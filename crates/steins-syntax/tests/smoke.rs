@@ -25,3 +25,46 @@ fn parse_error_no_panic() {
     let _ = tree.parse_errors();
     let _ = tree.functions();
 }
+
+#[test]
+fn lowers_scopes_trace_and_poison() {
+    use steins_syntax::StmtKind;
+
+    // Top-level scope + one function scope.
+    let src = "<?php\nfunction price(): string { return \"abc\"; }\n$w = \"abc\";\nwidth($w);\n";
+    let tree = SourceTree::parse(src);
+    assert_eq!(tree.scopes().len(), 2, "top-level + price()");
+
+    let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
+    assert!(!top.poisoned);
+    // The function *declaration* is a Barrier at top level; then the assign and call.
+    let kinds: Vec<&StmtKind> = top.stmts.iter().map(|s| &s.kind).collect();
+    assert!(matches!(kinds[0], StmtKind::Barrier), "nested fn decl → Barrier");
+    assert!(matches!(kinds[1], StmtKind::Assign { var, .. } if var == "w"));
+    assert!(matches!(kinds[2], StmtKind::Call(_)));
+    // `width($w)` hands `$w` to a call → invalidated after the statement.
+    assert_eq!(top.stmts[2].invalidated, vec!["w".to_owned()]);
+
+    // price() is a constant function: body is exactly `[Return(literal)]`.
+    let price = tree.scopes().iter().find(|s| s.function_name.as_deref() == Some("price")).unwrap();
+    assert!(!price.poisoned);
+    assert_eq!(price.stmts.len(), 1);
+    assert!(matches!(&price.stmts[0].kind, StmtKind::Return(v) if v.is_literal()));
+}
+
+#[test]
+fn poison_markers_are_detected() {
+    for (src, why) in [
+        ("<?php $r = &$w; width($w);", "reference assignment"),
+        ("<?php extract($d); width($w);", "extract"),
+        ("<?php compact('w'); width($w);", "compact"),
+        ("<?php global $w; width($w);", "global"),
+        ("<?php static $w = 1; width($w);", "static var"),
+        ("<?php $$w = 1; width($w);", "variable-variable"),
+        ("<?php $f = function () use (&$w) {}; width($w);", "by-ref closure capture"),
+    ] {
+        let tree = SourceTree::parse(src);
+        let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
+        assert!(top.poisoned, "{why} should poison the top-level scope");
+    }
+}

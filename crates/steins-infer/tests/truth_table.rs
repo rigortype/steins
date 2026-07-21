@@ -86,7 +86,9 @@ fn nullable_accepts_null_both_modes() {
 
 #[test]
 fn non_literal_and_unknown_are_silent() {
-    assert_eq!(n(&format!("{STRICT_INT}$x = \"abc\";\nwidth($x);")), 0, "non-literal silent");
+    // A value from an unknown source (a function not defined in this file) is
+    // not provable, so it stays silent even under strict mode.
+    assert_eq!(n(&format!("{STRICT_INT}$x = getInput();\nwidth($x);")), 0, "unknown source silent");
     assert_eq!(n(&format!("{STRICT_INT}unknownFunc(\"abc\");")), 0, "unknown fn silent");
     assert_eq!(n("<?php strlen(\"abc\");"), 0, "builtin not in file silent");
     // spread / named args are skipped (positional mapping unreliable).
@@ -118,6 +120,137 @@ fn message_is_value_precise() {
         d.message,
         "argument \"abc\" to width() cannot become int $w — proven TypeError (coercive mode)"
     );
+}
+
+// ==========================================================================
+// ADR-0001 value propagation: local-variable flow.
+// ==========================================================================
+
+/// Return the single finding, asserting there is exactly one.
+fn only(src: &str) -> Diagnostic {
+    let f = findings(src);
+    assert_eq!(f.len(), 1, "expected exactly one finding, got: {f:#?}");
+    f.into_iter().next().unwrap()
+}
+
+#[test]
+fn var_flow_flagged_coercive_and_strict() {
+    // Coercive: non-numeric string into int is a proven TypeError.
+    assert_eq!(n(&format!("{COERCIVE_INT}$w = \"abc\";\nwidth($w);")), 1, "coercive abc via $w");
+    // Strict: even a numeric string is rejected.
+    assert_eq!(n(&format!("{STRICT_INT}$w = \"5\";\nwidth($w);")), 1, "strict 5 via $w");
+    // Coercive numeric string still coerces silently through a variable.
+    assert_eq!(n(&format!("{COERCIVE_INT}$w = \"5\";\nwidth($w);")), 0, "coercive 5 via $w silent");
+}
+
+#[test]
+fn var_flow_message_shows_value_and_provenance() {
+    let src = "<?php\n\nfunction width(int $w): int {\n    return $w;\n}\n\n$w = \"abc\";\nwidth($w);\n";
+    let d = only(src);
+    // `$w = "abc"` is on line 7; `width($w)` is on line 8, column 7.
+    assert_eq!((d.line, d.column), (8, 7), "points at the argument $w");
+    assert_eq!(
+        d.message,
+        "argument \"abc\" (from $w, assigned at line 7) to width() cannot become int $w — proven TypeError (coercive mode)"
+    );
+}
+
+#[test]
+fn reassignment_uses_last_literal() {
+    // A later literal assignment replaces the value; the last one wins.
+    assert_eq!(
+        n(&format!("{COERCIVE_INT}$w = 5;\n$w = \"abc\";\nwidth($w);")),
+        1,
+        "last literal (bad) is used"
+    );
+    assert_eq!(
+        n(&format!("{COERCIVE_INT}$w = \"abc\";\n$w = 5;\nwidth($w);")),
+        0,
+        "last literal (good) is used"
+    );
+}
+
+#[test]
+fn intervening_control_flow_is_a_barrier() {
+    // An `if` between the assignment and the use erases the known value, even
+    // when it is irrelevant to `$w`.
+    let src = format!("{COERCIVE_INT}$w = \"abc\";\nif (true) {{ $y = 1; }}\nwidth($w);");
+    assert_eq!(n(&src), 0, "intervening if → silent");
+}
+
+#[test]
+fn variable_passed_to_another_call_becomes_unknown() {
+    // `$w` handed to `sink()` might be mutated by-ref, so its value is no longer
+    // trusted at the later `width($w)`.
+    let src = "<?php\nfunction width(int $w): int { return $w; }\nfunction sink($x) { return $x; }\n$w = \"abc\";\nsink($w);\nwidth($w);";
+    assert_eq!(n(src), 0, "$w passed to a call → unknown afterwards");
+}
+
+#[test]
+fn reference_poisoned_scope_is_silent() {
+    // A reference assignment anywhere in the scope poisons all local values.
+    let src = format!("{COERCIVE_INT}$w = \"abc\";\n$r = &$w;\nwidth($w);");
+    assert_eq!(n(&src), 0, "reference assignment poisons the scope");
+}
+
+#[test]
+fn extract_poisoned_scope_is_silent() {
+    let src = format!("{COERCIVE_INT}$w = \"abc\";\nextract($data);\nwidth($w);");
+    assert_eq!(n(&src), 0, "extract() poisons the scope");
+}
+
+// ==========================================================================
+// ADR-0001 value propagation: constant-function return flow.
+// ==========================================================================
+
+const CONST_PRICE: &str =
+    "<?php\nfunction width(int $w): int { return $w; }\nfunction price(): string { return \"abc\"; }\n";
+
+#[test]
+fn constant_function_flow_flagged() {
+    // `width(price())` where price() is a constant function returning a bad
+    // literal is a proven TypeError.
+    let d = only(&format!("{CONST_PRICE}width(price());"));
+    assert!(
+        d.message.contains("from price(), defined at line 3"),
+        "provenance names the const function: {}",
+        d.message
+    );
+    assert!(d.message.contains("argument \"abc\""));
+}
+
+#[test]
+fn non_constant_functions_are_silent() {
+    // Two statements in the body → not constant.
+    let two = "<?php\nfunction width(int $w): int { return $w; }\nfunction price(): string { $x = 1; return \"abc\"; }\nwidth(price());";
+    assert_eq!(n(two), 0, "two-statement body is not constant");
+    // Has a parameter → only zero-arg calls qualify, and it isn't constant.
+    let params = "<?php\nfunction width(int $w): int { return $w; }\nfunction price(string $s): string { return \"abc\"; }\nwidth(price(\"x\"));";
+    assert_eq!(n(params), 0, "parametrized function is not a constant function");
+    // Has a branch → body is a Barrier, not `[Return(literal)]`.
+    let branch = "<?php\nfunction width(int $w): int { return $w; }\nfunction price(): string { if (true) { return \"a\"; } return \"abc\"; }\nwidth(price());";
+    assert_eq!(n(branch), 0, "branching function is not constant");
+}
+
+#[test]
+fn nested_and_chained_constant_function_flow() {
+    // Nested: `width(price())`.
+    assert_eq!(n(&format!("{CONST_PRICE}width(price());")), 1, "nested width(price())");
+    // Chained through a variable: `$w = price(); width($w);`.
+    let chain = format!("{CONST_PRICE}$w = price();\nwidth($w);");
+    let d = only(&chain);
+    assert!(
+        d.message.contains("from $w, assigned at line 4"),
+        "chain reports the immediate $w hop: {}",
+        d.message
+    );
+}
+
+#[test]
+fn constant_function_composes_in_strict_mode() {
+    // Strict mode: a constant function returning a numeric string still fails.
+    let src = "<?php\ndeclare(strict_types=1);\nfunction width(int $w): int { return $w; }\nfunction price(): string { return \"5\"; }\nwidth(price());";
+    assert_eq!(n(src), 1, "strict: numeric-string const return into int flagged");
 }
 
 // ---- Salsa pipeline routing ----------------------------------------------
