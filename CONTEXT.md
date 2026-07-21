@@ -41,10 +41,18 @@ The trait Steins owns for its lossless, error-tolerant CST (ADR-0003). All
 analysis and rewriting go through it; parser backends live behind it.
 
 **Mago**:
-The existing Rust PHP toolchain (linter/formatter) whose parser is a candidate
-backend behind the syntax tree contract — adopted only if a spike proves
-lossless round-trip and error tolerance. Not the contract owner.
-_Avoid_: the parser (it is a candidate backend, not the contract)
+The existing Rust PHP toolchain (linter/formatter) whose parser is the
+**adopted** backend behind the syntax tree contract (spike-verified,
+ADR-0003; pinned fork). Not the contract owner.
+_Avoid_: the parser (it is a backend behind our contract)
+
+**Span+splice editing**:
+The rewriting model the syntax contract guarantees: text edits are computed
+from accurate node spans and spliced into the retained source bytes —
+unchanged regions stay byte-identical by construction. Chosen because Mago's
+tree is data-lossless but not uniformly traversable.
+_Avoid_: format-preserving printing (that names the harder, rejected
+tree-rendering approach)
 
 ### Execution & coverage
 
