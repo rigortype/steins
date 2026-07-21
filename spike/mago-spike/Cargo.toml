@@ -1,0 +1,15 @@
+[package]
+name = "mago-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+mago-syntax = { path = "/Users/megurine/repo/rust/mago/crates/syntax" }
+mago-allocator = { path = "/Users/megurine/repo/rust/mago/crates/allocator" }
+mago-span = { path = "/Users/megurine/repo/rust/mago/crates/span" }
+mago-database = { path = "/Users/megurine/repo/rust/mago/crates/database" }
+walkdir = "2"
+
+[profile.release]
+debug = false
