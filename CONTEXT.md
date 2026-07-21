@@ -1,6 +1,7 @@
 # PHP;STEINS
 
-A PHP type checker / static analyzer in Rust, modeled on PHPStan but re-importing
+A PHP type checker / static analyzer in Rust — officially a parody of PHPStan
+and a proving ground for BC-breaking proofs-of-concept (ADR-0016) — re-importing
 Rigor's value-precise analysis model, designed from the start for LSP and automated
 refactoring, with a declarative effect system as a differentiator.
 
