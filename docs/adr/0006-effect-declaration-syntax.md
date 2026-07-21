@@ -25,7 +25,6 @@ total-vs-exn split.
 
 ## Open questions
 
-- The relationship between the effect system and exceptions / non-local
-  exits / `exit` / `never` (type-and-effect interplay) needs its own design
-  round, including a checked/unchecked-style split (cf. PHP's `LogicException`
-  documented as "errors that should be detected at compile time").
+- ~~The relationship between the effect system and exceptions / non-local
+  exits / `exit` / `never`~~ — resolved: checked/unchecked split in
+  ADR-0007, type/effect division of labor in ADR-0019.
