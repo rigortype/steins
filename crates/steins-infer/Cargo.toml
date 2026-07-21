@@ -1,0 +1,15 @@
+[package]
+name = "steins-infer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+salsa.workspace = true
+steins-db = { path = "../steins-db" }
+steins-syntax = { path = "../steins-syntax" }
+
+[dev-dependencies]
+steins-db = { path = "../steins-db" }
+steins-syntax = { path = "../steins-syntax" }

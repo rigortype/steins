@@ -1,0 +1,15 @@
+[package]
+name = "steins-syntax"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# HARD RULE (ADR-0003): the Mago crates are dependencies of THIS crate only.
+# No Mago type may appear in this crate's public API — everything below the fold
+# is lowered into the owned, Mago-free representation exposed by `lib.rs`.
+[dependencies]
+mago-syntax.workspace = true
+mago-allocator.workspace = true
+mago-span.workspace = true
+mago-database.workspace = true
