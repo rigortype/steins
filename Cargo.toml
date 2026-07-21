@@ -11,7 +11,10 @@
 # NB: spike/mago-spike is a standalone crate, deliberately NOT a member.
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+# `xtask/` is dev tooling (the cargo-xtask pattern): a workspace member so it
+# builds and lints with everything else, but it ships nothing — invoked only as
+# `cargo xtask <command>`. It is never a dependency of a shipped crate.
+members = ["crates/*", "xtask"]
 
 [workspace.package]
 version = "0.0.0"
@@ -30,3 +33,8 @@ mago-database = { git = "https://github.com/rigortype/mago", rev = "237465ec7a36
 salsa = "0.28"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Dev-tooling dependencies (xtask only).
+rayon = "1"
+toml = "0.8"
+semver = "1"

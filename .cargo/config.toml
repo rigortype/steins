@@ -1,0 +1,3 @@
+# The cargo-xtask convention: `cargo xtask <command>` runs the dev-tooling crate.
+[alias]
+xtask = "run -p xtask --"
