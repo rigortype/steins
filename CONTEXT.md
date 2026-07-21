@@ -78,6 +78,13 @@ Which diagnostic set a run operated at — full fidelity (sidecar) or sound
 subset — always surfaced so incompleteness is never silent.
 _Avoid_: mode, level
 
+**Separate-process backend**:
+An external tool (formatter, linter) the project already uses, which Steins
+detects and orchestrates as its own process — e.g. the post-edit hook that
+styles transform-generated code. Never linked, never re-emitted as Steins
+output (ADR-0017).
+_Avoid_: integration, bundled tool
+
 ### Extension
 
 **Plugin**:
