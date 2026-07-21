@@ -1,5 +1,21 @@
 # Initial effect labels
 
+> Amended by ADR-0018: the labels below are now the roots of a hierarchical
+> label taxonomy (`io` ⊃ `io.fs.read`/`io.net.http`/…, `nondet` ⊃
+> `nondet.random`/`nondet.time`; `global-read`/`global-write` spelled
+> `global.read`/`global.write`), open to ecosystem/private labels via the
+> plugin registry.
+>
+> Terminology (amended): the canonical term for these atoms is **effect
+> label** — matching ADR-0018/0038 and the code's `effect_labels`
+> registry; "effect-kind" and the body's "colors" are historical
+> spellings. "Kind" is avoided as a term of art: in effect-row systems
+> (Koka) *kind* classifies effect types while the atoms are precisely
+> *labels*, so "effect-kind" invites the inverse reading. The structure
+> is the powerset lattice over labels (the filename's "lattice");
+> the declared per-function aggregate is the *envelope*, the inferred
+> one an *effect set*. "Color" survives only as prose metaphor.
+
 The initial colors, each independently present/absent (`Pure` = all empty
 except throw, per ADR-0006):
 

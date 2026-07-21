@@ -2,10 +2,11 @@
 
 Effect envelopes (ADR-0005) are declared with native PHP attributes
 (`#[\Steins\Effect(...)]`, sugar like `#[\Steins\Pure]`), not a docblock tag.
-Attributes are real, parser-checked syntax referencing autoloadable classes —
-colors can be enum cases rather than strings, and the declarations themselves
-are refactorable — matching Steins' native-declaration-over-docblock
-philosophy. No `@steins-effect` docblock variant: dual spellings are the
+Attributes are real, parser-checked syntax referencing autoloadable classes,
+and the declarations themselves are refactorable — matching Steins'
+native-declaration-over-docblock philosophy. (The original enum-case sketch
+for colors is superseded by ADR-0018: effects are hierarchical dot-path
+labels with class-constant sugar.) No `@steins-effect` docblock variant: dual spellings are the
 phpdoc sprawl we exist to prevent. Third-party code needs no in-source
 spelling — its envelopes come from the effect catalog / stubs.
 
