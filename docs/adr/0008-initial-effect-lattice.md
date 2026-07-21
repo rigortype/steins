@@ -1,5 +1,11 @@
 # Initial effect-kind set
 
+> Amended by ADR-0018: the kinds below are now the roots of a hierarchical
+> label taxonomy (`io` ⊃ `io.fs.read`/`io.net.http`/…, `nondet` ⊃
+> `nondet.random`/`nondet.time`; `global-read`/`global-write` spelled
+> `global.read`/`global.write`), open to ecosystem/private labels via the
+> plugin registry.
+
 The initial colors, each independently present/absent (`Pure` = all empty
 except throw, per ADR-0006):
 

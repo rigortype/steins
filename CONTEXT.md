@@ -118,6 +118,21 @@ second dimension of analysis (ADR-0005).
 _Avoid_: side effect (reserve for informal prose), impure point (PHPStan's
 mechanism, not ours)
 
+**Effect label**:
+The canonical identity of an effect: a hierarchical dot-path string
+(`io.net.http`, `nondet.time`, `email.send`), checked by prefix subsumption
+(a declared `io` admits an inferred `io.net.http`). Semantic labels
+(`email.send`) layer above transport labels and may co-occur on one
+declaration. Class constants are completion sugar; the string is the canon.
+_Avoid_: effect kind, Kind (collides with type theory's kind), color
+(internal slang only)
+
+**Label registry**:
+The set of known effect labels — core taxonomy plus plugin-registered
+ecosystem/private labels. An unregistered label is a diagnostic.
+_Avoid_: label catalog (the effect catalog maps *functions* to labels; the
+registry lists the labels themselves)
+
 **Effect envelope**:
 A declared upper bound on a function's effects. Its presence opts the function
 into always-on contract checking; inference exceeding it is a finding. Absent
