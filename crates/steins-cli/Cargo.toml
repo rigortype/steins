@@ -1,0 +1,15 @@
+[package]
+name = "steins-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "steins"
+path = "src/main.rs"
+
+[dependencies]
+steins-db = { path = "../steins-db" }
+steins-infer = { path = "../steins-infer" }
+serde_json.workspace = true

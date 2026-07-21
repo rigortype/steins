@@ -1,0 +1,32 @@
+# Steins — a PHP static analyzer in Rust (ADR-0016: greenfield).
+#
+# Workspace crate map:
+#   steins-syntax   syntax-tree contract + Mago parser backend (ADR-0003)
+#   steins-db       salsa demand-driven query database (ADR-0009)
+#   steins-catalog  builtin/extension catalog (ADR-0014/0021) — stub
+#   steins-infer    inference engine / proof-layer checks (ADR-0001/0002)
+#   steins-sidecar  PHP sidecar IPC (ADR-0004/0024) — stub
+#   steins-cli      the `steins` binary (ADR-0020)
+#
+# NB: spike/mago-spike is a standalone crate, deliberately NOT a member.
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97"
+license = "AGPL-3.0-only"
+
+[workspace.dependencies]
+# Pinned Mago fork — the adopted parser backend (ADR-0003). These crates are a
+# hard secret of steins-syntax: no other workspace crate may depend on them.
+mago-syntax = { git = "https://github.com/rigortype/mago", rev = "237465ec7a36e22431da14935d9ec0fecad2d6a2" }
+mago-allocator = { git = "https://github.com/rigortype/mago", rev = "237465ec7a36e22431da14935d9ec0fecad2d6a2" }
+mago-span = { git = "https://github.com/rigortype/mago", rev = "237465ec7a36e22431da14935d9ec0fecad2d6a2" }
+mago-database = { git = "https://github.com/rigortype/mago", rev = "237465ec7a36e22431da14935d9ec0fecad2d6a2" }
+
+salsa = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

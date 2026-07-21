@@ -1,0 +1,10 @@
+[package]
+name = "steins-db"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+salsa.workspace = true
+steins-syntax = { path = "../steins-syntax" }
