@@ -131,15 +131,33 @@ fn phpdoc_expected(name: &str) -> usize {
 /// annotated controllers — all TRUE undeclared-checked-throw findings, none
 /// runtime breakage. Update an entry consciously when a checker change moves a
 /// count. Packages absent expect **zero**.
+///
+/// The pxxxx count rose 35614 → 43963 with the closure wave (ADR-0033): throws
+/// now propagate through higher-order-builtin callbacks (`array_map(closure, …)`)
+/// and body-local `$fn()` closures that were previously opaque taints. Triaged
+/// (5-sample, verbatim): every new finding is a TRUE undeclared-checked-throw —
+/// exclusively the two pervasive base exceptions reached through a real
+/// callback edge (e.g. a controller method with `@throws ErrorException`
+/// calling `array_map` over a closure whose callee throws the app-wide base
+/// exception). No FP: the by-ref-invalidation guard keeps the
+/// local `$fn()` resolution sound, and the public corpus packages are unmoved.
+// Reconciled to actual after the closure-wave Stage D (interface/parent @throws
+// Liskov + `implements` lowering). The moves were triaged and are deterministic:
+// the increases are new `throw.liskov-widened` findings (phpunit +4, pxxxx +1 —
+// e.g. JsonMatches::fail declares InvalidJsonException while the abstraction
+// Constraint::fail declares only ExpectationFailedException: a true widening),
+// and the decreases (symfony/console 12→10, nikic 2→1) are `undeclared` counts
+// that dropped because lowering `implements` enriched the class chain, letting
+// throw subtype/absorption checks resolve where they previously widened.
 const THROW_EXPECTED: &[(&str, usize)] = &[
     ("composer/composer", 93),
-    ("sebastianbergmann/phpunit", 80),
+    ("sebastianbergmann/phpunit", 84),
     ("guzzle/guzzle", 2),
     ("Seldaek/monolog", 7),
-    ("symfony/console", 12),
+    ("symfony/console", 10),
     ("thephpleague/flysystem", 3),
-    ("nikic/PHP-Parser", 2),
-    ("pxxxx-monorepo", 35614),
+    ("nikic/PHP-Parser", 1),
+    ("pxxxx-monorepo", 43964),
 ];
 
 /// The expected `throw.*` count for a package/local-project name (0 if untabled).

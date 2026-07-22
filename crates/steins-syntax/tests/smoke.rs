@@ -207,6 +207,8 @@ fn scans_effect_origins_across_control_flow() {
             EffectOrigin::Exit { .. } => panic!("no exit expected"),
             EffectOrigin::MethodCall { .. } => panic!("no method call expected"),
             EffectOrigin::Opaque { .. } => panic!("no opaque call expected"),
+            EffectOrigin::HigherOrder { .. } => panic!("no higher-order call expected"),
+            EffectOrigin::Callback { .. } => panic!("no callback call expected"),
         }
     }
     assert_eq!(echo, 1, "echo inside the if is found");
@@ -259,11 +261,16 @@ fn lowers_class_and_method_shape() {
 }
 
 #[test]
-fn interfaces_traits_enums_are_not_lowered_as_classes() {
+fn interfaces_lowered_traits_enums_not() {
+    // Interfaces are lowered too (ADR-0033 Liskov), marked is_interface; traits and
+    // enums are still not lowered.
     let src = "<?php\ninterface I {}\ntrait T {}\nenum E { case A; }\nclass C {}\n";
     let tree = SourceTree::parse(src);
-    assert_eq!(tree.classes().len(), 1, "only the class is lowered");
-    assert_eq!(tree.classes()[0].name, "C");
+    assert_eq!(tree.classes().len(), 2, "the class and the interface are lowered");
+    let c = tree.classes().iter().find(|d| d.name == "C").unwrap();
+    assert!(!c.is_interface);
+    let i = tree.classes().iter().find(|d| d.name == "I").unwrap();
+    assert!(i.is_interface, "interface I is marked is_interface");
 }
 
 #[test]

@@ -306,6 +306,33 @@ pub enum EffectOrigin {
     /// is effect-free. Consumed only by the effects-exhaustiveness bit (the
     /// annotate `…?` marker); the envelope check ignores it. `span` is the call.
     Opaque { span: Span },
+    /// A call to a statically-named function that passes at least one **resolvable
+    /// callback argument** (an inline closure, a first-class callable, or a
+    /// string-literal function name), at the given positional index (ADR-0033
+    /// invocation shapes). Emitted *instead of* [`Self::Call`] for such calls. The
+    /// effects pass consults `steins_catalog::invocation_shape` on `callee`: for a
+    /// known higher-order builtin it edges to the callback at the shape's callback
+    /// param (its own base is pure); otherwise it falls back to normal `callee`
+    /// resolution (the callback is just an argument). `arg_count` is the positional
+    /// arity, so a resolvable callback at a *non*-callback position still taints.
+    HigherOrder { callee: NameRef, callbacks: Vec<(usize, CallbackRef)>, arg_count: usize, span: Span },
+    /// A direct `$fn()` variable call resolved (by a body-local single-assignment
+    /// analysis) to a known callback (ADR-0033). Its effects join the caller's
+    /// (immediate invocation); `span` is the call. An unresolvable `$fn()` stays
+    /// [`Self::Opaque`] (the honest taint).
+    Callback { cbref: CallbackRef, span: Span },
+}
+
+/// A resolvable callback argument (ADR-0033 invocation shapes): an inline
+/// closure/arrow scope (by definition-site offset), or a named free function (a
+/// first-class callable, or a string-literal function name). Consumed by the
+/// effects/throws passes to join the callback's sets into the caller's.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CallbackRef {
+    /// An inline closure/arrow whose body scope is at this definition offset.
+    Closure(u32),
+    /// A named free function passed as a callback (`'strtolower'`, `strtolower(...)`).
+    Named(NameRef),
 }
 
 /// The receiver of an [`EffectOrigin::MethodCall`], restricted to the forms the
@@ -363,6 +390,14 @@ pub enum ThrowKind {
     /// dynamic/unresolved call — contributes no reportable throw but **taints
     /// throw-exhaustiveness** (ADR-0040 safe side; envelope stays silent).
     Taint,
+    /// A call to a named function passing resolvable callback argument(s) — the
+    /// throw analogue of [`EffectOrigin::HigherOrder`] (ADR-0033). The callee's own
+    /// throws AND the callback's throws (at the invocation shape's callback param)
+    /// propagate, re-filtered through this origin's guards.
+    HigherOrder { callee: NameRef, callbacks: Vec<(usize, CallbackRef)>, arg_count: usize },
+    /// A direct `$fn()` call resolved to a known callback — the throw analogue of
+    /// [`EffectOrigin::Callback`]: the callback's throws propagate (ADR-0033).
+    Callback { cbref: CallbackRef },
 }
 
 /// One throw-relevant construct in a function/method body, with the ordered
@@ -479,10 +514,12 @@ pub struct MethodDecl {
     pub docblock: Option<String>,
 }
 
-/// A user-defined class declaration (top-level or namespaced). Interfaces,
-/// traits, and enums are **not** lowered to this — they carry no method bodies
-/// this slice checks (a class that *uses* a trait sets [`ClassDecl::uses_traits`]
-/// so resolution gives up on it).
+/// A user-defined class **or interface** declaration (top-level or namespaced).
+/// Interfaces are lowered too (ADR-0033 Liskov), distinguished by
+/// [`Self::is_interface`]; their methods are abstract signatures carrying effect
+/// envelopes and `@throws` docblocks (the abstraction envelopes Liskov checks
+/// against). Traits and enums are still **not** lowered (a class that *uses* a
+/// trait sets [`ClassDecl::uses_traits`] so resolution gives up on it).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ClassDecl {
     /// Simple (unqualified) class name as written at the declaration site (used
@@ -492,11 +529,19 @@ pub struct ClassDecl {
     /// this; for a global class it equals the lowercased simple name.
     pub fqn: String,
     pub is_final: bool,
+    /// `true` when this declaration is an `interface` (not a `class`). Interface
+    /// methods are abstract; they carry envelopes/`@throws` but no bodies.
+    pub is_interface: bool,
     /// The `extends` parent as written, if any (raw spelling + qualification).
     /// Method resolution resolves this to an FQN against the project index and
     /// walks the chain; a parent not defined anywhere in the project makes the
-    /// chain incomplete (→ unknown → silent).
+    /// chain incomplete (→ unknown → silent). For an interface this is its first
+    /// extended interface (further ones go in [`Self::implements`]).
     pub parent: Option<NameRef>,
+    /// The interfaces this class `implements` (ADR-0033 Liskov abstraction
+    /// carriers). For an interface declaration, the interfaces it `extends` beyond
+    /// the first. Each resolves to an FQN project-wide at use time.
+    pub implements: Vec<NameRef>,
     pub methods: Vec<MethodDecl>,
     /// `true` if the class `use`s any trait. Trait methods are merged into the
     /// class at compile time but their bodies live elsewhere, so a
@@ -784,8 +829,14 @@ pub enum Callee {
     /// `new Class(args...)` — a constructor call (`args` are the ctor args).
     /// `class` is the class reference as written (resolved to an FQN at use).
     Construct { class: NameRef },
+    /// `$fn(args...)` — a call through a bare local variable (ADR-0033). The
+    /// variable name is retained (no `$`) so the propagation walk can resolve it
+    /// against the env: a proven closure fact descends into the closure's scope, a
+    /// proven `Singleton(Str)` fact resolves it as a function name. An unresolved
+    /// `$fn` stays honestly opaque (no proven target, exhaustiveness taints).
+    DynamicVar(String),
     /// A receiver or method name the lowering cannot represent (dynamic method
-    /// name, `$obj[...]->m()`, `$var::m()`, …). Never resolves.
+    /// name, `$obj[...]->m()`, `$var::m()`, `$arr['x']()`, …). Never resolves.
     Dynamic,
 }
 
@@ -1348,9 +1399,10 @@ fn walk(node: &Node<'_, '_>, aliases: &SteinsAttrAliases, docs: &DocIndex, out: 
 fn lower_function(f: &Function<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> FunctionDecl {
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
+    let locals = collect_body_callables(f.body.statements.iter());
     for s in f.body.statements.iter() {
-        scan_effect_origins(&Node::Statement(s), &mut effect_origins);
-        scan_throw_origins(&Node::Statement(s), &[], &[], &mut throw_origins);
+        scan_effect_origins(&Node::Statement(s), &locals, &mut effect_origins);
+        scan_throw_origins(&Node::Statement(s), &[], &[], &locals, &mut throw_origins);
     }
 
     FunctionDecl {
@@ -1398,8 +1450,10 @@ fn lower_classes_into(
     docs: &DocIndex,
     out: &mut Vec<ClassDecl>,
 ) {
-    if let Node::Class(c) = node {
-        out.push(lower_class(c, aliases, docs));
+    match node {
+        Node::Class(c) => out.push(lower_class(c, aliases, docs)),
+        Node::Interface(i) => out.push(lower_interface(i, aliases, docs)),
+        _ => {}
     }
     for child in node.children() {
         lower_classes_into(&child, aliases, docs, out);
@@ -1412,6 +1466,11 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> C
         .as_ref()
         .and_then(|e| e.types.iter().next())
         .map(name_ref);
+    let implements: Vec<NameRef> = c
+        .implements
+        .as_ref()
+        .map(|i| i.types.iter().map(name_ref).collect())
+        .unwrap_or_default();
 
     let mut methods = Vec::new();
     let mut uses_traits = false;
@@ -1427,10 +1486,41 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> C
         name: bytes_to_string(c.name.value),
         fqn: String::new(), // filled in `parse` from the enclosing namespace ctx
         is_final: c.modifiers.iter().any(Modifier::is_final),
+        is_interface: false,
         parent,
+        implements,
         methods,
         uses_traits,
         span: to_span(c.name.span()),
+    }
+}
+
+/// Lower an `interface` declaration to a [`ClassDecl`] with `is_interface = true`
+/// (ADR-0033 Liskov): its methods are abstract signatures carrying effect
+/// envelopes and `@throws` docblocks. An interface's `extends` list (interfaces
+/// can extend several) becomes `parent` (the first) plus `implements` (the rest).
+fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> ClassDecl {
+    let mut extended: Vec<NameRef> =
+        i.extends.as_ref().map(|e| e.types.iter().map(name_ref).collect()).unwrap_or_default();
+    let parent = if extended.is_empty() { None } else { Some(extended.remove(0)) };
+
+    let mut methods = Vec::new();
+    for member in i.members.iter() {
+        if let ClassLikeMember::Method(m) = member {
+            methods.push(lower_method(m, aliases, docs));
+        }
+    }
+
+    ClassDecl {
+        name: bytes_to_string(i.name.value),
+        fqn: String::new(),
+        is_final: false,
+        is_interface: true,
+        parent,
+        implements: extended,
+        methods,
+        uses_traits: false,
+        span: to_span(i.name.span()),
     }
 }
 
@@ -1438,9 +1528,10 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) ->
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
     if let MethodBody::Concrete(block) = &m.body {
+        let locals = collect_body_callables(block.statements.iter());
         for s in block.statements.iter() {
-            scan_effect_origins(&Node::Statement(s), &mut effect_origins);
-            scan_throw_origins(&Node::Statement(s), &[], &[], &mut throw_origins);
+            scan_effect_origins(&Node::Statement(s), &locals, &mut effect_origins);
+            scan_throw_origins(&Node::Statement(s), &[], &[], &locals, &mut throw_origins);
         }
     }
 
@@ -1663,16 +1754,223 @@ fn effect_attr_labels(attr: &Attribute<'_>) -> Option<Vec<String>> {
     Some(labels)
 }
 
+/// A resolvable [`CallbackRef`] for a callback argument expression (ADR-0033): an
+/// inline closure/arrow (by its scope offset), a first-class callable of a named
+/// function, or a string-literal function name. `None` for anything else (a
+/// `$var`, an array `[$o, 'm']` callable, a non-literal — the honest opaque side).
+fn callback_ref_of_arg(expr: &Expression<'_>) -> Option<CallbackRef> {
+    match expr.unparenthesized() {
+        Expression::Closure(cl) => Some(CallbackRef::Closure(closure_def_offset(cl))),
+        Expression::ArrowFunction(af) => Some(CallbackRef::Closure(arrow_def_offset(af))),
+        Expression::PartialApplication(PartialApplication::Function(fpa))
+            if fpa.argument_list.is_first_class_callable() =>
+        {
+            match fpa.function {
+                Expression::Identifier(id) => Some(CallbackRef::Named(name_ref(id))),
+                _ => None,
+            }
+        }
+        Expression::Literal(Literal::String(ls)) => {
+            let raw = bytes_to_string(ls.value?);
+            // A string callable naming a method (`Foo::m`) is deferred → not resolved.
+            if raw.contains("::") || raw.is_empty() {
+                return None;
+            }
+            Some(CallbackRef::Named(NameRef {
+                raw: raw.trim_start_matches('\\').to_owned(),
+                kind: if bytes_to_string(ls.value?).starts_with('\\') {
+                    RefKind::FullyQualified
+                } else {
+                    RefKind::Unqualified
+                },
+                offset: to_span(expr.span()).start,
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// A higher-order call decomposition: `(callee, callbacks by position, positional
+/// arg count)`.
+type HigherOrderCall = (NameRef, Vec<(usize, CallbackRef)>, usize);
+
+/// The positional callback arguments of a named-function call, when at least one
+/// argument is a resolvable [`CallbackRef`] (ADR-0033). `None` when the call is not
+/// a named function, uses a named/spread argument, or carries no resolvable
+/// callback.
+fn higher_order_of_call(fc: &FunctionCall<'_>) -> Option<HigherOrderCall> {
+    let Expression::Identifier(id) = fc.function else { return None };
+    let mut callbacks: Vec<(usize, CallbackRef)> = Vec::new();
+    let mut pos = 0usize;
+    for arg in fc.argument_list.arguments.iter() {
+        match arg {
+            Argument::Positional(p) if p.ellipsis.is_none() => {
+                if let Some(cb) = callback_ref_of_arg(p.value) {
+                    callbacks.push((pos, cb));
+                }
+                pos += 1;
+            }
+            // A named or spread argument defeats positional callback mapping.
+            _ => return None,
+        }
+    }
+    if callbacks.is_empty() {
+        return None;
+    }
+    Some((name_ref(id), callbacks, pos))
+}
+
+/// The bare callee variable name of a `$fn(...)` dynamic function call, if the
+/// callee is a direct variable (`$fn`); `None` for other dynamic callees.
+fn direct_var_callee(fc: &FunctionCall<'_>) -> Option<String> {
+    match fc.function.unparenthesized() {
+        Expression::Variable(Variable::Direct(dv)) => Some(strip_dollar(bytes_to_string(dv.name))),
+        _ => None,
+    }
+}
+
+/// A body-local single-assignment map `var → CallbackRef` (ADR-0033): a variable
+/// assigned **exactly once** in the body, to a resolvable callback literal (inline
+/// closure / first-class callable / string-literal function name), and written
+/// nowhere else, resolves a later `$var()` call to that callback. A variable with
+/// more than one write is excluded (its callback is ambiguous → the `$var()` call
+/// stays an honest opaque taint). Sound with the *structural* envelope semantics:
+/// a conditional single assignment still counts (an effect envelope is about the
+/// code, not one path — like every other structural origin).
+fn collect_body_callables<'a, 'arena>(
+    statements: impl Iterator<Item = &'a Statement<'arena>>,
+) -> HashMap<String, CallbackRef>
+where
+    'arena: 'a,
+{
+    let mut candidates: HashMap<String, CallbackRef> = HashMap::new();
+    let mut writes: HashMap<String, usize> = HashMap::new();
+    let mut passed: Vec<String> = Vec::new();
+    for s in statements {
+        let node = Node::Statement(s);
+        collect_callable_assigns(&node, &mut candidates, &mut writes);
+        // A variable handed to any call may be rebound by reference (by-ref
+        // conservatism, matching the value-env's invalidation) — treat it as an
+        // extra write so its callback resolution is dropped (sound).
+        collect_call_vars(&node, &mut passed);
+    }
+    for v in passed {
+        *writes.entry(v).or_insert(0) += 1;
+    }
+    candidates.into_iter().filter(|(v, _)| writes.get(v).copied() == Some(1)).collect()
+}
+
+/// Recursively count per-variable writes and record `$v = <callback>` candidates
+/// over a CST subtree, NOT descending into nested closures/functions/classes
+/// (their assignments are a separate scope). A write is any direct-variable
+/// assignment lvalue, increment/decrement, or `foreach`/`catch` binding.
+fn collect_callable_assigns(
+    node: &Node<'_, '_>,
+    candidates: &mut HashMap<String, CallbackRef>,
+    writes: &mut HashMap<String, usize>,
+) {
+    match node {
+        Node::Assignment(a) => {
+            // Count every direct-variable write target in the lvalue.
+            let mut targets = Vec::new();
+            collect_direct_vars(&Node::Expression(a.lhs), &mut targets);
+            for t in &targets {
+                *writes.entry(t.clone()).or_insert(0) += 1;
+            }
+            // A plain `$v = <callback>` records a candidate for `$v`.
+            if a.operator.is_assign()
+                && let Expression::Variable(Variable::Direct(dv)) = a.lhs.unparenthesized()
+                && let Some(cb) = callback_ref_of_arg(a.rhs)
+            {
+                candidates.insert(strip_dollar(bytes_to_string(dv.name)), cb);
+            }
+            // The rhs may itself contain writes (a nested assignment).
+            collect_callable_assigns(&Node::Expression(a.rhs), candidates, writes);
+            return;
+        }
+        Node::UnaryPrefix(u) => {
+            if matches!(
+                u.operator,
+                UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_)
+            ) {
+                let mut t = Vec::new();
+                collect_direct_vars(&Node::Expression(u.operand), &mut t);
+                for v in t {
+                    *writes.entry(v).or_insert(0) += 1;
+                }
+            }
+        }
+        Node::UnaryPostfix(u) => {
+            let mut t = Vec::new();
+            collect_direct_vars(&Node::Expression(u.operand), &mut t);
+            for v in t {
+                *writes.entry(v).or_insert(0) += 1;
+            }
+        }
+        Node::ForeachValueTarget(t) => {
+            let mut vs = Vec::new();
+            collect_direct_vars(&Node::Expression(t.value), &mut vs);
+            for v in vs {
+                *writes.entry(v).or_insert(0) += 1;
+            }
+        }
+        Node::ForeachKeyValueTarget(t) => {
+            let mut vs = Vec::new();
+            collect_direct_vars(&Node::Expression(t.key), &mut vs);
+            collect_direct_vars(&Node::Expression(t.value), &mut vs);
+            for v in vs {
+                *writes.entry(v).or_insert(0) += 1;
+            }
+        }
+        Node::TryCatchClause(c) => {
+            if let Some(v) = &c.variable {
+                *writes.entry(strip_dollar(bytes_to_string(v.name))).or_insert(0) += 1;
+            }
+        }
+        // Nested scopes are their own concern — do not descend.
+        Node::Function(_)
+        | Node::Closure(_)
+        | Node::ArrowFunction(_)
+        | Node::AnonymousClass(_)
+        | Node::Class(_)
+        | Node::Interface(_)
+        | Node::Trait(_)
+        | Node::Enum(_) => return,
+        _ => {}
+    }
+    for child in node.children() {
+        collect_callable_assigns(&child, candidates, writes);
+    }
+}
+
 /// Walk a function-body subtree, appending every [`EffectOrigin`] found. Does not
 /// descend into nested scopes (function/closure/arrow/class-like bodies), whose
-/// effects are their own concern.
-fn scan_effect_origins(node: &Node<'_, '_>, out: &mut Vec<EffectOrigin>) {
+/// effects are their own concern. `locals` resolves a `$fn()` variable call to a
+/// body-local single-assignment closure (ADR-0033).
+fn scan_effect_origins(
+    node: &Node<'_, '_>,
+    locals: &HashMap<String, CallbackRef>,
+    out: &mut Vec<EffectOrigin>,
+) {
     match node {
         // A statically-named call is either a builtin (catalog-classified) or a
         // same-file user function (a propagation edge) — the effects pass decides.
         Node::FunctionCall(fc) => {
             if let Expression::Identifier(id) = fc.function {
-                out.push(EffectOrigin::Call { name: name_ref(id), span: to_span(id.span()) });
+                // A named call passing a resolvable callback is a HigherOrder origin
+                // (the invocation-shape redemption); otherwise a plain Call edge.
+                match higher_order_of_call(fc) {
+                    Some((callee, callbacks, arg_count)) => out.push(EffectOrigin::HigherOrder {
+                        callee,
+                        callbacks,
+                        arg_count,
+                        span: to_span(fc.span()),
+                    }),
+                    None => out.push(EffectOrigin::Call { name: name_ref(id), span: to_span(id.span()) }),
+                }
+            } else if let Some(cb) = direct_var_callee(fc).and_then(|v| locals.get(&v).cloned()) {
+                // `$fn()` resolved to a body-local single-assignment closure.
+                out.push(EffectOrigin::Callback { cbref: cb, span: to_span(fc.span()) });
             } else {
                 // A dynamic function call (`$f()`, `($cb)()`) — unprovable.
                 out.push(EffectOrigin::Opaque { span: to_span(fc.span()) });
@@ -1737,7 +2035,7 @@ fn scan_effect_origins(node: &Node<'_, '_>, out: &mut Vec<EffectOrigin>) {
         _ => {}
     }
     for child in node.children() {
-        scan_effect_origins(&child, out);
+        scan_effect_origins(&child, locals, out);
     }
 }
 
@@ -1758,6 +2056,7 @@ fn scan_throw_origins(
     node: &Node<'_, '_>,
     guards: &[Vec<CatchClause>],
     catch_scope: &[(String, Vec<NameRef>, bool)],
+    locals: &HashMap<String, CallbackRef>,
     out: &mut Vec<ThrowOrigin>,
 ) {
     // Innermost-first snapshot of the active guards for an origin at this point.
@@ -1776,7 +2075,7 @@ fn scan_throw_origins(
             let mut inner_guards = guards.to_vec();
             inner_guards.push(clauses.clone());
             for s in t.block.statements.iter() {
-                scan_throw_origins(&Node::Statement(s), &inner_guards, catch_scope, out);
+                scan_throw_origins(&Node::Statement(s), &inner_guards, catch_scope, locals, out);
             }
             // Catch blocks: outer guards only; the clause's `$e` enters scope for
             // rethrow precision inside its own body.
@@ -1803,13 +2102,13 @@ fn scan_throw_origins(
                     }
                 }
                 for s in c.block.statements.iter() {
-                    scan_throw_origins(&Node::Statement(s), guards, &inner_scope, out);
+                    scan_throw_origins(&Node::Statement(s), guards, &inner_scope, locals, out);
                 }
             }
             // Finally: outer guards only; this try's catches never absorb it.
             if let Some(fin) = &t.finally_clause {
                 for s in fin.block.statements.iter() {
-                    scan_throw_origins(&Node::Statement(s), guards, catch_scope, out);
+                    scan_throw_origins(&Node::Statement(s), guards, catch_scope, locals, out);
                 }
             }
             return; // children handled manually with the right guard/scope
@@ -1837,12 +2136,27 @@ fn scan_throw_origins(
             // Descend into the exception expression too (a call inside it — e.g.
             // `throw wrap(inner())` — is its own propagation edge).
         }
-        // Statically-named function call → propagation edge.
+        // Statically-named function call → propagation edge. A named call passing
+        // resolvable callbacks becomes a HigherOrder edge (ADR-0033); a `$fn()`
+        // resolved to a body-local closure becomes a Callback edge.
         Node::FunctionCall(fc) => {
             if let Expression::Identifier(id) = fc.function {
+                match higher_order_of_call(fc) {
+                    Some((callee, callbacks, arg_count)) => out.push(ThrowOrigin {
+                        kind: ThrowKind::HigherOrder { callee, callbacks, arg_count },
+                        span: to_span(fc.span()),
+                        guards: snapshot(),
+                    }),
+                    None => out.push(ThrowOrigin {
+                        kind: ThrowKind::Call(name_ref(id)),
+                        span: to_span(id.span()),
+                        guards: snapshot(),
+                    }),
+                }
+            } else if let Some(cb) = direct_var_callee(fc).and_then(|v| locals.get(&v).cloned()) {
                 out.push(ThrowOrigin {
-                    kind: ThrowKind::Call(name_ref(id)),
-                    span: to_span(id.span()),
+                    kind: ThrowKind::Callback { cbref: cb },
+                    span: to_span(fc.span()),
                     guards: snapshot(),
                 });
             } else {
@@ -1913,7 +2227,7 @@ fn scan_throw_origins(
         _ => {}
     }
     for child in node.children() {
-        scan_throw_origins(&child, guards, catch_scope, out);
+        scan_throw_origins(&child, guards, catch_scope, locals, out);
     }
 }
 
@@ -1995,7 +2309,15 @@ fn lower_call(c: &FunctionCall<'_>) -> CallExpr {
         Expression::Identifier(id) => (Some(bytes_to_string(id.last_segment())), Some(name_ref(id))),
         _ => (None, None),
     };
-    let receiver = callee.clone().map_or(Callee::Dynamic, Callee::Function);
+    // Receiver: a named function (`f(...)`), a variable call (`$fn(...)` — the
+    // closure/callable dispatch of ADR-0033), or an unresolvable dynamic callee.
+    let receiver = match (&callee, c.function.unparenthesized()) {
+        (Some(name), _) => Callee::Function(name.clone()),
+        (None, Expression::Variable(Variable::Direct(dv))) => {
+            Callee::DynamicVar(strip_dollar(bytes_to_string(dv.name)))
+        }
+        (None, _) => Callee::Dynamic,
+    };
 
     let (args, positional_only) = lower_argument_list(&c.argument_list);
     CallExpr { callee, callee_ref, receiver, args, positional_only, span: to_span(c.span()) }
@@ -2464,10 +2786,11 @@ fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>) -> Scope
     let mut stmts = Vec::new();
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
+    let locals = collect_body_callables(cl.body.statements.iter());
     for s in cl.body.statements.iter() {
         lower_stmt(s, &mut stmts);
-        scan_effect_origins(&Node::Statement(s), &mut effect_origins);
-        scan_throw_origins(&Node::Statement(s), &[], &[], &mut throw_origins);
+        scan_effect_origins(&Node::Statement(s), &locals, &mut effect_origins);
+        scan_throw_origins(&Node::Statement(s), &[], &[], &locals, &mut throw_origins);
     }
     // The closure's own scope is poisoned by a by-ref `use (&$x)` capture (its
     // captured var is a reference alias) or any in-body poison marker.
@@ -2490,8 +2813,10 @@ fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>) -> Scope
 fn build_closure_scope_from_arrow(af: &mago_syntax::cst::ArrowFunction<'_>) -> Scope {
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
-    scan_effect_origins(&Node::Expression(af.expression), &mut effect_origins);
-    scan_throw_origins(&Node::Expression(af.expression), &[], &[], &mut throw_origins);
+    // An arrow body is a single expression — no local assignments to resolve.
+    let locals: HashMap<String, CallbackRef> = HashMap::new();
+    scan_effect_origins(&Node::Expression(af.expression), &locals, &mut effect_origins);
+    scan_throw_origins(&Node::Expression(af.expression), &[], &[], &locals, &mut throw_origins);
     // The arrow body is its return value: lower as a `return <expr>;` trace.
     let value = lower_arg_value(af.expression);
     let mut invalidated = Vec::new();
@@ -2646,7 +2971,9 @@ fn named_call(expr: &Expression<'_>) -> Option<CallExpr> {
     match expr.unparenthesized() {
         Expression::Call(Call::Function(fc)) => {
             let call = lower_call(fc);
-            call.callee.is_some().then_some(call)
+            // A named function (`f(...)`) or a variable call (`$fn(...)`) is
+            // resolvable by the propagation walk; a fully dynamic callee is not.
+            (call.receiver != Callee::Dynamic).then_some(call)
         }
         Expression::Call(Call::Method(mc)) => {
             let call = lower_method_call(mc.object, &mc.method, &mc.argument_list, to_span(mc.span()), false);
