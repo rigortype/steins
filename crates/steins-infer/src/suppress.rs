@@ -25,7 +25,7 @@ use std::collections::HashSet;
 use steins_syntax::SourceTree;
 
 use crate::Diagnostic;
-use crate::{EFFECT_ID, ID, RETURN_ID, UNKNOWN_LABEL_ID};
+use crate::{EFFECT_ID, ID, PARAM_MISMATCH_ID, RETURN_ID, RETURN_MISMATCH_ID, UNKNOWN_LABEL_ID};
 
 /// The registry id for an `@steins-ignore` whose diagnostic id matches nothing on
 /// its target line (ADR-0023 anti-rot). Exempt from suppression.
@@ -41,6 +41,8 @@ pub const SUPPRESS_UNKNOWN_ID: &str = "suppress.unknown-id";
 pub const DIAGNOSTIC_IDS: &[&str] = &[
     ID,
     RETURN_ID,
+    PARAM_MISMATCH_ID,
+    RETURN_MISMATCH_ID,
     EFFECT_ID,
     UNKNOWN_LABEL_ID,
     SUPPRESS_UNMATCHED_ID,

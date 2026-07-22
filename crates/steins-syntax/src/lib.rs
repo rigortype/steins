@@ -18,6 +18,7 @@ use mago_allocator::LocalArena;
 use mago_database::file::FileId;
 use mago_span::HasSpan;
 use mago_syntax::cst::Argument;
+use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::Attribute;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::Class;
@@ -245,6 +246,12 @@ pub struct Param {
     pub variadic: bool,
     /// `&$x` — by-reference; the checker skips it.
     pub by_ref: bool,
+    /// `$x = null` — a literal `null` default. PHP makes such a parameter
+    /// **implicitly nullable** (its effective declared type accepts `null`), and
+    /// PHPStan honors this; the phpdoc contract check uses it to accept `null`
+    /// even against a non-nullable `@param` type (avoiding a false positive on the
+    /// common `string $x = null` idiom).
+    pub has_null_default: bool,
     pub span: Span,
 }
 
@@ -359,6 +366,11 @@ pub struct FunctionDecl {
     /// `Pure`-declared ones, because the effects pass propagates a callee's
     /// effects to `Pure` callers regardless of the callee's own annotations.
     pub effect_origins: Vec<EffectOrigin>,
+    /// The raw `/** … */` docblock trivia immediately preceding this declaration,
+    /// if any (only whitespace between it and the declaration head — the same
+    /// association discipline as attributes; ADR-0029). The phpdoc bridge parses
+    /// `@param`/`@return` tags out of it into phpdoc envelopes.
+    pub docblock: Option<String>,
 }
 
 /// A method's declared visibility. Absent visibility modifiers default to
@@ -395,6 +407,9 @@ pub struct MethodDecl {
     pub is_abstract: bool,
     /// `true` iff the method name is `__construct` (case-insensitive).
     pub is_constructor: bool,
+    /// The raw `/** … */` docblock trivia immediately preceding this method, if
+    /// any (association discipline as [`FunctionDecl::docblock`]).
+    pub docblock: Option<String>,
 }
 
 /// A user-defined class declaration (top-level or namespaced). Interfaces,
@@ -453,7 +468,83 @@ pub enum ArgValue {
     /// fixed at construction). Not a scalar literal — it never flows into a
     /// scalar type check.
     New(NameRef, Vec<ArgValue>),
+    /// An array literal `[...]` / `array(...)` whose keys are all literal-or-absent
+    /// and whose element values recursively lower (ADR-0001 array values in the
+    /// trace IR). Each entry pairs a lowered [`ArrayKey`] with its value. A spread
+    /// (`...`), an unrepresentable element, or a non-literal key lowers the **whole**
+    /// array to [`ArgValue::Other`] (the safe side). Keys carry PHP key-normalization
+    /// (`"5"` → `Int(5)`, floats truncate, `bool`→`int`, `null`→`""`); auto keys
+    /// (`ArrayKey::Auto`) receive their next-int position during normalization
+    /// ([`normalize_array`]), where duplicate keys resolve last-wins.
+    Array(Vec<(ArrayKey, ArgValue)>),
     Other,
+}
+
+/// A lowered array-literal key. `Auto` is an absent key (`[$a, $b]`) that receives
+/// its concrete integer position only during [`normalize_array`] (PHP next-int
+/// rules); `Int`/`Str` are already-normalized explicit keys.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ArrayKey {
+    /// An absent key — normalized to the next integer position.
+    Auto,
+    /// An integer key (already PHP-normalized: integer-like string keys, floats,
+    /// and bools all fold to this).
+    Int(i64),
+    /// A string key that is not integer-like.
+    Str(String),
+}
+
+/// A fully PHP-normalized array key (no `Auto`): the runtime key an entry occupies.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum NormKey {
+    Int(i64),
+    Str(String),
+}
+
+impl NormKey {
+    /// Render the key for a compact array message (`5`, `'foo'`).
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self {
+            NormKey::Int(i) => i.to_string(),
+            NormKey::Str(s) => format!("'{s}'"),
+        }
+    }
+}
+
+/// Resolve an array literal's raw `(ArrayKey, value)` entries to their PHP runtime
+/// key→value map, applying next-int assignment for `Auto` keys and **last-wins**
+/// for duplicates (a repeated key updates the value in place, keeping the first
+/// position — PHP semantics). The result is insertion-ordered.
+#[must_use]
+pub fn normalize_array(items: &[(ArrayKey, ArgValue)]) -> Vec<(NormKey, ArgValue)> {
+    let mut out: Vec<(NormKey, ArgValue)> = Vec::with_capacity(items.len());
+    // PHP's next auto-index: one past the largest integer key seen so far
+    // (explicit or auto). Starts at 0; never goes negative below that floor.
+    let mut next_auto: i64 = 0;
+    for (k, v) in items {
+        let key = match k {
+            ArrayKey::Auto => {
+                let i = next_auto;
+                next_auto = next_auto.saturating_add(1);
+                NormKey::Int(i)
+            }
+            ArrayKey::Int(i) => {
+                if *i >= next_auto {
+                    next_auto = i.saturating_add(1);
+                }
+                NormKey::Int(*i)
+            }
+            ArrayKey::Str(s) => NormKey::Str(s.clone()),
+        };
+        // Last-wins: update in place if the key already occupies a slot.
+        if let Some(slot) = out.iter_mut().find(|(ek, _)| *ek == key) {
+            slot.1 = v.clone();
+        } else {
+            out.push((key, v.clone()));
+        }
+    }
+    out
 }
 
 impl Eq for ArgValue {}
@@ -475,6 +566,7 @@ impl std::hash::Hash for ArgValue {
                 name.hash(state);
                 args.hash(state);
             }
+            ArgValue::Array(items) => items.hash(state),
             ArgValue::Null | ArgValue::Other => {}
         }
     }
@@ -510,8 +602,43 @@ impl ArgValue {
             ArgValue::Var(v) => format!("${v}"),
             ArgValue::Call(name, _) => format!("{name}()"),
             ArgValue::New(name, _) => format!("new {}()", name.simple()),
+            ArgValue::Array(items) => render_array(items),
             ArgValue::Other => "<expr>".to_owned(),
         }
+    }
+}
+
+/// Render an array literal compactly for a diagnostic message: `['a', 'b']`,
+/// `['k' => 1]`, list-shaped arrays without keys, truncating with `…` after the
+/// first five entries.
+fn render_array(items: &[(ArrayKey, ArgValue)]) -> String {
+    let normalized = normalize_array(items);
+    // A pure list (keys exactly 0..n-1) renders without keys.
+    let is_list = normalized
+        .iter()
+        .enumerate()
+        .all(|(i, (k, _))| matches!(k, NormKey::Int(n) if *n == i as i64));
+    let mut parts: Vec<String> = Vec::new();
+    for (k, v) in normalized.iter().take(5) {
+        if is_list {
+            parts.push(render_array_value(v));
+        } else {
+            parts.push(format!("{} => {}", k.render(), render_array_value(v)));
+        }
+    }
+    if normalized.len() > 5 {
+        parts.push("…".to_owned());
+    }
+    format!("[{}]", parts.join(", "))
+}
+
+/// Render an array element value in PHP-literal style (single-quoted strings, so
+/// a rendered array reads like source: `['a', 'b']`); non-strings defer to the
+/// shared [`ArgValue::render`].
+fn render_array_value(v: &ArgValue) -> String {
+    match v {
+        ArgValue::Str(s) => format!("'{s}'"),
+        other => other.render(),
     }
 }
 
@@ -774,10 +901,14 @@ impl SourceTree {
         // cover, so every declaration and reference resolves in the right scope.
         let (contexts, regions) = build_contexts(program);
 
-        let mut lowered = Lowered::default();
-        walk(&Node::Program(program), &aliases, &mut lowered);
+        // Docblock index: every `/** … */` trivium, so a declaration can adopt the
+        // one immediately preceding it (only whitespace between; ADR-0029).
+        let docs = DocIndex::build(source, program);
 
-        let mut classes = lower_classes(&Node::Program(program), &aliases);
+        let mut lowered = Lowered::default();
+        walk(&Node::Program(program), &aliases, &docs, &mut lowered);
+
+        let mut classes = lower_classes(&Node::Program(program), &aliases, &docs);
         let scopes = lower_scopes(program, &contexts, &regions);
 
         // Comment trivia (ADR-0023 inline ignores): whitespace trivia is dropped;
@@ -937,19 +1068,19 @@ struct Lowered {
     calls: Vec<CallExpr>,
 }
 
-fn walk(node: &Node<'_, '_>, aliases: &SteinsAttrAliases, out: &mut Lowered) {
+fn walk(node: &Node<'_, '_>, aliases: &SteinsAttrAliases, docs: &DocIndex, out: &mut Lowered) {
     match node {
-        Node::Function(f) => out.functions.push(lower_function(f, aliases)),
+        Node::Function(f) => out.functions.push(lower_function(f, aliases, docs)),
         Node::FunctionCall(c) => out.calls.push(lower_call(c)),
         Node::DeclareItem(d) if is_strict_types_one(d) => out.strict_types = true,
         _ => {}
     }
     for child in node.children() {
-        walk(&child, aliases, out);
+        walk(&child, aliases, docs, out);
     }
 }
 
-fn lower_function(f: &Function<'_>, aliases: &SteinsAttrAliases) -> FunctionDecl {
+fn lower_function(f: &Function<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> FunctionDecl {
     let mut effect_origins = Vec::new();
     for s in f.body.statements.iter() {
         scan_effect_origins(&Node::Statement(s), &mut effect_origins);
@@ -963,6 +1094,7 @@ fn lower_function(f: &Function<'_>, aliases: &SteinsAttrAliases) -> FunctionDecl
         span: to_span(f.name.span()),
         effect_envelope: attrs_effect_envelope(&f.attribute_lists, aliases),
         effect_origins,
+        docblock: docs.preceding(to_span(f.span()).start),
     }
 }
 
@@ -975,6 +1107,10 @@ fn lower_params(list: &mago_syntax::cst::FunctionLikeParameterList<'_>) -> Vec<P
             ty: p.hint.as_ref().and_then(lower_hint),
             variadic: p.is_variadic(),
             by_ref: p.is_reference(),
+            has_null_default: p
+                .default_value
+                .as_ref()
+                .is_some_and(|d| matches!(d.value.unparenthesized(), Expression::Literal(Literal::Null(_)))),
             span: to_span(p.span()),
         })
         .collect()
@@ -982,22 +1118,27 @@ fn lower_params(list: &mago_syntax::cst::FunctionLikeParameterList<'_>) -> Vec<P
 
 /// Lower every `class` declaration reachable from `node` (interfaces, traits,
 /// and enums are skipped — they carry no method bodies this slice checks).
-fn lower_classes(node: &Node<'_, '_>, aliases: &SteinsAttrAliases) -> Vec<ClassDecl> {
+fn lower_classes(node: &Node<'_, '_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> Vec<ClassDecl> {
     let mut out = Vec::new();
-    lower_classes_into(node, aliases, &mut out);
+    lower_classes_into(node, aliases, docs, &mut out);
     out
 }
 
-fn lower_classes_into(node: &Node<'_, '_>, aliases: &SteinsAttrAliases, out: &mut Vec<ClassDecl>) {
+fn lower_classes_into(
+    node: &Node<'_, '_>,
+    aliases: &SteinsAttrAliases,
+    docs: &DocIndex,
+    out: &mut Vec<ClassDecl>,
+) {
     if let Node::Class(c) = node {
-        out.push(lower_class(c, aliases));
+        out.push(lower_class(c, aliases, docs));
     }
     for child in node.children() {
-        lower_classes_into(&child, aliases, out);
+        lower_classes_into(&child, aliases, docs, out);
     }
 }
 
-fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases) -> ClassDecl {
+fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> ClassDecl {
     let parent = c
         .extends
         .as_ref()
@@ -1008,7 +1149,7 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases) -> ClassDecl {
     let mut uses_traits = false;
     for member in c.members.iter() {
         match member {
-            ClassLikeMember::Method(m) => methods.push(lower_method(m, aliases)),
+            ClassLikeMember::Method(m) => methods.push(lower_method(m, aliases, docs)),
             ClassLikeMember::TraitUse(_) => uses_traits = true,
             _ => {}
         }
@@ -1025,7 +1166,7 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases) -> ClassDecl {
     }
 }
 
-fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases) -> MethodDecl {
+fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> MethodDecl {
     let mut effect_origins = Vec::new();
     if let MethodBody::Concrete(block) = &m.body {
         for s in block.statements.iter() {
@@ -1056,6 +1197,45 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases) -> MethodDecl {
         is_final: m.modifiers.iter().any(Modifier::is_final),
         is_abstract: m.is_abstract(),
         is_constructor,
+        docblock: docs.preceding(to_span(m.span()).start),
+    }
+}
+
+/// An index of the file's `/** … */` docblock trivia, letting a declaration adopt
+/// the docblock immediately preceding its head (ADR-0029). A docblock is
+/// associated only when nothing but whitespace separates its end from the
+/// declaration's span start (which begins at the attribute list / modifiers /
+/// `function` keyword — so intervening attributes are already inside the gap-free
+/// side). A wrong association would be a wrong contract (a false-positive vector),
+/// so the whitespace-only rule is deliberately strict.
+struct DocIndex<'a> {
+    source: &'a str,
+    /// `(end_offset, text)` of each docblock, in source order.
+    blocks: Vec<(u32, String)>,
+}
+
+impl<'a> DocIndex<'a> {
+    fn build(source: &'a str, program: &Program<'_>) -> Self {
+        let blocks = program
+            .trivia
+            .iter()
+            .filter(|t| matches!(t.kind, TriviaKind::DocBlockComment))
+            .map(|t| (to_span(t.span).end, bytes_to_string(t.value)))
+            .collect();
+        Self { source, blocks }
+    }
+
+    /// The text of the docblock immediately preceding `decl_start`, if any.
+    fn preceding(&self, decl_start: u32) -> Option<String> {
+        let mut best: Option<(u32, &String)> = None;
+        for (end, text) in &self.blocks {
+            if *end <= decl_start && best.is_none_or(|(be, _)| *end > be) {
+                best = Some((*end, text));
+            }
+        }
+        let (end, text) = best?;
+        let gap = self.source.get(end as usize..decl_start as usize)?;
+        gap.chars().all(char::is_whitespace).then(|| text.clone())
     }
 }
 
@@ -1524,8 +1704,80 @@ fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
             }
             None => ArgValue::Other,
         },
+        // Array literals `[...]` and legacy `array(...)`. Both share the same
+        // element sequence shape; a spread, an unrepresentable element, or a
+        // non-literal key collapses the whole array to `Other`.
+        Expression::Array(a) => lower_array_elements(a.elements.iter()),
+        Expression::LegacyArray(a) => lower_array_elements(a.elements.iter()),
+        // Unary `-`/`+` on a numeric literal is itself a proven numeric literal
+        // (so `-5` is `Int(-5)`, not `Other`). Any other operator/operand widens.
+        Expression::UnaryPrefix(u) => match (&u.operator, lower_arg_value(u.operand)) {
+            (UnaryPrefixOperator::Negation(_), ArgValue::Int(i)) => ArgValue::Int(i.wrapping_neg()),
+            (UnaryPrefixOperator::Negation(_), ArgValue::Float(f)) => ArgValue::Float(-f),
+            (UnaryPrefixOperator::Plus(_), v @ (ArgValue::Int(_) | ArgValue::Float(_))) => v,
+            _ => ArgValue::Other,
+        },
         _ => ArgValue::Other,
     }
+}
+
+/// Lower an array-literal element sequence to [`ArgValue::Array`], or
+/// [`ArgValue::Other`] when any element defeats representation (a spread `...`, a
+/// `list()`-style missing hole, a non-literal key, or an element whose value
+/// lowers to `Other`). Nested arrays lower recursively and stay representable.
+fn lower_array_elements<'a>(elements: impl Iterator<Item = &'a ArrayElement<'a>>) -> ArgValue {
+    let mut items: Vec<(ArrayKey, ArgValue)> = Vec::new();
+    for el in elements {
+        match el {
+            ArrayElement::Value(v) => {
+                let value = lower_arg_value(v.value);
+                if matches!(value, ArgValue::Other) {
+                    return ArgValue::Other;
+                }
+                items.push((ArrayKey::Auto, value));
+            }
+            ArrayElement::KeyValue(kv) => {
+                let Some(key) = lower_array_key(kv.key) else {
+                    return ArgValue::Other;
+                };
+                let value = lower_arg_value(kv.value);
+                if matches!(value, ArgValue::Other) {
+                    return ArgValue::Other;
+                }
+                items.push((key, value));
+            }
+            // `...$spread`, or a `list()` destructuring hole — not representable.
+            ArrayElement::Variadic(_) | ArrayElement::Missing(_) => return ArgValue::Other,
+        }
+    }
+    ArgValue::Array(items)
+}
+
+/// Lower an array-literal key expression to a PHP-normalized [`ArrayKey`], or
+/// `None` when the key is not a literal (a variable, call, nested array, …). PHP
+/// key normalization: integer-like strings fold to `Int`, floats truncate toward
+/// zero, `bool`→`int`, `null`→`""`.
+fn lower_array_key(expr: &Expression<'_>) -> Option<ArrayKey> {
+    match lower_arg_value(expr) {
+        ArgValue::Int(i) => Some(ArrayKey::Int(i)),
+        ArgValue::Bool(b) => Some(ArrayKey::Int(i64::from(b))),
+        ArgValue::Null => Some(ArrayKey::Str(String::new())),
+        ArgValue::Float(f) if f.is_finite() => Some(ArrayKey::Int(f.trunc() as i64)),
+        ArgValue::Str(s) => Some(match php_canonical_int_string(&s) {
+            Some(i) => ArrayKey::Int(i),
+            None => ArrayKey::Str(s),
+        }),
+        // Non-literal key (variable/call/…) or a non-finite float → not provable.
+        _ => None,
+    }
+}
+
+/// Whether a string is a PHP *canonical* decimal integer (the form array keys
+/// fold to `int` on): it round-trips exactly through `i64` (`"5"` → 5, but
+/// `"05"`, `"+5"`, `" 5"`, `"-0"`, and out-of-range values stay strings).
+fn php_canonical_int_string(s: &str) -> Option<i64> {
+    let i: i64 = s.parse().ok()?;
+    (i.to_string() == s).then_some(i)
 }
 
 fn lower_literal(lit: &Literal<'_>) -> ArgValue {

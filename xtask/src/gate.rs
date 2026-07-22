@@ -37,9 +37,18 @@ struct PackageReport {
     file_count: usize,
     parse_error_files: Vec<String>,
     diagnostics: Vec<Diagnostic>,
+    /// NEW `phpdoc.*` declared-contract findings, held separately: in this run
+    /// they are **measurement mode** (ADR-0030 relation #1 landing) — reported and
+    /// counted per package but excluded from the red/green verdict.
+    phpdoc: Vec<Diagnostic>,
     /// Vendor findings suppressed from the gate count (local projects only).
     vendor_suppressed: usize,
     elapsed: Duration,
+}
+
+/// Whether a diagnostic is one of the NEW measurement-mode `phpdoc.*` ids.
+fn is_phpdoc(d: &Diagnostic) -> bool {
+    d.id.starts_with("phpdoc.")
 }
 
 /// Entry point for `cargo xtask fp-gate`. Returns `true` if the gate is GREEN
@@ -128,6 +137,10 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
     let mut diags: Vec<Diagnostic> = FOLDER.with(|f| check_project(&db, project, &mut *f.borrow_mut()));
     diags.retain(|d| !parse_err_set.contains(d.path.as_str()));
     diags.sort_by(|a, b| (&a.path, a.line, a.column).cmp(&(&b.path, b.line, b.column)));
+    // Measurement-mode split: `phpdoc.*` findings are reported + counted but do
+    // not gate this run.
+    let phpdoc: Vec<Diagnostic> = diags.iter().filter(|d| is_phpdoc(d)).cloned().collect();
+    diags.retain(|d| !is_phpdoc(d));
 
     PackageReport {
         name: name.to_owned(),
@@ -136,6 +149,7 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
         file_count: files.len(),
         parse_error_files,
         diagnostics: diags,
+        phpdoc,
         vendor_suppressed: 0,
         elapsed: start.elapsed(),
     }
@@ -182,6 +196,9 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
     diags.retain(|d| !is_vendor_path(&d.path));
     let vendor_suppressed = before - diags.len();
     diags.sort_by(|a, b| (&a.path, a.line, a.column).cmp(&(&b.path, b.line, b.column)));
+    // Measurement-mode split (first-party only; vendor already removed above).
+    let phpdoc: Vec<Diagnostic> = diags.iter().filter(|d| is_phpdoc(d)).cloned().collect();
+    diags.retain(|d| !is_phpdoc(d));
 
     PackageReport {
         name: proj.name.clone(),
@@ -190,6 +207,7 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
         file_count: files.len(),
         parse_error_files,
         diagnostics: diags,
+        phpdoc,
         vendor_suppressed,
         elapsed: start.elapsed(),
     }
@@ -235,7 +253,34 @@ fn print_report(reports: &[PackageReport], local_reports: &[PackageReport]) {
         for d in &r.diagnostics {
             println!("    DIAGNOSTIC {}:{}:{} [{}] {}", d.path, d.line, d.column, d.id, d.message);
         }
+        if !r.phpdoc.is_empty() {
+            println!("    [measurement mode] {} phpdoc.* finding(s) (excluded from red/green):", r.phpdoc.len());
+            for d in &r.phpdoc {
+                println!("    PHPDOC {}:{}:{} [{}] {}", d.path, d.line, d.column, d.id, d.message);
+            }
+        }
     }
+
+    // Measurement-mode summary: the NEW `phpdoc.*` declared-contract ids, counted
+    // per package but excluded from the gate verdict (ADR-0030 landing).
+    let total_phpdoc: usize = reports.iter().chain(local_reports.iter()).map(|r| r.phpdoc.len()).sum();
+    println!("\n=== phpdoc.* measurement mode (does NOT gate) ===\n");
+    for r in reports.iter().chain(local_reports.iter()) {
+        if r.phpdoc.is_empty() {
+            continue;
+        }
+        let label = if r.local { format!("{} (local)", r.name) } else { r.name.clone() };
+        let (params, returns) = r
+            .phpdoc
+            .iter()
+            .fold((0usize, 0usize), |(p, ret), d| match d.id {
+                "phpdoc.param-mismatch" => (p + 1, ret),
+                "phpdoc.return-mismatch" => (p, ret + 1),
+                _ => (p, ret),
+            });
+        println!("{label} — {} phpdoc.* ({params} param, {returns} return)", r.phpdoc.len());
+    }
+    println!("phpdoc.* TOTAL: {total_phpdoc}");
 
     // Summary table: packages and local projects share one table; local rows are
     // marked `(local)`.
