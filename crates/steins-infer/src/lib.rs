@@ -11,7 +11,7 @@
 //! `steins-db`'s [`parse`] / [`function_index`] queries (ADR-0009), so it is a
 //! memoized fact, not a batch pass.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use steins_db::{Db, SourceFile, function_index, parse};
 use steins_sidecar::{FoldArg, FoldResult, FoldValue, Sidecar};
@@ -21,6 +21,16 @@ use steins_syntax::{
 
 /// The registry id for the one check this crate emits (ADR-0022).
 pub const ID: &str = "type.argument-mismatch";
+
+/// The maximum depth of interprocedural argument-binding descent (Feature B).
+///
+/// ADR-0009 makes inference cutoffs a first-class budget discipline: a chain of
+/// same-file calls propagating a literal is followed at most this many frames
+/// deep, after which the descent stops with **no** diagnostic (a cutoff names
+/// itself as silence, never a manufactured finding). Direct and indirect
+/// recursion is caught earlier by the on-stack binding set; this bound guards
+/// against merely long, non-cyclic chains.
+pub const MAX_BINDING_DEPTH: usize = 8;
 
 /// The one-line coverage-posture notice (ADR-0004): printed to stderr when a run
 /// executes as the sound subset because the PHP sidecar is unavailable.
@@ -254,10 +264,21 @@ pub fn check_with(
 
     // --- Propagation pass: resolved `$var` / constant-return / folded args. ---
     for scope in tree.scopes() {
-        check_scope(&cx, folder, scope, &mut out);
+        analyze_scope(&cx, folder, scope, HashMap::new(), None, &mut out);
     }
 
+    // Global dedup (Feature B): the same finding can be reached both by a scope's
+    // empty-env walk and by a binding descent into that scope, or by a diamond of
+    // binding paths. Identical `(id, path, line, column, message)` tuples collapse
+    // to one; findings that differ only in binding provenance stay distinct.
+    dedup(&mut out);
     out
+}
+
+/// Drop exact-duplicate diagnostics, preserving first-occurrence order.
+fn dedup(out: &mut Vec<Diagnostic>) {
+    let mut seen: HashSet<Diagnostic> = HashSet::new();
+    out.retain(|d| seen.insert(d.clone()));
 }
 
 /// Read-only analysis context threaded through the propagation pass.
@@ -273,38 +294,108 @@ struct Known {
     value: ArgValue,
     /// 1-based line of the assignment that established the value.
     line: u32,
+    /// When the value came from an interprocedural argument binding (Feature B),
+    /// the provenance tail naming the outer binding call site
+    /// (`bound at outer("abc") call on line N`). `None` for an ordinary
+    /// same-scope assignment, whose provenance is derived from `line` instead.
+    bound: Option<String>,
 }
 
-/// Walk one scope's trace, tracking known local values, and check every call.
-fn check_scope(cx: &Cx, folder: &mut dyn Folder, scope: &Scope, out: &mut Vec<Diagnostic>) {
-    let mut env: HashMap<String, Known> = HashMap::new();
+/// A binding-descent key: the callee name plus its bound parameters (sorted by
+/// name), identifying a `(function, binding)` frame for recursion detection and
+/// memoization (Feature B).
+type BindingKey = (String, Vec<(String, ArgValue)>);
 
+/// The state threaded down an interprocedural binding descent (Feature B).
+struct Descent<'a> {
+    /// The provenance tail naming the **first** (outermost) binding call site,
+    /// e.g. `bound at outer("abc") call on line 9`. Fixed for the whole descent
+    /// so every finding, however deep, names the site that started the chain.
+    provenance: &'a str,
+    /// Current descent depth (the first binding is depth 1).
+    depth: usize,
+    /// `(function, binding)` frames currently on the descent stack — a revisit
+    /// is direct/indirect recursion and stops the descent.
+    stack: &'a mut Vec<BindingKey>,
+    /// `(function, binding)` frames already fully analyzed in this descent —
+    /// collapses diamonds without re-walking.
+    memo: &'a mut HashSet<BindingKey>,
+}
+
+/// Walk one scope's trace with a given initial environment, tracking known local
+/// values, checking every call, and attempting interprocedural binding descent.
+///
+/// `env` is empty for a scope's own top-level walk and pre-loaded with bound
+/// parameters for a binding descent; `descent` is `None` at the top level and
+/// `Some` inside a descent (carrying the budget/recursion/provenance state).
+fn analyze_scope(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    scope: &Scope,
+    mut env: HashMap<String, Known>,
+    mut descent: Option<Descent<'_>>,
+    out: &mut Vec<Diagnostic>,
+) {
     for stmt in &scope.stmts {
+        // 1. Check + descend every statically-named call this statement carries,
+        // against the env as it stands *before* the statement's own effect. This
+        // uniformly covers statement-level calls, `return f(...)`, `$x = f(...)`,
+        // and `echo f(...)` — all evaluate under the entry env in straight line.
+        for call in checkable_calls(&stmt.kind) {
+            check_propagated_call(cx, folder, scope.poisoned, call, &env, out);
+            try_descend(cx, folder, call, &env, scope.poisoned, descent.as_mut(), out);
+        }
+
+        // 2. Apply the statement's own effect on the known-value environment.
         match &stmt.kind {
-            StmtKind::Barrier => env.clear(),
-            StmtKind::Return(_) => {}
-            StmtKind::Assign { var, value, span } => {
+            // `echo` assigns nothing, but stays conservative like the former
+            // Barrier: clear afterward (the calls were already checked in step 1).
+            StmtKind::Barrier | StmtKind::Echo(_) => env.clear(),
+            // ADR-0027 ratchet: forget only the construct's write set (unless it
+            // poisons, in which case it behaves exactly like a Barrier).
+            StmtKind::Opaque { writes, poisons } => {
+                if *poisons {
+                    env.clear();
+                } else {
+                    for w in writes {
+                        env.remove(w);
+                    }
+                }
+            }
+            StmtKind::Return { .. } | StmtKind::Call(_) => {}
+            StmtKind::Assign { var, value, span, .. } => {
                 // A poisoned scope never trusts a variable value.
                 match cx.resolve_literal(value, &env, scope.poisoned, folder) {
                     Some(lit) => {
                         let line = cx.tree.position(span.start).line;
-                        env.insert(var.clone(), Known { value: lit, line });
+                        env.insert(var.clone(), Known { value: lit, line, bound: None });
                     }
                     None => {
                         env.remove(var);
                     }
                 }
             }
-            StmtKind::Call(call) => {
-                check_propagated_call(cx, folder, scope.poisoned, call, &env, out);
-            }
         }
 
-        // After the statement, any variable handed to a call is untrustworthy
+        // 3. After the statement, any variable handed to a call is untrustworthy
         // (a by-ref parameter could have mutated it).
         for v in &stmt.invalidated {
             env.remove(v);
         }
+    }
+}
+
+/// The statically-named calls a statement carries that must be checked and
+/// descended against the env at the statement's start: the statement-level call,
+/// a `return f(...)` / `$x = f(...)` right-hand call, or each `echo f(...)`
+/// operand. Calls nested inside control-flow bodies are deliberately excluded —
+/// they run under a different (post-assignment) env and stay `Opaque`.
+fn checkable_calls(kind: &StmtKind) -> Vec<&CallExpr> {
+    match kind {
+        StmtKind::Call(c) => vec![c],
+        StmtKind::Return { call: Some(c), .. } | StmtKind::Assign { call: Some(c), .. } => vec![c],
+        StmtKind::Echo(cs) => cs.iter().collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -329,9 +420,15 @@ fn check_propagated_call(
 
         // Only `Var` and `Call` arguments — literals belong to the direct pass.
         let resolved: Option<(ArgValue, String)> = match &arg.value {
-            ArgValue::Var(name) if !poisoned => env
-                .get(name)
-                .map(|k| (k.value.clone(), format!("from ${name}, assigned at line {}", k.line))),
+            ArgValue::Var(name) if !poisoned => env.get(name).map(|k| {
+                // A bound parameter names the outer binding site; a plain local
+                // assignment names its own line.
+                let prov = match &k.bound {
+                    Some(b) => format!("from ${name}, {b}"),
+                    None => format!("from ${name}, assigned at line {}", k.line),
+                };
+                (k.value.clone(), prov)
+            }),
             ArgValue::Call(name, args) => {
                 // A zero-arg same-file constant function wins; otherwise try to
                 // fold an allowlisted builtin over literal args.
@@ -349,6 +446,127 @@ fn check_propagated_call(
 
         if is_type_error(cx.strict, ty, &value) {
             out.push(cx.diagnostic(arg.span.start, &value, Some(&provenance), decl, i, ty));
+        }
+    }
+}
+
+/// Attempt an interprocedural argument-binding descent for one call (Feature B).
+///
+/// When `call` targets a same-file, non-poisoned user function and one or more
+/// positional arguments resolve to literals, the callee's body is re-analyzed
+/// with those parameters bound to their (post-coercion) values. Any proven
+/// `type.argument-mismatch` inside is reported at the inner call site with a
+/// provenance chain naming the outermost binding site. Zero-FP rules from the
+/// slice's spec are enforced here (see inline notes).
+fn try_descend(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    descent: Option<&mut Descent<'_>>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let Some(decl) = resolve_callee(cx.functions, call) else { return };
+    // The callee must have a unique, non-poisoned body scope to analyze.
+    let Some(callee_scope) = cx.unique_scope(&decl.name) else { return };
+    if callee_scope.poisoned {
+        return;
+    }
+
+    // Resolve each positional argument to a literal and try to bind it.
+    let mut bound: Vec<(String, ArgValue)> = Vec::new();
+    let mut render_args: Vec<ArgValue> = Vec::new();
+    for (i, arg) in call.args.iter().enumerate() {
+        let Some(param) = decl.params.get(i) else { break };
+        // Variadic parameter: it and everything after stays unbound.
+        if param.variadic {
+            break;
+        }
+        // Resolve the argument value (literal / known var / const-fn / fold).
+        let Some(value) = cx.resolve_literal(&arg.value, env, poisoned, folder) else {
+            // Unknown argument (or a default with no argument): leave unbound.
+            continue;
+        };
+        render_args.push(value.clone());
+        // A by-ref parameter in a bound position: skip the whole binding — its
+        // in-callee value is not determined by the caller's literal.
+        if param.by_ref {
+            return;
+        }
+        // The callee's declared type acts first. If the literal already violates
+        // it, the real call fatals at entry and the existing direct/propagation
+        // check reports at the outer site — do not descend. Otherwise bind the
+        // post-coercion value (what the parameter actually holds inside).
+        let Some(ty) = param.ty else {
+            // Untyped parameter: it holds the value unchanged.
+            bound.push((param.name.clone(), value));
+            continue;
+        };
+        match coerce_into_param(cx.strict, ty, &value) {
+            Some(coerced) => bound.push((param.name.clone(), coerced)),
+            None => return, // entry TypeError (reported at outer site) or unsure.
+        }
+    }
+
+    if bound.is_empty() {
+        return; // nothing known to propagate.
+    }
+
+    // Canonical `(callee, binding)` key for recursion detection / memoization.
+    let mut key_binding = bound.clone();
+    key_binding.sort_by(|a, b| a.0.cmp(&b.0));
+    let key: BindingKey = (decl.name.clone(), key_binding);
+
+    // Provenance names the *first* binding site; a nested descent inherits it.
+    let new_provenance;
+    let (provenance, next_depth): (&str, usize) = match &descent {
+        Some(d) => (d.provenance, d.depth + 1),
+        None => {
+            let line = cx.tree.position(call.span.start).line;
+            new_provenance =
+                format!("bound at {} call on line {}", render_call(&decl.name, &render_args), line);
+            (&new_provenance, 1)
+        }
+    };
+
+    // Budget (ADR-0009): stop past the cap with no diagnostic.
+    if next_depth > MAX_BINDING_DEPTH {
+        return;
+    }
+
+    // Build the bound environment; parameters carry the outer-site provenance.
+    let bound_env: HashMap<String, Known> = bound
+        .into_iter()
+        .map(|(name, value)| {
+            (name, Known { value, line: 0, bound: Some(provenance.to_owned()) })
+        })
+        .collect();
+
+    // Recursion / memo bookkeeping, then descend with a fresh or inherited frame.
+    match descent {
+        Some(d) => {
+            if d.stack.contains(&key) || d.memo.contains(&key) {
+                return;
+            }
+            d.stack.push(key.clone());
+            let child = Descent {
+                provenance,
+                depth: next_depth,
+                stack: d.stack,
+                memo: d.memo,
+            };
+            analyze_scope(cx, folder, callee_scope, bound_env, Some(child), out);
+            d.stack.pop();
+            d.memo.insert(key);
+        }
+        None => {
+            // First binding from a top-level scope walk: fresh recursion state.
+            let mut stack: Vec<BindingKey> = vec![key.clone()];
+            let mut memo: HashSet<BindingKey> = HashSet::new();
+            let child =
+                Descent { provenance, depth: next_depth, stack: &mut stack, memo: &mut memo };
+            analyze_scope(cx, folder, callee_scope, bound_env, Some(child), out);
         }
     }
 }
@@ -412,6 +630,15 @@ impl Cx<'_> {
         Some((folded, format!("folded from {}", render_call(name, args))))
     }
 
+    /// The unique body scope of the same-file user function `name`, or `None`
+    /// when there is no such scope or more than one (ambiguous → give up).
+    fn unique_scope(&self, name: &str) -> Option<&'_ Scope> {
+        let mut it =
+            self.tree.scopes().iter().filter(|s| s.function_name.as_deref() == Some(name));
+        let scope = it.next()?;
+        if it.next().is_some() { None } else { Some(scope) }
+    }
+
     /// Resolve a zero-argument same-file constant function: its body must be
     /// exactly `[Return(literal)]`, it must be unambiguous, take no parameters,
     /// and its scope must not be poisoned. Returns the literal and the function's
@@ -432,7 +659,7 @@ impl Cx<'_> {
         }
         // Body is exactly one `return <literal>;`.
         let [stmt] = scope.stmts.as_slice() else { return None };
-        let StmtKind::Return(value) = &stmt.kind else { return None };
+        let StmtKind::Return { value, .. } = &stmt.kind else { return None };
         if !value.is_literal() {
             return None;
         }
@@ -544,6 +771,96 @@ fn is_type_error(strict: bool, ty: ParamType, arg: &ArgValue) -> bool {
             ScalarType::String | ScalarType::Bool => false,
         }
     }
+}
+
+/// The value a parameter of type `ty` actually holds when `value` is passed to
+/// it under `strict`, or `None` when the pass would fatal at entry (a TypeError
+/// already reported at the outer site by the direct/propagation check) **or**
+/// when the coercion is one this slice is not certain about (silence is safe —
+/// ADR-0002 zero-FP).
+///
+/// This is Feature B's descend-value computation: only when a bound literal
+/// *passes* the callee's entry check do we analyze its body, and we do so with
+/// the post-coercion value (`"5"` into an int parameter becomes int `5` in
+/// coercive mode; under strict it would have fataled, so we never reach here).
+///
+/// The table is deliberately partial. Value precision only ever affects a
+/// downstream finding through the numeric-string-into-numeric rule, so the one
+/// risk is producing a string whose numericness we get wrong. We therefore emit
+/// only strings we can render exactly (`int`/`bool`→`string`) and decline
+/// `float`→`string` (PHP's rendering depends on the `precision` ini) by widening
+/// to `None`. `int`/`float`/`bool` descend values never trigger a downstream
+/// coercive TypeError, so their exact magnitude is immaterial.
+fn coerce_into_param(strict: bool, ty: ParamType, value: &ArgValue) -> Option<ArgValue> {
+    // Entry check first: a value that fatals never reaches the callee's body.
+    if is_type_error(strict, ty, value) {
+        return None;
+    }
+    // `null` into a nullable parameter stays `null` (non-nullable already
+    // rejected by the entry check above).
+    if matches!(value, ArgValue::Null) {
+        return Some(ArgValue::Null);
+    }
+    Some(match (ty.scalar, value) {
+        // Identity: the value already matches the target scalar.
+        (ScalarType::Int, ArgValue::Int(_))
+        | (ScalarType::Float, ArgValue::Float(_))
+        | (ScalarType::String, ArgValue::Str(_))
+        | (ScalarType::Bool, ArgValue::Bool(_)) => value.clone(),
+
+        // int -> float widening (permitted in both modes).
+        (ScalarType::Float, ArgValue::Int(i)) => ArgValue::Float(*i as f64),
+
+        // The rest are coercive-only (strict would have fataled at entry):
+        // numeric string -> int / float.
+        (ScalarType::Int, ArgValue::Str(s)) => ArgValue::Int(php_str_to_int(s)?),
+        (ScalarType::Float, ArgValue::Str(s)) => ArgValue::Float(php_str_to_float(s)?),
+        // float / bool -> int.
+        (ScalarType::Int, ArgValue::Float(f)) => ArgValue::Int(php_float_to_int(*f)?),
+        (ScalarType::Int, ArgValue::Bool(b)) => ArgValue::Int(i64::from(*b)),
+        // bool -> float.
+        (ScalarType::Float, ArgValue::Bool(b)) => ArgValue::Float(if *b { 1.0 } else { 0.0 }),
+        // -> bool (well-defined truthiness).
+        (ScalarType::Bool, ArgValue::Int(i)) => ArgValue::Bool(*i != 0),
+        (ScalarType::Bool, ArgValue::Float(f)) => ArgValue::Bool(*f != 0.0),
+        (ScalarType::Bool, ArgValue::Str(s)) => ArgValue::Bool(!(s.is_empty() || s == "0")),
+        // int / bool -> string (rendered exactly).
+        (ScalarType::String, ArgValue::Int(i)) => ArgValue::Str(i.to_string()),
+        (ScalarType::String, ArgValue::Bool(b)) => {
+            ArgValue::Str(if *b { "1".to_owned() } else { String::new() })
+        }
+
+        // Anything else — notably float -> string — is uncertain: widen.
+        _ => return None,
+    })
+}
+
+/// Whitespace PHP trims before interpreting a numeric string (matches
+/// [`php_is_numeric`]).
+fn php_trim(s: &str) -> &str {
+    s.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c'))
+}
+
+/// Convert a PHP *numeric string* (already validated by [`php_is_numeric`]) to
+/// the int it coerces to: integer form parses directly, float form truncates
+/// toward zero. `None` only on the unreachable non-numeric path.
+fn php_str_to_int(s: &str) -> Option<i64> {
+    let t = php_trim(s);
+    if let Ok(i) = t.parse::<i64>() {
+        return Some(i);
+    }
+    php_float_to_int(t.parse::<f64>().ok()?)
+}
+
+/// Convert a PHP numeric string to the float it coerces to.
+fn php_str_to_float(s: &str) -> Option<f64> {
+    php_trim(s).parse::<f64>().ok()
+}
+
+/// Truncate a float toward zero to an int (PHP scalar coercion). Non-finite
+/// floats have no well-defined int and widen to `None`.
+fn php_float_to_int(f: f64) -> Option<i64> {
+    f.is_finite().then(|| f.trunc() as i64)
 }
 
 /// PHP 8 `is_numeric` semantics: optional leading/trailing whitespace, optional
