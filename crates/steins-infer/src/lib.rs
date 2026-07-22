@@ -34,7 +34,7 @@ use steins_syntax::Span;
 use steins_syntax::{
     ArgValue, ArrayKey, Callee, CatchClause, ClassDecl, CmpOp, CondExpr, CondOperand,
     EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, MatchArmT, MethodDecl, NameRef,
-    NativeType, NormKey, Param, Receiver, RefKind, ScalarType, Scope, ScopeOwner, SourceTree,
+    NativeType, NormKey, Param, PropertyDecl, Receiver, RefKind, ScalarType, Scope, ScopeOwner, SourceTree,
     StaticClass, Stmt, StmtKind, ThrowKind, ThrowOrigin, TypeMember, Visibility, normalize_array,
 };
 
@@ -67,6 +67,20 @@ pub const RETURN_MISMATCH_ID: &str = "phpdoc.return-mismatch";
 /// runtime `Error` ("Call to a member function on null"). Only a *`Singleton(null)`*
 /// receiver fires; a `OneOf` that merely *includes* null is `Maybe` → silent.
 pub const CALL_ON_NULL_ID: &str = "call.on-null";
+
+/// The registry id for the native property-type check (ADR-0036): a proven value
+/// assigned to a native-typed property provably raises a `TypeError` under the
+/// assigning file's strict mode (`$x->p = "abc"` on `int $p`).
+pub const PROP_MISMATCH_ID: &str = "type.property-mismatch";
+
+/// The registry id for the phpdoc `@var` property-contract check (ADR-0036/0030):
+/// a proven or abstract value assigned to a property provably does not inhabit its
+/// `@var` contract type (definite `No` only; no double-report where native fired).
+pub const PHPDOC_PROP_MISMATCH_ID: &str = "phpdoc.property-mismatch";
+
+/// The registry id for the readonly-reassignment proof (ADR-0036): a second proven
+/// write to a `readonly` property on one path — a guaranteed runtime `Error`.
+pub const READONLY_REASSIGNED_ID: &str = "readonly.reassigned";
 
 /// The registry id for the effect-envelope check (ADR-0005/0022): a function
 /// declared `#[\Steins\Pure]` / `#[\Steins\Effect(...)]` whose inferred effects
@@ -228,6 +242,8 @@ fn arg_to_fold(arg: &ArgValue) -> Option<FoldArg> {
         | ArgValue::Array(_)
         | ArgValue::Ternary { .. }
         | ArgValue::Closure(_)
+        | ArgValue::PropFetch { .. }
+        | ArgValue::Clone(_)
         | ArgValue::Other => None,
     }
 }
@@ -525,7 +541,7 @@ fn check_units(units: &[FileUnit], index: &Index, folder: &mut dyn Folder) -> Ve
                 folder,
                 scope,
                 HashMap::new(),
-                HashMap::new(),
+                Store::default(),
                 None,
                 None,
                 None,
@@ -540,7 +556,7 @@ fn check_units(units: &[FileUnit], index: &Index, folder: &mut dyn Folder) -> Ve
         // site where the native check fired is skipped by the phpdoc check (no
         // double-report; ADR-0030). Calls in proven-dead regions are skipped. ---
         let empty_env: HashMap<String, Known> = HashMap::new();
-        let empty_classes: HashMap<String, String> = HashMap::new();
+        let empty_classes: Store = Store::default();
         for call in cx.tree().calls() {
             if in_dead(&dead_spans, call.span.start) {
                 continue;
@@ -749,7 +765,7 @@ fn annotate_units(
             folder,
             scope,
             HashMap::new(),
-            HashMap::new(),
+            Store::default(),
             None,
             None,
             Some(&mut facts),
@@ -2155,6 +2171,54 @@ impl<'a> Cx<'a> {
         Some(self.units[file].tree.resolve_class_fqn(pref))
     }
 
+    /// The non-static properties of `class_fqn` including inherited ones (ADR-0036),
+    /// walking the parent chain; a derived-class declaration shadows an ancestor's
+    /// property of the same name (first-seen wins, own class first). Static
+    /// properties are excluded (never heap-tracked). Stops at an unknown/absent
+    /// parent or a trait-using class (give up → the props gathered so far).
+    fn class_props(&self, class_fqn: &str) -> Vec<&'a PropertyDecl> {
+        let mut out: Vec<&'a PropertyDecl> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut cur = class_fqn.to_owned();
+        let mut chain_seen: HashSet<String> = HashSet::new();
+        loop {
+            if !chain_seen.insert(cur.to_ascii_lowercase()) {
+                break;
+            }
+            let Some((file, cd)) = self.find_class(&cur) else { break };
+            for p in &cd.properties {
+                if p.is_static {
+                    continue;
+                }
+                if seen.insert(p.name.to_ascii_lowercase()) {
+                    out.push(p);
+                }
+            }
+            match &cd.parent {
+                Some(pref) => cur = self.units[file].tree.resolve_class_fqn(pref),
+                None => break,
+            }
+        }
+        out
+    }
+
+    /// The `__construct` method resolved through `class_fqn`'s chain (ADR-0036),
+    /// for mapping `new` args to promoted-property positions.
+    fn find_ctor(&self, class_fqn: &str) -> Option<&'a MethodDecl> {
+        let mut cur = class_fqn.to_owned();
+        let mut seen: HashSet<String> = HashSet::new();
+        loop {
+            if !seen.insert(cur.to_ascii_lowercase()) {
+                return None;
+            }
+            let (file, cd) = self.find_class(&cur)?;
+            if let Some(m) = cd.methods.iter().find(|m| m.is_constructor) {
+                return Some(m);
+            }
+            cur = self.units[file].tree.resolve_class_fqn(cd.parent.as_ref()?);
+        }
+    }
+
     /// Resolve a **function** call reference per PHP name resolution (ADR-0001).
     fn resolve_function(&self, r: &NameRef) -> FnResolution {
         let catalog_knows = |n: &str| steins_catalog::effect_labels(n).is_some();
@@ -2538,6 +2602,8 @@ fn val_of(arg: &ArgValue) -> Option<Val> {
         | ArgValue::New(..)
         | ArgValue::Ternary { .. }
         | ArgValue::Closure(_)
+        | ArgValue::PropFetch { .. }
+        | ArgValue::Clone(_)
         | ArgValue::Other => None,
     }
 }
@@ -2629,6 +2695,119 @@ fn arg_of_fact_key(fact: &Fact) -> ArgValue {
     }
 }
 
+/// An allocation identity — the key the heap is stored under (ADR-0036). Fresh
+/// per `new`/`clone`; a variable holds one via [`Store::refs`] (its ObjRef).
+type AllocId = u32;
+
+/// A heap object (ADR-0036 object state): allocation-keyed, so aliases share it.
+/// The `class` is the exact runtime class (fixed at construction, never swept);
+/// `props` are the per-property value-domain facts.
+#[derive(Clone)]
+struct HeapObj {
+    /// The exact runtime class FQN (lowercase-normalized, as `classes_env` held).
+    class: String,
+    /// Property facts keyed by property name (ADR-0035 Facts live in props).
+    props: HashMap<String, Fact>,
+    /// Properties declared `readonly` — sweep-immune once established (ADR-0036).
+    readonly: HashSet<String>,
+    /// readonly props provably written on THIS path (for `readonly.reassigned`).
+    ro_written: HashSet<String>,
+    /// Whether this object has escaped (passed to a call, returned, stored into an
+    /// array/property, or captured by a closure). Escaped objects have their
+    /// non-readonly props swept by unknown calls; a purely-local object's props
+    /// survive — the ADR-0036 precision payoff.
+    escaped: bool,
+}
+
+impl HeapObj {
+    fn new(class: String) -> Self {
+        HeapObj {
+            class,
+            props: HashMap::new(),
+            readonly: HashSet::new(),
+            ro_written: HashSet::new(),
+            escaped: false,
+        }
+    }
+
+    /// Sweep the non-readonly props (an unknown/overridable call on an escaped or
+    /// `$this` object may have mutated them). readonly props and the class survive.
+    fn sweep_nonreadonly(&mut self) {
+        self.props.retain(|name, _| self.readonly.contains(name));
+    }
+}
+
+/// The object store threaded through the walk (ADR-0036), replacing the old flat
+/// `var → class` map. `refs` binds a variable to an allocation id (its ObjRef);
+/// `heap` maps ids to objects. Aliasing (`$b = $a`) copies the ref (shared id), so
+/// a write through any alias is visible through all. The exact-class fact that
+/// `classes_env` used to hold is now `heap[refs[var]].class`.
+#[derive(Clone, Default)]
+struct Store {
+    refs: HashMap<String, AllocId>,
+    heap: HashMap<AllocId, HeapObj>,
+}
+
+impl Store {
+    /// The exact class of the object `var` currently refers to, if any.
+    fn class_of(&self, var: &str) -> Option<&str> {
+        self.heap.get(self.refs.get(var)?).map(|o| o.class.as_str())
+    }
+
+    /// The allocation id `var` currently refers to.
+    fn id_of(&self, var: &str) -> Option<AllocId> {
+        self.refs.get(var).copied()
+    }
+
+    /// The object `var` currently refers to.
+    fn obj_of(&self, var: &str) -> Option<&HeapObj> {
+        self.heap.get(self.refs.get(var)?)
+    }
+
+    /// Whether `var` is bound to any object.
+    fn is_bound(&self, var: &str) -> bool {
+        self.refs.contains_key(var)
+    }
+
+    /// A property fact of the object `var` refers to.
+    fn prop_fact(&self, var: &str, prop: &str) -> Option<&Fact> {
+        self.obj_of(var)?.props.get(prop)
+    }
+
+    /// Drop `var`'s ObjRef binding — the heap object survives (other aliases keep
+    /// seeing it); `var` just forgets which object it held (ADR-0036: a pass-to-call
+    /// may rebind `$var`, so the var→id link must die exactly as `classes_env`
+    /// entries did, while the id lives on for its other aliases).
+    fn unbind(&mut self, var: &str) {
+        self.refs.remove(var);
+    }
+
+    /// Clear all bindings and the heap — a Barrier: nothing is reachable.
+    fn clear(&mut self) {
+        self.refs.clear();
+        self.heap.clear();
+    }
+
+    /// Mark the object `var` refers to as escaped (if any).
+    fn mark_escaped(&mut self, var: &str) {
+        if let Some(id) = self.refs.get(var).copied()
+            && let Some(o) = self.heap.get_mut(&id)
+        {
+            o.escaped = true;
+        }
+    }
+
+    /// Sweep every escaped object's non-readonly props (an unknown call ran that may
+    /// mutate any escaped object). Non-escaped objects survive (ADR-0036 payoff).
+    fn sweep_escaped(&mut self) {
+        for o in self.heap.values_mut() {
+            if o.escaped {
+                o.sweep_nonreadonly();
+            }
+        }
+    }
+}
+
 /// A proven local fact plus where it was established (for provenance). A closure
 /// value has no scalar `fact` — it rides in [`Known::closure`] instead (ADR-0033).
 #[derive(Clone)]
@@ -2681,7 +2860,7 @@ fn analyze_scope(
     folder: &mut dyn Folder,
     scope: &Scope,
     mut env: HashMap<String, Known>,
-    mut classes_env: HashMap<String, String>,
+    mut store: Store,
     this_exact: Option<String>,
     mut descent: Option<Descent<'_>>,
     mut facts: Option<&mut Vec<LineFact>>,
@@ -2713,7 +2892,7 @@ fn analyze_scope(
     // params may still carry their native-type fact — sound).
     if let Some(params) = cx.scope_params(scope) {
         for p in params {
-            if env.contains_key(&p.name) || classes_env.contains_key(&p.name) {
+            if env.contains_key(&p.name) || store.is_bound(&p.name) {
                 continue;
             }
             if let Some(fact) = seed_fact(p) {
@@ -2722,6 +2901,23 @@ fn analyze_scope(
         }
     }
 
+    // Seed the `$this` object in a method scope (ADR-0036): props/readonly from the
+    // class surface. Only when the class declares tracked properties (otherwise
+    // `$this` stays unbound — identical to pre-heap behavior). A descent that
+    // already bound `this` (impossible today — descents pass an empty store) is left
+    // untouched.
+    if let Some(class) = enclosing_class
+        && !store.is_bound("this")
+        && let Some(obj) = seed_this_object(cx, class)
+    {
+        let id = store.heap.keys().copied().max().map_or(0, |m| m + 1);
+        store.heap.insert(id, obj);
+        store.refs.insert("this".to_owned(), id);
+    }
+
+    // The allocation counter starts past any id already in the store (the seeded
+    // `$this`), so a fresh `new`/`clone` never collides with it.
+    let alloc_start = store.heap.keys().copied().max().map_or(0, |m| m + 1);
     let w = WalkCx {
         cx,
         scope,
@@ -2730,8 +2926,9 @@ fn analyze_scope(
         ret_info: &ret_info,
         ret_phpdoc: &ret_phpdoc,
         dead: std::cell::RefCell::new(Vec::new()),
+        alloc: std::cell::Cell::new(alloc_start),
     };
-    walk_trace(&w, folder, &scope.stmts, &mut env, &mut classes_env, &mut descent, &mut facts, out);
+    walk_trace(&w, folder, &scope.stmts, &mut env, &mut store, &mut descent, &mut facts, false, out);
     if let Some(sink) = dead_out {
         sink.extend(w.dead.into_inner());
     }
@@ -2758,6 +2955,19 @@ struct WalkCx<'a, 'w> {
     /// universal truths — a binding descent's dead branches are dead *for that
     /// binding only*, so descents discard theirs (`dead_out: None`).
     dead: std::cell::RefCell<Vec<Span>>,
+    /// A monotone allocation-id counter for this scope walk (ADR-0036). Shared
+    /// across branch clones (they clone the `Store`, not this cell), so a `new` in
+    /// one branch never collides with a `new` in another that later joins.
+    alloc: std::cell::Cell<AllocId>,
+}
+
+impl WalkCx<'_, '_> {
+    /// Mint a fresh allocation id for a `new`/`clone`.
+    fn fresh_id(&self) -> AllocId {
+        let id = self.alloc.get();
+        self.alloc.set(id + 1);
+        id
+    }
 }
 
 /// Record every top-level statement span of the given traces as proven dead.
@@ -2788,9 +2998,10 @@ fn walk_trace(
     folder: &mut dyn Folder,
     stmts: &[Stmt],
     env: &mut HashMap<String, Known>,
-    classes_env: &mut HashMap<String, String>,
+    store: &mut Store,
     descent: &mut Option<Descent<'_>>,
     facts: &mut Option<&mut Vec<LineFact>>,
+    guarded: bool,
     out: &mut Vec<Diagnostic>,
 ) -> Flow {
     let cx = w.cx;
@@ -2800,7 +3011,7 @@ fn walk_trace(
         for call in checkable_calls(&stmt.kind) {
             match &call.receiver {
                 Callee::Function(_) => {
-                    check_propagated_call(cx, folder, scope.poisoned, call, env, classes_env, out);
+                    check_propagated_call(cx, folder, scope.poisoned, call, env, store, out);
                     try_descend_function(cx, folder, call, env, scope.poisoned, descent.as_mut(), out);
                 }
                 Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
@@ -2813,7 +3024,7 @@ fn walk_trace(
                         scope,
                         call,
                         env,
-                        classes_env,
+                        store,
                         w.this_exact,
                         w.enclosing_class,
                         descent.as_mut(),
@@ -2830,6 +3041,13 @@ fn walk_trace(
             }
         }
 
+        // 1a. Escape + sweep (ADR-0036): passing an object into a call escapes it;
+        // an unknown/overridable call — or any call an object was passed into —
+        // sweeps every escaped object's non-readonly props. `$this` is pre-escaped,
+        // so an overridable call on it (unresolved via the guard) sweeps it, while a
+        // private/final call (resolved, no object args) leaves it intact.
+        apply_call_escape_and_sweep(w, &stmt.kind, store);
+
         // 1b. Return-type check (native + phpdoc contract); see the original notes.
         if let StmtKind::Return { value, span, .. } = &stmt.kind {
             let mut native_fired = false;
@@ -2845,7 +3063,7 @@ fn walk_trace(
             {
                 // Proven-value path, then the abstract-fact path (Feature E) —
                 // same discipline as the `@param` check: only a definite `No`.
-                let rendered = match cx.resolve_cval(value, env, classes_env, scope.poisoned, folder) {
+                let rendered = match cx.resolve_cval(value, env, store, scope.poisoned, folder) {
                     Some(cv) => (accepts(cx, cx.cur, span.start, pret, &cv) == Certainty::No)
                         .then(|| rendered_cval(&cv)),
                     None => arg_abstract_fact(value, env, scope.poisoned).and_then(|fact| {
@@ -2874,7 +3092,7 @@ fn walk_trace(
         let flow = match &stmt.kind {
             StmtKind::Barrier => {
                 env.clear();
-                classes_env.clear();
+                store.clear();
                 Flow::FellThrough
             }
             // `echo` assigns nothing on its own; anything it *can* mutate (embedded
@@ -2887,34 +3105,59 @@ fn walk_trace(
             StmtKind::Opaque { writes, reads, poisons } => {
                 if *poisons {
                     env.clear();
-                    classes_env.clear();
+                    store.clear();
                 } else {
                     for v in writes.iter().chain(reads) {
                         env.remove(v);
-                        classes_env.remove(v);
+                        store.unbind(v);
                     }
                 }
                 Flow::FellThrough
             }
             StmtKind::Call(_) => Flow::FellThrough,
             // Terminators: the trace stops; the remainder is unreachable.
-            StmtKind::Return { .. } | StmtKind::Throw { .. } | StmtKind::Exit { .. } => {
+            StmtKind::Return { value, .. } => {
+                // `return $o;` escapes the returned object (ADR-0036).
+                if let ArgValue::Var(v) = value {
+                    store.mark_escaped(v);
+                }
                 for v in &stmt.invalidated {
                     env.remove(v);
-                    classes_env.remove(v);
+                    store.unbind(v);
+                }
+                return Flow::Terminated;
+            }
+            StmtKind::Throw { .. } | StmtKind::Exit { .. } => {
+                for v in &stmt.invalidated {
+                    env.remove(v);
+                    store.unbind(v);
                 }
                 return Flow::Terminated;
             }
             StmtKind::Assign { var, value, span, .. } => {
-                apply_assign(w, folder, var, value, span.start, env, classes_env, facts);
+                apply_assign(w, folder, var, value, span.start, env, store, facts);
+                Flow::FellThrough
+            }
+            StmtKind::PropAssign { target_var, prop, value, span, .. } => {
+                // Property checks run only in the plain per-scope pass (like the
+                // return check): a binding descent rebinds the callee's params to
+                // hypothetical caller values that in-body guards (unmodeled here)
+                // would narrow — checking a descent-bound property write is
+                // guard-blind and unsound. The heap update always runs so reads
+                // within the descent still resolve.
+                let checks_enabled = descent.is_none();
+                apply_prop_assign(
+                    w, folder, target_var, prop, value, span.start, guarded, checks_enabled, env,
+                    store, out,
+                );
                 Flow::FellThrough
             }
             StmtKind::If { cond, then_trace, elseifs, else_trace } => walk_if(
-                w, folder, cond, then_trace, elseifs, else_trace.as_deref(), env, classes_env,
+                w, folder, cond, then_trace, elseifs, else_trace.as_deref(), env, store,
                 descent, facts, out,
             ),
             StmtKind::Match { subject, arms, default, loose } => walk_match(
-                w, folder, subject, arms, default.as_deref(), *loose, env, classes_env, descent,
+                w, folder, subject, arms, default.as_deref(), *loose, env, store, descent,
                 facts, out,
             ),
         };
@@ -2929,7 +3172,7 @@ fn walk_trace(
         let mut asserted: HashSet<String> = HashSet::new();
         for call in checkable_calls(&stmt.kind) {
             apply_stmt_asserts(
-                cx, scope, call, env, classes_env, w.this_exact, w.enclosing_class, &mut asserted,
+                cx, scope, call, env, store, w.this_exact, w.enclosing_class, &mut asserted,
             );
         }
 
@@ -2940,7 +3183,7 @@ fn walk_trace(
                 continue;
             }
             env.remove(v);
-            classes_env.remove(v);
+            store.unbind(v);
         }
 
         if flow == Flow::Terminated {
@@ -2961,7 +3204,7 @@ fn apply_assign(
     value: &ArgValue,
     span_start: u32,
     env: &mut HashMap<String, Known>,
-    classes_env: &mut HashMap<String, String>,
+    store: &mut Store,
     facts: &mut Option<&mut Vec<LineFact>>,
 ) {
     let cx = w.cx;
@@ -2971,7 +3214,7 @@ fn apply_assign(
     // walk evaluates the guard and resolves to the chosen arm, or (undecided) a
     // `OneOf` of the two arms when both are literal, else unknown.
     if let ArgValue::Ternary { cond, then_val, else_val } = value {
-        match eval_ternary_fact(w, folder, cond, then_val, else_val, env, classes_env) {
+        match eval_ternary_fact(w, folder, cond, then_val, else_val, env, store) {
             Some(fact) => {
                 if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
                     facts.push(LineFact {
@@ -2980,11 +3223,11 @@ fn apply_assign(
                     });
                 }
                 env.insert(var.to_owned(), Known::value(fact, line, None));
-                classes_env.remove(var);
+                store.unbind(var);
             }
             None => {
                 env.remove(var);
-                classes_env.remove(var);
+                store.unbind(var);
             }
         }
         return;
@@ -2996,9 +3239,16 @@ fn apply_assign(
     // capture. A poisoned scope drops it (no reliable capture snapshot).
     if let ArgValue::Closure(cref) = value {
         env.remove(var);
-        classes_env.remove(var);
+        store.unbind(var);
         if w.scope.poisoned {
             return;
+        }
+        // A closure that captures an object escapes it (ADR-0036): the closure holds
+        // the object handle, so an unknown call may reach and mutate it.
+        if let steins_syntax::ClosureRef::Anonymous { captures, .. } = cref {
+            for name in captures {
+                store.mark_escaped(name);
+            }
         }
         if let Some(cv) = build_closure_val(cx, cref, line, env) {
             env.insert(var.to_owned(), Known::closure(cv, line));
@@ -3007,19 +3257,50 @@ fn apply_assign(
     }
 
     match value {
-        ArgValue::New(class_ref, _) => {
+        // `$x = new Foo(args)` (ADR-0036): a fresh allocation, class from resolution,
+        // props populated from promoted ctor params + literal defaults.
+        ArgValue::New(class_ref, args) => {
             env.remove(var);
-            if w.scope.poisoned {
-                classes_env.remove(var);
-            } else {
+            store.unbind(var);
+            if !w.scope.poisoned {
                 let class = cx.class_fqn(class_ref);
-                classes_env.insert(var.to_owned(), class.clone());
+                let id = build_new_object(w, folder, &class, args, env, store);
+                store.refs.insert(var.to_owned(), id);
                 if let Some(facts) = facts.as_deref_mut() {
                     facts.push(LineFact {
                         line,
                         kind: FactKind::ExactClass { var: var.to_owned(), class },
                     });
                 }
+            }
+        }
+        // `$b = $a` where `$a` holds an object (ADR-0036 aliasing): copy the ObjRef
+        // (shared id), so a later write through either alias is visible via both.
+        ArgValue::Var(src) if !w.scope.poisoned && store.is_bound(src) => {
+            env.remove(var);
+            let id = store.id_of(src).expect("bound var has an id");
+            store.refs.insert(var.to_owned(), id);
+        }
+        // `clone $a` (ADR-0036 adversarial #1): a NEW id with a COPY of the source
+        // object's props (PHP shallow clone) — post-clone writes stay isolated.
+        ArgValue::Clone(src) if !w.scope.poisoned && store.is_bound(src) => {
+            env.remove(var);
+            store.unbind(var);
+            let src_id = store.id_of(src).expect("bound var has an id");
+            if let Some(src_obj) = store.heap.get(&src_id) {
+                let mut copy = src_obj.clone();
+                copy.escaped = false; // a fresh, local clone has not escaped
+                let id = w.fresh_id();
+                store.heap.insert(id, copy);
+                store.refs.insert(var.to_owned(), id);
+            }
+        }
+        // `$x = $o->p` (ADR-0036): a property read flows the prop's fact into `$x`.
+        ArgValue::PropFetch { var: recv, prop } if !w.scope.poisoned => {
+            env.remove(var);
+            store.unbind(var);
+            if let Some(fact) = store.prop_fact(recv, prop).cloned() {
+                env.insert(var.to_owned(), Known::value(fact, line, None));
             }
         }
         _ => match cx.resolve_literal(value, env, w.scope.poisoned, folder).and_then(|lit| {
@@ -3033,14 +3314,293 @@ fn apply_assign(
                     });
                 }
                 env.insert(var.to_owned(), Known::value(fact, line, None));
-                classes_env.remove(var);
+                store.unbind(var);
             }
             None => {
                 env.remove(var);
-                classes_env.remove(var);
+                store.unbind(var);
             }
         },
     }
+}
+
+/// Allocate a fresh heap object for `new Class(args)` (ADR-0036), populating its
+/// props from literal property defaults and promoted constructor parameters, and
+/// its readonly set from `readonly`-declared properties. Returns the allocation id.
+fn build_new_object(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    class: &str,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: &mut Store,
+) -> AllocId {
+    let cx = w.cx;
+    let id = w.fresh_id();
+    let mut obj = HeapObj::new(class.to_owned());
+    let props = cx.class_props(class);
+
+    // readonly set + literal defaults.
+    for p in &props {
+        if p.readonly {
+            obj.readonly.insert(p.name.clone());
+        }
+        if let Some(default) = &p.default
+            && let Some(fact) = singleton_fact(default)
+        {
+            // Skip null-admitting facts (unsound to flow past unmodeled guards).
+            if !fact_is_nullish(&fact) {
+                obj.props.insert(p.name.clone(), fact);
+            }
+            if p.readonly {
+                obj.ro_written.insert(p.name.clone());
+            }
+        }
+    }
+
+    // Promoted constructor params: bind each from its positional `new` argument.
+    if let Some(ctor) = cx.find_ctor(class) {
+        let promoted: HashMap<&str, &&PropertyDecl> =
+            props.iter().filter(|p| p.promoted).map(|p| (p.name.as_str(), p)).collect();
+        for (i, param) in ctor.params.iter().enumerate() {
+            if param.variadic {
+                break;
+            }
+            let Some(pd) = promoted.get(param.name.as_str()) else { continue };
+            // The value: the resolved arg literal, else the param's native-type seed.
+            let fact = args
+                .get(i)
+                .and_then(|a| cx.resolve_literal(a, env, w.scope.poisoned, folder))
+                .and_then(|lit| singleton_fact(&lit))
+                .or_else(|| seed_fact(param));
+            // Skip null-admitting facts (unsound to flow past unmodeled guards).
+            if let Some(fact) = fact
+                && !fact_is_nullish(&fact)
+            {
+                obj.props.insert(pd.name.clone(), fact);
+            }
+            // A promoted param is *always* written at construction — even when its
+            // value is unknown, record the write (readonly.reassigned first write).
+            if pd.readonly {
+                obj.ro_written.insert(pd.name.clone());
+            }
+        }
+    }
+
+    store.heap.insert(id, obj);
+    id
+}
+
+/// Seed the `$this` object shell for a method scope (ADR-0036): class from the
+/// enclosing class, plus the readonly set and provably-written readonly props from
+/// the class surface. `$this` is **pre-escaped** (an overridable call on it sweeps
+/// its non-readonly props). Returns `None` when the class has no tracked properties
+/// (leaving `$this` unbound — identical to pre-heap behavior).
+///
+/// Crucially this seeds **no property value facts**. A property's value in an
+/// arbitrary method is whatever some *other* method last stored (or a `!== null`
+/// guard narrowed) — neither of which this per-scope walk models — so assuming the
+/// declared default here would be unsound (it produced null-property false
+/// positives past `if ($this->x !== null)` guards). Only facts written *in this
+/// method* (explicit `$this->p = …`) flow; readonly bookkeeping stays because a
+/// readonly value cannot change after construction.
+fn seed_this_object(cx: &Cx, class_fqn: &str) -> Option<HeapObj> {
+    let props = cx.class_props(class_fqn);
+    if props.is_empty() {
+        return None;
+    }
+    let mut obj = HeapObj::new(class_fqn.to_owned());
+    obj.escaped = true; // pre-escaped
+    for p in &props {
+        if p.readonly {
+            obj.readonly.insert(p.name.clone());
+            // A promoted readonly param or a readonly prop with a literal default is
+            // provably written by construction — the first write for reassign checks.
+            if p.promoted || p.default.is_some() {
+                obj.ro_written.insert(p.name.clone());
+            }
+        }
+    }
+    Some(obj)
+}
+
+/// Whether a fact admits `null` — such a fact must never be *seeded* into a
+/// property (ADR-0036): property reads bypass the guard-narrowing that would clear
+/// a `!== null` check, so a seeded nullable/null property fact flowing into a
+/// non-null sink is a false positive. Explicitly-written facts still flow (they are
+/// sound within the linear trace); only construction-time seeding is filtered.
+fn fact_is_nullish(f: &Fact) -> bool {
+    match f {
+        Fact::Singleton(v) => matches!(v, Val::Null),
+        Fact::OneOf(vs) => vs.iter().any(|v| matches!(v, Val::Null)),
+        Fact::Refined { nullable, .. } | Fact::General { nullable, .. } => *nullable,
+    }
+}
+
+/// Apply a `$var->prop = <rvalue>` / `$this->prop = <rvalue>` property assignment
+/// (ADR-0036): run the property checks (native `type.property-mismatch`, `@var`
+/// `phpdoc.property-mismatch`, `readonly.reassigned`), then record the prop's new
+/// fact in the heap. An unknown receiver (no tracked object) records nothing (but
+/// an object rvalue still escapes — it is now reachable via the property).
+#[allow(clippy::too_many_arguments)]
+fn apply_prop_assign(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    target_var: &str,
+    prop: &str,
+    value: &ArgValue,
+    span_start: u32,
+    guarded: bool,
+    checks_enabled: bool,
+    env: &HashMap<String, Known>,
+    store: &mut Store,
+    out: &mut Vec<Diagnostic>,
+) {
+    let cx = w.cx;
+    if w.scope.poisoned {
+        return;
+    }
+    // An object rvalue stored into a property escapes (now reachable via the prop).
+    if let ArgValue::Var(src) = value
+        && store.is_bound(src)
+    {
+        store.mark_escaped(src);
+    }
+    let Some(id) = store.id_of(target_var) else {
+        return;
+    };
+    let class = store.heap.get(&id).expect("bound id present").class.clone();
+
+    // Resolve the rvalue to a proven literal (for the native check) and a fact
+    // (for storage + the abstract phpdoc check).
+    let proven_lit = cx.resolve_literal(value, env, false, folder);
+    let prop_fact_val: Option<Fact> = proven_lit.as_ref().and_then(singleton_fact).or_else(|| {
+        match value {
+            ArgValue::PropFetch { var: rv, prop: rp } => store.prop_fact(rv, rp).cloned(),
+            _ => arg_abstract_fact(value, env, false).cloned(),
+        }
+    });
+
+    // Locate the property declaration on the object's class surface (for its native
+    // type and `@var` contract).
+    let pdecl = cx.class_props(&class).into_iter().find(|p| p.name == prop && !p.is_static);
+
+    // 1. Native `type.property-mismatch` — a proven literal against a native prop
+    // type. Skip promoted props (checked as constructor args; no double-report).
+    let mut native_fired = false;
+    if checks_enabled
+        && let Some(pd) = pdecl
+        && !pd.promoted
+        && let Some(ty) = pd.ty.as_ref()
+        && let Some(lit) = proven_lit.as_ref()
+        && lit.is_literal()
+        && is_type_error(cx.strict(), ty, lit)
+    {
+        let pos = cx.tree().position(span_start);
+        let mode = if cx.strict() { "strict" } else { "coercive" };
+        out.push(Diagnostic {
+            id: PROP_MISMATCH_ID,
+            path: cx.path().to_owned(),
+            line: pos.line,
+            column: pos.column,
+            message: format!(
+                "Cannot assign {} to property {}::${} of type {} — proven TypeError ({} mode)",
+                lit.render(), simple_class(&class), prop, ty.render(), mode,
+            ),
+        });
+        native_fired = true;
+    }
+
+    // 2. phpdoc `@var` `phpdoc.property-mismatch` — a proven or abstract value that
+    // provably does not inhabit the property's `@var` contract (definite No only).
+    if checks_enabled
+        && !native_fired
+        && let Some(pd) = pdecl
+        && let Some(var_ty) = pd.docblock.as_deref().and_then(parse_var_type)
+        && let Some((cfile, _)) = cx.find_class(&class)
+    {
+        let coff = pd.span.start;
+        let violates = match proven_lit.as_ref().map(|l| CVal::Scalar(l.clone())) {
+            Some(cv) if matches!(cv, CVal::Scalar(ref v) if v.is_literal()) => {
+                accepts(cx, cfile, coff, &var_ty, &cv) == Certainty::No
+            }
+            _ => arg_abstract_fact(value, env, false).is_some_and(|fact| {
+                let cty = steins_contract::lower(&var_ty);
+                !contract_touches_class(&cty)
+                    && steins_contract::admits_fact(&cty, fact) == Certainty::No
+            }),
+        };
+        if violates {
+            let rendered = proven_lit
+                .as_ref()
+                .map(ArgValue::render)
+                .or_else(|| arg_abstract_fact(value, env, false).map(describe_fact))
+                .unwrap_or_else(|| value.render());
+            let pos = cx.tree().position(span_start);
+            out.push(Diagnostic {
+                id: PHPDOC_PROP_MISMATCH_ID,
+                path: cx.path().to_owned(),
+                line: pos.line,
+                column: pos.column,
+                message: format!(
+                    "value {rendered} assigned to property {}::${prop} violates declared @var {var_ty} — declared contract violation",
+                    simple_class(&class),
+                ),
+            });
+        }
+    }
+
+    // Whether the rvalue is an object handle (computed before the mutable borrow).
+    let rval_is_object = matches!(value, ArgValue::Var(src) if store.refs.contains_key(src));
+
+    // 3. `readonly.reassigned` — a second proven write to a readonly property on
+    // this (unguarded) path. `guarded` (inside a branch) suppresses it: the second
+    // write is not proven on every path (ADR-0036 conservative side).
+    let obj = store.heap.get_mut(&id).expect("bound id present");
+    let is_readonly = obj.readonly.contains(prop);
+    if checks_enabled && is_readonly && obj.ro_written.contains(prop) && !guarded {
+        let pos = cx.tree().position(span_start);
+        out.push(Diagnostic {
+            id: READONLY_REASSIGNED_ID,
+            path: cx.path().to_owned(),
+            line: pos.line,
+            column: pos.column,
+            message: format!(
+                "Cannot modify readonly property {}::${prop} — proven Error",
+                simple_class(&class),
+            ),
+        });
+    }
+
+    // 4. Record the prop's new fact (or drop it when the rvalue is not representable
+    // / is an object handle). Mark the readonly write for the reassign check.
+    match prop_fact_val {
+        Some(fact) if !rval_is_object => {
+            obj.props.insert(prop.to_owned(), fact);
+        }
+        _ => {
+            obj.props.remove(prop);
+        }
+    }
+    if is_readonly {
+        obj.ro_written.insert(prop.to_owned());
+    }
+}
+
+/// The simple (last-segment) class name of an FQN, for a diagnostic message.
+fn simple_class(fqn: &str) -> &str {
+    fqn.rsplit('\\').next().unwrap_or(fqn)
+}
+
+/// Parse the first `@var` tag's type out of a property docblock (ADR-0036), or
+/// `None` when absent/unparseable — the property carries no phpdoc contract.
+fn parse_var_type(docblock: &str) -> Option<PType> {
+    for tag in scan_docblock(docblock) {
+        if matches!(tag.kind, TagKind::Var) {
+            return parse_tag_type(&tag.type_text);
+        }
+    }
+    None
 }
 
 /// Build a [`ClosureVal`] from a lowered [`ClosureRef`] at its creation site,
@@ -3088,7 +3648,7 @@ fn walk_if(
     elseifs: &[(CondExpr, Vec<Stmt>)],
     else_trace: Option<&[Stmt]>,
     env: &mut HashMap<String, Known>,
-    classes_env: &mut HashMap<String, String>,
+    store: &mut Store,
     descent: &mut Option<Descent<'_>>,
     facts: &mut Option<&mut Vec<LineFact>>,
     out: &mut Vec<Diagnostic>,
@@ -3096,7 +3656,7 @@ fn walk_if(
     let poisoned = w.scope.poisoned;
     // 1. Evaluate the guard in the pre-branch env (short-circuit env refinement is
     // stage 2 — each condition sees the same entry env).
-    let verdict = eval_cond(w, cond, env, classes_env, poisoned);
+    let verdict = eval_cond(w, cond, env, store, poisoned);
 
     // A decided guard proves the skipped side dead — record it so the env-free
     // direct pass never reports inside it (live-path discipline, ADR-0002/0031).
@@ -3117,17 +3677,17 @@ fn walk_if(
     // by-ref call `if (parse($x))`) are forgotten on *every* resulting path.
     for v in cond_invalidations(cond) {
         env.remove(&v);
-        classes_env.remove(&v);
+        store.unbind(&v);
     }
 
     // 3. Walk the live branches on cloned envs, collecting those that fall through.
-    let mut fell: Vec<(HashMap<String, Known>, HashMap<String, String>)> = Vec::new();
+    let mut fell: Vec<(HashMap<String, Known>, Store)> = Vec::new();
 
     if verdict != Certainty::No {
         let mut benv = env.clone();
-        let mut bclasses = classes_env.clone();
+        let mut bclasses = store.clone();
         apply_refinements(&then_refinements(cond), &mut benv, &mut bclasses);
-        if walk_trace(w, folder, then_trace, &mut benv, &mut bclasses, descent, facts, out)
+        if walk_trace(w, folder, then_trace, &mut benv, &mut bclasses, descent, facts, true, out)
             == Flow::FellThrough
         {
             fell.push((benv, bclasses));
@@ -3136,7 +3696,7 @@ fn walk_if(
 
     if verdict != Certainty::Yes {
         let mut benv = env.clone();
-        let mut bclasses = classes_env.clone();
+        let mut bclasses = store.clone();
         apply_refinements(&else_refinements(cond), &mut benv, &mut bclasses);
         if walk_else(w, folder, elseifs, else_trace, &mut benv, &mut bclasses, descent, facts, out)
             == Flow::FellThrough
@@ -3151,7 +3711,7 @@ fn walk_if(
     }
     let (jenv, jclasses) = join_envs(fell);
     *env = jenv;
-    *classes_env = jclasses;
+    *store = jclasses;
     Flow::FellThrough
 }
 
@@ -3165,17 +3725,17 @@ fn walk_else(
     elseifs: &[(CondExpr, Vec<Stmt>)],
     else_trace: Option<&[Stmt]>,
     env: &mut HashMap<String, Known>,
-    classes_env: &mut HashMap<String, String>,
+    store: &mut Store,
     descent: &mut Option<Descent<'_>>,
     facts: &mut Option<&mut Vec<LineFact>>,
     out: &mut Vec<Diagnostic>,
 ) -> Flow {
     match elseifs.split_first() {
         Some(((cond, trace), rest)) => {
-            walk_if(w, folder, cond, trace, rest, else_trace, env, classes_env, descent, facts, out)
+            walk_if(w, folder, cond, trace, rest, else_trace, env, store, descent, facts, out)
         }
         None => match else_trace {
-            Some(stmts) => walk_trace(w, folder, stmts, env, classes_env, descent, facts, out),
+            Some(stmts) => walk_trace(w, folder, stmts, env, store, descent, facts, true, out),
             None => Flow::FellThrough,
         },
     }
@@ -3208,7 +3768,7 @@ fn walk_match(
     default: Option<&[Stmt]>,
     loose: bool,
     env: &mut HashMap<String, Known>,
-    classes_env: &mut HashMap<String, String>,
+    store: &mut Store,
     descent: &mut Option<Descent<'_>>,
     facts: &mut Option<&mut Vec<LineFact>>,
     out: &mut Vec<Diagnostic>,
@@ -3255,16 +3815,16 @@ fn walk_match(
     };
 
     // 2. Walk each live arm on a cloned env; record `No` arms dead.
-    let mut fell: Vec<(HashMap<String, Known>, HashMap<String, String>)> = Vec::new();
+    let mut fell: Vec<(HashMap<String, Known>, Store)> = Vec::new();
     for (arm, taken) in arms.iter().zip(&takens) {
         if *taken == Certainty::No {
             mark_dead(w, &[arm.trace.as_slice()]);
             continue;
         }
         let mut benv = env.clone();
-        let mut bclasses = classes_env.clone();
+        let mut bclasses = store.clone();
         refine_match_arm(subject, &arm.conditions, loose, &mut benv);
-        if walk_trace(w, folder, &arm.trace, &mut benv, &mut bclasses, descent, facts, out)
+        if walk_trace(w, folder, &arm.trace, &mut benv, &mut bclasses, descent, facts, true, out)
             == Flow::FellThrough
         {
             fell.push((benv, bclasses));
@@ -3278,8 +3838,8 @@ fn walk_match(
                 mark_dead(w, &[dtrace]);
             } else {
                 let mut benv = env.clone();
-                let mut bclasses = classes_env.clone();
-                if walk_trace(w, folder, dtrace, &mut benv, &mut bclasses, descent, facts, out)
+                let mut bclasses = store.clone();
+                if walk_trace(w, folder, dtrace, &mut benv, &mut bclasses, descent, facts, true, out)
                     == Flow::FellThrough
                 {
                     fell.push((benv, bclasses));
@@ -3291,7 +3851,7 @@ fn walk_match(
             // (entry env unchanged); a default-less `match` throws
             // `\UnhandledMatchError` — a terminator that joins nothing.
             if loose && no_match_taken != Certainty::No {
-                fell.push((env.clone(), classes_env.clone()));
+                fell.push((env.clone(), store.clone()));
             }
         }
     }
@@ -3302,7 +3862,7 @@ fn walk_match(
     }
     let (jenv, jclasses) = join_envs(fell);
     *env = jenv;
-    *classes_env = jclasses;
+    *store = jclasses;
     Flow::FellThrough
 }
 
@@ -3406,7 +3966,7 @@ fn eval_cond(
     w: &WalkCx,
     cond: &CondExpr,
     env: &HashMap<String, Known>,
-    classes_env: &HashMap<String, String>,
+    store: &Store,
     poisoned: bool,
 ) -> Certainty {
     match cond {
@@ -3421,13 +3981,13 @@ fn eval_cond(
             None => Certainty::Maybe,
         },
         CondExpr::Instanceof { operand, class_ref } => {
-            eval_instanceof(w, operand, class_ref, classes_env, poisoned)
+            eval_instanceof(w, operand, class_ref, store, poisoned)
         }
-        CondExpr::Not(c) => eval_cond(w, c, env, classes_env, poisoned).not(),
-        CondExpr::And(a, b) => eval_cond(w, a, env, classes_env, poisoned)
-            .and(eval_cond(w, b, env, classes_env, poisoned)),
-        CondExpr::Or(a, b) => eval_cond(w, a, env, classes_env, poisoned)
-            .or(eval_cond(w, b, env, classes_env, poisoned)),
+        CondExpr::Not(c) => eval_cond(w, c, env, store, poisoned).not(),
+        CondExpr::And(a, b) => eval_cond(w, a, env, store, poisoned)
+            .and(eval_cond(w, b, env, store, poisoned)),
+        CondExpr::Or(a, b) => eval_cond(w, a, env, store, poisoned)
+            .or(eval_cond(w, b, env, store, poisoned)),
         CondExpr::Opaque { .. } => Certainty::Maybe,
     }
 }
@@ -3442,11 +4002,11 @@ fn eval_ternary_fact(
     then_val: &ArgValue,
     else_val: &ArgValue,
     env: &HashMap<String, Known>,
-    classes_env: &HashMap<String, String>,
+    store: &Store,
 ) -> Option<Fact> {
     let poisoned = w.scope.poisoned;
     let mut resolve = |v: &ArgValue| w.cx.resolve_literal(v, env, poisoned, folder);
-    match eval_cond(w, cond, env, classes_env, poisoned) {
+    match eval_cond(w, cond, env, store, poisoned) {
         Certainty::Yes => resolve(then_val).and_then(|a| singleton_fact(&a)),
         Certainty::No => resolve(else_val).and_then(|a| singleton_fact(&a)),
         Certainty::Maybe => {
@@ -3550,11 +4110,11 @@ fn eval_instanceof(
     w: &WalkCx,
     operand: &CondOperand,
     class_ref: &NameRef,
-    classes_env: &HashMap<String, String>,
+    store: &Store,
     poisoned: bool,
 ) -> Certainty {
     match operand {
-        CondOperand::Var(name) if !poisoned => match classes_env.get(name) {
+        CondOperand::Var(name) if !poisoned => match store.class_of(name) {
             Some(obj_fqn) => {
                 let target = w.cx.class_fqn(class_ref);
                 // `object_is_a` returns false both for "provably not" and for a
@@ -3764,7 +4324,7 @@ fn ordering_range(op: CmpOp, k: i64) -> Option<IntRange> {
 fn apply_refinements(
     refs: &[Refine],
     env: &mut HashMap<String, Known>,
-    classes_env: &mut HashMap<String, String>,
+    store: &mut Store,
 ) {
     for r in refs {
         match r {
@@ -3777,7 +4337,7 @@ fn apply_refinements(
                         Some("proven on this branch".to_owned()),
                     ),
                 );
-                classes_env.remove(var);
+                store.unbind(var);
             }
             Refine::NotNull(var) => refine_fact(env, var, clear_null),
             Refine::Exclude(var, val) => {
@@ -3939,7 +4499,7 @@ fn apply_stmt_asserts(
     scope: &Scope,
     call: &CallExpr,
     env: &mut HashMap<String, Known>,
-    classes_env: &mut HashMap<String, String>,
+    store: &mut Store,
     this_exact: Option<&str>,
     enclosing_class: Option<&str>,
     asserted: &mut HashSet<String>,
@@ -3955,7 +4515,7 @@ fn apply_stmt_asserts(
         }
         Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
             let Some(target) = resolve_call_target(
-                cx, &call.receiver, classes_env, this_exact, enclosing_class, scope.poisoned,
+                cx, &call.receiver, store, this_exact, enclosing_class, scope.poisoned,
             ) else {
                 return;
             };
@@ -3973,7 +4533,7 @@ fn apply_stmt_asserts(
         let Some(pos) = params.iter().position(|p| p.name == spec.param) else { continue };
         let Some(arg) = call.args.get(pos) else { continue };
         let ArgValue::Var(v) = &arg.value else { continue };
-        if apply_assert_to_var(env, classes_env, v, spec) {
+        if apply_assert_to_var(env, store, v, spec) {
             asserted.insert(v.clone());
         }
     }
@@ -3989,7 +4549,7 @@ fn apply_stmt_asserts(
 /// stronger finite fact was deliberately kept, `false` when nothing applied.
 fn apply_assert_to_var(
     env: &mut HashMap<String, Known>,
-    classes_env: &mut HashMap<String, String>,
+    store: &mut Store,
     var: &str,
     spec: &AssertSpec,
 ) -> bool {
@@ -4013,7 +4573,7 @@ fn apply_assert_to_var(
         return true;
     }
     env.insert(var.to_owned(), Known::value(fact, 0, Some("asserted".to_owned())));
-    classes_env.remove(var);
+    store.unbind(var);
     true
 }
 
@@ -4048,11 +4608,11 @@ fn collect_cond_opaque_reads(cond: &CondExpr, out: &mut Vec<String>) {
 /// (equal → Singleton; differing → OneOf; overflow → dropped). An exact-class fact
 /// survives only when every branch agrees on the class.
 fn join_envs(
-    branches: Vec<(HashMap<String, Known>, HashMap<String, String>)>,
-) -> (HashMap<String, Known>, HashMap<String, String>) {
+    branches: Vec<(HashMap<String, Known>, Store)>,
+) -> (HashMap<String, Known>, Store) {
     let mut it = branches.into_iter();
     let (first_env, first_classes) = it.next().expect("join_envs called with no branches");
-    let rest: Vec<(HashMap<String, Known>, HashMap<String, String>)> = it.collect();
+    let rest: Vec<(HashMap<String, Known>, Store)> = it.collect();
     if rest.is_empty() {
         return (first_env, first_classes);
     }
@@ -4094,13 +4654,70 @@ fn join_envs(
         }
     }
 
-    let mut classes: HashMap<String, String> = HashMap::new();
-    for (name, c0) in &first_classes {
-        if rest.iter().all(|(_, bc)| bc.get(name) == Some(c0)) {
-            classes.insert(name.clone(), c0.clone());
+    let rest_stores: Vec<&Store> = rest.iter().map(|(_, s)| s).collect();
+    let store = join_stores(&first_classes, &rest_stores);
+    (env, store)
+}
+
+/// Join the heap stores of several fall-through branches (ADR-0036). A variable's
+/// ObjRef survives only when every branch binds it to the SAME allocation id (a
+/// pre-branch object keeps its id across the clones; a per-branch `new`/`clone`
+/// gets a distinct id and so is dropped). A surviving object joins its props
+/// member-wise (a prop survives only if present-and-joinable in every branch),
+/// unions `escaped` (escaped anywhere → escaped), and intersects `ro_written` (a
+/// readonly write counts only when proven on every joined path).
+fn join_stores(first: &Store, rest: &[&Store]) -> Store {
+    let mut refs: HashMap<String, AllocId> = HashMap::new();
+    for (var, id) in &first.refs {
+        if rest.iter().all(|s| s.refs.get(var) == Some(id)) {
+            refs.insert(var.clone(), *id);
         }
     }
-    (env, classes)
+    let mut heap: HashMap<AllocId, HeapObj> = HashMap::new();
+    // Join every id that survives via a ref (and any id present in all branches).
+    let live_ids: HashSet<AllocId> = refs.values().copied().collect();
+    for id in live_ids {
+        let Some(o0) = first.heap.get(&id) else { continue };
+        let others: Vec<&HeapObj> = rest.iter().filter_map(|s| s.heap.get(&id)).collect();
+        if others.len() != rest.len() {
+            continue; // not present in every branch — drop it
+        }
+        let mut joined = HeapObj::new(o0.class.clone());
+        joined.readonly = o0.readonly.clone();
+        joined.escaped = o0.escaped || others.iter().any(|o| o.escaped);
+        // ro_written: written on EVERY joined path.
+        joined.ro_written = o0
+            .ro_written
+            .iter()
+            .filter(|n| others.iter().all(|o| o.ro_written.contains(*n)))
+            .cloned()
+            .collect();
+        // props: present-and-joinable in every branch.
+        for (name, f0) in &o0.props {
+            let mut fact = f0.clone();
+            let mut ok = true;
+            for o in &others {
+                match o.props.get(name) {
+                    Some(kf) => match fact.join(kf) {
+                        Some(j) => fact = j,
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    },
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                joined.props.insert(name.clone(), fact);
+            }
+        }
+        heap.insert(id, joined);
+    }
+    Store { refs, heap }
 }
 
 // ---------------------------------------------------------------------------
@@ -4290,9 +4907,64 @@ fn scope_class(scope: &Scope) -> Option<&str> {
 fn checkable_calls(kind: &StmtKind) -> Vec<&CallExpr> {
     match kind {
         StmtKind::Call(c) => vec![c],
-        StmtKind::Return { call: Some(c), .. } | StmtKind::Assign { call: Some(c), .. } => vec![c],
+        StmtKind::Return { call: Some(c), .. }
+        | StmtKind::Assign { call: Some(c), .. }
+        | StmtKind::PropAssign { value_call: Some(c), .. } => vec![c],
         StmtKind::Echo(cs) => cs.iter().collect(),
         _ => Vec::new(),
+    }
+}
+
+/// Escape + sweep the heap for a statement's calls (ADR-0036). Passing an object
+/// (as an argument, or as the `$var` receiver of a method call) escapes it. If any
+/// object was passed into a call, or any call is unknown/overridable (not resolved
+/// to a project target), sweep every escaped object's non-readonly props. A purely
+/// local object never passed anywhere survives an unrelated unknown call — the
+/// precision payoff.
+fn apply_call_escape_and_sweep(w: &WalkCx, kind: &StmtKind, store: &mut Store) {
+    let calls = checkable_calls(kind);
+    if calls.is_empty() {
+        return;
+    }
+    let mut object_passed = false;
+    let mut unknown = false;
+    for call in &calls {
+        if let Callee::Method { receiver: Receiver::Var(v), .. } = &call.receiver
+            && store.is_bound(v)
+        {
+            store.mark_escaped(v);
+            object_passed = true;
+        }
+        for arg in &call.args {
+            if let ArgValue::Var(name) = &arg.value
+                && store.is_bound(name)
+            {
+                store.mark_escaped(name);
+                object_passed = true;
+            }
+        }
+        if !call_is_resolved(w, call, store) {
+            unknown = true;
+        }
+    }
+    if object_passed || unknown {
+        store.sweep_escaped();
+    }
+}
+
+/// Whether a call resolves to a known project/user target (ADR-0036). An unresolved
+/// function (builtin/unknown/dynamic) or an unresolved-via-guard method (an
+/// overridable `$this`/`self` call) counts as unknown — the sweeping side.
+fn call_is_resolved(w: &WalkCx, call: &CallExpr, store: &Store) -> bool {
+    match &call.receiver {
+        Callee::Function(_) => w.cx.resolve_user_fn(call).is_some(),
+        Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
+            resolve_call_target(
+                w.cx, &call.receiver, store, w.this_exact, w.enclosing_class, w.scope.poisoned,
+            )
+            .is_some()
+        }
+        Callee::DynamicVar(_) | Callee::Dynamic => false,
     }
 }
 
@@ -4305,7 +4977,7 @@ fn check_propagated_call(
     poisoned: bool,
     call: &CallExpr,
     env: &HashMap<String, Known>,
-    classes_env: &HashMap<String, String>,
+    store: &Store,
     out: &mut Vec<Diagnostic>,
 ) {
     let Some(site) = cx.resolve_user_fn(call) else { return };
@@ -4343,6 +5015,13 @@ fn check_propagated_call(
                         cx.try_fold(name, args, folder)
                     }
                 }
+                // A property read `$o->p` (ADR-0036): a `Singleton` prop fact flows.
+                ArgValue::PropFetch { var, prop } if !poisoned => {
+                    store.prop_fact(var, prop).and_then(|f| match f {
+                        Fact::Singleton(v) => Some((arg_of_val(v), format!("from ${var}->{prop}"))),
+                        _ => None,
+                    })
+                }
                 _ => None,
             };
             if let Some((value, provenance)) = resolved
@@ -4378,7 +5057,7 @@ fn check_propagated_call(
                 arg.span.start,
                 &arg.value,
                 env,
-                classes_env,
+                store,
                 poisoned,
                 out,
             );
@@ -4690,7 +5369,7 @@ fn descend(
                 folder,
                 callee_scope,
                 bound_env,
-                HashMap::new(),
+                Store::default(),
                 body_this_exact,
                 Some(child),
                 None,
@@ -4709,7 +5388,7 @@ fn descend(
                 folder,
                 callee_scope,
                 bound_env,
-                HashMap::new(),
+                Store::default(),
                 body_this_exact,
                 Some(child),
                 None,
@@ -4778,7 +5457,7 @@ struct CallTarget<'a> {
 fn resolve_call_target<'a>(
     cx: &Cx<'a>,
     receiver: &Callee,
-    classes_env: &HashMap<String, String>,
+    store: &Store,
     this_exact: Option<&str>,
     enclosing_class: Option<&str>,
     poisoned: bool,
@@ -4796,8 +5475,8 @@ fn resolve_call_target<'a>(
             if poisoned {
                 return None;
             }
-            let class = classes_env.get(v)?;
-            resolve_exact(cx, class, method, enclosing_class, Some(class.clone()))
+            let class = store.class_of(v)?.to_owned();
+            resolve_exact(cx, &class, method, enclosing_class, Some(class.clone()))
         }
         Callee::Method { receiver: Receiver::This, method, .. } => {
             let enclosing = enclosing_class?;
@@ -4903,7 +5582,7 @@ fn handle_method_call(
     scope: &Scope,
     call: &CallExpr,
     env: &HashMap<String, Known>,
-    classes_env: &HashMap<String, String>,
+    store: &Store,
     this_exact: Option<&str>,
     enclosing_class: Option<&str>,
     descent: Option<&mut Descent<'_>>,
@@ -4913,7 +5592,7 @@ fn handle_method_call(
         return;
     }
     let Some(target) =
-        resolve_call_target(cx, &call.receiver, classes_env, this_exact, enclosing_class, scope.poisoned)
+        resolve_call_target(cx, &call.receiver, store, this_exact, enclosing_class, scope.poisoned)
     else {
         return;
     };
@@ -4927,7 +5606,7 @@ fn handle_method_call(
         &callee_name,
         call,
         env,
-        classes_env,
+        store,
         scope.poisoned,
         out,
     );
@@ -4977,7 +5656,7 @@ fn check_method_args(
     callee_name: &str,
     call: &CallExpr,
     env: &HashMap<String, Known>,
-    classes_env: &HashMap<String, String>,
+    store: &Store,
     poisoned: bool,
     out: &mut Vec<Diagnostic>,
 ) {
@@ -5014,6 +5693,13 @@ fn check_method_args(
                         cx.try_fold(name, args, folder).map(|(l, p)| (l, Some(p)))
                     }
                 }
+                // A property read `$o->p` (ADR-0036): a `Singleton` prop fact flows.
+                ArgValue::PropFetch { var, prop } if !poisoned => {
+                    store.prop_fact(var, prop).and_then(|f| match f {
+                        Fact::Singleton(v) => Some((arg_of_val(v), Some(format!("from ${var}->{prop}")))),
+                        _ => None,
+                    })
+                }
                 _ => None,
             };
             if let Some((value, prov)) = resolved
@@ -5046,7 +5732,7 @@ fn check_method_args(
                 arg.span.start,
                 &arg.value,
                 env,
-                classes_env,
+                store,
                 poisoned,
                 out,
             );
@@ -5115,6 +5801,8 @@ fn is_type_error(strict: bool, ty: &NativeType, arg: &ArgValue) -> bool {
         | ArgValue::Call(..)
         | ArgValue::New(..)
         | ArgValue::Ternary { .. }
+        | ArgValue::PropFetch { .. }
+        | ArgValue::Clone(_)
         // A closure value against a scalar/union param is never a scalar finding
         // (a `callable`/`Closure` param is not a native scalar type this checks).
         | ArgValue::Closure(_)
@@ -5464,7 +6152,7 @@ impl<'a> Cx<'a> {
         &self,
         value: &ArgValue,
         env: &HashMap<String, Known>,
-        classes_env: &HashMap<String, String>,
+        store: &Store,
         poisoned: bool,
         folder: &mut dyn Folder,
     ) -> Option<CVal> {
@@ -5475,7 +6163,7 @@ impl<'a> Cx<'a> {
                 let normalized = normalize_array(items);
                 let mut out = Vec::with_capacity(normalized.len());
                 for (k, v) in normalized {
-                    out.push((k, self.resolve_cval(&v, env, classes_env, poisoned, folder)?));
+                    out.push((k, self.resolve_cval(&v, env, store, poisoned, folder)?));
                 }
                 Some(CVal::Array(out))
             }
@@ -5483,9 +6171,9 @@ impl<'a> Cx<'a> {
                 if let Some(k) = env.get(name) {
                     // A `OneOf` fact is not one proven value → not a `CVal`.
                     let v = k.singleton()?;
-                    self.resolve_cval(&v, env, classes_env, poisoned, folder)
+                    self.resolve_cval(&v, env, store, poisoned, folder)
                 } else {
-                    classes_env.get(name).map(|c| CVal::Object(c.clone()))
+                    store.class_of(name).map(|c| CVal::Object(c.to_owned()))
                 }
             }
             ArgValue::Call(..) => {
@@ -5939,7 +6627,7 @@ fn check_phpdoc_param(
     arg_offset: u32,
     value: &ArgValue,
     env: &HashMap<String, Known>,
-    classes_env: &HashMap<String, String>,
+    store: &Store,
     poisoned: bool,
     out: &mut Vec<Diagnostic>,
 ) {
@@ -5950,7 +6638,7 @@ fn check_phpdoc_param(
     }
     let Some(ty) = envelopes.param(&param.name) else { return };
     let param_name = &param.name;
-    let rendered = match cx.resolve_cval(value, env, classes_env, poisoned, folder) {
+    let rendered = match cx.resolve_cval(value, env, store, poisoned, folder) {
         Some(cv) => {
             // A parameter that is nullable by its native type, or implicitly nullable
             // via a `= null` default, accepts `null` regardless of a non-nullable

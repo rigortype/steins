@@ -17,6 +17,7 @@
 use mago_allocator::LocalArena;
 use mago_database::file::FileId;
 use mago_span::HasSpan;
+use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::Attribute;
@@ -41,6 +42,9 @@ use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::PartialApplication;
 use mago_syntax::cst::PartialArgument;
+use mago_syntax::cst::PlainProperty;
+use mago_syntax::cst::Property;
+use mago_syntax::cst::PropertyItem;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::Trivia;
@@ -514,6 +518,45 @@ pub struct MethodDecl {
     pub docblock: Option<String>,
 }
 
+/// A class property declaration (ADR-0036 object state). Covers both plain
+/// `public int $x = 0;` members and **promoted constructor parameters**
+/// (`public function __construct(public readonly int $x)`), which are properties
+/// too (they carry a native type and populate the object's props at construction).
+///
+/// Static properties are lowered (so the class surface is complete) but are
+/// **never tracked in the heap** — they are global state, out of the object-state
+/// slice (ADR-0036 "Out of stage 1"); the heap walk skips `is_static` props.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PropertyDecl {
+    /// Property name without the leading `$`.
+    pub name: String,
+    /// The native scalar/union type, or `None` when untyped / non-scalar / complex
+    /// (same lowering as a param/return type; the property-mismatch check skips
+    /// `None`-typed props, zero-FP).
+    pub ty: Option<NativeType>,
+    /// `true` when declared `readonly` (or a promoted `readonly` ctor param). A
+    /// readonly prop, once established, is sweep-immune (ADR-0036 readonly immunity).
+    pub readonly: bool,
+    /// `true` for a `static` property — lowered but never heap-tracked.
+    pub is_static: bool,
+    pub visibility: Visibility,
+    /// `true` when the declaration carries a default value (`= …`). For a promoted
+    /// param, `true` when the param has a default.
+    pub has_default: bool,
+    /// The lowered default value, when it is representable (a literal / array / …).
+    /// A non-representable default lowers to `None` (the prop simply starts unknown).
+    pub default: Option<ArgValue>,
+    /// `true` when this property is a promoted constructor parameter. Promoted
+    /// params are checked as constructor arguments (the ctor param check), so the
+    /// property-assign check skips them to avoid a double-report (ADR-0036).
+    pub promoted: bool,
+    /// The raw `/** … */` docblock preceding a plain property (for `@var` contract
+    /// extraction; promoted params carry `@param` on the ctor, not `@var`, so this
+    /// stays `None` for them).
+    pub docblock: Option<String>,
+    pub span: Span,
+}
+
 /// A user-defined class **or interface** declaration (top-level or namespaced).
 /// Interfaces are lowered too (ADR-0033 Liskov), distinguished by
 /// [`Self::is_interface`]; their methods are abstract signatures carrying effect
@@ -543,6 +586,9 @@ pub struct ClassDecl {
     /// the first. Each resolves to an FQN project-wide at use time.
     pub implements: Vec<NameRef>,
     pub methods: Vec<MethodDecl>,
+    /// The class's properties (plain members + promoted constructor params;
+    /// ADR-0036). Static properties are included but never heap-tracked.
+    pub properties: Vec<PropertyDecl>,
     /// `true` if the class `use`s any trait. Trait methods are merged into the
     /// class at compile time but their bodies live elsewhere, so a
     /// trait-using class is treated as unresolvable (give up → silent).
@@ -604,6 +650,18 @@ pub enum ArgValue {
     /// value (in `steins-infer`), and a later `$f(...)` resolves by binding descent
     /// into the closure's scope. Not a scalar — never flows into a scalar check.
     Closure(ClosureRef),
+    /// A property read `$var->prop` in rvalue position (ADR-0036 object state). Only
+    /// a **simple variable receiver** is represented (`$this->p` uses `var = "this"`);
+    /// a chain `$a->b->c` or a dynamic property name (`$a->$p`) lowers to
+    /// [`ArgValue::Other`] this slice. The walk resolves it against the heap: a known
+    /// object ref with a props entry flows that fact; an unknown receiver yields no
+    /// fact (silent).
+    PropFetch { var: String, prop: String },
+    /// `clone $var` (ADR-0036): a shallow copy of the object `$var` holds. The walk
+    /// mints a NEW allocation id with a COPY of the source object's props (PHP shallow
+    /// clone), so post-clone writes to one are invisible to the other. Only a bare
+    /// variable operand is represented; `clone <expr>` lowers to [`ArgValue::Other`].
+    Clone(String),
     Other,
 }
 
@@ -723,6 +781,11 @@ impl std::hash::Hash for ArgValue {
                 else_val.hash(state);
             }
             ArgValue::Closure(r) => r.hash(state),
+            ArgValue::PropFetch { var, prop } => {
+                var.hash(state);
+                prop.hash(state);
+            }
+            ArgValue::Clone(v) => v.hash(state),
             ArgValue::Null | ArgValue::Other => {}
         }
     }
@@ -764,6 +827,8 @@ impl ArgValue {
             }
             ArgValue::Closure(ClosureRef::FunctionName(n)) => format!("{}(...)", n.simple()),
             ArgValue::Closure(ClosureRef::Anonymous { .. }) => "Closure".to_owned(),
+            ArgValue::PropFetch { var, prop } => format!("${var}->{prop}"),
+            ArgValue::Clone(v) => format!("clone ${v}"),
             ArgValue::Other => "<expr>".to_owned(),
         }
     }
@@ -981,6 +1046,21 @@ pub enum StmtKind {
     /// statically-named call (`$x = f($s);`), so the propagation pass can check
     /// and descend into it — `ArgValue::Call` alone loses the argument spans.
     Assign { var: String, value: ArgValue, span: Span, call: Option<CallExpr> },
+    /// `$var->prop = <rvalue>;` / `$this->prop = <rvalue>;` — a property assignment
+    /// (ADR-0036 object state). `target_var` is the receiver variable name (`"this"`
+    /// for `$this`); `prop` is the static property name. `value` is the lowered
+    /// rvalue (a compound `+=`/`.=` lowers `value` to [`ArgValue::Other`]); `value_call`
+    /// carries the full [`CallExpr`] when the rvalue *is* a statically-named call, so
+    /// the propagation pass checks/descends it. A dynamic property name (`$o->$p = …`)
+    /// or a chained/complex lvalue (`$a->b->c = …`, `Foo::$s = …`) stays a
+    /// [`StmtKind::Barrier`], never a `PropAssign`.
+    PropAssign {
+        target_var: String,
+        prop: String,
+        value: ArgValue,
+        value_call: Option<CallExpr>,
+        span: Span,
+    },
     /// A statement-level function call `f(args);`.
     Call(CallExpr),
     /// `return <value>;` (value is [`ArgValue::Other`] for `return;`). `call`
@@ -1473,10 +1553,24 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> C
         .unwrap_or_default();
 
     let mut methods = Vec::new();
+    let mut properties = Vec::new();
     let mut uses_traits = false;
     for member in c.members.iter() {
         match member {
-            ClassLikeMember::Method(m) => methods.push(lower_method(m, aliases, docs)),
+            ClassLikeMember::Method(m) => {
+                // A constructor's promoted params are properties too (ADR-0036).
+                if bytes_to_string(m.name.value).eq_ignore_ascii_case("__construct") {
+                    lower_promoted_params(m, &mut properties);
+                }
+                methods.push(lower_method(m, aliases, docs));
+            }
+            ClassLikeMember::Property(Property::Plain(p)) => {
+                lower_plain_property(p, docs, &mut properties);
+            }
+            // Hooked properties (`public $x { get => … }`) are virtual/computed —
+            // not lowered this slice (out of object-state scope; never heap-tracked,
+            // so no property check fires on them — the safe side).
+            ClassLikeMember::Property(Property::Hooked(_)) => {}
             ClassLikeMember::TraitUse(_) => uses_traits = true,
             _ => {}
         }
@@ -1490,8 +1584,85 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> C
         parent,
         implements,
         methods,
+        properties,
         uses_traits,
         span: to_span(c.name.span()),
+    }
+}
+
+/// The read-visibility a modifier sequence declares, defaulting to `Public`
+/// (PHP semantics: absent visibility is public).
+fn visibility_of(modifiers: &mago_syntax::cst::Sequence<'_, Modifier<'_>>) -> Visibility {
+    if modifiers.iter().any(Modifier::is_private) {
+        Visibility::Private
+    } else if modifiers.iter().any(Modifier::is_protected) {
+        Visibility::Protected
+    } else {
+        Visibility::Public
+    }
+}
+
+/// Lower a plain property declaration (possibly multi-item `public int $a, $b;`)
+/// into one [`PropertyDecl`] per declared variable (ADR-0036).
+fn lower_plain_property(p: &PlainProperty<'_>, docs: &DocIndex, out: &mut Vec<PropertyDecl>) {
+    let readonly = p.modifiers.iter().any(Modifier::is_readonly);
+    let is_static = p.modifiers.iter().any(Modifier::is_static);
+    let visibility = visibility_of(&p.modifiers);
+    let ty = p.hint.as_ref().and_then(lower_hint);
+    let docblock = docs.preceding(to_span(p.span()).start);
+    let span = to_span(p.span());
+    for item in p.items.iter() {
+        let (name, has_default, default) = match item {
+            PropertyItem::Abstract(a) => (strip_dollar(bytes_to_string(a.variable.name)), false, None),
+            PropertyItem::Concrete(ci) => {
+                let v = lower_arg_value(ci.value);
+                let default = (!matches!(v, ArgValue::Other)).then_some(v);
+                (strip_dollar(bytes_to_string(ci.variable.name)), true, default)
+            }
+        };
+        out.push(PropertyDecl {
+            name,
+            ty: ty.clone(),
+            readonly,
+            is_static,
+            visibility,
+            has_default,
+            default,
+            promoted: false,
+            docblock: docblock.clone(),
+            span,
+        });
+    }
+}
+
+/// Lower a constructor's promoted parameters into [`PropertyDecl`]s (ADR-0036).
+/// A parameter is promoted iff it carries a modifier (visibility / `readonly`).
+fn lower_promoted_params(m: &Method<'_>, out: &mut Vec<PropertyDecl>) {
+    for p in m.parameter_list.parameters.iter() {
+        if !p.is_promoted_property() {
+            continue;
+        }
+        let readonly = p.modifiers.iter().any(Modifier::is_readonly);
+        let visibility = visibility_of(&p.modifiers);
+        let ty = p.hint.as_ref().and_then(lower_hint);
+        let has_default = p.default_value.is_some();
+        let default = p
+            .default_value
+            .as_ref()
+            .map(|d| lower_arg_value(d.value))
+            .filter(|v| !matches!(v, ArgValue::Other));
+        out.push(PropertyDecl {
+            name: strip_dollar(bytes_to_string(p.variable.name)),
+            ty,
+            readonly,
+            is_static: false,
+            visibility,
+            has_default,
+            default,
+            promoted: true,
+            docblock: None,
+            span: to_span(p.span()),
+        });
     }
 }
 
@@ -1519,6 +1690,7 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
         parent,
         implements: extended,
         methods,
+        properties: Vec::new(),
         uses_traits: false,
         span: to_span(i.name.span()),
     }
@@ -1535,13 +1707,7 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) ->
         }
     }
 
-    let visibility = if m.modifiers.iter().any(Modifier::is_private) {
-        Visibility::Private
-    } else if m.modifiers.iter().any(Modifier::is_protected) {
-        Visibility::Protected
-    } else {
-        Visibility::Public
-    };
+    let visibility = visibility_of(&m.modifiers);
 
     let name = bytes_to_string(m.name.value);
     let is_constructor = name.eq_ignore_ascii_case("__construct");
@@ -2370,6 +2536,18 @@ fn trace_recv_of_object(object: &Expression<'_>) -> Option<Receiver> {
     }
 }
 
+/// A simple property access `$var->prop` decomposed into `(var, prop)` (ADR-0036),
+/// or `None` when the receiver is not a bare variable or the selector is not a
+/// static identifier (dynamic name `$o->$p`, chain `$a->b->c`, `list()`-lvalue …).
+fn prop_fetch_of(object: &Expression<'_>, selector: &ClassLikeMemberSelector<'_>) -> Option<(String, String)> {
+    let var = match object.unparenthesized() {
+        Expression::Variable(Variable::Direct(dv)) => strip_dollar(bytes_to_string(dv.name)),
+        _ => return None,
+    };
+    let prop = method_name_of(selector)?;
+    Some((var, prop))
+}
+
 /// The trace [`StaticClass`] of a static-call class expression.
 fn trace_static_class(class: &Expression<'_>) -> Option<StaticClass> {
     match class {
@@ -2456,6 +2634,20 @@ fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
         Expression::Variable(Variable::Direct(dv)) => {
             ArgValue::Var(strip_dollar(bytes_to_string(dv.name)))
         }
+        // A property read `$var->prop` (ADR-0036): only a simple variable receiver
+        // and a static property identifier are represented; a chain `$a->b->c`
+        // (object is itself an access) or a dynamic name lowers to `Other`.
+        Expression::Access(Access::Property(pa)) => match prop_fetch_of(pa.object, &pa.property) {
+            Some((var, prop)) => ArgValue::PropFetch { var, prop },
+            None => ArgValue::Other,
+        },
+        // `clone $var` (ADR-0036): a shallow object copy of a bare variable operand.
+        Expression::Clone(c) => match c.object.unparenthesized() {
+            Expression::Variable(Variable::Direct(dv)) => {
+                ArgValue::Clone(strip_dollar(bytes_to_string(dv.name)))
+            }
+            _ => ArgValue::Other,
+        },
         Expression::Call(Call::Function(fc)) => match fc.function {
             Expression::Identifier(id) => {
                 let name = bytes_to_string(id.last_segment());
@@ -3372,8 +3564,24 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
                     kind: StmtKind::Assign { var, value, span: to_span(a.lhs.span()), call },
                     invalidated,
                 }
+            } else if let Expression::Access(Access::Property(pa)) = a.lhs.unparenthesized()
+                && let Some((target_var, prop)) = prop_fetch_of(pa.object, &pa.property)
+            {
+                // `$var->prop = <rvalue>` / `$this->prop = <rvalue>` (ADR-0036). A
+                // compound op (`+=`, `.=`, …) makes the property value unknown.
+                let value = if a.operator.is_assign() { lower_arg_value(a.rhs) } else { ArgValue::Other };
+                let value_call = if a.operator.is_assign() { named_call(a.rhs) } else { None };
+                let mut invalidated = Vec::new();
+                collect_call_vars(&Node::Expression(a.rhs), &mut invalidated);
+                Stmt {
+                    span: ZERO_SPAN,
+                    kind: StmtKind::PropAssign { target_var, prop, value, value_call, span: to_span(a.lhs.span()) },
+                    invalidated,
+                }
             } else {
-                // Assignment to a non-simple lvalue (`$a[i] = …`, `$o->p = …`).
+                // Assignment to a non-simple lvalue (`$a[i] = …`, `$o->$p = …`,
+                // `$a->b->c = …`, `Foo::$s = …`). Barrier (the sound floor); a by-ref
+                // property alias `$r = &$x->p` is caught by the poison family above.
                 Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated: Vec::new() }
             }
         }
