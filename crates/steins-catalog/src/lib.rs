@@ -147,6 +147,92 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     colored.or_else(|| foldable(name).then_some(EMPTY))
 }
 
+/// The hierarchical **label registry** (ADR-0018): the set of known effect
+/// labels. A declared envelope label outside this set (and not an ancestor of
+/// any entry — see [`is_known_label`]) earns an `effect.unknown-label`
+/// diagnostic; typo safety is Steins' own job.
+///
+/// It is the union of every label the catalog can color a builtin with
+/// ([`effect_labels`]) and the core taxonomy roots/parents of ADR-0018. Ecosystem
+/// and private labels (`io.redis`, `email.send`) are **not** here — they become
+/// known only once the ADR-0012 plugin channel can register them, which this
+/// slice does not implement, so they are (correctly) unknown for now.
+#[must_use]
+pub fn known_labels() -> &'static [&'static str] {
+    // Kept sorted for readability; the taxonomy of ADR-0018 plus every label used
+    // in `effect_labels` coloring (all of which are already taxonomy nodes).
+    &[
+        "exit",
+        "global.read",
+        "global.write",
+        "io",
+        "io.db",
+        "io.fs",
+        "io.fs.read",
+        "io.fs.write",
+        "io.net",
+        "io.net.http",
+        "io.process",
+        "mutate",
+        "nondet",
+        "nondet.random",
+        "nondet.time",
+        "output",
+    ]
+}
+
+/// Whether `envelope_label` **subsumes** `effect_label` under ADR-0018 prefix
+/// subsumption: true iff they are equal, or `effect_label` extends
+/// `envelope_label` by a dot-path segment (a declared `io` admits an inferred
+/// `io.net.http`). Segment-aware, so `io` does **not** subsume `iota`.
+#[must_use]
+pub fn subsumes(envelope_label: &str, effect_label: &str) -> bool {
+    effect_label == envelope_label
+        || effect_label
+            .strip_prefix(envelope_label)
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
+/// Whether a declared envelope `label` is **known** to the registry: it is a
+/// registry entry, or an ancestor of one (an internal taxonomy path). Since the
+/// registry already lists every internal node, the ancestor clause matters only
+/// for labels finer than the shipped taxonomy — `io.netw` is neither a node nor
+/// an ancestor of one, so it stays unknown (→ `effect.unknown-label`), while
+/// every registry root is accepted.
+#[must_use]
+pub fn is_known_label(label: &str) -> bool {
+    known_labels().iter().any(|&k| k == label || subsumes(label, k))
+}
+
+/// The registry label nearest to an unknown `label`, for a typo suggestion
+/// (`io.netw` → `io.net`). Returns `None` when nothing is close. The metric is a
+/// simple Levenshtein distance capped so only genuinely near names suggest.
+#[must_use]
+pub fn nearest_label(label: &str) -> Option<&'static str> {
+    known_labels()
+        .iter()
+        .map(|&k| (levenshtein(label, k), k))
+        .filter(|&(d, _)| d <= 2)
+        .min_by_key(|&(d, _)| d)
+        .map(|(_, k)| k)
+}
+
+/// Plain Levenshtein edit distance (small strings, so the quadratic DP is fine).
+fn levenshtein(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::{effect_labels, foldable};
@@ -214,5 +300,46 @@ mod tests {
         assert_eq!(effect_labels("RAND"), Some(&["nondet.random"][..]));
         assert_eq!(effect_labels("File_Put_Contents"), Some(&["io.fs.write"][..]));
         assert_eq!(effect_labels("STRTOLOWER"), Some(&[][..]));
+    }
+
+    use super::{is_known_label, nearest_label, subsumes};
+
+    #[test]
+    fn subsumption_is_prefix_and_segment_aware() {
+        assert!(subsumes("io", "io"), "equal labels subsume");
+        assert!(subsumes("io", "io.fs.write"), "coarse admits fine");
+        assert!(subsumes("nondet", "nondet.random"));
+        assert!(subsumes("io.fs.read", "io.fs.read"));
+        // Not subsumption: sibling, ancestor-of-envelope, and non-segment prefix.
+        assert!(!subsumes("io.fs.read", "io.fs.write"), "siblings do not subsume");
+        assert!(!subsumes("io.net", "io"), "fine does not admit coarse");
+        assert!(!subsumes("io", "iota"), "non-segment prefix is not subsumption");
+        assert!(!subsumes("io.net", "io.netw"), "io.net does not subsume io.netw");
+    }
+
+    #[test]
+    fn registry_roots_are_known() {
+        for label in [
+            "output", "io", "io.fs", "io.fs.read", "io.fs.write", "io.net", "io.net.http",
+            "io.db", "io.process", "global.read", "global.write", "nondet", "nondet.random",
+            "nondet.time", "exit", "mutate",
+        ] {
+            assert!(is_known_label(label), "{label} should be a known registry label");
+        }
+    }
+
+    #[test]
+    fn typos_and_private_labels_are_unknown() {
+        assert!(!is_known_label("io.netw"), "typo is unknown");
+        assert!(!is_known_label("email.send"), "private/plugin label is unknown for now");
+        assert!(!is_known_label("nondet.rand"), "close typo still unknown");
+    }
+
+    #[test]
+    fn nearest_label_suggests_the_obvious_typo() {
+        assert_eq!(nearest_label("io.netw"), Some("io.net"));
+        assert_eq!(nearest_label("outputt"), Some("output"));
+        // Something wildly off has no near suggestion.
+        assert_eq!(nearest_label("completely-different"), None);
     }
 }
