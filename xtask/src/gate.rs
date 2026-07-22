@@ -46,9 +46,44 @@ struct PackageReport {
     elapsed: Duration,
 }
 
-/// Whether a diagnostic is one of the NEW measurement-mode `phpdoc.*` ids.
+/// Whether a diagnostic is one of the measurement-mode `phpdoc.*` ids.
 fn is_phpdoc(d: &Diagnostic) -> bool {
     d.id.starts_with("phpdoc.")
+}
+
+/// Permanent gate policy for `phpdoc.*` findings (ADR-0030 relation #1).
+///
+/// `phpdoc.*` findings are **contract-layer** claims: they say a proven value does
+/// not inhabit a *declared* `@param`/`@return` type under the no-coercion contract
+/// relation. That is a statement about the code's own documentation, **not** a
+/// runtime-breakage claim (`type.*`/`effect.*`, which gate red on sight per
+/// ADR-0013). TRUE `phpdoc.*` findings legitimately exist in released, working
+/// corpus code — a `@param int` that a test calls with the numeric string `"5"` is
+/// a real declared-contract violation even though it runs fine — so they must
+/// never flip the gate red merely by existing.
+///
+/// Instead the gate tracks their **count per package** against this deliberately
+/// hand-maintained expected-count table and acts as a **regression tripwire**: a
+/// package goes red only if its `phpdoc.*` count *increases* beyond the seeded
+/// expectation (a genuine new finding, or a real regression in the checker),
+/// while a *decrease* is a welcome improvement that never blocks. Update an entry
+/// here consciously when a change to the checker legitimately moves a count.
+///
+/// Seeded with the post-assertion-exemption counts (the assertion-helper exemption
+/// removed ~19 monorepo findings vs. the pre-exemption 352). Packages absent from
+/// this table expect **zero** `phpdoc.*` findings.
+const PHPDOC_EXPECTED: &[(&str, usize)] = &[
+    ("composer/composer", 19),
+    ("sebastianbergmann/phpunit", 8),
+    ("Seldaek/monolog", 4),
+    ("thephpleague/flysystem", 1),
+    // The private monorepo (corpus.local.toml); matched by its local project name.
+    ("pxxxx-monorepo", 333),
+];
+
+/// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).
+fn phpdoc_expected(name: &str) -> usize {
+    PHPDOC_EXPECTED.iter().find(|(n, _)| *n == name).map_or(0, |(_, c)| *c)
 }
 
 /// Entry point for `cargo xtask fp-gate`. Returns `true` if the gate is GREEN
@@ -89,13 +124,46 @@ pub fn run() -> Result<bool, String> {
         locals.par_iter().map(analyze_local).collect();
     local_reports.sort_by(|a, b| a.name.cmp(&b.name));
 
-    print_report(&reports, &local_reports);
+    // `phpdoc.*` regression tripwire (see `PHPDOC_EXPECTED`): a package is a
+    // regression iff its count *exceeds* its seeded expectation.
+    let regressions = phpdoc_regressions(&reports, &local_reports);
+
+    print_report(&reports, &local_reports, &regressions);
 
     // RED on any counted finding — package diagnostics plus local *non-vendor*
-    // diagnostics (vendor findings never gate; ADR-0015).
+    // diagnostics (vendor findings never gate; ADR-0015) — OR on any `phpdoc.*`
+    // count that has regressed past its expected baseline.
     let total_diags: usize = reports.iter().map(|r| r.diagnostics.len()).sum::<usize>()
         + local_reports.iter().map(|r| r.diagnostics.len()).sum::<usize>();
-    Ok(total_diags == 0)
+    Ok(total_diags == 0 && regressions.is_empty())
+}
+
+/// One `phpdoc.*` regression: a package whose count exceeds its seeded expectation.
+struct PhpdocRegression {
+    name: String,
+    actual: usize,
+    expected: usize,
+}
+
+/// Compare every package's `phpdoc.*` count to its expected baseline, returning the
+/// ones that have *increased* (the only direction that gates red).
+fn phpdoc_regressions(
+    reports: &[PackageReport],
+    local_reports: &[PackageReport],
+) -> Vec<PhpdocRegression> {
+    reports
+        .iter()
+        .chain(local_reports.iter())
+        .filter_map(|r| {
+            let actual = r.phpdoc.len();
+            let expected = phpdoc_expected(&r.name);
+            (actual > expected).then(|| PhpdocRegression {
+                name: r.name.clone(),
+                actual,
+                expected,
+            })
+        })
+        .collect()
 }
 
 // Default posture (ADR-0004): the gate folds via the PHP sidecar. Each rayon
@@ -213,7 +281,11 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
     }
 }
 
-fn print_report(reports: &[PackageReport], local_reports: &[PackageReport]) {
+fn print_report(
+    reports: &[PackageReport],
+    local_reports: &[PackageReport],
+    regressions: &[PhpdocRegression],
+) {
     println!("\n=== fp-gate: per-package findings ===\n");
     if !local_reports.is_empty() {
         println!(
@@ -261,12 +333,16 @@ fn print_report(reports: &[PackageReport], local_reports: &[PackageReport]) {
         }
     }
 
-    // Measurement-mode summary: the NEW `phpdoc.*` declared-contract ids, counted
-    // per package but excluded from the gate verdict (ADR-0030 landing).
+    // Measurement-mode summary: the `phpdoc.*` declared-contract ids, counted per
+    // package against the `PHPDOC_EXPECTED` baseline. These do NOT gate on their
+    // own existence (TRUE contract-layer findings live in released code, ADR-0030);
+    // a package gates red only if its count *increased* past the baseline.
     let total_phpdoc: usize = reports.iter().chain(local_reports.iter()).map(|r| r.phpdoc.len()).sum();
-    println!("\n=== phpdoc.* measurement mode (does NOT gate) ===\n");
+    let total_expected: usize = PHPDOC_EXPECTED.iter().map(|(_, c)| *c).sum();
+    println!("\n=== phpdoc.* measurement mode (contract layer — gates only on INCREASE) ===\n");
     for r in reports.iter().chain(local_reports.iter()) {
-        if r.phpdoc.is_empty() {
+        let expected = phpdoc_expected(&r.name);
+        if r.phpdoc.is_empty() && expected == 0 {
             continue;
         }
         let label = if r.local { format!("{} (local)", r.name) } else { r.name.clone() };
@@ -278,9 +354,25 @@ fn print_report(reports: &[PackageReport], local_reports: &[PackageReport]) {
                 "phpdoc.return-mismatch" => (p, ret + 1),
                 _ => (p, ret),
             });
-        println!("{label} — {} phpdoc.* ({params} param, {returns} return)", r.phpdoc.len());
+        let actual = r.phpdoc.len();
+        let marker = match actual.cmp(&expected) {
+            std::cmp::Ordering::Greater => "  ⬆ REGRESSION (exceeds expected)",
+            std::cmp::Ordering::Less => "  ⬇ improved (below expected — update baseline when intentional)",
+            std::cmp::Ordering::Equal => "",
+        };
+        println!(
+            "{label} — {actual} phpdoc.* ({params} param, {returns} return) [expected {expected}]{marker}"
+        );
     }
-    println!("phpdoc.* TOTAL: {total_phpdoc}");
+    println!("phpdoc.* TOTAL: {total_phpdoc} (expected baseline {total_expected})");
+    if regressions.is_empty() {
+        println!("phpdoc.* tripwire: OK — no package exceeds its expected baseline.");
+    } else {
+        println!("phpdoc.* tripwire: TRIPPED — the following packages regressed:");
+        for reg in regressions {
+            println!("    {} — {} > expected {}", reg.name, reg.actual, reg.expected);
+        }
+    }
 
     // Summary table: packages and local projects share one table; local rows are
     // marked `(local)`.
@@ -317,12 +409,27 @@ fn print_report(reports: &[PackageReport], local_reports: &[PackageReport]) {
     println!("{:<name_w$}  {:>6}  {:>12}  {:>11}  {:>8.2}", "TOTAL", tf, tp, td, ttime);
 
     println!();
-    if td == 0 {
-        println!("GATE GREEN — no proof-layer diagnostics on clean-parsing corpus code.");
-    } else {
-        println!(
-            "GATE RED — {td} proof-layer diagnostic(s) on clean code. Human FP triage required (ADR-0013)."
-        );
+    match (td == 0, regressions.is_empty()) {
+        (true, true) => {
+            println!(
+                "GATE GREEN — no proof-layer diagnostics on clean-parsing corpus code, \
+                 and no phpdoc.* regression past the expected baseline."
+            );
+        }
+        (false, _) => {
+            println!(
+                "GATE RED — {td} proof-layer diagnostic(s) on clean code. Human FP triage required (ADR-0013)."
+            );
+        }
+        (true, false) => {
+            println!(
+                "GATE RED — {} package(s) regressed past their expected phpdoc.* baseline \
+                 (see the tripwire list above). Investigate the new finding(s); update \
+                 PHPDOC_EXPECTED in xtask/src/gate.rs only once the change is understood \
+                 and intended.",
+                regressions.len()
+            );
+        }
     }
 }
 

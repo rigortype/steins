@@ -251,3 +251,86 @@ fn inline_ignore_suppresses_param_mismatch() {
     assert_eq!(outcome.kept.iter().filter(|d| d.id == PARAM_MISMATCH_ID).count(), 0);
     assert_eq!(outcome.suppressed, 1);
 }
+
+// ==========================================================================
+// N. Assertion-helper exemption (ADR-0030): a `@…-assert` on parameter `$x`
+//    makes its `@param $x` a POST-condition, so arguments are not checked
+//    against it. Sibling params and `@return` stay checked; native stays a gate.
+// ==========================================================================
+
+#[test]
+fn assert_target_param_is_exempt() {
+    // `@param int $x` would normally reject "5", but the assert marks $x a
+    // post-condition target — no phpdoc.param-mismatch.
+    let src = "<?php\n\
+        /**\n * @param int $x\n * @phpstan-assert int $x\n */\n\
+        function assertInt($x): void {}\n\
+        assertInt(\"5\");";
+    assert_eq!(param_count(src), 0, "assert-target param must be exempt");
+    // Control: identical minus the assert tag → the @param fires.
+    let control = "<?php /** @param int $x */ function assertInt($x): void {}\n\
+        assertInt(\"5\");";
+    assert_eq!(param_count(control), 1, "without the assert, @param int rejects \"5\"");
+}
+
+#[test]
+fn if_true_if_false_and_negated_all_exempt() {
+    for tag in ["@phpstan-assert-if-true int $x", "@phpstan-assert-if-false int $x", "@phpstan-assert !string $x"] {
+        let src = format!(
+            "<?php\n/**\n * @param int $x\n * {tag}\n */\nfunction f($x) {{ return true; }}\nf(\"5\");"
+        );
+        assert_eq!(param_count(&src), 0, "exempt under {tag}");
+    }
+}
+
+#[test]
+fn sibling_param_still_checked() {
+    // Assert targets $x only; the sibling $y with @param int still rejects "5".
+    let src = "<?php\n\
+        /**\n * @param int $x\n * @param int $y\n * @phpstan-assert int $x\n */\n\
+        function f($x, $y): void {}\n\
+        f(\"5\", \"5\");";
+    let ds = param_findings(src);
+    assert_eq!(ds.len(), 1, "only the sibling $y should be reported, got: {ds:?}");
+}
+
+#[test]
+fn return_still_checked_under_assert() {
+    // The assert exempts the param, but the `@return` relation is untouched: a
+    // proven `return []` still violates `@return non-empty-list<int>`. (Native
+    // return is `: array`, so the phpdoc return check — not the native one — fires.)
+    let src = "<?php\n\
+        /**\n * @param int $x\n * @phpstan-assert int $x\n * @return non-empty-list<int>\n */\n\
+        function f($x): array { return []; }\n\
+        f(\"5\");";
+    assert_eq!(param_count(src), 0, "param exempt");
+    assert_eq!(return_count(src), 1, "@return contract still checked under the assert");
+}
+
+#[test]
+fn native_hint_still_fires_under_assert() {
+    // A native `int` hint is a real runtime gate; the assert does not silence it.
+    // Under strict_types, passing "5" to `int` is a runtime TypeError, reported as
+    // `type.argument-mismatch` (not phpdoc.*), regardless of the assert tag.
+    let src = "<?php declare(strict_types=1);\n\
+        /**\n * @param int $x\n * @phpstan-assert int $x\n */\n\
+        function f(int $x): void {}\n\
+        f(\"5\");";
+    let native = findings(src)
+        .into_iter()
+        .filter(|d| d.id == steins_infer::ID)
+        .count();
+    assert_eq!(native, 1, "native int hint still gates regardless of the assert");
+    assert_eq!(param_count(src), 0, "no phpdoc.param-mismatch (native fired / param exempt)");
+}
+
+#[test]
+fn property_assert_target_does_not_exempt() {
+    // `@phpstan-assert int $this->x` is a property target: no exemption effect, so
+    // the sibling `@param int $x` still rejects a bad argument.
+    let src = "<?php\n\
+        /**\n * @param int $x\n * @phpstan-assert int $this->x\n */\n\
+        function f($x): void {}\n\
+        f(\"5\");";
+    assert_eq!(param_count(src), 1, "property assert target must NOT exempt the param");
+}

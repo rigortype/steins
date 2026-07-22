@@ -2522,11 +2522,23 @@ struct Envelopes {
     /// Parameter name (no `$`) → declared phpdoc type.
     params: Vec<(String, PType)>,
     ret: Option<PType>,
+    /// Parameter names (no `$`) that an assertion tag (`@phpstan-assert` &c.)
+    /// targets on this same declaration — the function is an **assertion helper**
+    /// for them (see [`check_phpdoc_param`]). Property/`$this->…` assertion targets
+    /// are excluded (they say nothing about a call-site argument).
+    assert_params: HashSet<String>,
 }
 
 impl Envelopes {
     fn param(&self, name: &str) -> Option<&PType> {
         self.params.iter().find(|(n, _)| n == name).map(|(_, t)| t)
+    }
+
+    /// Whether `name` is an assertion target on this declaration, in which case its
+    /// `@param` states a **post**-condition and checking arguments against it is a
+    /// category error (see [`check_phpdoc_param`]).
+    fn is_assert_target(&self, name: &str) -> bool {
+        self.assert_params.contains(name)
     }
 }
 
@@ -2544,7 +2556,20 @@ fn parse_envelopes(docblock: Option<&str>) -> Option<Envelopes> {
     let mut param_prefixed: HashSet<String> = HashSet::new();
     let mut ret: Option<PType> = None;
     let mut ret_prefixed = false;
+    let mut assert_params: HashSet<String> = HashSet::new();
     for tag in scan_docblock(text) {
+        // An assertion tag targeting a parameter marks it an assert-helper param
+        // (its `@param` is a post-condition; ADR-0030). Property targets are inert.
+        // All three kinds (Always/IfTrue/IfFalse) and the negated form exempt alike:
+        // whatever the type or condition, the parameter is not being *constrained*
+        // on entry, so a call-site argument cannot violate it.
+        if let TagKind::Assert { .. } = tag.kind
+            && !tag.assert_property_target
+            && let Some(var) = &tag.var_name
+        {
+            assert_params.insert(var.trim_start_matches('$').to_owned());
+            continue;
+        }
         match tag.kind {
             TagKind::Param => {
                 let Some(var) = &tag.var_name else { continue };
@@ -2571,9 +2596,16 @@ fn parse_envelopes(docblock: Option<&str>) -> Option<Envelopes> {
                 }
             }
             TagKind::Var | TagKind::Throws => {}
+            // Assertion tags are consumed above (collected into `assert_params`);
+            // they never contribute a `@param`/`@return` envelope.
+            TagKind::Assert { .. } => {}
         }
     }
-    (!params.is_empty() || ret.is_some()).then_some(Envelopes { params, ret })
+    // Return an envelope set whenever there is anything to check *or* any assertion
+    // to remember: an assert-only docblock still carries the exemption fact, so a
+    // sibling `@param` (added later, or resolved in another pass) sees it.
+    (!params.is_empty() || ret.is_some() || !assert_params.is_empty())
+        .then_some(Envelopes { params, ret, assert_params })
 }
 
 /// Parse one tag's type text into a phpdoc [`PType`], or `None` on a parse error
@@ -3044,6 +3076,31 @@ fn norm_str_key(s: &str) -> NormKey {
 /// `phpdoc.param-mismatch` iff the proven value provably does not inhabit the
 /// `@param` type. `cfile`/`coff` locate the callee's docblock context (class-name
 /// resolution). Returns nothing for `Maybe`/`Yes`.
+///
+/// # Assertion-helper exemption (ADR-0030)
+///
+/// A function/method whose docblock carries an assertion tag (`@phpstan-assert`
+/// and its `-if-true`/`-if-false`/negated variants) targeting parameter `$x` is an
+/// **assertion helper for `$x`**: its `@param` for `$x` states a *post*-condition
+/// that the helper establishes about `$x`, not a precondition its callers must
+/// satisfy. Checking a call-site argument against it is therefore semantically
+/// wrong — the whole point of such a helper is to be called with a *wider* value
+/// (e.g. `mixed`/`string|int`) and to narrow it. So we skip `phpdoc.param-mismatch`
+/// for that parameter. This holds for all three assert kinds and the negated form.
+///
+/// Scope of the exemption, deliberately narrow:
+/// - **Other parameters** of the same function are still checked (the tag exempts
+///   only its own target).
+/// - **`@return`** checking is unaffected (a different relation entirely).
+/// - **Native** runtime checks are unaffected: a native type hint is a real
+///   runtime gate regardless of any docblock assertion, so it still fires (and,
+///   firing first, already suppresses this phpdoc check at that site).
+///
+/// This slice does **not** implement the *positive* refinement effect — applying
+/// the asserted type to the caller's environment after the call. That is a
+/// branch-analysis capability and lands with the structured trace tree / value
+/// domain (ADR-0031, ADR-0035); here we only suppress the incorrect precondition
+/// reading.
 #[allow(clippy::too_many_arguments)]
 fn check_phpdoc_param(
     cx: &Cx,
@@ -3060,6 +3117,11 @@ fn check_phpdoc_param(
     poisoned: bool,
     out: &mut Vec<Diagnostic>,
 ) {
+    // Assertion-helper exemption (see the doc comment above): this parameter's
+    // `@param` is a post-condition, so a call-site argument cannot violate it.
+    if envelopes.is_assert_target(&param.name) {
+        return;
+    }
     let Some(ty) = envelopes.param(&param.name) else { return };
     let Some(cv) = cx.resolve_cval(value, env, classes_env, poisoned, folder) else { return };
     // A parameter that is nullable by its native type, or implicitly nullable via
