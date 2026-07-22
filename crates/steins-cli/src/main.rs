@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use steins_db::{SourceFile, SteinsDatabase};
-use steins_infer::{Diagnostic, diagnostics};
+use steins_infer::{Diagnostic, SOUND_SUBSET_NOTICE, SidecarFolder, check_file};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Format {
@@ -27,7 +27,7 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
         None => {
-            eprintln!("usage: steins check [--format text|json] <paths...>");
+            eprintln!("usage: steins check [--format text|json] [--no-php] <paths...>");
             ExitCode::from(2)
         }
     }
@@ -35,10 +35,15 @@ fn main() -> ExitCode {
 
 fn run_check(args: &[String]) -> ExitCode {
     let mut format = Format::Text;
+    let mut no_php = false;
     let mut paths: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--no-php" => {
+                no_php = true;
+                i += 1;
+            }
             "--format" => {
                 let Some(value) = args.get(i + 1) else {
                     eprintln!("steins: --format requires an argument (text|json)");
@@ -73,7 +78,18 @@ fn run_check(args: &[String]) -> ExitCode {
     files.sort();
     files.dedup();
 
+    // Coverage posture (ADR-0004): with `--no-php` the run is the sound subset,
+    // surfaced up front as a startup notice. Without the flag we fold via a
+    // lazily-spawned sidecar (spawned only on the first foldable call); if `php`
+    // turns out to be unavailable, the folder emits the same notice itself.
+    if no_php {
+        eprintln!("{SOUND_SUBSET_NOTICE}");
+    }
+
     let db = SteinsDatabase::default();
+    // One folder for the whole run: it owns the resident sidecar and the fold
+    // memo, so a repeated call across files never re-spawns or re-folds.
+    let mut folder = if no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
     let mut findings: Vec<Diagnostic> = Vec::new();
     for file_path in &files {
         let text = match std::fs::read(file_path) {
@@ -84,7 +100,7 @@ fn run_check(args: &[String]) -> ExitCode {
             }
         };
         let input = SourceFile::new(&db, file_path.to_string_lossy().into_owned(), text);
-        findings.extend(diagnostics(&db, input).iter().cloned());
+        findings.extend(check_file(&db, input, &mut folder).iter().cloned());
     }
 
     match format {

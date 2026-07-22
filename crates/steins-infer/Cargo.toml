@@ -9,6 +9,8 @@ license.workspace = true
 salsa.workspace = true
 steins-db = { path = "../steins-db" }
 steins-syntax = { path = "../steins-syntax" }
+steins-catalog = { path = "../steins-catalog" }
+steins-sidecar = { path = "../steins-sidecar" }
 
 [dev-dependencies]
 steins-db = { path = "../steins-db" }

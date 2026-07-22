@@ -14,12 +14,158 @@
 use std::collections::HashMap;
 
 use steins_db::{Db, SourceFile, function_index, parse};
+use steins_sidecar::{FoldArg, FoldResult, FoldValue, Sidecar};
 use steins_syntax::{
     ArgValue, CallExpr, FunctionDecl, ParamType, ScalarType, Scope, SourceTree, StmtKind,
 };
 
 /// The registry id for the one check this crate emits (ADR-0022).
 pub const ID: &str = "type.argument-mismatch";
+
+/// The one-line coverage-posture notice (ADR-0004): printed to stderr when a run
+/// executes as the sound subset because the PHP sidecar is unavailable.
+pub const SOUND_SUBSET_NOTICE: &str =
+    "note: running as sound subset (no PHP sidecar) — findings that require executing PHP are omitted";
+
+// ---------------------------------------------------------------------------
+// Folding seam (ADR-0004 / ADR-0024).
+//
+// Folding — executing a real pure builtin over literal args to learn its value
+// — is the one part of the check that may perform IPC and is therefore NOT a
+// salsa query (queries must stay deterministic and side-effect-free). The
+// engine expresses its need for a fold through this trait; who answers it (a
+// real PHP sidecar, a test mock, or nobody) is the caller's choice.
+// ---------------------------------------------------------------------------
+
+/// Something that can fold a builtin call to a concrete literal value.
+///
+/// The engine only calls [`Folder::fold`] after it has already checked the
+/// gate: `name` is not a same-file user function, [`steins_catalog::foldable`]
+/// is `true`, and every element of `args` is a literal ([`ArgValue::is_literal`]).
+/// A `None` return means "widen" (unknown) — always the safe side.
+pub trait Folder {
+    /// Fold `name(args...)` to a literal, or `None` to widen.
+    fn fold(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue>;
+}
+
+/// The sound-subset folder: never folds anything. This is what the salsa
+/// [`diagnostics`] query uses, keeping that query deterministic.
+pub struct NoFold;
+
+impl Folder for NoFold {
+    fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+        None
+    }
+}
+
+/// A [`Folder`] backed by a lazily-spawned PHP [`Sidecar`], with a per-run memo
+/// so a repeated `(name, args)` never triggers duplicate IPC.
+///
+/// Lifecycle (ADR-0004): the sidecar is spawned only when the first foldable
+/// call is actually encountered. If spawning fails (or `--no-php` disabled it),
+/// every fold widens and the sound-subset notice is emitted once to stderr.
+pub struct SidecarFolder {
+    sidecar: Option<Sidecar>,
+    memo: HashMap<(String, Vec<ArgValue>), Option<ArgValue>>,
+    /// Explicitly disabled (`--no-php`): never spawn, never fold.
+    disabled: bool,
+    /// A prior spawn attempt failed: stop trying.
+    spawn_failed: bool,
+    /// The sound-subset notice has already been printed.
+    notified: bool,
+}
+
+impl SidecarFolder {
+    /// Create a folder. `disabled` (the CLI's `--no-php`) makes it a permanent
+    /// no-op that never spawns PHP. When disabled by flag the caller is expected
+    /// to have already surfaced the coverage posture, so this folder stays quiet.
+    #[must_use]
+    pub fn new(disabled: bool) -> Self {
+        Self {
+            sidecar: None,
+            memo: HashMap::new(),
+            disabled,
+            spawn_failed: false,
+            notified: true, // suppress our own notice; only spawn-failure re-arms it.
+        }
+    }
+
+    /// Create an enabled folder that will emit the sound-subset notice itself if
+    /// it cannot spawn PHP. Used by callers that do not print the notice up front.
+    #[must_use]
+    pub fn enabled() -> Self {
+        Self { notified: false, ..Self::new(false) }
+    }
+
+    /// Ensure a live sidecar, or record that we cannot have one.
+    fn ensure_sidecar(&mut self) -> Option<&mut Sidecar> {
+        if self.disabled || self.spawn_failed {
+            return None;
+        }
+        if self.sidecar.is_none() {
+            match Sidecar::spawn() {
+                Ok(sc) => self.sidecar = Some(sc),
+                Err(_) => {
+                    self.spawn_failed = true;
+                    if !self.notified {
+                        eprintln!("{SOUND_SUBSET_NOTICE}");
+                        self.notified = true;
+                    }
+                    return None;
+                }
+            }
+        }
+        self.sidecar.as_mut()
+    }
+}
+
+impl Folder for SidecarFolder {
+    fn fold(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue> {
+        let key = (name.to_owned(), args.to_vec());
+        if let Some(cached) = self.memo.get(&key) {
+            return cached.clone();
+        }
+        let folded = self.ensure_sidecar().and_then(|sc| {
+            let fargs: Vec<FoldArg> = args.iter().filter_map(arg_to_fold).collect();
+            // Defensive: every arg is a literal by the engine's gate, so the
+            // count must match; a mismatch means a non-literal slipped in.
+            if fargs.len() != args.len() {
+                return None;
+            }
+            match sc.fold(name, &fargs) {
+                FoldResult::Value(v) => fold_value_to_arg(&v),
+                // Throw / widen both mean "no known literal" for now.
+                FoldResult::Throw { .. } | FoldResult::Widen { .. } => None,
+            }
+        });
+        self.memo.insert(key, folded.clone());
+        folded
+    }
+}
+
+/// Convert a literal [`ArgValue`] to a [`FoldArg`]; non-literals yield `None`.
+fn arg_to_fold(arg: &ArgValue) -> Option<FoldArg> {
+    match arg {
+        ArgValue::Int(v) => Some(FoldArg::Int(*v)),
+        ArgValue::Float(v) => Some(FoldArg::Float(*v)),
+        ArgValue::Str(v) => Some(FoldArg::Str(v.clone())),
+        ArgValue::Bool(v) => Some(FoldArg::Bool(*v)),
+        ArgValue::Null => Some(FoldArg::Null),
+        ArgValue::Var(_) | ArgValue::Call(..) | ArgValue::Other => None,
+    }
+}
+
+/// Convert a folded value back to a literal [`ArgValue`]. Array results have no
+/// literal in the IR yet, so they widen.
+fn fold_value_to_arg(value: &FoldValue) -> Option<ArgValue> {
+    Some(match value {
+        FoldValue::Int(v) => ArgValue::Int(*v),
+        FoldValue::Float(v) => ArgValue::Float(*v),
+        FoldValue::Str(v) => ArgValue::Str(v.clone()),
+        FoldValue::Bool(v) => ArgValue::Bool(*v),
+        FoldValue::Null => ArgValue::Null,
+    })
+}
 
 /// A proof-layer finding. Kept deliberately flat so the CLI can render text or
 /// JSON without knowing anything about the analysis.
@@ -33,23 +179,56 @@ pub struct Diagnostic {
 }
 
 /// The proof-layer diagnostics for one file, as a memoized salsa query.
+///
+/// This query computes the **sound subset**: it uses [`NoFold`], so it never
+/// executes PHP and stays a pure, deterministic salsa fact. Runs that want
+/// folding (CLI, gate) call [`check_file`] instead — same salsa inputs
+/// ([`parse`], [`function_index`]), but the folding check runs *outside* the
+/// query graph.
 #[salsa::tracked]
 pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let tree = parse(db, file);
     let functions = function_index(db, file);
-    check(tree, functions, file.path(db))
+    check_with(tree, functions, file.path(db), &mut NoFold)
 }
 
-/// The pure checking core (no salsa) — easy to unit-test and to reuse.
+/// The folding-aware check for one file, run **outside** salsa (ADR-0004).
+///
+/// Salsa determinism is preserved by construction: `parse` and `function_index`
+/// remain memoized queries, but the folding pass — which may perform IPC — is a
+/// plain function taking `&mut dyn Folder`. Pass a [`SidecarFolder`] for the
+/// default posture, or [`NoFold`] for the sound subset.
+#[must_use]
+pub fn check_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec<Diagnostic> {
+    let tree = parse(db, file);
+    let functions = function_index(db, file);
+    check_with(tree, functions, file.path(db), folder)
+}
+
+/// The pure checking core with no folding — the sound subset. Kept for
+/// unit tests and callers that never execute PHP; equivalent to
+/// [`check_with`] with [`NoFold`].
+#[must_use]
+pub fn check(tree: &SourceTree, functions: &[FunctionDecl], path: &str) -> Vec<Diagnostic> {
+    check_with(tree, functions, path, &mut NoFold)
+}
+
+/// The checking core (no salsa) — easy to unit-test and to reuse.
 ///
 /// Two passes feed the one check. The **direct pass** walks every call site with
 /// a literal argument (unchanged behavior). The **propagation pass** walks each
-/// scope's linear trace and resolves `$var` / constant-function-return arguments
-/// to proven values (ADR-0001). The two partition cleanly by argument kind —
-/// literals go to the first, `Var`/`Call` arguments to the second — so no call
-/// site is reported twice.
+/// scope's linear trace and resolves `$var` / constant-function-return / folded
+/// builtin-call arguments to proven values (ADR-0001). The two partition cleanly
+/// by argument kind — literals go to the first, `Var`/`Call` arguments to the
+/// second — so no call site is reported twice. `folder` answers fold requests
+/// raised by `Call` arguments to allowlisted builtins.
 #[must_use]
-pub fn check(tree: &SourceTree, functions: &[FunctionDecl], path: &str) -> Vec<Diagnostic> {
+pub fn check_with(
+    tree: &SourceTree,
+    functions: &[FunctionDecl],
+    path: &str,
+    folder: &mut dyn Folder,
+) -> Vec<Diagnostic> {
     let cx = Cx { tree, functions, path, strict: tree.has_strict_types() };
     let mut out = Vec::new();
 
@@ -73,9 +252,9 @@ pub fn check(tree: &SourceTree, functions: &[FunctionDecl], path: &str) -> Vec<D
         }
     }
 
-    // --- Propagation pass: resolved `$var` / constant-return arguments. ---
+    // --- Propagation pass: resolved `$var` / constant-return / folded args. ---
     for scope in tree.scopes() {
-        check_scope(&cx, scope, &mut out);
+        check_scope(&cx, folder, scope, &mut out);
     }
 
     out
@@ -97,7 +276,7 @@ struct Known {
 }
 
 /// Walk one scope's trace, tracking known local values, and check every call.
-fn check_scope(cx: &Cx, scope: &Scope, out: &mut Vec<Diagnostic>) {
+fn check_scope(cx: &Cx, folder: &mut dyn Folder, scope: &Scope, out: &mut Vec<Diagnostic>) {
     let mut env: HashMap<String, Known> = HashMap::new();
 
     for stmt in &scope.stmts {
@@ -106,7 +285,7 @@ fn check_scope(cx: &Cx, scope: &Scope, out: &mut Vec<Diagnostic>) {
             StmtKind::Return(_) => {}
             StmtKind::Assign { var, value, span } => {
                 // A poisoned scope never trusts a variable value.
-                match cx.resolve_literal(value, &env, scope.poisoned) {
+                match cx.resolve_literal(value, &env, scope.poisoned, folder) {
                     Some(lit) => {
                         let line = cx.tree.position(span.start).line;
                         env.insert(var.clone(), Known { value: lit, line });
@@ -116,7 +295,9 @@ fn check_scope(cx: &Cx, scope: &Scope, out: &mut Vec<Diagnostic>) {
                     }
                 }
             }
-            StmtKind::Call(call) => check_propagated_call(cx, scope.poisoned, call, &env, out),
+            StmtKind::Call(call) => {
+                check_propagated_call(cx, folder, scope.poisoned, call, &env, out);
+            }
         }
 
         // After the statement, any variable handed to a call is untrustworthy
@@ -130,6 +311,7 @@ fn check_scope(cx: &Cx, scope: &Scope, out: &mut Vec<Diagnostic>) {
 /// Check a call whose arguments may be propagated values (`Var` / `Call`).
 fn check_propagated_call(
     cx: &Cx,
+    folder: &mut dyn Folder,
     poisoned: bool,
     call: &CallExpr,
     env: &HashMap<String, Known>,
@@ -150,9 +332,17 @@ fn check_propagated_call(
             ArgValue::Var(name) if !poisoned => env
                 .get(name)
                 .map(|k| (k.value.clone(), format!("from ${name}, assigned at line {}", k.line))),
-            ArgValue::Call(name, args) if args.is_empty() => cx
-                .resolve_const_fn(name)
-                .map(|(lit, line)| (lit, format!("from {name}(), defined at line {line}"))),
+            ArgValue::Call(name, args) => {
+                // A zero-arg same-file constant function wins; otherwise try to
+                // fold an allowlisted builtin over literal args.
+                if args.is_empty() {
+                    cx.resolve_const_fn(name)
+                        .map(|(lit, line)| (lit, format!("from {name}(), defined at line {line}")))
+                        .or_else(|| cx.try_fold(name, args, folder))
+                } else {
+                    cx.try_fold(name, args, folder)
+                }
+            }
             _ => None,
         };
         let Some((value, provenance)) = resolved else { continue };
@@ -173,6 +363,7 @@ impl Cx<'_> {
         value: &ArgValue,
         env: &HashMap<String, Known>,
         poisoned: bool,
+        folder: &mut dyn Folder,
     ) -> Option<ArgValue> {
         if poisoned {
             return None;
@@ -180,11 +371,45 @@ impl Cx<'_> {
         match value {
             v if v.is_literal() => Some(v.clone()),
             ArgValue::Var(name) => env.get(name).map(|k| k.value.clone()),
-            ArgValue::Call(name, args) if args.is_empty() => {
-                self.resolve_const_fn(name).map(|(lit, _line)| lit)
+            ArgValue::Call(name, args) => {
+                if args.is_empty()
+                    && let Some((lit, _line)) = self.resolve_const_fn(name)
+                {
+                    return Some(lit);
+                }
+                self.try_fold(name, args, folder).map(|(lit, _prov)| lit)
             }
             _ => None,
         }
+    }
+
+    /// Try to fold an allowlisted builtin call over literal arguments, returning
+    /// the folded literal and its provenance string (`folded from f("x")`).
+    ///
+    /// The gate (ADR-0004 / ADR-0008): the callee must NOT be a same-file user
+    /// function, [`steins_catalog::foldable`] must permit it, and every argument
+    /// must already be a literal the IR carries. Only then is the `folder` asked.
+    fn try_fold(
+        &self,
+        name: &str,
+        args: &[ArgValue],
+        folder: &mut dyn Folder,
+    ) -> Option<(ArgValue, String)> {
+        // A same-file user function is never folded via the sidecar (the const
+        // function path handles the zero-arg case; anything else is unknown).
+        if self.functions.iter().any(|f| f.name == name) {
+            return None;
+        }
+        if !steins_catalog::foldable(name) {
+            return None;
+        }
+        // Inner arguments must be literals directly — we do not resolve nested
+        // variables here (keeps the gate simple and the fold self-contained).
+        if !args.iter().all(ArgValue::is_literal) {
+            return None;
+        }
+        let folded = folder.fold(name, args)?;
+        Some((folded, format!("folded from {}", render_call(name, args))))
     }
 
     /// Resolve a zero-argument same-file constant function: its body must be
@@ -249,6 +474,13 @@ impl Cx<'_> {
             message,
         }
     }
+}
+
+/// Render a call with its literal arguments for a folding provenance string,
+/// e.g. `strtolower("ABC")` or `str_repeat("ab", 3)`.
+fn render_call(name: &str, args: &[ArgValue]) -> String {
+    let inner: Vec<String> = args.iter().map(ArgValue::render).collect();
+    format!("{name}({})", inner.join(", "))
 }
 
 /// Resolve a call's callee to the *unique* same-file user function, honoring the

@@ -873,13 +873,18 @@ name = "steins-infer"
 version = "0.0.0"
 dependencies = [
  "salsa",
+ "steins-catalog",
  "steins-db",
+ "steins-sidecar",
  "steins-syntax",
 ]
 
 [[package]]
 name = "steins-sidecar"
 version = "0.0.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "steins-syntax"
