@@ -1,0 +1,12 @@
+[package]
+name = "steins-domain"
+description = "The four-layer value domain (ADR-0035): facts, refinements, joins, widening."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1"
