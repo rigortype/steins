@@ -33,9 +33,9 @@ use steins_syntax::CallExpr;
 use steins_syntax::Span;
 use steins_syntax::{
     ArgValue, ArrayKey, Callee, CatchClause, ClassDecl, CmpOp, CondExpr, CondOperand,
-    EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, MethodDecl, NameRef, NativeType,
-    NormKey, Param, Receiver, RefKind, ScalarType, Scope, ScopeOwner, SourceTree, StaticClass,
-    Stmt, StmtKind, ThrowKind, ThrowOrigin, TypeMember, Visibility, normalize_array,
+    EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, MatchArmT, MethodDecl, NameRef,
+    NativeType, NormKey, Param, Receiver, RefKind, ScalarType, Scope, ScopeOwner, SourceTree,
+    StaticClass, Stmt, StmtKind, ThrowKind, ThrowOrigin, TypeMember, Visibility, normalize_array,
 };
 
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, ShapeKey, StringLit, TypeKind as PKind};
@@ -2409,6 +2409,10 @@ fn walk_trace(
                 w, folder, cond, then_trace, elseifs, else_trace.as_deref(), env, classes_env,
                 descent, facts, out,
             ),
+            StmtKind::Match { subject, arms, default, loose } => walk_match(
+                w, folder, subject, arms, default.as_deref(), *loose, env, classes_env, descent,
+                facts, out,
+            ),
         };
 
         // 3. Apply `@phpstan-assert` (Always) narrowings from every call in this
@@ -2623,6 +2627,189 @@ fn walk_else(
             Some(stmts) => walk_trace(w, folder, stmts, env, classes_env, descent, facts, out),
             None => Flow::FellThrough,
         },
+    }
+}
+
+/// Walk a structured statement-position `match`/`switch` (ADR-0031 Part B).
+///
+/// Per arm, the "taken" certainty is computed left to right with first-match
+/// semantics: `taken(k) = Yes` iff arm `k` matches (`Yes`) **and** every earlier
+/// arm provably does not (`No`); `No` iff arm `k` provably does not match; `Maybe`
+/// otherwise. This ordering rule is what stops a later `Yes` arm from being walked
+/// as the sole-live branch while an earlier arm is only `Maybe`. Arms with
+/// `taken == No` are recorded dead (the env-free direct pass then stays silent
+/// inside them); every other arm is walked on a cloned env, with the subject
+/// var refined to the arm's literal set (a `match` binds `Singleton`/`OneOf`; a
+/// `switch` binds nothing — its loose `==` truth set is multi-valued).
+///
+/// The "no arm matched" outcome depends on the construct: with a `default` arm it
+/// runs that body (unless a decided `Yes` arm makes it dead); without one, a
+/// `switch` falls through to after the construct (entry env preserved) while a
+/// `match` raises `\UnhandledMatchError` — a terminator contributing no
+/// fall-through. The successor env is the join of every branch that falls
+/// through; if none does, the whole construct terminates (tail unreachable).
+#[allow(clippy::too_many_arguments)]
+fn walk_match(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    subject: &CondOperand,
+    arms: &[MatchArmT],
+    default: Option<&[Stmt]>,
+    loose: bool,
+    env: &mut HashMap<String, Known>,
+    classes_env: &mut HashMap<String, String>,
+    descent: &mut Option<Descent<'_>>,
+    facts: &mut Option<&mut Vec<LineFact>>,
+    out: &mut Vec<Diagnostic>,
+) -> Flow {
+    let poisoned = w.scope.poisoned;
+    let op = if loose { CmpOp::Loose } else { CmpOp::Identical };
+    let subj_vals = operand_values(subject, env, poisoned);
+
+    // 1. Per-arm first-match "taken" certainty (left to right). `earlier_all_no`
+    // tracks whether every arm before the current one provably does NOT match;
+    // `decided_done` records that a *decided* match (`Yes` with all earlier `No`)
+    // has been found — every later arm and the default are then unreachable,
+    // because `match`/`switch` take the FIRST matching arm.
+    let mut takens: Vec<Certainty> = Vec::with_capacity(arms.len());
+    let mut earlier_all_no = true;
+    let mut decided_done = false;
+    for arm in arms {
+        if decided_done {
+            takens.push(Certainty::No); // a prior sure match makes this unreachable
+            continue;
+        }
+        let cond_k = eval_arm_cond(op, subj_vals.as_deref(), &arm.conditions, env, poisoned);
+        let taken = match cond_k {
+            Certainty::No => Certainty::No,
+            Certainty::Yes if earlier_all_no => {
+                decided_done = true;
+                Certainty::Yes
+            }
+            _ => Certainty::Maybe,
+        };
+        if cond_k != Certainty::No {
+            earlier_all_no = false;
+        }
+        takens.push(taken);
+    }
+    // The default / no-match path: `No` once a decided arm consumed the value;
+    // `Yes` when every arm provably fails to match; else `Maybe`.
+    let no_match_taken = if decided_done {
+        Certainty::No
+    } else if earlier_all_no {
+        Certainty::Yes
+    } else {
+        Certainty::Maybe
+    };
+
+    // 2. Walk each live arm on a cloned env; record `No` arms dead.
+    let mut fell: Vec<(HashMap<String, Known>, HashMap<String, String>)> = Vec::new();
+    for (arm, taken) in arms.iter().zip(&takens) {
+        if *taken == Certainty::No {
+            mark_dead(w, &[arm.trace.as_slice()]);
+            continue;
+        }
+        let mut benv = env.clone();
+        let mut bclasses = classes_env.clone();
+        refine_match_arm(subject, &arm.conditions, loose, &mut benv);
+        if walk_trace(w, folder, &arm.trace, &mut benv, &mut bclasses, descent, facts, out)
+            == Flow::FellThrough
+        {
+            fell.push((benv, bclasses));
+        }
+    }
+
+    // 3. The "no arm matched" outcome.
+    match default {
+        Some(dtrace) => {
+            if no_match_taken == Certainty::No {
+                mark_dead(w, &[dtrace]);
+            } else {
+                let mut benv = env.clone();
+                let mut bclasses = classes_env.clone();
+                if walk_trace(w, folder, dtrace, &mut benv, &mut bclasses, descent, facts, out)
+                    == Flow::FellThrough
+                {
+                    fell.push((benv, bclasses));
+                }
+            }
+        }
+        None => {
+            // A default-less `switch` falls through to after itself on no match
+            // (entry env unchanged); a default-less `match` throws
+            // `\UnhandledMatchError` — a terminator that joins nothing.
+            if loose && no_match_taken != Certainty::No {
+                fell.push((env.clone(), classes_env.clone()));
+            }
+        }
+    }
+
+    // 4. Merge. No live fall-through → the successor is unreachable.
+    if fell.is_empty() {
+        return Flow::Terminated;
+    }
+    let (jenv, jclasses) = join_envs(fell);
+    *env = jenv;
+    *classes_env = jclasses;
+    Flow::FellThrough
+}
+
+/// The certainty that a `match`/`switch` arm is the one taken *by value* — i.e.
+/// the subject equals ANY of the arm's conditions (`===` for match, loose `==`
+/// for switch). An unknown subject or condition contributes `Maybe`; the OR folds
+/// the per-condition verdicts (any `Yes` → `Yes`, all `No` → `No`, else `Maybe`).
+fn eval_arm_cond(
+    op: CmpOp,
+    subj_vals: Option<&[ArgValue]>,
+    conditions: &[CondOperand],
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+) -> Certainty {
+    let Some(subj) = subj_vals else { return Certainty::Maybe };
+    let mut acc = Certainty::No;
+    for c in conditions {
+        let cert = match operand_values(c, env, poisoned) {
+            Some(cv) => eval_cmp(op, subj, &cv),
+            None => Certainty::Maybe,
+        };
+        acc = acc.or(cert);
+        if acc == Certainty::Yes {
+            return Certainty::Yes;
+        }
+    }
+    acc
+}
+
+/// Refine the subject variable inside a matched arm's cloned env. A `match`
+/// (strict `===`) whose subject is a bare variable and whose conditions are all
+/// literals binds the subject to that exact finite set (`Singleton` for one,
+/// `OneOf` for several) — the value is provably one of them on this path. A
+/// `switch` (loose `==`) binds NOTHING: a loose-equal truth set is multi-valued
+/// (`case 0` matches `0`, `"0"`, `false`, `0.0`, …), so no single `Fact` is sound.
+fn refine_match_arm(
+    subject: &CondOperand,
+    conditions: &[CondOperand],
+    loose: bool,
+    env: &mut HashMap<String, Known>,
+) {
+    if loose {
+        return;
+    }
+    let CondOperand::Var(name) = subject else { return };
+    let mut vals = Vec::with_capacity(conditions.len());
+    for c in conditions {
+        match c {
+            CondOperand::Literal(v) => match val_of(v) {
+                Some(val) => vals.push(val),
+                None => return,
+            },
+            _ => return,
+        }
+    }
+    if let Some(fact) = Fact::from_vals(vals) {
+        let line = env.get(name).map_or(0, |k| k.line);
+        env.insert(name.clone(), Known { fact, line, bound: Some("matched arm".to_owned()) });
     }
 }
 

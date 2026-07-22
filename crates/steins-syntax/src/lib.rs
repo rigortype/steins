@@ -869,6 +869,21 @@ pub enum CondExpr {
     Opaque { reads: Vec<String> },
 }
 
+/// One arm of a structured [`StmtKind::Match`] (ADR-0031 Part B). `conditions`
+/// are the arm's comparison operands (a match/switch arm may list several:
+/// `1, 2 => …` / stacked `case 1: case 2:`); the arm is taken when the subject
+/// equals **any** of them (`===` for match, loose `==` for switch). `trace` is
+/// the arm body lowered by the same statement rules as every other sub-trace (a
+/// match arm's single body expression becomes a one-statement trace; a switch
+/// arm's statement list is lowered with its terminating `break` stripped — a
+/// `break` models "end of arm / fall through to after the construct", never a
+/// trace terminator, so it is simply removed during lowering).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MatchArmT {
+    pub conditions: Vec<CondOperand>,
+    pub trace: Vec<Stmt>,
+}
+
 /// One entry of a scope's linear trace IR (ADR-0001). A scope's body is lowered
 /// to an ordered list of these; anything the lowering does not recognize exactly
 /// becomes [`StmtKind::Barrier`] (over-lowering to `Barrier` is always sound —
@@ -907,6 +922,28 @@ pub enum StmtKind {
         then_trace: Vec<Stmt>,
         elseifs: Vec<(CondExpr, Vec<Stmt>)>,
         else_trace: Option<Vec<Stmt>>,
+    },
+    /// A structured statement-position `match` or `switch` (ADR-0031 Part B): the
+    /// trace models its arm control flow instead of erasing it. `subject` is the
+    /// scrutinee operand (`match ($subject)` / `switch ($subject)`); `arms` are
+    /// the conditional arms in source order; `default` is the `default`/`default:`
+    /// arm body when present. `loose` distinguishes the two comparison semantics:
+    /// `false` for `match` (strict `===`, first-match, and a missing `default`
+    /// throws `\UnhandledMatchError` on no match), `true` for `switch` (loose
+    /// `==`, and a missing `default` simply falls through on no match).
+    ///
+    /// Only constructs the lowering can fully model reach here — the subject and
+    /// every arm condition must lower to a bare variable or a literal, and (for
+    /// `switch`) every non-empty case must end in `break`/`return`/`throw`/`exit`
+    /// with no fall-through. Any construct that fails these stays [`StmtKind::Opaque`]
+    /// (partial structuring of a `match`/`switch` would be unsound for the
+    /// first-match and no-`default`-throws rules), so an unrepresentable arm makes
+    /// the WHOLE construct opaque, never a mixed lowering.
+    Match {
+        subject: CondOperand,
+        arms: Vec<MatchArmT>,
+        default: Option<Vec<Stmt>>,
+        loose: bool,
     },
     /// `throw <expr>;` — a trace terminator (the statement never falls through).
     /// `span` points at the `throw`. The thrown expression is not modeled; only
@@ -1792,6 +1829,27 @@ fn scan_throw_origins(
                 _ => out.push(ThrowOrigin { kind: ThrowKind::Taint, span: to_span(sc.span()), guards: snapshot() }),
             }
         }
+        // A `match` with no `default` arm can raise `\UnhandledMatchError` at
+        // runtime when the subject matches no arm (ADR-0031 Part B). This is a
+        // genuine *possible* throw of every default-less match — structural, like
+        // every other throw origin — so it is recorded here (env-independent);
+        // the trace walk separately proves when it is a *certain* terminator.
+        // `UnhandledMatchError` is an `Error` (unchecked), so it never enters
+        // `throw.undeclared`; it surfaces only in the annotate throws margin.
+        Node::Match(m) => {
+            if !m.arms.iter().any(mago_syntax::cst::MatchArm::is_default) {
+                out.push(ThrowOrigin {
+                    kind: ThrowKind::New(NameRef {
+                        raw: "UnhandledMatchError".to_owned(),
+                        kind: RefKind::FullyQualified,
+                        offset: to_span(m.span()).start,
+                    }),
+                    span: to_span(m.span()),
+                    guards: snapshot(),
+                });
+            }
+            // Fall through to descend into the arms for their own throws.
+        }
         // Nested scopes are their own concern — do not descend.
         Node::Function(_)
         | Node::Closure(_)
@@ -2334,13 +2392,17 @@ fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         // `if`/`elseif`/`else` is structured (ADR-0031 stage 1): its control flow
         // is modeled, not erased.
         Statement::If(if_stmt) => lower_if(if_stmt),
+        // A `switch` is structured (ADR-0031 Part B) when its subject and every
+        // case condition lower to a variable/literal AND every non-empty case
+        // ends in break/return/throw/exit (no fall-through); else it stays
+        // `Opaque` like the loop constructs below.
+        Statement::Switch(sw) => lower_switch(sw).unwrap_or_else(|| lower_opaque(s)),
         // Every OTHER control-flow construct stays `Opaque` (ADR-0027 ratchet) —
         // the walk forgets only its write/read set, not the whole env.
         Statement::While(_)
         | Statement::For(_)
         | Statement::Foreach(_)
         | Statement::DoWhile(_)
-        | Statement::Switch(_)
         | Statement::Try(_) => lower_opaque(s),
         // Everything else (declarations, `goto`, labels, `declare`, unset,
         // `__halt_compiler`, …) stays a full Barrier: the sound floor for
@@ -2408,6 +2470,213 @@ fn lower_trace(statements: &[Statement<'_>]) -> Vec<Stmt> {
         lower_stmt(s, &mut out);
     }
     out
+}
+
+/// Lower a match-arm body expression (`… => <expr>`) to a one-statement sub-trace.
+/// The body is an expression, so it reuses [`lower_expr_stmt`] (an arm body that
+/// is `throw …` therefore lowers to a real [`StmtKind::Throw`] terminator).
+fn lower_arm_body(expr: &Expression<'_>) -> Vec<Stmt> {
+    let st = lower_expr_stmt(expr);
+    vec![Stmt { span: to_span(expr.span()), ..st }]
+}
+
+/// Structure a statement-position `match ($subject) { … }` (ADR-0031 Part B).
+/// Returns `None` — falling back to `Opaque` — when the subject or any arm
+/// condition does not lower to a variable/literal, or when more than one
+/// `default` arm is present (partial structuring is unsound for the first-match
+/// and no-`default`-throws rules, so it is all-or-nothing).
+fn lower_match_stmt(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
+    let subject = usable_operand(m.expression)?;
+    let mut arms = Vec::new();
+    let mut default: Option<Vec<Stmt>> = None;
+    for arm in m.arms.iter() {
+        match arm {
+            mago_syntax::cst::MatchArm::Expression(a) => {
+                let mut conditions = Vec::new();
+                for c in a.conditions.iter() {
+                    conditions.push(usable_operand(c)?);
+                }
+                arms.push(MatchArmT { conditions, trace: lower_arm_body(a.expression) });
+            }
+            mago_syntax::cst::MatchArm::Default(a) => {
+                if default.is_some() {
+                    return None; // two defaults — give up (unreachable in valid PHP)
+                }
+                default = Some(lower_arm_body(a.expression));
+            }
+        }
+    }
+    Some(Stmt {
+        span: ZERO_SPAN,
+        kind: StmtKind::Match { subject, arms, default, loose: false },
+        invalidated: Vec::new(),
+    })
+}
+
+/// Structure a `switch ($subject) { … }` (ADR-0031 Part B) into the same
+/// [`StmtKind::Match`] node with `loose: true`. Returns `None` — falling back to
+/// `Opaque` — unless the subject and every case condition lower to a
+/// variable/literal AND every non-empty case ends in `break`/`return`/`throw`/
+/// `exit` with no fall-through. Empty case labels stack onto the following
+/// non-empty case as extra conditions (`case 1: case 2: body`), matching PHP
+/// fall-through-to-the-body semantics; a trailing `break` is stripped (it means
+/// end-of-arm, not a trace terminator). A stray `break`/`continue`/`goto` inside
+/// a case body (targeting the switch from within a nested `if`, say) makes the
+/// whole construct opaque — modeling it as an arm would be unsound.
+fn lower_switch(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
+    let subject = usable_operand(sw.expression)?;
+    let mut arms: Vec<MatchArmT> = Vec::new();
+    let mut default: Option<Vec<Stmt>> = None;
+    // Conditions of consecutive empty case labels, waiting to stack onto the next
+    // non-empty case body; `pending_default` records an empty `default:` label.
+    let mut pending: Vec<CondOperand> = Vec::new();
+    let mut pending_default = false;
+
+    for case in sw.body.cases() {
+        // The case's own comparison operand (None for `default`), rejected early
+        // if it does not lower to a variable/literal.
+        let cond = match case.expression() {
+            Some(e) => Some(usable_operand(e)?),
+            None => None,
+        };
+        if case.is_empty() {
+            // An empty label falls through to the next case body: remember it.
+            match cond {
+                Some(c) => pending.push(c),
+                None => {
+                    if default.is_some() {
+                        return None;
+                    }
+                    pending_default = true;
+                }
+            }
+            continue;
+        }
+        // A non-empty case must end cleanly: strip a trailing plain `break;`, else
+        // require a terminator; a stray jump anywhere in the body is unsound.
+        let raw = case.statements();
+        let (body, ends_break) = strip_trailing_break(raw)?;
+        if case_has_stray_jump(body) {
+            return None;
+        }
+        let trace = lower_trace(body);
+        if !ends_break {
+            // No break: the body must terminate, or it would fall through to the
+            // next case (which structuring cannot model).
+            let terminates = matches!(
+                trace.last().map(|s| &s.kind),
+                Some(StmtKind::Return { .. } | StmtKind::Throw { .. } | StmtKind::Exit { .. })
+            );
+            if !terminates {
+                return None;
+            }
+        }
+        // Build this arm, stacking any pending empty-label conditions in front.
+        match cond {
+            Some(c) if !pending_default => {
+                let mut conditions = std::mem::take(&mut pending);
+                conditions.push(c);
+                arms.push(MatchArmT { conditions, trace });
+            }
+            // This body is (or is reached by fall-through from) `default:`; a
+            // default subsumes any stacked case conditions (it catches all).
+            _ => {
+                if default.is_some() {
+                    return None;
+                }
+                default = Some(trace);
+            }
+        }
+        pending.clear();
+        pending_default = false;
+    }
+    // Trailing empty labels with no following body do nothing at runtime, but
+    // structuring them as no-op arms is fiddly; bail to Opaque (sound).
+    if !pending.is_empty() || pending_default {
+        return None;
+    }
+    Some(Stmt {
+        span: ZERO_SPAN,
+        kind: StmtKind::Match { subject, arms, default, loose: true },
+        invalidated: Vec::new(),
+    })
+}
+
+/// Lower an operand to a *usable* [`CondOperand`] — a bare variable or a literal —
+/// or `None` for anything else (a call, property fetch, arithmetic). Used to gate
+/// whether a `match`/`switch` can be structured at all.
+fn usable_operand(expr: &Expression<'_>) -> Option<CondOperand> {
+    match lower_cond_operand(expr) {
+        CondOperand::Other => None,
+        operand => Some(operand),
+    }
+}
+
+/// Split a case body into (body-without-terminating-break, ended-in-break). A
+/// trailing `break;` / `break 1;` is stripped; a `break N` (N > 1) or a
+/// non-literal level targets an outer construct — unrepresentable, so `None`.
+fn strip_trailing_break<'a, 'arena>(
+    raw: &'a [Statement<'arena>],
+) -> Option<(&'a [Statement<'arena>], bool)> {
+    match raw.last() {
+        Some(Statement::Break(b)) => {
+            if break_is_plain(b) { Some((&raw[..raw.len() - 1], true)) } else { None }
+        }
+        _ => Some((raw, false)),
+    }
+}
+
+/// Whether a `break` targets its immediately-enclosing construct (`break;` or
+/// `break 1;`) as opposed to an outer one (`break 2;`, `break $n;`).
+fn break_is_plain(b: &mago_syntax::cst::Break<'_>) -> bool {
+    match b.level {
+        None => true,
+        Some(e) => matches!(lower_arg_value(e), ArgValue::Int(1)),
+    }
+}
+
+/// Whether a switch-case body contains a `break`/`continue`/`goto` that would
+/// target the switch from inside the case (making arm modeling unsound). Nested
+/// loops and switches consume their own `break`/`continue`, so the scan does not
+/// descend into them; nested function-likes are separate scopes. Any `goto` at
+/// all disqualifies (its target is unbounded).
+fn case_has_stray_jump(body: &[Statement<'_>]) -> bool {
+    body.iter().any(|s| stmt_has_stray_jump(s))
+}
+
+fn stmt_has_stray_jump(s: &Statement<'_>) -> bool {
+    match s {
+        Statement::Break(_) | Statement::Continue(_) | Statement::Goto(_) => true,
+        // Nested loops/switch absorb their own break/continue — do not descend.
+        Statement::While(_)
+        | Statement::For(_)
+        | Statement::Foreach(_)
+        | Statement::DoWhile(_)
+        | Statement::Switch(_) => false,
+        _ => node_has_stray_jump(&Node::Statement(s)),
+    }
+}
+
+/// Recurse through a node's children looking for a stray jump, stopping at nested
+/// loops/switches (which consume their own) and nested function-like scopes.
+fn node_has_stray_jump(node: &Node<'_, '_>) -> bool {
+    node.children().iter().any(|child| match child {
+        Node::Break(_) | Node::Continue(_) | Node::Goto(_) => true,
+        Node::While(_)
+        | Node::For(_)
+        | Node::Foreach(_)
+        | Node::DoWhile(_)
+        | Node::Switch(_)
+        | Node::Function(_)
+        | Node::Closure(_)
+        | Node::ArrowFunction(_)
+        | Node::AnonymousClass(_)
+        | Node::Class(_)
+        | Node::Interface(_)
+        | Node::Trait(_)
+        | Node::Enum(_) => false,
+        other => node_has_stray_jump(other),
+    })
 }
 
 /// Lower a condition expression to a [`CondExpr`] (ADR-0031 stage 1). Recognized:
@@ -2576,13 +2845,15 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
                 Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated }
             }
         },
-        // A statement-level `match` is a control-flow construct: lower to
-        // `Opaque` over its subtree, like the block-form constructs above.
-        Expression::Match(_) => {
+        // A statement-position `match` (ADR-0031 Part B): structure its arms when
+        // the subject and every arm condition lower to a variable/literal; else
+        // fall back to `Opaque` over the whole subtree (partial structuring is
+        // unsound for the first-match / no-default-throws rules).
+        Expression::Match(m) => lower_match_stmt(m).unwrap_or_else(|| {
             let node = Node::Expression(expr);
             let (writes, reads, poisons) = opaque_sets(&node);
             Stmt { span: ZERO_SPAN, kind: StmtKind::Opaque { writes, reads, poisons }, invalidated: Vec::new() }
-        }
+        }),
         // `throw <expr>;` — a trace terminator (ADR-0031). Variables the thrown
         // expression hands to a call are still invalidated (by-ref conservatism),
         // though the terminator makes anything after it unreachable.
