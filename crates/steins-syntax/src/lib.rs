@@ -564,10 +564,10 @@ pub enum StmtKind {
     Echo(Vec<CallExpr>),
     /// A recognized *control-flow* construct (`if`/`while`/`for`/`foreach`/
     /// `do-while`/`switch`/`match`-statement/`try`/nested block) whose internal
-    /// data-flow the trace does not model, but whose **write set** it does. This
-    /// is the ADR-0027 ratchet applied to what used to be a blanket
+    /// data-flow the trace does not model, but whose **write set and read set** it
+    /// does. This is the ADR-0027 ratchet applied to what used to be a blanket
     /// [`StmtKind::Barrier`]: instead of erasing *all* known values, the walk
-    /// forgets only the variables the construct might touch.
+    /// forgets only the variables the construct might touch **or branch on**.
     ///
     /// * `writes` — the over-approximated set of variable names the subtree may
     ///   assign (any assignment lvalue, compound assign, increment/decrement,
@@ -576,11 +576,26 @@ pub enum StmtKind {
     ///   (by-ref conservatism). Over-collection is always sound — it only
     ///   forgets more. Nested function/closure bodies are separate scopes and
     ///   their internal writes are **not** counted.
+    /// * `reads` — every *other* variable the subtree merely *mentions*
+    ///   (conditions included), i.e. every direct variable in the subtree not
+    ///   already in `writes`. A construct that **reads** a variable may branch on
+    ///   it and early-return, so the fall-through path can *exclude* the currently-
+    ///   known value: continuing with the binding intact would assert an
+    ///   unreachable path (a real soundness hole — a `?int` guard `if ($x == null)
+    ///   { return; }` filters `null` out, yet the tail would otherwise still see
+    ///   `$x = null`). Invalidating reads too closes it. Over-collection is sound;
+    ///   nested function/closure bodies are not descended, same as `writes`.
     /// * `poisons` — `true` if the subtree contains any ADR-0001 poison marker
     ///   (reference/`global`/`static`/variable-variable/`extract`/`include`/
     ///   by-ref `use`, …). When set, the walk clears the whole env, exactly as a
     ///   `Barrier` would; the enclosing scope is independently poisoned too.
-    Opaque { writes: Vec<String>, poisons: bool },
+    ///
+    /// Remaining theoretical gap (NOT closed here; ADR-0027 ratchet direction): a
+    /// construct that early-returns on *every* branch makes all fall-through code
+    /// dead, so even a fact about a variable the construct never reads could
+    /// describe an unreachable path. Recovering that precision needs real
+    /// branch/reachability analysis, deferred until the trace models control flow.
+    Opaque { writes: Vec<String>, reads: Vec<String>, poisons: bool },
     /// Any construct the trace does not model *and* whose write set it cannot
     /// bound (`goto`, labels, `declare`, `__halt_compiler`, and anything the
     /// lowering is unsure of). Erases all known values — the sound floor.
@@ -1631,13 +1646,26 @@ fn named_call(expr: &Expression<'_>) -> Option<CallExpr> {
 /// its poison flag and its over-approximated write set (see the variant docs).
 fn lower_opaque(s: &Statement<'_>) -> Stmt {
     let node = Node::Statement(s);
-    let poisons = node_poisons(&node);
+    let (writes, reads, poisons) = opaque_sets(&node);
+    Stmt { kind: StmtKind::Opaque { writes, reads, poisons }, invalidated: Vec::new() }
+}
+
+/// Compute an `Opaque` construct's `(writes, reads, poisons)` over its subtree.
+/// `reads` is every direct variable mentioned that is not already a write —
+/// including branch conditions — so a construct that branches on a variable and
+/// early-returns invalidates the fall-through binding (soundness; see the
+/// [`StmtKind::Opaque`] docs). Nested function-like bodies are not descended.
+fn opaque_sets(node: &Node<'_, '_>) -> (Vec<String>, Vec<String>, bool) {
+    let poisons = node_poisons(node);
     let mut writes = Vec::new();
     // By-ref conservatism: every variable handed to any call in the subtree.
-    collect_call_vars(&node, &mut writes);
+    collect_call_vars(node, &mut writes);
     // Assignment / increment / foreach-binding / catch-param write targets.
-    collect_assign_writes(&node, &mut writes);
-    Stmt { kind: StmtKind::Opaque { writes, poisons }, invalidated: Vec::new() }
+    collect_assign_writes(node, &mut writes);
+    // Everything else the subtree merely reads / branches on.
+    let mut reads = Vec::new();
+    collect_read_vars(node, &writes, &mut reads);
+    (writes, reads, poisons)
 }
 
 /// Lower an expression-statement to a trace entry.
@@ -1687,11 +1715,8 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
         // `Opaque` over its subtree, like the block-form constructs above.
         Expression::Match(_) => {
             let node = Node::Expression(expr);
-            let poisons = node_poisons(&node);
-            let mut writes = Vec::new();
-            collect_call_vars(&node, &mut writes);
-            collect_assign_writes(&node, &mut writes);
-            Stmt { kind: StmtKind::Opaque { writes, poisons }, invalidated: Vec::new() }
+            let (writes, reads, poisons) = opaque_sets(&node);
+            Stmt { kind: StmtKind::Opaque { writes, reads, poisons }, invalidated: Vec::new() }
         }
         _ => Stmt { kind: StmtKind::Barrier, invalidated: Vec::new() },
     }
@@ -1795,6 +1820,35 @@ fn collect_direct_vars(node: &Node<'_, '_>, out: &mut Vec<String>) {
     }
     for child in node.children() {
         collect_direct_vars(&child, out);
+    }
+}
+
+/// Collect the **read set** of an `Opaque` construct: every direct variable
+/// mentioned anywhere in the subtree (conditions, call arguments, expressions)
+/// that is not already a `write`. Over-collection is sound (it only forgets
+/// more). Nested function-like bodies are their own scopes and are **not**
+/// descended, exactly as [`collect_assign_writes`] treats them.
+fn collect_read_vars(node: &Node<'_, '_>, writes: &[String], out: &mut Vec<String>) {
+    match node {
+        Node::DirectVariable(dv) => {
+            let name = strip_dollar(bytes_to_string(dv.name));
+            if !writes.contains(&name) && !out.contains(&name) {
+                out.push(name);
+            }
+        }
+        // Nested scopes are their own concern — do not read their internals.
+        Node::Function(_)
+        | Node::Closure(_)
+        | Node::ArrowFunction(_)
+        | Node::AnonymousClass(_)
+        | Node::Class(_)
+        | Node::Interface(_)
+        | Node::Trait(_)
+        | Node::Enum(_) => return,
+        _ => {}
+    }
+    for child in node.children() {
+        collect_read_vars(&child, writes, out);
     }
 }
 
