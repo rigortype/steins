@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use steins_db::{Project, SourceFile, SteinsDatabase, parse as parse_tree};
 use steins_infer::{
     Diagnostic, LineFact, SOUND_SUBSET_NOTICE, SidecarFolder, annotate_file, annotate_project,
-    apply_inline_ignores, check_project,
+    apply_inline_ignores, check_project, is_vendor_path,
 };
 use steins_syntax::SourceTree;
 
@@ -38,7 +38,7 @@ fn main() -> ExitCode {
         }
         None => {
             eprintln!(
-                "usage: steins check [--format text|json] [--no-php] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
+                "usage: steins check [--format text|json] [--no-php] [--vendor-diagnostics] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
             );
             eprintln!("       steins annotate [--no-php] <file.php>");
             ExitCode::from(2)
@@ -51,6 +51,7 @@ fn run_check(args: &[String]) -> ExitCode {
     let mut no_php = false;
     let mut set_baseline = false;
     let mut ignore_baseline = false;
+    let mut vendor_diagnostics = false;
     let mut baseline_path: Option<String> = None;
     let mut paths: Vec<String> = Vec::new();
     let mut i = 0;
@@ -58,6 +59,10 @@ fn run_check(args: &[String]) -> ExitCode {
         match args[i].as_str() {
             "--no-php" => {
                 no_php = true;
+                i += 1;
+            }
+            "--vendor-diagnostics" => {
+                vendor_diagnostics = true;
                 i += 1;
             }
             "--set-baseline" => {
@@ -142,7 +147,20 @@ fn run_check(args: &[String]) -> ExitCode {
         inputs.push(SourceFile::new(&db, path, text));
     }
     let project = Project::new(&db, inputs.clone());
-    let findings: Vec<Diagnostic> = check_project(&db, project, &mut folder);
+    let mut findings: Vec<Diagnostic> = check_project(&db, project, &mut folder);
+
+    // Vendor filtering applies FIRST (ADR-0015), before inline ignores and the
+    // baseline: vendor code is fully indexed and inferred, but a finding whose
+    // path is inside a `vendor/` directory is suppressed by default and never
+    // reaches — nor consumes — a later channel (a vendor finding must not eat a
+    // baseline entry). `--vendor-diagnostics` opts back in, sending vendor
+    // findings through the normal channels like any first-party finding.
+    let mut vendor_suppressed = 0usize;
+    if !vendor_diagnostics {
+        let before = findings.len();
+        findings.retain(|d| !is_vendor_path(&d.path));
+        vendor_suppressed = before - findings.len();
+    }
 
     // Inline `@steins-ignore` applies first (ADR-0023): a finding suppressed
     // inline never reaches — nor consumes — the baseline channel.
@@ -190,8 +208,8 @@ fn run_check(args: &[String]) -> ExitCode {
     });
 
     match format {
-        Format::Text => print_text(&displayed, inline.suppressed, baselined, stale),
-        Format::Json => print_json(&displayed, inline.suppressed, baselined),
+        Format::Text => print_text(&displayed, vendor_suppressed, inline.suppressed, baselined, stale),
+        Format::Json => print_json(&displayed, vendor_suppressed, inline.suppressed, baselined),
     }
 
     if displayed.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
@@ -402,11 +420,21 @@ fn render_annotation(text: &str, facts: &[LineFact]) -> String {
     out
 }
 
-fn print_text(findings: &[Diagnostic], suppressed: usize, baselined: usize, stale: usize) {
+fn print_text(
+    findings: &[Diagnostic],
+    vendor_suppressed: usize,
+    suppressed: usize,
+    baselined: usize,
+    stale: usize,
+) {
     for d in findings {
         println!("{}:{}:{}: error[{}]: {}", d.path, d.line, d.column, d.id, d.message);
     }
-    // Suppression accounting (ADR-0022/0023), each line printed only when nonzero.
+    // Suppression accounting (ADR-0022/0023/0015), each line printed only when
+    // nonzero. Vendor is the first channel (ADR-0015), so it prints first.
+    if vendor_suppressed > 0 {
+        println!("{vendor_suppressed} findings in vendor suppressed (--vendor-diagnostics to show)");
+    }
     if suppressed > 0 {
         println!("{suppressed} diagnostics suppressed by inline ignores");
     }
@@ -418,7 +446,7 @@ fn print_text(findings: &[Diagnostic], suppressed: usize, baselined: usize, stal
     }
 }
 
-fn print_json(findings: &[Diagnostic], suppressed: usize, baselined: usize) {
+fn print_json(findings: &[Diagnostic], vendor_suppressed: usize, suppressed: usize, baselined: usize) {
     let array: Vec<serde_json::Value> = findings
         .iter()
         .map(|d| {
@@ -433,6 +461,7 @@ fn print_json(findings: &[Diagnostic], suppressed: usize, baselined: usize) {
         .collect();
     let doc = serde_json::json!({
         "findings": array,
+        "vendor_suppressed": vendor_suppressed,
         "suppressed": suppressed,
         "baselined": baselined,
     });
