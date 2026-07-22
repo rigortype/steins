@@ -12,6 +12,11 @@
 //! and genuinely-unresolved names, which is exactly the signal that should drive
 //! the catalog's effect-coloring order. Names are folded case-insensitively by
 //! last namespace segment.
+//!
+//! Private-corpus scope: `freq` measures ONLY the pinned public corpus
+//! ([`PACKAGES`]). Local projects from `corpus.local.toml` (ADR-0013 §4) are
+//! deliberately ignored here — the committed frequency report must never contain
+//! private-code measurements. (They are consumed only by `fp-gate`.)
 
 use std::collections::HashMap;
 

@@ -181,6 +181,19 @@ fn fold_value_to_arg(value: &FoldValue) -> Option<ArgValue> {
     })
 }
 
+/// Whether a diagnostic path lies inside a `vendor/` directory (ADR-0015).
+///
+/// Vendor code is fully indexed and inferred (shapes/values/effects flow
+/// through it), but its diagnostics are off by default: a finding whose path has
+/// a `vendor` **directory component** — a top-level `vendor/…` or any nested
+/// `…/vendor/…` — is vendor. The match is on whole path components (split on
+/// both `/` and `\`), so a sibling like `vendor_proj/` or a file named
+/// `vendor.php` is *not* vendor. The trailing filename can never equal `vendor`
+/// (it carries a `.php` extension), so a bare component test is exact.
+pub fn is_vendor_path(path: &str) -> bool {
+    path.split(['/', '\\']).any(|component| component == "vendor")
+}
+
 /// A proof-layer finding. Kept deliberately flat so the CLI can render text or
 /// JSON without knowing anything about the analysis.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

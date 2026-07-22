@@ -1,2 +1,5 @@
 /target
 /corpus
+# Private-corpus injection point (ADR-0013 §4): local FP-gate projects live
+# outside the repo so non-public codebases never land in git.
+/corpus.local.toml

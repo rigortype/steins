@@ -219,6 +219,54 @@ fn annotate_errors_politely_on_a_directory() {
     assert!(r.stderr.contains("not a directory"), "polite message, got:\n{}", r.stderr);
 }
 
+// ---- vendor diagnostics (ADR-0015): off by default -----------------------
+
+#[test]
+fn vendor_findings_suppressed_by_default_shown_with_flag() {
+    let dir = fixture("vendor_proj");
+    let vendor_lib = dir.join("vendor/acme/lib.php").to_string_lossy().into_owned();
+
+    // Default: only the first-party width("abc") finding is reported; the
+    // vendor height("xyz") finding is suppressed and summarized. Exit reflects
+    // the first-party finding only.
+    let def = run(&["check", dir.to_str().unwrap()]);
+    assert_eq!(def.code, 1, "first-party finding → exit 1, got:\n{}", def.stdout);
+    assert!(def.stdout.contains("to width() cannot become int $w"), "first-party shown, got:\n{}", def.stdout);
+    assert!(!def.stdout.contains("to height()"), "vendor finding hidden, got:\n{}", def.stdout);
+    assert!(!def.stdout.contains(&vendor_lib), "no vendor path printed, got:\n{}", def.stdout);
+    assert!(
+        def.stdout.contains("1 findings in vendor suppressed (--vendor-diagnostics to show)"),
+        "vendor summary line, got:\n{}",
+        def.stdout
+    );
+
+    // --vendor-diagnostics: both findings reported, no summary line.
+    let show = run(&["check", "--vendor-diagnostics", dir.to_str().unwrap()]);
+    assert_eq!(show.code, 1);
+    assert!(show.stdout.contains("to width() cannot become int $w"), "first-party shown");
+    assert!(show.stdout.contains("to height() cannot become int $h"), "vendor shown, got:\n{}", show.stdout);
+    assert!(!show.stdout.contains("in vendor suppressed"), "no summary when shown, got:\n{}", show.stdout);
+}
+
+#[test]
+fn vendor_suppressed_field_present_in_json() {
+    let dir = fixture("vendor_proj");
+
+    // Default JSON: one finding (first-party), vendor_suppressed = 1.
+    let def = run(&["check", "--format", "json", dir.to_str().unwrap()]);
+    let v: serde_json::Value = serde_json::from_str(&def.stdout).expect("json object");
+    assert_eq!(v["vendor_suppressed"], 1, "got:\n{}", def.stdout);
+    let arr = v["findings"].as_array().expect("findings array");
+    assert_eq!(arr.len(), 1, "only the first-party finding, got:\n{}", def.stdout);
+    assert!(arr[0]["message"].as_str().unwrap().contains("width()"));
+
+    // With the flag: two findings, vendor_suppressed = 0.
+    let show = run(&["check", "--vendor-diagnostics", "--format", "json", dir.to_str().unwrap()]);
+    let v: serde_json::Value = serde_json::from_str(&show.stdout).expect("json object");
+    assert_eq!(v["vendor_suppressed"], 0, "got:\n{}", show.stdout);
+    assert_eq!(v["findings"].as_array().unwrap().len(), 2, "both findings, got:\n{}", show.stdout);
+}
+
 #[test]
 fn fold_strval_flagged_in_strict_silent_in_coercive() {
     let strict = run(&["check", fixture("fold_strval_strict.php").to_str().unwrap()]);

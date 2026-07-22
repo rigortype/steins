@@ -9,6 +9,7 @@
 //! binary) so it reads parse errors and call data straight off `SourceTree`.
 
 mod corpus;
+mod corpus_local;
 mod freq;
 mod gate;
 mod sync;
