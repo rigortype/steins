@@ -34,3 +34,14 @@ entries:
 **Deferred until needed** — narrowing details (co-evolving with the branch
 analysis ratchet), template variance in full, subtraction types: decided in
 envelope-checking priority order, not up front.
+
+## Governing rule (amendment)
+
+Vocabulary and minor judgments track PHPStan's model (yes/no/maybe,
+message idioms, familiar spellings) — familiarity is cheap and compounding.
+But when a decision touches the *nature of the inference* and a
+fundamentally better outcome is in reach, Steins replaces the PHPStan
+approach **without hesitation** (precedents: call-site propagation over
+modular analysis, ADR-0001; no template solver where propagation reaches,
+ADR-0032). The divergence registry is what makes this boldness safe:
+every replacement is recorded, justified, and traceable back upstream.
