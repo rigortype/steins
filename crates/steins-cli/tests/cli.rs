@@ -62,8 +62,11 @@ fn clean_fixtures_exit_zero() {
 fn json_format_smoke() {
     let r = run(&["check", "--format", "json", fixture("demo.php").to_str().unwrap()]);
     assert_eq!(r.code, 1);
-    let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid json array");
-    let arr = v.as_array().expect("array");
+    let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid json object");
+    // The document is now an object: findings array plus suppression counts.
+    assert_eq!(v["suppressed"], 0);
+    assert_eq!(v["baselined"], 0);
+    let arr = v["findings"].as_array().expect("findings array");
     assert_eq!(arr.len(), 1);
     let d = &arr[0];
     assert_eq!(d["id"], "type.argument-mismatch");

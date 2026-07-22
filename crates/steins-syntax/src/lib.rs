@@ -38,6 +38,8 @@ use mago_syntax::cst::Node;
 use mago_syntax::cst::PartialArgument;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Statement;
+use mago_syntax::cst::Trivia;
+use mago_syntax::cst::TriviaKind;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::UseItems;
 use mago_syntax::cst::Variable;
@@ -634,6 +636,31 @@ pub struct ParseError {
     pub span: Span,
 }
 
+/// The lexical form of a source [`Comment`] — the three trivia comment shapes the
+/// `@steins-ignore` channel reads (ADR-0023). Doc-block (`/** */`) comments are
+/// exposed too so a directive placed in one is still seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CommentKind {
+    /// `// …` single-line comment.
+    Line,
+    /// `# …` hash comment.
+    Hash,
+    /// `/* … */` block comment.
+    Block,
+    /// `/** … */` doc-block comment.
+    DocBlock,
+}
+
+/// A comment trivium recovered from the parse (ADR-0023 inline-ignore channel).
+/// `text` is the raw comment spelling including its delimiters (`// …`, `# …`,
+/// `/* … */`); the suppression layer scans it for `@steins-ignore`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Comment {
+    pub kind: CommentKind,
+    pub span: Span,
+    pub text: String,
+}
+
 /// An owned, Mago-free lowering of one parsed PHP file — the syntax-tree
 /// contract for the slice.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -644,6 +671,8 @@ pub struct SourceTree {
     calls: Vec<CallExpr>,
     scopes: Vec<Scope>,
     parse_errors: Vec<ParseError>,
+    /// The comment trivia in the file, in source order (ADR-0023 inline ignores).
+    comments: Vec<Comment>,
     /// The namespace contexts of the file; index 0 is always the global context.
     contexts: Vec<NsCtx>,
     /// One `(start, end, ctx_index)` per namespace declaration in the file, so a
@@ -679,6 +708,10 @@ impl SourceTree {
         let mut classes = lower_classes(&Node::Program(program), &aliases);
         let scopes = lower_scopes(program, &contexts, &regions);
 
+        // Comment trivia (ADR-0023 inline ignores): whitespace trivia is dropped;
+        // every comment shape is kept with its raw spelling and span.
+        let comments: Vec<Comment> = program.trivia.iter().filter_map(lower_comment).collect();
+
         // Fill the lowercase-normalized FQN on every declaration from the context
         // that encloses its name.
         for f in &mut lowered.functions {
@@ -701,6 +734,7 @@ impl SourceTree {
             calls: lowered.calls,
             scopes,
             parse_errors,
+            comments,
             contexts,
             regions,
             line_starts: line_starts(source),
@@ -787,6 +821,25 @@ impl SourceTree {
     #[must_use]
     pub fn parse_errors(&self) -> &[ParseError] {
         &self.parse_errors
+    }
+
+    /// The comment trivia found in the file, in source order (ADR-0023 inline
+    /// `@steins-ignore` channel). Whitespace trivia is not included.
+    #[must_use]
+    pub fn comments(&self) -> &[Comment] {
+        &self.comments
+    }
+
+    /// Whether everything on `offset`'s line *before* `offset` is whitespace —
+    /// i.e. the token at `offset` is the first non-whitespace on its line. Drives
+    /// the `@steins-ignore` placement rule (ADR-0023): a comment that leads its
+    /// line suppresses the *next* line; a trailing one suppresses *its own* line.
+    #[must_use]
+    pub fn is_line_leading(&self, offset: u32) -> bool {
+        let line_idx = self.line_starts.partition_point(|&s| s <= offset).saturating_sub(1);
+        let line_start = self.line_starts.get(line_idx).copied().unwrap_or(0) as usize;
+        let end = (offset as usize).min(self.text.len());
+        self.text.get(line_start..end).is_none_or(|s| s.trim().is_empty())
     }
 
     /// Resolve a byte offset to a 1-based line/column (column counted in
@@ -1928,6 +1981,18 @@ fn fqn_of(ctx: &NsCtx, name: &str) -> String {
 
 fn to_span(span: mago_span::Span) -> Span {
     Span { start: span.start.offset, end: span.end.offset }
+}
+
+/// Lower one trivium to a [`Comment`], dropping whitespace trivia (`None`).
+fn lower_comment(t: &Trivia<'_>) -> Option<Comment> {
+    let kind = match t.kind {
+        TriviaKind::SingleLineComment => CommentKind::Line,
+        TriviaKind::HashComment => CommentKind::Hash,
+        TriviaKind::MultiLineComment => CommentKind::Block,
+        TriviaKind::DocBlockComment => CommentKind::DocBlock,
+        TriviaKind::WhiteSpace => return None,
+    };
+    Some(Comment { kind, span: to_span(t.span), text: bytes_to_string(t.value) })
 }
 
 fn bytes_to_string(bytes: &[u8]) -> String {
