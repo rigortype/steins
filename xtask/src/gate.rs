@@ -109,7 +109,17 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // released test code, never runtime findings — the runtime gate stays GREEN.
     // Class-shaped `@param`s are held silent against scalar facts (template safety),
     // so no template FPs. Baseline moved deliberately per ADR-0030/0035.
-    ("pxxxx-monorepo", 404),
+    //
+    // 404 → 405 (+1) with the ADR-0036 object-state milestone: the new
+    // `phpdoc.property-mismatch` check (a proven/abstract value assigned to a
+    // property whose `@var` contract definitely rejects it). The single pxxxx
+    // increase is a TRUE finding — a model class's `$id` property is `@var
+    // numeric-string`, and a test assigns an int literal to it (a value that
+    // is not a numeric *string*); PHPStan flags the identical `assign.propertyType`.
+    // Property checks run only in the plain per-scope pass (never under a binding
+    // descent, whose caller values in-body guards would narrow), so the descent-bound
+    // guard-blind candidates seen mid-development do not reach the gate.
+    ("pxxxx-monorepo", 405),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).
