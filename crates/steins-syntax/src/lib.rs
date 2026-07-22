@@ -24,12 +24,16 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::Function;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Hint;
+use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::UnaryPrefixOperator;
+use mago_syntax::cst::UseItems;
 use mago_syntax::cst::Variable;
+
+use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
 // Public, Mago-free representation.
@@ -94,6 +98,37 @@ pub struct Param {
     pub span: Span,
 }
 
+/// A structural effect-origin candidate found by scanning a function body's CST
+/// subtree (ADR-0005 effect envelopes). Syntax only reports *where* a primitive
+/// effect could arise; the catalog/inference layer decides which are proven
+/// findings (uncatalogued builtins widen to silence, same-file user calls become
+/// propagation edges — [`steins_catalog::effect_labels`] and the effects pass).
+///
+/// The scan does **not** descend into nested function/closure/class bodies —
+/// those are separate scopes (closures are deferred in this slice). It *does*
+/// see constructs nested inside control flow (an `echo` inside an `if`), which
+/// is why the effects pass reads this instead of the linear trace.
+///
+/// The scan is **structural**, not reachability-aware: an `echo` in provably
+/// dead code is still reported as an origin. This is deliberate — an effect
+/// envelope (ADR-0005) is a contract about the function's *code*, not a single
+/// execution path, so the mere presence of an effectful construct in the body is
+/// what `Pure` forbids.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum EffectOrigin {
+    /// A call to a statically-named function `name` (the last, unqualified
+    /// segment) at `span` (the callee identifier). May resolve to a builtin
+    /// (classified via the catalog) or a same-file user function (an effect
+    /// propagation edge). Dynamic and method calls are not recorded.
+    Call { name: String, span: Span },
+    /// An `echo` / `print` / short-echo (`<?=`) construct at `span` — the
+    /// `output` effect. `keyword` is the spelling for diagnostics.
+    Output { keyword: &'static str, span: Span },
+    /// An `exit` / `die` construct at `span` — the `exit` effect (ADR-0019 rule
+    /// 4: `Pure` forbids exit). `keyword` is the spelling for diagnostics.
+    Exit { keyword: &'static str, span: Span },
+}
+
 /// A user-defined function declaration (top-level or namespaced). `name` is the
 /// simple (unqualified) name as written at the declaration site.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -101,6 +136,15 @@ pub struct FunctionDecl {
     pub name: String,
     pub params: Vec<Param>,
     pub span: Span,
+    /// The span of a recognized `#[\Steins\Pure]` attribute on this function, if
+    /// present (ADR-0006). `Some` opts the function into always-on envelope
+    /// checking (ADR-0005). Recognition is conservative — see [`lower_function`].
+    pub pure_envelope: Option<Span>,
+    /// Every structural effect-origin candidate in the body subtree, in source
+    /// order (see [`EffectOrigin`]). Computed for *all* functions, not just
+    /// `Pure`-declared ones, because the effects pass propagates a callee's
+    /// effects to `Pure` callers regardless of the callee's own annotations.
+    pub effect_origins: Vec<EffectOrigin>,
 }
 
 /// The value of a call argument (or an assignment right-hand side), restricted
@@ -306,8 +350,12 @@ impl SourceTree {
         let file_id = FileId::new(b"<steins>");
         let program = mago_syntax::parser::parse_file_content(&arena, file_id, source.as_bytes());
 
+        // File-level `use` imports that bind the `Steins\Pure` class to a local
+        // name, so a bare `#[Pure]` / aliased `#[P]` attribute can be recognized.
+        let pure_aliases = collect_pure_aliases(&Node::Program(program));
+
         let mut lowered = Lowered::default();
-        walk(&Node::Program(program), &mut lowered);
+        walk(&Node::Program(program), &pure_aliases, &mut lowered);
 
         let scopes = lower_scopes(program);
 
@@ -382,19 +430,19 @@ struct Lowered {
     calls: Vec<CallExpr>,
 }
 
-fn walk(node: &Node<'_, '_>, out: &mut Lowered) {
+fn walk(node: &Node<'_, '_>, pure_aliases: &HashSet<String>, out: &mut Lowered) {
     match node {
-        Node::Function(f) => out.functions.push(lower_function(f)),
+        Node::Function(f) => out.functions.push(lower_function(f, pure_aliases)),
         Node::FunctionCall(c) => out.calls.push(lower_call(c)),
         Node::DeclareItem(d) if is_strict_types_one(d) => out.strict_types = true,
         _ => {}
     }
     for child in node.children() {
-        walk(&child, out);
+        walk(&child, pure_aliases, out);
     }
 }
 
-fn lower_function(f: &Function<'_>) -> FunctionDecl {
+fn lower_function(f: &Function<'_>, pure_aliases: &HashSet<String>) -> FunctionDecl {
     let params = f
         .parameter_list
         .parameters
@@ -408,7 +456,141 @@ fn lower_function(f: &Function<'_>) -> FunctionDecl {
         })
         .collect();
 
-    FunctionDecl { name: bytes_to_string(f.name.value), params, span: to_span(f.name.span()) }
+    let pure_envelope = function_pure_envelope(f, pure_aliases);
+
+    let mut effect_origins = Vec::new();
+    for s in f.body.statements.iter() {
+        scan_effect_origins(&Node::Statement(s), &mut effect_origins);
+    }
+
+    FunctionDecl {
+        name: bytes_to_string(f.name.value),
+        params,
+        span: to_span(f.name.span()),
+        pure_envelope,
+        effect_origins,
+    }
+}
+
+/// The canonical, case-folded identity of the `Steins\Pure` class — leading
+/// namespace separators stripped, ASCII-lowercased (PHP class names are
+/// case-insensitive).
+const PURE_CLASS: &str = "steins\\pure";
+
+/// Normalize an attribute / use identifier to compare against [`PURE_CLASS`]:
+/// drop a leading `\` (fully-qualified spelling) and lowercase.
+fn normalize_class(name: &str) -> String {
+    name.trim_start_matches('\\').to_ascii_lowercase()
+}
+
+/// Collect the set of local names (lowercased) that a file's `use` statements
+/// bind to `Steins\Pure`, so a bare `#[Pure]` or aliased `#[P]` attribute can be
+/// resolved. `use Steins\Pure;` binds `pure`; `use Steins\Pure as X;` binds `x`.
+///
+/// Only the plain `use A\B;` / `use A\B as C;` sequence form is lowered (the
+/// grouped `use A\{B};` form is not) — a miss here only *fails to recognize* a
+/// Pure envelope, which is the conservative side: it never imposes checks the
+/// author did not ask for.
+fn collect_pure_aliases(node: &Node<'_, '_>) -> HashSet<String> {
+    let mut aliases = HashSet::new();
+    collect_pure_aliases_into(node, &mut aliases);
+    aliases
+}
+
+fn collect_pure_aliases_into(node: &Node<'_, '_>, out: &mut HashSet<String>) {
+    if let Node::Use(u) = node
+        && let UseItems::Sequence(seq) = &u.items
+    {
+        for item in seq.items.iter() {
+            let full = bytes_to_string(item.name.value());
+            if normalize_class(&full) != PURE_CLASS {
+                continue;
+            }
+            // The bound local name: the explicit alias, else the last segment.
+            let local = match &item.alias {
+                Some(a) => bytes_to_string(a.identifier.value),
+                None => bytes_to_string(item.name.last_segment()),
+            };
+            out.insert(local.to_ascii_lowercase());
+        }
+    }
+    for child in node.children() {
+        collect_pure_aliases_into(&child, out);
+    }
+}
+
+/// Recognize a `#[\Steins\Pure]` envelope attribute on a function, returning its
+/// span. Recognition is deliberately conservative (a false match imposes
+/// always-on checks the author never requested): it accepts only
+///
+/// * a fully-qualified `\Steins\Pure` or qualified `Steins\Pure` name, or
+/// * a bare / aliased name that a `use Steins\Pure[ as X];` import binds
+///   (`pure_aliases`).
+///
+/// So JetBrains' `#[Pure]` **without** the import, and `#[JetBrains\PhpStorm\Pure]`,
+/// do not match. Matching is case-insensitive (PHP class-name semantics).
+fn function_pure_envelope(f: &Function<'_>, pure_aliases: &HashSet<String>) -> Option<Span> {
+    for list in f.attribute_lists.iter() {
+        for attr in list.attributes.iter() {
+            let norm = normalize_class(&bytes_to_string(attr.name.value()));
+            let matched = match attr.name {
+                // A bare name matches only via an in-file `use Steins\Pure`.
+                Identifier::Local(_) => pure_aliases.contains(&norm),
+                // A qualified / fully-qualified name matches `Steins\Pure` itself.
+                Identifier::Qualified(_) | Identifier::FullyQualified(_) => norm == PURE_CLASS,
+            };
+            if matched {
+                return Some(to_span(attr.span()));
+            }
+        }
+    }
+    None
+}
+
+/// Walk a function-body subtree, appending every [`EffectOrigin`] found. Does not
+/// descend into nested scopes (function/closure/arrow/class-like bodies), whose
+/// effects are their own concern.
+fn scan_effect_origins(node: &Node<'_, '_>, out: &mut Vec<EffectOrigin>) {
+    match node {
+        // A statically-named call is either a builtin (catalog-classified) or a
+        // same-file user function (a propagation edge) — the effects pass decides.
+        Node::FunctionCall(fc) => {
+            if let Expression::Identifier(id) = fc.function {
+                out.push(EffectOrigin::Call {
+                    name: bytes_to_string(id.last_segment()),
+                    span: to_span(id.span()),
+                });
+            }
+        }
+        // Output-stream writes.
+        Node::Echo(e) => out.push(EffectOrigin::Output { keyword: "echo", span: to_span(e.span()) }),
+        Node::EchoTag(e) => {
+            out.push(EffectOrigin::Output { keyword: "echo", span: to_span(e.span()) });
+        }
+        Node::PrintConstruct(p) => {
+            out.push(EffectOrigin::Output { keyword: "print", span: to_span(p.span()) });
+        }
+        // Non-local program exit.
+        Node::ExitConstruct(x) => {
+            out.push(EffectOrigin::Exit { keyword: "exit", span: to_span(x.span()) });
+        }
+        Node::DieConstruct(d) => {
+            out.push(EffectOrigin::Exit { keyword: "die", span: to_span(d.span()) });
+        }
+        // Nested scopes — do not descend (closures deferred this slice).
+        Node::Function(_)
+        | Node::Closure(_)
+        | Node::ArrowFunction(_)
+        | Node::AnonymousClass(_)
+        | Node::Class(_)
+        | Node::Interface(_)
+        | Node::Trait(_)
+        | Node::Enum(_) => return,
+        _ => {}
+    }
+    for child in node.children() {
+        scan_effect_origins(&child, out);
+    }
 }
 
 /// Lower a type hint to a simple scalar type, or `None` for anything the slice

@@ -16,11 +16,16 @@ use std::collections::{HashMap, HashSet};
 use steins_db::{Db, SourceFile, function_index, parse};
 use steins_sidecar::{FoldArg, FoldResult, FoldValue, Sidecar};
 use steins_syntax::{
-    ArgValue, CallExpr, FunctionDecl, ParamType, ScalarType, Scope, SourceTree, StmtKind,
+    ArgValue, CallExpr, EffectOrigin, FunctionDecl, ParamType, ScalarType, Scope, SourceTree,
+    StmtKind,
 };
 
-/// The registry id for the one check this crate emits (ADR-0022).
+/// The registry id for the `type.argument-mismatch` proof-layer check (ADR-0022).
 pub const ID: &str = "type.argument-mismatch";
+
+/// The registry id for the effect-envelope check (ADR-0005/0022): a function
+/// declared `#[\Steins\Pure]` whose inferred effects exceed the empty envelope.
+pub const EFFECT_ID: &str = "effect.envelope-exceeded";
 
 /// The maximum depth of interprocedural argument-binding descent (Feature B).
 ///
@@ -267,6 +272,10 @@ pub fn check_with(
         analyze_scope(&cx, folder, scope, HashMap::new(), None, &mut out);
     }
 
+    // --- Effects pass (ADR-0005): `#[\Steins\Pure]` envelope checking. Needs no
+    // folder/sidecar — it reads only the catalog and CST-derived effect origins.
+    out.extend(effect_diagnostics(tree, functions, path));
+
     // Global dedup (Feature B): the same finding can be reached both by a scope's
     // empty-env walk and by a binding descent into that scope, or by a diamond of
     // binding paths. Identical `(id, path, line, column, message)` tuples collapse
@@ -279,6 +288,174 @@ pub fn check_with(
 fn dedup(out: &mut Vec<Diagnostic>) {
     let mut seen: HashSet<Diagnostic> = HashSet::new();
     out.retain(|d| seen.insert(d.clone()));
+}
+
+// ---------------------------------------------------------------------------
+// Effects pass (ADR-0005): `#[\Steins\Pure]` envelope checking, proven only.
+// ---------------------------------------------------------------------------
+
+/// One proven effect a function carries, with the provenance a transitive `via`
+/// message needs. Two effects are the same iff their `(label, origin, line)`
+/// agree, so the fixpoint deduplicates naturally.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct EffectFinding {
+    /// The effect label (ADR-0018 dot-path), e.g. `nondet.random`, `io.fs.write`.
+    label: String,
+    /// The ultimate origin's spelling: a builtin name, or `echo`/`print`/
+    /// `exit`/`die`. Preserved verbatim as effects propagate up call edges, so a
+    /// transitive finding names where the effect truly arises.
+    origin: String,
+    /// 1-based line of the ultimate origin (in whichever body defines it).
+    line: u32,
+}
+
+/// Effect-envelope diagnostics for one file (ADR-0005), **proven violations
+/// only**. A function declared `#[\Steins\Pure]` must have no effects; each
+/// proven origin in (or transitively reachable from) its body is one finding.
+///
+/// Silent by construction — the deferred "cannot-verify" maybe-diagnostic of the
+/// design (ADR-0005): uncatalogued builtins ([`steins_catalog::effect_labels`]
+/// `None`), dynamic and method calls (never recorded as an [`EffectOrigin`]),
+/// `throw` (permitted by `Pure`, ADR-0006), and closures nested in the body
+/// (separate scopes, deferred this slice). `exit`/`die` **are** caught
+/// structurally (ADR-0019 rule 4).
+///
+/// The same-file call graph is closed with a monotone fixpoint (effects of a
+/// function = its own proven origins ∪ the effects of its same-file callees), so
+/// direct and mutual recursion converge without looping.
+fn effect_diagnostics(tree: &SourceTree, functions: &[FunctionDecl], path: &str) -> Vec<Diagnostic> {
+    // Fast path: with no envelope in the file there is nothing to check.
+    if functions.iter().all(|f| f.pure_envelope.is_none()) {
+        return Vec::new();
+    }
+
+    let user_names: HashSet<&str> = functions.iter().map(|f| f.name.as_str()).collect();
+
+    // Per function name: its own proven origins (`direct`) and its same-file
+    // callee names (`edges`). Unioned across any duplicate-named declarations —
+    // a redeclaration is a PHP fatal, so precision there is moot.
+    let mut direct: HashMap<String, HashSet<EffectFinding>> = HashMap::new();
+    let mut edges: HashMap<String, HashSet<String>> = HashMap::new();
+    for f in functions {
+        let d = direct.entry(f.name.clone()).or_default();
+        let e = edges.entry(f.name.clone()).or_default();
+        for origin in &f.effect_origins {
+            match origin {
+                EffectOrigin::Call { name, span } => {
+                    if user_names.contains(name.as_str()) {
+                        // Same-file user call: an effect-propagation edge.
+                        e.insert(name.clone());
+                    } else if let Some(labels) = steins_catalog::effect_labels(name) {
+                        // Builtin: `Some([])` (pure) yields nothing; `None`
+                        // (uncatalogued) is skipped here entirely (widen/silent).
+                        let line = tree.position(span.start).line;
+                        for &label in labels {
+                            d.insert(EffectFinding {
+                                label: label.to_owned(),
+                                origin: name.clone(),
+                                line,
+                            });
+                        }
+                    }
+                }
+                EffectOrigin::Output { keyword, span } => {
+                    d.insert(EffectFinding {
+                        label: "output".to_owned(),
+                        origin: (*keyword).to_owned(),
+                        line: tree.position(span.start).line,
+                    });
+                }
+                EffectOrigin::Exit { keyword, span } => {
+                    d.insert(EffectFinding {
+                        label: "exit".to_owned(),
+                        origin: (*keyword).to_owned(),
+                        line: tree.position(span.start).line,
+                    });
+                }
+            }
+        }
+    }
+
+    // Fixpoint: effects(f) = direct(f) ∪ ⋃_{c ∈ edges(f)} effects(c). Monotone
+    // over a finite set of `EffectFinding`s, so chaotic iteration converges.
+    let names: Vec<String> = functions.iter().map(|f| f.name.clone()).collect();
+    let mut effects: HashMap<String, HashSet<EffectFinding>> = direct;
+    loop {
+        let mut changed = false;
+        for name in &names {
+            let callees: Vec<String> =
+                edges.get(name).into_iter().flatten().cloned().collect();
+            let mut incoming: Vec<EffectFinding> = Vec::new();
+            for c in &callees {
+                if let Some(ce) = effects.get(c) {
+                    incoming.extend(ce.iter().cloned());
+                }
+            }
+            let set = effects.entry(name.clone()).or_default();
+            for ef in incoming {
+                changed |= set.insert(ef);
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Report: one Pure envelope at a time, each proven origin in source order.
+    let mut out = Vec::new();
+    for f in functions.iter().filter(|f| f.pure_envelope.is_some()) {
+        let pure = &f.name;
+        for origin in &f.effect_origins {
+            match origin {
+                EffectOrigin::Call { name, span } => {
+                    if user_names.contains(name.as_str()) {
+                        // Transitive: name each proven effect of the callee, with
+                        // the origin that ultimately produces it.
+                        let mut fs: Vec<&EffectFinding> =
+                            effects.get(name).into_iter().flatten().collect();
+                        fs.sort_by(|a, b| {
+                            (a.line, &a.label, &a.origin).cmp(&(b.line, &b.label, &b.origin))
+                        });
+                        for ef in fs {
+                            let msg = format!(
+                                "{name}() has effect {} (via {} at line {}), but {pure}() is declared #[\\Steins\\Pure]",
+                                ef.label, ef.origin, ef.line
+                            );
+                            out.push(effect_diag(tree, path, span.start, msg));
+                        }
+                    } else if let Some(labels) = steins_catalog::effect_labels(name) {
+                        // A colored builtin at a Pure call site is a violation;
+                        // pure (`Some([])`) and uncatalogued (`None`) stay silent.
+                        for &label in labels {
+                            let msg = format!(
+                                "{name}() has effect {label}, but {pure}() is declared #[\\Steins\\Pure]"
+                            );
+                            out.push(effect_diag(tree, path, span.start, msg));
+                        }
+                    }
+                }
+                EffectOrigin::Output { keyword, span } => {
+                    let msg = format!(
+                        "{keyword} has effect output, but {pure}() is declared #[\\Steins\\Pure]"
+                    );
+                    out.push(effect_diag(tree, path, span.start, msg));
+                }
+                EffectOrigin::Exit { keyword, span } => {
+                    let msg = format!(
+                        "{keyword} has effect exit, but {pure}() is declared #[\\Steins\\Pure]"
+                    );
+                    out.push(effect_diag(tree, path, span.start, msg));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Build an `effect.envelope-exceeded` diagnostic at `offset` with `message`.
+fn effect_diag(tree: &SourceTree, path: &str, offset: u32, message: String) -> Diagnostic {
+    let pos = tree.position(offset);
+    Diagnostic { id: EFFECT_ID, path: path.to_owned(), line: pos.line, column: pos.column, message }
 }
 
 /// Read-only analysis context threaded through the propagation pass.
