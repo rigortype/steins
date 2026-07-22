@@ -160,6 +160,12 @@ A budget cutoff names itself in output — `maybe` is reported as `maybe`,
 silence is never manufactured (the Certainty discipline).
 _Avoid_: timeout (budgets are structural, not wall-clock)
 
+**Liskov (substitutability)**:
+The standing rule that any envelope on an abstraction binds every
+implementation/override (purer, narrower-throw, wider-in, narrower-out
+only — ADR-0033). Always written out as "Liskov" / リスコフ.
+_Avoid_: LSP (reserved exclusively for the Language Server Protocol)
+
 **Divergence registry**:
 The tracked ledger of intentional departures from PHPStan's semantics
 (ADR-0030) — each entry records the rationale and, where applicable, the
