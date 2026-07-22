@@ -145,6 +145,70 @@ fn no_php_omits_folded_but_keeps_direct_and_notes_posture() {
     );
 }
 
+// ---- annotate (ADR-0020): Rigor-style margin, proven facts only -----------
+
+#[test]
+fn annotate_prints_all_fact_kinds_and_exhaustiveness_marker() {
+    let r = run(&["annotate", fixture("annotate.php").to_str().unwrap()]);
+    assert_eq!(r.code, 0, "annotate never fails on a readable file, got:\n{}", r.stderr);
+    let out = r.stdout;
+
+    // 1. Effects on declaration lines: proven-empty, a proven io write, and the
+    //    non-exhaustive `…?` marker for an uncatalogued call.
+    assert!(out.contains("function price(): string"), "source reprinted");
+    assert!(out.contains("//=> effects: {}"), "proven effect-free body, got:\n{out}");
+    assert!(out.contains("//=> effects: {io.fs.write}"), "proven io.fs.write, got:\n{out}");
+    assert!(out.contains("//=> effects: {…?}"), "non-exhaustive marker, got:\n{out}");
+
+    // 2. Value facts: a folded builtin, a const-fn return, a plain literal.
+    assert!(out.contains(r#"//=> $upper = "XY""#), "folded value, got:\n{out}");
+    assert!(out.contains(r#"//=> $named = "abc""#), "const-fn value, got:\n{out}");
+    assert!(out.contains("//=> $count = 42"), "literal value, got:\n{out}");
+
+    // 3. Exact-class fact.
+    assert!(out.contains("//=> $box: Box (exact)"), "exact class, got:\n{out}");
+
+    // 4. A call line that produced a check diagnostic.
+    assert!(out.contains("//=> ✗ type.argument-mismatch"), "finding marker, got:\n{out}");
+
+    // The file is reprinted, never modified: the source lines are all present.
+    assert!(out.contains(r#"$upper = strtoupper("xy");"#));
+    assert!(out.contains(r#"width("nope");"#));
+}
+
+#[test]
+fn annotate_no_php_drops_folded_value_keeps_the_rest() {
+    let path = fixture("annotate.php");
+    let full = run(&["annotate", path.to_str().unwrap()]);
+    assert!(full.stdout.contains(r#"//=> $upper = "XY""#), "folded fact present with PHP");
+
+    let sound = run(&["annotate", "--no-php", path.to_str().unwrap()]);
+    assert_eq!(sound.code, 0);
+    // The folded fact needs the sidecar — gone under --no-php.
+    assert!(!sound.stdout.contains(r#"$upper = "XY""#), "folded fact dropped, got:\n{}", sound.stdout);
+    // Everything not requiring folding survives.
+    assert!(sound.stdout.contains(r#"//=> $named = "abc""#), "const-fn value stays");
+    assert!(sound.stdout.contains("//=> $count = 42"), "literal stays");
+    assert!(sound.stdout.contains("//=> $box: Box (exact)"), "exact class stays");
+    assert!(sound.stdout.contains("//=> effects: {io.fs.write}"), "effects stay");
+    assert!(sound.stdout.contains("//=> ✗ type.argument-mismatch"), "finding stays");
+    // The sound-subset posture is surfaced up front.
+    assert!(
+        sound.stderr.contains("running as sound subset (no PHP sidecar)"),
+        "posture notice on stderr, got:\n{}",
+        sound.stderr
+    );
+}
+
+#[test]
+fn annotate_errors_politely_on_a_directory() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let r = run(&["annotate", dir.to_str().unwrap()]);
+    assert_eq!(r.code, 2, "a directory is a usage error");
+    assert!(r.stdout.is_empty(), "no annotation output for a directory");
+    assert!(r.stderr.contains("not a directory"), "polite message, got:\n{}", r.stderr);
+}
+
 #[test]
 fn fold_strval_flagged_in_strict_silent_in_coercive() {
     let strict = run(&["check", fixture("fold_strval_strict.php").to_str().unwrap()]);
