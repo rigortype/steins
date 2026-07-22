@@ -7,11 +7,12 @@
 //! syntax); they are reported as statistics, never as gate failures, and their
 //! call sites are excluded from the diagnostic count.
 
+use std::cell::RefCell;
 use std::path::Path;
 
 use rayon::prelude::*;
 use steins_db::{SourceFile, SteinsDatabase, parse};
-use steins_infer::{Diagnostic, diagnostics};
+use steins_infer::{Diagnostic, SidecarFolder, check_file};
 
 use crate::corpus::{PACKAGES, checkout_dir, collect_php_files, read_lock, repo_root};
 
@@ -84,8 +85,17 @@ pub fn run() -> Result<bool, String> {
     Ok(total_diags == 0)
 }
 
-/// Run the full salsa pipeline on one file. A fresh database per file keeps the
-/// rayon workers independent (and memoization is irrelevant for a single pass).
+// Default posture (ADR-0004): the gate folds via the PHP sidecar. Each rayon
+// worker owns one resident `SidecarFolder` (thread-local), so the corpus's few
+// foldable calls reuse a handful of `php` processes rather than spawning per
+// file, and the per-run fold memo is shared across every file that thread sees.
+thread_local! {
+    static FOLDER: RefCell<SidecarFolder> = RefCell::new(SidecarFolder::enabled());
+}
+
+/// Run the full pipeline on one file. A fresh database per file keeps the rayon
+/// workers independent; folding runs outside salsa through the thread-local
+/// sidecar folder (see [`check_file`]).
 fn analyze_file(path: &Path, root: &Path) -> FileOutcome {
     let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy().into_owned();
     let text = match std::fs::read(path) {
@@ -99,7 +109,8 @@ fn analyze_file(path: &Path, root: &Path) -> FileOutcome {
     if !tree.parse_errors().is_empty() {
         return FileOutcome::ParseError(rel);
     }
-    FileOutcome::Clean(diagnostics(&db, input).to_vec())
+    let diags = FOLDER.with(|f| check_file(&db, input, &mut *f.borrow_mut()));
+    FileOutcome::Clean(diags)
 }
 
 fn print_report(reports: &[PackageReport]) {
