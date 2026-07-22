@@ -160,6 +160,20 @@ A budget cutoff names itself in output — `maybe` is reported as `maybe`,
 silence is never manufactured (the Certainty discipline).
 _Avoid_: timeout (budgets are structural, not wall-clock)
 
+**Value domain**:
+The four-layer representation of what the analyzer knows about a value:
+Singleton (one concrete value) → OneOf (finite set) → Refined (base type +
+predicate bitset / int interval) → General (bare type). Widening is layer
+descent with computed predicate summaries (ADR-0035).
+_Avoid_: type lattice (names the ordering, not the representation), carrier
+(Rigor's term; ours is the layered enum)
+
+**Refined** (layer):
+Base type plus refinement — predicate bitset for strings, `IntRange` for
+ints. Produced by guard survival, consumed by contract acceptance; rendered
+in PHPStan vocabulary (`non-empty-string`, `int<1, max>`).
+_Avoid_: accessory type (PHPStan's representation, deliberately not ours)
+
 **Liskov (substitutability)**:
 The standing rule that any envelope on an abstraction binds every
 implementation/override (purer, narrower-throw, wider-in, narrower-out
