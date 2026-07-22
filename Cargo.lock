@@ -877,6 +877,7 @@ dependencies = [
  "salsa",
  "steins-catalog",
  "steins-db",
+ "steins-phpdoc",
  "steins-sidecar",
  "steins-syntax",
 ]

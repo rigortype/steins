@@ -25,6 +25,11 @@ pub struct DocTag {
     pub type_span: Span,
     /// The parameter/variable name (`$foo`) when the tag carries one.
     pub var_name: Option<String>,
+    /// `true` when the tag was written with a `@phpstan-`/`@psalm-` prefix
+    /// (`@phpstan-param`, `@psalm-return`, …). PHPStan gives these precedence over
+    /// the plain `@param`/`@return` for the same target, so consumers should prefer
+    /// a prefixed tag when both are present (ADR-0029).
+    pub prefixed: bool,
 }
 
 /// The four envelope-bearing tag kinds Steins reads.
@@ -37,14 +42,24 @@ pub enum TagKind {
 }
 
 impl TagKind {
-    fn from_name(name: &str) -> Option<TagKind> {
-        match name {
-            "param" => Some(TagKind::Param),
-            "return" => Some(TagKind::Return),
-            "var" => Some(TagKind::Var),
-            "throws" => Some(TagKind::Throws),
-            _ => None,
-        }
+    /// Recognize a tag name, returning its kind and whether it carried a
+    /// `@phpstan-`/`@psalm-` precedence prefix.
+    fn from_name(name: &str) -> Option<(TagKind, bool)> {
+        let (bare, prefixed) = match name
+            .strip_prefix("phpstan-")
+            .or_else(|| name.strip_prefix("psalm-"))
+        {
+            Some(rest) => (rest, true),
+            None => (name, false),
+        };
+        let kind = match bare {
+            "param" => TagKind::Param,
+            "return" => TagKind::Return,
+            "var" => TagKind::Var,
+            "throws" => TagKind::Throws,
+            _ => return None,
+        };
+        Some((kind, prefixed))
     }
 
     fn carries_var_name(self) -> bool {
@@ -101,7 +116,7 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
         j += 1;
     }
     let name = &text[name_start..j];
-    let kind = TagKind::from_name(name)?;
+    let (kind, prefixed) = TagKind::from_name(name)?;
 
     // The remainder of the line, minus a trailing ` */` and whitespace.
     let mut rest_start = j;
@@ -157,6 +172,7 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
         type_text: text[type_start..type_end].to_owned(),
         type_span: Span::new(type_start as u32, type_end as u32),
         var_name,
+        prefixed,
     })
 }
 

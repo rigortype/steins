@@ -31,10 +31,13 @@ use steins_db::{Db, DeclSite, Project, ProjectIndex, Resolve, SourceFile, parse,
 use steins_sidecar::{FoldArg, FoldResult, FoldValue, Sidecar};
 use steins_syntax::CallExpr;
 use steins_syntax::{
-    ArgValue, Callee, ClassDecl, EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, MethodDecl,
-    NameRef, NativeType, Param, Receiver, RefKind, ScalarType, Scope, ScopeOwner, SourceTree,
-    StaticClass, StmtKind, TypeMember, Visibility,
+    ArgValue, ArrayKey, Callee, ClassDecl, EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl,
+    MethodDecl, NameRef, NativeType, NormKey, Param, Receiver, RefKind, ScalarType, Scope,
+    ScopeOwner, SourceTree, StaticClass, StmtKind, TypeMember, Visibility, normalize_array,
 };
+
+use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, ShapeKey, StringLit, TypeKind as PKind};
+use steins_phpdoc::{TagKind, Type as PType, parse_type, scan_docblock};
 
 /// The registry id for the `type.argument-mismatch` proof-layer check (ADR-0022).
 pub const ID: &str = "type.argument-mismatch";
@@ -43,6 +46,18 @@ pub const ID: &str = "type.argument-mismatch";
 /// a function/method whose return type is a native scalar/union and one of its
 /// (trace-visible) `return <literal>;` statements provably raises a `TypeError`.
 pub const RETURN_ID: &str = "type.return-mismatch";
+
+/// The registry id for the phpdoc declared-contract param check (ADR-0030 relation
+/// #1): a proven value flowing into a parameter with a `@param` phpdoc envelope
+/// that it provably does **not** inhabit under contract (set) acceptance — no
+/// coercion (a numeric string `"5"` does not satisfy `int` here). Distinct from the
+/// runtime relation ([`ID`]); phpdoc types are never enforced at runtime.
+pub const PARAM_MISMATCH_ID: &str = "phpdoc.param-mismatch";
+
+/// The registry id for the phpdoc declared-contract return check (ADR-0030): a
+/// proven `return <value>;` that provably does not inhabit the `@return` envelope
+/// under contract acceptance.
+pub const RETURN_MISMATCH_ID: &str = "phpdoc.return-mismatch";
 
 /// The registry id for the effect-envelope check (ADR-0005/0022): a function
 /// declared `#[\Steins\Pure]` / `#[\Steins\Effect(...)]` whose inferred effects
@@ -171,7 +186,11 @@ fn arg_to_fold(arg: &ArgValue) -> Option<FoldArg> {
         ArgValue::Str(v) => Some(FoldArg::Str(v.clone())),
         ArgValue::Bool(v) => Some(FoldArg::Bool(*v)),
         ArgValue::Null => Some(FoldArg::Null),
-        ArgValue::Var(_) | ArgValue::Call(..) | ArgValue::New(..) | ArgValue::Other => None,
+        ArgValue::Var(_)
+        | ArgValue::Call(..)
+        | ArgValue::New(..)
+        | ArgValue::Array(_)
+        | ArgValue::Other => None,
     }
 }
 
@@ -456,29 +475,64 @@ fn check_units(units: &[FileUnit], index: &Index, folder: &mut dyn Folder) -> Ve
     for fi in 0..units.len() {
         let cx = Cx::new(units, index, fi);
 
-        // --- Direct pass: literal arguments at every function call site. ------
+        // --- Direct pass: literal / array / `new` arguments at every function
+        // call site (env-free; propagation adds `$var`/folded resolution). Native
+        // scalar checks and the phpdoc declared-contract check both run here; a
+        // site where the native check fired is skipped by the phpdoc check (no
+        // double-report; ADR-0030). ---------------------------------------------
+        let empty_env: HashMap<String, Known> = HashMap::new();
+        let empty_classes: HashMap<String, String> = HashMap::new();
         for call in cx.tree().calls() {
             let Some(site) = cx.resolve_user_fn(call) else { continue };
             let decl = cx.fn_decl(site);
+            let envelopes = parse_envelopes(decl.docblock.as_deref());
             for (i, arg) in call.args.iter().enumerate() {
-                let Some(ty) = param_native_type(&decl.params, i) else {
-                    if arg_binds_to_variadic(&decl.params, i) {
-                        break;
-                    }
-                    continue;
-                };
-                if !arg.value.is_literal() {
+                let Some(param) = decl.params.get(i) else { break };
+                if param.variadic {
+                    break;
+                }
+                if param.by_ref {
                     continue;
                 }
-                if is_type_error(cx.strict(), ty, &arg.value) {
+                let mut native_fired = false;
+                if let Some(ty) = param.ty.as_ref()
+                    && arg.value.is_literal()
+                    && is_type_error(cx.strict(), ty, &arg.value)
+                {
                     out.push(cx.diagnostic(
                         arg.span.start,
                         &arg.value,
                         None,
                         &decl.name,
-                        &decl.params[i].name,
+                        &param.name,
                         ty,
                     ));
+                    native_fired = true;
+                }
+                // The direct pass owns env-free arg kinds (literal / array / `new`);
+                // `$var`/`call()` resolution — and their phpdoc check — belong to the
+                // propagation pass, so the two never both fire on one arg.
+                let env_free =
+                    arg.value.is_literal() || matches!(arg.value, ArgValue::Array(_) | ArgValue::New(..));
+                if !native_fired
+                    && env_free
+                    && let Some(env) = &envelopes
+                {
+                    check_phpdoc_param(
+                        &cx,
+                        folder,
+                        env,
+                        param,
+                        site.file,
+                        decl.span.start,
+                        &decl.name,
+                        arg.span.start,
+                        &arg.value,
+                        &empty_env,
+                        &empty_classes,
+                        false,
+                        &mut out,
+                    );
                 }
             }
         }
@@ -1272,6 +1326,16 @@ impl<'a> Cx<'a> {
                 }
                 self.try_fold(name, args, folder).map(|(lit, _prov)| lit)
             }
+            // An array is proven iff every element value is proven (keys are fixed
+            // at lowering). Folding is never applied to arrays (ADR-0001).
+            ArgValue::Array(items) => {
+                let mut resolved = Vec::with_capacity(items.len());
+                for (k, v) in items {
+                    let rv = self.resolve_literal(v, env, poisoned, folder)?;
+                    resolved.push((k.clone(), rv));
+                }
+                Some(ArgValue::Array(resolved))
+            }
             _ => None,
         }
     }
@@ -1396,6 +1460,28 @@ impl<'a> Cx<'a> {
             }
         }
     }
+
+    /// The `@return` phpdoc envelope and display name of a scope's owning function
+    /// or method (same file this `Cx` points at), or `None` when there is no
+    /// docblock `@return` (or the scope is top-level).
+    fn scope_return_phpdoc(&self, scope: &Scope) -> Option<(PType, String)> {
+        match &scope.owner {
+            ScopeOwner::TopLevel => None,
+            ScopeOwner::Function(name) => {
+                let f =
+                    self.tree().functions().iter().find(|f| f.name.eq_ignore_ascii_case(name))?;
+                let ret = parse_envelopes(f.docblock.as_deref())?.ret?;
+                Some((ret, f.name.clone()))
+            }
+            ScopeOwner::Method { class, method } => {
+                let cd =
+                    self.tree().classes().iter().find(|c| c.fqn.eq_ignore_ascii_case(class))?;
+                let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
+                let ret = parse_envelopes(m.docblock.as_deref())?.ret?;
+                Some((ret, format!("{}::{}", cd.name, m.name)))
+            }
+        }
+    }
 }
 
 /// A proven local value plus where it was established (for provenance).
@@ -1439,13 +1525,18 @@ fn analyze_scope(
     // returned value is resolved against the *file's own* `strict` via `cx`.
     let ret_info: Option<(&NativeType, String)> =
         if descent.is_none() { cx.scope_return(scope) } else { None };
+    // The owning declaration's `@return` phpdoc envelope, resolved the same way
+    // (plain per-scope pass only). Checked under contract acceptance, skipped where
+    // the native return check already fired (no double-report).
+    let ret_phpdoc: Option<(PType, String)> =
+        if descent.is_none() { cx.scope_return_phpdoc(scope) } else { None };
 
     for stmt in &scope.stmts {
         // 1. Check + descend every statically-named call this statement carries.
         for call in checkable_calls(&stmt.kind) {
             match &call.receiver {
                 Callee::Function(_) => {
-                    check_propagated_call(cx, folder, scope.poisoned, call, &env, out);
+                    check_propagated_call(cx, folder, scope.poisoned, call, &env, &classes_env, out);
                     try_descend_function(cx, folder, call, &env, scope.poisoned, descent.as_mut(), out);
                 }
                 Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
@@ -1466,17 +1557,39 @@ fn analyze_scope(
             }
         }
 
-        // 1b. Return-type check: a trace-visible `return <literal>;` whose value
-        // resolves to a proven literal (direct literal, env-known var, folded
-        // call, or const-fn) that provably fails the owner's native return type.
-        // Returns nested inside control flow live in `Opaque` and never surface
-        // here — an accepted limitation (only top-of-trace returns are checked).
-        if let (Some((ret, display)), StmtKind::Return { value, span, .. }) =
-            (&ret_info, &stmt.kind)
-            && let Some(lit) = cx.resolve_literal(value, &env, scope.poisoned, folder)
-            && is_type_error(cx.strict(), ret, &lit)
-        {
-            out.push(cx.return_diagnostic(span.start, &lit, ret, display));
+        // 1b. Return-type check: a trace-visible `return <value>;` whose value
+        // resolves to a proven value (direct literal incl. arrays, env-known var,
+        // folded call, const-fn, `New` exact-class) that provably fails the owner's
+        // native return type (runtime relation) or its `@return` phpdoc envelope
+        // (contract relation). Returns nested inside control flow live in `Opaque`
+        // and never surface here — an accepted limitation (only top-of-trace
+        // returns are checked).
+        if let StmtKind::Return { value, span, .. } = &stmt.kind {
+            let mut native_fired = false;
+            if let Some((ret, display)) = &ret_info
+                && let Some(lit) = cx.resolve_literal(value, &env, scope.poisoned, folder)
+                && is_type_error(cx.strict(), ret, &lit)
+            {
+                out.push(cx.return_diagnostic(span.start, &lit, ret, display));
+                native_fired = true;
+            }
+            if !native_fired
+                && let Some((pret, display)) = &ret_phpdoc
+                && let Some(cv) = cx.resolve_cval(value, &env, &classes_env, scope.poisoned, folder)
+                && accepts(cx, cx.cur, span.start, pret, &cv) == Tri::No
+            {
+                let pos = cx.tree().position(span.start);
+                out.push(Diagnostic {
+                    id: RETURN_MISMATCH_ID,
+                    path: cx.path().to_owned(),
+                    line: pos.line,
+                    column: pos.column,
+                    message: format!(
+                        "return value {} violates declared @return {pret} of {display}() — declared contract violation",
+                        rendered_cval(&cv),
+                    ),
+                });
+            }
         }
 
         // 2. Apply the statement's own effect on the known-value environment.
@@ -1568,56 +1681,91 @@ fn checkable_calls(kind: &StmtKind) -> Vec<&CallExpr> {
     }
 }
 
-/// Check a function call whose arguments may be propagated values (`Var`/`Call`).
+/// Check a function call whose arguments may be propagated values (`Var`/`Call`/
+/// array). Runs the native runtime check and the phpdoc declared-contract check;
+/// a site where the native check fired is skipped by the phpdoc check.
 fn check_propagated_call(
     cx: &Cx,
     folder: &mut dyn Folder,
     poisoned: bool,
     call: &CallExpr,
     env: &HashMap<String, Known>,
+    classes_env: &HashMap<String, String>,
     out: &mut Vec<Diagnostic>,
 ) {
     let Some(site) = cx.resolve_user_fn(call) else { return };
     let decl = cx.fn_decl(site);
+    let envelopes = parse_envelopes(decl.docblock.as_deref());
 
     for (i, arg) in call.args.iter().enumerate() {
-        let Some(ty) = param_native_type(&decl.params, i) else {
-            if arg_binds_to_variadic(&decl.params, i) {
-                break;
-            }
+        let Some(param) = decl.params.get(i) else { break };
+        if param.variadic {
+            break;
+        }
+        if param.by_ref {
             continue;
-        };
+        }
 
-        let resolved: Option<(ArgValue, String)> = match &arg.value {
-            ArgValue::Var(name) if !poisoned => env.get(name).map(|k| {
-                let prov = match &k.bound {
-                    Some(b) => format!("from ${name}, {b}"),
-                    None => format!("from ${name}, assigned at line {}", k.line),
-                };
-                (k.value.clone(), prov)
-            }),
-            ArgValue::Call(name, args) => {
-                if args.is_empty() {
-                    cx.resolve_const_fn(name)
-                        .map(|(lit, line)| (lit, format!("from {name}(), defined at line {line}")))
-                        .or_else(|| cx.try_fold(name, args, folder))
-                } else {
-                    cx.try_fold(name, args, folder)
+        let mut native_fired = false;
+        if let Some(ty) = param.ty.as_ref() {
+            let resolved: Option<(ArgValue, String)> = match &arg.value {
+                ArgValue::Var(name) if !poisoned => env.get(name).map(|k| {
+                    let prov = match &k.bound {
+                        Some(b) => format!("from ${name}, {b}"),
+                        None => format!("from ${name}, assigned at line {}", k.line),
+                    };
+                    (k.value.clone(), prov)
+                }),
+                ArgValue::Call(name, args) => {
+                    if args.is_empty() {
+                        cx.resolve_const_fn(name)
+                            .map(|(lit, line)| {
+                                (lit, format!("from {name}(), defined at line {line}"))
+                            })
+                            .or_else(|| cx.try_fold(name, args, folder))
+                    } else {
+                        cx.try_fold(name, args, folder)
+                    }
                 }
+                _ => None,
+            };
+            if let Some((value, provenance)) = resolved
+                && is_type_error(cx.strict(), ty, &value)
+            {
+                out.push(cx.diagnostic(
+                    arg.span.start,
+                    &value,
+                    Some(&provenance),
+                    &decl.name,
+                    &param.name,
+                    ty,
+                ));
+                native_fired = true;
             }
-            _ => None,
-        };
-        let Some((value, provenance)) = resolved else { continue };
+        }
 
-        if is_type_error(cx.strict(), ty, &value) {
-            out.push(cx.diagnostic(
-                arg.span.start,
-                &value,
-                Some(&provenance),
+        // Only the propagation-carrier arg kinds (`$var`/`call()`) are the
+        // propagation pass's to phpdoc-check; literal/array/`new` args are owned
+        // by the direct pass (no double-report across the two passes).
+        if !native_fired
+            && matches!(arg.value, ArgValue::Var(_) | ArgValue::Call(..))
+            && let Some(env_e) = &envelopes
+        {
+            check_phpdoc_param(
+                cx,
+                folder,
+                env_e,
+                param,
+                site.file,
+                decl.span.start,
                 &decl.name,
-                &decl.params[i].name,
-                ty,
-            ));
+                arg.span.start,
+                &arg.value,
+                env,
+                classes_env,
+                poisoned,
+                out,
+            );
         }
     }
 }
@@ -1974,7 +2122,18 @@ fn handle_method_call(
     };
 
     let callee_name = format!("{}::{}", target.declaring_class.name, target.method.name);
-    check_method_args(cx, folder, target.method, &callee_name, call, env, scope.poisoned, out);
+    check_method_args(
+        cx,
+        folder,
+        target.method,
+        target.class_file,
+        &callee_name,
+        call,
+        env,
+        classes_env,
+        scope.poisoned,
+        out,
+    );
 
     let Some(callee_scope) =
         cx.method_scope(target.class_file, &target.declaring_class.fqn, &target.method.name)
@@ -2007,59 +2166,91 @@ fn display_of_call(receiver: &Callee, declaring_class: &str, method: &str) -> St
     }
 }
 
-/// Check the arguments of a resolved method/constructor call at its call site.
+/// Check the arguments of a resolved method/constructor call at its call site
+/// (native runtime check plus the phpdoc declared-contract check; no double-report).
+/// `class_file` locates the callee method's docblock context for class-name
+/// resolution.
 #[allow(clippy::too_many_arguments)]
 fn check_method_args(
     cx: &Cx,
     folder: &mut dyn Folder,
     method: &MethodDecl,
+    class_file: usize,
     callee_name: &str,
     call: &CallExpr,
     env: &HashMap<String, Known>,
+    classes_env: &HashMap<String, String>,
     poisoned: bool,
     out: &mut Vec<Diagnostic>,
 ) {
+    let envelopes = parse_envelopes(method.docblock.as_deref());
     for (i, arg) in call.args.iter().enumerate() {
-        let Some(ty) = param_native_type(&method.params, i) else {
-            if arg_binds_to_variadic(&method.params, i) {
-                break;
-            }
-            continue;
-        };
-
-        let resolved: Option<(ArgValue, Option<String>)> = match &arg.value {
-            v if v.is_literal() => Some((v.clone(), None)),
-            ArgValue::Var(name) if !poisoned => env.get(name).map(|k| {
-                let prov = match &k.bound {
-                    Some(b) => format!("from ${name}, {b}"),
-                    None => format!("from ${name}, assigned at line {}", k.line),
-                };
-                (k.value.clone(), Some(prov))
-            }),
-            ArgValue::Call(name, args) => {
-                if args.is_empty() {
-                    cx.resolve_const_fn(name)
-                        .map(|(lit, line)| (lit, Some(format!("from {name}(), defined at line {line}"))))
-                        .or_else(|| cx.try_fold(name, args, folder).map(|(l, p)| (l, Some(p))))
-                } else {
-                    cx.try_fold(name, args, folder).map(|(l, p)| (l, Some(p)))
-                }
-            }
-            _ => None,
-        };
-        let Some((value, prov)) = resolved else { continue };
-        if !value.is_literal() {
+        let Some(param) = method.params.get(i) else { break };
+        if param.variadic {
+            break;
+        }
+        if param.by_ref {
             continue;
         }
-        if is_type_error(cx.strict(), ty, &value) {
-            out.push(cx.diagnostic(
-                arg.span.start,
-                &value,
-                prov.as_deref(),
+
+        let mut native_fired = false;
+        if let Some(ty) = param.ty.as_ref() {
+            let resolved: Option<(ArgValue, Option<String>)> = match &arg.value {
+                v if v.is_literal() => Some((v.clone(), None)),
+                ArgValue::Var(name) if !poisoned => env.get(name).map(|k| {
+                    let prov = match &k.bound {
+                        Some(b) => format!("from ${name}, {b}"),
+                        None => format!("from ${name}, assigned at line {}", k.line),
+                    };
+                    (k.value.clone(), Some(prov))
+                }),
+                ArgValue::Call(name, args) => {
+                    if args.is_empty() {
+                        cx.resolve_const_fn(name)
+                            .map(|(lit, line)| {
+                                (lit, Some(format!("from {name}(), defined at line {line}")))
+                            })
+                            .or_else(|| cx.try_fold(name, args, folder).map(|(l, p)| (l, Some(p))))
+                    } else {
+                        cx.try_fold(name, args, folder).map(|(l, p)| (l, Some(p)))
+                    }
+                }
+                _ => None,
+            };
+            if let Some((value, prov)) = resolved
+                && value.is_literal()
+                && is_type_error(cx.strict(), ty, &value)
+            {
+                out.push(cx.diagnostic(
+                    arg.span.start,
+                    &value,
+                    prov.as_deref(),
+                    callee_name,
+                    &param.name,
+                    ty,
+                ));
+                native_fired = true;
+            }
+        }
+
+        if !native_fired
+            && let Some(env_e) = &envelopes
+        {
+            check_phpdoc_param(
+                cx,
+                folder,
+                env_e,
+                param,
+                class_file,
+                method.span.start,
                 callee_name,
-                &method.params[i].name,
-                ty,
-            ));
+                arg.span.start,
+                &arg.value,
+                env,
+                classes_env,
+                poisoned,
+                out,
+            );
         }
     }
 }
@@ -2072,22 +2263,6 @@ fn check_method_args(
 fn render_call(name: &str, args: &[ArgValue]) -> String {
     let inner: Vec<String> = args.iter().map(ArgValue::render).collect();
     format!("{name}({})", inner.join(", "))
-}
-
-/// The native scalar/union type of parameter `i`, or `None` when the argument
-/// should be skipped (past the last declared param, variadic, by-ref, untyped,
-/// or a non-scalar/complex type).
-fn param_native_type(params: &[Param], i: usize) -> Option<&NativeType> {
-    let param = params.get(i)?;
-    if param.variadic || param.by_ref {
-        return None;
-    }
-    param.ty.as_ref()
-}
-
-/// Whether argument `i` binds to a variadic parameter.
-fn arg_binds_to_variadic(params: &[Param], i: usize) -> bool {
-    params.get(i).is_some_and(|p| p.variadic)
 }
 
 /// The generalized truth table: does passing (or returning) a **literal** `arg`
@@ -2132,6 +2307,9 @@ fn is_type_error(strict: bool, ty: &NativeType, arg: &ArgValue) -> bool {
                 !ty.members.iter().any(|&m| member_accepts_coercive(m, arg))
             }
         }
+        // An array is never a native scalar/union finding (arrays only ever fail
+        // the phpdoc contract relation, checked separately).
+        ArgValue::Array(_) => false,
         // Non-literal (`Var`/`Call`/`New`/`Other`): not provable → never an error.
         ArgValue::Var(_) | ArgValue::Call(..) | ArgValue::New(..) | ArgValue::Other => false,
     }
@@ -2302,4 +2480,654 @@ fn php_is_numeric(s: &str) -> bool {
     }
 
     i == bytes.len()
+}
+
+// ---------------------------------------------------------------------------
+// PHPDoc declared-contract acceptance (ADR-0029/0030 relation #1).
+//
+// A separate acceptance relation from the runtime one above: **pure set
+// semantics, NO coercion** (a numeric string `"5"` does NOT satisfy `int`). The
+// judgment is trinary — `Yes`/`No`/`Maybe` — and only a definite `No` (proven
+// non-membership) is ever reported; `Maybe` is silent (the zero-FP side).
+// ---------------------------------------------------------------------------
+
+/// The trinary contract-acceptance judgment (the Certainty discipline, ADR-0030).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tri {
+    Yes,
+    No,
+    Maybe,
+}
+
+/// Intersection-style combine: `No` dominates, then `Maybe`, else `Yes`. Used
+/// when *every* sub-obligation must hold (element/key membership, shape items).
+fn combine(a: Tri, b: Tri) -> Tri {
+    match (a, b) {
+        (Tri::No, _) | (_, Tri::No) => Tri::No,
+        (Tri::Maybe, _) | (_, Tri::Maybe) => Tri::Maybe,
+        _ => Tri::Yes,
+    }
+}
+
+/// A proven value in contract terms: a scalar literal, an array of proven values
+/// (normalized keys), or an object of an exact class (a `New` fact).
+enum CVal {
+    Scalar(ArgValue),
+    Array(Vec<(NormKey, CVal)>),
+    Object(String),
+}
+
+/// The `@param`/`@return` phpdoc envelopes parsed off one declaration's docblock.
+struct Envelopes {
+    /// Parameter name (no `$`) → declared phpdoc type.
+    params: Vec<(String, PType)>,
+    ret: Option<PType>,
+}
+
+impl Envelopes {
+    fn param(&self, name: &str) -> Option<&PType> {
+        self.params.iter().find(|(n, _)| n == name).map(|(_, t)| t)
+    }
+}
+
+/// Parse the `@param`/`@return` envelopes from a raw docblock, or `None` when the
+/// declaration carries no docblock or no envelope-bearing tag. A tag whose type
+/// fails to parse (or carries an `Unsupported` node) contributes no envelope; the
+/// other tags are unaffected (ADR-0029). `@var`/`@throws` are out of scope.
+fn parse_envelopes(docblock: Option<&str>) -> Option<Envelopes> {
+    let text = docblock?;
+    // A `@phpstan-`/`@psalm-` prefixed tag overrides the plain one for the same
+    // target (PHPStan precedence; ADR-0029). Track whether each recorded envelope
+    // came from a prefixed tag so a later prefixed tag wins but a plain one never
+    // displaces a prefixed one.
+    let mut params: Vec<(String, PType)> = Vec::new();
+    let mut param_prefixed: HashSet<String> = HashSet::new();
+    let mut ret: Option<PType> = None;
+    let mut ret_prefixed = false;
+    for tag in scan_docblock(text) {
+        match tag.kind {
+            TagKind::Param => {
+                let Some(var) = &tag.var_name else { continue };
+                let name = var.trim_start_matches('$').to_owned();
+                let Some(ty) = parse_tag_type(&tag.type_text) else { continue };
+                match params.iter_mut().find(|(n, _)| *n == name) {
+                    Some(slot) => {
+                        // Replace only if we are not downgrading precedence.
+                        if tag.prefixed || !param_prefixed.contains(&name) {
+                            slot.1 = ty;
+                        }
+                    }
+                    None => params.push((name.clone(), ty)),
+                }
+                if tag.prefixed {
+                    param_prefixed.insert(name);
+                }
+            }
+            TagKind::Return => {
+                let Some(ty) = parse_tag_type(&tag.type_text) else { continue };
+                if tag.prefixed || (ret.is_none() && !ret_prefixed) {
+                    ret = Some(ty);
+                    ret_prefixed = tag.prefixed;
+                }
+            }
+            TagKind::Var | TagKind::Throws => {}
+        }
+    }
+    (!params.is_empty() || ret.is_some()).then_some(Envelopes { params, ret })
+}
+
+/// Parse one tag's type text into a phpdoc [`PType`], or `None` on a parse error
+/// or an `Unsupported` node (no envelope — silence is safe).
+fn parse_tag_type(text: &str) -> Option<PType> {
+    let parsed = parse_type(text).ok()?;
+    (!kind_has_unsupported(&parsed.ty.kind)).then_some(parsed.ty)
+}
+
+/// Whether a phpdoc type subtree contains an `Unsupported` node anywhere.
+fn kind_has_unsupported(kind: &PKind) -> bool {
+    match kind {
+        PKind::Unsupported(_) => true,
+        PKind::Nullable(t) | PKind::Array(t) => kind_has_unsupported(&t.kind),
+        PKind::Union { types, .. } | PKind::Intersection(types) => {
+            types.iter().any(|t| kind_has_unsupported(&t.kind))
+        }
+        PKind::Generic { args, .. } => args.iter().any(|a| kind_has_unsupported(&a.ty.kind)),
+        PKind::OffsetAccess { base, offset } => {
+            kind_has_unsupported(&base.kind) || kind_has_unsupported(&offset.kind)
+        }
+        PKind::ArrayShape(s) => s.items.iter().any(|i| kind_has_unsupported(&i.value.kind)),
+        PKind::ObjectShape(items) => items.iter().any(|i| kind_has_unsupported(&i.value.kind)),
+        _ => false,
+    }
+}
+
+impl<'a> Cx<'a> {
+    /// Resolve a call/return value to a proven [`CVal`] (scalars, arrays of proven
+    /// values, or a `New` exact-class object), or `None` when not provable.
+    fn resolve_cval(
+        &self,
+        value: &ArgValue,
+        env: &HashMap<String, Known>,
+        classes_env: &HashMap<String, String>,
+        poisoned: bool,
+        folder: &mut dyn Folder,
+    ) -> Option<CVal> {
+        match value {
+            v if v.is_literal() => Some(CVal::Scalar(v.clone())),
+            ArgValue::New(class_ref, _) if !poisoned => Some(CVal::Object(self.class_fqn(class_ref))),
+            ArgValue::Array(items) => {
+                let normalized = normalize_array(items);
+                let mut out = Vec::with_capacity(normalized.len());
+                for (k, v) in normalized {
+                    out.push((k, self.resolve_cval(&v, env, classes_env, poisoned, folder)?));
+                }
+                Some(CVal::Array(out))
+            }
+            ArgValue::Var(name) if !poisoned => {
+                if let Some(k) = env.get(name) {
+                    self.resolve_cval(&k.value, env, classes_env, poisoned, folder)
+                } else {
+                    classes_env.get(name).map(|c| CVal::Object(c.clone()))
+                }
+            }
+            ArgValue::Call(..) => {
+                self.resolve_literal(value, env, poisoned, folder).map(CVal::Scalar)
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve a phpdoc class name to its FQN in the callee file `cfile`'s context
+    /// (offset `coff` picks the namespace/use scope where the docblock was written).
+    fn resolve_pclass(&self, cfile: usize, coff: u32, name: &str) -> String {
+        let raw = name.trim_start_matches('\\').to_owned();
+        let kind = if name.starts_with('\\') {
+            RefKind::FullyQualified
+        } else if raw.contains('\\') {
+            RefKind::Qualified
+        } else {
+            RefKind::Unqualified
+        };
+        self.units[cfile].tree.resolve_class_fqn(&NameRef { raw, kind, offset: coff })
+    }
+
+    /// Whether `obj_fqn`'s project inheritance chain reaches `target_fqn` (FQN
+    /// equality or subclass; case-insensitive). An exact-name match succeeds even
+    /// when the class is not in the project index; subclassing needs the chain.
+    fn object_is_a(&self, obj_fqn: &str, target_fqn: &str) -> bool {
+        let mut cur = obj_fqn.to_owned();
+        let mut seen: HashSet<String> = HashSet::new();
+        loop {
+            if cur.eq_ignore_ascii_case(target_fqn) {
+                return true;
+            }
+            if !seen.insert(cur.to_ascii_lowercase()) {
+                return false;
+            }
+            let Some((file, cd)) = self.find_class(&cur) else { return false };
+            match &cd.parent {
+                Some(pref) => cur = self.units[file].tree.resolve_class_fqn(pref),
+                None => return false,
+            }
+        }
+    }
+}
+
+/// Contract acceptance (ADR-0030): does the proven value `v` inhabit the phpdoc
+/// type `ty`? Class names in `ty` resolve in the callee file `cfile` at `coff`.
+fn accepts(cx: &Cx, cfile: usize, coff: u32, ty: &PType, v: &CVal) -> Tri {
+    match &ty.kind {
+        PKind::Identifier(name) => accepts_identifier(cx, cfile, coff, name, v),
+        PKind::This => Tri::Maybe, // `$this` — silent this slice
+        PKind::Nullable(inner) => match v {
+            CVal::Scalar(ArgValue::Null) => Tri::Yes,
+            _ => accepts(cx, cfile, coff, inner, v),
+        },
+        // Union: `Yes` if any member accepts, `No` only if all definitely reject.
+        PKind::Union { types, .. } => {
+            let (mut any_yes, mut any_maybe) = (false, false);
+            for t in types {
+                match accepts(cx, cfile, coff, t, v) {
+                    Tri::Yes => any_yes = true,
+                    Tri::Maybe => any_maybe = true,
+                    Tri::No => {}
+                }
+            }
+            if any_yes {
+                Tri::Yes
+            } else if any_maybe {
+                Tri::Maybe
+            } else {
+                Tri::No
+            }
+        }
+        PKind::Intersection(_) => Tri::Maybe, // class intersections — silent
+        // `T[]` — an array (any keys) whose values inhabit `T`.
+        PKind::Array(inner) => match v {
+            CVal::Array(entries) => {
+                let mut r = Tri::Yes;
+                for (_, cv) in entries {
+                    r = combine(r, accepts(cx, cfile, coff, inner, cv));
+                    if r == Tri::No {
+                        return Tri::No;
+                    }
+                }
+                r
+            }
+            _ => Tri::No,
+        },
+        PKind::Generic { base, args } => accepts_generic(cx, cfile, coff, base, args, v),
+        PKind::ArrayShape(shape) => accepts_shape(cx, cfile, coff, shape, v),
+        PKind::Const(c) => accepts_const(c, v),
+        // Callables, offset-access, conditionals, object-shapes → silent.
+        PKind::Callable(_) | PKind::OffsetAccess { .. } | PKind::Conditional(_)
+        | PKind::ObjectShape(_) | PKind::Unsupported(_) => Tri::Maybe,
+    }
+}
+
+/// Acceptance for a bare identifier type: the scalar keyword table, the string/int
+/// predicate refinements, `mixed`/`scalar`/`array-key`/`object`, or a class name.
+fn accepts_identifier(cx: &Cx, cfile: usize, coff: u32, name: &str, v: &CVal) -> Tri {
+    let scalar = match v {
+        CVal::Scalar(s) => Some(s),
+        _ => None,
+    };
+    let yes_no = |b: bool| if b { Tri::Yes } else { Tri::No };
+    match name.to_ascii_lowercase().as_str() {
+        "mixed" => Tri::Yes,
+        "int" => yes_no(matches!(scalar, Some(ArgValue::Int(_)))),
+        // `int` is accepted by `float` (PHPStan core semantics).
+        "float" => yes_no(matches!(scalar, Some(ArgValue::Float(_) | ArgValue::Int(_)))),
+        "string" => yes_no(matches!(scalar, Some(ArgValue::Str(_)))),
+        "bool" => yes_no(matches!(scalar, Some(ArgValue::Bool(_)))),
+        "true" => yes_no(matches!(scalar, Some(ArgValue::Bool(true)))),
+        "false" => yes_no(matches!(scalar, Some(ArgValue::Bool(false)))),
+        "null" => yes_no(matches!(scalar, Some(ArgValue::Null))),
+        "scalar" => yes_no(matches!(
+            scalar,
+            Some(ArgValue::Int(_) | ArgValue::Float(_) | ArgValue::Str(_) | ArgValue::Bool(_))
+        )),
+        "array-key" => yes_no(matches!(scalar, Some(ArgValue::Int(_) | ArgValue::Str(_)))),
+        "positive-int" => match scalar {
+            Some(ArgValue::Int(i)) => yes_no(*i > 0),
+            _ => Tri::No,
+        },
+        "negative-int" => match scalar {
+            Some(ArgValue::Int(i)) => yes_no(*i < 0),
+            _ => Tri::No,
+        },
+        "non-negative-int" => match scalar {
+            Some(ArgValue::Int(i)) => yes_no(*i >= 0),
+            _ => Tri::No,
+        },
+        "numeric-string" => match scalar {
+            Some(ArgValue::Str(s)) => yes_no(php_is_numeric(s)),
+            _ => Tri::No,
+        },
+        "non-empty-string" => match scalar {
+            Some(ArgValue::Str(s)) => yes_no(!s.is_empty()),
+            _ => Tri::No,
+        },
+        "non-falsy-string" | "truthy-string" => match scalar {
+            Some(ArgValue::Str(s)) => yes_no(!s.is_empty() && s != "0"),
+            _ => Tri::No,
+        },
+        "array" => yes_no(matches!(v, CVal::Array(_))),
+        "object" => yes_no(matches!(v, CVal::Object(_))),
+        // `iterable`: a proven array satisfies it; an object might be Traversable
+        // (unprovable) → silent; a scalar is silent too (not in the checked set).
+        "iterable" => match v {
+            CVal::Array(_) => Tri::Yes,
+            _ => Tri::Maybe,
+        },
+        // Types we deliberately keep silent this slice (class-string, self/static,
+        // callable-string, void/never, …).
+        "class-string" | "self" | "static" | "parent" | "void" | "never" | "callable-string"
+        | "interface-string" | "trait-string" | "enum-string" | "literal-string"
+        | "callable" | "closure" | "resource" | "empty" | "value-of" | "key-of" => Tri::Maybe,
+        // A class-name type: only `New`-exact facts are checked (match or subclass);
+        // any non-object value, or an unresolved class, stays silent.
+        _ => match v {
+            CVal::Object(obj) => {
+                let target = cx.resolve_pclass(cfile, coff, name);
+                if cx.object_is_a(obj, &target) { Tri::Yes } else { Tri::Maybe }
+            }
+            _ => Tri::Maybe,
+        },
+    }
+}
+
+/// Acceptance for a literal constant type (`'foo'`, `123`, `1.5`, `true`, …) by
+/// value equality; a const-fetch (`Foo::BAR`) is unresolved → silent.
+fn accepts_const(c: &ConstExpr, v: &CVal) -> Tri {
+    let scalar = match v {
+        CVal::Scalar(s) => s,
+        _ => return Tri::No,
+    };
+    let yes_no = |b: bool| if b { Tri::Yes } else { Tri::No };
+    match c {
+        ConstExpr::Int(s) => match (s.parse::<i64>().ok(), scalar) {
+            (Some(n), ArgValue::Int(i)) => yes_no(*i == n),
+            _ => Tri::No,
+        },
+        ConstExpr::Float(s) => match (s.parse::<f64>().ok(), scalar) {
+            (Some(n), ArgValue::Float(f)) => yes_no(*f == n),
+            _ => Tri::No,
+        },
+        ConstExpr::Str(lit) => match scalar {
+            ArgValue::Str(s) => yes_no(s == string_lit_value(lit)),
+            _ => Tri::No,
+        },
+        ConstExpr::True => yes_no(matches!(scalar, ArgValue::Bool(true))),
+        ConstExpr::False => yes_no(matches!(scalar, ArgValue::Bool(false))),
+        ConstExpr::Null => yes_no(matches!(scalar, ArgValue::Null)),
+        ConstExpr::Fetch { .. } => Tri::Maybe,
+    }
+}
+
+fn string_lit_value(lit: &StringLit) -> &str {
+    match lit {
+        StringLit::Single(s) | StringLit::Double(s) => s,
+    }
+}
+
+/// Acceptance for a generic type: `array<…>`/`list<…>`/`non-empty-*<…>` (per the
+/// phpstan#14939 list semantics), simple `int<lo, hi>` ranges; everything else
+/// (`Collection<…>`, `iterable<…>`, template generics) is silent.
+fn accepts_generic(
+    cx: &Cx,
+    cfile: usize,
+    coff: u32,
+    base: &str,
+    args: &[steins_phpdoc::ast::GenericArg],
+    v: &CVal,
+) -> Tri {
+    let base_lc = base.to_ascii_lowercase();
+    match base_lc.as_str() {
+        "array" | "non-empty-array" | "list" | "non-empty-list" => {
+            let CVal::Array(entries) = v else { return Tri::No };
+            let non_empty = base_lc.starts_with("non-empty");
+            let require_list = base_lc.ends_with("list");
+            // list<V> / non-empty-list<V>: 1 arg (value). array<V>: 1 arg (value);
+            // array<K, V>: 2 args (key, value).
+            let (key_ty, val_ty) = match (require_list, args) {
+                (_, [v1]) => (None, &v1.ty),
+                (false, [k, v2]) => (Some(&k.ty), &v2.ty),
+                (true, [_, v2]) => (None, &v2.ty), // list<int, V> is unusual; ignore key
+                _ => return Tri::Maybe,
+            };
+            check_arraylike(cx, cfile, coff, entries, key_ty, val_ty, require_list, non_empty)
+        }
+        // `int<lo, hi>` with simple integer/`min`/`max` bounds.
+        "int" => match (args, v) {
+            ([lo, hi], CVal::Scalar(ArgValue::Int(i))) => {
+                match (int_bound(&lo.ty, i64::MIN), int_bound(&hi.ty, i64::MAX)) {
+                    (Some(lo), Some(hi)) => {
+                        if *i >= lo && *i <= hi { Tri::Yes } else { Tri::No }
+                    }
+                    _ => Tri::Maybe,
+                }
+            }
+            ([_, _], CVal::Scalar(_)) => Tri::No, // non-int can't inhabit an int range
+            _ => Tri::Maybe,
+        },
+        _ => Tri::Maybe,
+    }
+}
+
+/// The bound of a simple `int<…>` argument: an integer literal, or `min`/`max`
+/// keywords (mapped to `default`). Anything else → `None` (not a simple bound).
+fn int_bound(ty: &PType, default: i64) -> Option<i64> {
+    match &ty.kind {
+        PKind::Const(ConstExpr::Int(s)) => s.parse::<i64>().ok(),
+        PKind::Identifier(name) if name.eq_ignore_ascii_case("min") || name.eq_ignore_ascii_case("max") => {
+            Some(default)
+        }
+        _ => None,
+    }
+}
+
+/// Membership for an `array`/`list` generic (per phpstan#14939): a value is a list
+/// iff its normalized keys are exactly `0..n-1` in order; element (and, for
+/// `array<K, V>`, key) membership is checked recursively; an uncertain element
+/// makes the whole check `Maybe` (silent).
+#[allow(clippy::too_many_arguments)]
+fn check_arraylike(
+    cx: &Cx,
+    cfile: usize,
+    coff: u32,
+    entries: &[(NormKey, CVal)],
+    key_ty: Option<&PType>,
+    val_ty: &PType,
+    require_list: bool,
+    non_empty: bool,
+) -> Tri {
+    if non_empty && entries.is_empty() {
+        return Tri::No;
+    }
+    if require_list && !is_list_shaped(entries) {
+        return Tri::No;
+    }
+    let mut r = Tri::Yes;
+    for (k, cv) in entries {
+        if let Some(kt) = key_ty {
+            r = combine(r, accepts(cx, cfile, coff, kt, &normkey_cval(k)));
+            if r == Tri::No {
+                return Tri::No;
+            }
+        }
+        r = combine(r, accepts(cx, cfile, coff, val_ty, cv));
+        if r == Tri::No {
+            return Tri::No;
+        }
+    }
+    r
+}
+
+/// Whether normalized `entries` form a list: keys exactly `0, 1, …, n-1` in order.
+fn is_list_shaped(entries: &[(NormKey, CVal)]) -> bool {
+    entries
+        .iter()
+        .enumerate()
+        .all(|(i, (k, _))| matches!(k, NormKey::Int(n) if *n == i as i64))
+}
+
+/// A normalized key as a scalar [`CVal`] (for key membership).
+fn normkey_cval(k: &NormKey) -> CVal {
+    match k {
+        NormKey::Int(i) => CVal::Scalar(ArgValue::Int(*i)),
+        NormKey::Str(s) => CVal::Scalar(ArgValue::Str(s.clone())),
+    }
+}
+
+/// Membership for an array-shape / list-shape (per phpstan#14939): `array{…}` is an
+/// order-agnostic required-key map (optional `?` keys may be absent; sealed unless
+/// `…`); `list{…}` is positional. A missing required key, a definite element-type
+/// violation, or an extra key in a sealed shape → `No`. An unresolvable shape key
+/// (a const-fetch) makes the whole check `Maybe`.
+fn accepts_shape(cx: &Cx, cfile: usize, coff: u32, shape: &steins_phpdoc::ast::ArrayShape, v: &CVal) -> Tri {
+    let CVal::Array(entries) = v else { return Tri::No };
+    let non_empty =
+        matches!(shape.kind, ArrayShapeKind::NonEmptyArray | ArrayShapeKind::NonEmptyList);
+    if non_empty && entries.is_empty() {
+        return Tri::No;
+    }
+    let require_list = matches!(shape.kind, ArrayShapeKind::List | ArrayShapeKind::NonEmptyList);
+    if require_list && !is_list_shaped(entries) {
+        return Tri::No;
+    }
+
+    // Assign each shape item its normalized key (positional next-int for keyless
+    // items, explicit keys otherwise). An unresolvable key → the whole shape maybe.
+    let mut expected: Vec<(NormKey, &PType, bool)> = Vec::with_capacity(shape.items.len());
+    let mut next_auto: i64 = 0;
+    for item in &shape.items {
+        let key = match &item.key {
+            None => {
+                let k = NormKey::Int(next_auto);
+                next_auto += 1;
+                k
+            }
+            Some(sk) => {
+                let Some(k) = shape_key_norm(sk) else { return Tri::Maybe };
+                if let NormKey::Int(i) = k
+                    && i >= next_auto
+                {
+                    next_auto = i + 1;
+                }
+                k
+            }
+        };
+        expected.push((key, &item.value, item.optional));
+    }
+
+    let mut r = Tri::Yes;
+    let mut used: HashSet<NormKey> = HashSet::new();
+    for (k, ety, optional) in &expected {
+        used.insert(k.clone());
+        match entries.iter().find(|(ek, _)| ek == k) {
+            Some((_, cv)) => {
+                r = combine(r, accepts(cx, cfile, coff, ety, cv));
+                if r == Tri::No {
+                    return Tri::No;
+                }
+            }
+            None => {
+                if !optional {
+                    return Tri::No; // missing required key
+                }
+            }
+        }
+    }
+
+    // Extra keys: a sealed shape rejects them (PHPStan parity); an unsealed `…<V>`
+    // checks their values against the tail type.
+    if shape.sealed {
+        if entries.iter().any(|(k, _)| !used.contains(k)) {
+            return Tri::No;
+        }
+    } else if let Some(u) = &shape.unsealed {
+        for (k, cv) in entries {
+            if !used.contains(k) {
+                r = combine(r, accepts(cx, cfile, coff, &u.value, cv));
+                if r == Tri::No {
+                    return Tri::No;
+                }
+            }
+        }
+    }
+    r
+}
+
+/// The normalized runtime key a phpdoc shape key denotes, or `None` for an
+/// unresolvable const-fetch key. Bareword and string keys fold integer-like
+/// spellings to `Int` (PHP key normalization).
+fn shape_key_norm(k: &ShapeKey) -> Option<NormKey> {
+    match k {
+        ShapeKey::Int(s) => s.parse::<i64>().ok().map(NormKey::Int),
+        ShapeKey::Str(lit) => Some(norm_str_key(string_lit_value(lit))),
+        ShapeKey::Ident(s) => Some(norm_str_key(s)),
+        ShapeKey::ConstFetch { .. } => None,
+    }
+}
+
+/// Fold an integer-like string key to `Int`, else keep it a `Str` key.
+fn norm_str_key(s: &str) -> NormKey {
+    match s.parse::<i64>() {
+        Ok(i) if i.to_string() == s => NormKey::Int(i),
+        _ => NormKey::Str(s.to_owned()),
+    }
+}
+
+/// The phpdoc contract-acceptance check for one argument at a call site. Runs only
+/// when the native check did **not** fire at this site (no double-report). Reports
+/// `phpdoc.param-mismatch` iff the proven value provably does not inhabit the
+/// `@param` type. `cfile`/`coff` locate the callee's docblock context (class-name
+/// resolution). Returns nothing for `Maybe`/`Yes`.
+#[allow(clippy::too_many_arguments)]
+fn check_phpdoc_param(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    envelopes: &Envelopes,
+    param: &Param,
+    cfile: usize,
+    coff: u32,
+    callee: &str,
+    arg_offset: u32,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    classes_env: &HashMap<String, String>,
+    poisoned: bool,
+    out: &mut Vec<Diagnostic>,
+) {
+    let Some(ty) = envelopes.param(&param.name) else { return };
+    let Some(cv) = cx.resolve_cval(value, env, classes_env, poisoned, folder) else { return };
+    // A parameter that is nullable by its native type, or implicitly nullable via
+    // a `= null` default, accepts `null` regardless of a non-nullable `@param`
+    // spelling — PHP/PHPStan honor this, so reporting it would be a false positive.
+    if matches!(cv, CVal::Scalar(ArgValue::Null))
+        && (param.has_null_default || param.ty.as_ref().is_some_and(|t| t.nullable))
+    {
+        return;
+    }
+    if accepts(cx, cfile, coff, ty, &cv) != Tri::No {
+        return;
+    }
+    let param_name = &param.name;
+    let pos = cx.tree().position(arg_offset);
+    let message = format!(
+        "argument {} to {callee}() violates declared @param {ty} ${param_name} — declared contract violation",
+        rendered_cval(&cv),
+    );
+    out.push(Diagnostic {
+        id: PARAM_MISMATCH_ID,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message,
+    });
+}
+
+/// Render a proven [`CVal`] for a diagnostic message (delegates arrays/scalars to
+/// [`ArgValue::render`]; objects show `new Class()`).
+fn rendered_cval(v: &CVal) -> String {
+    match v {
+        CVal::Scalar(s) => s.render(),
+        CVal::Object(class) => format!("new {}()", class.rsplit('\\').next().unwrap_or(class)),
+        CVal::Array(entries) => {
+            // Rebuild an `ArgValue::Array` with explicit keys so the shared compact
+            // renderer applies (it re-normalizes; explicit keys round-trip).
+            let items: Vec<(ArrayKey, ArgValue)> = entries
+                .iter()
+                .map(|(k, cv)| {
+                    let key = match k {
+                        NormKey::Int(i) => ArrayKey::Int(*i),
+                        NormKey::Str(s) => ArrayKey::Str(s.clone()),
+                    };
+                    (key, cval_to_argvalue(cv))
+                })
+                .collect();
+            ArgValue::Array(items).render()
+        }
+    }
+}
+
+/// A best-effort [`ArgValue`] reconstruction of a [`CVal`], for rendering only.
+fn cval_to_argvalue(v: &CVal) -> ArgValue {
+    match v {
+        CVal::Scalar(s) => s.clone(),
+        CVal::Object(_) => ArgValue::Other,
+        CVal::Array(entries) => ArgValue::Array(
+            entries
+                .iter()
+                .map(|(k, cv)| {
+                    let key = match k {
+                        NormKey::Int(i) => ArrayKey::Int(*i),
+                        NormKey::Str(s) => ArrayKey::Str(s.clone()),
+                    };
+                    (key, cval_to_argvalue(cv))
+                })
+                .collect(),
+        ),
+    }
 }
