@@ -50,8 +50,11 @@ pub fn config_path() -> PathBuf {
 /// list (the committed repo has no local projects, so the gate behaves exactly
 /// as before). A malformed file *is* an error, surfaced to the caller.
 pub fn read_local() -> Result<Vec<LocalProject>, String> {
-    let path = config_path();
-    match std::fs::read_to_string(&path) {
+    read_local_at(&config_path())
+}
+
+fn read_local_at(path: &Path) -> Result<Vec<LocalProject>, String> {
+    match std::fs::read_to_string(path) {
         Ok(text) => {
             let cfg: LocalConfig = toml::from_str(&text)
                 .map_err(|e| format!("{} is malformed: {e}", path.display()))?;
@@ -174,9 +177,10 @@ mod tests {
 
     #[test]
     fn missing_config_is_empty_not_an_error() {
-        // The committed repo has no corpus.local.toml, so the real read yields an
-        // empty list (this is what keeps the default gate behavior unchanged).
-        assert!(read_local().expect("missing file is ok").is_empty());
+        // Must not depend on whether the developer's working tree has a real
+        // corpus.local.toml (it is gitignored and often present locally).
+        let path = std::env::temp_dir().join("steins-xtask-test-no-such-config.toml");
+        assert!(read_local_at(&path).expect("missing file is ok").is_empty());
     }
 
     #[test]

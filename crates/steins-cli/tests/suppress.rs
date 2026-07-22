@@ -294,3 +294,55 @@ fn json_carries_suppressed_and_baselined_fields() {
     assert_eq!(v["baselined"], 1, "got:\n{}", r.stdout);
     assert_eq!(v["findings"].as_array().unwrap().len(), 0);
 }
+
+// -------------------------------------------- return-mismatch integration ---
+
+/// A file whose only finding is a `type.return-mismatch` on line 3.
+const RETURN_FINDING: &str =
+    "<?php\ndeclare(strict_types=1);\nfunction f(): int { return \"abc\"; }\n";
+
+#[test]
+fn return_mismatch_is_inline_ignorable() {
+    // The new `type.return-mismatch` id flows through the inline-ignore channel
+    // exactly like `type.argument-mismatch` (registry-governed, ADR-0022/0023).
+    let dir = workdir("return-inline");
+    write(
+        &dir,
+        "a.php",
+        "<?php\ndeclare(strict_types=1);\nfunction f(): int { return \"abc\"; } // @steins-ignore type.return-mismatch\n",
+    );
+    let r = run_in(&dir, &["check", "a.php"]);
+    assert_eq!(r.code, 0, "suppressed → exit 0; stdout:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("1 diagnostics suppressed by inline ignores"),
+        "got:\n{}",
+        r.stdout
+    );
+    assert!(!r.stdout.contains("error["), "no finding printed, got:\n{}", r.stdout);
+}
+
+#[test]
+fn return_mismatch_family_ignore_matches() {
+    // A `type.*` family ignore also covers `type.return-mismatch`.
+    let dir = workdir("return-family");
+    write(
+        &dir,
+        "a.php",
+        "<?php\ndeclare(strict_types=1);\n// @steins-ignore type.*\nfunction f(): int { return \"abc\"; }\n",
+    );
+    let r = run_in(&dir, &["check", "a.php"]);
+    assert_eq!(r.code, 0, "family-suppressed; stdout:\n{}", r.stdout);
+    assert!(r.stdout.contains("1 diagnostics suppressed by inline ignores"), "got:\n{}", r.stdout);
+}
+
+#[test]
+fn return_mismatch_is_baselineable() {
+    let dir = workdir("return-base");
+    write(&dir, "a.php", RETURN_FINDING);
+    assert_eq!(run_in(&dir, &["check", "--set-baseline", "a.php"]).code, 0);
+
+    let r = run_in(&dir, &["check", "a.php"]);
+    assert_eq!(r.code, 0, "baselined → exit 0; stdout:\n{}", r.stdout);
+    assert!(r.stdout.contains("1 findings in baseline"), "got:\n{}", r.stdout);
+    assert!(!r.stdout.contains("error["), "no finding printed, got:\n{}", r.stdout);
+}

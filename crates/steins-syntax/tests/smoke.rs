@@ -1,4 +1,4 @@
-use steins_syntax::{ArgValue, CommentKind, ParamType, ScalarType, SourceTree};
+use steins_syntax::{ArgValue, CommentKind, NativeType, ScalarType, SourceTree, TypeMember};
 
 #[test]
 fn lowers_functions_calls_and_strict() {
@@ -10,7 +10,15 @@ fn lowers_functions_calls_and_strict() {
     assert_eq!(f.name, "width");
     assert_eq!(f.params.len(), 1);
     assert_eq!(f.params[0].name, "w");
-    assert_eq!(f.params[0].ty, Some(ParamType { scalar: ScalarType::Int, nullable: false }));
+    assert_eq!(
+        f.params[0].ty,
+        Some(NativeType { members: vec![TypeMember::Scalar(ScalarType::Int)], nullable: false })
+    );
+    // The native scalar return type `: int` is lowered too.
+    assert_eq!(
+        f.ret,
+        Some(NativeType { members: vec![TypeMember::Scalar(ScalarType::Int)], nullable: false })
+    );
     assert_eq!(tree.calls().len(), 2);
     assert_eq!(tree.calls()[0].callee.as_deref(), Some("width"));
     assert_eq!(tree.calls()[0].args[0].value, ArgValue::Str("abc".into()));
