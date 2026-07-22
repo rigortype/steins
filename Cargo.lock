@@ -1067,6 +1067,7 @@ version = "0.0.0"
 dependencies = [
  "salsa",
  "steins-catalog",
+ "steins-contract",
  "steins-db",
  "steins-domain",
  "steins-phpdoc",

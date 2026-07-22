@@ -754,6 +754,16 @@ pub enum CmpOp {
     Loose,
     /// `!=` / `<>` — loose inequality.
     NotLoose,
+    /// `<` — less-than (ordering). Used for int-range guard refinement
+    /// (ADR-0031 stage 2); at the verdict level it decides only for concrete
+    /// numeric operands, else `Maybe`.
+    Lt,
+    /// `<=` — less-than-or-equal.
+    Le,
+    /// `>` — greater-than.
+    Gt,
+    /// `>=` — greater-than-or-equal.
+    Ge,
 }
 
 /// A lowered operand of a [`CondExpr`] comparison (ADR-0031): a bare local
@@ -2175,14 +2185,29 @@ fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
         BinaryOperator::NotIdentical(_) => Some(CmpOp::NotIdentical),
         BinaryOperator::Equal(_) => Some(CmpOp::Loose),
         BinaryOperator::NotEqual(_) | BinaryOperator::AngledNotEqual(_) => Some(CmpOp::NotLoose),
+        BinaryOperator::LessThan(_) => Some(CmpOp::Lt),
+        BinaryOperator::LessThanOrEqual(_) => Some(CmpOp::Le),
+        BinaryOperator::GreaterThan(_) => Some(CmpOp::Gt),
+        BinaryOperator::GreaterThanOrEqual(_) => Some(CmpOp::Ge),
         _ => None,
     };
     if let Some(op) = op {
-        return CondExpr::Cmp {
-            op,
-            lhs: lower_cond_operand(b.lhs),
-            rhs: lower_cond_operand(b.rhs),
-        };
+        let lhs = lower_cond_operand(b.lhs);
+        let rhs = lower_cond_operand(b.rhs);
+        // Ordering comparisons (`<`/`<=`/`>`/`>=`) are only useful for guard
+        // refinement when one side is a bare variable and the other a literal;
+        // an unrepresentable operand would otherwise silently drop the reads it
+        // may mutate by reference, so fall back to `Opaque` (collecting reads).
+        let ordering = matches!(op, CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge);
+        if ordering
+            && (matches!(lhs, CondOperand::Other) || matches!(rhs, CondOperand::Other))
+        {
+            let mut reads = Vec::new();
+            collect_read_vars(&Node::Expression(b.lhs), &[], &mut reads);
+            collect_read_vars(&Node::Expression(b.rhs), &[], &mut reads);
+            return CondExpr::Opaque { reads };
+        }
+        return CondExpr::Cmp { op, lhs, rhs };
     }
     match b.operator {
         BinaryOperator::Instanceof(_) => {

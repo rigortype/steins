@@ -39,7 +39,7 @@ use steins_syntax::{
 };
 
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, ShapeKey, StringLit, TypeKind as PKind};
-use steins_phpdoc::{TagKind, Type as PType, parse_type, scan_docblock};
+use steins_phpdoc::{AssertKind, TagKind, Type as PType, parse_type, scan_docblock};
 
 /// The registry id for the `type.argument-mismatch` proof-layer check (ADR-0022).
 pub const ID: &str = "type.argument-mismatch";
@@ -1353,7 +1353,7 @@ impl<'a> Cx<'a> {
         }
         match value {
             v if v.is_literal() => Some(v.clone()),
-            ArgValue::Var(name) => env.get(name).and_then(|k| k.singleton().cloned()),
+            ArgValue::Var(name) => env.get(name).and_then(Known::singleton),
             ArgValue::Call(name, args) => {
                 if args.is_empty()
                     && let Some((lit, _line)) = self.resolve_const_fn(name)
@@ -1475,6 +1475,24 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// The parameter list of a scope's owning function or method (same file this
+    /// `Cx` points at), or `None` for the top-level script scope. Used by the
+    /// native-type parameter seeding (Feature B).
+    fn scope_params(&self, scope: &Scope) -> Option<&'a [Param]> {
+        match &scope.owner {
+            ScopeOwner::TopLevel => None,
+            ScopeOwner::Function(name) => {
+                let f = self.tree().functions().iter().find(|f| f.name.eq_ignore_ascii_case(name))?;
+                Some(&f.params)
+            }
+            ScopeOwner::Method { class, method } => {
+                let cd = self.tree().classes().iter().find(|c| c.fqn.eq_ignore_ascii_case(class))?;
+                let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
+                Some(&m.params)
+            }
+        }
+    }
+
     /// The native return type and display name of a scope's owning function or
     /// method (the same file this `Cx` points at), or `None` for the top-level
     /// script scope or an owner with no native scalar/union return type.
@@ -1520,69 +1538,90 @@ impl<'a> Cx<'a> {
     }
 }
 
-/// The environment's value domain (ADR-0035). Stage 1 implements layers 1–2:
-///
-/// * `Singleton` — one concrete value (a literal, incl. arrays / `New` is tracked
-///   in `classes_env` separately). Layer 1.
-/// * `OneOf` — a finite value set (cap [`ONEOF_CAP`]): the join of disagreeing
-///   live branches. Layer 2.
-///
-/// Layers 3 (`Refined`: base type + predicate bitset / `IntRange`) and 4
-/// (`General`: the bare type) are **reserved** per ADR-0035 — declared here as a
-/// documented TODO, not implemented this stage. Only a `Singleton` ever resolves
-/// to a proven value at a use site; a `OneOf` is deliberately treated as unknown
-/// by every existing single-value consumer (the sound side — silence).
-#[derive(Clone, PartialEq, Eq)]
-enum Fact {
-    Singleton(ArgValue),
-    OneOf(Vec<ArgValue>),
-    // TODO(ADR-0035 stage 2): Refined(base, predicates) — guard-survival narrowing.
-    // TODO(ADR-0035 stage 2): General(bare type) — the widening floor.
+// ---------------------------------------------------------------------------
+// The env now stores the full four-layer `steins_domain::Fact` (ADR-0035) — the
+// finished algebra lives in `steins-domain`; this crate only converts to/from
+// the trace IR's `ArgValue` at the two seams below and calls the domain's joins,
+// membership, and trinary queries. Stage-2 abstract facts (`Refined`/`General`)
+// now flow through the env exactly like the finite layers: they resolve no
+// *value* (only a `Singleton` does), but they carry knowledge for guard
+// refinements (ADR-0031 stage 2), native-type seeding, and contract-on-fact
+// acceptance (ADR-0030).
+// ---------------------------------------------------------------------------
+
+/// The domain value-fact (four layers), aliased as `Fact` throughout the walk.
+use steins_domain::Fact;
+use steins_domain::{Base, IntRange, Key as VKey, Refinement, StrPreds, Val};
+
+/// The conversion seam **into** the domain: a literal (or fully-literal array)
+/// [`ArgValue`] to a domain [`Val`]. Array keys carry PHP key-normalization in
+/// insertion order (reusing [`normalize_array`], matching [`VKey`]). Any
+/// non-literal element (or a non-literal `ArgValue`) yields `None` — the fact is
+/// dropped (the safe side).
+fn val_of(arg: &ArgValue) -> Option<Val> {
+    match arg {
+        ArgValue::Int(i) => Some(Val::Int(*i)),
+        ArgValue::Float(f) => Some(Val::Float(*f)),
+        ArgValue::Str(s) => Some(Val::Str(s.clone())),
+        ArgValue::Bool(b) => Some(Val::Bool(*b)),
+        ArgValue::Null => Some(Val::Null),
+        ArgValue::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for (k, v) in normalize_array(items) {
+                let key = match k {
+                    NormKey::Int(i) => VKey::Int(i),
+                    NormKey::Str(s) => VKey::Str(s),
+                };
+                out.push((key, val_of(&v)?));
+            }
+            Some(Val::Array(out))
+        }
+        ArgValue::Var(_)
+        | ArgValue::Call(..)
+        | ArgValue::New(..)
+        | ArgValue::Ternary { .. }
+        | ArgValue::Other => None,
+    }
 }
 
-/// The `OneOf` cardinality cap (ADR-0035): a join that would exceed it widens by
-/// dropping the fact entirely (the computed, sound descent for stage 1 — stage 2
-/// widens to a `Refined` summary instead).
-const ONEOF_CAP: usize = 8;
-
-impl Fact {
-    /// The single concrete value, when this fact is a `Singleton`; `None` for a
-    /// `OneOf` (a multi-valued fact never resolves to one proven value).
-    fn singleton(&self) -> Option<&ArgValue> {
-        match self {
-            Fact::Singleton(v) => Some(v),
-            Fact::OneOf(_) => None,
-        }
+/// The conversion seam **out of** the domain: a concrete [`Val`] back to the
+/// trace IR's [`ArgValue`]. Total (the domain's `Val` is exactly the concrete
+/// subset of `ArgValue`), so proven-value consumers (native truth table, folding
+/// args, descent binding) keep receiving an `ArgValue` as before.
+fn arg_of_val(v: &Val) -> ArgValue {
+    match v {
+        Val::Int(i) => ArgValue::Int(*i),
+        Val::Float(f) => ArgValue::Float(*f),
+        Val::Str(s) => ArgValue::Str(s.clone()),
+        Val::Bool(b) => ArgValue::Bool(*b),
+        Val::Null => ArgValue::Null,
+        Val::Array(items) => ArgValue::Array(
+            items
+                .iter()
+                .map(|(k, v)| {
+                    let key = match k {
+                        VKey::Int(i) => ArrayKey::Int(*i),
+                        VKey::Str(s) => ArrayKey::Str(s.clone()),
+                    };
+                    (key, arg_of_val(v))
+                })
+                .collect(),
+        ),
     }
+}
 
-    /// The concrete values this fact ranges over (one for a `Singleton`).
-    fn values(&self) -> &[ArgValue] {
-        match self {
-            Fact::Singleton(v) => std::slice::from_ref(v),
-            Fact::OneOf(vs) => vs,
-        }
-    }
+/// Render a domain [`Val`] for a message/margin **byte-for-byte** identically to
+/// the existing [`ArgValue::render`] (float `5.0` form, `['a', 'b']` arrays,
+/// double-quoted scalars) — it simply routes through the shared renderer, so a
+/// `Singleton` fact renders exactly as its `ArgValue` always did.
+fn render_val(v: &Val) -> String {
+    arg_of_val(v).render()
+}
 
-    /// Join two facts at a branch merge (ADR-0031/0035): equal singletons stay a
-    /// `Singleton`; disagreeing values form the deduped `OneOf`, capped at
-    /// [`ONEOF_CAP`]. Overflow returns `None` — the fact is dropped from the merged
-    /// env (the sound stage-1 widening).
-    fn join(a: &Fact, b: &Fact) -> Option<Fact> {
-        let mut vals: Vec<ArgValue> = a.values().to_vec();
-        for v in b.values() {
-            if !vals.contains(v) {
-                vals.push(v.clone());
-            }
-        }
-        if vals.len() > ONEOF_CAP {
-            return None;
-        }
-        Some(if vals.len() == 1 {
-            Fact::Singleton(vals.pop().expect("len checked == 1"))
-        } else {
-            Fact::OneOf(vals)
-        })
-    }
+/// A domain `Singleton` fact from a literal/array [`ArgValue`], or `None` when
+/// the value is not representable (a non-literal) — the fact is then dropped.
+fn singleton_fact(arg: &ArgValue) -> Option<Fact> {
+    val_of(arg).map(Fact::Singleton)
 }
 
 /// A proven local fact plus where it was established (for provenance).
@@ -1594,9 +1633,14 @@ struct Known {
 }
 
 impl Known {
-    /// The single proven value, when the fact is a `Singleton`.
-    fn singleton(&self) -> Option<&ArgValue> {
-        self.fact.singleton()
+    /// The single proven value, when the fact is a `Singleton` (converted back to
+    /// the trace IR's [`ArgValue`]); `None` for every abstract or multi-valued
+    /// layer — those resolve no proven value.
+    fn singleton(&self) -> Option<ArgValue> {
+        match &self.fact {
+            Fact::Singleton(v) => Some(arg_of_val(v)),
+            _ => None,
+        }
     }
 }
 
@@ -1640,6 +1684,24 @@ fn analyze_scope(
     // the native return check already fired (no double-report).
     let ret_phpdoc: Option<(PType, String)> =
         if descent.is_none() { cx.scope_return_phpdoc(scope) } else { None };
+
+    // Native-type parameter seeding (Feature B): seed each parameter with the fact
+    // its native type guarantees at runtime. This is sound in BOTH strict and
+    // coercive modes: the engine coerces or throws at entry, so inside the body an
+    // `int $x` param IS an int (post-coercion) — the seed is a *runtime-enforced*
+    // fact, not a guess. A descent already binds actual values for the params the
+    // caller supplied; we only seed params still absent from the env (unbound
+    // params may still carry their native-type fact — sound).
+    if let Some(params) = cx.scope_params(scope) {
+        for p in params {
+            if env.contains_key(&p.name) || classes_env.contains_key(&p.name) {
+                continue;
+            }
+            if let Some(fact) = seed_fact(p) {
+                env.insert(p.name.clone(), Known { fact, line: 0, bound: Some("native parameter type".to_owned()) });
+            }
+        }
+    }
 
     let w = WalkCx {
         cx,
@@ -1755,20 +1817,31 @@ fn walk_trace(
             }
             if !native_fired
                 && let Some((pret, display)) = w.ret_phpdoc
-                && let Some(cv) = cx.resolve_cval(value, env, classes_env, scope.poisoned, folder)
-                && accepts(cx, cx.cur, span.start, pret, &cv) == Certainty::No
             {
-                let pos = cx.tree().position(span.start);
-                out.push(Diagnostic {
-                    id: RETURN_MISMATCH_ID,
-                    path: cx.path().to_owned(),
-                    line: pos.line,
-                    column: pos.column,
-                    message: format!(
-                        "return value {} violates declared @return {pret} of {display}() — declared contract violation",
-                        rendered_cval(&cv),
-                    ),
-                });
+                // Proven-value path, then the abstract-fact path (Feature E) —
+                // same discipline as the `@param` check: only a definite `No`.
+                let rendered = match cx.resolve_cval(value, env, classes_env, scope.poisoned, folder) {
+                    Some(cv) => (accepts(cx, cx.cur, span.start, pret, &cv) == Certainty::No)
+                        .then(|| rendered_cval(&cv)),
+                    None => arg_abstract_fact(value, env, scope.poisoned).and_then(|fact| {
+                        let cty = steins_contract::lower(pret);
+                        (!contract_touches_class(&cty)
+                            && steins_contract::admits_fact(&cty, fact) == Certainty::No)
+                            .then(|| describe_fact(fact))
+                    }),
+                };
+                if let Some(rendered) = rendered {
+                    let pos = cx.tree().position(span.start);
+                    out.push(Diagnostic {
+                        id: RETURN_MISMATCH_ID,
+                        path: cx.path().to_owned(),
+                        line: pos.line,
+                        column: pos.column,
+                        message: format!(
+                            "return value {rendered} violates declared @return {pret} of {display}() — declared contract violation",
+                        ),
+                    });
+                }
             }
         }
 
@@ -1817,8 +1890,26 @@ fn walk_trace(
             ),
         };
 
-        // 3. After the statement, invalidate any variable handed to a call.
+        // 3. Apply `@phpstan-assert` (Always) narrowings from every call in this
+        // statement (Feature D), collecting the vars they establish. This runs
+        // BEFORE the by-ref invalidation below so the replace-if-weaker decision
+        // sees a proven `Singleton`/`OneOf` (kept over a weaker asserted fact); the
+        // asserted vars are then protected from the conservative forget, since the
+        // assertion helper's contract is a *stronger* statement than "the call may
+        // have mutated this by reference".
+        let mut asserted: HashSet<String> = HashSet::new();
+        for call in checkable_calls(&stmt.kind) {
+            apply_stmt_asserts(
+                cx, scope, call, env, classes_env, w.this_exact, w.enclosing_class, &mut asserted,
+            );
+        }
+
+        // 4. After the statement, invalidate any variable handed to a call — except
+        // one an assertion just narrowed (its post-call fact is known).
         for v in &stmt.invalidated {
+            if asserted.contains(v) {
+                continue;
+            }
             env.remove(v);
             classes_env.remove(v);
         }
@@ -1856,7 +1947,7 @@ fn apply_assign(
                 if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
                     facts.push(LineFact {
                         line,
-                        kind: FactKind::Value { var: var.to_owned(), rendered: lit.render() },
+                        kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
                     });
                 }
                 env.insert(var.to_owned(), Known { fact, line, bound: None });
@@ -1886,15 +1977,17 @@ fn apply_assign(
                 }
             }
         }
-        _ => match cx.resolve_literal(value, env, w.scope.poisoned, folder) {
-            Some(lit) => {
+        _ => match cx.resolve_literal(value, env, w.scope.poisoned, folder).and_then(|lit| {
+            singleton_fact(&lit).map(|f| (lit, f))
+        }) {
+            Some((lit, fact)) => {
                 if let Some(facts) = facts.as_deref_mut() {
                     facts.push(LineFact {
                         line,
                         kind: FactKind::Value { var: var.to_owned(), rendered: lit.render() },
                     });
                 }
-                env.insert(var.to_owned(), Known { fact: Fact::Singleton(lit), line, bound: None });
+                env.insert(var.to_owned(), Known { fact, line, bound: None });
                 classes_env.remove(var);
             }
             None => {
@@ -2030,7 +2123,7 @@ fn check_call_on_null(
         return;
     };
     let Some(k) = env.get(v) else { return };
-    if !matches!(&k.fact, Fact::Singleton(ArgValue::Null)) {
+    if !matches!(&k.fact, Fact::Singleton(Val::Null)) {
         return;
     }
     let pos = w.cx.tree().position(call.span.start);
@@ -2095,12 +2188,16 @@ fn eval_ternary_fact(
     let poisoned = w.scope.poisoned;
     let mut resolve = |v: &ArgValue| w.cx.resolve_literal(v, env, poisoned, folder);
     match eval_cond(w, cond, env, classes_env, poisoned) {
-        Certainty::Yes => resolve(then_val).map(Fact::Singleton),
-        Certainty::No => resolve(else_val).map(Fact::Singleton),
+        Certainty::Yes => resolve(then_val).and_then(|a| singleton_fact(&a)),
+        Certainty::No => resolve(else_val).and_then(|a| singleton_fact(&a)),
         Certainty::Maybe => {
-            let t = resolve(then_val)?;
-            let e = resolve(else_val)?;
-            Some(if t == e { Fact::Singleton(t) } else { Fact::OneOf(vec![t, e]) })
+            // Undecided guard: the value is one of the two arms. `Fact::from_vals`
+            // gives the canonical finite form (a `Singleton` when the arms are
+            // equal, else a `OneOf`), or `None` (dropped) when an arm is not
+            // representable.
+            let t = val_of(&resolve(then_val)?)?;
+            let e = val_of(&resolve(else_val)?)?;
+            Fact::from_vals(vec![t, e])
         }
     }
 }
@@ -2114,7 +2211,12 @@ fn operand_values(
 ) -> Option<Vec<ArgValue>> {
     match op {
         CondOperand::Literal(v) => Some(vec![v.clone()]),
-        CondOperand::Var(name) if !poisoned => env.get(name).map(|k| k.fact.values().to_vec()),
+        // Only the finite layers (`Singleton`/`OneOf`) offer concrete candidate
+        // values for a comparison; an abstract fact has none → `None` → `Maybe`
+        // (the sound side). Condition evaluation over `finite_members()`.
+        CondOperand::Var(name) if !poisoned => {
+            env.get(name).and_then(|k| k.fact.finite_members().map(|vs| vs.iter().map(arg_of_val).collect()))
+        }
         _ => None,
     }
 }
@@ -2130,6 +2232,13 @@ fn eval_cmp(op: CmpOp, lhs: &[ArgValue], rhs: &[ArgValue]) -> Certainty {
                 CmpOp::NotIdentical => php_identical(l, r).map(|x| !x),
                 CmpOp::Loose => php_loose_eq(l, r),
                 CmpOp::NotLoose => php_loose_eq(l, r).map(|x| !x),
+                // Ordering: decide only for concrete numeric operands (PHP numeric
+                // ordering); any other pairing is undecidable here → `Maybe`. The
+                // refinement machinery consumes these guards regardless of verdict.
+                CmpOp::Lt => php_num_order(l, r).map(|o| o == std::cmp::Ordering::Less),
+                CmpOp::Le => php_num_order(l, r).map(|o| o != std::cmp::Ordering::Greater),
+                CmpOp::Gt => php_num_order(l, r).map(|o| o == std::cmp::Ordering::Greater),
+                CmpOp::Ge => php_num_order(l, r).map(|o| o != std::cmp::Ordering::Less),
             };
             match b {
                 None => return Certainty::Maybe,
@@ -2142,6 +2251,20 @@ fn eval_cmp(op: CmpOp, lhs: &[ArgValue], rhs: &[ArgValue]) -> Certainty {
         }
     }
     Certainty::from_opt(acc)
+}
+
+/// PHP numeric ordering of two concrete operands, decided only when **both** are
+/// `int`/`float` (comparing as f64); any other pairing (strings, bools, null,
+/// arrays) is `None` — undecidable here, so the guard verdict is `Maybe` (sound).
+fn php_num_order(a: &ArgValue, b: &ArgValue) -> Option<std::cmp::Ordering> {
+    let num = |v: &ArgValue| match v {
+        #[allow(clippy::cast_precision_loss)]
+        ArgValue::Int(i) => Some(*i as f64),
+        ArgValue::Float(f) => Some(*f),
+        _ => None,
+    };
+    let (x, y) = (num(a)?, num(b)?);
+    x.partial_cmp(&y)
 }
 
 /// Fold a sequence of per-member truth verdicts (`None` = undecidable) into one
@@ -2194,57 +2317,131 @@ fn eval_instanceof(
 }
 
 // ---------------------------------------------------------------------------
-// Positive refinement (ADR-0031 stage 1): `$x === <literal>` narrows to a
-// Singleton in the branch where the identity holds. Instanceof binds nothing —
-// membership is not exactness (a subclass instance would make an exact-class fact
-// WRONG); exact narrowing there needs the Refined/General layers (ADR-0035).
+// Guard refinement (ADR-0031 stage 1 → stage 2 negative facts). A guard narrows
+// a variable's fact on the branch where it holds. Stage 1's positive `$x === v`
+// binds a Singleton; stage 2 adds the *negative* facts (ADR-0031): `!== null`
+// clears nullability, `!== v` removes a member (or, for `!== ''`, adds
+// NON_EMPTY), ordering guards intersect an int interval, and truthiness adds
+// NON_FALSY / clears null. Instanceof binds nothing — membership is not
+// exactness (a subclass instance would make an exact-class fact WRONG).
+//
+// A refinement that would empty a fact (e.g. an int-range intersection with no
+// overlap, reachable only across an `&&` of contradictory guards) drops the
+// var's fact rather than signalling branch-death: the decided-guard verdict
+// already prunes truly-dead branches up front, so dropping-to-no-fact is the
+// sound, simpler fallback here (documented choice).
 // ---------------------------------------------------------------------------
 
-/// The `(var, value)` facts that hold when `cond` is TRUE (the then-branch).
-fn then_refinements(cond: &CondExpr) -> Vec<(String, ArgValue)> {
+/// The fact a parameter's **native** type guarantees at runtime (Feature B), or
+/// `None` when nothing representable is seeded this slice. Only a **single scalar**
+/// type (optionally nullable) seeds — a `General{base, nullable}` fact; unions and
+/// bool-literal members (`string|false`) have no clean single-`Fact` form and are
+/// skipped (documented). By-ref params are never seeded (the caller may hold
+/// anything and the var can be rebound); variadic params are skipped.
+fn seed_fact(p: &Param) -> Option<Fact> {
+    if p.by_ref || p.variadic {
+        return None;
+    }
+    let ty = p.ty.as_ref()?;
+    let [TypeMember::Scalar(scalar)] = ty.members.as_slice() else { return None };
+    let base = match scalar {
+        ScalarType::Int => Base::Int,
+        ScalarType::Float => Base::Float,
+        ScalarType::String => Base::String,
+        ScalarType::Bool => Base::Bool,
+    };
+    // A `= null` default makes even a non-`?T` param implicitly nullable.
+    let nullable = ty.nullable || p.has_null_default;
+    Some(Fact::General { base, nullable })
+}
+
+/// One narrowing a guard establishes for a variable on a given branch.
+enum Refine {
+    /// `$x === v` (then) — narrow to exactly this value.
+    Exact(String, Val),
+    /// `$x !== null` (then) / `$x === null` (else) — drop nullability: clear the
+    /// abstract `nullable` flag, or remove the `null` member of a finite fact.
+    NotNull(String),
+    /// `$x !== v` (non-null, then) — remove `v` from a finite fact; for a
+    /// String-based abstract fact and `v == ""`, add `NON_EMPTY` instead.
+    Exclude(String, Val),
+    /// `$x > k` &c. — intersect an Int-based abstract fact with this interval.
+    IntRange(String, IntRange),
+    /// `if ($x)` (then) — truthiness: clear nullability and, for a String-based
+    /// fact, add `NON_FALSY` (a truthy string is neither `""` nor `"0"`).
+    Truthy(String),
+}
+
+/// The refinements that hold when `cond` is TRUE (the then-branch).
+fn then_refinements(cond: &CondExpr) -> Vec<Refine> {
     let mut out = Vec::new();
-    collect_then_refine(cond, &mut out);
+    collect_refine(cond, true, &mut out);
     out
 }
 
-/// The `(var, value)` facts that hold when `cond` is FALSE (the else-branch).
-fn else_refinements(cond: &CondExpr) -> Vec<(String, ArgValue)> {
+/// The refinements that hold when `cond` is FALSE (the else-branch).
+fn else_refinements(cond: &CondExpr) -> Vec<Refine> {
     let mut out = Vec::new();
-    collect_else_refine(cond, &mut out);
+    collect_refine(cond, false, &mut out);
     out
 }
 
-fn collect_then_refine(cond: &CondExpr, out: &mut Vec<(String, ArgValue)>) {
+/// Collect the refinements a condition implies on the given polarity (`then` =
+/// true-path, `!then` = false-path). Negation flips polarity; `&&` distributes on
+/// the true-path, `||` on the false-path (De Morgan).
+fn collect_refine(cond: &CondExpr, then: bool, out: &mut Vec<Refine>) {
     match cond {
-        CondExpr::Cmp { op: CmpOp::Identical, lhs, rhs } => {
-            if let Some(pair) = var_literal(lhs, rhs) {
-                out.push(pair);
+        CondExpr::Cmp { op, lhs, rhs } => collect_cmp_refine(*op, lhs, rhs, then, out),
+        CondExpr::Truthy(op) => {
+            // Only the true-path of a bare truthiness test refines (the false-path
+            // — "falsy" — is not cleanly representable: `""`, `"0"`, `0`, null …).
+            if then && let CondOperand::Var(v) = op {
+                out.push(Refine::Truthy(v.clone()));
             }
         }
-        CondExpr::And(a, b) => {
-            collect_then_refine(a, out);
-            collect_then_refine(b, out);
+        CondExpr::Not(c) => collect_refine(c, !then, out),
+        CondExpr::And(a, b) if then => {
+            collect_refine(a, true, out);
+            collect_refine(b, true, out);
         }
-        CondExpr::Not(c) => collect_else_refine(c, out),
+        CondExpr::Or(a, b) if !then => {
+            collect_refine(a, false, out);
+            collect_refine(b, false, out);
+        }
         _ => {}
     }
 }
 
-fn collect_else_refine(cond: &CondExpr, out: &mut Vec<(String, ArgValue)>) {
-    match cond {
-        // `!( $x !== v )` ⟺ `$x === v` holds on the else-path.
-        CondExpr::Cmp { op: CmpOp::NotIdentical, lhs, rhs } => {
-            if let Some(pair) = var_literal(lhs, rhs) {
-                out.push(pair);
+/// Refinements from a comparison guard on a given polarity.
+fn collect_cmp_refine(op: CmpOp, lhs: &CondOperand, rhs: &CondOperand, then: bool, out: &mut Vec<Refine>) {
+    // Identity/equality guards over a (var, literal) pair.
+    if let Some((v, val)) = var_literal(lhs, rhs) {
+        // The *effective* operator on this branch: `===`/`!==` flip under `!then`.
+        let identical = match (op, then) {
+            (CmpOp::Identical, true) | (CmpOp::NotIdentical, false) => Some(true),
+            (CmpOp::NotIdentical, true) | (CmpOp::Identical, false) => Some(false),
+            _ => None,
+        };
+        if let Some(identical) = identical
+            && let Some(vv) = val_of(&val)
+        {
+            match (identical, &vv) {
+                (true, _) => out.push(Refine::Exact(v, vv)),
+                (false, Val::Null) => out.push(Refine::NotNull(v)),
+                (false, _) => out.push(Refine::Exclude(v, vv)),
             }
+            return;
         }
-        // `!(a || b)` ⟺ `!a && !b`.
-        CondExpr::Or(a, b) => {
-            collect_else_refine(a, out);
-            collect_else_refine(b, out);
+    }
+    // Ordering guards over a (var, int-literal) pair → an interval intersection.
+    if let Some((v, k, var_on_left)) = var_int_literal(lhs, rhs) {
+        // Normalize so the operator reads `var <op> k`.
+        let eff_op = if var_on_left { op } else { flip_ordering(op) };
+        // On the false-path the guard is negated.
+        let branch_op = if then { eff_op } else { negate_ordering(eff_op) };
+        if let Some(range) = ordering_range(branch_op, k) {
+            out.push(Refine::IntRange(v, range));
         }
-        CondExpr::Not(c) => collect_then_refine(c, out),
-        _ => {}
     }
 }
 
@@ -2258,20 +2455,302 @@ fn var_literal(lhs: &CondOperand, rhs: &CondOperand) -> Option<(String, ArgValue
     }
 }
 
-/// Bind refined `(var, value)` facts into a branch's env as Singletons (clearing
-/// any stale exact-class fact for the same variable).
+/// The `($var, int_literal, var_on_left)` of a comparison with one bare variable
+/// and one **int** literal (ordering refinement only applies to int bounds).
+fn var_int_literal(lhs: &CondOperand, rhs: &CondOperand) -> Option<(String, i64, bool)> {
+    match (lhs, rhs) {
+        (CondOperand::Var(v), CondOperand::Literal(ArgValue::Int(i))) => Some((v.clone(), *i, true)),
+        (CondOperand::Literal(ArgValue::Int(i)), CondOperand::Var(v)) => Some((v.clone(), *i, false)),
+        _ => None,
+    }
+}
+
+/// Mirror an ordering operator (used when the variable is the right operand).
+fn flip_ordering(op: CmpOp) -> CmpOp {
+    match op {
+        CmpOp::Lt => CmpOp::Gt,
+        CmpOp::Le => CmpOp::Ge,
+        CmpOp::Gt => CmpOp::Lt,
+        CmpOp::Ge => CmpOp::Le,
+        other => other,
+    }
+}
+
+/// The logical negation of an ordering operator (for the false-path).
+fn negate_ordering(op: CmpOp) -> CmpOp {
+    match op {
+        CmpOp::Lt => CmpOp::Ge,
+        CmpOp::Le => CmpOp::Gt,
+        CmpOp::Gt => CmpOp::Le,
+        CmpOp::Ge => CmpOp::Lt,
+        other => other,
+    }
+}
+
+/// The int interval `var <op> k` denotes (`> 0` → positive, `>= 0` → non-negative,
+/// `<`/`<=` symmetric). `None` when the interval is empty (a saturating bound
+/// overflow) — the caller adds no refinement.
+fn ordering_range(op: CmpOp, k: i64) -> Option<IntRange> {
+    match op {
+        CmpOp::Gt => IntRange::new(k.checked_add(1)?, i64::MAX),
+        CmpOp::Ge => IntRange::new(k, i64::MAX),
+        CmpOp::Lt => IntRange::new(i64::MIN, k.checked_sub(1)?),
+        CmpOp::Le => IntRange::new(i64::MIN, k),
+        _ => None,
+    }
+}
+
+/// Apply a branch's refinements to its cloned env (clearing any stale exact-class
+/// fact for a positively-narrowed variable).
 fn apply_refinements(
-    refs: &[(String, ArgValue)],
+    refs: &[Refine],
     env: &mut HashMap<String, Known>,
     classes_env: &mut HashMap<String, String>,
 ) {
-    for (var, val) in refs {
-        env.insert(
-            var.clone(),
-            Known { fact: Fact::Singleton(val.clone()), line: 0, bound: Some("proven on this branch".to_owned()) },
-        );
-        classes_env.remove(var);
+    for r in refs {
+        match r {
+            Refine::Exact(var, val) => {
+                env.insert(
+                    var.clone(),
+                    Known {
+                        fact: Fact::Singleton(val.clone()),
+                        line: 0,
+                        bound: Some("proven on this branch".to_owned()),
+                    },
+                );
+                classes_env.remove(var);
+            }
+            Refine::NotNull(var) => refine_fact(env, var, clear_null),
+            Refine::Exclude(var, val) => {
+                refine_fact(env, var, |f| exclude_member(f, val));
+            }
+            Refine::IntRange(var, range) => refine_fact(env, var, |f| intersect_int(f, *range)),
+            Refine::Truthy(var) => refine_fact(env, var, truthy_narrow),
+        }
     }
+}
+
+/// Transform the fact of `var` in place with `f` (a `None` result drops the fact —
+/// the conservative empty-fact fallback); a no-op when `var` has no fact.
+fn refine_fact(
+    env: &mut HashMap<String, Known>,
+    var: &str,
+    f: impl FnOnce(&Fact) -> Option<Fact>,
+) {
+    let Some(k) = env.get(var) else { return };
+    match f(&k.fact) {
+        Some(nf) => {
+            let (line, bound) = (k.line, k.bound.clone());
+            env.insert(var.to_owned(), Known { fact: nf, line, bound });
+        }
+        None => {
+            env.remove(var);
+        }
+    }
+}
+
+/// Clear nullability: an abstract fact loses its `nullable` flag; a finite fact
+/// loses its `null` member. `None` only if that empties a finite fact.
+fn clear_null(f: &Fact) -> Option<Fact> {
+    match f {
+        Fact::Refined { base, refinement, nullable: true } => {
+            Some(Fact::refined(*base, *refinement, false))
+        }
+        Fact::General { base, nullable: true } => Some(Fact::General { base: *base, nullable: false }),
+        Fact::Singleton(_) | Fact::OneOf(_) => exclude_member(f, &Val::Null),
+        // Already non-nullable abstract fact — unchanged.
+        other => Some(other.clone()),
+    }
+}
+
+/// Remove `val` from a finite fact; for a String-based abstract fact excluding
+/// `""`, add `NON_EMPTY` (the `!== ''` refinement). Otherwise unchanged.
+fn exclude_member(f: &Fact, val: &Val) -> Option<Fact> {
+    match f.finite_members() {
+        Some(members) => {
+            let kept: Vec<Val> = members.iter().filter(|m| *m != val).cloned().collect();
+            // Empty → drop the fact (conservative fallback; a truly-dead branch is
+            // already pruned by the decided-guard verdict).
+            Fact::from_vals(kept)
+        }
+        None => match (f, val) {
+            (Fact::Refined { base: Base::String, .. } | Fact::General { base: Base::String, .. }, Val::Str(s))
+                if s.is_empty() =>
+            {
+                Some(add_str_preds(f, StrPreds::NON_EMPTY))
+            }
+            _ => Some(f.clone()),
+        },
+    }
+}
+
+/// Intersect an Int-based abstract fact with `range`; a finite/other fact is left
+/// unchanged. `None` when the intersection is empty.
+fn intersect_int(f: &Fact, range: IntRange) -> Option<Fact> {
+    match f {
+        Fact::Refined { base: Base::Int, refinement: Refinement::Int(have), nullable } => {
+            let r = have.intersect(range)?;
+            Some(Fact::refined(Base::Int, Refinement::Int(r), *nullable))
+        }
+        Fact::General { base: Base::Int, nullable } => {
+            Some(Fact::refined(Base::Int, Refinement::Int(range), *nullable))
+        }
+        other => Some(other.clone()),
+    }
+}
+
+/// Truthiness narrowing on the true-path: clear nullability (null is falsy) and,
+/// for a String-based fact, add `NON_FALSY`. Int-based facts gain nothing usable
+/// (nonzero is not an interval — skipped, documented). Never empties.
+fn truthy_narrow(f: &Fact) -> Option<Fact> {
+    let f = clear_null(f)?;
+    Some(match &f {
+        Fact::Refined { base: Base::String, .. } | Fact::General { base: Base::String, .. } => {
+            add_str_preds(&f, StrPreds::NON_FALSY)
+        }
+        other => other.clone(),
+    })
+}
+
+/// Add string predicates to a String-based abstract fact (union-closed); a
+/// non-string or finite fact is returned unchanged.
+fn add_str_preds(f: &Fact, preds: StrPreds) -> Fact {
+    match f {
+        Fact::Refined { base: Base::String, refinement: Refinement::Str(have), nullable } => {
+            Fact::refined(Base::String, Refinement::Str(have.union(preds)), *nullable)
+        }
+        Fact::General { base: Base::String, nullable } => {
+            Fact::refined(Base::String, Refinement::Str(preds), *nullable)
+        }
+        other => other.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `@phpstan-assert` application (ADR-0030, Feature D). After a call to an
+// assertion helper, the asserted type narrows the CALLER's env for the variable
+// passed at the asserted position. `Always` asserts apply on the fall-through
+// (statement position); `-if-true`/`-if-false` apply only in guard position.
+// ---------------------------------------------------------------------------
+
+/// Convert a lowered contract type to the domain [`Fact`] an assertion of it
+/// establishes (conservative): `Base` → General, `IntIn` → Refined, `StrWith` →
+/// Refined, `Null` → `Singleton(null)`, a nullable union (`X|null`) → `X`'s fact
+/// with `nullable = true`; anything else → `None` (no application).
+fn assert_fact_of(cty: &steins_contract::ContractTy) -> Option<Fact> {
+    use steins_contract::ContractTy as C;
+    match cty {
+        C::Base(b) => Some(Fact::General { base: *b, nullable: false }),
+        C::IntIn(r) => Some(Fact::refined(Base::Int, Refinement::Int(*r), false)),
+        C::StrWith(p) => Some(Fact::refined(Base::String, Refinement::Str(*p), false)),
+        C::Null => Some(Fact::Singleton(Val::Null)),
+        C::Union(members) => {
+            let has_null = members.iter().any(|m| matches!(m, C::Null));
+            let non_null: Vec<&C> = members.iter().filter(|m| !matches!(m, C::Null)).collect();
+            // `X|null` (exactly one representable non-null member) → X, nullable.
+            if has_null && non_null.len() == 1 {
+                return Some(with_nullable(assert_fact_of(non_null[0])?));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Set the `nullable` flag on an abstract fact (a `Singleton`/`OneOf` is left
+/// unchanged — a nullable-union member never lowers to a finite fact here).
+fn with_nullable(f: Fact) -> Fact {
+    match f {
+        Fact::General { base, .. } => Fact::General { base, nullable: true },
+        Fact::Refined { base, refinement, .. } => Fact::refined(base, refinement, true),
+        other => other,
+    }
+}
+
+/// Apply the `Always` assertions of every statically-resolved call in a statement
+/// to the caller's env (Feature D). `-if-true`/`-if-false` asserts are **not**
+/// applied here — they hold only conditionally on the boolean result, so they
+/// belong to guard position (see the deferral note in the module tests).
+#[allow(clippy::too_many_arguments)]
+fn apply_stmt_asserts(
+    cx: &Cx,
+    scope: &Scope,
+    call: &CallExpr,
+    env: &mut HashMap<String, Known>,
+    classes_env: &mut HashMap<String, String>,
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
+    asserted: &mut HashSet<String>,
+) {
+    if scope.poisoned || !call.positional_only {
+        return;
+    }
+    let (params, docblock): (&[Param], Option<&str>) = match &call.receiver {
+        Callee::Function(_) => {
+            let Some(site) = cx.resolve_user_fn(call) else { return };
+            let decl = cx.fn_decl(site);
+            (&decl.params, decl.docblock.as_deref())
+        }
+        Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
+            let Some(target) = resolve_call_target(
+                cx, &call.receiver, classes_env, this_exact, enclosing_class, scope.poisoned,
+            ) else {
+                return;
+            };
+            (&target.method.params, target.method.docblock.as_deref())
+        }
+        Callee::Dynamic => return,
+    };
+    let Some(envelopes) = parse_envelopes(docblock) else { return };
+    for spec in &envelopes.asserts {
+        if spec.kind != AssertKind::Always {
+            continue;
+        }
+        let Some(pos) = params.iter().position(|p| p.name == spec.param) else { continue };
+        let Some(arg) = call.args.get(pos) else { continue };
+        let ArgValue::Var(v) = &arg.value else { continue };
+        if apply_assert_to_var(env, classes_env, v, spec) {
+            asserted.insert(v.clone());
+        }
+    }
+}
+
+/// Apply one assertion spec to a caller variable (replace-if-weaker): a stronger
+/// finite fact (`Singleton`/`OneOf`) is kept; otherwise the asserted fact replaces
+/// it. A negated `!null` clears nullability; other negated forms are not
+/// representable as a positive fact and are skipped (documented).
+///
+/// Returns whether the variable now carries an established fact (so the caller
+/// protects it from the by-ref invalidation) — `true` when a fact was set or a
+/// stronger finite fact was deliberately kept, `false` when nothing applied.
+fn apply_assert_to_var(
+    env: &mut HashMap<String, Known>,
+    classes_env: &mut HashMap<String, String>,
+    var: &str,
+    spec: &AssertSpec,
+) -> bool {
+    let cty = steins_contract::lower(&spec.ty);
+    if spec.negated {
+        // Only `!null` is representable as a positive narrowing (clear nullable);
+        // other negated forms establish nothing.
+        if matches!(cty, steins_contract::ContractTy::Null) && env.contains_key(var) {
+            refine_fact(env, var, clear_null);
+            return true;
+        }
+        return false;
+    }
+    let Some(fact) = assert_fact_of(&cty) else { return false };
+    // Never override a stronger finite fact with a weaker asserted one; keep it
+    // (and still protect it from invalidation — the by-value assert did not mutate
+    // it). Assertion helpers are conventionally by-value; a by-ref helper that
+    // rebinds is the documented edge where keeping the singleton is the simple,
+    // task-specified choice.
+    if env.get(var).is_some_and(|k| k.fact.finite_members().is_some()) {
+        return true;
+    }
+    env.insert(var.to_owned(), Known { fact, line: 0, bound: Some("asserted".to_owned()) });
+    classes_env.remove(var);
+    true
 }
 
 /// Every bare variable an opaque sub-condition reads (for the guard-mutation
@@ -2320,7 +2799,7 @@ fn join_envs(
         let mut ok = true;
         for (be, _) in &rest {
             match be.get(name) {
-                Some(k) => match Fact::join(&fact, &k.fact) {
+                Some(k) => match fact.join(&k.fact) {
                     Some(joined) => fact = joined,
                     None => {
                         ok = false;
@@ -2567,7 +3046,7 @@ fn check_propagated_call(
         if let Some(ty) = param.ty.as_ref() {
             let resolved: Option<(ArgValue, String)> = match &arg.value {
                 ArgValue::Var(name) if !poisoned => env.get(name).and_then(|k| {
-                    let v = k.singleton()?.clone();
+                    let v = k.singleton()?;
                     let prov = match &k.bound {
                         Some(b) => format!("from ${name}, {b}"),
                         None => format!("from ${name}, assigned at line {}", k.line),
@@ -2735,10 +3214,14 @@ fn descend(
         return;
     }
 
+    // Bound params are always resolved literals/arrays, so `singleton_fact`
+    // succeeds; a value that somehow fails conversion is simply left unbound
+    // (the callee param stays unknown — sound).
     let bound_env: HashMap<String, Known> = bound
         .into_iter()
-        .map(|(name, value)| {
-            (name, Known { fact: Fact::Singleton(value), line: 0, bound: Some(provenance.to_owned()) })
+        .filter_map(|(name, value)| {
+            singleton_fact(&value)
+                .map(|fact| (name, Known { fact, line: 0, bound: Some(provenance.to_owned()) }))
         })
         .collect();
 
@@ -3060,7 +3543,7 @@ fn check_method_args(
             let resolved: Option<(ArgValue, Option<String>)> = match &arg.value {
                 v if v.is_literal() => Some((v.clone(), None)),
                 ArgValue::Var(name) if !poisoned => env.get(name).and_then(|k| {
-                    let v = k.singleton()?.clone();
+                    let v = k.singleton()?;
                     let prov = match &k.bound {
                         Some(b) => format!("from ${name}, {b}"),
                         None => format!("from ${name}, assigned at line {}", k.line),
@@ -3390,6 +3873,22 @@ struct Envelopes {
     /// for them (see [`check_phpdoc_param`]). Property/`$this->…` assertion targets
     /// are excluded (they say nothing about a call-site argument).
     assert_params: HashSet<String>,
+    /// The full assertion specs on this declaration (Feature D): the asserted type
+    /// applied to the caller's env after a call (`Always`), or in guard position
+    /// (`IfTrue`/`IfFalse`). Property/`$this` targets are excluded (as above).
+    asserts: Vec<AssertSpec>,
+}
+
+/// One `@phpstan-assert[-if-true|-if-false] [!]<type> $param` spec (Feature D).
+struct AssertSpec {
+    /// Target parameter name (no `$`).
+    param: String,
+    /// The asserted phpdoc type.
+    ty: PType,
+    /// Unconditional / conditional-on-true / conditional-on-false.
+    kind: AssertKind,
+    /// The negated form (`@phpstan-assert !T $x`): asserts NOT `T`.
+    negated: bool,
 }
 
 impl Envelopes {
@@ -3420,17 +3919,23 @@ fn parse_envelopes(docblock: Option<&str>) -> Option<Envelopes> {
     let mut ret: Option<PType> = None;
     let mut ret_prefixed = false;
     let mut assert_params: HashSet<String> = HashSet::new();
+    let mut asserts: Vec<AssertSpec> = Vec::new();
     for tag in scan_docblock(text) {
         // An assertion tag targeting a parameter marks it an assert-helper param
         // (its `@param` is a post-condition; ADR-0030). Property targets are inert.
         // All three kinds (Always/IfTrue/IfFalse) and the negated form exempt alike:
         // whatever the type or condition, the parameter is not being *constrained*
-        // on entry, so a call-site argument cannot violate it.
-        if let TagKind::Assert { .. } = tag.kind
+        // on entry, so a call-site argument cannot violate it. The spec is also
+        // recorded (with its parsed type) for post-call application (Feature D).
+        if let TagKind::Assert { kind: akind, negated } = tag.kind
             && !tag.assert_property_target
             && let Some(var) = &tag.var_name
         {
-            assert_params.insert(var.trim_start_matches('$').to_owned());
+            let name = var.trim_start_matches('$').to_owned();
+            assert_params.insert(name.clone());
+            if let Some(ty) = parse_tag_type(&tag.type_text) {
+                asserts.push(AssertSpec { param: name, ty, kind: akind, negated });
+            }
             continue;
         }
         match tag.kind {
@@ -3468,7 +3973,7 @@ fn parse_envelopes(docblock: Option<&str>) -> Option<Envelopes> {
     // to remember: an assert-only docblock still carries the exemption fact, so a
     // sibling `@param` (added later, or resolved in another pass) sees it.
     (!params.is_empty() || ret.is_some() || !assert_params.is_empty())
-        .then_some(Envelopes { params, ret, assert_params })
+        .then_some(Envelopes { params, ret, assert_params, asserts })
 }
 
 /// Parse one tag's type text into a phpdoc [`PType`], or `None` on a parse error
@@ -3521,7 +4026,7 @@ impl<'a> Cx<'a> {
             ArgValue::Var(name) if !poisoned => {
                 if let Some(k) = env.get(name) {
                     // A `OneOf` fact is not one proven value → not a `CVal`.
-                    let v = k.singleton()?.clone();
+                    let v = k.singleton()?;
                     self.resolve_cval(&v, env, classes_env, poisoned, folder)
                 } else {
                     classes_env.get(name).map(|c| CVal::Object(c.clone()))
@@ -3988,23 +4493,47 @@ fn check_phpdoc_param(
         return;
     }
     let Some(ty) = envelopes.param(&param.name) else { return };
-    let Some(cv) = cx.resolve_cval(value, env, classes_env, poisoned, folder) else { return };
-    // A parameter that is nullable by its native type, or implicitly nullable via
-    // a `= null` default, accepts `null` regardless of a non-nullable `@param`
-    // spelling — PHP/PHPStan honor this, so reporting it would be a false positive.
-    if matches!(cv, CVal::Scalar(ArgValue::Null))
-        && (param.has_null_default || param.ty.as_ref().is_some_and(|t| t.nullable))
-    {
-        return;
-    }
-    if accepts(cx, cfile, coff, ty, &cv) != Tri::No {
-        return;
-    }
     let param_name = &param.name;
+    let rendered = match cx.resolve_cval(value, env, classes_env, poisoned, folder) {
+        Some(cv) => {
+            // A parameter that is nullable by its native type, or implicitly nullable
+            // via a `= null` default, accepts `null` regardless of a non-nullable
+            // `@param` spelling — PHP/PHPStan honor this, so reporting it would be a
+            // false positive.
+            if matches!(cv, CVal::Scalar(ArgValue::Null))
+                && (param.has_null_default || param.ty.as_ref().is_some_and(|t| t.nullable))
+            {
+                return;
+            }
+            if accepts(cx, cfile, coff, ty, &cv) != Tri::No {
+                return;
+            }
+            rendered_cval(&cv)
+        }
+        // Abstract-fact path (Feature E, ADR-0030/0035): an argument that resolves
+        // to an abstract fact (not a proven value — e.g. a native-seeded param or a
+        // guard-refined var) is judged by the domain's **set** acceptance via
+        // `steins_contract::admits_fact`. Only a definite `No` (every value the fact
+        // admits is rejected) reports; `Maybe` is silent.
+        None => {
+            let Some(fact) = arg_abstract_fact(value, env, poisoned) else { return };
+            let cty = steins_contract::lower(ty);
+            // A class-shaped contract stays silent against a scalar fact: a bare
+            // identifier may be a template / type-alias, and infer's proven-value
+            // `accepts` already treats a scalar vs any class name as `Maybe`. Keeping
+            // the two paths consistent preserves the zero-FP posture.
+            if contract_touches_class(&cty) {
+                return;
+            }
+            if steins_contract::admits_fact(&cty, fact) != Certainty::No {
+                return;
+            }
+            describe_fact(fact)
+        }
+    };
     let pos = cx.tree().position(arg_offset);
     let message = format!(
-        "argument {} to {callee}() violates declared @param {ty} ${param_name} — declared contract violation",
-        rendered_cval(&cv),
+        "argument {rendered} to {callee}() violates declared @param {ty} ${param_name} — declared contract violation",
     );
     out.push(Diagnostic {
         id: PARAM_MISMATCH_ID,
@@ -4013,6 +4542,92 @@ fn check_phpdoc_param(
         column: pos.column,
         message,
     });
+}
+
+/// The abstract fact an argument resolves to: a bare `$var` whose env fact is an
+/// abstract layer (no finite members). Finite/proven values go through
+/// `resolve_cval` instead, so this is the disjoint "abstract" arm of Feature E.
+fn arg_abstract_fact<'e>(
+    value: &ArgValue,
+    env: &'e HashMap<String, Known>,
+    poisoned: bool,
+) -> Option<&'e Fact> {
+    if poisoned {
+        return None;
+    }
+    let ArgValue::Var(name) = value else { return None };
+    let f = &env.get(name)?.fact;
+    f.finite_members().is_none().then_some(f)
+}
+
+/// Whether a lowered contract type contains a class-name node — a bare identifier
+/// that may actually be a template or a type-alias. The abstract-fact check stays
+/// silent on these (see [`check_phpdoc_param`]).
+fn contract_touches_class(ty: &steins_contract::ContractTy) -> bool {
+    use steins_contract::ContractTy as C;
+    match ty {
+        C::Class(_) => true,
+        C::Union(m) | C::Inter(m) => m.iter().any(contract_touches_class),
+        C::ListOf { elem, .. } => contract_touches_class(elem),
+        C::MapOf { key, val, .. } | C::IterableOf { key, val } => {
+            contract_touches_class(key) || contract_touches_class(val)
+        }
+        C::Shape { fields, unsealed, .. } => {
+            fields.iter().any(|f| contract_touches_class(&f.ty))
+                || unsealed.as_ref().is_some_and(|(k, v)| {
+                    k.as_ref().is_some_and(|k| contract_touches_class(k))
+                        || contract_touches_class(v)
+                })
+        }
+        _ => false,
+    }
+}
+
+/// A short, phpdoc-flavored description of an abstract fact for a diagnostic
+/// message (`a value of type int`, `a non-empty-string value`, `an int|null
+/// value`). Finite facts never reach here (they render as concrete values).
+fn describe_fact(f: &Fact) -> String {
+    let base_kw = |b: Base| match b {
+        Base::Int => "int",
+        Base::Float => "float",
+        Base::String => "string",
+        Base::Bool => "bool",
+    };
+    let (name, nullable) = match f {
+        Fact::General { base, nullable } => (base_kw(*base).to_owned(), *nullable),
+        Fact::Refined { base: Base::Int, refinement: Refinement::Int(r), nullable } => {
+            let n = if *r == IntRange::POSITIVE {
+                "positive-int".to_owned()
+            } else if *r == IntRange::NEGATIVE {
+                "negative-int".to_owned()
+            } else if *r == IntRange::NON_NEGATIVE {
+                "non-negative-int".to_owned()
+            } else {
+                format!("int<{}, {}>", r.lo(), r.hi())
+            };
+            (n, *nullable)
+        }
+        Fact::Refined { base: Base::String, refinement: Refinement::Str(p), nullable } => {
+            let n = if p.contains_all(StrPreds::NON_FALSY) {
+                "non-falsy-string"
+            } else if p.contains_all(StrPreds::NUMERIC) {
+                "numeric-string"
+            } else if p.contains_all(StrPreds::NON_EMPTY) {
+                "non-empty-string"
+            } else {
+                "string"
+            };
+            (n.to_owned(), *nullable)
+        }
+        Fact::Refined { base, nullable, .. } => (base_kw(*base).to_owned(), *nullable),
+        // Finite facts do not reach here.
+        Fact::Singleton(_) | Fact::OneOf(_) => ("value".to_owned(), false),
+    };
+    if nullable {
+        format!("a value of type {name}|null")
+    } else {
+        format!("a value of type {name}")
+    }
 }
 
 /// Render a proven [`CVal`] for a diagnostic message (delegates arrays/scalars to
@@ -4068,7 +4683,7 @@ mod domain_tests {
     use steins_syntax::ArgValue;
 
     fn sing(v: ArgValue) -> Fact {
-        Fact::Singleton(v)
+        singleton_fact(&v).expect("literal converts")
     }
 
     #[test]
@@ -4092,32 +4707,35 @@ mod domain_tests {
 
     #[test]
     fn fact_join_agree_keeps_singleton() {
-        let j = Fact::join(&sing(ArgValue::Int(5)), &sing(ArgValue::Int(5))).unwrap();
-        assert!(matches!(j, Fact::Singleton(ArgValue::Int(5))));
-        assert_eq!(j.singleton(), Some(&ArgValue::Int(5)));
+        // The env now stores `steins_domain::Fact`; joins go through the domain
+        // algebra. Equal singletons stay a Singleton and resolve to the value.
+        let j = sing(ArgValue::Int(5)).join(&sing(ArgValue::Int(5))).unwrap();
+        assert!(matches!(j, Fact::Singleton(Val::Int(5))));
+        let k = Known { fact: j, line: 0, bound: None };
+        assert_eq!(k.singleton(), Some(ArgValue::Int(5)));
     }
 
     #[test]
     fn fact_join_differ_forms_oneof_and_dedups() {
-        let j = Fact::join(&sing(ArgValue::Int(5)), &sing(ArgValue::Int(6))).unwrap();
+        let j = sing(ArgValue::Int(5)).join(&sing(ArgValue::Int(6))).unwrap();
         assert!(matches!(&j, Fact::OneOf(vs) if vs.len() == 2));
         // A OneOf never resolves to a single proven value.
-        assert_eq!(j.singleton(), None);
+        assert_eq!(Known { fact: j.clone(), line: 0, bound: None }.singleton(), None);
         // Re-joining an already-present value dedups.
-        let j2 = Fact::join(&j, &sing(ArgValue::Int(6))).unwrap();
+        let j2 = j.join(&sing(ArgValue::Int(6))).unwrap();
         assert!(matches!(&j2, Fact::OneOf(vs) if vs.len() == 2));
     }
 
     #[test]
-    fn fact_join_overflow_drops() {
-        // A OneOf of exactly ONEOF_CAP members is fine; one more drops the fact.
-        let full = Fact::OneOf((0..ONEOF_CAP as i64).map(ArgValue::Int).collect());
-        assert!(Fact::join(&full, &sing(ArgValue::Int(0))).is_some(), "existing member: no growth");
-        assert!(
-            Fact::join(&full, &sing(ArgValue::Int(999))).is_none(),
-            "a {}th distinct member overflows → dropped",
-            ONEOF_CAP + 1
-        );
+    fn fact_join_overflow_widens_to_refined() {
+        // Beyond the OneOf cap the domain widens to a *computed* Refined summary
+        // (an int interval), rather than dropping — abstract facts now flow
+        // through the env (ADR-0035 stage 2). The widened fact resolves no value.
+        let full = Fact::from_vals((0..steins_domain::CAP as i64).map(Val::Int).collect()).unwrap();
+        assert!(matches!(full, Fact::OneOf(_)));
+        let widened = full.join(&sing(ArgValue::Int(999))).unwrap();
+        assert!(matches!(widened, Fact::Refined { base: Base::Int, .. }));
+        assert_eq!(Known { fact: widened, line: 0, bound: None }.singleton(), None);
     }
 
     #[test]
