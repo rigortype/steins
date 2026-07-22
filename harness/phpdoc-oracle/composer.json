@@ -1,0 +1,12 @@
+{
+    "name": "steins/phpdoc-oracle",
+    "description": "Differential oracle harness: runs the real phpstan/phpdoc-parser as the compatibility reference for steins-phpdoc (ADR-0029).",
+    "license": "AGPL-3.0-only",
+    "require": {
+        "php": ">=8.1",
+        "phpstan/phpdoc-parser": "^2.0"
+    },
+    "config": {
+        "sort-packages": true
+    }
+}

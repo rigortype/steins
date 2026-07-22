@@ -1,0 +1,17 @@
+# steins-phpdoc — a PHPDoc type-expression parser (ADR-0029/0030).
+#
+# A hand-written lexer + recursive-descent parser whose grammar is normatively
+# phpstan/phpdoc-parser-compatible. It stands alone: NO dependency on any other
+# steins crate and no third-party runtime deps, so the zero-dep runner (ADR-0024)
+# can embed it. Compatibility is enforced mechanically against the real
+# phpstan/phpdoc-parser via the differential oracle in harness/phpdoc-oracle.
+[package]
+name = "steins-phpdoc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[dev-dependencies]

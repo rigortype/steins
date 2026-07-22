@@ -1,0 +1,230 @@
+array{\n\t\t\t\t\t// a is for apple\n\t\t\t\t\ta: int,\n\t\t\t\t}
+array{\n\t\t\t\t\t// a is for // apple\n\t\t\t\t\ta: int,\n\t\t\t\t}
+array{\n\t\t\t\t\t// a is for * apple\n\t\t\t\t\ta: int,\n\t\t\t\t}
+array{\n\t\t\t\t\t// a is for http://www.apple.com/\n\t\t\t\t\ta: int,\n\t\t\t\t}
+array{\n\t\t\t\t\t// a is for apple\n\t\t\t\t\t// a is also for awesome\n\t\t\t\t\ta: int,\n\t\t\t\t}
+string
+  string  
+ ( string ) 
+( ( string ) )
+\\Foo\\Bar\\Baz
+  \\Foo\\Bar\\Baz  
+ ( \\Foo\\Bar\\Baz ) 
+( ( \\Foo\\Bar\\Baz ) )
+string|int
+string | int
+(string | int)
+string | int | float
+string&int
+string & int
+(string & int)
+(\n  string\n  &\n  int\n)
+string & int & float
+string & (int | float)
+string | (int & float)
+string & int | float
+string | int & float
+string[]
+string [  ] 
+(string | int | float)[]
+string[][][]
+string [  ] [][]
+(((string | int | float)[])[])[]
+$this
+?int
+?Foo<Bar>
+array<int, Foo\\Bar>
+array<\n\t\t\t\t\t// index with an int\n\t\t\t\t\tint,\n\t\t\t\t\tFoo\\Bar\n\t\t\t\t>
+array {'a': int}
+array{a: int}
+array{a: ?int}
+array{a?: ?int}
+array{0: int}
+array{0?: int}
+array{int, int}
+array{a: int, b: string}
+array{a?: int, b: string, 0: int, 1?: DateTime, hello: string}
+array{a: int, b: array{c: callable(): int}}
+?array{a: int}
+array{
+array{a => int}
+array{"a": int}
+array{'a': int}
+array{'$ref': int}
+array{"$ref": int}
+array{\n\t\t\t\t *\ta: int\n\t\t\t\t *}
+array{\n\t\t\t\t \ta: int,\n\t\t\t\t }
+array{\n\t\t\t\t \ta: int,\n\t\t\t\t \tb: string,\n\t\t\t\t }
+array{\n\t\t\t\t \ta: int\n\t\t\t\t \t, b: string\n\t\t\t\t \t, c: string\n\t\t\t\t }
+array{\n\t\t\t\t \ta: int,\n\t\t\t\t \tb: string\n\t\t\t\t }
+array{a: int, b: int, ...}
+array{int, string, ...}
+array{...}
+array{\n\t\t\t\t *\ta: int,\n\t\t\t\t *\t...\n\t\t\t\t *}
+array{\n\t\t\t\t\ta: int,\n\t\t\t\t\t...,\n\t\t\t\t}
+array{int, ..., string}
+list{\n\t\t\t\t \tint,\n\t\t\t\t \tstring\n\t\t\t\t }
+non-empty-array{\n\t\t\t\t \tint,\n\t\t\t\t \tstring\n\t\t\t\t }
+callable(): non-empty-array{int, string}
+callable(): non-empty-list{int, string}
+non-empty-list{\n\t\t\t\t \tint,\n\t\t\t\t \tstring\n\t\t\t\t }
+array{...<string>}
+array{a: int, b?: int, ...<string>}
+array{a:int,b?:int,...<string>}
+array{a: int, b?: int, ...  \n  <  \n  string  \n  >  \n  ,  \n }
+array{...<int, string>}
+array{a: int, b?: int, ...<int, string>}
+array{a:int,b?:int,...<int,string>}
+array{a: int, b?: int, ...  \n  <  \n  int  \n  ,  \n  string  \n  >  \n  ,  \n  }
+list{...<string>}
+list{int, int, ...<string>}
+list{int,int,...<string>}
+list{int, int, ...  \n  <  \n  string  \n  >  \n  ,  \n  }
+list{0: int, 1?: int, ...<string>}
+list{0:int,1?:int,...<string>}
+list{0: int, 1?: int, ...  \n  <  \n  string  \n  >  \n  ,  \n  }
+array{...<>}
+array{...<int,>}
+array{...<int, string,>}
+array{...<int, string, string>}
+list{...<>}
+list{...<int,>}
+list{...<int, string>}
+callable(): Foo
+pure-callable(): Foo
+pure-Closure(): Foo
+callable(): ?Foo
+callable(): Foo<Bar>
+callable(): Foo<Bar>[]
+callable(): Foo|Bar
+callable(): Foo&Bar
+callable(): (Foo|Bar)
+callable(): (Foo&Bar)
+callable(): array{a: int}
+callable(A&...$a=, B&...=, C): Foo
+callable<A>(B): C
+callable<>(): void
+Closure<T of Model>(T, int): (T|false)
+\\Closure<Tx of X|Z, Ty of Y>(Tx, Ty): array{ Ty, Tx }
+(Foo\\Bar<array<mixed, string>, (int | (string<foo> & bar)[])> | Lorem)
+array [ int ]
+array[ int ]
+self::TYPES[ int ]
+?\t 09
+Collection<array-key, int>[]
+int | Collection<array-key, int>[]
+array{foo: int}[]
+int | array{foo: int}[]
+$this[]
+int | $this[]
+callable(): int[]
+?int[]
+callable(mixed...): TReturn
+'foo'|'bar'
+Foo::FOO_CONSTANT
+123
+123_456
+_123
+123_
+123.2
+123_456.789_012
++0x10_20|+8e+2 | -0b11
+18_446_744_073_709_551_616|8.2023437675747321e-18_446_744_073_709_551_617
+"bar"
+Foo::FOO_*
+Foo::FOO_*BAR
+Foo::*FOO*
+Foo::A*B*C
+self::*BAR
+Foo::*
+Foo::**
+Foo::*a
+( "foo" | Foo::FOO_* )
+DateTimeImmutable::*|DateTime::*
+ParameterTier::*|null
+list<QueueAttributeName::*>
+array<\n  Foo\n>
+array<\n  Foo,\n  Bar\n>
+array<\n  Foo, Bar\n>
+array<\n  Foo,\n  array<\n    Bar\n  >\n>
+array<\n  Foo,\n  array<\n    Bar,\n  >\n>
+array{}
+array{}|int
+int|array{}
+callable(\n  Foo\n): void
+callable(\n  Foo,\n  Bar\n): void
+callable(\n  Foo, Bar\n): void
+callable(\n  Foo,\n  callable(\n    Bar\n  ): void\n): void
+callable(\n  Foo,\n  callable(\n    Bar,\n  ): void\n): void
+(Foo is Bar ? never : int)
+(\n\t\t\t\t\tFoo is Bar\n\t\t\t\t\t?\n\t\t\t\t\t// never, I say\n\t\t\t\t\tnever\n\t\t\t\t\t:\n\t\t\t\t\tint)
+(Foo is not Bar ? never : int)
+(T is self::TYPE_STRING ? string : (T is self::TYPE_INT ? int : bool))
+(Foo is Bar|Baz ? never : int|string)
+(\n  TRandList is array ? array<TRandKey, TRandVal> : (\n  TRandList is XIterator ? XIterator<TRandKey, TRandVal> :\n  IteratorIterator<TRandKey, TRandVal>|LimitIterator<TRandKey, TRandVal>\n))
+($foo is Bar|Baz ? never : int|string)
+(\n  $foo is Bar|Baz\n    ? never\n    : int|string\n)
+?Currency::CURRENCY_*
+(T is Foo ? true : T is Bar ? false : null)
+(T is Foo ? T is Bar ? true : false : null)
+($foo is Foo ? true : $foo is Bar ? false : null)
+($foo is Foo ? $foo is Bar ? true : false : null)
+Foo<covariant Bar, Baz>
+Foo<Bar, contravariant Baz>
+Foo<covariant>
+Foo<typovariant Bar>
+Foo<Bar, *>
+object{a: int}
+object{a: ?int}
+object{a?: ?int}
+object{a: int, b: string}
+object{a: int, b: array{c: callable(): int}}
+object{a: int, b: object{c: callable(): int}}
+?object{a: int}
+object{
+object{a => int}
+object{int}
+object{0: int}
+object{0?: int}
+object{"a": int}
+object{'a': int}
+object{'$ref': int}
+object{"$ref": int}
+object{\n\t\t\t\t *\ta: int\n\t\t\t\t *}
+object{\n\t\t\t\t \ta: int,\n\t\t\t\t }
+object{\n\t\t\t\t\t// a is for apple\n\t\t\t\t \ta: int,\n\t\t\t\t }
+object{\n\t\t\t\t \ta: int,\n\t\t\t\t \tb: string,\n\t\t\t\t }
+object{\n\t\t\t\t \ta: int\n\t\t\t\t \t, b: string\n\t\t\t\t \t, c: string\n\t\t\t\t }
+object{\n\t\t\t\t \ta: int,\n\t\t\t\t \tb: string\n\t\t\t\t }
+object{foo: int}[]
+int | object{foo: int}[]
+object{}
+object{}|int
+int|object{}
+object{attribute:string, value?:string}
+Closure(Foo): (Closure(Foo): Bar)
+callable(): ?int
+callable(): object{foo: int}
+callable(): object{foo: int}[]
+callable(): int[][][]
+callable(): (int[][][])
+(callable(): int[])[][]
+callable(): $this
+callable(): $this[]
+2.5|3
+callable(): 3.5
+callable(): 3.5[]
+callable(): (Foo)[]
+callable(): Foo::BAR
+callable(): Foo::*
+?Foo[]
+callable(): ?Foo[]
+?(Foo|Bar)
+Foo | (Bar & Baz)
+(?Foo) | Bar
+?(Foo&Bar)
+(?Foo)[]
+Foo | Bar | (Baz | Lorem)
+Closure(Container):($serviceId is class-string<TService> ? TService : mixed)
+MongoCollection <p>Returns a collection object representing the new collection.</p>
+array{Foo::BAR: int}
