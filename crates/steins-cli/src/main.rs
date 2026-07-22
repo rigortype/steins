@@ -9,9 +9,10 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use steins_db::{SourceFile, SteinsDatabase};
+use steins_db::{Project, SourceFile, SteinsDatabase};
 use steins_infer::{
-    Diagnostic, LineFact, SOUND_SUBSET_NOTICE, SidecarFolder, annotate_file, check_file,
+    Diagnostic, LineFact, SOUND_SUBSET_NOTICE, SidecarFolder, annotate_file, annotate_project,
+    check_project,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -95,7 +96,11 @@ fn run_check(args: &[String]) -> ExitCode {
     // One folder for the whole run: it owns the resident sidecar and the fold
     // memo, so a repeated call across files never re-spawns or re-folds.
     let mut folder = if no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
-    let mut findings: Vec<Diagnostic> = Vec::new();
+
+    // Project mode (ADR-0009/0015): all `.php` files across the given paths form
+    // ONE project (one salsa DB), so cross-file calls, class chains, and effects
+    // resolve.
+    let mut inputs: Vec<SourceFile> = Vec::new();
     for file_path in &files {
         let text = match std::fs::read(file_path) {
             Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -104,9 +109,10 @@ fn run_check(args: &[String]) -> ExitCode {
                 continue;
             }
         };
-        let input = SourceFile::new(&db, file_path.to_string_lossy().into_owned(), text);
-        findings.extend(check_file(&db, input, &mut folder).iter().cloned());
+        inputs.push(SourceFile::new(&db, file_path.to_string_lossy().into_owned(), text));
     }
+    let project = Project::new(&db, inputs);
+    let findings: Vec<Diagnostic> = check_project(&db, project, &mut folder);
 
     match format {
         Format::Text => print_text(&findings),
@@ -121,20 +127,38 @@ fn run_check(args: &[String]) -> ExitCode {
 /// goes to stdout. Exits 2 on a usage error (directory, missing/extra args).
 fn run_annotate(args: &[String]) -> ExitCode {
     let mut no_php = false;
+    let mut project_dir: Option<String> = None;
     let mut paths: Vec<String> = Vec::new();
-    for arg in args {
-        match arg.as_str() {
-            "--no-php" => no_php = true,
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--no-php" => {
+                no_php = true;
+                i += 1;
+            }
+            "--project" => {
+                let Some(dir) = args.get(i + 1) else {
+                    eprintln!("steins: --project requires a directory argument");
+                    return ExitCode::from(2);
+                };
+                project_dir = Some(dir.clone());
+                i += 2;
+            }
             other if other.starts_with('-') => {
                 eprintln!("steins: unknown flag `{other}` for annotate");
                 return ExitCode::from(2);
             }
-            other => paths.push(other.to_owned()),
+            other => {
+                paths.push(other.to_owned());
+                i += 1;
+            }
         }
     }
 
     let [path] = paths.as_slice() else {
-        eprintln!("steins: annotate takes exactly one file (usage: steins annotate [--no-php] <file.php>)");
+        eprintln!(
+            "steins: annotate takes exactly one file (usage: steins annotate [--no-php] [--project <dir>] <file.php>)"
+        );
         return ExitCode::from(2);
     };
     let path = Path::new(path);
@@ -150,16 +174,56 @@ fn run_annotate(args: &[String]) -> ExitCode {
         }
     };
 
-    // Same coverage posture as `check` (ADR-0004): `--no-php` runs the sound
-    // subset (no folding) and surfaces the notice up front; otherwise a folder is
-    // lazily spawned and emits the notice itself if `php` is unavailable.
+    // Same coverage posture as `check` (ADR-0004).
     if no_php {
         eprintln!("{SOUND_SUBSET_NOTICE}");
     }
     let db = SteinsDatabase::default();
     let mut folder = if no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
-    let input = SourceFile::new(&db, path.to_string_lossy().into_owned(), text.clone());
-    let facts = annotate_file(&db, input, &mut folder);
+
+    // The project context for cross-file facts (ADR-0015): the `--project`
+    // directory, else the file's own directory. Every `.php` file under it is
+    // parsed into one project so `annotate` sees cross-file resolution.
+    let root = project_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(".")));
+
+    let canon_target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut project_files = Vec::new();
+    collect_php_files(&root, &mut project_files);
+    project_files.sort();
+    project_files.dedup();
+
+    let mut inputs: Vec<SourceFile> = Vec::new();
+    let mut target: Option<SourceFile> = None;
+    for fp in &project_files {
+        let content = if fp.canonicalize().map(|c| c == canon_target).unwrap_or(false) {
+            text.clone()
+        } else {
+            match std::fs::read(fp) {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(_) => continue,
+            }
+        };
+        let input = SourceFile::new(&db, fp.to_string_lossy().into_owned(), content);
+        if fp.canonicalize().map(|c| c == canon_target).unwrap_or(false) {
+            target = Some(input);
+        }
+        inputs.push(input);
+    }
+
+    // If the target file was not found under the root (e.g. an explicit path
+    // outside the project dir), fall back to a one-file project.
+    let facts = match target {
+        Some(target_file) => {
+            let project = Project::new(&db, inputs);
+            annotate_project(&db, project, target_file, &mut folder)
+        }
+        None => {
+            let input = SourceFile::new(&db, path.to_string_lossy().into_owned(), text.clone());
+            annotate_file(&db, input, &mut folder)
+        }
+    };
 
     print!("{}", render_annotation(&text, &facts));
     ExitCode::SUCCESS

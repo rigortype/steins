@@ -78,11 +78,18 @@ fn json_format_smoke() {
 
 #[test]
 fn directory_walk_and_unknown_command() {
-    // Walking the whole fixtures dir finds all findings; exit 1.
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    // Walking a directory recurses into subdirectories and collects every `.php`
+    // file into ONE project (ADR-0009/0015): `render()` is defined in
+    // `walk/lib.php` and called (badly) from `walk/sub/main.php`, so the finding
+    // only exists because the two files are analyzed together. Exit 1.
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/walk");
     let r = run(&["check", dir.to_str().unwrap()]);
-    assert_eq!(r.code, 1);
-    assert!(!r.stdout.is_empty());
+    assert_eq!(r.code, 1, "cross-file finding present, got:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("to render() cannot become int $w"),
+        "cross-file finding, got:\n{}",
+        r.stdout
+    );
 
     let bad = run(&["frobnicate"]);
     assert_eq!(bad.code, 2, "unknown command → exit 2");
@@ -149,7 +156,7 @@ fn no_php_omits_folded_but_keeps_direct_and_notes_posture() {
 
 #[test]
 fn annotate_prints_all_fact_kinds_and_exhaustiveness_marker() {
-    let r = run(&["annotate", fixture("annotate.php").to_str().unwrap()]);
+    let r = run(&["annotate", fixture("annotate/annotate.php").to_str().unwrap()]);
     assert_eq!(r.code, 0, "annotate never fails on a readable file, got:\n{}", r.stderr);
     let out = r.stdout;
 
@@ -178,7 +185,7 @@ fn annotate_prints_all_fact_kinds_and_exhaustiveness_marker() {
 
 #[test]
 fn annotate_no_php_drops_folded_value_keeps_the_rest() {
-    let path = fixture("annotate.php");
+    let path = fixture("annotate/annotate.php");
     let full = run(&["annotate", path.to_str().unwrap()]);
     assert!(full.stdout.contains(r#"//=> $upper = "XY""#), "folded fact present with PHP");
 

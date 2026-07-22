@@ -1,18 +1,23 @@
 //! `freq`: builtin-call frequency over the corpus (ADR-0021 seeding order).
 //!
-//! Counts call expressions whose callee is *not* a function declared in the same
-//! file. PHP function names are case-insensitive, and the lowered callee is
-//! already the last namespace segment (`Foo\bar()` → `bar`), so we fold by
-//! lowercased last segment. The top of the resulting list drives the catalog's
-//! effect-coloring order. Because we cannot yet resolve userland cross-file
-//! functions, they are still counted here — the list is an *upper bound* to be
-//! filtered against the real php-src builtin list later.
+//! # Methodology (whole-project revision)
+//!
+//! Each corpus package is now loaded as ONE project (one salsa DB), so
+//! [`steins_infer::resolves_to_user_function`] can resolve every function call
+//! against the project symbol index using PHP name resolution (namespace
+//! fallback + `use` imports). A call is counted **only when it does not resolve
+//! to a userland function defined anywhere in its package** — so cross-file
+//! userland calls (previously counted as an upper-bound contaminant) are now
+//! excluded. The result is a *true builtin ranking*: what remains is builtins
+//! and genuinely-unresolved names, which is exactly the signal that should drive
+//! the catalog's effect-coloring order. Names are folded case-insensitively by
+//! last namespace segment.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use rayon::prelude::*;
-use steins_syntax::SourceTree;
+use steins_db::{Project, SourceFile, SteinsDatabase, parse, project_index};
+use steins_infer::resolves_to_user_function;
 
 use crate::corpus::{PACKAGES, checkout_dir, collect_php_files, read_lock, repo_root};
 
@@ -25,36 +30,29 @@ pub fn run() -> Result<(), String> {
         return Err("corpus.lock.toml is empty — run `cargo xtask corpus-sync` first".to_owned());
     }
 
-    // Gather every corpus file up front so the whole set parallelizes evenly.
-    let mut files: Vec<PathBuf> = Vec::new();
     for pkg in PACKAGES {
         let dir = checkout_dir(pkg.name);
         if !dir.is_dir() {
-            return Err(format!(
-                "{} not checked out — run `cargo xtask corpus-sync`",
-                pkg.name
-            ));
+            return Err(format!("{} not checked out — run `cargo xtask corpus-sync`", pkg.name));
         }
-        collect_php_files(&dir, &mut files);
     }
 
-    // Fold each file to a local count map, then merge. Ignores files with parse
-    // errors for their *un-parsed* tail only — recovered calls still count.
-    let counts: HashMap<String, u64> = files
+    // Each package is its own project; count in parallel across packages, then
+    // merge. Resolution against the package's project index removes userland
+    // cross-file calls.
+    let (counts, file_count): (HashMap<String, u64>, usize) = PACKAGES
         .par_iter()
-        .fold(HashMap::new, |mut acc, path| {
-            if let Ok(bytes) = std::fs::read(path) {
-                let text = String::from_utf8_lossy(&bytes);
-                count_file(&text, &mut acc);
-            }
-            acc
-        })
-        .reduce(HashMap::new, |mut a, b| {
-            for (k, v) in b {
-                *a.entry(k).or_insert(0) += v;
-            }
-            a
-        });
+        .map(|pkg| count_package(&checkout_dir(pkg.name)))
+        .reduce(
+            || (HashMap::new(), 0usize),
+            |mut a, b| {
+                for (k, v) in b.0 {
+                    *a.0.entry(k).or_insert(0) += v;
+                }
+                a.1 += b.1;
+                a
+            },
+        );
 
     let grand_total: u64 = counts.values().sum();
     let distinct = counts.len();
@@ -63,13 +61,13 @@ pub fn run() -> Result<(), String> {
     let mut ranked: Vec<(String, u64)> = counts.into_iter().collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
-    let report = render_markdown(&ranked, grand_total, distinct, files.len(), &lock);
+    let report = render_markdown(&ranked, grand_total, distinct, file_count, &lock);
     let out_path = repo_root().join("docs/notes/20260722-builtin-frequency.md");
     std::fs::write(&out_path, report).map_err(|e| format!("write {}: {e}", out_path.display()))?;
 
     println!(
         "freq: {} files, {grand_total} counted calls, {distinct} distinct callees → {}",
-        files.len(),
+        file_count,
         out_path.display()
     );
     // Echo the top 20 so the run is self-documenting.
@@ -80,24 +78,42 @@ pub fn run() -> Result<(), String> {
     Ok(())
 }
 
-/// Add one file's cross-file call counts into `acc`.
-fn count_file(text: &str, acc: &mut HashMap<String, u64>) {
-    let tree = SourceTree::parse(text);
+/// Count one package's non-userland calls, resolved against the package project.
+/// Returns the count map and the number of files seen.
+fn count_package(dir: &std::path::Path) -> (HashMap<String, u64>, usize) {
+    let mut counts: HashMap<String, u64> = HashMap::new();
+    let mut files = Vec::new();
+    collect_php_files(dir, &mut files);
 
-    // Same-file user function names, lowercased (PHP is case-insensitive).
-    let local: std::collections::HashSet<String> =
-        tree.functions().iter().map(|f| f.name.to_ascii_lowercase()).collect();
+    let db = SteinsDatabase::default();
+    let inputs: Vec<SourceFile> = files
+        .iter()
+        .map(|f| {
+            let text = std::fs::read(f)
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default();
+            SourceFile::new(&db, f.to_string_lossy().into_owned(), text)
+        })
+        .collect();
+    let project = Project::new(&db, inputs.clone());
+    let index = project_index(&db, project);
 
-    for call in tree.calls() {
-        let Some(callee) = call.callee.as_deref() else { continue };
-        // Defensive: strip any leading namespace separators (the lowering already
-        // reduces to the last segment, but a stray `\strlen` should still fold).
-        let name = callee.trim_start_matches('\\').to_ascii_lowercase();
-        if name.is_empty() || local.contains(&name) {
-            continue;
+    for &input in &inputs {
+        let tree = parse(&db, input);
+        for call in tree.calls() {
+            let Some(r) = call.callee_ref.as_ref() else { continue };
+            // Exclude calls that resolve to a userland function in the project.
+            if resolves_to_user_function(index, tree, r) {
+                continue;
+            }
+            let name = r.simple().trim_start_matches('\\').to_ascii_lowercase();
+            if name.is_empty() {
+                continue;
+            }
+            *counts.entry(name).or_insert(0) += 1;
         }
-        *acc.entry(name).or_insert(0) += 1;
     }
+    (counts, files.len())
 }
 
 fn render_markdown(
@@ -117,11 +133,14 @@ fn render_markdown(
          compatible with the zero-FP bar (ADR-0002).\n\n",
     );
     s.push_str(
-        "**Upper bound, not a builtin list.** A callee is counted when it is *not* a \
-         function declared in the same file, but we cannot yet resolve userland \
-         cross-file functions — those are still counted here. Treat this ranking as an \
-         upper bound to be filtered against the real php-src builtin list before it drives \
-         coloring. Names are folded case-insensitively by last namespace segment.\n\n",
+        "**Methodology change (whole-project resolution).** Each package is now loaded as \
+         one project, and every call is resolved against the project symbol index using \
+         PHP name resolution (namespace fallback + `use` imports). A call is counted only \
+         when it does **not** resolve to a userland function defined anywhere in its \
+         package — so cross-file userland calls are excluded and this ranking is a *true \
+         builtin ranking*, no longer the old upper bound. What remains is builtins and \
+         genuinely-unresolved names. Names are folded case-insensitively by last \
+         namespace segment.\n\n",
     );
     s.push_str(&format!(
         "- Files analyzed: {file_count}\n- Counted cross-file calls: {grand_total}\n- Distinct callees: {distinct}\n\n"

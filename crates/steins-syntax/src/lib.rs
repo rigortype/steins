@@ -42,6 +42,7 @@ use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::UseItems;
 use mago_syntax::cst::Variable;
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
@@ -60,6 +61,95 @@ pub struct Span {
 pub struct Position {
     pub line: u32,
     pub column: u32,
+}
+
+/// How a name was written at a *reference* site, driving PHP name resolution
+/// (whole-project slice). This is the syntactic input the resolution rules key
+/// on; the resolution itself (namespace fallback, `use` imports, builtin
+/// catalog) lives in `steins-infer` against the project index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RefKind {
+    /// `\Foo\bar` — leading backslash: an absolute name; no import or current
+    /// namespace applies. (The stored `raw` has the leading `\` stripped.)
+    FullyQualified,
+    /// `Sub\bar` — contains a namespace separator but no leading one: relative
+    /// to the current namespace, first segment subject to `use` imports.
+    Qualified,
+    /// `bar` — a single bare segment: unqualified (subject to imports, then the
+    /// namespace/global fallback rules).
+    Unqualified,
+}
+
+/// A reference to a function or class name as written at a use site, carrying
+/// exactly what cross-file resolution needs: the raw spelling (leading `\`
+/// stripped, case preserved — PHP names are case-insensitive so callers fold
+/// case at lookup), the qualification [`RefKind`], and the byte `offset` of the
+/// reference (used to select the enclosing namespace context via
+/// [`SourceTree::ctx_at`]).
+///
+/// `offset` is intentionally excluded from equality/hashing: two textually
+/// identical references at different positions denote the same name.
+#[derive(Debug, Clone)]
+pub struct NameRef {
+    pub raw: String,
+    pub kind: RefKind,
+    pub offset: u32,
+}
+
+impl PartialEq for NameRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw && self.kind == other.kind
+    }
+}
+impl Eq for NameRef {}
+impl std::hash::Hash for NameRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.raw.hash(state);
+        self.kind.hash(state);
+    }
+}
+
+impl NameRef {
+    /// The last (unqualified) segment of the raw name — the simple name used for
+    /// diagnostics and same-file legacy paths.
+    #[must_use]
+    pub fn simple(&self) -> &str {
+        match self.raw.rfind('\\') {
+            Some(pos) => &self.raw[pos + 1..],
+            None => &self.raw,
+        }
+    }
+}
+
+/// A file-region namespace context: the enclosing namespace name plus the `use`
+/// imports in scope there (ADR: whole-project name resolution). Names and import
+/// targets are **case-preserved** (no leading/trailing `\`); import-map *keys*
+/// (the bound local alias) are lowercased, since PHP name lookup is
+/// case-insensitive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NsCtx {
+    /// The namespace path (`App\Models`), or empty for the global namespace.
+    pub namespace: String,
+    /// Class/namespace imports: lowercased alias → case-preserved target FQN.
+    pub class_imports: HashMap<String, String>,
+    /// `use function` imports: lowercased alias → case-preserved target FQN.
+    pub fn_imports: HashMap<String, String>,
+}
+
+impl NsCtx {
+    fn global() -> Self {
+        Self { namespace: String::new(), class_imports: HashMap::new(), fn_imports: HashMap::new() }
+    }
+}
+
+impl std::hash::Hash for NsCtx {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Order-independent: hash the namespace plus the sizes, so `NsCtx` can sit
+        // inside the `Hash`-deriving [`SourceTree`] despite holding hash maps.
+        self.namespace.hash(state);
+        self.class_imports.len().hash(state);
+        self.fn_imports.len().hash(state);
+    }
 }
 
 /// The scalar native types the slice reasons about (PHP 8.1+; ADR-0011).
@@ -125,11 +215,13 @@ pub struct Param {
 /// what `Pure` forbids.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EffectOrigin {
-    /// A call to a statically-named function `name` (the last, unqualified
-    /// segment) at `span` (the callee identifier). May resolve to a builtin
-    /// (classified via the catalog) or a same-file user function (an effect
-    /// propagation edge). Dynamic and method calls are not recorded.
-    Call { name: String, span: Span },
+    /// A call to a statically-named function at `span` (the callee identifier).
+    /// `name` carries the full reference (raw spelling + qualification) so the
+    /// effects pass can resolve it project-wide: it may resolve to a builtin
+    /// (classified via the catalog), a user function anywhere in the project (an
+    /// effect propagation edge), or nothing (ambiguous → taints exhaustiveness).
+    /// Dynamic and method calls are not recorded here.
+    Call { name: NameRef, span: Span },
     /// An `echo` / `print` / short-echo (`<?=`) construct at `span` — the
     /// `output` effect. `keyword` is the spelling for diagnostics.
     Output { keyword: &'static str, span: Span },
@@ -166,8 +258,10 @@ pub enum EffectRecv {
     SelfKw,
     /// `parent::m()` — resolved on the parent chain, exact (parent is fixed).
     Parent,
-    /// `Foo::m()` or `new Foo()->m()` — resolved on `Foo`'s chain, exact.
-    ClassName(String),
+    /// `Foo::m()` or `new Foo()->m()` — resolved on the referenced class's chain,
+    /// exact. Carries the full [`NameRef`] so the class resolves project-wide to
+    /// its FQN.
+    ClassName(NameRef),
 }
 
 /// A recognized effect-envelope declaration (ADR-0005/0006/0018): the upper
@@ -194,6 +288,11 @@ pub struct EffectEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionDecl {
     pub name: String,
+    /// The fully-qualified name, lowercase-normalized (namespace + `\` + name;
+    /// PHP function/namespace names are case-insensitive). The project index
+    /// keys on this. For a global (un-namespaced) function it equals the
+    /// lowercased simple name.
+    pub fqn: String,
     pub params: Vec<Param>,
     pub span: Span,
     /// The recognized `#[\Steins\Pure]` / `#[\Steins\Effect(...)]` envelope on
@@ -247,13 +346,18 @@ pub struct MethodDecl {
 /// so resolution gives up on it).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ClassDecl {
-    /// Simple (unqualified) class name as written at the declaration site.
+    /// Simple (unqualified) class name as written at the declaration site (used
+    /// for diagnostics).
     pub name: String,
+    /// The fully-qualified name, lowercase-normalized. The project index keys on
+    /// this; for a global class it equals the lowercased simple name.
+    pub fqn: String,
     pub is_final: bool,
-    /// The `extends` parent's simple (last-segment) name, if any. Method
-    /// resolution walks this chain in-file; a parent not defined in the same
-    /// file makes the chain incomplete (→ unknown → silent).
-    pub parent: Option<String>,
+    /// The `extends` parent as written, if any (raw spelling + qualification).
+    /// Method resolution resolves this to an FQN against the project index and
+    /// walks the chain; a parent not defined anywhere in the project makes the
+    /// chain incomplete (→ unknown → silent).
+    pub parent: Option<NameRef>,
     pub methods: Vec<MethodDecl>,
     /// `true` if the class `use`s any trait. Trait methods are merged into the
     /// class at compile time but their bodies live elsewhere, so a
@@ -285,12 +389,13 @@ pub enum ArgValue {
     /// lowered argument values (only zero-argument calls are resolvable in this
     /// slice, so the vector's contents matter only for `is_empty()`).
     Call(String, Vec<ArgValue>),
-    /// `new ClassName(args...)` — a construction rvalue. `String` is the simple
-    /// class name as written. Carried so an assignment `$x = new Foo(...)` can
-    /// record `$x`'s **exact class** in the propagation environment (the object's
-    /// runtime class is fixed at construction). Not a scalar literal — it never
-    /// flows into a scalar type check.
-    New(String, Vec<ArgValue>),
+    /// `new ClassName(args...)` — a construction rvalue. [`NameRef`] is the class
+    /// reference as written (resolved to an FQN project-wide at use time).
+    /// Carried so an assignment `$x = new Foo(...)` can record `$x`'s **exact
+    /// class** in the propagation environment (the object's runtime class is
+    /// fixed at construction). Not a scalar literal — it never flows into a
+    /// scalar type check.
+    New(NameRef, Vec<ArgValue>),
     Other,
 }
 
@@ -305,7 +410,11 @@ impl std::hash::Hash for ArgValue {
             ArgValue::Str(v) => v.hash(state),
             ArgValue::Bool(v) => v.hash(state),
             ArgValue::Var(v) => v.hash(state),
-            ArgValue::Call(name, args) | ArgValue::New(name, args) => {
+            ArgValue::Call(name, args) => {
+                name.hash(state);
+                args.hash(state);
+            }
+            ArgValue::New(name, args) => {
                 name.hash(state);
                 args.hash(state);
             }
@@ -343,7 +452,7 @@ impl ArgValue {
             ArgValue::Null => "null".to_owned(),
             ArgValue::Var(v) => format!("${v}"),
             ArgValue::Call(name, _) => format!("{name}()"),
-            ArgValue::New(name, _) => format!("new {name}()"),
+            ArgValue::New(name, _) => format!("new {}()", name.simple()),
             ArgValue::Other => "<expr>".to_owned(),
         }
     }
@@ -370,7 +479,8 @@ pub enum Callee {
     /// `Class::m(args...)` — a static (scope-resolution `::`) call.
     Static { class: StaticClass, method: String },
     /// `new Class(args...)` — a constructor call (`args` are the ctor args).
-    Construct { class: String },
+    /// `class` is the class reference as written (resolved to an FQN at use).
+    Construct { class: NameRef },
     /// A receiver or method name the lowering cannot represent (dynamic method
     /// name, `$obj[...]->m()`, `$var::m()`, …). Never resolves.
     Dynamic,
@@ -385,15 +495,17 @@ pub enum Receiver {
     /// `$var->m()` — resolvable only when the environment knows `$var`'s exact
     /// class (`$var = new Foo();`).
     Var(String),
-    /// `(new Foo(...))->m()` — an exact-class receiver (runtime class is `Foo`).
-    New(String),
+    /// `(new Foo(...))->m()` — an exact-class receiver (runtime class is the
+    /// referenced class, resolved to an FQN project-wide).
+    New(NameRef),
 }
 
 /// The class portion of a static `Class::m()` call, as written.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StaticClass {
-    /// An explicit class name (last segment), e.g. `Foo::m()` — exact.
-    Named(String),
+    /// An explicit class reference, e.g. `Foo::m()` / `Sub\Foo::m()` — exact
+    /// (resolved to an FQN project-wide).
+    Named(NameRef),
     /// `self::m()` — the lexical class, resolved under the final/private guard.
     SelfKw,
     /// `static::m()` — late static binding, always unknown (LSB).
@@ -409,6 +521,10 @@ pub struct CallExpr {
     /// identifier; `None` for dynamic and method/static/constructor calls. Kept
     /// for the function-world call path; the full receiver is in [`Self::receiver`].
     pub callee: Option<String>,
+    /// The full function reference (raw spelling + qualification) when the callee
+    /// is a statically-known function, for project-wide resolution; `None`
+    /// otherwise. Parallel to [`Self::callee`].
+    pub callee_ref: Option<NameRef>,
     /// The receiver dimension (function / method / static / constructor). For a
     /// plain function call this is [`Callee::Function`] with the same name as
     /// [`Self::callee`].
@@ -528,6 +644,12 @@ pub struct SourceTree {
     calls: Vec<CallExpr>,
     scopes: Vec<Scope>,
     parse_errors: Vec<ParseError>,
+    /// The namespace contexts of the file; index 0 is always the global context.
+    contexts: Vec<NsCtx>,
+    /// One `(start, end, ctx_index)` per namespace declaration in the file, so a
+    /// byte offset can be mapped to its enclosing namespace context. Offsets not
+    /// inside any namespace fall back to the global context (index 0).
+    regions: Vec<(u32, u32, usize)>,
     /// Byte offset of the start of each line (index 0 == line 1).
     line_starts: Vec<u32>,
     text: String,
@@ -547,11 +669,24 @@ impl SourceTree {
         // attribute can be recognized.
         let aliases = collect_steins_aliases(&Node::Program(program));
 
+        // Namespace contexts (name + `use` imports) and the byte regions they
+        // cover, so every declaration and reference resolves in the right scope.
+        let (contexts, regions) = build_contexts(program);
+
         let mut lowered = Lowered::default();
         walk(&Node::Program(program), &aliases, &mut lowered);
 
-        let classes = lower_classes(&Node::Program(program), &aliases);
-        let scopes = lower_scopes(program);
+        let mut classes = lower_classes(&Node::Program(program), &aliases);
+        let scopes = lower_scopes(program, &contexts, &regions);
+
+        // Fill the lowercase-normalized FQN on every declaration from the context
+        // that encloses its name.
+        for f in &mut lowered.functions {
+            f.fqn = fqn_of(ctx_of(&contexts, &regions, f.span.start), &f.name);
+        }
+        for c in &mut classes {
+            c.fqn = fqn_of(ctx_of(&contexts, &regions, c.span.start), &c.name);
+        }
 
         let parse_errors = program
             .errors
@@ -566,8 +701,53 @@ impl SourceTree {
             calls: lowered.calls,
             scopes,
             parse_errors,
+            contexts,
+            regions,
             line_starts: line_starts(source),
             text: source.to_owned(),
+        }
+    }
+
+    /// The namespace context enclosing `offset` (its namespace name and the
+    /// `use` imports in scope), for whole-project name resolution.
+    #[must_use]
+    pub fn ctx_at(&self, offset: u32) -> &NsCtx {
+        ctx_of(&self.contexts, &self.regions, offset)
+    }
+
+    /// Resolve a **class** reference to its FQN (case preserved, no leading `\`),
+    /// applying PHP class-name resolution: fully-qualified names pass through;
+    /// qualified/unqualified names apply `use` class imports on the first
+    /// segment, else prepend the current namespace. Class references have **no**
+    /// global fallback (unlike functions), so this is a pure syntactic function
+    /// of the reference and its context — no project index needed. Callers fold
+    /// case at lookup.
+    #[must_use]
+    pub fn resolve_class_fqn(&self, r: &NameRef) -> String {
+        let ctx = self.ctx_at(r.offset);
+        match r.kind {
+            RefKind::FullyQualified => r.raw.clone(),
+            RefKind::Qualified => {
+                // First segment via class/namespace imports, else current ns.
+                let first_len = r.raw.find('\\').unwrap_or(r.raw.len());
+                let first = &r.raw[..first_len];
+                if let Some(target) = ctx.class_imports.get(&first.to_ascii_lowercase()) {
+                    format!("{target}{}", &r.raw[first_len..])
+                } else if ctx.namespace.is_empty() {
+                    r.raw.clone()
+                } else {
+                    format!("{}\\{}", ctx.namespace, r.raw)
+                }
+            }
+            RefKind::Unqualified => {
+                if let Some(target) = ctx.class_imports.get(&r.raw.to_ascii_lowercase()) {
+                    target.clone()
+                } else if ctx.namespace.is_empty() {
+                    r.raw.clone()
+                } else {
+                    format!("{}\\{}", ctx.namespace, r.raw)
+                }
+            }
         }
     }
 
@@ -652,6 +832,7 @@ fn lower_function(f: &Function<'_>, aliases: &SteinsAttrAliases) -> FunctionDecl
 
     FunctionDecl {
         name: bytes_to_string(f.name.value),
+        fqn: String::new(), // filled in `parse` from the enclosing namespace ctx
         params: lower_params(&f.parameter_list),
         span: to_span(f.name.span()),
         effect_envelope: attrs_effect_envelope(&f.attribute_lists, aliases),
@@ -695,7 +876,7 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases) -> ClassDecl {
         .extends
         .as_ref()
         .and_then(|e| e.types.iter().next())
-        .map(|id| bytes_to_string(id.last_segment()));
+        .map(name_ref);
 
     let mut methods = Vec::new();
     let mut uses_traits = false;
@@ -709,6 +890,7 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases) -> ClassDecl {
 
     ClassDecl {
         name: bytes_to_string(c.name.value),
+        fqn: String::new(), // filled in `parse` from the enclosing namespace ctx
         is_final: c.modifiers.iter().any(Modifier::is_final),
         parent,
         methods,
@@ -912,10 +1094,7 @@ fn scan_effect_origins(node: &Node<'_, '_>, out: &mut Vec<EffectOrigin>) {
         // same-file user function (a propagation edge) — the effects pass decides.
         Node::FunctionCall(fc) => {
             if let Expression::Identifier(id) = fc.function {
-                out.push(EffectOrigin::Call {
-                    name: bytes_to_string(id.last_segment()),
-                    span: to_span(id.span()),
-                });
+                out.push(EffectOrigin::Call { name: name_ref(id), span: to_span(id.span()) });
             } else {
                 // A dynamic function call (`$f()`, `($cb)()`) — unprovable.
                 out.push(EffectOrigin::Opaque { span: to_span(fc.span()) });
@@ -1002,14 +1181,14 @@ fn lower_hint(hint: &Hint<'_>) -> Option<ParamType> {
 }
 
 fn lower_call(c: &FunctionCall<'_>) -> CallExpr {
-    let callee = match c.function {
-        Expression::Identifier(id) => Some(bytes_to_string(id.last_segment())),
-        _ => None,
+    let (callee, callee_ref) = match c.function {
+        Expression::Identifier(id) => (Some(bytes_to_string(id.last_segment())), Some(name_ref(id))),
+        _ => (None, None),
     };
     let receiver = callee.clone().map_or(Callee::Dynamic, Callee::Function);
 
     let (args, positional_only) = lower_argument_list(&c.argument_list);
-    CallExpr { callee, receiver, args, positional_only, span: to_span(c.span()) }
+    CallExpr { callee, callee_ref, receiver, args, positional_only, span: to_span(c.span()) }
 }
 
 /// Lower an argument list to `(args, positional_only)`, shared by every call
@@ -1037,11 +1216,11 @@ fn method_name_of(selector: &ClassLikeMemberSelector<'_>) -> Option<String> {
     }
 }
 
-/// The simple class name of an instantiation's class expression, if statically
+/// The class reference of an instantiation's class expression, if statically
 /// named (`new Foo(...)`). Dynamic (`new $c()`) yields `None`.
-fn instantiation_class(inst: &Instantiation<'_>) -> Option<String> {
+fn instantiation_class(inst: &Instantiation<'_>) -> Option<NameRef> {
     match inst.class {
-        Expression::Identifier(id) => Some(bytes_to_string(id.last_segment())),
+        Expression::Identifier(id) => Some(name_ref(id)),
         _ => None,
     }
 }
@@ -1062,7 +1241,7 @@ fn trace_recv_of_object(object: &Expression<'_>) -> Option<Receiver> {
 /// The trace [`StaticClass`] of a static-call class expression.
 fn trace_static_class(class: &Expression<'_>) -> Option<StaticClass> {
     match class {
-        Expression::Identifier(id) => Some(StaticClass::Named(bytes_to_string(id.last_segment()))),
+        Expression::Identifier(id) => Some(StaticClass::Named(name_ref(id))),
         Expression::Self_(_) => Some(StaticClass::SelfKw),
         Expression::Static(_) => Some(StaticClass::Static),
         Expression::Parent(_) => Some(StaticClass::Parent),
@@ -1088,7 +1267,7 @@ fn effect_recv_of_object(object: &Expression<'_>) -> Option<EffectRecv> {
 /// dynamic classes are unresolvable → `None`).
 fn effect_recv_of_class(class: &Expression<'_>) -> Option<EffectRecv> {
     match class {
-        Expression::Identifier(id) => Some(EffectRecv::ClassName(bytes_to_string(id.last_segment()))),
+        Expression::Identifier(id) => Some(EffectRecv::ClassName(name_ref(id))),
         Expression::Self_(_) => Some(EffectRecv::SelfKw),
         Expression::Parent(_) => Some(EffectRecv::Parent),
         _ => None,
@@ -1102,7 +1281,7 @@ fn lower_method_call(object: &Expression<'_>, selector: &ClassLikeMemberSelector
         _ => Callee::Dynamic,
     };
     let (args, positional_only) = lower_argument_list(list);
-    CallExpr { callee: None, receiver, args, positional_only, span }
+    CallExpr { callee: None, callee_ref: None, receiver, args, positional_only, span }
 }
 
 /// Lower a static method call into a [`CallExpr`].
@@ -1112,7 +1291,7 @@ fn lower_static_call(class: &Expression<'_>, selector: &ClassLikeMemberSelector<
         _ => Callee::Dynamic,
     };
     let (args, positional_only) = lower_argument_list(list);
-    CallExpr { callee: None, receiver, args, positional_only, span }
+    CallExpr { callee: None, callee_ref: None, receiver, args, positional_only, span }
 }
 
 /// Lower a `new Class(args...)` instantiation into a constructor [`CallExpr`],
@@ -1125,6 +1304,7 @@ fn lower_construct_call(inst: &Instantiation<'_>) -> Option<CallExpr> {
     };
     Some(CallExpr {
         callee: None,
+        callee_ref: None,
         receiver: Callee::Construct { class },
         args,
         positional_only,
@@ -1215,28 +1395,70 @@ fn is_strict_types_one(item: &DeclareItem<'_>) -> bool {
 /// Build every analysis scope: the top-level script first, then one per
 /// function declaration and one per concrete method body found anywhere in the
 /// file (nested functions and class methods alike get scopes).
-fn lower_scopes(program: &Program<'_>) -> Vec<Scope> {
-    let mut scopes = vec![build_scope(ScopeOwner::TopLevel, program.statements.as_slice())];
-    collect_scopes(&Node::Program(program), &mut scopes);
+fn lower_scopes(
+    program: &Program<'_>,
+    contexts: &[NsCtx],
+    regions: &[(u32, u32, usize)],
+) -> Vec<Scope> {
+    // The script (top-level) scope spans all namespace bodies too: file-scoped
+    // `namespace A;` nests the following statements inside the namespace node, so
+    // flatten those back out so namespaced top-level code (e.g. `new User(...)`)
+    // is analyzed. Function/class declarations still get their own scopes below.
+    let mut top: Vec<&Statement<'_>> = Vec::new();
+    for s in program.statements.iter() {
+        flatten_top_level(s, &mut top);
+    }
+    let mut scopes = vec![build_scope_from(ScopeOwner::TopLevel, &top)];
+    collect_scopes(&Node::Program(program), contexts, regions, &mut scopes);
     scopes
+}
+
+/// Collect script-level statements, descending through `namespace` bodies so
+/// their top-level code joins the script scope in source order.
+fn flatten_top_level<'a, 'arena>(
+    s: &'a Statement<'arena>,
+    out: &mut Vec<&'a Statement<'arena>>,
+) {
+    if let Statement::Namespace(ns) = s {
+        for inner in ns.statements().iter() {
+            flatten_top_level(inner, out);
+        }
+    } else {
+        out.push(s);
+    }
 }
 
 /// Recursively find `function` declarations (→ function scopes) and `class`
 /// declarations (→ one scope per concrete method), building a scope for each.
-fn collect_scopes(node: &Node<'_, '_>, out: &mut Vec<Scope>) {
+/// A method scope's owner carries the class **FQN** (lowercase-normalized), so
+/// cross-file resolution addresses it unambiguously.
+fn collect_scopes(
+    node: &Node<'_, '_>,
+    contexts: &[NsCtx],
+    regions: &[(u32, u32, usize)],
+    out: &mut Vec<Scope>,
+) {
     match node {
         Node::Function(f) => {
             let name = bytes_to_string(f.name.value);
             out.push(build_scope(ScopeOwner::Function(name), f.body.statements.as_slice()));
         }
         Node::Class(c) => {
-            let class = bytes_to_string(c.name.value);
+            let simple = bytes_to_string(c.name.value);
+            let ctx = ctx_of(contexts, regions, to_span(c.name.span()).start);
+            // Case-preserved FQN: cross-file lookups fold case, but keeping the
+            // written case makes the owner readable and stable for same-file code.
+            let class_fqn = if ctx.namespace.is_empty() {
+                simple.clone()
+            } else {
+                format!("{}\\{}", ctx.namespace, simple)
+            };
             for member in c.members.iter() {
                 if let ClassLikeMember::Method(m) = member
                     && let MethodBody::Concrete(block) = &m.body
                 {
                     let method = bytes_to_string(m.name.value);
-                    let owner = ScopeOwner::Method { class: class.clone(), method };
+                    let owner = ScopeOwner::Method { class: class_fqn.clone(), method };
                     out.push(build_scope(owner, block.statements.as_slice()));
                 }
             }
@@ -1247,12 +1469,19 @@ fn collect_scopes(node: &Node<'_, '_>, out: &mut Vec<Scope>) {
     // also get their scopes. Method scopes are only created above (matching
     // `Node::Class`), so this recursion never double-creates one.
     for child in node.children() {
-        collect_scopes(&child, out);
+        collect_scopes(&child, contexts, regions, out);
     }
 }
 
 /// Lower one scope's statements to a linear trace, and compute its poison flag.
 fn build_scope(owner: ScopeOwner, statements: &[Statement<'_>]) -> Scope {
+    let refs: Vec<&Statement<'_>> = statements.iter().collect();
+    build_scope_from(owner, &refs)
+}
+
+/// Lower a scope from a borrowed statement list (shared by the flattened
+/// top-level scope and the direct function/method paths).
+fn build_scope_from(owner: ScopeOwner, statements: &[&Statement<'_>]) -> Scope {
     let poisoned = statements.iter().any(|s| node_poisons(&Node::Statement(s)));
     let mut stmts = Vec::new();
     for s in statements {
@@ -1570,6 +1799,127 @@ fn node_poisons(node: &Node<'_, '_>) -> bool {
         _ => {}
     }
     node.children().iter().any(node_poisons)
+}
+
+// ---------------------------------------------------------------------------
+// Namespace contexts and name resolution helpers.
+// ---------------------------------------------------------------------------
+
+/// Build a [`NameRef`] from a Mago identifier: its raw spelling (leading `\`
+/// stripped for fully-qualified names), the qualification [`RefKind`], and the
+/// reference's byte offset (for context lookup).
+fn name_ref(id: &Identifier<'_>) -> NameRef {
+    let kind = match id {
+        Identifier::Local(_) => RefKind::Unqualified,
+        Identifier::Qualified(_) => RefKind::Qualified,
+        Identifier::FullyQualified(_) => RefKind::FullyQualified,
+    };
+    let raw = bytes_to_string(id.value()).trim_start_matches('\\').to_owned();
+    NameRef { raw, kind, offset: to_span(id.span()).start }
+}
+
+/// Build the file's namespace contexts (index 0 = global) and the byte regions
+/// each namespace declaration covers. Every `namespace` node in the file becomes
+/// one context (its name plus the `use` imports at its body's top level);
+/// top-level `use` statements outside any namespace populate the global context.
+fn build_contexts(program: &Program<'_>) -> (Vec<NsCtx>, Vec<(u32, u32, usize)>) {
+    let mut contexts = vec![NsCtx::global()];
+    let mut regions: Vec<(u32, u32, usize)> = Vec::new();
+
+    // Global-context imports: top-level `use` statements (a file with a
+    // file-scoped `namespace A;` has none — its statements nest under the node).
+    for stmt in program.statements.iter() {
+        if let Statement::Use(u) = stmt {
+            add_use(u, &mut contexts[0]);
+        }
+    }
+
+    // One context per namespace declaration, anywhere in the tree. Namespaces do
+    // not nest semantically, but a second file-scoped `namespace B;` may sit
+    // inside the first's implicit body sequence; a byte offset then falls inside
+    // both spans and [`ctx_of`] picks the innermost (latest-starting) region.
+    collect_namespaces(&Node::Program(program), &mut contexts, &mut regions);
+    (contexts, regions)
+}
+
+fn collect_namespaces(
+    node: &Node<'_, '_>,
+    contexts: &mut Vec<NsCtx>,
+    regions: &mut Vec<(u32, u32, usize)>,
+) {
+    if let Node::Namespace(ns) = node {
+        let name = ns
+            .name
+            .as_ref()
+            .map(|id| bytes_to_string(id.value()).trim_start_matches('\\').to_owned())
+            .unwrap_or_default();
+        let mut ctx = NsCtx { namespace: name, ..NsCtx::global() };
+        // `use` imports at the namespace body's top level.
+        for stmt in ns.statements().iter() {
+            if let Statement::Use(u) = stmt {
+                add_use(u, &mut ctx);
+            }
+        }
+        let idx = contexts.len();
+        contexts.push(ctx);
+        let span = to_span(ns.span());
+        regions.push((span.start, span.end, idx));
+    }
+    for child in node.children() {
+        collect_namespaces(&child, contexts, regions);
+    }
+}
+
+/// Fold one `use` statement's items into a context. Only the plain sequence form
+/// (`use A\B, C\D;` — class/namespace imports) and the typed-sequence
+/// `use function a\b;` form are lowered; grouped `use A\{B, C}` and `use const`
+/// are conservatively skipped (a miss only *fails to resolve*, never mis-resolves).
+fn add_use(u: &mago_syntax::cst::Use<'_>, ctx: &mut NsCtx) {
+    match &u.items {
+        UseItems::Sequence(seq) => {
+            for item in seq.items.iter() {
+                let target = bytes_to_string(item.name.value()).trim_start_matches('\\').to_owned();
+                let alias = match &item.alias {
+                    Some(a) => bytes_to_string(a.identifier.value),
+                    None => bytes_to_string(item.name.last_segment()),
+                };
+                ctx.class_imports.insert(alias.to_ascii_lowercase(), target);
+            }
+        }
+        UseItems::TypedSequence(seq) if seq.r#type.is_function() => {
+            for item in seq.items.iter() {
+                let target = bytes_to_string(item.name.value()).trim_start_matches('\\').to_owned();
+                let alias = match &item.alias {
+                    Some(a) => bytes_to_string(a.identifier.value),
+                    None => bytes_to_string(item.name.last_segment()),
+                };
+                ctx.fn_imports.insert(alias.to_ascii_lowercase(), target);
+            }
+        }
+        // `use const …`, grouped `use A\{…}` — conservatively un-lowered.
+        UseItems::TypedSequence(_) | UseItems::TypedList(_) | UseItems::MixedList(_) => {}
+    }
+}
+
+/// The namespace context enclosing `offset`: the innermost (latest-starting)
+/// namespace region containing it, else the global context (index 0).
+fn ctx_of<'a>(contexts: &'a [NsCtx], regions: &[(u32, u32, usize)], offset: u32) -> &'a NsCtx {
+    let mut best: Option<(u32, usize)> = None;
+    for &(start, end, idx) in regions {
+        if offset >= start && offset < end && best.is_none_or(|(bstart, _)| start >= bstart) {
+            best = Some((start, idx));
+        }
+    }
+    &contexts[best.map_or(0, |(_, idx)| idx)]
+}
+
+/// The lowercase-normalized FQN of a declaration named `name` in context `ctx`.
+fn fqn_of(ctx: &NsCtx, name: &str) -> String {
+    if ctx.namespace.is_empty() {
+        name.to_ascii_lowercase()
+    } else {
+        format!("{}\\{}", ctx.namespace, name).to_ascii_lowercase()
+    }
 }
 
 // ---------------------------------------------------------------------------

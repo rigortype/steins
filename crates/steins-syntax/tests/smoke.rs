@@ -195,7 +195,7 @@ fn scans_effect_origins_across_control_flow() {
                 assert_eq!(*keyword, "echo");
                 echo += 1;
             }
-            EffectOrigin::Call { name, .. } => calls.push(name.clone()),
+            EffectOrigin::Call { name, .. } => calls.push(name.simple().to_owned()),
             EffectOrigin::Exit { .. } => panic!("no exit expected"),
             EffectOrigin::MethodCall { .. } => panic!("no method call expected"),
             EffectOrigin::Opaque { .. } => panic!("no opaque call expected"),
@@ -230,7 +230,7 @@ fn lowers_class_and_method_shape() {
     let tree = SourceTree::parse(src);
     let foo = class(&tree, "Foo");
     assert!(foo.is_final);
-    assert_eq!(foo.parent.as_deref(), Some("Bar"));
+    assert_eq!(foo.parent.as_ref().map(|r| r.raw.as_str()), Some("Bar"));
     assert!(foo.uses_traits, "`use SomeTrait;` sets uses_traits");
     assert_eq!(foo.methods.len(), 4);
 
@@ -283,10 +283,10 @@ fn lowers_new_expression_as_class_fact_rvalue() {
     let tree = SourceTree::parse(src);
     let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
     let StmtKind::Assign { value, call, .. } = &top.stmts[0].kind else { panic!("assign") };
-    assert!(matches!(value, ArgValue::New(c, _) if c == "Foo"), "value is New(Foo)");
+    assert!(matches!(value, ArgValue::New(c, _) if c.raw == "Foo"), "value is New(Foo)");
     // The RHS also carries a constructor CallExpr for arg-checking.
     let call = call.as_ref().expect("ctor call carried");
-    assert!(matches!(&call.receiver, Callee::Construct { class } if class == "Foo"));
+    assert!(matches!(&call.receiver, Callee::Construct { class } if class.raw == "Foo"));
     assert_eq!(call.args[0].value, ArgValue::Str("abc".into()));
 }
 
@@ -311,7 +311,7 @@ fn lowers_method_and_static_call_receivers() {
     assert!(receivers.iter().any(|r| matches!(r, Callee::Static { class: StaticClass::SelfKw, method } if method == "s")));
     assert!(receivers.iter().any(|r| matches!(r, Callee::Static { class: StaticClass::Parent, method } if method == "p")));
     assert!(receivers.iter().any(|r| matches!(r, Callee::Static { class: StaticClass::Static, method } if method == "x")));
-    assert!(receivers.iter().any(|r| matches!(r, Callee::Static { class: StaticClass::Named(c), method } if c == "Bar" && method == "b")));
+    assert!(receivers.iter().any(|r| matches!(r, Callee::Static { class: StaticClass::Named(c), method } if c.raw == "Bar" && method == "b")));
     assert!(receivers.iter().any(|r| matches!(r, Callee::Method { receiver: Receiver::Var(v), method } if v == "v" && method == "d")));
 }
 
