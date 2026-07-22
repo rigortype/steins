@@ -219,6 +219,7 @@ fn arg_to_fold(arg: &ArgValue) -> Option<FoldArg> {
         | ArgValue::New(..)
         | ArgValue::Array(_)
         | ArgValue::Ternary { .. }
+        | ArgValue::Closure(_)
         | ArgValue::Other => None,
     }
 }
@@ -2011,6 +2012,14 @@ impl<'a> Cx<'a> {
                 let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
                 Some(&m.params)
             }
+            // A closure/arrow scope carries its own params (no FunctionDecl). Look
+            // the scope up in the tree so the borrow has the `'a` project lifetime.
+            ScopeOwner::Closure { def_offset } => {
+                let s = self.tree().scopes().iter().find(|s| {
+                    matches!(&s.owner, ScopeOwner::Closure { def_offset: d } if d == def_offset)
+                })?;
+                Some(&s.params)
+            }
         }
     }
 
@@ -2033,6 +2042,8 @@ impl<'a> Cx<'a> {
                 let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
                 m.ret.as_ref().map(|r| (r, format!("{}::{}", cd.name, m.name)))
             }
+            // Closure return-type checking is deferred this slice (documented).
+            ScopeOwner::Closure { .. } => None,
         }
     }
 
@@ -2055,6 +2066,7 @@ impl<'a> Cx<'a> {
                 let ret = parse_envelopes(m.docblock.as_deref())?.ret?;
                 Some((ret, format!("{}::{}", cd.name, m.name)))
             }
+            ScopeOwner::Closure { .. } => None,
         }
     }
 }
@@ -2101,6 +2113,7 @@ fn val_of(arg: &ArgValue) -> Option<Val> {
         | ArgValue::Call(..)
         | ArgValue::New(..)
         | ArgValue::Ternary { .. }
+        | ArgValue::Closure(_)
         | ArgValue::Other => None,
     }
 }
@@ -3711,7 +3724,9 @@ fn php_array_loose_eq(x: &[(ArrayKey, ArgValue)], y: &[(ArrayKey, ArgValue)]) ->
 fn scope_class(scope: &Scope) -> Option<&str> {
     match &scope.owner {
         ScopeOwner::Method { class, .. } => Some(class),
-        ScopeOwner::TopLevel | ScopeOwner::Function(_) => None,
+        // A closure lexically inside a method captures `$this`, but this slice
+        // does not thread the enclosing class into the closure scope (documented).
+        ScopeOwner::TopLevel | ScopeOwner::Function(_) | ScopeOwner::Closure { .. } => None,
     }
 }
 
@@ -4370,6 +4385,9 @@ fn is_type_error(strict: bool, ty: &NativeType, arg: &ArgValue) -> bool {
         | ArgValue::Call(..)
         | ArgValue::New(..)
         | ArgValue::Ternary { .. }
+        // A closure value against a scalar/union param is never a scalar finding
+        // (a `callable`/`Closure` param is not a native scalar type this checks).
+        | ArgValue::Closure(_)
         | ArgValue::Other => false,
     }
 }

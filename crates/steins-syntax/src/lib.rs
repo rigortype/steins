@@ -39,6 +39,7 @@ use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Node;
+use mago_syntax::cst::PartialApplication;
 use mago_syntax::cst::PartialArgument;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Statement;
@@ -551,7 +552,37 @@ pub enum ArgValue {
     /// [`ArgValue::Other`] this stage (their operands need negative/definedness
     /// facts the domain does not yet carry).
     Ternary { cond: Box<CondExpr>, then_val: Box<ArgValue>, else_val: Box<ArgValue> },
+    /// A closure value (ADR-0033): a `function (...) use (...) {...}` / arrow
+    /// `fn(...) => …` expression lowered to its own [`Scope`], or a first-class
+    /// callable (`strtolower(...)`) naming a function target. Carried in the trace
+    /// so an assignment `$f = fn(...) => …;` records a [`Fact`]-carrying closure
+    /// value (in `steins-infer`), and a later `$f(...)` resolves by binding descent
+    /// into the closure's scope. Not a scalar — never flows into a scalar check.
+    Closure(ClosureRef),
     Other,
+}
+
+/// Identifies the target of an [`ArgValue::Closure`] (ADR-0033). Either an
+/// anonymous closure/arrow expression lowered to its own [`Scope`] (addressed by
+/// the definition-site byte offset, matching [`ScopeOwner::Closure`]), or a
+/// first-class callable naming a free function.
+///
+/// The captured environment snapshot (by-value `use`/arrow auto-capture) is **not**
+/// stored here — `captures` lists only the captured *names*; the value snapshot of
+/// each is taken at closure-creation time by the inference walk (reading the
+/// definition-site env), which is the semantically correct PHP by-value capture.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ClosureRef {
+    /// A closure/arrow expression with its own scope at `def_offset` (the closure
+    /// keyword's byte offset; the closure scope's [`ScopeOwner::Closure`] carries
+    /// the same). `captures` are the by-value captured variable names — explicit
+    /// `use ($x)` for closures, the free variables of the body for arrow fns.
+    Anonymous { def_offset: u32, captures: Vec<String> },
+    /// A first-class callable of a named free function: `strtolower(...)`. Resolves
+    /// as a function name through the existing project/catalog resolution. (Method
+    /// and static first-class callables — `$o->m(...)`, `Foo::m(...)` — lower to
+    /// [`ArgValue::Other`] this slice; documented deferral.)
+    FunctionName(NameRef),
 }
 
 /// A lowered array-literal key. `Auto` is an absent key (`[$a, $b]`) that receives
@@ -646,6 +677,7 @@ impl std::hash::Hash for ArgValue {
                 then_val.hash(state);
                 else_val.hash(state);
             }
+            ArgValue::Closure(r) => r.hash(state),
             ArgValue::Null | ArgValue::Other => {}
         }
     }
@@ -685,6 +717,8 @@ impl ArgValue {
             ArgValue::Ternary { then_val, else_val, .. } => {
                 format!("(… ? {} : {})", then_val.render(), else_val.render())
             }
+            ArgValue::Closure(ClosureRef::FunctionName(n)) => format!("{}(...)", n.simple()),
+            ArgValue::Closure(ClosureRef::Anonymous { .. }) => "Closure".to_owned(),
             ArgValue::Other => "<expr>".to_owned(),
         }
     }
@@ -1019,6 +1053,11 @@ pub enum ScopeOwner {
     TopLevel,
     Function(String),
     Method { class: String, method: String },
+    /// A closure / arrow-function body (ADR-0033), addressed by the definition-site
+    /// byte offset (the closure/`fn` keyword span start). An [`ArgValue::Closure`]
+    /// value naming this offset descends into this scope. Its params/effects/throws
+    /// are carried on the [`Scope`] itself (a closure has no [`FunctionDecl`]).
+    Closure { def_offset: u32 },
 }
 
 /// One analysis scope: the top-level script, a function body, or a method body.
@@ -1040,6 +1079,18 @@ pub struct Scope {
     /// When poisoned, no variable value is ever considered known in the scope.
     pub poisoned: bool,
     pub stmts: Vec<Stmt>,
+    /// Parameters of a closure/arrow scope ([`ScopeOwner::Closure`]) — a closure
+    /// has no [`FunctionDecl`] to look them up on, so binding descent and native
+    /// parameter seeding read them here. Empty for function/method/top-level
+    /// scopes (which resolve params via [`Self::owner`]).
+    pub params: Vec<Param>,
+    /// Effect-origin candidates of a closure/arrow body ([`ScopeOwner::Closure`]),
+    /// so a closure can be an effect node in the fixpoint (ADR-0033 point 3).
+    /// Empty for non-closure scopes (their origins live on the decl).
+    pub effect_origins: Vec<EffectOrigin>,
+    /// Throw-origin candidates of a closure/arrow body ([`ScopeOwner::Closure`]),
+    /// the throw-fixpoint analogue of [`Self::effect_origins`].
+    pub throw_origins: Vec<ThrowOrigin>,
 }
 
 /// A recovered parse error with its span (ADR-0003: error-tolerant).
@@ -2142,6 +2193,30 @@ fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
             },
             None => ArgValue::Other,
         },
+        // Closure expression `function (...) use (...) {...}` (ADR-0033): a closure
+        // value naming its own scope (definition-site offset) and by-value captures.
+        Expression::Closure(cl) => ArgValue::Closure(ClosureRef::Anonymous {
+            def_offset: closure_def_offset(cl),
+            captures: closure_use_captures(cl),
+        }),
+        // Arrow function `fn(...) => expr` (ADR-0033): auto-captures its free
+        // variables by value.
+        Expression::ArrowFunction(af) => ArgValue::Closure(ClosureRef::Anonymous {
+            def_offset: arrow_def_offset(af),
+            captures: arrow_free_vars(af),
+        }),
+        // First-class callable of a named free function `strtolower(...)`. Method
+        // and static first-class callables are deferred → `Other` (documented).
+        Expression::PartialApplication(PartialApplication::Function(fpa))
+            if fpa.argument_list.is_first_class_callable() =>
+        {
+            match fpa.function {
+                Expression::Identifier(id) => {
+                    ArgValue::Closure(ClosureRef::FunctionName(name_ref(id)))
+                }
+                _ => ArgValue::Other,
+            }
+        }
         // Unary `-`/`+` on a numeric literal is itself a proven numeric literal
         // (so `-5` is `Int(-5)`, not `Other`). Any other operator/operand widens.
         Expression::UnaryPrefix(u) => match (&u.operator, lower_arg_value(u.operand)) {
@@ -2306,6 +2381,10 @@ fn collect_scopes(
                 }
             }
         }
+        // Closures / arrow fns get their own scope (ADR-0033), addressed by the
+        // definition-site byte offset. Params/effects/throws ride on the scope.
+        Node::Closure(cl) => out.push(build_closure_scope_from_closure(cl)),
+        Node::ArrowFunction(af) => out.push(build_closure_scope_from_arrow(af)),
         _ => {}
     }
     // Recurse so nested functions (inside methods or blocks) and nested classes
@@ -2332,9 +2411,156 @@ fn build_scope_from(owner: ScopeOwner, statements: &[&Statement<'_>]) -> Scope {
     }
     let function_name = match &owner {
         ScopeOwner::Function(name) => Some(name.clone()),
-        ScopeOwner::TopLevel | ScopeOwner::Method { .. } => None,
+        ScopeOwner::TopLevel | ScopeOwner::Method { .. } | ScopeOwner::Closure { .. } => None,
     };
-    Scope { function_name, owner, poisoned, stmts }
+    Scope {
+        function_name,
+        owner,
+        poisoned,
+        stmts,
+        params: Vec::new(),
+        effect_origins: Vec::new(),
+        throw_origins: Vec::new(),
+    }
+}
+
+/// The definition-site byte offset that identifies a closure scope — the
+/// `function` keyword's span start. An [`ArgValue::Closure`] value naming this
+/// offset descends into the built scope.
+fn closure_def_offset(cl: &mago_syntax::cst::Closure<'_>) -> u32 {
+    to_span(cl.function.span()).start
+}
+
+/// The definition-site byte offset of an arrow function — the `fn` keyword.
+fn arrow_def_offset(af: &mago_syntax::cst::ArrowFunction<'_>) -> u32 {
+    to_span(af.r#fn.span()).start
+}
+
+/// The by-value captured names of a closure's `use (...)` clause (by-ref `&$x`
+/// captures are excluded — they poison instead, ADR-0033/0001).
+fn closure_use_captures(cl: &mago_syntax::cst::Closure<'_>) -> Vec<String> {
+    cl.use_clause
+        .as_ref()
+        .map(|uc| {
+            uc.variables
+                .iter()
+                .filter(|v| v.ampersand.is_none())
+                .map(|v| strip_dollar(bytes_to_string(v.variable.name)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether a closure's `use (...)` clause captures anything by reference — this
+/// poisons the enclosing scope AND the closure's own scope (ADR-0033).
+fn closure_has_byref_use(cl: &mago_syntax::cst::Closure<'_>) -> bool {
+    cl.use_clause
+        .as_ref()
+        .is_some_and(|uc| uc.variables.iter().any(|v| v.ampersand.is_some()))
+}
+
+/// Build the [`Scope`] for a `function (...) use (...) {...}` closure (ADR-0033).
+fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>) -> Scope {
+    let mut stmts = Vec::new();
+    let mut effect_origins = Vec::new();
+    let mut throw_origins = Vec::new();
+    for s in cl.body.statements.iter() {
+        lower_stmt(s, &mut stmts);
+        scan_effect_origins(&Node::Statement(s), &mut effect_origins);
+        scan_throw_origins(&Node::Statement(s), &[], &[], &mut throw_origins);
+    }
+    // The closure's own scope is poisoned by a by-ref `use (&$x)` capture (its
+    // captured var is a reference alias) or any in-body poison marker.
+    let poisoned = closure_has_byref_use(cl)
+        || cl.body.statements.iter().any(|s| node_poisons(&Node::Statement(s)));
+    Scope {
+        function_name: None,
+        owner: ScopeOwner::Closure { def_offset: closure_def_offset(cl) },
+        poisoned,
+        stmts,
+        params: lower_params(&cl.parameter_list),
+        effect_origins,
+        throw_origins,
+    }
+}
+
+/// Build the [`Scope`] for an arrow function `fn(...) => expr` (ADR-0033). The
+/// single body expression lowers to one `return <expr>;` statement so a call
+/// inside it (`fn($x) => width($x)`) is a reachable propagation/descent edge.
+fn build_closure_scope_from_arrow(af: &mago_syntax::cst::ArrowFunction<'_>) -> Scope {
+    let mut effect_origins = Vec::new();
+    let mut throw_origins = Vec::new();
+    scan_effect_origins(&Node::Expression(af.expression), &mut effect_origins);
+    scan_throw_origins(&Node::Expression(af.expression), &[], &[], &mut throw_origins);
+    // The arrow body is its return value: lower as a `return <expr>;` trace.
+    let value = lower_arg_value(af.expression);
+    let mut invalidated = Vec::new();
+    collect_call_vars(&Node::Expression(af.expression), &mut invalidated);
+    let call = named_call(af.expression);
+    let span = to_span(af.expression.span());
+    let ret = Stmt {
+        span,
+        kind: StmtKind::Return { value, call, span },
+        invalidated,
+    };
+    let poisoned = node_poisons(&Node::Expression(af.expression));
+    Scope {
+        function_name: None,
+        owner: ScopeOwner::Closure { def_offset: arrow_def_offset(af) },
+        poisoned,
+        stmts: vec![ret],
+        params: lower_params(&af.parameter_list),
+        effect_origins,
+        throw_origins,
+    }
+}
+
+/// The free (captured) variable names of an arrow-function body: every bare
+/// variable it reads that is not one of its own parameters (arrow fns auto-capture
+/// free variables by value). Over-collection is harmless — an extra name simply
+/// snapshots a value the body ignores; a missing one would lose a capture.
+fn arrow_free_vars(af: &mago_syntax::cst::ArrowFunction<'_>) -> Vec<String> {
+    let params: std::collections::HashSet<String> = af
+        .parameter_list
+        .parameters
+        .iter()
+        .map(|p| strip_dollar(bytes_to_string(p.variable.name)))
+        .collect();
+    let mut vars = Vec::new();
+    collect_var_reads(&Node::Expression(af.expression), &mut vars);
+    let mut out: Vec<String> = Vec::new();
+    for v in vars {
+        if !params.contains(&v) && !out.contains(&v) {
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// Collect every bare `$var` read in a subtree (name without `$`), NOT descending
+/// into nested closures/arrows/functions/classes (their free-var capture is their
+/// own concern). Used for arrow-fn auto-capture (ADR-0033).
+fn collect_var_reads(node: &Node<'_, '_>, out: &mut Vec<String>) {
+    match node {
+        Node::DirectVariable(dv) => {
+            let name = strip_dollar(bytes_to_string(dv.name));
+            if name != "this" {
+                out.push(name);
+            }
+        }
+        Node::Closure(_)
+        | Node::ArrowFunction(_)
+        | Node::Function(_)
+        | Node::AnonymousClass(_)
+        | Node::Class(_)
+        | Node::Interface(_)
+        | Node::Trait(_)
+        | Node::Enum(_) => return,
+        _ => {}
+    }
+    for child in node.children() {
+        collect_var_reads(&child, out);
+    }
 }
 
 /// Append the lowered [`Stmt`] for one source statement (or nothing, for benign
