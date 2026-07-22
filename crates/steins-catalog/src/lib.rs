@@ -281,6 +281,99 @@ pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
     }
 }
 
+/// When a higher-order builtin invokes its callback (ADR-0033 point 3).
+///
+/// The distinction never changes *what* effects/throws propagate — both
+/// `Immediate` and `Deferred` join the callback's effect and throw sets into the
+/// caller's — it only records the honesty of *when*: a `Deferred` invoker
+/// (`register_shutdown_function`) claims nothing about timing (ADR-0033), so a
+/// value-level fold through it is never attempted, while its effects still count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Invocation {
+    /// The callback runs during the call (`array_map`, `usort`, …). Effects join,
+    /// and a value-level fold may be attempted when trivially composable.
+    Immediate,
+    /// The callback runs at some unspecified later point (`register_shutdown_function`).
+    /// Effects still join the caller's set; no timing or value is claimed.
+    Deferred,
+}
+
+/// Where a higher-order builtin draws the callback's arguments from (ADR-0033).
+/// Consumed only by the value-level fold path (deferred this milestone); the
+/// effects/throws join needs only [`InvocationShape::callback_param`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgSource {
+    /// The callback receives the *elements* of the array at this positional index
+    /// (`array_map`'s cb over param 1's elements, `array_filter`'s over param 0).
+    ElementsOf(usize),
+    /// The argument source is not modeled (variadic following args, an array of
+    /// call args, by-ref accumulation, …). Effects still join; no fold.
+    None,
+}
+
+/// How a higher-order builtin *calls* its callback (ADR-0033 point 3): the
+/// positional index of the callback parameter, whether the invocation is
+/// immediate or deferred, and where the callback's arguments come from. This is
+/// the invocation-shape metadata that lets the effects/throws passes treat
+/// `array_map($cb, $xs)` as *callback-effects ∪ own-effects* instead of an opaque
+/// taint — the redemption of ADR-0005's array_map claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvocationShape {
+    /// The positional index (0-based) of the callback argument.
+    pub callback_param: usize,
+    /// Immediate vs. deferred invocation.
+    pub invocation: Invocation,
+    /// Where the callback's arguments are drawn from (fold path only).
+    pub arg_source: ArgSource,
+}
+
+/// The [`InvocationShape`] of a higher-order builtin, or `None` when the function
+/// is not a known higher-order invoker (its callback argument, if any, stays an
+/// opaque taint — the FP-safe side).
+///
+/// Matching is case-insensitive (PHP function names are). The starter set follows
+/// ADR-0033's list. Notes on the argument-order quirks that make this a table and
+/// not a rule:
+///
+/// * `array_map($cb, $arr)` — callback first, elements of param 1. (The
+///   multi-array form `array_map($cb, $a, $b)` still has cb at 0; the element
+///   source degrades to `None` — effects still join, fold does not apply.)
+/// * `array_filter($arr, $cb)` — **reversed**: array first, callback at 1, over
+///   the elements of param 0. The 1-argument form `array_filter($arr)` has no
+///   callback, so a call with fewer than 2 args simply carries no callback to join.
+/// * `array_walk($arr, $cb)` — callback at 1 over param 0's elements, but the
+///   callback's first parameter is **by-ref** (it mutates in place): the binding
+///   descent skips (a by-ref param cannot be soundly value-bound), yet the
+///   callback's effects/throws still join. Modeled as `ElementsOf(0)`; the by-ref
+///   handling lives in the consumer.
+/// * `usort`/`uasort`/`uksort`/`array_reduce` — callback at 1, immediate; the
+///   callback args are not element-shaped (a comparator gets two elements, reduce
+///   gets carry+item), so `arg_source` is `None` (effects join, no fold).
+/// * `call_user_func($cb, …)` / `call_user_func_array($cb, $args)` — callback at
+///   0, immediate; args follow / are an array → `None`.
+/// * `register_shutdown_function($cb, …)` — callback at 0, **deferred**.
+/// * `preg_replace_callback($pat, $cb, $subj)` — callback at 1, immediate; the
+///   callback receives match arrays, not elements of an argument → `None`.
+#[must_use]
+pub fn invocation_shape(name: &str) -> Option<InvocationShape> {
+    use ArgSource::{ElementsOf, None as NoSrc};
+    use Invocation::{Deferred, Immediate};
+    let shape = |callback_param, invocation, arg_source| {
+        Some(InvocationShape { callback_param, invocation, arg_source })
+    };
+    match name.to_ascii_lowercase().as_str() {
+        "array_map" => shape(0, Immediate, ElementsOf(1)),
+        "array_filter" => shape(1, Immediate, ElementsOf(0)),
+        "array_walk" => shape(1, Immediate, ElementsOf(0)),
+        "usort" | "uasort" | "uksort" => shape(1, Immediate, NoSrc),
+        "array_reduce" => shape(1, Immediate, NoSrc),
+        "call_user_func" | "call_user_func_array" => shape(0, Immediate, NoSrc),
+        "register_shutdown_function" => shape(0, Deferred, NoSrc),
+        "preg_replace_callback" => shape(1, Immediate, NoSrc),
+        _ => None,
+    }
+}
+
 /// Plain Levenshtein edit distance (small strings, so the quadratic DP is fine).
 fn levenshtein(a: &str, b: &str) -> usize {
     let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
@@ -436,5 +529,46 @@ mod tests {
         assert_eq!(nearest_label("outputt"), Some("output"));
         // Something wildly off has no near suggestion.
         assert_eq!(nearest_label("completely-different"), None);
+    }
+
+    use super::{invocation_shape, ArgSource, Invocation};
+
+    #[test]
+    fn invocation_shapes_of_the_starter_set() {
+        let s = |n| invocation_shape(n).expect("known invoker");
+        // array_map: cb first, elements of the array at 1.
+        assert_eq!(s("array_map").callback_param, 0);
+        assert_eq!(s("array_map").invocation, Invocation::Immediate);
+        assert_eq!(s("array_map").arg_source, ArgSource::ElementsOf(1));
+        // array_filter: REVERSED — array first, cb at 1, over param 0's elements.
+        assert_eq!(s("array_filter").callback_param, 1);
+        assert_eq!(s("array_filter").arg_source, ArgSource::ElementsOf(0));
+        // array_walk: cb at 1 over param 0 (by-ref handled by the consumer).
+        assert_eq!(s("array_walk").callback_param, 1);
+        assert_eq!(s("array_walk").arg_source, ArgSource::ElementsOf(0));
+        // usort/uasort/uksort/array_reduce: cb at 1, no element source.
+        for n in ["usort", "uasort", "uksort", "array_reduce"] {
+            assert_eq!(s(n).callback_param, 1, "{n}");
+            assert_eq!(s(n).arg_source, ArgSource::None, "{n}");
+            assert_eq!(s(n).invocation, Invocation::Immediate, "{n}");
+        }
+        // call_user_func family: cb at 0, immediate.
+        assert_eq!(s("call_user_func").callback_param, 0);
+        assert_eq!(s("call_user_func_array").callback_param, 0);
+        // register_shutdown_function: cb at 0, DEFERRED.
+        assert_eq!(s("register_shutdown_function").callback_param, 0);
+        assert_eq!(s("register_shutdown_function").invocation, Invocation::Deferred);
+        // preg_replace_callback: cb at 1, immediate.
+        assert_eq!(s("preg_replace_callback").callback_param, 1);
+    }
+
+    #[test]
+    fn invocation_shape_is_case_insensitive_and_none_for_others() {
+        assert!(invocation_shape("ARRAY_MAP").is_some());
+        assert!(invocation_shape("Array_Filter").is_some());
+        // Non-invokers and plain builtins carry no shape.
+        for n in ["strtolower", "count", "array_merge", "some_unknown_fn"] {
+            assert_eq!(invocation_shape(n), None, "{n}");
+        }
     }
 }
