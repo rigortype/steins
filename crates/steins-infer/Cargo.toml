@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+steins-domain = { path = "../steins-domain" }
 salsa.workspace = true
 steins-db = { path = "../steins-db" }
 steins-syntax = { path = "../steins-syntax" }

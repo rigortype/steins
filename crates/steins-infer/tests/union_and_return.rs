@@ -200,13 +200,18 @@ fn return_folded_builtin_value_checked() {
 }
 
 #[test]
-fn return_inside_control_flow_is_silent() {
-    // The bad return is nested in an `if` → it lives inside an `Opaque` trace
-    // entry and never surfaces as a top-level `Return`, so it is not checked.
-    // (Accepted limitation — only top-of-trace returns are proof-checked.)
+fn return_inside_structured_if_is_now_checked() {
+    // EXPECTATION CHANGE (ADR-0031, was `..._is_silent` → 0): an `if` is now a
+    // structured trace, so a `return "abc";` inside a branch is walked and
+    // proof-checked like a top-level return. With `$c` unknown the guard is Maybe,
+    // the then-branch is walked, and `return "abc"` into `int` (strict) is FLAGGED.
+    // (The former "only top-of-trace returns are checked" limitation is lifted for
+    // `if`; loops/switch/try returns remain inside `Opaque` and are still unseen.)
     let src =
         "<?php\ndeclare(strict_types=1);\nfunction f(): int { if ($c) { return \"abc\"; } return 1; }\n";
-    assert_eq!(n(src), 0, "return inside if is invisible to the trace");
+    let d = findings(src);
+    assert_eq!(d.len(), 1, "return inside structured if is now checked: {d:#?}");
+    assert_eq!(d[0].id, "type.return-mismatch");
 }
 
 #[test]

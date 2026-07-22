@@ -315,12 +315,12 @@ fn lowers_method_and_static_call_receivers() {
             _ => None,
         })
         .collect();
-    assert!(receivers.iter().any(|r| matches!(r, Callee::Method { receiver: Receiver::This, method } if method == "m")));
+    assert!(receivers.iter().any(|r| matches!(r, Callee::Method { receiver: Receiver::This, method, .. } if method == "m")));
     assert!(receivers.iter().any(|r| matches!(r, Callee::Static { class: StaticClass::SelfKw, method } if method == "s")));
     assert!(receivers.iter().any(|r| matches!(r, Callee::Static { class: StaticClass::Parent, method } if method == "p")));
     assert!(receivers.iter().any(|r| matches!(r, Callee::Static { class: StaticClass::Static, method } if method == "x")));
     assert!(receivers.iter().any(|r| matches!(r, Callee::Static { class: StaticClass::Named(c), method } if c.raw == "Bar" && method == "b")));
-    assert!(receivers.iter().any(|r| matches!(r, Callee::Method { receiver: Receiver::Var(v), method } if v == "v" && method == "d")));
+    assert!(receivers.iter().any(|r| matches!(r, Callee::Method { receiver: Receiver::Var(v), method, .. } if v == "v" && method == "d")));
 }
 
 #[test]

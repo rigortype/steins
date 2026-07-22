@@ -1,12 +1,16 @@
-//! Regression tests for the `Opaque` **read-set** soundness fix.
+//! Regression tests for control-flow soundness around early-return guards.
 //!
-//! A control-flow construct that *reads* a variable may branch on it and
-//! early-return, so the fall-through path can exclude the currently-known value.
-//! Continuing with the binding intact asserts an unreachable path — a real
-//! false-positive class observed in the field (a `?int` guard `if ($x == null)
-//! { return; }` filters `null` out, yet the tail would still be analyzed with
-//! `$x = null`). The fix invalidates a construct's read set as well as its write
-//! set, from both the literal env and the exact-class env.
+//! The original mechanism (ADR-0027) was the `Opaque` **read-set** invalidation: a
+//! construct that *reads* a variable dropped it, because the construct might branch
+//! on it and early-return, so the fall-through could exclude the known value.
+//!
+//! Under ADR-0031, `if`/`elseif`/`else` is **structured** — its control flow is
+//! modeled, not erased — so the guard cases here are now handled by real branch
+//! analysis (dead-path pruning, fall-through joins) rather than by blanket
+//! read-invalidation. The read-set rule still governs the constructs that remain
+//! `Opaque` (loops, `switch`, `try`), and it still governs *opaque conditions*
+//! (a by-ref call in a guard). Two tests below record the resulting precision
+//! gains (see their EXPECTATION CHANGE notes).
 
 use steins_infer::{Diagnostic, check};
 use steins_syntax::SourceTree;
@@ -67,19 +71,26 @@ make(false);
 // ---- The top-level guard shape --------------------------------------------
 
 #[test]
-fn guard_reading_local_at_top_level_is_silent() {
-    // A guard at the top level of a scope that reads the tracked local drops it:
-    // the construct might branch on `$val` and skip the tail. Before the fix,
-    // `$val = "abc"` survived the `if` and `width($val)` was flagged even though
-    // the guard could have excluded "abc". Now the read of `$val` forgets it.
+fn guard_reading_local_survives_structured_if() {
+    // EXPECTATION CHANGE (ADR-0031, was `..._is_silent` → 0): the structured `if`
+    // no longer blanket-invalidates a variable merely *read* by a branch. This is
+    // the precision payoff. Original intent — "a guard that could exclude a value
+    // must not keep it on an unreachable path" — is now enforced by *modeling* the
+    // control flow instead of by forgetting: here `$val = "abc"`, the guard
+    // `$val !== ""` is provably TRUE (so the then-branch is the only live path and
+    // it falls through), and `echo $val` merely READS `$val` without filtering it.
+    // The fact survives, and the proven TypeError at `width($val)` is now FLAGGED
+    // (the ADR-0031 read-of-$w-no-longer-kills-the-fact case).
     let src = "<?php
 declare(strict_types=1);
 function width(int $w): int { return $w; }
 $val = \"abc\";
-if ($val !== \"\") { echo \"ok\"; }
+if ($cond) { echo $val; }
 width($val);
 ";
-    assert_eq!(n(src), 0, "guard reading $val → forgotten → silent");
+    let f = findings(src);
+    assert_eq!(f.len(), 1, "echo reads $val but does not filter it → still flagged: {f:#?}");
+    assert!(f[0].message.contains("argument \"abc\""), "{}", f[0].message);
 }
 
 // ---- Precision preserved: reads of OTHER variables keep the fact ----------
@@ -106,19 +117,21 @@ width($w);
 // ---- instanceof guard filters exact-class facts the same way --------------
 
 #[test]
-fn instanceof_guard_drops_exact_class_fact() {
-    // An `instanceof` narrowing guard reads the object variable; the read must
-    // drop its exact-class fact too, or method resolution on the fall-through
-    // would assert an unreachable type. `if (!($x instanceof Foo)) { return; }`
-    // reads `$x`, so `$x`'s exact-class fact is forgotten and `$x->m("abc")` no
-    // longer resolves → silent (a missed finding, the FP-safe side).
+fn instanceof_guard_prunes_dead_return_path() {
+    // EXPECTATION CHANGE (ADR-0031, was `..._drops_exact_class_fact` → 0): the
+    // original intent — "an `instanceof` guard must not let a fall-through assert an
+    // unreachable type" — is now met by *branch pruning* rather than by forgetting
+    // the fact. `$x = new Foo()` proves `$x instanceof Foo` (verdict Yes), so
+    // `!(...)` is No: the early-`return` then-branch is DEAD, the fall-through keeps
+    // `$x`'s exact class, and `$x->m("abc")` resolves + is FLAGGED. The bad path the
+    // old read-invalidation feared is proven dead, not merely forgotten.
     let src = "<?php
 class Foo { public function m(int $w): void {} }
 $x = new Foo();
 if (!($x instanceof Foo)) { return; }
 $x->m(\"abc\");
 ";
-    assert_eq!(n(src), 0, "instanceof guard reads $x → class fact dropped → silent");
+    assert_eq!(n(src), 1, "instanceof-true → early-return path dead → $x survives → flagged");
 }
 
 #[test]

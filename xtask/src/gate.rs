@@ -78,7 +78,14 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     ("Seldaek/monolog", 4),
     ("thephpleague/flysystem", 1),
     // The private monorepo (corpus.local.toml); matched by its local project name.
-    ("pxxxx-monorepo", 333),
+    // 333 → 357 (+24) with ADR-0031 branch-sensitive analysis: the structured `if`
+    // walk, ternary values, and positive refinement now reach proven values that
+    // were previously buried inside `Opaque` control-flow blocks, so the phpdoc
+    // contract layer sees more of them. All sampled increases are TRUE no-coercion
+    // contract violations in released test code (int/`null` into `@param string|int`,
+    // a non-array element in an `@return array[]`), never runtime findings — the
+    // runtime gate stays GREEN. Baseline moved deliberately per ADR-0030.
+    ("pxxxx-monorepo", 357),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).

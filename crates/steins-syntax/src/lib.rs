@@ -20,7 +20,10 @@ use mago_span::HasSpan;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::Attribute;
+use mago_syntax::cst::Binary;
+use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Call;
+use mago_syntax::cst::Construct;
 use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ClassLikeMemberSelector;
@@ -477,6 +480,14 @@ pub enum ArgValue {
     /// (`ArrayKey::Auto`) receive their next-int position during normalization
     /// ([`normalize_array`]), where duplicate keys resolve last-wins.
     Array(Vec<(ArrayKey, ArgValue)>),
+    /// A ternary `$c ? A : B` in rvalue position, lowered as a **conditional
+    /// value** (ADR-0031 stage 1): the walk evaluates `cond` against the env and,
+    /// when decided, resolves to the chosen arm; when undecided it joins the two
+    /// arms (a `OneOf` if both are literal, else unknown). Short-ternary `?:` and
+    /// null-coalescing `??` are **not** lowered here — they widen to
+    /// [`ArgValue::Other`] this stage (their operands need negative/definedness
+    /// facts the domain does not yet carry).
+    Ternary { cond: Box<CondExpr>, then_val: Box<ArgValue>, else_val: Box<ArgValue> },
     Other,
 }
 
@@ -567,6 +578,11 @@ impl std::hash::Hash for ArgValue {
                 args.hash(state);
             }
             ArgValue::Array(items) => items.hash(state),
+            ArgValue::Ternary { cond, then_val, else_val } => {
+                cond.hash(state);
+                then_val.hash(state);
+                else_val.hash(state);
+            }
             ArgValue::Null | ArgValue::Other => {}
         }
     }
@@ -603,6 +619,9 @@ impl ArgValue {
             ArgValue::Call(name, _) => format!("{name}()"),
             ArgValue::New(name, _) => format!("new {}()", name.simple()),
             ArgValue::Array(items) => render_array(items),
+            ArgValue::Ternary { then_val, else_val, .. } => {
+                format!("(… ? {} : {})", then_val.render(), else_val.render())
+            }
             ArgValue::Other => "<expr>".to_owned(),
         }
     }
@@ -659,7 +678,10 @@ pub enum Callee {
     /// `f(args...)` — a statically-named function (the last, unqualified name).
     Function(String),
     /// `$recv->m(args...)` / `$recv?->m(args...)` — an instance-method call.
-    Method { receiver: Receiver, method: String },
+    /// `nullsafe` is `true` for the `?->` form, whose call on a `null` receiver
+    /// is defined (short-circuits to `null`), so the `call.on-null` proof must
+    /// never fire on it.
+    Method { receiver: Receiver, method: String, nullsafe: bool },
     /// `Class::m(args...)` — a static (scope-resolution `::`) call.
     Static { class: StaticClass, method: String },
     /// `new Class(args...)` — a constructor call (`args` are the ctor args).
@@ -721,6 +743,59 @@ pub struct CallExpr {
     pub span: Span,
 }
 
+/// A comparison operator in a lowered [`CondExpr`] (ADR-0031 stage 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CmpOp {
+    /// `===` — strict identity.
+    Identical,
+    /// `!==` — strict non-identity.
+    NotIdentical,
+    /// `==` — loose equality (empirically-tabled coercion).
+    Loose,
+    /// `!=` / `<>` — loose inequality.
+    NotLoose,
+}
+
+/// A lowered operand of a [`CondExpr`] comparison (ADR-0031): a bare local
+/// variable (whose fact the env may know), a concrete literal value, or anything
+/// the lowering does not represent.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CondOperand {
+    /// `$name` — a bare local variable (name without the `$`).
+    Var(String),
+    /// A literal value (`5`, `null`, `"x"`, `true`, …). Only literal [`ArgValue`]s
+    /// appear here; a non-literal expression lowers the operand to [`Self::Other`].
+    Literal(ArgValue),
+    /// Anything else (a call, a property fetch, an arithmetic sub-expression, …).
+    Other,
+}
+
+/// A small lowered condition language (ADR-0031 stage 1). The trace evaluator
+/// walks it against the env to a unified `Certainty` (yes/no/maybe). Anything the
+/// lowering does not recognize becomes [`CondExpr::Opaque`], carrying the
+/// variables it reads so the walk can still forget them on the excluded path.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CondExpr {
+    /// `lhs <op> rhs` — a comparison (`===`/`!==`/`==`/`!=`).
+    Cmp { op: CmpOp, lhs: CondOperand, rhs: CondOperand },
+    /// A bare truthiness test (`if ($x)`, `if (foo())`).
+    Truthy(CondOperand),
+    /// `operand instanceof Class` — `class_ref` is the class as written (resolved
+    /// project-wide at evaluation time).
+    Instanceof { operand: CondOperand, class_ref: NameRef },
+    /// `!cond`.
+    Not(Box<CondExpr>),
+    /// `a && b` / `a and b`.
+    And(Box<CondExpr>, Box<CondExpr>),
+    /// `a || b` / `a or b`.
+    Or(Box<CondExpr>, Box<CondExpr>),
+    /// A condition the lowering cannot model. `reads` lists every bare variable it
+    /// mentions, so a branch guarded by an opaque condition still invalidates
+    /// those variables on the path that excludes it (the ADR-0027 read-set rule,
+    /// preserved for opaque conditions).
+    Opaque { reads: Vec<String> },
+}
+
 /// One entry of a scope's linear trace IR (ADR-0001). A scope's body is lowered
 /// to an ordered list of these; anything the lowering does not recognize exactly
 /// becomes [`StmtKind::Barrier`] (over-lowering to `Barrier` is always sound —
@@ -746,7 +821,28 @@ pub enum StmtKind {
     /// so the propagation pass checks/descends them. Echo assigns nothing, so its
     /// env effect stays conservative (a `Barrier`-equivalent clear afterward).
     Echo(Vec<CallExpr>),
-    /// A recognized *control-flow* construct (`if`/`while`/`for`/`foreach`/
+    /// A structured `if`/`elseif`/`else` (ADR-0031 stage 1): the trace models its
+    /// control flow instead of erasing it. `then_trace` is the primary branch;
+    /// `elseifs` are the `(condition, branch)` pairs in order; `else_trace` is the
+    /// `else` branch when present. Each sub-trace is lowered by the same rules
+    /// (nested ifs recurse; a construct that stays `Opaque` — a loop, `switch`,
+    /// `try` — appears as an `Opaque` inside the relevant sub-trace). Only the
+    /// *statement* form of `if` lowers here; every other control-flow construct
+    /// remains [`StmtKind::Opaque`] (the ADR-0027 ratchet: one construct at a time).
+    If {
+        cond: CondExpr,
+        then_trace: Vec<Stmt>,
+        elseifs: Vec<(CondExpr, Vec<Stmt>)>,
+        else_trace: Option<Vec<Stmt>>,
+    },
+    /// `throw <expr>;` — a trace terminator (the statement never falls through).
+    /// `span` points at the `throw`. The thrown expression is not modeled; only
+    /// the terminating control effect is.
+    Throw { span: Span },
+    /// `exit;` / `die;` (as an expression-statement) — a trace terminator. `span`
+    /// points at the construct.
+    Exit { span: Span },
+    /// A recognized *control-flow* construct (`while`/`for`/`foreach`/
     /// `do-while`/`switch`/`match`-statement/`try`/nested block) whose internal
     /// data-flow the trace does not model, but whose **write set and read set** it
     /// does. This is the ADR-0027 ratchet applied to what used to be a blanket
@@ -790,12 +886,20 @@ pub enum StmtKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Stmt {
     pub kind: StmtKind,
+    /// The source span of the whole statement (set centrally by `lower_stmt`
+    /// from the CST statement node; nested constructs' inner statements carry
+    /// their own spans). Used by the walk to record proven-dead regions.
+    pub span: Span,
     /// Variables passed as an argument to *any* call within this statement. The
     /// checker marks them unknown *after* the statement — PHP by-reference
     /// parameters could mutate them, so a value can't be trusted past a call it
     /// was handed to (conservatively covering unseen `&$x` signatures).
     pub invalidated: Vec<String>,
 }
+
+/// Placeholder span for [`Stmt`]s under construction — overwritten with the
+/// real statement span by `lower_stmt` before the statement enters a trace.
+const ZERO_SPAN: Span = Span { start: 0, end: 0 };
 
 /// Who owns an analysis [`Scope`] — the top-level script, a free function, or a
 /// class method. Method scopes carry their declaring class so `$this->`, `self::`,
@@ -1613,9 +1717,10 @@ fn effect_recv_of_class(class: &Expression<'_>) -> Option<EffectRecv> {
 }
 
 /// Lower a method call (`MethodCall` / `NullSafeMethodCall`) into a [`CallExpr`].
-fn lower_method_call(object: &Expression<'_>, selector: &ClassLikeMemberSelector<'_>, list: &mago_syntax::cst::ArgumentList<'_>, span: Span) -> CallExpr {
+/// `nullsafe` marks the `?->` form (see [`Callee::Method`]).
+fn lower_method_call(object: &Expression<'_>, selector: &ClassLikeMemberSelector<'_>, list: &mago_syntax::cst::ArgumentList<'_>, span: Span, nullsafe: bool) -> CallExpr {
     let receiver = match (trace_recv_of_object(object), method_name_of(selector)) {
-        (Some(recv), Some(method)) => Callee::Method { receiver: recv, method },
+        (Some(recv), Some(method)) => Callee::Method { receiver: recv, method, nullsafe },
         _ => Callee::Dynamic,
     };
     let (args, positional_only) = lower_argument_list(list);
@@ -1709,6 +1814,17 @@ fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
         // non-literal key collapses the whole array to `Other`.
         Expression::Array(a) => lower_array_elements(a.elements.iter()),
         Expression::LegacyArray(a) => lower_array_elements(a.elements.iter()),
+        // Full ternary `$c ? A : B` (ADR-0031): a conditional value the walk can
+        // evaluate. A short-ternary `?:` (`then` absent) widens to `Other` — it
+        // needs the value on the true side, a definedness fact not carried yet.
+        Expression::Conditional(cond) => match cond.then {
+            Some(then_expr) => ArgValue::Ternary {
+                cond: Box::new(lower_cond(cond.condition)),
+                then_val: Box::new(lower_arg_value(then_expr)),
+                else_val: Box::new(lower_arg_value(cond.r#else)),
+            },
+            None => ArgValue::Other,
+        },
         // Unary `-`/`+` on a numeric literal is itself a proven numeric literal
         // (so `-5` is `Int(-5)`, not `Other`). Any other operator/operand widens.
         Expression::UnaryPrefix(u) => match (&u.operator, lower_arg_value(u.operand)) {
@@ -1907,6 +2023,17 @@ fn build_scope_from(owner: ScopeOwner, statements: &[&Statement<'_>]) -> Scope {
 /// Append the lowered [`Stmt`] for one source statement (or nothing, for benign
 /// statements that neither define values nor disturb them).
 fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
+    // A brace block creates no PHP scope: flatten it into the enclosing trace so a
+    // branch body `{ return; … }` is lowered statement-by-statement (its `return`
+    // is a real terminator, not hidden inside an `Opaque`). This is what makes the
+    // structured-`if` branches see their terminators (ADR-0031).
+    if let Statement::Block(b) = s {
+        for inner in b.statements.iter() {
+            lower_stmt(inner, out);
+        }
+        return;
+    }
+    let stmt_span = to_span(s.span());
     let stmt = match s {
         // Benign: no effect on local values — keep known values flowing across.
         Statement::OpeningTag(_)
@@ -1926,7 +2053,7 @@ fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
                 // `return f($s);` — carry the call so propagation/descent reach it.
                 call = named_call(e);
             }
-            Stmt { kind: StmtKind::Return { value, call, span }, invalidated }
+            Stmt { span: ZERO_SPAN, kind: StmtKind::Return { value, call, span }, invalidated }
         }
         // `echo e1, e2, …;` — collect the statically-named calls among the
         // operands so propagation/descent check them; env stays conservative.
@@ -1935,28 +2062,33 @@ fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
             let mut invalidated = Vec::new();
             for v in e.values.iter() {
                 collect_call_vars(&Node::Expression(v), &mut invalidated);
+                // An embedded assignment (`echo $x = 5;`) writes a variable, so
+                // collect its write targets too: the walk no longer blanket-clears
+                // on echo (ADR-0031), it invalidates only what echo can mutate.
+                collect_assign_writes(&Node::Expression(v), &mut invalidated);
                 if let Some(c) = named_call(v) {
                     calls.push(c);
                 }
             }
-            Stmt { kind: StmtKind::Echo(calls), invalidated }
+            Stmt { span: ZERO_SPAN, kind: StmtKind::Echo(calls), invalidated }
         }
-        // Control-flow constructs: lowered to `Opaque` (ADR-0027 ratchet) — the
-        // walk forgets only their write set, not the whole env.
-        Statement::If(_)
-        | Statement::While(_)
+        // `if`/`elseif`/`else` is structured (ADR-0031 stage 1): its control flow
+        // is modeled, not erased.
+        Statement::If(if_stmt) => lower_if(if_stmt),
+        // Every OTHER control-flow construct stays `Opaque` (ADR-0027 ratchet) —
+        // the walk forgets only its write/read set, not the whole env.
+        Statement::While(_)
         | Statement::For(_)
         | Statement::Foreach(_)
         | Statement::DoWhile(_)
         | Statement::Switch(_)
-        | Statement::Try(_)
-        | Statement::Block(_) => lower_opaque(s),
+        | Statement::Try(_) => lower_opaque(s),
         // Everything else (declarations, `goto`, labels, `declare`, unset,
         // `__halt_compiler`, …) stays a full Barrier: the sound floor for
         // anything whose write set the lowering cannot bound.
-        _ => Stmt { kind: StmtKind::Barrier, invalidated: Vec::new() },
+        _ => Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated: Vec::new() },
     };
-    out.push(stmt);
+    out.push(Stmt { span: stmt_span, ..stmt });
 }
 
 /// The full [`CallExpr`] when `expr` (unparenthesized) is a resolvable call —
@@ -1970,11 +2102,11 @@ fn named_call(expr: &Expression<'_>) -> Option<CallExpr> {
             call.callee.is_some().then_some(call)
         }
         Expression::Call(Call::Method(mc)) => {
-            let call = lower_method_call(mc.object, &mc.method, &mc.argument_list, to_span(mc.span()));
+            let call = lower_method_call(mc.object, &mc.method, &mc.argument_list, to_span(mc.span()), false);
             (call.receiver != Callee::Dynamic).then_some(call)
         }
         Expression::Call(Call::NullSafeMethod(mc)) => {
-            let call = lower_method_call(mc.object, &mc.method, &mc.argument_list, to_span(mc.span()));
+            let call = lower_method_call(mc.object, &mc.method, &mc.argument_list, to_span(mc.span()), true);
             (call.receiver != Callee::Dynamic).then_some(call)
         }
         Expression::Call(Call::StaticMethod(sc)) => {
@@ -1986,12 +2118,126 @@ fn named_call(expr: &Expression<'_>) -> Option<CallExpr> {
     }
 }
 
+/// Lower a structured `if`/`elseif`/`else` statement (ADR-0031 stage 1) to
+/// [`StmtKind::If`]. Each branch body is lowered by the same statement rules as
+/// the enclosing scope (so nested ifs recurse and unstructured constructs inside
+/// a branch appear as `Opaque`/`Barrier` within the sub-trace). Both the brace
+/// body and the colon-delimited (`if: … endif;`) form are handled via the CST's
+/// body accessors.
+fn lower_if(if_stmt: &mago_syntax::cst::If<'_>) -> Stmt {
+    let body = &if_stmt.body;
+    let cond = lower_cond(if_stmt.condition);
+    let then_trace = lower_trace(body.statements());
+    let elseifs = body
+        .else_if_clauses()
+        .into_iter()
+        .map(|(c, stmts)| (lower_cond(c), lower_trace(stmts)))
+        .collect();
+    let else_trace = body.else_statements().map(lower_trace);
+    Stmt {
+        span: ZERO_SPAN,
+        kind: StmtKind::If { cond, then_trace, elseifs, else_trace },
+        invalidated: Vec::new(),
+    }
+}
+
+/// Lower a borrowed statement list to a sub-trace (a branch body). Shares the
+/// per-statement lowering with the top-level scope walk.
+fn lower_trace(statements: &[Statement<'_>]) -> Vec<Stmt> {
+    let mut out = Vec::new();
+    for s in statements {
+        lower_stmt(s, &mut out);
+    }
+    out
+}
+
+/// Lower a condition expression to a [`CondExpr`] (ADR-0031 stage 1). Recognized:
+/// `===`/`!==`/`==`/`!=` comparisons, `instanceof`, `!`/`&&`/`||` (incl. the
+/// low-precedence `and`/`or`), and bare truthiness. Everything else becomes
+/// [`CondExpr::Opaque`] carrying the variables it reads.
+fn lower_cond(expr: &Expression<'_>) -> CondExpr {
+    match expr.unparenthesized() {
+        Expression::Binary(b) => lower_binary_cond(b),
+        Expression::UnaryPrefix(u) if matches!(u.operator, UnaryPrefixOperator::Not(_)) => {
+            CondExpr::Not(Box::new(lower_cond(u.operand)))
+        }
+        other => match lower_cond_operand(other) {
+            CondOperand::Other => CondExpr::Opaque { reads: cond_reads(other) },
+            operand => CondExpr::Truthy(operand),
+        },
+    }
+}
+
+/// Lower a binary-operator condition (comparison / `instanceof` / `&&` / `||`).
+fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
+    let op = match b.operator {
+        BinaryOperator::Identical(_) => Some(CmpOp::Identical),
+        BinaryOperator::NotIdentical(_) => Some(CmpOp::NotIdentical),
+        BinaryOperator::Equal(_) => Some(CmpOp::Loose),
+        BinaryOperator::NotEqual(_) | BinaryOperator::AngledNotEqual(_) => Some(CmpOp::NotLoose),
+        _ => None,
+    };
+    if let Some(op) = op {
+        return CondExpr::Cmp {
+            op,
+            lhs: lower_cond_operand(b.lhs),
+            rhs: lower_cond_operand(b.rhs),
+        };
+    }
+    match b.operator {
+        BinaryOperator::Instanceof(_) => {
+            // `operand instanceof Class` — the class is the rhs when a plain name.
+            if let Expression::Identifier(id) = b.rhs.unparenthesized() {
+                CondExpr::Instanceof { operand: lower_cond_operand(b.lhs), class_ref: name_ref(id) }
+            } else {
+                CondExpr::Opaque { reads: cond_reads(b.lhs) }
+            }
+        }
+        BinaryOperator::And(_) | BinaryOperator::LowAnd(_) => {
+            CondExpr::And(Box::new(lower_cond(b.lhs)), Box::new(lower_cond(b.rhs)))
+        }
+        BinaryOperator::Or(_) | BinaryOperator::LowOr(_) => {
+            CondExpr::Or(Box::new(lower_cond(b.lhs)), Box::new(lower_cond(b.rhs)))
+        }
+        // Any other binary operator (arithmetic, `<`, `.`, …): opaque, reading its
+        // whole subtree.
+        _ => {
+            let mut reads = Vec::new();
+            collect_read_vars(&Node::Expression(b.lhs), &[], &mut reads);
+            collect_read_vars(&Node::Expression(b.rhs), &[], &mut reads);
+            CondExpr::Opaque { reads }
+        }
+    }
+}
+
+/// Lower a comparison operand: a bare `$var`, a literal, or [`CondOperand::Other`].
+fn lower_cond_operand(expr: &Expression<'_>) -> CondOperand {
+    match expr.unparenthesized() {
+        Expression::Variable(Variable::Direct(dv)) => {
+            CondOperand::Var(strip_dollar(bytes_to_string(dv.name)))
+        }
+        other => match lower_arg_value(other) {
+            v if v.is_literal() => CondOperand::Literal(v),
+            _ => CondOperand::Other,
+        },
+    }
+}
+
+/// The bare variables a condition subtree reads (for the opaque-condition read-set
+/// rule: a branch guarded by an opaque condition still forgets these on the path
+/// that excludes it).
+fn cond_reads(expr: &Expression<'_>) -> Vec<String> {
+    let mut reads = Vec::new();
+    collect_read_vars(&Node::Expression(expr), &[], &mut reads);
+    reads
+}
+
 /// Lower a recognized control-flow construct to [`StmtKind::Opaque`]: compute
 /// its poison flag and its over-approximated write set (see the variant docs).
 fn lower_opaque(s: &Statement<'_>) -> Stmt {
     let node = Node::Statement(s);
     let (writes, reads, poisons) = opaque_sets(&node);
-    Stmt { kind: StmtKind::Opaque { writes, reads, poisons }, invalidated: Vec::new() }
+    Stmt { span: ZERO_SPAN, kind: StmtKind::Opaque { writes, reads, poisons }, invalidated: Vec::new() }
 }
 
 /// Compute an `Opaque` construct's `(writes, reads, poisons)` over its subtree.
@@ -2026,18 +2272,19 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
                 // `$x = f($s);` — carry the RHS call for propagation/descent.
                 let call = if a.operator.is_assign() { named_call(a.rhs) } else { None };
                 Stmt {
+                    span: ZERO_SPAN,
                     kind: StmtKind::Assign { var, value, span: to_span(a.lhs.span()), call },
                     invalidated,
                 }
             } else {
                 // Assignment to a non-simple lvalue (`$a[i] = …`, `$o->p = …`).
-                Stmt { kind: StmtKind::Barrier, invalidated: Vec::new() }
+                Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated: Vec::new() }
             }
         }
         Expression::Call(Call::Function(fc)) => {
             let mut invalidated = Vec::new();
             collect_call_vars(&Node::Expression(expr), &mut invalidated);
-            Stmt { kind: StmtKind::Call(lower_call(fc)), invalidated }
+            Stmt { span: ZERO_SPAN, kind: StmtKind::Call(lower_call(fc)), invalidated }
         }
         // Statement-level method / static / constructor calls. A resolvable
         // receiver becomes a `Call`; a dynamic one is a `Barrier` (but its
@@ -2047,12 +2294,12 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
             Some(call) => {
                 let mut invalidated = Vec::new();
                 collect_call_vars(&Node::Expression(expr), &mut invalidated);
-                Stmt { kind: StmtKind::Call(call), invalidated }
+                Stmt { span: ZERO_SPAN, kind: StmtKind::Call(call), invalidated }
             }
             None => {
                 let mut invalidated = Vec::new();
                 collect_call_vars(&Node::Expression(expr), &mut invalidated);
-                Stmt { kind: StmtKind::Barrier, invalidated }
+                Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated }
             }
         },
         // A statement-level `match` is a control-flow construct: lower to
@@ -2060,9 +2307,21 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
         Expression::Match(_) => {
             let node = Node::Expression(expr);
             let (writes, reads, poisons) = opaque_sets(&node);
-            Stmt { kind: StmtKind::Opaque { writes, reads, poisons }, invalidated: Vec::new() }
+            Stmt { span: ZERO_SPAN, kind: StmtKind::Opaque { writes, reads, poisons }, invalidated: Vec::new() }
         }
-        _ => Stmt { kind: StmtKind::Barrier, invalidated: Vec::new() },
+        // `throw <expr>;` — a trace terminator (ADR-0031). Variables the thrown
+        // expression hands to a call are still invalidated (by-ref conservatism),
+        // though the terminator makes anything after it unreachable.
+        Expression::Throw(t) => {
+            let mut invalidated = Vec::new();
+            collect_call_vars(&Node::Expression(t.exception), &mut invalidated);
+            Stmt { span: ZERO_SPAN, kind: StmtKind::Throw { span: to_span(expr.span()) }, invalidated }
+        }
+        // `exit;` / `die;` — a trace terminator (ADR-0019 never-returns).
+        Expression::Construct(Construct::Exit(_) | Construct::Die(_)) => {
+            Stmt { span: ZERO_SPAN, kind: StmtKind::Exit { span: to_span(expr.span()) }, invalidated: Vec::new() }
+        }
+        _ => Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated: Vec::new() },
     }
 }
 
