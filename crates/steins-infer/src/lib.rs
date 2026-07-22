@@ -16,9 +16,11 @@ use std::collections::{HashMap, HashSet};
 use steins_db::{Db, SourceFile, function_index, parse};
 use steins_sidecar::{FoldArg, FoldResult, FoldValue, Sidecar};
 use steins_syntax::{
-    ArgValue, CallExpr, EffectOrigin, FunctionDecl, ParamType, ScalarType, Scope, SourceTree,
-    StmtKind,
+    ArgValue, Callee, ClassDecl, EffectOrigin, EffectRecv, FunctionDecl, MethodDecl, Param,
+    ParamType, Receiver, ScalarType, Scope, ScopeOwner, SourceTree, StaticClass, StmtKind,
+    Visibility,
 };
+use steins_syntax::CallExpr;
 
 /// The registry id for the `type.argument-mismatch` proof-layer check (ADR-0022).
 pub const ID: &str = "type.argument-mismatch";
@@ -166,7 +168,7 @@ fn arg_to_fold(arg: &ArgValue) -> Option<FoldArg> {
         ArgValue::Str(v) => Some(FoldArg::Str(v.clone())),
         ArgValue::Bool(v) => Some(FoldArg::Bool(*v)),
         ArgValue::Null => Some(FoldArg::Null),
-        ArgValue::Var(_) | ArgValue::Call(..) | ArgValue::Other => None,
+        ArgValue::Var(_) | ArgValue::Call(..) | ArgValue::New(..) | ArgValue::Other => None,
     }
 }
 
@@ -244,15 +246,15 @@ pub fn check_with(
     path: &str,
     folder: &mut dyn Folder,
 ) -> Vec<Diagnostic> {
-    let cx = Cx { tree, functions, path, strict: tree.has_strict_types() };
+    let cx = Cx { tree, functions, classes: tree.classes(), path, strict: tree.has_strict_types() };
     let mut out = Vec::new();
 
-    // --- Direct pass: literal arguments at every call site. --------------
+    // --- Direct pass: literal arguments at every function call site. ------
     for call in tree.calls() {
         let Some(decl) = resolve_callee(functions, call) else { continue };
         for (i, arg) in call.args.iter().enumerate() {
-            let Some(ty) = param_scalar_type(decl, i) else {
-                if arg_binds_to_variadic(decl, i) {
+            let Some(ty) = param_scalar_type(&decl.params, i) else {
+                if arg_binds_to_variadic(&decl.params, i) {
                     break;
                 }
                 continue;
@@ -262,19 +264,20 @@ pub fn check_with(
                 continue;
             }
             if is_type_error(cx.strict, ty, &arg.value) {
-                out.push(cx.diagnostic(arg.span.start, &arg.value, None, decl, i, ty));
+                out.push(cx.diagnostic(arg.span.start, &arg.value, None, &decl.name, &decl.params[i].name, ty));
             }
         }
     }
 
-    // --- Propagation pass: resolved `$var` / constant-return / folded args. ---
+    // --- Propagation pass: resolved `$var` / constant-return / folded args,
+    // plus all method / static / constructor call checking + descent. --------
     for scope in tree.scopes() {
-        analyze_scope(&cx, folder, scope, HashMap::new(), None, &mut out);
+        analyze_scope(&cx, folder, scope, HashMap::new(), HashMap::new(), None, None, &mut out);
     }
 
     // --- Effects pass (ADR-0005): `#[\Steins\Pure]` envelope checking. Needs no
     // folder/sidecar — it reads only the catalog and CST-derived effect origins.
-    out.extend(effect_diagnostics(tree, functions, path));
+    out.extend(effect_diagnostics(tree, functions, tree.classes(), path));
 
     // Global dedup (Feature B): the same finding can be reached both by a scope's
     // empty-env walk and by a binding descent into that scope, or by a diamond of
@@ -323,38 +326,69 @@ struct EffectFinding {
 /// The same-file call graph is closed with a monotone fixpoint (effects of a
 /// function = its own proven origins ∪ the effects of its same-file callees), so
 /// direct and mutual recursion converge without looping.
-fn effect_diagnostics(tree: &SourceTree, functions: &[FunctionDecl], path: &str) -> Vec<Diagnostic> {
-    // Fast path: with no envelope in the file there is nothing to check.
-    if functions.iter().all(|f| f.pure_envelope.is_none()) {
+/// A node in the unified effect call graph — a free function or a class method.
+/// Names are the canonical declaration spellings, so an edge built from a resolved
+/// callee matches the unit built for that callee.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Sym {
+    Func(String),
+    Method(String, String),
+}
+
+impl Sym {
+    /// The diagnostic spelling of the symbol (`f` or `Foo::bar`).
+    fn display(&self) -> String {
+        match self {
+            Sym::Func(n) => n.clone(),
+            Sym::Method(c, m) => format!("{c}::{m}"),
+        }
+    }
+}
+
+fn effect_diagnostics(
+    tree: &SourceTree,
+    functions: &[FunctionDecl],
+    classes: &[ClassDecl],
+    path: &str,
+) -> Vec<Diagnostic> {
+    // Fast path: with no envelope anywhere in the file there is nothing to check.
+    let any_pure = functions.iter().any(|f| f.pure_envelope.is_some())
+        || classes.iter().any(|c| c.methods.iter().any(|m| m.pure_envelope.is_some()));
+    if !any_pure {
         return Vec::new();
     }
 
-    let user_names: HashSet<&str> = functions.iter().map(|f| f.name.as_str()).collect();
-
-    // Per function name: its own proven origins (`direct`) and its same-file
-    // callee names (`edges`). Unioned across any duplicate-named declarations —
-    // a redeclaration is a PHP fatal, so precision there is moot.
-    let mut direct: HashMap<String, HashSet<EffectFinding>> = HashMap::new();
-    let mut edges: HashMap<String, HashSet<String>> = HashMap::new();
+    // Every effect unit (function + method), with the class that encloses its
+    // origins (for resolving `$this`/`self`/`parent` method-call edges).
+    let mut units: Vec<(Sym, Option<&str>, &[EffectOrigin])> = Vec::new();
     for f in functions {
-        let d = direct.entry(f.name.clone()).or_default();
-        let e = edges.entry(f.name.clone()).or_default();
-        for origin in &f.effect_origins {
+        units.push((Sym::Func(f.name.clone()), None, &f.effect_origins));
+    }
+    for c in classes {
+        for m in &c.methods {
+            units.push((
+                Sym::Method(c.name.clone(), m.name.clone()),
+                Some(c.name.as_str()),
+                &m.effect_origins,
+            ));
+        }
+    }
+
+    // Per unit: its own proven origins (`direct`) and its resolved same-file
+    // callee edges (`edges`) — function→function, method→method, and mixed.
+    let mut direct: HashMap<Sym, HashSet<EffectFinding>> = HashMap::new();
+    let mut edges: HashMap<Sym, HashSet<Sym>> = HashMap::new();
+    for (sym, class, origins) in &units {
+        let d = direct.entry(sym.clone()).or_default();
+        let e = edges.entry(sym.clone()).or_default();
+        for origin in *origins {
             match origin {
                 EffectOrigin::Call { name, span } => {
-                    if user_names.contains(name.as_str()) {
-                        // Same-file user call: an effect-propagation edge.
-                        e.insert(name.clone());
-                    } else if let Some(labels) = steins_catalog::effect_labels(name) {
-                        // Builtin: `Some([])` (pure) yields nothing; `None`
-                        // (uncatalogued) is skipped here entirely (widen/silent).
-                        let line = tree.position(span.start).line;
-                        for &label in labels {
-                            d.insert(EffectFinding {
-                                label: label.to_owned(),
-                                origin: name.clone(),
-                                line,
-                            });
+                    if let Some(canon) = user_fn_canon(functions, name) {
+                        e.insert(Sym::Func(canon)); // same-file user function edge
+                    } else {
+                        for f in builtin_findings(name, *span, tree) {
+                            d.insert(f);
                         }
                     }
                 }
@@ -372,26 +406,30 @@ fn effect_diagnostics(tree: &SourceTree, functions: &[FunctionDecl], path: &str)
                         line: tree.position(span.start).line,
                     });
                 }
+                EffectOrigin::MethodCall { receiver, method, .. } => {
+                    if let Some(callee) = resolve_effect_edge(classes, *class, receiver, method) {
+                        e.insert(callee);
+                    }
+                }
             }
         }
     }
 
-    // Fixpoint: effects(f) = direct(f) ∪ ⋃_{c ∈ edges(f)} effects(c). Monotone
+    // Fixpoint: effects(u) = direct(u) ∪ ⋃_{c ∈ edges(u)} effects(c). Monotone
     // over a finite set of `EffectFinding`s, so chaotic iteration converges.
-    let names: Vec<String> = functions.iter().map(|f| f.name.clone()).collect();
-    let mut effects: HashMap<String, HashSet<EffectFinding>> = direct;
+    let syms: Vec<Sym> = units.iter().map(|(s, ..)| s.clone()).collect();
+    let mut effects: HashMap<Sym, HashSet<EffectFinding>> = direct;
     loop {
         let mut changed = false;
-        for name in &names {
-            let callees: Vec<String> =
-                edges.get(name).into_iter().flatten().cloned().collect();
+        for sym in &syms {
+            let callees: Vec<Sym> = edges.get(sym).into_iter().flatten().cloned().collect();
             let mut incoming: Vec<EffectFinding> = Vec::new();
             for c in &callees {
                 if let Some(ce) = effects.get(c) {
                     incoming.extend(ce.iter().cloned());
                 }
             }
-            let set = effects.entry(name.clone()).or_default();
+            let set = effects.entry(sym.clone()).or_default();
             for ef in incoming {
                 changed |= set.insert(ef);
             }
@@ -404,52 +442,147 @@ fn effect_diagnostics(tree: &SourceTree, functions: &[FunctionDecl], path: &str)
     // Report: one Pure envelope at a time, each proven origin in source order.
     let mut out = Vec::new();
     for f in functions.iter().filter(|f| f.pure_envelope.is_some()) {
-        let pure = &f.name;
-        for origin in &f.effect_origins {
-            match origin {
-                EffectOrigin::Call { name, span } => {
-                    if user_names.contains(name.as_str()) {
-                        // Transitive: name each proven effect of the callee, with
-                        // the origin that ultimately produces it.
-                        let mut fs: Vec<&EffectFinding> =
-                            effects.get(name).into_iter().flatten().collect();
-                        fs.sort_by(|a, b| {
-                            (a.line, &a.label, &a.origin).cmp(&(b.line, &b.label, &b.origin))
-                        });
-                        for ef in fs {
-                            let msg = format!(
-                                "{name}() has effect {} (via {} at line {}), but {pure}() is declared #[\\Steins\\Pure]",
-                                ef.label, ef.origin, ef.line
-                            );
-                            out.push(effect_diag(tree, path, span.start, msg));
-                        }
-                    } else if let Some(labels) = steins_catalog::effect_labels(name) {
-                        // A colored builtin at a Pure call site is a violation;
-                        // pure (`Some([])`) and uncatalogued (`None`) stay silent.
-                        for &label in labels {
-                            let msg = format!(
-                                "{name}() has effect {label}, but {pure}() is declared #[\\Steins\\Pure]"
-                            );
-                            out.push(effect_diag(tree, path, span.start, msg));
-                        }
+        report_unit(&mut out, tree, path, functions, classes, None, &f.name, &f.effect_origins, &effects);
+    }
+    for c in classes {
+        for m in c.methods.iter().filter(|m| m.pure_envelope.is_some()) {
+            let display = format!("{}::{}", c.name, m.name);
+            report_unit(&mut out, tree, path, functions, classes, Some(&c.name), &display, &m.effect_origins, &effects);
+        }
+    }
+    out
+}
+
+/// Emit the effect-envelope violations for one `#[\Steins\Pure]` unit, walking
+/// its own origins in source order (direct builtins/output/exit reported at the
+/// origin; same-file function/method edges reported transitively with the
+/// ultimate origin named).
+#[allow(clippy::too_many_arguments)]
+fn report_unit(
+    out: &mut Vec<Diagnostic>,
+    tree: &SourceTree,
+    path: &str,
+    functions: &[FunctionDecl],
+    classes: &[ClassDecl],
+    class: Option<&str>,
+    pure_display: &str,
+    origins: &[EffectOrigin],
+    effects: &HashMap<Sym, HashSet<EffectFinding>>,
+) {
+    for origin in origins {
+        match origin {
+            EffectOrigin::Call { name, span } => {
+                if let Some(canon) = user_fn_canon(functions, name) {
+                    emit_transitive(out, tree, path, &Sym::Func(canon), effects, span.start, pure_display);
+                } else {
+                    for f in builtin_findings(name, *span, tree) {
+                        let msg = format!(
+                            "{name}() has effect {}, but {pure_display}() is declared #[\\Steins\\Pure]",
+                            f.label
+                        );
+                        out.push(effect_diag(tree, path, span.start, msg));
                     }
                 }
-                EffectOrigin::Output { keyword, span } => {
-                    let msg = format!(
-                        "{keyword} has effect output, but {pure}() is declared #[\\Steins\\Pure]"
-                    );
-                    out.push(effect_diag(tree, path, span.start, msg));
-                }
-                EffectOrigin::Exit { keyword, span } => {
-                    let msg = format!(
-                        "{keyword} has effect exit, but {pure}() is declared #[\\Steins\\Pure]"
-                    );
-                    out.push(effect_diag(tree, path, span.start, msg));
+            }
+            EffectOrigin::Output { keyword, span } => {
+                let msg = format!(
+                    "{keyword} has effect output, but {pure_display}() is declared #[\\Steins\\Pure]"
+                );
+                out.push(effect_diag(tree, path, span.start, msg));
+            }
+            EffectOrigin::Exit { keyword, span } => {
+                let msg = format!(
+                    "{keyword} has effect exit, but {pure_display}() is declared #[\\Steins\\Pure]"
+                );
+                out.push(effect_diag(tree, path, span.start, msg));
+            }
+            EffectOrigin::MethodCall { receiver, method, span } => {
+                if let Some(callee) = resolve_effect_edge(classes, class, receiver, method) {
+                    emit_transitive(out, tree, path, &callee, effects, span.start, pure_display);
                 }
             }
         }
     }
-    out
+}
+
+/// Emit each proven effect of `callee` as a transitive violation of the pure
+/// envelope, naming the ultimate origin.
+fn emit_transitive(
+    out: &mut Vec<Diagnostic>,
+    tree: &SourceTree,
+    path: &str,
+    callee: &Sym,
+    effects: &HashMap<Sym, HashSet<EffectFinding>>,
+    offset: u32,
+    pure_display: &str,
+) {
+    let callee_display = callee.display();
+    let mut fs: Vec<&EffectFinding> = effects.get(callee).into_iter().flatten().collect();
+    fs.sort_by(|a, b| (a.line, &a.label, &a.origin).cmp(&(b.line, &b.label, &b.origin)));
+    for ef in fs {
+        let msg = format!(
+            "{callee_display}() has effect {} (via {} at line {}), but {pure_display}() is declared #[\\Steins\\Pure]",
+            ef.label, ef.origin, ef.line
+        );
+        out.push(effect_diag(tree, path, offset, msg));
+    }
+}
+
+/// The canonical declaration name of a same-file user function matching `name`
+/// (case-insensitive; PHP function names are), or `None` for builtins/unknowns.
+fn user_fn_canon(functions: &[FunctionDecl], name: &str) -> Option<String> {
+    functions.iter().find(|f| f.name.eq_ignore_ascii_case(name)).map(|f| f.name.clone())
+}
+
+/// The proven effect findings a builtin `name` carries (empty for pure or
+/// uncatalogued builtins — the silent side of proven-only checking).
+fn builtin_findings(name: &str, span: steins_syntax::Span, tree: &SourceTree) -> Vec<EffectFinding> {
+    match steins_catalog::effect_labels(name) {
+        Some(labels) => {
+            let line = tree.position(span.start).line;
+            labels
+                .iter()
+                .map(|&label| EffectFinding {
+                    label: label.to_owned(),
+                    origin: name.to_owned(),
+                    line,
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    }
+}
+
+/// Resolve a method-call effect origin to the unit it edges to, under the same
+/// sound dispatch rules the type check uses (no flow environment, so only
+/// `$this`/`self`/`parent`/`Foo::`/`new Foo()->` receivers resolve). `$this` and
+/// `self::` require the final/private override guard; `parent::`/`Foo::` are
+/// exact.
+fn resolve_effect_edge(
+    classes: &[ClassDecl],
+    enclosing: Option<&str>,
+    receiver: &EffectRecv,
+    method: &str,
+) -> Option<Sym> {
+    let (start, exact) = match receiver {
+        EffectRecv::This | EffectRecv::SelfKw => (enclosing?.to_owned(), false),
+        EffectRecv::Parent => (find_class(classes, enclosing?)?.parent.clone()?, true),
+        EffectRecv::ClassName(name) => (name.clone(), true),
+    };
+    let Resolution::Found(r) = resolve_in_chain(classes, &start, method) else { return None };
+    // A private method is callable only from within its declaring class.
+    if r.method.visibility == Visibility::Private
+        && !enclosing.is_some_and(|e| e.eq_ignore_ascii_case(r.declaring_class))
+    {
+        return None;
+    }
+    if !exact {
+        let declaring_final = find_class(classes, r.declaring_class).is_some_and(|c| c.is_final);
+        if !(r.method.is_final || r.method.visibility == Visibility::Private || declaring_final) {
+            return None; // a non-final public method may be overridden elsewhere
+        }
+    }
+    Some(Sym::Method(r.declaring_class.to_owned(), r.method.name.clone()))
 }
 
 /// Build an `effect.envelope-exceeded` diagnostic at `offset` with `message`.
@@ -462,6 +595,7 @@ fn effect_diag(tree: &SourceTree, path: &str, offset: u32, message: String) -> D
 struct Cx<'a> {
     tree: &'a SourceTree,
     functions: &'a [FunctionDecl],
+    classes: &'a [ClassDecl],
     path: &'a str,
     strict: bool,
 }
@@ -505,60 +639,121 @@ struct Descent<'a> {
 /// `env` is empty for a scope's own top-level walk and pre-loaded with bound
 /// parameters for a binding descent; `descent` is `None` at the top level and
 /// `Some` inside a descent (carrying the budget/recursion/provenance state).
+#[allow(clippy::too_many_arguments)]
 fn analyze_scope(
     cx: &Cx,
     folder: &mut dyn Folder,
     scope: &Scope,
     mut env: HashMap<String, Known>,
+    mut classes_env: HashMap<String, String>,
+    this_exact: Option<String>,
     mut descent: Option<Descent<'_>>,
     out: &mut Vec<Diagnostic>,
 ) {
+    // The class that lexically encloses this scope (a method body), for resolving
+    // `$this->`, `self::`, and `parent::` calls; `None` for functions/top-level.
+    let enclosing_class = scope_class(scope);
+
     for stmt in &scope.stmts {
         // 1. Check + descend every statically-named call this statement carries,
-        // against the env as it stands *before* the statement's own effect. This
-        // uniformly covers statement-level calls, `return f(...)`, `$x = f(...)`,
-        // and `echo f(...)` — all evaluate under the entry env in straight line.
+        // against the env as it stands *before* the statement's own effect.
         for call in checkable_calls(&stmt.kind) {
-            check_propagated_call(cx, folder, scope.poisoned, call, &env, out);
-            try_descend(cx, folder, call, &env, scope.poisoned, descent.as_mut(), out);
+            match &call.receiver {
+                // Function calls keep the exact function-world behavior.
+                Callee::Function(_) => {
+                    check_propagated_call(cx, folder, scope.poisoned, call, &env, out);
+                    try_descend_function(cx, folder, call, &env, scope.poisoned, descent.as_mut(), out);
+                }
+                // Method / static / constructor calls: the class-world path.
+                Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
+                    handle_method_call(
+                        cx,
+                        folder,
+                        scope,
+                        call,
+                        &env,
+                        &classes_env,
+                        this_exact.as_deref(),
+                        enclosing_class,
+                        descent.as_mut(),
+                        out,
+                    );
+                }
+                Callee::Dynamic => {}
+            }
         }
 
         // 2. Apply the statement's own effect on the known-value environment.
         match &stmt.kind {
             // `echo` assigns nothing, but stays conservative like the former
             // Barrier: clear afterward (the calls were already checked in step 1).
-            StmtKind::Barrier | StmtKind::Echo(_) => env.clear(),
+            StmtKind::Barrier | StmtKind::Echo(_) => {
+                env.clear();
+                classes_env.clear();
+            }
             // ADR-0027 ratchet: forget only the construct's write set (unless it
-            // poisons, in which case it behaves exactly like a Barrier).
+            // poisons, in which case it behaves exactly like a Barrier). A write
+            // to `$x` is a reassignment, so it drops `$x`'s exact-class fact too.
             StmtKind::Opaque { writes, poisons } => {
                 if *poisons {
                     env.clear();
+                    classes_env.clear();
                 } else {
                     for w in writes {
                         env.remove(w);
+                        classes_env.remove(w);
                     }
                 }
             }
             StmtKind::Return { .. } | StmtKind::Call(_) => {}
-            StmtKind::Assign { var, value, span, .. } => {
-                // A poisoned scope never trusts a variable value.
-                match cx.resolve_literal(value, &env, scope.poisoned, folder) {
+            StmtKind::Assign { var, value, span, .. } => match value {
+                // `$x = new Foo(...)` — record `$x`'s exact class and drop any
+                // stale scalar fact. The fact holds only until `$x` is handed to
+                // a call (a by-ref parameter can rebind it; see step 3). A
+                // poisoned scope trusts nothing.
+                ArgValue::New(class, _) => {
+                    env.remove(var);
+                    if scope.poisoned {
+                        classes_env.remove(var);
+                    } else {
+                        classes_env.insert(var.clone(), class.clone());
+                    }
+                }
+                _ => match cx.resolve_literal(value, &env, scope.poisoned, folder) {
                     Some(lit) => {
                         let line = cx.tree.position(span.start).line;
                         env.insert(var.clone(), Known { value: lit, line, bound: None });
+                        classes_env.remove(var);
                     }
                     None => {
                         env.remove(var);
+                        classes_env.remove(var);
                     }
-                }
-            }
+                },
+            },
         }
 
         // 3. After the statement, any variable handed to a call is untrustworthy
-        // (a by-ref parameter could have mutated it).
+        // — a by-ref parameter can *rebind* it to a different object
+        // (`f(&$x) { $x = new Bar(); }`), which changes the variable's class, not
+        // just its scalar value. So invalidation drops the exact-class fact too,
+        // exactly as it drops a scalar literal fact. (The receiver of `$x->m()` is
+        // *not* listed here — a method call cannot rebind the caller's variable —
+        // so a method call on `$x` keeps `$x`'s class fact; and a direct
+        // `(new Foo())->m()` has no variable to rebind, so that path stays exact.)
         for v in &stmt.invalidated {
             env.remove(v);
+            classes_env.remove(v);
         }
+    }
+}
+
+/// The class that lexically owns a method scope, for resolving `$this`/`self`/
+/// `parent` inside it; `None` for function and top-level scopes.
+fn scope_class(scope: &Scope) -> Option<&str> {
+    match &scope.owner {
+        ScopeOwner::Method { class, .. } => Some(class),
+        ScopeOwner::TopLevel | ScopeOwner::Function(_) => None,
     }
 }
 
@@ -588,8 +783,8 @@ fn check_propagated_call(
     let Some(decl) = resolve_callee(cx.functions, call) else { return };
 
     for (i, arg) in call.args.iter().enumerate() {
-        let Some(ty) = param_scalar_type(decl, i) else {
-            if arg_binds_to_variadic(decl, i) {
+        let Some(ty) = param_scalar_type(&decl.params, i) else {
+            if arg_binds_to_variadic(&decl.params, i) {
                 break;
             }
             continue;
@@ -622,20 +817,21 @@ fn check_propagated_call(
         let Some((value, provenance)) = resolved else { continue };
 
         if is_type_error(cx.strict, ty, &value) {
-            out.push(cx.diagnostic(arg.span.start, &value, Some(&provenance), decl, i, ty));
+            out.push(cx.diagnostic(
+                arg.span.start,
+                &value,
+                Some(&provenance),
+                &decl.name,
+                &decl.params[i].name,
+                ty,
+            ));
         }
     }
 }
 
-/// Attempt an interprocedural argument-binding descent for one call (Feature B).
-///
-/// When `call` targets a same-file, non-poisoned user function and one or more
-/// positional arguments resolve to literals, the callee's body is re-analyzed
-/// with those parameters bound to their (post-coercion) values. Any proven
-/// `type.argument-mismatch` inside is reported at the inner call site with a
-/// provenance chain naming the outermost binding site. Zero-FP rules from the
-/// slice's spec are enforced here (see inline notes).
-fn try_descend(
+/// Attempt an interprocedural argument-binding descent into a same-file
+/// **function** (Feature B). Thin wrapper over [`descend`].
+fn try_descend_function(
     cx: &Cx,
     folder: &mut dyn Folder,
     call: &CallExpr,
@@ -645,8 +841,51 @@ fn try_descend(
     out: &mut Vec<Diagnostic>,
 ) {
     let Some(decl) = resolve_callee(cx.functions, call) else { return };
-    // The callee must have a unique, non-poisoned body scope to analyze.
     let Some(callee_scope) = cx.unique_scope(&decl.name) else { return };
+    descend(
+        cx,
+        folder,
+        &decl.params,
+        callee_scope,
+        &decl.name,
+        &decl.name,
+        None,
+        call,
+        env,
+        poisoned,
+        descent,
+        out,
+    );
+}
+
+/// Interprocedural argument-binding descent into a resolved callee body (Feature
+/// B), shared by the function and method paths. When one or more positional
+/// arguments of `call` resolve to literals, `callee_scope` is re-analyzed with
+/// those `params` bound to their post-coercion values; any proven
+/// `type.argument-mismatch` inside is reported at the inner call site with a
+/// provenance chain naming the outermost binding site. Zero-FP rules (entry
+/// coercion, by-ref skip, depth/recursion budget) are enforced here.
+///
+/// `key_name` uniquely identifies the callee for recursion/memoization
+/// (`"func"` or `"Class::method"`); `display_name` is the provenance render base
+/// (`"width"`, `"Foo::m"`, `"new Foo"`); `body_this_exact` is the exact `$this`
+/// class the callee body runs with (`Some` iff dispatched on an exact receiver),
+/// so nested `$this->…` inside resolves under the exact-class rule.
+#[allow(clippy::too_many_arguments)]
+fn descend(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    params: &[Param],
+    callee_scope: &Scope,
+    key_name: &str,
+    display_name: &str,
+    body_this_exact: Option<String>,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    descent: Option<&mut Descent<'_>>,
+    out: &mut Vec<Diagnostic>,
+) {
     if callee_scope.poisoned {
         return;
     }
@@ -655,28 +894,19 @@ fn try_descend(
     let mut bound: Vec<(String, ArgValue)> = Vec::new();
     let mut render_args: Vec<ArgValue> = Vec::new();
     for (i, arg) in call.args.iter().enumerate() {
-        let Some(param) = decl.params.get(i) else { break };
-        // Variadic parameter: it and everything after stays unbound.
+        let Some(param) = params.get(i) else { break };
         if param.variadic {
             break;
         }
-        // Resolve the argument value (literal / known var / const-fn / fold).
         let Some(value) = cx.resolve_literal(&arg.value, env, poisoned, folder) else {
-            // Unknown argument (or a default with no argument): leave unbound.
             continue;
         };
         render_args.push(value.clone());
-        // A by-ref parameter in a bound position: skip the whole binding — its
-        // in-callee value is not determined by the caller's literal.
+        // A by-ref parameter in a bound position: skip the whole binding.
         if param.by_ref {
             return;
         }
-        // The callee's declared type acts first. If the literal already violates
-        // it, the real call fatals at entry and the existing direct/propagation
-        // check reports at the outer site — do not descend. Otherwise bind the
-        // post-coercion value (what the parameter actually holds inside).
         let Some(ty) = param.ty else {
-            // Untyped parameter: it holds the value unchanged.
             bound.push((param.name.clone(), value));
             continue;
         };
@@ -687,13 +917,13 @@ fn try_descend(
     }
 
     if bound.is_empty() {
-        return; // nothing known to propagate.
+        return;
     }
 
     // Canonical `(callee, binding)` key for recursion detection / memoization.
     let mut key_binding = bound.clone();
     key_binding.sort_by(|a, b| a.0.cmp(&b.0));
-    let key: BindingKey = (decl.name.clone(), key_binding);
+    let key: BindingKey = (key_name.to_owned(), key_binding);
 
     // Provenance names the *first* binding site; a nested descent inherits it.
     let new_provenance;
@@ -701,49 +931,398 @@ fn try_descend(
         Some(d) => (d.provenance, d.depth + 1),
         None => {
             let line = cx.tree.position(call.span.start).line;
-            new_provenance =
-                format!("bound at {} call on line {}", render_call(&decl.name, &render_args), line);
+            new_provenance = format!(
+                "bound at {} call on line {}",
+                render_call(display_name, &render_args),
+                line
+            );
             (&new_provenance, 1)
         }
     };
 
-    // Budget (ADR-0009): stop past the cap with no diagnostic.
     if next_depth > MAX_BINDING_DEPTH {
         return;
     }
 
-    // Build the bound environment; parameters carry the outer-site provenance.
     let bound_env: HashMap<String, Known> = bound
         .into_iter()
-        .map(|(name, value)| {
-            (name, Known { value, line: 0, bound: Some(provenance.to_owned()) })
-        })
+        .map(|(name, value)| (name, Known { value, line: 0, bound: Some(provenance.to_owned()) }))
         .collect();
 
-    // Recursion / memo bookkeeping, then descend with a fresh or inherited frame.
     match descent {
         Some(d) => {
             if d.stack.contains(&key) || d.memo.contains(&key) {
                 return;
             }
             d.stack.push(key.clone());
-            let child = Descent {
-                provenance,
-                depth: next_depth,
-                stack: d.stack,
-                memo: d.memo,
-            };
-            analyze_scope(cx, folder, callee_scope, bound_env, Some(child), out);
+            let child = Descent { provenance, depth: next_depth, stack: d.stack, memo: d.memo };
+            analyze_scope(
+                cx,
+                folder,
+                callee_scope,
+                bound_env,
+                HashMap::new(),
+                body_this_exact,
+                Some(child),
+                out,
+            );
             d.stack.pop();
             d.memo.insert(key);
         }
         None => {
-            // First binding from a top-level scope walk: fresh recursion state.
             let mut stack: Vec<BindingKey> = vec![key.clone()];
             let mut memo: HashSet<BindingKey> = HashSet::new();
             let child =
                 Descent { provenance, depth: next_depth, stack: &mut stack, memo: &mut memo };
-            analyze_scope(cx, folder, callee_scope, bound_env, Some(child), out);
+            analyze_scope(
+                cx,
+                folder,
+                callee_scope,
+                bound_env,
+                HashMap::new(),
+                body_this_exact,
+                Some(child),
+                out,
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Class-world method resolution (ADR-0001 sound dispatch).
+// ---------------------------------------------------------------------------
+
+/// A method resolved through a same-file inheritance chain.
+struct ResolvedMethod<'a> {
+    method: &'a MethodDecl,
+    /// The class in the chain that declares the resolved method.
+    declaring_class: &'a str,
+}
+
+/// The outcome of walking a class's same-file inheritance chain for a method.
+enum Resolution<'a> {
+    /// A concrete, in-file method body was found.
+    Found(ResolvedMethod<'a>),
+    /// The whole chain is in-file and ends at a root with no such method (for a
+    /// constructor this means PHP's default constructor — no args checked).
+    NotFoundChainComplete,
+    /// The chain left the file, hit a trait-using class, or hit an abstract
+    /// method whose concrete body lives in an out-of-file subclass — give up.
+    Unknown,
+}
+
+/// Walk `start_class`'s same-file inheritance chain looking for a concrete
+/// `method`, most-derived first. Gives up (`Unknown`) the instant the chain
+/// leaves the file or reaches a trait-using class — the FP-safe boundary.
+fn resolve_in_chain<'a>(
+    classes: &'a [ClassDecl],
+    start_class: &str,
+    method: &str,
+) -> Resolution<'a> {
+    let mut cur = start_class.to_owned();
+    // Guard against pathological cyclic `extends` (illegal PHP, but be safe).
+    let mut seen: HashSet<String> = HashSet::new();
+    loop {
+        if !seen.insert(cur.to_ascii_lowercase()) {
+            return Resolution::Unknown;
+        }
+        let Some(cd) = find_class(classes, &cur) else {
+            return Resolution::Unknown; // chain leaves the file
+        };
+        if cd.uses_traits {
+            return Resolution::Unknown; // trait bodies live elsewhere
+        }
+        if let Some(m) = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method)) {
+            return if m.is_abstract {
+                // A concrete override must be in an out-of-file subclass.
+                Resolution::Unknown
+            } else {
+                Resolution::Found(ResolvedMethod { method: m, declaring_class: &cd.name })
+            };
+        }
+        match &cd.parent {
+            None => return Resolution::NotFoundChainComplete,
+            Some(p) => cur = p.clone(),
+        }
+    }
+}
+
+/// The first same-file class named `name` (case-insensitive).
+fn find_class<'a>(classes: &'a [ClassDecl], name: &str) -> Option<&'a ClassDecl> {
+    classes.iter().find(|c| c.name.eq_ignore_ascii_case(name))
+}
+
+/// A resolved call target: the method to check/descend, plus the exact `$this`
+/// class its body runs with (`Some` iff dispatched on an exact receiver).
+struct CallTarget<'a> {
+    method: &'a MethodDecl,
+    declaring_class: &'a str,
+    this_exact: Option<String>,
+}
+
+/// Resolve a method/static/constructor `receiver` to a same-file target under
+/// the sound dispatch rules, or `None` (silent) when dispatch is uncertain, the
+/// chain leaves the file, or the call would be a PHP fatal we do not report.
+fn resolve_call_target<'a>(
+    cx: &'a Cx,
+    receiver: &Callee,
+    classes_env: &HashMap<String, String>,
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
+    poisoned: bool,
+) -> Option<CallTarget<'a>> {
+    match receiver {
+        // `new Foo(...)` constructs exactly Foo → exact resolution of __construct.
+        Callee::Construct { class } => {
+            resolve_exact(cx, class, "__construct", enclosing_class, Some(class.clone()))
+        }
+        // `(new Foo())->m()` — exact receiver.
+        Callee::Method { receiver: Receiver::New(class), method } => {
+            resolve_exact(cx, class, method, enclosing_class, Some(class.clone()))
+        }
+        // `$x->m()` — exact only when the env knows `$x`'s class.
+        Callee::Method { receiver: Receiver::Var(v), method } => {
+            if poisoned {
+                return None;
+            }
+            let class = classes_env.get(v)?;
+            resolve_exact(cx, class, method, enclosing_class, Some(class.clone()))
+        }
+        // `$this->m()` — exact when `$this` is known exactly (descent), else the
+        // final/private guard (a subclass override could receive the call).
+        Callee::Method { receiver: Receiver::This, method } => {
+            let enclosing = enclosing_class?;
+            match this_exact {
+                Some(exact) => {
+                    resolve_exact(cx, exact, method, enclosing_class, Some(exact.to_owned()))
+                }
+                None => resolve_guarded(cx, enclosing, method, enclosing_class),
+            }
+        }
+        // `self::m()` — conservative final/private guard (early-bound in PHP, but
+        // the guard is only ever stricter, so it stays sound).
+        Callee::Static { class: StaticClass::SelfKw, method } => {
+            let enclosing = enclosing_class?;
+            resolve_guarded(cx, enclosing, method, enclosing_class)
+        }
+        // `parent::m()` — the parent chain, exact (parent is fixed at compile time).
+        Callee::Static { class: StaticClass::Parent, method } => {
+            let parent = find_class(cx.classes, enclosing_class?)?.parent.as_deref()?;
+            resolve_static_named(cx, parent, method, enclosing_class)
+        }
+        // `Foo::m()` — explicit class, exact (a subclass override only affects
+        // `static::`, never `Foo::`).
+        Callee::Static { class: StaticClass::Named(name), method } => {
+            resolve_static_named(cx, name, method, enclosing_class)
+        }
+        // `static::m()` — late static binding, always unknown.
+        Callee::Static { class: StaticClass::Static, .. } => None,
+        Callee::Function(_) | Callee::Dynamic => None,
+    }
+}
+
+/// Resolve an exact-receiver instance call (`new Foo()->m()`, `$x->m()` with a
+/// known class, exact `$this->m()`): any override-uncertainty is absent, so no
+/// final guard — only the private-visibility skip applies.
+fn resolve_exact<'a>(
+    cx: &'a Cx,
+    class: &str,
+    method: &str,
+    enclosing_class: Option<&str>,
+    this_exact: Option<String>,
+) -> Option<CallTarget<'a>> {
+    match resolve_in_chain(cx.classes, class, method) {
+        Resolution::Found(r) if !private_blocked(&r, enclosing_class) => {
+            Some(CallTarget { method: r.method, declaring_class: r.declaring_class, this_exact })
+        }
+        _ => None,
+    }
+}
+
+/// Resolve a `$this->`/`self::` call under the override guard: resolvable only
+/// when the found method is `private`, `final`, or its declaring class is
+/// `final` (else a subclass override elsewhere could receive the call). The body
+/// runs with an *open* `$this` (a subclass instance), so `this_exact` is `None`.
+fn resolve_guarded<'a>(
+    cx: &'a Cx,
+    class: &str,
+    method: &str,
+    enclosing_class: Option<&str>,
+) -> Option<CallTarget<'a>> {
+    let Resolution::Found(r) = resolve_in_chain(cx.classes, class, method) else { return None };
+    if private_blocked(&r, enclosing_class) {
+        return None;
+    }
+    let declaring_final = find_class(cx.classes, r.declaring_class).is_some_and(|c| c.is_final);
+    let final_or_private =
+        r.method.is_final || r.method.visibility == Visibility::Private || declaring_final;
+    if !final_or_private {
+        return None; // a non-final public method may be overridden elsewhere.
+    }
+    Some(CallTarget { method: r.method, declaring_class: r.declaring_class, this_exact: None })
+}
+
+/// Resolve an explicit `Foo::m()` / `parent::m()` static call (exact). Guards
+/// against the PHP-fatal case of calling a non-static instance method statically
+/// from *outside* any class context (where the fatal would mask our finding).
+fn resolve_static_named<'a>(
+    cx: &'a Cx,
+    class: &str,
+    method: &str,
+    enclosing_class: Option<&str>,
+) -> Option<CallTarget<'a>> {
+    let Resolution::Found(r) = resolve_in_chain(cx.classes, class, method) else { return None };
+    if private_blocked(&r, enclosing_class) {
+        return None;
+    }
+    // A non-static method called statically from outside a class is a fatal.
+    if !r.method.is_static && enclosing_class.is_none() {
+        return None;
+    }
+    Some(CallTarget { method: r.method, declaring_class: r.declaring_class, this_exact: None })
+}
+
+/// Whether a resolved `private` method is invisible at the call site (a private
+/// method is callable only from within its declaring class). Non-private
+/// methods are never blocked here.
+fn private_blocked(r: &ResolvedMethod, enclosing_class: Option<&str>) -> bool {
+    r.method.visibility == Visibility::Private
+        && !enclosing_class.is_some_and(|e| e.eq_ignore_ascii_case(r.declaring_class))
+}
+
+/// Check + descend one method / static / constructor call.
+#[allow(clippy::too_many_arguments)]
+fn handle_method_call(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    scope: &Scope,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    classes_env: &HashMap<String, String>,
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
+    descent: Option<&mut Descent<'_>>,
+    out: &mut Vec<Diagnostic>,
+) {
+    // Named/spread arguments make positional mapping unreliable — skip.
+    if !call.positional_only {
+        return;
+    }
+    let Some(target) = resolve_call_target(
+        cx,
+        &call.receiver,
+        classes_env,
+        this_exact,
+        enclosing_class,
+        scope.poisoned,
+    ) else {
+        return;
+    };
+
+    let callee_name = diag_callee_name(&call.receiver, target.declaring_class, &target.method.name);
+
+    // 1. Check the arguments passed *at this call site* (literals + resolved
+    // `$var`/const-fn/folded values) against the resolved method's params.
+    check_method_args(cx, folder, target.method, &callee_name, call, env, scope.poisoned, out);
+
+    // 2. Descend into the method body with the params bound and the exact `$this`
+    // class (when known) so nested `$this->…` resolves.
+    let Some(callee_scope) = cx.method_scope(target.declaring_class, &target.method.name) else {
+        return;
+    };
+    let display = display_of_call(&call.receiver, target.declaring_class, &target.method.name);
+    descend(
+        cx,
+        folder,
+        &target.method.params,
+        callee_scope,
+        &format!("{}::{}", target.declaring_class, target.method.name),
+        &display,
+        target.this_exact,
+        call,
+        env,
+        scope.poisoned,
+        descent,
+        out,
+    );
+}
+
+/// The callee spelling for a `type.argument-mismatch` message: `Class::method`
+/// (constructors render as `Class::__construct`), where `Class` is the class
+/// that actually declares the resolved method.
+fn diag_callee_name(_receiver: &Callee, declaring_class: &str, method: &str) -> String {
+    format!("{declaring_class}::{method}")
+}
+
+/// The provenance render base for a bound method/constructor call: `new Foo` for
+/// a constructor (so `render_call` yields `new Foo("abc")`), else `Class::method`.
+fn display_of_call(receiver: &Callee, declaring_class: &str, method: &str) -> String {
+    match receiver {
+        Callee::Construct { class } => format!("new {class}"),
+        _ => format!("{declaring_class}::{method}"),
+    }
+}
+
+/// Check the arguments of a resolved method/constructor call at its call site.
+/// Unlike the function direct pass, this covers **literal** arguments too (no
+/// separate direct pass reaches method calls). Non-literal resolved values
+/// (notably `new` receivers) never flow into a scalar type check.
+#[allow(clippy::too_many_arguments)]
+fn check_method_args(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    method: &MethodDecl,
+    callee_name: &str,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    out: &mut Vec<Diagnostic>,
+) {
+    for (i, arg) in call.args.iter().enumerate() {
+        let Some(ty) = param_scalar_type(&method.params, i) else {
+            if arg_binds_to_variadic(&method.params, i) {
+                break;
+            }
+            continue;
+        };
+
+        let resolved: Option<(ArgValue, Option<String>)> = match &arg.value {
+            v if v.is_literal() => Some((v.clone(), None)),
+            ArgValue::Var(name) if !poisoned => env.get(name).map(|k| {
+                let prov = match &k.bound {
+                    Some(b) => format!("from ${name}, {b}"),
+                    None => format!("from ${name}, assigned at line {}", k.line),
+                };
+                (k.value.clone(), Some(prov))
+            }),
+            ArgValue::Call(name, args) => {
+                if args.is_empty() {
+                    cx.resolve_const_fn(name)
+                        .map(|(lit, line)| {
+                            (lit, Some(format!("from {name}(), defined at line {line}")))
+                        })
+                        .or_else(|| cx.try_fold(name, args, folder).map(|(l, p)| (l, Some(p))))
+                } else {
+                    cx.try_fold(name, args, folder).map(|(l, p)| (l, Some(p)))
+                }
+            }
+            _ => None,
+        };
+        let Some((value, prov)) = resolved else { continue };
+        // Only concrete scalar literals are ever checked (a `new` receiver etc.
+        // resolves to a non-literal and is skipped — object→scalar is out of scope).
+        if !value.is_literal() {
+            continue;
+        }
+        if is_type_error(cx.strict, ty, &value) {
+            out.push(cx.diagnostic(
+                arg.span.start,
+                &value,
+                prov.as_deref(),
+                callee_name,
+                &method.params[i].name,
+                ty,
+            ));
         }
     }
 }
@@ -843,23 +1422,33 @@ impl Cx<'_> {
         Some((value.clone(), self.tree.position(decl.span.start).line))
     }
 
-    /// Build a `type.argument-mismatch` diagnostic for argument `i` of `decl`.
-    /// With `provenance`, the message names the value's origin hop; without, it
-    /// is the direct-literal message (byte-for-byte identical to the
-    /// pre-propagation output).
+    /// The unique method body scope for `class::method` (case-insensitive), or
+    /// `None` if absent or ambiguous.
+    fn method_scope(&self, class: &str, method: &str) -> Option<&'_ Scope> {
+        let mut it = self.tree.scopes().iter().filter(|s| {
+            matches!(&s.owner, ScopeOwner::Method { class: c, method: m }
+                if c.eq_ignore_ascii_case(class) && m.eq_ignore_ascii_case(method))
+        });
+        let scope = it.next()?;
+        if it.next().is_some() { None } else { Some(scope) }
+    }
+
+    /// Build a `type.argument-mismatch` diagnostic for a call to `callee`'s
+    /// parameter `param_name`. With `provenance`, the message names the value's
+    /// origin hop; without, it is the direct-literal message (byte-for-byte
+    /// identical to the pre-propagation output).
+    #[allow(clippy::too_many_arguments)]
     fn diagnostic(
         &self,
         offset: u32,
         value: &ArgValue,
         provenance: Option<&str>,
-        decl: &FunctionDecl,
-        i: usize,
+        callee: &str,
+        param_name: &str,
         ty: ParamType,
     ) -> Diagnostic {
         let pos = self.tree.position(offset);
         let mode = if self.strict { "strict" } else { "coercive" };
-        let callee = &decl.name;
-        let param_name = &decl.params[i].name;
         let message = match provenance {
             Some(p) => format!(
                 "argument {} ({}) to {}() cannot become {} ${} — proven TypeError ({} mode)",
@@ -904,8 +1493,8 @@ fn resolve_callee<'a>(functions: &'a [FunctionDecl], call: &CallExpr) -> Option<
 
 /// The simple scalar type of parameter `i`, or `None` when the argument should
 /// be skipped (past the last declared param, variadic, by-ref, or untyped).
-fn param_scalar_type(decl: &FunctionDecl, i: usize) -> Option<ParamType> {
-    let param = decl.params.get(i)?;
+fn param_scalar_type(params: &[Param], i: usize) -> Option<ParamType> {
+    let param = params.get(i)?;
     if param.variadic || param.by_ref {
         return None;
     }
@@ -914,8 +1503,8 @@ fn param_scalar_type(decl: &FunctionDecl, i: usize) -> Option<ParamType> {
 
 /// Whether argument `i` binds to a variadic parameter (so it, and every later
 /// argument, must be skipped).
-fn arg_binds_to_variadic(decl: &FunctionDecl, i: usize) -> bool {
-    decl.params.get(i).is_some_and(|p| p.variadic)
+fn arg_binds_to_variadic(params: &[Param], i: usize) -> bool {
+    params.get(i).is_some_and(|p| p.variadic)
 }
 
 /// The truth table: does passing `arg` to a parameter of type `ty` provably
