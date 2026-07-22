@@ -6,14 +6,19 @@
 //! exits 1 if any finding was reported. `annotate` reprints a single file with a
 //! right-margin column of *proven* inferred facts (the Rigor-style display).
 
+mod baseline;
+mod sha256;
+
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use steins_db::{Project, SourceFile, SteinsDatabase};
+use steins_db::{Project, SourceFile, SteinsDatabase, parse as parse_tree};
 use steins_infer::{
     Diagnostic, LineFact, SOUND_SUBSET_NOTICE, SidecarFolder, annotate_file, annotate_project,
-    check_project,
+    apply_inline_ignores, check_project,
 };
+use steins_syntax::SourceTree;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Format {
@@ -32,7 +37,9 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
         None => {
-            eprintln!("usage: steins check [--format text|json] [--no-php] <paths...>");
+            eprintln!(
+                "usage: steins check [--format text|json] [--no-php] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
+            );
             eprintln!("       steins annotate [--no-php] <file.php>");
             ExitCode::from(2)
         }
@@ -42,6 +49,9 @@ fn main() -> ExitCode {
 fn run_check(args: &[String]) -> ExitCode {
     let mut format = Format::Text;
     let mut no_php = false;
+    let mut set_baseline = false;
+    let mut ignore_baseline = false;
+    let mut baseline_path: Option<String> = None;
     let mut paths: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -49,6 +59,22 @@ fn run_check(args: &[String]) -> ExitCode {
             "--no-php" => {
                 no_php = true;
                 i += 1;
+            }
+            "--set-baseline" => {
+                set_baseline = true;
+                i += 1;
+            }
+            "--ignore-baseline" => {
+                ignore_baseline = true;
+                i += 1;
+            }
+            "--baseline" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("steins: --baseline requires a path argument");
+                    return ExitCode::from(2);
+                };
+                baseline_path = Some(value.clone());
+                i += 2;
             }
             "--format" => {
                 let Some(value) = args.get(i + 1) else {
@@ -99,8 +125,10 @@ fn run_check(args: &[String]) -> ExitCode {
 
     // Project mode (ADR-0009/0015): all `.php` files across the given paths form
     // ONE project (one salsa DB), so cross-file calls, class chains, and effects
-    // resolve.
+    // resolve. `texts` keeps each file's contents by diagnostic path so the
+    // baseline hash can read the flagged line's neighborhood (ADR-0022).
     let mut inputs: Vec<SourceFile> = Vec::new();
+    let mut texts: HashMap<String, String> = HashMap::new();
     for file_path in &files {
         let text = match std::fs::read(file_path) {
             Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -109,17 +137,118 @@ fn run_check(args: &[String]) -> ExitCode {
                 continue;
             }
         };
-        inputs.push(SourceFile::new(&db, file_path.to_string_lossy().into_owned(), text));
+        let path = file_path.to_string_lossy().into_owned();
+        texts.insert(path.clone(), text.clone());
+        inputs.push(SourceFile::new(&db, path, text));
     }
-    let project = Project::new(&db, inputs);
+    let project = Project::new(&db, inputs.clone());
     let findings: Vec<Diagnostic> = check_project(&db, project, &mut folder);
 
-    match format {
-        Format::Text => print_text(&findings),
-        Format::Json => print_json(&findings),
+    // Inline `@steins-ignore` applies first (ADR-0023): a finding suppressed
+    // inline never reaches — nor consumes — the baseline channel.
+    let trees: Vec<&SourceTree> = inputs.iter().map(|&sf| parse_tree(&db, sf)).collect();
+    let file_pairs: Vec<(String, &SourceTree)> =
+        inputs.iter().zip(trees.iter()).map(|(&sf, &t)| (sf.path(&db).to_owned(), t)).collect();
+    let inline = apply_inline_ignores(findings, &file_pairs);
+
+    // Which baseline file to consult (ADR-0022): `--set-baseline` and an explicit
+    // `--baseline` both name a file; otherwise the default is auto-loaded when it
+    // exists, unless `--ignore-baseline` bypasses it.
+    let baseline_file: Option<PathBuf> = if set_baseline {
+        Some(PathBuf::from(baseline_path.as_deref().unwrap_or(baseline::DEFAULT_FILE)))
+    } else if ignore_baseline {
+        None
+    } else if let Some(p) = &baseline_path {
+        Some(PathBuf::from(p))
+    } else if Path::new(baseline::DEFAULT_FILE).exists() {
+        Some(PathBuf::from(baseline::DEFAULT_FILE))
+    } else {
+        None
+    };
+
+    if set_baseline {
+        let file = baseline_file.expect("set-baseline names a file");
+        return write_baseline(&file, &inline.kept, &texts);
     }
 
-    if findings.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    // Baseline channel: partition the inline survivors into baselined (suppressed,
+    // excluded from exit) and reported. `--ignore-baseline` / no file → all report.
+    let (reported, baselined, stale) = match &baseline_file {
+        Some(file) => match std::fs::read_to_string(file) {
+            Ok(text) => match_baseline(file, &text, inline.kept, &texts),
+            Err(_) => (inline.kept, 0, 0),
+        },
+        None => (inline.kept, 0, 0),
+    };
+
+    // Displayed = object-level survivors + meta-diagnostics (which are exempt from
+    // both channels). Sorted for deterministic output.
+    let mut displayed = reported;
+    displayed.extend(inline.meta);
+    displayed.sort_by(|a, b| {
+        (a.path.as_str(), a.line, a.column, a.id).cmp(&(b.path.as_str(), b.line, b.column, b.id))
+    });
+
+    match format {
+        Format::Text => print_text(&displayed, inline.suppressed, baselined, stale),
+        Format::Json => print_json(&displayed, inline.suppressed, baselined),
+    }
+
+    if displayed.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+}
+
+/// Write a baseline file from the inline-surviving findings (ADR-0022
+/// `--set-baseline`). Never affects exit code: writing is a maintenance action.
+fn write_baseline(file: &Path, findings: &[Diagnostic], texts: &HashMap<String, String>) -> ExitCode {
+    let dir = baseline::base_dir(file);
+    let entries: Vec<baseline::Entry> = findings
+        .iter()
+        .map(|d| {
+            let rel = baseline::relativize(&dir, &d.path);
+            let hash = texts
+                .get(&d.path)
+                .map_or_else(String::new, |t| baseline::entry_hash(d.id, &rel, t, d.line));
+            baseline::Entry { id: d.id.to_owned(), path: rel, hash }
+        })
+        .collect();
+    let n = entries.len();
+    match std::fs::write(file, baseline::render(entries)) {
+        Ok(()) => {
+            eprintln!("steins: wrote {n} baseline entries to {}", file.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("steins: cannot write baseline {}: {e}", file.display());
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Match inline-surviving `findings` against a baseline file's entries. Returns
+/// `(reported, baselined_count, stale_count)`.
+fn match_baseline(
+    file: &Path,
+    text: &str,
+    findings: Vec<Diagnostic>,
+    texts: &HashMap<String, String>,
+) -> (Vec<Diagnostic>, usize, usize) {
+    let entries = baseline::parse(text);
+    let dir = baseline::base_dir(file);
+    let mut matcher = baseline::Matcher::new(&entries);
+    let mut reported = Vec::new();
+    let mut baselined = 0usize;
+    for d in findings {
+        let rel = baseline::relativize(&dir, &d.path);
+        let hash = texts
+            .get(&d.path)
+            .map_or_else(String::new, |t| baseline::entry_hash(d.id, &rel, t, d.line));
+        if matcher.take(d.id, &rel, &hash) {
+            baselined += 1;
+        } else {
+            reported.push(d);
+        }
+    }
+    (reported, baselined, matcher.stale_count())
 }
 
 /// `steins annotate [--no-php] <file.php>` — reprint one file with a right-margin
@@ -273,13 +402,23 @@ fn render_annotation(text: &str, facts: &[LineFact]) -> String {
     out
 }
 
-fn print_text(findings: &[Diagnostic]) {
+fn print_text(findings: &[Diagnostic], suppressed: usize, baselined: usize, stale: usize) {
     for d in findings {
         println!("{}:{}:{}: error[{}]: {}", d.path, d.line, d.column, d.id, d.message);
     }
+    // Suppression accounting (ADR-0022/0023), each line printed only when nonzero.
+    if suppressed > 0 {
+        println!("{suppressed} diagnostics suppressed by inline ignores");
+    }
+    if baselined > 0 {
+        println!("{baselined} findings in baseline");
+    }
+    if stale > 0 {
+        println!("{stale} baseline entries no longer match (stale — rerun --set-baseline)");
+    }
 }
 
-fn print_json(findings: &[Diagnostic]) {
+fn print_json(findings: &[Diagnostic], suppressed: usize, baselined: usize) {
     let array: Vec<serde_json::Value> = findings
         .iter()
         .map(|d| {
@@ -292,7 +431,12 @@ fn print_json(findings: &[Diagnostic]) {
             })
         })
         .collect();
-    match serde_json::to_string_pretty(&array) {
+    let doc = serde_json::json!({
+        "findings": array,
+        "suppressed": suppressed,
+        "baselined": baselined,
+    });
+    match serde_json::to_string_pretty(&doc) {
         Ok(s) => println!("{s}"),
         Err(e) => eprintln!("steins: failed to serialize json: {e}"),
     }

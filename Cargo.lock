@@ -855,9 +855,11 @@ version = "0.0.0"
 name = "steins-cli"
 version = "0.0.0"
 dependencies = [
+ "serde",
  "serde_json",
  "steins-db",
  "steins-infer",
+ "steins-syntax",
 ]
 
 [[package]]

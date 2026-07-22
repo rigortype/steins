@@ -1,4 +1,4 @@
-use steins_syntax::{ArgValue, ParamType, ScalarType, SourceTree};
+use steins_syntax::{ArgValue, CommentKind, ParamType, ScalarType, SourceTree};
 
 #[test]
 fn lowers_functions_calls_and_strict() {
@@ -326,4 +326,29 @@ fn nested_closure_bodies_are_not_scanned() {
         !f.effect_origins.iter().any(|o| matches!(o, EffectOrigin::Output { .. })),
         "closure-nested echo is not the outer function's effect"
     );
+}
+
+#[test]
+fn comments_are_exposed_with_kind_span_and_text() {
+    let src = "<?php\n// line one\n# hashed\n/* block */\nfunction f(): void {}\n";
+    let tree = SourceTree::parse(src);
+    let comments = tree.comments();
+    assert_eq!(comments.len(), 3, "three comment trivia, got: {comments:?}");
+    assert_eq!(comments[0].kind, CommentKind::Line);
+    assert!(comments[0].text.contains("line one"));
+    assert_eq!(comments[1].kind, CommentKind::Hash);
+    assert_eq!(comments[2].kind, CommentKind::Block);
+    // The span resolves to the right line.
+    assert_eq!(tree.position(comments[0].span.start).line, 2);
+}
+
+#[test]
+fn is_line_leading_distinguishes_trailing_from_own_line() {
+    // A comment alone on its line leads; one trailing code does not.
+    let src = "<?php\n// leading\n$x = 1; // trailing\n";
+    let tree = SourceTree::parse(src);
+    let leading = &tree.comments()[0];
+    let trailing = &tree.comments()[1];
+    assert!(tree.is_line_leading(leading.span.start), "own-line comment leads");
+    assert!(!tree.is_line_leading(trailing.span.start), "trailing comment does not lead");
 }

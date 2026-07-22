@@ -18,6 +18,13 @@
 //! run over a one-file project, so every same-file soundness guard keeps
 //! working unchanged; [`check_project`] / [`annotate_project`] run over many.
 
+pub mod suppress;
+
+pub use suppress::{
+    DIAGNOSTIC_IDS, InlineOutcome, SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID,
+    apply_inline_ignores, pattern_is_known,
+};
+
 use std::collections::{HashMap, HashSet};
 
 use steins_db::{Db, DeclSite, Project, ProjectIndex, Resolve, SourceFile, parse, project_index};
