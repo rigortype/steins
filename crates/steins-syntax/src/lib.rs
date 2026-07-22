@@ -325,6 +325,62 @@ pub enum EffectRecv {
     ClassName(NameRef),
 }
 
+/// One `catch` clause's caught types plus its bound variable, for the throw
+/// damming walk (ADR-0040). A multi-catch `catch (A|B $e)` records several
+/// `classes`; a caught type the lowering cannot name statically (a dynamic or
+/// non-identifier hint member) sets `has_unresolvable`, which forces absorption
+/// to `Maybe` for the whole clause (the consumer-inverted safe side).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CatchClause {
+    /// The statically-named caught classes (resolved to FQNs project-wide at
+    /// inference time). Empty with `has_unresolvable` set means "caught, but we
+    /// cannot name what".
+    pub classes: Vec<NameRef>,
+    /// The `$e` variable this clause binds (no `$`), for rethrow precision.
+    pub var: Option<String>,
+    /// A caught-type member the lowering could not name (→ absorption `Maybe`).
+    pub has_unresolvable: bool,
+}
+
+/// What a [`ThrowOrigin`] contributes to a body's throw set (ADR-0040). The
+/// explicit-throw variants carry the thrown class as written (resolved at
+/// inference time); the call variants are propagation edges (the callee's
+/// escaping throws flow in, re-filtered through this origin's guards).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ThrowKind {
+    /// `throw new X(...)` — `X` is the class as written.
+    New(NameRef),
+    /// `throw $e` where `$e` is an enclosing catch's parameter — re-emits exactly
+    /// that catch's absorbed set (ADR-0040 rethrow precision).
+    Rethrow { caught: Vec<NameRef>, has_unresolvable: bool },
+    /// A statically-named function call whose throws propagate.
+    Call(NameRef),
+    /// A method/static call with a statically-resolvable receiver (the class-world
+    /// propagation edge, resolved exactly like [`EffectOrigin::MethodCall`]).
+    MethodCall { receiver: EffectRecv, method: String },
+    /// An unresolvable throw (`throw $x` of a non-catch var, `throw <expr>`) or a
+    /// dynamic/unresolved call — contributes no reportable throw but **taints
+    /// throw-exhaustiveness** (ADR-0040 safe side; envelope stays silent).
+    Taint,
+}
+
+/// One throw-relevant construct in a function/method body, with the ordered
+/// enclosing `try`/`catch` guards that may dam it (ADR-0040 damming). Produced by
+/// a structural CST walk (independent of the trace IR), for *all* functions and
+/// methods, because the throw fixpoint propagates callee throw sets to callers
+/// regardless of annotations.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ThrowOrigin {
+    pub kind: ThrowKind,
+    /// The span of the throwing/calling construct (diagnostic position).
+    pub span: Span,
+    /// The enclosing `try` catch-guards, **innermost first**. Each entry is one
+    /// enclosing try's list of catch clauses. A throw is matched against each
+    /// guard from innermost outward; `finally` bodies and a try's own catch
+    /// bodies do **not** carry that try's own guard (the scanner omits it).
+    pub guards: Vec<Vec<CatchClause>>,
+}
+
 /// A recognized effect-envelope declaration (ADR-0005/0006/0018): the upper
 /// bound of effects a function or method promises not to exceed.
 ///
@@ -369,6 +425,10 @@ pub struct FunctionDecl {
     /// `Pure`-declared ones, because the effects pass propagates a callee's
     /// effects to `Pure` callers regardless of the callee's own annotations.
     pub effect_origins: Vec<EffectOrigin>,
+    /// Every throw-relevant construct in the body, with its enclosing try/catch
+    /// guards (ADR-0040 damming). Computed for *all* functions (the throw
+    /// fixpoint propagates callee throws regardless of annotations).
+    pub throw_origins: Vec<ThrowOrigin>,
     /// The raw `/** … */` docblock trivia immediately preceding this declaration,
     /// if any (only whitespace between it and the declaration head — the same
     /// association discipline as attributes; ADR-0029). The phpdoc bridge parses
@@ -404,6 +464,9 @@ pub struct MethodDecl {
     /// Structural effect-origin candidates in the body (see [`EffectOrigin`]).
     /// Empty for abstract methods (no body).
     pub effect_origins: Vec<EffectOrigin>,
+    /// Throw-relevant constructs with their try/catch guards (ADR-0040). Empty
+    /// for abstract methods (no body).
+    pub throw_origins: Vec<ThrowOrigin>,
     pub visibility: Visibility,
     pub is_static: bool,
     pub is_final: bool,
@@ -1196,8 +1259,10 @@ fn walk(node: &Node<'_, '_>, aliases: &SteinsAttrAliases, docs: &DocIndex, out: 
 
 fn lower_function(f: &Function<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> FunctionDecl {
     let mut effect_origins = Vec::new();
+    let mut throw_origins = Vec::new();
     for s in f.body.statements.iter() {
         scan_effect_origins(&Node::Statement(s), &mut effect_origins);
+        scan_throw_origins(&Node::Statement(s), &[], &[], &mut throw_origins);
     }
 
     FunctionDecl {
@@ -1208,6 +1273,7 @@ fn lower_function(f: &Function<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex
         span: to_span(f.name.span()),
         effect_envelope: attrs_effect_envelope(&f.attribute_lists, aliases),
         effect_origins,
+        throw_origins,
         docblock: docs.preceding(to_span(f.span()).start),
     }
 }
@@ -1282,9 +1348,11 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> C
 
 fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> MethodDecl {
     let mut effect_origins = Vec::new();
+    let mut throw_origins = Vec::new();
     if let MethodBody::Concrete(block) = &m.body {
         for s in block.statements.iter() {
             scan_effect_origins(&Node::Statement(s), &mut effect_origins);
+            scan_throw_origins(&Node::Statement(s), &[], &[], &mut throw_origins);
         }
     }
 
@@ -1306,6 +1374,7 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) ->
         span: to_span(m.name.span()),
         effect_envelope: attrs_effect_envelope(&m.attribute_lists, aliases),
         effect_origins,
+        throw_origins,
         visibility,
         is_static: m.modifiers.iter().any(Modifier::is_static),
         is_final: m.modifiers.iter().any(Modifier::is_final),
@@ -1581,6 +1650,186 @@ fn scan_effect_origins(node: &Node<'_, '_>, out: &mut Vec<EffectOrigin>) {
     }
     for child in node.children() {
         scan_effect_origins(&child, out);
+    }
+}
+
+/// The structural throw-origin walk (ADR-0040 damming). Produces every
+/// throw-relevant construct in a body — explicit throws, and function/method
+/// call edges — each tagged with the ordered enclosing `try`/`catch` guards that
+/// may dam it. It is independent of the trace IR: try/catch nesting is handled by
+/// threading a guard stack (`guards`, outer→inner) and a catch-variable scope
+/// (`catch_scope`, for rethrow precision) through the descent.
+///
+/// * A `try` block is walked with this try's guard pushed; its `catch` and
+///   `finally` blocks are walked WITHOUT it (a catch body is outside its own
+///   clause but inside outer trys; `finally` absorbs nothing). Nested trys
+///   compose naturally through the recursion.
+/// * `throw new X` records the class; `throw $e` of an enclosing catch parameter
+///   re-emits that catch's absorbed set (rethrow); any other throw taints.
+fn scan_throw_origins(
+    node: &Node<'_, '_>,
+    guards: &[Vec<CatchClause>],
+    catch_scope: &[(String, Vec<NameRef>, bool)],
+    out: &mut Vec<ThrowOrigin>,
+) {
+    // Innermost-first snapshot of the active guards for an origin at this point.
+    let snapshot = || -> Vec<Vec<CatchClause>> {
+        let mut g = guards.to_vec();
+        g.reverse();
+        g
+    };
+
+    match node {
+        // A `try` composes the damming: its own guard wraps the try block only.
+        Node::Try(t) => {
+            let clauses: Vec<CatchClause> =
+                t.catch_clauses.iter().map(lower_catch_clause).collect();
+            // Try block: this try's guard is active (innermost).
+            let mut inner_guards = guards.to_vec();
+            inner_guards.push(clauses.clone());
+            for s in t.block.statements.iter() {
+                scan_throw_origins(&Node::Statement(s), &inner_guards, catch_scope, out);
+            }
+            // Catch blocks: outer guards only; the clause's `$e` enters scope for
+            // rethrow precision inside its own body.
+            for c in t.catch_clauses.iter() {
+                let clause = lower_catch_clause(c);
+                let mut inner_scope = catch_scope.to_vec();
+                if let Some(var) = &clause.var {
+                    // Rethrow precision is only sound while `$e` still holds the
+                    // caught exception. If the clause body writes the variable —
+                    // by assignment or by handing it to any call (a by-ref
+                    // signature could rebind it) — a later `throw $e` may throw
+                    // something else entirely, so the variable must NOT enter
+                    // the rethrow scope (its throws degrade to Taint).
+                    // Review counterexample: `catch (RuntimeException $e) {
+                    // $e = new JsonException(); throw $e; }` under
+                    // `@throws JsonException` falsely reported RuntimeException.
+                    let mut written = Vec::new();
+                    for s in c.block.statements.iter() {
+                        collect_assign_writes(&Node::Statement(s), &mut written);
+                        collect_call_vars(&Node::Statement(s), &mut written);
+                    }
+                    if !written.contains(var) {
+                        inner_scope.push((var.clone(), clause.classes.clone(), clause.has_unresolvable));
+                    }
+                }
+                for s in c.block.statements.iter() {
+                    scan_throw_origins(&Node::Statement(s), guards, &inner_scope, out);
+                }
+            }
+            // Finally: outer guards only; this try's catches never absorb it.
+            if let Some(fin) = &t.finally_clause {
+                for s in fin.block.statements.iter() {
+                    scan_throw_origins(&Node::Statement(s), guards, catch_scope, out);
+                }
+            }
+            return; // children handled manually with the right guard/scope
+        }
+        // `throw <expr>` — classify the thrown expression.
+        Node::Throw(t) => {
+            let kind = match t.exception.unparenthesized() {
+                Expression::Instantiation(inst) => match instantiation_class(inst) {
+                    Some(class) => ThrowKind::New(class),
+                    None => ThrowKind::Taint, // `throw new $c()` — dynamic class
+                },
+                Expression::Variable(Variable::Direct(dv)) => {
+                    let name = strip_dollar(bytes_to_string(dv.name));
+                    match catch_scope.iter().rev().find(|(v, _, _)| *v == name) {
+                        Some((_, caught, unresolvable)) => ThrowKind::Rethrow {
+                            caught: caught.clone(),
+                            has_unresolvable: *unresolvable,
+                        },
+                        None => ThrowKind::Taint, // throwing a non-catch variable
+                    }
+                }
+                _ => ThrowKind::Taint,
+            };
+            out.push(ThrowOrigin { kind, span: to_span(t.span()), guards: snapshot() });
+            // Descend into the exception expression too (a call inside it — e.g.
+            // `throw wrap(inner())` — is its own propagation edge).
+        }
+        // Statically-named function call → propagation edge.
+        Node::FunctionCall(fc) => {
+            if let Expression::Identifier(id) = fc.function {
+                out.push(ThrowOrigin {
+                    kind: ThrowKind::Call(name_ref(id)),
+                    span: to_span(id.span()),
+                    guards: snapshot(),
+                });
+            } else {
+                out.push(ThrowOrigin { kind: ThrowKind::Taint, span: to_span(fc.span()), guards: snapshot() });
+            }
+        }
+        // Method / static calls with a resolvable receiver → edge; else taint.
+        Node::MethodCall(mc) => {
+            match (effect_recv_of_object(mc.object), method_name_of(&mc.method)) {
+                (Some(recv), Some(method)) => out.push(ThrowOrigin {
+                    kind: ThrowKind::MethodCall { receiver: recv, method },
+                    span: to_span(mc.span()),
+                    guards: snapshot(),
+                }),
+                _ => out.push(ThrowOrigin { kind: ThrowKind::Taint, span: to_span(mc.span()), guards: snapshot() }),
+            }
+        }
+        Node::NullSafeMethodCall(mc) => {
+            match (effect_recv_of_object(mc.object), method_name_of(&mc.method)) {
+                (Some(recv), Some(method)) => out.push(ThrowOrigin {
+                    kind: ThrowKind::MethodCall { receiver: recv, method },
+                    span: to_span(mc.span()),
+                    guards: snapshot(),
+                }),
+                _ => out.push(ThrowOrigin { kind: ThrowKind::Taint, span: to_span(mc.span()), guards: snapshot() }),
+            }
+        }
+        Node::StaticMethodCall(sc) => {
+            match (effect_recv_of_class(sc.class), method_name_of(&sc.method)) {
+                (Some(recv), Some(method)) => out.push(ThrowOrigin {
+                    kind: ThrowKind::MethodCall { receiver: recv, method },
+                    span: to_span(sc.span()),
+                    guards: snapshot(),
+                }),
+                _ => out.push(ThrowOrigin { kind: ThrowKind::Taint, span: to_span(sc.span()), guards: snapshot() }),
+            }
+        }
+        // Nested scopes are their own concern — do not descend.
+        Node::Function(_)
+        | Node::Closure(_)
+        | Node::ArrowFunction(_)
+        | Node::AnonymousClass(_)
+        | Node::Class(_)
+        | Node::Interface(_)
+        | Node::Trait(_)
+        | Node::Enum(_) => return,
+        _ => {}
+    }
+    for child in node.children() {
+        scan_throw_origins(&child, guards, catch_scope, out);
+    }
+}
+
+/// Lower a `catch (A|B $e)` clause to its caught classes plus bound variable
+/// (ADR-0040). A caught-type member that is not a plain class name marks the
+/// clause `has_unresolvable` (→ absorption `Maybe`).
+fn lower_catch_clause(c: &mago_syntax::cst::TryCatchClause<'_>) -> CatchClause {
+    let mut classes = Vec::new();
+    let mut has_unresolvable = false;
+    lower_catch_hint(&c.hint, &mut classes, &mut has_unresolvable);
+    let var = c.variable.as_ref().map(|v| strip_dollar(bytes_to_string(v.name)));
+    CatchClause { classes, var, has_unresolvable }
+}
+
+/// Flatten a catch type hint (a plain class or a `|`-union of them) into class
+/// [`NameRef`]s; any non-identifier member sets `unresolvable`.
+fn lower_catch_hint(hint: &Hint<'_>, classes: &mut Vec<NameRef>, unresolvable: &mut bool) {
+    match hint {
+        Hint::Identifier(id) => classes.push(name_ref(id)),
+        Hint::Union(u) => {
+            lower_catch_hint(u.left, classes, unresolvable);
+            lower_catch_hint(u.right, classes, unresolvable);
+        }
+        Hint::Parenthesized(p) => lower_catch_hint(p.hint, classes, unresolvable),
+        _ => *unresolvable = true,
     }
 }
 

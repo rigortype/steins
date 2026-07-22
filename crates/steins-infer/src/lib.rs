@@ -32,10 +32,10 @@ use steins_sidecar::{FoldArg, FoldResult, FoldValue, Sidecar};
 use steins_syntax::CallExpr;
 use steins_syntax::Span;
 use steins_syntax::{
-    ArgValue, ArrayKey, Callee, ClassDecl, CmpOp, CondExpr, CondOperand, EffectEnvelope,
-    EffectOrigin, EffectRecv, FunctionDecl, MethodDecl, NameRef, NativeType, NormKey, Param,
-    Receiver, RefKind, ScalarType, Scope, ScopeOwner, SourceTree, StaticClass, Stmt, StmtKind,
-    TypeMember, Visibility, normalize_array,
+    ArgValue, ArrayKey, Callee, CatchClause, ClassDecl, CmpOp, CondExpr, CondOperand,
+    EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, MethodDecl, NameRef, NativeType,
+    NormKey, Param, Receiver, RefKind, ScalarType, Scope, ScopeOwner, SourceTree, StaticClass,
+    Stmt, StmtKind, ThrowKind, ThrowOrigin, TypeMember, Visibility, normalize_array,
 };
 
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, ShapeKey, StringLit, TypeKind as PKind};
@@ -83,6 +83,19 @@ pub use steins_domain::Certainty;
 /// `#[\Steins\Effect(...)]` label that is not in the label registry
 /// ([`steins_catalog::is_known_label`]) — a typo or an unregistered private label.
 pub const UNKNOWN_LABEL_ID: &str = "effect.unknown-label";
+
+/// The registry id for the `@throws` envelope check (ADR-0040/0007): a **checked**
+/// exception that **provably escapes** (`Yes`) a function/method whose docblock
+/// declares `@throws`, and is a subclass of **none** of the declared classes. Only
+/// proven escapes report; `Maybe`-escape and unknown-hierarchy stay silent (the
+/// consumer-inverted safe side of ADR-0040).
+pub const THROW_UNDECLARED_ID: &str = "throw.undeclared";
+
+/// The registry id for the Liskov throw-widening check (ADR-0033/0040 rule 4): an
+/// override/implementation whose declared `@throws` names a checked class that is
+/// a subclass of none of the parent method's declared `@throws` classes. Fires
+/// only when **both** sides declare `@throws`; `Maybe` resolution stays silent.
+pub const THROW_LISKOV_ID: &str = "throw.liskov-widened";
 
 /// The maximum depth of interprocedural argument-binding descent (Feature B).
 ///
@@ -582,6 +595,9 @@ fn check_units(units: &[FileUnit], index: &Index, folder: &mut dyn Folder) -> Ve
     // --- Effects pass (ADR-0005), computed once over the whole project. ------
     out.extend(effect_diagnostics(units, index));
 
+    // --- Throw system (ADR-0040/0007): `@throws` envelope + Liskov. ----------
+    out.extend(throw_diagnostics(units, index));
+
     dedup(&mut out);
     out
 }
@@ -600,6 +616,9 @@ fn dedup(out: &mut Vec<Diagnostic>) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FactKind {
     Effects { labels: Vec<String>, exhaustive: bool },
+    /// The inferred throw set (ADR-0040): the classes a function/method can raise
+    /// that escape it, with a shared `…?` taint marker when non-exhaustive.
+    Throws { classes: Vec<String>, exhaustive: bool },
     Value { var: String, rendered: String },
     ExactClass { var: String, class: String },
     Finding { id: &'static str },
@@ -623,6 +642,13 @@ impl LineFact {
                     parts.push("…?".to_owned());
                 }
                 format!("effects: {{{}}}", parts.join(", "))
+            }
+            FactKind::Throws { classes, exhaustive } => {
+                let mut parts = classes.clone();
+                if !*exhaustive {
+                    parts.push("…?".to_owned());
+                }
+                format!("throws: {{{}}}", parts.join(", "))
             }
             FactKind::Value { var, rendered } => format!("${var} = {rendered}"),
             FactKind::ExactClass { var, class } => format!("${var}: {class} (exact)"),
@@ -687,12 +713,22 @@ fn annotate_units(
 ) -> Vec<LineFact> {
     let mut facts: Vec<LineFact> = Vec::new();
 
-    // 1. Effects on each declaration line in the target file.
+    // 1. Effects (and throws) on each declaration line in the target file.
     for s in effect_summary_units(units, index, target) {
+        let throws_present = !s.throws.is_empty() || !s.throws_exhaustive;
         facts.push(LineFact {
             line: s.line,
             kind: FactKind::Effects { labels: s.labels, exhaustive: s.exhaustive },
         });
+        // Throws print on the same line, after effects, only when non-empty
+        // (or tainted) — one color, one spelling (ADR-0006): throws are their
+        // own margin fact, never an effect label.
+        if throws_present {
+            facts.push(LineFact {
+                line: s.line,
+                kind: FactKind::Throws { classes: s.throws, exhaustive: s.throws_exhaustive },
+            });
+        }
     }
 
     // 2. Value / exact-class facts from the propagation walk of the target file.
@@ -881,6 +917,10 @@ pub struct EffectSummary {
     pub line: u32,
     pub labels: Vec<String>,
     pub exhaustive: bool,
+    /// The inferred escaping throw classes (ADR-0040), sorted; empty when none.
+    pub throws: Vec<String>,
+    /// Whether the throw set is exhaustive (no dynamic/unresolved taint).
+    pub throws_exhaustive: bool,
 }
 
 /// The proven effect set of every concrete function/method in a single file
@@ -901,6 +941,7 @@ pub fn effect_summary(
 #[must_use]
 fn effect_summary_units(units: &[FileUnit], index: &Index, target: usize) -> Vec<EffectSummary> {
     let effects = compute_effects(units, index);
+    let throws = compute_throws(units, index);
     let tree = units[target].tree;
     let sorted_labels = |sym: &Sym| -> Vec<String> {
         let mut labels: Vec<String> = effects
@@ -913,6 +954,18 @@ fn effect_summary_units(units: &[FileUnit], index: &Index, target: usize) -> Vec
         labels
     };
     let exhaustive = |sym: &Sym| effects.get(sym).is_none_or(|e| e.exhaustive);
+    // Escaping throw classes (Yes or Maybe escape) as compact simple names.
+    let throw_classes = |sym: &Sym| -> Vec<String> {
+        let mut cs: Vec<String> = throws
+            .get(sym)
+            .into_iter()
+            .flat_map(|t| t.facts.keys().map(|f| last_segment(&f.class).to_owned()))
+            .collect();
+        cs.sort();
+        cs.dedup();
+        cs
+    };
+    let throws_exhaustive = |sym: &Sym| throws.get(sym).is_none_or(|t| t.exhaustive);
 
     let mut out = Vec::new();
     for f in tree.functions() {
@@ -922,6 +975,8 @@ fn effect_summary_units(units: &[FileUnit], index: &Index, target: usize) -> Vec
             line: tree.position(f.span.start).line,
             labels: sorted_labels(&sym),
             exhaustive: exhaustive(&sym),
+            throws: throw_classes(&sym),
+            throws_exhaustive: throws_exhaustive(&sym),
         });
     }
     for c in tree.classes() {
@@ -935,6 +990,8 @@ fn effect_summary_units(units: &[FileUnit], index: &Index, target: usize) -> Vec
                 line: tree.position(m.span.start).line,
                 labels: sorted_labels(&sym),
                 exhaustive: exhaustive(&sym),
+                throws: throw_classes(&sym),
+                throws_exhaustive: throws_exhaustive(&sym),
             });
         }
     }
@@ -1158,6 +1215,470 @@ fn resolve_effect_edge(
         }
     }
     Some(Sym::Method(r.declaring_class.fqn.clone(), r.method.name.clone()))
+}
+
+// ---------------------------------------------------------------------------
+// Throw system (ADR-0040 damming / ADR-0007 checked accounting). Runs alongside
+// the effect fixpoint over the same resolved call graph: `throws(f) = escaping
+// own-throws(f) ∪ ⋃ filter(throws(callee), caller-guards)`, monotone to a
+// fixpoint, with a throw-exhaustiveness bit tainted by dynamic/unresolved calls
+// and opaque throws (mirroring effects).
+// ---------------------------------------------------------------------------
+
+/// One throw fact a unit can raise, with the provenance a `via` message needs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ThrowFact {
+    /// The thrown class, resolved to an FQN in its origin file's context.
+    class: String,
+    /// Display for the throwing construct (`new RuntimeException`, `intdiv()`).
+    origin: String,
+    /// The file the origin lives in (for cross-file position/provenance).
+    origin_file: usize,
+    /// The origin construct's span start in `origin_file`.
+    offset: u32,
+    line: u32,
+    path: String,
+}
+
+/// A unit's throw fixpoint result: the set of throws that **escape** it (each
+/// with an escape [`Certainty`] — only `Yes`/`Maybe` are stored; `No`/absorbed
+/// throws never enter), plus whether the set is exhaustive (ADR-0040).
+#[derive(Debug, Clone, Default)]
+struct ThrowSet {
+    facts: HashMap<ThrowFact, Certainty>,
+    exhaustive: bool,
+}
+
+/// `sub <: super` through the project inheritance chain **and** the builtin
+/// exception table (ADR-0040), as a [`Certainty`]: `Yes` when the chain reaches
+/// `super`; `No` when the chain is fully known (terminates at a project root or a
+/// builtin root like `Throwable`) without reaching it; `Maybe` when the chain
+/// leaves both the project and the builtin table (an unknown external class —
+/// the FP-safe middle).
+fn throw_subtype(cx: &Cx, sub_fqn: &str, sup_fqn: &str) -> Certainty {
+    let sup = sup_fqn.trim_start_matches('\\');
+    let mut cur = sub_fqn.trim_start_matches('\\').to_owned();
+    let mut seen: HashSet<String> = HashSet::new();
+    loop {
+        if cur.eq_ignore_ascii_case(sup) {
+            return Certainty::Yes;
+        }
+        if !seen.insert(cur.to_ascii_lowercase()) {
+            return Certainty::Maybe; // cycle → give up
+        }
+        if let Some((file, cd)) = cx.find_class(&cur) {
+            match &cd.parent {
+                Some(pref) => cur = cx.units[file].tree.resolve_class_fqn(pref),
+                None => return Certainty::No, // known project root, no match
+            }
+        } else if let Some(parent) = steins_catalog::builtin_exception_parent(&cur) {
+            cur = parent.to_owned();
+        } else if cur.eq_ignore_ascii_case("Throwable") {
+            return Certainty::No; // known builtin root, no match
+        } else {
+            return Certainty::Maybe; // unknown external class — chain incomplete
+        }
+    }
+}
+
+/// Whether a thrown `class` is **checked** for envelope purposes (ADR-0007):
+/// `No` (unchecked) for the `Error` / `LogicException` families, `Yes` when
+/// provably neither, `Maybe` when the hierarchy is unknown (checked-but-Maybe —
+/// envelope-silent, exhaustiveness-tainting).
+fn throw_checked(cx: &Cx, class: &str) -> Certainty {
+    let unchecked = throw_subtype(cx, class, "Error").or(throw_subtype(cx, class, "LogicException"));
+    match unchecked {
+        Certainty::Yes => Certainty::No,
+        Certainty::No => Certainty::Yes,
+        Certainty::Maybe => Certainty::Maybe,
+    }
+}
+
+/// Whether one catch `clause` absorbs a thrown `sub` class (ADR-0040): `Yes` when
+/// a caught member is provably a supertype; `Maybe` when a member might be (chain
+/// leaves known territory) or the clause has an unnameable caught member; `No`
+/// when no member can catch it.
+fn clause_absorbs(cx: &Cx, sub: &str, clause: &CatchClause) -> Certainty {
+    let mut r = if clause.has_unresolvable { Certainty::Maybe } else { Certainty::No };
+    for cref in &clause.classes {
+        let d = cx.class_fqn(cref);
+        r = r.or(throw_subtype(cx, sub, &d));
+        if r == Certainty::Yes {
+            return Certainty::Yes;
+        }
+    }
+    r
+}
+
+/// The escape [`Certainty`] of a `Yes`-arriving throw of `sub` past an ordered
+/// (innermost-first) guard stack: `No` once a guard provably absorbs it; `Maybe`
+/// if a guard might; else `Yes` (ADR-0040 damming, envelope-consumer side).
+fn escape_through_guards(cx: &Cx, sub: &str, guards: &[Vec<CatchClause>]) -> Certainty {
+    let mut maybe = false;
+    for guard in guards {
+        let mut absorb = Certainty::No;
+        for clause in guard {
+            absorb = absorb.or(clause_absorbs(cx, sub, clause));
+            if absorb == Certainty::Yes {
+                break;
+            }
+        }
+        match absorb {
+            Certainty::Yes => return Certainty::No,
+            Certainty::Maybe => maybe = true,
+            Certainty::No => {}
+        }
+    }
+    if maybe { Certainty::Maybe } else { Certainty::Yes }
+}
+
+/// The unified throw fixpoint for every function/method in the project, keyed by
+/// [`Sym`] (shared with the effect graph).
+fn compute_throws(units: &[FileUnit], index: &Index) -> HashMap<Sym, ThrowSet> {
+    struct Unit<'a> {
+        sym: Sym,
+        file: usize,
+        class_fqn: Option<String>,
+        origins: &'a [ThrowOrigin],
+    }
+    let mut ulist: Vec<Unit> = Vec::new();
+    for (fi, u) in units.iter().enumerate() {
+        for f in u.tree.functions() {
+            ulist.push(Unit { sym: Sym::Func(f.fqn.clone()), file: fi, class_fqn: None, origins: &f.throw_origins });
+        }
+        for c in u.tree.classes() {
+            for m in &c.methods {
+                ulist.push(Unit {
+                    sym: Sym::Method(c.fqn.clone(), m.name.clone()),
+                    file: fi,
+                    class_fqn: Some(c.fqn.clone()),
+                    origins: &m.throw_origins,
+                });
+            }
+        }
+    }
+
+    type Edge = (Sym, Vec<Vec<CatchClause>>);
+    let mut direct: HashMap<Sym, HashMap<ThrowFact, Certainty>> = HashMap::new();
+    let mut edges: HashMap<Sym, Vec<Edge>> = HashMap::new();
+    let mut ex: HashMap<Sym, bool> = HashMap::new();
+    let mut sym_file: HashMap<Sym, usize> = HashMap::new();
+
+    for unit in &ulist {
+        let cx = Cx::new(units, index, unit.file);
+        sym_file.insert(unit.sym.clone(), unit.file);
+        let d = direct.entry(unit.sym.clone()).or_default();
+        let e = edges.entry(unit.sym.clone()).or_default();
+        let x = ex.entry(unit.sym.clone()).or_insert(true);
+        let add_fact = |class: String, origin: String, span: steins_syntax::Span, cert: Certainty, d: &mut HashMap<ThrowFact, Certainty>| {
+            if cert == Certainty::No {
+                return;
+            }
+            let line = cx.tree().position(span.start).line;
+            let fact = ThrowFact {
+                class,
+                origin,
+                origin_file: unit.file,
+                offset: span.start,
+                line,
+                path: cx.path().to_owned(),
+            };
+            let slot = d.entry(fact).or_insert(Certainty::No);
+            *slot = slot.or(cert);
+        };
+        for origin in unit.origins {
+            match &origin.kind {
+                ThrowKind::New(class) => {
+                    let d_fqn = cx.class_fqn(class);
+                    let esc = escape_through_guards(&cx, &d_fqn, &origin.guards);
+                    let display = format!("new {}", last_segment(&d_fqn));
+                    add_fact(d_fqn, display, origin.span, esc, d);
+                }
+                ThrowKind::Rethrow { caught, has_unresolvable } => {
+                    for cref in caught {
+                        let d_fqn = cx.class_fqn(cref);
+                        let esc = escape_through_guards(&cx, &d_fqn, &origin.guards);
+                        let display = format!("rethrow {}", last_segment(&d_fqn));
+                        add_fact(d_fqn, display, origin.span, esc, d);
+                    }
+                    if *has_unresolvable {
+                        *x = false;
+                    }
+                }
+                ThrowKind::Call(name) => match cx.resolve_function(name) {
+                    FnResolution::User(site) => {
+                        e.push((Sym::Func(cx.fn_decl(site).fqn.clone()), origin.guards.clone()));
+                    }
+                    FnResolution::Builtin => {
+                        if let Some(classes) = steins_catalog::builtin_throws(name.simple()) {
+                            for c in classes {
+                                let esc = escape_through_guards(&cx, c, &origin.guards);
+                                add_fact((*c).to_owned(), format!("{}()", name.simple()), origin.span, esc, d);
+                            }
+                        }
+                    }
+                    FnResolution::Unknown => *x = false,
+                },
+                ThrowKind::MethodCall { receiver, method } => {
+                    match resolve_effect_edge(&cx, unit.class_fqn.as_deref(), receiver, method) {
+                        Some(callee) => e.push((callee, origin.guards.clone())),
+                        None => *x = false,
+                    }
+                }
+                ThrowKind::Taint => *x = false,
+            }
+        }
+    }
+
+    // Fixpoint: propagate callee throws through each call site's guards.
+    let syms: Vec<Sym> = ulist.iter().map(|u| u.sym.clone()).collect();
+    let mut facts = direct;
+    loop {
+        let mut changed = false;
+        for sym in &syms {
+            let file = sym_file[sym];
+            let cx = Cx::new(units, index, file);
+            let sym_edges: Vec<Edge> = edges.get(sym).cloned().unwrap_or_default();
+            for (callee, guards) in &sym_edges {
+                if ex.get(callee).copied() == Some(false) && ex.get(sym).copied() != Some(false) {
+                    ex.insert(sym.clone(), false);
+                    changed = true;
+                }
+                let callee_facts: Vec<(ThrowFact, Certainty)> =
+                    facts.get(callee).into_iter().flatten().map(|(f, c)| (f.clone(), *c)).collect();
+                for (fact, cert) in callee_facts {
+                    let esc = escape_through_guards(&cx, &fact.class, guards);
+                    let nc = cert.and(esc);
+                    if nc == Certainty::No {
+                        continue;
+                    }
+                    let slot = facts.entry(sym.clone()).or_default();
+                    match slot.get(&fact).copied() {
+                        Some(prev) => {
+                            let merged = prev.or(nc);
+                            if merged != prev {
+                                slot.insert(fact, merged);
+                                changed = true;
+                            }
+                        }
+                        None => {
+                            slot.insert(fact, nc);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    syms.into_iter()
+        .map(|s| {
+            let f = facts.remove(&s).unwrap_or_default();
+            let x = ex.get(&s).copied().unwrap_or(true);
+            (s, ThrowSet { facts: f, exhaustive: x })
+        })
+        .collect()
+}
+
+/// The last `\`-segment of an FQN (for a compact throw display).
+fn last_segment(fqn: &str) -> &str {
+    fqn.rsplit('\\').next().unwrap_or(fqn)
+}
+
+/// The declared `@throws` class FQNs of one docblock, resolved in the file's
+/// context at `offset` (ADR-0040 envelope opt-in). Accepts bare class names and
+/// unions of them; anything else contributes nothing. Empty ⇒ no envelope.
+fn declared_throws(cx: &Cx, offset: u32, docblock: Option<&str>) -> Vec<String> {
+    let Some(text) = docblock else { return Vec::new() };
+    let mut out = Vec::new();
+    for tag in scan_docblock(text) {
+        if tag.kind != TagKind::Throws {
+            continue;
+        }
+        let Some(ty) = parse_tag_type(&tag.type_text) else { continue };
+        collect_class_names(&ty, &mut |name| {
+            let fqn = resolve_class_name(cx, offset, name);
+            if !out.contains(&fqn) {
+                out.push(fqn);
+            }
+        });
+    }
+    out
+}
+
+/// Resolve a phpdoc class name to an FQN in the current file at `offset`.
+fn resolve_class_name(cx: &Cx, offset: u32, name: &str) -> String {
+    let raw = name.trim_start_matches('\\').to_owned();
+    let kind = if name.starts_with('\\') {
+        RefKind::FullyQualified
+    } else if raw.contains('\\') {
+        RefKind::Qualified
+    } else {
+        RefKind::Unqualified
+    };
+    cx.tree().resolve_class_fqn(&NameRef { raw, kind, offset })
+}
+
+/// Visit each plain class-name identifier in a phpdoc type that is a class name
+/// or a union of class names; non-class members are ignored (no envelope).
+fn collect_class_names(ty: &PType, f: &mut dyn FnMut(&str)) {
+    match &ty.kind {
+        PKind::Identifier(name) => f(name),
+        PKind::Union { types, .. } => {
+            for t in types {
+                collect_class_names(t, f);
+            }
+        }
+        PKind::Nullable(inner) => collect_class_names(inner, f),
+        _ => {}
+    }
+}
+
+/// The whole-project throw diagnostics: `throw.undeclared` envelope escapes and
+/// `throw.liskov-widened` overrides (ADR-0040/0033).
+fn throw_diagnostics(units: &[FileUnit], index: &Index) -> Vec<Diagnostic> {
+    // Fast path: nothing to check without a `@throws` tag anywhere.
+    let any_throws = units.iter().any(|u| {
+        let has = |d: Option<&str>| d.is_some_and(|t| t.contains("@throws") || t.contains("throws"));
+        u.tree.functions().iter().any(|f| f.docblock.as_deref().is_some_and(|t| t.contains("throws")))
+            || u.tree.classes().iter().any(|c| {
+                c.methods.iter().any(|m| has(m.docblock.as_deref()))
+            })
+    });
+    if !any_throws {
+        return Vec::new();
+    }
+
+    let throws = compute_throws(units, index);
+    let mut out = Vec::new();
+    for fi in 0..units.len() {
+        let cx = Cx::new(units, index, fi);
+        for f in cx.tree().functions() {
+            let declared = declared_throws(&cx, f.span.start, f.docblock.as_deref());
+            if declared.is_empty() {
+                continue;
+            }
+            let sym = Sym::Func(f.fqn.clone());
+            emit_undeclared(&mut out, &cx, index, units, &sym, &f.name, &declared, &throws);
+        }
+        for c in cx.tree().classes() {
+            for m in &c.methods {
+                let declared = declared_throws(&cx, m.span.start, m.docblock.as_deref());
+                let display = format!("{}::{}", c.name, m.name);
+                if !declared.is_empty() {
+                    let sym = Sym::Method(c.fqn.clone(), m.name.clone());
+                    emit_undeclared(&mut out, &cx, index, units, &sym, &display, &declared, &throws);
+                }
+                // Liskov: an override/impl whose declared throws widen the parent's.
+                emit_liskov(&mut out, &cx, c, m, &declared);
+            }
+        }
+    }
+    out
+}
+
+/// Emit `throw.undeclared` for each checked, proven-escaping throw of `sym` not
+/// covered by its declared `@throws` set.
+#[allow(clippy::too_many_arguments)]
+fn emit_undeclared(
+    out: &mut Vec<Diagnostic>,
+    cx: &Cx,
+    index: &Index,
+    units: &[FileUnit],
+    sym: &Sym,
+    display: &str,
+    declared: &[String],
+    throws: &HashMap<Sym, ThrowSet>,
+) {
+    let Some(set) = throws.get(sym) else { return };
+    let declared_list = declared.iter().map(|d| last_segment(d).to_owned()).collect::<Vec<_>>().join("|");
+    let mut facts: Vec<(&ThrowFact, Certainty)> = set.facts.iter().map(|(f, c)| (f, *c)).collect();
+    facts.sort_by(|a, b| (a.0.origin_file, a.0.offset, &a.0.class).cmp(&(b.0.origin_file, b.0.offset, &b.0.class)));
+    for (fact, cert) in facts {
+        if cert != Certainty::Yes {
+            continue; // Maybe-escape is silent (ADR-0040)
+        }
+        if throw_checked(cx, &fact.class) != Certainty::Yes {
+            continue; // unchecked or unknown-hierarchy — never counts
+        }
+        // Covered iff a subclass of some declared class (Yes through chain).
+        let covered = declared.iter().any(|d| throw_subtype(cx, &fact.class, d) != Certainty::No);
+        if covered {
+            continue; // Yes (covered) or Maybe (unproven) → silent
+        }
+        let ocx = Cx::new(units, index, fact.origin_file);
+        let pos = ocx.tree().position(fact.offset);
+        let simple = last_segment(&fact.class);
+        let msg = format!(
+            "{simple} can escape {display}() but is not declared (@throws {declared_list}) — proven escape"
+        );
+        out.push(Diagnostic {
+            id: THROW_UNDECLARED_ID,
+            path: fact.path.clone(),
+            line: pos.line,
+            column: pos.column,
+            message: msg,
+        });
+    }
+}
+
+/// Emit `throw.liskov-widened` when a child method's declared `@throws` names a
+/// checked class covered by none of the nearest ancestor method's declared
+/// `@throws` (both sides must declare; `Maybe` resolution is silent).
+fn emit_liskov(out: &mut Vec<Diagnostic>, cx: &Cx, class: &ClassDecl, m: &MethodDecl, child_declared: &[String]) {
+    if child_declared.is_empty() {
+        return;
+    }
+    let Some((parent_display, parent_declared)) = nearest_parent_throws(cx, class, &m.name) else {
+        return;
+    };
+    if parent_declared.is_empty() {
+        return;
+    }
+    let parent_list = parent_declared.iter().map(|d| last_segment(d)).collect::<Vec<_>>().join("|");
+    for c in child_declared {
+        // A child-declared class widens iff it is a subclass of NO parent class.
+        let covered = parent_declared.iter().any(|p| throw_subtype(cx, c, p) != Certainty::No);
+        if covered {
+            continue;
+        }
+        let pos = cx.tree().position(m.span.start);
+        let msg = format!(
+            "{} is declared thrown by {}::{}() but {parent_display}::{}() (its abstraction) declares only @throws {parent_list} — Liskov widening",
+            last_segment(c), class.name, m.name, m.name
+        );
+        out.push(Diagnostic {
+            id: THROW_LISKOV_ID,
+            path: cx.path().to_owned(),
+            line: pos.line,
+            column: pos.column,
+            message: msg,
+        });
+    }
+}
+
+/// The nearest ancestor class (walking `extends`) that declares a method named
+/// `method` with a `@throws` docblock, returning its class name and declared set.
+fn nearest_parent_throws(cx: &Cx, class: &ClassDecl, method: &str) -> Option<(String, Vec<String>)> {
+    let mut cur = class.parent.as_ref().map(|p| cx.class_fqn(p))?;
+    let mut seen: HashSet<String> = HashSet::new();
+    loop {
+        if !seen.insert(cur.to_ascii_lowercase()) {
+            return None;
+        }
+        let (file, cd) = cx.find_class(&cur)?;
+        if let Some(pm) = cd.methods.iter().find(|pm| pm.name.eq_ignore_ascii_case(method)) {
+            let pcx = Cx::new(cx.units, cx.index, file);
+            let declared = declared_throws(&pcx, pm.span.start, pm.docblock.as_deref());
+            if !declared.is_empty() {
+                return Some((cd.name.clone(), declared));
+            }
+        }
+        cur = cx.units[file].tree.resolve_class_fqn(cd.parent.as_ref()?);
+    }
 }
 
 // ---------------------------------------------------------------------------
