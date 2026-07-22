@@ -30,20 +30,54 @@ pub struct DocTag {
     /// the plain `@param`/`@return` for the same target, so consumers should prefer
     /// a prefixed tag when both are present (ADR-0029).
     pub prefixed: bool,
+    /// `true` when this is an assertion-family tag whose target is a property /
+    /// `$this->…` position rather than a plain parameter. Such targets are parsed
+    /// (so the tag is recognized, not treated as malformed) but carry **no
+    /// exemption effect** in the current slice — a docblock property assertion says
+    /// nothing about the acceptability of a call-site *argument*. See
+    /// [`crate::docblock::TagKind::Assert`].
+    pub assert_property_target: bool,
 }
 
-/// The four envelope-bearing tag kinds Steins reads.
+/// The three shapes of an assertion tag (PHPStan/Psalm `@…-assert` family).
+///
+/// An assertion tag narrows a target *after* the annotated function returns
+/// (`Always`) or conditionally on its boolean result (`IfTrue`/`IfFalse`). The
+/// declared type is therefore a **post-condition**, never a precondition — see
+/// [`TagKind::Assert`] for why that matters to envelope checking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssertKind {
+    /// `@phpstan-assert T $x` — holds unconditionally on normal return.
+    Always,
+    /// `@phpstan-assert-if-true T $x` — holds when the function returns `true`.
+    IfTrue,
+    /// `@phpstan-assert-if-false T $x` — holds when the function returns `false`.
+    IfFalse,
+}
+
+/// The envelope-bearing tag kinds Steins reads, plus the assertion family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TagKind {
     Param,
     Return,
     Var,
     Throws,
+    /// An assertion tag (`@phpstan-assert` / `@psalm-assert` and the
+    /// `-if-true`/`-if-false` variants). `negated` records the leading `!` of the
+    /// negated form (`@phpstan-assert !T $x`). The declared type and target reuse
+    /// the shared [`DocTag`] fields (`type_text` / `var_name`), so consumers read
+    /// an assertion just like a `@param`; only these two facets are assert-specific.
+    ///
+    /// Only the **prefixed** spellings are recognized — PHPStan has no bare
+    /// `@assert` tag, so an unprefixed `@assert` is not a tag at all.
+    Assert { kind: AssertKind, negated: bool },
 }
 
 impl TagKind {
     /// Recognize a tag name, returning its kind and whether it carried a
-    /// `@phpstan-`/`@psalm-` precedence prefix.
+    /// `@phpstan-`/`@psalm-` precedence prefix. Assert kinds are provisional here:
+    /// `negated` is set to `false` and fixed up by [`scan_line`] once the type text
+    /// (which carries the leading `!`) has been isolated.
     fn from_name(name: &str) -> Option<(TagKind, bool)> {
         let (bare, prefixed) = match name
             .strip_prefix("phpstan-")
@@ -57,13 +91,26 @@ impl TagKind {
             "return" => TagKind::Return,
             "var" => TagKind::Var,
             "throws" => TagKind::Throws,
+            // Assertion tags exist only in prefixed form (`@phpstan-assert`,
+            // `@psalm-assert`); a bare `@assert` is not a recognized tag.
+            "assert" if prefixed => TagKind::Assert { kind: AssertKind::Always, negated: false },
+            "assert-if-true" if prefixed => {
+                TagKind::Assert { kind: AssertKind::IfTrue, negated: false }
+            }
+            "assert-if-false" if prefixed => {
+                TagKind::Assert { kind: AssertKind::IfFalse, negated: false }
+            }
             _ => return None,
         };
         Some((kind, prefixed))
     }
 
     fn carries_var_name(self) -> bool {
-        matches!(self, TagKind::Param | TagKind::Var)
+        matches!(self, TagKind::Param | TagKind::Var | TagKind::Assert { .. })
+    }
+
+    fn is_assert(self) -> bool {
+        matches!(self, TagKind::Assert { .. })
     }
 }
 
@@ -116,12 +163,26 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
         j += 1;
     }
     let name = &text[name_start..j];
-    let (kind, prefixed) = TagKind::from_name(name)?;
+    let (mut kind, prefixed) = TagKind::from_name(name)?;
 
     // The remainder of the line, minus a trailing ` */` and whitespace.
     let mut rest_start = j;
     while rest_start < line_end && (bytes[rest_start] == b' ' || bytes[rest_start] == b'\t') {
         rest_start += 1;
+    }
+
+    // Assertion negation: `@phpstan-assert !T $x` puts a `!` in front of the type.
+    // Strip it (and any following whitespace) off the type region and record the
+    // negation flag on the tag kind, so the shared type/var extraction below sees a
+    // clean type just like a `@param`.
+    if kind.is_assert() && rest_start < line_end && bytes[rest_start] == b'!' {
+        rest_start += 1;
+        while rest_start < line_end && (bytes[rest_start] == b' ' || bytes[rest_start] == b'\t') {
+            rest_start += 1;
+        }
+        if let TagKind::Assert { negated, .. } = &mut kind {
+            *negated = true;
+        }
     }
     let mut rest_end = line_end;
     // Trim trailing `*/` and whitespace.
@@ -144,11 +205,23 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
         return None;
     }
 
-    // For @param/@var, split the type off at the first `$variable`.
+    // For @param/@var/@…-assert, split the type off at the first `$variable`.
+    let mut assert_property_target = false;
     let (type_start, type_end, var_name) = if kind.carries_var_name() {
         match find_variable(bytes, rest_start, rest_end) {
             Some(var_pos) => {
                 let var_name = read_variable(text, bytes, var_pos, rest_end);
+                // A `$this->prop` / `$obj->prop` / `$this::$static` assertion target
+                // is a *property*, not a parameter: recognized (not malformed) but
+                // exemption-inert this slice. Detect the accessor right after the
+                // variable name, and treat a bare `$this` target likewise.
+                let var_end = var_pos + var_name.len();
+                let followed_by_accessor = bytes[var_end..rest_end.min(bytes.len())]
+                    .starts_with(b"->")
+                    || bytes[var_end..rest_end.min(bytes.len())].starts_with(b"::");
+                if kind.is_assert() && (followed_by_accessor || var_name == "$this") {
+                    assert_property_target = true;
+                }
                 // Type is everything before the variable (trimmed).
                 let mut te = var_pos;
                 while te > rest_start && (bytes[te - 1] == b' ' || bytes[te - 1] == b'\t') {
@@ -160,7 +233,10 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
                 }
                 (rest_start, te, Some(var_name))
             }
-            // No `$var`: treat the whole remainder as the type (e.g. bare `@var T`).
+            // No `$var`. For `@param`/`@var` this is a bare `@var T`: the whole
+            // remainder is the type. An assertion tag with no target is malformed —
+            // ignore just this tag.
+            None if kind.is_assert() => return None,
             None => (rest_start, rest_end, None),
         }
     } else {
@@ -173,6 +249,7 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
         type_span: Span::new(type_start as u32, type_end as u32),
         var_name,
         prefixed,
+        assert_property_target,
     })
 }
 
@@ -246,5 +323,81 @@ mod tests {
     fn ignores_untyped_tags() {
         let doc = "/**\n * @deprecated do not use\n * @see Foo::bar\n */";
         assert!(scan_docblock(doc).is_empty());
+    }
+
+    // ---- Assertion family (@phpstan-assert / @psalm-assert) ----
+
+    #[test]
+    fn scans_plain_assert() {
+        let doc = "/** @phpstan-assert int $x */";
+        let tags = scan_docblock(doc);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].kind, TagKind::Assert { kind: AssertKind::Always, negated: false });
+        assert_eq!(tags[0].type_text, "int");
+        assert_eq!(tags[0].var_name.as_deref(), Some("$x"));
+        assert!(tags[0].prefixed);
+        assert!(!tags[0].assert_property_target);
+    }
+
+    #[test]
+    fn scans_if_true_and_if_false() {
+        let doc = "/**\n * @phpstan-assert-if-true non-empty-string $s\n \
+                   * @phpstan-assert-if-false null $s\n */";
+        let tags = scan_docblock(doc);
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0].kind, TagKind::Assert { kind: AssertKind::IfTrue, negated: false });
+        assert_eq!(tags[0].type_text, "non-empty-string");
+        assert_eq!(tags[1].kind, TagKind::Assert { kind: AssertKind::IfFalse, negated: false });
+        assert_eq!(tags[1].var_name.as_deref(), Some("$s"));
+    }
+
+    #[test]
+    fn scans_negated_assert() {
+        let doc = "/** @phpstan-assert !null $value */";
+        let tags = scan_docblock(doc);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].kind, TagKind::Assert { kind: AssertKind::Always, negated: true });
+        // The `!` is stripped off the type text.
+        assert_eq!(tags[0].type_text, "null");
+        assert_eq!(tags[0].var_name.as_deref(), Some("$value"));
+    }
+
+    #[test]
+    fn psalm_prefix_is_accepted() {
+        let doc = "/** @psalm-assert-if-true Foo $x */";
+        let tags = scan_docblock(doc);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].kind, TagKind::Assert { kind: AssertKind::IfTrue, negated: false });
+        assert!(tags[0].prefixed);
+    }
+
+    #[test]
+    fn bare_assert_is_not_a_tag() {
+        // PHPStan has no unprefixed `@assert`; it must not be recognized.
+        let doc = "/** @assert int $x */";
+        assert!(scan_docblock(doc).is_empty());
+    }
+
+    #[test]
+    fn property_target_is_marked_unsupported() {
+        for doc in [
+            "/** @phpstan-assert int $this->prop */",
+            "/** @phpstan-assert int $obj->field */",
+            "/** @phpstan-assert int $this */",
+        ] {
+            let tags = scan_docblock(doc);
+            assert_eq!(tags.len(), 1, "{doc}");
+            assert!(tags[0].kind.is_assert());
+            assert!(tags[0].assert_property_target, "{doc} should be a property target");
+        }
+    }
+
+    #[test]
+    fn malformed_assert_is_ignored_only() {
+        // No target variable → this tag is dropped, siblings survive.
+        let doc = "/**\n * @phpstan-assert int\n * @param string $s\n */";
+        let tags = scan_docblock(doc);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].kind, TagKind::Param);
     }
 }
