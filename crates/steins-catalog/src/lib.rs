@@ -217,6 +217,70 @@ pub fn nearest_label(label: &str) -> Option<&'static str> {
         .map(|(_, k)| k)
 }
 
+/// The **builtin SPL/engine exception hierarchy** (ADR-0040): the parent of a
+/// standard PHP `Throwable` class not defined in any project, keyed by its global
+/// simple name (no namespace, case-insensitive). Project classes chain into this
+/// table through their `extends` once their own chain leaves the project index.
+///
+/// The tree is the standard SPL/engine one: `Throwable` is the root interface;
+/// `Exception` and `Error` implement it; the SPL logic/runtime families and the
+/// engine `Error` family descend as PHP defines them. A name absent here (and not
+/// a project class) has an **unknown** parent — the caller keeps the chain result
+/// at `Maybe`, never `No` (the FP-safe side per ADR-0040).
+///
+/// Names are returned without a leading backslash; matching is case-insensitive.
+/// A name carrying a namespace separator is never a builtin (returns `None`).
+#[must_use]
+pub fn builtin_exception_parent(name: &str) -> Option<&'static str> {
+    let bare = name.trim_start_matches('\\');
+    if bare.contains('\\') {
+        return None; // namespaced — not a global engine/SPL class
+    }
+    Some(match bare.to_ascii_lowercase().as_str() {
+        // Root interface.
+        "throwable" => return None,
+        // The two roots implement Throwable.
+        "exception" | "error" => "Throwable",
+        // ── Exception family ──────────────────────────────────────────────
+        "errorexception" => "Exception",
+        "jsonexception" => "Exception",
+        "runtimeexception" => "Exception",
+        "logicexception" => "Exception",
+        // RuntimeException descendants.
+        "outofboundsexception" | "overflowexception" | "rangeexception"
+        | "underflowexception" | "unexpectedvalueexception" => "RuntimeException",
+        // LogicException descendants.
+        "badfunctioncallexception" | "domainexception" | "invalidargumentexception"
+        | "lengthexception" | "outofrangeexception" => "LogicException",
+        "badmethodcallexception" => "BadFunctionCallException",
+        // ── Error family ──────────────────────────────────────────────────
+        "typeerror" | "valueerror" | "arithmeticerror" | "unhandledmatcherror"
+        | "assertionerror" | "compileerror" | "fibererror" => "Error",
+        "divisionbyzeroerror" => "ArithmeticError",
+        "parseerror" => "CompileError",
+        _ => return None,
+    })
+}
+
+/// The **measured/curated** throw facts of a builtin call (ADR-0040 source #2):
+/// the global class names a builtin provably raises. Deliberately tiny and
+/// hand-verified — an uncatalogued builtin simply contributes no throw fact
+/// (widen, never a false positive). Empty slice = catalogued-but-throwless.
+#[must_use]
+pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
+    const DIV0: &[&str] = &["DivisionByZeroError"];
+    const JSON: &[&str] = &["JsonException"];
+    match name.to_ascii_lowercase().as_str() {
+        "intdiv" => Some(DIV0),
+        // `json_decode`/`json_encode` throw JsonException only under
+        // JSON_THROW_ON_ERROR; without flag inspection this stays uncatalogued
+        // (widen) rather than manufacture a throw — listed for when flag
+        // inspection lands.
+        "json_decode_throwing" | "json_encode_throwing" => Some(JSON),
+        _ => None,
+    }
+}
+
 /// Plain Levenshtein edit distance (small strings, so the quadratic DP is fine).
 fn levenshtein(a: &str, b: &str) -> usize {
     let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
@@ -293,6 +357,37 @@ mod tests {
         for name in ["some_unknown_fn", "curl_exec", "mysqli_query"] {
             assert_eq!(effect_labels(name), None, "{name} must be uncatalogued");
         }
+    }
+
+    #[test]
+    fn builtin_exception_tree_shape() {
+        use super::builtin_exception_parent as p;
+        assert_eq!(p("Throwable"), None);
+        assert_eq!(p("Exception"), Some("Throwable"));
+        assert_eq!(p("Error"), Some("Throwable"));
+        assert_eq!(p("RuntimeException"), Some("Exception"));
+        assert_eq!(p("LogicException"), Some("Exception"));
+        assert_eq!(p("JsonException"), Some("Exception"));
+        assert_eq!(p("ErrorException"), Some("Exception"));
+        assert_eq!(p("InvalidArgumentException"), Some("LogicException"));
+        assert_eq!(p("OutOfRangeException"), Some("LogicException"));
+        assert_eq!(p("OutOfBoundsException"), Some("RuntimeException"));
+        assert_eq!(p("TypeError"), Some("Error"));
+        assert_eq!(p("DivisionByZeroError"), Some("ArithmeticError"));
+        assert_eq!(p("ArithmeticError"), Some("Error"));
+        assert_eq!(p("UnhandledMatchError"), Some("Error"));
+        // Leading backslash tolerated; case-insensitive.
+        assert_eq!(p("\\runtimeexception"), Some("Exception"));
+        // Namespaced names are never the builtin.
+        assert_eq!(p("App\\Exception"), None);
+        // Unknown class → unknown parent.
+        assert_eq!(p("MyCustomThing"), None);
+    }
+
+    #[test]
+    fn builtin_throws_curated() {
+        assert_eq!(super::builtin_throws("intdiv"), Some(&["DivisionByZeroError"][..]));
+        assert_eq!(super::builtin_throws("strlen"), None);
     }
 
     #[test]

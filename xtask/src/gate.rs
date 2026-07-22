@@ -41,6 +41,13 @@ struct PackageReport {
     /// they are **measurement mode** (ADR-0030 relation #1 landing) — reported and
     /// counted per package but excluded from the red/green verdict.
     phpdoc: Vec<Diagnostic>,
+    /// `throw.*` findings (ADR-0040/0007), held in the same **measurement mode**
+    /// as `phpdoc.*`: they are contract-layer claims about the code's own
+    /// `@throws` documentation (an undeclared checked throw, a Liskov-widened
+    /// override), never runtime-breakage — TRUE ones abound in working code
+    /// (the checked-exception volume ADR-0007 keeps quiet by default), so they
+    /// gate only as a per-package increase tripwire.
+    throws: Vec<Diagnostic>,
     /// Vendor findings suppressed from the gate count (local projects only).
     vendor_suppressed: usize,
     elapsed: Duration,
@@ -49,6 +56,11 @@ struct PackageReport {
 /// Whether a diagnostic is one of the measurement-mode `phpdoc.*` ids.
 fn is_phpdoc(d: &Diagnostic) -> bool {
     d.id.starts_with("phpdoc.")
+}
+
+/// Whether a diagnostic is one of the measurement-mode `throw.*` ids (ADR-0040).
+fn is_throw(d: &Diagnostic) -> bool {
+    d.id.starts_with("throw.")
 }
 
 /// Permanent gate policy for `phpdoc.*` findings (ADR-0030 relation #1).
@@ -105,6 +117,36 @@ fn phpdoc_expected(name: &str) -> usize {
     PHPDOC_EXPECTED.iter().find(|(n, _)| *n == name).map_or(0, |(_, c)| *c)
 }
 
+/// Permanent gate policy for `throw.*` findings (ADR-0040/0007), identical in
+/// spirit to [`PHPDOC_EXPECTED`]: an undeclared **checked** throw escaping a
+/// written `@throws`, or a Liskov-widened override, is a real contract-layer
+/// claim about the code's own documentation — not a runtime-breakage proof. Such
+/// findings legitimately saturate working code (the very checked-exception volume
+/// ADR-0007 keeps quiet by default), so they are held in measurement mode and
+/// gate only as a per-package **increase** tripwire.
+///
+/// Seeded from the first landing run of the throw system (ADR-0040). The
+/// monorepo count is dominated by two pervasive base exceptions
+/// (an assertion-failure base and the app-wide base exception) thrown far below `@throws`-
+/// annotated controllers — all TRUE undeclared-checked-throw findings, none
+/// runtime breakage. Update an entry consciously when a checker change moves a
+/// count. Packages absent expect **zero**.
+const THROW_EXPECTED: &[(&str, usize)] = &[
+    ("composer/composer", 93),
+    ("sebastianbergmann/phpunit", 80),
+    ("guzzle/guzzle", 2),
+    ("Seldaek/monolog", 7),
+    ("symfony/console", 12),
+    ("thephpleague/flysystem", 3),
+    ("nikic/PHP-Parser", 2),
+    ("pxxxx-monorepo", 35614),
+];
+
+/// The expected `throw.*` count for a package/local-project name (0 if untabled).
+fn throw_expected(name: &str) -> usize {
+    THROW_EXPECTED.iter().find(|(n, _)| *n == name).map_or(0, |(_, c)| *c)
+}
+
 /// Entry point for `cargo xtask fp-gate`. Returns `true` if the gate is GREEN
 /// (no diagnostics on clean code).
 pub fn run() -> Result<bool, String> {
@@ -143,21 +185,23 @@ pub fn run() -> Result<bool, String> {
         locals.par_iter().map(analyze_local).collect();
     local_reports.sort_by(|a, b| a.name.cmp(&b.name));
 
-    // `phpdoc.*` regression tripwire (see `PHPDOC_EXPECTED`): a package is a
-    // regression iff its count *exceeds* its seeded expectation.
+    // Measurement-mode regression tripwires (see `PHPDOC_EXPECTED` /
+    // `THROW_EXPECTED`): a package regresses iff a count *exceeds* its seeded
+    // expectation. Both `phpdoc.*` and `throw.*` are contract-layer.
     let regressions = phpdoc_regressions(&reports, &local_reports);
+    let throw_regressions = measurement_regressions(&reports, &local_reports, "throw", |r| r.throws.len(), throw_expected);
 
-    print_report(&reports, &local_reports, &regressions);
+    print_report(&reports, &local_reports, &regressions, &throw_regressions);
 
-    // RED on any counted finding — package diagnostics plus local *non-vendor*
-    // diagnostics (vendor findings never gate; ADR-0015) — OR on any `phpdoc.*`
-    // count that has regressed past its expected baseline.
+    // RED on any counted proof-layer finding — package diagnostics plus local
+    // *non-vendor* diagnostics (vendor findings never gate; ADR-0015) — OR on any
+    // measurement-mode count that has regressed past its expected baseline.
     let total_diags: usize = reports.iter().map(|r| r.diagnostics.len()).sum::<usize>()
         + local_reports.iter().map(|r| r.diagnostics.len()).sum::<usize>();
-    Ok(total_diags == 0 && regressions.is_empty())
+    Ok(total_diags == 0 && regressions.is_empty() && throw_regressions.is_empty())
 }
 
-/// One `phpdoc.*` regression: a package whose count exceeds its seeded expectation.
+/// One measurement-mode regression: a package whose count exceeds its expectation.
 struct PhpdocRegression {
     name: String,
     actual: usize,
@@ -170,17 +214,25 @@ fn phpdoc_regressions(
     reports: &[PackageReport],
     local_reports: &[PackageReport],
 ) -> Vec<PhpdocRegression> {
+    measurement_regressions(reports, local_reports, "phpdoc", |r| r.phpdoc.len(), phpdoc_expected)
+}
+
+/// Generic measurement-mode tripwire: report packages whose `count` exceeds their
+/// `expected` baseline (the only direction that gates red).
+fn measurement_regressions(
+    reports: &[PackageReport],
+    local_reports: &[PackageReport],
+    _family: &str,
+    count: impl Fn(&PackageReport) -> usize,
+    expected: impl Fn(&str) -> usize,
+) -> Vec<PhpdocRegression> {
     reports
         .iter()
         .chain(local_reports.iter())
         .filter_map(|r| {
-            let actual = r.phpdoc.len();
-            let expected = phpdoc_expected(&r.name);
-            (actual > expected).then(|| PhpdocRegression {
-                name: r.name.clone(),
-                actual,
-                expected,
-            })
+            let actual = count(r);
+            let exp = expected(&r.name);
+            (actual > exp).then(|| PhpdocRegression { name: r.name.clone(), actual, expected: exp })
         })
         .collect()
 }
@@ -224,10 +276,11 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
     let mut diags: Vec<Diagnostic> = FOLDER.with(|f| check_project(&db, project, &mut *f.borrow_mut()));
     diags.retain(|d| !parse_err_set.contains(d.path.as_str()));
     diags.sort_by(|a, b| (&a.path, a.line, a.column).cmp(&(&b.path, b.line, b.column)));
-    // Measurement-mode split: `phpdoc.*` findings are reported + counted but do
-    // not gate this run.
+    // Measurement-mode split: `phpdoc.*` and `throw.*` findings are reported +
+    // counted but do not gate this run (only their increase tripwire does).
     let phpdoc: Vec<Diagnostic> = diags.iter().filter(|d| is_phpdoc(d)).cloned().collect();
-    diags.retain(|d| !is_phpdoc(d));
+    let throws: Vec<Diagnostic> = diags.iter().filter(|d| is_throw(d)).cloned().collect();
+    diags.retain(|d| !is_phpdoc(d) && !is_throw(d));
 
     PackageReport {
         name: name.to_owned(),
@@ -237,6 +290,7 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
         parse_error_files,
         diagnostics: diags,
         phpdoc,
+        throws,
         vendor_suppressed: 0,
         elapsed: start.elapsed(),
     }
@@ -285,7 +339,8 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
     diags.sort_by(|a, b| (&a.path, a.line, a.column).cmp(&(&b.path, b.line, b.column)));
     // Measurement-mode split (first-party only; vendor already removed above).
     let phpdoc: Vec<Diagnostic> = diags.iter().filter(|d| is_phpdoc(d)).cloned().collect();
-    diags.retain(|d| !is_phpdoc(d));
+    let throws: Vec<Diagnostic> = diags.iter().filter(|d| is_throw(d)).cloned().collect();
+    diags.retain(|d| !is_phpdoc(d) && !is_throw(d));
 
     PackageReport {
         name: proj.name.clone(),
@@ -295,6 +350,7 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
         parse_error_files,
         diagnostics: diags,
         phpdoc,
+        throws,
         vendor_suppressed,
         elapsed: start.elapsed(),
     }
@@ -304,6 +360,7 @@ fn print_report(
     reports: &[PackageReport],
     local_reports: &[PackageReport],
     regressions: &[PhpdocRegression],
+    throw_regressions: &[PhpdocRegression],
 ) {
     println!("\n=== fp-gate: per-package findings ===\n");
     if !local_reports.is_empty() {
@@ -393,6 +450,50 @@ fn print_report(
         }
     }
 
+    // Measurement-mode summary for the `throw.*` contract-layer ids (ADR-0040):
+    // counted per package against `THROW_EXPECTED`, gating only on INCREASE. The
+    // volume is far larger than `phpdoc.*` (checked-exception saturation), so only
+    // per-package counts and a small sample print — never every finding.
+    let total_throw: usize = reports.iter().chain(local_reports.iter()).map(|r| r.throws.len()).sum();
+    let total_throw_expected: usize = THROW_EXPECTED.iter().map(|(_, c)| *c).sum();
+    println!("\n=== throw.* measurement mode (contract layer — gates only on INCREASE) ===\n");
+    for r in reports.iter().chain(local_reports.iter()) {
+        let expected = throw_expected(&r.name);
+        if r.throws.is_empty() && expected == 0 {
+            continue;
+        }
+        let label = if r.local { format!("{} (local)", r.name) } else { r.name.clone() };
+        let (undecl, liskov) = r.throws.iter().fold((0usize, 0usize), |(u, l), d| match d.id {
+            "throw.undeclared" => (u + 1, l),
+            "throw.liskov-widened" => (u, l + 1),
+            _ => (u, l),
+        });
+        let actual = r.throws.len();
+        let marker = match actual.cmp(&expected) {
+            std::cmp::Ordering::Greater => "  ⬆ REGRESSION (exceeds expected)",
+            std::cmp::Ordering::Less => "  ⬇ improved (below expected — update baseline when intentional)",
+            std::cmp::Ordering::Equal => "",
+        };
+        println!(
+            "{label} — {actual} throw.* ({undecl} undeclared, {liskov} liskov) [expected {expected}]{marker}"
+        );
+        // A tiny sample so a regression is triageable without a 35k-line dump.
+        if actual > expected {
+            for d in r.throws.iter().take(3) {
+                println!("    THROW {}:{}:{} [{}] {}", d.path, d.line, d.column, d.id, d.message);
+            }
+        }
+    }
+    println!("throw.* TOTAL: {total_throw} (expected baseline {total_throw_expected})");
+    if throw_regressions.is_empty() {
+        println!("throw.* tripwire: OK — no package exceeds its expected baseline.");
+    } else {
+        println!("throw.* tripwire: TRIPPED — the following packages regressed:");
+        for reg in throw_regressions {
+            println!("    {} — {} > expected {}", reg.name, reg.actual, reg.expected);
+        }
+    }
+
     // Summary table: packages and local projects share one table; local rows are
     // marked `(local)`.
     let rows = || reports.iter().chain(local_reports.iter());
@@ -428,11 +529,12 @@ fn print_report(
     println!("{:<name_w$}  {:>6}  {:>12}  {:>11}  {:>8.2}", "TOTAL", tf, tp, td, ttime);
 
     println!();
-    match (td == 0, regressions.is_empty()) {
+    let measurement_ok = regressions.is_empty() && throw_regressions.is_empty();
+    match (td == 0, measurement_ok) {
         (true, true) => {
             println!(
                 "GATE GREEN — no proof-layer diagnostics on clean-parsing corpus code, \
-                 and no phpdoc.* regression past the expected baseline."
+                 and no phpdoc.*/throw.* regression past the expected baselines."
             );
         }
         (false, _) => {
@@ -442,11 +544,11 @@ fn print_report(
         }
         (true, false) => {
             println!(
-                "GATE RED — {} package(s) regressed past their expected phpdoc.* baseline \
-                 (see the tripwire list above). Investigate the new finding(s); update \
-                 PHPDOC_EXPECTED in xtask/src/gate.rs only once the change is understood \
-                 and intended.",
-                regressions.len()
+                "GATE RED — {} package(s) regressed past their expected phpdoc.*/throw.* baseline \
+                 (see the tripwire lists above). Investigate the new finding(s); update \
+                 PHPDOC_EXPECTED / THROW_EXPECTED in xtask/src/gate.rs only once the change is \
+                 understood and intended.",
+                regressions.len() + throw_regressions.len()
             );
         }
     }
