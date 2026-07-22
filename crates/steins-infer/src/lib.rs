@@ -1,26 +1,33 @@
-//! The inference engine for the first vertical slice.
+//! The inference engine — now whole-project (cross-file) resolution.
 //!
-//! It implements exactly one proof-layer diagnostic (ADR-0002, held to the
-//! zero-false-positive bar): [`ID`] = `type.argument-mismatch` (ADR-0022 kebab
-//! `family.rule`). A call to a **user-defined function in the same file** that
-//! passes a **literal** argument which **provably** raises a runtime `TypeError`
-//! under PHP 8.1+ semantics (ADR-0011), honoring the calling file's
-//! `declare(strict_types=1)`, is flagged. Everything not provable is silent.
+//! It implements the proof-layer diagnostics (ADR-0002, held to the
+//! zero-false-positive bar): [`ID`] = `type.argument-mismatch`, plus the
+//! effect-envelope checks. A call to a **user-defined function or method
+//! resolved anywhere in the project** that passes a **literal** argument which
+//! **provably** raises a runtime `TypeError` under PHP 8.1+ semantics
+//! (ADR-0011), honoring the calling file's `declare(strict_types=1)`, is
+//! flagged. Everything not provable is silent.
 //!
-//! The whole thing is a salsa tracked query ([`diagnostics`]) built on
-//! `steins-db`'s [`parse`] / [`function_index`] queries (ADR-0009), so it is a
-//! memoized fact, not a batch pass.
+//! Name resolution follows PHP semantics conservatively (ADR-0001): fully-
+//! qualified / qualified / unqualified names resolve against a project symbol
+//! index ([`steins_db::project_index`]) plus the builtin catalog, with
+//! `use` imports and the namespace/global fallback applied. Ambiguous symbols
+//! (duplicate FQN, builtin-shadowing) are never resolved — silent.
+//!
+//! The single-file entry points ([`check`], [`check_file`], [`diagnostics`])
+//! run over a one-file project, so every same-file soundness guard keeps
+//! working unchanged; [`check_project`] / [`annotate_project`] run over many.
 
 use std::collections::{HashMap, HashSet};
 
-use steins_db::{Db, SourceFile, function_index, parse};
+use steins_db::{Db, DeclSite, Project, ProjectIndex, Resolve, SourceFile, parse, project_index};
 use steins_sidecar::{FoldArg, FoldResult, FoldValue, Sidecar};
+use steins_syntax::CallExpr;
 use steins_syntax::{
     ArgValue, Callee, ClassDecl, EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, MethodDecl,
-    Param, ParamType, Receiver, ScalarType, Scope, ScopeOwner, SourceTree, StaticClass, StmtKind,
-    Visibility,
+    NameRef, Param, ParamType, Receiver, RefKind, ScalarType, Scope, ScopeOwner, SourceTree,
+    StaticClass, StmtKind, Visibility,
 };
-use steins_syntax::CallExpr;
 
 /// The registry id for the `type.argument-mismatch` proof-layer check (ADR-0022).
 pub const ID: &str = "type.argument-mismatch";
@@ -38,11 +45,11 @@ pub const UNKNOWN_LABEL_ID: &str = "effect.unknown-label";
 /// The maximum depth of interprocedural argument-binding descent (Feature B).
 ///
 /// ADR-0009 makes inference cutoffs a first-class budget discipline: a chain of
-/// same-file calls propagating a literal is followed at most this many frames
-/// deep, after which the descent stops with **no** diagnostic (a cutoff names
-/// itself as silence, never a manufactured finding). Direct and indirect
-/// recursion is caught earlier by the on-stack binding set; this bound guards
-/// against merely long, non-cyclic chains.
+/// calls propagating a literal is followed at most this many frames deep, after
+/// which the descent stops with **no** diagnostic (a cutoff names itself as
+/// silence, never a manufactured finding). Direct and indirect recursion is
+/// caught earlier by the on-stack binding set; this bound guards against merely
+/// long, non-cyclic chains.
 pub const MAX_BINDING_DEPTH: usize = 8;
 
 /// The one-line coverage-posture notice (ADR-0004): printed to stderr when a run
@@ -51,21 +58,10 @@ pub const SOUND_SUBSET_NOTICE: &str =
     "note: running as sound subset (no PHP sidecar) — findings that require executing PHP are omitted";
 
 // ---------------------------------------------------------------------------
-// Folding seam (ADR-0004 / ADR-0024).
-//
-// Folding — executing a real pure builtin over literal args to learn its value
-// — is the one part of the check that may perform IPC and is therefore NOT a
-// salsa query (queries must stay deterministic and side-effect-free). The
-// engine expresses its need for a fold through this trait; who answers it (a
-// real PHP sidecar, a test mock, or nobody) is the caller's choice.
+// Folding seam (ADR-0004 / ADR-0024). Unchanged from the per-file slice.
 // ---------------------------------------------------------------------------
 
 /// Something that can fold a builtin call to a concrete literal value.
-///
-/// The engine only calls [`Folder::fold`] after it has already checked the
-/// gate: `name` is not a same-file user function, [`steins_catalog::foldable`]
-/// is `true`, and every element of `args` is a literal ([`ArgValue::is_literal`]).
-/// A `None` return means "widen" (unknown) — always the safe side.
 pub trait Folder {
     /// Fold `name(args...)` to a literal, or `None` to widen.
     fn fold(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue>;
@@ -83,25 +79,17 @@ impl Folder for NoFold {
 
 /// A [`Folder`] backed by a lazily-spawned PHP [`Sidecar`], with a per-run memo
 /// so a repeated `(name, args)` never triggers duplicate IPC.
-///
-/// Lifecycle (ADR-0004): the sidecar is spawned only when the first foldable
-/// call is actually encountered. If spawning fails (or `--no-php` disabled it),
-/// every fold widens and the sound-subset notice is emitted once to stderr.
 pub struct SidecarFolder {
     sidecar: Option<Sidecar>,
     memo: HashMap<(String, Vec<ArgValue>), Option<ArgValue>>,
-    /// Explicitly disabled (`--no-php`): never spawn, never fold.
     disabled: bool,
-    /// A prior spawn attempt failed: stop trying.
     spawn_failed: bool,
-    /// The sound-subset notice has already been printed.
     notified: bool,
 }
 
 impl SidecarFolder {
     /// Create a folder. `disabled` (the CLI's `--no-php`) makes it a permanent
-    /// no-op that never spawns PHP. When disabled by flag the caller is expected
-    /// to have already surfaced the coverage posture, so this folder stays quiet.
+    /// no-op that never spawns PHP.
     #[must_use]
     pub fn new(disabled: bool) -> Self {
         Self {
@@ -114,7 +102,7 @@ impl SidecarFolder {
     }
 
     /// Create an enabled folder that will emit the sound-subset notice itself if
-    /// it cannot spawn PHP. Used by callers that do not print the notice up front.
+    /// it cannot spawn PHP.
     #[must_use]
     pub fn enabled() -> Self {
         Self { notified: false, ..Self::new(false) }
@@ -150,14 +138,11 @@ impl Folder for SidecarFolder {
         }
         let folded = self.ensure_sidecar().and_then(|sc| {
             let fargs: Vec<FoldArg> = args.iter().filter_map(arg_to_fold).collect();
-            // Defensive: every arg is a literal by the engine's gate, so the
-            // count must match; a mismatch means a non-literal slipped in.
             if fargs.len() != args.len() {
                 return None;
             }
             match sc.fold(name, &fargs) {
                 FoldResult::Value(v) => fold_value_to_arg(&v),
-                // Throw / widen both mean "no known literal" for now.
                 FoldResult::Throw { .. } | FoldResult::Widen { .. } => None,
             }
         });
@@ -178,8 +163,7 @@ fn arg_to_fold(arg: &ArgValue) -> Option<FoldArg> {
     }
 }
 
-/// Convert a folded value back to a literal [`ArgValue`]. Array results have no
-/// literal in the IR yet, so they widen.
+/// Convert a folded value back to a literal [`ArgValue`].
 fn fold_value_to_arg(value: &FoldValue) -> Option<ArgValue> {
     Some(match value {
         FoldValue::Int(v) => ArgValue::Int(*v),
@@ -201,60 +185,309 @@ pub struct Diagnostic {
     pub message: String,
 }
 
-/// The proof-layer diagnostics for one file, as a memoized salsa query.
-///
-/// This query computes the **sound subset**: it uses [`NoFold`], so it never
-/// executes PHP and stays a pure, deterministic salsa fact. Runs that want
-/// folding (CLI, gate) call [`check_file`] instead — same salsa inputs
-/// ([`parse`], [`function_index`]), but the folding check runs *outside* the
-/// query graph.
+// ---------------------------------------------------------------------------
+// The project view: the files analyzed together and their symbol index.
+// ---------------------------------------------------------------------------
+
+/// One file in the analyzed project: its diagnostic path and its lowered tree.
+/// The tree owns everything else the analysis needs (functions, classes,
+/// scopes, positions, namespace contexts).
+#[derive(Clone, Copy)]
+pub struct FileUnit<'a> {
+    pub path: &'a str,
+    pub tree: &'a SourceTree,
+}
+
+/// A declaration's position within the project view: the file's index in the
+/// [`FileUnit`] slice, and the declaration's index in that file's list.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Site {
+    file: usize,
+    index: usize,
+}
+
+/// The outcome of resolving an FQN against the in-memory project index.
+#[derive(Clone, Copy)]
+enum Res {
+    Absent,
+    Unique(Site),
+    Ambiguous,
+}
+
+/// The project symbol index in the analysis's own `Site` terms (a file *index*,
+/// not a salsa handle). Built either directly from the [`FileUnit`] slice
+/// (single-file / test paths) or adapted from the salsa [`ProjectIndex`]
+/// (the db-backed [`check_project`] path — so the tracked query is the authority
+/// on incrementality, ADR-0009).
+#[derive(Default)]
+struct Index {
+    functions: HashMap<String, Site>,
+    ambiguous_functions: HashSet<String>,
+    classes: HashMap<String, Site>,
+    ambiguous_classes: HashSet<String>,
+    fn_by_simple: HashMap<String, Vec<Site>>,
+}
+
+impl Index {
+    /// Build the index straight from the file units (mirrors the db query).
+    fn from_units(units: &[FileUnit]) -> Self {
+        let mut idx = Index::default();
+        for (fi, u) in units.iter().enumerate() {
+            for (i, f) in u.tree.functions().iter().enumerate() {
+                let site = Site { file: fi, index: i };
+                idx.fn_by_simple.entry(f.name.to_ascii_lowercase()).or_default().push(site);
+                insert_unique(&mut idx.functions, &mut idx.ambiguous_functions, &f.fqn, site);
+            }
+            for (i, c) in u.tree.classes().iter().enumerate() {
+                let site = Site { file: fi, index: i };
+                insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &c.fqn, site);
+            }
+        }
+        idx
+    }
+
+    /// Adapt the salsa [`ProjectIndex`] to `Site`s, using `pos` to map each
+    /// [`SourceFile`] to its position in the (identically ordered) unit slice.
+    fn from_db(db_index: &ProjectIndex, pos: &HashMap<SourceFile, usize>) -> Self {
+        let site = |ds: &DeclSite| Site { file: pos[&ds.file], index: ds.index };
+        let mut idx = Index::default();
+        for (fqn, ds) in db_index.functions() {
+            idx.functions.insert(fqn.clone(), site(ds));
+        }
+        for (fqn, ds) in db_index.classes() {
+            idx.classes.insert(fqn.clone(), site(ds));
+        }
+        idx.ambiguous_functions = db_index.ambiguous_functions().clone();
+        idx.ambiguous_classes = db_index.ambiguous_classes().clone();
+        for (simple, sites) in db_index.fn_by_simple() {
+            idx.fn_by_simple.insert(simple.clone(), sites.iter().map(site).collect());
+        }
+        idx
+    }
+
+    fn resolve_function(&self, fqn: &str) -> Res {
+        let key = fqn.to_ascii_lowercase();
+        if self.ambiguous_functions.contains(&key) {
+            Res::Ambiguous
+        } else {
+            self.functions.get(&key).copied().map_or(Res::Absent, Res::Unique)
+        }
+    }
+
+    fn resolve_class(&self, fqn: &str) -> Res {
+        let key = fqn.to_ascii_lowercase();
+        if self.ambiguous_classes.contains(&key) {
+            Res::Ambiguous
+        } else {
+            self.classes.get(&key).copied().map_or(Res::Absent, Res::Unique)
+        }
+    }
+
+    fn unique_fn_by_simple(&self, simple: &str) -> Option<Site> {
+        match self.fn_by_simple.get(&simple.to_ascii_lowercase()) {
+            Some(sites) if sites.len() == 1 => Some(sites[0]),
+            _ => None,
+        }
+    }
+
+    fn has_simple_function(&self, simple: &str) -> bool {
+        self.fn_by_simple.contains_key(&simple.to_ascii_lowercase())
+    }
+}
+
+/// Whether a function-call reference resolves to a **user** function defined in
+/// the project (as opposed to a builtin, or an unresolved/ambiguous name),
+/// applying PHP name resolution against the salsa [`ProjectIndex`]. Public so
+/// tooling (`xtask freq`) can exclude userland cross-file calls from the
+/// builtin-frequency ranking. A name is "userland" here if the project uniquely
+/// defines it at any candidate FQN the reference could denote — the
+/// builtin-shadow nuance the checker applies is irrelevant to this question.
+#[must_use]
+pub fn resolves_to_user_function(index: &ProjectIndex, tree: &SourceTree, r: &NameRef) -> bool {
+    let unique = |fqn: &str| matches!(index.resolve_function(fqn), Resolve::Unique(_));
+    match r.kind {
+        RefKind::FullyQualified => unique(&r.raw.to_ascii_lowercase()),
+        RefKind::Qualified => {
+            let ctx = tree.ctx_at(r.offset);
+            let first_len = r.raw.find('\\').unwrap_or(r.raw.len());
+            let first = &r.raw[..first_len];
+            let fqn = if let Some(t) = ctx.class_imports.get(&first.to_ascii_lowercase()) {
+                format!("{t}{}", &r.raw[first_len..])
+            } else if ctx.namespace.is_empty() {
+                r.raw.clone()
+            } else {
+                format!("{}\\{}", ctx.namespace, r.raw)
+            };
+            unique(&fqn)
+        }
+        RefKind::Unqualified => {
+            let ctx = tree.ctx_at(r.offset);
+            let name = r.raw.to_ascii_lowercase();
+            if let Some(t) = ctx.fn_imports.get(&name) {
+                return unique(&t.to_ascii_lowercase());
+            }
+            if !ctx.namespace.is_empty() && unique(&format!("{}\\{}", ctx.namespace, name)) {
+                return true;
+            }
+            unique(&name)
+        }
+    }
+}
+
+/// Insert `fqn → site`, demoting to ambiguity on any collision.
+fn insert_unique(
+    map: &mut HashMap<String, Site>,
+    ambiguous: &mut HashSet<String>,
+    fqn: &str,
+    site: Site,
+) {
+    if ambiguous.contains(fqn) {
+        return;
+    }
+    if map.remove(fqn).is_some() {
+        ambiguous.insert(fqn.to_owned());
+    } else {
+        map.insert(fqn.to_owned(), site);
+    }
+}
+
+/// How an unqualified/qualified/FQ **function** call resolves (ADR-0001).
+enum FnResolution {
+    /// A user function defined in the project (its declaration site).
+    User(Site),
+    /// A catalogued builtin — no user body, but folding/effect labels apply.
+    Builtin,
+    /// Ambiguous or unresolved — skip everything (no check, no fold, no effect
+    /// classification). The silent side.
+    Unknown,
+}
+
+// ---------------------------------------------------------------------------
+// Public entry points.
+// ---------------------------------------------------------------------------
+
+/// The proof-layer diagnostics for one file, as a memoized salsa query (sound
+/// subset — [`NoFold`], no PHP). Analyzes the file as a one-file project.
 #[salsa::tracked]
 pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let tree = parse(db, file);
-    let functions = function_index(db, file);
-    check_with(tree, functions, file.path(db), &mut NoFold)
+    let units = [FileUnit { path: file.path(db), tree }];
+    let index = Index::from_units(&units);
+    check_units(&units, &index, &mut NoFold)
 }
 
-/// The folding-aware check for one file, run **outside** salsa (ADR-0004).
-///
-/// Salsa determinism is preserved by construction: `parse` and `function_index`
-/// remain memoized queries, but the folding pass — which may perform IPC — is a
-/// plain function taking `&mut dyn Folder`. Pass a [`SidecarFolder`] for the
-/// default posture, or [`NoFold`] for the sound subset.
+/// The folding-aware check for one file (run **outside** salsa; ADR-0004),
+/// analyzed as a one-file project.
 #[must_use]
 pub fn check_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec<Diagnostic> {
     let tree = parse(db, file);
-    let functions = function_index(db, file);
-    check_with(tree, functions, file.path(db), folder)
+    let units = [FileUnit { path: file.path(db), tree }];
+    let index = Index::from_units(&units);
+    check_units(&units, &index, folder)
 }
 
-/// The pure checking core with no folding — the sound subset. Kept for
-/// unit tests and callers that never execute PHP; equivalent to
-/// [`check_with`] with [`NoFold`].
+/// The folding-aware check for a whole **project** (ADR-0009/0015): every file
+/// in `project` is analyzed as one unit, so cross-file calls, class chains, and
+/// effects resolve. Resolution is driven by the salsa [`project_index`] query.
+#[must_use]
+pub fn check_project(db: &dyn Db, project: Project, folder: &mut dyn Folder) -> Vec<Diagnostic> {
+    let handles: Vec<SourceFile> = project.files(db).to_vec();
+    let units: Vec<FileUnit> =
+        handles.iter().map(|&f| FileUnit { path: f.path(db), tree: parse(db, f) }).collect();
+    let db_index = project_index(db, project);
+    let pos: HashMap<SourceFile, usize> =
+        handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
+    let index = Index::from_db(db_index, &pos);
+    check_units(&units, &index, folder)
+}
+
+/// The pure single-file check (sound subset). Kept for unit tests and callers
+/// that never execute PHP. `functions` is accepted for signature stability; the
+/// tree's own function list is authoritative.
 #[must_use]
 pub fn check(tree: &SourceTree, functions: &[FunctionDecl], path: &str) -> Vec<Diagnostic> {
     check_with(tree, functions, path, &mut NoFold)
+}
+
+/// The folding-aware single-file check core, analyzed as a one-file project.
+#[must_use]
+pub fn check_with(
+    tree: &SourceTree,
+    functions: &[FunctionDecl],
+    path: &str,
+    folder: &mut dyn Folder,
+) -> Vec<Diagnostic> {
+    let _ = functions; // authoritative list comes from `tree.functions()`
+    let units = [FileUnit { path, tree }];
+    let index = Index::from_units(&units);
+    check_units(&units, &index, folder)
+}
+
+/// The project checking core: direct + propagation passes over every file's
+/// calls and scopes, then the one project-wide effects pass.
+fn check_units(units: &[FileUnit], index: &Index, folder: &mut dyn Folder) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+
+    for fi in 0..units.len() {
+        let cx = Cx::new(units, index, fi);
+
+        // --- Direct pass: literal arguments at every function call site. ------
+        for call in cx.tree().calls() {
+            let Some(site) = cx.resolve_user_fn(call) else { continue };
+            let decl = cx.fn_decl(site);
+            for (i, arg) in call.args.iter().enumerate() {
+                let Some(ty) = param_scalar_type(&decl.params, i) else {
+                    if arg_binds_to_variadic(&decl.params, i) {
+                        break;
+                    }
+                    continue;
+                };
+                if !arg.value.is_literal() {
+                    continue;
+                }
+                if is_type_error(cx.strict(), ty, &arg.value) {
+                    out.push(cx.diagnostic(
+                        arg.span.start,
+                        &arg.value,
+                        None,
+                        &decl.name,
+                        &decl.params[i].name,
+                        ty,
+                    ));
+                }
+            }
+        }
+
+        // --- Propagation pass: resolved `$var`/const/folded args + all method /
+        // static / constructor call checking and descent. --------------------
+        for scope in cx.tree().scopes() {
+            analyze_scope(&cx, folder, scope, HashMap::new(), HashMap::new(), None, None, None, &mut out);
+        }
+    }
+
+    // --- Effects pass (ADR-0005), computed once over the whole project. ------
+    out.extend(effect_diagnostics(units, index));
+
+    dedup(&mut out);
+    out
+}
+
+/// Drop exact-duplicate diagnostics, preserving first-occurrence order.
+fn dedup(out: &mut Vec<Diagnostic>) {
+    let mut seen: HashSet<Diagnostic> = HashSet::new();
+    out.retain(|d| seen.insert(d.clone()));
 }
 
 // ---------------------------------------------------------------------------
 // `annotate` facts (ADR-0020): the Rigor-style margin — proven facts only.
 // ---------------------------------------------------------------------------
 
-/// One proven fact the `annotate` margin can print against a source line. The
-/// honesty rule (ADR-0020): every variant is something the analyzer *proved* —
-/// where nothing is known, no fact is produced and the line stays bare.
+/// One proven fact the `annotate` margin can print against a source line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FactKind {
-    /// The inferred effect set on a function/method **declaration** line — the
-    /// same fixpoint the envelope check uses, exposed for every unit. `labels`
-    /// are sorted+deduplicated; `exhaustive` false appends the `…?` marker.
     Effects { labels: Vec<String>, exhaustive: bool },
-    /// A proven post-statement value on an **assignment** line: `$var`'s rendered
-    /// literal (a plain literal, a folded builtin result, or a const-fn return).
     Value { var: String, rendered: String },
-    /// A proven exact class on an assignment line (`$x = new Foo()`).
     ExactClass { var: String, class: String },
-    /// A **call** line that produced a check diagnostic; carries its registry id.
     Finding { id: &'static str },
 }
 
@@ -266,16 +499,13 @@ pub struct LineFact {
 }
 
 impl LineFact {
-    /// The margin body (without the `//=>` prefix or padding), e.g.
-    /// `effects: {io.fs.write, …?}`, `$w = "XY"`, `$x: Foo (exact)`,
-    /// `✗ type.argument-mismatch`.
+    /// The margin body (without the `//=>` prefix or padding).
     #[must_use]
     pub fn body(&self) -> String {
         match &self.kind {
             FactKind::Effects { labels, exhaustive } => {
                 let mut parts = labels.clone();
                 if !*exhaustive {
-                    // Silence names itself: "at least these; not proven complete."
                     parts.push("…?".to_owned());
                 }
                 format!("effects: {{{}}}", parts.join(", "))
@@ -287,18 +517,7 @@ impl LineFact {
     }
 }
 
-/// Compute every proven margin fact for one file (ADR-0020 `annotate`), reusing
-/// the existing analysis machinery — no new inference:
-///
-/// * **effects** on each declaration line come from [`effect_summary`] (the same
-///   fixpoint as the envelope check, now with the exhaustiveness bit);
-/// * **value / exact-class** facts come from re-running the propagation walk
-///   ([`analyze_scope`]) with a fact collector attached, so the recorded value
-///   is exactly the one the checker would trust at that point (folding included,
-///   and correctly absent under a `NoFold`/`--no-php` folder);
-/// * **finding** facts are the [`check_with`] diagnostics, keyed by line.
-///
-/// Facts are returned in line order (stable within a line).
+/// Single-file annotate facts (kept for tests / the no-`--project` CLI path).
 #[must_use]
 pub fn annotate_facts(
     tree: &SourceTree,
@@ -307,22 +526,65 @@ pub fn annotate_facts(
     path: &str,
     folder: &mut dyn Folder,
 ) -> Vec<LineFact> {
+    let _ = (functions, classes);
+    let units = [FileUnit { path, tree }];
+    let index = Index::from_units(&units);
+    annotate_units(&units, &index, 0, folder)
+}
+
+/// Salsa-fed single-file annotate.
+#[must_use]
+pub fn annotate_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec<LineFact> {
+    let tree = parse(db, file);
+    let units = [FileUnit { path: file.path(db), tree }];
+    let index = Index::from_units(&units);
+    annotate_units(&units, &index, 0, folder)
+}
+
+/// Project-aware annotate (ADR-0020, `--project`): compute the margin facts for
+/// `target` while resolving names, classes, and effects against the whole
+/// `project`. Returns facts for the target file only.
+#[must_use]
+pub fn annotate_project(
+    db: &dyn Db,
+    project: Project,
+    target: SourceFile,
+    folder: &mut dyn Folder,
+) -> Vec<LineFact> {
+    let handles: Vec<SourceFile> = project.files(db).to_vec();
+    let units: Vec<FileUnit> =
+        handles.iter().map(|&f| FileUnit { path: f.path(db), tree: parse(db, f) }).collect();
+    let db_index = project_index(db, project);
+    let pos: HashMap<SourceFile, usize> =
+        handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
+    let index = Index::from_db(db_index, &pos);
+    let Some(target_idx) = handles.iter().position(|&f| f == target) else {
+        return Vec::new();
+    };
+    annotate_units(&units, &index, target_idx, folder)
+}
+
+/// Compute the annotate facts for `target` file within a project view.
+fn annotate_units(
+    units: &[FileUnit],
+    index: &Index,
+    target: usize,
+    folder: &mut dyn Folder,
+) -> Vec<LineFact> {
     let mut facts: Vec<LineFact> = Vec::new();
 
-    // 1. Effects on every function/method declaration line.
-    for s in effect_summary(tree, functions, classes) {
+    // 1. Effects on each declaration line in the target file.
+    for s in effect_summary_units(units, index, target) {
         facts.push(LineFact {
             line: s.line,
             kind: FactKind::Effects { labels: s.labels, exhaustive: s.exhaustive },
         });
     }
 
-    // 2. Value / exact-class facts: the propagation walk with a collector. Each
-    // top-level scope is walked once with an empty env (no binding assumptions);
-    // descent bodies pass no collector, so only an assign's own line is recorded.
-    let cx = Cx { tree, functions, classes: tree.classes(), path, strict: tree.has_strict_types() };
-    let mut sink: Vec<Diagnostic> = Vec::new(); // diagnostics come from `check_with` below
-    for scope in tree.scopes() {
+    // 2. Value / exact-class facts from the propagation walk of the target file.
+    let cx = Cx::new(units, index, target);
+    let mut sink: Vec<Diagnostic> = Vec::new();
+    for scope in cx.tree().scopes() {
         analyze_scope(
             &cx,
             folder,
@@ -336,246 +598,129 @@ pub fn annotate_facts(
         );
     }
 
-    // 3. Findings: one marker per check diagnostic, at its line.
-    for d in check_with(tree, functions, path, folder) {
-        facts.push(LineFact { line: d.line, kind: FactKind::Finding { id: d.id } });
+    // 3. Findings on the target file (project-wide check, filtered by path).
+    let target_path = units[target].path;
+    for d in check_units(units, index, folder) {
+        if d.path == target_path {
+            facts.push(LineFact { line: d.line, kind: FactKind::Finding { id: d.id } });
+        }
     }
 
-    // Line order, stable within a line (effects, then values, then findings).
     facts.sort_by_key(|f| f.line);
     facts
 }
 
-/// Salsa-fed convenience over [`annotate_facts`], mirroring [`check_file`]: parse
-/// + index are memoized queries; the fact walk runs outside the query graph.
-#[must_use]
-pub fn annotate_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec<LineFact> {
-    let tree = parse(db, file);
-    let functions = function_index(db, file);
-    annotate_facts(tree, functions, tree.classes(), file.path(db), folder)
-}
-
-/// The checking core (no salsa) — easy to unit-test and to reuse.
-///
-/// Two passes feed the one check. The **direct pass** walks every call site with
-/// a literal argument (unchanged behavior). The **propagation pass** walks each
-/// scope's linear trace and resolves `$var` / constant-function-return / folded
-/// builtin-call arguments to proven values (ADR-0001). The two partition cleanly
-/// by argument kind — literals go to the first, `Var`/`Call` arguments to the
-/// second — so no call site is reported twice. `folder` answers fold requests
-/// raised by `Call` arguments to allowlisted builtins.
-#[must_use]
-pub fn check_with(
-    tree: &SourceTree,
-    functions: &[FunctionDecl],
-    path: &str,
-    folder: &mut dyn Folder,
-) -> Vec<Diagnostic> {
-    let cx = Cx { tree, functions, classes: tree.classes(), path, strict: tree.has_strict_types() };
-    let mut out = Vec::new();
-
-    // --- Direct pass: literal arguments at every function call site. ------
-    for call in tree.calls() {
-        let Some(decl) = resolve_callee(functions, call) else { continue };
-        for (i, arg) in call.args.iter().enumerate() {
-            let Some(ty) = param_scalar_type(&decl.params, i) else {
-                if arg_binds_to_variadic(&decl.params, i) {
-                    break;
-                }
-                continue;
-            };
-            // Only literals here; `Var`/`Call` are the propagation pass's job.
-            if !arg.value.is_literal() {
-                continue;
-            }
-            if is_type_error(cx.strict, ty, &arg.value) {
-                out.push(cx.diagnostic(arg.span.start, &arg.value, None, &decl.name, &decl.params[i].name, ty));
-            }
-        }
-    }
-
-    // --- Propagation pass: resolved `$var` / constant-return / folded args,
-    // plus all method / static / constructor call checking + descent. --------
-    for scope in tree.scopes() {
-        analyze_scope(&cx, folder, scope, HashMap::new(), HashMap::new(), None, None, None, &mut out);
-    }
-
-    // --- Effects pass (ADR-0005): `#[\Steins\Pure]` envelope checking. Needs no
-    // folder/sidecar — it reads only the catalog and CST-derived effect origins.
-    out.extend(effect_diagnostics(tree, functions, tree.classes(), path));
-
-    // Global dedup (Feature B): the same finding can be reached both by a scope's
-    // empty-env walk and by a binding descent into that scope, or by a diamond of
-    // binding paths. Identical `(id, path, line, column, message)` tuples collapse
-    // to one; findings that differ only in binding provenance stay distinct.
-    dedup(&mut out);
-    out
-}
-
-/// Drop exact-duplicate diagnostics, preserving first-occurrence order.
-fn dedup(out: &mut Vec<Diagnostic>) {
-    let mut seen: HashSet<Diagnostic> = HashSet::new();
-    out.retain(|d| seen.insert(d.clone()));
-}
-
 // ---------------------------------------------------------------------------
-// Effects pass (ADR-0005): `#[\Steins\Pure]` envelope checking, proven only.
+// Effects pass (ADR-0005): `#[\Steins\Pure]` envelope checking, project-wide.
 // ---------------------------------------------------------------------------
 
-/// One proven effect a function carries, with the provenance a transitive `via`
-/// message needs. Two effects are the same iff their `(label, origin, line)`
-/// agree, so the fixpoint deduplicates naturally.
+/// One proven effect a unit carries, with the provenance a transitive `via`
+/// message needs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct EffectFinding {
-    /// The effect label (ADR-0018 dot-path), e.g. `nondet.random`, `io.fs.write`.
     label: String,
-    /// The ultimate origin's spelling: a builtin name, or `echo`/`print`/
-    /// `exit`/`die`. Preserved verbatim as effects propagate up call edges, so a
-    /// transitive finding names where the effect truly arises.
     origin: String,
-    /// 1-based line of the ultimate origin (in whichever body defines it).
     line: u32,
+    /// The path of the file the origin lives in, so a transitive `via` message
+    /// can name the other file when the effect arises cross-file.
+    path: String,
 }
 
-/// Effect-envelope diagnostics for one file (ADR-0005), **proven violations
-/// only**. A function declared `#[\Steins\Pure]` must have no effects; each
-/// proven origin in (or transitively reachable from) its body is one finding.
-///
-/// Silent by construction — the deferred "cannot-verify" maybe-diagnostic of the
-/// design (ADR-0005): uncatalogued builtins ([`steins_catalog::effect_labels`]
-/// `None`), dynamic and method calls (never recorded as an [`EffectOrigin`]),
-/// `throw` (permitted by `Pure`, ADR-0006), and closures nested in the body
-/// (separate scopes, deferred this slice). `exit`/`die` **are** caught
-/// structurally (ADR-0019 rule 4).
-///
-/// The same-file call graph is closed with a monotone fixpoint (effects of a
-/// function = its own proven origins ∪ the effects of its same-file callees), so
-/// direct and mutual recursion converge without looping.
-/// A node in the unified effect call graph — a free function or a class method.
-/// Names are the canonical declaration spellings, so an edge built from a resolved
-/// callee matches the unit built for that callee.
+/// A node in the unified project effect call graph — a free function (keyed by
+/// FQN) or a class method (keyed by class FQN + method name).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Sym {
     Func(String),
     Method(String, String),
 }
 
-impl Sym {
-    /// The diagnostic spelling of the symbol (`f` or `Foo::bar`).
-    fn display(&self) -> String {
-        match self {
-            Sym::Func(n) => n.clone(),
-            Sym::Method(c, m) => format!("{c}::{m}"),
-        }
-    }
-}
-
-/// One unit's fixpoint result: its proven effect findings and whether that set
-/// is **exhaustive** (ADR-0005 certainty discipline). Exhaustive means every
-/// call in (and transitively reachable from) the body resolved and was
-/// classified — so the empty set really is *no effects*, not *no effects we
-/// could see*. A single uncatalogued builtin, dynamic call, or unresolved method
-/// anywhere in the reachable graph makes it non-exhaustive (the annotate `…?`).
+/// One unit's fixpoint result: its proven effect findings and exhaustiveness.
 #[derive(Debug, Clone, Default)]
 struct EffectSet {
     findings: HashSet<EffectFinding>,
     exhaustive: bool,
 }
 
-/// The unified effect fixpoint for **every** function and method in the file —
-/// computed regardless of any declared envelope, because `annotate` exposes the
-/// effect set on every declaration line (not just `Pure`/`Effect` ones) and the
-/// envelope check propagates a callee's effects to annotated callers either way.
-///
-/// Alongside the proven effect findings this carries the **exhaustiveness bit**:
-/// a unit's own set is non-exhaustive the moment it contains an origin the
-/// analyzer cannot classify — an uncatalogued builtin ([`steins_catalog::effect_labels`]
-/// `None`), a structurally-dynamic call ([`EffectOrigin::Opaque`]), or a method
-/// call whose same-file target cannot be resolved ([`resolve_effect_edge`] `None`).
-/// Non-exhaustiveness then **taints callers** through the same call edges the
-/// findings flow along, in the same monotone fixpoint (both quantities only ever
-/// grow / flip toward "more/unknown", so chaotic iteration converges).
-fn compute_effects(
-    tree: &SourceTree,
-    functions: &[FunctionDecl],
-    classes: &[ClassDecl],
-) -> HashMap<Sym, EffectSet> {
-    // Every effect unit (function + method), with the class that encloses its
-    // origins (for resolving `$this`/`self`/`parent` method-call edges).
-    let mut units: Vec<(Sym, Option<&str>, &[EffectOrigin])> = Vec::new();
-    for f in functions {
-        units.push((Sym::Func(f.name.clone()), None, &f.effect_origins));
+/// The unified effect fixpoint for **every** function and method in the whole
+/// project, keyed by [`Sym`] (FQN-based, so cross-file edges match).
+fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet> {
+    // Each effect unit with the file it lives in and its enclosing class FQN.
+    struct Unit<'a> {
+        sym: Sym,
+        file: usize,
+        class_fqn: Option<String>,
+        origins: &'a [EffectOrigin],
     }
-    for c in classes {
-        for m in &c.methods {
-            units.push((
-                Sym::Method(c.name.clone(), m.name.clone()),
-                Some(c.name.as_str()),
-                &m.effect_origins,
-            ));
+    let mut ulist: Vec<Unit> = Vec::new();
+    for (fi, u) in units.iter().enumerate() {
+        for f in u.tree.functions() {
+            ulist.push(Unit { sym: Sym::Func(f.fqn.clone()), file: fi, class_fqn: None, origins: &f.effect_origins });
+        }
+        for c in u.tree.classes() {
+            for m in &c.methods {
+                ulist.push(Unit {
+                    sym: Sym::Method(c.fqn.clone(), m.name.clone()),
+                    file: fi,
+                    class_fqn: Some(c.fqn.clone()),
+                    origins: &m.effect_origins,
+                });
+            }
         }
     }
 
-    // Per unit: its own proven origins (`direct`), its resolved same-file callee
-    // edges (`edges`), and whether its *own* origins are all classifiable
-    // (`own_exhaustive`; callee taint is folded in by the fixpoint below).
     let mut direct: HashMap<Sym, HashSet<EffectFinding>> = HashMap::new();
     let mut edges: HashMap<Sym, HashSet<Sym>> = HashMap::new();
     let mut exhaustive: HashMap<Sym, bool> = HashMap::new();
-    for (sym, class, origins) in &units {
-        let d = direct.entry(sym.clone()).or_default();
-        let e = edges.entry(sym.clone()).or_default();
-        let ex = exhaustive.entry(sym.clone()).or_insert(true);
-        for origin in *origins {
+    for unit in &ulist {
+        let cx = Cx::new(units, index, unit.file);
+        let d = direct.entry(unit.sym.clone()).or_default();
+        let e = edges.entry(unit.sym.clone()).or_default();
+        let ex = exhaustive.entry(unit.sym.clone()).or_insert(true);
+        for origin in unit.origins {
             match origin {
-                EffectOrigin::Call { name, span } => {
-                    if let Some(canon) = user_fn_canon(functions, name) {
-                        e.insert(Sym::Func(canon)); // same-file user function edge
-                    } else {
-                        // A catalogued builtin (colored or pure) is classified; an
-                        // uncatalogued one cannot be proven effect-free.
-                        if steins_catalog::effect_labels(name).is_none() {
-                            *ex = false;
-                        }
-                        for f in builtin_findings(name, *span, tree) {
+                EffectOrigin::Call { name, span } => match cx.resolve_function(name) {
+                    FnResolution::User(site) => {
+                        e.insert(Sym::Func(cx.fn_decl(site).fqn.clone()));
+                    }
+                    FnResolution::Builtin => {
+                        for f in builtin_findings(name.simple(), *span, cx.tree(), cx.path()) {
                             d.insert(f);
                         }
                     }
-                }
+                    // Ambiguous / unresolved: effects unknown → non-exhaustive.
+                    FnResolution::Unknown => *ex = false,
+                },
                 EffectOrigin::Output { keyword, span } => {
                     d.insert(EffectFinding {
                         label: "output".to_owned(),
                         origin: (*keyword).to_owned(),
-                        line: tree.position(span.start).line,
+                        line: cx.tree().position(span.start).line,
+                        path: cx.path().to_owned(),
                     });
                 }
                 EffectOrigin::Exit { keyword, span } => {
                     d.insert(EffectFinding {
                         label: "exit".to_owned(),
                         origin: (*keyword).to_owned(),
-                        line: tree.position(span.start).line,
+                        line: cx.tree().position(span.start).line,
+                        path: cx.path().to_owned(),
                     });
                 }
                 EffectOrigin::MethodCall { receiver, method, .. } => {
-                    match resolve_effect_edge(classes, *class, receiver, method) {
+                    match resolve_effect_edge(&cx, unit.class_fqn.as_deref(), receiver, method) {
                         Some(callee) => {
                             e.insert(callee);
                         }
-                        // A method call we cannot resolve to a same-file target:
-                        // its effects are unknown → non-exhaustive.
                         None => *ex = false,
                     }
                 }
-                // A structurally-dynamic call names its own uncertainty.
                 EffectOrigin::Opaque { .. } => *ex = false,
             }
         }
     }
 
-    // Fixpoint: effects(u) = direct(u) ∪ ⋃_{c ∈ edges(u)} effects(c), and
-    // exhaustive(u) stays true only while every callee is exhaustive too. Both
-    // are monotone over finite domains, so chaotic iteration converges.
-    let syms: Vec<Sym> = units.iter().map(|(s, ..)| s.clone()).collect();
+    // Fixpoint: effects(u) = direct(u) ∪ ⋃ effects(callees); exhaustive taints.
+    let syms: Vec<Sym> = ulist.iter().map(|u| u.sym.clone()).collect();
     let mut findings: HashMap<Sym, HashSet<EffectFinding>> = direct;
     loop {
         let mut changed = false;
@@ -614,35 +759,34 @@ fn compute_effects(
         .collect()
 }
 
-/// One line of the `annotate` effect margin: a function/method declaration with
-/// its proven effect labels (sorted, deduplicated) and the exhaustiveness bit.
-/// Public so the CLI (and infer's own tests) can read the fixpoint result for
-/// *all* units, not only enveloped ones.
+/// One line of the `annotate` effect margin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectSummary {
-    /// The declaration spelling: `f` for a function, `Foo::bar` for a method.
     pub symbol: String,
-    /// 1-based line of the declaration (the name identifier).
     pub line: u32,
-    /// Proven effect labels, sorted and deduplicated (ADR-0018 dot-paths).
     pub labels: Vec<String>,
-    /// Whether the set is exhaustive (see [`EffectSet`]). `false` earns the `…?`
-    /// marker: "at least these effects; not proven complete."
     pub exhaustive: bool,
 }
 
-/// The proven effect set of every concrete function and method in the file
-/// (ADR-0005), for the `annotate` margin. Abstract methods (no body) are omitted
-/// — there is nothing to prove about a declaration whose implementation lives in
-/// an override. Reuses [`compute_effects`], so it agrees with the envelope check
-/// by construction.
+/// The proven effect set of every concrete function/method in a single file
+/// (ADR-0020 annotate margin). Analyzed as a one-file project.
 #[must_use]
 pub fn effect_summary(
     tree: &SourceTree,
     functions: &[FunctionDecl],
     classes: &[ClassDecl],
 ) -> Vec<EffectSummary> {
-    let effects = compute_effects(tree, functions, classes);
+    let _ = (functions, classes);
+    let units = [FileUnit { path: "", tree }];
+    let index = Index::from_units(&units);
+    effect_summary_units(&units, &index, 0)
+}
+
+/// The proven effect set of every concrete function/method in the `target` file.
+#[must_use]
+fn effect_summary_units(units: &[FileUnit], index: &Index, target: usize) -> Vec<EffectSummary> {
+    let effects = compute_effects(units, index);
+    let tree = units[target].tree;
     let sorted_labels = |sym: &Sym| -> Vec<String> {
         let mut labels: Vec<String> = effects
             .get(sym)
@@ -656,8 +800,8 @@ pub fn effect_summary(
     let exhaustive = |sym: &Sym| effects.get(sym).is_none_or(|e| e.exhaustive);
 
     let mut out = Vec::new();
-    for f in functions {
-        let sym = Sym::Func(f.name.clone());
+    for f in tree.functions() {
+        let sym = Sym::Func(f.fqn.clone());
         out.push(EffectSummary {
             symbol: f.name.clone(),
             line: tree.position(f.span.start).line,
@@ -665,12 +809,12 @@ pub fn effect_summary(
             exhaustive: exhaustive(&sym),
         });
     }
-    for c in classes {
+    for c in tree.classes() {
         for m in &c.methods {
             if m.is_abstract {
-                continue; // no body — nothing proven
+                continue;
             }
-            let sym = Sym::Method(c.name.clone(), m.name.clone());
+            let sym = Sym::Method(c.fqn.clone(), m.name.clone());
             out.push(EffectSummary {
                 symbol: format!("{}::{}", c.name, m.name),
                 line: tree.position(m.span.start).line,
@@ -682,58 +826,49 @@ pub fn effect_summary(
     out
 }
 
-fn effect_diagnostics(
-    tree: &SourceTree,
-    functions: &[FunctionDecl],
-    classes: &[ClassDecl],
-    path: &str,
-) -> Vec<Diagnostic> {
-    // Fast path: with no envelope anywhere in the file there is nothing to check.
-    let any_envelope = functions.iter().any(|f| f.effect_envelope.is_some())
-        || classes.iter().any(|c| c.methods.iter().any(|m| m.effect_envelope.is_some()));
+/// Effect-envelope diagnostics for the whole project (proven violations only).
+fn effect_diagnostics(units: &[FileUnit], index: &Index) -> Vec<Diagnostic> {
+    // Fast path: no envelope anywhere → nothing to check.
+    let any_envelope = units.iter().any(|u| {
+        u.tree.functions().iter().any(|f| f.effect_envelope.is_some())
+            || u.tree.classes().iter().any(|c| c.methods.iter().any(|m| m.effect_envelope.is_some()))
+    });
     if !any_envelope {
         return Vec::new();
     }
 
-    // The unified effect fixpoint for every function + method in the file (its
-    // proven effect set and its exhaustiveness bit). Shared with `effect_summary`
-    // (the annotate margin); here only `.findings` is read.
-    let effects = compute_effects(tree, functions, classes);
-
-    // Report: one declared envelope at a time, each proven origin in source order.
+    let effects = compute_effects(units, index);
     let mut out = Vec::new();
-    for f in functions {
-        let Some(env) = &f.effect_envelope else { continue };
-        report_unit(&mut out, tree, path, functions, classes, None, &f.name, env, &f.effect_origins, &effects);
-    }
-    for c in classes {
-        for m in &c.methods {
-            let Some(env) = &m.effect_envelope else { continue };
-            let display = format!("{}::{}", c.name, m.name);
-            report_unit(&mut out, tree, path, functions, classes, Some(&c.name), &display, env, &m.effect_origins, &effects);
+    for fi in 0..units.len() {
+        let cx = Cx::new(units, index, fi);
+        for f in cx.tree().functions() {
+            let Some(env) = &f.effect_envelope else { continue };
+            report_unit(&mut out, &cx, None, &f.name, env, &f.effect_origins, &effects);
+        }
+        for c in cx.tree().classes() {
+            for m in &c.methods {
+                let Some(env) = &m.effect_envelope else { continue };
+                let display = format!("{}::{}", c.name, m.name);
+                report_unit(
+                    &mut out,
+                    &cx,
+                    Some(&c.fqn),
+                    &display,
+                    env,
+                    &m.effect_origins,
+                    &effects,
+                );
+            }
         }
     }
     out
 }
 
-/// Emit the diagnostics for one declared-envelope unit (ADR-0005/0018):
-///
-/// 1. **`effect.unknown-label`** — one per declared label not in the registry,
-///    reported at the attribute span (typos, unregistered private labels).
-/// 2. **`effect.envelope-exceeded`** — walking the unit's own origins in source
-///    order, each proven effect *not* subsumed by any declared label is a
-///    violation (direct builtins/output/exit reported at the origin; same-file
-///    function/method edges reported transitively with the ultimate origin named).
-///    The empty envelope (`Pure`) is exceeded by every effect, reproducing the
-///    pre-generalization behavior and message shape exactly.
-#[allow(clippy::too_many_arguments)]
+/// Emit the diagnostics for one declared-envelope unit (ADR-0005/0018).
 fn report_unit(
     out: &mut Vec<Diagnostic>,
-    tree: &SourceTree,
-    path: &str,
-    functions: &[FunctionDecl],
-    classes: &[ClassDecl],
-    class: Option<&str>,
+    cx: &Cx,
+    class_fqn: Option<&str>,
     display: &str,
     envelope: &EffectEnvelope,
     origins: &[EffectOrigin],
@@ -750,68 +885,66 @@ fn report_unit(
         let msg = format!(
             "unknown effect label '{label}' in #[\\Steins\\Effect] on {display}(){suggestion}"
         );
-        let pos = tree.position(envelope.span.start);
+        let pos = cx.tree().position(envelope.span.start);
         out.push(Diagnostic {
             id: UNKNOWN_LABEL_ID,
-            path: path.to_owned(),
+            path: cx.path().to_owned(),
             line: pos.line,
             column: pos.column,
             message: msg,
         });
     }
 
-    // 2. Envelope-exceeded violations (each effect not subsumed by the envelope).
+    // 2. Envelope-exceeded violations.
     let labels = &envelope.labels;
     for origin in origins {
         match origin {
-            EffectOrigin::Call { name, span } => {
-                if let Some(canon) = user_fn_canon(functions, name) {
-                    emit_transitive(out, tree, path, &Sym::Func(canon), effects, span.start, display, labels);
-                } else {
-                    for f in builtin_findings(name, *span, tree) {
+            EffectOrigin::Call { name, span } => match cx.resolve_function(name) {
+                FnResolution::User(site) => {
+                    let callee = Sym::Func(cx.fn_decl(site).fqn.clone());
+                    emit_transitive(out, cx, &callee, effects, span.start, display, labels);
+                }
+                FnResolution::Builtin => {
+                    for f in builtin_findings(name.simple(), *span, cx.tree(), cx.path()) {
                         if exceeds(labels, &f.label) {
-                            let prefix = format!("{name}() has effect {}", f.label);
-                            out.push(exceeded_diag(tree, path, span.start, &prefix, display, labels, &f.label));
+                            let prefix = format!("{}() has effect {}", name.simple(), f.label);
+                            out.push(exceeded_diag(cx, span.start, &prefix, display, labels, &f.label));
                         }
                     }
                 }
-            }
+                FnResolution::Unknown => {}
+            },
             EffectOrigin::Output { keyword, span } if exceeds(labels, "output") => {
                 let prefix = format!("{keyword} has effect output");
-                out.push(exceeded_diag(tree, path, span.start, &prefix, display, labels, "output"));
+                out.push(exceeded_diag(cx, span.start, &prefix, display, labels, "output"));
             }
             EffectOrigin::Exit { keyword, span } if exceeds(labels, "exit") => {
                 let prefix = format!("{keyword} has effect exit");
-                out.push(exceeded_diag(tree, path, span.start, &prefix, display, labels, "exit"));
+                out.push(exceeded_diag(cx, span.start, &prefix, display, labels, "exit"));
             }
             EffectOrigin::MethodCall { receiver, method, span } => {
-                if let Some(callee) = resolve_effect_edge(classes, class, receiver, method) {
-                    emit_transitive(out, tree, path, &callee, effects, span.start, display, labels);
+                if let Some(callee) = resolve_effect_edge(cx, class_fqn, receiver, method) {
+                    emit_transitive(out, cx, &callee, effects, span.start, display, labels);
                 }
             }
-            // Output / Exit subsumed by the envelope → silent.
             EffectOrigin::Output { .. } | EffectOrigin::Exit { .. } => {}
-            // An unprovable call carries no proven effect — silent for the
-            // envelope check (it only feeds the exhaustiveness bit).
             EffectOrigin::Opaque { .. } => {}
         }
     }
 }
 
-/// Emit each proven effect of `callee` *not subsumed by the envelope* as a
+/// Emit each proven effect of `callee` not subsumed by the envelope as a
 /// transitive violation, naming the ultimate origin.
-#[allow(clippy::too_many_arguments)]
 fn emit_transitive(
     out: &mut Vec<Diagnostic>,
-    tree: &SourceTree,
-    path: &str,
+    cx: &Cx,
     callee: &Sym,
     effects: &HashMap<Sym, EffectSet>,
     offset: u32,
     display: &str,
     labels: &[String],
 ) {
-    let callee_display = callee.display();
+    let callee_display = cx.sym_display(callee);
     let mut fs: Vec<&EffectFinding> =
         effects.get(callee).map(|e| &e.findings).into_iter().flatten().collect();
     fs.sort_by(|a, b| (a.line, &a.label, &a.origin).cmp(&(b.line, &b.label, &b.origin)));
@@ -819,28 +952,27 @@ fn emit_transitive(
         if !exceeds(labels, &ef.label) {
             continue;
         }
-        let prefix = format!(
-            "{callee_display}() has effect {} (via {} at line {})",
-            ef.label, ef.origin, ef.line
-        );
-        out.push(exceeded_diag(tree, path, offset, &prefix, display, labels, &ef.label));
+        // Name the file when the ultimate origin arises in a different file than
+        // the declared-envelope unit being reported (cross-file provenance).
+        let loc = if ef.path == cx.path() {
+            format!("line {}", ef.line)
+        } else {
+            format!("{} line {}", ef.path, ef.line)
+        };
+        let prefix =
+            format!("{callee_display}() has effect {} (via {} at {loc})", ef.label, ef.origin);
+        out.push(exceeded_diag(cx, offset, &prefix, display, labels, &ef.label));
     }
 }
 
-/// Whether an inferred `effect_label` **exceeds** the declared `labels`: a
-/// violation iff no declared label subsumes it (ADR-0018). The empty envelope
-/// (`Pure`) subsumes nothing, so every effect exceeds it.
+/// Whether an inferred `effect_label` **exceeds** the declared `labels`.
 fn exceeds(labels: &[String], effect_label: &str) -> bool {
     !labels.iter().any(|l| steins_catalog::subsumes(l, effect_label))
 }
 
-/// Build an `effect.envelope-exceeded` diagnostic. `prefix` names the effect and
-/// its source (`rand() has effect nondet.random`); the tail names the declared
-/// envelope — `#[\Steins\Pure]` for the empty set (the unchanged legacy shape),
-/// else `#[\Steins\Effect('io')] — <label> exceeds the envelope`.
+/// Build an `effect.envelope-exceeded` diagnostic.
 fn exceeded_diag(
-    tree: &SourceTree,
-    path: &str,
+    cx: &Cx,
     offset: u32,
     prefix: &str,
     display: &str,
@@ -857,18 +989,18 @@ fn exceeded_diag(
         )
     };
     let msg = format!("{prefix}, but {display}() is declared {clause}");
-    effect_diag(tree, path, offset, msg)
-}
-
-/// The canonical declaration name of a same-file user function matching `name`
-/// (case-insensitive; PHP function names are), or `None` for builtins/unknowns.
-fn user_fn_canon(functions: &[FunctionDecl], name: &str) -> Option<String> {
-    functions.iter().find(|f| f.name.eq_ignore_ascii_case(name)).map(|f| f.name.clone())
+    let pos = cx.tree().position(offset);
+    Diagnostic { id: EFFECT_ID, path: cx.path().to_owned(), line: pos.line, column: pos.column, message: msg }
 }
 
 /// The proven effect findings a builtin `name` carries (empty for pure or
-/// uncatalogued builtins — the silent side of proven-only checking).
-fn builtin_findings(name: &str, span: steins_syntax::Span, tree: &SourceTree) -> Vec<EffectFinding> {
+/// uncatalogued builtins).
+fn builtin_findings(
+    name: &str,
+    span: steins_syntax::Span,
+    tree: &SourceTree,
+    path: &str,
+) -> Vec<EffectFinding> {
     match steins_catalog::effect_labels(name) {
         Some(labels) => {
             let line = tree.position(span.start).line;
@@ -878,6 +1010,7 @@ fn builtin_findings(name: &str, span: steins_syntax::Span, tree: &SourceTree) ->
                     label: label.to_owned(),
                     origin: name.to_owned(),
                     line,
+                    path: path.to_owned(),
                 })
                 .collect()
         }
@@ -885,92 +1018,330 @@ fn builtin_findings(name: &str, span: steins_syntax::Span, tree: &SourceTree) ->
     }
 }
 
-/// Resolve a method-call effect origin to the unit it edges to, under the same
-/// sound dispatch rules the type check uses (no flow environment, so only
-/// `$this`/`self`/`parent`/`Foo::`/`new Foo()->` receivers resolve). `$this` and
-/// `self::` require the final/private override guard; `parent::`/`Foo::` are
-/// exact.
+/// Resolve a method-call effect origin to the unit it edges to (project-wide).
 fn resolve_effect_edge(
-    classes: &[ClassDecl],
+    cx: &Cx,
     enclosing: Option<&str>,
     receiver: &EffectRecv,
     method: &str,
 ) -> Option<Sym> {
     let (start, exact) = match receiver {
         EffectRecv::This | EffectRecv::SelfKw => (enclosing?.to_owned(), false),
-        EffectRecv::Parent => (find_class(classes, enclosing?)?.parent.clone()?, true),
-        EffectRecv::ClassName(name) => (name.clone(), true),
+        EffectRecv::Parent => (cx.parent_fqn(enclosing?)?, true),
+        EffectRecv::ClassName(name) => (cx.class_fqn(name), true),
     };
-    let Resolution::Found(r) = resolve_in_chain(classes, &start, method) else { return None };
-    // A private method is callable only from within its declaring class.
+    let Resolution::Found(r) = resolve_in_chain(cx, &start, method) else { return None };
     if r.method.visibility == Visibility::Private
-        && !enclosing.is_some_and(|e| e.eq_ignore_ascii_case(r.declaring_class))
+        && !enclosing.is_some_and(|e| e.eq_ignore_ascii_case(&r.declaring_class.fqn))
     {
         return None;
     }
     if !exact {
-        let declaring_final = find_class(classes, r.declaring_class).is_some_and(|c| c.is_final);
+        let declaring_final = r.declaring_class.is_final;
         if !(r.method.is_final || r.method.visibility == Visibility::Private || declaring_final) {
-            return None; // a non-final public method may be overridden elsewhere
+            return None;
         }
     }
-    Some(Sym::Method(r.declaring_class.to_owned(), r.method.name.clone()))
+    Some(Sym::Method(r.declaring_class.fqn.clone(), r.method.name.clone()))
 }
 
-/// Build an `effect.envelope-exceeded` diagnostic at `offset` with `message`.
-fn effect_diag(tree: &SourceTree, path: &str, offset: u32, message: String) -> Diagnostic {
-    let pos = tree.position(offset);
-    Diagnostic { id: EFFECT_ID, path: path.to_owned(), line: pos.line, column: pos.column, message }
-}
+// ---------------------------------------------------------------------------
+// The project-aware analysis context.
+// ---------------------------------------------------------------------------
 
-/// Read-only analysis context threaded through the propagation pass.
+/// Read-only analysis context: the whole project view plus the file currently
+/// being analyzed. Cheap to copy (all borrows); descent rebuilds it at the
+/// callee's file via [`Cx::at`].
+#[derive(Clone, Copy)]
 struct Cx<'a> {
-    tree: &'a SourceTree,
-    functions: &'a [FunctionDecl],
-    classes: &'a [ClassDecl],
-    path: &'a str,
-    strict: bool,
+    units: &'a [FileUnit<'a>],
+    index: &'a Index,
+    cur: usize,
+}
+
+impl<'a> Cx<'a> {
+    fn new(units: &'a [FileUnit<'a>], index: &'a Index, cur: usize) -> Self {
+        Self { units, index, cur }
+    }
+
+    /// A context pointing at a different file (for cross-file descent).
+    fn at(&self, file: usize) -> Cx<'a> {
+        Cx { units: self.units, index: self.index, cur: file }
+    }
+
+    fn tree(&self) -> &'a SourceTree {
+        self.units[self.cur].tree
+    }
+    fn path(&self) -> &'a str {
+        self.units[self.cur].path
+    }
+    fn strict(&self) -> bool {
+        self.tree().has_strict_types()
+    }
+
+    fn fn_decl(&self, site: Site) -> &'a FunctionDecl {
+        &self.units[site.file].tree.functions()[site.index]
+    }
+    fn class_decl(&self, site: Site) -> (usize, &'a ClassDecl) {
+        (site.file, &self.units[site.file].tree.classes()[site.index])
+    }
+
+    /// Resolve a class reference (in the current file's context) to its FQN.
+    fn class_fqn(&self, r: &NameRef) -> String {
+        self.tree().resolve_class_fqn(r)
+    }
+
+    /// Find a class by FQN (case-insensitive), returning its file and decl.
+    fn find_class(&self, fqn: &str) -> Option<(usize, &'a ClassDecl)> {
+        match self.index.resolve_class(fqn) {
+            Res::Unique(site) => Some(self.class_decl(site)),
+            _ => None,
+        }
+    }
+
+    /// The FQN of `class_fqn`'s parent, resolved in the parent's own file ctx.
+    fn parent_fqn(&self, class_fqn: &str) -> Option<String> {
+        let (file, cd) = self.find_class(class_fqn)?;
+        let pref = cd.parent.as_ref()?;
+        Some(self.units[file].tree.resolve_class_fqn(pref))
+    }
+
+    /// Resolve a **function** call reference per PHP name resolution (ADR-0001).
+    fn resolve_function(&self, r: &NameRef) -> FnResolution {
+        let catalog_knows = |n: &str| steins_catalog::effect_labels(n).is_some();
+        match r.kind {
+            RefKind::FullyQualified => {
+                let fqn = r.raw.to_ascii_lowercase();
+                match self.index.resolve_function(&fqn) {
+                    Res::Unique(site) => FnResolution::User(site),
+                    Res::Ambiguous => FnResolution::Unknown,
+                    Res::Absent => {
+                        // `\strlen` — a single-segment global name may be a builtin.
+                        if !r.raw.contains('\\') && catalog_knows(&r.raw) {
+                            FnResolution::Builtin
+                        } else {
+                            FnResolution::Unknown
+                        }
+                    }
+                }
+            }
+            RefKind::Qualified => {
+                // First segment via class/namespace imports, else current ns.
+                let ctx = self.tree().ctx_at(r.offset);
+                let first_len = r.raw.find('\\').unwrap_or(r.raw.len());
+                let first = &r.raw[..first_len];
+                let fqn = if let Some(t) = ctx.class_imports.get(&first.to_ascii_lowercase()) {
+                    format!("{t}{}", &r.raw[first_len..])
+                } else if ctx.namespace.is_empty() {
+                    r.raw.clone()
+                } else {
+                    format!("{}\\{}", ctx.namespace, r.raw)
+                };
+                match self.index.resolve_function(&fqn) {
+                    Res::Unique(site) => FnResolution::User(site),
+                    _ => FnResolution::Unknown,
+                }
+            }
+            RefKind::Unqualified => {
+                let ctx = self.tree().ctx_at(r.offset);
+                let name = r.raw.to_ascii_lowercase();
+                // `use function` import wins outright.
+                if let Some(t) = ctx.fn_imports.get(&name) {
+                    return match self.index.resolve_function(&t.to_ascii_lowercase()) {
+                        Res::Unique(site) => FnResolution::User(site),
+                        _ => FnResolution::Unknown,
+                    };
+                }
+                let is_builtin = catalog_knows(&name);
+                // PHP tries NS\name first (when in a namespace).
+                if !ctx.namespace.is_empty() {
+                    let ns_fqn = format!("{}\\{}", ctx.namespace, name);
+                    match self.index.resolve_function(&ns_fqn) {
+                        Res::Unique(site) => return FnResolution::User(site),
+                        Res::Ambiguous => return FnResolution::Unknown,
+                        Res::Absent => {}
+                    }
+                }
+                // Global fallback (also the whole story in the global namespace).
+                match self.index.resolve_function(&name) {
+                    Res::Ambiguous => FnResolution::Unknown,
+                    Res::Unique(site) => {
+                        // A user global that shadows a builtin name is ambiguous.
+                        if is_builtin { FnResolution::Unknown } else { FnResolution::User(site) }
+                    }
+                    Res::Absent => {
+                        if is_builtin { FnResolution::Builtin } else { FnResolution::Unknown }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The site of a **user** function this call resolves to (positional-only),
+    /// or `None` for builtins / unknown / dynamic / named-arg calls.
+    fn resolve_user_fn(&self, call: &CallExpr) -> Option<Site> {
+        if !call.positional_only {
+            return None;
+        }
+        let r = call.callee_ref.as_ref()?;
+        match self.resolve_function(r) {
+            FnResolution::User(site) => Some(site),
+            _ => None,
+        }
+    }
+
+    /// The unique body scope of the user function at `site`, plus its file.
+    fn fn_scope(&self, site: Site) -> Option<(usize, &'a Scope)> {
+        let name = &self.fn_decl(site).name;
+        let tree = self.units[site.file].tree;
+        let mut it = tree.scopes().iter().filter(|s| s.function_name.as_deref() == Some(name));
+        let scope = it.next()?;
+        if it.next().is_some() { None } else { Some((site.file, scope)) }
+    }
+
+    /// The unique method body scope for `class_fqn::method` in `file`.
+    fn method_scope(&self, file: usize, class_fqn: &str, method: &str) -> Option<&'a Scope> {
+        let tree = self.units[file].tree;
+        let mut it = tree.scopes().iter().filter(|s| {
+            matches!(&s.owner, ScopeOwner::Method { class: c, method: m }
+                if c.eq_ignore_ascii_case(class_fqn) && m.eq_ignore_ascii_case(method))
+        });
+        let scope = it.next()?;
+        if it.next().is_some() { None } else { Some(scope) }
+    }
+
+    /// A display name for an effect [`Sym`] (`f`, `Foo::bar`), using the resolved
+    /// declaration's written case where available.
+    fn sym_display(&self, sym: &Sym) -> String {
+        match sym {
+            Sym::Func(fqn) => match self.index.resolve_function(fqn) {
+                Res::Unique(site) => self.fn_decl(site).name.clone(),
+                _ => fqn.clone(),
+            },
+            Sym::Method(cfqn, m) => match self.find_class(cfqn) {
+                Some((_, cd)) => format!("{}::{}", cd.name, m),
+                None => format!("{cfqn}::{m}"),
+            },
+        }
+    }
+
+    /// Resolve an [`ArgValue`] to a concrete literal, if provable.
+    fn resolve_literal(
+        &self,
+        value: &ArgValue,
+        env: &HashMap<String, Known>,
+        poisoned: bool,
+        folder: &mut dyn Folder,
+    ) -> Option<ArgValue> {
+        if poisoned {
+            return None;
+        }
+        match value {
+            v if v.is_literal() => Some(v.clone()),
+            ArgValue::Var(name) => env.get(name).map(|k| k.value.clone()),
+            ArgValue::Call(name, args) => {
+                if args.is_empty()
+                    && let Some((lit, _line)) = self.resolve_const_fn(name)
+                {
+                    return Some(lit);
+                }
+                self.try_fold(name, args, folder).map(|(lit, _prov)| lit)
+            }
+            _ => None,
+        }
+    }
+
+    /// Try to fold an allowlisted builtin call over literal arguments.
+    fn try_fold(
+        &self,
+        name: &str,
+        args: &[ArgValue],
+        folder: &mut dyn Folder,
+    ) -> Option<(ArgValue, String)> {
+        // Any project user function sharing this simple name shadows the builtin
+        // (or makes it ambiguous) — do not fold. Conservative, never an FP.
+        if self.index.has_simple_function(name) {
+            return None;
+        }
+        if !steins_catalog::foldable(name) {
+            return None;
+        }
+        if !args.iter().all(ArgValue::is_literal) {
+            return None;
+        }
+        let folded = folder.fold(name, args)?;
+        Some((folded, format!("folded from {}", render_call(name, args))))
+    }
+
+    /// Resolve a zero-argument constant function anywhere in the project by its
+    /// simple name: unique definition, no params, body exactly `return <lit>`,
+    /// scope not poisoned. Returns the literal and the definition line.
+    fn resolve_const_fn(&self, name: &str) -> Option<(ArgValue, u32)> {
+        let site = self.index.unique_fn_by_simple(name)?;
+        let decl = self.fn_decl(site);
+        if !decl.params.is_empty() {
+            return None;
+        }
+        let tree = self.units[site.file].tree;
+        let mut scopes = tree.scopes().iter().filter(|s| s.function_name.as_deref() == Some(&decl.name));
+        let scope = scopes.next()?;
+        if scopes.next().is_some() || scope.poisoned {
+            return None;
+        }
+        let [stmt] = scope.stmts.as_slice() else { return None };
+        let StmtKind::Return { value, .. } = &stmt.kind else { return None };
+        if !value.is_literal() {
+            return None;
+        }
+        Some((value.clone(), tree.position(decl.span.start).line))
+    }
+
+    /// Build a `type.argument-mismatch` diagnostic (path/line from the current
+    /// file — where the call textually is).
+    fn diagnostic(
+        &self,
+        offset: u32,
+        value: &ArgValue,
+        provenance: Option<&str>,
+        callee: &str,
+        param_name: &str,
+        ty: ParamType,
+    ) -> Diagnostic {
+        let pos = self.tree().position(offset);
+        let mode = if self.strict() { "strict" } else { "coercive" };
+        let message = match provenance {
+            Some(p) => format!(
+                "argument {} ({}) to {}() cannot become {} ${} — proven TypeError ({} mode)",
+                value.render(), p, callee, ty.scalar.keyword(), param_name, mode,
+            ),
+            None => format!(
+                "argument {} to {}() cannot become {} ${} — proven TypeError ({} mode)",
+                value.render(), callee, ty.scalar.keyword(), param_name, mode,
+            ),
+        };
+        Diagnostic { id: ID, path: self.path().to_owned(), line: pos.line, column: pos.column, message }
+    }
 }
 
 /// A proven local value plus where it was established (for provenance).
 struct Known {
     value: ArgValue,
-    /// 1-based line of the assignment that established the value.
     line: u32,
-    /// When the value came from an interprocedural argument binding (Feature B),
-    /// the provenance tail naming the outer binding call site
-    /// (`bound at outer("abc") call on line N`). `None` for an ordinary
-    /// same-scope assignment, whose provenance is derived from `line` instead.
     bound: Option<String>,
 }
 
-/// A binding-descent key: the callee name plus its bound parameters (sorted by
-/// name), identifying a `(function, binding)` frame for recursion detection and
-/// memoization (Feature B).
+/// A binding-descent key: the callee (by FQN-ish key) plus its bound params.
 type BindingKey = (String, Vec<(String, ArgValue)>);
 
 /// The state threaded down an interprocedural binding descent (Feature B).
 struct Descent<'a> {
-    /// The provenance tail naming the **first** (outermost) binding call site,
-    /// e.g. `bound at outer("abc") call on line 9`. Fixed for the whole descent
-    /// so every finding, however deep, names the site that started the chain.
     provenance: &'a str,
-    /// Current descent depth (the first binding is depth 1).
     depth: usize,
-    /// `(function, binding)` frames currently on the descent stack — a revisit
-    /// is direct/indirect recursion and stops the descent.
     stack: &'a mut Vec<BindingKey>,
-    /// `(function, binding)` frames already fully analyzed in this descent —
-    /// collapses diamonds without re-walking.
     memo: &'a mut HashSet<BindingKey>,
 }
 
-/// Walk one scope's trace with a given initial environment, tracking known local
-/// values, checking every call, and attempting interprocedural binding descent.
-///
-/// `env` is empty for a scope's own top-level walk and pre-loaded with bound
-/// parameters for a binding descent; `descent` is `None` at the top level and
-/// `Some` inside a descent (carrying the budget/recursion/provenance state).
+/// Walk one scope's trace with a given initial environment.
 #[allow(clippy::too_many_arguments)]
 fn analyze_scope(
     cx: &Cx,
@@ -983,21 +1354,16 @@ fn analyze_scope(
     mut facts: Option<&mut Vec<LineFact>>,
     out: &mut Vec<Diagnostic>,
 ) {
-    // The class that lexically encloses this scope (a method body), for resolving
-    // `$this->`, `self::`, and `parent::` calls; `None` for functions/top-level.
     let enclosing_class = scope_class(scope);
 
     for stmt in &scope.stmts {
-        // 1. Check + descend every statically-named call this statement carries,
-        // against the env as it stands *before* the statement's own effect.
+        // 1. Check + descend every statically-named call this statement carries.
         for call in checkable_calls(&stmt.kind) {
             match &call.receiver {
-                // Function calls keep the exact function-world behavior.
                 Callee::Function(_) => {
                     check_propagated_call(cx, folder, scope.poisoned, call, &env, out);
                     try_descend_function(cx, folder, call, &env, scope.poisoned, descent.as_mut(), out);
                 }
-                // Method / static / constructor calls: the class-world path.
                 Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
                     handle_method_call(
                         cx,
@@ -1018,15 +1384,10 @@ fn analyze_scope(
 
         // 2. Apply the statement's own effect on the known-value environment.
         match &stmt.kind {
-            // `echo` assigns nothing, but stays conservative like the former
-            // Barrier: clear afterward (the calls were already checked in step 1).
             StmtKind::Barrier | StmtKind::Echo(_) => {
                 env.clear();
                 classes_env.clear();
             }
-            // ADR-0027 ratchet: forget only the construct's write set (unless it
-            // poisons, in which case it behaves exactly like a Barrier). A write
-            // to `$x` is a reassignment, so it drops `$x`'s exact-class fact too.
             StmtKind::Opaque { writes, poisons } => {
                 if *poisons {
                     env.clear();
@@ -1040,25 +1401,19 @@ fn analyze_scope(
             }
             StmtKind::Return { .. } | StmtKind::Call(_) => {}
             StmtKind::Assign { var, value, span, .. } => {
-                let line = cx.tree.position(span.start).line;
+                let line = cx.tree().position(span.start).line;
                 match value {
-                    // `$x = new Foo(...)` — record `$x`'s exact class and drop any
-                    // stale scalar fact. The fact holds only until `$x` is handed to
-                    // a call (a by-ref parameter can rebind it; see step 3). A
-                    // poisoned scope trusts nothing.
-                    ArgValue::New(class, _) => {
+                    ArgValue::New(class_ref, _) => {
                         env.remove(var);
                         if scope.poisoned {
                             classes_env.remove(var);
                         } else {
+                            let class = cx.class_fqn(class_ref);
                             classes_env.insert(var.clone(), class.clone());
                             if let Some(facts) = facts.as_deref_mut() {
                                 facts.push(LineFact {
                                     line,
-                                    kind: FactKind::ExactClass {
-                                        var: var.clone(),
-                                        class: class.clone(),
-                                    },
+                                    kind: FactKind::ExactClass { var: var.clone(), class },
                                 });
                             }
                         }
@@ -1068,10 +1423,7 @@ fn analyze_scope(
                             if let Some(facts) = facts.as_deref_mut() {
                                 facts.push(LineFact {
                                     line,
-                                    kind: FactKind::Value {
-                                        var: var.clone(),
-                                        rendered: lit.render(),
-                                    },
+                                    kind: FactKind::Value { var: var.clone(), rendered: lit.render() },
                                 });
                             }
                             env.insert(var.clone(), Known { value: lit, line, bound: None });
@@ -1086,14 +1438,7 @@ fn analyze_scope(
             }
         }
 
-        // 3. After the statement, any variable handed to a call is untrustworthy
-        // — a by-ref parameter can *rebind* it to a different object
-        // (`f(&$x) { $x = new Bar(); }`), which changes the variable's class, not
-        // just its scalar value. So invalidation drops the exact-class fact too,
-        // exactly as it drops a scalar literal fact. (The receiver of `$x->m()` is
-        // *not* listed here — a method call cannot rebind the caller's variable —
-        // so a method call on `$x` keeps `$x`'s class fact; and a direct
-        // `(new Foo())->m()` has no variable to rebind, so that path stays exact.)
+        // 3. After the statement, invalidate any variable handed to a call.
         for v in &stmt.invalidated {
             env.remove(v);
             classes_env.remove(v);
@@ -1101,8 +1446,7 @@ fn analyze_scope(
     }
 }
 
-/// The class that lexically owns a method scope, for resolving `$this`/`self`/
-/// `parent` inside it; `None` for function and top-level scopes.
+/// The class FQN that lexically owns a method scope; `None` for function/top.
 fn scope_class(scope: &Scope) -> Option<&str> {
     match &scope.owner {
         ScopeOwner::Method { class, .. } => Some(class),
@@ -1110,11 +1454,7 @@ fn scope_class(scope: &Scope) -> Option<&str> {
     }
 }
 
-/// The statically-named calls a statement carries that must be checked and
-/// descended against the env at the statement's start: the statement-level call,
-/// a `return f(...)` / `$x = f(...)` right-hand call, or each `echo f(...)`
-/// operand. Calls nested inside control-flow bodies are deliberately excluded —
-/// they run under a different (post-assignment) env and stay `Opaque`.
+/// The statically-named calls a statement carries.
 fn checkable_calls(kind: &StmtKind) -> Vec<&CallExpr> {
     match kind {
         StmtKind::Call(c) => vec![c],
@@ -1124,7 +1464,7 @@ fn checkable_calls(kind: &StmtKind) -> Vec<&CallExpr> {
     }
 }
 
-/// Check a call whose arguments may be propagated values (`Var` / `Call`).
+/// Check a function call whose arguments may be propagated values (`Var`/`Call`).
 fn check_propagated_call(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -1133,7 +1473,8 @@ fn check_propagated_call(
     env: &HashMap<String, Known>,
     out: &mut Vec<Diagnostic>,
 ) {
-    let Some(decl) = resolve_callee(cx.functions, call) else { return };
+    let Some(site) = cx.resolve_user_fn(call) else { return };
+    let decl = cx.fn_decl(site);
 
     for (i, arg) in call.args.iter().enumerate() {
         let Some(ty) = param_scalar_type(&decl.params, i) else {
@@ -1143,11 +1484,8 @@ fn check_propagated_call(
             continue;
         };
 
-        // Only `Var` and `Call` arguments — literals belong to the direct pass.
         let resolved: Option<(ArgValue, String)> = match &arg.value {
             ArgValue::Var(name) if !poisoned => env.get(name).map(|k| {
-                // A bound parameter names the outer binding site; a plain local
-                // assignment names its own line.
                 let prov = match &k.bound {
                     Some(b) => format!("from ${name}, {b}"),
                     None => format!("from ${name}, assigned at line {}", k.line),
@@ -1155,8 +1493,6 @@ fn check_propagated_call(
                 (k.value.clone(), prov)
             }),
             ArgValue::Call(name, args) => {
-                // A zero-arg same-file constant function wins; otherwise try to
-                // fold an allowlisted builtin over literal args.
                 if args.is_empty() {
                     cx.resolve_const_fn(name)
                         .map(|(lit, line)| (lit, format!("from {name}(), defined at line {line}")))
@@ -1169,7 +1505,7 @@ fn check_propagated_call(
         };
         let Some((value, provenance)) = resolved else { continue };
 
-        if is_type_error(cx.strict, ty, &value) {
+        if is_type_error(cx.strict(), ty, &value) {
             out.push(cx.diagnostic(
                 arg.span.start,
                 &value,
@@ -1182,8 +1518,7 @@ fn check_propagated_call(
     }
 }
 
-/// Attempt an interprocedural argument-binding descent into a same-file
-/// **function** (Feature B). Thin wrapper over [`descend`].
+/// Attempt an interprocedural binding descent into a same-project function.
 fn try_descend_function(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -1193,14 +1528,16 @@ fn try_descend_function(
     descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
 ) {
-    let Some(decl) = resolve_callee(cx.functions, call) else { return };
-    let Some(callee_scope) = cx.unique_scope(&decl.name) else { return };
+    let Some(site) = cx.resolve_user_fn(call) else { return };
+    let decl = cx.fn_decl(site);
+    let Some((callee_file, callee_scope)) = cx.fn_scope(site) else { return };
     descend(
         cx,
         folder,
         &decl.params,
+        callee_file,
         callee_scope,
-        &decl.name,
+        &decl.fqn,
         &decl.name,
         None,
         call,
@@ -1211,24 +1548,13 @@ fn try_descend_function(
     );
 }
 
-/// Interprocedural argument-binding descent into a resolved callee body (Feature
-/// B), shared by the function and method paths. When one or more positional
-/// arguments of `call` resolve to literals, `callee_scope` is re-analyzed with
-/// those `params` bound to their post-coercion values; any proven
-/// `type.argument-mismatch` inside is reported at the inner call site with a
-/// provenance chain naming the outermost binding site. Zero-FP rules (entry
-/// coercion, by-ref skip, depth/recursion budget) are enforced here.
-///
-/// `key_name` uniquely identifies the callee for recursion/memoization
-/// (`"func"` or `"Class::method"`); `display_name` is the provenance render base
-/// (`"width"`, `"Foo::m"`, `"new Foo"`); `body_this_exact` is the exact `$this`
-/// class the callee body runs with (`Some` iff dispatched on an exact receiver),
-/// so nested `$this->…` inside resolves under the exact-class rule.
+/// Interprocedural argument-binding descent into a resolved callee body.
 #[allow(clippy::too_many_arguments)]
 fn descend(
     cx: &Cx,
     folder: &mut dyn Folder,
     params: &[Param],
+    callee_file: usize,
     callee_scope: &Scope,
     key_name: &str,
     display_name: &str,
@@ -1243,7 +1569,8 @@ fn descend(
         return;
     }
 
-    // Resolve each positional argument to a literal and try to bind it.
+    // Resolve each positional argument to a literal and try to bind it (using
+    // the *caller's* env, strict mode, and folding).
     let mut bound: Vec<(String, ArgValue)> = Vec::new();
     let mut render_args: Vec<ArgValue> = Vec::new();
     for (i, arg) in call.args.iter().enumerate() {
@@ -1255,7 +1582,6 @@ fn descend(
             continue;
         };
         render_args.push(value.clone());
-        // A by-ref parameter in a bound position: skip the whole binding.
         if param.by_ref {
             return;
         }
@@ -1263,9 +1589,9 @@ fn descend(
             bound.push((param.name.clone(), value));
             continue;
         };
-        match coerce_into_param(cx.strict, ty, &value) {
+        match coerce_into_param(cx.strict(), ty, &value) {
             Some(coerced) => bound.push((param.name.clone(), coerced)),
-            None => return, // entry TypeError (reported at outer site) or unsure.
+            None => return,
         }
     }
 
@@ -1273,22 +1599,24 @@ fn descend(
         return;
     }
 
-    // Canonical `(callee, binding)` key for recursion detection / memoization.
     let mut key_binding = bound.clone();
     key_binding.sort_by(|a, b| a.0.cmp(&b.0));
     let key: BindingKey = (key_name.to_owned(), key_binding);
 
     // Provenance names the *first* binding site; a nested descent inherits it.
+    // When the call crosses files, the site names the caller's file.
+    let cross = cx.cur != callee_file;
     let new_provenance;
     let (provenance, next_depth): (&str, usize) = match &descent {
         Some(d) => (d.provenance, d.depth + 1),
         None => {
-            let line = cx.tree.position(call.span.start).line;
-            new_provenance = format!(
-                "bound at {} call on line {}",
-                render_call(display_name, &render_args),
-                line
-            );
+            let line = cx.tree().position(call.span.start).line;
+            let render = render_call(display_name, &render_args);
+            new_provenance = if cross {
+                format!("bound at {render} call at {} line {line}", cx.path())
+            } else {
+                format!("bound at {render} call on line {line}")
+            };
             (&new_provenance, 1)
         }
     };
@@ -1302,6 +1630,7 @@ fn descend(
         .map(|(name, value)| (name, Known { value, line: 0, bound: Some(provenance.to_owned()) }))
         .collect();
 
+    let child_cx = cx.at(callee_file);
     match descent {
         Some(d) => {
             if d.stack.contains(&key) || d.memo.contains(&key) {
@@ -1310,7 +1639,7 @@ fn descend(
             d.stack.push(key.clone());
             let child = Descent { provenance, depth: next_depth, stack: d.stack, memo: d.memo };
             analyze_scope(
-                cx,
+                &child_cx,
                 folder,
                 callee_scope,
                 bound_env,
@@ -1326,10 +1655,9 @@ fn descend(
         None => {
             let mut stack: Vec<BindingKey> = vec![key.clone()];
             let mut memo: HashSet<BindingKey> = HashSet::new();
-            let child =
-                Descent { provenance, depth: next_depth, stack: &mut stack, memo: &mut memo };
+            let child = Descent { provenance, depth: next_depth, stack: &mut stack, memo: &mut memo };
             analyze_scope(
-                cx,
+                &child_cx,
                 folder,
                 callee_scope,
                 bound_env,
@@ -1344,82 +1672,62 @@ fn descend(
 }
 
 // ---------------------------------------------------------------------------
-// Class-world method resolution (ADR-0001 sound dispatch).
+// Class-world method resolution (ADR-0001 sound dispatch), project-wide.
 // ---------------------------------------------------------------------------
 
-/// A method resolved through a same-file inheritance chain.
+/// A method resolved through a project inheritance chain.
 struct ResolvedMethod<'a> {
     method: &'a MethodDecl,
-    /// The class in the chain that declares the resolved method.
-    declaring_class: &'a str,
+    declaring_class: &'a ClassDecl,
+    class_file: usize,
 }
 
-/// The outcome of walking a class's same-file inheritance chain for a method.
+/// The outcome of walking a class's inheritance chain for a method.
 enum Resolution<'a> {
-    /// A concrete, in-file method body was found.
     Found(ResolvedMethod<'a>),
-    /// The whole chain is in-file and ends at a root with no such method (for a
-    /// constructor this means PHP's default constructor — no args checked).
     NotFoundChainComplete,
-    /// The chain left the file, hit a trait-using class, or hit an abstract
-    /// method whose concrete body lives in an out-of-file subclass — give up.
     Unknown,
 }
 
-/// Walk `start_class`'s same-file inheritance chain looking for a concrete
-/// `method`, most-derived first. Gives up (`Unknown`) the instant the chain
-/// leaves the file or reaches a trait-using class — the FP-safe boundary.
-fn resolve_in_chain<'a>(
-    classes: &'a [ClassDecl],
-    start_class: &str,
-    method: &str,
-) -> Resolution<'a> {
-    let mut cur = start_class.to_owned();
-    // Guard against pathological cyclic `extends` (illegal PHP, but be safe).
+/// Walk `start_fqn`'s project inheritance chain for a concrete `method`.
+fn resolve_in_chain<'a>(cx: &Cx<'a>, start_fqn: &str, method: &str) -> Resolution<'a> {
+    let mut cur = start_fqn.to_owned();
     let mut seen: HashSet<String> = HashSet::new();
     loop {
         if !seen.insert(cur.to_ascii_lowercase()) {
             return Resolution::Unknown;
         }
-        let Some(cd) = find_class(classes, &cur) else {
-            return Resolution::Unknown; // chain leaves the file
+        let Some((cfile, cd)) = cx.find_class(&cur) else {
+            return Resolution::Unknown; // chain leaves the project
         };
         if cd.uses_traits {
-            return Resolution::Unknown; // trait bodies live elsewhere
+            return Resolution::Unknown;
         }
         if let Some(m) = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method)) {
             return if m.is_abstract {
-                // A concrete override must be in an out-of-file subclass.
                 Resolution::Unknown
             } else {
-                Resolution::Found(ResolvedMethod { method: m, declaring_class: &cd.name })
+                Resolution::Found(ResolvedMethod { method: m, declaring_class: cd, class_file: cfile })
             };
         }
         match &cd.parent {
             None => return Resolution::NotFoundChainComplete,
-            Some(p) => cur = p.clone(),
+            Some(pref) => cur = cx.units[cfile].tree.resolve_class_fqn(pref),
         }
     }
 }
 
-/// The first same-file class named `name` (case-insensitive).
-fn find_class<'a>(classes: &'a [ClassDecl], name: &str) -> Option<&'a ClassDecl> {
-    classes.iter().find(|c| c.name.eq_ignore_ascii_case(name))
-}
-
-/// A resolved call target: the method to check/descend, plus the exact `$this`
-/// class its body runs with (`Some` iff dispatched on an exact receiver).
+/// A resolved call target.
 struct CallTarget<'a> {
     method: &'a MethodDecl,
-    declaring_class: &'a str,
+    declaring_class: &'a ClassDecl,
+    class_file: usize,
     this_exact: Option<String>,
 }
 
-/// Resolve a method/static/constructor `receiver` to a same-file target under
-/// the sound dispatch rules, or `None` (silent) when dispatch is uncertain, the
-/// chain leaves the file, or the call would be a PHP fatal we do not report.
+/// Resolve a method/static/constructor `receiver` to a project target.
 fn resolve_call_target<'a>(
-    cx: &'a Cx,
+    cx: &Cx<'a>,
     receiver: &Callee,
     classes_env: &HashMap<String, String>,
     this_exact: Option<&str>,
@@ -1427,15 +1735,14 @@ fn resolve_call_target<'a>(
     poisoned: bool,
 ) -> Option<CallTarget<'a>> {
     match receiver {
-        // `new Foo(...)` constructs exactly Foo → exact resolution of __construct.
         Callee::Construct { class } => {
-            resolve_exact(cx, class, "__construct", enclosing_class, Some(class.clone()))
+            let fqn = cx.class_fqn(class);
+            resolve_exact(cx, &fqn, "__construct", enclosing_class, Some(fqn.clone()))
         }
-        // `(new Foo())->m()` — exact receiver.
         Callee::Method { receiver: Receiver::New(class), method } => {
-            resolve_exact(cx, class, method, enclosing_class, Some(class.clone()))
+            let fqn = cx.class_fqn(class);
+            resolve_exact(cx, &fqn, method, enclosing_class, Some(fqn.clone()))
         }
-        // `$x->m()` — exact only when the env knows `$x`'s class.
         Callee::Method { receiver: Receiver::Var(v), method } => {
             if poisoned {
                 return None;
@@ -1443,106 +1750,100 @@ fn resolve_call_target<'a>(
             let class = classes_env.get(v)?;
             resolve_exact(cx, class, method, enclosing_class, Some(class.clone()))
         }
-        // `$this->m()` — exact when `$this` is known exactly (descent), else the
-        // final/private guard (a subclass override could receive the call).
         Callee::Method { receiver: Receiver::This, method } => {
             let enclosing = enclosing_class?;
             match this_exact {
-                Some(exact) => {
-                    resolve_exact(cx, exact, method, enclosing_class, Some(exact.to_owned()))
-                }
+                Some(exact) => resolve_exact(cx, exact, method, enclosing_class, Some(exact.to_owned())),
                 None => resolve_guarded(cx, enclosing, method, enclosing_class),
             }
         }
-        // `self::m()` — conservative final/private guard (early-bound in PHP, but
-        // the guard is only ever stricter, so it stays sound).
         Callee::Static { class: StaticClass::SelfKw, method } => {
             let enclosing = enclosing_class?;
             resolve_guarded(cx, enclosing, method, enclosing_class)
         }
-        // `parent::m()` — the parent chain, exact (parent is fixed at compile time).
         Callee::Static { class: StaticClass::Parent, method } => {
-            let parent = find_class(cx.classes, enclosing_class?)?.parent.as_deref()?;
-            resolve_static_named(cx, parent, method, enclosing_class)
+            let parent = cx.parent_fqn(enclosing_class?)?;
+            resolve_static_named(cx, &parent, method, enclosing_class)
         }
-        // `Foo::m()` — explicit class, exact (a subclass override only affects
-        // `static::`, never `Foo::`).
         Callee::Static { class: StaticClass::Named(name), method } => {
-            resolve_static_named(cx, name, method, enclosing_class)
+            let fqn = cx.class_fqn(name);
+            resolve_static_named(cx, &fqn, method, enclosing_class)
         }
-        // `static::m()` — late static binding, always unknown.
         Callee::Static { class: StaticClass::Static, .. } => None,
         Callee::Function(_) | Callee::Dynamic => None,
     }
 }
 
-/// Resolve an exact-receiver instance call (`new Foo()->m()`, `$x->m()` with a
-/// known class, exact `$this->m()`): any override-uncertainty is absent, so no
-/// final guard — only the private-visibility skip applies.
+/// Resolve an exact-receiver instance/constructor call (no override guard).
 fn resolve_exact<'a>(
-    cx: &'a Cx,
+    cx: &Cx<'a>,
     class: &str,
     method: &str,
     enclosing_class: Option<&str>,
     this_exact: Option<String>,
 ) -> Option<CallTarget<'a>> {
-    match resolve_in_chain(cx.classes, class, method) {
-        Resolution::Found(r) if !private_blocked(&r, enclosing_class) => {
-            Some(CallTarget { method: r.method, declaring_class: r.declaring_class, this_exact })
-        }
+    match resolve_in_chain(cx, class, method) {
+        Resolution::Found(r) if !private_blocked(&r, enclosing_class) => Some(CallTarget {
+            method: r.method,
+            declaring_class: r.declaring_class,
+            class_file: r.class_file,
+            this_exact,
+        }),
         _ => None,
     }
 }
 
-/// Resolve a `$this->`/`self::` call under the override guard: resolvable only
-/// when the found method is `private`, `final`, or its declaring class is
-/// `final` (else a subclass override elsewhere could receive the call). The body
-/// runs with an *open* `$this` (a subclass instance), so `this_exact` is `None`.
+/// Resolve a `$this->`/`self::` call under the override guard.
 fn resolve_guarded<'a>(
-    cx: &'a Cx,
+    cx: &Cx<'a>,
     class: &str,
     method: &str,
     enclosing_class: Option<&str>,
 ) -> Option<CallTarget<'a>> {
-    let Resolution::Found(r) = resolve_in_chain(cx.classes, class, method) else { return None };
+    let Resolution::Found(r) = resolve_in_chain(cx, class, method) else { return None };
     if private_blocked(&r, enclosing_class) {
         return None;
     }
-    let declaring_final = find_class(cx.classes, r.declaring_class).is_some_and(|c| c.is_final);
+    let declaring_final = r.declaring_class.is_final;
     let final_or_private =
         r.method.is_final || r.method.visibility == Visibility::Private || declaring_final;
     if !final_or_private {
-        return None; // a non-final public method may be overridden elsewhere.
+        return None;
     }
-    Some(CallTarget { method: r.method, declaring_class: r.declaring_class, this_exact: None })
+    Some(CallTarget {
+        method: r.method,
+        declaring_class: r.declaring_class,
+        class_file: r.class_file,
+        this_exact: None,
+    })
 }
 
-/// Resolve an explicit `Foo::m()` / `parent::m()` static call (exact). Guards
-/// against the PHP-fatal case of calling a non-static instance method statically
-/// from *outside* any class context (where the fatal would mask our finding).
+/// Resolve an explicit `Foo::m()` / `parent::m()` static call (exact).
 fn resolve_static_named<'a>(
-    cx: &'a Cx,
+    cx: &Cx<'a>,
     class: &str,
     method: &str,
     enclosing_class: Option<&str>,
 ) -> Option<CallTarget<'a>> {
-    let Resolution::Found(r) = resolve_in_chain(cx.classes, class, method) else { return None };
+    let Resolution::Found(r) = resolve_in_chain(cx, class, method) else { return None };
     if private_blocked(&r, enclosing_class) {
         return None;
     }
-    // A non-static method called statically from outside a class is a fatal.
     if !r.method.is_static && enclosing_class.is_none() {
         return None;
     }
-    Some(CallTarget { method: r.method, declaring_class: r.declaring_class, this_exact: None })
+    Some(CallTarget {
+        method: r.method,
+        declaring_class: r.declaring_class,
+        class_file: r.class_file,
+        this_exact: None,
+    })
 }
 
-/// Whether a resolved `private` method is invisible at the call site (a private
-/// method is callable only from within its declaring class). Non-private
-/// methods are never blocked here.
+/// Whether a resolved `private` method is invisible at the call site.
 fn private_blocked(r: &ResolvedMethod, enclosing_class: Option<&str>) -> bool {
     r.method.visibility == Visibility::Private
-        && !enclosing_class.is_some_and(|e| e.eq_ignore_ascii_case(r.declaring_class))
+        && !enclosing_class.is_some_and(|e| e.eq_ignore_ascii_case(&r.declaring_class.fqn))
 }
 
 /// Check + descend one method / static / constructor call.
@@ -1559,39 +1860,31 @@ fn handle_method_call(
     descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
 ) {
-    // Named/spread arguments make positional mapping unreliable — skip.
     if !call.positional_only {
         return;
     }
-    let Some(target) = resolve_call_target(
-        cx,
-        &call.receiver,
-        classes_env,
-        this_exact,
-        enclosing_class,
-        scope.poisoned,
-    ) else {
+    let Some(target) =
+        resolve_call_target(cx, &call.receiver, classes_env, this_exact, enclosing_class, scope.poisoned)
+    else {
         return;
     };
 
-    let callee_name = diag_callee_name(&call.receiver, target.declaring_class, &target.method.name);
-
-    // 1. Check the arguments passed *at this call site* (literals + resolved
-    // `$var`/const-fn/folded values) against the resolved method's params.
+    let callee_name = format!("{}::{}", target.declaring_class.name, target.method.name);
     check_method_args(cx, folder, target.method, &callee_name, call, env, scope.poisoned, out);
 
-    // 2. Descend into the method body with the params bound and the exact `$this`
-    // class (when known) so nested `$this->…` resolves.
-    let Some(callee_scope) = cx.method_scope(target.declaring_class, &target.method.name) else {
+    let Some(callee_scope) =
+        cx.method_scope(target.class_file, &target.declaring_class.fqn, &target.method.name)
+    else {
         return;
     };
-    let display = display_of_call(&call.receiver, target.declaring_class, &target.method.name);
+    let display = display_of_call(&call.receiver, &target.declaring_class.name, &target.method.name);
     descend(
         cx,
         folder,
         &target.method.params,
+        target.class_file,
         callee_scope,
-        &format!("{}::{}", target.declaring_class, target.method.name),
+        &format!("{}::{}", target.declaring_class.fqn, target.method.name),
         &display,
         target.this_exact,
         call,
@@ -1602,26 +1895,15 @@ fn handle_method_call(
     );
 }
 
-/// The callee spelling for a `type.argument-mismatch` message: `Class::method`
-/// (constructors render as `Class::__construct`), where `Class` is the class
-/// that actually declares the resolved method.
-fn diag_callee_name(_receiver: &Callee, declaring_class: &str, method: &str) -> String {
-    format!("{declaring_class}::{method}")
-}
-
-/// The provenance render base for a bound method/constructor call: `new Foo` for
-/// a constructor (so `render_call` yields `new Foo("abc")`), else `Class::method`.
+/// The provenance render base for a bound method/constructor call.
 fn display_of_call(receiver: &Callee, declaring_class: &str, method: &str) -> String {
     match receiver {
-        Callee::Construct { class } => format!("new {class}"),
+        Callee::Construct { class } => format!("new {}", class.simple()),
         _ => format!("{declaring_class}::{method}"),
     }
 }
 
 /// Check the arguments of a resolved method/constructor call at its call site.
-/// Unlike the function direct pass, this covers **literal** arguments too (no
-/// separate direct pass reaches method calls). Non-literal resolved values
-/// (notably `new` receivers) never flow into a scalar type check.
 #[allow(clippy::too_many_arguments)]
 fn check_method_args(
     cx: &Cx,
@@ -1653,9 +1935,7 @@ fn check_method_args(
             ArgValue::Call(name, args) => {
                 if args.is_empty() {
                     cx.resolve_const_fn(name)
-                        .map(|(lit, line)| {
-                            (lit, Some(format!("from {name}(), defined at line {line}")))
-                        })
+                        .map(|(lit, line)| (lit, Some(format!("from {name}(), defined at line {line}"))))
                         .or_else(|| cx.try_fold(name, args, folder).map(|(l, p)| (l, Some(p))))
                 } else {
                     cx.try_fold(name, args, folder).map(|(l, p)| (l, Some(p)))
@@ -1664,12 +1944,10 @@ fn check_method_args(
             _ => None,
         };
         let Some((value, prov)) = resolved else { continue };
-        // Only concrete scalar literals are ever checked (a `new` receiver etc.
-        // resolves to a non-literal and is skipped — object→scalar is out of scope).
         if !value.is_literal() {
             continue;
         }
-        if is_type_error(cx.strict, ty, &value) {
+        if is_type_error(cx.strict(), ty, &value) {
             out.push(cx.diagnostic(
                 arg.span.start,
                 &value,
@@ -1682,168 +1960,14 @@ fn check_method_args(
     }
 }
 
-impl Cx<'_> {
-    /// Resolve an [`ArgValue`] to a concrete literal, if this slice can prove
-    /// one: a bare literal, a currently-known variable, or a zero-argument call
-    /// to a same-file constant function. `poisoned` disables variable resolution
-    /// entirely (nothing is ever known in a poisoned scope).
-    fn resolve_literal(
-        &self,
-        value: &ArgValue,
-        env: &HashMap<String, Known>,
-        poisoned: bool,
-        folder: &mut dyn Folder,
-    ) -> Option<ArgValue> {
-        if poisoned {
-            return None;
-        }
-        match value {
-            v if v.is_literal() => Some(v.clone()),
-            ArgValue::Var(name) => env.get(name).map(|k| k.value.clone()),
-            ArgValue::Call(name, args) => {
-                if args.is_empty()
-                    && let Some((lit, _line)) = self.resolve_const_fn(name)
-                {
-                    return Some(lit);
-                }
-                self.try_fold(name, args, folder).map(|(lit, _prov)| lit)
-            }
-            _ => None,
-        }
-    }
+// ---------------------------------------------------------------------------
+// Value / type helpers (unchanged from the per-file slice).
+// ---------------------------------------------------------------------------
 
-    /// Try to fold an allowlisted builtin call over literal arguments, returning
-    /// the folded literal and its provenance string (`folded from f("x")`).
-    ///
-    /// The gate (ADR-0004 / ADR-0008): the callee must NOT be a same-file user
-    /// function, [`steins_catalog::foldable`] must permit it, and every argument
-    /// must already be a literal the IR carries. Only then is the `folder` asked.
-    fn try_fold(
-        &self,
-        name: &str,
-        args: &[ArgValue],
-        folder: &mut dyn Folder,
-    ) -> Option<(ArgValue, String)> {
-        // A same-file user function is never folded via the sidecar (the const
-        // function path handles the zero-arg case; anything else is unknown).
-        if self.functions.iter().any(|f| f.name == name) {
-            return None;
-        }
-        if !steins_catalog::foldable(name) {
-            return None;
-        }
-        // Inner arguments must be literals directly — we do not resolve nested
-        // variables here (keeps the gate simple and the fold self-contained).
-        if !args.iter().all(ArgValue::is_literal) {
-            return None;
-        }
-        let folded = folder.fold(name, args)?;
-        Some((folded, format!("folded from {}", render_call(name, args))))
-    }
-
-    /// The unique body scope of the same-file user function `name`, or `None`
-    /// when there is no such scope or more than one (ambiguous → give up).
-    fn unique_scope(&self, name: &str) -> Option<&'_ Scope> {
-        let mut it =
-            self.tree.scopes().iter().filter(|s| s.function_name.as_deref() == Some(name));
-        let scope = it.next()?;
-        if it.next().is_some() { None } else { Some(scope) }
-    }
-
-    /// Resolve a zero-argument same-file constant function: its body must be
-    /// exactly `[Return(literal)]`, it must be unambiguous, take no parameters,
-    /// and its scope must not be poisoned. Returns the literal and the function's
-    /// definition line.
-    fn resolve_const_fn(&self, name: &str) -> Option<(ArgValue, u32)> {
-        // Unique declaration, zero parameters.
-        let mut decls = self.functions.iter().filter(|f| f.name == name);
-        let decl = decls.next()?;
-        if decls.next().is_some() || !decl.params.is_empty() {
-            return None;
-        }
-        // Unique scope for this function.
-        let mut scopes =
-            self.tree.scopes().iter().filter(|s| s.function_name.as_deref() == Some(name));
-        let scope = scopes.next()?;
-        if scopes.next().is_some() || scope.poisoned {
-            return None;
-        }
-        // Body is exactly one `return <literal>;`.
-        let [stmt] = scope.stmts.as_slice() else { return None };
-        let StmtKind::Return { value, .. } = &stmt.kind else { return None };
-        if !value.is_literal() {
-            return None;
-        }
-        Some((value.clone(), self.tree.position(decl.span.start).line))
-    }
-
-    /// The unique method body scope for `class::method` (case-insensitive), or
-    /// `None` if absent or ambiguous.
-    fn method_scope(&self, class: &str, method: &str) -> Option<&'_ Scope> {
-        let mut it = self.tree.scopes().iter().filter(|s| {
-            matches!(&s.owner, ScopeOwner::Method { class: c, method: m }
-                if c.eq_ignore_ascii_case(class) && m.eq_ignore_ascii_case(method))
-        });
-        let scope = it.next()?;
-        if it.next().is_some() { None } else { Some(scope) }
-    }
-
-    /// Build a `type.argument-mismatch` diagnostic for a call to `callee`'s
-    /// parameter `param_name`. With `provenance`, the message names the value's
-    /// origin hop; without, it is the direct-literal message (byte-for-byte
-    /// identical to the pre-propagation output).
-    #[allow(clippy::too_many_arguments)]
-    fn diagnostic(
-        &self,
-        offset: u32,
-        value: &ArgValue,
-        provenance: Option<&str>,
-        callee: &str,
-        param_name: &str,
-        ty: ParamType,
-    ) -> Diagnostic {
-        let pos = self.tree.position(offset);
-        let mode = if self.strict { "strict" } else { "coercive" };
-        let message = match provenance {
-            Some(p) => format!(
-                "argument {} ({}) to {}() cannot become {} ${} — proven TypeError ({} mode)",
-                value.render(), p, callee, ty.scalar.keyword(), param_name, mode,
-            ),
-            None => format!(
-                "argument {} to {}() cannot become {} ${} — proven TypeError ({} mode)",
-                value.render(), callee, ty.scalar.keyword(), param_name, mode,
-            ),
-        };
-        Diagnostic {
-            id: ID,
-            path: self.path.to_owned(),
-            line: pos.line,
-            column: pos.column,
-            message,
-        }
-    }
-}
-
-/// Render a call with its literal arguments for a folding provenance string,
-/// e.g. `strtolower("ABC")` or `str_repeat("ab", 3)`.
+/// Render a call with its literal arguments for a folding provenance string.
 fn render_call(name: &str, args: &[ArgValue]) -> String {
     let inner: Vec<String> = args.iter().map(ArgValue::render).collect();
     format!("{name}({})", inner.join(", "))
-}
-
-/// Resolve a call's callee to the *unique* same-file user function, honoring the
-/// positional-only requirement. Ambiguity or a dynamic callee → `None`.
-fn resolve_callee<'a>(functions: &'a [FunctionDecl], call: &CallExpr) -> Option<&'a FunctionDecl> {
-    if !call.positional_only {
-        return None;
-    }
-    let callee = call.callee.as_deref()?;
-    let mut matches = functions.iter().filter(|f| f.name == callee);
-    let decl = matches.next()?;
-    if matches.next().is_some() {
-        return None; // redeclaration; not our call to make.
-    }
-    Some(decl)
 }
 
 /// The simple scalar type of parameter `i`, or `None` when the argument should
@@ -1856,25 +1980,19 @@ fn param_scalar_type(params: &[Param], i: usize) -> Option<ParamType> {
     param.ty
 }
 
-/// Whether argument `i` binds to a variadic parameter (so it, and every later
-/// argument, must be skipped).
+/// Whether argument `i` binds to a variadic parameter.
 fn arg_binds_to_variadic(params: &[Param], i: usize) -> bool {
     params.get(i).is_some_and(|p| p.variadic)
 }
 
 /// The truth table: does passing `arg` to a parameter of type `ty` provably
-/// raise a `TypeError` under PHP 8.1+ (given `strict` = `declare(strict_types=1)`)?
-///
-/// The bar is *provable breakage*. When unsure, return `false` (silent).
+/// raise a `TypeError` under PHP 8.1+ (given `strict`)?
 fn is_type_error(strict: bool, ty: ParamType, arg: &ArgValue) -> bool {
-    // `null` is special and mode-independent: it satisfies a nullable param and
-    // otherwise always errors — userland functions never coerce `null`.
     if matches!(arg, ArgValue::Null) {
         return !ty.nullable;
     }
 
     if strict {
-        // Strict mode: no scalar coercion, with the single exception of int→float.
         match ty.scalar {
             ScalarType::Int => !matches!(arg, ArgValue::Int(_)),
             ScalarType::Float => !matches!(arg, ArgValue::Int(_) | ArgValue::Float(_)),
@@ -1882,8 +2000,6 @@ fn is_type_error(strict: bool, ty: ParamType, arg: &ArgValue) -> bool {
             ScalarType::Bool => !matches!(arg, ArgValue::Bool(_)),
         }
     } else {
-        // Coercive mode: the only literal TypeErrors are non-numeric strings into
-        // a numeric (int|float) parameter. Everything else coerces silently.
         match ty.scalar {
             ScalarType::Int | ScalarType::Float => match arg {
                 ArgValue::Str(s) => !php_is_numeric(s),
@@ -1894,77 +2010,47 @@ fn is_type_error(strict: bool, ty: ParamType, arg: &ArgValue) -> bool {
     }
 }
 
-/// The value a parameter of type `ty` actually holds when `value` is passed to
-/// it under `strict`, or `None` when the pass would fatal at entry (a TypeError
-/// already reported at the outer site by the direct/propagation check) **or**
-/// when the coercion is one this slice is not certain about (silence is safe —
-/// ADR-0002 zero-FP).
-///
-/// This is Feature B's descend-value computation: only when a bound literal
-/// *passes* the callee's entry check do we analyze its body, and we do so with
-/// the post-coercion value (`"5"` into an int parameter becomes int `5` in
-/// coercive mode; under strict it would have fataled, so we never reach here).
-///
-/// The table is deliberately partial. Value precision only ever affects a
-/// downstream finding through the numeric-string-into-numeric rule, so the one
-/// risk is producing a string whose numericness we get wrong. We therefore emit
-/// only strings we can render exactly (`int`/`bool`→`string`) and decline
-/// `float`→`string` (PHP's rendering depends on the `precision` ini) by widening
-/// to `None`. `int`/`float`/`bool` descend values never trigger a downstream
-/// coercive TypeError, so their exact magnitude is immaterial.
+/// The value a parameter of type `ty` holds when `value` is passed under
+/// `strict`, or `None` when the pass fatals at entry or the coercion is
+/// uncertain (silence is safe — ADR-0002).
 fn coerce_into_param(strict: bool, ty: ParamType, value: &ArgValue) -> Option<ArgValue> {
-    // Entry check first: a value that fatals never reaches the callee's body.
     if is_type_error(strict, ty, value) {
         return None;
     }
-    // `null` into a nullable parameter stays `null` (non-nullable already
-    // rejected by the entry check above).
     if matches!(value, ArgValue::Null) {
         return Some(ArgValue::Null);
     }
     Some(match (ty.scalar, value) {
-        // Identity: the value already matches the target scalar.
         (ScalarType::Int, ArgValue::Int(_))
         | (ScalarType::Float, ArgValue::Float(_))
         | (ScalarType::String, ArgValue::Str(_))
         | (ScalarType::Bool, ArgValue::Bool(_)) => value.clone(),
 
-        // int -> float widening (permitted in both modes).
         (ScalarType::Float, ArgValue::Int(i)) => ArgValue::Float(*i as f64),
 
-        // The rest are coercive-only (strict would have fataled at entry):
-        // numeric string -> int / float.
         (ScalarType::Int, ArgValue::Str(s)) => ArgValue::Int(php_str_to_int(s)?),
         (ScalarType::Float, ArgValue::Str(s)) => ArgValue::Float(php_str_to_float(s)?),
-        // float / bool -> int.
         (ScalarType::Int, ArgValue::Float(f)) => ArgValue::Int(php_float_to_int(*f)?),
         (ScalarType::Int, ArgValue::Bool(b)) => ArgValue::Int(i64::from(*b)),
-        // bool -> float.
         (ScalarType::Float, ArgValue::Bool(b)) => ArgValue::Float(if *b { 1.0 } else { 0.0 }),
-        // -> bool (well-defined truthiness).
         (ScalarType::Bool, ArgValue::Int(i)) => ArgValue::Bool(*i != 0),
         (ScalarType::Bool, ArgValue::Float(f)) => ArgValue::Bool(*f != 0.0),
         (ScalarType::Bool, ArgValue::Str(s)) => ArgValue::Bool(!(s.is_empty() || s == "0")),
-        // int / bool -> string (rendered exactly).
         (ScalarType::String, ArgValue::Int(i)) => ArgValue::Str(i.to_string()),
         (ScalarType::String, ArgValue::Bool(b)) => {
             ArgValue::Str(if *b { "1".to_owned() } else { String::new() })
         }
 
-        // Anything else — notably float -> string — is uncertain: widen.
         _ => return None,
     })
 }
 
-/// Whitespace PHP trims before interpreting a numeric string (matches
-/// [`php_is_numeric`]).
+/// Whitespace PHP trims before interpreting a numeric string.
 fn php_trim(s: &str) -> &str {
     s.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c'))
 }
 
-/// Convert a PHP *numeric string* (already validated by [`php_is_numeric`]) to
-/// the int it coerces to: integer form parses directly, float form truncates
-/// toward zero. `None` only on the unreachable non-numeric path.
+/// Convert a PHP numeric string to the int it coerces to.
 fn php_str_to_int(s: &str) -> Option<i64> {
     let t = php_trim(s);
     if let Ok(i) = t.parse::<i64>() {
@@ -1978,15 +2064,12 @@ fn php_str_to_float(s: &str) -> Option<f64> {
     php_trim(s).parse::<f64>().ok()
 }
 
-/// Truncate a float toward zero to an int (PHP scalar coercion). Non-finite
-/// floats have no well-defined int and widen to `None`.
+/// Truncate a float toward zero to an int (PHP scalar coercion).
 fn php_float_to_int(f: f64) -> Option<i64> {
     f.is_finite().then(|| f.trunc() as i64)
 }
 
-/// PHP 8 `is_numeric` semantics: optional leading/trailing whitespace, optional
-/// sign, decimal integer or float with optional exponent. Hex, `inf`, and `nan`
-/// are *not* numeric strings.
+/// PHP 8 `is_numeric` semantics.
 fn php_is_numeric(s: &str) -> bool {
     let s = s.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c'));
     let bytes = s.as_bytes();
