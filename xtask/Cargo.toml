@@ -16,6 +16,7 @@ publish = false
 steins-syntax = { path = "../crates/steins-syntax" }
 steins-db = { path = "../crates/steins-db" }
 steins-infer = { path = "../crates/steins-infer" }
+steins-phpdoc = { path = "../crates/steins-phpdoc" }
 
 rayon.workspace = true
 toml.workspace = true

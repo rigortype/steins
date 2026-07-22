@@ -882,6 +882,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "steins-phpdoc"
+version = "0.0.0"
+
+[[package]]
 name = "steins-sidecar"
 version = "0.0.0"
 dependencies = [
@@ -1178,6 +1182,7 @@ dependencies = [
  "serde",
  "steins-db",
  "steins-infer",
+ "steins-phpdoc",
  "steins-syntax",
  "toml",
 ]
