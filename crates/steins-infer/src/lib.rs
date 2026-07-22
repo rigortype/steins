@@ -32,12 +32,17 @@ use steins_sidecar::{FoldArg, FoldResult, FoldValue, Sidecar};
 use steins_syntax::CallExpr;
 use steins_syntax::{
     ArgValue, Callee, ClassDecl, EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, MethodDecl,
-    NameRef, Param, ParamType, Receiver, RefKind, ScalarType, Scope, ScopeOwner, SourceTree,
-    StaticClass, StmtKind, Visibility,
+    NameRef, NativeType, Param, Receiver, RefKind, ScalarType, Scope, ScopeOwner, SourceTree,
+    StaticClass, StmtKind, TypeMember, Visibility,
 };
 
 /// The registry id for the `type.argument-mismatch` proof-layer check (ADR-0022).
 pub const ID: &str = "type.argument-mismatch";
+
+/// The registry id for the `type.return-mismatch` proof-layer check (ADR-0022):
+/// a function/method whose return type is a native scalar/union and one of its
+/// (trace-visible) `return <literal>;` statements provably raises a `TypeError`.
+pub const RETURN_ID: &str = "type.return-mismatch";
 
 /// The registry id for the effect-envelope check (ADR-0005/0022): a function
 /// declared `#[\Steins\Pure]` / `#[\Steins\Effect(...)]` whose inferred effects
@@ -456,7 +461,7 @@ fn check_units(units: &[FileUnit], index: &Index, folder: &mut dyn Folder) -> Ve
             let Some(site) = cx.resolve_user_fn(call) else { continue };
             let decl = cx.fn_decl(site);
             for (i, arg) in call.args.iter().enumerate() {
-                let Some(ty) = param_scalar_type(&decl.params, i) else {
+                let Some(ty) = param_native_type(&decl.params, i) else {
                     if arg_binds_to_variadic(&decl.params, i) {
                         break;
                     }
@@ -1325,21 +1330,71 @@ impl<'a> Cx<'a> {
         provenance: Option<&str>,
         callee: &str,
         param_name: &str,
-        ty: ParamType,
+        ty: &NativeType,
     ) -> Diagnostic {
         let pos = self.tree().position(offset);
         let mode = if self.strict() { "strict" } else { "coercive" };
         let message = match provenance {
             Some(p) => format!(
                 "argument {} ({}) to {}() cannot become {} ${} — proven TypeError ({} mode)",
-                value.render(), p, callee, ty.scalar.keyword(), param_name, mode,
+                value.render(), p, callee, ty.render(), param_name, mode,
             ),
             None => format!(
                 "argument {} to {}() cannot become {} ${} — proven TypeError ({} mode)",
-                value.render(), callee, ty.scalar.keyword(), param_name, mode,
+                value.render(), callee, ty.render(), param_name, mode,
             ),
         };
         Diagnostic { id: ID, path: self.path().to_owned(), line: pos.line, column: pos.column, message }
+    }
+
+    /// Build a `type.return-mismatch` diagnostic. `display` is the owning
+    /// function/method name (`f`, `Foo::bar`); `mode` is governed by the owning
+    /// file's `declare(strict_types=1)` — the file this `Cx` points at.
+    fn return_diagnostic(
+        &self,
+        offset: u32,
+        value: &ArgValue,
+        ret: &NativeType,
+        display: &str,
+    ) -> Diagnostic {
+        let pos = self.tree().position(offset);
+        let mode = if self.strict() { "strict" } else { "coercive" };
+        let message = format!(
+            "return {} cannot become {} (return type of {}()) — proven TypeError ({} mode)",
+            value.render(),
+            ret.render(),
+            display,
+            mode,
+        );
+        Diagnostic {
+            id: RETURN_ID,
+            path: self.path().to_owned(),
+            line: pos.line,
+            column: pos.column,
+            message,
+        }
+    }
+
+    /// The native return type and display name of a scope's owning function or
+    /// method (the same file this `Cx` points at), or `None` for the top-level
+    /// script scope or an owner with no native scalar/union return type.
+    fn scope_return(&self, scope: &Scope) -> Option<(&'a NativeType, String)> {
+        match &scope.owner {
+            ScopeOwner::TopLevel => None,
+            ScopeOwner::Function(name) => {
+                let f =
+                    self.tree().functions().iter().find(|f| f.name.eq_ignore_ascii_case(name))?;
+                f.ret.as_ref().map(|r| (r, f.name.clone()))
+            }
+            ScopeOwner::Method { class, method } => {
+                // `owner.class` is the case-preserved FQN; `ClassDecl.fqn` is
+                // lowercase-normalized — compare case-insensitively.
+                let cd =
+                    self.tree().classes().iter().find(|c| c.fqn.eq_ignore_ascii_case(class))?;
+                let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
+                m.ret.as_ref().map(|r| (r, format!("{}::{}", cd.name, m.name)))
+            }
+        }
     }
 }
 
@@ -1376,6 +1431,15 @@ fn analyze_scope(
 ) {
     let enclosing_class = scope_class(scope);
 
+    // The owning function/method's native return type, resolved once. Return-type
+    // checking runs only in the plain per-scope pass (`descent.is_none()`), never
+    // under an interprocedural binding descent: a descent rebinds the *callee's*
+    // parameters, not its return, so re-checking there would only duplicate the
+    // per-scope finding (and the file's own strict mode already governs it). The
+    // returned value is resolved against the *file's own* `strict` via `cx`.
+    let ret_info: Option<(&NativeType, String)> =
+        if descent.is_none() { cx.scope_return(scope) } else { None };
+
     for stmt in &scope.stmts {
         // 1. Check + descend every statically-named call this statement carries.
         for call in checkable_calls(&stmt.kind) {
@@ -1400,6 +1464,19 @@ fn analyze_scope(
                 }
                 Callee::Dynamic => {}
             }
+        }
+
+        // 1b. Return-type check: a trace-visible `return <literal>;` whose value
+        // resolves to a proven literal (direct literal, env-known var, folded
+        // call, or const-fn) that provably fails the owner's native return type.
+        // Returns nested inside control flow live in `Opaque` and never surface
+        // here — an accepted limitation (only top-of-trace returns are checked).
+        if let (Some((ret, display)), StmtKind::Return { value, span, .. }) =
+            (&ret_info, &stmt.kind)
+            && let Some(lit) = cx.resolve_literal(value, &env, scope.poisoned, folder)
+            && is_type_error(cx.strict(), ret, &lit)
+        {
+            out.push(cx.return_diagnostic(span.start, &lit, ret, display));
         }
 
         // 2. Apply the statement's own effect on the known-value environment.
@@ -1504,7 +1581,7 @@ fn check_propagated_call(
     let decl = cx.fn_decl(site);
 
     for (i, arg) in call.args.iter().enumerate() {
-        let Some(ty) = param_scalar_type(&decl.params, i) else {
+        let Some(ty) = param_native_type(&decl.params, i) else {
             if arg_binds_to_variadic(&decl.params, i) {
                 break;
             }
@@ -1612,7 +1689,7 @@ fn descend(
         if param.by_ref {
             return;
         }
-        let Some(ty) = param.ty else {
+        let Some(ty) = param.ty.as_ref() else {
             bound.push((param.name.clone(), value));
             continue;
         };
@@ -1943,7 +2020,7 @@ fn check_method_args(
     out: &mut Vec<Diagnostic>,
 ) {
     for (i, arg) in call.args.iter().enumerate() {
-        let Some(ty) = param_scalar_type(&method.params, i) else {
+        let Some(ty) = param_native_type(&method.params, i) else {
             if arg_binds_to_variadic(&method.params, i) {
                 break;
             }
@@ -1997,14 +2074,15 @@ fn render_call(name: &str, args: &[ArgValue]) -> String {
     format!("{name}({})", inner.join(", "))
 }
 
-/// The simple scalar type of parameter `i`, or `None` when the argument should
-/// be skipped (past the last declared param, variadic, by-ref, or untyped).
-fn param_scalar_type(params: &[Param], i: usize) -> Option<ParamType> {
+/// The native scalar/union type of parameter `i`, or `None` when the argument
+/// should be skipped (past the last declared param, variadic, by-ref, untyped,
+/// or a non-scalar/complex type).
+fn param_native_type(params: &[Param], i: usize) -> Option<&NativeType> {
     let param = params.get(i)?;
     if param.variadic || param.by_ref {
         return None;
     }
-    param.ty
+    param.ty.as_ref()
 }
 
 /// Whether argument `i` binds to a variadic parameter.
@@ -2012,42 +2090,129 @@ fn arg_binds_to_variadic(params: &[Param], i: usize) -> bool {
     params.get(i).is_some_and(|p| p.variadic)
 }
 
-/// The truth table: does passing `arg` to a parameter of type `ty` provably
-/// raise a `TypeError` under PHP 8.1+ (given `strict`)?
-fn is_type_error(strict: bool, ty: ParamType, arg: &ArgValue) -> bool {
-    if matches!(arg, ArgValue::Null) {
-        return !ty.nullable;
+/// The generalized truth table: does passing (or returning) a **literal** `arg`
+/// where a native scalar/union type `ty` is required provably raise a
+/// `TypeError` under PHP 8.1+ (honoring `strict`)?
+///
+/// The table was settled **empirically against PHP 8.5.8** (the analyzer's floor
+/// is 8.1, ADR-0011; these union-coercion rules have been stable since 8.0). The
+/// reproduction snippets and outputs (union members, both modes):
+///
+/// ```text
+/// COERCIVE (error iff the value coerces to NO member):
+///   1.5   -> int|string  => OK  (becomes int 1; the string sink also accepts)
+///   1.5   -> string|bool => OK  (becomes '1.5')
+///   true  -> int|string  => OK  (becomes int 1)
+///   "abc" -> int|float    => TypeError   (non-numeric string, no string sink)
+///   "abc" -> int|false    => TypeError   (false-literal accepts only `false`)
+///   "5"   -> int|float    => OK  (numeric string coerces)
+///   false -> string|false => OK  (matches the `false` literal member exactly)
+///   true  -> string|false => OK  (becomes '1' via the string member)
+///   null  -> int|string   => TypeError   (non-nullable)
+///   0/""/true -> false     => TypeError   (no coercion into a bool-literal)
+/// STRICT (value must match SOME member; only int->float widening is implicit):
+///   1.5   -> int|string  => TypeError   (float, no float member)
+///   true  -> int|string  => TypeError   (bool, no bool/bool-literal member)
+///   5     -> int|float    => OK  (int member; also OK via int->float widening)
+///   false -> string|false => OK  (matches the `false` literal member)
+///   true  -> string|false => TypeError   (`false` literal ≠ `true`; no bool)
+///   5     -> string|false => TypeError   (int, no int member)
+/// ```
+///
+/// Uncertain cells resolve to "not an error" (silence is always safe; ADR-0002).
+fn is_type_error(strict: bool, ty: &NativeType, arg: &ArgValue) -> bool {
+    match arg {
+        // `null` is accepted iff the type is nullable (`?T` or a `null` member).
+        ArgValue::Null => !ty.nullable,
+        // A concrete non-null literal: an error iff no member accepts it.
+        ArgValue::Int(_) | ArgValue::Float(_) | ArgValue::Str(_) | ArgValue::Bool(_) => {
+            if strict {
+                !ty.members.iter().any(|&m| member_accepts_strict(m, arg))
+            } else {
+                !ty.members.iter().any(|&m| member_accepts_coercive(m, arg))
+            }
+        }
+        // Non-literal (`Var`/`Call`/`New`/`Other`): not provable → never an error.
+        ArgValue::Var(_) | ArgValue::Call(..) | ArgValue::New(..) | ArgValue::Other => false,
     }
+}
 
-    if strict {
-        match ty.scalar {
-            ScalarType::Int => !matches!(arg, ArgValue::Int(_)),
-            ScalarType::Float => !matches!(arg, ArgValue::Int(_) | ArgValue::Float(_)),
-            ScalarType::String => !matches!(arg, ArgValue::Str(_)),
-            ScalarType::Bool => !matches!(arg, ArgValue::Bool(_)),
-        }
-    } else {
-        match ty.scalar {
-            ScalarType::Int | ScalarType::Float => match arg {
-                ArgValue::Str(s) => !php_is_numeric(s),
-                _ => false,
-            },
-            ScalarType::String | ScalarType::Bool => false,
-        }
+/// Strict mode: does a single union `member` accept the non-null literal `arg`
+/// *exactly* (the only implicit conversion PHP allows in strict mode is
+/// int→float, so a `float` member also accepts an `int` arg)?
+fn member_accepts_strict(m: TypeMember, arg: &ArgValue) -> bool {
+    match m {
+        TypeMember::Scalar(ScalarType::Int) => matches!(arg, ArgValue::Int(_)),
+        TypeMember::Scalar(ScalarType::Float) => matches!(arg, ArgValue::Int(_) | ArgValue::Float(_)),
+        TypeMember::Scalar(ScalarType::String) => matches!(arg, ArgValue::Str(_)),
+        TypeMember::Scalar(ScalarType::Bool) => matches!(arg, ArgValue::Bool(_)),
+        TypeMember::BoolLiteral(b) => matches!(arg, ArgValue::Bool(v) if *v == b),
+    }
+}
+
+/// Coercive mode: could the non-null literal `arg` be coerced into this single
+/// union `member`? `string`/`bool` are universal sinks for scalars; numeric
+/// members accept int/float/bool and numeric strings only; a bool-literal member
+/// accepts **only** the exact matching bool value (no coercion into it).
+fn member_accepts_coercive(m: TypeMember, arg: &ArgValue) -> bool {
+    match m {
+        // Any scalar coerces to `string` or to `bool`.
+        TypeMember::Scalar(ScalarType::String) | TypeMember::Scalar(ScalarType::Bool) => true,
+        // Numeric members accept numbers, bools, and numeric strings; a
+        // non-numeric string is the only scalar that fails.
+        TypeMember::Scalar(ScalarType::Int) | TypeMember::Scalar(ScalarType::Float) => match arg {
+            ArgValue::Str(s) => php_is_numeric(s),
+            ArgValue::Int(_) | ArgValue::Float(_) | ArgValue::Bool(_) => true,
+            _ => false,
+        },
+        // No value coerces *into* a bool-literal; only the exact bool matches.
+        TypeMember::BoolLiteral(b) => matches!(arg, ArgValue::Bool(v) if *v == b),
     }
 }
 
 /// The value a parameter of type `ty` holds when `value` is passed under
 /// `strict`, or `None` when the pass fatals at entry or the coercion is
 /// uncertain (silence is safe — ADR-0002).
-fn coerce_into_param(strict: bool, ty: ParamType, value: &ArgValue) -> Option<ArgValue> {
+///
+/// For a single-scalar type the exact per-scalar coercion is reproduced (keeping
+/// interprocedural binding precise). For a **union** the value is bound only when
+/// it already matches a member's own type exactly — Steins does not guess which
+/// member PHP would coerce a mismatched value into, so it stops the descent
+/// (silent) rather than risk an unsound bound value.
+fn coerce_into_param(strict: bool, ty: &NativeType, value: &ArgValue) -> Option<ArgValue> {
     if is_type_error(strict, ty, value) {
         return None;
     }
     if matches!(value, ArgValue::Null) {
         return Some(ArgValue::Null);
     }
-    Some(match (ty.scalar, value) {
+    if let [TypeMember::Scalar(scalar)] = ty.members.as_slice() {
+        return coerce_scalar(*scalar, value);
+    }
+    // Union: bind only on an exact-type member match; otherwise silence.
+    if ty.members.iter().any(|&m| member_matches_exact(m, value)) {
+        return Some(value.clone());
+    }
+    None
+}
+
+/// Whether a union `member` matches the *runtime type* of the non-null literal
+/// `value` exactly (no coercion) — used to decide when a union binding is safe.
+fn member_matches_exact(m: TypeMember, value: &ArgValue) -> bool {
+    match (m, value) {
+        (TypeMember::Scalar(ScalarType::Int), ArgValue::Int(_))
+        | (TypeMember::Scalar(ScalarType::Float), ArgValue::Float(_))
+        | (TypeMember::Scalar(ScalarType::String), ArgValue::Str(_))
+        | (TypeMember::Scalar(ScalarType::Bool), ArgValue::Bool(_)) => true,
+        (TypeMember::BoolLiteral(b), ArgValue::Bool(v)) => *v == b,
+        _ => false,
+    }
+}
+
+/// The value a single-scalar parameter holds after coercion (the per-scalar
+/// PHP 8 coercion table), or `None` when the conversion is uncertain.
+fn coerce_scalar(scalar: ScalarType, value: &ArgValue) -> Option<ArgValue> {
+    Some(match (scalar, value) {
         (ScalarType::Int, ArgValue::Int(_))
         | (ScalarType::Float, ArgValue::Float(_))
         | (ScalarType::String, ArgValue::Str(_))

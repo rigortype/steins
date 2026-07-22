@@ -25,7 +25,7 @@ use std::collections::HashSet;
 use steins_syntax::SourceTree;
 
 use crate::Diagnostic;
-use crate::{EFFECT_ID, ID, UNKNOWN_LABEL_ID};
+use crate::{EFFECT_ID, ID, RETURN_ID, UNKNOWN_LABEL_ID};
 
 /// The registry id for an `@steins-ignore` whose diagnostic id matches nothing on
 /// its target line (ADR-0023 anti-rot). Exempt from suppression.
@@ -40,6 +40,7 @@ pub const SUPPRESS_UNKNOWN_ID: &str = "suppress.unknown-id";
 /// baseline records these ids verbatim.
 pub const DIAGNOSTIC_IDS: &[&str] = &[
     ID,
+    RETURN_ID,
     EFFECT_ID,
     UNKNOWN_LABEL_ID,
     SUPPRESS_UNMATCHED_ID,
@@ -227,6 +228,10 @@ mod tests {
         assert!(pattern_matches("type.argument-mismatch", "type.argument-mismatch"));
         assert!(pattern_matches("type.*", "type.argument-mismatch"));
         assert!(pattern_matches("type", "type.argument-mismatch"));
+        // The `type.return-mismatch` id joins the same `type.*` family.
+        assert!(pattern_matches("type.return-mismatch", "type.return-mismatch"));
+        assert!(pattern_matches("type.*", "type.return-mismatch"));
+        assert!(pattern_matches("type", "type.return-mismatch"));
         assert!(pattern_matches("effect", "effect.envelope-exceeded"));
         // Segment-aware: `type` must not match a differently-rooted family.
         assert!(!pattern_matches("type", "typex.foo"));
@@ -236,6 +241,7 @@ mod tests {
     #[test]
     fn known_vs_unknown_ids() {
         assert!(pattern_is_known("type.argument-mismatch"));
+        assert!(pattern_is_known("type.return-mismatch"));
         assert!(pattern_is_known("type.*"));
         assert!(pattern_is_known("type"));
         assert!(pattern_is_known("effect.envelope-exceeded"));

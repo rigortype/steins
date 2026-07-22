@@ -176,13 +176,62 @@ impl ScalarType {
     }
 }
 
-/// A simple scalar native parameter type (`int`, `?string`, …). Non-scalar,
-/// union, and intersection hints are lowered to `None` on the [`Param`] so the
-/// checker stays silent on them (zero-FP; ADR-0002).
+/// One member of a native union type: one of the four scalars, or a `false` /
+/// `true` bool-literal pseudo-member (PHP allows `false`/`true` as literal type
+/// members, e.g. `string|false`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ParamType {
-    pub scalar: ScalarType,
+pub enum TypeMember {
+    /// A full scalar type (`int`, `float`, `string`, `bool`).
+    Scalar(ScalarType),
+    /// A `false` / `true` literal type. It accepts **only** the exact matching
+    /// bool value — no other value coerces into it (empirically verified against
+    /// PHP 8.5: `0`/`""`/`true` into a `false`-only type all `TypeError`).
+    BoolLiteral(bool),
+}
+
+impl TypeMember {
+    /// The PHP keyword spelling of this member, for diagnostic messages.
+    #[must_use]
+    pub fn keyword(self) -> &'static str {
+        match self {
+            TypeMember::Scalar(s) => s.keyword(),
+            TypeMember::BoolLiteral(false) => "false",
+            TypeMember::BoolLiteral(true) => "true",
+        }
+    }
+}
+
+/// A native scalar/union parameter **or return** type Steins reasons about,
+/// lowered from a single scalar, `?T`, or a `T1|T2|…[|null]` union of the four
+/// scalars (plus `false`/`true` literal members). Any member that is not a
+/// scalar or a bool-literal (a class, `array`, `mixed`, `iterable`, `callable`,
+/// `object`, an intersection, `self`/`static`/`parent`, `void`/`never`, …)
+/// lowers the **whole** type to `None` so the checker stays silent on it
+/// (zero-FP; ADR-0002).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NativeType {
+    /// The union members, in source order. Always non-empty: a hint that would
+    /// lower to zero members (e.g. standalone `null`) lowers to `None` instead.
+    /// Membership tests are existential, so duplicates are harmless.
+    pub members: Vec<TypeMember>,
+    /// `true` when `?T`, or a `null` union member, makes `null` acceptable.
     pub nullable: bool,
+}
+
+impl NativeType {
+    /// Render the type for a diagnostic message: `int`, `?int`, `int|string`,
+    /// `string|false`, `int|string|null`.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut parts: Vec<&str> = self.members.iter().map(|m| m.keyword()).collect();
+        if self.nullable {
+            if parts.len() == 1 {
+                return format!("?{}", parts[0]);
+            }
+            parts.push("null");
+        }
+        parts.join("|")
+    }
 }
 
 /// A single declared parameter.
@@ -190,8 +239,8 @@ pub struct ParamType {
 pub struct Param {
     /// Parameter name without the leading `$`.
     pub name: String,
-    /// Simple scalar type, or `None` when untyped / non-scalar / complex.
-    pub ty: Option<ParamType>,
+    /// Native scalar/union type, or `None` when untyped / non-scalar / complex.
+    pub ty: Option<NativeType>,
     /// `...$x` — the checker skips this and every later position.
     pub variadic: bool,
     /// `&$x` — by-reference; the checker skips it.
@@ -296,6 +345,9 @@ pub struct FunctionDecl {
     /// lowercased simple name.
     pub fqn: String,
     pub params: Vec<Param>,
+    /// The native scalar/union return type, or `None` when untyped / non-scalar
+    /// / `void` / `never` — the return-type check skips those (zero-FP).
+    pub ret: Option<NativeType>,
     pub span: Span,
     /// The recognized `#[\Steins\Pure]` / `#[\Steins\Effect(...)]` envelope on
     /// this function, if present (ADR-0005/0006/0018). `Some` opts the function
@@ -327,6 +379,9 @@ pub struct MethodDecl {
     /// case-insensitive — PHP method names are).
     pub name: String,
     pub params: Vec<Param>,
+    /// The native scalar/union return type, or `None` when untyped / non-scalar
+    /// / `void` / `never` (the return-type check skips those; zero-FP).
+    pub ret: Option<NativeType>,
     /// The span of the method name identifier (for diagnostic positions).
     pub span: Span,
     /// The recognized effect envelope, if declared (see [`FunctionDecl`]).
@@ -557,7 +612,9 @@ pub enum StmtKind {
     /// carries the full [`CallExpr`] when the returned expression *is* a
     /// statically-named call (`return f($s);` — one of the most common shapes in
     /// real PHP), so the propagation pass and interprocedural descent reach it.
-    Return { value: ArgValue, call: Option<CallExpr> },
+    /// `span` points at the returned value (or the `return` keyword when there is
+    /// no value), so the return-type check can locate its diagnostic.
+    Return { value: ArgValue, call: Option<CallExpr>, span: Span },
     /// `echo e1, e2, …;` — carries the statically-named calls among its operands
     /// so the propagation pass checks/descends them. Echo assigns nothing, so its
     /// env effect stays conservative (a `Barrier`-equivalent clear afterward).
@@ -902,6 +959,7 @@ fn lower_function(f: &Function<'_>, aliases: &SteinsAttrAliases) -> FunctionDecl
         name: bytes_to_string(f.name.value),
         fqn: String::new(), // filled in `parse` from the enclosing namespace ctx
         params: lower_params(&f.parameter_list),
+        ret: f.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint)),
         span: to_span(f.name.span()),
         effect_envelope: attrs_effect_envelope(&f.attribute_lists, aliases),
         effect_origins,
@@ -989,6 +1047,7 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases) -> MethodDecl {
     MethodDecl {
         name,
         params: lower_params(&m.parameter_list),
+        ret: m.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint)),
         span: to_span(m.name.span()),
         effect_envelope: attrs_effect_envelope(&m.attribute_lists, aliases),
         effect_origins,
@@ -1231,21 +1290,52 @@ fn scan_effect_origins(node: &Node<'_, '_>, out: &mut Vec<EffectOrigin>) {
     }
 }
 
-/// Lower a type hint to a simple scalar type, or `None` for anything the slice
-/// does not model (unions, intersections, class types, `array`, `mixed`, …).
-fn lower_hint(hint: &Hint<'_>) -> Option<ParamType> {
-    match hint {
-        Hint::Integer(_) => Some(ParamType { scalar: ScalarType::Int, nullable: false }),
-        Hint::Float(_) => Some(ParamType { scalar: ScalarType::Float, nullable: false }),
-        Hint::String(_) => Some(ParamType { scalar: ScalarType::String, nullable: false }),
-        Hint::Bool(_) => Some(ParamType { scalar: ScalarType::Bool, nullable: false }),
-        Hint::Nullable(n) => {
-            // `?int` etc. — a nullable wrapper over a bare scalar. Anything more
-            // complex inside the `?` is not a simple scalar and is skipped.
-            lower_hint(n.hint).map(|inner| ParamType { scalar: inner.scalar, nullable: true })
-        }
-        _ => None,
+/// Lower a type hint to a [`NativeType`] (single scalar, `?T`, or a union of the
+/// four scalars + `false`/`true`/`null`), or `None` for anything the slice does
+/// not model. A single non-scalar member anywhere (class type, `array`, `mixed`,
+/// `iterable`, `callable`, `object`, an intersection, `self`/`static`/`parent`,
+/// `void`/`never`) collapses the **whole** hint to `None` (silent; zero-FP).
+fn lower_hint(hint: &Hint<'_>) -> Option<NativeType> {
+    let mut members = Vec::new();
+    let mut nullable = false;
+    lower_hint_into(hint, &mut members, &mut nullable)?;
+    // A hint with no non-null members (standalone `null`) is not modeled.
+    if members.is_empty() {
+        return None;
     }
+    Some(NativeType { members, nullable })
+}
+
+/// Accumulate a hint's members into `members`, recording `null` in `nullable`.
+/// Returns `None` (propagated up) the moment any part is a type Steins does not
+/// model, collapsing the whole hint to silence.
+fn lower_hint_into(
+    hint: &Hint<'_>,
+    members: &mut Vec<TypeMember>,
+    nullable: &mut bool,
+) -> Option<()> {
+    match hint {
+        Hint::Integer(_) => members.push(TypeMember::Scalar(ScalarType::Int)),
+        Hint::Float(_) => members.push(TypeMember::Scalar(ScalarType::Float)),
+        Hint::String(_) => members.push(TypeMember::Scalar(ScalarType::String)),
+        Hint::Bool(_) => members.push(TypeMember::Scalar(ScalarType::Bool)),
+        Hint::False(_) => members.push(TypeMember::BoolLiteral(false)),
+        Hint::True(_) => members.push(TypeMember::BoolLiteral(true)),
+        Hint::Null(_) => *nullable = true,
+        Hint::Nullable(n) => {
+            *nullable = true;
+            lower_hint_into(n.hint, members, nullable)?;
+        }
+        Hint::Union(u) => {
+            lower_hint_into(u.left, members, nullable)?;
+            lower_hint_into(u.right, members, nullable)?;
+        }
+        Hint::Parenthesized(p) => lower_hint_into(p.hint, members, nullable)?,
+        // Class `Identifier`, `array`, `mixed`, `iterable`, `callable`, `object`,
+        // `Intersection`, `self`/`static`/`parent`, `void`/`never`, … → silence.
+        _ => return None,
+    }
+    Some(())
 }
 
 fn lower_call(c: &FunctionCall<'_>) -> CallExpr {
@@ -1577,12 +1667,14 @@ fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
             let value = r.value.map_or(ArgValue::Other, lower_arg_value);
             let mut invalidated = Vec::new();
             let mut call = None;
+            // Point the diagnostic at the returned value, else the `return` word.
+            let span = r.value.map_or_else(|| to_span(r.span()), |e| to_span(e.span()));
             if let Some(e) = r.value {
                 collect_call_vars(&Node::Expression(e), &mut invalidated);
                 // `return f($s);` — carry the call so propagation/descent reach it.
                 call = named_call(e);
             }
-            Stmt { kind: StmtKind::Return { value, call }, invalidated }
+            Stmt { kind: StmtKind::Return { value, call, span }, invalidated }
         }
         // `echo e1, e2, …;` — collect the statically-named calls among the
         // operands so propagation/descent check them; env stays conservative.
