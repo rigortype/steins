@@ -72,9 +72,84 @@ pub fn foldable(name: &str) -> bool {
     ALLOWLIST.iter().any(|&f| name.eq_ignore_ascii_case(f))
 }
 
+/// The effect labels (ADR-0018 hierarchical dot-paths) a builtin carries, or
+/// `None` when the function is **uncatalogued** (unknown effects — the safe,
+/// silent side of proven-only checking).
+///
+/// The three-valued return is the heart of ADR-0005 envelope checking:
+///
+/// * `Some(&[])` — **catalogued and pure**: no effect colors. Every
+///   [`foldable`] builtin is pure by construction, so the pure allowlist is
+///   reused verbatim as the empty-effect set. A `Pure`-declared function may
+///   call these freely.
+/// * `Some(&[label, …])` — **catalogued with effects**: calling it from a
+///   `Pure` envelope is a proven `effect.envelope-exceeded` violation.
+/// * `None` — **uncatalogued**: the effect is unknown. Proven-only checking
+///   stays silent here (the design's "cannot-verify" maybe-diagnostic, ADR-0005,
+///   is deliberately deferred to a later slice).
+///
+/// Matching is case-insensitive (PHP function names are).
+///
+/// # Provisional hand list (ADR-0021)
+///
+/// This coloring is a small, hand-curated seed drawn from the same
+/// frequency-driven sourcing as [`foldable`]; it is **not** the eventual
+/// generated catalog (ADR-0014/0021). Labels follow ADR-0018's taxonomy; where a
+/// function's effect is argument-dependent the entry takes the *no-arg-analysis
+/// upper bound* (the safe, coarser reading):
+///
+/// * `fopen` stays at the parent `io.fs` label — its read/write split is
+///   mode-string-dependent, which this slice does not inspect.
+/// * `print_r`/`var_export`/`var_dump` are colored `output` even though the
+///   first two are pure when their second argument is `true` (return-mode); the
+///   upper bound is the arg-blind safe choice.
+/// * `sleep`/`usleep` are `io`: an observable timing side effect on the running
+///   process, closest to the io root among the initial colors.
+///
+/// `exit`/`die` are **language constructs**, not functions — they never reach
+/// this table; the effects pass detects them structurally (ADR-0019 rule 4).
+#[must_use]
+pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
+    const EMPTY: &[&str] = &[];
+    const NONDET_RANDOM: &[&str] = &["nondet.random"];
+    const NONDET_TIME: &[&str] = &["nondet.time"];
+    const IO_FS_READ: &[&str] = &["io.fs.read"];
+    const IO_FS_WRITE: &[&str] = &["io.fs.write"];
+    const IO_FS: &[&str] = &["io.fs"];
+    const OUTPUT: &[&str] = &["output"];
+    const IO: &[&str] = &["io"];
+    const GLOBAL_WRITE: &[&str] = &["global.write"];
+    const GLOBAL_READ: &[&str] = &["global.read"];
+
+    // A per-call lowercase copy keeps the arms readable; PHP names are ASCII.
+    let colored: Option<&'static [&'static str]> = match name.to_ascii_lowercase().as_str() {
+        "rand" | "mt_rand" | "random_int" | "random_bytes" | "uniqid" | "shuffle" => {
+            Some(NONDET_RANDOM)
+        }
+        "time" | "microtime" | "hrtime" | "date" | "mktime" => Some(NONDET_TIME),
+        "file_get_contents" | "scandir" | "file_exists" | "is_file" | "is_dir" | "fread" => {
+            Some(IO_FS_READ)
+        }
+        "file_put_contents" | "fwrite" | "unlink" | "mkdir" | "rmdir" | "touch" | "copy"
+        | "rename" => Some(IO_FS_WRITE),
+        "fopen" => Some(IO_FS),
+        "print_r" | "var_dump" | "var_export" | "printf" | "vprintf" => Some(OUTPUT),
+        "error_log" | "syslog" | "sleep" | "usleep" => Some(IO),
+        "date_default_timezone_set" | "mb_regex_encoding" | "setlocale" | "ini_set" | "putenv" => {
+            Some(GLOBAL_WRITE)
+        }
+        "getenv" | "ini_get" | "date_default_timezone_get" => Some(GLOBAL_READ),
+        _ => None,
+    };
+
+    // A colored entry wins; otherwise a pure/foldable builtin is catalogued with
+    // the empty effect set, and everything else stays uncatalogued (`None`).
+    colored.or_else(|| foldable(name).then_some(EMPTY))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::foldable;
+    use super::{effect_labels, foldable};
 
     #[test]
     fn known_pure_builtins_are_foldable() {
@@ -103,5 +178,41 @@ mod tests {
         ] {
             assert!(!foldable(name), "{name} must not be foldable");
         }
+    }
+
+    #[test]
+    fn colored_builtins_carry_their_label() {
+        assert_eq!(effect_labels("rand"), Some(&["nondet.random"][..]));
+        assert_eq!(effect_labels("time"), Some(&["nondet.time"][..]));
+        assert_eq!(effect_labels("file_get_contents"), Some(&["io.fs.read"][..]));
+        assert_eq!(effect_labels("file_put_contents"), Some(&["io.fs.write"][..]));
+        assert_eq!(effect_labels("fopen"), Some(&["io.fs"][..]));
+        assert_eq!(effect_labels("printf"), Some(&["output"][..]));
+        assert_eq!(effect_labels("error_log"), Some(&["io"][..]));
+        assert_eq!(effect_labels("setlocale"), Some(&["global.write"][..]));
+        assert_eq!(effect_labels("getenv"), Some(&["global.read"][..]));
+    }
+
+    #[test]
+    fn foldable_builtins_are_catalogued_pure() {
+        // Every foldable builtin is catalogued with the empty effect set.
+        for name in ["strtolower", "strlen", "abs", "trim", "count"] {
+            assert_eq!(effect_labels(name), Some(&[][..]), "{name} should be pure");
+            assert!(foldable(name));
+        }
+    }
+
+    #[test]
+    fn uncatalogued_builtins_are_none() {
+        for name in ["some_unknown_fn", "curl_exec", "mysqli_query"] {
+            assert_eq!(effect_labels(name), None, "{name} must be uncatalogued");
+        }
+    }
+
+    #[test]
+    fn effect_labels_are_case_insensitive() {
+        assert_eq!(effect_labels("RAND"), Some(&["nondet.random"][..]));
+        assert_eq!(effect_labels("File_Put_Contents"), Some(&["io.fs.write"][..]));
+        assert_eq!(effect_labels("STRTOLOWER"), Some(&[][..]));
     }
 }

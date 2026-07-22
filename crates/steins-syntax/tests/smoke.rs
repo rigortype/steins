@@ -68,3 +68,93 @@ fn poison_markers_are_detected() {
         assert!(top.poisoned, "{why} should poison the top-level scope");
     }
 }
+
+// ---- ADR-0005/0006: `#[\Steins\Pure]` envelope attribute recognition -------
+
+use steins_syntax::EffectOrigin;
+
+/// The single function's `pure_envelope` presence.
+fn is_pure(src: &str) -> bool {
+    let tree = SourceTree::parse(src);
+    tree.functions().iter().find(|f| f.name == "f").is_some_and(|f| f.pure_envelope.is_some())
+}
+
+#[test]
+fn recognizes_fully_and_semi_qualified_pure() {
+    assert!(is_pure("<?php #[\\Steins\\Pure] function f(): void {}"), "fully-qualified");
+    assert!(is_pure("<?php #[Steins\\Pure] function f(): void {}"), "qualified");
+    // Case-insensitive (PHP class names).
+    assert!(is_pure("<?php #[\\steins\\pure] function f(): void {}"), "case-insensitive");
+}
+
+#[test]
+fn bare_pure_recognized_only_with_use() {
+    assert!(
+        is_pure("<?php\nuse Steins\\Pure;\n#[Pure] function f(): void {}"),
+        "bare #[Pure] with `use Steins\\Pure` binds"
+    );
+    assert!(
+        is_pure("<?php\nuse Steins\\Pure as P;\n#[P] function f(): void {}"),
+        "aliased #[P] with `use Steins\\Pure as P` binds"
+    );
+    // The JetBrains collision guard: bare #[Pure] WITHOUT the use does not match.
+    assert!(!is_pure("<?php #[Pure] function f(): void {}"), "bare #[Pure] without use");
+    // An alias binds only its own name, not the class's bare last segment.
+    assert!(
+        !is_pure("<?php\nuse Steins\\Pure as P;\n#[Pure] function f(): void {}"),
+        "aliasing to P does not also bind Pure"
+    );
+}
+
+#[test]
+fn foreign_pure_attributes_do_not_match() {
+    assert!(!is_pure("<?php #[JetBrains\\PhpStorm\\Pure] function f(): void {}"));
+    assert!(!is_pure("<?php #[Some\\Other\\Pure] function f(): void {}"));
+    assert!(!is_pure("<?php function f(): void {}"), "no attribute at all");
+}
+
+#[test]
+fn scans_effect_origins_across_control_flow() {
+    // echo nested in an if, a builtin call, and a same-file user call.
+    let src = "<?php #[\\Steins\\Pure] function f(): void { if (true) { echo 1; } rand(); g(); }\nfunction g(): void {}";
+    let tree = SourceTree::parse(src);
+    let f = tree.functions().iter().find(|f| f.name == "f").unwrap();
+    let mut echo = 0;
+    let mut calls = Vec::new();
+    for o in &f.effect_origins {
+        match o {
+            EffectOrigin::Output { keyword, .. } => {
+                assert_eq!(*keyword, "echo");
+                echo += 1;
+            }
+            EffectOrigin::Call { name, .. } => calls.push(name.clone()),
+            EffectOrigin::Exit { .. } => panic!("no exit expected"),
+        }
+    }
+    assert_eq!(echo, 1, "echo inside the if is found");
+    assert!(calls.contains(&"rand".to_owned()));
+    assert!(calls.contains(&"g".to_owned()));
+}
+
+#[test]
+fn scans_exit_and_die() {
+    let src = "<?php function f(): void { exit(); }\nfunction g(): void { die(1); }";
+    let tree = SourceTree::parse(src);
+    let f = tree.functions().iter().find(|x| x.name == "f").unwrap();
+    assert!(matches!(f.effect_origins.first(), Some(EffectOrigin::Exit { keyword: "exit", .. })));
+    let g = tree.functions().iter().find(|x| x.name == "g").unwrap();
+    assert!(matches!(g.effect_origins.first(), Some(EffectOrigin::Exit { keyword: "die", .. })));
+}
+
+#[test]
+fn nested_closure_bodies_are_not_scanned() {
+    // The echo is inside a closure — a separate scope — so it is NOT an origin
+    // of the outer function (closures deferred this slice).
+    let src = "<?php function f(): void { $g = function () { echo 1; }; }";
+    let tree = SourceTree::parse(src);
+    let f = &tree.functions()[0];
+    assert!(
+        !f.effect_origins.iter().any(|o| matches!(o, EffectOrigin::Output { .. })),
+        "closure-nested echo is not the outer function's effect"
+    );
+}
