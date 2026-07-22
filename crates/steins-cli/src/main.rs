@@ -1,15 +1,18 @@
 //! The `steins` binary.
 //!
-//! Only `check` exists for this milestone (ADR-0020 documents the eventual
-//! six-command surface; the others are deliberately NOT stubbed). `check` walks
+//! Two commands exist for this milestone (ADR-0020 documents the eventual
+//! six-command surface; the rest are deliberately NOT stubbed). `check` walks
 //! `.php` files, runs the salsa pipeline, prints proof-layer diagnostics, and
-//! exits 1 if any finding was reported.
+//! exits 1 if any finding was reported. `annotate` reprints a single file with a
+//! right-margin column of *proven* inferred facts (the Rigor-style display).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use steins_db::{SourceFile, SteinsDatabase};
-use steins_infer::{Diagnostic, SOUND_SUBSET_NOTICE, SidecarFolder, check_file};
+use steins_infer::{
+    Diagnostic, LineFact, SOUND_SUBSET_NOTICE, SidecarFolder, annotate_file, check_file,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Format {
@@ -22,12 +25,14 @@ fn main() -> ExitCode {
 
     match args.first().map(String::as_str) {
         Some("check") => run_check(&args[1..]),
+        Some("annotate") => run_annotate(&args[1..]),
         Some(other) => {
-            eprintln!("steins: unknown command `{other}` (only `check` is available)");
+            eprintln!("steins: unknown command `{other}` (available: check, annotate)");
             ExitCode::from(2)
         }
         None => {
             eprintln!("usage: steins check [--format text|json] [--no-php] <paths...>");
+            eprintln!("       steins annotate [--no-php] <file.php>");
             ExitCode::from(2)
         }
     }
@@ -109,6 +114,99 @@ fn run_check(args: &[String]) -> ExitCode {
     }
 
     if findings.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+}
+
+/// `steins annotate [--no-php] <file.php>` — reprint one file with a right-margin
+/// column of proven inferred facts (ADR-0020). Never modifies the file; output
+/// goes to stdout. Exits 2 on a usage error (directory, missing/extra args).
+fn run_annotate(args: &[String]) -> ExitCode {
+    let mut no_php = false;
+    let mut paths: Vec<String> = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "--no-php" => no_php = true,
+            other if other.starts_with('-') => {
+                eprintln!("steins: unknown flag `{other}` for annotate");
+                return ExitCode::from(2);
+            }
+            other => paths.push(other.to_owned()),
+        }
+    }
+
+    let [path] = paths.as_slice() else {
+        eprintln!("steins: annotate takes exactly one file (usage: steins annotate [--no-php] <file.php>)");
+        return ExitCode::from(2);
+    };
+    let path = Path::new(path);
+    if path.is_dir() {
+        eprintln!("steins: annotate expects a single file, not a directory: {}", path.display());
+        return ExitCode::from(2);
+    }
+    let text = match std::fs::read(path) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(e) => {
+            eprintln!("steins: cannot read {}: {e}", path.display());
+            return ExitCode::from(2);
+        }
+    };
+
+    // Same coverage posture as `check` (ADR-0004): `--no-php` runs the sound
+    // subset (no folding) and surfaces the notice up front; otherwise a folder is
+    // lazily spawned and emits the notice itself if `php` is unavailable.
+    if no_php {
+        eprintln!("{SOUND_SUBSET_NOTICE}");
+    }
+    let db = SteinsDatabase::default();
+    let mut folder = if no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
+    let input = SourceFile::new(&db, path.to_string_lossy().into_owned(), text.clone());
+    let facts = annotate_file(&db, input, &mut folder);
+
+    print!("{}", render_annotation(&text, &facts));
+    ExitCode::SUCCESS
+}
+
+/// Render the annotated file: each source line reprinted verbatim, and lines
+/// with a proven fact padded (to the longest line, capped at column 88) and
+/// given a `//=>` margin. Multiple facts on one line join with `; `.
+fn render_annotation(text: &str, facts: &[LineFact]) -> String {
+    /// The column source lines are padded to before the margin (cap: longer
+    /// lines simply get a single separating space).
+    const CAP: usize = 88;
+    const PREFIX: &str = "//=> ";
+
+    let lines: Vec<&str> = text.lines().collect();
+
+    // Group fact bodies by line, de-duplicating identical bodies, order-stable.
+    let mut by_line: std::collections::BTreeMap<u32, Vec<String>> = std::collections::BTreeMap::new();
+    for f in facts {
+        let bodies = by_line.entry(f.line).or_default();
+        let body = f.body();
+        if !bodies.contains(&body) {
+            bodies.push(body);
+        }
+    }
+
+    let target = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0).min(CAP);
+
+    let mut out = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        let line_no = i as u32 + 1;
+        out.push_str(line);
+        if let Some(bodies) = by_line.get(&line_no) {
+            let width = line.chars().count();
+            // Pad up to `target`, then always exactly one separating space — so
+            // margins align at column `target + 1`, and an over-long line (width
+            // >= target) simply gets that single space.
+            let pad = target.saturating_sub(width) + 1;
+            for _ in 0..pad {
+                out.push(' ');
+            }
+            out.push_str(PREFIX);
+            out.push_str(&bodies.join("; "));
+        }
+        out.push('\n');
+    }
+    out
 }
 
 fn print_text(findings: &[Diagnostic]) {

@@ -198,6 +198,7 @@ fn scans_effect_origins_across_control_flow() {
             EffectOrigin::Call { name, .. } => calls.push(name.clone()),
             EffectOrigin::Exit { .. } => panic!("no exit expected"),
             EffectOrigin::MethodCall { .. } => panic!("no method call expected"),
+            EffectOrigin::Opaque { .. } => panic!("no opaque call expected"),
         }
     }
     assert_eq!(echo, 1, "echo inside the if is found");

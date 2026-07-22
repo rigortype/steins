@@ -143,6 +143,15 @@ pub enum EffectOrigin {
     /// analogue of the `EffectOrigin::Call` function edge). Dynamic receivers
     /// (`$var->m()`, `static::m()`) are **not** recorded — no provable edge.
     MethodCall { receiver: EffectRecv, method: String, span: Span },
+    /// A call the scan cannot classify to a statically-named target: a dynamic
+    /// function call (`$f()`, `$arr['x']()`), or a method / static call whose
+    /// receiver or selector is not statically resolvable (`$obj->m()`,
+    /// `$var::m()`, `$o->$m()`). It contributes **no** proven effect finding (it
+    /// stays silent, like every unprovable effect), but it marks the enclosing
+    /// body's effect set **non-exhaustive**: the analyzer cannot prove the call
+    /// is effect-free. Consumed only by the effects-exhaustiveness bit (the
+    /// annotate `…?` marker); the envelope check ignores it. `span` is the call.
+    Opaque { span: Span },
 }
 
 /// The receiver of an [`EffectOrigin::MethodCall`], restricted to the forms the
@@ -907,6 +916,9 @@ fn scan_effect_origins(node: &Node<'_, '_>, out: &mut Vec<EffectOrigin>) {
                     name: bytes_to_string(id.last_segment()),
                     span: to_span(id.span()),
                 });
+            } else {
+                // A dynamic function call (`$f()`, `($cb)()`) — unprovable.
+                out.push(EffectOrigin::Opaque { span: to_span(fc.span()) });
             }
         }
         // Output-stream writes.
@@ -932,6 +944,9 @@ fn scan_effect_origins(node: &Node<'_, '_>, out: &mut Vec<EffectOrigin>) {
                 (effect_recv_of_object(mc.object), method_name_of(&mc.method))
             {
                 out.push(EffectOrigin::MethodCall { receiver: recv, method, span: to_span(mc.span()) });
+            } else {
+                // `$var->m()` / `$o->$m()` — receiver or selector not resolvable.
+                out.push(EffectOrigin::Opaque { span: to_span(mc.span()) });
             }
         }
         Node::NullSafeMethodCall(mc) => {
@@ -939,6 +954,8 @@ fn scan_effect_origins(node: &Node<'_, '_>, out: &mut Vec<EffectOrigin>) {
                 (effect_recv_of_object(mc.object), method_name_of(&mc.method))
             {
                 out.push(EffectOrigin::MethodCall { receiver: recv, method, span: to_span(mc.span()) });
+            } else {
+                out.push(EffectOrigin::Opaque { span: to_span(mc.span()) });
             }
         }
         Node::StaticMethodCall(sc) => {
@@ -946,6 +963,9 @@ fn scan_effect_origins(node: &Node<'_, '_>, out: &mut Vec<EffectOrigin>) {
                 (effect_recv_of_class(sc.class), method_name_of(&sc.method))
             {
                 out.push(EffectOrigin::MethodCall { receiver: recv, method, span: to_span(sc.span()) });
+            } else {
+                // `$var::m()` / `static::m()` / `Foo::$m()` — unresolvable.
+                out.push(EffectOrigin::Opaque { span: to_span(sc.span()) });
             }
         }
         // Nested scopes — do not descend (closures deferred this slice).

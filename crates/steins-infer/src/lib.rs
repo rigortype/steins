@@ -236,6 +236,125 @@ pub fn check(tree: &SourceTree, functions: &[FunctionDecl], path: &str) -> Vec<D
     check_with(tree, functions, path, &mut NoFold)
 }
 
+// ---------------------------------------------------------------------------
+// `annotate` facts (ADR-0020): the Rigor-style margin — proven facts only.
+// ---------------------------------------------------------------------------
+
+/// One proven fact the `annotate` margin can print against a source line. The
+/// honesty rule (ADR-0020): every variant is something the analyzer *proved* —
+/// where nothing is known, no fact is produced and the line stays bare.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FactKind {
+    /// The inferred effect set on a function/method **declaration** line — the
+    /// same fixpoint the envelope check uses, exposed for every unit. `labels`
+    /// are sorted+deduplicated; `exhaustive` false appends the `…?` marker.
+    Effects { labels: Vec<String>, exhaustive: bool },
+    /// A proven post-statement value on an **assignment** line: `$var`'s rendered
+    /// literal (a plain literal, a folded builtin result, or a const-fn return).
+    Value { var: String, rendered: String },
+    /// A proven exact class on an assignment line (`$x = new Foo()`).
+    ExactClass { var: String, class: String },
+    /// A **call** line that produced a check diagnostic; carries its registry id.
+    Finding { id: &'static str },
+}
+
+/// A [`FactKind`] keyed to a 1-based source line (ADR-0020 margin display).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineFact {
+    pub line: u32,
+    pub kind: FactKind,
+}
+
+impl LineFact {
+    /// The margin body (without the `//=>` prefix or padding), e.g.
+    /// `effects: {io.fs.write, …?}`, `$w = "XY"`, `$x: Foo (exact)`,
+    /// `✗ type.argument-mismatch`.
+    #[must_use]
+    pub fn body(&self) -> String {
+        match &self.kind {
+            FactKind::Effects { labels, exhaustive } => {
+                let mut parts = labels.clone();
+                if !*exhaustive {
+                    // Silence names itself: "at least these; not proven complete."
+                    parts.push("…?".to_owned());
+                }
+                format!("effects: {{{}}}", parts.join(", "))
+            }
+            FactKind::Value { var, rendered } => format!("${var} = {rendered}"),
+            FactKind::ExactClass { var, class } => format!("${var}: {class} (exact)"),
+            FactKind::Finding { id } => format!("✗ {id}"),
+        }
+    }
+}
+
+/// Compute every proven margin fact for one file (ADR-0020 `annotate`), reusing
+/// the existing analysis machinery — no new inference:
+///
+/// * **effects** on each declaration line come from [`effect_summary`] (the same
+///   fixpoint as the envelope check, now with the exhaustiveness bit);
+/// * **value / exact-class** facts come from re-running the propagation walk
+///   ([`analyze_scope`]) with a fact collector attached, so the recorded value
+///   is exactly the one the checker would trust at that point (folding included,
+///   and correctly absent under a `NoFold`/`--no-php` folder);
+/// * **finding** facts are the [`check_with`] diagnostics, keyed by line.
+///
+/// Facts are returned in line order (stable within a line).
+#[must_use]
+pub fn annotate_facts(
+    tree: &SourceTree,
+    functions: &[FunctionDecl],
+    classes: &[ClassDecl],
+    path: &str,
+    folder: &mut dyn Folder,
+) -> Vec<LineFact> {
+    let mut facts: Vec<LineFact> = Vec::new();
+
+    // 1. Effects on every function/method declaration line.
+    for s in effect_summary(tree, functions, classes) {
+        facts.push(LineFact {
+            line: s.line,
+            kind: FactKind::Effects { labels: s.labels, exhaustive: s.exhaustive },
+        });
+    }
+
+    // 2. Value / exact-class facts: the propagation walk with a collector. Each
+    // top-level scope is walked once with an empty env (no binding assumptions);
+    // descent bodies pass no collector, so only an assign's own line is recorded.
+    let cx = Cx { tree, functions, classes: tree.classes(), path, strict: tree.has_strict_types() };
+    let mut sink: Vec<Diagnostic> = Vec::new(); // diagnostics come from `check_with` below
+    for scope in tree.scopes() {
+        analyze_scope(
+            &cx,
+            folder,
+            scope,
+            HashMap::new(),
+            HashMap::new(),
+            None,
+            None,
+            Some(&mut facts),
+            &mut sink,
+        );
+    }
+
+    // 3. Findings: one marker per check diagnostic, at its line.
+    for d in check_with(tree, functions, path, folder) {
+        facts.push(LineFact { line: d.line, kind: FactKind::Finding { id: d.id } });
+    }
+
+    // Line order, stable within a line (effects, then values, then findings).
+    facts.sort_by_key(|f| f.line);
+    facts
+}
+
+/// Salsa-fed convenience over [`annotate_facts`], mirroring [`check_file`]: parse
+/// + index are memoized queries; the fact walk runs outside the query graph.
+#[must_use]
+pub fn annotate_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec<LineFact> {
+    let tree = parse(db, file);
+    let functions = function_index(db, file);
+    annotate_facts(tree, functions, tree.classes(), file.path(db), folder)
+}
+
 /// The checking core (no salsa) — easy to unit-test and to reuse.
 ///
 /// Two passes feed the one check. The **direct pass** walks every call site with
@@ -278,7 +397,7 @@ pub fn check_with(
     // --- Propagation pass: resolved `$var` / constant-return / folded args,
     // plus all method / static / constructor call checking + descent. --------
     for scope in tree.scopes() {
-        analyze_scope(&cx, folder, scope, HashMap::new(), HashMap::new(), None, None, &mut out);
+        analyze_scope(&cx, folder, scope, HashMap::new(), HashMap::new(), None, None, None, &mut out);
     }
 
     // --- Effects pass (ADR-0005): `#[\Steins\Pure]` envelope checking. Needs no
@@ -351,19 +470,36 @@ impl Sym {
     }
 }
 
-fn effect_diagnostics(
+/// One unit's fixpoint result: its proven effect findings and whether that set
+/// is **exhaustive** (ADR-0005 certainty discipline). Exhaustive means every
+/// call in (and transitively reachable from) the body resolved and was
+/// classified — so the empty set really is *no effects*, not *no effects we
+/// could see*. A single uncatalogued builtin, dynamic call, or unresolved method
+/// anywhere in the reachable graph makes it non-exhaustive (the annotate `…?`).
+#[derive(Debug, Clone, Default)]
+struct EffectSet {
+    findings: HashSet<EffectFinding>,
+    exhaustive: bool,
+}
+
+/// The unified effect fixpoint for **every** function and method in the file —
+/// computed regardless of any declared envelope, because `annotate` exposes the
+/// effect set on every declaration line (not just `Pure`/`Effect` ones) and the
+/// envelope check propagates a callee's effects to annotated callers either way.
+///
+/// Alongside the proven effect findings this carries the **exhaustiveness bit**:
+/// a unit's own set is non-exhaustive the moment it contains an origin the
+/// analyzer cannot classify — an uncatalogued builtin ([`steins_catalog::effect_labels`]
+/// `None`), a structurally-dynamic call ([`EffectOrigin::Opaque`]), or a method
+/// call whose same-file target cannot be resolved ([`resolve_effect_edge`] `None`).
+/// Non-exhaustiveness then **taints callers** through the same call edges the
+/// findings flow along, in the same monotone fixpoint (both quantities only ever
+/// grow / flip toward "more/unknown", so chaotic iteration converges).
+fn compute_effects(
     tree: &SourceTree,
     functions: &[FunctionDecl],
     classes: &[ClassDecl],
-    path: &str,
-) -> Vec<Diagnostic> {
-    // Fast path: with no envelope anywhere in the file there is nothing to check.
-    let any_envelope = functions.iter().any(|f| f.effect_envelope.is_some())
-        || classes.iter().any(|c| c.methods.iter().any(|m| m.effect_envelope.is_some()));
-    if !any_envelope {
-        return Vec::new();
-    }
-
+) -> HashMap<Sym, EffectSet> {
     // Every effect unit (function + method), with the class that encloses its
     // origins (for resolving `$this`/`self`/`parent` method-call edges).
     let mut units: Vec<(Sym, Option<&str>, &[EffectOrigin])> = Vec::new();
@@ -380,19 +516,27 @@ fn effect_diagnostics(
         }
     }
 
-    // Per unit: its own proven origins (`direct`) and its resolved same-file
-    // callee edges (`edges`) — function→function, method→method, and mixed.
+    // Per unit: its own proven origins (`direct`), its resolved same-file callee
+    // edges (`edges`), and whether its *own* origins are all classifiable
+    // (`own_exhaustive`; callee taint is folded in by the fixpoint below).
     let mut direct: HashMap<Sym, HashSet<EffectFinding>> = HashMap::new();
     let mut edges: HashMap<Sym, HashSet<Sym>> = HashMap::new();
+    let mut exhaustive: HashMap<Sym, bool> = HashMap::new();
     for (sym, class, origins) in &units {
         let d = direct.entry(sym.clone()).or_default();
         let e = edges.entry(sym.clone()).or_default();
+        let ex = exhaustive.entry(sym.clone()).or_insert(true);
         for origin in *origins {
             match origin {
                 EffectOrigin::Call { name, span } => {
                     if let Some(canon) = user_fn_canon(functions, name) {
                         e.insert(Sym::Func(canon)); // same-file user function edge
                     } else {
+                        // A catalogued builtin (colored or pure) is classified; an
+                        // uncatalogued one cannot be proven effect-free.
+                        if steins_catalog::effect_labels(name).is_none() {
+                            *ex = false;
+                        }
                         for f in builtin_findings(name, *span, tree) {
                             d.insert(f);
                         }
@@ -413,37 +557,148 @@ fn effect_diagnostics(
                     });
                 }
                 EffectOrigin::MethodCall { receiver, method, .. } => {
-                    if let Some(callee) = resolve_effect_edge(classes, *class, receiver, method) {
-                        e.insert(callee);
+                    match resolve_effect_edge(classes, *class, receiver, method) {
+                        Some(callee) => {
+                            e.insert(callee);
+                        }
+                        // A method call we cannot resolve to a same-file target:
+                        // its effects are unknown → non-exhaustive.
+                        None => *ex = false,
                     }
                 }
+                // A structurally-dynamic call names its own uncertainty.
+                EffectOrigin::Opaque { .. } => *ex = false,
             }
         }
     }
 
-    // Fixpoint: effects(u) = direct(u) ∪ ⋃_{c ∈ edges(u)} effects(c). Monotone
-    // over a finite set of `EffectFinding`s, so chaotic iteration converges.
+    // Fixpoint: effects(u) = direct(u) ∪ ⋃_{c ∈ edges(u)} effects(c), and
+    // exhaustive(u) stays true only while every callee is exhaustive too. Both
+    // are monotone over finite domains, so chaotic iteration converges.
     let syms: Vec<Sym> = units.iter().map(|(s, ..)| s.clone()).collect();
-    let mut effects: HashMap<Sym, HashSet<EffectFinding>> = direct;
+    let mut findings: HashMap<Sym, HashSet<EffectFinding>> = direct;
     loop {
         let mut changed = false;
         for sym in &syms {
             let callees: Vec<Sym> = edges.get(sym).into_iter().flatten().cloned().collect();
             let mut incoming: Vec<EffectFinding> = Vec::new();
+            let mut callee_taint = false;
             for c in &callees {
-                if let Some(ce) = effects.get(c) {
+                if let Some(ce) = findings.get(c) {
                     incoming.extend(ce.iter().cloned());
                 }
+                if exhaustive.get(c).copied() == Some(false) {
+                    callee_taint = true;
+                }
             }
-            let set = effects.entry(sym.clone()).or_default();
+            let set = findings.entry(sym.clone()).or_default();
             for ef in incoming {
                 changed |= set.insert(ef);
+            }
+            if callee_taint && exhaustive.get(sym).copied() != Some(false) {
+                exhaustive.insert(sym.clone(), false);
+                changed = true;
             }
         }
         if !changed {
             break;
         }
     }
+
+    syms.into_iter()
+        .map(|s| {
+            let f = findings.remove(&s).unwrap_or_default();
+            let ex = exhaustive.get(&s).copied().unwrap_or(true);
+            (s, EffectSet { findings: f, exhaustive: ex })
+        })
+        .collect()
+}
+
+/// One line of the `annotate` effect margin: a function/method declaration with
+/// its proven effect labels (sorted, deduplicated) and the exhaustiveness bit.
+/// Public so the CLI (and infer's own tests) can read the fixpoint result for
+/// *all* units, not only enveloped ones.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectSummary {
+    /// The declaration spelling: `f` for a function, `Foo::bar` for a method.
+    pub symbol: String,
+    /// 1-based line of the declaration (the name identifier).
+    pub line: u32,
+    /// Proven effect labels, sorted and deduplicated (ADR-0018 dot-paths).
+    pub labels: Vec<String>,
+    /// Whether the set is exhaustive (see [`EffectSet`]). `false` earns the `…?`
+    /// marker: "at least these effects; not proven complete."
+    pub exhaustive: bool,
+}
+
+/// The proven effect set of every concrete function and method in the file
+/// (ADR-0005), for the `annotate` margin. Abstract methods (no body) are omitted
+/// — there is nothing to prove about a declaration whose implementation lives in
+/// an override. Reuses [`compute_effects`], so it agrees with the envelope check
+/// by construction.
+#[must_use]
+pub fn effect_summary(
+    tree: &SourceTree,
+    functions: &[FunctionDecl],
+    classes: &[ClassDecl],
+) -> Vec<EffectSummary> {
+    let effects = compute_effects(tree, functions, classes);
+    let sorted_labels = |sym: &Sym| -> Vec<String> {
+        let mut labels: Vec<String> = effects
+            .get(sym)
+            .into_iter()
+            .flat_map(|e| e.findings.iter().map(|f| f.label.clone()))
+            .collect();
+        labels.sort();
+        labels.dedup();
+        labels
+    };
+    let exhaustive = |sym: &Sym| effects.get(sym).is_none_or(|e| e.exhaustive);
+
+    let mut out = Vec::new();
+    for f in functions {
+        let sym = Sym::Func(f.name.clone());
+        out.push(EffectSummary {
+            symbol: f.name.clone(),
+            line: tree.position(f.span.start).line,
+            labels: sorted_labels(&sym),
+            exhaustive: exhaustive(&sym),
+        });
+    }
+    for c in classes {
+        for m in &c.methods {
+            if m.is_abstract {
+                continue; // no body — nothing proven
+            }
+            let sym = Sym::Method(c.name.clone(), m.name.clone());
+            out.push(EffectSummary {
+                symbol: format!("{}::{}", c.name, m.name),
+                line: tree.position(m.span.start).line,
+                labels: sorted_labels(&sym),
+                exhaustive: exhaustive(&sym),
+            });
+        }
+    }
+    out
+}
+
+fn effect_diagnostics(
+    tree: &SourceTree,
+    functions: &[FunctionDecl],
+    classes: &[ClassDecl],
+    path: &str,
+) -> Vec<Diagnostic> {
+    // Fast path: with no envelope anywhere in the file there is nothing to check.
+    let any_envelope = functions.iter().any(|f| f.effect_envelope.is_some())
+        || classes.iter().any(|c| c.methods.iter().any(|m| m.effect_envelope.is_some()));
+    if !any_envelope {
+        return Vec::new();
+    }
+
+    // The unified effect fixpoint for every function + method in the file (its
+    // proven effect set and its exhaustiveness bit). Shared with `effect_summary`
+    // (the annotate margin); here only `.findings` is read.
+    let effects = compute_effects(tree, functions, classes);
 
     // Report: one declared envelope at a time, each proven origin in source order.
     let mut out = Vec::new();
@@ -482,7 +737,7 @@ fn report_unit(
     display: &str,
     envelope: &EffectEnvelope,
     origins: &[EffectOrigin],
-    effects: &HashMap<Sym, HashSet<EffectFinding>>,
+    effects: &HashMap<Sym, EffectSet>,
 ) {
     // 1. Unknown declared labels (one diagnostic each, at the attribute span).
     for label in &envelope.labels {
@@ -536,6 +791,9 @@ fn report_unit(
             }
             // Output / Exit subsumed by the envelope → silent.
             EffectOrigin::Output { .. } | EffectOrigin::Exit { .. } => {}
+            // An unprovable call carries no proven effect — silent for the
+            // envelope check (it only feeds the exhaustiveness bit).
+            EffectOrigin::Opaque { .. } => {}
         }
     }
 }
@@ -548,13 +806,14 @@ fn emit_transitive(
     tree: &SourceTree,
     path: &str,
     callee: &Sym,
-    effects: &HashMap<Sym, HashSet<EffectFinding>>,
+    effects: &HashMap<Sym, EffectSet>,
     offset: u32,
     display: &str,
     labels: &[String],
 ) {
     let callee_display = callee.display();
-    let mut fs: Vec<&EffectFinding> = effects.get(callee).into_iter().flatten().collect();
+    let mut fs: Vec<&EffectFinding> =
+        effects.get(callee).map(|e| &e.findings).into_iter().flatten().collect();
     fs.sort_by(|a, b| (a.line, &a.label, &a.origin).cmp(&(b.line, &b.label, &b.origin)));
     for ef in fs {
         if !exceeds(labels, &ef.label) {
@@ -721,6 +980,7 @@ fn analyze_scope(
     mut classes_env: HashMap<String, String>,
     this_exact: Option<String>,
     mut descent: Option<Descent<'_>>,
+    mut facts: Option<&mut Vec<LineFact>>,
     out: &mut Vec<Diagnostic>,
 ) {
     // The class that lexically encloses this scope (a method body), for resolving
@@ -779,31 +1039,51 @@ fn analyze_scope(
                 }
             }
             StmtKind::Return { .. } | StmtKind::Call(_) => {}
-            StmtKind::Assign { var, value, span, .. } => match value {
-                // `$x = new Foo(...)` — record `$x`'s exact class and drop any
-                // stale scalar fact. The fact holds only until `$x` is handed to
-                // a call (a by-ref parameter can rebind it; see step 3). A
-                // poisoned scope trusts nothing.
-                ArgValue::New(class, _) => {
-                    env.remove(var);
-                    if scope.poisoned {
-                        classes_env.remove(var);
-                    } else {
-                        classes_env.insert(var.clone(), class.clone());
-                    }
-                }
-                _ => match cx.resolve_literal(value, &env, scope.poisoned, folder) {
-                    Some(lit) => {
-                        let line = cx.tree.position(span.start).line;
-                        env.insert(var.clone(), Known { value: lit, line, bound: None });
-                        classes_env.remove(var);
-                    }
-                    None => {
+            StmtKind::Assign { var, value, span, .. } => {
+                let line = cx.tree.position(span.start).line;
+                match value {
+                    // `$x = new Foo(...)` — record `$x`'s exact class and drop any
+                    // stale scalar fact. The fact holds only until `$x` is handed to
+                    // a call (a by-ref parameter can rebind it; see step 3). A
+                    // poisoned scope trusts nothing.
+                    ArgValue::New(class, _) => {
                         env.remove(var);
-                        classes_env.remove(var);
+                        if scope.poisoned {
+                            classes_env.remove(var);
+                        } else {
+                            classes_env.insert(var.clone(), class.clone());
+                            if let Some(facts) = facts.as_deref_mut() {
+                                facts.push(LineFact {
+                                    line,
+                                    kind: FactKind::ExactClass {
+                                        var: var.clone(),
+                                        class: class.clone(),
+                                    },
+                                });
+                            }
+                        }
                     }
-                },
-            },
+                    _ => match cx.resolve_literal(value, &env, scope.poisoned, folder) {
+                        Some(lit) => {
+                            if let Some(facts) = facts.as_deref_mut() {
+                                facts.push(LineFact {
+                                    line,
+                                    kind: FactKind::Value {
+                                        var: var.clone(),
+                                        rendered: lit.render(),
+                                    },
+                                });
+                            }
+                            env.insert(var.clone(), Known { value: lit, line, bound: None });
+                            classes_env.remove(var);
+                        }
+                        None => {
+                            env.remove(var);
+                            classes_env.remove(var);
+                        }
+                    },
+                }
+            }
         }
 
         // 3. After the statement, any variable handed to a call is untrustworthy
@@ -1037,6 +1317,7 @@ fn descend(
                 HashMap::new(),
                 body_this_exact,
                 Some(child),
+                None,
                 out,
             );
             d.stack.pop();
@@ -1055,6 +1336,7 @@ fn descend(
                 HashMap::new(),
                 body_this_exact,
                 Some(child),
+                None,
                 out,
             );
         }
