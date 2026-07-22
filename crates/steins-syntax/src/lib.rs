@@ -18,6 +18,7 @@ use mago_allocator::LocalArena;
 use mago_database::file::FileId;
 use mago_span::HasSpan;
 use mago_syntax::cst::Argument;
+use mago_syntax::cst::Attribute;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeMember;
@@ -34,6 +35,7 @@ use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Node;
+use mago_syntax::cst::PartialArgument;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::UnaryPrefixOperator;
@@ -159,6 +161,25 @@ pub enum EffectRecv {
     ClassName(String),
 }
 
+/// A recognized effect-envelope declaration (ADR-0005/0006/0018): the upper
+/// bound of effects a function or method promises not to exceed.
+///
+/// The `labels` are hierarchical dot-path effect labels (ADR-0018). The **empty**
+/// set is the tightest bound — pure — spelled `#[\Steins\Pure]`; a non-empty set
+/// comes from `#[\Steins\Effect('io', 'nondet.time')]`. When both `#[\Steins\Pure]`
+/// and `#[\Steins\Effect(...)]` decorate the same declaration the two are
+/// contradictory (`Pure` = empty upper bound, the tighter of the two); Pure wins
+/// and `labels` is empty, with no diagnostic about the contradiction in this
+/// slice (see [`attrs_effect_envelope`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EffectEnvelope {
+    /// The declared effect labels (ADR-0018 dot-paths). Empty = `Pure`.
+    pub labels: Vec<String>,
+    /// The span of the recognized attribute (for diagnostic positions — e.g.
+    /// `effect.unknown-label` points here).
+    pub span: Span,
+}
+
 /// A user-defined function declaration (top-level or namespaced). `name` is the
 /// simple (unqualified) name as written at the declaration site.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -166,10 +187,11 @@ pub struct FunctionDecl {
     pub name: String,
     pub params: Vec<Param>,
     pub span: Span,
-    /// The span of a recognized `#[\Steins\Pure]` attribute on this function, if
-    /// present (ADR-0006). `Some` opts the function into always-on envelope
-    /// checking (ADR-0005). Recognition is conservative — see [`attrs_pure_envelope`].
-    pub pure_envelope: Option<Span>,
+    /// The recognized `#[\Steins\Pure]` / `#[\Steins\Effect(...)]` envelope on
+    /// this function, if present (ADR-0005/0006/0018). `Some` opts the function
+    /// into always-on envelope checking. Recognition is conservative — see
+    /// [`attrs_effect_envelope`].
+    pub effect_envelope: Option<EffectEnvelope>,
     /// Every structural effect-origin candidate in the body subtree, in source
     /// order (see [`EffectOrigin`]). Computed for *all* functions, not just
     /// `Pure`-declared ones, because the effects pass propagates a callee's
@@ -197,8 +219,8 @@ pub struct MethodDecl {
     pub params: Vec<Param>,
     /// The span of the method name identifier (for diagnostic positions).
     pub span: Span,
-    /// The `#[\Steins\Pure]` envelope span, if declared (see [`FunctionDecl`]).
-    pub pure_envelope: Option<Span>,
+    /// The recognized effect envelope, if declared (see [`FunctionDecl`]).
+    pub effect_envelope: Option<EffectEnvelope>,
     /// Structural effect-origin candidates in the body (see [`EffectOrigin`]).
     /// Empty for abstract methods (no body).
     pub effect_origins: Vec<EffectOrigin>,
@@ -511,14 +533,15 @@ impl SourceTree {
         let file_id = FileId::new(b"<steins>");
         let program = mago_syntax::parser::parse_file_content(&arena, file_id, source.as_bytes());
 
-        // File-level `use` imports that bind the `Steins\Pure` class to a local
-        // name, so a bare `#[Pure]` / aliased `#[P]` attribute can be recognized.
-        let pure_aliases = collect_pure_aliases(&Node::Program(program));
+        // File-level `use` imports that bind `Steins\Pure` / `Steins\Effect` to a
+        // local name, so a bare `#[Pure]` / aliased `#[P]` / `#[Effect(...)]`
+        // attribute can be recognized.
+        let aliases = collect_steins_aliases(&Node::Program(program));
 
         let mut lowered = Lowered::default();
-        walk(&Node::Program(program), &pure_aliases, &mut lowered);
+        walk(&Node::Program(program), &aliases, &mut lowered);
 
-        let classes = lower_classes(&Node::Program(program), &pure_aliases);
+        let classes = lower_classes(&Node::Program(program), &aliases);
         let scopes = lower_scopes(program);
 
         let parse_errors = program
@@ -600,19 +623,19 @@ struct Lowered {
     calls: Vec<CallExpr>,
 }
 
-fn walk(node: &Node<'_, '_>, pure_aliases: &HashSet<String>, out: &mut Lowered) {
+fn walk(node: &Node<'_, '_>, aliases: &SteinsAttrAliases, out: &mut Lowered) {
     match node {
-        Node::Function(f) => out.functions.push(lower_function(f, pure_aliases)),
+        Node::Function(f) => out.functions.push(lower_function(f, aliases)),
         Node::FunctionCall(c) => out.calls.push(lower_call(c)),
         Node::DeclareItem(d) if is_strict_types_one(d) => out.strict_types = true,
         _ => {}
     }
     for child in node.children() {
-        walk(&child, pure_aliases, out);
+        walk(&child, aliases, out);
     }
 }
 
-fn lower_function(f: &Function<'_>, pure_aliases: &HashSet<String>) -> FunctionDecl {
+fn lower_function(f: &Function<'_>, aliases: &SteinsAttrAliases) -> FunctionDecl {
     let mut effect_origins = Vec::new();
     for s in f.body.statements.iter() {
         scan_effect_origins(&Node::Statement(s), &mut effect_origins);
@@ -622,7 +645,7 @@ fn lower_function(f: &Function<'_>, pure_aliases: &HashSet<String>) -> FunctionD
         name: bytes_to_string(f.name.value),
         params: lower_params(&f.parameter_list),
         span: to_span(f.name.span()),
-        pure_envelope: attrs_pure_envelope(&f.attribute_lists, pure_aliases),
+        effect_envelope: attrs_effect_envelope(&f.attribute_lists, aliases),
         effect_origins,
     }
 }
@@ -643,22 +666,22 @@ fn lower_params(list: &mago_syntax::cst::FunctionLikeParameterList<'_>) -> Vec<P
 
 /// Lower every `class` declaration reachable from `node` (interfaces, traits,
 /// and enums are skipped — they carry no method bodies this slice checks).
-fn lower_classes(node: &Node<'_, '_>, pure_aliases: &HashSet<String>) -> Vec<ClassDecl> {
+fn lower_classes(node: &Node<'_, '_>, aliases: &SteinsAttrAliases) -> Vec<ClassDecl> {
     let mut out = Vec::new();
-    lower_classes_into(node, pure_aliases, &mut out);
+    lower_classes_into(node, aliases, &mut out);
     out
 }
 
-fn lower_classes_into(node: &Node<'_, '_>, pure_aliases: &HashSet<String>, out: &mut Vec<ClassDecl>) {
+fn lower_classes_into(node: &Node<'_, '_>, aliases: &SteinsAttrAliases, out: &mut Vec<ClassDecl>) {
     if let Node::Class(c) = node {
-        out.push(lower_class(c, pure_aliases));
+        out.push(lower_class(c, aliases));
     }
     for child in node.children() {
-        lower_classes_into(&child, pure_aliases, out);
+        lower_classes_into(&child, aliases, out);
     }
 }
 
-fn lower_class(c: &Class<'_>, pure_aliases: &HashSet<String>) -> ClassDecl {
+fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases) -> ClassDecl {
     let parent = c
         .extends
         .as_ref()
@@ -669,7 +692,7 @@ fn lower_class(c: &Class<'_>, pure_aliases: &HashSet<String>) -> ClassDecl {
     let mut uses_traits = false;
     for member in c.members.iter() {
         match member {
-            ClassLikeMember::Method(m) => methods.push(lower_method(m, pure_aliases)),
+            ClassLikeMember::Method(m) => methods.push(lower_method(m, aliases)),
             ClassLikeMember::TraitUse(_) => uses_traits = true,
             _ => {}
         }
@@ -685,7 +708,7 @@ fn lower_class(c: &Class<'_>, pure_aliases: &HashSet<String>) -> ClassDecl {
     }
 }
 
-fn lower_method(m: &Method<'_>, pure_aliases: &HashSet<String>) -> MethodDecl {
+fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases) -> MethodDecl {
     let mut effect_origins = Vec::new();
     if let MethodBody::Concrete(block) = &m.body {
         for s in block.statements.iter() {
@@ -708,7 +731,7 @@ fn lower_method(m: &Method<'_>, pure_aliases: &HashSet<String>) -> MethodDecl {
         name,
         params: lower_params(&m.parameter_list),
         span: to_span(m.name.span()),
-        pure_envelope: attrs_pure_envelope(&m.attribute_lists, pure_aliases),
+        effect_envelope: attrs_effect_envelope(&m.attribute_lists, aliases),
         effect_origins,
         visibility,
         is_static: m.modifiers.iter().any(Modifier::is_static),
@@ -723,78 +746,152 @@ fn lower_method(m: &Method<'_>, pure_aliases: &HashSet<String>) -> MethodDecl {
 /// case-insensitive).
 const PURE_CLASS: &str = "steins\\pure";
 
+/// The canonical, case-folded identity of the `Steins\Effect` class (ADR-0018).
+const EFFECT_CLASS: &str = "steins\\effect";
+
+/// The local names a file's `use` statements bind to `Steins\Pure` and
+/// `Steins\Effect` (lowercased), so a bare `#[Pure]` / `#[Effect(...)]` or an
+/// aliased `#[P]` attribute can be recognized (see [`collect_steins_aliases`]).
+#[derive(Default)]
+struct SteinsAttrAliases {
+    pure: HashSet<String>,
+    effect: HashSet<String>,
+}
+
 /// Normalize an attribute / use identifier to compare against [`PURE_CLASS`]:
 /// drop a leading `\` (fully-qualified spelling) and lowercase.
 fn normalize_class(name: &str) -> String {
     name.trim_start_matches('\\').to_ascii_lowercase()
 }
 
-/// Collect the set of local names (lowercased) that a file's `use` statements
-/// bind to `Steins\Pure`, so a bare `#[Pure]` or aliased `#[P]` attribute can be
-/// resolved. `use Steins\Pure;` binds `pure`; `use Steins\Pure as X;` binds `x`.
+/// Collect the local names (lowercased) that a file's `use` statements bind to
+/// `Steins\Pure` and `Steins\Effect`, so a bare `#[Pure]` / `#[Effect(...)]` or
+/// an aliased `#[P]` attribute can be resolved. `use Steins\Pure;` binds `pure`;
+/// `use Steins\Effect as X;` binds `x` in the effect set.
 ///
 /// Only the plain `use A\B;` / `use A\B as C;` sequence form is lowered (the
-/// grouped `use A\{B};` form is not) — a miss here only *fails to recognize* a
-/// Pure envelope, which is the conservative side: it never imposes checks the
-/// author did not ask for.
-fn collect_pure_aliases(node: &Node<'_, '_>) -> HashSet<String> {
-    let mut aliases = HashSet::new();
-    collect_pure_aliases_into(node, &mut aliases);
+/// grouped `use A\{B};` form is not) — a miss here only *fails to recognize* an
+/// envelope, which is the conservative side: it never imposes checks the author
+/// did not ask for.
+fn collect_steins_aliases(node: &Node<'_, '_>) -> SteinsAttrAliases {
+    let mut aliases = SteinsAttrAliases::default();
+    collect_steins_aliases_into(node, &mut aliases);
     aliases
 }
 
-fn collect_pure_aliases_into(node: &Node<'_, '_>, out: &mut HashSet<String>) {
+fn collect_steins_aliases_into(node: &Node<'_, '_>, out: &mut SteinsAttrAliases) {
     if let Node::Use(u) = node
         && let UseItems::Sequence(seq) = &u.items
     {
         for item in seq.items.iter() {
-            let full = bytes_to_string(item.name.value());
-            if normalize_class(&full) != PURE_CLASS {
+            let full = normalize_class(&bytes_to_string(item.name.value()));
+            let set = if full == PURE_CLASS {
+                &mut out.pure
+            } else if full == EFFECT_CLASS {
+                &mut out.effect
+            } else {
                 continue;
-            }
+            };
             // The bound local name: the explicit alias, else the last segment.
             let local = match &item.alias {
                 Some(a) => bytes_to_string(a.identifier.value),
                 None => bytes_to_string(item.name.last_segment()),
             };
-            out.insert(local.to_ascii_lowercase());
+            set.insert(local.to_ascii_lowercase());
         }
     }
     for child in node.children() {
-        collect_pure_aliases_into(&child, out);
+        collect_steins_aliases_into(&child, out);
     }
 }
 
-/// Recognize a `#[\Steins\Pure]` envelope attribute in an attribute-list
-/// sequence (a function or method declaration), returning its span. Recognition
-/// is deliberately conservative (a false match imposes
-/// always-on checks the author never requested): it accepts only
+/// Recognize a `#[\Steins\Pure]` or `#[\Steins\Effect(...)]` envelope attribute
+/// in an attribute-list sequence (a function or method declaration), returning
+/// the resolved [`EffectEnvelope`]. Recognition is deliberately conservative (a
+/// false match imposes always-on checks the author never requested): a name
+/// matches only when it is
 ///
-/// * a fully-qualified `\Steins\Pure` or qualified `Steins\Pure` name, or
-/// * a bare / aliased name that a `use Steins\Pure[ as X];` import binds
-///   (`pure_aliases`).
+/// * a fully-qualified `\Steins\Pure` / `\Steins\Effect` or qualified
+///   `Steins\Pure` / `Steins\Effect`, or
+/// * a bare / aliased name that a `use Steins\Pure[ as X];` /
+///   `use Steins\Effect[ as X];` import binds.
 ///
 /// So JetBrains' `#[Pure]` **without** the import, and `#[JetBrains\PhpStorm\Pure]`,
 /// do not match. Matching is case-insensitive (PHP class-name semantics).
-fn attrs_pure_envelope(
+///
+/// For `#[\Steins\Effect(...)]` the arguments must be **plain string literals**
+/// (`'io'`, `'nondet.time'`); any non-literal argument (a class constant like
+/// `Effects::IO`, a concatenation, or a named argument) — which this slice cannot
+/// resolve without constant resolution — makes the whole attribute *unrecognized*
+/// (no envelope, no checking), the conservative choice. Class-constant support is
+/// deferred until constant resolution exists.
+///
+/// `#[\Steins\Pure]` and `#[\Steins\Effect(...)]` on the same declaration are
+/// contradictory (Pure = empty upper bound, the tighter one); **Pure wins**
+/// (empty `labels`), with no diagnostic about the contradiction here.
+fn attrs_effect_envelope(
     attribute_lists: &mago_syntax::cst::Sequence<'_, mago_syntax::cst::AttributeList<'_>>,
-    pure_aliases: &HashSet<String>,
-) -> Option<Span> {
+    aliases: &SteinsAttrAliases,
+) -> Option<EffectEnvelope> {
+    let mut pure_span: Option<Span> = None;
+    let mut effect: Option<(Vec<String>, Span)> = None;
+
     for list in attribute_lists.iter() {
         for attr in list.attributes.iter() {
             let norm = normalize_class(&bytes_to_string(attr.name.value()));
-            let matched = match attr.name {
-                // A bare name matches only via an in-file `use Steins\Pure`.
-                Identifier::Local(_) => pure_aliases.contains(&norm),
-                // A qualified / fully-qualified name matches `Steins\Pure` itself.
+            let is_pure = match attr.name {
+                Identifier::Local(_) => aliases.pure.contains(&norm),
                 Identifier::Qualified(_) | Identifier::FullyQualified(_) => norm == PURE_CLASS,
             };
-            if matched {
-                return Some(to_span(attr.span()));
+            let is_effect = match attr.name {
+                Identifier::Local(_) => aliases.effect.contains(&norm),
+                Identifier::Qualified(_) | Identifier::FullyQualified(_) => norm == EFFECT_CLASS,
+            };
+
+            if is_pure {
+                pure_span.get_or_insert_with(|| to_span(attr.span()));
+            } else if is_effect
+                && effect.is_none()
+                && let Some(labels) = effect_attr_labels(attr)
+            {
+                // Only recognized when *all* arguments are string literals; a
+                // non-literal arg yields `None` and leaves the attribute ignored.
+                effect = Some((labels, to_span(attr.span())));
             }
         }
     }
-    None
+
+    // Pure wins the contradiction (empty upper bound is the tighter bound).
+    if let Some(span) = pure_span {
+        return Some(EffectEnvelope { labels: Vec::new(), span });
+    }
+    effect.map(|(labels, span)| EffectEnvelope { labels, span })
+}
+
+/// The effect labels declared by a recognized `#[\Steins\Effect(...)]` attribute,
+/// or `None` when any argument is not a plain string literal (→ the whole
+/// attribute is unrecognized). No argument list, or an empty one, yields an empty
+/// label set (an empty upper bound — the same tight bound as `Pure`).
+fn effect_attr_labels(attr: &Attribute<'_>) -> Option<Vec<String>> {
+    let Some(list) = attr.argument_list.as_ref() else {
+        return Some(Vec::new());
+    };
+    let mut labels = Vec::new();
+    for arg in list.arguments.iter() {
+        let PartialArgument::Positional(p) = arg else {
+            return None; // named / placeholder / variadic-placeholder → unrecognized
+        };
+        if p.ellipsis.is_some() {
+            return None; // spread argument → unrecognized
+        }
+        match p.value.unparenthesized() {
+            // `?` widens an undecodable string literal (`ls.value == None`) to the
+            // unrecognized path, exactly like a non-string argument.
+            Expression::Literal(Literal::String(ls)) => labels.push(bytes_to_string(ls.value?)),
+            _ => return None, // constant / concatenation / non-string literal → unrecognized
+        }
+    }
+    Some(labels)
 }
 
 /// Walk a function-body subtree, appending every [`EffectOrigin`] found. Does not

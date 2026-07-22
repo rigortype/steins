@@ -16,8 +16,8 @@ use std::collections::{HashMap, HashSet};
 use steins_db::{Db, SourceFile, function_index, parse};
 use steins_sidecar::{FoldArg, FoldResult, FoldValue, Sidecar};
 use steins_syntax::{
-    ArgValue, Callee, ClassDecl, EffectOrigin, EffectRecv, FunctionDecl, MethodDecl, Param,
-    ParamType, Receiver, ScalarType, Scope, ScopeOwner, SourceTree, StaticClass, StmtKind,
+    ArgValue, Callee, ClassDecl, EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, MethodDecl,
+    Param, ParamType, Receiver, ScalarType, Scope, ScopeOwner, SourceTree, StaticClass, StmtKind,
     Visibility,
 };
 use steins_syntax::CallExpr;
@@ -26,8 +26,14 @@ use steins_syntax::CallExpr;
 pub const ID: &str = "type.argument-mismatch";
 
 /// The registry id for the effect-envelope check (ADR-0005/0022): a function
-/// declared `#[\Steins\Pure]` whose inferred effects exceed the empty envelope.
+/// declared `#[\Steins\Pure]` / `#[\Steins\Effect(...)]` whose inferred effects
+/// exceed the declared envelope (ADR-0018 prefix subsumption).
 pub const EFFECT_ID: &str = "effect.envelope-exceeded";
+
+/// The registry id for the unknown-effect-label check (ADR-0018/0022): a declared
+/// `#[\Steins\Effect(...)]` label that is not in the label registry
+/// ([`steins_catalog::is_known_label`]) — a typo or an unregistered private label.
+pub const UNKNOWN_LABEL_ID: &str = "effect.unknown-label";
 
 /// The maximum depth of interprocedural argument-binding descent (Feature B).
 ///
@@ -352,9 +358,9 @@ fn effect_diagnostics(
     path: &str,
 ) -> Vec<Diagnostic> {
     // Fast path: with no envelope anywhere in the file there is nothing to check.
-    let any_pure = functions.iter().any(|f| f.pure_envelope.is_some())
-        || classes.iter().any(|c| c.methods.iter().any(|m| m.pure_envelope.is_some()));
-    if !any_pure {
+    let any_envelope = functions.iter().any(|f| f.effect_envelope.is_some())
+        || classes.iter().any(|c| c.methods.iter().any(|m| m.effect_envelope.is_some()));
+    if !any_envelope {
         return Vec::new();
     }
 
@@ -439,24 +445,32 @@ fn effect_diagnostics(
         }
     }
 
-    // Report: one Pure envelope at a time, each proven origin in source order.
+    // Report: one declared envelope at a time, each proven origin in source order.
     let mut out = Vec::new();
-    for f in functions.iter().filter(|f| f.pure_envelope.is_some()) {
-        report_unit(&mut out, tree, path, functions, classes, None, &f.name, &f.effect_origins, &effects);
+    for f in functions {
+        let Some(env) = &f.effect_envelope else { continue };
+        report_unit(&mut out, tree, path, functions, classes, None, &f.name, env, &f.effect_origins, &effects);
     }
     for c in classes {
-        for m in c.methods.iter().filter(|m| m.pure_envelope.is_some()) {
+        for m in &c.methods {
+            let Some(env) = &m.effect_envelope else { continue };
             let display = format!("{}::{}", c.name, m.name);
-            report_unit(&mut out, tree, path, functions, classes, Some(&c.name), &display, &m.effect_origins, &effects);
+            report_unit(&mut out, tree, path, functions, classes, Some(&c.name), &display, env, &m.effect_origins, &effects);
         }
     }
     out
 }
 
-/// Emit the effect-envelope violations for one `#[\Steins\Pure]` unit, walking
-/// its own origins in source order (direct builtins/output/exit reported at the
-/// origin; same-file function/method edges reported transitively with the
-/// ultimate origin named).
+/// Emit the diagnostics for one declared-envelope unit (ADR-0005/0018):
+///
+/// 1. **`effect.unknown-label`** — one per declared label not in the registry,
+///    reported at the attribute span (typos, unregistered private labels).
+/// 2. **`effect.envelope-exceeded`** — walking the unit's own origins in source
+///    order, each proven effect *not* subsumed by any declared label is a
+///    violation (direct builtins/output/exit reported at the origin; same-file
+///    function/method edges reported transitively with the ultimate origin named).
+///    The empty envelope (`Pure`) is exceeded by every effect, reproducing the
+///    pre-generalization behavior and message shape exactly.
 #[allow(clippy::too_many_arguments)]
 fn report_unit(
     out: &mut Vec<Diagnostic>,
@@ -465,48 +479,70 @@ fn report_unit(
     functions: &[FunctionDecl],
     classes: &[ClassDecl],
     class: Option<&str>,
-    pure_display: &str,
+    display: &str,
+    envelope: &EffectEnvelope,
     origins: &[EffectOrigin],
     effects: &HashMap<Sym, HashSet<EffectFinding>>,
 ) {
+    // 1. Unknown declared labels (one diagnostic each, at the attribute span).
+    for label in &envelope.labels {
+        if steins_catalog::is_known_label(label) {
+            continue;
+        }
+        let suggestion = steins_catalog::nearest_label(label)
+            .map(|s| format!(" — did you mean '{s}'?"))
+            .unwrap_or_default();
+        let msg = format!(
+            "unknown effect label '{label}' in #[\\Steins\\Effect] on {display}(){suggestion}"
+        );
+        let pos = tree.position(envelope.span.start);
+        out.push(Diagnostic {
+            id: UNKNOWN_LABEL_ID,
+            path: path.to_owned(),
+            line: pos.line,
+            column: pos.column,
+            message: msg,
+        });
+    }
+
+    // 2. Envelope-exceeded violations (each effect not subsumed by the envelope).
+    let labels = &envelope.labels;
     for origin in origins {
         match origin {
             EffectOrigin::Call { name, span } => {
                 if let Some(canon) = user_fn_canon(functions, name) {
-                    emit_transitive(out, tree, path, &Sym::Func(canon), effects, span.start, pure_display);
+                    emit_transitive(out, tree, path, &Sym::Func(canon), effects, span.start, display, labels);
                 } else {
                     for f in builtin_findings(name, *span, tree) {
-                        let msg = format!(
-                            "{name}() has effect {}, but {pure_display}() is declared #[\\Steins\\Pure]",
-                            f.label
-                        );
-                        out.push(effect_diag(tree, path, span.start, msg));
+                        if exceeds(labels, &f.label) {
+                            let prefix = format!("{name}() has effect {}", f.label);
+                            out.push(exceeded_diag(tree, path, span.start, &prefix, display, labels, &f.label));
+                        }
                     }
                 }
             }
-            EffectOrigin::Output { keyword, span } => {
-                let msg = format!(
-                    "{keyword} has effect output, but {pure_display}() is declared #[\\Steins\\Pure]"
-                );
-                out.push(effect_diag(tree, path, span.start, msg));
+            EffectOrigin::Output { keyword, span } if exceeds(labels, "output") => {
+                let prefix = format!("{keyword} has effect output");
+                out.push(exceeded_diag(tree, path, span.start, &prefix, display, labels, "output"));
             }
-            EffectOrigin::Exit { keyword, span } => {
-                let msg = format!(
-                    "{keyword} has effect exit, but {pure_display}() is declared #[\\Steins\\Pure]"
-                );
-                out.push(effect_diag(tree, path, span.start, msg));
+            EffectOrigin::Exit { keyword, span } if exceeds(labels, "exit") => {
+                let prefix = format!("{keyword} has effect exit");
+                out.push(exceeded_diag(tree, path, span.start, &prefix, display, labels, "exit"));
             }
             EffectOrigin::MethodCall { receiver, method, span } => {
                 if let Some(callee) = resolve_effect_edge(classes, class, receiver, method) {
-                    emit_transitive(out, tree, path, &callee, effects, span.start, pure_display);
+                    emit_transitive(out, tree, path, &callee, effects, span.start, display, labels);
                 }
             }
+            // Output / Exit subsumed by the envelope → silent.
+            EffectOrigin::Output { .. } | EffectOrigin::Exit { .. } => {}
         }
     }
 }
 
-/// Emit each proven effect of `callee` as a transitive violation of the pure
-/// envelope, naming the ultimate origin.
+/// Emit each proven effect of `callee` *not subsumed by the envelope* as a
+/// transitive violation, naming the ultimate origin.
+#[allow(clippy::too_many_arguments)]
 fn emit_transitive(
     out: &mut Vec<Diagnostic>,
     tree: &SourceTree,
@@ -514,18 +550,55 @@ fn emit_transitive(
     callee: &Sym,
     effects: &HashMap<Sym, HashSet<EffectFinding>>,
     offset: u32,
-    pure_display: &str,
+    display: &str,
+    labels: &[String],
 ) {
     let callee_display = callee.display();
     let mut fs: Vec<&EffectFinding> = effects.get(callee).into_iter().flatten().collect();
     fs.sort_by(|a, b| (a.line, &a.label, &a.origin).cmp(&(b.line, &b.label, &b.origin)));
     for ef in fs {
-        let msg = format!(
-            "{callee_display}() has effect {} (via {} at line {}), but {pure_display}() is declared #[\\Steins\\Pure]",
+        if !exceeds(labels, &ef.label) {
+            continue;
+        }
+        let prefix = format!(
+            "{callee_display}() has effect {} (via {} at line {})",
             ef.label, ef.origin, ef.line
         );
-        out.push(effect_diag(tree, path, offset, msg));
+        out.push(exceeded_diag(tree, path, offset, &prefix, display, labels, &ef.label));
     }
+}
+
+/// Whether an inferred `effect_label` **exceeds** the declared `labels`: a
+/// violation iff no declared label subsumes it (ADR-0018). The empty envelope
+/// (`Pure`) subsumes nothing, so every effect exceeds it.
+fn exceeds(labels: &[String], effect_label: &str) -> bool {
+    !labels.iter().any(|l| steins_catalog::subsumes(l, effect_label))
+}
+
+/// Build an `effect.envelope-exceeded` diagnostic. `prefix` names the effect and
+/// its source (`rand() has effect nondet.random`); the tail names the declared
+/// envelope — `#[\Steins\Pure]` for the empty set (the unchanged legacy shape),
+/// else `#[\Steins\Effect('io')] — <label> exceeds the envelope`.
+fn exceeded_diag(
+    tree: &SourceTree,
+    path: &str,
+    offset: u32,
+    prefix: &str,
+    display: &str,
+    labels: &[String],
+    exceeding_label: &str,
+) -> Diagnostic {
+    let clause = if labels.is_empty() {
+        "#[\\Steins\\Pure]".to_owned()
+    } else {
+        let quoted: Vec<String> = labels.iter().map(|l| format!("'{l}'")).collect();
+        format!(
+            "#[\\Steins\\Effect({})] — {exceeding_label} exceeds the envelope",
+            quoted.join(", ")
+        )
+    };
+    let msg = format!("{prefix}, but {display}() is declared {clause}");
+    effect_diag(tree, path, offset, msg)
 }
 
 /// The canonical declaration name of a same-file user function matching `name`

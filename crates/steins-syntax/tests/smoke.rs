@@ -73,10 +73,15 @@ fn poison_markers_are_detected() {
 
 use steins_syntax::EffectOrigin;
 
-/// The single function's `pure_envelope` presence.
+/// Whether the single function `f` carries a recognized `Pure` envelope (an
+/// effect envelope with the empty label set).
 fn is_pure(src: &str) -> bool {
     let tree = SourceTree::parse(src);
-    tree.functions().iter().find(|f| f.name == "f").is_some_and(|f| f.pure_envelope.is_some())
+    tree.functions()
+        .iter()
+        .find(|f| f.name == "f")
+        .and_then(|f| f.effect_envelope.as_ref())
+        .is_some_and(|e| e.labels.is_empty())
 }
 
 #[test]
@@ -111,6 +116,69 @@ fn foreign_pure_attributes_do_not_match() {
     assert!(!is_pure("<?php #[JetBrains\\PhpStorm\\Pure] function f(): void {}"));
     assert!(!is_pure("<?php #[Some\\Other\\Pure] function f(): void {}"));
     assert!(!is_pure("<?php function f(): void {}"), "no attribute at all");
+}
+
+// ---- ADR-0018: `#[\Steins\Effect(...)]` recognition + lowering ------------
+
+use steins_syntax::EffectEnvelope;
+
+/// The recognized envelope on function `f`, if any.
+fn envelope(src: &str) -> Option<EffectEnvelope> {
+    SourceTree::parse(src)
+        .functions()
+        .iter()
+        .find(|f| f.name == "f")
+        .and_then(|f| f.effect_envelope.clone())
+}
+
+#[test]
+fn recognizes_effect_with_string_literal_labels() {
+    let e = envelope("<?php #[\\Steins\\Effect('io', 'nondet.time')] function f(): void {}")
+        .expect("recognized");
+    assert_eq!(e.labels, vec!["io".to_owned(), "nondet.time".to_owned()]);
+
+    // Qualified spelling and case-insensitivity.
+    let e = envelope("<?php #[Steins\\Effect('io.fs.read')] function f(): void {}").expect("qualified");
+    assert_eq!(e.labels, vec!["io.fs.read".to_owned()]);
+}
+
+#[test]
+fn recognizes_effect_via_use_alias() {
+    let e = envelope("<?php\nuse Steins\\Effect;\n#[Effect('io')] function f(): void {}")
+        .expect("bare with use");
+    assert_eq!(e.labels, vec!["io".to_owned()]);
+
+    let e = envelope("<?php\nuse Steins\\Effect as Fx;\n#[Fx('nondet')] function f(): void {}")
+        .expect("aliased");
+    assert_eq!(e.labels, vec!["nondet".to_owned()]);
+
+    // Bare #[Effect(...)] without the use is not the Steins envelope.
+    assert!(envelope("<?php #[Effect('io')] function f(): void {}").is_none());
+}
+
+#[test]
+fn effect_with_non_literal_args_is_unrecognized() {
+    // Class-constant argument — not resolvable without constant resolution.
+    assert!(
+        envelope("<?php #[\\Steins\\Effect(Effects::IO)] function f(): void {}").is_none(),
+        "class-constant arg → whole attribute ignored"
+    );
+    // Concatenation and named args likewise.
+    assert!(envelope("<?php #[\\Steins\\Effect('io' . '.fs')] function f(): void {}").is_none());
+    assert!(envelope("<?php #[\\Steins\\Effect(label: 'io')] function f(): void {}").is_none());
+    // A non-string literal (int) is also not a label.
+    assert!(envelope("<?php #[\\Steins\\Effect(42)] function f(): void {}").is_none());
+}
+
+#[test]
+fn pure_wins_over_effect_when_both_present() {
+    let e = envelope("<?php #[\\Steins\\Pure]\n#[\\Steins\\Effect('io')] function f(): void {}")
+        .expect("recognized");
+    assert!(e.labels.is_empty(), "Pure (empty upper bound) wins the contradiction");
+    // Order-independent: Effect first, Pure second.
+    let e = envelope("<?php #[\\Steins\\Effect('io')]\n#[\\Steins\\Pure] function f(): void {}")
+        .expect("recognized");
+    assert!(e.labels.is_empty());
 }
 
 #[test]
