@@ -81,11 +81,23 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // 333 → 357 (+24) with ADR-0031 branch-sensitive analysis: the structured `if`
     // walk, ternary values, and positive refinement now reach proven values that
     // were previously buried inside `Opaque` control-flow blocks, so the phpdoc
-    // contract layer sees more of them. All sampled increases are TRUE no-coercion
-    // contract violations in released test code (int/`null` into `@param string|int`,
-    // a non-array element in an `@return array[]`), never runtime findings — the
-    // runtime gate stays GREEN. Baseline moved deliberately per ADR-0030.
-    ("pxxxx-monorepo", 357),
+    // contract layer sees more of them.
+    //
+    // 357 → 404 (+47) with the ADR-0035 "refined layer goes live" milestone: the
+    // env now stores the four-layer `steins_domain::Fact`, and three new sound
+    // inference sources feed the contract layer — native-type parameter *seeding*
+    // (`int $x` ⇒ `General{Int}`), guard *refinements* that produce Refined/General
+    // facts (`$n > 0` ⇒ positive-int, `$s !== ''` ⇒ non-empty-string), and
+    // `@phpstan-assert` *application* — checked via `steins_contract::admits_fact`
+    // (only a definite `No` reports). 8 of the increase are the new abstract-fact
+    // findings (a seeded/refined scalar flowing into an incompatible `@param`, e.g.
+    // positive-int → `@param string`, non-empty-string → `@param int`, int →
+    // `@param string`); the rest are concrete values the richer propagation now
+    // reaches. All sampled increases are TRUE no-coercion contract violations in
+    // released test code, never runtime findings — the runtime gate stays GREEN.
+    // Class-shaped `@param`s are held silent against scalar facts (template safety),
+    // so no template FPs. Baseline moved deliberately per ADR-0030/0035.
+    ("pxxxx-monorepo", 404),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).
