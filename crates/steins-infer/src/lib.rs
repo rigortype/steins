@@ -1395,14 +1395,21 @@ fn analyze_scope(
                 env.clear();
                 classes_env.clear();
             }
-            StmtKind::Opaque { writes, poisons } => {
+            // A control-flow construct forgets both what it may write AND what it
+            // branches on (reads): a guard that early-returns on a variable's
+            // value excludes that value from the fall-through path, so keeping the
+            // binding would assert an unreachable path (soundness — see the
+            // `StmtKind::Opaque` docs). Both sets drop from the literal env and the
+            // exact-class env (an `instanceof`/`is null` guard filters class facts
+            // the same way it filters scalar facts).
+            StmtKind::Opaque { writes, reads, poisons } => {
                 if *poisons {
                     env.clear();
                     classes_env.clear();
                 } else {
-                    for w in writes {
-                        env.remove(w);
-                        classes_env.remove(w);
+                    for v in writes.iter().chain(reads) {
+                        env.remove(v);
+                        classes_env.remove(v);
                     }
                 }
             }
