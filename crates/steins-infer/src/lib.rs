@@ -97,6 +97,14 @@ pub const THROW_UNDECLARED_ID: &str = "throw.undeclared";
 /// only when **both** sides declare `@throws`; `Maybe` resolution stays silent.
 pub const THROW_LISKOV_ID: &str = "throw.liskov-widened";
 
+/// The registry id for the Liskov effect-widening check (ADR-0033 point 5): a
+/// project method whose **proven** inferred effects exceed the effect envelope
+/// (`#[\Steins\Pure]` / `#[\Steins\Effect(...)]`) declared on the abstraction it
+/// overrides or implements (a parent class or interface method). Implementations
+/// may be purer, never less pure; the exhaustiveness-tainted (unknown) remainder
+/// stays silent — only the proven subset judges.
+pub const EFFECT_LISKOV_ID: &str = "effect.liskov-widened";
+
 /// The maximum depth of interprocedural argument-binding descent (Feature B).
 ///
 /// ADR-0009 makes inference cutoffs a first-class budget discipline: a chain of
@@ -784,6 +792,9 @@ struct EffectFinding {
 enum Sym {
     Func(String),
     Method(String, String),
+    /// A closure/arrow body (ADR-0033), keyed by file path + definition-site
+    /// offset (closures are same-file, so this key is stable within a project).
+    Closure(String, u32),
 }
 
 /// One unit's fixpoint result: its proven effect findings and exhaustiveness.
@@ -791,6 +802,48 @@ enum Sym {
 struct EffectSet {
     findings: HashSet<EffectFinding>,
     exhaustive: bool,
+}
+
+/// Resolve a [`CallbackRef`] to its effect [`Sym`], for the [`Sym::Closure`] key.
+/// A named callback resolving to a builtin/unknown returns `None` (the caller
+/// handles those inline).
+fn callback_effect_edge(cx: &Cx, cbref: &steins_syntax::CallbackRef) -> Option<Sym> {
+    match cbref {
+        steins_syntax::CallbackRef::Closure(off) => Some(Sym::Closure(cx.path().to_owned(), *off)),
+        steins_syntax::CallbackRef::Named(name) => match cx.resolve_function(name) {
+            FnResolution::User(site) => Some(Sym::Func(cx.fn_decl(site).fqn.clone())),
+            FnResolution::Builtin | FnResolution::Unknown => None,
+        },
+    }
+}
+
+/// Wire a resolved callback into the effect graph (ADR-0033): a closure or user
+/// function becomes an edge; a builtin callback contributes its catalog findings
+/// directly; an unknown callback taints exhaustiveness (`…?`).
+fn add_callback_effects(
+    cx: &Cx,
+    cbref: &steins_syntax::CallbackRef,
+    span: steins_syntax::Span,
+    d: &mut HashSet<EffectFinding>,
+    e: &mut HashSet<Sym>,
+    ex: &mut bool,
+) {
+    match cbref {
+        steins_syntax::CallbackRef::Closure(off) => {
+            e.insert(Sym::Closure(cx.path().to_owned(), *off));
+        }
+        steins_syntax::CallbackRef::Named(name) => match cx.resolve_function(name) {
+            FnResolution::User(site) => {
+                e.insert(Sym::Func(cx.fn_decl(site).fqn.clone()));
+            }
+            FnResolution::Builtin => {
+                for f in builtin_findings(name.simple(), span, cx.tree(), cx.path()) {
+                    d.insert(f);
+                }
+            }
+            FnResolution::Unknown => *ex = false,
+        },
+    }
 }
 
 /// The unified effect fixpoint for **every** function and method in the whole
@@ -815,6 +868,18 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
                     file: fi,
                     class_fqn: Some(c.fqn.clone()),
                     origins: &m.effect_origins,
+                });
+            }
+        }
+        // Closure/arrow bodies are effect nodes too (ADR-0033) — a HigherOrder /
+        // Callback edge into one carries the callback's proven effects.
+        for scope in u.tree.scopes() {
+            if let ScopeOwner::Closure { def_offset } = &scope.owner {
+                ulist.push(Unit {
+                    sym: Sym::Closure(u.path.to_owned(), *def_offset),
+                    file: fi,
+                    class_fqn: None,
+                    origins: &scope.effect_origins,
                 });
             }
         }
@@ -865,6 +930,42 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
                         }
                         None => *ex = false,
                     }
+                }
+                // A higher-order call: the callback's effects join the caller's, or
+                // the base call resolves normally for a non-invoker callee (ADR-0033).
+                EffectOrigin::HigherOrder { callee, callbacks, arg_count, span } => {
+                    match steins_catalog::invocation_shape(callee.simple()) {
+                        Some(shape) => {
+                            // The invoker's own base is effect-pure (the catalog
+                            // gives it no colors); its effect IS the callback's.
+                            if shape.callback_param < *arg_count {
+                                match callbacks.iter().find(|(p, _)| *p == shape.callback_param) {
+                                    Some((_, cbref)) => {
+                                        add_callback_effects(&cx, cbref, *span, d, e, ex);
+                                    }
+                                    // Callback slot filled by an unresolvable value.
+                                    None => *ex = false,
+                                }
+                            }
+                        }
+                        // Not a known invoker: the callee is a normal edge; the
+                        // callback arg is just data (its own body, if user, owns it).
+                        None => match cx.resolve_function(callee) {
+                            FnResolution::User(site) => {
+                                e.insert(Sym::Func(cx.fn_decl(site).fqn.clone()));
+                            }
+                            FnResolution::Builtin => {
+                                for f in builtin_findings(callee.simple(), *span, cx.tree(), cx.path()) {
+                                    d.insert(f);
+                                }
+                            }
+                            FnResolution::Unknown => *ex = false,
+                        },
+                    }
+                }
+                // A `$fn()` resolved to a body-local closure — its effects join.
+                EffectOrigin::Callback { cbref, span } => {
+                    add_callback_effects(&cx, cbref, *span, d, e, ex);
                 }
                 EffectOrigin::Opaque { .. } => *ex = false,
             }
@@ -1020,21 +1121,119 @@ fn effect_diagnostics(units: &[FileUnit], index: &Index) -> Vec<Diagnostic> {
         }
         for c in cx.tree().classes() {
             for m in &c.methods {
-                let Some(env) = &m.effect_envelope else { continue };
-                let display = format!("{}::{}", c.name, m.name);
-                report_unit(
-                    &mut out,
-                    &cx,
-                    Some(&c.fqn),
-                    &display,
-                    env,
-                    &m.effect_origins,
-                    &effects,
-                );
+                if let Some(env) = &m.effect_envelope {
+                    let display = format!("{}::{}", c.name, m.name);
+                    report_unit(
+                        &mut out,
+                        &cx,
+                        Some(&c.fqn),
+                        &display,
+                        env,
+                        &m.effect_origins,
+                        &effects,
+                    );
+                }
+                // Liskov (ADR-0033 point 5): a concrete implementation whose PROVEN
+                // effects exceed an abstraction's effect envelope. Interfaces carry
+                // no bodies, so only concrete class methods are judged.
+                if !c.is_interface && !m.is_abstract {
+                    emit_effect_liskov(&mut out, &cx, c, m, &effects);
+                }
             }
         }
     }
     out
+}
+
+/// Emit `effect.liskov-widened` when a concrete method's PROVEN inferred effects
+/// exceed the effect envelope declared on an abstraction it overrides/implements
+/// (a parent class or interface method — ADR-0033 point 5). Only the proven part
+/// judges: the exhaustiveness-tainted (unknown) remainder stays silent.
+fn emit_effect_liskov(
+    out: &mut Vec<Diagnostic>,
+    cx: &Cx,
+    class: &ClassDecl,
+    m: &MethodDecl,
+    effects: &HashMap<Sym, EffectSet>,
+) {
+    let abstractions = collect_abstraction_effects(cx, class, &m.name);
+    if abstractions.is_empty() {
+        return;
+    }
+    let sym = Sym::Method(class.fqn.clone(), m.name.clone());
+    let Some(set) = effects.get(&sym) else { return };
+    // The impl's proven effect labels (deduplicated, sorted for stable output).
+    let mut proven: Vec<&str> = set.findings.iter().map(|f| f.label.as_str()).collect();
+    proven.sort_unstable();
+    proven.dedup();
+    if proven.is_empty() {
+        return;
+    }
+    for (abs_display, labels) in abstractions {
+        for label in &proven {
+            if !exceeds(&labels, label) {
+                continue; // within the abstraction's envelope (purer OK)
+            }
+            let clause = if labels.is_empty() {
+                "#[\\Steins\\Pure]".to_owned()
+            } else {
+                let quoted: Vec<String> = labels.iter().map(|l| format!("'{l}'")).collect();
+                format!("#[\\Steins\\Effect({})]", quoted.join(", "))
+            };
+            let pos = cx.tree().position(m.span.start);
+            let msg = format!(
+                "{}::{}() has proven effect {label} but {abs_display}::{}() (its abstraction) is declared {clause} — Liskov effect widening",
+                class.name, m.name, m.name
+            );
+            out.push(Diagnostic {
+                id: EFFECT_LISKOV_ID,
+                path: cx.path().to_owned(),
+                line: pos.line,
+                column: pos.column,
+                message: msg,
+            });
+        }
+    }
+}
+
+/// Every abstraction carrier of `method` with a declared effect envelope: the
+/// nearest parent CLASS declaring it, plus each interface the class
+/// implements/extends (transitively) declaring it — `(display, envelope labels)`.
+fn collect_abstraction_effects(cx: &Cx, class: &ClassDecl, method: &str) -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    // Nearest parent class with an effect envelope on this method.
+    if let Some((display, labels)) = nearest_parent_effect(cx, class, method) {
+        out.push((display, labels));
+    }
+    // Implemented/extended interfaces declaring the method with an envelope.
+    for (display, _file, im) in interface_abstraction_methods(cx, class, method) {
+        if let Some(env) = &im.effect_envelope {
+            out.push((display, env.labels.clone()));
+        }
+    }
+    out
+}
+
+/// The nearest ancestor CLASS (walking `extends`, non-interfaces) declaring
+/// `method` with an effect envelope — `(class name, envelope labels)`.
+fn nearest_parent_effect(cx: &Cx, class: &ClassDecl, method: &str) -> Option<(String, Vec<String>)> {
+    let mut cur = class.parent.as_ref().map(|p| cx.class_fqn(p))?;
+    let mut seen: HashSet<String> = HashSet::new();
+    loop {
+        if !seen.insert(cur.to_ascii_lowercase()) {
+            return None;
+        }
+        let (file, cd) = cx.find_class(&cur)?;
+        if cd.is_interface {
+            return None;
+        }
+        if let Some(pm) = cd.methods.iter().find(|pm| pm.name.eq_ignore_ascii_case(method))
+            && let Some(env) = &pm.effect_envelope
+        {
+            return Some((cd.name.clone(), env.labels.clone()));
+        }
+        cur = cx.units[file].tree.resolve_class_fqn(cd.parent.as_ref()?);
+    }
 }
 
 /// Emit the diagnostics for one declared-envelope unit (ADR-0005/0018).
@@ -1100,8 +1299,67 @@ fn report_unit(
                     emit_transitive(out, cx, &callee, effects, span.start, display, labels);
                 }
             }
+            // A higher-order call (the array_map redemption): a resolvable callback
+            // at the shape's callback param contributes its effects with the
+            // callback's own origin in the provenance (ADR-0033). A non-invoker
+            // callee resolves as a normal edge.
+            EffectOrigin::HigherOrder { callee, callbacks, arg_count, span } => {
+                match steins_catalog::invocation_shape(callee.simple()) {
+                    Some(shape) => {
+                        if shape.callback_param < *arg_count
+                            && let Some((_, cbref)) =
+                                callbacks.iter().find(|(p, _)| *p == shape.callback_param)
+                        {
+                            report_callback(out, cx, cbref, effects, span.start, display, labels);
+                        }
+                    }
+                    None => {
+                        if let FnResolution::User(site) = cx.resolve_function(callee) {
+                            let cs = Sym::Func(cx.fn_decl(site).fqn.clone());
+                            emit_transitive(out, cx, &cs, effects, span.start, display, labels);
+                        } else if let FnResolution::Builtin = cx.resolve_function(callee) {
+                            for f in builtin_findings(callee.simple(), *span, cx.tree(), cx.path()) {
+                                if exceeds(labels, &f.label) {
+                                    let prefix = format!("{}() has effect {}", callee.simple(), f.label);
+                                    out.push(exceeded_diag(cx, span.start, &prefix, display, labels, &f.label));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // A `$fn()` resolved to a body-local closure — report its effects.
+            EffectOrigin::Callback { cbref, span } => {
+                report_callback(out, cx, cbref, effects, span.start, display, labels);
+            }
             EffectOrigin::Output { .. } | EffectOrigin::Exit { .. } => {}
             EffectOrigin::Opaque { .. } => {}
+        }
+    }
+}
+
+/// Emit envelope-exceeded violations for a resolved callback (ADR-0033): a
+/// closure/user callback's transitive effects, or a builtin callback's catalog
+/// effect, each named with the callback in the provenance.
+fn report_callback(
+    out: &mut Vec<Diagnostic>,
+    cx: &Cx,
+    cbref: &steins_syntax::CallbackRef,
+    effects: &HashMap<Sym, EffectSet>,
+    offset: u32,
+    display: &str,
+    labels: &[String],
+) {
+    if let Some(sym) = callback_effect_edge(cx, cbref) {
+        emit_transitive(out, cx, &sym, effects, offset, display, labels);
+    } else if let steins_syntax::CallbackRef::Named(name) = cbref
+        && let FnResolution::Builtin = cx.resolve_function(name)
+    {
+        for f in builtin_findings(name.simple(), steins_syntax::Span { start: offset, end: offset }, cx.tree(), cx.path()) {
+            if exceeds(labels, &f.label) {
+                let prefix = format!("{}() has effect {}", name.simple(), f.label);
+                out.push(exceeded_diag(cx, offset, &prefix, display, labels, &f.label));
+            }
         }
     }
 }
@@ -1250,6 +1508,54 @@ struct ThrowSet {
     exhaustive: bool,
 }
 
+/// Wire a resolved callback's throws into the throw graph (ADR-0033), filtered by
+/// the call site's `guards`: a closure/user callback is an edge; a builtin
+/// callback contributes its curated throws directly; an unknown callback taints.
+#[allow(clippy::too_many_arguments)]
+fn add_callback_throws(
+    cx: &Cx,
+    file: usize,
+    cbref: &steins_syntax::CallbackRef,
+    span: steins_syntax::Span,
+    guards: &[Vec<CatchClause>],
+    d: &mut HashMap<ThrowFact, Certainty>,
+    e: &mut Vec<(Sym, Vec<Vec<CatchClause>>)>,
+    x: &mut bool,
+) {
+    match cbref {
+        steins_syntax::CallbackRef::Closure(off) => {
+            e.push((Sym::Closure(cx.path().to_owned(), *off), guards.to_vec()));
+        }
+        steins_syntax::CallbackRef::Named(name) => match cx.resolve_function(name) {
+            FnResolution::User(site) => {
+                e.push((Sym::Func(cx.fn_decl(site).fqn.clone()), guards.to_vec()));
+            }
+            FnResolution::Builtin => {
+                if let Some(classes) = steins_catalog::builtin_throws(name.simple()) {
+                    for c in classes {
+                        let esc = escape_through_guards(cx, c, guards);
+                        if esc == Certainty::No {
+                            continue;
+                        }
+                        let line = cx.tree().position(span.start).line;
+                        let fact = ThrowFact {
+                            class: (*c).to_owned(),
+                            origin: format!("{}()", name.simple()),
+                            origin_file: file,
+                            offset: span.start,
+                            line,
+                            path: cx.path().to_owned(),
+                        };
+                        let slot = d.entry(fact).or_insert(Certainty::No);
+                        *slot = slot.or(esc);
+                    }
+                }
+            }
+            FnResolution::Unknown => *x = false,
+        },
+    }
+}
+
 /// `sub <: super` through the project inheritance chain **and** the builtin
 /// exception table (ADR-0040), as a [`Certainty`]: `Yes` when the chain reaches
 /// `super`; `No` when the chain is fully known (terminates at a project root or a
@@ -1357,6 +1663,17 @@ fn compute_throws(units: &[FileUnit], index: &Index) -> HashMap<Sym, ThrowSet> {
                 });
             }
         }
+        // Closure/arrow bodies are throw nodes too (ADR-0033).
+        for scope in u.tree.scopes() {
+            if let ScopeOwner::Closure { def_offset } = &scope.owner {
+                ulist.push(Unit {
+                    sym: Sym::Closure(u.path.to_owned(), *def_offset),
+                    file: fi,
+                    class_fqn: None,
+                    origins: &scope.throw_origins,
+                });
+            }
+        }
     }
 
     type Edge = (Sym, Vec<Vec<CatchClause>>);
@@ -1424,6 +1741,40 @@ fn compute_throws(units: &[FileUnit], index: &Index) -> HashMap<Sym, ThrowSet> {
                     match resolve_effect_edge(&cx, unit.class_fqn.as_deref(), receiver, method) {
                         Some(callee) => e.push((callee, origin.guards.clone())),
                         None => *x = false,
+                    }
+                }
+                // A resolved callback's throws propagate through this call site's
+                // guards (ADR-0033): a closure/user callback is an edge; a builtin
+                // callback contributes its curated throws; unknown taints.
+                ThrowKind::Callback { cbref } => {
+                    add_callback_throws(&cx, unit.file, cbref, origin.span, &origin.guards, d, e, x);
+                }
+                ThrowKind::HigherOrder { callee, callbacks, arg_count } => {
+                    match steins_catalog::invocation_shape(callee.simple()) {
+                        Some(shape) => {
+                            if shape.callback_param < *arg_count {
+                                match callbacks.iter().find(|(p, _)| *p == shape.callback_param) {
+                                    Some((_, cbref)) => add_callback_throws(
+                                        &cx, unit.file, cbref, origin.span, &origin.guards, d, e, x,
+                                    ),
+                                    None => *x = false,
+                                }
+                            }
+                        }
+                        None => match cx.resolve_function(callee) {
+                            FnResolution::User(site) => {
+                                e.push((Sym::Func(cx.fn_decl(site).fqn.clone()), origin.guards.clone()));
+                            }
+                            FnResolution::Builtin => {
+                                if let Some(classes) = steins_catalog::builtin_throws(callee.simple()) {
+                                    for c in classes {
+                                        let esc = escape_through_guards(&cx, c, &origin.guards);
+                                        add_fact((*c).to_owned(), format!("{}()", callee.simple()), origin.span, esc, d);
+                                    }
+                                }
+                            }
+                            FnResolution::Unknown => *x = false,
+                        },
                     }
                 }
                 ThrowKind::Taint => *x = false,
@@ -1633,36 +1984,56 @@ fn emit_liskov(out: &mut Vec<Diagnostic>, cx: &Cx, class: &ClassDecl, m: &Method
     if child_declared.is_empty() {
         return;
     }
-    let Some((parent_display, parent_declared)) = nearest_parent_throws(cx, class, &m.name) else {
-        return;
-    };
-    if parent_declared.is_empty() {
-        return;
-    }
-    let parent_list = parent_declared.iter().map(|d| last_segment(d)).collect::<Vec<_>>().join("|");
-    for c in child_declared {
-        // A child-declared class widens iff it is a subclass of NO parent class.
-        let covered = parent_declared.iter().any(|p| throw_subtype(cx, c, p) != Certainty::No);
-        if covered {
+    // Every abstraction carrier of this method: the nearest parent class declaring
+    // `@throws`, plus every implemented/extended interface declaring it (ADR-0033).
+    for (abs_display, abs_declared) in collect_abstraction_throws(cx, class, &m.name) {
+        if abs_declared.is_empty() {
             continue;
         }
-        let pos = cx.tree().position(m.span.start);
-        let msg = format!(
-            "{} is declared thrown by {}::{}() but {parent_display}::{}() (its abstraction) declares only @throws {parent_list} — Liskov widening",
-            last_segment(c), class.name, m.name, m.name
-        );
-        out.push(Diagnostic {
-            id: THROW_LISKOV_ID,
-            path: cx.path().to_owned(),
-            line: pos.line,
-            column: pos.column,
-            message: msg,
-        });
+        let abs_list = abs_declared.iter().map(|d| last_segment(d)).collect::<Vec<_>>().join("|");
+        for c in child_declared {
+            // A child-declared class widens iff it is a subclass of NO abstraction class.
+            let covered = abs_declared.iter().any(|p| throw_subtype(cx, c, p) != Certainty::No);
+            if covered {
+                continue;
+            }
+            let pos = cx.tree().position(m.span.start);
+            let msg = format!(
+                "{} is declared thrown by {}::{}() but {abs_display}::{}() (its abstraction) declares only @throws {abs_list} — Liskov widening",
+                last_segment(c), class.name, m.name, m.name
+            );
+            out.push(Diagnostic {
+                id: THROW_LISKOV_ID,
+                path: cx.path().to_owned(),
+                line: pos.line,
+                column: pos.column,
+                message: msg,
+            });
+        }
     }
 }
 
-/// The nearest ancestor class (walking `extends`) that declares a method named
-/// `method` with a `@throws` docblock, returning its class name and declared set.
+/// Every abstraction carrier of `method` with a declared `@throws` envelope: the
+/// nearest parent CLASS declaring it (existing behavior), plus each interface the
+/// class implements/extends (transitively) declaring it (ADR-0033 Liskov).
+fn collect_abstraction_throws(cx: &Cx, class: &ClassDecl, method: &str) -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    if let Some(p) = nearest_parent_throws(cx, class, method) {
+        out.push(p);
+    }
+    for (display, file, im) in interface_abstraction_methods(cx, class, method) {
+        let icx = Cx::new(cx.units, cx.index, file);
+        let declared = declared_throws(&icx, im.span.start, im.docblock.as_deref());
+        if !declared.is_empty() {
+            out.push((display, declared));
+        }
+    }
+    out
+}
+
+/// The nearest ancestor class (walking `extends`, non-interfaces only) that
+/// declares a method named `method` with a `@throws` docblock, returning its class
+/// name and declared set.
 fn nearest_parent_throws(cx: &Cx, class: &ClassDecl, method: &str) -> Option<(String, Vec<String>)> {
     let mut cur = class.parent.as_ref().map(|p| cx.class_fqn(p))?;
     let mut seen: HashSet<String> = HashSet::new();
@@ -1671,6 +2042,11 @@ fn nearest_parent_throws(cx: &Cx, class: &ClassDecl, method: &str) -> Option<(St
             return None;
         }
         let (file, cd) = cx.find_class(&cur)?;
+        // An interface reached via `parent` (an interface's `extends`) is handled by
+        // the interface walker, not the parent-class chain.
+        if cd.is_interface {
+            return None;
+        }
         if let Some(pm) = cd.methods.iter().find(|pm| pm.name.eq_ignore_ascii_case(method)) {
             let pcx = Cx::new(cx.units, cx.index, file);
             let declared = declared_throws(&pcx, pm.span.start, pm.docblock.as_deref());
@@ -1680,6 +2056,42 @@ fn nearest_parent_throws(cx: &Cx, class: &ClassDecl, method: &str) -> Option<(St
         }
         cur = cx.units[file].tree.resolve_class_fqn(cd.parent.as_ref()?);
     }
+}
+
+/// Every interface method (in an implemented/extended interface, transitively) a
+/// class's `method` implements — `(interface display, file, &MethodDecl)`
+/// (ADR-0033 Liskov). BFS over `implements` (and each interface's own
+/// `parent`/`implements` extends chain); dedup by interface FQN.
+fn interface_abstraction_methods<'a>(
+    cx: &Cx<'a>,
+    class: &ClassDecl,
+    method: &str,
+) -> Vec<(String, usize, &'a MethodDecl)> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    // Seed with the class's directly-implemented interfaces.
+    let mut queue: Vec<String> = class.implements.iter().map(|r| cx.class_fqn(r)).collect();
+    while let Some(fqn) = queue.pop() {
+        if !seen.insert(fqn.to_ascii_lowercase()) {
+            continue;
+        }
+        let Some((file, id)) = cx.find_class(&fqn) else { continue };
+        if !id.is_interface {
+            continue; // only interfaces are abstraction carriers here
+        }
+        if let Some(im) = id.methods.iter().find(|im| im.name.eq_ignore_ascii_case(method)) {
+            out.push((id.name.clone(), file, im));
+        }
+        // An interface's extended interfaces (parent + implements) are abstractions too.
+        let itree = cx.units[file].tree;
+        if let Some(p) = &id.parent {
+            queue.push(itree.resolve_class_fqn(p));
+        }
+        for r in &id.implements {
+            queue.push(itree.resolve_class_fqn(r));
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1847,6 +2259,14 @@ impl<'a> Cx<'a> {
         if it.next().is_some() { None } else { Some(scope) }
     }
 
+    /// The closure/arrow body scope defined at `def_offset` in this file (ADR-0033),
+    /// for descent through a proven `$fn()` closure value.
+    fn closure_scope(&self, def_offset: u32) -> Option<&'a Scope> {
+        self.tree().scopes().iter().find(|s| {
+            matches!(&s.owner, ScopeOwner::Closure { def_offset: d } if *d == def_offset)
+        })
+    }
+
     /// A display name for an effect [`Sym`] (`f`, `Foo::bar`), using the resolved
     /// declaration's written case where available.
     fn sym_display(&self, sym: &Sym) -> String {
@@ -1859,6 +2279,10 @@ impl<'a> Cx<'a> {
                 Some((_, cd)) => format!("{}::{}", cd.name, m),
                 None => format!("{cfqn}::{m}"),
             },
+            Sym::Closure(_, off) => {
+                let line = self.tree().position(*off).line;
+                format!("closure (line {line})")
+            }
         }
     }
 
@@ -2158,21 +2582,82 @@ fn singleton_fact(arg: &ArgValue) -> Option<Fact> {
     val_of(arg).map(Fact::Singleton)
 }
 
-/// A proven local fact plus where it was established (for provenance).
+/// The target of a proven closure value (ADR-0033): an anonymous closure/arrow
+/// scope (by definition-site byte offset), or a first-class callable naming a free
+/// function.
+#[derive(Clone)]
+enum ClosureTarget {
+    /// An anonymous closure/arrow scope addressed by its `def_offset`.
+    Scope(u32),
+    /// A first-class callable of a named free function (`strtolower(...)`).
+    Named(NameRef),
+}
+
+/// A proven closure value carried in the env (ADR-0033). Normal value discipline
+/// applies: a reassignment/invalidation drops the whole [`Known`], so the closure
+/// dies exactly like any other value. The by-value capture **snapshot** is taken
+/// at closure-creation time (the definition-site env), which is the semantically
+/// correct PHP by-value capture — a later mutation of the captured variable does
+/// not change what the closure sees.
+#[derive(Clone)]
+struct ClosureVal {
+    target: ClosureTarget,
+    /// The by-value captured variable facts, snapshotted at creation.
+    captures: Vec<(String, Fact)>,
+    /// The closure definition line, for descent provenance.
+    def_line: u32,
+}
+
+/// Whether two closure targets denote the same closure (same anonymous scope, or
+/// the same named function) — for join survival.
+fn closure_target_eq(a: &ClosureTarget, b: &ClosureTarget) -> bool {
+    match (a, b) {
+        (ClosureTarget::Scope(x), ClosureTarget::Scope(y)) => x == y,
+        (ClosureTarget::Named(x), ClosureTarget::Named(y)) => x.raw == y.raw && x.kind == y.kind,
+        _ => false,
+    }
+}
+
+/// A capture fact reduced to a [`BindingKey`]-comparable [`ArgValue`]: a concrete
+/// `Singleton` becomes its value (so a snapshot of `1` and of `"abc"` key
+/// distinctly); any abstract fact collapses to `Other` (still distinct from a
+/// concrete snapshot, sound for memoization).
+fn arg_of_fact_key(fact: &Fact) -> ArgValue {
+    match fact {
+        Fact::Singleton(v) => arg_of_val(v),
+        _ => ArgValue::Other,
+    }
+}
+
+/// A proven local fact plus where it was established (for provenance). A closure
+/// value has no scalar `fact` — it rides in [`Known::closure`] instead (ADR-0033).
 #[derive(Clone)]
 struct Known {
-    fact: Fact,
+    /// The scalar/array value-domain fact, or `None` for a closure-only binding.
+    fact: Option<Fact>,
     line: u32,
     bound: Option<String>,
+    /// The proven closure value bound to this variable, if any (ADR-0033).
+    closure: Option<ClosureVal>,
 }
 
 impl Known {
+    /// A plain value binding (no closure).
+    fn value(fact: Fact, line: u32, bound: Option<String>) -> Self {
+        Known { fact: Some(fact), line, bound, closure: None }
+    }
+
+    /// A closure binding (no scalar fact).
+    fn closure(cv: ClosureVal, line: u32) -> Self {
+        Known { fact: None, line, bound: None, closure: Some(cv) }
+    }
+
     /// The single proven value, when the fact is a `Singleton` (converted back to
     /// the trace IR's [`ArgValue`]); `None` for every abstract or multi-valued
-    /// layer — those resolve no proven value.
+    /// layer (and for a closure-only binding) — those resolve no proven value.
     fn singleton(&self) -> Option<ArgValue> {
         match &self.fact {
-            Fact::Singleton(v) => Some(arg_of_val(v)),
+            Some(Fact::Singleton(v)) => Some(arg_of_val(v)),
             _ => None,
         }
     }
@@ -2232,7 +2717,7 @@ fn analyze_scope(
                 continue;
             }
             if let Some(fact) = seed_fact(p) {
-                env.insert(p.name.clone(), Known { fact, line: 0, bound: Some("native parameter type".to_owned()) });
+                env.insert(p.name.clone(), Known::value(fact, 0, Some("native parameter type".to_owned())));
             }
         }
     }
@@ -2334,6 +2819,12 @@ fn walk_trace(
                         descent.as_mut(),
                         out,
                     );
+                }
+                // `$fn(...)` — resolve the callee variable against the env: a proven
+                // closure value descends into its scope (ADR-0033), a proven string
+                // resolves as a function name.
+                Callee::DynamicVar(name) => {
+                    handle_var_call(cx, folder, scope, name, call, env, descent.as_mut(), out);
                 }
                 Callee::Dynamic => {}
             }
@@ -2488,13 +2979,29 @@ fn apply_assign(
                         kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
                     });
                 }
-                env.insert(var.to_owned(), Known { fact, line, bound: None });
+                env.insert(var.to_owned(), Known::value(fact, line, None));
                 classes_env.remove(var);
             }
             None => {
                 env.remove(var);
                 classes_env.remove(var);
             }
+        }
+        return;
+    }
+
+    // A closure value `$f = fn(...) => …;` / `$f = strtolower(...);` (ADR-0033):
+    // record a `ClosureVal` with its by-value capture snapshot taken from the
+    // CURRENT (definition-site) env — the semantically correct PHP by-value
+    // capture. A poisoned scope drops it (no reliable capture snapshot).
+    if let ArgValue::Closure(cref) = value {
+        env.remove(var);
+        classes_env.remove(var);
+        if w.scope.poisoned {
+            return;
+        }
+        if let Some(cv) = build_closure_val(cx, cref, line, env) {
+            env.insert(var.to_owned(), Known::closure(cv, line));
         }
         return;
     }
@@ -2525,7 +3032,7 @@ fn apply_assign(
                         kind: FactKind::Value { var: var.to_owned(), rendered: lit.render() },
                     });
                 }
-                env.insert(var.to_owned(), Known { fact, line, bound: None });
+                env.insert(var.to_owned(), Known::value(fact, line, None));
                 classes_env.remove(var);
             }
             None => {
@@ -2533,6 +3040,37 @@ fn apply_assign(
                 classes_env.remove(var);
             }
         },
+    }
+}
+
+/// Build a [`ClosureVal`] from a lowered [`ClosureRef`] at its creation site,
+/// snapshotting the by-value captures from the definition-site `env` (ADR-0033).
+/// A capture whose variable has no proven scalar fact is simply omitted (the
+/// closure body sees it as unknown — sound); a captured closure is not re-snapshot
+/// (nested closure capture is not modeled — the body treats it as unknown).
+fn build_closure_val(
+    cx: &Cx,
+    cref: &steins_syntax::ClosureRef,
+    line: u32,
+    env: &HashMap<String, Known>,
+) -> Option<ClosureVal> {
+    use steins_syntax::ClosureRef;
+    match cref {
+        ClosureRef::Anonymous { def_offset, captures } => {
+            let mut snapshot: Vec<(String, Fact)> = Vec::new();
+            for name in captures {
+                if let Some(k) = env.get(name)
+                    && let Some(f) = &k.fact
+                {
+                    snapshot.push((name.clone(), f.clone()));
+                }
+            }
+            Some(ClosureVal { target: ClosureTarget::Scope(*def_offset), captures: snapshot, def_line: line })
+        }
+        ClosureRef::FunctionName(nameref) => {
+            let _ = cx;
+            Some(ClosureVal { target: ClosureTarget::Named(nameref.clone()), captures: Vec::new(), def_line: line })
+        }
     }
 }
 
@@ -2822,7 +3360,7 @@ fn refine_match_arm(
     }
     if let Some(fact) = Fact::from_vals(vals) {
         let line = env.get(name).map_or(0, |k| k.line);
-        env.insert(name.clone(), Known { fact, line, bound: Some("matched arm".to_owned()) });
+        env.insert(name.clone(), Known::value(fact, line, Some("matched arm".to_owned())));
     }
 }
 
@@ -2844,7 +3382,7 @@ fn check_call_on_null(
         return;
     };
     let Some(k) = env.get(v) else { return };
-    if !matches!(&k.fact, Fact::Singleton(Val::Null)) {
+    if !matches!(&k.fact, Some(Fact::Singleton(Val::Null))) {
         return;
     }
     let pos = w.cx.tree().position(call.span.start);
@@ -2936,7 +3474,7 @@ fn operand_values(
         // values for a comparison; an abstract fact has none → `None` → `Maybe`
         // (the sound side). Condition evaluation over `finite_members()`.
         CondOperand::Var(name) if !poisoned => {
-            env.get(name).and_then(|k| k.fact.finite_members().map(|vs| vs.iter().map(arg_of_val).collect()))
+            env.get(name).and_then(|k| k.fact.as_ref()?.finite_members().map(|vs| vs.iter().map(arg_of_val).collect()))
         }
         _ => None,
     }
@@ -3233,11 +3771,11 @@ fn apply_refinements(
             Refine::Exact(var, val) => {
                 env.insert(
                     var.clone(),
-                    Known {
-                        fact: Fact::Singleton(val.clone()),
-                        line: 0,
-                        bound: Some("proven on this branch".to_owned()),
-                    },
+                    Known::value(
+                        Fact::Singleton(val.clone()),
+                        0,
+                        Some("proven on this branch".to_owned()),
+                    ),
                 );
                 classes_env.remove(var);
             }
@@ -3259,10 +3797,13 @@ fn refine_fact(
     f: impl FnOnce(&Fact) -> Option<Fact>,
 ) {
     let Some(k) = env.get(var) else { return };
-    match f(&k.fact) {
+    // A closure-only binding carries no scalar fact — value refinements do not
+    // apply to it; leave it intact.
+    let Some(kf) = &k.fact else { return };
+    match f(kf) {
         Some(nf) => {
             let (line, bound) = (k.line, k.bound.clone());
-            env.insert(var.to_owned(), Known { fact: nf, line, bound });
+            env.insert(var.to_owned(), Known::value(nf, line, bound));
         }
         None => {
             env.remove(var);
@@ -3420,7 +3961,9 @@ fn apply_stmt_asserts(
             };
             (&target.method.params, target.method.docblock.as_deref())
         }
-        Callee::Dynamic => return,
+        // A `$fn(...)` variable call carries no static declaration to read
+        // `@phpstan-assert` envelopes from — nothing to apply.
+        Callee::DynamicVar(_) | Callee::Dynamic => return,
     };
     let Some(envelopes) = parse_envelopes(docblock) else { return };
     for spec in &envelopes.asserts {
@@ -3466,10 +4009,10 @@ fn apply_assert_to_var(
     // it). Assertion helpers are conventionally by-value; a by-ref helper that
     // rebinds is the documented edge where keeping the singleton is the simple,
     // task-specified choice.
-    if env.get(var).is_some_and(|k| k.fact.finite_members().is_some()) {
+    if env.get(var).is_some_and(|k| k.fact.as_ref().is_some_and(|f| f.finite_members().is_some())) {
         return true;
     }
-    env.insert(var.to_owned(), Known { fact, line: 0, bound: Some("asserted".to_owned()) });
+    env.insert(var.to_owned(), Known::value(fact, 0, Some("asserted".to_owned())));
     classes_env.remove(var);
     true
 }
@@ -3516,11 +4059,24 @@ fn join_envs(
 
     let mut env: HashMap<String, Known> = HashMap::new();
     for (name, k0) in &first_env {
-        let mut fact = k0.fact.clone();
+        // A closure-only binding survives a join only when every branch binds the
+        // SAME closure target (a differing/absent branch drops it — the safe side).
+        if let Some(cv0) = &k0.closure {
+            let all_same = rest.iter().all(|(be, _)| {
+                be.get(name)
+                    .and_then(|k| k.closure.as_ref())
+                    .is_some_and(|cv| closure_target_eq(&cv0.target, &cv.target))
+            });
+            if all_same {
+                env.insert(name.clone(), Known::closure(cv0.clone(), k0.line));
+            }
+            continue;
+        }
+        let Some(mut fact) = k0.fact.clone() else { continue };
         let mut ok = true;
         for (be, _) in &rest {
-            match be.get(name) {
-                Some(k) => match fact.join(&k.fact) {
+            match be.get(name).and_then(|k| k.fact.as_ref()) {
+                Some(kf) => match fact.join(kf) {
                     Some(joined) => fact = joined,
                     None => {
                         ok = false;
@@ -3534,7 +4090,7 @@ fn join_envs(
             }
         }
         if ok {
-            env.insert(name.clone(), Known { fact, line: k0.line, bound: k0.bound.clone() });
+            env.insert(name.clone(), Known::value(fact, k0.line, k0.bound.clone()));
         }
     }
 
@@ -3853,11 +4409,168 @@ fn try_descend_function(
         &decl.name,
         None,
         call,
+        &[],
         env,
         poisoned,
         descent,
         out,
     );
+}
+
+/// Handle a `$fn(...)` variable call (ADR-0033): resolve the callee variable
+/// against the env. A proven closure value → argument check against the closure's
+/// params + binding descent into the closure scope (with the capture snapshot
+/// seeded); a proven `Singleton(Str)` → resolve as a function name through the
+/// normal function path. An unresolved `$fn` does nothing (opaque; the effects
+/// pass taints exhaustiveness separately).
+#[allow(clippy::too_many_arguments)]
+fn handle_var_call(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    scope: &Scope,
+    name: &str,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    descent: Option<&mut Descent<'_>>,
+    out: &mut Vec<Diagnostic>,
+) {
+    if scope.poisoned || !call.positional_only {
+        return;
+    }
+    let Some(known) = env.get(name) else { return };
+
+    // 1. Proven closure value → check args + descend into the closure scope.
+    if let Some(cv) = &known.closure {
+        match &cv.target {
+            ClosureTarget::Scope(def_offset) => {
+                let Some(callee_scope) = cx.closure_scope(*def_offset) else { return };
+                // Argument type check at the `$fn(...)` site (mirrors the direct /
+                // propagated check for named calls, which never see a variable call).
+                check_callable_args(cx, folder, scope.poisoned, &callee_scope.params, "closure", call, env, out);
+                let display = format!("closure (defined on line {})", cv.def_line);
+                descend(
+                    cx,
+                    folder,
+                    &callee_scope.params,
+                    cx.cur,
+                    callee_scope,
+                    &format!("closure@{def_offset}"),
+                    &display,
+                    None,
+                    call,
+                    &cv.captures,
+                    env,
+                    scope.poisoned,
+                    descent,
+                    out,
+                );
+            }
+            ClosureTarget::Named(nameref) => {
+                dispatch_named_callable(cx, folder, scope.poisoned, nameref, call, env, descent, out);
+            }
+        }
+        return;
+    }
+
+    // 2. Proven string value → resolve as a function name (`$fn = 'strtolower';`).
+    if let Some(ArgValue::Str(s)) = known.singleton() {
+        let nameref = NameRef { raw: s, kind: RefKind::Unqualified, offset: call.span.start };
+        dispatch_named_callable(cx, folder, scope.poisoned, &nameref, call, env, descent, out);
+    }
+}
+
+/// Dispatch a `$fn(...)` call whose target is a named free function (a first-class
+/// callable or a proven string callable, ADR-0033): argument type check against the
+/// resolved function's params, then normal binding descent.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_named_callable(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    poisoned: bool,
+    nameref: &NameRef,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    descent: Option<&mut Descent<'_>>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let synth = synth_function_call(call, nameref);
+    if let Some(site) = cx.resolve_user_fn(&synth) {
+        let decl = cx.fn_decl(site);
+        check_callable_args(cx, folder, poisoned, &decl.params, &decl.name, call, env, out);
+    }
+    try_descend_function(cx, folder, &synth, env, poisoned, descent, out);
+}
+
+/// A synthetic named-function [`CallExpr`] from a `$fn(...)` variable call and a
+/// resolved function reference, so the normal function-resolution/descent path can
+/// consume it (ADR-0033 first-class-callable / string-callable dispatch).
+fn synth_function_call(call: &CallExpr, nameref: &NameRef) -> CallExpr {
+    CallExpr {
+        callee: Some(nameref.raw.clone()),
+        callee_ref: Some(nameref.clone()),
+        receiver: Callee::Function(nameref.raw.clone()),
+        args: call.args.clone(),
+        positional_only: call.positional_only,
+        span: call.span,
+    }
+}
+
+/// Argument type check for a `$fn(...)` call at the call site (ADR-0033): each
+/// proven argument (literal, or resolved `$var`/fold) is checked against the
+/// callable's corresponding native param type, firing `type.argument-mismatch` on
+/// a proven coercive TypeError — the variable-call analogue of the direct /
+/// propagated check (which never see a variable call). `display` names the callee
+/// in the message (`"closure"` or the resolved function name).
+#[allow(clippy::too_many_arguments)]
+fn check_callable_args(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    poisoned: bool,
+    params: &[Param],
+    display: &str,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    out: &mut Vec<Diagnostic>,
+) {
+    for (i, arg) in call.args.iter().enumerate() {
+        let Some(param) = params.get(i) else { break };
+        if param.variadic {
+            break;
+        }
+        if param.by_ref {
+            continue;
+        }
+        let Some(ty) = param.ty.as_ref() else { continue };
+        // Resolve the argument to a proven value (literal directly; `$var`/fold via
+        // the env). Provenance names the variable/fold source where applicable.
+        let resolved: Option<(ArgValue, Option<String>)> = match &arg.value {
+            v if v.is_literal() => Some((v.clone(), None)),
+            ArgValue::Var(vn) if !poisoned => env.get(vn).and_then(|k| {
+                let v = k.singleton()?;
+                let prov = match &k.bound {
+                    Some(b) => format!("from ${vn}, {b}"),
+                    None => format!("from ${vn}, assigned at line {}", k.line),
+                };
+                Some((v, Some(prov)))
+            }),
+            ArgValue::Call(cn, cargs) => cx
+                .try_fold(cn, cargs, folder)
+                .map(|(lit, prov)| (lit, Some(prov))),
+            _ => None,
+        };
+        if let Some((value, provenance)) = resolved
+            && is_type_error(cx.strict(), ty, &value)
+        {
+            out.push(cx.diagnostic(
+                arg.span.start,
+                &value,
+                provenance.as_deref(),
+                display,
+                &param.name,
+                ty,
+            ));
+        }
+    }
 }
 
 /// Interprocedural argument-binding descent into a resolved callee body.
@@ -3872,6 +4585,7 @@ fn descend(
     display_name: &str,
     body_this_exact: Option<String>,
     call: &CallExpr,
+    captures: &[(String, Fact)],
     env: &HashMap<String, Known>,
     poisoned: bool,
     descent: Option<&mut Descent<'_>>,
@@ -3907,11 +4621,18 @@ fn descend(
         }
     }
 
-    if bound.is_empty() {
+    // A closure with captures descends even with no bound args (the capture
+    // snapshot drives the body); a plain function needs at least one bound arg.
+    if bound.is_empty() && captures.is_empty() {
         return;
     }
 
+    // The binding key incorporates the captured snapshot so two calls of the same
+    // closure with different snapshots memoize distinctly (adversarial #1).
     let mut key_binding = bound.clone();
+    for (name, fact) in captures {
+        key_binding.push((format!("use:{name}"), arg_of_fact_key(fact)));
+    }
     key_binding.sort_by(|a, b| a.0.cmp(&b.0));
     let key: BindingKey = (key_name.to_owned(), key_binding);
 
@@ -3940,13 +4661,21 @@ fn descend(
     // Bound params are always resolved literals/arrays, so `singleton_fact`
     // succeeds; a value that somehow fails conversion is simply left unbound
     // (the callee param stays unknown — sound).
-    let bound_env: HashMap<String, Known> = bound
+    let mut bound_env: HashMap<String, Known> = bound
         .into_iter()
         .filter_map(|(name, value)| {
             singleton_fact(&value)
-                .map(|fact| (name, Known { fact, line: 0, bound: Some(provenance.to_owned()) }))
+                .map(|fact| (name, Known::value(fact, 0, Some(provenance.to_owned()))))
         })
         .collect();
+    // Closure captures (ADR-0033): the by-value snapshot seeds the initial env,
+    // UNDER the param bindings (a param of the same name shadows a capture, PHP
+    // semantics — `use ($x)` is ignored if `$x` is also a parameter).
+    for (name, fact) in captures {
+        bound_env.entry(name.clone()).or_insert_with(|| {
+            Known::value(fact.clone(), 0, Some(provenance.to_owned()))
+        });
+    }
 
     let child_cx = cx.at(callee_file);
     match descent {
@@ -4090,7 +4819,7 @@ fn resolve_call_target<'a>(
             resolve_static_named(cx, &fqn, method, enclosing_class)
         }
         Callee::Static { class: StaticClass::Static, .. } => None,
-        Callee::Function(_) | Callee::Dynamic => None,
+        Callee::Function(_) | Callee::DynamicVar(_) | Callee::Dynamic => None,
     }
 }
 
@@ -4219,6 +4948,7 @@ fn handle_method_call(
         &display,
         target.this_exact,
         call,
+        &[],
         env,
         scope.poisoned,
         descent,
@@ -5282,7 +6012,7 @@ fn arg_abstract_fact<'e>(
         return None;
     }
     let ArgValue::Var(name) = value else { return None };
-    let f = &env.get(name)?.fact;
+    let f = env.get(name)?.fact.as_ref()?;
     f.finite_members().is_none().then_some(f)
 }
 
@@ -5437,7 +6167,7 @@ mod domain_tests {
         // algebra. Equal singletons stay a Singleton and resolve to the value.
         let j = sing(ArgValue::Int(5)).join(&sing(ArgValue::Int(5))).unwrap();
         assert!(matches!(j, Fact::Singleton(Val::Int(5))));
-        let k = Known { fact: j, line: 0, bound: None };
+        let k = Known::value(j, 0, None);
         assert_eq!(k.singleton(), Some(ArgValue::Int(5)));
     }
 
@@ -5446,7 +6176,7 @@ mod domain_tests {
         let j = sing(ArgValue::Int(5)).join(&sing(ArgValue::Int(6))).unwrap();
         assert!(matches!(&j, Fact::OneOf(vs) if vs.len() == 2));
         // A OneOf never resolves to a single proven value.
-        assert_eq!(Known { fact: j.clone(), line: 0, bound: None }.singleton(), None);
+        assert_eq!(Known::value(j.clone(), 0, None).singleton(), None);
         // Re-joining an already-present value dedups.
         let j2 = j.join(&sing(ArgValue::Int(6))).unwrap();
         assert!(matches!(&j2, Fact::OneOf(vs) if vs.len() == 2));
@@ -5461,7 +6191,7 @@ mod domain_tests {
         assert!(matches!(full, Fact::OneOf(_)));
         let widened = full.join(&sing(ArgValue::Int(999))).unwrap();
         assert!(matches!(widened, Fact::Refined { base: Base::Int, .. }));
-        assert_eq!(Known { fact: widened, line: 0, bound: None }.singleton(), None);
+        assert_eq!(Known::value(widened, 0, None).singleton(), None);
     }
 
     #[test]

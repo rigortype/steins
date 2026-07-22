@@ -26,8 +26,8 @@ use steins_syntax::SourceTree;
 
 use crate::Diagnostic;
 use crate::{
-    CALL_ON_NULL_ID, EFFECT_ID, ID, PARAM_MISMATCH_ID, RETURN_ID, RETURN_MISMATCH_ID,
-    THROW_LISKOV_ID, THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID,
+    CALL_ON_NULL_ID, EFFECT_ID, EFFECT_LISKOV_ID, ID, PARAM_MISMATCH_ID, RETURN_ID,
+    RETURN_MISMATCH_ID, THROW_LISKOV_ID, THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID,
 };
 
 /// The registry id for an `@steins-ignore` whose diagnostic id matches nothing on
@@ -49,6 +49,7 @@ pub const DIAGNOSTIC_IDS: &[&str] = &[
     CALL_ON_NULL_ID,
     EFFECT_ID,
     UNKNOWN_LABEL_ID,
+    EFFECT_LISKOV_ID,
     THROW_UNDECLARED_ID,
     THROW_LISKOV_ID,
     SUPPRESS_UNMATCHED_ID,
