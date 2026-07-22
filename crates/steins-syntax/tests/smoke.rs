@@ -49,7 +49,7 @@ fn lowers_scopes_trace_and_poison() {
     let price = tree.scopes().iter().find(|s| s.function_name.as_deref() == Some("price")).unwrap();
     assert!(!price.poisoned);
     assert_eq!(price.stmts.len(), 1);
-    assert!(matches!(&price.stmts[0].kind, StmtKind::Return(v) if v.is_literal()));
+    assert!(matches!(&price.stmts[0].kind, StmtKind::Return { value, .. } if value.is_literal()));
 }
 
 #[test]

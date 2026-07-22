@@ -170,12 +170,96 @@ fn reassignment_uses_last_literal() {
     );
 }
 
+// ==========================================================================
+// ADR-0027 Feature A: write-set `Opaque` refinement of control-flow barriers.
+//
+// A control-flow construct no longer erases the *whole* env — it forgets only
+// the variables it might write. So a value survives an intervening construct
+// that does not touch it, and is forgotten by one that does.
+// ==========================================================================
+
 #[test]
-fn intervening_control_flow_is_a_barrier() {
-    // An `if` between the assignment and the use erases the known value, even
-    // when it is irrelevant to `$w`.
-    let src = format!("{COERCIVE_INT}$w = \"abc\";\nif (true) {{ $y = 1; }}\nwidth($w);");
-    assert_eq!(n(&src), 0, "intervening if → silent");
+fn construct_writing_var_forgets_it() {
+    // (Refinement of the former "intervening if → silent" test.) An `if` that
+    // *writes* `$w` makes it unknown at the later use → silent. This preserves
+    // the original intent: a construct that could have changed `$w` is not
+    // second-guessed.
+    let src = format!("{COERCIVE_INT}$w = \"abc\";\nif ($cond) {{ $w = 5; }}\nwidth($w);");
+    assert_eq!(n(&src), 0, "if writes $w → forgotten → silent");
+}
+
+#[test]
+fn irrelevant_construct_preserves_var() {
+    // The surviving case: an `if` that does not write `$w` (only calls a
+    // side-effecting helper and writes an unrelated `$y`) leaves `$w` known, so
+    // the proven TypeError at `width($w)` is now FLAGGED — where the old blanket
+    // Barrier would have gone silent.
+    let src = format!(
+        "{COERCIVE_INT}function log_it(): void {{}}\n$w = \"abc\";\nif ($cond) {{ log_it(); $y = 1; }}\nwidth($w);"
+    );
+    let d = only(&src);
+    assert!(d.message.contains("argument \"abc\""), "{}", d.message);
+    assert!(d.message.contains("from $w"), "{}", d.message);
+}
+
+#[test]
+fn loop_not_writing_var_survives() {
+    // A loop whose body does not write `$w` leaves it known → flagged.
+    let src = format!("{COERCIVE_INT}$w = \"abc\";\nwhile ($cond) {{ $y = 1; }}\nwidth($w);");
+    assert_eq!(n(&src), 1, "loop not writing $w → survives → flagged");
+    // foreach binding an unrelated value likewise preserves `$w`.
+    let each = format!("{COERCIVE_INT}$w = \"abc\";\nforeach ($items as $it) {{ echo $it; }}\nwidth($w);");
+    assert_eq!(n(&each), 1, "foreach not writing $w → survives");
+}
+
+#[test]
+fn loop_writing_var_becomes_unknown() {
+    // A `for` loop that assigns `$w` in its body forgets it → silent.
+    let src = format!("{COERCIVE_INT}$w = \"abc\";\nfor ($i = 0; $i < 3; $i++) {{ $w = $i; }}\nwidth($w);");
+    assert_eq!(n(&src), 0, "loop writing $w → unknown → silent");
+    // A `foreach` binding *into* `$w` (as the value target) also forgets it.
+    let each = format!("{COERCIVE_INT}$w = \"abc\";\nforeach ($items as $w) {{ echo $w; }}\nwidth($w);");
+    assert_eq!(n(&each), 0, "foreach binding $w → unknown");
+}
+
+#[test]
+fn try_catch_forgets_only_catch_param() {
+    // A `try`/`catch` whose body touches neither `$w` nor the catch var leaves
+    // `$w` known → flagged; the catch parameter `$e` is in the write set but is
+    // irrelevant to `$w`.
+    let src = format!(
+        "{COERCIVE_INT}$w = \"abc\";\ntry {{ echo 1; }} catch (\\Throwable $e) {{ echo 2; }}\nwidth($w);"
+    );
+    assert_eq!(n(&src), 1, "try/catch not writing $w → $w survives");
+    // But if the catch parameter *is* `$w`, the construct forgets it → silent.
+    let clobber = format!(
+        "{COERCIVE_INT}$w = \"abc\";\ntry {{ risky(); }} catch (\\Throwable $w) {{ echo 2; }}\nwidth($w);"
+    );
+    assert_eq!(n(&clobber), 0, "catch (... $w) → $w forgotten");
+}
+
+#[test]
+fn variable_written_via_call_in_construct_becomes_unknown() {
+    // `$w` handed to a call *inside* the construct is by-ref-conservatively part
+    // of the write set → forgotten (a callee could mutate it by reference).
+    let src = format!(
+        "{COERCIVE_INT}function sink($x): void {{}}\n$w = \"abc\";\nif ($cond) {{ sink($w); }}\nwidth($w);"
+    );
+    assert_eq!(n(&src), 0, "$w passed to a call inside the if → forgotten");
+}
+
+#[test]
+fn poison_inside_construct_still_poisons() {
+    // A poison marker anywhere in a construct's subtree poisons the whole scope,
+    // exactly as before — the write-set refinement never weakens poisoning.
+    let global = format!("{COERCIVE_INT}$w = \"abc\";\nif ($cond) {{ global $g; }}\nwidth($w);");
+    assert_eq!(n(&global), 0, "global inside if → scope poisoned → silent");
+    let byref = format!(
+        "{COERCIVE_INT}$w = \"abc\";\nif ($cond) {{ $f = function () use (&$w) {{}}; }}\nwidth($w);"
+    );
+    assert_eq!(n(&byref), 0, "by-ref use inside if → scope poisoned → silent");
+    let extract = format!("{COERCIVE_INT}$w = \"abc\";\nwhile ($cond) {{ extract($d); }}\nwidth($w);");
+    assert_eq!(n(&extract), 0, "extract inside loop → scope poisoned → silent");
 }
 
 #[test]
