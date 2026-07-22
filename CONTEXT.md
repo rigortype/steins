@@ -160,6 +160,13 @@ A budget cutoff names itself in output — `maybe` is reported as `maybe`,
 silence is never manufactured (the Certainty discipline).
 _Avoid_: timeout (budgets are structural, not wall-clock)
 
+**Divergence registry**:
+The tracked ledger of intentional departures from PHPStan's semantics
+(ADR-0030) — each entry records the rationale and, where applicable, the
+upstream proposal it feeds. Imported from rigor-rs.
+_Avoid_: incompatibility list (entries are deliberate and justified, not
+defects)
+
 ### Diagnostics
 
 **Proof layer**:
