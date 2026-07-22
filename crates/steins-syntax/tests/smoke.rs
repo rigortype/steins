@@ -129,6 +129,7 @@ fn scans_effect_origins_across_control_flow() {
             }
             EffectOrigin::Call { name, .. } => calls.push(name.clone()),
             EffectOrigin::Exit { .. } => panic!("no exit expected"),
+            EffectOrigin::MethodCall { .. } => panic!("no method call expected"),
         }
     }
     assert_eq!(echo, 1, "echo inside the if is found");
@@ -144,6 +145,105 @@ fn scans_exit_and_die() {
     assert!(matches!(f.effect_origins.first(), Some(EffectOrigin::Exit { keyword: "exit", .. })));
     let g = tree.functions().iter().find(|x| x.name == "g").unwrap();
     assert!(matches!(g.effect_origins.first(), Some(EffectOrigin::Exit { keyword: "die", .. })));
+}
+
+// ---- Class / method lowering (class-world extension) ----------------------
+
+use steins_syntax::{Callee, ClassDecl, Receiver, ScopeOwner, StaticClass, StmtKind, Visibility};
+
+fn class<'a>(tree: &'a SourceTree, name: &str) -> &'a ClassDecl {
+    tree.classes().iter().find(|c| c.name == name).expect("class present")
+}
+
+#[test]
+fn lowers_class_and_method_shape() {
+    let src = "<?php\nfinal class Foo extends Bar {\n  use SomeTrait;\n  public function __construct(int $w) {}\n  protected static final function s(string $x): void {}\n  private function p(): void {}\n  abstract public function a(): void;\n}\n";
+    let tree = SourceTree::parse(src);
+    let foo = class(&tree, "Foo");
+    assert!(foo.is_final);
+    assert_eq!(foo.parent.as_deref(), Some("Bar"));
+    assert!(foo.uses_traits, "`use SomeTrait;` sets uses_traits");
+    assert_eq!(foo.methods.len(), 4);
+
+    let ctor = foo.methods.iter().find(|m| m.is_constructor).unwrap();
+    assert_eq!(ctor.name, "__construct");
+    assert_eq!(ctor.visibility, Visibility::Public);
+    assert_eq!(ctor.params.len(), 1);
+
+    let s = foo.methods.iter().find(|m| m.name == "s").unwrap();
+    assert_eq!(s.visibility, Visibility::Protected);
+    assert!(s.is_static && s.is_final);
+
+    let p = foo.methods.iter().find(|m| m.name == "p").unwrap();
+    assert_eq!(p.visibility, Visibility::Private);
+
+    let a = foo.methods.iter().find(|m| m.name == "a").unwrap();
+    assert!(a.is_abstract);
+}
+
+#[test]
+fn interfaces_traits_enums_are_not_lowered_as_classes() {
+    let src = "<?php\ninterface I {}\ntrait T {}\nenum E { case A; }\nclass C {}\n";
+    let tree = SourceTree::parse(src);
+    assert_eq!(tree.classes().len(), 1, "only the class is lowered");
+    assert_eq!(tree.classes()[0].name, "C");
+}
+
+#[test]
+fn method_bodies_become_method_scopes() {
+    let src = "<?php\nclass Foo {\n  public function go(): void { $x = 1; }\n  abstract public function skip(): void;\n}\n";
+    let tree = SourceTree::parse(src);
+    let method_scopes: Vec<_> = tree
+        .scopes()
+        .iter()
+        .filter(|s| matches!(&s.owner, ScopeOwner::Method { .. }))
+        .collect();
+    // Only the concrete method gets a scope; the abstract one has no body.
+    assert_eq!(method_scopes.len(), 1);
+    assert!(matches!(
+        &method_scopes[0].owner,
+        ScopeOwner::Method { class, method } if class == "Foo" && method == "go"
+    ));
+    // A method scope is not a free-function scope.
+    assert!(method_scopes[0].function_name.is_none());
+}
+
+#[test]
+fn lowers_new_expression_as_class_fact_rvalue() {
+    let src = "<?php $x = new Foo(\"abc\");";
+    let tree = SourceTree::parse(src);
+    let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
+    let StmtKind::Assign { value, call, .. } = &top.stmts[0].kind else { panic!("assign") };
+    assert!(matches!(value, ArgValue::New(c, _) if c == "Foo"), "value is New(Foo)");
+    // The RHS also carries a constructor CallExpr for arg-checking.
+    let call = call.as_ref().expect("ctor call carried");
+    assert!(matches!(&call.receiver, Callee::Construct { class } if class == "Foo"));
+    assert_eq!(call.args[0].value, ArgValue::Str("abc".into()));
+}
+
+#[test]
+fn lowers_method_and_static_call_receivers() {
+    let src = "<?php\nclass Foo {\n  public function go(): void { $this->m(); self::s(); parent::p(); static::x(); Bar::b(); $v->d(); }\n}\n";
+    let tree = SourceTree::parse(src);
+    let go = tree
+        .scopes()
+        .iter()
+        .find(|s| matches!(&s.owner, ScopeOwner::Method { method, .. } if method == "go"))
+        .unwrap();
+    let receivers: Vec<&Callee> = go
+        .stmts
+        .iter()
+        .filter_map(|s| match &s.kind {
+            StmtKind::Call(c) => Some(&c.receiver),
+            _ => None,
+        })
+        .collect();
+    assert!(receivers.iter().any(|r| matches!(r, Callee::Method { receiver: Receiver::This, method } if method == "m")));
+    assert!(receivers.iter().any(|r| matches!(r, Callee::Static { class: StaticClass::SelfKw, method } if method == "s")));
+    assert!(receivers.iter().any(|r| matches!(r, Callee::Static { class: StaticClass::Parent, method } if method == "p")));
+    assert!(receivers.iter().any(|r| matches!(r, Callee::Static { class: StaticClass::Static, method } if method == "x")));
+    assert!(receivers.iter().any(|r| matches!(r, Callee::Static { class: StaticClass::Named(c), method } if c == "Bar" && method == "b")));
+    assert!(receivers.iter().any(|r| matches!(r, Callee::Method { receiver: Receiver::Var(v), method } if v == "v" && method == "d")));
 }
 
 #[test]

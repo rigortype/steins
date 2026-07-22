@@ -19,13 +19,20 @@ use mago_database::file::FileId;
 use mago_span::HasSpan;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::Call;
+use mago_syntax::cst::Class;
+use mago_syntax::cst::ClassLikeMember;
+use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::DeclareItem;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Function;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Identifier;
+use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Literal;
+use mago_syntax::cst::Method;
+use mago_syntax::cst::MethodBody;
+use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Statement;
@@ -127,6 +134,29 @@ pub enum EffectOrigin {
     /// An `exit` / `die` construct at `span` — the `exit` effect (ADR-0019 rule
     /// 4: `Pure` forbids exit). `keyword` is the spelling for diagnostics.
     Exit { keyword: &'static str, span: Span },
+    /// A method or static-method call whose *receiver* is one the effects pass
+    /// can resolve without a flow environment (`$this->`, `self::`, `parent::`,
+    /// `Foo::`, `new Foo()->`). Recorded so a `#[\Steins\Pure]` method can have
+    /// its resolved method→method effect edges propagated (the class-world
+    /// analogue of the `EffectOrigin::Call` function edge). Dynamic receivers
+    /// (`$var->m()`, `static::m()`) are **not** recorded — no provable edge.
+    MethodCall { receiver: EffectRecv, method: String, span: Span },
+}
+
+/// The receiver of an [`EffectOrigin::MethodCall`], restricted to the forms the
+/// effects pass can resolve to a same-file target without a flow environment.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum EffectRecv {
+    /// `$this->m()` — resolved against the enclosing class chain under the
+    /// final/private guard (a non-final public method may be overridden).
+    This,
+    /// `self::m()` — same guard as `$this` (conservative; `self::` is early-bound
+    /// in PHP but the guard is only ever stricter, so it stays sound).
+    SelfKw,
+    /// `parent::m()` — resolved on the parent chain, exact (parent is fixed).
+    Parent,
+    /// `Foo::m()` or `new Foo()->m()` — resolved on `Foo`'s chain, exact.
+    ClassName(String),
 }
 
 /// A user-defined function declaration (top-level or namespaced). `name` is the
@@ -138,13 +168,68 @@ pub struct FunctionDecl {
     pub span: Span,
     /// The span of a recognized `#[\Steins\Pure]` attribute on this function, if
     /// present (ADR-0006). `Some` opts the function into always-on envelope
-    /// checking (ADR-0005). Recognition is conservative — see [`lower_function`].
+    /// checking (ADR-0005). Recognition is conservative — see [`attrs_pure_envelope`].
     pub pure_envelope: Option<Span>,
     /// Every structural effect-origin candidate in the body subtree, in source
     /// order (see [`EffectOrigin`]). Computed for *all* functions, not just
     /// `Pure`-declared ones, because the effects pass propagates a callee's
     /// effects to `Pure` callers regardless of the callee's own annotations.
     pub effect_origins: Vec<EffectOrigin>,
+}
+
+/// A method's declared visibility. Absent visibility modifiers default to
+/// `Public` (PHP semantics).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Visibility {
+    Public,
+    Protected,
+    Private,
+}
+
+/// A user-defined method declaration — the class-world analogue of
+/// [`FunctionDecl`], carrying the same param/pure-envelope/effect-origin data
+/// plus the modifiers method resolution needs (ADR-0001 sound dispatch).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MethodDecl {
+    /// The simple method name as written (case is preserved; matching is
+    /// case-insensitive — PHP method names are).
+    pub name: String,
+    pub params: Vec<Param>,
+    /// The span of the method name identifier (for diagnostic positions).
+    pub span: Span,
+    /// The `#[\Steins\Pure]` envelope span, if declared (see [`FunctionDecl`]).
+    pub pure_envelope: Option<Span>,
+    /// Structural effect-origin candidates in the body (see [`EffectOrigin`]).
+    /// Empty for abstract methods (no body).
+    pub effect_origins: Vec<EffectOrigin>,
+    pub visibility: Visibility,
+    pub is_static: bool,
+    pub is_final: bool,
+    pub is_abstract: bool,
+    /// `true` iff the method name is `__construct` (case-insensitive).
+    pub is_constructor: bool,
+}
+
+/// A user-defined class declaration (top-level or namespaced). Interfaces,
+/// traits, and enums are **not** lowered to this — they carry no method bodies
+/// this slice checks (a class that *uses* a trait sets [`ClassDecl::uses_traits`]
+/// so resolution gives up on it).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClassDecl {
+    /// Simple (unqualified) class name as written at the declaration site.
+    pub name: String,
+    pub is_final: bool,
+    /// The `extends` parent's simple (last-segment) name, if any. Method
+    /// resolution walks this chain in-file; a parent not defined in the same
+    /// file makes the chain incomplete (→ unknown → silent).
+    pub parent: Option<String>,
+    pub methods: Vec<MethodDecl>,
+    /// `true` if the class `use`s any trait. Trait methods are merged into the
+    /// class at compile time but their bodies live elsewhere, so a
+    /// trait-using class is treated as unresolvable (give up → silent).
+    pub uses_traits: bool,
+    /// The span of the class name identifier.
+    pub span: Span,
 }
 
 /// The value of a call argument (or an assignment right-hand side), restricted
@@ -169,6 +254,12 @@ pub enum ArgValue {
     /// lowered argument values (only zero-argument calls are resolvable in this
     /// slice, so the vector's contents matter only for `is_empty()`).
     Call(String, Vec<ArgValue>),
+    /// `new ClassName(args...)` — a construction rvalue. `String` is the simple
+    /// class name as written. Carried so an assignment `$x = new Foo(...)` can
+    /// record `$x`'s **exact class** in the propagation environment (the object's
+    /// runtime class is fixed at construction). Not a scalar literal — it never
+    /// flows into a scalar type check.
+    New(String, Vec<ArgValue>),
     Other,
 }
 
@@ -183,7 +274,7 @@ impl std::hash::Hash for ArgValue {
             ArgValue::Str(v) => v.hash(state),
             ArgValue::Bool(v) => v.hash(state),
             ArgValue::Var(v) => v.hash(state),
-            ArgValue::Call(name, args) => {
+            ArgValue::Call(name, args) | ArgValue::New(name, args) => {
                 name.hash(state);
                 args.hash(state);
             }
@@ -221,6 +312,7 @@ impl ArgValue {
             ArgValue::Null => "null".to_owned(),
             ArgValue::Var(v) => format!("${v}"),
             ArgValue::Call(name, _) => format!("{name}()"),
+            ArgValue::New(name, _) => format!("new {name}()"),
             ArgValue::Other => "<expr>".to_owned(),
         }
     }
@@ -233,12 +325,63 @@ pub struct Arg {
     pub span: Span,
 }
 
-/// A function-call expression.
+/// What a [`CallExpr`] is called *on* — the receiver dimension that the
+/// class-world resolution rules dispatch on (ADR-0001 sound dispatch). Plain
+/// function calls stay `Function`, so every existing function-world path is
+/// unchanged; the other variants are the method/static/constructor forms whose
+/// resolvability depends on the receiver's exactness (see `steins-infer`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Callee {
+    /// `f(args...)` — a statically-named function (the last, unqualified name).
+    Function(String),
+    /// `$recv->m(args...)` / `$recv?->m(args...)` — an instance-method call.
+    Method { receiver: Receiver, method: String },
+    /// `Class::m(args...)` — a static (scope-resolution `::`) call.
+    Static { class: StaticClass, method: String },
+    /// `new Class(args...)` — a constructor call (`args` are the ctor args).
+    Construct { class: String },
+    /// A receiver or method name the lowering cannot represent (dynamic method
+    /// name, `$obj[...]->m()`, `$var::m()`, …). Never resolves.
+    Dynamic,
+}
+
+/// The object an instance-method call is dispatched on, restricted to the forms
+/// resolution can reason about.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Receiver {
+    /// `$this->m()` — inside a class body.
+    This,
+    /// `$var->m()` — resolvable only when the environment knows `$var`'s exact
+    /// class (`$var = new Foo();`).
+    Var(String),
+    /// `(new Foo(...))->m()` — an exact-class receiver (runtime class is `Foo`).
+    New(String),
+}
+
+/// The class portion of a static `Class::m()` call, as written.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum StaticClass {
+    /// An explicit class name (last segment), e.g. `Foo::m()` — exact.
+    Named(String),
+    /// `self::m()` — the lexical class, resolved under the final/private guard.
+    SelfKw,
+    /// `static::m()` — late static binding, always unknown (LSB).
+    Static,
+    /// `parent::m()` — the parent chain, exact.
+    Parent,
+}
+
+/// A function-call (or method / static / constructor call) expression.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CallExpr {
-    /// The simple callee name, if the callee is a statically-known identifier;
-    /// `None` for dynamic calls (`$f()`, method calls, …).
+    /// The simple callee name, if the callee is a statically-known **function**
+    /// identifier; `None` for dynamic and method/static/constructor calls. Kept
+    /// for the function-world call path; the full receiver is in [`Self::receiver`].
     pub callee: Option<String>,
+    /// The receiver dimension (function / method / static / constructor). For a
+    /// plain function call this is [`Callee::Function`] with the same name as
+    /// [`Self::callee`].
+    pub receiver: Callee,
     /// Arguments in source order. Only meaningful when `positional_only`.
     pub args: Vec<Arg>,
     /// `false` if the call used a named or spread (`...`) argument; the checker
@@ -306,12 +449,29 @@ pub struct Stmt {
     pub invalidated: Vec<String>,
 }
 
-/// One analysis scope: the top-level script, or a single function body. Carries
-/// the linear trace and a whole-scope `poisoned` flag (ADR-0001 give-up list).
+/// Who owns an analysis [`Scope`] — the top-level script, a free function, or a
+/// class method. Method scopes carry their declaring class so `$this->`, `self::`,
+/// and `parent::` calls inside them resolve against the right chain (ADR-0001).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ScopeOwner {
+    TopLevel,
+    Function(String),
+    Method { class: String, method: String },
+}
+
+/// One analysis scope: the top-level script, a function body, or a method body.
+/// Carries the linear trace and a whole-scope `poisoned` flag (ADR-0001 give-up
+/// list).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Scope {
-    /// `None` for the top-level script; `Some(name)` for a function body.
+    /// `None` for the top-level script *and for method bodies*; `Some(name)` for
+    /// a free function body. Retained for the function-world propagation paths
+    /// (constant-function resolution, function binding descent), which key on a
+    /// free-function name — a method never matches. Method scopes are addressed
+    /// via [`Self::owner`].
     pub function_name: Option<String>,
+    /// The precise owner of this scope (top-level / function / method).
+    pub owner: ScopeOwner,
     /// `true` if the scope contains any construct that defeats local value
     /// tracking (`extract`/`compact`, `global`, `static $x`, variable-variables,
     /// reference assignment, by-ref closure capture, `include`/`require`/`eval`).
@@ -333,6 +493,7 @@ pub struct ParseError {
 pub struct SourceTree {
     strict_types: bool,
     functions: Vec<FunctionDecl>,
+    classes: Vec<ClassDecl>,
     calls: Vec<CallExpr>,
     scopes: Vec<Scope>,
     parse_errors: Vec<ParseError>,
@@ -357,6 +518,7 @@ impl SourceTree {
         let mut lowered = Lowered::default();
         walk(&Node::Program(program), &pure_aliases, &mut lowered);
 
+        let classes = lower_classes(&Node::Program(program), &pure_aliases);
         let scopes = lower_scopes(program);
 
         let parse_errors = program
@@ -368,6 +530,7 @@ impl SourceTree {
         Self {
             strict_types: lowered.strict_types,
             functions: lowered.functions,
+            classes,
             calls: lowered.calls,
             scopes,
             parse_errors,
@@ -386,6 +549,13 @@ impl SourceTree {
     #[must_use]
     pub fn functions(&self) -> &[FunctionDecl] {
         &self.functions
+    }
+
+    /// The user-defined class declarations found in the file (interfaces,
+    /// traits, and enums are not lowered here).
+    #[must_use]
+    pub fn classes(&self) -> &[ClassDecl] {
+        &self.classes
     }
 
     /// The function-call expressions found in the file.
@@ -443,9 +613,23 @@ fn walk(node: &Node<'_, '_>, pure_aliases: &HashSet<String>, out: &mut Lowered) 
 }
 
 fn lower_function(f: &Function<'_>, pure_aliases: &HashSet<String>) -> FunctionDecl {
-    let params = f
-        .parameter_list
-        .parameters
+    let mut effect_origins = Vec::new();
+    for s in f.body.statements.iter() {
+        scan_effect_origins(&Node::Statement(s), &mut effect_origins);
+    }
+
+    FunctionDecl {
+        name: bytes_to_string(f.name.value),
+        params: lower_params(&f.parameter_list),
+        span: to_span(f.name.span()),
+        pure_envelope: attrs_pure_envelope(&f.attribute_lists, pure_aliases),
+        effect_origins,
+    }
+}
+
+/// Lower a parameter list to owned [`Param`]s (shared by functions and methods).
+fn lower_params(list: &mago_syntax::cst::FunctionLikeParameterList<'_>) -> Vec<Param> {
+    list.parameters
         .iter()
         .map(|p| Param {
             name: strip_dollar(bytes_to_string(p.variable.name)),
@@ -454,21 +638,83 @@ fn lower_function(f: &Function<'_>, pure_aliases: &HashSet<String>) -> FunctionD
             by_ref: p.is_reference(),
             span: to_span(p.span()),
         })
-        .collect();
+        .collect()
+}
 
-    let pure_envelope = function_pure_envelope(f, pure_aliases);
+/// Lower every `class` declaration reachable from `node` (interfaces, traits,
+/// and enums are skipped — they carry no method bodies this slice checks).
+fn lower_classes(node: &Node<'_, '_>, pure_aliases: &HashSet<String>) -> Vec<ClassDecl> {
+    let mut out = Vec::new();
+    lower_classes_into(node, pure_aliases, &mut out);
+    out
+}
 
-    let mut effect_origins = Vec::new();
-    for s in f.body.statements.iter() {
-        scan_effect_origins(&Node::Statement(s), &mut effect_origins);
+fn lower_classes_into(node: &Node<'_, '_>, pure_aliases: &HashSet<String>, out: &mut Vec<ClassDecl>) {
+    if let Node::Class(c) = node {
+        out.push(lower_class(c, pure_aliases));
+    }
+    for child in node.children() {
+        lower_classes_into(&child, pure_aliases, out);
+    }
+}
+
+fn lower_class(c: &Class<'_>, pure_aliases: &HashSet<String>) -> ClassDecl {
+    let parent = c
+        .extends
+        .as_ref()
+        .and_then(|e| e.types.iter().next())
+        .map(|id| bytes_to_string(id.last_segment()));
+
+    let mut methods = Vec::new();
+    let mut uses_traits = false;
+    for member in c.members.iter() {
+        match member {
+            ClassLikeMember::Method(m) => methods.push(lower_method(m, pure_aliases)),
+            ClassLikeMember::TraitUse(_) => uses_traits = true,
+            _ => {}
+        }
     }
 
-    FunctionDecl {
-        name: bytes_to_string(f.name.value),
-        params,
-        span: to_span(f.name.span()),
-        pure_envelope,
+    ClassDecl {
+        name: bytes_to_string(c.name.value),
+        is_final: c.modifiers.iter().any(Modifier::is_final),
+        parent,
+        methods,
+        uses_traits,
+        span: to_span(c.name.span()),
+    }
+}
+
+fn lower_method(m: &Method<'_>, pure_aliases: &HashSet<String>) -> MethodDecl {
+    let mut effect_origins = Vec::new();
+    if let MethodBody::Concrete(block) = &m.body {
+        for s in block.statements.iter() {
+            scan_effect_origins(&Node::Statement(s), &mut effect_origins);
+        }
+    }
+
+    let visibility = if m.modifiers.iter().any(Modifier::is_private) {
+        Visibility::Private
+    } else if m.modifiers.iter().any(Modifier::is_protected) {
+        Visibility::Protected
+    } else {
+        Visibility::Public
+    };
+
+    let name = bytes_to_string(m.name.value);
+    let is_constructor = name.eq_ignore_ascii_case("__construct");
+
+    MethodDecl {
+        name,
+        params: lower_params(&m.parameter_list),
+        span: to_span(m.name.span()),
+        pure_envelope: attrs_pure_envelope(&m.attribute_lists, pure_aliases),
         effect_origins,
+        visibility,
+        is_static: m.modifiers.iter().any(Modifier::is_static),
+        is_final: m.modifiers.iter().any(Modifier::is_final),
+        is_abstract: m.is_abstract(),
+        is_constructor,
     }
 }
 
@@ -519,8 +765,9 @@ fn collect_pure_aliases_into(node: &Node<'_, '_>, out: &mut HashSet<String>) {
     }
 }
 
-/// Recognize a `#[\Steins\Pure]` envelope attribute on a function, returning its
-/// span. Recognition is deliberately conservative (a false match imposes
+/// Recognize a `#[\Steins\Pure]` envelope attribute in an attribute-list
+/// sequence (a function or method declaration), returning its span. Recognition
+/// is deliberately conservative (a false match imposes
 /// always-on checks the author never requested): it accepts only
 ///
 /// * a fully-qualified `\Steins\Pure` or qualified `Steins\Pure` name, or
@@ -529,8 +776,11 @@ fn collect_pure_aliases_into(node: &Node<'_, '_>, out: &mut HashSet<String>) {
 ///
 /// So JetBrains' `#[Pure]` **without** the import, and `#[JetBrains\PhpStorm\Pure]`,
 /// do not match. Matching is case-insensitive (PHP class-name semantics).
-fn function_pure_envelope(f: &Function<'_>, pure_aliases: &HashSet<String>) -> Option<Span> {
-    for list in f.attribute_lists.iter() {
+fn attrs_pure_envelope(
+    attribute_lists: &mago_syntax::cst::Sequence<'_, mago_syntax::cst::AttributeList<'_>>,
+    pure_aliases: &HashSet<String>,
+) -> Option<Span> {
+    for list in attribute_lists.iter() {
         for attr in list.attributes.iter() {
             let norm = normalize_class(&bytes_to_string(attr.name.value()));
             let matched = match attr.name {
@@ -577,6 +827,30 @@ fn scan_effect_origins(node: &Node<'_, '_>, out: &mut Vec<EffectOrigin>) {
         Node::DieConstruct(d) => {
             out.push(EffectOrigin::Exit { keyword: "die", span: to_span(d.span()) });
         }
+        // Instance / static method calls with a statically-resolvable receiver
+        // become effect edges (`$this->`, `self::`, `parent::`, `Foo::`,
+        // `new Foo()->`). Dynamic receivers record nothing.
+        Node::MethodCall(mc) => {
+            if let (Some(recv), Some(method)) =
+                (effect_recv_of_object(mc.object), method_name_of(&mc.method))
+            {
+                out.push(EffectOrigin::MethodCall { receiver: recv, method, span: to_span(mc.span()) });
+            }
+        }
+        Node::NullSafeMethodCall(mc) => {
+            if let (Some(recv), Some(method)) =
+                (effect_recv_of_object(mc.object), method_name_of(&mc.method))
+            {
+                out.push(EffectOrigin::MethodCall { receiver: recv, method, span: to_span(mc.span()) });
+            }
+        }
+        Node::StaticMethodCall(sc) => {
+            if let (Some(recv), Some(method)) =
+                (effect_recv_of_class(sc.class), method_name_of(&sc.method))
+            {
+                out.push(EffectOrigin::MethodCall { receiver: recv, method, span: to_span(sc.span()) });
+            }
+        }
         // Nested scopes — do not descend (closures deferred this slice).
         Node::Function(_)
         | Node::Closure(_)
@@ -615,20 +889,130 @@ fn lower_call(c: &FunctionCall<'_>) -> CallExpr {
         Expression::Identifier(id) => Some(bytes_to_string(id.last_segment())),
         _ => None,
     };
+    let receiver = callee.clone().map_or(Callee::Dynamic, Callee::Function);
 
+    let (args, positional_only) = lower_argument_list(&c.argument_list);
+    CallExpr { callee, receiver, args, positional_only, span: to_span(c.span()) }
+}
+
+/// Lower an argument list to `(args, positional_only)`, shared by every call
+/// shape (function / method / static / constructor).
+fn lower_argument_list(list: &mago_syntax::cst::ArgumentList<'_>) -> (Vec<Arg>, bool) {
     let mut positional_only = true;
     let mut args = Vec::new();
-    for arg in c.argument_list.arguments.iter() {
+    for arg in list.arguments.iter() {
         match arg {
             Argument::Positional(p) if p.ellipsis.is_none() => {
                 args.push(Arg { value: lower_arg_value(p.value), span: to_span(p.value.span()) });
             }
-            // Named or spread argument: positional mapping is unreliable.
             _ => positional_only = false,
         }
     }
+    (args, positional_only)
+}
 
-    CallExpr { callee, args, positional_only, span: to_span(c.span()) }
+/// The simple method name of a member selector, if it is a plain identifier
+/// (`->m`, `::m`). Dynamic selectors (`->$m`, `->{...}`) yield `None`.
+fn method_name_of(selector: &ClassLikeMemberSelector<'_>) -> Option<String> {
+    match selector {
+        ClassLikeMemberSelector::Identifier(id) => Some(bytes_to_string(id.value)),
+        _ => None,
+    }
+}
+
+/// The simple class name of an instantiation's class expression, if statically
+/// named (`new Foo(...)`). Dynamic (`new $c()`) yields `None`.
+fn instantiation_class(inst: &Instantiation<'_>) -> Option<String> {
+    match inst.class {
+        Expression::Identifier(id) => Some(bytes_to_string(id.last_segment())),
+        _ => None,
+    }
+}
+
+/// The trace [`Receiver`] of a method-call object expression, or `None` when the
+/// receiver is not one resolution can reason about.
+fn trace_recv_of_object(object: &Expression<'_>) -> Option<Receiver> {
+    match object.unparenthesized() {
+        Expression::Variable(Variable::Direct(dv)) => {
+            let name = strip_dollar(bytes_to_string(dv.name));
+            Some(if name == "this" { Receiver::This } else { Receiver::Var(name) })
+        }
+        Expression::Instantiation(inst) => instantiation_class(inst).map(Receiver::New),
+        _ => None,
+    }
+}
+
+/// The trace [`StaticClass`] of a static-call class expression.
+fn trace_static_class(class: &Expression<'_>) -> Option<StaticClass> {
+    match class {
+        Expression::Identifier(id) => Some(StaticClass::Named(bytes_to_string(id.last_segment()))),
+        Expression::Self_(_) => Some(StaticClass::SelfKw),
+        Expression::Static(_) => Some(StaticClass::Static),
+        Expression::Parent(_) => Some(StaticClass::Parent),
+        _ => None,
+    }
+}
+
+/// The effect-graph receiver of a method-call object (no `$var` form — the
+/// effects pass has no flow environment to resolve a variable's class).
+fn effect_recv_of_object(object: &Expression<'_>) -> Option<EffectRecv> {
+    match object.unparenthesized() {
+        Expression::Variable(Variable::Direct(dv))
+            if strip_dollar(bytes_to_string(dv.name)) == "this" =>
+        {
+            Some(EffectRecv::This)
+        }
+        Expression::Instantiation(inst) => instantiation_class(inst).map(EffectRecv::ClassName),
+        _ => None,
+    }
+}
+
+/// The effect-graph receiver of a static-call class expression (`static::` and
+/// dynamic classes are unresolvable → `None`).
+fn effect_recv_of_class(class: &Expression<'_>) -> Option<EffectRecv> {
+    match class {
+        Expression::Identifier(id) => Some(EffectRecv::ClassName(bytes_to_string(id.last_segment()))),
+        Expression::Self_(_) => Some(EffectRecv::SelfKw),
+        Expression::Parent(_) => Some(EffectRecv::Parent),
+        _ => None,
+    }
+}
+
+/// Lower a method call (`MethodCall` / `NullSafeMethodCall`) into a [`CallExpr`].
+fn lower_method_call(object: &Expression<'_>, selector: &ClassLikeMemberSelector<'_>, list: &mago_syntax::cst::ArgumentList<'_>, span: Span) -> CallExpr {
+    let receiver = match (trace_recv_of_object(object), method_name_of(selector)) {
+        (Some(recv), Some(method)) => Callee::Method { receiver: recv, method },
+        _ => Callee::Dynamic,
+    };
+    let (args, positional_only) = lower_argument_list(list);
+    CallExpr { callee: None, receiver, args, positional_only, span }
+}
+
+/// Lower a static method call into a [`CallExpr`].
+fn lower_static_call(class: &Expression<'_>, selector: &ClassLikeMemberSelector<'_>, list: &mago_syntax::cst::ArgumentList<'_>, span: Span) -> CallExpr {
+    let receiver = match (trace_static_class(class), method_name_of(selector)) {
+        (Some(class), Some(method)) => Callee::Static { class, method },
+        _ => Callee::Dynamic,
+    };
+    let (args, positional_only) = lower_argument_list(list);
+    CallExpr { callee: None, receiver, args, positional_only, span }
+}
+
+/// Lower a `new Class(args...)` instantiation into a constructor [`CallExpr`],
+/// or `None` when the class is not statically named.
+fn lower_construct_call(inst: &Instantiation<'_>) -> Option<CallExpr> {
+    let class = instantiation_class(inst)?;
+    let (args, positional_only) = match &inst.argument_list {
+        Some(list) => lower_argument_list(list),
+        None => (Vec::new(), true),
+    };
+    Some(CallExpr {
+        callee: None,
+        receiver: Callee::Construct { class },
+        args,
+        positional_only,
+        span: to_span(inst.span()),
+    })
 }
 
 /// Lower an expression to an [`ArgValue`] — the shared lowering for both call
@@ -661,6 +1045,30 @@ fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
             }
             _ => ArgValue::Other,
         },
+        // `new Foo(...)` — a construction rvalue carrying its class (for exact-
+        // class env tracking). Args are lowered best-effort; only the class name
+        // is load-bearing.
+        Expression::Instantiation(inst) => match instantiation_class(inst) {
+            Some(class) => {
+                let args = inst
+                    .argument_list
+                    .as_ref()
+                    .map(|list| {
+                        list.arguments
+                            .iter()
+                            .filter_map(|a| match a {
+                                Argument::Positional(p) if p.ellipsis.is_none() => {
+                                    Some(lower_arg_value(p.value))
+                                }
+                                _ => None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                ArgValue::New(class, args)
+            }
+            None => ArgValue::Other,
+        },
         _ => ArgValue::Other,
     }
 }
@@ -688,33 +1096,56 @@ fn is_strict_types_one(item: &DeclareItem<'_>) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Build every analysis scope: the top-level script first, then one per
-/// function declaration found anywhere in the file (matching the flat function
-/// index, so nested functions get scopes too).
+/// function declaration and one per concrete method body found anywhere in the
+/// file (nested functions and class methods alike get scopes).
 fn lower_scopes(program: &Program<'_>) -> Vec<Scope> {
-    let mut scopes = vec![build_scope(None, program.statements.as_slice())];
-    collect_function_scopes(&Node::Program(program), &mut scopes);
+    let mut scopes = vec![build_scope(ScopeOwner::TopLevel, program.statements.as_slice())];
+    collect_scopes(&Node::Program(program), &mut scopes);
     scopes
 }
 
-/// Recursively find `function` declarations and build a scope for each body.
-fn collect_function_scopes(node: &Node<'_, '_>, out: &mut Vec<Scope>) {
-    if let Node::Function(f) = node {
-        let name = bytes_to_string(f.name.value);
-        out.push(build_scope(Some(name), f.body.statements.as_slice()));
+/// Recursively find `function` declarations (→ function scopes) and `class`
+/// declarations (→ one scope per concrete method), building a scope for each.
+fn collect_scopes(node: &Node<'_, '_>, out: &mut Vec<Scope>) {
+    match node {
+        Node::Function(f) => {
+            let name = bytes_to_string(f.name.value);
+            out.push(build_scope(ScopeOwner::Function(name), f.body.statements.as_slice()));
+        }
+        Node::Class(c) => {
+            let class = bytes_to_string(c.name.value);
+            for member in c.members.iter() {
+                if let ClassLikeMember::Method(m) = member
+                    && let MethodBody::Concrete(block) = &m.body
+                {
+                    let method = bytes_to_string(m.name.value);
+                    let owner = ScopeOwner::Method { class: class.clone(), method };
+                    out.push(build_scope(owner, block.statements.as_slice()));
+                }
+            }
+        }
+        _ => {}
     }
+    // Recurse so nested functions (inside methods or blocks) and nested classes
+    // also get their scopes. Method scopes are only created above (matching
+    // `Node::Class`), so this recursion never double-creates one.
     for child in node.children() {
-        collect_function_scopes(&child, out);
+        collect_scopes(&child, out);
     }
 }
 
 /// Lower one scope's statements to a linear trace, and compute its poison flag.
-fn build_scope(name: Option<String>, statements: &[Statement<'_>]) -> Scope {
+fn build_scope(owner: ScopeOwner, statements: &[Statement<'_>]) -> Scope {
     let poisoned = statements.iter().any(|s| node_poisons(&Node::Statement(s)));
     let mut stmts = Vec::new();
     for s in statements {
         lower_stmt(s, &mut stmts);
     }
-    Scope { function_name: name, poisoned, stmts }
+    let function_name = match &owner {
+        ScopeOwner::Function(name) => Some(name.clone()),
+        ScopeOwner::TopLevel | ScopeOwner::Method { .. } => None,
+    };
+    Scope { function_name, owner, poisoned, stmts }
 }
 
 /// Append the lowered [`Stmt`] for one source statement (or nothing, for benign
@@ -770,15 +1201,31 @@ fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
     out.push(stmt);
 }
 
-/// The full [`CallExpr`] when `expr` (unparenthesized) is a call to a
-/// statically-named function, else `None` (dynamic calls carry no callee name
-/// the checker can resolve, so they are dropped rather than tracked).
+/// The full [`CallExpr`] when `expr` (unparenthesized) is a resolvable call —
+/// a statically-named function, an instance/static method call, or a `new`
+/// construction — else `None` (dynamic receivers carry nothing the checker can
+/// resolve, so they are dropped rather than tracked).
 fn named_call(expr: &Expression<'_>) -> Option<CallExpr> {
-    if let Expression::Call(Call::Function(fc)) = expr.unparenthesized() {
-        let call = lower_call(fc);
-        return call.callee.is_some().then_some(call);
+    match expr.unparenthesized() {
+        Expression::Call(Call::Function(fc)) => {
+            let call = lower_call(fc);
+            call.callee.is_some().then_some(call)
+        }
+        Expression::Call(Call::Method(mc)) => {
+            let call = lower_method_call(mc.object, &mc.method, &mc.argument_list, to_span(mc.span()));
+            (call.receiver != Callee::Dynamic).then_some(call)
+        }
+        Expression::Call(Call::NullSafeMethod(mc)) => {
+            let call = lower_method_call(mc.object, &mc.method, &mc.argument_list, to_span(mc.span()));
+            (call.receiver != Callee::Dynamic).then_some(call)
+        }
+        Expression::Call(Call::StaticMethod(sc)) => {
+            let call = lower_static_call(sc.class, &sc.method, &sc.argument_list, to_span(sc.span()));
+            (call.receiver != Callee::Dynamic).then_some(call)
+        }
+        Expression::Instantiation(inst) => lower_construct_call(inst),
+        _ => None,
     }
-    None
 }
 
 /// Lower a recognized control-flow construct to [`StmtKind::Opaque`]: compute
@@ -821,6 +1268,22 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
             collect_call_vars(&Node::Expression(expr), &mut invalidated);
             Stmt { kind: StmtKind::Call(lower_call(fc)), invalidated }
         }
+        // Statement-level method / static / constructor calls. A resolvable
+        // receiver becomes a `Call`; a dynamic one is a `Barrier` (but its
+        // call-var invalidation is still collected below via the fallthrough).
+        Expression::Call(Call::Method(_) | Call::NullSafeMethod(_) | Call::StaticMethod(_))
+        | Expression::Instantiation(_) => match named_call(expr) {
+            Some(call) => {
+                let mut invalidated = Vec::new();
+                collect_call_vars(&Node::Expression(expr), &mut invalidated);
+                Stmt { kind: StmtKind::Call(call), invalidated }
+            }
+            None => {
+                let mut invalidated = Vec::new();
+                collect_call_vars(&Node::Expression(expr), &mut invalidated);
+                Stmt { kind: StmtKind::Barrier, invalidated }
+            }
+        },
         // A statement-level `match` is a control-flow construct: lower to
         // `Opaque` over its subtree, like the block-form constructs above.
         Expression::Match(_) => {
