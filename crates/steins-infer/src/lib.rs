@@ -30,10 +30,12 @@ use std::collections::{HashMap, HashSet};
 use steins_db::{Db, DeclSite, Project, ProjectIndex, Resolve, SourceFile, parse, project_index};
 use steins_sidecar::{FoldArg, FoldResult, FoldValue, Sidecar};
 use steins_syntax::CallExpr;
+use steins_syntax::Span;
 use steins_syntax::{
-    ArgValue, ArrayKey, Callee, ClassDecl, EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl,
-    MethodDecl, NameRef, NativeType, NormKey, Param, Receiver, RefKind, ScalarType, Scope,
-    ScopeOwner, SourceTree, StaticClass, StmtKind, TypeMember, Visibility, normalize_array,
+    ArgValue, ArrayKey, Callee, ClassDecl, CmpOp, CondExpr, CondOperand, EffectEnvelope,
+    EffectOrigin, EffectRecv, FunctionDecl, MethodDecl, NameRef, NativeType, NormKey, Param,
+    Receiver, RefKind, ScalarType, Scope, ScopeOwner, SourceTree, StaticClass, Stmt, StmtKind,
+    TypeMember, Visibility, normalize_array,
 };
 
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, ShapeKey, StringLit, TypeKind as PKind};
@@ -59,10 +61,23 @@ pub const PARAM_MISMATCH_ID: &str = "phpdoc.param-mismatch";
 /// under contract acceptance.
 pub const RETURN_MISMATCH_ID: &str = "phpdoc.return-mismatch";
 
+/// The registry id for the branch-sensitive null-dereference proof (ADR-0031
+/// stage 1): a method call whose receiver variable is **proven `null`** on the
+/// current path (e.g. inside `if ($u === null) { $u->name(); }`) — a guaranteed
+/// runtime `Error` ("Call to a member function on null"). Only a *`Singleton(null)`*
+/// receiver fires; a `OneOf` that merely *includes* null is `Maybe` → silent.
+pub const CALL_ON_NULL_ID: &str = "call.on-null";
+
 /// The registry id for the effect-envelope check (ADR-0005/0022): a function
 /// declared `#[\Steins\Pure]` / `#[\Steins\Effect(...)]` whose inferred effects
 /// exceed the declared envelope (ADR-0018 prefix subsumption).
 pub const EFFECT_ID: &str = "effect.envelope-exceeded";
+
+/// The one unified trinary judgment (ADR-0031), defined in `steins-domain`
+/// and re-exported here: condition evaluation in the branch walk, phpdoc
+/// contract acceptance (ADR-0030), and the domain's own fact queries all
+/// speak the same `Certainty`.
+pub use steins_domain::Certainty;
 
 /// The registry id for the unknown-effect-label check (ADR-0018/0022): a declared
 /// `#[\Steins\Effect(...)]` label that is not in the label registry
@@ -190,6 +205,7 @@ fn arg_to_fold(arg: &ArgValue) -> Option<FoldArg> {
         | ArgValue::Call(..)
         | ArgValue::New(..)
         | ArgValue::Array(_)
+        | ArgValue::Ternary { .. }
         | ArgValue::Other => None,
     }
 }
@@ -475,14 +491,38 @@ fn check_units(units: &[FileUnit], index: &Index, folder: &mut dyn Folder) -> Ve
     for fi in 0..units.len() {
         let cx = Cx::new(units, index, fi);
 
+        // --- Propagation pass FIRST: it walks every scope and, as a side
+        // product, proves dead regions (decided branches, unreachable tails) —
+        // the env-free direct pass below must not report inside them
+        // (live-path discipline, ADR-0002/0031). Binding descents contribute
+        // nothing here: their deadness is per-binding, not universal. ---------
+        let mut dead_spans: Vec<Span> = Vec::new();
+        for scope in cx.tree().scopes() {
+            analyze_scope(
+                &cx,
+                folder,
+                scope,
+                HashMap::new(),
+                HashMap::new(),
+                None,
+                None,
+                None,
+                Some(&mut dead_spans),
+                &mut out,
+            );
+        }
+
         // --- Direct pass: literal / array / `new` arguments at every function
         // call site (env-free; propagation adds `$var`/folded resolution). Native
         // scalar checks and the phpdoc declared-contract check both run here; a
         // site where the native check fired is skipped by the phpdoc check (no
-        // double-report; ADR-0030). ---------------------------------------------
+        // double-report; ADR-0030). Calls in proven-dead regions are skipped. ---
         let empty_env: HashMap<String, Known> = HashMap::new();
         let empty_classes: HashMap<String, String> = HashMap::new();
         for call in cx.tree().calls() {
+            if in_dead(&dead_spans, call.span.start) {
+                continue;
+            }
             let Some(site) = cx.resolve_user_fn(call) else { continue };
             let decl = cx.fn_decl(site);
             let envelopes = parse_envelopes(decl.docblock.as_deref());
@@ -537,11 +577,6 @@ fn check_units(units: &[FileUnit], index: &Index, folder: &mut dyn Folder) -> Ve
             }
         }
 
-        // --- Propagation pass: resolved `$var`/const/folded args + all method /
-        // static / constructor call checking and descent. --------------------
-        for scope in cx.tree().scopes() {
-            analyze_scope(&cx, folder, scope, HashMap::new(), HashMap::new(), None, None, None, &mut out);
-        }
     }
 
     // --- Effects pass (ADR-0005), computed once over the whole project. ------
@@ -673,6 +708,7 @@ fn annotate_units(
             None,
             None,
             Some(&mut facts),
+            None,
             &mut sink,
         );
     }
@@ -1317,7 +1353,7 @@ impl<'a> Cx<'a> {
         }
         match value {
             v if v.is_literal() => Some(v.clone()),
-            ArgValue::Var(name) => env.get(name).map(|k| k.value.clone()),
+            ArgValue::Var(name) => env.get(name).and_then(|k| k.singleton().cloned()),
             ArgValue::Call(name, args) => {
                 if args.is_empty()
                     && let Some((lit, _line)) = self.resolve_const_fn(name)
@@ -1484,11 +1520,84 @@ impl<'a> Cx<'a> {
     }
 }
 
-/// A proven local value plus where it was established (for provenance).
+/// The environment's value domain (ADR-0035). Stage 1 implements layers 1–2:
+///
+/// * `Singleton` — one concrete value (a literal, incl. arrays / `New` is tracked
+///   in `classes_env` separately). Layer 1.
+/// * `OneOf` — a finite value set (cap [`ONEOF_CAP`]): the join of disagreeing
+///   live branches. Layer 2.
+///
+/// Layers 3 (`Refined`: base type + predicate bitset / `IntRange`) and 4
+/// (`General`: the bare type) are **reserved** per ADR-0035 — declared here as a
+/// documented TODO, not implemented this stage. Only a `Singleton` ever resolves
+/// to a proven value at a use site; a `OneOf` is deliberately treated as unknown
+/// by every existing single-value consumer (the sound side — silence).
+#[derive(Clone, PartialEq, Eq)]
+enum Fact {
+    Singleton(ArgValue),
+    OneOf(Vec<ArgValue>),
+    // TODO(ADR-0035 stage 2): Refined(base, predicates) — guard-survival narrowing.
+    // TODO(ADR-0035 stage 2): General(bare type) — the widening floor.
+}
+
+/// The `OneOf` cardinality cap (ADR-0035): a join that would exceed it widens by
+/// dropping the fact entirely (the computed, sound descent for stage 1 — stage 2
+/// widens to a `Refined` summary instead).
+const ONEOF_CAP: usize = 8;
+
+impl Fact {
+    /// The single concrete value, when this fact is a `Singleton`; `None` for a
+    /// `OneOf` (a multi-valued fact never resolves to one proven value).
+    fn singleton(&self) -> Option<&ArgValue> {
+        match self {
+            Fact::Singleton(v) => Some(v),
+            Fact::OneOf(_) => None,
+        }
+    }
+
+    /// The concrete values this fact ranges over (one for a `Singleton`).
+    fn values(&self) -> &[ArgValue] {
+        match self {
+            Fact::Singleton(v) => std::slice::from_ref(v),
+            Fact::OneOf(vs) => vs,
+        }
+    }
+
+    /// Join two facts at a branch merge (ADR-0031/0035): equal singletons stay a
+    /// `Singleton`; disagreeing values form the deduped `OneOf`, capped at
+    /// [`ONEOF_CAP`]. Overflow returns `None` — the fact is dropped from the merged
+    /// env (the sound stage-1 widening).
+    fn join(a: &Fact, b: &Fact) -> Option<Fact> {
+        let mut vals: Vec<ArgValue> = a.values().to_vec();
+        for v in b.values() {
+            if !vals.contains(v) {
+                vals.push(v.clone());
+            }
+        }
+        if vals.len() > ONEOF_CAP {
+            return None;
+        }
+        Some(if vals.len() == 1 {
+            Fact::Singleton(vals.pop().expect("len checked == 1"))
+        } else {
+            Fact::OneOf(vals)
+        })
+    }
+}
+
+/// A proven local fact plus where it was established (for provenance).
+#[derive(Clone)]
 struct Known {
-    value: ArgValue,
+    fact: Fact,
     line: u32,
     bound: Option<String>,
+}
+
+impl Known {
+    /// The single proven value, when the fact is a `Singleton`.
+    fn singleton(&self) -> Option<&ArgValue> {
+        self.fact.singleton()
+    }
 }
 
 /// A binding-descent key: the callee (by FQN-ish key) plus its bound params.
@@ -1513,6 +1622,7 @@ fn analyze_scope(
     this_exact: Option<String>,
     mut descent: Option<Descent<'_>>,
     mut facts: Option<&mut Vec<LineFact>>,
+    dead_out: Option<&mut Vec<Span>>,
     out: &mut Vec<Diagnostic>,
 ) {
     let enclosing_class = scope_class(scope);
@@ -1531,24 +1641,100 @@ fn analyze_scope(
     let ret_phpdoc: Option<(PType, String)> =
         if descent.is_none() { cx.scope_return_phpdoc(scope) } else { None };
 
-    for stmt in &scope.stmts {
+    let w = WalkCx {
+        cx,
+        scope,
+        enclosing_class,
+        this_exact: this_exact.as_deref(),
+        ret_info: &ret_info,
+        ret_phpdoc: &ret_phpdoc,
+        dead: std::cell::RefCell::new(Vec::new()),
+    };
+    walk_trace(&w, folder, &scope.stmts, &mut env, &mut classes_env, &mut descent, &mut facts, out);
+    if let Some(sink) = dead_out {
+        sink.extend(w.dead.into_inner());
+    }
+}
+
+/// Whether a walked (sub-)trace runs off its end (its successor is reachable) or
+/// terminates (`return`/`throw`/`exit`, or an `if` where no branch falls through).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    FellThrough,
+    Terminated,
+}
+
+/// The immutable context shared across a scope's recursive branch walk (ADR-0031).
+struct WalkCx<'a, 'w> {
+    cx: &'w Cx<'a>,
+    scope: &'w Scope,
+    enclosing_class: Option<&'w str>,
+    this_exact: Option<&'w str>,
+    ret_info: &'w Option<(&'a NativeType, String)>,
+    ret_phpdoc: &'w Option<(PType, String)>,
+    /// Proven-dead statement spans discovered during this walk (skipped decided
+    /// branches, unreachable tails). Only the PLAIN per-scope walk's regions are
+    /// universal truths — a binding descent's dead branches are dead *for that
+    /// binding only*, so descents discard theirs (`dead_out: None`).
+    dead: std::cell::RefCell<Vec<Span>>,
+}
+
+/// Record every top-level statement span of the given traces as proven dead.
+/// Nested constructs' calls lie within their statement's span, so containment
+/// filtering over these covers them. (Skipped `elseif` *conditions* are not
+/// yet marked — a literal-arg call inside one is vanishingly rare; TODO.)
+fn mark_dead(w: &WalkCx, traces: &[&[Stmt]]) {
+    let mut dead = w.dead.borrow_mut();
+    for trace in traces {
+        for stmt in *trace {
+            dead.push(stmt.span);
+        }
+    }
+}
+
+/// Whether a byte position falls inside any proven-dead region.
+fn in_dead(dead: &[Span], pos: u32) -> bool {
+    dead.iter().any(|s| s.start <= pos && pos < s.end)
+}
+
+/// Walk an ordered statement (sub-)trace against a mutable env, threading the same
+/// findings sink, descent, and facts. Returns whether the trace falls through.
+/// Statements after a terminator are unreachable and are **not** walked (ADR-0031
+/// closes ADR-0027's dead-fallthrough gap).
+#[allow(clippy::too_many_arguments)]
+fn walk_trace(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    stmts: &[Stmt],
+    env: &mut HashMap<String, Known>,
+    classes_env: &mut HashMap<String, String>,
+    descent: &mut Option<Descent<'_>>,
+    facts: &mut Option<&mut Vec<LineFact>>,
+    out: &mut Vec<Diagnostic>,
+) -> Flow {
+    let cx = w.cx;
+    let scope = w.scope;
+    for (stmt_idx, stmt) in stmts.iter().enumerate() {
         // 1. Check + descend every statically-named call this statement carries.
         for call in checkable_calls(&stmt.kind) {
             match &call.receiver {
                 Callee::Function(_) => {
-                    check_propagated_call(cx, folder, scope.poisoned, call, &env, &classes_env, out);
-                    try_descend_function(cx, folder, call, &env, scope.poisoned, descent.as_mut(), out);
+                    check_propagated_call(cx, folder, scope.poisoned, call, env, classes_env, out);
+                    try_descend_function(cx, folder, call, env, scope.poisoned, descent.as_mut(), out);
                 }
                 Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
+                    // Branch-sensitive null-dereference proof (ADR-0031): a `$v->m()`
+                    // whose receiver is proven `Singleton(null)` on this path.
+                    check_call_on_null(w, call, env, out);
                     handle_method_call(
                         cx,
                         folder,
                         scope,
                         call,
-                        &env,
-                        &classes_env,
-                        this_exact.as_deref(),
-                        enclosing_class,
+                        env,
+                        classes_env,
+                        w.this_exact,
+                        w.enclosing_class,
                         descent.as_mut(),
                         out,
                     );
@@ -1557,26 +1743,20 @@ fn analyze_scope(
             }
         }
 
-        // 1b. Return-type check: a trace-visible `return <value>;` whose value
-        // resolves to a proven value (direct literal incl. arrays, env-known var,
-        // folded call, const-fn, `New` exact-class) that provably fails the owner's
-        // native return type (runtime relation) or its `@return` phpdoc envelope
-        // (contract relation). Returns nested inside control flow live in `Opaque`
-        // and never surface here — an accepted limitation (only top-of-trace
-        // returns are checked).
+        // 1b. Return-type check (native + phpdoc contract); see the original notes.
         if let StmtKind::Return { value, span, .. } = &stmt.kind {
             let mut native_fired = false;
-            if let Some((ret, display)) = &ret_info
-                && let Some(lit) = cx.resolve_literal(value, &env, scope.poisoned, folder)
+            if let Some((ret, display)) = w.ret_info
+                && let Some(lit) = cx.resolve_literal(value, env, scope.poisoned, folder)
                 && is_type_error(cx.strict(), ret, &lit)
             {
                 out.push(cx.return_diagnostic(span.start, &lit, ret, display));
                 native_fired = true;
             }
             if !native_fired
-                && let Some((pret, display)) = &ret_phpdoc
-                && let Some(cv) = cx.resolve_cval(value, &env, &classes_env, scope.poisoned, folder)
-                && accepts(cx, cx.cur, span.start, pret, &cv) == Tri::No
+                && let Some((pret, display)) = w.ret_phpdoc
+                && let Some(cv) = cx.resolve_cval(value, env, classes_env, scope.poisoned, folder)
+                && accepts(cx, cx.cur, span.start, pret, &cv) == Certainty::No
             {
                 let pos = cx.tree().position(span.start);
                 out.push(Diagnostic {
@@ -1592,19 +1772,20 @@ fn analyze_scope(
             }
         }
 
-        // 2. Apply the statement's own effect on the known-value environment.
-        match &stmt.kind {
-            StmtKind::Barrier | StmtKind::Echo(_) => {
+        // 2. Apply the statement's own effect on the environment + compute its flow.
+        let flow = match &stmt.kind {
+            StmtKind::Barrier => {
                 env.clear();
                 classes_env.clear();
+                Flow::FellThrough
             }
-            // A control-flow construct forgets both what it may write AND what it
-            // branches on (reads): a guard that early-returns on a variable's
-            // value excludes that value from the fall-through path, so keeping the
-            // binding would assert an unreachable path (soundness — see the
-            // `StmtKind::Opaque` docs). Both sets drop from the literal env and the
-            // exact-class env (an `instanceof`/`is null` guard filters class facts
-            // the same way it filters scalar facts).
+            // `echo` assigns nothing on its own; anything it *can* mutate (embedded
+            // assignment / by-ref call) is in `invalidated` (step 3). Reading a
+            // variable in an echo no longer forgets it (ADR-0031 precision payoff).
+            StmtKind::Echo(_) => Flow::FellThrough,
+            // A still-`Opaque` construct (loop / switch / try) forgets what it may
+            // write AND what it branches on (reads) — unchanged from ADR-0027,
+            // since the trace does not model its control flow.
             StmtKind::Opaque { writes, reads, poisons } => {
                 if *poisons {
                     env.clear();
@@ -1615,52 +1796,728 @@ fn analyze_scope(
                         classes_env.remove(v);
                     }
                 }
+                Flow::FellThrough
             }
-            StmtKind::Return { .. } | StmtKind::Call(_) => {}
-            StmtKind::Assign { var, value, span, .. } => {
-                let line = cx.tree().position(span.start).line;
-                match value {
-                    ArgValue::New(class_ref, _) => {
-                        env.remove(var);
-                        if scope.poisoned {
-                            classes_env.remove(var);
-                        } else {
-                            let class = cx.class_fqn(class_ref);
-                            classes_env.insert(var.clone(), class.clone());
-                            if let Some(facts) = facts.as_deref_mut() {
-                                facts.push(LineFact {
-                                    line,
-                                    kind: FactKind::ExactClass { var: var.clone(), class },
-                                });
-                            }
-                        }
-                    }
-                    _ => match cx.resolve_literal(value, &env, scope.poisoned, folder) {
-                        Some(lit) => {
-                            if let Some(facts) = facts.as_deref_mut() {
-                                facts.push(LineFact {
-                                    line,
-                                    kind: FactKind::Value { var: var.clone(), rendered: lit.render() },
-                                });
-                            }
-                            env.insert(var.clone(), Known { value: lit, line, bound: None });
-                            classes_env.remove(var);
-                        }
-                        None => {
-                            env.remove(var);
-                            classes_env.remove(var);
-                        }
-                    },
+            StmtKind::Call(_) => Flow::FellThrough,
+            // Terminators: the trace stops; the remainder is unreachable.
+            StmtKind::Return { .. } | StmtKind::Throw { .. } | StmtKind::Exit { .. } => {
+                for v in &stmt.invalidated {
+                    env.remove(v);
+                    classes_env.remove(v);
                 }
+                return Flow::Terminated;
             }
-        }
+            StmtKind::Assign { var, value, span, .. } => {
+                apply_assign(w, folder, var, value, span.start, env, classes_env, facts);
+                Flow::FellThrough
+            }
+            StmtKind::If { cond, then_trace, elseifs, else_trace } => walk_if(
+                w, folder, cond, then_trace, elseifs, else_trace.as_deref(), env, classes_env,
+                descent, facts, out,
+            ),
+        };
 
         // 3. After the statement, invalidate any variable handed to a call.
         for v in &stmt.invalidated {
             env.remove(v);
             classes_env.remove(v);
         }
+
+        if flow == Flow::Terminated {
+            // The rest of this trace is proven unreachable (ADR-0031).
+            mark_dead(w, &[&stmts[stmt_idx + 1..]]);
+            return Flow::Terminated;
+        }
     }
+    Flow::FellThrough
+}
+
+/// Apply a plain `$var = <value>;` assignment to the env (extracted from the walk).
+#[allow(clippy::too_many_arguments)]
+fn apply_assign(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    var: &str,
+    value: &ArgValue,
+    span_start: u32,
+    env: &mut HashMap<String, Known>,
+    classes_env: &mut HashMap<String, String>,
+    facts: &mut Option<&mut Vec<LineFact>>,
+) {
+    let cx = w.cx;
+    let line = cx.tree().position(span_start).line;
+
+    // A ternary rvalue `$x = $c ? A : B` is a conditional value (ADR-0031): the
+    // walk evaluates the guard and resolves to the chosen arm, or (undecided) a
+    // `OneOf` of the two arms when both are literal, else unknown.
+    if let ArgValue::Ternary { cond, then_val, else_val } = value {
+        match eval_ternary_fact(w, folder, cond, then_val, else_val, env, classes_env) {
+            Some(fact) => {
+                if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
+                    facts.push(LineFact {
+                        line,
+                        kind: FactKind::Value { var: var.to_owned(), rendered: lit.render() },
+                    });
+                }
+                env.insert(var.to_owned(), Known { fact, line, bound: None });
+                classes_env.remove(var);
+            }
+            None => {
+                env.remove(var);
+                classes_env.remove(var);
+            }
+        }
+        return;
+    }
+
+    match value {
+        ArgValue::New(class_ref, _) => {
+            env.remove(var);
+            if w.scope.poisoned {
+                classes_env.remove(var);
+            } else {
+                let class = cx.class_fqn(class_ref);
+                classes_env.insert(var.to_owned(), class.clone());
+                if let Some(facts) = facts.as_deref_mut() {
+                    facts.push(LineFact {
+                        line,
+                        kind: FactKind::ExactClass { var: var.to_owned(), class },
+                    });
+                }
+            }
+        }
+        _ => match cx.resolve_literal(value, env, w.scope.poisoned, folder) {
+            Some(lit) => {
+                if let Some(facts) = facts.as_deref_mut() {
+                    facts.push(LineFact {
+                        line,
+                        kind: FactKind::Value { var: var.to_owned(), rendered: lit.render() },
+                    });
+                }
+                env.insert(var.to_owned(), Known { fact: Fact::Singleton(lit), line, bound: None });
+                classes_env.remove(var);
+            }
+            None => {
+                env.remove(var);
+                classes_env.remove(var);
+            }
+        },
+    }
+}
+
+/// Walk a structured `if`/`elseif`/`else` (ADR-0031 stage 1). Evaluates the guard
+/// to a [`Certainty`], walks each **live** branch on a cloned env (applying
+/// positive refinement), then joins the envs of the branches that fall through.
+/// When no live branch falls through, the code after the `if` is unreachable and
+/// the whole construct terminates.
+#[allow(clippy::too_many_arguments)]
+fn walk_if(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    cond: &CondExpr,
+    then_trace: &[Stmt],
+    elseifs: &[(CondExpr, Vec<Stmt>)],
+    else_trace: Option<&[Stmt]>,
+    env: &mut HashMap<String, Known>,
+    classes_env: &mut HashMap<String, String>,
+    descent: &mut Option<Descent<'_>>,
+    facts: &mut Option<&mut Vec<LineFact>>,
+    out: &mut Vec<Diagnostic>,
+) -> Flow {
+    let poisoned = w.scope.poisoned;
+    // 1. Evaluate the guard in the pre-branch env (short-circuit env refinement is
+    // stage 2 — each condition sees the same entry env).
+    let verdict = eval_cond(w, cond, env, classes_env, poisoned);
+
+    // A decided guard proves the skipped side dead — record it so the env-free
+    // direct pass never reports inside it (live-path discipline, ADR-0002/0031).
+    match verdict {
+        Certainty::Yes => {
+            for (_, trace) in elseifs {
+                mark_dead(w, &[trace.as_slice()]);
+            }
+            if let Some(trace) = else_trace {
+                mark_dead(w, &[trace]);
+            }
+        }
+        Certainty::No => mark_dead(w, &[then_trace]),
+        Certainty::Maybe => {}
+    }
+
+    // 2. Variables the guard itself may mutate (opaque condition reads — e.g. a
+    // by-ref call `if (parse($x))`) are forgotten on *every* resulting path.
+    for v in cond_invalidations(cond) {
+        env.remove(&v);
+        classes_env.remove(&v);
+    }
+
+    // 3. Walk the live branches on cloned envs, collecting those that fall through.
+    let mut fell: Vec<(HashMap<String, Known>, HashMap<String, String>)> = Vec::new();
+
+    if verdict != Certainty::No {
+        let mut benv = env.clone();
+        let mut bclasses = classes_env.clone();
+        apply_refinements(&then_refinements(cond), &mut benv, &mut bclasses);
+        if walk_trace(w, folder, then_trace, &mut benv, &mut bclasses, descent, facts, out)
+            == Flow::FellThrough
+        {
+            fell.push((benv, bclasses));
+        }
+    }
+
+    if verdict != Certainty::Yes {
+        let mut benv = env.clone();
+        let mut bclasses = classes_env.clone();
+        apply_refinements(&else_refinements(cond), &mut benv, &mut bclasses);
+        if walk_else(w, folder, elseifs, else_trace, &mut benv, &mut bclasses, descent, facts, out)
+            == Flow::FellThrough
+        {
+            fell.push((benv, bclasses));
+        }
+    }
+
+    // 4. Merge. No live fall-through → the successor is unreachable.
+    if fell.is_empty() {
+        return Flow::Terminated;
+    }
+    let (jenv, jclasses) = join_envs(fell);
+    *env = jenv;
+    *classes_env = jclasses;
+    Flow::FellThrough
+}
+
+/// Walk the `else` side of an `if`: the `elseif` chain desugars to a nested
+/// `if`/`else`; the terminal `else` (if any) is a plain sub-trace; an absent
+/// `else` falls through unchanged (the negated-guard path).
+#[allow(clippy::too_many_arguments)]
+fn walk_else(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    elseifs: &[(CondExpr, Vec<Stmt>)],
+    else_trace: Option<&[Stmt]>,
+    env: &mut HashMap<String, Known>,
+    classes_env: &mut HashMap<String, String>,
+    descent: &mut Option<Descent<'_>>,
+    facts: &mut Option<&mut Vec<LineFact>>,
+    out: &mut Vec<Diagnostic>,
+) -> Flow {
+    match elseifs.split_first() {
+        Some(((cond, trace), rest)) => {
+            walk_if(w, folder, cond, trace, rest, else_trace, env, classes_env, descent, facts, out)
+        }
+        None => match else_trace {
+            Some(stmts) => walk_trace(w, folder, stmts, env, classes_env, descent, facts, out),
+            None => Flow::FellThrough,
+        },
+    }
+}
+
+/// The branch-sensitive null-dereference proof (ADR-0031, `call.on-null`): a
+/// non-null-safe `$v->m(...)` whose receiver `$v` is proven `Singleton(null)` on
+/// the current path is a guaranteed runtime `Error`. A `OneOf` that merely
+/// includes null stays `Maybe` (silent), and `?->` never fires.
+fn check_call_on_null(
+    w: &WalkCx,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    out: &mut Vec<Diagnostic>,
+) {
+    if w.scope.poisoned {
+        return;
+    }
+    let Callee::Method { receiver: Receiver::Var(v), method, nullsafe: false } = &call.receiver
+    else {
+        return;
+    };
+    let Some(k) = env.get(v) else { return };
+    if !matches!(&k.fact, Fact::Singleton(ArgValue::Null)) {
+        return;
+    }
+    let pos = w.cx.tree().position(call.span.start);
+    out.push(Diagnostic {
+        id: CALL_ON_NULL_ID,
+        path: w.cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message: format!(
+            "method call ${v}->{method}() — ${v} is proven null on this path — proven Error (Call to a member function on null)"
+        ),
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Condition evaluation → `Certainty` (ADR-0031 stage 1).
+// ---------------------------------------------------------------------------
+
+/// Evaluate a lowered [`CondExpr`] against the env to a unified [`Certainty`].
+fn eval_cond(
+    w: &WalkCx,
+    cond: &CondExpr,
+    env: &HashMap<String, Known>,
+    classes_env: &HashMap<String, String>,
+    poisoned: bool,
+) -> Certainty {
+    match cond {
+        CondExpr::Cmp { op, lhs, rhs } => {
+            match (operand_values(lhs, env, poisoned), operand_values(rhs, env, poisoned)) {
+                (Some(lv), Some(rv)) => eval_cmp(*op, &lv, &rv),
+                _ => Certainty::Maybe,
+            }
+        }
+        CondExpr::Truthy(op) => match operand_values(op, env, poisoned) {
+            Some(vs) => all_agree(vs.iter().map(php_truthy)),
+            None => Certainty::Maybe,
+        },
+        CondExpr::Instanceof { operand, class_ref } => {
+            eval_instanceof(w, operand, class_ref, classes_env, poisoned)
+        }
+        CondExpr::Not(c) => eval_cond(w, c, env, classes_env, poisoned).not(),
+        CondExpr::And(a, b) => eval_cond(w, a, env, classes_env, poisoned)
+            .and(eval_cond(w, b, env, classes_env, poisoned)),
+        CondExpr::Or(a, b) => eval_cond(w, a, env, classes_env, poisoned)
+            .or(eval_cond(w, b, env, classes_env, poisoned)),
+        CondExpr::Opaque { .. } => Certainty::Maybe,
+    }
+}
+
+/// Evaluate a ternary rvalue to an env [`Fact`] (ADR-0031): a decided guard picks
+/// the chosen arm's proven value; an undecided guard yields a `OneOf` of the two
+/// arms when both resolve to literals, else `None` (unknown → the var is dropped).
+fn eval_ternary_fact(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    cond: &CondExpr,
+    then_val: &ArgValue,
+    else_val: &ArgValue,
+    env: &HashMap<String, Known>,
+    classes_env: &HashMap<String, String>,
+) -> Option<Fact> {
+    let poisoned = w.scope.poisoned;
+    let mut resolve = |v: &ArgValue| w.cx.resolve_literal(v, env, poisoned, folder);
+    match eval_cond(w, cond, env, classes_env, poisoned) {
+        Certainty::Yes => resolve(then_val).map(Fact::Singleton),
+        Certainty::No => resolve(else_val).map(Fact::Singleton),
+        Certainty::Maybe => {
+            let t = resolve(then_val)?;
+            let e = resolve(else_val)?;
+            Some(if t == e { Fact::Singleton(t) } else { Fact::OneOf(vec![t, e]) })
+        }
+    }
+}
+
+/// The candidate values of a condition operand: the fact's value set for a known
+/// variable, the literal itself, else `None` (unknown → the caller yields `Maybe`).
+fn operand_values(
+    op: &CondOperand,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+) -> Option<Vec<ArgValue>> {
+    match op {
+        CondOperand::Literal(v) => Some(vec![v.clone()]),
+        CondOperand::Var(name) if !poisoned => env.get(name).map(|k| k.fact.values().to_vec()),
+        _ => None,
+    }
+}
+
+/// Evaluate a comparison over two candidate value sets (ADR-0031 OneOf rule: all
+/// member pairs agree → that verdict; any disagreement or undecidable pair → Maybe).
+fn eval_cmp(op: CmpOp, lhs: &[ArgValue], rhs: &[ArgValue]) -> Certainty {
+    let mut acc: Option<bool> = None;
+    for l in lhs {
+        for r in rhs {
+            let b = match op {
+                CmpOp::Identical => php_identical(l, r),
+                CmpOp::NotIdentical => php_identical(l, r).map(|x| !x),
+                CmpOp::Loose => php_loose_eq(l, r),
+                CmpOp::NotLoose => php_loose_eq(l, r).map(|x| !x),
+            };
+            match b {
+                None => return Certainty::Maybe,
+                Some(v) => match acc {
+                    None => acc = Some(v),
+                    Some(prev) if prev != v => return Certainty::Maybe,
+                    _ => {}
+                },
+            }
+        }
+    }
+    Certainty::from_opt(acc)
+}
+
+/// Fold a sequence of per-member truth verdicts (`None` = undecidable) into one
+/// [`Certainty`]: all-agree → that pole, else `Maybe`.
+fn all_agree(iter: impl Iterator<Item = Option<bool>>) -> Certainty {
+    let mut acc: Option<bool> = None;
+    for b in iter {
+        match b {
+            None => return Certainty::Maybe,
+            Some(v) => match acc {
+                None => acc = Some(v),
+                Some(prev) if prev != v => return Certainty::Maybe,
+                _ => {}
+            },
+        }
+    }
+    Certainty::from_opt(acc)
+}
+
+/// `operand instanceof Class`: `Yes` only when the operand's proven exact class
+/// is-a the target through the project chain; a non-object literal is `No`;
+/// everything else (unknown class, chain leaving the project) is `Maybe`.
+fn eval_instanceof(
+    w: &WalkCx,
+    operand: &CondOperand,
+    class_ref: &NameRef,
+    classes_env: &HashMap<String, String>,
+    poisoned: bool,
+) -> Certainty {
+    match operand {
+        CondOperand::Var(name) if !poisoned => match classes_env.get(name) {
+            Some(obj_fqn) => {
+                let target = w.cx.class_fqn(class_ref);
+                // `object_is_a` returns false both for "provably not" and for a
+                // chain that leaves the project, so only a positive is a definite
+                // verdict; a negative stays `Maybe` (the FP-safe side).
+                if w.cx.object_is_a(obj_fqn, &target) {
+                    Certainty::Yes
+                } else {
+                    Certainty::Maybe
+                }
+            }
+            None => Certainty::Maybe,
+        },
+        // A concrete non-object literal (`null`, `5`, `"x"`, …) is never an
+        // instance of a class.
+        CondOperand::Literal(v) if v.is_literal() => Certainty::No,
+        _ => Certainty::Maybe,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Positive refinement (ADR-0031 stage 1): `$x === <literal>` narrows to a
+// Singleton in the branch where the identity holds. Instanceof binds nothing —
+// membership is not exactness (a subclass instance would make an exact-class fact
+// WRONG); exact narrowing there needs the Refined/General layers (ADR-0035).
+// ---------------------------------------------------------------------------
+
+/// The `(var, value)` facts that hold when `cond` is TRUE (the then-branch).
+fn then_refinements(cond: &CondExpr) -> Vec<(String, ArgValue)> {
+    let mut out = Vec::new();
+    collect_then_refine(cond, &mut out);
+    out
+}
+
+/// The `(var, value)` facts that hold when `cond` is FALSE (the else-branch).
+fn else_refinements(cond: &CondExpr) -> Vec<(String, ArgValue)> {
+    let mut out = Vec::new();
+    collect_else_refine(cond, &mut out);
+    out
+}
+
+fn collect_then_refine(cond: &CondExpr, out: &mut Vec<(String, ArgValue)>) {
+    match cond {
+        CondExpr::Cmp { op: CmpOp::Identical, lhs, rhs } => {
+            if let Some(pair) = var_literal(lhs, rhs) {
+                out.push(pair);
+            }
+        }
+        CondExpr::And(a, b) => {
+            collect_then_refine(a, out);
+            collect_then_refine(b, out);
+        }
+        CondExpr::Not(c) => collect_else_refine(c, out),
+        _ => {}
+    }
+}
+
+fn collect_else_refine(cond: &CondExpr, out: &mut Vec<(String, ArgValue)>) {
+    match cond {
+        // `!( $x !== v )` ⟺ `$x === v` holds on the else-path.
+        CondExpr::Cmp { op: CmpOp::NotIdentical, lhs, rhs } => {
+            if let Some(pair) = var_literal(lhs, rhs) {
+                out.push(pair);
+            }
+        }
+        // `!(a || b)` ⟺ `!a && !b`.
+        CondExpr::Or(a, b) => {
+            collect_else_refine(a, out);
+            collect_else_refine(b, out);
+        }
+        CondExpr::Not(c) => collect_then_refine(c, out),
+        _ => {}
+    }
+}
+
+/// The `($var, literal)` of a comparison whose two operands are exactly one bare
+/// variable and one literal (in either order).
+fn var_literal(lhs: &CondOperand, rhs: &CondOperand) -> Option<(String, ArgValue)> {
+    match (lhs, rhs) {
+        (CondOperand::Var(v), CondOperand::Literal(val))
+        | (CondOperand::Literal(val), CondOperand::Var(v)) => Some((v.clone(), val.clone())),
+        _ => None,
+    }
+}
+
+/// Bind refined `(var, value)` facts into a branch's env as Singletons (clearing
+/// any stale exact-class fact for the same variable).
+fn apply_refinements(
+    refs: &[(String, ArgValue)],
+    env: &mut HashMap<String, Known>,
+    classes_env: &mut HashMap<String, String>,
+) {
+    for (var, val) in refs {
+        env.insert(
+            var.clone(),
+            Known { fact: Fact::Singleton(val.clone()), line: 0, bound: Some("proven on this branch".to_owned()) },
+        );
+        classes_env.remove(var);
+    }
+}
+
+/// Every bare variable an opaque sub-condition reads (for the guard-mutation
+/// invalidation: an opaque condition may mutate its operands by reference).
+fn cond_invalidations(cond: &CondExpr) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_cond_opaque_reads(cond, &mut out);
+    out
+}
+
+fn collect_cond_opaque_reads(cond: &CondExpr, out: &mut Vec<String>) {
+    match cond {
+        CondExpr::Opaque { reads } => {
+            for r in reads {
+                if !out.contains(r) {
+                    out.push(r.clone());
+                }
+            }
+        }
+        CondExpr::Not(c) => collect_cond_opaque_reads(c, out),
+        CondExpr::And(a, b) | CondExpr::Or(a, b) => {
+            collect_cond_opaque_reads(a, out);
+            collect_cond_opaque_reads(b, out);
+        }
+        _ => {}
+    }
+}
+
+/// Join the fall-through envs of several live branches (ADR-0031/0035): a scalar
+/// fact survives only when present in *every* branch, folded through [`Fact::join`]
+/// (equal → Singleton; differing → OneOf; overflow → dropped). An exact-class fact
+/// survives only when every branch agrees on the class.
+fn join_envs(
+    branches: Vec<(HashMap<String, Known>, HashMap<String, String>)>,
+) -> (HashMap<String, Known>, HashMap<String, String>) {
+    let mut it = branches.into_iter();
+    let (first_env, first_classes) = it.next().expect("join_envs called with no branches");
+    let rest: Vec<(HashMap<String, Known>, HashMap<String, String>)> = it.collect();
+    if rest.is_empty() {
+        return (first_env, first_classes);
+    }
+
+    let mut env: HashMap<String, Known> = HashMap::new();
+    for (name, k0) in &first_env {
+        let mut fact = k0.fact.clone();
+        let mut ok = true;
+        for (be, _) in &rest {
+            match be.get(name) {
+                Some(k) => match Fact::join(&fact, &k.fact) {
+                    Some(joined) => fact = joined,
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                },
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            env.insert(name.clone(), Known { fact, line: k0.line, bound: k0.bound.clone() });
+        }
+    }
+
+    let mut classes: HashMap<String, String> = HashMap::new();
+    for (name, c0) in &first_classes {
+        if rest.iter().all(|(_, bc)| bc.get(name) == Some(c0)) {
+            classes.insert(name.clone(), c0.clone());
+        }
+    }
+    (env, classes)
+}
+
+// ---------------------------------------------------------------------------
+// PHP scalar comparison semantics (ADR-0031). `===`/truthiness are exact; `==`
+// is settled EMPIRICALLY against PHP 8.5.8 (see [`php_loose_eq`]). Undecidable
+// cells return `None` → the caller yields `Maybe` (silence, the sound side).
+// ---------------------------------------------------------------------------
+
+/// PHP truthiness of a proven value. Note `"0"` and `""` are the only falsy
+/// non-empty/-empty strings (`"0.0"` and `"00"` are **truthy**), `0`/`0.0`/`[]`
+/// are falsy. `None` for a non-concrete value.
+fn php_truthy(v: &ArgValue) -> Option<bool> {
+    match v {
+        ArgValue::Null => Some(false),
+        ArgValue::Bool(b) => Some(*b),
+        ArgValue::Int(i) => Some(*i != 0),
+        ArgValue::Float(f) => Some(*f != 0.0),
+        ArgValue::Str(s) => Some(!(s.is_empty() || s == "0")),
+        ArgValue::Array(items) => Some(!items.is_empty()),
+        _ => None,
+    }
+}
+
+/// Strict identity `===`: same runtime type AND equal value. Different concrete
+/// runtime types are a definite non-identity; a non-concrete operand is `None`.
+fn php_identical(a: &ArgValue, b: &ArgValue) -> Option<bool> {
+    use ArgValue::{Array, Bool, Float, Int, Null, Str};
+    match (a, b) {
+        (Int(x), Int(y)) => Some(x == y),
+        (Float(x), Float(y)) => Some(x == y),
+        (Str(x), Str(y)) => Some(x == y),
+        (Bool(x), Bool(y)) => Some(x == y),
+        (Null, Null) => Some(true),
+        (Array(_), Array(_)) => php_array_identical(a, b),
+        _ if is_concrete(a) && is_concrete(b) => Some(false),
+        _ => None,
+    }
+}
+
+/// Deep `===` of two array literals: same length, same key order, element-wise
+/// identical. A non-concrete element makes the result `None`.
+fn php_array_identical(a: &ArgValue, b: &ArgValue) -> Option<bool> {
+    let (ArgValue::Array(ai), ArgValue::Array(bi)) = (a, b) else { return None };
+    let na = normalize_array(ai);
+    let nb = normalize_array(bi);
+    if na.len() != nb.len() {
+        return Some(false);
+    }
+    for ((ka, va), (kb, vb)) in na.iter().zip(nb.iter()) {
+        if ka != kb {
+            return Some(false);
+        }
+        match php_identical(va, vb) {
+            Some(true) => {}
+            Some(false) => return Some(false),
+            None => return None,
+        }
+    }
+    Some(true)
+}
+
+/// Whether a value is a fully-known concrete value (a scalar literal or an array).
+fn is_concrete(v: &ArgValue) -> bool {
+    v.is_literal() || matches!(v, ArgValue::Array(_))
+}
+
+/// Loose equality `==`, settled **empirically against PHP 8.5.8** (`php -r`, the
+/// full cross-product of `null`/`false`/`true`/`0`/`0.0`/`""`/`"0"`/`"abc"`/`"5"`/`[]`
+/// recorded). The measured table (`T` = equal):
+///
+/// ```text
+///           null false true  0   0.0   ""   "0"  "abc" "5"   []
+///   null     T    T    F    T    T     T    F    F     F     T
+///   false    T    T    F    T    T     T    T    F     F     T
+///   true     F    F    T    F    F     F    F    T     T     F
+///   0        T    T    F    T    T     F    T    F     F     F
+///   0.0      T    T    F    T    T     F    T    F     F     F
+///   ""       T    T    F    F    F     T    F    F     F     F
+///   "0"      F    T    F    T    T     F    T    F     F     F
+///   "abc"    F    F    T    F    F     F    F    T     F     F
+///   "5"      F    F    T    F    F     F    F    F     T     F
+///   []       T    T    F    F    F     F    F    F     F     T
+/// ```
+///
+/// The rules reproduced (stable since PHP 8.0): a `bool` operand casts BOTH sides
+/// to bool; `null` compares to the other side's zero/empty (except bool, handled
+/// by the bool rule); `int`/`float` vs a numeric string compares numerically,
+/// vs a non-numeric string compares the number's string form; two strings compare
+/// numerically iff both are numeric strings, else byte-wise; an array is unequal
+/// to any scalar (non-null, non-bool). Cells not covered (a `float` vs a
+/// non-numeric string; non-trivial arrays) return `None` → `Maybe`.
+fn php_loose_eq(a: &ArgValue, b: &ArgValue) -> Option<bool> {
+    use ArgValue::{Array, Bool, Float, Int, Null, Str};
+    // A `bool` on either side casts both operands to bool (subsumes null==bool).
+    if matches!(a, Bool(_)) || matches!(b, Bool(_)) {
+        return Some(php_truthy(a)? == php_truthy(b)?);
+    }
+    match (a, b) {
+        (Null, Null) => Some(true),
+        (Null, Int(i)) | (Int(i), Null) => Some(*i == 0),
+        (Null, Float(f)) | (Float(f), Null) => Some(*f == 0.0),
+        (Null, Str(s)) | (Str(s), Null) => Some(s.is_empty()),
+        (Null, Array(items)) | (Array(items), Null) => Some(items.is_empty()),
+        (Null, _) | (_, Null) => None,
+
+        (Int(x), Int(y)) => Some(x == y),
+        (Int(x), Float(y)) | (Float(y), Int(x)) => Some((*x as f64) == *y),
+        (Float(x), Float(y)) => Some(x == y),
+
+        (Int(i), Str(s)) | (Str(s), Int(i)) => Some(php_int_str_eq(*i, s)),
+        (Float(f), Str(s)) | (Str(s), Float(f)) => php_float_str_eq(*f, s),
+        (Str(x), Str(y)) => Some(php_str_eq(x, y)),
+
+        (Array(x), Array(y)) => php_array_loose_eq(x, y),
+        // An array is never loosely equal to a (non-null, non-bool) scalar.
+        (Array(_), Int(_) | Float(_) | Str(_)) | (Int(_) | Float(_) | Str(_), Array(_)) => {
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
+/// `int == string`: numeric string → numeric compare; else compare the int's
+/// decimal form to the string (PHP 8 semantics).
+fn php_int_str_eq(i: i64, s: &str) -> bool {
+    if php_is_numeric(s) {
+        php_str_to_float(s).is_some_and(|f| (i as f64) == f)
+    } else {
+        i.to_string() == s
+    }
+}
+
+/// `float == string`: numeric string → numeric compare; a non-numeric string is
+/// undecidable here (float→string formatting is precision-sensitive) → `None`.
+fn php_float_str_eq(f: f64, s: &str) -> Option<bool> {
+    if php_is_numeric(s) {
+        Some(php_str_to_float(s).is_some_and(|g| f == g))
+    } else {
+        None
+    }
+}
+
+/// `string == string`: both numeric strings → numeric compare; else byte compare.
+fn php_str_eq(x: &str, y: &str) -> bool {
+    if php_is_numeric(x) && php_is_numeric(y) {
+        match (php_str_to_float(x), php_str_to_float(y)) {
+            (Some(a), Some(b)) => a == b,
+            _ => x == y,
+        }
+    } else {
+        x == y
+    }
+}
+
+/// `array == array`: same key set with loosely-equal values (order-independent).
+/// An undecidable element value makes the whole comparison `None`.
+fn php_array_loose_eq(x: &[(ArrayKey, ArgValue)], y: &[(ArrayKey, ArgValue)]) -> Option<bool> {
+    let nx = normalize_array(x);
+    let ny = normalize_array(y);
+    if nx.len() != ny.len() {
+        return Some(false);
+    }
+    for (k, va) in &nx {
+        let Some((_, vb)) = ny.iter().find(|(k2, _)| k2 == k) else {
+            return Some(false);
+        };
+        match php_loose_eq(va, vb) {
+            Some(true) => {}
+            Some(false) => return Some(false),
+            None => return None,
+        }
+    }
+    Some(true)
 }
 
 /// The class FQN that lexically owns a method scope; `None` for function/top.
@@ -1709,12 +2566,13 @@ fn check_propagated_call(
         let mut native_fired = false;
         if let Some(ty) = param.ty.as_ref() {
             let resolved: Option<(ArgValue, String)> = match &arg.value {
-                ArgValue::Var(name) if !poisoned => env.get(name).map(|k| {
+                ArgValue::Var(name) if !poisoned => env.get(name).and_then(|k| {
+                    let v = k.singleton()?.clone();
                     let prov = match &k.bound {
                         Some(b) => format!("from ${name}, {b}"),
                         None => format!("from ${name}, assigned at line {}", k.line),
                     };
-                    (k.value.clone(), prov)
+                    Some((v, prov))
                 }),
                 ArgValue::Call(name, args) => {
                     if args.is_empty() {
@@ -1879,7 +2737,9 @@ fn descend(
 
     let bound_env: HashMap<String, Known> = bound
         .into_iter()
-        .map(|(name, value)| (name, Known { value, line: 0, bound: Some(provenance.to_owned()) }))
+        .map(|(name, value)| {
+            (name, Known { fact: Fact::Singleton(value), line: 0, bound: Some(provenance.to_owned()) })
+        })
         .collect();
 
     let child_cx = cx.at(callee_file);
@@ -1899,6 +2759,7 @@ fn descend(
                 body_this_exact,
                 Some(child),
                 None,
+                None,
                 out,
             );
             d.stack.pop();
@@ -1916,6 +2777,7 @@ fn descend(
                 HashMap::new(),
                 body_this_exact,
                 Some(child),
+                None,
                 None,
                 out,
             );
@@ -1991,18 +2853,18 @@ fn resolve_call_target<'a>(
             let fqn = cx.class_fqn(class);
             resolve_exact(cx, &fqn, "__construct", enclosing_class, Some(fqn.clone()))
         }
-        Callee::Method { receiver: Receiver::New(class), method } => {
+        Callee::Method { receiver: Receiver::New(class), method, .. } => {
             let fqn = cx.class_fqn(class);
             resolve_exact(cx, &fqn, method, enclosing_class, Some(fqn.clone()))
         }
-        Callee::Method { receiver: Receiver::Var(v), method } => {
+        Callee::Method { receiver: Receiver::Var(v), method, .. } => {
             if poisoned {
                 return None;
             }
             let class = classes_env.get(v)?;
             resolve_exact(cx, class, method, enclosing_class, Some(class.clone()))
         }
-        Callee::Method { receiver: Receiver::This, method } => {
+        Callee::Method { receiver: Receiver::This, method, .. } => {
             let enclosing = enclosing_class?;
             match this_exact {
                 Some(exact) => resolve_exact(cx, exact, method, enclosing_class, Some(exact.to_owned())),
@@ -2197,12 +3059,13 @@ fn check_method_args(
         if let Some(ty) = param.ty.as_ref() {
             let resolved: Option<(ArgValue, Option<String>)> = match &arg.value {
                 v if v.is_literal() => Some((v.clone(), None)),
-                ArgValue::Var(name) if !poisoned => env.get(name).map(|k| {
+                ArgValue::Var(name) if !poisoned => env.get(name).and_then(|k| {
+                    let v = k.singleton()?.clone();
                     let prov = match &k.bound {
                         Some(b) => format!("from ${name}, {b}"),
                         None => format!("from ${name}, assigned at line {}", k.line),
                     };
-                    (k.value.clone(), Some(prov))
+                    Some((v, Some(prov)))
                 }),
                 ArgValue::Call(name, args) => {
                     if args.is_empty() {
@@ -2310,8 +3173,13 @@ fn is_type_error(strict: bool, ty: &NativeType, arg: &ArgValue) -> bool {
         // An array is never a native scalar/union finding (arrays only ever fail
         // the phpdoc contract relation, checked separately).
         ArgValue::Array(_) => false,
-        // Non-literal (`Var`/`Call`/`New`/`Other`): not provable → never an error.
-        ArgValue::Var(_) | ArgValue::Call(..) | ArgValue::New(..) | ArgValue::Other => false,
+        // Non-literal (`Var`/`Call`/`New`/`Ternary`/`Other`): not provable → never
+        // an error (a `Ternary` is resolved to a concrete arm before this point).
+        ArgValue::Var(_)
+        | ArgValue::Call(..)
+        | ArgValue::New(..)
+        | ArgValue::Ternary { .. }
+        | ArgValue::Other => false,
     }
 }
 
@@ -2491,23 +3359,18 @@ fn php_is_numeric(s: &str) -> bool {
 // non-membership) is ever reported; `Maybe` is silent (the zero-FP side).
 // ---------------------------------------------------------------------------
 
-/// The trinary contract-acceptance judgment (the Certainty discipline, ADR-0030).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Tri {
-    Yes,
-    No,
-    Maybe,
-}
-
 /// Intersection-style combine: `No` dominates, then `Maybe`, else `Yes`. Used
 /// when *every* sub-obligation must hold (element/key membership, shape items).
-fn combine(a: Tri, b: Tri) -> Tri {
-    match (a, b) {
-        (Tri::No, _) | (_, Tri::No) => Tri::No,
-        (Tri::Maybe, _) | (_, Tri::Maybe) => Tri::Maybe,
-        _ => Tri::Yes,
-    }
+/// This is exactly [`Certainty::and`], kept as a free function for the existing
+/// call sites.
+fn combine(a: Certainty, b: Certainty) -> Certainty {
+    a.and(b)
 }
+
+/// A convenience alias inside this module: the phpdoc contract acceptance code
+/// (ADR-0030) was written against a local `Tri`; it now shares the one project-wide
+/// [`Certainty`] type (ADR-0031 — one trinary, never parallel ones).
+use Certainty as Tri;
 
 /// A proven value in contract terms: a scalar literal, an array of proven values
 /// (normalized keys), or an object of an exact class (a `New` fact).
@@ -2657,7 +3520,9 @@ impl<'a> Cx<'a> {
             }
             ArgValue::Var(name) if !poisoned => {
                 if let Some(k) = env.get(name) {
-                    self.resolve_cval(&k.value, env, classes_env, poisoned, folder)
+                    // A `OneOf` fact is not one proven value → not a `CVal`.
+                    let v = k.singleton()?.clone();
+                    self.resolve_cval(&v, env, classes_env, poisoned, folder)
                 } else {
                     classes_env.get(name).map(|c| CVal::Object(c.clone()))
                 }
@@ -3191,5 +4056,107 @@ fn cval_to_argvalue(v: &CVal) -> ArgValue {
                 })
                 .collect(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod domain_tests {
+    //! Unit tests for the ADR-0031/0035 domain skeleton: the unified [`Certainty`]
+    //! algebra, [`Fact`] joins (agree / OneOf / cap overflow), and the empirically
+    //! settled PHP comparison primitives.
+    use super::*;
+    use steins_syntax::ArgValue;
+
+    fn sing(v: ArgValue) -> Fact {
+        Fact::Singleton(v)
+    }
+
+    #[test]
+    fn certainty_algebra() {
+        use Certainty::{Maybe, No, Yes};
+        // not swaps the poles, fixes Maybe.
+        assert_eq!(Yes.not(), No);
+        assert_eq!(No.not(), Yes);
+        assert_eq!(Maybe.not(), Maybe);
+        // and: No dominates, then Maybe.
+        assert_eq!(Yes.and(Yes), Yes);
+        assert_eq!(Yes.and(No), No);
+        assert_eq!(Yes.and(Maybe), Maybe);
+        assert_eq!(No.and(Maybe), No);
+        // or: Yes dominates, then Maybe.
+        assert_eq!(No.or(No), No);
+        assert_eq!(No.or(Yes), Yes);
+        assert_eq!(No.or(Maybe), Maybe);
+        assert_eq!(Yes.or(Maybe), Yes);
+    }
+
+    #[test]
+    fn fact_join_agree_keeps_singleton() {
+        let j = Fact::join(&sing(ArgValue::Int(5)), &sing(ArgValue::Int(5))).unwrap();
+        assert!(matches!(j, Fact::Singleton(ArgValue::Int(5))));
+        assert_eq!(j.singleton(), Some(&ArgValue::Int(5)));
+    }
+
+    #[test]
+    fn fact_join_differ_forms_oneof_and_dedups() {
+        let j = Fact::join(&sing(ArgValue::Int(5)), &sing(ArgValue::Int(6))).unwrap();
+        assert!(matches!(&j, Fact::OneOf(vs) if vs.len() == 2));
+        // A OneOf never resolves to a single proven value.
+        assert_eq!(j.singleton(), None);
+        // Re-joining an already-present value dedups.
+        let j2 = Fact::join(&j, &sing(ArgValue::Int(6))).unwrap();
+        assert!(matches!(&j2, Fact::OneOf(vs) if vs.len() == 2));
+    }
+
+    #[test]
+    fn fact_join_overflow_drops() {
+        // A OneOf of exactly ONEOF_CAP members is fine; one more drops the fact.
+        let full = Fact::OneOf((0..ONEOF_CAP as i64).map(ArgValue::Int).collect());
+        assert!(Fact::join(&full, &sing(ArgValue::Int(0))).is_some(), "existing member: no growth");
+        assert!(
+            Fact::join(&full, &sing(ArgValue::Int(999))).is_none(),
+            "a {}th distinct member overflows → dropped",
+            ONEOF_CAP + 1
+        );
+    }
+
+    #[test]
+    fn loose_eq_measured_cells_php_8_5_8() {
+        use ArgValue::{Bool, Int, Null, Str};
+        let s = |x: &str| Str(x.to_owned());
+        // A representative slice of the recorded PHP 8.5.8 table.
+        assert_eq!(php_loose_eq(&Null, &Null), Some(true));
+        assert_eq!(php_loose_eq(&Null, &Int(0)), Some(true));
+        assert_eq!(php_loose_eq(&Null, &s("")), Some(true));
+        assert_eq!(php_loose_eq(&Null, &s("0")), Some(false)); // the PHP 8 trap
+        assert_eq!(php_loose_eq(&Null, &Bool(false)), Some(true));
+        assert_eq!(php_loose_eq(&Bool(false), &s("0")), Some(true));
+        assert_eq!(php_loose_eq(&Bool(false), &s("abc")), Some(false));
+        assert_eq!(php_loose_eq(&Bool(true), &s("abc")), Some(true));
+        assert_eq!(php_loose_eq(&Int(0), &s("abc")), Some(false)); // PHP 8, not PHP 7
+        assert_eq!(php_loose_eq(&Int(0), &s("0")), Some(true));
+        assert_eq!(php_loose_eq(&Int(0), &s("")), Some(false));
+        assert_eq!(php_loose_eq(&s("0"), &s("")), Some(false));
+        assert_eq!(php_loose_eq(&s("5"), &s("5")), Some(true));
+        assert_eq!(php_loose_eq(&s("5"), &Int(5)), Some(true));
+    }
+
+    #[test]
+    fn truthiness_edge_cells() {
+        use ArgValue::{Array, Float, Int, Null, Str};
+        assert_eq!(php_truthy(&Str("0".to_owned())), Some(false)); // "0" is falsy
+        assert_eq!(php_truthy(&Str("0.0".to_owned())), Some(true)); // but "0.0" is truthy
+        assert_eq!(php_truthy(&Str(String::new())), Some(false));
+        assert_eq!(php_truthy(&Int(0)), Some(false));
+        assert_eq!(php_truthy(&Float(0.0)), Some(false));
+        assert_eq!(php_truthy(&Null), Some(false));
+        assert_eq!(php_truthy(&Array(vec![])), Some(false)); // [] is falsy
+    }
+
+    #[test]
+    fn identical_is_type_strict() {
+        use ArgValue::{Float, Int};
+        assert_eq!(php_identical(&Int(5), &Int(5)), Some(true));
+        assert_eq!(php_identical(&Int(5), &Float(5.0)), Some(false)); // 5 === 5.0 is false
     }
 }
