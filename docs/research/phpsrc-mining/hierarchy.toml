@@ -1,0 +1,2681 @@
+# hierarchy.toml — builtin class/interface/enum hierarchy mined from php-src stubs
+# php-src commit: 6bc7c26cf67a9480b5ef9d6191aebe87fa931183 (Thu Jul 9 2026)
+# Cross-checked against PHP 8.5.8 (cli) at /opt/homebrew/bin/php where noted.
+# Names preserve declared casing; Steins lowercases at its seam.
+# Namespaced names are fully-qualified (no leading backslash).
+# Test-only extensions (ext/zend_test, ext/skeleton, ext/dl_test, sapi/*) are EXCLUDED.
+# Total production declarations: 368
+
+[[class]]
+name = 'Attribute'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'Zend/zend_attributes.stub.php:6'
+
+[[class]]
+name = 'ReturnTypeWillChange'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'Zend/zend_attributes.stub.php:33'
+
+[[class]]
+name = 'AllowDynamicProperties'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'Zend/zend_attributes.stub.php:39'
+
+[[class]]
+name = 'SensitiveParameter'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'Zend/zend_attributes.stub.php:48'
+
+[[class]]
+name = 'SensitiveParameterValue'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'Zend/zend_attributes.stub.php:57'
+
+[[class]]
+name = 'Override'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'Zend/zend_attributes.stub.php:72'
+
+[[class]]
+name = 'Deprecated'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'Zend/zend_attributes.stub.php:81'
+
+[[class]]
+name = 'NoDiscard'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'Zend/zend_attributes.stub.php:94'
+
+[[class]]
+name = 'DelayedTargetValidation'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'Zend/zend_attributes.stub.php:105'
+
+[[class]]
+name = 'stdClass'
+kind = 'class'
+extends = []
+implements = []
+source = 'Zend/zend_builtin_functions.stub.php:6'
+
+[[class]]
+name = 'Closure'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'Zend/zend_closures.stub.php:9'
+
+[[class]]
+name = 'UnitEnum'
+kind = 'interface'
+extends = []
+implements = []
+source = 'Zend/zend_enum.stub.php:5'
+
+[[class]]
+name = 'BackedEnum'
+kind = 'interface'
+extends = ['UnitEnum']
+implements = []
+source = 'Zend/zend_enum.stub.php:10'
+
+[[class]]
+name = 'Throwable'
+kind = 'interface'
+extends = ['Stringable']
+implements = []
+source = 'Zend/zend_exceptions.stub.php:7'
+
+[[class]]
+name = 'Exception'
+kind = 'class'
+extends = []
+implements = ['Throwable']
+source = 'Zend/zend_exceptions.stub.php:25'
+
+[[class]]
+name = 'ErrorException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'Zend/zend_exceptions.stub.php:68'
+
+[[class]]
+name = 'Error'
+kind = 'class'
+extends = []
+implements = ['Throwable']
+source = 'Zend/zend_exceptions.stub.php:84'
+
+[[class]]
+name = 'CompileError'
+kind = 'class'
+extends = ['Error']
+implements = []
+source = 'Zend/zend_exceptions.stub.php:142'
+
+[[class]]
+name = 'ParseError'
+kind = 'class'
+extends = ['CompileError']
+implements = []
+source = 'Zend/zend_exceptions.stub.php:146'
+
+[[class]]
+name = 'TypeError'
+kind = 'class'
+extends = ['Error']
+implements = []
+source = 'Zend/zend_exceptions.stub.php:150'
+
+[[class]]
+name = 'ArgumentCountError'
+kind = 'class'
+extends = ['TypeError']
+implements = []
+source = 'Zend/zend_exceptions.stub.php:154'
+
+[[class]]
+name = 'ValueError'
+kind = 'class'
+extends = ['Error']
+implements = []
+source = 'Zend/zend_exceptions.stub.php:158'
+
+[[class]]
+name = 'ArithmeticError'
+kind = 'class'
+extends = ['Error']
+implements = []
+source = 'Zend/zend_exceptions.stub.php:162'
+
+[[class]]
+name = 'DivisionByZeroError'
+kind = 'class'
+extends = ['ArithmeticError']
+implements = []
+source = 'Zend/zend_exceptions.stub.php:166'
+
+[[class]]
+name = 'UnhandledMatchError'
+kind = 'class'
+extends = ['Error']
+implements = []
+source = 'Zend/zend_exceptions.stub.php:170'
+
+[[class]]
+name = 'RequestParseBodyException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'Zend/zend_exceptions.stub.php:174'
+
+[[class]]
+name = 'Fiber'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'Zend/zend_fibers.stub.php:9'
+
+[[class]]
+name = 'FiberError'
+kind = 'class'
+extends = ['Error']
+implements = []
+final = true
+source = 'Zend/zend_fibers.stub.php:34'
+
+[[class]]
+name = 'Generator'
+kind = 'class'
+extends = []
+implements = ['Iterator']
+final = true
+source = 'Zend/zend_generators.stub.php:9'
+
+[[class]]
+name = 'ClosedGeneratorException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'Zend/zend_generators.stub.php:30'
+
+[[class]]
+name = 'Traversable'
+kind = 'interface'
+extends = []
+implements = []
+source = 'Zend/zend_interfaces.stub.php:5'
+
+[[class]]
+name = 'IteratorAggregate'
+kind = 'interface'
+extends = ['Traversable']
+implements = []
+source = 'Zend/zend_interfaces.stub.php:7'
+
+[[class]]
+name = 'Iterator'
+kind = 'interface'
+extends = ['Traversable']
+implements = []
+source = 'Zend/zend_interfaces.stub.php:13'
+
+[[class]]
+name = 'ArrayAccess'
+kind = 'interface'
+extends = []
+implements = []
+source = 'Zend/zend_interfaces.stub.php:31'
+
+[[class]]
+name = 'Serializable'
+kind = 'interface'
+extends = []
+implements = []
+source = 'Zend/zend_interfaces.stub.php:49'
+
+[[class]]
+name = 'Countable'
+kind = 'interface'
+extends = []
+implements = []
+source = 'Zend/zend_interfaces.stub.php:58'
+
+[[class]]
+name = 'Stringable'
+kind = 'interface'
+extends = []
+implements = []
+source = 'Zend/zend_interfaces.stub.php:64'
+
+[[class]]
+name = 'InternalIterator'
+kind = 'class'
+extends = []
+implements = ['Iterator']
+final = true
+source = 'Zend/zend_interfaces.stub.php:72'
+
+[[class]]
+name = 'WeakReference'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'Zend/zend_weakrefs.stub.php:9'
+
+[[class]]
+name = 'WeakMap'
+kind = 'class'
+extends = []
+implements = ['ArrayAccess', 'Countable', 'IteratorAggregate']
+final = true
+source = 'Zend/zend_weakrefs.stub.php:22'
+
+[[class]]
+name = 'Number'
+kind = 'class'
+extends = []
+implements = ['Stringable']
+final = true
+source = 'ext/bcmath/bcmath.stub.php:54'
+
+[[class]]
+name = 'variant'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/com_dotnet/com_extension.stub.php:356'
+
+[[class]]
+name = 'com'
+kind = 'class'
+extends = ['variant']
+implements = []
+source = 'ext/com_dotnet/com_extension.stub.php:361'
+
+[[class]]
+name = 'dotnet'
+kind = 'class'
+extends = ['variant']
+implements = []
+source = 'ext/com_dotnet/com_extension.stub.php:367'
+
+[[class]]
+name = 'com_safearray_proxy'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/com_dotnet/com_extension.stub.php:373'
+
+[[class]]
+name = 'com_exception'
+kind = 'class'
+extends = ['Exception']
+implements = []
+final = true
+source = 'ext/com_dotnet/com_extension.stub.php:377'
+
+[[class]]
+name = 'COMPersistHelper'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/com_dotnet/com_persist.stub.php:5'
+
+[[class]]
+name = 'CurlHandle'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/curl/curl.stub.php:3721'
+
+[[class]]
+name = 'CurlMultiHandle'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/curl/curl.stub.php:3729'
+
+[[class]]
+name = 'CurlShareHandle'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/curl/curl.stub.php:3737'
+
+[[class]]
+name = 'CurlSharePersistentHandle'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/curl/curl.stub.php:3745'
+
+[[class]]
+name = 'CURLFile'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/curl/curl_file.stub.php:6'
+
+[[class]]
+name = 'CURLStringFile'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/curl/curl_file.stub.php:30'
+
+[[class]]
+name = 'DateTimeInterface'
+kind = 'interface'
+extends = []
+implements = []
+source = 'ext/date/php_date.stub.php:277'
+
+[[class]]
+name = 'DateTime'
+kind = 'class'
+extends = []
+implements = ['DateTimeInterface']
+source = 'ext/date/php_date.stub.php:334'
+
+[[class]]
+name = 'DateTimeImmutable'
+kind = 'class'
+extends = []
+implements = ['DateTimeInterface']
+source = 'ext/date/php_date.stub.php:452'
+
+[[class]]
+name = 'DateTimeZone'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/date/php_date.stub.php:560'
+
+[[class]]
+name = 'DateInterval'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/date/php_date.stub.php:645'
+
+[[class]]
+name = 'DatePeriod'
+kind = 'class'
+extends = []
+implements = ['IteratorAggregate']
+source = 'ext/date/php_date.stub.php:672'
+
+[[class]]
+name = 'DateError'
+kind = 'class'
+extends = ['Error']
+implements = []
+source = 'ext/date/php_date.stub.php:754'
+
+[[class]]
+name = 'DateObjectError'
+kind = 'class'
+extends = ['DateError']
+implements = []
+source = 'ext/date/php_date.stub.php:761'
+
+[[class]]
+name = 'DateRangeError'
+kind = 'class'
+extends = ['DateError']
+implements = []
+source = 'ext/date/php_date.stub.php:768'
+
+[[class]]
+name = 'DateException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'ext/date/php_date.stub.php:775'
+
+[[class]]
+name = 'DateInvalidTimeZoneException'
+kind = 'class'
+extends = ['DateException']
+implements = []
+source = 'ext/date/php_date.stub.php:782'
+
+[[class]]
+name = 'DateInvalidOperationException'
+kind = 'class'
+extends = ['DateException']
+implements = []
+source = 'ext/date/php_date.stub.php:789'
+
+[[class]]
+name = 'DateMalformedStringException'
+kind = 'class'
+extends = ['DateException']
+implements = []
+source = 'ext/date/php_date.stub.php:796'
+
+[[class]]
+name = 'DateMalformedIntervalStringException'
+kind = 'class'
+extends = ['DateException']
+implements = []
+source = 'ext/date/php_date.stub.php:803'
+
+[[class]]
+name = 'DateMalformedPeriodStringException'
+kind = 'class'
+extends = ['DateException']
+implements = []
+source = 'ext/date/php_date.stub.php:810'
+
+[[class]]
+name = 'Dba\Connection'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/dba/dba.stub.php:10'
+
+[[class]]
+name = 'DOMDocumentType'
+kind = 'class'
+extends = ['DOMNode']
+implements = []
+source = 'ext/dom/php_dom.stub.php:238'
+
+[[class]]
+name = 'DOMCdataSection'
+kind = 'class'
+extends = ['DOMText']
+implements = []
+source = 'ext/dom/php_dom.stub.php:259'
+
+[[class]]
+name = 'DOMComment'
+kind = 'class'
+extends = ['DOMCharacterData']
+implements = []
+source = 'ext/dom/php_dom.stub.php:264'
+
+[[class]]
+name = 'DOMParentNode'
+kind = 'interface'
+extends = []
+implements = []
+source = 'ext/dom/php_dom.stub.php:269'
+
+[[class]]
+name = 'DOMChildNode'
+kind = 'interface'
+extends = []
+implements = []
+source = 'ext/dom/php_dom.stub.php:281'
+
+[[class]]
+name = 'DOMNode'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/dom/php_dom.stub.php:295'
+
+[[class]]
+name = 'DOMNameSpaceNode'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/dom/php_dom.stub.php:422'
+
+[[class]]
+name = 'DOMImplementation'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/dom/php_dom.stub.php:461'
+
+[[class]]
+name = 'DOMDocumentFragment'
+kind = 'class'
+extends = ['DOMNode']
+implements = ['DOMParentNode']
+source = 'ext/dom/php_dom.stub.php:473'
+
+[[class]]
+name = 'DOMNodeList'
+kind = 'class'
+extends = []
+implements = ['IteratorAggregate', 'Countable']
+source = 'ext/dom/php_dom.stub.php:508'
+
+[[class]]
+name = 'DOMCharacterData'
+kind = 'class'
+extends = ['DOMNode']
+implements = ['DOMChildNode']
+source = 'ext/dom/php_dom.stub.php:522'
+
+[[class]]
+name = 'DOMAttr'
+kind = 'class'
+extends = ['DOMNode']
+implements = []
+source = 'ext/dom/php_dom.stub.php:573'
+
+[[class]]
+name = 'DOMElement'
+kind = 'class'
+extends = ['DOMNode']
+implements = ['DOMParentNode', 'DOMChildNode']
+source = 'ext/dom/php_dom.stub.php:596'
+
+[[class]]
+name = 'DOMDocument'
+kind = 'class'
+extends = ['DOMNode']
+implements = ['DOMParentNode']
+source = 'ext/dom/php_dom.stub.php:710'
+
+[[class]]
+name = 'DOMException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+final = true
+source = 'ext/dom/php_dom.stub.php:904'
+
+[[class]]
+name = 'DOMText'
+kind = 'class'
+extends = ['DOMCharacterData']
+implements = []
+source = 'ext/dom/php_dom.stub.php:913'
+
+[[class]]
+name = 'DOMNamedNodeMap'
+kind = 'class'
+extends = []
+implements = ['IteratorAggregate', 'Countable']
+source = 'ext/dom/php_dom.stub.php:933'
+
+[[class]]
+name = 'DOMEntity'
+kind = 'class'
+extends = ['DOMNode']
+implements = []
+source = 'ext/dom/php_dom.stub.php:953'
+
+[[class]]
+name = 'DOMEntityReference'
+kind = 'class'
+extends = ['DOMNode']
+implements = []
+source = 'ext/dom/php_dom.stub.php:983'
+
+[[class]]
+name = 'DOMNotation'
+kind = 'class'
+extends = ['DOMNode']
+implements = []
+source = 'ext/dom/php_dom.stub.php:988'
+
+[[class]]
+name = 'DOMProcessingInstruction'
+kind = 'class'
+extends = ['DOMNode']
+implements = []
+source = 'ext/dom/php_dom.stub.php:997'
+
+[[class]]
+name = 'DOMXPath'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/dom/php_dom.stub.php:1010'
+
+[[class]]
+name = 'ParentNode'
+kind = 'interface'
+extends = []
+implements = []
+source = 'ext/dom/php_dom.stub.php:1125'
+
+[[class]]
+name = 'ChildNode'
+kind = 'interface'
+extends = []
+implements = []
+source = 'ext/dom/php_dom.stub.php:1135'
+
+[[class]]
+name = 'Implementation'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/dom/php_dom.stub.php:1147'
+
+[[class]]
+name = 'Node'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/dom/php_dom.stub.php:1157'
+
+[[class]]
+name = 'NodeList'
+kind = 'class'
+extends = []
+implements = ['IteratorAggregate', 'Countable']
+source = 'ext/dom/php_dom.stub.php:1239'
+
+[[class]]
+name = 'NamedNodeMap'
+kind = 'class'
+extends = []
+implements = ['IteratorAggregate', 'Countable']
+source = 'ext/dom/php_dom.stub.php:1254'
+
+[[class]]
+name = 'DtdNamedNodeMap'
+kind = 'class'
+extends = []
+implements = ['IteratorAggregate', 'Countable']
+source = 'ext/dom/php_dom.stub.php:1273'
+
+[[class]]
+name = 'HTMLCollection'
+kind = 'class'
+extends = []
+implements = ['IteratorAggregate', 'Countable']
+source = 'ext/dom/php_dom.stub.php:1292'
+
+[[class]]
+name = 'AdjacentPosition'
+kind = 'enum'
+extends = []
+implements = []
+source = 'ext/dom/php_dom.stub.php:1309'
+
+[[class]]
+name = 'Element'
+kind = 'class'
+extends = ['Node']
+implements = ['ParentNode', 'ChildNode']
+source = 'ext/dom/php_dom.stub.php:1317'
+
+[[class]]
+name = 'HTMLElement'
+kind = 'class'
+extends = ['Element']
+implements = []
+source = 'ext/dom/php_dom.stub.php:1431'
+
+[[class]]
+name = 'Attr'
+kind = 'class'
+extends = ['Node']
+implements = []
+source = 'ext/dom/php_dom.stub.php:1435'
+
+[[class]]
+name = 'CharacterData'
+kind = 'class'
+extends = ['Node']
+implements = ['ChildNode']
+source = 'ext/dom/php_dom.stub.php:1461'
+
+[[class]]
+name = 'Text'
+kind = 'class'
+extends = ['CharacterData']
+implements = []
+source = 'ext/dom/php_dom.stub.php:1489'
+
+[[class]]
+name = 'CDATASection'
+kind = 'class'
+extends = ['Text']
+implements = []
+source = 'ext/dom/php_dom.stub.php:1499'
+
+[[class]]
+name = 'ProcessingInstruction'
+kind = 'class'
+extends = ['CharacterData']
+implements = []
+source = 'ext/dom/php_dom.stub.php:1501'
+
+[[class]]
+name = 'Comment'
+kind = 'class'
+extends = ['CharacterData']
+implements = []
+source = 'ext/dom/php_dom.stub.php:1507'
+
+[[class]]
+name = 'DocumentType'
+kind = 'class'
+extends = ['Node']
+implements = ['ChildNode']
+source = 'ext/dom/php_dom.stub.php:1512'
+
+[[class]]
+name = 'DocumentFragment'
+kind = 'class'
+extends = ['Node']
+implements = ['ParentNode']
+source = 'ext/dom/php_dom.stub.php:1537'
+
+[[class]]
+name = 'Entity'
+kind = 'class'
+extends = ['Node']
+implements = []
+source = 'ext/dom/php_dom.stub.php:1562'
+
+[[class]]
+name = 'EntityReference'
+kind = 'class'
+extends = ['Node']
+implements = []
+source = 'ext/dom/php_dom.stub.php:1572'
+
+[[class]]
+name = 'Notation'
+kind = 'class'
+extends = ['Node']
+implements = []
+source = 'ext/dom/php_dom.stub.php:1574'
+
+[[class]]
+name = 'Document'
+kind = 'class'
+extends = ['Node']
+implements = ['ParentNode']
+abstract = true
+source = 'ext/dom/php_dom.stub.php:1582'
+
+[[class]]
+name = 'HTMLDocument'
+kind = 'class'
+extends = ['Document']
+implements = []
+final = true
+source = 'ext/dom/php_dom.stub.php:1673'
+
+[[class]]
+name = 'XMLDocument'
+kind = 'class'
+extends = ['Document']
+implements = []
+final = true
+source = 'ext/dom/php_dom.stub.php:1696'
+
+[[class]]
+name = 'TokenList'
+kind = 'class'
+extends = []
+implements = ['IteratorAggregate', 'Countable']
+final = true
+source = 'ext/dom/php_dom.stub.php:1734'
+
+[[class]]
+name = 'NamespaceInfo'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/dom/php_dom.stub.php:1760'
+
+[[class]]
+name = 'XPath'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/dom/php_dom.stub.php:1772'
+
+[[class]]
+name = 'EnchantBroker'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/enchant/enchant.stub.php:29'
+
+[[class]]
+name = 'EnchantDictionary'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/enchant/enchant.stub.php:37'
+
+[[class]]
+name = 'FFI'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/ffi/ffi.stub.php:7'
+
+[[class]]
+name = 'FFI\CData'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/ffi/ffi.stub.php:75'
+
+[[class]]
+name = 'FFI\CType'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/ffi/ffi.stub.php:79'
+
+[[class]]
+name = 'FFI\Exception'
+kind = 'class'
+extends = ['Error']
+implements = []
+source = 'ext/ffi/ffi.stub.php:185'
+
+[[class]]
+name = 'FFI\ParserException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+final = true
+source = 'ext/ffi/ffi.stub.php:188'
+
+[[class]]
+name = 'finfo'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/fileinfo/fileinfo.stub.php:66'
+
+[[class]]
+name = 'Filter\FilterException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'ext/filter/filter.stub.php:327'
+
+[[class]]
+name = 'Filter\FilterFailedException'
+kind = 'class'
+extends = ['FilterException']
+implements = []
+source = 'ext/filter/filter.stub.php:329'
+
+[[class]]
+name = 'FTP\Connection'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/ftp/ftp.stub.php:144'
+
+[[class]]
+name = 'GdImage'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/gd/gd.stub.php:466'
+
+[[class]]
+name = 'GdFont'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/gd/gd.stub.php:472'
+
+[[class]]
+name = 'GMP'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/gmp/gmp.stub.php:60'
+
+[[class]]
+name = 'HashContext'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/hash/hash.stub.php:98'
+
+[[class]]
+name = 'IntlBreakIterator'
+kind = 'class'
+extends = []
+implements = ['IteratorAggregate']
+source = 'ext/intl/breakiterator/breakiterator.stub.php:6'
+
+[[class]]
+name = 'IntlRuleBasedBreakIterator'
+kind = 'class'
+extends = ['IntlBreakIterator']
+implements = []
+source = 'ext/intl/breakiterator/breakiterator.stub.php:116'
+
+[[class]]
+name = 'IntlCodePointBreakIterator'
+kind = 'class'
+extends = ['IntlBreakIterator']
+implements = []
+source = 'ext/intl/breakiterator/breakiterator.stub.php:134'
+
+[[class]]
+name = 'IntlPartsIterator'
+kind = 'class'
+extends = ['IntlIterator']
+implements = []
+source = 'ext/intl/breakiterator/breakiterator_iterators.stub.php:6'
+
+[[class]]
+name = 'IntlCalendar'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/intl/calendar/calendar.stub.php:6'
+
+[[class]]
+name = 'IntlGregorianCalendar'
+kind = 'class'
+extends = ['IntlCalendar']
+implements = []
+source = 'ext/intl/calendar/calendar.stub.php:369'
+
+[[class]]
+name = 'Collator'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/intl/collator/collator.stub.php:17'
+
+[[class]]
+name = 'IntlIterator'
+kind = 'class'
+extends = []
+implements = ['Iterator']
+source = 'ext/intl/common/common.stub.php:736'
+
+[[class]]
+name = 'UConverter'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/intl/converter/converter.stub.php:6'
+
+[[class]]
+name = 'IntlDateFormatter'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/intl/dateformat/dateformat.stub.php:6'
+
+[[class]]
+name = 'IntlDatePatternGenerator'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/intl/dateformat/datepatterngenerator.stub.php:6'
+
+[[class]]
+name = 'NumberFormatter'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/intl/formatter/formatter.stub.php:6'
+
+[[class]]
+name = 'IntlListFormatter'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/intl/listformatter/listformatter.stub.php:9'
+
+[[class]]
+name = 'Locale'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/intl/locale/locale.stub.php:5'
+
+[[class]]
+name = 'MessageFormatter'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/intl/msgformat/msgformat.stub.php:6'
+
+[[class]]
+name = 'Normalizer'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/intl/normalizer/normalizer.stub.php:5'
+
+[[class]]
+name = 'IntlException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'ext/intl/php_intl.stub.php:170'
+
+[[class]]
+name = 'IntlNumberRangeFormatter'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/intl/rangeformatter/rangeformatter.stub.php:9'
+
+[[class]]
+name = 'ResourceBundle'
+kind = 'class'
+extends = []
+implements = ['IteratorAggregate', 'Countable']
+source = 'ext/intl/resourcebundle/resourcebundle.stub.php:6'
+
+[[class]]
+name = 'Spoofchecker'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/intl/spoofchecker/spoofchecker.stub.php:6'
+
+[[class]]
+name = 'IntlTimeZone'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/intl/timezone/timezone.stub.php:6'
+
+[[class]]
+name = 'Transliterator'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/intl/transliterator/transliterator.stub.php:6'
+
+[[class]]
+name = 'IntlChar'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/intl/uchar/uchar.stub.php:5'
+
+[[class]]
+name = 'JsonSerializable'
+kind = 'interface'
+extends = []
+implements = []
+source = 'ext/json/json.stub.php:166'
+
+[[class]]
+name = 'JsonException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'ext/json/json.stub.php:172'
+
+[[class]]
+name = 'LDAP\Connection'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/ldap/ldap.stub.php:836'
+
+[[class]]
+name = 'LDAP\Result'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/ldap/ldap.stub.php:844'
+
+[[class]]
+name = 'LDAP\ResultEntry'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/ldap/ldap.stub.php:852'
+
+[[class]]
+name = 'LibXMLError'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/libxml/libxml.stub.php:160'
+
+[[class]]
+name = 'mysqli_driver'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/mysqli/mysqli.stub.php:600'
+
+[[class]]
+name = 'mysqli'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/mysqli/mysqli.stub.php:614'
+
+[[class]]
+name = 'mysqli_result'
+kind = 'class'
+extends = []
+implements = ['IteratorAggregate']
+source = 'ext/mysqli/mysqli.stub.php:1026'
+
+[[class]]
+name = 'mysqli_stmt'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/mysqli/mysqli.stub.php:1145'
+
+[[class]]
+name = 'mysqli_warning'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/mysqli/mysqli.stub.php:1320'
+
+[[class]]
+name = 'mysqli_sql_exception'
+kind = 'class'
+extends = ['RuntimeException']
+implements = []
+final = true
+source = 'ext/mysqli/mysqli.stub.php:1333'
+
+[[class]]
+name = 'Odbc\Connection'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/odbc/odbc.stub.php:10'
+
+[[class]]
+name = 'Odbc\Result'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/odbc/odbc.stub.php:18'
+
+[[class]]
+name = 'Openssl\OpensslException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'ext/openssl/openssl.stub.php:7'
+
+[[class]]
+name = 'Openssl\Psk'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/openssl/openssl.stub.php:14'
+
+[[class]]
+name = 'Openssl\Session'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/openssl/openssl.stub.php:35'
+
+[[class]]
+name = 'OpenSSLCertificate'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/openssl/openssl.stub.php:477'
+
+[[class]]
+name = 'OpenSSLCertificateSigningRequest'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/openssl/openssl.stub.php:485'
+
+[[class]]
+name = 'OpenSSLAsymmetricKey'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/openssl/openssl.stub.php:493'
+
+[[class]]
+name = 'QosClass'
+kind = 'enum'
+extends = []
+implements = []
+source = 'ext/pcntl/pcntl.stub.php:1115'
+
+[[class]]
+name = 'PDOException'
+kind = 'class'
+extends = ['RuntimeException']
+implements = []
+source = 'ext/pdo/pdo.stub.php:5'
+
+[[class]]
+name = 'PDO'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/pdo/pdo_dbh.stub.php:6'
+
+[[class]]
+name = 'PDOStatement'
+kind = 'class'
+extends = []
+implements = ['IteratorAggregate']
+source = 'ext/pdo/pdo_stmt.stub.php:6'
+
+[[class]]
+name = 'PDORow'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/pdo/pdo_stmt.stub.php:71'
+
+[[class]]
+name = 'Pdo\Dblib'
+kind = 'class'
+extends = ['PDO']
+implements = []
+source = 'ext/pdo_dblib/pdo_dblib.stub.php:11'
+
+[[class]]
+name = 'Pdo\Firebird'
+kind = 'class'
+extends = ['PDO']
+implements = []
+source = 'ext/pdo_firebird/pdo_firebird.stub.php:11'
+
+[[class]]
+name = 'Pdo\Mysql'
+kind = 'class'
+extends = ['PDO']
+implements = []
+source = 'ext/pdo_mysql/pdo_mysql.stub.php:11'
+
+[[class]]
+name = 'Pdo\Odbc'
+kind = 'class'
+extends = ['PDO']
+implements = []
+source = 'ext/pdo_odbc/pdo_odbc.stub.php:18'
+
+[[class]]
+name = 'Pdo\Pgsql'
+kind = 'class'
+extends = ['PDO']
+implements = []
+source = 'ext/pdo_pgsql/pdo_pgsql.stub.php:11'
+
+[[class]]
+name = 'PDO_PGSql_Ext'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/pdo_pgsql/pgsql_driver.stub.php:9'
+
+[[class]]
+name = 'Pdo\Sqlite'
+kind = 'class'
+extends = ['PDO']
+implements = []
+source = 'ext/pdo_sqlite/pdo_sqlite.stub.php:11'
+
+[[class]]
+name = 'PDO_SQLite_Ext'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/pdo_sqlite/sqlite_driver.stub.php:9'
+
+[[class]]
+name = 'PgSql\Connection'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/pgsql/pgsql.stub.php:968'
+
+[[class]]
+name = 'PgSql\Result'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/pgsql/pgsql.stub.php:976'
+
+[[class]]
+name = 'PgSql\Lob'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/pgsql/pgsql.stub.php:984'
+
+[[class]]
+name = 'PharException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'ext/phar/phar_object.stub.php:5'
+
+[[class]]
+name = 'Phar'
+kind = 'class'
+extends = ['RecursiveDirectoryIterator']
+implements = ['Countable', 'ArrayAccess']
+source = 'ext/phar/phar_object.stub.php:9'
+
+[[class]]
+name = 'PharData'
+kind = 'class'
+extends = ['RecursiveDirectoryIterator']
+implements = ['Countable', 'ArrayAccess']
+source = 'ext/phar/phar_object.stub.php:246'
+
+[[class]]
+name = 'PharFileInfo'
+kind = 'class'
+extends = ['SplFileInfo']
+implements = []
+source = 'ext/phar/phar_object.stub.php:541'
+
+[[class]]
+name = 'Mt19937'
+kind = 'class'
+extends = []
+implements = ['Random\Engine']
+final = true
+source = 'ext/random/random.stub.php:53'
+
+[[class]]
+name = 'PcgOneseq128XslRr64'
+kind = 'class'
+extends = []
+implements = ['Random\Engine']
+final = true
+source = 'ext/random/random.stub.php:69'
+
+[[class]]
+name = 'Xoshiro256StarStar'
+kind = 'class'
+extends = []
+implements = ['Random\Engine']
+final = true
+source = 'ext/random/random.stub.php:91'
+
+[[class]]
+name = 'Secure'
+kind = 'class'
+extends = []
+implements = ['Random\CryptoSafeEngine']
+final = true
+source = 'ext/random/random.stub.php:116'
+
+[[class]]
+name = 'Engine'
+kind = 'interface'
+extends = []
+implements = []
+source = 'ext/random/random.stub.php:125'
+
+[[class]]
+name = 'CryptoSafeEngine'
+kind = 'interface'
+extends = ['Engine']
+implements = []
+source = 'ext/random/random.stub.php:130'
+
+[[class]]
+name = 'Randomizer'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/random/random.stub.php:137'
+
+[[class]]
+name = 'IntervalBoundary'
+kind = 'enum'
+extends = []
+implements = []
+source = 'ext/random/random.stub.php:166'
+
+[[class]]
+name = 'RandomError'
+kind = 'class'
+extends = ['Error']
+implements = []
+source = 'ext/random/random.stub.php:176'
+
+[[class]]
+name = 'BrokenRandomEngineError'
+kind = 'class'
+extends = ['RandomError']
+implements = []
+source = 'ext/random/random.stub.php:183'
+
+[[class]]
+name = 'RandomException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'ext/random/random.stub.php:190'
+
+[[class]]
+name = 'ReflectionException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'ext/reflection/php_reflection.stub.php:8'
+
+[[class]]
+name = 'Reflection'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/reflection/php_reflection.stub.php:12'
+
+[[class]]
+name = 'Reflector'
+kind = 'interface'
+extends = ['Stringable']
+implements = []
+source = 'ext/reflection/php_reflection.stub.php:18'
+
+[[class]]
+name = 'ReflectionFunctionAbstract'
+kind = 'class'
+extends = []
+implements = ['Reflector']
+abstract = true
+source = 'ext/reflection/php_reflection.stub.php:23'
+
+[[class]]
+name = 'ReflectionFunction'
+kind = 'class'
+extends = ['ReflectionFunctionAbstract']
+implements = []
+source = 'ext/reflection/php_reflection.stub.php:120'
+
+[[class]]
+name = 'ReflectionGenerator'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/reflection/php_reflection.stub.php:148'
+
+[[class]]
+name = 'ReflectionMethod'
+kind = 'class'
+extends = ['ReflectionFunctionAbstract']
+implements = []
+source = 'ext/reflection/php_reflection.stub.php:167'
+
+[[class]]
+name = 'ReflectionClass'
+kind = 'class'
+extends = []
+implements = ['Reflector']
+source = 'ext/reflection/php_reflection.stub.php:237'
+
+[[class]]
+name = 'ReflectionObject'
+kind = 'class'
+extends = ['ReflectionClass']
+implements = []
+source = 'ext/reflection/php_reflection.stub.php:441'
+
+[[class]]
+name = 'PropertyHookType'
+kind = 'enum'
+extends = []
+implements = []
+source = 'ext/reflection/php_reflection.stub.php:446'
+
+[[class]]
+name = 'ReflectionProperty'
+kind = 'class'
+extends = []
+implements = ['Reflector']
+source = 'ext/reflection/php_reflection.stub.php:453'
+
+[[class]]
+name = 'ReflectionClassConstant'
+kind = 'class'
+extends = []
+implements = ['Reflector']
+source = 'ext/reflection/php_reflection.stub.php:584'
+
+[[class]]
+name = 'ReflectionParameter'
+kind = 'class'
+extends = []
+implements = ['Reflector']
+source = 'ext/reflection/php_reflection.stub.php:643'
+
+[[class]]
+name = 'ReflectionType'
+kind = 'class'
+extends = []
+implements = ['Stringable']
+abstract = true
+source = 'ext/reflection/php_reflection.stub.php:726'
+
+[[class]]
+name = 'ReflectionNamedType'
+kind = 'class'
+extends = ['ReflectionType']
+implements = []
+source = 'ext/reflection/php_reflection.stub.php:737'
+
+[[class]]
+name = 'ReflectionUnionType'
+kind = 'class'
+extends = ['ReflectionType']
+implements = []
+source = 'ext/reflection/php_reflection.stub.php:746'
+
+[[class]]
+name = 'ReflectionIntersectionType'
+kind = 'class'
+extends = ['ReflectionType']
+implements = []
+source = 'ext/reflection/php_reflection.stub.php:751'
+
+[[class]]
+name = 'ReflectionExtension'
+kind = 'class'
+extends = []
+implements = ['Reflector']
+source = 'ext/reflection/php_reflection.stub.php:757'
+
+[[class]]
+name = 'ReflectionZendExtension'
+kind = 'class'
+extends = []
+implements = ['Reflector']
+source = 'ext/reflection/php_reflection.stub.php:803'
+
+[[class]]
+name = 'ReflectionReference'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/reflection/php_reflection.stub.php:831'
+
+[[class]]
+name = 'ReflectionAttribute'
+kind = 'class'
+extends = []
+implements = ['Reflector']
+source = 'ext/reflection/php_reflection.stub.php:844'
+
+[[class]]
+name = 'ReflectionEnum'
+kind = 'class'
+extends = ['ReflectionClass']
+implements = []
+source = 'ext/reflection/php_reflection.stub.php:864'
+
+[[class]]
+name = 'ReflectionEnumUnitCase'
+kind = 'class'
+extends = ['ReflectionClassConstant']
+implements = []
+source = 'ext/reflection/php_reflection.stub.php:879'
+
+[[class]]
+name = 'ReflectionEnumBackedCase'
+kind = 'class'
+extends = ['ReflectionEnumUnitCase']
+implements = []
+source = 'ext/reflection/php_reflection.stub.php:889'
+
+[[class]]
+name = 'ReflectionFiber'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/reflection/php_reflection.stub.php:897'
+
+[[class]]
+name = 'ReflectionConstant'
+kind = 'class'
+extends = []
+implements = ['Reflector']
+source = 'ext/reflection/php_reflection.stub.php:916'
+
+[[class]]
+name = 'SessionHandlerInterface'
+kind = 'interface'
+extends = []
+implements = []
+source = 'ext/session/session.stub.php:92'
+
+[[class]]
+name = 'SessionIdInterface'
+kind = 'interface'
+extends = []
+implements = []
+source = 'ext/session/session.stub.php:113'
+
+[[class]]
+name = 'SessionUpdateTimestampHandlerInterface'
+kind = 'interface'
+extends = []
+implements = []
+source = 'ext/session/session.stub.php:119'
+
+[[class]]
+name = 'SessionHandler'
+kind = 'class'
+extends = []
+implements = ['SessionHandlerInterface', 'SessionIdInterface']
+source = 'ext/session/session.stub.php:128'
+
+[[class]]
+name = 'Shmop'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/shmop/shmop.stub.php:9'
+
+[[class]]
+name = 'SimpleXMLElement'
+kind = 'class'
+extends = []
+implements = ['Stringable', 'Countable', 'RecursiveIterator']
+source = 'ext/simplexml/simplexml.stub.php:12'
+
+[[class]]
+name = 'SimpleXMLIterator'
+kind = 'class'
+extends = ['SimpleXMLElement']
+implements = []
+source = 'ext/simplexml/simplexml.stub.php:81'
+
+[[class]]
+name = 'SNMP'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/snmp/snmp.stub.php:184'
+
+[[class]]
+name = 'SNMPException'
+kind = 'class'
+extends = ['RuntimeException']
+implements = []
+source = 'ext/snmp/snmp.stub.php:252'
+
+[[class]]
+name = 'Soap\Url'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/soap/soap.stub.php:10'
+
+[[class]]
+name = 'Soap\Sdl'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/soap/soap.stub.php:18'
+
+[[class]]
+name = 'SoapParam'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/soap/soap.stub.php:452'
+
+[[class]]
+name = 'SoapHeader'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/soap/soap.stub.php:460'
+
+[[class]]
+name = 'SoapFault'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'ext/soap/soap.stub.php:471'
+
+[[class]]
+name = 'SoapVar'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/soap/soap.stub.php:487'
+
+[[class]]
+name = 'SoapServer'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/soap/soap.stub.php:499'
+
+[[class]]
+name = 'SoapClient'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/soap/soap.stub.php:535'
+
+[[class]]
+name = 'Socket'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/sockets/sockets.stub.php:2204'
+
+[[class]]
+name = 'AddressInfo'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/sockets/sockets.stub.php:2212'
+
+[[class]]
+name = 'SodiumException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'ext/sodium/libsodium.stub.php:970'
+
+[[class]]
+name = 'ArrayObject'
+kind = 'class'
+extends = []
+implements = ['IteratorAggregate', 'ArrayAccess', 'Serializable', 'Countable']
+source = 'ext/spl/spl_array.stub.php:5'
+
+[[class]]
+name = 'ArrayIterator'
+kind = 'class'
+extends = []
+implements = ['SeekableIterator', 'ArrayAccess', 'Serializable', 'Countable']
+source = 'ext/spl/spl_array.stub.php:87'
+
+[[class]]
+name = 'RecursiveArrayIterator'
+kind = 'class'
+extends = ['ArrayIterator']
+implements = ['RecursiveIterator']
+source = 'ext/spl/spl_array.stub.php:235'
+
+[[class]]
+name = 'SplFileInfo'
+kind = 'class'
+extends = []
+implements = ['Stringable']
+source = 'ext/spl/spl_directory.stub.php:6'
+
+[[class]]
+name = 'DirectoryIterator'
+kind = 'class'
+extends = ['SplFileInfo']
+implements = ['SeekableIterator']
+source = 'ext/spl/spl_directory.stub.php:104'
+
+[[class]]
+name = 'FilesystemIterator'
+kind = 'class'
+extends = ['DirectoryIterator']
+implements = []
+source = 'ext/spl/spl_directory.stub.php:148'
+
+[[class]]
+name = 'RecursiveDirectoryIterator'
+kind = 'class'
+extends = ['FilesystemIterator']
+implements = ['RecursiveIterator']
+source = 'ext/spl/spl_directory.stub.php:193'
+
+[[class]]
+name = 'GlobIterator'
+kind = 'class'
+extends = ['FilesystemIterator']
+implements = ['Countable']
+source = 'ext/spl/spl_directory.stub.php:210'
+
+[[class]]
+name = 'SplFileObject'
+kind = 'class'
+extends = ['SplFileInfo']
+implements = ['RecursiveIterator', 'SeekableIterator']
+source = 'ext/spl/spl_directory.stub.php:218'
+
+[[class]]
+name = 'SplTempFileObject'
+kind = 'class'
+extends = ['SplFileObject']
+implements = []
+source = 'ext/spl/spl_directory.stub.php:331'
+
+[[class]]
+name = 'SplDoublyLinkedList'
+kind = 'class'
+extends = []
+implements = ['Iterator', 'Countable', 'ArrayAccess', 'Serializable']
+source = 'ext/spl/spl_dllist.stub.php:5'
+
+[[class]]
+name = 'SplQueue'
+kind = 'class'
+extends = ['SplDoublyLinkedList']
+implements = []
+source = 'ext/spl/spl_dllist.stub.php:107'
+
+[[class]]
+name = 'SplStack'
+kind = 'class'
+extends = ['SplDoublyLinkedList']
+implements = []
+source = 'ext/spl/spl_dllist.stub.php:122'
+
+[[class]]
+name = 'LogicException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'ext/spl/spl_exceptions.stub.php:5'
+
+[[class]]
+name = 'BadFunctionCallException'
+kind = 'class'
+extends = ['LogicException']
+implements = []
+source = 'ext/spl/spl_exceptions.stub.php:9'
+
+[[class]]
+name = 'BadMethodCallException'
+kind = 'class'
+extends = ['BadFunctionCallException']
+implements = []
+source = 'ext/spl/spl_exceptions.stub.php:13'
+
+[[class]]
+name = 'DomainException'
+kind = 'class'
+extends = ['LogicException']
+implements = []
+source = 'ext/spl/spl_exceptions.stub.php:17'
+
+[[class]]
+name = 'InvalidArgumentException'
+kind = 'class'
+extends = ['LogicException']
+implements = []
+source = 'ext/spl/spl_exceptions.stub.php:21'
+
+[[class]]
+name = 'LengthException'
+kind = 'class'
+extends = ['LogicException']
+implements = []
+source = 'ext/spl/spl_exceptions.stub.php:25'
+
+[[class]]
+name = 'OutOfRangeException'
+kind = 'class'
+extends = ['LogicException']
+implements = []
+source = 'ext/spl/spl_exceptions.stub.php:29'
+
+[[class]]
+name = 'RuntimeException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'ext/spl/spl_exceptions.stub.php:33'
+
+[[class]]
+name = 'OutOfBoundsException'
+kind = 'class'
+extends = ['RuntimeException']
+implements = []
+source = 'ext/spl/spl_exceptions.stub.php:37'
+
+[[class]]
+name = 'OverflowException'
+kind = 'class'
+extends = ['RuntimeException']
+implements = []
+source = 'ext/spl/spl_exceptions.stub.php:41'
+
+[[class]]
+name = 'RangeException'
+kind = 'class'
+extends = ['RuntimeException']
+implements = []
+source = 'ext/spl/spl_exceptions.stub.php:45'
+
+[[class]]
+name = 'UnderflowException'
+kind = 'class'
+extends = ['RuntimeException']
+implements = []
+source = 'ext/spl/spl_exceptions.stub.php:49'
+
+[[class]]
+name = 'UnexpectedValueException'
+kind = 'class'
+extends = ['RuntimeException']
+implements = []
+source = 'ext/spl/spl_exceptions.stub.php:53'
+
+[[class]]
+name = 'SplFixedArray'
+kind = 'class'
+extends = []
+implements = ['IteratorAggregate', 'ArrayAccess', 'Countable', 'JsonSerializable']
+source = 'ext/spl/spl_fixedarray.stub.php:5'
+
+[[class]]
+name = 'SplPriorityQueue'
+kind = 'class'
+extends = []
+implements = ['Iterator', 'Countable']
+source = 'ext/spl/spl_heap.stub.php:5'
+
+[[class]]
+name = 'SplHeap'
+kind = 'class'
+extends = []
+implements = ['Iterator', 'Countable']
+abstract = true
+source = 'ext/spl/spl_heap.stub.php:93'
+
+[[class]]
+name = 'SplMinHeap'
+kind = 'class'
+extends = ['SplHeap']
+implements = []
+source = 'ext/spl/spl_heap.stub.php:144'
+
+[[class]]
+name = 'SplMaxHeap'
+kind = 'class'
+extends = ['SplHeap']
+implements = []
+source = 'ext/spl/spl_heap.stub.php:150'
+
+[[class]]
+name = 'EmptyIterator'
+kind = 'class'
+extends = []
+implements = ['Iterator']
+source = 'ext/spl/spl_iterators.stub.php:5'
+
+[[class]]
+name = 'CallbackFilterIterator'
+kind = 'class'
+extends = ['FilterIterator']
+implements = []
+source = 'ext/spl/spl_iterators.stub.php:23'
+
+[[class]]
+name = 'RecursiveCallbackFilterIterator'
+kind = 'class'
+extends = ['CallbackFilterIterator']
+implements = ['RecursiveIterator']
+source = 'ext/spl/spl_iterators.stub.php:31'
+
+[[class]]
+name = 'RecursiveIterator'
+kind = 'interface'
+extends = ['Iterator']
+implements = []
+source = 'ext/spl/spl_iterators.stub.php:45'
+
+[[class]]
+name = 'RecursiveIteratorIterator'
+kind = 'class'
+extends = []
+implements = ['OuterIterator']
+source = 'ext/spl/spl_iterators.stub.php:54'
+
+[[class]]
+name = 'OuterIterator'
+kind = 'interface'
+extends = ['Iterator']
+implements = []
+source = 'ext/spl/spl_iterators.stub.php:119'
+
+[[class]]
+name = 'IteratorIterator'
+kind = 'class'
+extends = []
+implements = ['OuterIterator']
+source = 'ext/spl/spl_iterators.stub.php:125'
+
+[[class]]
+name = 'FilterIterator'
+kind = 'class'
+extends = ['IteratorIterator']
+implements = []
+abstract = true
+source = 'ext/spl/spl_iterators.stub.php:148'
+
+[[class]]
+name = 'RecursiveFilterIterator'
+kind = 'class'
+extends = ['FilterIterator']
+implements = ['RecursiveIterator']
+abstract = true
+source = 'ext/spl/spl_iterators.stub.php:162'
+
+[[class]]
+name = 'ParentIterator'
+kind = 'class'
+extends = ['RecursiveFilterIterator']
+implements = []
+source = 'ext/spl/spl_iterators.stub.php:173'
+
+[[class]]
+name = 'SeekableIterator'
+kind = 'interface'
+extends = ['Iterator']
+implements = []
+source = 'ext/spl/spl_iterators.stub.php:184'
+
+[[class]]
+name = 'LimitIterator'
+kind = 'class'
+extends = ['IteratorIterator']
+implements = []
+source = 'ext/spl/spl_iterators.stub.php:190'
+
+[[class]]
+name = 'CachingIterator'
+kind = 'class'
+extends = ['IteratorIterator']
+implements = ['ArrayAccess', 'Countable', 'Stringable']
+source = 'ext/spl/spl_iterators.stub.php:210'
+
+[[class]]
+name = 'RecursiveCachingIterator'
+kind = 'class'
+extends = ['CachingIterator']
+implements = ['RecursiveIterator']
+source = 'ext/spl/spl_iterators.stub.php:278'
+
+[[class]]
+name = 'NoRewindIterator'
+kind = 'class'
+extends = ['IteratorIterator']
+implements = []
+source = 'ext/spl/spl_iterators.stub.php:289'
+
+[[class]]
+name = 'AppendIterator'
+kind = 'class'
+extends = ['IteratorIterator']
+implements = []
+source = 'ext/spl/spl_iterators.stub.php:309'
+
+[[class]]
+name = 'InfiniteIterator'
+kind = 'class'
+extends = ['IteratorIterator']
+implements = []
+source = 'ext/spl/spl_iterators.stub.php:335'
+
+[[class]]
+name = 'RegexIterator'
+kind = 'class'
+extends = ['FilterIterator']
+implements = []
+source = 'ext/spl/spl_iterators.stub.php:343'
+
+[[class]]
+name = 'RecursiveRegexIterator'
+kind = 'class'
+extends = ['RegexIterator']
+implements = ['RecursiveIterator']
+source = 'ext/spl/spl_iterators.stub.php:389'
+
+[[class]]
+name = 'RecursiveTreeIterator'
+kind = 'class'
+extends = ['RecursiveIteratorIterator']
+implements = []
+source = 'ext/spl/spl_iterators.stub.php:406'
+
+[[class]]
+name = 'SplObserver'
+kind = 'interface'
+extends = []
+implements = []
+source = 'ext/spl/spl_observer.stub.php:5'
+
+[[class]]
+name = 'SplSubject'
+kind = 'interface'
+extends = []
+implements = []
+source = 'ext/spl/spl_observer.stub.php:11'
+
+[[class]]
+name = 'SplObjectStorage'
+kind = 'class'
+extends = []
+implements = ['Countable', 'SeekableIterator', 'Serializable', 'ArrayAccess']
+source = 'ext/spl/spl_observer.stub.php:23'
+
+[[class]]
+name = 'MultipleIterator'
+kind = 'class'
+extends = []
+implements = ['Iterator']
+source = 'ext/spl/spl_observer.stub.php:119'
+
+[[class]]
+name = 'SQLite3Exception'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'ext/sqlite3/sqlite3.stub.php:74'
+
+[[class]]
+name = 'SQLite3'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/sqlite3/sqlite3.stub.php:79'
+
+[[class]]
+name = 'SQLite3Stmt'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/sqlite3/sqlite3.stub.php:243'
+
+[[class]]
+name = 'SQLite3Result'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/sqlite3/sqlite3.stub.php:287'
+
+[[class]]
+name = 'SortDirection'
+kind = 'enum'
+extends = []
+implements = []
+source = 'ext/standard/basic_functions.stub.php:93'
+
+[[class]]
+name = '__PHP_Incomplete_Class'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/standard/basic_functions.stub.php:1493'
+
+[[class]]
+name = 'AssertionError'
+kind = 'class'
+extends = ['Error']
+implements = []
+source = 'ext/standard/basic_functions.stub.php:1497'
+
+[[class]]
+name = 'RoundingMode'
+kind = 'enum'
+extends = []
+implements = []
+source = 'ext/standard/basic_functions.stub.php:3132'
+
+[[class]]
+name = 'Directory'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/standard/dir.stub.php:92'
+
+[[class]]
+name = 'Io\IoException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'ext/standard/io_poll.stub.php:9'
+
+[[class]]
+name = 'Io\Poll\Backend'
+kind = 'enum'
+extends = []
+implements = []
+source = 'ext/standard/io_poll.stub.php:15'
+
+[[class]]
+name = 'Io\Poll\Event'
+kind = 'enum'
+extends = []
+implements = []
+source = 'ext/standard/io_poll.stub.php:33'
+
+[[class]]
+name = 'Io\Poll\Handle'
+kind = 'interface'
+extends = []
+implements = []
+source = 'ext/standard/io_poll.stub.php:43'
+
+[[class]]
+name = 'Io\Poll\Watcher'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/standard/io_poll.stub.php:51'
+
+[[class]]
+name = 'Io\Poll\Context'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/standard/io_poll.stub.php:82'
+
+[[class]]
+name = 'Io\Poll\PollException'
+kind = 'class'
+extends = ['Io\IoException']
+implements = []
+source = 'ext/standard/io_poll.stub.php:94'
+
+[[class]]
+name = 'Io\Poll\FailedPollOperationException'
+kind = 'class'
+extends = ['PollException']
+implements = []
+abstract = true
+source = 'ext/standard/io_poll.stub.php:96'
+
+[[class]]
+name = 'Io\Poll\FailedContextInitializationException'
+kind = 'class'
+extends = ['FailedPollOperationException']
+implements = []
+source = 'ext/standard/io_poll.stub.php:135'
+
+[[class]]
+name = 'Io\Poll\FailedHandleAddException'
+kind = 'class'
+extends = ['FailedPollOperationException']
+implements = []
+source = 'ext/standard/io_poll.stub.php:137'
+
+[[class]]
+name = 'Io\Poll\FailedWatcherModificationException'
+kind = 'class'
+extends = ['FailedPollOperationException']
+implements = []
+source = 'ext/standard/io_poll.stub.php:139'
+
+[[class]]
+name = 'Io\Poll\FailedPollWaitException'
+kind = 'class'
+extends = ['FailedPollOperationException']
+implements = []
+source = 'ext/standard/io_poll.stub.php:141'
+
+[[class]]
+name = 'Io\Poll\BackendUnavailableException'
+kind = 'class'
+extends = ['PollException']
+implements = []
+source = 'ext/standard/io_poll.stub.php:143'
+
+[[class]]
+name = 'Io\Poll\InactiveWatcherException'
+kind = 'class'
+extends = ['PollException']
+implements = []
+source = 'ext/standard/io_poll.stub.php:145'
+
+[[class]]
+name = 'Io\Poll\HandleAlreadyWatchedException'
+kind = 'class'
+extends = ['PollException']
+implements = []
+source = 'ext/standard/io_poll.stub.php:147'
+
+[[class]]
+name = 'Io\Poll\InvalidHandleException'
+kind = 'class'
+extends = ['PollException']
+implements = []
+source = 'ext/standard/io_poll.stub.php:149'
+
+[[class]]
+name = 'StreamPollHandle'
+kind = 'class'
+extends = []
+implements = ['Io\Poll\Handle']
+final = true
+source = 'ext/standard/io_poll.stub.php:157'
+
+[[class]]
+name = 'php_user_filter'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/standard/user_filters.stub.php:37'
+
+[[class]]
+name = 'StreamBucket'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/standard/user_filters.stub.php:62'
+
+[[class]]
+name = 'SysvMessageQueue'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/sysvmsg/sysvmsg.stub.php:35'
+
+[[class]]
+name = 'SysvSemaphore'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/sysvsem/sysvsem.stub.php:9'
+
+[[class]]
+name = 'SysvSharedMemory'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/sysvshm/sysvshm.stub.php:9'
+
+[[class]]
+name = 'tidy'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/tidy/tidy.stub.php:864'
+
+[[class]]
+name = 'tidyNode'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/tidy/tidy.stub.php:976'
+
+[[class]]
+name = 'PhpToken'
+kind = 'class'
+extends = []
+implements = ['Stringable']
+source = 'ext/tokenizer/tokenizer.stub.php:15'
+
+[[class]]
+name = 'Uri\UriException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'ext/uri/php_uri.stub.php:10'
+
+[[class]]
+name = 'Uri\UriError'
+kind = 'class'
+extends = ['Error']
+implements = []
+source = 'ext/uri/php_uri.stub.php:15'
+
+[[class]]
+name = 'Uri\InvalidUriException'
+kind = 'class'
+extends = ['Uri\UriException']
+implements = []
+source = 'ext/uri/php_uri.stub.php:20'
+
+[[class]]
+name = 'Uri\UriComparisonMode'
+kind = 'enum'
+extends = []
+implements = []
+source = 'ext/uri/php_uri.stub.php:24'
+
+[[class]]
+name = 'Uri\Rfc3986\UriType'
+kind = 'enum'
+extends = []
+implements = []
+source = 'ext/uri/php_uri.stub.php:32'
+
+[[class]]
+name = 'Uri\Rfc3986\UriHostType'
+kind = 'enum'
+extends = []
+implements = []
+source = 'ext/uri/php_uri.stub.php:40'
+
+[[class]]
+name = 'Uri\Rfc3986\UriBuilder'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/uri/php_uri.stub.php:48'
+
+[[class]]
+name = 'Uri\Rfc3986\Uri'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/uri/php_uri.stub.php:78'
+
+[[class]]
+name = 'Uri\WhatWg\InvalidUrlException'
+kind = 'class'
+extends = ['Uri\InvalidUriException']
+implements = []
+source = 'ext/uri/php_uri.stub.php:154'
+
+[[class]]
+name = 'Uri\WhatWg\UrlValidationErrorType'
+kind = 'enum'
+extends = []
+implements = []
+source = 'ext/uri/php_uri.stub.php:161'
+
+[[class]]
+name = 'Uri\WhatWg\UrlValidationError'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/uri/php_uri.stub.php:195'
+
+[[class]]
+name = 'Uri\WhatWg\UrlHostType'
+kind = 'enum'
+extends = []
+implements = []
+source = 'ext/uri/php_uri.stub.php:204'
+
+[[class]]
+name = 'Uri\WhatWg\Url'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/uri/php_uri.stub.php:214'
+
+[[class]]
+name = 'XMLParser'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/xml/xml.stub.php:205'
+
+[[class]]
+name = 'XMLReader'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/xmlreader/php_xmlreader.stub.php:5'
+
+[[class]]
+name = 'XMLWriter'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/xmlwriter/php_xmlwriter.stub.php:89'
+
+[[class]]
+name = 'XSLTProcessor'
+kind = 'class'
+extends = []
+implements = []
+source = 'ext/xsl/php_xsl.stub.php:69'
+
+[[class]]
+name = 'ZipArchive'
+kind = 'class'
+extends = []
+implements = ['Countable']
+source = 'ext/zip/php_zip.stub.php:67'
+
+[[class]]
+name = 'InflateContext'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/zlib/zlib.stub.php:150'
+
+[[class]]
+name = 'DeflateContext'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'ext/zlib/zlib.stub.php:158'
+
+[[class]]
+name = 'StreamErrorCode'
+kind = 'enum'
+extends = []
+implements = []
+source = 'main/streams/stream_errors.stub.php:9'
+
+[[class]]
+name = 'StreamErrorMode'
+kind = 'enum'
+extends = []
+implements = []
+source = 'main/streams/stream_errors.stub.php:112'
+
+[[class]]
+name = 'StreamErrorStore'
+kind = 'enum'
+extends = []
+implements = []
+source = 'main/streams/stream_errors.stub.php:119'
+
+[[class]]
+name = 'StreamError'
+kind = 'class'
+extends = []
+implements = []
+final = true
+source = 'main/streams/stream_errors.stub.php:128'
+
+[[class]]
+name = 'StreamException'
+kind = 'class'
+extends = ['Exception']
+implements = []
+source = 'main/streams/stream_errors.stub.php:138'
+

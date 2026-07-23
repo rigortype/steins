@@ -1,0 +1,413 @@
+# failure_arms.toml — false/null failure-arm classification (ADR-0042)
+# php-src commit: 6bc7c26cf67a9480b5ef9d6191aebe87fa931183 (Thu Jul 9 2026)
+# C evidence read at that pin; runtime notes vs PHP 8.5.8 (cli).
+#
+# CAUSE vocabulary (ADR-0042 + the failure.* dot-path registry):
+#   failure.resource     — allocation/handle exhaustion only (irrefutable, unrecoverable)
+#   failure.environment  — filesystem/network/external state (normal operational failure; must-check)
+#   failure.input        — argument-value-determined; statically refutable with proven args
+# A function may carry MULTIPLE arms (list each with file:line evidence).
+#
+# PHP-8 migration note: many historical false-returns for BAD ARGUMENT VALUES
+# became ValueError/TypeError throws. Those arms are recorded here as
+# `migrated_to_throw = true` and cross-listed in throws.toml — they are NOT
+# false arms in PHP 8.5. A `|false` in the stub that is only reachable via a
+# now-throwing path is flagged `false_arm_unreachable`.
+#
+# NOT-A-FAILURE SENTINELS: some `|false` returns are legitimate results, not
+# failures (array_search "not found", strpos "no match", next()/current() past
+# end). These MUST NOT receive a failure.* label. Collected at the bottom under
+# [[sentinel]].
+
+# ─────────────────────────── cURL ───────────────────────────
+[[function]]
+name = "curl_init"
+return_type = "CurlHandle|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.resource", evidence = "ext/curl/interface.c:1142", detail = "curl_easy_init() returned NULL — libcurl handle allocation failed" },
+  { cause = "failure.input", evidence = "ext/curl/interface.c:1158", detail = "optional $url argument rejected by php_curl_option_url (interface.c:83) — value-determined" },
+]
+note = "ADR-0042's canonical failure.resource example. The url arm is input; with a proven-good url literal it is disproven per site."
+
+[[function]]
+name = "curl_exec"
+return_type = "string|bool"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/curl/interface.c:2349", detail = "curl_easy_perform() != CURLE_OK — network/transfer failure" },
+]
+note = "Returns true (not string) when CURLOPT_RETURNTRANSFER is off; string when on; false on transfer error. The false arm is purely environmental."
+
+[[function]]
+name = "curl_setopt"
+return_type = "bool"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.input", evidence = "ext/curl/interface.c:2277", detail = "_php_curl_setopt() != SUCCESS — invalid option id or value" },
+]
+note = "Some options additionally raise ValueError/TypeError inside _php_curl_setopt (see throws.toml). The plain false arm is invalid-value → input."
+
+# ─────────────────────── filesystem: open/read/write ───────────────────────
+[[function]]
+name = "fopen"
+return_type = "resource|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/file.c:757", detail = "php_stream_open_wrapper_ex() == NULL — file not found / permission / wrapper failure" },
+]
+note = "ADR-0042's canonical failure.environment example. Not checking it is a real bug."
+
+[[function]]
+name = "file_get_contents"
+return_type = "string|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/file.c:414", detail = "stream open failed" },
+  { cause = "failure.environment", evidence = "ext/standard/file.c:427", detail = "php_stream_copy_to_mem read failed" },
+]
+migrated_to_throw = false
+note = "$offset < 0 is now ValueError (file.c:403), not false — see throws.toml."
+
+[[function]]
+name = "file_put_contents"
+return_type = "int|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/file.c:487", detail = "stream open failed" },
+  { cause = "failure.environment", evidence = "ext/standard/file.c:494", detail = "flock/context/dir target failure" },
+  { cause = "failure.environment", evidence = "ext/standard/file.c:578", detail = "numbytes < 0 — short write / disk full (E_WARNING at :526/:562)" },
+]
+
+[[function]]
+name = "file"
+return_type = "array|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/file.c:627", detail = "stream open failed" },
+]
+note = "Invalid $flags is ValueError (file.c:613)."
+
+[[function]]
+name = "readfile"
+return_type = "int|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/file.c:1181..", detail = "php_stream_open_wrapper_ex REPORT_ERRORS; NULL stream → false" },
+]
+
+[[function]]
+name = "fread"
+return_type = "string|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/file.c:1625", detail = "php_stream_read_to_str returned NULL — read error on the stream" },
+]
+note = "$length <= 0 is ValueError (file.c:1617) — migrated. Note this arm rarely fires; EOF yields \"\" not false."
+
+[[function]]
+name = "fwrite"
+return_type = "int|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/file.c:1032", detail = "php_stream_write ret < 0 — write error (broken pipe, disk full)" },
+]
+
+[[function]]
+name = "fgets"
+return_type = "string|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/file.c:904", detail = "php_stream_get_line NULL — EOF or read error (the normal loop terminator)" },
+  { cause = "failure.environment", evidence = "ext/standard/file.c:920", detail = "same, explicit-length branch" },
+]
+note = "The false arm is the idiomatic while(($l=fgets($h))!==false) EOF terminator — environmental (end-of-stream). $length <= 0 is ValueError (file.c:911)."
+
+[[function]]
+name = "fscanf"
+return_type = "array|int|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/file.c:984", detail = "underlying fgets NULL — EOF/read error" },
+]
+
+[[function]]
+name = "tmpfile"
+return_type = "resource|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/file.c:727", detail = "php_open_temporary_file failed — no tmp dir / permission / fd exhaustion" },
+]
+note = "Straddles resource (fd exhaustion) and environment (no writable tmp). Primary read: environment."
+
+# ─────────────────────── filesystem: mutate/dir ───────────────────────
+[[function]]
+name = "mkdir"
+return_type = "bool"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/file.c:1133", detail = "php_stream_mkdir false — parent missing, EEXIST, permission" },
+]
+
+[[function]]
+name = "unlink"
+return_type = "bool"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/file.c:1306", detail = "no wrapper for path" },
+  { cause = "failure.environment", evidence = "ext/standard/file.c:1312", detail = "wrapper unlink failed — ENOENT/permission" },
+]
+
+[[function]]
+name = "rename"
+return_type = "bool"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/file.c:1263", detail = "no wrapper for old_name" },
+  { cause = "failure.environment", evidence = "ext/standard/file.c:1269", detail = "wrapper has no rename op" },
+  { cause = "failure.environment", evidence = "ext/standard/file.c:1275", detail = "cross-wrapper rename rejected" },
+]
+
+[[function]]
+name = "copy"
+return_type = "bool"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/file.c:1492", detail = "open_basedir / source access failure (plus downstream copy errors)" },
+]
+
+[[function]]
+name = "scandir"
+return_type = "array|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/dir.c:598", detail = "php_stream_scandir failed — directory unreadable / not a dir" },
+]
+note = "Invalid $sorting_order is ValueError (dir.c:592)."
+
+# ─────────────────────── streams / sockets (network = environment) ───────────────────────
+[[function]]
+name = "fsockopen"
+return_type = "resource|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/fsock.c:145", detail = "php_network_connect stream NULL — connection refused/timeout/DNS" },
+]
+note = "pfsockopen shares php_fsockopen_stream; same environmental arm (fsock.c:78 RETVAL_FALSE)."
+
+[[function]]
+name = "stream_socket_client"
+return_type = "resource|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/streamsfuncs.c:196", detail = "transport connect stream NULL — connection failure (E_WARNING at :179)" },
+]
+note = "Non-finite $timeout is ValueError (streamsfuncs.c:134)."
+
+[[function]]
+name = "stream_get_contents"
+return_type = "string|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/streamsfuncs.c:492", detail = "php_stream_copy_to_mem failed — read error" },
+]
+note = "$maxlength < -1 is ValueError (streamsfuncs.c:469)."
+
+# ─────────────────────── PCRE (input-determined) ───────────────────────
+[[function]]
+name = "preg_match"
+return_type = "int|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.input", evidence = "ext/pcre/php_pcre.c:1107", detail = "pcre_get_compiled_regex_cache NULL — pattern failed to compile (malformed regex)" },
+  { cause = "failure.input", evidence = "ext/pcre/php_pcre.c:1208", detail = "runtime match error — backtrack/recursion/JIT-stack limit (pattern+subject determined)" },
+]
+note = "ADR-0042 point 1: with a proven pattern literal the false arm is disproven per site. Limit-exceeded arms are still input(pattern+subject) shaped, not environment."
+
+[[function]]
+name = "preg_match_all"
+return_type = "int|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.input", evidence = "ext/pcre/php_pcre.c:1490", detail = "pattern compile failure (RETVAL_FALSE)" },
+]
+
+[[function]]
+name = "preg_replace"
+return_type = "string|array|null"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.input", evidence = "ext/pcre/php_pcre.c:2547", detail = "pattern compile failure → NULL (null is the failure sentinel here, not false)" },
+  { cause = "failure.input", evidence = "ext/pcre/php_pcre.c:2606", detail = "runtime replace error → NULL" },
+]
+note = "NULL — not false — signals failure. Relevant to the '|null where null signals failure' clause."
+
+[[function]]
+name = "preg_split"
+return_type = "array|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.input", evidence = "ext/pcre/php_pcre.c:2909", detail = "pattern compile failure" },
+  { cause = "failure.input", evidence = "ext/pcre/php_pcre.c:3013", detail = "runtime split error" },
+]
+
+# ─────────────────────── JSON ───────────────────────
+[[function]]
+name = "json_decode"
+return_type = "mixed"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.input", evidence = "ext/json/json.c:312", detail = "parse error without JSON_THROW_ON_ERROR → RETURN_NULL (malformed JSON)" },
+]
+migrated_to_throw = "conditional"
+note = "null is ambiguous — valid decode of the literal `null` also yields null. With JSON_THROW_ON_ERROR the arm becomes JsonException (json.c throw path). $depth<=0 / >INT_MAX are ValueError (json.c:316/321)."
+
+[[function]]
+name = "json_encode"
+return_type = "string|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.input", evidence = "ext/json/json.c:266", detail = "encoder.error_code != NONE and not PARTIAL_OUTPUT_ON_ERROR → false (unencodable value: bad UTF-8, NAN/INF, recursion, depth)" },
+]
+migrated_to_throw = "conditional"
+note = "With JSON_THROW_ON_ERROR → JsonException (json.c:271). ADR-0042 point 1: input-determined, disproven with a proven-encodable argument."
+
+# ─────────────────────── serialization / time / hash ───────────────────────
+[[function]]
+name = "unserialize"
+return_type = "mixed"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.input", evidence = "ext/standard/var.c:1393", detail = "empty input string → RETURN_FALSE" },
+  { cause = "failure.input", evidence = "ext/standard/var.c:1474", detail = "parse failed (malformed serialized data) → RETVAL_FALSE (E_WARNING at :1468)" },
+]
+note = "false is ambiguous — `b:0;` legitimately unserializes to false. The real failure signal is the emitted E_WARNING. options 'allowed_classes'/'max_depth' misuse are ValueError (var.c:1431/1450)."
+
+[[function]]
+name = "strtotime"
+return_type = "int|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.input", evidence = "ext/date/php_date.c:1103", detail = "empty $datetime string → false" },
+  { cause = "failure.input", evidence = "ext/date/php_date.c:1124", detail = "timelib error_count > 0 — unparseable time string" },
+  { cause = "failure.input", evidence = "ext/date/php_date.c:1136", detail = "timelib_strtotime produced no usable time" },
+]
+
+[[function]]
+name = "date_create"
+return_type = "DateTime|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.input", evidence = "ext/date/php_date.c:2555", detail = "php_date_initialize (php_date.c:2367) failed — unparseable datetime string" },
+]
+note = "The OO form DateTime::__construct THROWS DateMalformedStringException (php_date.c:2644, PHP_DATE_INIT_CTOR) instead of returning false — see throws.toml. date_create()/DateTime::createFromFormat() keep the false arm."
+
+[[function]]
+name = "DateTime::createFromFormat"
+return_type = "DateTime|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.input", evidence = "ext/date/php_date.c:2600", detail = "php_date_initialize with PHP_DATE_INIT_FORMAT failed — string does not match format" },
+]
+note = "DateTimeImmutable::createFromFormat shares the same helper (php_date.c:2624)."
+
+[[function]]
+name = "hash_file"
+return_type = "string|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/hash/hash.c:371", detail = "php_stream_open_wrapper_ex NULL — file unreadable/absent" },
+  { cause = "failure.environment", evidence = "ext/hash/hash.c:388", detail = "php_stream_read n < 0 — read error mid-file" },
+]
+note = "Unknown algo is ValueError (hash.c:360), null byte in filename is ValueError (hash.c:365). NB hash() itself returns `string` (not string|false) — it always throws ValueError for a bad algo; no false arm."
+
+[[function]]
+name = "iconv"
+return_type = "string|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.input", evidence = "ext/iconv/iconv.c:2256", detail = "php_iconv_string err != SUCCESS — wrong charset name OR illegal byte sequence in input; iconv does NOT throw for unknown charset, it warns + returns false" },
+]
+note = "Null byte in charset args → ValueError (iconv.c:2240). The false arm mixes bad-encoding-name (input) and illegal-input-sequence (input) — both input-determined."
+
+[[function]]
+name = "mb_convert_encoding"
+return_type = "array|string|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.input", evidence = "ext/mbstring/mbstring.c:2924..", detail = "php_mb_convert_encoding NULL → false (undetectable from_encoding on the input)" },
+]
+migrated_to_throw = "partial"
+note = "In PHP 8 the invalid-encoding-NAME cases are ValueError (mbstring.c:2893/2898/2905/2919). The residual false arm is conversion/detection failure — input-determined and uncommon (substitution char usually prevents it)."
+
+[[function]]
+name = "getenv"
+return_type = "string|array|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/standard/basic_functions.c:740", detail = "php_getenv NULL — the named variable is not present in the environment" },
+]
+note = "getenv() with no argument returns the full array (never false). The single-name form returns false when unset — environmental (external process state)."
+
+# ─────────────────────── IPC / process (resource ∪ environment) ───────────────────────
+[[function]]
+name = "proc_open"
+return_type = "resource|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.input", evidence = "ext/standard/proc_open.c:1269", detail = "command array → command-string build failed (empty/invalid program name)" },
+  { cause = "failure.environment", evidence = "ext/standard/proc_open.c:1548", detail = "exit_fail: fork/CreateProcess or descriptor setup failed" },
+]
+note = "Extensive ValueError surface for malformed descriptor specs (proc_open.c:517/523/824/1067/1071/1295/1312) — see throws.toml."
+
+[[function]]
+name = "sem_get"
+return_type = "SysvSemaphore|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/sysvsem/sysvsem.c:190", detail = "semget() == -1 — IPC permission / SEMMNI/SEMMNS limits" },
+]
+note = "Straddles resource (kernel semaphore-set exhaustion, ENOSPC) and environment (permission). Primary read: environment; resource-exhaustion sub-case exists."
+
+[[function]]
+name = "shmop_open"
+return_type = "Shmop|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.environment", evidence = "ext/shmop/shmop.c:216", detail = "shmget/shmat failed — segment missing (mode a/w) or IPC limits" },
+]
+note = "Bad access mode / out-of-range key / bad size are all ValueError (shmop.c:145/150/179/184/201)."
+
+[[function]]
+name = "socket_create"
+return_type = "Socket|false"
+confidence = "verified-C"
+arms = [
+  { cause = "failure.resource", evidence = "ext/sockets/sockets.c:1193", detail = "socket() syscall failed — fd exhaustion (EMFILE/ENFILE) or unsupported family" },
+]
+note = "Invalid $domain/$type/$protocol are ValueError (sockets.c:1162/1172). The remaining false arm is fd/kernel-resource exhaustion → resource (with an environment sub-case for unsupported protocol)."
+
+# ─────────────────────── NOT-A-FAILURE SENTINELS (do NOT label failure.*) ───────────────────────
+[[sentinel]]
+name = "array_search"
+return_type = "int|string|false"
+detail = "false means 'needle not found' — a legitimate result, not a failure. Labeling it failure.* would be wrong."
+confidence = "stub+semantics"
+
+[[sentinel]]
+name = "strpos"
+return_type = "int|false"
+detail = "false means 'substring not present'. Classic '=== false' idiom; not a failure."
+confidence = "stub+semantics"
+
+[[sentinel]]
+name = "array_key_first"
+return_type = "int|string|null"
+detail = "null means 'array is empty' — a legitimate result, not a failure."
+confidence = "stub+semantics"
+
+[[sentinel]]
+name = "next"
+return_type = "mixed"
+detail = "false when the internal pointer moves past the end — iteration terminator, not failure. (current/end/prev/reset likewise.)"
+confidence = "stub+semantics"
