@@ -63,6 +63,7 @@ use crate::common::{
     admits_all, arg_to_val, check_caller_enumerability, count_fqns, native_contract, param_site,
     render_value_domain, return_site, REASON_ARG_NOT_PROVEN,
 };
+use crate::obstacles::{self, VouchSet};
 use crate::plan::{ByteSpan, Edit, EditPlan};
 use crate::transform::{CompletenessOracle, Refusal, SiteRef, Transform, TransformReport};
 
@@ -72,7 +73,8 @@ use crate::transform::{CompletenessOracle, Refusal, SiteRef, Transform, Transfor
 // `function-referenced-as-value`, `resolution-ambiguous`, `named-or-spread-args`,
 // `argument-not-proven`) are shared with promotion and re-exported here.
 pub use crate::common::{
-    REASON_AMBIGUOUS, REASON_DYNAMIC_CALL, REASON_NAMED_OR_SPREAD, REASON_REFERENCED_AS_VALUE,
+    REASON_AMBIGUOUS, REASON_DYNAMIC_CALL, REASON_DYNAMIC_INCLUDE, REASON_EVAL_PRESENT,
+    REASON_NAMED_OR_SPREAD, REASON_REFERENCED_AS_VALUE,
 };
 pub use crate::common::REASON_ARG_NOT_PROVEN as REASON_ARGUMENT_NOT_PROVEN;
 
@@ -102,11 +104,21 @@ impl Transform for PhpdocHonesty {
 /// written and no diagnostics are re-checked here — the caller (CLI) drives the
 /// dry-run diff, the dual-verification post-check, and any `--apply` write
 /// (ADR-0034 point 3).
+///
+/// `vouches` are the user-vouched dynamic-code sites (`steins.toml`); pass
+/// [`VouchSet::empty`] when none. A standing (unvouched) `eval` / dynamic-include
+/// obstacle (ADR-0046 §2) makes "all callers proven" unknowable project-wide, so
+/// *every* candidate refuses while one remains.
 #[must_use]
-pub fn plan_phpdoc_honesty(db: &dyn Db, project: Project) -> TransformReport {
+pub fn plan_phpdoc_honesty(db: &dyn Db, project: Project, vouches: &VouchSet) -> TransformReport {
     let sweep = sweep_free_functions(db, project);
     let files: Vec<SourceFile> = project.files(db).to_vec();
     let fqn_counts = count_fqns(db, &files);
+
+    // Project-global dynamic-code obstacles (ADR-0046 §2): recorded once, and — if
+    // any stands unvouched — every candidate refuses with its reason.
+    let dynamism = obstacles::detect(db, project, vouches);
+    let blocking = dynamism.blocking_reason();
 
     let mut plan = EditPlan::new();
     let mut refusals: Vec<Refusal> = Vec::new();
@@ -120,14 +132,23 @@ pub fn plan_phpdoc_honesty(db: &dyn Db, project: Project) -> TransformReport {
         for func in tree.functions() {
             let tags = func.docblock.as_deref().map(scan_docblock).unwrap_or_default();
             plan_params(
-                func, &tags, path, tree, &sweep, &fqn_counts, &mut plan, &mut refusals,
+                func, &tags, path, tree, &sweep, &fqn_counts, blocking.as_ref(), &mut plan,
+                &mut refusals, &mut oracle,
+            );
+            plan_return(
+                func, &tags, path, tree, &scopes, blocking.as_ref(), &mut plan, &mut refusals,
                 &mut oracle,
             );
-            plan_return(func, &tags, path, tree, &scopes, &mut plan, &mut refusals, &mut oracle);
         }
     }
 
-    TransformReport { plan, refusals, oracle }
+    TransformReport {
+        plan,
+        refusals,
+        oracle,
+        obstacles: dynamism.obstacles,
+        vouched_exemptions: dynamism.vouched_exemptions,
+    }
 }
 
 // ---- `@param` honesty ------------------------------------------------------
@@ -140,6 +161,7 @@ fn plan_params(
     tree: &SourceTree,
     sweep: &FreeFnSweep,
     fqn_counts: &HashMap<String, usize>,
+    blocking: Option<&(&'static str, String)>,
     plan: &mut EditPlan,
     refusals: &mut Vec<Refusal>,
     oracle: &mut CompletenessOracle,
@@ -188,6 +210,12 @@ fn plan_params(
         // Enumerated site (ADR-0034 point 3b): must end transformed-or-refused.
         oracle.enumerated += 1;
         let site = param_site(path, tree, func, param);
+        // A standing project-global obstacle (ADR-0046 §2) refuses every candidate.
+        if let Some((reason, detail)) = blocking {
+            oracle.refused += 1;
+            refusals.push(Refusal::new(site, *reason, detail.clone()));
+            continue;
+        }
         let doc_start = func.docblock_span.map_or(0, |s| s.start);
         match decide_param(
             func, param, idx, path, doc_start, gov, plain, target, sweep, fqn_counts,
@@ -270,6 +298,7 @@ fn plan_return(
     path: &str,
     tree: &SourceTree,
     scopes: &HashMap<&str, &Scope>,
+    blocking: Option<&(&'static str, String)>,
     plan: &mut EditPlan,
     refusals: &mut Vec<Refusal>,
     oracle: &mut CompletenessOracle,
@@ -295,6 +324,12 @@ fn plan_return(
 
     oracle.enumerated += 1;
     let site = return_site(path, tree, func);
+    // A standing project-global obstacle (ADR-0046 §2) refuses every candidate.
+    if let Some((reason, detail)) = blocking {
+        oracle.refused += 1;
+        refusals.push(Refusal::new(site, *reason, detail.clone()));
+        return;
+    }
     let doc_start = func.docblock_span.map_or(0, |s| s.start);
     match decide_return(func, path, doc_start, gov, plain, scope, &returns) {
         Ok(edits) => account(plan, oracle, refusals, &site, edits),

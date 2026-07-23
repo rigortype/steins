@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use steins_db::{Project, SourceFile, SteinsDatabase, parse as parse_tree};
-use steins_edit::{TransformReport, plan_phpdoc_honesty, plan_phpdoc_to_native, unified_diff};
+use steins_edit::{
+    TransformReport, VouchSet, plan_phpdoc_honesty, plan_phpdoc_to_native, unified_diff,
+};
 use steins_infer::{
     Diagnostic, LineFact, NoFold, SOUND_SUBSET_NOTICE, SidecarFolder, annotate_file,
     annotate_project, apply_inline_ignores, check_project, is_vendor_path,
@@ -285,12 +287,21 @@ fn run_transform(args: &[String]) -> ExitCode {
     let mut apply = false;
     let mut subcommand: Option<String> = None;
     let mut paths: Vec<String> = Vec::new();
+    let mut config_path: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--apply" => {
                 apply = true;
                 i += 1;
+            }
+            "--config" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("steins: --config requires a path argument");
+                    return ExitCode::from(2);
+                };
+                config_path = Some(value.clone());
+                i += 2;
             }
             "--format" => {
                 let Some(value) = args.get(i + 1) else {
@@ -320,10 +331,14 @@ fn run_transform(args: &[String]) -> ExitCode {
 
     // Select the transform planner by subcommand. `action` is the verb the oracle
     // summary uses for an edited site.
-    let (planner, action): (fn(&SteinsDatabase, Project) -> TransformReport, &str) =
-        match subcommand.as_deref() {
-        Some("phpdoc-to-native") => (|db, project| plan_phpdoc_to_native(db, project), "promoted"),
-        Some("phpdoc-honesty") => (|db, project| plan_phpdoc_honesty(db, project), "rewritten"),
+    #[derive(Clone, Copy)]
+    enum Kind {
+        Promote,
+        Honesty,
+    }
+    let (kind, action) = match subcommand.as_deref() {
+        Some("phpdoc-to-native") => (Kind::Promote, "promoted"),
+        Some("phpdoc-honesty") => (Kind::Honesty, "rewritten"),
         Some(other) => {
             eprintln!(
                 "steins: unknown transform `{other}` (available: phpdoc-to-native, phpdoc-honesty)"
@@ -332,14 +347,22 @@ fn run_transform(args: &[String]) -> ExitCode {
         }
         None => {
             eprintln!(
-                "steins: transform requires a name (usage: steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--format text|json] <paths...>)"
+                "steins: transform requires a name (usage: steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--config steins.toml] [--format text|json] <paths...>)"
             );
             return ExitCode::from(2);
         }
-        };
+    };
     if paths.is_empty() {
         eprintln!("steins: no paths given");
         return ExitCode::from(2);
+    }
+
+    // Load the vouching valve (ADR-0046 §2): `steins.toml [transform.vouch]` from
+    // `--config`, else `./steins.toml` if present. A malformed entry is a warning,
+    // never a hard error (the run proceeds with the well-formed entries).
+    let (vouches, vouch_warnings) = load_vouches(config_path.as_deref());
+    for w in &vouch_warnings {
+        eprintln!("steins: {w}");
     }
 
     let mut files = Vec::new();
@@ -367,7 +390,16 @@ fn run_transform(args: &[String]) -> ExitCode {
     let project = Project::new(&db, inputs.clone());
 
     // Plan the transform (pure — no writes, no re-check).
-    let report = planner(&db, project);
+    let report = match kind {
+        Kind::Promote => plan_phpdoc_to_native(&db, project, &vouches),
+        Kind::Honesty => plan_phpdoc_honesty(&db, project, &vouches),
+    };
+
+    // Vouching an already-benign (or nonexistent) site is a no-op the user should
+    // know about (ADR-0046 §2).
+    for entry in vouches.unused() {
+        eprintln!("steins: vouched site `{entry}` matched no dynamic-code obstacle (no-op)");
+    }
 
     // Dual verification (ADR-0034 point 3a): re-analyze the edited project and
     // require zero NEW diagnostics vs. the pre-edit baseline. Run in both dry-run
@@ -411,6 +443,68 @@ fn run_transform(args: &[String]) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+/// `steins.toml` — only the `[transform.vouch]` section is read this slice
+/// (ADR-0046 §2). Unknown keys are ignored so the file can carry future config.
+#[derive(serde::Deserialize, Default)]
+struct SteinsConfig {
+    transform: Option<TransformConfig>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct TransformConfig {
+    vouch: Option<VouchConfig>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct VouchConfig {
+    /// User-vouched dynamic-code sites as `file:line` entries.
+    #[serde(default)]
+    sites: Vec<String>,
+}
+
+/// Load the vouching valve from `steins.toml` (ADR-0046 §2). Reads `--config` when
+/// given, else `./steins.toml` if it exists (a missing default file is silently
+/// no vouches). Returns the [`VouchSet`] plus human warnings for a missing
+/// explicit `--config`, a parse error, or a malformed `file:line` entry.
+fn load_vouches(config_path: Option<&str>) -> (VouchSet, Vec<String>) {
+    let mut warnings = Vec::new();
+    let (path, explicit) = match config_path {
+        Some(p) => (PathBuf::from(p), true),
+        None => (PathBuf::from("steins.toml"), false),
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => {
+            if explicit {
+                warnings.push(format!("--config {}: cannot read; proceeding with no vouches", path.display()));
+            }
+            return (VouchSet::empty(), warnings);
+        }
+    };
+    let config: SteinsConfig = match toml::from_str(&text) {
+        Ok(c) => c,
+        Err(e) => {
+            warnings.push(format!("{}: parse error ({e}); proceeding with no vouches", path.display()));
+            return (VouchSet::empty(), warnings);
+        }
+    };
+    let sites = config.transform.and_then(|t| t.vouch).map(|v| v.sites).unwrap_or_default();
+    let mut entries: Vec<(String, u32)> = Vec::new();
+    for raw in sites {
+        // `file:line` — split on the LAST colon so Windows drive letters survive.
+        match raw.rsplit_once(':').and_then(|(f, l)| {
+            let line = l.trim().parse::<u32>().ok()?;
+            (!f.trim().is_empty()).then(|| (f.trim().to_owned(), line))
+        }) {
+            Some(entry) => entries.push(entry),
+            None => warnings.push(format!(
+                "steins.toml [transform.vouch]: malformed site `{raw}` (want `file:line`); skipped"
+            )),
+        }
+    }
+    (VouchSet::from_entries(entries), warnings)
 }
 
 /// The outcome of the dual-verification post-check: whether the edited project is
@@ -486,6 +580,22 @@ fn print_transform_text(
         }
     }
 
+    // Project-global dynamic-code obstacles (ADR-0046 §2): recorded once, with the
+    // site list capped in text output (the JSON carries every site).
+    const OBSTACLE_SITE_CAP: usize = 5;
+    if !report.obstacles.is_empty() {
+        println!("\nDynamic-code obstacles ({}):", report.obstacles.len());
+        for ob in &report.obstacles {
+            println!("  [{}] {} — {} site(s):", ob.reason, ob.detail, ob.sites.len());
+            for s in ob.sites.iter().take(OBSTACLE_SITE_CAP) {
+                println!("    {}:{}:{}: {}", s.path, s.line, s.column, s.label);
+            }
+            if ob.sites.len() > OBSTACLE_SITE_CAP {
+                println!("    … and {} more (see --format json)", ob.sites.len() - OBSTACLE_SITE_CAP);
+            }
+        }
+    }
+
     if !report.refusals.is_empty() {
         println!("\nRefusals ({}):", report.refusals.len());
         for r in &report.refusals {
@@ -498,6 +608,19 @@ fn print_transform_text(
 
     let o = &report.oracle;
     println!("\n{} enumerated: {} {action}, {} refused", o.enumerated, o.transformed, o.refused);
+
+    // The vouching downgrade (ADR-0046 §2 / ADR-0037): a run that vouched sites
+    // does not silently pass — its completeness claim is conditional on those
+    // user assertions, and the report says so prominently.
+    if !report.vouched_exemptions.is_empty() {
+        println!(
+            "\nDOWNGRADE: completeness claim is conditional on {} user-vouched dynamic-code exemption(s):",
+            report.vouched_exemptions.len()
+        );
+        for s in &report.vouched_exemptions {
+            println!("    vouched {}:{}:{}: {}", s.path, s.line, s.column, s.label);
+        }
+    }
 
     if !postcheck.ok {
         println!("\nPost-check FAILED — {} new diagnostic(s):", postcheck.new_diagnostics.len());
@@ -523,10 +646,20 @@ fn print_transform_json(report: &TransformReport, postcheck: &PostCheck, applied
             })
         })
         .collect();
+    // The vouching downgrade (ADR-0046 §2): the `report` already serializes the
+    // `obstacles` and `vouched_exemptions` arrays; surface the claim downgrade as a
+    // prominent top-level note whenever any site was vouched.
+    let downgrade_note = (!report.vouched_exemptions.is_empty()).then(|| {
+        format!(
+            "completeness claim is conditional on {} user-vouched dynamic-code exemption(s)",
+            report.vouched_exemptions.len()
+        )
+    });
     let doc = serde_json::json!({
         "report": report,
         "postcheck": { "ok": postcheck.ok, "new_diagnostics": new_ds },
         "applied": applied,
+        "downgrade_note": downgrade_note,
     });
     match serde_json::to_string_pretty(&doc) {
         Ok(s) => println!("{s}"),

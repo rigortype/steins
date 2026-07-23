@@ -73,13 +73,44 @@ impl CompletenessOracle {
     }
 }
 
+/// A project-global caller-enumeration obstacle (ADR-0046 §2): a dynamic-code
+/// construct — `eval`, or a dynamic/out-of-universe `include`/`require` — that
+/// makes "all callers proven" unknowable for *every* candidate. Recorded ONCE per
+/// run with the full offending-site list (text output caps the display; JSON
+/// carries them all). While an unvouched obstacle stands, every candidate refuses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Obstacle {
+    /// The stable reason name (`eval-present` / `dynamic-include-present`).
+    pub reason: String,
+    /// A human sentence naming the obstacle family (agent-readable).
+    pub detail: String,
+    /// Every *unvouched* site that raises this obstacle, in source order.
+    pub sites: Vec<SiteRef>,
+}
+
+impl Obstacle {
+    #[must_use]
+    pub fn new(reason: impl Into<String>, detail: impl Into<String>, sites: Vec<SiteRef>) -> Self {
+        Self { reason: reason.into(), detail: detail.into(), sites }
+    }
+}
+
 /// The full result of running a transform over a project: the atomic
-/// [`EditPlan`], the per-site refusals, and the completeness oracle.
+/// [`EditPlan`], the per-site refusals, the completeness oracle, and — ADR-0046
+/// §2 — any project-global dynamic-code obstacles plus the sites the user vouched
+/// away. A non-empty `vouched_exemptions` is the honesty downgrade: the run's
+/// completeness claim is conditional on those user assertions (ADR-0037).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransformReport {
     pub plan: EditPlan,
     pub refusals: Vec<Refusal>,
     pub oracle: CompletenessOracle,
+    /// Project-global obstacles still standing (each with ≥1 unvouched site).
+    #[serde(default)]
+    pub obstacles: Vec<Obstacle>,
+    /// Sites the user vouched in `steins.toml` (the completeness-claim downgrade).
+    #[serde(default)]
+    pub vouched_exemptions: Vec<SiteRef>,
 }
 
 /// The transform contract (ADR-0034 point 2). Concrete transforms (e.g.
@@ -113,6 +144,12 @@ mod tests {
                 "a $fn(...) call could target f()",
             )],
             oracle: CompletenessOracle { enumerated: 1, transformed: 0, refused: 1 },
+            obstacles: vec![Obstacle::new(
+                "eval-present",
+                "the project contains an `eval(...)`",
+                vec![SiteRef::new("b.php", 7, 1, "eval(...)")],
+            )],
+            vouched_exemptions: vec![SiteRef::new("c.php", 2, 1, "include (vouched)")],
         };
         let json = serde_json::to_string(&report).unwrap();
         let back: TransformReport = serde_json::from_str(&json).unwrap();

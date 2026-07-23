@@ -4,7 +4,7 @@
 //! result where the rewrite is what matters.
 
 use steins_db::{Project, SourceFile, SteinsDatabase};
-use steins_edit::TransformReport;
+use steins_edit::{TransformReport, VouchSet};
 use steins_edit::plan_phpdoc_to_native;
 use steins_edit::promote::{
     REASON_AMBIGUOUS, REASON_ARG_NOT_PROVEN, REASON_DEFAULT_INCOMPATIBLE, REASON_DYNAMIC_CALL,
@@ -20,7 +20,7 @@ fn plan(files: &[(&str, &str)]) -> TransformReport {
         .map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned()))
         .collect();
     let project = Project::new(&db, inputs);
-    plan_phpdoc_to_native(&db, project)
+    plan_phpdoc_to_native(&db, project, &VouchSet::empty())
 }
 
 /// Plan, then apply the plan's edits to the first file, returning its rewrite.
@@ -376,4 +376,142 @@ fn by_ref_param_without_literal_callers_is_refused_not_broken() {
     let report = plan(&[("lib.php", lib), ("main.php", main)]);
     assert_oracle_complete(&report);
     assert_eq!(only_reason(&report), REASON_ARG_NOT_PROVEN);
+}
+
+// ---- ADR-0046 §2: dynamic-code obstacles ----------------------------------
+
+use steins_edit::promote::{REASON_DYNAMIC_INCLUDE, REASON_EVAL_PRESENT};
+
+/// Plan with a vouch set (ADR-0046 §2 vouching valve).
+fn plan_vouched(files: &[(&str, &str)], vouches: &VouchSet) -> TransformReport {
+    let db = SteinsDatabase::default();
+    let inputs: Vec<SourceFile> = files
+        .iter()
+        .map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned()))
+        .collect();
+    let project = Project::new(&db, inputs);
+    plan_phpdoc_to_native(&db, project, vouches)
+}
+
+/// An unproven `eval` anywhere in the project makes "all callers proven" false:
+/// every candidate refuses `eval-present`, and the obstacle is recorded once.
+#[test]
+fn eval_in_project_refuses_all_candidates() {
+    let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
+    let main = "<?php\nf(1);\n";
+    let evil = "<?php\neval('do_something();');\n";
+    let report = plan(&[("lib.php", lib), ("main.php", main), ("evil.php", evil)]);
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.transformed, 0, "eval must block promotion: {:#?}", report.plan);
+    assert_eq!(only_reason(&report), REASON_EVAL_PRESENT);
+    assert_eq!(report.obstacles.len(), 1);
+    assert_eq!(report.obstacles[0].reason, REASON_EVAL_PRESENT);
+    assert_eq!(report.obstacles[0].sites.len(), 1);
+    assert!(report.obstacles[0].sites[0].path.ends_with("evil.php"));
+}
+
+/// The canonical gap regression: `eval('foo(42)')` calls `foo` with no CST call
+/// site. The string-value reference scan (exact-name match) cannot see it, so
+/// without the eval obstacle the promotion would be unsound. It must refuse.
+#[test]
+fn canonical_eval_foo_42_regression() {
+    let lib = "<?php\n/** @param int $x */\nfunction foo($x) { return $x; }\n";
+    // No visible call site — only an eval string mentioning foo(42).
+    let main = "<?php\neval('foo(42)');\n";
+    let report = plan(&[("lib.php", lib), ("main.php", main)]);
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.transformed, 0, "eval('foo(42)') must block promotion");
+    assert_eq!(only_reason(&report), REASON_EVAL_PRESENT);
+}
+
+/// A dynamic `require $x` (unproven path) is a `dynamic-include-present` obstacle.
+#[test]
+fn dynamic_include_refuses_all_candidates() {
+    let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
+    let main = "<?php\n$page = $_GET['p'];\nrequire $page;\nf(1);\n";
+    let report = plan(&[("lib.php", lib), ("main.php", main)]);
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.transformed, 0);
+    assert_eq!(only_reason(&report), REASON_DYNAMIC_INCLUDE);
+    assert_eq!(report.obstacles[0].reason, REASON_DYNAMIC_INCLUDE);
+}
+
+/// A proven literal include that resolves INSIDE the analyzed universe is
+/// enumeration-benign (its file's calls are already counted): no obstacle, and
+/// the promotion proceeds.
+#[test]
+fn literal_in_universe_include_is_benign() {
+    let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
+    // `require __DIR__ . '/lib.php'` resolves to the in-universe lib.php.
+    let main = "<?php\nrequire __DIR__ . '/lib.php';\nf(1);\n";
+    let report = plan(&[("lib.php", lib), ("main.php", main)]);
+    assert_oracle_complete(&report);
+    assert!(report.obstacles.is_empty(), "in-universe include is benign: {:#?}", report.obstacles);
+    assert_eq!(report.oracle.transformed, 1, "promotion must proceed: {:#?}", report.refusals);
+}
+
+/// A proven literal include that resolves OUTSIDE the universe (a compiled-
+/// template cache) is a `dynamic-include-present` obstacle.
+#[test]
+fn out_of_universe_literal_include_is_obstacle() {
+    let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
+    let main = "<?php\nrequire 'cache/compiled_tpl_9f3.php';\nf(1);\n";
+    let report = plan(&[("lib.php", lib), ("main.php", main)]);
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.transformed, 0);
+    assert_eq!(only_reason(&report), REASON_DYNAMIC_INCLUDE);
+}
+
+/// Vendor presumption (ADR-0046): eval inside a `vendor/` path is composer
+/// autoload plumbing — it does NOT raise an obstacle, and promotion proceeds.
+#[test]
+fn vendor_eval_is_not_an_obstacle() {
+    let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
+    let main = "<?php\nf(1);\n";
+    let vendor = "<?php\neval('class_loader();');\n";
+    let report = plan(&[
+        ("lib.php", lib),
+        ("main.php", main),
+        ("vendor/composer/loader.php", vendor),
+    ]);
+    assert_oracle_complete(&report);
+    assert!(report.obstacles.is_empty(), "vendor eval must not obstruct: {:#?}", report.obstacles);
+    assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
+}
+
+/// The vouching valve: a vouched eval site does not raise its obstacle, so the
+/// promotion proceeds — but the run carries the completeness-claim downgrade
+/// (`vouched_exemptions`), it does not silently pass (ADR-0046 §2 / ADR-0037).
+#[test]
+fn vouched_eval_site_proceeds_with_downgrade() {
+    let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
+    let main = "<?php\nf(1);\n";
+    let evil = "<?php\neval('legacy_bootstrap();');\n"; // eval on line 2
+    let vouches = VouchSet::from_entries([("evil.php".to_owned(), 2)]);
+    let report = plan_vouched(&[("lib.php", lib), ("main.php", main), ("evil.php", evil)], &vouches);
+    assert_oracle_complete(&report);
+    assert!(report.obstacles.is_empty(), "vouched eval must not obstruct: {:#?}", report.obstacles);
+    assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
+    assert_eq!(report.vouched_exemptions.len(), 1, "downgrade note must carry the vouched site");
+    assert!(report.vouched_exemptions[0].path.ends_with("evil.php"));
+}
+
+/// An unvouched eval site alongside a vouched one still raises the obstacle.
+#[test]
+fn partially_vouched_eval_still_obstructs() {
+    let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
+    let main = "<?php\nf(1);\n";
+    let a = "<?php\neval('a();');\n";
+    let b = "<?php\neval('b();');\n";
+    let vouches = VouchSet::from_entries([("a.php".to_owned(), 2)]);
+    let report = plan_vouched(
+        &[("lib.php", lib), ("main.php", main), ("a.php", a), ("b.php", b)],
+        &vouches,
+    );
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.transformed, 0, "the unvouched eval still blocks");
+    assert_eq!(only_reason(&report), REASON_EVAL_PRESENT);
+    assert_eq!(report.obstacles[0].sites.len(), 1, "only the unvouched site is listed");
+    assert!(report.obstacles[0].sites[0].path.ends_with("b.php"));
+    assert_eq!(report.vouched_exemptions.len(), 1);
 }
