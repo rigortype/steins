@@ -594,11 +594,15 @@ fn check_units(units: &[FileUnit], index: &Index, folder: &mut dyn Folder) -> Ve
                     ));
                     native_fired = true;
                 }
-                // The direct pass owns env-free arg kinds (literal / array / `new`);
+                // The direct pass owns env-free arg kinds (literal / array / `new`,
+                // plus enum-case / class-const object values — ADR-0043 stage 4);
                 // `$var`/`call()` resolution — and their phpdoc check — belong to the
                 // propagation pass, so the two never both fire on one arg.
-                let env_free =
-                    arg.value.is_literal() || matches!(arg.value, ArgValue::Array(_) | ArgValue::New(..));
+                let env_free = arg.value.is_literal()
+                    || matches!(
+                        arg.value,
+                        ArgValue::Array(_) | ArgValue::New(..) | ArgValue::EnumCase(..) | ArgValue::ClassConst(..)
+                    );
                 if !native_fired
                     && env_free
                     && let Some(env) = &envelopes
@@ -616,6 +620,7 @@ fn check_units(units: &[FileUnit], index: &Index, folder: &mut dyn Folder) -> Ve
                         &empty_env,
                         &empty_classes,
                         false,
+                        false, // in_descent — the direct pass is never a descent
                         &mut out,
                     );
                 }
@@ -3082,11 +3087,19 @@ fn walk_trace(
                 // Proven-value path, then the abstract-fact path (Feature E) —
                 // same discipline as the `@param` check: only a definite `No`.
                 let rendered = match cx.resolve_cval(value, env, store, scope.poisoned, folder) {
-                    Some(cv) => (accepts(cx, cx.cur, span.start, pret, &cv) == Certainty::No)
-                        .then(|| rendered_cval(&cv)),
+                    // ADR-0043 stage 4: the class arm of `accepts` now yields definite
+                    // verdicts; a class-touching return verdict is guard-blind inside a
+                    // descent (mirror of the native `object_world_guard_blind`).
+                    Some(cv) => (accepts(cx, cx.cur, span.start, pret, &cv) == Certainty::No
+                        && !phpdoc_object_guard_blind(descent.is_some(), pret, Some(&cv)))
+                    .then(|| rendered_cval(&cv)),
                     None => arg_abstract_fact(value, env, scope.poisoned).and_then(|fact| {
                         let cty = steins_contract::lower(pret);
-                        (!contract_touches_class(&cty)
+                        // The class valve opens for a pure known-class contract against
+                        // a definite scalar fact (see `check_phpdoc_param`).
+                        let open_class_valve = is_pure_class_contract(cx, cx.cur, span.start, pret)
+                            && !phpdoc_object_guard_blind(descent.is_some(), pret, None);
+                        ((!contract_touches_class(&cty) || open_class_valve)
                             && steins_contract::admits_fact(&cty, fact) == Certainty::No)
                             .then(|| describe_fact(fact))
                     }),
@@ -5103,6 +5116,7 @@ fn check_propagated_call(
                 env,
                 store,
                 poisoned,
+                in_descent,
                 out,
             );
         }
@@ -5812,6 +5826,7 @@ fn check_method_args(
                 env,
                 store,
                 poisoned,
+                in_descent,
                 out,
             );
         }
@@ -6291,6 +6306,16 @@ impl<'a> Cx<'a> {
         match value {
             v if v.is_literal() => Some(CVal::Scalar(v.clone())),
             ArgValue::New(class_ref, _) if !poisoned => Some(CVal::Object(self.class_fqn(class_ref))),
+            // ADR-0043 stage 4: an enum case is an object value of its enum class,
+            // so it can ride the is-a oracle against enum/interface phpdoc contracts.
+            ArgValue::EnumCase(fqn, _) => Some(CVal::Object(fqn.clone())),
+            // A class-const access (`Foo::BAR`, `Suit::Hearts`) resolves env-free:
+            // an enum case becomes an object, a literal const its value. `self`/
+            // `parent` need an enclosing class, absent here → unresolved (silent).
+            ArgValue::ClassConst(sc, name) => match self.resolve_class_const(sc, name, None)? {
+                ArgValue::EnumCase(fqn, _) => Some(CVal::Object(fqn)),
+                lit => self.resolve_cval(&lit, env, store, poisoned, folder),
+            },
             ArgValue::Array(items) => {
                 let normalized = normalize_array(items);
                 let mut out = Vec::with_capacity(normalized.len());
@@ -6329,25 +6354,14 @@ impl<'a> Cx<'a> {
         self.units[cfile].tree.resolve_class_fqn(&NameRef { raw, kind, offset: coff })
     }
 
-    /// Whether `obj_fqn`'s project inheritance chain reaches `target_fqn` (FQN
-    /// equality or subclass; case-insensitive). An exact-name match succeeds even
-    /// when the class is not in the project index; subclassing needs the chain.
-    fn object_is_a(&self, obj_fqn: &str, target_fqn: &str) -> bool {
-        let mut cur = obj_fqn.to_owned();
-        let mut seen: HashSet<String> = HashSet::new();
-        loop {
-            if cur.eq_ignore_ascii_case(target_fqn) {
-                return true;
-            }
-            if !seen.insert(cur.to_ascii_lowercase()) {
-                return false;
-            }
-            let Some((file, cd)) = self.find_class(&cur) else { return false };
-            match &cd.parent {
-                Some(pref) => cur = self.units[file].tree.resolve_class_fqn(pref),
-                None => return false,
-            }
-        }
+    /// Whether `fqn` names a **known class** — a Unique project class or a
+    /// catalogued builtin (ADR-0043 stage 4). This is the same closure predicate
+    /// the is-a oracle uses ([`Self::ancestors_of`] returns `Some`): only a known
+    /// class may make a proven scalar a definite non-member. An unresolved bare
+    /// identifier (a `@template` param, a `@phpstan-type` alias, or an uncatalogued
+    /// external) is *not* known, so a scalar against it stays silent.
+    fn is_known_class(&self, fqn: &str) -> bool {
+        self.ancestors_of(fqn.trim_start_matches('\\')).is_some()
     }
 
     // -----------------------------------------------------------------------
@@ -6509,11 +6523,20 @@ impl<'a> Cx<'a> {
     /// simply ignores trait use and reports the class's real parent/interfaces.
     fn is_a(&self, sub_fqn: &str, super_fqn: &str) -> IsA {
         let target = super_fqn.trim_start_matches('\\');
+        // `Stringable` is implicitly implemented by any class with a `__toString`
+        // method (PHP 8.0+), which the explicit parent/`implements` closure does
+        // not see. For this target only: a proven `__toString` on any visited class
+        // is a definite `Yes`, and a visited trait-using class (whose merged methods
+        // are unmodeled — it *might* declare `__toString`) forces `Unknown` rather
+        // than an unsound `No`.
+        let stringable_target = target.eq_ignore_ascii_case("Stringable");
         let mut queue: Vec<String> = vec![sub_fqn.trim_start_matches('\\').to_owned()];
         let mut seen: HashSet<String> = HashSet::new();
         // Whether every ancestor edge inspected so far resolved — the closure
         // condition for a sound `No`. A single unresolvable node taints it.
         let mut complete = true;
+        // Whether a visited class may implicitly gain `Stringable` via a trait.
+        let mut maybe_stringable = false;
         while let Some(cur) = queue.pop() {
             if cur.eq_ignore_ascii_case(target) {
                 return IsA::Yes;
@@ -6521,10 +6544,23 @@ impl<'a> Cx<'a> {
             if !seen.insert(cur.to_ascii_lowercase()) {
                 continue;
             }
+            if stringable_target
+                && let Some((_, cd)) = self.find_class(&cur)
+            {
+                if cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__toString")) {
+                    return IsA::Yes;
+                }
+                if cd.uses_traits {
+                    maybe_stringable = true;
+                }
+            }
             match self.ancestors_of(&cur) {
                 Some(supers) => queue.extend(supers),
                 None => complete = false,
             }
+        }
+        if stringable_target && maybe_stringable {
+            return IsA::Unknown;
         }
         if complete { IsA::No } else { IsA::Unknown }
     }
@@ -6682,21 +6718,49 @@ fn accepts_identifier(cx: &Cx, cfile: usize, coff: u32, name: &str, v: &CVal) ->
         "class-string" | "self" | "static" | "parent" | "void" | "never" | "callable-string"
         | "interface-string" | "trait-string" | "enum-string" | "literal-string"
         | "callable" | "closure" | "resource" | "empty" | "value-of" | "key-of" => Tri::Maybe,
-        // A class-name type: only `New`-exact facts are checked (match or subclass);
-        // any non-object value, or an unresolved class, stays silent.
-        _ => match v {
-            CVal::Object(obj) => {
-                let target = cx.resolve_pclass(cfile, coff, name);
-                if cx.object_is_a(obj, &target) { Tri::Yes } else { Tri::Maybe }
+        // A class-name type (ADR-0043 stage 4). Rides the trinary is-a oracle for a
+        // proven object value (`Yes`→Yes, `No`→No, `Unknown`→Maybe) and rejects a
+        // proven scalar against a *known* class — phpdoc acceptance is pure set
+        // membership (ADR-0030 registry 1, no coercion), so no scalar is ever a
+        // class instance, in either mode. The `is_known_class` gate is the safety
+        // valve: an unresolved bare identifier may be a `@template` param or a
+        // `@phpstan-type` alias (which can denote a scalar), so it stays silent —
+        // the same closure discipline the is-a oracle applies to non-membership.
+        _ => {
+            let target = cx.resolve_pclass(cfile, coff, name);
+            match v {
+                CVal::Object(obj) => match cx.is_a(obj, &target) {
+                    IsA::Yes => Tri::Yes,
+                    // A definite `No` requires a *known* target: an object whose own
+                    // hierarchy is closed is-a-No against an unresolved name, but that
+                    // name may be a `@template`/`@phpstan-type` alias the object *does*
+                    // satisfy — so gate on `is_known_class`, as for the scalar arm.
+                    IsA::No if cx.is_known_class(&target) => Tri::No,
+                    IsA::No | IsA::Unknown => Tri::Maybe,
+                },
+                CVal::Scalar(_) if cx.is_known_class(&target) => Tri::No,
+                // An array is likewise never a class instance, but it is left
+                // silent this slice (out of the stage-4 scope).
+                _ => Tri::Maybe,
             }
-            _ => Tri::Maybe,
-        },
+        }
     }
 }
 
 /// Acceptance for a literal constant type (`'foo'`, `123`, `1.5`, `true`, …) by
 /// value equality; a const-fetch (`Foo::BAR`) is unresolved → silent.
 fn accepts_const(c: &ConstExpr, v: &CVal) -> Tri {
+    // A const-fetch type (`Foo::BAR`, `self::CONST`, or an enum-case type like
+    // `Suit::Hearts`) is unresolved here — its denotation is unknown, so it must
+    // stay silent for *every* value (ADR-0043 stage 4): an enum-case object or the
+    // referenced literal may well inhabit it, and a returned/passed value that *is*
+    // that very constant must never be manufactured into a `No`. This guards the
+    // class-const value resolution (which now flows enum cases and const literals
+    // into the contract check) from firing on `@return self::CONST { return
+    // self::CONST; }` tautologies.
+    if matches!(c, ConstExpr::Fetch { .. }) {
+        return Tri::Maybe;
+    }
     let scalar = match v {
         CVal::Scalar(s) => s,
         _ => return Tri::No,
@@ -6980,6 +7044,7 @@ fn check_phpdoc_param(
     env: &HashMap<String, Known>,
     store: &Store,
     poisoned: bool,
+    in_descent: bool,
     out: &mut Vec<Diagnostic>,
 ) {
     // Assertion-helper exemption (see the doc comment above): this parameter's
@@ -7008,6 +7073,13 @@ fn check_phpdoc_param(
             if accepts(cx, cfile, coff, ty, &cv) != Tri::No {
                 return;
             }
+            // ADR-0043 stage 4: a class-touching verdict is guard-blind inside a
+            // binding descent (mirror of the native `object_world_guard_blind`) —
+            // the callee's in-body type guards that would narrow the rebound value
+            // are unmodeled. Scalar-vs-scalar phpdoc checks stay live.
+            if phpdoc_object_guard_blind(in_descent, ty, Some(&cv)) {
+                return;
+            }
             rendered_cval(&cv)
         }
         // Abstract-fact path (Feature E, ADR-0030/0035): an argument that resolves
@@ -7018,11 +7090,18 @@ fn check_phpdoc_param(
         None => {
             let Some(fact) = arg_abstract_fact(value, env, poisoned) else { return };
             let cty = steins_contract::lower(ty);
-            // A class-shaped contract stays silent against a scalar fact: a bare
-            // identifier may be a template / type-alias, and infer's proven-value
-            // `accepts` already treats a scalar vs any class name as `Maybe`. Keeping
-            // the two paths consistent preserves the zero-FP posture.
-            if contract_touches_class(&cty) {
+            // ADR-0043 stage 4 — the class valve. A class-touching contract used to
+            // stay silent against every fact. It opens for exactly one sound case:
+            // a **pure class contract of known classes** (`Foo`, `Foo|null`, `A|B`)
+            // against a definite scalar fact. The abstract-fact domain is scalar-only
+            // (ADR-0035/0038 — no object inhabitant), so any fact here is a definite
+            // scalar, and a scalar is never a member of a class type (pure set
+            // membership, no coercion). It stays shut for an unknown identifier — a
+            // `@template` param or `@phpstan-type` alias may denote a scalar — and,
+            // like the proven path, for any class-touching verdict inside a descent.
+            let open_class_valve = is_pure_class_contract(cx, cfile, coff, ty)
+                && !phpdoc_object_guard_blind(in_descent, ty, None);
+            if contract_touches_class(&cty) && !open_class_valve {
                 return;
             }
             if steins_contract::admits_fact(&cty, fact) != Certainty::No {
@@ -7081,6 +7160,57 @@ fn contract_touches_class(ty: &steins_contract::ContractTy) -> bool {
         }
         _ => false,
     }
+}
+
+/// ADR-0043 stage 4 — the phpdoc-side analogue of [`object_world_guard_blind`]. A
+/// class-touching phpdoc verdict is unsound inside a binding descent: the callee's
+/// in-body type guards on the rebound value are unmodeled (the same reason the
+/// native object-world check is suppressed there). "Touches a class" means the
+/// proven value is an object, or the contract references a class name (a bare
+/// identifier the lowering treats as a class). Scalar-vs-scalar phpdoc checks —
+/// whose guards the walk *can* evaluate — are unaffected. Always `false` outside a
+/// descent.
+fn phpdoc_object_guard_blind(in_descent: bool, ty: &PType, cv: Option<&CVal>) -> bool {
+    in_descent
+        && (matches!(cv, Some(CVal::Object(_)))
+            || contract_touches_class(&steins_contract::lower(ty)))
+}
+
+/// ADR-0043 stage 4 — is `ty` a **pure class contract**: a known class name, or a
+/// union/nullable built only from known class names and `null` (e.g. `Foo`,
+/// `Foo|null`, `?Foo`, `A|B`)? Only such a contract may let a definite scalar fact
+/// open the [`contract_touches_class`] valve. The `is_known_class` gate is the
+/// safety valve — an unresolved bare identifier may be a `@template` param or a
+/// `@phpstan-type` alias (which can denote a scalar), so it disqualifies the whole
+/// contract. A contract touching an array/generic/shape/intersection/callable, or
+/// any scalar/pseudo-type keyword, is *not* pure-class (returns `false`): those
+/// cases keep the existing silence.
+fn is_pure_class_contract(cx: &Cx, cfile: usize, coff: u32, ty: &PType) -> bool {
+    fn walk(cx: &Cx, cfile: usize, coff: u32, ty: &PType, saw_class: &mut bool) -> bool {
+        match &ty.kind {
+            PKind::Identifier(name) => {
+                // A `null` companion (the `class|null` shape) is allowed but is not
+                // itself the class that satisfies the "at least one class" rule.
+                if name.eq_ignore_ascii_case("null") {
+                    return true;
+                }
+                let target = cx.resolve_pclass(cfile, coff, name);
+                if cx.is_known_class(&target) {
+                    *saw_class = true;
+                    true
+                } else {
+                    false
+                }
+            }
+            PKind::Nullable(inner) => walk(cx, cfile, coff, inner, saw_class),
+            PKind::Union { types, .. } => {
+                types.iter().all(|t| walk(cx, cfile, coff, t, saw_class))
+            }
+            _ => false,
+        }
+    }
+    let mut saw_class = false;
+    walk(cx, cfile, coff, ty, &mut saw_class) && saw_class
 }
 
 /// A short, phpdoc-flavored description of an abstract fact for a diagnostic
