@@ -245,6 +245,9 @@ fn arg_to_fold(arg: &ArgValue) -> Option<FoldArg> {
         | ArgValue::Closure(_)
         | ArgValue::PropFetch { .. }
         | ArgValue::Clone(_)
+        // Object-world values (ADR-0043) are not fold arguments — unproven, == Other.
+        | ArgValue::ClassConst(..)
+        | ArgValue::EnumCase(..)
         | ArgValue::Other => None,
     }
 }
@@ -2605,6 +2608,9 @@ fn val_of(arg: &ArgValue) -> Option<Val> {
         | ArgValue::Closure(_)
         | ArgValue::PropFetch { .. }
         | ArgValue::Clone(_)
+        // Object-world values (ADR-0043): not domain `Val`s — unproven, == Other.
+        | ArgValue::ClassConst(..)
+        | ArgValue::EnumCase(..)
         | ArgValue::Other => None,
     }
 }
@@ -4118,13 +4124,15 @@ fn eval_instanceof(
         CondOperand::Var(name) if !poisoned => match store.class_of(name) {
             Some(obj_fqn) => {
                 let target = w.cx.class_fqn(class_ref);
-                // `object_is_a` returns false both for "provably not" and for a
-                // chain that leaves the project, so only a positive is a definite
-                // verdict; a negative stays `Maybe` (the FP-safe side).
-                if w.cx.object_is_a(obj_fqn, &target) {
-                    Certainty::Yes
-                } else {
-                    Certainty::Maybe
+                // The trinary is-a oracle (ADR-0043): a proven supertype path is a
+                // definite `Yes`; a completely-enumerated hierarchy that excludes
+                // the target is a definite `No` (the branch is dead); an incomplete
+                // hierarchy stays `Maybe` (the FP-safe side). Instanceof still binds
+                // no exactness fact — membership is not exactness (see below).
+                match w.cx.is_a(obj_fqn, &target) {
+                    IsA::Yes => Certainty::Yes,
+                    IsA::No => Certainty::No,
+                    IsA::Unknown => Certainty::Maybe,
                 }
             }
             None => Certainty::Maybe,
@@ -5782,15 +5790,23 @@ fn render_call(name: &str, args: &[ArgValue]) -> String {
 ///
 /// Uncertain cells resolve to "not an error" (silence is always safe; ADR-0002).
 fn is_type_error(strict: bool, ty: &NativeType, arg: &ArgValue) -> bool {
+    // ADR-0043 stage 1 — object-bearing types stay silent. A union that carries
+    // an `Instance` (class/interface/enum) member yields no native scalar-value
+    // judgment this stage, exactly reproducing the pre-ADR-0043 behavior where the
+    // whole hint lowered to `None` and was never checked. The definite-No object
+    // arm (stage 3) is the only place this guard is lifted.
+    if ty.has_instance() {
+        return false;
+    }
     match arg {
         // `null` is accepted iff the type is nullable (`?T` or a `null` member).
         ArgValue::Null => !ty.nullable,
         // A concrete non-null literal: an error iff no member accepts it.
         ArgValue::Int(_) | ArgValue::Float(_) | ArgValue::Str(_) | ArgValue::Bool(_) => {
             if strict {
-                !ty.members.iter().any(|&m| member_accepts_strict(m, arg))
+                !ty.members.iter().any(|m| member_accepts_strict(m, arg))
             } else {
-                !ty.members.iter().any(|&m| member_accepts_coercive(m, arg))
+                !ty.members.iter().any(|m| member_accepts_coercive(m, arg))
             }
         }
         // An array is never a native scalar/union finding (arrays only ever fail
@@ -5798,12 +5814,16 @@ fn is_type_error(strict: bool, ty: &NativeType, arg: &ArgValue) -> bool {
         ArgValue::Array(_) => false,
         // Non-literal (`Var`/`Call`/`New`/`Ternary`/`Other`): not provable → never
         // an error (a `Ternary` is resolved to a concrete arm before this point).
+        // `ClassConst`/`EnumCase` are unproven object-world values (ADR-0043) —
+        // treated exactly like `Other` this stage (explicit, so stage 3 finds them).
         ArgValue::Var(_)
         | ArgValue::Call(..)
         | ArgValue::New(..)
         | ArgValue::Ternary { .. }
         | ArgValue::PropFetch { .. }
         | ArgValue::Clone(_)
+        | ArgValue::ClassConst(..)
+        | ArgValue::EnumCase(..)
         // A closure value against a scalar/union param is never a scalar finding
         // (a `callable`/`Closure` param is not a native scalar type this checks).
         | ArgValue::Closure(_)
@@ -5814,13 +5834,17 @@ fn is_type_error(strict: bool, ty: &NativeType, arg: &ArgValue) -> bool {
 /// Strict mode: does a single union `member` accept the non-null literal `arg`
 /// *exactly* (the only implicit conversion PHP allows in strict mode is
 /// int→float, so a `float` member also accepts an `int` arg)?
-fn member_accepts_strict(m: TypeMember, arg: &ArgValue) -> bool {
+fn member_accepts_strict(m: &TypeMember, arg: &ArgValue) -> bool {
     match m {
         TypeMember::Scalar(ScalarType::Int) => matches!(arg, ArgValue::Int(_)),
         TypeMember::Scalar(ScalarType::Float) => matches!(arg, ArgValue::Int(_) | ArgValue::Float(_)),
         TypeMember::Scalar(ScalarType::String) => matches!(arg, ArgValue::Str(_)),
         TypeMember::Scalar(ScalarType::Bool) => matches!(arg, ArgValue::Bool(_)),
-        TypeMember::BoolLiteral(b) => matches!(arg, ArgValue::Bool(v) if *v == b),
+        TypeMember::BoolLiteral(b) => matches!(arg, ArgValue::Bool(v) if v == b),
+        // Object member (ADR-0043): no scalar literal is a member of a class type.
+        // Unreachable in stage 1 (the `has_instance` guard in `is_type_error` short-
+        // circuits before any member is inspected); explicit for stage 3.
+        TypeMember::Instance(_) => false,
     }
 }
 
@@ -5828,7 +5852,7 @@ fn member_accepts_strict(m: TypeMember, arg: &ArgValue) -> bool {
 /// union `member`? `string`/`bool` are universal sinks for scalars; numeric
 /// members accept int/float/bool and numeric strings only; a bool-literal member
 /// accepts **only** the exact matching bool value (no coercion into it).
-fn member_accepts_coercive(m: TypeMember, arg: &ArgValue) -> bool {
+fn member_accepts_coercive(m: &TypeMember, arg: &ArgValue) -> bool {
     match m {
         // Any scalar coerces to `string` or to `bool`.
         TypeMember::Scalar(ScalarType::String) | TypeMember::Scalar(ScalarType::Bool) => true,
@@ -5840,7 +5864,10 @@ fn member_accepts_coercive(m: TypeMember, arg: &ArgValue) -> bool {
             _ => false,
         },
         // No value coerces *into* a bool-literal; only the exact bool matches.
-        TypeMember::BoolLiteral(b) => matches!(arg, ArgValue::Bool(v) if *v == b),
+        TypeMember::BoolLiteral(b) => matches!(arg, ArgValue::Bool(v) if v == b),
+        // Object member (ADR-0043): no scalar coerces into a class type. See
+        // `member_accepts_strict` — unreachable in stage 1, explicit for stage 3.
+        TypeMember::Instance(_) => false,
     }
 }
 
@@ -5854,6 +5881,13 @@ fn member_accepts_coercive(m: TypeMember, arg: &ArgValue) -> bool {
 /// member PHP would coerce a mismatched value into, so it stops the descent
 /// (silent) rather than risk an unsound bound value.
 fn coerce_into_param(strict: bool, ty: &NativeType, value: &ArgValue) -> Option<ArgValue> {
+    // ADR-0043 stage 1 — an object-bearing type binds the value verbatim, exactly
+    // as the pre-ADR-0043 `None`-typed (untracked) parameter did: the caller's
+    // `None => bind raw value` path is reproduced here so an object parameter does
+    // not abort the interprocedural descent. No scalar coercion applies to objects.
+    if ty.has_instance() {
+        return Some(value.clone());
+    }
     if is_type_error(strict, ty, value) {
         return None;
     }
@@ -5864,7 +5898,7 @@ fn coerce_into_param(strict: bool, ty: &NativeType, value: &ArgValue) -> Option<
         return coerce_scalar(*scalar, value);
     }
     // Union: bind only on an exact-type member match; otherwise silence.
-    if ty.members.iter().any(|&m| member_matches_exact(m, value)) {
+    if ty.members.iter().any(|m| member_matches_exact(m, value)) {
         return Some(value.clone());
     }
     None
@@ -5872,13 +5906,14 @@ fn coerce_into_param(strict: bool, ty: &NativeType, value: &ArgValue) -> Option<
 
 /// Whether a union `member` matches the *runtime type* of the non-null literal
 /// `value` exactly (no coercion) — used to decide when a union binding is safe.
-fn member_matches_exact(m: TypeMember, value: &ArgValue) -> bool {
+fn member_matches_exact(m: &TypeMember, value: &ArgValue) -> bool {
     match (m, value) {
         (TypeMember::Scalar(ScalarType::Int), ArgValue::Int(_))
         | (TypeMember::Scalar(ScalarType::Float), ArgValue::Float(_))
         | (TypeMember::Scalar(ScalarType::String), ArgValue::Str(_))
         | (TypeMember::Scalar(ScalarType::Bool), ArgValue::Bool(_)) => true,
-        (TypeMember::BoolLiteral(b), ArgValue::Bool(v)) => *v == b,
+        (TypeMember::BoolLiteral(b), ArgValue::Bool(v)) => v == b,
+        // Object member (ADR-0043): scalar literals never match a class type.
         _ => false,
     }
 }
@@ -6218,6 +6253,91 @@ impl<'a> Cx<'a> {
             }
         }
     }
+
+    /// The **trinary is-a oracle** (ADR-0043 §3): is a value of exact class
+    /// `sub_fqn` an instance of `super_fqn`?
+    ///
+    /// - **`Yes`** — a supertype path exists: the parent chain *and* the
+    ///   transitive `implements` closure (class→interface and interface→interface,
+    ///   since a lowered interface's extends become parent+implements). Reflexive
+    ///   (`sub == super` is `Yes`).
+    /// - **`No`** — only under a **completely enumerated hierarchy**: every
+    ///   ancestor edge reachable from `sub` resolved either Unique in-project or in
+    ///   the catalog's builtin tree, and `super` is absent from that closed
+    ///   ancestor set. This is the Certainty discipline applied to subtyping —
+    ///   non-membership is provable only under closure.
+    /// - **`Unknown`** — the enumeration is incomplete: some ancestor is
+    ///   unresolvable/ambiguous, or the chain leaves the project into an
+    ///   uncatalogued builtin, or `sub`/`super` is itself unknown.
+    ///
+    /// Enums (ADR-0043): a lowered enum is-a its explicit `implements` plus the
+    /// implicit `UnitEnum` interface, and a *backed* enum additionally is-a
+    /// `BackedEnum` (which the catalog records as extending `UnitEnum`).
+    ///
+    /// A `use`d trait does **not** force `Unknown`: in PHP a trait adds methods,
+    /// never types, so it cannot change the is-a relation — [`Self::ancestors_of`]
+    /// simply ignores trait use and reports the class's real parent/interfaces.
+    fn is_a(&self, sub_fqn: &str, super_fqn: &str) -> IsA {
+        let target = super_fqn.trim_start_matches('\\');
+        let mut queue: Vec<String> = vec![sub_fqn.trim_start_matches('\\').to_owned()];
+        let mut seen: HashSet<String> = HashSet::new();
+        // Whether every ancestor edge inspected so far resolved — the closure
+        // condition for a sound `No`. A single unresolvable node taints it.
+        let mut complete = true;
+        while let Some(cur) = queue.pop() {
+            if cur.eq_ignore_ascii_case(target) {
+                return IsA::Yes;
+            }
+            if !seen.insert(cur.to_ascii_lowercase()) {
+                continue;
+            }
+            match self.ancestors_of(&cur) {
+                Some(supers) => queue.extend(supers),
+                None => complete = false,
+            }
+        }
+        if complete { IsA::No } else { IsA::Unknown }
+    }
+
+    /// The **direct** supertypes (parent + `implements`, plus an enum's implicit
+    /// interfaces) of `fqn`, or `None` when `fqn` is an unknown external (not a
+    /// Unique project class, not a catalogued builtin) — which makes the is-a
+    /// enumeration incomplete. A resolvable class with no supertypes returns an
+    /// empty vector (fully enumerated, a root).
+    fn ancestors_of(&self, fqn: &str) -> Option<Vec<String>> {
+        if let Some((file, cd)) = self.find_class(fqn) {
+            let tree = &self.units[file].tree;
+            let mut supers = Vec::new();
+            if let Some(pref) = &cd.parent {
+                supers.push(tree.resolve_class_fqn(pref));
+            }
+            for imp in &cd.implements {
+                supers.push(tree.resolve_class_fqn(imp));
+            }
+            if cd.is_enum {
+                supers.push("UnitEnum".to_owned());
+                if cd.enum_backing.is_some() {
+                    supers.push("BackedEnum".to_owned());
+                }
+            }
+            Some(supers)
+        } else {
+            steins_catalog::builtin_class_supers(fqn)
+                .map(|s| s.into_iter().map(str::to_owned).collect())
+        }
+    }
+}
+
+/// The verdict of the trinary is-a oracle ([`Cx::is_a`], ADR-0043 §3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IsA {
+    /// A supertype path exists (membership is proven).
+    Yes,
+    /// The hierarchy is completely enumerated and the target is absent from it
+    /// (non-membership is proven under closure).
+    No,
+    /// The hierarchy is incomplete — no verdict (the FP-safe silence).
+    Unknown,
 }
 
 /// Contract acceptance (ADR-0030): does the proven value `v` inhabit the phpdoc
@@ -6646,7 +6766,12 @@ fn check_phpdoc_param(
             // `@param` spelling — PHP/PHPStan honor this, so reporting it would be a
             // false positive.
             if matches!(cv, CVal::Scalar(ArgValue::Null))
-                && (param.has_null_default || param.ty.as_ref().is_some_and(|t| t.nullable))
+                // ADR-0043 stage 1: consult native nullability only for scalar-value
+                // types. An object-bearing type contributes no native-nullable signal
+                // here (it lowered to `None` before ADR-0043), so `?Foo` does not
+                // change which `null` arguments this guard accepts.
+                && (param.has_null_default
+                    || param.ty.as_ref().is_some_and(|t| t.nullable && !t.has_instance()))
             {
                 return;
             }
@@ -6921,5 +7046,114 @@ mod domain_tests {
         use ArgValue::{Float, Int};
         assert_eq!(php_identical(&Int(5), &Int(5)), Some(true));
         assert_eq!(php_identical(&Int(5), &Float(5.0)), Some(false)); // 5 === 5.0 is false
+    }
+}
+
+#[cfg(test)]
+mod oracle_tests {
+    //! Unit tests for the ADR-0043 §3 trinary is-a oracle ([`Cx::is_a`]): the
+    //! parent chain, the transitive `implements` closure, interface-extends, the
+    //! builtin exception tree, the enum interface roots, the closed-set `No`, and
+    //! every `Unknown` condition. The oracle is exercised directly against a
+    //! one-file project so its verdicts are asserted without routing through
+    //! instanceof branch analysis (integration tests cover that path separately).
+    use super::*;
+
+    fn is_a(src: &str, sub: &str, sup: &str) -> IsA {
+        let tree = SourceTree::parse(src);
+        let units = [FileUnit { path: "t.php", tree: &tree }];
+        let index = Index::from_units(&units);
+        Cx::new(&units, &index, 0).is_a(sub, sup)
+    }
+
+    #[test]
+    fn reflexive_and_parent_chain() {
+        let src = "<?php class A {} class B extends A {} class C extends B {}";
+        assert_eq!(is_a(src, "c", "c"), IsA::Yes, "reflexive");
+        assert_eq!(is_a(src, "c", "a"), IsA::Yes, "grandparent via chain");
+        assert_eq!(is_a(src, "b", "a"), IsA::Yes);
+        // Fully enumerated, unrelated direction → No.
+        assert_eq!(is_a(src, "a", "c"), IsA::No, "a is not a c (closed set)");
+    }
+
+    #[test]
+    fn transitive_implements_and_interface_extends() {
+        let src = "<?php
+interface I {}
+interface J extends I {}
+class Base implements J {}
+class Foo extends Base {}";
+        assert_eq!(is_a(src, "foo", "j"), IsA::Yes, "class implements via parent");
+        assert_eq!(is_a(src, "foo", "i"), IsA::Yes, "transitive interface-extends");
+        assert_eq!(is_a(src, "base", "i"), IsA::Yes);
+        assert_eq!(is_a(src, "j", "i"), IsA::Yes, "interface extends interface");
+        // A class with no relation to K, fully enumerated → No.
+        let src2 = "<?php interface I {} interface K {} class Foo implements I {}";
+        assert_eq!(is_a(src2, "foo", "k"), IsA::No);
+    }
+
+    #[test]
+    fn builtin_exception_tree_closed() {
+        let src = "<?php class MyEx extends \\RuntimeException {}";
+        // Chain leaves the project into the catalogued exception tree — enumerated.
+        assert_eq!(is_a(src, "myex", "runtimeexception"), IsA::Yes);
+        assert_eq!(is_a(src, "myex", "exception"), IsA::Yes);
+        assert_eq!(is_a(src, "myex", "throwable"), IsA::Yes);
+        // A catalogued exception is provably NOT a LogicException (both under the
+        // fully-known SPL tree).
+        assert_eq!(is_a(src, "myex", "logicexception"), IsA::No);
+        // PHP 8.0+: `Throwable extends Stringable`, so every Throwable IS-A
+        // Stringable (verified against PHP 8.5). A `No` here would be unsound.
+        assert_eq!(is_a(src, "myex", "stringable"), IsA::Yes);
+    }
+
+    #[test]
+    fn enum_is_a_its_interfaces_and_roots() {
+        let src = "<?php
+interface HasLabel {}
+enum Suit: string implements HasLabel { case H = 'h'; }
+enum Dir { case Up; }";
+        // A backed enum is-a UnitEnum, BackedEnum, and its explicit interface.
+        assert_eq!(is_a(src, "suit", "unitenum"), IsA::Yes);
+        assert_eq!(is_a(src, "suit", "backedenum"), IsA::Yes);
+        assert_eq!(is_a(src, "suit", "haslabel"), IsA::Yes);
+        // A pure enum is-a UnitEnum but NOT BackedEnum (closed enumeration).
+        assert_eq!(is_a(src, "dir", "unitenum"), IsA::Yes);
+        assert_eq!(is_a(src, "dir", "backedenum"), IsA::No);
+        assert_eq!(is_a(src, "dir", "haslabel"), IsA::No);
+    }
+
+    #[test]
+    fn unknown_when_chain_leaves_project() {
+        // Parent is an uncatalogued external → enumeration incomplete → Unknown.
+        let src = "<?php class Foo extends \\Vendor\\Base {}";
+        assert_eq!(is_a(src, "foo", "vendor\\base"), IsA::Yes, "the named parent is still Yes");
+        assert_eq!(is_a(src, "foo", "somethingelse"), IsA::Unknown, "beyond the unknown parent");
+    }
+
+    #[test]
+    fn unknown_when_sub_or_super_unknown() {
+        let src = "<?php class A {}";
+        // Sub is an unknown external → Unknown (unless reflexively equal).
+        assert_eq!(is_a(src, "ghost", "a"), IsA::Unknown);
+        assert_eq!(is_a(src, "ghost", "ghost"), IsA::Yes, "reflexive even when unknown");
+        // Sub known+enumerated, super an unknown name absent from the closed set → No.
+        assert_eq!(is_a(src, "a", "ghost"), IsA::No);
+    }
+
+    #[test]
+    fn ambiguous_sub_is_unknown() {
+        // Two definitions of the same FQN → ambiguous → not Unique → Unknown.
+        let src = "<?php class Dup {} class Dup {}";
+        assert_eq!(is_a(src, "dup", "whatever"), IsA::Unknown);
+    }
+
+    #[test]
+    fn trait_use_does_not_force_unknown() {
+        // A `use`d trait adds no type; the class is still fully enumerated (its real
+        // parent/interfaces), so a `No` verdict stands.
+        let src = "<?php trait T {} class A {} class Foo extends A { use T; }";
+        assert_eq!(is_a(src, "foo", "a"), IsA::Yes);
+        assert_eq!(is_a(src, "foo", "unrelated"), IsA::No, "trait use keeps closure complete");
     }
 }

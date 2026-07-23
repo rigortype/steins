@@ -261,16 +261,24 @@ fn lowers_class_and_method_shape() {
 }
 
 #[test]
-fn interfaces_lowered_traits_enums_not() {
-    // Interfaces are lowered too (ADR-0033 Liskov), marked is_interface; traits and
-    // enums are still not lowered.
+fn interfaces_and_enums_lowered_traits_not() {
+    // Interfaces are lowered (ADR-0033 Liskov), marked is_interface; enums are
+    // lowered too (ADR-0043 object/method world), marked is_enum; traits stay
+    // unlowered.
     let src = "<?php\ninterface I {}\ntrait T {}\nenum E { case A; }\nclass C {}\n";
     let tree = SourceTree::parse(src);
-    assert_eq!(tree.classes().len(), 2, "the class and the interface are lowered");
+    assert_eq!(tree.classes().len(), 3, "the class, interface, and enum are lowered");
     let c = tree.classes().iter().find(|d| d.name == "C").unwrap();
-    assert!(!c.is_interface);
+    assert!(!c.is_interface && !c.is_enum);
     let i = tree.classes().iter().find(|d| d.name == "I").unwrap();
     assert!(i.is_interface, "interface I is marked is_interface");
+    let e = tree.classes().iter().find(|d| d.name == "E").unwrap();
+    assert!(e.is_enum, "enum E is marked is_enum");
+    assert!(e.is_final, "an enum is implicitly final");
+    // The unit case is recorded; no trait is lowered.
+    assert_eq!(e.enum_cases.len(), 1);
+    assert_eq!(e.enum_cases[0].name, "A");
+    assert!(tree.classes().iter().all(|d| d.name != "T"), "the trait stays unlowered");
 }
 
 #[test]
@@ -366,4 +374,107 @@ fn is_line_leading_distinguishes_trailing_from_own_line() {
     let trailing = &tree.comments()[1];
     assert!(tree.is_line_leading(leading.span.start), "own-line comment leads");
     assert!(!tree.is_line_leading(trailing.span.start), "trailing comment does not lead");
+}
+
+// --- ADR-0043 stage 1: object types, enums, class-const/enum-case values ------
+
+#[test]
+fn object_param_lowers_to_instance_member() {
+    // A class type hint lowers to a namespace-resolved, lowercase `Instance` member
+    // (ADR-0043), no longer collapsing the whole type to `None`.
+    let src = "<?php\nnamespace App;\nuse Other\\Bar;\nfunction f(Foo $a, Bar $b, \\Ns\\Baz $c): void {}\n";
+    let tree = SourceTree::parse(src);
+    let f = &tree.functions()[0];
+    let member = |p: usize| match &tree.functions()[0].params[p].ty {
+        Some(NativeType { members, nullable: false }) if members.len() == 1 => match &members[0] {
+            TypeMember::Instance(fqn) => fqn.clone(),
+            other => panic!("expected Instance, got {other:?}"),
+        },
+        other => panic!("expected single Instance member, got {other:?}"),
+    };
+    // Unqualified `Foo` resolves against the current namespace `App`.
+    assert_eq!(member(0), "app\\foo");
+    // `Bar` resolves through the `use Other\Bar` import.
+    assert_eq!(member(1), "other\\bar");
+    // A fully-qualified `\Ns\Baz` passes through (leading `\` trimmed, lowercased).
+    assert_eq!(member(2), "ns\\baz");
+    assert!(f.ret.is_none(), "a `void` return stays unlowered");
+}
+
+#[test]
+fn object_scalar_union_is_one_shape() {
+    // `Foo|null` and `A|B` are now a single union shape mixing objects and scalars.
+    let src = "<?php\nfunction f(?Foo $a, int|Bar $b): void {}\n";
+    let tree = SourceTree::parse(src);
+    let a = tree.functions()[0].params[0].ty.as_ref().unwrap();
+    assert!(a.nullable, "`?Foo` is nullable");
+    assert_eq!(a.members, vec![TypeMember::Instance("foo".into())]);
+    assert!(a.has_instance());
+    let b = tree.functions()[0].params[1].ty.as_ref().unwrap();
+    assert_eq!(
+        b.members,
+        vec![TypeMember::Scalar(ScalarType::Int), TypeMember::Instance("bar".into())]
+    );
+    assert!(b.has_instance(), "a union mixing a scalar and an object is object-bearing");
+    assert!(!b.nullable);
+}
+
+#[test]
+fn self_static_parent_and_intersection_stay_unlowered() {
+    // `self`/`static`/`parent` remain silent (None); an intersection stays None too.
+    let src = "<?php\nclass C {\n  function a(): self { return $this; }\n  function b(): static { return $this; }\n  function c(parent $p): void {}\n  function d(A&B $x): void {}\n}\n";
+    let tree = SourceTree::parse(src);
+    let c = tree.classes().iter().find(|d| d.name == "C").unwrap();
+    let m = |name: &str| c.methods.iter().find(|m| m.name == name).unwrap();
+    assert!(m("a").ret.is_none(), "self return stays None");
+    assert!(m("b").ret.is_none(), "static return stays None");
+    assert!(m("c").params[0].ty.is_none(), "parent param stays None");
+    assert!(m("d").params[0].ty.is_none(), "an intersection stays None (v1 deferral)");
+}
+
+#[test]
+fn enum_lowered_with_backing_and_cases() {
+    // A backed enum records its backing scalar, cases (with literal backed values),
+    // and implemented interfaces; it is final and marked is_enum.
+    let src = "<?php\nnamespace App;\nenum Suit: string implements HasLabel {\n  case Hearts = 'H';\n  case Spades = 'S';\n}\n";
+    let tree = SourceTree::parse(src);
+    let e = tree.classes().iter().find(|d| d.name == "Suit").unwrap();
+    assert!(e.is_enum && e.is_final && !e.is_interface);
+    assert_eq!(e.fqn, "app\\suit");
+    assert_eq!(e.enum_backing, Some(ScalarType::String));
+    assert_eq!(e.enum_cases.len(), 2);
+    assert_eq!(e.enum_cases[0].name, "Hearts");
+    assert_eq!(e.enum_cases[0].value, Some(ArgValue::Str("H".into())));
+    assert_eq!(e.implements.len(), 1, "the implemented interface is recorded");
+    assert!(e.methods.is_empty(), "enum method bodies are not lowered in v1");
+    // A pure (unit) enum records no backing.
+    let src2 = "<?php\nenum Dir { case Up; case Down; }\n";
+    let tree2 = SourceTree::parse(src2);
+    let d = tree2.classes().iter().find(|d| d.name == "Dir").unwrap();
+    assert!(d.is_enum && d.enum_backing.is_none());
+    assert_eq!(d.enum_cases.len(), 2);
+    assert!(d.enum_cases[0].value.is_none(), "a unit case has no backed value");
+}
+
+#[test]
+fn class_const_access_lowers_to_class_const_value() {
+    // `Class::CONST` / `Enum::Case` lower to the uniform ClassConst value (an
+    // unproven object-world value), no longer erased to Other.
+    let src = "<?php\nf(Foo::BAR, self::BAZ, $x::DYN, Suit::Hearts);\n";
+    let tree = SourceTree::parse(src);
+    let args = &tree.calls()[0].args;
+    match &args[0].value {
+        ArgValue::ClassConst(_, name) => assert_eq!(name, "BAR"),
+        other => panic!("expected ClassConst, got {other:?}"),
+    }
+    match &args[1].value {
+        ArgValue::ClassConst(_, name) => assert_eq!(name, "BAZ"),
+        other => panic!("expected ClassConst for self::BAZ, got {other:?}"),
+    }
+    // A dynamic class expression `$x::DYN` is not statically named → Other.
+    assert_eq!(args[2].value, ArgValue::Other);
+    match &args[3].value {
+        ArgValue::ClassConst(_, name) => assert_eq!(name, "Hearts"),
+        other => panic!("expected ClassConst, got {other:?}"),
+    }
 }

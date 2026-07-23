@@ -26,6 +26,7 @@ use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::Construct;
 use mago_syntax::cst::Class;
+use mago_syntax::cst::ClassLikeConstantSelector;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::DeclareItem;
@@ -185,10 +186,16 @@ impl ScalarType {
     }
 }
 
-/// One member of a native union type: one of the four scalars, or a `false` /
+/// One member of a native union type: one of the four scalars, a `false` /
 /// `true` bool-literal pseudo-member (PHP allows `false`/`true` as literal type
-/// members, e.g. `string|false`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// members, e.g. `string|false`), or a class/interface/enum **object** type
+/// (ADR-0043 object/method world).
+///
+/// [`TypeMember::Instance`] carries the namespace-resolved, lowercase-normalized
+/// FQN (matching [`ClassDecl::fqn`]), so `Foo|null` / `A|B` are one union shape
+/// alongside the scalars. It is **not** [`Copy`] (it owns a `String`); the whole
+/// enum is therefore no longer `Copy`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeMember {
     /// A full scalar type (`int`, `float`, `string`, `bool`).
     Scalar(ScalarType),
@@ -196,16 +203,23 @@ pub enum TypeMember {
     /// bool value — no other value coerces into it (empirically verified against
     /// PHP 8.5: `0`/`""`/`true` into a `false`-only type all `TypeError`).
     BoolLiteral(bool),
+    /// An object type: a class / interface / enum name, lowered to its
+    /// namespace-resolved lowercase FQN (ADR-0043). The is-a oracle consumes this
+    /// in later stages; native scalar-value acceptance stays silent on any union
+    /// that contains an `Instance` member until the definite-No arm opens.
+    Instance(String),
 }
 
 impl TypeMember {
-    /// The PHP keyword spelling of this member, for diagnostic messages.
+    /// Render this member for a diagnostic message: the PHP keyword for a scalar
+    /// or bool-literal, or the (lowercase) FQN for an object member.
     #[must_use]
-    pub fn keyword(self) -> &'static str {
+    pub fn render_member(&self) -> String {
         match self {
-            TypeMember::Scalar(s) => s.keyword(),
-            TypeMember::BoolLiteral(false) => "false",
-            TypeMember::BoolLiteral(true) => "true",
+            TypeMember::Scalar(s) => s.keyword().to_owned(),
+            TypeMember::BoolLiteral(false) => "false".to_owned(),
+            TypeMember::BoolLiteral(true) => "true".to_owned(),
+            TypeMember::Instance(fqn) => fqn.clone(),
         }
     }
 }
@@ -232,14 +246,24 @@ impl NativeType {
     /// `string|false`, `int|string|null`.
     #[must_use]
     pub fn render(&self) -> String {
-        let mut parts: Vec<&str> = self.members.iter().map(|m| m.keyword()).collect();
+        let mut parts: Vec<String> = self.members.iter().map(TypeMember::render_member).collect();
         if self.nullable {
             if parts.len() == 1 {
                 return format!("?{}", parts[0]);
             }
-            parts.push("null");
+            parts.push("null".to_owned());
         }
         parts.join("|")
+    }
+
+    /// `true` when any union member is an object ([`TypeMember::Instance`]) type.
+    /// Every native **scalar-value** consumer treats an `Instance`-bearing type
+    /// exactly as it treated an absent (`None`) type before ADR-0043 — the
+    /// zero-behavior-change invariant of stage 1. The definite-No object arm
+    /// (stage 3) is the only place this guard is lifted.
+    #[must_use]
+    pub fn has_instance(&self) -> bool {
+        self.members.iter().any(|m| matches!(m, TypeMember::Instance(_)))
     }
 }
 
@@ -572,12 +596,36 @@ pub struct PropertyDecl {
     pub span: Span,
 }
 
-/// A user-defined class **or interface** declaration (top-level or namespaced).
-/// Interfaces are lowered too (ADR-0033 Liskov), distinguished by
-/// [`Self::is_interface`]; their methods are abstract signatures carrying effect
-/// envelopes and `@throws` docblocks (the abstraction envelopes Liskov checks
-/// against). Traits and enums are still **not** lowered (a class that *uses* a
-/// trait sets [`ClassDecl::uses_traits`] so resolution gives up on it).
+/// One case of a lowered `enum` (ADR-0043). Minimal by design: the case name
+/// (as written) plus the backed value **when it is a representable literal**
+/// (`case A = 1;` / `case A = 'x';`). A unit-enum case, or a backed case whose
+/// initializer is not a literal, carries `value: None`. Enum cases are *not*
+/// heap-tracked properties — they are class constants whose value is an object
+/// of the enum class — so they live here, off the property path.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EnumCaseDecl {
+    /// The case name as written (e.g. `Hearts`).
+    pub name: String,
+    /// The backed value, when a representable literal; `None` for unit cases or
+    /// non-literal initializers.
+    pub value: Option<ArgValue>,
+    pub span: Span,
+}
+
+/// A user-defined class, **interface**, or **enum** declaration (top-level or
+/// namespaced). Interfaces are lowered (ADR-0033 Liskov), distinguished by
+/// [`Self::is_interface`]; enums are lowered (ADR-0043 object/method world),
+/// distinguished by [`Self::is_enum`] and carrying [`Self::enum_cases`] +
+/// [`Self::enum_backing`]. A class that *uses* a trait sets
+/// [`ClassDecl::uses_traits`] so resolution gives up on it.
+///
+/// Enum lowering in v1 is deliberately minimal: cases, backing type, and the
+/// `implements` list (for the is-a oracle) are recorded, but enum **method
+/// bodies are not analyzed** (no scope is built for them; [`Self::methods`] is
+/// left empty). This keeps stage 1 zero-behavior-change — an enum body cannot
+/// introduce new throw/effect/Liskov findings — while still placing the enum in
+/// the class index so subtyping can reason about it. Deferred-with-design:
+/// enum method resolution/analysis lands with the method-transform stage.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ClassDecl {
     /// Simple (unqualified) class name as written at the declaration site (used
@@ -590,6 +638,17 @@ pub struct ClassDecl {
     /// `true` when this declaration is an `interface` (not a `class`). Interface
     /// methods are abstract; they carry envelopes/`@throws` but no bodies.
     pub is_interface: bool,
+    /// `true` when this declaration is an `enum` (ADR-0043). An enum is
+    /// implicitly `final`; [`Self::enum_cases`] and [`Self::enum_backing`] carry
+    /// its cases and (for a backed enum) backing scalar. It implicitly implements
+    /// `UnitEnum` (and `BackedEnum` when backed) — recorded in the catalog's
+    /// interface tree, not here.
+    pub is_enum: bool,
+    /// A backed enum's backing scalar (`enum E: int` / `enum E: string`), or
+    /// `None` for a pure (unit) enum. Only `int`/`string` are legal backings.
+    pub enum_backing: Option<ScalarType>,
+    /// The enum's cases (empty for non-enums). See [`EnumCaseDecl`].
+    pub enum_cases: Vec<EnumCaseDecl>,
     /// The `extends` parent as written, if any (raw spelling + qualification).
     /// Method resolution resolves this to an FQN against the project index and
     /// walks the chain; a parent not defined anywhere in the project makes the
@@ -677,6 +736,24 @@ pub enum ArgValue {
     /// clone), so post-clone writes to one are invisible to the other. Only a bare
     /// variable operand is represented; `clone <expr>` lowers to [`ArgValue::Other`].
     Clone(String),
+    /// A class-constant / enum-case access `Class::NAME` (ADR-0043): the class
+    /// portion (an explicit name or `self`/`static`/`parent`) plus the constant
+    /// or case name. Syntactically a class-const and an enum-case are identical
+    /// (`Suit::Hearts` vs `Config::TIMEOUT`); the enum distinction needs the
+    /// project index, so lowering emits this uniform form and the inference layer
+    /// reinterprets it against a resolved enum (→ an [`ArgValue::EnumCase`] object
+    /// value) or resolves the literal constant value. Until then it is an
+    /// **unproven** value — treated exactly like [`ArgValue::Other`] (never flows
+    /// into a scalar check, resolves to no proven value).
+    ClassConst(StaticClass, String),
+    /// An enum-case object value `Enum::Case` (ADR-0043): the resolved,
+    /// lowercase enum FQN plus the case name. This is an *object* value of the
+    /// enum class (is-a the enum's interfaces + `UnitEnum`/`BackedEnum`). It is
+    /// produced by the inference layer when a [`ArgValue::ClassConst`] resolves
+    /// against a lowered enum — lowering never emits it directly (enum identity
+    /// is a project-index fact, not a syntactic one). Like [`ArgValue::New`] it is
+    /// not a scalar literal; native scalar checks stay silent on it.
+    EnumCase(String, String),
     Other,
 }
 
@@ -801,6 +878,14 @@ impl std::hash::Hash for ArgValue {
                 prop.hash(state);
             }
             ArgValue::Clone(v) => v.hash(state),
+            ArgValue::ClassConst(class, name) => {
+                class.hash(state);
+                name.hash(state);
+            }
+            ArgValue::EnumCase(class, case) => {
+                class.hash(state);
+                case.hash(state);
+            }
             ArgValue::Null | ArgValue::Other => {}
         }
     }
@@ -844,6 +929,8 @@ impl ArgValue {
             ArgValue::Closure(ClosureRef::Anonymous { .. }) => "Closure".to_owned(),
             ArgValue::PropFetch { var, prop } => format!("${var}->{prop}"),
             ArgValue::Clone(v) => format!("clone ${v}"),
+            ArgValue::ClassConst(class, name) => format!("{}::{name}", class.render()),
+            ArgValue::EnumCase(class, case) => format!("{class}::{case}"),
             ArgValue::Other => "<expr>".to_owned(),
         }
     }
@@ -946,6 +1033,20 @@ pub enum StaticClass {
     Static,
     /// `parent::m()` — the parent chain, exact.
     Parent,
+}
+
+impl StaticClass {
+    /// Render the class portion for a diagnostic message (the simple name for an
+    /// explicit reference, else the keyword).
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self {
+            StaticClass::Named(r) => r.simple().to_owned(),
+            StaticClass::SelfKw => "self".to_owned(),
+            StaticClass::Static => "static".to_owned(),
+            StaticClass::Parent => "parent".to_owned(),
+        }
+    }
 }
 
 /// A function-call (or method / static / constructor call) expression.
@@ -1316,10 +1417,14 @@ impl SourceTree {
         // one immediately preceding it (only whitespace between; ADR-0029).
         let docs = DocIndex::build(source, program);
 
-        let mut lowered = Lowered::default();
-        walk(&Node::Program(program), &aliases, &docs, &mut lowered);
+        // Object type hints (ADR-0043) resolve to their namespace FQN at lowering,
+        // like declaration names; the resolver carries the file's ns contexts.
+        let rc = RefResolver { contexts: &contexts, regions: &regions };
 
-        let mut classes = lower_classes(&Node::Program(program), &aliases, &docs);
+        let mut lowered = Lowered::default();
+        walk(&Node::Program(program), &aliases, &docs, &rc, &mut lowered);
+
+        let mut classes = lower_classes(&Node::Program(program), &aliases, &docs, &rc);
         let scopes = lower_scopes(program, &contexts, &regions);
 
         // Comment trivia (ADR-0023 inline ignores): whitespace trivia is dropped;
@@ -1372,31 +1477,7 @@ impl SourceTree {
     /// case at lookup.
     #[must_use]
     pub fn resolve_class_fqn(&self, r: &NameRef) -> String {
-        let ctx = self.ctx_at(r.offset);
-        match r.kind {
-            RefKind::FullyQualified => r.raw.clone(),
-            RefKind::Qualified => {
-                // First segment via class/namespace imports, else current ns.
-                let first_len = r.raw.find('\\').unwrap_or(r.raw.len());
-                let first = &r.raw[..first_len];
-                if let Some(target) = ctx.class_imports.get(&first.to_ascii_lowercase()) {
-                    format!("{target}{}", &r.raw[first_len..])
-                } else if ctx.namespace.is_empty() {
-                    r.raw.clone()
-                } else {
-                    format!("{}\\{}", ctx.namespace, r.raw)
-                }
-            }
-            RefKind::Unqualified => {
-                if let Some(target) = ctx.class_imports.get(&r.raw.to_ascii_lowercase()) {
-                    target.clone()
-                } else if ctx.namespace.is_empty() {
-                    r.raw.clone()
-                } else {
-                    format!("{}\\{}", ctx.namespace, r.raw)
-                }
-            }
-        }
+        resolve_class_ref(self.ctx_at(r.offset), r)
     }
 
     /// Whether the file begins with `declare(strict_types=1)`.
@@ -1479,19 +1560,30 @@ struct Lowered {
     calls: Vec<CallExpr>,
 }
 
-fn walk(node: &Node<'_, '_>, aliases: &SteinsAttrAliases, docs: &DocIndex, out: &mut Lowered) {
+fn walk(
+    node: &Node<'_, '_>,
+    aliases: &SteinsAttrAliases,
+    docs: &DocIndex,
+    rc: &RefResolver,
+    out: &mut Lowered,
+) {
     match node {
-        Node::Function(f) => out.functions.push(lower_function(f, aliases, docs)),
+        Node::Function(f) => out.functions.push(lower_function(f, aliases, docs, rc)),
         Node::FunctionCall(c) => out.calls.push(lower_call(c)),
         Node::DeclareItem(d) if is_strict_types_one(d) => out.strict_types = true,
         _ => {}
     }
     for child in node.children() {
-        walk(&child, aliases, docs, out);
+        walk(&child, aliases, docs, rc, out);
     }
 }
 
-fn lower_function(f: &Function<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> FunctionDecl {
+fn lower_function(
+    f: &Function<'_>,
+    aliases: &SteinsAttrAliases,
+    docs: &DocIndex,
+    rc: &RefResolver,
+) -> FunctionDecl {
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
     let locals = collect_body_callables(f.body.statements.iter());
@@ -1503,8 +1595,8 @@ fn lower_function(f: &Function<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex
     FunctionDecl {
         name: bytes_to_string(f.name.value),
         fqn: String::new(), // filled in `parse` from the enclosing namespace ctx
-        params: lower_params(&f.parameter_list),
-        ret: f.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint)),
+        params: lower_params(&f.parameter_list, rc),
+        ret: f.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
         span: to_span(f.name.span()),
         effect_envelope: attrs_effect_envelope(&f.attribute_lists, aliases),
         effect_origins,
@@ -1515,12 +1607,12 @@ fn lower_function(f: &Function<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex
 }
 
 /// Lower a parameter list to owned [`Param`]s (shared by functions and methods).
-fn lower_params(list: &mago_syntax::cst::FunctionLikeParameterList<'_>) -> Vec<Param> {
+fn lower_params(list: &mago_syntax::cst::FunctionLikeParameterList<'_>, rc: &RefResolver) -> Vec<Param> {
     list.parameters
         .iter()
         .map(|p| Param {
             name: strip_dollar(bytes_to_string(p.variable.name)),
-            ty: p.hint.as_ref().and_then(lower_hint),
+            ty: p.hint.as_ref().and_then(|h| lower_hint(h, rc)),
             variadic: p.is_variadic(),
             by_ref: p.is_reference(),
             has_null_default: p
@@ -1538,11 +1630,16 @@ fn lower_params(list: &mago_syntax::cst::FunctionLikeParameterList<'_>) -> Vec<P
         .collect()
 }
 
-/// Lower every `class` declaration reachable from `node` (interfaces, traits,
-/// and enums are skipped — they carry no method bodies this slice checks).
-fn lower_classes(node: &Node<'_, '_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> Vec<ClassDecl> {
+/// Lower every `class`, `interface`, and `enum` declaration reachable from
+/// `node` (ADR-0043 lowers enums; traits stay unlowered).
+fn lower_classes(
+    node: &Node<'_, '_>,
+    aliases: &SteinsAttrAliases,
+    docs: &DocIndex,
+    rc: &RefResolver,
+) -> Vec<ClassDecl> {
     let mut out = Vec::new();
-    lower_classes_into(node, aliases, docs, &mut out);
+    lower_classes_into(node, aliases, docs, rc, &mut out);
     out
 }
 
@@ -1550,19 +1647,21 @@ fn lower_classes_into(
     node: &Node<'_, '_>,
     aliases: &SteinsAttrAliases,
     docs: &DocIndex,
+    rc: &RefResolver,
     out: &mut Vec<ClassDecl>,
 ) {
     match node {
-        Node::Class(c) => out.push(lower_class(c, aliases, docs)),
-        Node::Interface(i) => out.push(lower_interface(i, aliases, docs)),
+        Node::Class(c) => out.push(lower_class(c, aliases, docs, rc)),
+        Node::Interface(i) => out.push(lower_interface(i, aliases, docs, rc)),
+        Node::Enum(e) => out.push(lower_enum(e, aliases, docs, rc)),
         _ => {}
     }
     for child in node.children() {
-        lower_classes_into(&child, aliases, docs, out);
+        lower_classes_into(&child, aliases, docs, rc, out);
     }
 }
 
-fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> ClassDecl {
+fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: &RefResolver) -> ClassDecl {
     let parent = c
         .extends
         .as_ref()
@@ -1582,12 +1681,12 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> C
             ClassLikeMember::Method(m) => {
                 // A constructor's promoted params are properties too (ADR-0036).
                 if bytes_to_string(m.name.value).eq_ignore_ascii_case("__construct") {
-                    lower_promoted_params(m, &mut properties);
+                    lower_promoted_params(m, rc, &mut properties);
                 }
-                methods.push(lower_method(m, aliases, docs));
+                methods.push(lower_method(m, aliases, docs, rc));
             }
             ClassLikeMember::Property(Property::Plain(p)) => {
-                lower_plain_property(p, docs, &mut properties);
+                lower_plain_property(p, docs, rc, &mut properties);
             }
             // Hooked properties (`public $x { get => … }`) are virtual/computed —
             // not lowered this slice (out of object-state scope; never heap-tracked,
@@ -1603,6 +1702,9 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> C
         fqn: String::new(), // filled in `parse` from the enclosing namespace ctx
         is_final: c.modifiers.iter().any(Modifier::is_final),
         is_interface: false,
+        is_enum: false,
+        enum_backing: None,
+        enum_cases: Vec::new(),
         parent,
         implements,
         methods,
@@ -1626,11 +1728,11 @@ fn visibility_of(modifiers: &mago_syntax::cst::Sequence<'_, Modifier<'_>>) -> Vi
 
 /// Lower a plain property declaration (possibly multi-item `public int $a, $b;`)
 /// into one [`PropertyDecl`] per declared variable (ADR-0036).
-fn lower_plain_property(p: &PlainProperty<'_>, docs: &DocIndex, out: &mut Vec<PropertyDecl>) {
+fn lower_plain_property(p: &PlainProperty<'_>, docs: &DocIndex, rc: &RefResolver, out: &mut Vec<PropertyDecl>) {
     let readonly = p.modifiers.iter().any(Modifier::is_readonly);
     let is_static = p.modifiers.iter().any(Modifier::is_static);
     let visibility = visibility_of(&p.modifiers);
-    let ty = p.hint.as_ref().and_then(lower_hint);
+    let ty = p.hint.as_ref().and_then(|h| lower_hint(h, rc));
     let docblock = docs.preceding(to_span(p.span()).start);
     let span = to_span(p.span());
     for item in p.items.iter() {
@@ -1659,14 +1761,14 @@ fn lower_plain_property(p: &PlainProperty<'_>, docs: &DocIndex, out: &mut Vec<Pr
 
 /// Lower a constructor's promoted parameters into [`PropertyDecl`]s (ADR-0036).
 /// A parameter is promoted iff it carries a modifier (visibility / `readonly`).
-fn lower_promoted_params(m: &Method<'_>, out: &mut Vec<PropertyDecl>) {
+fn lower_promoted_params(m: &Method<'_>, rc: &RefResolver, out: &mut Vec<PropertyDecl>) {
     for p in m.parameter_list.parameters.iter() {
         if !p.is_promoted_property() {
             continue;
         }
         let readonly = p.modifiers.iter().any(Modifier::is_readonly);
         let visibility = visibility_of(&p.modifiers);
-        let ty = p.hint.as_ref().and_then(lower_hint);
+        let ty = p.hint.as_ref().and_then(|h| lower_hint(h, rc));
         let has_default = p.default_value.is_some();
         let default = p
             .default_value
@@ -1692,7 +1794,7 @@ fn lower_promoted_params(m: &Method<'_>, out: &mut Vec<PropertyDecl>) {
 /// (ADR-0033 Liskov): its methods are abstract signatures carrying effect
 /// envelopes and `@throws` docblocks. An interface's `extends` list (interfaces
 /// can extend several) becomes `parent` (the first) plus `implements` (the rest).
-fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> ClassDecl {
+fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: &RefResolver) -> ClassDecl {
     let mut extended: Vec<NameRef> =
         i.extends.as_ref().map(|e| e.types.iter().map(name_ref).collect()).unwrap_or_default();
     let parent = if extended.is_empty() { None } else { Some(extended.remove(0)) };
@@ -1700,7 +1802,7 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
     let mut methods = Vec::new();
     for member in i.members.iter() {
         if let ClassLikeMember::Method(m) = member {
-            methods.push(lower_method(m, aliases, docs));
+            methods.push(lower_method(m, aliases, docs, rc));
         }
     }
 
@@ -1709,6 +1811,9 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
         fqn: String::new(),
         is_final: false,
         is_interface: true,
+        is_enum: false,
+        enum_backing: None,
+        enum_cases: Vec::new(),
         parent,
         implements: extended,
         methods,
@@ -1718,7 +1823,74 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
     }
 }
 
-fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) -> MethodDecl {
+/// Lower an `enum` declaration to a [`ClassDecl`] with `is_enum = true`
+/// (ADR-0043 object/method world). An enum is implicitly `final`, cannot extend,
+/// and joins the class index like a class/interface so subtyping can reason about
+/// it. Its `implements` list is recorded (the is-a oracle walks it, plus the
+/// implicit `UnitEnum`/`BackedEnum` catalog tree); its cases + backing scalar are
+/// recorded for value reasoning.
+///
+/// V1 deliberately does **not** analyze enum method bodies: [`methods`] is left
+/// empty and no scope is built (see [`ClassDecl`]), so an enum body introduces no
+/// new throw/effect/Liskov findings — the zero-behavior-change invariant of
+/// stage 1. Deferred-with-design: enum methods land with the method-transform
+/// stage that needs them.
+fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _docs: &DocIndex, rc: &RefResolver) -> ClassDecl {
+    let implements: Vec<NameRef> = e
+        .implements
+        .as_ref()
+        .map(|i| i.types.iter().map(name_ref).collect())
+        .unwrap_or_default();
+
+    // Backing scalar: only `int`/`string` are legal enum backings; anything else
+    // (should not occur) records no backing.
+    let enum_backing = e.backing_type_hint.as_ref().and_then(|b| match &b.hint {
+        Hint::Integer(_) => Some(ScalarType::Int),
+        Hint::String(_) => Some(ScalarType::String),
+        _ => None,
+    });
+
+    let mut enum_cases = Vec::new();
+    for member in e.members.iter() {
+        if let ClassLikeMember::EnumCase(case) = member {
+            let (name_id, value) = match &case.item {
+                mago_syntax::cst::EnumCaseItem::Unit(u) => (&u.name, None),
+                mago_syntax::cst::EnumCaseItem::Backed(b) => {
+                    let v = lower_arg_value(b.value);
+                    (&b.name, (!matches!(v, ArgValue::Other)).then_some(v))
+                }
+            };
+            enum_cases.push(EnumCaseDecl {
+                name: bytes_to_string(name_id.value),
+                value,
+                span: to_span(case.span()),
+            });
+        }
+    }
+
+    // `rc` is unused today (enum name hints are not resolved through it), but kept
+    // in the signature for symmetry with the other class-like lowerers and for the
+    // deferred method-lowering path.
+    let _ = rc;
+
+    ClassDecl {
+        name: bytes_to_string(e.name.value),
+        fqn: String::new(),
+        is_final: true, // enums are implicitly final in PHP
+        is_interface: false,
+        is_enum: true,
+        enum_backing,
+        enum_cases,
+        parent: None,
+        implements,
+        methods: Vec::new(),
+        properties: Vec::new(),
+        uses_traits: false,
+        span: to_span(e.name.span()),
+    }
+}
+
+fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: &RefResolver) -> MethodDecl {
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
     if let MethodBody::Concrete(block) = &m.body {
@@ -1736,8 +1908,8 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) ->
 
     MethodDecl {
         name,
-        params: lower_params(&m.parameter_list),
-        ret: m.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint)),
+        params: lower_params(&m.parameter_list, rc),
+        ret: m.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
         span: to_span(m.name.span()),
         effect_envelope: attrs_effect_envelope(&m.attribute_lists, aliases),
         effect_origins,
@@ -2461,10 +2633,10 @@ fn lower_catch_hint(hint: &Hint<'_>, classes: &mut Vec<NameRef>, unresolvable: &
 /// not model. A single non-scalar member anywhere (class type, `array`, `mixed`,
 /// `iterable`, `callable`, `object`, an intersection, `self`/`static`/`parent`,
 /// `void`/`never`) collapses the **whole** hint to `None` (silent; zero-FP).
-fn lower_hint(hint: &Hint<'_>) -> Option<NativeType> {
+fn lower_hint(hint: &Hint<'_>, rc: &RefResolver) -> Option<NativeType> {
     let mut members = Vec::new();
     let mut nullable = false;
-    lower_hint_into(hint, &mut members, &mut nullable)?;
+    lower_hint_into(hint, rc, &mut members, &mut nullable)?;
     // A hint with no non-null members (standalone `null`) is not modeled.
     if members.is_empty() {
         return None;
@@ -2477,6 +2649,7 @@ fn lower_hint(hint: &Hint<'_>) -> Option<NativeType> {
 /// model, collapsing the whole hint to silence.
 fn lower_hint_into(
     hint: &Hint<'_>,
+    rc: &RefResolver,
     members: &mut Vec<TypeMember>,
     nullable: &mut bool,
 ) -> Option<()> {
@@ -2488,17 +2661,25 @@ fn lower_hint_into(
         Hint::False(_) => members.push(TypeMember::BoolLiteral(false)),
         Hint::True(_) => members.push(TypeMember::BoolLiteral(true)),
         Hint::Null(_) => *nullable = true,
+        // A class / interface / enum name (ADR-0043): resolve to its lowercase
+        // FQN and join the union as an `Instance` member. `self`/`static`/`parent`
+        // are *not* `Hint::Identifier` (they are their own hint variants) — they
+        // stay in the silence arm below, per ADR-0043 (late-static-binding is
+        // not v1).
+        Hint::Identifier(id) => members.push(TypeMember::Instance(rc.class_fqn(&name_ref(id)))),
         Hint::Nullable(n) => {
             *nullable = true;
-            lower_hint_into(n.hint, members, nullable)?;
+            lower_hint_into(n.hint, rc, members, nullable)?;
         }
         Hint::Union(u) => {
-            lower_hint_into(u.left, members, nullable)?;
-            lower_hint_into(u.right, members, nullable)?;
+            lower_hint_into(u.left, rc, members, nullable)?;
+            lower_hint_into(u.right, rc, members, nullable)?;
         }
-        Hint::Parenthesized(p) => lower_hint_into(p.hint, members, nullable)?,
-        // Class `Identifier`, `array`, `mixed`, `iterable`, `callable`, `object`,
-        // `Intersection`, `self`/`static`/`parent`, `void`/`never`, … → silence.
+        Hint::Parenthesized(p) => lower_hint_into(p.hint, rc, members, nullable)?,
+        // `array`, `mixed`, `iterable`, `callable`, `object`, `self`/`static`/
+        // `parent`, `void`/`never`, and any `Intersection` → silence. Intersections
+        // stay unlowered in v1 (deferred-with-design: an intersection would need a
+        // conjunctive `Instance` member the union shape does not yet carry).
         _ => return None,
     }
     Some(())
@@ -2544,6 +2725,15 @@ fn lower_argument_list(list: &mago_syntax::cst::ArgumentList<'_>) -> (Vec<Arg>, 
 fn method_name_of(selector: &ClassLikeMemberSelector<'_>) -> Option<String> {
     match selector {
         ClassLikeMemberSelector::Identifier(id) => Some(bytes_to_string(id.value)),
+        _ => None,
+    }
+}
+
+/// The constant / enum-case name of a `Class::NAME` access, if statically named
+/// (`::CONST`, `::Case`). A dynamic name (`Class::{$x}`) yields `None`.
+fn class_const_name(selector: &ClassLikeConstantSelector<'_>) -> Option<String> {
+    match selector {
+        ClassLikeConstantSelector::Identifier(id) => Some(bytes_to_string(id.value)),
         _ => None,
     }
 }
@@ -2675,6 +2865,18 @@ fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
             Some((var, prop)) => ArgValue::PropFetch { var, prop },
             None => ArgValue::Other,
         },
+        // A class-constant / enum-case access `Class::NAME` (ADR-0043). The class
+        // portion resolves through the same static-class path as `Class::m()`
+        // (explicit name or `self`/`static`/`parent`); a dynamic class expr or a
+        // dynamic constant name (`Foo::{$x}`) lowers to `Other`. This is an
+        // **unproven** value (== `Other`) until the inference layer reinterprets
+        // it against a resolved enum or a literal class-constant initializer.
+        Expression::Access(Access::ClassConstant(cc)) => {
+            match (trace_static_class(cc.class), class_const_name(&cc.constant)) {
+                (Some(class), Some(name)) => ArgValue::ClassConst(class, name),
+                _ => ArgValue::Other,
+            }
+        }
         // `clone $var` (ADR-0036): a shallow object copy of a bare variable operand.
         Expression::Clone(c) => match c.object.unparenthesized() {
             Expression::Variable(Variable::Direct(dv)) => {
@@ -2874,8 +3076,9 @@ fn lower_scopes(
     for s in program.statements.iter() {
         flatten_top_level(s, &mut top);
     }
+    let rc = RefResolver { contexts, regions };
     let mut scopes = vec![build_scope_from(ScopeOwner::TopLevel, &top)];
-    collect_scopes(&Node::Program(program), contexts, regions, &mut scopes);
+    collect_scopes(&Node::Program(program), contexts, regions, &rc, &mut scopes);
     scopes
 }
 
@@ -2902,6 +3105,7 @@ fn collect_scopes(
     node: &Node<'_, '_>,
     contexts: &[NsCtx],
     regions: &[(u32, u32, usize)],
+    rc: &RefResolver,
     out: &mut Vec<Scope>,
 ) {
     match node {
@@ -2931,15 +3135,15 @@ fn collect_scopes(
         }
         // Closures / arrow fns get their own scope (ADR-0033), addressed by the
         // definition-site byte offset. Params/effects/throws ride on the scope.
-        Node::Closure(cl) => out.push(build_closure_scope_from_closure(cl)),
-        Node::ArrowFunction(af) => out.push(build_closure_scope_from_arrow(af)),
+        Node::Closure(cl) => out.push(build_closure_scope_from_closure(cl, rc)),
+        Node::ArrowFunction(af) => out.push(build_closure_scope_from_arrow(af, rc)),
         _ => {}
     }
     // Recurse so nested functions (inside methods or blocks) and nested classes
     // also get their scopes. Method scopes are only created above (matching
     // `Node::Class`), so this recursion never double-creates one.
     for child in node.children() {
-        collect_scopes(&child, contexts, regions, out);
+        collect_scopes(&child, contexts, regions, rc, out);
     }
 }
 
@@ -3008,7 +3212,7 @@ fn closure_has_byref_use(cl: &mago_syntax::cst::Closure<'_>) -> bool {
 }
 
 /// Build the [`Scope`] for a `function (...) use (...) {...}` closure (ADR-0033).
-fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>) -> Scope {
+fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>, rc: &RefResolver) -> Scope {
     let mut stmts = Vec::new();
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
@@ -3027,7 +3231,7 @@ fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>) -> Scope
         owner: ScopeOwner::Closure { def_offset: closure_def_offset(cl) },
         poisoned,
         stmts,
-        params: lower_params(&cl.parameter_list),
+        params: lower_params(&cl.parameter_list, rc),
         effect_origins,
         throw_origins,
     }
@@ -3036,7 +3240,7 @@ fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>) -> Scope
 /// Build the [`Scope`] for an arrow function `fn(...) => expr` (ADR-0033). The
 /// single body expression lowers to one `return <expr>;` statement so a call
 /// inside it (`fn($x) => width($x)`) is a reachable propagation/descent edge.
-fn build_closure_scope_from_arrow(af: &mago_syntax::cst::ArrowFunction<'_>) -> Scope {
+fn build_closure_scope_from_arrow(af: &mago_syntax::cst::ArrowFunction<'_>, rc: &RefResolver) -> Scope {
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
     // An arrow body is a single expression — no local assignments to resolve.
@@ -3060,7 +3264,7 @@ fn build_closure_scope_from_arrow(af: &mago_syntax::cst::ArrowFunction<'_>) -> S
         owner: ScopeOwner::Closure { def_offset: arrow_def_offset(af) },
         poisoned,
         stmts: vec![ret],
-        params: lower_params(&af.parameter_list),
+        params: lower_params(&af.parameter_list, rc),
         effect_origins,
         throw_origins,
     }
@@ -3969,6 +4173,59 @@ fn fqn_of(ctx: &NsCtx, name: &str) -> String {
         name.to_ascii_lowercase()
     } else {
         format!("{}\\{}", ctx.namespace, name).to_ascii_lowercase()
+    }
+}
+
+/// Resolve a **class** reference to its FQN (case preserved, no leading `\`) in
+/// namespace context `ctx`, applying PHP class-name resolution: fully-qualified
+/// names pass through; qualified/unqualified names apply `use` class imports on
+/// the first segment, else prepend the current namespace. Class references have
+/// no global fallback (unlike functions), so this is a pure function of the
+/// reference and its context. Shared by [`SourceTree::resolve_class_fqn`]
+/// (use-time, case-preserved) and [`RefResolver`] (lowering-time, lowercased).
+fn resolve_class_ref(ctx: &NsCtx, r: &NameRef) -> String {
+    match r.kind {
+        RefKind::FullyQualified => r.raw.clone(),
+        RefKind::Qualified => {
+            // First segment via class/namespace imports, else current ns.
+            let first_len = r.raw.find('\\').unwrap_or(r.raw.len());
+            let first = &r.raw[..first_len];
+            if let Some(target) = ctx.class_imports.get(&first.to_ascii_lowercase()) {
+                format!("{target}{}", &r.raw[first_len..])
+            } else if ctx.namespace.is_empty() {
+                r.raw.clone()
+            } else {
+                format!("{}\\{}", ctx.namespace, r.raw)
+            }
+        }
+        RefKind::Unqualified => {
+            if let Some(target) = ctx.class_imports.get(&r.raw.to_ascii_lowercase()) {
+                target.clone()
+            } else if ctx.namespace.is_empty() {
+                r.raw.clone()
+            } else {
+                format!("{}\\{}", ctx.namespace, r.raw)
+            }
+        }
+    }
+}
+
+/// Lowering-time namespace resolver for object type hints (ADR-0043). Carries the
+/// file's namespace contexts + regions so a class/interface/enum name in a native
+/// hint can be resolved to its lowercase-normalized FQN (matching
+/// [`ClassDecl::fqn`]) at the point of lowering, exactly like the FQN post-pass
+/// does for declaration names. Threaded alongside the attribute aliases + docs
+/// through the hint-bearing lowering functions.
+struct RefResolver<'a> {
+    contexts: &'a [NsCtx],
+    regions: &'a [(u32, u32, usize)],
+}
+
+impl RefResolver<'_> {
+    /// The lowercase-normalized FQN a class-name reference resolves to, in the
+    /// namespace context enclosing its offset.
+    fn class_fqn(&self, r: &NameRef) -> String {
+        resolve_class_ref(ctx_of(self.contexts, self.regions, r.offset), r).to_ascii_lowercase()
     }
 }
 
