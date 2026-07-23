@@ -428,6 +428,7 @@ fn arg_to_fold(arg: &ArgValue) -> Option<FoldArg> {
         | ArgValue::Closure(_)
         | ArgValue::PropFetch { .. }
         | ArgValue::Clone(_)
+        | ArgValue::Coalesce(..)
         // Object-world values (ADR-0043) are not fold arguments — unproven, == Other.
         | ArgValue::ClassConst(..)
         | ArgValue::EnumCase(..)
@@ -2899,6 +2900,7 @@ fn val_of(arg: &ArgValue) -> Option<Val> {
         | ArgValue::Call(..)
         | ArgValue::New(..)
         | ArgValue::Ternary { .. }
+        | ArgValue::Coalesce(..)
         | ArgValue::Closure(_)
         | ArgValue::PropFetch { .. }
         | ArgValue::Clone(_)
@@ -3655,6 +3657,10 @@ fn value_stratum(value: &ArgValue, env: &HashMap<String, Known>, store: Option<&
         ArgValue::Ternary { then_val, else_val, .. } => {
             value_stratum(then_val, env, store).min(value_stratum(else_val, env, store))
         }
+        // `$a ?? $b` consumes both operands' facts (a widening join): `min` (§5).
+        ArgValue::Coalesce(a, b) => {
+            value_stratum(a, env, store).min(value_stratum(b, env, store))
+        }
         _ => Stratum::Verified,
     }
 }
@@ -3773,6 +3779,28 @@ fn apply_assign(
                 env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
             }
         }
+        // `$x = $a ?? $b` (ADR-0052 §6): the value is the non-null part of `$a`
+        // unioned with `$b` — `clear_null(fact($a)) join fact($b)`. A fact only when
+        // BOTH operands are visible facts; an unseen operand (an array offset, an
+        // unknown call) yields no fact, so `??` never manufactures certainty for a
+        // value it cannot spell. The join widens, so it can only *lose* precision
+        // (never fire a proof the concrete arms would not) — the FP-safe side.
+        ArgValue::Coalesce(a, b) => {
+            match eval_coalesce_fact(w, folder, a, b, env) {
+                Some(fact) => {
+                    // Derivation clause: the value is one of the two operands, so the
+                    // stratum is `min` over both (either could be the chosen one).
+                    let strat = value_stratum(a, env, Some(&*store))
+                        .min(value_stratum(b, env, Some(&*store)));
+                    env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
+                    store.unbind(var);
+                }
+                None => {
+                    env.remove(var);
+                    store.unbind(var);
+                }
+            }
+        }
         _ => match cx.resolve_literal(value, env, w.scope.poisoned, folder).and_then(|lit| {
             singleton_fact(&lit).map(|f| (lit, f))
         }) {
@@ -3794,6 +3822,45 @@ fn apply_assign(
                 store.unbind(var);
             }
         },
+    }
+}
+
+/// The fact of `$a ?? $b` (ADR-0052 §6): `clear_null(fact($a)) join fact($b)`. Both
+/// operand facts must be visible — an operand the domain cannot spell yields no
+/// fact and the whole expression yields `None` (silent). A provably-null `$a`
+/// (`clear_null` empties it) collapses to exactly `fact($b)`.
+fn eval_coalesce_fact(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    a: &ArgValue,
+    b: &ArgValue,
+    env: &HashMap<String, Known>,
+) -> Option<Fact> {
+    let fa = arg_value_fact(w, folder, a, env)?;
+    let fb = arg_value_fact(w, folder, b, env)?;
+    match clear_null(&fa) {
+        // `$a` may be non-null: its non-null part unioned with `$b`.
+        Some(a_nonnull) => a_nonnull.join(&fb),
+        // `$a` is provably null (nothing survives `clear_null`): the value is `$b`.
+        None => Some(fb),
+    }
+}
+
+/// The value-domain fact of an rvalue operand for the `??` join: a bare variable's
+/// env fact, or a literal/foldable value's `Singleton`. Non-representable operands
+/// (calls, offsets → `Other`, objects) yield `None`.
+fn arg_value_fact(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    arg: &ArgValue,
+    env: &HashMap<String, Known>,
+) -> Option<Fact> {
+    match arg {
+        ArgValue::Var(name) if !w.scope.poisoned => env.get(name)?.fact.clone(),
+        _ => {
+            let lit = w.cx.resolve_literal(arg, env, w.scope.poisoned, folder)?;
+            singleton_fact(&lit)
+        }
     }
 }
 
@@ -4168,8 +4235,16 @@ fn walk_if(
         Certainty::Maybe => {}
     }
 
-    // 2. Variables the guard itself may mutate (opaque condition reads — e.g. a
-    // by-ref call `if (parse($x))`) are forgotten on *every* resulting path.
+    // 2. The guard's own effects on *every* resulting path, sequenced at the calls'
+    // positions (ADR-0052 §6, replacing the old blanket `cond_invalidations`): a
+    // retained guard call escapes its object arguments/receiver and sweeps the
+    // escaped objects' mutable props (the method receiver's binding survives — a
+    // method call does not rebind its receiver variable, the payoff (i) that lets
+    // `$x !== null && $x->m()` keep a proven-non-null receiver), then by-ref argument
+    // invalidation and opaque reads are forgotten. Both apply before the branch
+    // clones (a call in either operand may have executed on the excluded path too).
+    let guard_calls: Vec<&CallExpr> = collect_guard_calls_any(cond);
+    escape_and_sweep_calls(w, &guard_calls, store);
     for v in cond_invalidations(cond) {
         env.remove(&v);
         store.unbind(&v);
@@ -4178,25 +4253,20 @@ fn walk_if(
     // 3. Walk the live branches on cloned envs, collecting those that fall through.
     let mut fell: Vec<(HashMap<String, Known>, Store)> = Vec::new();
 
-    // A guard call (`if (isFoo($x))` / `if (!isFoo($x))`) whose callee carries
-    // `-if-true`/`-if-false` envelopes: apply the matching-polarity specs on each
-    // branch at the `Asserted` stratum (ADR-0052 §5). `then_is_true` records whether
-    // the then-branch corresponds to the call returning `true` (flipped under `!`).
-    let guard_call: Option<(&CallExpr, bool)> = match cond {
-        CondExpr::Call { call, .. } => Some((call, true)),
-        CondExpr::Not(inner) => match inner.as_ref() {
-            CondExpr::Call { call, .. } => Some((call, false)),
-            _ => None,
-        },
-        _ => None,
-    };
-
+    // Guard calls carrying `-if-true`/`-if-false` envelopes, collected per branch
+    // polarity through the `&&`/`||` structure (ADR-0052 §6, extending N2's
+    // top-level-only consumption into nested positions: `if ($a && isNonEmpty($s))`
+    // now consumes `isNonEmpty`'s `-if-true` on the then-branch). Each carries whether
+    // the call returned `true` on that branch, selecting the spec polarity. The specs
+    // apply at the `Asserted` stratum (§5) — silence only, never a proof premise.
     if verdict != Certainty::No {
         let mut benv = env.clone();
         let mut bclasses = store.clone();
         apply_refinements(&then_refinements(cond), &mut benv, &mut bclasses, Stratum::Verified);
-        if let Some((call, then_is_true)) = guard_call {
-            let kind = if then_is_true { AssertKind::IfTrue } else { AssertKind::IfFalse };
+        let mut then_calls = Vec::new();
+        collect_guard_calls(cond, true, &mut then_calls);
+        for (call, returns_true) in then_calls {
+            let kind = if returns_true { AssertKind::IfTrue } else { AssertKind::IfFalse };
             apply_guard_asserts(w, call, kind, &mut benv, &mut bclasses);
         }
         if walk_trace(w, folder, then_trace, &mut benv, &mut bclasses, descent, facts, true, out)
@@ -4210,9 +4280,10 @@ fn walk_if(
         let mut benv = env.clone();
         let mut bclasses = store.clone();
         apply_refinements(&else_refinements(cond), &mut benv, &mut bclasses, Stratum::Verified);
-        if let Some((call, then_is_true)) = guard_call {
-            // The else branch is the opposite polarity of the then branch.
-            let kind = if then_is_true { AssertKind::IfFalse } else { AssertKind::IfTrue };
+        let mut else_calls = Vec::new();
+        collect_guard_calls(cond, false, &mut else_calls);
+        for (call, returns_true) in else_calls {
+            let kind = if returns_true { AssertKind::IfTrue } else { AssertKind::IfFalse };
             apply_guard_asserts(w, call, kind, &mut benv, &mut bclasses);
         }
         if walk_else(w, folder, elseifs, else_trace, &mut benv, &mut bclasses, descent, facts, out)
@@ -4507,14 +4578,64 @@ fn eval_cond(
             eval_instanceof(w, operand, class_ref, store, poisoned)
         }
         CondExpr::Not(c) => eval_cond(w, c, env, store, poisoned).not(),
-        CondExpr::And(a, b) => eval_cond(w, a, env, store, poisoned)
-            .and(eval_cond(w, b, env, store, poisoned)),
-        CondExpr::Or(a, b) => eval_cond(w, a, env, store, poisoned)
-            .or(eval_cond(w, b, env, store, poisoned)),
+        // Short-circuit env threading (ADR-0052 §6 / N3): the RIGHT operand
+        // evaluates under the env the LEFT operand's outcome establishes, exactly as
+        // PHP's `&&`/`||` sequence it — `b` in `a && b` runs only when `a` was truthy
+        // (so it sees `then_refinements(a)`); `b` in `a || b` runs only when `a` was
+        // falsy (so it sees `else_refinements(a)`, De Morgan). The composed verdict
+        // stays the trinary `and`/`or`; only the operand env threads. This is
+        // walk-local left-to-right evaluation (ADR-0048 §2): the refinement clone is
+        // discarded, no entry state contributes, no ordering beyond the source's own.
+        CondExpr::And(a, b) => {
+            let va = eval_cond(w, a, env, store, poisoned);
+            // `a` false ⇒ `b` never runs; the verdict is already `No`, and the
+            // threaded env would be a contradiction — skip it.
+            if va == Certainty::No {
+                return Certainty::No;
+            }
+            let (benv, bstore) = threaded_operand_env(a, true, env, store);
+            va.and(eval_cond(w, b, &benv, &bstore, poisoned))
+        }
+        CondExpr::Or(a, b) => {
+            let va = eval_cond(w, a, env, store, poisoned);
+            // `a` true ⇒ `b` never runs; the verdict is already `Yes`.
+            if va == Certainty::Yes {
+                return Certainty::Yes;
+            }
+            let (benv, bstore) = threaded_operand_env(a, false, env, store);
+            va.or(eval_cond(w, b, &benv, &bstore, poisoned))
+        }
         // A guard call's verdict stays undecided (the retained-guard-call verdict
         // machinery — foldable predicates — is ADR-0052 §6 / N3).
         CondExpr::Opaque { .. } | CondExpr::Call { .. } => Certainty::Maybe,
     }
+}
+
+/// A clone of `(env, store)` with the refinements `operand` establishes on the
+/// given branch polarity applied (ADR-0052 §6 short-circuit threading). Used only
+/// to evaluate the *right* operand of an `&&`/`||` at the precision the left
+/// operand's runtime outcome guarantees. Native-condition refinements are
+/// `Verified` (the runtime executed the test); the clone is discarded after the
+/// verdict, so nothing leaks into the caller's env (ADR-0048 §2 walk-locality).
+fn threaded_operand_env(
+    operand: &CondExpr,
+    then: bool,
+    env: &HashMap<String, Known>,
+    store: &Store,
+) -> (HashMap<String, Known>, Store) {
+    let mut benv = env.clone();
+    let mut bstore = store.clone();
+    let mut refs = Vec::new();
+    collect_refine(operand, then, &mut refs);
+    apply_refinements(&refs, &mut benv, &mut bstore, Stratum::Verified);
+    // The operand's own side effects land *after* its test narrowed (a by-ref call
+    // in the operand may rebind a variable the test just constrained): forget them
+    // so the right operand's verdict reads the post-`operand` env, not a stale one.
+    for v in cond_invalidations(operand) {
+        benv.remove(&v);
+        bstore.unbind(&v);
+    }
+    (benv, bstore)
 }
 
 /// Evaluate a ternary rvalue to an env [`Fact`] (ADR-0031): a decided guard picks
@@ -4530,17 +4651,27 @@ fn eval_ternary_fact(
     store: &Store,
 ) -> Option<Fact> {
     let poisoned = w.scope.poisoned;
-    let mut resolve = |v: &ArgValue| w.cx.resolve_literal(v, env, poisoned, folder);
-    match eval_cond(w, cond, env, store, poisoned) {
-        Certainty::Yes => resolve(then_val).and_then(|a| singleton_fact(&a)),
-        Certainty::No => resolve(else_val).and_then(|a| singleton_fact(&a)),
+    let verdict = eval_cond(w, cond, env, store, poisoned);
+    // The arms evaluate under the guard's respective refinements (ADR-0052 §6):
+    // `$c ? A : B` — `A` runs only when `$c` was truthy (so it sees
+    // `then_refinements($c)`), `B` only when `$c` was falsy (`else_refinements`).
+    // The arm-selection verdict logic is unchanged; only the arm *envs* thread.
+    let (tenv, _) = threaded_operand_env(cond, true, env, store);
+    let (eenv, _) = threaded_operand_env(cond, false, env, store);
+    match verdict {
+        Certainty::Yes => {
+            w.cx.resolve_literal(then_val, &tenv, poisoned, folder).and_then(|a| singleton_fact(&a))
+        }
+        Certainty::No => {
+            w.cx.resolve_literal(else_val, &eenv, poisoned, folder).and_then(|a| singleton_fact(&a))
+        }
         Certainty::Maybe => {
             // Undecided guard: the value is one of the two arms. `Fact::from_vals`
             // gives the canonical finite form (a `Singleton` when the arms are
             // equal, else a `OneOf`), or `None` (dropped) when an arm is not
             // representable.
-            let t = val_of(&resolve(then_val)?)?;
-            let e = val_of(&resolve(else_val)?)?;
+            let t = val_of(&w.cx.resolve_literal(then_val, &tenv, poisoned, folder)?)?;
+            let e = val_of(&w.cx.resolve_literal(else_val, &eenv, poisoned, folder)?)?;
             Fact::from_vals(vec![t, e])
         }
     }
@@ -4735,6 +4866,49 @@ fn else_refinements(cond: &CondExpr) -> Vec<Refine> {
     let mut out = Vec::new();
     collect_refine(cond, false, &mut out);
     out
+}
+
+/// Guard calls whose `@phpstan-assert-if-true`/`-if-false` envelope applies on the
+/// given branch polarity, in source order — the same And-then / Or-else
+/// distribution as [`collect_refine`], so a call nested in a threaded `&&`/`||`
+/// (`if ($a && isNonEmpty($s))`) reaches its consumption point (ADR-0052 §6). The
+/// paired `bool` is whether the call returned `true` on this branch (it flips under
+/// `Not`), selecting the [`AssertKind`] polarity.
+fn collect_guard_calls<'a>(cond: &'a CondExpr, then: bool, out: &mut Vec<(&'a CallExpr, bool)>) {
+    match cond {
+        CondExpr::Call { call, .. } => out.push((call, then)),
+        CondExpr::Not(c) => collect_guard_calls(c, !then, out),
+        CondExpr::And(a, b) if then => {
+            collect_guard_calls(a, true, out);
+            collect_guard_calls(b, true, out);
+        }
+        CondExpr::Or(a, b) if !then => {
+            collect_guard_calls(a, false, out);
+            collect_guard_calls(b, false, out);
+        }
+        _ => {}
+    }
+}
+
+/// Every retained guard call anywhere in the condition (both polarities), for the
+/// position-sequenced escape/sweep and by-ref invalidation that apply on *every*
+/// resulting path (a call in either operand may have executed on the excluded path).
+fn collect_guard_calls_any(cond: &CondExpr) -> Vec<&CallExpr> {
+    let mut out = Vec::new();
+    collect_all_calls(cond, &mut out);
+    out
+}
+
+fn collect_all_calls<'a>(cond: &'a CondExpr, out: &mut Vec<&'a CallExpr>) {
+    match cond {
+        CondExpr::Call { call, .. } => out.push(call),
+        CondExpr::Not(c) => collect_all_calls(c, out),
+        CondExpr::And(a, b) | CondExpr::Or(a, b) => {
+            collect_all_calls(a, out);
+            collect_all_calls(b, out);
+        }
+        _ => {}
+    }
 }
 
 /// Collect the refinements a condition implies on the given polarity (`then` =
@@ -5179,10 +5353,29 @@ fn cond_invalidations(cond: &CondExpr) -> Vec<String> {
 
 fn collect_cond_opaque_reads(cond: &CondExpr, out: &mut Vec<String>) {
     match cond {
-        // A guard call invalidates its read variables identically to the equivalent
-        // opaque condition (ADR-0052 §5 — its `reads` are the same set).
-        CondExpr::Opaque { reads } | CondExpr::Call { reads, .. } => {
+        // An opaque condition may mutate any variable it reads by reference — the
+        // whole read-set is forgotten (the conservative floor, unchanged).
+        CondExpr::Opaque { reads } => {
             for r in reads {
+                if !out.contains(r) {
+                    out.push(r.clone());
+                }
+            }
+        }
+        // A retained guard call forgets its by-ref arguments and every nested
+        // by-ref mention — but NOT a pure method receiver (`$x` in `$x->m()` is not
+        // rebound by the call, only its object's props are swept; ADR-0052 §6 payoff
+        // (i)). The receiver survives only when it is not also handed in as an
+        // argument (`$x->m($x)` passes it by value/ref, so it is still forgotten).
+        CondExpr::Call { call, reads } => {
+            let recv = call_method_receiver_var(call);
+            let recv_is_arg = recv.is_some_and(|r| {
+                call.args.iter().any(|a| matches!(&a.value, ArgValue::Var(v) if v == r))
+            });
+            for r in reads {
+                if Some(r.as_str()) == recv && !recv_is_arg {
+                    continue;
+                }
                 if !out.contains(r) {
                     out.push(r.clone());
                 }
@@ -5194,6 +5387,15 @@ fn collect_cond_opaque_reads(cond: &CondExpr, out: &mut Vec<String>) {
             collect_cond_opaque_reads(b, out);
         }
         _ => {}
+    }
+}
+
+/// The bare method-receiver variable of a call (`$x` in `$x->m(...)`), or `None`
+/// for a function/static/constructor/dynamic call or a non-variable receiver.
+fn call_method_receiver_var(call: &CallExpr) -> Option<&str> {
+    match &call.receiver {
+        Callee::Method { receiver: Receiver::Var(v), .. } => Some(v),
+        _ => None,
     }
 }
 
@@ -5531,12 +5733,23 @@ fn checkable_calls(kind: &StmtKind) -> Vec<&CallExpr> {
 /// precision payoff.
 fn apply_call_escape_and_sweep(w: &WalkCx, kind: &StmtKind, store: &mut Store) {
     let calls = checkable_calls(kind);
+    escape_and_sweep_calls(w, &calls, store);
+}
+
+/// Escape + sweep for an explicit set of calls (ADR-0036), shared by the
+/// statement-position pass ([`apply_call_escape_and_sweep`]) and the guard-position
+/// retained-call handling (ADR-0052 §6): a guard call's object arguments and its
+/// method receiver escape, and any object passed in — or any unknown/overridable
+/// call — sweeps every escaped object's non-readonly props. The receiver's var→id
+/// *binding* survives (a method call does not rebind its receiver variable), so the
+/// receiver stays usable on the guarded path; only its mutable props are swept.
+fn escape_and_sweep_calls(w: &WalkCx, calls: &[&CallExpr], store: &mut Store) {
     if calls.is_empty() {
         return;
     }
     let mut object_passed = false;
     let mut unknown = false;
-    for call in &calls {
+    for call in calls {
         if let Callee::Method { receiver: Receiver::Var(v), .. } = &call.receiver
             && store.is_bound(v)
         {
@@ -6756,6 +6969,7 @@ fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
         ArgValue::Var(_)
         | ArgValue::Call(..)
         | ArgValue::Ternary { .. }
+        | ArgValue::Coalesce(..)
         | ArgValue::PropFetch { .. }
         | ArgValue::Clone(_)
         | ArgValue::ClassConst(..)

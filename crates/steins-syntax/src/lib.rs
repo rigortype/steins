@@ -800,6 +800,14 @@ pub enum ArgValue {
     /// is a project-index fact, not a syntactic one). Like [`ArgValue::New`] it is
     /// not a scalar literal; native scalar checks stay silent on it.
     EnumCase(String, String),
+    /// A null-coalescing rvalue `$a ?? $b` (ADR-0052 §6): the value is `$a` when it
+    /// is set-and-non-null, else `$b`. The walk resolves it to
+    /// `clear_null(fact($a)) join fact($b)` — the non-null part of `$a` unioned with
+    /// `$b`. Only reached when both operands lower to a representable value; an
+    /// operand the domain cannot spell (notably an array offset `$arr['k']`, which
+    /// lowers to [`Self::Other`]) yields no fact, so `??` never manufactures a fact
+    /// for a value it cannot see. Short-ternary `?:` still widens to `Other`.
+    Coalesce(Box<ArgValue>, Box<ArgValue>),
     Other,
 }
 
@@ -924,6 +932,10 @@ impl std::hash::Hash for ArgValue {
                 prop.hash(state);
             }
             ArgValue::Clone(v) => v.hash(state),
+            ArgValue::Coalesce(l, r) => {
+                l.hash(state);
+                r.hash(state);
+            }
             ArgValue::ClassConst(class, name) => {
                 class.hash(state);
                 name.hash(state);
@@ -975,6 +987,7 @@ impl ArgValue {
             ArgValue::Closure(ClosureRef::Anonymous { .. }) => "Closure".to_owned(),
             ArgValue::PropFetch { var, prop } => format!("${var}->{prop}"),
             ArgValue::Clone(v) => format!("clone ${v}"),
+            ArgValue::Coalesce(l, r) => format!("({} ?? {})", l.render(), r.render()),
             ArgValue::ClassConst(class, name) => format!("{}::{name}", class.render()),
             ArgValue::EnumCase(class, case) => format!("{class}::{case}"),
             ArgValue::Other => "<expr>".to_owned(),
@@ -3497,6 +3510,13 @@ fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
             (UnaryPrefixOperator::Plus(_), v @ (ArgValue::Int(_) | ArgValue::Float(_))) => v,
             _ => ArgValue::Other,
         },
+        // Null-coalescing `$a ?? $b` (ADR-0052 §6): a conditional value the walk
+        // resolves to `clear_null(fact($a)) join fact($b)`. Lowered structurally;
+        // an operand the domain cannot spell lowers to `Other`, and the walk then
+        // yields no fact (so `$arr['k'] ?? …` manufactures nothing).
+        Expression::Binary(b) if b.operator.is_null_coalesce() => {
+            ArgValue::Coalesce(Box::new(lower_arg_value(b.lhs)), Box::new(lower_arg_value(b.rhs)))
+        }
         _ => ArgValue::Other,
     }
 }
