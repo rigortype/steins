@@ -8,10 +8,19 @@
 //! *all callers proven* — is structurally unavailable to modular tools (PHPStan,
 //! Rector), which is exactly why it belongs here (ADR-0034).
 //!
-//! ## Scope (v1)
-//! - **Free functions only.** Method call-site resolution across receivers is a
-//!   materially larger inference surface; method promotion is deferred with
-//!   design. Method candidates are therefore *not enumerated* here.
+//! ## Scope
+//! - **Free functions and methods** (ADR-0043 §6). Free-function candidates are
+//!   proven against [`sweep_free_functions`]; method candidates against
+//!   [`sweep_methods`], keyed on the `Sym::Method` identity `(class_fqn, method)`.
+//!   A method is a candidate only when the ADR-0041 §1 **eligibility split**
+//!   admits it — private, or final, or a method of a final class, with no
+//!   inheritance involvement (not overriding an ancestor, not abstract, not an
+//!   interface method, its class not trait-using). Every non-eligible method
+//!   refuses `method-inheritance`; a magic method refuses `magic-method` (ADR-0046
+//!   §3). By construction of the split, narrowing an eligible method's parameter
+//!   cannot break Liskov substitution: a private method is invisible to subtype
+//!   dispatch, and a final method / final-class method cannot be overridden — so
+//!   no supertype caller can reach a narrowed body it would violate.
 //! - Promotable phpdoc types are those representable as a
 //!   [`steins_syntax::NativeType`]: the four scalars, `true`/`false` literals,
 //!   `?T`, and unions of those (plus a `null` member). A finer phpdoc type
@@ -28,15 +37,18 @@
 use steins_contract::{ContractTy, admits_val};
 use steins_db::{Db, Project, SourceFile, parse};
 use steins_domain::Certainty;
-use steins_infer::promote::{FreeFnSweep, TargetSweep, sweep_free_functions};
+use steins_infer::is_vendor_path;
+use steins_infer::promote::{
+    FreeFnSweep, MethodEligibility, MethodSweep, TargetSweep, sweep_free_functions, sweep_methods,
+};
 use steins_phpdoc::ast::{ConstExpr, Type as PType, TypeKind};
 use steins_phpdoc::docblock::DocTag;
 use steins_phpdoc::{TagKind, parse_type, scan_docblock};
-use steins_syntax::{FunctionDecl, NativeType, Param, ScalarType, SourceTree, TypeMember};
+use steins_syntax::{ClassDecl, FunctionDecl, MethodDecl, NativeType, Param, ScalarType, SourceTree, TypeMember};
 
 use crate::common::{
-    arg_to_val, check_caller_enumerability, count_fqns, has_source_hint, native_contract,
-    param_site,
+    arg_to_val, check_caller_enumerability, check_method_caller_enumerability, count_fqns,
+    has_source_hint, method_param_site, native_contract, param_site,
 };
 use crate::obstacles::{self, VouchSet};
 use crate::plan::{ByteSpan, Edit, EditPlan};
@@ -51,7 +63,8 @@ use crate::transform::{CompletenessOracle, Refusal, Transform, TransformReport};
 // resolve.
 pub use crate::common::{
     REASON_AMBIGUOUS, REASON_ARG_NOT_PROVEN, REASON_DYNAMIC_CALL, REASON_DYNAMIC_INCLUDE,
-    REASON_EVAL_PRESENT, REASON_NAMED_OR_SPREAD, REASON_REFERENCED_AS_VALUE,
+    REASON_EVAL_PRESENT, REASON_MAGIC_METHOD, REASON_METHOD_INHERITANCE, REASON_NAMED_OR_SPREAD,
+    REASON_REFERENCED_AS_VALUE,
 };
 
 /// The phpdoc type has no [`NativeType`] rendering and is not a scalar
@@ -91,6 +104,9 @@ impl Transform for PhpdocToNative {
 #[must_use]
 pub fn plan_phpdoc_to_native(db: &dyn Db, project: Project, vouches: &VouchSet) -> TransformReport {
     let sweep = sweep_free_functions(db, project);
+    // The class-world reverse sweep (ADR-0043 §6): method targets, taints, and the
+    // ADR-0041 §1 eligibility verdicts. Free-function behavior is unaffected.
+    let msweep = sweep_methods(db, project);
 
     // Project-global dynamic-code obstacles (ADR-0046 §2): recorded once, and — if
     // any stands unvouched — every candidate refuses with its reason.
@@ -108,14 +124,30 @@ pub fn plan_phpdoc_to_native(db: &dyn Db, project: Project, vouches: &VouchSet) 
     let mut oracle = CompletenessOracle::default();
 
     for &file in &files {
-        let tree = parse(db, file);
         let path = file.path(db);
+        // Vendor files participate in the reverse SWEEP (as callers and as
+        // definitions) but are never transform CANDIDATES: a rewrite into `vendor/`
+        // is outside the tool's write contract — composer overwrites it, and vendor
+        // diagnostics are off by default (ADR-0015). Candidate enumeration is
+        // project-only; caller/obstacle enumeration (above) still spans vendor.
+        if is_vendor_path(path) {
+            continue;
+        }
+        let tree = parse(db, file);
         let source = file.text(db);
         for func in tree.functions() {
             plan_function(
                 func, path, source, tree, &sweep, &fqn_counts, blocking.as_ref(), &mut plan,
                 &mut refusals, &mut oracle,
             );
+        }
+        for class in tree.classes() {
+            for method in &class.methods {
+                plan_method(
+                    class, method, path, source, tree, &msweep, blocking.as_ref(), &mut plan,
+                    &mut refusals, &mut oracle,
+                );
+            }
         }
     }
 
@@ -175,9 +207,11 @@ fn plan_function(
                     span: ByteSpan::at(param.span.start),
                     replacement: format!("{} ", native.render()),
                 };
+                let doc_start = func.docblock_span.map_or(0, |s| s.start);
+                let doc_text = func.docblock.as_deref().unwrap_or("");
                 let delete = Edit {
                     path: path.to_owned(),
-                    span: tag_deletion(source, func, tag, tags.len()),
+                    span: tag_deletion(source, doc_start, doc_text, tag, tags.len()),
                     replacement: String::new(),
                 };
                 // Overlap rejection is the plan's job; a rejection here is an
@@ -201,8 +235,8 @@ fn plan_function(
     }
 }
 
-/// Decide a single candidate: `Ok(native)` to promote, `Err((reason, detail))`
-/// to refuse.
+/// Decide a single **free-function** candidate: `Ok(native)` to promote,
+/// `Err((reason, detail))` to refuse.
 fn decide(
     func: &FunctionDecl,
     param: &Param,
@@ -212,6 +246,28 @@ fn decide(
     sweep: &FreeFnSweep,
     fqn_counts: &std::collections::HashMap<String, usize>,
 ) -> Result<NativeType, (&'static str, String)> {
+    // (a/b/b2) The native type mapping + default-value gates (shared with methods).
+    let native = native_of_candidate(param, tag)?;
+
+    // (c) Project-wide obstacles that make "all callers" unknowable (shared with
+    // honesty's `@param` widening).
+    check_caller_enumerability(func, sweep, fqn_counts)?;
+
+    // (d) Prove every observed call-site argument for this parameter position.
+    let contract = native_contract(&native);
+    let _ = source; // (source already consulted in the domain gate)
+    if let Some(target) = sweep.targets.get(&func.fqn) {
+        prove_target(target, idx, param.variadic, &native, &contract)?;
+    }
+    // No target entry means no observed callers — vacuously all-callers-proven
+    // (external/out-of-project callers are outside the analysis boundary).
+
+    Ok(native)
+}
+
+/// The native-type mapping + default-value gates shared by free-function and method
+/// candidates (ADR-0041 points 2/3). `Ok(native)` to keep going, `Err` to refuse.
+fn native_of_candidate(param: &Param, tag: &DocTag) -> Result<NativeType, (&'static str, String)> {
     // (a) Representability: the phpdoc type must map to a NativeType. A type that
     // is strictly *finer* than a native scalar (`positive-int`, `non-empty-string`,
     // `int<0, max>`) refuses distinctly from a genuinely non-scalar type (ADR-0041
@@ -275,19 +331,138 @@ fn decide(
         }
     }
 
-    // (c) Project-wide obstacles that make "all callers" unknowable (shared with
-    // honesty's `@param` widening).
-    check_caller_enumerability(func, sweep, fqn_counts)?;
+    Ok(native)
+}
 
-    // (d) Prove every observed call-site argument for this parameter position.
+// ---- Method promotion (ADR-0043 §6) ---------------------------------------
+
+/// Plan promotions for one method (the class-world analogue of [`plan_function`]),
+/// applying the ADR-0041 §1 eligibility split before any per-site judgment.
+#[allow(clippy::too_many_arguments)]
+fn plan_method(
+    class: &ClassDecl,
+    method: &MethodDecl,
+    path: &str,
+    source: &str,
+    tree: &SourceTree,
+    msweep: &MethodSweep,
+    blocking: Option<&(&'static str, String)>,
+    plan: &mut EditPlan,
+    refusals: &mut Vec<Refusal>,
+    oracle: &mut CompletenessOracle,
+) {
+    let tags = method.docblock.as_deref().map(scan_docblock).unwrap_or_default();
+    let key = (class.fqn.to_ascii_lowercase(), method.name.to_ascii_lowercase());
+
+    for (idx, param) in method.params.iter().enumerate() {
+        // Domain gate 1: the parameter must have no native hint in source.
+        if param.ty.is_some() || has_source_hint(source, param) {
+            continue;
+        }
+        // Domain gate 2: there must be a promotable `@param` tag for it.
+        let Some(tag) = param_tag(&tags, &param.name) else { continue };
+
+        // An *enumerated* site — it must end transformed or refused (the oracle).
+        oracle.enumerated += 1;
+        let site = method_param_site(path, tree, class, method, param);
+
+        // A standing project-global obstacle (ADR-0046 §2) refuses every candidate
+        // before any per-site judgment (an `eval` can call methods too).
+        if let Some((reason, detail)) = blocking {
+            oracle.refused += 1;
+            refusals.push(Refusal::new(site, *reason, detail.clone()));
+            continue;
+        }
+
+        // The ADR-0041 §1 eligibility split (magic / inheritance) precedes the
+        // type/caller judgment: a non-eligible method is never a candidate.
+        match msweep.eligibility.get(&key) {
+            Some(MethodEligibility::Magic) => {
+                oracle.refused += 1;
+                refusals.push(Refusal::new(
+                    site,
+                    REASON_MAGIC_METHOD,
+                    format!(
+                        "`{}::{}` is a magic method; it is invoked by the runtime with no ordinary call site, so it is never a candidate",
+                        class.name, method.name
+                    ),
+                ));
+                continue;
+            }
+            Some(MethodEligibility::Inheritance(detail)) => {
+                oracle.refused += 1;
+                refusals.push(Refusal::new(site, REASON_METHOD_INHERITANCE, detail.clone()));
+                continue;
+            }
+            // `Eligible` (or, defensively, an absent verdict → treat as ineligible).
+            Some(MethodEligibility::Eligible) => {}
+            None => {
+                oracle.refused += 1;
+                refusals.push(Refusal::new(
+                    site,
+                    REASON_METHOD_INHERITANCE,
+                    "method eligibility could not be determined".to_owned(),
+                ));
+                continue;
+            }
+        }
+
+        match decide_method(method, param, idx, tag, &key, msweep) {
+            Ok(native) => {
+                let insert = Edit {
+                    path: path.to_owned(),
+                    span: ByteSpan::at(param.span.start),
+                    replacement: format!("{} ", native.render()),
+                };
+                let doc_start = method.docblock_span.map_or(0, |s| s.start);
+                let doc_text = method.docblock.as_deref().unwrap_or("");
+                let delete = Edit {
+                    path: path.to_owned(),
+                    span: tag_deletion(source, doc_start, doc_text, tag, tags.len()),
+                    replacement: String::new(),
+                };
+                if plan.add_edit(insert).and_then(|()| plan.add_edit(delete)).is_ok() {
+                    oracle.transformed += 1;
+                } else {
+                    oracle.refused += 1;
+                    refusals.push(Refusal::new(
+                        site,
+                        REASON_ARG_NOT_PROVEN,
+                        "internal: promotion edits overlapped another edit; skipped",
+                    ));
+                }
+            }
+            Err((reason, detail)) => {
+                oracle.refused += 1;
+                refusals.push(Refusal::new(site, reason, detail));
+            }
+        }
+    }
+}
+
+/// Decide a single **method** candidate: the type/default gates, then the
+/// method-caller-enumerability obstacles and the observed-argument proof.
+fn decide_method(
+    method: &MethodDecl,
+    param: &Param,
+    idx: usize,
+    tag: &DocTag,
+    key: &(String, String),
+    msweep: &MethodSweep,
+) -> Result<NativeType, (&'static str, String)> {
+    let native = native_of_candidate(param, tag)?;
+
+    // Project-wide obstacles that make "all callers" unknowable for this method
+    // name (dynamic method call, callable-value reference, unresolved receiver).
+    check_method_caller_enumerability(&method.name, msweep)?;
+
+    // Prove every observed call-site argument for this parameter position.
     let contract = native_contract(&native);
-    let _ = source; // (source already consulted in the domain gate)
-    if let Some(target) = sweep.targets.get(&func.fqn) {
+    if let Some(target) = msweep.targets.get(key) {
         prove_target(target, idx, param.variadic, &native, &contract)?;
     }
-    // No target entry means no observed callers — vacuously all-callers-proven
-    // (external/out-of-project callers are outside the analysis boundary).
-
+    // No target entry → no observed in-project callers — vacuously all-callers-
+    // proven (external callers are outside the analysis boundary).
     Ok(native)
 }
 
@@ -359,9 +534,13 @@ fn param_tag<'a>(tags: &'a [DocTag], param_name: &str) -> Option<&'a DocTag> {
 /// - A tag sharing a line with `/**` or `*/` and it is the docblock's only tag →
 ///   delete the whole docblock.
 /// - Otherwise (delimiter line with sibling tags) → delete just the tag text.
-fn tag_deletion(source: &str, func: &FunctionDecl, tag: &DocTag, total_tags: usize) -> ByteSpan {
-    let doc_start = func.docblock_span.map_or(0, |s| s.start);
-    let doc_text = func.docblock.as_deref().unwrap_or("");
+fn tag_deletion(
+    source: &str,
+    doc_start: u32,
+    doc_text: &str,
+    tag: &DocTag,
+    total_tags: usize,
+) -> ByteSpan {
     let line = &doc_text[tag.line_span.start as usize..tag.line_span.end as usize];
     let has_delims = line.contains("/**") || line.contains("*/");
 

@@ -29,8 +29,15 @@ Concretizes ADR-0034 point 4 for the first shipped transform.
    by scanning for the name as a *value*, since these are invisible to
    call resolution), `argument-not-proven` (any call-site arg whose
    resolved fact does not admit the candidate type with
-   `Certainty::Yes`), `method-inheritance`,
-   `type-not-natively-representable`, `phpdoc-finer-than-native`,
+   `Certainty::Yes`), `method-inheritance` (the ADR-0043 §6 eligibility
+   split: a method that is overridable, overriding an ancestor, abstract,
+   an interface method, or in a class whose hierarchy is not fully
+   resolvable — trait-using or an unresolvable parent — so a rewrite could
+   break Liskov), `magic-method` (a `__construct`/`__wakeup`/`__toString`/
+   any `__*` method: invoked by the runtime with no ordinary call site,
+   and `__wakeup`/`__unserialize` by any `unserialize` — never a
+   candidate; ADR-0046 §3), `type-not-natively-representable`,
+   `phpdoc-finer-than-native`,
    `default-not-admitted-by-native` (a non-null parameter default not
    provably admitted by the candidate type — a native hint would turn it
    into a compile-time fatal; unresolvable constant defaults refuse

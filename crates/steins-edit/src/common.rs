@@ -19,10 +19,10 @@ use std::collections::HashMap;
 use steins_contract::{ContractTy, admits_val};
 use steins_db::{Db, SourceFile, parse};
 use steins_domain::{Base, Certainty, Key, StrPreds, Val, CAP};
-use steins_infer::promote::FreeFnSweep;
+use steins_infer::promote::{FreeFnSweep, MethodSweep};
 use steins_syntax::{
-    ArgValue, FunctionDecl, NativeType, NormKey, Param, ScalarType, SourceTree, TypeMember,
-    normalize_array,
+    ArgValue, ClassDecl, FunctionDecl, MethodDecl, NativeType, NormKey, Param, ScalarType,
+    SourceTree, TypeMember, normalize_array,
 };
 
 use crate::transform::SiteRef;
@@ -57,6 +57,17 @@ pub const REASON_EVAL_PRESENT: &str = "eval-present";
 /// universe code (compiled-template caches) can define/call anything. A project-
 /// global obstacle: every candidate refuses.
 pub const REASON_DYNAMIC_INCLUDE: &str = "dynamic-include-present";
+/// The candidate is a method that is inheritance-involved — overridable, overriding
+/// an ancestor, abstract, an interface method, or in a class whose hierarchy is not
+/// fully resolvable (parent unresolvable, or a trait `use` that merges methods).
+/// Narrowing it could break Liskov substitution, so v1 refuses the whole method
+/// (ADR-0041 §1 eligibility split / ADR-0043 §6).
+pub const REASON_METHOD_INHERITANCE: &str = "method-inheritance";
+/// The candidate is a magic method (`__construct`, `__wakeup`, `__toString`, any
+/// `__*`): a magic method is invoked by the runtime with no ordinary call site
+/// (and `__wakeup`/`__unserialize` by any `unserialize`), so it is never a
+/// promotion/honesty candidate (ADR-0046 §3).
+pub const REASON_MAGIC_METHOD: &str = "magic-method";
 
 // ---- Candidate / call-site helpers ----------------------------------------
 
@@ -90,6 +101,78 @@ pub fn param_site(path: &str, tree: &SourceTree, func: &FunctionDecl, param: &Pa
 pub fn return_site(path: &str, tree: &SourceTree, func: &FunctionDecl) -> SiteRef {
     let p = tree.position(func.span.start);
     SiteRef::new(path.to_owned(), p.line, p.column, format!("function {}() @return", func.name))
+}
+
+/// A [`SiteRef`] for a candidate **method** parameter (ADR-0043 §6).
+#[must_use]
+pub fn method_param_site(
+    path: &str,
+    tree: &SourceTree,
+    class: &ClassDecl,
+    method: &MethodDecl,
+    param: &Param,
+) -> SiteRef {
+    let p = tree.position(param.span.start);
+    SiteRef::new(
+        path.to_owned(),
+        p.line,
+        p.column,
+        format!("method {}::{}() param ${}", class.name, method.name, param.name),
+    )
+}
+
+/// A [`SiteRef`] for a candidate method's `@return` site (anchored at the method
+/// name identifier).
+#[must_use]
+pub fn method_return_site(
+    path: &str,
+    tree: &SourceTree,
+    class: &ClassDecl,
+    method: &MethodDecl,
+) -> SiteRef {
+    let p = tree.position(method.span.start);
+    SiteRef::new(
+        path.to_owned(),
+        p.line,
+        p.column,
+        format!("method {}::{}() @return", class.name, method.name),
+    )
+}
+
+/// The project-wide obstacles that make "all callers proven" unknowable for a
+/// **method** target of name `method_name` (shared by method promotion and method
+/// `@param` honesty; ADR-0043 §6). `Ok(())` when the method's callers are
+/// enumerable; otherwise a named refusal.
+///
+/// The per-target `named-or-spread-args` obstacle is not here — it is a fact of one
+/// target's observed calls, checked where the observed args are proven.
+pub fn check_method_caller_enumerability(
+    method_name: &str,
+    sweep: &MethodSweep,
+) -> Result<(), (&'static str, String)> {
+    if sweep.any_dynamic_method {
+        return Err((
+            REASON_DYNAMIC_CALL,
+            "a dynamic method call (`$o->$m()`) in the project could target this method".to_owned(),
+        ));
+    }
+    let name = method_name.to_ascii_lowercase();
+    if sweep.value_referenced_methods.contains(&name) {
+        return Err((
+            REASON_REFERENCED_AS_VALUE,
+            format!("`{method_name}` appears as a callable string / callable-array value"),
+        ));
+    }
+    if let Some(site) = sweep.unresolved_method_names.get(&name) {
+        return Err((
+            REASON_AMBIGUOUS,
+            format!(
+                "a `->{method_name}()` / `::{method_name}()` call at {}:{}:{} resolves to no unique method (unknown receiver class), so callers of every `{method_name}` are open",
+                site.path, site.line, site.column
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Whether the source text at `param.span.start` carries a native type hint.

@@ -9,9 +9,13 @@
 //! ## Enumeration domain
 //! Exactly the sites where `phpdoc.param-mismatch` / `phpdoc.return-mismatch`
 //! fire, restricted to v1 scope:
-//! - **Free functions only** (methods deferred wholesale, same rationale as
-//!   promotion — method call-site resolution across receivers is a materially
-//!   larger surface).
+//! - **Free functions and methods** (ADR-0043 §6). Free-function candidates prove
+//!   against [`sweep_free_functions`]; method candidates key on the `Sym::Method`
+//!   identity `(class_fqn, method)` and prove against [`sweep_methods`], subject to
+//!   the same ADR-0041 §1 eligibility split as method promotion (a non-eligible
+//!   method refuses `method-inheritance`; a magic method refuses `magic-method`).
+//!   Free-function planning is byte-identical to before this extension — the two
+//!   sweeps are independent, and every existing transform test passes unchanged.
 //! - **Literal-only proofs**: a non-literal call-site argument (`@param`) or a
 //!   non-literal return (`@return`) refuses rather than guesses. The
 //!   abstract-fact portion of a mismatch (a typed `$var` with no literal value)
@@ -52,15 +56,20 @@ use std::collections::HashMap;
 use steins_contract::{ContractTy, admits_val, lower};
 use steins_db::{Db, Project, SourceFile, parse};
 use steins_domain::{Certainty, Val};
-use steins_infer::promote::{FreeFnSweep, TargetSweep, sweep_free_functions};
+use steins_infer::is_vendor_path;
+use steins_infer::promote::{
+    FreeFnSweep, MethodEligibility, MethodSweep, TargetSweep, sweep_free_functions, sweep_methods,
+};
 use steins_phpdoc::docblock::DocTag;
 use steins_phpdoc::{TagKind, parse_type, scan_docblock};
 use steins_syntax::{
-    ArgValue, FunctionDecl, NativeType, Param, Scope, ScopeOwner, SourceTree, Stmt, StmtKind,
+    ArgValue, ClassDecl, FunctionDecl, MethodDecl, NativeType, Param, Scope, ScopeOwner, SourceTree,
+    Stmt, StmtKind,
 };
 
 use crate::common::{
-    admits_all, arg_to_val, check_caller_enumerability, count_fqns, native_contract, param_site,
+    admits_all, arg_to_val, check_caller_enumerability, check_method_caller_enumerability,
+    count_fqns, method_param_site, method_return_site, native_contract, param_site,
     render_value_domain, return_site, REASON_ARG_NOT_PROVEN,
 };
 use crate::obstacles::{self, VouchSet};
@@ -74,7 +83,8 @@ use crate::transform::{CompletenessOracle, Refusal, SiteRef, Transform, Transfor
 // `argument-not-proven`) are shared with promotion and re-exported here.
 pub use crate::common::{
     REASON_AMBIGUOUS, REASON_DYNAMIC_CALL, REASON_DYNAMIC_INCLUDE, REASON_EVAL_PRESENT,
-    REASON_NAMED_OR_SPREAD, REASON_REFERENCED_AS_VALUE,
+    REASON_MAGIC_METHOD, REASON_METHOD_INHERITANCE, REASON_NAMED_OR_SPREAD,
+    REASON_REFERENCED_AS_VALUE,
 };
 pub use crate::common::REASON_ARG_NOT_PROVEN as REASON_ARGUMENT_NOT_PROVEN;
 
@@ -112,6 +122,9 @@ impl Transform for PhpdocHonesty {
 #[must_use]
 pub fn plan_phpdoc_honesty(db: &dyn Db, project: Project, vouches: &VouchSet) -> TransformReport {
     let sweep = sweep_free_functions(db, project);
+    // The class-world reverse sweep (ADR-0043 §6): method targets, taints, and the
+    // ADR-0041 §1 eligibility verdicts (honesty applies the same split).
+    let msweep = sweep_methods(db, project);
     let files: Vec<SourceFile> = project.files(db).to_vec();
     let fqn_counts = count_fqns(db, &files);
 
@@ -125,8 +138,15 @@ pub fn plan_phpdoc_honesty(db: &dyn Db, project: Project, vouches: &VouchSet) ->
     let mut oracle = CompletenessOracle::default();
 
     for &file in &files {
-        let tree = parse(db, file);
         let path = file.path(db);
+        // Vendor files participate in the reverse SWEEP but are never transform
+        // CANDIDATES: a docblock rewrite into `vendor/` is outside the tool's write
+        // contract (composer overwrites it; vendor diagnostics are off, ADR-0015).
+        // Candidate enumeration is project-only; the sweeps above still span vendor.
+        if is_vendor_path(path) {
+            continue;
+        }
+        let tree = parse(db, file);
         // Free-function bodies by written name, for `@return` return-site scans.
         let scopes = scopes_by_function(tree);
         for func in tree.functions() {
@@ -139,6 +159,21 @@ pub fn plan_phpdoc_honesty(db: &dyn Db, project: Project, vouches: &VouchSet) ->
                 func, &tags, path, tree, &scopes, blocking.as_ref(), &mut plan, &mut refusals,
                 &mut oracle,
             );
+        }
+        // Method bodies keyed by `(class_fqn, method)`, for method `@return` scans.
+        let method_scopes = scopes_by_method(tree);
+        for class in tree.classes() {
+            for method in &class.methods {
+                let tags = method.docblock.as_deref().map(scan_docblock).unwrap_or_default();
+                plan_method_params(
+                    class, method, &tags, path, tree, &msweep, blocking.as_ref(), &mut plan,
+                    &mut refusals, &mut oracle,
+                );
+                plan_method_return(
+                    class, method, &tags, path, tree, &method_scopes, &msweep, blocking.as_ref(),
+                    &mut plan, &mut refusals, &mut oracle,
+                );
+            }
         }
     }
 
@@ -331,7 +366,7 @@ fn plan_return(
         return;
     }
     let doc_start = func.docblock_span.map_or(0, |s| s.start);
-    match decide_return(func, path, doc_start, gov, plain, scope, &returns) {
+    match decide_return(func.ret.as_ref(), path, doc_start, gov, plain, scope, &returns) {
         Ok(edits) => account(plan, oracle, refusals, &site, edits),
         Err((reason, detail)) => {
             oracle.refused += 1;
@@ -342,7 +377,7 @@ fn plan_return(
 
 #[allow(clippy::too_many_arguments)]
 fn decide_return(
-    func: &FunctionDecl,
+    ret: Option<&NativeType>,
     path: &str,
     doc_start: u32,
     gov: &DocTag,
@@ -381,11 +416,221 @@ fn decide_return(
 
     // ADR-0043 stage 1: an object-bearing native return type is out of the
     // native-guard's scalar domain — skip it (pre-ADR-0043 `None`-typed behavior).
-    if let Some(nt) = func.ret.as_ref().filter(|t| !t.has_instance()) {
+    if let Some(nt) = ret.filter(|t| !t.has_instance()) {
         native_guard(nt, &vals, "return")?;
     }
 
     build_tag_edits(path, doc_start, gov, plain, &vals)
+}
+
+// ---- Method `@param` / `@return` honesty (ADR-0043 §6) ---------------------
+
+/// The ADR-0041 §1 eligibility gate, shared by method `@param` and `@return`
+/// honesty: `Ok(())` when the method may host a rewrite, else the reserved
+/// `magic-method` / `method-inheritance` refusal.
+fn method_eligibility_gate(
+    msweep: &MethodSweep,
+    key: &(String, String),
+    class: &ClassDecl,
+    method: &MethodDecl,
+) -> Result<(), (&'static str, String)> {
+    match msweep.eligibility.get(key) {
+        Some(MethodEligibility::Eligible) => Ok(()),
+        Some(MethodEligibility::Magic) => Err((
+            REASON_MAGIC_METHOD,
+            format!(
+                "`{}::{}` is a magic method; it is invoked by the runtime with no ordinary call site, so it is never a candidate",
+                class.name, method.name
+            ),
+        )),
+        Some(MethodEligibility::Inheritance(detail)) => {
+            Err((REASON_METHOD_INHERITANCE, detail.clone()))
+        }
+        None => Err((
+            REASON_METHOD_INHERITANCE,
+            "method eligibility could not be determined".to_owned(),
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_method_params(
+    class: &ClassDecl,
+    method: &MethodDecl,
+    tags: &[DocTag],
+    path: &str,
+    tree: &SourceTree,
+    msweep: &MethodSweep,
+    blocking: Option<&(&'static str, String)>,
+    plan: &mut EditPlan,
+    refusals: &mut Vec<Refusal>,
+    oracle: &mut CompletenessOracle,
+) {
+    let key = (class.fqn.to_ascii_lowercase(), method.name.to_ascii_lowercase());
+    let target = msweep.targets.get(&key);
+    for (idx, param) in method.params.iter().enumerate() {
+        let (Some(gov), plain) = param_tags(tags, TagKind::Param, Some(&param.name)) else {
+            continue;
+        };
+        if assert_targets(tags, &param.name) {
+            continue;
+        }
+        let Some((gov_contract, _consumed)) = tag_contract(gov) else { continue };
+
+        let matches = |p: usize| if param.variadic { p >= idx } else { p == idx };
+        let null_ok = param.has_null_default
+            || param.ty.as_ref().is_some_and(|t| t.nullable && !t.has_instance());
+        let mut lie = false;
+        if let Some(t) = target {
+            for obs in t.observed.iter().filter(|o| matches(o.param_index)) {
+                if let Some(v) = arg_to_val(&obs.value) {
+                    if matches!(v, Val::Null) && null_ok {
+                        continue;
+                    }
+                    if admits_val(&gov_contract, &v) == Certainty::No {
+                        lie = true;
+                    }
+                }
+            }
+        }
+        if !lie {
+            continue;
+        }
+
+        oracle.enumerated += 1;
+        let site = method_param_site(path, tree, class, method, param);
+        if let Some((reason, detail)) = blocking {
+            oracle.refused += 1;
+            refusals.push(Refusal::new(site, *reason, detail.clone()));
+            continue;
+        }
+        if let Err((reason, detail)) = method_eligibility_gate(msweep, &key, class, method) {
+            oracle.refused += 1;
+            refusals.push(Refusal::new(site, reason, detail));
+            continue;
+        }
+        let doc_start = method.docblock_span.map_or(0, |s| s.start);
+        match decide_method_param(method, param, idx, path, doc_start, gov, plain, &key, msweep) {
+            Ok(edits) => account(plan, oracle, refusals, &site, edits),
+            Err((reason, detail)) => {
+                oracle.refused += 1;
+                refusals.push(Refusal::new(site, reason, detail));
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decide_method_param(
+    method: &MethodDecl,
+    param: &Param,
+    idx: usize,
+    path: &str,
+    doc_start: u32,
+    gov: &DocTag,
+    plain: Option<&DocTag>,
+    key: &(String, String),
+    msweep: &MethodSweep,
+) -> Result<Vec<Edit>, (&'static str, String)> {
+    check_method_caller_enumerability(&method.name, msweep)?;
+    let target = msweep.targets.get(key);
+    if target.is_some_and(|t| t.named_or_spread) {
+        return Err((
+            REASON_NAMED_OR_SPREAD,
+            "a call reaching this method used named or spread arguments".to_owned(),
+        ));
+    }
+
+    let matches = |p: usize| if param.variadic { p >= idx } else { p == idx };
+    let mut vals: Vec<Val> = Vec::new();
+    if let Some(t) = target {
+        for obs in t.observed.iter().filter(|o| matches(o.param_index)) {
+            let Some(v) = arg_to_val(&obs.value) else {
+                return Err((
+                    REASON_ARG_NOT_PROVEN,
+                    format!(
+                        "call at {}:{}:{} passes `{}`, not a proven literal",
+                        obs.caller_path,
+                        obs.line,
+                        obs.column,
+                        obs.value.render()
+                    ),
+                ));
+            };
+            vals.push(v);
+        }
+    }
+    dedup(&mut vals);
+
+    if let Some(nt) = param.ty.as_ref().filter(|t| !t.has_instance()) {
+        native_guard(nt, &vals, &param.name)?;
+    }
+    build_tag_edits(path, doc_start, gov, plain, &vals)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_method_return(
+    class: &ClassDecl,
+    method: &MethodDecl,
+    tags: &[DocTag],
+    path: &str,
+    tree: &SourceTree,
+    method_scopes: &HashMap<(String, String), &Scope>,
+    msweep: &MethodSweep,
+    blocking: Option<&(&'static str, String)>,
+    plan: &mut EditPlan,
+    refusals: &mut Vec<Refusal>,
+    oracle: &mut CompletenessOracle,
+) {
+    let (Some(gov), plain) = param_tags(tags, TagKind::Return, None) else {
+        return;
+    };
+    let Some((gov_contract, _consumed)) = tag_contract(gov) else { return };
+
+    let key = (class.fqn.to_ascii_lowercase(), method.name.to_ascii_lowercase());
+    let Some(scope) = method_scopes.get(&key) else { return };
+    let mut returns: Vec<&ArgValue> = Vec::new();
+    collect_returns(&scope.stmts, &mut returns);
+
+    let lie = returns.iter().any(|v| {
+        arg_to_val(v).is_some_and(|val| admits_val(&gov_contract, &val) == Certainty::No)
+    });
+    if !lie {
+        return;
+    }
+
+    oracle.enumerated += 1;
+    let site = method_return_site(path, tree, class, method);
+    if let Some((reason, detail)) = blocking {
+        oracle.refused += 1;
+        refusals.push(Refusal::new(site, *reason, detail.clone()));
+        return;
+    }
+    if let Err((reason, detail)) = method_eligibility_gate(msweep, &key, class, method) {
+        oracle.refused += 1;
+        refusals.push(Refusal::new(site, reason, detail));
+        return;
+    }
+    let doc_start = method.docblock_span.map_or(0, |s| s.start);
+    match decide_return(method.ret.as_ref(), path, doc_start, gov, plain, scope, &returns) {
+        Ok(edits) => account(plan, oracle, refusals, &site, edits),
+        Err((reason, detail)) => {
+            oracle.refused += 1;
+            refusals.push(Refusal::new(site, reason, detail));
+        }
+    }
+}
+
+/// Map each method to its scope, keyed `(class_fqn, method)` (both lowercased) —
+/// for method `@return` return-site scans.
+fn scopes_by_method(tree: &SourceTree) -> HashMap<(String, String), &Scope> {
+    let mut map = HashMap::new();
+    for scope in tree.scopes() {
+        if let ScopeOwner::Method { class, method } = &scope.owner {
+            map.insert((class.to_ascii_lowercase(), method.to_ascii_lowercase()), scope);
+        }
+    }
+    map
 }
 
 // ---- Shared decision mechanics --------------------------------------------
