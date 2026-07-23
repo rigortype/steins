@@ -162,7 +162,20 @@ message register.
    `assertions_assert_non_empty_list` returns the `null` from an
    `: int` function). The message register
    carries the runtime consequence verbatim so severity is never
-   ambiguous to a reader. Ids: `offset.missing` (key provably absent
+   ambiguous to a reader.
+   *Amended — the warning-handler posture is a pseudo-constant setting*
+   (ADR-0037 §2 family, ask-the-real-thing config edition): what a
+   warning *does* is decided at bootstrap by the installed error
+   handler, so `[runtime] warning-handler = "abort" | "null"` declares
+   it. Default **"abort"** — the realistic-application assumption
+   (owner-confirmed): handlers convert warnings to exceptions or
+   terminate, so a proven `E_WARNING` is a proven runtime break and the
+   proof-layer placement above needs no further argument. Under a
+   declared `"null"` posture the application tolerates the warning and
+   continues: the warning-backed findings leave the proof surface
+   (ADR-0050 layer demotion, not deletion), and the documented
+   `null`/`""` results become the propagated values
+   (deferred-with-design — value-side adoption needs its own triage). Ids: `offset.missing` (key provably absent
    from a proven container value) and `offset.on-unsupported` (proven
    non-offsetable base: the object case is `Error`-grade, the
    scalar/null cases warning-grade; `call.on-null`'s discipline, same
