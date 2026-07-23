@@ -123,10 +123,10 @@ pub const THROW_LISKOV_ID: &str = "throw.liskov-widened";
 pub const EFFECT_LISKOV_ID: &str = "effect.liskov-widened";
 
 // ---------------------------------------------------------------------------
-// The finding-breadth family (ADR-0049): absence-proof ids. Registered in S1
-// but **emitted by nothing yet** — each id lights up in a later stage (S2–S6).
-// They are listed in `REGISTERED_NOT_YET_EMITTED`, not `ALL_EMITTABLE_IDS`,
-// until their emit site lands; the totality test binds the two.
+// The finding-breadth family (ADR-0049): absence-proof ids. Each lights up in its
+// own stage (S2–S6); `call.undefined-method` is live (S2), the rest are registered
+// ahead of emission. A not-yet-emitted id lives in `REGISTERED_NOT_YET_EMITTED`,
+// not `ALL_EMITTABLE_IDS`, until its emit site lands; the totality test binds them.
 // ---------------------------------------------------------------------------
 
 /// The registry id for the undefined-function check (ADR-0049 §3, proof layer): a
@@ -202,6 +202,10 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     EFFECT_ID,
     EFFECT_LISKOV_ID,
     UNKNOWN_LABEL_ID,
+    // The finding-breadth flagship, lit up at ADR-0049 S2 (the first absence id to
+    // fire). Its emitter is `check_undefined_method`; the rest of the family stays in
+    // `REGISTERED_NOT_YET_EMITTED` until its own stage.
+    CALL_UNDEFINED_METHOD_ID,
     suppress::SUPPRESS_UNMATCHED_ID,
     suppress::SUPPRESS_UNKNOWN_ID,
 ];
@@ -221,7 +225,7 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
 /// the not-yet-emitted registry entries, never the emitted-but-unregistered defect.
 pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
     CALL_UNDEFINED_FUNCTION_ID,
-    CALL_UNDEFINED_METHOD_ID,
+    // CALL_UNDEFINED_METHOD_ID lit up at S2 — now in ALL_EMITTABLE_IDS.
     CLASS_UNDEFINED_ID,
     CALL_TOO_FEW_ARGUMENTS_ID,
     CALL_TOO_MANY_ARGUMENTS_ID,
@@ -250,11 +254,42 @@ pub const SOUND_SUBSET_NOTICE: &str =
 // Folding seam (ADR-0004 / ADR-0024). Unchanged from the per-file slice.
 // ---------------------------------------------------------------------------
 
-/// Something that can fold a builtin call to a concrete literal value.
+/// Something that can fold a builtin call to a concrete literal value, and (from
+/// ADR-0049 S2) answer the runtime boot surface for the absence-proof family.
 pub trait Folder {
     /// Fold `name(args...)` to a literal, or `None` to widen.
     fn fold(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue>;
+
+    /// Whether the absence-proof family (ADR-0049) may fire **at all** this run.
+    /// `true` only when a live PHP sidecar is answering the boot surface *and* no
+    /// runtime-redefinition extension (`uopz`/`runkit7`/`Componere`, ADR-0049 A9)
+    /// is loaded — with any such extension present, no absence claim holds. The
+    /// default is `false`: the sound subset (ADR-0004) keeps every absence id
+    /// silent when there is no sidecar to ask (A2ii's honest consequence — the
+    /// homonym question has no textual answer).
+    fn absence_family_available(&mut self) -> bool {
+        false
+    }
+
+    /// Ask the project's own PHP whether `fqn` is a resident builtin/extension
+    /// class-like — the ADR-0049 A2ii **homonym** leg. `Some(true)` — a boot-surface
+    /// homonym stands, so the textual twin may be dead code shadowed by the loaded
+    /// class (silence); `Some(false)` — definitively absent from the boot surface;
+    /// `None` — unanswerable (no sidecar / a mid-run failure ⇒ Unknown ⇒ silence).
+    /// The default is `None` (the sound subset). `fqn` is the index's
+    /// lowercase-normalized form; PHP's class-existence predicates are
+    /// case-insensitive, so the lowercased name is a faithful query.
+    fn boot_surface_class_like(&mut self, fqn: &str) -> Option<bool> {
+        let _ = fqn;
+        None
+    }
 }
+
+/// The runtime-redefinition extensions that void the absence family (ADR-0049 A9):
+/// with any of them loaded, a defined class can gain a method and a missing name
+/// can be minted at runtime, so no absence claim holds. Matched case-insensitively
+/// against the sidecar's loaded-extension list.
+const MONKEY_PATCH_EXTENSIONS: &[&str] = &["uopz", "runkit7", "runkit", "componere"];
 
 /// The sound-subset folder: never folds anything. This is what the salsa
 /// [`diagnostics`] query uses, keeping that query deterministic.
@@ -274,6 +309,13 @@ pub struct SidecarFolder {
     disabled: bool,
     spawn_failed: bool,
     notified: bool,
+    /// Cached ADR-0049 A9 verdict: whether the absence family is available (a live
+    /// sidecar and no monkey-patch extension). Computed once from the sidecar's
+    /// `env` and then memoized — a whole-run property (ADR-0048 query answer).
+    absence_available: Option<bool>,
+    /// Per-FQN memo of the A2ii homonym oracle so a repeated chain class never
+    /// triggers duplicate `reflect` IPC.
+    boot_surface_memo: HashMap<String, Option<bool>>,
 }
 
 impl SidecarFolder {
@@ -287,6 +329,8 @@ impl SidecarFolder {
             disabled,
             spawn_failed: false,
             notified: true, // suppress our own notice; only spawn-failure re-arms it.
+            absence_available: None,
+            boot_surface_memo: HashMap::new(),
         }
     }
 
@@ -337,6 +381,34 @@ impl Folder for SidecarFolder {
         });
         self.memo.insert(key, folded.clone());
         folded
+    }
+
+    fn absence_family_available(&mut self) -> bool {
+        if let Some(cached) = self.absence_available {
+            return cached;
+        }
+        // No live sidecar ⇒ the family is silent (the ADR-0004 sound subset covers
+        // it — A2ii). Otherwise consult the loaded-extension list once (A9).
+        let verdict = match self.ensure_sidecar().and_then(Sidecar::env) {
+            Some(env) => !env.extensions.iter().any(|e| {
+                MONKEY_PATCH_EXTENSIONS.iter().any(|m| e.eq_ignore_ascii_case(m))
+            }),
+            None => false,
+        };
+        self.absence_available = Some(verdict);
+        verdict
+    }
+
+    fn boot_surface_class_like(&mut self, fqn: &str) -> Option<bool> {
+        if let Some(cached) = self.boot_surface_memo.get(fqn) {
+            return *cached;
+        }
+        let answer = self
+            .ensure_sidecar()
+            .and_then(|sc| sc.reflect(fqn))
+            .map(|r| r.class_like_exists);
+        self.boot_surface_memo.insert(fqn.to_owned(), answer);
+        answer
     }
 }
 
@@ -693,8 +765,12 @@ fn check_units(
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
 
+    // The whole-universe dam fact (ADR-0049 §2): one query answer per run, shared by
+    // every file's context. Consumed by the absence family's conditional-decl leg.
+    let dam = dam_facts(units);
+
     for fi in 0..units.len() {
-        let cx = Cx::new_with(units, index, fi, zend_assertions);
+        let cx = Cx::new_with(units, index, fi, &dam, zend_assertions);
 
         // --- Propagation pass FIRST: it walks every scope and, as a side
         // product, proves dead regions (decided branches, unreachable tails) —
@@ -2292,11 +2368,22 @@ fn interface_abstraction_methods<'a>(
 /// Read-only analysis context: the whole project view plus the file currently
 /// being analyzed. Cheap to copy (all borrows); descent rebuilds it at the
 /// callee's file via [`Cx::at`].
+/// The shared empty dam fact for the auxiliary passes (effects/throws/const
+/// resolution) that never emit an absence id and so never read the dam. The main
+/// analysis pass ([`check_units`]) computes the real whole-universe fact and hands
+/// it to [`Cx::new_with`]; these passes use [`Cx::new`], which points here.
+static EMPTY_DAM: std::sync::LazyLock<DamFacts> = std::sync::LazyLock::new(DamFacts::default);
+
 #[derive(Clone, Copy)]
 struct Cx<'a> {
     units: &'a [FileUnit<'a>],
     index: &'a Index,
     cur: usize,
+    /// The whole-universe runtime-definition dam fact (ADR-0049 §2), a per-run query
+    /// answer (ADR-0048). Read by the absence family's conditional-declaration leg
+    /// (A2i): a chain containing a conditional declaration re-dams the claim, so it
+    /// fires only when the dam is clear. The auxiliary passes point at [`EMPTY_DAM`].
+    dam: &'a DamFacts,
     /// The `[runtime] zend-assertions = "enabled"` pseudo-constant (ADR-0052 §5,
     /// ADR-0037 §2 precedent): when the boot truth declares assertions enabled,
     /// `assert($expr)` narrowing rises to the `Verified` stratum. `false` (the safe
@@ -2306,18 +2393,30 @@ struct Cx<'a> {
 
 impl<'a> Cx<'a> {
     fn new(units: &'a [FileUnit<'a>], index: &'a Index, cur: usize) -> Self {
-        Self { units, index, cur, zend_assertions: false }
+        Self { units, index, cur, dam: &EMPTY_DAM, zend_assertions: false }
     }
 
     /// A context carrying an explicit runtime config (the top-level analysis pass).
-    fn new_with(units: &'a [FileUnit<'a>], index: &'a Index, cur: usize, zend_assertions: bool) -> Self {
-        Self { units, index, cur, zend_assertions }
+    fn new_with(
+        units: &'a [FileUnit<'a>],
+        index: &'a Index,
+        cur: usize,
+        dam: &'a DamFacts,
+        zend_assertions: bool,
+    ) -> Self {
+        Self { units, index, cur, dam, zend_assertions }
     }
 
     /// A context pointing at a different file (for cross-file descent); the runtime
-    /// config is a whole-run property and is inherited unchanged.
+    /// config and dam fact are whole-run properties and are inherited unchanged.
     fn at(&self, file: usize) -> Cx<'a> {
-        Cx { units: self.units, index: self.index, cur: file, zend_assertions: self.zend_assertions }
+        Cx {
+            units: self.units,
+            index: self.index,
+            cur: file,
+            dam: self.dam,
+            zend_assertions: self.zend_assertions,
+        }
     }
 
     fn tree(&self) -> &'a SourceTree {
@@ -3313,6 +3412,12 @@ fn walk_trace(
                     // Branch-sensitive null-dereference proof (ADR-0031): a `$v->m()`
                     // whose receiver is proven `Singleton(null)` on this path.
                     check_call_on_null(w, call, env, out);
+                    // The absence flagship (ADR-0049 §4 / S2): fire only in the plain
+                    // per-scope pass — every scope (method bodies included) is walked
+                    // once there, so a descent must not re-judge the same site.
+                    if descent.is_none() {
+                        check_undefined_method(cx, folder, call, store, scope.poisoned, out);
+                    }
                     handle_method_call(
                         cx,
                         folder,
@@ -6127,6 +6232,235 @@ fn resolve_static_named<'a>(
 fn private_blocked(r: &ResolvedMethod, enclosing_class: Option<&str>) -> bool {
     r.method.visibility == Visibility::Private
         && !enclosing_class.is_some_and(|e| e.eq_ignore_ascii_case(&r.declaring_class.fqn))
+}
+
+// ---------------------------------------------------------------------------
+// The finding-breadth flagship: `call.undefined-method` (ADR-0049 §4 / S2).
+//
+// An *absence* proof — fire only under complete closure over every place a method
+// could hide. The ladder (ADR-0049 §4 + amendments A1/A2/A3/A9) is applied leg by
+// leg; ANY doubt is silence (the zero-FP identity, ADR-0013). The cheap textual
+// legs run first so the sidecar homonym IPC (A2ii) is reached only for a chain
+// that already survived every local check.
+// ---------------------------------------------------------------------------
+
+/// Which magic fallback swallows an otherwise-undefined call, and the PHP phrasing
+/// of the call kind — instance (`$recv->m()`, `__call`) vs static (`C::m()`,
+/// `__callStatic`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UndefKind {
+    Instance,
+    Static,
+}
+
+impl UndefKind {
+    /// The magic method whose presence anywhere in the chain makes the call defined.
+    fn magic(self) -> &'static str {
+        match self {
+            UndefKind::Instance => "__call",
+            UndefKind::Static => "__callStatic",
+        }
+    }
+}
+
+/// The receiver a `call.undefined-method` claim can rest on, after legs (a)/(l).
+/// Carries the *exact* receiver class FQN and the call kind. `None` from the
+/// resolver means the receiver is out of scope for S2 (silence): `$this` (A1
+/// membership), an inexact/lower-bound variable, a nullsafe `?->`, a first-class
+/// callable, `self`/`static`/`parent`, or any dynamic form.
+fn undefined_method_receiver(
+    cx: &Cx,
+    call: &CallExpr,
+    store: &Store,
+    poisoned: bool,
+) -> Option<(String, String, UndefKind)> {
+    // Leg (l): the first-class-callable form `$v->m(...)` / `C::m(...)` lowers to an
+    // arg-less non-positional call — it builds a Closure, it does not invoke — so it
+    // is never an undefined-method site. (A named/spread call keeps `args` non-empty
+    // and stays eligible: method existence is argument-shape-independent.)
+    if !call.positional_only && call.args.is_empty() {
+        return None;
+    }
+    match &call.receiver {
+        Callee::Method { receiver, method, nullsafe } => {
+            if *nullsafe {
+                return None; // leg (l): `?->` excluded in v1.
+            }
+            let class = match receiver {
+                // Leg (a)/A1: an exact-class receiver only. `new Foo()` is exact by
+                // construction; a `$var` is exact only when the heap says so (a
+                // `new`/clone-of-exact allocation, never a `$this` lower bound or a
+                // laundered alias). `class_exact` is set solely by Verified-origin
+                // allocation sites, so the N2 stratum requirement on the receiver
+                // identity holds by construction.
+                Receiver::New(name) => cx.class_fqn(name),
+                Receiver::Var(v) => {
+                    if poisoned {
+                        return None;
+                    }
+                    let obj = store.obj_of(v)?;
+                    if !obj.class_exact {
+                        return None; // lower bound → S6's lane, not ours.
+                    }
+                    obj.class.clone()
+                }
+                // A1: `$this` is a membership fact, never exactness — silent in S2.
+                Receiver::This => return None,
+            };
+            Some((class, method.clone(), UndefKind::Instance))
+        }
+        Callee::Static { class, method } => match class {
+            // Textual, exact — no receiver proof needed. `self`/`static`/`parent`
+            // stay unlowered and silent (ADR-0043 §1).
+            StaticClass::Named(name) => {
+                Some((cx.class_fqn(name), method.clone(), UndefKind::Static))
+            }
+            StaticClass::SelfKw | StaticClass::Parent | StaticClass::Static => None,
+        },
+        // `new C()` (no method), `$fn()`, dynamic method names → not our sites.
+        Callee::Function(_)
+        | Callee::Construct { .. }
+        | Callee::DynamicVar(_)
+        | Callee::Dynamic => None,
+    }
+}
+
+/// The outcome of walking `start_fqn`'s ancestor chain for `method` under the
+/// ADR-0049 §4 closure discipline (the C1 completeness standard).
+enum ChainWalk {
+    /// The method is absent from a fully-enumerated, obstacle-free chain: fire
+    /// eligible. Carries the ordered simple class names (for the message), the
+    /// ordered chain FQNs (for the A2ii homonym leg), and whether any node was
+    /// declared conditionally (A2i — re-dams the claim).
+    Absent { simple_chain: Vec<String>, fqns: Vec<String>, any_conditional: bool },
+    /// An obstacle taints closure anywhere on the chain, or the method is present:
+    /// silence (the FP-safe verdict).
+    Silent,
+}
+
+/// Walk `start_fqn`'s parent chain proving the method's *absence* under complete
+/// enumeration (ADR-0049 §4 (b)–(f), (j); A2i/A2iii). Interfaces are not walked:
+/// a PHP interface never carries a method body, so it can never *define* the
+/// method — only the `extends` (class-parent) chain can, exactly as the landed
+/// [`resolve_in_chain`] does. Any of these taints closure ⇒ `Silent`:
+/// unresolvable/`Ambiguous`/builtin ancestor (leg b/f/i), a trait name or a
+/// `uses_traits` node (leg e), an `is_enum` node (leg j / A3), the magic fallback
+/// (`__call`/`__callStatic`, leg d), a cycle (leg b), or the method being present
+/// (not undefined).
+fn enumerate_method_chain(cx: &Cx, start_fqn: &str, method: &str, kind: UndefKind) -> ChainWalk {
+    let magic = kind.magic();
+    let mut cur = start_fqn.to_owned();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut simple_chain: Vec<String> = Vec::new();
+    let mut fqns: Vec<String> = Vec::new();
+    let mut any_conditional = false;
+    loop {
+        if !seen.insert(cur.to_ascii_lowercase()) {
+            return ChainWalk::Silent; // cycle — closure cannot terminate soundly.
+        }
+        // Leg (b)/(f)/(i): every ancestor edge must resolve to a UNIQUE project
+        // declaration. `find_class` returns `None` for `Absent` (a builtin/vendor-
+        // unresolved ancestor — leg f, awaiting the reflect method surface, M2) and
+        // for `Ambiguous` (a duplicate FQN or an alias/decl collision — leg i).
+        let Some((cfile, cd)) = cx.find_class(&cur) else {
+            return ChainWalk::Silent;
+        };
+        // Leg (j)/A3: enum methods are not lowered, so an enum chain would look
+        // method-empty — Unknown until enum method lowering lands.
+        if cd.is_enum {
+            return ChainWalk::Silent;
+        }
+        // A trait name in the class-like index carries no lowered members (S1): it
+        // would falsely read as "method absent". Never a method holder here.
+        if cd.is_trait {
+            return ChainWalk::Silent;
+        }
+        // Leg (e): a trait use adds methods the is-a oracle rightly ignores for
+        // ancestry — Unknown until trait flattening (per-node, like resolve_in_chain).
+        if cd.uses_traits {
+            return ChainWalk::Silent;
+        }
+        // Leg (d): a magic fallback anywhere swallows the name — no error at runtime.
+        if cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case(magic)) {
+            return ChainWalk::Silent;
+        }
+        // The method is present (case-insensitively) — including an abstract
+        // declaration: it is defined, so the call is not undefined.
+        if cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case(method)) {
+            return ChainWalk::Silent;
+        }
+        simple_chain.push(cd.name.clone());
+        fqns.push(cur.clone());
+        if cd.conditional {
+            any_conditional = true;
+        }
+        match &cd.parent {
+            None => {
+                return ChainWalk::Absent { simple_chain, fqns, any_conditional };
+            }
+            Some(pref) => cur = cx.units[cfile].tree.resolve_class_fqn(pref),
+        }
+    }
+}
+
+/// Run the full ADR-0049 §4 ladder for one method/static call and emit
+/// `call.undefined-method` iff **every** leg holds. Called only from the plain
+/// per-scope pass (`descent.is_none()`) so a site is judged once, never re-emitted
+/// under an interprocedural descent.
+fn check_undefined_method(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    store: &Store,
+    poisoned: bool,
+    out: &mut Vec<Diagnostic>,
+) {
+    // Legs (a)/(l): identify an exact receiver and the call kind, or bail.
+    let Some((class_fqn, method, kind)) = undefined_method_receiver(cx, call, store, poisoned)
+    else {
+        return;
+    };
+    // A9 (global) + A2ii's honest consequence: without a live sidecar, or with a
+    // monkey-patch extension loaded, the id is entirely silent (checked once, cached).
+    if !folder.absence_family_available() {
+        return;
+    }
+    // Legs (b)–(f), (j), A2i/A2iii: textual closure over the ancestor chain.
+    let ChainWalk::Absent { simple_chain, fqns, any_conditional } =
+        enumerate_method_chain(cx, &class_fqn, &method, kind)
+    else {
+        return;
+    };
+    // Leg A2i: a conditional declaration in the chain re-dams the claim — fire only
+    // when the whole-universe dam is clear (no vouch machinery in this slice).
+    if any_conditional && !cx.dam.is_clear() {
+        return;
+    }
+    // Leg (h)/A2ii: every chain FQN must be answered NOT-present by the boot-surface
+    // existence oracle. A homonym (`Some(true)`) or an unanswerable query (`None` —
+    // a mid-run sidecar failure) is silence.
+    for fqn in &fqns {
+        match folder.boot_surface_class_like(fqn) {
+            Some(false) => {}
+            Some(true) | None => return,
+        }
+    }
+
+    // Every leg holds — a proven `Error: Call to undefined method C::m()`.
+    let pos = cx.tree().position(call.span.start);
+    let simple_class = simple_chain.first().map_or(class_fqn.as_str(), String::as_str);
+    let chain_render = simple_chain.join(" → ");
+    let message = format!(
+        "call to undefined method {simple_class}::{method}() — hierarchy fully enumerated ({chain_render}), no {}",
+        kind.magic(),
+    );
+    out.push(Diagnostic {
+        id: CALL_UNDEFINED_METHOD_ID,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message,
+    });
 }
 
 /// Check + descend one method / static / constructor call.

@@ -338,6 +338,98 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         // (diagnostics render the declared casing; matching stays lowercased).
         message_contains: "cannot become MongoDB\\Client|MongoDB\\Driver\\Manager",
     },
+    // ADR-0049 S2: the flagship absence id `call.undefined-method` fired 10 times,
+    // all on the legacy monorepo, all STATIC calls (`__callStatic` absent). Every
+    // one was triaged verbatim against the checkout and is TRUE — a genuine call to
+    // a method that exists nowhere in a final, trait-free, fully-enumerated chain,
+    // so PHP would fatal `Error: Call to undefined method C::m()` at runtime. The
+    // OSS packages fired zero (mature code does not call methods its own tests would
+    // fatal on) — the point-2 core-yield prediction (method-absence needs no dam, so
+    // the dynamism-heavy monorepo still yields) stands. Path suffixes are chosen to
+    // key each finding precisely while omitting the private-corpus directory name.
+    //
+    // A DAO batch calls a legacy accessor that was removed/renamed: the DAO is a
+    // `final class` with no such method anywhere in the tree.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "call.undefined-method",
+        path_suffix: "Batch/UnifyThumbnailSchemaBatch.php",
+        line: 16,
+        message_contains: "getLegacyArticleThumbnailArticleIds() — hierarchy fully enumerated",
+    },
+    // A sample test drifted out of sync with its sample class: `Sample_Common`
+    // (`final`, methods `get`/`addData`/`swapData` only) is called with eight names
+    // it never declares. Each `Sample_Common::x()` would fatal when the test runs —
+    // exactly the ROADMAP gap-1 adoption case (a checker silent here is not adopted).
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "call.undefined-method",
+        path_suffix: "tests/SampleTest.php",
+        line: 79,
+        message_contains: "Sample_Common::getByHogeIds() — hierarchy fully enumerated",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "call.undefined-method",
+        path_suffix: "tests/SampleTest.php",
+        line: 105,
+        message_contains: "Sample_Common::isPrime() — hierarchy fully enumerated",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "call.undefined-method",
+        path_suffix: "tests/SampleTest.php",
+        line: 134,
+        message_contains: "Sample_Common::throwException() — hierarchy fully enumerated",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "call.undefined-method",
+        path_suffix: "tests/SampleTest.php",
+        line: 164,
+        message_contains: "Sample_Common::getValuesFromExternalServer() — hierarchy fully enumerated",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "call.undefined-method",
+        path_suffix: "tests/SampleTest.php",
+        line: 179,
+        message_contains: "Sample_Common::printToStandardOutput() — hierarchy fully enumerated",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "call.undefined-method",
+        path_suffix: "tests/SampleTest.php",
+        line: 192,
+        // Method name omitted (it carries a private-corpus token); line 192 +
+        // path + id keep this row 1:1.
+        message_contains: "— hierarchy fully enumerated",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "call.undefined-method",
+        path_suffix: "tests/SampleTest.php",
+        line: 211,
+        message_contains: "Sample_Common::setSampleCookie() — hierarchy fully enumerated",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "call.undefined-method",
+        path_suffix: "tests/SampleTest.php",
+        line: 229,
+        message_contains: "Sample_Common::hasCookie() — hierarchy fully enumerated",
+    },
+    // An auth model calls `OAuth2Model::checkPassword()` statically, but that method
+    // exists only as an *instance* method on the caller (`OAuth2ClientModel`);
+    // `OAuth2Model` is `final` and declares no such method — a genuine undefined
+    // static-method fatal.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "call.undefined-method",
+        path_suffix: "util/src/Model/Auth/OAuth2ClientModel.php",
+        line: 106,
+        message_contains: "OAuth2Model::checkPassword() — hierarchy fully enumerated",
+    },
 ];
 
 /// Whether `d` is a recorded, triaged TRUE proof-layer positive for `package`
@@ -498,7 +590,10 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
     let throws: Vec<Diagnostic> = diags.iter().filter(|d| is_throw(d)).cloned().collect();
     let effects: Vec<Diagnostic> = diags.iter().filter(|d| is_effect_contract(d)).cloned().collect();
     diags.retain(|d| !is_contract(d));
-    // Split off triaged TRUE runtime-layer positives (reported, not gated).
+    // Split off triaged TRUE runtime-layer positives (reported, not gated). The
+    // ADR-0049 S2 flagship `call.undefined-method` now flows through this
+    // red-on-sight channel like any proof-layer id, with its triaged TRUE corpus
+    // findings pinned in `EXPECTED_PROOF_FINDINGS` (any un-pinned finding reds).
     let expected_true: Vec<Diagnostic> =
         diags.iter().filter(|d| is_expected_true_positive(name, d)).cloned().collect();
     diags.retain(|d| !is_expected_true_positive(name, d));
