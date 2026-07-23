@@ -24,6 +24,12 @@
 //! does not implement. `nondet` builtins (`time`, `rand`, `microtime`, …) are
 //! excluded by definition.
 
+/// The builtin class-hierarchy table, generated from the pinned php-src mining
+/// data (`docs/research/phpsrc-mining/hierarchy.toml`) by `cargo xtask
+/// gen-catalog`. Consulted only by [`builtin_class_supers`]; see that function
+/// and `xtask/src/gen_catalog.rs` for the generation contract.
+mod hierarchy_generated;
+
 /// Whether `name` is on the folding allowlist (case-insensitive).
 ///
 /// A `true` here is a *permission to fold*, not a promise the call folds: the
@@ -120,6 +126,14 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     const IO: &[&str] = &["io"];
     const GLOBAL_WRITE: &[&str] = &["global.write"];
     const GLOBAL_READ: &[&str] = &["global.read"];
+    const IO_SIGNAL: &[&str] = &["io.signal"];
+    const OUTPUT_HEADER: &[&str] = &["output.header"];
+    const IO_IPC: &[&str] = &["io.ipc"];
+    // `session_start` is genuinely composite (effects_gaps.md): the default file
+    // handler writes session files (`io.fs.write`), the session cookie is sent as
+    // a `Set-Cookie` header (`output.header`), and `$_SESSION`/ini are mutated
+    // (`global.write`). The upper-bound set is all three.
+    const SESSION: &[&str] = &["io.fs.write", "output.header", "global.write"];
 
     // A per-call lowercase copy keeps the arms readable; PHP names are ASCII.
     let colored: Option<&'static [&'static str]> = match name.to_ascii_lowercase().as_str() {
@@ -139,6 +153,19 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
             Some(GLOBAL_WRITE)
         }
         "getenv" | "ini_get" | "date_default_timezone_get" => Some(GLOBAL_READ),
+        // Signal delivery/handling (effects_gaps.md §1). pcntl/posix procedural
+        // functions; a daemon/worker envelope declares `@effects io.signal`.
+        "pcntl_signal" | "pcntl_signal_dispatch" | "pcntl_alarm" | "pcntl_async_signals"
+        | "pcntl_sigprocmask" | "pcntl_sigwaitinfo" | "posix_kill" => Some(IO_SIGNAL),
+        // HTTP response-header mutation (effects_gaps.md §2).
+        "header" | "header_remove" | "setcookie" | "setrawcookie" | "http_response_code" => {
+            Some(OUTPUT_HEADER)
+        }
+        // System-V / shared-memory IPC (effects_gaps.md §4).
+        "shmop_write" | "shmop_read" | "sem_acquire" | "sem_release" | "msg_send"
+        | "msg_receive" => Some(IO_IPC),
+        // Composite session bootstrap (effects_gaps.md).
+        "session_start" => Some(SESSION),
         _ => None,
     };
 
@@ -163,6 +190,22 @@ pub fn known_labels() -> &'static [&'static str] {
     // in `effect_labels` coloring (all of which are already taxonomy nodes).
     &[
         "exit",
+        // Failure-cause provenance family (ADR-0042): the benevolent-union
+        // replacement. These label a `false`/`null` failure arm's *value
+        // provenance* (why the arm exists), not an effect; they share the ADR-0018
+        // registry so prefix subsumption (`failure` admits `failure.environment`)
+        // works, and so a future boundary profile can name them. See
+        // [`failure_arms`].
+        "failure",
+        "failure.environment",
+        "failure.input",
+        "failure.resource",
+        // Opaque native boundary (php-src FFI): runs arbitrary C, so the catalog
+        // can prove nothing about it — a deliberately top-level escape hatch
+        // beside `exit`/`mutate` (effects_gaps.md §3). FFI is OO-only, so no plain
+        // builtin is colored `ffi` yet; the label exists so an `@effects ffi`
+        // envelope declaration is valid.
+        "ffi",
         "global.read",
         "global.write",
         "io",
@@ -170,14 +213,24 @@ pub fn known_labels() -> &'static [&'static str] {
         "io.fs",
         "io.fs.read",
         "io.fs.write",
+        // System-V / shared-memory IPC (effects_gaps.md §4): cross-process shared
+        // state, neither filesystem nor network.
+        "io.ipc",
         "io.net",
         "io.net.http",
         "io.process",
+        // Signal delivery/handling (pcntl/posix; effects_gaps.md §1): an
+        // observable OS interaction, parallel to `io.process`.
+        "io.signal",
         "mutate",
         "nondet",
         "nondet.random",
         "nondet.time",
         "output",
+        // HTTP response-header mutation (effects_gaps.md §2): a response-side
+        // sibling of stdout `output`; a coarse `output` subsumes it, a policy can
+        // name it precisely.
+        "output.header",
     ]
 }
 
@@ -230,6 +283,15 @@ pub fn nearest_label(label: &str) -> Option<&'static str> {
 ///
 /// Names are returned without a leading backslash; matching is case-insensitive.
 /// A name carrying a namespace separator is never a builtin (returns `None`).
+///
+/// This is the **frozen throw-system projection** of the builtin hierarchy: it
+/// covers exactly the core SPL/engine `Throwable` tree the throw accounting
+/// (ADR-0040) reasons over, and is deliberately *not* widened to the full mined
+/// hierarchy ([`builtin_class_supers`]) — expanding the throw world is the job of
+/// the throw-catalog slices (ADR-0043 §5 gate discipline), not the is-a
+/// ingestion. A test (`exception_parent_agrees_with_generated_hierarchy`) proves
+/// this projection never conflicts with the generated table, so there is still a
+/// single source of truth for every edge both know.
 #[must_use]
 pub fn builtin_exception_parent(name: &str) -> Option<&'static str> {
     let bare = name.trim_start_matches('\\');
@@ -271,33 +333,29 @@ pub fn builtin_exception_parent(name: &str) -> Option<&'static str> {
 /// closure: only names present here (or resolvable in-project) let a `No` verdict
 /// stand.
 ///
-/// The tree unifies the SPL/engine `Throwable` hierarchy ([`builtin_exception_parent`])
-/// with the enum interface roots (`UnitEnum`; `BackedEnum` extends `UnitEnum`).
-/// Matching is case-insensitive; a namespaced name is never a builtin.
+/// The data is the **single source of truth** for the builtin hierarchy: the 352
+/// production classes + interfaces mined from php-src (pin
+/// `6bc7c26cf6…`, cross-checked vs PHP 8.5.8), generated into
+/// [`hierarchy_generated::HIERARCHY`] by `cargo xtask gen-catalog` from
+/// `docs/research/phpsrc-mining/hierarchy.toml`. It subsumes the SPL/engine
+/// `Throwable` tree (also projected, frozen, by [`builtin_exception_parent`] for
+/// the throw system — a test verifies the two agree on their overlap) and the
+/// enum interface roots (`UnitEnum`; `BackedEnum extends UnitEnum`;
+/// `Throwable extends Stringable`).
+///
+/// Matching is case-insensitive. **Namespaced** builtin classes (`Random\…`,
+/// `FFI\…`) *are* resolved here — the key preserves the backslash, and an unknown
+/// namespaced name simply misses the table (→ `None`). **Builtin enums are
+/// deliberately absent** (→ `None` → `Unknown`): the mining data omits an enum's
+/// implicit `UnitEnum`/`BackedEnum` interfaces and its backing, so its edge set is
+/// incomplete and a `No` against those interfaces would be unsound (ADR-0043 §3).
 #[must_use]
 pub fn builtin_class_supers(name: &str) -> Option<Vec<&'static str>> {
-    let bare = name.trim_start_matches('\\');
-    if bare.contains('\\') {
-        return None; // namespaced — not a global engine/SPL class
-    }
-    match bare.to_ascii_lowercase().as_str() {
-        // `Throwable extends Stringable` since PHP 8.0 (the interface gained a
-        // `__toString(): string` contract), so *every* Throwable IS-A Stringable
-        // — verified against PHP 8.5 (`Reflection`/`is_subclass_of`). Omitting
-        // this edge makes `Exception instanceof \Stringable` a spurious `No`
-        // (dead live branch — unsound). The whole SPL/engine tree roots here, so
-        // this single edge carries Stringable to the entire exception family.
-        "throwable" => Some(vec!["Stringable"]),
-        // Known root interfaces: fully enumerated, no further supertypes.
-        "unitenum" | "stringable" => Some(Vec::new()),
-        // A backed enum's implicit interface extends the unit-enum interface.
-        "backedenum" => Some(vec!["UnitEnum"]),
-        // The SPL/engine exception tree: a single catalogued parent edge.
-        other => match builtin_exception_parent(other) {
-            Some(parent) => Some(vec![parent]),
-            None => None, // unknown external — chain incomplete
-        },
-    }
+    let key = name.trim_start_matches('\\').to_ascii_lowercase();
+    hierarchy_generated::HIERARCHY
+        .binary_search_by(|(n, _)| (*n).cmp(key.as_str()))
+        .ok()
+        .map(|i| hierarchy_generated::HIERARCHY[i].1.to_vec())
 }
 
 /// The **measured/curated** throw facts of a builtin call (ADR-0040 source #2):
@@ -306,15 +364,159 @@ pub fn builtin_class_supers(name: &str) -> Option<Vec<&'static str>> {
 /// (widen, never a false positive). Empty slice = catalogued-but-throwless.
 #[must_use]
 pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
-    const DIV0: &[&str] = &["DivisionByZeroError"];
+    // intdiv has TWO input-determined arms (php-src `ext/standard/math.c`,
+    // throws.toml): `divisor == 0` → DivisionByZeroError (math.c:1502), and the
+    // `PHP_INT_MIN / -1` overflow → ArithmeticError (math.c:1507). The complete
+    // set is both; DivisionByZeroError extends ArithmeticError, so a coarse
+    // `@throws ArithmeticError` subsumes both. Both are is-a `Error` → unchecked
+    // (ADR-0007), so they enrich the throw envelope without adding
+    // `throw.undeclared` noise.
+    const INTDIV: &[&str] = &["DivisionByZeroError", "ArithmeticError"];
     const JSON: &[&str] = &["JsonException"];
+    // Input-determined `ValueError` throws mined from php-src C (throws.toml,
+    // ADR-0040 source #2): PHP-8 migration turned a family of argument-value
+    // misuses (bad flags/offset/length, unknown hash algo, `$min > $max`, malformed
+    // descriptor spec, …) from `false`-returns into `ValueError`. Each row is
+    // C-evidenced and statically refutable with proven args. `ValueError` is-a
+    // `Error` → unchecked (ADR-0007). Flag-gated JSON throws are deliberately NOT
+    // here (see below). Method-shaped constructor throws (DateTime::__construct →
+    // DateMalformedStringException) are deferred — they need the Date* exception
+    // family wired into the frozen throw tree first.
+    const VALUE_ERROR: &[&str] = &["ValueError"];
     match name.to_ascii_lowercase().as_str() {
-        "intdiv" => Some(DIV0),
+        "intdiv" => Some(INTDIV),
+        "preg_match" | "file_get_contents" | "fread" | "fgets" | "file" | "scandir"
+        | "stream_get_contents" | "stream_socket_client" | "unserialize" | "json_decode"
+        | "iconv" | "mb_convert_encoding" | "hash" | "hash_hmac" | "hash_init" | "hash_file"
+        | "random_int" | "random_bytes" | "proc_open" | "shmop_open" | "socket_create" => {
+            Some(VALUE_ERROR)
+        }
         // `json_decode`/`json_encode` throw JsonException only under
         // JSON_THROW_ON_ERROR; without flag inspection this stays uncatalogued
         // (widen) rather than manufacture a throw — listed for when flag
-        // inspection lands.
+        // inspection lands. (The plain `json_decode` key above carries its
+        // *unconditional* `$depth`-misuse ValueError, a separate arm.)
         "json_decode_throwing" | "json_encode_throwing" => Some(JSON),
+        _ => None,
+    }
+}
+
+/// The **cause** of a builtin's `false`/`null` failure arm (ADR-0042): a fact the
+/// catalog can state, never a probability it cannot. Each maps to a `failure.*`
+/// value-provenance label ([`known_labels`]) that a future boundary profile
+/// consumes to decide must-check policy (default exempts [`Resource`], includes
+/// [`Environment`]; strict includes both) — the honest-union + policy-profile
+/// replacement for ADR-0030's erased benevolent union.
+///
+/// [`Resource`]: FailureCause::Resource
+/// [`Environment`]: FailureCause::Environment
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureCause {
+    /// Allocation/handle exhaustion (`curl_init`, `imagecreate*`, `socket_create`
+    /// fd-exhaustion): statically irrefutable, unrecoverable in practice. Label
+    /// `failure.resource`. Default profile exempts it from must-check.
+    Resource,
+    /// Filesystem/network/external-state failure (`fopen`, `fsockopen`): a normal
+    /// operational outcome; not checking it is a real bug. Label
+    /// `failure.environment`. Both profiles require the check.
+    Environment,
+    /// Argument-value-determined failure (`preg_match` malformed pattern,
+    /// `json_encode` unencodable value): statically refutable with proven args —
+    /// the fallback label for sites whose arguments stay unproven. Label
+    /// `failure.input`.
+    Input,
+}
+
+impl FailureCause {
+    /// The `failure.*` registry dot-path this cause attaches to the arm's value.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            FailureCause::Resource => "failure.resource",
+            FailureCause::Environment => "failure.environment",
+            FailureCause::Input => "failure.input",
+        }
+    }
+}
+
+/// The failure-arm classification of a builtin (ADR-0042), as mined from php-src
+/// C (`docs/research/phpsrc-mining/failure_arms.toml`). Distinguishes the three
+/// states the boundary profile must tell apart:
+///
+/// * `Some(FailureArms::Causes(&[…]))` — the `false`/`null` arm is a real failure,
+///   carrying the distinct [`FailureCause`]s its arms were traced to (a function
+///   may fail for more than one cause: `curl_init` is `[Resource, Input]`,
+///   `proc_open` is `[Input, Environment]`).
+/// * `Some(FailureArms::Sentinel)` — the `false`/`null` return is a **legitimate
+///   non-failure result** (`strpos` "not present", `array_search` "not found",
+///   `next()` past end): it must NOT receive any `failure.*` label. This is
+///   *explicitly not a failure*, deliberately distinct from…
+/// * `None` — **unclassified**: the catalog states nothing about this name.
+///
+/// Nothing consumes this yet (the boundary profiles of ADR-0037 are future work),
+/// so it is behavior-neutral catalog data; the shape is the minimal one those
+/// profiles need — a per-call cause set plus the sentinel exclusion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureArms {
+    /// The distinct failure causes the arm(s) were traced to (order: as recorded).
+    Causes(&'static [FailureCause]),
+    /// The `false`/`null` is a legitimate result, never to be `failure.*`-labeled.
+    Sentinel,
+}
+
+/// The [`FailureArms`] classification of a builtin `name` (ADR-0042), or `None`
+/// when the name is unclassified. Matching is case-insensitive.
+///
+/// This is the queryable catalog side of the failure-cause labels: it states, per
+/// builtin, whether its `false`/`null` arm is a failure (and of what cause) or a
+/// legitimate sentinel result. Method-shaped rows from the mining data
+/// (`DateTime::createFromFormat`) are deferred — the current API is
+/// function-keyed. See `docs/research/phpsrc-mining/failure_arms.toml` (the
+/// source of record) for per-arm C evidence.
+#[must_use]
+pub fn failure_arms(name: &str) -> Option<FailureArms> {
+    use FailureCause::{Environment, Input, Resource};
+    const RESOURCE: &[FailureCause] = &[Resource];
+    const ENVIRONMENT: &[FailureCause] = &[Environment];
+    const INPUT: &[FailureCause] = &[Input];
+    // Multi-cause arms (each distinct cause the mining traced, in recorded order).
+    const RESOURCE_INPUT: &[FailureCause] = &[Resource, Input];
+    const INPUT_ENVIRONMENT: &[FailureCause] = &[Input, Environment];
+
+    let arms = |c| Some(FailureArms::Causes(c));
+    match name.to_ascii_lowercase().as_str() {
+        // cURL.
+        "curl_init" => arms(RESOURCE_INPUT),
+        "curl_exec" => arms(ENVIRONMENT),
+        "curl_setopt" => arms(INPUT),
+        // Filesystem open/read/write — environmental.
+        "fopen" | "file_get_contents" | "file_put_contents" | "file" | "readfile" | "fread"
+        | "fwrite" | "fgets" | "fscanf" | "tmpfile" | "mkdir" | "unlink" | "rename" | "copy"
+        | "scandir" => arms(ENVIRONMENT),
+        // Streams / sockets — network is environmental.
+        "fsockopen" | "pfsockopen" | "stream_socket_client" | "stream_get_contents" => {
+            arms(ENVIRONMENT)
+        }
+        // PCRE — input-determined (pattern+subject).
+        "preg_match" | "preg_match_all" | "preg_replace" | "preg_split" => arms(INPUT),
+        // Serialization / conversion / time — input-determined.
+        "json_decode" | "json_encode" | "unserialize" | "strtotime" | "date_create" | "iconv"
+        | "mb_convert_encoding" => arms(INPUT),
+        // hash_file straddles but reads primarily environmental (file unreadable).
+        "hash_file" => arms(ENVIRONMENT),
+        // Environment/external process state.
+        "getenv" => arms(ENVIRONMENT),
+        // IPC / process.
+        "proc_open" => arms(INPUT_ENVIRONMENT),
+        "sem_get" | "shmop_open" => arms(ENVIRONMENT),
+        "socket_create" => arms(RESOURCE),
+        // NOT-A-FAILURE SENTINELS — `false`/`null` is a legitimate result. These
+        // MUST stay distinct from unclassified (`None`): the boundary profile must
+        // know never to label them, not merely lack an opinion. Exactly the
+        // failure_arms.toml `[[sentinel]]` set (`next` note names the internal-
+        // pointer siblings current/prev/end/reset explicitly).
+        "array_search" | "strpos" | "array_key_first" | "next" | "current" | "prev" | "end"
+        | "reset" => Some(FailureArms::Sentinel),
         _ => None,
     }
 }
@@ -517,7 +719,17 @@ mod tests {
 
     #[test]
     fn builtin_throws_curated() {
-        assert_eq!(super::builtin_throws("intdiv"), Some(&["DivisionByZeroError"][..]));
+        // intdiv now carries BOTH input-determined arms (throws.toml, math.c:1502/1507).
+        assert_eq!(
+            super::builtin_throws("intdiv"),
+            Some(&["DivisionByZeroError", "ArithmeticError"][..])
+        );
+        // Input-determined ValueError rows (php-src throws.toml).
+        assert_eq!(super::builtin_throws("preg_match"), Some(&["ValueError"][..]));
+        assert_eq!(super::builtin_throws("random_int"), Some(&["ValueError"][..]));
+        assert_eq!(super::builtin_throws("HASH"), Some(&["ValueError"][..])); // case-insensitive
+        // Flag-gated JSON stays under its placeholder key (widen for plain json_*).
+        assert_eq!(super::builtin_throws("json_decode_throwing"), Some(&["JsonException"][..]));
         assert_eq!(super::builtin_throws("strlen"), None);
     }
 
@@ -540,6 +752,51 @@ mod tests {
         // Unknown external / namespaced → None (chain incomplete → oracle Unknown).
         assert_eq!(s("MyCustomThing"), None);
         assert_eq!(s("App\\Suit"), None);
+    }
+
+    #[test]
+    fn builtin_class_supers_from_mined_hierarchy() {
+        use super::builtin_class_supers as s;
+        // A class with multiple direct supers (extends none, implements many).
+        assert_eq!(
+            s("ArrayObject"),
+            Some(vec!["IteratorAggregate", "ArrayAccess", "Serializable", "Countable"])
+        );
+        // Interface→interface edge (needed so the closure reaches Traversable).
+        assert_eq!(s("IteratorAggregate"), Some(vec!["Traversable"]));
+        // Namespaced builtin classes ARE resolved now (backslash kept in key).
+        assert_eq!(s("FFI\\Exception"), Some(vec!["Error"]));
+        assert_eq!(s("\\FFI\\ParserException"), Some(vec!["Exception"]));
+        // Builtin enums are deliberately ABSENT (incomplete implicit-interface /
+        // backing data → Unknown, never a spurious No). See gen_catalog.rs.
+        assert_eq!(s("RoundingMode"), None);
+        assert_eq!(s("IntervalBoundary"), None);
+    }
+
+    #[test]
+    fn hierarchy_table_is_sorted_for_binary_search() {
+        // The generated table MUST be sorted by key or `binary_search_by` in
+        // `builtin_class_supers` silently misses entries. Guards regen drift.
+        let t = super::hierarchy_generated::HIERARCHY;
+        assert!(t.windows(2).all(|w| w[0].0 < w[1].0), "HIERARCHY must be strictly sorted by key");
+    }
+
+    #[test]
+    fn exception_parent_agrees_with_generated_hierarchy() {
+        // One source of truth: the frozen throw-tree projection
+        // (`builtin_exception_parent`) must never conflict with the generated
+        // hierarchy. For every table entry, if the throw tree names a parent it
+        // must be that class's first (single) recorded super — except Throwable,
+        // the throw-root, whose only super is the non-Throwable `Stringable`.
+        for &(name, supers) in super::hierarchy_generated::HIERARCHY {
+            if let Some(parent) = super::builtin_exception_parent(name) {
+                assert_eq!(
+                    Some(&parent),
+                    supers.first(),
+                    "throw-tree parent of `{name}` disagrees with generated hierarchy"
+                );
+            }
+        }
     }
 
     #[test]
@@ -588,6 +845,74 @@ mod tests {
         assert_eq!(nearest_label("outputt"), Some("output"));
         // Something wildly off has no near suggestion.
         assert_eq!(nearest_label("completely-different"), None);
+    }
+
+    #[test]
+    fn new_effect_labels_are_registered_and_subsume() {
+        // S4 additions (effects_gaps.md) are known and prefix-subsume correctly.
+        for label in ["ffi", "io.signal", "io.ipc", "output.header"] {
+            assert!(is_known_label(label), "{label} should be a known registry label");
+        }
+        assert!(subsumes("io", "io.signal"), "coarse io admits io.signal");
+        assert!(subsumes("io", "io.ipc"), "coarse io admits io.ipc");
+        assert!(subsumes("output", "output.header"), "coarse output admits output.header");
+        assert!(!subsumes("io.signal", "io.ipc"), "siblings do not subsume");
+        // ffi is a top-level escape hatch, not under io.
+        assert!(!subsumes("io", "ffi"));
+    }
+
+    #[test]
+    fn new_effect_labels_color_the_mined_functions() {
+        // io.signal (pcntl/posix), output.header (header/cookies), io.ipc (sysv),
+        // and the composite session bootstrap.
+        assert_eq!(effect_labels("pcntl_signal"), Some(&["io.signal"][..]));
+        assert_eq!(effect_labels("posix_kill"), Some(&["io.signal"][..]));
+        assert_eq!(effect_labels("header"), Some(&["output.header"][..]));
+        assert_eq!(effect_labels("setcookie"), Some(&["output.header"][..]));
+        assert_eq!(effect_labels("shmop_write"), Some(&["io.ipc"][..]));
+        assert_eq!(
+            effect_labels("session_start"),
+            Some(&["io.fs.write", "output.header", "global.write"][..])
+        );
+    }
+
+    use super::{failure_arms, FailureArms, FailureCause};
+
+    #[test]
+    fn failure_arms_classifies_by_cause() {
+        use FailureCause::{Environment, Input, Resource};
+        // Multi-cause: curl_init is resource ∪ input; proc_open is input ∪ environment.
+        assert_eq!(failure_arms("curl_init"), Some(FailureArms::Causes(&[Resource, Input])));
+        assert_eq!(failure_arms("proc_open"), Some(FailureArms::Causes(&[Input, Environment])));
+        // Single-cause canonical examples (ADR-0042).
+        assert_eq!(failure_arms("fopen"), Some(FailureArms::Causes(&[Environment])));
+        assert_eq!(failure_arms("preg_match"), Some(FailureArms::Causes(&[Input])));
+        assert_eq!(failure_arms("socket_create"), Some(FailureArms::Causes(&[Resource])));
+        // Case-insensitive.
+        assert_eq!(failure_arms("FOPEN"), Some(FailureArms::Causes(&[Environment])));
+    }
+
+    #[test]
+    fn failure_arms_sentinels_are_not_failures() {
+        // Explicitly NOT-a-failure — distinct from unclassified (None).
+        for name in ["array_search", "strpos", "array_key_first", "next", "current", "reset"] {
+            assert_eq!(failure_arms(name), Some(FailureArms::Sentinel), "{name} is a sentinel");
+        }
+        // Unclassified names return None (no opinion), NOT Sentinel.
+        assert_eq!(failure_arms("strlen"), None);
+        assert_eq!(failure_arms("some_unknown_fn"), None);
+    }
+
+    #[test]
+    fn failure_cause_labels_are_registered_dot_paths() {
+        assert_eq!(FailureCause::Resource.label(), "failure.resource");
+        assert_eq!(FailureCause::Environment.label(), "failure.environment");
+        assert_eq!(FailureCause::Input.label(), "failure.input");
+        // The family is in the ADR-0018 registry with working prefix subsumption.
+        for c in [FailureCause::Resource, FailureCause::Environment, FailureCause::Input] {
+            assert!(is_known_label(c.label()), "{} should be known", c.label());
+            assert!(subsumes("failure", c.label()), "failure.* subsumes {}", c.label());
+        }
     }
 
     use super::{invocation_shape, ArgSource, Invocation};

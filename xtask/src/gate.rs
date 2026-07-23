@@ -48,6 +48,11 @@ struct PackageReport {
     /// (the checked-exception volume ADR-0007 keeps quiet by default), so they
     /// gate only as a per-package increase tripwire.
     throws: Vec<Diagnostic>,
+    /// Triaged TRUE runtime-layer positives (real broken corpus code Steins
+    /// correctly proves; see [`EXPECTED_PROOF_FINDINGS`]). Reported prominently
+    /// but excluded from the red/green verdict — matched at finding precision so
+    /// any drift falls back into `diagnostics` and reds the gate.
+    expected_true: Vec<Diagnostic>,
     /// Vendor findings suppressed from the gate count (local projects only).
     vendor_suppressed: usize,
     elapsed: Duration,
@@ -173,6 +178,71 @@ const THROW_EXPECTED: &[(&str, usize)] = &[
 /// The expected `throw.*` count for a package/local-project name (0 if untabled).
 fn throw_expected(name: &str) -> usize {
     THROW_EXPECTED.iter().find(|(n, _)| *n == name).map_or(0, |(_, c)| *c)
+}
+
+/// A single **triaged TRUE proof-layer positive** the corpus legitimately
+/// contains: real broken code that Steins correctly proves. Unlike the
+/// measurement-mode `phpdoc.*`/`throw.*` families this is a *runtime-layer*
+/// finding, where the standing bar is a strict **zero** (ADR-0013). An entry here
+/// is not a weakening of that bar but a recorded, verbatim-triaged exception,
+/// matched at **finding precision** (package + id + path + line + a message
+/// fingerprint): any drift — a different line, a different message, a second
+/// finding — no longer matches and re-reds the gate, so this can never mask a
+/// future regression the way a bare count could.
+struct ExpectedProofFinding {
+    /// Package / local-project name the finding belongs to.
+    package: &'static str,
+    /// The diagnostic id (e.g. `type.argument-mismatch`).
+    id: &'static str,
+    /// A suffix of the finding's project-relative path.
+    path_suffix: &'static str,
+    /// The 1-based line.
+    line: u32,
+    /// A stable substring of the message (the acceptance fingerprint).
+    message_contains: &'static str,
+}
+
+/// Triaged TRUE proof-layer positives (ADR-0043 §5 gate discipline). Each is a
+/// place where real corpus code is genuinely wrong and Steins now proves it; the
+/// triage lives in the comment beside the row. Adding a row is a conscious,
+/// orchestrator-visible act — never a silent suppression.
+const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
+    // Surfaced by the ADR-0043 builtin-hierarchy ingestion (php-src mining): once
+    // `stdClass` entered the closed hierarchy as a mined root (supers = []), the
+    // is-a oracle can prove `stdClass` is-a-NO against every member of the
+    // external union `MongoDB\Client|MongoDB\Driver\Manager`, so the definite-No
+    // acceptance arm fires. The finding is in monolog's OWN test, which
+    // deliberately constructs the invalid argument and asserts the resulting
+    // TypeError:
+    //   public function testConstructorShouldThrowExceptionForInvalidMongo() {
+    //       $this->expectException(\TypeError::class);
+    //       new MongoDBHandler(new \stdClass, 'db', 'collection');   // ← here
+    //   }
+    // against `__construct(Client|Manager $mongodb, …)` under `declare(strict_types=1)`.
+    // Steins proves exactly the TypeError the test expects — a TRUE positive, not
+    // an FP. (Verbatim triage in the ingestion session; sound because `stdClass`
+    // has a fully-enumerated empty ancestor set and cannot be a subtype of either
+    // external class.)
+    ExpectedProofFinding {
+        package: "Seldaek/monolog",
+        id: "type.argument-mismatch",
+        path_suffix: "tests/Monolog/Handler/MongoDBHandlerTest.php",
+        line: 27,
+        message_contains: "cannot become mongodb\\client|mongodb\\driver\\manager",
+    },
+];
+
+/// Whether `d` is a recorded, triaged TRUE proof-layer positive for `package`
+/// (see [`EXPECTED_PROOF_FINDINGS`]) — reported but excluded from the red/green
+/// verdict. Matched at finding precision so any drift re-reds the gate.
+fn is_expected_true_positive(package: &str, d: &Diagnostic) -> bool {
+    EXPECTED_PROOF_FINDINGS.iter().any(|e| {
+        e.package == package
+            && e.id == d.id
+            && e.line == d.line
+            && d.path.ends_with(e.path_suffix)
+            && d.message.contains(e.message_contains)
+    })
 }
 
 /// Entry point for `cargo xtask fp-gate`. Returns `true` if the gate is GREEN
@@ -309,6 +379,10 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
     let phpdoc: Vec<Diagnostic> = diags.iter().filter(|d| is_phpdoc(d)).cloned().collect();
     let throws: Vec<Diagnostic> = diags.iter().filter(|d| is_throw(d)).cloned().collect();
     diags.retain(|d| !is_phpdoc(d) && !is_throw(d));
+    // Split off triaged TRUE runtime-layer positives (reported, not gated).
+    let expected_true: Vec<Diagnostic> =
+        diags.iter().filter(|d| is_expected_true_positive(name, d)).cloned().collect();
+    diags.retain(|d| !is_expected_true_positive(name, d));
 
     PackageReport {
         name: name.to_owned(),
@@ -319,6 +393,7 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
         diagnostics: diags,
         phpdoc,
         throws,
+        expected_true,
         vendor_suppressed: 0,
         elapsed: start.elapsed(),
     }
@@ -369,6 +444,10 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
     let phpdoc: Vec<Diagnostic> = diags.iter().filter(|d| is_phpdoc(d)).cloned().collect();
     let throws: Vec<Diagnostic> = diags.iter().filter(|d| is_throw(d)).cloned().collect();
     diags.retain(|d| !is_phpdoc(d) && !is_throw(d));
+    // Split off triaged TRUE runtime-layer positives (reported, not gated).
+    let expected_true: Vec<Diagnostic> =
+        diags.iter().filter(|d| is_expected_true_positive(&proj.name, d)).cloned().collect();
+    diags.retain(|d| !is_expected_true_positive(&proj.name, d));
 
     PackageReport {
         name: proj.name.clone(),
@@ -379,6 +458,7 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
         diagnostics: diags,
         phpdoc,
         throws,
+        expected_true,
         vendor_suppressed,
         elapsed: start.elapsed(),
     }
@@ -428,6 +508,15 @@ fn print_report(
         }
         for d in &r.diagnostics {
             println!("    DIAGNOSTIC {}:{}:{} [{}] {}", d.path, d.line, d.column, d.id, d.message);
+        }
+        if !r.expected_true.is_empty() {
+            println!(
+                "    [expected TRUE positive] {} triaged real-bug finding(s) (excluded from red/green — see EXPECTED_PROOF_FINDINGS):",
+                r.expected_true.len()
+            );
+            for d in &r.expected_true {
+                println!("    TRUE-POSITIVE {}:{}:{} [{}] {}", d.path, d.line, d.column, d.id, d.message);
+            }
         }
         if !r.phpdoc.is_empty() {
             println!("    [measurement mode] {} phpdoc.* finding(s) (excluded from red/green):", r.phpdoc.len());
