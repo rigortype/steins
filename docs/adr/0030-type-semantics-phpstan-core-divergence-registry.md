@@ -38,6 +38,27 @@ entries:
 analysis ratchet), template variance in full, subtraction types: decided in
 envelope-checking priority order, not up front.
 
+## Conformance-suite divergences (intentional silences)
+
+Departures from php-typing-conformance expectations, triaged 2026-07-23
+(18 non-#14939 fails: 0 bugs, all absent-machinery or intentional):
+
+1. **Vendor-prefixed tags**: only `@phpstan-*`/`@psalm-*` prefixes carry
+   contracts (ADR-0029); `@phan-param` and other tool-specific tags are
+   erased — PHPStan parity, not a divergence from it.
+2. **No declaration-coherence lints.** "Native `?string` wider than
+   `@param string`" is not reported: the code is type-safe, and a proof
+   layer speaks on proven value breaks, not declaration style; tolerating
+   native-nullable widening is deliberate (the `$x = null` idiom).
+   Could return as a policy profile, never as core.
+
+The remaining fails are the prioritized unimplemented queue: object-world
+native acceptance (9 fails, single root cause: non-scalar param/return
+types lower to `None`; the largest real-corpus gap), generic type-argument
+carry (ADR-0032), callable signatures (`CallableTy` is signature-less
+today), and narrowing-plus-new-finding-kinds (undefined-method,
+offset-access ids do not exist).
+
 ## Governing rule (amendment)
 
 Vocabulary and minor judgments track PHPStan's model (yes/no/maybe,
