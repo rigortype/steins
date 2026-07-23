@@ -251,7 +251,7 @@ pub fn native_contract(nt: &NativeType) -> ContractTy {
             // an `Instance`-bearing type here guard it out first (the native-guard
             // scalar domain), so this arm is exercised only once the object-world
             // acceptance path opens; it is the honest lowering regardless.
-            TypeMember::Instance(fqn) => ContractTy::Class(fqn.clone()),
+            TypeMember::Instance { fqn, .. } => ContractTy::Class(fqn.clone()),
         })
         .collect();
     if nt.nullable {
