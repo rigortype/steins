@@ -29,7 +29,10 @@ entries:
    acts only on proven values does not need it. **Grammar compatibility is
    preserved**: the parser accepts `__benevolent<T1|T2>` (it occurs in real
    stubs) and expands it to plain `T1|T2` — accepted syntactically,
-   erased semantically.
+   erased semantically. The replacement for what benevolence compensated
+   (practically-infallible `|false` returns like `curl_init`) is
+   failure-cause labels on union arms + policy-profile consumption:
+   ADR-0042.
 
 **Deferred until needed** — narrowing details (co-evolving with the branch
 analysis ratchet), template variance in full, subtraction types: decided in
