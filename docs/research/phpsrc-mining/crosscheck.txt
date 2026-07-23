@@ -1,0 +1,31 @@
+P1 stub-vs-runtime cross-check (PHP 8.5.8 cli, /opt/homebrew/bin/php)
+php-src commit 6bc7c26cf67a9480b5ef9d6191aebe87fa931183
+
+Method: stub declares DIRECT extends/implements; runtime class_implements()
+returns the TRANSITIVE closure. Consistency holds iff closure(direct edges) ==
+runtime set. Interface->interface edges (IteratorAggregate->Traversable,
+Iterator->Traversable, SeekableIterator->Iterator, RecursiveIterator->Iterator)
+are all present in hierarchy.toml, so the closure is reproducible.
+
+class            stub direct implements/extends        runtime closure (adds)
+DateTime         impl DateTimeInterface                 (identical)
+DateTimeImmutable impl DateTimeInterface                (identical)
+ArrayObject      impl IteratorAggregate,ArrayAccess,    +Traversable (via IteratorAggregate)
+                 Serializable,Countable
+SplStack         ext SplDoublyLinkedList                +Serializable,ArrayAccess,Countable,
+                                                          Traversable,Iterator (all inherited)
+ArrayIterator    impl SeekableIterator,ArrayAccess,     +Traversable,Iterator (via SeekableIterator)
+                 Serializable,Countable
+RecursiveArrayIterator ext ArrayIterator; impl          +full ArrayIterator closure + Traversable
+                 RecursiveIterator
+SplPriorityQueue impl Iterator,Countable                +Traversable (via Iterator)
+SplFixedArray    impl IteratorAggregate,ArrayAccess,    +Traversable (via IteratorAggregate)
+                 Countable,JsonSerializable
+Pdo\Sqlite       ext PDO                                 (identical)
+mysqli_result    impl IteratorAggregate                 +Traversable (via IteratorAggregate)
+
+VERDICT: no missing edges. Every runtime interface is derivable from the
+recorded direct edges via transitive closure. The only "discrepancy" is by
+design: stubs = direct edges, runtime = closure. Steins' oracle must compute
+the closure (it already walks builtin_class_supers transitively), so the
+direct-edge table is the correct feed. Nothing to patch.

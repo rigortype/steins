@@ -1,0 +1,264 @@
+# throws.toml — builtin throw facts mined from php-src C (ADR-0040 source #2)
+# php-src commit: 6bc7c26cf67a9480b5ef9d6191aebe87fa931183 (Thu Jul 9 2026)
+#
+# Each [[throw]] row: the builtin, the exception class it can raise, the
+# condition, and whether the condition is input-determined (argument-value,
+# statically refutable with proven args) or environmental (external state).
+# Evidence is the C throw site file:line.
+#
+# CONVENTION for Steins: `zend_argument_value_error(...)` -> ValueError;
+# `zend_argument_type_error`/parameter coercion -> TypeError;
+# `zend_throw_error(zend_ce_division_by_zero_error, ...)` -> DivisionByZeroError;
+# etc. All engine exceptions are global (no namespace); random's are namespaced
+# (Random\RandomException, Random\BrokenRandomEngineError).
+#
+# gap_vs_steins = true marks a throw fact NOT in the current
+# steins-catalog builtin_throws (which today lists only intdiv->DivisionByZeroError
+# and two json placeholder keys).
+
+# ─────────────────────── arithmetic ───────────────────────
+[[throw]]
+function = "intdiv"
+throws = "DivisionByZeroError"
+determinism = "input"
+condition = "divisor == 0"
+evidence = "ext/standard/math.c:1502"
+gap_vs_steins = false
+note = "Already catalogued in steins builtin_throws."
+
+[[throw]]
+function = "intdiv"
+throws = "ArithmeticError"
+determinism = "input"
+condition = "divisor == -1 && dividend == PHP_INT_MIN (overflow)"
+evidence = "ext/standard/math.c:1507"
+gap_vs_steins = true
+note = "MISSING from steins builtin_throws('intdiv'), which lists only DivisionByZeroError. Both arms are input-determined; a complete throw set is [DivisionByZeroError, ArithmeticError]. Note DivisionByZeroError extends ArithmeticError, so a coarse @throws ArithmeticError subsumes both."
+
+# ─────────────────────── JSON ───────────────────────
+[[throw]]
+function = "json_decode"
+throws = "JsonException"
+determinism = "input"
+condition = "malformed JSON AND options & JSON_THROW_ON_ERROR"
+evidence = "ext/json/json.c:303-308 (throw path when THROW_ON_ERROR set)"
+gap_vs_steins = "flag-gated"
+note = "Steins keys this under the placeholder 'json_decode_throwing' pending flag inspection. Throw is conditional on the JSON_THROW_ON_ERROR bit in $flags (arg 4). Without flag inference the FP-safe choice is to NOT manufacture the throw (widen) — matches current steins posture."
+
+[[throw]]
+function = "json_encode"
+throws = "JsonException"
+determinism = "input"
+condition = "unencodable value AND options & JSON_THROW_ON_ERROR"
+evidence = "ext/json/json.c:271"
+gap_vs_steins = "flag-gated"
+note = "Mirror of json_decode. Steins placeholder 'json_encode_throwing'."
+
+# ─────────────────────── DateTime (constructor throws; procedural returns false) ───────────────────────
+[[throw]]
+function = "DateTime::__construct"
+throws = "DateMalformedStringException"
+determinism = "input"
+condition = "unparseable $datetime string"
+evidence = "ext/date/php_date.c:2644 (PHP_DATE_INIT_CTOR path) + class reg at :1817"
+gap_vs_steins = true
+note = "PHP-8 migration: the OO constructor THROWS where date_create() returns false. DateMalformedStringException extends DateException extends Exception (see hierarchy.toml). DateTimeImmutable::__construct likewise. NOT in steins builtin_throws, and DateException/DateMalformedStringException are NOT yet in steins' exception tree."
+
+[[throw]]
+function = "DateTimeZone::__construct"
+throws = "DateInvalidTimeZoneException"
+determinism = "input"
+condition = "unknown timezone identifier"
+evidence = "ext/date/php_date.c (DateInvalidTimeZoneException reg at php_date.stub.php:782)"
+confidence = "stub+partial-C"
+gap_vs_steins = true
+note = "Whole Date* exception family (DateError/DateObjectError/DateRangeError/DateException + Malformed*/Invalid* leaves) is absent from steins' exception tree — see hierarchy.toml rows and effects_gaps."
+
+# ─────────────────────── random (namespaced exceptions) ───────────────────────
+[[throw]]
+function = "random_int"
+throws = "ValueError"
+determinism = "input"
+condition = "$min > $max"
+evidence = "ext/random/random.c:617"
+gap_vs_steins = true
+
+[[throw]]
+function = "random_int"
+throws = "Random\\RandomException"
+determinism = "environment"
+condition = "CSPRNG unavailable / OS entropy source failure"
+evidence = "ext/random/csprng.c:217 (via php_random_int_throw, random.c:621)"
+gap_vs_steins = true
+note = "Environmental — OS randomness source failed. Namespaced: Random\\RandomException extends Exception (random.c:737). Class family absent from steins."
+
+[[throw]]
+function = "random_bytes"
+throws = "ValueError"
+determinism = "input"
+condition = "$length < 1"
+evidence = "ext/random/random.c:589"
+gap_vs_steins = true
+
+[[throw]]
+function = "random_bytes"
+throws = "Random\\RandomException"
+determinism = "environment"
+condition = "CSPRNG failure"
+evidence = "ext/random/csprng.c:217 (via php_random_bytes_throw, random.c:595)"
+gap_vs_steins = true
+
+# ─────────────────────── hash (unknown algo now throws) ───────────────────────
+[[throw]]
+function = "hash"
+throws = "ValueError"
+determinism = "input"
+condition = "unknown hashing algorithm ($algo)"
+evidence = "ext/hash/hash.c:360"
+gap_vs_steins = true
+note = "PHP-8 migration: hash() used to return false for a bad algo; now ValueError, and the stub return type is plain `string`. hash_hmac (hash.c:502), hash_init (hash.c:619/625) likewise throw ValueError for bad algo."
+
+[[throw]]
+function = "hash_file"
+throws = "ValueError"
+determinism = "input"
+condition = "unknown algo (:360) or null byte in filename (:365)"
+evidence = "ext/hash/hash.c:360,365"
+gap_vs_steins = true
+
+# ─────────────────────── PCRE argument ValueErrors ───────────────────────
+[[throw]]
+function = "preg_match"
+throws = "ValueError"
+determinism = "input"
+condition = "$flags not a PREG_* constant (:1187) or $offset below LONG_MIN (:1112)"
+evidence = "ext/pcre/php_pcre.c:1112,1187"
+gap_vs_steins = true
+note = "The malformed-PATTERN case is NOT a throw — it is the false arm (see failure_arms.toml). Only the argument-shape misuse throws ValueError."
+
+# ─────────────────────── filesystem argument ValueErrors ───────────────────────
+[[throw]]
+function = "file_get_contents"
+throws = "ValueError"
+determinism = "input"
+condition = "$offset < 0"
+evidence = "ext/standard/file.c:403"
+gap_vs_steins = true
+
+[[throw]]
+function = "fread"
+throws = "ValueError"
+determinism = "input"
+condition = "$length <= 0"
+evidence = "ext/standard/file.c:1617"
+gap_vs_steins = true
+
+[[throw]]
+function = "fgets"
+throws = "ValueError"
+determinism = "input"
+condition = "$length <= 0"
+evidence = "ext/standard/file.c:911"
+gap_vs_steins = true
+
+[[throw]]
+function = "file"
+throws = "ValueError"
+determinism = "input"
+condition = "$flags is not a valid FILE_* combination"
+evidence = "ext/standard/file.c:613"
+gap_vs_steins = true
+
+[[throw]]
+function = "scandir"
+throws = "ValueError"
+determinism = "input"
+condition = "$sorting_order not a SCANDIR_SORT_* constant"
+evidence = "ext/standard/dir.c:592"
+gap_vs_steins = true
+
+[[throw]]
+function = "stream_get_contents"
+throws = "ValueError"
+determinism = "input"
+condition = "$maxlength < -1"
+evidence = "ext/standard/streamsfuncs.c:469"
+gap_vs_steins = true
+
+[[throw]]
+function = "stream_socket_client"
+throws = "ValueError"
+determinism = "input"
+condition = "$timeout not finite"
+evidence = "ext/standard/streamsfuncs.c:134"
+gap_vs_steins = true
+
+# ─────────────────────── proc_open descriptor-spec ValueErrors ───────────────────────
+[[throw]]
+function = "proc_open"
+throws = "ValueError"
+determinism = "input"
+condition = "malformed descriptor spec — empty program name (:517), null byte in element (:523), missing key (:824), bad redirection target (:1067/:1071), non-int-indexed array (:1295), non-array/stream member (:1312)"
+evidence = "ext/standard/proc_open.c:517,523,824,1067,1071,1295,1312"
+gap_vs_steins = true
+
+# ─────────────────────── serialization / conversion ValueErrors ───────────────────────
+[[throw]]
+function = "unserialize"
+throws = "ValueError"
+determinism = "input"
+condition = "options 'allowed_classes' not array-of-names (:1431) or 'max_depth' < 0 (:1450)"
+evidence = "ext/standard/var.c:1431,1450"
+gap_vs_steins = true
+note = "Malformed serialized DATA does NOT throw — it returns false (failure_arms.toml)."
+
+[[throw]]
+function = "json_decode"
+throws = "ValueError"
+determinism = "input"
+condition = "$depth <= 0 (:316) or $depth > INT_MAX (:321)"
+evidence = "ext/json/json.c:316,321"
+gap_vs_steins = true
+
+[[throw]]
+function = "iconv"
+throws = "ValueError"
+determinism = "input"
+condition = "null byte in $from_encoding/$to_encoding"
+evidence = "ext/iconv/iconv.c:2240"
+gap_vs_steins = true
+note = "Unknown charset does NOT throw (iconv warns + returns false — failure_arms.toml). Contrast mb_convert_encoding, which DOES throw for a bad encoding name."
+
+[[throw]]
+function = "mb_convert_encoding"
+throws = "ValueError"
+determinism = "input"
+condition = "invalid $to_encoding / $from_encoding name (:2893/:2898/:2905) or empty encoding list (:2919)"
+evidence = "ext/mbstring/mbstring.c:2893,2898,2905,2919"
+gap_vs_steins = true
+
+# ─────────────────────── IPC argument ValueErrors ───────────────────────
+[[throw]]
+function = "shmop_open"
+throws = "ValueError"
+determinism = "input"
+condition = "key out of range (:145), bad access mode (:150/:179), non-positive size for c/n (:184), size too large (:201)"
+evidence = "ext/shmop/shmop.c:145,150,179,184,201"
+gap_vs_steins = true
+
+[[throw]]
+function = "socket_create"
+throws = "ValueError"
+determinism = "input"
+condition = "$domain not AF_* (:1162) or $type not SOCK_* (:1172)"
+evidence = "ext/sockets/sockets.c:1162,1172"
+gap_vs_steins = true
+
+# ─────────────────────── SUMMARY of steins coverage gaps ───────────────────────
+# steins-catalog builtin_throws() currently returns Some only for:
+#   intdiv -> [DivisionByZeroError]           (INCOMPLETE: misses ArithmeticError)
+#   json_decode_throwing / json_encode_throwing -> [JsonException]  (placeholders)
+# Everything else above is uncatalogued (widens — FP-safe, but a missed throw fact).
+# Highest-value additions: intdiv ArithmeticError (trivial, input-certain),
+# and the DateTime/DateTimeZone constructor throws (a whole exception family that
+# also needs the hierarchy.toml Date* rows to be a usable @throws target).
