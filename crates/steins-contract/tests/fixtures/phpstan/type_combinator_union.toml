@@ -1,0 +1,159 @@
+# PHPStan `TypeCombinator::union` — the union *denotation*, ported as Steins
+# membership fixtures. ADR-0030 imports the denotational core "as-is": a union
+# denotes the set-union of its members, and membership is inclusion.
+#
+# ─────────────────────────────────────────────────────────────────────────
+# Attribution. Union shapes are taken from phpstan-src (MIT-licensed).
+#   Source:  https://github.com/phpstan/phpstan-src
+#   Commit:  cdc6ca267a2de883adc54393e277e905560b0a6b
+#   License: MIT (Copyright (c) Ondřej Mirtes and contributors)
+# ─────────────────────────────────────────────────────────────────────────
+#
+# What Steins can and cannot express here.
+#
+# PHPStan's `TypeCombinator::union` provider (`dataUnion`) asserts the
+# NORMALIZED result *type* — e.g. `union(true, false) = bool`,
+# `union(int|string, string) = int|string`. Steins has NO type-normalizing
+# combinator and no semantic type-equality: lowering `A|B` yields
+# `ContractTy::Union([A, B])` structurally, unsimplified. So the *normalization*
+# assertions of `dataUnion` are OUT-OF-SURFACE in bulk (roughly 90+ provider
+# rows across scalars, arrays, objects, intersections, generics — not counted
+# individually; the whole normalization operation is absent by design).
+#
+# What Steins DOES express is the union's denotation: `admits_val(A|B, v)`
+# folds membership across arms with Kleene `or`. This file ports that law,
+# using each union shape from `dataUnion` and asserting membership of concrete
+# witnesses. lhs = the union type; rhs = a constant witness; expected = whether
+# the witness is in the union's denotation (Steins == PHPStan — concrete).
+#
+#   PORTED             16
+#   EXPECTED-DIVERGENT  0
+#   NEEDS-DECISION      0
+#
+# NOTE on `true|false`: Steins does not normalize `true|false` to `bool`, so
+# `admits_fact(true|false, general-bool)` is Maybe (not Yes). That is the
+# normalization gap above — expressed here only via concrete literal witnesses,
+# which are exact.
+
+[meta]
+operation = "union_membership"
+source_repo = "https://github.com/phpstan/phpstan-src"
+source_commit = "cdc6ca267a2de883adc54393e277e905560b0a6b"
+source_license = "MIT"
+
+# ── union(string, null) = string|null ───────────────────────────────────────
+[[row]]
+name = "string_null__accepts_string"
+lhs = "string|null"
+rhs = "'x'"
+phpstan = "yes"
+source = "TypeCombinatorTest::dataUnion (string, null → string|null); membership witness"
+
+[[row]]
+name = "string_null__accepts_null"
+lhs = "string|null"
+rhs = "null"
+phpstan = "yes"
+source = "TypeCombinatorTest::dataUnion (string, null → string|null); membership witness"
+
+[[row]]
+name = "string_null__accepts_empty_string"
+lhs = "string|null"
+rhs = "''"
+phpstan = "yes"
+source = "TypeCombinatorTest::dataUnion (string, null → string|null); membership witness"
+
+[[row]]
+name = "string_null__rejects_int"
+lhs = "string|null"
+rhs = "1"
+phpstan = "no"
+source = "TypeCombinatorTest::dataUnion (string, null → string|null); membership witness"
+
+# ── union(true, false) = bool ───────────────────────────────────────────────
+[[row]]
+name = "true_false__accepts_true"
+lhs = "true|false"
+rhs = "true"
+phpstan = "yes"
+source = "TypeCombinatorTest::dataUnion (true, false → bool); membership witness"
+
+[[row]]
+name = "true_false__accepts_false"
+lhs = "true|false"
+rhs = "false"
+phpstan = "yes"
+source = "TypeCombinatorTest::dataUnion (true, false → bool); membership witness"
+
+[[row]]
+name = "true_false__rejects_int"
+lhs = "true|false"
+rhs = "1"
+phpstan = "no"
+source = "TypeCombinatorTest::dataUnion (true, false → bool); membership witness"
+
+# ── union(string, int) = int|string ─────────────────────────────────────────
+[[row]]
+name = "int_string__accepts_int"
+lhs = "int|string"
+rhs = "5"
+phpstan = "yes"
+source = "TypeCombinatorTest::dataUnion (string, int → int|string); membership witness"
+
+[[row]]
+name = "int_string__accepts_string"
+lhs = "int|string"
+rhs = "'x'"
+phpstan = "yes"
+source = "TypeCombinatorTest::dataUnion (string, int → int|string); membership witness"
+
+[[row]]
+name = "int_string__rejects_float"
+lhs = "int|string"
+rhs = "1.5"
+phpstan = "no"
+source = "TypeCombinatorTest::dataUnion (string, int → int|string); membership witness"
+
+# ── union(int|string, true) = int|string|true ──────────────────────────────
+[[row]]
+name = "int_string_true__accepts_true"
+lhs = "int|string|true"
+rhs = "true"
+phpstan = "yes"
+source = "TypeCombinatorTest::dataUnion ((int|string), true → int|string|true); membership witness"
+
+[[row]]
+name = "int_string_true__accepts_int"
+lhs = "int|string|true"
+rhs = "5"
+phpstan = "yes"
+source = "TypeCombinatorTest::dataUnion ((int|string), true → int|string|true); membership witness"
+
+[[row]]
+name = "int_string_true__accepts_string"
+lhs = "int|string|true"
+rhs = "'x'"
+phpstan = "yes"
+source = "TypeCombinatorTest::dataUnion ((int|string), true → int|string|true); membership witness"
+
+# ── union(int|string, null) = int|string|null ──────────────────────────────
+[[row]]
+name = "int_string_null__accepts_null"
+lhs = "int|string|null"
+rhs = "null"
+phpstan = "yes"
+source = "TypeCombinatorTest::dataUnion ((int|string), null → int|string|null); membership witness"
+
+[[row]]
+name = "int_string_null__accepts_string"
+lhs = "int|string|null"
+rhs = "'x'"
+phpstan = "yes"
+source = "TypeCombinatorTest::dataUnion ((int|string), null → int|string|null); membership witness"
+
+[[row]]
+name = "int_string_null__accepts_int"
+lhs = "int|string|null"
+rhs = "5"
+phpstan = "yes"
+source = "TypeCombinatorTest::dataUnion ((int|string), null → int|string|null); membership witness"

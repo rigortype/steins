@@ -1,0 +1,262 @@
+# PHPStan `accepts` data providers, ported as Steins acceptance fixtures.
+# ADR-0030: "Compatibility on this core is fixed mechanically by porting
+# phpstan-src's data-provider tests as fixtures."
+#
+# ─────────────────────────────────────────────────────────────────────────
+# Attribution. Rows are derived from phpstan-src, which is MIT-licensed.
+#   Source:  https://github.com/phpstan/phpstan-src
+#   Commit:  cdc6ca267a2de883adc54393e277e905560b0a6b
+#   License: MIT (Copyright (c) Ondřej Mirtes and contributors)
+# Only the (type, type, judgment) triples and their provenance are reproduced;
+# no phpstan-src source is vendored into this repository.
+# ─────────────────────────────────────────────────────────────────────────
+#
+# Operation. PHPStan `Type::accepts($other, true)->result`. Steins runs its
+# single acceptance relation (`admits_val` / `admits_fact`) over the probe of
+# the right-hand type. See tests/phpstan_port.rs for the bridge.
+#
+# Coverage summary for the providers mined into this file
+# (IntegerTypeTest, FloatTypeTest, BooleanTypeTest, ConstantIntegerTypeTest,
+#  ClassStringTypeTest — the `dataAccepts` providers):
+#
+#   PORTED          18   Steins agrees with PHPStan (scalar/literal/nullable/union).
+#   EXPECTED-DIVERGENT 5  4× class-string is non-extensional (ADR-0038) → Steins
+#                         answers Maybe where PHPStan reflects a class table;
+#                         1× narrow-LHS accepts strictness deliberately not
+#                         reproduced (ADR-0030 registry 4): the accepts/
+#                         isSuperTypeOf asymmetry collapses to the single
+#                         overlap relation.
+#
+# OUT-OF-SURFACE (not expressible on today's surface; counted, not ported):
+#   IntegerTypeTest::dataAccepts        1   `int accepts mixed`  (mixed RHS)
+#   FloatTypeTest::dataAccepts          2   `mixed` RHS; `string|resource` (resource)
+#   BooleanTypeTest::dataAccepts        1   `bool accepts mixed`
+#   ClassStringTypeTest::dataAccepts    1   `class-string accepts class-string`
+#                                           (non-extensional RHS, StrOpaque)
+#   StringTypeTest::dataAccepts        19   templates, template-args,
+#                                           object&HasProperty intersection,
+#                                           class-string RHS, and the
+#                                           decimal-integer-string accessory
+#                                           predicate (unmodeled) — whole provider
+#   ── object world / generics / accessory predicates / subtraction types are
+#      the known unimplemented queue (ADR-0030, ADR-0032).
+
+[meta]
+operation = "accepts"
+source_repo = "https://github.com/phpstan/phpstan-src"
+source_commit = "cdc6ca267a2de883adc54393e277e905560b0a6b"
+source_license = "MIT"
+
+# ── IntegerType::dataAccepts ────────────────────────────────────────────────
+[[row]]
+name = "int_accepts_int"
+lhs = "int"
+rhs = "int"
+phpstan = "yes"
+source = "IntegerTypeTest::dataAccepts[0]"
+
+[[row]]
+name = "int_accepts_const_1"
+lhs = "int"
+rhs = "1"
+phpstan = "yes"
+source = "IntegerTypeTest::dataAccepts[1]"
+
+[[row]]
+name = "int_accepts_null"
+lhs = "int"
+rhs = "null"
+phpstan = "no"
+source = "IntegerTypeTest::dataAccepts[2]"
+
+[[row]]
+name = "int_accepts_float"
+lhs = "int"
+rhs = "float"
+phpstan = "no"
+source = "IntegerTypeTest::dataAccepts[4]"
+
+[[row]]
+name = "int_accepts_string"
+lhs = "int"
+rhs = "string"
+phpstan = "no"
+source = "IntegerTypeTest::dataAccepts[5]"
+
+# ── FloatType::dataAccepts ──────────────────────────────────────────────────
+# NOTE: PHPStan core accepts int where float is expected; Steins mirrors this
+# (ContractTy::Base float admits Val::Int). See end_to_end.rs.
+[[row]]
+name = "float_accepts_float"
+lhs = "float"
+rhs = "float"
+phpstan = "yes"
+source = "FloatTypeTest::dataAccepts[0]"
+
+[[row]]
+name = "float_accepts_int"
+lhs = "float"
+rhs = "int"
+phpstan = "yes"
+source = "FloatTypeTest::dataAccepts[1]"
+
+[[row]]
+name = "float_accepts_int_or_float"
+lhs = "float"
+rhs = "int|float"
+phpstan = "yes"
+source = "FloatTypeTest::dataAccepts[3]"
+
+[[row]]
+name = "float_accepts_null"
+lhs = "float"
+rhs = "null"
+phpstan = "no"
+source = "FloatTypeTest::dataAccepts[4]"
+
+[[row]]
+name = "float_accepts_string"
+lhs = "float"
+rhs = "string"
+phpstan = "no"
+source = "FloatTypeTest::dataAccepts[5]"
+
+[[row]]
+name = "float_accepts_int_float_string"
+lhs = "float"
+rhs = "int|float|string"
+phpstan = "maybe"
+source = "FloatTypeTest::dataAccepts[6]"
+
+# ── BooleanType::dataAccepts ────────────────────────────────────────────────
+[[row]]
+name = "bool_accepts_bool"
+lhs = "bool"
+rhs = "bool"
+phpstan = "yes"
+source = "BooleanTypeTest::dataAccepts[0]"
+
+[[row]]
+name = "bool_accepts_true"
+lhs = "bool"
+rhs = "true"
+phpstan = "yes"
+source = "BooleanTypeTest::dataAccepts[1]"
+
+[[row]]
+name = "bool_accepts_null"
+lhs = "bool"
+rhs = "null"
+phpstan = "no"
+source = "BooleanTypeTest::dataAccepts[2]"
+
+[[row]]
+name = "bool_accepts_float"
+lhs = "bool"
+rhs = "float"
+phpstan = "no"
+source = "BooleanTypeTest::dataAccepts[4]"
+
+[[row]]
+name = "bool_accepts_string"
+lhs = "bool"
+rhs = "string"
+phpstan = "no"
+source = "BooleanTypeTest::dataAccepts[5]"
+
+# ── ConstantIntegerType::dataAccepts ────────────────────────────────────────
+[[row]]
+name = "const1_accepts_const1"
+lhs = "1"
+rhs = "1"
+phpstan = "yes"
+source = "ConstantIntegerTypeTest::dataAccepts[0]"
+
+[[row]]
+name = "const1_accepts_const2"
+lhs = "1"
+rhs = "2"
+phpstan = "no"
+source = "ConstantIntegerTypeTest::dataAccepts[2]"
+
+# ── EXPECTED-DIVERGENT: class-string is non-extensional (ADR-0038) ──────────
+# PHPStan decides these by consulting the class table (does the string name a
+# real class?). Steins lowers class-string to StrOpaque: any string is Maybe,
+# a non-string is No — it can never answer Yes/No on a concrete class name.
+# ADR-0030 imports the denotational core "as-is" but registers this: provenance-
+# flavored string types are non-extensional and cannot decide membership.
+[[row]]
+name = "classstring_accepts_real_class"
+lhs = "class-string"
+rhs = "'stdClass'"
+phpstan = "yes"
+steins = "maybe"
+status = "divergent"
+adr = "ADR-0038 (non-extensional string types) / ADR-0030 denotational-core registry"
+source = "ClassStringTypeTest::dataAccepts (ConstantString stdClass → Yes)"
+
+[[row]]
+name = "classstring_accepts_missing_class"
+lhs = "class-string"
+rhs = "'NonexistentClass'"
+phpstan = "no"
+steins = "maybe"
+status = "divergent"
+adr = "ADR-0038 (non-extensional string types) / ADR-0030 denotational-core registry"
+source = "ClassStringTypeTest::dataAccepts (ConstantString NonexistentClass → No)"
+
+[[row]]
+name = "classstring_accepts_union_all_real"
+lhs = "class-string"
+rhs = "'Foo'|'Bar'"
+phpstan = "yes"
+steins = "maybe"
+status = "divergent"
+adr = "ADR-0038 (non-extensional string types) / ADR-0030 denotational-core registry"
+source = "ClassStringTypeTest::dataAccepts (union of real ConstantStrings → Yes)"
+
+[[row]]
+name = "classstring_accepts_union_all_missing"
+lhs = "class-string"
+rhs = "'Nonexistent'|'Nonexistent2'"
+phpstan = "no"
+steins = "maybe"
+status = "divergent"
+adr = "ADR-0038 (non-extensional string types) / ADR-0030 denotational-core registry"
+source = "ClassStringTypeTest::dataAccepts (union of missing ConstantStrings → No)"
+
+# Coincidental agreement: a mixed real/missing union is Maybe in PHPStan too,
+# and Steins already answers Maybe for any class-string probe — so this ports
+# cleanly even though the *reason* differs (PHPStan: partial class table;
+# Steins: non-extensional). Kept as PORTED (asserts PHPStan's own Maybe).
+[[row]]
+name = "classstring_accepts_union_mixed"
+lhs = "class-string"
+rhs = "'stdClass'|'Nonexistent'"
+phpstan = "maybe"
+source = "ClassStringTypeTest::dataAccepts (union real|missing → Maybe)"
+
+# ── NEEDS-DECISION (quarantine): `accepts` vs `isSuperTypeOf` seam ──────────
+# PHPStan's `accepts` and `isSuperTypeOf` DISAGREE on this row:
+#   ConstantIntegerType(1)->accepts(IntegerType)      = No
+#   ConstantIntegerType(1)->isSuperTypeOf(IntegerType) = Maybe   (see is_super_type_of.toml)
+# Steins has ONE relation. `admits_fact(LitInt(1), General{int})` answers
+# Maybe — the overlap judgment (some ints are 1, some are not), which matches
+# PHPStan's isSuperTypeOf exactly and is the documented contract of admits_fact
+# (Yes=subset, No=disjoint, Maybe=partial). So Steins cannot also produce the
+# `accepts`-specific No here without contradicting the isSuperTypeOf row it
+# already matches. This is the accepts/isSuperTypeOf asymmetry, NOT a bug in
+# a leaf rule. Whether Steins' declared-contract acceptance should grow a
+# distinct PHPStan-`accepts` strictness for narrow LHS (ADR-0030 registry #1,
+# "two acceptance relations, not one") is a design decision for the
+# orchestrator — quarantined, not reclassified.
+[[row]]
+name = "const1_accepts_general_int"
+lhs = "1"
+rhs = "int"
+phpstan = "no"
+steins = "maybe"
+status = "divergent"
+adr = "ADR-0030 registry 4"
+note = "PHPStan's accepts=No is worst-case reasoning on a declared wide type flowing into a narrow contract; the runtime value may comply, so the proof layer answers the overlap Maybe (== PHPStan isSuperTypeOf). The accepts/isSuperTypeOf asymmetry deliberately collapses to the single overlap relation."
+source = "ConstantIntegerTypeTest::dataAccepts[1]"
