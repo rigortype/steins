@@ -155,6 +155,11 @@ pub fn native_contract(nt: &NativeType) -> ContractTy {
             TypeMember::Scalar(ScalarType::String) => ContractTy::Base(Base::String),
             TypeMember::Scalar(ScalarType::Bool) => ContractTy::Base(Base::Bool),
             TypeMember::BoolLiteral(b) => ContractTy::LitBool(*b),
+            // Object member (ADR-0043): the class contract. Callers that could feed
+            // an `Instance`-bearing type here guard it out first (the native-guard
+            // scalar domain), so this arm is exercised only once the object-world
+            // acceptance path opens; it is the honest lowering regardless.
+            TypeMember::Instance(fqn) => ContractTy::Class(fqn.clone()),
         })
         .collect();
     if nt.nullable {

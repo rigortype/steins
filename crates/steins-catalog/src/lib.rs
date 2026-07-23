@@ -262,6 +262,44 @@ pub fn builtin_exception_parent(name: &str) -> Option<&'static str> {
     })
 }
 
+/// The **direct supertypes** of a builtin class / interface, for the trinary is-a
+/// oracle (ADR-0043): `Some(list)` when `name` is a class Steins knows in full —
+/// a possibly-empty list of its immediate parents/interfaces (a root returns an
+/// empty list) — and `None` when the name is an *unknown* external, which keeps
+/// the oracle's enumeration incomplete (→ `Unknown`, never `No`; the FP-safe
+/// side). This is the catalog side of the "completely enumerated hierarchy"
+/// closure: only names present here (or resolvable in-project) let a `No` verdict
+/// stand.
+///
+/// The tree unifies the SPL/engine `Throwable` hierarchy ([`builtin_exception_parent`])
+/// with the enum interface roots (`UnitEnum`; `BackedEnum` extends `UnitEnum`).
+/// Matching is case-insensitive; a namespaced name is never a builtin.
+#[must_use]
+pub fn builtin_class_supers(name: &str) -> Option<Vec<&'static str>> {
+    let bare = name.trim_start_matches('\\');
+    if bare.contains('\\') {
+        return None; // namespaced — not a global engine/SPL class
+    }
+    match bare.to_ascii_lowercase().as_str() {
+        // `Throwable extends Stringable` since PHP 8.0 (the interface gained a
+        // `__toString(): string` contract), so *every* Throwable IS-A Stringable
+        // — verified against PHP 8.5 (`Reflection`/`is_subclass_of`). Omitting
+        // this edge makes `Exception instanceof \Stringable` a spurious `No`
+        // (dead live branch — unsound). The whole SPL/engine tree roots here, so
+        // this single edge carries Stringable to the entire exception family.
+        "throwable" => Some(vec!["Stringable"]),
+        // Known root interfaces: fully enumerated, no further supertypes.
+        "unitenum" | "stringable" => Some(Vec::new()),
+        // A backed enum's implicit interface extends the unit-enum interface.
+        "backedenum" => Some(vec!["UnitEnum"]),
+        // The SPL/engine exception tree: a single catalogued parent edge.
+        other => match builtin_exception_parent(other) {
+            Some(parent) => Some(vec![parent]),
+            None => None, // unknown external — chain incomplete
+        },
+    }
+}
+
 /// The **measured/curated** throw facts of a builtin call (ADR-0040 source #2):
 /// the global class names a builtin provably raises. Deliberately tiny and
 /// hand-verified — an uncatalogued builtin simply contributes no throw fact
@@ -481,6 +519,27 @@ mod tests {
     fn builtin_throws_curated() {
         assert_eq!(super::builtin_throws("intdiv"), Some(&["DivisionByZeroError"][..]));
         assert_eq!(super::builtin_throws("strlen"), None);
+    }
+
+    #[test]
+    fn builtin_class_supers_tree() {
+        use super::builtin_class_supers as s;
+        // `Throwable extends Stringable` since PHP 8.0 (verified vs PHP 8.5).
+        assert_eq!(s("Throwable"), Some(vec!["Stringable"]));
+        // Known roots: fully enumerated, no supertypes.
+        assert_eq!(s("UnitEnum"), Some(vec![]));
+        assert_eq!(s("Stringable"), Some(vec![]));
+        // A backed enum's interface extends the unit-enum interface.
+        assert_eq!(s("BackedEnum"), Some(vec!["UnitEnum"]));
+        // The SPL/engine exception tree (a single catalogued parent edge).
+        assert_eq!(s("Exception"), Some(vec!["Throwable"]));
+        assert_eq!(s("RuntimeException"), Some(vec!["Exception"]));
+        assert_eq!(s("TypeError"), Some(vec!["Error"]));
+        // Case-insensitive, leading backslash tolerated.
+        assert_eq!(s("\\backedenum"), Some(vec!["UnitEnum"]));
+        // Unknown external / namespaced → None (chain incomplete → oracle Unknown).
+        assert_eq!(s("MyCustomThing"), None);
+        assert_eq!(s("App\\Suit"), None);
     }
 
     #[test]

@@ -164,7 +164,10 @@ fn plan_params(
         // value that the parameter accepts by native-nullable / `= null` default
         // is not a violation (mirrors `check_phpdoc_param`).
         let matches = |p: usize| if param.variadic { p >= idx } else { p == idx };
-        let null_ok = param.has_null_default || param.ty.as_ref().is_some_and(|t| t.nullable);
+        // ADR-0043 stage 1: an object-bearing native type gives no native-nullable
+        // signal (it lowered to `None` before ADR-0043); only scalar-value types do.
+        let null_ok = param.has_null_default
+            || param.ty.as_ref().is_some_and(|t| t.nullable && !t.has_instance());
         let mut lie = false;
         if let Some(t) = target {
             for obs in t.observed.iter().filter(|o| matches(o.param_index)) {
@@ -248,7 +251,10 @@ fn decide_param(
 
     // Never contradict an existing native hint (ADR-0041): if the native type does
     // not admit the proven join, that is a different disease (human eyes).
-    if let Some(nt) = &param.ty {
+    // ADR-0043 stage 1: an object-bearing native type is out of the native-guard's
+    // scalar domain (it lowered to `None` before ADR-0043), so skip it — reproducing
+    // the pre-ADR-0043 `None`-typed behavior exactly.
+    if let Some(nt) = param.ty.as_ref().filter(|t| !t.has_instance()) {
         native_guard(nt, &vals, &param.name)?;
     }
 
@@ -338,7 +344,9 @@ fn decide_return(
     }
     dedup(&mut vals);
 
-    if let Some(nt) = &func.ret {
+    // ADR-0043 stage 1: an object-bearing native return type is out of the
+    // native-guard's scalar domain — skip it (pre-ADR-0043 `None`-typed behavior).
+    if let Some(nt) = func.ret.as_ref().filter(|t| !t.has_instance()) {
         native_guard(nt, &vals, "return")?;
     }
 
