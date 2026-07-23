@@ -18,9 +18,11 @@
 //! run over a one-file project, so every same-file soundness guard keeps
 //! working unchanged; [`check_project`] / [`annotate_project`] run over many.
 
+pub mod dam;
 pub mod promote;
 pub mod suppress;
 
+pub use dam::{DamFacts, DamKind, DamSite, dam_facts};
 pub use suppress::{
     DIAGNOSTIC_IDS, DIAGNOSTIC_REGISTRY, InlineOutcome, Layer, SUPPRESS_UNKNOWN_ID,
     SUPPRESS_UNMATCHED_ID, apply_inline_ignores, layer, pattern_is_known,
@@ -120,6 +122,59 @@ pub const THROW_LISKOV_ID: &str = "throw.liskov-widened";
 /// stays silent — only the proven subset judges.
 pub const EFFECT_LISKOV_ID: &str = "effect.liskov-widened";
 
+// ---------------------------------------------------------------------------
+// The finding-breadth family (ADR-0049): absence-proof ids. Registered in S1
+// but **emitted by nothing yet** — each id lights up in a later stage (S2–S6).
+// They are listed in `REGISTERED_NOT_YET_EMITTED`, not `ALL_EMITTABLE_IDS`,
+// until their emit site lands; the totality test binds the two.
+// ---------------------------------------------------------------------------
+
+/// The registry id for the undefined-function check (ADR-0049 §3, proof layer): a
+/// call to a function no candidate FQN defines and the sidecar reports not-found,
+/// with the dam clear. Emitted from S4.
+pub const CALL_UNDEFINED_FUNCTION_ID: &str = "call.undefined-function";
+
+/// The registry id for the undefined-method check (ADR-0049 §4, proof layer): a
+/// method call on a proven-exact receiver whose fully-enumerated hierarchy defines
+/// no such method, with no `__call`/trait obstacle. Emitted from S2.
+pub const CALL_UNDEFINED_METHOD_ID: &str = "call.undefined-method";
+
+/// The registry id for the undefined-class check (ADR-0049 §5, proof layer): a
+/// class reference at a hard-error position (`new`, static call, class-const /
+/// static-property fetch) whose FQN is absent from the index, the builtin
+/// hierarchy, and the sidecar, with the dam clear. Emitted from S4.
+pub const CLASS_UNDEFINED_ID: &str = "class.undefined";
+
+/// The registry id for the too-few-arguments check (ADR-0049 §6, proof layer): a
+/// uniquely-resolved call passing fewer positional arguments than the target's
+/// required parameters (always `ArgumentCountError`). Emitted from S5.
+pub const CALL_TOO_FEW_ARGUMENTS_ID: &str = "call.too-few-arguments";
+
+/// The registry id for the too-many-arguments check (ADR-0049 §6, proof layer):
+/// extra arguments to an **internal** non-variadic target (userland silently
+/// ignores them — never a finding). Emitted from S5.
+pub const CALL_TOO_MANY_ARGUMENTS_ID: &str = "call.too-many-arguments";
+
+/// The registry id for the unknown-named-argument check (ADR-0049 §6, proof
+/// layer): a named argument binding no parameter of a resolved non-variadic target
+/// (fatal `Error`). Emitted from S5.
+pub const CALL_UNKNOWN_NAMED_ARGUMENT_ID: &str = "call.unknown-named-argument";
+
+/// The registry id for the missing-offset check (ADR-0049 §7, proof layer): a read
+/// of a key provably absent from a proven container value (`Undefined array key`).
+/// Emitted from S3.
+pub const OFFSET_MISSING_ID: &str = "offset.missing";
+
+/// The registry id for the offset-on-unsupported check (ADR-0049 §7, proof layer):
+/// an offset read on a proven non-offsetable base (object → fatal `Error`;
+/// scalar/null → warning). Emitted from S3.
+pub const OFFSET_ON_UNSUPPORTED_ID: &str = "offset.on-unsupported";
+
+/// The registry id for the declared-receiver undefined-method check (ADR-0049 §8,
+/// **contract** layer): a method absent on a phpdoc-declared receiver narrowed by
+/// branch analysis, under descendant closure. Emitted from S6.
+pub const PHPDOC_UNDEFINED_METHOD_ID: &str = "phpdoc.undefined-method";
+
 /// Every id constant that reaches a `Diagnostic { id: … }` construction site — the
 /// canonical enumeration of what the emitters can produce (ADR-0050 §2 totality).
 ///
@@ -149,6 +204,31 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     UNKNOWN_LABEL_ID,
     suppress::SUPPRESS_UNMATCHED_ID,
     suppress::SUPPRESS_UNKNOWN_ID,
+];
+
+/// Ids that are **registered ahead of emission** (ADR-0049 S1 groundwork): the
+/// finding-breadth family's ids exist in [`DIAGNOSTIC_REGISTRY`] — so
+/// `@steins-ignore` can name them and their layer is pinned — but no emitter
+/// produces them yet. Each later stage (S2–S6) that lights up an id **moves** it
+/// from here into [`ALL_EMITTABLE_IDS`].
+///
+/// The totality test (`tests/registry.rs`) enforces the reconciliation so it
+/// cannot rot silently: every registered id must be in `ALL_EMITTABLE_IDS ∪
+/// REGISTERED_NOT_YET_EMITTED`, the two lists are **disjoint** (an id emitted for
+/// the first time must leave this list — it cannot be both), and every id here must
+/// actually be registered. An emitted id that is not in `ALL_EMITTABLE_IDS` still
+/// fails the forward-totality check exactly as before — this list only carves out
+/// the not-yet-emitted registry entries, never the emitted-but-unregistered defect.
+pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
+    CALL_UNDEFINED_FUNCTION_ID,
+    CALL_UNDEFINED_METHOD_ID,
+    CLASS_UNDEFINED_ID,
+    CALL_TOO_FEW_ARGUMENTS_ID,
+    CALL_TOO_MANY_ARGUMENTS_ID,
+    CALL_UNKNOWN_NAMED_ARGUMENT_ID,
+    OFFSET_MISSING_ID,
+    OFFSET_ON_UNSUPPORTED_ID,
+    PHPDOC_UNDEFINED_METHOD_ID,
 ];
 
 /// The maximum depth of interprocedural argument-binding descent (Feature B).
@@ -375,6 +455,24 @@ impl Index {
                 let site = Site { file: fi, index: i };
                 insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &c.fqn, site);
             }
+        }
+        // Literal `class_alias` edges (ADR-0049 §2 / A2iii) fold in after every
+        // textual decl, mirroring the db-backed `project_index`. Targets resolve
+        // against the textual snapshot (order-independent, ADR-0048); collisions
+        // (alias vs textual, or two aliases for one name) demote to `Ambiguous`.
+        let mut resolved: Vec<(String, Site)> = Vec::new();
+        for u in units {
+            for edge in u.tree.class_alias_edges() {
+                if idx.ambiguous_classes.contains(&edge.target_fqn) {
+                    continue;
+                }
+                if let Some(&target) = idx.classes.get(&edge.target_fqn) {
+                    resolved.push((edge.alias_fqn.clone(), target));
+                }
+            }
+        }
+        for (alias_fqn, target) in resolved {
+            insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &alias_fqn, target);
         }
         idx
     }

@@ -193,6 +193,12 @@ pub fn detect(db: &dyn Db, project: Project, vouches: &VouchSet) -> DynamismObst
                         include_sites.push(sref);
                     }
                 }
+                // Non-literal `class_alias` (ADR-0049 §2): a dam site for the
+                // checker-side finding-breadth family, but the transform-side
+                // obstacle scan deliberately ignores it in S1 to stay byte-identical
+                // (no `class_alias` was tracked here before). Damming it here is a
+                // deferred transform behavior change, not part of the S1 groundwork.
+                DynamismKind::ClassAlias => {}
             }
         }
     }

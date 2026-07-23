@@ -29,6 +29,47 @@ fn env_round_trips() {
 }
 
 #[test]
+fn reflect_finds_a_builtin_function() {
+    let Some(mut sc) = spawn_or_skip("reflect_finds_a_builtin_function") else { return };
+    let r = sc.reflect("strlen").expect("reflection reply");
+    assert!(r.function_exists, "strlen is a builtin function");
+    assert!(!r.class_like_exists, "strlen is not a class-like");
+    assert!(r.exists());
+}
+
+#[test]
+fn reflect_finds_a_builtin_class_like() {
+    let Some(mut sc) = spawn_or_skip("reflect_finds_a_builtin_class_like") else { return };
+    // A builtin class and a builtin interface both count as class-like.
+    let ex = sc.reflect("Exception").expect("reflection reply");
+    assert!(ex.class_like_exists && !ex.function_exists, "Exception is a class, {ex:?}");
+    let iface = sc.reflect("Countable").expect("reflection reply");
+    assert!(iface.class_like_exists, "Countable is an interface, {iface:?}");
+    // A leading backslash resolves to the same symbol.
+    assert!(sc.reflect("\\Throwable").expect("reply").class_like_exists);
+}
+
+#[test]
+fn reflect_reports_a_nonsense_name_as_not_found() {
+    let Some(mut sc) = spawn_or_skip("reflect_reports_a_nonsense_name_as_not_found") else {
+        return;
+    };
+    // A structured not-found — Some, exists() == false — never None (None is a
+    // failed query, this is a definitive answer).
+    let r = sc.reflect("steins_no_such_symbol_xyzzy").expect("reflection reply");
+    assert!(!r.exists(), "nonsense name must not exist: {r:?}");
+    assert!(!r.function_exists && !r.class_like_exists);
+}
+
+#[test]
+fn env_extension_list_is_non_empty() {
+    // A9 consults the loaded-extension list; `env` already carries it.
+    let Some(mut sc) = spawn_or_skip("env_extension_list_is_non_empty") else { return };
+    let env = sc.env().expect("env reply");
+    assert!(!env.extensions.is_empty(), "loaded extensions must be reported");
+}
+
+#[test]
 fn fold_strtolower_returns_value() {
     let Some(mut sc) = spawn_or_skip("fold_strtolower_returns_value") else { return };
     let r = sc.fold("strtolower", &[FoldArg::Str("ABC".to_owned())]);

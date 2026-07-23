@@ -75,8 +75,9 @@ function steins_handle($method, array $params)
             return steins_env();
         case 'fold':
             return steins_fold($params);
-        // Documented stubs (ADR-0024): the seams exist, the behavior does not yet.
         case 'reflect':
+            return steins_reflect($params);
+        // Documented stub (ADR-0024): the seam exists, the behavior does not yet.
         case 'plugin':
             return ['kind' => 'widen', 'reason' => 'unimplemented'];
         default:
@@ -95,6 +96,50 @@ function steins_env()
         'php_version' => PHP_VERSION,
         'extensions' => array_values(get_loaded_extensions()),
         'sapi' => PHP_SAPI,
+    ];
+}
+
+/**
+ * `reflect` — the runtime boot-surface existence oracle (ADR-0024 / ADR-0049 §1
+ * oracle (b)). Answers whether the *project's own* PHP knows a name among its
+ * builtins and loaded extensions, as a function and/or a class-like (class,
+ * interface, trait, or enum). Autoload is disabled: the sidecar runs no project
+ * autoloader, and the question is strictly "is this name resident on this PHP".
+ *
+ * The reply is always `{kind: "reflection", ...}` — a name that exists nowhere is a
+ * *structured not-found* (`exists: false`), never a `widen`; only a malformed
+ * request widens. The Rust side maps a widen/malformed reply to "unknown" (None),
+ * so a not-found is a positive answer, never confused with a failed query.
+ *
+ * @param array<mixed> $params
+ * @return array<string, mixed>
+ */
+function steins_reflect(array $params)
+{
+    $target = isset($params['target']) && is_string($params['target']) ? $params['target'] : null;
+    if ($target === null) {
+        return ['kind' => 'widen', 'reason' => 'reflect requires a string target'];
+    }
+
+    // PHP resolves `\Foo` and `Foo` to the same symbol; the existence functions
+    // want the leading backslash stripped.
+    $name = ltrim($target, '\\');
+
+    $function = function_exists($name);
+    // A class-like is any of class / interface / trait / enum. `enum_exists` is
+    // guarded for defensiveness though it is present on every PHP 8.1+ the runner
+    // supports. Autoload is off (second arg `false`) throughout.
+    $class_like = class_exists($name, false)
+        || interface_exists($name, false)
+        || trait_exists($name, false)
+        || (function_exists('enum_exists') && enum_exists($name, false));
+
+    return [
+        'kind' => 'reflection',
+        'target' => $target,
+        'exists' => $function || $class_like,
+        'function' => $function,
+        'class_like' => $class_like,
     ];
 }
 

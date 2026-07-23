@@ -195,7 +195,39 @@ pub fn project_index(db: &dyn Db, project: Project) -> ProjectIndex {
             insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &c.fqn, site);
         }
     }
+    // Literal `class_alias` edges (ADR-0049 §2 / A2iii) fold in **after** every
+    // textual declaration: an alias name resolves — for existence — to its target's
+    // site, sharing the duplicate-decl ambiguity discipline. An alias colliding with
+    // a textual decl of the same FQN, or two alias edges for one name, is
+    // `Ambiguous`. An alias whose target does not resolve uniquely mints no edge
+    // (its existence cannot be backed).
+    fold_class_alias_edges(db, project, &mut idx);
     idx
+}
+
+/// Fold every file's literal `class_alias` edges into the class map (ADR-0049 §2).
+/// Targets are resolved against the **textual** index snapshot (no alias-to-alias
+/// chaining), so the result is order-independent (ADR-0048); the resolved edges are
+/// then folded in with the same duplicate-decl discipline, so an alias colliding
+/// with a textual decl of the same FQN — or two alias edges for one name — demotes
+/// to `Ambiguous`. An alias whose target is absent or itself ambiguous mints no
+/// edge (its existence cannot be backed).
+fn fold_class_alias_edges(db: &dyn Db, project: Project, idx: &mut ProjectIndex) {
+    let mut resolved: Vec<(String, DeclSite)> = Vec::new();
+    for &file in project.files(db) {
+        let tree = parse(db, file);
+        for edge in tree.class_alias_edges() {
+            if idx.ambiguous_classes.contains(&edge.target_fqn) {
+                continue;
+            }
+            if let Some(&target) = idx.classes.get(&edge.target_fqn) {
+                resolved.push((edge.alias_fqn.clone(), target));
+            }
+        }
+    }
+    for (alias_fqn, target) in resolved {
+        insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &alias_fqn, target);
+    }
 }
 
 /// Insert `fqn → site`, demoting to ambiguity on any collision. `fqn` is already

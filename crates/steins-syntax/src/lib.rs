@@ -662,6 +662,21 @@ pub struct ClassDecl {
     /// `UnitEnum` (and `BackedEnum` when backed) — recorded in the catalog's
     /// interface tree, not here.
     pub is_enum: bool,
+    /// `true` when this declaration is a `trait` (ADR-0049 §5, C8/A2i). A trait
+    /// enters the class-*like* index as a **name** — the `class.undefined` closure
+    /// set is the class-like name set, traits included, since a static call through
+    /// a trait name runs (deprecated, not fatal). V1 lowers the name only: no
+    /// member flattening (`methods`/`properties`/… are empty), so a trait is inert
+    /// for every existing check and merely occupies its FQN in the symbol/ambiguity
+    /// table (a trait sharing an FQN with a class is `Ambiguous`, both silent).
+    pub is_trait: bool,
+    /// `true` when this declaration is nested under anything but a plain
+    /// namespace/program node — a function/method body, `if`, `try`, loop, or bare
+    /// block (ADR-0049 A2i). A conditional declaration leaves *which* definition
+    /// binds to runtime load order (the `if (!class_exists(…))` fallback-stub
+    /// shape), so a chain containing one **re-dams** absence claims. Consumed by
+    /// the finding-breadth family from S2 on; carried but unread in S1.
+    pub conditional: bool,
     /// A backed enum's backing scalar (`enum E: int` / `enum E: string`), or
     /// `None` for a pure (unit) enum. Only `int`/`string` are legal backings.
     pub enum_backing: Option<ScalarType>,
@@ -1440,6 +1455,14 @@ pub enum DynamismKind {
     /// carries the lowered path so provenness / in-universe resolution is
     /// judgeable.
     Include(IncludePath),
+    /// A `class_alias(...)` call with a **non-literal** argument (ADR-0046 §2,
+    /// ADR-0049 §2) — a runtime class-name mint the reference scan cannot resolve.
+    /// A `class_alias` with two literal string args instead contributes a
+    /// [`ClassAliasEdge`] to the index (see [`SourceTree::class_alias_edges`]) and
+    /// is *not* a dam site. The checker-side finding-breadth dam treats this as a
+    /// dam site (S2+); the transform-side obstacle scan deliberately ignores it in
+    /// S1 to stay byte-identical (ADR-0049 S1 groundwork).
+    ClassAlias,
 }
 
 /// One dynamic-code construct in a file (ADR-0046 §2). Collected file-wide —
@@ -1450,6 +1473,24 @@ pub enum DynamismKind {
 pub struct DynamismSite {
     pub kind: DynamismKind,
     /// The construct's source span (its starting line is the vouching key).
+    pub span: Span,
+}
+
+/// A literal `class_alias('Target', 'Alias')` edge (ADR-0049 §2 / A2iii): both
+/// arguments are string literals, so the alias name resolves — for **existence**
+/// purposes — to the target declaration's site. Folded into the project index
+/// after every textual declaration, sharing the duplicate-decl ambiguity
+/// discipline: an alias colliding with a textual declaration of the same FQN, or
+/// two alias edges for one name, marks that FQN `Ambiguous` (existence present,
+/// identity unresolved). FQNs are lowercase-normalized, leading `\` stripped — the
+/// same key shape [`ClassDecl::fqn`] and the index use.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClassAliasEdge {
+    /// The alias name being minted (`class_alias`'s 2nd arg), lowercase FQN.
+    pub alias_fqn: String,
+    /// The existing class the alias points at (`class_alias`'s 1st arg), lowercase FQN.
+    pub target_fqn: String,
+    /// The `class_alias(...)` call's source span.
     pub span: Span,
 }
 
@@ -1466,6 +1507,11 @@ pub struct SourceTree {
     /// (ADR-0046 §2). Consumed by the transform engine's caller-enumeration
     /// obstacle detection; the checker never reads it (zero behavior change).
     dynamism: Vec<DynamismSite>,
+    /// Literal `class_alias('Target', 'Alias')` edges found file-wide (ADR-0049
+    /// §2). Folded into the project index for existence resolution; a non-literal
+    /// `class_alias` is a [`DynamismKind::ClassAlias`] dam site in [`Self::dynamism`]
+    /// instead. Carried but consumed by nothing in the S1 groundwork slice.
+    class_alias_edges: Vec<ClassAliasEdge>,
     parse_errors: Vec<ParseError>,
     /// The comment trivia in the file, in source order (ADR-0023 inline ignores).
     comments: Vec<Comment>,
@@ -1538,6 +1584,7 @@ impl SourceTree {
             calls: lowered.calls,
             scopes,
             dynamism: lowered.dynamism,
+            class_alias_edges: lowered.class_alias_edges,
             parse_errors,
             comments,
             contexts,
@@ -1607,6 +1654,15 @@ impl SourceTree {
         &self.dynamism
     }
 
+    /// The literal `class_alias('Target', 'Alias')` edges found file-wide
+    /// (ADR-0049 §2). The project index folds these in for existence resolution;
+    /// a non-literal `class_alias` is a [`DynamismKind::ClassAlias`] dam site in
+    /// [`Self::dynamism_sites`] instead.
+    #[must_use]
+    pub fn class_alias_edges(&self) -> &[ClassAliasEdge] {
+        &self.class_alias_edges
+    }
+
     /// Whether the file contains any `eval(...)` construct.
     #[must_use]
     pub fn contains_eval(&self) -> bool {
@@ -1660,6 +1716,7 @@ struct Lowered {
     functions: Vec<FunctionDecl>,
     calls: Vec<CallExpr>,
     dynamism: Vec<DynamismSite>,
+    class_alias_edges: Vec<ClassAliasEdge>,
 }
 
 fn walk(
@@ -1671,7 +1728,14 @@ fn walk(
 ) {
     match node {
         Node::Function(f) => out.functions.push(lower_function(f, aliases, docs, rc)),
-        Node::FunctionCall(c) => out.calls.push(lower_call(c)),
+        Node::FunctionCall(c) => {
+            // `class_alias(...)` (ADR-0049 §2): a literal-args call mints an index
+            // alias edge; any non-literal argument makes it a runtime name mint —
+            // a dam site — instead. Recognized here so both facts are collected
+            // file-wide (like the dynamism set), before the call itself is lowered.
+            classify_class_alias(c, out);
+            out.calls.push(lower_call(c));
+        }
         Node::DeclareItem(d) if is_strict_types_one(d) => out.strict_types = true,
         // Dynamic-code constructs (ADR-0046 §2). Collected file-wide (the walk
         // descends into every scope), not per-scope like the poison flag.
@@ -1742,6 +1806,66 @@ fn lower_concat(expr: &Expression<'_>) -> ConcatVal {
     }
 }
 
+/// Classify a `class_alias(...)` call (ADR-0049 §2): two literal string arguments
+/// mint an index [`ClassAliasEdge`] (existence resolution); any non-literal
+/// argument — a computed target/alias name — makes it a [`DynamismKind::ClassAlias`]
+/// dam site. Only the global `class_alias` (unqualified, so subject to PHP's
+/// global function fallback, or fully-qualified `\class_alias`) is recognized; a
+/// namespaced `Foo\class_alias` is a different symbol. Called for every
+/// `FunctionCall` node file-wide; a non-`class_alias` callee is a no-op.
+fn classify_class_alias(c: &FunctionCall<'_>, out: &mut Lowered) {
+    let Expression::Identifier(id) = c.function else { return };
+    if !matches!(id, Identifier::Local(_) | Identifier::FullyQualified(_)) {
+        return;
+    }
+    if !bytes_to_string(id.last_segment()).eq_ignore_ascii_case("class_alias") {
+        return;
+    }
+    let span = to_span(c.span());
+
+    // The first two positional (non-spread) arguments must both be string literals
+    // for an edge; a named/spread argument or a non-literal makes it a dam site.
+    let mut literals: Vec<String> = Vec::new();
+    let mut clean = true;
+    for arg in c.argument_list.arguments.iter() {
+        if literals.len() >= 2 {
+            break;
+        }
+        match arg {
+            Argument::Positional(p) if p.ellipsis.is_none() => match lower_concat(p.value) {
+                ConcatVal::Str(s) => literals.push(s),
+                _ => {
+                    clean = false;
+                    break;
+                }
+            },
+            _ => {
+                clean = false;
+                break;
+            }
+        }
+    }
+
+    if clean && literals.len() == 2 {
+        // `class_alias(string $class /* target */, string $alias)` — arg 0 is the
+        // existing class, arg 1 the new name; the alias resolves to the target.
+        out.class_alias_edges.push(ClassAliasEdge {
+            alias_fqn: normalize_alias_fqn(&literals[1]),
+            target_fqn: normalize_alias_fqn(&literals[0]),
+            span,
+        });
+    } else {
+        out.dynamism.push(DynamismSite { kind: DynamismKind::ClassAlias, span });
+    }
+}
+
+/// Normalize a `class_alias` string argument to the index key shape: trimmed,
+/// leading `\` stripped, lowercased. `class_alias` strings are runtime FQNs — not
+/// resolved against `use` imports or the current namespace — so no context lookup.
+fn normalize_alias_fqn(s: &str) -> String {
+    s.trim().trim_start_matches('\\').to_ascii_lowercase()
+}
+
 fn lower_function(
     f: &Function<'_>,
     aliases: &SteinsAttrAliases,
@@ -1794,8 +1918,10 @@ fn lower_params(list: &mago_syntax::cst::FunctionLikeParameterList<'_>, rc: &Ref
         .collect()
 }
 
-/// Lower every `class`, `interface`, and `enum` declaration reachable from
-/// `node` (ADR-0043 lowers enums; traits stay unlowered).
+/// Lower every `class`, `interface`, `enum`, and `trait` declaration reachable
+/// from `node` (ADR-0043 lowers enums; ADR-0049 §5 adds trait *names*). The
+/// `conditional` flag (ADR-0049 A2i) starts `false` at the program root and turns
+/// `true` for any declaration nested under a non-namespace/program node.
 fn lower_classes(
     node: &Node<'_, '_>,
     aliases: &SteinsAttrAliases,
@@ -1803,7 +1929,7 @@ fn lower_classes(
     rc: &RefResolver,
 ) -> Vec<ClassDecl> {
     let mut out = Vec::new();
-    lower_classes_into(node, aliases, docs, rc, &mut out);
+    lower_classes_into(node, aliases, docs, rc, false, &mut out);
     out
 }
 
@@ -1812,20 +1938,68 @@ fn lower_classes_into(
     aliases: &SteinsAttrAliases,
     docs: &DocIndex,
     rc: &RefResolver,
+    conditional: bool,
     out: &mut Vec<ClassDecl>,
 ) {
     match node {
-        Node::Class(c) => out.push(lower_class(c, aliases, docs, rc)),
-        Node::Interface(i) => out.push(lower_interface(i, aliases, docs, rc)),
-        Node::Enum(e) => out.push(lower_enum(e, aliases, docs, rc)),
+        Node::Class(c) => out.push(lower_class(c, aliases, docs, rc, conditional)),
+        Node::Interface(i) => out.push(lower_interface(i, aliases, docs, rc, conditional)),
+        Node::Enum(e) => out.push(lower_enum(e, aliases, docs, rc, conditional)),
+        Node::Trait(t) => out.push(lower_trait(t, conditional)),
         _ => {}
     }
+    // A declaration reached only through a plain namespace/program node is
+    // unconditional; passing through anything else (a function/method body, `if`,
+    // `try`, loop, bare block) makes every declaration below it conditional.
+    let child_conditional = conditional || !is_decl_transparent(node);
     for child in node.children() {
-        lower_classes_into(&child, aliases, docs, rc, out);
+        lower_classes_into(&child, aliases, docs, rc, child_conditional, out);
     }
 }
 
-fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: &RefResolver) -> ClassDecl {
+/// Whether descending through `node` keeps a declaration **unconditional**
+/// (ADR-0049 A2i): only the program root and namespace nodes (and the `Statement`
+/// enum wrapper that links them to declarations) are transparent. Every other node
+/// — control flow, a function/method body, a bare block — marks nested
+/// declarations conditional.
+fn is_decl_transparent(node: &Node<'_, '_>) -> bool {
+    matches!(
+        node,
+        Node::Program(_)
+            | Node::Statement(_)
+            | Node::Namespace(_)
+            | Node::NamespaceBody(_)
+            | Node::NamespaceImplicitBody(_)
+    )
+}
+
+/// Lower a `trait` declaration to a name-only [`ClassDecl`] (ADR-0049 §5, C8/A2i).
+/// A trait joins the class-*like* index as a name — the `class.undefined` closure
+/// set is the class-like name set, traits included. V1 lowers **no members** (no
+/// flattening), so the trait is inert for every existing check; it merely occupies
+/// its FQN in the symbol/ambiguity table.
+fn lower_trait(t: &mago_syntax::cst::Trait<'_>, conditional: bool) -> ClassDecl {
+    ClassDecl {
+        name: bytes_to_string(t.name.value),
+        fqn: String::new(), // filled in `parse` from the enclosing namespace ctx
+        is_final: false,
+        is_interface: false,
+        is_enum: false,
+        is_trait: true,
+        conditional,
+        enum_backing: None,
+        enum_cases: Vec::new(),
+        parent: None,
+        implements: Vec::new(),
+        methods: Vec::new(),
+        properties: Vec::new(),
+        consts: Vec::new(),
+        uses_traits: false,
+        span: to_span(t.name.span()),
+    }
+}
+
+fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: &RefResolver, conditional: bool) -> ClassDecl {
     let parent = c
         .extends
         .as_ref()
@@ -1869,6 +2043,8 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
         is_final: c.modifiers.iter().any(Modifier::is_final),
         is_interface: false,
         is_enum: false,
+        is_trait: false,
+        conditional,
         enum_backing: None,
         enum_cases: Vec::new(),
         parent,
@@ -1974,7 +2150,7 @@ fn lower_promoted_params(m: &Method<'_>, rc: &RefResolver, out: &mut Vec<Propert
 /// (ADR-0033 Liskov): its methods are abstract signatures carrying effect
 /// envelopes and `@throws` docblocks. An interface's `extends` list (interfaces
 /// can extend several) becomes `parent` (the first) plus `implements` (the rest).
-fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: &RefResolver) -> ClassDecl {
+fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: &RefResolver, conditional: bool) -> ClassDecl {
     let mut extended: Vec<NameRef> =
         i.extends.as_ref().map(|e| e.types.iter().map(name_ref).collect()).unwrap_or_default();
     let parent = if extended.is_empty() { None } else { Some(extended.remove(0)) };
@@ -1995,6 +2171,8 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
         is_final: false,
         is_interface: true,
         is_enum: false,
+        is_trait: false,
+        conditional,
         enum_backing: None,
         enum_cases: Vec::new(),
         parent,
@@ -2019,7 +2197,7 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
 /// new throw/effect/Liskov findings — the zero-behavior-change invariant of
 /// stage 1. Deferred-with-design: enum methods land with the method-transform
 /// stage that needs them.
-fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _docs: &DocIndex, rc: &RefResolver) -> ClassDecl {
+fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _docs: &DocIndex, rc: &RefResolver, conditional: bool) -> ClassDecl {
     let implements: Vec<NameRef> = e
         .implements
         .as_ref()
@@ -2068,6 +2246,8 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _doc
         is_final: true, // enums are implicitly final in PHP
         is_interface: false,
         is_enum: true,
+        is_trait: false,
+        conditional,
         enum_backing,
         enum_cases,
         parent: None,

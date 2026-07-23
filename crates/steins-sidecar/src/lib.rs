@@ -79,11 +79,36 @@ impl FoldResult {
 }
 
 /// Environment facts reported by the `env` method — coverage-posture material.
+/// [`Self::extensions`] is the loaded-extension list ADR-0049 A9 consults (a
+/// monkey-patch extension like `uopz`/`runkit7`/`Componere` voids the family), so
+/// no separate reflect query is needed for it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnvInfo {
     pub php_version: String,
     pub extensions: Vec<String>,
     pub sapi: String,
+}
+
+/// The result of a `reflect(target)` existence query (ADR-0024 surface / ADR-0049
+/// §1 oracle (b)): whether the project's own PHP knows `target` among its builtins
+/// and loaded extensions. A structured *not-found* is `exists() == false`, distinct
+/// from a failed query (which the wrapper returns as `None`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reflection {
+    /// The name asked about (echoed back from the request).
+    pub target: String,
+    /// The name is a resident function (`function_exists`).
+    pub function_exists: bool,
+    /// The name is a resident class-like — class, interface, trait, or enum.
+    pub class_like_exists: bool,
+}
+
+impl Reflection {
+    /// Whether the name exists at all on the boot surface (function or class-like).
+    #[must_use]
+    pub fn exists(&self) -> bool {
+        self.function_exists || self.class_like_exists
+    }
 }
 
 /// A resident PHP sidecar process plus its request loop.
@@ -192,6 +217,33 @@ impl Sidecar {
                 .filter_map(|e| e.as_str().map(ToOwned::to_owned))
                 .collect(),
             sapi: obj.get("sapi")?.as_str()?.to_owned(),
+        })
+    }
+
+    /// Ask the project's own PHP whether `target` exists among builtins and loaded
+    /// extensions (ADR-0024 surface / ADR-0049 §1 oracle (b)). A definitive
+    /// *not-found* is `Some(Reflection)` with `exists() == false`; any sidecar
+    /// failure (poison, timeout, malformed/`widen` reply) is `None` — "unknown",
+    /// never a wrong not-found (the zero-FP contract). Older runners without the
+    /// `reflect` method reply `widen`, which maps to `None` as well.
+    pub fn reflect(&mut self, target: &str) -> Option<Reflection> {
+        if self.poisoned {
+            return None;
+        }
+        let value = self.request("reflect", serde_json::json!({ "target": target }))?;
+        let obj = value.get("result")?;
+        // Only a structured `reflection` reply is an existence answer; a `widen`
+        // (malformed request, or a runner too old to implement `reflect`) is unknown.
+        if obj.get("kind").and_then(serde_json::Value::as_str) != Some("reflection") {
+            return None;
+        }
+        Some(Reflection {
+            target: obj.get("target").and_then(serde_json::Value::as_str).unwrap_or(target).to_owned(),
+            function_exists: obj.get("function").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            class_like_exists: obj
+                .get("class_like")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
         })
     }
 

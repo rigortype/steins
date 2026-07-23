@@ -26,9 +26,12 @@ use steins_syntax::SourceTree;
 
 use crate::Diagnostic;
 use crate::{
-    CALL_ON_NULL_ID, EFFECT_ID, EFFECT_LISKOV_ID, ID, PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID,
-    PROP_MISMATCH_ID, READONLY_REASSIGNED_ID, RETURN_ID, RETURN_MISMATCH_ID, THROW_LISKOV_ID,
-    THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID,
+    CALL_ON_NULL_ID, CALL_TOO_FEW_ARGUMENTS_ID, CALL_TOO_MANY_ARGUMENTS_ID,
+    CALL_UNDEFINED_FUNCTION_ID, CALL_UNDEFINED_METHOD_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID,
+    CLASS_UNDEFINED_ID, EFFECT_ID, EFFECT_LISKOV_ID, ID, OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID,
+    PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID, PHPDOC_UNDEFINED_METHOD_ID, PROP_MISMATCH_ID,
+    READONLY_REASSIGNED_ID, RETURN_ID, RETURN_MISMATCH_ID, THROW_LISKOV_ID, THROW_UNDECLARED_ID,
+    UNKNOWN_LABEL_ID,
 };
 
 /// The registry id for an `@steins-ignore` whose diagnostic id matches nothing on
@@ -86,6 +89,16 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer)] = &[
     (CALL_ON_NULL_ID, Layer::Proof),
     (PROP_MISMATCH_ID, Layer::Proof),
     (READONLY_REASSIGNED_ID, Layer::Proof),
+    // proof — finding-breadth family (ADR-0049): registered in S1, emitted from
+    // S2+ (see `REGISTERED_NOT_YET_EMITTED`). No emit site exists yet.
+    (CALL_UNDEFINED_FUNCTION_ID, Layer::Proof),
+    (CALL_UNDEFINED_METHOD_ID, Layer::Proof),
+    (CLASS_UNDEFINED_ID, Layer::Proof),
+    (CALL_TOO_FEW_ARGUMENTS_ID, Layer::Proof),
+    (CALL_TOO_MANY_ARGUMENTS_ID, Layer::Proof),
+    (CALL_UNKNOWN_NAMED_ARGUMENT_ID, Layer::Proof),
+    (OFFSET_MISSING_ID, Layer::Proof),
+    (OFFSET_ON_UNSUPPORTED_ID, Layer::Proof),
     // contract — declared-contract acceptance (increase tripwires).
     (PARAM_MISMATCH_ID, Layer::Contract),
     (RETURN_MISMATCH_ID, Layer::Contract),
@@ -94,6 +107,9 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer)] = &[
     (THROW_LISKOV_ID, Layer::Contract),
     (EFFECT_ID, Layer::Contract),
     (EFFECT_LISKOV_ID, Layer::Contract),
+    // contract — finding-breadth declared-receiver lane (ADR-0049 §8), registered
+    // in S1, emitted from S6.
+    (PHPDOC_UNDEFINED_METHOD_ID, Layer::Contract),
     // mechanics — apparatus hygiene (red on sight, suppression-exempt).
     (SUPPRESS_UNMATCHED_ID, Layer::Mechanics),
     (SUPPRESS_UNKNOWN_ID, Layer::Mechanics),

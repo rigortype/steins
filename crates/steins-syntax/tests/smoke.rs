@@ -261,24 +261,25 @@ fn lowers_class_and_method_shape() {
 }
 
 #[test]
-fn interfaces_and_enums_lowered_traits_not() {
-    // Interfaces are lowered (ADR-0033 Liskov), marked is_interface; enums are
-    // lowered too (ADR-0043 object/method world), marked is_enum; traits stay
-    // unlowered.
+fn class_likes_are_all_lowered_as_names() {
+    // Interfaces (ADR-0033 Liskov), enums (ADR-0043), and — since ADR-0049 §5 —
+    // traits all enter the class-like index, each marked by its kind flag. A trait
+    // is name-only (no members) but present, so it occupies its FQN in the table.
     let src = "<?php\ninterface I {}\ntrait T {}\nenum E { case A; }\nclass C {}\n";
     let tree = SourceTree::parse(src);
-    assert_eq!(tree.classes().len(), 3, "the class, interface, and enum are lowered");
+    assert_eq!(tree.classes().len(), 4, "class, interface, enum, and trait are lowered");
     let c = tree.classes().iter().find(|d| d.name == "C").unwrap();
-    assert!(!c.is_interface && !c.is_enum);
+    assert!(!c.is_interface && !c.is_enum && !c.is_trait);
     let i = tree.classes().iter().find(|d| d.name == "I").unwrap();
     assert!(i.is_interface, "interface I is marked is_interface");
     let e = tree.classes().iter().find(|d| d.name == "E").unwrap();
     assert!(e.is_enum, "enum E is marked is_enum");
     assert!(e.is_final, "an enum is implicitly final");
-    // The unit case is recorded; no trait is lowered.
     assert_eq!(e.enum_cases.len(), 1);
     assert_eq!(e.enum_cases[0].name, "A");
-    assert!(tree.classes().iter().all(|d| d.name != "T"), "the trait stays unlowered");
+    let t = tree.classes().iter().find(|d| d.name == "T").unwrap();
+    assert!(t.is_trait, "trait T is marked is_trait (ADR-0049 §5)");
+    assert!(t.methods.is_empty(), "a trait is lowered name-only in S1");
 }
 
 #[test]
@@ -545,4 +546,79 @@ fn a_clean_file_has_no_dynamism_sites() {
     let tree = SourceTree::parse("<?php\nfunction f(int $x): int { return $x; }\nf(1);\n");
     assert!(tree.dynamism_sites().is_empty());
     assert!(!tree.contains_eval());
+}
+
+// ---- ADR-0049 §5: trait names into the class-like index --------------------
+
+#[test]
+fn trait_enters_the_class_like_index_as_a_name() {
+    let tree = SourceTree::parse("<?php\nnamespace App;\ntrait Greet { public function hi(): void {} }\n");
+    let t = class(&tree, "Greet");
+    assert!(t.is_trait, "trait carries is_trait");
+    assert!(!t.is_interface && !t.is_enum);
+    assert_eq!(t.fqn, "app\\greet", "trait FQN is indexed lowercase");
+    // Names only — no member flattening in S1.
+    assert!(t.methods.is_empty(), "trait members are not lowered in S1");
+    assert!(!t.conditional, "a top-level namespaced trait is unconditional");
+}
+
+// ---- ADR-0049 A2i: the conditional flag ------------------------------------
+
+#[test]
+fn top_level_and_namespaced_declarations_are_unconditional() {
+    let tree = SourceTree::parse("<?php\nclass A {}\nnamespace N;\nclass B {}\n");
+    assert!(!class(&tree, "A").conditional);
+    assert!(!class(&tree, "B").conditional);
+}
+
+#[test]
+fn a_class_guarded_by_class_exists_is_conditional() {
+    let tree = SourceTree::parse(
+        "<?php\nif (!class_exists('C')) {\n  class C {}\n}\n",
+    );
+    assert!(class(&tree, "C").conditional, "a class inside `if` is conditional");
+}
+
+#[test]
+fn declarations_inside_a_function_body_are_conditional() {
+    let tree = SourceTree::parse(
+        "<?php\nfunction boot(): void {\n  class Inner {}\n  interface I {}\n  enum E {}\n  trait T {}\n}\n",
+    );
+    for name in ["Inner", "I", "E", "T"] {
+        assert!(class(&tree, name).conditional, "{name} inside a function body is conditional");
+    }
+}
+
+// ---- ADR-0049 §2: class_alias edges + non-literal dam sites -----------------
+
+use steins_syntax::ClassAliasEdge;
+
+#[test]
+fn literal_class_alias_lowers_to_an_edge() {
+    let tree = SourceTree::parse("<?php\nclass_alias('App\\\\Legacy', 'App\\\\Modern');\n");
+    let edges = tree.class_alias_edges();
+    assert_eq!(edges.len(), 1);
+    let ClassAliasEdge { alias_fqn, target_fqn, .. } = &edges[0];
+    // arg 0 = existing target, arg 1 = new alias name; both lowercase FQN.
+    assert_eq!(target_fqn, "app\\legacy");
+    assert_eq!(alias_fqn, "app\\modern");
+    // A literal alias is NOT a dynamism/dam site.
+    assert!(tree.dynamism_sites().is_empty());
+}
+
+#[test]
+fn fully_qualified_class_alias_is_recognized() {
+    let tree = SourceTree::parse("<?php\n\\class_alias('A', 'B');\n");
+    assert_eq!(tree.class_alias_edges().len(), 1);
+    assert!(tree.dynamism_sites().is_empty());
+}
+
+#[test]
+fn non_literal_class_alias_is_a_dynamism_site() {
+    // A computed target/alias cannot mint an edge — it is a runtime name mint.
+    let tree = SourceTree::parse("<?php\nclass_alias($src, 'B');\n");
+    assert!(tree.class_alias_edges().is_empty());
+    let sites = tree.dynamism_sites();
+    assert_eq!(sites.len(), 1);
+    assert!(matches!(sites[0].kind, DynamismKind::ClassAlias));
 }
