@@ -2176,6 +2176,15 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// Whether a `$this` seeded from enclosing class `class_fqn` is provably the
+    /// **exact** runtime class (audit G1). A `final` class or an enum has no
+    /// subclass, so its `$this` is exact; any other project class is only a lower
+    /// bound (some subclass instance may be running the method). A class the index
+    /// cannot uniquely resolve is conservatively *not* exact.
+    fn this_class_exact(&self, class_fqn: &str) -> bool {
+        self.find_class(class_fqn).is_some_and(|(_, cd)| cd.is_final || cd.is_enum)
+    }
+
     /// The FQN of `class_fqn`'s parent, resolved in the parent's own file ctx.
     fn parent_fqn(&self, class_fqn: &str) -> Option<String> {
         let (file, cd) = self.find_class(class_fqn)?;
@@ -2715,12 +2724,23 @@ fn arg_of_fact_key(fact: &Fact) -> ArgValue {
 type AllocId = u32;
 
 /// A heap object (ADR-0036 object state): allocation-keyed, so aliases share it.
-/// The `class` is the exact runtime class (fixed at construction, never swept);
-/// `props` are the per-property value-domain facts.
+/// The `class` is fixed at construction and never swept; `class_exact` says whether
+/// it is the *exact* runtime class or only a lower bound (see below); `props` are
+/// the per-property value-domain facts.
 #[derive(Clone)]
 struct HeapObj {
-    /// The exact runtime class FQN (lowercase-normalized, as `classes_env` held).
+    /// The class FQN (lowercase-normalized, as `classes_env` held). For an
+    /// allocation-proven object (`new`, enum case, clone-of-exact) this is the exact
+    /// runtime class; for a `$this` seed it is only a **lower bound** — the runtime
+    /// object may be any descendant that inherited the method. `class_exact`
+    /// distinguishes the two (audit G1, ADR-0036).
     class: String,
+    /// Whether `class` is the *exact* runtime class (`true`) or a lower bound
+    /// (`false`). A No-side conclusion — `is_a(class, T) = No` implies the object is
+    /// not a `T` — is only sound when this is `true`: with a lower bound the actual
+    /// instance may be a descendant of `class` that *is* a `T`. Yes-side conclusions
+    /// (`is_a(class, T) = Yes`) hold for a lower bound too (every descendant is a T).
+    class_exact: bool,
     /// Property facts keyed by property name (ADR-0035 Facts live in props).
     props: HashMap<String, Fact>,
     /// Properties declared `readonly` — sweep-immune once established (ADR-0036).
@@ -2735,9 +2755,13 @@ struct HeapObj {
 }
 
 impl HeapObj {
+    /// A fresh heap object. `class_exact` defaults to `false` (a lower bound — the
+    /// safe default); allocation-proven construction sites set it to `true`
+    /// explicitly (`build_new_object`, exact `$this`/clone seeds).
     fn new(class: String) -> Self {
         HeapObj {
             class,
+            class_exact: false,
             props: HashMap::new(),
             readonly: HashSet::new(),
             ro_written: HashSet::new(),
@@ -2772,6 +2796,13 @@ impl Store {
     /// The allocation id `var` currently refers to.
     fn id_of(&self, var: &str) -> Option<AllocId> {
         self.refs.get(var).copied()
+    }
+
+    /// Whether `var` refers to an object whose `class` is the **exact** runtime
+    /// class (audit G1). `false` for an unbound var and for any lower-bound object
+    /// (a `$this` seed that is not provably exact) — the No-side gate.
+    fn is_exact(&self, var: &str) -> bool {
+        self.obj_of(var).is_some_and(|o| o.class_exact)
     }
 
     /// The object `var` currently refers to.
@@ -2923,11 +2954,21 @@ fn analyze_scope(
     // untouched.
     if let Some(class) = enclosing_class
         && !store.is_bound("this")
-        && let Some(obj) = seed_this_object(cx, class)
     {
-        let id = store.heap.keys().copied().max().map_or(0, |m| m + 1);
-        store.heap.insert(id, obj);
-        store.refs.insert("this".to_owned(), id);
+        // G1 (audit): `$this`'s heap class is a LOWER BOUND — any subclass instance
+        // may be running this method — UNLESS exactness is locally provable. A
+        // binding descent that proved the exact receiver (`this_exact`) makes `$this`
+        // exactly that class; otherwise the enclosing class is the class, exact only
+        // when it is `final` or an enum (no subclass can exist).
+        let (this_class, exact): (&str, bool) = match this_exact.as_deref() {
+            Some(exact) => (exact, true),
+            None => (class, cx.this_class_exact(class)),
+        };
+        if let Some(obj) = seed_this_object(cx, this_class, exact) {
+            let id = store.heap.keys().copied().max().map_or(0, |m| m + 1);
+            store.heap.insert(id, obj);
+            store.refs.insert("this".to_owned(), id);
+        }
     }
 
     // The allocation counter starts past any id already in the store (the seeded
@@ -3369,6 +3410,7 @@ fn build_new_object(
     let cx = w.cx;
     let id = w.fresh_id();
     let mut obj = HeapObj::new(class.to_owned());
+    obj.class_exact = true; // `new Class(...)` allocates exactly `Class` (audit G1)
     let props = cx.class_props(class);
 
     // readonly set + literal defaults.
@@ -3422,11 +3464,13 @@ fn build_new_object(
     id
 }
 
-/// Seed the `$this` object shell for a method scope (ADR-0036): class from the
-/// enclosing class, plus the readonly set and provably-written readonly props from
-/// the class surface. `$this` is **pre-escaped** (an overridable call on it sweeps
-/// its non-readonly props). Returns `None` when the class has no tracked properties
-/// (leaving `$this` unbound — identical to pre-heap behavior).
+/// Seed the `$this` object shell for a method scope (ADR-0036): `class_fqn` (the
+/// exact receiver when a descent proved one, else the enclosing class as a lower
+/// bound), plus the readonly set and provably-written readonly props from the class
+/// surface. `class_exact` records whether that class is exact (audit G1). `$this` is
+/// **pre-escaped** (an overridable call on it sweeps its non-readonly props).
+/// Returns `None` when the class has no tracked properties (leaving `$this` unbound
+/// — identical to pre-heap behavior).
 ///
 /// Crucially this seeds **no property value facts**. A property's value in an
 /// arbitrary method is whatever some *other* method last stored (or a `!== null`
@@ -3435,13 +3479,17 @@ fn build_new_object(
 /// positives past `if ($this->x !== null)` guards). Only facts written *in this
 /// method* (explicit `$this->p = …`) flow; readonly bookkeeping stays because a
 /// readonly value cannot change after construction.
-fn seed_this_object(cx: &Cx, class_fqn: &str) -> Option<HeapObj> {
+fn seed_this_object(cx: &Cx, class_fqn: &str, class_exact: bool) -> Option<HeapObj> {
     let props = cx.class_props(class_fqn);
     if props.is_empty() {
         return None;
     }
     let mut obj = HeapObj::new(class_fqn.to_owned());
     obj.escaped = true; // pre-escaped
+    // Membership is not exactness (audit G1): `$this` is a lower bound unless the
+    // caller proved the exact receiver (a binding descent) or the enclosing class
+    // has no subclass (`final`/enum). The No-side consumers gate on this bit.
+    obj.class_exact = class_exact;
     for p in &props {
         if p.readonly {
             obj.readonly.insert(p.name.clone());
@@ -4154,9 +4202,14 @@ fn eval_instanceof(
                 // hierarchy stays `Maybe` (the FP-safe side). Instanceof still binds
                 // no exactness fact — membership is not exactness (see below).
                 match w.cx.is_a(obj_fqn, &target) {
+                    // Yes-side holds for a lower bound too (every descendant of the
+                    // proven class is still a `T`) — keep the branch-death precision.
                     IsA::Yes => Certainty::Yes,
-                    IsA::No => Certainty::No,
-                    IsA::Unknown => Certainty::Maybe,
+                    // No-side needs exactness (audit G1): with a lower-bound `$this`,
+                    // the runtime object may be a descendant that IS a `T`, so a
+                    // `No` here is not decisive — the then-branch is not dead.
+                    IsA::No if store.is_exact(name) => Certainty::No,
+                    IsA::No | IsA::Unknown => Certainty::Maybe,
                 }
             }
             None => Certainty::Maybe,
@@ -4716,6 +4769,9 @@ fn join_stores(first: &Store, rest: &[&Store]) -> Store {
             continue; // not present in every branch — drop it
         }
         let mut joined = HeapObj::new(o0.class.clone());
+        // A surviving id is the SAME allocation across every branch, so its class and
+        // exactness bit are invariant — carry them from the first branch (audit G1).
+        joined.class_exact = o0.class_exact;
         joined.readonly = o0.readonly.clone();
         joined.escaped = o0.escaped || others.iter().any(|o| o.escaped);
         // ro_written: written on EVERY joined path.
@@ -5081,6 +5137,7 @@ fn check_propagated_call(
                 && !poisoned
                 && !in_descent
                 && let ArgValue::Var(name) = &arg.value
+                && store.is_exact(name) // No-side needs exactness (audit G1)
                 && let Some(class) = store.class_of(name)
                 && cx.object_is_type_error(ty, class)
             {
@@ -5542,8 +5599,19 @@ fn resolve_call_target<'a>(
             if poisoned {
                 return None;
             }
-            let class = store.class_of(v)?.to_owned();
-            resolve_exact(cx, &class, method, enclosing_class, Some(class.clone()))
+            let obj = store.obj_of(v)?;
+            let class = obj.class.clone();
+            if obj.class_exact {
+                // An allocation-proven receiver (`$x = new Foo(); $x->m()`) dispatches
+                // exactly — the landed precision.
+                resolve_exact(cx, &class, method, enclosing_class, Some(class.clone()))
+            } else {
+                // A lower-bound receiver — a laundered `$this` alias (`$u = $this`) or
+                // `clone $this` — is NOT exact (audit G1): fall back to the same
+                // final/private override guard `Receiver::This` uses, so an overridable
+                // method on it never resolves to the enclosing declaration.
+                resolve_guarded(cx, &class, method, enclosing_class)
+            }
         }
         Callee::Method { receiver: Receiver::This, method, .. } => {
             let enclosing = enclosing_class?;
@@ -5795,6 +5863,7 @@ fn check_method_args(
                 && !poisoned
                 && !in_descent
                 && let ArgValue::Var(name) = &arg.value
+                && store.is_exact(name) // No-side needs exactness (audit G1)
                 && let Some(class) = store.class_of(name)
                 && cx.object_is_type_error(ty, class)
             {
@@ -6329,8 +6398,14 @@ impl<'a> Cx<'a> {
                     // A `OneOf` fact is not one proven value → not a `CVal`.
                     let v = k.singleton()?;
                     self.resolve_cval(&v, env, store, poisoned, folder)
-                } else {
+                } else if store.is_exact(name) {
+                    // Only an EXACT object becomes a `CVal::Object` (audit G1): the
+                    // phpdoc-acceptance consumer draws a No-side `is_a` conclusion from
+                    // it, which a lower-bound `$this` would make unsound. An inexact
+                    // object stays unresolved (silent) — acceptance never fires on it.
                     store.class_of(name).map(|c| CVal::Object(c.to_owned()))
+                } else {
+                    None
                 }
             }
             ArgValue::Call(..) => {
