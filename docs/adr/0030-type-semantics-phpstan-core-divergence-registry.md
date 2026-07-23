@@ -33,6 +33,13 @@ entries:
    (practically-infallible `|false` returns like `curl_init`) is
    failure-cause labels on union arms + policy-profile consumption:
    ADR-0042.
+4. **No narrow-LHS `accepts` strictness.** PHPStan's `accepts` answers
+   No where `isSuperTypeOf` answers Maybe (e.g. `1 accepts int`):
+   worst-case reasoning on a declared wide type flowing into a narrow
+   contract. The runtime value may comply, so the proof layer keeps the
+   single overlap relation (`admits_*` == the `isSuperTypeOf` shape) —
+   the accepts/isSuperTypeOf asymmetry deliberately collapses. Surfaced
+   by the ported fixture net (`const1_accepts_general_int`).
 
 **Deferred until needed** — narrowing details (co-evolving with the branch
 analysis ratchet), template variance in full, subtraction types: decided in

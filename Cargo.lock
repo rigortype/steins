@@ -1043,8 +1043,10 @@ name = "steins-contract"
 version = "0.0.0"
 dependencies = [
  "proptest",
+ "serde",
  "steins-domain",
  "steins-phpdoc",
+ "toml",
 ]
 
 [[package]]

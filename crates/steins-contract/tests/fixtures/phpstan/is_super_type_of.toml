@@ -1,0 +1,181 @@
+# PHPStan `isSuperTypeOf` data providers, ported as Steins acceptance fixtures.
+# ADR-0030 denotational core: acceptance is set inclusion, judgments trinary.
+#
+# ─────────────────────────────────────────────────────────────────────────
+# Attribution. Rows are derived from phpstan-src (MIT-licensed).
+#   Source:  https://github.com/phpstan/phpstan-src
+#   Commit:  cdc6ca267a2de883adc54393e277e905560b0a6b
+#   License: MIT (Copyright (c) Ondřej Mirtes and contributors)
+# No phpstan-src source is vendored; only (type, type, judgment) triples.
+# ─────────────────────────────────────────────────────────────────────────
+#
+# Operation. PHPStan `Type::isSuperTypeOf($other)`. This is the relation
+# Steins' `admits_fact` implements natively: Yes ⇒ subset, No ⇒ disjoint,
+# Maybe ⇒ partial overlap. The union-on-the-subtype-side combinator
+# (mixed ⇒ Maybe) is Steins' `Certainty::all_of`.
+#
+# Coverage summary for the providers mined into this file
+# (IntegerTypeTest, BooleanTypeTest, MixedTypeTest, ConstantIntegerTypeTest,
+#  ConstantStringTypeTest, ClassStringTypeTest — the `dataIsSuperTypeOf`
+#  providers):
+#
+#   PORTED             16
+#   EXPECTED-DIVERGENT  2   class-string non-extensional (ADR-0038)
+#   NEEDS-DECISION      0
+#
+# OUT-OF-SURFACE (counted, not ported):
+#   IntegerTypeTest::dataIsSuperTypeOf      1   `int ⊇ mixed` (mixed RHS)
+#   BooleanTypeTest::dataIsSuperTypeOf      1   `bool ⊇ mixed`
+#   MixedTypeTest::dataIsSuperTypeOf       24   subtraction-typed `mixed`
+#                                              (rows 2-10,12-21,23,25), object
+#                                              world (object, never), strict-mixed,
+#                                              and `mixed ⊇ mixed` — subtraction
+#                                              types are the deferred queue (ADR-0030)
+#   ConstantStringTypeTest::dataIsSuperTypeOf 14 generic-class-string / template /
+#                                              static (object world & generics)
+#   StringTypeTest::dataIsSuperTypeOf       8   generic-class-string, templates,
+#                                              StringAlwaysAcceptingObjectWithToString
+#   ClassStringTypeTest::dataIsSuperTypeOf  2   generic-class-string RHS (object world)
+
+[meta]
+operation = "isSuperTypeOf"
+source_repo = "https://github.com/phpstan/phpstan-src"
+source_commit = "cdc6ca267a2de883adc54393e277e905560b0a6b"
+source_license = "MIT"
+
+# ── IntegerType::dataIsSuperTypeOf ──────────────────────────────────────────
+[[row]]
+name = "int_super_int"
+lhs = "int"
+rhs = "int"
+phpstan = "yes"
+source = "IntegerTypeTest::dataIsSuperTypeOf[0]"
+
+[[row]]
+name = "int_super_const1"
+lhs = "int"
+rhs = "1"
+phpstan = "yes"
+source = "IntegerTypeTest::dataIsSuperTypeOf[1]"
+
+# int ⊇ (int|string): int fully covers the int arm, is disjoint from string —
+# all_of(Yes, No) = Maybe. This is exactly why PHPStan's union-subtype
+# combinator yields Maybe, not No.
+[[row]]
+name = "int_super_int_or_string"
+lhs = "int"
+rhs = "int|string"
+phpstan = "maybe"
+source = "IntegerTypeTest::dataIsSuperTypeOf[3]"
+
+[[row]]
+name = "int_super_string"
+lhs = "int"
+rhs = "string"
+phpstan = "no"
+source = "IntegerTypeTest::dataIsSuperTypeOf[4]"
+
+# ── BooleanType::dataIsSuperTypeOf ──────────────────────────────────────────
+[[row]]
+name = "bool_super_bool"
+lhs = "bool"
+rhs = "bool"
+phpstan = "yes"
+source = "BooleanTypeTest::dataIsSuperTypeOf[0]"
+
+[[row]]
+name = "bool_super_true"
+lhs = "bool"
+rhs = "true"
+phpstan = "yes"
+source = "BooleanTypeTest::dataIsSuperTypeOf[1]"
+
+[[row]]
+name = "bool_super_bool_or_string"
+lhs = "bool"
+rhs = "bool|string"
+phpstan = "maybe"
+source = "BooleanTypeTest::dataIsSuperTypeOf[3]"
+
+[[row]]
+name = "bool_super_string"
+lhs = "bool"
+rhs = "string"
+phpstan = "no"
+source = "BooleanTypeTest::dataIsSuperTypeOf[4]"
+
+# ── MixedType::dataIsSuperTypeOf ────────────────────────────────────────────
+[[row]]
+name = "mixed_super_int"
+lhs = "mixed"
+rhs = "int"
+phpstan = "yes"
+source = "MixedTypeTest::dataIsSuperTypeOf[1]"
+
+[[row]]
+name = "mixed_super_string_or_int"
+lhs = "mixed"
+rhs = "string|int"
+phpstan = "yes"
+source = "MixedTypeTest::dataIsSuperTypeOf[24]"
+
+# ── ConstantIntegerType::dataIsSuperTypeOf ──────────────────────────────────
+[[row]]
+name = "const1_super_const1"
+lhs = "1"
+rhs = "1"
+phpstan = "yes"
+source = "ConstantIntegerTypeTest::dataIsSuperTypeOf[0]"
+
+# The isSuperTypeOf counterpart of the quarantined accepts row: here PHPStan
+# and Steins AGREE at Maybe (partial overlap of {1} and int). Same Steins call
+# `admits_fact(LitInt(1), General{int})`; this operation ports cleanly.
+[[row]]
+name = "const1_super_general_int"
+lhs = "1"
+rhs = "int"
+phpstan = "maybe"
+source = "ConstantIntegerTypeTest::dataIsSuperTypeOf[1]"
+
+[[row]]
+name = "const1_super_const2"
+lhs = "1"
+rhs = "2"
+phpstan = "no"
+source = "ConstantIntegerTypeTest::dataIsSuperTypeOf[2]"
+
+# ── ConstantStringType::dataIsSuperTypeOf (literal-vs-literal only) ──────────
+[[row]]
+name = "conststr_super_same"
+lhs = "'foo'"
+rhs = "'foo'"
+phpstan = "yes"
+source = "ConstantStringTypeTest::dataIsSuperTypeOf[4] (ConstantString==ConstantString)"
+
+[[row]]
+name = "conststr_super_other"
+lhs = "'foo'"
+rhs = "'bar'"
+phpstan = "no"
+source = "ConstantStringTypeTest::dataIsSuperTypeOf[5] (distinct ConstantStrings)"
+
+# ── EXPECTED-DIVERGENT: class-string non-extensional (ADR-0038) ─────────────
+[[row]]
+name = "classstring_super_real_class"
+lhs = "class-string"
+rhs = "'stdClass'"
+phpstan = "yes"
+steins = "maybe"
+status = "divergent"
+adr = "ADR-0038 (non-extensional string types) / ADR-0030 denotational-core registry"
+source = "ClassStringTypeTest::dataIsSuperTypeOf (ConstantString stdClass → Yes)"
+
+[[row]]
+name = "classstring_super_missing_class"
+lhs = "class-string"
+rhs = "'Nonexistent'"
+phpstan = "no"
+steins = "maybe"
+status = "divergent"
+adr = "ADR-0038 (non-extensional string types) / ADR-0030 denotational-core registry"
+source = "ClassStringTypeTest::dataIsSuperTypeOf (ConstantString Nonexistent → No)"
