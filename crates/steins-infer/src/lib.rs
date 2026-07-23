@@ -5955,7 +5955,7 @@ fn member_accepts_strict(m: &TypeMember, arg: &ArgValue) -> bool {
         // Object member (ADR-0043): no scalar literal is a member of a class type.
         // Unreachable in stage 1 (the `has_instance` guard in `is_type_error` short-
         // circuits before any member is inspected); explicit for stage 3.
-        TypeMember::Instance(_) => false,
+        TypeMember::Instance { .. } => false,
     }
 }
 
@@ -5978,7 +5978,7 @@ fn member_accepts_coercive(m: &TypeMember, arg: &ArgValue) -> bool {
         TypeMember::BoolLiteral(b) => matches!(arg, ArgValue::Bool(v) if v == b),
         // Object member (ADR-0043): no scalar coerces into a class type. See
         // `member_accepts_strict` — unreachable in stage 1, explicit for stage 3.
-        TypeMember::Instance(_) => false,
+        TypeMember::Instance { .. } => false,
     }
 }
 
@@ -6402,11 +6402,11 @@ impl<'a> Cx<'a> {
     ///   `__toString` across a class hierarchy, so a `string` member is a definite
     ///   reject only in **strict** mode; in coercive mode it stays silent
     ///   (Unknown), the FP-safe choice.
-    /// - `Instance(fqn)`: rejects iff the trinary is-a oracle proves non-membership
+    /// - `Instance { fqn, .. }`: rejects iff the trinary is-a oracle proves non-membership
     ///   (`IsA::No`); `Yes` accepts and `Unknown` (incomplete hierarchy) is silent.
     fn member_rejects_object(&self, m: &TypeMember, class_fqn: &str) -> bool {
         match m {
-            TypeMember::Instance(fqn) => self.is_a(class_fqn, fqn) == IsA::No,
+            TypeMember::Instance { fqn, .. } => self.is_a(class_fqn, fqn) == IsA::No,
             TypeMember::Scalar(ScalarType::String) => self.strict(),
             TypeMember::Scalar(_) | TypeMember::BoolLiteral(_) => true,
         }
