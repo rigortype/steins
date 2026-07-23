@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use steins_db::{Project, SourceFile, SteinsDatabase, parse as parse_tree};
-use steins_edit::{TransformReport, plan_phpdoc_to_native, unified_diff};
+use steins_edit::{TransformReport, plan_phpdoc_honesty, plan_phpdoc_to_native, unified_diff};
 use steins_infer::{
     Diagnostic, LineFact, NoFold, SOUND_SUBSET_NOTICE, SidecarFolder, annotate_file,
     annotate_project, apply_inline_ignores, check_project, is_vendor_path,
@@ -44,7 +44,7 @@ fn main() -> ExitCode {
             );
             eprintln!("       steins annotate [--no-php] <file.php>");
             eprintln!(
-                "       steins transform phpdoc-to-native [--apply] [--format text|json] <paths...>"
+                "       steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--format text|json] <paths...>"
             );
             ExitCode::from(2)
         }
@@ -274,12 +274,12 @@ fn match_baseline(
     (reported, baselined, matcher.stale_count())
 }
 
-/// `steins transform phpdoc-to-native [--apply] [--format text|json] <paths...>`
-/// (ADR-0020/0034). Dry-run by default: prints a unified diff and a refusal
-/// report, and runs the dual-verification post-check (ADR-0034 point 3a — the
-/// edited project must produce *zero new diagnostics*). `--apply` writes the
-/// edited files only after the post-check passes. Exits 2 on usage error, 1 when
-/// the post-check fails, 0 otherwise.
+/// `steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--format
+/// text|json] <paths...>` (ADR-0020/0034). Dry-run by default: prints a unified
+/// diff and a refusal report, and runs the dual-verification post-check (ADR-0034
+/// point 3a — the edited project must produce *zero new diagnostics*). `--apply`
+/// writes the edited files only after the post-check passes. Exits 2 on usage
+/// error, 1 when the post-check fails, 0 otherwise.
 fn run_transform(args: &[String]) -> ExitCode {
     let mut format = Format::Text;
     let mut apply = false;
@@ -318,19 +318,25 @@ fn run_transform(args: &[String]) -> ExitCode {
         }
     }
 
-    match subcommand.as_deref() {
-        Some("phpdoc-to-native") => {}
+    // Select the transform planner by subcommand. `action` is the verb the oracle
+    // summary uses for an edited site.
+    let (planner, action): (fn(&SteinsDatabase, Project) -> TransformReport, &str) =
+        match subcommand.as_deref() {
+        Some("phpdoc-to-native") => (|db, project| plan_phpdoc_to_native(db, project), "promoted"),
+        Some("phpdoc-honesty") => (|db, project| plan_phpdoc_honesty(db, project), "rewritten"),
         Some(other) => {
-            eprintln!("steins: unknown transform `{other}` (available: phpdoc-to-native)");
+            eprintln!(
+                "steins: unknown transform `{other}` (available: phpdoc-to-native, phpdoc-honesty)"
+            );
             return ExitCode::from(2);
         }
         None => {
             eprintln!(
-                "steins: transform requires a name (usage: steins transform phpdoc-to-native [--apply] [--format text|json] <paths...>)"
+                "steins: transform requires a name (usage: steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--format text|json] <paths...>)"
             );
             return ExitCode::from(2);
         }
-    }
+        };
     if paths.is_empty() {
         eprintln!("steins: no paths given");
         return ExitCode::from(2);
@@ -360,8 +366,8 @@ fn run_transform(args: &[String]) -> ExitCode {
     }
     let project = Project::new(&db, inputs.clone());
 
-    // Plan the promotion (pure — no writes, no re-check).
-    let report = plan_phpdoc_to_native(&db, project);
+    // Plan the transform (pure — no writes, no re-check).
+    let report = planner(&db, project);
 
     // Dual verification (ADR-0034 point 3a): re-analyze the edited project and
     // require zero NEW diagnostics vs. the pre-edit baseline. Run in both dry-run
@@ -370,7 +376,7 @@ fn run_transform(args: &[String]) -> ExitCode {
 
     match format {
         Format::Json => print_transform_json(&report, &postcheck, apply && postcheck.ok),
-        Format::Text => print_transform_text(&report, &postcheck, &texts),
+        Format::Text => print_transform_text(&report, &postcheck, &texts, action),
     }
 
     if !postcheck.ok {
@@ -467,7 +473,12 @@ fn filtered_diagnostics(mut ds: Vec<Diagnostic>) -> Vec<Diagnostic> {
 /// Render the transform dry-run/apply report as text: a unified diff per edited
 /// file, then the refusals, the completeness-oracle summary, and the post-check
 /// verdict.
-fn print_transform_text(report: &TransformReport, postcheck: &PostCheck, texts: &HashMap<String, String>) {
+fn print_transform_text(
+    report: &TransformReport,
+    postcheck: &PostCheck,
+    texts: &HashMap<String, String>,
+    action: &str,
+) {
     for path in report.plan.edited_paths() {
         if let Some(original) = texts.get(path) {
             let updated = report.plan.apply_file(path, original);
@@ -486,7 +497,7 @@ fn print_transform_text(report: &TransformReport, postcheck: &PostCheck, texts: 
     }
 
     let o = &report.oracle;
-    println!("\n{} enumerated: {} promoted, {} refused", o.enumerated, o.transformed, o.refused);
+    println!("\n{} enumerated: {} {action}, {} refused", o.enumerated, o.transformed, o.refused);
 
     if !postcheck.ok {
         println!("\nPost-check FAILED — {} new diagnostic(s):", postcheck.new_diagnostics.len());
