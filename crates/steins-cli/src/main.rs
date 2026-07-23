@@ -14,9 +14,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use steins_db::{Project, SourceFile, SteinsDatabase, parse as parse_tree};
+use steins_edit::{TransformReport, plan_phpdoc_to_native, unified_diff};
 use steins_infer::{
-    Diagnostic, LineFact, SOUND_SUBSET_NOTICE, SidecarFolder, annotate_file, annotate_project,
-    apply_inline_ignores, check_project, is_vendor_path,
+    Diagnostic, LineFact, NoFold, SOUND_SUBSET_NOTICE, SidecarFolder, annotate_file,
+    annotate_project, apply_inline_ignores, check_project, is_vendor_path,
 };
 use steins_syntax::SourceTree;
 
@@ -32,8 +33,9 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         Some("check") => run_check(&args[1..]),
         Some("annotate") => run_annotate(&args[1..]),
+        Some("transform") => run_transform(&args[1..]),
         Some(other) => {
-            eprintln!("steins: unknown command `{other}` (available: check, annotate)");
+            eprintln!("steins: unknown command `{other}` (available: check, annotate, transform)");
             ExitCode::from(2)
         }
         None => {
@@ -41,6 +43,9 @@ fn main() -> ExitCode {
                 "usage: steins check [--format text|json] [--no-php] [--vendor-diagnostics] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
             );
             eprintln!("       steins annotate [--no-php] <file.php>");
+            eprintln!(
+                "       steins transform phpdoc-to-native [--apply] [--format text|json] <paths...>"
+            );
             ExitCode::from(2)
         }
     }
@@ -267,6 +272,255 @@ fn match_baseline(
         }
     }
     (reported, baselined, matcher.stale_count())
+}
+
+/// `steins transform phpdoc-to-native [--apply] [--format text|json] <paths...>`
+/// (ADR-0020/0034). Dry-run by default: prints a unified diff and a refusal
+/// report, and runs the dual-verification post-check (ADR-0034 point 3a — the
+/// edited project must produce *zero new diagnostics*). `--apply` writes the
+/// edited files only after the post-check passes. Exits 2 on usage error, 1 when
+/// the post-check fails, 0 otherwise.
+fn run_transform(args: &[String]) -> ExitCode {
+    let mut format = Format::Text;
+    let mut apply = false;
+    let mut subcommand: Option<String> = None;
+    let mut paths: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--apply" => {
+                apply = true;
+                i += 1;
+            }
+            "--format" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("steins: --format requires an argument (text|json)");
+                    return ExitCode::from(2);
+                };
+                match value.as_str() {
+                    "text" => format = Format::Text,
+                    "json" => format = Format::Json,
+                    other => {
+                        eprintln!("steins: unknown format `{other}` (text|json)");
+                        return ExitCode::from(2);
+                    }
+                }
+                i += 2;
+            }
+            other if subcommand.is_none() && !other.starts_with('-') => {
+                subcommand = Some(other.to_owned());
+                i += 1;
+            }
+            other => {
+                paths.push(other.to_owned());
+                i += 1;
+            }
+        }
+    }
+
+    match subcommand.as_deref() {
+        Some("phpdoc-to-native") => {}
+        Some(other) => {
+            eprintln!("steins: unknown transform `{other}` (available: phpdoc-to-native)");
+            return ExitCode::from(2);
+        }
+        None => {
+            eprintln!(
+                "steins: transform requires a name (usage: steins transform phpdoc-to-native [--apply] [--format text|json] <paths...>)"
+            );
+            return ExitCode::from(2);
+        }
+    }
+    if paths.is_empty() {
+        eprintln!("steins: no paths given");
+        return ExitCode::from(2);
+    }
+
+    let mut files = Vec::new();
+    for p in &paths {
+        collect_php_files(Path::new(p), &mut files);
+    }
+    files.sort();
+    files.dedup();
+
+    let db = SteinsDatabase::default();
+    let mut inputs: Vec<SourceFile> = Vec::new();
+    let mut texts: HashMap<String, String> = HashMap::new();
+    for file_path in &files {
+        let text = match std::fs::read(file_path) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(e) => {
+                eprintln!("steins: cannot read {}: {e}", file_path.display());
+                continue;
+            }
+        };
+        let path = file_path.to_string_lossy().into_owned();
+        texts.insert(path.clone(), text.clone());
+        inputs.push(SourceFile::new(&db, path, text));
+    }
+    let project = Project::new(&db, inputs.clone());
+
+    // Plan the promotion (pure — no writes, no re-check).
+    let report = plan_phpdoc_to_native(&db, project);
+
+    // Dual verification (ADR-0034 point 3a): re-analyze the edited project and
+    // require zero NEW diagnostics vs. the pre-edit baseline. Run in both dry-run
+    // and `--apply`, so a violation is visible before anything is written.
+    let postcheck = post_check(&db, project, &report, &texts);
+
+    match format {
+        Format::Json => print_transform_json(&report, &postcheck, apply && postcheck.ok),
+        Format::Text => print_transform_text(&report, &postcheck, &texts),
+    }
+
+    if !postcheck.ok {
+        if apply {
+            eprintln!(
+                "steins: post-check found {} new diagnostic(s); refusing to write (ADR-0034)",
+                postcheck.new_diagnostics.len()
+            );
+        }
+        return ExitCode::FAILURE;
+    }
+
+    if apply {
+        let mut written = 0usize;
+        for path in report.plan.edited_paths() {
+            let Some(original) = texts.get(path) else { continue };
+            let updated = report.plan.apply_file(path, original);
+            if let Err(e) = std::fs::write(path, &updated) {
+                eprintln!("steins: cannot write {path}: {e}");
+                return ExitCode::FAILURE;
+            }
+            written += 1;
+        }
+        for nf in &report.plan.new_files {
+            if let Err(e) = std::fs::write(&nf.path, &nf.contents) {
+                eprintln!("steins: cannot create {}: {e}", nf.path);
+                return ExitCode::FAILURE;
+            }
+            written += 1;
+        }
+        eprintln!("steins: applied {written} file edit(s)");
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// The outcome of the dual-verification post-check: whether the edited project is
+/// clean, plus any diagnostics whose per-id count *increased* after the edits.
+struct PostCheck {
+    ok: bool,
+    new_diagnostics: Vec<Diagnostic>,
+}
+
+/// Re-analyze the project with the plan's edits applied and report any diagnostic
+/// id whose count increased (ADR-0034 point 3a). Comparison is by per-id count so
+/// it is robust to the line-number shifts a tag deletion causes; vendor findings
+/// are filtered from both sides, matching `check`'s default (ADR-0015).
+fn post_check(
+    db: &SteinsDatabase,
+    project: Project,
+    report: &TransformReport,
+    texts: &HashMap<String, String>,
+) -> PostCheck {
+    if report.plan.is_empty() {
+        return PostCheck { ok: true, new_diagnostics: Vec::new() };
+    }
+    let before = filtered_diagnostics(check_project(db, project, &mut NoFold));
+
+    // Build the edited project in a fresh database (avoids salsa mutation subtlety
+    // and keeps the pre-edit query results intact for `before`).
+    let edb = SteinsDatabase::default();
+    let mut einputs: Vec<SourceFile> = Vec::new();
+    for (path, original) in texts {
+        let updated = report.plan.apply_file(path, original);
+        einputs.push(SourceFile::new(&edb, path.clone(), updated));
+    }
+    let eproject = Project::new(&edb, einputs);
+    let after = filtered_diagnostics(check_project(&edb, eproject, &mut NoFold));
+
+    let mut before_counts: HashMap<&str, usize> = HashMap::new();
+    for d in &before {
+        *before_counts.entry(d.id).or_default() += 1;
+    }
+    let mut after_counts: HashMap<&str, usize> = HashMap::new();
+    for d in &after {
+        *after_counts.entry(d.id).or_default() += 1;
+    }
+    let regressed_ids: Vec<&str> = after_counts
+        .iter()
+        .filter(|(id, n)| **n > before_counts.get(**id).copied().unwrap_or(0))
+        .map(|(id, _)| *id)
+        .collect();
+
+    let new_diagnostics: Vec<Diagnostic> =
+        after.into_iter().filter(|d| regressed_ids.contains(&d.id)).collect();
+    PostCheck { ok: new_diagnostics.is_empty(), new_diagnostics }
+}
+
+fn filtered_diagnostics(mut ds: Vec<Diagnostic>) -> Vec<Diagnostic> {
+    ds.retain(|d| !is_vendor_path(&d.path));
+    ds
+}
+
+/// Render the transform dry-run/apply report as text: a unified diff per edited
+/// file, then the refusals, the completeness-oracle summary, and the post-check
+/// verdict.
+fn print_transform_text(report: &TransformReport, postcheck: &PostCheck, texts: &HashMap<String, String>) {
+    for path in report.plan.edited_paths() {
+        if let Some(original) = texts.get(path) {
+            let updated = report.plan.apply_file(path, original);
+            print!("{}", unified_diff(path, original, &updated, 3));
+        }
+    }
+
+    if !report.refusals.is_empty() {
+        println!("\nRefusals ({}):", report.refusals.len());
+        for r in &report.refusals {
+            println!(
+                "  {}:{}:{}: {} [{}] — {}",
+                r.site.path, r.site.line, r.site.column, r.site.label, r.reason, r.detail
+            );
+        }
+    }
+
+    let o = &report.oracle;
+    println!("\n{} enumerated: {} promoted, {} refused", o.enumerated, o.transformed, o.refused);
+
+    if !postcheck.ok {
+        println!("\nPost-check FAILED — {} new diagnostic(s):", postcheck.new_diagnostics.len());
+        for d in &postcheck.new_diagnostics {
+            println!("  {}:{}:{}: [{}] {}", d.path, d.line, d.column, d.id, d.message);
+        }
+    } else if !report.plan.is_empty() {
+        println!("Post-check OK — no new diagnostics.");
+    }
+}
+
+/// Render the transform report as JSON: the serializable [`TransformReport`]
+/// (plan + refusals + oracle) plus the post-check verdict and whether the edits
+/// were written.
+fn print_transform_json(report: &TransformReport, postcheck: &PostCheck, applied: bool) {
+    let new_ds: Vec<serde_json::Value> = postcheck
+        .new_diagnostics
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "id": d.id, "path": d.path, "line": d.line,
+                "column": d.column, "message": d.message,
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "report": report,
+        "postcheck": { "ok": postcheck.ok, "new_diagnostics": new_ds },
+        "applied": applied,
+    });
+    match serde_json::to_string_pretty(&doc) {
+        Ok(s) => println!("{s}"),
+        Err(e) => eprintln!("steins: failed to serialize json: {e}"),
+    }
 }
 
 /// `steins annotate [--no-php] <file.php>` — reprint one file with a right-margin

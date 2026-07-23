@@ -1033,6 +1033,7 @@ dependencies = [
  "serde",
  "serde_json",
  "steins-db",
+ "steins-edit",
  "steins-infer",
  "steins-syntax",
 ]
@@ -1059,6 +1060,20 @@ name = "steins-domain"
 version = "0.0.0"
 dependencies = [
  "proptest",
+]
+
+[[package]]
+name = "steins-edit"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "steins-contract",
+ "steins-db",
+ "steins-domain",
+ "steins-infer",
+ "steins-phpdoc",
+ "steins-syntax",
 ]
 
 [[package]]

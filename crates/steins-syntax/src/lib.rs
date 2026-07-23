@@ -260,6 +260,14 @@ pub struct Param {
     /// even against a non-nullable `@param` type (avoiding a false positive on the
     /// common `string $x = null` idiom).
     pub has_null_default: bool,
+    /// `true` when the parameter declares a default value (`= …`), of any form.
+    /// A default must be admitted by any native type promoted onto the parameter,
+    /// or PHP rejects the declaration at compile time (`int $x = 'str'`).
+    pub has_default: bool,
+    /// The lowered default value when it is a representable literal / array; a
+    /// non-representable default (a constant, `self::X`, an expression) lowers to
+    /// `None` even though [`Self::has_default`] is `true`.
+    pub default: Option<ArgValue>,
     pub span: Span,
 }
 
@@ -474,6 +482,13 @@ pub struct FunctionDecl {
     /// association discipline as attributes; ADR-0029). The phpdoc bridge parses
     /// `@param`/`@return` tags out of it into phpdoc envelopes.
     pub docblock: Option<String>,
+    /// The **file byte span** of the associated docblock (the same trivium whose
+    /// text is [`Self::docblock`]), when one is adopted. `docblock` text is the
+    /// exact substring `[span.start, span.end)` of the source, so a docblock-
+    /// relative offset (e.g. a [`steins_phpdoc`] tag span) maps into the file by
+    /// adding `span.start`. Retained for the transform engine (ADR-0034), which
+    /// deletes a promoted `@param` tag's line in the file.
+    pub docblock_span: Option<Span>,
 }
 
 /// A method's declared visibility. Absent visibility modifiers default to
@@ -1495,6 +1510,7 @@ fn lower_function(f: &Function<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex
         effect_origins,
         throw_origins,
         docblock: docs.preceding(to_span(f.span()).start),
+        docblock_span: docs.preceding_span(to_span(f.span()).start),
     }
 }
 
@@ -1511,6 +1527,12 @@ fn lower_params(list: &mago_syntax::cst::FunctionLikeParameterList<'_>) -> Vec<P
                 .default_value
                 .as_ref()
                 .is_some_and(|d| matches!(d.value.unparenthesized(), Expression::Literal(Literal::Null(_)))),
+            has_default: p.default_value.is_some(),
+            default: p
+                .default_value
+                .as_ref()
+                .map(|d| lower_arg_value(d.value))
+                .filter(|v| !matches!(v, ArgValue::Other)),
             span: to_span(p.span()),
         })
         .collect()
@@ -1738,8 +1760,9 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex) ->
 /// so the whitespace-only rule is deliberately strict.
 struct DocIndex<'a> {
     source: &'a str,
-    /// `(end_offset, text)` of each docblock, in source order.
-    blocks: Vec<(u32, String)>,
+    /// `(span, text)` of each docblock, in source order. `span` is the full file
+    /// span of the `/** … */` trivium; `text` is its exact source substring.
+    blocks: Vec<(Span, String)>,
 }
 
 impl<'a> DocIndex<'a> {
@@ -1748,22 +1771,33 @@ impl<'a> DocIndex<'a> {
             .trivia
             .iter()
             .filter(|t| matches!(t.kind, TriviaKind::DocBlockComment))
-            .map(|t| (to_span(t.span).end, bytes_to_string(t.value)))
+            .map(|t| (to_span(t.span), bytes_to_string(t.value)))
             .collect();
         Self { source, blocks }
     }
 
-    /// The text of the docblock immediately preceding `decl_start`, if any.
-    fn preceding(&self, decl_start: u32) -> Option<String> {
-        let mut best: Option<(u32, &String)> = None;
-        for (end, text) in &self.blocks {
-            if *end <= decl_start && best.is_none_or(|(be, _)| *end > be) {
-                best = Some((*end, text));
+    /// The docblock immediately preceding `decl_start` (only whitespace between
+    /// its end and `decl_start`), if any — as `(span, text)`.
+    fn preceding_block(&self, decl_start: u32) -> Option<(Span, &String)> {
+        let mut best: Option<(Span, &String)> = None;
+        for (span, text) in &self.blocks {
+            if span.end <= decl_start && best.is_none_or(|(bs, _)| span.end > bs.end) {
+                best = Some((*span, text));
             }
         }
-        let (end, text) = best?;
-        let gap = self.source.get(end as usize..decl_start as usize)?;
-        gap.chars().all(char::is_whitespace).then(|| text.clone())
+        let (span, text) = best?;
+        let gap = self.source.get(span.end as usize..decl_start as usize)?;
+        gap.chars().all(char::is_whitespace).then_some((span, text))
+    }
+
+    /// The text of the docblock immediately preceding `decl_start`, if any.
+    fn preceding(&self, decl_start: u32) -> Option<String> {
+        self.preceding_block(decl_start).map(|(_, text)| text.clone())
+    }
+
+    /// The file span of the docblock immediately preceding `decl_start`, if any.
+    fn preceding_span(&self, decl_start: u32) -> Option<Span> {
+        self.preceding_block(decl_start).map(|(span, _)| span)
     }
 }
 

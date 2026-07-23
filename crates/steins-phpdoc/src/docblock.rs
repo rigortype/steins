@@ -23,6 +23,17 @@ pub struct DocTag {
     pub type_text: String,
     /// Span of `type_text` within the scanned docblock text.
     pub type_span: Span,
+    /// Span of the whole *physical line* this tag was scanned from, within the
+    /// docblock text (`[line_start, line_end)`, newline-exclusive). The transform
+    /// engine (ADR-0034) uses this to delete a tag's entire line when promoting
+    /// its type to a native declaration.
+    pub line_span: Span,
+    /// Span of the tag itself within the docblock text — from the `@` to the end
+    /// of its last meaningful token (the `$var` for `@param`/`@var`/assert tags,
+    /// the type/description tail otherwise). Narrower than [`Self::line_span`]
+    /// (which includes the leading `*`-gutter and trailing whitespace); used for
+    /// an in-line tag deletion when the line also carries docblock delimiters.
+    pub tag_span: Span,
     /// The parameter/variable name (`$foo`) when the tag carries one.
     pub var_name: Option<String>,
     /// `true` when the tag was written with a `@phpstan-`/`@psalm-` prefix
@@ -156,6 +167,8 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
     if i >= line_end || bytes[i] != b'@' {
         return None;
     }
+    // The byte offset of the `@` — the start of the tag proper (past the gutter).
+    let at_offset = i;
     // Read the tag name.
     let name_start = i + 1;
     let mut j = name_start;
@@ -247,6 +260,11 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
         kind,
         type_text: text[type_start..type_end].to_owned(),
         type_span: Span::new(type_start as u32, type_end as u32),
+        // The tag proper runs from its `@` to the end of its trimmed content
+        // (`rest_end` already excludes a trailing `*/` and whitespace).
+        tag_span: Span::new(at_offset as u32, rest_end as u32),
+        // The whole physical line the tag was scanned from (newline-exclusive).
+        line_span: Span::new(line_start as u32, line_end as u32),
         var_name,
         prefixed,
         assert_property_target,
@@ -297,6 +315,33 @@ mod tests {
         // Span should point at the type text within the docblock.
         let s = tags[0].type_span;
         assert_eq!(&doc[s.start as usize..s.end as usize], "array<int, string>");
+    }
+
+    #[test]
+    fn records_line_and_tag_spans() {
+        let doc = "/**\n * @param int $x the count\n */";
+        let tags = scan_docblock(doc);
+        assert_eq!(tags.len(), 1);
+        let t = &tags[0];
+        // The physical line is " * @param int $x the count" (no trailing newline).
+        let line = &doc[t.line_span.start as usize..t.line_span.end as usize];
+        assert_eq!(line, " * @param int $x the count");
+        // The tag proper runs from the `@` to the end of the trimmed content.
+        let tag = &doc[t.tag_span.start as usize..t.tag_span.end as usize];
+        assert_eq!(tag, "@param int $x the count");
+    }
+
+    #[test]
+    fn tag_span_on_single_line_docblock_excludes_delimiters() {
+        let doc = "/** @param int $x */";
+        let tags = scan_docblock(doc);
+        assert_eq!(tags.len(), 1);
+        let t = &tags[0];
+        let tag = &doc[t.tag_span.start as usize..t.tag_span.end as usize];
+        assert_eq!(tag, "@param int $x");
+        // The line span covers the whole single line including delimiters.
+        let line = &doc[t.line_span.start as usize..t.line_span.end as usize];
+        assert_eq!(line, "/** @param int $x */");
     }
 
     #[test]

@@ -13,5 +13,6 @@ path = "src/main.rs"
 steins-db = { path = "../steins-db" }
 steins-infer = { path = "../steins-infer" }
 steins-syntax = { path = "../steins-syntax" }
+steins-edit = { path = "../steins-edit" }
 serde.workspace = true
 serde_json.workspace = true

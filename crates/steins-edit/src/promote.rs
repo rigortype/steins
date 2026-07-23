@@ -1,0 +1,610 @@
+//! Transform #1 — phpdoc→native parameter promotion (ADR-0034 point 4 /
+//! ADR-0037).
+//!
+//! Where `@param int $x` documents a parameter that carries **no native hint in
+//! source**, and call-site value propagation proves *every* project call site
+//! flows a value the native type admits, this transform adds the native
+//! declaration (`int $x`) and deletes the now-redundant tag. The precondition —
+//! *all callers proven* — is structurally unavailable to modular tools (PHPStan,
+//! Rector), which is exactly why it belongs here (ADR-0034).
+//!
+//! ## Scope (v1)
+//! - **Free functions only.** Method call-site resolution across receivers is a
+//!   materially larger inference surface; method promotion is deferred with
+//!   design. Method candidates are therefore *not enumerated* here.
+//! - Promotable phpdoc types are those representable as a
+//!   [`steins_syntax::NativeType`]: the four scalars, `true`/`false` literals,
+//!   `?T`, and unions of those (plus a `null` member). A finer phpdoc type
+//!   (`positive-int`, `non-empty-string`, `int<0, max>`, a class, an array, …) is
+//!   not representable and is refused `type-not-natively-representable`.
+//! - Only **literal** arguments prove a call site in v1 (folding-backed and
+//!   `$var`-flow proofs are deferred): a non-literal argument at any call site is
+//!   refused `argument-not-proven`.
+//!
+//! Every enumerated site is accounted for as transformed-or-refused (the
+//! completeness oracle, ADR-0034 point 3b). Refusals carry a stable named reason
+//! and human detail so an agent can read them and continue (ADR-0034 point 2).
+
+use steins_contract::{ContractTy, admits_val};
+use steins_db::{Db, Project, SourceFile, parse};
+use steins_domain::{Base, Certainty, Key, Val};
+use steins_infer::promote::{FreeFnSweep, TargetSweep, sweep_free_functions};
+use steins_phpdoc::ast::{ConstExpr, Type as PType, TypeKind};
+use steins_phpdoc::docblock::DocTag;
+use steins_phpdoc::{TagKind, parse_type, scan_docblock};
+use steins_syntax::{
+    ArgValue, FunctionDecl, NativeType, NormKey, Param, ScalarType, SourceTree, TypeMember,
+    normalize_array,
+};
+
+use crate::plan::{ByteSpan, Edit, EditPlan};
+use crate::transform::{CompletenessOracle, Refusal, SiteRef, Transform, TransformReport};
+
+// ---- Stable refusal reason names (ADR-0034 point 2) -----------------------
+
+/// The phpdoc type has no [`NativeType`] rendering and is not a scalar
+/// refinement either (arrays, generics, class names, callables, shapes).
+pub const REASON_NOT_REPRESENTABLE: &str = "type-not-natively-representable";
+/// The phpdoc type is a *refinement* of a native scalar (`positive-int`,
+/// `non-empty-string`, `int<0, max>`, a literal `5`): strictly finer than its
+/// native rendering, so v1 refuses rather than promote-and-keep (ADR-0041 pt 2).
+pub const REASON_FINER_THAN_NATIVE: &str = "phpdoc-finer-than-native";
+/// A `$x = null` default makes the parameter implicitly nullable, but the native
+/// type is not nullable — promoting would emit PHP-8.4-deprecated code.
+pub const REASON_IMPLICIT_NULLABLE: &str = "implicit-nullable-default";
+/// The parameter has a non-null default value that the native type does not
+/// provably admit (`int $x = 'str'` is a compile-time fatal; `int $x = PHP_INT_MAX`
+/// is valid but unprovable in v1). Refusing keeps the emitted declaration legal.
+pub const REASON_DEFAULT_INCOMPATIBLE: &str = "default-not-admitted-by-native";
+/// A dynamic `$fn(...)` call exists in the project — it could target any free
+/// function, so no free-function candidate can prove all its callers.
+pub const REASON_DYNAMIC_CALL: &str = "dynamic-call-present";
+/// The function's name appears as a string / first-class-callable value (a
+/// `call_user_func`-style caller invisible to call resolution).
+pub const REASON_REFERENCED_AS_VALUE: &str = "function-referenced-as-value";
+/// The function's name does not resolve uniquely project-wide (duplicate
+/// definition or builtin shadow), so its callers cannot be enumerated soundly.
+pub const REASON_AMBIGUOUS: &str = "resolution-ambiguous";
+/// A call reaching this function used named or spread arguments (positional
+/// mapping is unreliable).
+pub const REASON_NAMED_OR_SPREAD: &str = "named-or-spread-args";
+/// At least one call site's argument is not proven to admit the native type.
+pub const REASON_ARG_NOT_PROVEN: &str = "argument-not-proven";
+
+/// The phpdoc→native promotion transform (ADR-0034 point 4).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PhpdocToNative;
+
+impl Transform for PhpdocToNative {
+    fn id(&self) -> &'static str {
+        "phpdoc-to-native"
+    }
+}
+
+/// Plan the phpdoc→native promotion over `project`. Pure planning: no files are
+/// written and no diagnostics are re-checked here — the caller (CLI) drives the
+/// dry-run diff, the dual-verification post-check, and any `--apply` write
+/// (ADR-0034 point 3).
+#[must_use]
+pub fn plan_phpdoc_to_native(db: &dyn Db, project: Project) -> TransformReport {
+    let sweep = sweep_free_functions(db, project);
+
+    let files: Vec<SourceFile> = project.files(db).to_vec();
+
+    // Count each FQN across the project so a duplicate definition (which makes
+    // resolution ambiguous) refuses rather than promotes on thin evidence.
+    let mut fqn_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for &file in &files {
+        for f in parse(db, file).functions() {
+            *fqn_counts.entry(f.fqn.clone()).or_default() += 1;
+        }
+    }
+
+    let mut plan = EditPlan::new();
+    let mut refusals: Vec<Refusal> = Vec::new();
+    let mut oracle = CompletenessOracle::default();
+
+    for &file in &files {
+        let tree = parse(db, file);
+        let path = file.path(db);
+        let source = file.text(db);
+        for func in tree.functions() {
+            plan_function(
+                func, path, source, tree, &sweep, &fqn_counts, &mut plan, &mut refusals, &mut oracle,
+            );
+        }
+    }
+
+    TransformReport { plan, refusals, oracle }
+}
+
+/// Plan promotions for one free function, appending edits/refusals and updating
+/// the oracle for each *enumerated* parameter.
+#[allow(clippy::too_many_arguments)]
+fn plan_function(
+    func: &FunctionDecl,
+    path: &str,
+    source: &str,
+    tree: &SourceTree,
+    sweep: &FreeFnSweep,
+    fqn_counts: &std::collections::HashMap<String, usize>,
+    plan: &mut EditPlan,
+    refusals: &mut Vec<Refusal>,
+    oracle: &mut CompletenessOracle,
+) {
+    let tags = func.docblock.as_deref().map(scan_docblock).unwrap_or_default();
+
+    for (idx, param) in func.params.iter().enumerate() {
+        // Domain gate 1: the parameter must have no native hint in source.
+        if param.ty.is_some() || has_source_hint(source, param) {
+            continue;
+        }
+        // Domain gate 2: there must be a promotable `@param` tag for it.
+        let Some(tag) = param_tag(&tags, &param.name) else { continue };
+
+        // This parameter is an *enumerated* site — it must end transformed or
+        // refused (the completeness oracle, ADR-0034 point 3b).
+        oracle.enumerated += 1;
+        let site = candidate_site(path, tree, func, param);
+
+        match decide(func, param, idx, tag, source, sweep, fqn_counts) {
+            Ok(native) => {
+                // Insert `"<native> "` at the parameter's start (covers `&`/`...`),
+                // and delete the now-redundant `@param` line.
+                let insert = Edit {
+                    path: path.to_owned(),
+                    span: ByteSpan::at(param.span.start),
+                    replacement: format!("{} ", native.render()),
+                };
+                let delete = Edit {
+                    path: path.to_owned(),
+                    span: tag_deletion(source, func, tag, tags.len()),
+                    replacement: String::new(),
+                };
+                // Overlap rejection is the plan's job; a rejection here is an
+                // internal invariant break, surfaced as a refusal (never a panic).
+                if plan.add_edit(insert).and_then(|()| plan.add_edit(delete)).is_ok() {
+                    oracle.transformed += 1;
+                } else {
+                    oracle.refused += 1;
+                    refusals.push(Refusal::new(
+                        site,
+                        REASON_ARG_NOT_PROVEN,
+                        "internal: promotion edits overlapped another edit; skipped",
+                    ));
+                }
+            }
+            Err((reason, detail)) => {
+                oracle.refused += 1;
+                refusals.push(Refusal::new(site, reason, detail));
+            }
+        }
+    }
+}
+
+/// Decide a single candidate: `Ok(native)` to promote, `Err((reason, detail))`
+/// to refuse.
+fn decide(
+    func: &FunctionDecl,
+    param: &Param,
+    idx: usize,
+    tag: &DocTag,
+    source: &str,
+    sweep: &FreeFnSweep,
+    fqn_counts: &std::collections::HashMap<String, usize>,
+) -> Result<NativeType, (&'static str, String)> {
+    // (a) Representability: the phpdoc type must map to a NativeType. A type that
+    // is strictly *finer* than a native scalar (`positive-int`, `non-empty-string`,
+    // `int<0, max>`) refuses distinctly from a genuinely non-scalar type (ADR-0041
+    // point 2).
+    let parsed = parse_type(&tag.type_text).map_err(|_| {
+        (REASON_NOT_REPRESENTABLE, format!("phpdoc type `{}` did not parse", tag.type_text))
+    })?;
+    let native = match parsed.at_end.then(|| phpdoc_to_native(&parsed.ty)).flatten() {
+        Some(nt) => nt,
+        None if parsed.at_end && is_finer_than_native(&parsed.ty) => {
+            return Err((
+                REASON_FINER_THAN_NATIVE,
+                format!(
+                    "phpdoc type `{}` is finer than its native rendering; v1 refuses rather than promote-and-keep",
+                    tag.type_text
+                ),
+            ));
+        }
+        None => {
+            return Err((
+                REASON_NOT_REPRESENTABLE,
+                format!("phpdoc type `{}` has no native scalar/union rendering", tag.type_text),
+            ));
+        }
+    };
+
+    // (b) A literal-null default makes the parameter implicitly nullable; a
+    // non-nullable native type would emit PHP-8.4-deprecated code.
+    if param.has_null_default && !native.nullable {
+        return Err((
+            REASON_IMPLICIT_NULLABLE,
+            format!(
+                "parameter ${} has a `= null` default (implicitly nullable), but `{}` is not nullable",
+                param.name,
+                native.render()
+            ),
+        ));
+    }
+
+    // (b2) Any other default value must be provably admitted by the native type,
+    // or the emitted declaration is a compile-time fatal (`int $x = 'str'`,
+    // `int $x = 3.0`, `int $x = []`). A non-representable default (a constant,
+    // `self::X`, an expression) is unprovable in v1 and refused conservatively —
+    // `int $x = PHP_INT_MAX` is legal but we cannot show it here.
+    if param.has_default && !param.has_null_default {
+        let contract = native_contract(&native);
+        let admitted = param
+            .default
+            .as_ref()
+            .and_then(arg_to_val)
+            .is_some_and(|val| admits_val(&contract, &val) == Certainty::Yes);
+        if !admitted {
+            return Err((
+                REASON_DEFAULT_INCOMPATIBLE,
+                format!(
+                    "parameter ${} has a default value the native type `{}` does not provably admit; promoting would emit a declaration PHP rejects",
+                    param.name,
+                    native.render()
+                ),
+            ));
+        }
+    }
+
+    // (c) Project-wide obstacles that make "all callers" unknowable.
+    if sweep.any_dynamic_call {
+        return Err((
+            REASON_DYNAMIC_CALL,
+            "a dynamic `$fn(...)` call in the project could target this function".to_owned(),
+        ));
+    }
+    let simple = func.name.to_ascii_lowercase();
+    if sweep.value_referenced_names.contains(&simple)
+        || sweep.value_referenced_names.contains(&func.fqn)
+    {
+        return Err((
+            REASON_REFERENCED_AS_VALUE,
+            format!("`{}` appears as a string / first-class-callable value", func.name),
+        ));
+    }
+    if fqn_counts.get(&func.fqn).copied().unwrap_or(0) > 1
+        || sweep.unresolved_simple_names.contains(&simple)
+    {
+        return Err((
+            REASON_AMBIGUOUS,
+            format!("`{}` does not resolve uniquely project-wide", func.name),
+        ));
+    }
+
+    // (d) Prove every observed call-site argument for this parameter position.
+    let contract = native_contract(&native);
+    let _ = source; // (source already consulted in the domain gate)
+    if let Some(target) = sweep.targets.get(&func.fqn) {
+        prove_target(target, idx, param.variadic, &native, &contract)?;
+    }
+    // No target entry means no observed callers — vacuously all-callers-proven
+    // (external/out-of-project callers are outside the analysis boundary).
+
+    Ok(native)
+}
+
+/// Prove that every observed argument at parameter position `idx` admits the
+/// native contract with [`Certainty::Yes`]; also honor the named/spread flag.
+fn prove_target(
+    target: &TargetSweep,
+    idx: usize,
+    variadic: bool,
+    native: &NativeType,
+    contract: &ContractTy,
+) -> Result<(), (&'static str, String)> {
+    if target.named_or_spread {
+        return Err((
+            REASON_NAMED_OR_SPREAD,
+            "a call reaching this function used named or spread arguments".to_owned(),
+        ));
+    }
+    // A variadic parameter at position `idx` collects *every* positional argument
+    // from `idx` onward, so each of them must be proven (not just the one at
+    // `idx`) — otherwise a bad later argument (`f(1, 'str')`) flows in unchecked.
+    let matches = |p: usize| if variadic { p >= idx } else { p == idx };
+    for obs in target.observed.iter().filter(|o| matches(o.param_index)) {
+        let Some(val) = arg_to_val(&obs.value) else {
+            return Err((
+                REASON_ARG_NOT_PROVEN,
+                format!(
+                    "call at {}:{}:{} passes `{}`, not a proven literal admitting `{}`",
+                    obs.caller_path,
+                    obs.line,
+                    obs.column,
+                    obs.value.render(),
+                    native.render()
+                ),
+            ));
+        };
+        if admits_val(contract, &val) != Certainty::Yes {
+            return Err((
+                REASON_ARG_NOT_PROVEN,
+                format!(
+                    "call at {}:{}:{} passes `{}`, which `{}` does not admit",
+                    obs.caller_path,
+                    obs.line,
+                    obs.column,
+                    obs.value.render(),
+                    native.render()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ---- Candidate helpers ----------------------------------------------------
+
+/// A [`SiteRef`] for a candidate parameter.
+fn candidate_site(path: &str, tree: &SourceTree, func: &FunctionDecl, param: &Param) -> SiteRef {
+    let p = tree.position(param.span.start);
+    SiteRef::new(
+        path.to_owned(),
+        p.line,
+        p.column,
+        format!("function {}() param ${}", func.name, param.name),
+    )
+}
+
+/// Whether the source text at `param.span.start` carries a native type hint.
+///
+/// `param.ty == None` alone is ambiguous: it also means a *complex* hint was
+/// lowered away (`Foo|Bar $x`). So we inspect the raw bytes: from the parameter
+/// start, skip whitespace and the `&` / `...` markers; if the next token is the
+/// `$variable`, there is no hint. Anything else is a hint (the site is out of the
+/// enumeration domain, not a refusal).
+fn has_source_hint(source: &str, param: &Param) -> bool {
+    let start = param.span.start as usize;
+    let bytes = source.as_bytes();
+    let mut k = start;
+    loop {
+        // Skip whitespace.
+        while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+            k += 1;
+        }
+        if bytes[k..].starts_with(b"...") {
+            k += 3;
+            continue;
+        }
+        if bytes.get(k) == Some(&b'&') {
+            k += 1;
+            continue;
+        }
+        break;
+    }
+    // A hint is absent exactly when the next non-marker token is the `$variable`.
+    bytes.get(k) != Some(&b'$')
+}
+
+/// The `@param` tag documenting `param_name` (without `$`), if any.
+fn param_tag<'a>(tags: &'a [DocTag], param_name: &str) -> Option<&'a DocTag> {
+    let want = format!("${param_name}");
+    tags.iter().find(|t| {
+        matches!(t.kind, TagKind::Param) && t.var_name.as_deref() == Some(want.as_str())
+    })
+}
+
+/// Compute the file byte span to delete for a promoted `@param` tag, leaving a
+/// syntactically valid docblock.
+///
+/// - A tag on a line with no docblock delimiters → delete the whole physical line
+///   (plus its trailing newline).
+/// - A tag sharing a line with `/**` or `*/` and it is the docblock's only tag →
+///   delete the whole docblock.
+/// - Otherwise (delimiter line with sibling tags) → delete just the tag text.
+fn tag_deletion(source: &str, func: &FunctionDecl, tag: &DocTag, total_tags: usize) -> ByteSpan {
+    let doc_start = func.docblock_span.map_or(0, |s| s.start);
+    let doc_text = func.docblock.as_deref().unwrap_or("");
+    let line = &doc_text[tag.line_span.start as usize..tag.line_span.end as usize];
+    let has_delims = line.contains("/**") || line.contains("*/");
+
+    if !has_delims {
+        let start = doc_start + tag.line_span.start;
+        let mut end = doc_start + tag.line_span.end;
+        // Swallow the line's terminating newline so no blank gutter line is left.
+        if source.as_bytes().get(end as usize) == Some(&b'\n') {
+            end += 1;
+        }
+        ByteSpan::new(start, end)
+    } else if total_tags == 1 {
+        ByteSpan::new(doc_start, doc_start + doc_text.len() as u32)
+    } else {
+        ByteSpan::new(doc_start + tag.tag_span.start, doc_start + tag.tag_span.end)
+    }
+}
+
+// ---- Type + value mapping -------------------------------------------------
+
+/// Map a parsed phpdoc type to a [`NativeType`], or `None` when it is not
+/// representable as a scalar/bool-literal/nullable/scalar-union native type.
+fn phpdoc_to_native(ty: &PType) -> Option<NativeType> {
+    match &ty.kind {
+        TypeKind::Identifier(name) => {
+            member_of(name).map(|m| NativeType { members: vec![m], nullable: false })
+        }
+        TypeKind::Nullable(inner) => {
+            let mut nt = phpdoc_to_native(inner)?;
+            nt.nullable = true;
+            Some(nt)
+        }
+        TypeKind::Union { types, .. } => {
+            let mut members = Vec::new();
+            let mut nullable = false;
+            for t in types {
+                match &t.kind {
+                    TypeKind::Identifier(name) if name.eq_ignore_ascii_case("null") => {
+                        nullable = true;
+                    }
+                    TypeKind::Identifier(name) => members.push(member_of(name)?),
+                    TypeKind::Nullable(inner) => {
+                        // `?T` inside a union: fold its member in and mark nullable.
+                        let nt = phpdoc_to_native(inner)?;
+                        members.extend(nt.members);
+                        nullable = true;
+                    }
+                    _ => return None,
+                }
+            }
+            if members.is_empty() {
+                None // a `null`-only union has no native rendering
+            } else {
+                Some(NativeType { members, nullable })
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether a non-representable phpdoc type is a *refinement* of a native scalar
+/// (`positive-int`, `non-empty-string`, `int<0, max>`, a literal `5` / `'x'`), as
+/// opposed to genuinely non-scalar (arrays, classes, generic collections,
+/// callables, shapes). Drives the `phpdoc-finer-than-native` vs
+/// `type-not-natively-representable` split (ADR-0041 point 2).
+fn is_finer_than_native(ty: &PType) -> bool {
+    match &ty.kind {
+        TypeKind::Identifier(n) => is_refined_scalar_keyword(&n.to_ascii_lowercase()),
+        TypeKind::Nullable(inner) => is_finer_than_native(inner),
+        // A literal-value type (`5`, `1.5`, `'x'`) is finer than its scalar base.
+        TypeKind::Const(c) => {
+            matches!(c, ConstExpr::Int(_) | ConstExpr::Float(_) | ConstExpr::Str(_))
+        }
+        // `int<a, b>` — a bounded-int refinement (`array<…>` etc. are not).
+        TypeKind::Generic { base, .. } => base.eq_ignore_ascii_case("int"),
+        // A union is "finer" only if every member is representable-or-finer and at
+        // least one member is a refinement — else it is genuinely non-representable.
+        TypeKind::Union { types, .. } => {
+            let mut any_finer = false;
+            for t in types {
+                if native_member_repr(t) {
+                    continue;
+                }
+                if is_finer_than_native(t) {
+                    any_finer = true;
+                } else {
+                    return false;
+                }
+            }
+            any_finer
+        }
+        _ => false,
+    }
+}
+
+/// Whether a union member is a plainly-representable native member (scalar /
+/// bool-literal / `null` / nullable-of-such).
+fn native_member_repr(ty: &PType) -> bool {
+    match &ty.kind {
+        TypeKind::Identifier(n) => {
+            let n = n.to_ascii_lowercase();
+            n == "null" || member_of(&n).is_some()
+        }
+        TypeKind::Nullable(inner) => native_member_repr(inner),
+        _ => false,
+    }
+}
+
+/// The refined-scalar phpdoc keywords (subtypes of `int`/`string`) — finer than
+/// their native base, so promotion refuses `phpdoc-finer-than-native`.
+fn is_refined_scalar_keyword(n: &str) -> bool {
+    matches!(
+        n,
+        "positive-int"
+            | "negative-int"
+            | "non-negative-int"
+            | "non-positive-int"
+            | "non-empty-string"
+            | "non-falsy-string"
+            | "truthy-string"
+            | "numeric-string"
+            | "lowercase-string"
+            | "uppercase-string"
+            | "non-empty-lowercase-string"
+            | "class-string"
+            | "interned-string"
+            | "literal-string"
+            | "callable-string"
+            | "trait-string"
+            | "enum-string"
+            | "html-escaped-string"
+    )
+}
+
+/// A single native union member from a phpdoc identifier keyword. Only the
+/// canonical scalar keywords and `true`/`false` literals map; everything else
+/// (aliases, refined scalars, class names) is not natively representable.
+fn member_of(name: &str) -> Option<TypeMember> {
+    let n = name.to_ascii_lowercase();
+    match n.as_str() {
+        "int" => Some(TypeMember::Scalar(ScalarType::Int)),
+        "float" => Some(TypeMember::Scalar(ScalarType::Float)),
+        "string" => Some(TypeMember::Scalar(ScalarType::String)),
+        "bool" => Some(TypeMember::Scalar(ScalarType::Bool)),
+        "true" => Some(TypeMember::BoolLiteral(true)),
+        "false" => Some(TypeMember::BoolLiteral(false)),
+        _ => None,
+    }
+}
+
+/// Build the acceptance contract for a native type (native semantics, not phpdoc
+/// lowering): scalars → base, `true`/`false` → bool-literal, nullable adds
+/// `null`.
+fn native_contract(nt: &NativeType) -> ContractTy {
+    let mut members: Vec<ContractTy> = nt
+        .members
+        .iter()
+        .map(|m| match m {
+            TypeMember::Scalar(ScalarType::Int) => ContractTy::Base(Base::Int),
+            TypeMember::Scalar(ScalarType::Float) => ContractTy::Base(Base::Float),
+            TypeMember::Scalar(ScalarType::String) => ContractTy::Base(Base::String),
+            TypeMember::Scalar(ScalarType::Bool) => ContractTy::Base(Base::Bool),
+            TypeMember::BoolLiteral(b) => ContractTy::LitBool(*b),
+        })
+        .collect();
+    if nt.nullable {
+        members.push(ContractTy::Null);
+    }
+    if members.len() == 1 {
+        members.pop().expect("non-empty")
+    } else {
+        ContractTy::Union(members)
+    }
+}
+
+/// Convert a lowered [`ArgValue`] to a concrete domain [`Val`], or `None` when it
+/// is not a self-evident literal (a `$var`, a call, a `new`, a closure, …). Arrays
+/// are literal iff every element is.
+fn arg_to_val(v: &ArgValue) -> Option<Val> {
+    match v {
+        ArgValue::Int(i) => Some(Val::Int(*i)),
+        ArgValue::Float(f) => Some(Val::Float(*f)),
+        ArgValue::Str(s) => Some(Val::Str(s.clone())),
+        ArgValue::Bool(b) => Some(Val::Bool(*b)),
+        ArgValue::Null => Some(Val::Null),
+        ArgValue::Array(items) => {
+            let normalized = normalize_array(items);
+            let mut out = Vec::with_capacity(normalized.len());
+            for (k, e) in normalized {
+                out.push((norm_key(&k), arg_to_val(&e)?));
+            }
+            Some(Val::Array(out))
+        }
+        _ => None,
+    }
+}
+
+fn norm_key(k: &NormKey) -> Key {
+    match k {
+        NormKey::Int(i) => Key::Int(*i),
+        NormKey::Str(s) => Key::Str(s.clone()),
+    }
+}

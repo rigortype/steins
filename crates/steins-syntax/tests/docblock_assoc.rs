@@ -43,3 +43,24 @@ fn undocumented_function_has_no_docblock() {
     let tree = SourceTree::parse(src);
     assert!(tree.functions()[0].docblock.is_none());
 }
+
+#[test]
+fn docblock_span_maps_text_back_to_the_file() {
+    // The transform engine (ADR-0034) relies on `docblock` being the exact source
+    // substring at `docblock_span`, so a tag's docblock-relative offset maps into
+    // the file by adding `docblock_span.start`.
+    let src = "<?php\n/** @param int $n */\nfunction f($n): void {}\n";
+    let tree = SourceTree::parse(src);
+    let f = &tree.functions()[0];
+    let span = f.docblock_span.expect("span present when docblock attached");
+    let from_file = &src[span.start as usize..span.end as usize];
+    assert_eq!(from_file, f.docblock.as_deref().unwrap());
+    assert_eq!(from_file, "/** @param int $n */");
+}
+
+#[test]
+fn no_docblock_means_no_span() {
+    let src = "<?php\nfunction f($n): void {}\n";
+    let tree = SourceTree::parse(src);
+    assert!(tree.functions()[0].docblock_span.is_none());
+}

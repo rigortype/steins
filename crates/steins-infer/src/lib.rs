@@ -18,6 +18,7 @@
 //! run over a one-file project, so every same-file soundness guard keeps
 //! working unchanged; [`check_project`] / [`annotate_project`] run over many.
 
+pub mod promote;
 pub mod suppress;
 
 pub use suppress::{
