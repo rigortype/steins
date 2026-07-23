@@ -10,6 +10,9 @@
 //! - [`common`] — the machinery the two phpdoc transforms genuinely share: the
 //!   reverse-sweep refusal reasons, candidate/value helpers, and the value-domain
 //!   → ADR-0029 phpdoc **type rendering**.
+//! - [`obstacles`] — project-global dynamic-code obstacle detection (ADR-0046 §2):
+//!   `eval` / dynamic-`include` sites that make "all callers proven" unknowable,
+//!   the vendor presumption, and the `steins.toml` vouching valve.
 //! - [`promote`] — the first transform, phpdoc→native parameter promotion
 //!   (ADR-0034 point 4 / ADR-0037), which reaches into `steins-infer` to prove
 //!   *all call sites flow the native type* — the precondition structurally
@@ -24,12 +27,16 @@
 pub mod common;
 pub mod diff;
 pub mod honesty;
+pub mod obstacles;
 pub mod plan;
 pub mod promote;
 pub mod transform;
 
 pub use diff::unified_diff;
 pub use honesty::{PhpdocHonesty, plan_phpdoc_honesty};
+pub use obstacles::{DynamismObstacles, VouchSet};
 pub use plan::{ByteSpan, Edit, EditPlan, NewFile, PlanError};
 pub use promote::{PhpdocToNative, plan_phpdoc_to_native};
-pub use transform::{CompletenessOracle, Refusal, SiteRef, Transform, TransformReport};
+pub use transform::{
+    CompletenessOracle, Obstacle, Refusal, SiteRef, Transform, TransformReport,
+};

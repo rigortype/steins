@@ -203,3 +203,112 @@ fn honesty_json_format_emits_report_and_postcheck() {
     assert_eq!(v["applied"], false);
     assert_eq!(v["report"]["plan"]["edits"].as_array().unwrap().len(), 1);
 }
+
+// ---- ADR-0046 §2: dynamic-code obstacles + the vouching valve --------------
+
+/// An `eval` in a project file raises the `eval-present` obstacle (recorded once)
+/// and blocks every promotion — the canonical `'foo(42)'` invisible-caller gap.
+#[test]
+fn eval_obstacle_fires_and_blocks_promotion() {
+    let proj = TempProject::new("eval-obstacle");
+    proj.write("lib.php", "<?php\n/** @param int $x */\nfunction foo($x) { return $x; }\n");
+    proj.write("main.php", "<?php\nfoo(1);\n");
+    proj.write("evil.php", "<?php\neval('foo(42)');\n");
+
+    let r = run(&["transform", "phpdoc-to-native", proj.path()]);
+    assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
+    assert!(r.stdout.contains("Dynamic-code obstacles"), "obstacle block missing:\n{}", r.stdout);
+    assert!(r.stdout.contains("eval-present"), "reason missing:\n{}", r.stdout);
+    assert!(r.stdout.contains("0 promoted"), "promotion must be blocked:\n{}", r.stdout);
+    // The source is untouched (dry run, and nothing promotable anyway).
+    assert!(proj.read("lib.php").contains("@param"));
+}
+
+/// A dynamic `require $x` raises `dynamic-include-present`.
+#[test]
+fn dynamic_include_obstacle_fires() {
+    let proj = TempProject::new("dyn-include");
+    proj.write("lib.php", "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n");
+    proj.write("main.php", "<?php\n$p = $_GET['p'];\nrequire $p;\nf(1);\n");
+
+    let r = run(&["transform", "phpdoc-to-native", proj.path()]);
+    assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
+    assert!(r.stdout.contains("dynamic-include-present"), "reason missing:\n{}", r.stdout);
+    assert!(r.stdout.contains("0 promoted"), "{}", r.stdout);
+}
+
+/// The vouching valve: a vouched eval site does not raise its obstacle, so the
+/// promotion proceeds — but the report carries the prominent downgrade note.
+#[test]
+fn vouched_eval_proceeds_with_downgrade_note() {
+    let proj = TempProject::new("vouch-text");
+    proj.write("lib.php", "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n");
+    proj.write("main.php", "<?php\nf(1);\n");
+    proj.write("evil.php", "<?php\neval('legacy_boot();');\n"); // eval on line 2
+    let cfg = proj.write("steins.toml", "[transform.vouch]\nsites = [\"evil.php:2\"]\n");
+
+    let r = run(&[
+        "transform",
+        "phpdoc-to-native",
+        "--config",
+        cfg.to_str().unwrap(),
+        proj.path(),
+    ]);
+    assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
+    assert!(r.stdout.contains("1 promoted"), "vouched run must promote:\n{}", r.stdout);
+    assert!(r.stdout.contains("DOWNGRADE"), "downgrade note missing:\n{}", r.stdout);
+    assert!(r.stdout.contains("1 user-vouched dynamic-code exemption"), "{}", r.stdout);
+}
+
+/// The obstacle and downgrade note both appear in JSON (ADR-0046 §2: the claim
+/// downgrade must be machine-visible).
+#[test]
+fn json_carries_obstacles_and_downgrade_note() {
+    let proj = TempProject::new("vouch-json");
+    proj.write("lib.php", "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n");
+    proj.write("main.php", "<?php\nf(1);\n");
+    proj.write("evil.php", "<?php\neval('legacy_boot();');\n");
+
+    // Without a vouch: the obstacle is present in JSON and blocks.
+    let r = run(&["transform", "phpdoc-to-native", "--format", "json", proj.path()]);
+    assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
+    let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid json");
+    assert_eq!(v["report"]["obstacles"][0]["reason"], "eval-present");
+    assert_eq!(v["report"]["oracle"]["transformed"], 0);
+    assert!(v["downgrade_note"].is_null());
+
+    // With a vouch: obstacle clears, downgrade note appears, promotion proceeds.
+    let cfg = proj.write("steins.toml", "[transform.vouch]\nsites = [\"evil.php:2\"]\n");
+    let r2 = run(&[
+        "transform",
+        "phpdoc-to-native",
+        "--format",
+        "json",
+        "--config",
+        cfg.to_str().unwrap(),
+        proj.path(),
+    ]);
+    assert_eq!(r2.code, 0, "stderr:\n{}", r2.stderr);
+    let v2: serde_json::Value = serde_json::from_str(&r2.stdout).expect("valid json");
+    assert_eq!(v2["report"]["oracle"]["transformed"], 1);
+    assert_eq!(v2["report"]["vouched_exemptions"].as_array().unwrap().len(), 1);
+    assert!(
+        v2["downgrade_note"].as_str().unwrap().contains("conditional on 1"),
+        "downgrade note:\n{}",
+        r2.stdout
+    );
+}
+
+/// A proven literal include resolving inside the analyzed universe is benign — no
+/// obstacle, and the promotion proceeds normally.
+#[test]
+fn in_universe_include_does_not_obstruct() {
+    let proj = TempProject::new("in-universe");
+    proj.write("lib.php", "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n");
+    proj.write("main.php", "<?php\nrequire __DIR__ . '/lib.php';\nf(1);\n");
+
+    let r = run(&["transform", "phpdoc-to-native", proj.path()]);
+    assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
+    assert!(!r.stdout.contains("Dynamic-code obstacles"), "should be benign:\n{}", r.stdout);
+    assert!(r.stdout.contains("1 promoted"), "{}", r.stdout);
+}

@@ -38,6 +38,7 @@ use crate::common::{
     arg_to_val, check_caller_enumerability, count_fqns, has_source_hint, native_contract,
     param_site,
 };
+use crate::obstacles::{self, VouchSet};
 use crate::plan::{ByteSpan, Edit, EditPlan};
 use crate::transform::{CompletenessOracle, Refusal, Transform, TransformReport};
 
@@ -49,8 +50,8 @@ use crate::transform::{CompletenessOracle, Refusal, Transform, TransformReport};
 // re-exported here so the public `steins_edit::promote::REASON_*` paths still
 // resolve.
 pub use crate::common::{
-    REASON_AMBIGUOUS, REASON_ARG_NOT_PROVEN, REASON_DYNAMIC_CALL, REASON_NAMED_OR_SPREAD,
-    REASON_REFERENCED_AS_VALUE,
+    REASON_AMBIGUOUS, REASON_ARG_NOT_PROVEN, REASON_DYNAMIC_CALL, REASON_DYNAMIC_INCLUDE,
+    REASON_EVAL_PRESENT, REASON_NAMED_OR_SPREAD, REASON_REFERENCED_AS_VALUE,
 };
 
 /// The phpdoc type has no [`NativeType`] rendering and is not a scalar
@@ -82,9 +83,19 @@ impl Transform for PhpdocToNative {
 /// written and no diagnostics are re-checked here — the caller (CLI) drives the
 /// dry-run diff, the dual-verification post-check, and any `--apply` write
 /// (ADR-0034 point 3).
+///
+/// `vouches` are the user-vouched dynamic-code sites (`steins.toml`); pass
+/// [`VouchSet::empty`] when none. A standing (unvouched) `eval` / dynamic-include
+/// obstacle (ADR-0046 §2) makes "all callers proven" unknowable project-wide, so
+/// *every* candidate refuses while one remains.
 #[must_use]
-pub fn plan_phpdoc_to_native(db: &dyn Db, project: Project) -> TransformReport {
+pub fn plan_phpdoc_to_native(db: &dyn Db, project: Project, vouches: &VouchSet) -> TransformReport {
     let sweep = sweep_free_functions(db, project);
+
+    // Project-global dynamic-code obstacles (ADR-0046 §2): recorded once, and — if
+    // any stands unvouched — every candidate refuses with its reason.
+    let dynamism = obstacles::detect(db, project, vouches);
+    let blocking = dynamism.blocking_reason();
 
     let files: Vec<SourceFile> = project.files(db).to_vec();
 
@@ -102,12 +113,19 @@ pub fn plan_phpdoc_to_native(db: &dyn Db, project: Project) -> TransformReport {
         let source = file.text(db);
         for func in tree.functions() {
             plan_function(
-                func, path, source, tree, &sweep, &fqn_counts, &mut plan, &mut refusals, &mut oracle,
+                func, path, source, tree, &sweep, &fqn_counts, blocking.as_ref(), &mut plan,
+                &mut refusals, &mut oracle,
             );
         }
     }
 
-    TransformReport { plan, refusals, oracle }
+    TransformReport {
+        plan,
+        refusals,
+        oracle,
+        obstacles: dynamism.obstacles,
+        vouched_exemptions: dynamism.vouched_exemptions,
+    }
 }
 
 /// Plan promotions for one free function, appending edits/refusals and updating
@@ -120,6 +138,7 @@ fn plan_function(
     tree: &SourceTree,
     sweep: &FreeFnSweep,
     fqn_counts: &std::collections::HashMap<String, usize>,
+    blocking: Option<&(&'static str, String)>,
     plan: &mut EditPlan,
     refusals: &mut Vec<Refusal>,
     oracle: &mut CompletenessOracle,
@@ -138,6 +157,14 @@ fn plan_function(
         // refused (the completeness oracle, ADR-0034 point 3b).
         oracle.enumerated += 1;
         let site = param_site(path, tree, func, param);
+
+        // A standing project-global obstacle (ADR-0046 §2) refuses every candidate
+        // before any per-site judgment: "all callers proven" is unknowable.
+        if let Some((reason, detail)) = blocking {
+            oracle.refused += 1;
+            refusals.push(Refusal::new(site, *reason, detail.clone()));
+            continue;
+        }
 
         match decide(func, param, idx, tag, source, sweep, fqn_counts) {
             Ok(native) => {

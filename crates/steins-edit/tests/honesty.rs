@@ -5,7 +5,7 @@
 //! phpdoc parser as a self-check.
 
 use steins_db::{Project, SourceFile, SteinsDatabase};
-use steins_edit::TransformReport;
+use steins_edit::{TransformReport, VouchSet};
 use steins_edit::plan_phpdoc_honesty;
 use steins_edit::honesty::{
     REASON_AMBIGUOUS, REASON_ARGUMENT_NOT_PROVEN, REASON_DYNAMIC_CALL, REASON_NAMED_OR_SPREAD,
@@ -20,7 +20,7 @@ fn plan(files: &[(&str, &str)]) -> TransformReport {
         .map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned()))
         .collect();
     let project = Project::new(&db, inputs);
-    plan_phpdoc_honesty(&db, project)
+    plan_phpdoc_honesty(&db, project, &VouchSet::empty())
 }
 
 fn apply_first(files: &[(&str, &str)]) -> String {
@@ -374,4 +374,31 @@ fn multiline_docblock_only_type_span_replaced() {
     assert!(out.contains("@return 'z'"), "got:\n{out}");
     assert!(out.contains("/**") && out.contains("*/"), "docblock intact:\n{out}");
     assert_docblock_types_parse(&out);
+}
+
+// ---- ADR-0046 §2: dynamic-code obstacles ----------------------------------
+
+use steins_edit::honesty::{REASON_DYNAMIC_INCLUDE, REASON_EVAL_PRESENT};
+
+/// An eval in the project blocks honesty widening too: a lying tag still refuses
+/// `eval-present` rather than being rewritten from partial (unenumerable) evidence.
+#[test]
+fn eval_blocks_honesty_widening() {
+    // `@param int $id` lies (numeric-string callers) — normally widened.
+    let lib = "<?php\n/** @param int $id */\nfunction f($id) { return $id; }\n";
+    let main = "<?php\nf(1);\nf(\"12\");\n";
+    let evil = "<?php\neval('x();');\n";
+    let db = SteinsDatabase::default();
+    let inputs: Vec<SourceFile> = [("lib.php", lib), ("main.php", main), ("evil.php", evil)]
+        .iter()
+        .map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned()))
+        .collect();
+    let project = Project::new(&db, inputs);
+    let report = plan_phpdoc_honesty(&db, project, &VouchSet::empty());
+    assert!(report.oracle.is_complete());
+    assert_eq!(report.oracle.transformed, 0, "eval must block widening: {:#?}", report.plan);
+    assert!(report.refusals.iter().all(|r| r.reason == REASON_EVAL_PRESENT));
+    assert_eq!(report.obstacles[0].reason, REASON_EVAL_PRESENT);
+    // Sanity: the dynamic-include reason constant is wired for honesty too.
+    let _ = REASON_DYNAMIC_INCLUDE;
 }
