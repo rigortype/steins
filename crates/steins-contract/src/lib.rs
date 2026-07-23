@@ -15,6 +15,7 @@
 //! non-extensional per ADR-0038, so they can never decide `Yes`).
 
 mod admit;
+pub mod normalize;
 
 pub use admit::{admits_fact, admits_val};
 

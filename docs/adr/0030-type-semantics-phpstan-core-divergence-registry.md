@@ -40,6 +40,15 @@ entries:
    single overlap relation (`admits_*` == the `isSuperTypeOf` shape) —
    the accepts/isSuperTypeOf asymmetry deliberately collapses. Surfaced
    by the ported fixture net (`const1_accepts_general_int`).
+5. **Semantic type equality is mutual subsumption only.** Semantic type
+   equality in Steins is defined only as mutual subsumption (Yes/Yes) over
+   extensional arms; provenance-flavored types (`literal-string` and kin,
+   ADR-0038) are undecidable for equality and are barred from the
+   normalizer's arm vocabulary — the `ContractTy` arm type carries no
+   provenance slot, so the bar is enforced by the type system. Registered at
+   extraction (ADR-0052 §4 / slice N1), as the no-type-combinator amendment
+   below requires; this is the recorded reason Steins has no `Type::equals`
+   beside a separate `isSuperTypeOf`.
 
 **Deferred until needed** — narrowing details (co-evolving with the branch
 analysis ratchet), template variance in full, subtraction types: decided in

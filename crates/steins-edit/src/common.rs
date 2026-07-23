@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use steins_contract::normalize::summarize_vals;
 use steins_contract::{ContractTy, admits_val};
 use steins_db::{Db, SourceFile, parse};
 use steins_domain::{Base, Certainty, Key, StrPreds, Val, CAP};
@@ -319,35 +320,52 @@ pub fn check_caller_enumerability(
 }
 
 // ---- Value-domain → phpdoc type rendering (ADR-0029) ----------------------
+//
+// The *semantic* normal form — sort/dedup, the predicate-class collapse (numeric
+// literals → numeric-string, the bool pair → bool, null-fold) — lives in
+// `steins_contract::normalize::summarize_vals` (ADR-0052 §4, slice N1). What
+// stays here is **rendering policy**: docblock literal-safety (`*/`, raw
+// newlines), the CAP-bounded literal-union spelling decision, quoting/escaping,
+// and member spelling order. The cut is byte-identical against the honesty
+// tests below (the renderer's oracle).
 
 /// Render a proven set of concrete values as a faithful phpdoc type (ADR-0029
 /// grammar), or `None` when no faithful spelling exists (`type-not-renderable`).
 ///
-/// The set is normalized (subsumed members collapse; duplicates removed). The
-/// policy prefers precise spellings the grammar supports — integer values render
-/// as `int`, string values as literal unions (`'a'|'b'`) or a refined-string
-/// keyword (`numeric-string`, `non-falsy-string`, `non-empty-string`) when a
-/// single predicate class captures them — but never over-widens: an array-bearing
-/// set (no faithful scalar spelling) refuses. Members are emitted in a stable
-/// order (int, float, string(s), bool, then `null`).
+/// The set is normalized by [`summarize_vals`] (subsumed members collapse;
+/// duplicates removed) into an arm list; this function spells those arms.
+/// Integer values render as `int`, string values as literal unions (`'a'|'b'`)
+/// or a refined-string keyword (`numeric-string`, `non-falsy-string`,
+/// `non-empty-string`) when a single predicate class captures them — but never
+/// over-widens: an array-bearing set (no faithful scalar spelling) refuses.
+/// Members are emitted in a stable order (int, float, string(s), bool, then
+/// `null`).
 #[must_use]
 pub fn render_value_domain(vals: &[Val]) -> Option<String> {
+    let arms = summarize_vals(vals)?;
+
     let mut has_int = false;
     let mut has_float = false;
-    let mut has_true = false;
-    let mut has_false = false;
+    let mut bool_member: Option<&'static str> = None;
     let mut nullable = false;
-    let mut strings: Vec<&str> = Vec::new();
-    for v in vals {
-        match v {
-            Val::Int(_) => has_int = true,
-            Val::Float(_) => has_float = true,
-            Val::Bool(true) => has_true = true,
-            Val::Bool(false) => has_false = true,
-            Val::Null => nullable = true,
-            Val::Str(s) => strings.push(s),
-            // A non-scalar value has no faithful scalar phpdoc spelling in v1.
-            Val::Array(_) => return None,
+    // The string portion: `summarize_vals` hands us either the numeric-string
+    // class (one `StrWith` arm) or the distinct-sorted literal arms — never both.
+    let mut string_keyword: Option<String> = None;
+    let mut string_lits: Vec<&str> = Vec::new();
+    for arm in &arms {
+        match arm {
+            ContractTy::Base(Base::Int) => has_int = true,
+            ContractTy::Base(Base::Float) => has_float = true,
+            ContractTy::Base(Base::Bool) => bool_member = Some("bool"),
+            ContractTy::LitBool(true) => bool_member = Some("true"),
+            ContractTy::LitBool(false) => bool_member = Some("false"),
+            ContractTy::Null => nullable = true,
+            // A pre-collapsed predicate class (the numeric-string arm).
+            ContractTy::StrWith(p) => string_keyword = Some(preds_keyword(*p)),
+            ContractTy::Base(Base::String) => string_keyword = Some("string".to_owned()),
+            ContractTy::LitStr(s) => string_lits.push(s),
+            // `summarize_vals` produces no other arm shapes from a value set.
+            other => debug_assert!(false, "unexpected summarized arm: {other:?}"),
         }
     }
 
@@ -358,31 +376,32 @@ pub fn render_value_domain(vals: &[Val]) -> Option<String> {
     if has_float {
         members.push("float".to_owned());
     }
-    if let Some(spelled) = render_string_group(&strings) {
+    if let Some(kw) = string_keyword {
+        members.push(kw);
+    } else if let Some(spelled) = spell_string_literals(&string_lits) {
         members.extend(spelled);
     }
-    match (has_true, has_false) {
-        (true, true) => members.push("bool".to_owned()),
-        (true, false) => members.push("true".to_owned()),
-        (false, true) => members.push("false".to_owned()),
-        (false, false) => {}
-    }
-
-    if members.is_empty() {
-        // A `null`-only proof has a spelling (`null`); an empty proof does not.
-        return nullable.then(|| "null".to_owned());
+    if let Some(b) = bool_member {
+        members.push(b.to_owned());
     }
     if nullable {
+        // A `null`-only proof spells `null`; a set with scalar members appends it.
         members.push("null".to_owned());
     }
+
+    // `summarize_vals` returns `Some` only for a non-empty scalar/null-bearing
+    // set, so `members` is always non-empty here.
     Some(members.join("|"))
 }
 
-/// Spell a group of string values: a single value is its literal; multiple values
-/// that are all numeric collapse to `numeric-string`; a small distinct set spells
-/// a literal union; a larger set falls back to the tightest refined-string keyword
-/// its shared predicates admit.
-fn render_string_group(strings: &[&str]) -> Option<Vec<String>> {
+/// Spell a group of distinct string literals as phpdoc — the rendering policy
+/// half of the string ladder (the numeric-string collapse already happened in
+/// [`summarize_vals`]). A single docblock-safe value is its literal; a small
+/// safe set is a literal union; a value that cannot be embedded in a docblock
+/// (`*/` or a raw newline — [`docblock_literal_safe`]) or a set larger than
+/// [`CAP`] widens to the tightest refined-string keyword its shared predicate
+/// summary admits. `None` for an empty group (no string members).
+fn spell_string_literals(strings: &[&str]) -> Option<Vec<String>> {
     if strings.is_empty() {
         return None;
     }
@@ -390,42 +409,48 @@ fn render_string_group(strings: &[&str]) -> Option<Vec<String>> {
     distinct.sort_unstable();
     distinct.dedup();
 
-    // The predicate class every value shares (implication-closed).
-    let mut preds = StrPreds::of(distinct[0]);
-    for s in &distinct[1..] {
-        preds = preds.intersect(StrPreds::of(s));
-    }
-
     // A single-quoted literal is only faithful when every value can be embedded in
     // a docblock without corrupting it: no `*/` (which closes the enclosing
     // `/** … */`) and no raw newline (which the phpdoc lexer rejects in a quoted
     // literal). PHP single-quote escaping cannot represent either, so a value that
     // carries one has no literal spelling — it must widen to a keyword instead.
-    // Numeric widening (`numeric-string`) still applies: it is a keyword, never an
-    // embedded literal, and admits the value via the same `is_numeric` classifier.
     let all_literal_safe = distinct.iter().all(|s| docblock_literal_safe(s));
 
     if all_literal_safe && distinct.len() == 1 {
         // One safe observed value: its literal is the honest, tightest spelling.
         return Some(vec![string_literal(distinct[0])]);
     }
-    if preds.contains_all(StrPreds::NUMERIC) {
-        // All numeric: `numeric-string` captures the semantic class the illusion
-        // zone actually inhabits (ADR-0037 PDO story).
-        return Some(vec!["numeric-string".to_owned()]);
-    }
     if all_literal_safe && distinct.len() <= CAP {
         // A small enum-like set of docblock-safe values: a literal union is precise
         // and faithful.
         return Some(distinct.iter().map(|s| string_literal(s)).collect());
     }
-    if preds.contains_all(StrPreds::NON_FALSY) {
-        return Some(vec!["non-falsy-string".to_owned()]);
+
+    // Unsafe to embed, or larger than CAP: widen to the tightest predicate keyword
+    // the shared, implication-closed predicate summary admits. Numeric widening
+    // (`numeric-string`) still applies — it is a keyword, never an embedded
+    // literal, and admits the value via the same `is_numeric` classifier (the
+    // single-unsafe-numeric case, e.g. `"5\n"`).
+    let mut preds = StrPreds::of(distinct[0]);
+    for s in &distinct[1..] {
+        preds = preds.intersect(StrPreds::of(s));
     }
-    if preds.contains_all(StrPreds::NON_EMPTY) {
-        return Some(vec!["non-empty-string".to_owned()]);
+    Some(vec![preds_keyword(preds)])
+}
+
+/// The tightest refined-string keyword a predicate summary admits (the keyword
+/// half of the precision ladder). `numeric-string` ⊐ `non-falsy-string` ⊐
+/// `non-empty-string` ⊐ `string`.
+fn preds_keyword(preds: StrPreds) -> String {
+    if preds.contains_all(StrPreds::NUMERIC) {
+        "numeric-string".to_owned()
+    } else if preds.contains_all(StrPreds::NON_FALSY) {
+        "non-falsy-string".to_owned()
+    } else if preds.contains_all(StrPreds::NON_EMPTY) {
+        "non-empty-string".to_owned()
+    } else {
+        "string".to_owned()
     }
-    Some(vec!["string".to_owned()])
 }
 
 /// Whether a string can be spelled as a single-quoted phpdoc literal *inside a
