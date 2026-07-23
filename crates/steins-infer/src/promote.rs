@@ -40,6 +40,29 @@ pub struct ObservedArg {
     pub value: ArgValue,
 }
 
+/// A recorded obstacle *site* in a sweep (ADR-0047 §6 / Slice B): a file path plus
+/// a source position. Mirrors the `steins_edit::transform::SiteRef` shape used for
+/// dynamism obstacles (`steins-edit/src/obstacles.rs`) minus its human `label` —
+/// the label is a rendering concern the planner owns, and region attribution
+/// (ADR-0047 §2, a later slice) keys purely on `path`; `line`/`column` only spell a
+/// better message. Carrying the site (instead of a bare boolean or bare name) is
+/// what lets the partition planner attribute each obstacle to its declaring region.
+/// With one region a site list degenerates to "present / absent" — exactly what the
+/// old `any_dynamic_*` boolean carried, so this slice is behavior-preserving.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SweepSite {
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
+}
+
+impl SweepSite {
+    #[must_use]
+    pub fn new(path: impl Into<String>, line: u32, column: u32) -> Self {
+        Self { path: path.into(), line, column }
+    }
+}
+
 /// The reverse-sweep facts for one free-function target (keyed by lowercased FQN).
 #[derive(Debug, Clone, Default)]
 pub struct TargetSweep {
@@ -55,21 +78,24 @@ pub struct TargetSweep {
 pub struct FreeFnSweep {
     /// Target lowercased FQN → observed args + flags.
     pub targets: HashMap<String, TargetSweep>,
-    /// A dynamic (`$fn()`) or otherwise unrepresentable call exists anywhere. Such
-    /// a call could target *any* free function, so every candidate is tainted
-    /// (`dynamic-call-present`). Conservative and sound.
-    pub any_dynamic_call: bool,
-    /// Lowercased names (every qualified spelling seen, plus its last segment)
-    /// that appear as string or first-class-callable *values* anywhere — the
-    /// `function-referenced-as-value` trigger. A candidate whose FQN or simple
-    /// name is present here cannot be promoted (a `call_user_func`-style caller is
-    /// invisible to call resolution).
-    pub value_referenced_names: HashSet<String>,
-    /// Lowercased simple names of function-callee calls that did **not** resolve
-    /// to a unique user function (ambiguous / builtin-shadowed / unknown). A
-    /// candidate whose simple name is here can't be proven to see all of its
-    /// callers (`resolution-ambiguous`).
-    pub unresolved_simple_names: HashSet<String>,
+    /// The sites of dynamic (`$fn()`) or otherwise unrepresentable calls. Such a
+    /// call could target *any* free function, so while the list is non-empty every
+    /// candidate is tainted (`dynamic-call-present`). Conservative and sound. A
+    /// **non-empty** list is the old `any_dynamic_call == true`; an empty one is
+    /// `false` — region attribution (ADR-0047 §2) is a later slice.
+    pub dynamic_call_sites: Vec<SweepSite>,
+    /// Lowercased names (every qualified spelling seen, plus its last segment) that
+    /// appear as string or first-class-callable *values* → the sites at which they
+    /// so appear — the `function-referenced-as-value` trigger. A candidate whose
+    /// FQN or simple name is **present as a key** cannot be promoted (a
+    /// `call_user_func`-style caller is invisible to call resolution). Key-presence
+    /// is the old set membership; the site list is the Slice B carriage.
+    pub value_referenced_names: HashMap<String, Vec<SweepSite>>,
+    /// Lowercased simple names of function-callee calls that did **not** resolve to
+    /// a unique user function (ambiguous / builtin-shadowed / unknown) → the sites
+    /// of those calls. A candidate whose simple name is **present as a key** can't
+    /// be proven to see all of its callers (`resolution-ambiguous`).
+    pub unresolved_simple_names: HashMap<String, Vec<SweepSite>>,
 }
 
 /// Sweep every call in `project`, attributing positional arguments to the free
@@ -91,11 +117,16 @@ pub fn sweep_free_functions(db: &dyn Db, project: Project) -> FreeFnSweep {
         let tree = cx.tree();
         let path = cx.path();
         for call in tree.calls() {
+            // The site every obstacle this call raises is attributed to (the caller
+            // location; region attribution keys on `path`).
+            let cp = tree.position(call.span.start);
+            let call_site = SweepSite::new(path, cp.line, cp.column);
+
             // Value-reference scan across every argument, regardless of callee
             // kind: a function name flowing as a string/callable value is a caller
             // invisible to resolution.
             for arg in &call.args {
-                collect_value_names(&arg.value, &mut out.value_referenced_names);
+                collect_value_names(&arg.value, &call_site, &mut out.value_referenced_names);
             }
 
             // `call_user_func`/`call_user_func_array` whose callable argument is an
@@ -109,12 +140,12 @@ pub fn sweep_free_functions(db: &dyn Db, project: Project) -> FreeFnSweep {
                 && let Some(callable_arg) = call.args.first()
                 && callable_arg_is_opaque(&callable_arg.value)
             {
-                out.any_dynamic_call = true;
+                out.dynamic_call_sites.push(call_site.clone());
             }
 
             match &call.receiver {
                 Callee::DynamicVar(_) | Callee::Dynamic => {
-                    out.any_dynamic_call = true;
+                    out.dynamic_call_sites.push(call_site.clone());
                 }
                 Callee::Function(_) => {
                     let Some(cref) = &call.callee_ref else { continue };
@@ -138,7 +169,10 @@ pub fn sweep_free_functions(db: &dyn Db, project: Project) -> FreeFnSweep {
                             }
                         }
                         FnResolution::Builtin | FnResolution::Unknown => {
-                            out.unresolved_simple_names.insert(cref.simple().to_ascii_lowercase());
+                            out.unresolved_simple_names
+                                .entry(cref.simple().to_ascii_lowercase())
+                                .or_default()
+                                .push(call_site.clone());
                         }
                     }
                 }
@@ -151,41 +185,50 @@ pub fn sweep_free_functions(db: &dyn Db, project: Project) -> FreeFnSweep {
         // A first-class callable / function-name string can also flow through a
         // non-call value position (`$g = f(...);`, `return 'f';`), invisible to
         // `calls()`. Scan the scope traces too.
-        scan_scope_values(tree, &mut out.value_referenced_names);
+        scan_scope_values(tree, path, &mut out.value_referenced_names);
     }
     out
 }
 
 /// Scan every scope's linear trace for function-name-shaped values that escape
 /// through a non-call position (assignment / property-assignment / return rhs,
-/// recursing into structured `if`/`match` sub-traces).
-fn scan_scope_values(tree: &SourceTree, set: &mut HashSet<String>) {
+/// recursing into structured `if`/`match` sub-traces). Each name found is recorded
+/// with the site of its enclosing statement.
+fn scan_scope_values(tree: &SourceTree, path: &str, map: &mut HashMap<String, Vec<SweepSite>>) {
     for scope in tree.scopes() {
-        scan_stmts(&scope.stmts, set);
+        scan_stmts(&scope.stmts, tree, path, map);
     }
 }
 
-fn scan_stmts(stmts: &[Stmt], set: &mut HashSet<String>) {
+fn scan_stmts(
+    stmts: &[Stmt],
+    tree: &SourceTree,
+    path: &str,
+    map: &mut HashMap<String, Vec<SweepSite>>,
+) {
     for s in stmts {
         match &s.kind {
             StmtKind::Assign { value, .. }
             | StmtKind::PropAssign { value, .. }
-            | StmtKind::Return { value, .. } => collect_value_names(value, set),
+            | StmtKind::Return { value, .. } => {
+                let p = tree.position(s.span.start);
+                collect_value_names(value, &SweepSite::new(path, p.line, p.column), map);
+            }
             StmtKind::If { then_trace, elseifs, else_trace, .. } => {
-                scan_stmts(then_trace, set);
+                scan_stmts(then_trace, tree, path, map);
                 for (_, branch) in elseifs {
-                    scan_stmts(branch, set);
+                    scan_stmts(branch, tree, path, map);
                 }
                 if let Some(e) = else_trace {
-                    scan_stmts(e, set);
+                    scan_stmts(e, tree, path, map);
                 }
             }
             StmtKind::Match { arms, default, .. } => {
                 for arm in arms {
-                    scan_stmts(&arm.trace, set);
+                    scan_stmts(&arm.trace, tree, path, map);
                 }
                 if let Some(d) = default {
-                    scan_stmts(d, set);
+                    scan_stmts(d, tree, path, map);
                 }
             }
             _ => {}
@@ -194,30 +237,37 @@ fn scan_stmts(stmts: &[Stmt], set: &mut HashSet<String>) {
 }
 
 /// Recursively collect function-name-shaped string and first-class-callable
-/// *values* into `set` (lowercased; both the full spelling with a leading `\`
-/// stripped and its last segment).
-fn collect_value_names(v: &ArgValue, set: &mut HashSet<String>) {
+/// *values* into `map` (lowercased; both the full spelling with a leading `\`
+/// stripped and its last segment), each keyed name recording `site`.
+fn collect_value_names(v: &ArgValue, site: &SweepSite, map: &mut HashMap<String, Vec<SweepSite>>) {
     match v {
-        ArgValue::Str(s) => insert_name_forms(s, set),
+        ArgValue::Str(s) => insert_name_forms(s, site, map),
         ArgValue::Closure(ClosureRef::FunctionName(name)) => {
-            insert_name_forms(&name.raw, set);
-            set.insert(name.simple().to_ascii_lowercase());
+            insert_name_forms(&name.raw, site, map);
+            push_name(map, name.simple().to_ascii_lowercase(), site);
         }
         ArgValue::Array(items) => {
             for (_, e) in items {
-                collect_value_names(e, set);
+                collect_value_names(e, site, map);
             }
         }
         _ => {}
     }
 }
 
-fn insert_name_forms(raw: &str, set: &mut HashSet<String>) {
+fn insert_name_forms(raw: &str, site: &SweepSite, map: &mut HashMap<String, Vec<SweepSite>>) {
     let norm = raw.trim_start_matches('\\').to_ascii_lowercase();
     if let Some(pos) = norm.rfind('\\') {
-        set.insert(norm[pos + 1..].to_owned());
+        push_name(map, norm[pos + 1..].to_owned(), site);
     }
-    set.insert(norm);
+    push_name(map, norm, site);
+}
+
+/// Record `site` under `name` in a name→sites taint map (ADR-0047 §6 carriage):
+/// key-presence preserves the old set-membership semantics; the appended site is
+/// what a later slice region-attributes.
+fn push_name(map: &mut HashMap<String, Vec<SweepSite>>, name: String, site: &SweepSite) {
+    map.entry(name).or_default().push(site.clone());
 }
 
 /// Whether `name` (a `Callee::Function` simple name, as written) is one of PHP's
@@ -271,15 +321,6 @@ fn callable_arg_is_opaque(v: &ArgValue) -> bool {
 /// [`steins_syntax`]/`Sym::Method` identity the checker keys method dispatch on.
 pub type MethodKey = (String, String);
 
-/// A call site whose method the sweep could not resolve to a unique target, kept
-/// so a `resolution-ambiguous` refusal can name the offending location.
-#[derive(Debug, Clone)]
-pub struct MethodCallSite {
-    pub path: String,
-    pub line: u32,
-    pub column: u32,
-}
-
 /// Whether a class method may host a phpdoc→native rewrite (the ADR-0041 §1
 /// eligibility split), computed from the class hierarchy alone (independent of any
 /// docblock). The transform crate turns a non-`Eligible` verdict into the reserved
@@ -305,20 +346,23 @@ pub struct MethodSweep {
     /// `(class_fqn, method)` → observed positional args + the named/spread flag,
     /// for every call that resolved *uniquely and exactly* to that method.
     pub targets: HashMap<MethodKey, TargetSweep>,
-    /// A dynamic method call (`$o->$m()`, `$o::{$m}()`, or any [`Callee::Dynamic`])
-    /// exists somewhere — it could target *any* method, so every candidate is
-    /// tainted (the `dynamic-call-present` refusal). Conservative and sound.
-    pub any_dynamic_method: bool,
+    /// The sites of dynamic method calls (`$o->$m()`, `$o::{$m}()`, or any
+    /// [`Callee::Dynamic`]) — each could target *any* method, so while the list is
+    /// non-empty every candidate is tainted (the `dynamic-call-present` refusal).
+    /// Conservative and sound. A **non-empty** list is the old
+    /// `any_dynamic_method == true`.
+    pub dynamic_method_sites: Vec<SweepSite>,
     /// Lowercased method names that appear in a method call the sweep could NOT
     /// resolve to a unique target (an unknown-class `$var->m()`, a non-final
-    /// overridable `self::m()`, a chain that leaves the project, …). A candidate
-    /// whose name is here cannot prove it sees all its callers
-    /// (`resolution-ambiguous`); the value is a representative offending site.
-    pub unresolved_method_names: HashMap<String, MethodCallSite>,
+    /// overridable `self::m()`, a chain that leaves the project, …) → the sites of
+    /// those calls. A candidate whose name is **present as a key** cannot prove it
+    /// sees all its callers (`resolution-ambiguous`); the **first** recorded site
+    /// is the representative the refusal names (source order, as before).
+    pub unresolved_method_names: HashMap<String, Vec<SweepSite>>,
     /// Lowercased method names referenced as a *value* — a callable string
     /// `'Foo::m'` or a callable array `[$o, 'm']` — a caller invisible to call
-    /// resolution (`function-referenced-as-value`).
-    pub value_referenced_methods: HashSet<String>,
+    /// resolution (`function-referenced-as-value`) → the sites of those references.
+    pub value_referenced_methods: HashMap<String, Vec<SweepSite>>,
     /// `(class_fqn, method)` → the ADR-0041 §1 eligibility verdict for *every*
     /// method declared in the project (independent of its docblock).
     pub eligibility: HashMap<MethodKey, MethodEligibility>,
@@ -353,13 +397,16 @@ pub fn sweep_methods(db: &dyn Db, project: Project) -> MethodSweep {
                 _ => None,
             };
             for call in &scope.method_calls {
+                let cp = tree.position(call.span.start);
+                let call_site = SweepSite::new(path, cp.line, cp.column);
                 // Value-reference scan across every argument (a method name flowing
                 // as a callable string/array is a caller invisible to resolution).
                 for arg in &call.args {
                     collect_method_value_names(
                         &arg.value,
+                        &call_site,
                         &mut out.value_referenced_methods,
-                        &mut out.any_dynamic_method,
+                        &mut out.dynamic_method_sites,
                     );
                 }
                 resolve_one_method_call(
@@ -372,23 +419,28 @@ pub fn sweep_methods(db: &dyn Db, project: Project) -> MethodSweep {
         // (a free-function call arg like `usort($x, [$o, 'm'])`, an assignment, or a
         // return) — scan free-function call args and scope traces too.
         for call in tree.calls() {
+            let cp = tree.position(call.span.start);
+            let call_site = SweepSite::new(path, cp.line, cp.column);
             for arg in &call.args {
                 collect_method_value_names(
                     &arg.value,
+                    &call_site,
                     &mut out.value_referenced_methods,
-                    &mut out.any_dynamic_method,
+                    &mut out.dynamic_method_sites,
                 );
             }
             if matches!(call.receiver, Callee::Dynamic) {
                 // `$arr['x']()` and friends could invoke a method via a callable.
-                out.any_dynamic_method = true;
+                out.dynamic_method_sites.push(call_site);
             }
         }
         for scope in tree.scopes() {
             scan_scope_method_values(
                 scope,
+                tree,
+                path,
                 &mut out.value_referenced_methods,
-                &mut out.any_dynamic_method,
+                &mut out.dynamic_method_sites,
             );
         }
 
@@ -420,7 +472,8 @@ fn resolve_one_method_call(
     let method_name = match &call.receiver {
         Callee::Method { method, .. } | Callee::Static { method, .. } => method.as_str(),
         Callee::Dynamic => {
-            out.any_dynamic_method = true;
+            let p = tree.position(call.span.start);
+            out.dynamic_method_sites.push(SweepSite::new(path, p.line, p.column));
             return;
         }
         // scan_method_calls only emits Method/Static/Dynamic receivers.
@@ -451,10 +504,14 @@ fn resolve_one_method_call(
         }
         None => {
             // Unresolved to a unique target → taint the method name project-wide.
+            // The first site recorded (source order) stays the representative the
+            // `resolution-ambiguous` refusal names — byte-identical to the old
+            // `or_insert` single-site behavior.
             let p = tree.position(call.span.start);
-            out.unresolved_method_names.entry(method_name.to_ascii_lowercase()).or_insert(
-                MethodCallSite { path: path.to_owned(), line: p.line, column: p.column },
-            );
+            out.unresolved_method_names
+                .entry(method_name.to_ascii_lowercase())
+                .or_default()
+                .push(SweepSite::new(path, p.line, p.column));
         }
     }
 }
@@ -583,13 +640,18 @@ fn overrides_ancestor(cx: &Cx, class_fqn: &str, method: &str) -> AncestorVerdict
 /// `$o->$m()` (`Callee::Dynamic`) handling and sets `any_dynamic` — the broadest,
 /// conservative fallback that taints every method project-wide, exactly like an
 /// unresolvable dynamic method-call selector.
-fn collect_method_value_names(v: &ArgValue, set: &mut HashSet<String>, any_dynamic: &mut bool) {
+fn collect_method_value_names(
+    v: &ArgValue,
+    site: &SweepSite,
+    set: &mut HashMap<String, Vec<SweepSite>>,
+    dynamic: &mut Vec<SweepSite>,
+) {
     match v {
         ArgValue::Str(s) => {
             if let Some((_, m)) = s.rsplit_once("::")
                 && is_identifier(m)
             {
-                set.insert(m.to_ascii_lowercase());
+                push_name(set, m.to_ascii_lowercase(), site);
             }
         }
         ArgValue::Array(items) => {
@@ -599,16 +661,16 @@ fn collect_method_value_names(v: &ArgValue, set: &mut HashSet<String>, any_dynam
                 match &items[1].1 {
                     ArgValue::Str(name) => {
                         if is_identifier(name) {
-                            set.insert(name.to_ascii_lowercase());
+                            push_name(set, name.to_ascii_lowercase(), site);
                         }
                     }
                     // Non-literal method-name position: no name can be extracted, so
                     // taint broadly rather than silently seeing nothing.
-                    _ => *any_dynamic = true,
+                    _ => dynamic.push(site.clone()),
                 }
             }
             for (_, e) in items {
-                collect_method_value_names(e, set, any_dynamic);
+                collect_method_value_names(e, site, set, dynamic);
             }
         }
         _ => {}
@@ -617,31 +679,51 @@ fn collect_method_value_names(v: &ArgValue, set: &mut HashSet<String>, any_dynam
 
 /// Scan a scope's linear trace for callable values escaping through an assignment /
 /// property-assignment / return position, recursing into `if`/`match` sub-traces.
-fn scan_scope_method_values(scope: &Scope, set: &mut HashSet<String>, any_dynamic: &mut bool) {
-    scan_stmts_method_values(&scope.stmts, set, any_dynamic);
+fn scan_scope_method_values(
+    scope: &Scope,
+    tree: &SourceTree,
+    path: &str,
+    set: &mut HashMap<String, Vec<SweepSite>>,
+    dynamic: &mut Vec<SweepSite>,
+) {
+    scan_stmts_method_values(&scope.stmts, tree, path, set, dynamic);
 }
 
-fn scan_stmts_method_values(stmts: &[Stmt], set: &mut HashSet<String>, any_dynamic: &mut bool) {
+fn scan_stmts_method_values(
+    stmts: &[Stmt],
+    tree: &SourceTree,
+    path: &str,
+    set: &mut HashMap<String, Vec<SweepSite>>,
+    dynamic: &mut Vec<SweepSite>,
+) {
     for s in stmts {
         match &s.kind {
             StmtKind::Assign { value, .. }
             | StmtKind::PropAssign { value, .. }
-            | StmtKind::Return { value, .. } => collect_method_value_names(value, set, any_dynamic),
+            | StmtKind::Return { value, .. } => {
+                let p = tree.position(s.span.start);
+                collect_method_value_names(
+                    value,
+                    &SweepSite::new(path, p.line, p.column),
+                    set,
+                    dynamic,
+                );
+            }
             StmtKind::If { then_trace, elseifs, else_trace, .. } => {
-                scan_stmts_method_values(then_trace, set, any_dynamic);
+                scan_stmts_method_values(then_trace, tree, path, set, dynamic);
                 for (_, branch) in elseifs {
-                    scan_stmts_method_values(branch, set, any_dynamic);
+                    scan_stmts_method_values(branch, tree, path, set, dynamic);
                 }
                 if let Some(e) = else_trace {
-                    scan_stmts_method_values(e, set, any_dynamic);
+                    scan_stmts_method_values(e, tree, path, set, dynamic);
                 }
             }
             StmtKind::Match { arms, default, .. } => {
                 for arm in arms {
-                    scan_stmts_method_values(&arm.trace, set, any_dynamic);
+                    scan_stmts_method_values(&arm.trace, tree, path, set, dynamic);
                 }
                 if let Some(d) = default {
-                    scan_stmts_method_values(d, set, any_dynamic);
+                    scan_stmts_method_values(d, tree, path, set, dynamic);
                 }
             }
             _ => {}

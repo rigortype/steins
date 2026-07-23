@@ -160,20 +160,25 @@ pub fn check_method_caller_enumerability(
     method_name: &str,
     sweep: &MethodSweep,
 ) -> Result<(), (&'static str, String)> {
-    if sweep.any_dynamic_method {
+    // Non-empty site list == the old `any_dynamic_method == true` (ADR-0047 §6).
+    if !sweep.dynamic_method_sites.is_empty() {
         return Err((
             REASON_DYNAMIC_CALL,
             "a dynamic method call (`$o->$m()`) in the project could target this method".to_owned(),
         ));
     }
     let name = method_name.to_ascii_lowercase();
-    if sweep.value_referenced_methods.contains(&name) {
+    // Key-presence == the old set membership.
+    if sweep.value_referenced_methods.contains_key(&name) {
         return Err((
             REASON_REFERENCED_AS_VALUE,
             format!("`{method_name}` appears as a callable string / callable-array value"),
         ));
     }
-    if let Some(site) = sweep.unresolved_method_names.get(&name) {
+    if let Some(sites) = sweep.unresolved_method_names.get(&name) {
+        // The first recorded site is the representative (source order) — identical to
+        // the pre-Slice-B single-site value.
+        let site = &sites[0];
         return Err((
             REASON_AMBIGUOUS,
             format!(
@@ -285,15 +290,17 @@ pub fn check_caller_enumerability(
     sweep: &FreeFnSweep,
     fqn_counts: &HashMap<String, usize>,
 ) -> Result<(), (&'static str, String)> {
-    if sweep.any_dynamic_call {
+    // Non-empty site list == the old `any_dynamic_call == true` (ADR-0047 §6).
+    if !sweep.dynamic_call_sites.is_empty() {
         return Err((
             REASON_DYNAMIC_CALL,
             "a dynamic `$fn(...)` call in the project could target this function".to_owned(),
         ));
     }
     let simple = func.name.to_ascii_lowercase();
-    if sweep.value_referenced_names.contains(&simple)
-        || sweep.value_referenced_names.contains(&func.fqn)
+    // Key-presence == the old set membership.
+    if sweep.value_referenced_names.contains_key(&simple)
+        || sweep.value_referenced_names.contains_key(&func.fqn)
     {
         return Err((
             REASON_REFERENCED_AS_VALUE,
@@ -301,7 +308,7 @@ pub fn check_caller_enumerability(
         ));
     }
     if fqn_counts.get(&func.fqn).copied().unwrap_or(0) > 1
-        || sweep.unresolved_simple_names.contains(&simple)
+        || sweep.unresolved_simple_names.contains_key(&simple)
     {
         return Err((
             REASON_AMBIGUOUS,
