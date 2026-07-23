@@ -13,8 +13,9 @@
 //! [`subsumes`], [`arm_eq`], [`dedup_arms`], the value-set → normal-form
 //! [`summarize_vals`], and arm-wise [`subtract`]. There is deliberately **no**
 //! `union(A, B)` and no generic `remove(T, S)`: joins stay the value domain's
-//! job (ADR-0030). [`subtract`] is built and unit-tested here but is not yet
-//! consumed by narrowing — N4 consumes it.
+//! job (ADR-0030). [`subtract`] (and the public per-arm judgment
+//! [`subtrahend_covers`]) consult a real is-a [`IsaOracle`]; N4 wires the project
+//! hierarchy through that seam, N1 shipped the [`ReflexiveFloor`] default.
 //!
 //! ### ADR-0030 registry entry 5 (semantic type equality)
 //! Semantic type equality is defined **only** as mutual subsumption (Yes/Yes)
@@ -58,6 +59,52 @@ pub enum Subtrahend {
         /// The guard branch (see above).
         polarity: bool,
     },
+}
+
+/// The real is-a oracle for class-arm subtraction (ADR-0052 §2, slice N4). Kept
+/// as a trait so steins-contract stays **free of any steins-infer dependency**:
+/// the project class hierarchy, the builtin catalog, and the amendment-A11
+/// version-skew demotion all live in the *caller's* implementor (steins-infer's
+/// `ProjectIsa`). N1 shipped only the reflexive floor ([`ReflexiveFloor`]); N4
+/// wires the real hierarchy through this seam without moving the polarity law out
+/// of this crate.
+pub trait IsaOracle {
+    /// `is_a(sub, sup)`: is every value of exact class `sub` an instance of `sup`?
+    ///
+    /// - [`Certainty::Yes`] — a supertype path is proven (`sub` == `sup`, or `sup`
+    ///   is a transitive parent/interface of `sub`).
+    /// - [`Certainty::No`] — proven non-membership under a **fully enumerated**
+    ///   hierarchy (every ancestor edge resolved and `sup` is absent).
+    /// - [`Certainty::Maybe`] — Unknown: the enumeration is incomplete, a name is
+    ///   unresolvable, **or** an A11 version-skew demotion applied.
+    ///
+    /// **Argument order is (arm-class, guard-class)** — the arm `M` is `sub`, the
+    /// guard target `T` is `sup`. The negative-branch law asks `is_a(M, T)`; the
+    /// positive branch asks the same order. Reversing it is the C7 implementation
+    /// drift the ADR warns about.
+    fn is_a(&self, sub: &str, sup: &str) -> Certainty;
+
+    /// Whether `fqn` is `final` (or an enum) — no subclass can exist, so a proven
+    /// non-membership (`is_a(fqn, T) = No`) is **exhaustive** and licenses the
+    /// positive-branch deletion of the arm. A non-final class always survives the
+    /// positive branch (an unseen descendant could implement `T`).
+    fn is_final(&self, fqn: &str) -> bool;
+}
+
+/// The reflexive is-a floor N1 shipped: no class hierarchy, so `is_a` decides
+/// `Yes` only reflexively (same normalized class name) and is otherwise honest
+/// `Maybe`; nothing is `final` (every open class survives the positive branch).
+/// This reproduces N1's exact `subtract` behavior when no real oracle is supplied.
+#[derive(Debug, Clone, Copy)]
+pub struct ReflexiveFloor;
+
+impl IsaOracle for ReflexiveFloor {
+    fn is_a(&self, sub: &str, sup: &str) -> Certainty {
+        if class_eq(sub, sup) { Certainty::Yes } else { Certainty::Maybe }
+    }
+    fn is_final(&self, _fqn: &str) -> bool {
+        false
+    }
 }
 
 /// Pairwise arm subsumption: the [`Certainty`] that every value in `b`'s
@@ -304,50 +351,60 @@ fn summarize_string_group(strings: &[&str]) -> Vec<ContractTy> {
 /// [`Certainty::Yes`]; `Maybe` keeps it (the silence side). An arm list that
 /// this empties is left empty — the caller drops it to no-fact (never a death
 /// signal; the verdict owns death, ADR-0052 §2).
-pub fn subtract(arms: &mut Vec<ContractTy>, sub: &Subtrahend) {
-    arms.retain(|arm| !subtrahend_covers(sub, arm).is_yes());
+pub fn subtract(arms: &mut Vec<ContractTy>, sub: &Subtrahend, oracle: &dyn IsaOracle) {
+    arms.retain(|arm| !subtrahend_covers(sub, arm, oracle).is_yes());
 }
 
-/// The [`Certainty`] that the subtrahend's denotation covers (subsumes) the
-/// whole arm. `Null`/`Value`/`Base` reduce to a [`ContractTy`] and reuse
-/// [`subsumes`]; the class subtrahend carries the polarity asymmetry.
-fn subtrahend_covers(sub: &Subtrahend, arm: &ContractTy) -> Certainty {
+/// The [`Certainty`] that the subtrahend's denotation covers (subsumes) the whole
+/// arm — an arm dies iff this is [`Certainty::Yes`]. `Null`/`Value`/`Base` reduce
+/// to a [`ContractTy`] and reuse [`subsumes`]; the class subtrahend carries the
+/// polarity asymmetry and consults the real is-a `oracle`.
+///
+/// Public so a caller carrying a **parallel** per-arm structure (steins-infer's
+/// stratified contract lane, `Vec<(ContractTy, Stratum)>`) can `retain` in lockstep
+/// with the exact same judgment [`subtract`] uses — the single deletion oracle, no
+/// second copy of the polarity law.
+#[must_use]
+pub fn subtrahend_covers(sub: &Subtrahend, arm: &ContractTy, oracle: &dyn IsaOracle) -> Certainty {
     match sub {
         Subtrahend::Null => subsumes(&ContractTy::Null, arm),
         Subtrahend::Value(v) => subsumes(&val_contract(v), arm),
         Subtrahend::Base(b) => subsumes(&ContractTy::Base(*b), arm),
-        Subtrahend::Class { fqn, polarity } => class_covers(fqn, *polarity, arm),
+        Subtrahend::Class { fqn, polarity } => class_covers(fqn, *polarity, arm, oracle),
     }
 }
 
-/// The class-arm polarity asymmetry (ADR-0052 §2), judged against the reflexive
-/// is-a floor of steins-contract (no class hierarchy here — richer is-a arrives
-/// with N4's oracle wiring; the reflexive floor is sound and closes the
-/// reflexive cases, e.g. `User` is-a `User`).
+/// The class-arm polarity asymmetry (ADR-0052 §2), judged against the real is-a
+/// `oracle` (the reflexive floor still closes the reflexive cases; the project
+/// hierarchy + A11 demotion arrive through the caller's implementor).
 ///
 /// - **Negative branch** (`polarity == false`, subtrahend = *instances of T*):
-///   a class arm `M` dies iff `is_a(M, T) = Yes`, reflexively `M == T`;
-///   a non-object arm (a scalar / null) is never a `T` instance and survives.
-/// - **Positive branch** (`polarity == true`, subtrahend = *non-instances of
-///   T*): every scalar / null / array arm is definitely a non-instance and
-///   dies; a class / `object` arm cannot be proven all-non-instance without
-///   finality data, so it survives (`Maybe`).
-fn class_covers(fqn: &str, polarity: bool, arm: &ContractTy) -> Certainty {
+///   a class arm `M` dies iff `is_a(M, T) = Yes` — is-a is inherited, so every
+///   possible value of `M` (any descendant) is a `T` and none survives `!instanceof`.
+///   `No`/`Unknown` keeps the arm (`Maybe`/`No` — never `Yes`). A non-object arm
+///   (a scalar / null / array) is never a `T` instance and survives.
+/// - **Positive branch** (`polarity == true`, subtrahend = *non-instances of T*):
+///   a class arm `M` dies **only** when `M` is `final`/enum (`oracle.is_final`)
+///   **and** `is_a(M, T) = No` — an open class could have a descendant that also
+///   implements `T`, so a non-final arm survives (`Maybe`), and `Unknown` keeps it
+///   in both polarities. A scalar / null / array arm is definitely a non-instance
+///   and dies; a bare `object`/`Opaque`/`mixed` arm survives (`Maybe`).
+fn class_covers(fqn: &str, polarity: bool, arm: &ContractTy, oracle: &dyn IsaOracle) -> Certainty {
     use Certainty::{Maybe, No, Yes};
     if polarity {
-        // Subtrahend = non-instances of T.
+        // Subtrahend = non-instances of T. Argument order: is_a(M, T).
         match arm {
-            ContractTy::Class(_) | ContractTy::ObjectAny | ContractTy::Opaque | ContractTy::Mixed => {
-                Maybe
+            ContractTy::Class(m) => {
+                if oracle.is_final(m) && oracle.is_a(m, fqn) == No { Yes } else { Maybe }
             }
+            ContractTy::ObjectAny | ContractTy::Opaque | ContractTy::Mixed => Maybe,
             _ => Yes,
         }
     } else {
-        // Subtrahend = instances of T.
+        // Subtrahend = instances of T. Argument order: is_a(M, T) — the arm class
+        // is `sub`, the guard target `T` is `sup`. Yes deletes; No/Maybe keep.
         match arm {
-            ContractTy::Class(m) => {
-                if class_eq(m, fqn) { Yes } else { Maybe }
-            }
+            ContractTy::Class(m) => oracle.is_a(m, fqn),
             ContractTy::ObjectAny | ContractTy::Opaque | ContractTy::Mixed => Maybe,
             _ => No,
         }
@@ -600,14 +657,14 @@ mod tests {
     #[test]
     fn subtract_null_removes_only_the_null_arm() {
         let mut arms = vec![ContractTy::Base(Base::Int), ContractTy::Null];
-        subtract(&mut arms, &Subtrahend::Null);
+        subtract(&mut arms, &Subtrahend::Null, &ReflexiveFloor);
         assert_eq!(arms, vec![ContractTy::Base(Base::Int)]);
     }
 
     #[test]
     fn subtract_value_removes_the_matching_literal_only() {
         let mut arms = vec![lit_i(5), lit_i(6), ContractTy::Base(Base::String)];
-        subtract(&mut arms, &Subtrahend::Value(Val::Int(5)));
+        subtract(&mut arms, &Subtrahend::Value(Val::Int(5)), &ReflexiveFloor);
         assert_eq!(arms, vec![lit_i(6), ContractTy::Base(Base::String)]);
     }
 
@@ -616,7 +673,7 @@ mod tests {
         // `!== 5` on a general `int` arm is a no-op (interior point) — the base
         // arm is not subsumed by the single literal.
         let mut arms = vec![ContractTy::Base(Base::Int)];
-        subtract(&mut arms, &Subtrahend::Value(Val::Int(5)));
+        subtract(&mut arms, &Subtrahend::Value(Val::Int(5)), &ReflexiveFloor);
         assert_eq!(arms, vec![ContractTy::Base(Base::Int)]);
     }
 
@@ -625,7 +682,7 @@ mod tests {
         // `!is_int($x)` over `int|string`: the int arm (and any int literal) dies,
         // the string arm survives.
         let mut arms = vec![ContractTy::Base(Base::Int), lit_i(7), ContractTy::Base(Base::String)];
-        subtract(&mut arms, &Subtrahend::Base(Base::Int));
+        subtract(&mut arms, &Subtrahend::Base(Base::Int), &ReflexiveFloor);
         assert_eq!(arms, vec![ContractTy::Base(Base::String)]);
     }
 
@@ -634,7 +691,7 @@ mod tests {
         // else-branch of `$v instanceof User` over `User|Guest`: User dies
         // (is_a(User,User)=Yes), Guest survives (Unknown is-a keeps it).
         let mut arms = vec![class("user"), class("guest")];
-        subtract(&mut arms, &Subtrahend::Class { fqn: "User".to_owned(), polarity: false });
+        subtract(&mut arms, &Subtrahend::Class { fqn: "User".to_owned(), polarity: false }, &ReflexiveFloor);
         assert_eq!(arms, vec![class("guest")]);
     }
 
@@ -642,7 +699,7 @@ mod tests {
     fn subtract_class_negative_branch_keeps_scalars() {
         // `!($v instanceof T)` does not remove the possibility of a scalar.
         let mut arms = vec![ContractTy::Base(Base::Int), class("user")];
-        subtract(&mut arms, &Subtrahend::Class { fqn: "Guest".to_owned(), polarity: false });
+        subtract(&mut arms, &Subtrahend::Class { fqn: "Guest".to_owned(), polarity: false }, &ReflexiveFloor);
         assert_eq!(arms, vec![ContractTy::Base(Base::Int), class("user")]);
     }
 
@@ -651,14 +708,111 @@ mod tests {
         // then-branch of `$v instanceof T` over `int|User`: int dies (a proven
         // instance is not a scalar), the class arm survives (finality unknown).
         let mut arms = vec![ContractTy::Base(Base::Int), class("user"), ContractTy::Null];
-        subtract(&mut arms, &Subtrahend::Class { fqn: "User".to_owned(), polarity: true });
+        subtract(&mut arms, &Subtrahend::Class { fqn: "User".to_owned(), polarity: true }, &ReflexiveFloor);
         assert_eq!(arms, vec![class("user")]);
     }
 
     #[test]
     fn subtract_can_empty_the_arm_list() {
         let mut arms = vec![ContractTy::Null];
-        subtract(&mut arms, &Subtrahend::Null);
+        subtract(&mut arms, &Subtrahend::Null, &ReflexiveFloor);
         assert!(arms.is_empty());
+    }
+
+    // ---- subtract with a REAL is-a oracle (N4) ------------------------------
+
+    /// A fixed-hierarchy mock: `edges[sub]` lists `sub`'s proven supertypes
+    /// (transitively closed by the mock), `finals` the final/enum classes. Any
+    /// class named here is "fully enumerated", so a target absent from its closure
+    /// is a definite `No`; a class NOT named at all answers `Unknown` (`Maybe`).
+    struct MockIsa {
+        edges: std::collections::HashMap<&'static str, Vec<&'static str>>,
+        finals: Vec<&'static str>,
+        known: Vec<&'static str>,
+    }
+    impl IsaOracle for MockIsa {
+        fn is_a(&self, sub: &str, sup: &str) -> Certainty {
+            if class_eq(sub, sup) {
+                return Certainty::Yes;
+            }
+            if !self.known.iter().any(|k| class_eq(k, sub)) {
+                return Certainty::Maybe; // unknown class → incomplete enumeration
+            }
+            if self
+                .edges
+                .iter()
+                .find(|(k, _)| class_eq(k, sub))
+                .is_some_and(|(_, sups)| sups.iter().any(|s| class_eq(s, sup)))
+            {
+                Certainty::Yes
+            } else {
+                Certainty::No // fully enumerated, target absent
+            }
+        }
+        fn is_final(&self, fqn: &str) -> bool {
+            self.finals.iter().any(|f| class_eq(f, fqn))
+        }
+    }
+
+    fn mock() -> MockIsa {
+        // Dog is-a Animal; Cat is-a Animal. Animal, Dog, Cat all known; Dog final.
+        MockIsa {
+            edges: [("dog", vec!["animal"]), ("cat", vec!["animal"]), ("animal", vec![])]
+                .into_iter()
+                .collect(),
+            finals: vec!["dog"],
+            known: vec!["dog", "cat", "animal"],
+        }
+    }
+
+    #[test]
+    fn subtract_negative_branch_deletes_real_subclass_arm() {
+        // else of `$v instanceof Animal` over `Dog|Cat|string`: is_a(Dog,Animal)=Yes
+        // and is_a(Cat,Animal)=Yes both die; the scalar arm survives.
+        let mut arms = vec![class("dog"), class("cat"), ContractTy::Base(Base::String)];
+        subtract(&mut arms, &Subtrahend::Class { fqn: "Animal".to_owned(), polarity: false }, &mock());
+        assert_eq!(arms, vec![ContractTy::Base(Base::String)]);
+    }
+
+    #[test]
+    fn subtract_negative_branch_argument_order_is_m_then_t() {
+        // Guard `instanceof Dog` over arm `Animal`: the ADR asks is_a(Animal, Dog)
+        // = No (Animal is NOT a Dog) → the Animal arm SURVIVES the negation. A
+        // reversed is_a(Dog, Animal)=Yes would wrongly delete it — the C7 drift.
+        let mut arms = vec![class("animal")];
+        subtract(&mut arms, &Subtrahend::Class { fqn: "Dog".to_owned(), polarity: false }, &mock());
+        assert_eq!(arms, vec![class("animal")], "is_a(M,T) order: Animal is not a Dog, arm kept");
+    }
+
+    #[test]
+    fn subtract_negative_branch_unknown_keeps_arm() {
+        // `Mystery` is not in the mock's known set → is_a Unknown → arm kept both
+        // polarities (FP-safe).
+        let mut neg = vec![class("mystery")];
+        subtract(&mut neg, &Subtrahend::Class { fqn: "Animal".to_owned(), polarity: false }, &mock());
+        assert_eq!(neg, vec![class("mystery")]);
+        let mut pos = vec![class("mystery")];
+        subtract(&mut pos, &Subtrahend::Class { fqn: "Animal".to_owned(), polarity: true }, &mock());
+        assert_eq!(pos, vec![class("mystery")]);
+    }
+
+    #[test]
+    fn subtract_positive_branch_deletes_final_nonmember_only() {
+        // then of `$v instanceof Cat` over `Dog|Cat`: Dog is final AND is_a(Dog,Cat)
+        // = No → Dog dies; Cat is is_a(Cat,Cat)=Yes so it is NOT a non-instance →
+        // survives (Maybe).
+        let mut arms = vec![class("dog"), class("cat")];
+        subtract(&mut arms, &Subtrahend::Class { fqn: "Cat".to_owned(), polarity: true }, &mock());
+        assert_eq!(arms, vec![class("cat")]);
+    }
+
+    #[test]
+    fn subtract_positive_branch_keeps_nonfinal_nonmember() {
+        // `Animal` is NOT final, so even though is_a(Animal, Cat)=No, the positive
+        // branch keeps it — an unseen Animal subclass could be a Cat. The drift
+        // "positive-branch deleting a non-final arm" is guarded here.
+        let mut arms = vec![class("animal")];
+        subtract(&mut arms, &Subtrahend::Class { fqn: "Cat".to_owned(), polarity: true }, &mock());
+        assert_eq!(arms, vec![class("animal")]);
     }
 }

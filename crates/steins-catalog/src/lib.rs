@@ -24,6 +24,20 @@
 //! does not implement. `nondet` builtins (`time`, `rand`, `microtime`, …) are
 //! excluded by definition.
 
+/// The PHP minor version the builtin catalog is pinned to (`major`, `minor`) —
+/// the php-src mining data (`docs/research/phpsrc-mining/hierarchy.toml`, pin
+/// `6bc7c26cf6…`) is cross-checked against **PHP 8.5.8**, so the builtin
+/// class-hierarchy edges this crate reports are those of the `8.5` line.
+///
+/// ADR-0052 amendment A11: a catalog-backed is-a verdict used for **arm deletion**
+/// is only trustworthy when the project's own PHP is on this same minor line — a
+/// different minor may add/remove a builtin supertype edge the catalog does not
+/// reflect. The narrowing engine compares the sidecar-reported minor against this
+/// pin and, on a skew, demotes such a verdict to `Unknown` (keeping the arm, the
+/// FP-safe side). The patch component (`8` in `8.5.8`) is irrelevant — builtin
+/// type edges are stable within a minor line — so only `(major, minor)` is pinned.
+pub const PINNED_PHP: (u16, u16) = (8, 5);
+
 /// The builtin class-hierarchy table, generated from the pinned php-src mining
 /// data (`docs/research/phpsrc-mining/hierarchy.toml`) by `cargo xtask
 /// gen-catalog`. Consulted only by [`builtin_class_supers`]; see that function
