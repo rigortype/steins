@@ -247,6 +247,18 @@ const THROW_EXPECTED: &[(&str, usize)] = &[
     ("symfony/console", 10),
     ("thephpleague/flysystem", 3),
     ("nikic/PHP-Parser", 1),
+    // Registered 2026-07-24 (v0.1.0 run, oracle idea A): PHPStan's own src/ as a
+    // local corpus project (tests/, e2e/ excluded — deliberately-broken fixtures).
+    // First run: 0 proof-layer, 0 phpdoc.*, 20 throw.undeclared. Triaged verbatim
+    // (5+ samples): every finding is a TRUE undeclared checked throw escaping a
+    // `@throws`-annotated declaration — e.g. FileCacheStorage::save() (@throws
+    // DirectoryCreatorException) throws ShouldNotHappenException directly at :81;
+    // CommandHelper::begin() (@throws InceptionNotSuccessfulException) throws
+    // ShouldNotHappenException/:162 and reaches ServiceCreationException origins;
+    // FileReader::read()'s CouldNotReadFileException escapes FixerApplication's
+    // @throws-annotated methods. Homogeneous checked-exception debt, none runtime
+    // breakage — the exact ADR-0040/0007 pattern the tripwire mode exists for.
+    ("phpstan/phpstan-src", 20),
     ("pxxxx-monorepo", 43964),
 ];
 
