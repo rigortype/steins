@@ -27,20 +27,31 @@
 
 use steins_contract::{ContractTy, admits_val};
 use steins_db::{Db, Project, SourceFile, parse};
-use steins_domain::{Base, Certainty, Key, Val};
+use steins_domain::Certainty;
 use steins_infer::promote::{FreeFnSweep, TargetSweep, sweep_free_functions};
 use steins_phpdoc::ast::{ConstExpr, Type as PType, TypeKind};
 use steins_phpdoc::docblock::DocTag;
 use steins_phpdoc::{TagKind, parse_type, scan_docblock};
-use steins_syntax::{
-    ArgValue, FunctionDecl, NativeType, NormKey, Param, ScalarType, SourceTree, TypeMember,
-    normalize_array,
-};
+use steins_syntax::{FunctionDecl, NativeType, Param, ScalarType, SourceTree, TypeMember};
 
+use crate::common::{
+    arg_to_val, check_caller_enumerability, count_fqns, has_source_hint, native_contract,
+    param_site,
+};
 use crate::plan::{ByteSpan, Edit, EditPlan};
-use crate::transform::{CompletenessOracle, Refusal, SiteRef, Transform, TransformReport};
+use crate::transform::{CompletenessOracle, Refusal, Transform, TransformReport};
 
 // ---- Stable refusal reason names (ADR-0034 point 2) -----------------------
+
+// The caller-enumerability reasons (`dynamic-call-present`,
+// `function-referenced-as-value`, `resolution-ambiguous`, `named-or-spread-args`,
+// `argument-not-proven`) are shared with honesty and live in `crate::common`;
+// re-exported here so the public `steins_edit::promote::REASON_*` paths still
+// resolve.
+pub use crate::common::{
+    REASON_AMBIGUOUS, REASON_ARG_NOT_PROVEN, REASON_DYNAMIC_CALL, REASON_NAMED_OR_SPREAD,
+    REASON_REFERENCED_AS_VALUE,
+};
 
 /// The phpdoc type has no [`NativeType`] rendering and is not a scalar
 /// refinement either (arrays, generics, class names, callables, shapes).
@@ -56,20 +67,6 @@ pub const REASON_IMPLICIT_NULLABLE: &str = "implicit-nullable-default";
 /// provably admit (`int $x = 'str'` is a compile-time fatal; `int $x = PHP_INT_MAX`
 /// is valid but unprovable in v1). Refusing keeps the emitted declaration legal.
 pub const REASON_DEFAULT_INCOMPATIBLE: &str = "default-not-admitted-by-native";
-/// A dynamic `$fn(...)` call exists in the project — it could target any free
-/// function, so no free-function candidate can prove all its callers.
-pub const REASON_DYNAMIC_CALL: &str = "dynamic-call-present";
-/// The function's name appears as a string / first-class-callable value (a
-/// `call_user_func`-style caller invisible to call resolution).
-pub const REASON_REFERENCED_AS_VALUE: &str = "function-referenced-as-value";
-/// The function's name does not resolve uniquely project-wide (duplicate
-/// definition or builtin shadow), so its callers cannot be enumerated soundly.
-pub const REASON_AMBIGUOUS: &str = "resolution-ambiguous";
-/// A call reaching this function used named or spread arguments (positional
-/// mapping is unreliable).
-pub const REASON_NAMED_OR_SPREAD: &str = "named-or-spread-args";
-/// At least one call site's argument is not proven to admit the native type.
-pub const REASON_ARG_NOT_PROVEN: &str = "argument-not-proven";
 
 /// The phpdoc→native promotion transform (ADR-0034 point 4).
 #[derive(Debug, Clone, Copy, Default)]
@@ -93,12 +90,7 @@ pub fn plan_phpdoc_to_native(db: &dyn Db, project: Project) -> TransformReport {
 
     // Count each FQN across the project so a duplicate definition (which makes
     // resolution ambiguous) refuses rather than promotes on thin evidence.
-    let mut fqn_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for &file in &files {
-        for f in parse(db, file).functions() {
-            *fqn_counts.entry(f.fqn.clone()).or_default() += 1;
-        }
-    }
+    let fqn_counts = count_fqns(db, &files);
 
     let mut plan = EditPlan::new();
     let mut refusals: Vec<Refusal> = Vec::new();
@@ -145,7 +137,7 @@ fn plan_function(
         // This parameter is an *enumerated* site — it must end transformed or
         // refused (the completeness oracle, ADR-0034 point 3b).
         oracle.enumerated += 1;
-        let site = candidate_site(path, tree, func, param);
+        let site = param_site(path, tree, func, param);
 
         match decide(func, param, idx, tag, source, sweep, fqn_counts) {
             Ok(native) => {
@@ -256,30 +248,9 @@ fn decide(
         }
     }
 
-    // (c) Project-wide obstacles that make "all callers" unknowable.
-    if sweep.any_dynamic_call {
-        return Err((
-            REASON_DYNAMIC_CALL,
-            "a dynamic `$fn(...)` call in the project could target this function".to_owned(),
-        ));
-    }
-    let simple = func.name.to_ascii_lowercase();
-    if sweep.value_referenced_names.contains(&simple)
-        || sweep.value_referenced_names.contains(&func.fqn)
-    {
-        return Err((
-            REASON_REFERENCED_AS_VALUE,
-            format!("`{}` appears as a string / first-class-callable value", func.name),
-        ));
-    }
-    if fqn_counts.get(&func.fqn).copied().unwrap_or(0) > 1
-        || sweep.unresolved_simple_names.contains(&simple)
-    {
-        return Err((
-            REASON_AMBIGUOUS,
-            format!("`{}` does not resolve uniquely project-wide", func.name),
-        ));
-    }
+    // (c) Project-wide obstacles that make "all callers" unknowable (shared with
+    // honesty's `@param` widening).
+    check_caller_enumerability(func, sweep, fqn_counts)?;
 
     // (d) Prove every observed call-site argument for this parameter position.
     let contract = native_contract(&native);
@@ -344,47 +315,6 @@ fn prove_target(
 }
 
 // ---- Candidate helpers ----------------------------------------------------
-
-/// A [`SiteRef`] for a candidate parameter.
-fn candidate_site(path: &str, tree: &SourceTree, func: &FunctionDecl, param: &Param) -> SiteRef {
-    let p = tree.position(param.span.start);
-    SiteRef::new(
-        path.to_owned(),
-        p.line,
-        p.column,
-        format!("function {}() param ${}", func.name, param.name),
-    )
-}
-
-/// Whether the source text at `param.span.start` carries a native type hint.
-///
-/// `param.ty == None` alone is ambiguous: it also means a *complex* hint was
-/// lowered away (`Foo|Bar $x`). So we inspect the raw bytes: from the parameter
-/// start, skip whitespace and the `&` / `...` markers; if the next token is the
-/// `$variable`, there is no hint. Anything else is a hint (the site is out of the
-/// enumeration domain, not a refusal).
-fn has_source_hint(source: &str, param: &Param) -> bool {
-    let start = param.span.start as usize;
-    let bytes = source.as_bytes();
-    let mut k = start;
-    loop {
-        // Skip whitespace.
-        while k < bytes.len() && bytes[k].is_ascii_whitespace() {
-            k += 1;
-        }
-        if bytes[k..].starts_with(b"...") {
-            k += 3;
-            continue;
-        }
-        if bytes.get(k) == Some(&b'&') {
-            k += 1;
-            continue;
-        }
-        break;
-    }
-    // A hint is absent exactly when the next non-marker token is the `$variable`.
-    bytes.get(k) != Some(&b'$')
-}
 
 /// The `@param` tag documenting `param_name` (without `$`), if any.
 fn param_tag<'a>(tags: &'a [DocTag], param_name: &str) -> Option<&'a DocTag> {
@@ -555,56 +485,3 @@ fn member_of(name: &str) -> Option<TypeMember> {
     }
 }
 
-/// Build the acceptance contract for a native type (native semantics, not phpdoc
-/// lowering): scalars → base, `true`/`false` → bool-literal, nullable adds
-/// `null`.
-fn native_contract(nt: &NativeType) -> ContractTy {
-    let mut members: Vec<ContractTy> = nt
-        .members
-        .iter()
-        .map(|m| match m {
-            TypeMember::Scalar(ScalarType::Int) => ContractTy::Base(Base::Int),
-            TypeMember::Scalar(ScalarType::Float) => ContractTy::Base(Base::Float),
-            TypeMember::Scalar(ScalarType::String) => ContractTy::Base(Base::String),
-            TypeMember::Scalar(ScalarType::Bool) => ContractTy::Base(Base::Bool),
-            TypeMember::BoolLiteral(b) => ContractTy::LitBool(*b),
-        })
-        .collect();
-    if nt.nullable {
-        members.push(ContractTy::Null);
-    }
-    if members.len() == 1 {
-        members.pop().expect("non-empty")
-    } else {
-        ContractTy::Union(members)
-    }
-}
-
-/// Convert a lowered [`ArgValue`] to a concrete domain [`Val`], or `None` when it
-/// is not a self-evident literal (a `$var`, a call, a `new`, a closure, …). Arrays
-/// are literal iff every element is.
-fn arg_to_val(v: &ArgValue) -> Option<Val> {
-    match v {
-        ArgValue::Int(i) => Some(Val::Int(*i)),
-        ArgValue::Float(f) => Some(Val::Float(*f)),
-        ArgValue::Str(s) => Some(Val::Str(s.clone())),
-        ArgValue::Bool(b) => Some(Val::Bool(*b)),
-        ArgValue::Null => Some(Val::Null),
-        ArgValue::Array(items) => {
-            let normalized = normalize_array(items);
-            let mut out = Vec::with_capacity(normalized.len());
-            for (k, e) in normalized {
-                out.push((norm_key(&k), arg_to_val(&e)?));
-            }
-            Some(Val::Array(out))
-        }
-        _ => None,
-    }
-}
-
-fn norm_key(k: &NormKey) -> Key {
-    match k {
-        NormKey::Int(i) => Key::Int(*i),
-        NormKey::Str(s) => Key::Str(s.clone()),
-    }
-}

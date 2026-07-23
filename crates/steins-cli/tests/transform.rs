@@ -137,3 +137,69 @@ fn unknown_transform_name_is_usage_error() {
     assert_eq!(r.code, 2);
     assert!(r.stderr.contains("unknown transform"), "stderr:\n{}", r.stderr);
 }
+
+// ---- phpdoc-honesty (Transform #2) ----------------------------------------
+
+#[test]
+fn honesty_dry_run_prints_diff_and_does_not_write() {
+    let proj = TempProject::new("honesty-dryrun");
+    // `@param int $id` but callers pass an int and numeric strings — a lie.
+    let lib_before = "<?php\n/** @param int $id */\nfunction f($id) { return $id; }\n";
+    proj.write("lib.php", lib_before);
+    proj.write("main.php", "<?php\nf(1);\nf(\"12\");\nf(\"34\");\n");
+
+    let r = run(&["transform", "phpdoc-honesty", proj.path()]);
+    assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
+    assert!(
+        r.stdout.contains("+/** @param int|numeric-string $id */"),
+        "diff missing widened tag:\n{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("1 enumerated: 1 rewritten"), "oracle line:\n{}", r.stdout);
+    assert!(r.stdout.contains("Post-check OK"), "postcheck:\n{}", r.stdout);
+    // The dry run does not touch disk.
+    assert_eq!(proj.read("lib.php"), lib_before);
+}
+
+#[test]
+fn honesty_apply_writes_the_widened_tag() {
+    let proj = TempProject::new("honesty-apply");
+    proj.write("lib.php", "<?php\n/** @param int $id */\nfunction f($id) { return $id; }\n");
+    proj.write("main.php", "<?php\nf(1);\nf(\"12\");\nf(\"34\");\n");
+
+    let r = run(&["transform", "phpdoc-honesty", "--apply", proj.path()]);
+    assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
+    let after = proj.read("lib.php");
+    assert!(after.contains("@param int|numeric-string $id"), "not widened on disk:\n{after}");
+}
+
+#[test]
+fn honesty_refusal_is_reported_and_nothing_written() {
+    let proj = TempProject::new("honesty-refuse");
+    // A lying tag (array arg violates int) with no faithful scalar spelling.
+    let before = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
+    proj.write("lib.php", before);
+    proj.write("main.php", "<?php\nf([1, 2]);\n");
+
+    let r = run(&["transform", "phpdoc-honesty", "--apply", proj.path()]);
+    assert_eq!(r.code, 0, "a refusal is not a failure; stderr:\n{}", r.stderr);
+    assert!(r.stdout.contains("type-not-renderable"), "refusal reason:\n{}", r.stdout);
+    assert!(r.stdout.contains("0 rewritten, 1 refused"), "oracle:\n{}", r.stdout);
+    assert_eq!(proj.read("lib.php"), before);
+}
+
+#[test]
+fn honesty_json_format_emits_report_and_postcheck() {
+    let proj = TempProject::new("honesty-json");
+    proj.write("lib.php", "<?php\n/** @param int $id */\nfunction f($id) { return $id; }\n");
+    proj.write("main.php", "<?php\nf(1);\nf(\"12\");\nf(\"34\");\n");
+
+    let r = run(&["transform", "phpdoc-honesty", "--format", "json", proj.path()]);
+    assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
+    let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid json");
+    assert_eq!(v["report"]["oracle"]["enumerated"], 1);
+    assert_eq!(v["report"]["oracle"]["transformed"], 1);
+    assert_eq!(v["postcheck"]["ok"], true);
+    assert_eq!(v["applied"], false);
+    assert_eq!(v["report"]["plan"]["edits"].as_array().unwrap().len(), 1);
+}
