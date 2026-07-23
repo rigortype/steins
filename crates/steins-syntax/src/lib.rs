@@ -192,10 +192,11 @@ impl ScalarType {
 /// members, e.g. `string|false`), or a class/interface/enum **object** type
 /// (ADR-0043 object/method world).
 ///
-/// [`TypeMember::Instance`] carries the namespace-resolved, lowercase-normalized
-/// FQN (matching [`ClassDecl::fqn`]), so `Foo|null` / `A|B` are one union shape
-/// alongside the scalars. It is **not** [`Copy`] (it owns a `String`); the whole
-/// enum is therefore no longer `Copy`.
+/// [`TypeMember::Instance`] carries the namespace-resolved FQN twice: the
+/// lowercase-normalized form (matching [`ClassDecl::fqn`] — the matching key)
+/// and the source-cased form (diagnostics only), so `Foo|null` / `A|B` are one
+/// union shape alongside the scalars. It is **not** [`Copy`] (it owns
+/// `String`s); the whole enum is therefore no longer `Copy`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeMember {
     /// A full scalar type (`int`, `float`, `string`, `bool`).
@@ -204,23 +205,32 @@ pub enum TypeMember {
     /// bool value — no other value coerces into it (empirically verified against
     /// PHP 8.5: `0`/`""`/`true` into a `false`-only type all `TypeError`).
     BoolLiteral(bool),
-    /// An object type: a class / interface / enum name, lowered to its
-    /// namespace-resolved lowercase FQN (ADR-0043). The is-a oracle consumes this
-    /// in later stages; native scalar-value acceptance stays silent on any union
-    /// that contains an `Instance` member until the definite-No arm opens.
-    Instance(String),
+    /// An object type: a class / interface / enum name (ADR-0043). The is-a
+    /// oracle consumes this in later stages; native scalar-value acceptance
+    /// stays silent on any union that contains an `Instance` member until the
+    /// definite-No arm opens.
+    Instance {
+        /// The namespace-resolved, **lowercase-normalized** FQN (matching
+        /// [`ClassDecl::fqn`]). Every matching / resolution consumer keys on
+        /// this — case-insensitivity lives here, never in `display`.
+        fqn: String,
+        /// The same resolved FQN with the source's declared casing preserved
+        /// (`LogicException`, `App\Foo`). Diagnostic rendering only; carries no
+        /// resolution semantics.
+        display: String,
+    },
 }
 
 impl TypeMember {
     /// Render this member for a diagnostic message: the PHP keyword for a scalar
-    /// or bool-literal, or the (lowercase) FQN for an object member.
+    /// or bool-literal, or the source-cased FQN for an object member.
     #[must_use]
     pub fn render_member(&self) -> String {
         match self {
             TypeMember::Scalar(s) => s.keyword().to_owned(),
             TypeMember::BoolLiteral(false) => "false".to_owned(),
             TypeMember::BoolLiteral(true) => "true".to_owned(),
-            TypeMember::Instance(fqn) => fqn.clone(),
+            TypeMember::Instance { display, .. } => display.clone(),
         }
     }
 }
@@ -264,7 +274,7 @@ impl NativeType {
     /// (stage 3) is the only place this guard is lifted.
     #[must_use]
     pub fn has_instance(&self) -> bool {
-        self.members.iter().any(|m| matches!(m, TypeMember::Instance(_)))
+        self.members.iter().any(|m| matches!(m, TypeMember::Instance { .. }))
     }
 }
 
@@ -2900,12 +2910,16 @@ fn lower_hint_into(
         Hint::False(_) => members.push(TypeMember::BoolLiteral(false)),
         Hint::True(_) => members.push(TypeMember::BoolLiteral(true)),
         Hint::Null(_) => *nullable = true,
-        // A class / interface / enum name (ADR-0043): resolve to its lowercase
-        // FQN and join the union as an `Instance` member. `self`/`static`/`parent`
-        // are *not* `Hint::Identifier` (they are their own hint variants) — they
+        // A class / interface / enum name (ADR-0043): resolve to its FQN and
+        // join the union as an `Instance` member — lowercase-normalized for
+        // matching, source-cased for diagnostics. `self`/`static`/`parent` are
+        // *not* `Hint::Identifier` (they are their own hint variants) — they
         // stay in the silence arm below, per ADR-0043 (late-static-binding is
         // not v1).
-        Hint::Identifier(id) => members.push(TypeMember::Instance(rc.class_fqn(&name_ref(id)))),
+        Hint::Identifier(id) => {
+            let display = rc.class_display_fqn(&name_ref(id));
+            members.push(TypeMember::Instance { fqn: display.to_ascii_lowercase(), display });
+        }
         Hint::Nullable(n) => {
             *nullable = true;
             lower_hint_into(n.hint, rc, members, nullable)?;
@@ -4462,7 +4476,8 @@ fn fqn_of(ctx: &NsCtx, name: &str) -> String {
 /// the first segment, else prepend the current namespace. Class references have
 /// no global fallback (unlike functions), so this is a pure function of the
 /// reference and its context. Shared by [`SourceTree::resolve_class_fqn`]
-/// (use-time, case-preserved) and [`RefResolver`] (lowering-time, lowercased).
+/// (use-time) and [`RefResolver`] (lowering-time); both are case-preserved —
+/// callers needing the normalized matching key lowercase the result.
 fn resolve_class_ref(ctx: &NsCtx, r: &NameRef) -> String {
     match r.kind {
         RefKind::FullyQualified => r.raw.clone(),
@@ -4492,20 +4507,22 @@ fn resolve_class_ref(ctx: &NsCtx, r: &NameRef) -> String {
 
 /// Lowering-time namespace resolver for object type hints (ADR-0043). Carries the
 /// file's namespace contexts + regions so a class/interface/enum name in a native
-/// hint can be resolved to its lowercase-normalized FQN (matching
-/// [`ClassDecl::fqn`]) at the point of lowering, exactly like the FQN post-pass
-/// does for declaration names. Threaded alongside the attribute aliases + docs
-/// through the hint-bearing lowering functions.
+/// hint can be resolved to its FQN (case-preserved; lowercased by the caller into
+/// the normalized matching key that matches [`ClassDecl::fqn`]) at the point of
+/// lowering, exactly like the FQN post-pass does for declaration names. Threaded
+/// alongside the attribute aliases + docs through the hint-bearing lowering
+/// functions.
 struct RefResolver<'a> {
     contexts: &'a [NsCtx],
     regions: &'a [(u32, u32, usize)],
 }
 
 impl RefResolver<'_> {
-    /// The lowercase-normalized FQN a class-name reference resolves to, in the
-    /// namespace context enclosing its offset.
-    fn class_fqn(&self, r: &NameRef) -> String {
-        resolve_class_ref(ctx_of(self.contexts, self.regions, r.offset), r).to_ascii_lowercase()
+    /// The case-preserved (source-cased) FQN a class-name reference resolves to,
+    /// in the namespace context enclosing its offset. Lowercase the result to get
+    /// the normalized matching key.
+    fn class_display_fqn(&self, r: &NameRef) -> String {
+        resolve_class_ref(ctx_of(self.contexts, self.regions, r.offset), r)
     }
 }
 

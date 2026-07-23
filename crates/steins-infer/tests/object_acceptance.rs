@@ -355,3 +355,95 @@ function f(I $v): void {}
 f(new Uses());";
     assert_eq!(n(src), 0, "external parent → incomplete hierarchy → silent");
 }
+
+// ==========================================================================
+// 10. Diagnostic rendering — object types show source-declared casing.
+// ==========================================================================
+
+#[test]
+fn message_renders_object_union_with_declared_casing() {
+    // The rendered type is the source-cased FQN (`User|Guest`), not the
+    // lowercase-normalized matching key (`user|guest`).
+    let src = "<?php declare(strict_types=1);
+final class User {}
+final class Guest {}
+final class Robot {}
+function f(User|Guest $v): void {}
+f(new Robot());";
+    let ds = findings(src);
+    assert_eq!(ds.len(), 1);
+    assert!(
+        ds[0].message.contains("cannot become User|Guest $v"),
+        "source-cased union in message: {}",
+        ds[0].message
+    );
+}
+
+#[test]
+fn message_renders_namespaced_object_with_declared_casing() {
+    // An unqualified name in a namespace renders as the resolved, source-cased
+    // FQN (`App\Logger`), matching how the FQN was declared/written.
+    let src = "<?php declare(strict_types=1);
+namespace App;
+final class Logger {}
+final class Robot {}
+function f(Logger $l): void {}
+f(new Robot());";
+    let ds = findings(src);
+    assert_eq!(ds.len(), 1);
+    assert!(
+        ds[0].message.contains("cannot become App\\Logger $l"),
+        "source-cased namespaced FQN in message: {}",
+        ds[0].message
+    );
+}
+
+#[test]
+fn message_casing_does_not_change_matching() {
+    // Casing is display-only: a hint written in a different case than the
+    // declaration still matches (resolution stays case-insensitive) and the
+    // message shows the casing as written at the hint site.
+    let src = "<?php declare(strict_types=1);
+final class LogicBox {}
+final class Robot {}
+function f(LOGICBOX $v): void {}
+f(new LogicBox());
+f(new Robot());";
+    let ds = findings(src);
+    assert_eq!(ds.len(), 1, "LogicBox accepted despite hint casing; only Robot rejected");
+    assert!(
+        ds[0].message.contains("cannot become LOGICBOX $v"),
+        "hint-site casing preserved in message: {}",
+        ds[0].message
+    );
+}
+
+#[test]
+fn return_message_renders_object_with_declared_casing() {
+    let src = "<?php declare(strict_types=1);
+final class User {}
+final class Robot {}
+function make(): User { return new Robot(); }";
+    let ds = findings(src);
+    assert_eq!(ds.len(), 1);
+    assert!(
+        ds[0].message.contains("cannot become User (return type of make())"),
+        "source-cased return type in message: {}",
+        ds[0].message
+    );
+}
+
+#[test]
+fn message_renders_enum_type_with_declared_casing() {
+    let src = "<?php declare(strict_types=1);
+enum Status: string { case Active = 'active'; }
+function f(Status $s): void {}
+f('active');";
+    let ds = findings(src);
+    assert_eq!(ds.len(), 1);
+    assert!(
+        ds[0].message.contains("cannot become Status $s"),
+        "source-cased enum type in message: {}",
+        ds[0].message
+    );
+}

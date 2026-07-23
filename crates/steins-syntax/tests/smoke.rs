@@ -380,24 +380,26 @@ fn is_line_leading_distinguishes_trailing_from_own_line() {
 
 #[test]
 fn object_param_lowers_to_instance_member() {
-    // A class type hint lowers to a namespace-resolved, lowercase `Instance` member
-    // (ADR-0043), no longer collapsing the whole type to `None`.
+    // A class type hint lowers to a namespace-resolved `Instance` member
+    // (ADR-0043) — lowercase `fqn` for matching, source-cased `display` for
+    // diagnostics — no longer collapsing the whole type to `None`.
     let src = "<?php\nnamespace App;\nuse Other\\Bar;\nfunction f(Foo $a, Bar $b, \\Ns\\Baz $c): void {}\n";
     let tree = SourceTree::parse(src);
     let f = &tree.functions()[0];
     let member = |p: usize| match &tree.functions()[0].params[p].ty {
         Some(NativeType { members, nullable: false }) if members.len() == 1 => match &members[0] {
-            TypeMember::Instance(fqn) => fqn.clone(),
+            TypeMember::Instance { fqn, display } => (fqn.clone(), display.clone()),
             other => panic!("expected Instance, got {other:?}"),
         },
         other => panic!("expected single Instance member, got {other:?}"),
     };
     // Unqualified `Foo` resolves against the current namespace `App`.
-    assert_eq!(member(0), "app\\foo");
+    assert_eq!(member(0), ("app\\foo".into(), "App\\Foo".into()));
     // `Bar` resolves through the `use Other\Bar` import.
-    assert_eq!(member(1), "other\\bar");
-    // A fully-qualified `\Ns\Baz` passes through (leading `\` trimmed, lowercased).
-    assert_eq!(member(2), "ns\\baz");
+    assert_eq!(member(1), ("other\\bar".into(), "Other\\Bar".into()));
+    // A fully-qualified `\Ns\Baz` passes through (leading `\` trimmed; `fqn`
+    // lowercased, `display` source-cased).
+    assert_eq!(member(2), ("ns\\baz".into(), "Ns\\Baz".into()));
     assert!(f.ret.is_none(), "a `void` return stays unlowered");
 }
 
@@ -408,12 +410,18 @@ fn object_scalar_union_is_one_shape() {
     let tree = SourceTree::parse(src);
     let a = tree.functions()[0].params[0].ty.as_ref().unwrap();
     assert!(a.nullable, "`?Foo` is nullable");
-    assert_eq!(a.members, vec![TypeMember::Instance("foo".into())]);
+    assert_eq!(
+        a.members,
+        vec![TypeMember::Instance { fqn: "foo".into(), display: "Foo".into() }]
+    );
     assert!(a.has_instance());
     let b = tree.functions()[0].params[1].ty.as_ref().unwrap();
     assert_eq!(
         b.members,
-        vec![TypeMember::Scalar(ScalarType::Int), TypeMember::Instance("bar".into())]
+        vec![
+            TypeMember::Scalar(ScalarType::Int),
+            TypeMember::Instance { fqn: "bar".into(), display: "Bar".into() }
+        ]
     );
     assert!(b.has_instance(), "a union mixing a scalar and an object is object-bearing");
     assert!(!b.nullable);

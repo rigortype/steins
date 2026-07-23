@@ -275,7 +275,9 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         id: "type.argument-mismatch",
         path_suffix: "tests/Monolog/Handler/MongoDBHandlerTest.php",
         line: 27,
-        message_contains: "cannot become mongodb\\client|mongodb\\driver\\manager",
+        // Source-cased since `TypeMember::Instance` grew its `display` field
+        // (diagnostics render the declared casing; matching stays lowercased).
+        message_contains: "cannot become MongoDB\\Client|MongoDB\\Driver\\Manager",
     },
 ];
 
