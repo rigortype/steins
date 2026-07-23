@@ -148,7 +148,10 @@ Exit criteria:
   is set by intentional entries, expected ≥ 93/98.)
 - fp-gate green over the full corpus; every tripwire movement triaged
   verbatim (5-sample minimum per class).
-- Issues #1–5 closed.
+- Issue #5 (the template-shadow FP) closed. Issues #1–4 (the template
+  tracer) are **out of v0.1.0 scope** (owner decision, 2026-07-24):
+  ADR-0051's design stands, its implementation moves to the post-release
+  background track and is promoted only if dogfooding demands it.
 - New-id true-positive yield measured on the legacy monorepo and
   reported (a number, not an impression).
 
