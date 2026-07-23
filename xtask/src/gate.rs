@@ -93,7 +93,29 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     ("composer/composer", 19),
     ("sebastianbergmann/phpunit", 8),
     ("Seldaek/monolog", 4),
-    ("thephpleague/flysystem", 1),
+    // 1 → 2 (+1) with ADR-0043 stage 4 (phpdoc-side class contracts). The new
+    // finding is a class-value contract: `new MountManager(['valid' => 'something
+    // else'])` — a plain string in the `array<string, FilesystemOperator>` value
+    // position — inside a `guarding_against_mounting_invalid_filesystems` test that
+    // wraps it in `expectException(UnableToMountFilesystem::class)` and carries
+    // `@phpstan-ignore-next-line`. A TRUE no-coercion violation the test documents.
+    ("thephpleague/flysystem", 2),
+    // 0 → 1 (+1) with ADR-0043 stage 4. `ChoiceQuestionTest` passes a literal array
+    // `[..., null]` to `ChoiceQuestion::__construct(@param array<string|bool|int|
+    // float|\Stringable> $choices)`; `null` is a member of none of the union arms —
+    // a TRUE no-coercion contract violation (the docblock omits null). The sibling
+    // `StringChoice` (a `__toString` object, implicit `\Stringable`) is correctly
+    // *accepted*, not a finding — the is-a oracle honors the implicit interface.
+    ("symfony/console", 1),
+    // 0 → 15 (+15) with ADR-0043 stage 4. Every finding is a deliberate
+    // negative-test call site (`expectException(\LogicException::class)` /
+    // `\PhpParser\...`) passing a wrong-typed argument to a class-typed `@param`:
+    // `new Name()` vs `(string|Identifier|Expr)` (Name is-a-No either), scalar `1`
+    // /`"test"` vs `(Node|Builder)` / `(string|Identifier)`, `new stdClass()` vs a
+    // `\UnitEnum`-bearing union. All in `test/PhpParser/Builder*Test.php` and
+    // `NodeDumperTest.php`; each asserts the runtime `LogicException` that the
+    // phpdoc contract predicts — TRUE, released, working test code.
+    ("nikic/PHP-Parser", 15),
     // The private monorepo (corpus.local.toml); matched by its local project name.
     // 333 → 357 (+24) with ADR-0031 branch-sensitive analysis: the structured `if`
     // walk, ternary values, and positive refinement now reach proven values that
@@ -124,7 +146,32 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // Property checks run only in the plain per-scope pass (never under a binding
     // descent, whose caller values in-body guards would narrow), so the descent-bound
     // guard-blind candidates seen mid-development do not reach the gate.
-    ("pxxxx-monorepo", 405),
+    //
+    // 405 → 439 (+34) with ADR-0043 stage 4 (phpdoc-side class contracts + the
+    // enum-case/class-const value resolution that feeds them). The delta was
+    // baseline-diffed (a HEAD worktree) and triaged verbatim; all 34 net-new (36
+    // added, 2 pre-existing FPs removed) are TRUE:
+    //   - class-const string args vs `@param int`/`int[]` (a DAO's `TYPE_*`
+    //     consts holding `"3"`-style numeric strings into `int`; a const list of
+    //     numeric-string ids into `int[]`) — the stringly-typed DB-illusion
+    //     pattern (ADR-0037), now that class-const args resolve to their literals.
+    //   - proven scalars/objects vs a class-typed contract: a service-name string
+    //     vs an enum param, an int literal vs a `SomeInterface|false` union,
+    //     a float literal (an `@phpstan-ignore` intentional wrong type) vs a
+    //     scalar|`BackedEnum` union, a prose string literal vs a `list<Model>`
+    //     param, `null` assigned to a property whose `@var` names a PDO
+    //     wrapper class on `disconnect()`.
+    //   - sealed array-shape violations surfaced once a value became provable (its
+    //     class-const/`::class`/enum elements now resolve): two finder methods'
+    //     options arrays carrying a key their `@param array{…}` omits; a
+    //     data-provider `expected => SomeException::class` (a *string*) where
+    //     the `@return array<…, array<untyped>>` wants an array; a
+    //     metadata-defaults const carrying an extra key vs its `@return array{…}`.
+    // The 2 removed are pre-existing FPs the stage cleared: an unresolved const-fetch
+    // *type* (`SomeClass::LIST_*`) no longer manufactures a No against an array
+    // value (const-fetch types are silent), and a `[]`-vs-`non-empty-list` finding a
+    // `count()===0`-guarded value could never actually reach. Runtime layer GREEN.
+    ("pxxxx-monorepo", 439),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).
