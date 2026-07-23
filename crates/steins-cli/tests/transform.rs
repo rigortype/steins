@@ -45,6 +45,9 @@ impl TempProject {
     }
     fn write(&self, name: &str, contents: &str) -> PathBuf {
         let p = self.dir.join(name);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         std::fs::write(&p, contents).unwrap();
         p
     }
@@ -311,4 +314,80 @@ fn in_universe_include_does_not_obstruct() {
     assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
     assert!(!r.stdout.contains("Dynamic-code obstacles"), "should be benign:\n{}", r.stdout);
     assert!(r.stdout.contains("1 promoted"), "{}", r.stdout);
+}
+
+// ---- ADR-0047 Slice A: [transform.partitions] parsing (zero behavior change) --
+
+/// A well-formed `[transform.partitions]` section parses and threads through to
+/// the planner, but changes nothing this slice: the promotion result is identical
+/// to a run with no partition config (ADR-0047 §6). Round-trips the config surface
+/// from ADR-0047 §7 (observers + `[transform.partitions.sets]`).
+#[test]
+fn partitions_config_parses_and_changes_nothing() {
+    let proj = TempProject::new("partitions-ok");
+    proj.write("svc-a.example/lib.php", "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n");
+    proj.write("svc-a.example/main.php", "<?php\nf(1);\n");
+    let cfg = proj.write(
+        "steins.toml",
+        "[transform.partitions]\n\
+         observers = [\"tests/**\"]\n\n\
+         [transform.partitions.sets]\n\
+         svc-a = [\"svc-a.example/**\"]\n\
+         batch = [\"batch/**\"]\n",
+    );
+
+    // With the config…
+    let with_cfg = run(&[
+        "transform",
+        "phpdoc-to-native",
+        "--config",
+        cfg.to_str().unwrap(),
+        proj.dir.join("svc-a.example").to_str().unwrap(),
+    ]);
+    assert_eq!(with_cfg.code, 0, "stderr:\n{}", with_cfg.stderr);
+    assert!(with_cfg.stdout.contains("1 promoted"), "should still promote:\n{}", with_cfg.stdout);
+    assert!(!with_cfg.stderr.contains("partitions"), "no error expected:\n{}", with_cfg.stderr);
+
+    // …and with no partition config at all: identical oracle line (zero behavior
+    // change). Point --config at a file that has no [transform.partitions].
+    let plain = proj.write("plain.toml", "[transform.vouch]\nsites = []\n");
+    let without = run(&[
+        "transform",
+        "phpdoc-to-native",
+        "--config",
+        plain.to_str().unwrap(),
+        proj.dir.join("svc-a.example").to_str().unwrap(),
+    ]);
+    assert_eq!(without.code, 0, "stderr:\n{}", without.stderr);
+    assert_eq!(with_cfg.stdout, without.stdout, "partition config must not change output");
+}
+
+/// Overlapping partition path-sets are a hard config error (ADR-0047 §7): the run
+/// exits 2 with a message naming the conflict, rather than proceeding on an
+/// ambiguous assignment.
+#[test]
+fn overlapping_partitions_are_a_config_error() {
+    let proj = TempProject::new("partitions-overlap");
+    proj.write("svc-a.example/lib.php", "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n");
+    let cfg = proj.write(
+        "steins.toml",
+        "[transform.partitions.sets]\n\
+         outer = [\"svc-a.example/**\"]\n\
+         inner = [\"svc-a.example/sub/**\"]\n",
+    );
+
+    let r = run(&[
+        "transform",
+        "phpdoc-to-native",
+        "--config",
+        cfg.to_str().unwrap(),
+        proj.path(),
+    ]);
+    assert_eq!(r.code, 2, "overlap must exit 2; stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("overlap"), "error should name the overlap:\n{}", r.stderr);
+    assert!(
+        r.stderr.contains("[transform.partitions]"),
+        "error should name the config section:\n{}",
+        r.stderr
+    );
 }

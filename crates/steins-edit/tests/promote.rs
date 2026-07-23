@@ -20,7 +20,7 @@ fn plan(files: &[(&str, &str)]) -> TransformReport {
         .map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned()))
         .collect();
     let project = Project::new(&db, inputs);
-    plan_phpdoc_to_native(&db, project, &VouchSet::empty())
+    plan_phpdoc_to_native(&db, project, &VouchSet::empty(), None)
 }
 
 /// Plan, then apply the plan's edits to the first file, returning its rewrite.
@@ -418,7 +418,7 @@ fn plan_vouched(files: &[(&str, &str)], vouches: &VouchSet) -> TransformReport {
         .map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned()))
         .collect();
     let project = Project::new(&db, inputs);
-    plan_phpdoc_to_native(&db, project, vouches)
+    plan_phpdoc_to_native(&db, project, vouches, None)
 }
 
 /// An unproven `eval` anywhere in the project makes "all callers proven" false:

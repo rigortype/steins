@@ -10,6 +10,10 @@
 //! - [`common`] — the machinery the two phpdoc transforms genuinely share: the
 //!   reverse-sweep refusal reasons, candidate/value helpers, and the value-domain
 //!   → ADR-0029 phpdoc **type rendering**.
+//! - [`regions`] — the region model (ADR-0047 Slice A): the pure config→region
+//!   assignment ([`PartitionMap`]). Slice A threads it through to the planners but
+//!   no planner decides on it yet (with one region the planner is byte-identical
+//!   to today's whole-universe behavior).
 //! - [`obstacles`] — project-global dynamic-code obstacle detection (ADR-0046 §2):
 //!   `eval` / dynamic-`include` sites that make "all callers proven" unknowable,
 //!   the vendor presumption, and the `steins.toml` vouching valve.
@@ -30,12 +34,14 @@ pub mod honesty;
 pub mod obstacles;
 pub mod plan;
 pub mod promote;
+pub mod regions;
 pub mod transform;
 
 pub use diff::unified_diff;
 pub use honesty::{PhpdocHonesty, plan_phpdoc_honesty};
 pub use obstacles::{DynamismObstacles, VouchSet};
 pub use plan::{ByteSpan, Edit, EditPlan, NewFile, PlanError};
+pub use regions::{PartitionConfigError, PartitionMap, RegionId};
 pub use promote::{PhpdocToNative, plan_phpdoc_to_native};
 pub use transform::{
     CompletenessOracle, Obstacle, Refusal, SiteRef, Transform, TransformReport,

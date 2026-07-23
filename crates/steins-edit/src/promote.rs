@@ -107,8 +107,21 @@ impl Transform for PhpdocToNative {
 /// [`VouchSet::empty`] when none. A standing (unvouched) `eval` / dynamic-include
 /// obstacle (ADR-0046 §2) makes "all callers proven" unknowable project-wide, so
 /// *every* candidate refuses while one remains.
+///
+/// `partitions` is the region map (ADR-0047 §6), `None` for the single-region
+/// identity. **Slice A wires it through but does not consume it**: no promotion
+/// decision reads the map yet, so the plan is byte-identical whether it is `None`,
+/// an identity [`single_region`](crate::PartitionMap::single_region) map, or a
+/// fully-declared map — the scoped-enumeration behavior lands in a later slice.
 #[must_use]
-pub fn plan_phpdoc_to_native(db: &dyn Db, project: Project, vouches: &VouchSet) -> TransformReport {
+pub fn plan_phpdoc_to_native(
+    db: &dyn Db,
+    project: Project,
+    vouches: &VouchSet,
+    partitions: Option<&crate::regions::PartitionMap>,
+) -> TransformReport {
+    // ADR-0047 Slice A: received, deliberately not consumed (zero behavior change).
+    let _ = partitions;
     let sweep = sweep_free_functions(db, project);
     // The class-world reverse sweep (ADR-0043 §6): method targets, taints, and the
     // ADR-0041 §1 eligibility verdicts. Free-function behavior is unaffected.

@@ -11,6 +11,15 @@
 //! path = "/absolute/path"
 //! # optional:
 //! exclude = ["cache/**", "assets-origin/**"]
+//!
+//! # optional per-project partition declaration (ADR-0047 §7); shape-validated
+//! # and IGNORED this slice (Slice A) — Slice E consumes it for the scoped
+//! # measurement:
+//! [project.partitions]
+//! observers = ["tests/**"]
+//! [project.partitions.sets]
+//! svc-a = ["svc-a/**"]
+//! batch = ["batch/**"]
 //! ```
 //!
 //! Local projects are **unpinned** (they are live working trees — no sync, no
@@ -33,6 +42,30 @@ pub struct LocalProject {
     /// Glob patterns (see [`glob_match`]) pruning subtrees/files from the walk.
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// Optional per-project partition declaration (ADR-0047 §7), mapped onto the
+    /// same shape as `steins.toml [transform.partitions]`. **Parsed and validated
+    /// for shape only this slice (ADR-0047 Slice A) — it is NOT consumed by the
+    /// gate.** Slice E wires the measurement passthrough that reads it; until then
+    /// the fp-gate remains one-universe-per-package (ADR-0047 §7).
+    // Deliberately unread this slice — shape-validated passthrough only (Slice E).
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub partitions: Option<PartitionsSpec>,
+}
+
+/// The `[project.partitions]` shape on a `corpus.local.toml` entry (ADR-0047 §7):
+/// observer globs and a `[project.partitions.sets]` name→glob-list table. This
+/// mirrors `steins.toml [transform.partitions]` but is only shape-validated here;
+/// Slice E builds the region map from it.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[allow(dead_code)] // fields consumed by Slice E; shape-validated only for now.
+pub struct PartitionsSpec {
+    /// Observer path-sets (tests, dev-scripts; ADR-0047 §1).
+    #[serde(default)]
+    pub observers: Vec<String>,
+    /// Partition name → glob list.
+    #[serde(default)]
+    pub sets: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -205,6 +238,45 @@ mod tests {
         // Missing `exclude` defaults to empty.
         assert_eq!(cfg.projects[1].name, "plugin");
         assert!(cfg.projects[1].exclude.is_empty());
+    }
+
+    #[test]
+    fn parses_optional_partitions_passthrough_shape() {
+        // ADR-0047 Slice A: the `[project.partitions]` table is shape-validated and
+        // carried on the entry, but not consumed by the gate yet (Slice E).
+        let cfg: LocalConfig = toml::from_str(
+            r#"
+            [[project]]
+            name = "monorepo"
+            path = "/abs/mono"
+
+            [project.partitions]
+            observers = ["tests/**", "dev-script/**"]
+
+            [project.partitions.sets]
+            svc-a = ["svc-a/**"]
+            batch = ["batch/**"]
+            "#,
+        )
+        .expect("partitions passthrough parses");
+        let p = cfg.projects[0].partitions.as_ref().expect("partitions present");
+        assert_eq!(p.observers, vec!["tests/**", "dev-script/**"]);
+        assert_eq!(p.sets.len(), 2);
+        assert_eq!(p.sets["svc-a"], vec!["svc-a/**"]);
+        assert_eq!(p.sets["batch"], vec!["batch/**"]);
+    }
+
+    #[test]
+    fn partitions_default_to_none_when_absent() {
+        let cfg: LocalConfig = toml::from_str(
+            r#"
+            [[project]]
+            name = "plain"
+            path = "/abs/plain"
+            "#,
+        )
+        .expect("parses");
+        assert!(cfg.projects[0].partitions.is_none());
     }
 
     #[test]

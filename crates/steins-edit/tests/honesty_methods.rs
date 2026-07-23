@@ -15,7 +15,7 @@ fn plan(files: &[(&str, &str)]) -> TransformReport {
         .map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned()))
         .collect();
     let project = Project::new(&db, inputs);
-    plan_phpdoc_honesty(&db, project, &VouchSet::empty())
+    plan_phpdoc_honesty(&db, project, &VouchSet::empty(), None)
 }
 
 fn assert_oracle_complete(report: &TransformReport) {

@@ -20,7 +20,7 @@ fn plan(files: &[(&str, &str)]) -> TransformReport {
         .map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned()))
         .collect();
     let project = Project::new(&db, inputs);
-    plan_phpdoc_honesty(&db, project, &VouchSet::empty())
+    plan_phpdoc_honesty(&db, project, &VouchSet::empty(), None)
 }
 
 fn apply_first(files: &[(&str, &str)]) -> String {
@@ -409,7 +409,7 @@ fn eval_blocks_honesty_widening() {
         .map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned()))
         .collect();
     let project = Project::new(&db, inputs);
-    let report = plan_phpdoc_honesty(&db, project, &VouchSet::empty());
+    let report = plan_phpdoc_honesty(&db, project, &VouchSet::empty(), None);
     assert!(report.oracle.is_complete());
     assert_eq!(report.oracle.transformed, 0, "eval must block widening: {:#?}", report.plan);
     assert!(report.refusals.iter().all(|r| r.reason == REASON_EVAL_PRESENT));

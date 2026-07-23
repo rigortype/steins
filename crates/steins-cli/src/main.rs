@@ -15,7 +15,8 @@ use std::process::ExitCode;
 
 use steins_db::{Project, SourceFile, SteinsDatabase, parse as parse_tree};
 use steins_edit::{
-    TransformReport, VouchSet, plan_phpdoc_honesty, plan_phpdoc_to_native, unified_diff,
+    PartitionMap, TransformReport, VouchSet, plan_phpdoc_honesty, plan_phpdoc_to_native,
+    unified_diff,
 };
 use steins_infer::{
     Diagnostic, LineFact, NoFold, SOUND_SUBSET_NOTICE, SidecarFolder, annotate_file,
@@ -365,6 +366,19 @@ fn run_transform(args: &[String]) -> ExitCode {
         eprintln!("steins: {w}");
     }
 
+    // Load the region map (ADR-0047 §7): `steins.toml [transform.partitions]`. With
+    // no such section this is `None` — the single-region identity, so the transform
+    // is byte-identical to a run with no partition config. An *overlap* in the
+    // declared partition path-sets is a hard config error (unlike a vouch typo),
+    // because a non-disjoint partition claim has no defined region assignment.
+    let partitions = match load_partitions(config_path.as_deref()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("steins: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
     let mut files = Vec::new();
     for p in &paths {
         collect_php_files(Path::new(p), &mut files);
@@ -390,9 +404,11 @@ fn run_transform(args: &[String]) -> ExitCode {
     let project = Project::new(&db, inputs.clone());
 
     // Plan the transform (pure — no writes, no re-check).
+    // ADR-0047 Slice A: the region map is threaded into the planners but not yet
+    // consumed by any decision — the plan is identical with or without it.
     let report = match kind {
-        Kind::Promote => plan_phpdoc_to_native(&db, project, &vouches),
-        Kind::Honesty => plan_phpdoc_honesty(&db, project, &vouches),
+        Kind::Promote => plan_phpdoc_to_native(&db, project, &vouches, partitions.as_ref()),
+        Kind::Honesty => plan_phpdoc_honesty(&db, project, &vouches, partitions.as_ref()),
     };
 
     // Vouching an already-benign (or nonexistent) site is a no-op the user should
@@ -445,8 +461,9 @@ fn run_transform(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `steins.toml` — only the `[transform.vouch]` section is read this slice
-/// (ADR-0046 §2). Unknown keys are ignored so the file can carry future config.
+/// `steins.toml` — the `[transform.vouch]` (ADR-0046 §2) and
+/// `[transform.partitions]` (ADR-0047 §7) sections are read this slice. Unknown
+/// keys are ignored so the file can carry future config.
 #[derive(serde::Deserialize, Default)]
 struct SteinsConfig {
     transform: Option<TransformConfig>,
@@ -455,6 +472,7 @@ struct SteinsConfig {
 #[derive(serde::Deserialize, Default)]
 struct TransformConfig {
     vouch: Option<VouchConfig>,
+    partitions: Option<PartitionsConfig>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -462,6 +480,20 @@ struct VouchConfig {
     /// User-vouched dynamic-code sites as `file:line` entries.
     #[serde(default)]
     sites: Vec<String>,
+}
+
+/// The `[transform.partitions]` section (ADR-0047 §7): declared observer globs and
+/// the `[transform.partitions.sets]` name→glob-list table. Region assignment is a
+/// pure function of these plus the file path ([`PartitionMap`]).
+#[derive(serde::Deserialize, Default)]
+struct PartitionsConfig {
+    /// Observer path-sets (tests, dev-scripts; ADR-0047 §1).
+    #[serde(default)]
+    observers: Vec<String>,
+    /// Partition name → glob list. A `BTreeMap` gives deterministic iteration;
+    /// partitions are disjoint (validated), so order never affects assignment.
+    #[serde(default)]
+    sets: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// Load the vouching valve from `steins.toml` (ADR-0046 §2). Reads `--config` when
@@ -505,6 +537,39 @@ fn load_vouches(config_path: Option<&str>) -> (VouchSet, Vec<String>) {
         }
     }
     (VouchSet::from_entries(entries), warnings)
+}
+
+/// Load the region map from `steins.toml [transform.partitions]` (ADR-0047 §7).
+/// Reads `--config` when given, else `./steins.toml` if present.
+///
+/// Returns `Ok(None)` — the single-region identity — when the file is missing,
+/// unparseable (the vouch loader already surfaces the parse warning), or carries
+/// no `[transform.partitions]` section; a run with no partition config is then
+/// byte-identical to today's behavior. Returns `Err` only for a genuine config
+/// error: overlapping partition path-sets (which have no defined assignment).
+fn load_partitions(config_path: Option<&str>) -> Result<Option<PartitionMap>, String> {
+    let path = match config_path {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from("steins.toml"),
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    // A parse error is already reported by `load_vouches`; proceed as identity here
+    // rather than double-warning.
+    let Ok(config) = toml::from_str::<SteinsConfig>(&text) else {
+        return Ok(None);
+    };
+    let Some(partitions) = config.transform.and_then(|t| t.partitions) else {
+        return Ok(None);
+    };
+    // An empty section (no sets, no observers) is still the identity.
+    if partitions.sets.is_empty() && partitions.observers.is_empty() {
+        return Ok(None);
+    }
+    PartitionMap::build(partitions.sets, partitions.observers)
+        .map(Some)
+        .map_err(|e| format!("steins.toml [transform.partitions]: {e}"))
 }
 
 /// The outcome of the dual-verification post-check: whether the edited project is
