@@ -26,8 +26,9 @@ use steins_syntax::SourceTree;
 
 use crate::Diagnostic;
 use crate::{
-    CALL_ON_NULL_ID, EFFECT_ID, EFFECT_LISKOV_ID, ID, PARAM_MISMATCH_ID, RETURN_ID,
-    RETURN_MISMATCH_ID, THROW_LISKOV_ID, THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID,
+    CALL_ON_NULL_ID, EFFECT_ID, EFFECT_LISKOV_ID, ID, PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID,
+    PROP_MISMATCH_ID, READONLY_REASSIGNED_ID, RETURN_ID, RETURN_MISMATCH_ID, THROW_LISKOV_ID,
+    THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID,
 };
 
 /// The registry id for an `@steins-ignore` whose diagnostic id matches nothing on
@@ -38,23 +39,91 @@ pub const SUPPRESS_UNMATCHED_ID: &str = "suppress.unmatched";
 /// (ADR-0022 registry-governed). Exempt from suppression.
 pub const SUPPRESS_UNKNOWN_ID: &str = "suppress.unknown-id";
 
-/// The diagnostic-id registry (ADR-0022): the closed set of ids Steins currently
-/// emits. `@steins-ignore` ids are validated against it (prefix-aware), and the
-/// baseline records these ids verbatim.
-pub const DIAGNOSTIC_IDS: &[&str] = &[
-    ID,
-    RETURN_ID,
-    PARAM_MISMATCH_ID,
-    RETURN_MISMATCH_ID,
-    CALL_ON_NULL_ID,
-    EFFECT_ID,
-    UNKNOWN_LABEL_ID,
-    EFFECT_LISKOV_ID,
-    THROW_UNDECLARED_ID,
-    THROW_LISKOV_ID,
-    SUPPRESS_UNMATCHED_ID,
-    SUPPRESS_UNKNOWN_ID,
+/// The **diagnostic layer** an id carries (ADR-0050 §1): its semantic identity —
+/// *what kind of claim it makes* — not a severity grade. The layer, not a string
+/// prefix, is the carrier both the fp-gate (ADR-0050 §9) and the user-facing
+/// surfaces key on; prefix spellings (`throw.*`) stay a config convenience only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Layer {
+    /// Runtime survivability: the program provably breaks on a live path. Held to
+    /// the zero-FP bar; gates red on sight (ADR-0013).
+    Proof,
+    /// Declared-contract acceptance: a proven behavior violates something the code
+    /// *declares* about itself; the program still works. TRUE findings legitimately
+    /// abound in released code, so these gate as increase tripwires, never on sight.
+    Contract,
+    /// The apparatus's own hygiene: a finding whose absence would silently rot
+    /// another channel. Gates red on sight (apparatus rot on corpus code).
+    Mechanics,
+}
+
+impl Layer {
+    /// The lowercase wire spelling (`"proof"|"contract"|"mechanics"`) used by the
+    /// `--format json` `layer` field (ADR-0050 §2).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Layer::Proof => "proof",
+            Layer::Contract => "contract",
+            Layer::Mechanics => "mechanics",
+        }
+    }
+}
+
+/// The diagnostic-id registry (ADR-0022/0050): the closed set of ids Steins emits,
+/// each paired with its [`Layer`] (ADR-0050 §2 makes the layer a first-class
+/// registry attribute). This is the **single source of truth** — `DIAGNOSTIC_IDS`
+/// is derived from it, `layer()` reads it, and registering an id here without a
+/// layer does not compile (every entry is an `(id, Layer)` tuple). A workspace
+/// totality test asserts every *emittable* id constant appears here.
+///
+/// `@steins-ignore` ids are validated against it (prefix-aware), and the baseline
+/// records these ids verbatim.
+pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer)] = &[
+    // proof — runtime survivability (zero-FP, red on sight).
+    (ID, Layer::Proof),
+    (RETURN_ID, Layer::Proof),
+    (CALL_ON_NULL_ID, Layer::Proof),
+    (PROP_MISMATCH_ID, Layer::Proof),
+    (READONLY_REASSIGNED_ID, Layer::Proof),
+    // contract — declared-contract acceptance (increase tripwires).
+    (PARAM_MISMATCH_ID, Layer::Contract),
+    (RETURN_MISMATCH_ID, Layer::Contract),
+    (PHPDOC_PROP_MISMATCH_ID, Layer::Contract),
+    (THROW_UNDECLARED_ID, Layer::Contract),
+    (THROW_LISKOV_ID, Layer::Contract),
+    (EFFECT_ID, Layer::Contract),
+    (EFFECT_LISKOV_ID, Layer::Contract),
+    // mechanics — apparatus hygiene (red on sight, suppression-exempt).
+    (SUPPRESS_UNMATCHED_ID, Layer::Mechanics),
+    (SUPPRESS_UNKNOWN_ID, Layer::Mechanics),
+    (UNKNOWN_LABEL_ID, Layer::Mechanics),
 ];
+
+/// The flat id list, **derived** from [`DIAGNOSTIC_REGISTRY`] so there is exactly
+/// one source of truth. Kept as a `&[&str]` for the prefix-matching consumers and
+/// the baseline, whose spellings are unchanged from before ADR-0050.
+pub const DIAGNOSTIC_IDS: &[&str] = &derive_ids();
+
+/// Project the registry down to its ids at compile time (keeps `DIAGNOSTIC_IDS` a
+/// pure derivation of [`DIAGNOSTIC_REGISTRY`], never a parallel hand-list).
+const fn derive_ids() -> [&'static str; DIAGNOSTIC_REGISTRY.len()] {
+    let mut arr = [""; DIAGNOSTIC_REGISTRY.len()];
+    let mut i = 0;
+    while i < DIAGNOSTIC_REGISTRY.len() {
+        arr[i] = DIAGNOSTIC_REGISTRY[i].0;
+        i += 1;
+    }
+    arr
+}
+
+/// The [`Layer`] a diagnostic `id` carries, or `None` if `id` is not a registered
+/// diagnostic id (ADR-0050 §2). An exact-id lookup — prefix/family subsumption is
+/// [`pattern_is_known`]'s concern, not the layer attribute's.
+#[must_use]
+pub fn layer(id: &str) -> Option<Layer> {
+    DIAGNOSTIC_REGISTRY.iter().find(|(i, _)| *i == id).map(|(_, l)| *l)
+}
 
 /// The result of applying inline ignores to a batch of object-level findings.
 pub struct InlineOutcome {

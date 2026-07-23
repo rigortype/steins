@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 use steins_db::{Project, SourceFile, SteinsDatabase, parse};
-use steins_infer::{Diagnostic, SidecarFolder, check_project, is_vendor_path};
+use steins_infer::{Diagnostic, Layer, SidecarFolder, check_project, is_vendor_path, layer};
 
 use crate::corpus::{PACKAGES, checkout_dir, collect_php_files, read_lock, repo_root};
 use crate::corpus_local::{self, LocalProject};
@@ -48,6 +48,15 @@ struct PackageReport {
     /// (the checked-exception volume ADR-0007 keeps quiet by default), so they
     /// gate only as a per-package increase tripwire.
     throws: Vec<Diagnostic>,
+    /// `effect.*` **contract-layer** findings (`effect.envelope-exceeded` /
+    /// `effect.liskov-widened`), held in measurement mode under ADR-0050 §9: the
+    /// recorded gate-policy delta moves them off red-on-sight onto the same
+    /// per-package increase tripwire as `phpdoc.*`/`throw.*`, matching their
+    /// declared-contract semantics. Vacuous on the corpus today (no ADR-0006
+    /// envelope annotations exist in the wild) and correct the day they are not.
+    /// `effect.unknown-label` is **mechanics**, not contract — it stays on the
+    /// red-on-sight path in `diagnostics`, never here.
+    effects: Vec<Diagnostic>,
     /// Triaged TRUE runtime-layer positives (real broken corpus code Steins
     /// correctly proves; see [`EXPECTED_PROOF_FINDINGS`]). Reported prominently
     /// but excluded from the red/green verdict — matched at finding precision so
@@ -58,14 +67,33 @@ struct PackageReport {
     elapsed: Duration,
 }
 
-/// Whether a diagnostic is one of the measurement-mode `phpdoc.*` ids.
+/// Whether a diagnostic is **contract-layer** (ADR-0050 §9): the layer, read from
+/// the steins-infer registry, is the gate's partitioning carrier — contract findings
+/// go to measurement mode; proof and mechanics (and any unregistered id, treated
+/// conservatively) gate red on sight.
+fn is_contract(d: &Diagnostic) -> bool {
+    layer(d.id) == Some(Layer::Contract)
+}
+
+/// Whether a diagnostic is one of the measurement-mode `phpdoc.*` contract ids.
+/// The `phpdoc.*` family is layer-homogeneous (all contract), so the prefix keys
+/// its separate count table; [`is_contract`] is what actually gates it.
 fn is_phpdoc(d: &Diagnostic) -> bool {
     d.id.starts_with("phpdoc.")
 }
 
-/// Whether a diagnostic is one of the measurement-mode `throw.*` ids (ADR-0040).
+/// Whether a diagnostic is one of the measurement-mode `throw.*` contract ids
+/// (ADR-0040) — the prefix keys its own count table (all `throw.*` are contract).
 fn is_throw(d: &Diagnostic) -> bool {
     d.id.starts_with("throw.")
+}
+
+/// Whether a diagnostic is one of the `effect.*` **contract** ids
+/// (`effect.envelope-exceeded` / `effect.liskov-widened`) — the ADR-0050 §9 delta
+/// family. Selected by layer *and* prefix so `effect.unknown-label` (mechanics)
+/// is excluded and stays red-on-sight.
+fn is_effect_contract(d: &Diagnostic) -> bool {
+    d.id.starts_with("effect.") && is_contract(d)
 }
 
 /// Permanent gate policy for `phpdoc.*` findings (ADR-0030 relation #1).
@@ -227,6 +255,25 @@ fn throw_expected(name: &str) -> usize {
     THROW_EXPECTED.iter().find(|(n, _)| *n == name).map_or(0, |(_, c)| *c)
 }
 
+/// Permanent gate policy for the `effect.*` **contract** ids
+/// (`effect.envelope-exceeded` / `effect.liskov-widened`), the ADR-0050 §9 recorded
+/// delta. These moved off the runtime red-on-sight path onto the identical
+/// per-package **increase** tripwire as [`PHPDOC_EXPECTED`] / [`THROW_EXPECTED`],
+/// matching their declared-contract semantics (a proven behavior exceeds an
+/// envelope the code *declares* about itself; the program still runs).
+///
+/// Seeded **empty** and vacuous today: no ADR-0006 effect envelopes exist in the
+/// pinned corpus or the legacy monorepo, so every package expects **zero** (absent
+/// = 0). It gates correctly the day an envelope-annotated package lands — update an
+/// entry here consciously when a checker change legitimately moves a count.
+const EFFECT_EXPECTED: &[(&str, usize)] = &[];
+
+/// The expected `effect.*`-contract count for a package/local-project name (0 if
+/// untabled — the all-zero seed).
+fn effect_expected(name: &str) -> usize {
+    EFFECT_EXPECTED.iter().find(|(n, _)| *n == name).map_or(0, |(_, c)| *c)
+}
+
 /// A single **triaged TRUE proof-layer positive** the corpus legitimately
 /// contains: real broken code that Steins correctly proves. Unlike the
 /// measurement-mode `phpdoc.*`/`throw.*` families this is a *runtime-layer*
@@ -337,15 +384,21 @@ pub fn run() -> Result<bool, String> {
     // expectation. Both `phpdoc.*` and `throw.*` are contract-layer.
     let regressions = phpdoc_regressions(&reports, &local_reports);
     let throw_regressions = measurement_regressions(&reports, &local_reports, "throw", |r| r.throws.len(), throw_expected);
+    // ADR-0050 §9 delta family: `effect.*`-contract findings gate as an increase
+    // tripwire too. Empty today (no corpus envelopes), so no package can regress.
+    let effect_regressions = measurement_regressions(&reports, &local_reports, "effect", |r| r.effects.len(), effect_expected);
 
-    print_report(&reports, &local_reports, &regressions, &throw_regressions);
+    print_report(&reports, &local_reports, &regressions, &throw_regressions, &effect_regressions);
 
     // RED on any counted proof-layer finding — package diagnostics plus local
     // *non-vendor* diagnostics (vendor findings never gate; ADR-0015) — OR on any
     // measurement-mode count that has regressed past its expected baseline.
     let total_diags: usize = reports.iter().map(|r| r.diagnostics.len()).sum::<usize>()
         + local_reports.iter().map(|r| r.diagnostics.len()).sum::<usize>();
-    Ok(total_diags == 0 && regressions.is_empty() && throw_regressions.is_empty())
+    Ok(total_diags == 0
+        && regressions.is_empty()
+        && throw_regressions.is_empty()
+        && effect_regressions.is_empty())
 }
 
 /// One measurement-mode regression: a package whose count exceeds its expectation.
@@ -423,11 +476,16 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
     let mut diags: Vec<Diagnostic> = FOLDER.with(|f| check_project(&db, project, &mut *f.borrow_mut()));
     diags.retain(|d| !parse_err_set.contains(d.path.as_str()));
     diags.sort_by(|a, b| (&a.path, a.line, a.column).cmp(&(&b.path, b.line, b.column)));
-    // Measurement-mode split: `phpdoc.*` and `throw.*` findings are reported +
-    // counted but do not gate this run (only their increase tripwire does).
+    // Measurement-mode split (ADR-0050 §9): contract-layer findings are reported +
+    // counted but do not gate on sight (only their per-package increase tripwire
+    // does). The **layer** (from the steins-infer registry) is the gate carrier;
+    // the family prefix keys each separate count table — `phpdoc.*`, `throw.*`, and
+    // the ADR-0050 §9 `effect.*` delta. Proof and mechanics stay red-on-sight in
+    // `diags` (`is_contract` keeps `effect.unknown-label`, a mechanics id, there).
     let phpdoc: Vec<Diagnostic> = diags.iter().filter(|d| is_phpdoc(d)).cloned().collect();
     let throws: Vec<Diagnostic> = diags.iter().filter(|d| is_throw(d)).cloned().collect();
-    diags.retain(|d| !is_phpdoc(d) && !is_throw(d));
+    let effects: Vec<Diagnostic> = diags.iter().filter(|d| is_effect_contract(d)).cloned().collect();
+    diags.retain(|d| !is_contract(d));
     // Split off triaged TRUE runtime-layer positives (reported, not gated).
     let expected_true: Vec<Diagnostic> =
         diags.iter().filter(|d| is_expected_true_positive(name, d)).cloned().collect();
@@ -442,6 +500,7 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
         diagnostics: diags,
         phpdoc,
         throws,
+        effects,
         expected_true,
         vendor_suppressed: 0,
         elapsed: start.elapsed(),
@@ -490,9 +549,11 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
     let vendor_suppressed = before - diags.len();
     diags.sort_by(|a, b| (&a.path, a.line, a.column).cmp(&(&b.path, b.line, b.column)));
     // Measurement-mode split (first-party only; vendor already removed above).
+    // Same ADR-0050 §9 layer-driven partition as `analyze_package`.
     let phpdoc: Vec<Diagnostic> = diags.iter().filter(|d| is_phpdoc(d)).cloned().collect();
     let throws: Vec<Diagnostic> = diags.iter().filter(|d| is_throw(d)).cloned().collect();
-    diags.retain(|d| !is_phpdoc(d) && !is_throw(d));
+    let effects: Vec<Diagnostic> = diags.iter().filter(|d| is_effect_contract(d)).cloned().collect();
+    diags.retain(|d| !is_contract(d));
     // Split off triaged TRUE runtime-layer positives (reported, not gated).
     let expected_true: Vec<Diagnostic> =
         diags.iter().filter(|d| is_expected_true_positive(&proj.name, d)).cloned().collect();
@@ -507,6 +568,7 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
         diagnostics: diags,
         phpdoc,
         throws,
+        effects,
         expected_true,
         vendor_suppressed,
         elapsed: start.elapsed(),
@@ -518,6 +580,7 @@ fn print_report(
     local_reports: &[PackageReport],
     regressions: &[PhpdocRegression],
     throw_regressions: &[PhpdocRegression],
+    effect_regressions: &[PhpdocRegression],
 ) {
     println!("\n=== fp-gate: per-package findings ===\n");
     if !local_reports.is_empty() {
@@ -660,6 +723,54 @@ fn print_report(
         }
     }
 
+    // Measurement-mode summary for the `effect.*` **contract** ids (ADR-0050 §9
+    // delta: `effect.envelope-exceeded` / `effect.liskov-widened`). Seeded empty
+    // and vacuous on the corpus (no ADR-0006 envelope annotations), so this whole
+    // section is **suppressed while dormant** — it prints nothing unless an effect
+    // finding lands, the expected table is seeded, or a regression trips. That
+    // keeps the gate report byte-identical to the pre-convergence run today, and
+    // surfaces the family the day the corpus grows an envelope.
+    let total_effect: usize = reports.iter().chain(local_reports.iter()).map(|r| r.effects.len()).sum();
+    if total_effect > 0 || !EFFECT_EXPECTED.is_empty() || !effect_regressions.is_empty() {
+        let total_effect_expected: usize = EFFECT_EXPECTED.iter().map(|(_, c)| *c).sum();
+        println!("\n=== effect.* measurement mode (contract layer — gates only on INCREASE) ===\n");
+        for r in reports.iter().chain(local_reports.iter()) {
+            let expected = effect_expected(&r.name);
+            if r.effects.is_empty() && expected == 0 {
+                continue;
+            }
+            let label = if r.local { format!("{} (local)", r.name) } else { r.name.clone() };
+            let (envelope, liskov) = r.effects.iter().fold((0usize, 0usize), |(e, l), d| match d.id {
+                "effect.envelope-exceeded" => (e + 1, l),
+                "effect.liskov-widened" => (e, l + 1),
+                _ => (e, l),
+            });
+            let actual = r.effects.len();
+            let marker = match actual.cmp(&expected) {
+                std::cmp::Ordering::Greater => "  ⬆ REGRESSION (exceeds expected)",
+                std::cmp::Ordering::Less => "  ⬇ improved (below expected — update baseline when intentional)",
+                std::cmp::Ordering::Equal => "",
+            };
+            println!(
+                "{label} — {actual} effect.* ({envelope} envelope, {liskov} liskov) [expected {expected}]{marker}"
+            );
+            if actual > expected {
+                for d in r.effects.iter().take(3) {
+                    println!("    EFFECT {}:{}:{} [{}] {}", d.path, d.line, d.column, d.id, d.message);
+                }
+            }
+        }
+        println!("effect.* TOTAL: {total_effect} (expected baseline {total_effect_expected})");
+        if effect_regressions.is_empty() {
+            println!("effect.* tripwire: OK — no package exceeds its expected baseline.");
+        } else {
+            println!("effect.* tripwire: TRIPPED — the following packages regressed:");
+            for reg in effect_regressions {
+                println!("    {} — {} > expected {}", reg.name, reg.actual, reg.expected);
+            }
+        }
+    }
+
     // Summary table: packages and local projects share one table; local rows are
     // marked `(local)`.
     let rows = || reports.iter().chain(local_reports.iter());
@@ -695,7 +806,8 @@ fn print_report(
     println!("{:<name_w$}  {:>6}  {:>12}  {:>11}  {:>8.2}", "TOTAL", tf, tp, td, ttime);
 
     println!();
-    let measurement_ok = regressions.is_empty() && throw_regressions.is_empty();
+    let measurement_ok =
+        regressions.is_empty() && throw_regressions.is_empty() && effect_regressions.is_empty();
     match (td == 0, measurement_ok) {
         (true, true) => {
             println!(

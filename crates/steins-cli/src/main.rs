@@ -915,6 +915,9 @@ fn print_json(findings: &[Diagnostic], vendor_suppressed: usize, suppressed: usi
         .map(|d| {
             serde_json::json!({
                 "id": d.id,
+                // ADR-0050 §2: the diagnostic layer, additive. Every emitted id is
+                // registered (totality test), so this is always present.
+                "layer": steins_infer::layer(d.id).map(steins_infer::Layer::as_str),
                 "path": d.path,
                 "line": d.line,
                 "column": d.column,

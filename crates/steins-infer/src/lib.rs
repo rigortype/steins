@@ -22,8 +22,8 @@ pub mod promote;
 pub mod suppress;
 
 pub use suppress::{
-    DIAGNOSTIC_IDS, InlineOutcome, SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID,
-    apply_inline_ignores, pattern_is_known,
+    DIAGNOSTIC_IDS, DIAGNOSTIC_REGISTRY, InlineOutcome, Layer, SUPPRESS_UNKNOWN_ID,
+    SUPPRESS_UNMATCHED_ID, apply_inline_ignores, layer, pattern_is_known,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -119,6 +119,37 @@ pub const THROW_LISKOV_ID: &str = "throw.liskov-widened";
 /// may be purer, never less pure; the exhaustiveness-tainted (unknown) remainder
 /// stays silent — only the proven subset judges.
 pub const EFFECT_LISKOV_ID: &str = "effect.liskov-widened";
+
+/// Every id constant that reaches a `Diagnostic { id: … }` construction site — the
+/// canonical enumeration of what the emitters can produce (ADR-0050 §2 totality).
+///
+/// **Invariant, checked by the workspace totality test** (`tests/registry.rs`):
+/// this list and [`DIAGNOSTIC_REGISTRY`] are the same set, both directions — so a
+/// new emitter whose id is added here but not registered (or the reverse) fails to
+/// build the tests. Adding a `*_ID` constant and emitting it therefore *forces*
+/// both a registry entry (with a layer) and an entry here. The two live in
+/// different files on purpose: the registry carries the layer attribute, this
+/// carries "is emitted", and the test binds them.
+///
+/// `SUPPRESS_UNMATCHED_ID` / `SUPPRESS_UNKNOWN_ID` are emitted from
+/// [`suppress`] and so are covered via the registry side of the test.
+pub const ALL_EMITTABLE_IDS: &[&str] = &[
+    ID,
+    RETURN_ID,
+    CALL_ON_NULL_ID,
+    PROP_MISMATCH_ID,
+    READONLY_REASSIGNED_ID,
+    PARAM_MISMATCH_ID,
+    RETURN_MISMATCH_ID,
+    PHPDOC_PROP_MISMATCH_ID,
+    THROW_UNDECLARED_ID,
+    THROW_LISKOV_ID,
+    EFFECT_ID,
+    EFFECT_LISKOV_ID,
+    UNKNOWN_LABEL_ID,
+    suppress::SUPPRESS_UNMATCHED_ID,
+    suppress::SUPPRESS_UNKNOWN_ID,
+];
 
 /// The maximum depth of interprocedural argument-binding descent (Feature B).
 ///

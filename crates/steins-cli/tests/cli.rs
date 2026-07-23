@@ -70,6 +70,9 @@ fn json_format_smoke() {
     assert_eq!(arr.len(), 1);
     let d = &arr[0];
     assert_eq!(d["id"], "type.argument-mismatch");
+    // ADR-0050 §2: additive per-finding layer field. `type.argument-mismatch` is
+    // a proof-layer id.
+    assert_eq!(d["layer"], "proof");
     assert_eq!(d["line"], 7);
     assert_eq!(d["column"], 7);
     assert_eq!(d["path"].as_str().unwrap(), fixture("demo.php").to_string_lossy());
