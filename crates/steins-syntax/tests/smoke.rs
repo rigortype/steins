@@ -478,3 +478,63 @@ fn class_const_access_lowers_to_class_const_value() {
         other => panic!("expected ClassConst, got {other:?}"),
     }
 }
+
+// ---- ADR-0046 §2: dynamism sites (eval / include / require) ----------------
+
+use steins_syntax::{DynamismKind, IncludePath};
+
+#[test]
+fn eval_is_collected_as_a_dynamism_site() {
+    let tree = SourceTree::parse("<?php\neval('foo(42)');\n");
+    assert!(tree.contains_eval());
+    let sites = tree.dynamism_sites();
+    assert_eq!(sites.len(), 1);
+    assert!(matches!(sites[0].kind, DynamismKind::Eval));
+    // The site's starting line is the vouching key.
+    assert_eq!(tree.position(sites[0].span.start).line, 2);
+}
+
+#[test]
+fn eval_inside_a_function_body_is_collected_file_wide() {
+    // Unlike the per-scope poison flag, dynamism collection descends into bodies.
+    let tree = SourceTree::parse("<?php\nfunction f() { eval('x();'); }\n");
+    assert!(tree.contains_eval());
+    assert_eq!(tree.dynamism_sites().len(), 1);
+}
+
+#[test]
+fn include_path_shapes_lower_as_expected() {
+    let cases: &[(&str, IncludePath)] = &[
+        ("<?php require 'inc/util.php';", IncludePath::Literal("inc/util.php".to_owned())),
+        ("<?php include_once __DIR__ . '/a.php';", IncludePath::DirRelative("/a.php".to_owned())),
+        ("<?php require __DIR__ . '/a' . '/b.php';", IncludePath::DirRelative("/a/b.php".to_owned())),
+        ("<?php require 'a' . 'b.php';", IncludePath::Literal("ab.php".to_owned())),
+        ("<?php require $page;", IncludePath::Unproven),
+        ("<?php require dirname(__FILE__) . '/x.php';", IncludePath::Unproven),
+    ];
+    for (src, want) in cases {
+        let tree = SourceTree::parse(src);
+        let sites = tree.dynamism_sites();
+        assert_eq!(sites.len(), 1, "`{src}`");
+        match &sites[0].kind {
+            DynamismKind::Include(ip) => assert_eq!(ip, want, "`{src}`"),
+            other => panic!("`{src}`: expected include, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn all_four_import_keywords_are_collected() {
+    let tree = SourceTree::parse(
+        "<?php\ninclude 'a.php';\ninclude_once 'b.php';\nrequire 'c.php';\nrequire_once 'd.php';\n",
+    );
+    assert_eq!(tree.dynamism_sites().len(), 4);
+    assert!(!tree.contains_eval());
+}
+
+#[test]
+fn a_clean_file_has_no_dynamism_sites() {
+    let tree = SourceTree::parse("<?php\nfunction f(int $x): int { return $x; }\nf(1);\n");
+    assert!(tree.dynamism_sites().is_empty());
+    assert!(!tree.contains_eval());
+}

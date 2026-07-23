@@ -1036,6 +1036,7 @@ dependencies = [
  "steins-edit",
  "steins-infer",
  "steins-syntax",
+ "toml",
 ]
 
 [[package]]

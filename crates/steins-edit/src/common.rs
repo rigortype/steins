@@ -48,6 +48,15 @@ pub const REASON_AMBIGUOUS: &str = "resolution-ambiguous";
 pub const REASON_NAMED_OR_SPREAD: &str = "named-or-spread-args";
 /// At least one relevant call-site argument is not a proven literal.
 pub const REASON_ARG_NOT_PROVEN: &str = "argument-not-proven";
+/// A non-vendor project file contains an `eval(...)` — code as data can call any
+/// free function with no CST call site (ADR-0046 §2), so "all callers proven" is
+/// unknowable project-wide. A project-global obstacle: every candidate refuses.
+pub const REASON_EVAL_PRESENT: &str = "eval-present";
+/// A non-vendor `include`/`require` whose path is unproven, or a proven literal
+/// that does not resolve inside the analyzed universe (ADR-0046 §2) — out-of-
+/// universe code (compiled-template caches) can define/call anything. A project-
+/// global obstacle: every candidate refuses.
+pub const REASON_DYNAMIC_INCLUDE: &str = "dynamic-include-present";
 
 // ---- Candidate / call-site helpers ----------------------------------------
 

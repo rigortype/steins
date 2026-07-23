@@ -42,6 +42,13 @@ Concretizes ADR-0034 point 4 for the first shipped transform.
    onward, not just the index-matching one.
    Refusals carry site + reason + human detail; the completeness oracle
    accounts every candidate as edited-or-refused.
+   Two project-global caller-enumeration obstacles are added by ADR-0046 §2:
+   `eval-present` (a non-vendor `eval` — an invisible caller) and
+   `dynamic-include-present` (a non-vendor dynamic / out-of-universe
+   `include`/`require`). While one stands unvouched, *every* candidate
+   refuses with that reason, and the obstacle is recorded once with its
+   site list; a `steins.toml` vouch clears the site but downgrades the
+   completeness claim (carried as `vouched_exemptions`).
 4. **Sibling transform (next): `phpdoc-honesty`** (ADR-0037 point 4) —
    widen a lying `@param`/`@return` to the proven union from call-site
    evidence. Enumeration domain = exactly the sites where

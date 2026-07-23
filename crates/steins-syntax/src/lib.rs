@@ -37,6 +37,7 @@ use mago_syntax::cst::Hint;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Literal;
+use mago_syntax::cst::MagicConstant;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
@@ -1380,6 +1381,49 @@ pub struct Comment {
     pub text: String,
 }
 
+/// A statically-judgeable form of an `include`/`require` path argument
+/// (ADR-0046 §2). Only the decidable shapes are represented; every other
+/// expression is [`IncludePath::Unproven`] — the sound default, since a path a
+/// modular tool cannot prove could pull in out-of-universe code (compiled
+/// template caches) that calls any function with no visible call site.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum IncludePath {
+    /// A fully-proven literal path (`'inc/util.php'`, or a literal-only
+    /// concatenation `'a' . 'b'`). Resolved against the analyzed universe at
+    /// obstacle time (relative → against the including file's directory).
+    Literal(String),
+    /// `__DIR__ . '<suffix>'` — a directory-relative literal. The suffix is the
+    /// proven text after `__DIR__`; it resolves against the including file's own
+    /// directory. Covers the common project-relative include idiom.
+    DirRelative(String),
+    /// A path that is not statically proven (a variable, a call, a non-literal
+    /// concatenation): a caller-enumeration obstacle.
+    Unproven,
+}
+
+/// The kind of a dynamic-code construct that can invisibly reach code the
+/// call-site sweep cannot see (ADR-0046 §2, "universe havoc").
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DynamismKind {
+    /// `eval(<expr>)` — code as data; can call any function with no CST call site.
+    Eval,
+    /// `include`/`include_once`/`require`/`require_once <path>` — pulls in code;
+    /// carries the lowered path so provenness / in-universe resolution is
+    /// judgeable.
+    Include(IncludePath),
+}
+
+/// One dynamic-code construct in a file (ADR-0046 §2). Collected file-wide —
+/// across every scope, including nested function bodies — and kept distinct from
+/// the coarse per-scope [`Scope::poisoned`] *value*-havoc flag: this records
+/// *invisible callers / out-of-universe code*, a different soundness hole.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DynamismSite {
+    pub kind: DynamismKind,
+    /// The construct's source span (its starting line is the vouching key).
+    pub span: Span,
+}
+
 /// An owned, Mago-free lowering of one parsed PHP file — the syntax-tree
 /// contract for the slice.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1389,6 +1433,10 @@ pub struct SourceTree {
     classes: Vec<ClassDecl>,
     calls: Vec<CallExpr>,
     scopes: Vec<Scope>,
+    /// Dynamic-code constructs (eval / include / require) found file-wide
+    /// (ADR-0046 §2). Consumed by the transform engine's caller-enumeration
+    /// obstacle detection; the checker never reads it (zero behavior change).
+    dynamism: Vec<DynamismSite>,
     parse_errors: Vec<ParseError>,
     /// The comment trivia in the file, in source order (ADR-0023 inline ignores).
     comments: Vec<Comment>,
@@ -1460,6 +1508,7 @@ impl SourceTree {
             classes,
             calls: lowered.calls,
             scopes,
+            dynamism: lowered.dynamism,
             parse_errors,
             comments,
             contexts,
@@ -1520,6 +1569,21 @@ impl SourceTree {
         &self.scopes
     }
 
+    /// The dynamic-code constructs (eval / include / require) found file-wide
+    /// (ADR-0046 §2). Distinct from the coarse per-scope [`Scope::poisoned`]
+    /// value-havoc flag: these are the caller-enumeration obstacles the transform
+    /// engine consults before claiming "all callers proven".
+    #[must_use]
+    pub fn dynamism_sites(&self) -> &[DynamismSite] {
+        &self.dynamism
+    }
+
+    /// Whether the file contains any `eval(...)` construct.
+    #[must_use]
+    pub fn contains_eval(&self) -> bool {
+        self.dynamism.iter().any(|d| matches!(d.kind, DynamismKind::Eval))
+    }
+
     /// The recovered parse errors.
     #[must_use]
     pub fn parse_errors(&self) -> &[ParseError] {
@@ -1566,6 +1630,7 @@ struct Lowered {
     strict_types: bool,
     functions: Vec<FunctionDecl>,
     calls: Vec<CallExpr>,
+    dynamism: Vec<DynamismSite>,
 }
 
 fn walk(
@@ -1579,10 +1644,72 @@ fn walk(
         Node::Function(f) => out.functions.push(lower_function(f, aliases, docs, rc)),
         Node::FunctionCall(c) => out.calls.push(lower_call(c)),
         Node::DeclareItem(d) if is_strict_types_one(d) => out.strict_types = true,
+        // Dynamic-code constructs (ADR-0046 §2). Collected file-wide (the walk
+        // descends into every scope), not per-scope like the poison flag.
+        Node::EvalConstruct(ec) => {
+            out.dynamism.push(DynamismSite { kind: DynamismKind::Eval, span: to_span(ec.span()) });
+        }
+        Node::IncludeConstruct(ic) => out.dynamism.push(DynamismSite {
+            kind: DynamismKind::Include(lower_include_path(ic.value)),
+            span: to_span(ic.span()),
+        }),
+        Node::IncludeOnceConstruct(ic) => out.dynamism.push(DynamismSite {
+            kind: DynamismKind::Include(lower_include_path(ic.value)),
+            span: to_span(ic.span()),
+        }),
+        Node::RequireConstruct(rq) => out.dynamism.push(DynamismSite {
+            kind: DynamismKind::Include(lower_include_path(rq.value)),
+            span: to_span(rq.span()),
+        }),
+        Node::RequireOnceConstruct(rq) => out.dynamism.push(DynamismSite {
+            kind: DynamismKind::Include(lower_include_path(rq.value)),
+            span: to_span(rq.span()),
+        }),
         _ => {}
     }
     for child in node.children() {
         walk(&child, aliases, docs, rc, out);
+    }
+}
+
+/// The proven prefix of a concatenation chain: a literal string, a
+/// `__DIR__`-anchored directory-relative literal, or unproven.
+enum ConcatVal {
+    Str(String),
+    DirRel(String),
+    Unproven,
+}
+
+/// Lower an `include`/`require` path expression to a judgeable [`IncludePath`]
+/// (ADR-0046 §2). Recognizes string literals, literal-only concatenations, and
+/// the `__DIR__ . '<suffix>'` project-relative idiom; every other shape is
+/// [`IncludePath::Unproven`] (the sound default — an unprovable path is an
+/// obstacle).
+fn lower_include_path(expr: &Expression<'_>) -> IncludePath {
+    match lower_concat(expr) {
+        ConcatVal::Str(s) => IncludePath::Literal(s),
+        ConcatVal::DirRel(s) => IncludePath::DirRelative(s),
+        ConcatVal::Unproven => IncludePath::Unproven,
+    }
+}
+
+/// Fold a string-concatenation subtree into its proven value. `__DIR__` anchors a
+/// directory-relative result; a literal-only chain folds to a plain literal;
+/// anything else (a variable, a call, a second `__DIR__`) is unproven.
+fn lower_concat(expr: &Expression<'_>) -> ConcatVal {
+    match expr.unparenthesized() {
+        Expression::Literal(Literal::String(ls)) => {
+            ls.value.map_or(ConcatVal::Unproven, |bytes| ConcatVal::Str(bytes_to_string(bytes)))
+        }
+        Expression::MagicConstant(MagicConstant::Directory(_)) => ConcatVal::DirRel(String::new()),
+        Expression::Binary(b) if b.operator.is_concatenation() => {
+            match (lower_concat(b.lhs), lower_concat(b.rhs)) {
+                (ConcatVal::Str(l), ConcatVal::Str(r)) => ConcatVal::Str(format!("{l}{r}")),
+                (ConcatVal::DirRel(l), ConcatVal::Str(r)) => ConcatVal::DirRel(format!("{l}{r}")),
+                _ => ConcatVal::Unproven,
+            }
+        }
+        _ => ConcatVal::Unproven,
     }
 }
 
