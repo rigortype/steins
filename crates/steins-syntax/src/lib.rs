@@ -1169,6 +1169,16 @@ pub enum CondExpr {
     And(Box<CondExpr>, Box<CondExpr>),
     /// `a || b` / `a or b`.
     Or(Box<CondExpr>, Box<CondExpr>),
+    /// A resolvable **call in guard position** (`if (isFoo($x))`). Retained (not
+    /// opaqued) for the *minimal* purpose of consuming the callee's
+    /// `@phpstan-assert-if-true`/`-if-false` envelopes on the matching branch
+    /// (ADR-0052 §5, at the `Asserted` stratum). Its trace *verdict* stays `Maybe`
+    /// and `reads` (identical to what the equivalent [`Self::Opaque`] carried)
+    /// invalidates its variables on the excluded path exactly as before — the full
+    /// retained-guard-call machinery (env-threaded receiver checks, sequenced
+    /// invalidation, foldable-predicate verdicts) is ADR-0052 §6 / N3, deliberately
+    /// NOT built here.
+    Call { call: Box<CallExpr>, reads: Vec<String> },
     /// A condition the lowering cannot model. `reads` lists every bare variable it
     /// mentions, so a branch guarded by an opaque condition still invalidates
     /// those variables on the path that excludes it (the ADR-0027 read-set rule,
@@ -1267,6 +1277,15 @@ pub enum StmtKind {
         default: Option<Vec<Stmt>>,
         loose: bool,
     },
+    /// `assert(<expr>);` — a statement-position `assert` call whose argument is a
+    /// condition (ADR-0052 §5). `cond` is the lowered guard; the walk applies its
+    /// `then_refinements` to the fall-through env at the **`Asserted`** stratum by
+    /// default (under `zend.assertions=-1` the expression is never evaluated, so it
+    /// carries no runtime guarantee), promotable to `Verified` by the
+    /// `[runtime] zend-assertions = "enabled"` pseudo-constant. Only a bare
+    /// `assert($expr)` (or `assert($expr, $description)`) with a lowerable condition
+    /// reaches here; anything else stays a plain [`StmtKind::Call`].
+    Assert { cond: CondExpr },
     /// `throw <expr>;` — a trace terminator (the statement never falls through).
     /// `span` points at the `throw`. The thrown expression is not modeled; only
     /// the terminating control effect is.
@@ -3137,6 +3156,26 @@ fn lower_call(c: &FunctionCall<'_>) -> CallExpr {
     CallExpr { callee, callee_ref, receiver, args, positional_only, span: to_span(c.span()) }
 }
 
+/// The lowered condition of a statement-position `assert(<expr>[, <desc>])` call
+/// (ADR-0052 §5), or `None` when the callee is not the global `assert` builtin or
+/// the call has no positional first argument. The name match is case-insensitive
+/// and accepts the unqualified `assert` and the root-qualified `\assert`; a
+/// namespaced `Foo\assert` (a different function) is rejected.
+fn assert_stmt_cond(c: &FunctionCall<'_>) -> Option<CondExpr> {
+    let Expression::Identifier(id) = c.function else { return None };
+    let name = bytes_to_string(id.last_segment());
+    if !name.eq_ignore_ascii_case("assert")
+        || !matches!(name_ref(id).kind, RefKind::Unqualified | RefKind::FullyQualified)
+    {
+        return None;
+    }
+    let first = c.argument_list.arguments.iter().find_map(|arg| match arg {
+        Argument::Positional(p) if p.ellipsis.is_none() => Some(p.value),
+        _ => None,
+    })?;
+    Some(lower_cond(first))
+}
+
 /// Lower an argument list to `(args, positional_only)`, shared by every call
 /// shape (function / method / static / constructor).
 fn lower_argument_list(list: &mago_syntax::cst::ArgumentList<'_>) -> (Vec<Arg>, bool) {
@@ -4147,7 +4186,18 @@ fn lower_cond(expr: &Expression<'_>) -> CondExpr {
             CondExpr::Not(Box::new(lower_cond(u.operand)))
         }
         other => match lower_cond_operand(other) {
-            CondOperand::Other => CondExpr::Opaque { reads: cond_reads(other) },
+            // A resolvable call in guard position is retained as `Call` (minimal
+            // recognition for `-if-true`/`-if-false` consumption, ADR-0052 §5); every
+            // other unmodeled condition stays `Opaque`. `Call` and `Opaque` are
+            // interchangeable for the verdict and the invalidation set — the only
+            // added behavior is the tag consumption in the branch walk.
+            CondOperand::Other => {
+                let reads = cond_reads(other);
+                match named_call(other) {
+                    Some(call) => CondExpr::Call { call: Box::new(call), reads },
+                    None => CondExpr::Opaque { reads },
+                }
+            }
             operand => CondExpr::Truthy(operand),
         },
     }
@@ -4298,9 +4348,17 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
             }
         }
         Expression::Call(Call::Function(fc)) => {
-            let mut invalidated = Vec::new();
-            collect_call_vars(&Node::Expression(expr), &mut invalidated);
-            Stmt { span: ZERO_SPAN, kind: StmtKind::Call(lower_call(fc)), invalidated }
+            // `assert(<expr>)` — a statement-position assert whose argument lowers to
+            // a condition (ADR-0052 §5). `assert` is a pure by-value builtin (it never
+            // mutates its argument by reference), so the narrowed variables carry no
+            // invalidation; a non-lowerable argument falls back to a plain `Call`.
+            if let Some(cond) = assert_stmt_cond(fc) {
+                Stmt { span: ZERO_SPAN, kind: StmtKind::Assert { cond }, invalidated: Vec::new() }
+            } else {
+                let mut invalidated = Vec::new();
+                collect_call_vars(&Node::Expression(expr), &mut invalidated);
+                Stmt { span: ZERO_SPAN, kind: StmtKind::Call(lower_call(fc)), invalidated }
+            }
         }
         // Statement-level method / static / constructor calls. A resolvable
         // receiver becomes a `Call`; a dynamic one is a `Barrier` (but its

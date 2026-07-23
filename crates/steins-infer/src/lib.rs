@@ -604,7 +604,7 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let tree = parse(db, file);
     let units = [FileUnit { path: file.path(db), tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, &mut NoFold)
+    check_units(&units, &index, &mut NoFold, false)
 }
 
 /// The folding-aware check for one file (run **outside** salsa; ADR-0004),
@@ -614,7 +614,7 @@ pub fn check_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec
     let tree = parse(db, file);
     let units = [FileUnit { path: file.path(db), tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, folder)
+    check_units(&units, &index, folder, false)
 }
 
 /// The folding-aware check for a whole **project** (ADR-0009/0015): every file
@@ -622,6 +622,19 @@ pub fn check_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec
 /// effects resolve. Resolution is driven by the salsa [`project_index`] query.
 #[must_use]
 pub fn check_project(db: &dyn Db, project: Project, folder: &mut dyn Folder) -> Vec<Diagnostic> {
+    check_project_with_runtime(db, project, folder, false)
+}
+
+/// [`check_project`] with the `[runtime]` pseudo-constants declared (ADR-0052 §5):
+/// `zend_assertions` promotes `assert($expr)` narrowing to the `Verified` stratum.
+/// The default entry point passes `false` (the safe production default).
+#[must_use]
+pub fn check_project_with_runtime(
+    db: &dyn Db,
+    project: Project,
+    folder: &mut dyn Folder,
+    zend_assertions: bool,
+) -> Vec<Diagnostic> {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
     let units: Vec<FileUnit> =
         handles.iter().map(|&f| FileUnit { path: f.path(db), tree: parse(db, f) }).collect();
@@ -629,7 +642,7 @@ pub fn check_project(db: &dyn Db, project: Project, folder: &mut dyn Folder) -> 
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
     let index = Index::from_db(db_index, &pos);
-    check_units(&units, &index, folder)
+    check_units(&units, &index, folder, zend_assertions)
 }
 
 /// The pure single-file check (sound subset). Kept for unit tests and callers
@@ -651,16 +664,37 @@ pub fn check_with(
     let _ = functions; // authoritative list comes from `tree.functions()`
     let units = [FileUnit { path, tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, folder)
+    check_units(&units, &index, folder, false)
+}
+
+/// The pure single-file check with the `[runtime]` pseudo-constants declared
+/// (ADR-0052 §5): `zend_assertions` promotes `assert($expr)` narrowing to the
+/// `Verified` stratum. Kept for tests exercising the runtime-config path.
+#[must_use]
+pub fn check_runtime(
+    tree: &SourceTree,
+    functions: &[FunctionDecl],
+    path: &str,
+    zend_assertions: bool,
+) -> Vec<Diagnostic> {
+    let _ = functions;
+    let units = [FileUnit { path, tree }];
+    let index = Index::from_units(&units);
+    check_units(&units, &index, &mut NoFold, zend_assertions)
 }
 
 /// The project checking core: direct + propagation passes over every file's
 /// calls and scopes, then the one project-wide effects pass.
-fn check_units(units: &[FileUnit], index: &Index, folder: &mut dyn Folder) -> Vec<Diagnostic> {
+fn check_units(
+    units: &[FileUnit],
+    index: &Index,
+    folder: &mut dyn Folder,
+    zend_assertions: bool,
+) -> Vec<Diagnostic> {
     let mut out = Vec::new();
 
     for fi in 0..units.len() {
-        let cx = Cx::new(units, index, fi);
+        let cx = Cx::new_with(units, index, fi, zend_assertions);
 
         // --- Propagation pass FIRST: it walks every scope and, as a side
         // product, proves dead regions (decided branches, unreachable tails) —
@@ -917,7 +951,7 @@ fn annotate_units(
 
     // 3. Findings on the target file (project-wide check, filtered by path).
     let target_path = units[target].path;
-    for d in check_units(units, index, folder) {
+    for d in check_units(units, index, folder, false) {
         if d.path == target_path {
             facts.push(LineFact { line: d.line, kind: FactKind::Finding { id: d.id } });
         }
@@ -2263,16 +2297,27 @@ struct Cx<'a> {
     units: &'a [FileUnit<'a>],
     index: &'a Index,
     cur: usize,
+    /// The `[runtime] zend-assertions = "enabled"` pseudo-constant (ADR-0052 §5,
+    /// ADR-0037 §2 precedent): when the boot truth declares assertions enabled,
+    /// `assert($expr)` narrowing rises to the `Verified` stratum. `false` (the safe
+    /// production default — `zend.assertions=-1`) keeps it `Asserted`.
+    zend_assertions: bool,
 }
 
 impl<'a> Cx<'a> {
     fn new(units: &'a [FileUnit<'a>], index: &'a Index, cur: usize) -> Self {
-        Self { units, index, cur }
+        Self { units, index, cur, zend_assertions: false }
     }
 
-    /// A context pointing at a different file (for cross-file descent).
+    /// A context carrying an explicit runtime config (the top-level analysis pass).
+    fn new_with(units: &'a [FileUnit<'a>], index: &'a Index, cur: usize, zend_assertions: bool) -> Self {
+        Self { units, index, cur, zend_assertions }
+    }
+
+    /// A context pointing at a different file (for cross-file descent); the runtime
+    /// config is a whole-run property and is inherited unchanged.
     fn at(&self, file: usize) -> Cx<'a> {
-        Cx { units: self.units, index: self.index, cur: file }
+        Cx { units: self.units, index: self.index, cur: file, zend_assertions: self.zend_assertions }
     }
 
     fn tree(&self) -> &'a SourceTree {
@@ -2852,6 +2897,16 @@ fn arg_of_fact_key(fact: &Fact) -> ArgValue {
 /// per `new`/`clone`; a variable holds one via [`Store::refs`] (its ObjRef).
 type AllocId = u32;
 
+/// A property's value-domain fact together with its trust stratum (ADR-0052 §5).
+/// A prop written from an `Asserted` rvalue is `Asserted`; a prop read back out
+/// (`$x = $o->p`) carries the stratum forward, so an assert cannot launder into a
+/// proof-layer premise through the heap (the derivation clause — heap writes).
+#[derive(Clone)]
+struct PropFact {
+    fact: Fact,
+    stratum: Stratum,
+}
+
 /// A heap object (ADR-0036 object state): allocation-keyed, so aliases share it.
 /// The `class` is fixed at construction and never swept; `class_exact` says whether
 /// it is the *exact* runtime class or only a lower bound (see below); `props` are
@@ -2870,8 +2925,9 @@ struct HeapObj {
     /// instance may be a descendant of `class` that *is* a `T`. Yes-side conclusions
     /// (`is_a(class, T) = Yes`) hold for a lower bound too (every descendant is a T).
     class_exact: bool,
-    /// Property facts keyed by property name (ADR-0035 Facts live in props).
-    props: HashMap<String, Fact>,
+    /// Property facts keyed by property name (ADR-0035 Facts live in props), each
+    /// with its trust stratum (ADR-0052 §5).
+    props: HashMap<String, PropFact>,
     /// Properties declared `readonly` — sweep-immune once established (ADR-0036).
     readonly: HashSet<String>,
     /// readonly props provably written on THIS path (for `readonly.reassigned`).
@@ -2944,9 +3000,16 @@ impl Store {
         self.refs.contains_key(var)
     }
 
-    /// A property fact of the object `var` refers to.
+    /// A property fact of the object `var` refers to (stratum-agnostic — used by
+    /// contract-layer consumers, which accept `Asserted`).
     fn prop_fact(&self, var: &str, prop: &str) -> Option<&Fact> {
-        self.obj_of(var)?.props.get(prop)
+        self.obj_of(var)?.props.get(prop).map(|p| &p.fact)
+    }
+
+    /// The trust stratum of a property fact of the object `var` refers to, or
+    /// `Verified` when there is no such prop (the neutral element of `min`).
+    fn prop_stratum(&self, var: &str, prop: &str) -> Stratum {
+        self.obj_of(var).and_then(|o| o.props.get(prop)).map_or(Stratum::Verified, |p| p.stratum)
     }
 
     /// Drop `var`'s ObjRef binding — the heap object survives (other aliases keep
@@ -2983,6 +3046,41 @@ impl Store {
     }
 }
 
+/// The **trust stratum** of a bound fact (ADR-0052 §5): whether it is fit to
+/// premise a proof-layer finding. `Verified` facts come from a runtime-executed
+/// test on the live branch (`===`, `is_int`, `instanceof`, ordering, truthiness)
+/// or a native declaration seed — the branch runs only if the test passed, so the
+/// fact holds on the live path. `Asserted` facts come from docblock claims
+/// (`@phpstan-assert` family) and from `assert($expr)` narrowing (never evaluated
+/// under `zend.assertions=-1`) — a claim, not a proof. The bit is a *checked*
+/// attribute (the `"asserted"` provenance string is prose, only for display); the
+/// consumption rule (proof-layer ids require all-Verified premises) reads it.
+///
+/// A derived fact's stratum is the **minimum** over every fact consumed in its
+/// derivation (the amendment's derivation clause): folds, array composition, heap
+/// property writes, branch joins, and binding-descent seeding all propagate
+/// `min(inputs)`, so `Asserted` can never launder into `Verified` across a
+/// derivation step. `min` is `Asserted` whenever either operand is `Asserted`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+enum Stratum {
+    /// A runtime-executed test or a native declaration — fit for the proof layer.
+    Verified,
+    /// A docblock claim or an `assert($expr)` narrowing — never premises proof.
+    Asserted,
+}
+
+impl Stratum {
+    /// The weaker of two strata: `Asserted` dominates (the derivation clause). This
+    /// is commutative and associative, so the min-stratum rule is order-independent
+    /// (ADR-0048: no global ordering enters a fact).
+    fn min(self, other: Stratum) -> Stratum {
+        match (self, other) {
+            (Stratum::Verified, Stratum::Verified) => Stratum::Verified,
+            _ => Stratum::Asserted,
+        }
+    }
+}
+
 /// A proven local fact plus where it was established (for provenance). A closure
 /// value has no scalar `fact` — it rides in [`Known::closure`] instead (ADR-0033).
 #[derive(Clone)]
@@ -2993,17 +3091,27 @@ struct Known {
     bound: Option<String>,
     /// The proven closure value bound to this variable, if any (ADR-0033).
     closure: Option<ClosureVal>,
+    /// The trust stratum of `fact` (ADR-0052 §5). `Verified` by default; an
+    /// assert-derived or assert-laundered fact carries `Asserted`.
+    stratum: Stratum,
 }
 
 impl Known {
-    /// A plain value binding (no closure).
+    /// A plain value binding at the `Verified` stratum (native seeds, literal
+    /// assignments, native-condition refinements — the common case).
     fn value(fact: Fact, line: u32, bound: Option<String>) -> Self {
-        Known { fact: Some(fact), line, bound, closure: None }
+        Known { fact: Some(fact), line, bound, closure: None, stratum: Stratum::Verified }
     }
 
-    /// A closure binding (no scalar fact).
+    /// A plain value binding at an explicit stratum (derivation sites propagating
+    /// `min(inputs)`, and the assert family binding `Asserted`).
+    fn value_strat(fact: Fact, line: u32, bound: Option<String>, stratum: Stratum) -> Self {
+        Known { fact: Some(fact), line, bound, closure: None, stratum }
+    }
+
+    /// A closure binding (no scalar fact; a closure is never assert-derived).
     fn closure(cv: ClosureVal, line: u32) -> Self {
-        Known { fact: None, line, bound: None, closure: Some(cv) }
+        Known { fact: None, line, bound: None, closure: Some(cv), stratum: Stratum::Verified }
     }
 
     /// The single proven value, when the fact is a `Singleton` (converted back to
@@ -3243,7 +3351,11 @@ fn walk_trace(
             let ret_val = cx
                 .resolve_literal(value, env, scope.poisoned, folder)
                 .or_else(|| cx.resolve_static_value(value, w.enclosing_class));
+            // The native return check is proof-layer (`type.return-mismatch`): a
+            // returned value proven only through an `Asserted` fact stays silent
+            // (ADR-0052 §5). The phpdoc contract check below accepts `Asserted`.
             if let Some((ret, display)) = w.ret_info
+                && value_stratum(value, env, Some(&*store)) == Stratum::Verified
                 && let Some(lit) = ret_val.as_ref()
                 && is_type_error(cx, ret, lit)
                 && !object_world_guard_blind(descent.is_some(), ret, lit)
@@ -3316,6 +3428,18 @@ fn walk_trace(
                 Flow::FellThrough
             }
             StmtKind::Call(_) => Flow::FellThrough,
+            // `assert($expr)` narrows the fall-through env with the guard's
+            // true-branch refinements (ADR-0052 §5). A failed *enabled* assertion
+            // throws, so continuing means the condition held. The stratum is
+            // `Asserted` by default (under `zend.assertions=-1` the expression is
+            // never evaluated — no runtime guarantee), `Verified` only when the boot
+            // truth declares assertions enabled.
+            StmtKind::Assert { cond } => {
+                let stratum =
+                    if w.cx.zend_assertions { Stratum::Verified } else { Stratum::Asserted };
+                apply_refinements(&then_refinements(cond), env, store, stratum);
+                Flow::FellThrough
+            }
             // Terminators: the trace stops; the remainder is unreachable.
             StmtKind::Return { value, .. } => {
                 // `return $o;` escapes the returned object (ADR-0036).
@@ -3396,6 +3520,36 @@ fn walk_trace(
     Flow::FellThrough
 }
 
+/// The trust stratum a resolved value carries (ADR-0052 §5 derivation clause): the
+/// minimum over every env/heap fact consumed while resolving `value`. A literal, a
+/// `new`/enum/const, or a fully-literal subtree is `Verified`; a bare `$var` takes
+/// its env stratum; a property fetch takes the prop's stratum; an array literal or
+/// a foldable call takes the min over its elements/arguments; a ternary the min of
+/// its arms. Consulted only where resolution succeeded (so consumed vars were
+/// proven), it stamps the derived binding with `min(inputs)`, closing the
+/// laundering hazard the audit's `$pair = [$x, 99]` snippet names.
+fn value_stratum(value: &ArgValue, env: &HashMap<String, Known>, store: Option<&Store>) -> Stratum {
+    match value {
+        ArgValue::Var(name) => env.get(name).map_or(Stratum::Verified, |k| k.stratum),
+        // A property fetch takes its prop's stratum; with no store in scope (the
+        // variable-call check) a prop fetch never resolves to a proof premise, so
+        // `Verified` is the correct neutral answer.
+        ArgValue::PropFetch { var, prop } => {
+            store.map_or(Stratum::Verified, |s| s.prop_stratum(var, prop))
+        }
+        ArgValue::Array(items) => items
+            .iter()
+            .fold(Stratum::Verified, |acc, (_, v)| acc.min(value_stratum(v, env, store))),
+        ArgValue::Call(_, args) => {
+            args.iter().fold(Stratum::Verified, |acc, v| acc.min(value_stratum(v, env, store)))
+        }
+        ArgValue::Ternary { then_val, else_val, .. } => {
+            value_stratum(then_val, env, store).min(value_stratum(else_val, env, store))
+        }
+        _ => Stratum::Verified,
+    }
+}
+
 /// Apply a plain `$var = <value>;` assignment to the env (extracted from the walk).
 #[allow(clippy::too_many_arguments)]
 fn apply_assign(
@@ -3423,7 +3577,11 @@ fn apply_assign(
                         kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
                     });
                 }
-                env.insert(var.to_owned(), Known::value(fact, line, None));
+                // Derivation clause: the arm chosen is one of the two operands, so
+                // the result stratum is `min` over the arms (either could be the
+                // taken one under a `Maybe` verdict).
+                let strat = value_stratum(then_val, env, Some(&*store)).min(value_stratum(else_val, env, Some(&*store)));
+                env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
                 store.unbind(var);
             }
             None => {
@@ -3496,12 +3654,14 @@ fn apply_assign(
                 store.refs.insert(var.to_owned(), id);
             }
         }
-        // `$x = $o->p` (ADR-0036): a property read flows the prop's fact into `$x`.
+        // `$x = $o->p` (ADR-0036): a property read flows the prop's fact into `$x`,
+        // carrying the prop's stratum (derivation clause — heap reads).
         ArgValue::PropFetch { var: recv, prop } if !w.scope.poisoned => {
             env.remove(var);
             store.unbind(var);
             if let Some(fact) = store.prop_fact(recv, prop).cloned() {
-                env.insert(var.to_owned(), Known::value(fact, line, None));
+                let strat = store.prop_stratum(recv, prop);
+                env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
             }
         }
         _ => match cx.resolve_literal(value, env, w.scope.poisoned, folder).and_then(|lit| {
@@ -3514,7 +3674,10 @@ fn apply_assign(
                         kind: FactKind::Value { var: var.to_owned(), rendered: lit.render() },
                     });
                 }
-                env.insert(var.to_owned(), Known::value(fact, line, None));
+                // Derivation clause: folds and array composition resolve through
+                // `resolve_literal`, consuming env facts — stamp `min(inputs)`.
+                let strat = value_stratum(value, env, Some(&*store));
+                env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
                 store.unbind(var);
             }
             None => {
@@ -3550,9 +3713,10 @@ fn build_new_object(
         if let Some(default) = &p.default
             && let Some(fact) = singleton_fact(default)
         {
-            // Skip null-admitting facts (unsound to flow past unmodeled guards).
+            // Skip null-admitting facts (unsound to flow past unmodeled guards). A
+            // literal default is `Verified` (no env fact consumed).
             if !fact_is_nullish(&fact) {
-                obj.props.insert(p.name.clone(), fact);
+                obj.props.insert(p.name.clone(), PropFact { fact, stratum: Stratum::Verified });
             }
             if p.readonly {
                 obj.ro_written.insert(p.name.clone());
@@ -3569,17 +3733,24 @@ fn build_new_object(
                 break;
             }
             let Some(pd) = promoted.get(param.name.as_str()) else { continue };
-            // The value: the resolved arg literal, else the param's native-type seed.
-            let fact = args
-                .get(i)
-                .and_then(|a| cx.resolve_literal(a, env, w.scope.poisoned, folder))
-                .and_then(|lit| singleton_fact(&lit))
-                .or_else(|| seed_fact(param));
+            // The value: the resolved arg literal (carrying the arg's stratum —
+            // derivation clause, heap write), else the param's native-type seed
+            // (`Verified`).
+            let (fact, stratum) = match args.get(i) {
+                Some(a) => match cx
+                    .resolve_literal(a, env, w.scope.poisoned, folder)
+                    .and_then(|lit| singleton_fact(&lit))
+                {
+                    Some(f) => (Some(f), value_stratum(a, env, Some(&*store))),
+                    None => (seed_fact(param), Stratum::Verified),
+                },
+                None => (seed_fact(param), Stratum::Verified),
+            };
             // Skip null-admitting facts (unsound to flow past unmodeled guards).
             if let Some(fact) = fact
                 && !fact_is_nullish(&fact)
             {
-                obj.props.insert(pd.name.clone(), fact);
+                obj.props.insert(pd.name.clone(), PropFact { fact, stratum });
             }
             // A promoted param is *always* written at construction — even when its
             // value is unknown, record the write (readonly.reassigned first write).
@@ -3680,8 +3851,11 @@ fn apply_prop_assign(
     let class = store.heap.get(&id).expect("bound id present").class.clone();
 
     // Resolve the rvalue to a proven literal (for the native check) and a fact
-    // (for storage + the abstract phpdoc check).
+    // (for storage + the abstract phpdoc check). The rvalue's trust stratum
+    // (ADR-0052 §5) gates the proof-layer native check and is recorded on the prop
+    // (derivation clause — heap write).
     let proven_lit = cx.resolve_literal(value, env, false, folder);
+    let rvalue_strat = value_stratum(value, env, Some(&*store));
     let prop_fact_val: Option<Fact> = proven_lit.as_ref().and_then(singleton_fact).or_else(|| {
         match value {
             ArgValue::PropFetch { var: rv, prop: rp } => store.prop_fact(rv, rp).cloned(),
@@ -3697,6 +3871,7 @@ fn apply_prop_assign(
     // type. Skip promoted props (checked as constructor args; no double-report).
     let mut native_fired = false;
     if checks_enabled
+        && rvalue_strat == Stratum::Verified
         && let Some(pd) = pdecl
         && !pd.promoted
         && let Some(ty) = pd.ty.as_ref()
@@ -3784,7 +3959,7 @@ fn apply_prop_assign(
     // / is an object handle). Mark the readonly write for the reassign check.
     match prop_fact_val {
         Some(fact) if !rval_is_object => {
-            obj.props.insert(prop.to_owned(), fact);
+            obj.props.insert(prop.to_owned(), PropFact { fact, stratum: rvalue_strat });
         }
         _ => {
             obj.props.remove(prop);
@@ -3891,10 +4066,27 @@ fn walk_if(
     // 3. Walk the live branches on cloned envs, collecting those that fall through.
     let mut fell: Vec<(HashMap<String, Known>, Store)> = Vec::new();
 
+    // A guard call (`if (isFoo($x))` / `if (!isFoo($x))`) whose callee carries
+    // `-if-true`/`-if-false` envelopes: apply the matching-polarity specs on each
+    // branch at the `Asserted` stratum (ADR-0052 §5). `then_is_true` records whether
+    // the then-branch corresponds to the call returning `true` (flipped under `!`).
+    let guard_call: Option<(&CallExpr, bool)> = match cond {
+        CondExpr::Call { call, .. } => Some((call, true)),
+        CondExpr::Not(inner) => match inner.as_ref() {
+            CondExpr::Call { call, .. } => Some((call, false)),
+            _ => None,
+        },
+        _ => None,
+    };
+
     if verdict != Certainty::No {
         let mut benv = env.clone();
         let mut bclasses = store.clone();
-        apply_refinements(&then_refinements(cond), &mut benv, &mut bclasses);
+        apply_refinements(&then_refinements(cond), &mut benv, &mut bclasses, Stratum::Verified);
+        if let Some((call, then_is_true)) = guard_call {
+            let kind = if then_is_true { AssertKind::IfTrue } else { AssertKind::IfFalse };
+            apply_guard_asserts(w, call, kind, &mut benv, &mut bclasses);
+        }
         if walk_trace(w, folder, then_trace, &mut benv, &mut bclasses, descent, facts, true, out)
             == Flow::FellThrough
         {
@@ -3905,7 +4097,12 @@ fn walk_if(
     if verdict != Certainty::Yes {
         let mut benv = env.clone();
         let mut bclasses = store.clone();
-        apply_refinements(&else_refinements(cond), &mut benv, &mut bclasses);
+        apply_refinements(&else_refinements(cond), &mut benv, &mut bclasses, Stratum::Verified);
+        if let Some((call, then_is_true)) = guard_call {
+            // The else branch is the opposite polarity of the then branch.
+            let kind = if then_is_true { AssertKind::IfFalse } else { AssertKind::IfTrue };
+            apply_guard_asserts(w, call, kind, &mut benv, &mut bclasses);
+        }
         if walk_else(w, folder, elseifs, else_trace, &mut benv, &mut bclasses, descent, facts, out)
             == Flow::FellThrough
         {
@@ -4153,6 +4350,12 @@ fn check_call_on_null(
     if !matches!(&k.fact, Some(Fact::Singleton(Val::Null))) {
         return;
     }
+    // Proof-layer consumption rule (ADR-0052 §5): a receiver proven null only by an
+    // `Asserted` fact (e.g. `@phpstan-assert null $x`) cannot premise this proof —
+    // stay silent.
+    if k.stratum != Stratum::Verified {
+        return;
+    }
     let pos = w.cx.tree().position(call.span.start);
     out.push(Diagnostic {
         id: CALL_ON_NULL_ID,
@@ -4196,7 +4399,9 @@ fn eval_cond(
             .and(eval_cond(w, b, env, store, poisoned)),
         CondExpr::Or(a, b) => eval_cond(w, a, env, store, poisoned)
             .or(eval_cond(w, b, env, store, poisoned)),
-        CondExpr::Opaque { .. } => Certainty::Maybe,
+        // A guard call's verdict stays undecided (the retained-guard-call verdict
+        // machinery — foldable predicates — is ADR-0052 §6 / N3).
+        CondExpr::Opaque { .. } | CondExpr::Call { .. } => Certainty::Maybe,
     }
 }
 
@@ -4535,40 +4740,54 @@ fn ordering_range(op: CmpOp, k: i64) -> Option<IntRange> {
 }
 
 /// Apply a branch's refinements to its cloned env (clearing any stale exact-class
-/// fact for a positively-narrowed variable).
+/// fact for a positively-narrowed variable), at trust stratum `stratum` (ADR-0052
+/// §5): `Verified` for native-condition branches (the runtime test executed),
+/// `Asserted` for an `assert($expr)`-derived narrowing (never evaluated under
+/// `zend.assertions=-1`).
 fn apply_refinements(
     refs: &[Refine],
     env: &mut HashMap<String, Known>,
     store: &mut Store,
+    stratum: Stratum,
 ) {
     for r in refs {
         match r {
+            // `=== v` replaces the value with proven equality: the fact is exactly
+            // as trustworthy as the test that established it (`stratum`), regardless
+            // of any prior (weaker) knowledge about the variable.
             Refine::Exact(var, val) => {
                 env.insert(
                     var.clone(),
-                    Known::value(
+                    Known::value_strat(
                         Fact::Singleton(val.clone()),
                         0,
                         Some("proven on this branch".to_owned()),
+                        stratum,
                     ),
                 );
                 store.unbind(var);
             }
-            Refine::NotNull(var) => refine_fact(env, var, clear_null),
+            Refine::NotNull(var) => refine_fact(env, var, stratum, clear_null),
             Refine::Exclude(var, val) => {
-                refine_fact(env, var, |f| exclude_member(f, val));
+                refine_fact(env, var, stratum, |f| exclude_member(f, val));
             }
-            Refine::IntRange(var, range) => refine_fact(env, var, |f| intersect_int(f, *range)),
-            Refine::Truthy(var) => refine_fact(env, var, truthy_narrow),
+            Refine::IntRange(var, range) => {
+                refine_fact(env, var, stratum, |f| intersect_int(f, *range));
+            }
+            Refine::Truthy(var) => refine_fact(env, var, stratum, truthy_narrow),
         }
     }
 }
 
 /// Transform the fact of `var` in place with `f` (a `None` result drops the fact —
-/// the conservative empty-fact fallback); a no-op when `var` has no fact.
+/// the conservative empty-fact fallback); a no-op when `var` has no fact. The
+/// result stratum is `min(existing, refine_stratum)`: a narrowing (`!== null`,
+/// interval, truthy, member exclusion) constrains the *existing* fact, so it is
+/// only as trustworthy as its weakest component (ADR-0052 §5 derivation clause).
 fn refine_fact(
     env: &mut HashMap<String, Known>,
     var: &str,
+    refine_stratum: Stratum,
     f: impl FnOnce(&Fact) -> Option<Fact>,
 ) {
     let Some(k) = env.get(var) else { return };
@@ -4577,8 +4796,8 @@ fn refine_fact(
     let Some(kf) = &k.fact else { return };
     match f(kf) {
         Some(nf) => {
-            let (line, bound) = (k.line, k.bound.clone());
-            env.insert(var.to_owned(), Known::value(nf, line, bound));
+            let (line, bound, stratum) = (k.line, k.bound.clone(), k.stratum.min(refine_stratum));
+            env.insert(var.to_owned(), Known::value_strat(nf, line, bound, stratum));
         }
         None => {
             env.remove(var);
@@ -4705,9 +4924,9 @@ fn with_nullable(f: Fact) -> Fact {
 }
 
 /// Apply the `Always` assertions of every statically-resolved call in a statement
-/// to the caller's env (Feature D). `-if-true`/`-if-false` asserts are **not**
-/// applied here — they hold only conditionally on the boolean result, so they
-/// belong to guard position (see the deferral note in the module tests).
+/// to the caller's env (Feature D) — the fall-through position. `-if-true`/
+/// `-if-false` asserts are conditional on the boolean result and belong to guard
+/// position (see [`apply_guard_asserts`]).
 #[allow(clippy::too_many_arguments)]
 fn apply_stmt_asserts(
     cx: &Cx,
@@ -4717,6 +4936,44 @@ fn apply_stmt_asserts(
     store: &mut Store,
     this_exact: Option<&str>,
     enclosing_class: Option<&str>,
+    asserted: &mut HashSet<String>,
+) {
+    apply_call_asserts(cx, scope, call, env, store, this_exact, enclosing_class, AssertKind::Always, asserted);
+}
+
+/// Apply a guard-position call's `@phpstan-assert-if-true`/`-if-false` specs to a
+/// branch env (ADR-0052 §5, at the `Asserted` stratum). `kind` selects the
+/// polarity: `IfTrue` on the true branch, `IfFalse` on the false branch. This is
+/// the *minimal* guard-call tag consumption — the full retained-guard-call
+/// machinery (§6) is N3.
+fn apply_guard_asserts(
+    w: &WalkCx,
+    call: &CallExpr,
+    kind: AssertKind,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    let mut asserted = HashSet::new();
+    apply_call_asserts(
+        w.cx, w.scope, call, env, store, w.this_exact, w.enclosing_class, kind, &mut asserted,
+    );
+}
+
+/// Resolve a call's callee declaration and apply every assertion spec of a given
+/// `kind`, mapping each spec's `@param` name to the call's positional argument
+/// variable and narrowing it via [`apply_assert_to_var`] (always at the `Asserted`
+/// stratum). Shared by the fall-through (`Always`) and guard (`IfTrue`/`IfFalse`)
+/// consumption points.
+#[allow(clippy::too_many_arguments)]
+fn apply_call_asserts(
+    cx: &Cx,
+    scope: &Scope,
+    call: &CallExpr,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
+    kind: AssertKind,
     asserted: &mut HashSet<String>,
 ) {
     if scope.poisoned || !call.positional_only {
@@ -4742,7 +4999,7 @@ fn apply_stmt_asserts(
     };
     let Some(envelopes) = parse_envelopes(docblock) else { return };
     for spec in &envelopes.asserts {
-        if spec.kind != AssertKind::Always {
+        if spec.kind != kind {
             continue;
         }
         let Some(pos) = params.iter().position(|p| p.name == spec.param) else { continue };
@@ -4754,14 +5011,19 @@ fn apply_stmt_asserts(
     }
 }
 
-/// Apply one assertion spec to a caller variable (replace-if-weaker): a stronger
-/// finite fact (`Singleton`/`OneOf`) is kept; otherwise the asserted fact replaces
-/// it. A negated `!null` clears nullability; other negated forms are not
-/// representable as a positive fact and are skipped (documented).
+/// Apply one assertion spec to a caller variable at the **`Asserted`** stratum
+/// (ADR-0052 §5 — a docblock is a claim, never a proof). Replace-if-weaker, in two
+/// halves: (1) a stronger finite fact (`Singleton`/`OneOf`) is kept — an assert
+/// never coarsens known-exact knowledge; (2) **an `Asserted` fact never overwrites
+/// a `Verified` one of any layer** — the missing half this slice adds, so a lying
+/// `@phpstan-assert` cannot downgrade a proven fact into a forgeable one (nor
+/// launder its own claim past the stratum gate). A negated `!null` clears
+/// nullability (also `Asserted`); other negated forms are not representable as a
+/// positive fact and are skipped (documented).
 ///
 /// Returns whether the variable now carries an established fact (so the caller
 /// protects it from the by-ref invalidation) — `true` when a fact was set or a
-/// stronger finite fact was deliberately kept, `false` when nothing applied.
+/// stronger/Verified fact was deliberately kept, `false` when nothing applied.
 fn apply_assert_to_var(
     env: &mut HashMap<String, Known>,
     store: &mut Store,
@@ -4771,23 +5033,26 @@ fn apply_assert_to_var(
     let cty = steins_contract::lower(&spec.ty);
     if spec.negated {
         // Only `!null` is representable as a positive narrowing (clear nullable);
-        // other negated forms establish nothing.
+        // other negated forms establish nothing. The narrowing is `Asserted`, so
+        // `refine_fact` mins the result to `Asserted`.
         if matches!(cty, steins_contract::ContractTy::Null) && env.contains_key(var) {
-            refine_fact(env, var, clear_null);
+            refine_fact(env, var, Stratum::Asserted, clear_null);
             return true;
         }
         return false;
     }
     let Some(fact) = assert_fact_of(&cty) else { return false };
-    // Never override a stronger finite fact with a weaker asserted one; keep it
-    // (and still protect it from invalidation — the by-value assert did not mutate
-    // it). Assertion helpers are conventionally by-value; a by-ref helper that
-    // rebinds is the documented edge where keeping the singleton is the simple,
-    // task-specified choice.
-    if env.get(var).is_some_and(|k| k.fact.as_ref().is_some_and(|f| f.finite_members().is_some())) {
+    // Keep the existing fact when it is a stronger finite layer OR when it is
+    // already `Verified` (replace-if-weaker, both halves): an `Asserted` claim may
+    // neither coarsen exact knowledge nor overwrite a proven fact. Either way the
+    // variable stays protected from the by-ref invalidation (a by-value assert did
+    // not mutate it).
+    if env.get(var).is_some_and(|k| {
+        k.stratum == Stratum::Verified || k.fact.as_ref().is_some_and(|f| f.finite_members().is_some())
+    }) {
         return true;
     }
-    env.insert(var.to_owned(), Known::value(fact, 0, Some("asserted".to_owned())));
+    env.insert(var.to_owned(), Known::value_strat(fact, 0, Some("asserted".to_owned()), Stratum::Asserted));
     store.unbind(var);
     true
 }
@@ -4802,7 +5067,9 @@ fn cond_invalidations(cond: &CondExpr) -> Vec<String> {
 
 fn collect_cond_opaque_reads(cond: &CondExpr, out: &mut Vec<String>) {
     match cond {
-        CondExpr::Opaque { reads } => {
+        // A guard call invalidates its read variables identically to the equivalent
+        // opaque condition (ADR-0052 §5 — its `reads` are the same set).
+        CondExpr::Opaque { reads } | CondExpr::Call { reads, .. } => {
             for r in reads {
                 if !out.contains(r) {
                     out.push(r.clone());
@@ -4848,24 +5115,30 @@ fn join_envs(
             continue;
         }
         let Some(mut fact) = k0.fact.clone() else { continue };
+        // Derivation clause: a branch join takes `min` over the joined arms' strata
+        // (Verified ⊔ Asserted ⇒ Asserted). The neutral start is `k0`'s own stratum.
+        let mut stratum = k0.stratum;
         let mut ok = true;
         for (be, _) in &rest {
-            match be.get(name).and_then(|k| k.fact.as_ref()) {
-                Some(kf) => match fact.join(kf) {
-                    Some(joined) => fact = joined,
+            match be.get(name) {
+                Some(k) if k.fact.is_some() => match fact.join(k.fact.as_ref().expect("checked")) {
+                    Some(joined) => {
+                        fact = joined;
+                        stratum = stratum.min(k.stratum);
+                    }
                     None => {
                         ok = false;
                         break;
                     }
                 },
-                None => {
+                _ => {
                     ok = false;
                     break;
                 }
             }
         }
         if ok {
-            env.insert(name.clone(), Known::value(fact, k0.line, k0.bound.clone()));
+            env.insert(name.clone(), Known::value_strat(fact, k0.line, k0.bound.clone(), stratum));
         }
     }
 
@@ -4910,14 +5183,19 @@ fn join_stores(first: &Store, rest: &[&Store]) -> Store {
             .filter(|n| others.iter().all(|o| o.ro_written.contains(*n)))
             .cloned()
             .collect();
-        // props: present-and-joinable in every branch.
-        for (name, f0) in &o0.props {
-            let mut fact = f0.clone();
+        // props: present-and-joinable in every branch, at `min` over strata
+        // (derivation clause — a joined prop is Asserted if any branch's was).
+        for (name, p0) in &o0.props {
+            let mut fact = p0.fact.clone();
+            let mut stratum = p0.stratum;
             let mut ok = true;
             for o in &others {
                 match o.props.get(name) {
-                    Some(kf) => match fact.join(kf) {
-                        Some(j) => fact = j,
+                    Some(kp) => match fact.join(&kp.fact) {
+                        Some(j) => {
+                            fact = j;
+                            stratum = stratum.min(kp.stratum);
+                        }
                         None => {
                             ok = false;
                             break;
@@ -4930,7 +5208,7 @@ fn join_stores(first: &Store, rest: &[&Store]) -> Store {
                 }
             }
             if ok {
-                joined.props.insert(name.clone(), fact);
+                joined.props.insert(name.clone(), PropFact { fact, stratum });
             }
         }
         heap.insert(id, joined);
@@ -5244,7 +5522,12 @@ fn check_propagated_call(
                 }
                 _ => None,
             };
+            // Proof-layer consumption rule (ADR-0052 §5): the native
+            // `type.argument-mismatch` fires only on an all-`Verified` premise. A
+            // value proven through an `Asserted` env/heap fact stays silent (the
+            // phpdoc contract check below still accepts it).
             if let Some((value, provenance)) = resolved
+                && value_stratum(&arg.value, env, Some(store)) == Stratum::Verified
                 && is_type_error(cx, ty, &value)
                 && !object_world_guard_blind(in_descent, ty, &value)
             {
@@ -5489,7 +5772,10 @@ fn check_callable_args(
             // (ADR-0043 stage 3); env-free, `self`/`parent` unavailable here.
             _ => cx.resolve_static_value(&arg.value, None).map(|v| (v, None)),
         };
+        // Proof-layer consumption rule (ADR-0052 §5): silent on an `Asserted`
+        // premise (no store here — a prop-fetch arg never resolves to a fire).
         if let Some((value, provenance)) = resolved
+            && value_stratum(&arg.value, env, None) == Stratum::Verified
             && is_type_error(cx, ty, &value)
             && !object_world_guard_blind(in_descent, ty, &value)
         {
@@ -5528,8 +5814,10 @@ fn descend(
     }
 
     // Resolve each positional argument to a literal and try to bind it (using
-    // the *caller's* env, strict mode, and folding).
-    let mut bound: Vec<(String, ArgValue)> = Vec::new();
+    // the *caller's* env, strict mode, and folding). Each binding carries the arg's
+    // trust stratum (ADR-0052 §5): the seeded callee param inherits it, so an
+    // `Asserted` argument narrows into the descent without laundering to `Verified`.
+    let mut bound: Vec<(String, ArgValue, Stratum)> = Vec::new();
     let mut render_args: Vec<ArgValue> = Vec::new();
     for (i, arg) in call.args.iter().enumerate() {
         let Some(param) = params.get(i) else { break };
@@ -5539,16 +5827,17 @@ fn descend(
         let Some(value) = cx.resolve_literal(&arg.value, env, poisoned, folder) else {
             continue;
         };
+        let strat = value_stratum(&arg.value, env, None);
         render_args.push(value.clone());
         if param.by_ref {
             return;
         }
         let Some(ty) = param.ty.as_ref() else {
-            bound.push((param.name.clone(), value));
+            bound.push((param.name.clone(), value, strat));
             continue;
         };
         match coerce_into_param(cx, ty, &value) {
-            Some(coerced) => bound.push((param.name.clone(), coerced)),
+            Some(coerced) => bound.push((param.name.clone(), coerced, strat)),
             None => return,
         }
     }
@@ -5560,8 +5849,10 @@ fn descend(
     }
 
     // The binding key incorporates the captured snapshot so two calls of the same
-    // closure with different snapshots memoize distinctly (adversarial #1).
-    let mut key_binding = bound.clone();
+    // closure with different snapshots memoize distinctly (adversarial #1). The
+    // stratum is a trust attribute, not an identity — it is excluded from the key.
+    let mut key_binding: Vec<(String, ArgValue)> =
+        bound.iter().map(|(n, v, _)| (n.clone(), v.clone())).collect();
     for (name, fact) in captures {
         key_binding.push((format!("use:{name}"), arg_of_fact_key(fact)));
     }
@@ -5595,9 +5886,9 @@ fn descend(
     // (the callee param stays unknown — sound).
     let mut bound_env: HashMap<String, Known> = bound
         .into_iter()
-        .filter_map(|(name, value)| {
+        .filter_map(|(name, value, strat)| {
             singleton_fact(&value)
-                .map(|fact| (name, Known::value(fact, 0, Some(provenance.to_owned()))))
+                .map(|fact| (name, Known::value_strat(fact, 0, Some(provenance.to_owned()), strat)))
         })
         .collect();
     // Closure captures (ADR-0033): the by-value snapshot seeds the initial env,
@@ -5971,7 +6262,10 @@ fn check_method_args(
                 // not available here, so only a written class name resolves.
                 _ => cx.resolve_static_value(&arg.value, None).map(|v| (v, None)),
             };
+            // Proof-layer consumption rule (ADR-0052 §5): silent on an `Asserted`
+            // premise; the phpdoc contract check below still accepts it.
             if let Some((value, prov)) = resolved
+                && value_stratum(&arg.value, env, Some(store)) == Stratum::Verified
                 && is_type_error(cx, ty, &value)
                 && !object_world_guard_blind(in_descent, ty, &value)
             {
