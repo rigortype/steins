@@ -407,17 +407,19 @@ names, no FQN), which shrinks the obstacle to actual edge matches.
 strictly.** Only **absolute** literal include paths and
 `__DIR__`-anchored concatenations qualify as provable-in-universe; a
 bare relative literal (`include 'config.php';`) is **Unproven — a dam
-site**. Runtime resolution of a relative path consults `include_path`
-and the CWD before falling back to the including file's directory, so
-directory-relative belief is unsound: a same-named in-universe
-neighbor makes the dam believe the universe closed while runtime loads
-an out-of-universe twin defining symbols the scan never sees.
+site**. Runtime resolution of a relative path is `include_path` → the
+including script's directory → CWD (verified on PHP 8.5.8 by
+elimination; see the auto-ADR log entry of 2026-07-24), so
+directory-relative belief is unsound in both directions: a same-named
+in-universe neighbor makes the dam believe the universe closed while
+runtime loads an out-of-universe twin defining symbols the scan never
+sees. Also verified: a `./`-prefixed literal resolves against **CWD,
+not the including file's directory** — `./` does not anchor, so
+`./`-literals are Unproven exactly like bare relatives.
 Recorded opt-in refinement: a `[runtime] include-path` pseudo-constant
 (ADR-0037 §2 family) declaring the boot truth re-qualifies relative
-literals against the declared path; the exact 8.5 precedence order
-(including the `./`-prefix CWD binding) goes through `php -r`
-verification before that refinement is worded — this ADR's own
-discipline. The audit notes the same under-damming is latent in the
+literals against the declared path, modeling the verified three-step
+order. The audit notes the same under-damming is latent in the
 landed transform-side benign-include oracle; the checker dam and the
 transform oracle take the corrected rule from one shared judgment.
 
@@ -445,10 +447,13 @@ write positions (assignment targets, autovivifying nested writes,
 `&$a[k]`, `list()`/foreach-list targets), by-ref argument positions,
 and **any argument of an unresolved or unreflected callee** —
 by-ref-ness is unknowable there, and `f($a[0])` into `function
-f(&$x)` autovivifies silently at runtime. Compound assignment
-(`$a[0]++`, `$a[0] .= …`) stays out of the whitelist pending `php -r`
-verification of the read-half warning on 8.5; unverified contexts
-default to silence.
+f(&$x)` autovivifies silently at runtime. Compound assignment is
+**whitelist-eligible**: verified on PHP 8.5.8, `$a[0]++`,
+`$a[0] .= …`, and `$a[0] += …` on a missing key all emit the
+Undefined-array-key warning (the read half fires before the write
+half creates the key), while `$a[0] ??= …` is silent and joins the
+isset-family silence leg (auto-ADR log, 2026-07-24). Unverified
+contexts default to silence.
 
 **A8 (points 3, 5; M2) — the reference form must be fully resolved.**
 PHP's relative form `namespace\foo()` / `new namespace\Bar` has no
