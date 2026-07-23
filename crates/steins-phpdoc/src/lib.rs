@@ -52,7 +52,7 @@ pub mod lexer;
 pub mod parser;
 
 pub use ast::{Type, TypeKind};
-pub use docblock::{AssertKind, DocTag, TagKind, scan_docblock};
+pub use docblock::{AssertKind, DocTag, TagKind, scan_docblock, scan_template_names};
 pub use parser::{ParseError, TypeParse, parse_type};
 
 #[cfg(test)]

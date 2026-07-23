@@ -708,6 +708,11 @@ pub struct ClassDecl {
     /// class at compile time but their bodies live elsewhere, so a
     /// trait-using class is treated as unresolvable (give up → silent).
     pub uses_traits: bool,
+    /// The raw `/** … */` docblock preceding the class-like declaration, if any.
+    /// Read for class-level `@template` names, which shadow same-named classes in
+    /// **every** member docblock of this class-like (issue #5). `None` for a trait
+    /// (traits lower no members this slice, so a class-level template is inert).
+    pub docblock: Option<String>,
     /// The span of the class name identifier.
     pub span: Span,
 }
@@ -2014,6 +2019,9 @@ fn lower_trait(t: &mago_syntax::cst::Trait<'_>, conditional: bool) -> ClassDecl 
         properties: Vec::new(),
         consts: Vec::new(),
         uses_traits: false,
+        // A trait lowers no members this slice, so class-level `@template` names on
+        // it never reach a member docblock — carry `None` (nothing to shadow).
+        docblock: None,
         span: to_span(t.name.span()),
     }
 }
@@ -2072,6 +2080,10 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
         properties,
         consts,
         uses_traits,
+        // Class-level docblock (preceding the whole declaration incl. attributes/
+        // modifiers, mirroring the function/method lookup) — read for `@template`
+        // names that shadow same-named classes in member docblocks (issue #5).
+        docblock: docs.preceding(to_span(c.span()).start),
         span: to_span(c.name.span()),
     }
 }
@@ -2200,6 +2212,9 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
         properties: Vec::new(),
         consts,
         uses_traits: false,
+        // Class-level docblock — `@template` names shadow same-named classes in the
+        // interface's method docblocks (issue #5).
+        docblock: docs.preceding(to_span(i.span()).start),
         span: to_span(i.name.span()),
     }
 }
@@ -2275,6 +2290,9 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _doc
         properties: Vec::new(),
         consts,
         uses_traits: false,
+        // An enum lowers no method bodies this slice (see above), so a class-level
+        // `@template` on it reaches no analyzed member — carry `None`.
+        docblock: None,
         span: to_span(e.name.span()),
     }
 }

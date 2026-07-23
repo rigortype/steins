@@ -2845,7 +2845,11 @@ impl<'a> Cx<'a> {
                 let cd =
                     self.tree().classes().iter().find(|c| c.fqn.eq_ignore_ascii_case(class))?;
                 let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
-                let ret = parse_envelopes(m.docblock.as_deref())?.ret?;
+                let mut env = parse_envelopes(m.docblock.as_deref())?;
+                // Class-level `@template` names shadow in this method's `@return` too
+                // (issue #5) — the idempotent class-level stage.
+                env.shadow_templates(&template_names_of(cd.docblock.as_deref()));
+                let ret = env.ret?;
                 Some((ret, format!("{}::{}", cd.name, m.name)))
             }
             ScopeOwner::Closure { .. } => None,
@@ -4004,9 +4008,12 @@ fn apply_prop_assign(
     if checks_enabled
         && !native_fired
         && let Some(pd) = pdecl
-        && let Some(var_ty) = pd.docblock.as_deref().and_then(parse_var_type)
-        && let Some((cfile, _)) = cx.find_class(&class)
+        && let Some(mut var_ty) = pd.docblock.as_deref().and_then(parse_var_type)
+        && let Some((cfile, cdecl)) = cx.find_class(&class)
     {
+        // Class-level `@template` names shadow same-named classes in this property's
+        // `@var` type (issue #5) — a property is a member docblock too.
+        neutralize_templates(&mut var_ty, &template_names_of(cdecl.docblock.as_deref()));
         let coff = pd.span.start;
         let violates = match proven_lit.as_ref().map(|l| CVal::Scalar(l.clone())) {
             Some(cv) if matches!(cv, CVal::Scalar(ref v) if v.is_literal()) => {
@@ -6487,11 +6494,13 @@ fn handle_method_call(
     };
 
     let callee_name = format!("{}::{}", target.declaring_class.name, target.method.name);
+    let class_templates = template_names_of(target.declaring_class.docblock.as_deref());
     check_method_args(
         cx,
         folder,
         target.method,
         target.class_file,
+        &class_templates,
         &callee_name,
         call,
         env,
@@ -6543,6 +6552,7 @@ fn check_method_args(
     folder: &mut dyn Folder,
     method: &MethodDecl,
     class_file: usize,
+    class_templates: &HashSet<String>,
     callee_name: &str,
     call: &CallExpr,
     env: &HashMap<String, Known>,
@@ -6551,7 +6561,12 @@ fn check_method_args(
     in_descent: bool,
     out: &mut Vec<Diagnostic>,
 ) {
-    let envelopes = parse_envelopes(method.docblock.as_deref());
+    let mut envelopes = parse_envelopes(method.docblock.as_deref());
+    // Class-level `@template` names shadow same-named classes in every member
+    // docblock of the class-like (issue #5) — the second, idempotent shadow stage.
+    if let Some(e) = &mut envelopes {
+        e.shadow_templates(class_templates);
+    }
     for (i, arg) in call.args.iter().enumerate() {
         let Some(param) = method.params.get(i) else { break };
         if param.variadic {
@@ -7019,6 +7034,98 @@ impl Envelopes {
     fn is_assert_target(&self, name: &str) -> bool {
         self.assert_params.contains(name)
     }
+
+    /// Neutralize every envelope identifier naming a template from `shadow` (issue
+    /// #5): a `@template`-declared name is a template parameter, not a class, so it
+    /// must not lower to a class contract that would reject real arguments. Applied
+    /// in two idempotent stages — [`parse_envelopes`] applies this declaration's own
+    /// `@template` names, then a member-check site applies the enclosing class-like's
+    /// class-level `@template` names — so a `no-op` empty set costs nothing.
+    fn shadow_templates(&mut self, shadow: &HashSet<String>) {
+        if shadow.is_empty() {
+            return;
+        }
+        for (_, t) in &mut self.params {
+            neutralize_templates(t, shadow);
+        }
+        if let Some(t) = &mut self.ret {
+            neutralize_templates(t, shadow);
+        }
+        for s in &mut self.asserts {
+            neutralize_templates(&mut s.ty, shadow);
+        }
+    }
+}
+
+/// The lowercased set of `@template` names a docblock declares — the *shadow set*
+/// (issue #5). A name here is a template parameter, not a class, inside the
+/// docblock's own `@param`/`@return`/`@var` types (and, when this is a class-like's
+/// docblock, inside every member docblock).
+///
+/// **Case-insensitive by decision.** PHPStan treats template names as
+/// case-sensitive identifiers, so strictly `@template Model` would not shadow a
+/// `@param model`. Steins folds case instead, for three reasons: (1) zero-FP is
+/// paramount and over-shadowing only ever *silences* a diagnostic — it can never
+/// manufacture one; (2) the whole identifier pipeline (`is_known_class`, contract
+/// lowering, `accepts_identifier`) already normalizes to lowercase, so a folded
+/// shadow set composes uniformly instead of needing a lone case-sensitive path; (3)
+/// the only observable divergence from PHPStan is Steins staying silent where
+/// PHPStan would still resolve the class — and silence is the safe side (ADR-0029).
+fn template_names_of(docblock: Option<&str>) -> HashSet<String> {
+    docblock
+        .map(|t| {
+            steins_phpdoc::scan_template_names(t)
+                .into_iter()
+                .map(|n| n.to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Rewrite every **bare, unqualified** identifier naming a template from `shadow`
+/// to an opaque node (issue #5). The neutral node is [`PKind::Unsupported`], which
+/// lowers to `ContractTy::Opaque` and rides `accepts` as `Maybe` — exactly the
+/// silence a template already gets today when it names no existing class (ADR-0032:
+/// templates are transparent/thin where propagation does not reach). A `\`-qualified
+/// or namespaced reference (`\Model`, `App\Model`) is **never** shadowed —
+/// qualification opts out of the template namespace. Idempotent; recurses through
+/// every composite so a nested `list<Model>` / `array{a: Model}` is neutralized too.
+fn neutralize_templates(ty: &mut PType, shadow: &HashSet<String>) {
+    match &mut ty.kind {
+        PKind::Identifier(name) => {
+            if !name.contains('\\') && shadow.contains(&name.to_ascii_lowercase()) {
+                let raw = std::mem::take(name);
+                ty.kind = PKind::Unsupported(raw);
+            }
+        }
+        PKind::Nullable(inner) | PKind::Array(inner) => neutralize_templates(inner, shadow),
+        PKind::Union { types, .. } | PKind::Intersection(types) => {
+            for t in types {
+                neutralize_templates(t, shadow);
+            }
+        }
+        PKind::Generic { args, .. } => {
+            for a in args {
+                neutralize_templates(&mut a.ty, shadow);
+            }
+        }
+        PKind::OffsetAccess { base, offset } => {
+            neutralize_templates(base, shadow);
+            neutralize_templates(offset, shadow);
+        }
+        PKind::ArrayShape(s) => {
+            for it in &mut s.items {
+                neutralize_templates(&mut it.value, shadow);
+            }
+        }
+        PKind::ObjectShape(items) => {
+            for it in items {
+                neutralize_templates(&mut it.value, shadow);
+            }
+        }
+        PKind::This | PKind::Callable(_) | PKind::Const(_) | PKind::Conditional(_)
+        | PKind::Unsupported(_) => {}
+    }
 }
 
 /// Parse the `@param`/`@return` envelopes from a raw docblock, or `None` when the
@@ -7089,8 +7196,15 @@ fn parse_envelopes(docblock: Option<&str>) -> Option<Envelopes> {
     // Return an envelope set whenever there is anything to check *or* any assertion
     // to remember: an assert-only docblock still carries the exemption fact, so a
     // sibling `@param` (added later, or resolved in another pass) sees it.
-    (!params.is_empty() || ret.is_some() || !assert_params.is_empty())
-        .then_some(Envelopes { params, ret, assert_params, asserts })
+    if !(!params.is_empty() || ret.is_some() || !assert_params.is_empty()) {
+        return None;
+    }
+    let mut env = Envelopes { params, ret, assert_params, asserts };
+    // Shadow this declaration's own `@template` names in its envelope types (issue
+    // #5). A member-check site additionally applies the enclosing class-like's
+    // class-level templates (idempotent second stage).
+    env.shadow_templates(&template_names_of(Some(text)));
+    Some(env)
 }
 
 /// Parse one tag's type text into a phpdoc [`PType`], or `None` on a parse error

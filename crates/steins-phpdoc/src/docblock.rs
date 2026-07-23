@@ -146,9 +146,10 @@ pub fn scan_docblock(text: &str) -> Vec<DocTag> {
     tags
 }
 
-fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
-    let bytes = text.as_bytes();
-    // Skip the gutter: whitespace, then optional `*`, then whitespace.
+/// Skip the docblock gutter on a physical line — leading whitespace, an optional
+/// `/**`, a run of `*`, then whitespace — returning the byte offset of the first
+/// non-gutter character within `[line_start, line_end)`.
+fn skip_gutter(bytes: &[u8], line_start: usize, line_end: usize) -> usize {
     let mut i = line_start;
     while i < line_end && (bytes[i] == b' ' || bytes[i] == b'\t') {
         i += 1;
@@ -163,6 +164,12 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
     while i < line_end && (bytes[i] == b' ' || bytes[i] == b'\t') {
         i += 1;
     }
+    i
+}
+
+fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
+    let bytes = text.as_bytes();
+    let i = skip_gutter(bytes, line_start, line_end);
 
     if i >= line_end || bytes[i] != b'@' {
         return None;
@@ -269,6 +276,79 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
         prefixed,
         assert_property_target,
     })
+}
+
+/// Whether `name` (the token right after the `@`) is a `@template` declaration
+/// tag: `template`, `template-covariant`, or `template-contravariant`, each
+/// optionally carrying a `@phpstan-`/`@psalm-` precedence prefix (the ADR-0029
+/// prefix rule — the same prefix set [`TagKind::from_name`] recognizes). The
+/// covariant/contravariant variants declare the same template *name*; the variance
+/// is irrelevant to name resolution, so all three are treated alike here.
+fn is_template_tag(name: &str) -> bool {
+    let bare = name
+        .strip_prefix("phpstan-")
+        .or_else(|| name.strip_prefix("psalm-"))
+        .unwrap_or(name);
+    matches!(bare, "template" | "template-covariant" | "template-contravariant")
+}
+
+/// Scan a raw docblock for `@template` declarations, returning each declared
+/// template *name* — the first identifier token after the tag (the `T` in
+/// `@template T`, `@template T of Foo`, `@phpstan-template-covariant T`). Names are
+/// returned as written (case preserved); the caller decides case-folding.
+///
+/// This is the seam that feeds the *template shadow set* (issue #5): a name
+/// declared here shadows a same-named class in that declaration's docblock types,
+/// so a `@template Model` whose name collides with a real class `Model` is a
+/// template parameter (opaque), not the class. Only the name is read; bounds
+/// (`of Foo`), defaults (`= Bar`), and descriptions are ignored.
+#[must_use]
+pub fn scan_template_names(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut names = Vec::new();
+    let mut line_start = 0usize;
+    while line_start <= bytes.len() {
+        let line_end = memchr(bytes, line_start, b'\n').unwrap_or(bytes.len());
+        if let Some(name) = scan_template_line(text, line_start, line_end) {
+            names.push(name);
+        }
+        if line_end == bytes.len() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    names
+}
+
+fn scan_template_line(text: &str, line_start: usize, line_end: usize) -> Option<String> {
+    let bytes = text.as_bytes();
+    let i = skip_gutter(bytes, line_start, line_end);
+    if i >= line_end || bytes[i] != b'@' {
+        return None;
+    }
+    // Read the tag name (letters and `-`, matching `scan_line`).
+    let name_start = i + 1;
+    let mut j = name_start;
+    while j < line_end && (bytes[j].is_ascii_alphabetic() || bytes[j] == b'-') {
+        j += 1;
+    }
+    if !is_template_tag(&text[name_start..j]) {
+        return None;
+    }
+    // Skip whitespace, then read the template name: a PHP identifier
+    // (`[A-Za-z_\x80-…][A-Za-z0-9_\x80-…]*`).
+    while j < line_end && (bytes[j] == b' ' || bytes[j] == b'\t') {
+        j += 1;
+    }
+    let ident_start = j;
+    if j >= line_end || !(bytes[j].is_ascii_alphabetic() || bytes[j] == b'_' || bytes[j] >= 0x80) {
+        return None; // `@template` with no name — nothing to shadow.
+    }
+    j += 1;
+    while j < line_end && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] >= 0x80) {
+        j += 1;
+    }
+    Some(text[ident_start..j].to_owned())
 }
 
 /// Find the byte offset of the first `$name` variable within `[start, end)` that
@@ -435,6 +515,43 @@ mod tests {
             assert!(tags[0].kind.is_assert());
             assert!(tags[0].assert_property_target, "{doc} should be a property target");
         }
+    }
+
+    // ---- @template name scanning (issue #5 shadow set) ----
+
+    #[test]
+    fn scans_plain_template_name() {
+        assert_eq!(scan_template_names("/** @template T */"), vec!["T"]);
+        assert_eq!(scan_template_names("/**\n * @template Model\n */"), vec!["Model"]);
+    }
+
+    #[test]
+    fn scans_template_with_bound_and_default() {
+        // Only the name is read; `of Foo` / `= Bar` bounds and defaults are ignored.
+        assert_eq!(scan_template_names("/** @template T of \\Countable */"), vec!["T"]);
+        assert_eq!(scan_template_names("/** @template TValue = mixed */"), vec!["TValue"]);
+    }
+
+    #[test]
+    fn scans_variance_and_prefixed_variants() {
+        assert_eq!(scan_template_names("/** @template-covariant T */"), vec!["T"]);
+        assert_eq!(scan_template_names("/** @template-contravariant T */"), vec!["T"]);
+        assert_eq!(scan_template_names("/** @phpstan-template T */"), vec!["T"]);
+        assert_eq!(scan_template_names("/** @psalm-template-covariant TKey */"), vec!["TKey"]);
+    }
+
+    #[test]
+    fn scans_multiple_templates() {
+        let doc = "/**\n * @template TKey\n * @template TValue of \\Stringable\n */";
+        assert_eq!(scan_template_names(doc), vec!["TKey", "TValue"]);
+    }
+
+    #[test]
+    fn ignores_nameless_and_non_template_tags() {
+        assert!(scan_template_names("/** @template */").is_empty());
+        assert!(scan_template_names("/** @param int $x */").is_empty());
+        // `@template-extends`/`@extends` are class-relation tags, not declarations.
+        assert!(scan_template_names("/** @template-extends Foo<int> */").is_empty());
     }
 
     #[test]

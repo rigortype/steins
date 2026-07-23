@@ -321,3 +321,103 @@ fn overridden_method_class_param_reports_once() {
         $s = new Sub(); $s->m(new Robot());";
     assert_eq!(param_count(src), 1, "exactly one finding — no envelope double-fire");
 }
+
+// ==========================================================================
+// 8. @template name shadowing a real class (issue #5). A `@template X` in scope
+//    makes X a template parameter — opaque, never the class — inside that
+//    declaration's docblock types, so a same-named real class no longer
+//    manufactures a param/return-mismatch FP. The shadow is a per-declaration
+//    fact (function/method own docblock + enclosing class-like docblock);
+//    qualified references opt out.
+// ==========================================================================
+
+#[test]
+fn template_shadows_real_class_param_proven() {
+    // The issue's exact reproduction: real class + function-level `@template` of the
+    // same name + `@param` of that name, called with a non-member scalar.
+    let src = "<?php class Foo {}\n\
+        /** @template Foo\n * @param Foo $x */ function f($x): void {}\n\
+        f(5);";
+    assert_eq!(param_count(src), 0, "@template Foo shadows class Foo → f(5) silent");
+    // Control: without the `@template`, the same call is a genuine violation.
+    let control = "<?php class Foo {}\n\
+        /** @param Foo $x */ function f($x): void {}\n\
+        f(5);";
+    assert_eq!(param_count(control), 1, "no template → class contract fires");
+}
+
+#[test]
+fn template_shadows_real_class_param_abstract_fact() {
+    // The abstract-fact arm (native-`int` param → int fact): the template shadow must
+    // also keep the `contract_touches_class` valve shut for a real-class-named template.
+    let src = "<?php class Model {}\n\
+        /** @template Model\n * @param Model $x */ function f($x): void {}\n\
+        function g(int $i): void { f($i); }";
+    assert_eq!(param_count(src), 0, "int fact vs shadowed Model → valve stays shut");
+}
+
+#[test]
+fn class_level_template_shadows_method_param() {
+    // A class-level `@template Model` shadows Model in every member docblock — here a
+    // method `@param Model`, even though the method's own docblock has no template.
+    let src = "<?php class Model {}\n\
+        /** @template Model */\n\
+        class Repo { /** @param Model $m */ public function set($m): void {} }\n\
+        $r = new Repo(); $r->set(5);";
+    assert_eq!(param_count(src), 0, "class-level @template Model shadows the method @param");
+    // Control: drop the class-level template and the method @param binds the class.
+    let control = "<?php class Model {}\n\
+        class Repo { /** @param Model $m */ public function set($m): void {} }\n\
+        $r = new Repo(); $r->set(5);";
+    assert_eq!(param_count(control), 1, "no class template → method @param Model fires");
+}
+
+#[test]
+fn qualified_reference_is_never_shadowed() {
+    // A `\`-qualified reference opts out of the template namespace, so `\Foo` still
+    // resolves to the real class and a genuine violation still fires.
+    let src = "<?php class Foo {}\n\
+        /** @template Foo\n * @param \\Foo $x */ function f($x): void {}\n\
+        f(5);";
+    assert_eq!(param_count(src), 1, "\\Foo is qualified → resolves to the class → fires");
+}
+
+#[test]
+fn template_shadowing_nothing_is_unchanged() {
+    // A template whose name collides with no class: behavior is identical to today
+    // (the name was already unresolved → silent). The fix must not change this.
+    let src = "<?php /** @template TValue\n * @param TValue $x */ function f($x): void {}\n\
+        f(5);";
+    assert_eq!(param_count(src), 0, "template naming no class → silent (unchanged)");
+}
+
+#[test]
+fn template_scope_is_per_declaration() {
+    // `@template Model` on function `a` does not shadow class Model in sibling `b`.
+    let src = "<?php class Model {}\n\
+        /** @template Model\n * @param Model $x */ function a($x): void {}\n\
+        /** @param Model $y */ function b($y): void {}\n\
+        a(5); b(5);";
+    assert_eq!(param_count(src), 1, "only b() fires — a's template does not leak to b");
+}
+
+#[test]
+fn prefixed_template_variant_shadows() {
+    // `@phpstan-template` (and the variance/psalm variants) declare a template too.
+    let src = "<?php class Foo {}\n\
+        /** @phpstan-template Foo\n * @param Foo $x */ function f($x): void {}\n\
+        f(5);";
+    assert_eq!(param_count(src), 0, "@phpstan-template Foo shadows class Foo");
+}
+
+#[test]
+fn template_shadows_real_class_return() {
+    // The `@return` path: a `@template Foo` shadows the return contract too, so
+    // returning a scalar against `@return Foo` no longer fires.
+    let src = "<?php class Foo {}\n\
+        /** @template Foo\n * @return Foo */ function f() { return 5; }";
+    assert_eq!(return_count(src), 0, "@template Foo shadows @return Foo → silent");
+    // Control: without the template, returning 5 against @return Foo is a violation.
+    let control = "<?php final class Foo {}\n/** @return Foo */ function f() { return 5; }";
+    assert_eq!(return_count(control), 1, "no template → @return Foo fires");
+}
