@@ -383,9 +383,12 @@ ADR-0031 machinery (`CondExpr` → `eval_cond` verdicts → `Refine` collection
     - **N6 — structured loops**: the four constructs, entry-havoc walk,
       break/continue exit joins, unreachable-after-`while(true)`.
 
-    N1 must land first (N4 consumes its API); N2–N6 are order-free after
-    it, N3 before N4 preferred (guard calls give instanceof guards their
-    call-bearing neighbors). Every slice states its ADR-0048 §2 argument
+    N1 must land first (N4 consumes its API); *amended 2026-07-24: N2
+    lands second — it is a hard prerequisite of every ADR-0049 absence
+    slice (S2–S6), not order-free; see the amendment below*; N3–N6 are
+    order-free after N2, N3 before N4 preferred (guard calls give
+    instanceof guards their call-bearing neighbors). Every slice states
+    its ADR-0048 §2 argument
     and §3 contribution in the PR description, per issue #9's acceptance
     criteria.
 
@@ -409,3 +412,41 @@ ADR-0031 machinery (`CondExpr` → `eval_cond` verdicts → `Refine` collection
     - **Negative facts as a provenance-style label channel** — negation
       is extensional and lives in the carriers; ADR-0038's label registry
       stays reserved for provenance, not complements.
+
+## Amendment (2026-07-24): the derivation clause, and N2's place in the order
+
+Source: the pre-implementation soundness audit
+(`docs/notes/20260724-adr0049-0052-soundness-audit.md`, G8). Both
+points are normative.
+
+1. **Point 5 gains its missing half — the derivation clause.** The
+   consumption rule as written is an *emission-time* check: it inspects
+   the facts a finding consumed, not the facts those facts were made
+   from — necessary but **not sufficient**. Binding now: **a derived
+   fact's stratum is the minimum stratum over every fact consumed in
+   its derivation**, propagated through every fact constructor — fold
+   results over an Asserted operand, composed arrays (an array literal
+   containing an Asserted element), heap property writes from an
+   Asserted value, and branch **joins** (a Verified arm joined with an
+   Asserted arm yields Asserted) — so Asserted can never launder into
+   Verified across one derivation step. Counterexample closed (the
+   audit's G8 snippet): a lying `@phpstan-assert-if-true int $x`
+   narrows `$x` at the Asserted stratum; `$pair = [$x, 99];` composes
+   a Singleton array that would otherwise forget its element's
+   stratum; `takes_string($pair[0])` then premises a proof-layer
+   definite-No — an offset proof plus acceptance definite-No — on an
+   Asserted-derived value. Fixtures pinned with N2: that snippet stays
+   silent, plus the join fixture (Verified ⊔ Asserted ⇒ Asserted).
+
+2. **Point 11 reordered — N2 is a hard prerequisite of every ADR-0049
+   absence slice (S2–S6).** The leakage is live, not prospective:
+   `apply_assert_to_var` binds an assert-tag fact whose `"asserted"`
+   provenance is prose, and the landed proof-layer definite-No
+   emitters consume it indistinguishably — a lying assert tag can
+   already premise a `type.*` finding. N2 therefore stops being
+   order-free: it lands immediately after N1 and **before any absence
+   id fires** — every S-slice consumes env facts, and shipping any
+   absence id against the un-stratified `Known` re-opens the hole
+   point 5 exists to close. ADR-0049 §10's stage list inherits the
+   prerequisite by reference (its amendment's sequencing point states
+   the same order from the other side).

@@ -55,7 +55,10 @@ message register.
    stratum is rejected. **The immunity asymmetry is the design's core
    yield**: PHP cannot reopen a defined class — no runtime construct
    adds a method to a class the index resolved — so *method*-absence
-   claims need no dam at all; only symbol *existence* is dammed. The
+   claims need no dam at all; only symbol *existence* is dammed.
+   *Amended 2026-07-24 (A2): scoped, not revoked — the immunity holds
+   only for chains of unconditional top-level declarations with no
+   runtime-surface homonym and no alias/decl collision.* The
    family's strongest id is therefore the one legacy code needs most.
 
 3. **`call.undefined-function`** — all four legs, or silence: (a) every
@@ -71,7 +74,9 @@ message register.
 4. **`call.undefined-method`** — the closed-world flagship, dam-free
    (point 2): (a) receiver class **proven** — heap exact class
    (ADR-0036), `new`, or proven propagation; declared-only receivers go
-   to point 8; (b) hierarchy completely enumerated per ADR-0043 §3
+   to point 8 *(amended 2026-07-24, A1: proven means `class_exact`;
+   `$this`-derived receivers are membership facts and route to point
+   8)*; (b) hierarchy completely enumerated per ADR-0043 §3
    (every ancestor edge resolved in-project or in the builtin
    hierarchy); (c) the method absent — case-insensitively, verified —
    from every class in the chain; (d) **no `__call` anywhere in the
@@ -284,3 +289,215 @@ message register.
     deferred-with-design; `readonly`/`unset` offset-existence
     interactions with the heap — deferred until the object-shape work
     needs them.
+
+## Amendment (2026-07-24): audit-hardened ladder legs
+
+Source: the pre-implementation soundness audit
+(`docs/notes/20260724-adr0049-0052-soundness-audit.md`; gaps G1–G7,
+hardenings M1–M5, cited below by those names; line citations there are
+at commit `2be9a14`). Every leg here is **normative** — it joins the
+ladder it anchors to and ships under the point-10 discipline (the
+silence fixture is written before the id fires). The audit's
+confirmed-sound items (C1–C8) change no text; every new closure walk
+specified below copies the C1 standard (the landed is-a oracle's
+completeness bookkeeping: unresolvable or Ambiguous nodes taint
+closure, cycles terminate via the seen-set, case folding matches the
+engine).
+
+**A1 (points 4a, 8; G1) — `$this` is membership, not exactness.**
+"Receiver class proven" requires an *exactness-bearing* heap fact: the
+heap object carries a `class_exact` bit — true for `new` and for
+clone-of-exact; true for the `$this` seed only when the enclosing class
+is `final` or the descent context carries exactness; false otherwise,
+because the runtime object under `$this` may be any descendant, and
+plain aliasing (`$u = $this`) or `clone $this` must not launder the
+enclosing class into exactness. An inexact receiver **never** satisfies
+point 4a: the claim routes to point 8's declared-receiver ladder
+(descendant closure, dam included, contract layer) or stays silent. The
+membership direction stays sound and usable — `is_a(lower_bound, T) =
+Yes` holds for every descendant; only the No side and every
+definite-No consumer require the bit. FP prevented (live — the audit's
+13th FP class): the template-method shape, `$u = $this;
+$u->handle();` in `Handler` reported as `undefined method
+Handler::handle()` while the runtime object is a `MailHandler` that
+defines it. The carrier fix (the bit plus its four `class_of`
+consumers) is already queued as its own slice; the audit's first two
+counterexamples join the current fp-gate independent of S2.
+
+**A2 (points 2, 4; G2) — dam-freedom scoped to unconditional,
+homonym-free, unambiguous chains.** Point 2's immunity sentence ("PHP
+cannot reopen a defined class") is true of the *bound* class; the
+ladder's method list comes from the indexed *textual* declaration, and
+three legs now guard the identification of the two:
+   (i) *Conditionality.* Lowering records `conditional: bool` on class
+   declarations (true when nested under anything but a plain
+   namespace/program node). A chain containing a conditional
+   declaration **re-dams the claim** — dam clear or vouched required —
+   because a guarded declaration leaves *which* definition bound to
+   runtime load order (the fallback-stub shape: `if
+   (!class_exists(…))` beside a dam-site include that defines the real
+   class with the "missing" method). Dam-freedom survives only for
+   chains of unconditional top-level project declarations — which
+   legacy classes overwhelmingly are, so the point-2 core-yield
+   prediction stands.
+   (ii) *Runtime-surface homonyms.* Any chain FQN that the runtime
+   boot surface also knows as a builtin/extension class-like forces
+   Unknown: the textual twin (polyfill/stub packages vendored as
+   source, ADR-0015) may be dead code shadowed by the loaded extension
+   class — a variant with no dam site at all; points 3/5 already carry
+   the builtin-shadow guard that point 4 lacked. **Divergence
+   from the audit, recorded:** the audit defers this leg to the reflect
+   slice and offers "FQN present in the builtin hierarchy table ⇒
+   silent" as the pre-reflect approximation. Rejected as the normative
+   form: the leg's load-bearing direction is permissive — firing
+   requires the name be *absent from the boot surface* — and absence
+   from the 352-entry hierarchy table proves nothing (point 1's own
+   dictum: the catalog is never an absence oracle). The homonym
+   question is an *existence* question, and the S1 sidecar existence
+   surface (point 1 oracle (b)) answers it — so the leg consumes that
+   surface from S2 on, one cached not-found per chain class, with no
+   wait for the reflect slice's full method enumeration. Consequence,
+   stated honestly: **without a sidecar, `call.undefined-method` is
+   Unknown-silent like points 3/5** — the ADR-0004 sound subset now
+   covers the flagship, because the homonym question has no textual
+   answer. Table presence remains a valid extra silence (a subset of
+   the sidecar's answer); it is never a firing license.
+   (iii) *Alias/decl collision.* A literal `class_alias` edge colliding
+   with a textual declaration of the same FQN — or two literal alias
+   edges for one name — is `Ambiguous`: existence present, identity
+   unresolved; method-absence and point-8 closure treat it as any
+   Ambiguous node. Stated in S1 beside the alias-edge machinery.
+
+**A3 (points 4, 6, 10; G3) — enums are Unknown until their methods are
+lowered, and the reflect slice's gate says so.** Enum lowering today
+drops method bodies *and* the trait-use marker; every enum chain
+reaches the builtin `UnitEnum`, so point 4f silences by accident. Two
+deferrals — enum method lowering (ADR-0043, deferred with the
+method-transform stage) and builtin-ancestor enumeration (point 4f,
+waiting on the reflect slice) — are individually safe and **jointly
+unsound**: the reflect slice would make the enum chain "fully
+enumerated" over an empty method list, and every enum method call plus
+the engine-provided `cases()`/`from()`/`tryFrom()` (textless in any
+source) reports undefined. Normative now: `is_enum` with
+enum-methods-not-lowered (today: every enum) ⇒ Unknown for
+method-absence (point 4) and arity (point 6), independent of what the
+chain enumeration says; and the reflect slice's gate carries the
+written precondition *complete enum lowering — method bodies, the
+trait-use marker, and the engine-provided statics sourced from the
+sidecar surface, never the textual index*. The bomb and the unlock
+that arms it are now recorded in the same place.
+
+**A4 (point 8; G4) — the descendant closure's enumeration legs.** The
+closure enumerates over *declarations*, not the deduped index — both
+halves of an Ambiguous-FQN pair count as potential descendants; parent
+matching follows literal `class_alias` edges (`class B extends
+LegacyName` beside `class_alias('T', 'LegacyName')` makes B a
+descendant of T); and when the union member is an interface, the edge
+set includes `implements`, interface-`extends`, and enum-`implements`.
+Anonymous classes are invisible to the class index as lowered, so v1:
+the presence of any anonymous class whose extends/implements edge
+resolves to a union member — or is Unknown against one — is itself a
+closure obstacle ⇒ Unknown. FP prevented: `new class extends Report {
+public function toPlainText() … }` invisible to a "completely
+enumerated" descendant set of `Report`. Recorded refinement: edge-only
+lowering of anonymous classes (parent/implements refs plus member
+names, no FQN), which shrinks the obstacle to actual edge matches.
+
+**A5 (point 2; G5) — "proven to resolve in-universe" defined
+strictly.** Only **absolute** literal include paths and
+`__DIR__`-anchored concatenations qualify as provable-in-universe; a
+bare relative literal (`include 'config.php';`) is **Unproven — a dam
+site**. Runtime resolution of a relative path consults `include_path`
+and the CWD before falling back to the including file's directory, so
+directory-relative belief is unsound: a same-named in-universe
+neighbor makes the dam believe the universe closed while runtime loads
+an out-of-universe twin defining symbols the scan never sees.
+Recorded opt-in refinement: a `[runtime] include-path` pseudo-constant
+(ADR-0037 §2 family) declaring the boot truth re-qualifies relative
+literals against the declared path; the exact 8.5 precedence order
+(including the `./`-prefix CWD binding) goes through `php -r`
+verification before that refinement is worded — this ADR's own
+discipline. The audit notes the same under-damming is latent in the
+landed transform-side benign-include oracle; the checker dam and the
+transform oracle take the corrected rule from one shared judgment.
+
+**A6 (points 3, 5; G6) — the existence oracle records its SAPI.**
+"The project's own PHP" is not one function table: the sidecar runs
+CLI, production runs FPM/Apache, and per-SAPI ini files load different
+extension sets. Legs: (i) the coverage posture records the sidecar's
+SAPI, and existence claims are honest to it; (ii) a curated
+SAPI-provided symbol set (`fastcgi_finish_request`, the `apache_*`
+family, `litespeed_*`, …) is **never Absent** while the serving SAPI
+is undeclared — FP prevented: `fastcgi_finish_request()` reported
+undefined by a CLI sidecar though defined in every environment that
+executes the path; (iii) `[runtime] sapi` (ADR-0037 §2 family)
+declares the serving surface and unlocks the curated names against the
+declared truth. The same reasoning covers extension classes loaded by
+only one SAPI's ini under point 5.
+
+**A7 (point 7; G7) — the read-context whitelist.** The severity table
+is per-operation; the ladder is now too. `offset.missing` fires
+**only** in: plain rvalue reads (return operands included), argument
+positions whose parameter is proven non-by-ref on a *resolved* target,
+and `foreach` subjects. Every other context is a silence leg with one
+pinned fixture each: `isset`/`empty`/`??`/`array_key_exists`/`unset`,
+write positions (assignment targets, autovivifying nested writes,
+`&$a[k]`, `list()`/foreach-list targets), by-ref argument positions,
+and **any argument of an unresolved or unreflected callee** —
+by-ref-ness is unknowable there, and `f($a[0])` into `function
+f(&$x)` autovivifies silently at runtime. Compound assignment
+(`$a[0]++`, `$a[0] .= …`) stays out of the whitelist pending `php -r`
+verification of the read-half warning on 8.5; unverified contexts
+default to silence.
+
+**A8 (points 3, 5; M2) — the reference form must be fully resolved.**
+PHP's relative form `namespace\foo()` / `new namespace\Bar` has no
+lowered ref kind today and would resolve to a doubled prefix
+(`Ctx\namespace\foo`) — Absent by construction, an FP-manufacturing
+bug the moment points 3/5 fire. Lowering gains a distinct Relative ref
+kind, normalized against the enclosing namespace, **before S4**; the
+point-3 ladder gains the leg "the reference form is fully resolved",
+and until the kind exists, any reference lowering to a raw
+`namespace\`-headed name is Unknown-silent.
+
+**A9 (family-global; M3) — monkey-patch extensions void the family.**
+If the sidecar's loaded-extension list contains a runtime-redefinition
+extension (`uopz`, `runkit7`, `Componere`), every id in point 9 —
+including point 8's final-immunity leg, since finality itself stops
+binding — is Unknown-silent, and the coverage posture names the
+extension. One lookup against the point-1 oracle; these are dev
+tooling in practice, so the posture will rarely fire in anger, but
+with any of them loaded no absence claim holds.
+
+**A10 (point 7; M5) — one key canonicalization, both sides.** The
+read-side key lookup reuses the engine's array-key canonicalization
+exactly as landed on the write side (`php_canonical_int_string`
+semantics: `"5"` → 5; `"05"`/`"+5"`/overflow stay strings; bool → int;
+null → `""`; finite floats truncate) — the same shared helper, never a
+parallel comparison, so `$a = [5 => 'x']; $a["5"]` is present, not
+missing. String-numeric keys and negative offsets behave per the
+landed lowering and the verified table; if negative string offsets
+enter scope they get their own verified row first.
+
+**A11 (point 8, ADR-0052 §2/N4; M1) — version-skew demotion for
+catalog-backed is-a.** The builtin hierarchy table is mined at a
+pinned php-src version; when the sidecar-reported PHP minor differs
+from the pin, catalog-backed is-a verdicts consumed for **arm
+deletion** (ADR-0052 §2's class arms: the positive-branch final-arm
+`No`, and any negative-branch `Yes` riding a catalog edge) and for
+point 8's descendant closure **demote to Unknown** — the arm and the
+claim survive. A skewed edge set can fake No-under-closure where truth
+is Yes, wrongly delete a final arm, and manufacture
+`phpdoc.undefined-method` on the wrongly narrowed receiver.
+`class.undefined` is already double-locked by its sidecar leg; the
+narrowing arms were not, and now are. Recorded refinement: per-minor
+table generation selected by sidecar version; blanket demotion is v1.
+
+**Sequencing (point 10, restated with the audit's consequences).**
+Before S2: A1's carrier fix, A2's three legs, A3's silence condition,
+and ADR-0052's N2 (the checked stratum bit — see that ADR's amendment;
+every S-slice consumes env facts). Before S3: A7, A10. Before S4: A5,
+A6, A8, plus measurement mode as designed. Before S6/N4: A4, A9, A11.
+The reflect slice carries A3's precondition in its own gate. Every
+"verify against PHP 8.5" above goes through `php -r` before its leg is
+worded — never recall.
