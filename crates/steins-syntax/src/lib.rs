@@ -556,6 +556,13 @@ pub struct MethodDecl {
     /// The raw `/** … */` docblock trivia immediately preceding this method, if
     /// any (association discipline as [`FunctionDecl::docblock`]).
     pub docblock: Option<String>,
+    /// The **file byte span** of the associated docblock, when one is adopted —
+    /// the method-world analogue of [`FunctionDecl::docblock_span`]. `docblock`
+    /// text is the exact substring `[span.start, span.end)` of the source, so a
+    /// docblock-relative tag offset maps into the file by adding `span.start`.
+    /// Retained for the transform engine (ADR-0034 / ADR-0043 §6), which deletes a
+    /// promoted `@param` tag and rewrites a `@param`/`@return` type text.
+    pub docblock_span: Option<Span>,
 }
 
 /// A class property declaration (ADR-0036 object state). Covers both plain
@@ -1335,6 +1342,18 @@ pub struct Scope {
     /// When poisoned, no variable value is ever considered known in the scope.
     pub poisoned: bool,
     pub stmts: Vec<Stmt>,
+    /// Every instance/static method call in this scope's body, **comprehensively**
+    /// (including calls nested inside sub-expressions the linear trace drops to
+    /// [`ArgValue::Other`]), in source order, and NOT descending into nested
+    /// function/closure/class bodies (those are their own scopes). Unlike
+    /// [`Self::stmts`] — which captures only statement-position calls — this is the
+    /// sound caller-enumeration surface the method-transform reverse sweep needs
+    /// (ADR-0043 §6): a candidate method is safe to rewrite only when *every* call
+    /// that could reach it is accounted for, so a nested `$this->m($bad)` must be
+    /// visible here even though the trace never modeled it. Constructor (`new`)
+    /// calls are omitted — the constructor is magic and never a transform
+    /// candidate. Empty when the body has no method calls.
+    pub method_calls: Vec<CallExpr>,
     /// Parameters of a closure/arrow scope ([`ScopeOwner::Closure`]) — a closure
     /// has no [`FunctionDecl`] to look them up on, so binding descent and native
     /// parameter seeding read them here. Empty for function/method/top-level
@@ -2081,6 +2100,7 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
         is_abstract: m.is_abstract(),
         is_constructor,
         docblock: docs.preceding(to_span(m.span()).start),
+        docblock_span: docs.preceding_span(to_span(m.span()).start),
     }
 }
 
@@ -2572,6 +2592,64 @@ fn scan_effect_origins(
     }
 }
 
+/// Walk a body subtree, appending every instance/static method call as a
+/// [`CallExpr`] (ADR-0043 §6 comprehensive method-call surface). Mirrors
+/// [`scan_effect_origins`]'s traversal discipline: it descends into control flow
+/// and sub-expressions (so a nested `foo($this->m($x))` is captured) but NOT into
+/// nested function/closure/class-like bodies, which are their own scopes. Dynamic
+/// receivers/selectors are still recorded (as [`Callee::Dynamic`]) — the sweep
+/// needs to see them to taint. Constructor calls are intentionally omitted (the
+/// constructor is magic; never a transform candidate).
+fn scan_method_calls(node: &Node<'_, '_>, out: &mut Vec<CallExpr>) {
+    match node {
+        Node::MethodCall(mc) => out.push(lower_method_call(
+            mc.object,
+            &mc.method,
+            &mc.argument_list,
+            to_span(mc.span()),
+            false,
+        )),
+        Node::NullSafeMethodCall(mc) => out.push(lower_method_call(
+            mc.object,
+            &mc.method,
+            &mc.argument_list,
+            to_span(mc.span()),
+            true,
+        )),
+        Node::StaticMethodCall(sc) => {
+            out.push(lower_static_call(sc.class, &sc.method, &sc.argument_list, to_span(sc.span())));
+        }
+        // A method/static **first-class callable** — `$o->m(...)`, `Foo::m(...)` (PHP
+        // 8.1) — is not a call but references the method as a value: it produces a
+        // `Closure` that can be invoked with *any* arguments later, so it makes the
+        // method's callers unenumerable exactly as `[$o, 'm']` does. These lower to
+        // [`ArgValue::Other`] as values (a documented deferral) and so are invisible
+        // to the value scan; record them here as non-positional reference-"calls" so
+        // the reverse sweep taints the method (unknown receiver → `resolution-
+        // ambiguous`; a resolved receiver → `named-or-spread-args`) and never
+        // promotes it. Constructor first-class callables cannot exist.
+        Node::MethodPartialApplication(mpa) => {
+            out.push(first_class_method_ref(mpa.object, &mpa.method, to_span(mpa.span())));
+        }
+        Node::StaticMethodPartialApplication(spa) => {
+            out.push(first_class_static_ref(spa.class, &spa.method, to_span(spa.span())));
+        }
+        // Nested scopes are their own concern — do not descend.
+        Node::Function(_)
+        | Node::Closure(_)
+        | Node::ArrowFunction(_)
+        | Node::AnonymousClass(_)
+        | Node::Class(_)
+        | Node::Interface(_)
+        | Node::Trait(_)
+        | Node::Enum(_) => return,
+        _ => {}
+    }
+    for child in node.children() {
+        scan_method_calls(&child, out);
+    }
+}
+
 /// The structural throw-origin walk (ADR-0040 damming). Produces every
 /// throw-relevant construct in a body — explicit throws, and function/method
 /// call edges — each tagged with the ordered enclosing `try`/`catch` guards that
@@ -2990,6 +3068,38 @@ fn lower_static_call(class: &Expression<'_>, selector: &ClassLikeMemberSelector<
     CallExpr { callee: None, callee_ref: None, receiver, args, positional_only, span }
 }
 
+/// Lower a **method first-class callable** `$o->m(...)` into a reference-"call": a
+/// [`CallExpr`] with no positional arguments (`positional_only = false`), so the
+/// method-call reverse sweep (ADR-0043 §6) treats it as an unenumerable caller and
+/// taints the method rather than promoting it. Receiver construction mirrors
+/// [`lower_method_call`] — a resolvable receiver + literal selector keeps the method
+/// name (name-scoped taint); a dynamic selector falls to [`Callee::Dynamic`].
+fn first_class_method_ref(
+    object: &Expression<'_>,
+    selector: &ClassLikeMemberSelector<'_>,
+    span: Span,
+) -> CallExpr {
+    let receiver = match (trace_recv_of_object(object), method_name_of(selector)) {
+        (Some(recv), Some(method)) => Callee::Method { receiver: recv, method, nullsafe: false },
+        _ => Callee::Dynamic,
+    };
+    CallExpr { callee: None, callee_ref: None, receiver, args: Vec::new(), positional_only: false, span }
+}
+
+/// Lower a **static-method first-class callable** `Foo::m(...)` into a
+/// reference-"call" (the static analogue of [`first_class_method_ref`]).
+fn first_class_static_ref(
+    class: &Expression<'_>,
+    selector: &ClassLikeMemberSelector<'_>,
+    span: Span,
+) -> CallExpr {
+    let receiver = match (trace_static_class(class), method_name_of(selector)) {
+        (Some(class), Some(method)) => Callee::Static { class, method },
+        _ => Callee::Dynamic,
+    };
+    CallExpr { callee: None, callee_ref: None, receiver, args: Vec::new(), positional_only: false, span }
+}
+
 /// Lower a `new Class(args...)` instantiation into a constructor [`CallExpr`],
 /// or `None` when the class is not statically named.
 fn lower_construct_call(inst: &Instantiation<'_>) -> Option<CallExpr> {
@@ -3319,8 +3429,10 @@ fn build_scope(owner: ScopeOwner, statements: &[Statement<'_>]) -> Scope {
 fn build_scope_from(owner: ScopeOwner, statements: &[&Statement<'_>]) -> Scope {
     let poisoned = statements.iter().any(|s| node_poisons(&Node::Statement(s)));
     let mut stmts = Vec::new();
+    let mut method_calls = Vec::new();
     for s in statements {
         lower_stmt(s, &mut stmts);
+        scan_method_calls(&Node::Statement(s), &mut method_calls);
     }
     let function_name = match &owner {
         ScopeOwner::Function(name) => Some(name.clone()),
@@ -3331,6 +3443,7 @@ fn build_scope_from(owner: ScopeOwner, statements: &[&Statement<'_>]) -> Scope {
         owner,
         poisoned,
         stmts,
+        method_calls,
         params: Vec::new(),
         effect_origins: Vec::new(),
         throw_origins: Vec::new(),
@@ -3378,10 +3491,12 @@ fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>, rc: &Ref
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
     let locals = collect_body_callables(cl.body.statements.iter());
+    let mut method_calls = Vec::new();
     for s in cl.body.statements.iter() {
         lower_stmt(s, &mut stmts);
         scan_effect_origins(&Node::Statement(s), &locals, &mut effect_origins);
         scan_throw_origins(&Node::Statement(s), &[], &[], &locals, &mut throw_origins);
+        scan_method_calls(&Node::Statement(s), &mut method_calls);
     }
     // The closure's own scope is poisoned by a by-ref `use (&$x)` capture (its
     // captured var is a reference alias) or any in-body poison marker.
@@ -3392,6 +3507,7 @@ fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>, rc: &Ref
         owner: ScopeOwner::Closure { def_offset: closure_def_offset(cl) },
         poisoned,
         stmts,
+        method_calls,
         params: lower_params(&cl.parameter_list, rc),
         effect_origins,
         throw_origins,
@@ -3408,6 +3524,8 @@ fn build_closure_scope_from_arrow(af: &mago_syntax::cst::ArrowFunction<'_>, rc: 
     let locals: HashMap<String, CallbackRef> = HashMap::new();
     scan_effect_origins(&Node::Expression(af.expression), &locals, &mut effect_origins);
     scan_throw_origins(&Node::Expression(af.expression), &[], &[], &locals, &mut throw_origins);
+    let mut method_calls = Vec::new();
+    scan_method_calls(&Node::Expression(af.expression), &mut method_calls);
     // The arrow body is its return value: lower as a `return <expr>;` trace.
     let value = lower_arg_value(af.expression);
     let mut invalidated = Vec::new();
@@ -3425,6 +3543,7 @@ fn build_closure_scope_from_arrow(af: &mago_syntax::cst::ArrowFunction<'_>, rc: 
         owner: ScopeOwner::Closure { def_offset: arrow_def_offset(af) },
         poisoned,
         stmts: vec![ret],
+        method_calls,
         params: lower_params(&af.parameter_list, rc),
         effect_origins,
         throw_origins,
