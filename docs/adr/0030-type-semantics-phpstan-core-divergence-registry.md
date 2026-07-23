@@ -45,6 +45,33 @@ entries:
 analysis ratchet), template variance in full, subtraction types: decided in
 envelope-checking priority order, not up front.
 
+## No type combinator: the combinator lives in the value lattice
+
+Steins deliberately has no TypeCombinator/TypeUtils layer — no
+`union(A,B)` normalizer, no `remove(T,S)`, no semantic type-equality.
+PHPStan needs one because modular analysis has only declared types to
+compose; call-site propagation composes *value facts* instead, so the
+combination PHPStan does with types happens here as the four-layer
+domain's join (proven in production by the honesty transform). Types
+stay syntactic lists judged arm-wise through the single acceptance
+relation — which the ported phpstan-src fixture net now pins
+mechanically, and which is exactly the pairwise-subsumption core a
+normalizer would need.
+
+Type-side operations are only needed at three boundaries: **rendering**
+(writing a joined type back into phpdoc — exists today as the honesty
+renderer's dedup/subsumption-collapse/precision ladder, the embryonic
+normalizer), **narrowing/subtraction** (deferred above; inseparable
+from subtraction-type design, so neither leads alone), and future
+envelope simplification / boundary profiles. The commitment: when
+narrowing/subtraction lands, the type-side normalizer is *extracted
+from the rendering boundary*, not built up front. Semantic type
+equality, when needed, is mutual subsumption (Yes/Yes) — definable only
+for extensional types; provenance-flavored types (ADR-0038) are
+undecidable for equality by construction, a divergence to register at
+extraction time. Object-member subsumption arrives with ADR-0043's
+trinary is-a oracle.
+
 ## Conformance-suite divergences (intentional silences)
 
 Departures from php-typing-conformance expectations, triaged 2026-07-23
