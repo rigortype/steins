@@ -39,6 +39,7 @@ use steins_syntax::{
     EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, MatchArmT, MethodDecl, NameRef,
     NativeType, NormKey, Param, PropertyDecl, Receiver, RefKind, ScalarType, Scope, ScopeOwner, SourceTree,
     StaticClass, Stmt, StmtKind, ThrowKind, ThrowOrigin, TypeMember, Visibility, normalize_array,
+    php_canonical_int_string,
 };
 
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, ShapeKey, StringLit, TypeKind as PKind};
@@ -206,6 +207,10 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // fire). Its emitter is `check_undefined_method`; the rest of the family stays in
     // `REGISTERED_NOT_YET_EMITTED` until its own stage.
     CALL_UNDEFINED_METHOD_ID,
+    // The offset family, lit up at ADR-0049 S3 (`check_offset_read`): a value-domain
+    // proof over proven container values under the read-context whitelist.
+    OFFSET_MISSING_ID,
+    OFFSET_ON_UNSUPPORTED_ID,
     suppress::SUPPRESS_UNMATCHED_ID,
     suppress::SUPPRESS_UNKNOWN_ID,
 ];
@@ -230,8 +235,7 @@ pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
     CALL_TOO_FEW_ARGUMENTS_ID,
     CALL_TOO_MANY_ARGUMENTS_ID,
     CALL_UNKNOWN_NAMED_ARGUMENT_ID,
-    OFFSET_MISSING_ID,
-    OFFSET_ON_UNSUPPORTED_ID,
+    // OFFSET_MISSING_ID / OFFSET_ON_UNSUPPORTED_ID lit up at S3 — now in ALL_EMITTABLE_IDS.
     PHPDOC_UNDEFINED_METHOD_ID,
 ];
 
@@ -429,6 +433,7 @@ fn arg_to_fold(arg: &ArgValue) -> Option<FoldArg> {
         | ArgValue::PropFetch { .. }
         | ArgValue::Clone(_)
         | ArgValue::Coalesce(..)
+        | ArgValue::OffsetRead { .. }
         // Object-world values (ADR-0043) are not fold arguments — unproven, == Other.
         | ArgValue::ClassConst(..)
         | ArgValue::EnumCase(..)
@@ -677,7 +682,7 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let tree = parse(db, file);
     let units = [FileUnit { path: file.path(db), tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, &mut NoFold, false)
+    check_units(&units, &index, &mut NoFold, false, true)
 }
 
 /// The folding-aware check for one file (run **outside** salsa; ADR-0004),
@@ -687,7 +692,7 @@ pub fn check_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec
     let tree = parse(db, file);
     let units = [FileUnit { path: file.path(db), tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, folder, false)
+    check_units(&units, &index, folder, false, true)
 }
 
 /// The folding-aware check for a whole **project** (ADR-0009/0015): every file
@@ -695,18 +700,22 @@ pub fn check_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec
 /// effects resolve. Resolution is driven by the salsa [`project_index`] query.
 #[must_use]
 pub fn check_project(db: &dyn Db, project: Project, folder: &mut dyn Folder) -> Vec<Diagnostic> {
-    check_project_with_runtime(db, project, folder, false)
+    check_project_with_runtime(db, project, folder, false, true)
 }
 
-/// [`check_project`] with the `[runtime]` pseudo-constants declared (ADR-0052 §5):
-/// `zend_assertions` promotes `assert($expr)` narrowing to the `Verified` stratum.
-/// The default entry point passes `false` (the safe production default).
+/// [`check_project`] with the `[runtime]` pseudo-constants declared (ADR-0052 §5,
+/// ADR-0049 §7): `zend_assertions` promotes `assert($expr)` narrowing to the
+/// `Verified` stratum; `warning_handler_abort` (the `warning-handler` posture) is
+/// `true` for the default `"abort"` — proven warning-grade offset findings emit —
+/// and `false` for `"null"`, which silences them. The default entry point
+/// ([`check_project`]) passes `(false, true)`: the safe production defaults.
 #[must_use]
 pub fn check_project_with_runtime(
     db: &dyn Db,
     project: Project,
     folder: &mut dyn Folder,
     zend_assertions: bool,
+    warning_handler_abort: bool,
 ) -> Vec<Diagnostic> {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
     let units: Vec<FileUnit> =
@@ -715,7 +724,7 @@ pub fn check_project_with_runtime(
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
     let index = Index::from_db(db_index, &pos);
-    check_units(&units, &index, folder, zend_assertions)
+    check_units(&units, &index, folder, zend_assertions, warning_handler_abort)
 }
 
 /// The pure single-file check (sound subset). Kept for unit tests and callers
@@ -737,7 +746,7 @@ pub fn check_with(
     let _ = functions; // authoritative list comes from `tree.functions()`
     let units = [FileUnit { path, tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, folder, false)
+    check_units(&units, &index, folder, false, true)
 }
 
 /// The pure single-file check with the `[runtime]` pseudo-constants declared
@@ -753,7 +762,24 @@ pub fn check_runtime(
     let _ = functions;
     let units = [FileUnit { path, tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, &mut NoFold, zend_assertions)
+    check_units(&units, &index, &mut NoFold, zend_assertions, true)
+}
+
+/// The single-file check with a folder **and** the full `[runtime]` config
+/// (`zend_assertions`, `warning_handler_abort`). Kept for tests that must exercise
+/// both a live folder (the offset family is gated on [`Folder::absence_family_available`],
+/// ADR-0049 A9) and a chosen `warning-handler` posture (ADR-0049 §7).
+#[must_use]
+pub fn check_full(
+    tree: &SourceTree,
+    path: &str,
+    folder: &mut dyn Folder,
+    zend_assertions: bool,
+    warning_handler_abort: bool,
+) -> Vec<Diagnostic> {
+    let units = [FileUnit { path, tree }];
+    let index = Index::from_units(&units);
+    check_units(&units, &index, folder, zend_assertions, warning_handler_abort)
 }
 
 /// The project checking core: direct + propagation passes over every file's
@@ -763,6 +789,7 @@ fn check_units(
     index: &Index,
     folder: &mut dyn Folder,
     zend_assertions: bool,
+    warning_handler_abort: bool,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
 
@@ -771,7 +798,7 @@ fn check_units(
     let dam = dam_facts(units);
 
     for fi in 0..units.len() {
-        let cx = Cx::new_with(units, index, fi, &dam, zend_assertions);
+        let cx = Cx::new_with(units, index, fi, &dam, zend_assertions, warning_handler_abort);
 
         // --- Propagation pass FIRST: it walks every scope and, as a side
         // product, proves dead regions (decided branches, unreachable tails) —
@@ -1028,7 +1055,7 @@ fn annotate_units(
 
     // 3. Findings on the target file (project-wide check, filtered by path).
     let target_path = units[target].path;
-    for d in check_units(units, index, folder, false) {
+    for d in check_units(units, index, folder, false, true) {
         if d.path == target_path {
             facts.push(LineFact { line: d.line, kind: FactKind::Finding { id: d.id } });
         }
@@ -2390,11 +2417,22 @@ struct Cx<'a> {
     /// `assert($expr)` narrowing rises to the `Verified` stratum. `false` (the safe
     /// production default — `zend.assertions=-1`) keeps it `Asserted`.
     zend_assertions: bool,
+    /// The `[runtime] warning-handler` pseudo-constant (ADR-0049 §7 amendment,
+    /// ADR-0037 §2 family). `true` = `"abort"` (the owner-confirmed realistic-app
+    /// default: a warning handler converts an `E_WARNING` to an exception / halts, so
+    /// a *proven* warning is a proven runtime break — warning-grade offset findings
+    /// emit). `false` = `"null"`: the application tolerates the warning and continues,
+    /// so warning-grade offset findings leave the proof surface and stay silent (v1
+    /// simplification: the ADR-0050 layer-demotion + value-side `null`/`""` adoption
+    /// is deferred; v1 either emits under "abort" or silences under "null"). The
+    /// Error-grade `offset.on-unsupported` object case (deferred in this slice) is
+    /// posture-independent and would emit under both.
+    warning_handler_abort: bool,
 }
 
 impl<'a> Cx<'a> {
     fn new(units: &'a [FileUnit<'a>], index: &'a Index, cur: usize) -> Self {
-        Self { units, index, cur, dam: &EMPTY_DAM, zend_assertions: false }
+        Self { units, index, cur, dam: &EMPTY_DAM, zend_assertions: false, warning_handler_abort: true }
     }
 
     /// A context carrying an explicit runtime config (the top-level analysis pass).
@@ -2404,8 +2442,9 @@ impl<'a> Cx<'a> {
         cur: usize,
         dam: &'a DamFacts,
         zend_assertions: bool,
+        warning_handler_abort: bool,
     ) -> Self {
-        Self { units, index, cur, dam, zend_assertions }
+        Self { units, index, cur, dam, zend_assertions, warning_handler_abort }
     }
 
     /// A context pointing at a different file (for cross-file descent); the runtime
@@ -2417,6 +2456,7 @@ impl<'a> Cx<'a> {
             cur: file,
             dam: self.dam,
             zend_assertions: self.zend_assertions,
+            warning_handler_abort: self.warning_handler_abort,
         }
     }
 
@@ -2904,6 +2944,9 @@ fn val_of(arg: &ArgValue) -> Option<Val> {
         | ArgValue::Closure(_)
         | ArgValue::PropFetch { .. }
         | ArgValue::Clone(_)
+        // An offset read is never a proven `Val` — the walk judges it separately
+        // (ADR-0049 §7); it manufactures no fact here (the safe side).
+        | ArgValue::OffsetRead { .. }
         // Object-world values (ADR-0043): not domain `Val`s — unproven, == Other.
         | ArgValue::ClassConst(..)
         | ArgValue::EnumCase(..)
@@ -3445,6 +3488,20 @@ fn walk_trace(
                 }
                 Callee::Dynamic => {}
             }
+        }
+
+        // 1z. Offset family (ADR-0049 §7 / S3): fire `offset.missing` /
+        // `offset.on-unsupported` at the whitelisted read positions only (A7) — a
+        // plain assignment-RHS and a return operand whose value is directly an
+        // `OffsetRead`. Judged once per site in the plain per-scope pass
+        // (`descent.is_none()`), reading the pre-statement env (which already carries
+        // this sub-trace's branch refinements — e.g. an `=== []` guard narrowing the
+        // container to `Singleton([])`).
+        if descent.is_none()
+            && let StmtKind::Assign { value: ArgValue::OffsetRead { base, key }, span, .. }
+            | StmtKind::Return { value: ArgValue::OffsetRead { base, key }, span, .. } = &stmt.kind
+        {
+            check_offset_read(cx, folder, base, key, env, scope.poisoned, *span, out);
         }
 
         // 1a. Escape + sweep (ADR-0036): passing an object into a call escapes it;
@@ -6683,6 +6740,240 @@ fn check_undefined_method(
     });
 }
 
+// ---------------------------------------------------------------------------
+// The offset family: `offset.missing` / `offset.on-unsupported` (ADR-0049 §7 / S3).
+//
+// A value-domain absence proof: a read `$base[$key]` provably emits an `E_WARNING`
+// because the whole container value is known (a Verified `Singleton`/all-array
+// `OneOf`) and the key is provably absent, or the base is a proven non-offsetable
+// scalar/null. Provability is value-domain evidence only (§7): `General`/`Refined`,
+// objects, string bases, and any non-`Verified` fact (N2) are silent.
+//
+// **Read-context whitelist (A7).** The emitter is called ONLY from the whitelisted
+// read positions — a plain assignment-RHS and a return operand — in the plain
+// per-scope pass. Every silence context (`isset`/`??`/`array_key_exists`/`unset`,
+// write lvalues, by-ref/unresolved-callee argument positions, array elements) never
+// reaches here: `??` lowers its operand into an [`ArgValue::Coalesce`] (not a
+// top-level `OffsetRead`), a write lvalue never lowers to an `Assign`/`Return`
+// value, and `isset`/`unset`/`array_key_exists` are constructs/calls the lowering
+// keeps out of these value slots entirely.
+//
+// v1 scope (deferred-with-comment, all safe silence): the Error-grade object case
+// (needs the ArrayAccess is-a surface), the TypeError string-key-on-string case,
+// string-base offset reads (in-range present / uninitialized-offset warning), the
+// call-argument read position (the by-ref / unresolved-callee autovivification risk,
+// A7), and the compound-assignment read half — none of which the current lowering
+// carries into `Assign`/`Return` value slots.
+// ---------------------------------------------------------------------------
+
+/// Severity grade of an offset finding (ADR-0049 §7 verified table). The
+/// `warning-handler` posture gates only [`Self::Warning`]; [`Self::Fatal`] (the
+/// object `Error` / string-key `TypeError` cases) would emit under both — but those
+/// cases are deferred in this slice, so every finding here is currently `Warning`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OffsetGrade {
+    Warning,
+    #[allow(dead_code)]
+    Fatal,
+}
+
+/// Canonicalize a proven key [`Val`] to a domain array key (ADR-0049 A10), reusing
+/// the SAME [`php_canonical_int_string`] primitive as the write/lowering side — so
+/// `$a = [5 => 'x']; $a["5"]` resolves to the present key `5`, while `"05"`/`"+5"`
+/// stay strings. `None` for an array key (an illegal offset type — a distinct
+/// TypeError, out of scope here) or a non-finite float.
+fn offset_key_of(v: &Val) -> Option<VKey> {
+    match v {
+        Val::Int(i) => Some(VKey::Int(*i)),
+        Val::Bool(b) => Some(VKey::Int(i64::from(*b))),
+        Val::Null => Some(VKey::Str(String::new())),
+        #[allow(clippy::cast_possible_truncation)]
+        Val::Float(f) if f.is_finite() => Some(VKey::Int(f.trunc() as i64)),
+        Val::Str(s) => Some(match php_canonical_int_string(s) {
+            Some(i) => VKey::Int(i),
+            None => VKey::Str(s.clone()),
+        }),
+        Val::Float(_) | Val::Array(_) => None,
+    }
+}
+
+/// The proven `Verified` value-domain fact for an offset-read operand (base or key),
+/// or `None` when unproven, poisoned, or below the proof stratum (N2). A bare `Var`
+/// reads the env (requiring `Verified`); a literal / fully-literal array resolves
+/// directly (literals are `Verified` whole values). Every other form is unproven.
+fn offset_operand_fact(arg: &ArgValue, env: &HashMap<String, Known>, poisoned: bool) -> Option<Fact> {
+    match arg {
+        ArgValue::Var(name) => {
+            if poisoned {
+                return None;
+            }
+            let k = env.get(name)?;
+            (k.stratum == Stratum::Verified).then(|| k.fact.clone()).flatten()
+        }
+        _ => singleton_fact(arg),
+    }
+}
+
+/// The PHP type word for an offset read on a proven non-offsetable scalar/null base
+/// (verified PHP 8.5.8: `Trying to access array offset on null|int|float|true|false`).
+/// `None` for a string base (offsetable — deferred) or any array.
+fn unsupported_base_word(v: &Val) -> Option<&'static str> {
+    match v {
+        Val::Null => Some("null"),
+        Val::Int(_) => Some("int"),
+        Val::Float(_) => Some("float"),
+        Val::Bool(true) => Some("true"),
+        Val::Bool(false) => Some("false"),
+        Val::Str(_) | Val::Array(_) => None,
+    }
+}
+
+/// Render a canonical key in Steins' own phrasing (`0`, `'foo'`) for the evidence
+/// clause, and in PHP's verbatim phrasing (`0`, `"foo"`) for the quoted consequence.
+fn render_offset_key(k: &VKey) -> (String, String) {
+    match k {
+        VKey::Int(i) => (i.to_string(), i.to_string()),
+        VKey::Str(s) => (format!("'{s}'"), format!("\"{s}\"")),
+    }
+}
+
+/// Judge a single whitelisted offset read `base[key]` and emit at most one finding
+/// (ADR-0049 §7 / S3). `span` locates the diagnostic (the enclosing statement).
+#[allow(clippy::too_many_arguments)]
+fn check_offset_read(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    base: &ArgValue,
+    key: &ArgValue,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    span: Span,
+    out: &mut Vec<Diagnostic>,
+) {
+    // A9 (global): the whole family is silent without a live, monkey-patch-free
+    // sidecar (checked once, cached) — the uniform absence-family availability gate.
+    if !folder.absence_family_available() {
+        return;
+    }
+    // Legs (b)/(e): the base must be a proven `Verified` whole value (N2). An object
+    // base (fact `None` — object state lives in the heap, not the value domain) is
+    // silent: the ArrayAccess-arbitrary-code / non-ArrayAccess-`Error` split is the
+    // deferred object case.
+    let Some(base_fact) = offset_operand_fact(base, env, poisoned) else {
+        return;
+    };
+
+    // Case 1 — a proven non-offsetable scalar/null base (`offset.on-unsupported`,
+    // warning-grade): the read warns regardless of the key, so no proven key is
+    // required. Only a `Singleton` fires (a mixed/abstract base is silent).
+    if let Fact::Singleton(v) = &base_fact
+        && let Some(word) = unsupported_base_word(v)
+    {
+        emit_offset(
+            cx,
+            span,
+            OFFSET_ON_UNSUPPORTED_ID,
+            OffsetGrade::Warning,
+            format!(
+                "offset read on {} — provably {word}; reads null with \"Trying to access array offset on {word}\"",
+                base.render(),
+            ),
+            out,
+        );
+        return;
+    }
+
+    // Case 2 — a container base (`offset.missing`, warning-grade): the key must be a
+    // proven single value (leg (c)), canonicalized through the shared helper (A10).
+    let Some(Fact::Singleton(key_val)) = offset_operand_fact(key, env, poisoned) else {
+        return;
+    };
+    let Some(canon) = offset_key_of(&key_val) else {
+        return;
+    };
+
+    let (our_key, php_key) = render_offset_key(&canon);
+    match &base_fact {
+        // A single proven array (including `Singleton([])` from an `=== []` guard):
+        // key absence is definite (leg (b)).
+        Fact::Singleton(Val::Array(entries)) => {
+            if !array_has_key(entries, &canon) {
+                emit_offset(
+                    cx,
+                    span,
+                    OFFSET_MISSING_ID,
+                    OffsetGrade::Warning,
+                    format!(
+                        "offset {our_key} provably missing — {} is {} on this path; reads null with \"Undefined array key {php_key}\"",
+                        base.render(),
+                        render_val(&base_fact_val(&base_fact)),
+                    ),
+                    out,
+                );
+            }
+        }
+        // A `OneOf` fires only when EVERY member is an array and none carries the key
+        // (leg (b), the join rule): any member with the key — or any non-array member
+        // — is silence.
+        Fact::OneOf(members) => {
+            let all_arrays_missing = members.iter().all(|m| {
+                matches!(m, Val::Array(entries) if !array_has_key(entries, &canon))
+            });
+            if all_arrays_missing {
+                emit_offset(
+                    cx,
+                    span,
+                    OFFSET_MISSING_ID,
+                    OffsetGrade::Warning,
+                    format!(
+                        "offset {our_key} provably missing — {} is one of {} proven arrays, none carrying the key; reads null with \"Undefined array key {php_key}\"",
+                        base.render(),
+                        members.len(),
+                    ),
+                    out,
+                );
+            }
+        }
+        // `Refined`/`General` (no proven whole value), a string base, or anything
+        // else: silent (§7 value-domain-only provability).
+        _ => {}
+    }
+}
+
+/// Whether a normalized array-entry list contains `key` (the read-side membership
+/// check, over the already-canonical [`VKey`]s the domain stores).
+fn array_has_key(entries: &[(VKey, Val)], key: &VKey) -> bool {
+    entries.iter().any(|(k, _)| k == key)
+}
+
+/// The `Val` inside a `Singleton` fact (for rendering the container); a no-op clone
+/// guarded by the caller having matched `Singleton`.
+fn base_fact_val(f: &Fact) -> Val {
+    match f {
+        Fact::Singleton(v) => v.clone(),
+        _ => Val::Null,
+    }
+}
+
+/// Emit one offset finding, honoring the `warning-handler` posture (ADR-0049 §7):
+/// under `"null"` (`!warning_handler_abort`) a warning-grade finding leaves the
+/// proof surface and is not emitted; a `Fatal`-grade finding would emit under both
+/// (none are produced in this slice).
+fn emit_offset(
+    cx: &Cx,
+    span: Span,
+    id: &'static str,
+    grade: OffsetGrade,
+    message: String,
+    out: &mut Vec<Diagnostic>,
+) {
+    if grade == OffsetGrade::Warning && !cx.warning_handler_abort {
+        return;
+    }
+    let pos = cx.tree().position(span.start);
+    out.push(Diagnostic { id, path: cx.path().to_owned(), line: pos.line, column: pos.column, message });
+}
+
 /// Check + descend one method / static / constructor call.
 #[allow(clippy::too_many_arguments)]
 fn handle_method_call(
@@ -6970,6 +7261,7 @@ fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
         | ArgValue::Call(..)
         | ArgValue::Ternary { .. }
         | ArgValue::Coalesce(..)
+        | ArgValue::OffsetRead { .. }
         | ArgValue::PropFetch { .. }
         | ArgValue::Clone(_)
         | ArgValue::ClassConst(..)

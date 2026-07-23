@@ -158,12 +158,17 @@ fn run_check(args: &[String]) -> ExitCode {
     let project = Project::new(&db, inputs.clone());
     // `[runtime]` pseudo-constants (ADR-0052 §5): the boot truth the checker cannot
     // observe from source (e.g. `zend-assertions = "enabled"`).
-    let (zend_assertions, runtime_warnings) = load_runtime();
+    let (zend_assertions, warning_handler_abort, runtime_warnings) = load_runtime();
     for w in &runtime_warnings {
         eprintln!("steins: {w}");
     }
-    let mut findings: Vec<Diagnostic> =
-        check_project_with_runtime(&db, project, &mut folder, zend_assertions);
+    let mut findings: Vec<Diagnostic> = check_project_with_runtime(
+        &db,
+        project,
+        &mut folder,
+        zend_assertions,
+        warning_handler_abort,
+    );
 
     // Vendor filtering applies FIRST (ADR-0015), before inline ignores and the
     // baseline: vendor code is fully indexed and inferred, but a finding whose
@@ -492,6 +497,14 @@ struct RuntimeConfig {
     /// default (`zend.assertions=-1`, narrowing stays `Asserted`).
     #[serde(rename = "zend-assertions", default)]
     zend_assertions: Option<String>,
+    /// `warning-handler = "abort" | "null"` (ADR-0049 §7 amendment): what a proven
+    /// `E_WARNING` *does* at runtime. Default (or absence) is `"abort"` — the
+    /// owner-confirmed realistic-app assumption that a handler converts the warning to
+    /// an exception / halts, so proven warning-grade offset findings emit. `"null"`
+    /// declares the app tolerates the warning: those findings leave the proof surface
+    /// and stay silent.
+    #[serde(rename = "warning-handler", default)]
+    warning_handler: Option<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -564,37 +577,48 @@ fn load_vouches(config_path: Option<&str>) -> (VouchSet, Vec<String>) {
     (VouchSet::from_entries(entries), warnings)
 }
 
-/// Load the `[runtime]` pseudo-constants from `steins.toml` (ADR-0052 §5). Reads
-/// `./steins.toml` if present (a missing file is the safe default — every knob
-/// off). Returns `zend_assertions` plus human warnings for a parse error or an
-/// unrecognized `zend-assertions` value. An unknown key in `[runtime]` is a parse
-/// error (see [`RuntimeConfig`]) surfaced as a warning, leaving defaults in force.
-fn load_runtime() -> (bool, Vec<String>) {
+/// Load the `[runtime]` pseudo-constants from `steins.toml` (ADR-0052 §5 /
+/// ADR-0049 §7). Reads `./steins.toml` if present (a missing file is the safe
+/// default — assertions off, `warning-handler = "abort"`). Returns
+/// `(zend_assertions, warning_handler_abort)` plus human warnings for a parse error
+/// or an unrecognized value. An unknown key in `[runtime]` is a parse error (see
+/// [`RuntimeConfig`]) surfaced as a warning, leaving defaults in force.
+fn load_runtime() -> (bool, bool, Vec<String>) {
     let mut warnings = Vec::new();
     let path = PathBuf::from("steins.toml");
     let Ok(text) = std::fs::read_to_string(&path) else {
-        return (false, warnings);
+        return (false, true, warnings);
     };
     let config: SteinsConfig = match toml::from_str(&text) {
         Ok(c) => c,
         Err(e) => {
             warnings.push(format!("{}: parse error ({e}); proceeding with runtime defaults", path.display()));
-            return (false, warnings);
+            return (false, true, warnings);
         }
     };
-    let Some(raw) = config.runtime.and_then(|r| r.zend_assertions) else {
-        return (false, warnings);
-    };
-    match raw.as_str() {
-        "enabled" => (true, warnings),
-        "disabled" => (false, warnings),
-        other => {
+    let runtime = config.runtime.unwrap_or_default();
+    let zend_assertions = match runtime.zend_assertions.as_deref() {
+        None | Some("disabled") => false,
+        Some("enabled") => true,
+        Some(other) => {
             warnings.push(format!(
                 "steins.toml [runtime] zend-assertions: unknown value `{other}` (want \"enabled\"|\"disabled\"); using disabled"
             ));
-            (false, warnings)
+            false
         }
-    }
+    };
+    // Default "abort": a proven E_WARNING is a proven runtime break (ADR-0049 §7).
+    let warning_handler_abort = match runtime.warning_handler.as_deref() {
+        None | Some("abort") => true,
+        Some("null") => false,
+        Some(other) => {
+            warnings.push(format!(
+                "steins.toml [runtime] warning-handler: unknown value `{other}` (want \"abort\"|\"null\"); using abort"
+            ));
+            true
+        }
+    };
+    (zend_assertions, warning_handler_abort, warnings)
 }
 
 /// Load the region map from `steins.toml [transform.partitions]` (ADR-0047 §7).

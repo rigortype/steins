@@ -122,40 +122,35 @@ fn classification_matches_adr_0050_section_1() {
 }
 
 /// The finding-breadth family lights up stage by stage (ADR-0049). At S2 the
-/// flagship `call.undefined-method` is **emitted** (it left the pending list into
-/// `ALL_EMITTABLE_IDS`); the other eight remain registered ahead of emission.
+/// flagship `call.undefined-method` is **emitted**; at S3 the offset pair
+/// (`offset.missing` / `offset.on-unsupported`) joins it in `ALL_EMITTABLE_IDS`;
+/// the remaining six stay registered ahead of emission.
 #[test]
 fn finding_breadth_ids_light_up_stage_by_stage() {
     let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
     let emittable: HashSet<&str> = ALL_EMITTABLE_IDS.iter().copied().collect();
 
-    // S2: the flagship is now emittable and no longer pending.
-    assert!(
-        emittable.contains(CALL_UNDEFINED_METHOD_ID),
-        "`call.undefined-method` must be emittable from S2"
-    );
-    assert!(
-        !pending.contains(CALL_UNDEFINED_METHOD_ID),
-        "`call.undefined-method` must have left REGISTERED_NOT_YET_EMITTED at S2"
-    );
-    assert_eq!(layer(CALL_UNDEFINED_METHOD_ID), Some(Layer::Proof));
+    // S2/S3: the flagship and the offset pair are emittable and no longer pending.
+    for id in [CALL_UNDEFINED_METHOD_ID, OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID] {
+        assert!(emittable.contains(id), "`{id}` must be emittable from its stage (S2/S3)");
+        assert!(!pending.contains(id), "`{id}` must have left REGISTERED_NOT_YET_EMITTED");
+        assert_eq!(layer(id), Some(Layer::Proof));
+    }
 
-    // The remaining eight are still registered ahead of emission.
+    // The remaining six are still registered ahead of emission.
     for id in [
         CALL_UNDEFINED_FUNCTION_ID,
         CLASS_UNDEFINED_ID,
         CALL_TOO_FEW_ARGUMENTS_ID,
         CALL_TOO_MANY_ARGUMENTS_ID,
         CALL_UNKNOWN_NAMED_ARGUMENT_ID,
-        OFFSET_MISSING_ID,
-        OFFSET_ON_UNSUPPORTED_ID,
         PHPDOC_UNDEFINED_METHOD_ID,
     ] {
         assert!(pending.contains(id), "`{id}` should be registered-not-yet-emitted");
         assert!(!emittable.contains(id), "`{id}` must not be emittable before its stage");
         assert!(layer(id).is_some(), "`{id}` must be registered with a layer");
     }
-    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 8);
+    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 6);
 }
 
 /// An unregistered id has no layer (the lookup is exact, not prefix-based).

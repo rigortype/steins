@@ -808,6 +808,18 @@ pub enum ArgValue {
     /// lowers to [`Self::Other`]) yields no fact, so `??` never manufactures a fact
     /// for a value it cannot see. Short-ternary `?:` still widens to `Other`.
     Coalesce(Box<ArgValue>, Box<ArgValue>),
+    /// An array/offset read `$base[$key]` in **rvalue** position (ADR-0049 §7 / S3).
+    /// `base` and `key` are the lowered sub-expressions (each may itself be any
+    /// [`ArgValue`], commonly a [`Self::Var`] base and a literal/`Var` key). This is
+    /// never a *proven* value ([`val_of`] yields `None`, [`Self::is_literal`] is
+    /// `false`): the walk resolves the base to a container [`Fact`] and the key to a
+    /// proven value, then judges `offset.missing` / `offset.on-unsupported` **only in
+    /// the whitelisted read contexts** (ADR-0049 A7: plain assignment-RHS and return
+    /// operands in v1). It is a *silence carrier* everywhere else — an operand of `??`
+    /// ([`Self::Coalesce`]), a write lvalue, an `isset`/`array_key_exists` argument,
+    /// or an array element never fires (the array element case collapses the whole
+    /// literal to [`Self::Other`], as an offset read is not a proven element value).
+    OffsetRead { base: Box<ArgValue>, key: Box<ArgValue> },
     Other,
 }
 
@@ -936,6 +948,10 @@ impl std::hash::Hash for ArgValue {
                 l.hash(state);
                 r.hash(state);
             }
+            ArgValue::OffsetRead { base, key } => {
+                base.hash(state);
+                key.hash(state);
+            }
             ArgValue::ClassConst(class, name) => {
                 class.hash(state);
                 name.hash(state);
@@ -988,6 +1004,7 @@ impl ArgValue {
             ArgValue::PropFetch { var, prop } => format!("${var}->{prop}"),
             ArgValue::Clone(v) => format!("clone ${v}"),
             ArgValue::Coalesce(l, r) => format!("({} ?? {})", l.render(), r.render()),
+            ArgValue::OffsetRead { base, key } => format!("{}[{}]", base.render(), key.render()),
             ArgValue::ClassConst(class, name) => format!("{}::{name}", class.render()),
             ArgValue::EnumCase(class, case) => format!("{class}::{case}"),
             ArgValue::Other => "<expr>".to_owned(),
@@ -3517,6 +3534,15 @@ fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
         Expression::Binary(b) if b.operator.is_null_coalesce() => {
             ArgValue::Coalesce(Box::new(lower_arg_value(b.lhs)), Box::new(lower_arg_value(b.rhs)))
         }
+        // An array/offset read `$base[$key]` (ADR-0049 §7 / S3). Lowered
+        // structurally in every rvalue position; the walk fires `offset.missing` /
+        // `offset.on-unsupported` **only** at the whitelisted read positions (A7).
+        // In an array-*element* position it collapses the literal to `Other` (see
+        // [`lower_array_elements`]) — an offset read is not a proven element value.
+        Expression::ArrayAccess(aa) => ArgValue::OffsetRead {
+            base: Box::new(lower_arg_value(aa.array)),
+            key: Box::new(lower_arg_value(aa.index)),
+        },
         _ => ArgValue::Other,
     }
 }
@@ -3531,7 +3557,10 @@ fn lower_array_elements<'a>(elements: impl Iterator<Item = &'a ArrayElement<'a>>
         match el {
             ArrayElement::Value(v) => {
                 let value = lower_arg_value(v.value);
-                if matches!(value, ArgValue::Other) {
+                // An offset read is not a proven element value — collapse the whole
+                // literal to `Other` exactly as any other unrepresentable element,
+                // so `[$a[0]]` never carries an `OffsetRead` into a "concrete array".
+                if matches!(value, ArgValue::Other | ArgValue::OffsetRead { .. }) {
                     return ArgValue::Other;
                 }
                 items.push((ArrayKey::Auto, value));
@@ -3541,7 +3570,7 @@ fn lower_array_elements<'a>(elements: impl Iterator<Item = &'a ArrayElement<'a>>
                     return ArgValue::Other;
                 };
                 let value = lower_arg_value(kv.value);
-                if matches!(value, ArgValue::Other) {
+                if matches!(value, ArgValue::Other | ArgValue::OffsetRead { .. }) {
                     return ArgValue::Other;
                 }
                 items.push((key, value));
@@ -3575,7 +3604,12 @@ fn lower_array_key(expr: &Expression<'_>) -> Option<ArrayKey> {
 /// Whether a string is a PHP *canonical* decimal integer (the form array keys
 /// fold to `int` on): it round-trips exactly through `i64` (`"5"` → 5, but
 /// `"05"`, `"+5"`, `" 5"`, `"-0"`, and out-of-range values stay strings).
-fn php_canonical_int_string(s: &str) -> Option<i64> {
+///
+/// Public so the offset-read side (ADR-0049 A10) canonicalizes a runtime string key
+/// through the **same** primitive the write/lowering side uses — never a parallel
+/// comparison, so `$a = [5 => 'x']; $a["5"]` resolves to the present key 5.
+#[must_use]
+pub fn php_canonical_int_string(s: &str) -> Option<i64> {
     let i: i64 = s.parse().ok()?;
     (i.to_string() == s).then_some(i)
 }
@@ -4305,10 +4339,24 @@ fn lower_cond_operand(expr: &Expression<'_>) -> CondOperand {
             CondOperand::Var(strip_dollar(bytes_to_string(dv.name)))
         }
         other => match lower_arg_value(other) {
-            v if v.is_literal() => CondOperand::Literal(v),
+            // A scalar literal, or a fully-concrete array literal — the latter lets a
+            // `$x === []` / `$x === [1, 2]` guard narrow `$x` to a `Singleton` array
+            // (ADR-0049 §7: the `=== []` branch is what proves offset 0 missing). A
+            // non-concrete array (an element that is a `Var`/call/offset read) stays
+            // `Other`, so nothing unproven is ever treated as a decided literal.
+            v if v.is_literal() || arg_is_concrete_array(&v) => CondOperand::Literal(v),
             _ => CondOperand::Other,
         },
     }
+}
+
+/// Whether an [`ArgValue`] is a fully-concrete array literal: an `Array` whose every
+/// element value is itself a scalar literal or a concrete array (recursively). This
+/// is the "self-evident value" predicate for arrays that [`CondOperand::Literal`]
+/// requires — a `Var`/call/offset-read element makes the array unproven.
+fn arg_is_concrete_array(v: &ArgValue) -> bool {
+    let ArgValue::Array(items) = v else { return false };
+    items.iter().all(|(_, val)| val.is_literal() || arg_is_concrete_array(val))
 }
 
 /// The bare variables a condition subtree reads (for the opaque-condition read-set
