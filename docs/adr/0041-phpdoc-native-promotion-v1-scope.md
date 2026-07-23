@@ -49,6 +49,11 @@ Concretizes ADR-0034 point 4 for the first shipped transform.
    onward, not just the index-matching one.
    Refusals carry site + reason + human detail; the completeness oracle
    accounts every candidate as edited-or-refused.
+   `no-observed-callers` is added by ADR-0047 §4: a promotion candidate
+   whose enumerated caller set is EMPTY refuses — a vacuous all-callers
+   claim is zero evidence and cannot enter the verified stratum
+   (ADR-0037); it also closes framework convention-reflection dispatch
+   (test runners) without framework knowledge.
    Two project-global caller-enumeration obstacles are added by ADR-0046 §2:
    `eval-present` (a non-vendor `eval` — an invisible caller) and
    `dynamic-include-present` (a non-vendor dynamic / out-of-universe
