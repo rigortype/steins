@@ -663,6 +663,14 @@ pub struct ClassDecl {
     /// The class's properties (plain members + promoted constructor params;
     /// ADR-0036). Static properties are included but never heap-tracked.
     pub properties: Vec<PropertyDecl>,
+    /// Class constants with a **literal** initializer, as `(name, value)` pairs
+    /// (ADR-0043 §2). Only `const NAME = <literal>;` is recorded — a non-literal
+    /// initializer (an expression, another const, `new`, …) is omitted entirely,
+    /// so a name's *absence* means "no proven literal value", never "no such
+    /// constant". The name is stored as written (constant names are
+    /// case-sensitive); enum-case pseudo-constants live in [`Self::enum_cases`],
+    /// not here. Consumed by the class-constant value resolution.
+    pub consts: Vec<(String, ArgValue)>,
     /// `true` if the class `use`s any trait. Trait methods are merged into the
     /// class at compile time but their bodies live elsewhere, so a
     /// trait-using class is treated as unresolvable (give up → silent).
@@ -1675,6 +1683,7 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
 
     let mut methods = Vec::new();
     let mut properties = Vec::new();
+    let mut consts = Vec::new();
     let mut uses_traits = false;
     for member in c.members.iter() {
         match member {
@@ -1692,6 +1701,7 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
             // not lowered this slice (out of object-state scope; never heap-tracked,
             // so no property check fires on them — the safe side).
             ClassLikeMember::Property(Property::Hooked(_)) => {}
+            ClassLikeMember::Constant(k) => lower_class_consts(k, &mut consts),
             ClassLikeMember::TraitUse(_) => uses_traits = true,
             _ => {}
         }
@@ -1709,8 +1719,22 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
         implements,
         methods,
         properties,
+        consts,
         uses_traits,
         span: to_span(c.name.span()),
+    }
+}
+
+/// Lower a `const NAME = <expr>[, …];` class-member declaration into `(name,
+/// value)` pairs, keeping **only literal** initializers (ADR-0043 §2). A
+/// non-literal value lowers to [`ArgValue::Other`] and is dropped, so a name's
+/// absence means "no proven literal", never "no such constant".
+fn lower_class_consts(k: &mago_syntax::cst::ClassLikeConstant<'_>, out: &mut Vec<(String, ArgValue)>) {
+    for item in k.items.iter() {
+        let v = lower_arg_value(item.value);
+        if !matches!(v, ArgValue::Other) {
+            out.push((bytes_to_string(item.name.value), v));
+        }
     }
 }
 
@@ -1800,9 +1824,12 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
     let parent = if extended.is_empty() { None } else { Some(extended.remove(0)) };
 
     let mut methods = Vec::new();
+    let mut consts = Vec::new();
     for member in i.members.iter() {
-        if let ClassLikeMember::Method(m) = member {
-            methods.push(lower_method(m, aliases, docs, rc));
+        match member {
+            ClassLikeMember::Method(m) => methods.push(lower_method(m, aliases, docs, rc)),
+            ClassLikeMember::Constant(k) => lower_class_consts(k, &mut consts),
+            _ => {}
         }
     }
 
@@ -1818,6 +1845,7 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
         implements: extended,
         methods,
         properties: Vec::new(),
+        consts,
         uses_traits: false,
         span: to_span(i.name.span()),
     }
@@ -1851,20 +1879,25 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _doc
     });
 
     let mut enum_cases = Vec::new();
+    let mut consts = Vec::new();
     for member in e.members.iter() {
-        if let ClassLikeMember::EnumCase(case) = member {
-            let (name_id, value) = match &case.item {
-                mago_syntax::cst::EnumCaseItem::Unit(u) => (&u.name, None),
-                mago_syntax::cst::EnumCaseItem::Backed(b) => {
-                    let v = lower_arg_value(b.value);
-                    (&b.name, (!matches!(v, ArgValue::Other)).then_some(v))
-                }
-            };
-            enum_cases.push(EnumCaseDecl {
-                name: bytes_to_string(name_id.value),
-                value,
-                span: to_span(case.span()),
-            });
+        match member {
+            ClassLikeMember::EnumCase(case) => {
+                let (name_id, value) = match &case.item {
+                    mago_syntax::cst::EnumCaseItem::Unit(u) => (&u.name, None),
+                    mago_syntax::cst::EnumCaseItem::Backed(b) => {
+                        let v = lower_arg_value(b.value);
+                        (&b.name, (!matches!(v, ArgValue::Other)).then_some(v))
+                    }
+                };
+                enum_cases.push(EnumCaseDecl {
+                    name: bytes_to_string(name_id.value),
+                    value,
+                    span: to_span(case.span()),
+                });
+            }
+            ClassLikeMember::Constant(k) => lower_class_consts(k, &mut consts),
+            _ => {}
         }
     }
 
@@ -1885,6 +1918,7 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _doc
         implements,
         methods: Vec::new(),
         properties: Vec::new(),
+        consts,
         uses_traits: false,
         span: to_span(e.name.span()),
     }

@@ -113,16 +113,29 @@ fn union_message_renders_all_members() {
 }
 
 #[test]
-fn non_scalar_union_member_silences_whole_type() {
-    // A union containing a class / array / mixed / callable member lowers the
-    // WHOLE type to silence (zero-FP): no finding even for an obvious mismatch.
-    for ty in ["int|array", "int|\\Foo", "int|mixed", "int|callable", "iterable"] {
+fn unmodeled_union_member_silences_whole_type() {
+    // A union containing an `array` / `mixed` / `callable` / `iterable` member (none
+    // of which lower to a `TypeMember`) still lowers the WHOLE type to `None` →
+    // silence (zero-FP): no finding even for an obvious mismatch.
+    for ty in ["int|array", "int|mixed", "int|callable", "iterable"] {
         let src = format!("<?php\ndeclare(strict_types=1);\nfunction f({ty} $v): void {{}}\nf(1.5);\n");
         assert_eq!(n(&src), 0, "type `{ty}` must lower to silence");
     }
-    // An intersection anywhere collapses the type too.
+    // An intersection anywhere collapses the type too (intersections are unlowered).
     let src = "<?php\ndeclare(strict_types=1);\nfunction f(int|(A&B) $v): void {}\nf(1.5);\n";
     assert_eq!(n(src), 0, "intersection member silences the type");
+}
+
+#[test]
+fn object_union_member_is_now_modeled_adr0043_stage3() {
+    // ADR-0043 stage 3: an `int|\Foo` union lowers to `[Int, Instance(foo)]` — no
+    // longer silenced. A `1.5` (float) matches neither `int` (no float→int in
+    // strict) nor `\Foo` (a scalar is never an object) → a proven TypeError.
+    // Verified against php 8.5.8: `f(int|Foo $v); f(1.5)` strict → TypeError.
+    let src = "<?php\ndeclare(strict_types=1);\nfinal class Foo {}\nfunction f(int|\\Foo $v): void {}\nf(1.5);\n";
+    let d = findings(src);
+    assert_eq!(d.len(), 1, "1.5 vs int|Foo strict is a proven TypeError");
+    assert_eq!(d[0].id, "type.argument-mismatch");
 }
 
 // ==========================================================================

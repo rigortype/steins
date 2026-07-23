@@ -577,13 +577,16 @@ fn check_units(units: &[FileUnit], index: &Index, folder: &mut dyn Folder) -> Ve
                     continue;
                 }
                 let mut native_fired = false;
+                // Env-free resolution: a literal, a proven object (`new` / enum
+                // case), or a resolved class constant (ADR-0043 stage 3). At file
+                // scope there is no enclosing class for `self`/`parent`.
                 if let Some(ty) = param.ty.as_ref()
-                    && arg.value.is_literal()
-                    && is_type_error(cx.strict(), ty, &arg.value)
+                    && let Some(checkable) = cx.resolve_static_value(&arg.value, None)
+                    && is_type_error(&cx, ty, &checkable)
                 {
                     out.push(cx.diagnostic(
                         arg.span.start,
-                        &arg.value,
+                        &checkable,
                         None,
                         &decl.name,
                         &param.name,
@@ -3018,7 +3021,9 @@ fn walk_trace(
         for call in checkable_calls(&stmt.kind) {
             match &call.receiver {
                 Callee::Function(_) => {
-                    check_propagated_call(cx, folder, scope.poisoned, call, env, store, out);
+                    check_propagated_call(
+                        cx, folder, scope.poisoned, descent.is_some(), call, env, store, out,
+                    );
                     try_descend_function(cx, folder, call, env, scope.poisoned, descent.as_mut(), out);
                 }
                 Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
@@ -3058,11 +3063,17 @@ fn walk_trace(
         // 1b. Return-type check (native + phpdoc contract); see the original notes.
         if let StmtKind::Return { value, span, .. } = &stmt.kind {
             let mut native_fired = false;
+            // A proven scalar (env/fold), or a proven object / class constant
+            // (ADR-0043 stage 3 return path); the object arm rides the is-a oracle.
+            let ret_val = cx
+                .resolve_literal(value, env, scope.poisoned, folder)
+                .or_else(|| cx.resolve_static_value(value, w.enclosing_class));
             if let Some((ret, display)) = w.ret_info
-                && let Some(lit) = cx.resolve_literal(value, env, scope.poisoned, folder)
-                && is_type_error(cx.strict(), ret, &lit)
+                && let Some(lit) = ret_val.as_ref()
+                && is_type_error(cx, ret, lit)
+                && !object_world_guard_blind(descent.is_some(), ret, lit)
             {
-                out.push(cx.return_diagnostic(span.start, &lit, ret, display));
+                out.push(cx.return_diagnostic(span.start, lit, ret, display));
                 native_fired = true;
             }
             if !native_fired
@@ -3501,7 +3512,7 @@ fn apply_prop_assign(
         && let Some(ty) = pd.ty.as_ref()
         && let Some(lit) = proven_lit.as_ref()
         && lit.is_literal()
-        && is_type_error(cx.strict(), ty, lit)
+        && is_type_error(cx, ty, lit)
     {
         let pos = cx.tree().position(span_start);
         let mode = if cx.strict() { "strict" } else { "coercive" };
@@ -4980,10 +4991,12 @@ fn call_is_resolved(w: &WalkCx, call: &CallExpr, store: &Store) -> bool {
 /// Check a function call whose arguments may be propagated values (`Var`/`Call`/
 /// array). Runs the native runtime check and the phpdoc declared-contract check;
 /// a site where the native check fired is skipped by the phpdoc check.
+#[allow(clippy::too_many_arguments)]
 fn check_propagated_call(
     cx: &Cx,
     folder: &mut dyn Folder,
     poisoned: bool,
+    in_descent: bool,
     call: &CallExpr,
     env: &HashMap<String, Known>,
     store: &Store,
@@ -5034,12 +5047,34 @@ fn check_propagated_call(
                 _ => None,
             };
             if let Some((value, provenance)) = resolved
-                && is_type_error(cx.strict(), ty, &value)
+                && is_type_error(cx, ty, &value)
+                && !object_world_guard_blind(in_descent, ty, &value)
             {
                 out.push(cx.diagnostic(
                     arg.span.start,
                     &value,
                     Some(&provenance),
+                    &decl.name,
+                    &param.name,
+                    ty,
+                ));
+                native_fired = true;
+            }
+            // A variable bound to a proven object (ADR-0036 heap): object-vs-type
+            // definite-No (ADR-0043 stage 3). `new`/enum/const args are the direct
+            // pass's job; this covers the env/heap-dependent `$x = new Foo(); f($x)`.
+            // Guard-blind inside a descent (see `object_world_guard_blind`).
+            if !native_fired
+                && !poisoned
+                && !in_descent
+                && let ArgValue::Var(name) = &arg.value
+                && let Some(class) = store.class_of(name)
+                && cx.object_is_type_error(ty, class)
+            {
+                out.push(cx.diagnostic(
+                    arg.span.start,
+                    &ArgValue::Var(name.clone()),
+                    Some(&format!("holds a {}", simple_class(class))),
                     &decl.name,
                     &param.name,
                     ty,
@@ -5134,7 +5169,10 @@ fn handle_var_call(
                 let Some(callee_scope) = cx.closure_scope(*def_offset) else { return };
                 // Argument type check at the `$fn(...)` site (mirrors the direct /
                 // propagated check for named calls, which never see a variable call).
-                check_callable_args(cx, folder, scope.poisoned, &callee_scope.params, "closure", call, env, out);
+                check_callable_args(
+                    cx, folder, scope.poisoned, descent.is_some(), &callee_scope.params, "closure",
+                    call, env, out,
+                );
                 let display = format!("closure (defined on line {})", cv.def_line);
                 descend(
                     cx,
@@ -5184,7 +5222,9 @@ fn dispatch_named_callable(
     let synth = synth_function_call(call, nameref);
     if let Some(site) = cx.resolve_user_fn(&synth) {
         let decl = cx.fn_decl(site);
-        check_callable_args(cx, folder, poisoned, &decl.params, &decl.name, call, env, out);
+        check_callable_args(
+            cx, folder, poisoned, descent.is_some(), &decl.params, &decl.name, call, env, out,
+        );
     }
     try_descend_function(cx, folder, &synth, env, poisoned, descent, out);
 }
@@ -5214,6 +5254,7 @@ fn check_callable_args(
     cx: &Cx,
     folder: &mut dyn Folder,
     poisoned: bool,
+    in_descent: bool,
     params: &[Param],
     display: &str,
     call: &CallExpr,
@@ -5244,10 +5285,13 @@ fn check_callable_args(
             ArgValue::Call(cn, cargs) => cx
                 .try_fold(cn, cargs, folder)
                 .map(|(lit, prov)| (lit, Some(prov))),
-            _ => None,
+            // A proven object (`new` / enum case) or resolved class constant
+            // (ADR-0043 stage 3); env-free, `self`/`parent` unavailable here.
+            _ => cx.resolve_static_value(&arg.value, None).map(|v| (v, None)),
         };
         if let Some((value, provenance)) = resolved
-            && is_type_error(cx.strict(), ty, &value)
+            && is_type_error(cx, ty, &value)
+            && !object_world_guard_blind(in_descent, ty, &value)
         {
             out.push(cx.diagnostic(
                 arg.span.start,
@@ -5303,7 +5347,7 @@ fn descend(
             bound.push((param.name.clone(), value));
             continue;
         };
-        match coerce_into_param(cx.strict(), ty, &value) {
+        match coerce_into_param(cx, ty, &value) {
             Some(coerced) => bound.push((param.name.clone(), coerced)),
             None => return,
         }
@@ -5617,6 +5661,7 @@ fn handle_method_call(
         env,
         store,
         scope.poisoned,
+        descent.is_some(),
         out,
     );
 
@@ -5667,6 +5712,7 @@ fn check_method_args(
     env: &HashMap<String, Known>,
     store: &Store,
     poisoned: bool,
+    in_descent: bool,
     out: &mut Vec<Diagnostic>,
 ) {
     let envelopes = parse_envelopes(method.docblock.as_deref());
@@ -5709,16 +5755,39 @@ fn check_method_args(
                         _ => None,
                     })
                 }
-                _ => None,
+                // A proven object (`new` / enum case) or resolved class constant
+                // (ADR-0043 stage 3). Env-free; `self`/`parent` at the call site are
+                // not available here, so only a written class name resolves.
+                _ => cx.resolve_static_value(&arg.value, None).map(|v| (v, None)),
             };
             if let Some((value, prov)) = resolved
-                && value.is_literal()
-                && is_type_error(cx.strict(), ty, &value)
+                && is_type_error(cx, ty, &value)
+                && !object_world_guard_blind(in_descent, ty, &value)
             {
                 out.push(cx.diagnostic(
                     arg.span.start,
                     &value,
                     prov.as_deref(),
+                    callee_name,
+                    &param.name,
+                    ty,
+                ));
+                native_fired = true;
+            }
+            // A variable bound to a proven object (ADR-0036 heap): the object-vs-type
+            // definite-No, rendered against the variable (ADR-0043 stage 3).
+            // Guard-blind inside a descent (see `object_world_guard_blind`).
+            if !native_fired
+                && !poisoned
+                && !in_descent
+                && let ArgValue::Var(name) = &arg.value
+                && let Some(class) = store.class_of(name)
+                && cx.object_is_type_error(ty, class)
+            {
+                out.push(cx.diagnostic(
+                    arg.span.start,
+                    &ArgValue::Var(name.clone()),
+                    Some(&format!("holds a {}", simple_class(class))),
                     callee_name,
                     &param.name,
                     ty,
@@ -5789,19 +5858,25 @@ fn render_call(name: &str, args: &[ArgValue]) -> String {
 /// ```
 ///
 /// Uncertain cells resolve to "not an error" (silence is always safe; ADR-0002).
-fn is_type_error(strict: bool, ty: &NativeType, arg: &ArgValue) -> bool {
-    // ADR-0043 stage 1 — object-bearing types stay silent. A union that carries
-    // an `Instance` (class/interface/enum) member yields no native scalar-value
-    // judgment this stage, exactly reproducing the pre-ADR-0043 behavior where the
-    // whole hint lowered to `None` and was never checked. The definite-No object
-    // arm (stage 3) is the only place this guard is lifted.
-    if ty.has_instance() {
-        return false;
-    }
+///
+/// ADR-0043 stage 3 opens two definite-No arms, both riding the trinary is-a
+/// oracle on `cx`: a **proven object value** (`new` / enum case) errors iff every
+/// union member provenly rejects its exact class, and a **scalar value** now sees
+/// through any `Instance` union members (an object member never accepts a scalar —
+/// no coercion exists — so the verdict rests on the scalar members, exactly as the
+/// empirically-verified `member_accepts_*` tables already encode via their
+/// `Instance => false` arms). A `null` value against an object-bearing type stays
+/// silent (null-vs-object is out of scope; preserves the pre-stage-3 behavior and
+/// sidesteps the `has_null_default` implicit-nullable interplay).
+fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
+    let strict = cx.strict();
     match arg {
-        // `null` is accepted iff the type is nullable (`?T` or a `null` member).
-        ArgValue::Null => !ty.nullable,
-        // A concrete non-null literal: an error iff no member accepts it.
+        // `null` is accepted iff the type is nullable (`?T` / `null` member). An
+        // object-bearing type stays silent on `null` (unchanged from stage 1).
+        ArgValue::Null => !ty.nullable && !ty.has_instance(),
+        // A concrete non-null literal: an error iff no member accepts it. `Instance`
+        // members contribute nothing (they never accept a scalar) — ADR-0043 stage-3
+        // scalar-vs-object opening (e.g. a raw string where an enum is required).
         ArgValue::Int(_) | ArgValue::Float(_) | ArgValue::Str(_) | ArgValue::Bool(_) => {
             if strict {
                 !ty.members.iter().any(|m| member_accepts_strict(m, arg))
@@ -5809,26 +5884,47 @@ fn is_type_error(strict: bool, ty: &NativeType, arg: &ArgValue) -> bool {
                 !ty.members.iter().any(|m| member_accepts_coercive(m, arg))
             }
         }
+        // A proven object value (ADR-0043 stage 3): a definite No iff every union
+        // member provenly rejects an object of its exact class. An unresolvable /
+        // ambiguous class stays unproven (silent).
+        ArgValue::New(..) | ArgValue::EnumCase(..) => match cx.proven_object_class(arg) {
+            Some(class) => cx.object_is_type_error(ty, &class),
+            None => false,
+        },
         // An array is never a native scalar/union finding (arrays only ever fail
         // the phpdoc contract relation, checked separately).
         ArgValue::Array(_) => false,
-        // Non-literal (`Var`/`Call`/`New`/`Ternary`/`Other`): not provable → never
-        // an error (a `Ternary` is resolved to a concrete arm before this point).
-        // `ClassConst`/`EnumCase` are unproven object-world values (ADR-0043) —
-        // treated exactly like `Other` this stage (explicit, so stage 3 finds them).
+        // Non-provable carriers: silent (a `Ternary` is resolved to a concrete arm
+        // before this point; a `ClassConst` is resolved upstream to an enum case /
+        // literal, so an unresolved one is genuinely unproven).
         ArgValue::Var(_)
         | ArgValue::Call(..)
-        | ArgValue::New(..)
         | ArgValue::Ternary { .. }
         | ArgValue::PropFetch { .. }
         | ArgValue::Clone(_)
         | ArgValue::ClassConst(..)
-        | ArgValue::EnumCase(..)
         // A closure value against a scalar/union param is never a scalar finding
         // (a `callable`/`Closure` param is not a native scalar type this checks).
         | ArgValue::Closure(_)
         | ArgValue::Other => false,
     }
+}
+
+/// ADR-0043 stage 3 — the object-world native definite-No is **guard-blind inside
+/// a binding descent** and must be suppressed there. A descent rebinds a callee's
+/// parameter to a hypothetical caller value, but the callee's in-body `instanceof`
+/// / type guards that would narrow that value are unmodeled (e.g. Carbon's
+/// `if ($x instanceof DateTimeInterface) { … $x … }` is dead for a string `$x`,
+/// yet the walk cannot prove it because the guard flows through an intermediate
+/// boolean). Checking an object-world mismatch on a descent-bound value is
+/// therefore unsound — exactly the reason descent-bound property writes are also
+/// unchecked (see `apply_prop_assign`). Scalar-vs-scalar descent checks, whose
+/// guards the walk *can* evaluate, are unaffected: only a judgment that touches an
+/// object type (an `Instance`-bearing param, or a proven object value) is
+/// suppressed. In the non-descent direct/propagation passes this is always `false`.
+fn object_world_guard_blind(in_descent: bool, ty: &NativeType, value: &ArgValue) -> bool {
+    in_descent
+        && (ty.has_instance() || matches!(value, ArgValue::New(..) | ArgValue::EnumCase(..)))
 }
 
 /// Strict mode: does a single union `member` accept the non-null literal `arg`
@@ -5880,7 +5976,7 @@ fn member_accepts_coercive(m: &TypeMember, arg: &ArgValue) -> bool {
 /// it already matches a member's own type exactly — Steins does not guess which
 /// member PHP would coerce a mismatched value into, so it stops the descent
 /// (silent) rather than risk an unsound bound value.
-fn coerce_into_param(strict: bool, ty: &NativeType, value: &ArgValue) -> Option<ArgValue> {
+fn coerce_into_param(cx: &Cx, ty: &NativeType, value: &ArgValue) -> Option<ArgValue> {
     // ADR-0043 stage 1 — an object-bearing type binds the value verbatim, exactly
     // as the pre-ADR-0043 `None`-typed (untracked) parameter did: the caller's
     // `None => bind raw value` path is reproduced here so an object parameter does
@@ -5888,7 +5984,7 @@ fn coerce_into_param(strict: bool, ty: &NativeType, value: &ArgValue) -> Option<
     if ty.has_instance() {
         return Some(value.clone());
     }
-    if is_type_error(strict, ty, value) {
+    if is_type_error(cx, ty, value) {
         return None;
     }
     if matches!(value, ArgValue::Null) {
@@ -6251,6 +6347,140 @@ impl<'a> Cx<'a> {
                 Some(pref) => cur = self.units[file].tree.resolve_class_fqn(pref),
                 None => return false,
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-0043 stage 3 — native object acceptance (definite-No opening).
+    // -----------------------------------------------------------------------
+
+    /// The proven exact class (namespace-resolved FQN) of an object-valued
+    /// [`ArgValue`], or `None` when it is not a proven object. `New` resolves its
+    /// written class reference in this file's context (matching the ADR-0036 heap
+    /// `class_of`); an `EnumCase` already carries the resolved enum FQN.
+    fn proven_object_class(&self, v: &ArgValue) -> Option<String> {
+        match v {
+            ArgValue::New(r, _) => Some(self.class_fqn(r)),
+            ArgValue::EnumCase(fqn, _) => Some(fqn.clone()),
+            _ => None,
+        }
+    }
+
+    /// ADR-0043 stage 3 — does an object of exact class `class_fqn` **provably
+    /// violate** the native type `ty`? A definite-No: `true` only when *every*
+    /// union member definitively rejects an object of that class (any `Unknown`
+    /// or accepting member makes the whole verdict silent). `nullable` is
+    /// irrelevant to an object value — an object is never `null`.
+    fn object_is_type_error(&self, ty: &NativeType, class_fqn: &str) -> bool {
+        ty.members.iter().all(|m| self.member_rejects_object(m, class_fqn))
+    }
+
+    /// Whether a single union `member` **definitively rejects** an object of exact
+    /// class `class_fqn`.
+    ///
+    /// Verified against PHP 8.5.8 (`php -r`):
+    /// - `int`/`float`/`bool` (and `false`/`true` literals): no object — **not
+    ///   even one with `__toString`** — coerces into these in either mode; passing
+    ///   any object `TypeError`s → an unconditional definite reject.
+    /// - `string`: a `__toString` object *does* coerce to a `string` parameter in
+    ///   **coercive** mode (no error), while a plain object and **any** object in
+    ///   **strict** mode `TypeError`. Steins does not (yet) prove the *absence* of
+    ///   `__toString` across a class hierarchy, so a `string` member is a definite
+    ///   reject only in **strict** mode; in coercive mode it stays silent
+    ///   (Unknown), the FP-safe choice.
+    /// - `Instance(fqn)`: rejects iff the trinary is-a oracle proves non-membership
+    ///   (`IsA::No`); `Yes` accepts and `Unknown` (incomplete hierarchy) is silent.
+    fn member_rejects_object(&self, m: &TypeMember, class_fqn: &str) -> bool {
+        match m {
+            TypeMember::Instance(fqn) => self.is_a(class_fqn, fqn) == IsA::No,
+            TypeMember::Scalar(ScalarType::String) => self.strict(),
+            TypeMember::Scalar(_) | TypeMember::BoolLiteral(_) => true,
+        }
+    }
+
+    /// Resolve a [`StaticClass`] class-expression to its FQN (ADR-0043). `Named`
+    /// resolves in this file's namespace context (source-cased); `self`/`parent`
+    /// need the enclosing class; `static` (late static binding) stays unproven.
+    fn resolve_static_class_fqn(&self, sc: &StaticClass, enclosing: Option<&str>) -> Option<String> {
+        match sc {
+            StaticClass::Named(r) => Some(self.class_fqn(r)),
+            StaticClass::SelfKw => enclosing.map(str::to_owned),
+            StaticClass::Parent => self.parent_fqn(enclosing?),
+            StaticClass::Static => None,
+        }
+    }
+
+    /// Resolve a class-constant / enum-case access `Class::NAME` to a proven value
+    /// (ADR-0043 §2), or `None` when unresolvable/non-literal (→ silent).
+    ///
+    /// - `Class::class` → the FQN **string** literal. Only a written name
+    ///   (`Named`) is resolved: it preserves the declared source casing (verified
+    ///   against php 8.5.8 — `::class` yields the `use`-target's declared casing).
+    ///   `self`/`parent`/`static::class` resolve only to the lowercase-normalized
+    ///   index FQN, so emitting them would risk a wrong-case string — left
+    ///   unproven (documented deferral).
+    /// - An enum case → an [`ArgValue::EnumCase`] **object** value of the enum
+    ///   class (never its backing scalar — an enum case is an object).
+    /// - A class constant with a literal initializer → that literal, resolved
+    ///   through the class/interface hierarchy (child overrides parent).
+    fn resolve_class_const(&self, sc: &StaticClass, name: &str, enclosing: Option<&str>) -> Option<ArgValue> {
+        if name.eq_ignore_ascii_case("class") {
+            return match sc {
+                StaticClass::Named(r) => {
+                    Some(ArgValue::Str(self.class_fqn(r).trim_start_matches('\\').to_owned()))
+                }
+                _ => None,
+            };
+        }
+        let fqn = self.resolve_static_class_fqn(sc, enclosing)?;
+        if let Some((_, cd)) = self.find_class(&fqn)
+            && cd.is_enum
+            && cd.enum_cases.iter().any(|c| c.name == name)
+        {
+            return Some(ArgValue::EnumCase(cd.fqn.clone(), name.to_owned()));
+        }
+        self.resolve_const_literal(&fqn, name)
+    }
+
+    /// Resolve a class constant `fqn::name` to its literal value by walking the
+    /// class's own consts, its directly-implemented interfaces' consts, then its
+    /// parent chain (most-derived first, matching PHP constant override). Returns
+    /// `None` on an unresolvable node or a name with no proven literal.
+    fn resolve_const_literal(&self, fqn: &str, name: &str) -> Option<ArgValue> {
+        let mut cur = fqn.to_owned();
+        let mut seen: HashSet<String> = HashSet::new();
+        loop {
+            if !seen.insert(cur.to_ascii_lowercase()) {
+                return None;
+            }
+            let (file, cd) = self.find_class(&cur)?;
+            if let Some((_, v)) = cd.consts.iter().find(|(n, _)| n == name) {
+                return Some(v.clone());
+            }
+            for iref in &cd.implements {
+                let ifqn = self.units[file].tree.resolve_class_fqn(iref);
+                if let Some((_, icd)) = self.find_class(&ifqn)
+                    && let Some((_, v)) = icd.consts.iter().find(|(n, _)| n == name)
+                {
+                    return Some(v.clone());
+                }
+            }
+            let pref = cd.parent.as_ref()?;
+            cur = self.units[file].tree.resolve_class_fqn(pref);
+        }
+    }
+
+    /// Resolve an [`ArgValue`] to a proven value **without an environment** — a
+    /// self-evident literal, a proven object (`new` / enum case), or a resolved
+    /// class constant (ADR-0043). Feeds the native definite-No checks at the
+    /// call/return sites. `enclosing` supplies `self`/`parent` for class-const
+    /// resolution inside a method body (`None` at file scope).
+    fn resolve_static_value(&self, v: &ArgValue, enclosing: Option<&str>) -> Option<ArgValue> {
+        match v {
+            _ if v.is_literal() => Some(v.clone()),
+            ArgValue::New(..) | ArgValue::EnumCase(..) => Some(v.clone()),
+            ArgValue::ClassConst(sc, name) => self.resolve_class_const(sc, name, enclosing),
+            _ => None,
         }
     }
 
