@@ -1,0 +1,28 @@
+# steins-edit — the transform engine (ADR-0034): EditPlan transactions, code
+# preconditions proven against the inference engine, dual verification.
+#
+# Stage A (this crate's `plan`/`diff` modules) is pure span+splice machinery with
+# no inference dependency. Stage B (`promote`) drives the phpdoc→native promotion
+# transform, which reaches into `steins-infer` for call-site value propagation and
+# `steins-contract` for acceptance judgments (the "all callers proven" precondition
+# structurally unavailable to modular tools).
+[package]
+name = "steins-edit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+steins-db = { path = "../steins-db" }
+steins-syntax = { path = "../steins-syntax" }
+steins-infer = { path = "../steins-infer" }
+steins-domain = { path = "../steins-domain" }
+steins-contract = { path = "../steins-contract" }
+steins-phpdoc = { path = "../steins-phpdoc" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+steins-db = { path = "../steins-db" }
+steins-syntax = { path = "../steins-syntax" }
