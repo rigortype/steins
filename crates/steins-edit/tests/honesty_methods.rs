@@ -103,3 +103,17 @@ fn honest_method_is_not_enumerated() {
     assert_eq!(report.oracle.enumerated, 0);
     assert!(report.refusals.is_empty());
 }
+
+/// ADR-0047 §4 scope note, method side: a zero-caller lying `@param` on a
+/// method (the PHPUnit-shaped counterexample's own doc, if it lied) is never
+/// enumerated either — the "lie" flag requires an *observed* violating value,
+/// so an empty target (no call resolved to this method at all) never sets it.
+/// No `no-observed-callers` gate is needed on the honesty side by construction.
+#[test]
+fn zero_caller_lying_method_param_is_never_enumerated() {
+    let c = "<?php\nfinal class C {\n/** @param int $x */\npublic function m($x) { return $x; }\n}\n";
+    let report = plan(&[("c.php", c)]);
+    assert_eq!(report.oracle.enumerated, 0, "{:#?}", report);
+    assert!(report.plan.is_empty());
+    assert!(report.refusals.is_empty(), "{:#?}", report.refusals);
+}

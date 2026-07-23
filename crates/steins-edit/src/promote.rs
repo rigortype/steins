@@ -29,6 +29,12 @@
 //! - Only **literal** arguments prove a call site in v1 (folding-backed and
 //!   `$var`-flow proofs are deferred): a non-literal argument at any call site is
 //!   refused `argument-not-proven`.
+//! - A candidate whose enumerated caller set is **empty** — no call site anywhere
+//!   resolved to it — refuses `no-observed-callers` rather than promote on a
+//!   vacuous "all callers proven" (ADR-0047 §4 / ADR-0037; amends ADR-0041 §3):
+//!   zero callers is zero evidence, and is exactly the shape a framework's
+//!   convention-reflection dispatch hides behind (a test runner invoking a
+//!   data-provider method with no visible call site).
 //!
 //! Every enumerated site is accounted for as transformed-or-refused (the
 //! completeness oracle, ADR-0034 point 3b). Refusals carry a stable named reason
@@ -64,7 +70,7 @@ use crate::transform::{CompletenessOracle, Refusal, Transform, TransformReport};
 pub use crate::common::{
     REASON_AMBIGUOUS, REASON_ARG_NOT_PROVEN, REASON_DYNAMIC_CALL, REASON_DYNAMIC_INCLUDE,
     REASON_EVAL_PRESENT, REASON_MAGIC_METHOD, REASON_METHOD_INHERITANCE, REASON_NAMED_OR_SPREAD,
-    REASON_REFERENCED_AS_VALUE,
+    REASON_NO_OBSERVED_CALLERS, REASON_REFERENCED_AS_VALUE,
 };
 
 /// The phpdoc type has no [`NativeType`] rendering and is not a scalar
@@ -256,11 +262,24 @@ fn decide(
     // (d) Prove every observed call-site argument for this parameter position.
     let contract = native_contract(&native);
     let _ = source; // (source already consulted in the domain gate)
-    if let Some(target) = sweep.targets.get(&func.fqn) {
-        prove_target(target, idx, param.variadic, &native, &contract)?;
+    match sweep.targets.get(&func.fqn) {
+        Some(target) => prove_target(target, idx, param.variadic, &native, &contract)?,
+        // No target entry means no observed callers anywhere in the enumerated
+        // universe. This is NOT vacuous proof (ADR-0047 §4 / ADR-0037): an
+        // "all-callers-proven" claim over zero callers is zero evidence, and
+        // exactly the shape a framework's convention-reflection dispatch hides
+        // behind (a test runner invoking this function with no visible call
+        // site). Refuse rather than promote on nothing.
+        None => {
+            return Err((
+                REASON_NO_OBSERVED_CALLERS,
+                format!(
+                    "no call site was observed for `{}`; a vacuous all-callers proof is no evidence — callers may exist via reflection or dynamic dispatch",
+                    func.name
+                ),
+            ));
+        }
     }
-    // No target entry means no observed callers — vacuously all-callers-proven
-    // (external/out-of-project callers are outside the analysis boundary).
 
     Ok(native)
 }
@@ -458,11 +477,23 @@ fn decide_method(
 
     // Prove every observed call-site argument for this parameter position.
     let contract = native_contract(&native);
-    if let Some(target) = msweep.targets.get(key) {
-        prove_target(target, idx, param.variadic, &native, &contract)?;
+    match msweep.targets.get(key) {
+        Some(target) => prove_target(target, idx, param.variadic, &native, &contract)?,
+        // No target entry → no observed callers anywhere in the enumerated
+        // universe (ADR-0047 §4 / ADR-0037): the motivating hole is exactly this
+        // shape — a final test class's data-provider method invoked only via
+        // framework reflection, invisible to the sweep. Refuse rather than
+        // promote on a vacuous zero-caller proof.
+        None => {
+            return Err((
+                REASON_NO_OBSERVED_CALLERS,
+                format!(
+                    "no call site was observed for `{}::{}`; a vacuous all-callers proof is no evidence — callers may exist via reflection or dynamic dispatch",
+                    key.0, method.name
+                ),
+            ));
+        }
     }
-    // No target entry → no observed in-project callers — vacuously all-callers-
-    // proven (external callers are outside the analysis boundary).
     Ok(native)
 }
 

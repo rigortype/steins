@@ -7,7 +7,7 @@ use steins_db::{Project, SourceFile, SteinsDatabase};
 use steins_edit::plan_phpdoc_to_native;
 use steins_edit::promote::{
     REASON_AMBIGUOUS, REASON_ARG_NOT_PROVEN, REASON_MAGIC_METHOD, REASON_METHOD_INHERITANCE,
-    REASON_REFERENCED_AS_VALUE,
+    REASON_NO_OBSERVED_CALLERS, REASON_REFERENCED_AS_VALUE,
 };
 use steins_edit::{TransformReport, VouchSet};
 
@@ -81,13 +81,19 @@ fn multi_receiver_form_sweep_all_proven() {
 }
 
 #[test]
-fn zero_callers_method_promotes_vacuously() {
+fn zero_callers_method_refuses_no_observed_callers() {
+    // ADR-0047 §4 / ADR-0041 §3 amendment: the PHPUnit-shaped counterexample. A
+    // `final` test class's public method (e.g. a data-provider) with NO callers
+    // anywhere in the enumerated universe — its real callers arrive only via
+    // framework reflection, invisible to the sweep. Promoting here would emit a
+    // native declaration proven against zero call sites: a vacuous all-callers
+    // claim is zero evidence, not proof, and must refuse rather than fatal at
+    // runtime the first time reflection passes an inadmissible value.
     let src = "<?php\nfinal class C {\n/** @param string $s */\npublic function m($s) { return $s; }\n}\n";
     let report = plan(&[("c.php", src)]);
     assert_oracle_complete(&report);
-    assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
-    let out = report.plan.apply_file("c.php", src);
-    assert!(out.contains("public function m(string $s)"), "got:\n{out}");
+    assert_eq!(only_reason(&report), REASON_NO_OBSERVED_CALLERS);
+    assert!(report.plan.is_empty(), "must not promote on zero observed callers");
 }
 
 // ---- 2. The eligibility split → method-inheritance -------------------------
@@ -243,12 +249,16 @@ fn variadic_method_param_refuses_on_bad_trailing_arg() {
 }
 
 #[test]
-fn by_ref_method_param_promotes_vacuously_without_callers() {
+fn by_ref_method_param_without_callers_refuses_no_observed_callers() {
+    // A by-ref param can only receive lvalues, never a literal at any call site —
+    // but the zero-caller gate applies before that question is even reached: no
+    // call site was observed at all, so this refuses `no-observed-callers`
+    // rather than promote vacuously.
     let c = "<?php\nfinal class C {\n/** @param int $x */\npublic function m(&$x) { $x = 1; }\n}\n";
     let report = plan(&[("c.php", c)]);
-    assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
-    let out = report.plan.apply_file("c.php", c);
-    assert!(out.contains("public function m(int &$x)"), "got:\n{out}");
+    assert_oracle_complete(&report);
+    assert_eq!(only_reason(&report), REASON_NO_OBSERVED_CALLERS);
+    assert!(report.plan.is_empty());
 }
 
 // ---- 6. Edit mechanics (docblock, multibyte) -------------------------------

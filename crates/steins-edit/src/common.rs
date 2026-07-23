@@ -68,6 +68,16 @@ pub const REASON_METHOD_INHERITANCE: &str = "method-inheritance";
 /// (and `__wakeup`/`__unserialize` by any `unserialize`), so it is never a
 /// promotion/honesty candidate (ADR-0046 §3).
 pub const REASON_MAGIC_METHOD: &str = "magic-method";
+/// A **promotion** candidate whose enumerated caller set is empty: no call site
+/// anywhere in the analyzed universe resolved to this function/method. "All
+/// callers proven" over zero callers is vacuously true but carries zero evidence
+/// — it cannot enter the verified stratum (ADR-0037), and it is exactly the hole
+/// a framework's convention-reflection dispatch opens (a test runner invoking a
+/// data-provider method with no visible call site, ADR-0047 §4; amends the
+/// ADR-0041 §3 taxonomy). Honesty never reaches this: its own "lie" enumeration
+/// requires an observed violating value, so it cannot act on empty evidence by
+/// construction — this reason is promotion-only.
+pub const REASON_NO_OBSERVED_CALLERS: &str = "no-observed-callers";
 
 // ---- Candidate / call-site helpers ----------------------------------------
 

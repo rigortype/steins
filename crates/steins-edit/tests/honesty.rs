@@ -206,6 +206,21 @@ fn honest_param_is_not_enumerated() {
     assert!(report.plan.is_empty());
 }
 
+/// ADR-0047 §4 scope note, verified rather than assumed: honesty's "lie"
+/// detection requires an *observed* value that violates the declared tag
+/// (`admits_val(&gov_contract, &v) == Certainty::No`), so a candidate with zero
+/// callers never has a violating observation to find — it is never enumerated,
+/// by construction, with no `no-observed-callers` gate needed. A lying
+/// `@param int $x` on a function nobody calls stays untouched.
+#[test]
+fn zero_caller_lying_param_is_never_enumerated() {
+    let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
+    let report = plan(&[("lib.php", lib)]);
+    assert_eq!(report.oracle.enumerated, 0, "{:#?}", report);
+    assert!(report.plan.is_empty());
+    assert!(report.refusals.is_empty(), "{:#?}", report.refusals);
+}
+
 #[test]
 fn assertion_helper_param_is_exempt() {
     // A `@phpstan-assert` makes `@param` a post-condition — no mismatch fires.

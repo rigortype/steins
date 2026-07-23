@@ -9,7 +9,7 @@ use steins_edit::plan_phpdoc_to_native;
 use steins_edit::promote::{
     REASON_AMBIGUOUS, REASON_ARG_NOT_PROVEN, REASON_DEFAULT_INCOMPATIBLE, REASON_DYNAMIC_CALL,
     REASON_FINER_THAN_NATIVE, REASON_IMPLICIT_NULLABLE, REASON_NAMED_OR_SPREAD,
-    REASON_NOT_REPRESENTABLE, REASON_REFERENCED_AS_VALUE,
+    REASON_NOT_REPRESENTABLE, REASON_NO_OBSERVED_CALLERS, REASON_REFERENCED_AS_VALUE,
 };
 
 /// Plan the transform over a `(path, source)` project.
@@ -63,15 +63,15 @@ fn happy_promotion_all_callers_literal_int() {
 }
 
 #[test]
-fn zero_callers_promotes_vacuously() {
-    // No call sites at all — vacuously all-callers-proven (external callers are
-    // outside the analysis boundary).
+fn zero_callers_refuses_no_observed_callers() {
+    // ADR-0047 §4 / ADR-0041 §3 amendment: no call sites at all is zero evidence,
+    // not vacuous proof — a candidate with an empty enumerated caller set must
+    // refuse rather than promote (the framework-reflection hole this closes).
     let lib = "<?php\n/** @param string $s */\nfunction g($s) { return $s; }\n";
     let report = plan(&[("lib.php", lib)]);
     assert_oracle_complete(&report);
-    assert_eq!(report.oracle.transformed, 1);
-    let out = report.plan.apply_file("lib.php", lib);
-    assert!(out.contains("function g(string $s)"), "got:\n{out}");
+    assert_eq!(only_reason(&report), REASON_NO_OBSERVED_CALLERS);
+    assert!(report.plan.is_empty(), "must not promote on zero observed callers");
 }
 
 #[test]
@@ -348,9 +348,11 @@ fn refuses_unprovable_constant_default_conservatively() {
 
 #[test]
 fn promotes_compatible_int_default() {
-    // `int $x = 0` is a compatible, provable default — promotion is safe.
+    // `int $x = 0` is a compatible, provable default — promotion is safe. A
+    // literal-proven caller keeps this test independent of the zero-caller gate.
     let lib = "<?php\n/** @param int $x */\nfunction f($x = 0) { return $x; }\n";
-    let report = plan(&[("lib.php", lib)]);
+    let main = "<?php\nf();\n";
+    let report = plan(&[("lib.php", lib), ("main.php", main)]);
     assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
     let out = report.plan.apply_file("lib.php", lib);
     assert!(out.contains("function f(int $x = 0)"), "got:\n{out}");
@@ -358,9 +360,12 @@ fn promotes_compatible_int_default() {
 
 #[test]
 fn promotes_nullable_with_null_default() {
-    // `?int $x = null` is valid — the nullable native type admits the null default.
+    // `?int $x = null` is valid — the nullable native type admits the null
+    // default. A literal-proven caller keeps this test independent of the
+    // zero-caller gate.
     let lib = "<?php\n/** @param int|null $x */\nfunction f($x = null) { return $x; }\n";
-    let report = plan(&[("lib.php", lib)]);
+    let main = "<?php\nf(1);\n";
+    let report = plan(&[("lib.php", lib), ("main.php", main)]);
     assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
     let out = report.plan.apply_file("lib.php", lib);
     assert!(out.contains("function f(?int $x = null)"), "got:\n{out}");
