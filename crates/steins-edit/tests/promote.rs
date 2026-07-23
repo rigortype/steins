@@ -145,6 +145,29 @@ fn refuses_when_function_referenced_as_string_value() {
 }
 
 #[test]
+fn refuses_when_call_user_func_target_is_a_bare_variable() {
+    // The generic-invoker gap flagged alongside issue #6 (same family: a
+    // `call_user_func`/`call_user_func_array` callable argument that is not a
+    // name-shaped literal carries no value the reference scan can see, so it
+    // must taint broadly — mirroring a direct dynamic `$fn()` call — rather than
+    // silently letting the candidate promote.
+    let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
+    let main = "<?php\nfunction caller($name) { call_user_func($name, 1); }\n";
+    let report = plan(&[("lib.php", lib), ("main.php", main)]);
+    assert_eq!(only_reason(&report), REASON_DYNAMIC_CALL);
+    assert!(report.plan.is_empty());
+}
+
+#[test]
+fn refuses_when_call_user_func_array_target_is_a_bare_variable() {
+    let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
+    let main = "<?php\nfunction caller($name) { call_user_func_array($name, [1]); }\n";
+    let report = plan(&[("lib.php", lib), ("main.php", main)]);
+    assert_eq!(only_reason(&report), REASON_DYNAMIC_CALL);
+    assert!(report.plan.is_empty());
+}
+
+#[test]
 fn refuses_first_class_callable_reference() {
     let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
     let main = "<?php\n$g = f(...);\n";

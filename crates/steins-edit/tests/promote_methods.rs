@@ -196,6 +196,25 @@ fn callable_string_reference_refuses() {
 }
 
 #[test]
+fn variable_method_callable_array_taints_all_methods() {
+    // Issue #6 (the stage-5 adversarial review's counterexample): a callable
+    // array whose SECOND element (the method-name position) is a non-literal
+    // expression names no method at all, so the literal-value scan that catches
+    // `[$obj, 'm']` cannot see it. Left undetected this is a caller invisible to
+    // resolution that could invoke any method named by `$var` at runtime — it
+    // must refuse broadly (mirroring `$o->$m()`), never promote.
+    let c = "<?php\nfinal class C {\n/** @param int $x */\npublic function m($x) { return $x; }\n}\n";
+    let main =
+        "<?php\nfunction f($obj, $var) { call_user_func([$obj, $var], 1); }\n";
+    let report = plan(&[("c.php", c), ("main.php", main)]);
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.transformed, 0, "must not promote: {:#?}", report);
+    assert_eq!(report.refusals.len(), 1);
+    assert_eq!(report.refusals[0].reason, "dynamic-call-present");
+    assert!(report.plan.is_empty());
+}
+
+#[test]
 fn wrong_literal_at_method_call_refuses_arg_not_proven() {
     let c = "<?php\nfinal class C {\n/** @param int $x */\npublic function m($x) { return $x; }\n}\n";
     let main = "<?php\n(new C())->m('nope');\n";

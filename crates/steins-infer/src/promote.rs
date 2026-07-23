@@ -98,6 +98,20 @@ pub fn sweep_free_functions(db: &dyn Db, project: Project) -> FreeFnSweep {
                 collect_value_names(&arg.value, &mut out.value_referenced_names);
             }
 
+            // `call_user_func`/`call_user_func_array` whose callable argument is an
+            // opaque runtime value (a bare variable, a call result, …) carries no
+            // name the scan above can see — it could hold ANY free function at
+            // runtime. Taint broadly, mirroring a direct dynamic `$fn()` call,
+            // rather than silently seeing nothing (same family as issue #6's
+            // callable-array gap).
+            if let Callee::Function(name) = &call.receiver
+                && is_generic_invoker(name)
+                && let Some(callable_arg) = call.args.first()
+                && callable_arg_is_opaque(&callable_arg.value)
+            {
+                out.any_dynamic_call = true;
+            }
+
             match &call.receiver {
                 Callee::DynamicVar(_) | Callee::Dynamic => {
                     out.any_dynamic_call = true;
@@ -204,6 +218,34 @@ fn insert_name_forms(raw: &str, set: &mut HashSet<String>) {
         set.insert(norm[pos + 1..].to_owned());
     }
     set.insert(norm);
+}
+
+/// Whether `name` (a `Callee::Function` simple name, as written) is one of PHP's
+/// generic first-class-callable invokers — the `call_user_func*` family named
+/// explicitly in the `function-referenced-as-value` taxonomy (ADR-0041 §3):
+/// their first argument is *itself* the callable to invoke, so an opaque value
+/// there is invisible to ordinary call resolution.
+fn is_generic_invoker(name: &str) -> bool {
+    name.eq_ignore_ascii_case("call_user_func") || name.eq_ignore_ascii_case("call_user_func_array")
+}
+
+/// Whether `v` is a runtime value the literal-value scan (`collect_value_names`)
+/// cannot already account for, and which could hold an arbitrary callable at
+/// runtime: a bare variable, a call result, a `new`, a ternary, a property fetch,
+/// … — anything that is neither a name-shaped literal (a string, a first-class-
+/// callable reference, a callable array — all already scanned) nor a scalar shape
+/// PHP would reject as a callable outright (`int`/`float`/`bool`/`null`).
+fn callable_arg_is_opaque(v: &ArgValue) -> bool {
+    !matches!(
+        v,
+        ArgValue::Str(_)
+            | ArgValue::Closure(_)
+            | ArgValue::Array(_)
+            | ArgValue::Int(_)
+            | ArgValue::Float(_)
+            | ArgValue::Bool(_)
+            | ArgValue::Null
+    )
 }
 
 // ===========================================================================
@@ -314,7 +356,11 @@ pub fn sweep_methods(db: &dyn Db, project: Project) -> MethodSweep {
                 // Value-reference scan across every argument (a method name flowing
                 // as a callable string/array is a caller invisible to resolution).
                 for arg in &call.args {
-                    collect_method_value_names(&arg.value, &mut out.value_referenced_methods);
+                    collect_method_value_names(
+                        &arg.value,
+                        &mut out.value_referenced_methods,
+                        &mut out.any_dynamic_method,
+                    );
                 }
                 resolve_one_method_call(
                     &cx, tree, path, scope, enclosing, &empty_store, call, &mut out,
@@ -327,7 +373,11 @@ pub fn sweep_methods(db: &dyn Db, project: Project) -> MethodSweep {
         // return) — scan free-function call args and scope traces too.
         for call in tree.calls() {
             for arg in &call.args {
-                collect_method_value_names(&arg.value, &mut out.value_referenced_methods);
+                collect_method_value_names(
+                    &arg.value,
+                    &mut out.value_referenced_methods,
+                    &mut out.any_dynamic_method,
+                );
             }
             if matches!(call.receiver, Callee::Dynamic) {
                 // `$arr['x']()` and friends could invoke a method via a callable.
@@ -335,7 +385,11 @@ pub fn sweep_methods(db: &dyn Db, project: Project) -> MethodSweep {
             }
         }
         for scope in tree.scopes() {
-            scan_scope_method_values(scope, &mut out.value_referenced_methods);
+            scan_scope_method_values(
+                scope,
+                &mut out.value_referenced_methods,
+                &mut out.any_dynamic_method,
+            );
         }
 
         // (3) Eligibility for every declared method (hierarchy-only; ADR-0041 §1).
@@ -519,7 +573,17 @@ fn overrides_ancestor(cx: &Cx, class_fqn: &str, method: &str) -> AncestorVerdict
 /// string `'Foo::method'` (name after the last `::`) or a callable array
 /// `[$target, 'method']` (a 2-element array whose second entry is a string method
 /// name). Recurses into arrays so a callable nested in a value is still seen.
-fn collect_method_value_names(v: &ArgValue, set: &mut HashSet<String>) {
+///
+/// A callable array whose method-name position (the second entry) is present but
+/// **not** a literal string — `[$obj, $var]`, `[$obj, someExpr()]`, … — names no
+/// method at all, so it cannot be added to `set`; left undetected, it would be a
+/// caller invisible to *every* method of whatever name `$var` resolves to at
+/// runtime (issue #6). Context-sensitively tracking what the variable might hold
+/// is out of scope (v1 posture, ADR-0041/0046): instead this mirrors the existing
+/// `$o->$m()` (`Callee::Dynamic`) handling and sets `any_dynamic` — the broadest,
+/// conservative fallback that taints every method project-wide, exactly like an
+/// unresolvable dynamic method-call selector.
+fn collect_method_value_names(v: &ArgValue, set: &mut HashSet<String>, any_dynamic: &mut bool) {
     match v {
         ArgValue::Str(s) => {
             if let Some((_, m)) = s.rsplit_once("::")
@@ -530,15 +594,21 @@ fn collect_method_value_names(v: &ArgValue, set: &mut HashSet<String>) {
         }
         ArgValue::Array(items) => {
             // A classic callable array `[$obj, 'method']` / `[Foo::class, 'method']`
-            // is exactly two entries whose second is a string method name.
-            if items.len() == 2
-                && let ArgValue::Str(name) = &items[1].1
-                && is_identifier(name)
-            {
-                set.insert(name.to_ascii_lowercase());
+            // is exactly two entries; the second is the method-name position.
+            if items.len() == 2 {
+                match &items[1].1 {
+                    ArgValue::Str(name) => {
+                        if is_identifier(name) {
+                            set.insert(name.to_ascii_lowercase());
+                        }
+                    }
+                    // Non-literal method-name position: no name can be extracted, so
+                    // taint broadly rather than silently seeing nothing.
+                    _ => *any_dynamic = true,
+                }
             }
             for (_, e) in items {
-                collect_method_value_names(e, set);
+                collect_method_value_names(e, set, any_dynamic);
             }
         }
         _ => {}
@@ -547,31 +617,31 @@ fn collect_method_value_names(v: &ArgValue, set: &mut HashSet<String>) {
 
 /// Scan a scope's linear trace for callable values escaping through an assignment /
 /// property-assignment / return position, recursing into `if`/`match` sub-traces.
-fn scan_scope_method_values(scope: &Scope, set: &mut HashSet<String>) {
-    scan_stmts_method_values(&scope.stmts, set);
+fn scan_scope_method_values(scope: &Scope, set: &mut HashSet<String>, any_dynamic: &mut bool) {
+    scan_stmts_method_values(&scope.stmts, set, any_dynamic);
 }
 
-fn scan_stmts_method_values(stmts: &[Stmt], set: &mut HashSet<String>) {
+fn scan_stmts_method_values(stmts: &[Stmt], set: &mut HashSet<String>, any_dynamic: &mut bool) {
     for s in stmts {
         match &s.kind {
             StmtKind::Assign { value, .. }
             | StmtKind::PropAssign { value, .. }
-            | StmtKind::Return { value, .. } => collect_method_value_names(value, set),
+            | StmtKind::Return { value, .. } => collect_method_value_names(value, set, any_dynamic),
             StmtKind::If { then_trace, elseifs, else_trace, .. } => {
-                scan_stmts_method_values(then_trace, set);
+                scan_stmts_method_values(then_trace, set, any_dynamic);
                 for (_, branch) in elseifs {
-                    scan_stmts_method_values(branch, set);
+                    scan_stmts_method_values(branch, set, any_dynamic);
                 }
                 if let Some(e) = else_trace {
-                    scan_stmts_method_values(e, set);
+                    scan_stmts_method_values(e, set, any_dynamic);
                 }
             }
             StmtKind::Match { arms, default, .. } => {
                 for arm in arms {
-                    scan_stmts_method_values(&arm.trace, set);
+                    scan_stmts_method_values(&arm.trace, set, any_dynamic);
                 }
                 if let Some(d) = default {
-                    scan_stmts_method_values(d, set);
+                    scan_stmts_method_values(d, set, any_dynamic);
                 }
             }
             _ => {}
