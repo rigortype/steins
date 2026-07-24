@@ -60,7 +60,7 @@ grade.
 | `proof` | The program provably breaks on a live path. | Zero false positives. Any FP on corpus code is a release blocker (ADR-0013). |
 | `contract` | A proven behavior violates something the code *declares* about itself. The program still works. | True findings legitimately abound in released code; gated as increase tripwires, never on sight. |
 | `mechanics` | The analyzer's own hygiene — a finding whose absence would let another channel rot silently. | Red on sight. |
-| `debug` | Requested introspection: a report that exists *because a call site asked for it* (`PHPStan\dumpType()`). | Excluded from every gate counter (ADR-0053). Partial: the explicit pair emits, `var_dump` carriage does not. |
+| `debug` | Requested introspection: a report that exists *because a call site asked for it* (`PHPStan\dumpType()`). | Excluded from every gate counter (ADR-0053). Partial: the lane, its three ids, and the shared rendering landed (D1/D2); the emit slices (D3 explicit pair, D4 `var_dump`) were in flight at verification time. |
 
 A bare `steins check` surfaces `proof` + `mechanics` only. The contract layer is
 reached through a named profile. See [diagnostic-policy.md](diagnostic-policy.md).
@@ -75,8 +75,9 @@ the worst-case static reading*. Concretely:
   cutoff, a missing sidecar), the answer widens to `Maybe`, and `Maybe` does not
   report.
 - The bar is verified, not asserted: `cargo xtask fp-gate` runs the proof layer
-  over a pinned corpus of real PHP (10 OSS packages plus a private legacy
-  monorepo, ~90.7k files) and fails on *any* proof-layer finding that is not a
+  over a pinned corpus of real PHP (10 OSS packages plus locally-registered
+  projects — a private legacy monorepo and phpstan-src; ~99.3k files at the
+  last recorded run) and fails on *any* proof-layer finding that is not a
   triaged, fingerprint-pinned true positive.
 
 The paramount product constraint behind it (the "crying-wolf prohibition"): a
@@ -108,10 +109,10 @@ Emitting ids, by layer (the registry is the source of truth —
   `call.unknown-named-argument`, `offset.missing`, `offset.on-unsupported`.
 - **contract** — `phpdoc.param-mismatch`, `phpdoc.return-mismatch`,
   `phpdoc.property-mismatch`, `phpdoc.undefined-method`, `throw.undeclared`,
-  `throw.liskov-widened`, `effect.envelope-exceeded`, `effect.unknown-label`,
-  `effect.liskov-widened`.
-- **mechanics** — `suppress.unmatched`, `suppress.unknown-id`.
-- **debug** — `debug.type`, `debug.phpdoc-type`.
+  `throw.liskov-widened`, `effect.envelope-exceeded`, `effect.liskov-widened`.
+- **mechanics** — `suppress.unmatched`, `suppress.unknown-id`,
+  `effect.unknown-label` (a typo'd label is apparatus rot, not a contract
+  claim).
 
 Registered but **not yet emitted** — the registry reserves the id and its layer
 so `@steins-ignore` can name it and a profile can select it, but no emitter
@@ -122,11 +123,13 @@ produces it (`REGISTERED_NOT_YET_EMITTED`):
 | `call.undefined-function` | ADR-0049 S4 (scoped into v0.1.0, not landed) |
 | `class.undefined` | ADR-0049 S4 (same) |
 | `call.too-many-arguments` | the sidecar `reflect` slice — the arm fires for *internal* targets only, since userland too-many runs clean and is never a finding |
-| `debug.var-dump` | ADR-0053 D4 |
+| `debug.type`, `debug.phpdoc-type` | ADR-0053 D3 (in flight at verification time) |
+| `debug.var-dump` | ADR-0053 D4 (same) |
 
 CLI surface: `check`, `annotate`, `transform`. ADR-0020 declares six commands;
 `doctor`, `lsp`, and `mcp` are **designed, not implemented**, and are
-deliberately not stubbed. Output formats are `text` and `json`; `sarif` and
+deliberately not stubbed (a minimal `doctor` is scoped into v0.1.0 by owner
+decision, not landed). Output formats are `text` and `json`; `sarif` and
 `github` are designed in ADR-0054 and absent from the binary.
 
 The full gap list is [not-implemented.md](not-implemented.md).

@@ -38,11 +38,26 @@ rules instead of a keyword zoo:
 - `list<T>`, `non-empty-list<T>` → `ListOf`; `array<K, V>`, `T[]` → `MapOf`;
   `iterable<K, V>` → `IterableOf`.
 - `array{…}` / `list{…}` → `Shape`.
-- `callable`, `Closure`, `callable(P): R` → `CallableTy`.
+- `callable`, `Closure`, `callable(P): R` → `CallableTy(Option<CallableSig>)`
+  — `None` for the bare forms, `Some(sig)` carrying the lowered parameter and
+  return contracts. A template-bearing signature (`callable(T): T`) drops to
+  `CallableTy(None)`, so every carried signature arm is a ground contract.
+- `A|B` → `Union`; `A&B` → `Inter`.
 - A class or interface name → `Class(fqn)`, normalized (lowercased, leading `\`
-  stripped).
+  stripped). A generic class reference (`Collection<T>`) lowers to the same
+  `Class(fqn)` — the type *arguments* are not a `ContractTy` concern: proven
+  argument *values* ride the check-time value carrier and are judged at the
+  direct-`new` argument position (ADR-0032 stage 1; see
+  [object-model.md](object-model.md)).
 - Conditionals, offset-access types, const fetches, `$this`/`self`/`static`,
-  templates, and anything the parser marks unsupported → `Opaque`.
+  templates, and anything the parser marks unsupported → `Opaque`. A
+  **template name in scope shadows the class universe** for its own
+  declaration's docblock types (issue #5): a bare, unqualified name declared
+  by `@template` on the declaration or its enclosing class-like lowers
+  `Opaque` even when a real class of that name exists. The shadow match is
+  deliberately case-insensitive — over-shadowing only ever silences — and a
+  `\`-qualified or namespaced reference opts out and still resolves to the
+  class.
 
 ## The judgment
 

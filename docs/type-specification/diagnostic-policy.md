@@ -71,7 +71,7 @@ profile = "house"
 [profile.house]
 extends = "throws-direct"
 enable  = ["phpdoc.*"]
-disable = ["effect.unknown-label"]
+disable = ["phpdoc.undefined-method"]
 warn    = ["throw.undeclared"]
 ```
 
@@ -83,7 +83,31 @@ facet-shaped token (`throw.undeclared@direct`) is rejected as an unknown id
 pattern.
 
 `warn` demotes an id to **report-without-fail**. Every surfaced finding is
-`fail` by default in every layer.
+`fail` by default in every layer but `debug` — see below.
+
+## The debug lane (ADR-0053)
+
+The dump surface's contract, decided in full; implementation state at
+verification time: the lane, its three registered ids, and the shared
+plain-text rendering landed (D1/D2, gate-excluded and byte-identical); the emit
+slices (D3 explicit pair, D4 `var_dump`) were in flight.
+
+- **`debug.type` / `debug.phpdoc-type`** (explicit `PHPStan\dumpType` /
+  `dumpPhpDocType`, recognized unconditionally by resolved FQN): level
+  **fail**, fixed — the call names a function that does not exist at runtime,
+  so a committed call is a guaranteed fatal. **Profile-inert**, like
+  mechanics: no profile disables or demotes them.
+- **`debug.var-dump`** (a call resolving to the *global* `var_dump` under
+  PHP's own fallback rule): one report per argument, level **warn**, fixed —
+  structurally **exit-neutral forever**; no channel can promote it to fail
+  (that would be a lint rule, which Steins refuses). Default-ON in the
+  built-in profiles, **disableable** in a named profile.
+- All three are **exempt from all three suppression channels** — never
+  baselined, never matched by `@steins-ignore` or `[[policy]]`. The remedy
+  for an unwanted dump is deleting the call; an ignore naming a debug id
+  reports `suppress.unmatched`.
+- The layer is **excluded from every fp-gate counter** — a dump is an
+  answer, not a finding.
 
 ## Composition
 
@@ -170,6 +194,7 @@ declares one; the document also reports the active `profile` and the
 
 `sarif` and `github` formats are designed in ADR-0054 (with format invariance as
 the binding rule — a format is a serialization of the displayed surface, never a
-second surface) and are **not implemented**. Neither is `doctor`, the posture
-report that would answer "what is my coverage, is the sidecar healthy, what does
-the catalog know" without running an emitter.
+second surface) and are **not implemented** — decided out of v0.1.0 by owner.
+Neither is `doctor`, the posture report that would answer "what is my coverage,
+is the sidecar healthy, what does the catalog know" without running an emitter;
+a minimal `doctor` is scoped into v0.1.0, not landed.

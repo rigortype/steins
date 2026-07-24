@@ -112,6 +112,42 @@ pairs must agree for a verdict; any disagreement or undecidable pair yields
 PHP 8.5.8** rather than from the manual's table; ordering comparisons decide only
 for concrete numeric operands, and any other pairing is `Maybe`.
 
+`instanceof` additionally decides on the **value side, before any class
+reasoning**: an operand whose value-domain fact proves it holds a non-object
+value (a `null` or scalar `Singleton`/`OneOf`, any `Refined`/`General` — all
+four layers denote non-objects) answers `No` — nothing non-object is an
+instance of anything. The `No`-side heap conclusion stays exactness-gated as
+above.
+
+## Short-circuit threading
+
+Implemented (ADR-0052 §6 / N3). The operands of `&&`/`||` no longer all
+evaluate in the pre-branch env: `And(a, b)` evaluates `b` under the entry env
+plus `a`'s then-refinements; `Or(a, b)` under the entry env plus `a`'s
+else-refinements (De Morgan — `b` runs only when `a` was falsy). The composed
+verdict stays the trinary `and`/`or`; only the operand-evaluation env threads
+left to right, so a contradiction (`$x === 5 && $x === 6`) proves its branch
+dead and a `||` tautology over a finite fact proves its else dead.
+
+**Guard calls are retained**, not opaqued. A resolvable call in guard position
+keeps three payoffs: the receiver check runs inside the threaded env (the
+`$x !== null && $x->foo()` shape sees a non-null receiver), the callee's
+`@phpstan-assert-if-true`/`-if-false` envelopes consume on the matching
+polarity — including in nested `&&`/`||` positions, always at the `Asserted`
+stratum — and foldable predicate calls evaluate to verdicts where the catalog
+licenses it. The obligation is **sequenced, not blanket, invalidation**: a
+method call does not rebind its receiver variable (the receiver fact survives
+while the escaped object's properties are swept), but by-ref arguments and
+other mentions are forgotten at the call's position in left-to-right order.
+
+Ternary arms resolve under the guard's then/else refinements. `$a ?? $b`
+lowers to a coalesce value (`ArgValue::Coalesce`) and yields
+`clear_null(fact($a)) join fact($b)` — a fact only when *both* operands are
+visible, so `??` never manufactures certainty for a value it cannot spell
+(an unseen array offset yields no fact); the stratum is the min over both
+operands. `??` in *guard position* does not yet refine like
+`$a !== null ? $a : $b` — see the gap list below.
+
 ## Arm-wise subtraction
 
 Negative guard information removes arms from a contract-fact arm list
@@ -165,16 +201,17 @@ layer reasoning but never premise a proof-layer finding.
 ## Not implemented
 
 Recorded honestly; each costs true positives, never false positives, because an
-unknown widens to silence.
+unknown widens to silence. The first three are ADR-0052's N5/N6 slices,
+**deferred out of v0.1.0 by owner decision** — designed in full, no code.
 
-- **Short-circuit refinement across `&&` / `||` into the following statements**
-  beyond what the lowered condition operands already express.
-- **Loops as anything but `Opaque`.** No loop-carried facts, no fixpoint over a
-  loop body's environment; only the write/read-set invalidation above.
+- **Loops as anything but `Opaque`** (N6). No structured loop walk, no
+  loop-carried facts; only the write/read-set invalidation above.
+- **Property chains as guard operands and static properties as a fact lane**
+  (N5). One level of property access is modeled
+  ([object-model.md](object-model.md)); chained lvalues stay `Barrier`.
+- **`??` in guard position** — refining like `$a !== null ? $a : $b`; today
+  `??` yields a value fact only.
 - **`try`/`catch`/`finally` control flow.** Catch *matching* consumes contract
   facts, but the construct itself is `Opaque` for value flow.
-- **Static properties** as a fact lane.
-- **Property chains** (`$a->b->c`) — one level of property access is modeled
-  ([object-model.md](object-model.md)); chained lvalues stay `Barrier`.
 - **Array element narrowing.** An array is a fact only when *fully* known.
 - **Reachability analysis** — the all-branches-early-return gap above.

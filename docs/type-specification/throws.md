@@ -1,7 +1,8 @@
 # Throw Accounting
 
 **Status: implemented** (ADR-0007, ADR-0040). The default posture of
-`throw.undeclared` is an **open user decision** (roadmap gate G1); see below.
+`throw.undeclared` was roadmap gate G1, **decided by the owner** (ADR-0050
+amendment); see below.
 
 ## Checked and unchecked
 
@@ -105,12 +106,14 @@ selects `origin = direct`.
 
 ## Gate G1: the default posture
 
-**Open, and deliberately not pre-decided here.** `throw.undeclared` is a
-contract-layer id, so a bare `steins check` does not print it; reaching it
-requires `--profile throws-direct` or `--profile contracts`. Whether that is the
-right long-term default — keep it behind profiles, split it, or promote the
-direct arm — is the user's call, and it blocks the M2 milestone exit. See
-[`docs/ROADMAP.md`](../ROADMAP.md).
+**Decided** (owner resolution, recorded as an ADR-0050 amendment): demote,
+with named-stage opt-up. `throw.undeclared` is a contract-layer id, so a bare
+`steins check` does not print it; reaching it requires `--profile
+throws-direct` (the measurement-decided middle stage) or `--profile
+contracts`. The generalized principle — the **lenient default**: defaults are
+lenient, strictness is opt-in as named config stages, never numeric levels;
+mechanics ids and `[runtime]` boot-truth pseudo-constants are the carve-outs,
+and the trust order stays closed. The M2 blocker this gate held is cleared.
 
 ## Not implemented
 

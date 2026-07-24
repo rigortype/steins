@@ -85,8 +85,9 @@ of ADR-0023 — not a strictness knob.
 
 Trust stratification is about *how a fact was learned*. A second, orthogonal
 axis governs *how strong a class fact is*: an object's class may be **exact**
-(allocation-proven: `new`, an enum case, a clone of an exact object) or a **lower
-bound** (a `$this` seed — the runtime object may be any descendant that
+(allocation-proven: `new`, an enum case, a clone of an exact object; a `$this`
+in a `final` class or an enum; a descent-proved receiver) or a **lower bound**
+(any other `$this` seed — the runtime object may be any descendant that
 inherited the method).
 
 `No`-side conclusions require exactness: "`is_a(class, T) = No`, therefore this

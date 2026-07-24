@@ -40,11 +40,13 @@ A dam site is any of:
 | `Include` | every **non-vendor** `include`/`require` whose path is not provably in-universe |
 | `ClassAlias` | every **non-literal** `class_alias(...)` — a runtime class-name mint |
 
-"Not provably in-universe" is deliberately strict for includes: an unproven path,
-a bare-relative or `./`-prefixed literal (the runtime resolves those against
-`include_path`, then the script directory, then the CWD — so directory-relative
-belief is unsound), or an absolute / `__DIR__`-anchored literal that resolves
-*outside* the analyzed universe.
+"Not provably in-universe" is deliberately strict for includes: an unproven
+path, a bare-relative literal (the runtime resolves it against `include_path`,
+then the script directory, then the CWD — verified empirically on PHP 8.5.8),
+a `./`-prefixed literal (verified to bind to the **CWD**, not the including
+file's directory — `./` does not anchor), or an absolute / `__DIR__`-anchored
+literal that resolves *outside* the analyzed universe. Directory-relative
+belief is unsound in every one of these shapes.
 
 The **vendor presumption**: `eval` and dynamic includes inside a `vendor/` path
 are Composer plumbing and are presumed universe-internal. A *literal*

@@ -132,6 +132,9 @@ denotation can be falsy, truthy, or both — with both giving `Maybe`.
 - **No partial arrays.** `Val::Array` is a *fully known* array. An array with
   one unknown element is not representable, so the fact is dropped. This is why
   the offset family only fires on fully-proven containers.
-- **No generic type arguments.** Carrying `T` through a collection is ADR-0032
-  stage 1 — **designed, not implemented**. See
+- **No generic type arguments.** The domain carries none, by design. Class
+  generics are judged in the contract lane instead: type-argument *values* are
+  inferred at a direct-`new` argument position (ADR-0032 stage 1, landed);
+  carry through a variable binding is not implemented. See
+  [object-model.md](object-model.md) and
   [not-implemented.md](not-implemented.md).

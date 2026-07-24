@@ -54,8 +54,9 @@ by ADR-0052 slice N1).
 
 ## Conformance-suite divergences (intentional silences)
 
-Steins runs `php-typing-conformance`. Standing at the last recorded triage
-(2026-07-24): **85/98**, with every remaining non-#14939 failure registered
+Steins runs `php-typing-conformance`. Standing at the last recorded run
+(2026-07-24, at the v0.1.0 landing point): **93/98**, with every remaining
+non-#14939 failure registered
 below as either a standing refusal or an honest deferral, and zero
 absent-machinery failures among them at the time of triage. The ceiling is set
 by the intentional entries.
@@ -93,7 +94,9 @@ object-world value-modeling cluster.
 These are gaps, not divergences, and they are tracked in
 [not-implemented.md](not-implemented.md):
 
-- generic type-argument carry (ADR-0032 stage 1);
+- generic type-argument carry *through a variable binding* (the direct-`new`
+  argument position landed as ADR-0032 stage 1; the heap carries no type
+  arguments);
 - callable signatures beyond the closure-variance arm;
 - template scope transfer (ADR-0051).
 

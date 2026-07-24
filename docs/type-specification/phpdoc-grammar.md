@@ -50,8 +50,12 @@ The whole reference grammar is modelled. `TypeKind` covers:
 Generic arguments carry declared variance (invariant, covariant `covariant T`,
 contravariant, and the `*` bivariant wildcard).
 
-`TypeKind::Unsupported` exists for forward compatibility with upstream additions
-and is **currently unused** — the parser models the whole reference grammar.
+`TypeKind::Unsupported` exists for forward compatibility with upstream
+additions; the **parser never produces it** — it models the whole reference
+grammar. The one producer today is the template-shadow rewrite (issue #5): a
+bare identifier shadowed by an in-scope `@template` name is rewritten to
+`Unsupported`, which lowers `Opaque` — the same silence a template floor
+already gets.
 
 ### Accepted syntactically, erased semantically
 
@@ -65,7 +69,8 @@ ADR-0042). See [divergence-registry.md](divergence-registry.md).
 ### Failure modes
 
 - A construct the parser cannot accept yields a `ParseError`.
-- A construct deliberately kept opaque yields `TypeKind::Unsupported`.
+- A construct deliberately kept opaque yields `TypeKind::Unsupported` (today
+  only the template-shadow rewrite above produces it).
 
 Callers treat **both** as "no envelope" — silence, always the safe side. The
 parser never panics on input.
@@ -100,8 +105,12 @@ exception of the `@steins-ignore` suppression comment
 ([diagnostic-policy.md](diagnostic-policy.md)).
 
 **Not read today:** `@template` and friends are scanned for names
-(`scan_template_names`) but no call-site template solver exists (ADR-0032), and
-template scope transfer (ADR-0051) is designed and unimplemented. `@method`,
+(`scan_template_names` — the plain, `@phpstan-`/`@psalm-`-prefixed, and
+`-covariant`/`-contravariant` variants), and those names **shadow the class
+universe** in the declaring docblock's own types (issue #5; see
+[contract-types.md](contract-types.md)) — but no call-site template solver
+exists (ADR-0032), and template scope transfer (ADR-0051) is designed and
+unimplemented. `@method`,
 `@property`, `@mixin`, `@phpstan-type` aliases, `@phpstan-import-type`,
 `@phpstan-pure`, and `@phpstan-impure` are not recognized. See
 [not-implemented.md](not-implemented.md).

@@ -32,9 +32,12 @@ A `HeapObj` carries:
 `class_exact` is the object-world half of the trust discipline.
 
 - **Exact** — allocation-proven: `new Foo`, an enum case, a clone of an exact
-  object. `class` *is* the runtime class.
-- **Lower bound** — a `$this` seed. The runtime object may be any descendant
-  that inherited the method being analyzed.
+  object. `class` *is* the runtime class. Two `$this` shapes are also exact:
+  a `$this` whose enclosing class is `final` or an enum (no subclass can
+  exist), and a `$this` seeded by a binding descent that proved the exact
+  receiver at the call site.
+- **Lower bound** — any other `$this` seed. The runtime object may be any
+  descendant that inherited the method being analyzed.
 
 The rule this exists for: a **`No`-side conclusion requires exactness.**
 "`is_a(class, T) = No`, therefore this object is not a `T`" is sound only for an
@@ -123,7 +126,20 @@ determined. Anything ambiguous is silent:
 
 Native and PHPDoc **object acceptance** is judged over the same oracle: a class
 argument satisfies a declared class/interface parameter when `is_a` says `Yes`,
-fails on `No`, and is silent on `Unknown`.
+fails on `No`, and is silent on `Unknown`. A native intersection type (`A&B`)
+lowers to a conjunctive member (`InstanceInter`): every conjunct must answer
+`Yes`, any `No` fails, any `Unknown` is silence — Kleene `and` over the same
+oracle.
+
+**Return-position `static`/`self`/`parent`** is lowered by the minimum-bound
+lemma (ADR-0043 amendment, landed): every late-bound class `T` of a `: static`
+method of class `C` satisfies `is_a(T, C) = Yes`, so an exact returned class
+`V` with `is_a(V, C) = No` fails *every* possible `T` — an unconditional
+runtime `TypeError`, reported under `type.return-mismatch` with no worst-case
+reasoning. The bound is the enclosing class for `self`/`static` and the
+resolved parent for `parent`; `return $this`, `new self()` under `: static` in
+an open class, and sibling-subclass returns stay silent (see the divergence
+registry, conformance entry 3).
 
 ## Enums and `::class`
 
@@ -151,7 +167,11 @@ value.
 
 - **Generic type-argument carry through a variable binding.** A heap object
   records no type arguments: `$x = new Box('x'); f($x);` judges only the class
-  half. ADR-0032 stage 1 is designed, not implemented.
+  half. What *has* landed (ADR-0032 stage 1, issue #10) is scoped to the
+  direct-`new` argument position: `f(new Box('x'))` infers the class-level
+  type-argument values at the `new` site and judges them against the declared
+  generic, with an empty carry — silence on the argument half — as the honest
+  floor everywhere else.
 - **Extension classes from unloaded PHP extensions** are `Unknown`-silent. The
   sidecar's `reflect()` is the designed answer and is not wired into class
   resolution.

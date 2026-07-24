@@ -14,7 +14,8 @@ the semantic inventory.
 
 | Surface | ADR | Note |
 | --- | --- | --- |
-| Generic type-argument carry | 0032 stage 1 | A heap object records no type arguments; `$x = new Box('x')` judges only the class half. |
+| Generic type-argument carry through a variable binding | 0032 | A heap object records no type arguments; `$x = new Box('x'); f($x)` judges only the class half. Stage 1 (the direct-`new` argument position) landed. |
+| Narrowing N5/N6 — property-chain guards, static-prop channel, structured loops | 0052 | Deferred out of v0.1.0 by owner decision; designed in full in ADR-0052 §7–8. |
 | Template scope transfer | 0051 | Templates as functions, render sites as call sites. Out of v0.1.0 scope by owner decision; promoted only if dogfooding demands it. |
 | Callable signatures beyond the closure-variance arm | 0033 | A declared `callable(P): R` is checked against a *closure argument*; nothing else consumes it. |
 | `resource` type / resource-value tracking | 0030 reg. suite 4 | Needs `fopen()`-style values modeled through `=== false` narrowing. |
@@ -28,10 +29,10 @@ the semantic inventory.
 | --- | --- | --- |
 | `call.undefined-function`, `class.undefined` | 0049 S4 | Registered with layers; no emitter. Scoped into v0.1.0, not landed. |
 | `call.too-many-arguments` | 0049 §6 | Internal targets only — userland too-many runs clean and is never a finding. Waits on the sidecar reflect slice. |
-| `debug.var-dump` | 0053 D4 | The explicit `dumpType` pair emits; `var_dump` carriage does not. |
+| `debug.type` / `debug.phpdoc-type` / `debug.var-dump` emission | 0053 D3/D4 | The lane, ids, and shared rendering landed (D1/D2); the emit slices were in flight at verification time. |
 | Scoped policy — `[paths.sets]`, `[[policy]]` | 0023 | Designed in full, including semantic `where` matchers. The pipeline stage exists as a no-op with a seam. |
-| `sarif` / `github` formats | 0054 | With CI auto-detection and format invariance as the binding rule. |
-| `doctor` | 0054 | The posture report: coverage, sidecar health, catalog audit, baseline capture surface. |
+| `sarif` / `github` formats | 0054 | With CI auto-detection and format invariance as the binding rule. Decided out of v0.1.0 by owner. |
+| `doctor` | 0054 | The posture report: coverage, sidecar health, catalog audit, baseline capture surface. A minimal `doctor` is scoped into v0.1.0, not landed. |
 | `check --fix` fix-its | 0010 | Autofix as a first-class diagnostic payload. |
 | `lsp` | 0048, roadmap M6 | Position queries are *constrained* today (replay over retention, canonical entry states, no global-ordering dependence) but not built. The flagship capability is type-directed member completion. |
 | `mcp` | 0010, roadmap M7 | The agent-driven dry-run → diff → approve → apply loop. |
@@ -52,13 +53,15 @@ Places where Steins is quieter than it could be.
 
 **Control flow** ([narrowing.md](narrowing.md)):
 
-- Loops are `Opaque` — write/read-set invalidation only, no loop-carried facts.
+- Loops are `Opaque` — write/read-set invalidation only, no loop-carried facts
+  (ADR-0052 N6, deferred out of v0.1.0 by owner decision).
 - `try`/`catch`/`finally` is `Opaque` for value flow (catch *matching* works).
 - No reachability analysis: a construct that early-returns on every branch makes
   fall-through code dead, and a fact about a variable it never reads could
   describe an unreachable path.
 - Static properties are not a fact lane; property chains (`$a->b->c`) are a
-  `Barrier`.
+  `Barrier` (ADR-0052 N5, same owner deferral).
+- `??` in guard position does not refine; it yields a value fact only.
 - Array elements do not narrow — an array is a fact only when *fully* known.
 
 **Objects** ([object-model.md](object-model.md)):
@@ -87,8 +90,8 @@ Places where Steins is quieter than it could be.
 - **`project_index` is monolithic** — any file edit invalidates it and
   everything downstream. Acceptable for a batch CLI; the recorded plan is
   per-symbol interning, which the LSP needs (ADR-0009).
-- **No perf harness.** Full batch over ~90.7k files is CI-viable on dev
-  hardware; there is no measured cold/warm baseline under `xtask`.
+- **No perf harness.** Full batch over the ~99.3k-file corpus is CI-viable on
+  dev hardware; there is no measured cold/warm baseline under `xtask`.
 
 ## Deliberate refusals
 
