@@ -235,7 +235,12 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // *type* (`SomeClass::LIST_*`) no longer manufactures a No against an array
     // value (const-fetch types are silent), and a `[]`-vs-`non-empty-list` finding a
     // `count()===0`-guarded value could never actually reach. Runtime layer GREEN.
-    ("pxxxx-monorepo", 439),
+    //
+    // 439 → 434 (−5), 2026-07-24 evening: LIVE-TREE DRIFT, not a checker change —
+    // the unpinned monorepo checkout gained ~210 files during the day and some
+    // previously-counted finding sites changed. Decrease adopted consciously
+    // (a decrease never gates; recorded so the next reader knows the cause).
+    ("pxxxx-monorepo", 434),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).
@@ -295,7 +300,15 @@ const THROW_EXPECTED: &[(&str, usize)] = &[
     // @throws-annotated methods. Homogeneous checked-exception debt, none runtime
     // breakage — the exact ADR-0040/0007 pattern the tripwire mode exists for.
     ("phpstan/phpstan-src", 20),
-    ("pxxxx-monorepo", 43964),
+    // 43964 → 44372 (+408), 2026-07-24 evening: LIVE-TREE DRIFT — the unpinned
+    // monorepo checkout gained ~210 files (84,038 → 84,248) during the day.
+    // Triaged (3-sample verbatim, gate printout): every sampled new finding is
+    // the standing homogeneous debt class — an `@throws`-annotated declaration
+    // with an undeclared base-exception escape (the app-wide base exception,
+    // Exception_MethodNotAllowed, a bare Throwable) — TRUE contract findings on
+    // newly-landed application code, none runtime breakage. The proof layer
+    // stayed at ZERO over the new files. Reseeded consciously.
+    ("pxxxx-monorepo", 44372),
 ];
 
 /// The expected `throw.*` count for a package/local-project name (0 if untabled).
