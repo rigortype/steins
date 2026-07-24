@@ -7,6 +7,7 @@
 //! right-margin column of *proven* inferred facts (the Rigor-style display).
 
 mod baseline;
+mod doctor;
 mod profile;
 mod sha256;
 
@@ -39,8 +40,11 @@ fn main() -> ExitCode {
         Some("check") => run_check(&args[1..]),
         Some("annotate") => run_annotate(&args[1..]),
         Some("transform") => run_transform(&args[1..]),
+        Some("doctor") => doctor::run_doctor(&args[1..]),
         Some(other) => {
-            eprintln!("steins: unknown command `{other}` (available: check, annotate, transform)");
+            eprintln!(
+                "steins: unknown command `{other}` (available: check, annotate, transform, doctor)"
+            );
             ExitCode::from(2)
         }
         None => {
@@ -51,6 +55,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "       steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--format text|json] <paths...>"
             );
+            eprintln!("       steins doctor [--no-php] [--baseline <path>] [path]");
             ExitCode::from(2)
         }
     }
@@ -142,10 +147,28 @@ fn run_check(args: &[String]) -> ExitCode {
         eprintln!("{SOUND_SUBSET_NOTICE}");
     }
 
+    // Parse `./steins.toml` ONCE, up front, before any analysis (ADR-0050 §7 /
+    // ADR-0052 §5 N2): a malformed file — including an unknown key in `[runtime]`,
+    // which `deny_unknown_fields` rejects — is a HARD config error (exit 2), never
+    // a warn-and-proceed. Silently proceeding on defaults would let a `zend-asertions`
+    // typo leave the safe default in force while the user believed they had overridden
+    // it. A missing file is `None` (the built-in defaults govern).
+    let config = match read_steins_config() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("steins: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let (check_cfg, profile_tbl, runtime_cfg) = match config {
+        Some(c) => (c.check, c.profile, c.runtime),
+        None => (None, None, None),
+    };
+
     // The active display surface (ADR-0050 §5): resolve the selected profile before
     // any analysis so a config error fails fast (exit 2). Precedence: the
     // `--profile` flag beats `[check] profile` beats the built-in `default`.
-    let (config_profile, profile_configs) = load_profiles();
+    let (config_profile, profile_configs) = profiles_from_config(check_cfg, profile_tbl);
     let selected = profile_flag.as_deref().or(config_profile.as_deref());
     let surface = match profile_configs.resolve(selected) {
         Ok(s) => s,
@@ -180,8 +203,11 @@ fn run_check(args: &[String]) -> ExitCode {
     }
     let project = Project::new(&db, inputs.clone());
     // `[runtime]` pseudo-constants (ADR-0052 §5): the boot truth the checker cannot
-    // observe from source (e.g. `zend-assertions = "enabled"`).
-    let (zend_assertions, warning_handler_abort, runtime_warnings) = load_runtime();
+    // observe from source (e.g. `zend-assertions = "enabled"`). Parsed above with the
+    // rest of the config; an unknown *value* on a known key still warns and keeps the
+    // safe default (a parse error already exited 2).
+    let (zend_assertions, warning_handler_abort, runtime_warnings) =
+        runtime_from_config(runtime_cfg);
     for w in &runtime_warnings {
         eprintln!("steins: {w}");
     }
@@ -706,26 +732,39 @@ fn load_vouches(config_path: Option<&str>) -> (VouchSet, Vec<String>) {
     (VouchSet::from_entries(entries), warnings)
 }
 
-/// Load the `[runtime]` pseudo-constants from `steins.toml` (ADR-0052 §5 /
-/// ADR-0049 §7). Reads `./steins.toml` if present (a missing file is the safe
-/// default — assertions off, `warning-handler = "abort"`). Returns
-/// `(zend_assertions, warning_handler_abort)` plus human warnings for a parse error
-/// or an unrecognized value. An unknown key in `[runtime]` is a parse error (see
-/// [`RuntimeConfig`]) surfaced as a warning, leaving defaults in force.
-fn load_runtime() -> (bool, bool, Vec<String>) {
-    let mut warnings = Vec::new();
+/// Read and parse `./steins.toml` once for `check`/`doctor` (ADR-0050 §7 /
+/// ADR-0052 §5 N2). Returns:
+///
+/// * `Ok(None)` — no `steins.toml` (the built-in defaults govern);
+/// * `Ok(Some(config))` — the parsed config;
+/// * `Err(message)` — the file exists but does not parse. A malformed file,
+///   INCLUDING an unknown key in `[runtime]` (`RuntimeConfig` uses
+///   `deny_unknown_fields`), is a hard config error the caller maps to exit 2 —
+///   never a warn-and-proceed. This is the one place `steins.toml` leniency is the
+///   wrong default: a silently-ignored `zend-asertions` typo would leave the safe
+///   runtime default in force while the user believed they had overridden it.
+///
+/// Transform's `--config` path keeps its own lenient loaders (`load_vouches` /
+/// `load_partitions`, ADR-0046 §2): a vouch typo must not stop a transform run.
+fn read_steins_config() -> Result<Option<SteinsConfig>, String> {
     let path = PathBuf::from("steins.toml");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return (false, true, warnings);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
     };
-    let config: SteinsConfig = match toml::from_str(&text) {
-        Ok(c) => c,
-        Err(e) => {
-            warnings.push(format!("{}: parse error ({e}); proceeding with runtime defaults", path.display()));
-            return (false, true, warnings);
-        }
-    };
-    let runtime = config.runtime.unwrap_or_default();
+    toml::from_str::<SteinsConfig>(&text)
+        .map(Some)
+        .map_err(|e| format!("{}: parse error ({e})", path.display()))
+}
+
+/// Derive the `[runtime]` pseudo-constants (ADR-0052 §5 / ADR-0049 §7) from the
+/// already-parsed config. Returns `(zend_assertions, warning_handler_abort)` plus
+/// human warnings for an unrecognized *value* on a known key (a parse error / unknown
+/// key already exited 2 in [`read_steins_config`]). Absence is the safe default —
+/// assertions off, `warning-handler = "abort"`.
+fn runtime_from_config(runtime: Option<RuntimeConfig>) -> (bool, bool, Vec<String>) {
+    let mut warnings = Vec::new();
+    let runtime = runtime.unwrap_or_default();
     let zend_assertions = match runtime.zend_assertions.as_deref() {
         None | Some("disabled") => false,
         Some("enabled") => true,
@@ -750,23 +789,17 @@ fn load_runtime() -> (bool, bool, Vec<String>) {
     (zend_assertions, warning_handler_abort, warnings)
 }
 
-/// Load the profile selection and user-profile table from `steins.toml`
-/// (ADR-0050 §5). Reads `./steins.toml` if present. Returns the `[check] profile`
-/// selection (the repo default; the `--profile` flag beats it) and the resolved
-/// [`profile::ProfileConfigs`] table. A missing/unparseable file is no config —
-/// the built-in `default` profile then governs (a parse error is already surfaced
-/// by [`load_runtime`], so we do not double-warn here).
-fn load_profiles() -> (Option<String>, profile::ProfileConfigs) {
-    let path = PathBuf::from("steins.toml");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return (None, profile::ProfileConfigs::default());
-    };
-    let Ok(config) = toml::from_str::<SteinsConfig>(&text) else {
-        return (None, profile::ProfileConfigs::default());
-    };
-    let selected = config.check.and_then(|c| c.profile);
-    let map = config
-        .profile
+/// Derive the profile selection and user-profile table from the already-parsed
+/// config (ADR-0050 §5). Returns the `[check] profile` selection (the repo default;
+/// the `--profile` flag beats it) and the resolved [`profile::ProfileConfigs`] table.
+/// The parse itself already happened in [`read_steins_config`] (a parse error exited
+/// 2 there), so this is a pure decomposition.
+fn profiles_from_config(
+    check: Option<CheckConfig>,
+    profile: Option<std::collections::BTreeMap<String, ProfileEntryConfig>>,
+) -> (Option<String>, profile::ProfileConfigs) {
+    let selected = check.and_then(|c| c.profile);
+    let map = profile
         .unwrap_or_default()
         .into_iter()
         .map(|(name, e)| {

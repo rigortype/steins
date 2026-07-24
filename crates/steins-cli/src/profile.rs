@@ -279,6 +279,18 @@ impl Surface {
         }
     }
 
+    /// The named layers on this surface, sorted (ADR-0054 §9: the doctor's
+    /// "surface described" line). Mechanics is always-on regardless of membership
+    /// (§1); the built-in surfaces carry it in the set explicitly, so this is a
+    /// faithful summary. The debug lane is display-only and never a surface layer
+    /// (§8 capture/display split), so it does not appear here.
+    #[must_use]
+    pub fn layers_on(&self) -> Vec<&'static str> {
+        let mut v: Vec<&'static str> = self.layers.iter().map(|l| l.as_str()).collect();
+        v.sort_unstable();
+        v
+    }
+
     /// The resolved capture id-set (§8): every registered id this surface admits,
     /// facet-agnostic, sorted. Written into the baseline header by `--set-baseline`.
     #[must_use]

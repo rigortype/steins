@@ -1035,6 +1035,8 @@ dependencies = [
  "steins-db",
  "steins-edit",
  "steins-infer",
+ "steins-phpdoc",
+ "steins-sidecar",
  "steins-syntax",
  "toml",
 ]

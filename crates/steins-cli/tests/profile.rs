@@ -154,6 +154,41 @@ fn user_profile_facet_token_is_rejected() {
     assert!(r.stderr.contains("throw.undeclared@direct"), "got:\n{}", r.stderr);
 }
 
+// --------------------------------------------------- [runtime] config errors ---
+
+#[test]
+fn unknown_runtime_key_is_a_hard_config_error() {
+    // ADR-0050 §7 / ADR-0052 §5 N2: `[runtime]` uses `deny_unknown_fields`, so a
+    // misspelled key fails the parse — a HARD config error (exit 2), not a
+    // warn-and-proceed. The typo can never silently leave the safe default in force.
+    let dir = workdir("runtime-typo");
+    write(&dir, "a.php", THROW_ONLY);
+    write(&dir, "steins.toml", "[runtime]\nzend-asertions = \"enabled\"\n");
+    let r = run_in(&dir, &["check", "--no-php", "a.php"]);
+    assert_eq!(r.code, 2, "unknown [runtime] key → exit 2; stderr:\n{}", r.stderr);
+    assert!(r.stderr.contains("parse error"), "names the parse failure, got:\n{}", r.stderr);
+}
+
+#[test]
+fn valid_runtime_section_proceeds() {
+    // The control: a well-formed `[runtime]` parses and the run proceeds normally.
+    let dir = workdir("runtime-ok");
+    write(&dir, "a.php", THROW_ONLY);
+    write(&dir, "steins.toml", "[runtime]\nzend-assertions = \"enabled\"\n");
+    let r = run_in(&dir, &["check", "--no-php", "a.php"]);
+    assert_eq!(r.code, 0, "valid runtime + throw-only default surface → exit 0; stdout:\n{}", r.stdout);
+}
+
+#[test]
+fn malformed_toml_is_a_hard_config_error() {
+    // Any unparseable steins.toml the CLI reads is exit 2 (not silently ignored).
+    let dir = workdir("toml-garbage");
+    write(&dir, "a.php", THROW_ONLY);
+    write(&dir, "steins.toml", "this is not = valid = toml [[[\n");
+    let r = run_in(&dir, &["check", "--no-php", "a.php"]);
+    assert_eq!(r.code, 2, "malformed steins.toml → exit 2; stderr:\n{}", r.stderr);
+}
+
 // -------------------------------------------------------------- exit levels ---
 
 #[test]

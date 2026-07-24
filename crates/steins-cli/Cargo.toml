@@ -14,6 +14,8 @@ steins-db = { path = "../steins-db" }
 steins-infer = { path = "../steins-infer" }
 steins-syntax = { path = "../steins-syntax" }
 steins-edit = { path = "../steins-edit" }
+steins-phpdoc = { path = "../steins-phpdoc" }
+steins-sidecar = { path = "../steins-sidecar" }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

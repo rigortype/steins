@@ -36,9 +36,9 @@ Two deliberate non-contracts:
   a suppression key (ADR-0023). Nothing may key on wording.
 - **The `[runtime]` config section rejects unknown keys.** Ignoring a misspelled
   `zend-asertions` would leave the safe default in force while the user believed
-  otherwise, so a typo there fails the parse and is reported loudly (the run
-  proceeds on the safe runtime defaults) — the one place where silent leniency
-  is the wrong default.
+  otherwise, so a typo there is a **hard config error: the run aborts with exit 2**
+  (like any other unparseable `steins.toml`) rather than proceeding on defaults —
+  the one place where silent leniency is the wrong default.
 
 ## Versioning posture
 

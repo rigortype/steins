@@ -410,8 +410,9 @@ pub trait Folder {
 /// The runtime-redefinition extensions that void the absence family (ADR-0049 A9):
 /// with any of them loaded, a defined class can gain a method and a missing name
 /// can be minted at runtime, so no absence claim holds. Matched case-insensitively
-/// against the sidecar's loaded-extension list.
-const MONKEY_PATCH_EXTENSIONS: &[&str] = &["uopz", "runkit7", "runkit", "componere"];
+/// against the sidecar's loaded-extension list. Public so `doctor` (ADR-0054 §9.1)
+/// can name a loaded monkey-patch extension from the same single source of truth.
+pub const MONKEY_PATCH_EXTENSIONS: &[&str] = &["uopz", "runkit7", "runkit", "componere"];
 
 /// The sound-subset folder: never folds anything. This is what the salsa
 /// [`diagnostics`] query uses, keeping that query deterministic.

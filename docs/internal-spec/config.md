@@ -72,12 +72,16 @@ Boot-truth pseudo-constants the checker cannot observe from source.
 **This section uses `deny_unknown_fields`.** A misspelled key fails the parse,
 deliberately: a silently-ignored `zend-asertions` typo would leave the safe
 default in force while the user believed otherwise. What the binary does with
-that failure: the parse error is reported loudly and the run proceeds on the
-**safe runtime defaults** — the typo can never silently masquerade as the
-user's intended override, but it does not abort the run. An unrecognized
-*value* on a known key warns and keeps the safe default the same way. Reserved
-keys for future pseudo-constants (`include-path`, `sapi`) join here as they
-land.
+that failure: it is a **hard config error — the run aborts with exit 2**
+(ADR-0050 §7 / ADR-0052 §5 N2), the same class as any other unparseable
+`steins.toml`. Proceeding on defaults was rejected: a typo that leaves the safe
+default silently in force while the user believes they overrode it is exactly the
+failure `deny_unknown_fields` exists to prevent, so it must stop the run, not
+warn past it. An unrecognized *value* on a known key (e.g.
+`zend-assertions = "yes"`) still parses, so it warns and keeps the safe default.
+Reserved keys for future pseudo-constants (`include-path`, `sapi`) join here as
+they land. `doctor` treats the same unparseable-config condition as a
+configuration contradiction (exit 1, ADR-0054 §10).
 
 ### `[transform.vouch]`
 
