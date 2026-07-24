@@ -92,3 +92,5 @@ list in one place.
 | ADR-0054 | [CI surface: four renderings of one surface, and the doctor posture report](0054-ci-surface.md) |
 | ADR-0055 | [Class-level purity defaults, the `Impure` top envelope, and the mutation label family](0055-class-purity-impure-top-mutation-effects.md) |
 | ADR-0056 | [Builtin return facts: reflected envelope, curated refinement within it](0056-builtin-return-facts.md) |
+| ADR-0057 | [Returned-allocation heap transfer: return-object summaries, rebound by copy](0057-returned-allocation-heap-transfer.md) |
+| ADR-0058 | [Runtime-enforced invariant promotion: enforcement outranks annotation](0058-runtime-invariant-promotion.md) |

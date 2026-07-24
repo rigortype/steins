@@ -171,7 +171,11 @@ ADR-0031 machinery (`CondExpr` → `eval_cond` verdicts → `Refine` collection
      true branch, `-if-false` on the false branch, `Always` on both plus
      statement position (as landed); negated types route through point 2's
      subtraction.
-   - **`assert($expr)`**: **Asserted by default** — verified PHP
+   - **`assert($expr)`**: **Asserted by default** *(amended 2026-07-25 —
+     owner ruling: assert() reads as a throw-guard, Verified
+     unconditionally, and the `[runtime] zend-assertions` pseudo-constant
+     is abolished; see the second amendment below — this bullet is kept
+     for the record of the original reasoning)* — verified PHP
      semantics: under `zend.assertions=-1` (production default) the
      expression is *never evaluated*, so the fall-through carries no
      runtime guarantee; trusting it would forge proofs in exactly the
@@ -450,3 +454,59 @@ points are normative.
    point 5 exists to close. ADR-0049 §10's stage list inherits the
    prerequisite by reference (its amendment's sequencing point states
    the same order from the other side).
+
+## Amendment (2026-07-25): assert() reads as a throw-guard
+
+Source: owner ruling (2026-07-25), verbatim intent: **`assert()` is
+treated as always equivalent to `if (!cond) throw` — Verified,
+unconditionally. Steins does not consult `zend.assertions`** ("考慮
+しません" — the setting is not read at all, not merely defaulted). The
+operator who runs production with assertions compiled out or disabled
+accepts that risk at the runtime level; static analysis reads
+`assert($expr)` at face value as a type assertion, exactly as it reads
+an unconditional throw-guard.
+
+This **reverses point 5's assert() bullet**:
+
+1. **`assert($expr)` narrows the fall-through env at the `Verified`
+   stratum, always.** The lowering is unchanged (the argument is a
+   `CondExpr`; `then_refinements` apply on the fall-through); only the
+   stratum assignment moves. Assert-derived facts now premise
+   proof-layer findings under the ordinary all-Verified consumption
+   rule — the derivation clause (first amendment) applies to them
+   unchanged, as it does to any Verified input.
+2. **The `[runtime] zend-assertions` pseudo-constant is ABOLISHED.**
+   Not demoted to an optional override — the key is removed from the
+   `[runtime]` vocabulary; a config carrying it is an unknown-key
+   config error like any other. The pseudo-constant *pattern*
+   (ADR-0037 §2 — declare the boot truth, don't guess it) is untouched
+   and remains the shape for `warning-handler`, `sapi`,
+   `pdo-stringify-fetches`, and future boot truths; what the ruling
+   decides is that assert() semantics are not a boot truth Steins
+   models, but part of the source language's assertion vocabulary.
+3. **The honest epistemic note, on the record**: for assert-derived
+   facts the proof layer's claim is "proven under the assert-enabled
+   reading". Under `zend.assertions=-1` the expression is never
+   evaluated and the fall-through carries no runtime guarantee — the
+   original bullet's observation stays true as a matter of PHP
+   semantics. The ruling assigns that residual risk to the operator
+   (the same party who chose to disable the runtime check), not to the
+   analysis. ADR-0002's zero-FP identity is read accordingly: a
+   finding premised on an assert-derived fact is not a false positive
+   when the assertion would have caught the value; it is the runtime
+   check the operator turned off, reported statically.
+4. **Boundary: the ruling covers the `assert()` CONSTRUCT only.** The
+   `@phpstan-assert` / `-if-true` / `-if-false` tag family stays
+   **Asserted** — a docblock is a claim (ADR-0037), and a lying tag
+   must still be unable to forge a proof. The Verified path for
+   annotation-free assertion helpers is descent-proven postcondition
+   extraction (ADR-0058), not tag trust.
+
+**Status: decided, not yet implemented.** The landed code still gates
+the stratum on `Cx::zend_assertions` (default false ⇒ Asserted) and
+still accepts the `[runtime]` key; the follow-up slice deletes the
+flag, the config key, and the plumbing, and re-pins the assert
+fixtures at Verified (the ADR-0058 slice plan carries it as I0). Until
+that slice lands, the type specification's description of today's
+behavior remains the Asserted-by-default one — spec readers should
+treat this amendment as intent, per the README's ADR-vs-spec rule.
