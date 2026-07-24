@@ -429,16 +429,24 @@ fn object_scalar_union_is_one_shape() {
 }
 
 #[test]
-fn self_static_parent_stay_unlowered_intersection_lowers() {
-    // `self`/`static`/`parent` remain silent (None, ADR-0043 — LSB not v1); an
-    // object intersection (`A&B`) lowers to a single conjunctive `InstanceInter`
-    // member (ADR-0043 — the deferred conjunctive member, now built).
+fn self_static_return_lower_parent_param_unlowered_intersection_lowers() {
+    // Return-position `self`/`static` lower to a synthesized single-member
+    // `Instance` of the enclosing class bound (ADR-0043 amendment — the LSB
+    // minimum-bound check); `parent`/`self`/`static` in *parameter* position
+    // stay unlowered (out of the amendment's return-only scope). An object
+    // intersection (`A&B`) lowers to a single conjunctive `InstanceInter` member.
     let src = "<?php\nnamespace App;\nclass C {\n  function a(): self { return $this; }\n  function b(): static { return $this; }\n  function c(parent $p): void {}\n  function d(A&B $x): void {}\n}\n";
     let tree = SourceTree::parse(src);
     let c = tree.classes().iter().find(|d| d.name == "C").unwrap();
     let m = |name: &str| c.methods.iter().find(|m| m.name == name).unwrap();
-    assert!(m("a").ret.is_none(), "self return stays None");
-    assert!(m("b").ret.is_none(), "static return stays None");
+    let enclosing =
+        vec![TypeMember::Instance { fqn: "app\\c".into(), display: "App\\C".into() }];
+    let a = m("a").ret.as_ref().expect("self return lowers to the enclosing-class bound");
+    assert_eq!(a.members, enclosing, "self bound = enclosing class App\\C");
+    assert!(!a.nullable);
+    let b = m("b").ret.as_ref().expect("static return lowers to the enclosing-class bound");
+    assert_eq!(b.members, enclosing, "static bound = enclosing class App\\C");
+    assert!(!b.nullable);
     assert!(m("c").params[0].ty.is_none(), "parent param stays None");
     let d = m("d").params[0].ty.as_ref().expect("A&B lowers to an intersection member");
     assert_eq!(

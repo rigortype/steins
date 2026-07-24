@@ -95,6 +95,25 @@ fn method_return_honesty_refuses_inheritance() {
     assert_eq!(only_reason(&report), REASON_METHOD_INHERITANCE);
 }
 
+/// ADR-0043 amendment pin: the LSB return-position lowering synthesizes a native
+/// `Instance` return for a `: static`/`: self`/`: parent` method, but the phpdoc
+/// honesty transform must stay **unmoved** on such methods. `decide_return`'s
+/// `has_instance` filter skips `Instance`-bearing native rets before the native
+/// guard, so the transform sees exactly the pre-amendment `None` behavior — this
+/// `: static` method (native ret now `Instance` of `C`) still widens its lying
+/// `@return int` to the proven `int|'zero'` union, identical to the
+/// no-native-type case above. Without the filter the synthesized object ret would
+/// interfere with the scalar-literal widening.
+#[test]
+fn static_return_method_honesty_unmoved() {
+    let c = "<?php\nfinal class C {\n/** @return int */\npublic function m($flag): static {\nif ($flag) { return 1; }\nreturn 'zero';\n}\n}\n";
+    let report = plan(&[("c.php", c)]);
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
+    let out = report.plan.apply_file("c.php", c);
+    assert!(out.contains("int") && out.contains("'zero'"), "widened return:\n{out}");
+}
+
 #[test]
 fn honest_method_is_not_enumerated() {
     // No lie: the `@param` admits every observed literal — nothing to repair.

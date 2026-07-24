@@ -571,6 +571,36 @@ pub enum Visibility {
     Private,
 }
 
+/// The late-static-binding return keyword a method declares in return position:
+/// a bare `self` / `static` / `parent` (ADR-0043 amendment). `lower_method` sees
+/// the hint but has no class context, so it records only the keyword *kind* and
+/// nullability here; the [`SyntaxTree`]-build FQN-stamping pass — which owns the
+/// enclosing class's resolved name — resolves the kind to the actual bound and
+/// synthesizes [`MethodDecl::ret`]. Any other return shape (a union containing
+/// `static`, a plain class name, a scalar) leaves this `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RetBoundKind {
+    /// `: self` — bound is the enclosing class directly (not late-bound).
+    SelfKw,
+    /// `: static` — bound is the enclosing class as the *minimum* late-bound
+    /// class (the minimum-bound lemma: every late-bound `T` is-a the enclosing
+    /// class, so the enclosing class is a necessary bound).
+    Static,
+    /// `: parent` — bound is the resolved `extends` parent.
+    Parent,
+}
+
+/// The recorded return-position LSB keyword shape (kind + nullability) of a
+/// method, before the enclosing-class context is available to resolve it to a
+/// bound (ADR-0043 amendment §2). See [`RetBoundKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RetBoundKeyword {
+    pub kind: RetBoundKind,
+    /// `true` when the hint was `?self` / `?static` / `?parent` (the nullable
+    /// bound also accepts `null`, so `return null` stays silent).
+    pub nullable: bool,
+}
+
 /// A user-defined method declaration — the class-world analogue of
 /// [`FunctionDecl`], carrying the same param/pure-envelope/effect-origin data
 /// plus the modifiers method resolution needs (ADR-0001 sound dispatch).
@@ -581,8 +611,17 @@ pub struct MethodDecl {
     pub name: String,
     pub params: Vec<Param>,
     /// The native scalar/union return type, or `None` when untyped / non-scalar
-    /// / `void` / `never` (the return-type check skips those; zero-FP).
+    /// / `void` / `never` (the return-type check skips those; zero-FP). For a
+    /// bare/nullable `self`/`static`/`parent` return this is synthesized in the
+    /// FQN-stamping pass (ADR-0043 amendment) to a single-member `Instance` of
+    /// the resolved bound; see [`MethodDecl::ret_bound_keyword`].
     pub ret: Option<NativeType>,
+    /// The recorded LSB return-keyword shape (`self`/`static`/`parent`,
+    /// nullable-aware), when the return hint was one (ADR-0043 amendment). The
+    /// FQN-stamping pass consumes it to synthesize [`Self::ret`] once the
+    /// enclosing class's resolved name (and, for `parent`, the resolved parent)
+    /// is known; `None` for every other return shape.
+    pub ret_bound_keyword: Option<RetBoundKeyword>,
     /// The span of the method name identifier (for diagnostic positions).
     pub span: Span,
     /// The recognized effect envelope, if declared (see [`FunctionDecl`]).
@@ -1729,7 +1768,40 @@ impl SourceTree {
             f.fqn = fqn_of(ctx_of(&contexts, &regions, f.span.start), &f.name);
         }
         for c in &mut classes {
-            c.fqn = fqn_of(ctx_of(&contexts, &regions, c.span.start), &c.name);
+            let ctx = ctx_of(&contexts, &regions, c.span.start);
+            c.fqn = fqn_of(ctx, &c.name);
+            // ADR-0043 amendment: resolve any recorded `self`/`static`/`parent`
+            // return keyword to its bound and synthesize the method's `ret` as a
+            // single-member `Instance` of that bound. `self`/`static` bind to the
+            // enclosing class (the minimum-bound lemma); `parent` binds to the
+            // resolved `extends` parent, skipping when the class has none. The
+            // source-cased display renders the bound class in the diagnostic
+            // ("should return BrokenBuilder"); the lowercased FQN is the is-a key.
+            let self_display = if ctx.namespace.is_empty() {
+                c.name.clone()
+            } else {
+                format!("{}\\{}", ctx.namespace, c.name)
+            };
+            let self_fqn = c.fqn.clone();
+            let parent_bound = c.parent.as_ref().map(|p| {
+                let display = resolve_class_ref(ctx_of(&contexts, &regions, p.offset), p);
+                (display.to_ascii_lowercase(), display)
+            });
+            for m in &mut c.methods {
+                let Some(kw) = m.ret_bound_keyword else { continue };
+                let bound = match kw.kind {
+                    RetBoundKind::SelfKw | RetBoundKind::Static => {
+                        Some((self_fqn.clone(), self_display.clone()))
+                    }
+                    RetBoundKind::Parent => parent_bound.clone(),
+                };
+                if let Some((fqn, display)) = bound {
+                    m.ret = Some(NativeType {
+                        members: vec![TypeMember::Instance { fqn, display }],
+                        nullable: kw.nullable,
+                    });
+                }
+            }
         }
 
         let parse_errors = program
@@ -2491,6 +2563,7 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
         name,
         params: lower_params(&m.parameter_list, rc),
         ret: m.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
+        ret_bound_keyword: m.return_type_hint.as_ref().and_then(|r| ret_bound_keyword(&r.hint)),
         span: to_span(m.name.span()),
         effect_envelope: attrs_effect_envelope(&m.attribute_lists, aliases),
         effect_origins,
@@ -2502,6 +2575,27 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
         is_constructor,
         docblock: docs.preceding(to_span(m.span()).start),
         docblock_span: docs.preceding_span(to_span(m.span()).start),
+    }
+}
+
+/// Recognize a bare `self`/`static`/`parent` return hint — or the `?`-nullable of
+/// one — and record its keyword shape (ADR-0043 amendment §2). Anything else
+/// (a union containing the keyword, a plain class name, a scalar, `void`) returns
+/// `None`, keeping the pre-amendment silence. This runs at method lowering, which
+/// has no class context; the FQN-stamping pass resolves the kind to a bound.
+fn ret_bound_keyword(hint: &Hint<'_>) -> Option<RetBoundKeyword> {
+    match hint {
+        Hint::Static(_) => Some(RetBoundKeyword { kind: RetBoundKind::Static, nullable: false }),
+        Hint::Self_(_) => Some(RetBoundKeyword { kind: RetBoundKind::SelfKw, nullable: false }),
+        Hint::Parent(_) => Some(RetBoundKeyword { kind: RetBoundKind::Parent, nullable: false }),
+        // `?self` / `?static` / `?parent`: the nullable of a bare keyword. Any
+        // other nullable inner shape falls through to `None` via the inner call.
+        Hint::Nullable(n) => {
+            let mut kw = ret_bound_keyword(n.hint)?;
+            kw.nullable = true;
+            Some(kw)
+        }
+        _ => None,
     }
 }
 
