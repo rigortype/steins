@@ -24,6 +24,8 @@
 //! flow to [`TransformReport::vouched_exemptions`], downgrading the completeness
 //! claim to "conditional on N user-vouched dynamic-code exemptions" (ADR-0037: a
 //! user assertion is a trust stratum, and the proof says so).
+//!
+//! [`TransformReport::vouched_exemptions`]: crate::TransformReport::vouched_exemptions
 
 use std::collections::HashSet;
 

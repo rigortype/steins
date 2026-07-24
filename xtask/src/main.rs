@@ -1,12 +1,15 @@
 //! Steins dev tooling (the cargo-xtask pattern; ADR-0013/0021).
 //!
-//! `cargo xtask <command>`:
-//!   corpus-sync [--update]   materialize the pinned FP-gate corpus into `corpus/`
+//! ```text
+//! cargo xtask <command>
+//!
+//!   corpus-sync [--update]   materialize the pinned FP-gate corpus into corpus/
 //!   fp-gate                  run the proof-layer pipeline over the corpus (gate)
 //!   freq                     builtin-call frequency, written to docs/notes/
 //!   gen-catalog              regenerate the builtin hierarchy table from mining TOML
 //!   nsrt [DIR]               assertType harness (oracle idea B) over phpstan-src nsrt
 //!   phpdoc-oracle [--check]  diff steins-phpdoc against the real phpstan/phpdoc-parser
+//! ```
 //!
 //! It links the analysis crates directly (never shells out to the `steins`
 //! binary) so it reads parse errors and call data straight off `SourceTree`.

@@ -204,7 +204,8 @@ impl Sidecar {
     }
 
     /// Override the per-request timeout (mainly for tests exercising the timeout
-    /// path). Default is [`DEFAULT_TIMEOUT`].
+    /// path). The default is 2 seconds (ADR-0024): generous for a local `php`
+    /// call, and anything slower is treated as misbehavior and widened.
     pub fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
     }

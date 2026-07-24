@@ -121,52 +121,20 @@ jobs:
         with:
           key: docs
 
-      # A RATCHET, not a clean gate — the same shape as the diagnostic baseline
-      # (ADR-0022): accept the debt that exists, refuse any more of it.
+      # A CLEAN gate: one broken intra-doc link fails the run.
       #
-      # The tree currently has 18 broken intra-doc links (unresolved paths and
-      # public docs pointing at private items) across 12 files. Gating on
-      # `-D warnings` outright would fail every PR from day one, so instead the
-      # count is capped: new rot fails, and fixing rot is expected to LOWER the
-      # cap in the same commit. A hard compile error in a doc build always fails
-      # regardless of the count — that is not debt, that is breakage.
-      #
-      # Retire this job in favour of a plain `-D warnings` run when the cap
-      # reaches 0.
-      - name: Rustdoc link-rot ratchet
-        shell: bash
+      # This was a ratchet (the ADR-0022 baseline shape: accept the debt that
+      # exists, refuse any more of it) over 18 broken links across 12 files —
+      # unresolved paths, and public docs pointing at private items. The cap was
+      # lowered as links were fixed, reached 0, and the ratchet retired itself
+      # here as its comment said it should. Do not reintroduce a cap: fix the
+      # link, or reword the reference to plain backticks when the target is
+      # genuinely a private implementation detail or lives in a crate this one
+      # does not depend on.
+      - name: Rustdoc
         env:
           RUSTDOCFLAGS: -D warnings
-          # Lower this as links are fixed. Never raise it.
-          DOC_LINK_CAP: "18"
-        run: |
-          set -uo pipefail
-          cargo doc --no-deps --workspace --locked >doc.log 2>&1 && rc=0 || rc=$?
-          cat doc.log
-
-          # Compile errors carry an `error[EXXXX]` code; doc-link lints do not.
-          # A real build failure is never absorbed by the cap.
-          if grep -qE '^error\[E' doc.log; then
-            echo "::error::rustdoc failed to build the docs (not a link problem) — see the log above"
-            exit 1
-          fi
-
-          n=$(grep -cE '^error: (unresolved link|public documentation for)' doc.log || true)
-          echo "broken intra-doc links: $n (cap ${DOC_LINK_CAP})"
-
-          if [ "$n" -gt "${DOC_LINK_CAP}" ]; then
-            echo "::error::broken intra-doc links rose to $n (cap ${DOC_LINK_CAP}) — fix the new link(s); the cap only ever goes down"
-            exit 1
-          fi
-          if [ "$n" -lt "${DOC_LINK_CAP}" ]; then
-            echo "::notice::broken intra-doc links fell to $n — lower DOC_LINK_CAP in .github/workflows/ci.yml to $n to hold the gain"
-          fi
-          # Anything other than the doc-link lints failing the run is a genuine
-          # failure: re-raise it.
-          if [ "$rc" -ne 0 ] && [ "$n" -eq 0 ]; then
-            echo "::error::cargo doc failed with no broken links recognised — see the log above"
-            exit 1
-          fi
+        run: cargo doc --no-deps --workspace --locked
 
   licenses:
     name: licenses

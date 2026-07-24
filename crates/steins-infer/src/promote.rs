@@ -4,7 +4,7 @@
 //!
 //! This is the narrow seam the transform engine (`steins-edit`) reaches into: it
 //! reuses the inference engine's own name resolution (`Cx::resolve_function`,
-//! the project [`Index`]) rather than forking it, and returns plain data. The
+//! the project `Index`) rather than forking it, and returns plain data. The
 //! transform crate owns candidate enumeration, native-type mapping, the
 //! acceptance judgment (`steins-contract::admits_*`), refusal assembly, and the
 //! edit mechanics — none of which need the inference internals.

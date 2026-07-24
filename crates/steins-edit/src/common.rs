@@ -346,7 +346,7 @@ pub fn check_caller_enumerability(
 /// exists (`type-not-renderable`).
 ///
 /// The set is normalized by [`summarize_vals`] into an arm list; the docblock
-/// armor ([`docblock_widen_unsafe_literals`]) widens any literal group that cannot
+/// armor (`docblock_widen_unsafe_literals`) widens any literal group that cannot
 /// be embedded in a `/** … */` block (`*/` or a raw newline) to the tightest
 /// predicate keyword; then the shared [`spell_arms`] spells the (now docblock-safe)
 /// arms — member ordering, the CAP-bounded literal-union decision, the keyword

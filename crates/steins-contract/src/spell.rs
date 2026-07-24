@@ -10,7 +10,7 @@
 //! * the `annotate` / dump emitters in `steins-infer` (which cannot reach the
 //!   docblock renderer in `steins-edit` — the dependency runs
 //!   `steins-edit → steins-infer`, ADR-0053 §7); and
-//! * `steins-edit`'s docblock renderer ([`render_value_domain`]), which re-layers
+//! * `steins-edit`'s docblock renderer (`render_value_domain`), which re-layers
 //!   its docblock **armor** on top: the `*/`/raw-newline literal-safety widening
 //!   that is meaningless in terminal output but corrupts a `/** … */` block. That
 //!   armor pre-widens the arm list, then delegates the member assembly, the CAP-

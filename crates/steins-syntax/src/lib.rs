@@ -347,7 +347,7 @@ pub struct Param {
 /// subtree (ADR-0005 effect envelopes). Syntax only reports *where* a primitive
 /// effect could arise; the catalog/inference layer decides which are proven
 /// findings (uncatalogued builtins widen to silence, same-file user calls become
-/// propagation edges — [`steins_catalog::effect_labels`] and the effects pass).
+/// propagation edges — `steins_catalog::effect_labels` and the effects pass).
 ///
 /// The scan does **not** descend into nested function/closure/class bodies —
 /// those are separate scopes (closures are deferred in this slice). It *does*
@@ -510,7 +510,7 @@ pub struct ThrowOrigin {
 /// and `#[\Steins\Effect(...)]` decorate the same declaration the two are
 /// contradictory (`Pure` = empty upper bound, the tighter of the two); Pure wins
 /// and `labels` is empty, with no diagnostic about the contradiction in this
-/// slice (see [`attrs_effect_envelope`]).
+/// slice (see `attrs_effect_envelope`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EffectEnvelope {
     /// The declared effect labels (ADR-0018 dot-paths). Empty = `Pure`.
@@ -538,7 +538,7 @@ pub struct FunctionDecl {
     /// The recognized `#[\Steins\Pure]` / `#[\Steins\Effect(...)]` envelope on
     /// this function, if present (ADR-0005/0006/0018). `Some` opts the function
     /// into always-on envelope checking. Recognition is conservative — see
-    /// [`attrs_effect_envelope`].
+    /// `attrs_effect_envelope`.
     pub effect_envelope: Option<EffectEnvelope>,
     /// Every structural effect-origin candidate in the body subtree, in source
     /// order (see [`EffectOrigin`]). Computed for *all* functions, not just
@@ -557,7 +557,7 @@ pub struct FunctionDecl {
     /// The **file byte span** of the associated docblock (the same trivium whose
     /// text is [`Self::docblock`]), when one is adopted. `docblock` text is the
     /// exact substring `[span.start, span.end)` of the source, so a docblock-
-    /// relative offset (e.g. a [`steins_phpdoc`] tag span) maps into the file by
+    /// relative offset (e.g. a `steins_phpdoc` tag span) maps into the file by
     /// adding `span.start`. Retained for the transform engine (ADR-0034), which
     /// deletes a promoted `@param` tag's line in the file.
     pub docblock_span: Option<Span>,
@@ -583,7 +583,7 @@ pub enum Visibility {
 /// The late-static-binding return keyword a method declares in return position:
 /// a bare `self` / `static` / `parent` (ADR-0043 amendment). `lower_method` sees
 /// the hint but has no class context, so it records only the keyword *kind* and
-/// nullability here; the [`SyntaxTree`]-build FQN-stamping pass — which owns the
+/// nullability here; the [`SourceTree`]-build FQN-stamping pass — which owns the
 /// enclosing class's resolved name — resolves the kind to the actual bound and
 /// synthesizes [`MethodDecl::ret`]. Any other return shape (a union containing
 /// `static`, a plain class name, a scalar) leaves this `None`.
@@ -877,7 +877,7 @@ pub enum ArgValue {
     /// A closure value (ADR-0033): a `function (...) use (...) {...}` / arrow
     /// `fn(...) => …` expression lowered to its own [`Scope`], or a first-class
     /// callable (`strtolower(...)`) naming a function target. Carried in the trace
-    /// so an assignment `$f = fn(...) => …;` records a [`Fact`]-carrying closure
+    /// so an assignment `$f = fn(...) => …;` records a `Fact`-carrying closure
     /// value (in `steins-infer`), and a later `$f(...)` resolves by binding descent
     /// into the closure's scope. Not a scalar — never flows into a scalar check.
     Closure(ClosureRef),
@@ -922,8 +922,8 @@ pub enum ArgValue {
     /// An array/offset read `$base[$key]` in **rvalue** position (ADR-0049 §7 / S3).
     /// `base` and `key` are the lowered sub-expressions (each may itself be any
     /// [`ArgValue`], commonly a [`Self::Var`] base and a literal/`Var` key). This is
-    /// never a *proven* value ([`val_of`] yields `None`, [`Self::is_literal`] is
-    /// `false`): the walk resolves the base to a container [`Fact`] and the key to a
+    /// never a *proven* value (`val_of` yields `None`, [`Self::is_literal`] is
+    /// `false`): the walk resolves the base to a container `Fact` and the key to a
     /// proven value, then judges `offset.missing` / `offset.on-unsupported` **only in
     /// the whitelisted read contexts** (ADR-0049 A7: plain assignment-RHS and return
     /// operands in v1). It is a *silence carrier* everywhere else — an operand of `??`

@@ -114,7 +114,7 @@ impl IsaOracle for ReflexiveFloor {
 /// abstract fact that denotes it, and `a` is queried through
 /// [`admits_val`] / [`admits_fact`]. Object arms (`Class`, `object`) have no
 /// scalar-fact denotation and are judged by the reflexive is-a floor
-/// ([`subsumes_class`]); everything else the acceptance relation cannot decide
+/// (`subsumes_class`); everything else the acceptance relation cannot decide
 /// falls to the honest `Maybe`.
 #[must_use]
 pub fn subsumes(a: &ContractTy, b: &ContractTy) -> Certainty {

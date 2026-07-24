@@ -7,7 +7,7 @@
 //! production class/interface/enum declarations mined from php-src
 //! `6bc7c26cf67a9480b5ef9d6191aebe87fa931183` and cross-checked against PHP
 //! 8.5.8. It records **direct** edges (`extends` + `implements`); the is-a
-//! oracle computes the transitive closure by walking [`builtin_class_supers`]
+//! oracle computes the transitive closure by walking `builtin_class_supers`
 //! ([the crosscheck](docs/research/phpsrc-mining/crosscheck.txt) verified that
 //! closure-of-direct-edges == runtime `class_implements` for a sample).
 //!

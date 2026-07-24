@@ -63,7 +63,7 @@ pub fn php_str_is_falsy(s: &str) -> bool {
     s.is_empty() || s == "0"
 }
 
-/// PHP falsiness of a scalar value, expressed over the domain's [`Val`].
+/// PHP falsiness of a scalar value, expressed over the domain's [`Val`](crate::Val).
 ///
 /// Falsy: `false`, `0`, `0.0` (and `-0.0`), `""`, `"0"`, `null`, `[]`.
 #[must_use]

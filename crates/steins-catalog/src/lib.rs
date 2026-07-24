@@ -354,8 +354,8 @@ pub fn builtin_exception_parent(name: &str) -> Option<&'static str> {
 ///
 /// The data is the **single source of truth** for the builtin hierarchy: the 352
 /// production classes + interfaces mined from php-src (pin
-/// `6bc7c26cf6…`, cross-checked vs PHP 8.5.8), generated into
-/// [`hierarchy_generated::HIERARCHY`] by `cargo xtask gen-catalog` from
+/// `6bc7c26cf6…`, cross-checked vs PHP 8.5.8), generated into the private
+/// `hierarchy_generated::HIERARCHY` table by `cargo xtask gen-catalog` from
 /// `docs/research/phpsrc-mining/hierarchy.toml`. It subsumes the SPL/engine
 /// `Throwable` tree (also projected, frozen, by [`builtin_exception_parent`] for
 /// the throw system — a test verifies the two agree on their overlap) and the
