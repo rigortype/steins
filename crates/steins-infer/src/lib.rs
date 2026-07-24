@@ -5026,7 +5026,7 @@ fn eval_cond(
             None => Certainty::Maybe,
         },
         CondExpr::Instanceof { operand, class_ref } => {
-            eval_instanceof(w, operand, class_ref, store, poisoned)
+            eval_instanceof(w, operand, class_ref, env, store, poisoned)
         }
         CondExpr::Not(c) => eval_cond(w, c, env, store, poisoned).not(),
         // Short-circuit env threading (ADR-0052 §6 / N3): the RIGHT operand
@@ -5217,6 +5217,7 @@ fn eval_instanceof(
     w: &WalkCx,
     operand: &CondOperand,
     class_ref: &NameRef,
+    env: &HashMap<String, Known>,
     store: &Store,
     poisoned: bool,
 ) -> Certainty {
@@ -5241,10 +5242,23 @@ fn eval_instanceof(
                         IsA::No | IsA::Unknown => Certainty::Maybe,
                     }
                 }
-                // No heap object — but a prior `instanceof` guard may have bound a
-                // `Member` fact whose is-a implication decides this test (ADR-0052
-                // §3b, consumer (b)). A11 does NOT thread here: it is scoped to the
-                // arm-deletion consumers, and this implication is a separate one.
+                // No heap object. First the VALUE side (survey FP class 14): if the
+                // variable's value-domain fact proves it holds a *non-object* value on
+                // this path (`null`/int/float/string/bool/array — e.g. a call-site
+                // `null` imported as `Singleton(null)` by a binding descent), then
+                // `instanceof T` is definitionally `false` for every `T` — `null` and
+                // every scalar are instances of nothing. This is a decisive `No` that
+                // needs NO class reasoning and NO exactness: the G1 exactness discipline
+                // (`store.is_exact`) is scoped to *object-class* No verdicts on the heap
+                // path above and is untouched here. Sound unconditionally (silence: the
+                // then-branch is dead — no PHP value that is not an object is an instance).
+                None if env.get(name).and_then(|k| k.fact.as_ref()).is_some_and(fact_is_non_object) => {
+                    Certainty::No
+                }
+                // Otherwise a prior `instanceof` guard may have bound a `Member` fact
+                // whose is-a implication decides this test (ADR-0052 §3b, consumer (b)).
+                // A11 does NOT thread here: it is scoped to the arm-deletion consumers,
+                // and this implication is a separate one.
                 None => member_instanceof(w.cx, store.member_of(name), &target),
             }
         }
@@ -5275,6 +5289,34 @@ fn member_instanceof(cx: &Cx, member: Option<&Member>, target: &str) -> Certaint
         return Certainty::No;
     }
     Certainty::Maybe
+}
+
+/// Whether a value-domain [`Fact`] proves the variable holds a **non-object**
+/// value on this path (survey FP class 14 — the value-side `instanceof` rule).
+/// Every inhabitant of the fact must be a non-object PHP value; then `instanceof
+/// T` is `false` for every `T` (`null`, ints, floats, strings, bools and arrays
+/// are instances of nothing). All four fact layers denote non-object values —
+/// objects live in the heap, never in the value domain — so this holds whenever
+/// a value fact is present. A `Singleton`/`OneOf` is checked inhabitant-wise so
+/// the rule stays correct (a *mixed* `OneOf` would be `Maybe`) if the value
+/// domain ever gains an object inhabitant; the scalar-base layers admit only a
+/// scalar base plus optionally `null`, both non-objects.
+fn fact_is_non_object(f: &Fact) -> bool {
+    match f {
+        Fact::Singleton(v) => val_is_non_object(v),
+        Fact::OneOf(vs) => vs.iter().all(val_is_non_object),
+        Fact::Refined { .. } | Fact::General { .. } => true,
+    }
+}
+
+/// Whether a concrete [`Val`] is a non-object PHP value. Exhaustive by design:
+/// no current `Val` variant denotes an object, and if one is ever added this
+/// match forces a deliberate decision rather than silently answering `No` to an
+/// `instanceof` on a value that could be an object.
+fn val_is_non_object(v: &Val) -> bool {
+    match v {
+        Val::Int(_) | Val::Float(_) | Val::Str(_) | Val::Bool(_) | Val::Null | Val::Array(_) => true,
+    }
 }
 
 // ---------------------------------------------------------------------------
