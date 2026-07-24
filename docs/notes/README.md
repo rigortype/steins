@@ -40,3 +40,8 @@ Filenames are `YYYYMMDD-<slug>.md`, dated to authorship.
 - [The four oxidized PHP checkers: Steins vs Mago / Pzoom / Mir](20260722-oxidized-php-checkers.md)
   — where the Rust-side PHP-tooling landscape stands and what Steins does
   differently.
+- [PHPStan cross-check over the field survey — four recall gaps](20260725-phpstan-cross-check.md)
+  — PHPStan 2.2.5 as an independent oracle over the same fourteen applications:
+  the default surface holds at zero FP, and four recall gaps fall out
+  (symlink-duplicate suppression, unreported syntax errors, member reach,
+  the `vendor` literal).
