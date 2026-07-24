@@ -1,3 +1,30 @@
+# Continuous integration — every push to master and every pull request.
+#
+# The gates, and why each one is here:
+#
+#   test      clippy + workspace tests + a release build, on Linux AND macOS.
+#             Both, because both ship as release binaries and because the PHP
+#             sidecar (ADR-0004/0024) spawns a real `php` over a temp-dir path —
+#             the one part of Steins whose behaviour is genuinely OS-shaped.
+#   docs      rustdoc with `-D warnings`: intra-doc links across a 10-crate
+#             workspace rot silently, and the ADR-heavy doc comments are the
+#             navigation layer.
+#   licenses  the relicensing gate (ADR-0025 / deny.toml's header) plus the
+#             THIRD-PARTY-LICENSES.md drift guard — a binary-only distribution
+#             carries its dependencies' notices, so a stale file is a compliance
+#             bug, not a cosmetic one.
+#   fp-gate   the zero-false-positive bar over the corpus (ADR-0013/0026).
+#
+# `cargo fmt --check` is deliberately NOT a gate — the tree is hand-formatted and
+# a fmt run would rewrite 110 files. That policy, with its numbers, is recorded
+# in rustfmt.toml; clippy `-D warnings` is the blocking style gate instead.
+#
+# The toolchain is pinned to the DECLARED MSRV (`rust-version` in Cargo.toml),
+# not `stable`: the floor is a promise to anyone installing with `cargo install
+# --git`, and an unpinned CI silently lets code land that the floor cannot build.
+# The cost is that a regression from a *newer* stable is not caught here; when
+# stable moves meaningfully past the floor, add a second non-blocking matrix row
+# rather than unpinning this one.
 name: CI
 
 on:
@@ -5,44 +32,175 @@ on:
     branches: [master]
   pull_request:
 
+# Cancel superseded runs on the same ref.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  # Keep in lockstep with `rust-version` in Cargo.toml and `msrv` in clippy.toml.
+  RUST_MSRV: "1.97"
 
 jobs:
   test:
-    name: test
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      # One OS failing should still report the other — an OS-specific sidecar
+      # break is exactly the signal this matrix exists to isolate.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
+      # The sidecar discovers `php` on PATH; without it the suite runs in the
+      # sound subset and the runtime-dependent tests never exercise the IPC path.
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
         with:
           php-version: "8.4"
           coverage: none
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain (MSRV)
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_MSRV }}
           components: clippy
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
 
+      # `--locked` everywhere: build against the committed Cargo.lock, so a run
+      # is reproducible and an uncommitted lock update fails loudly here rather
+      # than drifting into a release build.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
+      # Builds with the shipping `[profile.release]` (thin LTO, codegen-units=1,
+      # stripped) — the same profile the release workflow packages, so profile
+      # breakage surfaces on a PR and not at a tag.
       - name: Build (release)
-        run: cargo build --release
+        run: cargo build --release --locked
+
+      # Liveness check on the produced binary, run from an empty directory so it
+      # sees no project and no steins.toml. `doctor` is the right smoke test: it
+      # runs no checks, exits 0 on a degraded environment by design (ADR-0054
+      # §10), and is what the release workflow and the Homebrew formula assert.
+      - name: Smoke test (doctor)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$PWD/target/release/steins"
+          tmp="$(mktemp -d)"
+          cd "$tmp"
+          "$bin" doctor
+          "$bin" doctor --no-php
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain (MSRV)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_MSRV }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: docs
+
+      # A RATCHET, not a clean gate — the same shape as the diagnostic baseline
+      # (ADR-0022): accept the debt that exists, refuse any more of it.
+      #
+      # The tree currently has 18 broken intra-doc links (unresolved paths and
+      # public docs pointing at private items) across 12 files. Gating on
+      # `-D warnings` outright would fail every PR from day one, so instead the
+      # count is capped: new rot fails, and fixing rot is expected to LOWER the
+      # cap in the same commit. A hard compile error in a doc build always fails
+      # regardless of the count — that is not debt, that is breakage.
+      #
+      # Retire this job in favour of a plain `-D warnings` run when the cap
+      # reaches 0.
+      - name: Rustdoc link-rot ratchet
+        shell: bash
+        env:
+          RUSTDOCFLAGS: -D warnings
+          # Lower this as links are fixed. Never raise it.
+          DOC_LINK_CAP: "18"
+        run: |
+          set -uo pipefail
+          cargo doc --no-deps --workspace --locked >doc.log 2>&1 && rc=0 || rc=$?
+          cat doc.log
+
+          # Compile errors carry an `error[EXXXX]` code; doc-link lints do not.
+          # A real build failure is never absorbed by the cap.
+          if grep -qE '^error\[E' doc.log; then
+            echo "::error::rustdoc failed to build the docs (not a link problem) — see the log above"
+            exit 1
+          fi
+
+          n=$(grep -cE '^error: (unresolved link|public documentation for)' doc.log || true)
+          echo "broken intra-doc links: $n (cap ${DOC_LINK_CAP})"
+
+          if [ "$n" -gt "${DOC_LINK_CAP}" ]; then
+            echo "::error::broken intra-doc links rose to $n (cap ${DOC_LINK_CAP}) — fix the new link(s); the cap only ever goes down"
+            exit 1
+          fi
+          if [ "$n" -lt "${DOC_LINK_CAP}" ]; then
+            echo "::notice::broken intra-doc links fell to $n — lower DOC_LINK_CAP in .github/workflows/ci.yml to $n to hold the gain"
+          fi
+          # Anything other than the doc-link lints failing the run is a genuine
+          # failure: re-raise it.
+          if [ "$rc" -ne 0 ] && [ "$n" -eq 0 ]; then
+            echo "::error::cargo doc failed with no broken links recognised — see the log above"
+            exit 1
+          fi
+
+  licenses:
+    name: licenses
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain (MSRV)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_MSRV }}
+
+      - name: Install cargo-about + cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about,cargo-deny
+
+      # Fails if any dependency's license falls outside deny.toml's allow list.
+      # For Steins that list is permissive-only ON PURPOSE — a copyleft
+      # dependency would silently foreclose the Apache-2.0/MPL-2.0 relicensing
+      # options ADR-0025 keeps open until gate G3. See deny.toml's header.
+      - name: License audit
+        run: cargo deny check licenses
+
+      # The committed notices must match the current dependency tree: the
+      # release archives ship this file as the dependencies' required notice,
+      # so drift means shipping an inaccurate legal document. Regenerate with
+      # the command in the error message when this fails.
+      - name: Third-party notices up to date
+        run: |
+          cargo about generate about.hbs -o THIRD-PARTY-LICENSES.md
+          git diff --exit-code -- THIRD-PARTY-LICENSES.md \
+            || { echo "::error::THIRD-PARTY-LICENSES.md is stale — run: cargo about generate about.hbs -o THIRD-PARTY-LICENSES.md"; exit 1; }
 
   fp-gate:
     name: fp-gate
@@ -50,7 +208,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
@@ -58,11 +216,15 @@ jobs:
           php-version: "8.4"
           coverage: none
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain (MSRV)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_MSRV }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          key: fp-gate
 
       - name: Cache corpus
         uses: actions/cache@v4

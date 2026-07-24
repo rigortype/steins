@@ -1,0 +1,278 @@
+# Release pipeline — pushing a `vX.Y.Z` tag builds and publishes everything.
+#
+# ── There is no crates.io channel, and that is structural ────────────────────
+# The parser backend is the rev-pinned Mago fork (ADR-0003/0025), i.e. a `git`
+# dependency, and crates.io refuses any crate that has one. `publish = false` in
+# Cargo.toml states this at the manifest so the failure is early and legible
+# rather than a confusing rejection at upload. The channels are therefore:
+#
+#   1. GitHub Release binaries  — this workflow, five targets, sha256 sidecars.
+#   2. Homebrew tap             — `brew install rigortype/tap/steins`.
+#   3. `cargo install --git https://github.com/rigortype/steins steins-cli`
+#      — needs a Rust toolchain at the MSRV, and is the documented fallback for
+#        platforms without a prebuilt binary.
+#
+# Job order: `guard` (tag matches the manifest, changelog section exists) →
+# `release` (create the GitHub Release from CHANGELOG.md) → `binaries` (build +
+# upload per target) → `homebrew` (fill the formula from the uploaded sha256
+# sidecars and push it to the tap). Each stage is downstream of the last, so a
+# mismatched tag never produces a half-published release.
+#
+# Windows is DEFERRED, not forgotten. Steins's core behaviour is executing the
+# project's own PHP over a temp-dir spawn (ADR-0004/0024); that path is untested
+# on Windows and nothing in the workspace claims Windows support. A binary that
+# builds but mis-spawns the sidecar would degrade to the sound subset with no
+# clear signal — worse than not shipping. Add the row once the sidecar is
+# verified there, with a native `steins doctor` smoke on a windows runner.
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write # create the Release and upload its assets
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_MSRV: "1.97"
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Fail before anything is published if the tag and the repository disagree.
+  guard:
+    name: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Tag matches the workspace version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          # The single source of truth: `version` under [workspace.package].
+          # Every member inherits it via `version.workspace = true`.
+          crate="$(sed -n '/^\[workspace\.package\]/,/^\[/{s/^version *= *"\([^"]*\)".*/\1/p;}' Cargo.toml | head -1)"
+          echo "tag=$tag  Cargo.toml=$crate"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag v$tag does not match the workspace version $crate — bump Cargo.toml (and Cargo.lock) or retag"
+            exit 1
+          fi
+
+      - name: CHANGELOG has a section for this version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          # The Release body is this section verbatim; an empty one would ship a
+          # release with no notes, so catch it here rather than after publishing.
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { p = 1; next }
+            p && /^## \[/ { exit }
+            p { print }
+          ' CHANGELOG.md > /tmp/release-body.md
+          if [ ! -s /tmp/release-body.md ]; then
+            echo "::error::CHANGELOG.md has no non-empty '## [$version]' section — seal [Unreleased] into it before tagging (see the steins-release-prep skill)"
+            exit 1
+          fi
+          echo "::group::release body"
+          cat /tmp/release-body.md
+          echo "::endgroup::"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Create the Release the binaries job uploads into. Body = this version's
+  # CHANGELOG section, verbatim (which is why entries must not be hard-wrapped).
+  release:
+    name: create release
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { p = 1; next }
+            p && /^## \[/ { exit }
+            p { print }
+          ' CHANGELOG.md > release-body.md
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file release-body.md
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Build and upload one archive per target, each with a `.sha256` sidecar the
+  # homebrew job reads. `fail-fast: false` so one target's toolchain trouble
+  # does not withhold the four that built.
+  binaries:
+    name: binary ${{ matrix.target }}
+    needs: release
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux glibc, native.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            smoke: true
+          # Linux glibc, cross-compiled by the action (containerized `cross`);
+          # wrong arch for the runner, so no smoke.
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            smoke: false
+          # Linux musl — a fully static binary, the one that works in Alpine
+          # images and scratch CI containers. Statically linked, so it runs on
+          # the glibc runner and CAN be smoked.
+          #
+          # The one row whose toolchain path is UNPROVEN in this org: the
+          # aarch64-gnu cross build is known-good (lisplens ships it with this
+          # same action), but no sibling repo has built musl. `fail-fast: false`
+          # is what makes that acceptable — if the musl row breaks, the other
+          # four still publish and this one is re-run after a fix.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            smoke: true
+          # Apple Silicon — native on the arm64 macos runner.
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            smoke: true
+          # Intel macOS — cross-compiled from the arm64 runner by the Apple
+          # toolchain. Running it would need Rosetta, which is not guaranteed on
+          # the runner, so no smoke.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            smoke: false
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain (MSRV)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_MSRV }}
+          targets: ${{ matrix.target }}
+
+      # Builds with the committed Cargo.lock and the shipping [profile.release],
+      # packages `steins` at the archive root (the layout Homebrew's
+      # `bin.install "steins"` expects), and emits `<archive>.sha256`.
+      #
+      # LICENSE and THIRD-PARTY-LICENSES.md ride along because they are not
+      # optional for this distribution: the core is AGPL-3.0-only and the
+      # bundled dependencies' MIT/Apache/BSD/ISC terms require their notices to
+      # accompany a binary. README.md gives the archive a usable entry point.
+      - name: Build and upload binary
+        uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: steins
+          target: ${{ matrix.target }}
+          archive: $bin-$tag-$target
+          include: LICENSE,README.md,THIRD-PARTY-LICENSES.md
+          checksum: sha256
+          locked: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Liveness check where the runner can execute what was just built. Same
+      # command CI and the Homebrew formula use: `doctor` runs no checks and
+      # exits 0 on a degraded environment by design (ADR-0054 §10), so it is a
+      # true smoke test rather than an analysis run.
+      - name: Smoke test (doctor)
+        if: matrix.smoke == true
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          bin="$PWD/target/${{ matrix.target }}/release/steins"
+          cd "$tmp"
+          "$bin" doctor --no-php
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Update the Homebrew tap so `brew install rigortype/tap/steins` tracks this
+  # release. Needs the repository secret HOMEBREW_TAP_TOKEN — a token with
+  # contents:write on rigortype/homebrew-tap (the built-in GITHUB_TOKEN only
+  # reaches this repo). SKIPS CLEANLY if the secret is unset, so the binaries
+  # release still succeeds before the tap is wired up.
+  homebrew:
+    name: homebrew tap
+    needs: binaries # the archives and their .sha256 sidecars must exist first
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5 # for .github/homebrew/steins.rb.tmpl
+
+      - name: Update tap formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        shell: bash
+        run: |
+          if [ -z "${TAP_TOKEN:-}" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN unset; skipping Homebrew tap update (the GitHub Release itself is unaffected)"
+            exit 0
+          fi
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          repo="${GITHUB_REPOSITORY}"
+          base="https://github.com/$repo/releases/download/$tag"
+
+          # target triple -> the template placeholder holding its sha256. Only
+          # the four Homebrew-relevant targets; musl has no Homebrew platform.
+          declare -A targets=(
+            [aarch64-apple-darwin]=SHA_MACOS_ARM
+            [x86_64-apple-darwin]=SHA_MACOS_INTEL
+            [aarch64-unknown-linux-gnu]=SHA_LINUX_ARM
+            [x86_64-unknown-linux-gnu]=SHA_LINUX_INTEL
+          )
+
+          sed_args=(-e "s|@VERSION@|$version|g" -e "s|@TAG@|$tag|g" -e "s|@BASE@|$base|g")
+          for t in "${!targets[@]}"; do
+            # upload-rust-binary-action writes the sidecar as
+            # "<archive>.<algo>" — the FULL archive name including `.tar.gz`,
+            # not the extensionless base (it runs `shasum -a 256 "$archive" >
+            # "$archive.sha256"`). Its single line is "<hash>  <archive>", so
+            # field 1 is the digest.
+            archive="steins-$tag-$t.tar.gz"
+            f="$archive.sha256"
+            gh release download "$tag" --repo "$repo" --pattern "$f" --dir . --clobber
+            # Pick the line for THIS archive by name rather than assuming the
+            # file holds exactly one; `shasum` may prefix the name with `*`.
+            sha="$(awk -v a="$archive" '$2 == a || $2 == "*" a { print $1; exit }' "$f")"
+            # A formula is only as good as these digests, and the sidecar's name
+            # and format come from a third-party action. Assert the shape rather
+            # than baking whatever was read into a formula users will install.
+            if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{64}$'; then
+              echo "::error::$f did not yield a sha256 digest (got '${sha}') — the sidecar naming or format changed upstream"
+              exit 1
+            fi
+            sed_args+=(-e "s|@${targets[$t]}@|$sha|g")
+          done
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/rigortype/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          sed "${sed_args[@]}" .github/homebrew/steins.rb.tmpl > tap/Formula/steins.rb
+
+          # Never ship an unfilled placeholder — a formula with a literal
+          # @SHA_...@ would fail `brew install` at integrity verification.
+          if grep -q '@[A-Z_]*@' tap/Formula/steins.rb; then
+            echo "::error::a placeholder survived substitution in the generated formula"
+            grep -n '@[A-Z_]*@' tap/Formula/steins.rb
+            exit 1
+          fi
+          ruby -c tap/Formula/steins.rb
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/steins.rb
+          if git diff --cached --quiet; then
+            echo "Formula already up to date for $version"
+          else
+            git commit -m "steins $version"
+            git push
+          fi
