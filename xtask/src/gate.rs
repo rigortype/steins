@@ -430,6 +430,37 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 106,
         message_contains: "OAuth2Model::checkPassword() — hierarchy fully enumerated",
     },
+    // ADR-0049 S5: the userland arity arm `call.too-few-arguments` fired twice on
+    // the legacy monorepo, both genuine `ArgumentCountError`s a run would hit,
+    // triaged verbatim against the checkout and both TRUE. (The two grouped-`use`
+    // `Query::__construct` findings that also fired were false positives from an
+    // unlowered grouped-`use` import; that resolution bug is fixed in the paired
+    // commit, and those findings are now correctly silent.) The OSS packages and
+    // phpstan-src fired zero. Path suffixes start past the serving-domain path
+    // component (the private-corpus naming rule).
+    //
+    // An admin mail-preview handler calls a static template helper whose
+    // example-builder requires its `$lang` argument, with none passed — the
+    // helper is `public static function getEmailExamples($lang)`, so the call
+    // fatals with `ArgumentCountError` the moment `_postEmail()` runs.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "call.too-few-arguments",
+        path_suffix: "email_preview.php",
+        line: 64,
+        message_contains: "getEmailExamples(): 0 passed, 1 required",
+    },
+    // An API test script passes only the host to a three-required-parameter static
+    // method: `AppApi_Testing::requestToAllAppApiEndpoints($target_host,
+    // $host_header, $oauth_token)` called with one argument — a provable
+    // `ArgumentCountError` (1 passed, 3 required) when the script executes.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "call.too-few-arguments",
+        path_suffix: "test/testall.php",
+        line: 14,
+        message_contains: "AppApi_Testing::requestToAllAppApiEndpoints(): 1 passed, 3 required",
+    },
 ];
 
 /// Whether `d` is a recorded, triaged TRUE proof-layer positive for `package`

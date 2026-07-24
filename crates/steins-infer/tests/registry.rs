@@ -137,25 +137,28 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
         assert_eq!(layer(id), Some(Layer::Proof));
     }
 
+    // S5: the userland arity arms (too-few / unknown-named) are emittable proof-layer
+    // ids and left the pending list.
+    for id in [CALL_TOO_FEW_ARGUMENTS_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID] {
+        assert!(emittable.contains(id), "`{id}` must be emittable from S5");
+        assert!(!pending.contains(id), "`{id}` must have left REGISTERED_NOT_YET_EMITTED");
+        assert_eq!(layer(id), Some(Layer::Proof));
+    }
+
     // S6: the declared-receiver lane is emittable and left the pending list — a
     // **contract**-layer id (the paired-id precedent), not proof.
     assert!(emittable.contains(PHPDOC_UNDEFINED_METHOD_ID), "S6 must be emittable");
     assert!(!pending.contains(PHPDOC_UNDEFINED_METHOD_ID), "S6 must have left REGISTERED_NOT_YET_EMITTED");
     assert_eq!(layer(PHPDOC_UNDEFINED_METHOD_ID), Some(Layer::Contract));
 
-    // The remaining five are still registered ahead of emission (S4/S5).
-    for id in [
-        CALL_UNDEFINED_FUNCTION_ID,
-        CLASS_UNDEFINED_ID,
-        CALL_TOO_FEW_ARGUMENTS_ID,
-        CALL_TOO_MANY_ARGUMENTS_ID,
-        CALL_UNKNOWN_NAMED_ARGUMENT_ID,
-    ] {
+    // The remaining three are still registered ahead of emission: the two S4
+    // existence ids, and the too-many arm (internal targets only, reflect slice M2).
+    for id in [CALL_UNDEFINED_FUNCTION_ID, CLASS_UNDEFINED_ID, CALL_TOO_MANY_ARGUMENTS_ID] {
         assert!(pending.contains(id), "`{id}` should be registered-not-yet-emitted");
         assert!(!emittable.contains(id), "`{id}` must not be emittable before its stage");
         assert!(layer(id).is_some(), "`{id}` must be registered with a layer");
     }
-    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 5);
+    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 3);
 }
 
 /// An unregistered id has no layer (the lookup is exact, not prefix-based).

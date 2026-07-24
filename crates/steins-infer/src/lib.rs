@@ -217,6 +217,13 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // the contract-layer method-absence claim over N4's narrowed contract-arm lists,
     // under per-arm descendant closure.
     PHPDOC_UNDEFINED_METHOD_ID,
+    // The userland arity arms, lit up at ADR-0049 S5 (`check_arity`): too-few and
+    // unknown-named on a uniquely-resolved userland function or a proven-exact
+    // receiver's method/constructor/static. The too-many arm (internal targets
+    // only) and the internal-target arity stay in `REGISTERED_NOT_YET_EMITTED`
+    // until the reflect slice (M2).
+    CALL_TOO_FEW_ARGUMENTS_ID,
+    CALL_UNKNOWN_NAMED_ARGUMENT_ID,
     suppress::SUPPRESS_UNMATCHED_ID,
     suppress::SUPPRESS_UNKNOWN_ID,
 ];
@@ -238,9 +245,11 @@ pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
     CALL_UNDEFINED_FUNCTION_ID,
     // CALL_UNDEFINED_METHOD_ID lit up at S2 — now in ALL_EMITTABLE_IDS.
     CLASS_UNDEFINED_ID,
-    CALL_TOO_FEW_ARGUMENTS_ID,
+    // CALL_TOO_FEW_ARGUMENTS_ID / CALL_UNKNOWN_NAMED_ARGUMENT_ID lit up at S5 (the
+    // userland arms) — now in ALL_EMITTABLE_IDS. The too-many arm fires for
+    // INTERNAL targets only (userland too-many runs clean — never a finding), so it
+    // waits for the reflect slice (M2).
     CALL_TOO_MANY_ARGUMENTS_ID,
-    CALL_UNKNOWN_NAMED_ARGUMENT_ID,
     // OFFSET_MISSING_ID / OFFSET_ON_UNSUPPORTED_ID lit up at S3 — now in ALL_EMITTABLE_IDS.
     // PHPDOC_UNDEFINED_METHOD_ID lit up at S6 — now in ALL_EMITTABLE_IDS.
 ];
@@ -294,6 +303,21 @@ pub trait Folder {
         None
     }
 
+    /// Ask the project's own PHP whether `fqn` is a resident builtin/extension
+    /// **function** — the arity family's A2ii homonym leg (ADR-0049 §6). A user
+    /// function that shares a name with a boot-surface function is only bound to
+    /// the indexed signature when the userland declaration actually executes (the
+    /// `function_exists`-guarded polyfill shadowed by a loaded extension is the
+    /// live counterexample); `Some(true)` therefore forces silence. `Some(false)`
+    /// — definitively absent from the boot surface; `None` — unanswerable (no
+    /// sidecar / a mid-run failure ⇒ silence). The default is `None`. `fqn` is the
+    /// index's lowercase-normalized form; PHP function names are case-insensitive,
+    /// so the lowercased name is a faithful query.
+    fn boot_surface_function(&mut self, fqn: &str) -> Option<bool> {
+        let _ = fqn;
+        None
+    }
+
     /// The project's own PHP `(major, minor)` from the sidecar `env()` — the
     /// ADR-0052 A11 version-skew input. `None` (the default / sound subset) when no
     /// sidecar answers: an unknown minor is treated as "no detectable skew", so the
@@ -334,6 +358,9 @@ pub struct SidecarFolder {
     /// Per-FQN memo of the A2ii homonym oracle so a repeated chain class never
     /// triggers duplicate `reflect` IPC.
     boot_surface_memo: HashMap<String, Option<bool>>,
+    /// Per-FQN memo of the arity family's function-homonym oracle (ADR-0049 §6),
+    /// the function-namespace analogue of [`Self::boot_surface_memo`].
+    boot_surface_fn_memo: HashMap<String, Option<bool>>,
     /// Memoized project PHP `(major, minor)` from the sidecar `env()` (ADR-0052
     /// A11) — a whole-run query answer. `Some(None)` records "asked, unanswerable".
     php_minor: Option<Option<(u16, u16)>>,
@@ -352,6 +379,7 @@ impl SidecarFolder {
             notified: true, // suppress our own notice; only spawn-failure re-arms it.
             absence_available: None,
             boot_surface_memo: HashMap::new(),
+            boot_surface_fn_memo: HashMap::new(),
             php_minor: None,
         }
     }
@@ -430,6 +458,18 @@ impl Folder for SidecarFolder {
             .and_then(|sc| sc.reflect(fqn))
             .map(|r| r.class_like_exists);
         self.boot_surface_memo.insert(fqn.to_owned(), answer);
+        answer
+    }
+
+    fn boot_surface_function(&mut self, fqn: &str) -> Option<bool> {
+        if let Some(cached) = self.boot_surface_fn_memo.get(fqn) {
+            return *cached;
+        }
+        let answer = self
+            .ensure_sidecar()
+            .and_then(|sc| sc.reflect(fqn))
+            .map(|r| r.function_exists);
+        self.boot_surface_fn_memo.insert(fqn.to_owned(), answer);
         answer
     }
 
@@ -3645,6 +3685,11 @@ fn walk_trace(
                     check_propagated_call(
                         cx, folder, scope.poisoned, descent.is_some(), call, env, store, out,
                     );
+                    // Userland function arity (ADR-0049 §6 / S5): judged once in the
+                    // plain per-scope pass, like the absence flagship.
+                    if descent.is_none() {
+                        check_arity(cx, folder, call, store, scope.poisoned, out);
+                    }
                     try_descend_function(cx, folder, call, env, scope.poisoned, descent.as_mut(), out);
                 }
                 Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
@@ -3662,6 +3707,10 @@ fn walk_trace(
                         // S2 by construction — S2 fires on class_exact receivers, S6
                         // only on non-exact receivers carrying a narrowed arm lane.
                         check_phpdoc_undefined_method(cx, folder, call, store, scope.poisoned, out);
+                        // Method / constructor / static arity (ADR-0049 §6 / S5),
+                        // under a proven-exact receiver only (the declared-receiver
+                        // variant is unsound — see `resolve_arity_method`).
+                        check_arity(cx, folder, call, store, scope.poisoned, out);
                     }
                     handle_method_call(
                         cx,
@@ -6589,6 +6638,8 @@ fn synth_function_call(call: &CallExpr, nameref: &NameRef) -> CallExpr {
         callee_ref: Some(nameref.clone()),
         receiver: Callee::Function(nameref.raw.clone()),
         args: call.args.clone(),
+        named_args: call.named_args.clone(),
+        has_spread: call.has_spread,
         positional_only: call.positional_only,
         span: call.span,
     }
@@ -7224,6 +7275,331 @@ fn check_undefined_method(
         column: pos.column,
         message,
     });
+}
+
+// ---------------------------------------------------------------------------
+// Arity: `call.too-few-arguments` / `call.unknown-named-argument`
+// (ADR-0049 §6 / S5 — the userland arms).
+//
+// The verified PHP 8.5 table is ASYMMETRIC (every row `php -r`-checked): too few
+// positional/named arguments to a userland target is always a fatal
+// `ArgumentCountError`; too MANY to a non-variadic runs clean (extras ignored) and
+// is NEVER a finding (the ADR-0002 consequence pattern, whatever PHPStan reports —
+// `call.too-many-arguments` stays REGISTERED_NOT_YET_EMITTED for the internal
+// slice, M2); an unknown named argument to a non-variadic is a fatal `Error`, while
+// a variadic silently collects it (`fv(x: 1)` → `{"x":1}`). A named argument that
+// overwrites a positional (`f(1, a: 5)`) is a fatal `Error` too — a DEFERRED id, so
+// it is a *silence* leg here. The verified runtime precedence is
+// **overwrite ≻ unknown-named ≻ too-few** (`f(z: 9)` on `f($a, $b)` throws the
+// unknown-name `Error`, not `ArgumentCountError`), and the checks below honor it so
+// the emitted id never misnames the runtime consequence. Internal (builtin) targets
+// take their arity from sidecar reflection and ship with the reflect slice (M2).
+//
+// Provability rests entirely on the RESOLVED TARGET's ground-truth signature:
+//   - functions: a uniquely-indexed userland function (ADR-0049 A2 legs — not
+//     Ambiguous, not builtin-shadowed; a conditional declaration re-dams the claim;
+//     the boot-surface function-homonym is cleared via the sidecar);
+//   - methods/constructors/statics: ONLY under a proven-EXACT receiver. The
+//     declared-receiver variant is UNSOUND — an override may ADD optional
+//     parameters (`P::m(int $a)` vs `Q::m($a = 0, $b = 0)`), so `$p->m()` on a
+//     declared `P` holding a `Q` satisfies the runtime contract and runs; a finding
+//     there is a false positive, REFUSED outright (never deferred to a contract
+//     lane, unlike `phpdoc.undefined-method`). Exactness reuses S2's gate: `new`,
+//     a `class_exact` heap object, or a textual `Class::` static; `$this`
+//     (membership, A1), `self::`/`static::`/`parent::`, `?->`, and every dynamic
+//     form are silent.
+// Call-site conditions: no argument unpacking (`...` ⇒ count unproven; counting
+// proven Singleton arrays is deferred); the first-class-callable `f(...)` is not a
+// call; named binding is resolved against the target's parameter names
+// case-SENSITIVELY, exactly as PHP binds them.
+// ---------------------------------------------------------------------------
+
+/// A resolved arity target: the callee's parameter list (the ground-truth
+/// signature) and its PHP display name for the message (`format`, `Order::pay`,
+/// `Order::__construct`).
+struct ArityTarget<'a> {
+    params: &'a [Param],
+    display: String,
+}
+
+/// The number of **required** parameters (ADR-0049 §6): the 1-based index of the
+/// last parameter that is neither variadic nor default-valued. Matches PHP 8.5's
+/// `ReflectionFunctionAbstract::getNumberOfRequiredParameters`, including the
+/// deprecated "optional parameter declared before a required one is implicitly
+/// required" shape (`f($a = 1, $b)` ⇒ 2, `php -r`-verified). A variadic is never
+/// required; by-ref and promoted parameters are required exactly like any other
+/// (both `php -r`-verified).
+fn required_param_count(params: &[Param]) -> usize {
+    let mut required = 0;
+    for (i, p) in params.iter().enumerate() {
+        if !p.variadic && !p.has_default {
+            required = i + 1;
+        }
+    }
+    required
+}
+
+/// Resolve the exact-receiver class + method name for an arity method/static/
+/// constructor call, or `None` when the receiver is not proven exact (S2's gate,
+/// plus constructors). Constructors and textual `Class::` statics are exact by
+/// construction; a `$var` receiver is exact only under a `class_exact` heap fact.
+/// The `bool` is whether this is a **static** (`Class::m()`) call — a static call
+/// to a NON-static method raises `Error: Non-static method … cannot be called
+/// statically` *before* any `ArgumentCountError` (`php -r`-verified), so the caller
+/// silences that shape rather than misnaming the consequence.
+fn arity_method_receiver(
+    cx: &Cx,
+    call: &CallExpr,
+    store: &Store,
+    poisoned: bool,
+) -> Option<(String, String, bool)> {
+    match &call.receiver {
+        Callee::Construct { class } => Some((cx.class_fqn(class), "__construct".to_owned(), false)),
+        Callee::Method { receiver, method, nullsafe } => {
+            if *nullsafe {
+                return None; // `?->` excluded in v1 (S2 leg (l)).
+            }
+            let class = match receiver {
+                Receiver::New(name) => cx.class_fqn(name),
+                Receiver::Var(v) => {
+                    if poisoned {
+                        return None;
+                    }
+                    let obj = store.obj_of(v)?;
+                    if !obj.class_exact {
+                        return None; // lower bound → the refused declared-receiver lane.
+                    }
+                    obj.class.clone()
+                }
+                // A1: `$this` is a membership fact, never exactness — silent.
+                Receiver::This => return None,
+            };
+            Some((class, method.clone(), false))
+        }
+        Callee::Static { class, method } => match class {
+            StaticClass::Named(name) => Some((cx.class_fqn(name), method.clone(), true)),
+            StaticClass::SelfKw | StaticClass::Parent | StaticClass::Static => None,
+        },
+        Callee::Function(_) | Callee::DynamicVar(_) | Callee::Dynamic => None,
+    }
+}
+
+/// Walk `start_fqn`'s exact-receiver chain resolving `method` to its declaring
+/// [`MethodDecl`] under S2's closure discipline. Returns the method, its declaring
+/// class's simple name, the ordered traversed FQNs (for the A2ii homonym leg), and
+/// whether any traversed class was declared conditionally (A2i). `None` on any
+/// obstacle: an unresolvable/`Ambiguous`/absent class, an enum (A3 — methods not
+/// lowered), a trait name or a `uses_traits` class (a trait could shadow the method
+/// with a different signature), a cycle, an **abstract** or **non-public** resolved
+/// method (a protected/private method may route to `__call` or raise a distinct
+/// visibility `Error` — not an `ArgumentCountError`), or the method being absent
+/// from the whole chain (that is S2's job, not arity's).
+fn walk_arity_chain<'a>(
+    cx: &Cx<'a>,
+    start_fqn: &str,
+    method: &str,
+) -> Option<(&'a MethodDecl, String, Vec<String>, bool)> {
+    let mut cur = start_fqn.to_owned();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut traversed: Vec<String> = Vec::new();
+    let mut any_conditional = false;
+    loop {
+        if !seen.insert(cur.to_ascii_lowercase()) {
+            return None; // cycle — closure cannot terminate soundly.
+        }
+        let (cfile, cd) = cx.find_class(&cur)?; // unique project class, or bust.
+        if cd.is_enum || cd.is_trait || cd.uses_traits {
+            return None;
+        }
+        traversed.push(cur.clone());
+        if cd.conditional {
+            any_conditional = true;
+        }
+        if let Some(m) = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method)) {
+            if m.is_abstract || m.visibility != Visibility::Public {
+                return None;
+            }
+            return Some((m, cd.name.clone(), traversed, any_conditional));
+        }
+        // A `None` parent ends the chain: the method is absent from the whole chain
+        // — that is S2's `call.undefined-method`, never arity's id.
+        cur = cx.units[cfile].tree.resolve_class_fqn(cd.parent.as_ref()?);
+    }
+}
+
+/// Resolve a userland **function** call to its arity target (ADR-0049 §6 / A2
+/// legs). Cheap textual resolution first, then the sidecar-backed legs.
+fn resolve_arity_function<'a>(
+    cx: &Cx<'a>,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+) -> Option<ArityTarget<'a>> {
+    let r = call.callee_ref.as_ref()?;
+    // Unique userland function only — `Ambiguous` and builtin-shadowed both resolve
+    // to `Unknown` (silent); a catalogued builtin is the internal slice (M2).
+    let FnResolution::User(site) = cx.resolve_function(r) else {
+        return None;
+    };
+    let decl = cx.fn_decl(site);
+    // A9 + the A2ii homonym leg both require a live sidecar.
+    if !folder.absence_family_available() {
+        return None;
+    }
+    // A2i: a conditionally-declared function re-dams the claim.
+    if decl.conditional && !cx.dam.is_clear() {
+        return None;
+    }
+    // A2ii: the resolved FQN must be answered NOT-present as a boot-surface
+    // function (a homonym extension function may be the real runtime binding — the
+    // `function_exists`-guarded polyfill shadowed by a loaded extension).
+    match folder.boot_surface_function(&decl.fqn) {
+        Some(false) => {}
+        Some(true) | None => return None,
+    }
+    Some(ArityTarget { params: &decl.params, display: decl.name.clone() })
+}
+
+/// Resolve a method/static/constructor arity target under a proven-exact receiver
+/// and S2's chain closure (ADR-0049 §6). Cheap textual legs first.
+fn resolve_arity_method<'a>(
+    cx: &Cx<'a>,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    store: &Store,
+    poisoned: bool,
+) -> Option<ArityTarget<'a>> {
+    let (start_fqn, method, is_static_call) = arity_method_receiver(cx, call, store, poisoned)?;
+    // `new AbstractClass()` / `new SomeInterface()` raises `Error: Cannot
+    // instantiate abstract class / interface` BEFORE any `ArgumentCountError`
+    // (`php -r`-verified) — silence it (would misname the consequence).
+    if let Callee::Construct { .. } = &call.receiver {
+        let (_, start_cd) = cx.find_class(&start_fqn)?;
+        if start_cd.is_abstract || start_cd.is_interface {
+            return None;
+        }
+    }
+    let (mdecl, declaring_name, traversed, any_conditional) =
+        walk_arity_chain(cx, &start_fqn, &method)?;
+    // A static call (`Class::m()`) to a NON-static method raises the non-static
+    // `Error` before any `ArgumentCountError` — silence it (would misname).
+    if is_static_call && !mdecl.is_static {
+        return None;
+    }
+    // A9 + the A2ii homonym leg both require a live sidecar.
+    if !folder.absence_family_available() {
+        return None;
+    }
+    // A2i: a conditional class anywhere on the traversed chain re-dams the claim.
+    if any_conditional && !cx.dam.is_clear() {
+        return None;
+    }
+    // A2ii: every traversed class must be boot-surface-absent as a class-like.
+    for fqn in &traversed {
+        match folder.boot_surface_class_like(fqn) {
+            Some(false) => {}
+            Some(true) | None => return None,
+        }
+    }
+    let display = if method.eq_ignore_ascii_case("__construct") {
+        format!("{declaring_name}::__construct")
+    } else {
+        format!("{declaring_name}::{}", mdecl.name)
+    };
+    Some(ArityTarget { params: &mdecl.params, display })
+}
+
+/// The finding half: given a resolved target, apply the ordered arity checks
+/// (overwrite ≻ unknown-named ≻ too-few) to one call site, honoring the verified
+/// runtime precedence so the emitted id never misnames the consequence.
+fn emit_arity(cx: &Cx, call: &CallExpr, target: &ArityTarget, out: &mut Vec<Diagnostic>) {
+    let params = target.params;
+    // Shape gates. Unpacking (or a non-canonical order) leaves the count unproven.
+    if call.has_spread {
+        return;
+    }
+    let pos = call.args.len();
+    let named = &call.named_args;
+    // First-class-callable `f(...)` lowers to an arg-less non-positional call — not
+    // a call for arity. (Any real call is `positional_only`, or has ≥1 arg.)
+    if !call.positional_only && pos == 0 && named.is_empty() {
+        return;
+    }
+
+    // Overwrite guard (verified precedence #1): a named argument targeting a
+    // parameter already filled by a positional argument (`f(1, a: 5)`) raises the
+    // DEFERRED overwrite `Error` — silence both of our ids so neither misclaims.
+    let overwrite = named
+        .iter()
+        .any(|n| params.iter().position(|p| p.name == n.name).is_some_and(|i| i < pos));
+    if overwrite {
+        return;
+    }
+
+    let has_variadic = params.iter().any(|p| p.variadic);
+    // unknown-named (verified precedence #2): a named argument matching no parameter
+    // of a NON-variadic target is a fatal `Error`; a variadic silently collects it.
+    // Parameter-name matching is case-SENSITIVE (`f(A: 1)` on `$a` is unknown).
+    if !has_variadic
+        && let Some(unknown) = named.iter().find(|n| !params.iter().any(|p| p.name == n.name))
+    {
+        let at = cx.tree().position(call.span.start);
+        out.push(Diagnostic {
+            id: CALL_UNKNOWN_NAMED_ARGUMENT_ID,
+            path: cx.path().to_owned(),
+            line: at.line,
+            column: at.column,
+            message: format!(
+                "unknown named argument ${} to {}() — no parameter ${}, provable Error",
+                unknown.name, target.display, unknown.name,
+            ),
+        });
+        return;
+    }
+
+    // too-few (verified precedence #3): a required parameter covered by neither a
+    // positional argument (index < pos) nor a named argument of that name.
+    let required = required_param_count(params);
+    let uncovered =
+        (0..required).any(|i| i >= pos && !named.iter().any(|n| n.name == params[i].name));
+    if uncovered {
+        let passed = pos + named.len();
+        let at = cx.tree().position(call.span.start);
+        out.push(Diagnostic {
+            id: CALL_TOO_FEW_ARGUMENTS_ID,
+            path: cx.path().to_owned(),
+            line: at.line,
+            column: at.column,
+            message: format!(
+                "too few arguments to {}(): {passed} passed, {required} required — provable ArgumentCountError",
+                target.display,
+            ),
+        });
+    }
+}
+
+/// Run the full ADR-0049 §6 userland arity ladder for one call and emit
+/// `call.too-few-arguments` / `call.unknown-named-argument` iff every leg holds.
+/// Called only from the plain per-scope pass (`descent.is_none()`) so a site is
+/// judged once, never re-emitted under an interprocedural descent.
+fn check_arity(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    store: &Store,
+    poisoned: bool,
+    out: &mut Vec<Diagnostic>,
+) {
+    let target = match &call.receiver {
+        Callee::Function(_) => resolve_arity_function(cx, folder, call),
+        Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
+            resolve_arity_method(cx, folder, call, store, poisoned)
+        }
+        Callee::DynamicVar(_) | Callee::Dynamic => None,
+    };
+    let Some(target) = target else {
+        return;
+    };
+    emit_arity(cx, call, &target, out);
 }
 
 // ---------------------------------------------------------------------------

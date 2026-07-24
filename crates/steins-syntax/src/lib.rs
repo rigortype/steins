@@ -524,6 +524,14 @@ pub struct FunctionDecl {
     /// adding `span.start`. Retained for the transform engine (ADR-0034), which
     /// deletes a promoted `@param` tag's line in the file.
     pub docblock_span: Option<Span>,
+    /// `true` when this function is declared inside a conditional/nested context
+    /// (anything but the program root or a bare namespace) — the function analogue
+    /// of [`ClassDecl::conditional`] (ADR-0049 A2i). A conditional function
+    /// declaration leaves *which* body binds at runtime to load order (the
+    /// `function_exists`-guarded polyfill beside a dam-site include is the shape),
+    /// so the arity check re-dams the claim: an arity finding on a conditional
+    /// target fires only when the whole-universe dam is clear.
+    pub conditional: bool,
 }
 
 /// A method's declared visibility. Absent visibility modifiers default to
@@ -653,6 +661,12 @@ pub struct ClassDecl {
     /// this; for a global class it equals the lowercased simple name.
     pub fqn: String,
     pub is_final: bool,
+    /// `true` when this declaration is an `abstract class`. An abstract class
+    /// cannot be instantiated (`new AbstractC()` raises `Error: Cannot instantiate
+    /// abstract class` — before any constructor `ArgumentCountError`), so the arity
+    /// family (ADR-0049 §6) silences constructor claims on it. `false` for
+    /// interfaces/enums/traits (each already flagged by its own bit).
+    pub is_abstract: bool,
     /// `true` when this declaration is an `interface` (not a `class`). Interface
     /// methods are abstract; they carry envelopes/`@throws` but no bodies.
     pub is_interface: bool,
@@ -1053,6 +1067,22 @@ pub struct Arg {
     pub span: Span,
 }
 
+/// A **named argument** (`name: <expr>`) at a call site (ADR-0049 §6 arity). The
+/// value is not retained — the arity check needs only the parameter *name* it
+/// binds (matched case-sensitively against the target's parameter names, as PHP
+/// does) — but the span is kept for diagnostics. A named argument makes the call
+/// non-[`CallExpr::positional_only`]; the positional args that accompany it stay
+/// in [`CallExpr::args`], so the two lists together describe the full binding.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NamedArg {
+    /// The parameter name being bound, without the leading `$` (e.g. `b` in
+    /// `f(b: 2)`). PHP parameter names are **case-sensitive** for named-argument
+    /// binding (`f(A: 1)` on `function f($a)` is a fatal `Error`), so this is
+    /// compared case-sensitively.
+    pub name: String,
+    pub span: Span,
+}
+
 /// What a [`CallExpr`] is called *on* — the receiver dimension that the
 /// class-world resolution rules dispatch on (ADR-0001 sound dispatch). Plain
 /// function calls stay `Function`, so every existing function-world path is
@@ -1140,10 +1170,30 @@ pub struct CallExpr {
     /// plain function call this is [`Callee::Function`] with the same name as
     /// [`Self::callee`].
     pub receiver: Callee,
-    /// Arguments in source order. Only meaningful when `positional_only`.
+    /// The **positional** arguments in source order (spread `...$x` unpacking
+    /// excluded — see [`Self::has_spread`]). This is the full argument list when
+    /// [`Self::positional_only`]; alongside [`Self::named_args`] it is the
+    /// positional prefix of a mixed call (`f(1, b: 2)` → `args = [1]`,
+    /// `named_args = [b]`).
     pub args: Vec<Arg>,
-    /// `false` if the call used a named or spread (`...`) argument; the checker
-    /// skips such calls (positional mapping is not reliable).
+    /// The **named** arguments (`name: <expr>`) in source order (ADR-0049 §6
+    /// arity). Empty for a purely positional call. Populated even though
+    /// [`Self::positional_only`] is then `false`, so the arity check can bind
+    /// named arguments to parameters.
+    pub named_args: Vec<NamedArg>,
+    /// `true` when the call carries **argument unpacking** (`...$args`) — the
+    /// argument count is then unproven (the spread's cardinality is a runtime
+    /// value), so the arity check stays silent. Also set for a **non-canonical**
+    /// argument order (a positional argument after a named one — a PHP compile
+    /// error, hence absent from valid corpus), which is likewise unanalyzable.
+    pub has_spread: bool,
+    /// `false` if the call used a named or spread (`...`) argument; the existing
+    /// checks (positional argument mapping) skip such calls. Equivalent to
+    /// `named_args.is_empty() && !has_spread` for a normally-lowered call — the
+    /// **first-class-callable** shape (`f(...)`) is the one exception: it lowers
+    /// to an arg-less non-positional call (`positional_only == false` with all
+    /// three of `args` / `named_args` empty and `has_spread == false`), so it is
+    /// never a call for arity purposes.
     pub positional_only: bool,
     pub span: Span,
 }
@@ -1630,7 +1680,7 @@ impl SourceTree {
         let rc = RefResolver { contexts: &contexts, regions: &regions };
 
         let mut lowered = Lowered::default();
-        walk(&Node::Program(program), &aliases, &docs, &rc, &mut lowered);
+        walk(&Node::Program(program), &aliases, &docs, &rc, false, &mut lowered);
 
         let mut classes = lower_classes(&Node::Program(program), &aliases, &docs, &rc);
         let scopes = lower_scopes(program, &contexts, &regions);
@@ -1811,10 +1861,11 @@ fn walk(
     aliases: &SteinsAttrAliases,
     docs: &DocIndex,
     rc: &RefResolver,
+    conditional: bool,
     out: &mut Lowered,
 ) {
     match node {
-        Node::Function(f) => out.functions.push(lower_function(f, aliases, docs, rc)),
+        Node::Function(f) => out.functions.push(lower_function(f, aliases, docs, rc, conditional)),
         Node::FunctionCall(c) => {
             // `class_alias(...)` (ADR-0049 §2): a literal-args call mints an index
             // alias edge; any non-literal argument makes it a runtime name mint —
@@ -1862,8 +1913,13 @@ fn walk(
         }),
         _ => {}
     }
+    // A function reached only through the program root / a namespace is
+    // unconditional (ADR-0049 A2i); passing through anything else (an `if`, a
+    // function/method body, a bare block) makes nested declarations conditional —
+    // the same transparency rule the class conditional flag uses.
+    let child_conditional = conditional || !is_decl_transparent(node);
     for child in node.children() {
-        walk(&child, aliases, docs, rc, out);
+        walk(&child, aliases, docs, rc, child_conditional, out);
     }
 }
 
@@ -1973,6 +2029,7 @@ fn lower_function(
     aliases: &SteinsAttrAliases,
     docs: &DocIndex,
     rc: &RefResolver,
+    conditional: bool,
 ) -> FunctionDecl {
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
@@ -1993,6 +2050,7 @@ fn lower_function(
         throw_origins,
         docblock: docs.preceding(to_span(f.span()).start),
         docblock_span: docs.preceding_span(to_span(f.span()).start),
+        conditional,
     }
 }
 
@@ -2085,6 +2143,7 @@ fn lower_trait(t: &mago_syntax::cst::Trait<'_>, conditional: bool) -> ClassDecl 
         name: bytes_to_string(t.name.value),
         fqn: String::new(), // filled in `parse` from the enclosing namespace ctx
         is_final: false,
+        is_abstract: false,
         is_interface: false,
         is_enum: false,
         is_trait: true,
@@ -2146,6 +2205,7 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
         name: bytes_to_string(c.name.value),
         fqn: String::new(), // filled in `parse` from the enclosing namespace ctx
         is_final: c.modifiers.iter().any(Modifier::is_final),
+        is_abstract: c.modifiers.iter().any(Modifier::is_abstract),
         is_interface: false,
         is_enum: false,
         is_trait: false,
@@ -2278,6 +2338,7 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
         name: bytes_to_string(i.name.value),
         fqn: String::new(),
         is_final: false,
+        is_abstract: false,
         is_interface: true,
         is_enum: false,
         is_trait: false,
@@ -2356,6 +2417,7 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _doc
         name: bytes_to_string(e.name.value),
         fqn: String::new(),
         is_final: true, // enums are implicitly final in PHP
+        is_abstract: false,
         is_interface: false,
         is_enum: true,
         is_trait: false,
@@ -3248,8 +3310,18 @@ fn lower_call(c: &FunctionCall<'_>) -> CallExpr {
         (None, _) => Callee::Dynamic,
     };
 
-    let (args, positional_only) = lower_argument_list(&c.argument_list);
-    CallExpr { callee, callee_ref, receiver, args, positional_only, span: to_span(c.span()) }
+    let LoweredArgs { args, named_args, has_spread, positional_only } =
+        lower_argument_list(&c.argument_list);
+    CallExpr {
+        callee,
+        callee_ref,
+        receiver,
+        args,
+        named_args,
+        has_spread,
+        positional_only,
+        span: to_span(c.span()),
+    }
 }
 
 /// The lowered condition of a statement-position `assert(<expr>[, <desc>])` call
@@ -3272,20 +3344,50 @@ fn assert_stmt_cond(c: &FunctionCall<'_>) -> Option<CondExpr> {
     Some(lower_cond(first))
 }
 
-/// Lower an argument list to `(args, positional_only)`, shared by every call
-/// shape (function / method / static / constructor).
-fn lower_argument_list(list: &mago_syntax::cst::ArgumentList<'_>) -> (Vec<Arg>, bool) {
+/// The lowered form of an argument list, shared by every call shape (function /
+/// method / static / constructor). See [`CallExpr`] for the field semantics.
+struct LoweredArgs {
+    args: Vec<Arg>,
+    named_args: Vec<NamedArg>,
+    has_spread: bool,
+    positional_only: bool,
+}
+
+/// Lower an argument list, separating positional and named arguments and flagging
+/// argument unpacking (ADR-0049 §6). A positional argument that appears *after* a
+/// named or spread argument is a PHP compile error; it is folded into `has_spread`
+/// (the "unanalyzable shape" signal) so the arity check stays silent on it.
+fn lower_argument_list(list: &mago_syntax::cst::ArgumentList<'_>) -> LoweredArgs {
     let mut positional_only = true;
+    let mut has_spread = false;
+    let mut seen_non_positional = false;
     let mut args = Vec::new();
+    let mut named_args = Vec::new();
     for arg in list.arguments.iter() {
         match arg {
             Argument::Positional(p) if p.ellipsis.is_none() => {
+                // A plain positional after a named/spread argument is non-canonical
+                // (a compile error) — mark the whole list unanalyzable.
+                if seen_non_positional {
+                    has_spread = true;
+                }
                 args.push(Arg { value: lower_arg_value(p.value), span: to_span(p.value.span()) });
             }
-            _ => positional_only = false,
+            Argument::Named(n) => {
+                positional_only = false;
+                seen_non_positional = true;
+                named_args
+                    .push(NamedArg { name: bytes_to_string(n.name.value), span: to_span(n.span()) });
+            }
+            // A spread `...$x` positional argument: unpacking, count unproven.
+            Argument::Positional(_) => {
+                positional_only = false;
+                has_spread = true;
+                seen_non_positional = true;
+            }
         }
     }
-    (args, positional_only)
+    LoweredArgs { args, named_args, has_spread, positional_only }
 }
 
 /// The simple method name of a member selector, if it is a plain identifier
@@ -3383,8 +3485,8 @@ fn lower_method_call(object: &Expression<'_>, selector: &ClassLikeMemberSelector
         (Some(recv), Some(method)) => Callee::Method { receiver: recv, method, nullsafe },
         _ => Callee::Dynamic,
     };
-    let (args, positional_only) = lower_argument_list(list);
-    CallExpr { callee: None, callee_ref: None, receiver, args, positional_only, span }
+    let LoweredArgs { args, named_args, has_spread, positional_only } = lower_argument_list(list);
+    CallExpr { callee: None, callee_ref: None, receiver, args, named_args, has_spread, positional_only, span }
 }
 
 /// Lower a static method call into a [`CallExpr`].
@@ -3393,8 +3495,8 @@ fn lower_static_call(class: &Expression<'_>, selector: &ClassLikeMemberSelector<
         (Some(class), Some(method)) => Callee::Static { class, method },
         _ => Callee::Dynamic,
     };
-    let (args, positional_only) = lower_argument_list(list);
-    CallExpr { callee: None, callee_ref: None, receiver, args, positional_only, span }
+    let LoweredArgs { args, named_args, has_spread, positional_only } = lower_argument_list(list);
+    CallExpr { callee: None, callee_ref: None, receiver, args, named_args, has_spread, positional_only, span }
 }
 
 /// Lower a **method first-class callable** `$o->m(...)` into a reference-"call": a
@@ -3412,7 +3514,16 @@ fn first_class_method_ref(
         (Some(recv), Some(method)) => Callee::Method { receiver: recv, method, nullsafe: false },
         _ => Callee::Dynamic,
     };
-    CallExpr { callee: None, callee_ref: None, receiver, args: Vec::new(), positional_only: false, span }
+    CallExpr {
+        callee: None,
+        callee_ref: None,
+        receiver,
+        args: Vec::new(),
+        named_args: Vec::new(),
+        has_spread: false,
+        positional_only: false,
+        span,
+    }
 }
 
 /// Lower a **static-method first-class callable** `Foo::m(...)` into a
@@ -3426,22 +3537,39 @@ fn first_class_static_ref(
         (Some(class), Some(method)) => Callee::Static { class, method },
         _ => Callee::Dynamic,
     };
-    CallExpr { callee: None, callee_ref: None, receiver, args: Vec::new(), positional_only: false, span }
+    CallExpr {
+        callee: None,
+        callee_ref: None,
+        receiver,
+        args: Vec::new(),
+        named_args: Vec::new(),
+        has_spread: false,
+        positional_only: false,
+        span,
+    }
 }
 
 /// Lower a `new Class(args...)` instantiation into a constructor [`CallExpr`],
 /// or `None` when the class is not statically named.
 fn lower_construct_call(inst: &Instantiation<'_>) -> Option<CallExpr> {
     let class = instantiation_class(inst)?;
-    let (args, positional_only) = match &inst.argument_list {
+    let LoweredArgs { args, named_args, has_spread, positional_only } = match &inst.argument_list {
         Some(list) => lower_argument_list(list),
-        None => (Vec::new(), true),
+        // `new C` / `new C()` with no argument list — zero positional arguments.
+        None => LoweredArgs {
+            args: Vec::new(),
+            named_args: Vec::new(),
+            has_spread: false,
+            positional_only: true,
+        },
     };
     Some(CallExpr {
         callee: None,
         callee_ref: None,
         receiver: Callee::Construct { class },
         args,
+        named_args,
+        has_spread,
         positional_only,
         span: to_span(inst.span()),
     })
