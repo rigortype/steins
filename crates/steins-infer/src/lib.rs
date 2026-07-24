@@ -4339,8 +4339,8 @@ fn walk_trace(
                 }
                 return Flow::Terminated;
             }
-            StmtKind::Assign { var, value, span, .. } => {
-                apply_assign(w, folder, var, value, span.start, env, store, facts);
+            StmtKind::Assign { var, value, span, call } => {
+                apply_assign(w, folder, var, value, call.as_ref(), span.start, env, store, facts);
                 Flow::FellThrough
             }
             StmtKind::PropAssign { target_var, prop, value, span, .. } => {
@@ -4996,6 +4996,7 @@ fn apply_assign(
     folder: &mut dyn Folder,
     var: &str,
     value: &ArgValue,
+    call: Option<&CallExpr>,
     span_start: u32,
     env: &mut HashMap<String, Known>,
     store: &mut Store,
@@ -5160,9 +5161,19 @@ fn apply_assign(
                     env.insert(var.to_owned(), Known::value(fact, line, None));
                     store.unbind(var);
                 }
+                // The FLOOR (ADR-0052 §9, the return direction): no proven value fact
+                // flowed, so seed the assigned var's contract-arm lane from the callee's
+                // declared return (native `Verified` / `@return` `Asserted`). `unbind`
+                // first (it voids any stale arm lane on `var`), then seed — the arm is
+                // the floor *below* the value paths above, never overwriting a value.
                 _ => {
                     env.remove(var);
                     store.unbind(var);
+                    if let Some(c) = call
+                        && let Some(arms) = call_return_arms(cx, c)
+                    {
+                        store.contract.insert(var.to_owned(), arms);
+                    }
                 }
             },
         },
@@ -6647,34 +6658,97 @@ fn seed_contract_arms(
         return None;
     }
     let native: Vec<ContractTy> = p.ty.as_ref().map(native_arms).unwrap_or_default();
+    refine_contract_arms(&native, phpdoc, resolve_class)
+}
+
+/// The shared core of declared-contract arm refinement (ADR-0052 §9), used for both
+/// the `@param` entry-state seeding ([`seed_contract_arms`]) and the declared-return
+/// call-site seeding ([`call_return_arms`]): the runtime-guaranteed native member
+/// list refined by a declared phpdoc envelope, under the trust order's subset
+/// discipline.
+///
+/// With **no** phpdoc envelope, each native member is a `Verified` arm (PHP enforces
+/// native param/return types at runtime). With one, each lowered phpdoc arm refines
+/// *within* the native envelope: a phpdoc arm the native base **provably cannot
+/// cover** is a contradiction (`string` under `int`) and seeds NOTHING — the docblock
+/// never widens past the runtime-enforced native type. An arm covering a native
+/// member exactly is `Verified`; a strict refinement within it (`positive-int` under
+/// `int`) is `Asserted`. An undecidable is-a (two unrelated classes — no hierarchy in
+/// this crate) is NOT a contradiction; the arm stays (`Asserted`), the FP-safe side.
+/// Where NO native type exists, every phpdoc arm seeds `Asserted`.
+fn refine_contract_arms(
+    native: &[ContractTy],
+    phpdoc: Option<&PType>,
+    resolve_class: &dyn Fn(&str) -> String,
+) -> Option<Vec<ContractArm>> {
     match phpdoc {
         Some(pt) => {
             let arms = flatten_arms(steins_contract::lower(pt));
             let out: Vec<ContractArm> = arms
                 .into_iter()
-                .map(|ty| {
-                    // Resolve a top-level class arm against the callee namespace; the
+                .filter_map(|ty| {
+                    // Resolve a top-level class arm against the declaring namespace; the
                     // native member list already holds FQNs, so this aligns the two.
                     let ty = match ty {
                         ContractTy::Class(n) => ContractTy::Class(resolve_class(&n)),
                         other => other,
                     };
+                    if !native.is_empty() {
+                        let covered = native
+                            .iter()
+                            .fold(Certainty::No, |acc, n| acc.or(normalize::subsumes(n, &ty)));
+                        if covered.is_no() {
+                            return None;
+                        }
+                    }
                     let stratum = if native.iter().any(|n| normalize::arm_eq(n, &ty)) {
                         Stratum::Verified
                     } else {
                         Stratum::Asserted
                     };
-                    ContractArm { ty, stratum }
+                    Some(ContractArm { ty, stratum })
                 })
                 .collect();
             (!out.is_empty()).then_some(out)
         }
         None => {
             let out: Vec<ContractArm> =
-                native.into_iter().map(|ty| ContractArm { ty, stratum: Stratum::Verified }).collect();
+                native.iter().cloned().map(|ty| ContractArm { ty, stratum: Stratum::Verified }).collect();
             (!out.is_empty()).then_some(out)
         }
     }
+}
+
+/// The declared-return arm list to seed the assigned variable of `$x = f(...)` at a
+/// call site (ADR-0052 §9, the return direction). For a uniquely-resolved USER
+/// function target (the same `resolve_user_fn_any` the contract lane uses, so it fires
+/// on named-argument calls too), the native return type seeds `Verified` arms and the
+/// `@return` phpdoc refines `Asserted` within it, through [`refine_contract_arms`].
+///
+/// **Verified membership is never exactness.** A `: Foo` native return seeds an
+/// Instance-*membership* arm (`ContractTy::Class`), NOT an exact-class object: PHP
+/// guarantees the value *is a* `Foo`, but the concrete runtime class may be any
+/// subclass. So this arm feeds the S6-style declared-receiver contract lane and the
+/// `eval_instanceof` Yes-side only; it must NEVER satisfy an exactness-requiring proof
+/// leg (the ADR-0052 §3 NOT-fed list: no S2/arity/descent consumption, the G1/A1
+/// membership-is-not-exactness discipline). The arms are the FLOOR below values: a
+/// caller seeds them only after every proven-value path (a folded literal, the R1
+/// builtin return envelope) has declined. `None` for a builtin / unknown / dynamic
+/// target, or a target with no declared return type at all.
+fn call_return_arms(cx: &Cx, call: &CallExpr) -> Option<Vec<ContractArm>> {
+    let site = cx.resolve_user_fn_any(call)?;
+    let decl = cx.fn_decl(site);
+    let native: Vec<ContractTy> = decl.ret.as_ref().map(native_arms).unwrap_or_default();
+    // The callee's own `@return` envelope (with its function-level `@template` names
+    // already shadowed to `Opaque` by `parse_envelopes`, issue #5). Class arms resolve
+    // in the CALLEE's file/namespace (where the return type is written), matching how
+    // the native return member list's FQNs were resolved at lowering.
+    let phpdoc = parse_envelopes(decl.docblock.as_deref()).and_then(|e| e.ret);
+    let off = decl.span.start;
+    let resolve = |n: &str| {
+        cx.resolve_pclass(site.file, off, n).trim_start_matches('\\').to_ascii_lowercase()
+    };
+    refine_contract_arms(&native, phpdoc.as_ref(), &resolve)
 }
 
 /// Lower a native scalar/union type to contract arms (declaration order, then a

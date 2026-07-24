@@ -20,7 +20,7 @@
 //! The cut is byte-identical against the honesty tests in `steins-edit` (the
 //! renderer's oracle) and the cross-crate parity test there.
 
-use steins_domain::{Base, StrPreds, CAP};
+use steins_domain::{Base, IntRange, StrPreds, CAP};
 
 use crate::ContractTy;
 
@@ -49,6 +49,15 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
     let mut has_float = false;
     let mut bool_member: Option<&'static str> = None;
     let mut nullable = false;
+    // Int-flavored refinement/literal arms a lowered phpdoc envelope carries but a
+    // summarized value set never does (`positive-int`, `int<1, 5>`, `5`). The
+    // value-domain callers reach [`spell_arms`] only through `summarize_vals`, whose
+    // int members collapse to `Base(Int)`, so these buckets stay empty there — the
+    // shared speller is unchanged for the docblock renderer, extended for the
+    // contract-arm dump surface (ADR-0052 §9).
+    let mut int_ranges: Vec<String> = Vec::new();
+    let mut int_lits: Vec<i64> = Vec::new();
+    let mut float_lits: Vec<f64> = Vec::new();
     // The string portion: a summarized set hands us either the numeric-string class
     // (one `StrWith` arm) or the distinct-sorted literal arms — never both.
     let mut string_keyword: Option<String> = None;
@@ -64,8 +73,11 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
             ContractTy::StrWith(p) => string_keyword = Some(preds_keyword(*p)),
             ContractTy::Base(Base::String) => string_keyword = Some("string".to_owned()),
             ContractTy::LitStr(s) => string_lits.push(s),
-            // Any other arm (an array, object, interval, class, …) has no faithful
-            // plain-scalar spelling — the honest refusal, `type-not-renderable`.
+            ContractTy::IntIn(r) => int_ranges.push(int_range_keyword(*r)),
+            ContractTy::LitInt(i) => int_lits.push(*i),
+            ContractTy::LitFloat(f) => float_lits.push(*f),
+            // Any other arm (an array, object, class, …) has no faithful plain-scalar
+            // spelling — the honest refusal, `type-not-renderable`.
             _ => return None,
         }
     }
@@ -74,9 +86,12 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
     if has_int {
         members.push("int".to_owned());
     }
+    members.extend(int_ranges);
+    members.extend(int_lits.iter().map(i64::to_string));
     if has_float {
         members.push("float".to_owned());
     }
+    members.extend(float_lits.iter().map(|f| float_literal(*f)));
     if let Some(kw) = string_keyword {
         members.push(kw);
     } else if let Some(spelled) = spell_string_literals(&string_lits) {
@@ -122,6 +137,29 @@ fn spell_string_literals(strings: &[&str]) -> Option<Vec<String>> {
         preds = preds.intersect(StrPreds::of(s));
     }
     Some(vec![preds_keyword(preds)])
+}
+
+/// The tightest int-range keyword a phpdoc interval arm spells as: the three named
+/// predicate classes, else the explicit `int<lo, hi>` interval (PHPStan's own
+/// spelling, spaces after the comma). Mirrors the dump surface's own ladder so the
+/// contract-arm renderer and the value-fact renderer agree.
+fn int_range_keyword(r: IntRange) -> String {
+    if r == IntRange::POSITIVE {
+        "positive-int".to_owned()
+    } else if r == IntRange::NEGATIVE {
+        "negative-int".to_owned()
+    } else if r == IntRange::NON_NEGATIVE {
+        "non-negative-int".to_owned()
+    } else {
+        format!("int<{}, {}>", r.lo(), r.hi())
+    }
+}
+
+/// Spell a float literal as PHPStan does: an integral value keeps a visible
+/// fractional part (`5.0`, not `5`); every other value uses its shortest
+/// round-tripping decimal (`3.14`).
+fn float_literal(f: f64) -> String {
+    if f.is_finite() && f.fract() == 0.0 { format!("{f:.1}") } else { f.to_string() }
 }
 
 /// The tightest refined-string keyword a predicate summary admits (the keyword half

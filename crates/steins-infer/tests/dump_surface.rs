@@ -395,3 +395,99 @@ fn dump_of_depth_2_chain_stays_unknown() {
         $h = new H(); $h->p = 7; \\PHPStan\\dumpType($h->p->q);";
     assert_eq!(one_type(src), "dumped type: unknown");
 }
+
+
+// ---- Scalar `@param` envelope seeding (ADR-0052 §9, contract-arm completion) ----
+//
+// A scalar `@param` envelope lowers to a contract-arm lane the introspection surface
+// renders: `positive-int`/`int<lo, hi>`/literal/`StrWith` arms now spell (they were
+// seeded before, but the shared speller punted on them). The subset discipline (the
+// trust order's refine-within) drops an arm the native base cannot cover.
+
+/// The single `debug.phpdoc-type` message body a one-dump source produces.
+fn one_phpdoc(src: &str) -> String {
+    let ds = dumps(src);
+    let pd: Vec<&Diagnostic> = ds.iter().filter(|d| d.id == DEBUG_PHPDOC_TYPE_ID).collect();
+    assert_eq!(pd.len(), 1, "expected exactly one debug.phpdoc-type dump, got {ds:?}");
+    pd[0].message.clone()
+}
+
+#[test]
+fn scalar_param_positive_int_seeds_an_asserted_arm() {
+    // No native base: the `@param positive-int` envelope alone seeds an Asserted arm,
+    // rendered on both surfaces. `dumpType` shows the arm (no value fact exists).
+    let pd = "<?php\n/** @param positive-int $n */\nfunction f($n) { \\PHPStan\\dumpPhpDocType($n); }\n";
+    assert_eq!(one_phpdoc(pd), "dumped phpdoc type: positive-int (asserted)");
+    let ty = "<?php\n/** @param positive-int $n */\nfunction f($n) { \\PHPStan\\dumpType($n); }\n";
+    assert_eq!(one_type(ty), "dumped type: positive-int (asserted)");
+}
+
+#[test]
+fn scalar_param_int_interval_renders() {
+    let src = "<?php\n/** @param int<1, 5> $n */\nfunction f($n) { \\PHPStan\\dumpPhpDocType($n); }\n";
+    assert_eq!(one_phpdoc(src), "dumped phpdoc type: int<1, 5> (asserted)");
+}
+
+#[test]
+fn scalar_param_refines_within_a_native_base() {
+    // `@param positive-int` on a native `int` refines within it — Asserted (a strict
+    // subset, not an exact match), and the native value seed still wins on dumpType.
+    let pd = "<?php\n/** @param positive-int $m */\nfunction f(int $m) { \\PHPStan\\dumpPhpDocType($m); }\n";
+    assert_eq!(one_phpdoc(pd), "dumped phpdoc type: positive-int (asserted)");
+    let ty = "<?php\n/** @param positive-int $m */\nfunction f(int $m) { \\PHPStan\\dumpType($m); }\n";
+    assert_eq!(one_type(ty), "dumped type: int");
+}
+
+#[test]
+fn scalar_param_contradicting_the_native_type_seeds_nothing() {
+    // Subset discipline: `@param string` on `int $x` is a contradiction — the docblock
+    // never widens past the runtime-enforced native type, so it seeds NO arm. The
+    // native `int` value seed still flows to dumpType.
+    let pd = "<?php\n/** @param string $x */\nfunction f(int $x) { \\PHPStan\\dumpPhpDocType($x); }\n";
+    assert_eq!(one_phpdoc(pd), "dumped phpdoc type: no declared contract");
+    let ty = "<?php\n/** @param string $x */\nfunction f(int $x) { \\PHPStan\\dumpType($x); }\n";
+    assert_eq!(one_type(ty), "dumped type: int");
+}
+
+// ---- Declared-return call-site seeding (ADR-0052 §9, the return direction) ------
+
+#[test]
+fn declared_object_return_makes_the_value_visible() {
+    // A `: Foo` native return seeds a Verified Instance-MEMBERSHIP arm at the call
+    // site — the object, previously invisible, now dumps as `Foo` (no exactness: no
+    // `(asserted)` since Verified, but membership, not an exact-class fact).
+    let src = "<?php\nclass Foo {}\nfunction createFoo(int $n): Foo { return new Foo(); }\n\
+               function g() { $foo = createFoo(123); \\PHPStan\\dumpType($foo); }\n";
+    assert_eq!(one_type(src), "dumped type: Foo");
+}
+
+#[test]
+fn declared_union_return_narrows_under_instanceof() {
+    // A `: User|Guest` return seeds both membership arms; an `instanceof User` guard
+    // subtracts `User` on the else-branch (N4 narrowing over the return arms), leaving
+    // exactly `Guest` — the assertions_instanceof_narrowing shape at a CALL SITE.
+    let src = "<?php\nclass User {}\nclass Guest {}\n\
+               function who(): User|Guest { return new User(); }\n\
+               function g() { $u = who(); if ($u instanceof User) {} else { \\PHPStan\\dumpType($u); } }\n";
+    assert_eq!(one_type(src), "dumped type: Guest");
+}
+
+#[test]
+fn declared_return_phpdoc_refines_asserted() {
+    // `@return positive-int` refines within the native `int` return — an Asserted arm
+    // seeded at the call site (the body here is not foldable, so no value fact beats
+    // the arm floor).
+    let src = "<?php\n/** @return positive-int */\nfunction mk(int $s): int { return $s + 1; }\n\
+               function g() { $x = mk(5); \\PHPStan\\dumpPhpDocType($x); }\n";
+    assert_eq!(one_phpdoc(src), "dumped phpdoc type: positive-int (asserted)");
+}
+
+#[test]
+fn a_folded_return_value_beats_the_return_arm() {
+    // Precedence (ADR-0052 §9): a proven value fact is the floor's ceiling. A trivially
+    // foldable `: int` return resolves to the literal `1`, which wins over the `int`
+    // membership arm on dumpType.
+    let src = "<?php\nfunction mkInt(): int { return 1; }\n\
+               function g() { $x = mkInt(); \\PHPStan\\dumpType($x); }\n";
+    assert_eq!(one_type(src), "dumped type: 1");
+}
