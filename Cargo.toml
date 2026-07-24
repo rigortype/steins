@@ -17,7 +17,7 @@ resolver = "3"
 members = ["crates/*", "xtask"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0-rc1"
 edition = "2024"
 rust-version = "1.97"
 # AGPL-3.0-only core (ADR-0025). The MIT attributes package lives in its own

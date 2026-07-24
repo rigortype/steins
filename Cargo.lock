@@ -1024,11 +1024,11 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "steins-catalog"
-version = "0.0.0"
+version = "0.1.0-rc1"
 
 [[package]]
 name = "steins-cli"
-version = "0.0.0"
+version = "0.1.0-rc1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1043,7 +1043,7 @@ dependencies = [
 
 [[package]]
 name = "steins-contract"
-version = "0.0.0"
+version = "0.1.0-rc1"
 dependencies = [
  "proptest",
  "serde",
@@ -1054,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "steins-db"
-version = "0.0.0"
+version = "0.1.0-rc1"
 dependencies = [
  "salsa",
  "steins-syntax",
@@ -1062,14 +1062,14 @@ dependencies = [
 
 [[package]]
 name = "steins-domain"
-version = "0.0.0"
+version = "0.1.0-rc1"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "steins-edit"
-version = "0.0.0"
+version = "0.1.0-rc1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1083,7 +1083,7 @@ dependencies = [
 
 [[package]]
 name = "steins-infer"
-version = "0.0.0"
+version = "0.1.0-rc1"
 dependencies = [
  "salsa",
  "steins-catalog",
@@ -1097,18 +1097,18 @@ dependencies = [
 
 [[package]]
 name = "steins-phpdoc"
-version = "0.0.0"
+version = "0.1.0-rc1"
 
 [[package]]
 name = "steins-sidecar"
-version = "0.0.0"
+version = "0.1.0-rc1"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "steins-syntax"
-version = "0.0.0"
+version = "0.1.0-rc1"
 dependencies = [
  "mago-allocator",
  "mago-database",
@@ -1432,7 +1432,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "xtask"
-version = "0.0.0"
+version = "0.1.0-rc1"
 dependencies = [
  "rayon",
  "semver",
