@@ -130,27 +130,32 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
     let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
     let emittable: HashSet<&str> = ALL_EMITTABLE_IDS.iter().copied().collect();
 
-    // S2/S3: the flagship and the offset pair are emittable and no longer pending.
+    // S2/S3: the flagship and the offset pair are emittable proof-layer ids.
     for id in [CALL_UNDEFINED_METHOD_ID, OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID] {
         assert!(emittable.contains(id), "`{id}` must be emittable from its stage (S2/S3)");
         assert!(!pending.contains(id), "`{id}` must have left REGISTERED_NOT_YET_EMITTED");
         assert_eq!(layer(id), Some(Layer::Proof));
     }
 
-    // The remaining six are still registered ahead of emission.
+    // S6: the declared-receiver lane is emittable and left the pending list — a
+    // **contract**-layer id (the paired-id precedent), not proof.
+    assert!(emittable.contains(PHPDOC_UNDEFINED_METHOD_ID), "S6 must be emittable");
+    assert!(!pending.contains(PHPDOC_UNDEFINED_METHOD_ID), "S6 must have left REGISTERED_NOT_YET_EMITTED");
+    assert_eq!(layer(PHPDOC_UNDEFINED_METHOD_ID), Some(Layer::Contract));
+
+    // The remaining five are still registered ahead of emission (S4/S5).
     for id in [
         CALL_UNDEFINED_FUNCTION_ID,
         CLASS_UNDEFINED_ID,
         CALL_TOO_FEW_ARGUMENTS_ID,
         CALL_TOO_MANY_ARGUMENTS_ID,
         CALL_UNKNOWN_NAMED_ARGUMENT_ID,
-        PHPDOC_UNDEFINED_METHOD_ID,
     ] {
         assert!(pending.contains(id), "`{id}` should be registered-not-yet-emitted");
         assert!(!emittable.contains(id), "`{id}` must not be emittable before its stage");
         assert!(layer(id).is_some(), "`{id}` must be registered with a layer");
     }
-    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 6);
+    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 5);
 }
 
 /// An unregistered id has no layer (the lookup is exact, not prefix-based).

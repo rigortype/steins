@@ -213,6 +213,10 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // proof over proven container values under the read-context whitelist.
     OFFSET_MISSING_ID,
     OFFSET_ON_UNSUPPORTED_ID,
+    // The declared-receiver lane, lit up at ADR-0049 S6 (`check_phpdoc_undefined_method`):
+    // the contract-layer method-absence claim over N4's narrowed contract-arm lists,
+    // under per-arm descendant closure.
+    PHPDOC_UNDEFINED_METHOD_ID,
     suppress::SUPPRESS_UNMATCHED_ID,
     suppress::SUPPRESS_UNKNOWN_ID,
 ];
@@ -238,7 +242,7 @@ pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
     CALL_TOO_MANY_ARGUMENTS_ID,
     CALL_UNKNOWN_NAMED_ARGUMENT_ID,
     // OFFSET_MISSING_ID / OFFSET_ON_UNSUPPORTED_ID lit up at S3 — now in ALL_EMITTABLE_IDS.
-    PHPDOC_UNDEFINED_METHOD_ID,
+    // PHPDOC_UNDEFINED_METHOD_ID lit up at S6 — now in ALL_EMITTABLE_IDS.
 ];
 
 /// The maximum depth of interprocedural argument-binding descent (Feature B).
@@ -3504,7 +3508,13 @@ fn analyze_scope(
                 // parameter's declared type — never seed a lane from it.
                 if e.is_assert_target(&p.name) { None } else { e.param(&p.name) }
             });
-            if let Some(arms) = seed_contract_arms(p, phpdoc)
+            // Resolve phpdoc class arms in the param's namespace context (its offset
+            // falls in the same region as the `@param` docblock), matching the FQNs
+            // the `instanceof` subtrahend and S6's `find_class` use.
+            let resolve = |n: &str| {
+                cx.resolve_pclass(cx.cur, p.span.start, n).trim_start_matches('\\').to_ascii_lowercase()
+            };
+            if let Some(arms) = seed_contract_arms(p, phpdoc, &resolve)
                 && !arms.is_empty()
             {
                 store.contract.insert(p.name.clone(), arms);
@@ -3646,6 +3656,12 @@ fn walk_trace(
                     // once there, so a descent must not re-judge the same site.
                     if descent.is_none() {
                         check_undefined_method(cx, folder, call, store, scope.poisoned, out);
+                        // The declared-receiver lane (ADR-0049 §8 / S6): a method
+                        // absent on a phpdoc-declared receiver narrowed by branch
+                        // analysis, under per-arm descendant closure. Disjoint from
+                        // S2 by construction — S2 fires on class_exact receivers, S6
+                        // only on non-exact receivers carrying a narrowed arm lane.
+                        check_phpdoc_undefined_method(cx, folder, call, store, scope.poisoned, out);
                     }
                     handle_method_call(
                         cx,
@@ -5119,7 +5135,21 @@ fn seed_fact(p: &Param) -> Option<Fact> {
 ///
 /// By-ref / variadic params are skipped (the caller may rebind a by-ref; a variadic
 /// is an array), matching [`seed_fact`].
-fn seed_contract_arms(p: &Param, phpdoc: Option<&PType>) -> Option<Vec<ContractArm>> {
+///
+/// `resolve_class` namespace-resolves a phpdoc **class** arm's name to its normalized
+/// (lowercase, no leading `\`) project FQN, using the callee file's namespace/use
+/// context — the same resolution [`Cx::resolve_pclass`] performs for every other
+/// phpdoc class contract. Without it, a `@param User|Guest` under a `namespace`
+/// would seed the arm lane with the *unqualified* names while the `instanceof`
+/// subtrahend (and S6's `find_class`) carry the fully-qualified ones, so subtraction
+/// would silently keep both arms and the declared-receiver lane could never close
+/// (the latent N4 gap this consumer surfaces). Native `Instance` arms are already
+/// FQN-resolved at syntax lowering, so only the phpdoc arms are re-resolved.
+fn seed_contract_arms(
+    p: &Param,
+    phpdoc: Option<&PType>,
+    resolve_class: &dyn Fn(&str) -> String,
+) -> Option<Vec<ContractArm>> {
     if p.by_ref || p.variadic {
         return None;
     }
@@ -5130,6 +5160,12 @@ fn seed_contract_arms(p: &Param, phpdoc: Option<&PType>) -> Option<Vec<ContractA
             let out: Vec<ContractArm> = arms
                 .into_iter()
                 .map(|ty| {
+                    // Resolve a top-level class arm against the callee namespace; the
+                    // native member list already holds FQNs, so this aligns the two.
+                    let ty = match ty {
+                        ContractTy::Class(n) => ContractTy::Class(resolve_class(&n)),
+                        other => other,
+                    };
                     let stratum = if native.iter().any(|n| normalize::arm_eq(n, &ty)) {
                         Stratum::Verified
                     } else {
@@ -7183,6 +7219,304 @@ fn check_undefined_method(
     );
     out.push(Diagnostic {
         id: CALL_UNDEFINED_METHOD_ID,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// The declared-receiver lane: `phpdoc.undefined-method` (ADR-0049 §8 / S6).
+//
+// The **contract-layer** twin of `call.undefined-method`. Where S2 fires on a
+// proven-exact receiver (`class_exact`), S6 fires on a receiver whose *declared*
+// type — a phpdoc `@param User|Guest`, narrowed by branch analysis (N4) down to a
+// surviving contract-arm list — provably lacks the method under a stricter ladder:
+// "conditional is not enough" (§8), so each surviving arm must clear both the §4
+// chain legs AND **descendant closure** (a subclass, incl. an `eval`-minted one,
+// could satisfy the contract and define the method).
+//
+// **Disjointness from S2 (stated in code).** S2 owns `class_exact` receivers; S6
+// requires the receiver be NOT exact — an inexact/lower-bound `$var` carrying a
+// narrowed arm lane. A receiver is never judged by both ids: an exact object has no
+// contract lane consulted here (the `is_exact` bail), and a lane-carrying var is
+// never `class_exact`. The two lists (`ALL_EMITTABLE_IDS`) stay disjoint too.
+//
+// This id **accepts Asserted premises** (contract layer, ADR-0052 §5): the
+// narrowed lane's arms may be `Asserted` (a `@param` refinement) — the finding is
+// coherent at the min stratum. It still respects `absence_family_available` (A9
+// monkey-patch silence + the A2ii homonym leg needs a live sidecar) and the A11
+// version-skew demotion of descendant closure.
+// ---------------------------------------------------------------------------
+
+/// The `(receiver-var, method)` an S6 claim can rest on, or `None` when the call is
+/// out of scope for the declared-receiver lane (silence). Only a plain
+/// `$var->method(...)` qualifies: `?->` (leg l), static/`$this`/`new`/dynamic forms,
+/// and the first-class-callable shape are excluded exactly as S2 excludes them.
+fn phpdoc_undefined_method_receiver(call: &CallExpr) -> Option<(String, String)> {
+    // Leg (l): the first-class-callable form builds a Closure, never a call.
+    if !call.positional_only && call.args.is_empty() {
+        return None;
+    }
+    match &call.receiver {
+        Callee::Method { receiver: Receiver::Var(v), method, nullsafe: false } => {
+            Some((v.clone(), method.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// The project-wide descendant enumeration of a union member (ADR-0049 §8 / A4).
+enum DescendantClosure<'a> {
+    /// The member is `final` (or an enum): no subclass can exist — extending it is
+    /// fatal — so the arm is immune and needs no descendant scan and no dam.
+    Immune,
+    /// The member's descendant declarations are **completely enumerated** (no
+    /// obstacle): every declared class either provably is-a the member (collected
+    /// here) or provably is not, over declarations (both halves of an Ambiguous FQN)
+    /// with alias-edge parent matching and interface edge kinds. A non-empty set
+    /// still requires the dam clear (an `eval`-minted subclass) before it closes.
+    Enumerated(Vec<(usize, &'a ClassDecl)>),
+    /// Closure is tainted — Unknown ⇒ silence. An anonymous class could extend the
+    /// member (invisible to the index), a candidate's is-a is Unknown (incomplete
+    /// hierarchy), the member itself is Ambiguous/absent, or a catalog-backed verdict
+    /// is demoted under a PHP-minor skew (A11).
+    Obstacle,
+}
+
+/// Whether the specific declaration `cd` (in file `file`) provably **is-a**
+/// `target` (lowercase FQN), walking its own inheritance edges directly rather than
+/// through the deduped index — so an Ambiguous declaration still contributes as a
+/// descendant (A4). A direct edge resolving to the *same index site* as `target`
+/// counts as `Yes`, which folds literal `class_alias` edges into parent matching
+/// (`class B extends LegacyName` with `class_alias('T', 'LegacyName')` makes B a
+/// descendant of T). Deeper hops defer to the trinary [`Cx::is_a`] oracle, whose
+/// `Unknown` (an unresolvable/uncatalogued ancestor) taints the enumeration.
+fn decl_is_a(cx: &Cx, file: usize, cd: &ClassDecl, target: &str) -> IsA {
+    let tree = &cx.units[file].tree;
+    let arm_site = match cx.index.resolve_class(target) {
+        Res::Unique(s) => Some(s),
+        _ => None,
+    };
+    let mut edges: Vec<String> = Vec::new();
+    if let Some(p) = &cd.parent {
+        edges.push(tree.resolve_class_fqn(p));
+    }
+    for i in &cd.implements {
+        edges.push(tree.resolve_class_fqn(i));
+    }
+    if cd.is_enum {
+        edges.push("UnitEnum".to_owned());
+        if cd.enum_backing.is_some() {
+            edges.push("BackedEnum".to_owned());
+        }
+    }
+    let mut any_unknown = false;
+    for e in &edges {
+        let en = e.trim_start_matches('\\');
+        if en.eq_ignore_ascii_case(target) {
+            return IsA::Yes;
+        }
+        // Alias-edge / site-identity parent match (A4): the direct edge resolves to
+        // the same index site as the arm.
+        if let (Some(a), Res::Unique(es)) = (arm_site, cx.index.resolve_class(en))
+            && es == a
+        {
+            return IsA::Yes;
+        }
+        match cx.is_a(en, target) {
+            IsA::Yes => return IsA::Yes,
+            IsA::Unknown => any_unknown = true,
+            IsA::No => {}
+        }
+    }
+    if any_unknown { IsA::Unknown } else { IsA::No }
+}
+
+/// Enumerate the project-wide descendant set of a union member (ADR-0049 §8 / A4).
+/// A query-style whole-universe function (ADR-0048): recomputed per run, no ordering
+/// dependence. See [`DescendantClosure`].
+fn descendant_closure<'a>(cx: &Cx<'a>, arm_fqn: &str) -> DescendantClosure<'a> {
+    // The member must resolve Unique — an Ambiguous/absent member cannot be closed.
+    let Some((_, arm_cd)) = cx.find_class(arm_fqn) else {
+        return DescendantClosure::Obstacle;
+    };
+    // A `final` class or an enum has no subclass — extending it is fatal — so the
+    // arm is immune (A9 already gated finality via `absence_family_available`).
+    if arm_cd.is_final || arm_cd.is_enum {
+        return DescendantClosure::Immune;
+    }
+    // A11: a PHP-minor skew can fake a catalog-backed is-a edge, so descendant
+    // closure demotes to Unknown (blanket v1) — silence, never a wrong narrowing.
+    if cx.a11_demote_catalog() {
+        return DescendantClosure::Obstacle;
+    }
+    // A4 anonymous-class obstacle: an anon class is invisible to the index, so any
+    // one whose extends/implements edge could reach the member taints closure.
+    for unit in cx.units {
+        for edge in unit.tree.anonymous_class_edges() {
+            let refs = edge.parent.iter().chain(edge.implements.iter());
+            for r in refs {
+                let efqn = unit.tree.resolve_class_fqn(r);
+                let en = efqn.trim_start_matches('\\');
+                if en.eq_ignore_ascii_case(arm_fqn) {
+                    return DescendantClosure::Obstacle;
+                }
+                // is-a-or-Unknown against the member ⇒ a possible invisible descendant.
+                match cx.is_a(en, arm_fqn) {
+                    IsA::Yes | IsA::Unknown => return DescendantClosure::Obstacle,
+                    IsA::No => {}
+                }
+            }
+        }
+    }
+    // Enumerate declared descendants over ALL declarations (not the deduped index —
+    // both halves of an Ambiguous FQN count, A4). A single Unknown candidate (an
+    // incompletely-enumerated hierarchy) taints the whole closure.
+    let mut descendants: Vec<(usize, &'a ClassDecl)> = Vec::new();
+    for (fi, unit) in cx.units.iter().enumerate() {
+        for cd in unit.tree.classes() {
+            if cd.fqn.eq_ignore_ascii_case(arm_fqn) {
+                continue; // the member itself (Unique — resolved above).
+            }
+            match decl_is_a(cx, fi, cd, arm_fqn) {
+                IsA::Yes => descendants.push((fi, cd)),
+                IsA::Unknown => return DescendantClosure::Obstacle,
+                IsA::No => {}
+            }
+        }
+    }
+    DescendantClosure::Enumerated(descendants)
+}
+
+/// Whether a descendant declaration could **introduce** `method` (or an obstacle
+/// that hides it) below a member whose own chain already lacks it (ADR-0049 §8). A
+/// descendant that declares the method, uses a trait, is an enum (A3, methods
+/// unlowered), or carries `__call` is a witness that the runtime object — though
+/// contract-typed as the member — may answer the call. Any such descendant makes
+/// the absence claim fail (silence).
+fn descendant_introduces_method(cd: &ClassDecl, method: &str) -> bool {
+    cd.is_enum
+        || cd.is_trait
+        || cd.uses_traits
+        || cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__call"))
+        || cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case(method))
+}
+
+/// Run the full §8 ladder for one narrowed contract arm and return its display
+/// simple-name when the method is **provably absent** across the arm's whole
+/// hierarchy *and* its complete descendant set, or `None` when any leg fails
+/// (silence). Instance calls only — the declared-receiver lane is `$var->m()`.
+fn arm_provably_lacks_method(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    arm_fqn: &str,
+    method: &str,
+) -> Option<String> {
+    // §4 chain closure over the arm's own ancestor chain (reuses S2's walk).
+    let ChainWalk::Absent { simple_chain, fqns, any_conditional } =
+        enumerate_method_chain(cx, arm_fqn, method, UndefKind::Instance)
+    else {
+        return None;
+    };
+    // A2i: a conditional declaration in the chain re-dams the claim.
+    if any_conditional && !cx.dam.is_clear() {
+        return None;
+    }
+    // A2ii homonym: every chain FQN must be answered NOT-present by the boot surface.
+    for fqn in &fqns {
+        if folder.boot_surface_class_like(fqn) != Some(false) {
+            return None;
+        }
+    }
+    // Descendant closure (A4): the arm is final-immune, or its descendant set is
+    // fully enumerated AND the dam is clear (an `eval`-minted subclass), and no
+    // descendant introduces the method.
+    match descendant_closure(cx, arm_fqn) {
+        DescendantClosure::Immune => {}
+        DescendantClosure::Obstacle => return None,
+        DescendantClosure::Enumerated(descendants) => {
+            if !cx.dam.is_clear() {
+                return None; // eval could mint a subclass carrying the method.
+            }
+            for (_, dcd) in &descendants {
+                if descendant_introduces_method(dcd, method) {
+                    return None;
+                }
+                // A homonym descendant may be dead code shadowed by a loaded class.
+                if folder.boot_surface_class_like(&dcd.fqn) != Some(false) {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(simple_chain.first().cloned().unwrap_or_else(|| arm_fqn.to_owned()))
+}
+
+/// Run the ADR-0049 §8 ladder for one `$var->method()` and emit
+/// `phpdoc.undefined-method` iff the receiver's narrowed contract-arm lane consists
+/// entirely of class arms that **each** provably lack the method under descendant
+/// closure. Contract layer — Asserted arms are coherent premises; any leg failure
+/// on any arm is silence.
+fn check_phpdoc_undefined_method(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    store: &Store,
+    poisoned: bool,
+    out: &mut Vec<Diagnostic>,
+) {
+    if poisoned {
+        return;
+    }
+    let Some((var, method)) = phpdoc_undefined_method_receiver(call) else {
+        return;
+    };
+    // Disjointness with S2: an exact receiver is S2's, never S6's.
+    if store.is_exact(&var) {
+        return;
+    }
+    // The narrowed declared-type arm lane (N4's accessor). No lane ⇒ nothing declared
+    // to close over.
+    let Some(arms) = store.contract_arms(&var) else {
+        return;
+    };
+    if arms.is_empty() {
+        return;
+    }
+    // Every surviving arm must be a class/interface arm: a scalar/array/null arm
+    // means the runtime receiver may be a non-object, so a method-absence claim does
+    // not hold (a different error, out of this lane) — silence.
+    let mut class_fqns: Vec<String> = Vec::with_capacity(arms.len());
+    for a in arms {
+        match &a.ty {
+            steins_contract::ContractTy::Class(f) => class_fqns.push(f.clone()),
+            _ => return,
+        }
+    }
+    // A9 (monkey-patch) + A2ii's honest consequence: without a live sidecar, or with
+    // a runtime-redefinition extension loaded, the id is silent (checked once).
+    if !folder.absence_family_available() {
+        return;
+    }
+    // Every arm must provably lack the method under its closed ladder.
+    let mut arm_names: Vec<String> = Vec::with_capacity(class_fqns.len());
+    for f in &class_fqns {
+        match arm_provably_lacks_method(cx, folder, f, &method) {
+            Some(name) => arm_names.push(name),
+            None => return, // any arm not provably-absent ⇒ silence.
+        }
+    }
+
+    let pos = cx.tree().position(call.span.start);
+    let arms_disp = arm_names.join("|");
+    let message = format!(
+        "call to undefined method {arms_disp}::{method}() — declared receiver ${var} narrowed to {{{arms_disp}}}, \
+         hierarchy and descendants fully enumerated, no __call"
+    );
+    out.push(Diagnostic {
+        id: PHPDOC_UNDEFINED_METHOD_ID,
         path: cx.path().to_owned(),
         line: pos.line,
         column: pos.column,
@@ -9505,6 +9839,12 @@ mod n4_carrier_tests {
         ProjectIsa { cx, demote_catalog: cx.a11_demote_catalog() }
     }
 
+    /// The identity class resolver for the global-namespace seeding tests: the
+    /// lowered phpdoc names are already the normalized FQNs there.
+    fn id_resolve(n: &str) -> String {
+        n.to_ascii_lowercase()
+    }
+
     // ---- native_arms / flatten_arms / seeding -------------------------------
 
     #[test]
@@ -9515,12 +9855,12 @@ mod n4_carrier_tests {
             let params = cx.scope_params(scope).unwrap();
             // `?int` → [int, null] Verified.
             assert_eq!(
-                seed_contract_arms(&params[0], None),
+                seed_contract_arms(&params[0], None, &id_resolve),
                 Some(vec![arm(ContractTy::Base(Base::Int), Stratum::Verified), arm(ContractTy::Null, Stratum::Verified)])
             );
             // `User|Guest` native (object instances) → [User, Guest] Verified.
             assert_eq!(
-                seed_contract_arms(&params[1], None),
+                seed_contract_arms(&params[1], None, &id_resolve),
                 Some(vec![arm(cls("user"), Stratum::Verified), arm(cls("guest"), Stratum::Verified)])
             );
         });
@@ -9534,7 +9874,7 @@ mod n4_carrier_tests {
             let scope = cx.tree().scopes().iter().find(|s| matches!(&s.owner, ScopeOwner::Function(n) if n == "f")).unwrap();
             let p = &cx.scope_params(scope).unwrap()[0];
             let env = cx.scope_envelopes(scope).unwrap();
-            let seeded = seed_contract_arms(p, env.param("value")).unwrap();
+            let seeded = seed_contract_arms(p, env.param("value"), &id_resolve).unwrap();
             assert_eq!(
                 seeded,
                 vec![arm(cls("user"), Stratum::Asserted), arm(cls("guest"), Stratum::Asserted)]
@@ -9553,7 +9893,7 @@ mod n4_carrier_tests {
             let p = &cx.scope_params(scope).unwrap()[0];
             let env = cx.scope_envelopes(scope).unwrap();
             assert_eq!(
-                seed_contract_arms(p, env.param("x")),
+                seed_contract_arms(p, env.param("x"), &id_resolve),
                 Some(vec![arm(ContractTy::Base(Base::Int), Stratum::Verified)])
             );
         });

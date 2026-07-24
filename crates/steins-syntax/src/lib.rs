@@ -1548,6 +1548,25 @@ pub struct ClassAliasEdge {
     pub span: Span,
 }
 
+/// An **anonymous class** declaration's inheritance edges (ADR-0049 A4 —
+/// descendant-closure obstacle detection). Anonymous classes (`new class extends
+/// Report {...}`) carry no FQN and never enter the class index, so a "completely
+/// enumerated" descendant set of a union member would silently miss one that
+/// `extends`/`implements` the member and defines the sought method. The
+/// declared-receiver lane (S6) reads these **edge-only** lowerings (parent +
+/// implements refs, no members) to taint closure: any anon-class edge that
+/// resolves to — or is Unknown against — a union member forces `Unknown` (silence).
+/// Refs resolve to FQNs project-wide at query time, like every other [`NameRef`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AnonClassEdge {
+    /// The `extends` parent as written, if any.
+    pub parent: Option<NameRef>,
+    /// The interfaces the anonymous class `implements`.
+    pub implements: Vec<NameRef>,
+    /// The `new class` construct's source span.
+    pub span: Span,
+}
+
 /// An owned, Mago-free lowering of one parsed PHP file — the syntax-tree
 /// contract for the slice.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1566,6 +1585,10 @@ pub struct SourceTree {
     /// `class_alias` is a [`DynamismKind::ClassAlias`] dam site in [`Self::dynamism`]
     /// instead. Carried but consumed by nothing in the S1 groundwork slice.
     class_alias_edges: Vec<ClassAliasEdge>,
+    /// Anonymous-class inheritance edges found file-wide (ADR-0049 A4). Read by the
+    /// declared-receiver lane's descendant closure (S6) — an invisible descendant
+    /// obstacle. Consumed by nothing else.
+    anon_class_edges: Vec<AnonClassEdge>,
     parse_errors: Vec<ParseError>,
     /// The comment trivia in the file, in source order (ADR-0023 inline ignores).
     comments: Vec<Comment>,
@@ -1639,6 +1662,7 @@ impl SourceTree {
             scopes,
             dynamism: lowered.dynamism,
             class_alias_edges: lowered.class_alias_edges,
+            anon_class_edges: lowered.anon_class_edges,
             parse_errors,
             comments,
             contexts,
@@ -1717,6 +1741,14 @@ impl SourceTree {
         &self.class_alias_edges
     }
 
+    /// The anonymous-class inheritance edges found file-wide (ADR-0049 A4). Read by
+    /// the declared-receiver lane's descendant closure (S6) to detect an invisible
+    /// descendant of a union member (an anon class is never in the class index).
+    #[must_use]
+    pub fn anonymous_class_edges(&self) -> &[AnonClassEdge] {
+        &self.anon_class_edges
+    }
+
     /// Whether the file contains any `eval(...)` construct.
     #[must_use]
     pub fn contains_eval(&self) -> bool {
@@ -1771,6 +1803,7 @@ struct Lowered {
     calls: Vec<CallExpr>,
     dynamism: Vec<DynamismSite>,
     class_alias_edges: Vec<ClassAliasEdge>,
+    anon_class_edges: Vec<AnonClassEdge>,
 }
 
 fn walk(
@@ -1789,6 +1822,21 @@ fn walk(
             // file-wide (like the dynamism set), before the call itself is lowered.
             classify_class_alias(c, out);
             out.calls.push(lower_call(c));
+        }
+        // Anonymous class (`new class extends P implements I {...}`, ADR-0049 A4):
+        // edge-only lowering — its inheritance refs, no members and no FQN. A
+        // descendant-closure walk (S6) reads these to taint closure when one could
+        // extend/implement a union member.
+        Node::AnonymousClass(ac) => {
+            out.anon_class_edges.push(AnonClassEdge {
+                parent: ac.extends.as_ref().and_then(|e| e.types.iter().next()).map(name_ref),
+                implements: ac
+                    .implements
+                    .as_ref()
+                    .map(|i| i.types.iter().map(name_ref).collect())
+                    .unwrap_or_default(),
+                span: to_span(ac.span()),
+            });
         }
         Node::DeclareItem(d) if is_strict_types_one(d) => out.strict_types = true,
         // Dynamic-code constructs (ADR-0046 §2). Collected file-wide (the walk
