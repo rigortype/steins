@@ -60,7 +60,11 @@ the project actually runs** (ADR-0004/0024): a resident sidecar does
 constant folding, environment facts (version, SAPI, extensions), and the
 existence oracle (`reflect`); the builtin catalog is never an absence
 oracle (ADR-0049 §1). No sidecar means a quieter *sound subset* whose
-silences are named.
+silences are named. Runtime-first is the release posture, not the last
+word: handling **lower-version signature diffs** (library-range checking)
+is an intended later direction — deferred, not refused, and deliberately
+unprepared-for in the current implementation. What stays refused is
+emulating versions the project does not run.
 
 ## Optimistic maybe-reporting vs the zero-FP proof layer
 
