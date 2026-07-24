@@ -111,13 +111,23 @@ deferral.
    "Declaration-coherence lints"). PHPStan itself fails both **by design**
    (phpstan/phpstan#7572), so this is a shared refusal, not a divergence
    from PHPStan. Standing refusal.
-3. **No `static`/`self` return-position acceptance**
-   (`objects_static_return_mismatch`). A `: static` (or `: self`) return
-   whose body returns a provably-unrelated class is not reported: ADR-0043
-   §1 leaves `self`/`static`/`parent` unlowered (silent) — late-static
-   binding is out of v1 scope. The return-position lower-bound check is
-   licensed machinery, just unbuilt this milestone: an honest **deferral**,
-   not a permanent refusal, taken up when the object-world LSB posture is.
+3. **`static`/`self` return-position acceptance — deferral discharged,
+   superseded by the ADR-0043 amendment (2026-07-24)**
+   (`objects_static_return_mismatch`). Originally registered as an honest
+   deferral: ADR-0043 §1 left `self`/`static`/`parent` unlowered. The
+   amendment brings return position into v1 via the minimum-bound lemma —
+   every late-bound class `T` satisfies `is_a(T, C) = Yes`, so an exact
+   returned class with `is_a(V, C) = No` fails *every* possible `T`: an
+   unconditional runtime `TypeError` (verified PHP 8.5.8), proof-layer
+   under the existing `type.return-mismatch`, no worst-case reasoning.
+   What stays out, now as a **standing refusal** rather than a deferral:
+   the conditional shapes — `new self()` under `: static` in an open
+   class (breaks only on proper-descendant receivers; PHPStan reports it
+   by worst-casing, ADR-0002 refuses it; silent by construction since
+   `is_a(C, C) = Yes`) and sibling-subclass returns. No conformance case
+   exercises the conditional shapes (the fixture class is `final`), so
+   this entry no longer records a suite divergence — only the
+   PHPStan-behavior delta on the refused shapes.
 4. **No `resource` type nor resource-value tracking**
    (`native_types_resource_argument`). `resource` is not a native type — a
    `resource $x` hint is a reference to a non-existent class `…\resource`
