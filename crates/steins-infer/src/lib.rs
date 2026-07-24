@@ -4203,9 +4203,16 @@ fn apply_assign(
         // `clone $a` (ADR-0036 adversarial #1): a NEW id with a COPY of the source
         // object's props (PHP shallow clone) — post-clone writes stay isolated.
         ArgValue::Clone(src) if !w.scope.poisoned && store.is_bound(src) => {
+            // Read the source id BEFORE unbinding `var`. For a self-clone
+            // `$a = clone $a` we have `var == src`, so `store.unbind(var)` would
+            // also drop `src`'s binding and make `id_of(src)` return `None`. PHP
+            // evaluates the rvalue (`clone $a`) against the current value first
+            // and only then assigns, so the source id is the pre-assignment one;
+            // capturing it here keeps the guard's `is_bound(src)` invariant true
+            // at the `.expect` for every `var`/`src` pairing.
+            let src_id = store.id_of(src).expect("bound var has an id");
             env.remove(var);
             store.unbind(var);
-            let src_id = store.id_of(src).expect("bound var has an id");
             if let Some(src_obj) = store.heap.get(&src_id) {
                 let mut copy = src_obj.clone();
                 copy.escaped = false; // a fresh, local clone has not escaped

@@ -71,6 +71,29 @@ fn clone_write_does_not_leak_to_original() {
     assert_eq!(count(&src), 0);
 }
 
+#[test]
+fn self_clone_does_not_panic_and_preserves_props() {
+    // `$a = clone $a` (self-clone, `var == src`): the rvalue `clone $a` is
+    // evaluated against the current object, then assigned back to `$a`. This
+    // panicked (`bound var has an id`) when the clone arm unbound `$a` before
+    // reading its source id (survey: mautic `$dateFrom = clone $dateFrom`).
+    // The sound result: `$a` holds a fresh copy carrying the source props, so a
+    // clean `int` prop stays clean (no finding), witnessing the copy survived.
+    let src = format!("{PRELUDE}$a = new Box();\n$a->p = 5;\n$a = clone $a;\nneedInt($a->p);\n");
+    assert_eq!(count(&src), 0, "self-clone must preserve the good prop fact");
+}
+
+#[test]
+fn self_clone_yields_writable_isolated_copy() {
+    // The self-clone result is a live, writable object: corrupting its prop
+    // after the self-clone is observed (one finding), proving the assignment
+    // rebound `$a` to the fresh copy rather than degrading to Opaque.
+    let src = format!(
+        "{PRELUDE}$a = new Box();\n$a->p = 5;\n$a = clone $a;\n$a->p = \"abc\";\nneedInt($a->p);\n"
+    );
+    assert_eq!(count(&src), 1, "corrupted prop on the self-cloned object must fire");
+}
+
 // ---- Escape sweep on pass-to-unknown; non-escaped survival (the payoff) -----
 
 #[test]
