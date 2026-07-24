@@ -105,13 +105,16 @@ trait Folder {
     fn absence_family_available(&mut self) -> bool { false }
     fn boot_surface_class_like(&mut self, fqn: &str) -> Option<bool> { None }
     fn boot_surface_function(&mut self, fqn: &str) -> Option<bool> { None }
+    fn php_minor(&mut self) -> Option<(u16, u16)> { None }
 }
 ```
 
 Two implementations: `NoFold` (the sound subset) and `SidecarFolder`. Every
 default is the conservative answer — no fold, absence family unavailable,
-existence unanswerable — so the sound subset is what you get by *not*
-implementing anything. See [folding-and-sidecar.md](folding-and-sidecar.md).
+existence unanswerable, no detectable version skew (`php_minor` feeds the
+ADR-0052 A11 catalog-skew demotion) — so the sound subset is what you get by
+*not* implementing anything. See
+[folding-and-sidecar.md](folding-and-sidecar.md).
 
 ## The auxiliary passes
 
@@ -135,13 +138,38 @@ Semantics: [`effects.md`](../type-specification/effects.md),
 
 ## The dam
 
-`dam_facts` aggregates whole-universe dynamism sites (`eval`, unproven
-non-vendor `include`, non-literal `class_alias`) as a **query answer** —
-recomputed per run, no entry state, no ordering dependence. It gates the
-existence-absence ids only; method-absence needs no dam.
+`dam_facts` aggregates whole-universe dynamism sites as a **query answer** —
+recomputed per run, no entry state, no ordering dependence: every `eval`; every
+**non-vendor** `include`/`require` whose path is not provably in-universe —
+`Unproven`, a bare-relative or `./`-prefixed literal (A5 as amended: runtime
+resolves those against `include_path` → the script dir → CWD, so
+directory-relative belief is unsound; only absolute and `__DIR__`-anchored
+literals can prove in-universe), or a provable literal that resolves *outside*
+the universe; and every **non-literal** `class_alias`. It exists to gate the
+existence-absence ids only — which have no emitter yet, so today the fact is
+carried and tested but consumed by nothing. Method-absence needs no dam (PHP
+cannot reopen a defined class).
 
 An empty shared dam is used by the auxiliary passes, which never emit an absence
 id and so never read it.
+
+## The finding-breadth emitters
+
+The ADR-0049 family, landed stage by stage (each stage's silence legs are
+tabulated at its emitter):
+
+| Emitter | Ids | Gate |
+| --- | --- | --- |
+| `check_undefined_method` (S2) | `call.undefined-method` | exact-class receivers only; hierarchy fully enumerated; `absence_family_available` (A9) plus the boot-surface class homonym leg (A2ii) |
+| `check_offset_read` (S3) | `offset.missing`, `offset.on-unsupported` | proven container values under the read-context whitelist; warning-grade findings obey the `warning-handler` pseudo-constant |
+| `check_arity` (S5) | `call.too-few-arguments`, `call.unknown-named-argument` | uniquely-resolved userland functions or proven-exact receivers; the boot-surface *function* homonym leg |
+| `check_phpdoc_undefined_method` (S6) | `phpdoc.undefined-method` (contract layer) | the declared-receiver lane over narrowed contract-arm lists, under per-arm descendant closure |
+
+Every doubt leg in every table is **silence** — the family widens the finding
+surface, never the proof standard. The dump surface's `emit_dumps` (ADR-0053
+D3) sits beside them: a recognized `PHPStan\dumpType()` /
+`PHPStan\dumpPhpDocType()` call emits its fact rendering as a debug-layer
+answer.
 
 ## The annotate surface
 

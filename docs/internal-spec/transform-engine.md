@@ -97,6 +97,14 @@ run** with the full offending-site list (text output caps the display; JSON
 carries them all), and while an unvouched obstacle stands, **every candidate
 refuses**.
 
+One asymmetry is deliberate and current: the *checker-side* dam classifies
+bare-relative and `./`-prefixed include literals as unproven (the amended A5
+rule — runtime resolves them against `include_path` first), while the transform
+obstacle detector still resolves a relative literal against the including
+file's directory and treats an in-universe hit as benign. The transform side
+was kept byte-identical when the checker rule was corrected; the two surfaces
+do **not** share the amended rule yet.
+
 The vouch valve (`[transform.vouch]` in [config.md](config.md)) lets a user
 declare that a specific site does not mint the names in question. A run that
 vouched anything **downgrades its completeness claim loudly**:

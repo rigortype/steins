@@ -33,13 +33,35 @@ so resolution stays complete — a partial tree can only silence, never add a fa
 positive. But any diagnostic landing *in* a parse-error file is excluded from the
 gate count.
 
+**Layer-driven partitioning.** The counter partition is decided in exactly one
+place: `gate_bucket` routes each finding by its registry **layer** through a
+`GateBucket` match that is *exhaustive on `Layer`* — proof and mechanics (and
+any unregistered id, conservatively) are `RedOnSight`; contract is
+`Measurement`; debug is `Excluded` from every counter (a dump is not a
+finding). A new `Layer` variant is a compile error here until its gate posture
+is stated.
+
 **Measurement mode.** Contract-layer families (`phpdoc.*`, `throw.*`,
 `effect.*`) are held separately: they are true findings that legitimately abound
 in released code, so they gate as **per-package increase tripwires**, not
-red-on-sight (ADR-0050 §9). The `debug` layer is excluded from every counter.
+red-on-sight (ADR-0050 §9). The seeded expectations are hand-maintained tables
+in `gate.rs`: `PHPDOC_EXPECTED` (488 findings across seven entries),
+`THROW_EXPECTED` (44,184 — dominated by the legacy monorepo's 43,964, and
+including the 20 `throw.undeclared` TRUEs seeded for phpstan-src at its
+registration), and `EFFECT_EXPECTED`, seeded **empty**: an all-zero tripwire
+that is vacuous until an envelope-annotated package lands, and correct the day
+one does. Moving a count is a conscious, comment-triaged act, never a drive-by.
+
 Triaged true positives in the proof layer are **fingerprint-pinned**
-(`EXPECTED_PROOF_FINDINGS`), so a known-good finding does not re-block, and a
-*new* one does.
+(`EXPECTED_PROOF_FINDINGS`), matched at finding precision — package + id +
+path suffix + line + a message substring — so a known-good finding does not
+re-block, and *any* drift does. Currently **13 pins**: the monolog
+`stdClass`-into-`MongoDBHandler` TypeError the package's own test expects, ten
+S2 `call.undefined-method` findings on the legacy monorepo, and two S5
+`call.too-few-arguments` findings there (path suffixes deliberately shortened
+past the private-corpus directory names). The discipline is staged opening:
+a new family lands in measurement, its findings are triaged verbatim, and only
+then are TRUEs pinned or counts seeded.
 
 **Vendor.** Vendor findings are excluded from local projects' verdicts
 (ADR-0015) and tallied separately.
@@ -51,9 +73,13 @@ at exactly that revision, so the gate is reproducible. Current entries include
 `composer/composer`, `sebastianbergmann/phpunit`, `guzzle/guzzle`, and others
 chosen for style diversity rather than size.
 
-`corpus.local.toml` injects **live working trees** — notably a private legacy
-monorepo — that are deliberately not pinned and not committed. Total scale at the
-last recorded run: ~90,709 files.
+`corpus.local.toml` injects **live working trees** that are deliberately not
+pinned and not committed: a private legacy monorepo, and — registered
+2026-07-24 at the v0.1.0 run — `phpstan/phpstan-src` (curated, pathological,
+modern PHP; `tests/` and `e2e/` excluded as deliberately-broken fixtures, so
+`src/` is the clean FP-hunting surface). Its first run: 0 proof-layer, 0
+`phpdoc.*`, 20 `throw.undeclared` — all triaged TRUE and seeded into
+`THROW_EXPECTED`. Total scale at the last recorded run: ~99,280 files.
 
 Held-out projects used for adoption drills are never used for tuning; that
 separation is what makes an adoption-drill number mean anything. See

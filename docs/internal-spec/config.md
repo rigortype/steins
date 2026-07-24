@@ -69,10 +69,15 @@ Boot-truth pseudo-constants the checker cannot observe from source.
   so proven warning-grade offset findings emit. `"null"` declares the app
   tolerates the warning, and those findings leave the proof surface.
 
-**This section uses `deny_unknown_fields`.** A misspelled key is a hard parse
-error, deliberately: a silently-ignored `zend-asertions` typo would leave the
-safe default in force while the user believed otherwise. Reserved keys for
-future pseudo-constants (`include-path`, `sapi`) join here as they land.
+**This section uses `deny_unknown_fields`.** A misspelled key fails the parse,
+deliberately: a silently-ignored `zend-asertions` typo would leave the safe
+default in force while the user believed otherwise. What the binary does with
+that failure: the parse error is reported loudly and the run proceeds on the
+**safe runtime defaults** — the typo can never silently masquerade as the
+user's intended override, but it does not abort the run. An unrecognized
+*value* on a known key warns and keeps the safe default the same way. Reserved
+keys for future pseudo-constants (`include-path`, `sapi`) join here as they
+land.
 
 ### `[transform.vouch]`
 

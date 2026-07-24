@@ -23,15 +23,21 @@ trait Folder {
     fn absence_family_available(&mut self) -> bool { false }
     fn boot_surface_class_like(&mut self, fqn: &str) -> Option<bool> { None }
     fn boot_surface_function(&mut self, fqn: &str) -> Option<bool> { None }
+    fn php_minor(&mut self) -> Option<(u16, u16)> { None }
 }
 ```
 
 Every default is the conservative answer, so **the sound subset is what you get
-by implementing nothing**. `NoFold` is literally the defaults.
+by implementing nothing**. `NoFold` is literally the defaults. `php_minor` is
+the ADR-0052 A11 version-skew input: `None` means "no detectable skew", so the
+catalog pin stands.
 
 `absence_family_available()` returns true only when a live sidecar is answering
 *and* no runtime-redefinition extension (`uopz`, `runkit7`, `Componere`) is
-loaded. With any of those present, no absence claim holds at all.
+loaded — read from `env`'s extension list and memoized as a whole-run property.
+With any of those present, no absence claim holds at all. The
+`boot_surface_*` homonym answers are memoized per FQN the same way, so a
+repeated chain class never re-asks the sidecar.
 
 ## The folding gate
 

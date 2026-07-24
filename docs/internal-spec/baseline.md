@@ -65,6 +65,10 @@ id set (ADR-0050 §8). Two consequences:
 A pre-ADR-0050 header lacking `profile`/`surface` parses as `None`, and such a
 baseline simply skips the surface-exceeds notice.
 
+Debug-layer ids (ADR-0053) are **baseline-exempt**: they never enter the
+captured id set and are never matched as entries — a dump is displayed but
+never baselined, on every profile.
+
 ## Staleness
 
 An entry inside the current surface that matches no finding this run is

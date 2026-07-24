@@ -20,7 +20,10 @@ adopted behind this contract. It is not the contract owner.
 `SourceTree::parse(text)` produces an owned tree carrying:
 
 - `declare(strict_types=1)` per file, and the namespace / `use`-import context
-  (`NsCtx`) at each offset — the input to PHP name resolution.
+  (`NsCtx`) at each offset — the input to PHP name resolution. Grouped `use`
+  lists (`use A\{B, C}`, both the typed and the mixed form) are lowered to
+  their flat imports — an unlowered grouped import was a real
+  resolution-FP source, fixed with the S5 wave.
 - **Function declarations** (`FunctionDecl`): FQN, parameters with native types
   and defaults, return type, docblock text and span, effect envelope, effect
   origins, throw origins, and a `conditional` flag.
@@ -34,7 +37,11 @@ adopted behind this contract. It is not the contract owner.
   fully-qualified, qualified, or unqualified — which is the syntactic input the
   resolution rules key on. Resolution itself lives in `steins-infer`.
 - **Dynamism sites** (`eval`, `include`/`require` with a classified path,
-  `class_alias`) for the [dam](../type-specification/dynamism.md).
+  `class_alias`) for the [dam](../type-specification/dynamism.md). Literal
+  `class_alias` calls additionally surface as index edges
+  (`class_alias_edges`), and anonymous-class inheritance edges
+  (`anonymous_class_edges`) are collected file-wide for the declared-receiver
+  lane's descendant closure — an anon class is never in the class index.
 
 The lowering is deliberately *demand-grown*: it started at exactly what the
 first check needed, and each construct was added when a check required it. What
