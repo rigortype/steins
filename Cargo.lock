@@ -1437,6 +1437,7 @@ dependencies = [
  "rayon",
  "semver",
  "serde",
+ "serde_json",
  "steins-db",
  "steins-infer",
  "steins-phpdoc",

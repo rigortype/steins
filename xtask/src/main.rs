@@ -5,6 +5,7 @@
 //!   fp-gate                  run the proof-layer pipeline over the corpus (gate)
 //!   freq                     builtin-call frequency, written to docs/notes/
 //!   gen-catalog              regenerate the builtin hierarchy table from mining TOML
+//!   nsrt [DIR]               assertType harness (oracle idea B) over phpstan-src nsrt
 //!   phpdoc-oracle [--check]  diff steins-phpdoc against the real phpstan/phpdoc-parser
 //!
 //! It links the analysis crates directly (never shells out to the `steins`
@@ -15,6 +16,7 @@ mod corpus_local;
 mod freq;
 mod gate;
 mod gen_catalog;
+mod nsrt;
 mod phpdoc_oracle;
 mod sync;
 
@@ -43,6 +45,13 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => fail(&e),
         },
+        Some("nsrt") => {
+            let dir = args.get(1).filter(|a| !a.starts_with("--")).map(String::as_str);
+            match nsrt::run(dir) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => fail(&e),
+            }
+        }
         Some("phpdoc-oracle") => {
             let check = args[1..].iter().any(|a| a == "--check");
             match phpdoc_oracle::run(check) {
@@ -51,11 +60,11 @@ fn main() -> ExitCode {
             }
         }
         Some(other) => fail(&format!(
-            "unknown command `{other}` (corpus-sync | fp-gate | freq | gen-catalog | phpdoc-oracle)"
+            "unknown command `{other}` (corpus-sync | fp-gate | freq | gen-catalog | nsrt | phpdoc-oracle)"
         )),
         None => {
             eprintln!(
-                "usage: cargo xtask <corpus-sync [--update] | fp-gate | freq | gen-catalog | phpdoc-oracle [--check]>"
+                "usage: cargo xtask <corpus-sync [--update] | fp-gate | freq | gen-catalog | nsrt [DIR] | phpdoc-oracle [--check]>"
             );
             ExitCode::from(2)
         }

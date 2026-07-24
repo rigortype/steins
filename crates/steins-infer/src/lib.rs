@@ -924,6 +924,69 @@ pub fn check_project_with_runtime(
     check_units(&units, &index, folder, zend_assertions, warning_handler_abort)
 }
 
+// ---------------------------------------------------------------------------
+// The assertType harness seam (oracle idea B): consume
+// `PHPStan\Testing\assertType('T', $e)` and measure Steins' rendering of `$e`
+// against PHPStan's asserted string. This is **harness-only** — recognition is
+// gated on a thread-local sink installed exclusively by [`collect_assert_types`],
+// so a normal check never sees `assertType` as anything but an ordinary call (the
+// check surface is byte-identical). It reuses the D3 dump path verbatim
+// (`best_dump_type` → `render_dump_fact`/speller) so the rendered fact matches
+// what `PHPStan\dumpType` would emit for the same expression.
+// ---------------------------------------------------------------------------
+
+/// One `PHPStan\Testing\assertType('Expected', $expr)` observation (oracle idea B).
+/// The expected type string PHPStan asserts, paired with Steins' own rendering of
+/// the second argument at that call position (the same best-fact + speller path the
+/// D3 dump surface uses). Collected ONLY by [`collect_assert_types`].
+#[derive(Debug, Clone)]
+pub struct AssertObservation {
+    /// The project-relative path of the file the assertion lives in.
+    pub path: String,
+    /// The 1-based line of the `assertType(...)` call.
+    pub line: u32,
+    /// The 1-based column of the call.
+    pub column: u32,
+    /// The first-argument type-string literal PHPStan asserts, when it is a
+    /// resolvable string literal. `None` when the expected slot is a
+    /// `::class`/concatenation expression Steins cannot fold to a plain string —
+    /// the harness counts those as *skipped*, never a spurious match.
+    pub expected: Option<String>,
+    /// Steins' rendering of the second argument's best fact (the dump-surface
+    /// speller), or the honest `unknown` when nothing faithful can be spelled.
+    pub got: String,
+    /// Whether `got` rode an `Asserted`-stratum premise (a docblock/assert claim
+    /// rather than a proven value) — surfaced so the harness never mistakes a
+    /// laundered docblock type for a proof.
+    pub asserted: bool,
+}
+
+thread_local! {
+    /// The harness-only assertType sink (oracle idea B). `None` during every normal
+    /// check — the [`emit_asserts`] recognizer is a no-op then, so the check surface
+    /// is byte-identical (assertType stays an ordinary call). [`collect_assert_types`]
+    /// installs a fresh buffer for one project run and drains it.
+    static ASSERT_SINK: std::cell::RefCell<Option<Vec<AssertObservation>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Harness entry point (oracle idea B, the nsrt assertType measurement): analyze
+/// `project` exactly as [`check_project`] would, but collect every
+/// `PHPStan\Testing\assertType('T', $e)` call's (expected string, Steins rendering)
+/// pair. NOT part of the check surface — recognition is gated on the installed sink,
+/// so a normal check never sees `assertType` as anything but an ordinary call, and
+/// the returned diagnostics of `check_project` are unchanged (and here discarded).
+#[must_use]
+pub fn collect_assert_types(
+    db: &dyn Db,
+    project: Project,
+    folder: &mut dyn Folder,
+) -> Vec<AssertObservation> {
+    ASSERT_SINK.with(|s| *s.borrow_mut() = Some(Vec::new()));
+    let _ = check_project(db, project, folder);
+    ASSERT_SINK.with(|s| s.borrow_mut().take().unwrap_or_default())
+}
+
 /// The pure single-file check (sound subset). Kept for unit tests and callers
 /// that never execute PHP. `functions` is accepted for signature stability; the
 /// tree's own function list is authoritative.
@@ -4001,6 +4064,11 @@ fn walk_trace(
                         // rendering at this position. Plain per-scope pass only, so a
                         // site is dumped once (never re-emitted under a binding descent).
                         emit_dumps(w, folder, call, env, store, out);
+                        // Oracle idea B (harness-only): when the assertType sink is
+                        // installed, record this call's (expected, rendering) pair.
+                        // A no-op in every normal check (the sink is absent), so this
+                        // adds nothing to the check surface.
+                        emit_asserts(w, folder, call, env, store);
                     }
                     try_descend_function(cx, folder, call, env, scope.poisoned, descent.as_mut(), out);
                 }
@@ -4669,6 +4737,77 @@ fn emit_dumps(
                 message: dump_message("dumped type", &rendering),
             });
         }
+    }
+}
+
+/// The resolved FQN of `PHPStan\Testing\assertType` (oracle idea B), lowercase-
+/// normalized — the assertType harness recognizer key, matched exactly like the
+/// dump family's [`DUMP_FQNS`], by resolved FQN (definition- and case-insensitive).
+const ASSERT_TYPE_FQN: &str = "phpstan\\testing\\asserttype";
+
+/// Harness-only (oracle idea B): when the assertType sink is installed
+/// ([`collect_assert_types`]), recognize a `PHPStan\Testing\assertType('T', $e)` call
+/// by resolved FQN and record (expected string, Steins rendering of `$e`) — the
+/// rendering shares the D3 dump path ([`best_dump_type`]) verbatim. A no-op when the
+/// sink is absent (every normal check), so the check surface is byte-identical.
+/// Runs in the plain per-scope pass only (like [`emit_dumps`]), so a site is recorded
+/// once — never re-observed under a binding descent.
+fn emit_asserts(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    store: &Store,
+) {
+    // Fast path: no sink ⇒ not the harness ⇒ assertType is an ordinary call.
+    if ASSERT_SINK.with(|s| s.borrow().is_none()) {
+        return;
+    }
+    let cx = w.cx;
+    let Callee::Function(_) = &call.receiver else { return };
+    let Some(r) = call.callee_ref.as_ref() else { return };
+    if resolved_fn_fqn(cx, r) != ASSERT_TYPE_FQN {
+        return;
+    }
+    // `assertType('Expected', $expr)` needs both positional arguments; a first-class
+    // callable or a mis-arity call records nothing (there is no fact pair to observe).
+    if call.args.len() < 2 {
+        return;
+    }
+    let expected = assert_expected_string(cx, &call.args[0].value, env, w.scope.poisoned, folder);
+    let rendering = best_dump_type(w, folder, &call.args[1].value, env, store);
+    let pos = cx.tree().position(call.span.start);
+    let obs = AssertObservation {
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        expected,
+        got: rendering.text,
+        asserted: rendering.asserted,
+    };
+    ASSERT_SINK.with(|s| {
+        if let Some(buf) = s.borrow_mut().as_mut() {
+            buf.push(obs);
+        }
+    });
+}
+
+/// The expected-type string an `assertType` first argument names: a plain string
+/// literal, or a value Steins can fold to one; `None` for a `::class`/concatenation
+/// the fold cannot reduce (the harness counts those as skipped, never a false match).
+fn assert_expected_string(
+    cx: &Cx,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    folder: &mut dyn Folder,
+) -> Option<String> {
+    if let ArgValue::Str(s) = value {
+        return Some(s.clone());
+    }
+    match cx.resolve_literal(value, env, poisoned, folder) {
+        Some(ArgValue::Str(s)) => Some(s),
+        _ => None,
     }
 }
 
