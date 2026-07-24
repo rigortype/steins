@@ -1,7 +1,7 @@
 # Dynamism and Absence Proofs
 
 **Status: partial** — the dam is computed and consumed by the absence ids that
-have landed; the ids waiting on ADR-0049 S4 are marked below. ADR-0046,
+have landed, including the ADR-0049 S4 existence ids. ADR-0046,
 ADR-0049.
 
 ## Unanalyzability, not nondeterminism
@@ -82,8 +82,8 @@ present, no absence claim holds.
 | `call.too-few-arguments` | proof | a uniquely-resolved target, fewer positional args than required params | **emits** |
 | `call.unknown-named-argument` | proof | a named argument binding no parameter of a resolved non-variadic target | **emits** |
 | `phpdoc.undefined-method` | contract | narrowed declared-receiver arms, each under descendant closure | **emits** |
-| `call.undefined-function` | proof | the dam clear, no candidate FQN, sidecar not-found | registered, **not emitted** (ADR-0049 S4) |
-| `class.undefined` | proof | the same, at a hard-error position (`new`, static call, class-const fetch) | registered, **not emitted** (S4) |
+| `call.undefined-function` | proof | the dam clear, no candidate FQN, sidecar not-found | **emitting** (ADR-0049 S4, landed) |
+| `class.undefined` | proof | the same, at a hard-error position (`new`, static call, class-const fetch) | **emitting** (S4, landed) |
 | `call.too-many-arguments` | proof | an **internal** non-variadic target | registered, **not emitted** (needs the reflect slice) |
 
 The arity table is **asymmetric on purpose**, and every row was `php -r`-verified

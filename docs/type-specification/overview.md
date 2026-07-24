@@ -105,14 +105,17 @@ Emitting ids, by layer (the registry is the source of truth —
 
 - **proof** — `type.argument-mismatch`, `type.return-mismatch`,
   `type.property-mismatch`, `call.on-null`, `readonly.reassigned`,
-  `call.undefined-method`, `call.too-few-arguments`,
-  `call.unknown-named-argument`, `offset.missing`, `offset.on-unsupported`.
+  `call.undefined-method`, `call.undefined-function`, `class.undefined`,
+  `call.too-few-arguments`, `call.unknown-named-argument`,
+  `offset.missing`, `offset.on-unsupported`.
 - **contract** — `phpdoc.param-mismatch`, `phpdoc.return-mismatch`,
   `phpdoc.property-mismatch`, `phpdoc.undefined-method`, `throw.undeclared`,
   `throw.liskov-widened`, `effect.envelope-exceeded`, `effect.liskov-widened`.
 - **mechanics** — `suppress.unmatched`, `suppress.unknown-id`,
   `effect.unknown-label` (a typo'd label is apparatus rot, not a contract
   claim).
+- **debug** — `debug.type`, `debug.phpdoc-type` (fail-level, profile-inert),
+  `debug.var-dump` (warn-level, exit-neutral, disableable) — ADR-0053 D3/D4.
 
 Registered but **not yet emitted** — the registry reserves the id and its layer
 so `@steins-ignore` can name it and a profile can select it, but no emitter
@@ -120,11 +123,7 @@ produces it (`REGISTERED_NOT_YET_EMITTED`):
 
 | Id | Waiting on |
 | --- | --- |
-| `call.undefined-function` | ADR-0049 S4 (scoped into v0.1.0, not landed) |
-| `class.undefined` | ADR-0049 S4 (same) |
 | `call.too-many-arguments` | the sidecar `reflect` slice — the arm fires for *internal* targets only, since userland too-many runs clean and is never a finding |
-| `debug.type`, `debug.phpdoc-type`, `debug.var-dump` | ADR-0053 D3/D4 (landed) |
-| `debug.var-dump` | ADR-0053 D4 (same) |
 
 CLI surface: `check`, `annotate`, `transform`. ADR-0020 declares six commands;
 `doctor`, `lsp`, and `mcp` are **designed, not implemented**, and are

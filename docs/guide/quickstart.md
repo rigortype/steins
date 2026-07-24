@@ -122,10 +122,12 @@ through profiles, deliberately, never dumped on you by a first run.
 - **No warm or incremental runs.** Every `check` is a cold batch analysis.
 - **No LSP or editor server yet.** `annotate` gives a one-shot margin view
   of inferred types and effects; a resident `lsp` server is later work.
-- **The dump surface is landing in v0.1.0.** `PHPStan\dumpType()` and
-  default-on `var_dump()` introspection (ADR-0053) are specified but not yet
-  emitted by this binary — a committed `dumpType()` will not yet red your
-  build, and `var_dump()` reports nothing. Do not rely on it here.
+- **The dump surface is live.** `PHPStan\dumpType($e)` prints the inferred
+  fact and **reds the build** (fail-level — remove it before committing, as
+  with PHPStan); `var_dump()` reports its arguments' inferred facts by
+  default at warn level (exit-neutral; disable with a profile's
+  `disable = ["debug.var-dump"]`). See the handbook's type-system chapter
+  for a tour built on `dumpType()`.
 - **Conformance posture, not a scoreboard.** Steins tracks the
   php-typing-conformance suite but does not claim a headline pass fraction
   in this doc — the default surface deliberately hides contract-layer
