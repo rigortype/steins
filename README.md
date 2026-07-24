@@ -6,3 +6,10 @@ A **shameless knockoff** heavily 'inspired' by PHPStan, born from my grand delus
 
 - [Quickstart](docs/guide/quickstart.md) — install, first run, exit codes, limits.
 - [Profiles and baseline](docs/guide/profiles-and-baseline.md) — named stages, the baseline ratchet, `steins.toml`.
+
+### Specifications
+
+- [Type specification](docs/type-specification/README.md) — what the analysis *means*: the value domain, acceptance, narrowing, effects, throws, diagnostic policy.
+- [Internal specification](docs/internal-spec/README.md) — analyzer-internal contracts: crate topology, syntax tree, trace IR, query graph, sidecar, config, transforms.
+- [Not implemented](docs/type-specification/not-implemented.md) — the honest gap list.
+- [Roadmap](docs/ROADMAP.md) — milestones, exit criteria, and the refusal list.
