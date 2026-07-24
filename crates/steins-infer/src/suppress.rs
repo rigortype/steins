@@ -340,6 +340,15 @@ pub fn apply_inline_ignores(
         let mut used: Vec<Vec<bool>> = dirs.iter().map(|d| vec![false; d.patterns.len()]).collect();
 
         for f in findings.iter().filter(|f| &f.path == path) {
+            // ADR-0053 §4: the debug lane is exempt from inline ignores — a dump is an
+            // answered question, not a finding; the remedy is deleting the call, one
+            // keystroke away. A debug finding is never suppressed and never marks a
+            // directive pattern used, so an `@steins-ignore debug.type` naming it stays
+            // unmatched and earns `suppress.unmatched` (the anti-rot channel's normal job).
+            if matches!(layer(f.id), Some(Layer::Debug)) {
+                kept.push(f.clone());
+                continue;
+            }
             let mut is_suppressed = false;
             for (di, d) in dirs.iter().enumerate() {
                 if d.target_line != f.line {

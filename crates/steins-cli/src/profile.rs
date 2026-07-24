@@ -41,8 +41,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
 use steins_infer::{
-    DIAGNOSTIC_REGISTRY, Diagnostic, Facet, Layer, Origin, THROW_UNDECLARED_ID, layer,
-    pattern_is_known, pattern_matches,
+    DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, DIAGNOSTIC_REGISTRY, Diagnostic, Facet,
+    Layer, Origin, THROW_UNDECLARED_ID, layer, pattern_is_known, pattern_matches,
 };
 
 /// The default profile name, used when neither `--profile` nor `[check] profile`
@@ -175,17 +175,14 @@ fn layer_always_on(l: Layer) -> bool {
     match l {
         Layer::Mechanics => true,
         Layer::Proof | Layer::Contract => false,
-        // ADR-0053 D1 groundwork, zero behavior: the debug lane is registered but
-        // no id emits yet, and no built-in surface includes it. Returning `false`
-        // keeps every registered `Layer::Debug` id (`debug.type` /
-        // `debug.phpdoc-type` / `debug.var-dump`) off the display surface AND out of
-        // `surface_ids()` — so a `--set-baseline` never captures a debug id (§4's
-        // baseline exemption) and the gate/baseline output stay byte-identical to the
-        // pre-dump run. The default-ON emission with the profile-inert (explicit
-        // pair) / disableable (`debug.var-dump`, §4) split is wired by the D3/D4
-        // emit slices, where the ids actually surface; it is deliberately NOT a
-        // `layer_always_on` answer, because "always on" here also means "captured in
-        // the baseline", which a dump must never be.
+        // The debug lane (ADR-0053 §4/§8) is **never** captured in a baseline and
+        // never enters `surface_ids()`, so it stays off *this* predicate — which
+        // governs `surface_ids()` (the baseline capture set) and the surface-aware
+        // staleness partition. Its DISPLAY is handled separately in
+        // [`Surface::is_surfaced`] (default-ON on every profile, the explicit pair
+        // profile-inert, `debug.var-dump` disableable — §4). Keeping capture and
+        // display split is exactly the §4/§8 exemption: a dump is displayed but never
+        // baselined. The exhaustive match still forces this variant to be stated.
         Layer::Debug => false,
     }
 }
@@ -240,6 +237,17 @@ impl Surface {
     /// `throw.undeclared` finding is kept only when its origin facet is `direct`.
     #[must_use]
     pub fn is_surfaced(&self, d: &Diagnostic) -> bool {
+        // The debug lane (ADR-0053 §4) is default-ON on every profile but never in
+        // `surfaces_id` (baseline-exempt, §8). The explicit pair is profile-inert (no
+        // profile disables or demotes it, like mechanics); `debug.var-dump` is the one
+        // profile-disableable dump (`disable = ["debug.var-dump"]`), ON by default in
+        // every built-in.
+        if let Some(Layer::Debug) = layer(d.id) {
+            if d.id == DEBUG_VAR_DUMP_ID {
+                return !self.disable.iter().any(|p| pattern_matches(p, d.id));
+            }
+            return true;
+        }
         if !self.surfaces_id(d.id) {
             return false;
         }
@@ -253,6 +261,17 @@ impl Surface {
     /// `warn = [...]` pattern matches. A pure function of the id (warn matches ids).
     #[must_use]
     pub fn level(&self, id: &str) -> Level {
+        // The debug lane's levels are FIXED (ADR-0053 §3), never touched by a profile
+        // `warn`/`enable` channel: the explicit pair fails (a committed call names a
+        // function that does not exist at runtime — a guaranteed fatal), `var_dump`
+        // warns (exit-neutral forever — a leftover `var_dump` is working PHP; a lint
+        // rule is refused, ADR-0017). No channel promotes `debug.var-dump` to fail.
+        if id == DEBUG_VAR_DUMP_ID {
+            return Level::Warn;
+        }
+        if id == DEBUG_TYPE_ID || id == DEBUG_PHPDOC_TYPE_ID {
+            return Level::Fail;
+        }
         if self.warn.iter().any(|p| pattern_matches(p, id)) {
             Level::Warn
         } else {
@@ -513,24 +532,73 @@ mod tests {
     }
 
     #[test]
-    fn debug_ids_are_off_every_surface_and_baseline_exempt_in_d1() {
-        // ADR-0053 D1 (zero behavior): the debug lane is registered but unemitted,
-        // and no built-in surface includes it. Every debug id is off the display
-        // surface on default, contracts, and throws-direct — so it never reaches a
-        // later channel — and (crucially) excluded from `surface_ids()`, the baseline
-        // capture set, honoring §4's baseline exemption. The default-ON emission with
-        // the inert/disableable split lands in the D3/D4 emit slices.
+    fn debug_lane_displays_default_on_every_profile_but_is_baseline_exempt() {
+        // ADR-0053 §4/§8: the debug lane is default-ON on every built-in profile
+        // (display), yet NEVER captured in a baseline (`surfaces_id` / `surface_ids`
+        // stay false — the capture/display split). The explicit pair is profile-inert;
+        // `var_dump` is disableable but ON by default here (no built-in disables it).
         for profile in [None, Some("contracts"), Some("throws-direct")] {
             let s = empty().resolve(profile).unwrap();
             for id in [DEBUG_TYPE_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_VAR_DUMP_ID] {
-                assert!(!s.surfaces_id(id), "`{id}` must be off the surface in D1 ({profile:?})");
-                assert!(!s.is_surfaced(&diag(id, None)), "`{id}` finding must not surface in D1");
+                assert!(
+                    s.is_surfaced(&diag(id, None)),
+                    "`{id}` must display on every built-in profile ({profile:?})"
+                );
+                assert!(
+                    !s.surfaces_id(id),
+                    "`{id}` must stay off the baseline capture predicate ({profile:?})"
+                );
                 assert!(
                     !s.surface_ids().iter().any(|c| c == id),
                     "`{id}` must be excluded from the baseline capture set (§4 exemption)"
                 );
             }
         }
+    }
+
+    #[test]
+    fn debug_levels_are_fixed_pair_fails_var_dump_warns() {
+        // ADR-0053 §3: fixed levels, untouched by any profile channel. The explicit
+        // pair fails (a committed call is a runtime fatal); `var_dump` warns
+        // (exit-neutral forever). Even a `warn = ["debug.*"]` cannot demote the pair,
+        // and no channel promotes `var_dump` to fail.
+        let s = empty().resolve(None).unwrap();
+        assert_eq!(s.level(DEBUG_TYPE_ID), Level::Fail);
+        assert_eq!(s.level(DEBUG_PHPDOC_TYPE_ID), Level::Fail);
+        assert_eq!(s.level(DEBUG_VAR_DUMP_ID), Level::Warn);
+
+        let mut m = BTreeMap::new();
+        m.insert(
+            "p".to_owned(),
+            UserProfile { warn: vec!["debug.*".to_owned()], ..Default::default() },
+        );
+        let w = ProfileConfigs(m).resolve(Some("p")).unwrap();
+        assert_eq!(w.level(DEBUG_TYPE_ID), Level::Fail, "the pair is fail-fixed, warn cannot demote");
+        assert_eq!(w.level(DEBUG_VAR_DUMP_ID), Level::Warn);
+    }
+
+    #[test]
+    fn var_dump_is_profile_disableable_but_the_pair_is_inert() {
+        // ADR-0053 §4: `disable = ["debug.var-dump"]` turns the incidental dump off;
+        // the explicit pair is profile-inert (disable is ignored, like mechanics).
+        let mut m = BTreeMap::new();
+        m.insert(
+            "quiet".to_owned(),
+            UserProfile { disable: vec!["debug.var-dump".to_owned()], ..Default::default() },
+        );
+        let s = ProfileConfigs(m).resolve(Some("quiet")).unwrap();
+        assert!(!s.is_surfaced(&diag(DEBUG_VAR_DUMP_ID, None)), "var_dump disabled by profile");
+        assert!(s.is_surfaced(&diag(DEBUG_TYPE_ID, None)), "the explicit pair stays inert");
+        assert!(s.is_surfaced(&diag(DEBUG_PHPDOC_TYPE_ID, None)), "the explicit pair stays inert");
+
+        // Disabling the pair is a no-op (profile-inert): they still display.
+        let mut m2 = BTreeMap::new();
+        m2.insert(
+            "try".to_owned(),
+            UserProfile { disable: vec!["debug.type".to_owned()], ..Default::default() },
+        );
+        let s2 = ProfileConfigs(m2).resolve(Some("try")).unwrap();
+        assert!(s2.is_surfaced(&diag(DEBUG_TYPE_ID, None)), "the explicit pair ignores disable");
     }
 
     #[test]

@@ -206,6 +206,36 @@ pub const DEBUG_PHPDOC_TYPE_ID: &str = "debug.phpdoc-type";
 /// fixed — exit-neutral forever (§3), profile-disableable (§4). Emitted from D4.
 pub const DEBUG_VAR_DUMP_ID: &str = "debug.var-dump";
 
+/// The resolved FQN of `PHPStan\dumpType` (ADR-0053 §2), lowercase-normalized and
+/// leading-`\`-stripped — the case-insensitive matching key (PHP function names are
+/// case-insensitive).
+pub const DUMP_TYPE_FQN: &str = "phpstan\\dumptype";
+
+/// The resolved FQN of `PHPStan\dumpPhpDocType` (ADR-0053 §2), lowercase-normalized.
+pub const DUMP_PHPDOC_TYPE_FQN: &str = "phpstan\\dumpphpdoctype";
+
+/// The reserved dump-family FQNs (ADR-0053 §5): the explicit pair, recognized
+/// **unconditionally by resolved FQN** — definition-insensitive (a userland
+/// definition of the name does not stand recognition down) and case-insensitive.
+///
+/// **S4 carve-out (ADR-0053 §6), recorded here so it cannot drift:** the future
+/// `call.undefined-function` recognizer (S4, not yet landed) MUST consult this set
+/// and exclude a call whose resolved FQN matches — a recognized dump already reds CI
+/// at that site with a fail-level `debug.type` whose message says what to do, so a
+/// second `call.undefined-function` finding for one deletable line is noise. When S4
+/// lands, its emitter reads `DUMP_FQNS` (or calls [`is_dump_family_fqn`]) directly,
+/// so the exclusion is one source of truth. A pinned fixture in `tests/dump_surface.rs`
+/// (`dump_pair_is_recognized_by_resolved_fqn`) guards the recognizer meanwhile.
+pub const DUMP_FQNS: &[&str] = &[DUMP_TYPE_FQN, DUMP_PHPDOC_TYPE_FQN];
+
+/// Whether `fqn` (lowercase-normalized, leading `\` stripped) is a reserved
+/// dump-family FQN (ADR-0053 §5/§6). The single predicate the dump recognizer and
+/// the future S4 carve-out share.
+#[must_use]
+pub fn is_dump_family_fqn(fqn: &str) -> bool {
+    DUMP_FQNS.contains(&fqn)
+}
+
 /// Every id constant that reaches a `Diagnostic { id: … }` construction site — the
 /// canonical enumeration of what the emitters can produce (ADR-0050 §2 totality).
 ///
@@ -252,6 +282,12 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // until the reflect slice (M2).
     CALL_TOO_FEW_ARGUMENTS_ID,
     CALL_UNKNOWN_NAMED_ARGUMENT_ID,
+    // The dump surface's explicit pair (ADR-0053 D3), lit up here: a recognized
+    // `PHPStan\dumpType($e)` / `PHPStan\dumpPhpDocType($e)` call emits its fact
+    // rendering from `emit_dumps` (the walk's call-handling arm). `debug.var-dump`
+    // stays in `REGISTERED_NOT_YET_EMITTED` until D4.
+    DEBUG_TYPE_ID,
+    DEBUG_PHPDOC_TYPE_ID,
     suppress::SUPPRESS_UNMATCHED_ID,
     suppress::SUPPRESS_UNKNOWN_ID,
 ];
@@ -280,11 +316,9 @@ pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
     CALL_TOO_MANY_ARGUMENTS_ID,
     // OFFSET_MISSING_ID / OFFSET_ON_UNSUPPORTED_ID lit up at S3 — now in ALL_EMITTABLE_IDS.
     // PHPDOC_UNDEFINED_METHOD_ID lit up at S6 — now in ALL_EMITTABLE_IDS.
-    // The dump surface's debug ids (ADR-0053), registered in D1 ahead of emission:
-    // the explicit pair (`debug.type` / `debug.phpdoc-type`) lights up at D3, and
-    // `debug.var-dump` at D4. Each moves into ALL_EMITTABLE_IDS by its emit slice.
-    DEBUG_TYPE_ID,
-    DEBUG_PHPDOC_TYPE_ID,
+    // The dump surface's debug ids (ADR-0053): the explicit pair
+    // (`debug.type` / `debug.phpdoc-type`) lit up at D3 — now in ALL_EMITTABLE_IDS.
+    // `debug.var-dump` lights up at D4; until then it is registered ahead of emission.
     DEBUG_VAR_DUMP_ID,
 ];
 
@@ -3831,6 +3865,11 @@ fn walk_trace(
                     // plain per-scope pass, like the absence flagship.
                     if descent.is_none() {
                         check_arity(cx, folder, call, store, scope.poisoned, out);
+                        // The dump surface (ADR-0053 D3/D4): a recognized
+                        // `PHPStan\dumpType`-family or `var_dump` call emits its fact
+                        // rendering at this position. Plain per-scope pass only, so a
+                        // site is dumped once (never re-emitted under a binding descent).
+                        emit_dumps(w, folder, call, env, store, out);
                     }
                     try_descend_function(cx, folder, call, env, scope.poisoned, descent.as_mut(), out);
                 }
@@ -4107,6 +4146,314 @@ fn value_stratum(value: &ArgValue, env: &HashMap<String, Known>, store: Option<&
             value_stratum(a, env, store).min(value_stratum(b, env, store))
         }
         _ => Stratum::Verified,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The dump surface (ADR-0053): requested introspection — an "answered question".
+// Emitted mid-walk at the call position, reading (never binding) the walk's facts
+// (§7 / §10); the plain per-scope pass only (`descent.is_none()`), so a site is
+// dumped once. The explicit pair (D3) is recognized by resolved FQN; `var_dump`
+// (D4) by the PHP fallback rule. Rendering shares the ONE speller (`spell_arms`).
+// ---------------------------------------------------------------------------
+
+/// The honest-incompleteness rendering (ADR-0053 §7): the dump knows nothing faithful
+/// to spell about the expression. Never a guess, never a `mixed` pretense.
+const DUMP_UNKNOWN: &str = "unknown";
+
+/// The `debug.phpdoc-type` rendering when the contract carrier is empty (ADR-0053
+/// §2): no declared `@param`/native envelope narrows the expression — never a
+/// synthesized type.
+const DUMP_NO_CONTRACT: &str = "no declared contract";
+
+/// Which explicit dump the reserved FQN names (ADR-0053 §2).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DumpFamily {
+    /// `PHPStan\dumpType($e)` → `debug.type`: the trust-ordered best value fact.
+    Type,
+    /// `PHPStan\dumpPhpDocType($e)` → `debug.phpdoc-type`: the declared arm list.
+    PhpDocType,
+}
+
+/// A rendered dump fact plus whether it rode an `Asserted`-stratum premise (ADR-0053
+/// §2 / ADR-0052 §5): an asserted fact carries an explicit `(asserted)` marker so the
+/// introspection surface never launders a docblock claim into a proven value.
+struct DumpRendering {
+    text: String,
+    asserted: bool,
+}
+
+/// The resolved function FQN a call names (ADR-0001 name resolution), lowercase-
+/// normalized and leading-`\`-stripped — **definition-insensitive** (no index lookup:
+/// the reserved dump pair is recognized regardless of whether a userland definition
+/// exists, ADR-0053 §5). Mirrors [`Cx::resolve_function`]'s name computation but
+/// yields the FQN string rather than a resolution verdict.
+fn resolved_fn_fqn(cx: &Cx, r: &NameRef) -> String {
+    match r.kind {
+        RefKind::FullyQualified => r.raw.to_ascii_lowercase(),
+        RefKind::Qualified => {
+            let ctx = cx.tree().ctx_at(r.offset);
+            let first_len = r.raw.find('\\').unwrap_or(r.raw.len());
+            let first = &r.raw[..first_len];
+            let fqn = if let Some(t) = ctx.class_imports.get(&first.to_ascii_lowercase()) {
+                format!("{t}{}", &r.raw[first_len..])
+            } else if ctx.namespace.is_empty() {
+                r.raw.clone()
+            } else {
+                format!("{}\\{}", ctx.namespace, r.raw)
+            };
+            fqn.to_ascii_lowercase()
+        }
+        RefKind::Unqualified => {
+            let ctx = cx.tree().ctx_at(r.offset);
+            let name = r.raw.to_ascii_lowercase();
+            // A `use function` import resolves the name outright.
+            if let Some(t) = ctx.fn_imports.get(&name) {
+                return t.to_ascii_lowercase();
+            }
+            // Otherwise PHP tries the current-namespace candidate first; the global
+            // fallback (bare `name`, no separator) never matches a reserved `PHPStan\`
+            // FQN, so the namespace candidate is the only one recognition needs.
+            if ctx.namespace.is_empty() {
+                name
+            } else {
+                format!("{}\\{}", ctx.namespace.to_ascii_lowercase(), name)
+            }
+        }
+    }
+}
+
+/// Which explicit dump a `Callee::Function` call is, recognized by resolved FQN
+/// (ADR-0053 §5): the reserved `PHPStan\` pair, definition-insensitive and
+/// case-insensitive. `None` for every other call.
+fn dump_family(cx: &Cx, call: &CallExpr) -> Option<DumpFamily> {
+    let Callee::Function(_) = &call.receiver else { return None };
+    let r = call.callee_ref.as_ref()?;
+    match resolved_fn_fqn(cx, r).as_str() {
+        DUMP_TYPE_FQN => Some(DumpFamily::Type),
+        DUMP_PHPDOC_TYPE_FQN => Some(DumpFamily::PhpDocType),
+        _ => None,
+    }
+}
+
+/// A first-class callable `f(...)` (ADR-0049 §6 shape): a non-positional call with
+/// all of `args`/`named_args` empty and no spread. It creates a `Closure`, not a
+/// call — there is no argument expression at the site to dump (ADR-0053 §5 leg f),
+/// and a reserved-name first-class callable is not a dumping call either.
+fn is_first_class_callable(call: &CallExpr) -> bool {
+    !call.positional_only && call.args.is_empty() && call.named_args.is_empty() && !call.has_spread
+}
+
+/// Render a value-domain [`Fact`] for the dump surface through the ONE shared
+/// spelling (ADR-0053 §7). Finite layers (`Singleton`/`OneOf`) go through the N1
+/// normalizer ([`normalize::summarize_vals`]) and the shared plain-text speller
+/// ([`steins_contract::spell::spell_arms`]) — the same path the value-domain docblock
+/// renderer shares (the D2 extraction), so a dump's finite-fact rendering byte-equals
+/// the speller's output for that fact (the parity pin). The abstract layers
+/// (`Refined`/`General`) carry no enumerable value set; they render as the honest
+/// phpdoc keyword ladder, reusing the speller's own `preds_keyword` for refined
+/// strings so the two agree. A set with no faithful scalar spelling (an array member)
+/// renders as honest [`DUMP_UNKNOWN`].
+fn render_dump_fact(fact: &Fact) -> String {
+    if let Some(members) = fact.finite_members() {
+        return normalize::summarize_vals(members)
+            .and_then(|arms| steins_contract::spell::spell_arms(&arms))
+            .unwrap_or_else(|| DUMP_UNKNOWN.to_owned());
+    }
+    match fact {
+        Fact::Refined { base: Base::Int, refinement: Refinement::Int(r), nullable } => {
+            with_null(int_range_keyword(*r), *nullable)
+        }
+        Fact::Refined { base: Base::String, refinement: Refinement::Str(p), nullable } => {
+            with_null(steins_contract::spell::preds_keyword(*p), *nullable)
+        }
+        Fact::Refined { base, nullable, .. } => with_null(base_keyword(*base).to_owned(), *nullable),
+        Fact::General { base, nullable } => with_null(base_keyword(*base).to_owned(), *nullable),
+        // Finite layers are handled above.
+        Fact::Singleton(_) | Fact::OneOf(_) => DUMP_UNKNOWN.to_owned(),
+    }
+}
+
+/// Append `|null` when the fact admits null (the honest nullable spelling).
+fn with_null(s: String, nullable: bool) -> String {
+    if nullable { format!("{s}|null") } else { s }
+}
+
+/// The bare phpdoc keyword for a scalar base.
+fn base_keyword(b: Base) -> &'static str {
+    match b {
+        Base::Int => "int",
+        Base::Float => "float",
+        Base::String => "string",
+        Base::Bool => "bool",
+    }
+}
+
+/// The tightest int-range keyword (mirrors [`describe_fact`]'s ladder): the named
+/// predicate classes, else the explicit `int<lo, hi>` interval.
+fn int_range_keyword(r: IntRange) -> String {
+    if r == IntRange::POSITIVE {
+        "positive-int".to_owned()
+    } else if r == IntRange::NEGATIVE {
+        "negative-int".to_owned()
+    } else if r == IntRange::NON_NEGATIVE {
+        "non-negative-int".to_owned()
+    } else {
+        format!("int<{}, {}>", r.lo(), r.hi())
+    }
+}
+
+/// Render a narrowed contract-fact arm list (ADR-0052 §1 carrier) for the dump
+/// surface. Scalar arms spell through the shared [`steins_contract::spell::spell_arms`];
+/// a pure class/`null` arm list renders each class's simple name; anything else has
+/// no faithful spelling (`None` → the caller falls to honest unknown).
+fn render_contract_arms(arms: &[ContractArm]) -> Option<String> {
+    let tys: Vec<ContractTy> = arms.iter().map(|a| a.ty.clone()).collect();
+    if let Some(scalar) = steins_contract::spell::spell_arms(&tys) {
+        return Some(scalar);
+    }
+    let mut parts = Vec::new();
+    for ty in &tys {
+        match ty {
+            ContractTy::Class(n) => parts.push(n.rsplit('\\').next().unwrap_or(n).to_owned()),
+            ContractTy::Null => parts.push("null".to_owned()),
+            // An array/generic/shape/callable/intersection arm has no faithful plain
+            // spelling here — honest unknown rather than a guess (§7).
+            _ => return None,
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("|"))
+}
+
+/// The best value fact of a dump argument, in the trust order (ADR-0052 §1 /
+/// ADR-0037): a proven value fact, else the object holder's exact class / membership,
+/// else the narrowed declared-arm list, else honest unknown. Drives `debug.type` and
+/// `debug.var-dump` (identical rendering, identical fact source, ADR-0053 §2).
+fn best_dump_type(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: &Store,
+) -> DumpRendering {
+    let cx = w.cx;
+    let poisoned = w.scope.poisoned;
+    if let ArgValue::Var(name) = value {
+        // 1. A proven value fact (the four-layer value domain), carrying its stratum.
+        if let Some(known) = env.get(name)
+            && let Some(fact) = &known.fact
+        {
+            return DumpRendering {
+                text: render_dump_fact(fact),
+                asserted: known.stratum == Stratum::Asserted,
+            };
+        }
+        // 2. An object holder: the heap's exact class (else the lower-bound class).
+        if let Some(obj) = store.obj_of(name) {
+            return DumpRendering { text: obj.class.clone(), asserted: false };
+        }
+        // 3. The narrowed declared-arm list (contract carrier).
+        if let Some(arms) = store.contract_arms(name)
+            && let Some(text) = render_contract_arms(arms)
+        {
+            return DumpRendering {
+                text,
+                asserted: arms.iter().any(|a| a.stratum == Stratum::Asserted),
+            };
+        }
+        // 4. Honest unknown.
+        return DumpRendering { text: DUMP_UNKNOWN.to_owned(), asserted: false };
+    }
+    // A non-variable argument: a resolved literal / foldable value fact, else unknown.
+    if let Some(lit) = cx.resolve_literal(value, env, poisoned, folder)
+        && let Some(fact) = singleton_fact(&lit)
+    {
+        return DumpRendering {
+            text: render_dump_fact(&fact),
+            asserted: value_stratum(value, env, Some(store)) == Stratum::Asserted,
+        };
+    }
+    DumpRendering { text: DUMP_UNKNOWN.to_owned(), asserted: false }
+}
+
+/// The declared-side view of a dump argument (ADR-0053 §2, `debug.phpdoc-type`): the
+/// contract-fact arm list (the declared envelope as narrowed by guards), or
+/// `no declared contract` when the carrier is empty — never a synthesized type.
+fn best_dump_phpdoc_type(value: &ArgValue, store: &Store) -> DumpRendering {
+    if let ArgValue::Var(name) = value
+        && let Some(arms) = store.contract_arms(name)
+        && let Some(text) = render_contract_arms(arms)
+    {
+        return DumpRendering {
+            text,
+            asserted: arms.iter().any(|a| a.stratum == Stratum::Asserted),
+        };
+    }
+    DumpRendering { text: DUMP_NO_CONTRACT.to_owned(), asserted: false }
+}
+
+/// The message frame around a rendered dump fact (ADR-0053 §7: wording is not a
+/// contract, the rendered fact is). Carries the `(asserted)` marker when the fact
+/// rode a docblock/assert premise.
+fn dump_message(label: &str, r: &DumpRendering) -> String {
+    let marker = if r.asserted { " (asserted)" } else { "" };
+    format!("{label}: {}{marker}", r.text)
+}
+
+/// Emit the dump reports a recognized call site produces (ADR-0053 §7): the explicit
+/// pair (D3) by resolved FQN, `var_dump` (D4) by the PHP fallback rule. One report
+/// per positional argument, in argument order; a zero-argument `dumpType()` still
+/// reports (fail-level, "nothing to dump" — the committed call is a runtime fatal
+/// either way). Reads the walk's facts at the call position; binds nothing (§10 §3).
+fn emit_dumps(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    out: &mut Vec<Diagnostic>,
+) {
+    let cx = w.cx;
+    if let Some(family) = dump_family(cx, call) {
+        // A first-class callable `dumpType(...)` is a Closure, not a dumping call.
+        if is_first_class_callable(call) {
+            return;
+        }
+        let (id, label, call_name) = match family {
+            DumpFamily::Type => (DEBUG_TYPE_ID, "dumped type", "PHPStan\\dumpType()"),
+            DumpFamily::PhpDocType => {
+                (DEBUG_PHPDOC_TYPE_ID, "dumped phpdoc type", "PHPStan\\dumpPhpDocType()")
+            }
+        };
+        if call.args.is_empty() {
+            // Zero-argument explicit dump: still fail-level (§7) — the runtime fatal
+            // stands regardless of what (nothing) it would dump.
+            let pos = cx.tree().position(call.span.start);
+            out.push(Diagnostic {
+                id,
+                facet: None,
+                path: cx.path().to_owned(),
+                line: pos.line,
+                column: pos.column,
+                message: format!("{call_name} called with no argument — nothing to dump"),
+            });
+            return;
+        }
+        for arg in &call.args {
+            let rendering = match family {
+                DumpFamily::Type => best_dump_type(w, folder, &arg.value, env, store),
+                DumpFamily::PhpDocType => best_dump_phpdoc_type(&arg.value, store),
+            };
+            let pos = cx.tree().position(arg.span.start);
+            out.push(Diagnostic {
+                id,
+                facet: None,
+                path: cx.path().to_owned(),
+                line: pos.line,
+                column: pos.column,
+                message: dump_message(label, &rendering),
+            });
+        }
     }
 }
 
@@ -11026,5 +11373,87 @@ mod n4_carrier_tests {
         store.unbind("v");
         assert_eq!(store.contract_arms("v"), None);
         assert_eq!(store.member_of("v"), None);
+    }
+}
+
+#[cfg(test)]
+mod dump_render_tests {
+    //! ADR-0053 §7 — the dump fact renderer and its annotate-parity pin: a finite
+    //! fact's dump rendering byte-equals the ONE shared speller's output for that
+    //! fact (`spell_arms(summarize_vals(members))`), and the abstract layers render
+    //! the honest keyword ladder. Rendering, not the walk, is under test here; the
+    //! end-to-end emitter is covered by the `dump_surface` integration test.
+    use super::*;
+
+    fn i(n: i64) -> Val {
+        Val::Int(n)
+    }
+    fn s(v: &str) -> Val {
+        Val::Str(v.to_owned())
+    }
+
+    /// The parity pin (ADR-0053 §7): the dump's rendering of a finite fact is exactly
+    /// the shared speller's output for that fact — one spelling, no second renderer.
+    fn assert_parity(vals: &[Val]) {
+        let fact = Fact::from_vals(vals.to_vec()).expect("nonempty");
+        let via_speller = normalize::summarize_vals(fact.finite_members().expect("finite"))
+            .and_then(|arms| steins_contract::spell::spell_arms(&arms))
+            .unwrap_or_else(|| DUMP_UNKNOWN.to_owned());
+        assert_eq!(render_dump_fact(&fact), via_speller, "dump vs D2 speller for {vals:?}");
+    }
+
+    #[test]
+    fn finite_facts_byte_equal_the_shared_speller() {
+        // Singleton int / string, OneOf int / string-enum, dedup, nullable, bool.
+        assert_parity(&[i(5)]);
+        assert_parity(&[s("abc")]);
+        assert_parity(&[i(1), i(2), i(3)]);
+        assert_parity(&[s("GET"), s("POST")]);
+        assert_parity(&[i(1), i(2), i(1)]);
+        assert_parity(&[i(1), Val::Null]);
+        assert_parity(&[Val::Bool(true), Val::Bool(false)]);
+        assert_parity(&[Val::Bool(true)]);
+        // An all-numeric string set collapses to the numeric-string class.
+        assert_parity(&[s("12"), s("34"), i(1)]);
+    }
+
+    #[test]
+    fn singleton_renders_the_honesty_spelling_not_a_php_literal() {
+        // The honesty renderer collapses an int literal to its base (`int`) and keeps
+        // a string literal precise (`'abc'`) — deliberately NOT PHPStan's `5` literal
+        // spelling (§9 quarantines that to assertType). This is the shared speller.
+        assert_eq!(render_dump_fact(&Fact::Singleton(i(5))), "int");
+        assert_eq!(render_dump_fact(&Fact::Singleton(s("abc"))), "'abc'");
+        assert_eq!(render_dump_fact(&Fact::Singleton(Val::Null)), "null");
+    }
+
+    #[test]
+    fn abstract_layers_render_the_honest_keyword_ladder() {
+        // General: bare base, with nullability.
+        assert_eq!(render_dump_fact(&Fact::General { base: Base::Int, nullable: false }), "int");
+        assert_eq!(
+            render_dump_fact(&Fact::General { base: Base::String, nullable: true }),
+            "string|null"
+        );
+        // Refined int range: the named predicate class.
+        assert_eq!(
+            render_dump_fact(&Fact::refined(Base::Int, Refinement::Int(IntRange::POSITIVE), false)),
+            "positive-int"
+        );
+        // Refined string: reuse the speller's own preds_keyword so a refined-string
+        // dump and its spell_arms rendering agree.
+        let numeric = Fact::refined(Base::String, Refinement::Str(StrPreds::NUMERIC.close()), false);
+        assert_eq!(
+            render_dump_fact(&numeric),
+            steins_contract::spell::preds_keyword(StrPreds::NUMERIC.close())
+        );
+    }
+
+    #[test]
+    fn array_bearing_fact_is_honest_unknown() {
+        // A set the domain cannot faithfully spell (an array member) dumps `unknown`,
+        // never a guess (§7).
+        let fact = Fact::Singleton(Val::Array(vec![]));
+        assert_eq!(render_dump_fact(&fact), DUMP_UNKNOWN);
     }
 }

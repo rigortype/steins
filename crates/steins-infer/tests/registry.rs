@@ -164,26 +164,33 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
         assert!(!emittable.contains(id), "`{id}` must not be emittable before its stage");
         assert!(layer(id).is_some(), "`{id}` must be registered with a layer");
     }
-    // Six ids are registered-not-yet-emitted: the three finding-breadth ids above,
-    // plus the three ADR-0053 dump-surface debug ids registered in D1 (checked in
-    // `debug_ids_are_registered_not_yet_emitted`).
-    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 6);
+    // Four ids are registered-not-yet-emitted: the three finding-breadth ids above,
+    // plus the one ADR-0053 dump-surface id still pending — `debug.var-dump` (lights
+    // up at D4). The explicit pair `debug.type` / `debug.phpdoc-type` lit up at D3
+    // (checked in `debug_pair_emits_var_dump_pending`).
+    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 4);
 }
 
-/// The ADR-0053 dump surface D1 groundwork: the three debug ids are registered with
-/// `Layer::Debug`, registered **ahead of emission** (in `REGISTERED_NOT_YET_EMITTED`,
-/// not `ALL_EMITTABLE_IDS`), and carry the kebab-case `debug.*` spellings. They light
-/// up at their emit slices (the explicit pair at D3, `debug.var-dump` at D4).
+/// The ADR-0053 dump surface: the explicit pair (`debug.type` / `debug.phpdoc-type`)
+/// lit up at D3 and left `REGISTERED_NOT_YET_EMITTED`; `debug.var-dump` stays
+/// registered ahead of emission until D4. All three carry `Layer::Debug` and the
+/// pinned kebab-case `debug.*` spellings.
 #[test]
-fn debug_ids_are_registered_not_yet_emitted() {
+fn debug_pair_emits_var_dump_pending() {
     let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
     let emittable: HashSet<&str> = ALL_EMITTABLE_IDS.iter().copied().collect();
 
-    for id in [DEBUG_TYPE_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_VAR_DUMP_ID] {
+    // D3: the explicit pair is emittable and left the pending list.
+    for id in [DEBUG_TYPE_ID, DEBUG_PHPDOC_TYPE_ID] {
         assert_eq!(layer(id), Some(Layer::Debug), "`{id}` must be a Debug-layer id");
-        assert!(pending.contains(id), "`{id}` must be registered ahead of emission (D1)");
-        assert!(!emittable.contains(id), "`{id}` must not be emittable until D3/D4");
+        assert!(emittable.contains(id), "`{id}` must be emittable from D3");
+        assert!(!pending.contains(id), "`{id}` must have left REGISTERED_NOT_YET_EMITTED");
     }
+    // D4 pending: `debug.var-dump` is registered ahead of emission.
+    assert_eq!(layer(DEBUG_VAR_DUMP_ID), Some(Layer::Debug));
+    assert!(pending.contains(DEBUG_VAR_DUMP_ID), "`debug.var-dump` is pending until D4");
+    assert!(!emittable.contains(DEBUG_VAR_DUMP_ID), "`debug.var-dump` must not be emittable until D4");
+
     // The kebab-case spellings are pinned (ADR-0053 §2 / ADR-0022).
     assert_eq!(DEBUG_TYPE_ID, "debug.type");
     assert_eq!(DEBUG_PHPDOC_TYPE_ID, "debug.phpdoc-type");
