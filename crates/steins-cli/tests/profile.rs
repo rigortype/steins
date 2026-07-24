@@ -283,7 +283,11 @@ fn var_dump_dumps_by_default_and_is_exit_neutral() {
     write(&dir, "a.php", VAR_DUMP_ONLY);
     let r = run_in(&dir, &["check", "--no-php", "a.php"]);
     assert!(r.stdout.contains("warning[debug.var-dump]"), "var_dump dumps by default:\n{}", r.stdout);
-    assert!(r.stdout.contains("dumped type: int"), "renders the fact:\n{}", r.stdout);
+    // The dump surface renders the value-domain fact value-precisely: `$x = 5` is
+    // the constant `5`, not the collapsed base `int` (the ADR-0053 §9 collapse is
+    // reversed for the dump path — value-precision is what the surface exists to
+    // show, matching PHPStan's constant types).
+    assert!(r.stdout.contains("dumped type: 5"), "renders the fact value-precisely:\n{}", r.stdout);
     assert_eq!(r.code, 0, "a var_dump-only run is exit-neutral; stdout:\n{}", r.stdout);
 }
 

@@ -2819,6 +2819,20 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// The source-cased, namespace-qualified display form of a class FQN (the
+    /// spelling diagnostics use, matching PHPStan — no leading `\`). A project class
+    /// contributes its declared casing ([`ClassDecl::display`]); a class the index
+    /// cannot uniquely resolve (a builtin/external name Steins only holds
+    /// lowercase-normalized) falls back to the given key with any leading `\`
+    /// stripped. Drives the dump surface's class rendering (ADR-0053 §7 / the class
+    /// rendering-fidelity fix).
+    fn class_display_fqn(&self, fqn: &str) -> String {
+        match self.find_class(fqn) {
+            Some((_, cd)) if !cd.display.is_empty() => cd.display.clone(),
+            _ => fqn.trim_start_matches('\\').to_owned(),
+        }
+    }
+
     /// Whether a `$this` seeded from enclosing class `class_fqn` is provably the
     /// **exact** runtime class (audit G1). A `final` class or an enum has no
     /// subclass, so its `$this` is exact; any other project class is only a lower
@@ -4504,21 +4518,19 @@ fn is_first_class_callable(call: &CallExpr) -> bool {
     !call.positional_only && call.args.is_empty() && call.named_args.is_empty() && !call.has_spread
 }
 
-/// Render a value-domain [`Fact`] for the dump surface through the ONE shared
-/// spelling (ADR-0053 §7). Finite layers (`Singleton`/`OneOf`) go through the N1
-/// normalizer ([`normalize::summarize_vals`]) and the shared plain-text speller
-/// ([`steins_contract::spell::spell_arms`]) — the same path the value-domain docblock
-/// renderer shares (the D2 extraction), so a dump's finite-fact rendering byte-equals
-/// the speller's output for that fact (the parity pin). The abstract layers
-/// (`Refined`/`General`) carry no enumerable value set; they render as the honest
-/// phpdoc keyword ladder, reusing the speller's own `preds_keyword` for refined
-/// strings so the two agree. A set with no faithful scalar spelling (an array member)
-/// renders as honest [`DUMP_UNKNOWN`].
+/// Render a value-domain [`Fact`] for the dump surface (ADR-0053 §7). Finite layers
+/// (`Singleton`/`OneOf`) render **value-precisely** — the literal itself, not its
+/// base type — because value-precision is exactly what the dump surface exists to
+/// show (and what PHPStan's own constant types render: `5`, `false`, `'a'`). This
+/// reverses ADR-0053 §9's earlier collapse-to-base pin for the dump path only (the
+/// annotate/docblock renderer keeps the base-collapsed spelling, unchanged — see
+/// [`render_finite_precise`]). The abstract layers (`Refined`/`General`) carry no
+/// enumerable value set; they render as the honest phpdoc keyword ladder, reusing
+/// the speller's own `preds_keyword` for refined strings so the two agree. A set with
+/// no faithful spelling (an array member) renders as honest [`DUMP_UNKNOWN`].
 fn render_dump_fact(fact: &Fact) -> String {
     if let Some(members) = fact.finite_members() {
-        return normalize::summarize_vals(members)
-            .and_then(|arms| steins_contract::spell::spell_arms(&arms))
-            .unwrap_or_else(|| DUMP_UNKNOWN.to_owned());
+        return render_finite_precise(members).unwrap_or_else(|| DUMP_UNKNOWN.to_owned());
     }
     match fact {
         Fact::Refined { base: Base::Int, refinement: Refinement::Int(r), nullable } => {
@@ -4532,6 +4544,60 @@ fn render_dump_fact(fact: &Fact) -> String {
         // Finite layers are handled above.
         Fact::Singleton(_) | Fact::OneOf(_) => DUMP_UNKNOWN.to_owned(),
     }
+}
+
+/// Value-precise spelling of a finite value set (`Singleton`/`OneOf` members) for
+/// the dump surface: int/float/bool literals verbatim (`123`, `-5`, `123.0`,
+/// `false`), string literals single-quoted through the shared speller's own literal
+/// escaping ([`steins_contract::spell::string_literal`] — ONE speller, no second
+/// string escaper), `null` as `null`. Members are sorted+deduped and joined with `|`
+/// in the domain's canonical [`Val`] order (int, float, string, bool, null) — order
+/// is immaterial to the harness (it sorts union atoms) but kept stable for readable
+/// output. `None` when any member is an array (no faithful spelling — the caller
+/// falls to honest [`DUMP_UNKNOWN`]), matching the pre-fix refusal.
+fn render_finite_precise(members: &[Val]) -> Option<String> {
+    let mut vals = members.to_vec();
+    vals.sort();
+    vals.dedup();
+    // Any array member has no faithful scalar spelling (§7).
+    if vals.iter().any(|v| matches!(v, Val::Array(_))) {
+        return None;
+    }
+    // Emit in the canonical spelling order `summarize_vals` fixes (int, float,
+    // string, bool, null) — value-precise per member. Order is immaterial to the
+    // harness (it sorts atoms) but kept stable and PHPStan-shaped for readable output.
+    let mut parts: Vec<String> = Vec::with_capacity(vals.len());
+    parts.extend(vals.iter().filter_map(|v| match v {
+        Val::Int(n) => Some(n.to_string()),
+        _ => None,
+    }));
+    parts.extend(vals.iter().filter_map(|v| match v {
+        Val::Float(f) => Some(render_dump_float(*f)),
+        _ => None,
+    }));
+    parts.extend(vals.iter().filter_map(|v| match v {
+        Val::Str(s) => Some(steins_contract::spell::string_literal(s)),
+        _ => None,
+    }));
+    // Both bool literals present ⟺ the whole `bool` type — PHPStan renders `bool`
+    // there, not `false|true`. A single bool literal stays precise (`true`/`false`).
+    match (vals.contains(&Val::Bool(true)), vals.contains(&Val::Bool(false))) {
+        (true, true) => parts.push("bool".to_owned()),
+        (true, false) => parts.push("true".to_owned()),
+        (false, true) => parts.push("false".to_owned()),
+        (false, false) => {}
+    }
+    if vals.contains(&Val::Null) {
+        parts.push("null".to_owned());
+    }
+    (!parts.is_empty()).then(|| parts.join("|"))
+}
+
+/// Render a float constant as PHPStan does: an integral value keeps a visible
+/// fractional part (`123.0`, not `123`); every other value uses its shortest
+/// round-tripping decimal (`3.14`, `1.5`).
+fn render_dump_float(f: f64) -> String {
+    if f.is_finite() && f.fract() == 0.0 { format!("{f:.1}") } else { f.to_string() }
 }
 
 /// Append `|null` when the fact admits null (the honest nullable spelling).
@@ -4565,9 +4631,11 @@ fn int_range_keyword(r: IntRange) -> String {
 
 /// Render a narrowed contract-fact arm list (ADR-0052 §1 carrier) for the dump
 /// surface. Scalar arms spell through the shared [`steins_contract::spell::spell_arms`];
-/// a pure class/`null` arm list renders each class's simple name; anything else has
-/// no faithful spelling (`None` → the caller falls to honest unknown).
-fn render_contract_arms(arms: &[ContractArm]) -> Option<String> {
+/// a pure class/`null` arm list renders each class's **source-cased,
+/// namespace-qualified** FQN (via [`Cx::class_display_fqn`], matching PHPStan and the
+/// casing diagnostics use); anything else has no faithful spelling (`None` → the
+/// caller falls to honest unknown).
+fn render_contract_arms(cx: &Cx, arms: &[ContractArm]) -> Option<String> {
     let tys: Vec<ContractTy> = arms.iter().map(|a| a.ty.clone()).collect();
     if let Some(scalar) = steins_contract::spell::spell_arms(&tys) {
         return Some(scalar);
@@ -4575,7 +4643,7 @@ fn render_contract_arms(arms: &[ContractArm]) -> Option<String> {
     let mut parts = Vec::new();
     for ty in &tys {
         match ty {
-            ContractTy::Class(n) => parts.push(n.rsplit('\\').next().unwrap_or(n).to_owned()),
+            ContractTy::Class(n) => parts.push(cx.class_display_fqn(n)),
             ContractTy::Null => parts.push("null".to_owned()),
             // An array/generic/shape/callable/intersection arm has no faithful plain
             // spelling here — honest unknown rather than a guess (§7).
@@ -4608,13 +4676,14 @@ fn best_dump_type(
                 asserted: known.stratum == Stratum::Asserted,
             };
         }
-        // 2. An object holder: the heap's exact class (else the lower-bound class).
+        // 2. An object holder: the heap's exact class (else the lower-bound class),
+        //    rendered source-cased and namespace-qualified (matching PHPStan).
         if let Some(obj) = store.obj_of(name) {
-            return DumpRendering { text: obj.class.clone(), asserted: false };
+            return DumpRendering { text: cx.class_display_fqn(&obj.class), asserted: false };
         }
         // 3. The narrowed declared-arm list (contract carrier).
         if let Some(arms) = store.contract_arms(name)
-            && let Some(text) = render_contract_arms(arms)
+            && let Some(text) = render_contract_arms(cx, arms)
         {
             return DumpRendering {
                 text,
@@ -4639,10 +4708,10 @@ fn best_dump_type(
 /// The declared-side view of a dump argument (ADR-0053 §2, `debug.phpdoc-type`): the
 /// contract-fact arm list (the declared envelope as narrowed by guards), or
 /// `no declared contract` when the carrier is empty — never a synthesized type.
-fn best_dump_phpdoc_type(value: &ArgValue, store: &Store) -> DumpRendering {
+fn best_dump_phpdoc_type(cx: &Cx, value: &ArgValue, store: &Store) -> DumpRendering {
     if let ArgValue::Var(name) = value
         && let Some(arms) = store.contract_arms(name)
-        && let Some(text) = render_contract_arms(arms)
+        && let Some(text) = render_contract_arms(cx, arms)
     {
         return DumpRendering {
             text,
@@ -4702,7 +4771,7 @@ fn emit_dumps(
         for arg in &call.args {
             let rendering = match family {
                 DumpFamily::Type => best_dump_type(w, folder, &arg.value, env, store),
-                DumpFamily::PhpDocType => best_dump_phpdoc_type(&arg.value, store),
+                DumpFamily::PhpDocType => best_dump_phpdoc_type(cx, &arg.value, store),
             };
             let pos = cx.tree().position(arg.span.start);
             out.push(Diagnostic {
@@ -12296,11 +12365,20 @@ mod n4_carrier_tests {
 
 #[cfg(test)]
 mod dump_render_tests {
-    //! ADR-0053 §7 — the dump fact renderer and its annotate-parity pin: a finite
-    //! fact's dump rendering byte-equals the ONE shared speller's output for that
-    //! fact (`spell_arms(summarize_vals(members))`), and the abstract layers render
-    //! the honest keyword ladder. Rendering, not the walk, is under test here; the
+    //! ADR-0053 §7 — the dump fact renderer. Finite facts render **value-precisely**
+    //! (the literal itself: `5`, `false`, `'abc'`); the abstract layers render the
+    //! honest keyword ladder. Rendering, not the walk, is under test here; the
     //! end-to-end emitter is covered by the `dump_surface` integration test.
+    //!
+    //! The earlier ADR-0053 §9 pin — collapse a finite fact to its base type on the
+    //! dump path, deferring value-literal spelling to assertType — is reversed FOR
+    //! THE DUMP PATH by the rendering-fidelity fix: value-precision is the differ-
+    //! entiator the dump surface exists to show, and PHPStan itself renders constant
+    //! types (`5`, `false`, `'a'`). The `annotate`/docblock renderer
+    //! (`render_value_domain` → `spell_arms(summarize_vals(...))`) keeps the base-
+    //! collapsed spelling unchanged; its byte-parity suite in `steins-edit` is
+    //! untouched. §9's message *frame* is non-contractual (§7); only the rendered
+    //! fact changed.
     use super::*;
 
     fn i(n: i64) -> Val {
@@ -12310,38 +12388,36 @@ mod dump_render_tests {
         Val::Str(v.to_owned())
     }
 
-    /// The parity pin (ADR-0053 §7): the dump's rendering of a finite fact is exactly
-    /// the shared speller's output for that fact — one spelling, no second renderer.
-    fn assert_parity(vals: &[Val]) {
-        let fact = Fact::from_vals(vals.to_vec()).expect("nonempty");
-        let via_speller = normalize::summarize_vals(fact.finite_members().expect("finite"))
-            .and_then(|arms| steins_contract::spell::spell_arms(&arms))
-            .unwrap_or_else(|| DUMP_UNKNOWN.to_owned());
-        assert_eq!(render_dump_fact(&fact), via_speller, "dump vs D2 speller for {vals:?}");
-    }
-
     #[test]
-    fn finite_facts_byte_equal_the_shared_speller() {
+    fn finite_facts_render_value_precisely() {
+        let r = |vals: &[Val]| render_dump_fact(&Fact::from_vals(vals.to_vec()).expect("nonempty"));
         // Singleton int / string, OneOf int / string-enum, dedup, nullable, bool.
-        assert_parity(&[i(5)]);
-        assert_parity(&[s("abc")]);
-        assert_parity(&[i(1), i(2), i(3)]);
-        assert_parity(&[s("GET"), s("POST")]);
-        assert_parity(&[i(1), i(2), i(1)]);
-        assert_parity(&[i(1), Val::Null]);
-        assert_parity(&[Val::Bool(true), Val::Bool(false)]);
-        assert_parity(&[Val::Bool(true)]);
-        // An all-numeric string set collapses to the numeric-string class.
-        assert_parity(&[s("12"), s("34"), i(1)]);
+        assert_eq!(r(&[i(5)]), "5");
+        assert_eq!(r(&[s("abc")]), "'abc'");
+        assert_eq!(r(&[i(1), i(2), i(3)]), "1|2|3");
+        assert_eq!(r(&[s("GET"), s("POST")]), "'GET'|'POST'");
+        assert_eq!(r(&[i(1), i(2), i(1)]), "1|2"); // dedup
+        assert_eq!(r(&[i(1), Val::Null]), "1|null");
+        // Both bool literals ⟺ the whole `bool` type (PHPStan renders `bool`, not
+        // `false|true`); a lone literal stays precise.
+        assert_eq!(r(&[Val::Bool(true), Val::Bool(false)]), "bool");
+        assert_eq!(r(&[Val::Bool(true)]), "true");
+        // `bool` joins other precise members (e.g. an int literal alongside).
+        assert_eq!(r(&[i(1), Val::Bool(true), Val::Bool(false)]), "1|bool");
+        // Floats keep a visible fractional part; strings stay precise alongside ints.
+        assert_eq!(r(&[Val::Float(123.0)]), "123.0");
+        assert_eq!(r(&[Val::Float(2.5)]), "2.5");
+        assert_eq!(r(&[i(-5)]), "-5");
     }
 
     #[test]
-    fn singleton_renders_the_honesty_spelling_not_a_php_literal() {
-        // The honesty renderer collapses an int literal to its base (`int`) and keeps
-        // a string literal precise (`'abc'`) — deliberately NOT PHPStan's `5` literal
-        // spelling (§9 quarantines that to assertType). This is the shared speller.
-        assert_eq!(render_dump_fact(&Fact::Singleton(i(5))), "int");
+    fn singleton_renders_the_php_literal_not_the_base_type() {
+        // The dump surface renders the literal itself (value-precision — the ADR-0053
+        // §9 collapse is reversed for this path), NOT the collapsed base `int`. A
+        // string literal is single-quoted; `null` is `null`.
+        assert_eq!(render_dump_fact(&Fact::Singleton(i(5))), "5");
         assert_eq!(render_dump_fact(&Fact::Singleton(s("abc"))), "'abc'");
+        assert_eq!(render_dump_fact(&Fact::Singleton(Val::Bool(false))), "false");
         assert_eq!(render_dump_fact(&Fact::Singleton(Val::Null)), "null");
     }
 

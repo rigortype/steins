@@ -736,6 +736,12 @@ pub struct ClassDecl {
     /// The fully-qualified name, lowercase-normalized. The project index keys on
     /// this; for a global class it equals the lowercased simple name.
     pub fqn: String,
+    /// The same resolved FQN with the source's declared casing preserved
+    /// (`AllowedSubtypesEnum\Foo`, no leading `\`). Diagnostic / dump rendering
+    /// only — carries no resolution semantics (mirrors [`TypeMember::Instance`]'s
+    /// `display`). Filled in `parse` from the enclosing namespace ctx alongside
+    /// [`Self::fqn`]; empty until then.
+    pub display: String,
     pub is_final: bool,
     /// `true` when this declaration is an `abstract class`. An abstract class
     /// cannot be instantiated (`new AbstractC()` raises `Error: Cannot instantiate
@@ -1795,6 +1801,10 @@ impl SourceTree {
             } else {
                 format!("{}\\{}", ctx.namespace, c.name)
             };
+            // The source-cased, namespace-qualified FQN for diagnostic / dump
+            // rendering (no leading `\`, matching PHPStan). Same construction the
+            // `self`/`static` bound uses below.
+            c.display = self_display.clone();
             let self_fqn = c.fqn.clone();
             let parent_bound = c.parent.as_ref().map(|p| {
                 let display = resolve_class_ref(ctx_of(&contexts, &regions, p.offset), p);
@@ -2307,6 +2317,7 @@ fn lower_trait(t: &mago_syntax::cst::Trait<'_>, conditional: bool) -> ClassDecl 
     ClassDecl {
         name: bytes_to_string(t.name.value),
         fqn: String::new(), // filled in `parse` from the enclosing namespace ctx
+        display: String::new(),
         is_final: false,
         is_abstract: false,
         is_interface: false,
@@ -2369,6 +2380,7 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
     ClassDecl {
         name: bytes_to_string(c.name.value),
         fqn: String::new(), // filled in `parse` from the enclosing namespace ctx
+        display: String::new(),
         is_final: c.modifiers.iter().any(Modifier::is_final),
         is_abstract: c.modifiers.iter().any(Modifier::is_abstract),
         is_interface: false,
@@ -2502,6 +2514,7 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
     ClassDecl {
         name: bytes_to_string(i.name.value),
         fqn: String::new(),
+        display: String::new(),
         is_final: false,
         is_abstract: false,
         is_interface: true,
@@ -2581,6 +2594,7 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _doc
     ClassDecl {
         name: bytes_to_string(e.name.value),
         fqn: String::new(),
+        display: String::new(),
         is_final: true, // enums are implicitly final in PHP
         is_abstract: false,
         is_interface: false,

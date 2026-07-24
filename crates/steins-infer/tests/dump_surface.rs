@@ -36,7 +36,7 @@ fn one_type(src: &str) -> String {
 
 #[test]
 fn recognized_by_fully_qualified_fqn() {
-    assert_eq!(one_type("<?php $x = 5; \\PHPStan\\dumpType($x);\n"), "dumped type: int");
+    assert_eq!(one_type("<?php $x = 5; \\PHPStan\\dumpType($x);\n"), "dumped type: 5");
 }
 
 #[test]
@@ -48,8 +48,8 @@ fn recognized_through_use_function_import() {
 #[test]
 fn recognition_is_case_insensitive() {
     // PHP function names are case-insensitive; recognition folds case.
-    assert_eq!(one_type("<?php $x = 5; \\PHPStan\\DUMPTYPE($x);\n"), "dumped type: int");
-    assert_eq!(one_type("<?php $x = 5; \\phpstan\\DumpType($x);\n"), "dumped type: int");
+    assert_eq!(one_type("<?php $x = 5; \\PHPStan\\DUMPTYPE($x);\n"), "dumped type: 5");
+    assert_eq!(one_type("<?php $x = 5; \\phpstan\\DumpType($x);\n"), "dumped type: 5");
 }
 
 #[test]
@@ -57,7 +57,7 @@ fn recognized_when_the_current_namespace_is_phpstan() {
     // An unqualified `dumpType()` inside `namespace PHPStan;` resolves to
     // `PHPStan\dumpType` — a resolution path reaching the reserved FQN.
     let src = "<?php\nnamespace PHPStan;\nfunction g($v) { $x = 5; dumpType($x); }\n";
-    assert_eq!(one_type(src), "dumped type: int");
+    assert_eq!(one_type(src), "dumped type: 5");
 }
 
 #[test]
@@ -66,7 +66,7 @@ fn userland_definition_does_not_stand_recognition_down() {
     // suppress recognition — the dump still fires.
     let src = "<?php\nnamespace PHPStan;\nfunction dumpType($v) { return 1; }\n\
                function g() { $x = 5; dumpType($x); }\n";
-    assert_eq!(one_type(src), "dumped type: int");
+    assert_eq!(one_type(src), "dumped type: 5");
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn a_different_namespace_homonym_is_not_recognized() {
 
 #[test]
 fn singleton_value_fact() {
-    assert_eq!(one_type("<?php $x = 5; \\PHPStan\\dumpType($x);\n"), "dumped type: int");
+    assert_eq!(one_type("<?php $x = 5; \\PHPStan\\dumpType($x);\n"), "dumped type: 5");
     assert_eq!(one_type("<?php $x = 'GET'; \\PHPStan\\dumpType($x);\n"), "dumped type: 'GET'");
 }
 
@@ -109,6 +109,21 @@ fn exact_class_of_an_object_holder() {
 }
 
 #[test]
+fn class_renders_source_cased_and_namespace_qualified() {
+    // The rendering-fidelity fix: a class dump renders the source-cased,
+    // namespace-qualified FQN (no leading `\`, matching PHPStan) — never the
+    // lowercase-normalized last segment. An object holder (heap class) …
+    let obj = "<?php\nnamespace App\\Models;\nclass User {}\n\
+               function f() { $x = new User(); \\PHPStan\\dumpType($x); }\n";
+    assert_eq!(one_type(obj), "dumped type: App\\Models\\User");
+    // … and a declared-param contract arm (the enum-param case the harness flagged:
+    // `AllowedSubtypesEnum\\Foo` had rendered as `foo`).
+    let param = "<?php\nnamespace App\\Models;\nclass User {}\n\
+                 function f(User $x) { \\PHPStan\\dumpType($x); }\n";
+    assert_eq!(one_type(param), "dumped type: App\\Models\\User");
+}
+
+#[test]
 fn unknown_is_honest() {
     // An unbound variable / unresolvable expression yields no fact — honest `unknown`,
     // never a guess.
@@ -120,7 +135,7 @@ fn asserted_stratum_carries_a_marker() {
     // An `assert($x === 5)` narrowing is Asserted (assertions off by default), so the
     // dump prints the marker — a docblock/assert claim never launders as a proof.
     let src = "<?php\nfunction f($x) { assert($x === 5); \\PHPStan\\dumpType($x); }\n";
-    assert_eq!(one_type(src), "dumped type: int (asserted)");
+    assert_eq!(one_type(src), "dumped type: 5 (asserted)");
 }
 
 // ---- Multi-arg / zero-arg (ADR-0053 §7) ------------------------------------
@@ -130,7 +145,7 @@ fn multi_argument_dumps_one_report_per_argument() {
     let src = "<?php $a = 5; $b = 'x'; \\PHPStan\\dumpType($a, $b);\n";
     let ds = dumps(src);
     assert_eq!(ds.len(), 2, "one report per argument: {ds:?}");
-    assert_eq!(ds[0].message, "dumped type: int");
+    assert_eq!(ds[0].message, "dumped type: 5");
     assert_eq!(ds[1].message, "dumped type: 'x'");
     // Argument order → column order.
     assert!(ds[0].column < ds[1].column);
@@ -210,7 +225,7 @@ fn a_dump_reads_facts_and_binds_nothing() {
 fn leg_a_fully_qualified_global_var_dump_dumps() {
     let ds = var_dumps("<?php $x = 5; \\var_dump($x);\n");
     assert_eq!(ds.len(), 1, "{ds:?}");
-    assert_eq!(ds[0].message, "dumped type: int");
+    assert_eq!(ds[0].message, "dumped type: 5");
 }
 
 #[test]
@@ -266,7 +281,7 @@ fn leg_d_use_function_import_of_the_global_still_dumps() {
     let src = "<?php\nnamespace App;\nuse function var_dump;\n$x = 5;\nvar_dump($x);\n";
     let ds = var_dumps(src);
     assert_eq!(ds.len(), 1, "{ds:?}");
-    assert_eq!(ds[0].message, "dumped type: int");
+    assert_eq!(ds[0].message, "dumped type: 5");
 }
 
 #[test]
@@ -288,7 +303,7 @@ fn var_dump_multi_argument_dumps_one_report_per_argument() {
     let src = "<?php $a = 5; $b = 'x'; var_dump($a, $b);\n";
     let ds = var_dumps(src);
     assert_eq!(ds.len(), 2, "one report per argument: {ds:?}");
-    assert_eq!(ds[0].message, "dumped type: int");
+    assert_eq!(ds[0].message, "dumped type: 5");
     assert_eq!(ds[1].message, "dumped type: 'x'");
     assert!(ds[0].column < ds[1].column, "argument order → column order");
 }
