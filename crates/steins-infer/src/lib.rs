@@ -4742,6 +4742,20 @@ fn best_dump_type(
         if let Some(obj) = store.obj_of(name) {
             return DumpRendering { text: cx.class_display_fqn(&obj.class), asserted: false };
         }
+        // 2b. The N4 `Member{yes:[…]}` carrier (ADR-0052 §1): a var an `instanceof`
+        //     guard bound to a class but that carries no heap object — e.g. a
+        //     `MethodCall`-typed var narrowed by `if ($x instanceof Foo)`, which
+        //     otherwise dumps as its coarse declared `CallLike` supertype. A
+        //     single-yes-member set renders that one class (tighter than the
+        //     contract arm); a multi-member yes-set has no single faithful class
+        //     spelling here, so it falls through to the contract carrier. The `no`
+        //     side never names a positive type. Bound at `Verified` (a runtime
+        //     `instanceof` on the live branch) ⇒ never `(asserted)`.
+        if let Some(m) = store.member_of(name)
+            && let [only] = m.yes.as_slice()
+        {
+            return DumpRendering { text: cx.class_display_fqn(only), asserted: false };
+        }
         // 3. The narrowed declared-arm list (contract carrier).
         if let Some(arms) = store.contract_arms(name)
             && let Some(text) = render_contract_arms(cx, arms)
@@ -12699,6 +12713,23 @@ mod return_fact_admission_tests {
             "the admitted refinement must be a Refined int, got {got:?}"
         );
         assert_ne!(got, Fact::General { base: Base::Int, nullable: false }, "must be narrower than the envelope");
+    }
+
+    #[test]
+    fn curated_string_refinement_admitted_within_string_envelope() {
+        // R4 shape: `sha1(): string` envelope refined to `non-falsy-string` — a
+        // subset of `string`, same base — is admitted at the pinned minor as a
+        // Refined string fact (narrower than the bare string envelope).
+        let got = admit_return_fact("string", Some("non-falsy-string"), true).expect("some fact");
+        assert!(
+            matches!(got, Fact::Refined { base: Base::String, .. }),
+            "the admitted refinement must be a Refined string, got {got:?}"
+        );
+        assert_ne!(
+            got,
+            Fact::General { base: Base::String, nullable: false },
+            "must be narrower than the string envelope"
+        );
     }
 
     #[test]

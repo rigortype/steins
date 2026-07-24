@@ -51,4 +51,148 @@
 #   R4  sha1(): non-empty-string    — envelope `string`, refinement `non-empty-string`
 # Those rows land with their own probes when their slices are implemented.
 
-# (no [[function]] rows in R1 — see the header)
+# ─────────────────────────── R3 int-range family ───────────────────────────
+# nsrt differ class `int-range | 546`. Reflected envelope is a single `int`
+# (verbatim ReflectionFunction::getReturnType, PHP 8.5.8, non-tentative):
+#   count int  sizeof int  strlen int  mb_strlen int  substr_count int
+#   func_num_args int  array_push int  array_unshift int
+# The refinement `int<0, max>` (== non-negative-int) narrows within that `int`
+# envelope. Each is argument-INSENSITIVE: it holds for EVERY argument the
+# function returns normally on (a throw on bad input is not a return, §4).
+# Probe (verbatim, /opt/homebrew/bin/php 8.5.8):
+#   count([])=0  count([1,2,3])=3  count(range(1,100000))=100000
+#   count([[1,2],[3,4,5]],COUNT_RECURSIVE)=7  sizeof([])=0
+#   strlen("")=0  strlen("abc")=3  strlen(chr(0))=1
+#   mb_strlen("")=0  mb_strlen("日本")=2
+#   substr_count("","x")=0  substr_count("aaa","a")=3  substr_count("abc","z")=0
+#   func_num_args()=0  func_num_args(1,2,3)=3
+#   array_push($e=[])=0  array_push([],1)=1  array_push([1,2],9,9)=4
+#   array_unshift($u=[])=0  array_unshift([9],1,2)=3
+# Nothing returned < 0 in any case; the empty-array / no-value edges pin the
+# LOWER bound at 0 (not 1) — array_push/array_unshift with no values-to-add
+# return the unchanged count, which is 0 for an empty target. So the airtight
+# refinement is int<0, max>, never positive-int.
+
+[[function]]
+name = "count"
+refinement = "int<0, max>"
+return_type = "int"
+confidence = "verified-probe"
+probe = "count([])=0; count([1,2,3])=3; count(range(1,100000))=100000; count([[1,2],[3,4,5]],COUNT_RECURSIVE)=7 — never negative, floor 0 (empty array)."
+
+[[function]]
+name = "sizeof"
+refinement = "int<0, max>"
+return_type = "int"
+confidence = "verified-probe"
+probe = "sizeof([])=0 — alias of count (php-src ext/standard/basic_functions.stub.php: sizeof === count); same int<0,max>."
+
+[[function]]
+name = "strlen"
+refinement = "int<0, max>"
+return_type = "int"
+confidence = "verified-probe"
+probe = "strlen(\"\")=0; strlen(\"abc\")=3; strlen(chr(0))=1 — byte length, never negative, floor 0 (empty string). Reflected envelope on 8.5 is plain int (no false arm)."
+
+[[function]]
+name = "mb_strlen"
+refinement = "int<0, max>"
+return_type = "int"
+confidence = "verified-probe"
+probe = "mb_strlen(\"\")=0; mb_strlen(\"日本\")=2 — code-point count, never negative. Invalid encoding THROWS ValueError on 8.x (not a return), so every normal return is >=0."
+
+[[function]]
+name = "substr_count"
+refinement = "int<0, max>"
+return_type = "int"
+confidence = "verified-probe"
+probe = "substr_count(\"\",\"x\")=0; substr_count(\"aaa\",\"a\")=3; substr_count(\"abc\",\"z\")=0 — occurrence count, floor 0 (no match / empty haystack), never negative for any args."
+
+[[function]]
+name = "func_num_args"
+refinement = "int<0, max>"
+return_type = "int"
+confidence = "verified-probe"
+probe = "func_num_args()=0; func_num_args(1,2,3)=3 — count of passed args, floor 0, never negative."
+
+[[function]]
+name = "array_push"
+refinement = "int<0, max>"
+return_type = "int"
+confidence = "verified-probe"
+probe = "array_push($e=[])=0; array_push([],1)=1; array_push([1,2],9,9)=4 — returns the NEW element count. With no values-to-push on an empty array it returns 0, so floor is 0 (not 1); never negative."
+
+[[function]]
+name = "array_unshift"
+refinement = "int<0, max>"
+return_type = "int"
+confidence = "verified-probe"
+probe = "array_unshift($u=[])=0; array_unshift([9],1,2)=3 — new element count, floor 0 (no-value on empty), never negative."
+
+# ─────────────────────── R3 refused rows (argument-SENSITIVE) ───────────────────────
+# These name int-range-adjacent functions whose REFLECTED envelope is multi-base,
+# so envelope_fact() already returns None and no refinement can be seeded. Recorded
+# here to preempt a future well-meaning but WRONG row (the ADR's named FP channel):
+#
+#   str_word_count  rt=array|int   — format 0 returns int>=0, format 1/2 return
+#                                     an array. Argument-SENSITIVE (v2 guarded-arm
+#                                     territory, ADR-0056 §4); refused in v1.
+#   preg_match_all  rt=int|false   — int<0,max>|false. Multi-base (the false arm is
+#                                     ADR-0042's authority); no single-Fact seed.
+#   abs             rt=int|float   — abs(int) is int<0,max> but abs(float) is float.
+#                                     Argument-SENSITIVE, the ADR's canonical v1
+#                                     refusal (§4); the envelope int|float already
+#                                     beats `unknown`. Refused.
+
+# ─────────────────────────── R4 refined-string family ───────────────────────────
+# nsrt differ class `refined-string | 675`. Reflected envelope is a single `string`
+# (verbatim getReturnType, 8.5.8): sha1 string  md5 string  uniqid string.
+# The refinement `non-falsy-string` (StrPreds NON_FALSY: neither "" nor "0")
+# narrows within that `string` envelope. StrPreds vocabulary is NON_EMPTY /
+# NON_FALSY / NUMERIC; NON_FALSY is the tightest that holds and is strictly a
+# subset of the envelope, so it is what we curate.
+# Probe (verbatim, /opt/homebrew/bin/php 8.5.8):
+#   sha1("")=da39a3ee5e6b4b0d3255bfef95601890afd80709 (40 hex); sha1("",true) len=20
+#   md5("")=d41d8cd98f00b204e9800998ecf8427e (32 hex);          md5("",true) len=16
+#   uniqid()=6a63673e90616; uniqid("")=6a63673e9061a (13 chars)
+#   (sha1("")==="0")=false; (sha1("")==="")=false
+# ARGUMENT-INSENSITIVE argument: a fixed-length digest/id is never the empty string
+# and never the single character "0" for ANY input — including the raw-binary modes
+# sha1($s,true)/md5($s,true), whose 20-/16-byte outputs are neither "" nor "0" (both
+# falsy strings have length <= 1). So NON_FALSY holds for every argument.
+
+[[function]]
+name = "sha1"
+refinement = "non-falsy-string"
+return_type = "string"
+confidence = "verified-probe"
+probe = "sha1(\"\")=da39a3ee5e6b4b0d3255bfef95601890afd80709 (40 hex chars); sha1(\"\",true) is 20 raw bytes. Never \"\" nor \"0\" for any input ⇒ non-falsy."
+
+[[function]]
+name = "md5"
+refinement = "non-falsy-string"
+return_type = "string"
+confidence = "verified-probe"
+probe = "md5(\"\")=d41d8cd98f00b204e9800998ecf8427e (32 hex chars); md5(\"\",true) is 16 raw bytes. Never \"\" nor \"0\" for any input ⇒ non-falsy."
+
+[[function]]
+name = "uniqid"
+refinement = "non-falsy-string"
+return_type = "string"
+confidence = "verified-probe"
+probe = "uniqid()=6a63673e90616; uniqid(\"\")=6a63673e9061a — always >=13 hex chars (a prefix is prepended, never removed). Never \"\" nor \"0\" ⇒ non-falsy for any args."
+
+# ─────────────────────── R4 refused rows ───────────────────────
+# bin2hex        rt=string  — REFUSED: bin2hex("")==="" (probe: bin2hex("")=[] empty).
+#                             ARGUMENT-SENSITIVE (empty in ⇒ empty out); a
+#                             non-empty/non-falsy row would be a WRONG premise for
+#                             bin2hex("") — the ADR's named FP channel. Refused.
+# sha1_file      rt=string|false — REFUSED: multi-base envelope (the |false is an
+#                             environmental failure arm, ADR-0042). No single-Fact
+#                             seed; envelope_fact() returns None already.
+# strtoupper     rt=string  — REFUSED: strtoupper("")=="" (probe: strtoupper("")=[]).
+# strtolower     rt=string  — REFUSED: same empty-in/empty-out shape.
+# trim           rt=string  — REFUSED: trim("  ")=="" AND trim("0")=="0" (probe:
+#                             trim("  ")=[] , trim("0")=[0]). No refinement — neither
+#                             non-empty (all-whitespace in) nor non-falsy ("0" out)
+#                             holds for all args. Comment-refused to preempt a wrong row.

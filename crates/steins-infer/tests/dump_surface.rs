@@ -124,6 +124,29 @@ fn class_renders_source_cased_and_namespace_qualified() {
 }
 
 #[test]
+fn instanceof_member_carrier_renders_the_narrowed_class() {
+    // The N4 `Member{yes:[…]}` dump-selection gap: a var typed as a coarse
+    // supertype (contract lane `CallLike`) and narrowed by a live `instanceof`
+    // guard carries the tighter class only on the `Member` carrier — no heap
+    // object. `best_dump_type` now consults it (single yes-member) between the
+    // exact-heap-class and contract arms, so the dump shows the narrowed class,
+    // not the declared supertype it would otherwise fall through to.
+    let src = "<?php\ninterface CallLike {}\nfinal class Handler implements CallLike {}\n\
+               function f(CallLike $x) { if ($x instanceof Handler) { \\PHPStan\\dumpType($x); } }\n";
+    assert_eq!(one_type(src), "dumped type: Handler");
+}
+
+#[test]
+fn instanceof_multi_member_falls_through_to_contract_carrier() {
+    // Two positive `instanceof` guards on the same var bind a MULTI-member yes-set
+    // (`[a, b]`) — no single faithful class spelling — so the Member arm falls
+    // through to the contract carrier, which still holds the declared `CallLike`.
+    let src = "<?php\ninterface CallLike {}\ninterface A {}\ninterface B {}\n\
+               function f(CallLike $x) { if ($x instanceof A) { if ($x instanceof B) { \\PHPStan\\dumpType($x); } } }\n";
+    assert_eq!(one_type(src), "dumped type: CallLike");
+}
+
+#[test]
 fn unknown_is_honest() {
     // An unbound variable / unresolvable expression yields no fact — honest `unknown`,
     // never a guess.

@@ -13,4 +13,15 @@
 // Sorted by key for binary search.
 
 pub(crate) static RETURN_FACTS: &[(&str, &str)] = &[
+    ("array_push", "int<0, max>"),
+    ("array_unshift", "int<0, max>"),
+    ("count", "int<0, max>"),
+    ("func_num_args", "int<0, max>"),
+    ("mb_strlen", "int<0, max>"),
+    ("md5", "non-falsy-string"),
+    ("sha1", "non-falsy-string"),
+    ("sizeof", "int<0, max>"),
+    ("strlen", "int<0, max>"),
+    ("substr_count", "int<0, max>"),
+    ("uniqid", "non-falsy-string"),
 ];

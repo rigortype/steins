@@ -735,15 +735,28 @@ mod tests {
     }
 
     #[test]
-    fn return_fact_table_is_empty_in_r1() {
-        // ADR-0056 R1 lands ZERO curated rows — the bool-predicate family's reflected
-        // envelope is already `bool`. Every builtin therefore has no curated
-        // refinement; the reflected envelope alone serves them (seeded in steins-infer).
+    fn return_facts_r3_r4_rows() {
+        // ADR-0056 R3+R4 populate the curated table with the int-range and
+        // refined-string families. The bool-predicate family (R1) still has NO row —
+        // its reflected envelope is already `bool`, nothing to refine.
         assert_eq!(super::return_fact("is_int"), None);
-        assert_eq!(super::return_fact("count"), None);
-        assert_eq!(super::return_fact("strlen"), None);
         assert_eq!(super::return_fact("some_unknown_fn"), None);
-        // The generated table is well-formed (sorted for binary search) even when empty.
+        // R3 int-range: `int<0, max>` within the reflected `int` envelope.
+        for name in ["count", "sizeof", "strlen", "mb_strlen", "substr_count", "func_num_args", "array_push", "array_unshift"] {
+            assert_eq!(super::return_fact(name), Some("int<0, max>"), "{name} must curate int<0, max>");
+        }
+        // R4 refined-string: `non-falsy-string` within the reflected `string` envelope.
+        for name in ["sha1", "md5", "uniqid"] {
+            assert_eq!(super::return_fact(name), Some("non-falsy-string"), "{name} must curate non-falsy-string");
+        }
+        // Refused rows carry no curated fact (argument-sensitive / multi-base).
+        for name in ["abs", "bin2hex", "trim", "strtoupper", "preg_match_all", "str_word_count", "sha1_file"] {
+            assert_eq!(super::return_fact(name), None, "{name} is a refused row — no curated fact");
+        }
+        // Case-insensitive lookup and leading-backslash trimming both hit.
+        assert_eq!(super::return_fact("COUNT"), Some("int<0, max>"));
+        assert_eq!(super::return_fact("\\sha1"), Some("non-falsy-string"));
+        // The generated table is well-formed (sorted for binary search).
         let t = super::return_facts_generated::RETURN_FACTS;
         assert!(t.windows(2).all(|w| w[0].0 < w[1].0), "RETURN_FACTS must be strictly sorted by key");
     }
