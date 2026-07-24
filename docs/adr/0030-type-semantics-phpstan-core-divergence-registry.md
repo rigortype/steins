@@ -83,24 +83,57 @@ trinary is-a oracle.
 
 ## Conformance-suite divergences (intentional silences)
 
-Departures from php-typing-conformance expectations, triaged 2026-07-23
-(18 non-#14939 fails: 0 bugs, all absent-machinery or intentional):
+Departures from php-typing-conformance expectations. First triaged
+2026-07-23 (18 non-#14939 fails: 0 bugs, all absent-machinery or
+intentional); re-triaged at the **M1 conformance-closing sweep,
+2026-07-24**, where native object acceptance (including `A&B`
+intersections, below) closed the bulk, and the surviving non-#14939 fails
+are each registered here as either a standing refusal or an honest
+deferral.
 
-1. **Vendor-prefixed tags**: only `@phpstan-*`/`@psalm-*` prefixes carry
-   contracts (ADR-0029); `@phan-param` and other tool-specific tags are
-   erased — PHPStan parity, not a divergence from it.
-2. **No declaration-coherence lints.** "Native `?string` wider than
-   `@param string`" is not reported: the code is type-safe, and a proof
-   layer speaks on proven value breaks, not declaration style; tolerating
-   native-nullable widening is deliberate (the `$x = null` idiom).
-   Could return as a policy profile, never as core.
+1. **Vendor-prefixed tags** (`phpdoc_advanced_vendor_prefixed_param_phan`):
+   only `@phpstan-*`/`@psalm-*` prefixes carry contracts (ADR-0029; ROADMAP
+   Won't-build, "Tool-specific tags beyond `@phpstan-*`/`@psalm-*`").
+   `@phan-param` and other tool-specific tags are erased. On this fixture
+   PHPStan *does* consume `@phan-param` (it is a PHPStan Pass — the
+   `argument.type` error is emitted), so Steins' erasure is a **registered
+   divergence from PHPStan's actual behavior here**, correcting the "PHPStan
+   parity" originally recorded; the ADR-0029 tool-tag scope is deliberate
+   and stands. Standing refusal.
+2. **No declaration-coherence lints**
+   (`phpdoc_advanced_param_typehint_nullable_mismatch`,
+   `phpdoc_advanced_param_typehint_array_nullable_mismatch`). "Native
+   `?string` wider than `@param string`" — and the `?array` vs `list<int>`
+   variant — is not reported: the code is type-safe, and a proof layer
+   speaks on proven value breaks, not declaration style; tolerating
+   native-nullable widening is deliberate (the `$x = null` idiom). At most a
+   future policy profile, never core (ROADMAP Won't-build,
+   "Declaration-coherence lints"). PHPStan itself fails both **by design**
+   (phpstan/phpstan#7572), so this is a shared refusal, not a divergence
+   from PHPStan. Standing refusal.
+3. **No `static`/`self` return-position acceptance**
+   (`objects_static_return_mismatch`). A `: static` (or `: self`) return
+   whose body returns a provably-unrelated class is not reported: ADR-0043
+   §1 leaves `self`/`static`/`parent` unlowered (silent) — late-static
+   binding is out of v1 scope. The return-position lower-bound check is
+   licensed machinery, just unbuilt this milestone: an honest **deferral**,
+   not a permanent refusal, taken up when the object-world LSB posture is.
+4. **No `resource` type nor resource-value tracking**
+   (`native_types_resource_argument`). `resource` is not a native type — a
+   `resource $x` hint is a reference to a non-existent class `…\resource`
+   (PHPStan reports `class.notFound`), and the call-site rejections require
+   modeling `fopen()`-style resource **values** through a `=== false`
+   narrowing and rejecting them against scalar params. Neither an
+   undefined-class-in-type-position finding nor a `resource` value domain
+   exists yet: an honest **deferral** in the non-scalar / object-world
+   value-modeling cluster, not a refusal.
 
-The remaining fails are the prioritized unimplemented queue: object-world
-native acceptance (9 fails, single root cause: non-scalar param/return
-types lower to `None`; the largest real-corpus gap), generic type-argument
-carry (ADR-0032), callable signatures (`CallableTy` is signature-less
-today), and narrowing-plus-new-finding-kinds (undefined-method,
-offset-access ids do not exist).
+The remaining non-registered gaps stay the prioritized unimplemented queue:
+generic type-argument carry (ADR-0032) and callable signatures beyond the
+closure-variance arm. Native **object** acceptance — single classes, unions,
+enum cases, class constants, and now `A&B` **intersections** (the
+conjunctive `InstanceInter` member, ADR-0043) — has landed; the
+`instanceof` / offset-access / undefined-method finding kinds exist.
 
 ## Governing rule (amendment)
 
