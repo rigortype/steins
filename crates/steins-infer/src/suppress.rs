@@ -73,6 +73,80 @@ impl Layer {
     }
 }
 
+/// The value of the `origin` facet (ADR-0050 §4): whether a `throw.undeclared`
+/// finding's escaping-throw origin site lies in the annotated declaration's **own
+/// body** ([`Origin::Direct`]) or arrived up one or more call edges
+/// ([`Origin::Propagated`]). This productionizes the direct-vs-propagated
+/// measurement (`docs/notes/20260724-g1-throw-origin-measurement.md`): 158 direct
+/// vs 43,805 propagated on the legacy monorepo, the split the `throws-direct`
+/// built-in profile selects on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Origin {
+    /// The origin lies in the annotated declaration's own body.
+    Direct,
+    /// The origin lies elsewhere, reached through a call hop.
+    Propagated,
+}
+
+impl Origin {
+    /// The wire spelling (`"direct"|"propagated"`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Origin::Direct => "direct",
+            Origin::Propagated => "propagated",
+        }
+    }
+}
+
+/// The name of the only facet v1 defines (ADR-0050 §4/§11), carried solely by
+/// `throw.undeclared`. Kept as a named constant so the emitter, the JSON key, and
+/// [`declared_facet`] agree on one spelling.
+pub const FACET_ORIGIN: &str = "origin";
+
+/// A registry-declared **facet** value a finding carries (ADR-0050 §4): an
+/// additional classification axis, recorded by the emitter at emit time from
+/// walk-local data, that profile entries may select on. v1 declares exactly one
+/// facet — `origin`, carried only by `throw.undeclared`. The `default`/`contracts`
+/// built-ins ignore it; the `throws-direct` built-in selects `origin = direct`.
+///
+/// Kept a small enum (not an open string) so a second facet is an ADR-forced
+/// variant, never an ad-hoc key. The `--format json` output shows it additively as
+/// `"<key>": "<value>"` only on ids that declare a facet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Facet {
+    /// The `origin` facet value (`direct|propagated`).
+    Origin(Origin),
+}
+
+impl Facet {
+    /// The wire key (`"origin"`) the additive JSON facet field uses.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Facet::Origin(_) => FACET_ORIGIN,
+        }
+    }
+
+    /// The wire value (`"direct"|"propagated"`).
+    #[must_use]
+    pub const fn value(self) -> &'static str {
+        match self {
+            Facet::Origin(o) => o.as_str(),
+        }
+    }
+}
+
+/// The facet an emitted `id` **declares**, if any (ADR-0050 §4). v1: only
+/// `throw.undeclared` declares the `origin` facet; every other id declares none,
+/// so its findings never carry — nor show — a facet key. Returns the facet *name*
+/// (a profile-selectable axis's identity), not a value. Registering that an id
+/// carries a facet is what lets the emitter attach one and profiles select on it.
+#[must_use]
+pub fn declared_facet(id: &str) -> Option<&'static str> {
+    if id == THROW_UNDECLARED_ID { Some(FACET_ORIGIN) } else { None }
+}
+
 /// The diagnostic-id registry (ADR-0022/0050): the closed set of ids Steins emits,
 /// each paired with its [`Layer`] (ADR-0050 §2 makes the layer a first-class
 /// registry attribute). This is the **single source of truth** — `DIAGNOSTIC_IDS`
@@ -167,8 +241,11 @@ struct Directive {
 /// Whether an ignore `pattern` (`type`, `type.*`, or `type.argument-mismatch`)
 /// **matches** a concrete diagnostic `id` under ADR-0022 prefix subsumption: a
 /// bare/`.*` family matches every id beneath it; an exact id matches itself.
-/// Segment-aware, so `type` does not match `typex.*`.
-fn pattern_matches(pattern: &str, id: &str) -> bool {
+/// Segment-aware, so `type` does not match `typex.*`. Shared by the inline-ignore
+/// channel and the profile engine's `enable`/`disable`/`warn` id-arrays (ADR-0050
+/// §5), so both read the ADR-0022 prefix semantics from one place.
+#[must_use]
+pub fn pattern_matches(pattern: &str, id: &str) -> bool {
     let norm = pattern.strip_suffix(".*").unwrap_or(pattern);
     id == norm || id.strip_prefix(norm).is_some_and(|rest| rest.starts_with('.'))
 }
@@ -310,7 +387,9 @@ pub fn apply_inline_ignores(
 
 /// Build a meta-diagnostic at a directive's comment location.
 fn meta_diag(id: &'static str, path: &str, d: &Directive, message: String) -> Diagnostic {
-    Diagnostic { id, path: path.to_owned(), line: d.line, column: d.column, message }
+    // Mechanics meta-diagnostics declare no facet (ADR-0050 §4: only
+    // `throw.undeclared` does).
+    Diagnostic { id, path: path.to_owned(), line: d.line, column: d.column, message, facet: None }
 }
 
 #[cfg(test)]

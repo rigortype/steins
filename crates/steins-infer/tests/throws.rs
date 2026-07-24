@@ -8,7 +8,9 @@
 //! unknown external class), unchecked families (`Error`/`LogicException`), and
 //! unproven coverage all stay silent.
 
-use steins_infer::{Diagnostic, THROW_LISKOV_ID, THROW_UNDECLARED_ID, check};
+use steins_infer::{
+    Diagnostic, Facet, Origin, THROW_LISKOV_ID, THROW_UNDECLARED_ID, check, declared_facet,
+};
 use steins_syntax::SourceTree;
 
 fn undeclared(src: &str) -> Vec<Diagnostic> {
@@ -268,4 +270,74 @@ function pass(): void {
 }
 "#;
     assert_eq!(n_undeclared(passed), 0, "param handed to a call voids rethrow precision");
+}
+
+// ---- The `origin` facet (ADR-0050 §4) ------------------------------------
+//
+// `throw.undeclared` findings carry a registry-declared `origin` facet, computed
+// at emit time from walk-local data: DIRECT when the escaping throw originates in
+// the annotated declaration's OWN body, PROPAGATED when it arrives up a call edge.
+// This productionizes the measurement note's rule (158 direct vs 43,805 propagated
+// on the legacy monorepo), the split the `throws-direct` profile selects on.
+
+#[test]
+fn own_body_throw_is_direct() {
+    // The RuntimeException is thrown in f()'s own body → direct.
+    let src = "<?php\n/** @throws \\JsonException */\nfunction f(): void { throw new \\RuntimeException(); }\n";
+    let ds = undeclared(src);
+    assert_eq!(ds.len(), 1, "got: {ds:#?}");
+    assert_eq!(ds[0].facet, Some(Facet::Origin(Origin::Direct)));
+}
+
+#[test]
+fn escape_through_a_callee_is_propagated() {
+    // f() declares @throws JsonException but calls g(), which throws
+    // RuntimeException. The escape's origin is g()'s body, reached up a call edge
+    // → propagated (even though g lives in the same file as f).
+    let src = "<?php\n\
+        function g(): void { throw new \\RuntimeException(); }\n\
+        /** @throws \\JsonException */\n\
+        function f(): void { g(); }\n";
+    let ds = undeclared(src);
+    assert_eq!(ds.len(), 1, "got: {ds:#?}");
+    assert_eq!(ds[0].facet, Some(Facet::Origin(Origin::Propagated)));
+}
+
+#[test]
+fn direct_and_propagated_coexist_on_one_declaration() {
+    // f() throws RuntimeException directly AND calls g() which throws RangeException.
+    // Both escape f()'s JsonException envelope: the own-body one is direct, the
+    // callee one propagated — the facet is per-finding, not per-declaration.
+    let src = "<?php\n\
+        function g(): void { throw new \\RangeException(); }\n\
+        /** @throws \\JsonException */\n\
+        function f(): void { g(); throw new \\RuntimeException(); }\n";
+    let ds = undeclared(src);
+    assert_eq!(ds.len(), 2, "got: {ds:#?}");
+    let facets: std::collections::HashSet<_> = ds.iter().map(|d| d.facet).collect();
+    assert!(facets.contains(&Some(Facet::Origin(Origin::Direct))));
+    assert!(facets.contains(&Some(Facet::Origin(Origin::Propagated))));
+}
+
+#[test]
+fn only_throw_undeclared_declares_the_origin_facet() {
+    assert_eq!(declared_facet(THROW_UNDECLARED_ID), Some("origin"));
+    assert_eq!(declared_facet(THROW_LISKOV_ID), None);
+    assert_eq!(declared_facet("type.argument-mismatch"), None);
+    assert_eq!(declared_facet("nope"), None);
+}
+
+#[test]
+fn liskov_findings_carry_no_facet() {
+    // A liskov-widened finding is not a throw.undeclared finding; it declares no
+    // facet (ADR-0050 §4: only throw.undeclared does).
+    let src = r#"<?php
+class Base { /** @throws \JsonException */ public function m(): void {} }
+class Child extends Base { /** @throws \RuntimeException */ public function m(): void {} }
+"#;
+    let ds = liskov(src);
+    assert!(!ds.is_empty(), "expected a liskov finding");
+    for d in &ds {
+        assert_eq!(d.facet, None);
+    }
 }

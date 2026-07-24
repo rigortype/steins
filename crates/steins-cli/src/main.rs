@@ -7,6 +7,7 @@
 //! right-margin column of *proven* inferred facts (the Rigor-style display).
 
 mod baseline;
+mod profile;
 mod sha256;
 
 use std::collections::HashMap;
@@ -44,7 +45,7 @@ fn main() -> ExitCode {
         }
         None => {
             eprintln!(
-                "usage: steins check [--format text|json] [--no-php] [--vendor-diagnostics] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
+                "usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor-diagnostics] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
             );
             eprintln!("       steins annotate [--no-php] <file.php>");
             eprintln!(
@@ -62,6 +63,7 @@ fn run_check(args: &[String]) -> ExitCode {
     let mut ignore_baseline = false;
     let mut vendor_diagnostics = false;
     let mut baseline_path: Option<String> = None;
+    let mut profile_flag: Option<String> = None;
     let mut paths: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -73,6 +75,14 @@ fn run_check(args: &[String]) -> ExitCode {
             "--vendor-diagnostics" => {
                 vendor_diagnostics = true;
                 i += 1;
+            }
+            "--profile" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("steins: --profile requires a name argument");
+                    return ExitCode::from(2);
+                };
+                profile_flag = Some(value.clone());
+                i += 2;
             }
             "--set-baseline" => {
                 set_baseline = true;
@@ -132,6 +142,19 @@ fn run_check(args: &[String]) -> ExitCode {
         eprintln!("{SOUND_SUBSET_NOTICE}");
     }
 
+    // The active display surface (ADR-0050 §5): resolve the selected profile before
+    // any analysis so a config error fails fast (exit 2). Precedence: the
+    // `--profile` flag beats `[check] profile` beats the built-in `default`.
+    let (config_profile, profile_configs) = load_profiles();
+    let selected = profile_flag.as_deref().or(config_profile.as_deref());
+    let surface = match profile_configs.resolve(selected) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("steins: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
     let db = SteinsDatabase::default();
     // One folder for the whole run: it owns the resident sidecar and the fold
     // memo, so a repeated call across files never re-spawns or re-folds.
@@ -183,7 +206,20 @@ fn run_check(args: &[String]) -> ExitCode {
         vendor_suppressed = before - findings.len();
     }
 
-    // Inline `@steins-ignore` applies first (ADR-0023): a finding suppressed
+    // Profile surface (ADR-0050 §6, second in the pipeline): a finding off the
+    // active surface does not exist — it never reaches, nor consumes, a later
+    // channel (inline ignore, baseline). This is the M2 adoption-surface core: a
+    // bare `check` shows proof + mechanics only; the contract layer opts up via a
+    // named profile. Mechanics ids stay on in every profile (anti-rot, §1).
+    findings.retain(|d| surface.is_surfaced(d));
+
+    // Scoped policy (ADR-0050 §6, third in the pipeline): `[[policy]]` per-path
+    // enable/disable is issue #15 / slice 3. This slice ships the seam as a no-op
+    // stage so the composition order is real and slice 3 slots in without moving
+    // the earlier stages.
+    let findings = apply_policy_stage(findings);
+
+    // Inline `@steins-ignore` applies next (ADR-0023): a finding suppressed
     // inline never reaches — nor consumes — the baseline channel.
     let trees: Vec<&SourceTree> = inputs.iter().map(|&sf| parse_tree(&db, sf)).collect();
     let file_pairs: Vec<(String, &SourceTree)> =
@@ -207,17 +243,20 @@ fn run_check(args: &[String]) -> ExitCode {
 
     if set_baseline {
         let file = baseline_file.expect("set-baseline names a file");
-        return write_baseline(&file, &inline.kept, &texts);
+        return write_baseline(&file, &inline.kept, &texts, &surface);
     }
 
     // Baseline channel: partition the inline survivors into baselined (suppressed,
     // excluded from exit) and reported. `--ignore-baseline` / no file → all report.
-    let (reported, baselined, stale) = match &baseline_file {
+    // Staleness is surface-aware (ADR-0050 §8): an unconsumed entry outside the
+    // current surface is dormant, not stale. `surface_notice` fires when the active
+    // surface exceeds the captured one (the drowns-loudly rule).
+    let (reported, baselined, stale, surface_notice) = match &baseline_file {
         Some(file) => match std::fs::read_to_string(file) {
-            Ok(text) => match_baseline(file, &text, inline.kept, &texts),
-            Err(_) => (inline.kept, 0, 0),
+            Ok(text) => match_baseline(file, &text, inline.kept, &texts, &surface),
+            Err(_) => (inline.kept, 0, 0, None),
         },
-        None => (inline.kept, 0, 0),
+        None => (inline.kept, 0, 0, None),
     };
 
     // Displayed = object-level survivors + meta-diagnostics (which are exempt from
@@ -229,16 +268,46 @@ fn run_check(args: &[String]) -> ExitCode {
     });
 
     match format {
-        Format::Text => print_text(&displayed, vendor_suppressed, inline.suppressed, baselined, stale),
-        Format::Json => print_json(&displayed, vendor_suppressed, inline.suppressed, baselined),
+        Format::Text => print_text(
+            &displayed,
+            &surface,
+            vendor_suppressed,
+            inline.suppressed,
+            baselined,
+            stale,
+            surface_notice.as_deref(),
+        ),
+        Format::Json => {
+            print_json(&displayed, &surface, vendor_suppressed, inline.suppressed, baselined)
+        }
     }
 
-    if displayed.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    // Exit level (ADR-0050 §7): 1 iff any *fail*-level finding is displayed; a
+    // warn-only run exits 0 (that is what `warn` means). Config/usage errors already
+    // exited 2 above.
+    let any_fail = displayed.iter().any(|d| surface.level(d.id) == profile::Level::Fail);
+    if any_fail { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+}
+
+/// The `[[policy]]` scoped enable/disable stage (ADR-0050 §6): issue #15 / slice 3.
+/// A no-op identity today — the structural seam that keeps the composition order
+/// (vendor → surface → policy → inline → baseline) real so slice 3 slots in without
+/// disturbing the surrounding stages.
+fn apply_policy_stage(findings: Vec<Diagnostic>) -> Vec<Diagnostic> {
+    findings
 }
 
 /// Write a baseline file from the inline-surviving findings (ADR-0022
 /// `--set-baseline`). Never affects exit code: writing is a maintenance action.
-fn write_baseline(file: &Path, findings: &[Diagnostic], texts: &HashMap<String, String>) -> ExitCode {
+/// The header records the capture surface (ADR-0050 §8): the active `surface`'s
+/// profile name and resolved id-set, so a later run can tell dormant from stale and
+/// notice when its surface exceeds this one.
+fn write_baseline(
+    file: &Path,
+    findings: &[Diagnostic],
+    texts: &HashMap<String, String>,
+    surface: &profile::Surface,
+) -> ExitCode {
     let dir = baseline::base_dir(file);
     let entries: Vec<baseline::Entry> = findings
         .iter()
@@ -251,9 +320,14 @@ fn write_baseline(file: &Path, findings: &[Diagnostic], texts: &HashMap<String, 
         })
         .collect();
     let n = entries.len();
-    match std::fs::write(file, baseline::render(entries)) {
+    let capture = baseline::CaptureSurface { profile: surface.name.clone(), ids: surface.surface_ids() };
+    match std::fs::write(file, baseline::render(entries, &capture)) {
         Ok(()) => {
-            eprintln!("steins: wrote {n} baseline entries to {}", file.display());
+            eprintln!(
+                "steins: wrote {n} baseline entries to {} (profile `{}`)",
+                file.display(),
+                surface.name
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -264,13 +338,20 @@ fn write_baseline(file: &Path, findings: &[Diagnostic], texts: &HashMap<String, 
 }
 
 /// Match inline-surviving `findings` against a baseline file's entries. Returns
-/// `(reported, baselined_count, stale_count)`.
+/// `(reported, baselined_count, stale_count, surface_notice)`.
+///
+/// Surface-aware (ADR-0050 §8): staleness counts only unconsumed entries whose id
+/// is inside the current `surface` (others are dormant — kept silently). The
+/// `surface_notice` is `Some` when the active surface admits an id the captured
+/// surface (from the header) did not — the "drowns loudly" rule so a
+/// `--profile contracts` run over a default-captured baseline says so.
 fn match_baseline(
     file: &Path,
     text: &str,
     findings: Vec<Diagnostic>,
     texts: &HashMap<String, String>,
-) -> (Vec<Diagnostic>, usize, usize) {
+    surface: &profile::Surface,
+) -> (Vec<Diagnostic>, usize, usize, Option<String>) {
     let entries = baseline::parse(text);
     let dir = baseline::base_dir(file);
     let mut matcher = baseline::Matcher::new(&entries);
@@ -287,7 +368,29 @@ fn match_baseline(
             reported.push(d);
         }
     }
-    (reported, baselined, matcher.stale_count())
+    let stale = matcher.stale_count_within(|id| surface.surfaces_id(id));
+
+    // The drowns-loudly notice (ADR-0050 §8): ids the current surface admits that
+    // the captured surface did not. A pre-ADR-0050 header (no capture surface) can
+    // not be compared, so no notice fires.
+    let surface_notice = baseline::parse_header(text).and_then(|captured| {
+        let captured_ids: std::collections::HashSet<&str> =
+            captured.ids.iter().map(String::as_str).collect();
+        let extra = surface
+            .surface_ids()
+            .into_iter()
+            .filter(|id| !captured_ids.contains(id.as_str()))
+            .count();
+        (extra > 0).then(|| {
+            format!(
+                "active profile `{}` surfaces {extra} id(s) the baseline (captured under `{}`) did not — \
+                 those findings are unbaselined (rerun --set-baseline to capture them)",
+                surface.name, captured.profile
+            )
+        })
+    });
+
+    (reported, baselined, stale, surface_notice)
 }
 
 /// `steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--format
@@ -481,6 +584,32 @@ fn run_transform(args: &[String]) -> ExitCode {
 struct SteinsConfig {
     transform: Option<TransformConfig>,
     runtime: Option<RuntimeConfig>,
+    /// The `[check]` section (ADR-0050 §5): the repo's default profile selection.
+    check: Option<CheckConfig>,
+    /// The `[profile.<name>]` table (ADR-0050 §5): user-defined profiles.
+    profile: Option<std::collections::BTreeMap<String, ProfileEntryConfig>>,
+}
+
+/// The `[check]` section (ADR-0050 §5): repo defaults for `steins check`. Today it
+/// carries the default profile name; the `--profile` flag beats it (§5).
+#[derive(serde::Deserialize, Default)]
+struct CheckConfig {
+    profile: Option<String>,
+}
+
+/// A `[profile.<name>]` entry (ADR-0050 §5): `extends` a base and refines it with
+/// ADR-0022 prefix id-arrays. Facet selection is not accepted here in v1 (the
+/// deferred-with-design lenient path, §4/§11): a facet-shaped token in any array is
+/// an unknown id pattern and errors clearly.
+#[derive(serde::Deserialize, Default)]
+struct ProfileEntryConfig {
+    extends: Option<String>,
+    #[serde(default)]
+    enable: Vec<String>,
+    #[serde(default)]
+    disable: Vec<String>,
+    #[serde(default)]
+    warn: Vec<String>,
 }
 
 /// The `[runtime]` section (ADR-0052 §5 / ADR-0037 §2): boot-truth pseudo-constants
@@ -619,6 +748,40 @@ fn load_runtime() -> (bool, bool, Vec<String>) {
         }
     };
     (zend_assertions, warning_handler_abort, warnings)
+}
+
+/// Load the profile selection and user-profile table from `steins.toml`
+/// (ADR-0050 §5). Reads `./steins.toml` if present. Returns the `[check] profile`
+/// selection (the repo default; the `--profile` flag beats it) and the resolved
+/// [`profile::ProfileConfigs`] table. A missing/unparseable file is no config —
+/// the built-in `default` profile then governs (a parse error is already surfaced
+/// by [`load_runtime`], so we do not double-warn here).
+fn load_profiles() -> (Option<String>, profile::ProfileConfigs) {
+    let path = PathBuf::from("steins.toml");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return (None, profile::ProfileConfigs::default());
+    };
+    let Ok(config) = toml::from_str::<SteinsConfig>(&text) else {
+        return (None, profile::ProfileConfigs::default());
+    };
+    let selected = config.check.and_then(|c| c.profile);
+    let map = config
+        .profile
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, e)| {
+            (
+                name,
+                profile::UserProfile {
+                    extends: e.extends,
+                    enable: e.enable,
+                    disable: e.disable,
+                    warn: e.warn,
+                },
+            )
+        })
+        .collect();
+    (selected, profile::ProfileConfigs(map))
 }
 
 /// Load the region map from `steins.toml [transform.partitions]` (ADR-0047 §7).
@@ -965,15 +1128,24 @@ fn render_annotation(text: &str, facts: &[LineFact]) -> String {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_text(
     findings: &[Diagnostic],
+    surface: &profile::Surface,
     vendor_suppressed: usize,
     suppressed: usize,
     baselined: usize,
     stale: usize,
+    surface_notice: Option<&str>,
 ) {
     for d in findings {
-        println!("{}:{}:{}: error[{}]: {}", d.path, d.line, d.column, d.id, d.message);
+        // The level distinction (ADR-0050 §7): fail-level prints `error[…]`,
+        // warn-level (a profile `warn = [...]` demotion) prints `warning[…]`.
+        let kind = match surface.level(d.id) {
+            profile::Level::Fail => "error",
+            profile::Level::Warn => "warning",
+        };
+        println!("{}:{}:{}: {kind}[{}]: {}", d.path, d.line, d.column, d.id, d.message);
     }
     // Suppression accounting (ADR-0022/0023/0015), each line printed only when
     // nonzero. Vendor is the first channel (ADR-0015), so it prints first.
@@ -989,26 +1161,45 @@ fn print_text(
     if stale > 0 {
         println!("{stale} baseline entries no longer match (stale — rerun --set-baseline)");
     }
+    // The drowns-loudly notice (ADR-0050 §8), printed after the accounting.
+    if let Some(notice) = surface_notice {
+        println!("{notice}");
+    }
 }
 
-fn print_json(findings: &[Diagnostic], vendor_suppressed: usize, suppressed: usize, baselined: usize) {
+fn print_json(
+    findings: &[Diagnostic],
+    surface: &profile::Surface,
+    vendor_suppressed: usize,
+    suppressed: usize,
+    baselined: usize,
+) {
     let array: Vec<serde_json::Value> = findings
         .iter()
         .map(|d| {
-            serde_json::json!({
+            let mut obj = serde_json::json!({
                 "id": d.id,
                 // ADR-0050 §2: the diagnostic layer, additive. Every emitted id is
                 // registered (totality test), so this is always present.
                 "layer": steins_infer::layer(d.id).map(steins_infer::Layer::as_str),
+                // ADR-0050 §7: the exit level (`fail|warn`), additive.
+                "level": surface.level(d.id).as_str(),
                 "path": d.path,
                 "line": d.line,
                 "column": d.column,
                 "message": d.message,
-            })
+            });
+            // ADR-0050 §4: the registry-declared facet, additive — present as its own
+            // key (`"origin": "direct"|"propagated"`) only on ids that declare one.
+            if let Some(facet) = d.facet {
+                obj[facet.key()] = serde_json::Value::String(facet.value().to_owned());
+            }
+            obj
         })
         .collect();
     let doc = serde_json::json!({
         "findings": array,
+        "profile": surface.name,
         "vendor_suppressed": vendor_suppressed,
         "suppressed": suppressed,
         "baselined": baselined,

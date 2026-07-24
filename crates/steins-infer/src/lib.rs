@@ -24,8 +24,9 @@ pub mod suppress;
 
 pub use dam::{DamFacts, DamKind, DamSite, dam_facts};
 pub use suppress::{
-    DIAGNOSTIC_IDS, DIAGNOSTIC_REGISTRY, InlineOutcome, Layer, SUPPRESS_UNKNOWN_ID,
-    SUPPRESS_UNMATCHED_ID, apply_inline_ignores, layer, pattern_is_known,
+    DIAGNOSTIC_IDS, DIAGNOSTIC_REGISTRY, FACET_ORIGIN, Facet, InlineOutcome, Layer, Origin,
+    SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID, apply_inline_ignores, declared_facet, layer,
+    pattern_is_known, pattern_matches,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -554,6 +555,15 @@ pub struct Diagnostic {
     pub line: u32,
     pub column: u32,
     pub message: String,
+    /// The registry-declared facet this finding carries (ADR-0050 §4), or `None`
+    /// for ids that declare no facet. v1: `Some(Facet::Origin(_))` on
+    /// `throw.undeclared` only, computed at emit time from walk-local data (the
+    /// measurement note's same-file-plus-own-origin rule). Additive — the
+    /// `--format json` output shows it as an extra key only when present, and the
+    /// value never participates in a check's inference behavior. It *does* take
+    /// part in equality/hash, but harmlessly: two findings that were previously
+    /// equal share an origin file+offset and so compute the same facet.
+    pub facet: Option<Facet>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1570,6 +1580,7 @@ fn emit_effect_liskov(
                 line: pos.line,
                 column: pos.column,
                 message: msg,
+                facet: None,
             });
         }
     }
@@ -1643,6 +1654,7 @@ fn report_unit(
             line: pos.line,
             column: pos.column,
             message: msg,
+            facet: None,
         });
     }
 
@@ -1800,7 +1812,7 @@ fn exceeded_diag(
     };
     let msg = format!("{prefix}, but {display}() is declared {clause}");
     let pos = cx.tree().position(offset);
-    Diagnostic { id: EFFECT_ID, path: cx.path().to_owned(), line: pos.line, column: pos.column, message: msg }
+    Diagnostic { id: EFFECT_ID, path: cx.path().to_owned(), line: pos.line, column: pos.column, message: msg, facet: None }
 }
 
 /// The proven effect findings a builtin `name` carries (empty for pure or
@@ -2293,7 +2305,7 @@ fn throw_diagnostics(units: &[FileUnit], index: &Index) -> Vec<Diagnostic> {
                 continue;
             }
             let sym = Sym::Func(f.fqn.clone());
-            emit_undeclared(&mut out, &cx, index, units, &sym, &f.name, &declared, &throws);
+            emit_undeclared(&mut out, &cx, index, units, &sym, &f.name, &declared, &throws, &f.throw_origins);
         }
         for c in cx.tree().classes() {
             for m in &c.methods {
@@ -2301,7 +2313,7 @@ fn throw_diagnostics(units: &[FileUnit], index: &Index) -> Vec<Diagnostic> {
                 let display = format!("{}::{}", c.name, m.name);
                 if !declared.is_empty() {
                     let sym = Sym::Method(c.fqn.clone(), m.name.clone());
-                    emit_undeclared(&mut out, &cx, index, units, &sym, &display, &declared, &throws);
+                    emit_undeclared(&mut out, &cx, index, units, &sym, &display, &declared, &throws, &m.throw_origins);
                 }
                 // Liskov: an override/impl whose declared throws widen the parent's.
                 emit_liskov(&mut out, &cx, c, m, &declared);
@@ -2323,6 +2335,7 @@ fn emit_undeclared(
     display: &str,
     declared: &[String],
     throws: &HashMap<Sym, ThrowSet>,
+    decl_origins: &[ThrowOrigin],
 ) {
     let Some(set) = throws.get(sym) else { return };
     let declared_list = declared.iter().map(|d| last_segment(d).to_owned()).collect::<Vec<_>>().join("|");
@@ -2346,12 +2359,27 @@ fn emit_undeclared(
         let msg = format!(
             "{simple} can escape {display}() but is not declared (@throws {declared_list}) — proven escape"
         );
+        // The `origin` facet (ADR-0050 §4), productionizing the measurement note's
+        // rule: DIRECT iff the escaping throw's origin is in the annotated
+        // declaration's OWN body — same file as the declaration (`cx.cur`) *and* a
+        // member of its own scanned `throw_origins` — else PROPAGATED (it arrived up
+        // a call edge). The origin offset is a unique file byte position and
+        // `throw_origins` is scoped to this one declaration's body, so the
+        // same-file-plus-own-origin test is exact even when a callee shares the file.
+        let origin = if fact.origin_file == cx.cur
+            && decl_origins.iter().any(|o| o.span.start == fact.offset)
+        {
+            Origin::Direct
+        } else {
+            Origin::Propagated
+        };
         out.push(Diagnostic {
             id: THROW_UNDECLARED_ID,
             path: fact.path.clone(),
             line: pos.line,
             column: pos.column,
             message: msg,
+            facet: Some(Facet::Origin(origin)),
         });
     }
 }
@@ -2387,6 +2415,7 @@ fn emit_liskov(out: &mut Vec<Diagnostic>, cx: &Cx, class: &ClassDecl, m: &Method
                 line: pos.line,
                 column: pos.column,
                 message: msg,
+                facet: None,
             });
         }
     }
@@ -2898,7 +2927,7 @@ impl<'a> Cx<'a> {
                 value.render(), callee, ty.render(), param_name, mode,
             ),
         };
-        Diagnostic { id: ID, path: self.path().to_owned(), line: pos.line, column: pos.column, message }
+        Diagnostic { id: ID, path: self.path().to_owned(), line: pos.line, column: pos.column, message, facet: None }
     }
 
     /// Build a `type.return-mismatch` diagnostic. `display` is the owning
@@ -2926,6 +2955,7 @@ impl<'a> Cx<'a> {
             line: pos.line,
             column: pos.column,
             message,
+            facet: None,
         }
     }
 
@@ -3803,6 +3833,7 @@ fn walk_trace(
                     let pos = cx.tree().position(span.start);
                     out.push(Diagnostic {
                         id: RETURN_MISMATCH_ID,
+                        facet: None,
                         path: cx.path().to_owned(),
                         line: pos.line,
                         column: pos.column,
@@ -4361,6 +4392,7 @@ fn apply_prop_assign(
         let mode = if cx.strict() { "strict" } else { "coercive" };
         out.push(Diagnostic {
             id: PROP_MISMATCH_ID,
+            facet: None,
             path: cx.path().to_owned(),
             line: pos.line,
             column: pos.column,
@@ -4403,6 +4435,7 @@ fn apply_prop_assign(
             let pos = cx.tree().position(span_start);
             out.push(Diagnostic {
                 id: PHPDOC_PROP_MISMATCH_ID,
+                facet: None,
                 path: cx.path().to_owned(),
                 line: pos.line,
                 column: pos.column,
@@ -4426,6 +4459,7 @@ fn apply_prop_assign(
         let pos = cx.tree().position(span_start);
         out.push(Diagnostic {
             id: READONLY_REASSIGNED_ID,
+            facet: None,
             path: cx.path().to_owned(),
             line: pos.line,
             column: pos.column,
@@ -4846,6 +4880,7 @@ fn check_call_on_null(
     let pos = w.cx.tree().position(call.span.start);
     out.push(Diagnostic {
         id: CALL_ON_NULL_ID,
+        facet: None,
         path: w.cx.path().to_owned(),
         line: pos.line,
         column: pos.column,
@@ -7274,6 +7309,7 @@ fn check_undefined_method(
         line: pos.line,
         column: pos.column,
         message,
+        facet: None,
     });
 }
 
@@ -7545,6 +7581,7 @@ fn emit_arity(cx: &Cx, call: &CallExpr, target: &ArityTarget, out: &mut Vec<Diag
         let at = cx.tree().position(call.span.start);
         out.push(Diagnostic {
             id: CALL_UNKNOWN_NAMED_ARGUMENT_ID,
+            facet: None,
             path: cx.path().to_owned(),
             line: at.line,
             column: at.column,
@@ -7566,6 +7603,7 @@ fn emit_arity(cx: &Cx, call: &CallExpr, target: &ArityTarget, out: &mut Vec<Diag
         let at = cx.tree().position(call.span.start);
         out.push(Diagnostic {
             id: CALL_TOO_FEW_ARGUMENTS_ID,
+            facet: None,
             path: cx.path().to_owned(),
             line: at.line,
             column: at.column,
@@ -7897,6 +7935,7 @@ fn check_phpdoc_undefined_method(
         line: pos.line,
         column: pos.column,
         message,
+        facet: None,
     });
 }
 
@@ -8131,7 +8170,7 @@ fn emit_offset(
         return;
     }
     let pos = cx.tree().position(span.start);
-    out.push(Diagnostic { id, path: cx.path().to_owned(), line: pos.line, column: pos.column, message });
+    out.push(Diagnostic { id, path: cx.path().to_owned(), line: pos.line, column: pos.column, message, facet: None });
 }
 
 /// Check + descend one method / static / constructor call.
@@ -9787,6 +9826,7 @@ fn check_phpdoc_param(
         line: pos.line,
         column: pos.column,
         message,
+        facet: None,
     });
 }
 

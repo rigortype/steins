@@ -12,11 +12,12 @@ use std::collections::HashSet;
 use steins_infer::{
     ALL_EMITTABLE_IDS, CALL_ON_NULL_ID, CALL_TOO_FEW_ARGUMENTS_ID, CALL_TOO_MANY_ARGUMENTS_ID,
     CALL_UNDEFINED_FUNCTION_ID, CALL_UNDEFINED_METHOD_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID,
-    CLASS_UNDEFINED_ID, DIAGNOSTIC_IDS, DIAGNOSTIC_REGISTRY, EFFECT_ID, EFFECT_LISKOV_ID, ID, Layer,
-    OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID, PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID,
-    PHPDOC_UNDEFINED_METHOD_ID, PROP_MISMATCH_ID, READONLY_REASSIGNED_ID, REGISTERED_NOT_YET_EMITTED,
-    RETURN_ID, RETURN_MISMATCH_ID, SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID, THROW_LISKOV_ID,
-    THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID, layer,
+    CLASS_UNDEFINED_ID, DIAGNOSTIC_IDS, DIAGNOSTIC_REGISTRY, EFFECT_ID, EFFECT_LISKOV_ID,
+    FACET_ORIGIN, Facet, ID, Layer, OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID, Origin,
+    PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID, PHPDOC_UNDEFINED_METHOD_ID, PROP_MISMATCH_ID,
+    READONLY_REASSIGNED_ID, REGISTERED_NOT_YET_EMITTED, RETURN_ID, RETURN_MISMATCH_ID,
+    SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID, THROW_LISKOV_ID, THROW_UNDECLARED_ID,
+    UNKNOWN_LABEL_ID, declared_facet, layer,
 };
 
 /// Totality, forward: every id an emitter can produce is registered *with* a layer.
@@ -177,4 +178,26 @@ fn layer_wire_spellings() {
     assert_eq!(Layer::Proof.as_str(), "proof");
     assert_eq!(Layer::Contract.as_str(), "contract");
     assert_eq!(Layer::Mechanics.as_str(), "mechanics");
+}
+
+/// The `origin` facet (ADR-0050 §4) is declared by exactly one id in v1 —
+/// `throw.undeclared`. The facet is a *registry-declared* axis: no other id
+/// declares one, so no other id's findings ever carry a facet key.
+#[test]
+fn only_throw_undeclared_declares_a_facet() {
+    assert_eq!(declared_facet(THROW_UNDECLARED_ID), Some("origin"));
+    for &id in ALL_EMITTABLE_IDS {
+        if id != THROW_UNDECLARED_ID {
+            assert_eq!(declared_facet(id), None, "`{id}` must declare no facet in v1");
+        }
+    }
+}
+
+/// The wire spellings for the `origin` facet's additive JSON field (ADR-0050 §4).
+#[test]
+fn facet_wire_spellings() {
+    assert_eq!(FACET_ORIGIN, "origin");
+    assert_eq!(Facet::Origin(Origin::Direct).key(), "origin");
+    assert_eq!(Facet::Origin(Origin::Direct).value(), "direct");
+    assert_eq!(Facet::Origin(Origin::Propagated).value(), "propagated");
 }
