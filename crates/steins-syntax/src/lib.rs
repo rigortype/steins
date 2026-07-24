@@ -219,6 +219,29 @@ pub enum TypeMember {
         /// resolution semantics.
         display: String,
     },
+    /// A native **intersection** of object types (`A&B&…`, ADR-0043 — the
+    /// conjunctive object member the union shape deferred). A single union
+    /// member that is itself a *conjunction*: an object satisfies it only when
+    /// it is-a **every** listed class, so it is rejected the moment it is-a-`No`
+    /// against **any** one of them. PHP forbids scalar/`null` members inside an
+    /// intersection, so every element is an object type; a scalar value never
+    /// satisfies it. Carrying the intersection as one member keeps DNF types
+    /// (`(A&B)|C`) a single [`NativeType`] union.
+    InstanceInter(Vec<ClassRef>),
+}
+
+/// One class/interface membership within a native object type — the resolved
+/// FQN carried twice, exactly as [`TypeMember::Instance`] carries it: the
+/// lowercase-normalized matching key and the source-cased display form. It is
+/// the element of an intersection member ([`TypeMember::InstanceInter`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClassRef {
+    /// The namespace-resolved, **lowercase-normalized** FQN (matching
+    /// [`ClassDecl::fqn`]) — the matching / is-a key.
+    pub fqn: String,
+    /// The same resolved FQN with the source's declared casing preserved.
+    /// Diagnostic rendering only.
+    pub display: String,
 }
 
 impl TypeMember {
@@ -231,6 +254,9 @@ impl TypeMember {
             TypeMember::BoolLiteral(false) => "false".to_owned(),
             TypeMember::BoolLiteral(true) => "true".to_owned(),
             TypeMember::Instance { display, .. } => display.clone(),
+            TypeMember::InstanceInter(cs) => {
+                cs.iter().map(|c| c.display.as_str()).collect::<Vec<_>>().join("&")
+            }
         }
     }
 }
@@ -274,7 +300,9 @@ impl NativeType {
     /// (stage 3) is the only place this guard is lifted.
     #[must_use]
     pub fn has_instance(&self) -> bool {
-        self.members.iter().any(|m| matches!(m, TypeMember::Instance { .. }))
+        self.members
+            .iter()
+            .any(|m| matches!(m, TypeMember::Instance { .. } | TypeMember::InstanceInter(_)))
     }
 }
 
@@ -3292,10 +3320,43 @@ fn lower_hint_into(
             lower_hint_into(u.right, rc, members, nullable)?;
         }
         Hint::Parenthesized(p) => lower_hint_into(p.hint, rc, members, nullable)?,
+        // An intersection of object types (`A&B&…`, ADR-0043): collect every
+        // conjunct's resolved class and join them as one conjunctive
+        // `InstanceInter` member. Any non-class conjunct (`array`, `mixed`,
+        // `iterable`, `callable`, `object`, `self`/`static`/`parent`, a nested
+        // scalar) collapses the whole hint to silence (zero-FP) via the `?`.
+        Hint::Intersection(_) => {
+            let mut classes = Vec::new();
+            collect_intersection_classes(hint, rc, &mut classes)?;
+            members.push(TypeMember::InstanceInter(classes));
+        }
         // `array`, `mixed`, `iterable`, `callable`, `object`, `self`/`static`/
-        // `parent`, `void`/`never`, and any `Intersection` → silence. Intersections
-        // stay unlowered in v1 (deferred-with-design: an intersection would need a
-        // conjunctive `Instance` member the union shape does not yet carry).
+        // `parent`, `void`/`never` → silence.
+        _ => return None,
+    }
+    Some(())
+}
+
+/// Accumulate the resolved classes of an intersection hint into `out`. Recurses
+/// through nested `Intersection`/`Parenthesized` nodes; each leaf must be a
+/// class/interface identifier (PHP forbids scalar or `null` intersection
+/// members). Returns `None` — propagated up to collapse the whole hint to
+/// silence — the moment a leaf is anything other than a class name.
+fn collect_intersection_classes(
+    hint: &Hint<'_>,
+    rc: &RefResolver,
+    out: &mut Vec<ClassRef>,
+) -> Option<()> {
+    match hint {
+        Hint::Intersection(i) => {
+            collect_intersection_classes(i.left, rc, out)?;
+            collect_intersection_classes(i.right, rc, out)?;
+        }
+        Hint::Parenthesized(p) => collect_intersection_classes(p.hint, rc, out)?,
+        Hint::Identifier(id) => {
+            let display = rc.class_display_fqn(&name_ref(id));
+            out.push(ClassRef { fqn: display.to_ascii_lowercase(), display });
+        }
         _ => return None,
     }
     Some(())

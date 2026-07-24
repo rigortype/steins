@@ -268,6 +268,10 @@ pub fn native_contract(nt: &NativeType) -> ContractTy {
             // scalar domain), so this arm is exercised only once the object-world
             // acceptance path opens; it is the honest lowering regardless.
             TypeMember::Instance { fqn, .. } => ContractTy::Class(fqn.clone()),
+            // An object intersection lowers to the conjunctive contract.
+            TypeMember::InstanceInter(cs) => {
+                ContractTy::Inter(cs.iter().map(|c| ContractTy::Class(c.fqn.clone())).collect())
+            }
         })
         .collect();
     if nt.nullable {

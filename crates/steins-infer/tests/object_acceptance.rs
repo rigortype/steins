@@ -447,3 +447,119 @@ f('active');";
         ds[0].message
     );
 }
+
+// ==========================================================================
+// 11. Native intersection types (`A&B&…`, ADR-0043 conjunctive member).
+//     An object satisfies the intersection only when it is-a EVERY conjunct;
+//     it is a definite No the moment the oracle proves `IsA::No` against ANY
+//     one conjunct. Any conjunct that stays Unknown (with no proven No) keeps
+//     the whole intersection silent.
+// ==========================================================================
+
+#[test]
+fn intersection_missing_one_conjunct_rejected() {
+    // intersections_interface_merge (conformance shape): AnonymousUser is-a HasId
+    // (Yes) but not HasName (No, closed hierarchy) → the intersection rejects it.
+    let src = "<?php declare(strict_types=1);
+interface HasId {}
+interface HasName {}
+final class User implements HasId, HasName {}
+final class AnonymousUser implements HasId {}
+function f(HasId&HasName $v): void {}
+f(new User());
+f(new AnonymousUser());";
+    assert_eq!(
+        ids(src),
+        vec!["type.argument-mismatch"],
+        "only AnonymousUser (missing HasName) rejected; User satisfies both"
+    );
+}
+
+#[test]
+fn intersection_all_conjuncts_satisfied_silent() {
+    let src = "<?php declare(strict_types=1);
+interface HasId {}
+interface HasName {}
+final class User implements HasId, HasName {}
+function f(HasId&HasName $v): void {}
+f(new User());";
+    assert_eq!(n(src), 0, "User is-a both HasId and HasName → accepted");
+}
+
+#[test]
+fn intersection_unknown_conjunct_stays_silent() {
+    // The object's own hierarchy is open (it extends an uncatalogued external),
+    // so its is-a against the second conjunct (`HasName`) is Unknown — the
+    // external base might supply it — while it provenly is-a the first (`HasId`).
+    // No conjunct yields a proven `No`, so the whole intersection stays silent.
+    let src = "<?php declare(strict_types=1);
+interface HasId {}
+interface HasName {}
+class Thing extends \\Vendor\\Base implements HasId {}
+function f(HasId&HasName $v): void {}
+f(new Thing());";
+    assert_eq!(n(src), 0, "open hierarchy → no proven No → silent");
+}
+
+#[test]
+fn intersection_scalar_value_rejected() {
+    // No scalar satisfies an interface intersection (strict mode).
+    let src = "<?php declare(strict_types=1);
+interface HasId {}
+interface HasName {}
+function f(HasId&HasName $v): void {}
+f('nope');";
+    assert_eq!(ids(src), vec!["type.argument-mismatch"], "scalar never satisfies an intersection");
+}
+
+#[test]
+fn intersection_dnf_union_of_intersection_and_class() {
+    // `(A&B)|C`: a C is accepted via the C arm; an object that is neither the
+    // A&B intersection nor C is rejected by every union member.
+    let src = "<?php declare(strict_types=1);
+interface A {}
+interface B {}
+final class C {}
+final class Both implements A, B {}
+final class Neither {}
+function f((A&B)|C $v): void {}
+";
+    assert_eq!(n(&format!("{src}f(new C());")), 0, "C satisfies the C arm");
+    assert_eq!(n(&format!("{src}f(new Both());")), 0, "Both satisfies the A&B arm");
+    assert_eq!(
+        ids(&format!("{src}f(new Neither());")),
+        vec!["type.argument-mismatch"],
+        "Neither is rejected by both the A&B arm and the C arm"
+    );
+}
+
+#[test]
+fn intersection_return_definite_no() {
+    let src = "<?php declare(strict_types=1);
+interface HasId {}
+interface HasName {}
+final class AnonymousUser implements HasId {}
+function make(): HasId&HasName { return new AnonymousUser(); }";
+    assert_eq!(
+        ids(src),
+        vec!["type.return-mismatch"],
+        "returning AnonymousUser (no HasName) violates the intersection return type"
+    );
+}
+
+#[test]
+fn intersection_message_renders_with_ampersand_and_casing() {
+    let src = "<?php declare(strict_types=1);
+interface HasId {}
+interface HasName {}
+final class AnonymousUser implements HasId {}
+function f(HasId&HasName $v): void {}
+f(new AnonymousUser());";
+    let ds = findings(src);
+    assert_eq!(ds.len(), 1);
+    assert!(
+        ds[0].message.contains("cannot become HasId&HasName $v"),
+        "intersection rendered with `&` and source casing: {}",
+        ds[0].message
+    );
+}

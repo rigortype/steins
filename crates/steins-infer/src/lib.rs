@@ -5362,6 +5362,9 @@ fn native_arms(ty: &NativeType) -> Vec<ContractTy> {
             TypeMember::Scalar(ScalarType::Bool) => ContractTy::Base(Base::Bool),
             TypeMember::BoolLiteral(b) => ContractTy::LitBool(*b),
             TypeMember::Instance { fqn, .. } => ContractTy::Class(fqn.clone()),
+            TypeMember::InstanceInter(cs) => {
+                ContractTy::Inter(cs.iter().map(|c| ContractTy::Class(c.fqn.clone())).collect())
+            }
         })
         .collect();
     if ty.nullable {
@@ -8586,10 +8589,11 @@ fn member_accepts_strict(m: &TypeMember, arg: &ArgValue) -> bool {
         TypeMember::Scalar(ScalarType::String) => matches!(arg, ArgValue::Str(_)),
         TypeMember::Scalar(ScalarType::Bool) => matches!(arg, ArgValue::Bool(_)),
         TypeMember::BoolLiteral(b) => matches!(arg, ArgValue::Bool(v) if v == b),
-        // Object member (ADR-0043): no scalar literal is a member of a class type.
-        // Unreachable in stage 1 (the `has_instance` guard in `is_type_error` short-
-        // circuits before any member is inspected); explicit for stage 3.
-        TypeMember::Instance { .. } => false,
+        // Object member (ADR-0043): no scalar literal is a member of a class type
+        // or an object intersection. Unreachable in stage 1 (the `has_instance`
+        // guard in `is_type_error` short-circuits before any member is inspected);
+        // explicit for stage 3.
+        TypeMember::Instance { .. } | TypeMember::InstanceInter(_) => false,
     }
 }
 
@@ -8610,9 +8614,10 @@ fn member_accepts_coercive(m: &TypeMember, arg: &ArgValue) -> bool {
         },
         // No value coerces *into* a bool-literal; only the exact bool matches.
         TypeMember::BoolLiteral(b) => matches!(arg, ArgValue::Bool(v) if v == b),
-        // Object member (ADR-0043): no scalar coerces into a class type. See
-        // `member_accepts_strict` — unreachable in stage 1, explicit for stage 3.
-        TypeMember::Instance { .. } => false,
+        // Object member (ADR-0043): no scalar coerces into a class type or an
+        // object intersection. See `member_accepts_strict` — unreachable in stage 1,
+        // explicit for stage 3.
+        TypeMember::Instance { .. } | TypeMember::InstanceInter(_) => false,
     }
 }
 
@@ -9168,6 +9173,14 @@ impl<'a> Cx<'a> {
     fn member_rejects_object(&self, m: &TypeMember, class_fqn: &str) -> bool {
         match m {
             TypeMember::Instance { fqn, .. } => self.is_a(class_fqn, fqn) == IsA::No,
+            // An intersection (`A&B&…`) demands membership in **every** conjunct,
+            // so it definitively rejects the object the moment the is-a oracle
+            // proves non-membership (`IsA::No`) in **any** one of them. An
+            // incomplete hierarchy on the remaining conjuncts stays silent — the
+            // one proven `No` is already a sound definite reject.
+            TypeMember::InstanceInter(cs) => {
+                cs.iter().any(|c| self.is_a(class_fqn, &c.fqn) == IsA::No)
+            }
             TypeMember::Scalar(ScalarType::String) => self.strict(),
             TypeMember::Scalar(_) | TypeMember::BoolLiteral(_) => true,
         }
@@ -10018,6 +10031,9 @@ fn native_to_contract(nt: &NativeType) -> ContractTy {
             TypeMember::Scalar(ScalarType::Bool) => ContractTy::Base(steins_domain::Base::Bool),
             TypeMember::BoolLiteral(b) => ContractTy::LitBool(*b),
             TypeMember::Instance { fqn, .. } => ContractTy::Class(fqn.clone()),
+            TypeMember::InstanceInter(cs) => {
+                ContractTy::Inter(cs.iter().map(|c| ContractTy::Class(c.fqn.clone())).collect())
+            }
         })
         .collect();
     if nt.nullable {

@@ -1,4 +1,4 @@
-use steins_syntax::{ArgValue, CommentKind, NativeType, ScalarType, SourceTree, TypeMember};
+use steins_syntax::{ArgValue, ClassRef, CommentKind, NativeType, ScalarType, SourceTree, TypeMember};
 
 #[test]
 fn lowers_functions_calls_and_strict() {
@@ -429,16 +429,28 @@ fn object_scalar_union_is_one_shape() {
 }
 
 #[test]
-fn self_static_parent_and_intersection_stay_unlowered() {
-    // `self`/`static`/`parent` remain silent (None); an intersection stays None too.
-    let src = "<?php\nclass C {\n  function a(): self { return $this; }\n  function b(): static { return $this; }\n  function c(parent $p): void {}\n  function d(A&B $x): void {}\n}\n";
+fn self_static_parent_stay_unlowered_intersection_lowers() {
+    // `self`/`static`/`parent` remain silent (None, ADR-0043 — LSB not v1); an
+    // object intersection (`A&B`) lowers to a single conjunctive `InstanceInter`
+    // member (ADR-0043 — the deferred conjunctive member, now built).
+    let src = "<?php\nnamespace App;\nclass C {\n  function a(): self { return $this; }\n  function b(): static { return $this; }\n  function c(parent $p): void {}\n  function d(A&B $x): void {}\n}\n";
     let tree = SourceTree::parse(src);
     let c = tree.classes().iter().find(|d| d.name == "C").unwrap();
     let m = |name: &str| c.methods.iter().find(|m| m.name == name).unwrap();
     assert!(m("a").ret.is_none(), "self return stays None");
     assert!(m("b").ret.is_none(), "static return stays None");
     assert!(m("c").params[0].ty.is_none(), "parent param stays None");
-    assert!(m("d").params[0].ty.is_none(), "an intersection stays None (v1 deferral)");
+    let d = m("d").params[0].ty.as_ref().expect("A&B lowers to an intersection member");
+    assert_eq!(
+        d.members,
+        vec![TypeMember::InstanceInter(vec![
+            ClassRef { fqn: "app\\a".into(), display: "App\\A".into() },
+            ClassRef { fqn: "app\\b".into(), display: "App\\B".into() },
+        ])],
+        "A&B → one conjunctive InstanceInter member with both resolved classes"
+    );
+    assert!(!d.nullable);
+    assert!(d.has_instance(), "an intersection member is object-bearing");
 }
 
 #[test]

@@ -121,9 +121,23 @@ fn unmodeled_union_member_silences_whole_type() {
         let src = format!("<?php\ndeclare(strict_types=1);\nfunction f({ty} $v): void {{}}\nf(1.5);\n");
         assert_eq!(n(&src), 0, "type `{ty}` must lower to silence");
     }
-    // An intersection anywhere collapses the type too (intersections are unlowered).
-    let src = "<?php\ndeclare(strict_types=1);\nfunction f(int|(A&B) $v): void {}\nf(1.5);\n";
-    assert_eq!(n(src), 0, "intersection member silences the type");
+    // A DNF hint whose intersection conjunct is a non-class type (`int&B` is not a
+    // valid object intersection) still collapses to silence via the conjunct guard.
+    let src = "<?php\ndeclare(strict_types=1);\nfunction f(int|(iterable&Countable) $v): void {}\nf(1.5);\n";
+    assert_eq!(n(src), 0, "non-class conjunct silences the whole type");
+}
+
+#[test]
+fn intersection_union_member_is_now_modeled_adr0043() {
+    // ADR-0043: an object intersection (`A&B`) is a modeled conjunctive member, so
+    // `int|(A&B)` lowers to `[Int, InstanceInter([A, B])]` — no longer silenced. A
+    // `1.5` (float) matches neither `int` (no float→int in strict) nor the object
+    // intersection (a scalar is never an object) → a proven TypeError. Verified
+    // against php 8.5.8: `f(int|(A&B) $v); f(1.5)` strict → TypeError `(A&B)|int`.
+    let src = "<?php\ndeclare(strict_types=1);\ninterface A {}\ninterface B {}\nfunction f(int|(A&B) $v): void {}\nf(1.5);\n";
+    let d = findings(src);
+    assert_eq!(d.len(), 1, "1.5 vs int|(A&B) strict is a proven TypeError");
+    assert_eq!(d[0].id, "type.argument-mismatch");
 }
 
 #[test]
