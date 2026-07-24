@@ -443,3 +443,93 @@ lands in the release.
   revisit with a triaged case in hand.
 - Whether PSR packs (ADR-0045) should ship any class-level `Pure`
   interface envelopes in their first release, or per-method only.
+
+## Amendment (2026-07-24): superglobal access as a structural effect origin
+
+Owner-approved addition, from an empirical finding verified against
+the release binary: superglobal reads are effect-invisible today —
+`#[Pure] function f() { return $_GET['q'] ?? null; }` passes with
+zero findings even on the contracts surface, while `getenv('PATH')`
+correctly carries `global.read`. The inconsistency is one of
+**mechanism**, not taxonomy: effect origins are catalogued calls plus
+an enumerated list of language constructs, and variable-access
+origins simply do not exist (an `effects_gaps.md`-unrecorded gap —
+the same unenumerated-origin shape as point 6's property-write gap,
+classified the same way: a design gap now closed, soundness never at
+risk, silence being the safe side).
+
+A1. **Superglobal access is a structural origin** — the same pattern
+    point 4 established for `mutate.static`: decided by syntax
+    position, no heap channel, reachability-blind like every origin.
+    The coloring:
+
+    - **Reads** of `$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`,
+      `$_ENV`, `$_REQUEST`, `$_FILES`, `$argv`, `$argc` →
+      `global.read`.
+    - **Writes** to any superglobal (including `$_SESSION`) →
+      `global.write`.
+    - **`$_SESSION` reads → `global.read`**, decided. Session state
+      is global mutable state — cross-request persistence changes
+      nothing about the intra-request semantics an effect label
+      describes, and `global.read` is the coherent floor: a function
+      reading `$_SESSION` is world-coupled in exactly the way a
+      `$_GET` reader is. The *bootstrap* is already handled — the
+      catalog's `session_start` composite coloring
+      (`io.fs.write` + `output.header` + `global.write`) stands
+      unchanged; this row covers the subsequent array accesses that
+      the composite cannot see.
+    - **`$GLOBALS`** access joins the family (it is itself a
+      superglobal): reads → `global.read`, writes → `global.write`.
+    - **`global $x;` imports**: reads of an imported global →
+      `global.read`, writes → `global.write` — the import statement
+      is the syntactic marker; the same world-coupling through a
+      different door.
+    - Dynamic forms (`${'_GET'}`, variable-variables) contribute no
+      label and taint exhaustiveness, per the standing dynamic-origin
+      rule.
+
+    The taxonomy needs **no new labels**: `global.read` and
+    `global.write` exist and already carry `getenv`/`ini_set`. A
+    finer request-coupling child (a hypothetical
+    `global.read.request`) is **refused as premature**: no consumer
+    exists (no policy or transform targets request-coupling today),
+    and prefix subsumption makes the refinement additive and BC-free
+    whenever one does — a declared `global.read` would admit it
+    unchanged. This is the `fopen`-stays-at-`io.fs` precedent:
+    coarse until discrimination is demanded. Revisit trigger: a
+    policy profile wanting "no request coupling below the controller
+    layer," argued with a case in hand.
+
+A2. **Catalog coloring for the input-reading builtins**
+    (owner-requested, the two named rows binding): `filter_input()`
+    and `filter_input_array()` read `INPUT_GET`/`INPUT_POST`/
+    `INPUT_SERVER`/`INPUT_ENV`/`INPUT_COOKIE` without touching the
+    superglobals syntactically — both color `global.read`. Two
+    adjacent candidates are colored with them rather than left open,
+    on the identical-shape argument: `getopt()` reads
+    `$argv`/invocation state, and `apache_request_headers()` (with
+    its `getallheaders` alias) reads SAPI-provided request state —
+    each is a function-shaped door to the same world-coupling A1
+    catches at the variable-shaped door, and leaving them uncolored
+    would recreate this amendment's inconsistency one row over. All
+    are plain catalog data at the no-arg-analysis upper bound
+    (`filter_input(INPUT_ENV, …)` vs `INPUT_GET` is not
+    discriminated — same posture as `fopen`'s mode string).
+
+A3. **The Pure consequence, restated.** With these origins, a
+    Pure-claiming request-reading function finally fires
+    `effect.envelope-exceeded` (contract layer; default surface
+    unmoved, same three softeners as point 7): the owner's
+    "implicit self-mutation must not pass as `Pure`" constraint,
+    generalized — **implicit world-coupling must not pass as
+    `Pure`**. The migration is the same margin-driven mechanic, and
+    the honest envelope for a request reader is
+    `#[Effect('global.read')]`.
+
+A4. **Slice placement.** No new slice: A2's catalog rows fold into
+    **E1** (vocabulary/catalog, corpus-inert until inference), A1's
+    structural origins fold into **E2** (structural origins, beside
+    `mutate.static`), and E2's monorepo margin measurement (point 16)
+    now also counts superglobal-origin prevalence — on a 2007-era
+    codebase the `global.read` margin is expected to be the loudest
+    single instrument of the effect-splitting inventory.
