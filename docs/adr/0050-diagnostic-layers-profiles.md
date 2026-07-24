@@ -249,3 +249,28 @@ never guesses it; the repo declares it, reviewably.
    boot truth (ADR-0037 §2, ask-the-real-thing), NOT strictness
    knobs — the lenient-default principle governs *reporting
    surfaces* and never reopens the trust-toggle refusal (point 10).
+5. **Middle stage decided by measurement — v1 ships THREE built-ins**
+   (amending point 5's "two, not a ladder": still not a ladder, now
+   three names). The direct-vs-propagated measurement
+   (`docs/notes/20260724-g1-throw-origin-measurement.md`: monorepo
+   43,963 = 158 direct across 134 declarations + 43,805 propagated,
+   99.5%) justified the middle stage, so `throws-direct` (= default +
+   `throw.undeclared` where `origin = direct`) ships beside `default`
+   and `contracts`, and point 4's origin facet is productionized from
+   the measurement's classification rule (origin-file identity plus
+   own-body origin-offset membership). Facet selection in USER
+   profiles stays deferred-with-design (point 11): v1 reaches the
+   facet only through the built-in — a facet-shaped token in a user
+   profile's id arrays is an unknown-pattern config error, no TOML
+   syntax invented ahead of its design.
+6. **The conformance-harness consequence, recorded.** The
+   php-typing-conformance adapter invokes a bare `check`, which now
+   reads the default surface: contract-layer expectations are hidden
+   (measured: 81/98 default-surface vs 87/98 contracts-surface, zero
+   proof-layer movement; one intended-divergence case,
+   `regressions_reversed_literal_list_param`, now PASSES under
+   default — the demote silencing an over-report). Capability
+   measurement should read the full surface; the adapter-side
+   `--profile contracts` (or equivalent) is the conformance repo
+   owner's call (gate G4's boundary), recorded here so the 81-vs-87
+   split is never mistaken for a checker regression.
