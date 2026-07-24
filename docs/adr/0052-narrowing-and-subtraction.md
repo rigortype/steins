@@ -502,11 +502,11 @@ This **reverses point 5's assert() bullet**:
    annotation-free assertion helpers is descent-proven postcondition
    extraction (ADR-0058), not tag trust.
 
-**Status: decided, not yet implemented.** The landed code still gates
-the stratum on `Cx::zend_assertions` (default false ⇒ Asserted) and
-still accepts the `[runtime]` key; the follow-up slice deletes the
-flag, the config key, and the plumbing, and re-pins the assert
-fixtures at Verified (the ADR-0058 slice plan carries it as I0). Until
-that slice lands, the type specification's description of today's
-behavior remains the Asserted-by-default one — spec readers should
-treat this amendment as intent, per the README's ADR-vs-spec rule.
+**Status: implemented (slice I0).** The `StmtKind::Assert` narrowing now
+binds `Verified` unconditionally; the `Cx::zend_assertions` flag, the
+`[runtime] zend-assertions` config key, and their plumbing are deleted
+(a `steins.toml` still carrying the key hits the `deny_unknown_fields`
+exit-2 path — the intended hard-config-error outcome); the assert
+fixtures are re-pinned at Verified. The `@phpstan-assert` tag family is
+unchanged (Asserted). The type specification now describes the
+Verified-always behavior.

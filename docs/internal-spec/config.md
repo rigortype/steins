@@ -55,30 +55,34 @@ Mechanics ids ignore `disable`.
 
 ```toml
 [runtime]
-zend-assertions = "enabled"    # default: disabled
 warning-handler = "abort"      # default: abort
 ```
 
 Boot-truth pseudo-constants the checker cannot observe from source.
 
-- `zend-assertions = "enabled"` promotes `assert($expr)` narrowing from the
-  `Asserted` stratum to `Verified`. Any other value keeps the production default
-  (`zend.assertions=-1`).
 - `warning-handler` declares what a proven `E_WARNING` *does* at runtime.
   `"abort"` (the default) assumes a handler converts it to an exception or halts,
   so proven warning-grade offset findings emit. `"null"` declares the app
   tolerates the warning, and those findings leave the proof surface.
 
+There is **no `zend-assertions` key**: the 2026-07-25 owner ruling (ADR-0052
+amendment "assert() reads as a throw-guard") reads `assert($expr)` as statically
+equivalent to `if (!$expr) throw` — `Verified` unconditionally, `zend.assertions`
+never consulted. `assert()` semantics are part of the source language's assertion
+vocabulary, not a boot truth Steins models, so the key was abolished; a
+`steins.toml` still carrying it is an unknown-key config error (below).
+
 **This section uses `deny_unknown_fields`.** A misspelled key fails the parse,
-deliberately: a silently-ignored `zend-asertions` typo would leave the safe
+deliberately: a silently-ignored `warning-hadler` typo would leave the safe
 default in force while the user believed otherwise. What the binary does with
 that failure: it is a **hard config error — the run aborts with exit 2**
 (ADR-0050 §7 / ADR-0052 §5 N2), the same class as any other unparseable
-`steins.toml`. Proceeding on defaults was rejected: a typo that leaves the safe
+`steins.toml`. The abolished `zend-assertions` key reaches the same exit-2 path.
+Proceeding on defaults was rejected: a typo that leaves the safe
 default silently in force while the user believes they overrode it is exactly the
 failure `deny_unknown_fields` exists to prevent, so it must stop the run, not
 warn past it. An unrecognized *value* on a known key (e.g.
-`zend-assertions = "yes"`) still parses, so it warns and keeps the safe default.
+`warning-handler = "yes"`) still parses, so it warns and keeps the safe default.
 Reserved keys for future pseudo-constants (`include-path`, `sapi`) join here as
 they land. `doctor` treats the same unparseable-config condition as a
 configuration contradiction (exit 1, ADR-0054 §10).

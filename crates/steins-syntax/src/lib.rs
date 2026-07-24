@@ -1477,12 +1477,11 @@ pub enum StmtKind {
     },
     /// `assert(<expr>);` — a statement-position `assert` call whose argument is a
     /// condition (ADR-0052 §5). `cond` is the lowered guard; the walk applies its
-    /// `then_refinements` to the fall-through env at the **`Asserted`** stratum by
-    /// default (under `zend.assertions=-1` the expression is never evaluated, so it
-    /// carries no runtime guarantee), promotable to `Verified` by the
-    /// `[runtime] zend-assertions = "enabled"` pseudo-constant. Only a bare
-    /// `assert($expr)` (or `assert($expr, $description)`) with a lowerable condition
-    /// reaches here; anything else stays a plain [`StmtKind::Call`].
+    /// `then_refinements` to the fall-through env at the **`Verified`** stratum,
+    /// unconditionally (the 2026-07-25 owner ruling reads `assert($expr)` as a
+    /// throw-guard `if (!$expr) throw` and never consults `zend.assertions`). Only a
+    /// bare `assert($expr)` (or `assert($expr, $description)`) with a lowerable
+    /// condition reaches here; anything else stays a plain [`StmtKind::Call`].
     Assert { cond: CondExpr },
     /// `throw <expr>;` — a trace terminator (the statement never falls through).
     /// `span` points at the `throw`. The thrown expression is not modeled; only

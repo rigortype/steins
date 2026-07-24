@@ -231,27 +231,35 @@ fn silent_after_by_ref_argument_poisoning() {
 }
 
 // ---------------------------------------------------------------------------
-// Stratum discipline (N2) — an Asserted narrowing never premises a proof.
+// Stratum discipline (N2) — the assert() construct is Verified.
+//
+// FLIPPED by the 2026-07-25 owner ruling (ADR-0052 amendment "assert() reads as a
+// throw-guard", slice I0): `assert($v === [])` narrows at the Verified stratum
+// unconditionally (the ruling reads assert() as `if (!$expr) throw` and never
+// consults `zend.assertions`; the abolished `[runtime] zend-assertions` knob is
+// gone). Pre-ruling this fixture was SILENT (Asserted, gated); it now FIRES.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn silent_on_asserted_empty_singleton() {
-    // `assert($v === [])` narrows to `Singleton([])` at the *Asserted* stratum by
-    // default (`zend.assertions=-1`); proof-layer offset requires all-Verified.
+fn fires_on_assert_empty_singleton() {
+    // `assert($v === [])` narrows to `Singleton([])` at the Verified stratum (owner
+    // ruling), so the proof-layer `offset.missing` fires on the fall-through `$v[0]`.
     let src = "<?php\nfunction h(array $v): int {\n    assert($v === []);\n    return $v[0];\n}\n";
-    assert!(offset_diags(src).is_empty(), "an Asserted Singleton must not fire");
+    let d = missing(src);
+    assert_eq!(d.len(), 1, "assert() is Verified (owner ruling) → the Singleton fires: {d:#?}");
 }
 
 #[test]
-fn fires_on_asserted_empty_singleton_under_zend_assertions() {
-    // Under `[runtime] zend-assertions = "enabled"` the same narrowing is Verified.
-    let src = "<?php\nfunction h(array $v): int {\n    assert($v === []);\n    return $v[0];\n}\n";
-    let tree = SourceTree::parse(src);
-    let d: Vec<Diagnostic> = check_full(&tree, "test.php", &mut Ready, true, true)
-        .into_iter()
-        .filter(|d| d.id == OFFSET_MISSING_ID)
-        .collect();
-    assert_eq!(d.len(), 1, "zend-assertions=enabled promotes the narrowing to Verified: {d:#?}");
+fn silent_on_assert_non_empty_list_read() {
+    // The conformance `assertions_assert_non_empty_list` OTHER function: after
+    // `assert($v !== [])`, reading `$v[0]` must stay SILENT. Post-ruling the assert()
+    // narrowing is Verified (not gated by the abolished stratum rule), so the silence
+    // MECHANISM is now the refinement's SHAPE: `!== []` yields a non-empty fact, NOT a
+    // `Singleton` — and `offset.missing` requires proving the key ABSENT, which a mere
+    // non-empty array does not (it need not carry key 0). Silence from unprovable
+    // absence, not from an Asserted stratum gate — and crucially not a false positive.
+    let src = "<?php\nfunction h(array $v): int {\n    assert($v !== []);\n    return $v[0];\n}\n";
+    assert!(missing(src).is_empty(), "assert($v !== []) leaves key-0 absence unprovable → silent");
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +281,7 @@ fn warning_handler_null_silences_warning_grade() {
     // Under `warning-handler = "null"` the application tolerates the warning: the
     // warning-grade finding leaves the proof surface.
     let tree = SourceTree::parse("<?php\n$a = ['x' => 1];\n$b = $a[0];\n");
-    let d: Vec<Diagnostic> = check_full(&tree, "test.php", &mut Ready, false, false)
+    let d: Vec<Diagnostic> = check_full(&tree, "test.php", &mut Ready, false)
         .into_iter()
         .filter(|d| d.id == OFFSET_MISSING_ID)
         .collect();
@@ -283,7 +291,7 @@ fn warning_handler_null_silences_warning_grade() {
 #[test]
 fn warning_handler_abort_emits() {
     let tree = SourceTree::parse("<?php\n$a = ['x' => 1];\n$b = $a[0];\n");
-    let d: Vec<Diagnostic> = check_full(&tree, "test.php", &mut Ready, false, true)
+    let d: Vec<Diagnostic> = check_full(&tree, "test.php", &mut Ready, true)
         .into_iter()
         .filter(|d| d.id == OFFSET_MISSING_ID)
         .collect();

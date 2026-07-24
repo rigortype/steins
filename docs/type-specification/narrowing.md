@@ -18,7 +18,7 @@ Modeled today:
 | --- | --- |
 | `if` / `elseif` / `else` (statement form) | structured sub-traces per branch |
 | statement-position `match` / `switch` | arms + optional default, with strict/loose comparison distinguished |
-| `assert($expr)` | a guard applied to the fall-through env at the `Asserted` stratum |
+| `assert($expr)` | a guard applied to the fall-through env at the `Verified` stratum (read as a throw-guard — owner ruling, ADR-0052 amendment) |
 | `throw`, `exit` / `die` | trace terminators |
 | loops, `try`, nested blocks, expression-position `match` | `Opaque { writes, reads, poisons }` |
 | `goto`, labels, `declare`, `__halt_compiler`, anything unsure | `Barrier` |
@@ -196,7 +196,10 @@ environment for the variable passed at the asserted position:
 
 All of these bind at the `Asserted` stratum
 ([trust-stratification.md](trust-stratification.md)), so they narrow contract-
-layer reasoning but never premise a proof-layer finding.
+layer reasoning but never premise a proof-layer finding. This is the
+`@phpstan-assert` *tag family* — distinct from the `assert($expr)` *construct*,
+which the owner ruling reads as a throw-guard and binds `Verified` (see the table
+above and trust-stratification.md).
 
 ## Not implemented
 

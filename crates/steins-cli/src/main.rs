@@ -150,7 +150,7 @@ fn run_check(args: &[String]) -> ExitCode {
     // Parse `./steins.toml` ONCE, up front, before any analysis (ADR-0050 §7 /
     // ADR-0052 §5 N2): a malformed file — including an unknown key in `[runtime]`,
     // which `deny_unknown_fields` rejects — is a HARD config error (exit 2), never
-    // a warn-and-proceed. Silently proceeding on defaults would let a `zend-asertions`
+    // a warn-and-proceed. Silently proceeding on defaults would let a `warning-hadler`
     // typo leave the safe default in force while the user believed they had overridden
     // it. A missing file is `None` (the built-in defaults govern).
     let config = match read_steins_config() {
@@ -202,12 +202,11 @@ fn run_check(args: &[String]) -> ExitCode {
         inputs.push(SourceFile::new(&db, path, text));
     }
     let project = Project::new(&db, inputs.clone());
-    // `[runtime]` pseudo-constants (ADR-0052 §5): the boot truth the checker cannot
-    // observe from source (e.g. `zend-assertions = "enabled"`). Parsed above with the
+    // `[runtime]` pseudo-constants (ADR-0037 §2): the boot truth the checker cannot
+    // observe from source (e.g. `warning-handler = "null"`). Parsed above with the
     // rest of the config; an unknown *value* on a known key still warns and keeps the
     // safe default (a parse error already exited 2).
-    let (zend_assertions, warning_handler_abort, runtime_warnings) =
-        runtime_from_config(runtime_cfg);
+    let (warning_handler_abort, runtime_warnings) = runtime_from_config(runtime_cfg);
     for w in &runtime_warnings {
         eprintln!("steins: {w}");
     }
@@ -215,7 +214,6 @@ fn run_check(args: &[String]) -> ExitCode {
         &db,
         project,
         &mut folder,
-        zend_assertions,
         warning_handler_abort,
     );
 
@@ -638,20 +636,18 @@ struct ProfileEntryConfig {
     warn: Vec<String>,
 }
 
-/// The `[runtime]` section (ADR-0052 §5 / ADR-0037 §2): boot-truth pseudo-constants
-/// the checker cannot observe from source. `deny_unknown_fields` makes a misspelled
-/// key a hard parse error — a security-relevant knob (a silently-ignored
-/// `zend-asertions` typo would leave the safe default in force while the user
-/// believed otherwise). Reserved keys for future runtime pseudo-constants
-/// (ADR-0049's `warning-handler`, `include-path`, `sapi`) join here as they land.
+/// The `[runtime]` section (ADR-0037 §2): boot-truth pseudo-constants the checker
+/// cannot observe from source. `deny_unknown_fields` makes a misspelled key a hard
+/// parse error — a security-relevant knob (a silently-ignored `warning-handler` typo
+/// would leave the safe default in force while the user believed otherwise). This is
+/// also where the abolished `zend-assertions` key now lands: the 2026-07-25 owner
+/// ruling reads `assert($expr)` as a throw-guard (Verified unconditionally), so a
+/// `steins.toml` still carrying `zend-assertions` is an unknown-key config error
+/// (exit 2) — the correct hard-config-error outcome. Reserved keys for future runtime
+/// pseudo-constants (ADR-0049's `include-path`, `sapi`) join here as they land.
 #[derive(serde::Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct RuntimeConfig {
-    /// `zend-assertions = "enabled"` promotes `assert($expr)` narrowing to the
-    /// `Verified` stratum. Any other value (or absence) keeps the safe production
-    /// default (`zend.assertions=-1`, narrowing stays `Asserted`).
-    #[serde(rename = "zend-assertions", default)]
-    zend_assertions: Option<String>,
     /// `warning-handler = "abort" | "null"` (ADR-0049 §7 amendment): what a proven
     /// `E_WARNING` *does* at runtime. Default (or absence) is `"abort"` — the
     /// owner-confirmed realistic-app assumption that a handler converts the warning to
@@ -741,8 +737,9 @@ fn load_vouches(config_path: Option<&str>) -> (VouchSet, Vec<String>) {
 ///   INCLUDING an unknown key in `[runtime]` (`RuntimeConfig` uses
 ///   `deny_unknown_fields`), is a hard config error the caller maps to exit 2 —
 ///   never a warn-and-proceed. This is the one place `steins.toml` leniency is the
-///   wrong default: a silently-ignored `zend-asertions` typo would leave the safe
-///   runtime default in force while the user believed they had overridden it.
+///   wrong default: a silently-ignored `warning-hadler` typo would leave the safe
+///   runtime default in force while the user believed they had overridden it. (The
+///   abolished `zend-assertions` key reaches the same exit-2 path, as intended.)
 ///
 /// Transform's `--config` path keeps its own lenient loaders (`load_vouches` /
 /// `load_partitions`, ADR-0046 §2): a vouch typo must not stop a transform run.
@@ -757,24 +754,13 @@ fn read_steins_config() -> Result<Option<SteinsConfig>, String> {
         .map_err(|e| format!("{}: parse error ({e})", path.display()))
 }
 
-/// Derive the `[runtime]` pseudo-constants (ADR-0052 §5 / ADR-0049 §7) from the
-/// already-parsed config. Returns `(zend_assertions, warning_handler_abort)` plus
-/// human warnings for an unrecognized *value* on a known key (a parse error / unknown
-/// key already exited 2 in [`read_steins_config`]). Absence is the safe default —
-/// assertions off, `warning-handler = "abort"`.
-fn runtime_from_config(runtime: Option<RuntimeConfig>) -> (bool, bool, Vec<String>) {
+/// Derive the `[runtime]` pseudo-constants (ADR-0049 §7) from the already-parsed
+/// config. Returns `(warning_handler_abort)` plus human warnings for an unrecognized
+/// *value* on a known key (a parse error / unknown key already exited 2 in
+/// [`read_steins_config`]). Absence is the safe default — `warning-handler = "abort"`.
+fn runtime_from_config(runtime: Option<RuntimeConfig>) -> (bool, Vec<String>) {
     let mut warnings = Vec::new();
     let runtime = runtime.unwrap_or_default();
-    let zend_assertions = match runtime.zend_assertions.as_deref() {
-        None | Some("disabled") => false,
-        Some("enabled") => true,
-        Some(other) => {
-            warnings.push(format!(
-                "steins.toml [runtime] zend-assertions: unknown value `{other}` (want \"enabled\"|\"disabled\"); using disabled"
-            ));
-            false
-        }
-    };
     // Default "abort": a proven E_WARNING is a proven runtime break (ADR-0049 §7).
     let warning_handler_abort = match runtime.warning_handler.as_deref() {
         None | Some("abort") => true,
@@ -786,7 +772,7 @@ fn runtime_from_config(runtime: Option<RuntimeConfig>) -> (bool, bool, Vec<Strin
             true
         }
     };
-    (zend_assertions, warning_handler_abort, warnings)
+    (warning_handler_abort, warnings)
 }
 
 /// Derive the profile selection and user-profile table from the already-parsed

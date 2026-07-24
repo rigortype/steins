@@ -154,11 +154,24 @@ fn unknown_is_honest() {
 }
 
 #[test]
-fn asserted_stratum_carries_a_marker() {
-    // An `assert($x === 5)` narrowing is Asserted (assertions off by default), so the
-    // dump prints the marker — a docblock/assert claim never launders as a proof.
+fn assert_construct_is_verified_no_marker() {
+    // FLIPPED by the 2026-07-25 owner ruling (ADR-0052 amendment "assert() reads as a
+    // throw-guard", slice I0): `assert($x === 5)` narrows at the Verified stratum
+    // unconditionally — the ruling reads assert() as `if (!$expr) throw` and never
+    // consults `zend.assertions`. So the dump carries NO `(asserted)` marker (pre-
+    // ruling it printed `5 (asserted)`). The flip IS the record — see the amendment.
     let src = "<?php\nfunction f($x) { assert($x === 5); \\PHPStan\\dumpType($x); }\n";
-    assert_eq!(one_type(src), "dumped type: 5 (asserted)");
+    assert_eq!(one_type(src), "dumped type: 5");
+}
+
+#[test]
+fn asserted_tag_stratum_carries_a_marker() {
+    // The `(asserted)` marker path is still live for the `@phpstan-assert` TAG family
+    // (Asserted — the ruling boundary, item 4): a docblock claim never launders as a
+    // proof, so the dump carries the marker. (Moved off `assert()`, now Verified.)
+    let src = "<?php\n/** @phpstan-assert null $x */\nfunction claimNull($x): void {}\n\
+               function f($x) { claimNull($x); \\PHPStan\\dumpType($x); }\n";
+    assert_eq!(one_type(src), "dumped type: null (asserted)");
 }
 
 // ---- Multi-arg / zero-arg (ADR-0053 §7) ------------------------------------

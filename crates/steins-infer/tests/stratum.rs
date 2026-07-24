@@ -1,27 +1,22 @@
 //! Stratum-discipline tests (ADR-0052 §5 slice N2): the checked trust bit that
 //! stops a docblock claim from forging a proof-layer finding.
 //!
-//! The through-line: an `Asserted` fact (an `@phpstan-assert` family claim, or an
-//! `assert($expr)` narrowing) buys **silence** — narrowing away a would-be proof
-//! report is always safe — but never *premises* a proof-layer id (`type.*`,
-//! `call.on-null`). A `Verified` fact (a native runtime test, a native seed) does.
-//! Every "SILENT" test below is paired, where practical, with a `Verified` control
-//! that fires, so the test proves the narrowing happened *and* was gated — not that
-//! nothing narrowed at all.
+//! The through-line: an `Asserted` fact (an `@phpstan-assert` family docblock claim)
+//! buys **silence** — narrowing away a would-be proof report is always safe — but
+//! never *premises* a proof-layer id (`type.*`, `call.on-null`). A `Verified` fact (a
+//! native runtime test, a native seed, or an `assert($expr)` construct — see the
+//! 2026-07-25 owner ruling folded into the ADR-0052 amendment) does. Every "SILENT"
+//! test below is paired, where practical, with a `Verified` control that fires, so
+//! the test proves the narrowing happened *and* was gated — not that nothing narrowed
+//! at all.
 
-use steins_infer::{CALL_ON_NULL_ID, Diagnostic, ID, PARAM_MISMATCH_ID, check, check_runtime};
+use steins_infer::{CALL_ON_NULL_ID, Diagnostic, ID, PARAM_MISMATCH_ID, check};
 use steins_syntax::SourceTree;
 
 fn findings(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
     let functions = tree.functions().to_vec();
     check(&tree, &functions, "test.php")
-}
-
-fn findings_zend(src: &str, zend: bool) -> Vec<Diagnostic> {
-    let tree = SourceTree::parse(src);
-    let functions = tree.functions().to_vec();
-    check_runtime(&tree, &functions, "test.php", zend)
 }
 
 fn arg_mismatch(src: &str) -> usize {
@@ -232,37 +227,49 @@ function f(mixed $x): void { if (isNull($x)) { takesInt($x); } }
 }
 
 // ==========================================================================
-// assert($expr) statement narrowing and the [runtime] zend-assertions knob.
+// assert($expr) statement narrowing — Verified UNCONDITIONALLY.
+//
+// FLIPPED by the 2026-07-25 owner ruling (ADR-0052 amendment "assert() reads as a
+// throw-guard", slice I0): `assert($expr)` is statically equivalent to
+// `if (!$expr) throw` — Verified, always; `zend.assertions` is never consulted, and
+// the `[runtime] zend-assertions` pseudo-constant is abolished. The pre-ruling
+// behavior (Asserted-by-default, promotable by a runtime knob) is deleted; these
+// tests pin the NEW behavior. The flip IS the record — see the amendment.
 // ==========================================================================
 
 #[test]
-fn assert_stmt_narrows_at_asserted_by_default() {
-    // `assert($x === null)` narrows `$x` to null — but at the Asserted stratum by
-    // default (under zend.assertions=-1 the expression is never evaluated), so the
-    // downstream `takesInt($x)` stays silent.
+fn assert_stmt_narrows_at_verified_and_premises_proof() {
+    // `assert($x === null)` narrows `$x` to null and — per the ruling — does so at the
+    // Verified stratum unconditionally, so the downstream `takesInt($x)` premises the
+    // proof-layer `type.argument-mismatch`. (Pre-ruling this was SILENT under the
+    // default zend.assertions=-1; the ruling reads assert() as a throw-guard, so the
+    // fact is fit for the proof layer.)
     let src = "<?php
 function takesInt(int $n): void {}
 function f(mixed $x): void { assert($x === null); takesInt($x); }
 ";
-    assert_eq!(arg_mismatch(src), 0, "assert() narrowing is Asserted by default → silent proof layer");
+    assert_eq!(
+        arg_mismatch(src),
+        1,
+        "assert() is Verified unconditionally (owner ruling) → premises the proof layer"
+    );
 }
 
 #[test]
-fn assert_stmt_promoted_to_verified_fires() {
-    // With `[runtime] zend-assertions = "enabled"`, the assert expression runs, so
-    // the narrowing rises to Verified and the downstream proof-layer check fires.
+fn asserted_tag_still_cannot_premise_where_assert_construct_can() {
+    // Boundary guard (ruling item 4): the `@phpstan-assert` TAG family stays Asserted
+    // — a lying tag claiming the same `=== null` narrowing must still NOT premise the
+    // proof layer, even though the `assert()` CONSTRUCT now does. The ruling covers
+    // the construct only; the tag remains a docblock claim (ADR-0037).
     let src = "<?php
+/** @phpstan-assert null $x */
+function claimNull($x): void {}
 function takesInt(int $n): void {}
-function f(mixed $x): void { assert($x === null); takesInt($x); }
+function f(mixed $x): void { claimNull($x); takesInt($x); }
 ";
     assert_eq!(
-        findings_zend(src, true).iter().filter(|d| d.id == ID).count(),
-        1,
-        "zend-assertions=enabled promotes assert() narrowing to Verified → fires"
-    );
-    assert_eq!(
-        findings_zend(src, false).iter().filter(|d| d.id == ID).count(),
+        arg_mismatch(src),
         0,
-        "the same source with the default (disabled) stays silent"
+        "the @phpstan-assert tag stays Asserted (ruling boundary) → still silent"
     );
 }

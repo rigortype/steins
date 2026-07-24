@@ -23,14 +23,12 @@ display string:
 
 | Stratum | Origin | Fit to premise a proof-layer finding |
 | --- | --- | --- |
-| `Verified` | A runtime-executed test on the live branch (`===`, `is_int()`, `instanceof`, ordering comparisons, truthiness), or a native declaration seed. | yes |
-| `Asserted` | A docblock claim (`@phpstan-assert` family) or `assert($expr)` narrowing. | **no** |
+| `Verified` | A runtime-executed test on the live branch (`===`, `is_int()`, `instanceof`, ordering comparisons, truthiness), a native declaration seed, or an `assert($expr)` construct (read as a throw-guard — see below). | yes |
+| `Asserted` | A docblock claim (`@phpstan-assert` family). | **no** |
 
 The distinction is operational, not philosophical. A `Verified` fact holds
 because *the branch only runs if the test passed*. An `Asserted` fact holds
-because someone said so — and in the `assert()` case, because someone said so in
-code that PHP does not execute at all under `zend.assertions=-1`, the standard
-production setting.
+because someone said so in a docblock.
 
 The consumption rule: **a proof-layer id requires all-`Verified` premises.**
 Contract-layer ids may consume `Asserted` facts — they are claims about
@@ -64,22 +62,27 @@ takesString($w);        // NOT a proof-layer finding — the premise is Asserted
 is what keeps it compatible with ADR-0048's "no global-ordering dependence"
 constraint for future position queries.
 
-## `assert()` and `zend.assertions`
+## `assert()` reads as a throw-guard
 
-`assert($expr)` narrows like a guard, but binds at the `Asserted` stratum,
-because PHP compiles the call away under `zend.assertions=-1`.
+`assert($expr)` narrows the fall-through env at the `Verified` stratum,
+**unconditionally**. The 2026-07-25 owner ruling (ADR-0052 amendment "assert()
+reads as a throw-guard") reads `assert($expr)` as statically equivalent to
+`if (!$expr) throw`: continuing past it means the condition held, so the fact is
+fit for the proof layer exactly as a native throw-guard would be. Steins does not
+consult `zend.assertions` at all.
 
-A project that genuinely runs with assertions on can say so:
+The honest epistemic note: under `zend.assertions=-1` (the production default)
+PHP never evaluates the expression, so the fall-through carries no *runtime*
+guarantee. The ruling assigns that residual risk to the operator who chose to
+disable the runtime check — a finding premised on an assert-derived fact is not a
+false positive; it is the runtime check the operator turned off, reported
+statically (ADR-0002's zero-FP identity, read accordingly). There is **no
+`[runtime] zend-assertions` knob** — it was abolished; the key is now an
+unknown-key config error.
 
-```toml
-# steins.toml
-[runtime]
-zend-assertions = "enabled"    # default: disabled
-```
-
-This promotes `assert($expr)` narrowing to `Verified`. It is intent the repo
-declares about its own runtime, reviewably — the config-carries-intent principle
-of ADR-0023 — not a strictness knob.
+**Boundary:** this covers the `assert()` *construct* only. The `@phpstan-assert`
+tag family stays `Asserted` — a docblock is a claim, and a lying tag must still
+be unable to forge a proof.
 
 ## The exactness dimension
 

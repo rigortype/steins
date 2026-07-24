@@ -163,9 +163,25 @@ fn unknown_runtime_key_is_a_hard_config_error() {
     // warn-and-proceed. The typo can never silently leave the safe default in force.
     let dir = workdir("runtime-typo");
     write(&dir, "a.php", THROW_ONLY);
-    write(&dir, "steins.toml", "[runtime]\nzend-asertions = \"enabled\"\n");
+    write(&dir, "steins.toml", "[runtime]\nwarning-hadler = \"abort\"\n");
     let r = run_in(&dir, &["check", "--no-php", "a.php"]);
     assert_eq!(r.code, 2, "unknown [runtime] key → exit 2; stderr:\n{}", r.stderr);
+    assert!(r.stderr.contains("parse error"), "names the parse failure, got:\n{}", r.stderr);
+}
+
+#[test]
+fn abolished_zend_assertions_key_is_a_hard_config_error() {
+    // ADR-0052 amendment (2026-07-25 owner ruling, slice I0): `zend-assertions` is
+    // ABOLISHED from the `[runtime]` vocabulary — `assert($expr)` now reads as a
+    // throw-guard (Verified unconditionally), so the key is not a runtime pseudo-
+    // constant Steins models. A steins.toml still carrying it hits the
+    // `deny_unknown_fields` exit-2 path like any other unknown key — the correct
+    // hard-config-error outcome, not a warn-and-proceed.
+    let dir = workdir("runtime-zend-abolished");
+    write(&dir, "a.php", THROW_ONLY);
+    write(&dir, "steins.toml", "[runtime]\nzend-assertions = \"enabled\"\n");
+    let r = run_in(&dir, &["check", "--no-php", "a.php"]);
+    assert_eq!(r.code, 2, "abolished zend-assertions key → exit 2; stderr:\n{}", r.stderr);
     assert!(r.stderr.contains("parse error"), "names the parse failure, got:\n{}", r.stderr);
 }
 
@@ -174,7 +190,7 @@ fn valid_runtime_section_proceeds() {
     // The control: a well-formed `[runtime]` parses and the run proceeds normally.
     let dir = workdir("runtime-ok");
     write(&dir, "a.php", THROW_ONLY);
-    write(&dir, "steins.toml", "[runtime]\nzend-assertions = \"enabled\"\n");
+    write(&dir, "steins.toml", "[runtime]\nwarning-handler = \"abort\"\n");
     let r = run_in(&dir, &["check", "--no-php", "a.php"]);
     assert_eq!(r.code, 0, "valid runtime + throw-only default surface → exit 0; stdout:\n{}", r.stdout);
 }

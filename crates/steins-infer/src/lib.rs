@@ -940,7 +940,7 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let tree = parse(db, file);
     let units = [FileUnit { path: file.path(db), tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, &mut NoFold, false, true)
+    check_units(&units, &index, &mut NoFold, true)
 }
 
 /// The folding-aware check for one file (run **outside** salsa; ADR-0004),
@@ -950,7 +950,7 @@ pub fn check_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec
     let tree = parse(db, file);
     let units = [FileUnit { path: file.path(db), tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, folder, false, true)
+    check_units(&units, &index, folder, true)
 }
 
 /// The folding-aware check for a whole **project** (ADR-0009/0015): every file
@@ -958,21 +958,20 @@ pub fn check_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec
 /// effects resolve. Resolution is driven by the salsa [`project_index`] query.
 #[must_use]
 pub fn check_project(db: &dyn Db, project: Project, folder: &mut dyn Folder) -> Vec<Diagnostic> {
-    check_project_with_runtime(db, project, folder, false, true)
+    check_project_with_runtime(db, project, folder, true)
 }
 
-/// [`check_project`] with the `[runtime]` pseudo-constants declared (ADR-0052 §5,
-/// ADR-0049 §7): `zend_assertions` promotes `assert($expr)` narrowing to the
-/// `Verified` stratum; `warning_handler_abort` (the `warning-handler` posture) is
-/// `true` for the default `"abort"` — proven warning-grade offset findings emit —
-/// and `false` for `"null"`, which silences them. The default entry point
-/// ([`check_project`]) passes `(false, true)`: the safe production defaults.
+/// [`check_project`] with the `[runtime]` pseudo-constants declared (ADR-0049 §7):
+/// `warning_handler_abort` (the `warning-handler` posture) is `true` for the default
+/// `"abort"` — proven warning-grade offset findings emit — and `false` for `"null"`,
+/// which silences them. The default entry point ([`check_project`]) passes `true`:
+/// the safe production default. (The former `zend_assertions` knob was abolished by
+/// the 2026-07-25 owner ruling — `assert($expr)` is `Verified` unconditionally.)
 #[must_use]
 pub fn check_project_with_runtime(
     db: &dyn Db,
     project: Project,
     folder: &mut dyn Folder,
-    zend_assertions: bool,
     warning_handler_abort: bool,
 ) -> Vec<Diagnostic> {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
@@ -982,7 +981,7 @@ pub fn check_project_with_runtime(
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
     let index = Index::from_db(db_index, &pos);
-    check_units(&units, &index, folder, zend_assertions, warning_handler_abort)
+    check_units(&units, &index, folder, warning_handler_abort)
 }
 
 // ---------------------------------------------------------------------------
@@ -1067,40 +1066,25 @@ pub fn check_with(
     let _ = functions; // authoritative list comes from `tree.functions()`
     let units = [FileUnit { path, tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, folder, false, true)
+    check_units(&units, &index, folder, true)
 }
 
-/// The pure single-file check with the `[runtime]` pseudo-constants declared
-/// (ADR-0052 §5): `zend_assertions` promotes `assert($expr)` narrowing to the
-/// `Verified` stratum. Kept for tests exercising the runtime-config path.
-#[must_use]
-pub fn check_runtime(
-    tree: &SourceTree,
-    functions: &[FunctionDecl],
-    path: &str,
-    zend_assertions: bool,
-) -> Vec<Diagnostic> {
-    let _ = functions;
-    let units = [FileUnit { path, tree }];
-    let index = Index::from_units(&units);
-    check_units(&units, &index, &mut NoFold, zend_assertions, true)
-}
-
-/// The single-file check with a folder **and** the full `[runtime]` config
-/// (`zend_assertions`, `warning_handler_abort`). Kept for tests that must exercise
-/// both a live folder (the offset family is gated on [`Folder::absence_family_available`],
-/// ADR-0049 A9) and a chosen `warning-handler` posture (ADR-0049 §7).
+/// The single-file check with a folder **and** the `warning-handler` posture
+/// (`warning_handler_abort`, ADR-0049 §7). Kept for tests that must exercise both a
+/// live folder (the offset family is gated on [`Folder::absence_family_available`],
+/// ADR-0049 A9) and a chosen `warning-handler` posture. (The former `zend_assertions`
+/// knob was abolished by the 2026-07-25 owner ruling — `assert($expr)` is `Verified`
+/// unconditionally, so no runtime knob controls its stratum.)
 #[must_use]
 pub fn check_full(
     tree: &SourceTree,
     path: &str,
     folder: &mut dyn Folder,
-    zend_assertions: bool,
     warning_handler_abort: bool,
 ) -> Vec<Diagnostic> {
     let units = [FileUnit { path, tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, folder, zend_assertions, warning_handler_abort)
+    check_units(&units, &index, folder, warning_handler_abort)
 }
 
 /// The project checking core: direct + propagation passes over every file's
@@ -1109,7 +1093,6 @@ fn check_units(
     units: &[FileUnit],
     index: &Index,
     folder: &mut dyn Folder,
-    zend_assertions: bool,
     warning_handler_abort: bool,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
@@ -1123,7 +1106,7 @@ fn check_units(
     let php_minor = folder.php_minor();
 
     for fi in 0..units.len() {
-        let cx = Cx::new_with(units, index, fi, &dam, zend_assertions, warning_handler_abort, php_minor);
+        let cx = Cx::new_with(units, index, fi, &dam, warning_handler_abort, php_minor);
 
         // --- Propagation pass FIRST: it walks every scope and, as a side
         // product, proves dead regions (decided branches, unreachable tails) —
@@ -1403,7 +1386,7 @@ fn annotate_units(
 
     // 3. Findings on the target file (project-wide check, filtered by path).
     let target_path = units[target].path;
-    for d in check_units(units, index, folder, false, true) {
+    for d in check_units(units, index, folder, true) {
         if d.path == target_path {
             facts.push(LineFact { line: d.line, kind: FactKind::Finding { id: d.id } });
         }
@@ -2779,11 +2762,6 @@ struct Cx<'a> {
     /// (A2i): a chain containing a conditional declaration re-dams the claim, so it
     /// fires only when the dam is clear. The auxiliary passes point at [`EMPTY_DAM`].
     dam: &'a DamFacts,
-    /// The `[runtime] zend-assertions = "enabled"` pseudo-constant (ADR-0052 §5,
-    /// ADR-0037 §2 precedent): when the boot truth declares assertions enabled,
-    /// `assert($expr)` narrowing rises to the `Verified` stratum. `false` (the safe
-    /// production default — `zend.assertions=-1`) keeps it `Asserted`.
-    zend_assertions: bool,
     /// The `[runtime] warning-handler` pseudo-constant (ADR-0049 §7 amendment,
     /// ADR-0037 §2 family). `true` = `"abort"` (the owner-confirmed realistic-app
     /// default: a warning handler converts an `E_WARNING` to an exception / halts, so
@@ -2811,7 +2789,6 @@ impl<'a> Cx<'a> {
             index,
             cur,
             dam: &EMPTY_DAM,
-            zend_assertions: false,
             warning_handler_abort: true,
             php_minor: None,
         }
@@ -2823,11 +2800,10 @@ impl<'a> Cx<'a> {
         index: &'a Index,
         cur: usize,
         dam: &'a DamFacts,
-        zend_assertions: bool,
         warning_handler_abort: bool,
         php_minor: Option<(u16, u16)>,
     ) -> Self {
-        Self { units, index, cur, dam, zend_assertions, warning_handler_abort, php_minor }
+        Self { units, index, cur, dam, warning_handler_abort, php_minor }
     }
 
     /// A context pointing at a different file (for cross-file descent); the runtime
@@ -2838,7 +2814,6 @@ impl<'a> Cx<'a> {
             index: self.index,
             cur: file,
             dam: self.dam,
-            zend_assertions: self.zend_assertions,
             warning_handler_abort: self.warning_handler_abort,
             php_minor: self.php_minor,
         }
@@ -3842,9 +3817,10 @@ impl Store {
 /// premise a proof-layer finding. `Verified` facts come from a runtime-executed
 /// test on the live branch (`===`, `is_int`, `instanceof`, ordering, truthiness)
 /// or a native declaration seed — the branch runs only if the test passed, so the
-/// fact holds on the live path. `Asserted` facts come from docblock claims
-/// (`@phpstan-assert` family) and from `assert($expr)` narrowing (never evaluated
-/// under `zend.assertions=-1`) — a claim, not a proof. The bit is a *checked*
+/// fact holds on the live path. The `assert($expr)` construct is `Verified` too:
+/// the 2026-07-25 owner ruling reads it as a throw-guard (`if (!$expr) throw`),
+/// unconditionally, without consulting `zend.assertions`. `Asserted` facts come from
+/// docblock claims (`@phpstan-assert` family) — a claim, not a proof. The bit is a *checked*
 /// attribute (the `"asserted"` provenance string is prose, only for display); the
 /// consumption rule (proof-layer ids require all-Verified premises) reads it.
 ///
@@ -4309,15 +4285,14 @@ fn walk_trace(
             }
             StmtKind::Call(_) => Flow::FellThrough,
             // `assert($expr)` narrows the fall-through env with the guard's
-            // true-branch refinements (ADR-0052 §5). A failed *enabled* assertion
-            // throws, so continuing means the condition held. The stratum is
-            // `Asserted` by default (under `zend.assertions=-1` the expression is
-            // never evaluated — no runtime guarantee), `Verified` only when the boot
-            // truth declares assertions enabled.
+            // true-branch refinements (ADR-0052 §5, amended 2026-07-25 — owner
+            // ruling "assert() reads as a throw-guard"). Steins reads `assert($expr)`
+            // as statically equivalent to `if (!$expr) throw`: continuing past it
+            // means the condition held, at the `Verified` stratum unconditionally.
+            // `zend.assertions` is never consulted — the risk of running production
+            // with assertions compiled out is the operator's, not the analysis's.
             StmtKind::Assert { cond } => {
-                let stratum =
-                    if w.cx.zend_assertions { Stratum::Verified } else { Stratum::Asserted };
-                apply_refinements(&then_refinements(cond), env, store, stratum);
+                apply_refinements(&then_refinements(cond), env, store, Stratum::Verified);
                 Flow::FellThrough
             }
             // Terminators: the trace stops; the remainder is unreachable.
@@ -7070,9 +7045,9 @@ fn ordering_range(op: CmpOp, k: i64) -> Option<IntRange> {
 
 /// Apply a branch's refinements to its cloned env (clearing any stale exact-class
 /// fact for a positively-narrowed variable), at trust stratum `stratum` (ADR-0052
-/// §5): `Verified` for native-condition branches (the runtime test executed),
-/// `Asserted` for an `assert($expr)`-derived narrowing (never evaluated under
-/// `zend.assertions=-1`).
+/// §5): `Verified` for native-condition branches (the runtime test executed) and for
+/// `assert($expr)` (the owner ruling reads it as a throw-guard), `Asserted` for
+/// `@phpstan-assert`-tag-derived narrowings (a docblock claim).
 fn apply_refinements(
     refs: &[Refine],
     env: &mut HashMap<String, Known>,
@@ -12536,7 +12511,7 @@ mod n4_carrier_tests {
         let tree = SourceTree::parse(src);
         let units = [FileUnit { path: "t.php", tree: &tree }];
         let index = Index::from_units(&units);
-        let cx = Cx::new_with(&units, &index, 0, &EMPTY_DAM, false, true, php_minor);
+        let cx = Cx::new_with(&units, &index, 0, &EMPTY_DAM, true, php_minor);
         f(&cx)
     }
 
