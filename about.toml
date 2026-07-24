@@ -1,7 +1,8 @@
 # cargo-about configuration. Generates THIRD-PARTY-LICENSES.md — the notices the
 # MIT/Apache/BSD/ISC dependencies compiled into the `steins` binary require a
 # binary-only distribution to carry. The release workflow ships that file inside
-# every release archive, beside LICENSE (which carries Steins's own AGPL terms).
+# every release archive, beside LICENSE (which carries Steins's own Apache-2.0
+# terms).
 #
 # Regenerate with:
 #
@@ -40,8 +41,8 @@ targets = [
 # shipped binary, so their notices do not belong in a distribution artifact.
 ignore-dev-dependencies = true
 
-# The workspace's own AGPL-3.0-only crates are excluded: this file is the
-# THIRD-PARTY notice file, and Steins's own terms are the LICENSE file. Keeping
+# The workspace's own crates are excluded: this file is the THIRD-PARTY notice
+# file, and Steins's own Apache-2.0 terms are the LICENSE file. Keeping
 # them out has a practical payoff too — the generated file then depends only on
 # the dependency tree, so a version bump alone can never make it stale.
 [private]

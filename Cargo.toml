@@ -20,11 +20,17 @@ members = ["crates/*", "xtask"]
 version = "0.1.0-rc1"
 edition = "2024"
 rust-version = "1.97"
-# AGPL-3.0-only core (ADR-0025). The MIT attributes package lives in its own
-# repo (`rigortype/steins-attributes`) and is not a member here; relicensing to
-# Apache-2.0/MPL-2.0 stays open until external contributions are accepted, so
-# this field is expected to be revisited at gate G3 (ROADMAP M3), not frozen.
-license = "AGPL-3.0-only"
+# Apache-2.0 core. This is the SETTLED outcome of roadmap gate G3 (ADR-0025):
+# the sole copyright holder relicensed from AGPL-3.0-only before the first
+# external contribution, which is the window in which that was still a
+# unilateral decision. The MIT attributes package lives in its own repo
+# (`rigortype/steins-attributes`) and is not a member here.
+#
+# Changing this again is no longer cheap: after external contributions land it
+# requires every contributor's consent. Treat it as fixed, and see deny.toml —
+# a copyleft dependency would now contradict a promise already made to users,
+# not merely close off a future option.
+license = "Apache-2.0"
 authors = ["USAMI Kenta <tadsan@zonu.me>"]
 repository = "https://github.com/rigortype/steins"
 homepage = "https://github.com/rigortype/steins"

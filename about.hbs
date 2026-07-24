@@ -3,7 +3,7 @@
 The licenses of every Rust dependency compiled into the `steins` release binary,
 so a binary-only distribution carries the notices those licenses require.
 
-Steins's own terms are **not** here — the core is AGPL-3.0-only (ADR-0025) and its
+Steins's own terms are **not** here — the core is Apache-2.0 (ADR-0025) and its
 license text is [`LICENSE`](LICENSE). Dev-only crates (test tooling, never linked
 into a shipped binary) are excluded.
 

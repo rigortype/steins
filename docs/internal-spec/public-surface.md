@@ -55,10 +55,9 @@ ignores do not break when the emitter lands.
 
 Recorded here because they gate what "public" can even mean:
 
-- The core is AGPL today; relicensing to Apache-2.0 / MPL-2.0 is an open
-  decision to be settled before the first external contribution (ADR-0025,
-  roadmap gate G3, with a DCO/CLA as the recorded fallback if contributions
-  arrive first).
+- The core is **Apache-2.0** — gate G3, settled 2026-07-25 before the first
+  external contribution, so relicensing needed no contributor consent
+  (ADR-0025 amendment). Changing it again would.
 - The attribute vocabulary package (`Steins\Pure`, `Steins\Effect`) is intended
   to be MIT and separately distributed — a project that annotates its code must
   not thereby take on the core's license.

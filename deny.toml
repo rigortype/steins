@@ -1,13 +1,16 @@
 # cargo-deny configuration — the license audit CI runs as `cargo deny check licenses`.
 #
-# WHY THIS GATE EXISTS, for Steins specifically. The core is AGPL-3.0-only today,
-# but ADR-0025 keeps Apache-2.0 and MPL-2.0 live as relicensing candidates until
-# gate G3 is resolved (ROADMAP M3) — and unlike the copyright question, which the
-# sole copyright holder can still settle unilaterally, a copyleft *dependency*
-# would foreclose that option silently and permanently, from a transitive bump
-# nobody reviewed. So the allow-list below is deliberately PERMISSIVE-ONLY, more
-# restrictive than AGPL-3.0-only itself requires: it is not protecting the license
-# Steins has, it is protecting the licenses Steins may still choose.
+# WHY THIS GATE EXISTS, for Steins specifically. The core is Apache-2.0 (gate G3,
+# ADR-0025). A copyleft dependency compiled into the release binary would impose
+# its own terms on that binary as distributed — so the permissive Apache-2.0
+# licence Steins states in `Cargo.toml`, in the Homebrew formula, and in every
+# release archive would simply not be the licence users actually received.
+#
+# That makes this gate STRICTER in consequence than it was before the relicense,
+# not looser. Under the old AGPL core a stray copyleft dependency merely closed
+# off a future relicensing option; now it contradicts a promise already made, and
+# it can arrive from a transitive bump nobody reviewed. The allow-list below is
+# therefore permissive-only, and stays that way.
 #
 # The bundled notices themselves are generated separately by `cargo about` into
 # THIRD-PARTY-LICENSES.md (see about.toml); this file decides what is ALLOWED,
@@ -26,9 +29,12 @@ targets = [
 
 [licenses]
 # Keep in sync with about.toml's `accepted`. Add a license here only after
-# confirming it is compatible with BOTH shipping an AGPL binary today AND a
-# future relicense to Apache-2.0/MPL-2.0 (the paragraph above) — that second
-# condition is the one that is easy to forget.
+# confirming a binary combining it with Apache-2.0 code may still be distributed
+# under Apache-2.0 — i.e. it imposes no reciprocal source obligation and no term
+# Apache-2.0 does not already satisfy. Weak-copyleft licences (MPL-2.0, LGPL) are
+# NOT a middle ground to wave through casually: they attach file- or
+# library-scoped obligations that a single statically linked binary cannot honour
+# implicitly, so they need a deliberate decision, not an edit to this list.
 allow = [
     "MIT",
     "MIT-0",
@@ -46,10 +52,10 @@ allow = [
 ]
 confidence-threshold = 0.9
 
-# The workspace's own crates are AGPL-3.0-only and `publish = false`. Skipping
-# them keeps AGPL out of the `allow` list above — which matters: allowing it
-# there would also wave through an AGPL *dependency*, the exact thing this gate
-# is here to catch.
+# The workspace's own crates are `publish = false`, and their licence is set in
+# exactly one place — `[workspace.package] license` — and inherited by all eleven,
+# so there is nothing here for this gate to catch. Skipping them keeps the
+# allow-list's meaning single: it says what THIRD-PARTY code may be.
 [licenses.private]
 ignore = true
 

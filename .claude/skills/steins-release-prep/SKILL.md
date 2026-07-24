@@ -53,10 +53,14 @@ decision and an ADR, not a change to this skill.
 
 ## Before the first release only
 
-- **ROADMAP gates.** M3 ("Checker release 0.1") is blocked by design on gates
-  **G2** (public repos) and **G3** (license, ADR-0025) — both decided by the
-  owner, not by you. Confirm both are resolved before preparing `v0.1.0`. If they
-  are not, stop and say so; everything else in this file is premature.
+- **ROADMAP gates — both now RESOLVED**, so `v0.1.0` is no longer gate-blocked.
+  **G2** (public repos) closed when `rigortype/steins` went public; **G3**
+  (license) closed on 2026-07-25 with the relicense to **Apache-2.0**, settled
+  before the first external contribution (ADR-0025 amendment). Do not "restore"
+  AGPL on the strength of an older document: `docs/notes/20260724-v010-auto-adr-log.md`
+  contains a superseded entry deciding the opposite, annotated as reversed. The
+  governing record is the ADR-0025 amendment, and `[workspace.package] license`
+  is the single source of truth that all eleven crates inherit.
 - **Homebrew tap.** The `homebrew` job pushes `Formula/steins.rb` to
   `rigortype/homebrew-tap` (that repo must exist — it is the same tap lisplens
   uses). It needs the repository secret `HOMEBREW_TAP_TOKEN`, a token with
@@ -325,7 +329,7 @@ the archive uploads into the existing Release, no re-tag needed.
 
 ## Quick checklist
 
-- Gates G2/G3 resolved (first release only); `[Unreleased]` reconstructed if it
+- `[Unreleased]` reconstructed if it
   had drifted; every bullet classified and, if commit-style, rewritten — no
   bullet with two sentences, an internal-only detail, or a merge artefact.
 - Findings referenced by **id**, not by message text; any newly-firing finding

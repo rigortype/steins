@@ -60,7 +60,7 @@ list in one place.
 | ADR-0022 | [Diagnostic IDs: emitter-decoupled family.rule registry; JSONL baseline](0022-diagnostic-id-registry-and-baseline.md) |
 | ADR-0023 | [Config: steins.toml carries intent; suppression splits into three channels](0023-config-toml-and-suppression-channels.md) |
 | ADR-0024 | [Sidecar protocol: JSON-RPC over stdio, single-file runner, four core methods](0024-sidecar-protocol.md) |
-| ADR-0025 | [License boundaries: MIT vocabulary, AGPL core (relicensing kept open)](0025-license-boundaries-and-packaging.md) |
+| ADR-0025 | [License boundaries: MIT vocabulary, Apache-2.0 core (G3 settled)](0025-license-boundaries-and-packaging.md) |
 | ADR-0026 | [Corpus harness as xtask: pinned lock, red-on-any-finding gate](0026-corpus-harness-xtask.md) |
 | ADR-0027 | [Propagation is staged through a linear trace IR; unknown lowers to Barrier](0027-linear-trace-ir-staged-propagation.md) |
 | ADR-0028 | [Folding runs outside the salsa query graph (for now)](0028-folding-outside-query-graph.md) |

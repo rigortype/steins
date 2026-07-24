@@ -337,9 +337,10 @@ them.
   envelope-carrying code only). Blocks the M2 exit.
 - **G2 — public repo creation** (`rigortype/steins-attributes`, and
   the core repo's visibility; ADR-0025). Blocks M3.
-- **G3 — core relicense** AGPL → Apache-2.0/MPL-2.0, settled before
-  the first external contribution (ADR-0025). Blocks M3 (or a DCO/CLA
-  is the recorded fallback if contributions arrive first).
+- **G3 — core relicense — RESOLVED (2026-07-25): Apache-2.0.** Settled
+  before the first external contribution, so no consent was required and
+  the DCO/CLA fallback was never needed (ADR-0025 amendment). No longer
+  blocks M3.
 - **G4 — conformance-repo checker adapter.** SteinsChecker + `--tool`
   filter exist uncommitted in the user's php-typing-conformance
   working tree; committing is theirs. Affects M1 measurement

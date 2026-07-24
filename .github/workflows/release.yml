@@ -164,9 +164,10 @@ jobs:
       # `bin.install "steins"` expects), and emits `<archive>.sha256`.
       #
       # LICENSE and THIRD-PARTY-LICENSES.md ride along because they are not
-      # optional for this distribution: the core is AGPL-3.0-only and the
-      # bundled dependencies' MIT/Apache/BSD/ISC terms require their notices to
-      # accompany a binary. README.md gives the archive a usable entry point.
+      # optional for this distribution: Apache-2.0 §4(a) requires recipients to
+      # get a copy of the licence, and the bundled dependencies' MIT/BSD/ISC
+      # terms require their notices to accompany a binary. README.md gives the
+      # archive a usable entry point.
       - name: Build and upload binary
         uses: taiki-e/upload-rust-binary-action@v1
         with:
