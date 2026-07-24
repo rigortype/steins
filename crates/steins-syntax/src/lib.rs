@@ -91,6 +91,15 @@ pub enum RefKind {
     /// `bar` — a single bare segment: unqualified (subject to imports, then the
     /// namespace/global fallback rules).
     Unqualified,
+    /// `namespace\bar` — the PHP `namespace`-keyword relative form (ADR-0049 A8):
+    /// the leading `namespace\` is dropped and the remainder resolves against the
+    /// **enclosing namespace only**, with no `use` imports applied and — for
+    /// functions — no global fallback (an undefined `Ns\bar` is a fatal error, not
+    /// a fall-through to global `bar`). The stored `raw` is the remainder with the
+    /// `namespace\` prefix already stripped (`bar`, `Sub\bar`). Lowering this as a
+    /// distinct kind is what stops the pre-A8 doubled-prefix mis-resolution
+    /// (`Ctx\namespace\bar`) that would manufacture spurious absence.
+    Relative,
 }
 
 /// A reference to a function or class name as written at a use site, carrying
@@ -5028,7 +5037,20 @@ fn name_ref(id: &Identifier<'_>) -> NameRef {
         Identifier::FullyQualified(_) => RefKind::FullyQualified,
     };
     let raw = bytes_to_string(id.value()).trim_start_matches('\\').to_owned();
-    NameRef { raw, kind, offset: to_span(id.span()).start }
+    let offset = to_span(id.span()).start;
+    // ADR-0049 A8: the `namespace\bar` relative form lexes as a `QualifiedIdentifier`
+    // whose first segment is the reserved `namespace` keyword (never a real segment
+    // name). Rewrite it to the distinct `Relative` kind, dropping the prefix, so the
+    // remainder resolves against the enclosing namespace instead of being appended to
+    // it (the doubled-prefix bug). Case-insensitive: PHP keywords fold case.
+    if kind == RefKind::Qualified {
+        let first_len = raw.find('\\').unwrap_or(raw.len());
+        if raw[..first_len].eq_ignore_ascii_case("namespace") {
+            let remainder = raw.get(first_len + 1..).unwrap_or("").to_owned();
+            return NameRef { raw: remainder, kind: RefKind::Relative, offset };
+        }
+    }
+    NameRef { raw, kind, offset }
 }
 
 /// Build the file's namespace contexts (index 0 = global) and the byte regions
@@ -5211,6 +5233,16 @@ fn resolve_class_ref(ctx: &NsCtx, r: &NameRef) -> String {
             if let Some(target) = ctx.class_imports.get(&r.raw.to_ascii_lowercase()) {
                 target.clone()
             } else if ctx.namespace.is_empty() {
+                r.raw.clone()
+            } else {
+                format!("{}\\{}", ctx.namespace, r.raw)
+            }
+        }
+        // ADR-0049 A8: `namespace\Bar` — the remainder resolves against the enclosing
+        // namespace only, no imports (`use` never rebinds a `namespace\`-relative
+        // name). In the global namespace it is the remainder itself.
+        RefKind::Relative => {
+            if ctx.namespace.is_empty() {
                 r.raw.clone()
             } else {
                 format!("{}\\{}", ctx.namespace, r.raw)

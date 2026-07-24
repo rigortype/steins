@@ -796,6 +796,16 @@ pub fn resolves_to_user_function(index: &ProjectIndex, tree: &SourceTree, r: &Na
             }
             unique(&name)
         }
+        // ADR-0049 A8: `namespace\name` — the enclosing-namespace candidate only.
+        RefKind::Relative => {
+            let ctx = tree.ctx_at(r.offset);
+            let fqn = if ctx.namespace.is_empty() {
+                r.raw.clone()
+            } else {
+                format!("{}\\{}", ctx.namespace, r.raw)
+            };
+            unique(&fqn.to_ascii_lowercase())
+        }
     }
 }
 
@@ -2905,6 +2915,31 @@ impl<'a> Cx<'a> {
                     }
                 }
             }
+            // ADR-0049 A8: `namespace\name` — resolves against the enclosing namespace
+            // ONLY, with no `use` imports and no global fallback (an undefined `Ns\name`
+            // is a fatal error, never a fall-through to a global builtin). In the global
+            // namespace the candidate is `name` itself, where a catalog builtin applies.
+            RefKind::Relative => {
+                let ctx = self.tree().ctx_at(r.offset);
+                let name = r.raw.to_ascii_lowercase();
+                if ctx.namespace.is_empty() {
+                    match self.index.resolve_function(&name) {
+                        Res::Ambiguous => FnResolution::Unknown,
+                        Res::Unique(site) => {
+                            if catalog_knows(&name) { FnResolution::Unknown } else { FnResolution::User(site) }
+                        }
+                        Res::Absent => {
+                            if catalog_knows(&name) { FnResolution::Builtin } else { FnResolution::Unknown }
+                        }
+                    }
+                } else {
+                    let fqn = format!("{}\\{}", ctx.namespace.to_ascii_lowercase(), name);
+                    match self.index.resolve_function(&fqn) {
+                        Res::Unique(site) => FnResolution::User(site),
+                        _ => FnResolution::Unknown,
+                    }
+                }
+            }
         }
     }
 
@@ -4258,6 +4293,17 @@ fn resolved_fn_fqn(cx: &Cx, r: &NameRef) -> String {
                 format!("{}\\{}", ctx.namespace.to_ascii_lowercase(), name)
             }
         }
+        // ADR-0049 A8: `namespace\name` resolves against the enclosing namespace only
+        // (no imports, no global fallback). In the global namespace it is `name` itself.
+        RefKind::Relative => {
+            let ctx = cx.tree().ctx_at(r.offset);
+            let name = r.raw.to_ascii_lowercase();
+            if ctx.namespace.is_empty() {
+                name
+            } else {
+                format!("{}\\{}", ctx.namespace.to_ascii_lowercase(), name)
+            }
+        }
     }
 }
 
@@ -4298,7 +4344,9 @@ fn recognizes_var_dump(cx: &Cx, call: &CallExpr) -> bool {
         // (a) `\var_dump` — the global builtin (a single segment, no namespace).
         RefKind::FullyQualified => r.raw.eq_ignore_ascii_case("var_dump"),
         // (d) `Foo\var_dump` — a qualified name resolves elsewhere.
-        RefKind::Qualified => false,
+        // A8: `namespace\var_dump` is relative to the current namespace with NO global
+        // fallback, so it never denotes the global builtin — never a dump.
+        RefKind::Qualified | RefKind::Relative => false,
         RefKind::Unqualified => {
             if !r.raw.eq_ignore_ascii_case("var_dump") {
                 return false;
