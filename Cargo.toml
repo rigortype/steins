@@ -20,7 +20,36 @@ members = ["crates/*", "xtask"]
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.97"
+# AGPL-3.0-only core (ADR-0025). The MIT attributes package lives in its own
+# repo (`rigortype/steins-attributes`) and is not a member here; relicensing to
+# Apache-2.0/MPL-2.0 stays open until external contributions are accepted, so
+# this field is expected to be revisited at gate G3 (ROADMAP M3), not frozen.
 license = "AGPL-3.0-only"
+authors = ["USAMI Kenta <tadsan@zonu.me>"]
+repository = "https://github.com/rigortype/steins"
+homepage = "https://github.com/rigortype/steins"
+readme = "README.md"
+description = "A value-precise static analyzer for PHP that reports only what provably breaks at runtime."
+# NOT PUBLISHABLE TO crates.io, and not merely unpublished: the parser backend
+# is the rev-pinned Mago fork (ADR-0003/0025), and crates.io rejects any crate
+# with a `git` dependency. `publish = false` makes that a clear, early error
+# instead of a confusing one at upload time. The distribution channels are the
+# GitHub Release binaries and the Homebrew tap (.github/workflows/release.yml),
+# plus `cargo install --git` from a checkout; see the `steins-release-prep`
+# skill. Revisit only if the Mago fork's crates are ever published.
+publish = false
+
+# Release profile — shared by CI's release build and the artifacts the release
+# workflow ships, so what is measured is what is distributed (one profile, no
+# divergence). `lto = "thin"` + `codegen-units = 1` buys cross-crate inlining
+# across the 10-crate pipeline for a CPU-bound analyzer; `strip = "symbols"`
+# drops the debug symbol table from a binary that is downloaded, not debugged.
+# `panic` is deliberately left at `unwind`: the CLI's exit-code contract
+# (ADR-0050 §7) and the test suite both rely on unwinding.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
 
 [workspace.dependencies]
 # Pinned Mago fork — the adopted parser backend (ADR-0003). These crates are a

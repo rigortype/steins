@@ -1,0 +1,12 @@
+# Clippy's suggestion-MSRV, pinned to the workspace's declared `rust-version`.
+#
+# Contributors and CI runners drift ahead of the floor (CI pins the toolchain to
+# 1.97; a laptop may be on something newer). Without this, clippy proposes
+# idioms stabilized after 1.97 and a developer who applies the suggestion
+# silently raises the MSRV — the build then fails only for whoever is actually
+# on the floor. Pinning it here makes clippy's advice and the declared floor the
+# same number, so `-D warnings` stays green without churn and without drift.
+#
+# Keep this in lockstep with `rust-version` in Cargo.toml: raising the floor
+# means raising both, in one commit, deliberately.
+msrv = "1.97"

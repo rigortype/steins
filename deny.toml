@@ -1,0 +1,62 @@
+# cargo-deny configuration — the license audit CI runs as `cargo deny check licenses`.
+#
+# WHY THIS GATE EXISTS, for Steins specifically. The core is AGPL-3.0-only today,
+# but ADR-0025 keeps Apache-2.0 and MPL-2.0 live as relicensing candidates until
+# gate G3 is resolved (ROADMAP M3) — and unlike the copyright question, which the
+# sole copyright holder can still settle unilaterally, a copyleft *dependency*
+# would foreclose that option silently and permanently, from a transitive bump
+# nobody reviewed. So the allow-list below is deliberately PERMISSIVE-ONLY, more
+# restrictive than AGPL-3.0-only itself requires: it is not protecting the license
+# Steins has, it is protecting the licenses Steins may still choose.
+#
+# The bundled notices themselves are generated separately by `cargo about` into
+# THIRD-PARTY-LICENSES.md (see about.toml); this file decides what is ALLOWED,
+# that one records what is SHIPPED.
+
+# Audit the union of the published-binary platforms (same set as about.toml and
+# the release matrix), so a license pulled in only on, say, Linux is still seen.
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+
+[licenses]
+# Keep in sync with about.toml's `accepted`. Add a license here only after
+# confirming it is compatible with BOTH shipping an AGPL binary today AND a
+# future relicense to Apache-2.0/MPL-2.0 (the paragraph above) — that second
+# condition is the one that is easy to forget.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "ISC",
+    "Zlib",
+    "Unlicense",
+    # Public-domain dedications. CC0-1.0 reaches us through `notify` (a
+    # mago-database dependency) and `blake3`/`constant_time_eq`; Unicode-3.0 is
+    # the data license `unicode-ident` carries alongside its MIT/Apache grant.
+    "CC0-1.0",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+
+# The workspace's own crates are AGPL-3.0-only and `publish = false`. Skipping
+# them keeps AGPL out of the `allow` list above — which matters: allowing it
+# there would also wave through an AGPL *dependency*, the exact thing this gate
+# is here to catch.
+[licenses.private]
+ignore = true
+
+# The rev-pinned Mago fork (ADR-0003/0025) is the one non-crates.io source in
+# the graph. Declaring it keeps a full `cargo deny check` from flagging it, and
+# means an *undeclared* git dependency appearing later would be flagged.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/rigortype/mago"]

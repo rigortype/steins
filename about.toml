@@ -1,0 +1,48 @@
+# cargo-about configuration. Generates THIRD-PARTY-LICENSES.md — the notices the
+# MIT/Apache/BSD/ISC dependencies compiled into the `steins` binary require a
+# binary-only distribution to carry. The release workflow ships that file inside
+# every release archive, beside LICENSE (which carries Steins's own AGPL terms).
+#
+# Regenerate with:
+#
+#   cargo about generate about.hbs -o THIRD-PARTY-LICENSES.md
+#
+# CI fails if the committed file has drifted from the current dependency tree.
+#
+# `accepted` is the set of licenses allowed to appear; keep it in sync with
+# deny.toml's `[licenses] allow` (the audit gate — its header explains why the
+# list is permissive-only). cargo-about fails on a dependency outside this set.
+accepted = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "ISC",
+    "Zlib",
+    "Unlicense",
+    "CC0-1.0",
+    "Unicode-3.0",
+]
+
+# The union across every published-binary platform is what ships, so notices are
+# collected for all of them (same set as deny.toml and the release matrix in
+# .github/workflows/release.yml).
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+
+# Test/bench-only crates (proptest and its tree) are never linked into the
+# shipped binary, so their notices do not belong in a distribution artifact.
+ignore-dev-dependencies = true
+
+# The workspace's own AGPL-3.0-only crates are excluded: this file is the
+# THIRD-PARTY notice file, and Steins's own terms are the LICENSE file. Keeping
+# them out has a practical payoff too — the generated file then depends only on
+# the dependency tree, so a version bump alone can never make it stale.
+[private]
+ignore = true

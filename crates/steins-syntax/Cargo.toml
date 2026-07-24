@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish.workspace = true
 
 # HARD RULE (ADR-0003): the Mago crates are dependencies of THIS crate only.
 # No Mago type may appear in this crate's public API — everything below the fold

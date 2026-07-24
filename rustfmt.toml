@@ -1,0 +1,26 @@
+# Steins is HAND-FORMATTED. `cargo fmt --check` is NOT a CI gate.
+#
+# This is a statement of the tree's actual state, not an aspiration: as of the
+# release-infrastructure setup, `cargo fmt --check` reports 1,756 hunks across
+# 110 files (25,241 diff lines). Every source file in the workspace is affected.
+# Running `cargo fmt` would therefore not be a tidy-up — it would be a whole-tree
+# rewrite touching every crate, erasing the deliberately compact style the code
+# is written in (packed match arms, one-line struct literals, inline chains) for
+# no correctness benefit, and burying every subsequent `git blame`.
+#
+# The blocking style gate is CLIPPY (`-D warnings`, see .github/workflows/ci.yml),
+# which catches what matters — correctness-adjacent lints — and which the
+# workspace is kept clean against.
+#
+# If a fmt gate is ever wanted, it is a deliberate one-shot reformat commit
+# landed on its own (and worth an ADR, since it is a repo-wide convention
+# change), followed by adding the gate — never a CI toggle flipped on a tree
+# that would fail it. The sibling analyzer `rigor-rs` records exactly this
+# decision as docs/adr/0032-source-formatting-policy.md.
+#
+# This file exists ONLY to document that policy and to pin the basic intent
+# (edition + width) for editors and tools that insist on a rustfmt config. These
+# settings do NOT make `cargo fmt --check` pass and are not an invitation to run
+# it: no stable rustfmt configuration round-trips the existing code.
+edition = "2024"
+max_width = 100

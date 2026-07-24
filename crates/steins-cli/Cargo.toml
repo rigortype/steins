@@ -1,9 +1,19 @@
+# The shipped crate: it produces the `steins` binary that the release workflow
+# packages for every target. The distribution metadata below is inherited from
+# `[workspace.package]` so the Homebrew formula's `desc`/`homepage` and the
+# release notes have one source.
 [package]
 name = "steins-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+authors.workspace = true
 
 [[bin]]
 name = "steins"
