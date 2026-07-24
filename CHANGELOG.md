@@ -25,12 +25,23 @@ findings by id (`call.undefined-function`), never by the sentence they print.
 
 ## [Unreleased]
 
-Nothing released yet. Steins is pre-`0.1.0`: the version in `Cargo.toml` is
-`0.0.0`, no tag exists, and the ROADMAP gates the first tagged release (M3) on
-the user-decided license and public-repo gates.
-
 Entries accumulate under this heading as work lands; the `steins-release-prep`
 skill seals them into a version section at release time, reconstructing from
 `git log` if the discipline slipped.
 
-[Unreleased]: https://github.com/rigortype/steins/commits/master
+## [0.1.0-rc1] - 2026-07-25
+
+A **pipeline rehearsal, not a feature release.** Nothing about the analyzer changed for this tag; it exists to exercise the release workflow end to end for the first time — the tag/version guard, the five-target build matrix, the archive and checksum-sidecar naming, and the Homebrew tap push — before a real `0.1.0` makes those paths irreversible. Install it only to test the install itself; `0.1.0` is the first release intended for use.
+
+### Added
+
+- Prebuilt binaries for five targets: `x86_64`/`aarch64` Linux (glibc), `x86_64` Linux (musl, static), and `x86_64`/`aarch64` macOS, each with a `.sha256` sidecar, and each archive carrying `LICENSE` and `THIRD-PARTY-LICENSES.md` alongside the binary.
+- A Homebrew formula in `rigortype/homebrew-tap`, so `brew install rigortype/tap/steins` resolves.
+
+### Notes
+
+- There is no crates.io channel and there will not be one while the parser backend is the rev-pinned Mago fork — crates.io rejects crates with git dependencies. Install from a release archive, from Homebrew, or with `cargo install --git https://github.com/rigortype/steins steins-cli`.
+- Windows is not shipped: the PHP sidecar's temp-dir spawn path is unverified there, and a binary that mis-spawns would degrade silently to the sound subset.
+
+[Unreleased]: https://github.com/rigortype/steins/compare/v0.1.0-rc1...HEAD
+[0.1.0-rc1]: https://github.com/rigortype/steins/releases/tag/v0.1.0-rc1
