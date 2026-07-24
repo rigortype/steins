@@ -262,6 +262,90 @@ function f($c): void {
     assert_eq!(n(src), 0, "OneOf of null and a string receiver → not proven null → silent");
 }
 
+// ---- call.on-null on a depth-1 property-fetch receiver (ADR-0052 §7, Gap B) --
+
+#[test]
+fn call_on_null_fires_on_proven_null_prop_receiver() {
+    // `$h->p` is proven null on this path (explicit write); the direct receiver
+    // `$h->p->m()` is a guaranteed Error — previously silent (receiver was `Dynamic`).
+    let src = "<?php
+class A { public function m(): void {} }
+class H { public ?A $p = null; }
+$h = new H();
+$h->p = null;
+$h->p->m();
+";
+    let f = findings(src);
+    assert_eq!(f.len(), 1, "proven-null prop receiver → call.on-null: {f:#?}");
+    assert_eq!(f[0].id, "call.on-null");
+    assert_eq!(
+        f[0].message,
+        "method call $h->p->m() — $h->p is proven null on this path — proven Error (Call to a member function on null)"
+    );
+}
+
+#[test]
+fn call_on_null_prop_receiver_silent_after_escape() {
+    // The object escapes to an unknown call, sweeping its non-readonly props, so the
+    // null fact is gone by the receiver deref (read through the surviving alias, which
+    // isolates the sweep from the pass-to-call unbinding of `$h`) — silence.
+    let src = "<?php
+class A { public function m(): void {} }
+class H { public ?A $p = null; }
+$h = new H();
+$h->p = null;
+$a = $h;
+sink($h);
+unknownFn();
+$a->p->m();
+";
+    assert_eq!(n(src), 0, "swept prop → no proven-null fact → silent");
+}
+
+#[test]
+fn call_on_null_prop_receiver_silent_for_nullsafe() {
+    // `$h->p?->m()` on a null prop is defined (short-circuits) → never fires.
+    let src = "<?php
+class A { public function m(): void {} }
+class H { public ?A $p = null; }
+$h = new H();
+$h->p = null;
+$h->p?->m();
+";
+    assert_eq!(n(src), 0, "nullsafe prop-receiver call on proven null → silent");
+}
+
+#[test]
+fn call_on_null_prop_receiver_silent_on_asserted_stratum() {
+    // An `Asserted` null prop fact (written from a `@phpstan-assert null` claim) is a
+    // claim, not a proof — it must NOT premise the proof-layer `call.on-null` (N2).
+    let src = "<?php
+/** @phpstan-assert null $x */
+function claimNull($x): void {}
+class A { public function m(): void {} }
+class H { public ?A $p = null; }
+function f($x): void {
+    claimNull($x);
+    $h = new H();
+    $h->p = $x;
+    $h->p->m();
+}
+";
+    assert_eq!(n(src), 0, "an Asserted-null prop receiver must NOT premise call.on-null");
+}
+
+#[test]
+fn call_on_null_depth_2_chain_stays_silent() {
+    // Depth stays exactly 1: `$h->p->q->m()` receiver is a chain → `Dynamic` → silent.
+    let src = "<?php
+class H { public ?H $p = null; }
+$h = new H();
+$h->p = null;
+$h->p->q->m();
+";
+    assert_eq!(n(src), 0, "depth-2 receiver chain → not represented → silent");
+}
+
 // ---- empirical `==` cells (PHP 8.5.8; see php_loose_eq rustdoc) ------------
 
 /// Whether the then-branch of `if ($x <op> <rhs>)` is LIVE, observed by whether a

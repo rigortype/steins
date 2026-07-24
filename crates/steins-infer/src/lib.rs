@@ -4161,7 +4161,7 @@ fn walk_trace(
                 Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
                     // Branch-sensitive null-dereference proof (ADR-0031): a `$v->m()`
                     // whose receiver is proven `Singleton(null)` on this path.
-                    check_call_on_null(w, call, env, out);
+                    check_call_on_null(w, call, env, store, out);
                     // The absence flagship (ADR-0049 §4 / S2): fire only in the plain
                     // per-scope pass — every scope (method bodies included) is walked
                     // once there, so a descent must not re-judge the same site.
@@ -4778,6 +4778,19 @@ fn best_dump_type(
         }
         // 4. Honest unknown.
         return DumpRendering { text: DUMP_UNKNOWN.to_owned(), asserted: false };
+    }
+    // A depth-1 property fetch `$var->prop` (ADR-0052 §7, Gap B): the allocation-keyed
+    // heap property fact (alias-correct by construction, ADR-0036). Escaped-then-swept
+    // props carry no fact and fall through to honest unknown; a readonly prop survives.
+    // Deeper chains (`$a->b->c`) lower to `Other`, never here — depth stays exactly 1.
+    if let ArgValue::PropFetch { var, prop } = value
+        && !poisoned
+        && let Some(fact) = store.prop_fact(var, prop)
+    {
+        return DumpRendering {
+            text: render_dump_fact(fact),
+            asserted: store.prop_stratum(var, prop) == Stratum::Asserted,
+        };
     }
     // A non-variable argument: a resolved literal / foldable value fact wins first
     // (folding is the floor below the return fact — a fully-literal call folds to a
@@ -5874,23 +5887,38 @@ fn check_call_on_null(
     w: &WalkCx,
     call: &CallExpr,
     env: &HashMap<String, Known>,
+    store: &Store,
     out: &mut Vec<Diagnostic>,
 ) {
     if w.scope.poisoned {
         return;
     }
-    let Callee::Method { receiver: Receiver::Var(v), method, nullsafe: false } = &call.receiver
-    else {
+    let Callee::Method { receiver, method, nullsafe: false } = &call.receiver else {
         return;
     };
-    let Some(k) = env.get(v) else { return };
-    if !matches!(&k.fact, Some(Fact::Singleton(Val::Null))) {
+    // The proven-null receiver fact + its trust stratum + the receiver's rendering.
+    // A bare `$v` reads the env value fact; a depth-1 `$v->prop` receiver reads the
+    // allocation-keyed heap property fact (ADR-0052 §7, alias-correct by construction,
+    // ADR-0036) — escaped-then-swept props return `None` here (silence preserved), a
+    // readonly prop survives the sweep, and the stratum gate below refuses an
+    // `Asserted` premise exactly as it does for a variable.
+    let (fact, stratum, display) = match receiver {
+        Receiver::Var(v) => {
+            let Some(k) = env.get(v) else { return };
+            (k.fact.as_ref(), k.stratum, format!("${v}"))
+        }
+        Receiver::Prop { var, prop } => {
+            (store.prop_fact(var, prop), store.prop_stratum(var, prop), format!("${var}->{prop}"))
+        }
+        Receiver::This | Receiver::New(_) => return,
+    };
+    if !matches!(fact, Some(Fact::Singleton(Val::Null))) {
         return;
     }
     // Proof-layer consumption rule (ADR-0052 §5): a receiver proven null only by an
     // `Asserted` fact (e.g. `@phpstan-assert null $x`) cannot premise this proof —
     // stay silent.
-    if k.stratum != Stratum::Verified {
+    if stratum != Stratum::Verified {
         return;
     }
     let pos = w.cx.tree().position(call.span.start);
@@ -5901,7 +5929,7 @@ fn check_call_on_null(
         line: pos.line,
         column: pos.column,
         message: format!(
-            "method call ${v}->{method}() — ${v} is proven null on this path — proven Error (Call to a member function on null)"
+            "method call {display}->{method}() — {display} is proven null on this path — proven Error (Call to a member function on null)"
         ),
     });
 }
@@ -8406,6 +8434,9 @@ fn resolve_call_target<'a>(
             resolve_static_named(cx, &fqn, method, enclosing_class)
         }
         Callee::Static { class: StaticClass::Static, .. } => None,
+        // A depth-1 property-fetch receiver is never a dispatch target (ADR-0052 §7):
+        // the method is not resolved from the heap object — silent, like `Dynamic`.
+        Callee::Method { receiver: Receiver::Prop { .. }, .. } => None,
         Callee::Function(_) | Callee::DynamicVar(_) | Callee::Dynamic => None,
     }
 }
@@ -8554,6 +8585,9 @@ fn undefined_method_receiver(
                 }
                 // A1: `$this` is a membership fact, never exactness — silent in S2.
                 Receiver::This => return None,
+                // A depth-1 property-fetch receiver carries no exact-class proof for
+                // absence dispatch (ADR-0052 §7) — silent, like an unknown receiver.
+                Receiver::Prop { .. } => return None,
             };
             Some((class, method.clone(), UndefKind::Instance))
         }
@@ -9060,6 +9094,9 @@ fn arity_method_receiver(
                 }
                 // A1: `$this` is a membership fact, never exactness — silent.
                 Receiver::This => return None,
+                // A depth-1 property-fetch receiver carries no exact-class proof for
+                // arity dispatch (ADR-0052 §7) — silent.
+                Receiver::Prop { .. } => return None,
             };
             Some((class, method.clone(), false))
         }

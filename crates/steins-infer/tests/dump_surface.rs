@@ -346,3 +346,52 @@ fn var_dump_shares_the_type_rendering() {
     let unknown = var_dumps("<?php var_dump($undefined);\n");
     assert_eq!(unknown[0].message, "dumped type: unknown");
 }
+
+// ---- Depth-1 property-fetch dump reach (ADR-0052 §7, Gap B) -----------------
+
+#[test]
+fn dump_of_heap_bound_prop_renders_the_value() {
+    // A written property fact reaches a direct `dumpType($h->p)` (previously unknown).
+    let src = "<?php class H { public ?int $p = null; } \
+        $h = new H(); $h->p = 7; \\PHPStan\\dumpType($h->p);";
+    assert_eq!(one_type(src), "dumped type: 7");
+}
+
+#[test]
+fn dump_of_promoted_prop_renders_the_value() {
+    // A promoted-constructor prop, bound positionally and by name, both reach the dump
+    // (the named form is the value-binding side of Gap A).
+    let pos = "<?php class Cfg { public function __construct(public int $n) {} } \
+        $c = new Cfg(30); \\PHPStan\\dumpType($c->n);";
+    assert_eq!(one_type(pos), "dumped type: 30");
+    let named = "<?php class Cfg { public function __construct(public int $n) {} } \
+        $c = new Cfg(n: 30); \\PHPStan\\dumpType($c->n);";
+    assert_eq!(one_type(named), "dumped type: 30");
+}
+
+#[test]
+fn dump_of_prop_after_escape_is_unknown() {
+    // The object escapes to an unknown call, sweeping its non-readonly props; the dump
+    // (read through an alias that keeps the binding) honestly renders unknown. Passing
+    // `$h` itself would also drop `$h`'s binding, so the alias isolates the sweep.
+    let src = "<?php class H { public ?int $p = null; } \
+        $h = new H(); $h->p = 7; $a = $h; sink($h); unknownFn(); \\PHPStan\\dumpType($a->p);";
+    assert_eq!(one_type(src), "dumped type: unknown");
+}
+
+#[test]
+fn dump_of_readonly_prop_survives_escape() {
+    // A readonly prop is sweep-immune, so its fact still reaches the dump after the
+    // same escape shape (read through the surviving alias).
+    let src = "<?php class H { public function __construct(public readonly int $p) {} } \
+        $h = new H(5); $a = $h; sink($h); unknownFn(); \\PHPStan\\dumpType($a->p);";
+    assert_eq!(one_type(src), "dumped type: 5");
+}
+
+#[test]
+fn dump_of_depth_2_chain_stays_unknown() {
+    // Depth stays exactly 1: `$h->p->q` lowers to `Other`, never a prop fetch.
+    let src = "<?php class H { public ?int $p = null; } \
+        $h = new H(); $h->p = 7; \\PHPStan\\dumpType($h->p->q);";
+    assert_eq!(one_type(src), "dumped type: unknown");
+}

@@ -1217,6 +1217,15 @@ pub enum Receiver {
     /// `(new Foo(...))->m()` — an exact-class receiver (runtime class is the
     /// referenced class, resolved to an FQN project-wide).
     New(NameRef),
+    /// `$var->prop->m()` — a **depth-1** property-fetch receiver (ADR-0052 §7). The
+    /// receiver object is whatever the heap says `$var->prop` holds; only a bare
+    /// variable object and a static property identifier are represented (a chain
+    /// `$a->b->c->m()` or a dynamic name lowers to [`Callee::Dynamic`], never this).
+    /// The method target is not resolved from it (the §7 scope is the null-receiver
+    /// proof and the dump/receiver heap reads, not dispatch), so every method-
+    /// resolution path treats it as unresolvable — exactly like `Dynamic` — while the
+    /// `call.on-null` proof reads the heap property fact.
+    Prop { var: String, prop: String },
 }
 
 /// The class portion of a static `Class::m()` call, as written.
@@ -3673,6 +3682,15 @@ fn trace_recv_of_object(object: &Expression<'_>) -> Option<Receiver> {
             Some(if name == "this" { Receiver::This } else { Receiver::Var(name) })
         }
         Expression::Instantiation(inst) => instantiation_class(inst).map(Receiver::New),
+        // A depth-1 property-fetch receiver `$var->prop->m()` (ADR-0052 §7): the
+        // object is read from the heap `$var->prop` fact. A chain or a dynamic name
+        // (`prop_fetch_of` returns `None`) falls through to `Dynamic`. The receiver
+        // var is never `$this` here — `$this->prop->m()` still decomposes as a
+        // `$this` property whose object is `prop`, kept out of the guarded `$this`
+        // dispatch lane by construction (it is a Prop, not `Receiver::This`).
+        Expression::Access(Access::Property(pa)) => {
+            prop_fetch_of(pa.object, &pa.property).map(|(var, prop)| Receiver::Prop { var, prop })
+        }
         _ => None,
     }
 }
