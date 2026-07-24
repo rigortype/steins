@@ -56,12 +56,13 @@ red on sight), `Contract` (declared-contract acceptance, increase tripwires),
 profile but baseline- and suppression-exempt and excluded from every gate
 counter; a dump is not a finding).
 
-`REGISTERED_NOT_YET_EMITTED` today holds `call.undefined-function` and
-`class.undefined` (the existence ids, waiting on their dam-gated stages)
-and `call.too-many-arguments` (fires for internal targets only, so it
-waits on the sidecar `reflect` slice). The whole dump surface —
-`debug.type` / `debug.phpdoc-type` (D3) and `debug.var-dump` (D4) — is
-emittable.
+`REGISTERED_NOT_YET_EMITTED` today holds exactly one id:
+`call.too-many-arguments` (fires for internal targets only, so it waits on the
+sidecar `reflect` slice's signature layer). The existence ids
+`call.undefined-function` and `class.undefined` lit up at ADR-0049 S4 and are
+now emittable (their emitters run under the full dam-gated ladder). The whole
+dump surface — `debug.type` / `debug.phpdoc-type` (D3) and `debug.var-dump`
+(D4) — is emittable.
 
 Semantics of layers, facets, prefix matching, and profiles:
 [`diagnostic-policy.md`](../type-specification/diagnostic-policy.md).
@@ -139,8 +140,6 @@ excluded from every gate counter.
   Nothing format-specific may reopen a suppression channel (a baselined finding
   must not reappear as a SARIF "suppressed result") or drop a displayed finding
   (no annotation cap).
-- **`doctor`** — the posture report (ADR-0054). Its minimal form is in scope
-  for the v0.1.0 landing point; no code exists as of this writing.
 - **Fix-it payloads** on diagnostics (ADR-0010).
 - **A stable message contract.** Messages are prose and keep improving; they are
   explicitly not a suppression key (ADR-0023).

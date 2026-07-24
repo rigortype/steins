@@ -32,7 +32,10 @@ callee's file via `Cx::at`.
 ## Name resolution
 
 Conservative PHP semantics (ADR-0001). A `NameRef` records how the name was
-written — fully-qualified, qualified, or unqualified — and resolution applies
+written — fully-qualified, qualified, unqualified, or `namespace\`-relative
+(ADR-0049 A8: the leading `namespace\` is stripped and the remainder resolves
+against the enclosing namespace only, no `use` imports and — for functions — no
+global fallback) — and resolution applies
 `use` imports, the current namespace, and the global fallback against
 [`project_index`](query-graph.md) plus the builtin catalog.
 
@@ -97,6 +100,17 @@ A budget cutoff **names itself as silence** and never manufactures a finding
 (ADR-0009). Closure bodies are descended the same way, using the scope's own
 `params`.
 
+The same descent also yields a **return-fact summary** (`ReturnSummary`,
+ADR-0057 amendment slice T0): the join, over a callee's returning exits, of the
+returned expression's value-domain fact, carried at the `min` trust stratum over
+those exits (an `Asserted` exit drags the whole summary to `Asserted`). It rides
+the same `BindingKey` memo — now a value map — and is consumed at the call-result
+binding as the value **floor** above the declared arms. It is a pure function of
+`(callee CST, bound entry state)`, so it is a legitimate replayable query answer.
+The struct carries a heap-object component slot (ADR-0057 §1) for slice **T1**;
+in T0 that slot is present but always `None` — no returned allocation is
+transferred yet.
+
 ## The folding seam
 
 ```rust
@@ -106,14 +120,20 @@ trait Folder {
     fn boot_surface_class_like(&mut self, fqn: &str) -> Option<bool> { None }
     fn boot_surface_function(&mut self, fqn: &str) -> Option<bool> { None }
     fn php_minor(&mut self) -> Option<(u16, u16)> { None }
+    fn boot_surface_label(&mut self) -> Option<String> { None }
+    fn builtin_return_fact(&mut self, name: &str) -> Option<Fact> { None }
 }
 ```
 
 Two implementations: `NoFold` (the sound subset) and `SidecarFolder`. Every
 default is the conservative answer — no fold, absence family unavailable,
 existence unanswerable, no detectable version skew (`php_minor` feeds the
-ADR-0052 A11 catalog-skew demotion) — so the sound subset is what you get by
-*not* implementing anything. See
+ADR-0052 A11 catalog-skew demotion), no boot-surface label, no return fact — so
+the sound subset is what you get by *not* implementing anything.
+`builtin_return_fact` (ADR-0056 R1) seeds a uniquely-resolved builtin call's
+reflected return envelope into the value domain — at an assignment RHS and at a
+dump site — always at the `Verified` stratum, refused when the simple name
+collides with a project user function. See
 [folding-and-sidecar.md](folding-and-sidecar.md).
 
 ## The auxiliary passes
@@ -145,10 +165,11 @@ recomputed per run, no entry state, no ordering dependence: every `eval`; every
 resolves those against `include_path` → the script dir → CWD, so
 directory-relative belief is unsound; only absolute and `__DIR__`-anchored
 literals can prove in-universe), or a provable literal that resolves *outside*
-the universe; and every **non-literal** `class_alias`. It exists to gate the
-existence-absence ids only — which have no emitter yet, so today the fact is
-carried and tested but consumed by nothing. Method-absence needs no dam (PHP
-cannot reopen a defined class).
+the universe; and every **non-literal** `class_alias`. It gates the
+existence-absence ids: since ADR-0049 S4 its consumers are live — the
+`call.undefined-function` and `class.undefined` emitters fire only when the dam
+is clear (a single `eval` or out-of-universe include withholds the whole
+family). Method-absence needs no dam (PHP cannot reopen a defined class).
 
 An empty shared dam is used by the auxiliary passes, which never emit an absence
 id and so never read it.
@@ -162,6 +183,7 @@ tabulated at its emitter):
 | --- | --- | --- |
 | `check_undefined_method` (S2) | `call.undefined-method` | exact-class receivers only; hierarchy fully enumerated; `absence_family_available` (A9) plus the boot-surface class homonym leg (A2ii) |
 | `check_offset_read` (S3) | `offset.missing`, `offset.on-unsupported` | proven container values under the read-context whitelist; warning-grade findings obey the `warning-handler` pseudo-constant |
+| `check_undefined_function` / `check_undefined_class` (S4) | `call.undefined-function`, `class.undefined` | a clear dynamism dam (A5); every candidate answered not-a-function/not-a-class-like by the boot surface (A2ii) and `absence_family_available` (A9); `class.undefined` runs the §5 ladder over the file's `hard_class_refs`; the message register is seeded by `boot_surface_label` |
 | `check_arity` (S5) | `call.too-few-arguments`, `call.unknown-named-argument` | uniquely-resolved userland functions or proven-exact receivers; the boot-surface *function* homonym leg |
 | `check_phpdoc_undefined_method` (S6) | `phpdoc.undefined-method` (contract layer) | the declared-receiver lane over narrowed contract-arm lists, under per-arm descendant closure |
 
@@ -170,6 +192,13 @@ surface, never the proof standard. The dump surface's `emit_dumps` (ADR-0053
 D3) sits beside them: a recognized `PHPStan\dumpType()` /
 `PHPStan\dumpPhpDocType()` call emits its fact rendering as a debug-layer
 answer.
+
+Two read surfaces reach one level into the heap (ADR-0052 §7): a **depth-1
+property fetch** `$var->prop` — allocation-keyed through the object store — reads
+a proven member fact both as a dump argument and as a call receiver, so
+`check_call_on_null` proves `call.on-null` on a `Receiver::Prop` whose depth-1
+member is `Singleton(null)`. Anything deeper (`$a->b->c`) stays unknown and
+silent.
 
 ## The annotate surface
 

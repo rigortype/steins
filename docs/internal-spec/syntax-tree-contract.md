@@ -31,10 +31,15 @@ adopted behind this contract. It is not the contract owner.
   `extends`/`implements` refs, methods, properties, constants, enum cases and
   backing type, `uses_traits`, and the same docblock/conditional facts.
 - **Methods and properties** with visibility, `static`/`final`/`abstract`,
-  `readonly`, promotion, and return-bound keywords (`self`/`static`/`parent`).
+  `readonly`, promotion, a `hooked` flag (a PHP 8.4 property with a `get`/`set`
+  hook runs arbitrary code, so `PropertyDecl.hooked` marks it and it binds **no**
+  value fact anywhere — the structural facts stay valid), and return-bound
+  keywords (`self`/`static`/`parent`).
 - **Analysis scopes** (`Scope`) carrying the [trace IR](trace-ir.md).
 - **Reference sites** (`NameRef`) tagged with how the name was written —
-  fully-qualified, qualified, or unqualified — which is the syntactic input the
+  fully-qualified, qualified, unqualified, or `namespace\`-relative (the
+  ADR-0049 A8 `RefKind::Relative`, lowered as a distinct kind with its
+  `namespace\` prefix already stripped) — which is the syntactic input the
   resolution rules key on. Resolution itself lives in `steins-infer`.
 - **Dynamism sites** (`eval`, `include`/`require` with a classified path,
   `class_alias`) for the [dam](../type-specification/dynamism.md). Literal

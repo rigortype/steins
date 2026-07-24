@@ -24,13 +24,22 @@ trait Folder {
     fn boot_surface_class_like(&mut self, fqn: &str) -> Option<bool> { None }
     fn boot_surface_function(&mut self, fqn: &str) -> Option<bool> { None }
     fn php_minor(&mut self) -> Option<(u16, u16)> { None }
+    fn boot_surface_label(&mut self) -> Option<String> { None }
+    fn builtin_return_fact(&mut self, name: &str) -> Option<Fact> { None }
 }
 ```
 
 Every default is the conservative answer, so **the sound subset is what you get
 by implementing nothing**. `NoFold` is literally the defaults. `php_minor` is
 the ADR-0052 A11 version-skew input: `None` means "no detectable skew", so the
-catalog pin stands.
+catalog pin stands. `boot_surface_label` (ADR-0049 §9) is the boot surface's
+self-description for the existence-id message register (`PHP 8.5.8 (32
+extensions)`); `None` falls back to a version-agnostic phrasing.
+`builtin_return_fact` (ADR-0056 R1) is the value-domain return fact of a
+uniquely-resolved builtin — the reflected return envelope refined by an admitted
+curated row, always seeded at the `Verified` stratum; `None` when nothing may be
+seeded (no sidecar, a monkey-patch extension loaded, an unknown name, or a
+return type not representable as a single value-domain `Fact`).
 
 `absence_family_available()` returns true only when a live sidecar is answering
 *and* no runtime-redefinition extension (`uopz`, `runkit7`, `Componere`) is
@@ -68,7 +77,7 @@ own* PHP.
 | --- | --- | --- |
 | `env` | `{php_version, extensions, sapi}` — coverage-posture material and the PHP-minor check for catalog version skew | implemented |
 | `fold` | a call's value, tagged with its PHP type | implemented |
-| `reflect` | whether a name is a resident function and/or class-like on this PHP, autoload **disabled** | implemented |
+| `reflect` | whether a name is a resident function and/or class-like on this PHP, autoload **disabled**; for a resident function also its **reflected return type** (`return_type`, with `return_type_tentative` when the engine carries only a tentative type) — the envelope the ADR-0056 return-fact seeder reads | implemented |
 | `plugin` | — | **stub**: returns `{kind: "widen", reason: "unimplemented"}` |
 
 `reflect`'s reply is always structured: a name that exists nowhere is a
@@ -131,5 +140,3 @@ so. Naming the guarantee rather than the deficiency is deliberate vocabulary.
 - **Array-valued fold arguments and results.**
 - **The pseudo-constant settings opt-in** that would let locale- and
   timezone-sensitive functions fold (ADR-0008).
-- **`doctor`**, which would surface `env` and sidecar health as a user-facing
-  posture report (ADR-0054).

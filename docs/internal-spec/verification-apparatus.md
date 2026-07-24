@@ -13,8 +13,9 @@ is the instrument.
 | `fp-gate` | run the proof layer over the pinned corpus; **red on any finding** |
 | `corpus-sync` | clone/refresh the pinned corpus (`--update` re-resolves to latest stable) |
 | `phpdoc-oracle` | differential the PHPDoc parser against the real `phpstan/phpdoc-parser` |
-| `gen-catalog` | regenerate the builtin class hierarchy from the mining TOML |
+| `gen-catalog` | regenerate the builtin class hierarchy **and the return-fact table** from the mining TOML |
 | `freq` | builtin frequency mining (catalog seeding input) |
+| `nsrt` | the `assertType` harness (oracle idea B): three-verdict measurement of dump renderings against PHPStan's own `nsrt/` fixtures, `assertType` recognized **harness-only** |
 
 ## `fp-gate`
 
@@ -45,8 +46,10 @@ is stated.
 `effect.*`) are held separately: they are true findings that legitimately abound
 in released code, so they gate as **per-package increase tripwires**, not
 red-on-sight (ADR-0050 §9). The seeded expectations are hand-maintained tables
-in `gate.rs`: `PHPDOC_EXPECTED` (488 findings across seven entries),
-`THROW_EXPECTED` (44,184 — dominated by the legacy monorepo's 43,964, and
+in `gate.rs`: `PHPDOC_EXPECTED` (526 findings across seven entries — the legacy
+monorepo alone at 477 after the ADR-0056 R1 return-fact reseed, +43 from
+uniquely-resolved builtin calls now seeding their reflected return envelope),
+`THROW_EXPECTED` (44,592 — dominated by the legacy monorepo's 44,372, and
 including the 20 `throw.undeclared` TRUEs seeded for phpstan-src at its
 registration), and `EFFECT_EXPECTED`, seeded **empty**: an all-zero tripwire
 that is vacuous until an envelope-annotated package lands, and correct the day
@@ -79,7 +82,8 @@ pinned and not committed: a private legacy monorepo, and — registered
 modern PHP; `tests/` and `e2e/` excluded as deliberately-broken fixtures, so
 `src/` is the clean FP-hunting surface). Its first run: 0 proof-layer, 0
 `phpdoc.*`, 20 `throw.undeclared` — all triaged TRUE and seeded into
-`THROW_EXPECTED`. Total scale at the last recorded run: ~99,280 files.
+`THROW_EXPECTED`. Total scale at the last recorded run: ~99,490 files (the
+unpinned monorepo drifted +210 during the day and its tripwires were reseeded).
 
 Held-out projects used for adoption drills are never used for tuning; that
 separation is what makes an adoption-drill number mean anything. See
@@ -98,14 +102,15 @@ This is why the grammar can be called normatively compatible rather than
 ## `gen-catalog`
 
 Regenerates `steins-catalog::hierarchy_generated` from
-`docs/research/phpsrc-mining/hierarchy.toml`. The TOML is the **source of
-record**; the Rust file is `@generated` and carries the php-src commit pin and
-the PHP version it was cross-checked against. Editing the Rust by hand is a
-defect.
+`docs/research/phpsrc-mining/hierarchy.toml` **and
+`steins-catalog::return_facts_generated` from `return_facts.toml`** (ADR-0056 R3+R4,
+the eleven curated return rows). The TOML is the **source of record**; the Rust
+files are `@generated` and carry the php-src commit pin and the PHP version they
+were cross-checked against. Editing the Rust by hand is a defect.
 
 The mining directory also holds `throws.toml`, `failure_arms.toml`,
-`effects_gaps.md`, and a `crosscheck.txt` — the per-arm C evidence behind the
-catalog's claims.
+`return_facts.toml`, `effects_gaps.md`, and a `crosscheck.txt` — the per-arm C
+evidence behind the catalog's claims.
 
 ## Conformance
 
@@ -120,8 +125,8 @@ measurement convenience only.
 
 ## Test discipline
 
-~1,200 `#[test]` functions across the workspace, weighted toward
-`steins-infer/tests/` (35 integration files: arity, branch analysis, effects,
+~1,350 `#[test]` functions across the workspace, weighted toward
+`steins-infer/tests/` (40 integration files: arity, branch analysis, effects,
 throws, offsets, object acceptance, truth tables, short-circuit, match/switch,
 phpdoc contracts, …).
 

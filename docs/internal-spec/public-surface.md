@@ -35,10 +35,13 @@ Two deliberate non-contracts:
 - **Diagnostic messages are prose.** They keep improving and are explicitly not
   a suppression key (ADR-0023). Nothing may key on wording.
 - **The `[runtime]` config section rejects unknown keys.** Ignoring a misspelled
-  `zend-asertions` would leave the safe default in force while the user believed
+  `warning-hadler` would leave the safe default in force while the user believed
   otherwise, so a typo there is a **hard config error: the run aborts with exit 2**
   (like any other unparseable `steins.toml`) rather than proceeding on defaults —
-  the one place where silent leniency is the wrong default.
+  the one place where silent leniency is the wrong default. (The former
+  `zend-assertions` key was abolished by the 2026-07-25 owner ruling that reads
+  `assert()` as a throw-guard; a `steins.toml` still carrying it hits this same
+  exit-2 unknown-key path.)
 
 ## Versioning posture
 
