@@ -261,10 +261,11 @@ irreversible-publish gate. Make sure every CI check is green before asking.
 ## Merge, then tag to publish
 
 Only after the PR is **approved and its CI is green**, and with explicit approval
-for each push:
+for each push. `--rebase` because this repo's history is strictly linear — 160
+commits, zero merge commits — so a merge commit would be the anomaly:
 
 ```bash
-gh pr merge --merge && git checkout master && git pull --ff-only
+gh pr merge --rebase && git checkout master && git pull --ff-only
 ```
 
 ```bash
