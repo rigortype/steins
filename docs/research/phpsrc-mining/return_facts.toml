@@ -1,0 +1,54 @@
+# return_facts.toml — curated builtin return-fact REFINEMENTS (ADR-0056)
+# php-src commit: 6bc7c26cf67a9480b5ef9d6191aebe87fa931183 (Thu Jul 9 2026)
+# Stub types read at that pin; behavioral probes run vs PHP 8.5.8 (cli),
+# /opt/homebrew/bin/php. Source of record for `cargo xtask gen-catalog`, which
+# emits crates/steins-catalog/src/return_facts_generated.rs.
+#
+# ─────────────────────────── What a row IS ───────────────────────────
+# A row is a CURATED REFINEMENT that beats the reflected return envelope in
+# precision. The reflected envelope (the running engine's own `getReturnType()`)
+# is seeded WITHOUT a row — the plumbing does that for every builtin whose return
+# is a single representable scalar base (ADR-0056 §1, "the envelope machinery
+# alone already serves every reflected builtin"). A row is needed ONLY where a
+# Refined-layer fact the engine's type system cannot express (`int<0, max>`,
+# `non-empty-string`) narrows strictly WITHIN that envelope.
+#
+# `refinement` is a phpdoc type STRING (e.g. "int<0, max>", "non-empty-string").
+# It is admitted at a call site only after the acceptance machinery confirms it is
+# an extensional subset of the reflected envelope AND the project PHP minor equals
+# steins_catalog::PINNED_PHP (ADR-0056 §2). A stale row can only lose precision,
+# never manufacture a wrong premise the runtime disowns.
+#
+# Every row carries per-row EVIDENCE: the php-src stub `return_type` at the pin,
+# and for the refinement a behavioral witness — a `php -r` probe transcript or a
+# php-src C citation, recorded verbatim. Nothing is recalled from memory.
+#
+# ─────────────────────────── R1 measured family ───────────────────────────
+# R1 is the bool-predicate family (nsrt differ class `expected:bool | 741`) plus
+# the plumbing. For a PURE predicate the reflected envelope IS `bool`, and `bool`
+# is already the coarsest value-domain base — there is NO refinement beyond it.
+# So R1 lands ZERO curated rows: the entire 741 comes from ENVELOPE SEEDING alone,
+# not from this table. The probes below RECORD that finding (reflected == bool for
+# each, hence no row), keeping the sourcing discipline honest.
+#
+# Probe (verbatim), all on /opt/homebrew/bin/php 8.5.8:
+#   php -r 'foreach (["array_key_exists","in_array","str_contains","str_starts_with",
+#     "str_ends_with","is_int","is_string","is_bool","is_float","is_array","is_null",
+#     "is_object","is_callable","is_numeric","property_exists","method_exists",
+#     "function_exists","class_exists","ctype_digit","ctype_alpha"] as $fn) {
+#       $r = new ReflectionFunction($fn);
+#       echo $fn." rt=".((string)($r->getReturnType() ?? "NULL"))."\n"; }'
+# Output: every one printed `rt=bool` (getReturnType, non-tentative, non-nullable).
+# `getTentativeReturnType` is NULL for all (they carry a real return type).
+#
+# `isset`/`empty` are language constructs, not functions — no ReflectionFunction,
+# no reflected envelope, and guard-position folding already handles them (ADR-0056
+# leaves guard-position UNTOUCHED). They are correctly absent here.
+#
+# Because bool == envelope, the R1 curated table is EMPTY. Later slices add rows
+# where refinement is real:
+#   R3  count(): int<0, max>        — envelope `int`, refinement `int<0, max>`
+#   R4  sha1(): non-empty-string    — envelope `string`, refinement `non-empty-string`
+# Those rows land with their own probes when their slices are implemented.
+
+# (no [[function]] rows in R1 — see the header)

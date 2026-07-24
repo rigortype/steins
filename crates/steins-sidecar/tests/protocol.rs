@@ -50,6 +50,31 @@ fn reflect_finds_a_builtin_class_like() {
 }
 
 #[test]
+fn reflect_reports_the_native_return_type() {
+    // ADR-0056 R1: the reflection reply carries the builtin's native return type.
+    let Some(mut sc) = spawn_or_skip("reflect_reports_the_native_return_type") else { return };
+    // A bool predicate — the R1 family. getReturnType() is `bool`, non-tentative.
+    let is_int = sc.reflect("is_int").expect("reflection reply");
+    assert_eq!(is_int.return_type.as_deref(), Some("bool"), "is_int returns bool, {is_int:?}");
+    assert!(!is_int.return_type_tentative, "is_int has a real (non-tentative) return type");
+    // A single-base int producer and a string producer — the envelope-seeding cases.
+    assert_eq!(sc.reflect("strlen").expect("reply").return_type.as_deref(), Some("int"));
+    assert_eq!(sc.reflect("sha1").expect("reply").return_type.as_deref(), Some("string"));
+    // A multi-base union return — surfaced faithfully as a string (the consumer
+    // decides it is not single-fact-representable).
+    assert_eq!(sc.reflect("strpos").expect("reply").return_type.as_deref(), Some("int|false"));
+}
+
+#[test]
+fn reflect_return_type_is_none_for_a_class_like() {
+    // A class-like name is not a function — no return type surface.
+    let Some(mut sc) = spawn_or_skip("reflect_return_type_is_none_for_a_class_like") else { return };
+    let ex = sc.reflect("Exception").expect("reflection reply");
+    assert!(ex.class_like_exists && !ex.function_exists);
+    assert_eq!(ex.return_type, None, "a class-like carries no return type: {ex:?}");
+}
+
+#[test]
 fn reflect_reports_a_nonsense_name_as_not_found() {
     let Some(mut sc) = spawn_or_skip("reflect_reports_a_nonsense_name_as_not_found") else {
         return;

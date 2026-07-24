@@ -405,6 +405,23 @@ pub trait Folder {
     fn boot_surface_label(&mut self) -> Option<String> {
         None
     }
+
+    /// The value-domain **return fact** of a uniquely-resolved builtin `name`
+    /// (ADR-0056 R1): the reflected return envelope (the running engine's own
+    /// declaration), refined by an admitted curated row. `None` when nothing may
+    /// be seeded — no sidecar, a runtime-redefinition extension loaded (a
+    /// monkey-patched builtin disowns its declared type — the ADR-0049 A9 posture,
+    /// value-domain edition), a name the runtime does not know as a function, a
+    /// return type not representable as a single value-domain [`Fact`] (a
+    /// multi-base union such as `int|false` — deferred to the contract-lane arms
+    /// of a later slice), or no return type at all. The default is `None` (the
+    /// sound subset — ADR-0004). Always seeded at the `Verified` stratum: it is a
+    /// native declaration read off the engine's own arginfo (§2), never demoted to
+    /// Asserted. `name` is the call's simple name (the fold path's key).
+    fn builtin_return_fact(&mut self, name: &str) -> Option<Fact> {
+        let _ = name;
+        None
+    }
 }
 
 /// The runtime-redefinition extensions that void the absence family (ADR-0049 A9):
@@ -449,6 +466,10 @@ pub struct SidecarFolder {
     /// sidecar `env()` — the ADR-0049 §9 message register's closure-evidence clause
     /// for the existence ids. `Some(None)` records "asked, unanswerable".
     boot_surface_label: Option<Option<String>>,
+    /// Per-name memo of the builtin return-fact (ADR-0056 R1) so a repeated call to
+    /// the same builtin never triggers duplicate `reflect` IPC. Keyed by the
+    /// lowercased simple name (PHP function names are case-insensitive).
+    return_fact_memo: HashMap<String, Option<Fact>>,
 }
 
 impl SidecarFolder {
@@ -467,6 +488,7 @@ impl SidecarFolder {
             boot_surface_fn_memo: HashMap::new(),
             php_minor: None,
             boot_surface_label: None,
+            return_fact_memo: HashMap::new(),
         }
     }
 
@@ -580,6 +602,45 @@ impl Folder for SidecarFolder {
             .map(|e| format!("PHP {} ({} extensions)", e.php_version, e.extensions.len()));
         self.boot_surface_label = Some(answer.clone());
         answer
+    }
+
+    fn builtin_return_fact(&mut self, name: &str) -> Option<Fact> {
+        let key = name.to_ascii_lowercase();
+        if let Some(cached) = self.return_fact_memo.get(&key) {
+            return cached.clone();
+        }
+        let answer = self.compute_builtin_return_fact(&key);
+        self.return_fact_memo.insert(key, answer.clone());
+        answer
+    }
+}
+
+impl SidecarFolder {
+    /// Compute the builtin return fact for `key` (already lowercased) — the
+    /// admission gate of ADR-0056 §2 assembled from three whole-run sidecar
+    /// answers. Called once per name; [`Self::builtin_return_fact`] memoizes.
+    fn compute_builtin_return_fact(&mut self, key: &str) -> Option<Fact> {
+        // Gate 1 — a live sidecar and no runtime-redefinition extension. A
+        // monkey-patched builtin (uopz/runkit7/Componere) can return a type its
+        // native declaration disowns, so the reflected envelope is not trustworthy;
+        // this is the ADR-0049 A9 posture applied to the value domain. Also covers
+        // the no-sidecar sound subset (returns `false`).
+        if !self.absence_family_available() {
+            return None;
+        }
+        // Gate 2 (minor pin, ADR-0052 A11 / ADR-0056 §2) — governs the CURATED
+        // refinement only; the reflected envelope is version-correct by
+        // construction and needs no pin. `None` minor (unparseable) is treated as
+        // no-detectable-skew, keeping the envelope but not admitting curation.
+        let minor_matches_pin = self.php_minor() == Some(steins_catalog::PINNED_PHP);
+        // The reflected return envelope — the running engine's own declaration.
+        let refl = self.ensure_sidecar().and_then(|sc| sc.reflect(key))?;
+        if !refl.function_exists {
+            return None;
+        }
+        let return_type = refl.return_type.as_deref()?;
+        let curated = steins_catalog::return_fact(key);
+        admit_return_fact(return_type, curated, minor_matches_pin)
     }
 }
 
@@ -4693,7 +4754,9 @@ fn best_dump_type(
         // 4. Honest unknown.
         return DumpRendering { text: DUMP_UNKNOWN.to_owned(), asserted: false };
     }
-    // A non-variable argument: a resolved literal / foldable value fact, else unknown.
+    // A non-variable argument: a resolved literal / foldable value fact wins first
+    // (folding is the floor below the return fact — a fully-literal call folds to a
+    // Singleton, ADR-0056 §4).
     if let Some(lit) = cx.resolve_literal(value, env, poisoned, folder)
         && let Some(fact) = singleton_fact(&lit)
     {
@@ -4701,6 +4764,14 @@ fn best_dump_type(
             text: render_dump_fact(&fact),
             asserted: value_stratum(value, env, Some(store)) == Stratum::Asserted,
         };
+    }
+    // A uniquely-resolved builtin call the fold could not reach: its reflected
+    // return envelope / admitted refinement (ADR-0056 R1). Always Verified — a
+    // native declaration read off the engine's own arginfo (§2).
+    if let ArgValue::Call(name, _) = value
+        && let Some(fact) = builtin_call_return_fact(cx, folder, name)
+    {
+        return DumpRendering { text: render_dump_fact(&fact), asserted: false };
     }
     DumpRendering { text: DUMP_UNKNOWN.to_owned(), asserted: false }
 }
@@ -5039,10 +5110,23 @@ fn apply_assign(
                 env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
                 store.unbind(var);
             }
-            None => {
-                env.remove(var);
-                store.unbind(var);
-            }
+            // `$x = is_int($y)` and kin: the fold could not reach it, so seed the
+            // uniquely-resolved builtin's reflected return envelope / admitted
+            // refinement (ADR-0056 R1). Enters at `Verified` — a native declaration
+            // (§2). A more-precise fold above already returned; this is the floor.
+            None => match value {
+                ArgValue::Call(name, _)
+                    if !w.scope.poisoned
+                        && let Some(fact) = builtin_call_return_fact(cx, folder, name) =>
+                {
+                    env.insert(var.to_owned(), Known::value(fact, line, None));
+                    store.unbind(var);
+                }
+                _ => {
+                    env.remove(var);
+                    store.unbind(var);
+                }
+            },
         },
     }
 }
@@ -11640,6 +11724,123 @@ fn check_callable_arg(
     });
 }
 
+// ---------------------------------------------------------------------------
+// Builtin return facts (ADR-0056 R1): the reflected envelope seeds the value
+// domain; a curated row refines strictly within it. The admission gate of §2 is
+// factored into pure functions so every leg is unit-testable without a sidecar.
+// ---------------------------------------------------------------------------
+
+/// Combine a reflected return-type string with an optional curated refinement
+/// into the value-domain [`Fact`] to seed (ADR-0056 §1–2), or `None` when nothing
+/// representable can be seeded.
+///
+/// * The **reflected envelope** is `return_type` lowered to a single-base fact
+///   (`bool`, `int`, `string`, `float`, or their `?T` nullable form). A multi-base
+///   union (`int|false`), a non-scalar (`array`, `object`, a class, `void`), or
+///   `mixed` is not representable as one [`Fact`] and yields `None` — the union
+///   case is deferred to the contract-lane arms of a later slice (§4).
+/// * A **curated refinement** (`curated`, a phpdoc type string such as
+///   `int<0, max>` or `non-empty-string`) is admitted only when `minor_matches_pin`
+///   holds (the A11 pin, §2), it lowers to a fact of the SAME base as the envelope,
+///   AND the envelope extensionally subsumes it ([`normalize::subsumes`] `== Yes`).
+///   Otherwise the envelope stands alone. Curation may narrow within the envelope;
+///   it may never widen or cross bases — so a stale curated row loses precision,
+///   never manufactures a wrong premise the runtime disowns.
+fn admit_return_fact(return_type: &str, curated: Option<&str>, minor_matches_pin: bool) -> Option<Fact> {
+    let envelope_ty = steins_contract::lower_str(return_type)?;
+    let envelope = envelope_fact(&envelope_ty)?;
+    // No curated row, or the minor pin fails: the envelope stands alone.
+    let Some(curated) = curated.filter(|_| minor_matches_pin) else {
+        return Some(envelope);
+    };
+    // The curated refinement must lower, be extensionally subsumed by the
+    // envelope (curated ⊆ reflected, the §1.2 subset check), and share the
+    // envelope's base. Any failure keeps the envelope alone (never widens).
+    let refined = steins_contract::lower_str(curated).and_then(|cty| {
+        if normalize::subsumes(&envelope_ty, &cty).is_yes() {
+            contractty_to_fact(&cty).filter(|f| fact_base(f) == fact_base(&envelope))
+        } else {
+            None
+        }
+    });
+    Some(refined.unwrap_or(envelope))
+}
+
+/// The scalar base of a [`General`]/[`Refined`] fact (`None` for the finite
+/// layers, which the return-fact path never produces).
+///
+/// [`General`]: Fact::General
+/// [`Refined`]: Fact::Refined
+fn fact_base(f: &Fact) -> Option<Base> {
+    match f {
+        Fact::General { base, .. } | Fact::Refined { base, .. } => Some(*base),
+        Fact::Singleton(_) | Fact::OneOf(_) => None,
+    }
+}
+
+/// Lower a reflected envelope [`ContractTy`] to the single-base value-domain
+/// [`Fact`] it seeds, or `None` when it is not a single representable scalar base:
+/// a bare `Base(b)` → `General{b}`, and a two-member `?T` union (`{Null, Base(b)}`)
+/// → `General{b, nullable}`. Everything else (multi-base unions, non-scalars,
+/// `mixed`) yields `None`.
+fn envelope_fact(ty: &ContractTy) -> Option<Fact> {
+    match ty {
+        ContractTy::Base(b) => Some(Fact::General { base: *b, nullable: false }),
+        ContractTy::Union(members) if members.len() == 2 && members.iter().any(|m| matches!(m, ContractTy::Null)) => {
+            let base = members.iter().find_map(|m| match m {
+                ContractTy::Base(b) => Some(*b),
+                _ => None,
+            })?;
+            Some(Fact::General { base, nullable: true })
+        }
+        _ => None,
+    }
+}
+
+/// Lower a curated refinement [`ContractTy`] to a value-domain [`Fact`] (ADR-0056
+/// §1.2), or `None` when it is not a scalar refinement the domain carries. Handles
+/// the base layer and the two Refined refinements (`int<lo, hi>`, string
+/// predicates); a two-member `?T` nullable wrapper is unwrapped and re-nulled.
+/// Unions of more than the nullable pair, and non-scalars, yield `None` — a
+/// curated row that cannot be a single fact simply does not refine (the envelope
+/// stands).
+fn contractty_to_fact(ty: &ContractTy) -> Option<Fact> {
+    match ty {
+        ContractTy::Base(b) => Some(Fact::General { base: *b, nullable: false }),
+        ContractTy::IntIn(r) => Some(Fact::refined(Base::Int, Refinement::Int(*r), false)),
+        ContractTy::StrWith(p) => Some(Fact::refined(Base::String, Refinement::Str(*p), false)),
+        ContractTy::Union(members) if members.len() == 2 && members.iter().any(|m| matches!(m, ContractTy::Null)) => {
+            let inner = members.iter().find(|m| !matches!(m, ContractTy::Null))?;
+            fact_with_null(&contractty_to_fact(inner)?)
+        }
+        _ => None,
+    }
+}
+
+/// Add null admissibility to a single-base fact (the `?T` curated wrapper). `None`
+/// for a finite fact (never produced here).
+fn fact_with_null(f: &Fact) -> Option<Fact> {
+    match f {
+        Fact::General { base, .. } => Some(Fact::General { base: *base, nullable: true }),
+        Fact::Refined { base, refinement, .. } => Some(Fact::refined(*base, *refinement, true)),
+        Fact::Singleton(_) | Fact::OneOf(_) => None,
+    }
+}
+
+/// The value-domain fact to seed for a call to builtin `name` at a call site
+/// (ADR-0056 R1), or `None` when no fact may be seeded. The call must resolve
+/// **uniquely to the builtin**: any project user function sharing the simple name
+/// shadows (or makes ambiguous) the builtin, so — exactly as [`Cx::try_fold`]
+/// does — a simple-name collision refuses (conservative, never an FP). The fact
+/// itself, and the sidecar/monkey-patch/pin gating, come from
+/// [`Folder::builtin_return_fact`].
+fn builtin_call_return_fact(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Option<Fact> {
+    if cx.index.has_simple_function(name) {
+        return None;
+    }
+    folder.builtin_return_fact(name)
+}
+
 /// The abstract fact an argument resolves to: a bare `$var` whose env fact is an
 /// abstract layer (no finite members). Finite/proven values go through
 /// `resolve_cval` instead, so this is the disjoint "abstract" arm of Feature E.
@@ -12449,5 +12650,85 @@ mod dump_render_tests {
         // never a guess (§7).
         let fact = Fact::Singleton(Val::Array(vec![]));
         assert_eq!(render_dump_fact(&fact), DUMP_UNKNOWN);
+    }
+}
+
+#[cfg(test)]
+mod return_fact_admission_tests {
+    //! ADR-0056 §1–2 — the pure admission-gate core ([`admit_return_fact`] and its
+    //! helpers), tested without a sidecar. Covers: the reflected envelope alone for
+    //! each single representable base; the un-representable cases (multi-base union,
+    //! non-scalar, `mixed`/`void`); and the three curated-refinement legs — admitted
+    //! (subset ∧ pinned), rejected by a failed subset check, and rejected by a minor
+    //! mismatch. The R1 generated table is empty, so curation is exercised with
+    //! hand-passed refinement strings here.
+    use super::*;
+
+    #[test]
+    fn envelope_alone_for_each_representable_base() {
+        // A curated-less row (the R1 reality) seeds exactly the reflected base.
+        assert_eq!(admit_return_fact("bool", None, true), Some(Fact::General { base: Base::Bool, nullable: false }));
+        assert_eq!(admit_return_fact("int", None, true), Some(Fact::General { base: Base::Int, nullable: false }));
+        assert_eq!(admit_return_fact("string", None, true), Some(Fact::General { base: Base::String, nullable: false }));
+        assert_eq!(admit_return_fact("float", None, true), Some(Fact::General { base: Base::Float, nullable: false }));
+        // A `?T` nullable envelope carries nullability.
+        assert_eq!(admit_return_fact("?string", None, true), Some(Fact::General { base: Base::String, nullable: true }));
+    }
+
+    #[test]
+    fn unrepresentable_envelopes_seed_nothing() {
+        // A multi-base union (`int|false`) is not a single value-domain fact — the
+        // union case is deferred (§4), so R1 seeds nothing rather than a wrong arm.
+        assert_eq!(admit_return_fact("int|false", None, true), None);
+        assert_eq!(admit_return_fact("string|int|false", None, true), None);
+        // Non-scalars and the top/void keywords never seed.
+        assert_eq!(admit_return_fact("array", None, true), None);
+        assert_eq!(admit_return_fact("object", None, true), None);
+        assert_eq!(admit_return_fact("mixed", None, true), None);
+        assert_eq!(admit_return_fact("void", None, true), None);
+        assert_eq!(admit_return_fact("DateTime", None, true), None);
+    }
+
+    #[test]
+    fn curated_refinement_admitted_when_subset_and_pinned() {
+        // `count(): int` envelope refined to `int<0, max>` — a subset of `int` — is
+        // admitted at the pinned minor, yielding a Refined (narrower) int fact.
+        let got = admit_return_fact("int", Some("int<0, max>"), true).expect("some fact");
+        assert!(
+            matches!(got, Fact::Refined { base: Base::Int, .. }),
+            "the admitted refinement must be a Refined int, got {got:?}"
+        );
+        assert_ne!(got, Fact::General { base: Base::Int, nullable: false }, "must be narrower than the envelope");
+    }
+
+    #[test]
+    fn curated_refinement_rejected_when_not_a_subset() {
+        // `non-empty-string` is NOT a subset of an `int` envelope (base mismatch):
+        // the row is discarded and the envelope stands alone (never a wrong premise).
+        assert_eq!(
+            admit_return_fact("int", Some("non-empty-string"), true),
+            Some(Fact::General { base: Base::Int, nullable: false })
+        );
+    }
+
+    #[test]
+    fn curated_refinement_rejected_on_minor_mismatch() {
+        // A perfectly valid subset refinement is still NOT admitted when the project
+        // PHP minor differs from PINNED_PHP (the A11 narrowing-direction guard, §2):
+        // the envelope stands alone.
+        assert_eq!(
+            admit_return_fact("int", Some("int<0, max>"), false),
+            Some(Fact::General { base: Base::Int, nullable: false })
+        );
+    }
+
+    #[test]
+    fn envelope_fact_shapes() {
+        assert_eq!(envelope_fact(&ContractTy::Base(Base::Bool)), Some(Fact::General { base: Base::Bool, nullable: false }));
+        // A non-nullable multi-base union → None.
+        assert_eq!(
+            envelope_fact(&ContractTy::Union(vec![ContractTy::Base(Base::Int), ContractTy::LitBool(false)])),
+            None
+        );
     }
 }

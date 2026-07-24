@@ -18,3 +18,4 @@ steins-phpdoc = { path = "../steins-phpdoc" }
 [dev-dependencies]
 steins-db = { path = "../steins-db" }
 steins-syntax = { path = "../steins-syntax" }
+steins-domain = { path = "../steins-domain" }

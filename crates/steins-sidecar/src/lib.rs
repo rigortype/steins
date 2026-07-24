@@ -101,6 +101,18 @@ pub struct Reflection {
     pub function_exists: bool,
     /// The name is a resident class-like — class, interface, trait, or enum.
     pub class_like_exists: bool,
+    /// The resident function's native return type, as the `(string)` rendering of
+    /// `ReflectionFunction::getReturnType()` — or `getTentativeReturnType()` when
+    /// the former is null (ADR-0056 R1). `None` when the name is not a function or
+    /// declares no return type at all. Examples: `"bool"`, `"int"`, `"?string"`,
+    /// `"int|false"`. This is the reflected *envelope* the return-fact seeder
+    /// lowers; it is the running engine's own declaration for its own builtin, so
+    /// it is version-correct by construction (ADR-0056 §1).
+    pub return_type: Option<String>,
+    /// Whether [`Self::return_type`] came from the *tentative* return type (the
+    /// function declared no `getReturnType()` but the engine carries a tentative
+    /// one). Still the engine's own claim; recorded distinctly per ADR-0056 §7.
+    pub return_type_tentative: bool,
 }
 
 impl Reflection {
@@ -242,6 +254,16 @@ impl Sidecar {
             function_exists: obj.get("function").and_then(serde_json::Value::as_bool).unwrap_or(false),
             class_like_exists: obj
                 .get("class_like")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            // Absent (an older runner) or JSON `null` both map to `None` — no
+            // reflected envelope, so the seeder widens away (ADR-0056).
+            return_type: obj
+                .get("return_type")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned),
+            return_type_tentative: obj
+                .get("return_type_tentative")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
         })

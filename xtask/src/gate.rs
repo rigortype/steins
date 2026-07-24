@@ -240,7 +240,24 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // the unpinned monorepo checkout gained ~210 files during the day and some
     // previously-counted finding sites changed. Decrease adopted consciously
     // (a decrease never gates; recorded so the next reader knows the cause).
-    ("pxxxx-monorepo", 434),
+    //
+    // 434 → 477 (+43) with ADR-0056 R1 (builtin return facts): a uniquely-resolved
+    // builtin call now seeds its REFLECTED RETURN ENVELOPE into the value domain
+    // (`trim()`/`substr()`/… ⇒ `General{String}`), the runtime's own
+    // `getReturnType()` — so a request string read as
+    // `trim(ParamHelper::…->asString())` and passed to a method's `@param int`
+    // becomes a proven contract mismatch the phpdoc layer now sees. All 43 were
+    // baseline-diffed (a stashed HEAD) and triaged verbatim: every one is a
+    // `string`/`non-empty-string` value → `@param int` in a request-handling
+    // controller (AJAX/Rpc/admin htdocs), PHPStan flags each identically — the
+    // stringly-typed request-param → int-param pattern (same class the +47/ADR-0035
+    // note above already recorded). Two render `non-empty-string`: the seeded
+    // `General{String}` refined by an existing `=== ''` guard before the call — the
+    // envelope composing correctly with narrowing. 0 findings disappeared; every
+    // OSS package is unchanged (the soundness signal — a wrong envelope would light
+    // up well-typed OSS too). Runtime/proof layer stays GREEN (0). throw.* is
+    // unmoved by this change (44563 before and after).
+    ("pxxxx-monorepo", 477),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).

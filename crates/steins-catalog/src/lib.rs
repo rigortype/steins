@@ -44,6 +44,11 @@ pub const PINNED_PHP: (u16, u16) = (8, 5);
 /// and `xtask/src/gen_catalog.rs` for the generation contract.
 mod hierarchy_generated;
 
+/// The builtin return-fact refinement table (ADR-0056), generated from
+/// `docs/research/phpsrc-mining/return_facts.toml` by `cargo xtask gen-catalog`.
+/// Consulted only by [`return_fact`]. May be empty (R1 lands zero rows).
+mod return_facts_generated;
+
 /// Whether `name` is on the folding allowlist (case-insensitive).
 ///
 /// A `true` here is a *permission to fold*, not a promise the call folds: the
@@ -628,6 +633,29 @@ pub fn invocation_shape(name: &str) -> Option<InvocationShape> {
     }
 }
 
+/// The **curated return-fact refinement** of a builtin `name` (ADR-0056 §1.2): a
+/// phpdoc type string (`"int<0, max>"`, `"non-empty-string"`) that narrows
+/// strictly within the builtin's reflected return envelope, or `None` when no row
+/// curates it (the common case — the reflected envelope then stands alone).
+///
+/// This is only a *refinement proposal*: the consumer (steins-infer) admits it at
+/// a call site solely after confirming it is an extensional subset of the reflected
+/// envelope AND the project PHP minor equals [`PINNED_PHP`] (ADR-0056 §2). A stale
+/// row can therefore lose precision, never manufacture a wrong premise.
+///
+/// The table (`return_facts_generated::RETURN_FACTS`) is generated from
+/// `return_facts.toml`; it is EMPTY in R1 (the bool-predicate family's reflected
+/// envelope is already `bool`, so no refinement adds precision). Matching is
+/// case-insensitive; the generated keys are lowercased and sorted for binary search.
+#[must_use]
+pub fn return_fact(name: &str) -> Option<&'static str> {
+    let key = name.trim_start_matches('\\').to_ascii_lowercase();
+    return_facts_generated::RETURN_FACTS
+        .binary_search_by(|(n, _)| (*n).cmp(key.as_str()))
+        .ok()
+        .map(|i| return_facts_generated::RETURN_FACTS[i].1)
+}
+
 /// Plain Levenshtein edit distance (small strings, so the quadratic DP is fine).
 fn levenshtein(a: &str, b: &str) -> usize {
     let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
@@ -704,6 +732,20 @@ mod tests {
         for name in ["some_unknown_fn", "curl_exec", "mysqli_query"] {
             assert_eq!(effect_labels(name), None, "{name} must be uncatalogued");
         }
+    }
+
+    #[test]
+    fn return_fact_table_is_empty_in_r1() {
+        // ADR-0056 R1 lands ZERO curated rows — the bool-predicate family's reflected
+        // envelope is already `bool`. Every builtin therefore has no curated
+        // refinement; the reflected envelope alone serves them (seeded in steins-infer).
+        assert_eq!(super::return_fact("is_int"), None);
+        assert_eq!(super::return_fact("count"), None);
+        assert_eq!(super::return_fact("strlen"), None);
+        assert_eq!(super::return_fact("some_unknown_fn"), None);
+        // The generated table is well-formed (sorted for binary search) even when empty.
+        let t = super::return_facts_generated::RETURN_FACTS;
+        assert!(t.windows(2).all(|w| w[0].0 < w[1].0), "RETURN_FACTS must be strictly sorted by key");
     }
 
     #[test]

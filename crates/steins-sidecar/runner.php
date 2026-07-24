@@ -111,6 +111,21 @@ function steins_env()
  * request widens. The Rust side maps a widen/malformed reply to "unknown" (None),
  * so a not-found is a positive answer, never confused with a failed query.
  *
+ * ## Return-type surface (ADR-0056 R1)
+ *
+ * When the name is a resident function, the reply also carries its **native
+ * return type** as read off the running engine's own arginfo: `return_type` is
+ * the `(string)` rendering of `ReflectionFunction::getReturnType()` (e.g.
+ * `"bool"`, `"int"`, `"?string"`, `"int|false"`), or `null` when the function
+ * declares none. A function that declares no return type but a *tentative* one
+ * (`ReflectionFunction::getTentativeReturnType()`, still the engine's own claim
+ * for its own builtin) reports that instead, with `return_type_tentative: true`
+ * so the consumer can treat it distinctly if it ever needs to. Both render
+ * through the SAME `(string)` cast — one wire form — and the boolean tag is the
+ * only distinction (ADR-0056 §7 open question, resolved here). By-ref out-param
+ * types are NOT surfaced in v1 (the value-domain seed is the ordinary return
+ * only). Any reflection failure leaves `return_type` null — never a guess.
+ *
  * @param array<mixed> $params
  * @return array<string, mixed>
  */
@@ -134,12 +149,38 @@ function steins_reflect(array $params)
         || trait_exists($name, false)
         || (function_exists('enum_exists') && enum_exists($name, false));
 
+    // The native return-type surface (ADR-0056). Only for resident functions;
+    // never crash — a reflection failure yields a null return type (widen-safe).
+    $return_type = null;
+    $tentative = false;
+    if ($function) {
+        try {
+            $rf = new ReflectionFunction($name);
+            $rt = $rf->getReturnType();
+            if ($rt === null && method_exists($rf, 'getTentativeReturnType')) {
+                $tt = $rf->getTentativeReturnType();
+                if ($tt !== null) {
+                    $rt = $tt;
+                    $tentative = true;
+                }
+            }
+            if ($rt !== null) {
+                $return_type = (string) $rt;
+            }
+        } catch (\Throwable $e) {
+            $return_type = null;
+            $tentative = false;
+        }
+    }
+
     return [
         'kind' => 'reflection',
         'target' => $target,
         'exists' => $function || $class_like,
         'function' => $function,
         'class_like' => $class_like,
+        'return_type' => $return_type,
+        'return_type_tentative' => $tentative,
     ];
 }
 
