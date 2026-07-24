@@ -282,12 +282,13 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // until the reflect slice (M2).
     CALL_TOO_FEW_ARGUMENTS_ID,
     CALL_UNKNOWN_NAMED_ARGUMENT_ID,
-    // The dump surface's explicit pair (ADR-0053 D3), lit up here: a recognized
-    // `PHPStan\dumpType($e)` / `PHPStan\dumpPhpDocType($e)` call emits its fact
-    // rendering from `emit_dumps` (the walk's call-handling arm). `debug.var-dump`
-    // stays in `REGISTERED_NOT_YET_EMITTED` until D4.
+    // The dump surface's ids (ADR-0053), all lit up from `emit_dumps` (the walk's
+    // call-handling arm): the explicit pair `debug.type` / `debug.phpdoc-type` (D3),
+    // recognized by resolved FQN, and `debug.var-dump` (D4), recognized by the PHP
+    // fallback rule — default-on, one report per argument.
     DEBUG_TYPE_ID,
     DEBUG_PHPDOC_TYPE_ID,
+    DEBUG_VAR_DUMP_ID,
     suppress::SUPPRESS_UNMATCHED_ID,
     suppress::SUPPRESS_UNKNOWN_ID,
 ];
@@ -316,10 +317,8 @@ pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
     CALL_TOO_MANY_ARGUMENTS_ID,
     // OFFSET_MISSING_ID / OFFSET_ON_UNSUPPORTED_ID lit up at S3 — now in ALL_EMITTABLE_IDS.
     // PHPDOC_UNDEFINED_METHOD_ID lit up at S6 — now in ALL_EMITTABLE_IDS.
-    // The dump surface's debug ids (ADR-0053): the explicit pair
-    // (`debug.type` / `debug.phpdoc-type`) lit up at D3 — now in ALL_EMITTABLE_IDS.
-    // `debug.var-dump` lights up at D4; until then it is registered ahead of emission.
-    DEBUG_VAR_DUMP_ID,
+    // The dump surface's debug ids (ADR-0053) all lit up: the explicit pair at D3 and
+    // `debug.var-dump` at D4 — all now in ALL_EMITTABLE_IDS.
 ];
 
 /// The maximum depth of interprocedural argument-binding descent (Feature B).
@@ -4236,6 +4235,54 @@ fn dump_family(cx: &Cx, call: &CallExpr) -> Option<DumpFamily> {
     }
 }
 
+/// Whether a call resolves to the **global** `var_dump()` under PHP's own name
+/// resolution and fallback rule (ADR-0053 §5 / D4) — the `debug.var-dump` trigger.
+/// The six enumerated legs:
+///
+/// - (a) `\var_dump($e)` — always (the fully-qualified global builtin);
+/// - (b) unqualified `var_dump($e)` in the root namespace — always;
+/// - (c) unqualified in `namespace Foo;` — only if `Foo\var_dump` is **provably
+///   undefined** (the runtime falls back to global); a same-namespace homonym, an
+///   ambiguous resolution, or a dam that leaves existence Unknown ⇒ **no dump** (a
+///   missed dump is never an FP — silence is the free safe side);
+/// - (d) `Foo\var_dump($e)` qualified, or `use function Foo\var_dump;` — never
+///   (resolves elsewhere); a `use function var_dump;` importing the global is still
+///   the global, so it dumps;
+/// - (e) a *method* `$o->var_dump()` / `static::var_dump()` — never (a different
+///   symbol space; `Callee::Method`/`Static`, not `Function`);
+/// - (f) first-class callables and string callables — never (no argument expression
+///   at the site to dump — handled by the arg-less guard in [`emit_dumps`]).
+fn recognizes_var_dump(cx: &Cx, call: &CallExpr) -> bool {
+    let Callee::Function(_) = &call.receiver else { return false };
+    let Some(r) = call.callee_ref.as_ref() else { return false };
+    match r.kind {
+        // (a) `\var_dump` — the global builtin (a single segment, no namespace).
+        RefKind::FullyQualified => r.raw.eq_ignore_ascii_case("var_dump"),
+        // (d) `Foo\var_dump` — a qualified name resolves elsewhere.
+        RefKind::Qualified => false,
+        RefKind::Unqualified => {
+            if !r.raw.eq_ignore_ascii_case("var_dump") {
+                return false;
+            }
+            let ctx = cx.tree().ctx_at(r.offset);
+            // (d) `use function ...\var_dump;` — resolves to the import target; only a
+            // `use function var_dump;` naming the global is still the trigger.
+            if let Some(t) = ctx.fn_imports.get("var_dump") {
+                return t.eq_ignore_ascii_case("var_dump");
+            }
+            // (b) the root namespace: always the global.
+            if ctx.namespace.is_empty() {
+                return true;
+            }
+            // (c) in a namespace: only if `Ns\var_dump` is provably undefined (index
+            // Absent) AND the dam is clear (dynamic code could otherwise mint it,
+            // leaving existence Unknown — silence, the free safe side).
+            let ns_fqn = format!("{}\\var_dump", ctx.namespace).to_ascii_lowercase();
+            matches!(cx.index.resolve_function(&ns_fqn), Res::Absent) && cx.dam.is_clear()
+        }
+    }
+}
+
 /// A first-class callable `f(...)` (ADR-0049 §6 shape): a non-positional call with
 /// all of `args`/`named_args` empty and no spread. It creates a `Closure`, not a
 /// call — there is no argument expression at the site to dump (ADR-0053 §5 leg f),
@@ -4452,6 +4499,29 @@ fn emit_dumps(
                 line: pos.line,
                 column: pos.column,
                 message: dump_message(label, &rendering),
+            });
+        }
+        return;
+    }
+
+    // var_dump (ADR-0053 D4): default-on, one `debug.type`-shaped report per argument,
+    // same rendering and same fact source as the explicit `debug.type`. A first-class
+    // callable and a zero-argument `var_dump()` dump nothing (§2/§5 leg f) — no
+    // argument expression exists at the site.
+    if recognizes_var_dump(cx, call) {
+        if is_first_class_callable(call) || call.args.is_empty() {
+            return;
+        }
+        for arg in &call.args {
+            let rendering = best_dump_type(w, folder, &arg.value, env, store);
+            let pos = cx.tree().position(arg.span.start);
+            out.push(Diagnostic {
+                id: DEBUG_VAR_DUMP_ID,
+                facet: None,
+                path: cx.path().to_owned(),
+                line: pos.line,
+                column: pos.column,
+                message: dump_message("dumped type", &rendering),
             });
         }
     }

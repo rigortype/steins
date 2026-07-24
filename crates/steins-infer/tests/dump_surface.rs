@@ -6,7 +6,7 @@
 //! case-insensitive (ADR-0053 §5). The rendered fact is pinned; the message frame
 //! wording is not (§7). `var_dump` (D4) has its own test module.
 
-use steins_infer::{DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, Diagnostic, check};
+use steins_infer::{DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, Diagnostic, check};
 use steins_syntax::SourceTree;
 
 /// The dump diagnostics a source file produces (both explicit ids).
@@ -16,6 +16,12 @@ fn dumps(src: &str) -> Vec<Diagnostic> {
         .into_iter()
         .filter(|d| d.id == DEBUG_TYPE_ID || d.id == DEBUG_PHPDOC_TYPE_ID)
         .collect()
+}
+
+/// The `debug.var-dump` diagnostics a source file produces (ADR-0053 D4).
+fn var_dumps(src: &str) -> Vec<Diagnostic> {
+    let tree = SourceTree::parse(src);
+    check(&tree, &[], "t.php").into_iter().filter(|d| d.id == DEBUG_VAR_DUMP_ID).collect()
 }
 
 /// The single `debug.type` message body a one-dump source produces.
@@ -194,4 +200,111 @@ fn a_dump_reads_facts_and_binds_nothing() {
     };
     assert_eq!(after_unknown, after_dump, "a dump perturbs the env exactly as any unknown call");
     assert_eq!(after_unknown, "dumped type: unknown");
+}
+
+// ============================================================================
+// ADR-0053 D4 — `var_dump` default-on. The six resolution legs of §5.
+// ============================================================================
+
+#[test]
+fn leg_a_fully_qualified_global_var_dump_dumps() {
+    let ds = var_dumps("<?php $x = 5; \\var_dump($x);\n");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].message, "dumped type: int");
+}
+
+#[test]
+fn leg_b_unqualified_root_namespace_dumps() {
+    let ds = var_dumps("<?php $x = 'GET'; var_dump($x);\n");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].message, "dumped type: 'GET'");
+}
+
+#[test]
+fn leg_c_namespaced_falls_back_to_global_when_provably_undefined() {
+    // A clean universe (dam clear) with no same-namespace homonym: the runtime falls
+    // back to the global var_dump, so the dump fires.
+    let src = "<?php\nnamespace App;\nfunction g(int $v) { var_dump($v); }\n";
+    let ds = var_dumps(src);
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].message, "dumped type: int");
+}
+
+#[test]
+fn leg_c_namespaced_homonym_is_silent() {
+    // A same-namespace `App\var_dump` shadows the global — the call resolves to it,
+    // never the global, so NO dump (silence is the free safe side).
+    let src = "<?php\nnamespace App;\nfunction var_dump($x) {}\n\
+               function g(int $v) { var_dump($v); }\n";
+    assert!(var_dumps(src).is_empty(), "a namespaced homonym stands the dump down");
+}
+
+#[test]
+fn leg_c_dam_leaves_existence_unknown_and_is_silent() {
+    // A dam site (eval) means dynamic code could mint `App\var_dump` at runtime, so
+    // its existence is Unknown — the call might not fall back to global. No dump.
+    let src = "<?php\nnamespace App;\nfunction g(int $v) { eval('return 1;'); var_dump($v); }\n";
+    assert!(var_dumps(src).is_empty(), "dam-Unknown existence stands the dump down");
+}
+
+#[test]
+fn leg_d_qualified_var_dump_resolves_elsewhere() {
+    assert!(var_dumps("<?php $x = 5; \\App\\var_dump($x);\n").is_empty());
+    assert!(var_dumps("<?php\nnamespace N;\n$x = 5;\nApp\\var_dump($x);\n").is_empty());
+}
+
+#[test]
+fn leg_d_use_function_import_of_a_namespaced_var_dump_is_silent() {
+    // `use function App\var_dump;` resolves the name to `App\var_dump`, never global.
+    let src = "<?php\nuse function App\\var_dump;\n$x = 5;\nvar_dump($x);\n";
+    assert!(var_dumps(src).is_empty());
+}
+
+#[test]
+fn leg_d_use_function_import_of_the_global_still_dumps() {
+    // `use function var_dump;` explicitly imports the global — still the trigger.
+    let src = "<?php\nnamespace App;\nuse function var_dump;\n$x = 5;\nvar_dump($x);\n";
+    let ds = var_dumps(src);
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].message, "dumped type: int");
+}
+
+#[test]
+fn leg_e_a_method_named_var_dump_is_never_a_dump() {
+    let src = "<?php\nclass C { function m() { $this->var_dump(5); } }\n";
+    assert!(var_dumps(src).is_empty(), "a method var_dump is a different symbol space");
+}
+
+#[test]
+fn leg_f_first_class_callable_and_string_callable_are_silent() {
+    // First-class callable: no argument expression to dump.
+    assert!(var_dumps("<?php $f = var_dump(...);\n").is_empty());
+    // String callable: the call is to array_map, not var_dump.
+    assert!(var_dumps("<?php $a = [1]; array_map('var_dump', $a);\n").is_empty());
+}
+
+#[test]
+fn var_dump_multi_argument_dumps_one_report_per_argument() {
+    let src = "<?php $a = 5; $b = 'x'; var_dump($a, $b);\n";
+    let ds = var_dumps(src);
+    assert_eq!(ds.len(), 2, "one report per argument: {ds:?}");
+    assert_eq!(ds[0].message, "dumped type: int");
+    assert_eq!(ds[1].message, "dumped type: 'x'");
+    assert!(ds[0].column < ds[1].column, "argument order → column order");
+}
+
+#[test]
+fn zero_argument_var_dump_dumps_nothing() {
+    // Arity is S5's business, not a dump (§2): a bare `var_dump()` emits nothing.
+    assert!(var_dumps("<?php var_dump();\n").is_empty());
+}
+
+#[test]
+fn var_dump_shares_the_type_rendering() {
+    // Same fact source and rendering as the explicit `debug.type` (§2): an object
+    // holder renders its exact class; an unknown is honest.
+    let obj = var_dumps("<?php\nclass Foo {}\n$x = new Foo();\nvar_dump($x);\n");
+    assert_eq!(obj[0].message, "dumped type: Foo");
+    let unknown = var_dumps("<?php var_dump($undefined);\n");
+    assert_eq!(unknown[0].message, "dumped type: unknown");
 }

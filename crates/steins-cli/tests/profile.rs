@@ -233,3 +233,68 @@ fn out_of_surface_baseline_entries_are_dormant_not_stale() {
     );
     assert_eq!(r.code, 0, "proof finding is baselined; exit 0");
 }
+
+// -------------------------------------------------- ADR-0053 D4: var_dump lane ---
+
+/// A fixture whose ONLY finding is a default-on `var_dump` dump.
+const VAR_DUMP_ONLY: &str = "<?php\n$x = 5;\nvar_dump($x);\n";
+
+#[test]
+fn var_dump_dumps_by_default_and_is_exit_neutral() {
+    // ADR-0053 §3/§4: `var_dump` reports on a bare `check` (default-ON, every
+    // profile), at warn level — so a run whose only findings are var_dump dumps
+    // exits 0 (exit-neutral forever). The dump is warn, never a lint red.
+    let dir = workdir("vardump");
+    write(&dir, "a.php", VAR_DUMP_ONLY);
+    let r = run_in(&dir, &["check", "--no-php", "a.php"]);
+    assert!(r.stdout.contains("warning[debug.var-dump]"), "var_dump dumps by default:\n{}", r.stdout);
+    assert!(r.stdout.contains("dumped type: int"), "renders the fact:\n{}", r.stdout);
+    assert_eq!(r.code, 0, "a var_dump-only run is exit-neutral; stdout:\n{}", r.stdout);
+}
+
+#[test]
+fn var_dump_json_carries_debug_layer_and_warn_level() {
+    let dir = workdir("vardump-json");
+    write(&dir, "a.php", VAR_DUMP_ONLY);
+    let r = run_in(&dir, &["check", "--no-php", "--format", "json", "a.php"]);
+    assert!(r.stdout.contains("\"id\": \"debug.var-dump\""), "{}", r.stdout);
+    assert!(r.stdout.contains("\"layer\": \"debug\""), "{}", r.stdout);
+    assert!(r.stdout.contains("\"level\": \"warn\""), "{}", r.stdout);
+    assert_eq!(r.code, 0);
+}
+
+#[test]
+fn var_dump_is_profile_disableable() {
+    // ADR-0053 §4: a named profile `disable = ["debug.var-dump"]` turns the incidental
+    // dump off — the relief valve for a team drowning in legacy sites.
+    let dir = workdir("vardump-off");
+    write(&dir, "a.php", VAR_DUMP_ONLY);
+    write(
+        &dir,
+        "steins.toml",
+        "[profile.quiet]\nextends = \"default\"\ndisable = [\"debug.var-dump\"]\n",
+    );
+    let r = run_in(&dir, &["check", "--no-php", "--profile", "quiet", "a.php"]);
+    assert!(!r.stdout.contains("debug.var-dump"), "disabled var_dump must not display:\n{}", r.stdout);
+    assert_eq!(r.code, 0);
+}
+
+#[test]
+fn an_inline_ignore_never_suppresses_a_dump() {
+    // ADR-0053 §4: the debug lane is exempt from all three suppression channels. An
+    // `@steins-ignore debug.var-dump` does NOT mute the dump (it still displays) and,
+    // matching nothing suppressible, earns `suppress.unmatched` — the anti-rot channel
+    // doing its normal job.
+    let dir = workdir("vardump-ignore");
+    write(&dir, "a.php", "<?php\n$x = 5;\nvar_dump($x); // @steins-ignore debug.var-dump\n");
+    let r = run_in(&dir, &["check", "--no-php", "a.php"]);
+    assert!(r.stdout.contains("debug.var-dump"), "the dump is NOT suppressed:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("suppress.unmatched"),
+        "an ignore naming a dump earns suppress.unmatched:\n{}",
+        r.stdout
+    );
+    // suppress.unmatched is mechanics (fail-level), so this run exits 1 — on the
+    // meta-diagnostic, not the dump.
+    assert_eq!(r.code, 1, "the unmatched-ignore mechanics finding fails; stdout:\n{}", r.stdout);
+}
