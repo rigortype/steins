@@ -841,7 +841,11 @@ pub enum ArgValue {
     /// class** in the propagation environment (the object's runtime class is
     /// fixed at construction). Not a scalar literal — it never flows into a
     /// scalar type check.
-    New(NameRef, Vec<ArgValue>),
+    /// The third field is the constructor's **named** arguments (`new Foo(n: 1)`),
+    /// so a promoted-property seed can bind them by name exactly as it binds the
+    /// positional `args` (Gap A value-binding side); empty for a positional-only
+    /// construction.
+    New(NameRef, Vec<ArgValue>, Vec<NamedArg>),
     /// An array literal `[...]` / `array(...)` whose keys are all literal-or-absent
     /// and whose element values recursively lower (ADR-0001 array values in the
     /// trace IR). Each entry pairs a lowered [`ArrayKey`] with its value. A spread
@@ -1024,9 +1028,10 @@ impl std::hash::Hash for ArgValue {
                 name.hash(state);
                 args.hash(state);
             }
-            ArgValue::New(name, args) => {
+            ArgValue::New(name, args, named) => {
                 name.hash(state);
                 args.hash(state);
+                named.hash(state);
             }
             ArgValue::Array(items) => items.hash(state),
             ArgValue::Ternary { cond, then_val, else_val } => {
@@ -1090,7 +1095,7 @@ impl ArgValue {
             ArgValue::Null => "null".to_owned(),
             ArgValue::Var(v) => format!("${v}"),
             ArgValue::Call(name, _) => format!("{name}()"),
-            ArgValue::New(name, _) => format!("new {}()", name.simple()),
+            ArgValue::New(name, _, _) => format!("new {}()", name.simple()),
             ArgValue::Array(items) => render_array(items),
             ArgValue::Ternary { then_val, else_val, .. } => {
                 format!("(… ? {} : {})", then_val.render(), else_val.render())
@@ -1150,9 +1155,10 @@ pub struct Arg {
 }
 
 /// A **named argument** (`name: <expr>`) at a call site (ADR-0049 §6 arity). The
-/// value is not retained — the arity check needs only the parameter *name* it
-/// binds (matched case-sensitively against the target's parameter names, as PHP
-/// does) — but the span is kept for diagnostics. A named argument makes the call
+/// arity check needs only the parameter *name* it binds (matched case-sensitively
+/// against the target's parameter names, as PHP does); the phpdoc declared-contract
+/// lane also binds the argument's **value** to that parameter, so the lowered value
+/// is retained alongside the span. A named argument makes the call
 /// non-[`CallExpr::positional_only`]; the positional args that accompany it stay
 /// in [`CallExpr::args`], so the two lists together describe the full binding.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1162,6 +1168,10 @@ pub struct NamedArg {
     /// binding (`f(A: 1)` on `function f($a)` is a fatal `Error`), so this is
     /// compared case-sensitively.
     pub name: String,
+    /// The lowered argument value bound to the parameter (`2` in `f(b: 2)`), so the
+    /// declared-contract lane can judge it against the target's `@param` envelope
+    /// exactly as it judges a positional argument.
+    pub value: ArgValue,
     pub span: Span,
 }
 
@@ -3610,8 +3620,11 @@ fn lower_argument_list(list: &mago_syntax::cst::ArgumentList<'_>) -> LoweredArgs
             Argument::Named(n) => {
                 positional_only = false;
                 seen_non_positional = true;
-                named_args
-                    .push(NamedArg { name: bytes_to_string(n.name.value), span: to_span(n.span()) });
+                named_args.push(NamedArg {
+                    name: bytes_to_string(n.name.value),
+                    value: lower_arg_value(n.value),
+                    span: to_span(n.span()),
+                });
             }
             // A spread `...$x` positional argument: unpacking, count unproven.
             Argument::Positional(_) => {
@@ -3866,27 +3879,18 @@ fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
             _ => ArgValue::Other,
         },
         // `new Foo(...)` — a construction rvalue carrying its class (for exact-
-        // class env tracking). Args are lowered best-effort; only the class name
-        // is load-bearing.
+        // class env tracking) plus its positional and named arguments (both feed the
+        // promoted-property seed; only the class name is load-bearing for the class
+        // fact). A spread positional is dropped, as before.
         Expression::Instantiation(inst) => match instantiation_class(inst) {
-            Some(class) => {
-                let args = inst
-                    .argument_list
-                    .as_ref()
-                    .map(|list| {
-                        list.arguments
-                            .iter()
-                            .filter_map(|a| match a {
-                                Argument::Positional(p) if p.ellipsis.is_none() => {
-                                    Some(lower_arg_value(p.value))
-                                }
-                                _ => None,
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                ArgValue::New(class, args)
-            }
+            Some(class) => match inst.argument_list.as_ref() {
+                Some(list) => {
+                    let LoweredArgs { args, named_args, .. } = lower_argument_list(list);
+                    let args = args.into_iter().map(|a| a.value).collect();
+                    ArgValue::New(class, args, named_args)
+                }
+                None => ArgValue::New(class, Vec::new(), Vec::new()),
+            },
             None => ArgValue::Other,
         },
         // Array literals `[...]` and legacy `array(...)`. Both share the same

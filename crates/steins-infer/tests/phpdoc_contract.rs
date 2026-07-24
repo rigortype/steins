@@ -334,3 +334,85 @@ fn property_assert_target_does_not_exempt() {
         f(\"5\");";
     assert_eq!(param_count(src), 1, "property assert target must NOT exempt the param");
 }
+
+// ==========================================================================
+// 8. Named arguments bind in the contract lane (Gap A).
+//
+// A named argument `f(n: <expr>)` binds to its parameter by name (case-sensitive,
+// as PHP does) and is judged against that parameter's `@param` envelope exactly as
+// a positional argument is. Before this landed the whole named/mixed call was
+// skipped by the positional-only guards, so every one of these fired NOTHING.
+// ==========================================================================
+
+#[test]
+fn named_arg_wrong_literal_fires_on_plain_function() {
+    let f = "<?php /** @param positive-int $n */ function f($n): void {}\n";
+    assert_eq!(param_count(&format!("{f}f(n: 0);")), 1, "named 0 violates positive-int");
+    assert_eq!(param_count(&format!("{f}f(n: -5);")), 1, "named -5 violates positive-int");
+    assert_eq!(param_count(&format!("{f}f(n: 5);")), 0, "named 5 satisfies positive-int");
+}
+
+#[test]
+fn named_arg_wrong_literal_fires_on_constructor() {
+    // The headline reproduction: `new Foo(n: 0)` used to fire nothing.
+    let c = "<?php class Foo { /** @param positive-int $n */ \
+        public function __construct(public int $n) {} }\n";
+    assert_eq!(param_count(&format!("{c}new Foo(n: 0);")), 1, "named 0 violates positive-int");
+    assert_eq!(param_count(&format!("{c}new Foo(n: 5);")), 0, "named 5 satisfies positive-int");
+    // Positional still fires (regression guard for the reordering).
+    assert_eq!(param_count(&format!("{c}new Foo(-5);")), 1, "positional -5 still fires");
+}
+
+#[test]
+fn named_arg_wrong_literal_fires_on_method() {
+    let c = "<?php class C { /** @param positive-int $n */ public function m($n): void {} }\n";
+    let call = "$c = new C(); $c->m(n: 0);";
+    assert_eq!(param_count(&format!("{c}{call}")), 1, "named 0 violates positive-int on method");
+    let ok = "$c = new C(); $c->m(n: 5);";
+    assert_eq!(param_count(&format!("{c}{ok}")), 0, "named 5 satisfies positive-int on method");
+}
+
+#[test]
+fn mixed_positional_and_named() {
+    let f = "<?php /** @param int $a\n * @param positive-int $b */ function f($a, $b): void {}\n";
+    // Positional `a` ok, named `b` violates.
+    assert_eq!(param_count(&format!("{f}f(1, b: 0);")), 1, "named b=0 violates positive-int");
+    // Positional `a` violates (contract int, float given), named `b` ok.
+    assert_eq!(param_count(&format!("{f}f(1.5, b: 3);")), 1, "positional a=1.5 violates int");
+    // Both ok.
+    assert_eq!(param_count(&format!("{f}f(1, b: 3);")), 0, "both satisfy");
+    // Both violate → two findings.
+    assert_eq!(param_count(&format!("{f}f(1.5, b: 0);")), 2, "both violate");
+}
+
+#[test]
+fn named_only_call_zero_positional() {
+    let f = "<?php /** @param int $a\n * @param positive-int $b */ function f($a, $b): void {}\n";
+    // Named-only, out of source order — binding is by name, so `b` still checks.
+    assert_eq!(param_count(&format!("{f}f(b: 0, a: 1);")), 1, "named b=0 violates regardless of order");
+    assert_eq!(param_count(&format!("{f}f(b: 3, a: 1);")), 0, "named-only, both satisfy");
+}
+
+#[test]
+fn named_arg_to_variadic_stays_silent() {
+    // A named argument collected by a variadic parameter is a keyed element, not a
+    // scalar contract — the collector semantics keep it silent.
+    let f = "<?php /** @param positive-int ...$rest */ function f(int ...$rest): void {}\n";
+    assert_eq!(param_count(&format!("{f}f(rest: 0);")), 0, "named into variadic collector is silent");
+}
+
+#[test]
+fn named_arg_case_sensitive_binding() {
+    // PHP named-argument names are case-SENSITIVE: `N:` does not bind to `$n`, so the
+    // contract lane binds nothing (the arity lane owns the resulting Error). No FP.
+    let f = "<?php /** @param positive-int $n */ function f($n): void {}\n";
+    assert_eq!(param_count(&format!("{f}f(N: 0);")), 0, "wrong-case name binds nothing → silent");
+    assert_eq!(param_count(&format!("{f}f(n: 0);")), 1, "exact-case name binds and fires");
+}
+
+#[test]
+fn named_arg_native_nullable_accepts_null() {
+    // The nullable-default acceptance rule holds for named binding too (no FP).
+    let f = "<?php /** @param int $n */ function f($n = null): void {}\n";
+    assert_eq!(param_count(&format!("{f}f(n: null);")), 0, "null accepted via nullable default");
+}

@@ -307,7 +307,7 @@ fn lowers_new_expression_as_class_fact_rvalue() {
     let tree = SourceTree::parse(src);
     let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
     let StmtKind::Assign { value, call, .. } = &top.stmts[0].kind else { panic!("assign") };
-    assert!(matches!(value, ArgValue::New(c, _) if c.raw == "Foo"), "value is New(Foo)");
+    assert!(matches!(value, ArgValue::New(c, _, _) if c.raw == "Foo"), "value is New(Foo)");
     // The RHS also carries a constructor CallExpr for arg-checking.
     let call = call.as_ref().expect("ctor call carried");
     assert!(matches!(&call.receiver, Callee::Construct { class } if class.raw == "Foo"));

@@ -39,7 +39,7 @@ use steins_syntax::CallExpr;
 use steins_syntax::Span;
 use steins_syntax::{
     ArgValue, ArrayKey, Callee, CatchClause, ClassDecl, ClosureRef, CmpOp, CondExpr, CondOperand,
-    EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, MatchArmT, MethodDecl, NameRef,
+    EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, MatchArmT, MethodDecl, NameRef, NamedArg,
     NativeType, NormKey, Param, PropertyDecl, Receiver, RefKind, ScalarType, Scope, ScopeOwner, SourceTree,
     StaticClass, Stmt, StmtKind, ThrowKind, ThrowOrigin, TypeMember, Visibility, normalize_array,
     php_canonical_int_string,
@@ -1168,7 +1168,9 @@ fn check_units(
             if in_dead(&dead_spans, call.span.start) {
                 continue;
             }
-            let Some(site) = cx.resolve_user_fn(call) else { continue };
+            // Resolve the positional prefix of a mixed call too (Gap A) — the guard
+            // that keeps the binding descent positional-only lives on the descent path.
+            let Some(site) = cx.resolve_user_fn_any(call) else { continue };
             let decl = cx.fn_decl(site);
             let envelopes = parse_envelopes(decl.docblock.as_deref());
             for (i, arg) in call.args.iter().enumerate() {
@@ -3129,6 +3131,15 @@ impl<'a> Cx<'a> {
         if !call.positional_only {
             return None;
         }
+        self.resolve_user_fn_any(call)
+    }
+
+    /// Resolve the call's user-function target **without** the positional-only guard
+    /// (Gap A). The argument-contract lanes bind named arguments by name and check the
+    /// positional prefix of a mixed call, so they must resolve a non-positional call;
+    /// the binding descent still routes through [`Self::resolve_user_fn`], whose guard
+    /// keeps the positional-mapping descent off named/spread calls.
+    fn resolve_user_fn_any(&self, call: &CallExpr) -> Option<Site> {
         let r = call.callee_ref.as_ref()?;
         match self.resolve_function(r) {
             FnResolution::User(site) => Some(site),
@@ -5033,12 +5044,12 @@ fn apply_assign(
     match value {
         // `$x = new Foo(args)` (ADR-0036): a fresh allocation, class from resolution,
         // props populated from promoted ctor params + literal defaults.
-        ArgValue::New(class_ref, args) => {
+        ArgValue::New(class_ref, args, named) => {
             env.remove(var);
             store.unbind(var);
             if !w.scope.poisoned {
                 let class = cx.class_fqn(class_ref);
-                let id = build_new_object(w, folder, &class, args, env, store);
+                let id = build_new_object(w, folder, &class, args, named, env, store);
                 store.refs.insert(var.to_owned(), id);
                 if let Some(facts) = facts.as_deref_mut() {
                     facts.push(LineFact {
@@ -5192,6 +5203,7 @@ fn build_new_object(
     folder: &mut dyn Folder,
     class: &str,
     args: &[ArgValue],
+    named: &[NamedArg],
     env: &HashMap<String, Known>,
     store: &mut Store,
 ) -> AllocId {
@@ -5229,10 +5241,17 @@ fn build_new_object(
                 break;
             }
             let Some(pd) = promoted.get(param.name.as_str()) else { continue };
+            // The bound argument: the positional at this index, else a named argument
+            // whose name matches this parameter (case-sensitive, PHP semantics — Gap A
+            // value-binding side). A positional-and-named collision is a PHP fatal, so
+            // the two are disjoint on valid input.
+            let bound = args
+                .get(i)
+                .or_else(|| named.iter().find(|n| n.name == param.name).map(|n| &n.value));
             // The value: the resolved arg literal (carrying the arg's stratum —
             // derivation clause, heap write), else the param's native-type seed
             // (`Verified`).
-            let (fact, stratum) = match args.get(i) {
+            let (fact, stratum) = match bound {
                 Some(a) => match cx
                     .resolve_literal(a, env, w.scope.poisoned, folder)
                     .and_then(|lit| singleton_fact(&lit))
@@ -7786,7 +7805,9 @@ fn check_propagated_call(
     store: &Store,
     out: &mut Vec<Diagnostic>,
 ) {
-    let Some(site) = cx.resolve_user_fn(call) else { return };
+    // Resolve non-positional calls too (Gap A): the positional prefix and the named
+    // arguments are contract-checked here; only the binding descent stays positional.
+    let Some(site) = cx.resolve_user_fn_any(call) else { return };
     let decl = cx.fn_decl(site);
     let envelopes = parse_envelopes(decl.docblock.as_deref());
 
@@ -7897,6 +7918,28 @@ fn check_propagated_call(
                 out,
             );
         }
+    }
+
+    // Named arguments (`f(n: <expr>)`, Gap A): bind each to its parameter by name and
+    // run the same declared-contract judgment. Owned solely by this pass for function
+    // calls — the direct pass never touches named arguments — so no double-report.
+    if let Some(env_e) = &envelopes {
+        check_named_phpdoc_params(
+            cx,
+            folder,
+            env_e,
+            &decl.params,
+            call.args.len(),
+            site.file,
+            decl.span.start,
+            &decl.name,
+            &call.named_args,
+            env,
+            store,
+            poisoned,
+            in_descent,
+            out,
+        );
     }
 }
 
@@ -9795,9 +9838,6 @@ fn handle_method_call(
     descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
 ) {
-    if !call.positional_only {
-        return;
-    }
     let Some(target) =
         resolve_call_target(cx, &call.receiver, store, this_exact, enclosing_class, scope.poisoned)
     else {
@@ -9806,6 +9846,9 @@ fn handle_method_call(
 
     let callee_name = format!("{}::{}", target.declaring_class.name, target.method.name);
     let class_templates = template_names_of(target.declaring_class.docblock.as_deref());
+    // The argument-contract check runs for every argument shape — the positional
+    // prefix and the named arguments (Gap A: `new Foo(n: 0)` / `$o->m(n: 0)` were
+    // previously skipped wholesale by the `positional_only` guard below).
     check_method_args(
         cx,
         folder,
@@ -9821,6 +9864,12 @@ fn handle_method_call(
         out,
     );
 
+    // The binding descent maps positional arguments to parameters, so it stays
+    // positional-only (a named/spread call's parameter binding is not modeled here);
+    // the contract check above already covered the arguments.
+    if !call.positional_only {
+        return;
+    }
     let Some(callee_scope) =
         cx.method_scope(target.class_file, &target.declaring_class.fqn, &target.method.name)
     else {
@@ -9991,6 +10040,28 @@ fn check_method_args(
         {
             check_callable_arg(cx, env_e, param, callee_name, arg.span.start, closure, out);
         }
+    }
+
+    // Named arguments (`$o->m(n: <expr>)` / `new Foo(n: <expr>)`, Gap A): bind each
+    // to its parameter by name and run the same declared-contract judgment. This is
+    // the sole contract lane for method/constructor calls, so no double-report.
+    if let Some(env_e) = &envelopes {
+        check_named_phpdoc_params(
+            cx,
+            folder,
+            env_e,
+            &method.params,
+            call.args.len(),
+            class_file,
+            method.span.start,
+            callee_name,
+            &call.named_args,
+            env,
+            store,
+            poisoned,
+            in_descent,
+            out,
+        );
     }
 }
 
@@ -10580,7 +10651,7 @@ impl<'a> Cx<'a> {
             // `new Class(args)` — a proven object of exactly `Class`, carrying the
             // generic type-argument values that flow into it (ADR-0032 tier 3,
             // issue #10). Empty carry when non-generic / unprovable (FP-safe).
-            ArgValue::New(class_ref, args) if !poisoned => {
+            ArgValue::New(class_ref, args, _) if !poisoned => {
                 let class = self.class_fqn(class_ref);
                 let targs = self.infer_generic_args(&class, args, env, store, poisoned, folder);
                 Some(CVal::Object(class, targs))
@@ -10666,7 +10737,7 @@ impl<'a> Cx<'a> {
     /// `class_of`); an `EnumCase` already carries the resolved enum FQN.
     fn proven_object_class(&self, v: &ArgValue) -> Option<String> {
         match v {
-            ArgValue::New(r, _) => Some(self.class_fqn(r)),
+            ArgValue::New(r, _, _) => Some(self.class_fqn(r)),
             ArgValue::EnumCase(fqn, _) => Some(fqn.clone()),
             _ => None,
         }
@@ -11522,6 +11593,66 @@ fn check_phpdoc_param(
         message,
         facet: None,
     });
+}
+
+/// Bind each **named** argument (`name: <expr>`) to its target parameter by name
+/// and run the same declared-contract acceptance judgment [`check_phpdoc_param`]
+/// applies to a positional argument (Gap A). Named-argument binding is PHP-exact:
+///
+/// - **case-sensitive** name matching (`f(A: 1)` on `$a` is a fatal `Error`, not a
+///   binding — PHP does not fold case here), so an unmatched name binds nothing and
+///   is silent (the arity lane owns that `Error`);
+/// - a **variadic** collector parameter takes the named argument as a keyed element
+///   (`function f(...$rest)`, `f(x: 1)`), never a scalar contract, so it is skipped;
+/// - a **by-ref** parameter is skipped exactly as the positional lane skips it;
+/// - a name that resolves to a parameter already filled by a **positional**
+///   argument (index `< positional_count`) is the deferred overwrite `Error` — a
+///   fatal, so neither the positional nor this lane reports it (mirrors
+///   [`emit_arity`]'s overwrite guard).
+///
+/// `positional_count` is the call's positional-argument arity (`call.args.len()`);
+/// every other argument is shared verbatim with the positional-lane call.
+#[allow(clippy::too_many_arguments)]
+fn check_named_phpdoc_params(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    envelopes: &Envelopes,
+    params: &[Param],
+    positional_count: usize,
+    cfile: usize,
+    coff: u32,
+    callee: &str,
+    named_args: &[NamedArg],
+    env: &HashMap<String, Known>,
+    store: &Store,
+    poisoned: bool,
+    in_descent: bool,
+    out: &mut Vec<Diagnostic>,
+) {
+    for na in named_args {
+        let Some((idx, param)) = params.iter().enumerate().find(|(_, p)| p.name == na.name) else {
+            continue;
+        };
+        if param.variadic || param.by_ref || idx < positional_count {
+            continue;
+        }
+        check_phpdoc_param(
+            cx,
+            folder,
+            envelopes,
+            param,
+            cfile,
+            coff,
+            callee,
+            na.span.start,
+            &na.value,
+            env,
+            store,
+            poisoned,
+            in_descent,
+            out,
+        );
+    }
 }
 
 /// The kind of callable-signature incompatibility a bound closure / first-class
