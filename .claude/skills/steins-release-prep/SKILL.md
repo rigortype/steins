@@ -63,7 +63,16 @@ decision and an ADR, not a change to this skill.
   `contents:write` on the tap (the built-in `GITHUB_TOKEN` cannot reach another
   repo). **If the secret is unset the job skips cleanly** — logs a warning, exits
   0 — so the binary release still succeeds. Wire it up when you want the tap live.
+  If the secret is set but *insufficient*, the job fails fast on a preflight
+  permission check: the tap is public, so cloning it proves nothing about the
+  token. For a **fine-grained PAT** the tap must be in the token's selected
+  repositories *and* carry `Contents: read and write`; a classic PAT needs `repo`.
+  A trailing newline pasted into the secret also fails. This is what the
+  `v0.1.0-rc1` rehearsal caught.
 - No other secret is needed; the binaries and the Release use `GITHUB_TOKEN`.
+- **`CARGO_REGISTRY_TOKEN` is not used and cannot be** — nothing in this repo runs
+  `cargo publish` (see the no-crates.io section below). If it is set, it is inert;
+  removing it is one less unused credential on a public repo.
 
 ## Update the versioned files
 

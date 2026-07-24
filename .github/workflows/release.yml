@@ -221,6 +221,22 @@ jobs:
           repo="${GITHUB_REPOSITORY}"
           base="https://github.com/$repo/releases/download/$tag"
 
+          # PREFLIGHT: can this token actually push to the tap?
+          #
+          # Learned from the v0.1.0-rc1 rehearsal, where an insufficient token
+          # got all the way through clone → generate → local commit before
+          # failing on `git push` with "Invalid username or token". The tap is a
+          # PUBLIC repo, so `git clone` and `git ls-remote` succeed with no
+          # credentials at all and prove nothing — only an authenticated API
+          # call reports the token's actual push permission. Checking it up
+          # front turns a late, confusing failure into an immediate, specific
+          # one, and costs one request.
+          if ! GH_TOKEN="${TAP_TOKEN}" gh api repos/rigortype/homebrew-tap \
+                 --jq '.permissions.push' 2>/dev/null | grep -qx true; then
+            echo "::error::HOMEBREW_TAP_TOKEN cannot push to rigortype/homebrew-tap. Needs Contents: read and write on that repo — for a fine-grained PAT the tap must also be in its selected repositories. Check for an expired token or stray whitespace in the secret. The GitHub Release and its assets are already published and unaffected; fix the secret and re-run this job alone (no re-tag)."
+            exit 1
+          fi
+
           # target triple -> the template placeholder holding its sha256. Only
           # the four Homebrew-relevant targets; musl has no Homebrew platform.
           declare -A targets=(
