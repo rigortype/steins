@@ -233,15 +233,29 @@ jobs:
           sed_args=(-e "s|@VERSION@|$version|g" -e "s|@TAG@|$tag|g" -e "s|@BASE@|$base|g")
           for t in "${!targets[@]}"; do
             # upload-rust-binary-action writes the sidecar as
-            # "<archive>.<algo>" — the FULL archive name including `.tar.gz`,
-            # not the extensionless base (it runs `shasum -a 256 "$archive" >
-            # "$archive.sha256"`). Its single line is "<hash>  <archive>", so
-            # field 1 is the digest.
+            # THE SIDECAR'S OWN NAME AND THE NAME RECORDED INSIDE IT DIFFER, and
+            # the difference is easy to get backwards. In upload-rust-binary-action
+            # (`main.sh` at the pinned `v1`), `archive` is the EXTENSIONLESS base:
+            # the `$bin-$tag-$target` input with placeholders substituted (L296-298)
+            # and never reassigned. The extension is appended only when naming the
+            # asset — `assets+=("${archive}.tar.gz")` (L494) — while the checksum
+            # write redirects to the base: `shasum -a 256 "${assets[@]}" >
+            # "${archive}.${checksum}"` (L600). So the OPERAND carries `.tar.gz`
+            # and the REDIRECT TARGET does not:
+            #
+            #   asset    steins-<tag>-<target>.tar.gz
+            #   sidecar  steins-<tag>-<target>.sha256          <- download THIS
+            #   content  "<hash>  steins-<tag>-<target>.tar.gz" <- match THIS
+            #
+            # Reading it as `<asset>.sha256` yields a name that does not exist and
+            # fails the download under `set -e` on the first real release.
             archive="steins-$tag-$t.tar.gz"
-            f="$archive.sha256"
+            f="steins-$tag-$t.sha256"
             gh release download "$tag" --repo "$repo" --pattern "$f" --dir . --clobber
-            # Pick the line for THIS archive by name rather than assuming the
-            # file holds exactly one; `shasum` may prefix the name with `*`.
+            # Pick the line for THIS archive by name rather than assuming the file
+            # holds exactly one: the action hashes the whole `assets` array into a
+            # single sidecar, so enabling `tar-xz` on the `binaries` job above would
+            # make it two lines. `shasum` may prefix the name with `*`.
             sha="$(awk -v a="$archive" '$2 == a || $2 == "*" a { print $1; exit }' "$f")"
             # A formula is only as good as these digests, and the sidecar's name
             # and format come from a third-party action. Assert the shape rather
