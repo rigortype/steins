@@ -339,3 +339,203 @@ T1's summaries and is designed under ADR-0036's queue when scheduled.
 - Whether the summary-only walk (T2) should ever be admitted for
   membership-final receivers once the ADR-0052 §3 final-Member unlock
   lands — deferred with that unlock.
+
+## Amendment (2026-07-25): return-FACT summaries — the value-domain generalization, and T0
+
+The motivating example (owner, 2026-07-25, verbatim shape):
+
+```php
+function f(): int {
+    $n = foo();        // foo(): int — the #33 return arm gives Verified int
+    assert($n > 0);    // the assert ruling (I0, in flight) makes this a Verified ordering guard
+    return $n;         // body fact at return: Refined{Int, ≥1} = positive-int, Verified
+}
+```
+
+Callers of `f()` must see **`positive-int`**, not the declared `int`.
+The intra-body half is I0's; the boundary crossing is this amendment's.
+The body ADR built the crossing for heap objects only; the mechanism it
+built is more general than the case it built it for.
+
+### A1. The unification statement
+
+**A return summary is the join, over all returning exits, of the
+returned expression's fact** — value domain (Singleton / OneOf /
+Refined / General, the ADR-0052 carriers), stratum per N2's derivation
+clause (min over inputs, through the join). It is computed in the same
+descent (§3's out-channel), memoized under the same `BindingKey` in the
+same value-map upgrade, and justified by the same ADR-0048 §2 argument
+verbatim: a pure function of (callee CST, bound entry state, query
+answers) — a legitimate query answer. **The return-object summary of
+§1–§6 is the heap-bearing special case**: one `ReturnSummary` with a
+value component (always attempted) and a heap component (attempted only
+when §2's stricter all-paths-allocation conditions hold). Everything
+the body ADR decided about the heap component stands unmodified; this
+amendment adds the value component beside it.
+
+The precedent already in the tree: `resolve_const_fn`
+(steins-infer) crosses a zero-arg callee's `return <literal>` body to
+its callers today — literal returns DO cross the boundary. The value
+summary extends that from single literals to JOINED and REFINED facts
+under bound arguments; `resolve_const_fn` is its degenerate
+(empty-key, single-exit, Singleton) case and is subsumed when T2's
+empty-key walk lands.
+
+**Consumption: the summary is the value floor.** At the call site the
+precedence ladder is uniform across sources:
+
+1. **caller-side proven value** — a fully-literal foldable call's fold
+   result (the R1 "folding beats the return fact" pin generalizes);
+2. **the summary** (user functions, from descent) / **the reflected
+   envelope + curated refinement** (builtins, ADR-0056) — siblings:
+   one answer from walking the body, one from asking the runtime; a
+   call resolves to exactly one of the two lanes, so they never
+   compete;
+3. **the declared-return arms** (#33 seeding) — the floor everything
+   above widens to.
+
+From the caller's perspective the summary IS the proven value: it sits
+exactly where a folded literal sits today, above the arms, below
+nothing except a caller-side fold. No new consumption machinery — the
+call-result binding that today takes the arm facts takes the summary
+fact when one exists.
+
+### A2. Envelope discipline: the native/phpdoc split
+
+The summary must refine WITHIN the declared return envelope. When the
+walk proves a returning exit's fact the envelope cannot cover, the
+callee's own return-mismatch finding fires (landed machinery); what
+the summary does then splits on what the envelope IS:
+
+- **Native declared type, proven violation ⇒ DROP the exit's
+  contribution.** A native return declaration is runtime-enforced: the
+  violating return is a proven `TypeError` at the boundary — the value
+  never reaches the caller, so there is nothing true to summarize for
+  that exit. `type.return-mismatch` is the record; the summary is the
+  join over the remaining (conforming) exits, and if none remain there
+  is no summary — arm floor. Clamping was considered and refused: a
+  clamped fact is a value the walk never proved flows.
+- **Phpdoc-only claim, proven violation ⇒ the walk truth CROSSES.**
+  Nothing enforces a phpdoc at runtime; the body fact is what actually
+  flows, and the phpdoc is the lie — `phpdoc.return-mismatch` on the
+  callee is the record. This is §2.6 verbatim ("claims do not edit
+  proofs; the caller consumes the walk truth"), now stated for the
+  value component too. Nothing is laundered: the crossing fact is
+  true; the inconsistent artifact is the docblock, and it is reported
+  where it lives.
+
+The split is ADR-0037's trust order and ADR-0058's
+enforcement-outranks-annotation lens applied at the boundary; it also
+keeps the object §2.6 posture and this clause from contradicting each
+other.
+
+### A3. Honesty: the factless exit contributes the arm floor
+
+The join is over ALL returning exits — no exit is skipped. A returning
+exit whose expression carries no fact contributes **the declared-return
+arm set** (for a simple declaration, `General{base}`; for a union, the
+arms). This is honest because the value domain HAS a sound top within
+the envelope: `General{int}` truthfully describes any int-returning
+exit, so a join of `Refined{Int, ≥1}` with `General{Int}` is
+`General{Int}` — degraded, never wrong. The no-partial-lie rule is
+satisfied by degradation, not by refusal.
+
+**The asymmetry with §2.5 is justified, not accidental.** The object
+summary had no sound middle: between "this exact object with these
+props" and nothing there is no heap shape that truthfully covers a
+`null`-returning path — hence any non-allocation path kills the heap
+component (§2.5 stands). Scalar facts join safely precisely because
+General-of-the-envelope is a lattice top the heap lacks. One
+consequence stated plainly: a value summary that degrades all the way
+to the arm floor carries no information beyond the arms; emitting it
+and emitting no summary are equivalent, and the memo may store either
+(an implementation freedom, not a semantic choice — a fixture pins the
+observable equivalence: no rendering difference at the call site).
+
+### A4. Strata across the boundary
+
+Each exit's fact carries the stratum N2's derivation clause assigns it
+in the body; the join takes the min; the summary crosses with that
+stratum intact (the rebind-is-identity argument of §1, unchanged). The
+owner's example is Verified end-to-end: Verified arm from `foo()`, the
+I0 assert ruling makes the guard Verified, `Refined{Int, ≥1}` at the
+return is Verified, single exit ⇒ the summary is Verified
+`positive-int`. A body refinement derived from a `@phpstan-assert` tag
+yields an Asserted component ⇒ min at the join ⇒ an Asserted summary;
+caller-side proof-layer usage gates on the stratum as N2 always
+requires. No laundering step exists anywhere on the path.
+
+### A5. Recursion and budget: degrade, don't die
+
+Depth exhaustion (`> MAX_BINDING_DEPTH` = 8) means no descent ⇒ no
+summary for that call ⇒ the caller keeps the arm floor — unchanged.
+Recursion (BindingKey on the descent stack) differs from the object
+case in outcome because A3 gives it somewhere sound to land: the
+suppressed inner call's result carries the inner callee's arm floor,
+so the enclosing exit contributes the floor and the OUTER summary
+degrades instead of dying. Terminating (the stack suppression is
+untouched) and deterministic (arm-floor-for-on-stack-calls is a rule,
+so the memoized value stays a pure function of the key). The heap
+component keeps §3's stricter no-summary rule.
+
+### A6. Interaction with R1: siblings under one ladder
+
+A builtin's reflected envelope plus curated refinement (ADR-0056) and
+a user function's descent summary are the same epistemic object
+arriving by different oracles — one asks the runtime, one walks the
+body. The A1 ladder is the single stated precedence for both; neither
+lane ever intersects with or edits the other (a call is resolved to
+one lane), and both widen to the declared/reflected arm floor on any
+refusal. Fixture: a user function shadowing nothing, a builtin, and a
+foldable literal call in one file render per the ladder.
+
+### A7. Sequencing: T0, the warm-up slice
+
+The value summary is strictly simpler than the object case — no heap,
+no escape bits, no readonly transfer, no exactness discipline, and a
+join that cannot die (A3). Committed order: **T0 lands BEFORE T1** and
+builds the shared infrastructure T1 then rides:
+
+- **T0 — value-fact return summaries**: the summary out-channel on
+  `analyze_scope`, the memo-to-value-map upgrade
+  (`BindingKey → Option<ReturnSummary>` with only the value component
+  populated), the exit join with A2's envelope split and A3's floor
+  contribution, call-site consumption per the A1 ladder. Acceptance
+  fixtures: (i) the owner's `f()` verbatim — `dumpType(f())` at the
+  call site renders `positive-int` with no stratum marker (Verified);
+  (ii) a mixed-strata body (one Verified exit, one tag-derived
+  Asserted exit) — the call site sees the joined fact `(asserted)`;
+  (iii) a factless-exit join — degrades to the declared arm,
+  observably identical to no-summary; (iv) a native return-mismatch
+  body — finding fires in the callee, caller sees the arm floor;
+  (v) a phpdoc-mismatch body — `phpdoc.return-mismatch` fires, the
+  walk truth crosses. Full verification protocol; fp-gate foreground
+  (the summary premises caller-side proof findings, so zero movement
+  is the bar).
+- **T1–T3 unchanged** in content; T1 adds the heap component into the
+  `ReturnSummary` T0 defined and reuses its memo and out-channel.
+  Dependency note updated: T0 needs the arm-seeding slice (#33, the
+  floor) and benefits from I0 for the flagship fixture's stratum;
+  neither T2 nor T3 changes.
+
+### Amendment refusals (one line each)
+
+- **Clamping an out-of-native-envelope fact to the envelope** — a
+  value the walk never proved (A2).
+- **A summary lane for phpdoc claims themselves** — claims already
+  cross as Asserted arms via #33; the summary carries proofs only.
+- **Intersecting summary and builtin lanes** — a call resolves to one
+  oracle; no call has both (A6).
+- **Killing the value summary on factless or recursive exits** — the
+  value domain has a sound top; degradation is the honest join (A3,
+  A5).
+
+### Amendment open questions
+
+- Whether the value summary should also cross `Member{yes}` guard
+  bounds on object-typed returns when no heap summary exists (the body
+  ADR's first open question, now with a natural carrier — still no
+  consumer demanding it; unchanged: revisit with a case).
+- Rendering: whether the call site's dump spells the summary's
+  provenance ("proven by f() body") — folds into the body ADR's T1
+  provenance question, decided in T0/T1 together.
