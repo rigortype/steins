@@ -22,6 +22,33 @@ pub use admit::{admits_fact, admits_val};
 use steins_domain::{Base, IntRange, StrPreds};
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, ShapeKey, StringLit, Type, TypeKind};
 
+/// A lowered `callable(P1, P2=): R` signature (issue #11): the parameter
+/// contracts (with optionality/variadic/by-ref markers as the phpdoc grammar
+/// provides) and the return contract. A template-bearing signature
+/// (`callable(T): T`) is never lowered to this — it drops to a bare
+/// `CallableTy(None)` (ADR-0032/0051: no call-site template solver), so every
+/// arm here is a ground contract type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallableSig {
+    /// The declared parameters, in source order.
+    pub params: Vec<CallableParamTy>,
+    /// The declared return contract.
+    pub ret: ContractTy,
+}
+
+/// One parameter of a lowered [`CallableSig`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallableParamTy {
+    /// The parameter's contract type.
+    pub ty: ContractTy,
+    /// `$x =` — the parameter is optional (a caller may omit it).
+    pub optional: bool,
+    /// `...$x` — variadic.
+    pub variadic: bool,
+    /// `&$x` — by-reference (the variance check stays silent on these).
+    pub by_ref: bool,
+}
+
 /// A field of a lowered shape.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CField {
@@ -124,7 +151,17 @@ pub enum ContractTy {
     /// `callable` and callable signatures: strings and arrays are `Maybe`
     /// (a string may name a function, a pair-array a method), other
     /// scalars `No`.
-    CallableTy,
+    ///
+    /// `None` is a bare `callable`/`Closure` (no parenthesized signature) —
+    /// it accepts any callable. `Some(sig)` carries a declared
+    /// `callable(P1, P2=): R` signature (issue #11): the parameter contracts
+    /// and the return contract, against which a bound closure/first-class
+    /// callable is judged arm-wise (contravariant params, covariant return).
+    /// Value/fact acceptance ([`admits_val`]/[`admits_fact`]) ignores the
+    /// signature — a runtime string/array value cannot be judged against a
+    /// call shape — so the signature is consumed only by the closure-argument
+    /// variance check in `steins-infer`.
+    CallableTy(Option<Box<CallableSig>>),
     /// Union.
     Union(Vec<ContractTy>),
     /// Intersection.
@@ -156,7 +193,7 @@ pub fn lower(ty: &Type) -> ContractTy {
             non_empty: false,
         },
         TypeKind::Generic { base, args } => lower_generic(base, args),
-        TypeKind::Callable(_) => ContractTy::CallableTy,
+        TypeKind::Callable(c) => lower_callable(c),
         TypeKind::ArrayShape(shape) => lower_shape(shape),
         TypeKind::ObjectShape(_) => ContractTy::ObjectAny,
         TypeKind::OffsetAccess { .. } | TypeKind::Conditional(_) | TypeKind::Unsupported(_) => {
@@ -229,7 +266,7 @@ fn lower_identifier(name: &str) -> ContractTy {
             key: Box::new(ContractTy::Mixed),
             val: Box::new(ContractTy::Mixed),
         },
-        "callable" | "pure-callable" | "callable-object" | "closure" => ContractTy::CallableTy,
+        "callable" | "pure-callable" | "callable-object" | "closure" => ContractTy::CallableTy(None),
         "object" => ContractTy::ObjectAny,
         "self" | "static" | "parent" | "key-of" | "value-of" => ContractTy::Opaque,
         _ => ContractTy::Class(norm),
@@ -266,6 +303,32 @@ fn lower_generic(base: &str, args: &[steins_phpdoc::ast::GenericArg]) -> Contrac
         ("class-string", _) => ContractTy::StrOpaque,
         _ => ContractTy::Class(norm),
     }
+}
+
+/// Lower a `callable(P1, P2=): R` / `\Closure(P): R` signature (issue #11).
+///
+/// A **template-bearing** signature (`callable(T): T`, `\Closure<T>(T): R`) is
+/// unrepresentable: its type variables would lower to bare `Class` arms and
+/// yield false judgments, and Steins runs no call-site template solver
+/// (ADR-0032/0051). Such a signature drops to a bare `CallableTy(None)` — the
+/// same silent floor as an unsignatured `callable` — so a closure bound to it is
+/// never judged. Every lowered [`CallableSig`] therefore carries only ground
+/// contract arms.
+fn lower_callable(c: &steins_phpdoc::ast::CallableType) -> ContractTy {
+    if !c.templates.is_empty() {
+        return ContractTy::CallableTy(None);
+    }
+    let params = c
+        .params
+        .iter()
+        .map(|p| CallableParamTy {
+            ty: lower(&p.ty),
+            optional: p.is_optional,
+            variadic: p.is_variadic,
+            by_ref: p.is_reference,
+        })
+        .collect();
+    ContractTy::CallableTy(Some(Box::new(CallableSig { params, ret: lower(&c.return_type) })))
 }
 
 fn lower_int_range(args: &[steins_phpdoc::ast::GenericArg]) -> ContractTy {

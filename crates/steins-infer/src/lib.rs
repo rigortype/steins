@@ -38,7 +38,7 @@ use steins_sidecar::{FoldArg, FoldResult, FoldValue, Sidecar};
 use steins_syntax::CallExpr;
 use steins_syntax::Span;
 use steins_syntax::{
-    ArgValue, ArrayKey, Callee, CatchClause, ClassDecl, CmpOp, CondExpr, CondOperand,
+    ArgValue, ArrayKey, Callee, CatchClause, ClassDecl, ClosureRef, CmpOp, CondExpr, CondOperand,
     EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, MatchArmT, MethodDecl, NameRef,
     NativeType, NormKey, Param, PropertyDecl, Receiver, RefKind, ScalarType, Scope, ScopeOwner, SourceTree,
     StaticClass, Stmt, StmtKind, ThrowKind, ThrowOrigin, TypeMember, Visibility, normalize_array,
@@ -984,6 +984,16 @@ fn check_units(
                         false, // in_descent — the direct pass is never a descent
                         &mut out,
                     );
+                }
+                // Callable-signature variance (issue #11): a closure / first-class
+                // callable argument against a signature-bearing `callable(...)`
+                // @param. Env-free (a closure's declared signature is a static CST
+                // fact), so the direct pass owns it — no overlap with the
+                // propagation pass, which owns `$var`/`call()` arg kinds.
+                if let ArgValue::Closure(closure) = &arg.value
+                    && let Some(env) = &envelopes
+                {
+                    check_callable_arg(&cx, env, param, &decl.name, arg.span.start, closure, &mut out);
                 }
             }
         }
@@ -8443,6 +8453,15 @@ fn check_method_args(
                 out,
             );
         }
+        // Callable-signature variance (issue #11) for a closure / first-class
+        // callable argument to a method against a signature-bearing `callable(...)`
+        // @param. The closure's declared signature is a static CST fact, so this is
+        // safe to run at the resolved call site.
+        if let ArgValue::Closure(closure) = &arg.value
+            && let Some(env_e) = &envelopes
+        {
+            check_callable_arg(cx, env_e, param, callee_name, arg.span.start, closure, out);
+        }
     }
 }
 
@@ -9956,6 +9975,217 @@ fn check_phpdoc_param(
     let message = format!(
         "argument {rendered} to {callee}() violates declared @param {ty} ${param_name} — declared contract violation",
     );
+    out.push(Diagnostic {
+        id: PARAM_MISMATCH_ID,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message,
+        facet: None,
+    });
+}
+
+/// The kind of callable-signature incompatibility a bound closure / first-class
+/// callable exhibits against a declared `callable(...)` contract (issue #11).
+#[derive(Debug, Clone, Copy)]
+enum CallableViolation {
+    /// The closure's declared parameter at this position is narrower than the
+    /// contract supplies (parameter contravariance broken).
+    Param(usize),
+    /// The closure's declared return is provably incompatible with the contract's
+    /// (return covariance broken).
+    Return,
+    /// The closure requires more parameters than the contract supplies, so the
+    /// callee's invocation would `ArgumentCountError` (arity).
+    Arity,
+}
+
+/// Lower a native scalar/union type to a [`ContractTy`] for the callable-signature
+/// variance check (issue #11). Scalars and bool-literals map to their contract
+/// arm; an object member maps to a class arm (which [`normalize::subsumes`] judges
+/// only reflexively, so cross-class comparisons stay `Maybe` — silent); a nullable
+/// hint adds a `null` arm. A [`NativeType`] is always representable — the syntax
+/// layer already dropped `mixed`/`iterable`/`callable`/intersection hints to
+/// `None`, so nothing here needs an `Opaque` escape.
+fn native_to_contract(nt: &NativeType) -> ContractTy {
+    let mut arms: Vec<ContractTy> = nt
+        .members
+        .iter()
+        .map(|m| match m {
+            TypeMember::Scalar(ScalarType::Int) => ContractTy::Base(steins_domain::Base::Int),
+            TypeMember::Scalar(ScalarType::Float) => ContractTy::Base(steins_domain::Base::Float),
+            TypeMember::Scalar(ScalarType::String) => ContractTy::Base(steins_domain::Base::String),
+            TypeMember::Scalar(ScalarType::Bool) => ContractTy::Base(steins_domain::Base::Bool),
+            TypeMember::BoolLiteral(b) => ContractTy::LitBool(*b),
+            TypeMember::Instance { fqn, .. } => ContractTy::Class(fqn.clone()),
+        })
+        .collect();
+    if nt.nullable {
+        arms.push(ContractTy::Null);
+    }
+    match arms.len() {
+        1 => arms.pop().expect("len checked"),
+        _ => ContractTy::Union(arms),
+    }
+}
+
+/// Whether a contract arm is decidable by the **scalar** overlap relation — the
+/// only positions the callable-variance check will fire a definite `No` on
+/// (issue #11). A bare identifier in a callable signature (`callable(T): T`) is
+/// syntactically indistinguishable from a class name, and is far more often an
+/// unbound `@template` than a real class (ADR-0032/0051 — no call-site template
+/// solver), so a `Class`/`ObjectAny`/`Opaque`/array/callable arm is treated as
+/// undecidable here and stays silent (zero-FP). Only scalar/literal/null arms —
+/// where `subsumes` gives a sound `No` and no template can hide — are judged.
+/// `StrOpaque` (`class-string` et al.) and `Mixed` never yield a decidable `No`
+/// anyway, so excluding them costs nothing.
+fn scalar_decidable(ty: &ContractTy) -> bool {
+    match ty {
+        ContractTy::Base(_)
+        | ContractTy::IntIn(_)
+        | ContractTy::StrWith(_)
+        | ContractTy::LitInt(_)
+        | ContractTy::LitFloat(_)
+        | ContractTy::LitStr(_)
+        | ContractTy::LitBool(_)
+        | ContractTy::Null
+        | ContractTy::Never => true,
+        ContractTy::Union(m) | ContractTy::Inter(m) => m.iter().all(scalar_decidable),
+        _ => false,
+    }
+}
+
+/// Judge a bound closure's declared native signature against a `callable(...)`
+/// contract (issue #11), returning the first definite incompatibility or `None`
+/// when compatible or undecidable (zero-FP silence).
+///
+/// This is the **declared-contract** relation (ADR-0030 divergence #1 — envelope
+/// checking, no runtime coercion; PHP does *not* enforce a `callable(int): string`
+/// docblock at runtime, verified with `php -r`, so the claim is contract-layer),
+/// and it reuses the single overlap relation [`normalize::subsumes`] (the
+/// `isSuperTypeOf` shape) as its comparator rather than a bespoke one:
+///
+/// - **Parameters are contravariant.** At each contract position the closure's
+///   declared parameter must accept everything the contract supplies:
+///   `subsumes(closure_param, contract_param)`. A closure accepting WIDER than the
+///   contract is fine; one requiring NARROWER is the violation. Only a definite
+///   `No` (a scalar mismatch such as `string` vs `int`) reports; an undeclared
+///   parameter, a template, or a cross-class comparison is `Maybe` → silent. A
+///   by-reference position (either side) is skipped — by-ref callable semantics
+///   are unverified, so Steins stays silent (zero-FP).
+/// - **Return is covariant.** The closure's declared return must be subsumed by
+///   the contract's: `subsumes(contract_ret, closure_ret)`. A closure returning
+///   narrower/equal is fine; a provably-disjoint return (e.g. `int` vs `string`)
+///   is the violation. Only a definite `No` reports; an undeclared return is silent.
+/// - **Arity.** A closure REQUIRING more parameters (no default, non-variadic)
+///   than the contract supplies would `ArgumentCountError` when the callee invokes
+///   it with the contract's arity — verified against PHP 8.5 (`Too few arguments`).
+///   PHP ignores surplus arguments, so a closure with FEWER params, or extra
+///   OPTIONAL/variadic params, is fine. Skipped when the contract is itself
+///   variadic (the callee may pass any number of arguments).
+fn callable_sig_violation(
+    sig: &steins_contract::CallableSig,
+    closure_params: &[Param],
+    closure_ret: Option<&NativeType>,
+) -> Option<CallableViolation> {
+    // Parameter contravariance, positional.
+    for (i, cparam) in sig.params.iter().enumerate() {
+        if cparam.by_ref || cparam.variadic {
+            continue;
+        }
+        let Some(closure_param) = closure_params.get(i) else { continue };
+        if closure_param.by_ref {
+            continue;
+        }
+        let Some(pty) = closure_param.ty.as_ref() else { continue };
+        let closure_ty = native_to_contract(pty);
+        if scalar_decidable(&closure_ty)
+            && scalar_decidable(&cparam.ty)
+            && normalize::subsumes(&closure_ty, &cparam.ty) == Certainty::No
+        {
+            return Some(CallableViolation::Param(i));
+        }
+    }
+    // Return covariance.
+    if let Some(ret) = closure_ret {
+        let closure_ret_ty = native_to_contract(ret);
+        if scalar_decidable(&sig.ret)
+            && scalar_decidable(&closure_ret_ty)
+            && normalize::subsumes(&sig.ret, &closure_ret_ty) == Certainty::No
+        {
+            return Some(CallableViolation::Return);
+        }
+    }
+    // Arity: the closure demands more parameters than the contract will supply.
+    let contract_variadic = sig.params.iter().any(|p| p.variadic);
+    if !contract_variadic {
+        let required =
+            closure_params.iter().filter(|p| !p.has_default && !p.variadic).count();
+        if required > sig.params.len() {
+            return Some(CallableViolation::Arity);
+        }
+    }
+    None
+}
+
+/// Check a closure / first-class-callable argument at a call site against a
+/// declared `callable(...)` `@param` contract (issue #11), emitting at most one
+/// `phpdoc.param-mismatch`. Silent unless the contract carries a signature AND the
+/// bound callable's declared *native* signature (Verified — ADR-0052 N2) provably
+/// violates it. Reuses the `phpdoc.param-mismatch` lane: a callable argument that
+/// breaks the declared callable signature *is* a violation of the callee's
+/// `@param $callback` (id-choice recorded in the commit body).
+///
+/// The closure's declared signature is a static CST fact — it does not depend on
+/// the call-site environment (captures do not change the parameter/return hints),
+/// so this rides the env-free direct pass (no overlap with the propagation pass).
+fn check_callable_arg(
+    cx: &Cx,
+    envelopes: &Envelopes,
+    param: &Param,
+    callee: &str,
+    arg_offset: u32,
+    closure: &ClosureRef,
+    out: &mut Vec<Diagnostic>,
+) {
+    let Some(ty) = envelopes.param(&param.name) else { return };
+    let ContractTy::CallableTy(Some(sig)) = steins_contract::lower(ty) else { return };
+
+    // Resolve the bound callable's declared native signature. Anonymous closures
+    // address their own scope by definition offset; a first-class callable naming
+    // a user function reuses the function-resolution leg (S5) — a builtin or
+    // unresolvable name has no ground-truth signature, so it stays silent (Maybe).
+    let (closure_params, closure_ret): (&[Param], Option<&NativeType>) = match closure {
+        ClosureRef::Anonymous { def_offset, .. } => {
+            let Some(scope) = cx.closure_scope(*def_offset) else { return };
+            (scope.params.as_slice(), scope.ret_ty.as_ref())
+        }
+        ClosureRef::FunctionName(name) => match cx.resolve_function(name) {
+            FnResolution::User(site) => {
+                let decl = cx.fn_decl(site);
+                (decl.params.as_slice(), decl.ret.as_ref())
+            }
+            _ => return,
+        },
+    };
+
+    let Some(violation) = callable_sig_violation(&sig, closure_params, closure_ret) else {
+        return;
+    };
+    let param_name = &param.name;
+    let message = match violation {
+        CallableViolation::Param(i) => format!(
+            "callable argument to {callee}() violates declared @param {ty} ${param_name} — parameter #{} type is incompatible (callable parameter contravariance)",
+            i + 1,
+        ),
+        CallableViolation::Return => format!(
+            "callable argument to {callee}() violates declared @param {ty} ${param_name} — return type is incompatible (callable return covariance)",
+        ),
+        CallableViolation::Arity => format!(
+            "callable argument to {callee}() violates declared @param {ty} ${param_name} — it requires more parameters than the callable signature supplies",
+        ),
+    };
+    let pos = cx.tree().position(arg_offset);
     out.push(Diagnostic {
         id: PARAM_MISMATCH_ID,
         path: cx.path().to_owned(),

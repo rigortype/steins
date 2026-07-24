@@ -75,7 +75,12 @@ pub fn admits_val(ty: &ContractTy, v: &Val) -> Certainty {
             _ => No,
         },
         ContractTy::Class(_) | ContractTy::ObjectAny => No,
-        ContractTy::CallableTy => match v {
+        // The signature (if any) is not consulted here: a runtime string/array
+        // value cannot be judged against a call shape, so acceptance is the same
+        // as for a bare callable — a string may name a function, a pair-array a
+        // method (Maybe), any other scalar No. The signature is used only by the
+        // closure-argument variance check (issue #11, `steins-infer`).
+        ContractTy::CallableTy(_) => match v {
             Val::Str(_) | Val::Array(_) => Maybe,
             _ => No,
         },
@@ -188,7 +193,7 @@ fn base_only(ty: &ContractTy, base: Base, refinement: Option<Refinement>) -> Cer
         | ContractTy::Shape { .. }
         | ContractTy::Class(_)
         | ContractTy::ObjectAny => No,
-        ContractTy::CallableTy => {
+        ContractTy::CallableTy(_) => {
             if base == Base::String { Maybe } else { No }
         }
         ContractTy::Union(members) => {

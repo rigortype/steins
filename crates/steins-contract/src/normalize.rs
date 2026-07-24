@@ -165,7 +165,7 @@ pub fn subsumes(a: &ContractTy, b: &ContractTy) -> Certainty {
         | ContractTy::MapOf { .. }
         | ContractTy::IterableOf { .. }
         | ContractTy::Shape { .. }
-        | ContractTy::CallableTy
+        | ContractTy::CallableTy(_)
         | ContractTy::StrOpaque
         | ContractTy::Opaque => match a {
             ContractTy::Mixed => Yes,

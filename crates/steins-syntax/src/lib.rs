@@ -1488,6 +1488,12 @@ pub struct Scope {
     /// parameter seeding read them here. Empty for function/method/top-level
     /// scopes (which resolve params via [`Self::owner`]).
     pub params: Vec<Param>,
+    /// Declared native return type of a closure/arrow scope
+    /// ([`ScopeOwner::Closure`]) — a closure has no [`FunctionDecl`] carrying it,
+    /// so the callable-signature variance check (issue #11) reads the closure's
+    /// `: R` here. `None` for a closure with no/unrepresentable return hint and
+    /// for every non-closure scope.
+    pub ret_ty: Option<NativeType>,
     /// Effect-origin candidates of a closure/arrow body ([`ScopeOwner::Closure`]),
     /// so a closure can be an effect node in the fixpoint (ADR-0033 point 3).
     /// Empty for non-closure scopes (their origins live on the decl).
@@ -3926,6 +3932,7 @@ fn build_scope_from(owner: ScopeOwner, statements: &[&Statement<'_>]) -> Scope {
         stmts,
         method_calls,
         params: Vec::new(),
+        ret_ty: None,
         effect_origins: Vec::new(),
         throw_origins: Vec::new(),
     }
@@ -3990,6 +3997,7 @@ fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>, rc: &Ref
         stmts,
         method_calls,
         params: lower_params(&cl.parameter_list, rc),
+        ret_ty: cl.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
         effect_origins,
         throw_origins,
     }
@@ -4026,6 +4034,7 @@ fn build_closure_scope_from_arrow(af: &mago_syntax::cst::ArrowFunction<'_>, rc: 
         stmts: vec![ret],
         method_calls,
         params: lower_params(&af.parameter_list, rc),
+        ret_ty: af.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
         effect_origins,
         throw_origins,
     }
