@@ -21,22 +21,41 @@ point it at your project.
 From a checkout of the workspace:
 
 ```sh
-cargo install --path .
+brew install rigortype/tap/steins
 ```
 
-That puts a `steins` binary on your Cargo `PATH`. Or, after a
-release build, run `target/release/steins` directly. Prebuilt
-binaries ship with each release.
+Or take a prebuilt binary from the [releases
+page](https://github.com/rigortype/steins/releases) — `x86_64`/`aarch64`
+Linux (glibc), `x86_64` Linux (musl, static), and
+`x86_64`/`aarch64` macOS, each with a `.sha256` sidecar. Windows is
+not shipped yet.
 
-The binary has three subcommands — `check`, `annotate`,
-`transform` — and no `--help`. Run it with no arguments to see
-the surface:
+From source, with a Rust toolchain at 1.97 or newer:
+
+```sh
+cargo install --git https://github.com/rigortype/steins steins-cli
+```
+
+That puts a `steins` binary on your Cargo `PATH`. There is no
+crates.io package — the parser backend is a rev-pinned fork, and
+crates.io rejects crates with git dependencies. From a checkout,
+`cargo install --path crates/steins-cli` works, or run
+`target/release/steins` directly after a release build.
+
+The binary has four subcommands — `check`, `annotate`,
+`transform`, `doctor` — and no `--help`. Run it with no arguments
+to see the surface:
 
 ```text
 usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor-diagnostics] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
        steins annotate [--no-php] <file.php>
        steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--format text|json] <paths...>
+       steins doctor [--no-php] [--baseline <path>] [path]
 ```
+
+`doctor` answers "what is my setup?" rather than "what is wrong
+with my code?" — it reports the resolved `php`, the active
+profile's surface, and baseline health, and runs no checks.
 
 ## Your first run
 
