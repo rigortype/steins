@@ -6,3 +6,13 @@
 # PHPDoc oracle harness (ADR-0029): composer deps are materialized locally, never
 # committed. composer.lock IS committed so the reference version is reproducible.
 /harness/phpdoc-oracle/vendor
+
+# `.claude/` is excluded by a global excludesFile on the owner's machine, which
+# would silently drop the release skill from a clone — AGENTS.md points at it, so
+# it is repo content, not local scratch. Re-include the directory (a repo
+# .gitignore outranks the global excludes), then ignore everything in it EXCEPT
+# `skills/`; git cannot re-include a path whose parent stays excluded, hence the
+# three-step dance. `.claude/worktrees/` and any local settings stay ignored.
+!/.claude/
+/.claude/*
+!/.claude/skills/

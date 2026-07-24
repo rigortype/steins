@@ -11,3 +11,7 @@ Uses the default label vocabulary: `needs-triage`, `needs-info`, `ready-for-agen
 ### Domain docs
 
 Single-context repo: one `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### Release
+
+Cutting a version is PR-gated and tag-driven: `.claude/skills/steins-release-prep/SKILL.md`. There is no crates.io channel — the rev-pinned Mago fork is a git dependency, so the channels are the GitHub Release binaries, the Homebrew tap, and `cargo install --git`. Pushing a branch or a tag needs the owner's explicit approval each time.
