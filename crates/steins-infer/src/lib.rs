@@ -6298,7 +6298,19 @@ fn join_stores(first: &Store, rest: &[&Store]) -> Store {
 fn dedup_contract_arms(arms: &mut Vec<ContractArm>) {
     let mut kept: Vec<ContractArm> = Vec::with_capacity(arms.len());
     for arm in arms.drain(..) {
-        if let Some(k) = kept.iter_mut().find(|k| normalize::arm_eq(&k.ty, &arm.ty)) {
+        // Collapse a structurally-identical arm FIRST (`ty == ty`), keeping the min
+        // stratum. This is the reflexive tie `subsumes`/`arm_eq` deliberately cannot
+        // prove for the non-extensional arms (`StrOpaque`, `ArrayAny`/`ListOf`/`MapOf`,
+        // `CallableTy`, `Opaque` — ADR-0038: membership is unmodeled, so `subsumes(x, x)`
+        // is `Maybe`, not `Yes`). Exact structural equality is a strictly stronger
+        // witness of same-denotation than mutual subsumption, so keeping one is sound
+        // and loses no precision — and it is what stops a branch-union from *doubling*
+        // a pile of identical opaque arms at every join. Without it an `array`/`Closure`
+        // parameter threaded through a deeply nested `if` tree grew to 2^depth copies
+        // of one arm (survey non-termination on nextcloud `core/Migrations`).
+        if let Some(k) =
+            kept.iter_mut().find(|k| k.ty == arm.ty || normalize::arm_eq(&k.ty, &arm.ty))
+        {
             k.stratum = k.stratum.min(arm.stratum);
             continue;
         }
@@ -10789,6 +10801,46 @@ mod n4_carrier_tests {
         ];
         dedup_contract_arms(&mut arms);
         assert_eq!(arms, vec![arm(ContractTy::Base(Base::Int), Stratum::Asserted)]);
+    }
+
+    #[test]
+    fn dedup_collapses_identical_opaque_arms() {
+        // Survey non-termination regression (nextcloud `core/Migrations`): the
+        // non-extensional arms (`ArrayAny`/`CallableTy`/`StrOpaque`/`Opaque`)
+        // have `subsumes(x, x) == Maybe`, so `arm_eq` alone could NOT collapse two
+        // identical copies — a branch-union then doubled the pile at every join,
+        // reaching 2^depth. Structural equality must collapse them. A whole pile of
+        // one opaque arm dedups to a single arm regardless of count.
+        // (`Mixed`/`ObjectAny` are arm_eq-reflexive already, so were never affected.)
+        // The two arms observed exploding in the survey (`array $options`,
+        // `\Closure $schemaClosure`) plus the other non-extensional floors. Each is an
+        // arm `arm_eq` cannot prove equal to ITSELF (`subsumes(x, x) == Maybe`), so
+        // before the fix a 64-copy pile stayed 64 and doubled at the next join.
+        for ty in [
+            ContractTy::ArrayAny { non_empty: false },
+            ContractTy::CallableTy(None),
+            ContractTy::StrOpaque,
+            ContractTy::Opaque,
+        ] {
+            assert!(!normalize::arm_eq(&ty, &ty), "{ty:?} is expectedly non-arm_eq-reflexive");
+            let mut arms: Vec<ContractArm> =
+                (0..64).map(|_| arm(ty.clone(), Stratum::Verified)).collect();
+            dedup_contract_arms(&mut arms);
+            assert_eq!(arms, vec![arm(ty.clone(), Stratum::Verified)], "{ty:?} pile must collapse to one");
+        }
+    }
+
+    #[test]
+    fn dedup_identical_opaque_keeps_min_stratum() {
+        // The structural-equality collapse still honors the derivation clause: a
+        // Verified + Asserted pair of the SAME opaque arm survives at Asserted.
+        let mut arms = vec![
+            arm(ContractTy::CallableTy(None), Stratum::Verified),
+            arm(ContractTy::CallableTy(None), Stratum::Asserted),
+            arm(ContractTy::CallableTy(None), Stratum::Verified),
+        ];
+        dedup_contract_arms(&mut arms);
+        assert_eq!(arms, vec![arm(ContractTy::CallableTy(None), Stratum::Asserted)]);
     }
 
     // ---- the deliverable: else-of-instanceof leaves {Guest} -----------------
