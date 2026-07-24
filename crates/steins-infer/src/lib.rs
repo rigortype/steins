@@ -1125,6 +1125,7 @@ fn check_units(
                 None,
                 None,
                 Some(&mut dead_spans),
+                None,
                 &mut out,
             );
         }
@@ -1379,6 +1380,7 @@ fn annotate_units(
             None,
             None,
             Some(&mut facts),
+            None,
             None,
             &mut sink,
         );
@@ -3896,12 +3898,84 @@ impl Known {
 /// A binding-descent key: the callee (by FQN-ish key) plus its bound params.
 type BindingKey = (String, Vec<(String, ArgValue)>);
 
-/// The state threaded down an interprocedural binding descent (Feature B).
+/// A **return-fact summary** (ADR-0057 amendment, slice T0): the join, over a
+/// callee's returning exits, of the returned expression's value-domain fact — a
+/// legitimate query answer (ADR-0048 §2), a pure function of (callee CST, bound
+/// entry state). It rides the same descent, the same [`BindingKey`] memo (now a
+/// value map), and is consumed at the call-result binding as the value FLOOR above
+/// the declared arms (A1). The heap-object component (ADR-0057 §1) is the value
+/// component's heap-bearing sibling — slice T1 populates it; in T0 the slot is
+/// present but always `None`, so the memo/value-map shape is already the one T1 rides.
+#[derive(Clone)]
+struct ReturnSummary {
+    /// The value-domain component (this amendment): the joined returned-expression
+    /// fact with its trust stratum.
+    value: Option<SummaryValue>,
+    /// The heap-object component (ADR-0057 §1) — populated by T1; always `None` here.
+    #[allow(dead_code)] // T1 slot, present for the memo/value-map shape
+    heap: Option<HeapSummary>,
+}
+
+/// The value-domain half of a [`ReturnSummary`]: the joined fact and its stratum
+/// (`min` over exits, N2 — an `Asserted` exit drags the whole summary to `Asserted`).
+#[derive(Clone)]
+struct SummaryValue {
+    fact: Fact,
+    stratum: Stratum,
+}
+
+/// The heap-object component of a [`ReturnSummary`] (ADR-0057 §1) — reserved for
+/// slice T1 (class/exactness/props/readonly/escape); never constructed in T0.
+#[derive(Clone)]
+#[allow(dead_code)] // T1 slot
+struct HeapSummary;
+
+/// One returning exit's contribution to the summary join (A2/A3). A native-envelope
+/// violating exit is DROPPED (a proven boundary TypeError, its value never reaches
+/// the caller) — it is simply never recorded, so there is no variant for it.
+enum ExitContribution {
+    /// An informative exit within the declared envelope: its fact crosses with its
+    /// stratum (a phpdoc-only violation crosses here — the walk truth, A2).
+    Fact(Fact, Stratum),
+    /// A factless returning exit: it contributes the declared value FLOOR (A3), the
+    /// sound top within the envelope — `General{base}` degrades, never lies.
+    Floor,
+}
+
+/// The per-descent summary-collection context threaded through [`WalkCx`] while a
+/// callee body is walked for its return-fact summary. Holds the callee's native
+/// return arms (the A2 drop oracle) and the accumulating exit list.
+struct SummaryCtx {
+    /// The callee's native return type lowered to contract arms — the drop test's
+    /// oracle (A2): an exit fact every arm provably rejects is a boundary TypeError.
+    native: Vec<ContractTy>,
+    /// Each returning exit's contribution, in walk order (RefCell — pushed through
+    /// the shared-immutable [`WalkCx`] as branches recurse).
+    exits: std::cell::RefCell<Vec<ExitContribution>>,
+}
+
+impl SummaryCtx {
+    /// Whether `fact` provably violates the native return envelope (A2): every native
+    /// arm rejects it. With no native declaration there is nothing to violate.
+    fn native_violates(&self, fact: &Fact) -> bool {
+        !self.native.is_empty()
+            && self
+                .native
+                .iter()
+                .fold(Certainty::No, |acc, arm| acc.or(steins_contract::admits_fact(arm, fact)))
+                .is_no()
+    }
+}
+
+/// The state threaded down an interprocedural binding descent (Feature B). The memo
+/// is a **value map** (ADR-0057 §3): a key's computed [`ReturnSummary`] is cached so
+/// a memo hit REPLAYS it (a summary is a value, not a suppression bit) — legitimate
+/// caching, since the summary is a pure function of the key's entry state.
 struct Descent<'a> {
     provenance: &'a str,
     depth: usize,
     stack: &'a mut Vec<BindingKey>,
-    memo: &'a mut HashSet<BindingKey>,
+    memo: &'a mut HashMap<BindingKey, Option<ReturnSummary>>,
 }
 
 /// Walk one scope's trace with a given initial environment.
@@ -3916,6 +3990,7 @@ fn analyze_scope(
     mut descent: Option<Descent<'_>>,
     mut facts: Option<&mut Vec<LineFact>>,
     dead_out: Option<&mut Vec<Span>>,
+    ret_exits: Option<&mut Vec<ExitContribution>>,
     out: &mut Vec<Diagnostic>,
 ) {
     let enclosing_class = scope_class(scope);
@@ -4015,6 +4090,13 @@ fn analyze_scope(
     // The allocation counter starts past any id already in the store (the seeded
     // `$this`), so a fresh `new`/`clone` never collides with it.
     let alloc_start = store.heap.keys().copied().max().map_or(0, |m| m + 1);
+    // Return-fact summary collection (ADR-0057 amendment T0): active only when the
+    // caller requested exits (a descent building the callee's summary). The native
+    // return arms are resolved once, up front, as the A2 drop oracle.
+    let summary = ret_exits.as_ref().map(|_| SummaryCtx {
+        native: cx.scope_return(scope).map(|(ty, _)| native_arms(ty)).unwrap_or_default(),
+        exits: std::cell::RefCell::new(Vec::new()),
+    });
     let w = WalkCx {
         cx,
         scope,
@@ -4024,8 +4106,14 @@ fn analyze_scope(
         ret_phpdoc: &ret_phpdoc,
         dead: std::cell::RefCell::new(Vec::new()),
         alloc: std::cell::Cell::new(alloc_start),
+        summary,
     };
     walk_trace(&w, folder, &scope.stmts, &mut env, &mut store, &mut descent, &mut facts, false, out);
+    if let Some(out) = ret_exits
+        && let Some(sc) = w.summary
+    {
+        *out = sc.exits.into_inner();
+    }
     if let Some(sink) = dead_out {
         sink.extend(w.dead.into_inner());
     }
@@ -4056,6 +4144,10 @@ struct WalkCx<'a, 'w> {
     /// across branch clones (they clone the `Store`, not this cell), so a `new` in
     /// one branch never collides with a `new` in another that later joins.
     alloc: std::cell::Cell<AllocId>,
+    /// Return-fact summary collection (ADR-0057 amendment T0): `Some` only while a
+    /// callee body is walked for its summary (a descent requested it). Each returning
+    /// exit pushes its contribution here; the join happens in [`descend`].
+    summary: Option<SummaryCtx>,
 }
 
 impl WalkCx<'_, '_> {
@@ -4104,6 +4196,11 @@ fn walk_trace(
     let cx = w.cx;
     let scope = w.scope;
     for (stmt_idx, stmt) in stmts.iter().enumerate() {
+        // The return-fact summary of a `$x = f(...)` RHS descent (ADR-0057 amendment
+        // T0), captured in step 1 and consumed by `apply_assign` in step 2. For an
+        // `Assign` statement `checkable_calls` yields exactly the RHS call, so the
+        // Function-arm summary below is unambiguously this assignment's.
+        let mut stmt_summary: Option<ReturnSummary> = None;
         // 1. Check + descend every statically-named call this statement carries.
         for call in checkable_calls(&stmt.kind) {
             match &call.receiver {
@@ -4132,7 +4229,8 @@ fn walk_trace(
                         // adds nothing to the check surface.
                         emit_asserts(w, folder, call, env, store);
                     }
-                    try_descend_function(cx, folder, call, env, scope.poisoned, descent.as_mut(), out);
+                    stmt_summary =
+                        try_descend_function(cx, folder, call, env, scope.poisoned, descent.as_mut(), out);
                 }
                 Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
                     // Branch-sensitive null-dereference proof (ADR-0031): a `$v->m()`
@@ -4257,6 +4355,40 @@ fn walk_trace(
             }
         }
 
+        // 1c. Return-fact summary (ADR-0057 amendment T0): when a descent is building
+        // this callee's summary, snapshot each returning exit's value-domain fact.
+        // Read here — before the return's own escape/invalidation effect (step 2) —
+        // so the returned variable's env fact is still live. The join is deferred to
+        // `descend`; here we only classify the exit (A2 drop / cross, A3 floor).
+        if let StmtKind::Return { value, .. } = &stmt.kind
+            && let Some(sc) = &w.summary
+        {
+            // Composition (A1): when the returned expression IS a call, its own
+            // summary (captured into `stmt_summary` by the step-1 descent) is this
+            // exit's fact — `return g(...)` crosses g's proven fact. A recursive /
+            // unbindable inner call left `stmt_summary` empty, so this falls through
+            // to the direct value fact (and thence the A3 floor).
+            let composed = matches!(value, ArgValue::Call(_, _))
+                .then(|| stmt_summary.as_ref().and_then(|s| s.value.as_ref()))
+                .flatten()
+                .map(|sv| (sv.fact.clone(), sv.stratum));
+            let exit_fact = composed.or_else(|| return_value_fact(w, folder, value, env, store));
+            let contrib = match exit_fact {
+                // A2 — native-envelope violation: a proven boundary `TypeError`, the
+                // value never reaches the caller. Drop the exit (record nothing); the
+                // callee's own `type.return-mismatch` is the standing record.
+                Some((fact, _)) if sc.native_violates(&fact) => None,
+                // An informative exit within the envelope: it crosses with its stratum
+                // (a phpdoc-only violation crosses HERE — the walk truth, A2).
+                Some((fact, strat)) => Some(ExitContribution::Fact(fact, strat)),
+                // A3 — a factless returning exit degrades to the declared arm floor.
+                None => Some(ExitContribution::Floor),
+            };
+            if let Some(c) = contrib {
+                sc.exits.borrow_mut().push(c);
+            }
+        }
+
         // 2. Apply the statement's own effect on the environment + compute its flow.
         let flow = match &stmt.kind {
             StmtKind::Barrier => {
@@ -4315,7 +4447,10 @@ fn walk_trace(
                 return Flow::Terminated;
             }
             StmtKind::Assign { var, value, span, call } => {
-                apply_assign(w, folder, var, value, call.as_ref(), span.start, env, store, facts);
+                apply_assign(
+                    w, folder, var, value, call.as_ref(), span.start, env, store, facts,
+                    stmt_summary.as_ref(),
+                );
                 Flow::FellThrough
             }
             StmtKind::PropAssign { target_var, prop, value, span, .. } => {
@@ -4976,6 +5111,7 @@ fn apply_assign(
     env: &mut HashMap<String, Known>,
     store: &mut Store,
     facts: &mut Option<&mut Vec<LineFact>>,
+    summary: Option<&ReturnSummary>,
 ) {
     let cx = w.cx;
     let line = cx.tree().position(span_start).line;
@@ -5136,15 +5272,27 @@ fn apply_assign(
                     env.insert(var.to_owned(), Known::value(fact, line, None));
                     store.unbind(var);
                 }
-                // The FLOOR (ADR-0052 §9, the return direction): no proven value fact
-                // flowed, so seed the assigned var's contract-arm lane from the callee's
-                // declared return (native `Verified` / `@return` `Asserted`). `unbind`
-                // first (it voids any stale arm lane on `var`), then seed — the arm is
-                // the floor *below* the value paths above, never overwriting a value.
+                // The return-fact SUMMARY, then the arm FLOOR (ADR-0057 amendment T0 /
+                // ADR-0052 §9). `unbind` first (it voids any stale arm lane on `var`).
+                // The summary is the value floor above the declared arms (A1): when it
+                // carries a bindable value fact (strictly more precise than a bare base,
+                // A3), it binds as `var`'s VALUE fact at its joined stratum — sitting
+                // exactly where a folded literal would (the `resolve_const_fn`
+                // degenerate case above is disjoint by arity: it is zero-arg only, the
+                // summary descends on positional args ≥ 1). Otherwise the summary
+                // degraded to the floor and the declared arms stand — observably
+                // identical to no summary.
                 _ => {
                     env.remove(var);
                     store.unbind(var);
-                    if let Some(c) = call
+                    if let Some(ReturnSummary { value: Some(sv), .. }) = summary
+                        && summary_binds(&sv.fact)
+                    {
+                        env.insert(
+                            var.to_owned(),
+                            Known::value_strat(sv.fact.clone(), line, None, sv.stratum),
+                        );
+                    } else if let Some(c) = call
                         && let Some(arms) = call_return_arms(cx, c)
                     {
                         store.contract.insert(var.to_owned(), arms);
@@ -8048,7 +8196,8 @@ fn check_propagated_call(
     }
 }
 
-/// Attempt an interprocedural binding descent into a same-project function.
+/// Attempt an interprocedural binding descent into a same-project function. Returns
+/// the callee's return-fact summary (ADR-0057 amendment T0), if one was computed.
 fn try_descend_function(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -8057,10 +8206,10 @@ fn try_descend_function(
     poisoned: bool,
     descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
-) {
-    let Some(site) = cx.resolve_user_fn(call) else { return };
+) -> Option<ReturnSummary> {
+    let site = cx.resolve_user_fn(call)?;
     let decl = cx.fn_decl(site);
-    let Some((callee_file, callee_scope)) = cx.fn_scope(site) else { return };
+    let (callee_file, callee_scope) = cx.fn_scope(site)?;
     descend(
         cx,
         folder,
@@ -8076,7 +8225,7 @@ fn try_descend_function(
         poisoned,
         descent,
         out,
-    );
+    )
 }
 
 /// Handle a `$fn(...)` variable call (ADR-0033): resolve the callee variable
@@ -8113,7 +8262,9 @@ fn handle_var_call(
                     call, env, out,
                 );
                 let display = format!("closure (defined on line {})", cv.def_line);
-                descend(
+                // T0 consumes summaries only at direct-function-call assignment sites;
+                // a `$fn(...)` closure-call result is not rebound here (deferred).
+                let _ = descend(
                     cx,
                     folder,
                     &callee_scope.params,
@@ -8249,7 +8400,11 @@ fn check_callable_args(
     }
 }
 
-/// Interprocedural argument-binding descent into a resolved callee body.
+/// Interprocedural argument-binding descent into a resolved callee body. Returns the
+/// callee's [`ReturnSummary`] (ADR-0057 amendment T0) when one was computed — the
+/// join over its returning exits, memoized under the binding key — or `None` when no
+/// descent ran (unbound, by-ref, depth-exhausted, recursive) or no summarizable exit
+/// remained. The caller consumes it as the call-result value floor above the arms.
 #[allow(clippy::too_many_arguments)]
 fn descend(
     cx: &Cx,
@@ -8266,9 +8421,9 @@ fn descend(
     poisoned: bool,
     descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
-) {
+) -> Option<ReturnSummary> {
     if callee_scope.poisoned {
-        return;
+        return None;
     }
 
     // Resolve each positional argument to a literal and try to bind it (using
@@ -8288,22 +8443,22 @@ fn descend(
         let strat = value_stratum(&arg.value, env, None);
         render_args.push(value.clone());
         if param.by_ref {
-            return;
+            return None;
         }
         let Some(ty) = param.ty.as_ref() else {
             bound.push((param.name.clone(), value, strat));
             continue;
         };
-        match coerce_into_param(cx, ty, &value) {
-            Some(coerced) => bound.push((param.name.clone(), coerced, strat)),
-            None => return,
-        }
+        let coerced = coerce_into_param(cx, ty, &value)?;
+        bound.push((param.name.clone(), coerced, strat));
     }
 
     // A closure with captures descends even with no bound args (the capture
     // snapshot drives the body); a plain function needs at least one bound arg.
+    // Zero-argument factories do NOT descend in T0 (ADR-0057 §3 / A5, deferred to
+    // T2's emission-suppressed summary-only walk) — they take the arm floor.
     if bound.is_empty() && captures.is_empty() {
-        return;
+        return None;
     }
 
     // The binding key incorporates the captured snapshot so two calls of the same
@@ -8335,8 +8490,10 @@ fn descend(
         }
     };
 
+    // Depth exhaustion widens, never lies (ADR-0057 §3 / A5): no descent ⇒ no
+    // summary ⇒ the caller keeps the arm floor.
     if next_depth > MAX_BINDING_DEPTH {
-        return;
+        return None;
     }
 
     // Bound params are always resolved literals/arrays, so `singleton_fact`
@@ -8361,11 +8518,21 @@ fn descend(
     let child_cx = cx.at(callee_file);
     match descent {
         Some(d) => {
-            if d.stack.contains(&key) || d.memo.contains(&key) {
-                return;
+            // Recursion (ADR-0057 §3 / A5): the key is already on the descent stack;
+            // the walk is suppressed and no summary exists yet — `None` (arm floor).
+            // The enclosing exit degrades to the floor via A3 rather than dying.
+            if d.stack.contains(&key) {
+                return None;
+            }
+            // Memo hit: REPLAY the cached summary (a value, not a suppression bit) —
+            // no re-walk, so no re-emitted findings. Legitimate caching (§3): the
+            // summary is a pure function of the key's entry state.
+            if let Some(cached) = d.memo.get(&key) {
+                return cached.clone();
             }
             d.stack.push(key.clone());
             let child = Descent { provenance, depth: next_depth, stack: d.stack, memo: d.memo };
+            let mut exits: Vec<ExitContribution> = Vec::new();
             analyze_scope(
                 &child_cx,
                 folder,
@@ -8376,15 +8543,19 @@ fn descend(
                 Some(child),
                 None,
                 None,
+                Some(&mut exits),
                 out,
             );
             d.stack.pop();
-            d.memo.insert(key);
+            let summary = join_summary(&child_cx, callee_scope, &exits);
+            d.memo.insert(key, summary.clone());
+            summary
         }
         None => {
             let mut stack: Vec<BindingKey> = vec![key.clone()];
-            let mut memo: HashSet<BindingKey> = HashSet::new();
+            let mut memo: HashMap<BindingKey, Option<ReturnSummary>> = HashMap::new();
             let child = Descent { provenance, depth: next_depth, stack: &mut stack, memo: &mut memo };
+            let mut exits: Vec<ExitContribution> = Vec::new();
             analyze_scope(
                 &child_cx,
                 folder,
@@ -8395,10 +8566,117 @@ fn descend(
                 Some(child),
                 None,
                 None,
+                Some(&mut exits),
                 out,
             );
+            join_summary(&child_cx, callee_scope, &exits)
         }
     }
+}
+
+/// Build the [`ReturnSummary`] from a callee's collected returning-exit contributions
+/// (ADR-0057 amendment T0): join the value facts (A1), a factless exit contributing
+/// the declared value floor (A3), the stratum `min` over exits (A4). The heap
+/// component (T1) is always `None` here. `None` when nothing summarizable remained.
+fn join_summary(
+    cx: &Cx,
+    callee_scope: &Scope,
+    exits: &[ExitContribution],
+) -> Option<ReturnSummary> {
+    let floor = cx.scope_return(callee_scope).and_then(|(ty, _)| native_value_floor(ty));
+    let (fact, stratum) = join_exits(exits, floor.as_ref())?;
+    Some(ReturnSummary { value: Some(SummaryValue { fact, stratum }), heap: None })
+}
+
+/// Join a callee's returning-exit contributions into the value-domain summary fact
+/// (ADR-0057 A1/A3/A4). Each `Fact` exit joins by the existing value-domain join;
+/// each `Floor` exit contributes the declared value floor (a `None` floor — an object
+/// or mixed-base return — kills the whole value summary, there being no representable
+/// degraded top). Stratum is `min` over exits (N2). An empty exit set (no returning
+/// exit, or every exit dropped by A2) or an unrepresentable join (mixed bases) yields
+/// `None` — arm floor.
+fn join_exits(exits: &[ExitContribution], floor: Option<&Fact>) -> Option<(Fact, Stratum)> {
+    if exits.is_empty() {
+        return None;
+    }
+    let mut acc: Option<Fact> = None;
+    let mut stratum = Stratum::Verified;
+    for e in exits {
+        let (fact, s) = match e {
+            ExitContribution::Fact(f, s) => (f.clone(), *s),
+            ExitContribution::Floor => (floor?.clone(), Stratum::Verified),
+        };
+        stratum = stratum.min(s);
+        acc = Some(match acc {
+            None => fact,
+            Some(a) => a.join(&fact)?,
+        });
+    }
+    Some((acc?, stratum))
+}
+
+/// The declared return type's value-domain FLOOR as a single [`Fact`] — the sound top
+/// within the envelope a factless exit contributes (ADR-0057 A3). Representable only
+/// when every native member shares ONE scalar base (`int`, `?int`); a union of bases,
+/// an object, or a bool-literal return has no single-base value floor (`None`).
+fn native_value_floor(ty: &NativeType) -> Option<Fact> {
+    let mut base: Option<Base> = None;
+    for m in &ty.members {
+        let b = match m {
+            TypeMember::Scalar(ScalarType::Int) => Base::Int,
+            TypeMember::Scalar(ScalarType::Float) => Base::Float,
+            TypeMember::Scalar(ScalarType::String) => Base::String,
+            TypeMember::Scalar(ScalarType::Bool) => Base::Bool,
+            _ => return None,
+        };
+        match base {
+            None => base = Some(b),
+            Some(x) if x == b => {}
+            Some(_) => return None,
+        }
+    }
+    base.map(|base| Fact::General { base, nullable: ty.nullable })
+}
+
+/// The returned expression's best value-domain fact and stratum at a returning exit
+/// (ADR-0057 amendment T0): a bare variable's env fact (covering the assert-narrowed
+/// `positive-int` case), else a literal/const/foldable `Singleton`, else a depth-1
+/// property fact. `None` for any exit the value domain cannot spell (an object, an
+/// unresolved call, an array offset) — a factless exit (A3).
+fn return_value_fact(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: &Store,
+) -> Option<(Fact, Stratum)> {
+    let poisoned = w.scope.poisoned;
+    if let ArgValue::Var(name) = value
+        && let Some(known) = env.get(name)
+        && let Some(fact) = known.fact.clone()
+    {
+        return Some((fact, known.stratum));
+    }
+    if let Some(lit) = w.cx.resolve_literal(value, env, poisoned, folder)
+        && let Some(fact) = singleton_fact(&lit)
+    {
+        return Some((fact, value_stratum(value, env, Some(store))));
+    }
+    if let ArgValue::PropFetch { var, prop } = value
+        && !poisoned
+        && let Some(fact) = store.prop_fact(var, prop).cloned()
+    {
+        return Some((fact, store.prop_stratum(var, prop)));
+    }
+    None
+}
+
+/// Whether a summary value fact is precise enough to bind as the call-result's value
+/// (ADR-0057 A3): a `Singleton`/`OneOf`/`Refined` fact is strictly more than the
+/// declared arm floor and binds; a bare `General{base}` (the degraded join) carries
+/// nothing beyond the arms — the arm floor stands, observably identical to no summary.
+fn summary_binds(fact: &Fact) -> bool {
+    matches!(fact, Fact::Singleton(_) | Fact::OneOf(_) | Fact::Refined { .. })
 }
 
 // ---------------------------------------------------------------------------
@@ -9990,7 +10268,9 @@ fn handle_method_call(
         return;
     };
     let display = display_of_call(&call.receiver, &target.declaring_class.name, &target.method.name);
-    descend(
+    // T0 consumes summaries only at direct-function-call assignment sites; a method
+    // call's summary is computed (memo/machinery shared) but not rebound here (T1).
+    let _ = descend(
         cx,
         folder,
         &target.method.params,
