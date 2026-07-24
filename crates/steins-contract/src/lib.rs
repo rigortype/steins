@@ -16,6 +16,7 @@
 
 mod admit;
 pub mod normalize;
+pub mod spell;
 
 pub use admit::{admits_fact, admits_val};
 

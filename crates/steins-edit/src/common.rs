@@ -17,9 +17,10 @@
 use std::collections::HashMap;
 
 use steins_contract::normalize::summarize_vals;
+use steins_contract::spell::spell_arms;
 use steins_contract::{ContractTy, admits_val};
 use steins_db::{Db, SourceFile, parse};
-use steins_domain::{Base, Certainty, Key, StrPreds, Val, CAP};
+use steins_domain::{Base, Certainty, Key, StrPreds, Val};
 use steins_infer::promote::{FreeFnSweep, MethodSweep};
 use steins_syntax::{
     ArgValue, ClassDecl, FunctionDecl, MethodDecl, NativeType, NormKey, Param, ScalarType,
@@ -323,138 +324,74 @@ pub fn check_caller_enumerability(
     Ok(())
 }
 
-// ---- Value-domain → phpdoc type rendering (ADR-0029) ----------------------
+// ---- Value-domain → phpdoc type rendering (ADR-0029 / ADR-0053 §7) ---------
 //
 // The *semantic* normal form — sort/dedup, the predicate-class collapse (numeric
 // literals → numeric-string, the bool pair → bool, null-fold) — lives in
-// `steins_contract::normalize::summarize_vals` (ADR-0052 §4, slice N1). What
-// stays here is **rendering policy**: docblock literal-safety (`*/`, raw
-// newlines), the CAP-bounded literal-union spelling decision, quoting/escaping,
-// and member spelling order. The cut is byte-identical against the honesty
-// tests below (the renderer's oracle).
+// `steins_contract::normalize::summarize_vals` (ADR-0052 §4, slice N1). The
+// **plain-text arm spelling** — member ordering/join, the CAP-bounded literal-
+// union decision, the predicate-keyword ladder, and single-quote escaping — now
+// lives in `steins_contract::spell` (ADR-0053 §7, slice D2), shared with the
+// `annotate`/dump emitters in `steins-infer` (which cannot reach this crate: the
+// dependency runs steins-edit → steins-infer).
+//
+// What *stays* here is the **docblock armor**: the `*/`/raw-newline literal-safety
+// widening that is meaningless in terminal output but corrupts a `/** … */` block.
+// It pre-widens the arm list before delegating to the shared speller. The cut is
+// byte-identical against the honesty tests below (the renderer's oracle) and the
+// cross-crate parity test.
 
 /// Render a proven set of concrete values as a faithful phpdoc type (ADR-0029
-/// grammar), or `None` when no faithful spelling exists (`type-not-renderable`).
+/// grammar) *safe to embed in a docblock*, or `None` when no faithful spelling
+/// exists (`type-not-renderable`).
 ///
-/// The set is normalized by [`summarize_vals`] (subsumed members collapse;
-/// duplicates removed) into an arm list; this function spells those arms.
-/// Integer values render as `int`, string values as literal unions (`'a'|'b'`)
-/// or a refined-string keyword (`numeric-string`, `non-falsy-string`,
-/// `non-empty-string`) when a single predicate class captures them — but never
-/// over-widens: an array-bearing set (no faithful scalar spelling) refuses.
-/// Members are emitted in a stable order (int, float, string(s), bool, then
-/// `null`).
+/// The set is normalized by [`summarize_vals`] into an arm list; the docblock
+/// armor ([`docblock_widen_unsafe_literals`]) widens any literal group that cannot
+/// be embedded in a `/** … */` block (`*/` or a raw newline) to the tightest
+/// predicate keyword; then the shared [`spell_arms`] spells the (now docblock-safe)
+/// arms — member ordering, the CAP-bounded literal-union decision, the keyword
+/// ladder, and `\`/`'` escaping. Integer values render as `int`, string values as
+/// literal unions (`'a'|'b'`) or a refined-string keyword; an array-bearing set
+/// has no faithful scalar spelling and refuses.
 #[must_use]
 pub fn render_value_domain(vals: &[Val]) -> Option<String> {
-    let arms = summarize_vals(vals)?;
-
-    let mut has_int = false;
-    let mut has_float = false;
-    let mut bool_member: Option<&'static str> = None;
-    let mut nullable = false;
-    // The string portion: `summarize_vals` hands us either the numeric-string
-    // class (one `StrWith` arm) or the distinct-sorted literal arms — never both.
-    let mut string_keyword: Option<String> = None;
-    let mut string_lits: Vec<&str> = Vec::new();
-    for arm in &arms {
-        match arm {
-            ContractTy::Base(Base::Int) => has_int = true,
-            ContractTy::Base(Base::Float) => has_float = true,
-            ContractTy::Base(Base::Bool) => bool_member = Some("bool"),
-            ContractTy::LitBool(true) => bool_member = Some("true"),
-            ContractTy::LitBool(false) => bool_member = Some("false"),
-            ContractTy::Null => nullable = true,
-            // A pre-collapsed predicate class (the numeric-string arm).
-            ContractTy::StrWith(p) => string_keyword = Some(preds_keyword(*p)),
-            ContractTy::Base(Base::String) => string_keyword = Some("string".to_owned()),
-            ContractTy::LitStr(s) => string_lits.push(s),
-            // `summarize_vals` produces no other arm shapes from a value set.
-            other => debug_assert!(false, "unexpected summarized arm: {other:?}"),
-        }
-    }
-
-    let mut members: Vec<String> = Vec::new();
-    if has_int {
-        members.push("int".to_owned());
-    }
-    if has_float {
-        members.push("float".to_owned());
-    }
-    if let Some(kw) = string_keyword {
-        members.push(kw);
-    } else if let Some(spelled) = spell_string_literals(&string_lits) {
-        members.extend(spelled);
-    }
-    if let Some(b) = bool_member {
-        members.push(b.to_owned());
-    }
-    if nullable {
-        // A `null`-only proof spells `null`; a set with scalar members appends it.
-        members.push("null".to_owned());
-    }
-
-    // `summarize_vals` returns `Some` only for a non-empty scalar/null-bearing
-    // set, so `members` is always non-empty here.
-    Some(members.join("|"))
+    let mut arms = summarize_vals(vals)?;
+    docblock_widen_unsafe_literals(&mut arms);
+    spell_arms(&arms)
 }
 
-/// Spell a group of distinct string literals as phpdoc — the rendering policy
-/// half of the string ladder (the numeric-string collapse already happened in
-/// [`summarize_vals`]). A single docblock-safe value is its literal; a small
-/// safe set is a literal union; a value that cannot be embedded in a docblock
-/// (`*/` or a raw newline — [`docblock_literal_safe`]) or a set larger than
-/// [`CAP`] widens to the tightest refined-string keyword its shared predicate
-/// summary admits. `None` for an empty group (no string members).
-fn spell_string_literals(strings: &[&str]) -> Option<Vec<String>> {
-    if strings.is_empty() {
-        return None;
+/// Docblock armor (ADR-0053 §7): if a `LitStr` group carries any value that cannot
+/// be embedded in a `/** … */` block ([`docblock_literal_safe`]), replace the whole
+/// group with the tightest predicate-keyword arm ([`ContractTy::StrWith`]) *before*
+/// the shared speller runs. A single-quoted literal cannot represent `*/` (which
+/// closes the block early) or a raw newline (the phpdoc lexer rejects it), so such
+/// a value has no faithful literal spelling in a docblock and must widen.
+///
+/// A no-op when the group is all-safe (the shared speller then spells the literals)
+/// or absent. This is the only docblock-specific transformation; everything else is
+/// the shared terminal spelling. Terminal output has no such hazard, so the dump/
+/// annotate emitters call [`spell_arms`] directly, skipping this.
+fn docblock_widen_unsafe_literals(arms: &mut Vec<ContractTy>) {
+    // `summarize_vals` yields the string group as either one `StrWith` arm (numeric
+    // collapse) or distinct-sorted `LitStr` arms — never both.
+    let lits: Vec<&str> = arms
+        .iter()
+        .filter_map(|a| if let ContractTy::LitStr(s) = a { Some(s.as_str()) } else { None })
+        .collect();
+    if lits.is_empty() || lits.iter().all(|s| docblock_literal_safe(s)) {
+        return;
     }
-    let mut distinct: Vec<&str> = strings.to_vec();
-    distinct.sort_unstable();
-    distinct.dedup();
-
-    // A single-quoted literal is only faithful when every value can be embedded in
-    // a docblock without corrupting it: no `*/` (which closes the enclosing
-    // `/** … */`) and no raw newline (which the phpdoc lexer rejects in a quoted
-    // literal). PHP single-quote escaping cannot represent either, so a value that
-    // carries one has no literal spelling — it must widen to a keyword instead.
-    let all_literal_safe = distinct.iter().all(|s| docblock_literal_safe(s));
-
-    if all_literal_safe && distinct.len() == 1 {
-        // One safe observed value: its literal is the honest, tightest spelling.
-        return Some(vec![string_literal(distinct[0])]);
-    }
-    if all_literal_safe && distinct.len() <= CAP {
-        // A small enum-like set of docblock-safe values: a literal union is precise
-        // and faithful.
-        return Some(distinct.iter().map(|s| string_literal(s)).collect());
-    }
-
-    // Unsafe to embed, or larger than CAP: widen to the tightest predicate keyword
-    // the shared, implication-closed predicate summary admits. Numeric widening
-    // (`numeric-string`) still applies — it is a keyword, never an embedded
-    // literal, and admits the value via the same `is_numeric` classifier (the
-    // single-unsafe-numeric case, e.g. `"5\n"`).
-    let mut preds = StrPreds::of(distinct[0]);
-    for s in &distinct[1..] {
+    // The shared, implication-closed predicate summary of the group (the same
+    // intersection the terminal keyword ladder would compute).
+    let mut preds = StrPreds::of(lits[0]);
+    for s in &lits[1..] {
         preds = preds.intersect(StrPreds::of(s));
     }
-    Some(vec![preds_keyword(preds)])
-}
-
-/// The tightest refined-string keyword a predicate summary admits (the keyword
-/// half of the precision ladder). `numeric-string` ⊐ `non-falsy-string` ⊐
-/// `non-empty-string` ⊐ `string`.
-fn preds_keyword(preds: StrPreds) -> String {
-    if preds.contains_all(StrPreds::NUMERIC) {
-        "numeric-string".to_owned()
-    } else if preds.contains_all(StrPreds::NON_FALSY) {
-        "non-falsy-string".to_owned()
-    } else if preds.contains_all(StrPreds::NON_EMPTY) {
-        "non-empty-string".to_owned()
-    } else {
-        "string".to_owned()
-    }
+    // Replace the (canonically contiguous) `LitStr` arms with one keyword arm at the
+    // string slot, preserving the member order the speller re-imposes.
+    let at = arms.iter().position(|a| matches!(a, ContractTy::LitStr(_))).expect("a LitStr arm");
+    arms.retain(|a| !matches!(a, ContractTy::LitStr(_)));
+    arms.insert(at, ContractTy::StrWith(preds));
 }
 
 /// Whether a string can be spelled as a single-quoted phpdoc literal *inside a
@@ -465,25 +402,9 @@ fn preds_keyword(preds: StrPreds) -> String {
 ///   literal (it would also split the tag across physical lines).
 ///
 /// A value carrying either has no faithful literal spelling and must widen to a
-/// keyword. (`\` and `'` themselves are handled by [`string_literal`]'s escaping.)
+/// keyword. (`\` and `'` themselves are handled by the shared speller's escaping.)
 fn docblock_literal_safe(s: &str) -> bool {
     !s.contains("*/") && !s.contains('\n') && !s.contains('\r')
-}
-
-/// Render one PHP string as a single-quoted phpdoc literal, escaping `\` and `'`
-/// exactly as PHP single-quoted syntax requires (round-tripped through
-/// [`steins_phpdoc::parse_type`] in the honesty tests).
-fn string_literal(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for c in s.chars() {
-        if c == '\'' || c == '\\' {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out.push('\'');
-    out
 }
 
 /// Whether `contract` admits *every* value in `vals` with [`Certainty::Yes`] — the
@@ -606,5 +527,48 @@ mod tests {
         assert_eq!(r, "numeric-string");
         assert!(!r.contains('\n') && !r.contains('\''));
         round_trips(&r);
+    }
+
+    /// The **annotate parity** contract (ADR-0053 §7, slice D2): the shared
+    /// `steins_contract::spell::spell_arms` — the one the `annotate`/dump emitters
+    /// in `steins-infer` call, byte-for-byte — reproduces this crate's docblock
+    /// renderer wherever the docblock armor is a no-op (every docblock-safe value
+    /// set). The extraction seam is byte-identical, so a dump and an `annotate`
+    /// margin for the same expression will spell the same fact the same way (the
+    /// full same-position pin lands with the emitters at D3). Where a value is not
+    /// docblock-safe (`*/` / raw newline), the two deliberately diverge — the
+    /// docblock renderer widens, the terminal speller spells the literal — and that
+    /// divergence is exactly the armor D2 keeps in `steins-edit`.
+    #[test]
+    fn shared_speller_is_byte_equal_to_the_docblock_renderer_on_safe_sets() {
+        let safe_sets: Vec<Vec<Val>> = vec![
+            vec![i(1), s("12"), s("34")],       // int|numeric-string
+            vec![s("123")],                     // '123'
+            vec![s("POST"), s("GET"), s("GET")], // 'GET'|'POST'
+            vec![i(1), i(2), i(1)],             // int
+            vec![i(1), Val::Null],              // int|null
+            vec![Val::Bool(true), Val::Bool(false)], // bool
+            vec![Val::Bool(true)],              // true
+            vec![s("a'b"), s("c\\d")],          // escaped literal union
+            vec![Val::Float(1.5), i(2)],        // float|int-ish
+        ];
+        for vals in &safe_sets {
+            let docblock = render_value_domain(vals);
+            let shared = summarize_vals(vals).and_then(|arms| spell_arms(&arms));
+            assert_eq!(shared, docblock, "shared speller diverged from the renderer on {vals:?}");
+        }
+
+        // The array-bearing refusal is shared too: both return `None`.
+        assert_eq!(render_value_domain(&[Val::Array(vec![])]), None);
+        assert_eq!(summarize_vals(&[Val::Array(vec![])]).and_then(|a| spell_arms(&a)), None);
+
+        // Documented divergence on a docblock-*unsafe* value: the renderer widens to
+        // a keyword, the shared terminal speller spells the (escaped) literal.
+        let unsafe_val = vec![s("a*/b")];
+        assert_eq!(render_value_domain(&unsafe_val).unwrap(), "non-falsy-string");
+        assert_eq!(
+            summarize_vals(&unsafe_val).and_then(|a| spell_arms(&a)).unwrap(),
+            "'a*/b'"
+        );
     }
 }
