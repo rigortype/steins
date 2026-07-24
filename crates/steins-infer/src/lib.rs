@@ -2692,6 +2692,75 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// Infer the class-level generic type-argument VALUES a `new Class(args)`
+    /// expression carries (ADR-0032 tier 1 propagation feeding tier 3 carry,
+    /// issue #10). For each class-level `@template` (declaration order) that binds
+    /// to a DIRECT top-level `@param T $p` constructor parameter, the matching
+    /// positional argument's resolved value becomes that template's carried value.
+    ///
+    /// Deliberately **not a solver** (ADR-0030/0032 "won't build"): a template is
+    /// bound only from a *bare* `@param T` occurrence at a constructor parameter; a
+    /// nested or compound occurrence (`@param array<T>`, `@param T|null`) does not
+    /// bind it. The result is **all-or-nothing**: one carried value per template
+    /// only when EVERY template resolved to a proven value at an aligned positional
+    /// argument; any gap (a template with no direct parameter, a missing/unprovable
+    /// argument, a variadic in the way) returns EMPTY. An empty carry is the honest
+    /// floor — downstream acceptance answers `Maybe` on the argument half, never a
+    /// manufactured `No`, and the positional args↔templates alignment stays sound.
+    ///
+    /// ADR-0048: this is a pure function of the already-seeded `new` argument trace
+    /// (§2 replayable from the scope walk), touches no scope entry state (§3), and
+    /// carries no global-ordering dependence (§4).
+    fn infer_generic_args(
+        &self,
+        class_fqn: &str,
+        args: &[ArgValue],
+        env: &HashMap<String, Known>,
+        store: &Store,
+        poisoned: bool,
+        folder: &mut dyn Folder,
+    ) -> Vec<CVal> {
+        let empty = Vec::new();
+        let Some((_, cd)) = self.find_class(class_fqn) else { return empty };
+        let templates: Vec<String> = cd
+            .docblock
+            .as_deref()
+            .map(steins_phpdoc::scan_template_names)
+            .unwrap_or_default()
+            .iter()
+            .map(|t| t.to_ascii_lowercase())
+            .collect();
+        if templates.is_empty() {
+            return empty; // not a generic class — no carry.
+        }
+        let Some(ctor) = self.find_ctor(class_fqn) else { return empty };
+        // The constructor's own `@param` envelopes, WITHOUT the class-level template
+        // shadow applied: a bare `@param T` must stay readable as the template name
+        // `T` here (the shadow that neutralizes it to opaque is a check-site concern).
+        let Some(ctor_env) = parse_envelopes(ctor.docblock.as_deref()) else { return empty };
+        let mut out = Vec::with_capacity(templates.len());
+        for tmpl in &templates {
+            // The single constructor parameter whose `@param` is exactly this
+            // template name (a direct, top-level occurrence — no solver).
+            let Some(pos) = ctor.params.iter().position(|p| {
+                ctor_env.param(&p.name).is_some_and(|pty| {
+                    matches!(&pty.kind, PKind::Identifier(n) if n.eq_ignore_ascii_case(tmpl))
+                })
+            }) else {
+                return empty;
+            };
+            if ctor.params[pos].variadic {
+                return empty; // a variadic element breaks positional alignment.
+            }
+            let Some(arg) = args.get(pos) else { return empty };
+            let Some(cv) = self.resolve_cval(arg, env, store, poisoned, folder) else {
+                return empty;
+            };
+            out.push(cv);
+        }
+        out
+    }
+
     /// Resolve a **function** call reference per PHP name resolution (ADR-0001).
     fn resolve_function(&self, r: &NameRef) -> FnResolution {
         let catalog_knows = |n: &str| steins_catalog::effect_labels(n).is_some();
@@ -8694,10 +8763,18 @@ use Certainty as Tri;
 
 /// A proven value in contract terms: a scalar literal, an array of proven values
 /// (normalized keys), or an object of an exact class (a `New` fact).
+///
+/// An object additionally carries its **class-level generic type-argument values**
+/// (ADR-0032 tier 3, issue #10): the per-`@template` values that flowed into the
+/// object at its `new` site (tier-1 propagation), in template-declaration order.
+/// The vector is empty when the class is non-generic, or when the arguments could
+/// not be proven — an empty carry is the honest floor (acceptance then answers
+/// `Maybe` on the argument half, never a manufactured `No`). These live in the
+/// contract lane, not the object-free value lattice (ADR-0035/0043 §4).
 enum CVal {
     Scalar(ArgValue),
     Array(Vec<(NormKey, CVal)>),
-    Object(String),
+    Object(String, Vec<CVal>),
 }
 
 /// The `@param`/`@return` phpdoc envelopes parsed off one declaration's docblock.
@@ -8950,15 +9027,23 @@ impl<'a> Cx<'a> {
     ) -> Option<CVal> {
         match value {
             v if v.is_literal() => Some(CVal::Scalar(v.clone())),
-            ArgValue::New(class_ref, _) if !poisoned => Some(CVal::Object(self.class_fqn(class_ref))),
+            // `new Class(args)` — a proven object of exactly `Class`, carrying the
+            // generic type-argument values that flow into it (ADR-0032 tier 3,
+            // issue #10). Empty carry when non-generic / unprovable (FP-safe).
+            ArgValue::New(class_ref, args) if !poisoned => {
+                let class = self.class_fqn(class_ref);
+                let targs = self.infer_generic_args(&class, args, env, store, poisoned, folder);
+                Some(CVal::Object(class, targs))
+            }
             // ADR-0043 stage 4: an enum case is an object value of its enum class,
             // so it can ride the is-a oracle against enum/interface phpdoc contracts.
-            ArgValue::EnumCase(fqn, _) => Some(CVal::Object(fqn.clone())),
+            // An enum is never `@template`-parameterized → no generic carry.
+            ArgValue::EnumCase(fqn, _) => Some(CVal::Object(fqn.clone(), Vec::new())),
             // A class-const access (`Foo::BAR`, `Suit::Hearts`) resolves env-free:
             // an enum case becomes an object, a literal const its value. `self`/
             // `parent` need an enclosing class, absent here → unresolved (silent).
             ArgValue::ClassConst(sc, name) => match self.resolve_class_const(sc, name, None)? {
-                ArgValue::EnumCase(fqn, _) => Some(CVal::Object(fqn)),
+                ArgValue::EnumCase(fqn, _) => Some(CVal::Object(fqn, Vec::new())),
                 lit => self.resolve_cval(&lit, env, store, poisoned, folder),
             },
             ArgValue::Array(items) => {
@@ -8979,7 +9064,13 @@ impl<'a> Cx<'a> {
                     // phpdoc-acceptance consumer draws a No-side `is_a` conclusion from
                     // it, which a lower-bound `$this` would make unsound. An inexact
                     // object stays unresolved (silent) — acceptance never fires on it.
-                    store.class_of(name).map(|c| CVal::Object(c.to_owned()))
+                    //
+                    // Generic type arguments are NOT carried through a variable binding
+                    // this slice (the heap object records no type-arg carry); a
+                    // `$x = new Box('x'); f($x)` therefore judges only its class half.
+                    // Stage 1 scopes the argument half to the direct `new` argument
+                    // position (the conformance fixtures' shape) — empty carry here.
+                    store.class_of(name).map(|c| CVal::Object(c.to_owned(), Vec::new()))
                 } else {
                     None
                 }
@@ -9412,7 +9503,7 @@ fn accepts_identifier(cx: &Cx, cfile: usize, coff: u32, name: &str, v: &CVal) ->
             _ => Tri::No,
         },
         "array" => yes_no(matches!(v, CVal::Array(_))),
-        "object" => yes_no(matches!(v, CVal::Object(_))),
+        "object" => yes_no(matches!(v, CVal::Object(..))),
         // `iterable`: a proven array satisfies it; an object might be Traversable
         // (unprovable) → silent; a scalar is silent too (not in the checked set).
         "iterable" => match v {
@@ -9435,7 +9526,7 @@ fn accepts_identifier(cx: &Cx, cfile: usize, coff: u32, name: &str, v: &CVal) ->
         _ => {
             let target = cx.resolve_pclass(cfile, coff, name);
             match v {
-                CVal::Object(obj) => match cx.is_a(obj, &target) {
+                CVal::Object(obj, _) => match cx.is_a(obj, &target) {
                     IsA::Yes => Tri::Yes,
                     // A definite `No` requires a *known* target: an object whose own
                     // hierarchy is closed is-a-No against an unresolved name, but that
@@ -9538,8 +9629,53 @@ fn accepts_generic(
             ([_, _], CVal::Scalar(_)) => Tri::No, // non-int can't inhabit an int range
             _ => Tri::Maybe,
         },
-        _ => Tri::Maybe,
+        // A class-level generic `Class<A, …>` (ADR-0032 tier 3, issue #10).
+        _ => accepts_class_generic(cx, cfile, coff, base, args, v),
     }
+}
+
+/// Acceptance of a value against a class-level generic contract `Class<A, …>`
+/// (ADR-0032 tier 3, issue #10). The class half rides the trinary is-a oracle
+/// exactly as the bare-class identifier path; the argument half judges ONLY when
+/// the object carries provable, arity-matched per-position type-argument values
+/// (from `new`-site propagation — see [`Cx::infer_generic_args`]).
+///
+/// Honesty bounds (zero-FP, stage 1):
+/// - A **non-object** value is silent (`Maybe`): the bare-class identifier path
+///   owns scalar-vs-class `No`; a *generic* spelling never manufactures it here.
+/// - The class half only **gates**: a `No`/`Unknown` is-a answers `Maybe`, never a
+///   manufactured `No` — generic-class *class-mismatch* reporting is deferred, so
+///   the sole `No` this arm yields comes from a provable **argument-half** violation
+///   on an object that **is** the required class.
+/// - An **empty** carry or an **arity mismatch** between declared arguments and
+///   carried values answers `Maybe` (no provable knowledge / library-author
+///   inconsistency stays a thin lint, per ADR-0032).
+fn accepts_class_generic(
+    cx: &Cx,
+    cfile: usize,
+    coff: u32,
+    base: &str,
+    args: &[steins_phpdoc::ast::GenericArg],
+    v: &CVal,
+) -> Tri {
+    let CVal::Object(obj_class, targs) = v else { return Tri::Maybe };
+    let target = cx.resolve_pclass(cfile, coff, base);
+    // Class half: proceed only on a proven is-a; otherwise stay silent.
+    if cx.is_a(obj_class, &target) != IsA::Yes {
+        return Tri::Maybe;
+    }
+    // Argument half: needs provable, arity-matched per-position knowledge.
+    if targs.is_empty() || targs.len() != args.len() {
+        return Tri::Maybe;
+    }
+    let mut r = Tri::Yes;
+    for (declared, actual) in args.iter().zip(targs.iter()) {
+        r = combine(r, accepts(cx, cfile, coff, &declared.ty, actual));
+        if r == Tri::No {
+            return Tri::No;
+        }
+    }
+    r
 }
 
 /// The bound of a simple `int<…>` argument: an integer literal, or `min`/`max`
@@ -9879,7 +10015,7 @@ fn contract_touches_class(ty: &steins_contract::ContractTy) -> bool {
 /// descent.
 fn phpdoc_object_guard_blind(in_descent: bool, ty: &PType, cv: Option<&CVal>) -> bool {
     in_descent
-        && (matches!(cv, Some(CVal::Object(_)))
+        && (matches!(cv, Some(CVal::Object(..)))
             || contract_touches_class(&steins_contract::lower(ty)))
 }
 
@@ -9972,7 +10108,7 @@ fn describe_fact(f: &Fact) -> String {
 fn rendered_cval(v: &CVal) -> String {
     match v {
         CVal::Scalar(s) => s.render(),
-        CVal::Object(class) => format!("new {}()", class.rsplit('\\').next().unwrap_or(class)),
+        CVal::Object(class, _) => format!("new {}()", class.rsplit('\\').next().unwrap_or(class)),
         CVal::Array(entries) => {
             // Rebuild an `ArgValue::Array` with explicit keys so the shared compact
             // renderer applies (it re-normalizes; explicit keys round-trip).
@@ -9995,7 +10131,7 @@ fn rendered_cval(v: &CVal) -> String {
 fn cval_to_argvalue(v: &CVal) -> ArgValue {
     match v {
         CVal::Scalar(s) => s.clone(),
-        CVal::Object(_) => ArgValue::Other,
+        CVal::Object(..) => ArgValue::Other,
         CVal::Array(entries) => ArgValue::Array(
             entries
                 .iter()
