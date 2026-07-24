@@ -4790,35 +4790,84 @@ fn collect_namespaces(
     }
 }
 
-/// Fold one `use` statement's items into a context. Only the plain sequence form
-/// (`use A\B, C\D;` — class/namespace imports) and the typed-sequence
-/// `use function a\b;` form are lowered; grouped `use A\{B, C}` and `use const`
-/// are conservatively skipped (a miss only *fails to resolve*, never mis-resolves).
+/// Fold one `use` statement's items into a context — every class/function import
+/// form: the plain sequence (`use A\B, C\D;`), the typed sequence
+/// (`use function a\b;`), and the **grouped** forms (`use A\{B, C}`,
+/// `use function A\{b, c}`, and the mixed `use A\{B, function c, const D}`). Only
+/// `use const` items are skipped (constant resolution is out of scope).
+///
+/// Grouped-use lowering was previously skipped on the belief that "a miss only
+/// fails to resolve, never mis-resolves" — but that belief is false: an unresolved
+/// grouped import falls back through [`resolve_class_ref`] to the enclosing
+/// namespace (bare, in the global namespace), which can collide with a *different*
+/// real class of that fallback name and mis-resolve. That is a genuine FP source
+/// (ADR-0049 §6 arity surfaced it on `use Contentful\{Delivery\Query}; new Query()`
+/// resolving to an unrelated `Query`), so the grouped forms are now lowered.
 fn add_use(u: &mago_syntax::cst::Use<'_>, ctx: &mut NsCtx) {
     match &u.items {
         UseItems::Sequence(seq) => {
             for item in seq.items.iter() {
                 let target = bytes_to_string(item.name.value()).trim_start_matches('\\').to_owned();
-                let alias = match &item.alias {
-                    Some(a) => bytes_to_string(a.identifier.value),
-                    None => bytes_to_string(item.name.last_segment()),
-                };
-                ctx.class_imports.insert(alias.to_ascii_lowercase(), target);
+                ctx.class_imports.insert(use_item_alias(item), target);
             }
         }
         UseItems::TypedSequence(seq) if seq.r#type.is_function() => {
             for item in seq.items.iter() {
                 let target = bytes_to_string(item.name.value()).trim_start_matches('\\').to_owned();
-                let alias = match &item.alias {
-                    Some(a) => bytes_to_string(a.identifier.value),
-                    None => bytes_to_string(item.name.last_segment()),
-                };
-                ctx.fn_imports.insert(alias.to_ascii_lowercase(), target);
+                ctx.fn_imports.insert(use_item_alias(item), target);
             }
         }
-        // `use const …`, grouped `use A\{…}` — conservatively un-lowered.
-        UseItems::TypedSequence(_) | UseItems::TypedList(_) | UseItems::MixedList(_) => {}
+        // Grouped `use function A\{b, c}` / `use const A\{X, Y}`: one leading type
+        // applies to every item under the `A\` prefix.
+        UseItems::TypedList(list) => {
+            if list.r#type.is_function() {
+                let prefix = bytes_to_string(list.namespace.value());
+                for item in list.items.iter() {
+                    ctx.fn_imports.insert(use_item_alias(item), group_target(&prefix, item));
+                }
+            }
+        }
+        // Grouped `use A\{B, function c, const D}`: each item carries its own
+        // optional type (`None` ⇒ class, `Function` ⇒ function, `Const` ⇒ skip).
+        UseItems::MixedList(list) => {
+            let prefix = bytes_to_string(list.namespace.value());
+            for mti in list.items.iter() {
+                let target = group_target(&prefix, &mti.item);
+                let alias = use_item_alias(&mti.item);
+                match &mti.r#type {
+                    None => {
+                        ctx.class_imports.insert(alias, target);
+                    }
+                    Some(t) if t.is_function() => {
+                        ctx.fn_imports.insert(alias, target);
+                    }
+                    Some(_) => {} // `const` — out of scope.
+                }
+            }
+        }
+        // `use const A\B;` — out of scope.
+        UseItems::TypedSequence(_) => {}
     }
+}
+
+/// The lowercase-normalized import alias for a `use` item: its explicit `as` alias,
+/// else the last segment of the imported name (PHP class/function names are
+/// case-insensitive, so the map keys on the lowercased form).
+fn use_item_alias(item: &mago_syntax::cst::UseItem<'_>) -> String {
+    match &item.alias {
+        Some(a) => bytes_to_string(a.identifier.value),
+        None => bytes_to_string(item.name.last_segment()),
+    }
+    .to_ascii_lowercase()
+}
+
+/// The full target FQN of a grouped-`use` item: `<prefix>\<item name>`, each side
+/// trimmed of a stray leading backslash (grouped items are relative to the prefix).
+fn group_target(prefix: &str, item: &mago_syntax::cst::UseItem<'_>) -> String {
+    let prefix = prefix.trim_start_matches('\\');
+    let name = bytes_to_string(item.name.value());
+    let name = name.trim_start_matches('\\');
+    format!("{prefix}\\{name}")
 }
 
 /// The namespace context enclosing `offset`: the innermost (latest-starting)
