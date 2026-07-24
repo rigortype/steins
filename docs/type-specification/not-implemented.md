@@ -31,7 +31,7 @@ the semantic inventory.
 | `call.too-many-arguments` | 0049 §6 | Internal targets only — userland too-many runs clean and is never a finding. Waits on the sidecar reflect slice. |
 | Scoped policy — `[paths.sets]`, `[[policy]]` | 0023 | Designed in full, including semantic `where` matchers. The pipeline stage exists as a no-op with a seam. |
 | `sarif` / `github` formats | 0054 | With CI auto-detection and format invariance as the binding rule. Decided out of v0.1.0 by owner. |
-| `doctor` | 0054 | The posture report: coverage, sidecar health, catalog audit, baseline capture surface. A minimal `doctor` is scoped into v0.1.0, not landed. |
+| `doctor` (full report) | 0054 | The **minimal** `doctor` (ADR-0054 C3 scope — index-bound posture report, runs no emitter) has **landed**. Deferred: `--format json`, the richer audits (deeper catalog audit, full baseline capture-surface report). |
 | `check --fix` fix-its | 0010 | Autofix as a first-class diagnostic payload. |
 | `lsp` | 0048, roadmap M6 | Position queries are *constrained* today (replay over retention, canonical entry states, no global-ordering dependence) but not built. The flagship capability is type-directed member completion. |
 | `mcp` | 0010, roadmap M7 | The agent-driven dry-run → diff → approve → apply loop. |

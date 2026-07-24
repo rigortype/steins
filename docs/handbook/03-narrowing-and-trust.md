@@ -192,14 +192,12 @@ stratum** — a checked attribute recording *how* it was learned:
 
 | Stratum | Where it comes from | May premise a proof? |
 | --- | --- | --- |
-| **Verified** | A test the runtime actually executes on the live branch — `===`, `is_int()`, `instanceof`, ordering, truthiness — or a native type declaration. | **Yes** |
-| **Asserted** | A docblock claim (`@phpstan-assert`) or an `assert($expr)` narrowing. | **No** |
+| **Verified** | A test the runtime actually executes on the live branch — `===`, `is_int()`, `instanceof`, ordering, truthiness — a native type declaration, or an `assert($expr)` construct (read as a throw-guard — see below). | **Yes** |
+| **Asserted** | A docblock claim (`@phpstan-assert`). | **No** |
 
 The distinction is operational, not philosophical. A `Verified`
 fact holds because *the branch only runs if the test passed*. An
-`Asserted` fact holds because someone *said so* — and in the
-`assert()` case, because they said so in code PHP does not even
-execute under the standard production setting `zend.assertions=-1`.
+`Asserted` fact holds because someone *said so* in a docblock.
 
 The rule: **a proof-layer finding requires all-Verified
 premises.** A derived fact inherits the *minimum* stratum of
@@ -245,22 +243,28 @@ cannot forge a proof — it can only fail to produce one.
 > layer (they are, after all, claims about declarations) — they
 > simply cannot underwrite a zero-FP proof.
 
-## `assert()` and `zend.assertions`
+## `assert()` is a throw-guard
 
-`assert($expr)` narrows like any guard, but binds `Asserted`,
-because PHP compiles the call away in production. A project that
-genuinely runs with assertions enabled can declare that intent:
+`assert($expr)` narrows like any guard and binds **`Verified`,
+unconditionally**. Steins reads it as statically equivalent to
+`if (!$expr) throw`: continuing past the call means the condition
+held, so the fact is fit for the proof layer exactly as a native
+throw-guard would be. There is no `zend.assertions` setting to
+consult and no config knob to flip — the reading is fixed (owner
+ruling, 2026-07-25).
 
-```toml
-# steins.toml
-[runtime]
-zend-assertions = "enabled"   # default: disabled
-```
+The honest edge: under `zend.assertions=-1` (the production
+default) PHP never evaluates the expression, so the fall-through
+carries no *runtime* guarantee. The ruling assigns that residual
+risk to the operator who chose to disable the runtime check. A
+finding premised on an assert-derived fact is not a false
+positive — it is the runtime check you turned off, reported
+statically.
 
-This promotes `assert()` narrowing to `Verified`. It is not a
-strictness knob — it is the repository stating a reviewable fact
-about the runtime it actually boots on, and Steins takes it at
-its word only because *you* declared it about *your* runtime.
+This covers the `assert()` *construct* only. The
+`@phpstan-assert` tag family stays `Asserted`: a docblock is a
+claim, and a lying tag must never be able to forge a proof (the
+section above is exactly why).
 
 ## What is not narrowed yet
 

@@ -64,19 +64,20 @@ The display is PHPStan's grammar: a single known string prints as
 base types print as their name. Keep two honest facts in mind as
 you read the rest of the chapter:
 
-1. `dumpType` is a **compact view** of a richer internal fact. It
-   prints a single known *string* as a literal (`'hello'`), but a
-   single known *integer* as its base:
+1. `dumpType` renders a value fact **value-precisely**. A single
+   known integer prints as itself, a single known string
+   single-quoted, a float with its visible point:
 
    ```php
    $i = 42;
-   \PHPStan\dumpType($i);   // dumped type: int
+   \PHPStan\dumpType($i);   // dumped type: 42
    ```
 
-   Steins still *reasons* with the exact value `42` — that is how
-   it proves the findings later in this chapter — but the dump
-   surface renders it as `int`. The dump is a debugging
-   convenience, not a full serialization of the value.
+   The dump spells the concrete value Steins proved (`42`,
+   `'hello'`, `123.0`), the same exact value it reasons with to
+   prove the findings later in this chapter. Where no concrete
+   value is known it falls back to the base (`int`) or to the
+   honest `unknown`.
 
 2. `dumpType` names a function PHP does not have. A committed call
    is a fatal, so Steins prints it at fail level to nag you into
@@ -101,16 +102,16 @@ function greet(string $s): void {
 ```
 
 Inside the branch, `$s` can only be `'ready'` — the guard proved
-it. (For integers and floats the dump prints the base, per the
-note above; the singleton fact is still there.)
+it. An integer or float singleton dumps just as precisely: on a
+proven `42`, `\PHPStan\dumpType($n)` prints `42`.
 
 ### 2. OneOf — a small finite set
 
 When a value is one of a few known possibilities (up to eight),
 Steins keeps the whole set. This is the closest PHP gets to a
-sum type. On the dump surface a finite set of scalars renders as
-its base type — `dumpType` does not spell the members out — but
-the set is what the engine narrows against branch by branch (see
+sum type. On the dump surface a finite set spells its members
+joined by `|` — `'GET'|'POST'`, `1|2|3` — and that set is what
+the engine narrows against branch by branch (see
 [Chapter 3](03-narrowing-and-trust.md)).
 
 ### 3. Refined — a base plus a predicate

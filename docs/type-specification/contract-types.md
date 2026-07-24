@@ -152,7 +152,12 @@ coupling, no whole-project ordering dependence (the ADR-0048 constraint that
 keeps position queries reachable).
 
 `steins-contract::spell` renders a summarized arm list back to a terminal-safe
-PHPDoc type string (`int|numeric-string|null`, `'GET'|'POST'`). It is the one
-shared spelling, consumed by both the `annotate`/dump emitters and the docblock
-renderer in `steins-edit` — the latter layering docblock-literal armor
-(`*/` and raw-newline widening) on top before delegating.
+PHPDoc type string (`int|numeric-string|null`, `'GET'|'POST'`). It spells the
+literal and range arms a lowered PHPDoc envelope carries value-precisely —
+int-range (`IntIn` → `int<1, 5>`, `positive-int`), int literal (`LitInt` → `5`),
+and float literal (`LitFloat` → `1.5`) — extended for the contract-arm dump
+surface (ADR-0052 §9); the docblock renderer is unchanged, since a summarized
+value set never produces those buckets (its int members collapse to `Base(Int)`).
+It is the one shared spelling, consumed by both the `annotate`/dump emitters and
+the docblock renderer in `steins-edit` — the latter layering docblock-literal
+armor (`*/` and raw-newline widening) on top before delegating.

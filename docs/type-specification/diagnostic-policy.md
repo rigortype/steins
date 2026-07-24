@@ -194,7 +194,8 @@ declares one; the document also reports the active `profile` and the
 
 `sarif` and `github` formats are designed in ADR-0054 (with format invariance as
 the binding rule — a format is a serialization of the displayed surface, never a
-second surface) and are **not implemented** — decided out of v0.1.0 by owner.
-Neither is `doctor`, the posture report that would answer "what is my coverage,
-is the sidecar healthy, what does the catalog know" without running an emitter;
-a minimal `doctor` is scoped into v0.1.0, not landed.
+second surface) and are **not implemented** — decided out of v0.1.0 by owner. A
+minimal `doctor` — the posture report that answers "what is my coverage, is the
+sidecar healthy, what does the catalog know" without running an emitter — has
+**landed** (ADR-0054 C3 scope, index-bound); the full report (`--format json`,
+the richer audits) stays deferred.

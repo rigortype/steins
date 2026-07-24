@@ -119,6 +119,20 @@ are the only falsy strings (`"0.0"` and `"00"` are truthy), `0`, `0.0`, `[]`,
 member-wise and joined; on an abstract layer it is decided from whether the
 denotation can be falsy, truthy, or both — with both giving `Maybe`.
 
+## Seeding from builtin returns
+
+A uniquely-resolved builtin call whose arguments do not fold to a concrete value
+still seeds a `Fact` from its **reflected return envelope** — the running engine's
+own declaration for that function, so it is version-correct by construction
+(ADR-0056 R1). `strlen()` seeds `int`, a bool predicate seeds `bool`, and so on;
+the envelope is `Verified` (PHP enforces the native return). A small **curated**
+table refines *within* the envelope where a row is airtight: `count`, `strlen`,
+`mb_strlen`, `substr_count` → `int<0, max>`; `md5`, `sha1`, `uniqid` →
+`non-falsy-string`. Folding still wins when it can (a fully-literal call folds to
+a `Singleton`, the floor below the envelope); the seed only fills the gap that
+used to widen to no fact. A user-space function shadowing a builtin name blocks
+the seed, and without a sidecar nothing is seeded.
+
 ## What the domain does *not* do
 
 - **No union of unlike bases.** `int|string` is not a `Fact`; it is either an

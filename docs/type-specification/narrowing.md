@@ -69,12 +69,29 @@ environment, with a [trust stratum](trust-stratification.md) and a provenance
 line. This is the lane that answers "what value is this".
 
 **2. Contract facts** — the variable's *declared* type as a lowered, syntactic
-**arm list**, seeded at scope entry and narrowed arm-wise by guards. A native
-member list seeds `Verified`; a `@param` PHPDoc refinement seeds `Asserted`.
-Consumed by exactly four things: arm filtering, `instanceof` implication, catch
-matching, and the declared-receiver lane (`phpdoc.undefined-method`). It is
-**never** consumed by `call.on-null` proofs, arity checks,
-`call.undefined-method`, or binding descent.
+**arm list**, seeded at scope entry and narrowed arm-wise by guards. The seeding
+is a trichotomy over the native type and the `@param` PHPDoc, under the trust
+order's subset discipline (ADR-0052 §9, `refine_contract_arms`): a native member
+the PHPDoc **provably cannot cover** (`string` under `int`) is a contradiction
+and seeds **nothing** — the docblock never widens past the runtime-enforced
+native type; a PHPDoc arm that covers a native member **exactly** stays
+`Verified`; a strict refinement within it (`positive-int` under `int`) is
+`Asserted`. With no native type every PHPDoc arm is `Asserted`; with no PHPDoc
+every native member is `Verified`. An undecidable is-a (two unrelated classes)
+is *not* a contradiction — the arm stays, the FP-safe side. Consumed by exactly
+four things: arm filtering, `instanceof` implication, catch matching, and the
+declared-receiver lane (`phpdoc.undefined-method`). It is **never** consumed by
+`call.on-null` proofs, arity checks, `call.undefined-method`, or binding descent.
+
+The same refinement seeds the **declared-return arm list** at a call site
+(`$x = f(...)` where `f` has a native/PHPDoc return): a uniquely-resolved user
+target's return type refines the assigned variable's contract lane, as the floor
+*below* every proven-value path (a folded literal, the R1 builtin return
+envelope — [value-domain.md](value-domain.md)). **Verified membership is never
+exactness**: a `: Foo` native return seeds an Instance-*membership* arm, not an
+exact-class object — PHP guarantees the value *is a* `Foo`, but the runtime class
+may be any subclass — so the arm feeds the declared-receiver lane and the
+`instanceof` Yes-side only, never an exactness-requiring proof leg.
 
 **3. Class facts (`Member`)** — guard-derived is-a bounds on an object variable:
 `instanceof T` on the positive branch binds `T` into `yes`, the negative branch
@@ -118,6 +135,19 @@ value (a `null` or scalar `Singleton`/`OneOf`, any `Refined`/`General` — all
 four layers denote non-objects) answers `No` — nothing non-object is an
 instance of anything. The `No`-side heap conclusion stays exactness-gated as
 above.
+
+## Existence-guard verdicts
+
+The `*_exists` family (`function_exists`, `class_exists`, `interface_exists`,
+`trait_exists`, `enum_exists`, `method_exists`, `property_exists`) folds to a
+trinary verdict where the catalog and project index can decide it, and the
+positive branch **vouches** for the name (FP class 15). A guarded body —
+`if (class_exists($c)) { new $c(); }`, `if (method_exists($o, 'm')) { $o->m(); }`
+— never produces an absence finding: the guard already established presence on
+the branch it protects, so the absence family ([object-model.md](object-model.md),
+[dynamism.md](dynamism.md)) stands down there. The negative branch is the mirror.
+This is a soundness rule, not a convenience: emitting an absence finding across a
+guard that checked for exactly that would be a false positive.
 
 ## Short-circuit threading
 
@@ -214,6 +244,13 @@ unknown widens to silence. The first three are ADR-0052's N5/N6 slices,
   ([object-model.md](object-model.md)); chained lvalues stay `Barrier`.
 - **`??` in guard position** — refining like `$a !== null ? $a : $b`; today
   `??` yields a value fact only.
+- **`assert($x instanceof T)` does not narrow the class carrier.** The
+  `assert()` construct applies its condition's *value-domain* refinements
+  (`Exact`/`NotNull`/`Exclude`/`IntRange`/`Truthy`) on the fall-through at the
+  `Verified` stratum, but the `Member` (is-a) lane is bound only by the
+  statement-form `if` walk — so an `instanceof` inside `assert()` establishes no
+  class fact. A recorded capability gap (walk_if-only `Member` binding), costing
+  true positives only.
 - **`try`/`catch`/`finally` control flow.** Catch *matching* consumes contract
   facts, but the construct itself is `Opaque` for value flow.
 - **Array element narrowing.** An array is a fact only when *fully* known.

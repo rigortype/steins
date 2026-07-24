@@ -160,7 +160,7 @@ a.php:7:1: error[suppress.unmatched]: @steins-ignore of call.on-null matches no 
 1 diagnostics suppressed by inline ignores
 ```
 
-## The dump ids (landing in v0.1.0)
+## The dump ids
 
 ADR-0053 adds a fourth `debug` layer for *requested introspection* —
 `debug.type` from an explicit `PHPStan\dumpType()` (fail-level: the call is a
@@ -172,8 +172,9 @@ it would invert the quiet-default identity). Dumps are exempt from all three
 suppression channels: the question is in the source, and the remedy is
 deleting the call.
 
-This lane is specified but **not yet emitting in the v0.1.0 binary**: as of
-this build, `dumpType()` and `var_dump()` produce no dump output from
-`check`. The exit postures above (fail for the explicit pair, exit-neutral
-warn for `var_dump`) are what the D3/D4 slices deliver when they land; treat
-this section as the contract, not yet the behavior.
+This lane is **landed in full** (slices D1–D4): `dumpType()` and
+`dumpPhpDocType()` emit at fail level, `var_dump()` reports one warn-level dump
+per argument, and the whole `debug` layer is excluded from every gate counter.
+The rendering is value-precise — a proven `42` prints as `42`, a `'GET'|'POST'`
+set spells its members. `var_dump` reporting is default-on in the built-in
+profiles and silenced with `disable = ["debug.var-dump"]` in a named profile.

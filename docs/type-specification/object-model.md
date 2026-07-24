@@ -72,6 +72,25 @@ modeled, and it erases known values.
 Property facts propagate their stratum in both directions (write and read), so
 an `Asserted` value cannot launder into a proof-layer premise through the heap.
 
+A **hooked property** (PHP 8.4 `get`/`set`, whether declared in the class body
+or on a promoted constructor parameter) **binds no fact** in either direction: a
+write routes through the `set` hook's arbitrary user code — the value that lands
+is whatever the hook stored, not the assigned value — and a read runs the `get`
+hook, so recording either would be a false-positive vector (FP class 16). A
+hooked property is also never `readonly` (the combination is a PHP fatal), so it
+is excluded from readonly tracking too. The absence of a fact is the honest
+floor; the property is simply opaque.
+
+The read direction reaches **depth 1**: a `$var->prop` fetch in a dump argument
+or a call receiver reads the allocation-keyed heap property fact (alias-correct
+by construction). Deeper chains (`$a->b->c`) lower to an opaque form and never
+reach the heap — depth stays exactly 1.
+
+At a `new`, a **promoted constructor parameter** seeds its property fact from the
+bound argument — by position, or **by name** for a named argument
+(`new Point(y: 2, x: 1)` seeds `$x` and `$y` correctly). A hooked promoted
+parameter is excluded, per the rule above.
+
 Two ids consume them: `type.property-mismatch` (proof — a proven value assigned
 to a native-typed property that provably raises a `TypeError` under the assigning
 file's strict mode) and `phpdoc.property-mismatch` (contract — the same against a
