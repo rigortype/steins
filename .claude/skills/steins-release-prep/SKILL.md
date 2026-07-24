@@ -173,13 +173,9 @@ cargo xtask fp-gate
 cargo xtask phpdoc-oracle --check
 cargo deny check licenses
 cargo about generate about.hbs -o THIRD-PARTY-LICENSES.md && git diff --exit-code -- THIRD-PARTY-LICENSES.md
-cargo doc --no-deps --workspace --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --locked
 git diff --check
 ```
-
-`cargo doc` currently emits broken intra-doc links (18 of them, tracked by a
-ratchet in `ci.yml` — see that job's comment). It is not a release blocker; only
-an *increase* is, and CI is what enforces that.
 
 Reading the results:
 
@@ -191,6 +187,10 @@ Reading the results:
 - **phpdoc-oracle** is the conformance rerun; it needs `php` + `composer` + the
   harness `vendor/`. It **succeeds without them** by design, so confirm from its
   output that it actually ran rather than skipped.
+- **rustdoc is a clean gate** — `-D warnings` means a single broken intra-doc link
+  fails, and blocks the release. It reached zero from a ratchet over 18 links and
+  is meant to stay there: fix the link, or reword the reference to plain backticks
+  when the target is genuinely private. Never reintroduce a cap or an `#[allow]`.
 - **`cargo fmt` is not part of this** — the tree is hand-formatted and running it
   would rewrite 110 files. See `rustfmt.toml`.
 - **Smoke the binary the way the release will**, from a directory with no project
