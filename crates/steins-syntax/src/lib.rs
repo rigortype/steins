@@ -1322,14 +1322,15 @@ pub enum CondExpr {
     /// `a || b` / `a or b`.
     Or(Box<CondExpr>, Box<CondExpr>),
     /// A resolvable **call in guard position** (`if (isFoo($x))`). Retained (not
-    /// opaqued) for the *minimal* purpose of consuming the callee's
+    /// opaqued) so the inference layer can (a) consume the callee's
     /// `@phpstan-assert-if-true`/`-if-false` envelopes on the matching branch
-    /// (ADR-0052 §5, at the `Asserted` stratum). Its trace *verdict* stays `Maybe`
-    /// and `reads` (identical to what the equivalent [`Self::Opaque`] carried)
-    /// invalidates its variables on the excluded path exactly as before — the full
-    /// retained-guard-call machinery (env-threaded receiver checks, sequenced
-    /// invalidation, foldable-predicate verdicts) is ADR-0052 §6 / N3, deliberately
-    /// NOT built here.
+    /// (ADR-0052 §5, at the `Asserted` stratum) and (b) fold a recognized existence
+    /// predicate to a real Yes/No/Maybe verdict (`method_exists`/`function_exists`/
+    /// `class_exists` …, ADR-0049 §4 / N3): the env-threaded short-circuit evaluation
+    /// and the foldable-predicate verdicts landed with N3, so a guard call is no
+    /// longer uniformly `Maybe`. Other (unrecognized) guard calls still evaluate to
+    /// `Maybe`, and `reads` (identical to what the equivalent [`Self::Opaque`] carried)
+    /// invalidates its variables on the excluded path exactly as before.
     Call { call: Box<CallExpr>, reads: Vec<String> },
     /// A condition the lowering cannot model. `reads` lists every bare variable it
     /// mentions, so a branch guarded by an opaque condition still invalidates

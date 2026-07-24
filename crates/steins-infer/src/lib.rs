@@ -3442,6 +3442,31 @@ struct Store {
     /// the exactness-gated consumers (§3 NOT-fed list); a final-class `Member` is
     /// deliberately not treated as exactness in v1.
     members: HashMap<String, Member>,
+    /// **Existence vouches** (ADR-0049 §4 conservative guard-respect leg): the set of
+    /// symbols a positive `method_exists`/`function_exists`/`class_exists` … guard has
+    /// vouched for on THIS branch. An absence-family emitter (`call.undefined-method`
+    /// today, S4's ids tomorrow) that resolves to a vouched symbol stays silent even
+    /// when its own proof reached `Absent` — firing against programmer-supplied
+    /// existence evidence would call the programmer a liar. Purely additive and
+    /// walk-local (ADR-0048): bound on the guarded branch clone, INTERSECTED at a
+    /// join (a vouch survives past the `if` only if every fall-through path carried
+    /// it — so `if (method_exists(C,'m')) {} (new C)->m();` never silences the tail),
+    /// and deliberately untouched by [`Self::unbind`]/[`Self::clear`] (a symbol's
+    /// existence does not change when a variable is rebound or a barrier is crossed).
+    vouched: HashSet<Vouch>,
+}
+
+/// A symbol a positive existence guard vouches for (ADR-0049 §4 guard-respect leg).
+/// All names are lowercased — PHP class/function/method names are case-insensitive,
+/// so the vouch matches the resolved emitter symbol case-blind.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Vouch {
+    /// `method_exists(C, 'm')` vouched `C::m` — `class` is the receiver's FQN.
+    Method { class: String, method: String },
+    /// `function_exists('f')` vouched the function `f`.
+    Function(String),
+    /// `class_exists`/`interface_exists`/`trait_exists`/`enum_exists('N')` vouched `N`.
+    Class(String),
 }
 
 /// One arm of a [`Store::contract`] lane: a declared-type alternative plus the
@@ -3541,6 +3566,20 @@ impl Store {
     /// and catch-arm matching — never the exactness-gated lanes.
     fn member_of(&self, var: &str) -> Option<&Member> {
         self.members.get(var)
+    }
+
+    /// Record an existence vouch on this branch (ADR-0049 §4 guard-respect leg).
+    fn vouch(&mut self, v: Vouch) {
+        self.vouched.insert(v);
+    }
+
+    /// Whether a positive existence guard on this path vouched `class::method`
+    /// (case-insensitively — the vouch stores lowercased names).
+    fn vouches_method(&self, class: &str, method: &str) -> bool {
+        self.vouched.contains(&Vouch::Method {
+            class: class.to_ascii_lowercase(),
+            method: method.to_ascii_lowercase(),
+        })
     }
 
     /// Mark the object `var` refers to as escaped (if any).
@@ -5090,7 +5129,7 @@ fn walk_if(
     let poisoned = w.scope.poisoned;
     // 1. Evaluate the guard in the pre-branch env (short-circuit env refinement is
     // stage 2 — each condition sees the same entry env).
-    let verdict = eval_cond(w, cond, env, store, poisoned);
+    let verdict = eval_cond(w, folder, cond, env, store, poisoned);
 
     // A decided guard proves the skipped side dead — record it so the env-free
     // direct pass never reports inside it (live-path discipline, ADR-0002/0031).
@@ -5141,6 +5180,11 @@ fn walk_if(
         for (call, returns_true) in then_calls {
             let kind = if returns_true { AssertKind::IfTrue } else { AssertKind::IfFalse };
             apply_guard_asserts(w, call, kind, &mut benv, &mut bclasses);
+            // Guard-respect leg (ADR-0049 §4): a positive existence guard vouches its
+            // symbol on the branch where it holds true, silencing the absence family.
+            if returns_true && let Some(v) = existence_vouch(w.cx, &bclasses, call) {
+                bclasses.vouch(v);
+            }
         }
         if walk_trace(w, folder, then_trace, &mut benv, &mut bclasses, descent, facts, true, out)
             == Flow::FellThrough
@@ -5159,6 +5203,11 @@ fn walk_if(
         for (call, returns_true) in else_calls {
             let kind = if returns_true { AssertKind::IfTrue } else { AssertKind::IfFalse };
             apply_guard_asserts(w, call, kind, &mut benv, &mut bclasses);
+            // Guard-respect leg (ADR-0049 §4): the negated-guard branch where the
+            // predicate holds true (`if (!method_exists(...)) {} else <here>`) vouches too.
+            if returns_true && let Some(v) = existence_vouch(w.cx, &bclasses, call) {
+                bclasses.vouch(v);
+            }
         }
         if walk_else(w, folder, elseifs, else_trace, &mut benv, &mut bclasses, descent, facts, out)
             == Flow::FellThrough
@@ -5431,8 +5480,14 @@ fn check_call_on_null(
 // ---------------------------------------------------------------------------
 
 /// Evaluate a lowered [`CondExpr`] against the env to a unified [`Certainty`].
+///
+/// `folder` is threaded because a foldable existence-guard call
+/// (`method_exists`/`function_exists`/`class_exists` …, ADR-0049 §4 / N3) folds to
+/// a real verdict by asking the runtime boot surface (the A2ii homonym oracle);
+/// every other arm is env-only and ignores it.
 fn eval_cond(
     w: &WalkCx,
+    folder: &mut dyn Folder,
     cond: &CondExpr,
     env: &HashMap<String, Known>,
     store: &Store,
@@ -5452,7 +5507,7 @@ fn eval_cond(
         CondExpr::Instanceof { operand, class_ref } => {
             eval_instanceof(w, operand, class_ref, env, store, poisoned)
         }
-        CondExpr::Not(c) => eval_cond(w, c, env, store, poisoned).not(),
+        CondExpr::Not(c) => eval_cond(w, folder, c, env, store, poisoned).not(),
         // Short-circuit env threading (ADR-0052 §6 / N3): the RIGHT operand
         // evaluates under the env the LEFT operand's outcome establishes, exactly as
         // PHP's `&&`/`||` sequence it — `b` in `a && b` runs only when `a` was truthy
@@ -5462,27 +5517,316 @@ fn eval_cond(
         // walk-local left-to-right evaluation (ADR-0048 §2): the refinement clone is
         // discarded, no entry state contributes, no ordering beyond the source's own.
         CondExpr::And(a, b) => {
-            let va = eval_cond(w, a, env, store, poisoned);
+            let va = eval_cond(w, folder, a, env, store, poisoned);
             // `a` false ⇒ `b` never runs; the verdict is already `No`, and the
             // threaded env would be a contradiction — skip it.
             if va == Certainty::No {
                 return Certainty::No;
             }
             let (benv, bstore) = threaded_operand_env(a, true, env, store);
-            va.and(eval_cond(w, b, &benv, &bstore, poisoned))
+            va.and(eval_cond(w, folder, b, &benv, &bstore, poisoned))
         }
         CondExpr::Or(a, b) => {
-            let va = eval_cond(w, a, env, store, poisoned);
+            let va = eval_cond(w, folder, a, env, store, poisoned);
             // `a` true ⇒ `b` never runs; the verdict is already `Yes`.
             if va == Certainty::Yes {
                 return Certainty::Yes;
             }
             let (benv, bstore) = threaded_operand_env(a, false, env, store);
-            va.or(eval_cond(w, b, &benv, &bstore, poisoned))
+            va.or(eval_cond(w, folder, b, &benv, &bstore, poisoned))
         }
-        // A guard call's verdict stays undecided (the retained-guard-call verdict
-        // machinery — foldable predicates — is ADR-0052 §6 / N3).
-        CondExpr::Opaque { .. } | CondExpr::Call { .. } => Certainty::Maybe,
+        // A foldable existence predicate in guard position folds to a Yes/No/Maybe
+        // verdict against the closed world (ADR-0049 §4 / N3); an opaque condition or
+        // any other guard call stays undecided.
+        CondExpr::Call { call, .. } => eval_existence_call(w, folder, call),
+        CondExpr::Opaque { .. } => Certainty::Maybe,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Foldable existence-guard verdicts (ADR-0049 §4 / N3).
+//
+// `method_exists(C, 'm')` / `function_exists('f')` / `class_exists('N')` (and the
+// `interface_`/`trait_`/`enum_exists` siblings) in guard position fold to a
+// three-valued `Certainty` against the closed world, so the ADR-0031 dead-region
+// discipline prunes the branch the runtime provably never takes. The verdict rests
+// on the SAME closure the absence family fires under (S1 existence + S2 chain
+// enumeration + the A2ii boot-surface homonym oracle + A2i conditional/dam leg):
+//   * `Yes`  — the symbol is provably PRESENT under complete closure;
+//   * `No`   — provably ABSENT under complete closure;
+//   * `Maybe`— anything short of closure (a trait-bearing chain, a conditional decl
+//              with the dam standing, an unresolvable ancestor, an unanswerable
+//              homonym query, a non-literal argument, or no live boot surface).
+// A `Maybe` verdict is always the FP-safe fallback: it walks both branches live and
+// leans on the conservative guard-respect leg (the per-symbol vouch) for silence.
+// ---------------------------------------------------------------------------
+
+/// The recognized existence predicate a guard call names, or `None` when the call
+/// is not one of them / is a namespaced or userland-shadowed twin (a `Foo\class_exists`
+/// or a same-named user function is a DIFFERENT function, never the global builtin).
+fn existence_predicate(cx: &Cx, call: &CallExpr) -> Option<&'static str> {
+    let callee = call.callee.as_deref()?;
+    let r = call.callee_ref.as_ref()?;
+    // A qualified name (`Foo\method_exists`) is a different function; the raw has its
+    // leading `\` stripped, so any remaining backslash means a namespace prefix.
+    if r.raw.contains('\\') {
+        return None;
+    }
+    // A userland function of the same (unqualified) name shadows the builtin.
+    if matches!(cx.resolve_function(r), FnResolution::User(_)) {
+        return None;
+    }
+    const PREDS: &[&str] = &[
+        "method_exists",
+        "function_exists",
+        "class_exists",
+        "interface_exists",
+        "trait_exists",
+        "enum_exists",
+    ];
+    PREDS.iter().copied().find(|p| callee.eq_ignore_ascii_case(p))
+}
+
+/// Fold a recognized existence-guard call to a verdict (the N3 machinery). Anything
+/// unrecognized or short of closure is `Maybe`.
+fn eval_existence_call(w: &WalkCx, folder: &mut dyn Folder, call: &CallExpr) -> Certainty {
+    let Some(pred) = existence_predicate(w.cx, call) else {
+        return Certainty::Maybe;
+    };
+    // A2ii/A9: without a live boot surface (or with a runtime-redefinition extension
+    // loaded), neither presence nor absence is decidable — the sound subset is Maybe.
+    if !folder.absence_family_available() {
+        return Certainty::Maybe;
+    }
+    if pred == "method_exists" {
+        // `method_exists(class, 'name')` — two positional literal arguments.
+        if !call.positional_only || call.args.len() != 2 {
+            return Certainty::Maybe;
+        }
+        let Some(class_fqn) = existence_class_literal(w.cx, &call.args[0].value) else {
+            return Certainty::Maybe;
+        };
+        let ArgValue::Str(method) = &call.args[1].value else {
+            return Certainty::Maybe;
+        };
+        method_exists_verdict(w.cx, folder, &class_fqn, method)
+    } else if pred == "function_exists" {
+        if !call.positional_only || call.args.len() != 1 {
+            return Certainty::Maybe;
+        }
+        let ArgValue::Str(name) = &call.args[0].value else {
+            return Certainty::Maybe;
+        };
+        function_exists_verdict(w.cx, folder, name)
+    } else {
+        // `class_exists`/`interface_exists`/`trait_exists`/`enum_exists('Name')`.
+        if !call.positional_only || call.args.is_empty() {
+            return Certainty::Maybe;
+        }
+        let Some(name) = existence_class_literal(w.cx, &call.args[0].value) else {
+            return Certainty::Maybe;
+        };
+        classlike_exists_verdict(w.cx, folder, pred, &name)
+    }
+}
+
+/// Resolve a *literal* class reference in an existence-predicate argument to an FQN:
+/// the `C::class` magic constant (resolved in the call site's namespace context) or
+/// a string class name (which PHP treats as fully qualified). A `$var` receiver or
+/// any other form is `None` — the verdict then stays `Maybe`, and the conservative
+/// guard-respect leg (which CAN read the store) carries the silence for a proven-class
+/// variable.
+fn existence_class_literal(cx: &Cx, v: &ArgValue) -> Option<String> {
+    match v {
+        ArgValue::ClassConst(StaticClass::Named(r), name) if name.eq_ignore_ascii_case("class") => {
+            Some(cx.class_fqn(r))
+        }
+        ArgValue::Str(s) => Some(s.trim_start_matches('\\').to_owned()),
+        _ => None,
+    }
+}
+
+/// The three-valued `method_exists(start_fqn, method)` verdict: walk `start_fqn`'s
+/// class chain under the S2 closure discipline (ADR-0049 §4). Unlike the absence
+/// flagship this ignores `__call`/`__callStatic` — `method_exists` reports only
+/// DECLARED methods, magic fallbacks do not make it true. An abstract or any-visibility
+/// declaration counts as present (`method_exists` is visibility-blind). Any obstacle
+/// to closure (a trait-bearing/enum node, an unresolvable ancestor, a cycle, a
+/// conditional node with the dam standing, or an unanswerable/positive boot-surface
+/// homonym on any traversed FQN) collapses to `Maybe`.
+fn method_exists_verdict(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    start_fqn: &str,
+    method: &str,
+) -> Certainty {
+    let mut cur = start_fqn.to_owned();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut fqns: Vec<String> = Vec::new();
+    let mut any_conditional = false;
+    let present;
+    loop {
+        if !seen.insert(cur.to_ascii_lowercase()) {
+            return Certainty::Maybe; // cycle — closure cannot terminate soundly.
+        }
+        let Some((cfile, cd)) = cx.find_class(&cur) else {
+            return Certainty::Maybe; // ancestor leaves the project / ambiguous.
+        };
+        // Enum methods are not lowered; a trait/`uses_traits` node could carry the
+        // method invisibly to this walk — either way, closure is unproven.
+        if cd.is_enum || cd.is_trait || cd.uses_traits {
+            return Certainty::Maybe;
+        }
+        fqns.push(cur.clone());
+        if cd.conditional {
+            any_conditional = true;
+        }
+        if cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case(method)) {
+            present = true;
+            break;
+        }
+        match &cd.parent {
+            None => {
+                present = false;
+                break;
+            }
+            Some(pref) => cur = cx.units[cfile].tree.resolve_class_fqn(pref),
+        }
+    }
+    // A2i: a conditional declaration on the chain re-dams the claim — only the clear
+    // whole-universe dam lets either verdict stand.
+    if any_conditional && !cx.dam.is_clear() {
+        return Certainty::Maybe;
+    }
+    // A2ii: every traversed FQN must be boot-surface homonym-clear, else the runtime
+    // class differs from the textual one and neither presence nor absence is decidable.
+    for fqn in &fqns {
+        match folder.boot_surface_class_like(fqn) {
+            Some(false) => {}
+            Some(true) | None => return Certainty::Maybe,
+        }
+    }
+    if present { Certainty::Yes } else { Certainty::No }
+}
+
+/// The three-valued `function_exists('name')` verdict (ADR-0049 §6 / S1 existence).
+/// A catalog builtin is always present; a uniquely-indexed unconditional userland
+/// function is present; an absent name that the boot surface answers NOT-a-function
+/// is provably absent. A conditional declaration (dam standing), an ambiguous name,
+/// or an unanswerable homonym is `Maybe`.
+fn function_exists_verdict(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Certainty {
+    let lname = name.trim_start_matches('\\').to_ascii_lowercase();
+    // A catalogued builtin is a resident function (`strlen`, `array_map`, …).
+    if steins_catalog::effect_labels(&lname).is_some() {
+        return Certainty::Yes;
+    }
+    match cx.index.resolve_function(&lname) {
+        Res::Unique(site) => {
+            if cx.fn_decl(site).conditional && !cx.dam.is_clear() {
+                Certainty::Maybe // a conditional polyfill with the dam standing.
+            } else {
+                Certainty::Yes
+            }
+        }
+        Res::Ambiguous => Certainty::Maybe,
+        Res::Absent => match folder.boot_surface_function(&lname) {
+            Some(true) => Certainty::Yes,  // a resident extension function.
+            Some(false) => Certainty::No,  // provably absent everywhere.
+            None => Certainty::Maybe,
+        },
+    }
+}
+
+/// The three-valued `class_exists`/`interface_exists`/`trait_exists`/`enum_exists`
+/// verdict (ADR-0049 §4 / S1 existence). A uniquely-indexed unconditional project
+/// class-like of the MATCHING kind is present; an absent name the boot surface reports
+/// as resident is present; an absent name the boot surface reports NOT-resident is
+/// provably absent. A conditional decl (dam standing), an ambiguous name, a kind
+/// mismatch (`class_exists` on an interface), or an unanswerable homonym is `Maybe`.
+fn classlike_exists_verdict(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    pred: &str,
+    name: &str,
+) -> Certainty {
+    let lname = name.trim_start_matches('\\').to_ascii_lowercase();
+    match cx.index.resolve_class(&lname) {
+        Res::Unique(site) => {
+            let (_, cd) = cx.class_decl(site);
+            if cd.conditional && !cx.dam.is_clear() {
+                return Certainty::Maybe;
+            }
+            // The predicate queries one specific kind; `enum` satisfies both
+            // `enum_exists` and `class_exists` (a PHP enum is a class), while a plain
+            // interface/trait never satisfies `class_exists`. A mismatch cannot be
+            // proven true here (the name may still resolve to a boot-surface homonym
+            // of the right kind), so it stays `Maybe`.
+            if classlike_kind_matches(pred, cd) {
+                Certainty::Yes
+            } else {
+                Certainty::Maybe
+            }
+        }
+        Res::Ambiguous => Certainty::Maybe,
+        Res::Absent => match folder.boot_surface_class_like(&lname) {
+            Some(true) => Certainty::Yes,
+            Some(false) => Certainty::No,
+            None => Certainty::Maybe,
+        },
+    }
+}
+
+/// Whether a resolved class-like declaration satisfies the given existence predicate:
+/// `class_exists` accepts a class or enum (never a bare interface/trait);
+/// `interface_exists`/`trait_exists`/`enum_exists` each accept only their own kind.
+fn classlike_kind_matches(pred: &str, cd: &ClassDecl) -> bool {
+    match pred {
+        "class_exists" => !cd.is_interface && !cd.is_trait,
+        "interface_exists" => cd.is_interface,
+        "trait_exists" => cd.is_trait,
+        "enum_exists" => cd.is_enum,
+        _ => false,
+    }
+}
+
+/// The symbol a positive existence guard call vouches for (ADR-0049 §4 guard-respect
+/// leg), resolved against the branch store. `None` when the call is not a recognized
+/// existence predicate or its subject cannot be pinned to a concrete symbol.
+/// `method_exists` additionally resolves a `$var` receiver to its store-known class
+/// (the literal `C::class`/string forms go through [`existence_class_literal`]), so
+/// the instance idiom `if (method_exists($o,'m')) { $o->m(); }` vouches `C::m` — the
+/// exact-textual-match discipline: the vouch key is the RESOLVED class + name.
+fn existence_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Option<Vouch> {
+    let pred = existence_predicate(cx, call)?;
+    if pred == "method_exists" {
+        if !call.positional_only || call.args.len() != 2 {
+            return None;
+        }
+        let ArgValue::Str(method) = &call.args[1].value else {
+            return None;
+        };
+        let class = match &call.args[0].value {
+            ArgValue::Var(v) => store.class_of(v)?.to_owned(),
+            other => existence_class_literal(cx, other)?,
+        };
+        Some(Vouch::Method {
+            class: class.trim_start_matches('\\').to_ascii_lowercase(),
+            method: method.to_ascii_lowercase(),
+        })
+    } else if pred == "function_exists" {
+        if !call.positional_only || call.args.len() != 1 {
+            return None;
+        }
+        let ArgValue::Str(name) = &call.args[0].value else {
+            return None;
+        };
+        Some(Vouch::Function(name.trim_start_matches('\\').to_ascii_lowercase()))
+    } else {
+        if !call.positional_only || call.args.is_empty() {
+            return None;
+        }
+        let name = existence_class_literal(cx, &call.args[0].value)?;
+        Some(Vouch::Class(name.trim_start_matches('\\').to_ascii_lowercase()))
     }
 }
 
@@ -5526,7 +5870,7 @@ fn eval_ternary_fact(
     store: &Store,
 ) -> Option<Fact> {
     let poisoned = w.scope.poisoned;
-    let verdict = eval_cond(w, cond, env, store, poisoned);
+    let verdict = eval_cond(w, folder, cond, env, store, poisoned);
     // The arms evaluate under the guard's respective refinements (ADR-0052 §6):
     // `$c ? A : B` — `A` runs only when `$c` was truthy (so it sees
     // `then_refinements($c)`), `B` only when `$c` was falsy (`else_refinements`).
@@ -6704,7 +7048,14 @@ fn join_stores(first: &Store, rest: &[&Store]) -> Store {
         }
     }
 
-    Store { refs, heap, contract, members }
+    // Existence-vouch lane (ADR-0049 §4): a vouch survives the join only if EVERY
+    // branch carried it — the intersection. A vouch bound on a guarded branch that
+    // falls through must not leak onto a sibling path that was never guarded (so the
+    // tail of `if (method_exists(C,'m')) {} (new C)->m();` still fires).
+    let vouched: HashSet<Vouch> =
+        first.vouched.iter().filter(|v| rest.iter().all(|s| s.vouched.contains(*v))).cloned().collect();
+
+    Store { refs, heap, contract, members, vouched }
 }
 
 /// Remove contract arms another surviving arm subsumes (`Certainty::Yes`) — the
@@ -7862,6 +8213,14 @@ fn check_undefined_method(
     else {
         return;
     };
+    // Guard-respect leg (ADR-0049 §4): a positive `method_exists($this-or-C, 'm')`
+    // guard dominating this site vouched `C::m` — the programmer supplied existence
+    // evidence, so stay silent even if the chain enumeration below would reach Absent
+    // (a `Maybe`-verdict guard whose branch we are walking live). Exact-textual match
+    // on the RESOLVED class + method (case-insensitive).
+    if store.vouches_method(&class_fqn, &method) {
+        return;
+    }
     // A9 (global) + A2ii's honest consequence: without a live sidecar, or with a
     // monkey-patch extension loaded, the id is entirely silent (checked once, cached).
     if !folder.absence_family_available() {
