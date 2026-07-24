@@ -5,6 +5,7 @@ A **shameless knockoff** heavily 'inspired' by PHPStan, born from my grand delus
 ## Docs
 
 - [Quickstart](docs/guide/quickstart.md) — install, first run, exit codes, limits.
+- [Handbook](docs/handbook/README.md) — a guided tour of what Steins proves: the guarantee, the type system, narrowing, and effects.
 - [Profiles and baseline](docs/guide/profiles-and-baseline.md) — named stages, the baseline ratchet, `steins.toml`.
 
 ### Specifications
