@@ -169,13 +169,24 @@ pub struct Surface {
 
 /// Whether a layer prints on **every** surface (ADR-0050 §1: mechanics is anti-rot,
 /// not a strictness preference). Exhaustive on [`Layer`] on purpose: a new variant
-/// (ADR-0053's planned `Debug`, a future `boundary` layer) becomes a *compile
-/// error* here — forcing a deliberate always-on/opt-in decision rather than a
-/// silent fall-through to off.
+/// (a future `boundary` layer) becomes a *compile error* here — forcing a
+/// deliberate always-on/opt-in decision rather than a silent fall-through to off.
 fn layer_always_on(l: Layer) -> bool {
     match l {
         Layer::Mechanics => true,
         Layer::Proof | Layer::Contract => false,
+        // ADR-0053 D1 groundwork, zero behavior: the debug lane is registered but
+        // no id emits yet, and no built-in surface includes it. Returning `false`
+        // keeps every registered `Layer::Debug` id (`debug.type` /
+        // `debug.phpdoc-type` / `debug.var-dump`) off the display surface AND out of
+        // `surface_ids()` — so a `--set-baseline` never captures a debug id (§4's
+        // baseline exemption) and the gate/baseline output stay byte-identical to the
+        // pre-dump run. The default-ON emission with the profile-inert (explicit
+        // pair) / disableable (`debug.var-dump`, §4) split is wired by the D3/D4
+        // emit slices, where the ids actually surface; it is deliberately NOT a
+        // `layer_always_on` answer, because "always on" here also means "captured in
+        // the baseline", which a dump must never be.
+        Layer::Debug => false,
     }
 }
 
@@ -341,8 +352,8 @@ impl ProfileConfigs {
 mod tests {
     use super::*;
     use steins_infer::{
-        CALL_ON_NULL_ID, EFFECT_ID, PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID,
-        SUPPRESS_UNMATCHED_ID, THROW_LISKOV_ID,
+        CALL_ON_NULL_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, EFFECT_ID,
+        PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID, SUPPRESS_UNMATCHED_ID, THROW_LISKOV_ID,
     };
 
     fn diag(id: &'static str, facet: Option<Facet>) -> Diagnostic {
@@ -499,6 +510,27 @@ mod tests {
             ProfileConfigs(m).resolve(Some("contracts")),
             Err(ConfigError::UnknownId { .. })
         ));
+    }
+
+    #[test]
+    fn debug_ids_are_off_every_surface_and_baseline_exempt_in_d1() {
+        // ADR-0053 D1 (zero behavior): the debug lane is registered but unemitted,
+        // and no built-in surface includes it. Every debug id is off the display
+        // surface on default, contracts, and throws-direct — so it never reaches a
+        // later channel — and (crucially) excluded from `surface_ids()`, the baseline
+        // capture set, honoring §4's baseline exemption. The default-ON emission with
+        // the inert/disableable split lands in the D3/D4 emit slices.
+        for profile in [None, Some("contracts"), Some("throws-direct")] {
+            let s = empty().resolve(profile).unwrap();
+            for id in [DEBUG_TYPE_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_VAR_DUMP_ID] {
+                assert!(!s.surfaces_id(id), "`{id}` must be off the surface in D1 ({profile:?})");
+                assert!(!s.is_surfaced(&diag(id, None)), "`{id}` finding must not surface in D1");
+                assert!(
+                    !s.surface_ids().iter().any(|c| c == id),
+                    "`{id}` must be excluded from the baseline capture set (§4 exemption)"
+                );
+            }
+        }
     }
 
     #[test]

@@ -28,10 +28,10 @@ use crate::Diagnostic;
 use crate::{
     CALL_ON_NULL_ID, CALL_TOO_FEW_ARGUMENTS_ID, CALL_TOO_MANY_ARGUMENTS_ID,
     CALL_UNDEFINED_FUNCTION_ID, CALL_UNDEFINED_METHOD_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID,
-    CLASS_UNDEFINED_ID, EFFECT_ID, EFFECT_LISKOV_ID, ID, OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID,
-    PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID, PHPDOC_UNDEFINED_METHOD_ID, PROP_MISMATCH_ID,
-    READONLY_REASSIGNED_ID, RETURN_ID, RETURN_MISMATCH_ID, THROW_LISKOV_ID, THROW_UNDECLARED_ID,
-    UNKNOWN_LABEL_ID,
+    CLASS_UNDEFINED_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, EFFECT_ID,
+    EFFECT_LISKOV_ID, ID, OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID, PARAM_MISMATCH_ID,
+    PHPDOC_PROP_MISMATCH_ID, PHPDOC_UNDEFINED_METHOD_ID, PROP_MISMATCH_ID, READONLY_REASSIGNED_ID,
+    RETURN_ID, RETURN_MISMATCH_ID, THROW_LISKOV_ID, THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID,
 };
 
 /// The registry id for an `@steins-ignore` whose diagnostic id matches nothing on
@@ -58,17 +58,28 @@ pub enum Layer {
     /// The apparatus's own hygiene: a finding whose absence would silently rot
     /// another channel. Gates red on sight (apparatus rot on corpus code).
     Mechanics,
+    /// Requested introspection — an **answered question** (ADR-0053 §1): the
+    /// finding-shaped report exists *because a call site asked for it*
+    /// (`PHPStan\dumpType()`, `var_dump()`), and its content is a fact rendering,
+    /// not a claim about the program. Neither a proof (nothing breaks) nor a
+    /// contract claim (nothing is declared) nor mechanics (nothing rots if absent).
+    /// A layer, not a boolean, precisely so every exhaustive `Layer` match is forced
+    /// to state its debug posture at compile time (the point-1 discipline). fp-gate:
+    /// excluded from every counter (§8). Emitted from D3/D4; registered but unemitted
+    /// in the D1 groundwork.
+    Debug,
 }
 
 impl Layer {
-    /// The lowercase wire spelling (`"proof"|"contract"|"mechanics"`) used by the
-    /// `--format json` `layer` field (ADR-0050 §2).
+    /// The lowercase wire spelling (`"proof"|"contract"|"mechanics"|"debug"`) used by
+    /// the `--format json` `layer` field (ADR-0050 §2 / ADR-0053 §4).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Layer::Proof => "proof",
             Layer::Contract => "contract",
             Layer::Mechanics => "mechanics",
+            Layer::Debug => "debug",
         }
     }
 }
@@ -188,6 +199,13 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer)] = &[
     (SUPPRESS_UNMATCHED_ID, Layer::Mechanics),
     (SUPPRESS_UNKNOWN_ID, Layer::Mechanics),
     (UNKNOWN_LABEL_ID, Layer::Mechanics),
+    // debug — the dump surface (ADR-0053): requested introspection, an answered
+    // question. Registered in D1 ahead of emission (in REGISTERED_NOT_YET_EMITTED
+    // until D3/D4). Suppression- and baseline-exempt (§4), fp-gate counter-exempt
+    // (§8): a dump is not a finding.
+    (DEBUG_TYPE_ID, Layer::Debug),
+    (DEBUG_PHPDOC_TYPE_ID, Layer::Debug),
+    (DEBUG_VAR_DUMP_ID, Layer::Debug),
 ];
 
 /// The flat id list, **derived** from [`DIAGNOSTIC_REGISTRY`] so there is exactly
@@ -419,6 +437,15 @@ mod tests {
         assert!(pattern_is_known("type"));
         assert!(pattern_is_known("effect.envelope-exceeded"));
         assert!(pattern_is_known("suppress.unmatched"));
+        // The ADR-0053 debug ids are registry-governed, so an `@steins-ignore`
+        // naming one is a *known* pattern (never `suppress.unknown-id`). It matches
+        // no dump finding (a dump is suppression-exempt, §4), so it reports
+        // `suppress.unmatched` — the anti-rot channel doing its normal job.
+        assert!(pattern_is_known("debug.type"));
+        assert!(pattern_is_known("debug.phpdoc-type"));
+        assert!(pattern_is_known("debug.var-dump"));
+        assert!(pattern_is_known("debug.*"));
+        assert!(pattern_is_known("debug"));
         // Typos and unknown families.
         assert!(!pattern_is_known("type.bogus"));
         assert!(!pattern_is_known("nope"));

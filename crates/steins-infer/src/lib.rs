@@ -179,6 +179,33 @@ pub const OFFSET_ON_UNSUPPORTED_ID: &str = "offset.on-unsupported";
 /// branch analysis, under descendant closure. Emitted from S6.
 pub const PHPDOC_UNDEFINED_METHOD_ID: &str = "phpdoc.undefined-method";
 
+// ---------------------------------------------------------------------------
+// The dump surface (ADR-0053): the **debug** layer's three ids — requested
+// introspection, an "answered question" (§1). All three carry `Layer::Debug` and
+// are registered ahead of emission (the S1 pattern): they live in
+// `REGISTERED_NOT_YET_EMITTED` through the D1 groundwork and move to
+// `ALL_EMITTABLE_IDS` when their emitter lands (the explicit pair at D3, `var_dump`
+// at D4). No emit site exists yet — D1 is zero behavior.
+// ---------------------------------------------------------------------------
+
+/// The registry id for the explicit `PHPStan\dumpType($e)` dump (ADR-0053 §2, debug
+/// layer): renders the walk's best knowledge of `$e` at the call position (the trust
+/// order — proven value beats membership beats declared arms). Fail-level, fixed:
+/// the named function does not exist at runtime, so a committed call is a guaranteed
+/// fatal (§3). Emitted from D3.
+pub const DEBUG_TYPE_ID: &str = "debug.type";
+
+/// The registry id for the explicit `PHPStan\dumpPhpDocType($e)` dump (ADR-0053 §2,
+/// debug layer): renders the **contract-fact arm list** (the declared envelope as
+/// narrowed by guards) — the declared-side view. Fail-level, fixed (§3). Emitted
+/// from D3.
+pub const DEBUG_PHPDOC_TYPE_ID: &str = "debug.phpdoc-type";
+
+/// The registry id for the default-on `var_dump($e)` dump (ADR-0053 §2, debug
+/// layer): one `debug.type`-shaped report per argument expression. Warn-level,
+/// fixed — exit-neutral forever (§3), profile-disableable (§4). Emitted from D4.
+pub const DEBUG_VAR_DUMP_ID: &str = "debug.var-dump";
+
 /// Every id constant that reaches a `Diagnostic { id: … }` construction site — the
 /// canonical enumeration of what the emitters can produce (ADR-0050 §2 totality).
 ///
@@ -253,6 +280,12 @@ pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
     CALL_TOO_MANY_ARGUMENTS_ID,
     // OFFSET_MISSING_ID / OFFSET_ON_UNSUPPORTED_ID lit up at S3 — now in ALL_EMITTABLE_IDS.
     // PHPDOC_UNDEFINED_METHOD_ID lit up at S6 — now in ALL_EMITTABLE_IDS.
+    // The dump surface's debug ids (ADR-0053), registered in D1 ahead of emission:
+    // the explicit pair (`debug.type` / `debug.phpdoc-type`) lights up at D3, and
+    // `debug.var-dump` at D4. Each moves into ALL_EMITTABLE_IDS by its emit slice.
+    DEBUG_TYPE_ID,
+    DEBUG_PHPDOC_TYPE_ID,
+    DEBUG_VAR_DUMP_ID,
 ];
 
 /// The maximum depth of interprocedural argument-binding descent (Feature B).

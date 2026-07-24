@@ -12,12 +12,12 @@ use std::collections::HashSet;
 use steins_infer::{
     ALL_EMITTABLE_IDS, CALL_ON_NULL_ID, CALL_TOO_FEW_ARGUMENTS_ID, CALL_TOO_MANY_ARGUMENTS_ID,
     CALL_UNDEFINED_FUNCTION_ID, CALL_UNDEFINED_METHOD_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID,
-    CLASS_UNDEFINED_ID, DIAGNOSTIC_IDS, DIAGNOSTIC_REGISTRY, EFFECT_ID, EFFECT_LISKOV_ID,
-    FACET_ORIGIN, Facet, ID, Layer, OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID, Origin,
-    PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID, PHPDOC_UNDEFINED_METHOD_ID, PROP_MISMATCH_ID,
-    READONLY_REASSIGNED_ID, REGISTERED_NOT_YET_EMITTED, RETURN_ID, RETURN_MISMATCH_ID,
-    SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID, THROW_LISKOV_ID, THROW_UNDECLARED_ID,
-    UNKNOWN_LABEL_ID, declared_facet, layer,
+    CLASS_UNDEFINED_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, DIAGNOSTIC_IDS,
+    DIAGNOSTIC_REGISTRY, EFFECT_ID, EFFECT_LISKOV_ID, FACET_ORIGIN, Facet, ID, Layer,
+    OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID, Origin, PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID,
+    PHPDOC_UNDEFINED_METHOD_ID, PROP_MISMATCH_ID, READONLY_REASSIGNED_ID, REGISTERED_NOT_YET_EMITTED,
+    RETURN_ID, RETURN_MISMATCH_ID, SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID, THROW_LISKOV_ID,
+    THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID, declared_facet, layer,
 };
 
 /// Totality, forward: every id an emitter can produce is registered *with* a layer.
@@ -120,6 +120,10 @@ fn classification_matches_adr_0050_section_1() {
     assert_eq!(layer(OFFSET_MISSING_ID), Some(Layer::Proof));
     assert_eq!(layer(OFFSET_ON_UNSUPPORTED_ID), Some(Layer::Proof));
     assert_eq!(layer(PHPDOC_UNDEFINED_METHOD_ID), Some(Layer::Contract));
+    // dump surface (ADR-0053 §1): the three debug ids carry the debug layer.
+    assert_eq!(layer(DEBUG_TYPE_ID), Some(Layer::Debug));
+    assert_eq!(layer(DEBUG_PHPDOC_TYPE_ID), Some(Layer::Debug));
+    assert_eq!(layer(DEBUG_VAR_DUMP_ID), Some(Layer::Debug));
 }
 
 /// The finding-breadth family lights up stage by stage (ADR-0049). At S2 the
@@ -152,14 +156,38 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
     assert!(!pending.contains(PHPDOC_UNDEFINED_METHOD_ID), "S6 must have left REGISTERED_NOT_YET_EMITTED");
     assert_eq!(layer(PHPDOC_UNDEFINED_METHOD_ID), Some(Layer::Contract));
 
-    // The remaining three are still registered ahead of emission: the two S4
-    // existence ids, and the too-many arm (internal targets only, reflect slice M2).
+    // The remaining three finding-breadth ids are still registered ahead of
+    // emission: the two S4 existence ids, and the too-many arm (internal targets
+    // only, reflect slice M2).
     for id in [CALL_UNDEFINED_FUNCTION_ID, CLASS_UNDEFINED_ID, CALL_TOO_MANY_ARGUMENTS_ID] {
         assert!(pending.contains(id), "`{id}` should be registered-not-yet-emitted");
         assert!(!emittable.contains(id), "`{id}` must not be emittable before its stage");
         assert!(layer(id).is_some(), "`{id}` must be registered with a layer");
     }
-    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 3);
+    // Six ids are registered-not-yet-emitted: the three finding-breadth ids above,
+    // plus the three ADR-0053 dump-surface debug ids registered in D1 (checked in
+    // `debug_ids_are_registered_not_yet_emitted`).
+    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 6);
+}
+
+/// The ADR-0053 dump surface D1 groundwork: the three debug ids are registered with
+/// `Layer::Debug`, registered **ahead of emission** (in `REGISTERED_NOT_YET_EMITTED`,
+/// not `ALL_EMITTABLE_IDS`), and carry the kebab-case `debug.*` spellings. They light
+/// up at their emit slices (the explicit pair at D3, `debug.var-dump` at D4).
+#[test]
+fn debug_ids_are_registered_not_yet_emitted() {
+    let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
+    let emittable: HashSet<&str> = ALL_EMITTABLE_IDS.iter().copied().collect();
+
+    for id in [DEBUG_TYPE_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_VAR_DUMP_ID] {
+        assert_eq!(layer(id), Some(Layer::Debug), "`{id}` must be a Debug-layer id");
+        assert!(pending.contains(id), "`{id}` must be registered ahead of emission (D1)");
+        assert!(!emittable.contains(id), "`{id}` must not be emittable until D3/D4");
+    }
+    // The kebab-case spellings are pinned (ADR-0053 §2 / ADR-0022).
+    assert_eq!(DEBUG_TYPE_ID, "debug.type");
+    assert_eq!(DEBUG_PHPDOC_TYPE_ID, "debug.phpdoc-type");
+    assert_eq!(DEBUG_VAR_DUMP_ID, "debug.var-dump");
 }
 
 /// An unregistered id has no layer (the lookup is exact, not prefix-based).
@@ -178,6 +206,8 @@ fn layer_wire_spellings() {
     assert_eq!(Layer::Proof.as_str(), "proof");
     assert_eq!(Layer::Contract.as_str(), "contract");
     assert_eq!(Layer::Mechanics.as_str(), "mechanics");
+    // ADR-0053 §4: the debug layer's `--format json` wire spelling.
+    assert_eq!(Layer::Debug.as_str(), "debug");
 }
 
 /// The `origin` facet (ADR-0050 §4) is declared by exactly one id in v1 —

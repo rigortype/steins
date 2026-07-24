@@ -67,12 +67,48 @@ struct PackageReport {
     elapsed: Duration,
 }
 
-/// Whether a diagnostic is **contract-layer** (ADR-0050 §9): the layer, read from
-/// the steins-infer registry, is the gate's partitioning carrier — contract findings
-/// go to measurement mode; proof and mechanics (and any unregistered id, treated
-/// conservatively) gate red on sight.
+/// Which counter partition a finding routes into (ADR-0050 §9 / ADR-0053 §8). The
+/// **layer** (read from the steins-infer registry) is the gate's partitioning
+/// carrier, and this classification is the one place it is decided — exhaustive on
+/// [`Layer`] so a new variant is a *compile error* here until its gate posture is
+/// stated, never a silent fall-through into a counting bucket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateBucket {
+    /// proof + mechanics (and any unregistered id, treated conservatively): gate
+    /// **red on sight** (ADR-0013).
+    RedOnSight,
+    /// contract: **measurement mode** — reported and counted, gates only on a
+    /// per-package increase past the seeded baseline (ADR-0050 §9).
+    Measurement,
+    /// debug (ADR-0053 §8): requested introspection, **excluded from every counter**
+    /// — not red-on-sight, not a tripwire, not `EXPECTED_PROOF_FINDINGS` material. A
+    /// dump is not a finding. Vacuous today (no debug emitter until ADR-0053 D3/D4),
+    /// so the gate output is byte-identical to the pre-dump run.
+    Excluded,
+}
+
+/// Route a finding to its [`GateBucket`] by layer. Unregistered ids (no layer) are
+/// conservatively red-on-sight, exactly as before. The `Layer::Debug` arm is what
+/// keeps a future dump id out of every counter (ADR-0053 §8).
+fn gate_bucket(d: &Diagnostic) -> GateBucket {
+    match layer(d.id) {
+        Some(Layer::Contract) => GateBucket::Measurement,
+        Some(Layer::Debug) => GateBucket::Excluded,
+        Some(Layer::Proof | Layer::Mechanics) | None => GateBucket::RedOnSight,
+    }
+}
+
+/// Whether a diagnostic is **contract-layer** (ADR-0050 §9): measurement-mode
+/// partitioning. A thin wrapper over [`gate_bucket`] so the layer decision lives in
+/// exactly one exhaustive place.
 fn is_contract(d: &Diagnostic) -> bool {
-    layer(d.id) == Some(Layer::Contract)
+    gate_bucket(d) == GateBucket::Measurement
+}
+
+/// Whether a diagnostic is **debug-layer** (ADR-0053 §8): excluded from every gate
+/// counter. Read from the same exhaustive [`gate_bucket`] partition.
+fn is_debug(d: &Diagnostic) -> bool {
+    gate_bucket(d) == GateBucket::Excluded
 }
 
 /// Whether a diagnostic is one of the measurement-mode `phpdoc.*` contract ids.
@@ -620,6 +656,11 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
     let phpdoc: Vec<Diagnostic> = diags.iter().filter(|d| is_phpdoc(d)).cloned().collect();
     let throws: Vec<Diagnostic> = diags.iter().filter(|d| is_throw(d)).cloned().collect();
     let effects: Vec<Diagnostic> = diags.iter().filter(|d| is_effect_contract(d)).cloned().collect();
+    // Debug-layer findings (ADR-0053 §8) are excluded from every counter before the
+    // contract split and the red-on-sight retain: a dump is requested introspection,
+    // not a finding. Dropped outright — not reported, not counted. Vacuous today (no
+    // debug emitter until D3/D4), so `diags` is byte-identical to the pre-dump run.
+    diags.retain(|d| !is_debug(d));
     diags.retain(|d| !is_contract(d));
     // Split off triaged TRUE runtime-layer positives (reported, not gated). The
     // ADR-0049 S2 flagship `call.undefined-method` now flows through this
@@ -691,6 +732,9 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
     let phpdoc: Vec<Diagnostic> = diags.iter().filter(|d| is_phpdoc(d)).cloned().collect();
     let throws: Vec<Diagnostic> = diags.iter().filter(|d| is_throw(d)).cloned().collect();
     let effects: Vec<Diagnostic> = diags.iter().filter(|d| is_effect_contract(d)).cloned().collect();
+    // Debug-layer findings (ADR-0053 §8): excluded from every counter (see
+    // `analyze_package`). Vacuous until D3/D4 — byte-identical gate output today.
+    diags.retain(|d| !is_debug(d));
     diags.retain(|d| !is_contract(d));
     // Split off triaged TRUE runtime-layer positives (reported, not gated).
     let expected_true: Vec<Diagnostic> =
