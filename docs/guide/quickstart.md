@@ -9,20 +9,44 @@ run.
 
 From a checkout of this workspace:
 
+Homebrew, on macOS or Linux:
+
 ```
-cargo install --path .
+brew install rigortype/tap/steins
 ```
 
-Or run the workspace binary directly out of `target/release/steins` after a
-release build. Prebuilt binaries ship with the release.
+Or download a prebuilt binary from the
+[releases page](https://github.com/rigortype/steins/releases) — `x86_64`/`aarch64`
+Linux (glibc), `x86_64` Linux (musl, static), and `x86_64`/`aarch64` macOS. Each
+archive holds the bare `steins` binary and carries a `.sha256` sidecar beside it.
+Windows is not shipped yet.
 
-The binary has three subcommands and no `--help`; run it with no arguments
+From source, with a Rust toolchain at 1.97 or newer:
+
+```
+cargo install --git https://github.com/rigortype/steins steins-cli
+```
+
+There is no crates.io package: the parser backend is a rev-pinned fork, and
+crates.io does not accept crates with git dependencies. From a checkout of this
+workspace, `cargo install --path crates/steins-cli` works too.
+
+The binary has four subcommands and no `--help`; run it with no arguments
 to see the surface:
 
 ```
 usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor-diagnostics] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
        steins annotate [--no-php] <file.php>
        steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--format text|json] <paths...>
+       steins doctor [--no-php] [--baseline <path>] [path]
+```
+
+`doctor` reports posture rather than findings — which `php` was resolved, what the
+active profile checks, baseline health — and runs no checks at all. It is also the
+quickest way to confirm an install works:
+
+```
+steins doctor --no-php
 ```
 
 ## Requirements

@@ -192,9 +192,14 @@ channels, coverage posture), install path (release binaries;
 Exit criteria:
 
 - Gates G2 (public repos, ADR-0025) and G3 (license) resolved by the
-  user.
+  user. **Both resolved**: G2 with the repo going public, G3 on
+  2026-07-25 with the relicense to Apache-2.0.
 - Tagged v0.1.0; a third party can install and reproduce the adoption
-  drill from docs alone.
+  drill from docs alone. **v0.1.0 tagged 2026-07-25** — five prebuilt
+  targets, a Homebrew tap, and `cargo install --git`, with the install
+  path written up in the quickstart and the handbook. The
+  third-party-reproduction half is not self-certifiable and stays open
+  until someone outside the project actually does it.
 
 ### M4 — Ecosystem knowledge
 
