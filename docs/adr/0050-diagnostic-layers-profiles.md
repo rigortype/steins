@@ -214,3 +214,38 @@ registry attribute and the printed surface a named, deliberate choice.
     `doctor` reporting written-but-unchecked envelopes and the active
     surface (M2); per-layer SARIF level overrides if code-scanning
     ingestion demands them.
+
+## Amendment (2026-07-24): G1 decided — demote, with named-stage opt-up
+
+The owner resolved gate G1, and generalized it into a standing
+principle recorded here because this ADR is where surfaces live:
+
+**The lenient-default principle (owner, 2026-07-24): defaults are
+lenient; strictness is opt-in, expressed as named stages a project
+declares in config.** A project's appetite for debt reporting is not
+uniform — it tracks the project's modernization stage — so the tool
+never guesses it; the repo declares it, reviewably.
+
+1. **G1 outcome: demote.** The built-in `default` profile is
+   proof + mechanics (point 3's shape, now unconditional). `throw.*`
+   lives in the `contracts` profile. The "wrote `@throws`, got
+   silence" gap is doctor's written-but-unchecked-envelopes notice
+   (point 11), unchanged.
+2. **Named stages, never a ladder.** The graduated-strictness wish is
+   served by *named* profiles a project selects in `[check] profile`
+   and ratchets through with the baseline round-trip (§8) — the
+   numeric-level refusal (point 10) stands untouched: stages have
+   names and definitions, not numbers.
+3. **A possible middle stage is measurement-gated.** Whether a
+   `throw.undeclared` direct-origin subset deserves a named built-in
+   stage (the point-4 split, needing the origin facet) is decided by
+   the pending direct-vs-propagated measurement over the legacy
+   corpus, not by taste. Until then v1 ships `default` and
+   `contracts` exactly as point 5 states.
+4. **Two carve-outs, restated as binding.** (a) Mechanics ids print in
+   every profile (anti-rot is not a strictness preference). (b) The
+   `[runtime]` pseudo-constants (`zend-assertions`,
+   `warning-handler`, `include-path`, `sapi`) are declarations of
+   boot truth (ADR-0037 §2, ask-the-real-thing), NOT strictness
+   knobs — the lenient-default principle governs *reporting
+   surfaces* and never reopens the trust-toggle refusal (point 10).
