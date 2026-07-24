@@ -127,9 +127,9 @@ fn classification_matches_adr_0050_section_1() {
 }
 
 /// The finding-breadth family lights up stage by stage (ADR-0049). At S2 the
-/// flagship `call.undefined-method` is **emitted**; at S3 the offset pair
-/// (`offset.missing` / `offset.on-unsupported`) joins it in `ALL_EMITTABLE_IDS`;
-/// the remaining six stay registered ahead of emission.
+/// flagship `call.undefined-method` is **emitted**; S3 adds the offset pair, S4 the
+/// two existence ids, S5 the userland arity arms, S6 the declared-receiver lane —
+/// leaving only the internal-target too-many arm registered ahead of emission.
 #[test]
 fn finding_breadth_ids_light_up_stage_by_stage() {
     let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
@@ -138,6 +138,14 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
     // S2/S3: the flagship and the offset pair are emittable proof-layer ids.
     for id in [CALL_UNDEFINED_METHOD_ID, OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID] {
         assert!(emittable.contains(id), "`{id}` must be emittable from its stage (S2/S3)");
+        assert!(!pending.contains(id), "`{id}` must have left REGISTERED_NOT_YET_EMITTED");
+        assert_eq!(layer(id), Some(Layer::Proof));
+    }
+
+    // S4: the two existence ids are emittable proof-layer ids and left the pending
+    // list (promoted after the zero-FP measurement run + field survey).
+    for id in [CALL_UNDEFINED_FUNCTION_ID, CLASS_UNDEFINED_ID] {
+        assert!(emittable.contains(id), "`{id}` must be emittable from S4");
         assert!(!pending.contains(id), "`{id}` must have left REGISTERED_NOT_YET_EMITTED");
         assert_eq!(layer(id), Some(Layer::Proof));
     }
@@ -156,19 +164,16 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
     assert!(!pending.contains(PHPDOC_UNDEFINED_METHOD_ID), "S6 must have left REGISTERED_NOT_YET_EMITTED");
     assert_eq!(layer(PHPDOC_UNDEFINED_METHOD_ID), Some(Layer::Contract));
 
-    // The remaining three finding-breadth ids are still registered ahead of
-    // emission: the two S4 existence ids, and the too-many arm (internal targets
-    // only, reflect slice M2).
-    for id in [CALL_UNDEFINED_FUNCTION_ID, CLASS_UNDEFINED_ID, CALL_TOO_MANY_ARGUMENTS_ID] {
-        assert!(pending.contains(id), "`{id}` should be registered-not-yet-emitted");
-        assert!(!emittable.contains(id), "`{id}` must not be emittable before its stage");
-        assert!(layer(id).is_some(), "`{id}` must be registered with a layer");
-    }
-    // Three ids are registered-not-yet-emitted: the two S4 existence ids, and the
-    // too-many arm (internal targets only, reflect slice M2). All three ADR-0053
-    // dump-surface debug ids have lit up (the explicit pair at D3, `debug.var-dump`
-    // at D4 — checked in `all_three_debug_ids_emit`).
-    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 3);
+    // Only ONE finding-breadth id stays registered ahead of emission: the too-many
+    // arm (internal targets only — userland too-many runs clean, never a finding —
+    // waiting on the reflect slice, M2).
+    let too_many = CALL_TOO_MANY_ARGUMENTS_ID;
+    assert!(pending.contains(too_many), "`{too_many}` should be registered-not-yet-emitted");
+    assert!(!emittable.contains(too_many), "`{too_many}` must not be emittable before its stage");
+    assert!(layer(too_many).is_some(), "`{too_many}` must be registered with a layer");
+    // One id is registered-not-yet-emitted: the too-many arm. All three ADR-0053
+    // dump-surface debug ids have lit up (checked in `all_three_debug_ids_emit`).
+    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 1);
 }
 
 /// The ADR-0053 dump surface: all three debug ids emit — the explicit pair

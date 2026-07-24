@@ -282,6 +282,12 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // until the reflect slice (M2).
     CALL_TOO_FEW_ARGUMENTS_ID,
     CALL_UNKNOWN_NAMED_ARGUMENT_ID,
+    // The existence ids, lit up at ADR-0049 S4 (`check_undefined_function` /
+    // `check_undefined_class`): dammed absence proofs behind a clear whole-universe
+    // dam. Promoted after the measurement run (99,280 corpus files + the nsrt/kimai/
+    // ec-cube2 field survey) yielded ZERO findings — zero FPs, so nothing to pin.
+    CALL_UNDEFINED_FUNCTION_ID,
+    CLASS_UNDEFINED_ID,
     // The dump surface's ids (ADR-0053), all lit up from `emit_dumps` (the walk's
     // call-handling arm): the explicit pair `debug.type` / `debug.phpdoc-type` (D3),
     // recognized by resolved FQN, and `debug.var-dump` (D4), recognized by the PHP
@@ -307,13 +313,10 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
 /// fails the forward-totality check exactly as before — this list only carves out
 /// the not-yet-emitted registry entries, never the emitted-but-unregistered defect.
 pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
-    CALL_UNDEFINED_FUNCTION_ID,
-    // CALL_UNDEFINED_METHOD_ID lit up at S2 — now in ALL_EMITTABLE_IDS.
-    CLASS_UNDEFINED_ID,
-    // CALL_TOO_FEW_ARGUMENTS_ID / CALL_UNKNOWN_NAMED_ARGUMENT_ID lit up at S5 (the
-    // userland arms) — now in ALL_EMITTABLE_IDS. The too-many arm fires for
-    // INTERNAL targets only (userland too-many runs clean — never a finding), so it
-    // waits for the reflect slice (M2).
+    // CALL_UNDEFINED_FUNCTION_ID / CLASS_UNDEFINED_ID lit up at S4 — now in
+    // ALL_EMITTABLE_IDS. CALL_UNDEFINED_METHOD_ID lit up at S2. The too-many arm
+    // fires for INTERNAL targets only (userland too-many runs clean — never a
+    // finding), so it waits for the reflect slice (M2).
     CALL_TOO_MANY_ARGUMENTS_ID,
     // OFFSET_MISSING_ID / OFFSET_ON_UNSUPPORTED_ID lit up at S3 — now in ALL_EMITTABLE_IDS.
     // PHPDOC_UNDEFINED_METHOD_ID lit up at S6 — now in ALL_EMITTABLE_IDS.
@@ -392,6 +395,16 @@ pub trait Folder {
     fn php_minor(&mut self) -> Option<(u16, u16)> {
         None
     }
+
+    /// The boot surface's self-description for the existence-id message register
+    /// (ADR-0049 §9): `PHP 8.5.8 (32 extensions)`, sourced from the sidecar `env()`.
+    /// `None` (the default / sound subset) when no sidecar answers — the emitter
+    /// then falls back to a version-agnostic phrasing. The existence ids only fire
+    /// when [`Self::absence_family_available`] is `true`, so a live label is the
+    /// normal case at a firing site.
+    fn boot_surface_label(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// The runtime-redefinition extensions that void the absence family (ADR-0049 A9):
@@ -431,6 +444,10 @@ pub struct SidecarFolder {
     /// Memoized project PHP `(major, minor)` from the sidecar `env()` (ADR-0052
     /// A11) — a whole-run query answer. `Some(None)` records "asked, unanswerable".
     php_minor: Option<Option<(u16, u16)>>,
+    /// Memoized boot-surface description (`PHP 8.5.8 (32 extensions)`) from the
+    /// sidecar `env()` — the ADR-0049 §9 message register's closure-evidence clause
+    /// for the existence ids. `Some(None)` records "asked, unanswerable".
+    boot_surface_label: Option<Option<String>>,
 }
 
 impl SidecarFolder {
@@ -448,6 +465,7 @@ impl SidecarFolder {
             boot_surface_memo: HashMap::new(),
             boot_surface_fn_memo: HashMap::new(),
             php_minor: None,
+            boot_surface_label: None,
         }
     }
 
@@ -548,6 +566,18 @@ impl Folder for SidecarFolder {
         // an unparseable / absent report stays `None` (no detectable skew — A11).
         let answer = self.ensure_sidecar().and_then(Sidecar::env).and_then(|e| parse_php_minor(&e.php_version));
         self.php_minor = Some(answer);
+        answer
+    }
+
+    fn boot_surface_label(&mut self) -> Option<String> {
+        if let Some(cached) = &self.boot_surface_label {
+            return cached.clone();
+        }
+        let answer = self
+            .ensure_sidecar()
+            .and_then(Sidecar::env)
+            .map(|e| format!("PHP {} ({} extensions)", e.php_version, e.extensions.len()));
+        self.boot_surface_label = Some(answer.clone());
         answer
     }
 }
@@ -989,6 +1019,17 @@ fn check_units(
                 Some(&mut dead_spans),
                 &mut out,
             );
+        }
+
+        // --- The `class.undefined` pass (ADR-0049 §5 / S4): the file's hard-error
+        // class references, judged once each. A reference in a proven-dead region is
+        // skipped — which IS this id's guard leg (a `class_exists('X')` whose class
+        // meets the firing conditions folds its branch dead under the same closure).
+        for r in cx.tree().hard_class_refs() {
+            if in_dead(&dead_spans, r.offset) {
+                continue;
+            }
+            check_undefined_class(&cx, folder, r, &mut out);
         }
 
         // --- Direct pass: literal / array / `new` arguments at every function
@@ -3617,6 +3658,16 @@ impl Store {
         })
     }
 
+    /// Whether a positive `function_exists('f')` guard on this path vouched the
+    /// function `f` (ADR-0049 §3 / FP-15 guard leg; case-insensitive — the vouch
+    /// stores the lowercased, leading-`\`-stripped name). (`class.undefined` needs no
+    /// twin here: its firing conditions — index Absent + boot not-found — are exactly
+    /// what folds a `class_exists('X')` guard's branch dead, so dead-region pruning
+    /// is that id's guard leg.)
+    fn vouches_function(&self, fqn: &str) -> bool {
+        self.vouched.contains(&Vouch::Function(fqn.trim_start_matches('\\').to_ascii_lowercase()))
+    }
+
     /// Mark the object `var` refers to as escaped (if any).
     fn mark_escaped(&mut self, var: &str) {
         if let Some(id) = self.refs.get(var).copied()
@@ -3938,6 +3989,12 @@ fn walk_trace(
                     // plain per-scope pass, like the absence flagship.
                     if descent.is_none() {
                         check_arity(cx, folder, call, store, scope.poisoned, out);
+                        // The existence flagship (ADR-0049 §3 / S4): a call to a
+                        // provably-undefined function behind a clear dam. Judged once
+                        // in the plain per-scope pass; the walk has already pruned any
+                        // proven-dead region, and the branch store carries the FP-15
+                        // `function_exists` vouch.
+                        check_undefined_function(cx, folder, call, store, out);
                         // The dump surface (ADR-0053 D3/D4): a recognized
                         // `PHPStan\dumpType`-family or `var_dump` call emits its fact
                         // rendering at this position. Plain per-scope pass only, so a
@@ -8309,6 +8366,250 @@ fn check_undefined_method(
         line: pos.line,
         column: pos.column,
         message,
+        facet: None,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// The existence ids: `call.undefined-function` + `class.undefined`
+// (ADR-0049 §3/§5 / S4 — the FP-risk hotspot, opened in measurement mode first).
+//
+// Both are DAMMED absence claims (unlike S2's method-absence, which is immune —
+// PHP cannot reopen a resolved class, but eval and out-of-universe includes DO mint
+// functions and classes at runtime). So a standing dam site ANYWHERE in the universe
+// silences the whole slice: the include-heavy legacy monorepo stays quiet while
+// dynamism-free OSS packages fire — the §10 falsifiable prediction. The shared
+// ladder (any leg failing ⇒ silence, the zero-FP identity ADR-0013):
+//   - a real direct call / a hard-error class position (first-class callables,
+//     `$fn()`, `::class`, instanceof, catch, type-decls are §5's verified NON-findings);
+//   - `absence_family_available` (A9 monkey-patch void + the no-sidecar sound subset);
+//   - not a reserved dump FQN (D3 carve-out) and not a curated SAPI-provided name (A6);
+//   - every candidate FQN index-Absent — not Unique, not Ambiguous, not a catalog builtin;
+//   - the whole-universe dam clear (A5-corrected; the vouch valve is NOT in scope —
+//     dammed ⇒ silent);
+//   - the boot surface answers not-found for every candidate (A2ii / reflect);
+//   - not existence-vouched by a dominating `function_exists`/`class_exists` guard —
+//     for `call.undefined-function` via the branch store (FP-15); for `class.undefined`
+//     via dead-region pruning, since a decided guard whose class meets the firing
+//     conditions (Absent + boot not-found) folds its branch dead under the SAME closure;
+//   - PHP function-/class-name case-insensitivity throughout.
+// ---------------------------------------------------------------------------
+
+/// The curated SAPI-provided functions (ADR-0049 A6): symbols a CLI sidecar lacks
+/// but the serving FPM/Apache/LiteSpeed runtime provides, so they are NEVER Absent
+/// while the serving SAPI is undeclared (the default — `[runtime] sapi` would unlock
+/// a firing claim, deferred-with-design). Matched case-insensitively on the already-
+/// lowercased candidate; the `apache_`/`litespeed_` families are prefix-matched.
+fn is_sapi_provided_function(lname: &str) -> bool {
+    const EXACT: &[&str] = &["fastcgi_finish_request", "getallheaders", "virtual"];
+    lname.starts_with("apache_") || lname.starts_with("litespeed_") || EXACT.contains(&lname)
+}
+
+/// Resolve a function-call reference to its provably-**absent** target under PHP name
+/// resolution (ADR-0049 §3 (a) + A8): `Some((display, candidates))` when EVERY FQN the
+/// call could denote is index-`Absent` (no Unique decl — conditional decls are indexed
+/// too, so this excludes the polyfill idiom — and no `Ambiguous`), and no candidate is
+/// a catalog builtin; `None` otherwise (resolved / ambiguous / builtin ⇒ silence).
+/// `display` is the source-cased primary target (the current-ns candidate for an
+/// unqualified call); `candidates` are the lowercased FQNs whose runtime existence the
+/// boot-surface leg must also refute (two for an unqualified in-namespace call: the
+/// `Ns\name` candidate PHP tries first, then the global fallback).
+fn undefined_function_target(cx: &Cx, r: &NameRef) -> Option<(String, Vec<String>)> {
+    let catalog_knows = |n: &str| steins_catalog::effect_labels(n).is_some();
+    let absent = |fqn: &str| matches!(cx.index.resolve_function(fqn), Res::Absent);
+    match r.kind {
+        RefKind::FullyQualified => {
+            let lname = r.raw.to_ascii_lowercase();
+            // A single-segment global name (`\strlen`) may be a builtin.
+            if !r.raw.contains('\\') && catalog_knows(&lname) {
+                return None;
+            }
+            absent(&lname).then(|| (r.raw.clone(), vec![lname]))
+        }
+        RefKind::Qualified => {
+            let ctx = cx.tree().ctx_at(r.offset);
+            let first_len = r.raw.find('\\').unwrap_or(r.raw.len());
+            let first = &r.raw[..first_len];
+            let fqn = if let Some(t) = ctx.class_imports.get(&first.to_ascii_lowercase()) {
+                format!("{t}{}", &r.raw[first_len..])
+            } else if ctx.namespace.is_empty() {
+                r.raw.clone()
+            } else {
+                format!("{}\\{}", ctx.namespace, r.raw)
+            };
+            let lname = fqn.to_ascii_lowercase();
+            absent(&lname).then_some((fqn, vec![lname]))
+        }
+        RefKind::Relative => {
+            // A8: `namespace\name` — the enclosing-ns candidate only, no fallback.
+            let ctx = cx.tree().ctx_at(r.offset);
+            if ctx.namespace.is_empty() {
+                let lname = r.raw.to_ascii_lowercase();
+                if catalog_knows(&lname) {
+                    return None;
+                }
+                absent(&lname).then(|| (r.raw.clone(), vec![lname]))
+            } else {
+                let fqn = format!("{}\\{}", ctx.namespace, r.raw);
+                let lname = fqn.to_ascii_lowercase();
+                absent(&lname).then_some((fqn, vec![lname]))
+            }
+        }
+        RefKind::Unqualified => {
+            let ctx = cx.tree().ctx_at(r.offset);
+            let name = r.raw.to_ascii_lowercase();
+            // `use function` import wins outright: the single candidate is its target.
+            if let Some(t) = ctx.fn_imports.get(&name) {
+                let lt = t.to_ascii_lowercase();
+                if !lt.contains('\\') && catalog_knows(&lt) {
+                    return None;
+                }
+                return absent(&lt).then(|| (t.clone(), vec![lt]));
+            }
+            let (display, ns_candidate) = if ctx.namespace.is_empty() {
+                (r.raw.clone(), None)
+            } else {
+                // PHP tries `Ns\name` first; a Unique or Ambiguous there ⇒ not absent.
+                let ns_l = format!("{}\\{}", ctx.namespace, name);
+                if !absent(&ns_l) {
+                    return None;
+                }
+                (format!("{}\\{}", ctx.namespace, r.raw), Some(ns_l))
+            };
+            // Global fallback candidate: a catalog builtin or any user/ambiguous global
+            // means the call resolves — silence.
+            if catalog_knows(&name) || !absent(&name) {
+                return None;
+            }
+            let mut candidates: Vec<String> = ns_candidate.into_iter().collect();
+            candidates.push(name);
+            Some((display, candidates))
+        }
+    }
+}
+
+/// Run the ADR-0049 §3 ladder for one function call and emit
+/// `call.undefined-function` iff **every** leg holds. Called only in the plain
+/// per-scope pass (`descent.is_none()`), and never inside a proven-dead region (the
+/// walk prunes those), so a site is judged once with the branch store live.
+fn check_undefined_function(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    store: &Store,
+    out: &mut Vec<Diagnostic>,
+) {
+    // Leg (d): a real direct call. A first-class callable `f(...)` builds a Closure
+    // (never invokes); `$fn()` / `call_user_func` are other `Callee` variants.
+    let Callee::Function(_) = &call.receiver else {
+        return;
+    };
+    if is_first_class_callable(call) {
+        return;
+    }
+    let Some(r) = call.callee_ref.as_ref() else {
+        return;
+    };
+    // Index leg (cheap, first): every candidate provably Absent (not Unique/Ambiguous,
+    // not a catalog builtin). `None` ⇒ resolved/ambiguous ⇒ silence.
+    let Some((display, candidates)) = undefined_function_target(cx, r) else {
+        return;
+    };
+    // D3 carve-out: a reserved dump FQN already reds CI with a fail-level dump — a
+    // second finding for one deletable line is noise (ADR-0053 §6).
+    if is_dump_family_fqn(&resolved_fn_fqn(cx, r)) {
+        return;
+    }
+    // A6: a curated SAPI-provided name is never Absent under an undeclared SAPI.
+    if candidates.iter().any(|c| is_sapi_provided_function(c)) {
+        return;
+    }
+    // FP-15 guard leg: a dominating positive `function_exists('f')` vouched the name.
+    if candidates.iter().any(|c| store.vouches_function(c)) {
+        return;
+    }
+    // Dam leg (A5): function existence is dammed — a standing dynamism site could mint
+    // the name (the vouch valve is not in scope this slice ⇒ dammed is silent).
+    if !cx.dam.is_clear() {
+        return;
+    }
+    // A9 + no-sidecar sound subset: the whole family is silent (checked once, cached).
+    if !folder.absence_family_available() {
+        return;
+    }
+    // Boot-surface leg (A2ii / reflect): every candidate must be answered NOT-a-function
+    // by the project's own PHP. A homonym (`Some(true)`) or unanswerable (`None`) ⇒ silence.
+    for c in &candidates {
+        match folder.boot_surface_function(c) {
+            Some(false) => {}
+            Some(true) | None => return,
+        }
+    }
+
+    // Every leg holds — a proven `Error: Call to undefined function f()`.
+    let pos = cx.tree().position(call.span.start);
+    let evidence = existence_evidence(folder);
+    out.push(Diagnostic {
+        id: CALL_UNDEFINED_FUNCTION_ID,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message: format!("call to undefined function {display}() — {evidence}"),
+        facet: None,
+    });
+}
+
+/// The ADR-0049 §9 closure-evidence clause for the existence ids: the boot surface's
+/// self-description (`not defined in the project, not on PHP 8.5.8 (32 extensions)`),
+/// or a version-agnostic phrasing when the sidecar reports no label.
+fn existence_evidence(folder: &mut dyn Folder) -> String {
+    folder.boot_surface_label().map_or_else(
+        || "not defined in the project, not on the analyzing PHP".to_owned(),
+        |label| format!("not defined in the project, not on {label}"),
+    )
+}
+
+/// Run the ADR-0049 §5 ladder for the file's hard-error class references and emit
+/// `class.undefined` for each provably-absent one. Called once per file (never under
+/// a descent); dead-region references are skipped by the caller, which is exactly the
+/// guard leg for this id (a `class_exists('X')` whose class meets the firing
+/// conditions folds its branch dead under the SAME closure this ladder rests on).
+fn check_undefined_class(cx: &Cx, folder: &mut dyn Folder, r: &NameRef, out: &mut Vec<Diagnostic>) {
+    // The class-LIKE closure set (classes + interfaces + enums + traits, alias edges
+    // followed) — index Absent, not Ambiguous. `self`/`static`/`parent`, dynamic
+    // classes, and `X::class` were excluded at collection.
+    let display = cx.tree().resolve_class_fqn(r);
+    let lname = display.to_ascii_lowercase();
+    if !matches!(cx.index.resolve_class(&lname), Res::Absent) {
+        return; // Unique (defined / aliased) or Ambiguous ⇒ silence.
+    }
+    // Extra silence (a subset of the sidecar's answer, never a firing license): a class
+    // the catalog knows as a builtin/extension class-like in its hierarchy.
+    if steins_catalog::builtin_class_supers(&lname).is_some() {
+        return;
+    }
+    // Dam leg (A5): class existence is dammed — eval / out-of-universe include mints.
+    if !cx.dam.is_clear() {
+        return;
+    }
+    // A9 + no-sidecar sound subset.
+    if !folder.absence_family_available() {
+        return;
+    }
+    // Boot-surface leg (A2ii / reflect): the project's own PHP must answer not-found.
+    match folder.boot_surface_class_like(&lname) {
+        Some(false) => {}
+        Some(true) | None => return,
+    }
+
+    let pos = cx.tree().position(r.offset);
+    let evidence = existence_evidence(folder);
+    out.push(Diagnostic {
+        id: CLASS_UNDEFINED_ID,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message: format!("reference to undefined class {display} — {evidence}"),
         facet: None,
     });
 }

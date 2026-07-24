@@ -216,9 +216,11 @@ fn editing_the_flagged_line_resurfaces_and_marks_stale() {
 #[test]
 fn duplicate_findings_and_entries_match_one_for_one() {
     let dir = workdir("dup");
-    // Two `width("abc")` calls with identical neighborhoods (`foo();` above and
-    // below each) → identical (id, path, hash) → two identical baseline lines.
-    let src = "<?php\nfunction width(int $w): int { return $w; }\nfoo();\nwidth(\"abc\");\nfoo();\nwidth(\"abc\");\nfoo();\n";
+    // Two `width("abc")` calls with identical neighborhoods (a silent builtin filler
+    // `strlen("x");` above and below each) → identical (id, path, hash) → two
+    // identical baseline lines. (A bare undefined call would now itself be an S4
+    // `call.undefined-function` finding, so the filler must be a resident builtin.)
+    let src = "<?php\nfunction width(int $w): int { return $w; }\nstrlen(\"x\");\nwidth(\"abc\");\nstrlen(\"x\");\nwidth(\"abc\");\nstrlen(\"x\");\n";
     write(&dir, "a.php", src);
     assert_eq!(run_in(&dir, &["check", "--set-baseline", "a.php"]).code, 0);
 

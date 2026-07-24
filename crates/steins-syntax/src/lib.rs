@@ -1722,6 +1722,9 @@ pub struct SourceTree {
     /// declared-receiver lane's descendant closure (S6) — an invisible descendant
     /// obstacle. Consumed by nothing else.
     anon_class_edges: Vec<AnonClassEdge>,
+    /// Class references at the four hard-error positions (ADR-0049 §5 / S4), read by
+    /// the `class.undefined` per-file pass.
+    hard_class_refs: Vec<NameRef>,
     parse_errors: Vec<ParseError>,
     /// The comment trivia in the file, in source order (ADR-0023 inline ignores).
     comments: Vec<Comment>,
@@ -1829,6 +1832,7 @@ impl SourceTree {
             dynamism: lowered.dynamism,
             class_alias_edges: lowered.class_alias_edges,
             anon_class_edges: lowered.anon_class_edges,
+            hard_class_refs: lowered.hard_class_refs,
             parse_errors,
             comments,
             contexts,
@@ -1910,6 +1914,15 @@ impl SourceTree {
     /// The anonymous-class inheritance edges found file-wide (ADR-0049 A4). Read by
     /// the declared-receiver lane's descendant closure (S6) to detect an invisible
     /// descendant of a union member (an anon class is never in the class index).
+    /// Class references at the four hard-error positions — `new X`, `X::m()`,
+    /// `X::CONST`, `X::$prop` (ADR-0049 §5 / S4). Consumed by the `class.undefined`
+    /// per-file pass; `self`/`static`/`parent`, dynamic classes, and `X::class` are
+    /// excluded at collection.
+    #[must_use]
+    pub fn hard_class_refs(&self) -> &[NameRef] {
+        &self.hard_class_refs
+    }
+
     #[must_use]
     pub fn anonymous_class_edges(&self) -> &[AnonClassEdge] {
         &self.anon_class_edges
@@ -1970,6 +1983,13 @@ struct Lowered {
     dynamism: Vec<DynamismSite>,
     class_alias_edges: Vec<ClassAliasEdge>,
     anon_class_edges: Vec<AnonClassEdge>,
+    /// Class references at the four **hard-error positions** (ADR-0049 §5 / S4):
+    /// `new X`, `X::m()`, `X::CONST`, `X::$prop`. Explicit named classes only —
+    /// `self`/`static`/`parent`, dynamic class exprs, and the `X::class` magic
+    /// constant (a plain string since 8.0, never an error) are excluded at
+    /// collection, so the collection IS exactly the verified finding-position set
+    /// (`instanceof`/`catch`/type-decls are other node kinds, never collected here).
+    hard_class_refs: Vec<NameRef>,
 }
 
 fn walk(
@@ -2004,6 +2024,35 @@ fn walk(
                     .unwrap_or_default(),
                 span: to_span(ac.span()),
             });
+        }
+        // The four hard-error class-reference positions (ADR-0049 §5 / S4). Each
+        // collects only an explicitly-named class (`trace_static_class` /
+        // `instantiation_class` return `None`/non-`Named` for self/static/parent and
+        // dynamic class exprs), so `class.undefined` never fires on those forms.
+        Node::Instantiation(inst) => {
+            if let Some(r) = instantiation_class(inst) {
+                out.hard_class_refs.push(r);
+            }
+        }
+        Node::StaticMethodCall(sc) => {
+            if let Some(StaticClass::Named(r)) = trace_static_class(sc.class) {
+                out.hard_class_refs.push(r);
+            }
+        }
+        Node::ClassConstantAccess(cc) => {
+            // `X::class` is a plain string since PHP 8.0 — never a hard-error site.
+            let is_class_const =
+                class_const_name(&cc.constant).is_some_and(|n| n.eq_ignore_ascii_case("class"));
+            if !is_class_const
+                && let Some(StaticClass::Named(r)) = trace_static_class(cc.class)
+            {
+                out.hard_class_refs.push(r);
+            }
+        }
+        Node::StaticPropertyAccess(sp) => {
+            if let Some(StaticClass::Named(r)) = trace_static_class(sp.class) {
+                out.hard_class_refs.push(r);
+            }
         }
         Node::DeclareItem(d) if is_strict_types_one(d) => out.strict_types = true,
         // Dynamic-code constructs (ADR-0046 §2). Collected file-wide (the walk
