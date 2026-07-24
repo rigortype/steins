@@ -60,7 +60,7 @@ grade.
 | `proof` | The program provably breaks on a live path. | Zero false positives. Any FP on corpus code is a release blocker (ADR-0013). |
 | `contract` | A proven behavior violates something the code *declares* about itself. The program still works. | True findings legitimately abound in released code; gated as increase tripwires, never on sight. |
 | `mechanics` | The analyzer's own hygiene — a finding whose absence would let another channel rot silently. | Red on sight. |
-| `debug` | Requested introspection: a report that exists *because a call site asked for it* (`PHPStan\dumpType()`). | Excluded from every gate counter (ADR-0053). Partial: the lane, its three ids, and the shared rendering landed (D1/D2); the emit slices (D3 explicit pair, D4 `var_dump`) were in flight at verification time. |
+| `debug` | Requested introspection: a report that exists *because a call site asked for it* (`PHPStan\dumpType()`). | Excluded from every gate counter (ADR-0053). Landed in full (D1–D4): the lane, its three ids, the shared rendering, and both emit slices. |
 
 A bare `steins check` surfaces `proof` + `mechanics` only. The contract layer is
 reached through a named profile. See [diagnostic-policy.md](diagnostic-policy.md).
@@ -123,7 +123,7 @@ produces it (`REGISTERED_NOT_YET_EMITTED`):
 | `call.undefined-function` | ADR-0049 S4 (scoped into v0.1.0, not landed) |
 | `class.undefined` | ADR-0049 S4 (same) |
 | `call.too-many-arguments` | the sidecar `reflect` slice — the arm fires for *internal* targets only, since userland too-many runs clean and is never a finding |
-| `debug.type`, `debug.phpdoc-type` | ADR-0053 D3 (in flight at verification time) |
+| `debug.type`, `debug.phpdoc-type`, `debug.var-dump` | ADR-0053 D3/D4 (landed) |
 | `debug.var-dump` | ADR-0053 D4 (same) |
 
 CLI surface: `check`, `annotate`, `transform`. ADR-0020 declares six commands;

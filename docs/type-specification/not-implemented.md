@@ -29,7 +29,6 @@ the semantic inventory.
 | --- | --- | --- |
 | `call.undefined-function`, `class.undefined` | 0049 S4 | Registered with layers; no emitter. Scoped into v0.1.0, not landed. |
 | `call.too-many-arguments` | 0049 §6 | Internal targets only — userland too-many runs clean and is never a finding. Waits on the sidecar reflect slice. |
-| `debug.type` / `debug.phpdoc-type` / `debug.var-dump` emission | 0053 D3/D4 | The lane, ids, and shared rendering landed (D1/D2); the emit slices were in flight at verification time. |
 | Scoped policy — `[paths.sets]`, `[[policy]]` | 0023 | Designed in full, including semantic `where` matchers. The pipeline stage exists as a no-op with a seam. |
 | `sarif` / `github` formats | 0054 | With CI auto-detection and format invariance as the binding rule. Decided out of v0.1.0 by owner. |
 | `doctor` | 0054 | The posture report: coverage, sidecar health, catalog audit, baseline capture surface. A minimal `doctor` is scoped into v0.1.0, not landed. |

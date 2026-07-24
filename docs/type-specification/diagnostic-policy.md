@@ -87,10 +87,10 @@ pattern.
 
 ## The debug lane (ADR-0053)
 
-The dump surface's contract, decided in full; implementation state at
-verification time: the lane, its three registered ids, and the shared
-plain-text rendering landed (D1/D2, gate-excluded and byte-identical); the emit
-slices (D3 explicit pair, D4 `var_dump`) were in flight.
+The dump surface's contract, decided in full and **landed in full**
+(D1–D4): the lane, its three registered ids, the shared plain-text
+rendering, and both emit slices (the D3 explicit pair and D4
+`var_dump`), gate-excluded and byte-identical throughout.
 
 - **`debug.type` / `debug.phpdoc-type`** (explicit `PHPStan\dumpType` /
   `dumpPhpDocType`, recognized unconditionally by resolved FQN): level

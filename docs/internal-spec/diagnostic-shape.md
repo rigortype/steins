@@ -57,11 +57,11 @@ profile but baseline- and suppression-exempt and excluded from every gate
 counter; a dump is not a finding).
 
 `REGISTERED_NOT_YET_EMITTED` today holds `call.undefined-function` and
-`class.undefined` (the existence ids, waiting on their dam-gated stages),
-`call.too-many-arguments` (fires for internal targets only, so it waits on the
-sidecar `reflect` slice), and `debug.var-dump` (ADR-0053 D4, landing in
-v0.1.0). The dump surface's explicit pair — `debug.type` /
-`debug.phpdoc-type` — lit up at D3 and is emittable.
+`class.undefined` (the existence ids, waiting on their dam-gated stages)
+and `call.too-many-arguments` (fires for internal targets only, so it
+waits on the sidecar `reflect` slice). The whole dump surface —
+`debug.type` / `debug.phpdoc-type` (D3) and `debug.var-dump` (D4) — is
+emittable.
 
 Semantics of layers, facets, prefix matching, and profiles:
 [`diagnostic-policy.md`](../type-specification/diagnostic-policy.md).
