@@ -691,6 +691,17 @@ pub struct PropertyDecl {
     /// params are checked as constructor arguments (the ctor param check), so the
     /// property-assign check skips them to avoid a double-report (ADR-0036).
     pub promoted: bool,
+    /// `true` when this property carries a PHP 8.4 property hook (`get`/`set`),
+    /// promoted or class-body (FP class 16). A hook is arbitrary user code: a `set`
+    /// hook stores whatever it computes (not the assigned value), a `get` hook
+    /// returns a computed value, and a virtual (backing-store-less) property holds
+    /// no value at all. So a hooked property **binds no value fact ever** and is
+    /// excluded from every value/mismatch check — the raw assigned/constructed value
+    /// is not the property's value. Only class-surface facts (the name exists, its
+    /// visibility) remain valid. Class-body hooked properties are dropped entirely at
+    /// lowering (never reach here); this flag carries the promoted-param case, which
+    /// must stay on the surface (its name is a real property) while binding nothing.
+    pub hooked: bool,
     /// The raw `/** … */` docblock preceding a plain property (for `@var` contract
     /// extraction; promoted params carry `@param` on the ctor, not `@var`, so this
     /// stays `None` for them).
@@ -2474,6 +2485,7 @@ fn lower_plain_property(p: &PlainProperty<'_>, docs: &DocIndex, rc: &RefResolver
             has_default,
             default,
             promoted: false,
+            hooked: false,
             docblock: docblock.clone(),
             span,
         });
@@ -2505,6 +2517,10 @@ fn lower_promoted_params(m: &Method<'_>, rc: &RefResolver, out: &mut Vec<Propert
             has_default,
             default,
             promoted: true,
+            // A hook on a promoted param (`public int $n { set { … } }`, PHP 8.4) makes
+            // every write/read go through arbitrary code — bind no fact (FP class 16).
+            // `readonly` + any hook is a PHP fatal, so a hooked prop is never readonly.
+            hooked: p.hooks.is_some(),
             docblock: None,
             span: to_span(p.span()),
         });

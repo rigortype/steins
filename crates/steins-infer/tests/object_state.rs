@@ -266,6 +266,43 @@ fn promoted_param_no_double_report() {
     assert_eq!(f[0].id, ID, "the single finding is the ctor-arg check, not a property one");
 }
 
+// ---- Property hooks (PHP 8.4): a hooked prop binds no value fact (FP class 16) --
+
+#[test]
+fn hooked_promoted_binds_no_fact() {
+    // A promoted param carrying a `set` hook routes the write through arbitrary code —
+    // the stored value is the hook's result, not the raw argument. Reading it must
+    // yield Unknown, so the sink check is silent (before the fix the raw "abc" bound
+    // and fired a false `type.argument-mismatch`).
+    let src = format!(
+        "{PRELUDE}class Hk {{ public function __construct(public $n {{ set {{ $this->n = $value; }} }}) {{}} }}\n$h = new Hk(\"abc\");\nneedInt($h->n);\n"
+    );
+    assert_eq!(count(&src), 0, "a hooked promoted prop binds no fact — no false finding");
+}
+
+#[test]
+fn hooked_promoted_later_assign_binds_no_fact() {
+    // A later `$h->n = "abc"` on a hooked prop also runs the `set` hook — still no
+    // fact bound, so no property-mismatch and no downstream sink finding.
+    let src = format!(
+        "{PRELUDE}class Hk {{ public function __construct(public $n {{ set {{ $this->n = $value; }} }}) {{}} }}\n$h = new Hk(1);\n$h->n = \"abc\";\nneedInt($h->n);\n"
+    );
+    assert_eq!(count(&src), 0, "assignment through a set hook binds no fact");
+}
+
+#[test]
+fn unhooked_promoted_still_binds_positional_and_named() {
+    // Regression guard: an ordinary (unhooked) promoted prop still binds its value,
+    // via both a positional and a named `new` argument (per commit 3c7461e). Two
+    // proven-bad reads → two `type.argument-mismatch` findings.
+    let src = format!(
+        "{PRELUDE}class Pl {{ public function __construct(public $n) {{}} }}\n$a = new Pl(\"abc\");\nneedInt($a->n);\n$b = new Pl(n: \"abc\");\nneedInt($b->n);\n"
+    );
+    let f = findings(&src);
+    assert_eq!(f.len(), 2, "unhooked promoted binds both positional and named: {f:#?}");
+    assert!(f.iter().all(|d| d.id == ID), "both are argument-mismatch findings");
+}
+
 // ---- Adversarial #2: by-ref property alias must not keep a stale fact -------
 
 #[test]

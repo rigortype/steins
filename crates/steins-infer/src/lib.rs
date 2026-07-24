@@ -5228,6 +5228,12 @@ fn build_new_object(
 
     // readonly set + literal defaults.
     for p in &props {
+        // A hooked property (PHP 8.4 `get`/`set`) binds no value fact: writes run
+        // arbitrary code, so the constructed/default value is not the stored value
+        // (FP class 16). It is never readonly either (readonly + hook is a PHP fatal).
+        if p.hooked {
+            continue;
+        }
         if p.readonly {
             obj.readonly.insert(p.name.clone());
         }
@@ -5247,8 +5253,11 @@ fn build_new_object(
 
     // Promoted constructor params: bind each from its positional `new` argument.
     if let Some(ctor) = cx.find_ctor(class) {
+        // A hooked promoted param (`public int $n { set { … } }`) binds no fact — its
+        // write runs arbitrary code, so the raw argument is not the stored value
+        // (FP class 16). Excluded here; its value stays Unknown.
         let promoted: HashMap<&str, &&PropertyDecl> =
-            props.iter().filter(|p| p.promoted).map(|p| (p.name.as_str(), p)).collect();
+            props.iter().filter(|p| p.promoted && !p.hooked).map(|p| (p.name.as_str(), p)).collect();
         for (i, param) in ctor.params.iter().enumerate() {
             if param.variadic {
                 break;
@@ -5319,6 +5328,11 @@ fn seed_this_object(cx: &Cx, class_fqn: &str, class_exact: bool) -> Option<HeapO
     // has no subclass (`final`/enum). The No-side consumers gate on this bit.
     obj.class_exact = class_exact;
     for p in &props {
+        // A hooked property (PHP 8.4) is never readonly (readonly + hook is a PHP
+        // fatal) and holds no tracked value — nothing to seed (FP class 16).
+        if p.hooked {
+            continue;
+        }
         if p.readonly {
             obj.readonly.insert(p.name.clone());
             // A promoted readonly param or a readonly prop with a literal default is
@@ -5395,10 +5409,19 @@ fn apply_prop_assign(
     // type and `@var` contract).
     let pdecl = cx.class_props(&class).into_iter().find(|p| p.name == prop && !p.is_static);
 
+    // A hooked property (PHP 8.4 `get`/`set`) routes this write through arbitrary
+    // user code: the value that lands in the object is whatever the `set` hook
+    // computes, not `value`. So neither property-mismatch id is sound against the
+    // assigned value, and no fact may be recorded (FP class 16). Class-body hooked
+    // props are dropped at lowering (pdecl is `None` — checks skip naturally); this
+    // guards the promoted-param case, whose declaration survives on the surface.
+    let hooked = pdecl.is_some_and(|pd| pd.hooked);
+
     // 1. Native `type.property-mismatch` — a proven literal against a native prop
     // type. Skip promoted props (checked as constructor args; no double-report).
     let mut native_fired = false;
     if checks_enabled
+        && !hooked
         && rvalue_strat == Stratum::Verified
         && let Some(pd) = pdecl
         && !pd.promoted
@@ -5426,6 +5449,7 @@ fn apply_prop_assign(
     // 2. phpdoc `@var` `phpdoc.property-mismatch` — a proven or abstract value that
     // provably does not inhabit the property's `@var` contract (definite No only).
     if checks_enabled
+        && !hooked
         && !native_fired
         && let Some(pd) = pdecl
         && let Some(mut var_ty) = pd.docblock.as_deref().and_then(parse_var_type)
@@ -5492,7 +5516,11 @@ fn apply_prop_assign(
     // 4. Record the prop's new fact (or drop it when the rvalue is not representable
     // / is an object handle). Mark the readonly write for the reassign check.
     match prop_fact_val {
-        Some(fact) if !rval_is_object => {
+        // A hooked property never records a fact — its stored value is the `set`
+        // hook's arbitrary-code result, not `value` (FP class 16). Keep the slot
+        // Unknown so reads (dumps, receivers, depth-1 prop-fetch) fall back to
+        // arbitrary code rather than the assigned value.
+        Some(fact) if !rval_is_object && !hooked => {
             obj.props.insert(prop.to_owned(), PropFact { fact, stratum: rvalue_strat });
         }
         _ => {
