@@ -96,3 +96,4 @@ list in one place.
 | ADR-0058 | [Runtime-enforced invariant promotion: enforcement outranks annotation](0058-runtime-invariant-promotion.md) |
 | ADR-0059 | [Lean 4 as the value domain's specification: proofs over the algebra, differential vectors over the implementation](0059-lean-spec-for-value-domain.md) |
 | ADR-0060 | [The Packagist vendor is `typedduck`, not the namespace and not the GitHub org](0060-packagist-vendor-name.md) |
+| ADR-0061 | [Argument-dependent builtin returns: the type rung, its envelope gate, and the PHPStan port terms](0061-argument-dependent-builtin-returns.md) |

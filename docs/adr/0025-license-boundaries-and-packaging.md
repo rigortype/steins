@@ -106,3 +106,15 @@ explicitly does not land in this release and which no code in `steins-syntax`
 recognizes; and a constants class for the effect labels, because the recognizer
 requires plain string literals and a class constant makes the whole attribute
 unrecognized — silently.
+
+## Amendment (2026-07-26): a third case — ported MIT logic inside the Apache-2.0 core
+
+The boundary above has two cases: the MIT attributes package and the
+Apache-2.0 core. ADR-0061 adds a third and settles its terms: PHPStan's
+MIT-licensed dynamic-return-type logic, translated into the core, is
+sublicensed under Apache-2.0 with the rest of the work; the surviving MIT
+notice obligation is discharged by fixed-format file headers plus a
+hand-maintained root `NOTICE` file (the Apache-2.0 §4(d) vehicle, embedded in
+the binary like the other notices) — never by the generated
+`THIRD-PARTY-LICENSES.md`, which the next `cargo xtask licenses` run would
+overwrite. See ADR-0061 §4.
