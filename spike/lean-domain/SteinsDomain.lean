@@ -7,3 +7,4 @@ import SteinsDomain.Fact
 import SteinsDomain.Soundness
 import SteinsDomain.Queries
 import SteinsDomain.Vectors
+import SteinsDomain.Axioms

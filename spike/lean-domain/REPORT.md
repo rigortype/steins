@@ -13,8 +13,11 @@ from `cargo xtask lean-check`. Decision recorded as ADR-0059.
   Mathlib, so `lake build` is offline and takes a few seconds.
 - Size: ~1,500 lines of Lean for the 1,089 lines of `crates/steins-domain`.
 - Axioms: `propext`, `Classical.choice`, `Quot.sound` — Lean's own three. No
-  `sorry`, no `native_decide`, no bespoke axiom. Verify with
-  `#print axioms SteinsDomain.Fact.join_sound`.
+  `sorry`, no `native_decide`, no bespoke axiom. This is not a promise but a build
+  step: `SteinsDomain/Axioms.lean` pins each headline theorem's axiom set with
+  `#guard_msgs`, so a `sorry` left in during a refactor, or a `native_decide`
+  (which would add `Lean.ofReduceBool` and move the trust boundary from the
+  kernel to the compiler), fails `lake build`.
 
 ## What is proved
 
@@ -140,6 +143,11 @@ cargo xtask lean-check --bless                    # rewrite the fixture after a 
 cargo test -p steins-domain --test lean_vectors    # Rust vs. the fixture (needs no Lean)
 ```
 
+In CI, `.github/workflows/lean.yml` runs the first two legs behind a path filter
+(`leanprover/lean-action`, elan rather than Nix — a nixpkgs cache miss on `lean4`
+would build Lean from source). The third leg needs no Lean and runs in the
+ordinary `test` job on every PR.
+
 ## Module map
 
 | File | Contents |
@@ -153,3 +161,4 @@ cargo test -p steins-domain --test lean_vectors    # Rust vs. the fixture (needs
 | `SteinsDomain/Soundness.lean` | `join_sound` and the widening steps it composes |
 | `SteinsDomain/Queries.lean` | decided verdicts hold for every admitted value |
 | `SteinsDomain/Vectors.lean` | the differential vector file |
+| `SteinsDomain/Axioms.lean` | the axiom ratchet — no `sorry`, no `native_decide`, enforced |
