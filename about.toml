@@ -6,7 +6,11 @@
 #
 # Regenerate with:
 #
-#   cargo about generate about.hbs -o THIRD-PARTY-LICENSES.md
+#   cargo xtask licenses
+#
+# (which runs `cargo about generate about.hbs` and then merges sections whose
+# bodies differ only in typography — cargo-about groups on exact text, so one
+# license otherwise appears twice; see xtask/src/licenses.rs)
 #
 # CI fails if the committed file has drifted from the current dependency tree.
 #

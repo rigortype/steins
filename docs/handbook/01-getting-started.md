@@ -42,8 +42,8 @@ crates.io rejects crates with git dependencies. From a checkout,
 `cargo install --path crates/steins-cli` works, or run
 `target/release/steins` directly after a release build.
 
-The binary has four subcommands — `check`, `annotate`,
-`transform`, `doctor` — and no `--help`. Run it with no arguments
+The binary has six subcommands — `check`, `annotate`,
+`transform`, `doctor`, `version`, `license` — and no `--help`. Run it with no arguments
 to see the surface:
 
 ```text
@@ -51,6 +51,8 @@ usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor
        steins annotate [--no-php] <file.php>
        steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--format text|json] <paths...>
        steins doctor [--no-php] [--baseline <path>] [path]
+       steins version | -v | --version
+       steins license
 ```
 
 `doctor` answers "what is my setup?" rather than "what is wrong

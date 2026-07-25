@@ -55,7 +55,7 @@ There is no crates.io package: the parser backend is a rev-pinned fork, and
 crates.io does not accept crates with git dependencies. From a checkout of this
 workspace, `cargo install --path crates/steins-cli` works too.
 
-The binary has four subcommands and no `--help`; run it with no arguments
+The binary has six subcommands and no `--help`; run it with no arguments
 to see the surface:
 
 ```
@@ -63,6 +63,8 @@ usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor
        steins annotate [--no-php] <file.php>
        steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--format text|json] <paths...>
        steins doctor [--no-php] [--baseline <path>] [path]
+       steins version | -v | --version
+       steins license
 ```
 
 `doctor` reports posture rather than findings — which `php` was resolved, what the

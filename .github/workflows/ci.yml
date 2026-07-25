@@ -173,9 +173,9 @@ jobs:
       # the command in the error message when this fails.
       - name: Third-party notices up to date
         run: |
-          cargo about generate about.hbs -o THIRD-PARTY-LICENSES.md
+          cargo xtask licenses
           git diff --exit-code -- THIRD-PARTY-LICENSES.md \
-            || { echo "::error::THIRD-PARTY-LICENSES.md is stale — run: cargo about generate about.hbs -o THIRD-PARTY-LICENSES.md"; exit 1; }
+            || { echo "::error::THIRD-PARTY-LICENSES.md is stale — run: cargo xtask licenses"; exit 1; }
 
   fp-gate:
     name: fp-gate

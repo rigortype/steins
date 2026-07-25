@@ -185,11 +185,14 @@ jobs:
       # packages `steins` at the archive root (the layout Homebrew's
       # `bin.install "steins"` expects), and emits `<archive>.sha256`.
       #
-      # LICENSE and THIRD-PARTY-LICENSES.md ride along because they are not
-      # optional for this distribution: Apache-2.0 §4(a) requires recipients to
-      # get a copy of the licence, and the bundled dependencies' MIT/BSD/ISC
-      # terms require their notices to accompany a binary. README.md gives the
-      # archive a usable entry point.
+      # LICENSE and THIRD-PARTY-LICENSES.md ride along so the archive is
+      # readable without running anything. The obligations themselves —
+      # Apache-2.0 §4(a)'s copy of the licence, and the bundled dependencies'
+      # MIT/BSD/ISC notices — are satisfied by the binary itself, which embeds
+      # both and prints them from `steins license` (#43). That matters because
+      # a packager can install the executable without these files, and the
+      # Homebrew formula does exactly that. README.md gives the archive a
+      # usable entry point.
       - name: Build and upload binary
         uses: taiki-e/upload-rust-binary-action@v1
         with:
