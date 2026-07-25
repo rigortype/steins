@@ -64,3 +64,38 @@ Consequences, each already applied:
 
 Changing this again is no longer cheap. After the first external
 contribution it requires every contributor's consent; treat it as fixed.
+
+## Amendment (2026-07-25): the Composer package requires the attributes package
+
+The Composer channel gives the licence boundary its first user-visible shape.
+Steins now publishes `rigortype/steins` on Packagist — a PHP shim that fetches
+the release binary — and that package **requires** `rigortype/steins-attributes`
+rather than merely suggesting it. Owner decision.
+
+The alternative was to leave the two packages independent and name the
+attributes under `suggest`. It was rejected on the user's first experience:
+`composer require --dev rigortype/steins` followed by an unresolved
+`#[\Steins\Effect]` is a confusing way to learn that a second package exists,
+and the confusion falls on exactly the vocabulary whose spread is the point.
+
+The boundary survives the dependency. Each package declares its own licence and
+is independently readable — the analyzer Apache-2.0, the attributes MIT — and a
+licence audit reads the dependency graph, which is where the distinction now
+lives explicitly rather than by the two repositories merely being separate. What
+the requirement costs is one hard dependency on the core package, and a user who
+wants only the binary getting seven inert classes with it; both are cheaper than
+the failure they prevent.
+
+**Blocked on G2, and this is the only thing blocking it.** No such package
+exists yet: `rigortype/steins-attributes` is neither on GitHub nor on Packagist,
+because creating it is the substance of decision gate G2 (`docs/ROADMAP.md`,
+"User decision gates"). Adding the `require` before then would make
+`composer require rigortype/steins` fail to resolve for every user, so the entry
+is deliberately absent from `composer.json` until the package is published. A
+`suggest` entry would be no better in the interim — it would name something a
+user cannot install.
+
+The decision is recorded here rather than left in the issue tracker so that
+whoever clears G2 does not have to rediscover it. When the attributes package
+publishes, the mechanical change is one `require` line and a docs sentence
+naming both packages.

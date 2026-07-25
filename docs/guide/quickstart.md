@@ -7,21 +7,38 @@ run.
 
 ## Install
 
-From a checkout of this workspace:
+Four channels. They differ in *where the version lives*, which is the only
+question worth thinking about:
 
-Homebrew, on macOS or Linux:
+**Composer** — when the analyzer should be pinned beside the code it analyzes.
+The version goes in `composer.lock`, so CI and every developer resolve the same
+one and `composer update` moves it deliberately. This is the right default for a
+project.
+
+```
+composer require --dev rigortype/steins
+```
+
+What Composer installs is a small PHP shim, not the analyzer: on first use it
+downloads the release binary matching the installed version, checks it against
+the sha256 the release published, and runs it. Later runs use the cached binary
+and touch the network not at all. Requires PHP 8.1+.
+
+**Homebrew** — when you want `steins` on `PATH` for any project on the machine.
 
 ```
 brew install rigortype/tap/steins
 ```
 
-Or download a prebuilt binary from the
+**A prebuilt binary**, from the
 [releases page](https://github.com/rigortype/steins/releases) — `x86_64`/`aarch64`
 Linux (glibc), `x86_64` Linux (musl, static), and `x86_64`/`aarch64` macOS. Each
 archive holds the bare `steins` binary and carries a `.sha256` sidecar beside it.
 Windows is not shipped yet.
 
-From source, with a Rust toolchain at 1.97 or newer:
+**From source**, with a Rust toolchain at 1.97 or newer. This is the fallback
+for a platform with no prebuilt binary — notably arm64 Alpine, where the musl
+build is x86_64-only.
 
 ```
 cargo install --git https://github.com/rigortype/steins steins-cli

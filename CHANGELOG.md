@@ -29,6 +29,10 @@ Entries accumulate under this heading as work lands; the `steins-release-prep`
 skill seals them into a version section at release time, reconstructing from
 `git log` if the discipline slipped.
 
+### Added
+
+- **Install with Composer:** `composer require --dev rigortype/steins`. Packagist serves a small PHP shim that downloads the release binary matching the installed version, verifies it against the sha256 the release published, and runs it; later runs use the cached binary and touch no network. This is the channel to use when the analyzer should be pinned in `composer.lock` beside the code it analyzes, so CI and every developer resolve the same version. Requires PHP 8.1 or newer. Prebuilt binaries exist for Linux (glibc `x86_64`/`aarch64`, static musl `x86_64`) and macOS (`x86_64`/`aarch64`); a platform without one — notably arm64 musl — is refused by name and pointed at a source build rather than handed an archive that cannot run.
+
 ## [0.1.0] - 2026-07-25
 
 The first public release. Steins is a static analyzer for PHP built on one commitment: **a bare `steins check` reports only what provably breaks at runtime, and stays quiet about everything else.** That is enforced, not aspirational — the release gate runs the analyzer over roughly 100,000 files of real, clean PHP and fails if it emits a single proof-layer finding. This release ships that gate green.

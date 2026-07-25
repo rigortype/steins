@@ -37,16 +37,30 @@ tag push as the point of no return.
 `cargo publish` **cannot** work here and this is structural, not an oversight:
 the parser backend is the rev-pinned Mago fork (ADR-0003/0025), i.e. a `git`
 dependency, and crates.io rejects any crate that has one. `publish = false` in
-`Cargo.toml` makes that an early, legible error. The three real channels:
+`Cargo.toml` makes that an early, legible error. The four real channels:
 
 1. **GitHub Release binaries** — five targets, each a `.tar.gz` with a `.sha256`
    sidecar: `x86_64`/`aarch64` Linux (glibc), `x86_64` Linux (musl, static), and
    `x86_64`/`aarch64` macOS. Windows is deliberately not shipped (the PHP sidecar
    spawn path is unverified there — the reasoning is in `release.yml`'s header).
 2. **Homebrew** — `brew install rigortype/tap/steins`.
-3. **`cargo install --git https://github.com/rigortype/steins steins-cli`** — the
+3. **Composer** — `composer require --dev rigortype/steins`. Packagist serves a
+   PHP shim (`composer/`, ~26KB) that fetches channel 1's archive on first use
+   and verifies its `.sha256` sidecar. Nothing here is version-bumped by hand:
+   the shim reads the installed version from Composer metadata, and Packagist
+   learns the version from the git tag this skill pushes.
+4. **`cargo install --git https://github.com/rigortype/steins steins-cli`** — the
    documented fallback for platforms without a prebuilt binary; needs a Rust
-   toolchain at the MSRV.
+   toolchain at the MSRV. Also the only answer for arm64 musl, which has no
+   archive at all.
+
+**The Composer channel has a publish-order hazard, and it is the one thing about
+it worth remembering.** Packagist sees the new version the moment the tag lands,
+but the binaries do not exist until the `binaries` job finishes minutes later —
+and that job is `fail-fast: false`, so one target can stay missing much longer.
+In that window `composer require` resolves and the first run fails on a missing
+asset. The shim's 404 message says so rather than reporting a bare "not found",
+but do not announce a release until the assets are actually up.
 
 If a release ever *should* reach crates.io, that is a Mago-fork publishing
 decision and an ADR, not a change to this skill.
@@ -213,6 +227,20 @@ Reading the results:
   ```bash
   cd "$(mktemp -d)" && steins doctor --no-php
   ```
+- **Smoke the Composer channel** if anything under `composer/`, `composer.json`
+  or `.gitattributes` changed since the last release. Its CI is path-filtered,
+  so a release that touched none of them has already been covered — but a
+  release that did must not be the first place the shim runs:
+
+  ```bash
+  composer/tests/package-contents.sh HEAD
+  php composer/tests/target-detection.php && php composer/tests/checksum.php
+  composer/tests/smoke.sh "$(gh release list --limit 1 --json tagName --jq '.[0].tagName')"
+  ```
+
+  The last one installs the package into a scratch project and runs the binary
+  it fetches, against the *previous* release — the version being prepared has no
+  binaries yet, which is the whole reason the fixture takes a tag.
 
 ## Rehearse the first release with a release candidate
 
@@ -315,7 +343,19 @@ gh api repos/rigortype/homebrew-tap/contents/Formula/steins.rb --jq '.content' |
 
 If a target failed while others succeeded, the Release exists with a **partial**
 asset set. Fix the target and re-run just that job (`gh run rerun --job <id>`) —
-the archive uploads into the existing Release, no re-tag needed.
+the archive uploads into the existing Release, no re-tag needed. Note that
+Packagist is already serving the new version at this point, so a partial asset
+set is a *broken Composer install* for whichever platform is missing, not merely
+an incomplete releases page. Prioritize accordingly.
+
+Then confirm the Composer channel resolves the new version and runs it:
+
+```bash
+cd "$(mktemp -d)" && composer require --dev rigortype/steins:x.y.z && ./vendor/bin/steins doctor --no-php
+```
+
+If Packagist has not picked up the tag within a few minutes, its GitHub webhook
+is the thing to check — the release itself is unaffected.
 
 ## If something goes wrong
 
@@ -342,7 +382,11 @@ the archive uploads into the existing Release, no re-tag needed.
   the arbiter); `cargo deny check licenses` clean.
 - Full verification protocol green, with **fp-gate run in the foreground** and
   phpdoc-oracle confirmed to have actually run rather than skipped.
+- Composer channel smoked if `composer/`, `composer.json` or `.gitattributes`
+  changed — its CI is path-filtered and will not have covered a release that
+  touched them only in this branch.
 - The change landed via a **release PR approved by the owner**; no push happened
   without its own explicit Go; the commit message is `Bump up version to x.y.z`.
-- After publish: ten assets on the Release, a downloaded binary runs, and the tap
-  formula carries the new version and real sha256s.
+- After publish: ten assets on the Release, a downloaded binary runs, the tap
+  formula carries the new version and real sha256s, and `composer require --dev
+  rigortype/steins:x.y.z` resolves and runs in a scratch directory.
