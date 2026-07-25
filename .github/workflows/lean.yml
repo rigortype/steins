@@ -1,0 +1,83 @@
+# The Lean 4 specification of the value domain (ADR-0059).
+#
+# A separate workflow rather than a job in ci.yml for one mechanical reason:
+# `on.paths` is a workflow-level filter, and this check can only say something
+# when the spec, the crate it specifies, or this file changes.
+#
+# What it gates, precisely: the SPECIFICATION side. The implementation side is
+# already covered by ci.yml, where `cargo test` runs
+# `crates/steins-domain/tests/lean_vectors.rs` — that test regenerates the
+# vectors from the real Rust and needs no Lean at all. This workflow adds the two
+# legs that do need a toolchain:
+#
+#   1. the proofs still compile, including the `SteinsDomain/Axioms.lean` ratchet
+#      — a stray `sorry` or a `native_decide` changes a theorem's axiom set and
+#      fails the build there;
+#   2. the committed vector fixture is still byte-identical to what the spec
+#      prints, so a spec edit that forgot `cargo xtask lean-check --bless` is
+#      caught instead of silently making the two sides describe different things.
+#
+# elan, not nix. `nix develop` would reproduce the developer's shell exactly, but
+# a binary-cache miss on nixpkgs' `lean4` makes Nix build Lean FROM SOURCE, which
+# turns a one-minute job into a very long one. lean-action downloads the prebuilt
+# toolchain named in `spike/lean-domain/lean-toolchain` and caches `.lake`; the
+# flake stays the local path. Keep that file and `flake.nix`'s nixpkgs pin in
+# lockstep — same discipline as RUST_MSRV / rust-version / clippy.toml's msrv.
+#
+# Step 2 duplicates what `cargo xtask lean-check` does, deliberately: doing it in
+# shell keeps this job free of a Rust toolchain and a full workspace build (xtask
+# links the analysis crates and the git-pinned Mago fork). `lean-check` stays the
+# local entry point and performs the same two checks.
+name: Lean spec
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "spike/lean-domain/**"
+      - "crates/steins-domain/**"
+      - ".github/workflows/lean.yml"
+  pull_request:
+    paths:
+      - "spike/lean-domain/**"
+      - "crates/steins-domain/**"
+      - ".github/workflows/lean.yml"
+
+concurrency:
+  group: lean-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  spec:
+    name: lean spec
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      # Installs elan, reads `spike/lean-domain/lean-toolchain`, runs `lake
+      # build`, and caches `.lake`. The project has no Mathlib dependency and no
+      # `test`/`lint` targets, so those are switched off explicitly rather than
+      # left to auto-detection — a silent "nothing to run" is worse than a
+      # declared one.
+      - name: Build the specification
+        uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: spike/lean-domain
+          auto-config: "false"
+          build: "true"
+          test: "false"
+          lint: "false"
+          use-mathlib-cache: "false"
+
+      # The `cd` is load-bearing, not tidiness: elan picks a toolchain by walking
+      # up from the working directory for a `lean-toolchain`, and there is none at
+      # the repo root.
+      #
+      # A diff rather than a boolean — the first differing line is what explains a
+      # stale fixture, and the failure should read like the local one.
+      - name: Vectors match the specification
+        run: |
+          (cd spike/lean-domain && lake exe vectors) > /tmp/lean-vectors.actual
+          diff -u crates/steins-domain/tests/fixtures/lean-vectors.expected /tmp/lean-vectors.actual \
+            || { echo "::error::lean-vectors.expected is stale — run: cargo xtask lean-check --bless"; exit 1; }

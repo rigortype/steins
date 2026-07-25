@@ -117,6 +117,23 @@ committed, so the Rust-side check is always available. The toolchain itself is
 pinned by `spike/lean-domain/flake.nix` (`nix develop`, Lean 4.30.0 from nixpkgs;
 a separate `.#elan` shell for elan-managed toolchains).
 
+**In CI**: legs 1–2 run in their own path-filtered workflow
+(`.github/workflows/lean.yml`, `leanprover/lean-action`), triggered only when
+`spike/lean-domain/**` or `crates/steins-domain/**` changes; leg 3 runs in the
+ordinary `test` job on every PR. It is *not* added to `fp-gate` or the release
+gates, which are about the analyzer's output rather than the repo's internal
+consistency — the closest sibling is the `licenses` job's
+`THIRD-PARTY-LICENSES.md` drift guard, and this is the same shape: a committed
+generated artifact that must still match its generator. elan rather than Nix in
+CI, because a binary-cache miss on nixpkgs' `lean4` would build Lean from source;
+`lean-toolchain` and the flake's pin are kept in lockstep by hand.
+
+The proofs' own claim is a build step too. `SteinsDomain/Axioms.lean` guards the
+axiom set of every headline theorem with `#guard_msgs`, so a `sorry` left in
+during a refactor — or a `native_decide`, which would move the trust boundary
+from the kernel to the compiler by adding `Lean.ofReduceBool` — fails `lake
+build` rather than quietly weakening what the ADR claims.
+
 ## Scope, honestly
 
 1,089 of 51,586 lines — **2.1%**. The remaining 98% is entangled with PHP's real

@@ -15,6 +15,13 @@
 #             bug, not a cosmetic one.
 #   fp-gate   the zero-false-positive bar over the corpus (ADR-0013/0026).
 #
+# One gate lives outside this file: `lean.yml` builds the Lean 4 specification of
+# the value domain and checks its committed vectors (ADR-0059). It is separate
+# because `on.paths` is a workflow-level filter and it only has something to say
+# when the spec or `crates/steins-domain/` changes. The Rust half of that loop —
+# `crates/steins-domain/tests/lean_vectors.rs` — needs no Lean and runs in `test`
+# below, on every PR.
+#
 # `cargo fmt --check` is deliberately NOT a gate — the tree is hand-formatted and
 # a fmt run would rewrite 110 files. That policy, with its numbers, is recorded
 # in rustfmt.toml; clippy `-D warnings` is the blocking style gate instead.

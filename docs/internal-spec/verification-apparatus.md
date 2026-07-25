@@ -121,7 +121,18 @@ Three legs, only the first two of which need Lean:
 
 Leg 3 is an ordinary test, so a machine without a Lean toolchain still gets the
 full Rust-side check; that is why `lean-check` **skips rather than fails** when no
-toolchain is found. The command is not wired into `fp-gate` or the release gates.
+toolchain is found.
+
+In CI, legs 1–2 run in `.github/workflows/lean.yml` — a separate, path-filtered
+workflow (only `spike/lean-domain/**` and `crates/steins-domain/**` trigger it)
+using `leanprover/lean-action`; leg 3 runs in the ordinary `test` job on every PR.
+Not part of `fp-gate` or the release gates: those are about the analyzer's output,
+this is a drift guard on a committed generated artifact, exactly like the
+`licenses` job's `THIRD-PARTY-LICENSES.md` check.
+
+`spike/lean-domain/SteinsDomain/Axioms.lean` makes the "no `sorry`, no
+`native_decide`" claim a build step: each headline theorem's axiom set is pinned
+with `#guard_msgs`, so weakening a proof fails `lake build`.
 
 What is *not* proved, and is checked exhaustively instead: `join` associativity
 (110,592 triples, zero mismatches). It matters because `join_envs` folds
