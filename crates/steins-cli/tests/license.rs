@@ -58,9 +58,18 @@ fn the_embedded_notices_are_generated_not_a_stub() {
     // carrying nothing. Assert real bodies and a real dependency, never merely
     // that the output is non-empty.
     let (_, out) = run(&["license"]);
-    assert!(out.matches("\n## ").count() >= 10, "expected many license sections");
+    assert!(out.matches("\n## ").count() >= 8, "expected the licence sections");
     assert!(out.contains("Used by:"));
     assert!(out.contains("— https://"), "entries must carry crate repositories");
+    // The evidence moved with issue #45: sections are now grouped by permission
+    // notice, so there are 9 of them rather than 44 and a section count no longer
+    // measures much. What a stub cannot fake is the *attribution* — thirty-odd
+    // distinct copyright notices, and these named holders among them.
+    let notices = out.lines().filter(|l| l.starts_with("Copyright")).count();
+    assert!(notices >= 30, "the bundled copyright notices are missing (found {notices})");
+    for holder in ["Copyright (c) 2014 Alex Crichton", "Copyright (c) 2010 The Rust Project Developers"] {
+        assert!(out.contains(holder), "missing `{holder}`");
+    }
 }
 
 #[test]
@@ -77,6 +86,29 @@ fn typographic_variants_are_merged_into_one_section() {
         "Apache-2.0 must appear as exactly one entry among the dependencies"
     );
     assert_eq!(third_party.matches("\n## ISC License").count(), 1, "ISC likewise");
+}
+
+#[test]
+fn mit_is_one_section_carrying_every_holder() {
+    // Issue #45: 39 generated MIT sections share one permission notice, so they
+    // are one section with every crate's copyright notice listed above the grant.
+    // The embedded copy is what a `brew install` user reads, so the property is
+    // checked on the command's output and not only on the file.
+    let (_, out) = run(&["license"]);
+    let third_party = out.split("Third-Party Licenses").nth(1).expect("third-party section");
+    assert_eq!(third_party.matches("\n## MIT License").count(), 1, "MIT is one section");
+    let mit = third_party
+        .split("\n## MIT License")
+        .nth(1)
+        .and_then(|s| s.split("\n## ").next())
+        .expect("the MIT section");
+    assert_eq!(
+        mit.matches("Permission is hereby granted").count(),
+        1,
+        "one permission notice for the group"
+    );
+    let holders = mit.lines().filter(|l| l.starts_with("Copyright")).count();
+    assert!(holders >= 30, "the grouped section must keep every holder (found {holders})");
 }
 
 #[test]
