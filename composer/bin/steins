@@ -36,7 +36,7 @@ use const STDERR;
         $loaded = false;
         foreach (
             [
-                // Installed: vendor/rigortype/steins/composer/bin -> vendor/autoload.php
+                // Installed: vendor/typedduck/steins/composer/bin -> vendor/autoload.php
                 __DIR__ . '/../../../../autoload.php',
                 // A checkout of this repository with its own vendor/ present.
                 __DIR__ . '/../../vendor/autoload.php',

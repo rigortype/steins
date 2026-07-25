@@ -27,7 +27,7 @@ git -C "$work/pkg" add -A
 git -C "$work/pkg" -c user.email=ci@localhost -c user.name=ci commit -qm "package fixture"
 git -C "$work/pkg" tag "$tag"
 
-# STEINS_ATTRIBUTES_REPO points at a local checkout of rigortype/steins-attributes.
+# STEINS_ATTRIBUTES_REPO points at a local checkout of typedduck/steins-attributes.
 # Two uses: developing the two packages together, and running this before that
 # package is registered on Packagist. Unset, the attributes resolve normally.
 attributes_repo=""
@@ -39,22 +39,22 @@ fi
 cat > "$work/app/composer.json" <<EOF
 {
     "repositories": [{"type": "vcs", "url": "$work/pkg"}$attributes_repo],
-    "require-dev": {"rigortype/steins": "$version"}
+    "require-dev": {"typedduck/steins": "$version"}
 }
 EOF
 
 cd "$work/app"
-# The analyzer package requires rigortype/steins-attributes, which resolves from
+# The analyzer package requires typedduck/steins-attributes, which resolves from
 # Packagist — the local fixture covers only the shim. Until that package is
 # registered, this is where the run stops, and a wall of Composer resolution
 # output is a poor way to learn why.
 if ! install_log="$(composer install --no-interaction 2>&1)"; then
   printf '%s\n' "$install_log" | sed 's/^/  /'
-  if printf '%s' "$install_log" | grep -q "rigortype/steins-attributes"; then
+  if printf '%s' "$install_log" | grep -q "typedduck/steins-attributes"; then
     echo
     echo "  The attributes package could not be resolved. It is a hard requirement of"
-    echo "  rigortype/steins (ADR-0025 amendment) and comes from Packagist, so this smoke"
-    echo "  cannot pass until rigortype/steins-attributes is registered there."
+    echo "  typedduck/steins (ADR-0025 amendment) and comes from Packagist, so this smoke"
+    echo "  cannot pass until typedduck/steins-attributes is registered there."
   fi
   exit 1
 fi
@@ -121,7 +121,7 @@ fi
 
 echo
 echo "Exit codes reach the caller (ADR-0050 §7 — CI reads them)"
-binary="$(find vendor/rigortype/steins/composer/bin -name steins -type f -not -path '*/bin/steins' | head -1)"
+binary="$(find vendor/typedduck/steins/composer/bin -name steins -type f -not -path '*/bin/steins' | head -1)"
 # A non-zero status is the point of this section, so `set -e` has to stand down
 # for it — `--version` is not a command steins has, and exits 2 saying so.
 set +e
@@ -140,14 +140,14 @@ set -e
 
 echo
 echo "Nothing was left dirty"
-if [ -n "$(git -C vendor/rigortype/steins status --porcelain)" ]; then
+if [ -n "$(git -C vendor/typedduck/steins status --porcelain)" ]; then
   echo "  FAIL    the installed package has local modifications:"
-  git -C vendor/rigortype/steins status --porcelain | sed 's/^/          /'
+  git -C vendor/typedduck/steins status --porcelain | sed 's/^/          /'
   fail=1
 else
   echo "  ok      the installed package is unmodified"
 fi
-leftovers="$(find vendor/rigortype/steins/composer/bin -maxdepth 2 \( -name '*.tar.gz' -o -name '*.sha256' \) )"
+leftovers="$(find vendor/typedduck/steins/composer/bin -maxdepth 2 \( -name '*.tar.gz' -o -name '*.sha256' \) )"
 if [ -n "$leftovers" ]; then
   echo "  FAIL    download scratch survived: $leftovers"
   fail=1
@@ -157,10 +157,10 @@ fi
 
 echo
 echo "Concurrent cold starts converge on one binary"
-rm -rf "vendor/rigortype/steins/composer/bin/$version"
+rm -rf "vendor/typedduck/steins/composer/bin/$version"
 for _ in 1 2 3 4; do ./vendor/bin/steins doctor --no-php >/dev/null 2>&1 & done
 wait
-count="$(find "vendor/rigortype/steins/composer/bin/$version" -name steins -type f | wc -l | tr -d ' ')"
+count="$(find "vendor/typedduck/steins/composer/bin/$version" -name steins -type f | wc -l | tr -d ' ')"
 check "exactly one extracted binary" "$count" "1"
 
 exit "$fail"

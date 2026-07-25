@@ -5,7 +5,7 @@ A **shameless knockoff** heavily 'inspired' by PHPStan, born from my grand delus
 ## Install
 
 ```
-composer require --dev rigortype/steins
+composer require --dev typedduck/steins
 ```
 
 Composer installs a PHP shim; on first use it downloads the release binary

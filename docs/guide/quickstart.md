@@ -16,7 +16,7 @@ one and `composer update` moves it deliberately. This is the right default for a
 project.
 
 ```
-composer require --dev rigortype/steins
+composer require --dev typedduck/steins
 ```
 
 What Composer installs is a small PHP shim, not the analyzer: on first use it
@@ -24,8 +24,8 @@ downloads the release binary matching the installed version, checks it against
 the sha256 the release published, and runs it. Later runs use the cached binary
 and touch the network not at all. Requires PHP 8.1+.
 
-You end up with two packages. `rigortype/steins` is the shim, **Apache-2.0**,
-and it requires `rigortype/steins-attributes` — the `#[\Steins\Pure]` and
+You end up with two packages. `typedduck/steins` is the shim, **Apache-2.0**,
+and it requires `typedduck/steins-attributes` — the `#[\Steins\Pure]` and
 `#[\Steins\Effect]` classes you write in your own source, **MIT** and inert at
 runtime. They are separate packages because they are different kinds of thing:
 one is tooling you run, the other is vocabulary meant to spread (ADR-0025). The

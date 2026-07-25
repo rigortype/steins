@@ -44,7 +44,7 @@ dependency, and crates.io rejects any crate that has one. `publish = false` in
    `x86_64`/`aarch64` macOS. Windows is deliberately not shipped (the PHP sidecar
    spawn path is unverified there — the reasoning is in `release.yml`'s header).
 2. **Homebrew** — `brew install rigortype/tap/steins`.
-3. **Composer** — `composer require --dev rigortype/steins`. Packagist serves a
+3. **Composer** — `composer require --dev typedduck/steins`. Packagist serves a
    PHP shim (`composer/`, ~26KB) that fetches channel 1's archive on first use
    and verifies its `.sha256` sidecar. Nothing here is version-bumped by hand:
    the shim reads the installed version from Composer metadata, and Packagist
@@ -351,7 +351,7 @@ an incomplete releases page. Prioritize accordingly.
 Then confirm the Composer channel resolves the new version and runs it:
 
 ```bash
-cd "$(mktemp -d)" && composer require --dev rigortype/steins:x.y.z && ./vendor/bin/steins doctor --no-php
+cd "$(mktemp -d)" && composer require --dev typedduck/steins:x.y.z && ./vendor/bin/steins doctor --no-php
 ```
 
 If Packagist has not picked up the tag within a few minutes, its GitHub webhook
@@ -389,4 +389,4 @@ is the thing to check — the release itself is unaffected.
   without its own explicit Go; the commit message is `Bump up version to x.y.z`.
 - After publish: ten assets on the Release, a downloaded binary runs, the tap
   formula carries the new version and real sha256s, and `composer require --dev
-  rigortype/steins:x.y.z` resolves and runs in a scratch directory.
+  typedduck/steins:x.y.z` resolves and runs in a scratch directory.

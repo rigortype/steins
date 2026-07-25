@@ -1,5 +1,5 @@
 {
-    "name": "rigortype/steins",
+    "name": "typedduck/steins",
     "description": "A value-precise static analyzer for PHP that reports only what provably breaks at runtime.",
     "type": "library",
     "license": "Apache-2.0",
@@ -19,7 +19,7 @@
     ],
     "require": {
         "php": ">=8.1",
-        "rigortype/steins-attributes": "^0.1"
+        "typedduck/steins-attributes": "^0.1"
     },
     "suggest": {
         "ext-curl": "To show progress while the analyzer binary downloads"

@@ -68,13 +68,17 @@ contribution it requires every contributor's consent; treat it as fixed.
 ## Amendment (2026-07-25): the Composer package requires the attributes package
 
 The Composer channel gives the licence boundary its first user-visible shape.
-Steins now publishes `rigortype/steins` on Packagist — a PHP shim that fetches
-the release binary — and that package **requires** `rigortype/steins-attributes`
+Steins now publishes `typedduck/steins` on Packagist — a PHP shim that fetches
+the release binary — and that package **requires** `typedduck/steins-attributes`
 rather than merely suggesting it. Owner decision.
+
+(The vendor name is `typedduck`, not `rigortype` and not `steins`; the
+`rigortype/steins-attributes` spelling in the **Attributes package** bullet above
+names the GitHub repository, which is a different thing. See ADR-0060.)
 
 The alternative was to leave the two packages independent and name the
 attributes under `suggest`. It was rejected on the user's first experience:
-`composer require --dev rigortype/steins` followed by an unresolved
+`composer require --dev typedduck/steins` followed by an unresolved
 `#[\Steins\Effect]` is a confusing way to learn that a second package exists,
 and the confusion falls on exactly the vocabulary whose spread is the point.
 
@@ -86,16 +90,19 @@ the requirement costs is one hard dependency on the core package, and a user who
 wants only the binary getting seven inert classes with it; both are cheaper than
 the failure they prevent.
 
-**Blocked on G2, and this is the only thing blocking it.** No such package
-exists yet: `rigortype/steins-attributes` is neither on GitHub nor on Packagist,
-because creating it is the substance of decision gate G2 (`docs/ROADMAP.md`,
-"User decision gates"). Adding the `require` before then would make
-`composer require rigortype/steins` fail to resolve for every user, so the entry
-is deliberately absent from `composer.json` until the package is published. A
-`suggest` entry would be no better in the interim — it would name something a
-user cannot install.
+**Landed.** `github.com/rigortype/steins-attributes` was created for this, which
+is the part of decision gate G2 (`docs/ROADMAP.md`, "User decision gates") that
+this amendment needed, and the `require` is in `composer.json`.
 
-The decision is recorded here rather than left in the issue tracker so that
-whoever clears G2 does not have to rediscover it. When the attributes package
-publishes, the mechanical change is one `require` line and a docs sentence
-naming both packages.
+One ordering constraint survives and is not optional: **`typedduck/steins-attributes`
+must reach Packagist before `typedduck/steins`.** Published the other way round,
+the analyzer package is uninstallable from the moment it appears — its only
+requirement does not resolve.
+
+The package ships `Steins\Pure` and `Steins\Effect` and nothing further. Two
+candidates were left out deliberately, both because shipping them would disable
+checking rather than enable it: `Steins\Impure`, which ADR-0055 designs but
+explicitly does not land in this release and which no code in `steins-syntax`
+recognizes; and a constants class for the effect labels, because the recognizer
+requires plain string literals and a class constant makes the whole attribute
+unrecognized — silently.

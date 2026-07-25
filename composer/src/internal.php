@@ -81,6 +81,18 @@ use const LOCK_UN;
 use const STDERR;
 
 /**
+ * This package's name on Packagist — the key Composer's own metadata is under.
+ *
+ * Deliberately NOT the same string as {@see REPOSITORY}, and the two must not be
+ * merged back together. The Packagist vendor is the team brand and the GitHub
+ * organization is the hosting account; they diverge on purpose (ADR-0060), and
+ * a single constant serving both would be right until the day either one moves.
+ *
+ * @internal
+ */
+const PACKAGE = 'typedduck/steins';
+
+/**
  * The GitHub repository whose releases hold the binaries.
  *
  * @internal
@@ -148,7 +160,7 @@ function locked(string $lockFile, Closure $callback)
  */
 function get_version(): string
 {
-    $pretty = InstalledVersions::getPrettyVersion(REPOSITORY);
+    $pretty = InstalledVersions::getPrettyVersion(PACKAGE);
     if ($pretty === null) {
         throw new RuntimeException('could not determine the installed steins version from Composer metadata.');
     }

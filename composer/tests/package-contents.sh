@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# What `composer require rigortype/steins` actually downloads.
+# What `composer require typedduck/steins` actually downloads.
 #
 # Packagist's dist archive is `git archive`, so this is not a proxy for the
 # published package — it IS the published package. Two ways to get it wrong,

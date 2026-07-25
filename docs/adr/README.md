@@ -95,3 +95,4 @@ list in one place.
 | ADR-0057 | [Returned-allocation heap transfer: return-object summaries, rebound by copy](0057-returned-allocation-heap-transfer.md) |
 | ADR-0058 | [Runtime-enforced invariant promotion: enforcement outranks annotation](0058-runtime-invariant-promotion.md) |
 | ADR-0059 | [Lean 4 as the value domain's specification: proofs over the algebra, differential vectors over the implementation](0059-lean-spec-for-value-domain.md) |
+| ADR-0060 | [The Packagist vendor is `typedduck`, not the namespace and not the GitHub org](0060-packagist-vendor-name.md) |

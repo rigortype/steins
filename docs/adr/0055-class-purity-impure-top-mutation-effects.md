@@ -224,7 +224,7 @@ lands in the release.
 
 11. **Attributes-package impact: the first versioning event.**
     `Steins\Impure` is a new final, argumentless attribute class in
-    `rigortype/steins-attributes` (MIT vocabulary, ADR-0025) —
+    `typedduck/steins-attributes` (MIT vocabulary, ADR-0025) —
     additive, therefore a minor version bump, and the package's first
     release event since the seed set. Core recognizes it exactly as
     `Pure`/`Effect`: fully-qualified, `use`-imported bare, and
@@ -355,7 +355,7 @@ lands in the release.
       (subsumption tests extended); `Steins\Impure` recognized (FQN /
       `use` / alias, the ⊤ envelope form in the envelope type);
       `effect.contradictory-envelope` registered and fired on the
-      bounded+⊤ node pair; `rigortype/steins-attributes` minor
+      bounded+⊤ node pair; `typedduck/steins-attributes` minor
       release (Impure class + `TARGET_CLASS` on all three).
       Corpus-inert by construction (no inference change).
     - **E2 — inference**: `mutate.self`/`mutate.instance` labeled
