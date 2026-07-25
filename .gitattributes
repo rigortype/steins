@@ -15,9 +15,6 @@
 #                             require their notices to accompany it.
 #   README.md                 the package's entry point on Packagist.
 #
-# CHANGELOG.md rides along deliberately: a pinned dev-tool dependency is exactly
-# the case where a reader wants to know what changed between two versions
-# without leaving `vendor/`.
 #
 # The release workflow's archives are built from a checkout, not from
 # `git archive`, so nothing here affects them.
@@ -44,6 +41,12 @@
 /corpus.lock.toml  export-ignore
 /AGENTS.md         export-ignore
 /CONTEXT.md        export-ignore
+
+# The changelog is written for someone deciding whether to upgrade, and it is
+# already where they would look: `release.yml` uses each version's section
+# verbatim as the GitHub Release body. Shipping a second copy into `vendor/`
+# adds weight to every install to duplicate the release page.
+/CHANGELOG.md      export-ignore
 
 # ── Prose: hundreds of files (ADRs, specs, research) aimed at contributors, ──
 # not at someone who installed a linter. The published docs live on the repo.

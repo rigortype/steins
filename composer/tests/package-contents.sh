@@ -58,6 +58,8 @@ refuse "Cargo.toml"
 refuse "Cargo.lock"
 refuse ".github/"
 refuse "composer/tests/"
+# The release page already carries each version's notes verbatim.
+refuse "CHANGELOG.md"
 
 echo
 size="$(git archive "$tree" --format=tar.gz | wc -c | tr -d ' ')"

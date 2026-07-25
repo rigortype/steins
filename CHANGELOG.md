@@ -31,8 +31,11 @@ skill seals them into a version section at release time, reconstructing from
 
 ### Added
 
-- **Install with Composer:** `composer require --dev typedduck/steins`. Packagist serves a small PHP shim that downloads the release binary matching the installed version, verifies it against the sha256 the release published, and runs it; later runs use the cached binary and touch no network. This is the channel to use when the analyzer should be pinned in `composer.lock` beside the code it analyzes, so CI and every developer resolve the same version. Requires PHP 8.1 or newer. Prebuilt binaries exist for Linux (glibc `x86_64`/`aarch64`, static musl `x86_64`) and macOS (`x86_64`/`aarch64`); a platform without one — notably arm64 musl — is refused by name and pointed at a source build rather than handed an archive that cannot run.
-- **The effect vocabulary ships as its own package.** `typedduck/steins-attributes` provides `#[\Steins\Pure]` and `#[\Steins\Effect]` — the classes you write in your own source to declare an effect envelope. It is MIT and inert at runtime, separate from the Apache-2.0 analyzer because it is vocabulary rather than tooling and its spread is the point (ADR-0025). The Composer package requires it, so one command leaves you able to write an envelope; nothing changes for the Homebrew or release-binary channels, where the attributes were always yours to install.
+- **A Composer channel** — `composer require --dev typedduck/steins` pins the analyzer in `composer.lock` beside the code it analyzes, so CI and every developer resolve the same version.
+  - What Composer installs is a PHP shim, not the analyzer: on first use it downloads the release binary matching the installed version, checks it against the sha256 published with that release, and runs it. Later runs use the cached binary and touch no network.
+  - Requires PHP 8.1 or newer. A platform with no prebuilt binary — notably arm64 musl — is refused by name and pointed at a source build, rather than handed an archive that cannot run.
+- **The effect vocabulary as its own package** — `typedduck/steins-attributes` supplies `#[\Steins\Pure]` and `#[\Steins\Effect]`, and the Composer package requires it, so one install leaves you able to declare an envelope.
+  - MIT and inert at runtime, separate from the analyzer because it is vocabulary rather than tooling (ADR-0025). The Homebrew and release-binary channels are unchanged; the attributes were always yours to install there.
 
 ## [0.1.0] - 2026-07-25
 
