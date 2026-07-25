@@ -1,0 +1,15 @@
+name = "SteinsDomainSpec"
+version = "0.1.0"
+defaultTargets = ["SteinsDomain", "vectors"]
+
+# Lean core only — no Mathlib. The spec needs `omega`, `decide`, and `List`,
+# all of which core ships, and a Mathlib dependency would make `lake build`
+# network-bound and add minutes to a check that must stay cheap enough to run
+# from `cargo xtask lean-check`.
+[[lean_lib]]
+name = "SteinsDomain"
+
+# `lake exe vectors` prints the differential vector file on stdout (ADR-0059 §4).
+[[lean_exe]]
+name = "vectors"
+root = "Main"
