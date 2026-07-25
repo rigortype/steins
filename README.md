@@ -8,29 +8,9 @@ A **shameless knockoff** heavily 'inspired' by PHPStan, born from my grand delus
 composer require --dev typedduck/steins
 ```
 
-Composer installs a PHP shim; on first use it downloads the release binary
-matching the installed version, verifies its published sha256, and runs it.
-Pinning the analyzer in `composer.lock` beside the code it analyzes is the
-point — CI and every developer then resolve the same one. Requires PHP 8.1+.
+Composer installs a PHP shim that fetches the matching release binary on first use, verifies its published sha256, and runs it — so the analyzer pins in `composer.lock` beside the code it analyzes.
 
-That one command also brings in
-[`rigortype/steins-attributes`](https://github.com/rigortype/steins-attributes)
-— the `#[\Steins\Pure]` and `#[\Steins\Effect]` classes you write in your own
-source. The analyzer is Apache-2.0; the attributes are MIT and inert at runtime.
-
-Machine-wide instead of per-project:
-
-```
-brew install rigortype/tap/steins
-```
-
-Prebuilt binaries for Linux (glibc `x86_64`/`aarch64`, static musl `x86_64`) and
-macOS (`x86_64`/`aarch64`) are on the [releases page](https://github.com/rigortype/steins/releases);
-Windows is not shipped yet. For a platform with no prebuilt binary, build from
-source with `cargo install --git https://github.com/rigortype/steins steins-cli`.
-[Quickstart](docs/guide/quickstart.md) covers which channel fits what.
-
-Confirm an install with `steins doctor --no-php`, which runs no checks.
+Or `brew install rigortype/tap/steins`, a [prebuilt binary](https://github.com/rigortype/steins/releases), or `cargo install --git https://github.com/rigortype/steins steins-cli`. [Quickstart](docs/guide/quickstart.md) covers which fits what, and `steins doctor --no-php` confirms any of them.
 
 ## Docs
 
@@ -47,7 +27,7 @@ Confirm an install with `steins doctor --no-php`, which runs no checks.
 
 ## Copyright
 
-This software is licensed under the [Apache License, Version 2.0](LICENSE).
+Apache-2.0 ([LICENSE](LICENSE)). The `#[\Steins\Pure]` and `#[\Steins\Effect]` attributes are a separate MIT package, [rigortype/steins-attributes](https://github.com/rigortype/steins-attributes).
 
 ```
 Copyright 2026 TypedDuck, USAMI Kenta <tadsan@zonu.me>
@@ -64,7 +44,3 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ```
-
-The `#[\Steins\Pure]` and `#[\Steins\Effect]` attributes are a separate package
-under a separate licence — see
-[rigortype/steins-attributes](https://github.com/rigortype/steins-attributes).
