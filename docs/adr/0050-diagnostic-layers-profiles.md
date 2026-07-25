@@ -274,3 +274,36 @@ never guesses it; the repo declares it, reviewably.
    `--profile contracts` (or equivalent) is the conformance repo
    owner's call (gate G4's boundary), recorded here so the 81-vs-87
    split is never mistaken for a checker regression.
+
+## Amendment (2026-07-26): `suppress.unmatched` always-on is load-bearing, not incidental (issue #32)
+
+Point 1 already states the shape — `suppress.unmatched` is mechanics-layer,
+prints in every profile, exempt from all three suppression channels — as a
+design choice among others. The same ten-project PHPStan survey behind the
+ADR-0023 reach-not-entries amendment names exactly the failure this shape
+forecloses, which promotes it here from choice to invariant: one surveyed
+project carried 25 `ignoreErrors` entries, 13 of them matching nothing —
+dead exclusions written against diagnostics since fixed, renamed, or never
+occurring as described — and nobody was told, because the analyser's
+`reportUnmatchedIgnoredErrors` setting was off. That flag is the mechanism
+worth naming: an unmatched-entry report is not most analyzers' default, it
+is a **configurable convenience projects eventually turn off**, at which
+point a denial that has stopped matching returns to silence
+indistinguishable from a denial still doing its job.
+
+`suppress.unmatched` has no equivalent flag and must never gain one — not
+a profile toggle, not a `[[policy]]` scope (which cannot target mechanics
+ids per point 1 already), not a `[check]` leniency knob under the
+lenient-default principle (the G1 amendment's point 4(a) above already
+carves mechanics out of "strictness" for exactly this reason). Point 1's
+"exempt from the suppression channels" and point 7's "mechanics ids
+default to fail like everything else" jointly already produce the
+invariant; what this amendment adds is naming it as one thing that must
+hold simultaneously across both axes: **a denial that has stopped
+matching cannot go unreported, under any profile, at any strictness
+stage.** A future change that satisfies point 1 and point 7 individually
+while silencing `suppress.unmatched` in some new surface (a report-level
+filter, a format-specific omission) would violate this amendment even
+though it violates neither point in isolation — the binding claim is the
+conjunction, stated once so it cannot be split apart by a change that
+respects each half separately.
