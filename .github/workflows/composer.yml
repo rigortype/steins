@@ -1,0 +1,187 @@
+# The Composer channel's own CI.
+#
+# This is PHP living in a Rust repository, which is exactly why it needs its own
+# workflow: no `cargo test` touches it, no clippy lint reads it, and its failure
+# mode is silent. It breaks for a user at `composer require` time, on a platform
+# no maintainer happens to run, possibly several releases after the change that
+# broke it.
+#
+# The shim resolves its version from Composer metadata and fetches the matching
+# GitHub Release, so a commit under test has no release of its own. The fixture
+# in composer/tests/smoke.sh closes that honestly: publish exactly what
+# `git archive` would publish, tag it with a version that HAS been released, and
+# let the shim under test fetch a real binary. Only the packaging origin is
+# local — the download, the checksum, and the exec are all real.
+#
+# Path-filtered, because none of this is affected by a Rust-only commit.
+name: composer
+
+# NB: the two path lists are duplicated on purpose. GitHub's workflow parser
+# does not honour YAML anchors, so an `&anchor`/`*alias` pair here would either
+# fail to load or silently widen the filter to everything.
+on:
+  push:
+    branches: [master]
+    paths:
+      - "composer/**"
+      - "composer.json"
+      - ".gitattributes"
+      - ".github/workflows/composer.yml"
+  pull_request:
+    paths:
+      - "composer/**"
+      - "composer.json"
+      - ".gitattributes"
+      - ".github/workflows/composer.yml"
+  # The channel depends on release assets that this workflow does not produce.
+  # A manual run is how you check the channel still works after a release.
+  workflow_dispatch:
+
+permissions:
+  contents: read # `gh release list`, to find a tag that actually has binaries
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # What Packagist would serve. No PHP involved: this is a statement about
+  # `git archive` and therefore about .gitattributes, which is the only thing
+  # standing between a 26KB shim and the whole workspace.
+  package:
+    name: published package contents
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: composer/tests/package-contents.sh HEAD
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Target detection and checksum reading, over the declared PHP range. These
+  # cover the machines CI is not: a runner never takes the arm64-musl branch,
+  # but a user does, and a wrong answer there costs them a download that
+  # succeeds and then fails at exec.
+  unit:
+    name: unit (php ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor is what composer.json requires and what the sidecar runner
+        # states (ADR-0004); the ceiling is whatever is current. Both ends are
+        # load-bearing: the shim runs on the USER's PHP, not on one we pick.
+        php: ["8.1", "8.2", "8.3", "8.4"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+
+      - run: php composer/tests/target-detection.php
+      - run: php composer/tests/checksum.php
+
+      - name: Syntax check every shipped PHP file
+        run: |
+          set -euo pipefail
+          for file in composer/bin/steins composer/src/*.php; do
+            php -l "$file"
+          done
+
+      - run: composer validate --no-check-publish --no-check-lock
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # The real thing, on real machines: install the package and run the binary it
+  # fetches. One row per target whose detection this runner can actually
+  # exercise — musl is the job below, and Windows has no binary by design.
+  install:
+    name: install (${{ matrix.label }})
+    needs: package
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux x86_64 glibc
+          - os: ubuntu-24.04-arm
+            label: linux arm64 glibc
+          - os: macos-latest
+            label: macos arm64
+          # The Intel macOS row. `macos-13` is retired; the Intel image is now
+          # spelled `-intel`, and macos-latest is arm64.
+          - os: macos-15-intel
+            label: macos x86_64
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          coverage: none
+
+      - name: Find a tag whose binaries exist
+        id: released
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 1 --json tagName --jq '.[0].tagName // ""')"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ -z "$tag" ]; then
+            echo "::warning::no published release yet — the install smoke has nothing to fetch and is skipped"
+          fi
+
+      - name: Install the package and run it
+        if: steps.released.outputs.tag != ''
+        run: composer/tests/smoke.sh "${{ steps.released.outputs.tag }}" HEAD
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # musl, which is the one row where detection has a judgement call rather than
+  # a lookup: both x86_64 Linux builds exist, and the shim prefers glibc only
+  # when it is confident. Run inside a container rather than as a job container
+  # so the Actions runner keeps its own glibc — the runner does not work on
+  # Alpine, but `docker run` from it does.
+  musl:
+    name: install (linux x86_64 musl)
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Find a tag whose binaries exist
+        id: released
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 1 --json tagName --jq '.[0].tagName // ""')"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # The composer image is Alpine with PHP and Composer already on PATH, so
+      # this tests the shim on a genuinely musl PHP rather than on a glibc PHP
+      # told to pretend.
+      - name: Install the package and run it, on Alpine
+        if: steps.released.outputs.tag != ''
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/src" -w /src -e TAG="${{ steps.released.outputs.tag }}" composer:2 sh -c '
+            set -eu
+            apk add --no-cache bash >/dev/null
+            git config --global --add safe.directory /src
+            php -r "echo PHP_OS_FAMILY, php_uname(\"m\"), PHP_EOL;"
+            bash composer/tests/smoke.sh "$TAG" HEAD
+          '
+
+      # The tie-break only means something if the musl archive is what was
+      # actually chosen. Assert it, rather than inferring it from a run that
+      # would also have passed on the static binary picked for the wrong reason.
+      - name: The musl archive is the one that was chosen
+        if: steps.released.outputs.tag != ''
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/src" -w /src composer:2 php -r '
+            require "/src/composer/src/internal.php";
+            $target = Steins\Internal\detect_target();
+            echo "detected: $target\n";
+            exit($target === "x86_64-unknown-linux-musl" ? 0 : 1);
+          '
