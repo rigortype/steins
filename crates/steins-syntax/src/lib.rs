@@ -1761,9 +1761,10 @@ pub enum DynamismKind {
     /// carries the lowered path so provenness / in-universe resolution is
     /// judgeable.
     Include(IncludePath),
-    /// A `class_alias(...)` call with a **non-literal** argument (ADR-0046 §2,
-    /// ADR-0049 §2) — a runtime class-name mint the reference scan cannot resolve.
-    /// A `class_alias` with two literal string args instead contributes a
+    /// A `class_alias(...)` call with a **runtime-minted** name argument (ADR-0046
+    /// §2, ADR-0049 §2) — a class name the reference scan cannot resolve. A
+    /// `class_alias` whose two names are known at compile time (string literals, or
+    /// the `X::class` constant — issue #36) instead contributes a
     /// [`ClassAliasEdge`] to the index (see [`SourceTree::class_alias_edges`]) and
     /// is *not* a dam site. The checker-side finding-breadth dam treats this as a
     /// dam site (S2+); the transform-side obstacle scan deliberately ignores it in
@@ -1840,9 +1841,11 @@ pub struct ReflectionSite {
     pub span: Span,
 }
 
-/// A literal `class_alias('Target', 'Alias')` edge (ADR-0049 §2 / A2iii): both
-/// arguments are string literals, so the alias name resolves — for **existence**
-/// purposes — to the target declaration's site. Folded into the project index
+/// A compile-time `class_alias('Target', 'Alias')` edge (ADR-0049 §2 / A2iii): both
+/// arguments name a class at compile time — a string literal, or the `X::class`
+/// constant resolved through the file's namespace context (issue #36) — so the
+/// alias name resolves, for **existence** purposes, to the target declaration's
+/// site. Folded into the project index
 /// after every textual declaration, sharing the duplicate-decl ambiguity
 /// discipline: an alias colliding with a textual declaration of the same FQN, or
 /// two alias edges for one name, marks that FQN `Ambiguous` (existence present,
@@ -1890,10 +1893,11 @@ pub struct SourceTree {
     /// (ADR-0046 §2). Consumed by the transform engine's caller-enumeration
     /// obstacle detection; the checker never reads it (zero behavior change).
     dynamism: Vec<DynamismSite>,
-    /// Literal `class_alias('Target', 'Alias')` edges found file-wide (ADR-0049
-    /// §2). Folded into the project index for existence resolution; a non-literal
-    /// `class_alias` is a [`DynamismKind::ClassAlias`] dam site in [`Self::dynamism`]
-    /// instead. Carried but consumed by nothing in the S1 groundwork slice.
+    /// Compile-time `class_alias('Target', 'Alias')` edges found file-wide (ADR-0049
+    /// §2). Folded into the project index for existence resolution; a `class_alias`
+    /// naming a runtime-minted class is a [`DynamismKind::ClassAlias`] dam site in
+    /// [`Self::dynamism`] instead. Carried but consumed by nothing in the S1
+    /// groundwork slice.
     class_alias_edges: Vec<ClassAliasEdge>,
     /// Anonymous-class inheritance edges found file-wide (ADR-0049 A4). Read by the
     /// declared-receiver lane's descendant closure (S6) — an invisible descendant
@@ -2088,9 +2092,10 @@ impl SourceTree {
         &self.dynamism
     }
 
-    /// The literal `class_alias('Target', 'Alias')` edges found file-wide
-    /// (ADR-0049 §2). The project index folds these in for existence resolution;
-    /// a non-literal `class_alias` is a [`DynamismKind::ClassAlias`] dam site in
+    /// The compile-time `class_alias('Target', 'Alias')` edges found file-wide
+    /// (ADR-0049 §2) — both names given as string literals or as `X::class`. The
+    /// project index folds these in for existence resolution; a `class_alias`
+    /// naming a runtime-minted class is a [`DynamismKind::ClassAlias`] dam site in
     /// [`Self::dynamism_sites`] instead.
     #[must_use]
     pub fn class_alias_edges(&self) -> &[ClassAliasEdge] {
@@ -2201,11 +2206,13 @@ fn walk(
     match node {
         Node::Function(f) => out.functions.push(lower_function(f, aliases, docs, rc, conditional)),
         Node::FunctionCall(c) => {
-            // `class_alias(...)` (ADR-0049 §2): a literal-args call mints an index
-            // alias edge; any non-literal argument makes it a runtime name mint —
-            // a dam site — instead. Recognized here so both facts are collected
-            // file-wide (like the dynamism set), before the call itself is lowered.
-            classify_class_alias(c, out);
+            // `class_alias(...)` (ADR-0049 §2): a call whose two names are known at
+            // compile time (string literals, or `X::class` — issue #36) mints an index
+            // alias edge; a runtime-minted name makes it a dam site instead. Recognized
+            // here so both facts are collected file-wide (like the dynamism set),
+            // before the call itself is lowered. `rc` resolves the `X::class` spelling
+            // against the enclosing namespace context, exactly as PHP does.
+            classify_class_alias(c, rc, out);
             // `func_get_args()` under a typed signature (issue #30, report-only):
             // the declaration announces an argument shape the body then bypasses.
             if typed_sig
@@ -2425,14 +2432,20 @@ fn lower_concat(expr: &Expression<'_>) -> ConcatVal {
     }
 }
 
-/// Classify a `class_alias(...)` call (ADR-0049 §2): two literal string arguments
-/// mint an index [`ClassAliasEdge`] (existence resolution); any non-literal
-/// argument — a computed target/alias name — makes it a [`DynamismKind::ClassAlias`]
-/// dam site. Only the global `class_alias` (unqualified, so subject to PHP's
-/// global function fallback, or fully-qualified `\class_alias`) is recognized; a
-/// namespaced `Foo\class_alias` is a different symbol. Called for every
-/// `FunctionCall` node file-wide; a non-`class_alias` callee is a no-op.
-fn classify_class_alias(c: &FunctionCall<'_>, out: &mut Lowered) {
+/// Classify a `class_alias(...)` call (ADR-0049 §2): two **compile-time** class-name
+/// arguments mint an index [`ClassAliasEdge`] (existence resolution); an argument
+/// whose name only exists at run time — a variable, a call, a computed string —
+/// makes it a [`DynamismKind::ClassAlias`] dam site. Only the global `class_alias`
+/// (unqualified, so subject to PHP's global function fallback, or fully-qualified
+/// `\class_alias`) is recognized; a namespaced `Foo\class_alias` is a different
+/// symbol. Called for every `FunctionCall` node file-wide; a non-`class_alias`
+/// callee is a no-op.
+///
+/// The compile-time set is decided by [`lower_alias_name`], which is where the
+/// `X::class` form joins the string literal (issue #36) — that argument shape is
+/// resolved by the *compiler*, so treating it as a runtime mint dammed the whole
+/// universe over a constant.
+fn classify_class_alias(c: &FunctionCall<'_>, rc: &RefResolver, out: &mut Lowered) {
     let Expression::Identifier(id) = c.function else { return };
     if !matches!(id, Identifier::Local(_) | Identifier::FullyQualified(_)) {
         return;
@@ -2442,18 +2455,19 @@ fn classify_class_alias(c: &FunctionCall<'_>, out: &mut Lowered) {
     }
     let span = to_span(c.span());
 
-    // The first two positional (non-spread) arguments must both be string literals
-    // for an edge; a named/spread argument or a non-literal makes it a dam site.
-    let mut literals: Vec<String> = Vec::new();
+    // The first two positional (non-spread) arguments must both name a class at
+    // compile time for an edge; a named/spread argument or a runtime-minted name
+    // makes it a dam site. Both are already normalized to the index key shape.
+    let mut names: Vec<String> = Vec::new();
     let mut clean = true;
     for arg in c.argument_list.arguments.iter() {
-        if literals.len() >= 2 {
+        if names.len() >= 2 {
             break;
         }
         match arg {
-            Argument::Positional(p) if p.ellipsis.is_none() => match lower_concat(p.value) {
-                ConcatVal::Str(s) => literals.push(s),
-                _ => {
+            Argument::Positional(p) if p.ellipsis.is_none() => match lower_alias_name(p.value, rc) {
+                Some(s) => names.push(s),
+                None => {
                     clean = false;
                     break;
                 }
@@ -2465,12 +2479,12 @@ fn classify_class_alias(c: &FunctionCall<'_>, out: &mut Lowered) {
         }
     }
 
-    if clean && literals.len() == 2 {
+    if clean && names.len() == 2 {
         // `class_alias(string $class /* target */, string $alias)` — arg 0 is the
         // existing class, arg 1 the new name; the alias resolves to the target.
         out.class_alias_edges.push(ClassAliasEdge {
-            alias_fqn: normalize_alias_fqn(&literals[1]),
-            target_fqn: normalize_alias_fqn(&literals[0]),
+            alias_fqn: names[1].clone(),
+            target_fqn: names[0].clone(),
             span,
         });
     } else {
@@ -2478,9 +2492,57 @@ fn classify_class_alias(c: &FunctionCall<'_>, out: &mut Lowered) {
     }
 }
 
-/// Normalize a `class_alias` string argument to the index key shape: trimmed,
-/// leading `\` stripped, lowercased. `class_alias` strings are runtime FQNs — not
-/// resolved against `use` imports or the current namespace — so no context lookup.
+/// Lower one `class_alias` argument to the normalized index-key FQN it names at
+/// **compile time**, or `None` when the name is only known at run time (which dams
+/// — ADR-0049 §2). Two shapes qualify, and they normalize *differently* on purpose:
+///
+/// - a **string literal** (including a literal-only concatenation): a runtime FQN,
+///   spelled out in full. PHP does not resolve it against `use` imports or the
+///   current namespace, so neither does [`normalize_alias_fqn`].
+/// - **`X::class`** (issue #36): since PHP 8.0 this is a plain compile-time string —
+///   no autoload, no runtime lookup, the named class need not even exist. It is
+///   therefore *not* a runtime class-name mint and must not dam. Its spelling **is**
+///   subject to ordinary class-name resolution, so it goes through the same
+///   [`RefResolver`] every other class reference uses — `use` imports (plain,
+///   aliased, and the grouped forms `use A\{B, C}` whose omission previously
+///   mis-resolved names), the enclosing namespace, and the `namespace\X` relative
+///   form — rather than being taken as spelled. Taking the raw spelling would key
+///   the edge on a name no declaration ever carries.
+///
+/// Deliberately **not** widened past those two:
+/// - `self::class` / `parent::class` are lexically knowable in principle, but this
+///   walk is file-wide and carries no enclosing-class context; `static::class` is
+///   late-static-bound and not knowable at the site at all. All three keep damming,
+///   which is the sound direction (a dam only silences absence claims).
+/// - a variable, a constant, a function call, or any concatenation touching one:
+///   [`lower_concat`] folds only literals and `__DIR__`, so `Foo::class . $suffix`
+///   and friends stay unproven and keep damming.
+fn lower_alias_name(expr: &Expression<'_>, rc: &RefResolver) -> Option<String> {
+    let expr = expr.unparenthesized();
+    // `X::class` — an explicitly-named class only (`self`/`static`/`parent` and a
+    // dynamic class expr are other `Expression` variants and fall through to the
+    // literal path, which rejects them).
+    if let Expression::Access(Access::ClassConstant(cc)) = expr
+        && class_const_name(&cc.constant).is_some_and(|n| n.eq_ignore_ascii_case("class"))
+    {
+        return match cc.class {
+            Expression::Identifier(id) => {
+                Some(normalize_alias_fqn(&rc.class_display_fqn(&name_ref(id))))
+            }
+            _ => None,
+        };
+    }
+    match lower_concat(expr) {
+        ConcatVal::Str(s) => Some(normalize_alias_fqn(&s)),
+        _ => None,
+    }
+}
+
+/// Normalize a `class_alias` class name to the index key shape: trimmed, leading
+/// `\` stripped, lowercased. Applied to an already-resolved name — a literal
+/// argument is a runtime FQN (never resolved against `use` imports or the current
+/// namespace), and an `X::class` argument was resolved by [`RefResolver`] before it
+/// got here — so this step itself does no context lookup.
 fn normalize_alias_fqn(s: &str) -> String {
     s.trim().trim_start_matches('\\').to_ascii_lowercase()
 }

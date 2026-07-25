@@ -165,7 +165,9 @@ recomputed per run, no entry state, no ordering dependence: every `eval`; every
 resolves those against `include_path` → the script dir → CWD, so
 directory-relative belief is unsound; only absolute and `__DIR__`-anchored
 literals can prove in-universe), or a provable literal that resolves *outside*
-the universe; and every **non-literal** `class_alias`. It gates the
+the universe; and every `class_alias` whose class names are **not known at
+compile time** (a string literal and the `X::class` constant both are — the
+latter is resolved by the compiler, so it mints an index edge instead). It gates the
 existence-absence ids: since ADR-0049 S4 its consumers are live — the
 `call.undefined-function` and `class.undefined` emitters fire only when the dam
 is clear (a single `eval` or out-of-universe include withholds the whole

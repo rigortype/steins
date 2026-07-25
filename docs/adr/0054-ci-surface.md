@@ -220,7 +220,7 @@ doctor is user-side adoption readiness).
       `class.undefined`, and per A2(ii) `call.undefined-method`);
       the **dam-site count** (the S1 dam fact,
       `crates/steins-infer/src/dam.rs` — "N dammed sites", broken
-      down by eval / unproven include / non-literal `class_alias`)
+      down by eval / unproven include / runtime-name `class_alias`)
       with the vouch count and the ADR-0046/0049 downgrade sentence
       ("absence claims conditional on N vouched dynamic-code
       exemptions"); the vendor posture (vendor findings suppressed by

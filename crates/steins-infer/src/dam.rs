@@ -17,13 +17,15 @@
 //!   amended — runtime resolves those against `include_path` → the script dir →
 //!   CWD, so directory-relative belief is unsound), or an absolute / `__DIR__`-
 //!   anchored literal that resolves *outside* the analyzed universe;
-//! - every **non-literal** `class_alias(...)` (a runtime class-name mint —
-//!   [`steins_syntax::DynamismKind::ClassAlias`]).
+//! - every `class_alias(...)` naming a **runtime-minted** class (a class-name mint
+//!   the reference scan cannot resolve — [`steins_syntax::DynamismKind::ClassAlias`]).
 //!
 //! The vendor presumption of ADR-0046 §2 carries over verbatim: `eval` /
 //! dynamic-include inside a `vendor/` path is composer plumbing, presumed
-//! universe-internal. (A literal `class_alias` instead contributes an index edge —
-//! it is never a dam site.)
+//! universe-internal. (A `class_alias` whose two names are known at compile time —
+//! string literals, or the `X::class` constant, which the *compiler* resolves and
+//! which therefore mints nothing at run time (issue #36) — instead contributes an
+//! index edge; it is never a dam site.)
 //!
 //! **S1 groundwork: this fact is carried and tested, but consumed by nothing.**
 //! The existence ids that read it (`call.undefined-function`, `class.undefined`,
@@ -46,7 +48,8 @@ pub enum DamKind {
     Eval,
     /// A non-vendor `include`/`require` with an unproven or out-of-universe path.
     Include,
-    /// A non-literal `class_alias(...)` — a runtime class-name mint.
+    /// A `class_alias(...)` naming a runtime-minted class (issue #36: `X::class` is
+    /// compile-time and mints an index edge instead).
     ClassAlias,
 }
 
@@ -126,10 +129,10 @@ pub fn dam_facts(units: &[FileUnit], layout: &ProjectLayout) -> DamFacts {
                     }
                     DamKind::Include
                 }
-                // A non-literal `class_alias` is a runtime name mint. The vendor
-                // presumption does not extend to it: unlike autoload include/eval,
-                // an aliasing call mints a *project-visible* class name regardless of
-                // where it sits, so it dams even in vendor.
+                // A `class_alias` whose name is not known at compile time is a runtime
+                // name mint. The vendor presumption does not extend to it: unlike
+                // autoload include/eval, an aliasing call mints a *project-visible*
+                // class name regardless of where it sits, so it dams even in vendor.
                 DynamismKind::ClassAlias => DamKind::ClassAlias,
             };
             sites.push(DamSite { path: u.path.to_owned(), line: pos.line, column: pos.column, kind });
@@ -285,5 +288,31 @@ mod tests {
         let t = tree("<?php\nclass_alias('A', 'B');\n");
         let units = [FileUnit { path: "src/a.php", tree: &t }];
         assert!(dam_facts(&units, &ProjectLayout::fallback()).is_clear());
+    }
+
+    #[test]
+    fn class_const_class_alias_is_not_a_dam_site() {
+        // Issue #36: `X::class` is resolved by the compiler, so this mints an index
+        // edge like the two-literal form. `is_clear()` is universe-wide, so this one
+        // site standing would have silenced the existence family for every file.
+        let t = tree("<?php\nclass Thing {}\nclass_alias(Thing::class, 'Legacy_Thing');\n");
+        let units = [FileUnit { path: "vendor/pkg/Thing.php", tree: &t }];
+        assert!(dam_facts(&units, &ProjectLayout::fallback()).is_clear());
+    }
+
+    #[test]
+    fn one_runtime_name_class_alias_dams_the_whole_universe() {
+        // The blast radius the fix is about: the fact is a universe-wide boolean, so
+        // a single runtime-minted name in ONE file dams every other file's existence
+        // claims. That remains true — the fix narrows what counts, not the reach.
+        let clean = tree("<?php\nclass Thing {}\nclass_alias(Thing::class, 'Legacy');\n");
+        let dirty = tree("<?php\nclass_alias($computed, 'Other');\n");
+        let units = [
+            FileUnit { path: "src/a.php", tree: &clean },
+            FileUnit { path: "src/b.php", tree: &dirty },
+        ];
+        let facts = dam_facts(&units, &ProjectLayout::fallback());
+        assert_eq!(facts.len(), 1, "{:?}", facts.sites());
+        assert!(!facts.is_clear());
     }
 }

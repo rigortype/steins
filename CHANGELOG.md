@@ -33,7 +33,7 @@ skill seals them into a version section at release time, reconstructing from
 
 - **`steins doctor` now says what a quiet run was silent about** — a Coverage posture section inventories the code the analyzer parses and then declines to reason about, so a clean run is a measured claim rather than an unexplained silence.
   - Poisoned scopes as a share of all scopes, with the constructs that caused them broken down by kind: `eval`, `include`/`require`, `extract`, `compact`, variable variables, reference assignment, `global`, `static`, and by-ref capture. Every local in such a scope is unknown by design — that is why Steins does not report false positives there, and now it says so.
-  - Dam sites broken down by `eval` / unproven include / non-literal `class_alias`: the sites where an absence claim about a function or class stays silent because runtime code could mint the name.
+  - Dam sites broken down by `eval` / unproven include / runtime-name `class_alias`: the sites where an absence claim about a function or class stays silent because runtime code could mint the name.
   - Reflection-driven invocation sites (`->invoke*()`, `->newInstance*()`, `Closure::bind` with a computed scope, `func_get_args()` under a typed signature), reported as an explicitly incomplete guess: these silence nothing on their own, and the list exists to be corrected against real code.
   - The section reports; it never fails. Nothing here is a diagnostic id, nothing enters a baseline, and `doctor` still exits 0 on every environment fact.
 - **A Composer channel** — `composer require --dev typedduck/steins` pins the analyzer in `composer.lock` beside the code it analyzes, so CI and every developer resolve the same version.
@@ -41,6 +41,12 @@ skill seals them into a version section at release time, reconstructing from
   - Requires PHP 8.1 or newer. A platform with no prebuilt binary — notably arm64 musl — is refused by name and pointed at a source build, rather than handed an archive that cannot run.
 - **The effect vocabulary as its own package** — `typedduck/steins-attributes` supplies `#[\Steins\Pure]` and `#[\Steins\Effect]`, and the Composer package requires it, so one install leaves you able to declare an envelope.
   - MIT and inert at runtime, separate from the analyzer because it is vocabulary rather than tooling (ADR-0025). The Homebrew and release-binary channels are unchanged; the attributes were always yours to install there.
+
+### Fixed
+
+- **`class_alias(X::class, 'Name')` no longer silences the absence family across your whole project.** `X::class` is resolved by the PHP compiler — it is a plain string constant, it autoloads nothing, and `X` need not even exist — but Steins was reading it as a name minted at run time and raising the runtime-definition dam on it. That dam is a single project-wide switch, so **one** such call anywhere in the analyzed universe made `call.undefined-function`, `class.undefined`, and the guarded legs of `call.undefined-method` go quiet in every file. Vendoring one package that writes `class_alias(Thing::class, 'Legacy_Thing')` once per class was enough to do it; on one 85,000-file codebase this accounted for 32,749 of 32,914 dam sites. The call now contributes a class-alias edge to the index, exactly as the two-string-literal form already did, and the alias name resolves.
+  - **This can surface findings that were being suppressed** — that is the point of the fix. If your project's dam is now clear where it was not, absence findings you have never seen may appear; they are claims that were always true and always withheld. Everything else about the dam is unchanged: a genuinely computed name (a variable, a concatenation, a function call, a constant) still dams, as do `self::class`, `static::class`, and `parent::class`.
+  - The `X::class` spelling is resolved against the file's `use` imports (including grouped `use A\{B, C}`), its namespace, and the `namespace\X` relative form — not taken as written — so the alias points at the class PHP would point it at. A string-literal argument keeps its existing meaning as a runtime FQN spelled out in full.
 
 ## [0.1.0] - 2026-07-25
 

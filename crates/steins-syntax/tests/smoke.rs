@@ -643,6 +643,115 @@ fn non_literal_class_alias_is_a_dynamism_site() {
     assert!(matches!(sites[0].kind, DynamismKind::ClassAlias));
 }
 
+// ---- issue #36: `X::class` is compile-time, so it mints an edge, not a dam ----
+
+/// The single edge a source lowers to, as `(target_fqn, alias_fqn)`, asserting the
+/// call left no dam site behind. Panics unless there is exactly one edge.
+fn only_edge(tree: &SourceTree) -> (String, String) {
+    assert!(tree.dynamism_sites().is_empty(), "unexpected dam site: {:?}", tree.dynamism_sites());
+    let edges = tree.class_alias_edges();
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    (edges[0].target_fqn.clone(), edges[0].alias_fqn.clone())
+}
+
+/// Whether a source dams (a `ClassAlias` dynamism site, no edge).
+fn alias_dams(src: &str) -> bool {
+    let tree = SourceTree::parse(src);
+    tree.class_alias_edges().is_empty()
+        && tree.dynamism_sites().iter().any(|s| matches!(s.kind, DynamismKind::ClassAlias))
+}
+
+#[test]
+fn class_const_target_lowers_to_an_edge() {
+    // The issue's minimal repro: `X::class` is resolved by the compiler, so this is
+    // an alias edge — not "a runtime class-name mint".
+    let tree = SourceTree::parse("<?php\nclass Thing {}\nclass_alias(Thing::class, 'Legacy_Thing');\n");
+    assert_eq!(only_edge(&tree), ("thing".to_owned(), "legacy_thing".to_owned()));
+}
+
+#[test]
+fn class_const_in_either_or_both_positions_lowers_to_an_edge() {
+    // The alias position too — `class_alias('A', B::class)` is equally compile-time.
+    let tree = SourceTree::parse("<?php\nclass_alias('A', B::class);\n");
+    assert_eq!(only_edge(&tree), ("a".to_owned(), "b".to_owned()));
+    let tree = SourceTree::parse("<?php\nclass_alias(A::class, B::class);\n");
+    assert_eq!(only_edge(&tree), ("a".to_owned(), "b".to_owned()));
+}
+
+#[test]
+fn class_const_target_resolves_through_the_namespace_context() {
+    // `X::class` is subject to ordinary class-name resolution, unlike a literal
+    // (which is a runtime FQN taken as written). The enclosing namespace applies…
+    let tree = SourceTree::parse("<?php\nnamespace App;\nclass Thing {}\nclass_alias(Thing::class, 'Legacy');\n");
+    assert_eq!(only_edge(&tree), ("app\\thing".to_owned(), "legacy".to_owned()));
+    // …a fully-qualified spelling escapes it…
+    let tree = SourceTree::parse("<?php\nnamespace App;\nclass_alias(\\Other\\Thing::class, 'Legacy');\n");
+    assert_eq!(only_edge(&tree), ("other\\thing".to_owned(), "legacy".to_owned()));
+    // …and `namespace\X` resolves against the namespace without doubling it.
+    let tree = SourceTree::parse("<?php\nnamespace App;\nclass_alias(namespace\\Thing::class, 'Legacy');\n");
+    assert_eq!(only_edge(&tree), ("app\\thing".to_owned(), "legacy".to_owned()));
+}
+
+#[test]
+fn class_const_target_resolves_through_use_imports() {
+    // Plain, aliased, and GROUPED `use` — the grouped form is the shape that
+    // previously mis-resolved to a same-named class in the fallback namespace.
+    let tree = SourceTree::parse("<?php\nuse Vendor\\Pkg\\Thing;\nclass_alias(Thing::class, 'Legacy');\n");
+    assert_eq!(only_edge(&tree), ("vendor\\pkg\\thing".to_owned(), "legacy".to_owned()));
+    let tree = SourceTree::parse("<?php\nuse Vendor\\Pkg\\Thing as T;\nclass_alias(T::class, 'Legacy');\n");
+    assert_eq!(only_edge(&tree), ("vendor\\pkg\\thing".to_owned(), "legacy".to_owned()));
+    let tree = SourceTree::parse("<?php\nuse Vendor\\{Pkg\\Thing, Other};\nclass_alias(Thing::class, 'Legacy');\n");
+    assert_eq!(only_edge(&tree), ("vendor\\pkg\\thing".to_owned(), "legacy".to_owned()));
+    // A qualified reference imports on its FIRST segment only.
+    let tree = SourceTree::parse("<?php\nuse Vendor\\Pkg;\nclass_alias(Pkg\\Thing::class, 'Legacy');\n");
+    assert_eq!(only_edge(&tree), ("vendor\\pkg\\thing".to_owned(), "legacy".to_owned()));
+}
+
+#[test]
+fn class_const_on_an_unresolvable_name_still_lowers_to_an_edge() {
+    // `X::class` neither autoloads nor requires `X` to exist (PHP 8.0+), so the
+    // lowering is unconditional. Whether the alias *backs an existence claim* is the
+    // index fold's call — an edge to an absent target mints nothing there — so a
+    // name the index cannot resolve costs nothing and must not dam.
+    let tree = SourceTree::parse("<?php\nclass_alias(NeverDeclared::class, 'Legacy');\n");
+    assert_eq!(only_edge(&tree), ("neverdeclared".to_owned(), "legacy".to_owned()));
+}
+
+#[test]
+fn self_static_and_parent_class_still_dam() {
+    // `static::class` is late-static-bound — unknowable at the site. `self::class` /
+    // `parent::class` need a lexical-class context this file-wide walk does not
+    // carry. All three keep damming, the sound direction.
+    for kw in ["self", "static", "parent"] {
+        let src = format!(
+            "<?php\nclass C extends P {{ public function f(): void {{ class_alias({kw}::class, 'Legacy'); }} }}\n"
+        );
+        assert!(alias_dams(&src), "{kw}::class must dam");
+    }
+}
+
+#[test]
+fn genuinely_runtime_alias_names_still_dam() {
+    // The widening stops at `::class`. Everything whose name is minted at run time —
+    // a variable, a concatenation (even one touching `::class`), a call, a constant,
+    // a dynamic class expression, a dynamic constant name — keeps damming.
+    for src in [
+        "<?php\nclass_alias($src, 'B');\n",
+        "<?php\nclass_alias('A', $dst);\n",
+        "<?php\nclass_alias(Thing::class . 'Suffix', 'B');\n",
+        "<?php\nclass_alias('Prefix' . Thing::class, 'B');\n",
+        "<?php\nclass_alias(get_class($o), 'B');\n",
+        "<?php\nclass_alias(TARGET_CLASS, 'B');\n",
+        "<?php\nclass_alias($cls::class, 'B');\n",
+        "<?php\nclass_alias(Thing::{$k}, 'B');\n",
+        "<?php\nclass_alias(Thing::NAME, 'B');\n",
+        "<?php\nclass_alias(...$args);\n",
+        "<?php\nclass_alias(alias: 'B', class: A::class);\n",
+    ] {
+        assert!(alias_dams(src), "must dam: {src}");
+    }
+}
+
 // ---- issue #30: the opaque-construct inventory behind the poison flag -------
 
 use steins_syntax::{OpaqueConstruct, ReflectionKind};

@@ -37,10 +37,21 @@ message register.
    class-absence claims are dammed by the universe's dynamism sites —
    the already-lowered `DynamismSite` set: any `eval`, any non-vendor
    include whose path is unproven or proven out-of-universe (the vendor
-   presumption of ADR-0046 §2 carries over verbatim), plus non-literal
-   `class_alias` — a runtime name mint the reference scan cannot
-   resolve (literal `class_alias` arguments instead contribute alias
-   edges to the index).
+   presumption of ADR-0046 §2 carries over verbatim), plus a
+   `class_alias` whose class names are not known at compile time — a
+   runtime name mint the reference scan cannot resolve. *Amended
+   (issue #36): the compile-time set is string literals **and the
+   `X::class` constant**, which since PHP 8.0 is a plain compile-time
+   string the compiler resolves — no autoload, no runtime lookup, and
+   `X` need not exist. Reading it as a runtime mint was a defect, not a
+   conservatism: because the dam fact is consumed as the universe-wide
+   `is_clear()`, a single vendored `class_alias(Thing::class, 'Legacy')`
+   silenced the existence family for every file in the project.
+   `X::class` is resolved through the file's `use` imports and namespace
+   before it becomes an edge key — unlike a literal, which PHP takes as
+   a runtime FQN written out in full. `self`/`static`/`parent::class`
+   and every genuinely computed name still dam.* Compile-time
+   `class_alias` arguments instead contribute alias edges to the index.
    Code-generating autoloaders need no separate analysis: generating a
    class requires `eval` or an out-of-universe include, so the dam
    already catches them — one mechanism, not two. The dam is
@@ -362,8 +373,8 @@ three legs now guard the identification of the two:
    covers the flagship, because the homonym question has no textual
    answer. Table presence remains a valid extra silence (a subset of
    the sidecar's answer); it is never a firing license.
-   (iii) *Alias/decl collision.* A literal `class_alias` edge colliding
-   with a textual declaration of the same FQN — or two literal alias
+   (iii) *Alias/decl collision.* A compile-time `class_alias` edge colliding
+   with a textual declaration of the same FQN — or two alias
    edges for one name — is `Ambiguous`: existence present, identity
    unresolved; method-absence and point-8 closure treat it as any
    Ambiguous node. Stated in S1 beside the alias-edge machinery.
@@ -390,7 +401,7 @@ that arms it are now recorded in the same place.
 **A4 (point 8; G4) — the descendant closure's enumeration legs.** The
 closure enumerates over *declarations*, not the deduped index — both
 halves of an Ambiguous-FQN pair count as potential descendants; parent
-matching follows literal `class_alias` edges (`class B extends
+matching follows compile-time `class_alias` edges (`class B extends
 LegacyName` beside `class_alias('T', 'LegacyName')` makes B a
 descendant of T); and when the union member is an interface, the edge
 set includes `implements`, interface-`extends`, and enum-`implements`.

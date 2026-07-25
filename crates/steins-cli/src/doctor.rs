@@ -336,8 +336,9 @@ fn section_coverage(root: &Path, files: &[ParsedFile], layout: &ProjectLayout) {
     // The dam (ADR-0049 §2): the same query answer `check` computes, recomputed here
     // from the same lowered universe. It does not track the construct counts above in
     // either direction — vendor `eval`/dynamic-include is presumed universe-internal
-    // and a proven in-universe include is benign (both drop out), while a non-literal
-    // `class_alias` dams without poisoning any scope (it appears only here).
+    // and a proven in-universe include is benign (both drop out), while a
+    // runtime-name `class_alias` dams without poisoning any scope (it appears only
+    // here).
     let units: Vec<FileUnit<'_>> =
         files.iter().map(|f| FileUnit { path: &f.path, tree: &f.tree }).collect();
     let dam = dam_facts(&units, layout);
@@ -360,7 +361,7 @@ fn section_coverage(root: &Path, files: &[ParsedFile], layout: &ProjectLayout) {
             dam.len(),
             breakdown(
                 &dam_counts,
-                ["eval", "unproven/out-of-universe include", "non-literal class_alias"]
+                ["eval", "unproven/out-of-universe include", "runtime-name class_alias"]
             )
         );
         println!(

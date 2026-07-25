@@ -348,12 +348,15 @@ fn doctor_reports_dam_sites_broken_down_by_kind() {
     let dir = workdir("dam");
     write(&dir, "a.php", OPAQUE);
     write(&dir, "b.php", "<?php\nclass_alias($src, 'B');\n");
+    // Issue #36: a `X::class` argument is compile-time, so this third file adds an
+    // index edge and NOT a fourth dam site — the count below is the assertion.
+    write(&dir, "c.php", "<?php\nclass Thing {}\nclass_alias(Thing::class, 'Legacy_Thing');\n");
     let r = run_in(&dir, &["doctor", "--no-php", "."]);
     assert!(
         r.stdout.contains("dam sites: 4")
             && r.stdout.contains("eval 1")
             && r.stdout.contains("unproven/out-of-universe include 2")
-            && r.stdout.contains("non-literal class_alias 1"),
+            && r.stdout.contains("runtime-name class_alias 1"),
         "stdout:\n{}",
         r.stdout
     );

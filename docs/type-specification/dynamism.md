@@ -38,7 +38,7 @@ A dam site is any of:
 | --- | --- |
 | `Eval` | every `eval(...)` — code as data, universe havoc |
 | `Include` | every **non-vendor** `include`/`require` whose path is not provably in-universe |
-| `ClassAlias` | every **non-literal** `class_alias(...)` — a runtime class-name mint |
+| `ClassAlias` | every `class_alias(...)` whose class names are **not known at compile time** — a runtime class-name mint |
 
 "Not provably in-universe" is deliberately strict for includes: an unproven
 path, a bare-relative literal (the runtime resolves it against `include_path`,
@@ -49,8 +49,17 @@ literal that resolves *outside* the analyzed universe. Directory-relative
 belief is unsound in every one of these shapes.
 
 The **vendor presumption**: `eval` and dynamic includes inside a `vendor/` path
-are Composer plumbing and are presumed universe-internal. A *literal*
-`class_alias` is never a dam site at all — it contributes an index edge.
+are Composer plumbing and are presumed universe-internal. A `class_alias` whose
+two class names are known at compile time is never a dam site at all — it
+contributes an index edge. Two argument shapes are compile-time: a string
+literal (a runtime FQN, taken as written), and the `X::class` constant, which
+since PHP 8.0 is a plain compile-time string the *compiler* resolves — no
+autoload, no runtime lookup, and `X` need not even exist. `X::class` is subject
+to ordinary class-name resolution, so it is resolved against the file's `use`
+imports and namespace before it becomes an edge key, unlike a literal. Anything
+else — a variable, a call, a constant, any concatenation, and
+`self`/`static`/`parent::class`, whose lexical class this file-wide lowering
+does not carry — still dams.
 
 With the dam raised, existence claims are withheld for the whole run.
 

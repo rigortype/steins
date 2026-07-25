@@ -42,8 +42,10 @@ adopted behind this contract. It is not the contract owner.
   `namespace\` prefix already stripped) — which is the syntactic input the
   resolution rules key on. Resolution itself lives in `steins-infer`.
 - **Dynamism sites** (`eval`, `include`/`require` with a classified path,
-  `class_alias`) for the [dam](../type-specification/dynamism.md). Literal
-  `class_alias` calls additionally surface as index edges
+  `class_alias`) for the [dam](../type-specification/dynamism.md).
+  `class_alias` calls whose two class names are known at compile time — string
+  literals, or the `X::class` constant resolved through the file's namespace
+  context — additionally surface as index edges
   (`class_alias_edges`), and anonymous-class inheritance edges
   (`anonymous_class_edges`) are collected file-wide for the declared-receiver
   lane's descendant closure — an anon class is never in the class index.
