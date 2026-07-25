@@ -642,3 +642,172 @@ fn non_literal_class_alias_is_a_dynamism_site() {
     assert_eq!(sites.len(), 1);
     assert!(matches!(sites[0].kind, DynamismKind::ClassAlias));
 }
+
+// ---- issue #30: the opaque-construct inventory behind the poison flag -------
+
+use steins_syntax::{OpaqueConstruct, ReflectionKind};
+
+/// The give-up-list constructs of the top-level scope, in source order.
+fn top_opaque(src: &str) -> Vec<OpaqueConstruct> {
+    let tree = SourceTree::parse(src);
+    let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
+    top.opaque.iter().map(|s| s.construct).collect()
+}
+
+#[test]
+fn every_poison_marker_names_itself_in_the_inventory() {
+    // The same sources as `poison_markers_are_detected`, now asserting WHICH
+    // construct was recognized — the inventory is the predicate's own vocabulary.
+    for (src, want) in [
+        ("<?php $r = &$w; width($w);", OpaqueConstruct::ReferenceAssign),
+        ("<?php extract($d); width($w);", OpaqueConstruct::Extract),
+        ("<?php compact('w'); width($w);", OpaqueConstruct::Compact),
+        ("<?php global $w; width($w);", OpaqueConstruct::Global),
+        ("<?php static $w = 1; width($w);", OpaqueConstruct::StaticVar),
+        ("<?php $$w = 1; width($w);", OpaqueConstruct::VariableVariable),
+        ("<?php $f = function () use (&$w) {}; width($w);", OpaqueConstruct::ByRefCapture),
+        ("<?php eval($c);", OpaqueConstruct::Eval),
+        ("<?php include $p;", OpaqueConstruct::Include),
+        ("<?php include_once $p;", OpaqueConstruct::Include),
+        ("<?php require $p;", OpaqueConstruct::Include),
+        ("<?php require_once $p;", OpaqueConstruct::Include),
+    ] {
+        assert_eq!(top_opaque(src), vec![want], "`{src}`");
+    }
+}
+
+#[test]
+fn the_poison_flag_is_the_inventory_being_non_empty() {
+    // The anti-drift invariant, asserted over every scope of a mixed file: the flag
+    // and the inventory come from one walk, so they cannot disagree.
+    let tree = SourceTree::parse(
+        "<?php\n\
+         function clean(int $a): int { return $a; }\n\
+         function dirty(array $r): void { extract($r); }\n\
+         $f = function () use (&$t) {};\n\
+         $g = fn($n) => eval($n);\n\
+         class C { public function m(): void { global $x; } }\n",
+    );
+    assert!(tree.scopes().len() >= 5, "scopes: {}", tree.scopes().len());
+    for scope in tree.scopes() {
+        assert_eq!(scope.poisoned, !scope.opaque.is_empty(), "{:?}", scope.owner);
+    }
+    let poisoned = tree.scopes().iter().filter(|s| s.poisoned).count();
+    // The top level is poisoned too: the by-ref `use (&$t)` capture aliases one of
+    // ITS locals (ADR-0033), so the fact lands on both sides of the capture.
+    assert_eq!(poisoned, 5, "top level + dirty + the closure + the arrow fn + C::m");
+}
+
+#[test]
+fn a_clean_scope_carries_no_sites() {
+    let tree = SourceTree::parse("<?php\nfunction f(int $x): int { return $x; }\nf(1);\n");
+    assert!(tree.scopes().iter().all(|s| s.opaque.is_empty() && !s.poisoned));
+}
+
+#[test]
+fn a_byref_capture_is_a_site_on_both_scopes() {
+    // One aliasing fact, two scopes (ADR-0033): the enclosing scope and the
+    // closure's own. Both must name it, or the inventory under-reports the closure.
+    let tree = SourceTree::parse("<?php\n$t = 0;\n$f = function () use (&$t) { $t++; };\n");
+    let sites: Vec<OpaqueConstruct> =
+        tree.scopes().iter().flat_map(|s| s.opaque.iter().map(|o| o.construct)).collect();
+    assert_eq!(sites, vec![OpaqueConstruct::ByRefCapture, OpaqueConstruct::ByRefCapture]);
+}
+
+#[test]
+fn a_nested_scopes_construct_belongs_to_that_scope_only() {
+    // A function body's `extract` poisons the function, never the top level.
+    let tree = SourceTree::parse("<?php\nfunction f(array $r): void { extract($r); }\n$w = 1;\n");
+    assert!(top_opaque("<?php\nfunction f(array $r): void { extract($r); }\n$w = 1;\n").is_empty());
+    let f = tree.scopes().iter().find(|s| s.function_name.as_deref() == Some("f")).unwrap();
+    assert_eq!(f.opaque.iter().map(|o| o.construct).collect::<Vec<_>>(), vec![OpaqueConstruct::Extract]);
+}
+
+#[test]
+fn every_construct_kind_has_a_label() {
+    // `ALL` is hand-maintained beside an exhaustive `label` match; this pins the
+    // pair together so a new variant cannot silently vanish from the report.
+    assert_eq!(OpaqueConstruct::ALL.len(), 9);
+    let mut labels: Vec<&str> = OpaqueConstruct::ALL.iter().map(|c| c.label()).collect();
+    labels.sort_unstable();
+    labels.dedup();
+    assert_eq!(labels.len(), OpaqueConstruct::ALL.len(), "labels must be distinct");
+}
+
+// ---- issue #30: reflection-driven invocation (report-only, an admitted guess) ---
+
+fn reflection_kinds(src: &str) -> Vec<ReflectionKind> {
+    SourceTree::parse(src).reflection_sites().iter().map(|s| s.kind).collect()
+}
+
+#[test]
+fn invoke_and_new_instance_shapes_are_inventoried() {
+    for (src, want) in [
+        ("<?php $m->invoke($o);", ReflectionKind::Invoke),
+        ("<?php $m->invokeArgs($o, $a);", ReflectionKind::Invoke),
+        ("<?php $c->newInstance();", ReflectionKind::NewInstance),
+        ("<?php $c->newInstanceArgs($a);", ReflectionKind::NewInstance),
+        ("<?php $c->newInstanceWithoutConstructor();", ReflectionKind::NewInstance),
+        ("<?php $c?->invoke($o);", ReflectionKind::Invoke),
+    ] {
+        assert_eq!(reflection_kinds(src), vec![want], "`{src}`");
+    }
+    // `__invoke` is not the `invoke` prefix, and an unrelated method is not a site.
+    assert!(reflection_kinds("<?php $c->__invoke(); $o->render();").is_empty());
+}
+
+#[test]
+fn closure_bind_counts_only_a_computed_scope() {
+    assert_eq!(
+        reflection_kinds("<?php \\Closure::bind($fn, $o, $scope);"),
+        vec![ReflectionKind::ClosureBindComputedScope]
+    );
+    // A statically named scope resolves — nothing is hidden from the analyzer.
+    for literal in [
+        "<?php Closure::bind($fn, $o, 'App\\\\Legacy');",
+        "<?php Closure::bind($fn, $o, Legacy::class);",
+        "<?php Closure::bind($fn, $o, null);",
+        "<?php Closure::bind($fn, $o);",
+        "<?php Other::bind($fn, $o, $scope);",
+    ] {
+        assert!(reflection_kinds(literal).is_empty(), "`{literal}`");
+    }
+}
+
+#[test]
+fn func_get_args_counts_only_under_a_typed_signature() {
+    // A parameter hint is a claim about the argument list; so is a return hint.
+    for src in [
+        "<?php function f(int $a) { return func_get_args(); }",
+        "<?php function f($a): array { return func_get_args(); }",
+        "<?php class C { public function m(int $a) { return func_get_args(); } }",
+        "<?php $f = function (int $a) { return func_get_args(); };",
+        "<?php $f = fn(int $a) => func_get_args();",
+    ] {
+        assert_eq!(
+            reflection_kinds(src),
+            vec![ReflectionKind::FuncGetArgsInTypedSignature],
+            "`{src}`"
+        );
+    }
+    // No hint anywhere: the signature claims nothing, so nothing is contradicted.
+    for src in [
+        "<?php function f($a) { return func_get_args(); }",
+        "<?php func_get_args();",
+        // The nearest enclosing function-like decides: an untyped closure inside a
+        // typed method is untyped.
+        "<?php class C { public function m(int $a): array { $f = function () { return func_get_args(); }; return []; } }",
+    ] {
+        assert!(reflection_kinds(src).is_empty(), "`{src}`");
+    }
+}
+
+#[test]
+fn reflection_sites_poison_nothing() {
+    // The inventory is report-only: recognizing a reflective call must not change a
+    // single analysis decision.
+    let tree = SourceTree::parse("<?php\nfunction f(\\ReflectionMethod $m, object $o): mixed {\n  return $m->invoke($o);\n}\n");
+    assert_eq!(tree.reflection_sites().len(), 1);
+    assert!(tree.scopes().iter().all(|s| !s.poisoned));
+    assert!(tree.dynamism_sites().is_empty());
+}

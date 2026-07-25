@@ -1564,6 +1564,84 @@ pub enum ScopeOwner {
     Closure { def_offset: u32 },
 }
 
+/// A construct on the ADR-0001 whole-scope give-up list: code the analyzer parses
+/// and then declines to reason about (ADR-0046 §1 "scope havoc"). Each variant is a
+/// *reason* [`Scope::poisoned`] is set, and the set of variants is the poison
+/// predicate's own vocabulary rather than a description of it: `scan_opaque` is the
+/// single walk behind both the predicate and this inventory, so a construct added to
+/// the give-up list cannot fail to appear in what `steins doctor` reports. A
+/// hand-maintained parallel list would drift from the real behaviour, which is
+/// exactly the silence this inventory exists to measure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OpaqueConstruct {
+    /// `eval(<expr>)` — code as data (also a [`DynamismKind::Eval`] dam site).
+    Eval,
+    /// `include` / `include_once` / `require` / `require_once` — code pulled in at
+    /// runtime, able to write any local of the including scope.
+    Include,
+    /// `extract(...)` — names minted into the scope from array keys.
+    Extract,
+    /// `compact(...)` — the scope's own names read as data.
+    Compact,
+    /// `$$name` / `${<expr>}` — a variable variable (read or write).
+    VariableVariable,
+    /// `$x = &$y` — reference assignment: two names, one cell.
+    ReferenceAssign,
+    /// `global $x` — the local is an alias of a global cell.
+    Global,
+    /// `static $x` — the local outlives the call and other calls write it.
+    StaticVar,
+    /// `use (&$x)` — a closure captures a local by reference. Poisons the enclosing
+    /// scope *and* the closure's own scope (ADR-0033).
+    ByRefCapture,
+}
+
+impl OpaqueConstruct {
+    /// Every variant, in report order (the order `steins doctor` prints them). The
+    /// array is hand-maintained — adding a variant without extending it compiles
+    /// fine and silently drops the kind from the report — so a workspace test pins
+    /// the length and the distinctness of the labels.
+    pub const ALL: [Self; 9] = [
+        Self::Eval,
+        Self::Include,
+        Self::Extract,
+        Self::Compact,
+        Self::VariableVariable,
+        Self::ReferenceAssign,
+        Self::Global,
+        Self::StaticVar,
+        Self::ByRefCapture,
+    ];
+
+    /// The construct's label as a posture report spells it — PHP's own spelling
+    /// where there is one, because the reader is looking for it in their source.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Eval => "eval",
+            Self::Include => "include/require",
+            Self::Extract => "extract",
+            Self::Compact => "compact",
+            Self::VariableVariable => "variable variable",
+            Self::ReferenceAssign => "reference assignment",
+            Self::Global => "global",
+            Self::StaticVar => "static variable",
+            Self::ByRefCapture => "by-ref capture",
+        }
+    }
+}
+
+/// One give-up-list construct, where it stands. Collected per scope (see
+/// [`Scope::opaque`]) rather than file-wide, because the fact it explains — "no
+/// local is known here" — is a *scope* fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OpaqueSite {
+    pub construct: OpaqueConstruct,
+    /// The construct's source span (the outermost construct when they nest — the
+    /// predicate stops there too).
+    pub span: Span,
+}
+
 /// One analysis scope: the top-level script, a function body, or a method body.
 /// Carries the linear trace and a whole-scope `poisoned` flag (ADR-0001 give-up
 /// list).
@@ -1582,6 +1660,12 @@ pub struct Scope {
     /// reference assignment, by-ref closure capture, `include`/`require`/`eval`).
     /// When poisoned, no variable value is ever considered known in the scope.
     pub poisoned: bool,
+    /// Every give-up-list construct found in this scope, in source order — the
+    /// *reasons* [`Self::poisoned`] holds. `poisoned == !opaque.is_empty()` by
+    /// construction (both come from one `scan_opaque` walk), so the inventory can
+    /// never drift from the predicate. Read by `steins doctor`'s coverage posture
+    /// (ADR-0054 §9.2); the checker reads only [`Self::poisoned`].
+    pub opaque: Vec<OpaqueSite>,
     pub stmts: Vec<Stmt>,
     /// Every instance/static method call in this scope's body, **comprehensively**
     /// (including calls nested inside sub-expressions the linear trace drops to
@@ -1698,6 +1782,64 @@ pub struct DynamismSite {
     pub span: Span,
 }
 
+/// A **reflection-driven invocation** shape: code that reaches a function or method
+/// through a value rather than a call site, so the call-site sweep never sees the
+/// target (issue #30).
+///
+/// Unlike [`OpaqueConstruct`], this is **not** derived from a predicate the analyzer
+/// already acts on — nothing poisons a scope or dams a claim here, and the analyzer's
+/// behaviour is unchanged by it. **The list is a guess until measured**: it is the
+/// shapes a cross-analyzer survey named, recognized syntactically and therefore both
+/// over- and under-inclusive (a `$queue->invoke()` on a plain domain object counts; a
+/// reflective call reached through a helper does not). It is inventoried so the
+/// guess has numbers attached to it and can be corrected against a corpus, which is
+/// exactly what an unmeasured silence cannot offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReflectionKind {
+    /// `$r->invoke(...)` / `$r->invokeArgs(...)` — any `->invoke*()` method call
+    /// (`ReflectionMethod`, `ReflectionFunction`, `Closure::__invoke`).
+    Invoke,
+    /// `$r->newInstance(...)` / `->newInstanceArgs(...)` /
+    /// `->newInstanceWithoutConstructor()` — any `->newInstance*()` method call.
+    NewInstance,
+    /// `Closure::bind($fn, $obj, <computed>)` — a rebind whose **scope** argument is
+    /// not a literal class name (a string literal or `X::class`), so the bound
+    /// private/protected surface is not statically known. A `Closure::bind` with a
+    /// literal scope, and the instance form `$fn->bindTo(...)`, are deliberately not
+    /// counted — the guess is kept narrow rather than padded.
+    ClosureBindComputedScope,
+    /// `func_get_args()` inside a declaration whose signature declares any type (a
+    /// parameter hint or a return hint): the signature says one thing and the body
+    /// reads another argument list entirely.
+    FuncGetArgsInTypedSignature,
+}
+
+impl ReflectionKind {
+    /// Every variant, in report order.
+    pub const ALL: [Self; 4] =
+        [Self::Invoke, Self::NewInstance, Self::ClosureBindComputedScope, Self::FuncGetArgsInTypedSignature];
+
+    /// The kind's label as a posture report spells it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Invoke => "->invoke*()",
+            Self::NewInstance => "->newInstance*()",
+            Self::ClosureBindComputedScope => "Closure::bind (computed scope)",
+            Self::FuncGetArgsInTypedSignature => "func_get_args() in a typed signature",
+        }
+    }
+}
+
+/// One reflection-driven invocation site, collected file-wide like
+/// [`DynamismSite`]. Consumed only by `steins doctor`'s coverage posture — no
+/// checker, dam, or transform decision reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReflectionSite {
+    pub kind: ReflectionKind,
+    pub span: Span,
+}
+
 /// A literal `class_alias('Target', 'Alias')` edge (ADR-0049 §2 / A2iii): both
 /// arguments are string literals, so the alias name resolves — for **existence**
 /// purposes — to the target declaration's site. Folded into the project index
@@ -1757,6 +1899,10 @@ pub struct SourceTree {
     /// declared-receiver lane's descendant closure (S6) — an invisible descendant
     /// obstacle. Consumed by nothing else.
     anon_class_edges: Vec<AnonClassEdge>,
+    /// Reflection-driven invocation sites found file-wide (issue #30). Report-only:
+    /// consumed by `steins doctor`'s coverage posture and by nothing that decides a
+    /// finding. See [`ReflectionKind`] — the list is a guess until measured.
+    reflection: Vec<ReflectionSite>,
     /// Class references at the four hard-error positions (ADR-0049 §5 / S4), read by
     /// the `class.undefined` per-file pass.
     hard_class_refs: Vec<NameRef>,
@@ -1801,7 +1947,7 @@ impl SourceTree {
         let rc = RefResolver { contexts: &contexts, regions: &regions };
 
         let mut lowered = Lowered::default();
-        walk(&Node::Program(program), &aliases, &docs, &rc, false, &mut lowered);
+        walk(&Node::Program(program), &aliases, &docs, &rc, false, false, &mut lowered);
 
         let mut classes = lower_classes(&Node::Program(program), &aliases, &docs, &rc);
         let scopes = lower_scopes(program, &contexts, &regions);
@@ -1871,6 +2017,7 @@ impl SourceTree {
             dynamism: lowered.dynamism,
             class_alias_edges: lowered.class_alias_edges,
             anon_class_edges: lowered.anon_class_edges,
+            reflection: lowered.reflection,
             hard_class_refs: lowered.hard_class_refs,
             parse_errors,
             comments,
@@ -1967,6 +2114,15 @@ impl SourceTree {
         &self.anon_class_edges
     }
 
+    /// The reflection-driven invocation sites found file-wide (issue #30). These
+    /// poison no scope and dam no claim — they are inventoried so a quiet run can
+    /// say what it declined to follow. The recognizer is an admitted guess; see
+    /// [`ReflectionKind`].
+    #[must_use]
+    pub fn reflection_sites(&self) -> &[ReflectionSite] {
+        &self.reflection
+    }
+
     /// Whether the file contains any `eval(...)` construct.
     #[must_use]
     pub fn contains_eval(&self) -> bool {
@@ -2022,6 +2178,8 @@ struct Lowered {
     dynamism: Vec<DynamismSite>,
     class_alias_edges: Vec<ClassAliasEdge>,
     anon_class_edges: Vec<AnonClassEdge>,
+    /// Reflection-driven invocation sites (issue #30) — report-only.
+    reflection: Vec<ReflectionSite>,
     /// Class references at the four **hard-error positions** (ADR-0049 §5 / S4):
     /// `new X`, `X::m()`, `X::CONST`, `X::$prop`. Explicit named classes only —
     /// `self`/`static`/`parent`, dynamic class exprs, and the `X::class` magic
@@ -2037,6 +2195,7 @@ fn walk(
     docs: &DocIndex,
     rc: &RefResolver,
     conditional: bool,
+    typed_sig: bool,
     out: &mut Lowered,
 ) {
     match node {
@@ -2047,8 +2206,24 @@ fn walk(
             // a dam site — instead. Recognized here so both facts are collected
             // file-wide (like the dynamism set), before the call itself is lowered.
             classify_class_alias(c, out);
+            // `func_get_args()` under a typed signature (issue #30, report-only):
+            // the declaration announces an argument shape the body then bypasses.
+            if typed_sig
+                && let Expression::Identifier(id) = c.function
+                && bytes_to_string(id.last_segment()).eq_ignore_ascii_case("func_get_args")
+            {
+                out.reflection.push(ReflectionSite {
+                    kind: ReflectionKind::FuncGetArgsInTypedSignature,
+                    span: to_span(c.span()),
+                });
+            }
             out.calls.push(lower_call(c));
         }
+        // Reflection-driven invocation through a method name (issue #30,
+        // report-only): recognized by the method name alone, which is why the
+        // inventory is documented as a guess — see [`ReflectionKind`].
+        Node::MethodCall(mc) => push_reflection_method(&mc.method, to_span(mc.span()), out),
+        Node::NullSafeMethodCall(mc) => push_reflection_method(&mc.method, to_span(mc.span()), out),
         // Anonymous class (`new class extends P implements I {...}`, ADR-0049 A4):
         // edge-only lowering — its inheritance refs, no members and no FQN. A
         // descendant-closure walk (S6) reads these to taint closure when one could
@@ -2075,6 +2250,12 @@ fn walk(
         }
         Node::StaticMethodCall(sc) => {
             if let Some(StaticClass::Named(r)) = trace_static_class(sc.class) {
+                if closure_bind_computed_scope(&r, sc) {
+                    out.reflection.push(ReflectionSite {
+                        kind: ReflectionKind::ClosureBindComputedScope,
+                        span: to_span(sc.span()),
+                    });
+                }
                 out.hard_class_refs.push(r);
             }
         }
@@ -2122,8 +2303,84 @@ fn walk(
     // function/method body, a bare block) makes nested declarations conditional —
     // the same transparency rule the class conditional flag uses.
     let child_conditional = conditional || !is_decl_transparent(node);
+    // The typed-signature flag is a property of the *nearest enclosing*
+    // function-like, so every function-like node recomputes it for its subtree
+    // (a nested untyped closure inside a typed method is untyped).
+    let child_typed = match node {
+        Node::Function(f) => signature_is_typed(&f.parameter_list, f.return_type_hint.as_ref()),
+        Node::Method(m) => signature_is_typed(&m.parameter_list, m.return_type_hint.as_ref()),
+        Node::Closure(c) => signature_is_typed(&c.parameter_list, c.return_type_hint.as_ref()),
+        Node::ArrowFunction(a) => signature_is_typed(&a.parameter_list, a.return_type_hint.as_ref()),
+        _ => typed_sig,
+    };
     for child in node.children() {
-        walk(&child, aliases, docs, rc, child_conditional, out);
+        walk(&child, aliases, docs, rc, child_conditional, child_typed, out);
+    }
+}
+
+/// Whether a function-like signature declares **any** native type — one parameter
+/// hint or a return hint. Deliberately "any", not "all": the point of the
+/// `func_get_args()` inventory line is a signature that *claims* a shape while the
+/// body reads a different argument list, and one hint is already such a claim.
+fn signature_is_typed(
+    params: &mago_syntax::cst::FunctionLikeParameterList<'_>,
+    ret: Option<&mago_syntax::cst::FunctionLikeReturnTypeHint<'_>>,
+) -> bool {
+    ret.is_some() || params.parameters.iter().any(|p| p.hint.is_some())
+}
+
+/// Record an `->invoke*()` / `->newInstance*()` reflection site (issue #30). Matched
+/// on the method name only: no receiver type is required (and none is knowable at
+/// lowering time), so `$q->invokeHandler()` on a plain domain object counts too —
+/// the over-inclusion the [`ReflectionKind`] docs own up to. `__invoke` is not
+/// matched (the prefix is `invoke`, not `_`).
+fn push_reflection_method(selector: &ClassLikeMemberSelector<'_>, span: Span, out: &mut Lowered) {
+    let Some(name) = method_name_of(selector) else { return };
+    let kind = if name.len() >= "invoke".len() && name[.."invoke".len()].eq_ignore_ascii_case("invoke")
+    {
+        ReflectionKind::Invoke
+    } else if name.len() >= "newInstance".len()
+        && name[.."newInstance".len()].eq_ignore_ascii_case("newInstance")
+    {
+        ReflectionKind::NewInstance
+    } else {
+        return;
+    };
+    out.reflection.push(ReflectionSite { kind, span });
+}
+
+/// Whether a static call is `Closure::bind(...)` whose **scope** argument (the
+/// third positional one) is computed — anything but a string literal, `X::class`, or
+/// `null`. A computed scope means the private/protected surface the rebound closure
+/// may reach is not statically known. Named arguments (`newScope:`) and the instance
+/// form `$fn->bindTo(...)` are not matched: the guess stays narrow (issue #30).
+fn closure_bind_computed_scope(class: &NameRef, sc: &mago_syntax::cst::StaticMethodCall<'_>) -> bool {
+    if !class.simple().eq_ignore_ascii_case("Closure")
+        || !method_name_of(&sc.method).is_some_and(|m| m.eq_ignore_ascii_case("bind"))
+    {
+        return false;
+    }
+    let scope = sc
+        .argument_list
+        .arguments
+        .iter()
+        .filter_map(|a| match a {
+            Argument::Positional(p) if p.ellipsis.is_none() => Some(p.value),
+            _ => None,
+        })
+        .nth(2);
+    scope.is_some_and(|e| !is_literal_class_name(e))
+}
+
+/// Whether an expression names a class statically for `Closure::bind`'s scope
+/// argument: a string literal, `X::class`, or the `null` unbind.
+fn is_literal_class_name(expr: &Expression<'_>) -> bool {
+    match expr.unparenthesized() {
+        Expression::Literal(Literal::String(_) | Literal::Null(_)) => true,
+        Expression::Access(Access::ClassConstant(cc)) => {
+            class_const_name(&cc.constant).is_some_and(|n| n.eq_ignore_ascii_case("class"))
+        }
+        _ => false,
     }
 }
 
@@ -4179,13 +4436,16 @@ fn build_scope(owner: ScopeOwner, statements: &[Statement<'_>]) -> Scope {
 /// Lower a scope from a borrowed statement list (shared by the flattened
 /// top-level scope and the direct function/method paths).
 fn build_scope_from(owner: ScopeOwner, statements: &[&Statement<'_>]) -> Scope {
-    let poisoned = statements.iter().any(|s| node_poisons(&Node::Statement(s)));
+    let mut opaque = Vec::new();
     let mut stmts = Vec::new();
     let mut method_calls = Vec::new();
     for s in statements {
         lower_stmt(s, &mut stmts);
         scan_method_calls(&Node::Statement(s), &mut method_calls);
+        scan_opaque(&Node::Statement(s), &mut opaque, false);
     }
+    // The flag IS the inventory being non-empty (never a second computation).
+    let poisoned = !opaque.is_empty();
     let function_name = match &owner {
         ScopeOwner::Function(name) => Some(name.clone()),
         ScopeOwner::TopLevel | ScopeOwner::Method { .. } | ScopeOwner::Closure { .. } => None,
@@ -4194,6 +4454,7 @@ fn build_scope_from(owner: ScopeOwner, statements: &[&Statement<'_>]) -> Scope {
         function_name,
         owner,
         poisoned,
+        opaque,
         stmts,
         method_calls,
         params: Vec::new(),
@@ -4230,14 +4491,6 @@ fn closure_use_captures(cl: &mago_syntax::cst::Closure<'_>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Whether a closure's `use (...)` clause captures anything by reference — this
-/// poisons the enclosing scope AND the closure's own scope (ADR-0033).
-fn closure_has_byref_use(cl: &mago_syntax::cst::Closure<'_>) -> bool {
-    cl.use_clause
-        .as_ref()
-        .is_some_and(|uc| uc.variables.iter().any(|v| v.ampersand.is_some()))
-}
-
 /// Build the [`Scope`] for a `function (...) use (...) {...}` closure (ADR-0033).
 fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>, rc: &RefResolver) -> Scope {
     let mut stmts = Vec::new();
@@ -4245,20 +4498,23 @@ fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>, rc: &Ref
     let mut throw_origins = Vec::new();
     let locals = collect_body_callables(cl.body.statements.iter());
     let mut method_calls = Vec::new();
+    // The closure's own scope is poisoned by a by-ref `use (&$x)` capture (its
+    // captured var is a reference alias) or any in-body poison marker.
+    let mut opaque = Vec::new();
+    push_byref_captures(cl, &mut opaque, false);
     for s in cl.body.statements.iter() {
         lower_stmt(s, &mut stmts);
         scan_effect_origins(&Node::Statement(s), &locals, &mut effect_origins);
         scan_throw_origins(&Node::Statement(s), &[], &[], &locals, &mut throw_origins);
         scan_method_calls(&Node::Statement(s), &mut method_calls);
+        scan_opaque(&Node::Statement(s), &mut opaque, false);
     }
-    // The closure's own scope is poisoned by a by-ref `use (&$x)` capture (its
-    // captured var is a reference alias) or any in-body poison marker.
-    let poisoned = closure_has_byref_use(cl)
-        || cl.body.statements.iter().any(|s| node_poisons(&Node::Statement(s)));
+    let poisoned = !opaque.is_empty();
     Scope {
         function_name: None,
         owner: ScopeOwner::Closure { def_offset: closure_def_offset(cl) },
         poisoned,
+        opaque,
         stmts,
         method_calls,
         params: lower_params(&cl.parameter_list, rc),
@@ -4291,11 +4547,14 @@ fn build_closure_scope_from_arrow(af: &mago_syntax::cst::ArrowFunction<'_>, rc: 
         kind: StmtKind::Return { value, call, span },
         invalidated,
     };
-    let poisoned = node_poisons(&Node::Expression(af.expression));
+    let mut opaque = Vec::new();
+    scan_opaque(&Node::Expression(af.expression), &mut opaque, false);
+    let poisoned = !opaque.is_empty();
     Scope {
         function_name: None,
         owner: ScopeOwner::Closure { def_offset: arrow_def_offset(af) },
         poisoned,
+        opaque,
         stmts: vec![ret],
         method_calls,
         params: lower_params(&af.parameter_list, rc),
@@ -5070,44 +5329,64 @@ fn collect_read_vars(node: &Node<'_, '_>, writes: &[String], out: &mut Vec<Strin
 /// Whether a node (scanned within a single scope, not descending into nested
 /// function-like bodies) contains a construct on the ADR-0001 whole-scope
 /// give-up list. Over-detection is always safe — it only silences the scope.
+///
+/// The predicate is `scan_opaque` asking for the first site only: one walk decides
+/// poisoning and enumerates the reasons, so [`Scope::opaque`] cannot disagree with
+/// [`Scope::poisoned`].
 fn node_poisons(node: &Node<'_, '_>) -> bool {
-    match node {
+    // No heap allocation on the (overwhelmingly common) clean path: `Vec::new` does
+    // not allocate, and `stop_at_first` pushes at most once.
+    let mut first = Vec::new();
+    scan_opaque(node, &mut first, true);
+    !first.is_empty()
+}
+
+/// Collect the ADR-0001 give-up-list constructs in `node`'s subtree, appending one
+/// [`OpaqueSite`] per construct in source order. Nested function-like bodies are
+/// their own scopes and are not descended (they get their own [`Scope`], hence their
+/// own sites) — a closure's `use (&$x)` clause is the one exception: a by-ref
+/// capture poisons the *enclosing* scope, so it is recorded here and, separately, on
+/// the closure's own scope (ADR-0033).
+///
+/// `stop_at_first` makes the walk exit as soon as one site exists — the predicate
+/// path ([`node_poisons`]), which asks only whether the scope is poisoned. The
+/// inventory path passes `false` and gets every site. Both share this control flow
+/// exactly, so the predicate cannot recognize a construct the inventory misses.
+///
+/// A matched construct is not descended into: the outermost construct is the site
+/// (`extract(compact($a))` is one `extract`), which is where the predicate stops too.
+fn scan_opaque(node: &Node<'_, '_>, out: &mut Vec<OpaqueSite>, stop_at_first: bool) {
+    let direct = match node {
         // Direct markers.
-        Node::Global(_)
-        | Node::Static(_)
-        | Node::EvalConstruct(_)
-        | Node::IncludeConstruct(_)
+        Node::Global(_) => Some(OpaqueConstruct::Global),
+        Node::Static(_) => Some(OpaqueConstruct::StaticVar),
+        Node::EvalConstruct(_) => Some(OpaqueConstruct::Eval),
+        Node::IncludeConstruct(_)
         | Node::IncludeOnceConstruct(_)
         | Node::RequireConstruct(_)
-        | Node::RequireOnceConstruct(_)
-        | Node::NestedVariable(_)
-        | Node::IndirectVariable(_) => return true,
+        | Node::RequireOnceConstruct(_) => Some(OpaqueConstruct::Include),
+        Node::NestedVariable(_) | Node::IndirectVariable(_) => {
+            Some(OpaqueConstruct::VariableVariable)
+        }
         // `extract(...)` / `compact(...)`.
         Node::FunctionCall(fc) => {
             if let Expression::Identifier(id) = fc.function {
-                let name = bytes_to_string(id.last_segment());
-                if name == "extract" || name == "compact" {
-                    return true;
+                match bytes_to_string(id.last_segment()).as_str() {
+                    "extract" => Some(OpaqueConstruct::Extract),
+                    "compact" => Some(OpaqueConstruct::Compact),
+                    _ => None,
                 }
+            } else {
+                None
             }
         }
         // Reference assignment `$x = &$y`.
-        Node::Assignment(a) => {
-            if a.rhs.is_reference() {
-                return true;
-            }
-        }
+        Node::Assignment(a) => a.rhs.is_reference().then_some(OpaqueConstruct::ReferenceAssign),
         // Closure: inspect its `use (&$x)` capture list, but do not descend into
         // its body (a separate scope).
         Node::Closure(c) => {
-            if let Some(use_clause) = &c.use_clause {
-                for v in use_clause.variables.iter() {
-                    if v.ampersand.is_some() {
-                        return true;
-                    }
-                }
-            }
-            return false;
+            push_byref_captures(c, out, stop_at_first);
+            return;
         }
         // Other nested scopes — skip entirely (their own give-up list is their
         // own concern).
@@ -5117,10 +5396,42 @@ fn node_poisons(node: &Node<'_, '_>) -> bool {
         | Node::Class(_)
         | Node::Interface(_)
         | Node::Trait(_)
-        | Node::Enum(_) => return false,
-        _ => {}
+        | Node::Enum(_) => return,
+        _ => None,
+    };
+    if let Some(construct) = direct {
+        out.push(OpaqueSite { construct, span: to_span(node.span()) });
+        return;
     }
-    node.children().iter().any(node_poisons)
+    for child in node.children() {
+        scan_opaque(&child, out, stop_at_first);
+        if stop_at_first && !out.is_empty() {
+            return;
+        }
+    }
+}
+
+/// Record one [`OpaqueConstruct::ByRefCapture`] site per `use (&$x)` variable of a
+/// closure. Shared by the enclosing-scope walk ([`scan_opaque`]) and the closure's
+/// own scope build, which is why the by-ref capture appears on both scopes — it is
+/// one aliasing fact that defeats value tracking on either side of the capture.
+fn push_byref_captures(
+    cl: &mago_syntax::cst::Closure<'_>,
+    out: &mut Vec<OpaqueSite>,
+    stop_at_first: bool,
+) {
+    let Some(use_clause) = &cl.use_clause else { return };
+    for v in use_clause.variables.iter() {
+        if v.ampersand.is_some() {
+            out.push(OpaqueSite {
+                construct: OpaqueConstruct::ByRefCapture,
+                span: to_span(v.variable.span()),
+            });
+            if stop_at_first {
+                return;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

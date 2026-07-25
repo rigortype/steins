@@ -1,4 +1,4 @@
-//! `steins doctor` (ADR-0054 Part II, slice C3 — the v0.1.0 MINIMAL scope).
+//! `steins doctor` (ADR-0054 Part II: slice C3, plus C4's coverage posture).
 //!
 //! Doctor is the **index-bound posture mirror** (ADR-0054 §8): it reads
 //! configuration, the environment (via the sidecar's `env()`), and index-level
@@ -17,28 +17,41 @@
 //!   conditions under which `check` diverges from declared intent.
 //! * **2** — doctor's own usage errors.
 //!
-//! # v0.1.0 minimal scope (owner-decided landing point)
+//! # Scope
 //!
-//! Five sections: Runtime (sidecar/PHP health + SAPI + extension count, the
+//! Six sections: Runtime (sidecar/PHP health + SAPI + extension count, the
 //! monkey-patch line), Config + active surface, Layout (the ADR-0015 vendor
-//! resolution and the manifest that answered), Envelopes (the G1-demote
-//! written-but-unchecked notice), and Baseline. The full ADR-0054 §9 sections
-//! (Coverage posture with dam statistics, Catalog skew, Registry totality, the
-//! SAPI-undeclared A6 line, `[runtime]` pseudo-constant reporting) are **v0.1.x** —
-//! deferred, not built here. `doctor --format json` is likewise deferred with design
-//! (§14: the section structure is the schema; it ships when a consumer exists).
+//! resolution and the manifest that answered), Coverage posture (ADR-0054 §9.2 and
+//! issue #30 — the dam statistics and the opaque-construct inventory), Envelopes
+//! (the G1-demote written-but-unchecked notice), and Baseline. Still deferred from
+//! the full ADR-0054 §9 list: Catalog skew, Registry totality, the SAPI-undeclared
+//! A6 line, `[runtime]` pseudo-constant reporting. `doctor --format json` is
+//! likewise deferred with design (§14: the section structure is the schema; it ships
+//! when a consumer exists).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use steins_db::composer;
-use steins_infer::{MONKEY_PATCH_EXTENSIONS, SOUND_SUBSET_NOTICE, THROW_UNDECLARED_ID};
+use steins_db::{ProjectLayout, composer};
+use steins_infer::{
+    DamKind, FileUnit, MONKEY_PATCH_EXTENSIONS, SOUND_SUBSET_NOTICE, THROW_UNDECLARED_ID,
+    dam_facts,
+};
 use steins_phpdoc::{TagKind, scan_docblock};
 use steins_sidecar::Sidecar;
-use steins_syntax::SourceTree;
+use steins_syntax::{OpaqueConstruct, ReflectionKind, SourceTree};
 
 use crate::baseline;
 use crate::profile;
+
+/// One parsed file of the scanned tree — doctor's whole index. Parsed once in
+/// [`run_doctor`] and shared by every section that reads source-level facts, so the
+/// report costs exactly one parse per file. This is the deepest doctor ever looks:
+/// index-bound by construction (ADR-0054 §8), no emitter, no inference.
+struct ParsedFile {
+    path: String,
+    tree: SourceTree,
+}
 
 /// `steins doctor [--no-php] [--baseline <path>] [path]` (default `path` = `.`).
 pub fn run_doctor(args: &[String]) -> ExitCode {
@@ -87,10 +100,16 @@ pub fn run_doctor(args: &[String]) -> ExitCode {
 
     println!("steins doctor — posture report (index-bound; runs no checks)");
 
+    // One parse of the tree, one layout discovery, shared by every section below.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let layout = composer::discover(std::slice::from_ref(&root), &cwd);
+    let files = parse_project(&root);
+
     section_runtime(no_php);
     let surface = section_config(&mut contradiction);
-    section_layout(&root);
-    section_envelopes(&root, &surface);
+    section_layout(&root, &cwd, &layout);
+    section_coverage(&root, &files, &layout);
+    section_envelopes(&files, &surface);
     section_baseline(baseline_path.as_deref(), &surface, &mut contradiction);
 
     if contradiction {
@@ -216,11 +235,9 @@ fn section_config(contradiction: &mut bool) -> profile::Surface {
 /// project's own `composer.json` — `config.vendor-dir` plus the autoload roots —
 /// so the report names the manifest that answered, and says plainly when nothing
 /// did and the directory-name floor is carrying the whole decision.
-fn section_layout(root: &Path) {
+fn section_layout(root: &Path, cwd: &Path, layout: &ProjectLayout) {
     println!();
     println!("Layout");
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let layout = composer::discover(&[root.to_path_buf()], &cwd);
     if layout.is_fallback() {
         println!(
             "  no composer.json governs {} — vendor is the `vendor` directory-name floor, not a declared fact",
@@ -230,10 +247,186 @@ fn section_layout(root: &Path) {
     }
     println!("  {} manifest(s) govern this tree:", layout.roots().len());
     for r in layout.roots() {
-        println!("    {}", display_path(&cwd, r.manifest()));
-        println!("      vendor: {}", join_paths(&cwd, r.vendor_roots()));
-        println!("      ours:   {}", join_paths(&cwd, r.first_party_roots()));
+        println!("    {}", display_path(cwd, r.manifest()));
+        println!("      vendor: {}", join_paths(cwd, r.vendor_roots()));
+        println!("      ours:   {}", join_paths(cwd, r.first_party_roots()));
     }
+}
+
+/// Section 4 — Coverage posture (ADR-0054 §9.2; issue #30): what this run parsed
+/// and then declined to reason about.
+///
+/// A diagnostic-driven pipeline cannot see what produces no diagnostics: a scope
+/// full of `extract()` and a scope proven clean print the same nothing. Steins is
+/// *correct* on those scopes — `Scope::poisoned` makes every local unknown, so the
+/// "eval rewrote my local" false-positive class is structurally impossible
+/// (ADR-0046 §1) — and until now it threw the evidence away. Under the
+/// crying-wolf prohibition the risk is symmetrical: a quiet analyzer that cannot say
+/// *why* it is quiet is asking to be trusted on nothing. This section is the
+/// measurement, so a silent run is a claim with numbers behind it.
+///
+/// Three facts, each from an existing surface and none of them a diagnostic (no
+/// registry id, no baseline entry, no fp-gate counter):
+///
+/// 1. **Poisoned scopes** as a share of all scopes, with the sites broken down by
+///    construct kind. Both come from `Scope::opaque`, which the poison predicate
+///    itself populates — one walk decides poisoning and enumerates the reasons, so
+///    the inventory cannot drift from the behaviour it describes.
+/// 2. **Dam sites** (ADR-0049 §2 / ADR-0054 §9.2's designed line), broken down by
+///    eval / unproven-or-out-of-universe include / non-literal `class_alias`. These
+///    are the *existence*-claim conditionals, a different soundness hole from scope
+///    havoc: they answer "could a name exist that the reference scan never saw".
+/// 3. **Reflection-driven invocation** sites — inventoried even though they poison
+///    no scope and dam no claim, and labelled as the guess they are.
+fn section_coverage(root: &Path, files: &[ParsedFile], layout: &ProjectLayout) {
+    println!();
+    println!("Coverage posture");
+    if files.is_empty() {
+        println!("  no .php files under {} — nothing to inventory", root.display());
+        return;
+    }
+
+    let mut scopes = 0usize;
+    let mut poisoned = 0usize;
+    let mut constructs = [0usize; OpaqueConstruct::ALL.len()];
+    let mut reflection = [0usize; ReflectionKind::ALL.len()];
+    for f in files {
+        // Sites are counted per *construct in the source*, not per affected scope: a
+        // `use (&$x)` capture is recorded on the enclosing scope AND on the closure's
+        // own (one aliasing fact, two silenced scopes — ADR-0033), and both carry the
+        // captured variable's span. The scope count above already reports the two;
+        // counting the construct twice would answer "grep your source for this" wrong.
+        let mut seen = std::collections::HashSet::new();
+        for scope in f.tree.scopes() {
+            scopes += 1;
+            if scope.poisoned {
+                poisoned += 1;
+            }
+            for site in &scope.opaque {
+                if !seen.insert(*site) {
+                    continue;
+                }
+                if let Some(i) = OpaqueConstruct::ALL.iter().position(|c| *c == site.construct) {
+                    constructs[i] += 1;
+                }
+            }
+        }
+        for site in f.tree.reflection_sites() {
+            if let Some(i) = ReflectionKind::ALL.iter().position(|k| *k == site.kind) {
+                reflection[i] += 1;
+            }
+        }
+    }
+
+    println!(
+        "  {} file(s), {scopes} scope(s), {poisoned} poisoned ({}) — a poisoned scope knows no local's value (ADR-0001, ADR-0046 §1)",
+        files.len(),
+        share(poisoned, scopes)
+    );
+    let construct_total: usize = constructs.iter().sum();
+    if construct_total == 0 {
+        println!("  opaque constructs: none — no scope is on the give-up list");
+    } else {
+        println!(
+            "  opaque constructs: {construct_total} site(s) — {}",
+            breakdown(&constructs, OpaqueConstruct::ALL.map(OpaqueConstruct::label))
+        );
+    }
+
+    // The dam (ADR-0049 §2): the same query answer `check` computes, recomputed here
+    // from the same lowered universe. It does not track the construct counts above in
+    // either direction — vendor `eval`/dynamic-include is presumed universe-internal
+    // and a proven in-universe include is benign (both drop out), while a non-literal
+    // `class_alias` dams without poisoning any scope (it appears only here).
+    let units: Vec<FileUnit<'_>> =
+        files.iter().map(|f| FileUnit { path: &f.path, tree: &f.tree }).collect();
+    let dam = dam_facts(&units, layout);
+    if dam.is_empty() {
+        println!(
+            "  dam sites: none — no runtime-definition construct stands, so existence-absence claims are undammed (ADR-0049 §2)"
+        );
+    } else {
+        let mut dam_counts = [0usize; 3];
+        for site in dam.sites() {
+            let i = match site.kind {
+                DamKind::Eval => 0,
+                DamKind::Include => 1,
+                DamKind::ClassAlias => 2,
+            };
+            dam_counts[i] += 1;
+        }
+        println!(
+            "  dam sites: {} — {}",
+            dam.len(),
+            breakdown(
+                &dam_counts,
+                ["eval", "unproven/out-of-universe include", "non-literal class_alias"]
+            )
+        );
+        println!(
+            "    existence-absence claims (undefined function/class) stay silent where these stand (ADR-0049 §2)"
+        );
+    }
+
+    let reflection_total: usize = reflection.iter().sum();
+    if reflection_total == 0 {
+        println!("  reflection-driven invocation: none recognized");
+    } else {
+        println!(
+            "  reflection-driven invocation: {reflection_total} site(s) — {}",
+            breakdown(&reflection, ReflectionKind::ALL.map(ReflectionKind::label))
+        );
+    }
+    // Stated on every run, not only a non-zero one: the honest reading of a `0` here
+    // is "the recognizer saw nothing", not "the code reflects nowhere".
+    println!(
+        "    (this list is a guess until measured: the recognizer is syntactic, it names no receiver type, and it is not exhaustive)"
+    );
+}
+
+/// `poisoned/total` as a percentage, or `n/a` for an empty denominator. One decimal:
+/// the number is a posture, not a metric anyone should diff on.
+fn share(part: usize, whole: usize) -> String {
+    if whole == 0 {
+        return "n/a".to_owned();
+    }
+    #[expect(clippy::cast_precision_loss, reason = "a display percentage; counts are small")]
+    let pct = part as f64 * 100.0 / whole as f64;
+    format!("{pct:.1}%")
+}
+
+/// `label N` pairs for the non-zero counts, comma-joined in the array's order. Zero
+/// counts are dropped: a list of nine kinds where one fired reads as noise, and the
+/// total is already on the line.
+fn breakdown<const N: usize>(counts: &[usize; N], labels: [&str; N]) -> String {
+    counts
+        .iter()
+        .zip(labels)
+        .filter(|(n, _)| **n > 0)
+        .map(|(n, label)| format!("{label} {n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Parse every `.php` file under `root` once. Unreadable files are skipped silently
+/// (the same tolerance `check`'s collection has); parse errors are not: a recovered
+/// tree still carries scopes and sites, which is exactly the ADR-0003 posture.
+fn parse_project(root: &Path) -> Vec<ParsedFile> {
+    let mut files = Vec::new();
+    crate::collect_php_files(root, &mut files);
+    files.sort();
+    files.dedup();
+    files
+        .iter()
+        .filter_map(|file| {
+            let bytes = std::fs::read(file).ok()?;
+            let text = String::from_utf8_lossy(&bytes);
+            Some(ParsedFile {
+                path: file.to_string_lossy().into_owned(),
+                tree: SourceTree::parse(&text),
+            })
+        })
+        .collect()
 }
 
 /// Render a path relative to `cwd` when it sits underneath it, else absolute.
@@ -251,14 +444,14 @@ fn join_paths(cwd: &Path, paths: &[PathBuf]) -> String {
     paths.iter().map(|p| display_path(cwd, p)).collect::<Vec<_>>().join(", ")
 }
 
-/// Section 4 — Envelopes (ADR-0054 §9.4, the G1-amendment written-but-unchecked
+/// Section 5 — Envelopes (ADR-0054 §9.4, the G1-amendment written-but-unchecked
 /// notice). An index scan (never the checker): count declarations carrying a written
 /// `@throws` tag, then state whether the active surface checks them. This is the
 /// designed answer to "wrote `@throws`, got silence".
-fn section_envelopes(root: &Path, surface: &profile::Surface) {
+fn section_envelopes(files: &[ParsedFile], surface: &profile::Surface) {
     println!();
     println!("Envelopes");
-    let n = count_throws_envelopes(root);
+    let n = count_throws_envelopes(files);
     let checked = surface.surfaces_id(THROW_UNDECLARED_ID);
     if checked {
         println!(
@@ -273,26 +466,18 @@ fn section_envelopes(root: &Path, surface: &profile::Surface) {
     }
 }
 
-/// Count declarations (functions + methods) that carry a written `@throws` tag, by
-/// scanning parsed docblocks across every `.php` file under `root`. Index-bound: it
-/// parses source and reads docblock trivia; it runs no inference.
-fn count_throws_envelopes(root: &Path) -> usize {
-    let mut files = Vec::new();
-    crate::collect_php_files(root, &mut files);
-    files.sort();
-    files.dedup();
-
+/// Count declarations (functions + methods) that carry a written `@throws` tag,
+/// reading the docblock trivia of the already-parsed tree. Index-bound: it reads
+/// parsed source; it runs no inference.
+fn count_throws_envelopes(files: &[ParsedFile]) -> usize {
     let mut count = 0usize;
-    for file in &files {
-        let Ok(bytes) = std::fs::read(file) else { continue };
-        let text = String::from_utf8_lossy(&bytes);
-        let tree = SourceTree::parse(&text);
-        for f in tree.functions() {
+    for file in files {
+        for f in file.tree.functions() {
             if declares_throws(f.docblock.as_deref()) {
                 count += 1;
             }
         }
-        for c in tree.classes() {
+        for c in file.tree.classes() {
             for m in &c.methods {
                 if declares_throws(m.docblock.as_deref()) {
                     count += 1;
@@ -308,7 +493,7 @@ fn declares_throws(docblock: Option<&str>) -> bool {
     docblock.is_some_and(|d| scan_docblock(d).iter().any(|t| t.kind == TagKind::Throws))
 }
 
-/// Section 5 — Baseline (ADR-0054 §9.5, minimal): the capture surface (profile + id
+/// Section 6 — Baseline (ADR-0054 §9.5, minimal): the capture surface (profile + id
 /// count from the header) versus the active surface, and the dormant-entry count
 /// (entries whose id is outside the active surface — kept, not stale). Doctor accepts
 /// `--baseline <path>`; absent that it discovers the conventional default file, and

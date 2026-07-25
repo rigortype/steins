@@ -1,7 +1,7 @@
-//! End-to-end tests for `steins doctor` (ADR-0054 Part II, C3 minimal scope): the
-//! four sections (Runtime, Config + active surface, Envelopes, Baseline) and the
-//! exit semantics (§10 — environment degrades at 0, configuration contradicts at 1,
-//! usage at 2).
+//! End-to-end tests for `steins doctor` (ADR-0054 Part II, C3 plus C4's coverage
+//! posture): the sections (Runtime, Config + active surface, Layout, Coverage
+//! posture, Envelopes, Baseline) and the exit semantics (§10 — environment degrades
+//! at 0, configuration contradicts at 1, usage at 2).
 //!
 //! Each test runs the real `steins` binary in a private temp dir (its own CWD) so
 //! the auto-loaded `steins.toml` and `.steins-baseline.jsonl` are isolated. Most use
@@ -60,12 +60,19 @@ const THREE_THROWS: &str = "<?php\n\
 // ------------------------------------------------------- all sections render ---
 
 #[test]
-fn doctor_renders_all_four_sections_exit_zero() {
+fn doctor_renders_all_sections_exit_zero() {
     let dir = workdir("sections");
     write(&dir, "a.php", THREE_THROWS);
     let r = run_in(&dir, &["doctor", "--no-php", "."]);
     assert_eq!(r.code, 0, "healthy/degraded world → exit 0; stdout:\n{}", r.stdout);
-    for section in ["Runtime", "Config + active surface", "Envelopes", "Baseline"] {
+    for section in [
+        "Runtime",
+        "Config + active surface",
+        "Layout",
+        "Coverage posture",
+        "Envelopes",
+        "Baseline",
+    ] {
         assert!(r.stdout.contains(section), "missing `{section}` section; stdout:\n{}", r.stdout);
     }
 }
@@ -262,4 +269,118 @@ fn doctor_rejects_unknown_flag() {
     let dir = workdir("badflag");
     let r = run_in(&dir, &["doctor", "--nope"]);
     assert_eq!(r.code, 2, "unknown flag → usage error exit 2; stderr:\n{}", r.stderr);
+}
+
+// ------------------------------------------------ coverage posture (issue #30) ---
+
+/// One scope per give-up-list construct, plus a clean function and the four
+/// reflection shapes. 11 poisoned scopes over 17: the by-ref capture poisons the
+/// enclosing scope AND the closure's own — one aliasing fact, two silenced scopes,
+/// but one construct in the source (so it counts once in the construct breakdown).
+const OPAQUE: &str = "<?php\n\
+    function with_eval(string $c): void { eval($c); }\n\
+    function with_include(string $p): void { include $p; }\n\
+    function with_require(string $p): void { require $p; }\n\
+    function with_extract(array $r): void { extract($r); }\n\
+    function with_compact(int $a): array { return compact('a'); }\n\
+    function with_varvar(string $n): void { $$n = 1; }\n\
+    function with_ref(array $r): void { $x = &$r[0]; }\n\
+    function with_global(): void { global $config; }\n\
+    function with_static(): int { static $n = 0; return ++$n; }\n\
+    function with_capture(): callable { $t = 0; return function (int $n) use (&$t): void { $t += $n; }; }\n\
+    function clean(int $a, int $b): int { return $a + $b; }\n\
+    class R {\n\
+    public function a(\\ReflectionMethod $m, object $o): mixed { return $m->invoke($o); }\n\
+    public function b(\\ReflectionClass $c): object { return $c->newInstance(); }\n\
+    public function c(\\Closure $f, object $o, string $s): \\Closure { return \\Closure::bind($f, $o, $s); }\n\
+    public function d(int $first): array { return func_get_args(); }\n\
+    }\n";
+
+#[test]
+fn doctor_inventories_the_opaque_constructs() {
+    let dir = workdir("coverage");
+    write(&dir, "a.php", OPAQUE);
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0, "an inventory is a report, never a failure; stdout:\n{}", r.stdout);
+    assert!(r.stdout.contains("Coverage posture"), "stdout:\n{}", r.stdout);
+    // The share, not a bare scalar: poisoned scopes against ALL scopes.
+    assert!(
+        r.stdout.contains("17 scope(s), 11 poisoned (64.7%)"),
+        "expected the poisoned-scope share; stdout:\n{}",
+        r.stdout
+    );
+    // Every construct kind named, with its own count.
+    for kind in [
+        "eval 1",
+        "include/require 2",
+        "extract 1",
+        "compact 1",
+        "variable variable 1",
+        "reference assignment 1",
+        "global 1",
+        "static variable 1",
+        "by-ref capture 1",
+    ] {
+        assert!(r.stdout.contains(kind), "missing `{kind}`; stdout:\n{}", r.stdout);
+    }
+}
+
+#[test]
+fn doctor_inventories_reflection_sites_and_labels_them_a_guess() {
+    let dir = workdir("reflection");
+    write(&dir, "a.php", OPAQUE);
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert!(
+        r.stdout.contains("reflection-driven invocation: 4 site(s)")
+            && r.stdout.contains("->invoke*() 1")
+            && r.stdout.contains("->newInstance*() 1")
+            && r.stdout.contains("Closure::bind (computed scope) 1")
+            && r.stdout.contains("func_get_args() in a typed signature 1"),
+        "stdout:\n{}",
+        r.stdout
+    );
+    // The list is a guess until measured, and the report says so on every run.
+    assert!(r.stdout.contains("a guess until measured"), "stdout:\n{}", r.stdout);
+}
+
+#[test]
+fn doctor_reports_dam_sites_broken_down_by_kind() {
+    let dir = workdir("dam");
+    write(&dir, "a.php", OPAQUE);
+    write(&dir, "b.php", "<?php\nclass_alias($src, 'B');\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert!(
+        r.stdout.contains("dam sites: 4")
+            && r.stdout.contains("eval 1")
+            && r.stdout.contains("unproven/out-of-universe include 2")
+            && r.stdout.contains("non-literal class_alias 1"),
+        "stdout:\n{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn doctor_says_a_clean_tree_is_clean() {
+    // The point of the section: a quiet run states what it looked at, so silence
+    // over clean code reads differently from silence over opaque code.
+    let dir = workdir("clean");
+    write(&dir, "a.php", "<?php\nfunction f(int $x): int { return $x + 1; }\nf(1);\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.stdout.contains("2 scope(s), 0 poisoned (0.0%)")
+            && r.stdout.contains("opaque constructs: none")
+            && r.stdout.contains("dam sites: none")
+            && r.stdout.contains("reflection-driven invocation: none recognized"),
+        "stdout:\n{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn doctor_coverage_survives_an_empty_tree() {
+    let dir = workdir("empty");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0);
+    assert!(r.stdout.contains("no .php files under"), "stdout:\n{}", r.stdout);
 }

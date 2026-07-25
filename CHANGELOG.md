@@ -31,6 +31,11 @@ skill seals them into a version section at release time, reconstructing from
 
 ### Added
 
+- **`steins doctor` now says what a quiet run was silent about** — a Coverage posture section inventories the code the analyzer parses and then declines to reason about, so a clean run is a measured claim rather than an unexplained silence.
+  - Poisoned scopes as a share of all scopes, with the constructs that caused them broken down by kind: `eval`, `include`/`require`, `extract`, `compact`, variable variables, reference assignment, `global`, `static`, and by-ref capture. Every local in such a scope is unknown by design — that is why Steins does not report false positives there, and now it says so.
+  - Dam sites broken down by `eval` / unproven include / non-literal `class_alias`: the sites where an absence claim about a function or class stays silent because runtime code could mint the name.
+  - Reflection-driven invocation sites (`->invoke*()`, `->newInstance*()`, `Closure::bind` with a computed scope, `func_get_args()` under a typed signature), reported as an explicitly incomplete guess: these silence nothing on their own, and the list exists to be corrected against real code.
+  - The section reports; it never fails. Nothing here is a diagnostic id, nothing enters a baseline, and `doctor` still exits 0 on every environment fact.
 - **A Composer channel** — `composer require --dev typedduck/steins` pins the analyzer in `composer.lock` beside the code it analyzes, so CI and every developer resolve the same version.
   - What Composer installs is a PHP shim, not the analyzer: on first use it downloads the release binary matching the installed version, checks it against the sha256 published with that release, and runs it. Later runs use the cached binary and touch no network.
   - Requires PHP 8.1 or newer. A platform with no prebuilt binary — notably arm64 musl — is refused by name and pointed at a source build, rather than handed an archive that cannot run.
