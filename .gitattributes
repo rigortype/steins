@@ -48,3 +48,7 @@
 # ── Prose: hundreds of files (ADRs, specs, research) aimed at contributors, ──
 # not at someone who installed a linter. The published docs live on the repo.
 /docs/             export-ignore
+
+# The shim's own tests. CI runs them from a checkout, never from the published
+# archive, so shipping them would only add weight to every `composer install`.
+/composer/tests/   export-ignore

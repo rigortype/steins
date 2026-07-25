@@ -37,9 +37,12 @@ use function fopen;
 use function fprintf;
 use function fwrite;
 use function getenv;
+use function glob;
 use function implode;
 use function ini_get;
+use function is_array;
 use function is_dir;
+use function is_file;
 use function is_resource;
 use function is_string;
 use function ltrim;
@@ -49,9 +52,12 @@ use function php_uname;
 use function proc_close;
 use function proc_get_status;
 use function proc_open;
+use function shell_exec;
+use function str_contains;
 use function str_starts_with;
 use function stream_context_create;
 use function strtolower;
+use function trim;
 use function unlink;
 use function usleep;
 
@@ -165,34 +171,144 @@ function tag_for(string $version): string
 /**
  * The Rust target triple for the machine this is running on.
  *
- * Only targets with a published release binary are returned. Anything else
- * raises, naming what was detected and the source-build fallback — a wrong
- * guess here does not fail at detection, it fails at exec with a dynamic-loader
- * error that says nothing about the actual cause.
+ * The five targets the release workflow builds, and only those:
+ *
+ *   x86_64-apple-darwin          aarch64-apple-darwin
+ *   x86_64-unknown-linux-gnu     aarch64-unknown-linux-gnu
+ *   x86_64-unknown-linux-musl
+ *
+ * Everything else raises here, naming what was detected. That is the whole
+ * point of the function: a wrong guess does not fail at detection, it fails
+ * later at exec, with a dynamic-loader message that says nothing about the
+ * actual cause. Windows is deferred by design (the sidecar's temp-dir spawn is
+ * unverified there); FreeBSD and 32-bit ARM have no row at all.
  *
  * @throws RuntimeException If no released binary matches this machine.
  *
  * @internal
  */
-function detect_target(): string
+function detect_target(?string $machine = null, ?string $system = null, string $root = ''): string
 {
-    $machine = strtolower(php_uname('m'));
-    $system = strtolower(php_uname('s'));
+    $machine = strtolower($machine ?? php_uname('m'));
+    $system = strtolower($system ?? php_uname('s'));
 
     $architecture = match ($machine) {
         'arm64', 'aarch64' => 'aarch64',
         'x86_64', 'amd64' => 'x86_64',
-        default => null,
+        default => throw new RuntimeException(namespace\unsupported_message($system, $machine)),
     };
 
-    if ($architecture === 'aarch64' && $system === 'darwin') {
-        return 'aarch64-apple-darwin';
+    if ($system === 'darwin') {
+        return "{$architecture}-apple-darwin";
     }
 
-    throw new RuntimeException(
-        "no released binary for this platform ({$system} {$machine}). Install via Homebrew, or build from source: "
-        . 'cargo install --git https://github.com/' . REPOSITORY . ' steins-cli',
-    );
+    if ($system !== 'linux') {
+        throw new RuntimeException(namespace\unsupported_message($system, $machine));
+    }
+
+    $libc = namespace\detect_linux_libc($root);
+
+    if ($architecture === 'aarch64') {
+        // The gap in the matrix, and a realistic place to land: an Alpine arm64
+        // container is an ordinary way to run a PHP toolchain, and there is no
+        // aarch64 musl build. Refuse rather than hand back the glibc triple —
+        // that archive downloads and extracts perfectly and then dies at exec
+        // on a missing interpreter, which reads like a corrupt download.
+        if ($libc === 'musl') {
+            throw new RuntimeException(
+                "no released binary for arm64 musl (detected: {$system} {$machine}, musl libc). The Linux arm64 "
+                . 'build is glibc-only and the musl build is x86_64-only, so an arm64 Alpine or musl host has no '
+                . 'archive to fetch. Use a glibc-based image, or build from source: '
+                . 'cargo install --git https://github.com/' . REPOSITORY . ' steins-cli',
+            );
+        }
+
+        return 'aarch64-unknown-linux-gnu';
+    }
+
+    // x86_64 Linux, where both builds exist and the tie-break has a right
+    // answer. The musl binary is fully static, so it runs on a glibc host too;
+    // the glibc binary does not run on a musl host. Detection decides when it
+    // can, and an inconclusive detection takes musl — the one that cannot be
+    // wrong. glibc's allocator is the faster of the two for a workload like
+    // this, which is why a confident 'gnu' is still preferred when we have it.
+    return $libc === 'gnu' ? 'x86_64-unknown-linux-gnu' : 'x86_64-unknown-linux-musl';
+}
+
+/**
+ * Which C library this Linux system uses, when that can be established.
+ *
+ * Deliberately does not lead with `ldd`: the environments most likely to be
+ * musl are also the ones most likely to be stripped down, and a minimal Alpine
+ * image has no `ldd` on PATH at all — asking it there answers "glibc" for the
+ * wrong reason. The dynamic loader is a better witness, because a system
+ * cannot run dynamically linked programs without one.
+ *
+ * @param string $root Filesystem root to probe under. Empty in production; the
+ *   test suite points it at a fixture tree, which is the only way to exercise
+ *   branches for a libc the host does not have.
+ *
+ * @return null|string "musl", "gnu", or null when nothing conclusive was found.
+ *
+ * @internal
+ */
+function detect_linux_libc(string $root = ''): ?string
+{
+    if (is_file("{$root}/etc/alpine-release")) {
+        return 'musl';
+    }
+
+    // The loader's own name carries the answer. Both live at a fixed path by
+    // ABI convention, which is what lets a static check work here.
+    $muslLoader = glob("{$root}/lib/ld-musl-*.so.*");
+    if (is_array($muslLoader) && $muslLoader !== []) {
+        return 'musl';
+    }
+
+    foreach (['/lib64/ld-linux-x86-64.so.2', '/lib/ld-linux-aarch64.so.1', '/lib/ld-linux-x86-64.so.2'] as $loader) {
+        if (is_file($root . $loader)) {
+            return 'gnu';
+        }
+    }
+
+    // A fixture root describes a hypothetical machine; consulting this one's
+    // shell about it would answer a different question.
+    if ($root !== '') {
+        return null;
+    }
+
+    // Last resort, and only when the shell can find it. `ldd --version` writes
+    // to stderr on musl and exits non-zero, so both streams are read.
+    $ldd = shell_exec('command -v ldd 2>/dev/null');
+    if (is_string($ldd) && trim($ldd) !== '') {
+        $version = (string) shell_exec('ldd --version 2>&1');
+        if (str_contains($version, 'musl')) {
+            return 'musl';
+        }
+
+        if (str_contains($version, 'GLIBC') || str_contains($version, 'GNU libc')) {
+            return 'gnu';
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Phrase the refusal for a platform with no released binary.
+ *
+ * @internal
+ */
+function unsupported_message(string $system, string $machine): string
+{
+    $message = "no released binary for this platform (detected: {$system} {$machine}).";
+
+    if ($system === 'windows nt') {
+        $message .= ' Windows support is deferred, not merely missing: the PHP sidecar spawn path is unverified '
+            . 'there, and a binary that mis-spawns it would silently degrade to the sound subset.';
+    }
+
+    return $message . ' Build from source: cargo install --git https://github.com/' . REPOSITORY . ' steins-cli';
 }
 
 /**
