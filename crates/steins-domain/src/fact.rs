@@ -1,6 +1,7 @@
 //! The [`Fact`] — what the analyzer knows about one value — and its algebra.
 //!
-//! Soundness contract (property-tested in `tests/lattice.rs`):
+//! Soundness contract (property-tested in `tests/lattice.rs`, proved for every
+//! value in `spike/lean-domain` — ADR-0059):
 //! `γ(a) ∪ γ(b) ⊆ γ(join(a, b))` whenever the join is representable; a
 //! `None` join means the caller must drop the fact (γ = everything), which
 //! is always safe. Widening from the finite layers is *computed*: the

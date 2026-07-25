@@ -1,7 +1,7 @@
 # The Verification Apparatus
 
-**Status: implemented** (`xtask`, `harness/phpdoc-oracle`; ADR-0013, ADR-0021,
-ADR-0026, ADR-0029).
+**Status: implemented** (`xtask`, `harness/phpdoc-oracle`, `spike/lean-domain`;
+ADR-0013, ADR-0021, ADR-0026, ADR-0029, ADR-0059).
 
 The zero-FP bar is a claim, and a claim without an instrument is a slogan. This
 is the instrument.
@@ -13,6 +13,7 @@ is the instrument.
 | `fp-gate` | run the proof layer over the pinned corpus; **red on any finding** |
 | `corpus-sync` | clone/refresh the pinned corpus (`--update` re-resolves to latest stable) |
 | `phpdoc-oracle` | differential the PHPDoc parser against the real `phpstan/phpdoc-parser` |
+| `lean-check` | build the Lean 4 spec of the value domain and verify the committed differential vectors are still what it prints (`--bless` to rewrite) |
 | `gen-catalog` | regenerate the builtin class hierarchy **and the return-fact table** from the mining TOML |
 | `freq` | builtin frequency mining (catalog seeding input) |
 | `nsrt` | the `assertType` harness (oracle idea B): three-verdict measurement of dump renderings against PHPStan's own `nsrt/` fixtures, `assertType` recognized **harness-only** |
@@ -99,6 +100,33 @@ This is why the grammar can be called normatively compatible rather than
 "close": compatibility is measured, not asserted. See
 [`phpdoc-grammar.md`](../type-specification/phpdoc-grammar.md).
 
+## `lean-check`
+
+The differential harness for the value domain's *algebra* (ADR-0059).
+`spike/lean-domain` is a Lean 4 specification of `steins-domain` that proves what
+the crate's doc comments claim — `γ(a) ∪ γ(b) ⊆ γ(join(a, b))` for every value,
+not for generated samples — and then prints a deterministic vector file.
+
+Three legs, only the first two of which need Lean:
+
+1. `lake build` — the proofs compile. A spec that does not build proves nothing.
+2. `lake exe vectors` — the spec prints 4,154 lines of `admits` / `truthy` /
+   `isnull` / `satisfiesstr` / `intin` / `join` over a fixed universe, plus the
+   atom tables (where the PHP-classifier assumptions the proofs rest on are
+   checked against `StrPreds::of`) and an exhaustive associativity tally.
+   `lean-check` verifies `crates/steins-domain/tests/fixtures/lean-vectors.expected`
+   is byte-identical to that output; `--bless` rewrites it.
+3. `cargo test -p steins-domain --test lean_vectors` — the Rust implementation
+   walks the same universe in the same order and diffs the rendered results.
+
+Leg 3 is an ordinary test, so a machine without a Lean toolchain still gets the
+full Rust-side check; that is why `lean-check` **skips rather than fails** when no
+toolchain is found. The command is not wired into `fp-gate` or the release gates.
+
+What is *not* proved, and is checked exhaustively instead: `join` associativity
+(110,592 triples, zero mismatches). It matters because `join_envs` folds
+multi-branch joins left-to-right. See `spike/lean-domain/REPORT.md`.
+
 ## `gen-catalog`
 
 Regenerates `steins-catalog::hierarchy_generated` from
@@ -136,7 +164,11 @@ behavior:
 - **`tests/registry.rs`** — the diagnostic id totality reconciliation. See
   [diagnostic-shape.md](diagnostic-shape.md).
 - **the domain's property tests** — `γ(a) ∪ γ(b) ⊆ γ(join(a, b))` over generated
-  facts.
+  facts. The same statement is *proved* for every value by the Lean spec
+  (ADR-0059); the property tests stay because they exercise the real
+  implementation, which the proofs do not.
+- **`crates/steins-domain/tests/lean_vectors.rs`** — the Rust leg of the
+  `lean-check` loop above.
 
 The standing rule recorded in the roadmap: **zero conformance regressions,
 ever.**

@@ -25,7 +25,7 @@ From there, three clusters:
 
 - **Type semantics** — 0029–0033, 0035–0037, 0042–0045, 0052, 0056.
 - **Effects and throws** — 0005–0008, 0018, 0019, 0040, 0055.
-- **Apparatus and surfaces** — 0013, 0020–0026, 0049, 0050, 0053, 0054.
+- **Apparatus and surfaces** — 0013, 0020–0026, 0049, 0050, 0053, 0054, 0059.
 
 Steins ADRs carry no `Status:` field. An ADR is in this directory because it was
 accepted; where implementation is still in flight, the ADR says so inline and
@@ -94,3 +94,4 @@ list in one place.
 | ADR-0056 | [Builtin return facts: reflected envelope, curated refinement within it](0056-builtin-return-facts.md) |
 | ADR-0057 | [Returned-allocation heap transfer: return-object summaries, rebound by copy](0057-returned-allocation-heap-transfer.md) |
 | ADR-0058 | [Runtime-enforced invariant promotion: enforcement outranks annotation](0058-runtime-invariant-promotion.md) |
+| ADR-0059 | [Lean 4 as the value domain's specification: proofs over the algebra, differential vectors over the implementation](0059-lean-spec-for-value-domain.md) |

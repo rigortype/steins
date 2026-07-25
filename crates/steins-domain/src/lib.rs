@@ -12,7 +12,10 @@
 //! precision loss is measured, never guessed), extensional membership
 //! (`admits`), and trinary queries in the unified [`Certainty`].
 //!
-//! Design invariants, enforced by constructors and checked by property tests:
+//! Design invariants, enforced by constructors, checked by property tests, and
+//! **proved for every value** by the Lean 4 specification in
+//! `spike/lean-domain` (ADR-0059) — which this crate is differentially checked
+//! against by `tests/lean_vectors.rs`:
 //!
 //! - **Soundness of join**: `γ(a) ∪ γ(b) ⊆ γ(join(a, b))` — a join may lose
 //!   precision (widen), never members. `join` returning `None` means "not
