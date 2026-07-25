@@ -100,3 +100,15 @@ the entry alone cannot substitute: a scope's `disable` list can name a
 whole family (`"type.*"`) while `where` narrows it to almost nothing live
 in a given tree, and only the reach number tells "broad by design, thin in
 practice" apart from "broad and biting."
+
+**And note which of the survey's shapes this leaves.** It measured three
+ways to write a ledger of unbounded scope, and this design already refuses
+two of them outright: the bare `message:` regex is foreclosed by the body
+above (message-regex matching is deliberately unsupported), and the
+occurrence-keyed baseline cannot express one at all (ADR-0022, amended).
+What remains expressible is exactly the `disable` + `in` shape — an id
+family over a path set — which is the one the survey's worst cases were
+written in. So the reach constraint is not defence-in-depth against a
+hazard already handled elsewhere; it is the whole of the defence for the
+one shape this config surface still permits, and the reason it has to be
+fixed before #15 ships rather than after.
