@@ -1,0 +1,73 @@
+#!/usr/bin/env php
+<?php
+
+// The Composer entry point for Steins.
+//
+// Composer ships this shim, not the analyzer. Steins is a Rust binary; what a
+// PHP project installs is ~100KB of PHP that, on first use, fetches the release
+// build matching the installed package version and execs it. Every later
+// invocation finds the binary already there and adds only process spawn.
+//
+// The other channels (Homebrew, `cargo install --git`) put a binary on PATH
+// once, machine-wide. This one exists so a project can PIN the analyzer beside
+// the code it analyzes: the version lives in composer.lock, CI and every
+// developer resolve the same one, and `composer update` moves it.
+
+declare(strict_types=1);
+
+namespace Steins\Internal;
+
+use Composer;
+use RuntimeException;
+
+use function array_shift;
+use function class_exists;
+use function file_exists;
+use function fwrite;
+
+use const STDERR;
+
+(function (): never {
+    // The Composer-generated bin proxy has already loaded the autoloader, which
+    // is where InstalledVersions comes from. Running this file directly (from a
+    // checkout, or by path) has not, so find it — a developer poking at the
+    // shim should not get a fatal from a missing class.
+    if (!class_exists(Composer\InstalledVersions::class, false)) {
+        $loaded = false;
+        foreach (
+            [
+                // Installed: vendor/rigortype/steins/composer/bin -> vendor/autoload.php
+                __DIR__ . '/../../../../autoload.php',
+                // A checkout of this repository with its own vendor/ present.
+                __DIR__ . '/../../vendor/autoload.php',
+            ] as $autoload
+        ) {
+            if (file_exists($autoload)) {
+                require $autoload;
+                $loaded = true;
+                break;
+            }
+        }
+
+        if (!$loaded) {
+            fwrite(STDERR, "steins: Composer autoloader not found. Run 'composer install' first.\n");
+            exit(1);
+        }
+    }
+
+    require __DIR__ . '/../src/internal.php';
+
+    try {
+        $version = namespace\get_version();
+        $target = namespace\detect_target();
+        $executable = namespace\ensure_binary($version, $target, __DIR__);
+
+        $args = $_SERVER['argv'];
+        array_shift($args);
+
+        namespace\execute($executable, $args);
+    } catch (RuntimeException $e) {
+        fwrite(STDERR, "steins: {$e->getMessage()}\n");
+        exit(1);
+    }
+})();

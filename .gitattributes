@@ -1,0 +1,50 @@
+# What the Composer package contains.
+#
+# Packagist's dist archive is `git archive`, so `export-ignore` is the only
+# thing standing between "a PHP project installs a 130KB shim" and "a PHP
+# project installs the entire Rust workspace". The published package must hold
+# exactly the shim, its metadata, and the notices — nothing else.
+#
+# The three files that MUST NOT be ignored, and why:
+#
+#   LICENSE                   Apache-2.0 §4(a): recipients of a derivative or a
+#                             distribution get a copy of the licence. The
+#                             Composer package is a distribution.
+#   THIRD-PARTY-LICENSES.md   the binary the shim downloads is statically linked
+#                             against MIT/BSD/ISC dependencies whose terms
+#                             require their notices to accompany it.
+#   README.md                 the package's entry point on Packagist.
+#
+# CHANGELOG.md rides along deliberately: a pinned dev-tool dependency is exactly
+# the case where a reader wants to know what changed between two versions
+# without leaving `vendor/`.
+#
+# The release workflow's archives are built from a checkout, not from
+# `git archive`, so nothing here affects them.
+
+# ── Rust: the whole workspace, its manifests, and its tooling ────────────────
+/crates/           export-ignore
+/xtask/            export-ignore
+/harness/          export-ignore
+/spike/            export-ignore
+/Cargo.toml        export-ignore
+/Cargo.lock        export-ignore
+/rustfmt.toml      export-ignore
+/clippy.toml       export-ignore
+/deny.toml         export-ignore
+/about.toml        export-ignore
+/about.hbs         export-ignore
+/.cargo/           export-ignore
+
+# ── Repository operation: CI, corpus wiring, agent and contributor docs ──────
+/.github/          export-ignore
+/.claude/          export-ignore
+/.gitignore        export-ignore
+/.gitattributes    export-ignore
+/corpus.lock.toml  export-ignore
+/AGENTS.md         export-ignore
+/CONTEXT.md        export-ignore
+
+# ── Prose: hundreds of files (ADRs, specs, research) aimed at contributors, ──
+# not at someone who installed a linter. The published docs live on the repo.
+/docs/             export-ignore

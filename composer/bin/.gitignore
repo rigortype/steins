@@ -1,0 +1,7 @@
+# Downloaded binaries land in `<version>/<target>/` under this directory. The
+# pattern matches every two-component path here, which covers both the lock
+# files and the per-target directories — and once a directory is ignored, git
+# does not descend into it, so the extracted binary is covered too.
+#
+# `steins` (this directory's only tracked file) has no slash and is unaffected.
+*/*

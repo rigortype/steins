@@ -1,0 +1,30 @@
+{
+    "name": "rigortype/steins",
+    "description": "A value-precise static analyzer for PHP that reports only what provably breaks at runtime.",
+    "type": "library",
+    "license": "Apache-2.0",
+    "homepage": "https://github.com/rigortype/steins",
+    "authors": [
+        {
+            "name": "USAMI Kenta",
+            "email": "tadsan@zonu.me"
+        }
+    ],
+    "keywords": [
+        "static analysis",
+        "dev"
+    ],
+    "bin": [
+        "composer/bin/steins"
+    ],
+    "require": {
+        "php": ">=8.1"
+    },
+    "suggest": {
+        "ext-curl": "To show progress while the analyzer binary downloads"
+    },
+    "support": {
+        "issues": "https://github.com/rigortype/steins/issues",
+        "source": "https://github.com/rigortype/steins"
+    }
+}
