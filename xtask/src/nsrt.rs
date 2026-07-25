@@ -152,8 +152,15 @@ fn default_nsrt_dir() -> PathBuf {
 enum Verdict {
     Match,
     Unsupported,
-    /// Steins is strictly more precise than the oracle (issue #47; see the module
-    /// docs for why this is neither `Match` nor `Differ`).
+    /// Steins' answer is a proper subtype of the assertion (issue #47; see the
+    /// module docs for why this is neither `Match` nor `Differ`).
+    ///
+    /// The verdict names a **type relation, not a quality**. Narrower is usually
+    /// better and sometimes not: a fold bug producing the wrong literal under a
+    /// correct base type lands here, and so does an over-narrowing that drops a
+    /// reachable arm. That is exactly why `subsumed` does not count toward the
+    /// headline — calling the bucket "more precise" would smuggle back the
+    /// conclusion the headline decision refuses to draw.
     Subsumed,
     Differ,
 }
@@ -760,7 +767,7 @@ fn report(records: &[Record], elapsed: f64) {
     // Subsumption listing — small enough to print whole, and worth reading row by
     // row: each one is a place Steins decided something PHPStan left open.
     let subsumed: Vec<&Record> = records.iter().filter(|r| r.verdict == "subsumed").collect();
-    println!("\n=== subsumed: Steins strictly more precise ({sub} total) ===\n");
+    println!("\n=== subsumed: Steins narrower than the assertion ({sub} total) ===\n");
     for r in &subsumed {
         let mark = if r.asserted { " (asserted)" } else { "" };
         println!(
