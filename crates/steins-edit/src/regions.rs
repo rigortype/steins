@@ -43,7 +43,7 @@
 //! `dir/**` form; a pattern beginning with a wildcard has an empty prefix and so
 //! is treated as overlapping every partition (deliberately conservative).
 
-use steins_infer::is_vendor_path;
+use steins_db::ProjectLayout;
 
 /// Which region a file's declaring scope belongs to (ADR-0047 §1). *Vendor* is
 /// not a separate variant: it is [`RegionId::Shared`] with `vendor: true`, since
@@ -208,11 +208,12 @@ impl PartitionMap {
     }
 
     /// Assign `path` to its region (ADR-0047 §1). Pure; see the module doc for the
-    /// precedence (vendor → observer → partition → shared).
+    /// precedence (vendor → observer → partition → shared). `layout` answers the
+    /// vendor question from the project's own manifest (ADR-0015).
     #[must_use]
-    pub fn region_of(&self, path: &str) -> RegionId {
-        // 1. Vendor always wins — a partition glob never claims `vendor/`.
-        if is_vendor_path(path) {
+    pub fn region_of(&self, layout: &ProjectLayout, path: &str) -> RegionId {
+        // 1. Vendor always wins — a partition glob never claims a vendor tree.
+        if layout.is_vendor(path) {
             return RegionId::vendor();
         }
         // 2. Observer.
@@ -330,28 +331,28 @@ mod tests {
 
     #[test]
     fn assigns_partition_files() {
-        assert_eq!(map().region_of("svc-a.example/src/Foo.php"), RegionId::Partition("svc-a".into()));
-        assert_eq!(map().region_of("svc-b.example/Bar.php"), RegionId::Partition("svc-b".into()));
-        assert_eq!(map().region_of("batch/Job.php"), RegionId::Partition("batch".into()));
+        assert_eq!(map().region_of(&ProjectLayout::fallback(), "svc-a.example/src/Foo.php"), RegionId::Partition("svc-a".into()));
+        assert_eq!(map().region_of(&ProjectLayout::fallback(), "svc-b.example/Bar.php"), RegionId::Partition("svc-b".into()));
+        assert_eq!(map().region_of(&ProjectLayout::fallback(), "batch/Job.php"), RegionId::Partition("batch".into()));
     }
 
     #[test]
     fn assigns_observer_files() {
-        assert_eq!(map().region_of("tests/FooTest.php"), RegionId::Observer);
-        assert_eq!(map().region_of("dev-script/seed.php"), RegionId::Observer);
+        assert_eq!(map().region_of(&ProjectLayout::fallback(), "tests/FooTest.php"), RegionId::Observer);
+        assert_eq!(map().region_of(&ProjectLayout::fallback(), "dev-script/seed.php"), RegionId::Observer);
     }
 
     #[test]
     fn unclaimed_first_party_is_shared() {
         // No partition/observer glob covers a shared-lib file → Shared (not vendor).
-        assert_eq!(map().region_of("lib/Support/Str.php"), RegionId::shared());
-        assert_eq!(map().region_of("src/Kernel.php"), RegionId::Shared { vendor: false });
+        assert_eq!(map().region_of(&ProjectLayout::fallback(), "lib/Support/Str.php"), RegionId::shared());
+        assert_eq!(map().region_of(&ProjectLayout::fallback(), "src/Kernel.php"), RegionId::Shared { vendor: false });
     }
 
     #[test]
     fn vendor_is_always_shared_with_flag() {
-        assert_eq!(map().region_of("vendor/acme/pkg/A.php"), RegionId::vendor());
-        assert_eq!(map().region_of("svc-a.example/vendor/x/Y.php"), RegionId::Shared { vendor: true });
+        assert_eq!(map().region_of(&ProjectLayout::fallback(), "vendor/acme/pkg/A.php"), RegionId::vendor());
+        assert_eq!(map().region_of(&ProjectLayout::fallback(), "svc-a.example/vendor/x/Y.php"), RegionId::Shared { vendor: true });
     }
 
     #[test]
@@ -363,7 +364,7 @@ mod tests {
             vec![],
         )
         .expect("build");
-        let r = m.region_of("svc-a.example/vendor/dep/File.php");
+        let r = m.region_of(&ProjectLayout::fallback(), "svc-a.example/vendor/dep/File.php");
         assert_eq!(r, RegionId::vendor());
         assert!(r.is_vendor() && r.is_shared());
         assert!(r.partition_name().is_none());
@@ -377,8 +378,8 @@ mod tests {
             vec!["svc-a.example/tests/**".to_owned()],
         )
         .expect("build");
-        assert_eq!(m.region_of("svc-a.example/tests/FooTest.php"), RegionId::Observer);
-        assert_eq!(m.region_of("svc-a.example/src/Foo.php"), RegionId::Partition("svc-a".into()));
+        assert_eq!(m.region_of(&ProjectLayout::fallback(), "svc-a.example/tests/FooTest.php"), RegionId::Observer);
+        assert_eq!(m.region_of(&ProjectLayout::fallback(), "svc-a.example/src/Foo.php"), RegionId::Partition("svc-a".into()));
     }
 
     #[test]
@@ -438,10 +439,10 @@ mod tests {
     fn single_region_identity_assigns_everything_shared() {
         let m = PartitionMap::single_region();
         assert!(m.is_single_region());
-        assert_eq!(m.region_of("anything/at/all.php"), RegionId::shared());
-        assert_eq!(m.region_of("svc-a.example/Foo.php"), RegionId::shared());
+        assert_eq!(m.region_of(&ProjectLayout::fallback(), "anything/at/all.php"), RegionId::shared());
+        assert_eq!(m.region_of(&ProjectLayout::fallback(), "svc-a.example/Foo.php"), RegionId::shared());
         // Vendor is still vendor even in the identity map.
-        assert_eq!(m.region_of("vendor/x/Y.php"), RegionId::vendor());
+        assert_eq!(m.region_of(&ProjectLayout::fallback(), "vendor/x/Y.php"), RegionId::vendor());
     }
 
     #[test]

@@ -12,6 +12,11 @@ use std::collections::{HashMap, HashSet};
 use salsa::Storage;
 use steins_syntax::{FunctionDecl, SourceTree};
 
+pub mod composer;
+pub mod layout;
+
+pub use layout::{GoverningRoot, ProjectLayout, fallback_is_vendor};
+
 /// The database trait analysis queries are written against. Downstream crates
 /// (e.g. `steins-infer`) define tracked queries taking `&dyn Db`.
 #[salsa::db]
@@ -53,10 +58,19 @@ pub fn function_index(db: &dyn Db, file: SourceFile) -> Vec<FunctionDecl> {
 ///
 /// Setting the file list creates a new revision; the monolithic
 /// [`project_index`] then re-runs (see its granularity note).
+///
+/// The [`ProjectLayout`] rides along as a second input because vendor
+/// classification is *project* state, not ambient state: it decides which
+/// findings are reported and which declarations are transform candidates
+/// (ADR-0015), and a replay must reach the same verdict from the same inputs
+/// (ADR-0048). Resolved once at the boundary by [`composer::discover`];
+/// [`ProjectLayout::fallback`] is the honest answer for a tree with no manifest.
 #[salsa::input]
 pub struct Project {
     #[returns(deref)]
     pub files: Vec<SourceFile>,
+    #[returns(ref)]
+    pub layout: ProjectLayout,
 }
 
 /// Where a declaration lives: the owning file and its index in that file's

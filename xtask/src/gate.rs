@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 use steins_db::{Project, SourceFile, SteinsDatabase, parse};
-use steins_infer::{Diagnostic, Layer, SidecarFolder, check_project, is_vendor_path, layer};
+use steins_db::composer;
+use steins_infer::{Diagnostic, Layer, SidecarFolder, check_project, layer};
 
 use crate::corpus::{PACKAGES, checkout_dir, collect_php_files, read_lock, repo_root};
 use crate::corpus_local::{self, LocalProject};
@@ -673,7 +674,9 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
     }
     let parse_err_set: HashSet<&str> = parse_error_files.iter().map(String::as_str).collect();
 
-    let project = Project::new(&db, inputs);
+    // Paths are `root`-relative above, so the layout resolves against `root`
+    // (ADR-0015): the package's own `composer.json` decides what is vendor.
+    let project = Project::new(&db, inputs, composer::discover(&[dir.to_path_buf()], root));
     let mut diags: Vec<Diagnostic> = FOLDER.with(|f| check_project(&db, project, &mut *f.borrow_mut()));
     diags.retain(|d| !parse_err_set.contains(d.path.as_str()));
     diags.sort_by(|a, b| (&a.path, a.line, a.column).cmp(&(&b.path, b.line, b.column)));
@@ -747,14 +750,15 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
     }
     let parse_err_set: HashSet<&str> = parse_error_files.iter().map(String::as_str).collect();
 
-    let project = Project::new(&db, inputs);
+    let layout = composer::discover(&[root.to_path_buf()], root);
+    let project = Project::new(&db, inputs, layout.clone());
     let mut diags: Vec<Diagnostic> = FOLDER.with(|f| check_project(&db, project, &mut *f.borrow_mut()));
     diags.retain(|d| !parse_err_set.contains(d.path.as_str()));
 
     // Vendor default (ADR-0015): vendor code was fully indexed and inferred, but
     // its findings do not count against the gate. Split them out.
     let before = diags.len();
-    diags.retain(|d| !is_vendor_path(&d.path));
+    diags.retain(|d| !layout.is_vendor(&d.path));
     let vendor_suppressed = before - diags.len();
     diags.sort_by(|a, b| (&a.path, a.line, a.column).cmp(&(&b.path, b.line, b.column)));
     // Measurement-mode split (first-party only; vendor already removed above).

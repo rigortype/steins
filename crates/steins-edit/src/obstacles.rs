@@ -30,7 +30,6 @@
 use std::collections::HashSet;
 
 use steins_db::{Db, Project, parse};
-use steins_infer::is_vendor_path;
 use steins_syntax::{DynamismKind, IncludePath};
 
 use crate::common::{REASON_DYNAMIC_INCLUDE, REASON_EVAL_PRESENT};
@@ -161,11 +160,12 @@ pub fn detect(db: &dyn Db, project: Project, vouches: &VouchSet) -> DynamismObst
     let mut eval_sites: Vec<SiteRef> = Vec::new();
     let mut include_sites: Vec<SiteRef> = Vec::new();
     let mut vouched: Vec<SiteRef> = Vec::new();
+    let layout = project.layout(db);
 
     for &file in project.files(db).iter() {
         let path = file.path(db);
         // Vendor presumption: eval/dynamic-include in vendor/ is autoload plumbing.
-        if is_vendor_path(path) {
+        if layout.is_vendor(path) {
             continue;
         }
         let tree = parse(db, file);

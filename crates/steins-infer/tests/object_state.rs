@@ -17,7 +17,7 @@ use steins_infer::{
 fn findings(src: &str) -> Vec<Diagnostic> {
     let db = SteinsDatabase::default();
     let input = SourceFile::new(&db, "main.php".to_owned(), src.to_owned());
-    let project = Project::new(&db, vec![input]);
+    let project = Project::new(&db, vec![input], steins_db::ProjectLayout::fallback());
     check_project(&db, project, &mut NoFold)
 }
 

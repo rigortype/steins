@@ -43,7 +43,6 @@
 use steins_contract::{ContractTy, admits_val};
 use steins_db::{Db, Project, SourceFile, parse};
 use steins_domain::Certainty;
-use steins_infer::is_vendor_path;
 use steins_infer::promote::{
     FreeFnSweep, MethodEligibility, MethodSweep, TargetSweep, sweep_free_functions, sweep_methods,
 };
@@ -141,6 +140,7 @@ pub fn plan_phpdoc_to_native(
     let mut plan = EditPlan::new();
     let mut refusals: Vec<Refusal> = Vec::new();
     let mut oracle = CompletenessOracle::default();
+    let layout = project.layout(db);
 
     for &file in &files {
         let path = file.path(db);
@@ -149,7 +149,7 @@ pub fn plan_phpdoc_to_native(
         // is outside the tool's write contract — composer overwrites it, and vendor
         // diagnostics are off by default (ADR-0015). Candidate enumeration is
         // project-only; caller/obstacle enumeration (above) still spans vendor.
-        if is_vendor_path(path) {
+        if layout.is_vendor(path) {
             continue;
         }
         let tree = parse(db, file);

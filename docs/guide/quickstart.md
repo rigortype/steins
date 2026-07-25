@@ -66,8 +66,8 @@ usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor
 ```
 
 `doctor` reports posture rather than findings — which `php` was resolved, what the
-active profile checks, baseline health — and runs no checks at all. It is also the
-quickest way to confirm an install works:
+active profile checks, which trees count as vendor, baseline health — and runs no
+checks at all. It is also the quickest way to confirm an install works:
 
 ```
 steins doctor --no-php
@@ -119,6 +119,13 @@ Each line is `path:line:col: error[id]: message — proven <consequence>`.
 The `id` (`call.on-null`, `type.argument-mismatch`) names the *finding*,
 not the rule that found it. Vendor code is analyzed for propagation but its
 own findings are suppressed by default; `--vendor-diagnostics` shows them.
+
+Which trees are vendor is read from your `composer.json` — `config.vendor-dir`
+and the `autoload` roots — so a project that installs into `3rdparty/` is
+classified correctly, and a first-party `src/vendor/` is not disowned. In a
+monorepo each subproject's own manifest governs its own subtree. With no
+manifest, a `vendor` directory component is the fallback. `steins doctor` prints
+what resolved.
 
 ## Reading the default surface
 

@@ -19,8 +19,9 @@
 //!
 //! # v0.1.0 minimal scope (owner-decided landing point)
 //!
-//! Four sections: Runtime (sidecar/PHP health + SAPI + extension count, the
-//! monkey-patch line), Config + active surface, Envelopes (the G1-demote
+//! Five sections: Runtime (sidecar/PHP health + SAPI + extension count, the
+//! monkey-patch line), Config + active surface, Layout (the ADR-0015 vendor
+//! resolution and the manifest that answered), Envelopes (the G1-demote
 //! written-but-unchecked notice), and Baseline. The full ADR-0054 §9 sections
 //! (Coverage posture with dam statistics, Catalog skew, Registry totality, the
 //! SAPI-undeclared A6 line, `[runtime]` pseudo-constant reporting) are **v0.1.x** —
@@ -30,6 +31,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use steins_db::composer;
 use steins_infer::{MONKEY_PATCH_EXTENSIONS, SOUND_SUBSET_NOTICE, THROW_UNDECLARED_ID};
 use steins_phpdoc::{TagKind, scan_docblock};
 use steins_sidecar::Sidecar;
@@ -87,6 +89,7 @@ pub fn run_doctor(args: &[String]) -> ExitCode {
 
     section_runtime(no_php);
     let surface = section_config(&mut contradiction);
+    section_layout(&root);
     section_envelopes(&root, &surface);
     section_baseline(baseline_path.as_deref(), &surface, &mut contradiction);
 
@@ -205,7 +208,50 @@ fn section_config(contradiction: &mut bool) -> profile::Surface {
     surface
 }
 
-/// Section 3 — Envelopes (ADR-0054 §9.4, the G1-amendment written-but-unchecked
+/// Section 3 — Layout (ADR-0015): which trees this run treats as somebody else's.
+///
+/// Vendor classification decides whether a finding is reported at all and whether
+/// a declaration is a transform candidate, and a wrong answer moves findings
+/// between "ours" and "theirs" without saying so. It is resolved from the
+/// project's own `composer.json` — `config.vendor-dir` plus the autoload roots —
+/// so the report names the manifest that answered, and says plainly when nothing
+/// did and the directory-name floor is carrying the whole decision.
+fn section_layout(root: &Path) {
+    println!();
+    println!("Layout");
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let layout = composer::discover(&[root.to_path_buf()], &cwd);
+    if layout.is_fallback() {
+        println!(
+            "  no composer.json governs {} — vendor is the `vendor` directory-name floor, not a declared fact",
+            root.display()
+        );
+        return;
+    }
+    println!("  {} manifest(s) govern this tree:", layout.roots().len());
+    for r in layout.roots() {
+        println!("    {}", display_path(&cwd, r.manifest()));
+        println!("      vendor: {}", join_paths(&cwd, r.vendor_roots()));
+        println!("      ours:   {}", join_paths(&cwd, r.first_party_roots()));
+    }
+}
+
+/// Render a path relative to `cwd` when it sits underneath it, else absolute.
+/// Doctor's output is read next to the shell it was run from.
+fn display_path(cwd: &Path, p: &Path) -> String {
+    p.strip_prefix(cwd).unwrap_or(p).display().to_string()
+}
+
+/// A comma-joined root list, or `none declared` for an empty one — an autoload
+/// block a project simply does not have.
+fn join_paths(cwd: &Path, paths: &[PathBuf]) -> String {
+    if paths.is_empty() {
+        return "none declared".to_owned();
+    }
+    paths.iter().map(|p| display_path(cwd, p)).collect::<Vec<_>>().join(", ")
+}
+
+/// Section 4 — Envelopes (ADR-0054 §9.4, the G1-amendment written-but-unchecked
 /// notice). An index scan (never the checker): count declarations carrying a written
 /// `@throws` tag, then state whether the active surface checks them. This is the
 /// designed answer to "wrote `@throws`, got silence".
@@ -262,7 +308,7 @@ fn declares_throws(docblock: Option<&str>) -> bool {
     docblock.is_some_and(|d| scan_docblock(d).iter().any(|t| t.kind == TagKind::Throws))
 }
 
-/// Section 4 — Baseline (ADR-0054 §9.5, minimal): the capture surface (profile + id
+/// Section 5 — Baseline (ADR-0054 §9.5, minimal): the capture surface (profile + id
 /// count from the header) versus the active surface, and the dormant-entry count
 /// (entries whose id is outside the active surface — kept, not stale). Doctor accepts
 /// `--baseline <path>`; absent that it discovers the conventional default file, and

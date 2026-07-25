@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use steins_db::{Project, SourceFile, SteinsDatabase, parse as parse_tree};
+use steins_db::{Project, ProjectLayout, SourceFile, SteinsDatabase, composer, parse as parse_tree};
 use steins_edit::{
     PartitionMap, TransformReport, VouchSet, plan_phpdoc_honesty, plan_phpdoc_to_native,
     unified_diff,
@@ -23,7 +23,6 @@ use steins_edit::{
 use steins_infer::{
     Diagnostic, LineFact, NoFold, SOUND_SUBSET_NOTICE, SidecarFolder, annotate_file,
     annotate_project, apply_inline_ignores, check_project, check_project_with_runtime,
-    is_vendor_path,
 };
 use steins_syntax::SourceTree;
 
@@ -201,7 +200,8 @@ fn run_check(args: &[String]) -> ExitCode {
         texts.insert(path.clone(), text.clone());
         inputs.push(SourceFile::new(&db, path, text));
     }
-    let project = Project::new(&db, inputs.clone());
+    let layout = resolve_layout(&paths);
+    let project = Project::new(&db, inputs.clone(), layout.clone());
     // `[runtime]` pseudo-constants (ADR-0037 §2): the boot truth the checker cannot
     // observe from source (e.g. `warning-handler = "null"`). Parsed above with the
     // rest of the config; an unknown *value* on a known key still warns and keeps the
@@ -226,7 +226,7 @@ fn run_check(args: &[String]) -> ExitCode {
     let mut vendor_suppressed = 0usize;
     if !vendor_diagnostics {
         let before = findings.len();
-        findings.retain(|d| !is_vendor_path(&d.path));
+        findings.retain(|d| !layout.is_vendor(&d.path));
         vendor_suppressed = before - findings.len();
     }
 
@@ -541,7 +541,7 @@ fn run_transform(args: &[String]) -> ExitCode {
         texts.insert(path.clone(), text.clone());
         inputs.push(SourceFile::new(&db, path, text));
     }
-    let project = Project::new(&db, inputs.clone());
+    let project = Project::new(&db, inputs.clone(), resolve_layout(&paths));
 
     // Plan the transform (pure — no writes, no re-check).
     // ADR-0047 Slice A: the region map is threaded into the planners but not yet
@@ -856,7 +856,7 @@ fn post_check(
     if report.plan.is_empty() {
         return PostCheck { ok: true, new_diagnostics: Vec::new() };
     }
-    let before = filtered_diagnostics(check_project(db, project, &mut NoFold));
+    let before = filtered_diagnostics(project.layout(db), check_project(db, project, &mut NoFold));
 
     // Build the edited project in a fresh database (avoids salsa mutation subtlety
     // and keeps the pre-edit query results intact for `before`).
@@ -866,8 +866,10 @@ fn post_check(
         let updated = report.plan.apply_file(path, original);
         einputs.push(SourceFile::new(&edb, path.clone(), updated));
     }
-    let eproject = Project::new(&edb, einputs);
-    let after = filtered_diagnostics(check_project(&edb, eproject, &mut NoFold));
+    // The edited project is the same project: it must classify vendor the same way
+    // or the before/after comparison is measuring the layout, not the edit.
+    let eproject = Project::new(&edb, einputs, project.layout(db).clone());
+    let after = filtered_diagnostics(eproject.layout(&edb), check_project(&edb, eproject, &mut NoFold));
 
     let mut before_counts: HashMap<&str, usize> = HashMap::new();
     for d in &before {
@@ -888,8 +890,8 @@ fn post_check(
     PostCheck { ok: new_diagnostics.is_empty(), new_diagnostics }
 }
 
-fn filtered_diagnostics(mut ds: Vec<Diagnostic>) -> Vec<Diagnostic> {
-    ds.retain(|d| !is_vendor_path(&d.path));
+fn filtered_diagnostics(layout: &ProjectLayout, mut ds: Vec<Diagnostic>) -> Vec<Diagnostic> {
+    ds.retain(|d| !layout.is_vendor(&d.path));
     ds
 }
 
@@ -1090,7 +1092,8 @@ fn run_annotate(args: &[String]) -> ExitCode {
     // outside the project dir), fall back to a one-file project.
     let facts = match target {
         Some(target_file) => {
-            let project = Project::new(&db, inputs);
+            let layout = resolve_layout(&[root.to_string_lossy().into_owned()]);
+            let project = Project::new(&db, inputs, layout);
             annotate_project(&db, project, target_file, &mut folder)
         }
         None => {
@@ -1231,6 +1234,18 @@ fn print_json(
 
 /// Recursively collect `.php` files under `path` (or `path` itself if it is a
 /// `.php` file).
+/// Resolve the run's [`ProjectLayout`] from the analyzed paths (ADR-0015): read
+/// each governing `composer.json` for its vendor directory and its own autoload
+/// roots, so "is this someone else's code" is answered from what the project
+/// declares rather than from a directory name. A tree with no manifest — or an
+/// unreadable working directory — resolves to [`ProjectLayout::fallback`], which
+/// is the directory-name floor.
+fn resolve_layout(paths: &[String]) -> ProjectLayout {
+    let Ok(cwd) = std::env::current_dir() else { return ProjectLayout::fallback() };
+    let roots: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    composer::discover(&roots, &cwd)
+}
+
 fn collect_php_files(path: &Path, out: &mut Vec<PathBuf>) {
     if path.is_dir() {
         let Ok(entries) = std::fs::read_dir(path) else { return };

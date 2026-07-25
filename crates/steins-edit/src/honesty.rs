@@ -56,7 +56,6 @@ use std::collections::HashMap;
 use steins_contract::{ContractTy, admits_val, lower};
 use steins_db::{Db, Project, SourceFile, parse};
 use steins_domain::{Certainty, Val};
-use steins_infer::is_vendor_path;
 use steins_infer::promote::{
     FreeFnSweep, MethodEligibility, MethodSweep, TargetSweep, sweep_free_functions, sweep_methods,
 };
@@ -149,6 +148,7 @@ pub fn plan_phpdoc_honesty(
     let mut plan = EditPlan::new();
     let mut refusals: Vec<Refusal> = Vec::new();
     let mut oracle = CompletenessOracle::default();
+    let layout = project.layout(db);
 
     for &file in &files {
         let path = file.path(db);
@@ -156,7 +156,7 @@ pub fn plan_phpdoc_honesty(
         // CANDIDATES: a docblock rewrite into `vendor/` is outside the tool's write
         // contract (composer overwrites it; vendor diagnostics are off, ADR-0015).
         // Candidate enumeration is project-only; the sweeps above still span vendor.
-        if is_vendor_path(path) {
+        if layout.is_vendor(path) {
             continue;
         }
         let tree = parse(db, file);

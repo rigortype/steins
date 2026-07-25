@@ -33,10 +33,10 @@
 
 use std::collections::HashSet;
 
+use steins_db::ProjectLayout;
 use steins_syntax::{DynamismKind, IncludePath};
 
 use crate::FileUnit;
-use crate::is_vendor_path;
 
 /// The kind of a dam site (ADR-0049 §2). Mirrors the dynamism taxonomy the
 /// existence ids reason about; carried so triage/coverage surfaces can name it.
@@ -97,8 +97,13 @@ impl DamFacts {
 
 /// Compute the whole-universe dam fact from the lowered `units` (ADR-0049 §2).
 /// A query answer — pure over the universe, no ordering dependence (ADR-0048).
+///
+/// `layout` decides which files get ADR-0046 §2's vendor presumption. It is a
+/// project input rather than a path guess precisely because the presumption is a
+/// documented soundness trade: extending it to first-party code would silence
+/// real obstacles.
 #[must_use]
-pub fn dam_facts(units: &[FileUnit]) -> DamFacts {
+pub fn dam_facts(units: &[FileUnit], layout: &ProjectLayout) -> DamFacts {
     // The analyzed universe: every project + vendor file, path-normalized for
     // include resolution (a proven include is benign only if it lands here).
     let universe: HashSet<String> = units.iter().map(|u| normalize_path(u.path)).collect();
@@ -106,7 +111,7 @@ pub fn dam_facts(units: &[FileUnit]) -> DamFacts {
     let mut sites = Vec::new();
     for u in units {
         let tree = u.tree;
-        let vendor = is_vendor_path(u.path);
+        let vendor = layout.is_vendor(u.path);
         for site in tree.dynamism_sites() {
             let pos = tree.position(site.span.start);
             let kind = match &site.kind {
@@ -222,7 +227,7 @@ mod tests {
     fn a_clean_universe_is_dam_clear() {
         let t = tree("<?php\nfunction f(int $x): int { return $x; }\nclass C {}\nf(1);\n");
         let units = [FileUnit { path: "src/a.php", tree: &t }];
-        let facts = dam_facts(&units);
+        let facts = dam_facts(&units, &ProjectLayout::fallback());
         assert!(facts.is_clear(), "clean universe: {:?}", facts.sites());
         assert_eq!(facts.len(), 0);
     }
@@ -234,7 +239,7 @@ mod tests {
             "<?php\neval('x();');\ninclude 'inc/util.php';\nclass_alias($a, 'B');\n",
         );
         let units = [FileUnit { path: "src/boot.php", tree: &t }];
-        let facts = dam_facts(&units);
+        let facts = dam_facts(&units, &ProjectLayout::fallback());
         let kinds: HashSet<DamKind> = facts.sites().iter().map(|s| s.kind).collect();
         assert!(kinds.contains(&DamKind::Eval), "{:?}", facts.sites());
         assert!(kinds.contains(&DamKind::Include), "{:?}", facts.sites());
@@ -248,7 +253,7 @@ mod tests {
         // A5: `./config.php` resolves against CWD, not the including dir → dam.
         let t = tree("<?php\ninclude './config.php';\n");
         let units = [FileUnit { path: "src/a.php", tree: &t }];
-        assert_eq!(dam_facts(&units).len(), 1);
+        assert_eq!(dam_facts(&units, &ProjectLayout::fallback()).len(), 1);
     }
 
     #[test]
@@ -263,7 +268,7 @@ mod tests {
             FileUnit { path: "src/util.php", tree: &util },
             FileUnit { path: "/proj/lib.php", tree: &lib },
         ];
-        let facts = dam_facts(&units);
+        let facts = dam_facts(&units, &ProjectLayout::fallback());
         assert!(facts.is_clear(), "{:?}", facts.sites());
     }
 
@@ -271,7 +276,7 @@ mod tests {
     fn vendor_eval_and_include_do_not_dam() {
         let t = tree("<?php\neval('x();');\ninclude $dynamic;\n");
         let units = [FileUnit { path: "vendor/pkg/autoload.php", tree: &t }];
-        assert!(dam_facts(&units).is_clear());
+        assert!(dam_facts(&units, &ProjectLayout::fallback()).is_clear());
     }
 
     #[test]
@@ -279,6 +284,6 @@ mod tests {
         // A literal class_alias is an index edge, never a dam site.
         let t = tree("<?php\nclass_alias('A', 'B');\n");
         let units = [FileUnit { path: "src/a.php", tree: &t }];
-        assert!(dam_facts(&units).is_clear());
+        assert!(dam_facts(&units, &ProjectLayout::fallback()).is_clear());
     }
 }

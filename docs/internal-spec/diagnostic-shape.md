@@ -75,9 +75,16 @@ Ordered, in the CLI (ADR-0050 §6):
 inference → vendor filter → profile surface → [[policy]] → inline ignores → baseline → format
 ```
 
-- **vendor filter** — `is_vendor_path` matches whole path components split on
-  both `/` and `\`, so `vendor_proj/` and a file named `vendor.php` are not
-  vendor. Suppressed unless `--vendor-diagnostics`.
+- **vendor filter** — `ProjectLayout::is_vendor`, resolved once per run from the
+  project's own `composer.json` (`config.vendor-dir` plus the `autoload` /
+  `autoload-dev` roots) and carried as a `Project` input so a replay reaches the
+  same verdict from the same inputs. The **nearest** manifest above a path
+  governs it, then longest component-prefix wins: a declared vendor root beats a
+  first-party root, and a first-party root that is at least as specific keeps
+  `src/vendor/` ours. Anything neither covers falls through to the floor —
+  `is_vendor_path`, the historical `vendor` directory-name guess — which is why a
+  monorepo's undeclared subproject vendor tree is still vendor. Suppressed unless
+  `--vendor-diagnostics`; `doctor`'s Layout section prints what resolved.
 - **`[[policy]]`** — present as a no-op stage with a seam; **not implemented**.
 - **inline ignores** — `steins_infer::apply_inline_ignores`, which also emits
   the two mechanics meta-diagnostics. They are exempt from every channel.

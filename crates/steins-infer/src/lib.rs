@@ -33,7 +33,9 @@ use std::collections::{HashMap, HashSet};
 
 use steins_contract::ContractTy;
 use steins_contract::normalize;
-use steins_db::{Db, DeclSite, Project, ProjectIndex, Resolve, SourceFile, parse, project_index};
+use steins_db::{
+    Db, DeclSite, Project, ProjectIndex, ProjectLayout, Resolve, SourceFile, parse, project_index,
+};
 use steins_sidecar::{FoldArg, FoldResult, FoldValue, Sidecar};
 use steins_syntax::CallExpr;
 use steins_syntax::Span;
@@ -693,15 +695,17 @@ fn fold_value_to_arg(value: &FoldValue) -> Option<ArgValue> {
 
 /// Whether a diagnostic path lies inside a `vendor/` directory (ADR-0015).
 ///
-/// Vendor code is fully indexed and inferred (shapes/values/effects flow
-/// through it), but its diagnostics are off by default: a finding whose path has
-/// a `vendor` **directory component** — a top-level `vendor/…` or any nested
-/// `…/vendor/…` — is vendor. The match is on whole path components (split on
-/// both `/` and `\`), so a sibling like `vendor_proj/` or a file named
-/// `vendor.php` is *not* vendor. The trailing filename can never equal `vendor`
-/// (it carries a `.php` extension), so a bare component test is exact.
+/// **The floor, not the rule.** This is the directory-name guess: a path with a
+/// `vendor` component — a top-level `vendor/…` or any nested `…/vendor/…` — is
+/// vendor. It is right for the common Composer install and wrong for a tree that
+/// vendors elsewhere, so the answer a run actually uses comes from
+/// [`ProjectLayout::is_vendor`], which reads the project's own `composer.json`
+/// and falls back to this. Kept public for callers that have no project in hand.
+///
+/// Vendor code is fully indexed and inferred (shapes/values/effects flow through
+/// it) either way; only its diagnostics are off by default.
 pub fn is_vendor_path(path: &str) -> bool {
-    path.split(['/', '\\']).any(|component| component == "vendor")
+    steins_db::fallback_is_vendor(path)
 }
 
 /// A proof-layer finding. Kept deliberately flat so the CLI can render text or
@@ -940,7 +944,7 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let tree = parse(db, file);
     let units = [FileUnit { path: file.path(db), tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, &mut NoFold, true)
+    check_units(&units, &index, &mut NoFold, true, &ProjectLayout::fallback())
 }
 
 /// The folding-aware check for one file (run **outside** salsa; ADR-0004),
@@ -950,7 +954,7 @@ pub fn check_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec
     let tree = parse(db, file);
     let units = [FileUnit { path: file.path(db), tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, folder, true)
+    check_units(&units, &index, folder, true, &ProjectLayout::fallback())
 }
 
 /// The folding-aware check for a whole **project** (ADR-0009/0015): every file
@@ -981,7 +985,7 @@ pub fn check_project_with_runtime(
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
     let index = Index::from_db(db_index, &pos);
-    check_units(&units, &index, folder, warning_handler_abort)
+    check_units(&units, &index, folder, warning_handler_abort, project.layout(db))
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,7 +1070,7 @@ pub fn check_with(
     let _ = functions; // authoritative list comes from `tree.functions()`
     let units = [FileUnit { path, tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, folder, true)
+    check_units(&units, &index, folder, true, &ProjectLayout::fallback())
 }
 
 /// The single-file check with a folder **and** the `warning-handler` posture
@@ -1084,7 +1088,7 @@ pub fn check_full(
 ) -> Vec<Diagnostic> {
     let units = [FileUnit { path, tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, folder, warning_handler_abort)
+    check_units(&units, &index, folder, warning_handler_abort, &ProjectLayout::fallback())
 }
 
 /// The project checking core: direct + propagation passes over every file's
@@ -1094,12 +1098,13 @@ fn check_units(
     index: &Index,
     folder: &mut dyn Folder,
     warning_handler_abort: bool,
+    layout: &ProjectLayout,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
 
     // The whole-universe dam fact (ADR-0049 §2): one query answer per run, shared by
     // every file's context. Consumed by the absence family's conditional-decl leg.
-    let dam = dam_facts(units);
+    let dam = dam_facts(units, layout);
 
     // The project PHP minor (ADR-0052 A11): one sidecar `env()` query answer per run,
     // shared by every file's context; drives the catalog version-skew demotion.
@@ -1305,7 +1310,7 @@ pub fn annotate_facts(
     let _ = (functions, classes);
     let units = [FileUnit { path, tree }];
     let index = Index::from_units(&units);
-    annotate_units(&units, &index, 0, folder)
+    annotate_units(&units, &index, 0, folder, &ProjectLayout::fallback())
 }
 
 /// Salsa-fed single-file annotate.
@@ -1314,7 +1319,7 @@ pub fn annotate_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> 
     let tree = parse(db, file);
     let units = [FileUnit { path: file.path(db), tree }];
     let index = Index::from_units(&units);
-    annotate_units(&units, &index, 0, folder)
+    annotate_units(&units, &index, 0, folder, &ProjectLayout::fallback())
 }
 
 /// Project-aware annotate (ADR-0020, `--project`): compute the margin facts for
@@ -1337,7 +1342,7 @@ pub fn annotate_project(
     let Some(target_idx) = handles.iter().position(|&f| f == target) else {
         return Vec::new();
     };
-    annotate_units(&units, &index, target_idx, folder)
+    annotate_units(&units, &index, target_idx, folder, project.layout(db))
 }
 
 /// Compute the annotate facts for `target` file within a project view.
@@ -1346,6 +1351,7 @@ fn annotate_units(
     index: &Index,
     target: usize,
     folder: &mut dyn Folder,
+    layout: &ProjectLayout,
 ) -> Vec<LineFact> {
     let mut facts: Vec<LineFact> = Vec::new();
 
@@ -1388,7 +1394,7 @@ fn annotate_units(
 
     // 3. Findings on the target file (project-wide check, filtered by path).
     let target_path = units[target].path;
-    for d in check_units(units, index, folder, true) {
+    for d in check_units(units, index, folder, true, layout) {
         if d.path == target_path {
             facts.push(LineFact { line: d.line, kind: FactKind::Finding { id: d.id } });
         }

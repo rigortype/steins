@@ -14,7 +14,7 @@ fn findings(files: &[(&str, &str)]) -> Vec<Diagnostic> {
         .iter()
         .map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned()))
         .collect();
-    let project = Project::new(&db, inputs);
+    let project = Project::new(&db, inputs, steins_db::ProjectLayout::fallback());
     check_project(&db, project, &mut NoFold)
 }
 
@@ -226,7 +226,7 @@ fn annotate_project_shows_cross_file_finding() {
         "<?php\nfunction render(int $w): int { return $w; }\n".to_owned(),
     );
     let main = SourceFile::new(&db, "main.php".to_owned(), "<?php\nrender(\"abc\");\n".to_owned());
-    let project = Project::new(&db, vec![lib, main]);
+    let project = Project::new(&db, vec![lib, main], steins_db::ProjectLayout::fallback());
 
     let facts = annotate_project(&db, project, main, &mut NoFold);
     assert!(

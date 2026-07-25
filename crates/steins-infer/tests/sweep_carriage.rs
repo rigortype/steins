@@ -13,7 +13,7 @@ fn free_sweep(files: &[(&str, &str)]) -> FreeFnSweep {
     let db = SteinsDatabase::default();
     let inputs: Vec<SourceFile> =
         files.iter().map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned())).collect();
-    let project = Project::new(&db, inputs);
+    let project = Project::new(&db, inputs, steins_db::ProjectLayout::fallback());
     sweep_free_functions(&db, project)
 }
 
@@ -21,7 +21,7 @@ fn method_sweep(files: &[(&str, &str)]) -> MethodSweep {
     let db = SteinsDatabase::default();
     let inputs: Vec<SourceFile> =
         files.iter().map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned())).collect();
-    let project = Project::new(&db, inputs);
+    let project = Project::new(&db, inputs, steins_db::ProjectLayout::fallback());
     sweep_methods(&db, project)
 }
 

@@ -9,3 +9,4 @@ publish.workspace = true
 [dependencies]
 salsa.workspace = true
 steins-syntax = { path = "../steins-syntax" }
+serde_json.workspace = true

@@ -33,7 +33,7 @@ fn resolve(files: &[(&str, &str)], fqn: &str) -> Resolve {
         .iter()
         .map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned()))
         .collect();
-    let project = Project::new(&db, inputs);
+    let project = Project::new(&db, inputs, steins_db::ProjectLayout::fallback());
     project_index(&db, project).resolve_class(fqn)
 }
 
