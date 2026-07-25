@@ -512,7 +512,15 @@ impl SidecarFolder {
                 Err(_) => {
                     self.spawn_failed = true;
                     if !self.notified {
-                        eprintln!("{SOUND_SUBSET_NOTICE}");
+                        // The one place a *library* crate writes to a user-facing
+                        // stream, and it obeys the CLI's output seam rule (issue
+                        // #44): `eprintln!` panics when the write fails, and
+                        // `steins check 2>&1 | head` closes stderr like any other
+                        // pipe. A lost notice is not a reason to abort a run, so
+                        // the error is dropped rather than propagated — the seam's
+                        // stderr policy, stated in `steins-cli/src/out.rs`.
+                        use std::io::Write;
+                        let _ = writeln!(std::io::stderr(), "{SOUND_SUBSET_NOTICE}");
                         self.notified = true;
                     }
                     return None;

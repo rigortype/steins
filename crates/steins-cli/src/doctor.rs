@@ -67,14 +67,14 @@ pub fn run_doctor(args: &[String]) -> ExitCode {
             }
             "--baseline" => {
                 let Some(value) = args.get(i + 1) else {
-                    eprintln!("steins: --baseline requires a path argument");
+                    errln!("steins: --baseline requires a path argument");
                     return ExitCode::from(2);
                 };
                 baseline_path = Some(value.clone());
                 i += 2;
             }
             other if other.starts_with('-') => {
-                eprintln!("steins: unknown flag `{other}` for doctor");
+                errln!("steins: unknown flag `{other}` for doctor");
                 return ExitCode::from(2);
             }
             other => {
@@ -87,7 +87,7 @@ pub fn run_doctor(args: &[String]) -> ExitCode {
         [] => PathBuf::from("."),
         [p] => PathBuf::from(p),
         _ => {
-            eprintln!(
+            errln!(
                 "steins: doctor takes at most one path (usage: steins doctor [--no-php] [--baseline <path>] [path])"
             );
             return ExitCode::from(2);
@@ -98,7 +98,7 @@ pub fn run_doctor(args: &[String]) -> ExitCode {
     // refutes flips this and exits 1.
     let mut contradiction = false;
 
-    println!("steins doctor — posture report (index-bound; runs no checks)");
+    outln!("steins doctor — posture report (index-bound; runs no checks)");
 
     // One parse of the tree, one layout discovery, shared by every section below.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -124,21 +124,21 @@ pub fn run_doctor(args: &[String]) -> ExitCode {
 /// SAPI, loaded-extension count, and the monkey-patch line (ADR-0049 A9). No
 /// reachable PHP is the sound-subset posture (ADR-0004): named loudly, exit 0.
 fn section_runtime(no_php: bool) {
-    println!();
-    println!("Runtime");
+    outln!();
+    outln!("Runtime");
     if no_php {
-        println!("  PHP sidecar: disabled (--no-php)");
-        println!("  posture: sound subset — findings that require executing PHP are omitted");
-        println!("  (a degraded environment is not a failure — exit stays 0, ADR-0004)");
+        outln!("  PHP sidecar: disabled (--no-php)");
+        outln!("  posture: sound subset — findings that require executing PHP are omitted");
+        outln!("  (a degraded environment is not a failure — exit stays 0, ADR-0004)");
         return;
     }
     match Sidecar::spawn() {
         Ok(mut sc) => match sc.env() {
             Some(env) => {
-                println!("  PHP sidecar: spawned ok");
-                println!("  PHP version: {}", env.php_version);
-                println!("  SAPI: {}", env.sapi);
-                println!("  loaded extensions: {}", env.extensions.len());
+                outln!("  PHP sidecar: spawned ok");
+                outln!("  PHP version: {}", env.php_version);
+                outln!("  SAPI: {}", env.sapi);
+                outln!("  loaded extensions: {}", env.extensions.len());
                 // Monkey-patch presence (ADR-0049 A9): a loaded `uopz`/`runkit7`/
                 // `Componere` silently voids the entire absence-proof family — the
                 // exact incompleteness ADR-0004 forbids leaving unsaid, so name it.
@@ -149,23 +149,23 @@ fn section_runtime(no_php: bool) {
                     .map(String::as_str)
                     .collect();
                 if !present.is_empty() {
-                    println!(
+                    outln!(
                         "  monkey-patch extension(s) loaded: {} — the entire absence-proof family is Unknown-silent this run (ADR-0049 A9)",
                         present.join(", ")
                     );
                 }
             }
             None => {
-                println!("  PHP sidecar: spawned, but the env() query failed");
-                println!(
+                outln!("  PHP sidecar: spawned, but the env() query failed");
+                outln!(
                     "  posture: sound subset (degraded) — findings that require executing PHP are omitted (exit 0, ADR-0004)"
                 );
             }
         },
         Err(_) => {
-            println!("  PHP sidecar: not spawnable (no `php` on PATH)");
-            println!("  {SOUND_SUBSET_NOTICE}");
-            println!("  (a degraded environment is not a failure — exit stays 0, ADR-0004)");
+            outln!("  PHP sidecar: not spawnable (no `php` on PATH)");
+            outln!("  {SOUND_SUBSET_NOTICE}");
+            outln!("  (a degraded environment is not a failure — exit stays 0, ADR-0004)");
         }
     }
 }
@@ -176,27 +176,27 @@ fn section_runtime(no_php: bool) {
 /// true`, exit 1); the section still renders on the built-in `default` surface so the
 /// rest of the report is produced.
 fn section_config(contradiction: &mut bool) -> profile::Surface {
-    println!();
-    println!("Config + active surface");
+    outln!();
+    outln!("Config + active surface");
 
     let config = match crate::read_steins_config() {
         Ok(c) => c,
         Err(e) => {
-            println!("  steins.toml: PARSE ERROR — {e}");
-            println!("  (configuration contradiction — doctor exits 1, ADR-0054 §10)");
+            outln!("  steins.toml: PARSE ERROR — {e}");
+            outln!("  (configuration contradiction — doctor exits 1, ADR-0054 §10)");
             *contradiction = true;
             None
         }
     };
     let (check_cfg, profile_tbl) = match config {
         Some(c) => {
-            println!("  steins.toml: found");
+            outln!("  steins.toml: found");
             (c.check, c.profile)
         }
         None => {
             // A genuine absence (not the parse-error fallback, which already printed).
             if !*contradiction {
-                println!("  steins.toml: not found (built-in defaults govern)");
+                outln!("  steins.toml: not found (built-in defaults govern)");
             }
             (None, None)
         }
@@ -207,8 +207,8 @@ fn section_config(contradiction: &mut bool) -> profile::Surface {
     let surface = match profile_configs.resolve(config_profile.as_deref()) {
         Ok(s) => s,
         Err(e) => {
-            println!("  profile resolution: ERROR — {e}");
-            println!("  (configuration contradiction — doctor exits 1, ADR-0054 §10)");
+            outln!("  profile resolution: ERROR — {e}");
+            outln!("  (configuration contradiction — doctor exits 1, ADR-0054 §10)");
             *contradiction = true;
             // Fall back to the built-in default surface so the remaining sections
             // render; the run already exits 1 on the contradiction.
@@ -217,9 +217,9 @@ fn section_config(contradiction: &mut bool) -> profile::Surface {
                 .expect("the built-in default profile always resolves")
         }
     };
-    println!("  active profile: `{}` (from {provenance})", surface.name);
+    outln!("  active profile: `{}` (from {provenance})", surface.name);
     let layers = surface.layers_on();
-    println!(
+    outln!(
         "  surface: layers [{}], {} checked id(s)",
         layers.join(", "),
         surface.surface_ids().len()
@@ -236,20 +236,20 @@ fn section_config(contradiction: &mut bool) -> profile::Surface {
 /// so the report names the manifest that answered, and says plainly when nothing
 /// did and the directory-name floor is carrying the whole decision.
 fn section_layout(root: &Path, cwd: &Path, layout: &ProjectLayout) {
-    println!();
-    println!("Layout");
+    outln!();
+    outln!("Layout");
     if layout.is_fallback() {
-        println!(
+        outln!(
             "  no composer.json governs {} — vendor is the `vendor` directory-name floor, not a declared fact",
             root.display()
         );
         return;
     }
-    println!("  {} manifest(s) govern this tree:", layout.roots().len());
+    outln!("  {} manifest(s) govern this tree:", layout.roots().len());
     for r in layout.roots() {
-        println!("    {}", display_path(cwd, r.manifest()));
-        println!("      vendor: {}", join_paths(cwd, r.vendor_roots()));
-        println!("      ours:   {}", join_paths(cwd, r.first_party_roots()));
+        outln!("    {}", display_path(cwd, r.manifest()));
+        outln!("      vendor: {}", join_paths(cwd, r.vendor_roots()));
+        outln!("      ours:   {}", join_paths(cwd, r.first_party_roots()));
     }
 }
 
@@ -279,10 +279,10 @@ fn section_layout(root: &Path, cwd: &Path, layout: &ProjectLayout) {
 /// 3. **Reflection-driven invocation** sites — inventoried even though they poison
 ///    no scope and dam no claim, and labelled as the guess they are.
 fn section_coverage(root: &Path, files: &[ParsedFile], layout: &ProjectLayout) {
-    println!();
-    println!("Coverage posture");
+    outln!();
+    outln!("Coverage posture");
     if files.is_empty() {
-        println!("  no .php files under {} — nothing to inventory", root.display());
+        outln!("  no .php files under {} — nothing to inventory", root.display());
         return;
     }
 
@@ -318,16 +318,16 @@ fn section_coverage(root: &Path, files: &[ParsedFile], layout: &ProjectLayout) {
         }
     }
 
-    println!(
+    outln!(
         "  {} file(s), {scopes} scope(s), {poisoned} poisoned ({}) — a poisoned scope knows no local's value (ADR-0001, ADR-0046 §1)",
         files.len(),
         share(poisoned, scopes)
     );
     let construct_total: usize = constructs.iter().sum();
     if construct_total == 0 {
-        println!("  opaque constructs: none — no scope is on the give-up list");
+        outln!("  opaque constructs: none — no scope is on the give-up list");
     } else {
-        println!(
+        outln!(
             "  opaque constructs: {construct_total} site(s) — {}",
             breakdown(&constructs, OpaqueConstruct::ALL.map(OpaqueConstruct::label))
         );
@@ -343,7 +343,7 @@ fn section_coverage(root: &Path, files: &[ParsedFile], layout: &ProjectLayout) {
         files.iter().map(|f| FileUnit { path: &f.path, tree: &f.tree }).collect();
     let dam = dam_facts(&units, layout);
     if dam.is_empty() {
-        println!(
+        outln!(
             "  dam sites: none — no runtime-definition construct stands, so existence-absence claims are undammed (ADR-0049 §2)"
         );
     } else {
@@ -356,7 +356,7 @@ fn section_coverage(root: &Path, files: &[ParsedFile], layout: &ProjectLayout) {
             };
             dam_counts[i] += 1;
         }
-        println!(
+        outln!(
             "  dam sites: {} — {}",
             dam.len(),
             breakdown(
@@ -364,23 +364,23 @@ fn section_coverage(root: &Path, files: &[ParsedFile], layout: &ProjectLayout) {
                 ["eval", "unproven/out-of-universe include", "runtime-name class_alias"]
             )
         );
-        println!(
+        outln!(
             "    existence-absence claims (undefined function/class) stay silent where these stand (ADR-0049 §2)"
         );
     }
 
     let reflection_total: usize = reflection.iter().sum();
     if reflection_total == 0 {
-        println!("  reflection-driven invocation: none recognized");
+        outln!("  reflection-driven invocation: none recognized");
     } else {
-        println!(
+        outln!(
             "  reflection-driven invocation: {reflection_total} site(s) — {}",
             breakdown(&reflection, ReflectionKind::ALL.map(ReflectionKind::label))
         );
     }
     // Stated on every run, not only a non-zero one: the honest reading of a `0` here
     // is "the recognizer saw nothing", not "the code reflects nowhere".
-    println!(
+    outln!(
         "    (this list is a guess until measured: the recognizer is syntactic, it names no receiver type, and it is not exhaustive)"
     );
 }
@@ -450,17 +450,17 @@ fn join_paths(cwd: &Path, paths: &[PathBuf]) -> String {
 /// `@throws` tag, then state whether the active surface checks them. This is the
 /// designed answer to "wrote `@throws`, got silence".
 fn section_envelopes(files: &[ParsedFile], surface: &profile::Surface) {
-    println!();
-    println!("Envelopes");
+    outln!();
+    outln!("Envelopes");
     let n = count_throws_envelopes(files);
     let checked = surface.surfaces_id(THROW_UNDECLARED_ID);
     if checked {
-        println!(
+        outln!(
             "  {n} declaration(s) carry a written @throws — the active profile `{}` checks them (throw.undeclared on surface)",
             surface.name
         );
     } else {
-        println!(
+        outln!(
             "  {n} written throw envelope(s); the active profile `{}` does not check them — the `contracts` (or `throws-direct`) profile does",
             surface.name
         );
@@ -501,8 +501,8 @@ fn declares_throws(docblock: Option<&str>) -> bool {
 /// reports "none" when neither resolves. An unparseable baseline file is a
 /// configuration contradiction (exit 1, ADR-0054 §10).
 fn section_baseline(cli_path: Option<&str>, surface: &profile::Surface, contradiction: &mut bool) {
-    println!();
-    println!("Baseline");
+    outln!();
+    outln!("Baseline");
 
     // Resolve the file: an explicit `--baseline` wins; else the conventional default
     // (the same file `check` auto-loads) when it exists.
@@ -514,14 +514,14 @@ fn section_baseline(cli_path: Option<&str>, surface: &profile::Surface, contradi
         }
     };
     let Some(file) = file else {
-        println!("  none (no baseline file; `check --set-baseline` writes one)");
+        outln!("  none (no baseline file; `check --set-baseline` writes one)");
         return;
     };
     let text = match std::fs::read_to_string(&file) {
         Ok(t) => t,
         Err(_) => {
             // An explicit `--baseline` to a missing path is reported absent, not failed.
-            println!("  none ({} not readable)", file.display());
+            outln!("  none ({} not readable)", file.display());
             return;
         }
     };
@@ -533,23 +533,23 @@ fn section_baseline(cli_path: Option<&str>, surface: &profile::Surface, contradi
         .next()
         .is_some_and(|first| serde_json::from_str::<serde_json::Value>(first).is_ok());
     if !header_ok {
-        println!("  {}: UNPARSEABLE (header is not valid JSON)", file.display());
-        println!("  (configuration contradiction — doctor exits 1, ADR-0054 §10)");
+        outln!("  {}: UNPARSEABLE (header is not valid JSON)", file.display());
+        outln!("  (configuration contradiction — doctor exits 1, ADR-0054 §10)");
         *contradiction = true;
         return;
     }
 
     let entries = baseline::parse(&text);
-    println!("  file: {} ({} entr{})", file.display(), entries.len(), plural(entries.len()));
+    outln!("  file: {} ({} entr{})", file.display(), entries.len(), plural(entries.len()));
 
     match baseline::parse_header(&text) {
         Some(capture) => {
-            println!(
+            outln!(
                 "  capture surface: profile `{}`, {} id(s)",
                 capture.profile,
                 capture.ids.len()
             );
-            println!(
+            outln!(
                 "  active surface: profile `{}`, {} id(s)",
                 surface.name,
                 surface.surface_ids().len()
@@ -558,7 +558,7 @@ fn section_baseline(cli_path: Option<&str>, surface: &profile::Surface, contradi
             // kept, not stale, because this profile simply never looks for it.
             let dormant = entries.iter().filter(|e| !surface.surfaces_id(&e.id)).count();
             if dormant > 0 {
-                println!(
+                outln!(
                     "  {dormant} dormant entr{} (id outside the active surface — kept, not stale)",
                     plural(dormant)
                 );
@@ -566,7 +566,7 @@ fn section_baseline(cli_path: Option<&str>, surface: &profile::Surface, contradi
         }
         None => {
             // A pre-ADR-0050 header (no capture surface) is reported as such, not failed.
-            println!("  capture surface: none recorded (pre-capture-surface baseline header)");
+            outln!("  capture surface: none recorded (pre-capture-surface baseline header)");
         }
     }
 }

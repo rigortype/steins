@@ -6,6 +6,12 @@
 //! exits 1 if any finding was reported. `annotate` reprints a single file with a
 //! right-margin column of *proven* inferred facts (the Rigor-style display).
 
+// The output seam (issue #44) is declared FIRST and `#[macro_use]`d: `outln!` /
+// `out!` / `errln!` are `macro_rules!` macros, which are textually scoped, so
+// every module that writes a byte has to come after this line.
+#[macro_use]
+mod out;
+
 mod baseline;
 mod doctor;
 mod profile;
@@ -34,7 +40,15 @@ enum Format {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Every command's verdict passes through the output seam on its way out
+    // (issue #44): `out::finish` flushes stdout and decides what a failed write
+    // does to the exit code. A closed reader leaves `code` alone — see `out`.
+    out::finish(dispatch(&args))
+}
 
+/// Dispatch on the subcommand. Split out of `main` so there is exactly one exit
+/// path through [`out::finish`] rather than one per `return`.
+fn dispatch(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
         Some("check") => run_check(&args[1..]),
         Some("annotate") => run_annotate(&args[1..]),
@@ -43,22 +57,22 @@ fn main() -> ExitCode {
         Some("version" | "--version" | "-v") => print_version(),
         Some("license" | "licenses") => print_license(),
         Some(other) => {
-            eprintln!(
+            errln!(
                 "steins: unknown command `{other}` (available: check, annotate, transform, doctor, version, license)"
             );
             ExitCode::from(2)
         }
         None => {
-            eprintln!(
+            errln!(
                 "usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor-diagnostics] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
             );
-            eprintln!("       steins annotate [--no-php] <file.php>");
-            eprintln!(
+            errln!("       steins annotate [--no-php] <file.php>");
+            errln!(
                 "       steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--format text|json] <paths...>"
             );
-            eprintln!("       steins doctor [--no-php] [--baseline <path>] [path]");
-            eprintln!("       steins version | -v | --version");
-            eprintln!("       steins license");
+            errln!("       steins doctor [--no-php] [--baseline <path>] [path]");
+            errln!("       steins version | -v | --version");
+            errln!("       steins license");
             ExitCode::from(2)
         }
     }
@@ -123,30 +137,14 @@ fn license_text() -> String {
 
 /// `version` / `-v` / `--version`.
 fn print_version() -> ExitCode {
-    write_stdout(&format!("{}\n", version_text()))
+    outln!("{}", version_text());
+    ExitCode::SUCCESS
 }
 
 /// `license` / `licenses`.
 fn print_license() -> ExitCode {
-    write_stdout(&license_text())
-}
-
-/// Write `text` to stdout, treating a closed pipe as success.
-///
-/// `println!` panics on `EPIPE`, and these two commands are the ones a reader
-/// pipes: `steins license` emits over two thousand lines, so `| head` and
-/// `| less` (quit early) are the normal way to read it. A panic there would be a
-/// crash report for a correctly-used command.
-fn write_stdout(text: &str) -> ExitCode {
-    use std::io::Write;
-    match std::io::stdout().write_all(text.as_bytes()) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("steins: cannot write to stdout: {e}");
-            ExitCode::FAILURE
-        }
-    }
+    out!("{}", license_text());
+    ExitCode::SUCCESS
 }
 
 fn run_check(args: &[String]) -> ExitCode {
@@ -171,7 +169,7 @@ fn run_check(args: &[String]) -> ExitCode {
             }
             "--profile" => {
                 let Some(value) = args.get(i + 1) else {
-                    eprintln!("steins: --profile requires a name argument");
+                    errln!("steins: --profile requires a name argument");
                     return ExitCode::from(2);
                 };
                 profile_flag = Some(value.clone());
@@ -187,7 +185,7 @@ fn run_check(args: &[String]) -> ExitCode {
             }
             "--baseline" => {
                 let Some(value) = args.get(i + 1) else {
-                    eprintln!("steins: --baseline requires a path argument");
+                    errln!("steins: --baseline requires a path argument");
                     return ExitCode::from(2);
                 };
                 baseline_path = Some(value.clone());
@@ -195,14 +193,14 @@ fn run_check(args: &[String]) -> ExitCode {
             }
             "--format" => {
                 let Some(value) = args.get(i + 1) else {
-                    eprintln!("steins: --format requires an argument (text|json)");
+                    errln!("steins: --format requires an argument (text|json)");
                     return ExitCode::from(2);
                 };
                 match value.as_str() {
                     "text" => format = Format::Text,
                     "json" => format = Format::Json,
                     other => {
-                        eprintln!("steins: unknown format `{other}` (text|json)");
+                        errln!("steins: unknown format `{other}` (text|json)");
                         return ExitCode::from(2);
                     }
                 }
@@ -216,7 +214,7 @@ fn run_check(args: &[String]) -> ExitCode {
     }
 
     if paths.is_empty() {
-        eprintln!("steins: no paths given");
+        errln!("steins: no paths given");
         return ExitCode::from(2);
     }
 
@@ -232,7 +230,7 @@ fn run_check(args: &[String]) -> ExitCode {
     // lazily-spawned sidecar (spawned only on the first foldable call); if `php`
     // turns out to be unavailable, the folder emits the same notice itself.
     if no_php {
-        eprintln!("{SOUND_SUBSET_NOTICE}");
+        errln!("{SOUND_SUBSET_NOTICE}");
     }
 
     // Parse `./steins.toml` ONCE, up front, before any analysis (ADR-0050 §7 /
@@ -244,7 +242,7 @@ fn run_check(args: &[String]) -> ExitCode {
     let config = match read_steins_config() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("steins: {e}");
+            errln!("steins: {e}");
             return ExitCode::from(2);
         }
     };
@@ -261,7 +259,7 @@ fn run_check(args: &[String]) -> ExitCode {
     let surface = match profile_configs.resolve(selected) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("steins: {e}");
+            errln!("steins: {e}");
             return ExitCode::from(2);
         }
     };
@@ -281,7 +279,7 @@ fn run_check(args: &[String]) -> ExitCode {
         let text = match std::fs::read(file_path) {
             Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
             Err(e) => {
-                eprintln!("steins: cannot read {}: {e}", file_path.display());
+                errln!("steins: cannot read {}: {e}", file_path.display());
                 continue;
             }
         };
@@ -297,7 +295,7 @@ fn run_check(args: &[String]) -> ExitCode {
     // safe default (a parse error already exited 2).
     let (warning_handler_abort, runtime_warnings) = runtime_from_config(runtime_cfg);
     for w in &runtime_warnings {
-        eprintln!("steins: {w}");
+        errln!("steins: {w}");
     }
     let mut findings: Vec<Diagnostic> = check_project_with_runtime(
         &db,
@@ -436,7 +434,7 @@ fn write_baseline(
     let capture = baseline::CaptureSurface { profile: surface.name.clone(), ids: surface.surface_ids() };
     match std::fs::write(file, baseline::render(entries, &capture)) {
         Ok(()) => {
-            eprintln!(
+            errln!(
                 "steins: wrote {n} baseline entries to {} (profile `{}`)",
                 file.display(),
                 surface.name
@@ -444,7 +442,7 @@ fn write_baseline(
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("steins: cannot write baseline {}: {e}", file.display());
+            errln!("steins: cannot write baseline {}: {e}", file.display());
             ExitCode::from(2)
         }
     }
@@ -527,7 +525,7 @@ fn run_transform(args: &[String]) -> ExitCode {
             }
             "--config" => {
                 let Some(value) = args.get(i + 1) else {
-                    eprintln!("steins: --config requires a path argument");
+                    errln!("steins: --config requires a path argument");
                     return ExitCode::from(2);
                 };
                 config_path = Some(value.clone());
@@ -535,14 +533,14 @@ fn run_transform(args: &[String]) -> ExitCode {
             }
             "--format" => {
                 let Some(value) = args.get(i + 1) else {
-                    eprintln!("steins: --format requires an argument (text|json)");
+                    errln!("steins: --format requires an argument (text|json)");
                     return ExitCode::from(2);
                 };
                 match value.as_str() {
                     "text" => format = Format::Text,
                     "json" => format = Format::Json,
                     other => {
-                        eprintln!("steins: unknown format `{other}` (text|json)");
+                        errln!("steins: unknown format `{other}` (text|json)");
                         return ExitCode::from(2);
                     }
                 }
@@ -570,20 +568,20 @@ fn run_transform(args: &[String]) -> ExitCode {
         Some("phpdoc-to-native") => (Kind::Promote, "promoted"),
         Some("phpdoc-honesty") => (Kind::Honesty, "rewritten"),
         Some(other) => {
-            eprintln!(
+            errln!(
                 "steins: unknown transform `{other}` (available: phpdoc-to-native, phpdoc-honesty)"
             );
             return ExitCode::from(2);
         }
         None => {
-            eprintln!(
+            errln!(
                 "steins: transform requires a name (usage: steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--config steins.toml] [--format text|json] <paths...>)"
             );
             return ExitCode::from(2);
         }
     };
     if paths.is_empty() {
-        eprintln!("steins: no paths given");
+        errln!("steins: no paths given");
         return ExitCode::from(2);
     }
 
@@ -592,7 +590,7 @@ fn run_transform(args: &[String]) -> ExitCode {
     // never a hard error (the run proceeds with the well-formed entries).
     let (vouches, vouch_warnings) = load_vouches(config_path.as_deref());
     for w in &vouch_warnings {
-        eprintln!("steins: {w}");
+        errln!("steins: {w}");
     }
 
     // Load the region map (ADR-0047 §7): `steins.toml [transform.partitions]`. With
@@ -603,7 +601,7 @@ fn run_transform(args: &[String]) -> ExitCode {
     let partitions = match load_partitions(config_path.as_deref()) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("steins: {e}");
+            errln!("steins: {e}");
             return ExitCode::from(2);
         }
     };
@@ -622,7 +620,7 @@ fn run_transform(args: &[String]) -> ExitCode {
         let text = match std::fs::read(file_path) {
             Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
             Err(e) => {
-                eprintln!("steins: cannot read {}: {e}", file_path.display());
+                errln!("steins: cannot read {}: {e}", file_path.display());
                 continue;
             }
         };
@@ -643,7 +641,7 @@ fn run_transform(args: &[String]) -> ExitCode {
     // Vouching an already-benign (or nonexistent) site is a no-op the user should
     // know about (ADR-0046 §2).
     for entry in vouches.unused() {
-        eprintln!("steins: vouched site `{entry}` matched no dynamic-code obstacle (no-op)");
+        errln!("steins: vouched site `{entry}` matched no dynamic-code obstacle (no-op)");
     }
 
     // Dual verification (ADR-0034 point 3a): re-analyze the edited project and
@@ -658,7 +656,7 @@ fn run_transform(args: &[String]) -> ExitCode {
 
     if !postcheck.ok {
         if apply {
-            eprintln!(
+            errln!(
                 "steins: post-check found {} new diagnostic(s); refusing to write (ADR-0034)",
                 postcheck.new_diagnostics.len()
             );
@@ -672,19 +670,19 @@ fn run_transform(args: &[String]) -> ExitCode {
             let Some(original) = texts.get(path) else { continue };
             let updated = report.plan.apply_file(path, original);
             if let Err(e) = std::fs::write(path, &updated) {
-                eprintln!("steins: cannot write {path}: {e}");
+                errln!("steins: cannot write {path}: {e}");
                 return ExitCode::FAILURE;
             }
             written += 1;
         }
         for nf in &report.plan.new_files {
             if let Err(e) = std::fs::write(&nf.path, &nf.contents) {
-                eprintln!("steins: cannot create {}: {e}", nf.path);
+                errln!("steins: cannot create {}: {e}", nf.path);
                 return ExitCode::FAILURE;
             }
             written += 1;
         }
-        eprintln!("steins: applied {written} file edit(s)");
+        errln!("steins: applied {written} file edit(s)");
     }
 
     ExitCode::SUCCESS
@@ -996,7 +994,7 @@ fn print_transform_text(
     for path in report.plan.edited_paths() {
         if let Some(original) = texts.get(path) {
             let updated = report.plan.apply_file(path, original);
-            print!("{}", unified_diff(path, original, &updated, 3));
+            out!("{}", unified_diff(path, original, &updated, 3));
         }
     }
 
@@ -1004,22 +1002,22 @@ fn print_transform_text(
     // site list capped in text output (the JSON carries every site).
     const OBSTACLE_SITE_CAP: usize = 5;
     if !report.obstacles.is_empty() {
-        println!("\nDynamic-code obstacles ({}):", report.obstacles.len());
+        outln!("\nDynamic-code obstacles ({}):", report.obstacles.len());
         for ob in &report.obstacles {
-            println!("  [{}] {} — {} site(s):", ob.reason, ob.detail, ob.sites.len());
+            outln!("  [{}] {} — {} site(s):", ob.reason, ob.detail, ob.sites.len());
             for s in ob.sites.iter().take(OBSTACLE_SITE_CAP) {
-                println!("    {}:{}:{}: {}", s.path, s.line, s.column, s.label);
+                outln!("    {}:{}:{}: {}", s.path, s.line, s.column, s.label);
             }
             if ob.sites.len() > OBSTACLE_SITE_CAP {
-                println!("    … and {} more (see --format json)", ob.sites.len() - OBSTACLE_SITE_CAP);
+                outln!("    … and {} more (see --format json)", ob.sites.len() - OBSTACLE_SITE_CAP);
             }
         }
     }
 
     if !report.refusals.is_empty() {
-        println!("\nRefusals ({}):", report.refusals.len());
+        outln!("\nRefusals ({}):", report.refusals.len());
         for r in &report.refusals {
-            println!(
+            outln!(
                 "  {}:{}:{}: {} [{}] — {}",
                 r.site.path, r.site.line, r.site.column, r.site.label, r.reason, r.detail
             );
@@ -1027,28 +1025,28 @@ fn print_transform_text(
     }
 
     let o = &report.oracle;
-    println!("\n{} enumerated: {} {action}, {} refused", o.enumerated, o.transformed, o.refused);
+    outln!("\n{} enumerated: {} {action}, {} refused", o.enumerated, o.transformed, o.refused);
 
     // The vouching downgrade (ADR-0046 §2 / ADR-0037): a run that vouched sites
     // does not silently pass — its completeness claim is conditional on those
     // user assertions, and the report says so prominently.
     if !report.vouched_exemptions.is_empty() {
-        println!(
+        outln!(
             "\nDOWNGRADE: completeness claim is conditional on {} user-vouched dynamic-code exemption(s):",
             report.vouched_exemptions.len()
         );
         for s in &report.vouched_exemptions {
-            println!("    vouched {}:{}:{}: {}", s.path, s.line, s.column, s.label);
+            outln!("    vouched {}:{}:{}: {}", s.path, s.line, s.column, s.label);
         }
     }
 
     if !postcheck.ok {
-        println!("\nPost-check FAILED — {} new diagnostic(s):", postcheck.new_diagnostics.len());
+        outln!("\nPost-check FAILED — {} new diagnostic(s):", postcheck.new_diagnostics.len());
         for d in &postcheck.new_diagnostics {
-            println!("  {}:{}:{}: [{}] {}", d.path, d.line, d.column, d.id, d.message);
+            outln!("  {}:{}:{}: [{}] {}", d.path, d.line, d.column, d.id, d.message);
         }
     } else if !report.plan.is_empty() {
-        println!("Post-check OK — no new diagnostics.");
+        outln!("Post-check OK — no new diagnostics.");
     }
 }
 
@@ -1082,8 +1080,8 @@ fn print_transform_json(report: &TransformReport, postcheck: &PostCheck, applied
         "downgrade_note": downgrade_note,
     });
     match serde_json::to_string_pretty(&doc) {
-        Ok(s) => println!("{s}"),
-        Err(e) => eprintln!("steins: failed to serialize json: {e}"),
+        Ok(s) => outln!("{s}"),
+        Err(e) => errln!("steins: failed to serialize json: {e}"),
     }
 }
 
@@ -1103,14 +1101,14 @@ fn run_annotate(args: &[String]) -> ExitCode {
             }
             "--project" => {
                 let Some(dir) = args.get(i + 1) else {
-                    eprintln!("steins: --project requires a directory argument");
+                    errln!("steins: --project requires a directory argument");
                     return ExitCode::from(2);
                 };
                 project_dir = Some(dir.clone());
                 i += 2;
             }
             other if other.starts_with('-') => {
-                eprintln!("steins: unknown flag `{other}` for annotate");
+                errln!("steins: unknown flag `{other}` for annotate");
                 return ExitCode::from(2);
             }
             other => {
@@ -1121,27 +1119,27 @@ fn run_annotate(args: &[String]) -> ExitCode {
     }
 
     let [path] = paths.as_slice() else {
-        eprintln!(
+        errln!(
             "steins: annotate takes exactly one file (usage: steins annotate [--no-php] [--project <dir>] <file.php>)"
         );
         return ExitCode::from(2);
     };
     let path = Path::new(path);
     if path.is_dir() {
-        eprintln!("steins: annotate expects a single file, not a directory: {}", path.display());
+        errln!("steins: annotate expects a single file, not a directory: {}", path.display());
         return ExitCode::from(2);
     }
     let text = match std::fs::read(path) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(e) => {
-            eprintln!("steins: cannot read {}: {e}", path.display());
+            errln!("steins: cannot read {}: {e}", path.display());
             return ExitCode::from(2);
         }
     };
 
     // Same coverage posture as `check` (ADR-0004).
     if no_php {
-        eprintln!("{SOUND_SUBSET_NOTICE}");
+        errln!("{SOUND_SUBSET_NOTICE}");
     }
     let db = SteinsDatabase::default();
     let mut folder = if no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
@@ -1191,7 +1189,7 @@ fn run_annotate(args: &[String]) -> ExitCode {
         }
     };
 
-    print!("{}", render_annotation(&text, &facts));
+    out!("{}", render_annotation(&text, &facts));
     ExitCode::SUCCESS
 }
 
@@ -1256,25 +1254,25 @@ fn print_text(
             profile::Level::Fail => "error",
             profile::Level::Warn => "warning",
         };
-        println!("{}:{}:{}: {kind}[{}]: {}", d.path, d.line, d.column, d.id, d.message);
+        outln!("{}:{}:{}: {kind}[{}]: {}", d.path, d.line, d.column, d.id, d.message);
     }
     // Suppression accounting (ADR-0022/0023/0015), each line printed only when
     // nonzero. Vendor is the first channel (ADR-0015), so it prints first.
     if vendor_suppressed > 0 {
-        println!("{vendor_suppressed} findings in vendor suppressed (--vendor-diagnostics to show)");
+        outln!("{vendor_suppressed} findings in vendor suppressed (--vendor-diagnostics to show)");
     }
     if suppressed > 0 {
-        println!("{suppressed} diagnostics suppressed by inline ignores");
+        outln!("{suppressed} diagnostics suppressed by inline ignores");
     }
     if baselined > 0 {
-        println!("{baselined} findings in baseline");
+        outln!("{baselined} findings in baseline");
     }
     if stale > 0 {
-        println!("{stale} baseline entries no longer match (stale — rerun --set-baseline)");
+        outln!("{stale} baseline entries no longer match (stale — rerun --set-baseline)");
     }
     // The drowns-loudly notice (ADR-0050 §8), printed after the accounting.
     if let Some(notice) = surface_notice {
-        println!("{notice}");
+        outln!("{notice}");
     }
 }
 
@@ -1316,8 +1314,8 @@ fn print_json(
         "baselined": baselined,
     });
     match serde_json::to_string_pretty(&doc) {
-        Ok(s) => println!("{s}"),
-        Err(e) => eprintln!("steins: failed to serialize json: {e}"),
+        Ok(s) => outln!("{s}"),
+        Err(e) => errln!("steins: failed to serialize json: {e}"),
     }
 }
 
