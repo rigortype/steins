@@ -13,9 +13,11 @@
 // composer install. PHP 8.1-compatible syntax throughout.
 //
 // The runner does NOT enforce purity — the Rust side gates which functions may
-// be folded (the ADR-0008 allowlist). The runner's sole jobs are: call the
-// named builtin with positional literal args, and report the outcome as one of
-// value / throw / widen. It must never crash: any misuse widens.
+// be folded (the ADR-0008 allowlist). The runner's sole jobs are: rebuild the
+// positional literal args (scalars, and array literals in the entry form
+// `steins_decode_arg` documents), call the named builtin with them, and report
+// the outcome as one of value / throw / widen. It must never crash: any misuse
+// widens.
 
 // Keep stdout pure NDJSON — divert any warning/notice/deprecation text to
 // stderr (which the parent discards) so it can never corrupt a response line.
@@ -193,14 +195,18 @@ function steins_reflect(array $params)
 function steins_fold(array $params)
 {
     $fn = isset($params['function']) ? $params['function'] : null;
-    $args = isset($params['args']) && is_array($params['args']) ? $params['args'] : [];
+    $raw = isset($params['args']) && is_array($params['args']) ? $params['args'] : [];
 
     if (!is_string($fn) || !function_exists($fn)) {
         return ['kind' => 'widen', 'reason' => 'unknown function'];
     }
 
     // Positional args only — never named.
-    $args = array_values($args);
+    $decoded = steins_decode_args(array_values($raw));
+    if ($decoded === null) {
+        return ['kind' => 'widen', 'reason' => 'undecodable argument'];
+    }
+    $args = $decoded;
 
     try {
         $ret = $fn(...$args);
@@ -214,6 +220,74 @@ function steins_fold(array $params)
     }
 
     return steins_encode_value($ret);
+}
+
+/**
+ * Decode the wire form of a positional argument list (issue #39).
+ *
+ * @param array<mixed> $args
+ * @return array<int, mixed>|null the decoded args, or null when any is malformed
+ */
+function steins_decode_args(array $args)
+{
+    $out = [];
+    foreach ($args as $a) {
+        $one = steins_decode_arg($a);
+        if ($one === null) {
+            return null;
+        }
+        $out[] = $one[0];
+    }
+    return $out;
+}
+
+/**
+ * Decode one wire argument.
+ *
+ * A scalar arrives bare (`5`, `"x"`, `true`, `null`); an array arrives as
+ * `{"__steins_array": [[key, value], ...]}` where `key` is null for an absent key,
+ * or an int/string for an explicit one. Values recurse, so nested array literals
+ * decode too.
+ *
+ * **The key rules are PHP's, on purpose** (ADR-0004): an absent key is appended
+ * with `$arr[] =`, so this engine's own next-int rule assigns it — including the
+ * negative-key edge PHP 8.3 changed — and a repeated key is a plain assignment,
+ * so duplicates resolve by this engine's own last-wins. Nothing here reimplements
+ * array semantics; that is the entire reason folding runs on the project's PHP.
+ *
+ * The return is wrapped in a one-element array so that a successfully decoded
+ * `null` value is distinguishable from a decode failure (which returns null).
+ *
+ * @param mixed $a
+ * @return array{0: mixed}|null
+ */
+function steins_decode_arg($a)
+{
+    if (is_int($a) || is_float($a) || is_string($a) || is_bool($a) || $a === null) {
+        return [$a];
+    }
+    if (!is_array($a) || !array_key_exists('__steins_array', $a) || !is_array($a['__steins_array'])) {
+        return null;
+    }
+    $arr = [];
+    foreach ($a['__steins_array'] as $entry) {
+        if (!is_array($entry) || !array_key_exists(0, $entry) || !array_key_exists(1, $entry)) {
+            return null;
+        }
+        $value = steins_decode_arg($entry[1]);
+        if ($value === null) {
+            return null;
+        }
+        $key = $entry[0];
+        if ($key === null) {
+            $arr[] = $value[0];
+        } elseif (is_int($key) || is_string($key)) {
+            $arr[$key] = $value[0];
+        } else {
+            return null;
+        }
+    }
+    return [$arr];
 }
 
 /**
@@ -250,9 +324,9 @@ function steins_encode_value($v)
     }
     if (is_array($v)) {
         // Arrays are OK if they round-trip cleanly (no objects/resources/binary
-        // strings inside). The Rust IR has no array literal yet, so the caller
-        // will widen anyway — but reporting it faithfully keeps the protocol
-        // honest for when arrays arrive.
+        // strings inside). Array *arguments* exist (issue #39); an array *result*
+        // is still widened by the Rust side, a deliberate boundary (#41/#42) —
+        // but reporting it faithfully keeps the protocol honest.
         $encoded = json_encode($v, JSON_PRESERVE_ZERO_FRACTION);
         if ($encoded === false) {
             return ['kind' => 'widen', 'reason' => 'unencodable array'];

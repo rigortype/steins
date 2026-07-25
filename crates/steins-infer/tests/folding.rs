@@ -2,6 +2,9 @@
 //! [`Folder`] (no PHP needed). Real end-to-end folding through a live sidecar is
 //! covered by the CLI tests; here we prove the engine's gate and provenance.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use steins_infer::{Diagnostic, Folder, NoFold, check, check_with};
 use steins_syntax::{ArgValue, SourceTree};
 
@@ -14,9 +17,44 @@ impl Folder for Mock {
             ("strtolower", [ArgValue::Str(s)]) => Some(ArgValue::Str(s.to_lowercase())),
             ("strtoupper", [ArgValue::Str(s)]) => Some(ArgValue::Str(s.to_uppercase())),
             ("strval", [ArgValue::Int(i)]) => Some(ArgValue::Str(i.to_string())),
+            // `count` over a literal array (issue #39). The real fold runs on the
+            // project's PHP; the mock only has to prove the GATE let the array
+            // through — the sidecar tests cover the semantics.
+            ("count", [ArgValue::Array(items)]) => {
+                Some(ArgValue::Str(format!("n{}", items.len())))
+            }
             _ => None,
         }
     }
+}
+
+/// One call the gate forwarded to the folder.
+type Ask = (String, Vec<ArgValue>);
+
+/// A folder that records every `(name, args)` the gate hands it and never folds,
+/// so a test can assert on what the gate *asked* rather than on a diagnostic.
+#[derive(Clone, Default)]
+struct Spy(Rc<RefCell<Vec<Ask>>>);
+
+impl Folder for Spy {
+    fn fold(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue> {
+        self.0.borrow_mut().push((name.to_owned(), args.to_vec()));
+        None
+    }
+}
+
+/// The calls the gate forwarded to the folder for `src`.
+fn asked(src: &str) -> Vec<Ask> {
+    let spy = Spy::default();
+    let mut folder = spy.clone();
+    let _ = find(src, &mut folder);
+    spy.0.borrow().clone()
+}
+
+/// A PHP source with an `n`-element literal array argument to `count`.
+fn count_of_n(n: usize) -> String {
+    let elems: Vec<String> = (0..n).map(|i| i.to_string()).collect();
+    format!("{COERCIVE_INT}width(count([{}]));", elems.join(", "))
 }
 
 fn find(src: &str, folder: &mut dyn Folder) -> Vec<Diagnostic> {
@@ -82,6 +120,103 @@ fn nofold_is_silent_for_folded_findings() {
     let tree = SourceTree::parse(direct);
     let funcs = tree.functions().to_vec();
     assert_eq!(check(&tree, &funcs, "d.php").len(), 1);
+}
+
+// ---- array-literal fold arguments (issue #39) -----------------------------
+//
+// These assert the GATE — which arguments reach the folder at all. `count`,
+// `in_array` and `implode` were parked on the `foldable` allowlist behind exactly
+// this gate; nothing about the allowlist changes here.
+
+#[test]
+fn a_literal_array_argument_reaches_the_folder() {
+    let calls = asked(&format!("{COERCIVE_INT}width(count([1, 2, 3]));"));
+    assert!(!calls.is_empty(), "the array arg passed the gate");
+    assert!(
+        calls.iter().all(|(n, a)| n == "count"
+            && matches!(&a[..], [ArgValue::Array(items)] if items.len() == 3)),
+        "got {calls:#?}"
+    );
+
+    // …and the folded value premises the ordinary native check: "n3" into int.
+    let f = find(&format!("{COERCIVE_INT}width(count([1, 2, 3]));"), &mut Mock);
+    assert_eq!(f.len(), 1, "folded array arg produces a finding, got {f:#?}");
+    assert!(f[0].message.contains("folded from count([1, 2, 3])"), "{}", f[0].message);
+}
+
+#[test]
+fn a_nested_literal_array_reaches_the_folder() {
+    // Nesting is REPRESENTED, not widened: the whole tree crosses the seam.
+    let calls = asked(&format!("{COERCIVE_INT}width(count([[1, 2], ['k' => 3]]));"));
+    assert!(!calls.is_empty(), "nested array arg passed the gate");
+    let [ArgValue::Array(outer)] = &calls[0].1[..] else { panic!("expected one array arg") };
+    assert!(matches!(&outer[0].1, ArgValue::Array(inner) if inner.len() == 2));
+}
+
+#[test]
+fn an_array_with_a_non_literal_element_never_reaches_the_folder() {
+    // The acceptance pin: `count([1, $x])` widens. `$x` may hold anything —
+    // including an array — so the literal's length is not the array's length.
+    assert!(asked(&format!("{COERCIVE_INT}width(count([1, $x]));")).is_empty());
+    // Also at depth, and also when the element is itself a foldable call (the
+    // seam folds a call's arguments, never a call nested inside one).
+    assert!(asked(&format!("{COERCIVE_INT}width(count([[1, [$x]]]));")).is_empty());
+    assert!(asked(&format!("{COERCIVE_INT}width(count([strtolower('A')]));")).is_empty());
+    // And a spread, which never lowered to an `Array` in the first place.
+    assert!(asked(&format!("{COERCIVE_INT}width(count([1, ...$rest]));")).is_empty());
+}
+
+#[test]
+fn a_non_literal_key_never_reaches_the_folder() {
+    // A key the analyzer cannot spell collapses the whole literal to `Other` at
+    // lowering, so the gate never even sees an array: `count([$k => 1])` is not
+    // 1 (the key might collide with another entry's).
+    assert!(asked(&format!("{COERCIVE_INT}width(count([$k => 1, 'a' => 2]));")).is_empty());
+    assert!(asked(&format!("{COERCIVE_INT}width(count([[$k => 1]]));")).is_empty());
+}
+
+#[test]
+fn a_literal_array_folds_in_a_poisoned_scope_too() {
+    // Poisoning (ADR-0027: `extract`, references, …) makes every *variable*
+    // unknown, but a literal array reads no variable — `count([1, 2, 3])` is 3
+    // whatever aliasing machinery the scope contains. The fold is asked, and it
+    // is asked with the same argument as in a clean scope.
+    let src = format!(
+        "{COERCIVE_INT}function poisoned() {{ extract($GLOBALS); width(count([1, 2, 3])); }}"
+    );
+    let calls = asked(&src);
+    assert!(!calls.is_empty(), "a literal needs no env, so poisoning does not gate it");
+    assert!(matches!(&calls[0].1[..], [ArgValue::Array(items)] if items.len() == 3));
+    // But an element read out of that scope's env stays unknown, poisoned or not.
+    let via_var = format!(
+        "{COERCIVE_INT}function poisoned() {{ extract($GLOBALS); width(count([1, $x])); }}"
+    );
+    assert!(asked(&via_var).is_empty());
+}
+
+#[test]
+fn the_empty_array_is_a_value_and_folds() {
+    let calls = asked(&format!("{COERCIVE_INT}width(count([]));"));
+    assert!(!calls.is_empty(), "count([]) is a fold, not a widen");
+    assert!(matches!(&calls[0].1[..], [ArgValue::Array(items)] if items.is_empty()));
+}
+
+#[test]
+fn an_oversized_literal_array_widens_instead_of_folding() {
+    // The fold budget (256 entries, counted recursively) keeps a generated lookup
+    // table off the IPC seam and out of the memo. At the cap it still folds;
+    // one past it, the gate never asks.
+    assert!(!asked(&count_of_n(256)).is_empty(), "256 entries is inside the budget");
+    assert!(asked(&count_of_n(257)).is_empty(), "257 entries widens");
+}
+
+#[test]
+fn an_overdeep_literal_array_widens_instead_of_folding() {
+    // The depth bound (8) is what keeps the recursive encoders — Rust's and the
+    // runner's — off an unbounded stack.
+    let nest = |d: usize| format!("{COERCIVE_INT}width(count({}1{}));", "[".repeat(d), "]".repeat(d));
+    assert!(!asked(&nest(8)).is_empty(), "depth 8 is inside the budget");
+    assert!(asked(&nest(9)).is_empty(), "depth 9 widens");
 }
 
 #[test]

@@ -113,3 +113,36 @@ fn variable_element_stays_representable() {
     let it = items(&v);
     assert_eq!(it[0].1, ArgValue::Var("x".into()));
 }
+
+// ---- `is_concrete_value`: the self-evident-value predicate (issue #39) -------
+
+#[test]
+fn concrete_value_covers_scalars_and_literal_arrays() {
+    for src in [
+        "<?php f(1);",
+        "<?php f('s');",
+        "<?php f(null);",
+        "<?php f([]);", // the empty array IS a value — `count([])` folds to 0
+        "<?php f([1, 2, 3]);",
+        "<?php f(['k' => 'v', 5 => 1.5, true]);",
+        "<?php f([[1, 2], ['k' => [3]]]);", // nesting is represented, not widened
+    ] {
+        assert!(first_arg(src).is_concrete_value(), "{src} should be a concrete value");
+    }
+}
+
+#[test]
+fn one_unresolved_element_makes_the_whole_array_non_concrete() {
+    // A carrier element (`$x`, a call) is representable in the IR but is NOT a
+    // proven value, so the array containing it is not one either — at any depth.
+    for src in [
+        "<?php f([$x]);",
+        "<?php f([1, $x, 3]);",
+        "<?php f([1, strtolower('A')]);",
+        "<?php f([[1, [2, $x]]]);",
+    ] {
+        let v = first_arg(src);
+        assert!(matches!(v, ArgValue::Array(_)), "{src} still lowers to an Array");
+        assert!(!v.is_concrete_value(), "{src} must not be a concrete value");
+    }
+}

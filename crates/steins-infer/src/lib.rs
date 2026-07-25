@@ -36,7 +36,7 @@ use steins_contract::normalize;
 use steins_db::{
     Db, DeclSite, Project, ProjectIndex, ProjectLayout, Resolve, SourceFile, parse, project_index,
 };
-use steins_sidecar::{FoldArg, FoldResult, FoldValue, Sidecar};
+use steins_sidecar::{FoldArg, FoldKey, FoldResult, FoldValue, Sidecar};
 use steins_syntax::CallExpr;
 use steins_syntax::Span;
 use steins_syntax::{
@@ -657,18 +657,103 @@ fn parse_php_minor(v: &str) -> Option<(u16, u16)> {
     Some((major, minor))
 }
 
-/// Convert a literal [`ArgValue`] to a [`FoldArg`]; non-literals yield `None`.
+/// The fold seam's array budget (issue #39): the greatest number of entries an
+/// array argument may contribute, counted **recursively** over nesting, and the
+/// deepest nesting a fold argument may have.
+///
+/// Both exist because a fold argument is serialized, sent over IPC, executed, and
+/// used as a memo key — all linear in the literal's size, all paid per call site.
+/// The values are chosen to cover every array literal a human writes as a `count`
+/// / `in_array` / `implode` argument while refusing the generated 10,000-entry
+/// lookup table, where a fold costs real time and buys nothing (its `count` is a
+/// number nobody is about to mistype into a `string` parameter). Exceeding either
+/// bound **widens** — a miss, never a false positive (ADR-0002).
+///
+/// The depth bound is also what keeps the recursive encoders here and in the
+/// runner off an unbounded stack.
+const FOLD_ARRAY_MAX_ENTRIES: usize = 256;
+const FOLD_ARRAY_MAX_DEPTH: u8 = 8;
+
+/// Charge `v` against the fold seam's array budget: `false` when it nests deeper
+/// than `depth` or its entries (recursively) exhaust `budget`, or when it is not a
+/// self-evident value at all. A scalar literal always fits and costs nothing.
+///
+/// The budget is **per argument**, and both users of it ([`Cx::try_fold`]'s gate
+/// and [`arg_to_fold`]'s encoder) charge identically, so the gate's verdict and the
+/// encoder's are the same verdict computed twice — never a gate that admits what
+/// the encoder then refuses.
+fn fits_fold_budget(v: &ArgValue, depth: u8, budget: &mut usize) -> bool {
+    match v {
+        ArgValue::Array(items) => {
+            if depth == 0 {
+                return false;
+            }
+            for (_, el) in items {
+                if *budget == 0 {
+                    return false;
+                }
+                *budget -= 1;
+                if !fits_fold_budget(el, depth - 1, budget) {
+                    return false;
+                }
+            }
+            true
+        }
+        v => v.is_literal(),
+    }
+}
+
+/// Whether `arg` may be sent to the sidecar at all: a scalar literal, or an array
+/// literal that is concrete all the way down *and* inside the budget.
+fn is_fold_arg(arg: &ArgValue) -> bool {
+    let mut budget = FOLD_ARRAY_MAX_ENTRIES;
+    fits_fold_budget(arg, FOLD_ARRAY_MAX_DEPTH, &mut budget)
+}
+
+/// Convert a literal or literal-array [`ArgValue`] to a [`FoldArg`]; anything else
+/// (and anything over the budget) yields `None`, which widens.
 fn arg_to_fold(arg: &ArgValue) -> Option<FoldArg> {
+    let mut budget = FOLD_ARRAY_MAX_ENTRIES;
+    arg_to_fold_within(arg, FOLD_ARRAY_MAX_DEPTH, &mut budget)
+}
+
+/// The budget-carrying body of [`arg_to_fold`]. Array entries keep their **source
+/// order and their raw keys**: an absent key stays absent on the wire, so PHP's own
+/// next-int rule assigns it, and a duplicate key is resolved by PHP's own
+/// last-wins. Nothing here re-derives array semantics — that is precisely what
+/// running the fold on the project's PHP is for (ADR-0004/0028).
+fn arg_to_fold_within(arg: &ArgValue, depth: u8, budget: &mut usize) -> Option<FoldArg> {
     match arg {
         ArgValue::Int(v) => Some(FoldArg::Int(*v)),
         ArgValue::Float(v) => Some(FoldArg::Float(*v)),
         ArgValue::Str(v) => Some(FoldArg::Str(v.clone())),
         ArgValue::Bool(v) => Some(FoldArg::Bool(*v)),
         ArgValue::Null => Some(FoldArg::Null),
+        // An array literal (issue #39): representable when every element is, and
+        // nested literals recurse. One unrepresentable element widens the WHOLE
+        // array — `count([1, $x])` is not 2, because `$x` may not be one entry.
+        ArgValue::Array(items) => {
+            if depth == 0 {
+                return None;
+            }
+            let mut entries = Vec::with_capacity(items.len());
+            for (k, v) in items {
+                if *budget == 0 {
+                    return None;
+                }
+                *budget -= 1;
+                let key = match k {
+                    ArrayKey::Auto => None,
+                    ArrayKey::Int(i) => Some(FoldKey::Int(*i)),
+                    ArrayKey::Str(s) => Some(FoldKey::Str(s.clone())),
+                };
+                entries.push((key, arg_to_fold_within(v, depth - 1, budget)?));
+            }
+            Some(FoldArg::Array(entries))
+        }
         ArgValue::Var(_)
         | ArgValue::Call(..)
         | ArgValue::New(..)
-        | ArgValue::Array(_)
         | ArgValue::Ternary { .. }
         | ArgValue::Closure(_)
         | ArgValue::PropFetch { .. }
@@ -3228,7 +3313,13 @@ impl<'a> Cx<'a> {
         if !steins_catalog::foldable(name) {
             return None;
         }
-        if !args.iter().all(ArgValue::is_literal) {
+        // Every argument must be a self-evident value: a scalar literal, or an
+        // array literal that is concrete all the way down and inside the fold
+        // budget (issue #39). This is the gate the `count`/`in_array`/`implode`
+        // entries were parked behind — nothing about the allowlist changed, the
+        // arguments they take simply became representable. Checked BEFORE
+        // `folder.fold`, so an over-budget literal is never cloned into the memo.
+        if !args.iter().all(is_fold_arg) {
             return None;
         }
         let folded = folder.fold(name, args)?;

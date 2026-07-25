@@ -6,7 +6,20 @@
 
 use std::time::Duration;
 
-use steins_sidecar::{FoldArg, FoldResult, FoldValue, Sidecar};
+use steins_sidecar::{FoldArg, FoldKey, FoldResult, FoldValue, Sidecar};
+
+/// An unkeyed (`ArrayKey::Auto`) array argument of `values`.
+fn list(values: Vec<FoldArg>) -> FoldArg {
+    FoldArg::Array(values.into_iter().map(|v| (None, v)).collect())
+}
+
+fn int(i: i64) -> FoldArg {
+    FoldArg::Int(i)
+}
+
+fn s(v: &str) -> FoldArg {
+    FoldArg::Str(v.to_owned())
+}
 
 /// Spawn a sidecar, or print a skip marker and return `None` if `php` is absent.
 fn spawn_or_skip(test: &str) -> Option<Sidecar> {
@@ -138,6 +151,82 @@ fn fold_wrong_arity_widens() {
     // strlen() with no args → ArgumentCountError → widen (structural misuse).
     let r = sc.fold("strlen", &[]);
     assert!(matches!(r, FoldResult::Widen { .. }), "wrong arity widens, got {r:?}");
+}
+
+// ---- array-literal fold arguments (issue #39) -----------------------------
+//
+// The wire form carries entries, not a JSON map, so PHP's own key rules apply:
+// the runtime assigns absent keys and resolves duplicates. These tests run
+// against real PHP precisely because that is where the semantics live.
+
+#[test]
+fn fold_count_over_a_literal_array() {
+    let Some(mut sc) = spawn_or_skip("fold_count_over_a_literal_array") else { return };
+    assert_eq!(sc.fold("count", &[list(vec![int(1), int(2), int(3)])]), FoldResult::Value(FoldValue::Int(3)));
+    // The empty array is a value, and its count is 0 — not a widen.
+    assert_eq!(sc.fold("count", &[list(vec![])]), FoldResult::Value(FoldValue::Int(0)));
+}
+
+#[test]
+fn fold_in_array_and_implode_over_literal_arrays() {
+    let Some(mut sc) = spawn_or_skip("fold_in_array_and_implode") else { return };
+    let haystack = list(vec![int(1), int(2), int(3)]);
+    assert_eq!(sc.fold("in_array", &[int(2), haystack.clone()]), FoldResult::Value(FoldValue::Bool(true)));
+    assert_eq!(sc.fold("in_array", &[int(9), haystack]), FoldResult::Value(FoldValue::Bool(false)));
+    assert_eq!(
+        sc.fold("implode", &[s(","), list(vec![s("a"), s("b")])]),
+        FoldResult::Value(FoldValue::Str("a,b".to_owned()))
+    );
+}
+
+#[test]
+fn fold_nested_array_arguments_round_trip() {
+    let Some(mut sc) = spawn_or_skip("fold_nested_array_arguments_round_trip") else { return };
+    // count() is shallow: [[1,2],[3]] has two entries.
+    let nested = list(vec![list(vec![int(1), int(2)]), list(vec![int(3)])]);
+    assert_eq!(sc.fold("count", std::slice::from_ref(&nested)), FoldResult::Value(FoldValue::Int(2)));
+    // in_array compares the inner array by value — proof the nesting survived
+    // the wire intact rather than arriving as some flattened approximation.
+    assert_eq!(
+        sc.fold("in_array", &[list(vec![int(1), int(2)]), nested]),
+        FoldResult::Value(FoldValue::Bool(true))
+    );
+}
+
+#[test]
+fn php_assigns_absent_keys_and_resolves_duplicates() {
+    let Some(mut sc) = spawn_or_skip("php_assigns_absent_keys_and_resolves_duplicates") else {
+        return;
+    };
+    // A duplicate key is one entry after PHP's own last-wins assignment.
+    let dup = FoldArg::Array(vec![
+        (Some(FoldKey::Int(1)), s("a")),
+        (Some(FoldKey::Int(1)), s("b")),
+    ]);
+    assert_eq!(sc.fold("count", std::slice::from_ref(&dup)), FoldResult::Value(FoldValue::Int(1)));
+    assert_eq!(sc.fold("implode", &[s(""), dup]), FoldResult::Value(FoldValue::Str("b".to_owned())));
+
+    // Mixed explicit and absent keys: the runtime's next-int rule places 'c'.
+    let mixed = FoldArg::Array(vec![
+        (Some(FoldKey::Str("x".to_owned())), s("a")),
+        (Some(FoldKey::Int(5)), s("b")),
+        (None, s("c")),
+    ]);
+    assert_eq!(sc.fold("count", std::slice::from_ref(&mixed)), FoldResult::Value(FoldValue::Int(3)));
+    assert_eq!(
+        sc.fold("implode", &[s(","), mixed]),
+        FoldResult::Value(FoldValue::Str("a,b,c".to_owned()))
+    );
+}
+
+#[test]
+fn an_array_returning_fold_widens() {
+    let Some(mut sc) = spawn_or_skip("an_array_returning_fold_widens") else { return };
+    // Array *arguments* exist; an array *result* is a documented boundary
+    // (#41/#42) — the runner reports it faithfully, the Rust side widens.
+    let r = sc.fold("str_replace", &[s("a"), s("b"), list(vec![s("a")])]);
+    assert!(matches!(r, FoldResult::Widen { .. }), "array result widens, got {r:?}");
+    assert!(!sc.is_poisoned(), "a widened result is not a protocol failure");
 }
 
 #[test]

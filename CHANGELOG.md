@@ -44,6 +44,10 @@ skill seals them into a version section at release time, reconstructing from
   - Requires PHP 8.1 or newer. A platform with no prebuilt binary — notably arm64 musl — is refused by name and pointed at a source build, rather than handed an archive that cannot run.
 - **The effect vocabulary as its own package** — `typedduck/steins-attributes` supplies `#[\Steins\Pure]` and `#[\Steins\Effect]`, and the Composer package requires it, so one install leaves you able to declare an envelope.
   - MIT and inert at runtime, separate from the analyzer because it is vocabulary rather than tooling (ADR-0025). The Homebrew and release-binary channels are unchanged; the attributes were always yours to install there.
+- **`count`, `in_array` and `implode` now compute their value when you write the array out.** Steins evaluates a small set of pure builtins on your own PHP and carries the answer forward as a known value; until now it could only pass scalars to them, so these three — the ones whose whole job is to take an array — never actually ran. `count([1, 2, 3])` is `3`, `implode(",", ["a", "b"])` is `"a,b"`, `in_array(2, [1, 2, 3])` is `true`, and any check downstream of that value now has something to check. Nested literals count too: `count([[1, 2], [3]])` is `2`.
+  - **This can surface findings that were not firing before**, in the ordinary way that knowing a value does: a folded result flows into argument, return and contract checks like any other proven value.
+  - The array has to be written out in full. One element Steins cannot prove — a variable, a call, an offset read — and the whole array is unknown, because `count([1, $x])` is not `2` when `$x` might be an array. A literal of more than 256 entries or nested more than 8 deep is left alone as well.
+  - The keys are your PHP's, not an imitation of them: the array is built by the same engine that evaluates the call, so a repeated key, an omitted key after an explicit one, and the negative-key rule PHP 8.3 changed all behave exactly as they do when you run the code.
 
 ### Fixed
 

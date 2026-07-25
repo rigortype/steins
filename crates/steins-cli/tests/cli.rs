@@ -158,6 +158,38 @@ fn no_php_omits_folded_but_keeps_direct_and_notes_posture() {
     );
 }
 
+#[test]
+fn array_literals_fold_through_the_untouched_allowlist() {
+    // Issue #39's acceptance criterion, end to end: `count`, `in_array` and
+    // `implode` were parked on the `foldable` allowlist behind an argument gate
+    // that no array could pass. Nothing about the allowlist changed — the gate
+    // learned to carry an array literal, and the parked entries lit up.
+    let path = fixture("fold_array.php");
+    let r = run(&["annotate", path.to_str().unwrap()]);
+    assert_eq!(r.code, 0, "annotate never fails on a readable file, got:\n{}", r.stderr);
+    let out = r.stdout;
+
+    // The three parked entries, folded on the project's own PHP.
+    assert!(out.contains("//=> $n = 3"), "count folded, got:\n{out}");
+    assert!(out.contains(r#"//=> $joined = "a,b""#), "implode folded, got:\n{out}");
+    assert!(out.contains("//=> $member = true"), "in_array folded, got:\n{out}");
+    // Nesting is represented: the outer count is 2, not a widen.
+    assert!(out.contains("//=> $nested = 2"), "nested literal folded, got:\n{out}");
+    // PHP's own key semantics, because PHP is what builds the array.
+    assert!(out.contains("//=> $dup = 1"), "duplicate key is one entry, got:\n{out}");
+    assert!(out.contains(r#"//=> $mixed = "a,b,c""#), "mixed keys, got:\n{out}");
+    // The widening pin: one non-literal element and the whole array is unproven.
+    // (the source line is reprinted verbatim; what must be absent is the margin)
+    assert!(out.contains("$widened = count([1, $x]);"), "source reprinted, got:\n{out}");
+    assert!(!out.contains("//=> $widened"), "count([1, $x]) must widen, got:\n{out}");
+
+    // Under `--no-php` every one of these is a folded fact, so all of them go —
+    // the sound subset (ADR-0004) never invents a value it did not execute.
+    let sound = run(&["annotate", "--no-php", path.to_str().unwrap()]);
+    assert_eq!(sound.code, 0);
+    assert!(!sound.stdout.contains("//=>"), "no folded facts without PHP, got:\n{}", sound.stdout);
+}
+
 // ---- annotate (ADR-0020): Rigor-style margin, proven facts only -----------
 
 #[test]

@@ -1092,6 +1092,27 @@ impl ArgValue {
         )
     }
 
+    /// Whether this is a **self-evident value**: a scalar literal, or an array
+    /// literal whose every element is itself self-evident (recursively).
+    ///
+    /// This is [`Self::is_literal`] extended over the array carrier, and it is the
+    /// predicate both guard narrowing ([`CondOperand::Literal`]) and the fold seam
+    /// (ADR-0028) need: an array is a *value* exactly when nothing inside it is
+    /// still unresolved. One `Var`/call/offset-read element anywhere in the tree
+    /// leaves the whole array unproven — it widens rather than folding (issue #39),
+    /// which is the only reading compatible with the zero-FP bar (ADR-0002).
+    ///
+    /// The empty array is concrete (`count([])` is a fold, not a widen). Keys need
+    /// no test: lowering already refuses a non-literal key by collapsing the whole
+    /// literal to [`Self::Other`] (see `lower_array_key`).
+    #[must_use]
+    pub fn is_concrete_value(&self) -> bool {
+        match self {
+            ArgValue::Array(items) => items.iter().all(|(_, v)| v.is_concrete_value()),
+            v => v.is_literal(),
+        }
+    }
+
     /// Render the value as it should appear in a diagnostic message.
     #[must_use]
     pub fn render(&self) -> String {
@@ -5115,19 +5136,10 @@ fn lower_cond_operand(expr: &Expression<'_>) -> CondOperand {
             // (ADR-0049 §7: the `=== []` branch is what proves offset 0 missing). A
             // non-concrete array (an element that is a `Var`/call/offset read) stays
             // `Other`, so nothing unproven is ever treated as a decided literal.
-            v if v.is_literal() || arg_is_concrete_array(&v) => CondOperand::Literal(v),
+            v if v.is_concrete_value() => CondOperand::Literal(v),
             _ => CondOperand::Other,
         },
     }
-}
-
-/// Whether an [`ArgValue`] is a fully-concrete array literal: an `Array` whose every
-/// element value is itself a scalar literal or a concrete array (recursively). This
-/// is the "self-evident value" predicate for arrays that [`CondOperand::Literal`]
-/// requires — a `Var`/call/offset-read element makes the array unproven.
-fn arg_is_concrete_array(v: &ArgValue) -> bool {
-    let ArgValue::Array(items) = v else { return false };
-    items.iter().all(|(_, val)| val.is_literal() || arg_is_concrete_array(val))
 }
 
 /// The bare variables a condition subtree reads (for the opaque-condition read-set

@@ -56,10 +56,15 @@ mod return_facts_generated;
 /// arguments to be literals the IR carries before it asks the sidecar.
 ///
 /// Several allowlisted functions (`sprintf`, `str_replace`, `in_array`, `count`,
-/// `implode`) commonly take **array** arguments. The trace IR has no array
-/// literal yet (ADR-0027), so those calls simply will not qualify — every arg
-/// must be an `int`/`float`/`string`/`bool`/`null` literal. They stay on the
-/// list so they light up automatically once array literals arrive.
+/// `implode`) commonly take **array** arguments. Those calls now qualify: an
+/// argument may be a scalar literal *or* an array literal that is concrete all the
+/// way down (issue #39). `in_array`/`count`/`implode` were parked here waiting for
+/// exactly that, and lit up when the fold seam learned to carry an array — this
+/// list never changed, which is the point.
+///
+/// A folded *result* is still scalar-only: a builtin that returns an array (say
+/// `str_replace` over an array subject) widens, because carrying an array back
+/// would seed synthesized array facts rather than read written ones (#41/#42).
 #[must_use]
 pub fn foldable(name: &str) -> bool {
     // Sorted for readability; matched case-insensitively (PHP function names are

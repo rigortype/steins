@@ -38,8 +38,18 @@ const RUNNER_SRC: &str = include_str!("../runner.php");
 /// anything slower is treated as misbehavior and widened.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// A JSON-encodable literal argument to a folded call. Only the scalar literals
-/// the trace IR carries (ADR-0027) are representable.
+/// A JSON-encodable literal argument to a folded call: the scalar literals the
+/// trace IR carries (ADR-0027), plus an **array literal** of them (issue #39).
+///
+/// # Why an array argument is a list of entries, not a JSON object
+///
+/// PHP array semantics that JSON cannot express are deliberately left to the
+/// runtime rather than reimplemented here (ADR-0004: a fold is the value the
+/// *project's own PHP* produces). An entry's key is `None` for an absent key
+/// (`[$a, $b]`), and the runner appends with `$arr[] =`, so PHP's own next-int
+/// rule assigns it — including the negative-key edge PHP 8.3 changed. Duplicate
+/// keys resolve by plain assignment, i.e. PHP's own last-wins. A JSON object
+/// could carry neither (it has no absent key, and its keys are all strings).
 #[derive(Debug, Clone, PartialEq)]
 pub enum FoldArg {
     Int(i64),
@@ -47,6 +57,19 @@ pub enum FoldArg {
     Str(String),
     Bool(bool),
     Null,
+    /// An array literal: its entries in source order, each an already
+    /// PHP-normalized key (`None` = absent, assigned by the runtime) and a value
+    /// that is itself a [`FoldArg`] — so nested array literals are representable.
+    Array(Vec<(Option<FoldKey>, FoldArg)>),
+}
+
+/// An explicit array-literal key on the fold wire. PHP normalization (integer-like
+/// strings to `Int`, floats truncated, `bool` to `int`, `null` to `""`) has already
+/// happened at lowering, so only the two runtime key types survive here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FoldKey {
+    Int(i64),
+    Str(String),
 }
 
 /// A concrete value returned by a successful fold, tagged with its PHP type.
@@ -361,7 +384,16 @@ impl Drop for Sidecar {
     }
 }
 
+/// The wire tag that marks an array argument. A scalar argument encodes to a bare
+/// JSON scalar, so a JSON *object* can only ever be this envelope — the tag is a
+/// readability aid and a shape check for the runner, not a disambiguator.
+const ARRAY_TAG: &str = "__steins_array";
+
 /// Encode a [`FoldArg`] as JSON, preserving float-ness (`5.0`, not `5`).
+///
+/// An array becomes `{"__steins_array": [[key, value], …]}` with `key` being
+/// `null` (absent), an integer, or a string — the three [`FoldKey`] states. Values
+/// recurse, so a nested array literal encodes as a nested envelope.
 fn fold_arg_to_json(arg: &FoldArg) -> serde_json::Value {
     match arg {
         FoldArg::Int(v) => serde_json::json!(v),
@@ -370,6 +402,20 @@ fn fold_arg_to_json(arg: &FoldArg) -> serde_json::Value {
         FoldArg::Str(v) => serde_json::json!(v),
         FoldArg::Bool(v) => serde_json::json!(v),
         FoldArg::Null => serde_json::Value::Null,
+        FoldArg::Array(entries) => {
+            let items: Vec<serde_json::Value> = entries
+                .iter()
+                .map(|(k, v)| {
+                    let key = match k {
+                        None => serde_json::Value::Null,
+                        Some(FoldKey::Int(i)) => serde_json::json!(i),
+                        Some(FoldKey::Str(s)) => serde_json::json!(s),
+                    };
+                    serde_json::Value::Array(vec![key, fold_arg_to_json(v)])
+                })
+                .collect();
+            serde_json::json!({ ARRAY_TAG: items })
+        }
     }
 }
 
@@ -400,7 +446,11 @@ fn parse_fold_value(result: &serde_json::Value) -> Option<FoldValue> {
         "string" => value.as_str().map(|s| FoldValue::Str(s.to_owned())),
         "bool" => value.as_bool().map(FoldValue::Bool),
         "null" => Some(FoldValue::Null),
-        // `array` (and anything else) has no literal in our IR yet — widen.
+        // An array **result** widens: issue #39 makes array literals fold
+        // *arguments*, and stops there deliberately. Carrying a folded array back
+        // as a value would seed synthesized array facts into the env, which is the
+        // array-return work of #41/#42 — a documented boundary, not an oversight.
+        // Anything else (objects, resources) has no literal in our IR at all.
         _ => None,
     }
 }
