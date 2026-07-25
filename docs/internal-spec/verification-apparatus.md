@@ -16,7 +16,7 @@ is the instrument.
 | `lean-check` | build the Lean 4 spec of the value domain and verify the committed differential vectors are still what it prints (`--bless` to rewrite) |
 | `gen-catalog` | regenerate the builtin class hierarchy **and the return-fact table** from the mining TOML |
 | `freq` | builtin frequency mining (catalog seeding input) |
-| `nsrt` | the `assertType` harness (oracle idea B): three-verdict measurement of dump renderings against PHPStan's own `nsrt/` fixtures, `assertType` recognized **harness-only** |
+| `nsrt` | the `assertType` harness (oracle idea B): four-verdict measurement of dump renderings against PHPStan's own `nsrt/` fixtures, `assertType` recognized **harness-only** |
 
 ## `fp-gate`
 
@@ -137,6 +137,79 @@ with `#guard_msgs`, so weakening a proof fails `lake build`.
 What is *not* proved, and is checked exhaustively instead: `join` associativity
 (110,592 triples, zero mismatches). It matters because `join_envs` folds
 multi-branch joins left-to-right. See `spike/lean-domain/REPORT.md`.
+
+## `nsrt`
+
+PHPStan's `assertType` corpus read as an oracle for inference. Each observation is
+given one of four verdicts, and the split between the last two is the point of
+issue #47.
+
+| verdict | meaning |
+| --- | --- |
+| `match` | semantically equal to the assertion after normalization |
+| `unsupported` | the assertion uses vocabulary Steins deliberately does not model |
+| `subsumed` | Steins is strictly **more precise**: what it renders is a proper subtype of what PHPStan asserts |
+| `differ` | a genuine divergence, including `unknown` where a concrete type was asserted |
+
+Before the fourth verdict existed, `subsumed` rows scored as `differ`. That made the
+instrument argue against the analyzer: PHPStan asserts `bool` for
+`in_array('foo', ['foo', 'bar'])` because it declines to fold a loose comparison,
+Steins proves `true`, and the slice that shipped the improvement booked a
+regression. Since nsrt's counts are what every inference slice is ranked by
+(ADR-0056 ranked its whole programme off them, and ADR-0061's type rung is measured
+the same way), a metric that falls as folding widens is worse than a wrong number —
+it is a number that argues against the work.
+
+The subtype test **reuses the acceptance relation the checker enforces**:
+`steins_contract::lower_str` on both strings, then `normalize::subsumes` — the same
+relation behind param contravariance / return covariance and ADR-0056's envelope
+subset check. There is deliberately no harness-local definition of "narrower than";
+one would drift from what the analyzer actually does, and the harness would end up
+measuring something else. Anything the relation cannot decide (`Maybe`) stays
+`differ`, which is the FP-safe direction for a metric.
+
+Two asymmetries are load-bearing and pinned by unit tests:
+
+- **Steins wider than the assertion stays a failure.** `bool` where PHPStan asserts
+  `true` is a real gap. Were that laundered into `subsumed`, every widening
+  regression would report as precision.
+- **PHP's int→float coercion is not membership.** `admits_val(float, Int)` is `Yes`
+  because PHP coerces at a declared `float` slot; PHPStan's own hierarchy answers
+  `No`. So an `int` under an asserted `float` is a contradiction, not an open
+  question — `bug-12393.php:40` is Steins missing a typed-property coercion — and the
+  harness declines to ask the relation across that boundary.
+
+### Does `subsumed` count toward the headline? No. (Settled; do not re-argue.)
+
+The headline stays `match`: oracle-**confirmed** agreement. A `subsumed` row is only
+*unfalsified* — the corpus says `bool` is admissible, it never says `true` is right,
+and a fold bug producing the wrong literal under a correct base type would land here
+too. Merging the two would make the headline unfalsifiable and `match` would stop
+meaning "we reproduce PHPStan". The 24 rows at the baseline below make the case
+concretely: several are Steins narrowing for reasons that are *not* extra
+precision — `array-find-key.php:59` and `bug-9293.php:27` render bare `null` where a
+real value is reachable, `bug-10122.php:17` misses the string-increment fallout, and
+the `bug-2600*.php` rows narrow on an `(asserted)`-stratum phpdoc fact that ignores a
+`= null` default. All four are strictly narrower and all four are gaps.
+
+What actually fixes the defect is that these rows **leave `differ`**, not that they
+join `match`. A slice that converts ten divergences into subsumptions now reads as
+differ falling and subsumed rising, never as a regression. The report prints
+`match + subsumed` as an explicit secondary *admissible* figure so that movement is
+visible without unverified claims entering the headline.
+
+Recorded baseline (post-#47, phpstan-src fixtures as checked out):
+
+| | count |
+| --- | --- |
+| match (**headline**) | 734 |
+| unsupported | 6,987 |
+| subsumed | 24 |
+| differ | 7,768 |
+| measured | 15,513 |
+
+Future slices are measured against these numbers, not against the pre-#47 pair
+(734 / 7,792) in which the 24 subsumptions were counted as losses.
 
 ## `gen-catalog`
 

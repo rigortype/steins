@@ -1439,6 +1439,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "steins-contract",
  "steins-db",
  "steins-infer",
  "steins-phpdoc",

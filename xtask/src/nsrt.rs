@@ -17,16 +17,57 @@
 //! SEPARATE single-file projects sharing one resident sidecar folder — fast, and
 //! free of cross-file namespace collisions.
 //!
-//! Three-verdict taxonomy (see [`classify`]):
+//! Four-verdict taxonomy (see [`classify`]):
 //!
 //! - `match` — semantically equal after normalization (case, `|` order, nullable
 //!   forms, int-range spelling). Generous only where equivalence is certain.
 //! - `unsupported` — the expected string uses vocabulary Steins deliberately does
 //!   not model (`*ERROR*`/`*NEVER*`, `mixed`, generics/shapes, intersections,
 //!   `object`, array families, …), named by pattern.
+//! - `subsumed` — Steins is strictly **more precise** than the oracle: what Steins
+//!   renders is a proper subtype of what PHPStan asserts (issue #47).
 //! - `differ` — Steins renders something semantically different (the gap
 //!   inventory), including `unknown` where PHPStan asserts a concrete type (a
 //!   reach gap).
+//!
+//! ## `subsumed`: why it is not `differ`, and why it is not `match` either
+//!
+//! PHPStan asserts `bool` for `in_array('foo', ['foo', 'bar'])` because it declines
+//! to constant-fold a loose comparison; Steins proves `true`. Scoring that as a
+//! `differ` makes the instrument argue against the analyzer: as folding widens
+//! (#39) and the argument-dependent return rung lands (ADR-0061), every gain in
+//! precision would be booked as a regression. `true` is admissible under `bool` —
+//! Steins did not get it wrong, it answered a question the oracle left open.
+//!
+//! **The relation is the checker's own.** [`is_subsumption`] lowers both strings
+//! through `steins_contract::lower_str` and asks `normalize::subsumes` — the single
+//! acceptance relation the contract layer already uses for param contravariance /
+//! return covariance, and the same one behind ADR-0056's envelope subset check. A
+//! harness-local notion of "narrower than" would measure something the analyzer
+//! does not enforce.
+//!
+//! **The asymmetry is the point.** Steins answering `bool` where PHPStan asserts
+//! `true` is a real gap and stays a `differ`; only `expected ⊇ got` (strictly, and
+//! with `Certainty::Yes` on the covering direction) earns `subsumed`. Laundering
+//! the reverse direction would turn every widening regression into a "we're more
+//! precise" row — the worst possible failure for this instrument. Pinned by
+//! `reverse_direction_is_never_subsumption`.
+//!
+//! ## Headline decision (settled here; do not re-argue per slice)
+//!
+//! **`subsumed` does NOT count toward the headline `match` number.** The headline
+//! is *agreement with the oracle*: a `match` is a claim PHPStan independently
+//! confirms. A `subsumed` row is only *unfalsified* by the oracle — the corpus
+//! says `bool` is admissible, it does not say `true` is right. A fold bug that
+//! produced `'bar'` where the truth is `'foo'` and PHPStan says `string` would land
+//! in `subsumed` too, so merging the two would make the headline unfalsifiable and
+//! `match` would stop meaning "we reproduce PHPStan".
+//!
+//! What fixes issue #47 is that these rows leave `differ`, not that they join
+//! `match`: a slice that converts ten `differ`s into `subsumed`s now reads as
+//! differ falling and subsumed rising, never as a regression. The report prints
+//! `match + subsumed` as an explicit secondary **admissible** figure so that
+//! movement is visible without unverified claims entering the headline.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -103,7 +144,7 @@ fn default_nsrt_dir() -> PathBuf {
 // classification
 // ----------------------------------------------------------------------------
 
-/// The three-verdict taxonomy. Observations whose expected slot could not be
+/// The four-verdict taxonomy. Observations whose expected slot could not be
 /// resolved to a plain string (`::class`/concat) never reach [`classify`] — they are
 /// recorded as the `"skipped"` housekeeping bucket directly in [`Record::classify`]
 /// and kept out of the measurement denominator.
@@ -111,6 +152,9 @@ fn default_nsrt_dir() -> PathBuf {
 enum Verdict {
     Match,
     Unsupported,
+    /// Steins is strictly more precise than the oracle (issue #47; see the module
+    /// docs for why this is neither `Match` nor `Differ`).
+    Subsumed,
     Differ,
 }
 
@@ -125,8 +169,8 @@ struct Record {
     /// Steins' rendering.
     got: String,
     asserted: bool,
-    /// For `unsupported`: the named vocabulary pattern. For `differ`: the coarse
-    /// gap-class key. Empty for `match`/`skipped`.
+    /// For `unsupported`: the named vocabulary pattern. For `differ`/`subsumed`:
+    /// the coarse gap-class key. Empty for `match`/`skipped`.
     class: String,
 }
 
@@ -162,13 +206,15 @@ fn verdict_name(v: Verdict) -> &'static str {
     match v {
         Verdict::Match => "match",
         Verdict::Unsupported => "unsupported",
+        Verdict::Subsumed => "subsumed",
         Verdict::Differ => "differ",
     }
 }
 
 /// Classify one (expected, got) pair. Unsupported-vocabulary expected strings are
 /// classified first (Steins does not aim there); otherwise the two are normalized
-/// and compared for certain semantic equivalence.
+/// and compared for certain semantic equivalence, then — only when they are not
+/// equal — asked the one-directional subsumption question (issue #47).
 fn classify(expected: &str, got: &str) -> (Verdict, String) {
     if let Some(pattern) = unsupported_pattern(expected) {
         return (Verdict::Unsupported, pattern.to_owned());
@@ -176,7 +222,82 @@ fn classify(expected: &str, got: &str) -> (Verdict, String) {
     if normalize(expected) == normalize(got) {
         return (Verdict::Match, String::new());
     }
+    if is_subsumption(expected, got) {
+        return (Verdict::Subsumed, gap_class(expected, got));
+    }
     (Verdict::Differ, gap_class(expected, got))
+}
+
+// ----------------------------------------------------------------------------
+// subsumption (issue #47) — the checker's own acceptance relation
+// ----------------------------------------------------------------------------
+
+/// Steins' own sentinel renderings. They are not type strings: `unknown` is the
+/// reach gap this harness exists to inventory, and lowering it would parse as a
+/// *class named `unknown`*, which no expected type subsumes with `Yes` — but the
+/// guard is explicit so a future sentinel cannot quietly become "more precise".
+const STEINS_SENTINELS: &[&str] = &["unknown", "no declared contract"];
+
+/// Whether `got` is strictly narrower than `expected` — Steins answering a question
+/// the oracle left open (issue #47).
+///
+/// Both strings are lowered through the ordinary phpdoc path
+/// (`steins_contract::lower_str`) and judged by `normalize::subsumes`, the single
+/// acceptance relation the contract layer already enforces (param contravariance /
+/// return covariance, and ADR-0056's envelope subset check). No second definition
+/// of narrowing lives in this harness: if the checker would not call `got` an
+/// acceptable inhabitant of `expected`, neither does the instrument.
+///
+/// Strictness is the covering direction answering `Yes` while the reverse does not.
+/// Anything the relation cannot decide (`Maybe`, the honest floor for `Opaque`, for
+/// class hierarchies steins-contract carries no oracle for, and for arrays/shapes)
+/// is **not** a subsumption — it stays in the `differ` inventory where it can be
+/// triaged, which is the FP-safe direction for a metric.
+fn is_subsumption(expected: &str, got: &str) -> bool {
+    if STEINS_SENTINELS.contains(&got.trim()) {
+        return false;
+    }
+    if crosses_int_float(expected, got) {
+        return false;
+    }
+    let (Some(exp_ty), Some(got_ty)) =
+        (steins_contract::lower_str(expected), steins_contract::lower_str(got))
+    else {
+        return false; // one side does not parse as a type — not a comparison at all
+    };
+    use steins_contract::normalize::subsumes;
+    subsumes(&exp_ty, &got_ty).is_yes() && !subsumes(&got_ty, &exp_ty).is_yes()
+}
+
+/// Whether the pair straddles the int/float boundary in the widening direction —
+/// the one place the acceptance relation answers a question this harness is not
+/// asking.
+///
+/// `admits_val(float, Int) = Yes` ("float accepts ints", PHPStan core semantics) is
+/// the rule for a value crossing into a **declared** `float` slot: PHP coerces it
+/// there. It is not a claim that an int value *is* a float, and PHPStan's own
+/// hierarchy answers the membership question `No`
+/// (`FloatType::isSuperTypeOf(IntegerType)`). So when the oracle asserts `float` and
+/// Steins renders `int`, the oracle has *contradicted* Steins, not left the question
+/// open — `bug-12393.php:40` is exactly that: `$this->float = $i` on a
+/// `private float $float`, where the runtime value is a float and Steins is missing
+/// the typed-property coercion. Booking it as precision would launder a live
+/// analyzer bug into the good bucket.
+///
+/// This introduces no second notion of narrowing: [`subsumes`] remains the only
+/// relation consulted. It declines to *ask* it across the coercion boundary, which
+/// is the direction that keeps a real gap visible in the `differ` inventory.
+///
+/// [`subsumes`]: steins_contract::normalize::subsumes
+fn crosses_int_float(expected: &str, got: &str) -> bool {
+    fn int_flavored(s: &str) -> bool {
+        normalize(s)
+            .split('|')
+            .any(|a| matches!(atom_kind(a), "int" | "int-literal" | "int-range"))
+    }
+    // Only the widening direction is blocked: an int-flavored `got` needs an
+    // int-flavored arm in `expected` to be a *member*, not merely coercible.
+    int_flavored(got) && !int_flavored(expected)
 }
 
 // ----------------------------------------------------------------------------
@@ -601,21 +722,28 @@ fn report(records: &[Record], elapsed: f64) {
     let total = records.len();
     let count = |v: &str| records.iter().filter(|r| r.verdict == v).count();
     let (m, u, d, s) = (count("match"), count("unsupported"), count("differ"), count("skipped"));
+    let sub = count("subsumed");
     // The measurement denominator excludes skipped (unresolvable expected slots).
-    let measured = m + u + d;
+    let measured = m + u + sub + d;
     let pct = |n: usize| if measured == 0 { 0.0 } else { 100.0 * n as f64 / measured as f64 };
 
     println!("=== nsrt assertType harness — verdict summary ===\n");
     println!("total assertType observations: {total}");
     println!("  skipped (expected unresolvable ::class/concat): {s}");
-    println!("measured (match + unsupported + differ):          {measured}\n");
+    println!("measured (match + unsupported + subsumed + differ): {measured}\n");
     println!("  {:<13} {:>6}   {:>6}", "verdict", "count", "% meas");
     println!("  {}", "-".repeat(30));
     println!("  {:<13} {:>6}   {:>5.1}%", "match", m, pct(m));
     println!("  {:<13} {:>6}   {:>5.1}%", "unsupported", u, pct(u));
+    println!("  {:<13} {:>6}   {:>5.1}%", "subsumed", sub, pct(sub));
     println!("  {:<13} {:>6}   {:>5.1}%", "differ", d, pct(d));
     println!("  {}", "-".repeat(30));
-    println!("  {:<13} {:>6}   ({:.2}s)\n", "TOTAL meas", measured, elapsed);
+    println!("  {:<13} {:>6}   ({:.2}s)", "TOTAL meas", measured, elapsed);
+    // The headline stays `match` — oracle-confirmed agreement. `subsumed` rows are
+    // only *unfalsified* by the oracle, so they are reported beside it, never inside
+    // it (issue #47; the argument is in this module's docs).
+    println!("\n  HEADLINE (match, oracle-confirmed):   {m}");
+    println!("  admissible (match + subsumed):        {}\n", m + sub);
 
     // Unsupported pattern breakdown.
     let mut unsup: BTreeMap<&str, usize> = BTreeMap::new();
@@ -627,6 +755,18 @@ fn report(records: &[Record], elapsed: f64) {
     println!("=== unsupported-vocabulary patterns ({u} total) ===\n");
     for (pat, n) in &unsup_sorted {
         println!("  {:<20} {:>6}", pat, n);
+    }
+
+    // Subsumption listing — small enough to print whole, and worth reading row by
+    // row: each one is a place Steins decided something PHPStan left open.
+    let subsumed: Vec<&Record> = records.iter().filter(|r| r.verdict == "subsumed").collect();
+    println!("\n=== subsumed: Steins strictly more precise ({sub} total) ===\n");
+    for r in &subsumed {
+        let mark = if r.asserted { " (asserted)" } else { "" };
+        println!(
+            "  {}:{}\n      phpstan: {}\n      steins:  {}{}",
+            r.file, r.line, r.expected, r.got, mark
+        );
     }
 
     // Differ gap-class ranking.
@@ -728,6 +868,80 @@ mod tests {
         assert_eq!(classify("positive-int", "int<1, max>").0, Verdict::Match);
         assert_eq!(classify("int", "unknown").0, Verdict::Differ);
         assert_eq!(classify("int", "string").0, Verdict::Differ);
+    }
+
+    // ---- subsumption (issue #47) --------------------------------------------
+
+    #[test]
+    fn strictly_narrower_is_subsumed_not_differ() {
+        // The row that motivated the verdict: binary.php:547, `in_array('foo',
+        // ['foo', 'bar'])` — PHPStan declines to fold the loose comparison and
+        // asserts `bool`; Steins proves `true`, which is admissible under `bool`.
+        assert_eq!(classify("bool", "true").0, Verdict::Subsumed);
+        assert_eq!(classify("int", "5").0, Verdict::Subsumed);
+        assert_eq!(classify("string", "'foo'").0, Verdict::Subsumed);
+        assert_eq!(classify("int|null", "int").0, Verdict::Subsumed);
+        assert_eq!(classify("int", "int<1, max>").0, Verdict::Subsumed);
+        assert_eq!(classify("string", "non-empty-string").0, Verdict::Subsumed);
+    }
+
+    /// The asymmetry is the whole point of the verdict: Steins *wider* than the
+    /// assertion is a real gap. If this ever flipped, every widening regression
+    /// would launder itself into the "we're more precise" bucket.
+    #[test]
+    fn reverse_direction_is_never_subsumption() {
+        assert_eq!(classify("true", "bool").0, Verdict::Differ);
+        assert_eq!(classify("5", "int").0, Verdict::Differ);
+        assert_eq!(classify("'foo'", "string").0, Verdict::Differ);
+        assert_eq!(classify("int", "int|null").0, Verdict::Differ);
+        assert_eq!(classify("int<1, max>", "int").0, Verdict::Differ);
+        assert_eq!(classify("non-empty-string", "string").0, Verdict::Differ);
+        assert!(!is_subsumption("true", "bool"));
+    }
+
+    #[test]
+    fn unrelated_types_and_sentinels_stay_differ() {
+        assert_eq!(classify("int", "string").0, Verdict::Differ);
+        assert_eq!(classify("'a'", "'b'").0, Verdict::Differ);
+        // The reach gap must never read as precision, whatever was asserted.
+        assert_eq!(classify("int", "unknown").0, Verdict::Differ);
+        assert_eq!(classify("stdClass", "unknown").0, Verdict::Differ);
+        assert_eq!(classify("int", "no declared contract").0, Verdict::Differ);
+        for s in STEINS_SENTINELS {
+            assert!(!is_subsumption("bool", s), "{s} must not be a subsumption");
+        }
+    }
+
+    /// An equal-but-differently-spelled pair is mutual subsumption, not a *strict*
+    /// subtype — it must not enter the subsumed bucket through the back door. (The
+    /// normalizer catches the spellings it is certain about before this test runs.)
+    #[test]
+    fn mutual_subsumption_is_not_strict() {
+        assert!(!is_subsumption("int", "int"));
+        assert!(!is_subsumption("positive-int", "int<1, max>"));
+    }
+
+    /// The coercion boundary: `float ⊇ int` is `Yes` in the acceptance relation
+    /// (PHP coerces at a declared `float` slot) but `No` in PHPStan's hierarchy.
+    /// `bug-12393.php:40/56` are Steins missing a typed-property coercion, so they
+    /// must stay `differ` — precision must never be inferred from a coercion rule.
+    #[test]
+    fn int_where_float_is_asserted_is_a_gap_not_precision() {
+        assert_eq!(classify("float", "int").0, Verdict::Differ);
+        assert_eq!(classify("1.0", "1").0, Verdict::Differ);
+        assert_eq!(classify("float|null", "int").0, Verdict::Differ);
+        // …but an int-flavored expected arm makes it a genuine membership question.
+        assert_eq!(classify("float|int|string", "int").0, Verdict::Subsumed);
+        assert_eq!(classify("int|float", "1").0, Verdict::Subsumed);
+        // The float side of a mixed-numeric expected is unaffected.
+        assert_eq!(classify("float|int|string", "string").0, Verdict::Subsumed);
+    }
+
+    #[test]
+    fn unsupported_expected_wins_over_subsumption() {
+        // `mixed` subsumes everything, but Steins does not aim at `mixed` — the
+        // vocabulary verdict is decided first, so the denominator is unchanged.
+        assert_eq!(classify("mixed", "int").0, Verdict::Unsupported);
     }
 
     #[test]
