@@ -27,15 +27,37 @@ git -C "$work/pkg" add -A
 git -C "$work/pkg" -c user.email=ci@localhost -c user.name=ci commit -qm "package fixture"
 git -C "$work/pkg" tag "$tag"
 
+# STEINS_ATTRIBUTES_REPO points at a local checkout of rigortype/steins-attributes.
+# Two uses: developing the two packages together, and running this before that
+# package is registered on Packagist. Unset, the attributes resolve normally.
+attributes_repo=""
+if [ -n "${STEINS_ATTRIBUTES_REPO:-}" ]; then
+  echo "Resolving the attributes from $STEINS_ATTRIBUTES_REPO instead of Packagist"
+  attributes_repo=", {\"type\": \"vcs\", \"url\": \"$STEINS_ATTRIBUTES_REPO\"}"
+fi
+
 cat > "$work/app/composer.json" <<EOF
 {
-    "repositories": [{"type": "vcs", "url": "$work/pkg"}],
+    "repositories": [{"type": "vcs", "url": "$work/pkg"}$attributes_repo],
     "require-dev": {"rigortype/steins": "$version"}
 }
 EOF
 
 cd "$work/app"
-composer install --no-interaction --quiet
+# The analyzer package requires rigortype/steins-attributes, which resolves from
+# Packagist — the local fixture covers only the shim. Until that package is
+# registered, this is where the run stops, and a wall of Composer resolution
+# output is a poor way to learn why.
+if ! install_log="$(composer install --no-interaction 2>&1)"; then
+  printf '%s\n' "$install_log" | sed 's/^/  /'
+  if printf '%s' "$install_log" | grep -q "rigortype/steins-attributes"; then
+    echo
+    echo "  The attributes package could not be resolved. It is a hard requirement of"
+    echo "  rigortype/steins (ADR-0025 amendment) and comes from Packagist, so this smoke"
+    echo "  cannot pass until rigortype/steins-attributes is registered there."
+  fi
+  exit 1
+fi
 
 fail=0
 check() {
@@ -46,6 +68,17 @@ check() {
     fail=1
   fi
 }
+
+echo
+echo "The vocabulary came with it"
+# The reason the requirement is hard rather than suggested: one install has to
+# leave the user able to write #[\Steins\Pure] without a second command.
+if php -r 'require "vendor/autoload.php"; exit(class_exists("Steins\Pure") && class_exists("Steins\Effect") ? 0 : 1);'; then
+  echo "  ok      Steins\\Pure and Steins\\Effect are autoloadable"
+else
+  echo "  FAIL    the attributes did not come along, or are not autoloadable"
+  fail=1
+fi
 
 echo
 echo "Cold run — downloads, verifies, execs"

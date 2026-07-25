@@ -13,6 +13,11 @@ matching the installed version, verifies its published sha256, and runs it.
 Pinning the analyzer in `composer.lock` beside the code it analyzes is the
 point — CI and every developer then resolve the same one. Requires PHP 8.1+.
 
+That one command also brings in
+[`rigortype/steins-attributes`](https://github.com/rigortype/steins-attributes)
+— the `#[\Steins\Pure]` and `#[\Steins\Effect]` classes you write in your own
+source. The analyzer is Apache-2.0; the attributes are MIT and inert at runtime.
+
 Machine-wide instead of per-project:
 
 ```
