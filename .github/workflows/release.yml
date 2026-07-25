@@ -65,12 +65,31 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          # The Release body is this section verbatim; an empty one would ship a
-          # release with no notes, so catch it here rather than after publishing.
+          # The Release body is this section; an empty one would ship a release
+          # with no notes, so catch it here rather than after publishing.
+          #
+          # Headings shift up one level. In CHANGELOG.md the version is `##` and
+          # its categories are `###`, but the Release page supplies the version
+          # as its own title — so lifting the section unchanged leaves `###`
+          # headings under nothing, one level deeper than any parent. Promoting
+          # them makes the body a document in its own right.
+          #
+          # The promotion runs AFTER the terminator test on purpose: rewriting
+          # first could only ever produce `## Added`, which does not match the
+          # bracketed `^## \[` this stops on, but the order is what makes that
+          # obvious to the next reader rather than a thing to re-derive.
+          #
+          # The link-definition terminator is the second stop, and it is not
+          # hypothetical: the OLDEST version section has no `## [` after it, so
+          # it runs to end-of-file and swallows the `[Unreleased]: …compare…`
+          # footer. That is what happened to v0.1.0, whose published body ends
+          # with two bare compare links. Every later release has a predecessor
+          # heading to stop on and never showed the bug.
           awk -v v="$version" '
             $0 ~ "^## \\[" v "\\]" { p = 1; next }
             p && /^## \[/ { exit }
-            p { print }
+            p && /^\[[^]]+\]: / { exit }
+            p { sub(/^### /, "## "); print }
           ' CHANGELOG.md > /tmp/release-body.md
           if [ ! -s /tmp/release-body.md ]; then
             echo "::error::CHANGELOG.md has no non-empty '## [$version]' section — seal [Unreleased] into it before tagging (see the steins-release-prep skill)"
@@ -97,10 +116,13 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
+          # Identical to the `guard` job's extraction, promotion included — the
+          # body it printed for review has to be the body that ships.
           awk -v v="$version" '
             $0 ~ "^## \\[" v "\\]" { p = 1; next }
             p && /^## \[/ { exit }
-            p { print }
+            p && /^\[[^]]+\]: / { exit }
+            p { sub(/^### /, "## "); print }
           ' CHANGELOG.md > release-body.md
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
