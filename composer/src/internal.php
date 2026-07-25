@@ -21,6 +21,7 @@ use RuntimeException;
 
 use function array_map;
 use function chmod;
+use function count;
 use function curl_error;
 use function curl_exec;
 use function curl_getinfo;
@@ -29,6 +30,7 @@ use function curl_setopt;
 use function escapeshellarg;
 use function extension_loaded;
 use function fclose;
+use function file;
 use function file_exists;
 use function file_get_contents;
 use function file_put_contents;
@@ -38,6 +40,8 @@ use function fprintf;
 use function fwrite;
 use function getenv;
 use function glob;
+use function hash_equals;
+use function hash_file;
 use function implode;
 use function ini_get;
 use function is_array;
@@ -49,6 +53,8 @@ use function ltrim;
 use function mkdir;
 use function number_format;
 use function php_uname;
+use function preg_match;
+use function preg_split;
 use function proc_close;
 use function proc_get_status;
 use function proc_open;
@@ -68,6 +74,8 @@ use const CURLOPT_HTTPHEADER;
 use const CURLOPT_NOPROGRESS;
 use const CURLOPT_PROGRESSFUNCTION;
 use const CURLOPT_USERAGENT;
+use const FILE_IGNORE_NEW_LINES;
+use const FILE_SKIP_EMPTY_LINES;
 use const LOCK_EX;
 use const LOCK_UN;
 use const STDERR;
@@ -326,6 +334,108 @@ function archive_name(string $version, string $target): string
 }
 
 /**
+ * The checksum sidecar's asset name for a version and target.
+ *
+ * NOT `<archive>.sha256` — the sidecar's own name and the name recorded inside
+ * it differ, and the difference is easy to get backwards. In
+ * upload-rust-binary-action the `archive` input is the EXTENSIONLESS base; the
+ * extension is appended only when naming the asset, while the checksum write
+ * redirects to the base. So:
+ *
+ *     asset    steins-v0.1.0-<target>.tar.gz
+ *     sidecar  steins-v0.1.0-<target>.sha256           <- fetch THIS
+ *     content  "<hash>  steins-v0.1.0-<target>.tar.gz" <- match THIS line
+ *
+ * The `homebrew` job in .github/workflows/release.yml reads them the same way,
+ * for the same reason. Keep the two readings in step.
+ *
+ * @internal
+ */
+function sidecar_name(string $version, string $target): string
+{
+    return 'steins-' . namespace\tag_for($version) . "-{$target}.sha256";
+}
+
+/**
+ * The digest a checksum sidecar records for a named archive.
+ *
+ * Selects the line by archive name rather than assuming the file holds exactly
+ * one: the action hashes its whole asset array into a single sidecar, so
+ * enabling another archive format upstream would make this two lines. `shasum`
+ * may prefix the name with `*` for binary mode.
+ *
+ * @throws RuntimeException If the file is unreadable, records no line for this
+ *   archive, or records something that is not a sha256 digest.
+ *
+ * @internal
+ */
+function expected_digest(string $sidecarFile, string $asset): string
+{
+    $lines = file($sidecarFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if ($lines === false) {
+        throw new RuntimeException("could not read the checksum file {$sidecarFile}");
+    }
+
+    foreach ($lines as $line) {
+        $fields = preg_split('/\s+/', trim($line));
+        if ($fields === false || count($fields) < 2) {
+            continue;
+        }
+
+        [$digest, $name] = $fields;
+        if (ltrim($name, '*') !== $asset) {
+            continue;
+        }
+
+        // Assert the shape rather than trusting whatever was read: the sidecar's
+        // format comes from a third-party action, and a checksum that is not a
+        // checksum would verify nothing while looking like it did.
+        if (preg_match('/^[0-9a-f]{64}$/', $digest) !== 1) {
+            throw new RuntimeException(
+                "the checksum published for {$asset} is not a sha256 digest ('{$digest}') — the sidecar format "
+                . 'changed upstream. Refusing to run an unverified binary.',
+            );
+        }
+
+        return $digest;
+    }
+
+    throw new RuntimeException(
+        "the checksum file published for this release records no entry for {$asset}. Refusing to run an "
+        . 'unverified binary.',
+    );
+}
+
+/**
+ * Check a downloaded archive against its published digest, or delete it.
+ *
+ * A binary fetched over the network and then executed is exactly the thing
+ * worth checking, and the release already publishes the digests — the Homebrew
+ * formula is built from these same sidecars. On mismatch the archive is removed
+ * so a retry starts clean rather than re-verifying the same bad bytes.
+ *
+ * @throws RuntimeException If the digests differ.
+ *
+ * @internal
+ */
+function verify_digest(string $archiveFile, string $expected, string $asset): void
+{
+    $actual = hash_file('sha256', $archiveFile);
+
+    if ($actual === false || !hash_equals($expected, $actual)) {
+        unlink($archiveFile);
+
+        throw new RuntimeException(
+            "{$asset} does not match the checksum published with the release.\n"
+            . "  expected  {$expected}\n"
+            . '  actual    ' . ($actual === false ? '(could not be computed)' : $actual) . "\n"
+            . '  The download may have been truncated or corrupted in transit; retry. If it persists, do not run '
+            . 'the binary — report it at https://github.com/' . REPOSITORY . '/issues',
+        );
+    }
+}
+
+/**
  * The download URL for a release asset.
  *
  * @internal
@@ -579,10 +689,20 @@ function ensure_binary(string $version, string $target, string $binDir): string
         }
 
         $asset = namespace\archive_name($version, $target);
+        $sidecar = namespace\sidecar_name($version, $target);
         $archiveFile = "{$versionDir}/{$asset}";
+        $sidecarFile = "{$versionDir}/{$sidecar}";
 
         fprintf(STDERR, "Downloading steins %s for %s...\n", $version, $target);
         namespace\download(namespace\build_download_url($version, $asset), $archiveFile);
+
+        // Verification happens here, inside the lock and before extraction, so
+        // it costs nothing on the warm path and no unverified bytes ever reach
+        // a file that gets marked executable.
+        namespace\download(namespace\build_download_url($version, $sidecar), $sidecarFile);
+        namespace\verify_digest($archiveFile, namespace\expected_digest($sidecarFile, $asset), $asset);
+        unlink($sidecarFile);
+
         namespace\extract_archive($archiveFile, $targetDir);
 
         if (!file_exists($executable)) {
