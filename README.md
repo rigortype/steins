@@ -44,3 +44,27 @@ Confirm an install with `steins doctor --no-php`, which runs no checks.
 - [Internal specification](docs/internal-spec/README.md) — analyzer-internal contracts: crate topology, syntax tree, trace IR, query graph, sidecar, config, transforms.
 - [Not implemented](docs/type-specification/not-implemented.md) — the honest gap list.
 - [Roadmap](docs/ROADMAP.md) — milestones, exit criteria, and the refusal list.
+
+## Copyright
+
+This software is licensed under the [Apache License, Version 2.0](LICENSE).
+
+```
+Copyright 2026 TypedDuck, USAMI Kenta <tadsan@zonu.me>
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+The `#[\Steins\Pure]` and `#[\Steins\Effect]` attributes are a separate package
+under a separate licence — see
+[rigortype/steins-attributes](https://github.com/rigortype/steins-attributes).
