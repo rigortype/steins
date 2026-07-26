@@ -98,6 +98,15 @@ Decide the next version first. Pre-`1.0`, a release that changes which findings
 fire is a **minor** bump, not a patch — a green CI going red is breaking in
 effect whatever semver says about `0.x`.
 
+**The `0.1.x` preview series overrides that rule, by owner decision (2026-07-26,
+at `v0.1.1`).** While Steins is a preview with much still unimplemented, the
+series continues through releases that change which findings fire rather than
+jumping a minor each time. Do not argue for a minor bump on findings-change
+grounds alone during `0.1.x`; ask only if the owner has said the preview phase
+is over. What does not relax is the *warning*: with the version number no longer
+carrying it, each changelog entry must say plainly that findings can appear or
+disappear, and the release summary must repeat it.
+
 - **`Cargo.toml`** — `version` under `[workspace.package]`. That is the single
   source of truth; all eleven members inherit it via `version.workspace = true`,
   so there is exactly one line to edit. `release.yml`'s `guard` job re-checks it
@@ -105,11 +114,15 @@ effect whatever semver says about `0.x`.
 - **`Cargo.lock`** — run `cargo build` and commit the result. It updates all
   eleven workspace entries at once. The lock is committed and every CI and
   release build uses `--locked`, so a stale lock fails the release build.
-- **`THIRD-PARTY-LICENSES.md`** — regenerate **only if dependencies changed**:
-  `cargo about generate about.hbs -o THIRD-PARTY-LICENSES.md`. Unlike the sibling
-  repos, `about.toml` here excludes the workspace's own crates, so a version bump
-  alone can never make this file stale. Run it anyway and let `git diff` answer —
-  CI's drift guard fails the PR if it disagrees.
+- **`THIRD-PARTY-LICENSES.md`** — regenerate with **`cargo xtask licenses`**,
+  never with bare `cargo about generate`. Since #45 the xtask post-processes
+  cargo-about's output (merging typographic variants, grouping MIT by permission
+  text with every copyright notice preserved), so running cargo-about directly
+  *reverts* that and corrupts the committed file. `cargo xtask licenses` is also
+  exactly what CI's drift guard runs. Unlike the sibling repos, `about.toml` here
+  excludes the workspace's own crates, so a version bump alone can never make this
+  file stale — but the generator's own output can drift from what is committed
+  (it had, at `v0.1.1`), so run it anyway and let `git diff` answer.
 - **`CHANGELOG.md`** — seal `[Unreleased]` into the new version section (below).
 
 ### Seal the `[Unreleased]` entries — the load-bearing step
@@ -133,7 +146,30 @@ for.
    Ask of each entry: *would someone running `steins check` on their code notice?*
 4. Consolidate several commits into one user-recognisable change; split merge
    artefacts.
-5. Re-read the sealed section as a user deciding whether to upgrade.
+5. **Classify against the last released version, not against the diff.** This is
+   the step the accumulate-as-you-go discipline cannot do for you, because each
+   entry was written when its commit landed, without knowing what else the window
+   would contain. `Changed` / `Fixed` / `Removed` describe how the **previously
+   released** version behaves differently. Something introduced during this same
+   unreleased window and then refined during it is, to a user upgrading, simply
+   `Added` — the intermediate state never shipped, so nothing changed for them.
+   One question per bullet: *did the thing it describes exist in the last
+   release?* Check it (`git show vX.Y.Z:path`, `git log vX.Y.Z..HEAD`) rather than
+   recalling. If no, fold the bullet into the `Added` entry that introduces the
+   feature, describe the **end state**, and delete every "previously X, now Y"
+   framing where X never shipped.
+
+   The same trap catches **measured numbers**, and more quietly. A figure written
+   mid-window ("goes from 1,702 to 669 lines") is the delta from an intermediate
+   state no user ever had. Recompute every before/after number against the last
+   tag. At `v0.1.1` the real delta was 1,897 -> 671; the committed entry claimed
+   1,702 -> 669, and only re-measuring against `v0.1.0` caught it.
+
+   A bullet can also be **half** wrong: `steins license` and
+   `THIRD-PARTY-LICENSES.md` shared one `Changed` entry, but the command was new
+   in the window while the file shipped in `v0.1.0` — so it split, the command's
+   half moving to `Added` and only the file's half staying a change.
+6. Re-read the sealed section as a user deciding whether to upgrade.
 
 **What is notable for an analyzer**, concretely — this is the filter that matters:
 
@@ -199,7 +235,7 @@ cargo build --release --locked
 cargo xtask fp-gate
 cargo xtask phpdoc-oracle --check
 cargo deny check licenses
-cargo about generate about.hbs -o THIRD-PARTY-LICENSES.md && git diff --exit-code -- THIRD-PARTY-LICENSES.md
+cargo xtask licenses && git diff --exit-code -- THIRD-PARTY-LICENSES.md
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --locked
 git diff --check
 ```
@@ -218,6 +254,9 @@ Reading the results:
   fails, and blocks the release. It reached zero from a ratchet over 18 links and
   is meant to stay there: fix the link, or reword the reference to plain backticks
   when the target is genuinely private. Never reintroduce a cap or an `#[allow]`.
+  It does **not** stay there on its own: eight broken links had accumulated by
+  `v0.1.1` because no ordinary CI job runs this. Expect to fix some, and budget
+  for it rather than treating a red rustdoc as a surprise.
 - **`cargo fmt` is not part of this** — the tree is hand-formatted and running it
   would rewrite 110 files. See `rustfmt.toml`.
 - **Smoke the binary the way the release will**, from a directory with no project
@@ -372,6 +411,9 @@ is the thing to check — the release itself is unaffected.
 - `[Unreleased]` reconstructed if it
   had drifted; every bullet classified and, if commit-style, rewritten — no
   bullet with two sentences, an internal-only detail, or a merge artefact.
+- Every bullet classified **against the last release**: nothing under `Changed` /
+  `Fixed` / `Removed` that did not exist in it, no "previously X" where X never
+  shipped, and every before/after number re-measured against the tag.
 - Findings referenced by **id**, not by message text; any newly-firing finding
   flagged as breaking.
 - Docs reconciled: quickstart's usage block matches the real binary, the install
