@@ -16,7 +16,7 @@
 //!
 //! was a crash report for ordinary use. Fixing it call site by call site leaves
 //! the next `println!` free to reintroduce it silently, so the rule lives in one
-//! place instead: [`outln!`] / [`out!`] / [`errln!`] are the only way this crate
+//! place instead: `outln!` / `out!` / `errln!` are the only way this crate
 //! writes, and `crates/steins-cli/tests/output_seam.rs` fails the build if a
 //! `println!` reappears anywhere in the CLI's source.
 //!
@@ -88,7 +88,7 @@ pub fn stdout_str(text: &str) {
     record(handle.write_all(text.as_bytes()));
 }
 
-/// Write formatted output to stdout with no trailing newline — the [`out!`] macro.
+/// Write formatted output to stdout with no trailing newline — the `out!` macro.
 pub fn stdout_fmt(args: std::fmt::Arguments<'_>) {
     if STDOUT_STOPPED.load(Ordering::Relaxed) {
         return;
@@ -97,7 +97,7 @@ pub fn stdout_fmt(args: std::fmt::Arguments<'_>) {
     record(handle.write_fmt(args));
 }
 
-/// Write one formatted line to stdout — the [`outln!`] macro. The newline is
+/// Write one formatted line to stdout — the `outln!` macro. The newline is
 /// written under the same lock as the body, so a line is never split.
 pub fn stdout_line(args: std::fmt::Arguments<'_>) {
     if STDOUT_STOPPED.load(Ordering::Relaxed) {
@@ -107,7 +107,7 @@ pub fn stdout_line(args: std::fmt::Arguments<'_>) {
     record(handle.write_fmt(args).and_then(|()| handle.write_all(b"\n")));
 }
 
-/// Write one formatted line to stderr — the [`errln!`] macro. Errors are dropped
+/// Write one formatted line to stderr — the `errln!` macro. Errors are dropped
 /// on the floor: a broken stderr has nowhere to be reported and says nothing
 /// about whether the analysis succeeded.
 pub fn stderr_line(args: std::fmt::Arguments<'_>) {

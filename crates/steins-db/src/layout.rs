@@ -17,7 +17,8 @@
 //! [`ProjectLayout`] is pure: no IO, no syscalls, no ambient state. Everything it
 //! compares against is captured at construction, including the working directory,
 //! so a replay with the same inputs gives the same answer (ADR-0048's canonical
-//! entry state). [`discover`] is the boundary that reads the filesystem; it runs
+//! entry state). [`crate::composer::discover`] is the boundary that reads the
+//! filesystem; it runs
 //! once per run, before any salsa input is set.
 //!
 //! # The rule
@@ -127,7 +128,7 @@ impl ProjectLayout {
     }
 
     /// Build a layout from already-discovered roots. Orders them deepest-first so
-    /// [`Self::governing_root`] can take the first match.
+    /// the private `governing_root` lookup can take the first match.
     #[must_use]
     pub fn new(cwd: PathBuf, mut roots: Vec<GoverningRoot>) -> Self {
         roots.sort_by(|a, b| {
