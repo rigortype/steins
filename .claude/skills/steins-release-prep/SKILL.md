@@ -1,6 +1,6 @@
 ---
 name: steins-release-prep
-description: Prepare a Steins release through a review PR — bump the workspace version, seal the changelog, reconcile the docs, run the full verification protocol, open a release PR for the owner to approve, then merge and tag so GitHub Actions builds the five release binaries and updates the Homebrew tap. Use when the user asks to prepare the next version, cut a release, tag a version, refresh release metadata, or make versioned files consistent before tagging.
+description: Release a Steins version end to end — bump the workspace version, seal the changelog, reconcile the docs, run the full verification protocol, then open the release PR, drive CI green, and on the owner's Go merge, tag, and verify the published GitHub Release, binaries and Homebrew tap. Use when the user asks to prepare the next version, cut a release, tag a version, refresh release metadata, or make versioned files consistent before tagging.
 metadata:
   internal: true
 ---
@@ -17,15 +17,34 @@ changelog seal, docs reconcile, verification), open a **release PR** so the owne
 can review the `CHANGELOG.md` and docs diffs, and only on their Go do you merge
 and tag. At a glance:
 
-prepare on a branch → **PR (owner reviews CHANGELOG + docs)** → merge → tag →
-Actions builds and publishes → verify the outcome.
+prepare on a branch → PR → CI green → **owner reviews CHANGELOG + docs** →
+merge → tag → Actions builds and publishes the Release → verify the outcome.
+
+Everything from opening the PR to the published Release is this skill's work, not
+a hand-off — see [Publish](#publish-pr--ci--merge--tag--release). It runs as one
+sequence through **two** approval gates, and stops dead at either.
 
 ## Two standing constraints
 
-**Never push without explicit approval.** The owner's standing directive is that
-commits stay local until they say otherwise. This workflow pushes three times —
-the branch, the merge, and the tag — and each one needs its own Go. Ask; do not
-infer approval from a previous step.
+**Never push without explicit approval — at two gates, and only two.** The
+owner's standing directive is that commits stay local until they say otherwise.
+This workflow pushes three times (the branch, the merge, the tag) but asks
+**twice**, because the second Go is a decision about publishing rather than about
+a git command:
+
+- **Gate 1 — open the PR.** Authorises pushing the release branch and creating
+  the PR. Nothing is published; this only puts the diff somewhere reviewable.
+- **Gate 2 — the owner's Go on the reviewed PR.** Authorises the whole rest of
+  the sequence: merge, tag, and everything the tag triggers. Once given, carry it
+  through to a verified Release without asking again — re-asking between merge
+  and tag strands the repo in a half-published state, which is worse than either
+  end of it.
+
+Recorded at `v0.1.1` by owner decision: the skill owns the chain, so a mechanical
+step inside an authorised sequence is not a new decision. What still needs a
+fresh Go is anything *outside* it — re-tagging, deleting a Release, force-pushing
+— and any gate whose preconditions changed after it was given (CI went red, the
+diff moved, the version changed). Ask again then; do not infer.
 
 **A release is effectively irreversible.** A GitHub Release can be deleted and a
 tag re-cut, but the Homebrew tap commit and anything already downloaded cannot be
@@ -322,35 +341,58 @@ Bump up version to x.y.z
 
 Commit unrelated cleanup separately — do not fold it into the version bump.
 
-## Open the release PR — the review gate
+## Publish: PR → CI → merge → tag → Release
 
-**Ask for approval before this push** (the standing directive above). Then:
+One sequence, owned end to end. Do not stop between steps 4 and 7 — an authorised
+publish left half-done is worse than one not started.
+
+**Step 1 — push the branch (Gate 1).** Ask, then:
 
 ```bash
 git push -u origin release/vx.y.z
 ```
 
+**Step 2 — open the PR.**
+
 ```bash
 gh pr create --base master --title "Release vx.y.z" --body "Release vx.y.z. Publishing is triggered by the vx.y.z tag after this merges. Review focus: the CHANGELOG.md [x.y.z] section — it becomes the GitHub Release body verbatim — and the docs diff. Approve to publish."
 ```
 
-Then **stop and hand off**. The owner reviews the rendered `CHANGELOG.md` and doc
-diffs and gives the Go. Do not merge on your own initiative — this approval is the
-irreversible-publish gate. Make sure every CI check is green before asking.
+**Step 3 — drive CI to green *before* asking the owner to look.** Their review is
+the expensive step; do not spend it on a PR that CI will reject anyway.
 
-## Merge, then tag to publish
+```bash
+gh pr checks --watch
+```
 
-Only after the PR is **approved and its CI is green**, and with explicit approval
-for each push. `--rebase` because this repo's history is strictly linear — 160
-commits, zero merge commits — so a merge commit would be the anomaly:
+Red is yours to fix, not to report: push the fix to the branch and re-watch. The
+local protocol and CI overlap but are not identical — CI also runs the
+`THIRD-PARTY-LICENSES.md` drift guard and the relicensing gate, and it runs on
+Linux, so a macOS-only local pass can still fail there. If a check is red for a
+reason the release cannot fix (an outage, a flake), say which check and why
+rather than asking for the Go over it.
+
+**Step 4 — the owner reviews, and gives the Go (Gate 2).** Hand them the PR link
+and name what to look at: the rendered `CHANGELOG.md [x.y.z]` section, because it
+becomes the Release body verbatim, and the docs diff. State that CI is green and
+that their Go covers merge, tag, and publish.
+
+**Step 5 — merge.** `--rebase` because this repo's history is strictly linear —
+160 commits, zero merge commits — so a merge commit would be the anomaly:
 
 ```bash
 gh pr merge --rebase && git checkout master && git pull --ff-only
 ```
 
+**Step 6 — tag, which publishes.** This is the point of no return:
+
 ```bash
 git tag vx.y.z && git push origin vx.y.z && gh run watch
 ```
+
+**Step 7 — verify the outcome** (next section). The sequence is not finished when
+the workflow goes green; it is finished when the assets exist and a downloaded
+binary runs.
 
 The tag triggers `release.yml`:
 
@@ -427,8 +469,14 @@ is the thing to check — the release itself is unaffected.
 - Composer channel smoked if `composer/`, `composer.json` or `.gitattributes`
   changed — its CI is path-filtered and will not have covered a release that
   touched them only in this branch.
-- The change landed via a **release PR approved by the owner**; no push happened
-  without its own explicit Go; the commit message is `Bump up version to x.y.z`.
+- CI driven to green on the PR **before** the owner was asked to review, and any
+  red fixed on the branch rather than reported upward.
+- The change landed via a **release PR approved by the owner**; Gate 1 and Gate 2
+  each had an explicit Go, and nothing outside that sequence was pushed; the
+  commit message is `Bump up version to x.y.z`.
+- The sequence was carried from the owner's Go through to a **verified** Release
+  without stopping in between — never merged-but-untagged, never tagged with the
+  outcome unchecked.
 - After publish: ten assets on the Release, a downloaded binary runs, the tap
   formula carries the new version and real sha256s, and `composer require --dev
   typedduck/steins:x.y.z` resolves and runs in a scratch directory.
