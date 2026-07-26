@@ -223,6 +223,15 @@ pub fn has_source_hint(source: &str, param: &Param) -> bool {
 /// Convert a lowered [`ArgValue`] to a concrete domain [`Val`], or `None` when it
 /// is not a self-evident literal (a `$var`, a call, a `new`, a closure, …). Arrays
 /// are literal iff every element is.
+///
+/// The transform sweeps run off the Salsa query path ([`steins_infer::promote`]),
+/// which carries no [`steins_infer::Folder`] — so no PHP minor is reachable here
+/// and this passes `None` to [`normalize_array`]. Under ADR-0049 A12 that is the
+/// conservative leg: an array literal straddling the 8.3 next-int change is *not*
+/// a self-evident literal for the edit layer, so the site refuses to promote
+/// rather than writing a declaration derived from a guessed key. Every
+/// version-independent literal is unaffected. Threading the minor into the sweeps
+/// would tighten this; A12 records it as the later refinement.
 #[must_use]
 pub fn arg_to_val(v: &ArgValue) -> Option<Val> {
     match v {
@@ -232,7 +241,7 @@ pub fn arg_to_val(v: &ArgValue) -> Option<Val> {
         ArgValue::Bool(b) => Some(Val::Bool(*b)),
         ArgValue::Null => Some(Val::Null),
         ArgValue::Array(items) => {
-            let normalized = normalize_array(items);
+            let normalized = normalize_array(items, None)?;
             let mut out = Vec::with_capacity(normalized.len());
             for (k, e) in normalized {
                 out.push((norm_key(&k), arg_to_val(&e)?));

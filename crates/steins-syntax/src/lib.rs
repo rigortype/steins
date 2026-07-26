@@ -989,27 +989,99 @@ impl NormKey {
     }
 }
 
-/// Resolve an array literal's raw `(ArrayKey, value)` entries to their PHP runtime
-/// key→value map, applying next-int assignment for `Auto` keys and **last-wins**
-/// for duplicates (a repeated key updates the value in place, keeping the first
-/// position — PHP semantics). The result is insertion-ordered.
+/// The PHP minor that changed the next-auto-index edge case for negative keys.
+const NEXT_INT_RULE_CHANGED_IN: (u16, u16) = (8, 3);
+
+/// PHP's next-auto-index rule for an omitted array key (`[$a, $b]`). The two
+/// variants differ **only** when every integer key seen so far is negative —
+/// every other literal normalizes identically under both.
+///
+/// PHP 8.3 changed the edge case: before it, the next auto-index floored at `0`,
+/// so `[-5 => 'a', 'b']` put `'b'` at `0`; from 8.3 it is one past the largest
+/// integer key seen, negative or not, so `'b'` lands at `-4`. Verified on PHP
+/// 8.5.8 — `php -r 'var_export([-5=>"a","b"]);'` → `-5, -4`.
+///
+/// Steins' floor is 8.1 (ADR-0011), so both rules are live: 8.1/8.2 take
+/// [`NextIntRule::FloorAtZero`], 8.3+ take [`NextIntRule::MaxPlusOne`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NextIntRule {
+    /// PHP < 8.3 (Steins' floor 8.1 through 8.2): the next auto-index never
+    /// goes below `0`.
+    FloorAtZero,
+    /// PHP >= 8.3: one past the largest integer key seen, negative or not.
+    MaxPlusOne,
+}
+
+impl NextIntRule {
+    /// The rule a project on PHP `(major, minor)` follows.
+    #[must_use]
+    pub fn for_minor(minor: (u16, u16)) -> Self {
+        if minor >= NEXT_INT_RULE_CHANGED_IN { Self::MaxPlusOne } else { Self::FloorAtZero }
+    }
+}
+
+/// Whether `items` normalizes *differently* under the two [`NextIntRule`]s: an
+/// omitted key falls where every integer key seen so far is negative, so the
+/// pre-8.3 floor and the 8.3+ max+1 disagree on its position.
+///
+/// This is the exact ambiguity [`normalize_array`] refuses to guess at when the
+/// project's PHP minor is unknown. It is a purely syntactic property — no
+/// version input — and false for every literal without negative integer keys.
 #[must_use]
-pub fn normalize_array(items: &[(ArrayKey, ArgValue)]) -> Vec<(NormKey, ArgValue)> {
+pub fn next_int_is_version_dependent(items: &[(ArrayKey, ArgValue)]) -> bool {
+    let mut max_seen: Option<i64> = None;
+    for (k, _) in items {
+        match k {
+            ArrayKey::Auto => {
+                // `None` → position 0 under both rules. Otherwise the rules split
+                // exactly when one past the running max is still negative.
+                let next = max_seen.map_or(0, |m: i64| m.saturating_add(1));
+                if next < 0 {
+                    return true;
+                }
+                max_seen = Some(max_seen.map_or(next, |m| m.max(next)));
+            }
+            ArrayKey::Int(i) => max_seen = Some(max_seen.map_or(*i, |m| m.max(*i))),
+            ArrayKey::Str(_) => {}
+        }
+    }
+    false
+}
+
+/// Resolve an array literal under an explicitly chosen [`NextIntRule`], applying
+/// next-int assignment for `Auto` keys and **last-wins** for duplicates (a
+/// repeated key updates the value in place, keeping the first position — PHP
+/// semantics). The result is insertion-ordered.
+///
+/// Prefer [`normalize_array`], which picks the rule from the project's PHP minor
+/// and declines to answer when the answer would be a guess. Use this only where
+/// a rule is genuinely known, or where the result is not a proof-layer premise
+/// (diagnostic rendering).
+#[must_use]
+pub fn normalize_array_with(
+    items: &[(ArrayKey, ArgValue)],
+    rule: NextIntRule,
+) -> Vec<(NormKey, ArgValue)> {
     let mut out: Vec<(NormKey, ArgValue)> = Vec::with_capacity(items.len());
-    // PHP's next auto-index: one past the largest integer key seen so far
-    // (explicit or auto). Starts at 0; never goes negative below that floor.
-    let mut next_auto: i64 = 0;
+    // PHP's next auto-index: one past the largest integer key seen so far —
+    // explicit or auto-assigned, and a duplicate still counts (verified:
+    // `[5=>'a',5=>'b','c']` → 5, 6). `None` = no integer key yet → position 0.
+    let mut max_seen: Option<i64> = None;
     for (k, v) in items {
         let key = match k {
             ArrayKey::Auto => {
-                let i = next_auto;
-                next_auto = next_auto.saturating_add(1);
+                // Saturating: at `i64::MAX` PHP itself refuses to append; the
+                // clamped index collides and last-wins folds it, which is as
+                // close as a pure key model gets to that runtime error.
+                let mut i = max_seen.map_or(0, |m: i64| m.saturating_add(1));
+                if matches!(rule, NextIntRule::FloorAtZero) {
+                    i = i.max(0);
+                }
+                max_seen = Some(max_seen.map_or(i, |m| m.max(i)));
                 NormKey::Int(i)
             }
             ArrayKey::Int(i) => {
-                if *i >= next_auto {
-                    next_auto = i.saturating_add(1);
-                }
+                max_seen = Some(max_seen.map_or(*i, |m| m.max(*i)));
                 NormKey::Int(*i)
             }
             ArrayKey::Str(s) => NormKey::Str(s.clone()),
@@ -1022,6 +1094,31 @@ pub fn normalize_array(items: &[(ArrayKey, ArgValue)]) -> Vec<(NormKey, ArgValue
         }
     }
     out
+}
+
+/// Resolve an array literal's raw `(ArrayKey, value)` entries to their PHP runtime
+/// key→value map, choosing the next-auto-index rule from the project's own PHP
+/// minor (ADR-0049 A12).
+///
+/// `php_minor` is the sidecar-reported `(major, minor)` — `Folder::php_minor()`,
+/// the same input ADR-0052 A11 consumes — or `None` when no sidecar answered.
+/// Returns `None` only when the minor is unknown *and* the literal actually
+/// straddles the 8.3 rule change ([`next_int_is_version_dependent`]): the runtime
+/// keys are then genuinely unproven, and a caller holding a proof-layer premise
+/// (`===`/`==`, a `Val::Array` singleton fact) must drop the fact rather than
+/// guess a key. Every version-independent literal — the overwhelming majority —
+/// still answers under an unknown minor.
+#[must_use]
+pub fn normalize_array(
+    items: &[(ArrayKey, ArgValue)],
+    php_minor: Option<(u16, u16)>,
+) -> Option<Vec<(NormKey, ArgValue)>> {
+    match php_minor {
+        Some(m) => Some(normalize_array_with(items, NextIntRule::for_minor(m))),
+        None if next_int_is_version_dependent(items) => None,
+        // The rules agree on this literal, so either one resolves it.
+        None => Some(normalize_array_with(items, NextIntRule::MaxPlusOne)),
+    }
 }
 
 impl Eq for ArgValue {}
@@ -1149,7 +1246,12 @@ impl ArgValue {
 /// `['k' => 1]`, list-shaped arrays without keys, truncating with `…` after the
 /// first five entries.
 fn render_array(items: &[(ArrayKey, ArgValue)]) -> String {
-    let normalized = normalize_array(items);
+    // Rendering is cosmetic — a message never carries a proof-layer premise — so
+    // it takes the pinned rule unconditionally rather than threading the project
+    // minor through `ArgValue::render()`'s config-free `&self` surface (ADR-0049
+    // A12). A pre-8.3 project can therefore see a negative-key literal rendered
+    // with 8.3+ positions; no diagnostic decision rides on it.
+    let normalized = normalize_array_with(items, NextIntRule::MaxPlusOne);
     // A pure list (keys exactly 0..n-1) renders without keys.
     let is_list = normalized
         .iter()

@@ -3532,7 +3532,7 @@ use steins_domain::{Base, IntRange, Key as VKey, Refinement, StrPreds, Val};
 /// insertion order (reusing [`normalize_array`], matching [`VKey`]). Any
 /// non-literal element (or a non-literal `ArgValue`) yields `None` — the fact is
 /// dropped (the safe side).
-fn val_of(arg: &ArgValue) -> Option<Val> {
+fn val_of(arg: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<Val> {
     match arg {
         ArgValue::Int(i) => Some(Val::Int(*i)),
         ArgValue::Float(f) => Some(Val::Float(*f)),
@@ -3540,13 +3540,17 @@ fn val_of(arg: &ArgValue) -> Option<Val> {
         ArgValue::Bool(b) => Some(Val::Bool(*b)),
         ArgValue::Null => Some(Val::Null),
         ArgValue::Array(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            for (k, v) in normalize_array(items) {
+            // An unknown minor over a literal straddling the 8.3 next-int change
+            // yields `None` here (ADR-0049 A12) — the keys are unproven, so the
+            // singleton fact is dropped rather than built on a guessed key.
+            let normalized = normalize_array(items, php_minor)?;
+            let mut out = Vec::with_capacity(normalized.len());
+            for (k, v) in normalized {
                 let key = match k {
                     NormKey::Int(i) => VKey::Int(i),
                     NormKey::Str(s) => VKey::Str(s),
                 };
-                out.push((key, val_of(&v)?));
+                out.push((key, val_of(&v, php_minor)?));
             }
             Some(Val::Array(out))
         }
@@ -3604,8 +3608,8 @@ fn render_val(v: &Val) -> String {
 
 /// A domain `Singleton` fact from a literal/array [`ArgValue`], or `None` when
 /// the value is not representable (a non-literal) — the fact is then dropped.
-fn singleton_fact(arg: &ArgValue) -> Option<Fact> {
-    val_of(arg).map(Fact::Singleton)
+fn singleton_fact(arg: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<Fact> {
+    val_of(arg, php_minor).map(Fact::Singleton)
 }
 
 /// The target of a proven closure value (ADR-0033): an anonymous closure/arrow
@@ -4529,7 +4533,8 @@ fn walk_trace(
             // `zend.assertions` is never consulted — the risk of running production
             // with assertions compiled out is the operator's, not the analysis's.
             StmtKind::Assert { cond } => {
-                apply_refinements(&then_refinements(cond), env, store, Stratum::Verified);
+                let refs = then_refinements(cond, w.cx.php_minor);
+                apply_refinements(&refs, env, store, Stratum::Verified);
                 Flow::FellThrough
             }
             // Terminators: the trace stops; the remainder is unreachable.
@@ -5011,7 +5016,7 @@ fn best_dump_type(
     // (folding is the floor below the return fact — a fully-literal call folds to a
     // Singleton, ADR-0056 §4).
     if let Some(lit) = cx.resolve_literal(value, env, poisoned, folder)
-        && let Some(fact) = singleton_fact(&lit)
+        && let Some(fact) = singleton_fact(&lit, cx.php_minor)
     {
         return DumpRendering {
             text: render_dump_fact(&fact),
@@ -5350,7 +5355,7 @@ fn apply_assign(
             }
         }
         _ => match cx.resolve_literal(value, env, w.scope.poisoned, folder).and_then(|lit| {
-            singleton_fact(&lit).map(|f| (lit, f))
+            singleton_fact(&lit, cx.php_minor).map(|f| (lit, f))
         }) {
             Some((lit, fact)) => {
                 if let Some(facts) = facts.as_deref_mut() {
@@ -5442,7 +5447,7 @@ fn arg_value_fact(
         ArgValue::Var(name) if !w.scope.poisoned => env.get(name)?.fact.clone(),
         _ => {
             let lit = w.cx.resolve_literal(arg, env, w.scope.poisoned, folder)?;
-            singleton_fact(&lit)
+            singleton_fact(&lit, w.cx.php_minor)
         }
     }
 }
@@ -5477,7 +5482,7 @@ fn build_new_object(
             obj.readonly.insert(p.name.clone());
         }
         if let Some(default) = &p.default
-            && let Some(fact) = singleton_fact(default)
+            && let Some(fact) = singleton_fact(default, cx.php_minor)
         {
             // Skip null-admitting facts (unsound to flow past unmodeled guards). A
             // literal default is `Verified` (no env fact consumed).
@@ -5515,7 +5520,7 @@ fn build_new_object(
             let (fact, stratum) = match bound {
                 Some(a) => match cx
                     .resolve_literal(a, env, w.scope.poisoned, folder)
-                    .and_then(|lit| singleton_fact(&lit))
+                    .and_then(|lit| singleton_fact(&lit, cx.php_minor))
                 {
                     Some(f) => (Some(f), value_stratum(a, env, Some(&*store))),
                     None => (seed_fact(param), Stratum::Verified),
@@ -5637,7 +5642,7 @@ fn apply_prop_assign(
     // (derivation clause — heap write).
     let proven_lit = cx.resolve_literal(value, env, false, folder);
     let rvalue_strat = value_stratum(value, env, Some(&*store));
-    let prop_fact_val: Option<Fact> = proven_lit.as_ref().and_then(singleton_fact).or_else(|| {
+    let prop_fact_val: Option<Fact> = proven_lit.as_ref().and_then(|l| singleton_fact(l, cx.php_minor)).or_else(|| {
         match value {
             ArgValue::PropFetch { var: rv, prop: rp } => store.prop_fact(rv, rp).cloned(),
             _ => arg_abstract_fact(value, env, false).cloned(),
@@ -5884,7 +5889,8 @@ fn walk_if(
     if verdict != Certainty::No {
         let mut benv = env.clone();
         let mut bclasses = store.clone();
-        apply_refinements(&then_refinements(cond), &mut benv, &mut bclasses, Stratum::Verified);
+        let refs = then_refinements(cond, w.cx.php_minor);
+        apply_refinements(&refs, &mut benv, &mut bclasses, Stratum::Verified);
         apply_class_narrowing(w, cond, true, &mut bclasses);
         let mut then_calls = Vec::new();
         collect_guard_calls(cond, true, &mut then_calls);
@@ -5907,7 +5913,8 @@ fn walk_if(
     if verdict != Certainty::Yes {
         let mut benv = env.clone();
         let mut bclasses = store.clone();
-        apply_refinements(&else_refinements(cond), &mut benv, &mut bclasses, Stratum::Verified);
+        let refs = else_refinements(cond, w.cx.php_minor);
+        apply_refinements(&refs, &mut benv, &mut bclasses, Stratum::Verified);
         apply_class_narrowing(w, cond, false, &mut bclasses);
         let mut else_calls = Vec::new();
         collect_guard_calls(cond, false, &mut else_calls);
@@ -6012,7 +6019,8 @@ fn walk_match(
             takens.push(Certainty::No); // a prior sure match makes this unreachable
             continue;
         }
-        let cond_k = eval_arm_cond(op, subj_vals.as_deref(), &arm.conditions, env, poisoned);
+        let cond_k =
+            eval_arm_cond(op, subj_vals.as_deref(), &arm.conditions, env, poisoned, w.cx.php_minor);
         let taken = match cond_k {
             Certainty::No => Certainty::No,
             Certainty::Yes if earlier_all_no => {
@@ -6045,7 +6053,7 @@ fn walk_match(
         }
         let mut benv = env.clone();
         let mut bclasses = store.clone();
-        refine_match_arm(subject, &arm.conditions, loose, &mut benv);
+        refine_match_arm(subject, &arm.conditions, loose, &mut benv, w.cx.php_minor);
         if walk_trace(w, folder, &arm.trace, &mut benv, &mut bclasses, descent, facts, true, out)
             == Flow::FellThrough
         {
@@ -6098,12 +6106,13 @@ fn eval_arm_cond(
     conditions: &[CondOperand],
     env: &HashMap<String, Known>,
     poisoned: bool,
+    php_minor: Option<(u16, u16)>,
 ) -> Certainty {
     let Some(subj) = subj_vals else { return Certainty::Maybe };
     let mut acc = Certainty::No;
     for c in conditions {
         let cert = match operand_values(c, env, poisoned) {
-            Some(cv) => eval_cmp(op, subj, &cv),
+            Some(cv) => eval_cmp(op, subj, &cv, php_minor),
             None => Certainty::Maybe,
         };
         acc = acc.or(cert);
@@ -6125,6 +6134,7 @@ fn refine_match_arm(
     conditions: &[CondOperand],
     loose: bool,
     env: &mut HashMap<String, Known>,
+    php_minor: Option<(u16, u16)>,
 ) {
     if loose {
         return;
@@ -6133,7 +6143,7 @@ fn refine_match_arm(
     let mut vals = Vec::with_capacity(conditions.len());
     for c in conditions {
         match c {
-            CondOperand::Literal(v) => match val_of(v) {
+            CondOperand::Literal(v) => match val_of(v, php_minor) {
                 Some(val) => vals.push(val),
                 None => return,
             },
@@ -6222,7 +6232,7 @@ fn eval_cond(
     match cond {
         CondExpr::Cmp { op, lhs, rhs } => {
             match (operand_values(lhs, env, poisoned), operand_values(rhs, env, poisoned)) {
-                (Some(lv), Some(rv)) => eval_cmp(*op, &lv, &rv),
+                (Some(lv), Some(rv)) => eval_cmp(*op, &lv, &rv, w.cx.php_minor),
                 _ => Certainty::Maybe,
             }
         }
@@ -6249,7 +6259,7 @@ fn eval_cond(
             if va == Certainty::No {
                 return Certainty::No;
             }
-            let (benv, bstore) = threaded_operand_env(a, true, env, store);
+            let (benv, bstore) = threaded_operand_env(a, true, env, store, w.cx.php_minor);
             va.and(eval_cond(w, folder, b, &benv, &bstore, poisoned))
         }
         CondExpr::Or(a, b) => {
@@ -6258,7 +6268,7 @@ fn eval_cond(
             if va == Certainty::Yes {
                 return Certainty::Yes;
             }
-            let (benv, bstore) = threaded_operand_env(a, false, env, store);
+            let (benv, bstore) = threaded_operand_env(a, false, env, store, w.cx.php_minor);
             va.or(eval_cond(w, folder, b, &benv, &bstore, poisoned))
         }
         // A foldable existence predicate in guard position folds to a Yes/No/Maybe
@@ -6567,11 +6577,12 @@ fn threaded_operand_env(
     then: bool,
     env: &HashMap<String, Known>,
     store: &Store,
+    php_minor: Option<(u16, u16)>,
 ) -> (HashMap<String, Known>, Store) {
     let mut benv = env.clone();
     let mut bstore = store.clone();
     let mut refs = Vec::new();
-    collect_refine(operand, then, &mut refs);
+    collect_refine(operand, then, &mut refs, php_minor);
     apply_refinements(&refs, &mut benv, &mut bstore, Stratum::Verified);
     // The operand's own side effects land *after* its test narrowed (a by-ref call
     // in the operand may rebind a variable the test just constrained): forget them
@@ -6601,22 +6612,28 @@ fn eval_ternary_fact(
     // `$c ? A : B` — `A` runs only when `$c` was truthy (so it sees
     // `then_refinements($c)`), `B` only when `$c` was falsy (`else_refinements`).
     // The arm-selection verdict logic is unchanged; only the arm *envs* thread.
-    let (tenv, _) = threaded_operand_env(cond, true, env, store);
-    let (eenv, _) = threaded_operand_env(cond, false, env, store);
+    let (tenv, _) = threaded_operand_env(cond, true, env, store, w.cx.php_minor);
+    let (eenv, _) = threaded_operand_env(cond, false, env, store, w.cx.php_minor);
     match verdict {
         Certainty::Yes => {
-            w.cx.resolve_literal(then_val, &tenv, poisoned, folder).and_then(|a| singleton_fact(&a))
+            w.cx
+                .resolve_literal(then_val, &tenv, poisoned, folder)
+                .and_then(|a| singleton_fact(&a, w.cx.php_minor))
         }
         Certainty::No => {
-            w.cx.resolve_literal(else_val, &eenv, poisoned, folder).and_then(|a| singleton_fact(&a))
+            w.cx
+                .resolve_literal(else_val, &eenv, poisoned, folder)
+                .and_then(|a| singleton_fact(&a, w.cx.php_minor))
         }
         Certainty::Maybe => {
             // Undecided guard: the value is one of the two arms. `Fact::from_vals`
             // gives the canonical finite form (a `Singleton` when the arms are
             // equal, else a `OneOf`), or `None` (dropped) when an arm is not
             // representable.
-            let t = val_of(&w.cx.resolve_literal(then_val, &tenv, poisoned, folder)?)?;
-            let e = val_of(&w.cx.resolve_literal(else_val, &eenv, poisoned, folder)?)?;
+            let t =
+                val_of(&w.cx.resolve_literal(then_val, &tenv, poisoned, folder)?, w.cx.php_minor)?;
+            let e =
+                val_of(&w.cx.resolve_literal(else_val, &eenv, poisoned, folder)?, w.cx.php_minor)?;
             Fact::from_vals(vec![t, e])
         }
     }
@@ -6643,15 +6660,15 @@ fn operand_values(
 
 /// Evaluate a comparison over two candidate value sets (ADR-0031 OneOf rule: all
 /// member pairs agree → that verdict; any disagreement or undecidable pair → Maybe).
-fn eval_cmp(op: CmpOp, lhs: &[ArgValue], rhs: &[ArgValue]) -> Certainty {
+fn eval_cmp(op: CmpOp, lhs: &[ArgValue], rhs: &[ArgValue], php_minor: Option<(u16, u16)>) -> Certainty {
     let mut acc: Option<bool> = None;
     for l in lhs {
         for r in rhs {
             let b = match op {
-                CmpOp::Identical => php_identical(l, r),
-                CmpOp::NotIdentical => php_identical(l, r).map(|x| !x),
-                CmpOp::Loose => php_loose_eq(l, r),
-                CmpOp::NotLoose => php_loose_eq(l, r).map(|x| !x),
+                CmpOp::Identical => php_identical(l, r, php_minor),
+                CmpOp::NotIdentical => php_identical(l, r, php_minor).map(|x| !x),
+                CmpOp::Loose => php_loose_eq(l, r, php_minor),
+                CmpOp::NotLoose => php_loose_eq(l, r, php_minor).map(|x| !x),
                 // Ordering: decide only for concrete numeric operands (PHP numeric
                 // ordering); any other pairing is undecidable here → `Maybe`. The
                 // refinement machinery consumes these guards regardless of verdict.
@@ -7033,16 +7050,16 @@ enum Refine {
 }
 
 /// The refinements that hold when `cond` is TRUE (the then-branch).
-fn then_refinements(cond: &CondExpr) -> Vec<Refine> {
+fn then_refinements(cond: &CondExpr, php_minor: Option<(u16, u16)>) -> Vec<Refine> {
     let mut out = Vec::new();
-    collect_refine(cond, true, &mut out);
+    collect_refine(cond, true, &mut out, php_minor);
     out
 }
 
 /// The refinements that hold when `cond` is FALSE (the else-branch).
-fn else_refinements(cond: &CondExpr) -> Vec<Refine> {
+fn else_refinements(cond: &CondExpr, php_minor: Option<(u16, u16)>) -> Vec<Refine> {
     let mut out = Vec::new();
-    collect_refine(cond, false, &mut out);
+    collect_refine(cond, false, &mut out, php_minor);
     out
 }
 
@@ -7092,9 +7109,11 @@ fn collect_all_calls<'a>(cond: &'a CondExpr, out: &mut Vec<&'a CallExpr>) {
 /// Collect the refinements a condition implies on the given polarity (`then` =
 /// true-path, `!then` = false-path). Negation flips polarity; `&&` distributes on
 /// the true-path, `||` on the false-path (De Morgan).
-fn collect_refine(cond: &CondExpr, then: bool, out: &mut Vec<Refine>) {
+fn collect_refine(cond: &CondExpr, then: bool, out: &mut Vec<Refine>, php_minor: Option<(u16, u16)>) {
     match cond {
-        CondExpr::Cmp { op, lhs, rhs } => collect_cmp_refine(*op, lhs, rhs, then, out),
+        CondExpr::Cmp { op, lhs, rhs } => {
+            collect_cmp_refine(*op, lhs, rhs, then, out, php_minor);
+        }
         CondExpr::Truthy(op) => {
             // Only the true-path of a bare truthiness test refines (the false-path
             // — "falsy" — is not cleanly representable: `""`, `"0"`, `0`, null …).
@@ -7102,21 +7121,28 @@ fn collect_refine(cond: &CondExpr, then: bool, out: &mut Vec<Refine>) {
                 out.push(Refine::Truthy(v.clone()));
             }
         }
-        CondExpr::Not(c) => collect_refine(c, !then, out),
+        CondExpr::Not(c) => collect_refine(c, !then, out, php_minor),
         CondExpr::And(a, b) if then => {
-            collect_refine(a, true, out);
-            collect_refine(b, true, out);
+            collect_refine(a, true, out, php_minor);
+            collect_refine(b, true, out, php_minor);
         }
         CondExpr::Or(a, b) if !then => {
-            collect_refine(a, false, out);
-            collect_refine(b, false, out);
+            collect_refine(a, false, out, php_minor);
+            collect_refine(b, false, out, php_minor);
         }
         _ => {}
     }
 }
 
 /// Refinements from a comparison guard on a given polarity.
-fn collect_cmp_refine(op: CmpOp, lhs: &CondOperand, rhs: &CondOperand, then: bool, out: &mut Vec<Refine>) {
+fn collect_cmp_refine(
+    op: CmpOp,
+    lhs: &CondOperand,
+    rhs: &CondOperand,
+    then: bool,
+    out: &mut Vec<Refine>,
+    php_minor: Option<(u16, u16)>,
+) {
     // Identity/equality guards over a (var, literal) pair.
     if let Some((v, val)) = var_literal(lhs, rhs) {
         // The *effective* operator on this branch: `===`/`!==` flip under `!then`.
@@ -7126,7 +7152,7 @@ fn collect_cmp_refine(op: CmpOp, lhs: &CondOperand, rhs: &CondOperand, then: boo
             _ => None,
         };
         if let Some(identical) = identical
-            && let Some(vv) = val_of(&val)
+            && let Some(vv) = val_of(&val, php_minor)
         {
             match (identical, &vv) {
                 (true, _) => out.push(Refine::Exact(v, vv)),
@@ -7216,7 +7242,7 @@ fn apply_class_narrowing(w: &WalkCx, cond: &CondExpr, then: bool, store: &mut St
 
     // (3) `!== null` on this branch → drop the `null` arm of the contract lane.
     let mut refs = Vec::new();
-    collect_refine(cond, then, &mut refs);
+    collect_refine(cond, then, &mut refs, w.cx.php_minor);
     for r in &refs {
         if let Refine::NotNull(var) = r {
             subtract_contract_lane(store, var, &normalize::Subtrahend::Null, &oracle);
@@ -7913,7 +7939,7 @@ fn php_truthy(v: &ArgValue) -> Option<bool> {
 
 /// Strict identity `===`: same runtime type AND equal value. Different concrete
 /// runtime types are a definite non-identity; a non-concrete operand is `None`.
-fn php_identical(a: &ArgValue, b: &ArgValue) -> Option<bool> {
+fn php_identical(a: &ArgValue, b: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<bool> {
     use ArgValue::{Array, Bool, Float, Int, Null, Str};
     match (a, b) {
         (Int(x), Int(y)) => Some(x == y),
@@ -7921,7 +7947,7 @@ fn php_identical(a: &ArgValue, b: &ArgValue) -> Option<bool> {
         (Str(x), Str(y)) => Some(x == y),
         (Bool(x), Bool(y)) => Some(x == y),
         (Null, Null) => Some(true),
-        (Array(_), Array(_)) => php_array_identical(a, b),
+        (Array(_), Array(_)) => php_array_identical(a, b, php_minor),
         _ if is_concrete(a) && is_concrete(b) => Some(false),
         _ => None,
     }
@@ -7929,10 +7955,13 @@ fn php_identical(a: &ArgValue, b: &ArgValue) -> Option<bool> {
 
 /// Deep `===` of two array literals: same length, same key order, element-wise
 /// identical. A non-concrete element makes the result `None`.
-fn php_array_identical(a: &ArgValue, b: &ArgValue) -> Option<bool> {
+fn php_array_identical(a: &ArgValue, b: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<bool> {
     let (ArgValue::Array(ai), ArgValue::Array(bi)) = (a, b) else { return None };
-    let na = normalize_array(ai);
-    let nb = normalize_array(bi);
+    // Keys the project's PHP minor cannot pin down make the whole verdict
+    // undecidable (ADR-0049 A12) — `===` compares key order, so a guessed key
+    // would forge a `===` premise.
+    let na = normalize_array(ai, php_minor)?;
+    let nb = normalize_array(bi, php_minor)?;
     if na.len() != nb.len() {
         return Some(false);
     }
@@ -7940,7 +7969,7 @@ fn php_array_identical(a: &ArgValue, b: &ArgValue) -> Option<bool> {
         if ka != kb {
             return Some(false);
         }
-        match php_identical(va, vb) {
+        match php_identical(va, vb, php_minor) {
             Some(true) => {}
             Some(false) => return Some(false),
             None => return None,
@@ -7979,7 +8008,7 @@ fn is_concrete(v: &ArgValue) -> bool {
 /// numerically iff both are numeric strings, else byte-wise; an array is unequal
 /// to any scalar (non-null, non-bool). Cells not covered (a `float` vs a
 /// non-numeric string; non-trivial arrays) return `None` → `Maybe`.
-fn php_loose_eq(a: &ArgValue, b: &ArgValue) -> Option<bool> {
+fn php_loose_eq(a: &ArgValue, b: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<bool> {
     use ArgValue::{Array, Bool, Float, Int, Null, Str};
     // A `bool` on either side casts both operands to bool (subsumes null==bool).
     if matches!(a, Bool(_)) || matches!(b, Bool(_)) {
@@ -8001,7 +8030,7 @@ fn php_loose_eq(a: &ArgValue, b: &ArgValue) -> Option<bool> {
         (Float(f), Str(s)) | (Str(s), Float(f)) => php_float_str_eq(*f, s),
         (Str(x), Str(y)) => Some(php_str_eq(x, y)),
 
-        (Array(x), Array(y)) => php_array_loose_eq(x, y),
+        (Array(x), Array(y)) => php_array_loose_eq(x, y, php_minor),
         // An array is never loosely equal to a (non-null, non-bool) scalar.
         (Array(_), Int(_) | Float(_) | Str(_)) | (Int(_) | Float(_) | Str(_), Array(_)) => {
             Some(false)
@@ -8044,9 +8073,15 @@ fn php_str_eq(x: &str, y: &str) -> bool {
 
 /// `array == array`: same key set with loosely-equal values (order-independent).
 /// An undecidable element value makes the whole comparison `None`.
-fn php_array_loose_eq(x: &[(ArrayKey, ArgValue)], y: &[(ArrayKey, ArgValue)]) -> Option<bool> {
-    let nx = normalize_array(x);
-    let ny = normalize_array(y);
+fn php_array_loose_eq(
+    x: &[(ArrayKey, ArgValue)],
+    y: &[(ArrayKey, ArgValue)],
+    php_minor: Option<(u16, u16)>,
+) -> Option<bool> {
+    // As in `php_array_identical`: unproven keys make `==` undecidable, since the
+    // comparison is key-set-based (ADR-0049 A12).
+    let nx = normalize_array(x, php_minor)?;
+    let ny = normalize_array(y, php_minor)?;
     if nx.len() != ny.len() {
         return Some(false);
     }
@@ -8054,7 +8089,7 @@ fn php_array_loose_eq(x: &[(ArrayKey, ArgValue)], y: &[(ArrayKey, ArgValue)]) ->
         let Some((_, vb)) = ny.iter().find(|(k2, _)| k2 == k) else {
             return Some(false);
         };
-        match php_loose_eq(va, vb) {
+        match php_loose_eq(va, vb, php_minor) {
             Some(true) => {}
             Some(false) => return Some(false),
             None => return None,
@@ -8607,7 +8642,7 @@ fn descend(
     let mut bound_env: HashMap<String, Known> = bound
         .into_iter()
         .filter_map(|(name, value, strat)| {
-            singleton_fact(&value)
+            singleton_fact(&value, cx.php_minor)
                 .map(|fact| (name, Known::value_strat(fact, 0, Some(provenance.to_owned()), strat)))
         })
         .collect();
@@ -8763,7 +8798,7 @@ fn return_value_fact(
         return Some((fact, known.stratum));
     }
     if let Some(lit) = w.cx.resolve_literal(value, env, poisoned, folder)
-        && let Some(fact) = singleton_fact(&lit)
+        && let Some(fact) = singleton_fact(&lit, w.cx.php_minor)
     {
         return Some((fact, value_stratum(value, env, Some(store))));
     }
@@ -10148,7 +10183,12 @@ fn offset_key_of(v: &Val) -> Option<VKey> {
 /// or `None` when unproven, poisoned, or below the proof stratum (N2). A bare `Var`
 /// reads the env (requiring `Verified`); a literal / fully-literal array resolves
 /// directly (literals are `Verified` whole values). Every other form is unproven.
-fn offset_operand_fact(arg: &ArgValue, env: &HashMap<String, Known>, poisoned: bool) -> Option<Fact> {
+fn offset_operand_fact(
+    arg: &ArgValue,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    php_minor: Option<(u16, u16)>,
+) -> Option<Fact> {
     match arg {
         ArgValue::Var(name) => {
             if poisoned {
@@ -10157,7 +10197,7 @@ fn offset_operand_fact(arg: &ArgValue, env: &HashMap<String, Known>, poisoned: b
             let k = env.get(name)?;
             (k.stratum == Stratum::Verified).then(|| k.fact.clone()).flatten()
         }
-        _ => singleton_fact(arg),
+        _ => singleton_fact(arg, php_minor),
     }
 }
 
@@ -10206,7 +10246,7 @@ fn check_offset_read(
     // base (fact `None` — object state lives in the heap, not the value domain) is
     // silent: the ArrayAccess-arbitrary-code / non-ArrayAccess-`Error` split is the
     // deferred object case.
-    let Some(base_fact) = offset_operand_fact(base, env, poisoned) else {
+    let Some(base_fact) = offset_operand_fact(base, env, poisoned, cx.php_minor) else {
         return;
     };
 
@@ -10232,7 +10272,8 @@ fn check_offset_read(
 
     // Case 2 — a container base (`offset.missing`, warning-grade): the key must be a
     // proven single value (leg (c)), canonicalized through the shared helper (A10).
-    let Some(Fact::Singleton(key_val)) = offset_operand_fact(key, env, poisoned) else {
+    let Some(Fact::Singleton(key_val)) = offset_operand_fact(key, env, poisoned, cx.php_minor)
+    else {
         return;
     };
     let Some(canon) = offset_key_of(&key_val) else {
@@ -11167,7 +11208,10 @@ impl<'a> Cx<'a> {
                 lit => self.resolve_cval(&lit, env, store, poisoned, folder),
             },
             ArgValue::Array(items) => {
-                let normalized = normalize_array(items);
+                // ADR-0049 A12: the walk knows the project's own PHP minor, so a
+                // negative-key literal resolves exactly; only an unreported minor
+                // over such a literal declines.
+                let normalized = normalize_array(items, self.php_minor)?;
                 let mut out = Vec::with_capacity(normalized.len());
                 for (k, v) in normalized {
                     out.push((k, self.resolve_cval(&v, env, store, poisoned, folder)?));
@@ -12675,7 +12719,8 @@ mod domain_tests {
     use steins_syntax::ArgValue;
 
     fn sing(v: ArgValue) -> Fact {
-        singleton_fact(&v).expect("literal converts")
+        // Scalars only here — no array literal, so the minor is immaterial.
+        singleton_fact(&v, None).expect("literal converts")
     }
 
     #[test]
@@ -12735,20 +12780,20 @@ mod domain_tests {
         use ArgValue::{Bool, Int, Null, Str};
         let s = |x: &str| Str(x.to_owned());
         // A representative slice of the recorded PHP 8.5.8 table.
-        assert_eq!(php_loose_eq(&Null, &Null), Some(true));
-        assert_eq!(php_loose_eq(&Null, &Int(0)), Some(true));
-        assert_eq!(php_loose_eq(&Null, &s("")), Some(true));
-        assert_eq!(php_loose_eq(&Null, &s("0")), Some(false)); // the PHP 8 trap
-        assert_eq!(php_loose_eq(&Null, &Bool(false)), Some(true));
-        assert_eq!(php_loose_eq(&Bool(false), &s("0")), Some(true));
-        assert_eq!(php_loose_eq(&Bool(false), &s("abc")), Some(false));
-        assert_eq!(php_loose_eq(&Bool(true), &s("abc")), Some(true));
-        assert_eq!(php_loose_eq(&Int(0), &s("abc")), Some(false)); // PHP 8, not PHP 7
-        assert_eq!(php_loose_eq(&Int(0), &s("0")), Some(true));
-        assert_eq!(php_loose_eq(&Int(0), &s("")), Some(false));
-        assert_eq!(php_loose_eq(&s("0"), &s("")), Some(false));
-        assert_eq!(php_loose_eq(&s("5"), &s("5")), Some(true));
-        assert_eq!(php_loose_eq(&s("5"), &Int(5)), Some(true));
+        assert_eq!(php_loose_eq(&Null, &Null, Some((8, 5))), Some(true));
+        assert_eq!(php_loose_eq(&Null, &Int(0), Some((8, 5))), Some(true));
+        assert_eq!(php_loose_eq(&Null, &s(""), Some((8, 5))), Some(true));
+        assert_eq!(php_loose_eq(&Null, &s("0"), Some((8, 5))), Some(false)); // the PHP 8 trap
+        assert_eq!(php_loose_eq(&Null, &Bool(false), Some((8, 5))), Some(true));
+        assert_eq!(php_loose_eq(&Bool(false), &s("0"), Some((8, 5))), Some(true));
+        assert_eq!(php_loose_eq(&Bool(false), &s("abc"), Some((8, 5))), Some(false));
+        assert_eq!(php_loose_eq(&Bool(true), &s("abc"), Some((8, 5))), Some(true));
+        assert_eq!(php_loose_eq(&Int(0), &s("abc"), Some((8, 5))), Some(false)); // PHP 8, not PHP 7
+        assert_eq!(php_loose_eq(&Int(0), &s("0"), Some((8, 5))), Some(true));
+        assert_eq!(php_loose_eq(&Int(0), &s(""), Some((8, 5))), Some(false));
+        assert_eq!(php_loose_eq(&s("0"), &s(""), Some((8, 5))), Some(false));
+        assert_eq!(php_loose_eq(&s("5"), &s("5"), Some((8, 5))), Some(true));
+        assert_eq!(php_loose_eq(&s("5"), &Int(5), Some((8, 5))), Some(true));
     }
 
     #[test]
@@ -12766,8 +12811,63 @@ mod domain_tests {
     #[test]
     fn identical_is_type_strict() {
         use ArgValue::{Float, Int};
-        assert_eq!(php_identical(&Int(5), &Int(5)), Some(true));
-        assert_eq!(php_identical(&Int(5), &Float(5.0)), Some(false)); // 5 === 5.0 is false
+        assert_eq!(php_identical(&Int(5), &Int(5), Some((8, 5))), Some(true));
+        assert_eq!(php_identical(&Int(5), &Float(5.0), Some((8, 5))), Some(false)); // 5 === 5.0 is false
+    }
+
+    /// ADR-0049 A12: the next-auto-index rule for negative keys changed in PHP
+    /// 8.3, so an array `===` verdict is a function of the *project's* minor —
+    /// and is unproven when no minor was reported.
+    #[test]
+    fn negative_key_arrays_compare_per_the_project_minor() {
+        use steins_syntax::ArrayKey;
+        let s = |x: &str| ArgValue::Str(x.to_owned());
+        let arr = |items: Vec<(ArrayKey, ArgValue)>| ArgValue::Array(items);
+
+        // `[-5 => 'a', 'b']` — the omitted key is where the two rules disagree.
+        let auto = arr(vec![(ArrayKey::Int(-5), s("a")), (ArrayKey::Auto, s("b"))]);
+        // `[-5 => 'a', -4 => 'b']` (the 8.3+ landing) and `[-5 => 'a', 0 => 'b']`
+        // (the pre-8.3 landing), both written with explicit keys.
+        let at_minus_4 = arr(vec![(ArrayKey::Int(-5), s("a")), (ArrayKey::Int(-4), s("b"))]);
+        let at_zero = arr(vec![(ArrayKey::Int(-5), s("a")), (ArrayKey::Int(0), s("b"))]);
+
+        // Witnessed on PHP 8.5.8:
+        //   php -r 'var_export([-5=>"a","b"] === [-5=>"a",-4=>"b"]);' → true
+        //   php -r 'var_export([-5=>"a","b"] === [-5=>"a",0=>"b"]);'  → false
+        assert_eq!(php_identical(&auto, &at_minus_4, Some((8, 5))), Some(true));
+        assert_eq!(php_identical(&auto, &at_zero, Some((8, 5))), Some(false));
+
+        // A project on 8.1/8.2 floors the auto index at 0 — the verdicts invert.
+        for minor in [(8, 1), (8, 2)] {
+            assert_eq!(php_identical(&auto, &at_minus_4, Some(minor)), Some(false), "{minor:?}");
+            assert_eq!(php_identical(&auto, &at_zero, Some(minor)), Some(true), "{minor:?}");
+        }
+
+        // No reported minor: unproven, not guessed. This is the leg that keeps a
+        // wrong key out of the proof layer.
+        assert_eq!(php_identical(&auto, &at_minus_4, None), None);
+        assert_eq!(php_identical(&auto, &at_zero, None), None);
+        assert_eq!(php_loose_eq(&auto, &at_minus_4, None), None);
+
+        // A version-independent literal still decides under an unknown minor —
+        // the widening stays narrow.
+        let list = arr(vec![(ArrayKey::Auto, s("a"))]);
+        let list_explicit = arr(vec![(ArrayKey::Int(0), s("a"))]);
+        assert_eq!(php_identical(&list, &list_explicit, None), Some(true));
+    }
+
+    /// The same premise on the fact side: an unresolvable key drops the
+    /// `Val::Array` singleton rather than recording a guessed one.
+    #[test]
+    fn unproven_negative_key_drops_the_singleton_fact() {
+        use steins_syntax::ArrayKey;
+        let arr = ArgValue::Array(vec![
+            (ArrayKey::Int(-5), ArgValue::Str("a".to_owned())),
+            (ArrayKey::Auto, ArgValue::Str("b".to_owned())),
+        ]);
+        assert!(singleton_fact(&arr, None).is_none());
+        assert!(singleton_fact(&arr, Some((8, 5))).is_some());
+        assert!(singleton_fact(&arr, Some((8, 1))).is_some());
     }
 }
 

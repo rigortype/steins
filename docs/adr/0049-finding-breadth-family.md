@@ -517,3 +517,136 @@ A6, A8, plus measurement mode as designed. Before S6/N4: A4, A9, A11.
 The reflect slice carries A3's precondition in its own gate. Every
 "verify against PHP 8.5" above goes through `php -r` before its leg is
 worded — never recall.
+
+## Amendment (2026-07-26): the next-int rule is a project property
+
+Source: found while landing issue #39 (array literals as fold
+arguments, commit `7c38323`) and **not** caused by it — the fold path
+sends raw entries to the sidecar and lets the runtime assign keys, so
+folded values were always right. The divergence was on the Rust side,
+in `steins_syntax::normalize_array` and its consumers. Normative, and
+sequenced before any further consumer of a lowered array key.
+
+ADR-0028 §3 already named the hazard from the other direction — the
+wire format hands absent keys to the project's own PHP precisely "so no
+array rule is reimplemented in Rust to be wrong about later." A12 is
+that principle applied to the Rust side, which had reimplemented one.
+
+**A12 (A10's companion; ADR-0011, ADR-0052 A11) — the next-auto-index
+rule follows the project's PHP minor, and declines when that minor is
+unknown.** PHP 8.3 changed the edge case for an omitted key after a
+negative one: before 8.3 the next auto-index floored at `0`, so
+`[-5 => 'a', 'b']` put `'b'` at `0`; from 8.3 it is one past the
+largest integer key seen, negative or not, so `'b'` lands at `-4`.
+Witnessed, never recalled — `php -r 'var_export([-5=>"a","b"]);'` on
+PHP 8.5.8 prints `-5, -4`; the same probe pins that the index tracks
+the running **max** and never moves backwards (`[3=>a,-5=>b,c]` → `4`),
+that a duplicate key still counts toward it (`[5=>a,5=>b,c]` → `6`),
+and that auto keys climb back out of the negatives
+(`[-5=>a,b,-1=>z,c]` → `-5,-4,-1,0`). `normalize_array` implemented the
+pre-8.3 rule while `PINNED_PHP` is `(8, 5)`.
+
+The fix is not "use the 8.3 rule". ADR-0011's floor is **8.1**, so both
+rules are live across the supported range — 8.1/8.2 take the floor,
+8.3/8.4/8.5 take max+1 — and following the catalog pin unconditionally
+would be wrong for two of the five supported minors, which is not a
+fringe skew. The rule is therefore selected from the project's own PHP
+minor, the same `Folder::php_minor()` input A11 consumes.
+
+Where A11 must **demote blanket-wise**, A12 resolves **exactly**, and
+the difference is principled: A11's builtin hierarchy table is mined at
+one php-src version and the *other* version's table is unknowable, so
+any skew poisons every catalog edge. Here both rules and the exact
+changeover version are known, and the ambiguity is a narrow, purely
+syntactic property of a single literal — an omitted key falling where
+every integer key seen so far is negative
+(`next_int_is_version_dependent`). So:
+
+- **minor reported** → that minor's rule, proven, no widening. This is
+  the default configuration: the sidecar is default-on (ADR-0004).
+- **minor unknown + version-independent literal** → proven. The two
+  rules agree, so no version input is needed. This covers every literal
+  without negative integer keys, i.e. essentially all of them.
+- **minor unknown + version-dependent literal** → **unproven**.
+  `normalize_array` returns `None` and the consumer drops the fact.
+
+The third leg is the load-bearing one. A guessed key is not a cosmetic
+error: `===` and `==` compare key order and key sets, so a wrong key is
+a wrong identity verdict — a proof-layer premise (ADR-0002, ADR-0037),
+not a diagnostic detail. Dropping the fact is the zero-FP side; A11's
+"unknown minor means no detectable skew, trust the pin" default is
+*not* inherited here, because unlike a catalog edge the divergence is
+detectable per-literal, so there is no reason to guess.
+
+**Consumers.** The inference walk carries the minor on `Cx` already
+(A11's plumbing) and threads it to `val_of`/`singleton_fact`, the
+`===`/`==` evaluators, condition refinement, and `resolve_cval`.
+Diagnostic **rendering** is explicitly exempt: `ArgValue::render()` is a
+config-free `&self` surface with wide reach, a message never carries a
+premise, so `render_array` takes the pinned rule unconditionally and a
+pre-8.3 project may see a negative-key literal rendered with 8.3+
+positions. The **edit** layer (`steins_edit::common::arg_to_val`) runs
+off the Salsa sweep path, which carries no `Folder`; it passes `None`,
+so a version-dependent literal is simply not a self-evident literal
+there and the site refuses to promote rather than writing a declaration
+derived from a guessed key. Recorded refinement, mirroring A11's own:
+thread the reported minor into the promote sweeps so the edit layer
+resolves exactly instead of declining.
+
+**Relationship to #28 — the divergence, argued rather than assumed.**
+A12 reads `Folder::php_minor()`, which is the **sidecar's runtime**
+version: the very input #28 identifies as the wrong question, since a
+project declaring `require.php: ^8.1` analysed on a developer's 8.5 is
+being asked about a PHP it does not ship on. A12 inherits that, and the
+inheritance is deliberate. #46 requires the posture be "consistent
+between them rather than decided twice"; while #28 is open, the way to
+stay consistent is to consume the *same channel* A11 already consumes,
+so that #28 replaces **one** seam and both amendments follow it. Giving
+A12 its own private version source would manufacture exactly the second
+decision #46 warns against.
+
+The exposure, stated plainly: on a project targeting 8.1 but developed
+on 8.5, A12 resolves a negative-key literal under max+1 where the target
+floors at 0 — a wrong key, so potentially a wrong `===` verdict. That is
+louder than #28's general failure mode (which is silent: a missing
+finding, invisible by construction), but it is not a *new* skew — it is
+the one A11 already carries, now with a fixture that makes it visible.
+
+What keeps this cheap to correct is that the version is a **parameter**,
+never a global: `normalize_array` is handed the minor and reads nothing
+ambient, so #28 changes what callers pass, not the rule.
+
+Recorded as the intended #28 integration: a resolved target is likely a
+**range**, not a point — `^8.1` spans the 8.3 change outright — and
+`next_int_is_version_dependent` generalizes to it directly. A literal
+whose keys differ anywhere across the project's declared range is
+version-dependent *within that project's own target* and must decline,
+exactly as it declines today for an unreported minor. The unknown-minor
+leg is therefore not a stopgap to be deleted when #28 lands; it is the
+shape #28 will need, already built and already fixture-pinned.
+
+**Evidence bar.** Every expectation in
+`crates/steins-syntax/tests/array_lowering.rs` and in the A12 cases of
+`steins-infer`'s `domain_tests` is a `php -r` witness at PHP 8.5.8 for
+the 8.3+ column; the pre-8.3 column is the documented floor rule that
+ADR-0011's 8.1 floor obliges Steins to keep serving. Both columns are
+asserted, and the unknown-minor leg is asserted to return no verdict.
+
+#46's named counterexamples each get a witnessed row: mixed negative and
+positive explicit keys, a negative key *after* a larger auto key (the
+index cannot be pulled back down), and string keys interleaved before
+and around the negative one. `-1` gets its own case as the exact edge
+where the two rules reconverge — one past `-1` is `0`, which the floor
+also yields — so `-2` is the first key that splits them. Beyond the
+hand-written rows, one test sweeps **every** key sequence of length ≤ 4
+over `{auto, -2, -1, 0, 1, "k"}` and asserts A12's load-bearing
+invariant: whenever `next_int_is_version_dependent` says no, the two
+rules genuinely agree, which is what makes answering under an unknown
+minor sound rather than merely convenient.
+
+The corpus was triaged verbatim as #46 requires: `fp-gate` over 99,532
+files reports numbers **byte-identical** to those at the parent commit
+(`throw.*` 44,563; `phpdoc.*` 526; zero proof-layer diagnostics), so no
+`===` verdict in the corpus moved. That is the expected result — the
+shape needs a negative explicit key followed by an omitted one — and it
+is recorded here so a future change to these numbers is attributable.
