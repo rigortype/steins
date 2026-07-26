@@ -317,7 +317,18 @@ const THROW_EXPECTED: &[(&str, usize)] = &[
     // FileReader::read()'s CouldNotReadFileException escapes FixerApplication's
     // @throws-annotated methods. Homogeneous checked-exception debt, none runtime
     // breakage — the exact ADR-0040/0007 pattern the tripwire mode exists for.
-    ("phpstan/phpstan-src", 20),
+    // 20 -> 21, 2026-07-26: the local checkout advanced (192 src/ files changed),
+    // rewriting ValidateServiceTagsExtension onto the attribute collector. The new
+    // `getInterfaceTagMapping()` throws ShouldNotHappenException ("Interface %s
+    // claims multiple tags") and `beforeCompile()` — which calls it and declares
+    // only @throws MissingImplementedInterfaceInServiceWithTagException — lets it
+    // escape. Triaged verbatim against the pre-advance tree: that file held exactly
+    // one such throw before and holds two now, and the other 20 findings are
+    // unchanged in file, line and escaping method. A TRUE undeclared checked throw
+    // of the same homogeneous shape as the seeded 20, caught transitively (the
+    // throw is in the helper, the escape is attributed to the annotated caller),
+    // which is what the ADR-0040 damming machinery is for.
+    ("phpstan/phpstan-src", 21),
     // 43964 → 44372 (+408), 2026-07-24 evening: LIVE-TREE DRIFT — the unpinned
     // monorepo checkout gained ~210 files (84,038 → 84,248) during the day.
     // Triaged (3-sample verbatim, gate printout): every sampled new finding is
