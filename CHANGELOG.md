@@ -29,11 +29,17 @@ Entries accumulate under this heading as work lands; the `steins-release-prep`
 skill seals them into a version section at release time, reconstructing from
 `git log` if the discipline slipped.
 
+## [0.1.1] - 2026-07-26
+
+The first release after `v0.1.0`, and the first one that can change what your CI reports. Three entries below move findings — folding now reaches array arguments, `class_alias` no longer silences absence claims project-wide, and array literals with a negative key are read by your PHP's version rules — so a green run may go red on claims that were always true and merely withheld. Steins is still a preview with plenty unimplemented, so the `0.1.x` series continues rather than jumping a minor; read the entries rather than the version number to know what changes.
+
+Alongside those, the binary now carries its own legal notices and can say what version it is, `doctor` reports the code it declines to reason about instead of leaving a quiet run unexplained, and Steins is installable through Composer.
+
 ### Added
 
 - **`steins version` and `steins license`** — the binary now tells you what it is and carries its own legal notices. `steins version` (also `-v`, `--version`) prints the version, the date and commit it was built from, the copyright, and where to read the licenses. `steins license` prints Steins' full Apache-2.0 terms followed by every bundled dependency's notice.
   - Both texts are compiled into the executable, which matters because nothing downstream keeps them beside it: `brew install` puts the binary on your `PATH` without `LICENSE`, and so does `cargo install --git`. Apache-2.0 §4(a) entitles you to a copy of the licence and the bundled MIT/BSD/ISC dependencies require their notices to accompany a binary — now the binary carries both itself, whatever your packager installed.
-  - One license reads as one entry. A dependency shipping Apache-2.0 centred and another shipping it flush-left previously produced two identical-in-substance sections; those are merged, keyed on the license text rather than its typography. Notices that genuinely differ — an MIT body naming a different copyright holder — stay separate, because that attribution is what the licence exists to preserve.
+  - One licence reads as one entry, not one per copyright holder: the MIT permission notice is printed once with every dependency's copyright line above it — which is what "the above copyright notice and this permission notice shall be included in all copies" asks for — and bodies differing only in typography (centred versus flush-left) count as the same licence. That is 877 lines rather than the roughly 1,900 a per-crate listing would print, with no attribution lost.
 - **`steins doctor` now says what a quiet run was silent about** — a Coverage posture section inventories the code the analyzer parses and then declines to reason about, so a clean run is a measured claim rather than an unexplained silence.
   - Poisoned scopes as a share of all scopes, with the constructs that caused them broken down by kind: `eval`, `include`/`require`, `extract`, `compact`, variable variables, reference assignment, `global`, `static`, and by-ref capture. Every local in such a scope is unknown by design — that is why Steins does not report false positives there, and now it says so.
   - Dam sites broken down by `eval` / unproven include / runtime-name `class_alias`: the sites where an absence claim about a function or class stays silent because runtime code could mint the name.
@@ -51,7 +57,7 @@ skill seals them into a version section at release time, reconstructing from
 
 ### Changed
 
-- **`steins license` and `THIRD-PARTY-LICENSES.md` now read as one entry per licence, not one per copyright holder.** The MIT permission notice was printed 39 times, once for each dependency that ships it, because the copyright line above it differs. Those sections are now grouped by the permission notice, with every crate's copyright notice listed above it — which is exactly what "the above copyright notice and this permission notice shall be included in all copies" describes. The notices file goes from 1,702 to 669 lines and `steins license` from 1,910 to 877, with **no holder dropped**: all 46 copyright notices in the file are still there, and a test compares the two sets rather than trusting the eye. The same treatment applies to any licence family whose text carries a per-crate copyright line; MIT is simply the only one in this tree with more than one holder.
+- **`THIRD-PARTY-LICENSES.md` now reads as one entry per licence, not one per copyright holder.** The file ships inside every release archive, and in 0.1.0 it repeated the MIT permission notice once for each of the 39 dependencies that ship it, because the copyright line above each one differs. Those sections are now grouped by the permission notice, with every crate's copyright notice listed above it — which is exactly what "the above copyright notice and this permission notice shall be included in all copies" describes. The file goes from 1,897 lines and 49 sections to 671 and 9, with **no holder dropped**: the regrouping is checked by a test comparing the before and after sets of copyright notices rather than trusting the eye. The same treatment applies to any licence family whose text carries a per-crate copyright line; MIT is simply the only one in this tree with more than one holder.
 
 ### Fixed
 
@@ -93,5 +99,6 @@ The trade is deliberate. Steins finds less than a conventional analyzer, and wha
 - **Windows is not shipped.** The sidecar spawns PHP through a temp-dir path that is unverified there, and a binary that mis-spawned it would degrade silently to the sound subset — worse than not shipping.
 - **What Steins does not do yet** is written down rather than left to discovery: see [`docs/type-specification/not-implemented.md`](docs/type-specification/not-implemented.md). It is also not a linter or a formatter, and will not become one.
 
-[Unreleased]: https://github.com/rigortype/steins/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/rigortype/steins/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/rigortype/steins/releases/tag/v0.1.1
 [0.1.0]: https://github.com/rigortype/steins/releases/tag/v0.1.0
