@@ -2,6 +2,8 @@
 
 A **shameless knockoff** heavily 'inspired' by PHPStan, born from my grand delusions. It is a cursed dead copy designed to ~~destroy your codebase~~ deceive ***the Organization*** and rewrite the worldline of static analysis. *El Psy Kongroo.*
 
+*Steins* is pronounced [/ʃtaɪn/](https://en.wiktionary.org/wiki/Stein#German) — rhymes with *shine*, not *stine*, like the German *-stein* in Albert Einstein. The trailing *s* is often forgotten by lazy Japanese speakers — myself included.
+
 ## Install
 
 ```
