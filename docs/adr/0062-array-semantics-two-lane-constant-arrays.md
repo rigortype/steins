@@ -302,6 +302,18 @@ amendment governs.
   non-nullable — with a nullable value, present-null falls through at
   runtime and the right arm may truly be missing (real semantics, not
   imprecision).
+- **A-G1a — Implementation note on value slots (orchestrator, pre-S2).**
+  In `steins-domain` the canonical form's field/tail value slots are
+  recursive `Option<Fact>`, not ContractTy arm lists — the domain crate
+  cannot (and must not) name `ContractTy`; the dependency points the other
+  way. Declared fidelity the fact domain cannot express (class instances,
+  callables) stays in the *aligned* `Shape` arm in the arm lane, which is
+  flow-immutable; flow refinement (presence, covers, subtraction) lives in
+  the domain form, kept per-binding as a vector aligned index-wise with
+  the declared arms. A read takes presence from the flow form and its
+  value from the slot fact, else the aligned declared arm, by trust order.
+  This refines A-G1's "stratum-carrying arm lists" phrasing, which was
+  written before the dependency direction was checked.
 - **A-G12 — Domain-first resequencing** (settles Open Question 2). S0
   acceptance convergence (was A1) → S1 spelling (A2) → S2 domain core:
   `Fact::Shape` + lowering + join + lift + computed descent (was A6) → S3
