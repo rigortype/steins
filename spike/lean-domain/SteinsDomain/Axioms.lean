@@ -63,6 +63,43 @@ say in the commit message which axiom appeared and why it is acceptable.
 #guard_msgs in
 #print axioms SteinsDomain.Certainty.allOf_eq_yes_iff
 
+/-! ## The array stratum (ADR-0062 S2)
+
+The canonical form's invariants. The array stratum's *join* soundness is checked
+exhaustively rather than proved (`REPORT.md`), but what `normalize` establishes
+is proved for every input, and these pin it. -/
+
+/-- info: 'SteinsDomain.normalize_fieldsSorted' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms SteinsDomain.normalize_fieldsSorted
+
+/-- info: 'SteinsDomain.normalize_sealed_no_absent' depends on axioms: [propext] -/
+#guard_msgs in
+#print axioms SteinsDomain.normalize_sealed_no_absent
+
+/-- info: 'SteinsDomain.normalize_covers_have_two_keys' depends on axioms: [propext] -/
+#guard_msgs in
+#print axioms SteinsDomain.normalize_covers_have_two_keys
+
+/-- info: 'SteinsDomain.Key.blt_total' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms SteinsDomain.Key.blt_total
+
+/-- info: 'SteinsDomain.Presence.required_of_join' depends on axioms: [propext] -/
+#guard_msgs in
+#print axioms SteinsDomain.Presence.required_of_join
+
+/-- info: 'SteinsDomain.KeyClass.join_admits' depends on axioms: [propext] -/
+#guard_msgs in
+#print axioms SteinsDomain.KeyClass.join_admits
+
+-- The array stratum is layered on the scalar core, and off that stratum the
+-- full join *is* the core — which is what makes `join_sound` above a statement
+-- about the shipped `Fact::join` for every non-array fact.
+/-- info: 'SteinsDomain.Fact.join_eq_joinScalar' depends on axioms: [propext] -/
+#guard_msgs in
+#print axioms SteinsDomain.Fact.join_eq_joinScalar
+
 /-! ## The vector model's coherence laws
 
 These are the two obligations `Model` demands of the string classifier, so it is

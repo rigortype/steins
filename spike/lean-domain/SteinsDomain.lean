@@ -3,6 +3,7 @@ import SteinsDomain.Preds
 import SteinsDomain.Range
 import SteinsDomain.Val
 import SteinsDomain.Canon
+import SteinsDomain.Shape
 import SteinsDomain.Fact
 import SteinsDomain.Soundness
 import SteinsDomain.Queries

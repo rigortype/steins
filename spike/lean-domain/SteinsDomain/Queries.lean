@@ -112,6 +112,32 @@ theorem truthy_yes (M : Model) {f : Fact} {v : Val}
           | arr _ => simp [admits, refAdmits] at hv
       | float => cases r <;> (simp only at hft; exact absurd hft (by simp))
       | bool => cases r <;> (simp only at hft; exact absurd hft (by simp))
+    | shape s n =>
+      -- A `yes` on the array stratum says the shape is known non-empty and
+      -- non-nullable, and an array is falsy exactly when it is empty — the
+      -- coupling `Model.arrFalsy_iff` records.
+      have hcf := canFalsy_false_of_truthy_yes (M := M) (by simp [finiteMembers]) h
+      simp only [abstractFalsyTruthy] at hcf
+      obtain ⟨hne, hn⟩ := Bool.or_eq_false_iff.mp hcf
+      have hne' : s.nonEmpty = true := by simpa using hne
+      cases v with
+      | null => rw [hn] at hv; simp [admits] at hv
+      | arr r =>
+        have hempty : (M.arrEntries r).isEmpty = true := by
+          have hco := M.arrFalsy_iff r
+          simp only [Val.falsy] at hb
+          rw [hb] at hco
+          exact hco.symm
+        obtain ⟨fields, tail, isList, nonEmpty, covers⟩ := s
+        simp only at hne'
+        subst hne'
+        simp only [admits] at hv
+        unfold shapeAdmits at hv
+        simp [hempty] at hv
+      | bool _ => simp [admits] at hv
+      | int _ => simp [admits] at hv
+      | float _ => simp [admits] at hv
+      | str _ => simp [admits] at hv
 
 /-- **A `no` from `truthy` holds for every admitted value.** On the Refined layer
 only `int<0, 0>` can produce it, which is exactly what `canTruthy` encodes. -/
@@ -165,6 +191,12 @@ theorem truthy_no (M : Model) {f : Fact} {v : Val}
       | str => cases r <;> (simp only at hct; exact absurd hct (by simp))
       | float => cases r <;> (simp only at hct; exact absurd hct (by simp))
       | bool => cases r <;> (simp only at hct; exact absurd hct (by simp))
+    | shape s n =>
+      -- The array stratum over-approximates the truthy side, so it never
+      -- answers `no` — there is nothing to discharge.
+      have hct := canTruthy_false_of_truthy_no (M := M) (by simp [finiteMembers]) h
+      simp only [abstractFalsyTruthy] at hct
+      exact absurd hct (by simp)
 
 /-! ## `satisfiesStr` -/
 
@@ -222,6 +254,7 @@ theorem satisfiesStr_yes (M : Model) {f : Fact} {v : Val} {pred : StrPreds}
     | int => cases r <;> simp [satisfiesStr] at h
     | float => cases r <;> simp [satisfiesStr] at h
     | bool => cases r <;> simp [satisfiesStr] at h
+  | shape _ _ => simp [satisfiesStr] at h
 
 /-! ## `intIn` -/
 
@@ -270,6 +303,7 @@ theorem intIn_no (M : Model) {f : Fact} {v : Val} {range : IntRange} {i : Int}
     | float => simp [admits, Val.base] at hv
     | str => simp [admits, Val.base] at hv
     | bool => simp [admits, Val.base] at hv
+  | shape _ _ => simp [admits] at hv
 
 end Fact
 end SteinsDomain

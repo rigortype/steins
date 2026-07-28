@@ -78,6 +78,7 @@ theorem mem_of_admits_finite {a : Fact} {xs : List Val} {v : Val}
     simpa [admits] using hv
   | refined _ _ _ => simp [finiteMembers] at hxs
   | general _ _ => simp [finiteMembers] at hxs
+  | shape _ _ => simp [finiteMembers] at hxs
 
 /-! ## Widening steps
 
@@ -262,10 +263,10 @@ private theorem mem_scalars {vals : List Val} {v : Val} (hv : v ∈ vals) (hn : 
 /-- `summarize` lands in a finite layer only in the all-null branch. This is what
 lets `joinFiniteAbstract`'s `Some(_)` arm conclude that the finite operand was
 nothing but nulls. -/
-theorem summarize_finite {vals : List Val} {f : Fact} (h : summarize M vals = some f)
+theorem summarize_finite {vals : List Val} {f : Fact} (h : summarizeScalar M vals = some f)
     (hf : f.finiteMembers ≠ none) :
     f = .singleton Val.null ∧ ∀ v ∈ vals, v = Val.null := by
-  unfold summarize at h
+  unfold summarizeScalar at h
   simp only at h
   split at h
   · rename_i hnil
@@ -287,8 +288,8 @@ theorem summarize_finite {vals : List Val} {f : Fact} (h : summarize M vals = so
 /-- **The computed widening never loses a member.** Every value the list contains
 is admitted by the summary an overflowing set widens to. -/
 theorem summarize_admits {vals : List Val} {f : Fact} {v : Val}
-    (hv : v ∈ vals) (h : summarize M vals = some f) : admits M f v = true := by
-  unfold summarize at h
+    (hv : v ∈ vals) (h : summarizeScalar M vals = some f) : admits M f v = true := by
+  unfold summarizeScalar at h
   simp only at h
   split at h
   · rename_i hnil
@@ -362,9 +363,9 @@ theorem summarize_admits {vals : List Val} {f : Fact} {v : Val}
 /-- **Layering never loses a member.** The all-values generalisation of the
 `from_vals_admits_every_input` proptest. -/
 theorem fromVals_admits {vals : List Val} {f : Fact} {v : Val}
-    (hv : v ∈ vals) (h : fromVals M vals = some f) : admits M f v = true := by
+    (hv : v ∈ vals) (h : fromValsScalar M vals = some f) : admits M f v = true := by
   have hvc : v ∈ Val.canon vals := (Val.mem_canon v vals).mpr hv
-  unfold fromVals at h
+  unfold fromValsScalar at h
   rcases hc : Val.canon vals with _ | ⟨w, tl⟩
   · rw [hc] at hvc; exact absurd hvc (by simp)
   · rw [hc] at h hvc
@@ -388,10 +389,12 @@ theorem joinAbstract_sub_left {a b j : Fact} (h : joinAbstract a b = some j) : S
   cases a with
   | singleton _ => simp [abstractParts] at h
   | oneOf _ => simp [abstractParts] at h
+  | shape _ _ => simp [abstractParts] at h
   | refined ab ar an =>
     cases b with
     | singleton _ => simp [abstractParts] at h
     | oneOf _ => simp [abstractParts] at h
+    | shape _ _ => simp [abstractParts] at h
     | refined bb br bn =>
       simp only [abstractParts] at h
       split at h
@@ -425,6 +428,7 @@ theorem joinAbstract_sub_left {a b j : Fact} (h : joinAbstract a b = some j) : S
     cases b with
     | singleton _ => simp [abstractParts] at h
     | oneOf _ => simp [abstractParts] at h
+    | shape _ _ => simp [abstractParts] at h
     | refined bb br bn =>
       simp only [abstractParts] at h
       split at h
@@ -444,10 +448,12 @@ theorem joinAbstract_comm (a b : Fact) : joinAbstract a b = joinAbstract b a := 
   cases a with
   | singleton _ => cases b <;> rfl
   | oneOf _ => cases b <;> rfl
+  | shape _ _ => cases b <;> rfl
   | refined ab ar an =>
     cases b with
     | singleton _ => rfl
     | oneOf _ => rfl
+    | shape _ _ => rfl
     | refined bb br bn =>
       simp only [joinAbstract, abstractParts]
       by_cases hb : ab = bb
@@ -467,6 +473,7 @@ theorem joinAbstract_comm (a b : Fact) : joinAbstract a b = joinAbstract b a := 
     cases b with
     | singleton _ => rfl
     | oneOf _ => rfl
+    | shape _ _ => rfl
     | refined bb br bn =>
       simp only [joinAbstract, abstractParts]
       by_cases hb : ab = bb
@@ -505,6 +512,7 @@ theorem joinFiniteAbstract_admits_finite {finite : List Val} {abs j : Fact} {v :
       | general b n => injection h with h; subst h; exact admits_null_general rfl
       | singleton _ => exact absurd h (by simp)
       | oneOf _ => exact absurd h (by simp)
+      | shape _ _ => exact absurd h (by simp)
     · exact joinAbstract_sub_left h v hadm
 
 theorem joinFiniteAbstract_admits_abs {finite : List Val} {abs j : Fact} {v : Val}
@@ -523,21 +531,22 @@ theorem joinFiniteAbstract_admits_abs {finite : List Val} {abs j : Fact} {v : Va
         exact sub_general_nullable (fun _ => rfl) v hv
       | singleton _ => simp [finiteMembers] at habs
       | oneOf _ => simp [finiteMembers] at habs
+      | shape _ _ => exact absurd h (by simp)
     · exact joinAbstract_sub_right h v hv
 
 /-- **`γ(a) ∪ γ(b) ⊆ γ(join a b)`** — the soundness contract of ADR-0035, for
 every value and every model. A `none` join is ⊤, which is why the statement is
 phrased over `denotes`. -/
 theorem join_sound (M : Model) (a b : Fact) (v : Val)
-    (h : a.admits M v = true ∨ b.admits M v = true) : denotes M (join M a b) v := by
-  unfold join
+    (h : a.admits M v = true ∨ b.admits M v = true) : denotes M (joinScalar M a b) v := by
+  unfold joinScalar
   split
   · rename_i xs ys hxs hys
     have hmem : v ∈ xs ++ ys := by
       rcases h with h | h
       · exact List.mem_append.mpr (Or.inl (mem_of_admits_finite hxs h))
       · exact List.mem_append.mpr (Or.inr (mem_of_admits_finite hys h))
-    cases hj : fromVals M (xs ++ ys) with
+    cases hj : fromValsScalar M (xs ++ ys) with
     | none => simp [denotes]
     | some f => simpa only [denotes] using fromVals_admits hmem hj
   · rename_i xs hxs hys
@@ -570,14 +579,14 @@ theorem join_sound (M : Model) (a b : Fact) (v : Val)
 /-- `fromVals` sees only the canonical member set, so appending in either order
 gives the same fact. -/
 theorem fromVals_append_comm (M : Model) (xs ys : List Val) :
-    fromVals M (xs ++ ys) = fromVals M (ys ++ xs) := by
-  unfold fromVals
+    fromValsScalar M (xs ++ ys) = fromValsScalar M (ys ++ xs) := by
+  unfold fromValsScalar
   rw [Val.canon_append_comm]
 
 /-- **The join is commutative** — the all-inputs generalisation of the
 `join_is_commutative` proptest. -/
-theorem join_comm (M : Model) (a b : Fact) : join M a b = join M b a := by
-  unfold join
+theorem join_comm (M : Model) (a b : Fact) : joinScalar M a b = joinScalar M b a := by
+  unfold joinScalar
   cases ha : a.finiteMembers with
   | none =>
     cases hb : b.finiteMembers with

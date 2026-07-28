@@ -4833,8 +4833,11 @@ fn render_dump_fact(fact: &Fact) -> String {
         }
         Fact::Refined { base, nullable, .. } => with_null(base_keyword(*base).to_owned(), *nullable),
         Fact::General { base, nullable } => with_null(base_keyword(*base).to_owned(), *nullable),
-        // Finite layers are handled above.
-        Fact::Singleton(_) | Fact::OneOf(_) => DUMP_UNKNOWN.to_owned(),
+        // Finite layers are handled above. The array stratum (ADR-0062
+        // `Fact::Shape`) has no faithful spelling until the array-vocabulary
+        // slice teaches the speller, so it renders as honest `DUMP_UNKNOWN` —
+        // the same answer an array member already gets.
+        Fact::Singleton(_) | Fact::OneOf(_) | Fact::Shape { .. } => DUMP_UNKNOWN.to_owned(),
     }
 }
 
@@ -5599,6 +5602,10 @@ fn fact_is_nullish(f: &Fact) -> bool {
         Fact::Singleton(v) => matches!(v, Val::Null),
         Fact::OneOf(vs) => vs.iter().any(|v| matches!(v, Val::Null)),
         Fact::Refined { nullable, .. } | Fact::General { nullable, .. } => *nullable,
+        // The array stratum (ADR-0062 `Fact::Shape`) has no property-seeding
+        // consumer in this slice. Answering `true` keeps it out of the heap
+        // entirely, which is the no-knowledge side of this filter.
+        Fact::Shape { .. } => true,
     }
 }
 
@@ -6817,6 +6824,10 @@ fn fact_is_non_object(f: &Fact) -> bool {
         Fact::Singleton(v) => val_is_non_object(v),
         Fact::OneOf(vs) => vs.iter().all(val_is_non_object),
         Fact::Refined { .. } | Fact::General { .. } => true,
+        // A shape fact does denote arrays, which are non-objects — but the
+        // value-side `instanceof` rule gains no new proof in this slice, so
+        // the arm answers "not proven" (no narrowing), the no-knowledge side.
+        Fact::Shape { .. } => false,
     }
 }
 
@@ -12426,7 +12437,8 @@ fn admit_return_fact(return_type: &str, curated: Option<&str>, minor_matches_pin
 fn fact_base(f: &Fact) -> Option<Base> {
     match f {
         Fact::General { base, .. } | Fact::Refined { base, .. } => Some(*base),
-        Fact::Singleton(_) | Fact::OneOf(_) => None,
+        // The array stratum has no scalar base.
+        Fact::Singleton(_) | Fact::OneOf(_) | Fact::Shape { .. } => None,
     }
 }
 
@@ -12475,7 +12487,9 @@ fn fact_with_null(f: &Fact) -> Option<Fact> {
     match f {
         Fact::General { base, .. } => Some(Fact::General { base: *base, nullable: true }),
         Fact::Refined { base, refinement, .. } => Some(Fact::refined(*base, *refinement, true)),
-        Fact::Singleton(_) | Fact::OneOf(_) => None,
+        // The curated `?T` wrapper is a scalar path; a shape fact refuses
+        // rather than acquiring nullability here.
+        Fact::Singleton(_) | Fact::OneOf(_) | Fact::Shape { .. } => None,
     }
 }
 
@@ -12620,8 +12634,9 @@ fn describe_fact(f: &Fact) -> String {
             (n.to_owned(), *nullable)
         }
         Fact::Refined { base, nullable, .. } => (base_kw(*base).to_owned(), *nullable),
-        // Finite facts do not reach here.
-        Fact::Singleton(_) | Fact::OneOf(_) => ("value".to_owned(), false),
+        // Finite facts do not reach here, and the array stratum has no
+        // diagnostic spelling yet: both take the site's own generic wording.
+        Fact::Singleton(_) | Fact::OneOf(_) | Fact::Shape { .. } => ("value".to_owned(), false),
     };
     if nullable {
         format!("a value of type {name}|null")

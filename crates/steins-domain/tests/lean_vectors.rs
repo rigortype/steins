@@ -19,7 +19,8 @@
 //! lines, which is what this test compares.
 
 use steins_domain::{
-    Base, Certainty, Fact, IntRange, Key, Refinement, StrPreds, Val, php_is_falsy,
+    Base, Certainty, Cover, CoverFlavor, Fact, IntRange, Key, KeyClass, Presence, Refinement,
+    ShapeFact, StrPreds, Tail, Val, array_is_list, php_is_falsy,
 };
 
 /// The string atoms of the spec, in rank order — which is `str::cmp` order,
@@ -31,12 +32,58 @@ const STR_ATOMS: [&str; 6] = ["", " 5 ", "0", "00", "5", "abc"];
 /// The float atoms, with the literal text the spec prints for each.
 const FLOAT_ATOMS: [(f64, &str); 3] = [(-1.5, "-1.5"), (0.0, "0.0"), (2.5, "2.5")];
 
-/// The array atoms, with their literal text.
-fn arr_atoms() -> Vec<(Val, &'static str)> {
+/// The string-key atoms of the shape section, in rank order — `str::cmp`
+/// order, for the same reason `STR_ATOMS` is.
+const KEY_ATOMS: [&str; 3] = ["a", "b", "c"];
+
+fn ik(n: i64) -> Key {
+    Key::Int(n)
+}
+
+fn sk(rank: usize) -> Key {
+    Key::Str(KEY_ATOMS[rank].to_owned())
+}
+
+/// Every array atom, in the domain's total order on `Val` — which is what
+/// `Val::arr rank` means on the Lean side, so the ranks are load-bearing.
+/// Ranks 0 and 1 are the pre-shape universe (`values()` uses only those); the
+/// rest exist for the shape section.
+fn shape_arr_atoms() -> Vec<(Val, &'static str)> {
+    let a = |entries: Vec<(Key, Val)>| Val::Array(entries);
     vec![
-        (Val::Array(vec![]), "[]"),
-        (Val::Array(vec![(Key::Int(0), Val::Int(1))]), "[0=>1]"),
+        (a(vec![]), "[]"),
+        (a(vec![(ik(0), Val::Int(1))]), "[0=>1]"),
+        (a(vec![(ik(0), Val::Int(1)), (ik(1), Val::Int(2))]), "[0=>1,1=>2]"),
+        (a(vec![(ik(0), Val::Int(1)), (sk(0), Val::Int(2))]), "[0=>1,a=>2]"),
+        (a(vec![(ik(1), Val::Int(2))]), "[1=>2]"),
+        (a(vec![(sk(0), Val::Int(1))]), "[a=>1]"),
+        (a(vec![(sk(0), Val::Int(2))]), "[a=>2]"),
+        (a(vec![(sk(0), Val::Int(2)), (sk(1), Val::Int(1))]), "[a=>2,b=>1]"),
+        (a(vec![(sk(0), Val::Int(3))]), "[a=>3]"),
+        (a(vec![(sk(0), Val::Int(4))]), "[a=>4]"),
+        (a(vec![(sk(0), Val::Int(5))]), "[a=>5]"),
+        (a(vec![(sk(0), Val::Int(6))]), "[a=>6]"),
+        (a(vec![(sk(0), Val::Int(7))]), "[a=>7]"),
+        (a(vec![(sk(0), Val::Int(8))]), "[a=>8]"),
+        (a(vec![(sk(0), Val::Int(9))]), "[a=>9]"),
+        (a(vec![(sk(1), Val::Int(1))]), "[b=>1]"),
     ]
+}
+
+/// The array atoms of the pre-shape universe, with their literal text.
+fn arr_atoms() -> Vec<(Val, &'static str)> {
+    shape_arr_atoms().into_iter().take(2).collect()
+}
+
+fn arr_atom(rank: usize) -> Val {
+    shape_arr_atoms()[rank].0.clone()
+}
+
+fn arr_entries(rank: usize) -> Vec<(Key, Val)> {
+    match arr_atom(rank) {
+        Val::Array(e) => e,
+        other => panic!("atom {rank} is not an array: {other:?}"),
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -102,7 +149,7 @@ fn str_rank(s: &str) -> usize {
 }
 
 fn arr_rank(v: &Val) -> usize {
-    arr_atoms()
+    shape_arr_atoms()
         .iter()
         .position(|(a, _)| a == v)
         .unwrap_or_else(|| panic!("array {v:?} is not an atom of the vector universe"))
@@ -139,7 +186,89 @@ fn render_fact(f: &Fact) -> String {
         Fact::General { base, nullable } => {
             format!("G({},{})", render_base(*base), render_nullable(*nullable))
         }
+        Fact::Shape { shape, nullable } => {
+            format!("A({},{})", render_shape(shape), render_nullable(*nullable))
+        }
     }
+}
+
+// ----------------------------------------------------------------------------
+// Shape rendering (ADR-0062 S2)
+// ----------------------------------------------------------------------------
+
+fn key_rank(s: &str) -> usize {
+    KEY_ATOMS
+        .iter()
+        .position(|a| *a == s)
+        .unwrap_or_else(|| panic!("key {s:?} is not an atom of the vector universe"))
+}
+
+fn render_key(k: &Key) -> String {
+    match k {
+        Key::Int(n) => format!("i{}", render_int(*n)),
+        Key::Str(s) => format!("s{}", key_rank(s)),
+    }
+}
+
+fn render_presence(p: Presence) -> &'static str {
+    match p {
+        Presence::Required { witnessed: true } => "R!",
+        Presence::Required { witnessed: false } => "R",
+        Presence::Optional => "O",
+        Presence::Absent => "X",
+    }
+}
+
+fn render_slot(slot: Option<&Fact>) -> String {
+    match slot {
+        None => "-".to_owned(),
+        Some(f) => render_fact(f),
+    }
+}
+
+fn render_key_class(c: KeyClass) -> &'static str {
+    match c {
+        KeyClass::Int => "i",
+        KeyClass::Str => "s",
+        KeyClass::ArrayKey => "k",
+    }
+}
+
+fn render_tail(t: &Tail) -> String {
+    match t {
+        Tail::Sealed => ".".to_owned(),
+        Tail::Unsealed { key, value } => {
+            format!("*{}:{}", render_key_class(*key), render_slot(value.as_deref()))
+        }
+    }
+}
+
+fn render_cover(c: &Cover) -> String {
+    let keys: Vec<String> = c.keys.iter().map(render_key).collect();
+    let flavor = match c.flavor {
+        CoverFlavor::Isset => "i",
+        CoverFlavor::KeyExists => "e",
+    };
+    format!("{}@{}", keys.join("+"), flavor)
+}
+
+fn render_shape(s: &ShapeFact) -> String {
+    let fields: Vec<String> = s
+        .fields
+        .iter()
+        .map(|(k, p, slot)| {
+            format!("{}={}:{}", render_key(k), render_presence(*p), render_slot(slot.as_deref()))
+        })
+        .collect();
+    let covers: Vec<String> = s.covers.iter().map(render_cover).collect();
+    format!(
+        "{{{}|{}|{}|{}|{}}}",
+        if fields.is_empty() { "-".to_owned() } else { fields.join(";") },
+        render_tail(&s.tail),
+        render_cert(s.is_list),
+        if s.non_empty { "ne" } else { "-" },
+        if covers.is_empty() { "-".to_owned() } else { covers.join(";") },
+    )
 }
 
 fn render_opt_fact(f: Option<&Fact>) -> String {
@@ -271,6 +400,176 @@ fn facts() -> Vec<Fact> {
     deduped
 }
 
+/// The shape seeds, in the order the `shape` lines number them. Each is the
+/// *raw* input to `ShapeFact::normalize`, so the rendered result shows what
+/// normalization did: sorting, the singleton-cover promotion, the sealed-Absent
+/// drop, the cover antichain, and the denotational `is_list` recomputation.
+///
+/// Rows 0–8 are the ADR-0062 §3 / RFC #14939 `is_list` table; 9–11 are the
+/// A-G1 lowerings (`list<T>`, a typed tail, the §5 tail-key fixture); 12–18
+/// exercise A-G8's cover laws and the remaining normalization invariants.
+fn shape_seeds() -> Vec<ShapeFact> {
+    let req = Presence::Required { witnessed: true };
+    let sint = |i: i64| Some(Box::new(Fact::Singleton(Val::Int(i))));
+    let gint = || Some(Box::new(Fact::General { base: Base::Int, nullable: false }));
+    let none = || None;
+    let seal = |fields: Vec<(Key, Presence, Option<Box<Fact>>)>| {
+        ShapeFact::normalize(fields, Tail::Sealed, Certainty::Maybe, false, Vec::new())
+    };
+    vec![
+        // 0  array{}                          — Yes
+        seal(vec![]),
+        // 1  array{0: 1}                      — Yes
+        seal(vec![(ik(0), req, sint(1))]),
+        // 2  array{0?: 1}                     — Yes
+        seal(vec![(ik(0), Presence::Optional, sint(1))]),
+        // 3  array{0: 1, 1: 2}                — Maybe (two realizable orders)
+        seal(vec![(ik(0), req, sint(1)), (ik(1), req, sint(2))]),
+        // 4  array{a?: 1}                     — Maybe
+        seal(vec![(sk(0), Presence::Optional, sint(1))]),
+        // 5  array{a: 1}                      — No (required string key)
+        seal(vec![(sk(0), req, sint(1))]),
+        // 6  array{1: 2}                      — No (gapped required int key)
+        seal(vec![(ik(1), req, sint(2))]),
+        // 7  array{0?: 1, 1: 2}               — Maybe (the gap is fillable)
+        seal(vec![(ik(0), Presence::Optional, sint(1)), (ik(1), req, sint(2))]),
+        // 8  array{-1: 2}                     — No (negative key)
+        seal(vec![(ik(-1), req, sint(2))]),
+        // 9  array (the degenerate shape)     — Maybe
+        ShapeFact::plain_array(),
+        // 10 list<int>: typed tail + the caller's Yes sharpening Maybe
+        ShapeFact::normalize(
+            Vec::new(),
+            Tail::Unsealed { key: KeyClass::Int, value: gint() },
+            Certainty::Yes,
+            false,
+            Vec::new(),
+        ),
+        // 11 array{a: int, ...<string, int>}  — the §5 tail-key fixture
+        ShapeFact::normalize(
+            vec![(sk(0), req, gint())],
+            Tail::Unsealed { key: KeyClass::Str, value: gint() },
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        ),
+        // 12 array{1: 2, ...<string, mixed>}  — No: a string tail cannot fill
+        //    the gap at key 0
+        ShapeFact::normalize(
+            vec![(ik(1), req, sint(2))],
+            Tail::Unsealed { key: KeyClass::Str, value: none() },
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        ),
+        // 13 an Isset cover over {a, b}
+        ShapeFact::normalize(
+            vec![(sk(0), Presence::Optional, none()), (sk(1), Presence::Optional, none())],
+            Tail::Sealed,
+            Certainty::Maybe,
+            false,
+            vec![Cover::new(vec![sk(1), sk(0)], CoverFlavor::Isset)],
+        ),
+        // 14 the same keys with a KeyExists cover
+        ShapeFact::normalize(
+            vec![(sk(0), Presence::Optional, none()), (sk(1), Presence::Optional, none())],
+            Tail::Sealed,
+            Certainty::Maybe,
+            false,
+            vec![Cover::new(vec![sk(0), sk(1)], CoverFlavor::KeyExists)],
+        ),
+        // 15 a singleton cover promotes to presence rather than surviving
+        ShapeFact::normalize(
+            vec![(sk(0), Presence::Optional, sint(1))],
+            Tail::Sealed,
+            Certainty::Maybe,
+            false,
+            vec![Cover::new(vec![sk(0)], CoverFlavor::Isset)],
+        ),
+        // 16 supersets drop: {a,b,c} loses to {a,b}
+        ShapeFact::normalize(
+            vec![
+                (sk(0), Presence::Optional, none()),
+                (sk(1), Presence::Optional, none()),
+                (sk(2), Presence::Optional, none()),
+            ],
+            Tail::Sealed,
+            Certainty::Maybe,
+            false,
+            vec![
+                Cover::new(vec![sk(0), sk(1), sk(2)], CoverFlavor::KeyExists),
+                Cover::new(vec![sk(1), sk(0)], CoverFlavor::KeyExists),
+            ],
+        ),
+        // 17 a proven-Absent key survives an unsealed tail
+        ShapeFact::normalize(
+            vec![(sk(0), Presence::Absent, none()), (sk(1), Presence::Absent, none())],
+            Tail::Unsealed { key: KeyClass::ArrayKey, value: none() },
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        ),
+        // 18 non-empty with only a string optional — No, and `[]` is excluded
+        ShapeFact::normalize(
+            vec![(sk(0), Presence::Optional, sint(1))],
+            Tail::Sealed,
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        ),
+    ]
+}
+
+/// The `Fact`-level universe of the shape section: four shape facts (one of
+/// them nullable) and the neighbours the mixed-base discipline must reject.
+fn shape_facts() -> Vec<Fact> {
+    let seeds = shape_seeds();
+    let sh = |i: usize, nullable: bool| Fact::Shape {
+        shape: Box::new(seeds[i].clone()),
+        nullable,
+    };
+    vec![
+        sh(1, false),
+        sh(5, false),
+        sh(9, false),
+        sh(9, true),
+        Fact::Singleton(arr_atom(0)),
+        Fact::Singleton(arr_atom(2)),
+        Fact::Singleton(Val::Null),
+        Fact::Singleton(Val::Int(1)),
+        Fact::OneOf(vec![arr_atom(0), arr_atom(1)]),
+        Fact::OneOf(vec![Val::Null, arr_atom(1)]),
+        Fact::OneOf(vec![Val::Null, Val::Int(1)]),
+        Fact::General { base: Base::Int, nullable: false },
+    ]
+}
+
+/// The descent seeds: value sets that overflow `CAP` with arrays in them.
+fn descent_seeds() -> Vec<(&'static str, Vec<Val>)> {
+    let arrays: Vec<Val> = (6..=14).map(arr_atom).collect();
+    let mut with_null = arrays.clone();
+    with_null.push(Val::Null);
+    let mut mixed = arrays.clone();
+    mixed.push(Val::Int(1));
+    let lists: Vec<Val> = vec![
+        arr_atom(0),
+        arr_atom(1),
+        arr_atom(2),
+        arr_atom(3),
+        arr_atom(4),
+        arr_atom(5),
+        arr_atom(6),
+        arr_atom(7),
+        arr_atom(8),
+    ];
+    vec![
+        ("allarrays", arrays),
+        ("withnull", with_null),
+        ("mixed", mixed),
+        ("assorted", lists),
+    ]
+}
+
 /// `None` is ⊤ and absorbs — the reading `join_envs` implements when it drops a
 /// binding.
 fn join_opt(a: Option<&Fact>, b: Option<&Fact>) -> Option<Fact> {
@@ -373,6 +672,141 @@ fn generate() -> Vec<String> {
         }
     }
     out.push(format!("assoc {total} {mismatches}"));
+
+    // ------------------------------------------------------------------
+    // The shape section (ADR-0062 S2). Appended, so every line above is
+    // untouched by the array stratum landing.
+    // ------------------------------------------------------------------
+    let atoms = shape_arr_atoms();
+    for (rank, (v, lit)) in atoms.iter().enumerate() {
+        let entries = match v {
+            Val::Array(e) => e.as_slice(),
+            other => panic!("atom {rank} is not an array: {other:?}"),
+        };
+        out.push(format!(
+            "shapearr arr#{rank} {lit} {}",
+            if array_is_list(entries) { "list" } else { "nolist" }
+        ));
+    }
+
+    let seeds = shape_seeds();
+    for (i, s) in seeds.iter().enumerate() {
+        out.push(format!("shape {i} => {}", render_shape(s)));
+    }
+    for (i, s) in seeds.iter().enumerate() {
+        for rank in 0..atoms.len() {
+            out.push(format!(
+                "shapeadmits {i} arr#{rank} => {}",
+                s.admits(&arr_entries(rank))
+            ));
+        }
+    }
+    for (i, a) in seeds.iter().enumerate() {
+        for (j, b) in seeds.iter().enumerate() {
+            out.push(format!("shapejoin {i} {j} => {}", render_shape(&a.join(b))));
+        }
+    }
+    for rank in 0..atoms.len() {
+        out.push(format!(
+            "shapelift arr#{rank} => {}",
+            render_shape(&ShapeFact::lift(&arr_entries(rank)))
+        ));
+    }
+
+    let sfs = shape_facts();
+    for (i, f) in sfs.iter().enumerate() {
+        out.push(format!("shapefact {i} => {}", render_fact(f)));
+    }
+    for (i, f) in sfs.iter().enumerate() {
+        for rank in 0..atoms.len() {
+            out.push(format!("shapefactadmits {i} arr#{rank} => {}", f.admits(&arr_atom(rank))));
+        }
+        out.push(format!("shapefactadmits {i} null => {}", f.admits(&Val::Null)));
+        out.push(format!("shapefactadmits {i} int:1 => {}", f.admits(&Val::Int(1))));
+    }
+    for (i, a) in sfs.iter().enumerate() {
+        for (j, b) in sfs.iter().enumerate() {
+            out.push(format!("shapefactjoin {i} {j} => {}", render_opt_fact(a.join(b).as_ref())));
+        }
+    }
+    for f in &sfs {
+        out.push(format!("shapetruthy {} => {}", render_fact(f), render_cert(f.truthy())));
+        out.push(format!("shapeisnull {} => {}", render_fact(f), render_cert(f.is_null())));
+    }
+    for (name, vals) in descent_seeds() {
+        out.push(format!(
+            "shapedescent {name} => {}",
+            render_opt_fact(Fact::from_vals(vals).as_ref())
+        ));
+    }
+
+    // Soundness tallies for the array stratum: `γ(a) ∪ γ(b) ⊆ γ(a ⊔ b)`, the
+    // lift admitting what it lifted, and the descent admitting every member.
+    // These are *checked exhaustively*, on both sides, exactly as `assoc` is —
+    // see the spec's REPORT.md for why the array stratum is checked here rather
+    // than proved in `SteinsDomain.Soundness`.
+    let mut total = 0usize;
+    let mut violations = 0usize;
+    for a in &seeds {
+        for b in &seeds {
+            let joined = a.join(b);
+            for rank in 0..atoms.len() {
+                let e = arr_entries(rank);
+                total += 1;
+                if (a.admits(&e) || b.admits(&e)) && !joined.admits(&e) {
+                    violations += 1;
+                }
+            }
+        }
+    }
+    out.push(format!("shapejoinsound {total} {violations}"));
+
+    let mut total = 0usize;
+    let mut violations = 0usize;
+    for rank in 0..atoms.len() {
+        let e = arr_entries(rank);
+        total += 1;
+        if !ShapeFact::lift(&e).admits(&e) {
+            violations += 1;
+        }
+    }
+    out.push(format!("shapeliftsound {total} {violations}"));
+
+    let mut total = 0usize;
+    let mut violations = 0usize;
+    for (_, vals) in descent_seeds() {
+        if let Some(f) = Fact::from_vals(vals.clone()) {
+            for v in &vals {
+                total += 1;
+                if !f.admits(v) {
+                    violations += 1;
+                }
+            }
+        }
+    }
+    out.push(format!("shapedescentsound {total} {violations}"));
+
+    let probe: Vec<Val> = (0..atoms.len())
+        .map(arr_atom)
+        .chain([Val::Null, Val::Int(1)])
+        .collect();
+    let mut total = 0usize;
+    let mut violations = 0usize;
+    for a in &sfs {
+        for b in &sfs {
+            let joined = a.join(b);
+            for v in &probe {
+                total += 1;
+                // `None` is ⊤ and admits everything — the `denotes` reading.
+                if (a.admits(v) || b.admits(v))
+                    && !joined.as_ref().is_none_or(|g| g.admits(v))
+                {
+                    violations += 1;
+                }
+            }
+        }
+    }
+    out.push(format!("shapefactjoinsound {total} {violations}"));
     out
 }
 
@@ -425,4 +859,26 @@ fn join_is_associative_over_the_vector_universe() {
     let mismatches: usize = parts.next().expect("mismatches").parse().expect("number");
     assert!(total > 100_000, "the universe should cover a six-figure triple count, got {total}");
     assert_eq!(mismatches, 0, "join is not associative over the vector universe");
+}
+
+/// The array stratum's soundness is *checked* over the shape vector universe
+/// rather than proved in Lean (see `spike/lean-domain/REPORT.md`). The tallies
+/// are data in the vector file — which means a regression would merely change a
+/// committed number — so assert the value the slice established: the join never
+/// loses a member, the lift admits what it lifted, and the computed descent
+/// admits every member it summarized.
+#[test]
+fn the_array_stratum_loses_no_member_over_the_vector_universe() {
+    let lines = generate();
+    for id in ["shapejoinsound", "shapeliftsound", "shapedescentsound", "shapefactjoinsound"] {
+        let line = lines
+            .iter()
+            .find(|l| l.starts_with(&format!("{id} ")))
+            .unwrap_or_else(|| panic!("{id} line"));
+        let mut parts = line.split_whitespace().skip(1);
+        let total: usize = parts.next().expect("total").parse().expect("number");
+        let violations: usize = parts.next().expect("violations").parse().expect("number");
+        assert!(total > 0, "{id} checked nothing");
+        assert_eq!(violations, 0, "{id}: the array stratum lost a member ({line})");
+    }
 }

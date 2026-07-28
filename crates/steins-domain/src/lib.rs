@@ -7,6 +7,13 @@
 //! 4. General     — the bare base type
 //! ```
 //!
+//! Arrays get their own stratum rather than a scalar layer: [`Fact::Shape`]
+//! carries one canonical [`ShapeFact`] (ADR-0062), and the *degenerate* shape —
+//! no fields, an untyped unsealed tail — is plain `array`, so there is no
+//! array-`General` form. Layer descent is total for arrays too: an over-`CAP`
+//! set of arrays widens to a **computed** shape summary instead of being
+//! dropped.
+//!
 //! The crate owns the *algebra*: joins with **computed** layer descent
 //! (widening a finite set derives the predicate summary its members satisfy —
 //! precision loss is measured, never guessed), extensional membership
@@ -36,6 +43,7 @@ mod fact;
 mod php;
 mod preds;
 mod range;
+mod shape;
 mod value;
 
 pub use certainty::Certainty;
@@ -43,4 +51,7 @@ pub use fact::{Fact, Refinement, CAP};
 pub use php::{php_is_falsy, php_is_numeric};
 pub use preds::StrPreds;
 pub use range::IntRange;
+pub use shape::{
+    Cover, CoverFlavor, KeyClass, Presence, SHAPE_WIDTH_LIMIT, ShapeFact, Tail, array_is_list,
+};
 pub use value::{Base, Key, Val};

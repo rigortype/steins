@@ -12,7 +12,10 @@ use crate::certainty::Certainty;
 use crate::php::php_is_falsy;
 use crate::preds::StrPreds;
 use crate::range::IntRange;
-use crate::value::{Base, Val};
+use crate::shape::{
+    KeyClass, Presence, ShapeFact, Tail, array_is_list, SHAPE_WIDTH_LIMIT,
+};
+use crate::value::{Base, Key, Val};
 
 /// Maximum cardinality of the [`Fact::OneOf`] layer.
 pub const CAP: usize = 8;
@@ -51,6 +54,20 @@ pub enum Fact {
     General {
         /// The scalar base.
         base: Base,
+        /// Whether `null` is also admitted.
+        nullable: bool,
+    },
+    /// The abstract array stratum (ADR-0062 §3, A-G2): one canonical
+    /// [`ShapeFact`] plus the same `nullable` side-flag the other abstract
+    /// layers carry.
+    ///
+    /// There is no array-`General` variant: the degenerate shape
+    /// ([`ShapeFact::plain_array`]) *is* plain `array`. Field-value
+    /// nullability lives in that field's own slot fact, never here — one
+    /// representation per claim.
+    Shape {
+        /// The array shape.
+        shape: Box<ShapeFact>,
         /// Whether `null` is also admitted.
         nullable: bool,
     },
@@ -114,6 +131,11 @@ impl Fact {
                 Val::Null => *nullable,
                 _ => v.base() == Some(*base),
             },
+            Fact::Shape { shape, nullable } => match v {
+                Val::Null => *nullable,
+                Val::Array(entries) => shape.admits(entries),
+                _ => false,
+            },
         }
     }
 
@@ -121,6 +143,11 @@ impl Fact {
     /// `None` = unrepresentable; the caller drops the fact (safe).
     #[must_use]
     pub fn join(&self, other: &Fact) -> Option<Fact> {
+        // The array stratum has its own algebra (ADR-0062 A-G5); the scalar
+        // layering below cannot express it.
+        if matches!(self, Fact::Shape { .. }) || matches!(other, Fact::Shape { .. }) {
+            return join_shape(self, other);
+        }
         match (self.finite_members(), other.finite_members()) {
             (Some(a), Some(b)) => {
                 let mut all = a.to_vec();
@@ -157,7 +184,9 @@ impl Fact {
             Fact::OneOf(vals) => {
                 Certainty::all_of(vals.iter().map(|v| Certainty::from_bool(*v == Val::Null)))
             }
-            Fact::Refined { nullable, .. } | Fact::General { nullable, .. } => {
+            Fact::Refined { nullable, .. }
+            | Fact::General { nullable, .. }
+            | Fact::Shape { nullable, .. } => {
                 if *nullable { Certainty::Maybe } else { Certainty::No }
             }
         }
@@ -186,6 +215,8 @@ impl Fact {
             Fact::General { base, .. } => {
                 if *base == Base::String { Certainty::Maybe } else { Certainty::No }
             }
+            // An array is never a string, and neither is null.
+            Fact::Shape { .. } => Certainty::No,
         }
     }
 
@@ -212,6 +243,8 @@ impl Fact {
             Fact::General { base, .. } => {
                 if *base == Base::Int { Certainty::Maybe } else { Certainty::No }
             }
+            // An array is never an int, and neither is null.
+            Fact::Shape { .. } => Certainty::No,
         }
     }
 
@@ -246,8 +279,127 @@ impl Fact {
                 (f || *nullable, t)
             }
             Fact::General { .. } => (true, true),
+            Fact::Shape { shape, nullable } => {
+                // An array is falsy exactly when empty; `null` is falsy too.
+                // The truthy side is over-approximated to `true`: deciding that
+                // a shape admits *only* `[]` buys nothing until a consumer asks
+                // (`ShapeFact::can_be_non_empty` is the query when one does),
+                // and over-approximating pushes the verdict toward `Maybe`,
+                // which is the honest direction for a trinary.
+                (!shape.non_empty || *nullable, true)
+            }
         }
     }
+}
+
+/// Join where at least one operand is a [`Fact::Shape`].
+///
+/// `None` — drop the fact — for anything outside `array|null`: mixed-base
+/// unions stay un-facted, exactly as for scalars (A-G2).
+fn join_shape(a: &Fact, b: &Fact) -> Option<Fact> {
+    let (sa, na) = shape_view(a)?;
+    let (sb, nb) = shape_view(b)?;
+    let nullable = na || nb;
+    let shape = match (sa, sb) {
+        (Some(x), Some(y)) => x.join(&y),
+        (Some(x), None) | (None, Some(x)) => x,
+        // Both operands were null-only, so neither was a Shape — unreachable
+        // through `join`, and dropping the fact is the safe answer anyway.
+        (None, None) => return None,
+    };
+    Some(Fact::Shape { shape: Box::new(shape), nullable })
+}
+
+/// `(the array shape, nullability)` for an array-shaped fact; `None` when the
+/// fact denotes anything outside `array|null`. A concrete array lifts (A-G5),
+/// which is where order-witnessed-ness is honestly lost.
+fn shape_view(f: &Fact) -> Option<(Option<ShapeFact>, bool)> {
+    match f {
+        Fact::Shape { shape, nullable } => Some((Some((**shape).clone()), *nullable)),
+        Fact::Singleton(Val::Array(entries)) => Some((Some(ShapeFact::lift(entries)), false)),
+        Fact::Singleton(Val::Null) => Some((None, true)),
+        Fact::OneOf(vals) => {
+            let mut acc: Option<ShapeFact> = None;
+            let mut nullable = false;
+            for v in vals {
+                match v {
+                    Val::Null => nullable = true,
+                    Val::Array(entries) => {
+                        let lifted = ShapeFact::lift(entries);
+                        acc = Some(acc.map_or(lifted.clone(), |prev| prev.join(&lifted)));
+                    }
+                    _ => return None,
+                }
+            }
+            Some((acc, nullable))
+        }
+        _ => None,
+    }
+}
+
+/// The **computed descent** for an over-`CAP` set of arrays (ADR-0062 §3):
+/// keys present in every member are `Required { witnessed: true }`, keys in
+/// some are `Optional`, and the tail seals because the members enumerate every
+/// key there is. Value slots are the members' own widening, so the summary is
+/// derived member by member — never a threshold heuristic (ADR-0035).
+fn shape_descent(members: &[&Val], nullable: bool) -> Fact {
+    let entries: Vec<&[(Key, Val)]> = members
+        .iter()
+        .filter_map(|v| match v {
+            Val::Array(e) => Some(e.as_slice()),
+            _ => None,
+        })
+        .collect();
+    let non_empty = entries.iter().all(|e| !e.is_empty());
+    let is_list =
+        Certainty::all_of(entries.iter().map(|e| Certainty::from_bool(array_is_list(e))));
+
+    let mut keys: Vec<Key> = Vec::new();
+    for e in &entries {
+        for (k, _) in *e {
+            if !keys.contains(k) {
+                keys.push(k.clone());
+            }
+        }
+    }
+    keys.sort();
+
+    // A-G6: the field-width bound applies to a seeded shape as much as a
+    // lifted one.
+    if keys.len() > SHAPE_WIDTH_LIMIT {
+        let mut key_class: Option<KeyClass> = None;
+        let mut all_vals: Vec<Val> = Vec::new();
+        for e in &entries {
+            for (k, v) in *e {
+                let c = KeyClass::of_key(k);
+                key_class = Some(key_class.map_or(c, |acc| acc.join(c)));
+                all_vals.push(v.clone());
+            }
+        }
+        let tail = Tail::Unsealed {
+            key: key_class.unwrap_or(KeyClass::ArrayKey),
+            value: Fact::from_vals(all_vals).map(Box::new),
+        };
+        let shape = ShapeFact::normalize(Vec::new(), tail, is_list, non_empty, Vec::new());
+        return Fact::Shape { shape: Box::new(shape), nullable };
+    }
+
+    let mut fields = Vec::with_capacity(keys.len());
+    for k in keys {
+        let mut vals: Vec<Val> = Vec::new();
+        let mut in_every = true;
+        for e in &entries {
+            match e.iter().find(|(ek, _)| *ek == k) {
+                Some((_, v)) => vals.push(v.clone()),
+                None => in_every = false,
+            }
+        }
+        let presence =
+            if in_every { Presence::Required { witnessed: true } } else { Presence::Optional };
+        fields.push((k, presence, Fact::from_vals(vals).map(Box::new)));
+    }
+    let shape = ShapeFact::normalize(fields, Tail::Sealed, is_list, non_empty, Vec::new());
+    Fact::Shape { shape: Box::new(shape), nullable }
 }
 
 /// Widen a non-empty, deduped value list to an abstract summary. `None`
@@ -259,6 +411,12 @@ fn summarize(vals: &[Val]) -> Option<Fact> {
         // All members were null; the finite layer already represents this.
         return Some(Fact::Singleton(Val::Null));
     };
+    // An all-array overflow descends to the abstract array stratum rather than
+    // being dropped (ADR-0062 §3). A *mixed* array/non-array overflow is still
+    // unsummarizable, exactly as before.
+    if scalars.iter().all(|v| matches!(v, Val::Array(_))) {
+        return Some(shape_descent(&scalars, nullable));
+    }
     let base = first.base()?;
     if scalars.iter().any(|v| v.base() != Some(base)) {
         return None;
@@ -329,7 +487,9 @@ fn abstract_parts(f: &Fact) -> Option<(Base, Option<Refinement>, bool)> {
     match f {
         Fact::Refined { base, refinement, nullable } => Some((*base, Some(*refinement), *nullable)),
         Fact::General { base, nullable } => Some((*base, None, *nullable)),
-        Fact::Singleton(_) | Fact::OneOf(_) => None,
+        // The array stratum has no scalar base; `join` routes it away from
+        // here before this is ever reached.
+        Fact::Singleton(_) | Fact::OneOf(_) | Fact::Shape { .. } => None,
     }
 }
 

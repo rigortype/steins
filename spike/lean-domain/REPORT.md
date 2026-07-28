@@ -11,7 +11,7 @@ from `cargo xtask lean-check`. Decision recorded as ADR-0059.
 
 - Toolchain: Lean 4.30.0, `nix develop` (see `flake.nix`). Lean core only — no
   Mathlib, so `lake build` is offline and takes a few seconds.
-- Size: ~1,500 lines of Lean for the 1,089 lines of `crates/steins-domain`.
+- Size: ~2,300 lines of Lean for the ~1,700 lines of `crates/steins-domain`.
 - Axioms: `propext`, `Classical.choice`, `Quot.sound` — Lean's own three. No
   `sorry`, no `native_decide`, no bespoke axiom. This is not a promise but a build
   step: `SteinsDomain/Axioms.lean` pins each headline theorem's axiom set with
@@ -85,6 +85,71 @@ Three further observations, none a defect:
    side, so the theorems hold for the panic-free reading — but if any of those
    became reachable, Rust panics where the spec silently widens.
 
+## The array stratum: what is proved and what is checked (ADR-0062 S2)
+
+`Fact` gained a fifth constructor, `shape`, carrying the canonical array fact.
+Three things follow, and it is worth being precise about which is which.
+
+**Proved, for every input.** `admits` is the *full* recursive mirror of Rust:
+a shape's value slots are structural subterms of the fact, so the definition
+recurses with no modelling shortcut, and the theorems that read a decided
+verdict (`truthy_yes`, `truthy_no`, `satisfiesStr_yes`, `intIn_no`) now cover
+the array stratum too. `Model` gained `arrEntries` with the coherence law
+`arrFalsy_iff` — an array is falsy exactly when empty — which is what
+`truthy_yes` leans on for an array value, the same way it leans on
+`nonFalsy_iff` for a string. `normalize`'s invariants are theorems:
+`normalize_fieldsSorted` (fields strictly increasing on the key, hence one
+entry per key), `normalize_sealed_no_absent`, `normalize_covers_have_two_keys`.
+
+**Unchanged.** `join_sound`, `join_comm`, `summarize_admits` and
+`fromVals_admits` are the *same statements about the same definitions*: the
+scalar core is now spelled `joinScalar`/`summarizeScalar`/`fromValsScalar` and
+its bodies are untouched, so nothing proved before is weaker now.
+`join_eq_joinScalar` records that off the array stratum the shipped join *is*
+the proved one.
+
+**Checked, not proved.** The array stratum's own join, lift and computed
+descent are exercised exhaustively over the shape vector universe and tallied
+in the vector file, on both sides, exactly as associativity is:
+
+```
+shapejoinsound 5776 0        γ(a) ∪ γ(b) ⊆ γ(a ⊔ b), shape-level
+shapeliftsound 16 0          the lifted shape admits the value it lifted
+shapedescentsound 28 0       the descent admits every member it summarized
+shapefactjoinsound 2592 0    the same at the `Fact` level, `none` read as ⊤
+```
+
+Why it resisted proof rather than being skipped: the join's soundness rests on
+the *denotational* correctness of `computeIsList` in both directions — `yes`
+must imply every admissible array is a list, and `no` must imply none is, the
+second by way of a counting argument over the declared keys — and on
+field-wise reasoning through `sortFields` and the sealed-`absent` filter. That
+is a real development, not a missing tactic call, and it is the first thing to
+do if this spike is continued after associativity.
+
+**Two deliberate modelling widenings**, both forced by the same thing — the
+spec models an array as an opaque rank whose entries come from
+`Model.arrEntries`, so a value reached *through* an array has no structure for
+a termination measure to descend on:
+
+1. `joinSlot` joins value slots through the scalar core, so a slot that is
+   itself a shape fact widens to `unknown`, where Rust joins it recursively.
+2. `shapeDescent` builds slot facts with `fromValsScalar`, where Rust calls the
+   full `from_vals`.
+
+Both make the spec *weaker* (an `unknown` slot admits everything), so no
+theorem is put at risk, and neither is reachable from the vector universe —
+which is why Rust and Lean agree on all 5,258 data lines.
+
+**One representational note.** `Fact` is a *nested* inductive (its `shape`
+payload contains `List (Key × Presence × Option Fact)`), which keeps the Lean
+type faithful to Rust's `Vec<(Key, Presence, Option<Box<Fact>>)>` and lets the
+ordinary `List` API apply. Lean 4 has no `deriving DecidableEq` handler for
+nested inductives, so `Fact.beq` is written out and `BEq Fact` is built from
+it; nothing in the spec needs propositional decidability of fact equality. This
+is also why `Fact` and `Refinement` are declared in `Shape.lean` rather than
+`Fact.lean`: `Fact` and the shape form are one recursive declaration.
+
 ## What is not proved: associativity
 
 `join` associativity is **checked, not proved**: 110,592 triples over the
@@ -157,7 +222,8 @@ ordinary `test` job on every PR.
 | `SteinsDomain/Range.lean` | `IntRange`; hull/intersection laws by `omega` |
 | `SteinsDomain/Val.lean` | values, the `(rank, tie)` total order and its three laws, and `Model` — the classifier parameters with their two coherence laws |
 | `SteinsDomain/Canon.lean` | the sorted-deduped finite layer and its canonicity |
-| `SteinsDomain/Fact.lean` | the four layers, `admits`, `summarize`, `fromVals`, `join`, the trinary queries |
+| `SteinsDomain/Shape.lean` | the array stratum (ADR-0062): keys, presence, covers, the `Fact` inductive, `normalize` and its invariants |
+| `SteinsDomain/Fact.lean` | the four layers, `admits`, `summarize`, `fromVals`, `join`, the trinary queries, and the array stratum's algebra (`lift`, `shapeJoin`, `shapeDescent`) |
 | `SteinsDomain/Soundness.lean` | `join_sound` and the widening steps it composes |
 | `SteinsDomain/Queries.lean` | decided verdicts hold for every admitted value |
 | `SteinsDomain/Vectors.lean` | the differential vector file |

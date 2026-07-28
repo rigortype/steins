@@ -102,6 +102,11 @@ pub fn admits_fact(ty: &ContractTy, fact: &Fact) -> Certainty {
     let (base, refinement, nullable) = match fact {
         Fact::Refined { base, refinement, nullable } => (*base, Some(*refinement), *nullable),
         Fact::General { base, nullable } => (*base, None, *nullable),
+        // The array stratum (ADR-0062 `Fact::Shape`) has no scalar base, and
+        // judging a shape fact against a contract is the acceptance-convergence
+        // slice's work, not this one. Answer with the honest middle — the same
+        // silence this site produces for a fact it knows nothing about.
+        Fact::Shape { .. } => return Certainty::Maybe,
         Fact::Singleton(_) | Fact::OneOf(_) => unreachable!("finite handled above"),
     };
     let base_part = base_only(ty, base, refinement);

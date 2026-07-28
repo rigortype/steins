@@ -120,6 +120,59 @@ theorem eq_of_not_blt {a b : Val} (h₁ : a.blt b = false) (h₂ : b.blt a = fal
 
 end Val
 
+/-! ## Keys -/
+
+/-- An array key after PHP normalization. Strings are ordered atoms, exactly as
+in `Val` — see the module docstring of `SteinsDomain.Val`. -/
+inductive Key where
+  /-- Integer key. -/
+  | int (n : Int)
+  /-- String key, as its position in the domain's order on key strings. -/
+  | str (rank : Nat)
+  deriving DecidableEq, Repr, Inhabited
+
+namespace Key
+
+/-- Rust's derived discriminant order: `Int` before `Str`. -/
+def rank : Key → Nat
+  | .int _ => 0
+  | .str _ => 1
+
+def tie : Key → Int
+  | .int n => n
+  | .str r => (r : Int)
+
+/-- Strict order, lexicographic on `(rank, tie)` — Rust's derived `Ord for Key`
+(ints before strings, each ascending). -/
+def blt (a b : Key) : Bool :=
+  a.rank < b.rank || (a.rank == b.rank && a.tie < b.tie)
+
+theorem blt_irrefl (a : Key) : a.blt a = false := by
+  simp only [blt, Bool.or_eq_false_iff, Bool.and_eq_false_imp, decide_eq_false_iff_not,
+    Nat.not_lt, beq_iff_eq]
+  omega
+
+theorem key_inj {a b : Key} (hr : a.rank = b.rank) (ht : a.tie = b.tie) : a = b := by
+  cases a <;> cases b <;> simp_all [rank, tie]
+  all_goals omega
+
+theorem blt_asymm {a b : Key} (h : a.blt b = true) : b.blt a = false := by
+  simp only [blt, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at h
+  simp only [blt, Bool.or_eq_false_iff, Bool.and_eq_false_imp, decide_eq_false_iff_not,
+    Nat.not_lt, beq_iff_eq]
+  omega
+
+theorem blt_trans {a b c : Key} (h₁ : a.blt b = true) (h₂ : b.blt c = true) : a.blt c = true := by
+  simp only [blt, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at *
+  omega
+
+theorem blt_total {a b : Key} (h : a ≠ b) : a.blt b = true ∨ b.blt a = true := by
+  have hk : ¬(a.rank = b.rank ∧ a.tie = b.tie) := fun ⟨h₁, h₂⟩ => h (key_inj h₁ h₂)
+  simp only [blt, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq]
+  omega
+
+end Key
+
 /-- The parameters the value domain treats as opaque, together with the two
 coherence laws the algebra actually leans on.
 
@@ -135,6 +188,13 @@ structure Model where
   floatFalsy : Nat → Bool
   /-- `php_is_falsy` on an array atom (the empty array). -/
   arrFalsy : Nat → Bool
+  /-- The entries of an array atom, in insertion order — `Val::Array`'s payload.
+  The scalar algebra never reads this; the array stratum (ADR-0062,
+  `SteinsDomain.Shape`) does, and it is the one place the abstraction has to be
+  opened. Like `predsOf`, it is a parameter, so the shape theorems hold for any
+  array table, and its *fidelity* is checked differentially by the vector file's
+  `shapearr` block rather than assumed here. -/
+  arrEntries : Nat → List (Key × Val)
   /-- `StrPreds::of` returns implication-closed sets. Recorded because the Rust
   doc comment claims it; **not** used by any soundness proof (see
   `SteinsDomain.Soundness`). -/
@@ -144,6 +204,10 @@ structure Model where
   `truthy` is only as good as this law — which the vector file's `classifier`
   block checks on concrete strings. -/
   nonFalsy_iff : ∀ r, (predsOf r).nonFalsy = !strFalsy r
+  /-- An array is falsy exactly when it is empty. This couples the two array
+  parameters, so a `truthy` verdict read off `arrFalsy` and a shape verdict read
+  off the entries cannot disagree. -/
+  arrFalsy_iff : ∀ r, arrFalsy r = (arrEntries r).isEmpty
 
 namespace Val
 

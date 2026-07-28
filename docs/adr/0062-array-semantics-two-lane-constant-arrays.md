@@ -271,6 +271,12 @@ amendment governs.
   satisfies; a nested write autovivifies the outer key; rebinding clears
   everything; by-ref exposure and by-ref builtins (`sort` &c.) havoc the
   fact (v1); by-value flow copies facts freely (PHP CoW semantics).
+  *S2 correction (flavor-aware implication):* a `Required` key discharges a
+  **KeyExists**-cover unconditionally, but an **Isset**-cover only when its
+  value slot proves non-null — a required key whose value may be null does
+  not make `isset` true, and a join keeping a cover one operand does not
+  satisfy would reject values that operand admits. The original "a Required
+  member key implies the cover" was flavor-blind and unsound on that edge.
 - **A-G9 — Reads are never null-poisoned.** An unguarded optional-key
   read yields the declared value arms (`Asserted`), not arms∪null: the
   missing-ness hazard is the strict leg's *finding*, never a type

@@ -58,10 +58,33 @@ def vecFloatFalsy : Nat → Bool
   | 1 => true
   | _ => false
 
-/-- Array atoms: `[]`, `[0 => 1]`. -/
-def vecArrFalsy : Nat → Bool
-  | 0 => true
-  | _ => false
+/-- The array atoms, as their real entry lists. Ranks are the atoms' positions
+in the domain's total order on `Val` — `[] < [0=>1] < [0=>1,1=>2] < …` — because
+the spec models an array value as its position in that order. Ranks 0 and 1 are
+the only ones the scalar universe uses; the rest exist for the shape section
+(ADR-0062 S2). The `shapearr` lines pin the whole table. -/
+def vecArrEntries : Nat → List (Key × Val)
+  | 0 => []
+  | 1 => [(.int 0, .int 1)]
+  | 2 => [(.int 0, .int 1), (.int 1, .int 2)]
+  | 3 => [(.int 0, .int 1), (.str 0, .int 2)]
+  | 4 => [(.int 1, .int 2)]
+  | 5 => [(.str 0, .int 1)]
+  | 6 => [(.str 0, .int 2)]
+  | 7 => [(.str 0, .int 2), (.str 1, .int 1)]
+  | 8 => [(.str 0, .int 3)]
+  | 9 => [(.str 0, .int 4)]
+  | 10 => [(.str 0, .int 5)]
+  | 11 => [(.str 0, .int 6)]
+  | 12 => [(.str 0, .int 7)]
+  | 13 => [(.str 0, .int 8)]
+  | 14 => [(.str 0, .int 9)]
+  | 15 => [(.str 1, .int 1)]
+  | _ => []
+
+/-- `php_is_falsy` on an array: exactly the empty array. Derived from the entry
+table, which is what makes `Model.arrFalsy_iff` hold by `rfl`. -/
+def vecArrFalsy (r : Nat) : Bool := (vecArrEntries r).isEmpty
 
 theorem vecPreds_closed : ∀ r, (vecPreds r).Closed := by
   intro r
@@ -83,8 +106,10 @@ def vecModel : Model where
   strFalsy := vecStrFalsy
   floatFalsy := vecFloatFalsy
   arrFalsy := vecArrFalsy
+  arrEntries := vecArrEntries
   predsOf_closed := vecPreds_closed
   nonFalsy_iff := vecPreds_nonFalsy_iff
+  arrFalsy_iff := fun _ => rfl
 
 /-! ## Rendering -/
 
@@ -119,12 +144,70 @@ def renderVal : Val → String
 
 def renderNullable (n : Bool) : String := if n then "null" else "nonnull"
 
+def renderCert : Certainty → String
+  | .yes => "yes"
+  | .no => "no"
+  | .maybe => "maybe"
+
+def renderKey : Key → String
+  | .int n => "i" ++ renderInt n
+  | .str r => "s" ++ toString r
+
+def renderPresence : Presence → String
+  | .required true => "R!"
+  | .required false => "R"
+  | .optional => "O"
+  | .absent => "X"
+
+def renderKeyClass : KeyClass → String
+  | .int => "i"
+  | .str => "s"
+  | .arrayKey => "k"
+
+def renderCover (c : Cover) : String :=
+  String.intercalate "+" (c.keys.map renderKey) ++ "@" ++
+    (match c.flavor with | .isset => "i" | .keyExists => "e")
+
+mutual
+
 def renderFact : Fact → String
   | .singleton v => "S(" ++ renderVal v ++ ")"
   | .oneOf vs => "O(" ++ String.intercalate "," (vs.map renderVal) ++ ")"
   | .refined b r n =>
     "R(" ++ renderBase b ++ "," ++ renderRef r ++ "," ++ renderNullable n ++ ")"
   | .general b n => "G(" ++ renderBase b ++ "," ++ renderNullable n ++ ")"
+  | .shape s n => "A(" ++ renderShape s ++ "," ++ renderNullable n ++ ")"
+termination_by f => sizeOf f
+
+def renderShape : ShapeFact → String
+  | ⟨fields, tail, isList, nonEmpty, covers⟩ =>
+    "{" ++ (if fields.isEmpty then "-" else renderFields fields)
+      ++ "|" ++ renderTail tail
+      ++ "|" ++ renderCert isList
+      ++ "|" ++ (if nonEmpty then "ne" else "-")
+      ++ "|" ++ (if covers.isEmpty then "-"
+                 else String.intercalate ";" (covers.map renderCover))
+      ++ "}"
+termination_by s => sizeOf s + 1
+
+def renderFields : List Field → String
+  | [] => ""
+  | [(k, p, slot)] => renderKey k ++ "=" ++ renderPresence p ++ ":" ++ renderSlot slot
+  | (k, p, slot) :: rest =>
+    renderKey k ++ "=" ++ renderPresence p ++ ":" ++ renderSlot slot ++ ";" ++ renderFields rest
+termination_by fs => sizeOf fs
+
+def renderTail : GTail Fact → String
+  | .sealed => "."
+  | .unsealed kc slot => "*" ++ renderKeyClass kc ++ ":" ++ renderSlot slot
+termination_by t => sizeOf t
+
+def renderSlot : Slot → String
+  | none => "-"
+  | some f => renderFact f
+termination_by sl => sizeOf sl
+
+end
 
 /-- `none` is ⊤ — "the caller drops the fact". Spelled ASCII so the file stays
 byte-comparable without encoding questions. -/
@@ -132,10 +215,6 @@ def renderOptFact : Option Fact → String
   | none => "TOP"
   | some f => renderFact f
 
-def renderCert : Certainty → String
-  | .yes => "yes"
-  | .no => "no"
-  | .maybe => "maybe"
 
 /-! ## The universe -/
 
@@ -198,13 +277,97 @@ def joinOpt (M : Model) : Option Fact → Option Fact → Option Fact
   | some _, none => none
   | some a, some b => Fact.join M a b
 
+/-- `Fact` is a nested inductive, so `deriving DecidableEq` has no handler for
+it (see `SteinsDomain.Shape`); the tally compares with the written-out Boolean
+equality, which is the same relation. -/
+def optFactBeq : Option Fact → Option Fact → Bool
+  | none, none => true
+  | some a, some b => Fact.beq a b
+  | _, _ => false
+
 def assocTally (M : Model) (fs : List Fact) : Nat × Nat :=
   fs.foldl (fun acc a =>
     fs.foldl (fun acc b =>
       fs.foldl (fun (acc : Nat × Nat) c =>
         let lhs := joinOpt M (Fact.join M a b) (some c)
         let rhs := joinOpt M (some a) (Fact.join M b c)
-        (acc.1 + 1, if lhs = rhs then acc.2 else acc.2 + 1)) acc) acc) (0, 0)
+        (acc.1 + 1, if optFactBeq lhs rhs then acc.2 else acc.2 + 1)) acc) acc) (0, 0)
+
+
+/-! ## The shape section (ADR-0062 S2)
+
+Appended after the scalar vectors, so every line above is untouched by the array
+stratum landing. The seeds are the *raw* inputs to `normalize`, so the rendered
+result shows what normalization did: sorting, the singleton-cover promotion, the
+sealed-`absent` drop, the cover antichain, and the denotational `isList`
+recomputation. Rows 0–8 are the ADR-0062 §3 / RFC #14939 `isList` table; 9–11 are
+the A-G1 lowerings; 12–18 exercise A-G8's cover laws and the remaining
+normalization invariants. -/
+
+private def sreq : Presence := .required true
+private def sint (i : Int) : Slot := some (Fact.singleton (.int i))
+private def sgint : Slot := some (Fact.general .int false)
+private def sealSeed (fields : List Field) : ShapeFact := normalize fields .sealed .maybe false []
+
+def shapeSeeds : List ShapeFact :=
+  [ sealSeed []                                                          -- 0  array{}
+  , sealSeed [(.int 0, sreq, sint 1)]                                    -- 1  array{0: 1}
+  , sealSeed [(.int 0, .optional, sint 1)]                               -- 2  array{0?: 1}
+  , sealSeed [(.int 0, sreq, sint 1), (.int 1, sreq, sint 2)]            -- 3  array{0: 1, 1: 2}
+  , sealSeed [(.str 0, .optional, sint 1)]                               -- 4  array{a?: 1}
+  , sealSeed [(.str 0, sreq, sint 1)]                                    -- 5  array{a: 1}
+  , sealSeed [(.int 1, sreq, sint 2)]                                    -- 6  array{1: 2}
+  , sealSeed [(.int 0, .optional, sint 1), (.int 1, sreq, sint 2)]       -- 7  array{0?: 1, 1: 2}
+  , sealSeed [(.int (-1), sreq, sint 2)]                                 -- 8  array{-1: 2}
+  , plainArray                                                       -- 9  array
+  , normalize [] (.unsealed .int sgint) .yes false []                -- 10 list<int>
+  , normalize [(.str 0, sreq, sgint)] (.unsealed .str sgint) .maybe false []
+                                                                     -- 11 tail-key fixture
+  , normalize [(.int 1, sreq, sint 2)] (.unsealed .str none) .maybe false []
+                                                                     -- 12 string tail, gap at 0
+  , normalize [(.str 0, .optional, none), (.str 1, .optional, none)] .sealed .maybe false
+      [{ keys := [.str 1, .str 0], flavor := .isset }]                -- 13 isset cover
+  , normalize [(.str 0, .optional, none), (.str 1, .optional, none)] .sealed .maybe false
+      [{ keys := [.str 0, .str 1], flavor := .keyExists }]            -- 14 keyExists cover
+  , normalize [(.str 0, .optional, sint 1)] .sealed .maybe false
+      [{ keys := [.str 0], flavor := .isset }]                        -- 15 singleton promotes
+  , normalize [(.str 0, .optional, none), (.str 1, .optional, none), (.str 2, .optional, none)]
+      .sealed .maybe false
+      [{ keys := [.str 0, .str 1, .str 2], flavor := .keyExists },
+       { keys := [.str 1, .str 0], flavor := .keyExists }]            -- 16 antichain
+  , normalize [(.str 0, .absent, none), (.str 1, .absent, none)]
+      (.unsealed .arrayKey none) .maybe false []                      -- 17 absent survives
+  , normalize [(.str 0, .optional, sint 1)] .sealed .maybe true [] ]  -- 18 non-empty, string opt
+
+/-- Four shape facts (one nullable) and the neighbours the mixed-base discipline
+must reject. -/
+def shapeFacts : List Fact :=
+  let sh := fun (i : Nat) (n : Bool) => Fact.shape (shapeSeeds.getD i plainArray) n
+  [ sh 1 false, sh 5 false, sh 9 false, sh 9 true
+  , .singleton (.arr 0), .singleton (.arr 2), .singleton .null, .singleton (.int 1)
+  , .oneOf [.arr 0, .arr 1], .oneOf [.null, .arr 1], .oneOf [.null, .int 1]
+  , .general .int false ]
+
+private def descentArrays : List Val :=
+  [.arr 6, .arr 7, .arr 8, .arr 9, .arr 10, .arr 11, .arr 12, .arr 13, .arr 14]
+
+/-- Value sets that overflow `CAP` with arrays in them. -/
+def descentSeeds : List (String × List Val) :=
+  [ ("allarrays", descentArrays)
+  , ("withnull", descentArrays ++ [.null])
+  , ("mixed", descentArrays ++ [.int 1])
+  , ("assorted", [.arr 0, .arr 1, .arr 2, .arr 3, .arr 4, .arr 5, .arr 6, .arr 7, .arr 8]) ]
+
+def arrLit : Nat → String
+  | 0 => "[]"      | 1 => "[0=>1]"  | 2 => "[0=>1,1=>2]" | 3 => "[0=>1,a=>2]"
+  | 4 => "[1=>2]"  | 5 => "[a=>1]"  | 6 => "[a=>2]"      | 7 => "[a=>2,b=>1]"
+  | 8 => "[a=>3]"  | 9 => "[a=>4]"  | 10 => "[a=>5]"     | 11 => "[a=>6]"
+  | 12 => "[a=>7]" | 13 => "[a=>8]" | 14 => "[a=>9]"     | 15 => "[b=>1]"
+  | _ => "?"
+
+def arrRanks : List Nat := List.range 16
+
+def renderBool (b : Bool) : String := if b then "true" else "false"
 
 /-! ## The file -/
 
@@ -258,10 +421,87 @@ def render : String :=
         renderOptFact (Fact.join vecModel a b)
   let tally := assocTally vecModel facts
   let assocLine := "assoc " ++ toString tally.1 ++ " " ++ toString tally.2
+  -- The shape section.
+  let shapeArrLines := arrRanks.map fun r =>
+    "shapearr arr#" ++ toString r ++ " " ++ arrLit r ++ " " ++
+      (if arrayIsList (vecArrEntries r) then "list" else "nolist")
+  let seeds := shapeSeeds
+  let idx := List.range seeds.length
+  let seedAt := fun i => seeds.getD i plainArray
+  let shapeLines := idx.map fun i => "shape " ++ toString i ++ " => " ++ renderShape (seedAt i)
+  let shapeAdmitsLines := idx.flatMap fun i => arrRanks.map fun r =>
+    "shapeadmits " ++ toString i ++ " arr#" ++ toString r ++ " => " ++
+      renderBool (Fact.shapeAdmits vecModel (seedAt i) (vecArrEntries r))
+  let shapeJoinLines := idx.flatMap fun i => idx.map fun j =>
+    "shapejoin " ++ toString i ++ " " ++ toString j ++ " => " ++
+      renderShape (Fact.shapeJoin vecModel (seedAt i) (seedAt j))
+  let shapeLiftLines := arrRanks.map fun r =>
+    "shapelift arr#" ++ toString r ++ " => " ++ renderShape (Fact.lift vecModel (vecArrEntries r))
+  let sfs := shapeFacts
+  let fidx := List.range sfs.length
+  let factAt := fun i => sfs.getD i (Fact.singleton .null)
+  let shapeFactLines := fidx.map fun i =>
+    "shapefact " ++ toString i ++ " => " ++ renderFact (factAt i)
+  let shapeFactAdmitsLines := fidx.flatMap fun i =>
+    (arrRanks.map fun r =>
+      "shapefactadmits " ++ toString i ++ " arr#" ++ toString r ++ " => " ++
+        renderBool ((factAt i).admits vecModel (.arr r)))
+    ++ [ "shapefactadmits " ++ toString i ++ " null => " ++
+           renderBool ((factAt i).admits vecModel .null),
+         "shapefactadmits " ++ toString i ++ " int:1 => " ++
+           renderBool ((factAt i).admits vecModel (.int 1)) ]
+  let shapeFactJoinLines := fidx.flatMap fun i => fidx.map fun j =>
+    "shapefactjoin " ++ toString i ++ " " ++ toString j ++ " => " ++
+      renderOptFact (Fact.join vecModel (factAt i) (factAt j))
+  let shapeQueryLines := sfs.flatMap fun f =>
+    [ "shapetruthy " ++ renderFact f ++ " => " ++ renderCert (f.truthy vecModel),
+      "shapeisnull " ++ renderFact f ++ " => " ++ renderCert f.isNull ]
+  let shapeDescentLines := descentSeeds.map fun p =>
+    "shapedescent " ++ p.1 ++ " => " ++ renderOptFact (Fact.fromVals vecModel p.2)
+  -- Soundness tallies for the array stratum, checked exhaustively on both sides
+  -- exactly as `assoc` is (REPORT.md).
+  let joinTally : Nat × Nat := idx.foldl (fun acc i =>
+    idx.foldl (fun acc j =>
+      let a := seedAt i
+      let b := seedAt j
+      let joined := Fact.shapeJoin vecModel a b
+      arrRanks.foldl (fun (acc : Nat × Nat) r =>
+        let e := vecArrEntries r
+        let covered := Fact.shapeAdmits vecModel a e || Fact.shapeAdmits vecModel b e
+        (acc.1 + 1,
+         if covered && !Fact.shapeAdmits vecModel joined e then acc.2 + 1 else acc.2)) acc) acc)
+    (0, 0)
+  let liftTally : Nat × Nat := arrRanks.foldl (fun (acc : Nat × Nat) r =>
+    let e := vecArrEntries r
+    (acc.1 + 1,
+     if Fact.shapeAdmits vecModel (Fact.lift vecModel e) e then acc.2 else acc.2 + 1)) (0, 0)
+  let descentTally : Nat × Nat := descentSeeds.foldl (fun (acc : Nat × Nat) p =>
+    match Fact.fromVals vecModel p.2 with
+    | none => acc
+    | some f => p.2.foldl (fun (acc : Nat × Nat) v =>
+        (acc.1 + 1, if f.admits vecModel v then acc.2 else acc.2 + 1)) acc) (0, 0)
+  let probe : List Val := (arrRanks.map (fun r => Val.arr r)) ++ [.null, .int 1]
+  let factJoinTally : Nat × Nat := sfs.foldl (fun acc a =>
+    sfs.foldl (fun acc b =>
+      let joined := Fact.join vecModel a b
+      probe.foldl (fun (acc : Nat × Nat) v =>
+        let covered := a.admits vecModel v || b.admits vecModel v
+        let ok := match joined with
+          | none => true          -- `none` is ⊤ and admits everything
+          | some g => g.admits vecModel v
+        (acc.1 + 1, if covered && !ok then acc.2 + 1 else acc.2)) acc) acc) (0, 0)
+  let soundLines :=
+    [ "shapejoinsound " ++ toString joinTally.1 ++ " " ++ toString joinTally.2,
+      "shapeliftsound " ++ toString liftTally.1 ++ " " ++ toString liftTally.2,
+      "shapedescentsound " ++ toString descentTally.1 ++ " " ++ toString descentTally.2,
+      "shapefactjoinsound " ++ toString factJoinTally.1 ++ " " ++ toString factJoinTally.2 ]
   String.intercalate "\n"
     (header ++ ["#"] ++ atomLines ++ ["#", orderLine, "#"] ++
       admitsLines ++ truthyLines ++ isNullLines ++ satisfiesLines ++ intInLines ++
-      joinLines ++ [assocLine]) ++ "\n"
+      joinLines ++ [assocLine] ++
+      shapeArrLines ++ shapeLines ++ shapeAdmitsLines ++ shapeJoinLines ++ shapeLiftLines ++
+      shapeFactLines ++ shapeFactAdmitsLines ++ shapeFactJoinLines ++ shapeQueryLines ++
+      shapeDescentLines ++ soundLines) ++ "\n"
 
 end Vectors
 end SteinsDomain
