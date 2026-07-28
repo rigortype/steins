@@ -34,6 +34,39 @@ The role a declared type (native or phpdoc) plays in inference: an upper bound
 the analyzer trusts and refines within — call-site precision may tighten
 inside it, never widen beyond it.
 
+**Order-witnessed / order-declared** (ADR-0062):
+The provenance split for arrays. An order-witnessed array's insertion order
+was *observed* by the analysis (a literal, tracked writes, call-site
+propagation) — order-dependent results are sound on it. An order-declared
+array is known only through a declared shape (a key set) — reading its field
+declaration order as runtime order is unsound and never done.
+_Avoid_: "declared order" as a truth source (it is spelling, not order)
+
+**Shape fact** (ADR-0062):
+The one canonical abstract array fact: fields (key, presence, value) + tail
+(sealed, or unsealed with key/value bounds) + denotational `isList` trinary +
+non-emptiness + key covers. `array`, `array<K, V>`, `list<T>` and `array{…}`
+are all degenerate cases of this single form; the contract lane's distinct
+spellings lower into it at the fact boundary. Always a *single* shape — a
+union of shapes lives as contract arms (where discrimination happens), never
+inside one fact.
+_Avoid_: mirroring the contract lane's array split into the fact domain
+
+**KeyCover** (ADR-0062 A-G8):
+A disjunctive presence fact on one array: "at least one of these keys is
+there", recorded from `isset(…) || isset(…)`-style guards and consumed by
+the coalesce right-arm discharge. Two flavors with different strength:
+an Isset-cover promises a *non-null* member, a KeyExists-cover only a
+*present* one — the flavor decides what `??` may conclude.
+_Avoid_: union-of-shapes expansion (the cover is the compact form)
+
+**Surface floor** (ADR-0062 A-G10):
+The single registry attribute that places a diagnostic id on the profile
+ladder (`default ⊂ contracts ⊂ strict`): the lowest surface at which the id
+reports. Evidence classification (layer) and surface selection (floor) stay
+separate axes.
+_Avoid_: per-profile id lists, a "strict layer"
+
 ### Syntax layer
 
 **Syntax tree contract**:

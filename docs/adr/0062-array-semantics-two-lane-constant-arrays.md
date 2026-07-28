@@ -94,12 +94,19 @@ for concrete arrays, version-aware. An abstract shape declines the
 prediction: append to a shape widens the tail (sound); the fact never
 carries `nextAutoIndexes`.
 
+- **covers**: the disjunctive-presence facts (`KeyCover`, #51 L4) live
+  *inside* the shape fact — an antichain of key sets with a flavor bit;
+  laws in Amendment A-G8.
+
 **Lean obligation (ADR-0059).** `Fact::Shape` enters `steins-domain` only
 together with its spec extension: `join_sound` over the field-wise join
 (required∧required stays required, else optional; values join arm-wise;
-`is_list` joins by Certainty; sealed only when both sides seal the same key
-universe), `summarize_admits` for the OneOf descent, and agreement between
-Rust `admits_shape` and the Lean acceptance on the differential vectors.
+`is_list` joins by Certainty; sealed joins per Amendment A-G5 — the
+original "sealed only when both sides seal the same key universe" here was
+wrong and is superseded), `summarize_admits` for the OneOf descent, and
+agreement between Rust `admits_shape` and the Lean acceptance on the
+differential vectors. The form is recursive (field/tail value slots nest),
+so the spec becomes an inductive type with a size measure.
 
 ## 4. Transfer functions: the sound table
 
@@ -154,13 +161,18 @@ same one speller.
    provenance split.
 2. Abstract `nextAutoIndexes` (§3) — concrete-only via A12.
 3. `ARRAY_COUNT_LIMIT = 256` union degradation — replaced by OneOf-cap
-   computed descent.
+   computed descent. (The 256 constant itself returns in Amendment A-G6 as
+   the single-shape *field-width* bound; the union-degradation role stays
+   declined.)
 4. Loop list-ness rescue heuristics (§4) — not imported; loop-schema
    inference is future, separate work.
 5. (Standing, ADR-0030) benevolent unions; the accepts/isSuperTypeOf
    asymmetry.
 
 ## 8. Slices
+
+Resequenced by Amendment A-G12 (S0–S8, domain-first) — the governing
+order lives there; the A-numbers below are retained as content references.
 
 | Slice | Content | Consumer / instrument |
 | --- | --- | --- |
@@ -184,8 +196,120 @@ gate: the strict leg emits nothing until guarded code is clean.
    widening (`array_values(shape)` → bounded list of the value union) over
    returning unknown. Widening is more useful and still sound; decline is
    cheaper. Default: widen.
-2. **A6 timing.** Arms-first (A1–A5 need no domain change) keeps the
-   proved core untouched until the consumers exist. The alternative —
-   domain-first — front-loads the Lean work. Default: arms-first.
+2. ~~**A6 timing.**~~ **Settled by Amendment A-G12** (owner, 2026-07-29):
+   domain-first — the canonical fact lands before the guard slices, because
+   the covers live inside it (A-G8) and arms-first would force a temporary
+   home plus a migration.
 3. **D4 spelling immediately vs behind the strict surface.** Default:
    immediately — the dump surface is debug-grade and BC-free here.
+
+## Amendment A (2026-07-29): grilling resolutions
+
+Owner-settled in a branch-by-branch design interrogation; each item was
+confirmed individually. Where an item contradicts the body above, the
+amendment governs.
+
+- **A-G1 — One canonical form.** The fact domain does **not** mirror the
+  contract lane's `ArrayAny`/`ListOf`/`MapOf`/`Shape` split. All four
+  lower into the single shape fact: `array` = no fields + untyped unsealed
+  tail; `array<K, V>` = typed tail; `list<T>` = typed tail + isList Yes;
+  `array{…}`/`list{…}` as declared. One join, one acceptance, one Lean
+  algebra; the contract lane keeps its spellings.
+- **A-G2 — Fact placement.** `Fact::Shape { shape, nullable }` is the
+  fifth `Fact` variant; `nullable` is the same side-flag `Refined`/
+  `General` carry, never a field inside the shape (field-value nullability
+  belongs to that value slot's own arms — no double representation). No
+  array-`General` variant exists: the degenerate shape fact absorbs
+  ADR-0035's layer-4 array text. Mixed-base unions (`array{…}|string`)
+  stay un-facted, exactly as for scalars.
+- **A-G3 — Discriminated unions live in the arm lane.** A shape∪shape
+  union is never dropped to unknown: it persists as multiple `Shape` arms,
+  and the fact lane holds a single shape fact only once the union has
+  collapsed to one arm. Presence-based subtraction: `isset($x['k'])` true
+  eliminates sealed arms lacking `k` (sealed-by-default is what makes the
+  idiom sound); false eliminates arms where `k` is Required with a
+  non-nullable value. Concrete unions stay `OneOf`.
+- **A-G4 — Tagged-union discrimination.** Constant-key projection guards
+  (`===`, `match`, `switch`) subtract base arms by the field-value
+  `admits` verdict: a No arm is eliminated, so
+  `match ($w['type']) { 'x' => $w['x_url'], … }` collapses the union per
+  arm and each read spells its declared contract with zero findings on
+  every surface (the ADR's acceptance fixture, neutral tag names). v1
+  scope: binding base, constant key, literal int/string tags. Symmetry:
+  isset-discrimination is powered by *sealed*; tag-discrimination by
+  *Required + literal exclusivity*.
+- **A-G5 — Join laws (correcting §3).** Field-wise: key on both sides →
+  presence join (`Required(s₁)⊔Required(s₂) = Required(min stratum)`; any
+  Optional → Optional), values join arm-wise. Key on one side → Optional;
+  value joined with the other side's tail value bound when that side is
+  unsealed. Tail: `Sealed⊔Sealed = Sealed` — **`Sealed{a}⊔Sealed{b} =
+  {a?, b?} + Sealed`**, optionality absorbs the key-set difference (the
+  body's "same key universe" condition was wrong); `Sealed⊔Unsealed(K,V) =
+  Unsealed(K,V)`; `Unsealed⊔Unsealed` joins key-class and value. isList:
+  trinary or. non_empty: and. nullable: or. Concrete⊔abstract lifts the
+  `Singleton` (all fields Required/Verified, sealed, isList computed by
+  `array_is_list`) and then shape-joins — the lift is where
+  order-witnessed-ness is honestly lost.
+- **A-G6 — Field-width bound = 256, imported.** Lifting or seeding a
+  shape beyond 256 fields (PHPStan's `ARRAY_COUNT_LIMIT`, adopted as-is
+  rather than a novel constant) degrades to the tail-only summary
+  (unsealed key-class/value join + non_empty + isList). Orthogonal to the
+  OneOf cap (8), which governs how many whole arrays stay finite.
+- **A-G7 — No general meet in v1.** Narrowing ships as targeted
+  refinement operators (presence promotion, arm subtraction, isList flip,
+  non_empty set, cover recording); a general ⊓ waits for a real consumer.
+- **A-G8 — KeyCover laws.** Covers live inside the shape fact as an
+  antichain of key sets, each of size ≥ 2 (a singleton cover normalizes to
+  presence promotion; a cover containing a Required key drops as
+  redundant). Each cover carries a flavor: **Isset-cover** (from
+  `isset(…)||isset(…)`: at least one key present *non-null*) or
+  **KeyExists-cover** (from `array_key_exists` disjunctions: at least one
+  key *exists*, value possibly null). Join keeps a cover iff both sides
+  imply it (via a subset cover or a Required member key). Invalidation:
+  `unset($x[k])` kills every cover containing `k` and marks `k` absent; a
+  write to `k` promotes `k` to Required/Verified and drops the covers it
+  satisfies; a nested write autovivifies the outer key; rebinding clears
+  everything; by-ref exposure and by-ref builtins (`sort` &c.) havoc the
+  fact (v1); by-value flow copies facts freely (PHP CoW semantics).
+- **A-G9 — Reads are never null-poisoned.** An unguarded optional-key
+  read yields the declared value arms (`Asserted`), not arms∪null: the
+  missing-ness hazard is the strict leg's *finding*, never a type
+  pollution (PHPStan's posture, imported; it is what keeps non-strict
+  surfaces zero-FP downstream). Stratum law: a read result never exceeds
+  its value slot's stratum; presence stratum and value stratum are
+  independent. Corollary, normative: **shape-derived facts never feed
+  proof-layer findings.**
+- **A-G10 — The finding ladder and its wiring.** Three ids:
+  `offset.missing` (proof evidence, default surface — unchanged);
+  `offset.undeclared` (new: constant-key read outside a sealed shape's
+  fields — definite absence *conditional on the docblock*; layer
+  contracts, floor contracts); `offset.maybe-missing` (undischarged
+  optional-key read; layer contracts, floor strict). The registry gains
+  exactly one attribute — `surface_floor ∈ {default, contracts, strict}` —
+  and profiles are the cumulative ladder `default ⊂ contracts ⊂ strict`.
+  Baselines record their capture surface; `suppress.unmatched` judges only
+  ids fireable at the current surface. v1 emission: shape-declared bases
+  with constant keys only. General-map/list reads do not fire in v1 but
+  are counted in triage (#50) buckets from day one; a future general leg
+  is a separate id (PHPStan's two-flag split, imported).
+- **A-G11 — Coalesce premise scope.** Premises arise only from pure
+  projection arms (binding + constant key, depth 1); each arm carries
+  ¬isset of every prior arm; a non-projection arm (any call) contributes
+  no premise *and invalidates the accumulated ones* for later arms
+  (by-ref/global mutation conservatism); mixed bases discharge nothing.
+  Discharge table: Isset-cover + ¬isset(a) ⇒ isset(b), unconditionally;
+  a KeyExists-cover discharges only when the prior arms' values are
+  non-nullable — with a nullable value, present-null falls through at
+  runtime and the right arm may truly be missing (real semantics, not
+  imprecision).
+- **A-G12 — Domain-first resequencing** (settles Open Question 2). S0
+  acceptance convergence (was A1) → S1 spelling (A2) → S2 domain core:
+  `Fact::Shape` + lowering + join + lift + computed descent (was A6) → S3
+  shape reads (A3) → S4 guards: presence promotion, arm subtraction incl.
+  tagged, the invalidation table (A4, expanded) → S5 KeyCover + coalesce
+  discharge (A4/A5) → S6 strict-leg emission + `surface_floor` + the
+  `strict` profile + baseline surface tags (#51's emission gate) → S7
+  positional projections + fold seam (A7; parallel to S3–S6) → S8
+  `array_all`/`array_any` legs (A8). Rationale: covers live inside the
+  shape fact (A-G8), so arms-first would force a temporary cover home and
+  a migration.
