@@ -212,8 +212,16 @@ fn key_as_val(k: &VKey) -> Val {
     }
 }
 
-fn is_list(items: &[(VKey, Val)]) -> bool {
+fn is_list<V>(items: &[(VKey, V)]) -> bool {
     items.iter().enumerate().all(|(i, (k, _))| matches!(k, VKey::Int(v) if *v == i as i64))
+}
+
+fn key_eq(declared: &CKey, actual: &VKey) -> bool {
+    match (declared, actual) {
+        (CKey::Int(a), VKey::Int(b)) => a == b,
+        (CKey::Str(a), VKey::Str(b)) => a == b,
+        _ => false,
+    }
 }
 
 fn admits_list(elem: &ContractTy, non_empty: bool, items: &[(VKey, Val)]) -> Certainty {
@@ -234,64 +242,75 @@ fn admits_entries(key: &ContractTy, val: &ContractTy, items: &[(VKey, Val)]) -> 
     })
 }
 
+/// The declared parts of one array shape, lane-independently — exactly what the
+/// structural acceptance relation ([`shape_verdict`]) reads.
+///
+/// `T` is the lane's declared-type representation: [`ContractTy`] for the fact
+/// lane, the phpdoc `Type` AST for `steins-infer`'s proven-value lane (ADR-0062
+/// §5: **one** acceptance relation, two leaf judges).
+#[derive(Debug)]
+pub struct ShapeSpec<'a, T> {
+    /// `list{…}` (positional) vs `array{…}` (keyed set).
+    pub list: bool,
+    /// Sealed shapes reject undeclared keys.
+    pub sealed: bool,
+    /// Reject the empty array (`non-empty-array{…}` forms).
+    pub non_empty: bool,
+    /// The declared fields as `(normalized key, optional, value type)`.
+    pub fields: Vec<(CKey, bool, &'a T)>,
+    /// The unsealed tail `...<K, V>`: the optional **key** contract and the
+    /// value contract. `None` for a sealed shape *and* for an untyped `...`.
+    pub tail: Option<(Option<&'a T>, &'a T)>,
+}
+
 /// Shape acceptance per #14939: `array{}` is an order-agnostic key set,
 /// `list{}` a positional sequence (which must also *be* a list).
-fn admits_shape(
-    list: bool,
-    fields: &[CField],
-    sealed: bool,
-    non_empty: bool,
-    unsealed: &Option<(Option<Box<ContractTy>>, Box<ContractTy>)>,
-    items: &[(VKey, Val)],
+///
+/// This is the single implementation of the relation (ADR-0030's
+/// no-second-relation discipline, ADR-0062 §5). Everything lane-specific is a
+/// parameter: `judge_val` decides a declared value type against one of the
+/// lane's values, `judge_key` decides the unsealed tail's key type against a
+/// runtime key. The structural rules — required/optional presence, sealing, the
+/// tail key *and* value obligations, list-ness, non-emptiness — live here and
+/// nowhere else.
+pub fn shape_verdict<T, V>(
+    spec: &ShapeSpec<'_, T>,
+    items: &[(VKey, V)],
+    judge_val: &mut dyn FnMut(&T, &V) -> Certainty,
+    judge_key: &mut dyn FnMut(&T, &VKey) -> Certainty,
 ) -> Certainty {
     use Certainty::{No, Yes};
 
-    if non_empty && items.is_empty() {
+    if spec.non_empty && items.is_empty() {
         return No;
     }
-    if list && !is_list(items) {
+    if spec.list && !is_list(items) {
         return No;
     }
-
-    let lookup = |key: &CKey| -> Option<&Val> {
-        items.iter().find_map(|(k, v)| {
-            let matches = match (k, key) {
-                (VKey::Int(a), CKey::Int(b)) => a == b,
-                (VKey::Str(a), CKey::Str(b)) => a == b,
-                _ => false,
-            };
-            matches.then_some(v)
-        })
-    };
 
     let mut verdict = Yes;
-    for field in fields {
-        match lookup(&field.key) {
-            Some(v) => verdict = verdict.and(admits_val(&field.ty, v)),
-            None if field.optional => {}
+    for (key, optional, ty) in &spec.fields {
+        match items.iter().find_map(|(k, v)| key_eq(key, k).then_some(v)) {
+            Some(v) => verdict = verdict.and(judge_val(ty, v)),
+            None if *optional => {}
             None => return No,
         }
     }
 
     // Extra entries: keys not declared by any field.
     for (k, v) in items {
-        let declared = fields.iter().any(|f| match (&f.key, k) {
-            (CKey::Int(b), VKey::Int(a)) => a == b,
-            (CKey::Str(b), VKey::Str(a)) => a == b,
-            _ => false,
-        });
-        if declared {
+        if spec.fields.iter().any(|(key, _, _)| key_eq(key, k)) {
             continue;
         }
-        match unsealed {
+        match spec.tail {
             Some((key_ty, val_ty)) => {
                 if let Some(kt) = key_ty {
-                    verdict = verdict.and(admits_val(kt, &key_as_val(k)));
+                    verdict = verdict.and(judge_key(kt, k));
                 }
-                verdict = verdict.and(admits_val(val_ty, v));
+                verdict = verdict.and(judge_val(val_ty, v));
             }
             None => {
-                if sealed {
+                if spec.sealed {
                     return No;
                 }
                 // Unsealed without a declared tail type: anything goes.
@@ -300,4 +319,29 @@ fn admits_shape(
     }
 
     verdict
+}
+
+/// The fact lane's driver of [`shape_verdict`]: both leaf judges are
+/// [`admits_val`] (a runtime key is itself a value).
+fn admits_shape(
+    list: bool,
+    fields: &[CField],
+    sealed: bool,
+    non_empty: bool,
+    unsealed: &Option<(Option<Box<ContractTy>>, Box<ContractTy>)>,
+    items: &[(VKey, Val)],
+) -> Certainty {
+    let spec = ShapeSpec {
+        list,
+        sealed,
+        non_empty,
+        fields: fields.iter().map(|f| (f.key.clone(), f.optional, &f.ty)).collect(),
+        tail: unsealed.as_ref().map(|(k, v)| (k.as_deref(), &**v)),
+    };
+    shape_verdict(
+        &spec,
+        items,
+        &mut |ty, v| admits_val(ty, v),
+        &mut |ty, k| admits_val(ty, &key_as_val(k)),
+    )
 }

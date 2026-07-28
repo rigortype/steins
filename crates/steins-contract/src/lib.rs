@@ -18,7 +18,7 @@ mod admit;
 pub mod normalize;
 pub mod spell;
 
-pub use admit::{admits_fact, admits_val};
+pub use admit::{ShapeSpec, admits_fact, admits_val, shape_verdict};
 
 use steins_domain::{Base, IntRange, StrPreds};
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, ShapeKey, StringLit, Type, TypeKind};
@@ -353,30 +353,51 @@ fn lower_int_range(args: &[steins_phpdoc::ast::GenericArg]) -> ContractTy {
     }
 }
 
+/// The normalized runtime keys a shape's items denote, in item order — the ONE
+/// shape-key rule: positional items take the running auto-index, and PHP folds an
+/// integer-like string/bareword key to an int key (`array{'9': T}` declares the
+/// key `9`, exactly as `[9 => …]` builds it).
+///
+/// `None` when a key is not resolvable at all — a const-fetch key, or an int
+/// literal that does not parse — which makes the whole shape undecidable
+/// (`Opaque` when lowering, `Maybe` when judging).
+#[must_use]
+pub fn shape_keys(shape: &steins_phpdoc::ast::ArrayShape) -> Option<Vec<CKey>> {
+    let mut keys = Vec::with_capacity(shape.items.len());
+    let mut next_auto: i64 = 0;
+    for item in &shape.items {
+        let key = match &item.key {
+            None => CKey::Int(next_auto),
+            Some(ShapeKey::Int(s)) => CKey::Int(s.replace('_', "").parse::<i64>().ok()?),
+            Some(ShapeKey::Str(lit)) => norm_shape_key(&string_lit_value(lit)),
+            Some(ShapeKey::Ident(name)) => norm_shape_key(name),
+            Some(ShapeKey::ConstFetch { .. }) => return None,
+        };
+        // Every int key — declared or PHP-folded — advances the auto-index.
+        if let CKey::Int(v) = key {
+            next_auto = next_auto.max(v.saturating_add(1));
+        }
+        keys.push(key);
+    }
+    Some(keys)
+}
+
+/// PHP array-key normalization for a shape's string/bareword key: a canonical
+/// decimal integer spelling denotes an int key, everything else a string key.
+fn norm_shape_key(s: &str) -> CKey {
+    match s.parse::<i64>() {
+        Ok(i) if i.to_string() == s => CKey::Int(i),
+        _ => CKey::Str(s.to_owned()),
+    }
+}
+
 fn lower_shape(shape: &steins_phpdoc::ast::ArrayShape) -> ContractTy {
     let list = matches!(shape.kind, ArrayShapeKind::List | ArrayShapeKind::NonEmptyList);
     let non_empty =
         matches!(shape.kind, ArrayShapeKind::NonEmptyArray | ArrayShapeKind::NonEmptyList);
+    let Some(keys) = shape_keys(shape) else { return ContractTy::Opaque };
     let mut fields = Vec::with_capacity(shape.items.len());
-    let mut next_auto: i64 = 0;
-    for item in &shape.items {
-        let key = match &item.key {
-            None => {
-                let k = CKey::Int(next_auto);
-                next_auto += 1;
-                k
-            }
-            Some(ShapeKey::Int(s)) => match s.parse::<i64>() {
-                Ok(v) => {
-                    next_auto = next_auto.max(v.saturating_add(1));
-                    CKey::Int(v)
-                }
-                Err(_) => return ContractTy::Opaque,
-            },
-            Some(ShapeKey::Str(lit)) => CKey::Str(string_lit_value(lit)),
-            Some(ShapeKey::Ident(name)) => CKey::Str(name.clone()),
-            Some(ShapeKey::ConstFetch { .. }) => return ContractTy::Opaque,
-        };
+    for (key, item) in keys.into_iter().zip(&shape.items) {
         fields.push(CField { key, optional: item.optional, ty: lower(&item.value) });
     }
     let unsealed = shape.unsealed.as_ref().map(|u| {

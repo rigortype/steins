@@ -103,6 +103,41 @@ fn shapes_follow_14939() {
     assert_eq!(admits_val(&pair, &reversed), No);
 }
 
+/// ADR-0062 §5 — the acceptance-convergence fixture, fact-path side. The
+/// proven-value path in `steins-infer` now judges through this very relation
+/// (`shape_verdict`), so its twin fixture — `unsealed_tail_key_contract_is_checked`
+/// in `steins-infer/tests/phpdoc_contract.rs` — must agree verdict for verdict.
+#[test]
+fn unsealed_tail_key_contract_is_checked() {
+    let tail = ty("array{a: int, ...<string, int>}");
+    let int_tail_key = arr(vec![(Key::Str("a".into()), Val::Int(1)), (Key::Int(9), Val::Int(2))]);
+    let str_tail_key =
+        arr(vec![(Key::Str("a".into()), Val::Int(1)), (Key::Str("b".into()), Val::Int(2))]);
+    let bad_tail_val =
+        arr(vec![(Key::Str("a".into()), Val::Int(1)), (Key::Str("b".into()), s("x"))]);
+
+    assert_eq!(admits_val(&tail, &int_tail_key), No, "int key 9 violates <string, …>");
+    assert_eq!(admits_val(&tail, &str_tail_key), Yes);
+    assert_eq!(admits_val(&tail, &bad_tail_val), No, "the tail VALUE contract too");
+    assert_eq!(admits_val(&ty("array{a: int, ...<int, int>}"), &int_tail_key), Yes);
+    assert_eq!(admits_val(&ty("array{a: int, ...}"), &int_tail_key), Yes, "untyped tail");
+}
+
+/// PHP array-key normalization is part of the one shape relation: a shape key
+/// spelled as an integer-like string declares the *int* key it denotes, so it
+/// matches the value `[9 => …]` instead of counting as an undeclared extra.
+#[test]
+fn integer_like_string_shape_keys_normalize() {
+    let shape = ty("array{'9': int}");
+    assert_eq!(admits_val(&shape, &arr(vec![(Key::Int(9), Val::Int(1))])), Yes);
+    assert_eq!(admits_val(&shape, &arr(vec![(Key::Int(9), s("x"))])), No);
+    // A non-canonical spelling stays a string key (PHP does not fold "09").
+    assert_eq!(
+        admits_val(&ty("array{'09': int}"), &arr(vec![(Key::Str("09".into()), Val::Int(1))])),
+        Yes
+    );
+}
+
 #[test]
 fn abstract_facts_judged_soundly() {
     let numeric =

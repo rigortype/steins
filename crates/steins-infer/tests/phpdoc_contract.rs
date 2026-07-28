@@ -126,6 +126,47 @@ fn list_shape_is_positional() {
     assert_eq!(param_count(&format!("{f}f(['x', 1]);")), 1, "positional type mismatch");
 }
 
+/// ADR-0062 §5 — the acceptance-convergence fixture, proven-value side. The
+/// unsealed tail carries a **key** contract as well as a value contract, and the
+/// proven path judges both: it shares `steins-contract`'s one shape relation
+/// instead of re-implementing it (this was the measured divergence — the int key
+/// `9` used to pass `...<string, int>` here while the fact path rejected it).
+#[test]
+fn unsealed_tail_key_contract_is_checked() {
+    let f = "<?php /** @param array{a: int, ...<string, int>} $s */ function f(array $s): void {}\n";
+    assert_eq!(
+        param_count(&format!("{f}f(['a' => 1, 9 => 2]);")),
+        1,
+        "int key 9 violates the <string, …> tail key contract"
+    );
+    assert_eq!(
+        param_count(&format!("{f}f(['a' => 1, 'b' => 2]);")),
+        0,
+        "string tail key with an int value satisfies ...<string, int>"
+    );
+    assert_eq!(
+        param_count(&format!("{f}f(['a' => 1, 'b' => 'x']);")),
+        1,
+        "the tail VALUE contract is still checked"
+    );
+
+    // An int-keyed tail contract admits the same value.
+    let g = "<?php /** @param array{a: int, ...<int, int>} $s */ function g(array $s): void {}\n";
+    assert_eq!(
+        param_count(&format!("{g}g(['a' => 1, 9 => 2]);")),
+        0,
+        "int key 9 satisfies the <int, …> tail key contract"
+    );
+
+    // An untyped unsealed tail admits any extra key/value.
+    let h = "<?php /** @param array{a: int, ...} $s */ function h(array $s): void {}\n";
+    assert_eq!(
+        param_count(&format!("{h}h(['a' => 1, 9 => 2]);")),
+        0,
+        "untyped `...` tail admits anything"
+    );
+}
+
 // ==========================================================================
 // 4. Class-name envelopes — only New-exact facts checked.
 // ==========================================================================

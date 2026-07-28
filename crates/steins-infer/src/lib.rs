@@ -47,7 +47,7 @@ use steins_syntax::{
     php_canonical_int_string,
 };
 
-use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, ShapeKey, StringLit, TypeKind as PKind};
+use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, StringLit, TypeKind as PKind};
 use steins_phpdoc::{AssertKind, TagKind, Type as PType, parse_type, scan_docblock};
 
 /// The registry id for the `type.argument-mismatch` proof-layer check (ADR-0022).
@@ -11918,99 +11918,63 @@ fn normkey_cval(k: &NormKey) -> CVal {
 /// Membership for an array-shape / list-shape (per phpstan#14939): `array{…}` is an
 /// order-agnostic required-key map (optional `?` keys may be absent; sealed unless
 /// `…`); `list{…}` is positional. A missing required key, a definite element-type
-/// violation, or an extra key in a sealed shape → `No`. An unresolvable shape key
-/// (a const-fetch) makes the whole check `Maybe`.
+/// violation, an extra key in a sealed shape, or an extra key/value violating the
+/// unsealed tail contract → `No`. An unresolvable shape key (a const-fetch) makes
+/// the whole check `Maybe`.
+///
+/// **One acceptance relation** (ADR-0030's no-second-relation discipline, ADR-0062
+/// §5). The structural rules are *not* implemented here: this lowers the proven
+/// value's keys into the domain's key vocabulary, hands `steins-contract` the
+/// declared shape, and lets [`steins_contract::shape_verdict`] — the same code the
+/// fact path's `admits_shape` runs — decide. Only the leaf judgment stays local,
+/// because the proven lane's values include objects (judged through the is-a
+/// oracle) which the value domain cannot express. The divergence this convergence
+/// removed: the tail **key** contract went unchecked here, so `['a' => 1, 9 => 2]`
+/// passed `array{a: int, ...<string, int>}` on this path while the fact path
+/// rejected it.
 fn accepts_shape(cx: &Cx, cfile: usize, coff: u32, shape: &steins_phpdoc::ast::ArrayShape, v: &CVal) -> Tri {
     let CVal::Array(entries) = v else { return Tri::No };
-    let non_empty =
-        matches!(shape.kind, ArrayShapeKind::NonEmptyArray | ArrayShapeKind::NonEmptyList);
-    if non_empty && entries.is_empty() {
-        return Tri::No;
-    }
-    let require_list = matches!(shape.kind, ArrayShapeKind::List | ArrayShapeKind::NonEmptyList);
-    if require_list && !is_list_shaped(entries) {
-        return Tri::No;
-    }
-
-    // Assign each shape item its normalized key (positional next-int for keyless
-    // items, explicit keys otherwise). An unresolvable key → the whole shape maybe.
-    let mut expected: Vec<(NormKey, &PType, bool)> = Vec::with_capacity(shape.items.len());
-    let mut next_auto: i64 = 0;
-    for item in &shape.items {
-        let key = match &item.key {
-            None => {
-                let k = NormKey::Int(next_auto);
-                next_auto += 1;
-                k
-            }
-            Some(sk) => {
-                let Some(k) = shape_key_norm(sk) else { return Tri::Maybe };
-                if let NormKey::Int(i) = k
-                    && i >= next_auto
-                {
-                    next_auto = i + 1;
-                }
-                k
-            }
-        };
-        expected.push((key, &item.value, item.optional));
-    }
-
-    let mut r = Tri::Yes;
-    let mut used: HashSet<NormKey> = HashSet::new();
-    for (k, ety, optional) in &expected {
-        used.insert(k.clone());
-        match entries.iter().find(|(ek, _)| ek == k) {
-            Some((_, cv)) => {
-                r = combine(r, accepts(cx, cfile, coff, ety, cv));
-                if r == Tri::No {
-                    return Tri::No;
-                }
-            }
-            None => {
-                if !optional {
-                    return Tri::No; // missing required key
-                }
-            }
-        }
-    }
-
-    // Extra keys: a sealed shape rejects them (PHPStan parity); an unsealed `…<V>`
-    // checks their values against the tail type.
-    if shape.sealed {
-        if entries.iter().any(|(k, _)| !used.contains(k)) {
-            return Tri::No;
-        }
-    } else if let Some(u) = &shape.unsealed {
-        for (k, cv) in entries {
-            if !used.contains(k) {
-                r = combine(r, accepts(cx, cfile, coff, &u.value, cv));
-                if r == Tri::No {
-                    return Tri::No;
-                }
-            }
-        }
-    }
-    r
+    // An unresolvable shape key (const-fetch) → no verdict.
+    let Some(keys) = steins_contract::shape_keys(shape) else { return Tri::Maybe };
+    let spec = steins_contract::ShapeSpec {
+        list: matches!(shape.kind, ArrayShapeKind::List | ArrayShapeKind::NonEmptyList),
+        sealed: shape.sealed,
+        non_empty: matches!(
+            shape.kind,
+            ArrayShapeKind::NonEmptyArray | ArrayShapeKind::NonEmptyList
+        ),
+        fields: keys
+            .into_iter()
+            .zip(&shape.items)
+            .map(|(k, item)| (k, item.optional, &item.value))
+            .collect(),
+        tail: shape.unsealed.as_ref().map(|u| (u.key.as_deref(), &*u.value)),
+    };
+    let items: Vec<(VKey, &CVal)> =
+        entries.iter().map(|(k, cv)| (domain_key(k), cv)).collect();
+    steins_contract::shape_verdict(
+        &spec,
+        &items,
+        &mut |ty, cv| accepts(cx, cfile, coff, ty, cv),
+        &mut |ty, k| accepts(cx, cfile, coff, ty, &key_cval(k)),
+    )
 }
 
-/// The normalized runtime key a phpdoc shape key denotes, or `None` for an
-/// unresolvable const-fetch key. Bareword and string keys fold integer-like
-/// spellings to `Int` (PHP key normalization).
-fn shape_key_norm(k: &ShapeKey) -> Option<NormKey> {
+/// A proven array's normalized key in the domain's key vocabulary (the shared
+/// acceptance relation speaks [`VKey`], the trace IR speaks [`NormKey`]).
+fn domain_key(k: &NormKey) -> VKey {
     match k {
-        ShapeKey::Int(s) => s.parse::<i64>().ok().map(NormKey::Int),
-        ShapeKey::Str(lit) => Some(norm_str_key(string_lit_value(lit))),
-        ShapeKey::Ident(s) => Some(norm_str_key(s)),
-        ShapeKey::ConstFetch { .. } => None,
+        NormKey::Int(i) => VKey::Int(*i),
+        NormKey::Str(s) => VKey::Str(s.clone()),
     }
 }
 
-/// Fold an integer-like string key to `Int`, else keep it a `Str` key.
-fn norm_str_key(s: &str) -> NormKey {
-    match s.parse::<i64>() {
-        Ok(i) if i.to_string() == s => NormKey::Int(i),
-        _ => NormKey::Str(s.to_owned()),
+/// A runtime array key as a proven scalar value — the subject of an unsealed
+/// tail's key contract.
+fn key_cval(k: &VKey) -> CVal {
+    match k {
+        VKey::Int(i) => CVal::Scalar(ArgValue::Int(*i)),
+        VKey::Str(s) => CVal::Scalar(ArgValue::Str(s.clone())),
     }
 }
 
