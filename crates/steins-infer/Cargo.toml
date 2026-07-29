@@ -13,8 +13,14 @@ salsa.workspace = true
 steins-db = { path = "../steins-db" }
 steins-syntax = { path = "../steins-syntax" }
 steins-catalog = { path = "../steins-catalog" }
-steins-sidecar = { path = "../steins-sidecar" }
 steins-phpdoc = { path = "../steins-phpdoc" }
+
+# Native-only: the sidecar spawns the project's own PHP over IPC, which no wasm
+# runtime can do. Gating the DEPENDENCY (not just the code) keeps `std::process`
+# out of the wasm dependency graph entirely — the playground build cannot even
+# try to spawn (ADR-0065). The wasm target runs the sound subset via `NoFold`.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+steins-sidecar = { path = "../steins-sidecar" }
 
 [dev-dependencies]
 steins-db = { path = "../steins-db" }

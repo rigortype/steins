@@ -1,0 +1,25 @@
+# The browser-playground module (ADR-0065): the analysis core compiled to
+# `wasm32-unknown-unknown` behind a hand-rolled C ABI — no wasm-bindgen, no JS
+# glue dependencies, so the wasm dependency graph is exactly the analysis graph.
+# The build is the sound subset by construction: this crate can only construct
+# `NoFold`, and `steins-infer` does not even compile its sidecar seam for wasm
+# (the dependency is target-gated out, not merely unused).
+#
+# `cdylib` is the wasm module; `rlib` keeps the crate testable and clippy-able
+# natively — the envelope logic is target-agnostic and its tests run on the host.
+[package]
+name = "steins-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+steins-db = { path = "../steins-db" }
+steins-infer = { path = "../steins-infer" }
+steins-syntax = { path = "../steins-syntax" }
+serde_json.workspace = true

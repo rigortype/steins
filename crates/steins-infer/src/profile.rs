@@ -51,7 +51,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use steins_infer::{
+use crate::{
     DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, DIAGNOSTIC_REGISTRY, Diagnostic, Facet,
     Floor, Layer, Origin, THROW_UNDECLARED_ID, layer, pattern_is_known, pattern_matches,
     surface_floor,
@@ -434,7 +434,7 @@ impl ProfileConfigs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use steins_infer::{
+    use crate::{
         CALL_ON_NULL_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, EFFECT_ID,
         OFFSET_MAYBE_MISSING_ID, OFFSET_UNDECLARED_ID, PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID,
         SUPPRESS_UNMATCHED_ID, THROW_LISKOV_ID,

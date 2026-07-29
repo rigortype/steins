@@ -98,3 +98,6 @@ list in one place.
 | ADR-0060 | [The Packagist vendor is `typedduck`, not the namespace and not the GitHub org](0060-packagist-vendor-name.md) |
 | ADR-0061 | [Argument-dependent builtin returns: the type rung, its envelope gate, and the PHPStan port terms](0061-argument-dependent-builtin-returns.md) |
 | ADR-0062 | [Array semantics: the ConstantArrayType import, split across order-witnessed values and order-declared shapes](0062-array-semantics-two-lane-constant-arrays.md) |
+| ADR-0063 | [Pure-function typing: semantic effect propagation first, conditional-purity contracts second](0063-pure-function-typing-conditional-purity.md) |
+| ADR-0064 | [Dynamic return typing: the PHPStan extension-point import lands in five named seams](0064-dynamic-return-import-taxonomy.md) |
+| ADR-0065 | [Browser playground: the analysis core as a static wasm asset, no backend](0065-browser-playground-wasm.md) |

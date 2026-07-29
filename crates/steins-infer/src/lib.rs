@@ -19,6 +19,7 @@
 //! working unchanged; [`check_project`] / [`annotate_project`] run over many.
 
 pub mod dam;
+pub mod profile;
 pub mod promote;
 pub mod suppress;
 
@@ -36,6 +37,7 @@ use steins_contract::normalize;
 use steins_db::{
     Db, DeclSite, Project, ProjectIndex, ProjectLayout, Resolve, SourceFile, parse, project_index,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use steins_sidecar::{FoldArg, FoldKey, FoldResult, FoldValue, Sidecar};
 use steins_syntax::CallExpr;
 use steins_syntax::Span;
@@ -490,6 +492,7 @@ impl Folder for NoFold {
 
 /// A [`Folder`] backed by a lazily-spawned PHP [`Sidecar`], with a per-run memo
 /// so a repeated `(name, args)` never triggers duplicate IPC.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct SidecarFolder {
     sidecar: Option<Sidecar>,
     memo: HashMap<(String, Vec<ArgValue>), Option<ArgValue>>,
@@ -522,6 +525,7 @@ pub struct SidecarFolder {
     return_type_memo: HashMap<String, Option<String>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl SidecarFolder {
     /// Create a folder. `disabled` (the CLI's `--no-php`) makes it a permanent
     /// no-op that never spawns PHP.
@@ -580,6 +584,7 @@ impl SidecarFolder {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Folder for SidecarFolder {
     fn fold(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue> {
         let key = (name.to_owned(), args.to_vec());
@@ -684,6 +689,7 @@ impl Folder for SidecarFolder {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl SidecarFolder {
     /// Compute the builtin return fact for `key` (already lowercased) — the
     /// admission gate of ADR-0056 §2 assembled from three whole-run sidecar
@@ -726,6 +732,7 @@ impl SidecarFolder {
 
 /// Parse a PHP version string (`"8.5.8"`, `"8.5.8-dev"`) to `(major, minor)`.
 /// `None` when the first two dotted components are not both integers.
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_php_minor(v: &str) -> Option<(u16, u16)> {
     let mut it = v.split('.');
     let major = it.next()?.parse().ok()?;
@@ -790,6 +797,7 @@ fn is_fold_arg(arg: &ArgValue) -> bool {
 
 /// Convert a literal or literal-array [`ArgValue`] to a [`FoldArg`]; anything else
 /// (and anything over the budget) yields `None`, which widens.
+#[cfg(not(target_arch = "wasm32"))]
 fn arg_to_fold(arg: &ArgValue) -> Option<FoldArg> {
     let mut budget = FOLD_ARRAY_MAX_ENTRIES;
     arg_to_fold_within(arg, FOLD_ARRAY_MAX_DEPTH, &mut budget)
@@ -800,6 +808,7 @@ fn arg_to_fold(arg: &ArgValue) -> Option<FoldArg> {
 /// next-int rule assigns it, and a duplicate key is resolved by PHP's own
 /// last-wins. Nothing here re-derives array semantics — that is precisely what
 /// running the fold on the project's PHP is for (ADR-0004/0028).
+#[cfg(not(target_arch = "wasm32"))]
 fn arg_to_fold_within(arg: &ArgValue, depth: u8, budget: &mut usize) -> Option<FoldArg> {
     match arg {
         ArgValue::Int(v) => Some(FoldArg::Int(*v)),
@@ -846,6 +855,7 @@ fn arg_to_fold_within(arg: &ArgValue, depth: u8, budget: &mut usize) -> Option<F
 }
 
 /// Convert a folded value back to a literal [`ArgValue`].
+#[cfg(not(target_arch = "wasm32"))]
 fn fold_value_to_arg(value: &FoldValue) -> Option<ArgValue> {
     Some(match value {
         FoldValue::Int(v) => ArgValue::Int(*v),
@@ -15648,6 +15658,7 @@ fn check_callable_arg(
 ///   Otherwise the envelope stands alone. Curation may narrow within the envelope;
 ///   it may never widen or cross bases — so a stale curated row loses precision,
 ///   never manufactures a wrong premise the runtime disowns.
+#[cfg(not(target_arch = "wasm32"))]
 fn admit_return_fact(return_type: &str, curated: Option<&str>, minor_matches_pin: bool) -> Option<Fact> {
     let envelope_ty = steins_contract::lower_str(return_type)?;
     let envelope = envelope_fact(&envelope_ty)?;
@@ -15673,6 +15684,7 @@ fn admit_return_fact(return_type: &str, curated: Option<&str>, minor_matches_pin
 ///
 /// [`General`]: Fact::General
 /// [`Refined`]: Fact::Refined
+#[cfg(not(target_arch = "wasm32"))]
 fn fact_base(f: &Fact) -> Option<Base> {
     match f {
         Fact::General { base, .. } | Fact::Refined { base, .. } => Some(*base),
@@ -15686,6 +15698,7 @@ fn fact_base(f: &Fact) -> Option<Base> {
 /// a bare `Base(b)` → `General{b}`, and a two-member `?T` union (`{Null, Base(b)}`)
 /// → `General{b, nullable}`. Everything else (multi-base unions, non-scalars,
 /// `mixed`) yields `None`.
+#[cfg(not(target_arch = "wasm32"))]
 fn envelope_fact(ty: &ContractTy) -> Option<Fact> {
     match ty {
         ContractTy::Base(b) => Some(Fact::General { base: *b, nullable: false }),
@@ -15707,6 +15720,7 @@ fn envelope_fact(ty: &ContractTy) -> Option<Fact> {
 /// Unions of more than the nullable pair, and non-scalars, yield `None` — a
 /// curated row that cannot be a single fact simply does not refine (the envelope
 /// stands).
+#[cfg(not(target_arch = "wasm32"))]
 fn contractty_to_fact(ty: &ContractTy) -> Option<Fact> {
     match ty {
         ContractTy::Base(b) => Some(Fact::General { base: *b, nullable: false }),

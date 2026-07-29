@@ -14,8 +14,13 @@ mod out;
 
 mod baseline;
 mod doctor;
-mod profile;
 mod sha256;
+
+// The profile engine (Surface, the rung ladder, user-profile resolution) moved to
+// `steins_infer::profile` so the wasm playground and the CLI read ONE
+// implementation (the no-second-relation discipline, applied to surface
+// selection). The alias keeps every `profile::` path in this crate unchanged.
+pub(crate) use steins_infer::profile;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
