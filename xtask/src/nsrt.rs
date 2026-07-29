@@ -22,8 +22,12 @@
 //! - `match` — semantically equal after normalization (case, `|` order, nullable
 //!   forms, int-range spelling). Generous only where equivalence is certain.
 //! - `unsupported` — the expected string uses vocabulary Steins deliberately does
-//!   not model (`*ERROR*`/`*NEVER*`, `mixed`, generics/shapes, intersections,
-//!   `object`, array families, …), named by pattern.
+//!   not model (`*ERROR*`/`*NEVER*`, `mixed`, non-array generics (`Traversable<K,
+//!   V>` and friends), intersections, `object`, …), named by pattern. As of S1.5
+//!   (ADR-0062), the full array vocabulary (`array{…}`, `list{…}`,
+//!   `array<K, V>`, `list<T>`, bare `array`/`list`, and their `non-empty-`
+//!   forms) is **not** on this list — S1 taught the speller to spell it, so it
+//!   now flows into the normal match/subsumed/differ comparison below.
 //! - `subsumed` — Steins is strictly **more precise** than the oracle: what Steins
 //!   renders is a proper subtype of what PHPStan asserts (issue #47).
 //! - `differ` — Steins renders something semantically different (the gap
@@ -349,20 +353,22 @@ fn atom_unsupported_category(atom: &str) -> Option<&'static str> {
     if a.contains('&') {
         return Some("intersection"); // int&object, T&hasMethod(...)
     }
+    // `{` no longer implies unsupported (S1.5): a well-formed `array{...}` /
+    // `list{...}` / `non-empty-*{...}` already returned `None` above via
+    // `is_supported_atom`. Anything still reaching here with a `{` is some
+    // other shape-like PHPStan vocabulary this harness has not named yet
+    // (kept out of `array-shape`'s old catch-all so it is visible, not
+    // silently folded back in) — group it with the generic bucket.
     if a.contains('{') {
-        return Some("array-shape"); // array{...}, list{...}
+        return Some("shape-other");
     }
     // A generic `Name<...>` (an int-range `int<lo, hi>` is supported and handled by
-    // `is_supported_atom`, so any `<` reaching here is a true generic).
+    // `is_supported_atom`, and so is a well-formed `array<...>`/`list<...>`/
+    // `non-empty-*<...>` — S1.5 — so any `<` reaching here is a true non-array
+    // generic).
     if a.contains('<') {
         if a.contains("class-string") {
             return Some("class-string");
-        }
-        if a.starts_with("array<") || a.starts_with("non-empty-array<") {
-            return Some("generic-array");
-        }
-        if a.starts_with("list<") || a.starts_with("non-empty-list<") {
-            return Some("generic-list");
         }
         return Some("generic-other");
     }
@@ -382,8 +388,6 @@ fn atom_unsupported_category(atom: &str) -> Option<&'static str> {
         "mixed" => Some("mixed"),
         "object" => Some("object"),
         "void" | "never" | "resource" | "scalar" | "empty" | "iterable" => Some("other-keyword"),
-        "array" | "non-empty-array" => Some("array-family"),
-        "list" | "non-empty-list" => Some("list-family"),
         "static" | "self" | "parent" | "$this" => Some("self-static"),
         "callable" => Some("callable"),
         "class-string" => Some("class-string"),
@@ -401,8 +405,10 @@ fn atom_unsupported_category(atom: &str) -> Option<&'static str> {
 }
 
 /// Whether a single atom is one Steins can render (so it is fair to *compare*, not
-/// classify unsupported). Scalar/refined/int-range keywords, scalar literals, and
-/// plain class names all qualify.
+/// classify unsupported). Scalar/refined/int-range keywords, scalar literals,
+/// plain class names, and — as of S1.5 (ADR-0062), the array vocabulary the
+/// speller now spells (`array`/`list` and their `non-empty-` forms, bare or
+/// applied as `array{…}`/`list{…}`/`array<K, V>`/`list<T>`) — all qualify.
 fn is_supported_atom(a: &str) -> bool {
     const KEYWORDS: &[&str] = &[
         "int",
@@ -418,6 +424,12 @@ fn is_supported_atom(a: &str) -> bool {
         "positive-int",
         "negative-int",
         "non-negative-int",
+        // Bare array/list keywords (S1.5): the speller now spells the full array
+        // vocabulary, so these are a fair comparison, not an automatic Unsupported.
+        "array",
+        "non-empty-array",
+        "list",
+        "non-empty-list",
     ];
     let low = a.to_ascii_lowercase();
     if KEYWORDS.contains(&low.as_str()) {
@@ -432,6 +444,9 @@ fn is_supported_atom(a: &str) -> bool {
     if a.starts_with('\'') && a.ends_with('\'') && a.len() >= 2 {
         return true; // a string literal
     }
+    if is_array_shape_atom(a) || is_array_generic_atom(a) {
+        return true;
+    }
     // Reserved lowercase keywords look class-like but name vocabulary Steins does
     // not render as a class — they must NOT pass as a plain class name.
     if RESERVED_UNSUPPORTED_KEYWORDS.contains(&low.as_str()) {
@@ -442,11 +457,41 @@ fn is_supported_atom(a: &str) -> bool {
     is_plain_class_name(a)
 }
 
+/// `array{…}` / `list{…}` / `non-empty-array{…}` / `non-empty-list{…}` — the full
+/// shape vocabulary the speller now renders (S1, ADR-0062). Structural only: a
+/// recognized keyword prefix plus a matching closing brace. `split_union` upstream
+/// already hands out brace-balanced atoms, so this never mis-detects a
+/// truncated/malformed shape as one of ours.
+///
+/// What is genuinely unrepresentable *inside* a shape (a conditional type or a
+/// template as a field value, a PHPStan-internal pseudo-type such as
+/// `oversized-array`) does not make `steins_contract::lower_str` fail or panic —
+/// `lib.rs`'s `TypeKind::Conditional`/`TypeKind::Unsupported`/`ConstExpr::Fetch`
+/// arms lower it to `Opaque` instead of erroring — so admitting the outer shape
+/// here never crashes the classifier; the mismatch just fails to compare equal
+/// and lands in `differ`, which is where a real gap belongs.
+fn is_array_shape_atom(a: &str) -> bool {
+    const PREFIXES: &[&str] = &["array{", "list{", "non-empty-array{", "non-empty-list{"];
+    let low = a.to_ascii_lowercase();
+    PREFIXES.iter().any(|p| low.starts_with(p)) && a.ends_with('}')
+}
+
+/// `array<...>` / `list<...>` / `non-empty-array<...>` / `non-empty-list<...>` —
+/// the generic-array/list vocabulary the speller now renders (S1). Same
+/// structural-only caveat as [`is_array_shape_atom`].
+fn is_array_generic_atom(a: &str) -> bool {
+    const PREFIXES: &[&str] = &["array<", "list<", "non-empty-array<", "non-empty-list<"];
+    let low = a.to_ascii_lowercase();
+    PREFIXES.iter().any(|p| low.starts_with(p)) && a.ends_with('>')
+}
+
 /// Bare lowercase keywords that are syntactically class-like but denote vocabulary
 /// Steins does not model — never a plain class name, always an unsupported atom.
+/// `array`/`list` (and their `non-empty-` forms) are deliberately NOT here as of
+/// S1.5: they are recognized earlier, in [`is_supported_atom`]'s `KEYWORDS` list.
 const RESERVED_UNSUPPORTED_KEYWORDS: &[&str] = &[
     "mixed", "object", "void", "never", "resource", "scalar", "empty", "iterable",
-    "array", "list", "callable", "static", "self", "parent",
+    "callable", "static", "self", "parent",
 ];
 
 /// `int<lo, hi>` where lo/hi are `min`/`max`/signed integers (whitespace-tolerant).
@@ -702,11 +747,22 @@ fn atom_kind(a: &str) -> &'static str {
     if a.starts_with("int<") {
         return "int-range";
     }
+    // Array vocabulary (S1.5): give shapes and generic-array/list atoms their own
+    // gap-class label instead of falling into the catch-all `other` bucket — that
+    // is what makes the differ ranking legible now that these atoms are compared.
+    if is_array_shape_atom(a) {
+        return "array-shape";
+    }
+    if is_array_generic_atom(a) {
+        return "array-generic";
+    }
     match a {
         "int" => "int",
         "float" => "float",
         "string" => "string",
         "non-empty-string" | "non-falsy-string" | "numeric-string" => "refined-string",
+        "array" | "non-empty-array" => "array-bare",
+        "list" | "non-empty-list" => "list-bare",
         _ => {
             if is_plain_class_name(a) {
                 "class"
@@ -718,7 +774,10 @@ fn atom_kind(a: &str) -> &'static str {
 }
 
 fn is_scalarish(a: &str) -> bool {
-    !matches!(atom_kind(a), "class" | "other")
+    !matches!(
+        atom_kind(a),
+        "class" | "other" | "array-shape" | "array-generic" | "array-bare" | "list-bare"
+    )
 }
 
 // ----------------------------------------------------------------------------
@@ -956,14 +1015,13 @@ mod tests {
         assert_eq!(unsupported_pattern("*ERROR*"), Some("phpstan-special"));
         assert_eq!(unsupported_pattern("*NEVER*"), Some("phpstan-special"));
         assert_eq!(unsupported_pattern("mixed"), Some("mixed"));
-        assert_eq!(unsupported_pattern("array{}"), Some("array-shape"));
-        assert_eq!(unsupported_pattern("array<string>"), Some("generic-array"));
-        assert_eq!(unsupported_pattern("list<int>"), Some("generic-list"));
         assert_eq!(unsupported_pattern("object"), Some("object"));
-        assert_eq!(unsupported_pattern("non-empty-array"), Some("array-family"));
         assert_eq!(unsupported_pattern("int&object"), Some("intersection"));
         assert_eq!(unsupported_pattern("mixed~null"), Some("subtraction"));
         assert_eq!(unsupported_pattern("class-string<T>"), Some("class-string"));
+        // Still-gated: a non-array generic (S1.5 only opened the array vocabulary;
+        // Steins runs no template solver over an arbitrary generic class).
+        assert_eq!(unsupported_pattern("Traversable<int, string>"), Some("generic-other"));
         // Supported vocab returns None (fair to compare).
         assert_eq!(unsupported_pattern("int|null"), None);
         assert_eq!(unsupported_pattern("positive-int"), None);
@@ -971,13 +1029,67 @@ mod tests {
         assert_eq!(unsupported_pattern("'foo'|'bar'"), None);
     }
 
+    /// S1.5 (ADR-0062): the array vocabulary itself is no longer gated — the
+    /// speller spells it (S1), so it is a fair comparison now.
+    #[test]
+    fn array_vocabulary_is_no_longer_unsupported() {
+        for a in [
+            "array{}",
+            "array{a: int}",
+            "list{}",
+            "list{int, string}",
+            "non-empty-array{a: int}",
+            "non-empty-list{0: int}",
+            "array<string>",
+            "array<string, int>",
+            "list<int>",
+            "non-empty-array<int>",
+            "non-empty-list<int>",
+            "array",
+            "non-empty-array",
+            "list",
+            "non-empty-list",
+        ] {
+            assert_eq!(unsupported_pattern(a), None, "{a} should be a supported comparison now");
+        }
+    }
+
     #[test]
     fn supported_atoms_are_not_flagged_unsupported() {
         for a in ["int", "float", "string", "bool", "true", "false", "null",
                   "non-empty-string", "numeric-string", "int<0, 5>", "-3", "1.5",
-                  "'x'", "stdClass", "\\Foo\\Bar"] {
+                  "'x'", "stdClass", "\\Foo\\Bar",
+                  "array", "list", "non-empty-array", "non-empty-list",
+                  "array{a: int}", "list<int>"] {
             assert!(is_supported_atom(a), "{a} should be supported");
         }
+    }
+
+    // ---- array vocabulary now classifiable (S1.5, ADR-0062) ----------------
+
+    /// An array expectation now flows into the normal classify path instead of
+    /// being gated Unsupported before `got` is ever read.
+    #[test]
+    fn array_expectation_is_classifiable() {
+        assert_eq!(classify("array{a: int}", "array{a: int}").0, Verdict::Match);
+        assert_eq!(classify("list<int>", "list<int>").0, Verdict::Match);
+        assert_eq!(classify("array<string, int>", "array<string, int>").0, Verdict::Match);
+    }
+
+    /// A genuine D4-native divergence — Steins spells an empty/sequential array
+    /// value as `list{…}` where PHPStan stable asserts `array{…}` — must land in
+    /// `differ` and stay visible, never be normalized away (ADR-0062 §6).
+    #[test]
+    fn d4_native_list_vs_array_divergence_is_differ() {
+        assert_eq!(classify("array{}", "list{}").0, Verdict::Differ);
+    }
+
+    /// A pattern the speller still cannot spell (a non-array generic class, here
+    /// with a type argument Steins' `lower_generic` would drop) stays Unsupported
+    /// — S1.5 narrowed the gate, it did not remove it.
+    #[test]
+    fn still_gated_pattern_stays_unsupported() {
+        assert_eq!(classify("Traversable<int, string>", "unknown").0, Verdict::Unsupported);
     }
 
     #[test]

@@ -198,7 +198,7 @@ differ falling and subsumed rising, never as a regression. The report prints
 `match + subsumed` as an explicit secondary *admissible* figure so that movement is
 visible without unverified claims entering the headline.
 
-Recorded baseline (post-#47, phpstan-src fixtures as checked out):
+Recorded baseline, post-#47 (superseded below by the S1.5 reseed):
 
 | | count |
 | --- | --- |
@@ -208,8 +208,34 @@ Recorded baseline (post-#47, phpstan-src fixtures as checked out):
 | differ | 7,768 |
 | measured | 15,513 |
 
-Future slices are measured against these numbers, not against the pre-#47 pair
-(734 / 7,792) in which the 24 subsumptions were counted as losses.
+That baseline is superseded, not wrong: it pre-dates S1 (the speller learning the
+full array vocabulary) and S1.5 (2026-07-29, ADR-0062) removing the array-vocabulary
+atoms — `{`, `array<…>`/`list<…>`, bare `array`/`list`, and their `non-empty-` forms
+— from `unsupported_pattern`. Before S1.5 those atoms were gated *before `got` was
+ever read*, so 4,398 array-typed expectations that the speller could already answer
+sat in `unsupported` unmeasured. Reseeded baseline (same phpstan-src checkout,
+classify-logic change only — no analyzer code moved):
+
+| | count |
+| --- | --- |
+| match (**headline**) | 845 |
+| unsupported | 2,586 |
+| subsumed | 25 |
+| differ | 12,054 |
+| measured | 15,510 |
+
+Of the 4,398 records that left `unsupported`: 111 became `match`, 1 became
+`subsumed` (`bug-10834.php:20` — Steins renders bare `null` where PHPStan asserts a
+64-field shape union with `null`, the same narrowing pattern as the pre-existing
+`array-find-key.php:59`/`bug-9293.php:27` rows), and the remaining 4,286 became
+`differ` — the array-vocabulary gap inventory this slice exists to expose,
+including the deliberately-*not*-normalized-away D4-native divergence where Steins
+spells an empty or sequential array value as `list{…}` and PHPStan stable asserts
+`array{…}` (e.g. `array-is-list-unset.php:9`).
+
+Future slices are measured against the S1.5 numbers above, not against the pre-#47
+pair (734 / 7,792, in which the 24 subsumptions were counted as losses) or the
+post-#47/pre-S1.5 pair (734 / 6,987/24/7,768) superseded here.
 
 ## `gen-catalog`
 
