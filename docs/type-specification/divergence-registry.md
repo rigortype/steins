@@ -30,7 +30,10 @@ rules folded in. See [contract-types.md](contract-types.md).
 **2. Array-shape / list semantics follow phpstan/phpstan#14939.** `array{}` is
 an order-agnostic key *set*, `list{}` a positional key *sequence*, and
 `list<T>` requires keys exactly `0..n-1`. Steins implements the RFC's
-resolution, which current PHPStan does not.
+resolution, which current PHPStan does not — since ADR-0062 this includes
+the denotational `isList` trinary (computed over the admitted value set,
+optional-key combinatorics included) and the D4 rendering (`list{…}` for
+every Yes-list; keyless `array{…}` for a sequential Maybe).
 
 **3. No benevolent unions.** `BenevolentUnionType` compensates for worst-case
 false positives that a proof layer does not emit. The grammar is accepted
@@ -51,6 +54,26 @@ asked about them ([contract-types.md](contract-types.md)).
 type-side normalizer was *extracted from the honesty renderer* rather than built
 as a parallel `TypeCombinator`/`TypeUtils` stack (ADR-0030 amendment, discharged
 by ADR-0052 slice N1).
+
+**7. Declared-order trust in positional projections is declined.** PHPStan's
+`ConstantArrayType` stores declared key order and lets the positional
+projections (`array_keys`, `array_values`, `array_slice`, `array_reverse`)
+read it as runtime order, while acceptance stays order-insensitive — a
+real-FP class (phpstan/phpstan#14940). Steins splits by provenance
+(ADR-0062 §2): order-dependent results are computed only on
+**order-witnessed** concrete values; over shape-only (order-declared) truth
+they take the sound widening, never declaration order.
+
+**8. No abstract `nextAutoIndexes`.** The next-auto-index prediction exists
+only for concrete arrays and is PHP-minor-aware (ADR-0049 A12). An abstract
+shape declines the prediction: append widens the tail (ADR-0062 §3).
+
+**9. No union-degradation threshold.** PHPStan collapses >256-member
+constant-array unions (`ARRAY_COUNT_LIMIT`) as a heuristic. Steins' finite
+layer caps at the OneOf bound and then **computes** the shape summary
+member-by-member (keys-in-all required, keys-in-some optional, residue in
+the tail; ADR-0062 §3). The 256 constant survives only as the single-shape
+field-width bound (A-G6), deliberately imported rather than invented.
 
 ## Conformance-suite divergences (intentional silences)
 
