@@ -158,12 +158,29 @@ fn an_array_with_a_non_literal_element_never_reaches_the_folder() {
     // The acceptance pin: `count([1, $x])` widens. `$x` may hold anything —
     // including an array — so the literal's length is not the array's length.
     assert!(asked(&format!("{COERCIVE_INT}width(count([1, $x]));")).is_empty());
-    // Also at depth, and also when the element is itself a foldable call (the
-    // seam folds a call's arguments, never a call nested inside one).
+    // Also at depth.
     assert!(asked(&format!("{COERCIVE_INT}width(count([[1, [$x]]]));")).is_empty());
-    assert!(asked(&format!("{COERCIVE_INT}width(count([strtolower('A')]));")).is_empty());
     // And a spread, which never lowered to an `Array` in the first place.
     assert!(asked(&format!("{COERCIVE_INT}width(count([1, ...$rest]));")).is_empty());
+}
+
+#[test]
+fn a_provable_element_is_resolved_before_the_gate_judges_the_array() {
+    // ADR-0062 S7: the gate judges each argument as the value it PROVABLY is, so
+    // an element that is itself a foldable call (or a bound variable) is resolved
+    // first and the whole array crosses the seam. `strtolower('A')` runs on the
+    // project's own PHP, so `['a']` is what `count` is actually handed — one
+    // entry, and the length claim is honest.
+    let calls = asked(&format!("{COERCIVE_INT}width(count([strtolower('A')]));"));
+    assert!(!calls.is_empty(), "the resolved element let the array through");
+    // The `strtolower` fold is asked for first, then `count` over the resolved
+    // array — the Spy never folds, so `count`'s argument stays unresolved here.
+    assert_eq!(calls[0].0, "strtolower");
+    // With a folder that actually folds, the array is concrete by the time the
+    // gate judges it.
+    let f = find(&format!("{COERCIVE_INT}width(count([strtolower('A')]));"), &mut Mock);
+    assert_eq!(f.len(), 1, "the resolved array folds, got {f:#?}");
+    assert!(f[0].message.contains("folded from count(['a'])"), "{}", f[0].message);
 }
 
 #[test]

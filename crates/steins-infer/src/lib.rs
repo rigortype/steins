@@ -452,6 +452,23 @@ pub trait Folder {
         let _ = name;
         None
     }
+
+    /// The **reflected return-type declaration** of a uniquely-resolved builtin
+    /// `name` — the `(string)` rendering of the running engine's own
+    /// `ReflectionFunction::getReturnType()` (`"array"`, `"string|int|null"`).
+    ///
+    /// This is [`Self::builtin_return_fact`]'s raw sibling, for the transfers
+    /// whose result is not a scalar the value domain names in a single `Fact`
+    /// (ADR-0062 §4's positional projections return arrays; `array_key_first`
+    /// returns an `int|string|null` union). It carries the *same* gates —
+    /// a live sidecar and no runtime-redefinition extension loaded (ADR-0049 A9:
+    /// a monkey-patched builtin disowns its declared type) — so a rule admitted
+    /// through it is admitted on exactly the ADR-0061 §2 evidence, unweakened.
+    /// The default is `None`: the sound subset withholds the rule.
+    fn builtin_return_type(&mut self, name: &str) -> Option<String> {
+        let _ = name;
+        None
+    }
 }
 
 /// The runtime-redefinition extensions that void the absence family (ADR-0049 A9):
@@ -500,6 +517,9 @@ pub struct SidecarFolder {
     /// the same builtin never triggers duplicate `reflect` IPC. Keyed by the
     /// lowercased simple name (PHP function names are case-insensitive).
     return_fact_memo: HashMap<String, Option<Fact>>,
+    /// Per-name memo of the raw reflected return-type declaration (ADR-0062 S7's
+    /// projection gate), the string sibling of [`Self::return_fact_memo`].
+    return_type_memo: HashMap<String, Option<String>>,
 }
 
 impl SidecarFolder {
@@ -519,6 +539,7 @@ impl SidecarFolder {
             php_minor: None,
             boot_surface_label: None,
             return_fact_memo: HashMap::new(),
+            return_type_memo: HashMap::new(),
         }
     }
 
@@ -651,6 +672,16 @@ impl Folder for SidecarFolder {
         self.return_fact_memo.insert(key, answer.clone());
         answer
     }
+
+    fn builtin_return_type(&mut self, name: &str) -> Option<String> {
+        let key = name.to_ascii_lowercase();
+        if let Some(cached) = self.return_type_memo.get(&key) {
+            return cached.clone();
+        }
+        let answer = self.compute_builtin_return_type(&key);
+        self.return_type_memo.insert(key, answer.clone());
+        answer
+    }
 }
 
 impl SidecarFolder {
@@ -679,6 +710,17 @@ impl SidecarFolder {
         let return_type = refl.return_type.as_deref()?;
         let curated = steins_catalog::return_fact(key);
         admit_return_fact(return_type, curated, minor_matches_pin)
+    }
+
+    /// The raw reflected return-type declaration for `key` (already lowercased),
+    /// under the same A9 / sound-subset gate [`Self::compute_builtin_return_fact`]
+    /// applies. Called once per name; [`Self::builtin_return_type`] memoizes.
+    fn compute_builtin_return_type(&mut self, key: &str) -> Option<String> {
+        if !self.absence_family_available() {
+            return None;
+        }
+        let refl = self.ensure_sidecar().and_then(|sc| sc.reflect(key))?;
+        refl.function_exists.then_some(refl.return_type).flatten()
     }
 }
 
@@ -3402,7 +3444,7 @@ impl<'a> Cx<'a> {
                 {
                     return Some(lit);
                 }
-                self.try_fold(name, args, folder).map(|(lit, _prov)| lit)
+                self.try_fold(name, args, env, poisoned, folder).map(|(lit, _prov)| lit)
             }
             // An array is proven iff every element value is proven (keys are fixed
             // at lowering). Folding is never applied to arrays (ADR-0001).
@@ -3418,11 +3460,34 @@ impl<'a> Cx<'a> {
         }
     }
 
-    /// Try to fold an allowlisted builtin call over literal arguments.
+    /// Try to fold an allowlisted builtin call over **proven** arguments.
+    ///
+    /// # The env-resolved argument (ADR-0062 S7, the §1 fold gap)
+    ///
+    /// Each argument is first rendered as the value it provably *is*, through
+    /// [`Self::resolve_literal`]: a bare `$a` bound to a proven value becomes that
+    /// value, an array literal with a proven element becomes the concrete array,
+    /// a nested foldable call becomes its folded result. An argument that does not
+    /// resolve is left **exactly as written**, so the gate below judges it the way
+    /// it always did — resolution can only ever add arguments to the fold, never
+    /// remove one (a literal resolves to itself, and a poisoned scope resolves
+    /// nothing at all).
+    ///
+    /// This is what closes ADR-0062 §1's measured gap: `$a = ['x', 'y'];
+    /// count($a)` now folds to `2` exactly as the written `count(['x', 'y'])`
+    /// does. **Nothing about the allowlist or the purity discipline changed** —
+    /// the fold still runs on the project's own PHP (ADR-0004/0028), so every
+    /// order-dependent builtin the allowlist admits (`in_array`, `implode`,
+    /// `count`) is answered by the real engine over the real, order-witnessed
+    /// array (ADR-0062 §2's value lane), never by a re-derivation here.
+    ///
+    /// Provenance names the *resolved* call — the call that actually ran.
     fn try_fold(
         &self,
         name: &str,
         args: &[ArgValue],
+        env: &HashMap<String, Known>,
+        poisoned: bool,
         folder: &mut dyn Folder,
     ) -> Option<(ArgValue, String)> {
         // Any project user function sharing this simple name shadows the builtin
@@ -3433,17 +3498,21 @@ impl<'a> Cx<'a> {
         if !steins_catalog::foldable(name) {
             return None;
         }
+        let resolved: Vec<ArgValue> = args
+            .iter()
+            .map(|a| self.resolve_literal(a, env, poisoned, folder).unwrap_or_else(|| a.clone()))
+            .collect();
         // Every argument must be a self-evident value: a scalar literal, or an
         // array literal that is concrete all the way down and inside the fold
         // budget (issue #39). This is the gate the `count`/`in_array`/`implode`
         // entries were parked behind — nothing about the allowlist changed, the
         // arguments they take simply became representable. Checked BEFORE
         // `folder.fold`, so an over-budget literal is never cloned into the memo.
-        if !args.iter().all(is_fold_arg) {
+        if !resolved.iter().all(is_fold_arg) {
             return None;
         }
-        let folded = folder.fold(name, args)?;
-        Some((folded, format!("folded from {}", render_call(name, args))))
+        let folded = folder.fold(name, &resolved)?;
+        Some((folded, format!("folded from {}", render_call(name, &resolved))))
     }
 
     /// Resolve a zero-argument constant function anywhere in the project by its
@@ -8943,9 +9012,9 @@ fn check_propagated_call(
                             .map(|(lit, line)| {
                                 (lit, format!("from {name}(), defined at line {line}"))
                             })
-                            .or_else(|| cx.try_fold(name, args, folder))
+                            .or_else(|| cx.try_fold(name, args, env, poisoned, folder))
                     } else {
-                        cx.try_fold(name, args, folder)
+                        cx.try_fold(name, args, env, poisoned, folder)
                     }
                 }
                 // A property read `$o->p` (ADR-0036): a `Singleton` prop fact flows.
@@ -9228,7 +9297,7 @@ fn check_callable_args(
                 Some((v, Some(prov)))
             }),
             ArgValue::Call(cn, cargs) => cx
-                .try_fold(cn, cargs, folder)
+                .try_fold(cn, cargs, env, poisoned, folder)
                 .map(|(lit, prov)| (lit, Some(prov))),
             // A proven object (`new` / enum case) or resolved class constant
             // (ADR-0043 stage 3); env-free, `self`/`parent` unavailable here.
@@ -12188,9 +12257,9 @@ fn check_method_args(
                             .map(|(lit, line)| {
                                 (lit, Some(format!("from {name}(), defined at line {line}")))
                             })
-                            .or_else(|| cx.try_fold(name, args, folder).map(|(l, p)| (l, Some(p))))
+                            .or_else(|| cx.try_fold(name, args, env, poisoned, folder).map(|(l, p)| (l, Some(p))))
                     } else {
-                        cx.try_fold(name, args, folder).map(|(l, p)| (l, Some(p)))
+                        cx.try_fold(name, args, env, poisoned, folder).map(|(l, p)| (l, Some(p)))
                     }
                 }
                 // A property read `$o->p` (ADR-0036): a `Singleton` prop fact flows.
@@ -14553,11 +14622,282 @@ fn shape_builtin_return_fact(
             Certainty::Maybe => return None,
         }
     } else {
-        return None;
+        // The positional-projection family (ADR-0062 S7) carries its own
+        // admission gate — the reflected *declaration*, since its results are not
+        // facts the scalar envelope path can name.
+        return shape_projection_fact(cx, folder, name, shape)
+            .map(|fact| (fact, known.stratum));
     };
 
     let envelope = builtin_call_return_fact(cx, folder, name)?;
     (envelope.join(&out).as_ref() == Some(&envelope)).then_some((out, known.stratum))
+}
+
+/// **The positional projections over the order-DECLARED lane** (ADR-0062 §4's
+/// `array_values`/`array_keys`/… row, §2's rule, §7's declined import 1).
+///
+/// A `Fact::Shape` is a key *set*, never a key sequence: field order in the fact
+/// is the domain's canonical [`VKey`] order, which has nothing to do with the
+/// insertion order of any array the shape admits. So every transfer here is a
+/// **sound widening** that reads only order-independent structure — the value
+/// union, the key union, the key classes, `non_empty`, and the denotational
+/// `is_list`. None of them may produce `list{k1, k2}` in declaration order; that
+/// is exactly the upstream defect (phpstan/phpstan#14940) this ADR declines.
+///
+/// Concrete arrays never come here: they are order-**witnessed**, and the fold
+/// seam runs the real builtin on the real array (ADR-0004/0028), which is where
+/// an exact, order-correct answer legitimately comes from.
+///
+/// **The admission gate** is [`Folder::builtin_return_type`]: the running engine
+/// must itself declare the return type this transfer assumes (`array` for the
+/// four array-valued projections, `string|int|null` for the key-member pair).
+/// It carries the same sidecar-presence and A9 monkey-patch legs the ADR-0061 §2
+/// envelope gate does, so a redefined builtin, or a run with no PHP, withholds
+/// the rule rather than trusting it.
+fn shape_projection_fact(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    name: &str,
+    shape: &ShapeFact,
+) -> Option<Fact> {
+    /// The `(string)` renderings of `array_key_first`/`array_key_last`'s declared
+    /// return type. PHP 8 renders the union in its own order; both are accepted so
+    /// the gate tests the *declaration*, not the engine's spelling of it.
+    const KEY_OR_NULL: &[&str] = &["string|int|null", "int|string|null"];
+    const ARRAY: &[&str] = &["array"];
+
+    let lower = name.to_ascii_lowercase();
+    let (out, declared): (Fact, &[&str]) = match lower.as_str() {
+        // `array_values($x)`: the values in witnessed order, reindexed. The key
+        // structure is gone (a list), the value set is preserved exactly, and an
+        // array with an entry still has one after the projection.
+        "array_values" => (shape_fact(project_values(shape)), ARRAY),
+        // `array_keys($x)`: a list whose ELEMENTS are the keys. Enumerable only
+        // under a sealed tail, where every present key is a declared key.
+        "array_keys" => (shape_fact(project_keys(shape)), ARRAY),
+        // `array_flip($x)`: keys and values swap. Both bounds widen (see the
+        // helper), and `non_empty` is *dropped* — flip silently skips an entry
+        // whose value is not `int|string`, so a non-empty input can flip to `[]`.
+        "array_flip" => (shape_fact(project_flip(shape)), ARRAY),
+        // `array_reverse($x)` — the one-argument form only, whose `$preserve_keys`
+        // is `false`: string keys survive, integer keys are renumbered.
+        "array_reverse" => (shape_fact(project_reverse(shape)), ARRAY),
+        // `array_key_first`/`array_key_last`: **SOME key of the set**, never the
+        // declared-first one — ADR-0062 §2's rule at its sharpest. `null` joins in
+        // unless the shape proves the array is non-empty (PHP returns `null` for
+        // `[]`).
+        "array_key_first" | "array_key_last" => {
+            let keys = shape_key_union(shape)?;
+            let out = if shape.non_empty { keys } else { fact_admitting_null(&keys)? };
+            (out, KEY_OR_NULL)
+        }
+        // Declined in v1 (stated in the ADR-0062 S7 report): `array_slice` (its
+        // offset/length arguments govern the result's key structure, and this seam
+        // is single-argument by construction — the shape-only answer carries no
+        // more than the reflected `array` envelope already does), and the
+        // value-side of `in_array`/`array_search`.
+        _ => return None,
+    };
+    if cx.index.has_simple_function(name) {
+        return None;
+    }
+    let reflected = folder.builtin_return_type(name)?;
+    declared.iter().any(|d| d.eq_ignore_ascii_case(&reflected)).then_some(out)
+}
+
+fn shape_fact(shape: ShapeFact) -> Fact {
+    Fact::Shape { shape: Box::new(shape), nullable: false }
+}
+
+/// The fact **every value** of an admitted array satisfies: the join of every
+/// non-`Absent` field's value slot with the tail's value bound. One unknown
+/// contributor (or an unrepresentable join) yields `None` — the unknown floor,
+/// which admits anything.
+fn shape_value_union(shape: &ShapeFact) -> Option<Fact> {
+    use steins_domain::{Presence, Tail};
+    let mut acc: Option<Fact> = None;
+    for (_, presence, slot) in &shape.fields {
+        if matches!(presence, Presence::Absent) {
+            continue;
+        }
+        acc = join_into(acc, slot.as_deref()?)?;
+    }
+    if let Tail::Unsealed { value, .. } = &shape.tail {
+        acc = join_into(acc, value.as_deref()?)?;
+    }
+    acc
+}
+
+/// The fact **every key** of an admitted array satisfies. Under a `Sealed` tail
+/// the key set is exactly the declared, non-`Absent` keys, so the answer is those
+/// key literals (a `Singleton`/`OneOf`, or the domain's own computed widening past
+/// [`steins_domain::CAP`] — never a hand-rolled degradation). An `Unsealed` tail
+/// contributes its key class, joined with the declared keys; `array-key` (PHP's
+/// `int|string`) is not a single-base fact, so it yields the unknown floor.
+fn shape_key_union(shape: &ShapeFact) -> Option<Fact> {
+    use steins_domain::{KeyClass, Presence, Tail};
+    let declared: Vec<Val> = shape
+        .fields
+        .iter()
+        .filter(|(_, p, _)| !matches!(p, Presence::Absent))
+        .map(|(k, _, _)| val_of_key(k))
+        .collect();
+    match &shape.tail {
+        Tail::Sealed => Fact::from_vals(declared),
+        Tail::Unsealed { key, .. } => {
+            let class = match key {
+                KeyClass::Int => Fact::General { base: Base::Int, nullable: false },
+                KeyClass::Str => Fact::General { base: Base::String, nullable: false },
+                KeyClass::ArrayKey => return None,
+            };
+            declared
+                .iter()
+                .try_fold(class, |acc, v| acc.join(&Fact::Singleton(v.clone())))
+        }
+    }
+}
+
+/// `array_values($x)`: a list of the value union. `non_empty` carries — the
+/// projection preserves the entry count.
+fn project_values(shape: &ShapeFact) -> ShapeFact {
+    use steins_domain::{KeyClass, Tail};
+    ShapeFact::normalize(
+        Vec::new(),
+        Tail::Unsealed { key: KeyClass::Int, value: shape_value_union(shape).map(Box::new) },
+        Certainty::Yes,
+        shape.non_empty,
+        Vec::new(),
+    )
+}
+
+/// `array_keys($x)`: a list of the key union. `non_empty` carries.
+fn project_keys(shape: &ShapeFact) -> ShapeFact {
+    use steins_domain::{KeyClass, Tail};
+    ShapeFact::normalize(
+        Vec::new(),
+        Tail::Unsealed { key: KeyClass::Int, value: shape_key_union(shape).map(Box::new) },
+        Certainty::Yes,
+        shape.non_empty,
+        Vec::new(),
+    )
+}
+
+/// `array_flip($x)`: the values become keys and the keys become values.
+///
+/// Two soundness points, both measured against the engine:
+///
+/// * **The result key class is `int` only when every value is an `int`.** A
+///   *string* value does not give a string key: PHP's own array-key cast turns
+///   `'5'` into `5` (`array_flip(['a' => '5']) === [5 => 'a']`), so a string-valued
+///   flip can produce integer keys and the honest class is `array-key`.
+/// * **`non_empty` is dropped.** `array_flip` skips (with a warning) any entry
+///   whose value is not `int|string`, so a non-empty input can flip to `[]`.
+///
+/// `is_list` is left to `normalize` (`Maybe`): whether the values happen to be
+/// `0..n-1` is not something the shape knows.
+fn project_flip(shape: &ShapeFact) -> ShapeFact {
+    use steins_domain::{KeyClass, Tail};
+    let all_int = shape_value_union(shape).is_some_and(|f| fact_is_int(&f));
+    ShapeFact::normalize(
+        Vec::new(),
+        Tail::Unsealed {
+            key: if all_int { KeyClass::Int } else { KeyClass::ArrayKey },
+            value: shape_key_union(shape).map(Box::new),
+        },
+        Certainty::Maybe,
+        false,
+        Vec::new(),
+    )
+}
+
+/// `array_reverse($x)` with the default `$preserve_keys = false`: **string keys
+/// keep their keys, integer keys are renumbered `0..n-1`** (measured:
+/// `array_reverse(['a' => 1, 5 => 2, 9 => 3]) === [0 => 3, 1 => 2, 'a' => 1]`).
+///
+/// The result's key SET is therefore the input's string keys plus a fresh integer
+/// prefix — which is why the fields are dropped rather than carried, and why the
+/// `is_list` verdict is a three-way read of the input's key structure:
+///
+/// * **`Yes`** when no admitted array can carry a string key (a sealed tail whose
+///   declared keys are all integers, or an `int`-classed unsealed tail with the
+///   same): everything is renumbered, so the result is exactly `0..n-1`.
+/// * **`No`** when some string key is `Required`: it survives into the result, and
+///   an array with a string key is not a list.
+/// * **`Maybe`** otherwise — the honest widening.
+///
+/// `non_empty` carries (reversal preserves the entry count).
+fn project_reverse(shape: &ShapeFact) -> ShapeFact {
+    use steins_domain::{KeyClass, Presence, Tail};
+    let declared_ints =
+        shape.fields.iter().all(|(k, p, _)| matches!(p, Presence::Absent) || matches!(k, VKey::Int(_)));
+    let tail_ints = match &shape.tail {
+        Tail::Sealed => true,
+        Tail::Unsealed { key, .. } => *key == KeyClass::Int,
+    };
+    let all_int_keys = declared_ints && tail_ints;
+    let required_str =
+        shape.fields.iter().any(|(k, p, _)| p.is_required() && matches!(k, VKey::Str(_)));
+    let is_list = if all_int_keys {
+        Certainty::Yes
+    } else if required_str {
+        Certainty::No
+    } else {
+        Certainty::Maybe
+    };
+    ShapeFact::normalize(
+        Vec::new(),
+        Tail::Unsealed {
+            key: if all_int_keys { KeyClass::Int } else { KeyClass::ArrayKey },
+            value: shape_value_union(shape).map(Box::new),
+        },
+        is_list,
+        shape.non_empty,
+        Vec::new(),
+    )
+}
+
+/// Join `f` into an accumulator that may still be empty; `None` propagates the
+/// unrepresentable join as the unknown floor.
+fn join_into(acc: Option<Fact>, f: &Fact) -> Option<Option<Fact>> {
+    match acc {
+        None => Some(Some(f.clone())),
+        Some(a) => a.join(f).map(Some),
+    }
+}
+
+/// The domain value a shape key denotes (`Key::Int(5)` is the value `5`).
+fn val_of_key(k: &VKey) -> Val {
+    match k {
+        VKey::Int(i) => Val::Int(*i),
+        VKey::Str(s) => Val::Str(s.clone()),
+    }
+}
+
+/// Is every value this fact admits an `int`? (`null` is immaterial to
+/// [`project_flip`]'s question — a null value is skipped by the flip, not turned
+/// into a key.)
+fn fact_is_int(f: &Fact) -> bool {
+    match f.finite_members() {
+        Some(vals) => vals.iter().all(|v| matches!(v, Val::Int(_) | Val::Null)),
+        None => matches!(
+            f,
+            Fact::General { base: Base::Int, .. } | Fact::Refined { base: Base::Int, .. }
+        ),
+    }
+}
+
+/// Add `null` to a fact's denotation — the finite layers by value, the abstract
+/// ones through their own `nullable` flag. `None` when the result is not
+/// representable (a shape fact, or an over-cap finite widening).
+fn fact_admitting_null(f: &Fact) -> Option<Fact> {
+    match f.finite_members() {
+        Some(vals) => {
+            let mut vals = vals.to_vec();
+            vals.push(Val::Null);
+            Fact::from_vals(vals)
+        }
+        None => fact_with_null(f),
+    }
 }
 
 /// The abstract fact an argument resolves to: a bare `$var` whose env fact is an
@@ -15571,5 +15911,326 @@ mod return_fact_admission_tests {
             envelope_fact(&ContractTy::Union(vec![ContractTy::Base(Base::Int), ContractTy::LitBool(false)])),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod shape_projection_tests {
+    //! ADR-0062 S7 — the positional projections over the order-DECLARED lane
+    //! ([`shape_projection_fact`]'s helpers), tested as pure algebra.
+    //!
+    //! The headline is [`every_projection_admits_the_real_result`]: for every
+    //! (shape, array) pair in the universe where the shape admits the array, the
+    //! projected shape admits the array the real builtin produces. The reference
+    //! results are the measured PHP semantics (`array_reverse` renumbers integer
+    //! keys and keeps string ones; `array_flip` skips a non-`int|string` value),
+    //! written out here rather than derived from the transfer under test.
+    //!
+    //! The second discipline is §2's rule: no transfer may read field
+    //! declaration order. [`array_key_first_is_never_the_declared_first_key`] is
+    //! its negative pin.
+    use super::*;
+    use steins_domain::{Certainty, KeyClass, Presence, ShapeFact, Tail};
+
+    fn ik(i: i64) -> VKey {
+        VKey::Int(i)
+    }
+
+    fn sk(s: &str) -> VKey {
+        VKey::Str(s.to_owned())
+    }
+
+    fn req() -> Presence {
+        Presence::Required { witnessed: false }
+    }
+
+    fn slot(f: Fact) -> Option<Box<Fact>> {
+        Some(Box::new(f))
+    }
+
+    fn base_fact(base: Base) -> Fact {
+        Fact::General { base, nullable: false }
+    }
+
+    /// `array{a: int, b?: string}` — the ADR's own fixture shape.
+    fn declared_shape() -> ShapeFact {
+        ShapeFact::normalize(
+            vec![
+                (sk("a"), req(), slot(base_fact(Base::Int))),
+                (sk("b"), Presence::Optional, slot(base_fact(Base::String))),
+            ],
+            Tail::Sealed,
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        )
+    }
+
+    /// `list<int>`: an int-classed unsealed tail, denotationally a list.
+    fn list_of_int() -> ShapeFact {
+        ShapeFact::normalize(
+            Vec::new(),
+            Tail::Unsealed { key: KeyClass::Int, value: slot(base_fact(Base::Int)) },
+            Certainty::Yes,
+            false,
+            Vec::new(),
+        )
+    }
+
+    /// `array<string, int>`.
+    fn map_str_int() -> ShapeFact {
+        ShapeFact::normalize(
+            Vec::new(),
+            Tail::Unsealed { key: KeyClass::Str, value: slot(base_fact(Base::Int)) },
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        )
+    }
+
+    /// The concrete arrays the soundness sweep runs over, in *witnessed* order.
+    fn arrays() -> Vec<Vec<(VKey, Val)>> {
+        vec![
+            vec![],
+            vec![(ik(0), Val::Int(7))],
+            vec![(ik(0), Val::Str("x".to_owned())), (ik(1), Val::Str("y".to_owned()))],
+            vec![(ik(5), Val::Int(1)), (ik(9), Val::Int(2))],
+            vec![(ik(1), Val::Int(2)), (ik(0), Val::Int(3))],
+            vec![(sk("a"), Val::Int(1)), (sk("b"), Val::Str("x".to_owned()))],
+            vec![(sk("a"), Val::Int(1))],
+            vec![(sk("b"), Val::Str("zz".to_owned())), (sk("a"), Val::Int(4))],
+            vec![(ik(0), Val::Int(1)), (sk("a"), Val::Int(2)), (ik(3), Val::Int(3))],
+        ]
+    }
+
+    fn shapes() -> Vec<ShapeFact> {
+        let mut out =
+            vec![declared_shape(), list_of_int(), map_str_int(), ShapeFact::plain_array()];
+        out.extend(arrays().iter().map(|a| ShapeFact::lift(a)));
+        out
+    }
+
+    // ---- The reference results (measured PHP semantics) --------------------
+
+    fn php_array_values(a: &[(VKey, Val)]) -> Vec<(VKey, Val)> {
+        a.iter()
+            .enumerate()
+            .map(|(i, (_, v))| (ik(i64::try_from(i).expect("small")), v.clone()))
+            .collect()
+    }
+
+    fn php_array_keys(a: &[(VKey, Val)]) -> Vec<(VKey, Val)> {
+        a.iter()
+            .enumerate()
+            .map(|(i, (k, _))| (ik(i64::try_from(i).expect("small")), val_of_key(k)))
+            .collect()
+    }
+
+    /// `array_flip`: values become keys (an `int` value gives an `int` key, a
+    /// non-numeric `string` value a string key), and anything else is skipped.
+    /// The universe carries no duplicate flipped key, so last-wins never arises.
+    fn php_array_flip(a: &[(VKey, Val)]) -> Vec<(VKey, Val)> {
+        a.iter()
+            .filter_map(|(k, v)| {
+                let nk = match v {
+                    Val::Int(i) => VKey::Int(*i),
+                    Val::Str(s) => VKey::Str(s.clone()),
+                    _ => return None,
+                };
+                Some((nk, val_of_key(k)))
+            })
+            .collect()
+    }
+
+    /// `array_reverse($a)` with the default `$preserve_keys = false`: walk the
+    /// entries backwards, keep string keys, renumber integer ones from 0.
+    fn php_array_reverse(a: &[(VKey, Val)]) -> Vec<(VKey, Val)> {
+        let mut next = 0i64;
+        let mut out = Vec::with_capacity(a.len());
+        for (k, v) in a.iter().rev() {
+            match k {
+                VKey::Str(_) => out.push((k.clone(), v.clone())),
+                VKey::Int(_) => {
+                    out.push((ik(next), v.clone()));
+                    next += 1;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_projection_admits_the_real_result() {
+        let mut checked = 0usize;
+        for shape in shapes() {
+            for a in arrays() {
+                if !shape.admits(&a) {
+                    continue;
+                }
+                checked += 1;
+                assert!(
+                    project_values(&shape).admits(&php_array_values(&a)),
+                    "array_values: {shape:?} on {a:?}"
+                );
+                assert!(
+                    project_keys(&shape).admits(&php_array_keys(&a)),
+                    "array_keys: {shape:?} on {a:?}"
+                );
+                assert!(
+                    project_flip(&shape).admits(&php_array_flip(&a)),
+                    "array_flip: {shape:?} on {a:?}"
+                );
+                assert!(
+                    project_reverse(&shape).admits(&php_array_reverse(&a)),
+                    "array_reverse: {shape:?} on {a:?}"
+                );
+                // The key-member transfer: `array_key_first`/`_last` return SOME
+                // key, or `null` on the empty array — every one of which the
+                // transfer's fact must admit.
+                if let Some(keys) = shape_key_union(&shape) {
+                    let member = if shape.non_empty {
+                        keys
+                    } else {
+                        fact_admitting_null(&keys).expect("representable")
+                    };
+                    match (a.first(), a.last()) {
+                        (Some((f, _)), Some((l, _))) => {
+                            assert!(member.admits(&val_of_key(f)), "first: {shape:?} on {a:?}");
+                            assert!(member.admits(&val_of_key(l)), "last: {shape:?} on {a:?}");
+                        }
+                        _ => assert!(member.admits(&Val::Null), "empty: {shape:?}"),
+                    }
+                }
+            }
+        }
+        // The sweep is only evidence if the pairs exist.
+        assert!(checked >= 20, "universe too small: {checked} admitted pairs");
+    }
+
+    // ---- §2's rule: declaration order is never read ------------------------
+
+    #[test]
+    fn array_key_first_is_never_the_declared_first_key() {
+        // THE negative test of this slice. `array{a: int, b: int}` is a key SET;
+        // PHPStan answers `'a'` here (phpstan/phpstan#14940) and is wrong on
+        // `['b' => 1, 'a' => 2]`, which the shape admits just as well.
+        let shape = ShapeFact::normalize(
+            vec![(sk("a"), req(), slot(base_fact(Base::Int))), (sk("b"), req(), slot(base_fact(Base::Int)))],
+            Tail::Sealed,
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        let keys = shape_key_union(&shape).expect("enumerable");
+        assert_eq!(
+            keys,
+            Fact::OneOf(vec![Val::Str("a".to_owned()), Val::Str("b".to_owned())])
+        );
+        assert!(keys.admits(&Val::Str("b".to_owned())));
+        // Both fields are Required, so the array cannot be empty and no `null`
+        // joins in.
+        assert!(shape.non_empty);
+    }
+
+    #[test]
+    fn a_possibly_empty_shape_admits_null_as_its_key_member() {
+        let keys = shape_key_union(&map_str_int()).expect("string class");
+        let member = fact_admitting_null(&keys).expect("representable");
+        assert_eq!(member, Fact::General { base: Base::String, nullable: true });
+    }
+
+    // ---- Per-projection structure -----------------------------------------
+
+    #[test]
+    fn array_values_is_a_list_of_the_value_union() {
+        // int ⊔ string is not representable as one scalar fact, so the value slot
+        // widens to the unknown floor — a list of anything, still non-empty.
+        let p = project_values(&declared_shape());
+        assert_eq!(p.is_list, Certainty::Yes);
+        assert!(p.non_empty);
+        assert!(p.fields.is_empty());
+        assert_eq!(p.tail, Tail::Unsealed { key: KeyClass::Int, value: None });
+
+        // A homogeneous shape keeps its value bound.
+        let same = ShapeFact::normalize(
+            vec![
+                (sk("a"), req(), slot(base_fact(Base::Int))),
+                (sk("b"), Presence::Optional, slot(base_fact(Base::Int))),
+            ],
+            Tail::Sealed,
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(
+            project_values(&same).tail,
+            Tail::Unsealed { key: KeyClass::Int, value: slot(base_fact(Base::Int)) }
+        );
+    }
+
+    #[test]
+    fn array_keys_enumerates_a_sealed_shapes_keys_and_widens_an_unsealed_one() {
+        assert_eq!(
+            project_keys(&declared_shape()).tail,
+            Tail::Unsealed {
+                key: KeyClass::Int,
+                value: slot(Fact::OneOf(vec![
+                    Val::Str("a".to_owned()),
+                    Val::Str("b".to_owned())
+                ])),
+            }
+        );
+        // An `array-key`-classed tail is `int|string` — not one fact, so the
+        // element slot is the unknown floor rather than a wrong guess.
+        assert_eq!(
+            project_keys(&ShapeFact::plain_array()).tail,
+            Tail::Unsealed { key: KeyClass::Int, value: None }
+        );
+        assert_eq!(
+            project_keys(&list_of_int()).tail,
+            Tail::Unsealed { key: KeyClass::Int, value: slot(base_fact(Base::Int)) }
+        );
+    }
+
+    #[test]
+    fn array_flip_drops_non_empty_and_only_claims_int_keys_for_int_values() {
+        let p = project_flip(&declared_shape());
+        // Values are `int|string`; a string value can still produce an INT key
+        // (PHP's array-key cast), so the class is `array-key`.
+        assert!(matches!(p.tail, Tail::Unsealed { key: KeyClass::ArrayKey, .. }));
+        // A non-`int|string` value is skipped by the flip, so the result may be
+        // empty even though the input is not.
+        assert!(!p.non_empty);
+
+        let ints = ShapeFact::normalize(
+            vec![(sk("a"), req(), slot(base_fact(Base::Int)))],
+            Tail::Sealed,
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        assert!(matches!(
+            project_flip(&ints).tail,
+            Tail::Unsealed { key: KeyClass::Int, .. }
+        ));
+    }
+
+    #[test]
+    fn array_reverse_reads_the_key_structure_three_ways() {
+        // All-int keys: everything is renumbered, so the result IS a list.
+        assert_eq!(project_reverse(&list_of_int()).is_list, Certainty::Yes);
+        // A required string key survives the reversal — never a list.
+        assert_eq!(project_reverse(&declared_shape()).is_list, Certainty::No);
+        // A string key that may or may not be there: the honest widening.
+        let optional_str = ShapeFact::normalize(
+            vec![(sk("a"), Presence::Optional, slot(base_fact(Base::Int)))],
+            Tail::Sealed,
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(project_reverse(&optional_str).is_list, Certainty::Maybe);
+        // The entry count is preserved, so `non_empty` carries.
+        assert!(project_reverse(&declared_shape()).non_empty);
     }
 }
