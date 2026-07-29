@@ -693,30 +693,37 @@ fn native_member_repr(ty: &PType) -> bool {
     }
 }
 
-/// The refined-scalar phpdoc keywords (subtypes of `int`/`string`) — finer than
-/// their native base, so promotion refuses `phpdoc-finer-than-native`.
+/// Whether `n` is a refined-scalar phpdoc keyword (a subtype of `int`/`string`) —
+/// finer than its native base, so promotion refuses `phpdoc-finer-than-native`
+/// rather than promoting it away.
+///
+/// Queries `steins-contract`'s one identifier table (`steins_contract::lower_identifier`)
+/// rather than restating it: a refinement is exactly a lowered
+/// [`ContractTy::IntIn`]/[`ContractTy::StrWith`]/[`ContractTy::StrOpaque`] arm — an
+/// interval, a predicate-string class, or a non-extensional string subtype
+/// (`class-string`, `literal-string`, …). A bare `ContractTy::Base` (`int`,
+/// `string`, …) is natively representable, not a refinement, and
+/// [`ContractTy::Class`] is `lower_identifier`'s "not a keyword" signal — neither
+/// counts.
+///
+/// This is a genuine convergence, not a restatement: the hand-written list this
+/// replaced had drifted from the shared table in both directions — missing
+/// `decimal-int-string`/`non-decimal-int-string` (`StrWith`) and
+/// `interface-string`/`numeric-int-string` (`StrOpaque`), so those four spellings
+/// now correctly refuse promotion instead of silently promoting away a refinement.
+///
+/// Two spellings the hand list carried are not in `steins-contract`'s table at
+/// all: `interned-string`/`html-escaped-string` are project-local phpdoc
+/// conventions, not part of the cross-analyzer vocabulary the shared table is
+/// curated against — so they stay this predicate's own small residual, the one
+/// piece of vocabulary that cannot delegate.
 fn is_refined_scalar_keyword(n: &str) -> bool {
+    if matches!(n, "interned-string" | "html-escaped-string") {
+        return true;
+    }
     matches!(
-        n,
-        "positive-int"
-            | "negative-int"
-            | "non-negative-int"
-            | "non-positive-int"
-            | "non-empty-string"
-            | "non-falsy-string"
-            | "truthy-string"
-            | "numeric-string"
-            | "lowercase-string"
-            | "uppercase-string"
-            | "non-empty-lowercase-string"
-            | "non-empty-uppercase-string"
-            | "class-string"
-            | "interned-string"
-            | "literal-string"
-            | "callable-string"
-            | "trait-string"
-            | "enum-string"
-            | "html-escaped-string"
+        steins_contract::lower_identifier(n),
+        ContractTy::IntIn(_) | ContractTy::StrWith(_) | ContractTy::StrOpaque
     )
 }
 
@@ -733,6 +740,70 @@ fn member_of(name: &str) -> Option<TypeMember> {
         "true" => Some(TypeMember::BoolLiteral(true)),
         "false" => Some(TypeMember::BoolLiteral(false)),
         _ => None,
+    }
+}
+
+/// C-phase residue: `is_refined_scalar_keyword`'s convergence onto
+/// `steins_contract::lower_identifier` (the third keyword table this crate used
+/// to hand-maintain a drifted sibling of).
+#[cfg(test)]
+mod is_refined_scalar_keyword_tests {
+    use super::is_refined_scalar_keyword;
+
+    #[test]
+    fn the_pre_existing_hand_list_still_refuses() {
+        for n in [
+            "positive-int",
+            "negative-int",
+            "non-negative-int",
+            "non-positive-int",
+            "non-empty-string",
+            "non-falsy-string",
+            "truthy-string",
+            "numeric-string",
+            "lowercase-string",
+            "uppercase-string",
+            "non-empty-lowercase-string",
+            "non-empty-uppercase-string",
+            "class-string",
+            "literal-string",
+            "callable-string",
+            "trait-string",
+            "enum-string",
+        ] {
+            assert!(is_refined_scalar_keyword(n), "{n} should be a refined scalar");
+        }
+    }
+
+    /// The two project-local spellings absent from `steins-contract`'s shared
+    /// table stay recognized — the one piece of vocabulary this predicate keeps
+    /// as its own residual rather than delegating.
+    #[test]
+    fn project_local_spellings_not_in_the_shared_table_still_refuse() {
+        assert!(is_refined_scalar_keyword("interned-string"));
+        assert!(is_refined_scalar_keyword("html-escaped-string"));
+    }
+
+    /// The convergence fix: these four spellings were missing from the old
+    /// hand-rolled list (a census-table drift, exactly like C1's) — they are
+    /// `StrWith`/`StrOpaque` refinements in `steins-contract`'s table, so
+    /// promotion must now refuse them too instead of silently promoting a
+    /// refined type away.
+    #[test]
+    fn spellings_missing_from_the_old_hand_list_now_refuse() {
+        for n in ["decimal-int-string", "non-decimal-int-string", "interface-string", "numeric-int-string"]
+        {
+            assert!(is_refined_scalar_keyword(n), "{n} should be a refined scalar (convergence fix)");
+        }
+    }
+
+    /// A bare native scalar keyword is not a refinement (natively
+    /// representable), and a class name is not a keyword at all — both false.
+    #[test]
+    fn bare_scalars_and_class_names_are_not_refinements() {
+        for n in ["int", "float", "string", "bool", "mixed", "array", "SomeClass"] {
+            assert!(!is_refined_scalar_keyword(n), "{n} should not be a refined scalar");
+        }
     }
 }
 

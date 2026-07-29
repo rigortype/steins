@@ -354,6 +354,43 @@ pub(crate) fn is_array_key_ty(ty: &ContractTy) -> bool {
     )
 }
 
+/// Type-operator/pseudo-type spellings this crate **recognizes as vocabulary**
+/// but does not (yet) model any relation for — `int-mask<...>`, `resource`,
+/// Psalm's `properties-of<T>`, … — checked by both catch-alls below (the
+/// identifier table and the generic table share one normalized-name space, so
+/// one list serves both).
+///
+/// Before this list existed, every one of these names fell through the
+/// catch-all to [`ContractTy::Class`] — a **nonexistent-class reference**,
+/// which is a hazard, not mere silence: the class leg of acceptance answers a
+/// definite `No` for any non-object value (`admits_val`/`accepts_class_name`),
+/// so `@param resource $h` would report a false positive on every scalar/array
+/// argument the checker could resolve. This is exactly the wrong-No hazard C7
+/// fixed for `key-of`/`value-of` (ADR-0062), applied to the names PHPStan's own
+/// curation corpus already documents as "falls back to a nonexistent-class
+/// reference" (`php-typing-conformance/conformance/results/steins/*.toml`,
+/// `status` field) — Steins does not model these constructs, so the honest
+/// floor is [`ContractTy::Opaque`] (always `Maybe`), never a manufactured `No`.
+///
+/// This is deliberately **not** the same thing as "any unrecognized name" — an
+/// unknown identifier must still fall through to `Class` (see the catch-alls'
+/// own docs): "not a keyword" is the load-bearing signal both lanes' class
+/// machinery depends on. This list exists only for spellings Steins *knows* are
+/// pseudo-types/type-operators it does not enforce, so their fallback is honest
+/// rather than a coincidence of an unmodeled name looking like a class.
+const KNOWN_UNENFORCED: &[&str] = &[
+    "int-mask",
+    "int-mask-of",
+    "resource",
+    "open-resource",
+    "closed-resource",
+    "non-empty-literal-string",
+    "arraylike-object",
+    "properties-of",
+    "stringable-object",
+    "class-string-map",
+];
+
 /// **The one identifier table**: what every phpdoc *keyword* spelled as a bare
 /// identifier means, lowered to a [`ContractTy`]. Both lanes read this table and
 /// neither keeps a sibling — ADR-0030's no-second-relation discipline applied to
@@ -366,10 +403,15 @@ pub(crate) fn is_array_key_ty(ty: &ContractTy) -> bool {
 /// lowers to [`ContractTy::Class`], which is each lane's signal to hand the name to
 /// its own class machinery (the trinary is-a oracle and the `is_known_class` gate
 /// in `steins-infer`) — the one identifier judgment this crate cannot host, since
-/// the value domain has no object inhabitant (ADR-0035/0038).
+/// the value domain has no object inhabitant (ADR-0035/0038). [`KNOWN_UNENFORCED`]
+/// is checked first: those names ARE keywords (deliberately unmodeled ones), so
+/// they must not reach the class machinery at all.
 #[must_use]
 pub fn lower_identifier(name: &str) -> ContractTy {
     let norm = name.trim_start_matches('\\').to_ascii_lowercase();
+    if KNOWN_UNENFORCED.contains(&norm.as_str()) {
+        return ContractTy::Opaque;
+    }
     match norm.as_str() {
         "int" | "integer" => ContractTy::Base(Base::Int),
         "float" | "double" => ContractTy::Base(Base::Float),
@@ -546,10 +588,16 @@ pub fn is_shadowable_pseudo_type(name: &str) -> bool {
 /// reason — `steins-infer`'s proven-value lane reads it rather than restating the
 /// bound grammar or the recognized base names. Its catch-all carries the same
 /// meaning: a base name that is not vocabulary lowers to [`ContractTy::Class`], the
-/// signal to hand it to the caller's class-generic machinery.
+/// signal to hand it to the caller's class-generic machinery — except a
+/// [`KNOWN_UNENFORCED`] base name (`int-mask<...>`, `properties-of<T>`, …), which
+/// floors to [`ContractTy::Opaque`] instead, for the same nonexistent-class-hazard
+/// reason [`lower_identifier`] does.
 #[must_use]
 pub fn lower_generic(base: &str, args: &[steins_phpdoc::ast::GenericArg]) -> ContractTy {
     let norm = base.trim_start_matches('\\').to_ascii_lowercase();
+    if KNOWN_UNENFORCED.contains(&norm.as_str()) {
+        return ContractTy::Opaque;
+    }
     let arg = |i: usize| args.get(i).map(|a| lower(&a.ty));
     match (norm.as_str(), args.len()) {
         ("array" | "non-empty-array", 1) => ContractTy::MapOf {
@@ -1003,6 +1051,64 @@ fn lower_const(c: &ConstExpr) -> ContractTy {
 fn string_lit_value(lit: &StringLit) -> String {
     match lit {
         StringLit::Single(v) | StringLit::Double(v) => v.clone(),
+    }
+}
+
+/// C-phase residue: the [`KNOWN_UNENFORCED`] hazard fix — a known-vocabulary
+/// pseudo-type spelling floors to [`ContractTy::Opaque`] (always `Maybe`) rather
+/// than the nonexistent-class-reference `Class` catch-all, which would otherwise
+/// manufacture a `No` for every non-object value (the same hazard C7 fixed for
+/// `key-of`/`value-of`).
+#[cfg(test)]
+mod known_unenforced_tests {
+    use super::*;
+    use steins_domain::Val;
+
+    #[test]
+    fn known_unenforced_identifiers_lower_to_opaque() {
+        for name in [
+            "resource",
+            "open-resource",
+            "closed-resource",
+            "non-empty-literal-string",
+            "arraylike-object",
+            "stringable-object",
+        ] {
+            assert_eq!(lower_identifier(name), ContractTy::Opaque, "{name} should lower to Opaque");
+        }
+    }
+
+    #[test]
+    fn known_unenforced_generics_lower_to_opaque_regardless_of_args() {
+        let ty = lower_str("int-mask<1, 2, 4>").unwrap();
+        assert_eq!(ty, ContractTy::Opaque);
+        let ty = lower_str("int-mask-of<Permissions::*>").unwrap();
+        assert_eq!(ty, ContractTy::Opaque);
+        let ty = lower_str("properties-of<User>").unwrap();
+        assert_eq!(ty, ContractTy::Opaque);
+        let ty = lower_str("class-string-map<Foo, Bar>").unwrap();
+        assert_eq!(ty, ContractTy::Opaque);
+    }
+
+    /// The pin: `int-mask<1, 2, 4>` admits an int as `Maybe` — not the `No` the
+    /// old `Class("int-mask")` catch-all would have manufactured for every
+    /// scalar (the wrong-No hazard this fix retires).
+    #[test]
+    fn int_mask_admits_an_int_as_maybe_not_no() {
+        let ty = lower_str("int-mask<1, 2, 4>").unwrap();
+        assert_eq!(admits_val(&ty, &Val::Int(5)), Certainty::Maybe);
+    }
+
+    /// The load-bearing floor this fix must not touch: a genuinely unknown name
+    /// (not in [`KNOWN_UNENFORCED`], not a keyword) still lowers to `Class` — the
+    /// signal both lanes' class machinery depends on.
+    #[test]
+    fn a_genuinely_unknown_name_still_lowers_to_class() {
+        assert_eq!(lower_identifier("TotallyUnknownFrobnicator"), ContractTy::Class("totallyunknownfrobnicator".to_owned()));
+        assert!(matches!(
+            lower_generic("SomeUnknownGeneric", &[]),
+            ContractTy::Class(name) if name == "someunknowngeneric"
+        ));
     }
 }
 

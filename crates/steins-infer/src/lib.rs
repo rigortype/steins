@@ -3707,7 +3707,7 @@ impl<'a> Cx<'a> {
 /// The domain value-fact (four layers), aliased as `Fact` throughout the walk.
 use steins_domain::Fact;
 use steins_domain::{
-    Base, CoverFlavor, IntRange, Key as VKey, Refinement, ShapeFact, StrPreds, Val,
+    Base, CoverFlavor, IntRange, Key as VKey, Refinement, ShapeFact, StrPreds, Val, php_is_numeric,
 };
 
 /// The conversion seam **into** the domain: a literal (or fully-literal array)
@@ -12797,49 +12797,6 @@ fn php_float_to_int(f: f64) -> Option<i64> {
     f.is_finite().then(|| f.trunc() as i64)
 }
 
-/// PHP 8 `is_numeric` semantics.
-fn php_is_numeric(s: &str) -> bool {
-    let s = s.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c'));
-    let bytes = s.as_bytes();
-    let mut i = 0;
-
-    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
-        i += 1;
-    }
-
-    let mut saw_digit = false;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-        saw_digit = true;
-    }
-    if i < bytes.len() && bytes[i] == b'.' {
-        i += 1;
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
-            i += 1;
-            saw_digit = true;
-        }
-    }
-    if !saw_digit {
-        return false;
-    }
-    if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
-        i += 1;
-        if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
-            i += 1;
-        }
-        let mut saw_exp = false;
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
-            i += 1;
-            saw_exp = true;
-        }
-        if !saw_exp {
-            return false;
-        }
-    }
-
-    i == bytes.len()
-}
-
 // ---------------------------------------------------------------------------
 // PHPDoc declared-contract acceptance (ADR-0029/0030 relation #1).
 //
@@ -13838,6 +13795,25 @@ fn accepts_generic(
 ) -> Tri {
     let base_lc = base.to_ascii_lowercase();
     match base_lc.as_str() {
+        // `array`/`non-empty-array`/`list`/`non-empty-list`, per phpstan#14939's
+        // list semantics.
+        //
+        // NOT converged onto `lower_generic` + `admits_val` (unlike the
+        // `associative-array`/`int`/`key-of` arms below): a residue-slice attempt
+        // at that convergence regressed `nested_generic_fires_on_inner_mismatch`
+        // (`steins-infer/tests/generics_carry.rs`) — `list<Box<int>>` with a
+        // `Box<string>` element must still fire `No`, but a `Box` element is an
+        // **object**, which `cval_as_val` cannot represent (the value domain has
+        // no object inhabitant, ADR-0035/0038), so the whole array collapses to
+        // `None` → `Maybe`, silently losing the inner-mismatch detection. Unlike
+        // the associative-array/`key-of` arms (whose fixtures never exercise an
+        // object element), this leg is reached for arrays of PROJECT OBJECTS
+        // (`list<Box<int>>`, `array<string, User>`, …), so `check_arraylike`'s
+        // per-element recursion through the lane-local `accepts()` — which
+        // dispatches object elements to `accepts_class_generic`/
+        // `accepts_class_name` — is load-bearing, not incidental duplication.
+        // Kept as the stricter-correct side per the fixture, ADR-0062 §5's own
+        // discipline: one relation only where the value domain can host it.
         "array" | "non-empty-array" | "list" | "non-empty-list" => {
             let CVal::Array(entries) = v else { return Tri::No };
             let non_empty = base_lc.starts_with("non-empty");
