@@ -4768,12 +4768,17 @@ fn walk_trace(
             // `zend.assertions` is never consulted — the risk of running production
             // with assertions compiled out is the operator's, not the analysis's.
             StmtKind::Assert { cond } => {
+                apply_type_narrowing(w.cx, cond, true, env, store);
                 let refs = then_refinements(cond, w.cx.php_minor);
                 apply_refinements(&refs, env, store, Stratum::Verified);
                 // The assert lowering already models its argument as a `CondExpr`
                 // and applies the true-branch refinements, so `assert(isset(...))`
                 // routes into the S4 narrowing through exactly the `if`-guard
                 // path — no assert-specific plumbing.
+                // …and the same holds for the DR2 type-predicate vocabulary
+                // (applied above, in the branch walk's order): `assert(is_string($x))`
+                // narrows through the `if`-guard path with no assert-specific
+                // plumbing — ADR-0064 §5's "assert inherits every guard for free".
                 apply_shape_narrowing(w.cx, cond, true, env, store, true);
                 Flow::FellThrough
             }
@@ -6513,6 +6518,11 @@ fn walk_if(
     if verdict != Certainty::No {
         let mut benv = env.clone();
         let mut bclasses = store.clone();
+        // The DR2 type vocabulary runs FIRST of the four: it is the only one that
+        // can *mint* a fact over an unfacted binding, and the scalar refinements
+        // below must then see that fact — `if (is_string($v) && $v !== '')` on a
+        // `mixed` binding narrows to `non-empty-string` only in this order.
+        apply_type_narrowing(w.cx, cond, true, &mut benv, &mut bclasses);
         let refs = then_refinements(cond, w.cx.php_minor);
         apply_refinements(&refs, &mut benv, &mut bclasses, Stratum::Verified);
         apply_class_narrowing(w, cond, true, &mut bclasses);
@@ -6538,6 +6548,7 @@ fn walk_if(
     if verdict != Certainty::Yes {
         let mut benv = env.clone();
         let mut bclasses = store.clone();
+        apply_type_narrowing(w.cx, cond, false, &mut benv, &mut bclasses);
         let refs = else_refinements(cond, w.cx.php_minor);
         apply_refinements(&refs, &mut benv, &mut bclasses, Stratum::Verified);
         apply_class_narrowing(w, cond, false, &mut bclasses);
@@ -7247,6 +7258,11 @@ fn threaded_operand_env(
     let mut benv = env.clone();
     let mut bstore = store.clone();
     let mut refs = Vec::new();
+    // The DR2 type vocabulary threads with the rest — and, as in the branch walk,
+    // runs before the scalar refinements so a minted fact is what they refine:
+    // `is_string($s) && strlen($s)` evaluates its right operand under a narrowed
+    // `$s` (ADR-0052 §6).
+    apply_type_narrowing(cx, operand, then, &mut benv, &mut bstore);
     collect_refine(operand, then, &mut refs, php_minor);
     apply_refinements(&refs, &mut benv, &mut bstore, Stratum::Verified);
     // The operand's own side effects land *after* its test narrowed (a by-ref call
@@ -7970,6 +7986,613 @@ fn subtract_contract_lane(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Type-predicate guard vocabulary (ADR-0064 seam (v), slice DR2).
+//
+// PHPStan ships this family as a `FunctionTypeSpecifyingExtension` set; Steins
+// imports it into the *landed* narrowing machinery (ADR-0052) rather than a new
+// extension mechanism — the arm lane subtracts, the value-fact lane refines, and
+// `assert(is_string($x))` inherits both for free because assert lowers its
+// argument to the same `CondExpr` and runs the same walk.
+//
+// **Both polarities are pinned per predicate, and each is a different question.**
+// For an arm `M` and a predicate `P`, `pred_holds_on_arm` answers the trinary
+// "does *every* value `M` admits satisfy `P`?":
+//   * the TRUE branch deletes `M` iff that answer is `No`  — `P` refutes the arm;
+//   * the FALSE branch deletes `M` iff that answer is `Yes` — `P` proves the arm,
+//     so no value of `M` survives the negation.
+// `Maybe` keeps the arm on both branches: ADR-0052 §2's "an arm dies only on a
+// definite verdict", verbatim.
+//
+// **`ctype_*` is deliberately NOT here.** `ctype_digit` and kin are locale- and
+// byte-sensitive (and, before PHP 8.1, silently reinterpreted int arguments in
+// `-128..=255` as byte values), so the string-predicate mapping they *look* like
+// needs its own measured slice; DR2 declines them rather than guessing.
+// ---------------------------------------------------------------------------
+
+/// One recognized `is_*` type predicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypePred {
+    /// `is_string`
+    Str,
+    /// `is_int` / `is_integer` / `is_long`
+    Int,
+    /// `is_float` / `is_double`
+    Float,
+    /// `is_bool`
+    Bool,
+    /// `is_array`
+    Array,
+    /// `is_null`
+    Null,
+    /// `is_object`
+    Object,
+    /// `is_scalar`
+    Scalar,
+    /// `is_numeric`
+    Numeric,
+    /// `is_callable`
+    Callable,
+    /// `is_iterable`
+    Iterable,
+}
+
+/// A value's PHP **runtime** type class — what `gettype()` reports, which is the
+/// only thing the `is_*` family actually tests. Deliberately distinct from the
+/// contract crate's *acceptance* relation: `admits_val(Base(Float), Int(5))` is
+/// `Yes` (PHPStan's "float accepts int" declaration rule), but `is_float(5)` is
+/// `false` — a `float`-declared slot holds a float at runtime, because PHP widens
+/// at the boundary. The judgment below reads declared arms as runtime types, the
+/// same reading PHPStan's own type specifier uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RtKind {
+    Null,
+    Bool,
+    Int,
+    Float,
+    String,
+    Array,
+    Object,
+}
+
+/// The **exhaustive** set of runtime kinds an arm's values can have, or `None`
+/// when the arm spans an unknown set (`mixed`, its cuts, `Opaque`, `never`).
+/// Unknown keeps the arm on both polarities.
+fn arm_rt_kinds(arm: &ContractTy) -> Option<&'static [RtKind]> {
+    use ContractTy as C;
+    use RtKind::{Array, Bool, Float, Int, Null, Object, String as Str};
+    Some(match arm {
+        C::Null => &[Null],
+        C::Base(Base::Int) | C::IntIn(_) | C::LitInt(_) => &[Int],
+        C::Base(Base::Float) | C::LitFloat(_) => &[Float],
+        // `class-string`/`literal-string`/`callable-string` are strings at
+        // runtime — their non-extensionality (ADR-0038) is about *which*
+        // strings, never about being one.
+        C::Base(Base::String) | C::StrWith(_) | C::LitStr(_) | C::StrOpaque => &[Str],
+        C::Base(Base::Bool) | C::LitBool(_) => &[Bool],
+        C::ArrayAny { .. } | C::ListOf { .. } | C::MapOf { .. } | C::Shape { .. } => &[Array],
+        C::Class(_) | C::ObjectAny => &[Object],
+        // `iterable` is `array|Traversable`; `callable` is a callable-string, a
+        // `[obj, 'm']`/`['C', 'm']` pair-array, a Closure or an `__invoke`able.
+        C::IterableOf { .. } => &[Array, Object],
+        C::CallableTy { .. } => &[Str, Array, Object],
+        C::Mixed | C::MixedMinus(_) | C::Opaque | C::Never | C::Union(_) | C::Inter(_) => {
+            return None;
+        }
+    })
+}
+
+/// `(kinds the predicate definitely accepts, kinds it definitely rejects)`. A kind
+/// in neither set is undecidable for that predicate (`is_callable` on a string, on
+/// an array, or on an object; `is_iterable` on an object).
+fn pred_kind_sets(pred: TypePred) -> (&'static [RtKind], &'static [RtKind]) {
+    use RtKind::{Array, Bool, Float, Int, Null, Object, String as Str};
+    match pred {
+        TypePred::Str => (&[Str], &[Null, Bool, Int, Float, Array, Object]),
+        TypePred::Int => (&[Int], &[Null, Bool, Float, Str, Array, Object]),
+        TypePred::Float => (&[Float], &[Null, Bool, Int, Str, Array, Object]),
+        TypePred::Bool => (&[Bool], &[Null, Int, Float, Str, Array, Object]),
+        TypePred::Array => (&[Array], &[Null, Bool, Int, Float, Str, Object]),
+        TypePred::Null => (&[Null], &[Bool, Int, Float, Str, Array, Object]),
+        TypePred::Object => (&[Object], &[Null, Bool, Int, Float, Str, Array]),
+        // `is_scalar(null)` and `is_scalar([])` are both false — PHP's "scalar"
+        // is exactly int|float|string|bool.
+        TypePred::Scalar => (&[Bool, Int, Float, Str], &[Null, Array, Object]),
+        // `is_iterable` is `is_array($x) || $x instanceof Traversable`; an object
+        // arm is therefore undecided without the is-a oracle, and stays `Maybe`.
+        TypePred::Iterable => (&[Array], &[Null, Bool, Int, Float, Str]),
+        // `is_callable` accepts no *kind* outright (a string may name a function,
+        // an array may be a `[obj, 'm']` pair, an object may be `__invoke`able),
+        // and rejects the four kinds that can never be callable.
+        TypePred::Callable => (&[], &[Null, Bool, Int, Float]),
+        // `is_numeric(true)` is FALSE — bools are not numeric. The string kind is
+        // decided by the arm's own predicate set, not by its kind, so it appears
+        // in neither list here (see `pred_holds_on_arm`).
+        TypePred::Numeric => (&[Int, Float], &[Null, Bool, Array, Object]),
+    }
+}
+
+/// The [`Certainty`] that **every** value `arm` admits satisfies `pred`.
+///
+/// `Yes` licenses the FALSE branch to delete the arm, `No` licenses the TRUE
+/// branch to; `Maybe` keeps it on both (ADR-0052 §2).
+fn pred_holds_on_arm(pred: TypePred, arm: &ContractTy) -> Certainty {
+    use Certainty::{Maybe, No, Yes};
+    // A union answers only where every member agrees; an intersection is a subset
+    // of each member, so one deciding member decides it.
+    match arm {
+        ContractTy::Union(members) if !members.is_empty() => {
+            let mut it = members.iter().map(|m| pred_holds_on_arm(pred, m));
+            let first = it.next().expect("non-empty checked");
+            return if it.all(|c| c == first) { first } else { Maybe };
+        }
+        ContractTy::Inter(members) => {
+            if members.iter().any(|m| pred_holds_on_arm(pred, m).is_yes()) {
+                return Yes;
+            }
+            if members.iter().any(|m| pred_holds_on_arm(pred, m) == No) {
+                return No;
+            }
+            return Maybe;
+        }
+        // The two arms whose whole meaning IS a predicate's answer.
+        ContractTy::CallableTy { .. } if pred == TypePred::Callable => return Yes,
+        ContractTy::IterableOf { .. } if pred == TypePred::Iterable => return Yes,
+        // `is_numeric` on a string arm is decided by the arm's predicate set, not
+        // by its runtime kind: `numeric-string` proves it, a numeric literal
+        // proves it, a non-numeric literal refutes it, and a bare `string` (or a
+        // non-extensional `class-string`) answers nothing.
+        ContractTy::LitStr(s) if pred == TypePred::Numeric => {
+            return Certainty::from_bool(php_is_numeric(s));
+        }
+        ContractTy::StrWith(p) if pred == TypePred::Numeric => {
+            return if p.contains_all(StrPreds::NUMERIC) { Yes } else { Maybe };
+        }
+        _ => {}
+    }
+    let Some(kinds) = arm_rt_kinds(arm) else { return Maybe };
+    let (sat, unsat) = pred_kind_sets(pred);
+    if !kinds.is_empty() && kinds.iter().all(|k| sat.contains(k)) {
+        return Yes;
+    }
+    if !kinds.is_empty() && kinds.iter().all(|k| unsat.contains(k)) {
+        return No;
+    }
+    Maybe
+}
+
+/// The [`Certainty`] that a concrete value satisfies `pred` — the finite-layer
+/// twin of [`pred_holds_on_arm`], and exact for every predicate except the two
+/// whose answer depends on data the domain does not carry (`is_callable` on a
+/// string that may name a function or on a `[obj, 'm']` pair).
+fn pred_holds_on_val(pred: TypePred, v: &Val) -> Certainty {
+    use Certainty::{Maybe, No, Yes};
+    if pred == TypePred::Numeric {
+        return match v {
+            Val::Int(_) | Val::Float(_) => Yes,
+            Val::Str(s) => Certainty::from_bool(php_is_numeric(s)),
+            Val::Bool(_) | Val::Null | Val::Array(_) => No,
+        };
+    }
+    if pred == TypePred::Callable {
+        return match v {
+            // A literal string may name a function; a literal array may be a
+            // `['C', 'm']` pair. Undecidable here, so it filters nothing.
+            Val::Str(_) | Val::Array(_) => Maybe,
+            Val::Int(_) | Val::Float(_) | Val::Bool(_) | Val::Null => No,
+        };
+    }
+    let kind = match v {
+        Val::Null => RtKind::Null,
+        Val::Bool(_) => RtKind::Bool,
+        Val::Int(_) => RtKind::Int,
+        Val::Float(_) => RtKind::Float,
+        Val::Str(_) => RtKind::String,
+        Val::Array(_) => RtKind::Array,
+    };
+    let (sat, unsat) = pred_kind_sets(pred);
+    if sat.contains(&kind) {
+        Yes
+    } else if unsat.contains(&kind) {
+        No
+    } else {
+        Maybe
+    }
+}
+
+/// The [`Certainty`] that **every** value the fact admits satisfies `pred` — the
+/// value-lane twin of [`pred_holds_on_arm`]. A `nullable` abstract fact carries the
+/// null kind alongside its base, since `is_string(null)` is false.
+fn pred_holds_on_fact(pred: TypePred, f: &Fact) -> Certainty {
+    use Certainty::{Maybe, Yes};
+    if let Some(members) = f.finite_members() {
+        return Certainty::all_of(members.iter().map(|v| pred_holds_on_val(pred, v)));
+    }
+    let (kind, nullable) = match f {
+        Fact::Refined { base, nullable, .. } | Fact::General { base, nullable } => {
+            let k = match base {
+                Base::Int => RtKind::Int,
+                Base::Float => RtKind::Float,
+                Base::String => RtKind::String,
+                Base::Bool => RtKind::Bool,
+            };
+            (k, *nullable)
+        }
+        Fact::Shape { nullable, .. } => (RtKind::Array, *nullable),
+        // Finite layers are handled above.
+        Fact::Singleton(_) | Fact::OneOf(_) => return Maybe,
+    };
+    // The one refinement that decides a predicate the base alone cannot: a string
+    // fact already carrying `NUMERIC` is proven numeric.
+    if pred == TypePred::Numeric
+        && !nullable
+        && let Fact::Refined { base: Base::String, refinement: Refinement::Str(p), .. } = f
+        && p.contains_all(StrPreds::NUMERIC)
+    {
+        return Yes;
+    }
+    let (sat, unsat) = pred_kind_sets(pred);
+    let kinds: &[RtKind] = if nullable { &[kind, RtKind::Null] } else { &[kind] };
+    if kinds.iter().all(|k| sat.contains(k)) {
+        return Yes;
+    }
+    if kinds.iter().all(|k| unsat.contains(k)) {
+        return Certainty::No;
+    }
+    Maybe
+}
+
+/// The scalar [`Base`] a predicate *proves* on its true branch, for the four
+/// predicates that name exactly one. The rest prove a base the four-layer domain
+/// cannot spell alone (`is_scalar`/`is_numeric` name a union of bases, `is_array`
+/// the array stratum, `is_object`/`is_callable`/`is_iterable` nothing the domain
+/// represents at all).
+fn pred_base(pred: TypePred) -> Option<Base> {
+    match pred {
+        TypePred::Str => Some(Base::String),
+        TypePred::Int => Some(Base::Int),
+        TypePred::Float => Some(Base::Float),
+        TypePred::Bool => Some(Base::Bool),
+        _ => None,
+    }
+}
+
+/// The recognized type predicate a guard call names, or `None` for a namespaced or
+/// userland-shadowed twin — the SAME discipline [`existence_predicate`] and
+/// [`array_guard_predicate`] apply (a `Foo\is_string` or a same-named user function
+/// is a different function, never the global builtin). Every member of the family
+/// takes exactly one by-value argument.
+fn type_predicate(cx: &Cx, call: &CallExpr) -> Option<TypePred> {
+    let callee = call.callee.as_deref()?;
+    let r = call.callee_ref.as_ref()?;
+    if r.raw.contains('\\') || matches!(cx.resolve_function(r), FnResolution::User(_)) {
+        return None;
+    }
+    if !call.positional_only || call.args.len() != 1 {
+        return None;
+    }
+    const PREDS: &[(&str, TypePred)] = &[
+        ("is_string", TypePred::Str),
+        ("is_int", TypePred::Int),
+        ("is_integer", TypePred::Int),
+        ("is_long", TypePred::Int),
+        ("is_float", TypePred::Float),
+        ("is_double", TypePred::Float),
+        ("is_bool", TypePred::Bool),
+        ("is_array", TypePred::Array),
+        ("is_null", TypePred::Null),
+        ("is_object", TypePred::Object),
+        ("is_scalar", TypePred::Scalar),
+        ("is_numeric", TypePred::Numeric),
+        ("is_callable", TypePred::Callable),
+        ("is_iterable", TypePred::Iterable),
+    ];
+    PREDS.iter().find(|(n, _)| callee.eq_ignore_ascii_case(n)).map(|(_, p)| *p)
+}
+
+/// One type-vocabulary guard, resolved to a variable and a branch polarity.
+enum TypeGuard {
+    /// `is_string($x)` and kin.
+    Pred { var: String, pred: TypePred, positive: bool },
+    /// `in_array($x, [<literals>], true)` — the strict-only literal-haystack form.
+    InArray { var: String, lits: Vec<Val>, positive: bool },
+}
+
+/// The `(needle var, haystack literals)` of a **strict** `in_array` over a literal
+/// haystack, or `None`.
+///
+/// **The non-strict form narrows NOTHING, deliberately.** `in_array($x, ['a'], false)`
+/// is PHP's loose `==`, whose equivalence classes are neither reflexive across types
+/// nor transitive: `in_array(0, ['a'])` is *true* on PHP 7 (`0 == 'a'`), `in_array('1e2',
+/// ['100'])` is true, `in_array(true, ['anything non-empty'])` is true, and the PHP 8
+/// string↔int comparison change moved the boundary again. There is no sound OneOf to
+/// mint from a loose membership test, so the whole guard is declined rather than
+/// approximated. A non-literal haystack (`in_array($x, $allowed, true)`) is declined for
+/// the plainer reason that its members are unknown.
+fn in_array_literals(
+    cx: &Cx,
+    call: &CallExpr,
+    php_minor: Option<(u16, u16)>,
+) -> Option<(String, Vec<Val>)> {
+    let callee = call.callee.as_deref()?;
+    let r = call.callee_ref.as_ref()?;
+    if r.raw.contains('\\') || matches!(cx.resolve_function(r), FnResolution::User(_)) {
+        return None;
+    }
+    if !call.positional_only || !callee.eq_ignore_ascii_case("in_array") {
+        return None;
+    }
+    // The third argument must be a literal `true`: strict is what makes the
+    // membership an *identity*, and identity is what a `OneOf` means.
+    if call.args.len() != 3 || !matches!(call.args[2].value, ArgValue::Bool(true)) {
+        return None;
+    }
+    let ArgValue::Var(var) = &call.args[0].value else { return None };
+    let ArgValue::Array(_) = &call.args[1].value else { return None };
+    let Some(Val::Array(entries)) = val_of(&call.args[1].value, php_minor) else { return None };
+    // A nested array member has no scalar identity the value domain can carry.
+    if entries.iter().any(|(_, v)| matches!(v, Val::Array(_))) {
+        return None;
+    }
+    let lits: Vec<Val> = entries.into_iter().map(|(_, v)| v).collect();
+    if lits.is_empty() {
+        return None;
+    }
+    Some((var.clone(), lits))
+}
+
+/// Collect the type-vocabulary guards a condition establishes at polarity `then`.
+/// The polarity walk is [`collect_refine`]'s, verbatim in structure: `Not` flips,
+/// `And` contributes on the true path, `Or` on the false one (De Morgan) — so
+/// `if ($a && is_string($s))` reaches its narrowing point.
+fn collect_type_guards(cx: &Cx, cond: &CondExpr, then: bool, out: &mut Vec<TypeGuard>) {
+    match cond {
+        CondExpr::Call { call, .. } => {
+            if let Some(pred) = type_predicate(cx, call) {
+                if let ArgValue::Var(var) = &call.args[0].value {
+                    out.push(TypeGuard::Pred { var: var.clone(), pred, positive: then });
+                }
+                return;
+            }
+            if let Some((var, lits)) = in_array_literals(cx, call, cx.php_minor) {
+                out.push(TypeGuard::InArray { var, lits, positive: then });
+            }
+        }
+        CondExpr::Not(c) => collect_type_guards(cx, c, !then, out),
+        CondExpr::And(a, b) if then => {
+            collect_type_guards(cx, a, then, out);
+            collect_type_guards(cx, b, then, out);
+        }
+        CondExpr::Or(a, b) if !then => {
+            collect_type_guards(cx, a, then, out);
+            collect_type_guards(cx, b, then, out);
+        }
+        _ => {}
+    }
+}
+
+/// **Apply every type-vocabulary guard of `cond` at polarity `then`** to a branch's
+/// cloned env and store (ADR-0064 seam (v)). Runs beside [`apply_refinements`] /
+/// [`apply_class_narrowing`] / [`apply_shape_narrowing`] in the branch walk, and on
+/// the fall-through of `assert($expr)`.
+fn apply_type_narrowing(
+    cx: &Cx,
+    cond: &CondExpr,
+    then: bool,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    let mut guards = Vec::new();
+    collect_type_guards(cx, cond, then, &mut guards);
+    for g in &guards {
+        match g {
+            TypeGuard::Pred { var, pred, positive } => {
+                subtract_pred_arms(store, var, *pred, *positive);
+                // An arm lane that collapsed to a single array arm mints its shape
+                // fact through the SAME gated helper `is_array`'s S4 siblings use —
+                // this slice adds no second minting path.
+                mint_collapsed_shape(var, env, store);
+                refine_fact_for_pred(env, var, *pred, *positive);
+                // A value the guard proved is not an object cannot still carry a
+                // heap binding or an is-a bound; the declared-arm lane (just
+                // narrowed) is deliberately kept.
+                if *positive && !pred_kind_sets(*pred).0.contains(&RtKind::Object) {
+                    store.refs.remove(var);
+                    store.members.remove(var);
+                }
+            }
+            TypeGuard::InArray { var, lits, positive } => {
+                refine_fact_for_in_array(env, var, lits, *positive);
+            }
+        }
+    }
+}
+
+/// Arm-lane subtraction for one type predicate: the TRUE branch deletes the arms
+/// the predicate **refutes**, the FALSE branch the arms it **proves**. `Maybe`
+/// keeps the arm on both. An emptied lane drops to no-fact, never a death signal
+/// (ADR-0052 §2).
+fn subtract_pred_arms(store: &mut Store, var: &str, pred: TypePred, positive: bool) {
+    let Some(arms) = store.contract.get_mut(var) else { return };
+    arms.retain(|a| {
+        let holds = pred_holds_on_arm(pred, &a.ty);
+        if positive { holds != Certainty::No } else { !holds.is_yes() }
+    });
+    if arms.is_empty() {
+        store.contract.remove(var);
+    }
+}
+
+/// Value-fact narrowing for one type predicate.
+///
+/// **`None` means "leave the fact exactly as it was", and that is also the answer
+/// when the guard's polarity refutes the whole fact** — a binding proven `int` under
+/// an `is_string` true-branch says the branch is unreachable, and this slice does not
+/// own death (ADR-0052 §2: the verdict does). Rewriting the fact there would mint a
+/// claim about a path the runtime never takes; leaving it reproduces the pre-slice
+/// behavior on exactly that path.
+fn refine_fact_for_pred(
+    env: &mut HashMap<String, Known>,
+    var: &str,
+    pred: TypePred,
+    positive: bool,
+) {
+    // The one predicate that narrows a binding carrying NO fact: `is_string`/
+    // `is_int`/`is_float`/`is_bool` prove a single base, and `is_null` proves a
+    // single value, so the true branch can state it outright (a `mixed`/undeclared
+    // binding is the common real-world guard subject). Every other predicate names
+    // a union of bases (`is_scalar`, `is_numeric`), the array stratum (`is_array` —
+    // served by `mint_collapsed_shape` from the arm lane instead, so the Asserted
+    // shape lane keeps its A-G9 stratum discipline), or something the four-layer
+    // domain does not represent (`is_object`/`is_callable`/`is_iterable`).
+    if env.get(var).is_none_or(|k| k.fact.is_none()) {
+        if !positive {
+            return;
+        }
+        let minted = match pred {
+            TypePred::Null => Some(Fact::Singleton(Val::Null)),
+            _ => pred_base(pred).map(|base| Fact::General { base, nullable: false }),
+        };
+        if let Some(fact) = minted {
+            // A closure-only binding carries no scalar fact by construction
+            // (ADR-0033); minting one over it would forget the closure target.
+            if env.get(var).is_some_and(|k| k.closure.is_some()) {
+                return;
+            }
+            let line = env.get(var).map_or(0, |k| k.line);
+            env.insert(
+                var.to_owned(),
+                Known::value_strat(fact, line, Some("proven on this branch".to_owned()), Stratum::Verified),
+            );
+        }
+        return;
+    }
+    refine_fact(env, var, Stratum::Verified, |f| {
+        // **The guard's polarity refutes the binding's own fact ⇒ DROP it.** The
+        // branch is unreachable (`is_string($n)` with `$n` proven `1`), and this
+        // slice does not own death — the verdict does (ADR-0052 §2). Carrying the
+        // refuted fact into the branch is worse than either alternative: it would
+        // premise proof-layer findings about a path the runtime never takes (the
+        // measured FP class — `new Identifier($name)` inside `if (is_string($name))`
+        // under a call-site descent that bound `$name` to an int). Dropping to
+        // no-fact is exactly the pre-slice behavior, since the guard's base used to
+        // be forgotten wholesale here.
+        let holds = pred_holds_on_fact(pred, f);
+        if (positive && holds == Certainty::No) || (!positive && holds.is_yes()) {
+            return None;
+        }
+        // The finite layers narrow by **exact member retention** on both
+        // polarities — the only lossless subtraction the domain has (ADR-0052 §2).
+        // The retention can no longer empty the set: the refutation test above
+        // already caught the all-members-refuted case.
+        if let Some(members) = f.finite_members() {
+            let kept: Vec<Val> = members
+                .iter()
+                .filter(|v| {
+                    let h = pred_holds_on_val(pred, v);
+                    if positive { h != Certainty::No } else { !h.is_yes() }
+                })
+                .cloned()
+                .collect();
+            return Fact::from_vals(kept);
+        }
+        if !positive {
+            // The abstract layers carry no negative-predicate vocabulary (ADR-0052
+            // §2: "General has no point-complement representation, and gets none").
+            // The one exception is the nullable bit, which IS the complement of
+            // `is_null` — the same channel `!== null` already uses.
+            return if pred == TypePred::Null { clear_null(f) } else { Some(f.clone()) };
+        }
+        Some(match (pred, f) {
+            // `is_null($x)` true: the value IS null, whatever the fact said.
+            (TypePred::Null, _) => Fact::Singleton(Val::Null),
+            // A base-naming predicate on a matching base keeps every refinement it
+            // had and drops nullability (`is_string(null)` is false).
+            (_, Fact::Refined { base, refinement, .. }) if pred_base(pred) == Some(*base) => {
+                Fact::refined(*base, *refinement, false)
+            }
+            (_, Fact::General { base, .. }) if pred_base(pred) == Some(*base) => {
+                Fact::General { base: *base, nullable: false }
+            }
+            // `is_numeric` is the first guard to WIRE the already-modeled
+            // `StrPreds::NUMERIC` (ADR-0064 §1 names it): on a string-based fact the
+            // true branch intersects the numeric-string class in. On an int/float
+            // fact it only drops nullability (every int and float is numeric).
+            (
+                TypePred::Numeric,
+                Fact::Refined { base: Base::String, .. } | Fact::General { base: Base::String, .. },
+            ) => add_str_preds(&clear_null(f)?, StrPreds::NUMERIC),
+            (
+                TypePred::Numeric,
+                Fact::Refined { base: Base::Int | Base::Float, .. }
+                | Fact::General { base: Base::Int | Base::Float, .. },
+            ) => clear_null(f)?,
+            // `is_scalar` names int|float|string|bool: on any scalar-based fact it
+            // proves only non-nullness, which is exactly what it drops.
+            (TypePred::Scalar, Fact::Refined { .. } | Fact::General { .. }) => clear_null(f)?,
+            // `is_array` on an array-stratum fact proves non-nullness too.
+            (TypePred::Array, Fact::Shape { .. }) => clear_null(f)?,
+            // Everything else: either the predicate refutes this fact (an
+            // unreachable branch — see the doc comment) or it says nothing the
+            // domain can hold.
+            (_, other) => other.clone(),
+        })
+    });
+}
+
+/// Value-fact narrowing for the strict literal-haystack `in_array` form.
+///
+/// TRUE branch: the needle is **identical** to one of the haystack literals, so the
+/// fact becomes the `OneOf` of those literals intersected with what was already
+/// known (`Fact::from_vals` re-canonicalizes — one survivor collapses to a
+/// `Singleton`, an over-`CAP` set widens through the computed summary).
+/// FALSE branch: subtraction is exact only on a **finite** fact (`OneOf` minus the
+/// literals, through the landed `exclude_member`); an abstract fact has no
+/// point-complement, so it is left alone.
+/// Either polarity emptying the set means the branch is unreachable — the fact is
+/// left untouched, since the verdict owns death (ADR-0052 §2).
+fn refine_fact_for_in_array(
+    env: &mut HashMap<String, Known>,
+    var: &str,
+    lits: &[Val],
+    positive: bool,
+) {
+    if env.get(var).is_none_or(|k| k.fact.is_none()) {
+        if !positive || env.get(var).is_some_and(|k| k.closure.is_some()) {
+            return;
+        }
+        let Some(fact) = Fact::from_vals(lits.to_vec()) else { return };
+        let line = env.get(var).map_or(0, |k| k.line);
+        env.insert(
+            var.to_owned(),
+            Known::value_strat(fact, line, Some("proven on this branch".to_owned()), Stratum::Verified),
+        );
+        return;
+    }
+    refine_fact(env, var, Stratum::Verified, |f| {
+        if positive {
+            // No admitted literal ⇒ the membership test cannot hold ⇒ the branch is
+            // unreachable, and the fact drops rather than being carried into it (the
+            // same rule `refine_fact_for_pred` states at length).
+            let kept: Vec<Val> = lits.iter().filter(|v| f.admits(v)).cloned().collect();
+            return Fact::from_vals(kept);
+        }
+        if f.finite_members().is_none() {
+            return Some(f.clone());
+        }
+        let mut cur = f.clone();
+        for v in lits {
+            match exclude_member(&cur, v) {
+                Some(next) => cur = next,
+                // Emptied: every member was in the haystack, so the false branch is
+                // unreachable — drop, do not carry.
+                None => return None,
+            }
+        }
+        Some(cur)
+    });
+}
+
 /// The `($var, literal)` of a comparison whose two operands are exactly one bare
 /// variable and one literal (in either order).
 fn var_literal(lhs: &CondOperand, rhs: &CondOperand) -> Option<(String, ArgValue)> {
@@ -8531,6 +9154,20 @@ fn collect_cond_opaque_reads(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) {
         CondExpr::Call { call, .. }
             if array_guard_predicate(cx, call).is_some()
                 || array_all_any_predicate(cx, call).is_some() => {}
+        // **The DR2 exemption, and why it is unconditional** (unlike S8's, which is
+        // gated on the shape lane). The `is_*` family and `in_array` declare every
+        // parameter BY VALUE in PHP's own signature and are side-effect free, so a
+        // guard call cannot have changed the base between the test and the branch.
+        // S8 kept its exemption shape-lane-gated because lifting it wholesale would
+        // let *any* proven fact survive a guard for the first time; here the base's
+        // scalar fact surviving is the entire point of the slice — and every finding
+        // it can premise is true by construction, because the value the branch sees
+        // is the value the predicate tested. A base mentioned by any OTHER call in
+        // the same condition still gets the old forgetting: that mention is what
+        // might mutate it, and it is collected by the general arm below.
+        CondExpr::Call { call, .. }
+            if type_predicate(cx, call).is_some()
+                || in_array_literals(cx, call, cx.php_minor).is_some() => {}
         // An opaque condition may mutate any variable it reads by reference — the
         // whole read-set is forgotten (the conservative floor, unchanged).
         CondExpr::Opaque { reads } => {
