@@ -4,8 +4,8 @@
 //! # Format
 //!
 //! JSONL. A header line `{"steins-baseline":1,"note":"…"}`, then one
-//! `{"id","path","hash"}` entry per line, sorted by `(path, id, hash)` for diff
-//! stability. `path` is relative to the baseline file's directory, forward
+//! `{"id","path","hash"[,"surface"]}` entry per line, sorted by `(path, id, hash)`
+//! for diff stability. `path` is relative to the baseline file's directory, forward
 //! slashes.
 //!
 //! # Stable hash (no line numbers)
@@ -17,29 +17,67 @@
 //! when the flagged line or its immediate neighborhood changes (the finding then
 //! correctly resurfaces).
 //!
-//! # Capture surface (ADR-0050 §8)
+//! # Capture surface (ADR-0050 §8, ADR-0062 A-G10)
 //!
-//! The header additionally records the **capture surface**: the `profile` name
-//! and the resolved id-set the baseline was written under. Two consequences: (a)
-//! staleness is computed only over ids *inside the current run's surface* — an
-//! unconsumed entry whose id is outside it is *dormant* (kept, not stale, not
-//! pruned); (b) a run whose active surface exceeds the captured one prints a
-//! one-line notice so it "drowns loudly", never silently.
+//! The header records the **capture surface**: the `profile` name and the resolved
+//! id-set the baseline was written under. Two consequences: (a) staleness is
+//! computed only over ids *inside the current run's surface* — an unconsumed entry
+//! whose id is outside it is *dormant* (kept, not stale, not pruned); (b) a run
+//! whose active surface exceeds the captured one prints a one-line notice so it
+//! "drowns loudly", never silently.
+//!
+//! ADR-0062 A-G10 pushes the capture surface down to the **entry**: each entry may
+//! carry the profile *rung* (`"default"|"contracts"|"strict"`) it was captured at,
+//! and an entry is judged unmatched only on a run whose rung is at or above it. The
+//! header is one string for a whole file; the per-entry tag is what keeps a file
+//! honest when entries from different surfaces end up in it.
+//!
+//! **Round-trip and the untagged reading.** The field is omitted entirely when the
+//! rung is `default`, so a `default`-captured baseline is byte-identical to one this
+//! crate wrote before S6, and an untagged legacy entry reads as **captured at
+//! `default`**. That reading is chosen because it is the *behavior-preserving* one:
+//! `Default <= every rung`, so the rung clause is vacuously true for every legacy
+//! entry and staleness for legacy files is decided exactly as before, by the id
+//! alone. An unrecognized spelling (a hand-edit) reads the same way.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use steins_infer::Floor;
 
 use crate::sha256;
 
 /// One baseline entry. Field order is the on-disk key order (serde preserves
-/// struct field order): `{"id":…,"path":…,"hash":…}`.
+/// struct field order): `{"id":…,"path":…,"hash":…[,"surface":…]}`.
+///
+/// `surface` is the capture **rung** (ADR-0062 A-G10), omitted when `default` — see
+/// the module docs for the round-trip rule. It is deliberately NOT part of the
+/// match key: a finding matches its entry by `(id, path, hash)` regardless of the
+/// surface either was seen on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub id: String,
     pub path: String,
     pub hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<String>,
+}
+
+impl Entry {
+    /// This entry's capture rung: the tag when present and recognized, else
+    /// `Floor::Default` (the untagged/legacy reading — see the module docs).
+    #[must_use]
+    pub fn captured_at(&self) -> Floor {
+        self.surface.as_deref().and_then(Floor::parse).unwrap_or(Floor::Default)
+    }
+
+    /// The on-disk tag for a capture at `rung`: `None` at `default` so the written
+    /// line stays byte-identical to a pre-S6 baseline.
+    #[must_use]
+    pub fn tag_for(rung: Floor) -> Option<String> {
+        (rung != Floor::Default).then(|| rung.as_str().to_owned())
+    }
 }
 
 /// The default baseline filename, looked up in the CWD (ADR-0022).
@@ -160,15 +198,23 @@ pub fn parse(text: &str) -> Vec<Entry> {
 /// one as findings match (duplicate findings against one entry: one suppressed,
 /// one reported — ADR-0022's implicit count).
 pub struct Matcher {
-    counts: HashMap<(String, String, String), usize>,
+    /// `key -> (unconsumed count, lowest capture rung seen for that key)`. The rung
+    /// is the *minimum* over entries sharing a key: the lowest rung is the one that
+    /// makes the entry judgeable on the widest range of runs, so taking it never
+    /// hides a stale entry from a surface that could have matched it.
+    counts: HashMap<(String, String, String), (usize, Floor)>,
 }
 
 impl Matcher {
     #[must_use]
     pub fn new(entries: &[Entry]) -> Self {
-        let mut counts: HashMap<(String, String, String), usize> = HashMap::new();
+        let mut counts: HashMap<(String, String, String), (usize, Floor)> = HashMap::new();
         for e in entries {
-            *counts.entry((e.id.clone(), e.path.clone(), e.hash.clone())).or_insert(0) += 1;
+            let slot = counts
+                .entry((e.id.clone(), e.path.clone(), e.hash.clone()))
+                .or_insert((0, Floor::Strict));
+            slot.0 += 1;
+            slot.1 = slot.1.min(e.captured_at());
         }
         Self { counts }
     }
@@ -178,7 +224,7 @@ impl Matcher {
     pub fn take(&mut self, id: &str, path: &str, hash: &str) -> bool {
         let key = (id.to_owned(), path.to_owned(), hash.to_owned());
         match self.counts.get_mut(&key) {
-            Some(n) if *n > 0 => {
+            Some((n, _)) if *n > 0 => {
                 *n -= 1;
                 true
             }
@@ -186,24 +232,34 @@ impl Matcher {
         }
     }
 
-    /// Surface-aware staleness (ADR-0050 §8): the number of unconsumed entries
-    /// whose id `in_surface` reports as inside the *current run's* surface. An
-    /// unconsumed entry whose id is outside it is **dormant** — kept, not counted
-    /// stale — because the current profile simply never looked for it. Passing
-    /// `|_| true` recovers the pre-ADR-0050 unconditional stale count.
+    /// Surface-aware staleness (ADR-0050 §8, ADR-0062 A-G10): the number of
+    /// unconsumed entries that the current run **could** have matched. Two
+    /// independent conditions, both required:
+    ///
+    /// * the entry's id is inside the current run's surface (`in_surface`) — an id
+    ///   this profile never looked for is **dormant**, kept and not counted; and
+    /// * the entry's capture rung is at or below `rung` — an entry captured at
+    ///   `strict` never cries unmatched on a `default` run, even for an id whose
+    ///   floor would admit it, because that run did not analyze the same surface.
+    ///
+    /// Passing `Floor::Strict` with `|_| true` recovers the pre-ADR-0050
+    /// unconditional stale count. Legacy untagged entries read as `Floor::Default`,
+    /// so the second clause is vacuous for them and behavior is unchanged.
     #[must_use]
-    pub fn stale_count_within(&self, in_surface: impl Fn(&str) -> bool) -> usize {
+    pub fn stale_count_within(&self, rung: Floor, in_surface: impl Fn(&str) -> bool) -> usize {
         self.counts
             .iter()
-            .filter(|((id, _, _), n)| **n > 0 && in_surface(id))
-            .map(|(_, n)| *n)
+            .filter(|((id, _, _), (n, captured))| *n > 0 && *captured <= rung && in_surface(id))
+            .map(|(_, (n, _))| *n)
             .sum()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CaptureSurface, Entry, Matcher, entry_hash, parse_header, render};
+    use steins_infer::Floor;
+
+    use super::{CaptureSurface, Entry, Matcher, entry_hash, parse, parse_header, render};
 
     #[test]
     fn hash_is_line_number_independent_but_neighborhood_sensitive() {
@@ -222,19 +278,19 @@ mod tests {
 
     #[test]
     fn matcher_consumes_one_for_one() {
-        let e = Entry { id: "x".into(), path: "a".into(), hash: "h".into() };
+        let e = Entry { id: "x".into(), path: "a".into(), hash: "h".into(), surface: None };
         let mut m = Matcher::new(&[e.clone(), e.clone()]);
         assert!(m.take("x", "a", "h"));
         assert!(m.take("x", "a", "h"));
         assert!(!m.take("x", "a", "h"), "third finding exhausts the two entries");
-        assert_eq!(m.stale_count_within(|_| true), 0);
+        assert_eq!(m.stale_count_within(Floor::Strict, |_| true), 0);
     }
 
     #[test]
     fn unconsumed_entries_are_stale() {
-        let e = Entry { id: "x".into(), path: "a".into(), hash: "h".into() };
+        let e = Entry { id: "x".into(), path: "a".into(), hash: "h".into(), surface: None };
         let m = Matcher::new(&[e]);
-        assert_eq!(m.stale_count_within(|_| true), 1, "never matched → stale");
+        assert_eq!(m.stale_count_within(Floor::Strict, |_| true), 1, "never matched → stale");
     }
 
     #[test]
@@ -245,8 +301,8 @@ mod tests {
         };
         let out = render(
             vec![
-                Entry { id: "b".into(), path: "z.php".into(), hash: "2".into() },
-                Entry { id: "a".into(), path: "a.php".into(), hash: "1".into() },
+                Entry { id: "b".into(), path: "z.php".into(), hash: "2".into(), surface: None },
+                Entry { id: "a".into(), path: "a.php".into(), hash: "1".into(), surface: None },
             ],
             &surface,
         );
@@ -278,16 +334,112 @@ mod tests {
     #[test]
     fn stale_within_treats_out_of_surface_entries_as_dormant() {
         let entries = vec![
-            Entry { id: "throw.undeclared".into(), path: "a".into(), hash: "h1".into() },
-            Entry { id: "call.on-null".into(), path: "b".into(), hash: "h2".into() },
+            Entry { id: "throw.undeclared".into(), path: "a".into(), hash: "h1".into(), surface: None },
+            Entry { id: "call.on-null".into(), path: "b".into(), hash: "h2".into(), surface: None },
         ];
         let m = Matcher::new(&entries);
         // Neither consumed. Under a proof-only surface, throw.undeclared is dormant.
-        assert_eq!(m.stale_count_within(|_| true), 2, "raw stale counts both");
+        assert_eq!(m.stale_count_within(Floor::Strict, |_| true), 2, "raw stale counts both");
         assert_eq!(
-            m.stale_count_within(|id| id == "call.on-null"),
+            m.stale_count_within(Floor::Strict, |id| id == "call.on-null"),
             1,
             "only the in-surface entry is stale; the other is dormant"
         );
+    }
+
+    #[test]
+    fn an_untagged_legacy_entry_reads_as_captured_at_default() {
+        // The round-trip choice (ADR-0062 A-G10): absent tag = `default`, which makes
+        // the rung clause vacuous and leaves legacy staleness decided by id alone.
+        let e: Entry = serde_json::from_str(r#"{"id":"x","path":"a","hash":"h"}"#).unwrap();
+        assert_eq!(e.surface, None);
+        assert_eq!(e.captured_at(), Floor::Default);
+        // An unrecognized spelling (a hand-edit) reads the same way.
+        let odd: Entry =
+            serde_json::from_str(r#"{"id":"x","path":"a","hash":"h","surface":"nope"}"#).unwrap();
+        assert_eq!(odd.captured_at(), Floor::Default);
+    }
+
+    #[test]
+    fn a_default_capture_writes_the_pre_s6_bytes() {
+        // Byte-identity for the common case: no `surface` key is written at the
+        // `default` rung, so a default baseline diffs clean against an older one.
+        let surface = CaptureSurface { profile: "default".into(), ids: vec!["a".into()] };
+        let out = render(
+            vec![Entry {
+                id: "a".into(),
+                path: "a.php".into(),
+                hash: "1".into(),
+                surface: Entry::tag_for(Floor::Default),
+            }],
+            &surface,
+        );
+        let line = out.lines().nth(1).unwrap();
+        assert_eq!(line, r#"{"id":"a","path":"a.php","hash":"1"}"#);
+    }
+
+    #[test]
+    fn a_strict_capture_round_trips_its_rung() {
+        let surface = CaptureSurface { profile: "strict".into(), ids: vec!["a".into()] };
+        let out = render(
+            vec![Entry {
+                id: "a".into(),
+                path: "a.php".into(),
+                hash: "1".into(),
+                surface: Entry::tag_for(Floor::Strict),
+            }],
+            &surface,
+        );
+        let line = out.lines().nth(1).unwrap();
+        assert_eq!(line, r#"{"id":"a","path":"a.php","hash":"1","surface":"strict"}"#);
+        let back = parse(&out);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].captured_at(), Floor::Strict);
+    }
+
+    #[test]
+    fn a_strict_captured_entry_is_dormant_on_a_default_run() {
+        // A-G10's rule, stated on the entry rather than only on the id: the run that
+        // never analyzed the strict surface must not call the entry unmatched.
+        let entries = vec![Entry {
+            id: "call.on-null".into(),
+            path: "a".into(),
+            hash: "h".into(),
+            surface: Some("strict".into()),
+        }];
+        let m = Matcher::new(&entries);
+        // The id itself IS fireable at default — so only the capture rung can make
+        // this dormant, which is exactly what the per-entry tag buys.
+        assert_eq!(m.stale_count_within(Floor::Default, |_| true), 0, "dormant on a default run");
+        assert_eq!(m.stale_count_within(Floor::Contracts, |_| true), 0, "still below strict");
+        assert_eq!(m.stale_count_within(Floor::Strict, |_| true), 1, "judged on a strict run");
+    }
+
+    #[test]
+    fn a_default_captured_entry_is_judged_on_every_run() {
+        let entries = vec![Entry {
+            id: "call.on-null".into(),
+            path: "a".into(),
+            hash: "h".into(),
+            surface: None,
+        }];
+        let m = Matcher::new(&entries);
+        for rung in [Floor::Default, Floor::Contracts, Floor::Strict] {
+            assert_eq!(m.stale_count_within(rung, |_| true), 1, "{rung:?}");
+        }
+    }
+
+    #[test]
+    fn the_surface_tag_is_not_part_of_the_match_key() {
+        // A finding matches its entry by `(id, path, hash)`; which surface either was
+        // seen on is bookkeeping, never identity.
+        let e = Entry {
+            id: "x".into(),
+            path: "a".into(),
+            hash: "h".into(),
+            surface: Some("strict".into()),
+        };
+        let mut m = Matcher::new(&[e]);
+        assert!(m.take("x", "a", "h"), "a strict-captured entry still matches");
     }
 }

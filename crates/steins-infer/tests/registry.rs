@@ -13,7 +13,8 @@ use steins_infer::{
     ALL_EMITTABLE_IDS, CALL_ON_NULL_ID, CALL_TOO_FEW_ARGUMENTS_ID, CALL_TOO_MANY_ARGUMENTS_ID,
     CALL_UNDEFINED_FUNCTION_ID, CALL_UNDEFINED_METHOD_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID,
     CLASS_UNDEFINED_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, DIAGNOSTIC_IDS,
-    DIAGNOSTIC_REGISTRY, EFFECT_ID, EFFECT_LISKOV_ID, FACET_ORIGIN, Facet, ID, Layer,
+    DIAGNOSTIC_REGISTRY, EFFECT_ID, EFFECT_LISKOV_ID, FACET_ORIGIN, Facet, Floor, ID, Layer,
+    OFFSET_MAYBE_MISSING_ID, OFFSET_UNDECLARED_ID, surface_floor,
     OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID, Origin, PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID,
     PHPDOC_UNDEFINED_METHOD_ID, PROP_MISMATCH_ID, READONLY_REASSIGNED_ID, REGISTERED_NOT_YET_EMITTED,
     RETURN_ID, RETURN_MISMATCH_ID, SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID, THROW_LISKOV_ID,
@@ -54,7 +55,7 @@ fn registry_has_no_unemittable_ids() {
     }
 
     // Every registered id is accounted for by exactly one carve-out.
-    for &(id, _) in DIAGNOSTIC_REGISTRY {
+    for &(id, ..) in DIAGNOSTIC_REGISTRY {
         assert!(
             emittable.contains(id) || pending.contains(id),
             "registered id `{id}` is neither emittable nor registered-ahead-of-emission — \
@@ -73,7 +74,7 @@ fn registry_has_no_unemittable_ids() {
 
     // Cardinality: registry == emittable + pending (disjoint), so set equality.
     assert_eq!(DIAGNOSTIC_REGISTRY.len(), ALL_EMITTABLE_IDS.len() + REGISTERED_NOT_YET_EMITTED.len());
-    let regset: HashSet<&str> = DIAGNOSTIC_REGISTRY.iter().map(|(i, _)| *i).collect();
+    let regset: HashSet<&str> = DIAGNOSTIC_REGISTRY.iter().map(|(i, ..)| *i).collect();
     assert_eq!(regset.len(), DIAGNOSTIC_REGISTRY.len(), "duplicate id in DIAGNOSTIC_REGISTRY");
     assert_eq!(emittable.len(), ALL_EMITTABLE_IDS.len(), "duplicate id in ALL_EMITTABLE_IDS");
     assert_eq!(pending.len(), REGISTERED_NOT_YET_EMITTED.len(), "duplicate id in REGISTERED_NOT_YET_EMITTED");
@@ -83,7 +84,7 @@ fn registry_has_no_unemittable_ids() {
 /// truth): same ids, same order.
 #[test]
 fn diagnostic_ids_is_derived_from_registry() {
-    let derived: Vec<&str> = DIAGNOSTIC_REGISTRY.iter().map(|(i, _)| *i).collect();
+    let derived: Vec<&str> = DIAGNOSTIC_REGISTRY.iter().map(|(i, ..)| *i).collect();
     assert_eq!(DIAGNOSTIC_IDS, derived.as_slice());
 }
 
@@ -236,4 +237,64 @@ fn facet_wire_spellings() {
     assert_eq!(Facet::Origin(Origin::Direct).key(), "origin");
     assert_eq!(Facet::Origin(Origin::Direct).value(), "direct");
     assert_eq!(Facet::Origin(Origin::Propagated).value(), "propagated");
+}
+
+// ---------------------------------------------------------------------------
+// The `surface_floor` attribute (ADR-0062 A-G10)
+// ---------------------------------------------------------------------------
+
+/// The floor column is **total**: every registered id has one, and the floor lookup
+/// agrees with the registry row (the same binding `layer()` gets).
+#[test]
+fn every_registered_id_has_a_surface_floor() {
+    for &(id, _, floor) in DIAGNOSTIC_REGISTRY {
+        assert_eq!(
+            surface_floor(id),
+            Some(floor),
+            "`{id}`'s floor lookup must agree with its registry row"
+        );
+    }
+    assert_eq!(surface_floor("not.a.real.id"), None);
+}
+
+/// **The byte-identity argument, mechanized.** ADR-0062 A-G10 replaced the profile
+/// engine's layer-*set* selection with the floor ladder, on the claim that the floor
+/// is a faithful unification of what the built-ins already selected. That claim is
+/// exactly this rule — proof/mechanics/debug at `default`, contract at `contracts` —
+/// and it is checked here for EVERY id rather than argued once in a comment.
+///
+/// The only admitted exception is the pair ADR-0062 S6 itself introduces: the offset
+/// family's strict leg sits in the contract layer at the `strict` floor, which is
+/// the whole reason a floor attribute was needed (a layer can now straddle rungs).
+#[test]
+fn floors_reproduce_the_pre_s6_layer_selection() {
+    let strict_leg = [OFFSET_UNDECLARED_ID, OFFSET_MAYBE_MISSING_ID];
+    for &(id, layer_of, floor) in DIAGNOSTIC_REGISTRY {
+        if strict_leg.contains(&id) {
+            assert_eq!(layer_of, Layer::Contract, "the strict leg is contract-layer");
+            assert_eq!(floor, Floor::Strict, "`{id}` is S6's measurement-first pair");
+            continue;
+        }
+        let expected = match layer_of {
+            // `default` = proof + mechanics; the debug lane displays everywhere.
+            Layer::Proof | Layer::Mechanics | Layer::Debug => Floor::Default,
+            // `contracts` was the first built-in whose layer set held these.
+            Layer::Contract => Floor::Contracts,
+        };
+        assert_eq!(
+            floor, expected,
+            "`{id}` ({layer_of:?}) must keep the floor that reproduces its pre-S6 selection"
+        );
+    }
+}
+
+/// The ladder is a total order, smallest-first — what `floor(id) <= rung` relies on.
+#[test]
+fn the_floor_ladder_is_cumulative() {
+    assert!(Floor::Default < Floor::Contracts);
+    assert!(Floor::Contracts < Floor::Strict);
+    for f in [Floor::Default, Floor::Contracts, Floor::Strict] {
+        assert_eq!(Floor::parse(f.as_str()), Some(f), "rung spelling round-trips");
+    }
+    assert_eq!(Floor::parse("nope"), None);
 }

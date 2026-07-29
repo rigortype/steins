@@ -16,9 +16,20 @@
 //!   `docs/notes/20260724-g1-throw-origin-measurement.md` (158 direct vs 43,805
 //!   propagated on the legacy monorepo).
 //! * `contracts` — default plus the whole contract layer.
+//! * `strict` — contracts plus the strict-floor ids (ADR-0062 A-G10): the offset
+//!   family's `offset.undeclared` / `offset.maybe-missing` leg (issue #51).
 //!
-//! `strict` and `boundary` are **reserved** names (ADR-0042): selecting *or*
-//! defining one is a config error until their ADR lands.
+//! # The rung ladder (ADR-0062 A-G10)
+//!
+//! Profiles select by **rung**, not by layer set: the registry gives every id a
+//! `surface_floor`, and a surface admits an id when `floor(id) <= rung`. The
+//! built-ins are the cumulative ladder `default ⊂ contracts ⊂ strict`. This is a
+//! restatement of the pre-S6 layer-set selection, not a re-levelling — see
+//! [`Surface::surfaces_id`] — and it is what lets ONE layer hold ids at two rungs
+//! (the contract layer now does).
+//!
+//! `boundary` is still a **reserved** name (ADR-0042): selecting *or* defining it
+//! is a config error until its ADR lands.
 //!
 //! # User profiles (§5)
 //!
@@ -37,12 +48,13 @@
 //! inline ignores → baseline. `[[policy]]` is issue #15 / slice 3: this slice
 //! ships the pipeline with a no-op policy stage and a clear seam (see the CLI).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::fmt;
 
 use steins_infer::{
     DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, DIAGNOSTIC_REGISTRY, Diagnostic, Facet,
-    Layer, Origin, THROW_UNDECLARED_ID, layer, pattern_is_known, pattern_matches,
+    Floor, Layer, Origin, THROW_UNDECLARED_ID, layer, pattern_is_known, pattern_matches,
+    surface_floor,
 };
 
 /// The default profile name, used when neither `--profile` nor `[check] profile`
@@ -50,11 +62,13 @@ use steins_infer::{
 pub const DEFAULT: &str = "default";
 
 /// The reserved profile names (ADR-0042): selecting or defining one errors until
-/// the boundary-profile ADR lands.
-const RESERVED: &[&str] = &["strict", "boundary"];
+/// its ADR lands. `strict` left this list at ADR-0062 S6 — A-G10 is its ADR — and
+/// is now a built-in; `boundary` is still deferred.
+const RESERVED: &[&str] = &["boundary"];
 
-/// The built-in profile names shipped in v1 (ADR-0050 §5 / G1 amendment).
-const BUILTINS: &[&str] = &["default", "contracts", "throws-direct"];
+/// The built-in profile names (ADR-0050 §5 / G1 amendment, extended by ADR-0062
+/// A-G10's `strict` rung).
+const BUILTINS: &[&str] = &["default", "contracts", "throws-direct", "strict"];
 
 /// Whether a surfaced finding fails the run or is merely reported (ADR-0050 §7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +113,7 @@ pub struct ProfileConfigs(pub BTreeMap<String, UserProfile>);
 /// usage/config error — the CLI maps it to exit 2.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
-    /// A reserved name (`strict`/`boundary`) was selected or extended as a profile.
+    /// A reserved name (`boundary`) was selected or extended as a profile.
     ReservedName(String),
     /// A reserved name was defined as `[profile.<name>]`.
     ReservedDefinition(String),
@@ -132,7 +146,7 @@ impl fmt::Display for ConfigError {
             ),
             ConfigError::Unknown(n) => write!(
                 f,
-                "unknown profile `{n}` (built-ins: default, contracts, throws-direct; or define [profile.{n}])"
+                "unknown profile `{n}` (built-ins: default, contracts, throws-direct, strict; or define [profile.{n}])"
             ),
             ConfigError::Cycle(chain) => {
                 write!(f, "profile `extends` cycle: {}", chain.join(" -> "))
@@ -152,8 +166,11 @@ impl fmt::Display for ConfigError {
 pub struct Surface {
     /// The name this surface resolved from (for the baseline capture header, §8).
     pub name: String,
-    /// Layers whose findings are on the surface.
-    layers: HashSet<Layer>,
+    /// The **rung** on the cumulative ladder `default ⊂ contracts ⊂ strict`
+    /// (ADR-0062 A-G10): an id is admitted when its registry [`Floor`] is at or
+    /// below this. Replaces the pre-S6 layer *set* — see [`Surface::layers_on`] for
+    /// why that replacement is behavior-preserving.
+    rung: Floor,
     /// Id patterns forced on beyond the layer set (`throws-direct` uses this for
     /// `throw.undeclared`; user profiles for `enable`).
     enable: Vec<String>,
@@ -189,9 +206,9 @@ fn layer_always_on(l: Layer) -> bool {
 
 impl Surface {
     fn builtin(name: &str) -> Option<Surface> {
-        let base = |layers: &[Layer]| Surface {
+        let base = |rung: Floor| Surface {
             name: name.to_owned(),
-            layers: layers.iter().copied().collect(),
+            rung,
             enable: Vec::new(),
             disable: Vec::new(),
             warn: Vec::new(),
@@ -199,12 +216,16 @@ impl Surface {
         };
         match name {
             // proof + mechanics (§3 / G1 amendment: unconditional).
-            "default" => Some(base(&[Layer::Proof, Layer::Mechanics])),
-            // default + the whole contract layer.
-            "contracts" => Some(base(&[Layer::Proof, Layer::Mechanics, Layer::Contract])),
+            "default" => Some(base(Floor::Default)),
+            // default + the whole contract layer, as it stood before S6 — which is
+            // exactly "every id whose floor is at or below `contracts`".
+            "contracts" => Some(base(Floor::Contracts)),
+            // contracts + the strict-floor ids (ADR-0062 A-G10). Strictly cumulative:
+            // it adds ids, never removes or re-levels one.
+            "strict" => Some(base(Floor::Strict)),
             // default + throw.undeclared WHERE origin = direct (the §4 facet).
             "throws-direct" => {
-                let mut s = base(&[Layer::Proof, Layer::Mechanics]);
+                let mut s = base(Floor::Default);
                 s.enable.push(THROW_UNDECLARED_ID.to_owned());
                 s.origin_direct_only = true;
                 Some(s)
@@ -216,13 +237,25 @@ impl Surface {
     /// Whether id `id` is on this surface, **facet-agnostic** (§8): the id-level
     /// question, used to compute the baseline capture id-set and the dormant/stale
     /// partition. Mechanics is unconditionally on (disable-exempt, §1/§5).
+    ///
+    /// The layer-set membership test this used to run became the ladder test
+    /// `floor(id) <= rung` at ADR-0062 S6. That substitution is behavior-preserving
+    /// for every pre-S6 id — proof/mechanics ids carry `Floor::Default` and were in
+    /// every built-in's layer set; contract ids carry `Floor::Contracts` and were in
+    /// `contracts`'s alone — and `tests/profile.rs` pins it id-by-id against the
+    /// registry rather than trusting the argument.
     #[must_use]
     pub fn surfaces_id(&self, id: &str) -> bool {
         let Some(l) = layer(id) else { return false };
         if layer_always_on(l) {
             return true;
         }
-        let mut on = self.layers.contains(&l);
+        // The debug lane's capture exemption (§4/§8) is a LAYER property, decided
+        // before the ladder: a dump displays everywhere but is never captured, so
+        // its floor never gets a vote. Keeping this arm here (rather than inventing
+        // an unreachable floor) preserves the pre-S6 reading exactly, including the
+        // corner where an explicit `enable` pattern below forces a debug id on.
+        let mut on = l != Layer::Debug && surface_floor(id).is_some_and(|f| f <= self.rung);
         if self.enable.iter().any(|p| pattern_matches(p, id)) {
             on = true;
         }
@@ -230,6 +263,13 @@ impl Surface {
             on = false;
         }
         on
+    }
+
+    /// The rung this surface resolved to (ADR-0062 A-G10) — what a baseline entry
+    /// records as its capture surface.
+    #[must_use]
+    pub const fn rung(&self) -> Floor {
+        self.rung
     }
 
     /// Whether a concrete finding is on this surface (§5/§6). Adds the facet
@@ -281,12 +321,24 @@ impl Surface {
 
     /// The named layers on this surface, sorted (ADR-0054 §9: the doctor's
     /// "surface described" line). Mechanics is always-on regardless of membership
-    /// (§1); the built-in surfaces carry it in the set explicitly, so this is a
-    /// faithful summary. The debug lane is display-only and never a surface layer
-    /// (§8 capture/display split), so it does not appear here.
+    /// (§1); every rung carries it, so this is a faithful summary. The debug lane is
+    /// display-only and never a surface layer (§8 capture/display split), so it does
+    /// not appear here.
+    ///
+    /// Derived from the rung rather than a stored set, and byte-identical to the
+    /// pre-S6 built-in sets: `default` was `{proof, mechanics}`, `contracts` added
+    /// `contract`. `strict` names the SAME three layers — it is a floor within the
+    /// contract layer, not a fourth layer (A-G10), which is precisely why the
+    /// registry needed a floor attribute instead of another `Layer` variant.
     #[must_use]
     pub fn layers_on(&self) -> Vec<&'static str> {
-        let mut v: Vec<&'static str> = self.layers.iter().map(|l| l.as_str()).collect();
+        let layers: &[Layer] = match self.rung {
+            Floor::Default => &[Layer::Proof, Layer::Mechanics],
+            Floor::Contracts | Floor::Strict => {
+                &[Layer::Proof, Layer::Mechanics, Layer::Contract]
+            }
+        };
+        let mut v: Vec<&'static str> = layers.iter().map(|l| l.as_str()).collect();
         v.sort_unstable();
         v
     }
@@ -297,7 +349,7 @@ impl Surface {
     pub fn surface_ids(&self) -> Vec<String> {
         let mut ids: Vec<String> = DIAGNOSTIC_REGISTRY
             .iter()
-            .map(|(id, _)| *id)
+            .map(|(id, ..)| *id)
             .filter(|id| self.surfaces_id(id))
             .map(str::to_owned)
             .collect();
@@ -384,7 +436,8 @@ mod tests {
     use super::*;
     use steins_infer::{
         CALL_ON_NULL_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, EFFECT_ID,
-        PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID, SUPPRESS_UNMATCHED_ID, THROW_LISKOV_ID,
+        OFFSET_MAYBE_MISSING_ID, OFFSET_UNDECLARED_ID, PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID,
+        SUPPRESS_UNMATCHED_ID, THROW_LISKOV_ID,
     };
 
     fn diag(id: &'static str, facet: Option<Facet>) -> Diagnostic {
@@ -462,10 +515,8 @@ mod tests {
 
     #[test]
     fn flag_selection_of_reserved_name_errors() {
-        assert_eq!(
-            empty().resolve(Some("strict")),
-            Err(ConfigError::ReservedName("strict".to_owned()))
-        );
+        // `boundary` is the one still-deferred reserved name (ADR-0042); `strict`
+        // left the list at ADR-0062 S6 and is exercised as a built-in below.
         assert_eq!(
             empty().resolve(Some("boundary")),
             Err(ConfigError::ReservedName("boundary".to_owned()))
@@ -480,10 +531,10 @@ mod tests {
     #[test]
     fn defining_reserved_or_builtin_errors() {
         let mut m = BTreeMap::new();
-        m.insert("strict".to_owned(), UserProfile::default());
+        m.insert("boundary".to_owned(), UserProfile::default());
         assert_eq!(
             ProfileConfigs(m).resolve(None),
-            Err(ConfigError::ReservedDefinition("strict".to_owned()))
+            Err(ConfigError::ReservedDefinition("boundary".to_owned()))
         );
 
         let mut m = BTreeMap::new();
@@ -491,6 +542,14 @@ mod tests {
         assert_eq!(
             ProfileConfigs(m).resolve(None),
             Err(ConfigError::BuiltinRedefinition("default".to_owned()))
+        );
+
+        // `strict` is a built-in now, so redefining it is the builtin error.
+        let mut m = BTreeMap::new();
+        m.insert("strict".to_owned(), UserProfile::default());
+        assert_eq!(
+            ProfileConfigs(m).resolve(None),
+            Err(ConfigError::BuiltinRedefinition("strict".to_owned()))
         );
     }
 
@@ -611,6 +670,88 @@ mod tests {
         );
         let s2 = ProfileConfigs(m2).resolve(Some("try")).unwrap();
         assert!(s2.is_surfaced(&diag(DEBUG_TYPE_ID, None)), "the explicit pair ignores disable");
+    }
+
+    #[test]
+    fn strict_is_contracts_plus_the_strict_floor_ids() {
+        let s = empty().resolve(Some("strict")).unwrap();
+        assert_eq!(s.name, "strict");
+        assert_eq!(s.rung(), Floor::Strict);
+        // Everything contracts shows, still shown.
+        assert!(s.is_surfaced(&diag(CALL_ON_NULL_ID, None))); // proof
+        assert!(s.is_surfaced(&diag(SUPPRESS_UNMATCHED_ID, None))); // mechanics
+        assert!(s.is_surfaced(&diag(PARAM_MISMATCH_ID, None))); // contract
+        assert!(s.is_surfaced(&diag(THROW_LISKOV_ID, None)));
+        // …plus the strict-floor ids.
+        assert!(s.is_surfaced(&diag(OFFSET_UNDECLARED_ID, None)));
+        assert!(s.is_surfaced(&diag(OFFSET_MAYBE_MISSING_ID, None)));
+    }
+
+    #[test]
+    fn the_strict_floor_ids_are_invisible_below_strict() {
+        // The measurement-first posture, at the surface: S6's ids exist and are
+        // emitted, but no profile below `strict` displays or captures them — which
+        // is what keeps default/contracts byte-identical to their pre-S6 output.
+        for profile in [None, Some("contracts"), Some("throws-direct")] {
+            let s = empty().resolve(profile).unwrap();
+            for id in [OFFSET_UNDECLARED_ID, OFFSET_MAYBE_MISSING_ID] {
+                assert!(!s.is_surfaced(&diag(id, None)), "`{id}` must not display on {profile:?}");
+                assert!(!s.surfaces_id(id), "`{id}` must not be captured on {profile:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_ladder_is_cumulative_across_the_whole_registry() {
+        // `default ⊂ contracts ⊂ strict` as SETS, checked over every registered id
+        // rather than asserted: a rung may only add ids, never drop or re-level one.
+        let d = empty().resolve(None).unwrap();
+        let c = empty().resolve(Some("contracts")).unwrap();
+        let s = empty().resolve(Some("strict")).unwrap();
+        for &(id, ..) in DIAGNOSTIC_REGISTRY {
+            assert!(!d.surfaces_id(id) || c.surfaces_id(id), "`{id}`: default ⊄ contracts");
+            assert!(!c.surfaces_id(id) || s.surfaces_id(id), "`{id}`: contracts ⊄ strict");
+        }
+        assert!(d.surface_ids().len() < c.surface_ids().len(), "contracts adds ids");
+        assert!(c.surface_ids().len() < s.surface_ids().len(), "strict adds ids");
+    }
+
+    #[test]
+    fn strict_names_the_same_three_layers_as_contracts() {
+        // `strict` is a FLOOR within the contract layer, not a fourth layer (A-G10),
+        // so the doctor's "surface described" line reads identically.
+        let c = empty().resolve(Some("contracts")).unwrap();
+        let s = empty().resolve(Some("strict")).unwrap();
+        assert_eq!(c.layers_on(), s.layers_on());
+        assert_eq!(s.layers_on(), vec!["contract", "mechanics", "proof"]);
+        assert_eq!(empty().resolve(None).unwrap().layers_on(), vec!["mechanics", "proof"]);
+    }
+
+    #[test]
+    fn a_user_profile_inherits_the_rung_it_extends() {
+        let mut m = BTreeMap::new();
+        m.insert(
+            "house".to_owned(),
+            UserProfile { extends: Some("strict".to_owned()), ..Default::default() },
+        );
+        let s = ProfileConfigs(m).resolve(Some("house")).unwrap();
+        assert_eq!(s.rung(), Floor::Strict);
+        assert!(s.is_surfaced(&diag(OFFSET_MAYBE_MISSING_ID, None)));
+    }
+
+    #[test]
+    fn a_default_profile_can_still_enable_one_strict_id_explicitly() {
+        // The `enable` channel is orthogonal to the ladder (it always was): a project
+        // that wants ONE strict id without the rest keeps that path.
+        let mut m = BTreeMap::new();
+        m.insert(
+            "just-undeclared".to_owned(),
+            UserProfile { enable: vec![OFFSET_UNDECLARED_ID.to_owned()], ..Default::default() },
+        );
+        let s = ProfileConfigs(m).resolve(Some("just-undeclared")).unwrap();
+        assert!(s.is_surfaced(&diag(OFFSET_UNDECLARED_ID, None)));
+        assert!(!s.is_surfaced(&diag(OFFSET_MAYBE_MISSING_ID, None)), "the other stays off");
+        assert!(!s.is_surfaced(&diag(PARAM_MISMATCH_ID, None)), "the rung is still default");
     }
 
     #[test]

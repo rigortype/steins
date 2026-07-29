@@ -29,7 +29,8 @@ use crate::{
     CALL_ON_NULL_ID, CALL_TOO_FEW_ARGUMENTS_ID, CALL_TOO_MANY_ARGUMENTS_ID,
     CALL_UNDEFINED_FUNCTION_ID, CALL_UNDEFINED_METHOD_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID,
     CLASS_UNDEFINED_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, EFFECT_ID,
-    EFFECT_LISKOV_ID, ID, OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID, PARAM_MISMATCH_ID,
+    EFFECT_LISKOV_ID, ID, OFFSET_MAYBE_MISSING_ID, OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID,
+    OFFSET_UNDECLARED_ID, PARAM_MISMATCH_ID,
     PHPDOC_PROP_MISMATCH_ID, PHPDOC_UNDEFINED_METHOD_ID, PROP_MISMATCH_ID, READONLY_REASSIGNED_ID,
     RETURN_ID, RETURN_MISMATCH_ID, THROW_LISKOV_ID, THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID,
 };
@@ -158,54 +159,126 @@ pub fn declared_facet(id: &str) -> Option<&'static str> {
     if id == THROW_UNDECLARED_ID { Some(FACET_ORIGIN) } else { None }
 }
 
-/// The diagnostic-id registry (ADR-0022/0050): the closed set of ids Steins emits,
-/// each paired with its [`Layer`] (ADR-0050 §2 makes the layer a first-class
-/// registry attribute). This is the **single source of truth** — `DIAGNOSTIC_IDS`
-/// is derived from it, `layer()` reads it, and registering an id here without a
-/// layer does not compile (every entry is an `(id, Layer)` tuple). A workspace
-/// totality test asserts every *emittable* id constant appears here.
+/// The **lowest profile rung** on which a registered id may reach the surface
+/// (ADR-0062 A-G10). The profile ladder is cumulative — `default ⊂ contracts ⊂
+/// strict` — so an id is admitted by a profile exactly when its floor is at or
+/// below that profile's rung. Ordered smallest-first: `Default < Contracts <
+/// Strict`, and the `Ord` derive is what the admission test uses.
+///
+/// This is a **unification of the pre-S6 layer selection**, not a new axis: the
+/// built-ins used to name layer *sets* (`default` = proof+mechanics, `contracts` =
+/// those plus contract), and every id's floor below is the lowest built-in whose
+/// set contained its layer. The one thing the floor adds is that a *single* layer
+/// can now straddle two rungs — the contract layer holds both floor-`Contracts`
+/// ids (everything that shipped before S6) and floor-`Strict` ids (the offset
+/// family's strict leg), which a layer-set selection could not express.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Floor {
+    /// On the bare `steins check` surface (and therefore every surface above it).
+    Default,
+    /// Reached first by the `contracts` opt-up stage.
+    Contracts,
+    /// Reached only by the `strict` opt-up stage (ADR-0062 A-G10).
+    Strict,
+}
+
+impl Floor {
+    /// The wire/config spelling (`"default"|"contracts"|"strict"`) — also the rung
+    /// name a baseline entry records as its capture surface (A-G10).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Floor::Default => "default",
+            Floor::Contracts => "contracts",
+            Floor::Strict => "strict",
+        }
+    }
+
+    /// Parse a rung spelling back (the baseline round-trip). Deliberately an inherent
+    /// method, not `FromStr`: there is no error type worth naming and the tolerant
+    /// `None` reading is the whole contract. Unknown spellings
+    /// yield `None`; the caller decides the tolerant reading.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Floor> {
+        match s {
+            "default" => Some(Floor::Default),
+            "contracts" => Some(Floor::Contracts),
+            "strict" => Some(Floor::Strict),
+            _ => None,
+        }
+    }
+}
+
+/// The diagnostic-id registry (ADR-0022/0050/0062): the closed set of ids Steins
+/// emits, each paired with its [`Layer`] (ADR-0050 §2 makes the layer a first-class
+/// registry attribute) and its [`Floor`] (ADR-0062 A-G10's one added attribute).
+/// This is the **single source of truth** — `DIAGNOSTIC_IDS` is derived from it,
+/// `layer()` and `surface_floor()` read it, and registering an id here without both
+/// attributes does not compile (every entry is an `(id, Layer, Floor)` triple). A
+/// workspace totality test asserts every *emittable* id constant appears here.
+///
+/// **The floor column reproduces the pre-S6 profile behavior exactly** and is
+/// pinned by `tests/registry.rs`: proof, mechanics and debug ids carry
+/// `Floor::Default` (the `default` built-in's layer set), every contract id that
+/// existed before S6 carries `Floor::Contracts` (reached first by the `contracts`
+/// built-in), and only the two S6 ids carry `Floor::Strict`.
 ///
 /// `@steins-ignore` ids are validated against it (prefix-aware), and the baseline
 /// records these ids verbatim.
-pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer)] = &[
+pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // proof — runtime survivability (zero-FP, red on sight).
-    (ID, Layer::Proof),
-    (RETURN_ID, Layer::Proof),
-    (CALL_ON_NULL_ID, Layer::Proof),
-    (PROP_MISMATCH_ID, Layer::Proof),
-    (READONLY_REASSIGNED_ID, Layer::Proof),
+    (ID, Layer::Proof, Floor::Default),
+    (RETURN_ID, Layer::Proof, Floor::Default),
+    (CALL_ON_NULL_ID, Layer::Proof, Floor::Default),
+    (PROP_MISMATCH_ID, Layer::Proof, Floor::Default),
+    (READONLY_REASSIGNED_ID, Layer::Proof, Floor::Default),
     // proof — finding-breadth family (ADR-0049): registered in S1, emitted from
     // S2+ (see `REGISTERED_NOT_YET_EMITTED`). No emit site exists yet.
-    (CALL_UNDEFINED_FUNCTION_ID, Layer::Proof),
-    (CALL_UNDEFINED_METHOD_ID, Layer::Proof),
-    (CLASS_UNDEFINED_ID, Layer::Proof),
-    (CALL_TOO_FEW_ARGUMENTS_ID, Layer::Proof),
-    (CALL_TOO_MANY_ARGUMENTS_ID, Layer::Proof),
-    (CALL_UNKNOWN_NAMED_ARGUMENT_ID, Layer::Proof),
-    (OFFSET_MISSING_ID, Layer::Proof),
-    (OFFSET_ON_UNSUPPORTED_ID, Layer::Proof),
+    (CALL_UNDEFINED_FUNCTION_ID, Layer::Proof, Floor::Default),
+    (CALL_UNDEFINED_METHOD_ID, Layer::Proof, Floor::Default),
+    (CLASS_UNDEFINED_ID, Layer::Proof, Floor::Default),
+    (CALL_TOO_FEW_ARGUMENTS_ID, Layer::Proof, Floor::Default),
+    (CALL_TOO_MANY_ARGUMENTS_ID, Layer::Proof, Floor::Default),
+    (CALL_UNKNOWN_NAMED_ARGUMENT_ID, Layer::Proof, Floor::Default),
+    (OFFSET_MISSING_ID, Layer::Proof, Floor::Default),
+    (OFFSET_ON_UNSUPPORTED_ID, Layer::Proof, Floor::Default),
     // contract — declared-contract acceptance (increase tripwires).
-    (PARAM_MISMATCH_ID, Layer::Contract),
-    (RETURN_MISMATCH_ID, Layer::Contract),
-    (PHPDOC_PROP_MISMATCH_ID, Layer::Contract),
-    (THROW_UNDECLARED_ID, Layer::Contract),
-    (THROW_LISKOV_ID, Layer::Contract),
-    (EFFECT_ID, Layer::Contract),
-    (EFFECT_LISKOV_ID, Layer::Contract),
+    (PARAM_MISMATCH_ID, Layer::Contract, Floor::Contracts),
+    (RETURN_MISMATCH_ID, Layer::Contract, Floor::Contracts),
+    (PHPDOC_PROP_MISMATCH_ID, Layer::Contract, Floor::Contracts),
+    (THROW_UNDECLARED_ID, Layer::Contract, Floor::Contracts),
+    (THROW_LISKOV_ID, Layer::Contract, Floor::Contracts),
+    (EFFECT_ID, Layer::Contract, Floor::Contracts),
+    (EFFECT_LISKOV_ID, Layer::Contract, Floor::Contracts),
     // contract — finding-breadth declared-receiver lane (ADR-0049 §8), registered
     // in S1, emitted from S6.
-    (PHPDOC_UNDEFINED_METHOD_ID, Layer::Contract),
+    (PHPDOC_UNDEFINED_METHOD_ID, Layer::Contract, Floor::Contracts),
+    // contract — the offset family's STRICT leg (ADR-0062 A-G10, issue #51).
+    // Contract-layer evidence (the Asserted declared envelope), admitted only by
+    // the `strict` rung.
+    //
+    // NOTE (A-G10's END state vs. THIS slice): the amendment puts
+    // `offset.undeclared` at floor `Contracts` once the corpus says it is
+    // zero-FP. That promotion is deliberately NOT taken here. The calibrated-
+    // defaults doctrine is measure → judge → enable, so S6 ships BOTH ids at
+    // `Floor::Strict` and the slice's corpus triage is the evidence the owner
+    // promotes on. Moving `offset.undeclared` to `Floor::Contracts` is a
+    // one-line change to this row plus its registry test.
+    (OFFSET_UNDECLARED_ID, Layer::Contract, Floor::Strict),
+    (OFFSET_MAYBE_MISSING_ID, Layer::Contract, Floor::Strict),
     // mechanics — apparatus hygiene (red on sight, suppression-exempt).
-    (SUPPRESS_UNMATCHED_ID, Layer::Mechanics),
-    (SUPPRESS_UNKNOWN_ID, Layer::Mechanics),
-    (UNKNOWN_LABEL_ID, Layer::Mechanics),
+    (SUPPRESS_UNMATCHED_ID, Layer::Mechanics, Floor::Default),
+    (SUPPRESS_UNKNOWN_ID, Layer::Mechanics, Floor::Default),
+    (UNKNOWN_LABEL_ID, Layer::Mechanics, Floor::Default),
     // debug — the dump surface (ADR-0053): requested introspection, an answered
     // question. Registered in D1 ahead of emission (in REGISTERED_NOT_YET_EMITTED
     // until D3/D4). Suppression- and baseline-exempt (§4), fp-gate counter-exempt
-    // (§8): a dump is not a finding.
-    (DEBUG_TYPE_ID, Layer::Debug),
-    (DEBUG_PHPDOC_TYPE_ID, Layer::Debug),
-    (DEBUG_VAR_DUMP_ID, Layer::Debug),
+    // (§8): a dump is not a finding. The floor is `Default` (a dump displays on
+    // every surface, §4) but is INERT for capture: the debug lane's exclusion from
+    // `surfaces_id` is a *layer* property, decided before the ladder is consulted.
+    (DEBUG_TYPE_ID, Layer::Debug, Floor::Default),
+    (DEBUG_PHPDOC_TYPE_ID, Layer::Debug, Floor::Default),
+    (DEBUG_VAR_DUMP_ID, Layer::Debug, Floor::Default),
 ];
 
 /// The flat id list, **derived** from [`DIAGNOSTIC_REGISTRY`] so there is exactly
@@ -230,7 +303,15 @@ const fn derive_ids() -> [&'static str; DIAGNOSTIC_REGISTRY.len()] {
 /// [`pattern_is_known`]'s concern, not the layer attribute's.
 #[must_use]
 pub fn layer(id: &str) -> Option<Layer> {
-    DIAGNOSTIC_REGISTRY.iter().find(|(i, _)| *i == id).map(|(_, l)| *l)
+    DIAGNOSTIC_REGISTRY.iter().find(|(i, ..)| *i == id).map(|(_, l, _)| *l)
+}
+
+/// The [`Floor`] a diagnostic `id` carries — the lowest profile rung that admits
+/// it (ADR-0062 A-G10) — or `None` if `id` is not registered. Exact-id lookup, the
+/// sibling of [`layer`].
+#[must_use]
+pub fn surface_floor(id: &str) -> Option<Floor> {
+    DIAGNOSTIC_REGISTRY.iter().find(|(i, ..)| *i == id).map(|(.., f)| *f)
 }
 
 /// The result of applying inline ignores to a batch of object-level findings.

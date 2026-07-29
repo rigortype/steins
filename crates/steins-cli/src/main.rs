@@ -427,7 +427,14 @@ fn write_baseline(
             let hash = texts
                 .get(&d.path)
                 .map_or_else(String::new, |t| baseline::entry_hash(d.id, &rel, t, d.line));
-            baseline::Entry { id: d.id.to_owned(), path: rel, hash }
+            // The per-entry capture rung (ADR-0062 A-G10). `None` at the `default`
+            // rung, so a default capture writes the pre-S6 bytes exactly.
+            baseline::Entry {
+                id: d.id.to_owned(),
+                path: rel,
+                hash,
+                surface: baseline::Entry::tag_for(surface.rung()),
+            }
         })
         .collect();
     let n = entries.len();
@@ -479,7 +486,7 @@ fn match_baseline(
             reported.push(d);
         }
     }
-    let stale = matcher.stale_count_within(|id| surface.surfaces_id(id));
+    let stale = matcher.stale_count_within(surface.rung(), |id| surface.surfaces_id(id));
 
     // The drowns-loudly notice (ADR-0050 §8): ids the current surface admits that
     // the captured surface did not. A pre-ADR-0050 header (no capture surface) can

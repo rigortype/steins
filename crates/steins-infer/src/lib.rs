@@ -24,9 +24,9 @@ pub mod suppress;
 
 pub use dam::{DamFacts, DamKind, DamSite, dam_facts};
 pub use suppress::{
-    DIAGNOSTIC_IDS, DIAGNOSTIC_REGISTRY, FACET_ORIGIN, Facet, InlineOutcome, Layer, Origin,
+    DIAGNOSTIC_IDS, DIAGNOSTIC_REGISTRY, FACET_ORIGIN, Facet, Floor, InlineOutcome, Layer, Origin,
     SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID, apply_inline_ignores, declared_facet, layer,
-    pattern_is_known, pattern_matches,
+    pattern_is_known, pattern_matches, surface_floor,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -176,6 +176,29 @@ pub const OFFSET_MISSING_ID: &str = "offset.missing";
 /// scalar/null → warning). Emitted from S3.
 pub const OFFSET_ON_UNSUPPORTED_ID: &str = "offset.on-unsupported";
 
+/// The registry id for the undeclared-offset check (ADR-0062 A-G10, **contract**
+/// layer, floor `strict`): a constant-key read of a key the base's *declared* shape
+/// excludes — a field declared `Absent`, a key outside a `Sealed` shape's fields, or
+/// a key the unsealed tail's own key class rejects ([`ShapeRead::DeclaredAbsent`]).
+///
+/// The absence is definite **conditional on the docblock**, so the evidence is the
+/// Asserted world and the finding is contract-grade — never a proof-layer claim
+/// (A-G9's corollary). Emitted from S6. v1 scope: shape-declared bases with
+/// constant/env-resolved keys only.
+pub const OFFSET_UNDECLARED_ID: &str = "offset.undeclared";
+
+/// The registry id for the undischarged optional-offset read (ADR-0062 A-G10 /
+/// issue #51, **contract** layer, floor `strict`): a constant-key read of a key the
+/// base's declared shape marks `Optional` ([`ShapeRead::MaybeMissing`]) that no
+/// proof on this path discharges — no `isset`/`array_key_exists` guard promoted it
+/// (S4), and no KeyCover + `¬isset` premise ladder proved it (S5).
+///
+/// At runtime such a read warns `Undefined array key` and yields `null`, which then
+/// propagates — a real soundness hazard, reported only on the strict surface because
+/// its evidence is the declaration, not a proven value. Emitted from S6. The `??`
+/// chain's non-final arms NEVER fire: the operator itself protects them.
+pub const OFFSET_MAYBE_MISSING_ID: &str = "offset.maybe-missing";
+
 /// The registry id for the declared-receiver undefined-method check (ADR-0049 §8,
 /// **contract** layer): a method absent on a phpdoc-declared receiver narrowed by
 /// branch analysis, under descendant closure. Emitted from S6.
@@ -273,6 +296,11 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // proof over proven container values under the read-context whitelist.
     OFFSET_MISSING_ID,
     OFFSET_ON_UNSUPPORTED_ID,
+    // The offset family's STRICT leg, lit up at ADR-0062 S6 (`check_shape_read` and
+    // `check_coalesce_final_arm`): declaration-derived absence and undischarged
+    // optionality, at the same whitelisted read positions plus the `??` final arm.
+    OFFSET_UNDECLARED_ID,
+    OFFSET_MAYBE_MISSING_ID,
     // The declared-receiver lane, lit up at ADR-0049 S6 (`check_phpdoc_undefined_method`):
     // the contract-layer method-absence claim over N4's narrowed contract-arm lists,
     // under per-arm descendant closure.
@@ -4422,6 +4450,24 @@ fn walk_trace(
             | StmtKind::Return { value: ArgValue::OffsetRead { base, key }, span, .. } = &stmt.kind
         {
             check_offset_read(cx, folder, base, key, env, scope.poisoned, *span, out);
+            // The strict leg (ADR-0062 S6 / A-G10) at the SAME whitelisted position:
+            // where `check_offset_read` judges a proven whole container, this judges
+            // the *declared* shape. The two are disjoint by construction — a
+            // `Fact::Shape` is `Asserted`, and `check_offset_read`'s operand gate
+            // takes `Verified` facts only — so at most one of them ever fires here.
+            check_shape_read(cx, base, key, env, scope.poisoned, *span, out);
+        }
+
+        // 1z-bis. The `??` final arm (ADR-0062 S6, issue #51 §2). A coalesce operand
+        // is a silence carrier for every arm the operator protects, but the RIGHT-MOST
+        // arm is a plain read: it is the value whenever everything left of it fell
+        // through. Judged at the same two whitelisted positions, under the accumulated
+        // `¬isset` premise ladder S5 built.
+        if descent.is_none()
+            && let StmtKind::Assign { value: value @ ArgValue::Coalesce(..), span, .. }
+            | StmtKind::Return { value: value @ ArgValue::Coalesce(..), span, .. } = &stmt.kind
+        {
+            check_coalesce_final_arm(cx, value, env, scope.poisoned, *span, out);
         }
 
         // 1a. Escape + sweep (ADR-0036): passing an object into a call escapes it;
@@ -5801,18 +5847,34 @@ fn coalesce_arm_fact(
     }
     let absent: Vec<VKey> =
         premises.iter().filter(|(v, _)| v == var).map(|(_, k)| k.clone()).collect();
-    let flavor = shape.cover_proves(key, &absent)?;
+    let flavor = cover_discharges(shape, key, &absent)?;
     let slot = shape.field(key).and_then(|(_, _, s)| s.as_deref().cloned())?;
     match flavor {
         // "at least one covered key is present AND non-null": every other member
         // failed `isset`, so this one carries the claim — present, and not null.
         CoverFlavor::Isset => clear_null(&slot).map(|f| (f, known.stratum, true)),
         // "at least one covered key EXISTS", value possibly null (A-G11's table).
-        // A present-*null* earlier key satisfies that claim while `??` still falls
-        // through it, so the cover would have been discharged by an arm that is not
-        // this one. The discharge is sound only when every premise key's declared
-        // value is provably non-nullable, which is what makes "fell through" and
-        // "absent" the same statement for them.
+        CoverFlavor::KeyExists => Some((slot, known.stratum, false)),
+    }
+}
+
+/// **The S5 discharge, asked as a presence question** (A-G11's table): does a
+/// recorded KeyCover plus the accumulated `¬isset(absent)` ladder prove `key`
+/// present? `Some(flavor)` when it does, `None` when nothing discharges it.
+///
+/// Split out of [`coalesce_arm_fact`] so the *value* lane and S6's *finding* lane
+/// consult one predicate. The distinction matters: a discharged key whose declared
+/// value slot is unrepresentable yields no fact (the value lane has nothing to
+/// bind) but is still proven present (the finding lane must stay silent). Folding
+/// the two together would have made an unspellable slot emit a false positive.
+fn cover_discharges(shape: &ShapeFact, key: &VKey, absent: &[VKey]) -> Option<CoverFlavor> {
+    match shape.cover_proves(key, absent)? {
+        CoverFlavor::Isset => Some(CoverFlavor::Isset),
+        // A present-*null* earlier key satisfies a KeyExists claim while `??` still
+        // falls through it, so the cover would have been discharged by an arm that
+        // is not this one. The discharge is sound only when every premise key's
+        // declared value is provably non-nullable, which is what makes "fell
+        // through" and "absent" the same statement for them.
         CoverFlavor::KeyExists => absent
             .iter()
             .all(|k| {
@@ -5821,7 +5883,7 @@ fn coalesce_arm_fact(
                     .and_then(|(_, _, s)| s.as_deref())
                     .is_some_and(|f| f.is_null().is_no())
             })
-            .then_some((slot, known.stratum, false)),
+            .then_some(CoverFlavor::KeyExists),
     }
 }
 
@@ -10985,20 +11047,21 @@ fn shape_read(shape: &ShapeFact, key: &VKey) -> ShapeRead {
     }
 }
 
-/// Resolve a read site `base[key]` against the abstract stratum: the base's own
-/// shape fact and the offset family's proven-key resolution ([`offset_key_of`],
-/// the ONE canonicalization), plus the stratum the result inherits.
+/// Resolve a read site `base[key]` to the **shape and canonical key** it names, or
+/// decline. The one resolver both the value lane ([`shape_read_at`]) and the strict
+/// leg's emitters (S6) go through, so a read and a finding can never disagree about
+/// which field they mean.
 ///
 /// `None` — decline — when the base carries no shape fact, when the base is
-/// **nullable** (the value may be null, so no field is guaranteed; narrowing
-/// that is S4's job), or when the key is not a proven single value.
-fn shape_read_at(
+/// **nullable** (the value may be null, so no field is guaranteed; narrowing that is
+/// S4's job), or when the key is not a proven single value.
+fn shape_site_at<'a>(
     base: &ArgValue,
     key: &ArgValue,
-    env: &HashMap<String, Known>,
+    env: &'a HashMap<String, Known>,
     poisoned: bool,
     php_minor: Option<(u16, u16)>,
-) -> Option<(ShapeRead, Stratum)> {
+) -> Option<(&'a ShapeFact, VKey, Stratum)> {
     if poisoned {
         return None;
     }
@@ -11011,9 +11074,219 @@ fn shape_read_at(
         return None;
     };
     let canon = offset_key_of(&key_val)?;
+    Some((shape, canon, known.stratum))
+}
+
+/// Resolve a read site `base[key]` against the abstract stratum: the base's own
+/// shape fact and the offset family's proven-key resolution ([`offset_key_of`],
+/// the ONE canonicalization), plus the stratum the result inherits.
+fn shape_read_at(
+    base: &ArgValue,
+    key: &ArgValue,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    php_minor: Option<(u16, u16)>,
+) -> Option<(ShapeRead, Stratum)> {
+    let (shape, canon, stratum) = shape_site_at(base, key, env, poisoned, php_minor)?;
     // Derivation clause (ADR-0052 §5): the read consumes the base's fact, so the
     // result is no stronger than it — which is always `Asserted` for a shape.
-    Some((shape_read(shape, &canon), known.stratum))
+    Some((shape_read(shape, &canon), stratum))
+}
+
+// ---------------------------------------------------------------------------
+// The offset family's STRICT leg (ADR-0062 S6 / A-G10, issue #51).
+//
+// Two contract-layer ids, both at `Floor::Strict`, emitted from the SAME
+// whitelisted read positions the proof leg uses (a plain assignment-RHS and a
+// return operand) plus one position the proof leg deliberately does not judge:
+// the right-most arm of a `??` chain.
+//
+// **Evidence discipline.** Every finding here reads a `Fact::Shape` — the declared
+// envelope, `Asserted`. A-G9's corollary holds by construction: nothing below
+// consults a proof-layer fact, and nothing below can produce a proof-layer id.
+//
+// **What is silent, and why.**
+//
+// * `ShapeRead::Present` — S3 reads it, S4's guards promoted it, or S5's cover
+//   ladder proved it. Guarded code is clean *by proof*, never by skip.
+// * `ShapeRead::Tail` — the unsealed tail's value bound. A general map/list read is
+//   OUT of v1 scope (A-G10): it stays silent here and is a future separate id,
+//   mirroring PHPStan's own two-flag split.
+// * Every non-whitelisted read position — an `isset`/`array_key_exists`/`unset`
+//   argument, a write lvalue, an array element, a NON-final `??` arm — never
+//   reaches these emitters at all, exactly as in the proof leg (A7).
+//
+// **The `??` split** (issue #51 §2). PHP protects only the arms it may fall
+// *through*; the right-most arm is evaluated as a plain read under the premise
+// `¬isset` of every arm to its left. So the left arms stay silent on every surface
+// and the final arm is judged — under S5's accumulated premise ladder, which is
+// what makes the disjunctive-assert pattern clean rather than a wolf cry.
+// ---------------------------------------------------------------------------
+
+/// Render the evidence + consequence clauses shared by both strict-leg ids, in the
+/// offset family's established message discipline (see `check_offset_read`): what
+/// the declaration says, then what PHP does at runtime, quoted verbatim.
+fn strict_leg_message(kind: &str, base: &str, shape: &ShapeFact, canon: &VKey) -> String {
+    let (our_key, php_key) = render_offset_key(canon);
+    let declared = render_shape_fact(shape, false);
+    // `{base} is {declared}` mirrors `offset.missing`'s own evidence clause. The
+    // spelling is the shape fact's, which may be more precise than the source text
+    // (a fully-required shape spells `non-empty-array{…}`) — the same rendering the
+    // dump surface shows, so the two never disagree about what Steins believes.
+    match kind {
+        "undeclared" => format!(
+            "offset {our_key} is outside the declared shape — {base} is {declared}, which cannot carry the key; reads null with \"Undefined array key {php_key}\""
+        ),
+        "coalesce" => format!(
+            "offset {our_key} may be missing on the final `??` arm — {base} is {declared}, which declares the key optional, and nothing to the left of this arm discharges it; reads null with \"Undefined array key {php_key}\""
+        ),
+        _ => format!(
+            "offset {our_key} may be missing — {base} is {declared}, which declares the key optional, and no guard on this path discharges it; reads null with \"Undefined array key {php_key}\""
+        ),
+    }
+}
+
+/// Judge one whitelisted **plain** read `base[key]` against the declared shape and
+/// emit at most one strict-leg finding (ADR-0062 S6).
+///
+/// Deliberately NOT gated on [`Folder::absence_family_available`], unlike the proof
+/// leg: A9's gate exists because a monkey-patched runtime can invalidate a
+/// *value-domain* absence proof. This leg's evidence is the docblock, which no
+/// sidecar posture can move, so gating it would withhold a contract claim for a
+/// reason that does not apply to it.
+fn check_shape_read(
+    cx: &Cx,
+    base: &ArgValue,
+    key: &ArgValue,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    span: Span,
+    out: &mut Vec<Diagnostic>,
+) {
+    let Some((shape, canon, _)) = shape_site_at(base, key, env, poisoned, cx.php_minor) else {
+        return;
+    };
+    let rendered = base.render();
+    match shape_read(shape, &canon) {
+        // Proven present (declared Required, or promoted by an S4 guard / S5 cover),
+        // or an unsealed tail's value (out of v1 scope): silent.
+        ShapeRead::Present(_) | ShapeRead::Tail(_) => {}
+        ShapeRead::DeclaredAbsent => emit_offset(
+            cx,
+            span,
+            OFFSET_UNDECLARED_ID,
+            OffsetGrade::Warning,
+            strict_leg_message("undeclared", &rendered, shape, &canon),
+            out,
+        ),
+        // A plain read carries no `¬isset` premises — a discharged optional key is
+        // already `Present` here (S4 promotion / S5 collapse), so reaching this arm
+        // IS the "no proof on this path" statement.
+        ShapeRead::MaybeMissing(_) => emit_offset(
+            cx,
+            span,
+            OFFSET_MAYBE_MISSING_ID,
+            OffsetGrade::Warning,
+            strict_leg_message("maybe-missing", &rendered, shape, &canon),
+            out,
+        ),
+    }
+}
+
+/// Judge the **right-most arm** of a `??` chain in a whitelisted value position
+/// (ADR-0062 S6, issue #51 §2).
+///
+/// The arm walk mirrors [`eval_coalesce_fact`]'s exactly — same projection test,
+/// same premise accumulation, same invalidation on a non-projection arm, same
+/// settle-and-stop — because the two must agree on which arm PHP actually
+/// evaluates. Only the final arm can produce a finding; every arm before it is
+/// protected by the operator.
+fn check_coalesce_final_arm(
+    cx: &Cx,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    span: Span,
+    out: &mut Vec<Diagnostic>,
+) {
+    let mut arms: Vec<&ArgValue> = Vec::new();
+    flatten_coalesce(value, &mut arms);
+    let Some(last) = arms.len().checked_sub(1) else { return };
+
+    let mut premises: Vec<(String, VKey)> = Vec::new();
+    for (i, arm) in arms.iter().enumerate() {
+        let projection = coalesce_projection(arm, env, poisoned, cx.php_minor);
+        if i == last {
+            let Some((var, canon)) = projection else { return };
+            judge_coalesce_final(cx, &var, &canon, env, &premises, span, out);
+            return;
+        }
+        match projection {
+            Some((var, canon)) => {
+                // A projection arm the shape proves present AND non-null IS the
+                // value: `??` never evaluates anything to its right, so the final
+                // arm is dead code and judging it would be a wolf cry.
+                if coalesce_arm_settles(&var, &canon, env) {
+                    return;
+                }
+                premises.push((var, canon));
+            }
+            // A non-projection arm may write through a reference or a global, so
+            // every accumulated `¬isset` goes stale (A-G11's conservatism).
+            None => premises.clear(),
+        }
+    }
+}
+
+/// Whether a non-final projection arm settles the chain — the emitter's reading of
+/// [`eval_coalesce_fact`]'s `settled`, kept spelling-identical so the two lanes
+/// cannot drift about which arms are reachable.
+fn coalesce_arm_settles(var: &str, key: &VKey, env: &HashMap<String, Known>) -> bool {
+    let Some(known) = env.get(var) else { return false };
+    let Some(Fact::Shape { shape, nullable: false }) = &known.fact else { return false };
+    matches!(shape_read(shape, key), ShapeRead::Present(Some(f)) if f.is_null().is_no())
+}
+
+/// Emit for the final `??` arm, consuming S5's premise ladder as its discharge.
+fn judge_coalesce_final(
+    cx: &Cx,
+    var: &str,
+    canon: &VKey,
+    env: &HashMap<String, Known>,
+    premises: &[(String, VKey)],
+    span: Span,
+    out: &mut Vec<Diagnostic>,
+) {
+    let Some(known) = env.get(var) else { return };
+    let Some(Fact::Shape { shape, nullable: false }) = &known.fact else { return };
+    let rendered = format!("${var}");
+    match shape_read(shape, canon) {
+        ShapeRead::Present(_) | ShapeRead::Tail(_) => {}
+        ShapeRead::DeclaredAbsent => emit_offset(
+            cx,
+            span,
+            OFFSET_UNDECLARED_ID,
+            OffsetGrade::Warning,
+            strict_leg_message("undeclared", &rendered, shape, canon),
+            out,
+        ),
+        ShapeRead::MaybeMissing(_) => {
+            // The `¬isset` ladder over THIS base, exactly as `coalesce_arm_fact`
+            // builds it — the S5 discharge, asked as a presence question.
+            let absent: Vec<VKey> =
+                premises.iter().filter(|(v, _)| v == var).map(|(_, k)| k.clone()).collect();
+            if cover_discharges(shape, canon, &absent).is_none() {
+                emit_offset(
+                    cx,
+                    span,
+                    OFFSET_MAYBE_MISSING_ID,
+                    OffsetGrade::Warning,
+                    strict_leg_message("coalesce", &rendered, shape, canon),
+                    out,
+                );
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

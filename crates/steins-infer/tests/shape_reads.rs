@@ -226,13 +226,20 @@ fn a_transfer_binds_into_the_env_for_later_use() {
     assert_eq!(one_type(src), "dumped type: 2 (asserted)");
 }
 
-// ---- Zero emission (A-G9's corollary) --------------------------------------
+// ---- Emission discipline (A-G9's corollary) --------------------------------
 
 #[test]
-fn no_findings_from_shape_reads() {
-    // Every shape-derived fact, across the whole read/transfer matrix, in the
-    // positions that DO have emitters (assignment RHS, return operand, call
-    // argument, condition): not one finding.
+fn shape_reads_feed_nothing_but_the_strict_leg() {
+    // A-G9's corollary, restated after ADR-0062 S6 lit the strict leg: a
+    // shape-derived fact may produce the CONTRACT-layer ids `offset.undeclared` /
+    // `offset.maybe-missing` and NOTHING else. Every proof-layer id — above all the
+    // offset family's own proof leg — stays absent from every cell of the matrix.
+    //
+    // (Before S6 this swept for zero findings outright. The sweep's real content was
+    // always "no shape fact reaches a proof-layer emitter", which is what it still
+    // asserts; the two strict ids are enumerated so a third one cannot slip in
+    // unnoticed.)
+    let strict_leg = ["offset.undeclared", "offset.maybe-missing"];
     let bodies = [
         "$x = $v['a']; return;",
         "$x = $v['zzz']; return;",
@@ -249,23 +256,32 @@ fn no_findings_from_shape_reads() {
         for decl in ["array{a: string, b?: int}", "list<string>", "array<string, int>", "array"] {
             let src = fixture(decl, body);
             let ds = diagnostics(&src);
-            let found: Vec<&Diagnostic> = ds.iter().filter(|d| !d.id.starts_with("debug.")).collect();
+            let found: Vec<&Diagnostic> = ds
+                .iter()
+                .filter(|d| !d.id.starts_with("debug.") && !strict_leg.contains(&d.id))
+                .collect();
             assert!(found.is_empty(), "`{decl}` + `{body}` emitted {found:?}");
         }
     }
 }
 
 #[test]
-fn a_shape_seed_does_not_disturb_the_offset_family() {
-    // The proof-layer offset check judges PROVEN whole values only; a shape base
-    // is silent there, and the `Asserted` seed is invisible to its Verified-only
-    // operand gate to begin with. A concrete array in the same position still
-    // fires, so the silence is scoped, not global.
+fn a_shape_seed_does_not_disturb_the_proof_leg() {
+    // The PROOF-layer offset check judges proven whole values only; a shape base is
+    // silent there, and the `Asserted` seed is invisible to its Verified-only
+    // operand gate to begin with. S6 added a contract-layer leg over the same site —
+    // `$v['nope']` on a sealed shape is a declared absence — so the assertion is
+    // that the proof leg stays out of it, not that the site is silent.
     let shaped = "<?php\n/** @param array{a: string} $v */\n\
                   function f(array $v): void { $x = $v['nope']; }\n";
+    let ds = diagnostics(shaped);
     assert!(
-        diagnostics(shaped).iter().all(|d| d.id.starts_with("debug.")),
-        "a shape base must never reach the offset emitters"
+        ds.iter().all(|d| d.id != "offset.missing" && d.id != "offset.on-unsupported"),
+        "a shape base must never reach the PROOF-layer offset emitters: {ds:?}"
+    );
+    assert!(
+        ds.iter().any(|d| d.id == "offset.undeclared"),
+        "…while the contract-layer strict leg does judge it (S6): {ds:?}"
     );
     let concrete = "<?php\nfunction g(): void { $a = ['a' => 1]; $x = $a['nope']; }\n";
     assert!(

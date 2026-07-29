@@ -131,11 +131,12 @@ fn unknown_profile_is_a_config_error() {
 fn reserved_profile_name_is_a_config_error() {
     let dir = workdir("reserved");
     write(&dir, "a.php", THROW_ONLY);
-    for name in ["strict", "boundary"] {
-        let r = run_in(&dir, &["check", "--no-php", "--profile", name, "a.php"]);
-        assert_eq!(r.code, 2, "reserved `{name}` → exit 2");
-        assert!(r.stderr.contains("reserved name"), "got:\n{}", r.stderr);
-    }
+    // `boundary` is the last deferred name; `strict` became a built-in at ADR-0062
+    // S6 (A-G10 is its ADR) and is exercised by the strict-profile tests instead.
+    let name = "boundary";
+    let r = run_in(&dir, &["check", "--no-php", "--profile", name, "a.php"]);
+    assert_eq!(r.code, 2, "reserved `{name}` → exit 2");
+    assert!(r.stderr.contains("reserved name"), "got:\n{}", r.stderr);
 }
 
 #[test]
@@ -352,4 +353,102 @@ fn an_inline_ignore_never_suppresses_a_dump() {
     // suppress.unmatched is mechanics (fail-level), so this run exits 1 — on the
     // meta-diagnostic, not the dump.
     assert_eq!(r.code, 1, "the unmatched-ignore mechanics finding fails; stdout:\n{}", r.stdout);
+}
+
+// ---------------------------------------------- strict (ADR-0062 A-G10 / #51) ---
+
+/// The strict leg's own fixture: an unguarded read of a declared-optional key (one
+/// `offset.maybe-missing`) and a read of a key the sealed shape excludes (one
+/// `offset.undeclared`). No proof-layer or other contract-layer finding, so each
+/// profile's output is exactly its own rung's contribution.
+const STRICT_ONLY: &str = "<?php\n\
+    /** @param array{a?: string, b: string} $d */\n\
+    function f(array $d): void { $x = $d['a']; $y = $d['zzz']; }\n";
+
+#[test]
+fn strict_leg_ids_are_invisible_on_default_and_contracts() {
+    // The measurement-first posture, end to end: S6 emits these findings, and no
+    // profile below `strict` shows one. This is what keeps the two pre-existing
+    // surfaces byte-identical to their pre-S6 output for the same file.
+    let dir = workdir("strict-hidden");
+    write(&dir, "a.php", STRICT_ONLY);
+    for profile in [vec!["check", "--no-php", "a.php"], vec![
+        "check",
+        "--no-php",
+        "--profile",
+        "contracts",
+        "a.php",
+    ]] {
+        let r = run_in(&dir, &profile);
+        assert_eq!(r.code, 0, "clean below strict; stdout:\n{}", r.stdout);
+        assert!(!r.stdout.contains("offset.maybe-missing"), "got:\n{}", r.stdout);
+        assert!(!r.stdout.contains("offset.undeclared"), "got:\n{}", r.stdout);
+    }
+}
+
+#[test]
+fn strict_profile_surfaces_the_offset_strict_leg() {
+    let dir = workdir("strict-on");
+    write(&dir, "a.php", STRICT_ONLY);
+    let r = run_in(&dir, &["check", "--no-php", "--profile", "strict", "a.php"]);
+    assert_eq!(r.code, 1, "a surfaced fail-level finding exits 1; stdout:\n{}", r.stdout);
+    assert_eq!(r.stdout.matches("offset.maybe-missing").count(), 1, "got:\n{}", r.stdout);
+    assert_eq!(r.stdout.matches("offset.undeclared").count(), 1, "got:\n{}", r.stdout);
+}
+
+#[test]
+fn strict_profile_keeps_everything_contracts_shows() {
+    // Cumulative, not a replacement: the contract layer's own ids are still there.
+    let dir = workdir("strict-cumulative");
+    write(&dir, "a.php", MIXED);
+    let r = run_in(&dir, &["check", "--no-php", "--profile", "strict", "a.php"]);
+    assert_eq!(r.code, 1);
+    assert!(r.stdout.contains("type.argument-mismatch"), "proof still on, got:\n{}", r.stdout);
+    assert_eq!(r.stdout.matches("throw.undeclared").count(), 2, "got:\n{}", r.stdout);
+}
+
+#[test]
+fn a_guarded_read_is_clean_at_strict() {
+    // The discharge ladder, through the real binary: guarded code must be clean by
+    // PROOF at the strictest surface, or the leg is unusable (issue #51 §3).
+    let dir = workdir("strict-guarded");
+    write(
+        &dir,
+        "a.php",
+        "<?php\n\
+         /** @param array{a?: string, b?: string} $d */\n\
+         function f(array $d): void {\n\
+             if (isset($d['a'])) { $x = $d['a']; }\n\
+             if (array_key_exists('b', $d)) { $y = $d['b']; }\n\
+             assert(isset($d['a']) || isset($d['b']));\n\
+             $z = $d['a'] ?? $d['b'];\n\
+         }\n",
+    );
+    let r = run_in(&dir, &["check", "--no-php", "--profile", "strict", "a.php"]);
+    assert_eq!(r.code, 0, "guarded + discharged code must be clean at strict:\n{}", r.stdout);
+}
+
+#[test]
+fn a_strict_baseline_entry_is_dormant_on_a_default_run() {
+    // The per-entry capture surface (A-G10). Capture at strict, then run at default:
+    // the entries are dormant, so no `suppress.unmatched` fires — and the default
+    // run stays clean rather than complaining about a surface it never analyzed.
+    let dir = workdir("strict-baseline");
+    write(&dir, "a.php", STRICT_ONLY);
+    let set = run_in(&dir, &["check", "--no-php", "--profile", "strict", "--set-baseline", "a.php"]);
+    assert!(set.stderr.contains("wrote 2 baseline entries"), "stderr:\n{}", set.stderr);
+
+    let written = std::fs::read_to_string(dir.join(".steins-baseline.jsonl")).expect("baseline");
+    assert!(written.contains(r#""surface":"strict""#), "entries carry the rung:\n{written}");
+
+    let strict_run = run_in(&dir, &["check", "--no-php", "--profile", "strict", "a.php"]);
+    assert_eq!(strict_run.code, 0, "baselined at strict:\n{}", strict_run.stdout);
+
+    let default_run = run_in(&dir, &["check", "--no-php", "a.php"]);
+    assert_eq!(default_run.code, 0, "stdout:\n{}", default_run.stdout);
+    assert!(
+        !default_run.stdout.contains("suppress.unmatched"),
+        "a strict-captured entry must never cry unmatched on a default run:\n{}",
+        default_run.stdout
+    );
 }
