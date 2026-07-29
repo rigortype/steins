@@ -4167,6 +4167,30 @@ fn analyze_scope(
             if let Some(arms) = seed_contract_arms(p, phpdoc, &resolve)
                 && !arms.is_empty()
             {
+                // The abstract array stratum's entry state (ADR-0062 S3): a lane
+                // whose array vocabulary has collapsed to ONE arm also seeds the
+                // value lane with that arm's canonical shape fact. Multi-array-arm
+                // lanes seed nothing — a shape∪shape union lives in the arm lane
+                // until a guard subtracts it down to one (A-G3; the subtraction is
+                // S4's), and the fact lane holds a single shape only then.
+                if !env.contains_key(&p.name)
+                    && let Some(fact) = seed_shape_fact(&arms)
+                {
+                    env.insert(
+                        p.name.clone(),
+                        // ALWAYS `Asserted`, even where the arm itself is
+                        // `Verified` (a native `array $x`): A-G9's corollary is
+                        // normative — shape-derived facts never feed proof-layer
+                        // findings — and the stratum is the mechanism that
+                        // enforces it structurally rather than by review.
+                        Known::value_strat(
+                            fact,
+                            0,
+                            Some("declared array shape".to_owned()),
+                            Stratum::Asserted,
+                        ),
+                    );
+                }
                 store.contract.insert(p.name.clone(), arms);
             }
         }
@@ -4852,6 +4876,33 @@ fn render_shape_fact(shape: &ShapeFact, nullable: bool) -> String {
     use steins_domain::{KeyClass, Presence, Tail};
 
     let is_list = shape.is_list == Certainty::Yes;
+    // The degenerate forms (A-G1) spell as the GENERIC vocabulary, not as a
+    // brace shape with only a tail in it: `array`, `array<K, V>`, `list<T>` —
+    // which is both what they lowered from and what they round-trip back to.
+    // `array{...<int, string>}` would parse to the same fact, but nobody writes
+    // it and PHPStan does not print it.
+    if shape.fields.is_empty()
+        && shape.covers.is_empty()
+        && let Tail::Unsealed { key, value } = &shape.tail
+    {
+        let val = value.as_ref().map(|f| render_dump_fact(f));
+        // A key class is printed only where it is narrower than `array-key`;
+        // `spell_generic_array` drops it entirely for a list.
+        let key_text = match key {
+            KeyClass::ArrayKey => None,
+            KeyClass::Int => Some("int"),
+            KeyClass::Str => Some("string"),
+        };
+        // A key-agnostic, value-agnostic tail IS plain `array`, which the
+        // speller produces from the two `None`s.
+        let body = steins_contract::spell::spell_generic_array(
+            is_list,
+            shape.non_empty,
+            key_text,
+            val.as_deref(),
+        );
+        return with_null(body, nullable);
+    }
     let fields: Vec<(VKey, bool, String)> = shape
         .fields
         .iter()
@@ -5011,6 +5062,23 @@ fn best_dump_type(
         if let Some(known) = env.get(name)
             && let Some(fact) = &known.fact
         {
+            // A-G1a, applied to spelling: declared fidelity the fact domain cannot
+            // express (class-typed slots, exotic key contracts) lives in the ALIGNED
+            // arm, and in S3 the shape fact is by construction a lossy lowering of
+            // that one arm — no flow refinement exists to make the fact the sharper
+            // of the two yet. So a shape-facted binding spells from the arm lane
+            // while both describe the same thing; the day a refinement operator
+            // lands (S4: presence promotion, subtraction, isList flip) the fact
+            // becomes the sharper source and this preference has to flip with it.
+            if matches!(fact, Fact::Shape { .. })
+                && let Some(arms) = store.contract_arms(name)
+                && let Some(text) = render_contract_arms(cx, arms)
+            {
+                return DumpRendering {
+                    text,
+                    asserted: arms.iter().any(|a| a.stratum == Stratum::Asserted),
+                };
+            }
             return DumpRendering {
                 text: render_dump_fact(fact),
                 asserted: known.stratum == Stratum::Asserted,
@@ -5047,6 +5115,20 @@ fn best_dump_type(
         // 4. Honest unknown.
         return DumpRendering { text: DUMP_UNKNOWN.to_owned(), asserted: false };
     }
+    // A constant-key read against an abstract shape (ADR-0062 §4, S3): the declared
+    // field's value slot. Every no-fact outcome (an optional field, an unknown slot,
+    // a declared absence) falls through to honest unknown — the read surface says
+    // nothing it cannot spell, and emits nothing at all.
+    if let ArgValue::OffsetRead { base, key } = value
+        && let Some((read, stratum)) = shape_read_at(base, key, env, poisoned, cx.php_minor)
+        && let Some(fact) = read.into_fact()
+    {
+        return DumpRendering {
+            text: render_dump_fact(&fact),
+            asserted: stratum == Stratum::Asserted,
+        };
+    }
+
     // A depth-1 property fetch `$var->prop` (ADR-0052 §7, Gap B): the allocation-keyed
     // heap property fact (alias-correct by construction, ADR-0036). Escaped-then-swept
     // props carry no fact and fall through to honest unknown; a readonly prop survives.
@@ -5071,6 +5153,19 @@ fn best_dump_type(
             asserted: value_stratum(value, env, Some(store)) == Stratum::Asserted,
         };
     }
+    // The argument-dependent type rung (ADR-0061 §1) — `count`/`array_is_list` over
+    // an abstract shape (ADR-0062 §4) — sits above the envelope here exactly as it
+    // does at the assignment seam, and carries the argument's stratum.
+    if let ArgValue::Call(name, args) = value
+        && let Some((fact, stratum)) =
+            shape_builtin_return_fact(cx, folder, name, args, env, poisoned)
+    {
+        return DumpRendering {
+            text: render_dump_fact(&fact),
+            asserted: stratum == Stratum::Asserted,
+        };
+    }
+
     // A uniquely-resolved builtin call the fold could not reach: its reflected
     // return envelope / admitted refinement (ADR-0056 R1). Always Verified — a
     // native declaration read off the engine's own arginfo (§2).
@@ -5380,6 +5475,25 @@ fn apply_assign(
                 env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
             }
         }
+        // `$x = $base[k]` where `$base` carries an abstract shape (ADR-0062 §4's
+        // read row, S3): a constant-key read takes the declared field's value slot.
+        // A key with no fact behind it (an optional field, an unknown slot, a
+        // declared absence) binds NOTHING — never value∪null (A-G9: missing-ness is
+        // the strict leg's finding, never a type pollution). The concrete-base read
+        // is unchanged (it never bound a fact here either); this arm only adds the
+        // abstract stratum, and the whitelisted `offset.missing` judgment for this
+        // same statement has already run in the walk (1z) independently.
+        ArgValue::OffsetRead { base, key } => {
+            // Resolve against the PRE-assignment env: PHP evaluates the rvalue
+            // first, so a self-read `$a = $a['k']` still reads the old `$a`.
+            let read = shape_read_at(base, key, env, w.scope.poisoned, cx.php_minor)
+                .and_then(|(read, strat)| Some((read.into_fact()?, strat)));
+            env.remove(var);
+            store.unbind(var);
+            if let Some((fact, strat)) = read {
+                env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
+            }
+        }
         // `$x = $a ?? $b` (ADR-0052 §6): the value is the non-null part of `$a`
         // unioned with `$b` — `clear_null(fact($a)) join fact($b)`. A fact only when
         // BOTH operands are visible facts; an unseen operand (an array offset, an
@@ -5423,6 +5537,23 @@ fn apply_assign(
             // refinement (ADR-0056 R1). Enters at `Verified` — a native declaration
             // (§2). A more-precise fold above already returned; this is the floor.
             None => match value {
+                // The type rung above the envelope (ADR-0061 §1): a rule that reads
+                // the call's ARGUMENT facts — here ADR-0062 §4's `count`/
+                // `array_is_list` shape transfers. Enters at the argument's own
+                // stratum (§3's derivation clause), not `Verified`.
+                ArgValue::Call(name, args)
+                    if let Some((fact, strat)) = shape_builtin_return_fact(
+                        cx,
+                        folder,
+                        name,
+                        args,
+                        env,
+                        w.scope.poisoned,
+                    ) =>
+                {
+                    env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
+                    store.unbind(var);
+                }
                 ArgValue::Call(name, _)
                     if !w.scope.poisoned
                         && let Some(fact) = builtin_call_return_fact(cx, folder, name) =>
@@ -5862,6 +5993,16 @@ fn build_closure_val(
             for name in captures {
                 if let Some(k) = env.get(name)
                     && let Some(f) = &k.fact
+                    // A `Fact::Shape` is deliberately NOT captured (ADR-0062 S3).
+                    // Two reasons, both structural: the descent key collapses every
+                    // non-`Singleton` fact to `Other` (`arg_of_fact_key`), so a
+                    // captured shape carries no binding information — it would only
+                    // flip the "descend at all" test below; and the capture lane
+                    // seeds the callee env at `Verified`, which would launder the
+                    // shape's `Asserted` stratum and break A-G9's corollary
+                    // (shape-derived facts never feed proof-layer findings). The
+                    // capture lane grows a stratum before a shape may ride it.
+                    && !matches!(f, Fact::Shape { .. })
                 {
                     snapshot.push((name.clone(), f.clone()));
                 }
@@ -6962,6 +7103,40 @@ fn seed_contract_arms(
     refine_contract_arms(&native, phpdoc, resolve_class)
 }
 
+/// The value-lane seed a seeded contract-arm lane contributes (ADR-0062 S3): the
+/// canonical [`Fact::Shape`] of a lane whose array vocabulary is ONE arm, plus a
+/// `null` arm's nullability (A-G2 — `nullable` is the same side-flag the other
+/// abstract layers carry, never a field inside the shape).
+///
+/// `None` — no value-lane seed — in every other case, each for its own ADR reason:
+///
+/// * **two or more array arms**: a shape∪shape union stays in the arm lane until a
+///   guard subtracts it to one (A-G3); the fact lane never joins them, because the
+///   join would lose exactly the discrimination the arms exist to carry;
+/// * **a mixed union** (`array{…}|string`): un-facted, exactly as for scalars
+///   (A-G2);
+/// * **no array arm at all**: the scalar lanes are untouched by this ADR.
+///
+/// The lowering itself is [`steins_contract::to_shape_fact`] — the ONE lowering,
+/// shared with the speller's `is_list` computation, so a seeded fact and its
+/// spelled arm can never disagree.
+fn seed_shape_fact(arms: &[ContractArm]) -> Option<Fact> {
+    let mut shape: Option<steins_domain::ShapeFact> = None;
+    let mut nullable = false;
+    for arm in arms {
+        if matches!(arm.ty, ContractTy::Null) {
+            nullable = true;
+            continue;
+        }
+        let lowered = steins_contract::to_shape_fact(&arm.ty)?;
+        if shape.is_some() {
+            return None;
+        }
+        shape = Some(lowered);
+    }
+    Some(Fact::Shape { shape: Box::new(shape?), nullable })
+}
+
 /// The shared core of declared-contract arm refinement (ADR-0052 §9), used for both
 /// the `@param` entry-state seeding ([`seed_contract_arms`]) and the declared-return
 /// call-site seeding ([`call_return_arms`]): the runtime-guaranteed native member
@@ -7674,7 +7849,18 @@ fn apply_assert_to_var(
         // Only `!null` is representable as a positive narrowing (clear nullable);
         // other negated forms establish nothing. The narrowing is `Asserted`, so
         // `refine_fact` mins the result to `Asserted`.
-        if matches!(cty, steins_contract::ContractTy::Null) && env.contains_key(var) {
+        // The presence test is deliberately blind to a `Fact::Shape` entry
+        // (ADR-0062 S3): the shape seed is entry-state provenance, not an
+        // assert-visible narrowing target, and `clear_null` is a no-op on it
+        // anyway. Counting it would flip this to `true` for every array param and
+        // so protect the variable from the by-ref invalidation sweep — a control
+        // change with nothing behind it. Shape narrowing (including clearing a
+        // nullable shape) is S4's, and arrives with its own refinement operator.
+        if matches!(cty, steins_contract::ContractTy::Null)
+            && env
+                .get(var)
+                .is_some_and(|k| !matches!(k.fact, Some(Fact::Shape { .. })))
+        {
             refine_fact(env, var, Stratum::Asserted, clear_null);
             return true;
         }
@@ -10384,6 +10570,106 @@ fn check_offset_read(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shape-aware reads (ADR-0062 §4's read row, S3).
+//
+// The value-lane sibling of `check_offset_read`: where that function judges a
+// PROVEN whole container for an absence FINDING, this one answers "what does the
+// declaration say this key holds" against the abstract stratum, and emits
+// nothing at all. The two never overlap — a `Fact::Shape` base falls into
+// `check_offset_read`'s silent `_` arm, and an `Asserted` shape seed is invisible
+// to its `Verified`-only operand gate to begin with (A-G9's corollary: shape-
+// derived facts never feed proof-layer findings).
+// ---------------------------------------------------------------------------
+
+/// What a constant-key read against an abstract shape found (ADR-0062 §4).
+///
+/// The three no-fact outcomes are deliberately distinct even though S3 renders
+/// them identically (unknown, silent): they are exactly the finding ladder S6
+/// wires (A-G10) — [`Self::MaybeMissing`] is `offset.maybe-missing`'s site and
+/// [`Self::DeclaredAbsent`] is `offset.undeclared`'s. Keeping the distinction in
+/// the return type now means S6 adds emitters, not a second read path.
+#[derive(Debug, Clone, PartialEq)]
+enum ShapeRead {
+    /// A `Required` field: its value slot (`None` — an unknown slot — is the
+    /// honest floor, A-G1a).
+    Present(Option<Fact>),
+    /// An `Optional` field, undischarged: **no fact**, and specifically never
+    /// the slot's value ∪ null (A-G9 — reads are never null-poisoned).
+    MaybeMissing,
+    /// The declaration proves the key is not there: an `Absent` field, a key
+    /// outside a `Sealed` shape's fields, or a key the unsealed tail's own key
+    /// class rejects.
+    DeclaredAbsent,
+    /// An undeclared key admitted by an `Unsealed` tail: the tail's value bound.
+    Tail(Option<Fact>),
+}
+
+impl ShapeRead {
+    /// The fact this read yields, if any. Every no-fact outcome collapses here —
+    /// the distinction above is for S6's emitters, not for the value lane.
+    fn into_fact(self) -> Option<Fact> {
+        match self {
+            ShapeRead::Present(f) | ShapeRead::Tail(f) => f,
+            ShapeRead::MaybeMissing | ShapeRead::DeclaredAbsent => None,
+        }
+    }
+}
+
+/// Read one canonical key out of an abstract shape (ADR-0062 §4).
+fn shape_read(shape: &ShapeFact, key: &VKey) -> ShapeRead {
+    use steins_domain::{Presence, Tail};
+    match shape.field(key) {
+        // The witness bit is provenance, not extension: a declared-Required and a
+        // guard-Verified key read the same value (the presence stratum is what S6
+        // consumes, and it lives on the field, not on the read).
+        Some((_, Presence::Required { .. }, slot)) => {
+            ShapeRead::Present(slot.as_deref().cloned())
+        }
+        Some((_, Presence::Optional, _)) => ShapeRead::MaybeMissing,
+        Some((_, Presence::Absent, _)) => ShapeRead::DeclaredAbsent,
+        None => match &shape.tail {
+            Tail::Sealed => ShapeRead::DeclaredAbsent,
+            Tail::Unsealed { key: class, value } if class.admits_key(key) => {
+                ShapeRead::Tail(value.as_deref().cloned())
+            }
+            // The tail's key class excludes this key, so no admitted value has it.
+            Tail::Unsealed { .. } => ShapeRead::DeclaredAbsent,
+        },
+    }
+}
+
+/// Resolve a read site `base[key]` against the abstract stratum: the base's own
+/// shape fact and the offset family's proven-key resolution ([`offset_key_of`],
+/// the ONE canonicalization), plus the stratum the result inherits.
+///
+/// `None` — decline — when the base carries no shape fact, when the base is
+/// **nullable** (the value may be null, so no field is guaranteed; narrowing
+/// that is S4's job), or when the key is not a proven single value.
+fn shape_read_at(
+    base: &ArgValue,
+    key: &ArgValue,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    php_minor: Option<(u16, u16)>,
+) -> Option<(ShapeRead, Stratum)> {
+    if poisoned {
+        return None;
+    }
+    let ArgValue::Var(name) = base else { return None };
+    let known = env.get(name)?;
+    let Some(Fact::Shape { shape, nullable: false }) = &known.fact else { return None };
+    // The key resolution is the offset family's, unchanged: a literal or a
+    // `Verified` proven value, canonicalized by PHP's own key rule (A10).
+    let Some(Fact::Singleton(key_val)) = offset_operand_fact(key, env, poisoned, php_minor) else {
+        return None;
+    };
+    let canon = offset_key_of(&key_val)?;
+    // Derivation clause (ADR-0052 §5): the read consumes the base's fact, so the
+    // result is no stronger than it — which is always `Asserted` for a shape.
+    Some((shape_read(shape, &canon), known.stratum))
+}
+
 /// Whether a normalized array-entry list contains `key` (the read-side membership
 /// check, over the already-canonical [`VKey`]s the domain stores).
 fn array_has_key(entries: &[(VKey, Val)], key: &VKey) -> bool {
@@ -12550,6 +12836,72 @@ fn builtin_call_return_fact(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Opt
         return None;
     }
     folder.builtin_return_fact(name)
+}
+
+/// The **argument-dependent** return rung (ADR-0061 §1) for the two ADR-0062 §4
+/// transfers that read the abstract array stratum: `count($x)` and
+/// `array_is_list($x)`. `None` — decline — is a first-class outcome (ADR-0061 §1),
+/// and the caller falls through to the argument-insensitive envelope rung exactly
+/// as before.
+///
+/// The rule fires only on a single-argument call whose one argument is a bare
+/// variable carrying a non-nullable [`Fact::Shape`]; a nullable base declines
+/// (the value may be null, which is a TypeError rather than a count), a second
+/// argument declines (`count($x, COUNT_RECURSIVE)` counts something else), and a
+/// project function shadowing the simple name declines through
+/// [`builtin_call_return_fact`]'s own check.
+///
+/// **The admission gate is ADR-0061 §2's, unweakened**: the computed fact is
+/// seeded only when the sidecar-backed envelope for this name exists (which is
+/// where the sidecar-presence and PHP-minor-pin legs live, via
+/// [`Folder::builtin_return_fact`]) AND the fact is extensionally inside it —
+/// checked in the domain itself, as `envelope ⊔ out == envelope`. A rule that
+/// claims something the running engine's own declaration disowns is discarded,
+/// never demoted.
+///
+/// **Stratum is ADR-0061 §3's derivation clause**: the output carries the
+/// argument fact's stratum, which for a declared shape is always `Asserted` — so
+/// `count($declaredShape)` can never premise a proof-layer finding (A-G9's
+/// corollary), while `count()` of a *proven* array keeps folding to a Singleton
+/// on the value rung above, untouched.
+fn shape_builtin_return_fact(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    name: &str,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+) -> Option<(Fact, Stratum)> {
+    if poisoned {
+        return None;
+    }
+    let [ArgValue::Var(var)] = args else { return None };
+    let known = env.get(var)?;
+    let Some(Fact::Shape { shape, nullable: false }) = &known.fact else { return None };
+
+    let out = if name.eq_ignore_ascii_case("count") || name.eq_ignore_ascii_case("sizeof") {
+        let range = shape.count_range();
+        if range.lo() == range.hi() {
+            // The one place a shape has an exact size: a sealed, all-required
+            // shape (ADR-0062 §4, mirroring PHPStan's own exactness).
+            Fact::Singleton(Val::Int(range.lo()))
+        } else {
+            Fact::refined(Base::Int, Refinement::Int(range), false)
+        }
+    } else if name.eq_ignore_ascii_case("array_is_list") {
+        match shape.is_list {
+            // The answer IS the denotational flag (§4's row) — no structural
+            // inspection, and `Maybe` answers nothing.
+            Certainty::Yes => Fact::Singleton(Val::Bool(true)),
+            Certainty::No => Fact::Singleton(Val::Bool(false)),
+            Certainty::Maybe => return None,
+        }
+    } else {
+        return None;
+    };
+
+    let envelope = builtin_call_return_fact(cx, folder, name)?;
+    (envelope.join(&out).as_ref() == Some(&envelope)).then_some((out, known.stratum))
 }
 
 /// The abstract fact an argument resolves to: a bare `$var` whose env fact is an

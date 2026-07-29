@@ -135,22 +135,51 @@ fn non_empty_keyword(base: &str, non_empty: bool) -> String {
     if non_empty { format!("non-empty-{base}") } else { base.to_owned() }
 }
 
+/// The shared spelling of the **generic** (fieldless) array vocabulary —
+/// `array`, `non-empty-array`, `array<V>`, `array<K, V>`, `list<T>` — the
+/// sibling of [`spell_shape`]'s brace assembly, and the ONE place that decides
+/// it. Used by [`spell_array_arm`]'s degenerate arms and by the dump surface's
+/// abstract-shape renderer, which must spell a fieldless shape fact (A-G1's
+/// degenerate forms) exactly as the contract arm it lowered from was spelled.
+///
+/// `key`/`value` are already-spelled slot text; `None` is "no knowledge". A
+/// list never prints a key (its key class is `int` by definition), and a
+/// value-less list/map prints `mixed` — the loosest honest keyword, so the
+/// spelling still round-trips to the same fact.
+#[must_use]
+pub fn spell_generic_array(
+    is_list: bool,
+    non_empty: bool,
+    key: Option<&str>,
+    value: Option<&str>,
+) -> String {
+    if is_list {
+        return format!(
+            "{}<{}>",
+            non_empty_keyword("list", non_empty),
+            value.unwrap_or("mixed")
+        );
+    }
+    let kw = non_empty_keyword("array", non_empty);
+    match (key, value) {
+        (None, None) => kw,
+        (None, Some(v)) => format!("{kw}<{v}>"),
+        (Some(k), v) => format!("{kw}<{k}, {}>", v.unwrap_or("mixed")),
+    }
+}
+
 /// Spell one array-vocabulary [`ContractTy`] arm (`ArrayAny`/`ListOf`/`MapOf`/
 /// `Shape`). Panics if handed anything else — callers dispatch on the same
 /// variant set [`spell_arms`]'s match arm does.
 fn spell_array_arm(ty: &ContractTy) -> String {
     match ty {
-        ContractTy::ArrayAny { non_empty } => non_empty_keyword("array", *non_empty),
+        ContractTy::ArrayAny { non_empty } => spell_generic_array(false, *non_empty, None, None),
         ContractTy::ListOf { elem, non_empty } => {
-            format!("{}<{}>", non_empty_keyword("list", *non_empty), spell_nested(elem))
+            spell_generic_array(true, *non_empty, None, Some(&spell_nested(elem)))
         }
         ContractTy::MapOf { key, val, non_empty } => {
-            let kw = non_empty_keyword("array", *non_empty);
-            if is_array_key_ty(key) {
-                format!("{kw}<{}>", spell_nested(val))
-            } else {
-                format!("{kw}<{}, {}>", spell_nested(key), spell_nested(val))
-            }
+            let k = (!is_array_key_ty(key)).then(|| spell_nested(key));
+            spell_generic_array(false, *non_empty, k.as_deref(), Some(&spell_nested(val)))
         }
         ContractTy::Shape { list, fields, sealed, non_empty, unsealed } => {
             spell_contract_shape(*list, fields, *sealed, *non_empty, unsealed)

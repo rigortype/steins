@@ -29,6 +29,7 @@
 
 use crate::certainty::Certainty;
 use crate::fact::Fact;
+use crate::range::IntRange;
 use crate::value::{Key, Val};
 
 /// Field-width bound for a single shape (A-G6).
@@ -459,6 +460,35 @@ impl ShapeFact {
         })
     }
 
+    /// **The entry count every admitted array can have** (ADR-0062 §4's
+    /// `count($x)` row), as an inclusive interval.
+    ///
+    /// * **Floor** — one entry per `Required` field, floored at 1 when
+    ///   `non_empty` (or a cover) says the array cannot be empty: a cover
+    ///   claims at least one of its keys is there.
+    /// * **Ceiling** — a `Sealed` tail bounds the array by its declared,
+    ///   non-`Absent` key set (this is the one place PHPStan has an exact
+    ///   size, mirrored); an `Unsealed` tail admits arbitrarily many
+    ///   undeclared keys, so the ceiling is the domain's own top.
+    ///
+    /// `lo == hi` is exactly the exact-size case (a sealed, all-required
+    /// shape) — the caller spells that as a literal rather than an interval.
+    #[must_use]
+    pub fn count_range(&self) -> IntRange {
+        let required = self.fields.iter().filter(|(_, p, _)| p.is_required()).count();
+        let declared = self.fields.iter().filter(|(_, p, _)| !matches!(p, Presence::Absent)).count();
+        let floor_one = self.non_empty || !self.covers.is_empty();
+        let lo = i64::try_from(required).unwrap_or(i64::MAX).max(i64::from(floor_one));
+        let hi = match self.tail {
+            Tail::Sealed => i64::try_from(declared).unwrap_or(i64::MAX),
+            Tail::Unsealed { .. } => i64::MAX,
+        };
+        // `lo <= hi` holds by construction (required ⊆ declared, and a
+        // non-empty sealed shape declares at least one key); the fallback
+        // keeps the constructor total rather than trusting that argument.
+        IntRange::new(lo, hi).unwrap_or(IntRange::NON_NEGATIVE)
+    }
+
     /// **Join** (A-G5): field-wise, with the tail absorbing the key-set
     /// difference. `Sealed{a} ⊔ Sealed{b} = {a?, b?} + Sealed`.
     #[must_use]
@@ -636,7 +666,6 @@ fn list_is_admitted(fields: &[Field], tail: &Tail, non_empty: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::range::IntRange;
     use crate::value::Base;
 
     fn k(i: i64) -> Key {
@@ -1051,6 +1080,65 @@ mod tests {
         let declared = sealed(vec![(ks("a"), Presence::Required { witnessed: false }, int_slot(1))]);
         let v = arr(vec![(ks("a"), Val::Int(1))]);
         assert_eq!(witnessed.admits(&v), declared.admits(&v));
+    }
+
+    // ------------------------------------------------------------------
+    // count_range (ADR-0062 §4)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn count_of_a_sealed_all_required_shape_is_exact() {
+        let s = sealed(vec![(ks("x"), req(), int_slot(1)), (ks("y"), req(), int_slot(2))]);
+        assert_eq!(s.count_range(), IntRange::new(2, 2).expect("ordered"));
+    }
+
+    #[test]
+    fn count_of_the_empty_sealed_shape_is_exactly_zero() {
+        assert_eq!(sealed(vec![]).count_range(), IntRange::point(0));
+    }
+
+    #[test]
+    fn count_of_a_sealed_shape_with_optionals_spans_required_to_declared() {
+        let s = sealed(vec![
+            (ks("a"), req(), int_slot(1)),
+            (ks("b"), Presence::Optional, int_slot(2)),
+        ]);
+        assert_eq!(s.count_range(), IntRange::new(1, 2).expect("ordered"));
+    }
+
+    #[test]
+    fn count_of_an_unsealed_shape_tops_out_at_the_domain_max() {
+        let s = ShapeFact::normalize(
+            vec![(ks("a"), req(), int_slot(1))],
+            Tail::Unsealed { key: KeyClass::ArrayKey, value: None },
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(s.count_range(), IntRange::POSITIVE);
+        assert_eq!(ShapeFact::plain_array().count_range(), IntRange::NON_NEGATIVE);
+    }
+
+    #[test]
+    fn count_of_a_non_empty_optional_only_shape_floors_at_one() {
+        // `non-empty-array{a?: T}` admits exactly `['a' => …]`.
+        let s = ShapeFact::normalize(
+            vec![(ks("a"), Presence::Optional, int_slot(1))],
+            Tail::Sealed,
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        );
+        assert_eq!(s.count_range(), IntRange::point(1));
+    }
+
+    #[test]
+    fn count_floor_respects_a_cover() {
+        let s = sealed_with_covers(
+            vec![(ks("a"), Presence::Optional, None), (ks("b"), Presence::Optional, None)],
+            vec![Cover::new(vec![ks("a"), ks("b")], CoverFlavor::Isset)],
+        );
+        assert_eq!(s.count_range(), IntRange::new(1, 2).expect("ordered"));
     }
 
     // ------------------------------------------------------------------
