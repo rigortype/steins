@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Steins Playground</title>
+
+  <!--
+    Steins Playground — fully in-browser (ADR-0065): the analysis core runs as
+    a wasm module in a Web Worker; there is no backend. The layout, design
+    tokens, and interaction model follow the rigor-playground frontend (rigor
+    ADR-29), the sibling project this page's spec comes from.
+
+    Every run here is the documented sound subset (no PHP sidecar in a
+    browser): the banner at the bottom is the envelope's `notice` field
+    rendered as data — the same sentence `steins check --no-php` prints.
+  -->
+
+  <!-- Set theme before first paint to avoid a flash of the wrong theme -->
+  <script>
+    (function () {
+      const stored = localStorage.getItem("steins-theme") || "system"
+      const dark = stored === "dark" ||
+        (stored === "system" && matchMedia("(prefers-color-scheme: dark)").matches)
+      document.documentElement.dataset.theme = dark ? "dark" : "light"
+    })()
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <!--
+    CodeMirror 6 from esm.sh through an import map: every package resolves its
+    @codemirror/* and @lezer/* dependencies through the map (the esm.sh `*`
+    prefix externalizes them), so the whole graph shares ONE instance of each —
+    the duplicated-@codemirror/state failure mode CM6 is known for cannot
+    happen. `@codemirror/legacy-modes` has no PHP mode (the CM5 php mode needs
+    htmlmixed), so this page uses the real lezer PHP parser via lang-php.
+  -->
+  <script type="importmap">
+  {
+    "imports": {
+      "codemirror": "https://esm.sh/*codemirror@6.0.2",
+      "@codemirror/state": "https://esm.sh/*@codemirror/state@6",
+      "@codemirror/view": "https://esm.sh/*@codemirror/view@6",
+      "@codemirror/language": "https://esm.sh/*@codemirror/language@6",
+      "@codemirror/commands": "https://esm.sh/*@codemirror/commands@6",
+      "@codemirror/search": "https://esm.sh/*@codemirror/search@6",
+      "@codemirror/autocomplete": "https://esm.sh/*@codemirror/autocomplete@6",
+      "@codemirror/lint": "https://esm.sh/*@codemirror/lint@6",
+      "@codemirror/lang-php": "https://esm.sh/*@codemirror/lang-php@6",
+      "@codemirror/lang-html": "https://esm.sh/*@codemirror/lang-html@6",
+      "@codemirror/lang-css": "https://esm.sh/*@codemirror/lang-css@6",
+      "@codemirror/lang-javascript": "https://esm.sh/*@codemirror/lang-javascript@6",
+      "@lezer/common": "https://esm.sh/*@lezer/common@1",
+      "@lezer/highlight": "https://esm.sh/*@lezer/highlight@1",
+      "@lezer/lr": "https://esm.sh/*@lezer/lr@1",
+      "@lezer/php": "https://esm.sh/*@lezer/php@1",
+      "@lezer/html": "https://esm.sh/*@lezer/html@1",
+      "@lezer/css": "https://esm.sh/*@lezer/css@1",
+      "@lezer/javascript": "https://esm.sh/*@lezer/javascript@1",
+      "@marijn/find-cluster-break": "https://esm.sh/@marijn/find-cluster-break@1",
+      "style-mod": "https://esm.sh/style-mod@4",
+      "w3c-keyname": "https://esm.sh/w3c-keyname@2",
+      "crelt": "https://esm.sh/crelt@1"
+    }
+  }
+  </script>
+
+  <style>
+    /* Design tokens — the shared parchment/terminal system (rigor ADR-29). */
+    :root {
+      --st-ink: #0E1116; --st-ink-2: #2A2F38; --st-ink-3: #585F6B;
+      --st-paper: #F6F4EE; --st-paper-2: #EFEBE0; --st-paper-3: #E6E1D2;
+      --st-rule: #D6D2C7;
+      --st-term-bg: #1A1D23; --st-term-fg: #E6E1D2;
+      --st-accent: #7A2A2A; --st-accent-2: #5C1F1F; --st-accent-3: #F1E2DE;
+      --st-error: #B5302B; --st-warning: #8A5F12; --st-info: #2D5C9E; --st-ok: #2E6F3F;
+      --st-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+      --st-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+      --st-r: 4px;
+    }
+    :root, :root[data-theme="light"] {
+      --bg: var(--st-paper); --surface: var(--st-paper-2); --surface-2: var(--st-paper-3);
+      --border: var(--st-rule); --border-strong: #B7B2A2;
+      --text: var(--st-ink-2); --text-strong: var(--st-ink); --muted: var(--st-ink-3);
+      --accent: var(--st-accent); --accent-tint: var(--st-accent-3);
+      --hover: var(--st-paper-3); --active-line: #ECE7D8; --selection: #D9C9C5;
+      --caret: var(--st-accent);
+      --gutter-fg: var(--st-ink-3); --gutter-bg: var(--st-paper-2); --anno: var(--st-ink-3);
+      --c-error: var(--st-error); --c-warning: var(--st-warning);
+      --c-info: var(--st-info); --c-ok: var(--st-ok);
+      --sev-fg: #FFFFFF;
+      --syn-keyword: #7A2A2A; --syn-def: #205070; --syn-type: #205070;
+      --syn-string: #2E6F3F; --syn-number: #8A5F12; --syn-comment: #6E7480;
+      --syn-meta: #6E7480; --syn-operator: #2A2F38; --syn-var: #2A2F38;
+    }
+    :root[data-theme="dark"] {
+      --bg: var(--st-term-bg); --surface: #22262E; --surface-2: #2A2F38;
+      --border: #343A44; --border-strong: #4A515D;
+      --text: var(--st-term-fg); --text-strong: #F6F4EE; --muted: #9AA1AC;
+      --accent: #C97B6B; --accent-tint: #3A2B28;
+      --hover: #2A2F38; --active-line: #22262E; --selection: #43372F;
+      --caret: #C97B6B;
+      --gutter-fg: #9AA1AC; --gutter-bg: #1A1D23; --anno: #8A919C;
+      --c-error: #E5766F; --c-warning: #D9A94A; --c-info: #7AA5DC; --c-ok: #7CBB8C;
+      --sev-fg: #14161A;
+      --syn-keyword: #C97B6B; --syn-def: #7AA5DC; --syn-type: #7AA5DC;
+      --syn-string: #7CBB8C; --syn-number: #D9A94A; --syn-comment: #767E8B;
+      --syn-meta: #767E8B; --syn-operator: #E6E1D2; --syn-var: #E6E1D2;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      display: flex; flex-direction: column;
+      background: var(--bg); color: var(--text);
+      font-family: var(--st-sans); font-size: 14px;
+    }
+
+    header {
+      display: flex; align-items: center; gap: 16px;
+      padding: 8px 16px;
+      background: var(--surface); border-bottom: 1px solid var(--border);
+    }
+    .brand { font-weight: 700; color: var(--text-strong); }
+    .brand .product { color: var(--accent); }
+    #status { color: var(--muted); font-size: 13px; }
+    #status.error { color: var(--c-error); }
+    #status.ok { color: var(--c-ok); }
+    .toolbar { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+    .btn, select.ctl {
+      font: 500 13px var(--st-sans); color: var(--text);
+      background: var(--surface-2); border: 1px solid var(--border-strong);
+      border-radius: var(--st-r); padding: 5px 10px; cursor: pointer;
+    }
+    .btn:hover, select.ctl:hover { background: var(--hover); border-color: var(--muted); }
+    .btn.active { background: var(--accent); border-color: var(--accent); color: var(--sev-fg); }
+    label.ctl-label { color: var(--muted); font-size: 12.5px; }
+
+    main { flex: 1; display: flex; min-height: 0; }
+    #editor-wrap { flex: 1; min-width: 0; display: flex; }
+    #editor { flex: 1; min-width: 0; }
+    .cm-editor { height: 100%; }
+    .cm-editor .cm-scroller { font-family: var(--st-mono); font-size: 13.5px; line-height: 1.6; }
+
+    #sidebar {
+      width: 380px; display: flex; flex-direction: column;
+      border-left: 1px solid var(--border); background: var(--surface);
+    }
+    #sidebar-header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 8px 12px; border-bottom: 1px solid var(--border);
+      font-weight: 600; color: var(--text-strong); font-size: 13px;
+    }
+    #diag-count {
+      background: var(--surface-2); border-radius: 10px;
+      font-size: 12px; padding: 1px 9px; color: var(--muted);
+    }
+    #diagnostics { flex: 1; overflow-y: auto; padding: 8px; }
+    .diag-empty { color: var(--muted); text-align: center; margin-top: 24px; font-size: 13px; }
+    .diag-item {
+      display: flex; gap: 8px; padding: 8px; margin-bottom: 6px;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: var(--st-r); cursor: pointer;
+    }
+    .diag-item:hover, .diag-item:focus-visible { border-color: var(--border-strong); background: var(--hover); outline: none; }
+    .diag-sev {
+      align-self: flex-start; flex-shrink: 0;
+      font: 700 10.5px var(--st-sans); text-transform: uppercase; letter-spacing: 0.04em;
+      border-radius: 3px; padding: 2px 6px; color: var(--sev-fg);
+    }
+    .diag-sev.fail { background: var(--c-error); }
+    .diag-sev.warn { background: var(--c-warning); }
+    .diag-sev.parse { background: var(--c-info); }
+    .diag-body { min-width: 0; }
+    .diag-loc { color: var(--muted); font-size: 11.5px; }
+    .diag-msg { font-size: 12.5px; line-height: 1.45; overflow-wrap: break-word; }
+    .diag-id { font-family: var(--st-mono); font-size: 11px; color: var(--accent); margin-top: 2px; }
+
+    /* The sound-subset banner: the envelope's `notice`, rendered as data. */
+    #posture {
+      padding: 6px 16px; font-size: 12.5px;
+      background: var(--accent-tint); color: var(--text);
+      border-top: 1px solid var(--border);
+    }
+    #posture strong { color: var(--accent); font-weight: 600; }
+
+    /* Wavy underlines + gutter markers */
+    .cm-lintRange-error { text-decoration: underline wavy var(--c-error); text-decoration-thickness: 1.5px; }
+    .cm-lintRange-warning { text-decoration: underline wavy var(--c-warning); text-decoration-thickness: 1.5px; }
+    .cm-lintRange-info { text-decoration: underline wavy var(--c-info); text-decoration-thickness: 1.5px; }
+    .cm-tooltip, .cm-tooltip.cm-tooltip-hover {
+      background: var(--surface); border: 1px solid var(--border-strong);
+      border-radius: var(--st-r); color: var(--text);
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+    }
+    ul.cm-tooltip-lint { background: var(--surface); color: var(--text); padding: 0; margin: 0; list-style: none; border-radius: var(--st-r); overflow: hidden; }
+    .cm-tooltip-lint .cm-diagnostic {
+      font-family: var(--st-mono); font-size: 12px; line-height: 1.5;
+      padding: 7px 10px; margin: 0; border-left-width: 3px; white-space: pre-wrap;
+    }
+    .cm-tooltip-lint .cm-diagnostic-error { border-left-color: var(--c-error); }
+    .cm-tooltip-lint .cm-diagnostic-warning { border-left-color: var(--c-warning); }
+    .cm-tooltip-lint .cm-diagnostic-info { border-left-color: var(--c-info); }
+
+    /* The annotate overlay (margin facts) */
+    .cm-fact-annotation {
+      color: var(--anno); font-style: italic; font-size: 12px;
+      pointer-events: none; user-select: none;
+    }
+
+    #diagnostics::-webkit-scrollbar, .cm-scroller::-webkit-scrollbar { width: 10px; height: 10px; }
+    #diagnostics::-webkit-scrollbar-thumb, .cm-scroller::-webkit-scrollbar-thumb {
+      background: var(--border-strong); border-radius: 2px;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+    }
+    @media (max-width: 720px) {
+      main { flex-direction: column; }
+      #sidebar { width: 100%; max-height: 40vh; border-left: none; border-top: 1px solid var(--border); }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="brand">Steins <span class="product">Playground</span></span>
+    <span id="status" aria-live="polite">Loading analyzer…</span>
+    <div class="toolbar"></div>
+  </header>
+
+  <main>
+    <div id="editor-wrap">
+      <div id="editor"></div>
+    </div>
+    <aside id="sidebar" aria-label="Findings">
+      <div id="sidebar-header">
+        <span>Findings</span>
+        <span id="diag-count">0</span>
+      </div>
+      <div id="diagnostics"><p class="diag-empty">No findings</p></div>
+    </aside>
+  </main>
+
+  <div id="posture" hidden></div>
+
+  <script type="module">
+    import { basicSetup } from "codemirror"
+    import { EditorState, Prec } from "@codemirror/state"
+    import { EditorView } from "@codemirror/view"
+    import { HighlightStyle, syntaxHighlighting } from "@codemirror/language"
+    import { php } from "@codemirror/lang-php"
+    import { lintGutter, setDiagnostics } from "@codemirror/lint"
+    import { tags as t } from "@lezer/highlight"
+    import LZString from "https://esm.sh/lz-string@1.5.0"
+
+    const SAMPLE = `<?php
+// Steins Playground — edit this code and see findings in real time.
+// The analyzer runs entirely in your browser, as the documented
+// sound subset: no PHP sidecar here, so findings that require
+// executing PHP are omitted — and nothing false is added.
+
+function greet(int $times, string $name): string {
+    return str_repeat("Hello, " . $name . "! ", $times);
+}
+
+greet("three", "World"); // "three" can never satisfy int
+`
+
+    // ── Worker transport ──────────────────────────────────────────────────
+    // The wasm module lives in a Worker so a check never blocks typing.
+    // `seq` guards against stale responses: only the newest answer paints.
+    const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" })
+    let seq = 0
+    const pending = new Map()
+    worker.onmessage = (e) => {
+      const { seq: n, check, annotate } = e.data
+      const resolve = pending.get(n)
+      if (resolve) { pending.delete(n); resolve({ check, annotate }) }
+    }
+    function analyze(source) {
+      const n = ++seq
+      return new Promise((resolve) => {
+        pending.set(n, resolve)
+        worker.postMessage({ seq: n, source, profile: "", wantAnnotate: false })
+      })
+    }
+    const isStale = (n) => n !== seq
+
+    // ── Syntax highlight (warm theme via CSS vars) ────────────────────────
+    const steinsHighlight = HighlightStyle.define([
+      { tag: [t.keyword, t.controlKeyword, t.definitionKeyword, t.moduleKeyword, t.operatorKeyword, t.self], color: "var(--syn-keyword)" },
+      { tag: [t.function(t.variableName), t.function(t.definition(t.variableName)), t.definition(t.variableName), t.macroName], color: "var(--syn-def)", fontWeight: "500" },
+      { tag: [t.typeName, t.className, t.namespace, t.tagName], color: "var(--syn-type)" },
+      { tag: [t.string, t.special(t.string), t.character, t.regexp, t.escape], color: "var(--syn-string)" },
+      { tag: [t.number, t.integer, t.float, t.bool, t.null, t.atom, t.constant(t.variableName), t.unit], color: "var(--syn-number)" },
+      { tag: [t.comment, t.lineComment, t.blockComment, t.docComment], color: "var(--syn-comment)", fontStyle: "italic" },
+      { tag: [t.meta, t.annotation, t.processingInstruction], color: "var(--syn-meta)" },
+      { tag: [t.operator, t.punctuation, t.separator, t.bracket, t.derefOperator], color: "var(--syn-operator)" },
+      { tag: [t.variableName, t.propertyName, t.labelName, t.attributeName], color: "var(--syn-var)" },
+      { tag: t.invalid, color: "var(--c-error)" },
+    ])
+
+    // ── Shareable URL state (?c=<lz-string>) ──────────────────────────────
+    const QUERY_KEY = "c"
+    function sourceFromUrl() {
+      const c = new URLSearchParams(location.search).get(QUERY_KEY)
+      if (!c) return null
+      try { return LZString.decompressFromEncodedURIComponent(c) || null } catch { return null }
+    }
+    const INITIAL_DOC = sourceFromUrl() ?? SAMPLE
+
+    // ── Editor ────────────────────────────────────────────────────────────
+    const MONO = `'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: INITIAL_DOC,
+        extensions: [
+          basicSetup,
+          php(),
+          Prec.highest(syntaxHighlighting(steinsHighlight)),
+          lintGutter(),
+          EditorView.updateListener.of((update) => {
+            if (!update.docChanged) return
+            scheduleCheck()
+            scheduleUrlSync()
+          }),
+          EditorView.theme({
+            "&": { backgroundColor: "var(--bg)", color: "var(--text)", height: "100%" },
+            ".cm-content": { caretColor: "var(--caret)", fontFamily: MONO, padding: "8px 0" },
+            ".cm-cursor": { borderLeftColor: "var(--caret)", borderLeftWidth: "2px" },
+            ".cm-gutters": { backgroundColor: "var(--gutter-bg)", color: "var(--gutter-fg)", border: "none", borderRight: "1px solid var(--border)" },
+            ".cm-lineNumbers .cm-gutterElement": { padding: "0 12px 0 8px" },
+            ".cm-activeLineGutter": { backgroundColor: "var(--hover)", color: "var(--text)" },
+            ".cm-activeLine": { backgroundColor: "var(--active-line)" },
+            ".cm-selectionBackground": { backgroundColor: "var(--selection)" },
+            "&.cm-focused .cm-selectionBackground": { backgroundColor: "var(--selection)" },
+          }),
+        ],
+      }),
+      parent: document.getElementById("editor"),
+    })
+
+    // ── Check (600 ms debounce, per the rigor spec) ───────────────────────
+    let debounceTimer = null
+    function scheduleCheck() {
+      clearTimeout(debounceTimer)
+      debounceTimer = setTimeout(runCheck, 600)
+    }
+
+    let urlTimer = null
+    function scheduleUrlSync() {
+      clearTimeout(urlTimer)
+      urlTimer = setTimeout(() => {
+        const src = view.state.doc.toString()
+        const url = src === SAMPLE
+          ? location.pathname
+          : `${location.pathname}?${QUERY_KEY}=${LZString.compressToEncodedURIComponent(src)}`
+        history.replaceState(null, "", url)
+      }, 600)
+    }
+
+    async function runCheck() {
+      const mySeq = seq + 1
+      setStatus("checking", "Checking…")
+      const { check } = await analyze(view.state.doc.toString())
+      if (isStale(mySeq)) return
+
+      if (!check.ok) {
+        setStatus("error", check.error)
+        return
+      }
+      showPosture(check.notice)
+      const findings = check.findings
+      const parseErrors = check.parse_errors
+      applyLintMarkers(findings, parseErrors)
+      renderSidebar(findings, parseErrors)
+
+      const failCount = findings.filter((f) => f.level === "fail").length
+      if (failCount > 0) {
+        setStatus("error", `${failCount} finding${failCount === 1 ? "" : "s"}`)
+      } else if (parseErrors.length > 0) {
+        setStatus("error", `${parseErrors.length} parse error${parseErrors.length === 1 ? "" : "s"}`)
+      } else if (findings.length > 0) {
+        setStatus("ok", `${findings.length} warn-level finding${findings.length === 1 ? "" : "s"}`)
+      } else {
+        setStatus("ok", "No findings")
+      }
+    }
+
+    function applyLintMarkers(findings, parseErrors) {
+      const doc = view.state.doc
+      const cmDiags = []
+      for (const f of findings) {
+        const lineNum = Math.max(1, Math.min(f.line, doc.lines))
+        const line = doc.line(lineNum)
+        const from = Math.min(line.to, line.from + Math.max(0, (f.column || 1) - 1))
+        const to = Math.max(from + 1, Math.min(line.to, from + 10))
+        cmDiags.push({
+          from, to,
+          severity: f.level === "fail" ? "error" : "warning",
+          message: `${f.message}  [${f.id}]`,
+        })
+      }
+      for (const p of parseErrors) {
+        const lineNum = Math.max(1, Math.min(p.line, doc.lines))
+        const line = doc.line(lineNum)
+        cmDiags.push({
+          from: line.from, to: Math.max(line.from + 1, line.to),
+          severity: "info",
+          message: `parse error (analysis continues on the recovered tree): ${p.message}`,
+        })
+      }
+      cmDiags.sort((a, b) => a.from - b.from)
+      view.dispatch(setDiagnostics(view.state, cmDiags))
+    }
+
+    // ── Sidebar ───────────────────────────────────────────────────────────
+    function renderSidebar(findings, parseErrors) {
+      const container = document.getElementById("diagnostics")
+      const counter = document.getElementById("diag-count")
+      const total = findings.length + parseErrors.length
+      counter.textContent = total
+
+      if (!total) {
+        container.innerHTML = '<p class="diag-empty">No findings</p>'
+        return
+      }
+      const rows = []
+      for (const p of parseErrors) {
+        rows.push({ sev: "parse", line: p.line, column: 1, message: p.message, id: null })
+      }
+      for (const f of findings) {
+        rows.push({ sev: f.level, line: f.line, column: f.column, message: f.message, id: f.id })
+      }
+      container.innerHTML = rows.map((d, i) => `
+        <div class="diag-item" data-index="${i}" tabindex="0" role="button"
+             aria-label="${escHtml(d.sev)} at line ${d.line}: ${escHtml(d.message)}">
+          <span class="diag-sev ${d.sev}">${d.sev}</span>
+          <div class="diag-body">
+            <div class="diag-loc">Line ${d.line}, col ${d.column}</div>
+            <div class="diag-msg">${escHtml(d.message)}</div>
+            ${d.id ? `<div class="diag-id">${escHtml(d.id)}</div>` : ""}
+          </div>
+        </div>
+      `).join("")
+
+      container.querySelectorAll(".diag-item").forEach((el) => {
+        const jump = () => {
+          const d = rows[+el.dataset.index]
+          const doc = view.state.doc
+          const n = Math.max(1, Math.min(d.line, doc.lines))
+          const pos = doc.line(n).from + Math.max(0, (d.column || 1) - 1)
+          view.dispatch({ selection: { anchor: pos }, scrollIntoView: true })
+          view.focus()
+        }
+        el.addEventListener("click", jump)
+        el.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); jump() }
+        })
+      })
+    }
+
+    // ── Posture banner + status ───────────────────────────────────────────
+    function showPosture(notice) {
+      const el = document.getElementById("posture")
+      if (el.hidden) {
+        el.hidden = false
+        el.innerHTML = `<strong>sound subset</strong> — ${escHtml(notice.replace(/^note:\s*/, ""))}`
+      }
+    }
+    function setStatus(cls, text) {
+      const el = document.getElementById("status")
+      el.className = cls
+      el.textContent = text
+    }
+    function escHtml(s) {
+      return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    }
+
+    // ── Boot ──────────────────────────────────────────────────────────────
+    runCheck()
+  </script>
+</body>
+</html>
