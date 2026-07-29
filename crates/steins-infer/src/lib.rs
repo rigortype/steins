@@ -1739,8 +1739,15 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
                 EffectOrigin::HigherOrder { callee, callbacks, arg_count, span } => {
                     match steins_catalog::invocation_shape(callee.simple()) {
                         Some(shape) => {
-                            // The invoker's own base is effect-pure (the catalog
-                            // gives it no colors); its effect IS the callback's.
+                            // ADR-0063 P1: the call's effect is the invoker's OWN
+                            // catalog color ⊔ the envelope of the callback it
+                            // immediately invokes. The own-color leg runs first and
+                            // unconditionally — an unresolvable (or absent) callback
+                            // never *weakens* the invoker's declared color; it only
+                            // adds the `…?` taint below.
+                            for f in builtin_findings(callee.simple(), *span, cx.tree(), cx.path()) {
+                                d.insert(f);
+                            }
                             if shape.callback_param < *arg_count {
                                 match callbacks.iter().find(|(p, _)| *p == shape.callback_param) {
                                     Some((_, cbref)) => {
@@ -2173,6 +2180,15 @@ fn report_unit(
             EffectOrigin::HigherOrder { callee, callbacks, arg_count, span } => {
                 match steins_catalog::invocation_shape(callee.simple()) {
                     Some(shape) => {
+                        // ADR-0063 P1 own-color leg, mirroring `compute_effects`:
+                        // the invoker's own catalog color is reported whether or not
+                        // the callback at the shape's position resolves.
+                        for f in builtin_findings(callee.simple(), *span, cx.tree(), cx.path()) {
+                            if exceeds(labels, &f.label) {
+                                let prefix = format!("{}() has effect {}", callee.simple(), f.label);
+                                out.push(exceeded_diag(cx, span.start, &prefix, display, labels, &f.label));
+                            }
+                        }
                         if shape.callback_param < *arg_count
                             && let Some((_, cbref)) =
                                 callbacks.iter().find(|(p, _)| *p == shape.callback_param)

@@ -618,6 +618,50 @@ pub struct InvocationShape {
 /// * `register_shutdown_function($cb, …)` — callback at 0, **deferred**.
 /// * `preg_replace_callback($pat, $cb, $subj)` — callback at 1, immediate; the
 ///   callback receives match arrays, not elements of an argument → `None`.
+///
+/// # The immediately-invoked rows (ADR-0063 P1)
+///
+/// ADR-0063 decision 1 makes this table the **callback-position catalog** that
+/// drives the higher-order effect join: a row asserts that the named position is
+/// *immediately invoked* during the call, so the callback's inferred envelope is
+/// part of this call's effect. Each row below is here because PHP evaluates the
+/// callback inside the call, before it returns:
+///
+/// * `array_find`/`array_find_key`/`array_any`/`array_all` (PHP 8.4) — callback
+///   at 1 over param 0's elements; the search predicate runs during the scan.
+///   (Short-circuiting does not change *whether* it runs, only how often — the
+///   effect join is a may-analysis, so one possible invocation is enough.)
+/// * `array_walk_recursive($arr, $cb)` — callback at 1, immediate, like
+///   `array_walk`; `arg_source` is `None` rather than `ElementsOf(0)` because the
+///   callback sees the *leaves* of the nested array, not param 0's own elements
+///   (effects join either way; the fold path must not be lied to).
+/// * `iterator_apply($it, $cb, $args)` — callback at 1, immediate; the callback
+///   is called once per iteration during the call, with `$args`, so `None`.
+///
+/// # Deliberate exclusions
+///
+/// A builtin that takes a callable but is **not** given a row contributes no
+/// callback effects; the exclusion is the honest answer, not an oversight:
+///
+/// * `set_error_handler`, `set_exception_handler`, `spl_autoload_register`,
+///   `register_tick_function`, `header_register_callback`, `ob_start` — the
+///   callable is *stored* and invoked later by the engine (on an error, an
+///   unresolved class, a tick, a flush), not during the call. They are the
+///   `register_shutdown_function` family: **not immediately invoked**. The one
+///   grandfathered `Deferred` row (`register_shutdown_function`, ADR-0033) is
+///   kept as-is; ADR-0063 P1 adds no new deferred rows, so a non-immediate
+///   position contributes nothing new.
+/// * `preg_replace_callback_array($patternsToCallbacks, $subj)` — the callables
+///   are *values inside* an associative array at position 0, not a positional
+///   callback argument. [`InvocationShape::callback_param`] cannot name them and
+///   the consumer's callback resolution is positional, so a row would be a lie.
+/// * `array_udiff`/`array_uintersect`/`array_udiff_assoc`/`array_diff_ukey`/
+///   `array_intersect_ukey`/`array_udiff_uassoc`/`array_uintersect_uassoc` — the
+///   comparator(s) are immediately invoked, but they sit in the **last** (and for
+///   the double-`u` forms, last *two*) positions of a variadic argument list.
+///   `callback_param` is a fixed index and cannot express "last"; widening the
+///   shape type for these is deferred rather than approximated wrongly.
+/// * `usleep`-style and every non-callable builtin — no callback at all.
 #[must_use]
 pub fn invocation_shape(name: &str) -> Option<InvocationShape> {
     use ArgSource::{ElementsOf, None as NoSrc};
@@ -634,6 +678,13 @@ pub fn invocation_shape(name: &str) -> Option<InvocationShape> {
         "call_user_func" | "call_user_func_array" => shape(0, Immediate, NoSrc),
         "register_shutdown_function" => shape(0, Deferred, NoSrc),
         "preg_replace_callback" => shape(1, Immediate, NoSrc),
+        // PHP 8.4 array search predicates — cb at 1 over param 0's elements.
+        "array_find" | "array_find_key" | "array_any" | "array_all" => {
+            shape(1, Immediate, ElementsOf(0))
+        }
+        // Leaves, not top-level elements → no element source (see the doc above).
+        "array_walk_recursive" => shape(1, Immediate, NoSrc),
+        "iterator_apply" => shape(1, Immediate, NoSrc),
         _ => None,
     }
 }
@@ -1067,6 +1118,55 @@ mod tests {
         assert_eq!(s("register_shutdown_function").invocation, Invocation::Deferred);
         // preg_replace_callback: cb at 1, immediate.
         assert_eq!(s("preg_replace_callback").callback_param, 1);
+    }
+
+    #[test]
+    fn adr0063_p1_immediately_invoked_rows() {
+        let s = |n| invocation_shape(n).expect("known invoker");
+        // PHP 8.4 search predicates: cb at 1 over param 0's elements, immediate.
+        for n in ["array_find", "array_find_key", "array_any", "array_all"] {
+            assert_eq!(s(n).callback_param, 1, "{n}");
+            assert_eq!(s(n).invocation, Invocation::Immediate, "{n}");
+            assert_eq!(s(n).arg_source, ArgSource::ElementsOf(0), "{n}");
+        }
+        // array_walk_recursive: immediate, but the callback sees leaves, so the
+        // element source is deliberately unmodeled.
+        assert_eq!(s("array_walk_recursive").callback_param, 1);
+        assert_eq!(s("array_walk_recursive").invocation, Invocation::Immediate);
+        assert_eq!(s("array_walk_recursive").arg_source, ArgSource::None);
+        // iterator_apply: cb at 1, immediate, args from the third parameter.
+        assert_eq!(s("iterator_apply").callback_param, 1);
+        assert_eq!(s("iterator_apply").invocation, Invocation::Immediate);
+    }
+
+    #[test]
+    fn adr0063_p1_exclusions_carry_no_shape() {
+        // Deferred invokers (the callable is stored, not immediately invoked) and
+        // shapes this table cannot express (callables inside an array; comparators
+        // in the LAST variadic position) stay uncatalogued on purpose.
+        for n in [
+            "set_error_handler",
+            "set_exception_handler",
+            "spl_autoload_register",
+            "register_tick_function",
+            "header_register_callback",
+            "ob_start",
+            "preg_replace_callback_array",
+            "array_udiff",
+            "array_uintersect",
+            "array_udiff_assoc",
+            "array_diff_ukey",
+            "array_intersect_ukey",
+            "array_udiff_uassoc",
+            "array_uintersect_uassoc",
+        ] {
+            assert_eq!(invocation_shape(n), None, "{n} must stay excluded");
+        }
+        // The one grandfathered deferred row is untouched by ADR-0063 P1.
+        assert_eq!(
+            invocation_shape("register_shutdown_function").map(|s| s.invocation),
+            Some(Invocation::Deferred)
+        );
     }
 
     #[test]
