@@ -40,6 +40,67 @@ pub struct CallableSig {
     pub ret: ContractTy,
 }
 
+/// The obligations a **refined** callable spelling puts on the callable that is
+/// bound to it (ADR-0063 §2 decision 4). All three are `false` for a plain
+/// `callable`/`Closure`, which is why [`Default`] is the bare callable.
+///
+/// The three flags are orthogonal and the vocabulary composes them: `pure-callable`
+/// is `pure`, `pure-closure` is `pure + closure_only`, `static-closure` is
+/// `is_static + closure_only`, `static-pure-closure` is all three.
+///
+/// Only [`Self::closure_only`] is a *value-domain* obligation (a string or array is
+/// never a `Closure` instance, so [`admits_val`]/[`admits_fact`] can decide it).
+/// [`Self::pure`] and [`Self::is_static`] are properties of the bound callable's
+/// **definition**, not of any runtime value this crate can see, so they are judged
+/// where the definition is in scope — the closure-argument check in `steins-infer`
+/// — exactly like [`CallableSig`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CallableObl {
+    /// `pure-callable` / `pure-closure` / `static-pure-closure`: the bound
+    /// callable's **inferred effect envelope** must be pure (ADR-0055 semantics).
+    /// Judged against the effect fixpoint, never against a declaration flag —
+    /// the metadata-only purity flag is the import ADR-0063 §3 declines.
+    pub pure: bool,
+    /// `static-closure` / `static-pure-closure`: the bound closure must carry the
+    /// `static` keyword. A syntactic fact, so this is a mechanical binding check.
+    pub is_static: bool,
+    /// The `*-closure` spellings: the value must be a `Closure` **instance**. A
+    /// callable-string or callable-array fails this half without any purity
+    /// analysis — the two halves of `pure-closure` fail independently.
+    pub closure_only: bool,
+}
+
+impl CallableObl {
+    /// Whether this spelling imposes nothing beyond a bare `callable` — the fast
+    /// path every existing consumer keeps.
+    #[must_use]
+    pub fn is_bare(self) -> bool {
+        !self.pure && !self.is_static && !self.closure_only
+    }
+}
+
+/// The obligations named by a callable **identifier**, or `None` when the
+/// identifier is not a callable spelling at all. Shared by the bare-identifier
+/// lowering and the parenthesized-signature lowering, so `pure-callable(int): int`
+/// carries the same obligation as bare `pure-callable`.
+///
+/// `callable-object` is deliberately *not* `closure_only`: it means "an object that
+/// is callable" (any `__invoke`), which is wider than `Closure`. Bare `Closure` is
+/// likewise left obligation-free this slice — tightening it is a separate, wider
+/// change than the refined spellings ADR-0063 P3 names.
+#[must_use]
+fn callable_obl(norm: &str) -> Option<CallableObl> {
+    let obl = match norm {
+        "callable" | "callable-object" | "closure" => CallableObl::default(),
+        "pure-callable" => CallableObl { pure: true, ..CallableObl::default() },
+        "pure-closure" => CallableObl { pure: true, closure_only: true, is_static: false },
+        "static-closure" => CallableObl { is_static: true, closure_only: true, pure: false },
+        "static-pure-closure" => CallableObl { pure: true, is_static: true, closure_only: true },
+        _ => return None,
+    };
+    Some(obl)
+}
+
 /// One parameter of a lowered [`CallableSig`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct CallableParamTy {
@@ -202,7 +263,12 @@ pub enum ContractTy {
     /// signature — a runtime string/array value cannot be judged against a
     /// call shape — so the signature is consumed only by the closure-argument
     /// variance check in `steins-infer`.
-    CallableTy(Option<Box<CallableSig>>),
+    ///
+    /// `obl` carries the refined spellings' obligations (ADR-0063 P3):
+    /// `pure-callable`, `pure-closure`, `static-closure`, `static-pure-closure`.
+    /// A [`CallableObl::is_bare`] obligation is exactly the historical
+    /// `callable`/`Closure` behavior, so every pre-existing consumer is unchanged.
+    CallableTy { sig: Option<Box<CallableSig>>, obl: CallableObl },
     /// Union.
     Union(Vec<ContractTy>),
     /// Intersection.
@@ -412,7 +478,17 @@ pub fn lower_identifier(name: &str) -> ContractTy {
             key: Box::new(ContractTy::Mixed),
             val: Box::new(ContractTy::Mixed),
         },
-        "callable" | "pure-callable" | "callable-object" | "closure" => ContractTy::CallableTy(None),
+        // The callable family, bare and refined (ADR-0063 P3). `callable_obl` owns
+        // the vocabulary so the parenthesized-signature path agrees by construction.
+        "callable"
+        | "callable-object"
+        | "closure"
+        | "pure-callable"
+        | "pure-closure"
+        | "static-closure"
+        | "static-pure-closure" => {
+            ContractTy::CallableTy { sig: None, obl: callable_obl(&norm).unwrap_or_default() }
+        }
         "object" => ContractTy::ObjectAny,
         "self" | "static" | "parent" | "key-of" | "value-of" => ContractTy::Opaque,
         _ => ContractTy::Class(norm),
@@ -620,8 +696,14 @@ pub fn project_value_of(inner: &ContractTy) -> ContractTy {
 /// never judged. Every lowered [`CallableSig`] therefore carries only ground
 /// contract arms.
 fn lower_callable(c: &steins_phpdoc::ast::CallableType) -> ContractTy {
+    // The identifier before the `(` still names the refined spelling — a
+    // `pure-callable(int): int` is both a signature and a purity obligation, and an
+    // identifier outside the callable vocabulary (a `@template` alias resolved to a
+    // call shape) carries none.
+    let obl = callable_obl(&c.identifier.trim_start_matches('\\').to_ascii_lowercase())
+        .unwrap_or_default();
     if !c.templates.is_empty() {
-        return ContractTy::CallableTy(None);
+        return ContractTy::CallableTy { sig: None, obl };
     }
     let params = c
         .params
@@ -633,7 +715,10 @@ fn lower_callable(c: &steins_phpdoc::ast::CallableType) -> ContractTy {
             by_ref: p.is_reference,
         })
         .collect();
-    ContractTy::CallableTy(Some(Box::new(CallableSig { params, ret: lower(&c.return_type) })))
+    ContractTy::CallableTy {
+        sig: Some(Box::new(CallableSig { params, ret: lower(&c.return_type) })),
+        obl,
+    }
 }
 
 fn lower_int_range(args: &[steins_phpdoc::ast::GenericArg]) -> ContractTy {

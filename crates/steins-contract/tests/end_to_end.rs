@@ -580,3 +580,84 @@ fn non_empty_scalar_is_the_cut_intersected_with_scalar() {
     assert_eq!(admits_val(&t, &list(vec![Val::Int(1)])), No, "an array is not a scalar");
     assert_eq!(admits_val(&t, &Val::Null), No, "null is not a scalar");
 }
+
+// ---------------------------------------------------------------------------
+// C9 — the refined callable spellings (ADR-0063 P3). The vocabulary lowers to
+// `CallableTy` plus an obligation triple, the obligation round-trips through the
+// speller, and the closure-only half is decided in the value domain.
+// ---------------------------------------------------------------------------
+
+/// The obligation triple a spelling lowers to, as `(pure, is_static, closure_only)`.
+fn obl(spelling: &str) -> (bool, bool, bool) {
+    match ty(spelling) {
+        steins_contract::ContractTy::CallableTy { obl, .. } => {
+            (obl.pure, obl.is_static, obl.closure_only)
+        }
+        other => panic!("{spelling} must lower to a callable, got {other:?}"),
+    }
+}
+
+#[test]
+fn refined_callable_spellings_lower_to_their_obligations() {
+    assert_eq!(obl("callable"), (false, false, false), "the bare spelling is unchanged");
+    assert_eq!(obl("Closure"), (false, false, false), "bare Closure is untightened this slice");
+    assert_eq!(obl("callable-object"), (false, false, false), "wider than Closure");
+    assert_eq!(obl("pure-callable"), (true, false, false));
+    assert_eq!(obl("pure-closure"), (true, false, true));
+    assert_eq!(obl("static-closure"), (false, true, true));
+    assert_eq!(obl("static-pure-closure"), (true, true, true));
+}
+
+#[test]
+fn a_parenthesized_signature_keeps_the_obligation() {
+    // `pure-callable(int): int` is both a call shape and a purity obligation.
+    let steins_contract::ContractTy::CallableTy { sig, obl } = ty("pure-callable(int): int") else {
+        panic!("must lower to a callable");
+    };
+    assert!(sig.is_some(), "the signature survives");
+    assert!(obl.pure, "and so does the obligation");
+    assert!(!obl.is_bare());
+}
+
+#[test]
+fn refined_callable_spellings_round_trip_through_the_speller() {
+    // The speller is reached through a nested slot (a bare callable arm has no
+    // faithful scalar spelling and is refused at top level, as before).
+    for spelling in
+        ["callable", "pure-callable", "pure-closure", "static-closure", "static-pure-closure"]
+    {
+        let shape = ty(&format!("array{{cb: {spelling}}}"));
+        let spelled = steins_contract::spell::spell_arms(std::slice::from_ref(&shape))
+            .unwrap_or_else(|| panic!("shape must spell: {spelling}"));
+        assert_eq!(spelled, format!("array{{cb: {spelling}}}"), "faithful round trip");
+    }
+}
+
+#[test]
+fn the_closure_only_half_is_decided_in_the_value_domain() {
+    // A callable-string / callable-array names a function or a method; neither is
+    // ever a `Closure` instance, and that half needs no purity analysis.
+    for closure_only in ["pure-closure", "static-closure", "static-pure-closure"] {
+        let t = ty(closure_only);
+        assert_eq!(admits_val(&t, &s("strlen")), No, "{closure_only}: a string is not a Closure");
+        assert_eq!(
+            admits_val(&t, &list(vec![s("Foo"), s("bar")])),
+            No,
+            "{closure_only}: an array is not a Closure",
+        );
+        assert_eq!(admits_val(&t, &Val::Int(1)), No, "{closure_only}: not callable at all");
+        assert_eq!(
+            admits_fact(&t, &Fact::General { base: Base::String, nullable: false }),
+            No,
+            "{closure_only}: a definitely-string fact is not a Closure",
+        );
+    }
+    // The `callable` spellings keep the historical `Maybe` — a string may name a
+    // pure function, which the value alone cannot decide.
+    for wide in ["callable", "pure-callable"] {
+        let t = ty(wide);
+        assert_eq!(admits_val(&t, &s("strlen")), Maybe, "{wide}: callable-string candidate");
+        assert_eq!(admits_val(&t, &Val::Int(1)), No, "{wide}: not callable at all");
+        assert_eq!(admits_fact(&t, &Fact::General { base: Base::String, nullable: false }), Maybe, "{wide}");
+    }
+}

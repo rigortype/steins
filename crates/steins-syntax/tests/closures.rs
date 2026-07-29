@@ -155,3 +155,35 @@ fn closure_inside_function_body_gets_its_own_scope() {
     assert!(tree.scopes().iter().any(|s| matches!(&s.owner, ScopeOwner::Function(n) if n == "outer")));
     assert_eq!(closure_scopes(&tree).len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// The `static` keyword (ADR-0063 P3): a closure declared `static` can never be
+// bound to an object, so it can never reach `$this`. Syntactic, so the scope
+// records it verbatim and the contract layer's binding obligation is mechanical.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn static_keyword_is_recorded_on_closure_and_arrow_scopes() {
+    let src = "<?php\n$a = static function () { return 1; };\n$b = static fn () => 1;\n";
+    let tree = SourceTree::parse(src);
+    let scopes = closure_scopes(&tree);
+    assert_eq!(scopes.len(), 2);
+    assert!(scopes.iter().all(|s| s.is_static), "both forms carry the keyword");
+}
+
+#[test]
+fn a_bindable_closure_is_not_static() {
+    let src = "<?php\n$a = function () { return 1; };\n$b = fn () => 1;\n";
+    let tree = SourceTree::parse(src);
+    let scopes = closure_scopes(&tree);
+    assert_eq!(scopes.len(), 2);
+    assert!(scopes.iter().all(|s| !s.is_static), "no keyword, no static binding");
+}
+
+#[test]
+fn function_and_top_level_scopes_are_never_static() {
+    // The keyword has no meaning outside a closure; the flag must not leak.
+    let src = "<?php\nfunction f() { return 1; }\n$x = 1;\n";
+    let tree = SourceTree::parse(src);
+    assert!(tree.scopes().iter().all(|s| !s.is_static));
+}

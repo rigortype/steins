@@ -22,7 +22,7 @@
 
 use steins_domain::{Base, Certainty, IntRange, Key, StrPreds, Val, CAP};
 
-use crate::{is_array_key_ty, shape_is_list, CField, CKey, ContractTy, MixedCut};
+use crate::{is_array_key_ty, shape_is_list, CallableObl, CField, CKey, ContractTy, MixedCut};
 
 /// Spell a summarized contract-arm list as a terminal-safe phpdoc type, or `None`
 /// when no faithful scalar spelling exists (an array/object/otherwise-unmodeled
@@ -245,6 +245,24 @@ fn ckey_to_key(k: &CKey) -> Key {
 /// (that lives in `steins-infer`'s `Cx`, the wrong dependency direction); a
 /// class-typed array member is therefore a known, deliberate casing
 /// divergence from the top-level dump surface's class rendering.
+/// Render a callable arm back to the spelling its obligations came from
+/// (ADR-0063 P3). The five reachable combinations are exactly the vocabulary
+/// `callable_obl` recognizes, so this is a faithful round-trip; any unreachable
+/// combination floors to the loosest honest keyword rather than inventing syntax
+/// no analyzer would accept.
+///
+/// The parenthesized signature is *not* rendered here — that predates this slice
+/// (`callable(int): int` has always spelled back as `callable`) and is unchanged.
+fn spell_callable(obl: CallableObl) -> &'static str {
+    match (obl.pure, obl.is_static, obl.closure_only) {
+        (true, false, false) => "pure-callable",
+        (true, false, true) => "pure-closure",
+        (false, true, true) => "static-closure",
+        (true, true, true) => "static-pure-closure",
+        _ => "callable",
+    }
+}
+
 fn spell_nested(ty: &ContractTy) -> String {
     match ty {
         ContractTy::Mixed => "mixed".to_owned(),
@@ -254,7 +272,7 @@ fn spell_nested(ty: &ContractTy) -> String {
         ContractTy::MixedMinus(MixedCut::Falsy) => "non-empty-mixed".to_owned(),
         ContractTy::Class(name) => name.clone(),
         ContractTy::ObjectAny => "object".to_owned(),
-        ContractTy::CallableTy(_) => "callable".to_owned(),
+        ContractTy::CallableTy { obl, .. } => spell_callable(*obl).to_owned(),
         ContractTy::ArrayAny { .. }
         | ContractTy::ListOf { .. }
         | ContractTy::MapOf { .. }

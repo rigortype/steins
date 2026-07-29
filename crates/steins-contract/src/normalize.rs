@@ -165,7 +165,7 @@ pub fn subsumes(a: &ContractTy, b: &ContractTy) -> Certainty {
         | ContractTy::MapOf { .. }
         | ContractTy::IterableOf { .. }
         | ContractTy::Shape { .. }
-        | ContractTy::CallableTy(_)
+        | ContractTy::CallableTy { .. }
         | ContractTy::StrOpaque
         // A cut of `mixed` still spans every base — objects included — so it has
         // no scalar-fact denotation to ask the acceptance relation about, and

@@ -1231,8 +1231,14 @@ fn check_units(
     // shared by every file's context; drives the catalog version-skew demotion.
     let php_minor = folder.php_minor();
 
+    // The callable-purity oracle (ADR-0063 P3): one whole-project effect fixpoint per
+    // run, shared by every file's context, and built only when some docblock actually
+    // spells a purity-bearing callable.
+    let purity = PurityOracle::build(units, index);
+
     for fi in 0..units.len() {
-        let cx = Cx::new_with(units, index, fi, &dam, warning_handler_abort, php_minor);
+        let cx =
+            Cx::new_with(units, index, fi, &dam, warning_handler_abort, php_minor, purity.as_ref());
 
         // --- Propagation pass FIRST: it walks every scope and, as a side
         // product, proves dead regions (decided branches, unreachable tails) —
@@ -1853,6 +1859,68 @@ fn effect_summary_units(units: &[FileUnit], index: &Index, target: usize) -> Vec
         }
     }
     out
+}
+
+/// The bridge between the effect fixpoint and the contract judgment (ADR-0063 P3).
+///
+/// The purity half of `pure-callable`/`pure-closure`/`static-pure-closure` asks one
+/// question of a bound callable — "is its inferred effect envelope pure?" — and the
+/// machinery that answers it ([`compute_effects`]) already exists, keyed by exactly
+/// the [`Sym`] a `ClosureRef`/`ClosureTarget` names. What did not exist was a way to
+/// ask it from a *call site*: [`compute_effects`] ran only inside
+/// [`effect_diagnostics`], a whole-project pass that runs strictly **after** the
+/// per-call-site loop. This type is the connection, and nothing more — it adds no
+/// effect semantics of its own.
+///
+/// Purity is read against the **current** `Pure` envelope semantics (ADR-0055): a
+/// `Pure` envelope declares an empty label set and therefore tolerates no label at
+/// all. ADR-0063's `mutate.local` tolerance is slice P2 and does not exist yet, so a
+/// by-ref out-param builtin still colors its caller impure here — the same verdict
+/// a `#[\Steins\Pure]` declaration would get today, which is the point: one purity
+/// relation, two consumers.
+struct PurityOracle {
+    effects: HashMap<Sym, EffectSet>,
+}
+
+impl PurityOracle {
+    /// Build the oracle, or `None` when no docblock in the project spells a
+    /// purity-bearing callable. The fixpoint is a whole-project pass and
+    /// [`effect_diagnostics`] already guards its own use of it the same way; without
+    /// such a spelling nothing could consult the answer, so the work is pure cost.
+    ///
+    /// The gate is exact rather than merely cheap: an obligation can only reach a
+    /// judgment by being *written*, and every purity-bearing spelling in the
+    /// vocabulary (`pure-callable`, `pure-closure`, `static-pure-closure`) contains
+    /// one of the two literal substrings tested.
+    fn build(units: &[FileUnit], index: &Index) -> Option<Self> {
+        let spells_purity = |doc: Option<&String>| {
+            doc.is_some_and(|t| t.contains("pure-callable") || t.contains("pure-closure"))
+        };
+        let any = units.iter().any(|u| {
+            u.tree.functions().iter().any(|f| spells_purity(f.docblock.as_ref()))
+                || u.tree
+                    .classes()
+                    .iter()
+                    .any(|c| c.methods.iter().any(|m| spells_purity(m.docblock.as_ref())))
+        });
+        if !any {
+            return None;
+        }
+        Some(PurityOracle { effects: compute_effects(units, index) })
+    }
+
+    /// Whether `sym`'s inferred effect envelope is **provably** not pure: the
+    /// fixpoint proved at least one effect finding for it.
+    ///
+    /// Deliberately one-sided. An unknown symbol answers `false`, and so does a
+    /// symbol whose proven finding set is empty but whose `exhaustive` bit is off
+    /// (an unresolved callee somewhere below it) — "not proven impure" is the only
+    /// answer that can never manufacture a finding. Non-exhaustiveness can hide an
+    /// effect, never invent one, so a *non-empty* finding set is a definite verdict
+    /// regardless of it.
+    fn provably_impure(&self, sym: &Sym) -> bool {
+        self.effects.get(sym).is_some_and(|e| !e.findings.is_empty())
+    }
 }
 
 /// Effect-envelope diagnostics for the whole project (proven violations only).
@@ -2909,6 +2977,12 @@ struct Cx<'a> {
     /// [`steins_catalog::PINNED_PHP`] to decide whether a catalog-backed is-a
     /// verdict used for **arm deletion** must be demoted to `Unknown`.
     php_minor: Option<(u16, u16)>,
+    /// The whole-project purity answer for the callable-purity obligation
+    /// (ADR-0063 P3), or `None` when no purity-bearing callable is spelled anywhere
+    /// (and therefore also for every auxiliary pass, which reports no findings of
+    /// this family). `None` makes [`Self::provably_impure`] answer `false`, i.e. the
+    /// obligation stays silent — the safe side.
+    purity: Option<&'a PurityOracle>,
 }
 
 impl<'a> Cx<'a> {
@@ -2920,6 +2994,7 @@ impl<'a> Cx<'a> {
             dam: &EMPTY_DAM,
             warning_handler_abort: true,
             php_minor: None,
+            purity: None,
         }
     }
 
@@ -2931,8 +3006,9 @@ impl<'a> Cx<'a> {
         dam: &'a DamFacts,
         warning_handler_abort: bool,
         php_minor: Option<(u16, u16)>,
+        purity: Option<&'a PurityOracle>,
     ) -> Self {
-        Self { units, index, cur, dam, warning_handler_abort, php_minor }
+        Self { units, index, cur, dam, warning_handler_abort, php_minor, purity }
     }
 
     /// A context pointing at a different file (for cross-file descent); the runtime
@@ -2945,7 +3021,15 @@ impl<'a> Cx<'a> {
             dam: self.dam,
             warning_handler_abort: self.warning_handler_abort,
             php_minor: self.php_minor,
+            purity: self.purity,
         }
+    }
+
+    /// Whether a callable symbol is **provably** impure (ADR-0063 P3) — the one
+    /// question the purity obligation asks. `false` whenever the oracle is absent,
+    /// so an auxiliary pass and a project with no purity spelling both stay silent.
+    fn provably_impure(&self, sym: &Sym) -> bool {
+        self.purity.is_some_and(|p| p.provably_impure(sym))
     }
 
     /// Whether a **catalog-backed** is-a verdict used for arm deletion must be
@@ -13337,7 +13421,7 @@ fn unrepresentable_verdict(cty: &steins_contract::ContractTy, v: &CVal) -> Tri {
             // An object may be `Traversable`, may have `__invoke`, and a
             // provenance-flavored string type is non-extensional (ADR-0038) — none
             // of it provable from the class name alone.
-            C::Opaque | C::IterableOf { .. } | C::CallableTy(_) | C::StrOpaque => Tri::Maybe,
+            C::Opaque | C::IterableOf { .. } | C::CallableTy { .. } | C::StrOpaque => Tri::Maybe,
             // Every other lowered form denotes scalars, null, or arrays, of which no
             // object is a member (pure set membership, no coercion — ADR-0030).
             _ => Tri::No,
@@ -13358,7 +13442,7 @@ fn unrepresentable_verdict(cty: &steins_contract::ContractTy, v: &CVal) -> Tri {
             | C::MapOf { .. }
             | C::IterableOf { .. }
             | C::Shape { .. }
-            | C::CallableTy(_)
+            | C::CallableTy { .. }
             | C::Opaque => Tri::Maybe,
             _ => Tri::No,
         },
@@ -13794,6 +13878,30 @@ fn check_phpdoc_param(
         return;
     }
     let Some(ty) = envelopes.param(&param.name) else { return };
+
+    // ADR-0063 P3 — the refined callable spellings' obligations, propagation-pass
+    // lane. A variable bound to a PROVEN closure value carries no scalar fact at all
+    // (`Known::closure` sets `fact: None`), so neither the proven-value lane nor the
+    // abstract-fact lane below can see it; the obligation is judged here instead,
+    // against the closure's definition, exactly as [`check_callable_arg`] judges a
+    // closure written directly in argument position.
+    //
+    // Restricted to a non-descent site on purpose: a `ClosureVal` records only its
+    // definition *offset*, and the fixpoint's closure symbol is file-keyed. Outside a
+    // descent the env and `cx` are the same file by construction; inside one they can
+    // differ, and a same-offset closure in the other file would be a different
+    // closure. Documented ceiling rather than a guess.
+    if !in_descent
+        && let ArgValue::Var(name) = value
+        && let Some(cv) = env.get(name).and_then(|k| k.closure.as_ref())
+        && let ContractTy::CallableTy { obl, .. } = steins_contract::lower(ty)
+        && !obl.is_bare()
+        && let Some(violation) = callable_obl_violation(cx, obl, &cv.target)
+    {
+        push_obligation_diag(cx, violation, callee, ty, &param.name, arg_offset, out);
+        return;
+    }
+
     let param_name = &param.name;
     let rendered = match cx.resolve_cval(value, env, store, poisoned, folder) {
         Some(cv) => {
@@ -14071,6 +14179,119 @@ fn callable_sig_violation(
     None
 }
 
+/// A violated obligation of a **refined** callable spelling (ADR-0063 P3) — the
+/// obligation half of the callable contract, beside [`CallableViolation`]'s
+/// signature half.
+#[derive(Clone, Copy)]
+enum ObligationViolation {
+    /// `pure-callable`/`pure-closure`/`static-pure-closure`: the bound callable's
+    /// inferred effect envelope is provably not pure.
+    Purity,
+    /// `static-closure`/`static-pure-closure`: the bound closure is not declared
+    /// `static`, so it can be bound to an object and reach `$this`.
+    StaticBinding,
+}
+
+/// The [`ClosureTarget`] a lowered [`ClosureRef`] argument denotes — the one shape
+/// [`callable_obl_violation`] judges, so the direct pass (a closure written *in*
+/// argument position) and the propagation pass (a variable holding a proven closure
+/// value) ask exactly the same question.
+fn closure_target_of_ref(cref: &ClosureRef) -> ClosureTarget {
+    match cref {
+        ClosureRef::Anonymous { def_offset, .. } => ClosureTarget::Scope(*def_offset),
+        ClosureRef::FunctionName(name) => ClosureTarget::Named(name.clone()),
+    }
+}
+
+/// Judge a bound callable against the obligations of a refined callable spelling
+/// (ADR-0063 §2 decision 4). `None` is "no proven violation" — the zero-FP floor:
+/// every leg that cannot see the callable's definition answers `None` rather than
+/// guessing, so an opaque callable value is silent by construction.
+///
+/// The two obligations are decided by different machinery, which is why the ADR
+/// keeps them separate: `static` is written in the syntax (a mechanical binding
+/// check against [`Scope::is_static`]), purity is a property of the body that only
+/// the effect fixpoint can answer ([`Cx::provably_impure`]).
+///
+/// `closure_only` is **not** judged here: a closure literal and a first-class
+/// callable both evaluate to a real `Closure` instance, so they satisfy it by
+/// construction. The spelling's closure half bites on the *value* side instead
+/// (`steins_contract::admits_val`/`admits_fact` — a callable-string is not a
+/// `Closure`), which is exactly the fixtures' claim that the two halves of
+/// `pure-closure` fail independently.
+fn callable_obl_violation(
+    cx: &Cx,
+    obl: steins_contract::CallableObl,
+    target: &ClosureTarget,
+) -> Option<ObligationViolation> {
+    match target {
+        ClosureTarget::Scope(def_offset) => {
+            let scope = cx.closure_scope(*def_offset)?;
+            if obl.is_static && !scope.is_static {
+                return Some(ObligationViolation::StaticBinding);
+            }
+            // Closures are same-file, and every caller of this leg judges a closure
+            // written in the file `cx` points at, so the fixpoint's file-keyed
+            // closure symbol matches by construction.
+            if obl.pure
+                && cx.provably_impure(&Sym::Closure(cx.path().to_owned(), *def_offset))
+            {
+                return Some(ObligationViolation::Purity);
+            }
+            None
+        }
+        ClosureTarget::Named(nameref) => {
+            // `f(...)` — a first-class callable of a free function. It evaluates to a
+            // `Closure` with no bound `$this`, so it satisfies the static-binding
+            // obligation the way `static function () {}` does; only purity can be
+            // violated, and only when the name resolves to a *user* function whose
+            // body the fixpoint actually read (a builtin or an ambiguous name has no
+            // envelope to judge, so it stays silent).
+            if !obl.pure {
+                return None;
+            }
+            let FnResolution::User(site) = cx.resolve_function(nameref) else { return None };
+            let fqn = cx.fn_decl(site).fqn.clone();
+            if cx.provably_impure(&Sym::Func(fqn)) {
+                return Some(ObligationViolation::Purity);
+            }
+            None
+        }
+    }
+}
+
+/// Emit the one `phpdoc.param-mismatch` a violated callable obligation produces.
+/// Shared by both lanes so a closure written in argument position and a variable
+/// holding the same closure report identically.
+#[allow(clippy::too_many_arguments)]
+fn push_obligation_diag(
+    cx: &Cx,
+    violation: ObligationViolation,
+    callee: &str,
+    ty: &PType,
+    param_name: &str,
+    arg_offset: u32,
+    out: &mut Vec<Diagnostic>,
+) {
+    let reason = match violation {
+        ObligationViolation::Purity => {
+            "the bound callable's inferred effect envelope is not pure"
+        }
+        ObligationViolation::StaticBinding => "the bound closure is not declared static",
+    };
+    let pos = cx.tree().position(arg_offset);
+    out.push(Diagnostic {
+        id: PARAM_MISMATCH_ID,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message: format!(
+            "callable argument to {callee}() violates declared @param {ty} ${param_name} — {reason}",
+        ),
+        facet: None,
+    });
+}
+
 /// Check a closure / first-class-callable argument at a call site against a
 /// declared `callable(...)` `@param` contract (issue #11), emitting at most one
 /// `phpdoc.param-mismatch`. Silent unless the contract carries a signature AND the
@@ -14092,7 +14313,21 @@ fn check_callable_arg(
     out: &mut Vec<Diagnostic>,
 ) {
     let Some(ty) = envelopes.param(&param.name) else { return };
-    let ContractTy::CallableTy(Some(sig)) = steins_contract::lower(ty) else { return };
+    let ContractTy::CallableTy { sig, obl } = steins_contract::lower(ty) else { return };
+
+    // ADR-0063 P3: the refined spellings' obligations come first. They are decided
+    // from the bound callable's *definition* (its `static` keyword, its inferred
+    // effect envelope) rather than from the declared call shape, so they apply to a
+    // bare `pure-callable` that carries no signature at all — and when both halves
+    // are violated the obligation is the more specific report.
+    if !obl.is_bare()
+        && let Some(violation) = callable_obl_violation(cx, obl, &closure_target_of_ref(closure))
+    {
+        push_obligation_diag(cx, violation, callee, ty, &param.name, arg_offset, out);
+        return;
+    }
+
+    let Some(sig) = sig else { return };
 
     // Resolve the bound callable's declared native signature. Anonymous closures
     // address their own scope by definition offset; a first-class callable naming
@@ -14808,7 +15043,7 @@ mod n4_carrier_tests {
         let tree = SourceTree::parse(src);
         let units = [FileUnit { path: "t.php", tree: &tree }];
         let index = Index::from_units(&units);
-        let cx = Cx::new_with(&units, &index, 0, &EMPTY_DAM, true, php_minor);
+        let cx = Cx::new_with(&units, &index, 0, &EMPTY_DAM, true, php_minor, None);
         f(&cx)
     }
 
@@ -14909,7 +15144,7 @@ mod n4_carrier_tests {
         // before the fix a 64-copy pile stayed 64 and doubled at the next join.
         for ty in [
             ContractTy::ArrayAny { non_empty: false },
-            ContractTy::CallableTy(None),
+            ContractTy::CallableTy { sig: None, obl: steins_contract::CallableObl::default() },
             ContractTy::StrOpaque,
             ContractTy::Opaque,
         ] {
@@ -14926,12 +15161,12 @@ mod n4_carrier_tests {
         // The structural-equality collapse still honors the derivation clause: a
         // Verified + Asserted pair of the SAME opaque arm survives at Asserted.
         let mut arms = vec![
-            arm(ContractTy::CallableTy(None), Stratum::Verified),
-            arm(ContractTy::CallableTy(None), Stratum::Asserted),
-            arm(ContractTy::CallableTy(None), Stratum::Verified),
+            arm(ContractTy::CallableTy { sig: None, obl: steins_contract::CallableObl::default() }, Stratum::Verified),
+            arm(ContractTy::CallableTy { sig: None, obl: steins_contract::CallableObl::default() }, Stratum::Asserted),
+            arm(ContractTy::CallableTy { sig: None, obl: steins_contract::CallableObl::default() }, Stratum::Verified),
         ];
         dedup_contract_arms(&mut arms);
-        assert_eq!(arms, vec![arm(ContractTy::CallableTy(None), Stratum::Asserted)]);
+        assert_eq!(arms, vec![arm(ContractTy::CallableTy { sig: None, obl: steins_contract::CallableObl::default() }, Stratum::Asserted)]);
     }
 
     // ---- the deliverable: else-of-instanceof leaves {Guest} -----------------

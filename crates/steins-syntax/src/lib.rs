@@ -1863,6 +1863,14 @@ pub struct Scope {
     /// Throw-origin candidates of a closure/arrow body ([`ScopeOwner::Closure`]),
     /// the throw-fixpoint analogue of [`Self::effect_origins`].
     pub throw_origins: Vec<ThrowOrigin>,
+    /// `true` when a closure/arrow scope ([`ScopeOwner::Closure`]) was declared
+    /// with the `static` keyword (`static function () {}`, `static fn () => …`) —
+    /// the closure can never be bound to an object and so can never touch `$this`.
+    /// This is a **syntactic** fact, written in the source, which is what makes the
+    /// `static-closure` family's binding obligation a mechanical check rather than
+    /// an inference (ADR-0063 §2 decision 4). Always `false` for function, method
+    /// and top-level scopes (the keyword has no meaning there).
+    pub is_static: bool,
 }
 
 /// A recovered parse error with its span (ADR-0003: error-tolerant).
@@ -4689,6 +4697,7 @@ fn build_scope_from(owner: ScopeOwner, statements: &[&Statement<'_>]) -> Scope {
         ret_ty: None,
         effect_origins: Vec::new(),
         throw_origins: Vec::new(),
+        is_static: false,
     }
 }
 
@@ -4749,6 +4758,7 @@ fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>, rc: &Ref
         ret_ty: cl.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
         effect_origins,
         throw_origins,
+        is_static: cl.r#static.is_some(),
     }
 }
 
@@ -4789,6 +4799,7 @@ fn build_closure_scope_from_arrow(af: &mago_syntax::cst::ArrowFunction<'_>, rc: 
         ret_ty: af.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
         effect_origins,
         throw_origins,
+        is_static: af.r#static.is_some(),
     }
 }
 

@@ -88,8 +88,12 @@ pub fn admits_val(ty: &ContractTy, v: &Val) -> Certainty {
         // as for a bare callable — a string may name a function, a pair-array a
         // method (Maybe), any other scalar No. The signature is used only by the
         // closure-argument variance check (issue #11, `steins-infer`).
-        ContractTy::CallableTy(_) => match v {
-            Val::Str(_) | Val::Array(_) => Maybe,
+        // `closure_only` (the `*-closure` spellings, ADR-0063 P3) decides the string
+        // and array cases outright: a callable-string names a function and a pair-
+        // array a method, and neither is ever a `Closure` **instance**. That is the
+        // half of `pure-closure` that needs no purity analysis at all.
+        ContractTy::CallableTy { obl, .. } => match v {
+            Val::Str(_) | Val::Array(_) if !obl.closure_only => Maybe,
             _ => No,
         },
         ContractTy::Union(members) => {
@@ -231,8 +235,11 @@ fn base_only(ty: &ContractTy, base: Base, refinement: Option<Refinement>) -> Cer
         | ContractTy::Shape { .. }
         | ContractTy::Class(_)
         | ContractTy::ObjectAny => No,
-        ContractTy::CallableTy(_) => {
-            if base == Base::String { Maybe } else { No }
+        // As in [`admits_val`]: a definitely-string fact is a callable-string
+        // candidate (`Maybe`) for the `callable` spellings, but never a `Closure`
+        // instance, so `closure_only` decides it `No`.
+        ContractTy::CallableTy { obl, .. } => {
+            if base == Base::String && !obl.closure_only { Maybe } else { No }
         }
         ContractTy::Union(members) => {
             members.iter().fold(No, |acc, m| acc.or(base_only(m, base, refinement)))
