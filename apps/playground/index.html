@@ -228,7 +228,9 @@
   <header>
     <span class="brand">Steins <span class="product">Playground</span></span>
     <span id="status" aria-live="polite">Loading analyzer…</span>
-    <div class="toolbar"></div>
+    <div class="toolbar">
+      <button class="btn active" id="type-btn" aria-pressed="true">Hide types</button>
+    </div>
   </header>
 
   <main>
@@ -248,8 +250,8 @@
 
   <script type="module">
     import { basicSetup } from "codemirror"
-    import { EditorState, Prec } from "@codemirror/state"
-    import { EditorView } from "@codemirror/view"
+    import { EditorState, Prec, StateField, StateEffect } from "@codemirror/state"
+    import { EditorView, Decoration, WidgetType } from "@codemirror/view"
     import { HighlightStyle, syntaxHighlighting } from "@codemirror/language"
     import { php } from "@codemirror/lang-php"
     import { lintGutter, setDiagnostics } from "@codemirror/lint"
@@ -280,14 +282,75 @@ greet("three", "World"); // "three" can never satisfy int
       const resolve = pending.get(n)
       if (resolve) { pending.delete(n); resolve({ check, annotate }) }
     }
-    function analyze(source) {
+    function analyze(source, wantAnnotate) {
       const n = ++seq
       return new Promise((resolve) => {
         pending.set(n, resolve)
-        worker.postMessage({ seq: n, source, profile: "", wantAnnotate: false })
+        worker.postMessage({ seq: n, source, profile: "", wantAnnotate })
       })
     }
     const isStale = (n) => n !== seq
+
+    // ── The annotate overlay (#56): steins annotate's margin facts ────────
+    // A LineFact is a per-line string in the CLI's own vocabulary (the
+    // envelope's `text` is LineFact::body() verbatim — no re-spelling here).
+    // Rendered as end-of-line widgets padded to a common column, exactly the
+    // rigor overlay's approach. The decorations map through edits, so the
+    // overlay survives a keystroke and the debounced refresh repaints it
+    // in place — no per-keystroke flicker.
+    class FactWidget extends WidgetType {
+      constructor(text, pad) { super(); this.text = text; this.pad = pad }
+      eq(other) { return other.text === this.text && other.pad === this.pad }
+      ignoreEvent() { return true }
+      toDOM() {
+        const el = document.createElement("span")
+        el.className = "cm-fact-annotation"
+        const spacer = document.createElement("span")
+        spacer.style.cssText = `display:inline-block;width:${this.pad}ch`
+        spacer.setAttribute("aria-hidden", "true")
+        el.appendChild(spacer)
+        el.appendChild(document.createTextNode("//=> " + this.text))
+        return el
+      }
+    }
+
+    const setFactsEffect = StateEffect.define()
+    const factsField = StateField.define({
+      create: () => Decoration.none,
+      update(deco, tr) {
+        deco = deco.map(tr.changes)
+        for (const e of tr.effects) if (e.is(setFactsEffect)) deco = e.value
+        return deco
+      },
+      provide: (f) => EditorView.decorations.from(f),
+    })
+
+    function applyFacts(lines) {
+      const BASE_GAP = 3
+      const doc = view.state.doc
+      // Group multiple facts on one line into a single widget.
+      const byLine = new Map()
+      for (const { line, text } of lines) {
+        if (line < 1 || line > doc.lines) continue
+        byLine.set(line, byLine.has(line) ? byLine.get(line) + " · " + text : text)
+      }
+      if (!byLine.size) {
+        view.dispatch({ effects: setFactsEffect.of(Decoration.none) })
+        return
+      }
+      const maxLen = Math.max(...[...byLine.keys()].map((n) => doc.line(n).length))
+      const ranges = [...byLine.entries()].map(([n, text]) => {
+        const line = doc.line(n)
+        const pad = maxLen - line.length + BASE_GAP
+        return Decoration.widget({ widget: new FactWidget(text, pad), side: 1 }).range(line.to)
+      })
+      ranges.sort((a, b) => a.from - b.from)
+      view.dispatch({ effects: setFactsEffect.of(Decoration.set(ranges)) })
+    }
+
+    function clearFacts() {
+      view.dispatch({ effects: setFactsEffect.of(Decoration.none) })
+    }
 
     // ── Syntax highlight (warm theme via CSS vars) ────────────────────────
     const steinsHighlight = HighlightStyle.define([
@@ -322,6 +385,7 @@ greet("three", "World"); // "three" can never satisfy int
           php(),
           Prec.highest(syntaxHighlighting(steinsHighlight)),
           lintGutter(),
+          factsField,
           EditorView.updateListener.of((update) => {
             if (!update.docChanged) return
             scheduleCheck()
@@ -365,7 +429,7 @@ greet("three", "World"); // "three" can never satisfy int
     async function runCheck() {
       const mySeq = seq + 1
       setStatus("checking", "Checking…")
-      const { check } = await analyze(view.state.doc.toString())
+      const { check, annotate } = await analyze(view.state.doc.toString(), typesVisible)
       if (isStale(mySeq)) return
 
       if (!check.ok) {
@@ -373,6 +437,7 @@ greet("three", "World"); // "three" can never satisfy int
         return
       }
       showPosture(check.notice)
+      if (typesVisible && annotate && annotate.ok) applyFacts(annotate.lines)
       const findings = check.findings
       const parseErrors = check.parse_errors
       applyLintMarkers(findings, parseErrors)
@@ -462,6 +527,21 @@ greet("three", "World"); // "three" can never satisfy int
         })
       })
     }
+
+    // ── Types toggle (#56): on by default — the overlay is the point ─────
+    let typesVisible = true
+    const typeBtn = document.getElementById("type-btn")
+    typeBtn.addEventListener("click", () => {
+      typesVisible = !typesVisible
+      typeBtn.setAttribute("aria-pressed", String(typesVisible))
+      typeBtn.textContent = typesVisible ? "Hide types" : "Show types"
+      typeBtn.classList.toggle("active", typesVisible)
+      if (typesVisible) {
+        runCheck()
+      } else {
+        clearFacts()
+      }
+    })
 
     // ── Posture banner + status ───────────────────────────────────────────
     function showPosture(notice) {
