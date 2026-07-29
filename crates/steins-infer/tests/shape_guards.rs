@@ -227,6 +227,103 @@ fn array_is_list_flips_the_flag_on_both_branches() {
     );
 }
 
+// ---- array_all / array_any (A8, PHP 8.4, ADR-0062 §4) ----------------------
+//
+// Only ONE leg of each is unconditional: `array_all([], f)` is vacuously
+// true, so only its FALSY branch proves non-emptiness; `array_any([], f)` is
+// vacuously false, so only its TRUTHY branch does. The opposite branch of
+// each is the vacuity trap named in §4 — it must narrow NOTHING, so its pin
+// asserts the fact is exactly what an unguarded read would show.
+
+#[test]
+fn array_all_falsy_proves_non_empty_and_sharpens_count() {
+    // The mirror of `a_truthy_array_guard_sets_non_empty_and_sharpens_count`:
+    // non-empty + sealed one-optional collapses `count` to the exact `1`.
+    assert_eq!(
+        guarded_else("array{a?: int}", "array_all($v, fn ($x) => $x > 0)", "count($v)"),
+        "dumped type: 1 (asserted)"
+    );
+}
+
+#[test]
+fn array_any_truthy_proves_non_empty_and_sharpens_count() {
+    assert_eq!(
+        guarded("array{a?: int}", "array_any($v, fn ($x) => $x > 0)", "count($v)"),
+        "dumped type: 1 (asserted)"
+    );
+}
+
+#[test]
+fn array_all_truthy_is_the_vacuity_trap_and_narrows_nothing() {
+    // `array_all($v, f)` truthy could be the empty array (vacuously true) OR a
+    // fully-passing non-empty array — the leg §4 declines to import. `count`
+    // must read exactly as it would with no guard at all: `int<0, 1>`.
+    assert_eq!(
+        guarded("array{a?: int}", "array_all($v, fn ($x) => $x > 0)", "count($v)"),
+        one_type(&fixture("array{a?: int}", "\\PHPStan\\dumpType(count($v));"))
+    );
+}
+
+#[test]
+fn array_any_falsy_is_the_vacuity_trap_and_narrows_nothing() {
+    // `array_any($v, f)` falsy could be the empty array OR a non-empty array
+    // where every element failed — the leg §4 declines to import.
+    assert_eq!(
+        guarded_else("array{a?: int}", "array_any($v, fn ($x) => $x > 0)", "count($v)"),
+        one_type(&fixture("array{a?: int}", "\\PHPStan\\dumpType(count($v));"))
+    );
+}
+
+#[test]
+fn array_all_truthy_leaves_the_shape_fact_itself_unchanged() {
+    // Same vacuity pin, at the fact-lane level: dumping `$v` in the vacuous
+    // branch must not carry a `non-empty-` modifier.
+    assert_eq!(
+        guarded("array{a?: int}", "array_all($v, fn ($x) => $x > 0)", "$v"),
+        one_type(&fixture("array{a?: int}", "\\PHPStan\\dumpType($v);"))
+    );
+}
+
+#[test]
+fn array_any_falsy_leaves_the_shape_fact_itself_unchanged() {
+    assert_eq!(
+        guarded_else("array{a?: int}", "array_any($v, fn ($x) => $x > 0)", "$v"),
+        one_type(&fixture("array{a?: int}", "\\PHPStan\\dumpType($v);"))
+    );
+}
+
+#[test]
+fn not_array_all_proves_non_empty_via_the_negation_route() {
+    // `if (!array_all($x, $f))` — the ADR's own worked example: the outer `!`
+    // flips polarity through `CondExpr::Not`, landing on the same falsy leg.
+    assert_eq!(
+        guarded("array{a?: int}", "!array_all($v, fn ($x) => $x > 0)", "count($v)"),
+        "dumped type: 1 (asserted)"
+    );
+}
+
+#[test]
+fn array_all_any_do_not_special_case_the_concrete_lane() {
+    // The S4 pure-guard-call exemption (`cond_invalidations`/`shape_lane_present`)
+    // only spares a base that carries the SHAPE lane (a `Fact::Shape`, or a
+    // contract arm with one) — exactly what this guard's narrowing consumes. A
+    // proven `Singleton` concrete array is neither, so it is NOT exempted and
+    // keeps the pre-existing by-ref-conservative forgetting every other call
+    // argument gets. This is the deliberate absence of special-casing: A8 adds
+    // no concrete-lane logic, so a concrete array survives a guard call exactly
+    // as it did before this slice (compare the unguarded baseline, identical).
+    let guarded = one_type(
+        "<?php\nfunction f(): void { $v = ['a' => 1]; \
+         if (array_any($v, fn ($x) => $x > 0)) { \\PHPStan\\dumpType($v); } }\n",
+    );
+    let unguarded_but_still_a_call_argument = one_type(
+        "<?php\nfunction f(): void { $v = ['a' => 1]; \
+         some_unrelated_call($v); \\PHPStan\\dumpType($v); }\n",
+    );
+    assert_eq!(guarded, "dumped type: unknown");
+    assert_eq!(guarded, unguarded_but_still_a_call_argument);
+}
+
 // ---- Arm subtraction + the collapse mint (A-G3 / A-G4) ---------------------
 
 /// A two-array-arm union: the fact lane is empty at entry (A-G3 keeps the union

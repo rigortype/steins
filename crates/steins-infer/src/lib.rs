@@ -8397,7 +8397,10 @@ fn collect_pure_guard_bases(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) {
                 out.push(var.clone());
             }
         }
-        CondExpr::Call { call, reads } if array_guard_predicate(cx, call).is_some() => {
+        CondExpr::Call { call, reads }
+            if array_guard_predicate(cx, call).is_some()
+                || array_all_any_predicate(cx, call).is_some() =>
+        {
             for r in reads {
                 if !out.contains(r) {
                     out.push(r.clone());
@@ -8430,8 +8433,16 @@ fn shape_lane_present(var: &str, env: &HashMap<String, Known>, store: &Store) ->
 fn collect_cond_opaque_reads(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) {
     match cond {
         // A recognized pure array builtin mutates nothing; its bases are decided
-        // by `collect_pure_guard_bases` + the shape-lane test instead.
-        CondExpr::Call { call, .. } if array_guard_predicate(cx, call).is_some() => {}
+        // by `collect_pure_guard_bases` + the shape-lane test instead. `array_all`/
+        // `array_any` (A8) join this set: neither parameter is by-ref in PHP's own
+        // signature, so the base array is exactly as safe as `array_is_list`'s —
+        // any *other* alias risk (a callback closing over the base by reference)
+        // is still caught, because `collect_pure_guard_bases` only exempts a read
+        // that also carries the shape lane, and a by-ref-captured var generally
+        // won't.
+        CondExpr::Call { call, .. }
+            if array_guard_predicate(cx, call).is_some()
+                || array_all_any_predicate(cx, call).is_some() => {}
         // An opaque condition may mutate any variable it reads by reference — the
         // whole read-set is forgotten (the conservative floor, unchanged).
         CondExpr::Opaque { reads } => {
@@ -11498,6 +11509,14 @@ enum ShapeGuard {
     /// mixed disjunction reads as [`PresenceFlavor::KeyExists`], because
     /// `isset(k)` implies `k` exists but not conversely.
     Cover { var: String, keys: Vec<VKey>, flavor: PresenceFlavor },
+    /// `array_all($x, $f)` falsy / `array_any($x, $f)` truthy (A8, ADR-0062
+    /// §4, PHP 8.4): the ONE unconditional leg of each — `array_all([], f)`
+    /// and `array_any([], f)` are respectively always true and always false,
+    /// so only the branch that leg refutes proves `$x` non-empty. The opposite
+    /// (vacuous-on-empty) branch is never recorded — [`collect_shape_guards`]
+    /// pushes this only at the firing polarity, so its absence on that branch
+    /// is silence, not a claim.
+    NonEmpty { var: String },
 }
 
 impl ShapeGuard {
@@ -11507,7 +11526,8 @@ impl ShapeGuard {
             | ShapeGuard::Truthy { var, .. }
             | ShapeGuard::IsList { var, .. }
             | ShapeGuard::Tag { var, .. }
-            | ShapeGuard::Cover { var, .. } => var,
+            | ShapeGuard::Cover { var, .. }
+            | ShapeGuard::NonEmpty { var, .. } => var,
         }
     }
 }
@@ -11534,6 +11554,22 @@ fn array_guard_predicate(cx: &Cx, call: &CallExpr) -> Option<&'static str> {
     ["array_key_exists", "key_exists", "array_is_list"]
         .into_iter()
         .find(|p| callee.eq_ignore_ascii_case(p))
+}
+
+/// The recognized `array_all`/`array_any` name a guard call names (A8), under the
+/// same namespace/userland-shadow discipline as [`array_guard_predicate`] — kept
+/// as a separate lookup because the two calls have a different arity (`$array,
+/// $callback`) and a different firing rule than the presence/list-flag guards.
+fn array_all_any_predicate(cx: &Cx, call: &CallExpr) -> Option<&'static str> {
+    let callee = call.callee.as_deref()?;
+    let r = call.callee_ref.as_ref()?;
+    if r.raw.contains('\\') || matches!(cx.resolve_function(r), FnResolution::User(_)) {
+        return None;
+    }
+    if !call.positional_only {
+        return None;
+    }
+    ["array_all", "array_any"].into_iter().find(|p| callee.eq_ignore_ascii_case(p))
 }
 
 /// Collect the shape guards a condition establishes at polarity `then`.
@@ -11594,29 +11630,49 @@ fn collect_shape_guards(
             }
         }
         CondExpr::Call { call, .. } => {
-            let Some(pred) = array_guard_predicate(cx, call) else { return };
-            match pred {
-                "array_key_exists" | "key_exists" => {
-                    if call.args.len() != 2 {
-                        return;
+            if let Some(pred) = array_guard_predicate(cx, call) {
+                match pred {
+                    "array_key_exists" | "key_exists" => {
+                        if call.args.len() != 2 {
+                            return;
+                        }
+                        let ArgValue::Var(var) = &call.args[1].value else { return };
+                        if let Some(k) = guard_key(&call.args[0].value, php_minor) {
+                            out.push(ShapeGuard::Present {
+                                var: var.clone(),
+                                key: k,
+                                flavor: PresenceFlavor::KeyExists,
+                                positive: then,
+                            });
+                        }
                     }
-                    let ArgValue::Var(var) = &call.args[1].value else { return };
-                    if let Some(k) = guard_key(&call.args[0].value, php_minor) {
-                        out.push(ShapeGuard::Present {
-                            var: var.clone(),
-                            key: k,
-                            flavor: PresenceFlavor::KeyExists,
-                            positive: then,
-                        });
+                    _ => {
+                        if call.args.len() != 1 {
+                            return;
+                        }
+                        if let ArgValue::Var(var) = &call.args[0].value {
+                            out.push(ShapeGuard::IsList { var: var.clone(), positive: then });
+                        }
                     }
                 }
-                _ => {
-                    if call.args.len() != 1 {
-                        return;
-                    }
-                    if let ArgValue::Var(var) = &call.args[0].value {
-                        out.push(ShapeGuard::IsList { var: var.clone(), positive: then });
-                    }
+                return;
+            }
+            // A8: `array_all` fires on its falsy branch (`array_all([], f)` is
+            // vacuously true, so falsy means at least one element existed and
+            // failed); `array_any` fires on its truthy branch (`array_any([],
+            // f)` is vacuously false). The opposite branch of each is a vacuity
+            // trap — it proves nothing about emptiness — so it pushes no guard.
+            if let Some(pred) = array_all_any_predicate(cx, call) {
+                if call.args.len() != 2 {
+                    return;
+                }
+                let fires = match pred {
+                    "array_all" => !then,
+                    "array_any" => then,
+                    _ => false,
+                };
+                if fires && let ArgValue::Var(var) = &call.args[0].value {
+                    out.push(ShapeGuard::NonEmpty { var: var.clone() });
                 }
             }
         }
@@ -11814,11 +11870,13 @@ fn shape_arm_survives(g: &ShapeGuard, ty: &ContractTy, php_minor: Option<(u16, u
             }
             tags.iter().any(|t| tag_possible(slot, t, *loose, php_minor))
         }
-        // Truthiness and list-ness are properties of the whole array, not of a
-        // key, and every array arm can be non-empty or a list for *some* value
-        // the arm admits — so v1 subtracts nothing here and refines the fact
-        // lane only.
-        ShapeGuard::Truthy { .. } | ShapeGuard::IsList { .. } => true,
+        // Truthiness, list-ness, and A8's non-emptiness leg are all properties
+        // of the whole array, not of a key, and every array arm can be
+        // non-empty or a list for *some* value the arm admits — so v1
+        // subtracts nothing here and refines the fact lane only.
+        ShapeGuard::Truthy { .. } | ShapeGuard::IsList { .. } | ShapeGuard::NonEmpty { .. } => {
+            true
+        }
         // **Covers on arms are future work** (A-G8's home for them is inside the
         // shape fact, and A-G3 keeps unions in the arm lane). An arm that can hold
         // NONE of the covered keys is in fact refuted by the disjunction — the
@@ -11937,6 +11995,16 @@ fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>) {
             shape: Box::new(shape.set_is_list(Certainty::from_bool(*positive))),
             nullable,
         }),
+        // A8: the guard only ever fires on the leg that proves non-emptiness
+        // (collect_shape_guards never pushes it on the vacuous branch), so
+        // there is no positive/negative split to make here — unlike
+        // `Truthy`, whose false branch also needs a distinct (empty-array)
+        // reading. The concrete/value lane is untouched: `array_all`/
+        // `array_any` say nothing about entry order or values, only that at
+        // least one entry exists.
+        ShapeGuard::NonEmpty { .. } => {
+            Some(Fact::Shape { shape: Box::new(shape.set_non_empty()), nullable })
+        }
         // The S5 recording (A-G8): the disjunction's own claim, stored on the
         // fact for A-G11's `??` discharge to consume.
         ShapeGuard::Cover { keys, flavor, .. } => Some(Fact::Shape {
