@@ -511,6 +511,27 @@ def render : String :=
     [Certainty.yes, Certainty.no].map fun c =>
       "shapeislist " ++ toString i ++ " " ++ renderCert c ++ " => " ++
         renderShape (Fact.shapeSetIsList (seedAt i) c)
+  -- ADR-0062 S5: cover recording (A-G8) and the discharge query (A-G11). The
+  -- pairs are every two-element subset of `opKeys`, so each seed sees covers
+  -- whose members it declares, half-declares and does not declare at all.
+  let coverPairs : List (Key × Key) :=
+    [(.int 0, .int 1), (.int 0, .str 0), (.int 0, .str 1),
+     (.int 1, .str 0), (.int 1, .str 1), (.str 0, .str 1)]
+  let coverFlavors : List CoverFlavor := [.isset, .keyExists]
+  let renderFlavor : CoverFlavor → String :=
+    fun f => match f with | .isset => "i" | .keyExists => "e"
+  let shapeRecordCoverLines := idx.flatMap fun i => coverPairs.flatMap fun p =>
+    coverFlavors.map fun fl =>
+      "shaperecordcover " ++ toString i ++ " " ++ renderKey p.1 ++ " " ++ renderKey p.2 ++ " " ++
+        renderFlavor fl ++ " => " ++ renderShape (GShape.recordCover (seedAt i) [p.1, p.2] fl)
+  let shapeCoverProvesLines := idx.flatMap fun i => coverPairs.flatMap fun p =>
+    coverFlavors.map fun fl =>
+      let s := GShape.recordCover (seedAt i) [p.1, p.2] fl
+      "shapecoverproves " ++ toString i ++ " " ++ renderKey p.1 ++ " " ++ renderKey p.2 ++ " " ++
+        renderFlavor fl ++ " => " ++
+        (match GShape.coverProves s p.2 [p.1] with
+         | none => "-"
+         | some g => renderFlavor g)
   -- The narrowing law, checked exhaustively: everything the receiver admits
   -- that satisfies the guard survives the operator.
   let narrowTally : Nat × Nat := idx.foldl (fun acc i =>
@@ -557,6 +578,48 @@ def render : String :=
       if !Fact.shapeAdmits vecModel s e then acc else
       (acc.1 + 1,
        if (GShape.countRange s).contains (e.length : Int) then acc.2 else acc.2 + 1)) acc) (0, 0)
+  -- The S5 recording law: an array that satisfies the disjunction survives the
+  -- recording (the cover narrows, and a narrowing may not lose a member).
+  let coverTally : Nat × Nat := idx.foldl (fun acc i =>
+    let s := seedAt i
+    coverPairs.foldl (fun acc p =>
+      arrRanks.foldl (fun acc r =>
+        let e := vecArrEntries r
+        if !Fact.shapeAdmits vecModel s e then acc else
+        coverFlavors.foldl (fun (acc : Nat × Nat) fl =>
+          let sat := [p.1, p.2].any (fun k =>
+            match Fact.entryOf e k with
+            | none => false
+            | some v => match fl with
+              | .isset => !(v == Val.null)
+              | .keyExists => true)
+          if !sat then acc else
+          (acc.1 + 1,
+           if Fact.shapeAdmits vecModel (GShape.recordCover s [p.1, p.2] fl) e
+           then acc.2 else acc.2 + 1)) acc) acc) acc) (0, 0)
+  -- The A-G11 discharge law: when `coverProves` answers, the key really IS
+  -- present in every admitted array whose other member fell through — where
+  -- "fell through" is absent-or-null for an isset-cover and (given the caller's
+  -- non-nullable-slot check) absent for a keyExists-cover.
+  let dischargeTally : Nat × Nat := idx.foldl (fun acc i =>
+    let s := seedAt i
+    coverPairs.foldl (fun acc p =>
+      coverFlavors.foldl (fun acc fl =>
+        let c := GShape.recordCover s [p.1, p.2] fl
+        arrRanks.foldl (fun (acc : Nat × Nat) r =>
+          let e := vecArrEntries r
+          if !Fact.shapeAdmits vecModel c e then acc else
+          match GShape.coverProves c p.2 [p.1] with
+          | none => acc
+          | some g =>
+            let fellThrough := match Fact.entryOf e p.1 with
+              | none => true
+              | some v => match g with | .isset => v == Val.null | .keyExists => false
+            if !fellThrough then acc else
+            let ok := match Fact.entryOf e p.2 with
+              | none => false
+              | some v => match g with | .isset => !(v == Val.null) | .keyExists => true
+            (acc.1 + 1, if ok then acc.2 else acc.2 + 1)) acc) acc) acc) (0, 0)
   let soundLines :=
     [ "shapejoinsound " ++ toString joinTally.1 ++ " " ++ toString joinTally.2,
       "shapeliftsound " ++ toString liftTally.1 ++ " " ++ toString liftTally.2,
@@ -564,7 +627,9 @@ def render : String :=
       "shapefactjoinsound " ++ toString factJoinTally.1 ++ " " ++ toString factJoinTally.2,
       "shapenarrowsound " ++ toString narrowTally.1 ++ " " ++ toString narrowTally.2,
       "shapeunsetsound " ++ toString unsetTally.1 ++ " " ++ toString unsetTally.2,
-      "shapecountsound " ++ toString countTally.1 ++ " " ++ toString countTally.2 ]
+      "shapecountsound " ++ toString countTally.1 ++ " " ++ toString countTally.2,
+      "shapecoversound " ++ toString coverTally.1 ++ " " ++ toString coverTally.2,
+      "shapedischargesound " ++ toString dischargeTally.1 ++ " " ++ toString dischargeTally.2 ]
   String.intercalate "\n"
     (header ++ ["#"] ++ atomLines ++ ["#", orderLine, "#"] ++
       admitsLines ++ truthyLines ++ isNullLines ++ satisfiesLines ++ intInLines ++
@@ -572,7 +637,8 @@ def render : String :=
       shapeArrLines ++ shapeLines ++ shapeAdmitsLines ++ shapeJoinLines ++ shapeLiftLines ++
       shapeFactLines ++ shapeFactAdmitsLines ++ shapeFactJoinLines ++ shapeQueryLines ++
       shapeDescentLines ++ shapeCountLines ++ shapePromoteLines ++ shapeAbsentLines ++
-      shapeNonEmptyLines ++ shapeIsListLines ++ soundLines) ++ "\n"
+      shapeNonEmptyLines ++ shapeIsListLines ++
+      shapeRecordCoverLines ++ shapeCoverProvesLines ++ soundLines) ++ "\n"
 
 end Vectors
 end SteinsDomain

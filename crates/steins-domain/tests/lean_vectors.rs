@@ -42,6 +42,26 @@ fn op_keys() -> Vec<Key> {
     vec![Key::Int(0), Key::Int(1), Key::Str("a".to_owned()), Key::Str("b".to_owned())]
 }
 
+/// Every two-element subset of [`op_keys`], in that order — so each seed sees
+/// covers whose members it declares, half-declares and does not declare at all.
+fn cover_pairs() -> Vec<(Key, Key)> {
+    let ks = op_keys();
+    let mut out = Vec::new();
+    for i in 0..ks.len() {
+        for j in (i + 1)..ks.len() {
+            out.push((ks[i].clone(), ks[j].clone()));
+        }
+    }
+    out
+}
+
+fn render_flavor(f: CoverFlavor) -> &'static str {
+    match f {
+        CoverFlavor::Isset => "i",
+        CoverFlavor::KeyExists => "e",
+    }
+}
+
 fn ik(n: i64) -> Key {
     Key::Int(n)
 }
@@ -789,6 +809,39 @@ fn generate() -> Vec<String> {
         }
     }
 
+    // ------------------------------------------------------------------
+    // ADR-0062 S5: cover recording (A-G8) and the discharge query (A-G11).
+    // ------------------------------------------------------------------
+    for (i, s) in seeds.iter().enumerate() {
+        for (k1, k2) in cover_pairs() {
+            for fl in [CoverFlavor::Isset, CoverFlavor::KeyExists] {
+                out.push(format!(
+                    "shaperecordcover {i} {} {} {} => {}",
+                    render_key(&k1),
+                    render_key(&k2),
+                    render_flavor(fl),
+                    render_shape(&s.record_cover(vec![k1.clone(), k2.clone()], fl))
+                ));
+            }
+        }
+    }
+    for (i, s) in seeds.iter().enumerate() {
+        for (k1, k2) in cover_pairs() {
+            for fl in [CoverFlavor::Isset, CoverFlavor::KeyExists] {
+                let covered = s.record_cover(vec![k1.clone(), k2.clone()], fl);
+                out.push(format!(
+                    "shapecoverproves {i} {} {} {} => {}",
+                    render_key(&k1),
+                    render_key(&k2),
+                    render_flavor(fl),
+                    covered
+                        .cover_proves(&k2, std::slice::from_ref(&k1))
+                        .map_or("-", render_flavor)
+                ));
+            }
+        }
+    }
+
 
     // Soundness tallies for the array stratum: `γ(a) ∪ γ(b) ⊆ γ(a ⊔ b)`, the
     // lift admitting what it lifted, and the descent admitting every member.
@@ -942,6 +995,74 @@ fn generate() -> Vec<String> {
         }
     }
     out.push(format!("shapecountsound {total} {violations}"));
+
+    // The S5 recording law: an array satisfying the disjunction survives the
+    // recording (a cover narrows, and a narrowing may not lose a member).
+    let mut total = 0usize;
+    let mut violations = 0usize;
+    for s in &seeds {
+        for (k1, k2) in cover_pairs() {
+            for rank in 0..atoms.len() {
+                let e = arr_entries(rank);
+                if !s.admits(&e) {
+                    continue;
+                }
+                let entry = |k: &Key| e.iter().find(|(ek, _)| ek == k).map(|(_, v)| v);
+                for fl in [CoverFlavor::Isset, CoverFlavor::KeyExists] {
+                    let sat = [&k1, &k2].into_iter().any(|k| match entry(k) {
+                        None => false,
+                        Some(v) => fl == CoverFlavor::KeyExists || *v != Val::Null,
+                    });
+                    if !sat {
+                        continue;
+                    }
+                    total += 1;
+                    if !s.record_cover(vec![k1.clone(), k2.clone()], fl).admits(&e) {
+                        violations += 1;
+                    }
+                }
+            }
+        }
+    }
+    out.push(format!("shapecoversound {total} {violations}"));
+
+    // The A-G11 discharge law: when `cover_proves` answers, the key really IS
+    // present in every admitted array whose other member fell through.
+    let mut total = 0usize;
+    let mut violations = 0usize;
+    for s in &seeds {
+        for (k1, k2) in cover_pairs() {
+            for fl in [CoverFlavor::Isset, CoverFlavor::KeyExists] {
+                let covered = s.record_cover(vec![k1.clone(), k2.clone()], fl);
+                for rank in 0..atoms.len() {
+                    let e = arr_entries(rank);
+                    if !covered.admits(&e) {
+                        continue;
+                    }
+                    let entry = |k: &Key| e.iter().find(|(ek, _)| ek == k).map(|(_, v)| v);
+                    let Some(g) = covered.cover_proves(&k2, std::slice::from_ref(&k1)) else {
+                        continue;
+                    };
+                    let fell_through = match entry(&k1) {
+                        None => true,
+                        Some(v) => g == CoverFlavor::Isset && *v == Val::Null,
+                    };
+                    if !fell_through {
+                        continue;
+                    }
+                    let ok = match entry(&k2) {
+                        None => false,
+                        Some(v) => g == CoverFlavor::KeyExists || *v != Val::Null,
+                    };
+                    total += 1;
+                    if !ok {
+                        violations += 1;
+                    }
+                }
+            }
+        }
+    }
+    out.push(format!("shapedischargesound {total} {violations}"));
     out
 }
 
@@ -1013,6 +1134,8 @@ fn the_array_stratum_loses_no_member_over_the_vector_universe() {
         "shapenarrowsound",
         "shapeunsetsound",
         "shapecountsound",
+        "shapecoversound",
+        "shapedischargesound",
     ] {
         let line = lines
             .iter()

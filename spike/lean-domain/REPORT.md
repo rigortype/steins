@@ -185,6 +185,50 @@ flags is sound there. The Rust unit tests
 `mark_absent_admits_every_receiver_member_minus_the_key` pin the same two laws
 in-crate over their own universe.
 
+## The cover algebra (ADR-0062 S5)
+
+`GShape.recordCover` and `GShape.coverProves` mirror `ShapeFact::record_cover`
+and `ShapeFact::cover_proves` — A-G8's recording and A-G11's discharge query.
+
+**Proved, for every input.** The recording constructor establishes nothing of
+its own: it routes through `normalize`, so the invariants that adding a cover
+could break are the S2 theorems instantiated — `recordCover_fieldsSorted`,
+`recordCover_covers_have_two_keys` (with `recordCover_singleton_stores_no_cover`
+naming the case A-G8 singles out: a singleton is presence, never a cover) and
+`recordCover_sealed_no_absent`. That is the whole design argument for a
+normalizing constructor, stated as theorems rather than asserted in a comment.
+`coverProves_mem` is the one claim genuinely about the query: it only ever
+answers with a cover the shape actually carries, so a discharge cannot invent
+the claim it discharges.
+
+**Checked, not proved.** The two laws the `??` right-arm rule rests on,
+exhaustively over the shape × array vector universe, on both sides:
+
+```
+shapecoversound     488 0    γ(record_cover(s, K, f)) ⊇ { v ∈ γ(s) : v satisfies K@f }
+shapedischargesound 218 0    cover_proves(k, [j]) ⇒ k present in every admitted v where j fell through
+```
+
+Why checked rather than proved: the same obstacle the S2 and S4 sections name —
+`recordCover` routes through `normalize`, so its result's `is_list` is
+`computeIsList` over a field list the cover promotion may have changed, and the
+containment needs `computeIsList` denotationally correct in both directions
+first. The discharge law additionally needs the antichain filter to preserve the
+disjunctive claim, which is a statement about `subsumes` being a genuine entailment
+rather than a sorting key. Both are real developments, not missing tactic calls.
+The Rust unit tests `record_cover_admits_every_member_satisfying_the_disjunction`
+and `cover_proves_only_when_the_key_is_really_present` pin the same two laws
+in-crate over their own universe.
+
+**One deliberate asymmetry, and it is the point.** `coverProves` returns the
+*claim*, not a verdict. An `isset` cover discharges unconditionally; a
+`keyExists` cover discharges only when the caller has established that every
+refuted member's value slot is non-nullable, because a present-**null** member
+satisfies the cover while `??` still falls through it. The domain deliberately
+does not know about `??`, so that second condition lives in `steins-infer`
+(`coalesce_arm_fact`) and the vector law above states only what the domain
+promises.
+
 **One representational note.** `Fact` is a *nested* inductive (its `shape`
 payload contains `List (Key × Presence × Option Fact)`), which keeps the Lean
 type faithful to Rust's `Vec<(Key, Presence, Option<Box<Fact>>)>` and lets the
@@ -266,7 +310,7 @@ ordinary `test` job on every PR.
 | `SteinsDomain/Range.lean` | `IntRange`; hull/intersection laws by `omega` |
 | `SteinsDomain/Val.lean` | values, the `(rank, tie)` total order and its three laws, and `Model` — the classifier parameters with their two coherence laws |
 | `SteinsDomain/Canon.lean` | the sorted-deduped finite layer and its canonicity |
-| `SteinsDomain/Shape.lean` | the array stratum (ADR-0062): keys, presence, covers, the `Fact` inductive, `normalize` and its invariants |
+| `SteinsDomain/Shape.lean` | the array stratum (ADR-0062): keys, presence, covers, the `Fact` inductive, `normalize` and its invariants, the S5 cover algebra (`recordCover` / `coverProves`) |
 | `SteinsDomain/Fact.lean` | the four layers, `admits`, `summarize`, `fromVals`, `join`, the trinary queries, the array stratum's algebra (`lift`, `shapeJoin`, `shapeDescent`), and the S4 narrowing operators |
 | `SteinsDomain/Soundness.lean` | `join_sound` and the widening steps it composes |
 | `SteinsDomain/Queries.lean` | decided verdicts hold for every admitted value |

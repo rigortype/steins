@@ -354,6 +354,71 @@ impl ShapeFact {
             || c.keys.iter().any(|k| self.key_implies(k, c.flavor))
     }
 
+    /// **Cover recording** (A-G8, S5): the true branch of a disjunction of
+    /// depth-1 constant-key presence tests over one binding —
+    /// `isset($x['a']) || isset($x['b'])`.
+    ///
+    /// The claim recorded is "at least one of `keys` satisfies `flavor`", which
+    /// is exactly what the disjunction being true says and nothing more. Every
+    /// canonicalization is [`ShapeFact::normalize`]'s, so the S2 invariants hold
+    /// by construction rather than by a second rule here:
+    ///
+    /// * a **singleton** input is not a disjunction — it *is* presence, and is
+    ///   promoted to `Required { witnessed: true }` instead of stored;
+    /// * a cover one of whose keys is already `Required` is redundant and drops;
+    /// * the surviving covers stay a deterministically ordered antichain.
+    ///
+    /// `non_empty` follows from the claim and is set: a cover says at least one
+    /// of its keys is present, so no admitted array is empty. This is the same
+    /// reasoning [`ShapeFact::count_range`] already applies when it floors a
+    /// covered shape at one, hoisted to the flag so the *spelling* carries it
+    /// too. It is not double representation — [`ShapeFact::mark_absent`] drops
+    /// the flag and re-derives it, so the two never disagree.
+    #[must_use]
+    pub fn record_cover(&self, keys: Vec<Key>, flavor: CoverFlavor) -> ShapeFact {
+        let mut covers = self.covers.clone();
+        let claims_a_key = keys.len() > 1;
+        covers.push(Cover::new(keys, flavor));
+        ShapeFact::normalize(
+            self.fields.clone(),
+            self.tail.clone(),
+            self.is_list,
+            self.non_empty || claims_a_key,
+            covers,
+        )
+    }
+
+    /// **Cover discharge** (A-G11): does some cover prove `key` present, given
+    /// that every *other* member of that cover is known absent?
+    ///
+    /// This is the query the `??` right-arm rule consumes: the arms to the left
+    /// of `key` failed their `isset`, which is what populates `absent_keys`, and
+    /// a cover all of whose other members are in that set has only `key` left to
+    /// satisfy it.
+    ///
+    /// The returned [`CoverFlavor`] is the *claim*, not the verdict — the two
+    /// discharge under different conditions and the second one is the caller's
+    /// (A-G11's table, and the domain has no business knowing about `??`):
+    ///
+    /// * [`CoverFlavor::Isset`] — present **and non-null**, so the discharge is
+    ///   unconditional and the value additionally loses `null`.
+    /// * [`CoverFlavor::KeyExists`] — present, value possibly null. A
+    ///   present-**null** member satisfies the cover while `??` still falls
+    ///   through it, so the caller must check that every `absent_keys` member's
+    ///   value slot ([`ShapeFact::field`]) is provably non-nullable before
+    ///   trusting it.
+    ///
+    /// `Isset` wins when both claims are available: it is the stronger one.
+    #[must_use]
+    pub fn cover_proves(&self, key: &Key, absent_keys: &[Key]) -> Option<CoverFlavor> {
+        self.covers
+            .iter()
+            .filter(|c| c.keys.contains(key))
+            .filter(|c| c.keys.iter().all(|k| k == key || absent_keys.contains(k)))
+            .map(|c| c.flavor)
+            .min()
+    }
+
     fn key_implies(&self, k: &Key, flavor: CoverFlavor) -> bool {
         match self.field(k) {
             Some((_, p, slot)) if p.is_required() => match flavor {
@@ -1857,6 +1922,179 @@ mod tests {
                         s.mark_absent(key).admits(&removed),
                         "unset({key:?}) on {v:?} left {removed:?}, rejected by {s:?}"
                     );
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // record_cover / cover_proves (A-G8 recording, A-G11 discharge) — S5
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn record_cover_stores_a_two_key_disjunction() {
+        let s = sealed(vec![
+            (ks("a"), Presence::Optional, int_slot(1)),
+            (ks("b"), Presence::Optional, int_slot(2)),
+        ])
+        .record_cover(vec![ks("b"), ks("a")], CoverFlavor::Isset);
+        assert_eq!(s.covers, vec![Cover::new(vec![ks("a"), ks("b")], CoverFlavor::Isset)]);
+        // The claim implies it: at least one key is present, so no admitted
+        // array is empty.
+        assert!(s.non_empty);
+    }
+
+    /// The S2 invariant, reached through the S5 constructor: a singleton input is
+    /// presence, not a disjunction.
+    #[test]
+    fn record_cover_promotes_a_singleton_instead_of_storing_it() {
+        let s = sealed(vec![(ks("a"), Presence::Optional, int_slot(1))])
+            .record_cover(vec![ks("a")], CoverFlavor::Isset);
+        assert!(s.covers.is_empty());
+        assert_eq!(
+            s.field(&ks("a")).map(|(_, p, _)| *p),
+            Some(Presence::Required { witnessed: true })
+        );
+    }
+
+    /// Recording composes with S4: a cover one of whose keys a guard already
+    /// promoted normalizes away rather than being carried as a weaker twin.
+    #[test]
+    fn record_cover_normalizes_away_against_an_already_required_key() {
+        let s = sealed(vec![
+            (ks("a"), Presence::Optional, int_slot(1)),
+            (ks("b"), Presence::Optional, int_slot(2)),
+        ])
+        .promote_present(&ks("a"), true)
+        .record_cover(vec![ks("a"), ks("b")], CoverFlavor::Isset);
+        assert!(s.covers.is_empty());
+        assert_eq!(
+            s.field(&ks("a")).map(|(_, p, _)| *p),
+            Some(Presence::Required { witnessed: true })
+        );
+    }
+
+    #[test]
+    fn record_cover_keeps_three_keys_as_one_cover() {
+        let s = sealed(vec![
+            (ks("a"), Presence::Optional, int_slot(1)),
+            (ks("b"), Presence::Optional, int_slot(2)),
+            (ks("c"), Presence::Optional, int_slot(3)),
+        ])
+        .record_cover(vec![ks("a"), ks("b"), ks("c")], CoverFlavor::Isset);
+        assert_eq!(s.covers.len(), 1);
+        assert_eq!(s.covers[0].keys, vec![ks("a"), ks("b"), ks("c")]);
+    }
+
+    #[test]
+    fn cover_proves_the_last_unrefuted_member() {
+        let s = sealed(vec![
+            (ks("a"), Presence::Optional, int_slot(1)),
+            (ks("b"), Presence::Optional, int_slot(2)),
+        ])
+        .record_cover(vec![ks("a"), ks("b")], CoverFlavor::Isset);
+        assert_eq!(s.cover_proves(&ks("b"), &[ks("a")]), Some(CoverFlavor::Isset));
+        assert_eq!(s.cover_proves(&ks("a"), &[ks("b")]), Some(CoverFlavor::Isset));
+        // Nothing refuted yet: the disjunction proves neither member alone.
+        assert_eq!(s.cover_proves(&ks("b"), &[]), None);
+        // A key the cover does not mention is never proved by it.
+        assert_eq!(s.cover_proves(&ks("c"), &[ks("a")]), None);
+    }
+
+    #[test]
+    fn cover_proves_needs_every_other_member_refuted() {
+        let s = sealed(vec![
+            (ks("a"), Presence::Optional, int_slot(1)),
+            (ks("b"), Presence::Optional, int_slot(2)),
+            (ks("c"), Presence::Optional, int_slot(3)),
+        ])
+        .record_cover(vec![ks("a"), ks("b"), ks("c")], CoverFlavor::Isset);
+        assert_eq!(s.cover_proves(&ks("c"), &[ks("a")]), None);
+        assert_eq!(s.cover_proves(&ks("c"), &[ks("a"), ks("b")]), Some(CoverFlavor::Isset));
+    }
+
+    #[test]
+    fn cover_proves_reports_the_flavor_and_prefers_isset() {
+        let base = sealed(vec![
+            (ks("a"), Presence::Optional, int_slot(1)),
+            (ks("b"), Presence::Optional, int_slot(2)),
+        ]);
+        let exists = base.record_cover(vec![ks("a"), ks("b")], CoverFlavor::KeyExists);
+        assert_eq!(exists.cover_proves(&ks("b"), &[ks("a")]), Some(CoverFlavor::KeyExists));
+        // Both claims present: the stronger one is reported, and the antichain has
+        // already dropped the weaker twin.
+        let both = exists.record_cover(vec![ks("a"), ks("b")], CoverFlavor::Isset);
+        assert_eq!(both.cover_proves(&ks("b"), &[ks("a")]), Some(CoverFlavor::Isset));
+    }
+
+    /// The S5 recording law, checked over the operator vectors: an array that
+    /// satisfies the disjunction survives the recording.
+    #[test]
+    fn record_cover_admits_every_member_satisfying_the_disjunction() {
+        let pair: Vec<Key> = OPERATOR_KEYS.iter().map(|s| ks(s)).collect();
+        for s in &operator_shape_universe() {
+            for v in &operator_array_universe() {
+                if !s.admits(v) {
+                    continue;
+                }
+                let entry = |key: &Key| v.iter().find(|(ek, _)| ek == key).map(|(_, val)| val);
+                let isset = pair.iter().any(|k| entry(k).is_some_and(|val| *val != Val::Null));
+                let exists = pair.iter().any(|k| entry(k).is_some());
+                if isset {
+                    assert!(
+                        s.record_cover(pair.clone(), CoverFlavor::Isset).admits(v),
+                        "record_cover(isset) lost {v:?} from {s:?}"
+                    );
+                }
+                if exists {
+                    assert!(
+                        s.record_cover(pair.clone(), CoverFlavor::KeyExists).admits(v),
+                        "record_cover(exists) lost {v:?} from {s:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The discharge law A-G11 rests on, checked over the operator vectors: when
+    /// `cover_proves` answers, the key really is present in every admitted array
+    /// whose `absent` members are absent-or-null (`Isset`) / absent
+    /// (`KeyExists`).
+    #[test]
+    fn cover_proves_only_when_the_key_is_really_present() {
+        let pair: Vec<Key> = OPERATOR_KEYS.iter().map(|s| ks(s)).collect();
+        for s in &operator_shape_universe() {
+            for flavor in [CoverFlavor::Isset, CoverFlavor::KeyExists] {
+                let covered = s.record_cover(pair.clone(), flavor);
+                for v in &operator_array_universe() {
+                    if !covered.admits(v) {
+                        continue;
+                    }
+                    let entry =
+                        |key: &Key| v.iter().find(|(ek, _)| ek == key).map(|(_, val)| val);
+                    let Some(got) = covered.cover_proves(&ks("b"), &[ks("a")]) else {
+                        continue;
+                    };
+                    // The premise: the `??` arms to the left fell through, which
+                    // for `isset` means absent-or-null and for `array_key_exists`
+                    // (given the caller's non-nullable-slot check) means absent.
+                    let fell_through = match got {
+                        CoverFlavor::Isset => entry(&ks("a")).is_none_or(|val| *val == Val::Null),
+                        CoverFlavor::KeyExists => entry(&ks("a")).is_none(),
+                    };
+                    if !fell_through {
+                        continue;
+                    }
+                    assert!(
+                        entry(&ks("b")).is_some(),
+                        "cover_proves({got:?}) claimed 'b' present in {v:?} under {covered:?}"
+                    );
+                    if got == CoverFlavor::Isset {
+                        assert!(
+                            entry(&ks("b")) != Some(&Val::Null),
+                            "isset-cover claimed 'b' non-null in {v:?} under {covered:?}"
+                        );
+                    }
                 }
             }
         }

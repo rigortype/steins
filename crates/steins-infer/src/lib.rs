@@ -3525,7 +3525,9 @@ impl<'a> Cx<'a> {
 
 /// The domain value-fact (four layers), aliased as `Fact` throughout the walk.
 use steins_domain::Fact;
-use steins_domain::{Base, IntRange, Key as VKey, Refinement, ShapeFact, StrPreds, Val};
+use steins_domain::{
+    Base, CoverFlavor, IntRange, Key as VKey, Refinement, ShapeFact, StrPreds, Val,
+};
 
 /// The conversion seam **into** the domain: a literal (or fully-literal array)
 /// [`ArgValue`] to a domain [`Val`]. Array keys carry PHP key-normalization in
@@ -5173,6 +5175,18 @@ fn best_dump_type(
         };
     }
 
+    // A `??` chain (ADR-0052 §6 + ADR-0062 A-G11, S5): the spine's join under the
+    // left-to-right `¬isset` premise ladder, which is where a KeyCover discharges.
+    // Placed above the fold because a `??` is never a literal the folder can reach.
+    if let ArgValue::Coalesce(a, b) = value
+        && let Some((fact, stratum)) = eval_coalesce_fact(w, folder, a, b, env, Some(store))
+    {
+        return DumpRendering {
+            text: render_dump_fact(&fact),
+            asserted: stratum == Stratum::Asserted,
+        };
+    }
+
     // A depth-1 property fetch `$var->prop` (ADR-0052 §7, Gap B): the allocation-keyed
     // heap property fact (alias-correct by construction, ADR-0036). Escaped-then-swept
     // props carry no fact and fall through to honest unknown; a readonly prop survives.
@@ -5545,12 +5559,12 @@ fn apply_assign(
         // value it cannot spell. The join widens, so it can only *lose* precision
         // (never fire a proof the concrete arms would not) — the FP-safe side.
         ArgValue::Coalesce(a, b) => {
-            match eval_coalesce_fact(w, folder, a, b, env) {
-                Some(fact) => {
-                    // Derivation clause: the value is one of the two operands, so the
-                    // stratum is `min` over both (either could be the chosen one).
-                    let strat = value_stratum(a, env, Some(&*store))
-                        .min(value_stratum(b, env, Some(&*store)));
+            // The stratum is the evaluator's own `min` over the spine's arms — the
+            // same derivation clause the two-operand form used, extended to a
+            // projection arm, whose stratum comes from the base's shape fact rather
+            // than from `value_stratum`'s syntactic reading.
+            match eval_coalesce_fact(w, folder, a, b, env, Some(&*store)) {
+                Some((fact, strat)) => {
                     env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
                     store.unbind(var);
                 }
@@ -5636,24 +5650,178 @@ fn apply_assign(
     }
 }
 
-/// The fact of `$a ?? $b` (ADR-0052 §6): `clear_null(fact($a)) join fact($b)`. Both
-/// operand facts must be visible — an operand the domain cannot spell yields no
-/// fact and the whole expression yields `None` (silent). A provably-null `$a`
-/// (`clear_null` empties it) collapses to exactly `fact($b)`.
+/// The fact of a `??` chain (ADR-0052 §6, extended by ADR-0062 A-G11 / S5).
+///
+/// **The join law is unchanged**: `clear_null(fact($a)) join fact($b)`, folded
+/// right-to-left over the whole spine (`??` is right-associative, so `$a ?? $b ??
+/// $c` is one chain of three arms, not two nested pairs). Every arm must produce a
+/// fact — an operand the domain cannot spell yields `None` for the whole
+/// expression, so `??` never manufactures certainty for a value it cannot see —
+/// and every arm but the last contributes only its non-null part, because that is
+/// the only case in which `??` takes it.
+///
+/// **What S5 adds is the premise ladder** (A-G11). A `??` arm is reached only when
+/// every arm to its left failed `isset`, so a pure depth-1 projection arm
+/// `$x['k']` contributes the premise `¬isset($x['k'])` to everything after it.
+/// Those premises are what [`ShapeFact::cover_proves`] consumes: a KeyCover
+/// recorded by `isset($x['a']) || isset($x['b'])` plus `¬isset($x['a'])` proves
+/// `$x['b']` present, so the last arm — otherwise an undischarged optional read
+/// with no fact — becomes a `Present` read and the chain gets a value.
+///
+/// **Any other arm form invalidates the ladder.** A call may write through a
+/// reference or a global and make an earlier `¬isset` stale, so an arm that is not
+/// a pure projection contributes no premise *and drops every accumulated one*
+/// (A-G11's conservatism, and the reason `$x['a'] ?? f() ?? $x['b']` discharges
+/// nothing).
 fn eval_coalesce_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
     a: &ArgValue,
     b: &ArgValue,
     env: &HashMap<String, Known>,
-) -> Option<Fact> {
-    let fa = arg_value_fact(w, folder, a, env)?;
-    let fb = arg_value_fact(w, folder, b, env)?;
-    match clear_null(&fa) {
-        // `$a` may be non-null: its non-null part unioned with `$b`.
-        Some(a_nonnull) => a_nonnull.join(&fb),
-        // `$a` is provably null (nothing survives `clear_null`): the value is `$b`.
-        None => Some(fb),
+    store: Option<&Store>,
+) -> Option<(Fact, Stratum)> {
+    let (poisoned, php_minor) = (w.scope.poisoned, w.cx.php_minor);
+    let mut arms: Vec<&ArgValue> = Vec::new();
+    flatten_coalesce(a, &mut arms);
+    flatten_coalesce(b, &mut arms);
+    let last = arms.len() - 1;
+
+    let mut premises: Vec<(String, VKey)> = Vec::new();
+    let mut parts: Vec<(Fact, Stratum)> = Vec::with_capacity(arms.len());
+    for (i, arm) in arms.iter().enumerate() {
+        let projection = coalesce_projection(arm, env, poisoned, php_minor);
+        let (part, settled) = match &projection {
+            Some((var, key)) => {
+                let (f, s, settled) = coalesce_arm_fact(var, key, env, &premises, i == last)?;
+                (Some((f, s)), settled)
+            }
+            None => (
+                arg_value_fact(w, folder, arm, env).map(|f| (f, value_stratum(arm, env, store))),
+                false,
+            ),
+        };
+        parts.push(part?);
+        // A projection arm the shape proves present AND non-null is the value: `??`
+        // never evaluates anything to its right, so the chain ends here and the
+        // arms after it contribute nothing. (Only the shape lane short-circuits;
+        // the operand forms that predate this slice keep their join verbatim.)
+        if settled {
+            break;
+        }
+        match projection {
+            Some(p) => premises.push(p),
+            None => premises.clear(),
+        }
+    }
+
+    // Derivation clause (ADR-0052 §5): the value is one of the arms, so the whole
+    // expression is no stronger than the weakest of them.
+    let (mut acc, mut stratum) = parts.pop()?;
+    while let Some((fact, s)) = parts.pop() {
+        stratum = stratum.min(s);
+        // A provably-null arm (nothing survives `clear_null`) can never be the
+        // value: it contributes nothing, exactly as the two-operand law had it.
+        if let Some(nonnull) = clear_null(&fact) {
+            acc = nonnull.join(&acc)?;
+        }
+    }
+    Some((acc, stratum))
+}
+
+/// Flatten a `??` spine into its arms, left to right. Both sides are walked: `??`
+/// is right-associative, so the nesting is normally on the right, but explicit
+/// parentheses (`($a ?? $b) ?? $c`) nest left and mean the same chain.
+fn flatten_coalesce<'a>(v: &'a ArgValue, out: &mut Vec<&'a ArgValue>) {
+    match v {
+        ArgValue::Coalesce(a, b) => {
+            flatten_coalesce(a, out);
+            flatten_coalesce(b, out);
+        }
+        _ => out.push(v),
+    }
+}
+
+/// Is this `??` arm a **pure depth-1 projection** `$x[k]` with a resolvable
+/// constant key (A-G11's premise carrier)? The key resolution is the offset
+/// family's own ([`offset_operand_fact`] + [`offset_key_of`]), so a premise and a
+/// cover can never disagree about which key they mean.
+///
+/// Depth is exactly one and the base is exactly a binding: `$x['a']['b']` and
+/// `$this->x['a']` are not premise carriers, and by falling through to the
+/// non-projection path they *invalidate* the ladder rather than extending it.
+fn coalesce_projection(
+    arm: &ArgValue,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    php_minor: Option<(u16, u16)>,
+) -> Option<(String, VKey)> {
+    let ArgValue::OffsetRead { base, key } = arm else { return None };
+    let ArgValue::Var(name) = base.as_ref() else { return None };
+    let Some(Fact::Singleton(key_val)) = offset_operand_fact(key, env, poisoned, php_minor) else {
+        return None;
+    };
+    Some((name.clone(), offset_key_of(&key_val)?))
+}
+
+/// The fact a projection arm `$var[key]` contributes to its `??` chain, the
+/// stratum it inherits from the base's shape fact (the derivation clause: the read
+/// consumes that fact, so it is never stronger than it — always `Asserted`), and
+/// whether the arm **settles** the chain (is proven to be the value, so `??` never
+/// evaluates anything to its right).
+///
+/// The two positions are genuinely different questions:
+///
+/// * a **non-final** arm is used only when `isset` holds of it, so presence does
+///   not have to be proved — missing means fall-through — and the arm yields its
+///   declared slot ([`ShapeRead::taken_fact`]);
+/// * the **final** arm is the value whenever everything to its left fell through,
+///   so it must be *proved* present. A declared-`Required` field proves it
+///   outright; for an optional one, A-G11's cover discharge is the only thing that
+///   can, and `absent` is the accumulated `¬isset` ladder over this same base.
+fn coalesce_arm_fact(
+    var: &str,
+    key: &VKey,
+    env: &HashMap<String, Known>,
+    premises: &[(String, VKey)],
+    final_arm: bool,
+) -> Option<(Fact, Stratum, bool)> {
+    let known = env.get(var)?;
+    let Some(Fact::Shape { shape, nullable: false }) = &known.fact else { return None };
+    let read = shape_read(shape, key);
+    // Present AND non-null is exactly PHP's `isset`, so this arm is taken for every
+    // value the shape admits — the same test in both positions, harmless on the
+    // last arm and a short-circuit before it.
+    let settled = matches!(&read, ShapeRead::Present(Some(f)) if f.is_null().is_no());
+    if !final_arm {
+        return read.taken_fact().map(|f| (f, known.stratum, settled));
+    }
+    if let ShapeRead::Present(Some(f)) = read {
+        return Some((f, known.stratum, settled));
+    }
+    let absent: Vec<VKey> =
+        premises.iter().filter(|(v, _)| v == var).map(|(_, k)| k.clone()).collect();
+    let flavor = shape.cover_proves(key, &absent)?;
+    let slot = shape.field(key).and_then(|(_, _, s)| s.as_deref().cloned())?;
+    match flavor {
+        // "at least one covered key is present AND non-null": every other member
+        // failed `isset`, so this one carries the claim — present, and not null.
+        CoverFlavor::Isset => clear_null(&slot).map(|f| (f, known.stratum, true)),
+        // "at least one covered key EXISTS", value possibly null (A-G11's table).
+        // A present-*null* earlier key satisfies that claim while `??` still falls
+        // through it, so the cover would have been discharged by an arm that is not
+        // this one. The discharge is sound only when every premise key's declared
+        // value is provably non-nullable, which is what makes "fell through" and
+        // "absent" the same statement for them.
+        CoverFlavor::KeyExists => absent
+            .iter()
+            .all(|k| {
+                shape
+                    .field(k)
+                    .and_then(|(_, _, s)| s.as_deref())
+                    .is_some_and(|f| f.is_null().is_no())
+            })
+            .then_some((slot, known.stratum, false)),
     }
 }
 
@@ -10749,7 +10917,12 @@ enum ShapeRead {
     Present(Option<Fact>),
     /// An `Optional` field, undischarged: **no fact**, and specifically never
     /// the slot's value ∪ null (A-G9 — reads are never null-poisoned).
-    MaybeMissing,
+    ///
+    /// The declared slot rides along but [`Self::into_fact`] does not yield it —
+    /// the read surface must stay null-poison-free. Its ONE consumer is
+    /// [`ShapeRead::taken_fact`], the `??` left-arm reading, where missing-ness
+    /// is fall-through rather than a value (A-G11).
+    MaybeMissing(Option<Fact>),
     /// The declaration proves the key is not there: an `Absent` field, a key
     /// outside a `Sealed` shape's fields, or a key the unsealed tail's own key
     /// class rejects.
@@ -10764,7 +10937,25 @@ impl ShapeRead {
     fn into_fact(self) -> Option<Fact> {
         match self {
             ShapeRead::Present(f) | ShapeRead::Tail(f) => f,
-            ShapeRead::MaybeMissing | ShapeRead::DeclaredAbsent => None,
+            ShapeRead::MaybeMissing(_) | ShapeRead::DeclaredAbsent => None,
+        }
+    }
+
+    /// The value this read yields **when a `??` takes the arm** (S5, A-G11).
+    ///
+    /// A non-final `??` arm is used only when `isset` holds of it, so its
+    /// missing-ness is fall-through, not a value: an undischarged optional field
+    /// still yields its declared slot here, and the `??` fold's `clear_null` is
+    /// what applies the `isset` half. A *declared absence* yields nothing —
+    /// nothing admitted by the shape can take that arm.
+    ///
+    /// This is not a weakening of A-G9: the fact never reaches a read surface,
+    /// only the `??` join, and the join is where PHP itself says the arm's value
+    /// is the one the expression has.
+    fn taken_fact(self) -> Option<Fact> {
+        match self {
+            ShapeRead::Present(f) | ShapeRead::Tail(f) | ShapeRead::MaybeMissing(f) => f,
+            ShapeRead::DeclaredAbsent => None,
         }
     }
 }
@@ -10779,7 +10970,9 @@ fn shape_read(shape: &ShapeFact, key: &VKey) -> ShapeRead {
         Some((_, Presence::Required { .. }, slot)) => {
             ShapeRead::Present(slot.as_deref().cloned())
         }
-        Some((_, Presence::Optional, _)) => ShapeRead::MaybeMissing,
+        Some((_, Presence::Optional, slot)) => {
+            ShapeRead::MaybeMissing(slot.as_deref().cloned())
+        }
         Some((_, Presence::Absent, _)) => ShapeRead::DeclaredAbsent,
         None => match &shape.tail {
             Tail::Sealed => ShapeRead::DeclaredAbsent,
@@ -10869,6 +11062,12 @@ enum ShapeGuard {
     /// `match`/`switch` arm on `$x[k]`. Several tags come from a stacked arm
     /// (`case 1: case 2:` / `1, 2 => …`); `loose` is the `switch` reading.
     Tag { var: String, key: VKey, tags: Vec<ArgValue>, loose: bool },
+    /// A **disjunctive**-presence guard (A-G8, S5): `isset($x['a']) ||
+    /// isset($x['b'])` and its `array_key_exists` twin, over ONE binding, at
+    /// truth polarity. `flavor` is the weakest claim every disjunct implies — a
+    /// mixed disjunction reads as [`PresenceFlavor::KeyExists`], because
+    /// `isset(k)` implies `k` exists but not conversely.
+    Cover { var: String, keys: Vec<VKey>, flavor: PresenceFlavor },
 }
 
 impl ShapeGuard {
@@ -10877,7 +11076,8 @@ impl ShapeGuard {
             ShapeGuard::Present { var, .. }
             | ShapeGuard::Truthy { var, .. }
             | ShapeGuard::IsList { var, .. }
-            | ShapeGuard::Tag { var, .. } => var,
+            | ShapeGuard::Tag { var, .. }
+            | ShapeGuard::Cover { var, .. } => var,
         }
     }
 }
@@ -10995,12 +11195,97 @@ fn collect_shape_guards(
             collect_shape_guards(cx, a, then, out);
             collect_shape_guards(cx, b, then, out);
         }
+        // De Morgan: `¬(isset a ∨ isset b)` is `¬isset a ∧ ¬isset b`, so the false
+        // branch of a disjunction is just both disjuncts at false polarity — the
+        // per-key S4 narrowing, distributed by the walk itself. Nothing S5-specific
+        // is needed here; the cover lives on the TRUE branch only.
         CondExpr::Or(a, b) if !then => {
             collect_shape_guards(cx, a, then, out);
             collect_shape_guards(cx, b, then, out);
         }
+        // The true branch of a disjunction (A-G8, S5). Individually a disjunct
+        // proves nothing — either could be the false one — so the ONLY thing
+        // recorded is the disjunctive fact itself.
+        CondExpr::Or(..) if then => {
+            if let Some(g) = disjunctive_cover(cx, cond) {
+                out.push(g);
+            }
+        }
         _ => {}
     }
+}
+
+/// One disjunct of a truth-context `||` chain, as A-G11's v1 scope admits it: a
+/// depth-1 constant-key presence test over a named binding.
+type PresenceDisjunct = (String, VKey, PresenceFlavor);
+
+/// Flatten a `||` chain into its presence disjuncts. `false` — and the whole
+/// cover is abandoned — the moment ANY disjunct is something else: a non-presence
+/// condition (`isset($x['a']) || $y`), a deeper path, or a key that does not
+/// resolve to a constant. A disjunction is only as strong as its weakest disjunct,
+/// so one unmodelled arm makes the whole claim unrecordable rather than partial.
+fn presence_disjuncts(cx: &Cx, cond: &CondExpr, out: &mut Vec<PresenceDisjunct>) -> bool {
+    match cond {
+        CondExpr::Or(a, b) => {
+            presence_disjuncts(cx, a, out) && presence_disjuncts(cx, b, out)
+        }
+        CondExpr::Isset { var, key } => match guard_key(key, cx.php_minor) {
+            Some(k) => {
+                out.push((var.clone(), k, PresenceFlavor::Isset));
+                true
+            }
+            None => false,
+        },
+        CondExpr::Call { call, .. } => {
+            let Some(pred) = array_guard_predicate(cx, call) else { return false };
+            if !matches!(pred, "array_key_exists" | "key_exists") || call.args.len() != 2 {
+                return false;
+            }
+            let ArgValue::Var(var) = &call.args[1].value else { return false };
+            match guard_key(&call.args[0].value, cx.php_minor) {
+                Some(k) => {
+                    out.push((var.clone(), k, PresenceFlavor::KeyExists));
+                    true
+                }
+                None => false,
+            }
+        },
+        _ => false,
+    }
+}
+
+/// The [`ShapeGuard::Cover`] a truth-context disjunction records, or `None` when
+/// A-G11's v1 scope declines it.
+///
+/// Three conditions, each a soundness requirement rather than a convenience:
+///
+/// * **every** disjunct is a modelled presence test (see [`presence_disjuncts`]);
+/// * they all test the **same** binding — a cover is a fact about one array, and
+///   `isset($x['a']) || isset($y['b'])` says nothing about either;
+/// * at least two distinct keys remain, so the claim really is disjunctive (a
+///   singleton would be presence, which the domain's `normalize` promotes anyway).
+///
+/// Flavor is the **weakest** claim every disjunct implies: all-`isset` gives an
+/// Isset-cover ("at least one present and non-null"); any `array_key_exists`
+/// disjunct drags the whole cover down to KeyExists, since a present-null entry
+/// satisfies that disjunct without satisfying `isset`.
+fn disjunctive_cover(cx: &Cx, cond: &CondExpr) -> Option<ShapeGuard> {
+    let mut parts: Vec<PresenceDisjunct> = Vec::new();
+    if !presence_disjuncts(cx, cond, &mut parts) || parts.len() < 2 {
+        return None;
+    }
+    let var = parts[0].0.clone();
+    if parts.iter().any(|(v, _, _)| *v != var) {
+        return None;
+    }
+    let flavor = if parts.iter().all(|(_, _, f)| *f == PresenceFlavor::Isset) {
+        PresenceFlavor::Isset
+    } else {
+        PresenceFlavor::KeyExists
+    };
+    let mut keys: Vec<VKey> = parts.into_iter().map(|(_, k, _)| k).collect();
+    keys.dedup();
+    Some(ShapeGuard::Cover { var, keys, flavor })
 }
 
 /// **Apply every shape guard of `cond` at polarity `then`** to a branch's cloned
@@ -11104,6 +11389,13 @@ fn shape_arm_survives(g: &ShapeGuard, ty: &ContractTy, php_minor: Option<(u16, u
         // the arm admits — so v1 subtracts nothing here and refines the fact
         // lane only.
         ShapeGuard::Truthy { .. } | ShapeGuard::IsList { .. } => true,
+        // **Covers on arms are future work** (A-G8's home for them is inside the
+        // shape fact, and A-G3 keeps unions in the arm lane). An arm that can hold
+        // NONE of the covered keys is in fact refuted by the disjunction — the
+        // same sealed-by-default reasoning `Present { positive: true }` uses — but
+        // v1 records covers on a single-shape fact only, so nothing is subtracted
+        // here and no discriminated union changes shape because of one.
+        ShapeGuard::Cover { .. } => true,
     }
 }
 
@@ -11214,6 +11506,26 @@ fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>) {
         ShapeGuard::IsList { positive, .. } => Some(Fact::Shape {
             shape: Box::new(shape.set_is_list(Certainty::from_bool(*positive))),
             nullable,
+        }),
+        // The S5 recording (A-G8): the disjunction's own claim, stored on the
+        // fact for A-G11's `??` discharge to consume.
+        ShapeGuard::Cover { keys, flavor, .. } => Some(Fact::Shape {
+            shape: Box::new(shape.record_cover(
+                keys.clone(),
+                match flavor {
+                    PresenceFlavor::Isset => CoverFlavor::Isset,
+                    PresenceFlavor::KeyExists => CoverFlavor::KeyExists,
+                },
+            )),
+            // The WHOLE disjunction being true means at least one `isset` returned
+            // true — and `isset` on an offset of `null` is false — so an all-`isset`
+            // disjunction proves the base is a non-null array. (A single *false*
+            // `isset($x['a'])` would prove nothing of the sort; it is the truth of
+            // the disjunction, not of any one disjunct, that carries this.) An
+            // `array_key_exists` disjunct raises a TypeError on `null` rather than
+            // answering, so a KeyExists-flavored cover proves nothing here —
+            // exactly the reading `Present { positive: true }` already takes.
+            nullable: nullable && *flavor == PresenceFlavor::KeyExists,
         }),
         // A tag guard's job is arm subtraction; the collapsed arm's own slot is
         // already the declared literal, so refining the fact adds nothing v1.

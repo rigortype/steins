@@ -463,6 +463,40 @@ what makes the constructor total rather than trusting `required ⊆ declared`. -
 theorem countRange_valid (s : ShapeFact) : (countRange s).Valid :=
   IntRange.new_getD_valid _ _ (by decide)
 
+/-- **Cover recording** (A-G8, S5): the true branch of a disjunction of depth-1
+constant-key presence tests over one binding. The claim recorded is exactly what
+the disjunction being true says — "at least one of `keys` satisfies `flavor`" —
+and every canonicalization is `normalize`'s, so the invariants hold by
+construction: a singleton input is promoted to presence rather than stored, a
+cover with a required member drops as discharged, and the survivors stay an
+antichain.
+
+`nonEmpty` follows from the claim: a cover says at least one of its keys is
+present, so no admitted array is empty. A singleton input reaches the same
+conclusion through the promotion branch, which is why only the ≥ 2 case sets the
+flag here. -/
+def recordCover (s : ShapeFact) (keys : List Key) (flavor : CoverFlavor) : ShapeFact :=
+  normalize s.fields s.tail s.isList (s.nonEmpty || 1 < keys.length)
+    (s.covers ++ [{ keys := keys, flavor := flavor }])
+
+/-- **Cover discharge** (A-G11): does some cover prove `key` present, given that
+every *other* member of that cover is in `absentKeys`?
+
+The returned flavor is the *claim*, not the verdict: an `isset` cover discharges
+unconditionally, a `keyExists` cover only when the caller has checked that every
+absent key's value slot is provably non-nullable (a present-null member satisfies
+the cover while `??` still falls through it). `isset` wins when both are
+available — it is the stronger claim, and the fold below mirrors Rust's `.min()`
+over the derived flavor order. -/
+def coverProves (s : ShapeFact) (key : Key) (absentKeys : List Key) : Option CoverFlavor :=
+  let usable := s.covers.filter (fun c =>
+    c.keys.contains key && c.keys.all (fun k => k = key || absentKeys.contains k))
+  usable.foldl (fun acc c =>
+    match acc with
+    | none => some c.flavor
+    | some f => some (if Cover.flavorRank c.flavor < Cover.flavorRank f then c.flavor else f))
+    none
+
 end GShape
 
 /-! ## Normalization invariants
@@ -659,5 +693,67 @@ theorem normalize_covers_have_two_keys (fields : List Field) (tail : GTail Fact)
   have h₃ := (List.mem_filter.mp h₂).1
   exact foldCovers_two_keys tail covers (sortFields fields, [])
     (by intro d hd; exact absurd hd (by simp)) c h₃
+
+/-! ### The S5 recording constructor
+
+`recordCover` establishes nothing of its own: it routes through `normalize`, so
+the two invariants that could be lost by adding a cover are the ones already
+proved above, instantiated. That is the whole design argument for a normalizing
+constructor, stated as theorems. -/
+
+theorem recordCover_fieldsSorted (s : ShapeFact) (keys : List Key) (flavor : CoverFlavor) :
+    FieldsSorted (GShape.recordCover s keys flavor).fields :=
+  normalize_fieldsSorted _ _ _ _ _
+
+theorem recordCover_covers_have_two_keys (s : ShapeFact) (keys : List Key) (flavor : CoverFlavor) :
+    ∀ c ∈ (GShape.recordCover s keys flavor).covers, 2 ≤ c.keys.length :=
+  normalize_covers_have_two_keys _ _ _ _ _
+
+theorem recordCover_sealed_no_absent (s : ShapeFact) (keys : List Key) (flavor : CoverFlavor)
+    (h : s.tail = GTail.sealed) :
+    ∀ f ∈ (GShape.recordCover s keys flavor).fields, f.2.1 ≠ Presence.absent := by
+  unfold GShape.recordCover
+  rw [h]
+  exact normalize_sealed_no_absent _ _ _ _
+
+/-- A **singleton** input is not a disjunction — it is presence — so it is never
+stored as a cover. The general statement is `recordCover_covers_have_two_keys`;
+this names the case A-G8 singles out. -/
+theorem recordCover_singleton_stores_no_cover (s : ShapeFact) (k : Key) (flavor : CoverFlavor) :
+    ∀ c ∈ (GShape.recordCover s [k] flavor).covers, 2 ≤ c.keys.length :=
+  recordCover_covers_have_two_keys s [k] flavor
+
+/-- `coverProves` only ever answers with a cover the shape actually carries: the
+discharge cannot invent a claim. -/
+theorem coverProves_mem (s : ShapeFact) (key : Key) (absentKeys : List Key) :
+    ∀ f, GShape.coverProves s key absentKeys = some f → ∃ c ∈ s.covers, c.flavor = f := by
+  unfold GShape.coverProves
+  simp only
+  suffices hg : ∀ (l : List Cover) (acc : Option CoverFlavor),
+      (∀ f, acc = some f → ∃ c ∈ s.covers, c.flavor = f) →
+      (∀ c ∈ l, c ∈ s.covers) →
+      ∀ f, (l.foldl (fun acc c =>
+        match acc with
+        | none => some c.flavor
+        | some g => some (if Cover.flavorRank c.flavor < Cover.flavorRank g then c.flavor else g))
+        acc) = some f → ∃ c ∈ s.covers, c.flavor = f by
+    refine hg _ none (by intro f h; exact absurd h (by simp)) ?_
+    intro c hc; exact (List.mem_filter.mp hc).1
+  intro l
+  induction l with
+  | nil => intro acc h _ f hf; exact h f hf
+  | cons x xs ih =>
+    intro acc h hmem f hf
+    refine ih _ ?_ (fun c hc => hmem c (List.mem_cons_of_mem _ hc)) f hf
+    intro g hg
+    cases acc with
+    | none =>
+      simp only [Option.some.injEq] at hg
+      exact ⟨x, hmem x (by simp), hg⟩
+    | some a =>
+      simp only [Option.some.injEq] at hg
+      split at hg
+      · exact ⟨x, hmem x (by simp), hg⟩
+      · exact h a rfl |>.imp (fun c hc => ⟨hc.1, hg ▸ hc.2⟩)
 
 end SteinsDomain
