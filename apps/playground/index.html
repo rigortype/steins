@@ -229,7 +229,15 @@
     <span class="brand">Steins <span class="product">Playground</span></span>
     <span id="status" aria-live="polite">Loading analyzer…</span>
     <div class="toolbar">
+      <label class="ctl-label" for="profile-sel">Profile</label>
+      <select class="ctl" id="profile-sel" aria-label="Analysis profile">
+        <option value="default" selected>default</option>
+        <option value="throws-direct">throws-direct</option>
+        <option value="contracts">contracts</option>
+        <option value="strict">strict</option>
+      </select>
       <button class="btn active" id="type-btn" aria-pressed="true">Hide types</button>
+      <button class="btn" id="theme-btn" title="Cycle theme">Auto</button>
     </div>
   </header>
 
@@ -258,17 +266,44 @@
     import { tags as t } from "@lezer/highlight"
     import LZString from "https://esm.sh/lz-string@1.5.0"
 
+    // The seeded sample demonstrates the rung ladder (ADR-0062 A-G10):
+    // findings APPEAR as the profile climbs — 1 at default, 2 at contracts,
+    // 3 at strict — so the cumulative model is visible in three clicks.
     const SAMPLE = `<?php
 // Steins Playground — edit this code and see findings in real time.
-// The analyzer runs entirely in your browser, as the documented
-// sound subset: no PHP sidecar here, so findings that require
-// executing PHP are omitted — and nothing false is added.
+// The analyzer runs entirely in your browser, as the documented sound
+// subset: no PHP sidecar here, so findings that require executing PHP
+// are omitted — and nothing false is added.
+//
+// Try the Profile selector: strictness in Steins is a cumulative ladder,
+// default < contracts < strict, and this sample climbs it —
+//   default   reports the proven TypeError at the bottom;
+//   contracts adds the wrong @throws contract;
+//   strict    adds the unguarded read of an optional array key.
+
+/** @param array{id: int, name?: string} $user */
+function label(array $user): string {
+    $id = $user['id'];        // declared present: clean on every rung
+    $name = $user['name'];    // strict: 'name' is optional and nothing proves it here
+    if (isset($user['name'])) {
+        $name = $user['name']; // guarded: clean — silenced by proof, not by skip
+    }
+    return "#" . $id . " " . $name;
+}
+
+/** @throws InvalidArgumentException */
+function load(string $path): string {
+    if ($path === '') {
+        throw new RuntimeException('empty path'); // contracts: not the declared @throws
+    }
+    return $path;
+}
 
 function greet(int $times, string $name): string {
     return str_repeat("Hello, " . $name . "! ", $times);
 }
 
-greet("three", "World"); // "three" can never satisfy int
+greet("three", "World"); // default: "three" can never satisfy int
 `
 
     // ── Worker transport ──────────────────────────────────────────────────
@@ -286,7 +321,7 @@ greet("three", "World"); // "three" can never satisfy int
       const n = ++seq
       return new Promise((resolve) => {
         pending.set(n, resolve)
-        worker.postMessage({ seq: n, source, profile: "", wantAnnotate })
+        worker.postMessage({ seq: n, source, profile: currentProfile, wantAnnotate })
       })
     }
     const isStale = (n) => n !== seq
@@ -527,6 +562,35 @@ greet("three", "World"); // "three" can never satisfy int
         })
       })
     }
+
+    // ── Profile selector (#57): the rung ladder, selected per run ────────
+    let currentProfile = "default"
+    const profileSel = document.getElementById("profile-sel")
+    profileSel.addEventListener("change", () => {
+      currentProfile = profileSel.value
+      document.querySelector("#sidebar-header > span").textContent = `Findings — ${currentProfile}`
+      runCheck()
+    })
+
+    // ── Theme cycle (#57): Dark / Light / Auto, persisted ────────────────
+    const THEME_CYCLE = ["dark", "light", "system"]
+    const THEME_LABELS = { dark: "Dark", light: "Light", system: "Auto" }
+    let themeMode = localStorage.getItem("steins-theme") || "system"
+    const mediaDark = window.matchMedia("(prefers-color-scheme: dark)")
+    const themeBtn = document.getElementById("theme-btn")
+    function applyTheme() {
+      const dark = themeMode === "dark" || (themeMode === "system" && mediaDark.matches)
+      document.documentElement.dataset.theme = dark ? "dark" : "light"
+      themeBtn.textContent = THEME_LABELS[themeMode]
+      themeBtn.title = `Theme: ${THEME_LABELS[themeMode]} — click to cycle`
+    }
+    themeBtn.addEventListener("click", () => {
+      themeMode = THEME_CYCLE[(THEME_CYCLE.indexOf(themeMode) + 1) % THEME_CYCLE.length]
+      localStorage.setItem("steins-theme", themeMode)
+      applyTheme()
+    })
+    mediaDark.addEventListener("change", () => { if (themeMode === "system") applyTheme() })
+    applyTheme()
 
     // ── Types toggle (#56): on by default — the overlay is the point ─────
     let typesVisible = true

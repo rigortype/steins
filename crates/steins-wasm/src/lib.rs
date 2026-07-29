@@ -172,7 +172,13 @@ fn check_impl(source: &str, selected: Option<&str>) -> serde_json::Value {
     let file = SourceFile::new(&db, SNIPPET_PATH.to_owned(), source.to_owned());
     let project = Project::new(&db, vec![file], ProjectLayout::fallback());
     let mut folder = NoFold;
-    let mut findings = check_project_with_runtime(&db, project, &mut folder, false);
+    // `warning_handler_abort = true` is the CLI's DEFAULT (ADR-0049 §7: a proven
+    // E_WARNING is a proven runtime break; only `[runtime] warning-handler =
+    // "null"` opts out, and a browser snippet has no steins.toml). Passing false
+    // here silently withheld every warning-backed finding — offset.maybe-missing
+    // among them — which is how the playground's strict rung first shipped
+    // quieter than `steins check --profile strict`.
+    let mut findings = check_project_with_runtime(&db, project, &mut folder, true);
 
     // The CLI pipeline (ADR-0050 §6) minus the snippet-meaningless channels:
     // vendor (nothing here is vendored), policy (no config), baseline (no fs).
@@ -318,5 +324,32 @@ mod tests {
         assert_eq!(v["ok"], true);
         assert_eq!(v["notice"], SOUND_SUBSET_NOTICE);
         assert!(!v["lines"].as_array().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod strict_leg {
+    use super::*;
+
+    /// The strict rung through the playground path fires exactly as the CLI
+    /// does. This pins the ADR-0049 §7 default: `warning_handler_abort = true`
+    /// is the CLI's no-config posture, and passing `false` here withheld every
+    /// warning-backed finding (offset.maybe-missing among them) — the playground
+    /// must never be quieter than `steins check --profile strict` on the same
+    /// snippet.
+    #[test]
+    fn strict_fixture_fires_maybe_missing() {
+        let src = "<?php\n/** @param array{a?: string} $d */\nfunction f(array $d): void { $x = $d[\"a\"]; }\n";
+        let v = check_impl(src, Some("strict"));
+        let ids: Vec<&str> = v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"offset.maybe-missing"), "got {ids:?}");
+        // And the same read is quiet one rung down — the ladder is the point.
+        let v = check_impl(src, Some("contracts"));
+        assert_eq!(v["findings"].as_array().unwrap().len(), 0, "quiet at contracts");
     }
 }
