@@ -434,6 +434,157 @@ def fromVals (M : Model) (vals : List Val) : Option Fact :=
   | [v] => some (.singleton v)
   | c@(_ :: _ :: _) => if c.length ≤ CAP then some (.oneOf c) else summarize M c
 
+/-! ## Narrowing operators (ADR-0062 S4, A-G7)
+
+Targeted refinement, never a general ⊓. Each mirrors
+`crates/steins-domain/src/shape.rs` clause for clause; they live here rather
+than in `SteinsDomain.Shape` for the same reason `shapeAdmits` and `shapeJoin`
+do — they read slot facts, and `stripNullFact` needs `fromVals`.
+
+**What is proved and what is checked.** The invariant-preservation theorems
+below are proved for every input; the narrowing law itself — the narrowed shape
+admits every array the receiver admits that satisfies the guard — is *checked*
+exhaustively over the shape × array vector universe and tallied in the vector
+file (`shapenarrowsound`, `shapeunsetsound`), exactly as the join's soundness
+is. Proving it needs a `computeIsList` development (that a subset of the
+admitted arrays cannot sharpen the denotational verdict against them) which the
+spike has deliberately deferred since S2; `REPORT.md` records the split. -/
+
+/-- Drop `null` from a value slot's fact. A slot that is *exactly* `null`
+degrades to `none` — the unknown floor — rather than to an empty fact: the
+domain has no bottom, and widening is the safe direction. -/
+def stripNullFact (M : Model) : Fact → Option Fact
+  | .singleton .null => none
+  | .singleton v => some (.singleton v)
+  | .oneOf vs => fromVals M (vs.filter (fun v => decide (v ≠ Val.null)))
+  | .refined b r _ => some (mkRefined b r false)
+  | .general b _ => some (.general b false)
+  | .shape s _ => some (.shape s false)
+
+def stripNullSlot (M : Model) : Slot → Slot
+  | none => none
+  | some f => stripNullFact M f
+
+/-- **Presence promotion** (§4's guard row, #51 L3): the true branch of
+`isset($x[k])` (`stripNull`) or `array_key_exists(k, $x)` (no strip).
+
+`k` becomes `required true` — the presence stratum moves, the value stratum does
+not (A-G9). An undeclared `k` becomes a field only when the tail can supply it,
+starting from the tail's own value bound; where the tail cannot, no admitted
+array has `k`, the guard's meet is empty, and the shape is returned unchanged
+(the one widening in this operator). -/
+def shapePromotePresent (M : Model) (s : ShapeFact) (k : Key) (stripNull : Bool) : ShapeFact :=
+  match fieldOf s.fields k with
+  | some _ =>
+    let fields := s.fields.map (fun f =>
+      if f.1 = k then
+        (f.1, Presence.required true, if stripNull then stripNullSlot M f.2.2 else f.2.2)
+      else f)
+    normalize fields s.tail s.isList s.nonEmpty s.covers
+  | none =>
+    match s.tail with
+    | .sealed => s
+    | .unsealed kc slot =>
+      if !kc.admitsKey k then s
+      else
+        let slot' := if stripNull then stripNullSlot M slot else slot
+        normalize (s.fields ++ [(k, Presence.required true, slot')]) s.tail s.isList s.nonEmpty
+          s.covers
+
+/-- **Proven absence**: `unset($x[k])`, and the false branch of
+`array_key_exists`.
+
+Two laws, and the stronger governs: as a guard the result need only keep what
+the receiver admits *without* `k`; as `unset` it must keep `v \ {k}` for every
+`v` the receiver admits — a set the receiver itself need not admit. That is why
+`isList` is recomputed (`maybe` in) and `nonEmpty` dropped, where the other
+three operators carry them: `array{a: string}` is `no`, and removing `a` leaves
+`[]`, which *is* a list. Covers containing `k` are killed (A-G8's invalidation
+law); shrinking them is S5 cover algebra. -/
+def shapeMarkAbsent (s : ShapeFact) (k : Key) : ShapeFact :=
+  let covers := s.covers.filter (fun c => !c.keys.contains k)
+  match fieldOf s.fields k with
+  | some _ =>
+    let fields := s.fields.map (fun f =>
+      if f.1 = k then (f.1, Presence.absent, none) else f)
+    normalize fields s.tail .maybe false covers
+  | none =>
+    match s.tail with
+    | .sealed => s
+    | .unsealed _ _ =>
+      normalize (s.fields ++ [(k, Presence.absent, none)]) s.tail .maybe false covers
+
+/-- **`nonEmpty` set**: the true branch of `if ($x)` on an array base. -/
+def shapeSetNonEmpty (s : ShapeFact) : ShapeFact :=
+  normalize s.fields s.tail s.isList true s.covers
+
+/-- **The `is_list` flag flip** (RFC #14939's C1): `array_is_list($x)` narrows to
+`yes` on the true branch and `no` on the false one — a pure flag flip, no
+structural surgery. `normalize` still owns the verdict, and a flag contradicting
+the computed one loses *soundly*: a computed `no` means no admitted array is a
+list, so the true branch's meet is empty. -/
+def shapeSetIsList (s : ShapeFact) (want : Certainty) : ShapeFact :=
+  normalize s.fields s.tail want s.nonEmpty s.covers
+
+/-! ### Invariant preservation, proved
+
+Each operator either returns the receiver untouched or routes through
+`normalize`, so the invariants `normalize` establishes survive. Stated with the
+receiver's own invariant as a hypothesis, which is what discharges the
+passthrough branches. -/
+
+theorem shapePromotePresent_fieldsSorted (M : Model) (s : ShapeFact) (k : Key) (b : Bool)
+    (h : FieldsSorted s.fields) : FieldsSorted (shapePromotePresent M s k b).fields := by
+  unfold shapePromotePresent
+  split
+  · exact normalize_fieldsSorted _ _ _ _ _
+  · split
+    · exact h
+    · split
+      · exact h
+      · exact normalize_fieldsSorted _ _ _ _ _
+
+theorem shapeMarkAbsent_fieldsSorted (s : ShapeFact) (k : Key)
+    (h : FieldsSorted s.fields) : FieldsSorted (shapeMarkAbsent s k).fields := by
+  unfold shapeMarkAbsent
+  split
+  · exact normalize_fieldsSorted _ _ _ _ _
+  · split
+    · exact h
+    · exact normalize_fieldsSorted _ _ _ _ _
+
+theorem shapeSetNonEmpty_fieldsSorted (s : ShapeFact) :
+    FieldsSorted (shapeSetNonEmpty s).fields :=
+  normalize_fieldsSorted _ _ _ _ _
+
+theorem shapeSetIsList_fieldsSorted (s : ShapeFact) (w : Certainty) :
+    FieldsSorted (shapeSetIsList s w).fields :=
+  normalize_fieldsSorted _ _ _ _ _
+
+/-- The `if ($x)` true branch really records non-emptiness. -/
+theorem shapeSetNonEmpty_nonEmpty (s : ShapeFact) : (shapeSetNonEmpty s).nonEmpty = true := by
+  simp [shapeSetNonEmpty, normalize]
+
+/-- Every operator keeps the cover antichain's two-key invariant. -/
+theorem shapeMarkAbsent_covers_have_two_keys (s : ShapeFact) (k : Key)
+    (h : ∀ c ∈ s.covers, 2 ≤ c.keys.length) :
+    ∀ c ∈ (shapeMarkAbsent s k).covers, 2 ≤ c.keys.length := by
+  unfold shapeMarkAbsent
+  split
+  · intro c hc; exact normalize_covers_have_two_keys _ _ _ _ _ c hc
+  · split
+    · exact h
+    · intro c hc; exact normalize_covers_have_two_keys _ _ _ _ _ c hc
+
+theorem shapeSetIsList_covers_have_two_keys (s : ShapeFact) (w : Certainty) :
+    ∀ c ∈ (shapeSetIsList s w).covers, 2 ≤ c.keys.length :=
+  fun c hc => normalize_covers_have_two_keys _ _ _ _ _ c hc
+
+/-- Erase one key from an array value's entry list — the `unset($x[k])`
+transform the second `markAbsent` law quantifies over. -/
+def eraseKey (entries : List (Key × Val)) (k : Key) : List (Key × Val) :=
+  entries.filter (fun e => decide (e.1 ≠ k))
+
 /-! ## Trinary queries -/
 
 /-- `(canBeFalsy, canBeTruthy)` for the abstract layers. The finite layers are

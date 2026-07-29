@@ -16,8 +16,10 @@
 //!   field lowers to.
 //! * **No next-auto-index.** ADR-0062 §3 declines an abstract
 //!   `nextAutoIndexes`; append widens the tail instead.
-//! * **No general meet** (A-G7). Narrowing arrives later as targeted
-//!   refinement operators.
+//! * **No general meet** (A-G7). Narrowing arrives as the targeted refinement
+//!   operators of S4 ([`ShapeFact::promote_present`],
+//!   [`ShapeFact::mark_absent`], [`ShapeFact::set_non_empty`],
+//!   [`ShapeFact::set_is_list`]) — never a general ⊓.
 //!
 //! `is_list` is **denotational**, never syntactic (§3, RFC #14939): it is
 //! recomputed from the key structure by [`ShapeFact::normalize`], and a
@@ -533,6 +535,173 @@ impl ShapeFact {
             self.non_empty && other.non_empty,
             covers,
         )
+    }
+
+    // ------------------------------------------------------------------
+    // Narrowing operators (ADR-0062 S4; A-G7 — targeted, never a general ⊓)
+    //
+    // Each one is a *narrowing*: the returned shape admits every array the
+    // receiver admits that also satisfies the guard. Where the guard's exact
+    // meet is not representable the operator takes the widening side, which
+    // keeps the law as stated (⊇, never =). The three places that happens are
+    // named at their site: a guard on a key a `Sealed` tail forbids, a
+    // `Singleton(null)` slot stripped of null, and `mark_absent`'s dropped
+    // `non_empty`.
+    //
+    // Every operator routes through `normalize`, so `is_list`, `non_empty` and
+    // the cover antichain are re-derived rather than patched. `promote_present`,
+    // `set_non_empty` and `set_is_list` may still *carry* the receiver's
+    // `is_list` across (the flag can only sharpen a computed `Maybe`, §3),
+    // because each of them returns a shape whose denotation is a SUBSET of the
+    // receiver's — a claim that held for every admitted array still holds for
+    // fewer. `mark_absent` is the exception and says why at its own site.
+    // ------------------------------------------------------------------
+
+    /// **Presence promotion** (ADR-0062 §4's guard row, #51 L3): the true
+    /// branch of `isset($x[k])` (`strip_null`) or `array_key_exists(k, $x)`
+    /// (no strip).
+    ///
+    /// `k` becomes `Required { witnessed: true }` — the presence stratum moves,
+    /// the value stratum does not (A-G9). With `strip_null` the value slot
+    /// additionally loses `null`, because `isset` is false on a present-null
+    /// entry; `array_key_exists` tests existence only and leaves the slot
+    /// alone.
+    ///
+    /// An undeclared `k` becomes a field only when the tail can supply it: its
+    /// slot starts from the tail's own value bound. When the tail cannot
+    /// (`Sealed`, or an `Unsealed` key class that rejects `k`) no admitted
+    /// array has `k`, so the guard's meet is empty and the shape is returned
+    /// unchanged — a widening, and the one place this operator is not exact.
+    #[must_use]
+    pub fn promote_present(&self, k: &Key, strip_null: bool) -> ShapeFact {
+        let mut fields = self.fields.clone();
+        match fields.iter_mut().find(|(fk, _, _)| fk == k) {
+            Some((_, p, slot)) => {
+                *p = Presence::Required { witnessed: true };
+                if strip_null {
+                    *slot = strip_null_slot(slot);
+                }
+            }
+            None => match &self.tail {
+                // The guard is runtime-impossible against this shape; claiming
+                // the key would be unsound the other way round, so widen.
+                Tail::Sealed => return self.clone(),
+                Tail::Unsealed { key: class, value } => {
+                    if !class.admits_key(k) {
+                        return self.clone();
+                    }
+                    let slot = if strip_null { strip_null_slot(value) } else { value.clone() };
+                    fields.push((k.clone(), Presence::Required { witnessed: true }, slot));
+                }
+            },
+        }
+        ShapeFact::normalize(
+            fields,
+            self.tail.clone(),
+            self.is_list,
+            self.non_empty,
+            self.covers.clone(),
+        )
+    }
+
+    /// **Proven absence**: `unset($x[k])`, and the false branch of
+    /// `array_key_exists(k, $x)`.
+    ///
+    /// `k` becomes [`Presence::Absent`]; under a `Sealed` tail `normalize`
+    /// then drops the field outright, because sealing already proves the
+    /// absence and the domain keeps one representation per claim.
+    ///
+    /// **Two laws, and the stronger one governs.** As a *guard* the operator
+    /// only has to keep what the receiver admits without `k`; as `unset` it
+    /// must keep `v \ {k}` for every `v` the receiver admits — a set the
+    /// receiver itself need not admit. The `unset` law is what forces the two
+    /// components below to be re-derived rather than carried:
+    ///
+    /// * **`is_list` is recomputed** (`Maybe` in, `normalize` decides). Carrying
+    ///   it is unsound under `unset`: `array{a: string}` is `No`, and removing
+    ///   `a` leaves `[]`, which *is* a list. §4's row says as much — "`is_list`
+    ///   recomputed (a mid-list unset is No/Maybe by position knowledge)".
+    /// * **`non_empty` is dropped** and re-derived from the surviving
+    ///   `Required` fields: the flag cannot say whether it came from a
+    ///   `non-empty-array{…}` declaration or from the key just removed.
+    ///
+    /// **Covers containing `k` are killed** rather than shrunk — A-G8's
+    /// invalidation law as written. The sharper "remove `k` from the cover and
+    /// let a singleton normalize to presence" is cover algebra and lands with
+    /// the rest of the cover lane in S5.
+    #[must_use]
+    pub fn mark_absent(&self, k: &Key) -> ShapeFact {
+        let mut fields = self.fields.clone();
+        match fields.iter_mut().find(|(fk, _, _)| fk == k) {
+            Some((_, p, slot)) => {
+                *p = Presence::Absent;
+                *slot = None;
+            }
+            None => match &self.tail {
+                // Sealed already proves it; nothing to record.
+                Tail::Sealed => return self.clone(),
+                Tail::Unsealed { .. } => {
+                    fields.push((k.clone(), Presence::Absent, None));
+                }
+            },
+        }
+        let covers: Vec<Cover> =
+            self.covers.iter().filter(|c| !c.keys.contains(k)).cloned().collect();
+        ShapeFact::normalize(fields, self.tail.clone(), Certainty::Maybe, false, covers)
+    }
+
+    /// **`non_empty` set**: the true branch of `if ($x)` on an array base, and
+    /// the `array_all` / `array_any` legs S8 will add.
+    #[must_use]
+    pub fn set_non_empty(&self) -> ShapeFact {
+        ShapeFact::normalize(
+            self.fields.clone(),
+            self.tail.clone(),
+            self.is_list,
+            true,
+            self.covers.clone(),
+        )
+    }
+
+    /// **The `is_list` flag flip** (RFC #14939's C1): `array_is_list($x)`
+    /// narrows to [`Certainty::Yes`] on the true branch and
+    /// [`Certainty::No`] on the false one. A pure flag flip — no structural
+    /// surgery, which is exactly the RFC's point.
+    ///
+    /// `normalize` still owns the verdict: a flag contradicting the computed
+    /// one loses (§3), and it loses *soundly* — a computed `No` means no
+    /// admitted array is a list, so the true branch's meet is empty.
+    #[must_use]
+    pub fn set_is_list(&self, want: Certainty) -> ShapeFact {
+        ShapeFact::normalize(
+            self.fields.clone(),
+            self.tail.clone(),
+            want,
+            self.non_empty,
+            self.covers.clone(),
+        )
+    }
+}
+
+/// Drop `null` from a value slot. `None` (the unknown floor) stays unknown, and
+/// a slot that is *exactly* `null` degrades to unknown rather than to an empty
+/// fact — the domain has no bottom, and widening is the safe direction.
+fn strip_null_slot(slot: &Option<Box<Fact>>) -> Option<Box<Fact>> {
+    slot.as_deref().and_then(strip_null_fact).map(Box::new)
+}
+
+fn strip_null_fact(f: &Fact) -> Option<Fact> {
+    match f {
+        Fact::Singleton(Val::Null) => None,
+        Fact::Singleton(_) => Some(f.clone()),
+        Fact::OneOf(vals) => {
+            Fact::from_vals(vals.iter().filter(|v| **v != Val::Null).cloned().collect())
+        }
+        Fact::Refined { base, refinement, .. } => Some(Fact::refined(*base, *refinement, false)),
+        Fact::General { base, .. } => Some(Fact::General { base: *base, nullable: false }),
+        Fact::Shape { shape, .. } => {
+            Some(Fact::Shape { shape: shape.clone(), nullable: false })
+        }
     }
 }
 
@@ -1366,6 +1535,331 @@ mod tests {
         let j = ShapeFact::lift(&a).join(&ShapeFact::lift(&b));
         assert!(j.admits(&a), "join lost the left operand");
         assert!(j.admits(&b), "join lost the right operand");
+    }
+
+    // ------------------------------------------------------------------
+    // Narrowing operators (S4)
+    // ------------------------------------------------------------------
+
+    fn unsealed(fields: Vec<Field>, key: KeyClass, value: Option<Box<Fact>>) -> ShapeFact {
+        ShapeFact::normalize(
+            fields,
+            Tail::Unsealed { key, value },
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn promote_present_witnesses_an_optional_field() {
+        let s = sealed(vec![
+            (ks("a"), Presence::Optional, int_slot(1)),
+            (ks("b"), Presence::Optional, int_slot(2)),
+        ]);
+        let n = s.promote_present(&ks("a"), true);
+        assert_eq!(
+            n.field(&ks("a")).map(|(_, p, _)| *p),
+            Some(Presence::Required { witnessed: true })
+        );
+        assert_eq!(n.field(&ks("b")).map(|(_, p, _)| *p), Some(Presence::Optional));
+        assert!(n.non_empty);
+    }
+
+    #[test]
+    fn promote_present_strips_null_only_for_the_isset_flavor() {
+        let nullable = slot(Fact::General { base: Base::String, nullable: true });
+        let s = sealed(vec![(ks("a"), Presence::Optional, nullable.clone())]);
+        let isset = s.promote_present(&ks("a"), true);
+        assert_eq!(
+            isset.field(&ks("a")).and_then(|(_, _, v)| v.clone()),
+            slot(Fact::General { base: Base::String, nullable: false })
+        );
+        let exists = s.promote_present(&ks("a"), false);
+        assert_eq!(exists.field(&ks("a")).and_then(|(_, _, v)| v.clone()), nullable);
+    }
+
+    #[test]
+    fn promote_present_of_an_exactly_null_slot_degrades_to_unknown() {
+        // No non-null value inhabits the slot, so `isset` is impossible; the
+        // domain has no bottom, and unknown is the widening side.
+        let s = sealed(vec![(ks("a"), Presence::Optional, slot(Fact::Singleton(Val::Null)))]);
+        assert_eq!(s.promote_present(&ks("a"), true).field(&ks("a")).and_then(|(_, _, v)| v.clone()), None);
+    }
+
+    #[test]
+    fn promote_present_adds_an_undeclared_key_from_the_tail_bound() {
+        let s = unsealed(
+            Vec::new(),
+            KeyClass::Str,
+            slot(Fact::General { base: Base::Int, nullable: true }),
+        );
+        let n = s.promote_present(&ks("a"), true);
+        assert_eq!(
+            n.field(&ks("a")).map(|(_, p, _)| *p),
+            Some(Presence::Required { witnessed: true })
+        );
+        assert_eq!(
+            n.field(&ks("a")).and_then(|(_, _, v)| v.clone()),
+            slot(Fact::General { base: Base::Int, nullable: false })
+        );
+        assert!(n.admits(&arr(vec![(ks("a"), Val::Int(1))])));
+    }
+
+    #[test]
+    fn promote_present_is_a_no_op_where_the_key_cannot_exist() {
+        let s = sealed(vec![(ks("a"), req(), int_slot(1))]);
+        assert_eq!(s.promote_present(&ks("zz"), true), s);
+        // …and where the tail's key class rejects it.
+        let t = unsealed(Vec::new(), KeyClass::Int, None);
+        assert_eq!(t.promote_present(&ks("a"), true), t);
+    }
+
+    #[test]
+    fn promote_present_discharges_a_cover_containing_the_key() {
+        let s = sealed_with_covers(
+            vec![(ks("a"), Presence::Optional, int_slot(1)), (ks("b"), Presence::Optional, int_slot(2))],
+            vec![Cover::new(vec![ks("a"), ks("b")], CoverFlavor::Isset)],
+        );
+        assert_eq!(s.covers.len(), 1);
+        assert!(s.promote_present(&ks("a"), true).covers.is_empty());
+    }
+
+    #[test]
+    fn promote_present_keeps_a_declared_list_flag() {
+        // `list<string>`: typed int tail + isList Yes (A-G1).
+        let l = ShapeFact::normalize(
+            Vec::new(),
+            Tail::Unsealed {
+                key: KeyClass::Int,
+                value: slot(Fact::General { base: Base::String, nullable: false }),
+            },
+            Certainty::Yes,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(l.promote_present(&k(0), true).is_list, Certainty::Yes);
+    }
+
+    #[test]
+    fn mark_absent_under_a_sealed_tail_drops_the_field() {
+        let s = sealed(vec![
+            (ks("a"), req(), slot(Fact::General { base: Base::String, nullable: false })),
+            (ks("b"), Presence::Optional, int_slot(2)),
+        ]);
+        let n = s.mark_absent(&ks("a"));
+        assert!(n.field(&ks("a")).is_none(), "sealed already proves the absence");
+        assert!(!n.admits(&arr(vec![(ks("a"), Val::Str("x".to_owned()))])));
+        // `unset($x['a'])` on `['a' => 'x']` leaves `[]`, which is a list — the
+        // receiver's `is_list = No` must not survive the removal.
+        assert_eq!(s.is_list, Certainty::No);
+        assert_eq!(n.is_list, Certainty::Maybe);
+        assert!(n.admits(&[]));
+    }
+
+    #[test]
+    fn mark_absent_under_an_unsealed_tail_records_the_field() {
+        let s = unsealed(Vec::new(), KeyClass::ArrayKey, None);
+        let n = s.mark_absent(&ks("a"));
+        assert_eq!(n.field(&ks("a")).map(|(_, p, _)| *p), Some(Presence::Absent));
+        assert!(!n.admits(&arr(vec![(ks("a"), Val::Int(1))])));
+        assert!(n.admits(&arr(vec![(ks("b"), Val::Int(1))])));
+    }
+
+    #[test]
+    fn mark_absent_drops_non_empty_and_re_derives_it() {
+        let s = sealed(vec![(ks("a"), req(), int_slot(1))]);
+        assert!(s.non_empty);
+        assert!(!s.mark_absent(&ks("a")).non_empty);
+        // A surviving required field re-derives the flag.
+        let two = sealed(vec![(ks("a"), req(), int_slot(1)), (ks("b"), req(), int_slot(2))]);
+        assert!(two.mark_absent(&ks("a")).non_empty);
+    }
+
+    #[test]
+    fn mark_absent_kills_covers_containing_the_key() {
+        let s = sealed_with_covers(
+            vec![
+                (ks("a"), Presence::Optional, int_slot(1)),
+                (ks("b"), Presence::Optional, int_slot(2)),
+                (ks("c"), Presence::Optional, int_slot(3)),
+            ],
+            vec![
+                Cover::new(vec![ks("a"), ks("b")], CoverFlavor::Isset),
+                Cover::new(vec![ks("b"), ks("c")], CoverFlavor::Isset),
+            ],
+        );
+        assert_eq!(s.covers.len(), 2);
+        assert_eq!(
+            s.mark_absent(&ks("a")).covers,
+            vec![Cover::new(vec![ks("b"), ks("c")], CoverFlavor::Isset)]
+        );
+    }
+
+    #[test]
+    fn mark_absent_is_a_no_op_on_an_undeclared_key_of_a_sealed_shape() {
+        let s = sealed(vec![(ks("a"), req(), int_slot(1))]);
+        assert_eq!(s.mark_absent(&ks("zz")), s);
+    }
+
+    #[test]
+    fn mark_absent_recomputes_is_list() {
+        let s = sealed(vec![(k(0), req(), int_slot(1)), (k(1), req(), int_slot(2))]);
+        assert_eq!(s.is_list, Certainty::Maybe);
+        assert_eq!(s.mark_absent(&k(1)).is_list, Certainty::Yes);
+        assert_eq!(s.mark_absent(&k(0)).is_list, Certainty::No);
+    }
+
+    #[test]
+    fn set_non_empty_rejects_the_empty_array() {
+        let s = sealed(vec![(ks("a"), Presence::Optional, int_slot(1))]);
+        assert!(s.admits(&[]));
+        let n = s.set_non_empty();
+        assert!(n.non_empty);
+        assert!(!n.admits(&[]));
+        // The sealed one-optional shape is now exactly one entry (the fixture
+        // behind `if ($t) { count($t) }` → `1`).
+        assert_eq!(n.count_range(), IntRange::point(1));
+    }
+
+    #[test]
+    fn set_non_empty_recomputes_is_list() {
+        let s = sealed(vec![(k(0), Presence::Optional, int_slot(1))]);
+        assert_eq!(s.is_list, Certainty::Yes);
+        assert_eq!(s.set_non_empty().is_list, Certainty::Yes);
+        let m = sealed(vec![(ks("a"), Presence::Optional, int_slot(1))]);
+        assert_eq!(m.is_list, Certainty::Maybe);
+        assert_eq!(m.set_non_empty().is_list, Certainty::No);
+    }
+
+    #[test]
+    fn set_is_list_flips_the_flag_both_ways() {
+        // `array<int, string>` — the computed verdict is Maybe, so the flag
+        // decides.
+        let s = unsealed(
+            Vec::new(),
+            KeyClass::Int,
+            slot(Fact::General { base: Base::String, nullable: false }),
+        );
+        assert_eq!(s.is_list, Certainty::Maybe);
+        assert_eq!(s.set_is_list(Certainty::Yes).is_list, Certainty::Yes);
+        assert_eq!(s.set_is_list(Certainty::No).is_list, Certainty::No);
+        let yes = s.set_is_list(Certainty::Yes);
+        assert!(yes.admits(&arr(vec![(k(0), Val::Str("x".to_owned()))])));
+        assert!(!yes.admits(&arr(vec![(k(1), Val::Str("x".to_owned()))])));
+    }
+
+    #[test]
+    fn set_is_list_never_contradicts_the_computed_verdict() {
+        // A required string key can never be a list; the flag loses, soundly —
+        // the true branch's meet is empty.
+        let s = sealed(vec![(ks("a"), req(), int_slot(1))]);
+        assert_eq!(s.set_is_list(Certainty::Yes).is_list, Certainty::No);
+    }
+
+    fn operator_shape_universe() -> Vec<ShapeFact> {
+        vec![
+            sealed(vec![]),
+            sealed(vec![(ks("a"), Presence::Optional, int_slot(1))]),
+            sealed(vec![(ks("a"), req(), int_slot(1)), (ks("b"), Presence::Optional, int_slot(2))]),
+            sealed(vec![(k(0), req(), int_slot(1)), (k(1), req(), int_slot(2))]),
+            sealed(vec![(k(0), Presence::Optional, int_slot(1))]),
+            unsealed(Vec::new(), KeyClass::ArrayKey, None),
+            unsealed(vec![(ks("a"), Presence::Optional, None)], KeyClass::Str, None),
+            unsealed(Vec::new(), KeyClass::Int, slot(Fact::General { base: Base::Int, nullable: true })),
+            sealed(vec![(ks("a"), Presence::Optional, slot(Fact::General { base: Base::Int, nullable: true }))]),
+            sealed(vec![(ks("a"), req(), slot(Fact::General { base: Base::String, nullable: false }))]),
+            ShapeFact::plain_array(),
+        ]
+    }
+
+    fn operator_array_universe() -> Vec<Vec<(Key, Val)>> {
+        vec![
+            vec![],
+            vec![(ks("a"), Val::Int(1))],
+            vec![(ks("a"), Val::Null)],
+            vec![(ks("a"), Val::Str("x".to_owned()))],
+            vec![(ks("b"), Val::Int(2))],
+            vec![(ks("a"), Val::Int(1)), (ks("b"), Val::Int(2))],
+            vec![(k(0), Val::Int(1))],
+            vec![(k(0), Val::Int(1)), (k(1), Val::Int(2))],
+            vec![(k(1), Val::Int(2)), (k(0), Val::Int(1))],
+        ]
+    }
+
+    const OPERATOR_KEYS: [&str; 2] = ["a", "b"];
+
+    fn operator_key_universe() -> Vec<Key> {
+        OPERATOR_KEYS.iter().map(|s| ks(s)).chain([k(0), k(1)]).collect()
+    }
+
+    /// The narrowing law, checked over the operator vectors: everything the
+    /// receiver admits that satisfies the guard survives the operator.
+    #[test]
+    fn narrowing_operators_admit_every_guard_satisfying_member() {
+        let shapes = operator_shape_universe();
+        let arrays = operator_array_universe();
+        let keys = operator_key_universe();
+        for s in &shapes {
+            for v in &arrays {
+                if !s.admits(v) {
+                    continue;
+                }
+                let entry = |key: &Key| v.iter().find(|(ek, _)| ek == key).map(|(_, val)| val);
+                for key in &keys {
+                    // isset: present and non-null.
+                    if entry(key).is_some_and(|val| *val != Val::Null) {
+                        assert!(
+                            s.promote_present(key, true).admits(v),
+                            "promote_present(isset) lost {v:?} from {s:?}"
+                        );
+                    }
+                    // array_key_exists: present.
+                    if entry(key).is_some() {
+                        assert!(
+                            s.promote_present(key, false).admits(v),
+                            "promote_present(exists) lost {v:?} from {s:?}"
+                        );
+                    } else {
+                        assert!(
+                            s.mark_absent(key).admits(v),
+                            "mark_absent lost {v:?} from {s:?}"
+                        );
+                    }
+                }
+                if !v.is_empty() {
+                    assert!(s.set_non_empty().admits(v), "set_non_empty lost {v:?} from {s:?}");
+                }
+                let want = Certainty::from_bool(array_is_list(v));
+                assert!(
+                    s.set_is_list(want).admits(v),
+                    "set_is_list({want:?}) lost {v:?} from {s:?}"
+                );
+            }
+        }
+    }
+
+    /// `mark_absent`'s **second** law, the one `unset($x[k])` needs: the result
+    /// admits `v \ {k}` for every `v` the receiver admits — a set the receiver
+    /// itself generally does not admit, which is why `is_list` and `non_empty`
+    /// are re-derived there and carried everywhere else.
+    #[test]
+    fn mark_absent_admits_every_receiver_member_minus_the_key() {
+        for s in &operator_shape_universe() {
+            for v in &operator_array_universe() {
+                if !s.admits(v) {
+                    continue;
+                }
+                for key in &operator_key_universe() {
+                    let removed: Vec<(Key, Val)> =
+                        v.iter().filter(|(ek, _)| ek != key).cloned().collect();
+                    assert!(
+                        s.mark_absent(key).admits(&removed),
+                        "unset({key:?}) on {v:?} left {removed:?}, rejected by {s:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

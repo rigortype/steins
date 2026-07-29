@@ -139,7 +139,51 @@ a termination measure to descend on:
 
 Both make the spec *weaker* (an `unknown` slot admits everything), so no
 theorem is put at risk, and neither is reachable from the vector universe —
-which is why Rust and Lean agree on all 5,258 data lines.
+which is why Rust and Lean agree on all 5,569 data lines.
+
+## The narrowing operators (ADR-0062 S4)
+
+Four targeted refinement operators (A-G7 — never a general ⊓) mirror
+`ShapeFact::promote_present` / `mark_absent` / `set_non_empty` /
+`set_is_list` as `Fact.shapePromotePresent` / `shapeMarkAbsent` /
+`shapeSetNonEmpty` / `shapeSetIsList`, plus `Fact.stripNullFact` (the
+`isset` flavor's null strip) and `GShape.countRange` — the last discharging
+S3's Lean debt.
+
+**Proved, for every input.** Invariant preservation, which is what reusing
+`normalize` buys: `shapePromotePresent_fieldsSorted`,
+`shapeMarkAbsent_fieldsSorted`, `shapeSetNonEmpty_fieldsSorted`,
+`shapeSetIsList_fieldsSorted` (each stated with the receiver's own invariant as
+the hypothesis, which is what discharges the two passthrough branches),
+`shapeMarkAbsent_covers_have_two_keys`, `shapeSetIsList_covers_have_two_keys`,
+`shapeSetNonEmpty_nonEmpty`, and `IntRange.new_getD_valid` /
+`GShape.countRange_valid` — the count interval is always well-formed, which is
+what makes Rust's `unwrap_or(NON_NEGATIVE)` a totality fallback rather than a
+reachable branch.
+
+**Checked, not proved.** The narrowing law itself, exhaustively over the shape ×
+array vector universe, on both sides:
+
+```
+shapenarrowsound 559 0    γ(op(s)) ⊇ { v ∈ γ(s) : v satisfies the guard }
+shapeunsetsound  320 0    γ(mark_absent(s, k)) ∋ v \ {k} for every v ∈ γ(s)
+shapecountsound   80 0    count_range(s) bounds |v| for every v ∈ γ(s)
+```
+
+Why it is checked rather than proved: exactly the obstacle the S2 section names.
+Every operator routes through `normalize`, so its result's `is_list` is
+`computeIsList` applied to a *changed* field list, and the law needs
+`computeIsList` to be denotationally correct in both directions before any of
+the four can be discharged. That development is still the first thing to do.
+`shapeunsetsound` is the reason `mark_absent` is the one operator that does
+**not** carry the receiver's `is_list` and `non_empty` across: under `unset` the
+result must admit `v \ {k}`, which the receiver itself need not admit —
+`array{a: string}` computes `no`, and removing `a` leaves `[]`, which is a list.
+The other three return a denotational *subset* of the receiver, so carrying the
+flags is sound there. The Rust unit tests
+`narrowing_operators_admit_every_guard_satisfying_member` and
+`mark_absent_admits_every_receiver_member_minus_the_key` pin the same two laws
+in-crate over their own universe.
 
 **One representational note.** `Fact` is a *nested* inductive (its `shape`
 payload contains `List (Key × Presence × Option Fact)`), which keeps the Lean
@@ -223,7 +267,7 @@ ordinary `test` job on every PR.
 | `SteinsDomain/Val.lean` | values, the `(rank, tie)` total order and its three laws, and `Model` — the classifier parameters with their two coherence laws |
 | `SteinsDomain/Canon.lean` | the sorted-deduped finite layer and its canonicity |
 | `SteinsDomain/Shape.lean` | the array stratum (ADR-0062): keys, presence, covers, the `Fact` inductive, `normalize` and its invariants |
-| `SteinsDomain/Fact.lean` | the four layers, `admits`, `summarize`, `fromVals`, `join`, the trinary queries, and the array stratum's algebra (`lift`, `shapeJoin`, `shapeDescent`) |
+| `SteinsDomain/Fact.lean` | the four layers, `admits`, `summarize`, `fromVals`, `join`, the trinary queries, the array stratum's algebra (`lift`, `shapeJoin`, `shapeDescent`), and the S4 narrowing operators |
 | `SteinsDomain/Soundness.lean` | `join_sound` and the widening steps it composes |
 | `SteinsDomain/Queries.lean` | decided verdicts hold for every admitted value |
 | `SteinsDomain/Vectors.lean` | the differential vector file |

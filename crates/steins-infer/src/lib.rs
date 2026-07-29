@@ -4529,6 +4529,16 @@ fn walk_trace(
                 store.clear();
                 Flow::FellThrough
             }
+            // The A-G8 invalidation table: barrier semantics, plus the base
+            // binding's array shape carried across with the key promoted/removed.
+            StmtKind::OffsetWrite { base, keys, value } => {
+                apply_offset_write(w, folder, base, keys, Some(value), env, store);
+                Flow::FellThrough
+            }
+            StmtKind::OffsetUnset { base, key } => {
+                apply_offset_write(w, folder, base, std::slice::from_ref(key), None, env, store);
+                Flow::FellThrough
+            }
             // `echo` assigns nothing on its own; anything it *can* mutate (embedded
             // assignment / by-ref call) is in `invalidated` (step 3). Reading a
             // variable in an echo no longer forgets it (ADR-0031 precision payoff).
@@ -4559,6 +4569,11 @@ fn walk_trace(
             StmtKind::Assert { cond } => {
                 let refs = then_refinements(cond, w.cx.php_minor);
                 apply_refinements(&refs, env, store, Stratum::Verified);
+                // The assert lowering already models its argument as a `CondExpr`
+                // and applies the true-branch refinements, so `assert(isset(...))`
+                // routes into the S4 narrowing through exactly the `if`-guard
+                // path — no assert-specific plumbing.
+                apply_shape_narrowing(w.cx, cond, true, env, store);
                 Flow::FellThrough
             }
             // Terminators: the trace stops; the remainder is unreachable.
@@ -5044,6 +5059,31 @@ fn render_contract_arms(cx: &Cx, arms: &[ContractArm]) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("|"))
 }
 
+/// The `Known::bound` provenance every S4 flow refinement stamps on a shape
+/// fact. Two things read it: `annotate` (as prose) and [`shape_is_flow_refined`]
+/// (as the dump-preference signal), which is why it is a constant rather than a
+/// literal at each site.
+const SHAPE_REFINED: &str = "narrowed array shape";
+
+/// Has this shape fact been refined by the flow, rather than merely seeded from
+/// a declaration?
+///
+/// Two independent signals, because the S4 operators leave different traces: a
+/// **witnessed** field is presence promotion's own record (the presence stratum,
+/// ADR-0062 §3), and the [`SHAPE_REFINED`] provenance covers the operators that
+/// leave no structural mark — `set_non_empty`, `set_is_list`, a `mark_absent`
+/// whose field a sealed tail then drops, and the collapse mint.
+fn shape_is_flow_refined(fact: &Fact, known: &Known) -> bool {
+    if known.bound.as_deref() == Some(SHAPE_REFINED) {
+        return true;
+    }
+    let Fact::Shape { shape, .. } = fact else { return false };
+    shape
+        .fields
+        .iter()
+        .any(|(_, p, _)| matches!(p, steins_domain::Presence::Required { witnessed: true }))
+}
+
 /// The best value fact of a dump argument, in the trust order (ADR-0052 §1 /
 /// ADR-0037): a proven value fact, else the object holder's exact class / membership,
 /// else the narrowed declared-arm list, else honest unknown. Drives `debug.type` and
@@ -5064,13 +5104,17 @@ fn best_dump_type(
         {
             // A-G1a, applied to spelling: declared fidelity the fact domain cannot
             // express (class-typed slots, exotic key contracts) lives in the ALIGNED
-            // arm, and in S3 the shape fact is by construction a lossy lowering of
-            // that one arm — no flow refinement exists to make the fact the sharper
-            // of the two yet. So a shape-facted binding spells from the arm lane
-            // while both describe the same thing; the day a refinement operator
-            // lands (S4: presence promotion, subtraction, isList flip) the fact
-            // becomes the sharper source and this preference has to flip with it.
+            // arm, and an UNREFINED shape fact is by construction a lossy lowering
+            // of that one arm — so a freshly seeded binding spells from the arm
+            // lane while both describe the same thing.
+            //
+            // **S4 flips it once flow refinement exists** (the S3 note at this site
+            // said it would have to): a fact carrying a witnessed field, or one
+            // minted by arm subtraction, states something the declared arm does
+            // not, and spelling the arm would report the declaration back at a
+            // caller who just narrowed it. [`shape_is_flow_refined`] is the test.
             if matches!(fact, Fact::Shape { .. })
+                && !shape_is_flow_refined(fact, known)
                 && let Some(arms) = store.contract_arms(name)
                 && let Some(text) = render_contract_arms(cx, arms)
             {
@@ -6065,7 +6109,7 @@ fn walk_if(
     // clones (a call in either operand may have executed on the excluded path too).
     let guard_calls: Vec<&CallExpr> = collect_guard_calls_any(cond);
     escape_and_sweep_calls(w, &guard_calls, store);
-    for v in cond_invalidations(cond) {
+    for v in cond_invalidations(w.cx, cond, env, store) {
         env.remove(&v);
         store.unbind(&v);
     }
@@ -6085,6 +6129,7 @@ fn walk_if(
         let refs = then_refinements(cond, w.cx.php_minor);
         apply_refinements(&refs, &mut benv, &mut bclasses, Stratum::Verified);
         apply_class_narrowing(w, cond, true, &mut bclasses);
+        apply_shape_narrowing(w.cx, cond, true, &mut benv, &mut bclasses);
         let mut then_calls = Vec::new();
         collect_guard_calls(cond, true, &mut then_calls);
         for (call, returns_true) in then_calls {
@@ -6109,6 +6154,7 @@ fn walk_if(
         let refs = else_refinements(cond, w.cx.php_minor);
         apply_refinements(&refs, &mut benv, &mut bclasses, Stratum::Verified);
         apply_class_narrowing(w, cond, false, &mut bclasses);
+        apply_shape_narrowing(w.cx, cond, false, &mut benv, &mut bclasses);
         let mut else_calls = Vec::new();
         collect_guard_calls(cond, false, &mut else_calls);
         for (call, returns_true) in else_calls {
@@ -6247,6 +6293,22 @@ fn walk_match(
         let mut benv = env.clone();
         let mut bclasses = store.clone();
         refine_match_arm(subject, &arm.conditions, loose, &mut benv, w.cx.php_minor);
+        // Tag-based discrimination (ADR-0062 A-G4): a `match`/`switch` on a
+        // constant-key projection subtracts the base's array arms by the field's
+        // `admits` verdict, and mints the collapsed shape into the arm's env.
+        // The `default` arm below refines nothing — its truth is "no listed tag
+        // matched", a residue A-G4 does not model in v1.
+        if let CondOperand::Offset { var, key } = subject
+            && let Some(k) = guard_key(key, w.cx.php_minor)
+            && let Some(tags) = arm_tag_literals(&arm.conditions)
+        {
+            apply_shape_guard(
+                w.cx,
+                &ShapeGuard::Tag { var: var.clone(), key: k, tags, loose },
+                &mut benv,
+                &mut bclasses,
+            );
+        }
         if walk_trace(w, folder, &arm.trace, &mut benv, &mut bclasses, descent, facts, true, out)
             == Flow::FellThrough
         {
@@ -6322,6 +6384,21 @@ fn eval_arm_cond(
 /// `OneOf` for several) — the value is provably one of them on this path. A
 /// `switch` (loose `==`) binds NOTHING: a loose-equal truth set is multi-valued
 /// (`case 0` matches `0`, `"0"`, `false`, `0.0`, …), so no single `Fact` is sound.
+/// A match/switch arm's condition literals, or `None` when any condition is not
+/// one (a stacked arm lists several: `1, 2 => …` / `case 1: case 2:`).
+fn arm_tag_literals(conditions: &[CondOperand]) -> Option<Vec<ArgValue>> {
+    if conditions.is_empty() {
+        return None;
+    }
+    conditions
+        .iter()
+        .map(|c| match c {
+            CondOperand::Literal(v) => Some(v.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn refine_match_arm(
     subject: &CondOperand,
     conditions: &[CondOperand],
@@ -6452,7 +6529,7 @@ fn eval_cond(
             if va == Certainty::No {
                 return Certainty::No;
             }
-            let (benv, bstore) = threaded_operand_env(a, true, env, store, w.cx.php_minor);
+            let (benv, bstore) = threaded_operand_env(w.cx, a, true, env, store, w.cx.php_minor);
             va.and(eval_cond(w, folder, b, &benv, &bstore, poisoned))
         }
         CondExpr::Or(a, b) => {
@@ -6461,14 +6538,20 @@ fn eval_cond(
             if va == Certainty::Yes {
                 return Certainty::Yes;
             }
-            let (benv, bstore) = threaded_operand_env(a, false, env, store, w.cx.php_minor);
+            let (benv, bstore) = threaded_operand_env(w.cx, a, false, env, store, w.cx.php_minor);
             va.or(eval_cond(w, folder, b, &benv, &bstore, poisoned))
         }
         // A foldable existence predicate in guard position folds to a Yes/No/Maybe
         // verdict against the closed world (ADR-0049 §4 / N3); an opaque condition or
         // any other guard call stays undecided.
         CondExpr::Call { call, .. } => eval_existence_call(w, folder, call),
-        CondExpr::Opaque { .. } => Certainty::Maybe,
+        // `isset($x[k])` decides NOTHING (ADR-0062 S4). The only evidence that
+        // could decide it on a declared base is a shape fact, which is
+        // `Asserted` — and a verdict is what prunes branches and marks regions
+        // dead, so deciding here would let a docblock claim silence the env-free
+        // direct pass on a live path. Narrowing (silence) is the whole payoff;
+        // reachability stays proof-only.
+        CondExpr::Isset { .. } | CondExpr::Opaque { .. } => Certainty::Maybe,
     }
 }
 
@@ -6766,6 +6849,7 @@ fn existence_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Option<Vouch> {
 /// `Verified` (the runtime executed the test); the clone is discarded after the
 /// verdict, so nothing leaks into the caller's env (ADR-0048 §2 walk-locality).
 fn threaded_operand_env(
+    cx: &Cx,
     operand: &CondExpr,
     then: bool,
     env: &HashMap<String, Known>,
@@ -6780,7 +6864,7 @@ fn threaded_operand_env(
     // The operand's own side effects land *after* its test narrowed (a by-ref call
     // in the operand may rebind a variable the test just constrained): forget them
     // so the right operand's verdict reads the post-`operand` env, not a stale one.
-    for v in cond_invalidations(operand) {
+    for v in cond_invalidations(cx, operand, env, store) {
         benv.remove(&v);
         bstore.unbind(&v);
     }
@@ -6805,8 +6889,8 @@ fn eval_ternary_fact(
     // `$c ? A : B` — `A` runs only when `$c` was truthy (so it sees
     // `then_refinements($c)`), `B` only when `$c` was falsy (`else_refinements`).
     // The arm-selection verdict logic is unchanged; only the arm *envs* thread.
-    let (tenv, _) = threaded_operand_env(cond, true, env, store, w.cx.php_minor);
-    let (eenv, _) = threaded_operand_env(cond, false, env, store, w.cx.php_minor);
+    let (tenv, _) = threaded_operand_env(w.cx, cond, true, env, store, w.cx.php_minor);
+    let (eenv, _) = threaded_operand_env(w.cx, cond, false, env, store, w.cx.php_minor);
     match verdict {
         Certainty::Yes => {
             w.cx
@@ -7882,16 +7966,85 @@ fn apply_assert_to_var(
     true
 }
 
-/// Every bare variable an opaque sub-condition reads (for the guard-mutation
-/// invalidation: an opaque condition may mutate its operands by reference).
-fn cond_invalidations(cond: &CondExpr) -> Vec<String> {
+/// Every bare variable a guard may mutate by reference, and therefore forgets on
+/// both paths.
+///
+/// **The S4 exemption, and how narrow it is.** `isset($x['k'])`,
+/// `array_key_exists('k', $x)` and `array_is_list($x)` cannot mutate anything —
+/// the first is not even a function call, the other two are pure by-value
+/// builtins. Before S4 all three forgot their base (the first because it lowered
+/// to `Opaque`, the other two because a retained guard call forgets its reads),
+/// which was pure conservatism. Lifting it *wholesale* would let every lane see
+/// facts across such a guard for the first time, and a proven `Singleton` array
+/// surviving into the branch can premise a proof-layer `offset.missing` that did
+/// not fire before. So the exemption is granted only to a base that carries the
+/// **shape lane** — a `Fact::Shape`, or a contract lane with an array arm — which
+/// is exactly what this slice's narrowing consumes and is `Asserted` end to end
+/// (A-G9). A base mentioned anywhere else in the same condition keeps the old
+/// forgetting, because that other mention is what might mutate it.
+fn cond_invalidations(
+    cx: &Cx,
+    cond: &CondExpr,
+    env: &HashMap<String, Known>,
+    store: &Store,
+) -> Vec<String> {
     let mut out = Vec::new();
-    collect_cond_opaque_reads(cond, &mut out);
+    collect_cond_opaque_reads(cx, cond, &mut out);
+    let mut pure = Vec::new();
+    collect_pure_guard_bases(cx, cond, &mut pure);
+    for v in pure {
+        if out.contains(&v) || shape_lane_present(&v, env, store) {
+            continue;
+        }
+        out.push(v);
+    }
     out
 }
 
-fn collect_cond_opaque_reads(cond: &CondExpr, out: &mut Vec<String>) {
+/// The bases of guards that provably cannot mutate: the `isset` form and the
+/// recognized pure array builtins.
+fn collect_pure_guard_bases(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) {
     match cond {
+        CondExpr::Isset { var, .. } => {
+            if !out.contains(var) {
+                out.push(var.clone());
+            }
+        }
+        CondExpr::Call { call, reads } if array_guard_predicate(cx, call).is_some() => {
+            for r in reads {
+                if !out.contains(r) {
+                    out.push(r.clone());
+                }
+            }
+        }
+        CondExpr::Not(c) => collect_pure_guard_bases(cx, c, out),
+        CondExpr::And(a, b) | CondExpr::Or(a, b) => {
+            collect_pure_guard_bases(cx, a, out);
+            collect_pure_guard_bases(cx, b, out);
+        }
+        _ => {}
+    }
+}
+
+/// Does `var` carry the shape lane — either half of it? The fact half is empty
+/// for a *union* of array shapes by design (A-G3 keeps the union in the arm
+/// lane), so testing the fact alone would leave exactly the discriminated-union
+/// case unexempted.
+fn shape_lane_present(var: &str, env: &HashMap<String, Known>, store: &Store) -> bool {
+    if env.get(var).is_some_and(|k| matches!(k.fact, Some(Fact::Shape { .. }))) {
+        return true;
+    }
+    store
+        .contract
+        .get(var)
+        .is_some_and(|arms| arms.iter().any(|a| steins_contract::to_shape_fact(&a.ty).is_some()))
+}
+
+fn collect_cond_opaque_reads(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) {
+    match cond {
+        // A recognized pure array builtin mutates nothing; its bases are decided
+        // by `collect_pure_guard_bases` + the shape-lane test instead.
+        CondExpr::Call { call, .. } if array_guard_predicate(cx, call).is_some() => {}
         // An opaque condition may mutate any variable it reads by reference — the
         // whole read-set is forgotten (the conservative floor, unchanged).
         CondExpr::Opaque { reads } => {
@@ -7920,10 +8073,10 @@ fn collect_cond_opaque_reads(cond: &CondExpr, out: &mut Vec<String>) {
                 }
             }
         }
-        CondExpr::Not(c) => collect_cond_opaque_reads(c, out),
+        CondExpr::Not(c) => collect_cond_opaque_reads(cx, c, out),
         CondExpr::And(a, b) | CondExpr::Or(a, b) => {
-            collect_cond_opaque_reads(a, out);
-            collect_cond_opaque_reads(b, out);
+            collect_cond_opaque_reads(cx, a, out);
+            collect_cond_opaque_reads(cx, b, out);
         }
         _ => {}
     }
@@ -10668,6 +10821,532 @@ fn shape_read_at(
     // Derivation clause (ADR-0052 §5): the read consumes the base's fact, so the
     // result is no stronger than it — which is always `Asserted` for a shape.
     Some((shape_read(shape, &canon), known.stratum))
+}
+
+// ---------------------------------------------------------------------------
+// Shape narrowing (ADR-0062 S4): guards on the fact lane, subtraction on the
+// arm lane, and the collapse that mints one from the other.
+//
+// Two lanes, one pass. A binding whose declaration has ONE array arm carries a
+// `Fact::Shape` in the env and is refined by the domain's narrowing operators;
+// a binding whose declaration has SEVERAL array arms carries none — the union
+// lives in the arm lane (A-G3) — and is refined by deleting arms. The moment
+// subtraction leaves exactly one array arm the two meet: `seed_shape_fact`
+// mints the fact, and the same guard that did the subtraction then promotes it.
+//
+// **Reachability is deliberately untouched.** None of this feeds `eval_cond`,
+// `mark_dead`, or the dead-region set. A shape fact is `Asserted` (A-G9's
+// corollary), and a dead region computed from an `Asserted` premise would let
+// the env-free direct pass stop reporting on a live path — the historical FP
+// class this slice must not re-open. `Fact::truthy` / `is_null` / `int_in` /
+// `satisfies_str` are *decisive* on `Fact::Shape` (`truthy` reads `non_empty`,
+// the other three answer `No` outright), so the first caller that routes a
+// shape fact into a verdict re-opens exactly that question; the tripwire test
+// `shape_facts_do_not_decide_guard_verdicts` in `tests/shape_guards.rs` is
+// what makes that a deliberate decision rather than a silent one.
+// ---------------------------------------------------------------------------
+
+/// Which presence predicate a guard tests — A-G8's flavor discipline applied to
+/// guards rather than covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PresenceFlavor {
+    /// `isset($x[k])`: the key is present **and its value is not null**.
+    Isset,
+    /// `array_key_exists(k, $x)`: the key exists; the value may be null.
+    KeyExists,
+}
+
+/// One guard form S4 consumes, already resolved to a branch polarity.
+#[derive(Debug, Clone, PartialEq)]
+enum ShapeGuard {
+    /// A key-presence guard (A-G3).
+    Present { var: String, key: VKey, flavor: PresenceFlavor, positive: bool },
+    /// `if ($x)` on an array binding.
+    Truthy { var: String, positive: bool },
+    /// `array_is_list($x)` — the RFC's C1 flag flip.
+    IsList { var: String, positive: bool },
+    /// A constant-key projection guard (A-G4): `$x[k] === <lit>`, or a
+    /// `match`/`switch` arm on `$x[k]`. Several tags come from a stacked arm
+    /// (`case 1: case 2:` / `1, 2 => …`); `loose` is the `switch` reading.
+    Tag { var: String, key: VKey, tags: Vec<ArgValue>, loose: bool },
+}
+
+impl ShapeGuard {
+    fn var(&self) -> &str {
+        match self {
+            ShapeGuard::Present { var, .. }
+            | ShapeGuard::Truthy { var, .. }
+            | ShapeGuard::IsList { var, .. }
+            | ShapeGuard::Tag { var, .. } => var,
+        }
+    }
+}
+
+/// A guard's literal key, canonicalized by PHP's own key rule — the SAME
+/// [`offset_key_of`] the read side uses, so a guard and a read can never
+/// disagree about which key they mean.
+fn guard_key(arg: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<VKey> {
+    offset_key_of(&val_of(arg, php_minor)?)
+}
+
+/// The recognized array-predicate a guard call names, or `None` for a namespaced
+/// or userland-shadowed twin (the same discipline [`existence_predicate`] applies:
+/// a `Foo\array_key_exists` or a same-named user function is a different function).
+fn array_guard_predicate(cx: &Cx, call: &CallExpr) -> Option<&'static str> {
+    let callee = call.callee.as_deref()?;
+    let r = call.callee_ref.as_ref()?;
+    if r.raw.contains('\\') || matches!(cx.resolve_function(r), FnResolution::User(_)) {
+        return None;
+    }
+    if !call.positional_only {
+        return None;
+    }
+    ["array_key_exists", "key_exists", "array_is_list"]
+        .into_iter()
+        .find(|p| callee.eq_ignore_ascii_case(p))
+}
+
+/// Collect the shape guards a condition establishes at polarity `then`.
+///
+/// The polarity walk is `collect_refine`'s, verbatim in structure: `Not` flips,
+/// `And` contributes on the true path, `Or` on the false one (De Morgan).
+/// Everything else contributes nothing, so a condition this slice does not model
+/// narrows nothing rather than narrowing wrongly.
+fn collect_shape_guards(
+    cx: &Cx,
+    cond: &CondExpr,
+    then: bool,
+    out: &mut Vec<ShapeGuard>,
+) {
+    let php_minor = cx.php_minor;
+    match cond {
+        CondExpr::Isset { var, key } => {
+            if let Some(k) = guard_key(key, php_minor) {
+                out.push(ShapeGuard::Present {
+                    var: var.clone(),
+                    key: k,
+                    flavor: PresenceFlavor::Isset,
+                    positive: then,
+                });
+            }
+        }
+        CondExpr::Truthy(CondOperand::Var(v)) => {
+            out.push(ShapeGuard::Truthy { var: v.clone(), positive: then });
+        }
+        // `$x[k] === <lit>` and its negation-by-polarity twin `!($x[k] !== <lit>)`.
+        // Only the *positive* reading of a tag guard subtracts: knowing the tag is
+        // NOT `'circle'` kills an arm only if that arm's tag slot admits nothing
+        // else, which is a residue question A-G4 does not open in v1.
+        CondExpr::Cmp { op, lhs, rhs } => {
+            let positive = match op {
+                CmpOp::Identical | CmpOp::Loose => then,
+                CmpOp::NotIdentical | CmpOp::NotLoose => !then,
+                _ => return,
+            };
+            let loose = matches!(op, CmpOp::Loose | CmpOp::NotLoose);
+            if !positive {
+                return;
+            }
+            let (offset, lit) = match (lhs, rhs) {
+                (CondOperand::Offset { var, key }, CondOperand::Literal(v))
+                | (CondOperand::Literal(v), CondOperand::Offset { var, key }) => {
+                    ((var, key), v)
+                }
+                _ => return,
+            };
+            if let Some(k) = guard_key(offset.1, php_minor) {
+                out.push(ShapeGuard::Tag {
+                    var: offset.0.clone(),
+                    key: k,
+                    tags: vec![lit.clone()],
+                    loose,
+                });
+            }
+        }
+        CondExpr::Call { call, .. } => {
+            let Some(pred) = array_guard_predicate(cx, call) else { return };
+            match pred {
+                "array_key_exists" | "key_exists" => {
+                    if call.args.len() != 2 {
+                        return;
+                    }
+                    let ArgValue::Var(var) = &call.args[1].value else { return };
+                    if let Some(k) = guard_key(&call.args[0].value, php_minor) {
+                        out.push(ShapeGuard::Present {
+                            var: var.clone(),
+                            key: k,
+                            flavor: PresenceFlavor::KeyExists,
+                            positive: then,
+                        });
+                    }
+                }
+                _ => {
+                    if call.args.len() != 1 {
+                        return;
+                    }
+                    if let ArgValue::Var(var) = &call.args[0].value {
+                        out.push(ShapeGuard::IsList { var: var.clone(), positive: then });
+                    }
+                }
+            }
+        }
+        CondExpr::Not(c) => collect_shape_guards(cx, c, !then, out),
+        CondExpr::And(a, b) if then => {
+            collect_shape_guards(cx, a, then, out);
+            collect_shape_guards(cx, b, then, out);
+        }
+        CondExpr::Or(a, b) if !then => {
+            collect_shape_guards(cx, a, then, out);
+            collect_shape_guards(cx, b, then, out);
+        }
+        _ => {}
+    }
+}
+
+/// **Apply every shape guard of `cond` at polarity `then`** to a branch's cloned
+/// env and store. Runs after `apply_refinements` in the branch walk, so a shape
+/// operator is the last word on a `Fact::Shape` binding — none of the scalar
+/// refinement operators can express anything about one anyway.
+fn apply_shape_narrowing(
+    cx: &Cx,
+    cond: &CondExpr,
+    then: bool,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    let mut guards = Vec::new();
+    collect_shape_guards(cx, cond, then, &mut guards);
+    for g in &guards {
+        apply_shape_guard(cx, g, env, store);
+    }
+}
+
+/// One guard, both lanes: subtract the arm lane, mint a fact if the subtraction
+/// collapsed the union to one array arm, then refine the fact.
+fn apply_shape_guard(cx: &Cx, g: &ShapeGuard, env: &mut HashMap<String, Known>, store: &mut Store) {
+    subtract_shape_arms(cx, g, store);
+    mint_collapsed_shape(g.var(), env, store);
+    refine_shape_fact(g, env);
+}
+
+/// **Arm subtraction** (A-G3/A-G4): delete the arms of `var`'s contract lane the
+/// guard proves cannot be the live one. Non-array arms are left alone except for
+/// the one case PHP decides — `isset` on an offset of `null` is false, so an
+/// `isset`-true branch kills a `null` arm.
+///
+/// An emptied lane drops to no-fact, never a death signal (ADR-0052 §2).
+fn subtract_shape_arms(cx: &Cx, g: &ShapeGuard, store: &mut Store) {
+    let Some(arms) = store.contract.get(g.var()) else { return };
+    // A single-arm lane has no discrimination to do; leaving it alone keeps the
+    // fact lane the only thing this guard can move for the common case.
+    if arms.len() < 2 {
+        return;
+    }
+    let kept: Vec<ContractArm> =
+        arms.iter().filter(|a| shape_arm_survives(g, &a.ty, cx.php_minor)).cloned().collect();
+    if kept.len() == arms.len() {
+        return;
+    }
+    if kept.is_empty() {
+        store.contract.remove(g.var());
+    } else {
+        store.contract.insert(g.var().to_owned(), kept);
+    }
+}
+
+/// Does `ty` survive `g`? The FP-safe answer is always `true`: an arm dies only
+/// on a definite verdict, exactly as ADR-0052 §2's arm deletion does.
+fn shape_arm_survives(g: &ShapeGuard, ty: &ContractTy, php_minor: Option<(u16, u16)>) -> bool {
+    use steins_domain::Presence;
+    let shape = steins_contract::to_shape_fact(ty);
+    match g {
+        ShapeGuard::Present { key, flavor, positive, .. } => {
+            // `isset($x[k])` on a `null` base is false — PHP decides it, so the
+            // arm dies. `array_key_exists` on null is a TypeError, not a false
+            // verdict, so it kills nothing (the conservative reading).
+            if matches!(ty, ContractTy::Null) {
+                return !(*positive && *flavor == PresenceFlavor::Isset);
+            }
+            let Some(shape) = shape else { return true };
+            if *positive {
+                // Sealed-by-default is what makes the idiom sound (A-G3): an arm
+                // that cannot hold `k` at all cannot be the live one.
+                arm_can_hold_key(&shape, key)
+            } else {
+                // The false branch kills arms where `k` is `Required` — for
+                // `isset` only when the value cannot be null, because a
+                // present-null entry makes `isset` false without the key being
+                // absent (the A-G8 S2 flavor correction, applied to guards).
+                match shape.field(key) {
+                    Some((_, p, slot)) if p.is_required() => match flavor {
+                        PresenceFlavor::KeyExists => false,
+                        PresenceFlavor::Isset => {
+                            !slot.as_ref().is_some_and(|f| f.is_null().is_no())
+                        }
+                    },
+                    _ => true,
+                }
+            }
+        }
+        // A tag guard asks the field's declared value contract whether it admits
+        // the literal; a `No` verdict kills the arm (A-G4). An undeclared or
+        // unknown-slot field answers nothing and keeps it.
+        ShapeGuard::Tag { key, tags, loose, .. } => {
+            let Some(shape) = shape else { return true };
+            let Some((_, presence, Some(slot))) = shape.field(key) else { return true };
+            if matches!(presence, Presence::Absent) {
+                return false;
+            }
+            tags.iter().any(|t| tag_possible(slot, t, *loose, php_minor))
+        }
+        // Truthiness and list-ness are properties of the whole array, not of a
+        // key, and every array arm can be non-empty or a list for *some* value
+        // the arm admits — so v1 subtracts nothing here and refines the fact
+        // lane only.
+        ShapeGuard::Truthy { .. } | ShapeGuard::IsList { .. } => true,
+    }
+}
+
+/// Can an array admitted by `shape` have the key `k` at all?
+fn arm_can_hold_key(shape: &ShapeFact, k: &VKey) -> bool {
+    use steins_domain::{Presence, Tail};
+    match shape.field(k) {
+        Some((_, Presence::Absent, _)) => false,
+        Some(_) => true,
+        None => match &shape.tail {
+            Tail::Sealed => false,
+            Tail::Unsealed { key: class, .. } => class.admits_key(k),
+        },
+    }
+}
+
+/// Could the slot's declared value equal the tag? `loose` selects PHP's `==`
+/// (the `switch` reading), whose truth set is a superset of `===`'s — so a
+/// finite slot is compared through the one comparison judgment ([`eval_cmp`])
+/// rather than by `admits`, and an abstract slot under a loose comparison keeps
+/// the arm (its truth set is not decidable from the fact alone).
+fn tag_possible(slot: &Fact, tag: &ArgValue, loose: bool, php_minor: Option<(u16, u16)>) -> bool {
+    match slot.finite_members() {
+        Some(members) => {
+            let op = if loose { CmpOp::Loose } else { CmpOp::Identical };
+            let args: Vec<ArgValue> = members.iter().map(arg_of_val).collect();
+            eval_cmp(op, &args, std::slice::from_ref(tag), php_minor) != Certainty::No
+        }
+        // An abstract slot decides only under `===`, where membership *is* the
+        // question `admits` answers.
+        None => loose || val_of(tag, php_minor).is_none_or(|v| slot.admits(&v)),
+    }
+}
+
+/// **The collapse rule** (A-G3): once subtraction leaves a lane whose array
+/// vocabulary is one arm, that lane states a single shape truth — so mint it
+/// into the fact lane through the S3 lowering ([`seed_shape_fact`], the same one
+/// entry-state seeding uses, so a minted fact and a seeded one are identical by
+/// construction).
+///
+/// Only ever *adds* a fact: a binding that already carries one (seeded, or minted
+/// by an earlier guard on the same branch) is left to the refinement step, and a
+/// binding carrying a non-shape fact — a proven `Singleton` array, say — is
+/// strictly better information and is never overwritten.
+fn mint_collapsed_shape(var: &str, env: &mut HashMap<String, Known>, store: &Store) {
+    if env.get(var).is_some_and(|k| k.fact.is_some()) {
+        return;
+    }
+    let Some(arms) = store.contract.get(var) else { return };
+    let Some(fact) = seed_shape_fact(arms) else { return };
+    let line = env.get(var).map_or(0, |k| k.line);
+    env.insert(
+        var.to_owned(),
+        // `Asserted`, for the same reason entry-state seeding is: A-G9's
+        // corollary is normative, and the stratum is what enforces it.
+        Known::value_strat(fact, line, Some(SHAPE_REFINED.to_owned()), Stratum::Asserted),
+    );
+}
+
+/// **Fact-lane refinement**: apply the guard's domain operator to `var`'s
+/// `Fact::Shape`, if it has one. Every operator is a narrowing
+/// (`crates/steins-domain/src/shape.rs`), so the result admits everything the
+/// binding admitted that satisfies the guard.
+fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>) {
+    use steins_domain::Presence;
+    let Some(known) = env.get(g.var()) else { return };
+    let Some(Fact::Shape { shape, nullable }) = &known.fact else { return };
+    let (shape, nullable) = (shape.as_ref(), *nullable);
+    let next = match g {
+        ShapeGuard::Present { key, flavor, positive: true, .. } => Some(Fact::Shape {
+            shape: Box::new(shape.promote_present(key, *flavor == PresenceFlavor::Isset)),
+            // `isset($x[k])` is false when `$x` is null, so the true branch also
+            // proves the base non-null. `array_key_exists` on null raises a
+            // TypeError rather than answering false, so it proves nothing here.
+            nullable: nullable && *flavor == PresenceFlavor::KeyExists,
+        }),
+        ShapeGuard::Present { key, flavor, positive: false, .. } => {
+            match (flavor, shape.field(key)) {
+                // `!array_key_exists(k, $x)` tests key existence and nothing
+                // else: the key is proven absent whatever its declared value.
+                (PresenceFlavor::KeyExists, _) => {
+                    Some(Fact::Shape { shape: Box::new(shape.mark_absent(key)), nullable })
+                }
+                // `!isset($x[k])` on an optional non-nullable slot: the only way
+                // the guard can be false is the key being absent.
+                (PresenceFlavor::Isset, Some((_, Presence::Optional, slot)))
+                    if slot.as_ref().is_some_and(|f| f.is_null().is_no()) =>
+                {
+                    Some(Fact::Shape { shape: Box::new(shape.mark_absent(key)), nullable })
+                }
+                // A `Required` field with a non-nullable slot makes this branch
+                // runtime-impossible. **Deliberate v1 conservatism**: the env is
+                // left unchanged rather than the region marked dead. Death is the
+                // verdict's business (ADR-0052 §2), the premise here is `Asserted`
+                // (A-G9), and an `Asserted`-derived dead region would stop the
+                // env-free direct pass from reporting on a live path.
+                _ => None,
+            }
+        }
+        ShapeGuard::Truthy { positive: true, .. } => {
+            Some(Fact::Shape { shape: Box::new(shape.set_non_empty()), nullable })
+        }
+        // A falsy array is the empty array — but only when the base cannot be
+        // null, since `null` is falsy too and would make the claim wrong.
+        ShapeGuard::Truthy { positive: false, .. } => {
+            (!nullable).then(|| Fact::Singleton(Val::Array(Vec::new())))
+        }
+        ShapeGuard::IsList { positive, .. } => Some(Fact::Shape {
+            shape: Box::new(shape.set_is_list(Certainty::from_bool(*positive))),
+            nullable,
+        }),
+        // A tag guard's job is arm subtraction; the collapsed arm's own slot is
+        // already the declared literal, so refining the fact adds nothing v1.
+        ShapeGuard::Tag { .. } => None,
+    };
+    let Some(next) = next else { return };
+    let (line, stratum) = (known.line, known.stratum);
+    env.insert(
+        g.var().to_owned(),
+        Known::value_strat(next, line, Some(SHAPE_REFINED.to_owned()), stratum),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Write invalidation (ADR-0062 A-G8's table)
+// ---------------------------------------------------------------------------
+
+/// `$var[k] = v` / `$var[k1][k2] = v` and `unset($var[k])`.
+///
+/// **Barrier first, then one binding.** The walk still clears the whole env and
+/// store, exactly as the pre-S4 `Barrier` lowering did — an offset write can
+/// alias through references the trace does not model — and only then puts back
+/// the base binding's array shape with the key promoted or removed. That order
+/// is the containment: this rule can move the shape lane and nothing else, so a
+/// finding that did not premise a shape fact cannot move with it.
+///
+/// The by-ref sweep needs no separate fence: everything is dropped before
+/// anything is restored, and the restore reads facts captured *before* the
+/// clear, so a by-ref exposure that dropped the fact earlier in the walk leaves
+/// nothing to restore.
+fn apply_offset_write(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    base: &str,
+    keys: &[ArgValue],
+    value: Option<&ArgValue>,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    use steins_domain::{KeyClass, Tail};
+    let php_minor = w.cx.php_minor;
+    // Capture before the barrier clears everything.
+    let before = env.get(base).cloned();
+    let arms = store.contract.get(base).cloned();
+    // The written value's fact, resolved in the PRE-write env through the same
+    // ladder an ordinary assignment uses; `None` (an unresolvable rvalue, or the
+    // `unset` case) leaves the slot unknown, which is the honest floor.
+    let slot = value.and_then(|v| {
+        w.cx.resolve_literal(v, env, w.scope.poisoned, folder).and_then(|lit| singleton_fact(&lit, php_minor))
+    });
+
+    env.clear();
+    store.clear();
+
+    let Some(known) = before else { return };
+    let Some(Fact::Shape { shape, nullable }) = &known.fact else { return };
+    let Some(first) = keys.first().and_then(|k| guard_key(k, php_minor)) else { return };
+
+    let next = match value {
+        None => {
+            // `unset($x[k])` — the key is proven gone. Cover interplay (a cover
+            // containing `k` dies with it, A-G8) is handled inside `mark_absent`;
+            // the *sharper* law that shrinks a cover instead of dropping it is
+            // S5's, with the rest of the cover lane.
+            shape.mark_absent(&first)
+        }
+        Some(_) => {
+            // A write makes the key real: `Required { witnessed: true }` with the
+            // value's own fact. A nested write (`$x['a']['b'] = v`) autovivifies
+            // the OUTER key and **clears its slot**: the inner array just changed
+            // in a way the declared slot may no longer describe (a `string` written
+            // under `array<string, int>`), so carrying the declaration across would
+            // state something the write may have falsified. Unknown is the honest
+            // floor; a real nested-shape update is not v1.
+            let nested = keys.len() > 1;
+            let mut next = shape.promote_present(&first, false);
+            // Writing an UNDECLARED key under a `Sealed` tail: the declaration
+            // says the key cannot be there and the code just put it there, so the
+            // runtime value has diverged from the docblock. Resolved the A-G5
+            // way — "flow refinement lives in the domain form": the write is
+            // order-witnessed truth, so the field is added AND the tail unseals.
+            // Keeping `Sealed` would leave a fact that rejects the very array the
+            // code just built; unsealing is sound and loses only the declared
+            // sealing, on this binding, from this point on.
+            if next.field(&first).is_none() {
+                next = ShapeFact::normalize(
+                    next.fields.clone(),
+                    Tail::Unsealed { key: KeyClass::ArrayKey, value: None },
+                    next.is_list,
+                    next.non_empty,
+                    next.covers.clone(),
+                )
+                .promote_present(&first, false);
+            }
+            if nested { set_slot_fact(&next, &first, None) } else { set_slot_fact(&next, &first, slot) }
+        }
+    };
+    env.insert(
+        base.to_owned(),
+        Known::value_strat(
+            Fact::Shape { shape: Box::new(next), nullable: *nullable },
+            known.line,
+            Some(SHAPE_REFINED.to_owned()),
+            known.stratum,
+        ),
+    );
+    if let Some(arms) = arms {
+        store.contract.insert(base.to_owned(), arms);
+    }
+}
+
+/// Replace one field's value slot, keeping every other component. `None` sets the
+/// unknown floor. The field is known to exist (the caller promoted it first), so
+/// a miss is a no-op.
+fn set_slot_fact(shape: &ShapeFact, key: &VKey, fact: Option<Fact>) -> ShapeFact {
+    let fields = shape
+        .fields
+        .iter()
+        .map(|(k, p, slot)| {
+            if k == key {
+                (k.clone(), *p, fact.clone().map(Box::new))
+            } else {
+                (k.clone(), *p, slot.clone())
+            }
+        })
+        .collect();
+    ShapeFact::normalize(
+        fields,
+        shape.tail.clone(),
+        shape.is_list,
+        shape.non_empty,
+        shape.covers.clone(),
+    )
 }
 
 /// Whether a normalized array-entry list contains `key` (the read-side membership

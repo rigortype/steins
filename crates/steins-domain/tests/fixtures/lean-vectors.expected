@@ -5268,7 +5268,314 @@ shapedescent allarrays => A({s0=R!:O(int:2,int:3,int:4,int:5,int:6,int:7,int:8,i
 shapedescent withnull => A({s0=R!:O(int:2,int:3,int:4,int:5,int:6,int:7,int:8,int:9);s1=O:S(int:1)|.|no|ne|-},null)
 shapedescent mixed => TOP
 shapedescent assorted => A({i0=O:S(int:1);i1=O:S(int:2);s0=O:O(int:1,int:2,int:3);s1=O:S(int:1)|.|maybe|-|-},nonnull)
+shapecount 0 => [0,0]
+shapecount 1 => [1,1]
+shapecount 2 => [0,1]
+shapecount 3 => [2,2]
+shapecount 4 => [0,1]
+shapecount 5 => [1,1]
+shapecount 6 => [1,1]
+shapecount 7 => [1,2]
+shapecount 8 => [1,1]
+shapecount 9 => [0,max]
+shapecount 10 => [0,max]
+shapecount 11 => [1,max]
+shapecount 12 => [1,max]
+shapecount 13 => [1,2]
+shapecount 14 => [1,2]
+shapecount 15 => [1,1]
+shapecount 16 => [1,3]
+shapecount 17 => [0,max]
+shapecount 18 => [1,1]
+shapepromote 0 i0 isset => {-|.|yes|-|-}
+shapepromote 0 i0 exists => {-|.|yes|-|-}
+shapepromote 0 i1 isset => {-|.|yes|-|-}
+shapepromote 0 i1 exists => {-|.|yes|-|-}
+shapepromote 0 s0 isset => {-|.|yes|-|-}
+shapepromote 0 s0 exists => {-|.|yes|-|-}
+shapepromote 0 s1 isset => {-|.|yes|-|-}
+shapepromote 0 s1 exists => {-|.|yes|-|-}
+shapepromote 1 i0 isset => {i0=R!:S(int:1)|.|yes|ne|-}
+shapepromote 1 i0 exists => {i0=R!:S(int:1)|.|yes|ne|-}
+shapepromote 1 i1 isset => {i0=R!:S(int:1)|.|yes|ne|-}
+shapepromote 1 i1 exists => {i0=R!:S(int:1)|.|yes|ne|-}
+shapepromote 1 s0 isset => {i0=R!:S(int:1)|.|yes|ne|-}
+shapepromote 1 s0 exists => {i0=R!:S(int:1)|.|yes|ne|-}
+shapepromote 1 s1 isset => {i0=R!:S(int:1)|.|yes|ne|-}
+shapepromote 1 s1 exists => {i0=R!:S(int:1)|.|yes|ne|-}
+shapepromote 2 i0 isset => {i0=R!:S(int:1)|.|yes|ne|-}
+shapepromote 2 i0 exists => {i0=R!:S(int:1)|.|yes|ne|-}
+shapepromote 2 i1 isset => {i0=O:S(int:1)|.|yes|-|-}
+shapepromote 2 i1 exists => {i0=O:S(int:1)|.|yes|-|-}
+shapepromote 2 s0 isset => {i0=O:S(int:1)|.|yes|-|-}
+shapepromote 2 s0 exists => {i0=O:S(int:1)|.|yes|-|-}
+shapepromote 2 s1 isset => {i0=O:S(int:1)|.|yes|-|-}
+shapepromote 2 s1 exists => {i0=O:S(int:1)|.|yes|-|-}
+shapepromote 3 i0 isset => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapepromote 3 i0 exists => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapepromote 3 i1 isset => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapepromote 3 i1 exists => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapepromote 3 s0 isset => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapepromote 3 s0 exists => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapepromote 3 s1 isset => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapepromote 3 s1 exists => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapepromote 4 i0 isset => {s0=O:S(int:1)|.|maybe|-|-}
+shapepromote 4 i0 exists => {s0=O:S(int:1)|.|maybe|-|-}
+shapepromote 4 i1 isset => {s0=O:S(int:1)|.|maybe|-|-}
+shapepromote 4 i1 exists => {s0=O:S(int:1)|.|maybe|-|-}
+shapepromote 4 s0 isset => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 4 s0 exists => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 4 s1 isset => {s0=O:S(int:1)|.|maybe|-|-}
+shapepromote 4 s1 exists => {s0=O:S(int:1)|.|maybe|-|-}
+shapepromote 5 i0 isset => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 5 i0 exists => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 5 i1 isset => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 5 i1 exists => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 5 s0 isset => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 5 s0 exists => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 5 s1 isset => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 5 s1 exists => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 6 i0 isset => {i1=R!:S(int:2)|.|no|ne|-}
+shapepromote 6 i0 exists => {i1=R!:S(int:2)|.|no|ne|-}
+shapepromote 6 i1 isset => {i1=R!:S(int:2)|.|no|ne|-}
+shapepromote 6 i1 exists => {i1=R!:S(int:2)|.|no|ne|-}
+shapepromote 6 s0 isset => {i1=R!:S(int:2)|.|no|ne|-}
+shapepromote 6 s0 exists => {i1=R!:S(int:2)|.|no|ne|-}
+shapepromote 6 s1 isset => {i1=R!:S(int:2)|.|no|ne|-}
+shapepromote 6 s1 exists => {i1=R!:S(int:2)|.|no|ne|-}
+shapepromote 7 i0 isset => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapepromote 7 i0 exists => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapepromote 7 i1 isset => {i0=O:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapepromote 7 i1 exists => {i0=O:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapepromote 7 s0 isset => {i0=O:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapepromote 7 s0 exists => {i0=O:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapepromote 7 s1 isset => {i0=O:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapepromote 7 s1 exists => {i0=O:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapepromote 8 i0 isset => {i-1=R!:S(int:2)|.|no|ne|-}
+shapepromote 8 i0 exists => {i-1=R!:S(int:2)|.|no|ne|-}
+shapepromote 8 i1 isset => {i-1=R!:S(int:2)|.|no|ne|-}
+shapepromote 8 i1 exists => {i-1=R!:S(int:2)|.|no|ne|-}
+shapepromote 8 s0 isset => {i-1=R!:S(int:2)|.|no|ne|-}
+shapepromote 8 s0 exists => {i-1=R!:S(int:2)|.|no|ne|-}
+shapepromote 8 s1 isset => {i-1=R!:S(int:2)|.|no|ne|-}
+shapepromote 8 s1 exists => {i-1=R!:S(int:2)|.|no|ne|-}
+shapepromote 9 i0 isset => {i0=R!:-|*k:-|maybe|ne|-}
+shapepromote 9 i0 exists => {i0=R!:-|*k:-|maybe|ne|-}
+shapepromote 9 i1 isset => {i1=R!:-|*k:-|maybe|ne|-}
+shapepromote 9 i1 exists => {i1=R!:-|*k:-|maybe|ne|-}
+shapepromote 9 s0 isset => {s0=R!:-|*k:-|no|ne|-}
+shapepromote 9 s0 exists => {s0=R!:-|*k:-|no|ne|-}
+shapepromote 9 s1 isset => {s1=R!:-|*k:-|no|ne|-}
+shapepromote 9 s1 exists => {s1=R!:-|*k:-|no|ne|-}
+shapepromote 10 i0 isset => {i0=R!:G(int,nonnull)|*i:G(int,nonnull)|yes|ne|-}
+shapepromote 10 i0 exists => {i0=R!:G(int,nonnull)|*i:G(int,nonnull)|yes|ne|-}
+shapepromote 10 i1 isset => {i1=R!:G(int,nonnull)|*i:G(int,nonnull)|yes|ne|-}
+shapepromote 10 i1 exists => {i1=R!:G(int,nonnull)|*i:G(int,nonnull)|yes|ne|-}
+shapepromote 10 s0 isset => {-|*i:G(int,nonnull)|yes|-|-}
+shapepromote 10 s0 exists => {-|*i:G(int,nonnull)|yes|-|-}
+shapepromote 10 s1 isset => {-|*i:G(int,nonnull)|yes|-|-}
+shapepromote 10 s1 exists => {-|*i:G(int,nonnull)|yes|-|-}
+shapepromote 11 i0 isset => {s0=R!:G(int,nonnull)|*s:G(int,nonnull)|no|ne|-}
+shapepromote 11 i0 exists => {s0=R!:G(int,nonnull)|*s:G(int,nonnull)|no|ne|-}
+shapepromote 11 i1 isset => {s0=R!:G(int,nonnull)|*s:G(int,nonnull)|no|ne|-}
+shapepromote 11 i1 exists => {s0=R!:G(int,nonnull)|*s:G(int,nonnull)|no|ne|-}
+shapepromote 11 s0 isset => {s0=R!:G(int,nonnull)|*s:G(int,nonnull)|no|ne|-}
+shapepromote 11 s0 exists => {s0=R!:G(int,nonnull)|*s:G(int,nonnull)|no|ne|-}
+shapepromote 11 s1 isset => {s0=R!:G(int,nonnull);s1=R!:G(int,nonnull)|*s:G(int,nonnull)|no|ne|-}
+shapepromote 11 s1 exists => {s0=R!:G(int,nonnull);s1=R!:G(int,nonnull)|*s:G(int,nonnull)|no|ne|-}
+shapepromote 12 i0 isset => {i1=R!:S(int:2)|*s:-|no|ne|-}
+shapepromote 12 i0 exists => {i1=R!:S(int:2)|*s:-|no|ne|-}
+shapepromote 12 i1 isset => {i1=R!:S(int:2)|*s:-|no|ne|-}
+shapepromote 12 i1 exists => {i1=R!:S(int:2)|*s:-|no|ne|-}
+shapepromote 12 s0 isset => {i1=R!:S(int:2);s0=R!:-|*s:-|no|ne|-}
+shapepromote 12 s0 exists => {i1=R!:S(int:2);s0=R!:-|*s:-|no|ne|-}
+shapepromote 12 s1 isset => {i1=R!:S(int:2);s1=R!:-|*s:-|no|ne|-}
+shapepromote 12 s1 exists => {i1=R!:S(int:2);s1=R!:-|*s:-|no|ne|-}
+shapepromote 13 i0 isset => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@i}
+shapepromote 13 i0 exists => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@i}
+shapepromote 13 i1 isset => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@i}
+shapepromote 13 i1 exists => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@i}
+shapepromote 13 s0 isset => {s0=R!:-;s1=O:-|.|no|ne|-}
+shapepromote 13 s0 exists => {s0=R!:-;s1=O:-|.|no|ne|-}
+shapepromote 13 s1 isset => {s0=O:-;s1=R!:-|.|no|ne|-}
+shapepromote 13 s1 exists => {s0=O:-;s1=R!:-|.|no|ne|-}
+shapepromote 14 i0 isset => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@e}
+shapepromote 14 i0 exists => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@e}
+shapepromote 14 i1 isset => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@e}
+shapepromote 14 i1 exists => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@e}
+shapepromote 14 s0 isset => {s0=R!:-;s1=O:-|.|no|ne|-}
+shapepromote 14 s0 exists => {s0=R!:-;s1=O:-|.|no|ne|-}
+shapepromote 14 s1 isset => {s0=O:-;s1=R!:-|.|no|ne|-}
+shapepromote 14 s1 exists => {s0=O:-;s1=R!:-|.|no|ne|-}
+shapepromote 15 i0 isset => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 15 i0 exists => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 15 i1 isset => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 15 i1 exists => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 15 s0 isset => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 15 s0 exists => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 15 s1 isset => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 15 s1 exists => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 16 i0 isset => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|s0+s1@e}
+shapepromote 16 i0 exists => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|s0+s1@e}
+shapepromote 16 i1 isset => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|s0+s1@e}
+shapepromote 16 i1 exists => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|s0+s1@e}
+shapepromote 16 s0 isset => {s0=R!:-;s1=O:-;s2=O:-|.|no|ne|-}
+shapepromote 16 s0 exists => {s0=R!:-;s1=O:-;s2=O:-|.|no|ne|-}
+shapepromote 16 s1 isset => {s0=O:-;s1=R!:-;s2=O:-|.|no|ne|-}
+shapepromote 16 s1 exists => {s0=O:-;s1=R!:-;s2=O:-|.|no|ne|-}
+shapepromote 17 i0 isset => {i0=R!:-;s0=X:-;s1=X:-|*k:-|maybe|ne|-}
+shapepromote 17 i0 exists => {i0=R!:-;s0=X:-;s1=X:-|*k:-|maybe|ne|-}
+shapepromote 17 i1 isset => {i1=R!:-;s0=X:-;s1=X:-|*k:-|maybe|ne|-}
+shapepromote 17 i1 exists => {i1=R!:-;s0=X:-;s1=X:-|*k:-|maybe|ne|-}
+shapepromote 17 s0 isset => {s0=R!:-;s1=X:-|*k:-|no|ne|-}
+shapepromote 17 s0 exists => {s0=R!:-;s1=X:-|*k:-|no|ne|-}
+shapepromote 17 s1 isset => {s0=X:-;s1=R!:-|*k:-|no|ne|-}
+shapepromote 17 s1 exists => {s0=X:-;s1=R!:-|*k:-|no|ne|-}
+shapepromote 18 i0 isset => {s0=O:S(int:1)|.|no|ne|-}
+shapepromote 18 i0 exists => {s0=O:S(int:1)|.|no|ne|-}
+shapepromote 18 i1 isset => {s0=O:S(int:1)|.|no|ne|-}
+shapepromote 18 i1 exists => {s0=O:S(int:1)|.|no|ne|-}
+shapepromote 18 s0 isset => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 18 s0 exists => {s0=R!:S(int:1)|.|no|ne|-}
+shapepromote 18 s1 isset => {s0=O:S(int:1)|.|no|ne|-}
+shapepromote 18 s1 exists => {s0=O:S(int:1)|.|no|ne|-}
+shapeabsent 0 i0 => {-|.|yes|-|-}
+shapeabsent 0 i1 => {-|.|yes|-|-}
+shapeabsent 0 s0 => {-|.|yes|-|-}
+shapeabsent 0 s1 => {-|.|yes|-|-}
+shapeabsent 1 i0 => {-|.|yes|-|-}
+shapeabsent 1 i1 => {i0=R!:S(int:1)|.|yes|ne|-}
+shapeabsent 1 s0 => {i0=R!:S(int:1)|.|yes|ne|-}
+shapeabsent 1 s1 => {i0=R!:S(int:1)|.|yes|ne|-}
+shapeabsent 2 i0 => {-|.|yes|-|-}
+shapeabsent 2 i1 => {i0=O:S(int:1)|.|yes|-|-}
+shapeabsent 2 s0 => {i0=O:S(int:1)|.|yes|-|-}
+shapeabsent 2 s1 => {i0=O:S(int:1)|.|yes|-|-}
+shapeabsent 3 i0 => {i1=R!:S(int:2)|.|no|ne|-}
+shapeabsent 3 i1 => {i0=R!:S(int:1)|.|yes|ne|-}
+shapeabsent 3 s0 => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapeabsent 3 s1 => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapeabsent 4 i0 => {s0=O:S(int:1)|.|maybe|-|-}
+shapeabsent 4 i1 => {s0=O:S(int:1)|.|maybe|-|-}
+shapeabsent 4 s0 => {-|.|yes|-|-}
+shapeabsent 4 s1 => {s0=O:S(int:1)|.|maybe|-|-}
+shapeabsent 5 i0 => {s0=R!:S(int:1)|.|no|ne|-}
+shapeabsent 5 i1 => {s0=R!:S(int:1)|.|no|ne|-}
+shapeabsent 5 s0 => {-|.|yes|-|-}
+shapeabsent 5 s1 => {s0=R!:S(int:1)|.|no|ne|-}
+shapeabsent 6 i0 => {i1=R!:S(int:2)|.|no|ne|-}
+shapeabsent 6 i1 => {-|.|yes|-|-}
+shapeabsent 6 s0 => {i1=R!:S(int:2)|.|no|ne|-}
+shapeabsent 6 s1 => {i1=R!:S(int:2)|.|no|ne|-}
+shapeabsent 7 i0 => {i1=R!:S(int:2)|.|no|ne|-}
+shapeabsent 7 i1 => {i0=O:S(int:1)|.|yes|-|-}
+shapeabsent 7 s0 => {i0=O:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapeabsent 7 s1 => {i0=O:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapeabsent 8 i0 => {i-1=R!:S(int:2)|.|no|ne|-}
+shapeabsent 8 i1 => {i-1=R!:S(int:2)|.|no|ne|-}
+shapeabsent 8 s0 => {i-1=R!:S(int:2)|.|no|ne|-}
+shapeabsent 8 s1 => {i-1=R!:S(int:2)|.|no|ne|-}
+shapeabsent 9 i0 => {i0=X:-|*k:-|maybe|-|-}
+shapeabsent 9 i1 => {i1=X:-|*k:-|maybe|-|-}
+shapeabsent 9 s0 => {s0=X:-|*k:-|maybe|-|-}
+shapeabsent 9 s1 => {s1=X:-|*k:-|maybe|-|-}
+shapeabsent 10 i0 => {i0=X:-|*i:G(int,nonnull)|maybe|-|-}
+shapeabsent 10 i1 => {i1=X:-|*i:G(int,nonnull)|maybe|-|-}
+shapeabsent 10 s0 => {s0=X:-|*i:G(int,nonnull)|maybe|-|-}
+shapeabsent 10 s1 => {s1=X:-|*i:G(int,nonnull)|maybe|-|-}
+shapeabsent 11 i0 => {i0=X:-;s0=R!:G(int,nonnull)|*s:G(int,nonnull)|no|ne|-}
+shapeabsent 11 i1 => {i1=X:-;s0=R!:G(int,nonnull)|*s:G(int,nonnull)|no|ne|-}
+shapeabsent 11 s0 => {s0=X:-|*s:G(int,nonnull)|maybe|-|-}
+shapeabsent 11 s1 => {s0=R!:G(int,nonnull);s1=X:-|*s:G(int,nonnull)|no|ne|-}
+shapeabsent 12 i0 => {i0=X:-;i1=R!:S(int:2)|*s:-|no|ne|-}
+shapeabsent 12 i1 => {i1=X:-|*s:-|maybe|-|-}
+shapeabsent 12 s0 => {i1=R!:S(int:2);s0=X:-|*s:-|no|ne|-}
+shapeabsent 12 s1 => {i1=R!:S(int:2);s1=X:-|*s:-|no|ne|-}
+shapeabsent 13 i0 => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@i}
+shapeabsent 13 i1 => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@i}
+shapeabsent 13 s0 => {s1=O:-|.|maybe|-|-}
+shapeabsent 13 s1 => {s0=O:-|.|maybe|-|-}
+shapeabsent 14 i0 => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@e}
+shapeabsent 14 i1 => {s0=O:-;s1=O:-|.|maybe|-|s0+s1@e}
+shapeabsent 14 s0 => {s1=O:-|.|maybe|-|-}
+shapeabsent 14 s1 => {s0=O:-|.|maybe|-|-}
+shapeabsent 15 i0 => {s0=R!:S(int:1)|.|no|ne|-}
+shapeabsent 15 i1 => {s0=R!:S(int:1)|.|no|ne|-}
+shapeabsent 15 s0 => {-|.|yes|-|-}
+shapeabsent 15 s1 => {s0=R!:S(int:1)|.|no|ne|-}
+shapeabsent 16 i0 => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|s0+s1@e}
+shapeabsent 16 i1 => {s0=O:-;s1=O:-;s2=O:-|.|maybe|-|s0+s1@e}
+shapeabsent 16 s0 => {s1=O:-;s2=O:-|.|maybe|-|-}
+shapeabsent 16 s1 => {s0=O:-;s2=O:-|.|maybe|-|-}
+shapeabsent 17 i0 => {i0=X:-;s0=X:-;s1=X:-|*k:-|maybe|-|-}
+shapeabsent 17 i1 => {i1=X:-;s0=X:-;s1=X:-|*k:-|maybe|-|-}
+shapeabsent 17 s0 => {s0=X:-;s1=X:-|*k:-|maybe|-|-}
+shapeabsent 17 s1 => {s0=X:-;s1=X:-|*k:-|maybe|-|-}
+shapeabsent 18 i0 => {s0=O:S(int:1)|.|no|ne|-}
+shapeabsent 18 i1 => {s0=O:S(int:1)|.|no|ne|-}
+shapeabsent 18 s0 => {-|.|yes|-|-}
+shapeabsent 18 s1 => {s0=O:S(int:1)|.|no|ne|-}
+shapenonempty 0 => {-|.|yes|ne|-}
+shapenonempty 1 => {i0=R!:S(int:1)|.|yes|ne|-}
+shapenonempty 2 => {i0=O:S(int:1)|.|yes|ne|-}
+shapenonempty 3 => {i0=R!:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapenonempty 4 => {s0=O:S(int:1)|.|no|ne|-}
+shapenonempty 5 => {s0=R!:S(int:1)|.|no|ne|-}
+shapenonempty 6 => {i1=R!:S(int:2)|.|no|ne|-}
+shapenonempty 7 => {i0=O:S(int:1);i1=R!:S(int:2)|.|maybe|ne|-}
+shapenonempty 8 => {i-1=R!:S(int:2)|.|no|ne|-}
+shapenonempty 9 => {-|*k:-|maybe|ne|-}
+shapenonempty 10 => {-|*i:G(int,nonnull)|yes|ne|-}
+shapenonempty 11 => {s0=R!:G(int,nonnull)|*s:G(int,nonnull)|no|ne|-}
+shapenonempty 12 => {i1=R!:S(int:2)|*s:-|no|ne|-}
+shapenonempty 13 => {s0=O:-;s1=O:-|.|no|ne|s0+s1@i}
+shapenonempty 14 => {s0=O:-;s1=O:-|.|no|ne|s0+s1@e}
+shapenonempty 15 => {s0=R!:S(int:1)|.|no|ne|-}
+shapenonempty 16 => {s0=O:-;s1=O:-;s2=O:-|.|no|ne|s0+s1@e}
+shapenonempty 17 => {s0=X:-;s1=X:-|*k:-|maybe|ne|-}
+shapenonempty 18 => {s0=O:S(int:1)|.|no|ne|-}
+shapeislist 0 yes => {-|.|yes|-|-}
+shapeislist 0 no => {-|.|yes|-|-}
+shapeislist 1 yes => {i0=R!:S(int:1)|.|yes|ne|-}
+shapeislist 1 no => {i0=R!:S(int:1)|.|yes|ne|-}
+shapeislist 2 yes => {i0=O:S(int:1)|.|yes|-|-}
+shapeislist 2 no => {i0=O:S(int:1)|.|yes|-|-}
+shapeislist 3 yes => {i0=R!:S(int:1);i1=R!:S(int:2)|.|yes|ne|-}
+shapeislist 3 no => {i0=R!:S(int:1);i1=R!:S(int:2)|.|no|ne|-}
+shapeislist 4 yes => {s0=O:S(int:1)|.|yes|-|-}
+shapeislist 4 no => {s0=O:S(int:1)|.|no|-|-}
+shapeislist 5 yes => {s0=R!:S(int:1)|.|no|ne|-}
+shapeislist 5 no => {s0=R!:S(int:1)|.|no|ne|-}
+shapeislist 6 yes => {i1=R!:S(int:2)|.|no|ne|-}
+shapeislist 6 no => {i1=R!:S(int:2)|.|no|ne|-}
+shapeislist 7 yes => {i0=O:S(int:1);i1=R!:S(int:2)|.|yes|ne|-}
+shapeislist 7 no => {i0=O:S(int:1);i1=R!:S(int:2)|.|no|ne|-}
+shapeislist 8 yes => {i-1=R!:S(int:2)|.|no|ne|-}
+shapeislist 8 no => {i-1=R!:S(int:2)|.|no|ne|-}
+shapeislist 9 yes => {-|*k:-|yes|-|-}
+shapeislist 9 no => {-|*k:-|no|-|-}
+shapeislist 10 yes => {-|*i:G(int,nonnull)|yes|-|-}
+shapeislist 10 no => {-|*i:G(int,nonnull)|no|-|-}
+shapeislist 11 yes => {s0=R!:G(int,nonnull)|*s:G(int,nonnull)|no|ne|-}
+shapeislist 11 no => {s0=R!:G(int,nonnull)|*s:G(int,nonnull)|no|ne|-}
+shapeislist 12 yes => {i1=R!:S(int:2)|*s:-|no|ne|-}
+shapeislist 12 no => {i1=R!:S(int:2)|*s:-|no|ne|-}
+shapeislist 13 yes => {s0=O:-;s1=O:-|.|yes|-|s0+s1@i}
+shapeislist 13 no => {s0=O:-;s1=O:-|.|no|-|s0+s1@i}
+shapeislist 14 yes => {s0=O:-;s1=O:-|.|yes|-|s0+s1@e}
+shapeislist 14 no => {s0=O:-;s1=O:-|.|no|-|s0+s1@e}
+shapeislist 15 yes => {s0=R!:S(int:1)|.|no|ne|-}
+shapeislist 15 no => {s0=R!:S(int:1)|.|no|ne|-}
+shapeislist 16 yes => {s0=O:-;s1=O:-;s2=O:-|.|yes|-|s0+s1@e}
+shapeislist 16 no => {s0=O:-;s1=O:-;s2=O:-|.|no|-|s0+s1@e}
+shapeislist 17 yes => {s0=X:-;s1=X:-|*k:-|yes|-|-}
+shapeislist 17 no => {s0=X:-;s1=X:-|*k:-|no|-|-}
+shapeislist 18 yes => {s0=O:S(int:1)|.|no|ne|-}
+shapeislist 18 no => {s0=O:S(int:1)|.|no|ne|-}
 shapejoinsound 5776 0
 shapeliftsound 16 0
 shapedescentsound 28 0
 shapefactjoinsound 2592 0
+shapenarrowsound 559 0
+shapeunsetsound 320 0
+shapecountsound 80 0

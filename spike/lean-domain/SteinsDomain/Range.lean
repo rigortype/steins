@@ -64,6 +64,15 @@ def inter (r s : IntRange) : Option IntRange := new (max r.lo s.lo) (min r.hi s.
 
 theorem point_valid (v : Int) : (point v).Valid := by simp [Valid, point]
 
+/-- Rust's `IntRange::new(lo, hi).unwrap_or(FALLBACK)` shape: whichever branch
+is taken, the result is a well-formed interval. -/
+theorem new_getD_valid (lo hi : Int) {r : IntRange} (hr : r.Valid) :
+    ((new lo hi).getD r).Valid := by
+  unfold new
+  split
+  · rename_i h; simpa [Valid] using h
+  · simpa using hr
+
 theorem contains_point (v : Int) : (point v).contains v = true := by
   simp [contains, point]
 

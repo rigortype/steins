@@ -367,6 +367,10 @@ def arrLit : Nat → String
 
 def arrRanks : List Nat := List.range 16
 
+/-- The keys the S4 narrowing operators are exercised over: exactly the keys the
+array atoms use, so every operator sees both a hit and a miss. -/
+def opKeys : List Key := [.int 0, .int 1, .str 0, .str 1]
+
 def renderBool (b : Bool) : String := if b then "true" else "false"
 
 /-! ## The file -/
@@ -490,18 +494,85 @@ def render : String :=
           | none => true          -- `none` is ⊤ and admits everything
           | some g => g.admits vecModel v
         (acc.1 + 1, if covered && !ok then acc.2 + 1 else acc.2)) acc) acc) (0, 0)
+  -- ADR-0062 S4: `count_range` (the S3 Lean debt) and the narrowing operators.
+  let shapeCountLines := idx.map fun i =>
+    "shapecount " ++ toString i ++ " => " ++ renderRange (GShape.countRange (seedAt i))
+  let shapePromoteLines := idx.flatMap fun i => opKeys.flatMap fun k =>
+    [ "shapepromote " ++ toString i ++ " " ++ renderKey k ++ " isset => " ++
+        renderShape (Fact.shapePromotePresent vecModel (seedAt i) k true),
+      "shapepromote " ++ toString i ++ " " ++ renderKey k ++ " exists => " ++
+        renderShape (Fact.shapePromotePresent vecModel (seedAt i) k false) ]
+  let shapeAbsentLines := idx.flatMap fun i => opKeys.map fun k =>
+    "shapeabsent " ++ toString i ++ " " ++ renderKey k ++ " => " ++
+      renderShape (Fact.shapeMarkAbsent (seedAt i) k)
+  let shapeNonEmptyLines := idx.map fun i =>
+    "shapenonempty " ++ toString i ++ " => " ++ renderShape (Fact.shapeSetNonEmpty (seedAt i))
+  let shapeIsListLines := idx.flatMap fun i =>
+    [Certainty.yes, Certainty.no].map fun c =>
+      "shapeislist " ++ toString i ++ " " ++ renderCert c ++ " => " ++
+        renderShape (Fact.shapeSetIsList (seedAt i) c)
+  -- The narrowing law, checked exhaustively: everything the receiver admits
+  -- that satisfies the guard survives the operator.
+  let narrowTally : Nat × Nat := idx.foldl (fun acc i =>
+    let s := seedAt i
+    arrRanks.foldl (fun acc r =>
+      let e := vecArrEntries r
+      if !Fact.shapeAdmits vecModel s e then acc else
+      let base : Nat × Nat := opKeys.foldl (fun (acc : Nat × Nat) k =>
+        match Fact.entryOf e k with
+        | none =>
+          (acc.1 + 1,
+           if Fact.shapeAdmits vecModel (Fact.shapeMarkAbsent s k) e then acc.2 else acc.2 + 1)
+        | some v =>
+          let acc := (acc.1 + 1,
+            if Fact.shapeAdmits vecModel (Fact.shapePromotePresent vecModel s k false) e
+            then acc.2 else acc.2 + 1)
+          if v = Val.null then acc else
+          (acc.1 + 1,
+           if Fact.shapeAdmits vecModel (Fact.shapePromotePresent vecModel s k true) e
+           then acc.2 else acc.2 + 1)) acc
+      let base := if e.isEmpty then base else
+        (base.1 + 1,
+         if Fact.shapeAdmits vecModel (Fact.shapeSetNonEmpty s) e then base.2 else base.2 + 1)
+      let want := Certainty.ofBool (arrayIsList e)
+      (base.1 + 1,
+       if Fact.shapeAdmits vecModel (Fact.shapeSetIsList s want) e then base.2 else base.2 + 1))
+      acc) (0, 0)
+  -- `mark_absent`'s second law, the one `unset($x[k])` needs: the result admits
+  -- `v \ {k}` for every `v` the receiver admits.
+  let unsetTally : Nat × Nat := idx.foldl (fun acc i =>
+    let s := seedAt i
+    arrRanks.foldl (fun acc r =>
+      let e := vecArrEntries r
+      if !Fact.shapeAdmits vecModel s e then acc else
+      opKeys.foldl (fun (acc : Nat × Nat) k =>
+        (acc.1 + 1,
+         if Fact.shapeAdmits vecModel (Fact.shapeMarkAbsent s k) (Fact.eraseKey e k)
+         then acc.2 else acc.2 + 1)) acc) acc) (0, 0)
+  -- `count_range` bounds every admitted array's entry count.
+  let countTally : Nat × Nat := idx.foldl (fun acc i =>
+    let s := seedAt i
+    arrRanks.foldl (fun (acc : Nat × Nat) r =>
+      let e := vecArrEntries r
+      if !Fact.shapeAdmits vecModel s e then acc else
+      (acc.1 + 1,
+       if (GShape.countRange s).contains (e.length : Int) then acc.2 else acc.2 + 1)) acc) (0, 0)
   let soundLines :=
     [ "shapejoinsound " ++ toString joinTally.1 ++ " " ++ toString joinTally.2,
       "shapeliftsound " ++ toString liftTally.1 ++ " " ++ toString liftTally.2,
       "shapedescentsound " ++ toString descentTally.1 ++ " " ++ toString descentTally.2,
-      "shapefactjoinsound " ++ toString factJoinTally.1 ++ " " ++ toString factJoinTally.2 ]
+      "shapefactjoinsound " ++ toString factJoinTally.1 ++ " " ++ toString factJoinTally.2,
+      "shapenarrowsound " ++ toString narrowTally.1 ++ " " ++ toString narrowTally.2,
+      "shapeunsetsound " ++ toString unsetTally.1 ++ " " ++ toString unsetTally.2,
+      "shapecountsound " ++ toString countTally.1 ++ " " ++ toString countTally.2 ]
   String.intercalate "\n"
     (header ++ ["#"] ++ atomLines ++ ["#", orderLine, "#"] ++
       admitsLines ++ truthyLines ++ isNullLines ++ satisfiesLines ++ intInLines ++
       joinLines ++ [assocLine] ++
       shapeArrLines ++ shapeLines ++ shapeAdmitsLines ++ shapeJoinLines ++ shapeLiftLines ++
       shapeFactLines ++ shapeFactAdmitsLines ++ shapeFactJoinLines ++ shapeQueryLines ++
-      shapeDescentLines ++ soundLines) ++ "\n"
+      shapeDescentLines ++ shapeCountLines ++ shapePromoteLines ++ shapeAbsentLines ++
+      shapeNonEmptyLines ++ shapeIsListLines ++ soundLines) ++ "\n"
 
 end Vectors
 end SteinsDomain

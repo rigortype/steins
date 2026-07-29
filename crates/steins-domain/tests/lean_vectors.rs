@@ -36,6 +36,12 @@ const FLOAT_ATOMS: [(f64, &str); 3] = [(-1.5, "-1.5"), (0.0, "0.0"), (2.5, "2.5"
 /// order, for the same reason `STR_ATOMS` is.
 const KEY_ATOMS: [&str; 3] = ["a", "b", "c"];
 
+/// The keys the S4 narrowing operators are exercised over: exactly the keys the
+/// array atoms use, so every operator sees both a hit and a miss.
+fn op_keys() -> Vec<Key> {
+    vec![Key::Int(0), Key::Int(1), Key::Str("a".to_owned()), Key::Str("b".to_owned())]
+}
+
 fn ik(n: i64) -> Key {
     Key::Int(n)
 }
@@ -740,6 +746,50 @@ fn generate() -> Vec<String> {
         ));
     }
 
+    // ------------------------------------------------------------------
+    // ADR-0062 S4: `count_range` (the S3 Lean debt) and the four narrowing
+    // operators, rendered per seed and then checked exhaustively.
+    // ------------------------------------------------------------------
+    for (i, s) in seeds.iter().enumerate() {
+        out.push(format!("shapecount {i} => {}", render_range(s.count_range())));
+    }
+    for (i, s) in seeds.iter().enumerate() {
+        for k in op_keys() {
+            out.push(format!(
+                "shapepromote {i} {} isset => {}",
+                render_key(&k),
+                render_shape(&s.promote_present(&k, true))
+            ));
+            out.push(format!(
+                "shapepromote {i} {} exists => {}",
+                render_key(&k),
+                render_shape(&s.promote_present(&k, false))
+            ));
+        }
+    }
+    for (i, s) in seeds.iter().enumerate() {
+        for k in op_keys() {
+            out.push(format!(
+                "shapeabsent {i} {} => {}",
+                render_key(&k),
+                render_shape(&s.mark_absent(&k))
+            ));
+        }
+    }
+    for (i, s) in seeds.iter().enumerate() {
+        out.push(format!("shapenonempty {i} => {}", render_shape(&s.set_non_empty())));
+    }
+    for (i, s) in seeds.iter().enumerate() {
+        for c in [Certainty::Yes, Certainty::No] {
+            out.push(format!(
+                "shapeislist {i} {} => {}",
+                render_cert(c),
+                render_shape(&s.set_is_list(c))
+            ));
+        }
+    }
+
+
     // Soundness tallies for the array stratum: `γ(a) ∪ γ(b) ⊆ γ(a ⊔ b)`, the
     // lift admitting what it lifted, and the descent admitting every member.
     // These are *checked exhaustively*, on both sides, exactly as `assoc` is —
@@ -807,6 +857,91 @@ fn generate() -> Vec<String> {
         }
     }
     out.push(format!("shapefactjoinsound {total} {violations}"));
+
+    // The S4 narrowing law: everything the receiver admits that satisfies the
+    // guard survives the operator.
+    let mut total = 0usize;
+    let mut violations = 0usize;
+    for s in &seeds {
+        for rank in 0..atoms.len() {
+            let e = arr_entries(rank);
+            if !s.admits(&e) {
+                continue;
+            }
+            for k in op_keys() {
+                match e.iter().find(|(ek, _)| *ek == k).map(|(_, v)| v) {
+                    None => {
+                        total += 1;
+                        if !s.mark_absent(&k).admits(&e) {
+                            violations += 1;
+                        }
+                    }
+                    Some(v) => {
+                        total += 1;
+                        if !s.promote_present(&k, false).admits(&e) {
+                            violations += 1;
+                        }
+                        if *v != Val::Null {
+                            total += 1;
+                            if !s.promote_present(&k, true).admits(&e) {
+                                violations += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            if !e.is_empty() {
+                total += 1;
+                if !s.set_non_empty().admits(&e) {
+                    violations += 1;
+                }
+            }
+            total += 1;
+            if !s.set_is_list(Certainty::from_bool(array_is_list(&e))).admits(&e) {
+                violations += 1;
+            }
+        }
+    }
+    out.push(format!("shapenarrowsound {total} {violations}"));
+
+    // `mark_absent`'s second law, the one `unset($x[k])` needs: the result
+    // admits `v \ {k}` for every `v` the receiver admits.
+    let mut total = 0usize;
+    let mut violations = 0usize;
+    for s in &seeds {
+        for rank in 0..atoms.len() {
+            let e = arr_entries(rank);
+            if !s.admits(&e) {
+                continue;
+            }
+            for k in op_keys() {
+                let erased: Vec<(Key, Val)> =
+                    e.iter().filter(|(ek, _)| *ek != k).cloned().collect();
+                total += 1;
+                if !s.mark_absent(&k).admits(&erased) {
+                    violations += 1;
+                }
+            }
+        }
+    }
+    out.push(format!("shapeunsetsound {total} {violations}"));
+
+    // `count_range` bounds every admitted array's entry count (the S3 debt).
+    let mut total = 0usize;
+    let mut violations = 0usize;
+    for s in &seeds {
+        for rank in 0..atoms.len() {
+            let e = arr_entries(rank);
+            if !s.admits(&e) {
+                continue;
+            }
+            total += 1;
+            if !s.count_range().contains(i64::try_from(e.len()).expect("small")) {
+                violations += 1;
+            }
+        }
+    }
+    out.push(format!("shapecountsound {total} {violations}"));
     out
 }
 
@@ -870,7 +1005,15 @@ fn join_is_associative_over_the_vector_universe() {
 #[test]
 fn the_array_stratum_loses_no_member_over_the_vector_universe() {
     let lines = generate();
-    for id in ["shapejoinsound", "shapeliftsound", "shapedescentsound", "shapefactjoinsound"] {
+    for id in [
+        "shapejoinsound",
+        "shapeliftsound",
+        "shapedescentsound",
+        "shapefactjoinsound",
+        "shapenarrowsound",
+        "shapeunsetsound",
+        "shapecountsound",
+    ] {
         let line = lines
             .iter()
             .find(|l| l.starts_with(&format!("{id} ")))

@@ -436,6 +436,33 @@ def keyImplies (s : ShapeFact) (k : Key) (flavor : CoverFlavor) : Bool :=
 def impliesCover (s : ShapeFact) (c : Cover) : Bool :=
   s.covers.any (fun own => own.subsumes c) || c.keys.any (fun k => s.keyImplies k c.flavor)
 
+/-- **The entry count every admitted array can have** (ADR-0062 §4's `count($x)`
+row), as an inclusive interval.
+
+* **Floor** — one entry per required field, floored at 1 when `nonEmpty` (or a
+  cover) says the array cannot be empty.
+* **Ceiling** — a sealed tail bounds the array by its declared, not-absent key
+  set (the one place PHPStan has an exact size, mirrored); an unsealed tail
+  admits arbitrarily many undeclared keys, so the ceiling is the domain's top.
+
+`lo = hi` is exactly the exact-size case. **Modelling note**: Rust writes
+`i64::try_from(len).unwrap_or(i64::MAX)` on the two counts, unreachable for any
+list a machine can hold; the spec carries `Int` and needs no such guard, and the
+`getD` fallback mirrors Rust's `unwrap_or(NON_NEGATIVE)` — which the comment
+there calls a totality fallback rather than a reachable branch. -/
+def countRange (s : ShapeFact) : IntRange :=
+  let required : Int := (s.fields.filter (fun f => f.2.1.isRequired)).length
+  let declared : Int := (s.fields.filter (fun f => !(f.2.1 == Presence.absent))).length
+  let floorOne : Int := if s.nonEmpty || !s.covers.isEmpty then 1 else 0
+  let lo : Int := max required floorOne
+  let hi : Int := if isSealed s.tail then declared else i64Max
+  (IntRange.new lo hi).getD ⟨0, i64Max⟩
+
+/-- The count interval is always a well-formed interval — the `getD` fallback is
+what makes the constructor total rather than trusting `required ⊆ declared`. -/
+theorem countRange_valid (s : ShapeFact) : (countRange s).Valid :=
+  IntRange.new_getD_valid _ _ (by decide)
+
 end GShape
 
 /-! ## Normalization invariants

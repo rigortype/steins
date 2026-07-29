@@ -1466,6 +1466,17 @@ pub enum CondOperand {
     /// A literal value (`5`, `null`, `"x"`, `true`, …). Only literal [`ArgValue`]s
     /// appear here; a non-literal expression lowers the operand to [`Self::Other`].
     Literal(ArgValue),
+    /// `$var[<literal>]` — a **constant-key projection**, depth exactly one
+    /// (ADR-0062 A-G4's v1 scope: binding base, constant key). Carried so a
+    /// tagged-union guard (`$s['kind'] === 'circle'`, `match ($s['kind'])`,
+    /// `switch ($s['kind'])`) can subtract the base's array arms by the field's
+    /// `admits` verdict.
+    ///
+    /// For every *other* consumer this variant behaves exactly as
+    /// [`Self::Other`] did before it existed — it decides no verdict and
+    /// contributes no value-lane refinement. Only the shape-narrowing pass reads
+    /// it, which is what keeps this a purely additive lowering change.
+    Offset { var: String, key: Box<ArgValue> },
     /// Anything else (a call, a property fetch, an arithmetic sub-expression, …).
     Other,
 }
@@ -1500,6 +1511,19 @@ pub enum CondExpr {
     /// `Maybe`, and `reads` (identical to what the equivalent [`Self::Opaque`] carried)
     /// invalidates its variables on the excluded path exactly as before.
     Call { call: Box<CallExpr>, reads: Vec<String> },
+    /// `isset($var[<literal>])` — a **key-presence guard**, depth exactly one
+    /// (ADR-0062 S4). PHP's `isset` is true when the key exists *and* its value
+    /// is not null, which is the distinction the narrowing consumes: the true
+    /// branch promotes presence and strips `null` from the value slot.
+    ///
+    /// Only this exact form is lowered. `isset($x)` on a bare variable, an
+    /// `isset` over a property/dynamic key, and `empty(…)` all keep their
+    /// pre-S4 [`Self::Opaque`] lowering, so no other lane's behavior moves.
+    /// A multi-argument `isset($a['x'], $b['y'])` — a conjunction by PHP
+    /// semantics — lowers to an [`Self::And`] chain of these, but only when
+    /// *every* operand fits the form; otherwise the whole construct stays
+    /// `Opaque`.
+    Isset { var: String, key: Box<ArgValue> },
     /// A condition the lowering cannot model. `reads` lists every bare variable it
     /// mentions, so a branch guarded by an opaque condition still invalidates
     /// those variables on the path that excludes it (the ADR-0027 read-set rule,
@@ -1647,6 +1671,25 @@ pub enum StmtKind {
     /// describe an unreachable path. Recovering that precision needs real
     /// branch/reachability analysis, deferred until the trace models control flow.
     Opaque { writes: Vec<String>, reads: Vec<String>, poisons: bool },
+    /// `$var[<lit>] = <rvalue>;` / `$var[<lit>][<lit>] = <rvalue>;` — a
+    /// **constant-key offset write** (ADR-0062 A-G8's invalidation table).
+    ///
+    /// This is a [`Self::Barrier`] carrying one extra piece of information. The
+    /// walk still forgets the whole env and store exactly as a barrier does —
+    /// an array write can alias anything the lowering cannot bound — and then
+    /// re-establishes *only* the base binding's array shape with the key
+    /// promoted. That containment is deliberate: it means the S4 write rule can
+    /// move the shape lane and nothing else.
+    ///
+    /// `keys` has one or two entries (depth 1, plus the autovivification case
+    /// A-G8 names); `$x[] = v` (append), a dynamic key, and a compound operator
+    /// (`+=`, `.=`) all stay a plain `Barrier`.
+    OffsetWrite { base: String, keys: Vec<ArgValue>, value: ArgValue },
+    /// `unset($var[<lit>]);` — a **constant-key offset unset** (A-G8). Same
+    /// containment as [`Self::OffsetWrite`]: barrier semantics plus a
+    /// `mark_absent` on the base's shape. A multi-target `unset`, a dynamic key,
+    /// and `unset($var)` itself all stay a plain `Barrier`.
+    OffsetUnset { base: String, key: ArgValue },
     /// Any construct the trace does not model *and* whose write set it cannot
     /// bound (`goto`, labels, `declare`, `__halt_compiler`, and anything the
     /// lowering is unsure of). Erases all known values — the sound floor.
@@ -4864,7 +4907,27 @@ fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         | Statement::Foreach(_)
         | Statement::DoWhile(_)
         | Statement::Try(_) => lower_opaque(s),
-        // Everything else (declarations, `goto`, labels, `declare`, unset,
+        // `unset($var[<lit>]);` — a constant-key offset unset (ADR-0062 A-G8).
+        // Barrier semantics plus the base and key, exactly as `OffsetWrite`; a
+        // multi-target unset, `unset($var)` itself, and a dynamic key all fall
+        // through to the plain barrier below.
+        Statement::Unset(u)
+            if u.values.len() == 1
+                && u.values.iter().next().is_some_and(|v| const_key_offset(v).is_some()) =>
+        {
+            let (base, key) = u
+                .values
+                .iter()
+                .next()
+                .and_then(|v| const_key_offset(v))
+                .expect("guarded above");
+            Stmt {
+                span: ZERO_SPAN,
+                kind: StmtKind::OffsetUnset { base, key },
+                invalidated: Vec::new(),
+            }
+        }
+        // Everything else (declarations, `goto`, labels, `declare`, other unsets,
         // `__halt_compiler`, …) stays a full Barrier: the sound floor for
         // anything whose write set the lowering cannot bound.
         _ => Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated: Vec::new() },
@@ -5151,6 +5214,28 @@ fn lower_cond(expr: &Expression<'_>) -> CondExpr {
         Expression::UnaryPrefix(u) if matches!(u.operator, UnaryPrefixOperator::Not(_)) => {
             CondExpr::Not(Box::new(lower_cond(u.operand)))
         }
+        // `isset($x['k'])` (ADR-0062 S4). Recognized ONLY when every operand is a
+        // depth-one constant-key projection; a multi-argument isset is a
+        // conjunction by PHP semantics and lowers to the matching `And` chain.
+        // Anything else — `isset($x)`, a property or dynamic key, a mixed list —
+        // falls through to the pre-S4 `Opaque` lowering below, unchanged.
+        Expression::Construct(Construct::Isset(iss)) => {
+            let operands: Option<Vec<CondExpr>> = iss
+                .values
+                .iter()
+                .map(|v| {
+                    const_key_offset(v)
+                        .map(|(var, key)| CondExpr::Isset { var, key: Box::new(key) })
+                })
+                .collect();
+            match operands {
+                Some(parts) if !parts.is_empty() => parts
+                    .into_iter()
+                    .reduce(|a, b| CondExpr::And(Box::new(a), Box::new(b)))
+                    .expect("non-empty"),
+                _ => CondExpr::Opaque { reads: cond_reads(expr) },
+            }
+        }
         other => match lower_cond_operand(other) {
             // A resolvable call in guard position is retained as `Call` (minimal
             // recognition for `-if-true`/`-if-false` consumption, ADR-0052 §5); every
@@ -5226,11 +5311,50 @@ fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
     }
 }
 
-/// Lower a comparison operand: a bare `$var`, a literal, or [`CondOperand::Other`].
+/// `$var[<literal>]` — the depth-one constant-key projection ADR-0062 A-G4
+/// scopes tag discrimination to. `None` for a non-variable base, a nested
+/// access, or a key that is not a concrete literal.
+fn const_key_offset(expr: &Expression<'_>) -> Option<(String, ArgValue)> {
+    let Expression::ArrayAccess(aa) = expr.unparenthesized() else { return None };
+    let Expression::Variable(Variable::Direct(dv)) = aa.array.unparenthesized() else {
+        return None;
+    };
+    let key = lower_arg_value(aa.index);
+    key.is_concrete_value().then(|| (strip_dollar(bytes_to_string(dv.name)), key))
+}
+
+/// The base and constant-key path of an offset **lvalue**, depth one or two:
+/// `$var[<lit>]` → `("var", [lit])`, `$var[<lit>][<lit>]` → `("var", [k1, k2])`.
+/// `None` for an append (`$var[] = …`), a dynamic key, a deeper chain, or a
+/// non-variable base — each of which stays a plain barrier.
+fn const_key_offset_path(expr: &Expression<'_>) -> Option<(String, Vec<ArgValue>)> {
+    let Expression::ArrayAccess(aa) = expr.unparenthesized() else { return None };
+    let key = lower_arg_value(aa.index);
+    if !key.is_concrete_value() {
+        return None;
+    }
+    match aa.array.unparenthesized() {
+        Expression::Variable(Variable::Direct(dv)) => {
+            Some((strip_dollar(bytes_to_string(dv.name)), vec![key]))
+        }
+        inner => {
+            let (base, mut keys) = const_key_offset(inner).map(|(v, k)| (v, vec![k]))?;
+            keys.push(key);
+            Some((base, keys))
+        }
+    }
+}
+
+/// Lower a comparison operand: a bare `$var`, a literal, a constant-key
+/// projection, or [`CondOperand::Other`].
 fn lower_cond_operand(expr: &Expression<'_>) -> CondOperand {
     match expr.unparenthesized() {
         Expression::Variable(Variable::Direct(dv)) => {
             CondOperand::Var(strip_dollar(bytes_to_string(dv.name)))
+        }
+        other if const_key_offset(other).is_some() => {
+            let (var, key) = const_key_offset(other).expect("checked");
+            CondOperand::Offset { var, key: Box::new(key) }
         }
         other => match lower_arg_value(other) {
             // A scalar literal, or a fully-concrete array literal — the latter lets a
@@ -5311,10 +5435,24 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
                     kind: StmtKind::PropAssign { target_var, prop, value, value_call, span: to_span(a.lhs.span()) },
                     invalidated,
                 }
+            } else if a.operator.is_assign()
+                && let Some((base, keys)) = const_key_offset_path(a.lhs)
+            {
+                // `$var[<lit>] = …` / `$var[<lit>][<lit>] = …` (ADR-0062 A-G8).
+                // Still a barrier in the walk — see `StmtKind::OffsetWrite` — but
+                // one that names the base and key so the shape lane survives it.
+                let mut invalidated = Vec::new();
+                collect_call_vars(&Node::Expression(a.rhs), &mut invalidated);
+                Stmt {
+                    span: ZERO_SPAN,
+                    kind: StmtKind::OffsetWrite { base, keys, value: lower_arg_value(a.rhs) },
+                    invalidated,
+                }
             } else {
-                // Assignment to a non-simple lvalue (`$a[i] = …`, `$o->$p = …`,
-                // `$a->b->c = …`, `Foo::$s = …`). Barrier (the sound floor); a by-ref
-                // property alias `$r = &$x->p` is caught by the poison family above.
+                // Assignment to a non-simple lvalue (`$a[] = …`, `$a[$i] = …`,
+                // `$o->$p = …`, `$a->b->c = …`, `Foo::$s = …`). Barrier (the sound
+                // floor); a by-ref property alias `$r = &$x->p` is caught by the
+                // poison family above.
                 Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated: Vec::new() }
             }
         }
