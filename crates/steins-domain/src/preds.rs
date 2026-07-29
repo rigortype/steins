@@ -53,7 +53,7 @@ impl StrPreds {
     /// cased character, so it is both lowercase and uppercase. It does **not**
     /// entail `NonFalsy`: `"0"` is a decimal-int-string and is falsy.
     pub const DECIMAL_INT: StrPreds = StrPreds(1 << 5);
-    /// `non-decimal-int-string`: the complement of [`DECIMAL_INT`] within
+    /// `non-decimal-int-string`: the complement of `DECIMAL_INT` within
     /// `string` — every string that keeps its identity as an array key, which
     /// is wider than the name suggests (`"+1"`, `"00"`, `"18E+3"`, `"1.2"`,
     /// `"foo"` and `""` all qualify).

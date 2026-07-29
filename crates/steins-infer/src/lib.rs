@@ -179,7 +179,7 @@ pub const OFFSET_ON_UNSUPPORTED_ID: &str = "offset.on-unsupported";
 /// The registry id for the undeclared-offset check (ADR-0062 A-G10, **contract**
 /// layer, floor `strict`): a constant-key read of a key the base's *declared* shape
 /// excludes — a field declared `Absent`, a key outside a `Sealed` shape's fields, or
-/// a key the unsealed tail's own key class rejects ([`ShapeRead::DeclaredAbsent`]).
+/// a key the unsealed tail's own key class rejects (`ShapeRead::DeclaredAbsent`).
 ///
 /// The absence is definite **conditional on the docblock**, so the evidence is the
 /// Asserted world and the finding is contract-grade — never a proof-layer claim
@@ -189,7 +189,7 @@ pub const OFFSET_UNDECLARED_ID: &str = "offset.undeclared";
 
 /// The registry id for the undischarged optional-offset read (ADR-0062 A-G10 /
 /// issue #51, **contract** layer, floor `strict`): a constant-key read of a key the
-/// base's declared shape marks `Optional` ([`ShapeRead::MaybeMissing`]) that no
+/// base's declared shape marks `Optional` (`ShapeRead::MaybeMissing`) that no
 /// proof on this path discharges — no `isset`/`array_key_exists` guard promoted it
 /// (S4), and no KeyCover + `¬isset` premise ladder proved it (S5).
 ///

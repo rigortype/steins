@@ -403,7 +403,7 @@ const KNOWN_UNENFORCED: &[&str] = &[
 /// lowers to [`ContractTy::Class`], which is each lane's signal to hand the name to
 /// its own class machinery (the trinary is-a oracle and the `is_known_class` gate
 /// in `steins-infer`) — the one identifier judgment this crate cannot host, since
-/// the value domain has no object inhabitant (ADR-0035/0038). [`KNOWN_UNENFORCED`]
+/// the value domain has no object inhabitant (ADR-0035/0038). `KNOWN_UNENFORCED`
 /// is checked first: those names ARE keywords (deliberately unmodeled ones), so
 /// they must not reach the class machinery at all.
 #[must_use]
@@ -589,7 +589,7 @@ pub fn is_shadowable_pseudo_type(name: &str) -> bool {
 /// bound grammar or the recognized base names. Its catch-all carries the same
 /// meaning: a base name that is not vocabulary lowers to [`ContractTy::Class`], the
 /// signal to hand it to the caller's class-generic machinery — except a
-/// [`KNOWN_UNENFORCED`] base name (`int-mask<...>`, `properties-of<T>`, …), which
+/// `KNOWN_UNENFORCED` base name (`int-mask<...>`, `properties-of<T>`, …), which
 /// floors to [`ContractTy::Opaque`] instead, for the same nonexistent-class-hazard
 /// reason [`lower_identifier`] does.
 #[must_use]

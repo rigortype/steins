@@ -138,7 +138,7 @@ fn non_empty_keyword(base: &str, non_empty: bool) -> String {
 /// The shared spelling of the **generic** (fieldless) array vocabulary —
 /// `array`, `non-empty-array`, `array<V>`, `array<K, V>`, `list<T>` — the
 /// sibling of [`spell_shape`]'s brace assembly, and the ONE place that decides
-/// it. Used by [`spell_array_arm`]'s degenerate arms and by the dump surface's
+/// it. Used by `spell_array_arm`'s degenerate arms and by the dump surface's
 /// abstract-shape renderer, which must spell a fieldless shape fact (A-G1's
 /// degenerate forms) exactly as the contract arm it lowered from was spelled.
 ///
@@ -315,11 +315,11 @@ pub enum ShapeTail {
 
 /// The shared D4 brace assembly (ADR-0062 §6): the ONE place that decides
 /// `list{…}` vs `array{…}` and keyless-vs-keyed field spelling, used by both
-/// the contract-arm path ([`spell_contract_shape`]) and the concrete-value
+/// the contract-arm path (`spell_contract_shape`) and the concrete-value
 /// path ([`spell_val`]).
 ///
 /// `is_list` is the caller's already-decided verdict (denotational
-/// `Certainty::Yes`, per [`shape_is_list`], or the exact
+/// `Certainty::Yes`, per `shape_is_list`, or the exact
 /// [`steins_domain::array_is_list`] answer for a concrete array — never
 /// recomputed here). `fields` are `(key, required, spelled value)` **in the
 /// order they print** — this function does not reorder them, deliberately:
