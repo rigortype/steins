@@ -626,11 +626,19 @@ impl ShapeFact {
     /// branch of `isset($x[k])` (`strip_null`) or `array_key_exists(k, $x)`
     /// (no strip).
     ///
-    /// `k` becomes `Required { witnessed: true }` — the presence stratum moves,
-    /// the value stratum does not (A-G9). With `strip_null` the value slot
+    /// `k` becomes `Required { witnessed }` — the presence stratum moves, the
+    /// value stratum does not (A-G9). With `strip_null` the value slot
     /// additionally loses `null`, because `isset` is false on a present-null
     /// entry; `array_key_exists` tests existence only and leaves the slot
     /// alone.
+    ///
+    /// **`witnessed` is the guard's own stratum** (ADR-0058's table, read into
+    /// the presence bit §3 defines): a runtime guard — an `if`, an `assert()` —
+    /// observed the key, so it passes `true`; a promotion whose only evidence is
+    /// a docblock claim — a `@phpstan-assert true $cond` on a userland assertion
+    /// helper, the tag lane, Asserted — passes `false`. The bit never changes
+    /// what the fact admits, so this is provenance discipline, not a second
+    /// narrowing semantics.
     ///
     /// An undeclared `k` becomes a field only when the tail can supply it: its
     /// slot starts from the tail's own value bound. When the tail cannot
@@ -638,11 +646,15 @@ impl ShapeFact {
     /// array has `k`, so the guard's meet is empty and the shape is returned
     /// unchanged — a widening, and the one place this operator is not exact.
     #[must_use]
-    pub fn promote_present(&self, k: &Key, strip_null: bool) -> ShapeFact {
+    pub fn promote_present(&self, k: &Key, strip_null: bool, witnessed: bool) -> ShapeFact {
         let mut fields = self.fields.clone();
         match fields.iter_mut().find(|(fk, _, _)| fk == k) {
             Some((_, p, slot)) => {
-                *p = Presence::Required { witnessed: true };
+                // A promotion never *lowers* an already-witnessed presence: the
+                // earlier runtime observation still stands (join mins the strata,
+                // a re-promotion must not).
+                let keep = matches!(*p, Presence::Required { witnessed: true });
+                *p = Presence::Required { witnessed: witnessed || keep };
                 if strip_null {
                     *slot = strip_null_slot(slot);
                 }
@@ -656,7 +668,7 @@ impl ShapeFact {
                         return self.clone();
                     }
                     let slot = if strip_null { strip_null_slot(value) } else { value.clone() };
-                    fields.push((k.clone(), Presence::Required { witnessed: true }, slot));
+                    fields.push((k.clone(), Presence::Required { witnessed }, slot));
                 }
             },
         }
@@ -1622,7 +1634,7 @@ mod tests {
             (ks("a"), Presence::Optional, int_slot(1)),
             (ks("b"), Presence::Optional, int_slot(2)),
         ]);
-        let n = s.promote_present(&ks("a"), true);
+        let n = s.promote_present(&ks("a"), true, true);
         assert_eq!(
             n.field(&ks("a")).map(|(_, p, _)| *p),
             Some(Presence::Required { witnessed: true })
@@ -1635,13 +1647,39 @@ mod tests {
     fn promote_present_strips_null_only_for_the_isset_flavor() {
         let nullable = slot(Fact::General { base: Base::String, nullable: true });
         let s = sealed(vec![(ks("a"), Presence::Optional, nullable.clone())]);
-        let isset = s.promote_present(&ks("a"), true);
+        let isset = s.promote_present(&ks("a"), true, true);
         assert_eq!(
             isset.field(&ks("a")).and_then(|(_, _, v)| v.clone()),
             slot(Fact::General { base: Base::String, nullable: false })
         );
-        let exists = s.promote_present(&ks("a"), false);
+        let exists = s.promote_present(&ks("a"), false, true);
         assert_eq!(exists.field(&ks("a")).and_then(|(_, _, v)| v.clone()), nullable);
+    }
+
+    #[test]
+    fn promote_present_carries_the_guards_own_presence_stratum() {
+        // ADR-0058's table in the presence bit: a runtime guard witnesses the key,
+        // a docblock-only claim (`@phpstan-assert true $cond` on a userland helper,
+        // the tag lane) promotes at the declared stratum. Neither changes what the
+        // fact admits — the bit is provenance (§3).
+        let s = sealed(vec![(ks("a"), Presence::Optional, int_slot(1))]);
+        let declared = s.promote_present(&ks("a"), true, false);
+        assert_eq!(
+            declared.field(&ks("a")).map(|(_, p, _)| *p),
+            Some(Presence::Required { witnessed: false })
+        );
+        let witnessed = s.promote_present(&ks("a"), true, true);
+        assert_eq!(
+            witnessed.field(&ks("a")).map(|(_, p, _)| *p),
+            Some(Presence::Required { witnessed: true })
+        );
+        let v = arr(vec![(ks("a"), Val::Int(1))]);
+        assert_eq!(declared.admits(&v), witnessed.admits(&v), "the bit never extends the fact");
+        // A declared promotion never un-witnesses an already-observed key.
+        assert_eq!(
+            witnessed.promote_present(&ks("a"), true, false).field(&ks("a")).map(|(_, p, _)| *p),
+            Some(Presence::Required { witnessed: true })
+        );
     }
 
     #[test]
@@ -1649,7 +1687,7 @@ mod tests {
         // No non-null value inhabits the slot, so `isset` is impossible; the
         // domain has no bottom, and unknown is the widening side.
         let s = sealed(vec![(ks("a"), Presence::Optional, slot(Fact::Singleton(Val::Null)))]);
-        assert_eq!(s.promote_present(&ks("a"), true).field(&ks("a")).and_then(|(_, _, v)| v.clone()), None);
+        assert_eq!(s.promote_present(&ks("a"), true, true).field(&ks("a")).and_then(|(_, _, v)| v.clone()), None);
     }
 
     #[test]
@@ -1659,7 +1697,7 @@ mod tests {
             KeyClass::Str,
             slot(Fact::General { base: Base::Int, nullable: true }),
         );
-        let n = s.promote_present(&ks("a"), true);
+        let n = s.promote_present(&ks("a"), true, true);
         assert_eq!(
             n.field(&ks("a")).map(|(_, p, _)| *p),
             Some(Presence::Required { witnessed: true })
@@ -1674,10 +1712,10 @@ mod tests {
     #[test]
     fn promote_present_is_a_no_op_where_the_key_cannot_exist() {
         let s = sealed(vec![(ks("a"), req(), int_slot(1))]);
-        assert_eq!(s.promote_present(&ks("zz"), true), s);
+        assert_eq!(s.promote_present(&ks("zz"), true, true), s);
         // …and where the tail's key class rejects it.
         let t = unsealed(Vec::new(), KeyClass::Int, None);
-        assert_eq!(t.promote_present(&ks("a"), true), t);
+        assert_eq!(t.promote_present(&ks("a"), true, true), t);
     }
 
     #[test]
@@ -1687,7 +1725,7 @@ mod tests {
             vec![Cover::new(vec![ks("a"), ks("b")], CoverFlavor::Isset)],
         );
         assert_eq!(s.covers.len(), 1);
-        assert!(s.promote_present(&ks("a"), true).covers.is_empty());
+        assert!(s.promote_present(&ks("a"), true, true).covers.is_empty());
     }
 
     #[test]
@@ -1703,7 +1741,7 @@ mod tests {
             false,
             Vec::new(),
         );
-        assert_eq!(l.promote_present(&k(0), true).is_list, Certainty::Yes);
+        assert_eq!(l.promote_present(&k(0), true, true).is_list, Certainty::Yes);
     }
 
     #[test]
@@ -1875,14 +1913,14 @@ mod tests {
                     // isset: present and non-null.
                     if entry(key).is_some_and(|val| *val != Val::Null) {
                         assert!(
-                            s.promote_present(key, true).admits(v),
+                            s.promote_present(key, true, true).admits(v),
                             "promote_present(isset) lost {v:?} from {s:?}"
                         );
                     }
                     // array_key_exists: present.
                     if entry(key).is_some() {
                         assert!(
-                            s.promote_present(key, false).admits(v),
+                            s.promote_present(key, false, true).admits(v),
                             "promote_present(exists) lost {v:?} from {s:?}"
                         );
                     } else {
@@ -1965,7 +2003,7 @@ mod tests {
             (ks("a"), Presence::Optional, int_slot(1)),
             (ks("b"), Presence::Optional, int_slot(2)),
         ])
-        .promote_present(&ks("a"), true)
+        .promote_present(&ks("a"), true, true)
         .record_cover(vec![ks("a"), ks("b")], CoverFlavor::Isset);
         assert!(s.covers.is_empty());
         assert_eq!(

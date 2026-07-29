@@ -1431,6 +1431,40 @@ pub struct CallExpr {
     /// never a call for arity purposes.
     pub positional_only: bool,
     pub span: Span,
+    /// The **guard reading of each positional argument**, index-parallel with
+    /// [`Self::args`] — `Some` only where the argument is a condition the
+    /// [`CondExpr`] vocabulary models (`isset(…)`, `empty(…)`, their `!`/`&&`/
+    /// `||` compositions, a constant-key comparison, a named call), `None`
+    /// everywhere else.
+    ///
+    /// Why a *second* reading of the same arguments: [`ArgValue`] is a value
+    /// lowering, and `isset($d['a'])` has no value it can express — it lowers to
+    /// [`ArgValue::Other`], which is where a userland assertion helper's argument
+    /// used to disappear. `Util_Assert::true(isset($d['a']));` is a guard the
+    /// analysis can consume exactly as it consumes `assert(isset($d['a']))`
+    /// (ADR-0058's tag lane), but only if the *condition* survives lowering; this
+    /// field is where it survives. Populated purely syntactically — the lowering
+    /// knows nothing about which callees carry `@phpstan-assert` tags — and read
+    /// only by that consumer.
+    ///
+    /// **Empty when no argument has a guard reading** (the overwhelming case), so
+    /// an ordinary call allocates nothing; index with [`Self::arg_cond`], which
+    /// treats a short vector as all-`None`. It is deliberately NOT a condition
+    /// the branch walk may evaluate as an `if`: a [`CondExpr::Call`] built here
+    /// carries its real `reads`, but the walk never sees this field as a guard
+    /// position.
+    pub arg_conds: Vec<Option<CondExpr>>,
+}
+
+impl CallExpr {
+    /// The guard reading of the positional argument at `pos` (see
+    /// [`Self::arg_conds`]). `None` when the argument is not a modelled
+    /// condition, when the index is out of range, and for every argument of a
+    /// call whose arguments have no guard readings at all.
+    #[must_use]
+    pub fn arg_cond(&self, pos: usize) -> Option<&CondExpr> {
+        self.arg_conds.get(pos)?.as_ref()
+    }
 }
 
 /// A comparison operator in a lowered [`CondExpr`] (ADR-0031 stage 1).
@@ -1516,9 +1550,12 @@ pub enum CondExpr {
     /// is not null, which is the distinction the narrowing consumes: the true
     /// branch promotes presence and strips `null` from the value slot.
     ///
-    /// Only this exact form is lowered. `isset($x)` on a bare variable, an
-    /// `isset` over a property/dynamic key, and `empty(…)` all keep their
-    /// pre-S4 [`Self::Opaque`] lowering, so no other lane's behavior moves.
+    /// Only this exact form is lowered. `isset($x)` on a bare variable and an
+    /// `isset` over a property/dynamic key keep their pre-S4 [`Self::Opaque`]
+    /// lowering, so no other lane's behavior moves. `empty($x[<literal>])` —
+    /// the same depth-one scope — lowers to `!isset(…) || !…` in terms of this
+    /// variant (PHP's own definition of the construct); every other `empty`
+    /// form stays `Opaque`.
     /// A multi-argument `isset($a['x'], $b['y'])` — a conjunction by PHP
     /// semantics — lowers to an [`Self::And`] chain of these, but only when
     /// *every* operand fits the form; otherwise the whole construct stays
@@ -4071,7 +4108,7 @@ fn lower_call(c: &FunctionCall<'_>) -> CallExpr {
         (None, _) => Callee::Dynamic,
     };
 
-    let LoweredArgs { args, named_args, has_spread, positional_only } =
+    let LoweredArgs { args, named_args, has_spread, positional_only, arg_conds } =
         lower_argument_list(&c.argument_list);
     CallExpr {
         callee,
@@ -4082,6 +4119,7 @@ fn lower_call(c: &FunctionCall<'_>) -> CallExpr {
         has_spread,
         positional_only,
         span: to_span(c.span()),
+        arg_conds,
     }
 }
 
@@ -4112,6 +4150,7 @@ struct LoweredArgs {
     named_args: Vec<NamedArg>,
     has_spread: bool,
     positional_only: bool,
+    arg_conds: Vec<Option<CondExpr>>,
 }
 
 /// Lower an argument list, separating positional and named arguments and flagging
@@ -4124,6 +4163,7 @@ fn lower_argument_list(list: &mago_syntax::cst::ArgumentList<'_>) -> LoweredArgs
     let mut seen_non_positional = false;
     let mut args = Vec::new();
     let mut named_args = Vec::new();
+    let mut arg_conds: Vec<Option<CondExpr>> = Vec::new();
     for arg in list.arguments.iter() {
         match arg {
             Argument::Positional(p) if p.ellipsis.is_none() => {
@@ -4133,6 +4173,7 @@ fn lower_argument_list(list: &mago_syntax::cst::ArgumentList<'_>) -> LoweredArgs
                     has_spread = true;
                 }
                 args.push(Arg { value: lower_arg_value(p.value), span: to_span(p.value.span()) });
+                arg_conds.push(lower_guard_arg(p.value));
             }
             Argument::Named(n) => {
                 positional_only = false;
@@ -4151,7 +4192,70 @@ fn lower_argument_list(list: &mago_syntax::cst::ArgumentList<'_>) -> LoweredArgs
             }
         }
     }
-    LoweredArgs { args, named_args, has_spread, positional_only }
+    // The common case is "no argument is a condition"; keep the parallel vector
+    // empty then, so an ordinary call carries no extra allocation.
+    if arg_conds.iter().all(Option::is_none) {
+        arg_conds.clear();
+    }
+    LoweredArgs { args, named_args, has_spread, positional_only, arg_conds }
+}
+
+/// The **guard reading** of one call argument (see [`CallExpr::arg_conds`]), or
+/// `None` when the argument is not a condition the [`CondExpr`] vocabulary
+/// models.
+///
+/// This is not `lower_cond` under another name, and the difference is the point:
+/// `lower_cond` is total (it answers `Opaque { reads }` for everything it cannot
+/// model, walking the subtree to collect those reads), whereas this runs on
+/// **every argument of every call in the project** and must therefore decline in
+/// O(1) for the shapes that dominate real code — a variable, a literal, a
+/// property fetch, a concatenation. So each arm is a positive recognition, the
+/// fallback is a bare `None`, and only the recognized arms may walk anything.
+fn lower_guard_arg(expr: &Expression<'_>) -> Option<CondExpr> {
+    match expr.unparenthesized() {
+        // `isset(…)` / `empty(…)`: `lower_cond` owns both forms and their
+        // scope rules; an unmodelled one comes back `Opaque` and is declined.
+        Expression::Construct(Construct::Isset(_) | Construct::Empty(_)) => {
+            match lower_cond(expr) {
+                CondExpr::Opaque { .. } => None,
+                c => Some(c),
+            }
+        }
+        Expression::UnaryPrefix(u) if matches!(u.operator, UnaryPrefixOperator::Not(_)) => {
+            Some(CondExpr::Not(Box::new(lower_guard_arg(u.operand)?)))
+        }
+        Expression::Binary(b) => match b.operator {
+            // A composition is modelled only when BOTH halves are: a guard whose
+            // one half is unknown claims nothing on either polarity.
+            BinaryOperator::And(_) | BinaryOperator::LowAnd(_) => Some(CondExpr::And(
+                Box::new(lower_guard_arg(b.lhs)?),
+                Box::new(lower_guard_arg(b.rhs)?),
+            )),
+            BinaryOperator::Or(_) | BinaryOperator::LowOr(_) => Some(CondExpr::Or(
+                Box::new(lower_guard_arg(b.lhs)?),
+                Box::new(lower_guard_arg(b.rhs)?),
+            )),
+            // Equality/identity over a constant-key projection is the tag
+            // discrimination guard (A-G4); `lower_binary_cond` decides whether the
+            // operands are representable and says `Opaque` when they are not.
+            BinaryOperator::Identical(_)
+            | BinaryOperator::NotIdentical(_)
+            | BinaryOperator::Equal(_)
+            | BinaryOperator::NotEqual(_)
+            | BinaryOperator::AngledNotEqual(_) => match lower_binary_cond(b) {
+                CondExpr::Opaque { .. } => None,
+                c => Some(c),
+            },
+            _ => None,
+        },
+        // A named call — `array_key_exists('a', $d)` and its siblings. `reads` is
+        // the honest set, as the guard-position lowering computes it.
+        other @ (Expression::Call(_) | Expression::Instantiation(_)) => {
+            let call = named_call(other)?;
+            Some(CondExpr::Call { call: Box::new(call), reads: cond_reads(other) })
+        }
+        _ => None,
+    }
 }
 
 /// The simple method name of a member selector, if it is a plain identifier
@@ -4258,8 +4362,9 @@ fn lower_method_call(object: &Expression<'_>, selector: &ClassLikeMemberSelector
         (Some(recv), Some(method)) => Callee::Method { receiver: recv, method, nullsafe },
         _ => Callee::Dynamic,
     };
-    let LoweredArgs { args, named_args, has_spread, positional_only } = lower_argument_list(list);
-    CallExpr { callee: None, callee_ref: None, receiver, args, named_args, has_spread, positional_only, span }
+    let LoweredArgs { args, named_args, has_spread, positional_only, arg_conds } =
+        lower_argument_list(list);
+    CallExpr { callee: None, callee_ref: None, receiver, args, named_args, has_spread, positional_only, span, arg_conds }
 }
 
 /// Lower a static method call into a [`CallExpr`].
@@ -4268,8 +4373,9 @@ fn lower_static_call(class: &Expression<'_>, selector: &ClassLikeMemberSelector<
         (Some(class), Some(method)) => Callee::Static { class, method },
         _ => Callee::Dynamic,
     };
-    let LoweredArgs { args, named_args, has_spread, positional_only } = lower_argument_list(list);
-    CallExpr { callee: None, callee_ref: None, receiver, args, named_args, has_spread, positional_only, span }
+    let LoweredArgs { args, named_args, has_spread, positional_only, arg_conds } =
+        lower_argument_list(list);
+    CallExpr { callee: None, callee_ref: None, receiver, args, named_args, has_spread, positional_only, span, arg_conds }
 }
 
 /// Lower a **method first-class callable** `$o->m(...)` into a reference-"call": a
@@ -4296,6 +4402,7 @@ fn first_class_method_ref(
         has_spread: false,
         positional_only: false,
         span,
+        arg_conds: Vec::new(),
     }
 }
 
@@ -4319,6 +4426,7 @@ fn first_class_static_ref(
         has_spread: false,
         positional_only: false,
         span,
+        arg_conds: Vec::new(),
     }
 }
 
@@ -4326,16 +4434,18 @@ fn first_class_static_ref(
 /// or `None` when the class is not statically named.
 fn lower_construct_call(inst: &Instantiation<'_>) -> Option<CallExpr> {
     let class = instantiation_class(inst)?;
-    let LoweredArgs { args, named_args, has_spread, positional_only } = match &inst.argument_list {
-        Some(list) => lower_argument_list(list),
-        // `new C` / `new C()` with no argument list — zero positional arguments.
-        None => LoweredArgs {
-            args: Vec::new(),
-            named_args: Vec::new(),
-            has_spread: false,
-            positional_only: true,
-        },
-    };
+    let LoweredArgs { args, named_args, has_spread, positional_only, arg_conds } =
+        match &inst.argument_list {
+            Some(list) => lower_argument_list(list),
+            // `new C` / `new C()` with no argument list — zero positional arguments.
+            None => LoweredArgs {
+                args: Vec::new(),
+                named_args: Vec::new(),
+                has_spread: false,
+                positional_only: true,
+                arg_conds: Vec::new(),
+            },
+        };
     Some(CallExpr {
         callee: None,
         callee_ref: None,
@@ -4345,6 +4455,7 @@ fn lower_construct_call(inst: &Instantiation<'_>) -> Option<CallExpr> {
         has_spread,
         positional_only,
         span: to_span(inst.span()),
+        arg_conds,
     })
 }
 
@@ -5225,6 +5336,34 @@ fn lower_cond(expr: &Expression<'_>) -> CondExpr {
         Expression::UnaryPrefix(u) if matches!(u.operator, UnaryPrefixOperator::Not(_)) => {
             CondExpr::Not(Box::new(lower_cond(u.operand)))
         }
+        // `empty($x['k'])` — PHP's own definition, lowered rather than special-
+        // cased: `empty(e)` is true iff `e` is not set OR `e` is falsy, i.e.
+        // `!isset(e) || !e`. The narrowing then falls out of the compositional
+        // walk with no `empty`-aware code anywhere downstream: the true branch of
+        // a disjunction of two negations records nothing (correct — `empty` true
+        // leaves both "absent" and "present-falsy" open), and its false branch is
+        // De Morgan'd back to `isset(e) && e`, which is exactly the presence
+        // promotion `!empty($x['k'])` deserves.
+        //
+        // Scope is `isset`'s, deliberately (A-G4's depth-one projection): only
+        // `empty($var[<literal>])`. `empty($x)` on a bare variable, a property or
+        // dynamic key, and every deeper path keep the pre-existing `Opaque`
+        // lowering — a bare-variable `empty` would newly feed the scalar
+        // refinement lane (`Truthy` over a plain local), a much wider behavior
+        // change than this leg is measuring.
+        Expression::Construct(Construct::Empty(e)) => match const_key_offset(e.value) {
+            Some((var, key)) => CondExpr::Or(
+                Box::new(CondExpr::Not(Box::new(CondExpr::Isset {
+                    var: var.clone(),
+                    key: Box::new(key.clone()),
+                }))),
+                Box::new(CondExpr::Not(Box::new(CondExpr::Truthy(CondOperand::Offset {
+                    var,
+                    key: Box::new(key),
+                })))),
+            ),
+            None => CondExpr::Opaque { reads: cond_reads(expr) },
+        },
         // `isset($x['k'])` (ADR-0062 S4). Recognized ONLY when every operand is a
         // depth-one constant-key projection; a multi-argument isset is a
         // conjunction by PHP semantics and lowers to the matching `And` chain.

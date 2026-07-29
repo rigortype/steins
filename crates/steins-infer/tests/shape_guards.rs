@@ -155,6 +155,88 @@ fn assert_isset_routes_through_the_same_guard_path() {
     );
 }
 
+// ---- `empty()` (S6-residue): PHP's own definition, lowered ------------------
+//
+// `empty(e)` ≡ `!isset(e) || !e`. The lowering says exactly that and adds no
+// `empty`-aware narrowing code anywhere, so both polarities below are the
+// compositional walk's answers, not a special case:
+//
+// * `empty(…)` TRUE is a disjunction of two negations — it records nothing,
+//   which is right (the key may be absent, or present and falsy);
+// * `empty(…)` FALSE is De Morgan'd to `isset(e) && e`, whose `isset` half is
+//   the ordinary presence promotion — so `!empty($v['a'])` discharges the read.
+
+#[test]
+fn not_empty_promotes_the_key_exactly_as_isset_does() {
+    assert_eq!(
+        guarded("array{a?: string, b?: string}", "!empty($v['a'])", "$v['a']"),
+        "dumped type: string (asserted)"
+    );
+    // The whole-array reading agrees with the hand-written equivalent.
+    assert_eq!(
+        guarded("array{a?: string, b?: string}", "!empty($v['a'])", "$v"),
+        guarded("array{a?: string, b?: string}", "isset($v['a']) && $v['a']", "$v")
+    );
+}
+
+#[test]
+fn not_empty_strips_null_from_the_slot() {
+    // Inherited from the `isset` half — `empty` is false only where `isset` is
+    // true, and a present-null entry is `empty`.
+    assert_eq!(
+        guarded("array{a?: string|null}", "!empty($v['a'])", "$v['a']"),
+        "dumped type: string (asserted)"
+    );
+}
+
+#[test]
+fn the_empty_true_branch_promotes_nothing() {
+    // Absent-or-falsy: nothing about presence is decided, so the read stays
+    // undischarged. Silence here is the correctness property, not a gap.
+    assert_eq!(guarded("array{a?: string}", "empty($v['a'])", "$v['a']"), "dumped type: unknown");
+}
+
+#[test]
+fn the_empty_false_branch_promotes_the_key() {
+    assert_eq!(
+        guarded_else("array{a?: string, b?: string}", "empty($v['a'])", "$v['a']"),
+        "dumped type: string (asserted)"
+    );
+}
+
+#[test]
+fn empty_promotion_does_not_leak_to_the_sibling_key() {
+    assert_eq!(
+        guarded("array{a?: string, b?: string}", "!empty($v['a'])", "$v['b']"),
+        "dumped type: unknown"
+    );
+}
+
+#[test]
+fn empty_outside_the_depth_one_projection_scope_narrows_nothing() {
+    // `empty($v)` on a bare variable and a deeper path keep the pre-existing
+    // `Opaque` lowering — the scope is `isset`'s (A-G4), deliberately.
+    assert_eq!(guarded("array{a?: string}", "!empty($v)", "$v['a']"), "dumped type: unknown");
+    assert_eq!(
+        guarded("array{a?: array{b?: string}}", "!empty($v['a']['b'])", "$v['a']"),
+        "dumped type: unknown"
+    );
+}
+
+#[test]
+fn empty_does_not_decide_a_guard_verdict_over_a_declared_shape() {
+    // The S4 tripwire, restated for the new lowering: `empty($v['a'])` on a
+    // declared-required non-null key would be decidable from the shape fact —
+    // and deciding it would prune a region from an `Asserted` premise.
+    let src = "<?php\n/** @param array{a: int} $v */\nfunction f(array $v): void \
+               { if (empty($v['a'])) { \\PHPStan\\dumpType(1); } else { \\PHPStan\\dumpType(2); } }\n";
+    let ds = diagnostics(src);
+    let dumps: Vec<&str> =
+        ds.iter().filter(|d| d.id == DEBUG_TYPE_ID).map(|d| d.message.as_str()).collect();
+    assert_eq!(dumps, vec!["dumped type: 1", "dumped type: 2"]);
+    assert!(ds.iter().all(|d| d.id.starts_with("debug.")), "empty() emitted a finding: {ds:?}");
+}
+
 // ---- False branches (v1-conservative) --------------------------------------
 
 #[test]

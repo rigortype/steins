@@ -825,12 +825,12 @@ fn generate() -> Vec<String> {
             out.push(format!(
                 "shapepromote {i} {} isset => {}",
                 render_key(&k),
-                render_shape(&s.promote_present(&k, true))
+                render_shape(&s.promote_present(&k, true, true))
             ));
             out.push(format!(
                 "shapepromote {i} {} exists => {}",
                 render_key(&k),
-                render_shape(&s.promote_present(&k, false))
+                render_shape(&s.promote_present(&k, false, true))
             ));
         }
     }
@@ -978,12 +978,12 @@ fn generate() -> Vec<String> {
                     }
                     Some(v) => {
                         total += 1;
-                        if !s.promote_present(&k, false).admits(&e) {
+                        if !s.promote_present(&k, false, true).admits(&e) {
                             violations += 1;
                         }
                         if *v != Val::Null {
                             total += 1;
-                            if !s.promote_present(&k, true).admits(&e) {
+                            if !s.promote_present(&k, true, true).admits(&e) {
                                 violations += 1;
                             }
                         }

@@ -75,9 +75,14 @@ fn the_strict_leg_floors_pin_the_post_triage_ruling() {
     // the 2026-07-29 corpus sweep measured `offset.undeclared` at ZERO findings
     // across 99,522 files, and the orchestrator took A-G10's END-state promotion
     // to `contracts`. `offset.maybe-missing` (3 sweep findings, all one
-    // assertion-helper discharge gap) stays at `strict` until that discharge
-    // lands. This test remains the tripwire: either floor moving again without
-    // a deliberate ruling fails here.
+    // assertion-helper discharge gap) stayed at `strict` pending that discharge.
+    //
+    // The discharge has since LANDED (the S6-residue slice: a `@phpstan-assert
+    // true $c` helper routes its condition argument through the S4 guard walk —
+    // see `tests/assert_helper_discharge.rs`), and the floor is deliberately NOT
+    // moved with it: the promotion is a ruling to take on a fresh measurement,
+    // not a side effect of the fix. This test remains the tripwire: either floor
+    // moving without a deliberate ruling fails here.
     for (id, floor) in
         [(OFFSET_UNDECLARED_ID, Floor::Contracts), (OFFSET_MAYBE_MISSING_ID, Floor::Strict)]
     {
@@ -151,6 +156,39 @@ fn an_isset_if_guard_discharges_the_read() {
 fn an_array_key_exists_guard_discharges_the_read() {
     let src = fixture("array{a?: string}", "if (array_key_exists('a', $d)) { $x = $d['a']; }");
     assert!(ids(&src).is_empty(), "array_key_exists-guarded read must be clean: {:?}", strict(&src));
+}
+
+#[test]
+fn a_not_empty_guard_discharges_the_read() {
+    // `empty(e)` is `!isset(e) || !e` (PHP's own definition, lowered), so its
+    // false branch is `isset(e) && e` and the presence promotion is the `isset`
+    // half's. The full polarity table is pinned in `tests/shape_guards.rs`.
+    let src = fixture("array{a?: string}", "if (!empty($d['a'])) { $x = $d['a']; }");
+    assert!(ids(&src).is_empty(), "!empty-guarded read must be clean: {:?}", strict(&src));
+}
+
+#[test]
+fn an_empty_guarded_read_still_fires_on_the_true_branch() {
+    // `empty($d['a'])` true leaves "absent" and "present-falsy" both open, so it
+    // discharges nothing — the honest reading, and the one the corpus needs.
+    let src = fixture("array{a?: string}", "if (empty($d['a'])) { $x = $d['a']; }");
+    assert_eq!(ids(&src), [OFFSET_MAYBE_MISSING_ID]);
+}
+
+#[test]
+fn a_tagged_assertion_helper_discharges_the_read() {
+    // The 2026-07-29 sweep's entire `offset.maybe-missing` residue was this one
+    // shape. The rung's own suite is `tests/assert_helper_discharge.rs`; this is
+    // the ladder-level pin, next to `assert()`'s.
+    let src = format!(
+        "<?php\nfinal class H {{\n\
+         /** @phpstan-assert true $c */\n\
+         public static function t(bool $c): void {{ if (!$c) {{ throw new \\RuntimeException('x'); }} }}\n\
+         }}\n\
+         /** @param {AB} $d */\n\
+         function f(array $d): void {{ H::t(isset($d['a'])); $x = $d['a']; }}\n"
+    );
+    assert!(ids(&src).is_empty(), "helper-guarded read must be clean: {:?}", strict(&src));
 }
 
 #[test]

@@ -4774,7 +4774,7 @@ fn walk_trace(
                 // and applies the true-branch refinements, so `assert(isset(...))`
                 // routes into the S4 narrowing through exactly the `if`-guard
                 // path — no assert-specific plumbing.
-                apply_shape_narrowing(w.cx, cond, true, env, store);
+                apply_shape_narrowing(w.cx, cond, true, env, store, true);
                 Flow::FellThrough
             }
             // Terminators: the trace stops; the remainder is unreachable.
@@ -6516,7 +6516,7 @@ fn walk_if(
         let refs = then_refinements(cond, w.cx.php_minor);
         apply_refinements(&refs, &mut benv, &mut bclasses, Stratum::Verified);
         apply_class_narrowing(w, cond, true, &mut bclasses);
-        apply_shape_narrowing(w.cx, cond, true, &mut benv, &mut bclasses);
+        apply_shape_narrowing(w.cx, cond, true, &mut benv, &mut bclasses, true);
         let mut then_calls = Vec::new();
         collect_guard_calls(cond, true, &mut then_calls);
         for (call, returns_true) in then_calls {
@@ -6541,7 +6541,7 @@ fn walk_if(
         let refs = else_refinements(cond, w.cx.php_minor);
         apply_refinements(&refs, &mut benv, &mut bclasses, Stratum::Verified);
         apply_class_narrowing(w, cond, false, &mut bclasses);
-        apply_shape_narrowing(w.cx, cond, false, &mut benv, &mut bclasses);
+        apply_shape_narrowing(w.cx, cond, false, &mut benv, &mut bclasses, true);
         let mut else_calls = Vec::new();
         collect_guard_calls(cond, false, &mut else_calls);
         for (call, returns_true) in else_calls {
@@ -6694,6 +6694,7 @@ fn walk_match(
                 &ShapeGuard::Tag { var: var.clone(), key: k, tags, loose },
                 &mut benv,
                 &mut bclasses,
+                true,
             );
         }
         if walk_trace(w, folder, &arm.trace, &mut benv, &mut bclasses, descent, facts, true, out)
@@ -8288,10 +8289,97 @@ fn apply_call_asserts(
             continue;
         }
         let Some(pos) = params.iter().position(|p| p.name == spec.param) else { continue };
+        // The assertion-helper leg: the spec asserts a BOOLEAN of the parameter,
+        // and the argument at that position is a condition. Read it as the guard
+        // it is, before the value-fact lane gets a chance to make nothing of it.
+        if let Some(then) = asserted_boolean(spec)
+            && let Some(cond) = call.arg_cond(pos)
+        {
+            apply_helper_guard(cx, call, cond, then, env, store, asserted);
+            continue;
+        }
         let Some(arg) = call.args.get(pos) else { continue };
         let ArgValue::Var(v) = &arg.value else { continue };
         if apply_assert_to_var(env, store, v, spec) {
             asserted.insert(v.clone());
+        }
+    }
+}
+
+/// The boolean an assertion spec claims of its parameter, or `None` when the spec
+/// asserts something other than a literal `true`/`false`.
+///
+/// Four spellings collapse to two answers, and negation is a plain XOR because the
+/// asserted subject is a *condition* — `isset(…)`, a comparison, a `&&` chain —
+/// whose value is a `bool` by construction, so "not `true`" is "`false`":
+/// `@phpstan-assert true $c` and `@phpstan-assert !false $c` both say the guard
+/// held; `@phpstan-assert false $c` and `@phpstan-assert !true $c` both say it did
+/// not.
+fn asserted_boolean(spec: &AssertSpec) -> Option<bool> {
+    match steins_contract::lower(&spec.ty) {
+        steins_contract::ContractTy::LitBool(b) => Some(b != spec.negated),
+        _ => None,
+    }
+}
+
+/// **Assertion-helper discharge** (ADR-0058 §3's tag lane, ADR-0062 A-G10's
+/// discharge ladder): route a userland assertion helper's condition argument
+/// through the SAME guard walk `assert($cond)` uses.
+///
+/// `Util_Assert::true(isset($options['user_id']));` is the corpus pattern this
+/// exists for. `assert(isset(…))` discharges the strict leg because its argument
+/// survives lowering as a condition; the helper form did not, because the value
+/// lowering of `isset(…)` is [`ArgValue::Other`] — nothing to consume. With the
+/// condition retained (`CallExpr::arg_conds`) the two forms differ in exactly one
+/// respect, and it is the one ADR-0058 legislates:
+///
+/// * **Stratum.** `assert()` is *Verified, unconditionally* (the 2026-07-25
+///   ruling reads it as `if (!$cond) throw`). A helper carrying only a
+///   `@phpstan-assert` tag is **Asserted** — ADR-0058's table row "userland
+///   helper, tag-declared only", restated as a refusal in its §8: the tag lane is
+///   a claim and a lying tag must not forge a proof. So the presence promotion
+///   this applies is `Required { witnessed: false }`. The DISCHARGE is unaffected
+///   — `offset.maybe-missing` is a contract-layer finding over an `Asserted`
+///   shape (A-G9's corollary), so an Asserted presence silences it just as a
+///   witnessed one does, and no proof-layer id can be premised on either.
+///   Raising this leg to Verified needs the descent proof of ADR-0058 §3 (slice
+///   I2), which reads the helper's throw-guard out of its body rather than
+///   trusting the tag; that is deliberately not this slice.
+/// * **Nothing else.** Polarity, `&&`/`||` distribution, the S5 disjunctive
+///   cover, tag discrimination and arm subtraction are the walk's, unmodified.
+///
+/// The by-ref exemption is the second half. `assert()` never forgets its argument
+/// (its statement carries no invalidation); a helper call *does* — the lowering
+/// conservatively forgets every variable the call expression mentions, which
+/// includes the base inside `isset($d['a'])` and would erase the narrowing one
+/// statement later. A variable mentioned only inside a condition argument cannot
+/// be bound by reference (PHP binds a reference to a variable or lvalue, never to
+/// the value of `isset(…)` or `$a && $b`), so it is exempt — unless the SAME call
+/// also hands that variable over directly, which is the one case that can mutate.
+#[allow(clippy::too_many_arguments)]
+fn apply_helper_guard(
+    cx: &Cx,
+    call: &CallExpr,
+    cond: &CondExpr,
+    then: bool,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+    asserted: &mut HashSet<String>,
+) {
+    let mut guards = Vec::new();
+    collect_shape_guards(cx, cond, then, &mut guards);
+    for g in &guards {
+        // ADR-0058: tag-declared, so the presence stratum is the declared one.
+        apply_shape_guard(cx, g, env, store, false);
+        let var = g.var();
+        let handed_over = call
+            .args
+            .iter()
+            .map(|a| &a.value)
+            .chain(call.named_args.iter().map(|n| &n.value))
+            .any(|v| matches!(v, ArgValue::Var(name) if name == var));
+        if !handed_over {
+            asserted.insert(var.to_owned());
         }
     }
 }
@@ -9265,6 +9353,7 @@ fn synth_function_call(call: &CallExpr, nameref: &NameRef) -> CallExpr {
         has_spread: call.has_spread,
         positional_only: call.positional_only,
         span: call.span,
+        arg_conds: call.arg_conds.clone(),
     }
 }
 
@@ -11778,26 +11867,42 @@ fn disjunctive_cover(cx: &Cx, cond: &CondExpr) -> Option<ShapeGuard> {
 /// env and store. Runs after `apply_refinements` in the branch walk, so a shape
 /// operator is the last word on a `Fact::Shape` binding — none of the scalar
 /// refinement operators can express anything about one anyway.
+///
+/// `witnessed` is the **evidence stratum of the condition itself** (ADR-0058's
+/// table): `true` for a condition the runtime evaluated — an `if`, an `assert()`
+/// — and `false` for one whose only evidence is a docblock, which today means a
+/// `@phpstan-assert true $cond` tag on a userland assertion helper. It reaches
+/// exactly one operator, [`ShapeFact::promote_present`]; every other narrowing
+/// here (arm subtraction, cover recording, `mark_absent`) is already confined to
+/// the `Asserted` shape lane, whose stratum is A-G9's corollary and does not vary
+/// per guard.
 fn apply_shape_narrowing(
     cx: &Cx,
     cond: &CondExpr,
     then: bool,
     env: &mut HashMap<String, Known>,
     store: &mut Store,
+    witnessed: bool,
 ) {
     let mut guards = Vec::new();
     collect_shape_guards(cx, cond, then, &mut guards);
     for g in &guards {
-        apply_shape_guard(cx, g, env, store);
+        apply_shape_guard(cx, g, env, store, witnessed);
     }
 }
 
 /// One guard, both lanes: subtract the arm lane, mint a fact if the subtraction
 /// collapsed the union to one array arm, then refine the fact.
-fn apply_shape_guard(cx: &Cx, g: &ShapeGuard, env: &mut HashMap<String, Known>, store: &mut Store) {
+fn apply_shape_guard(
+    cx: &Cx,
+    g: &ShapeGuard,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+    witnessed: bool,
+) {
     subtract_shape_arms(cx, g, store);
     mint_collapsed_shape(g.var(), env, store);
-    refine_shape_fact(g, env);
+    refine_shape_fact(g, env, witnessed);
 }
 
 /// **Arm subtraction** (A-G3/A-G4): delete the arms of `var`'s contract lane the
@@ -11947,14 +12052,18 @@ fn mint_collapsed_shape(var: &str, env: &mut HashMap<String, Known>, store: &Sto
 /// `Fact::Shape`, if it has one. Every operator is a narrowing
 /// (`crates/steins-domain/src/shape.rs`), so the result admits everything the
 /// binding admitted that satisfies the guard.
-fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>) {
+fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>, witnessed: bool) {
     use steins_domain::Presence;
     let Some(known) = env.get(g.var()) else { return };
     let Some(Fact::Shape { shape, nullable }) = &known.fact else { return };
     let (shape, nullable) = (shape.as_ref(), *nullable);
     let next = match g {
         ShapeGuard::Present { key, flavor, positive: true, .. } => Some(Fact::Shape {
-            shape: Box::new(shape.promote_present(key, *flavor == PresenceFlavor::Isset)),
+            shape: Box::new(shape.promote_present(
+                key,
+                *flavor == PresenceFlavor::Isset,
+                witnessed,
+            )),
             // `isset($x[k])` is false when `$x` is null, so the true branch also
             // proves the base non-null. `array_key_exists` on null raises a
             // TypeError rather than answering false, so it proves nothing here.
@@ -12099,7 +12208,7 @@ fn apply_offset_write(
             // state something the write may have falsified. Unknown is the honest
             // floor; a real nested-shape update is not v1.
             let nested = keys.len() > 1;
-            let mut next = shape.promote_present(&first, false);
+            let mut next = shape.promote_present(&first, false, true);
             // Writing an UNDECLARED key under a `Sealed` tail: the declaration
             // says the key cannot be there and the code just put it there, so the
             // runtime value has diverged from the docblock. Resolved the A-G5
@@ -12116,7 +12225,7 @@ fn apply_offset_write(
                     next.non_empty,
                     next.covers.clone(),
                 )
-                .promote_present(&first, false);
+                .promote_present(&first, false, true);
             }
             if nested { set_slot_fact(&next, &first, None) } else { set_slot_fact(&next, &first, slot) }
         }
