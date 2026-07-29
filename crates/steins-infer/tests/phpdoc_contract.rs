@@ -457,3 +457,176 @@ fn named_arg_native_nullable_accepts_null() {
     let f = "<?php /** @param int $n */ function f($n = null): void {}\n";
     assert_eq!(param_count(&format!("{f}f(n: null);")), 0, "null accepted via nullable default");
 }
+
+// ==========================================================================
+// Conformance slice C1 — the one identifier table.
+//
+// Each test below mirrors one `php-typing-conformance` case, and its assertions
+// are read off that fixture's `E?:` probe lines and its silent (accepting) call
+// sites. These spellings were already known to `steins-contract::lower_identifier`
+// (the table the abstract-fact lane lowers through) but were silent on the
+// proven-value lane, which kept a hand-maintained sibling match. The lanes now
+// share one table.
+// ==========================================================================
+
+/// `phpdoc_advanced_param_typehint_boolean_synonym`: `boolean` is `bool`, and is
+/// still *enforced* as one.
+#[test]
+fn boolean_synonym_is_enforced_as_bool() {
+    let f = "<?php /** @param boolean $flag */ function f($flag): void {}\n";
+    assert_eq!(param_count(&format!("{f}f(true);")), 0, "a native bool satisfies @param boolean");
+    assert_eq!(param_count(&format!("{f}f(false);")), 0, "false satisfies @param boolean");
+    assert_eq!(
+        param_count(&format!("{f}f('not a bool');")),
+        1,
+        "a string is rejected where @param boolean is required"
+    );
+    // The `@return boolean` half of the fixture must stay silent on a real bool.
+    let g = "<?php /** @return boolean */ function g() { return true; }\n";
+    assert_eq!(return_count(g), 0, "true satisfies @return boolean");
+}
+
+/// `phpdoc_advanced_param_typehint_integer_synonym`.
+#[test]
+fn integer_synonym_is_enforced_as_int() {
+    let f = "<?php /** @param integer $value */ function f($value): void {}\n";
+    assert_eq!(param_count(&format!("{f}f(1);")), 0, "an int satisfies @param integer");
+    assert_eq!(
+        param_count(&format!("{f}f('not an int');")),
+        1,
+        "a string is rejected where @param integer is required"
+    );
+    let g = "<?php /** @return integer */ function g() { return 1; }\n";
+    assert_eq!(return_count(g), 0, "1 satisfies @return integer");
+}
+
+/// `phpdoc_advanced_param_typehint_double_synonym`.
+#[test]
+fn double_synonym_is_enforced_as_float() {
+    let f = "<?php /** @param double $value */ function f($value): void {}\n";
+    assert_eq!(param_count(&format!("{f}f(1.5);")), 0, "a float satisfies @param double");
+    assert_eq!(
+        param_count(&format!("{f}f(1);")),
+        0,
+        "an int satisfies float/double (PHPStan core semantics)"
+    );
+    assert_eq!(
+        param_count(&format!("{f}f('not a float');")),
+        1,
+        "a string is rejected where @param double is required"
+    );
+    let g = "<?php /** @return double */ function g() { return 1.5; }\n";
+    assert_eq!(return_count(g), 0, "1.5 satisfies @return double");
+}
+
+/// `phpdoc_advanced_fallback_non_positive_int`: `int<min, 0>` — zero is what the
+/// spelling exists for, `1` is one past the boundary.
+#[test]
+fn non_positive_int_is_enforced() {
+    let f = "<?php /** @param non-positive-int $value */ function f($value): void {}\n";
+    assert_eq!(param_count(&format!("{f}f(0);")), 0, "zero is inside non-positive-int");
+    assert_eq!(param_count(&format!("{f}f(-1);")), 0, "-1 is inside non-positive-int");
+    assert_eq!(param_count(&format!("{f}f(1);")), 1, "1 is not a non-positive-int");
+}
+
+/// `phpdoc_advanced_fallback_non_zero_int`: `int<min, -1>|int<1, max>` — the union
+/// must keep the hole at zero rather than flatten to one range.
+#[test]
+fn non_zero_int_keeps_the_hole_at_zero() {
+    let f = "<?php /** @param non-zero-int $value */ function f($value): void {}\n";
+    assert_eq!(param_count(&format!("{f}f(1);")), 0, "1 is on one side of the hole");
+    assert_eq!(param_count(&format!("{f}f(-1);")), 0, "-1 is on the other side");
+    assert_eq!(param_count(&format!("{f}f(0);")), 1, "0 is the hole non-zero-int excludes");
+}
+
+/// `phpdoc_advanced_fallback_numeric`: `int|float|numeric-string`.
+#[test]
+fn numeric_is_enforced() {
+    let f = "<?php /** @param numeric $value */ function f($value): void {}\n";
+    assert_eq!(param_count(&format!("{f}f(1);")), 0, "int is numeric");
+    assert_eq!(param_count(&format!("{f}f(1.5);")), 0, "float is numeric");
+    assert_eq!(param_count(&format!("{f}f('123');")), 0, "a numeric string is numeric");
+    assert_eq!(param_count(&format!("{f}f('1.5e3');")), 0, "exponent form is numeric");
+    assert_eq!(param_count(&format!("{f}f('abc');")), 1, "'abc' is not numeric");
+    assert_eq!(param_count(&format!("{f}f(true);")), 1, "true is not numeric");
+}
+
+/// `phpdoc_advanced_fallback_number`: `int|float` and nothing else — the whole
+/// distinction from `numeric` is that a numeric string is *not* a `number`.
+#[test]
+fn number_excludes_numeric_strings() {
+    let f = "<?php /** @param number $value */ function f($value): void {}\n";
+    assert_eq!(param_count(&format!("{f}f(1);")), 0, "int is a number");
+    assert_eq!(param_count(&format!("{f}f(1.5);")), 0, "float is a number");
+    assert_eq!(param_count(&format!("{f}f('1');")), 1, "a numeric string is not a number");
+    assert_eq!(param_count(&format!("{f}f(true);")), 1, "true is not a number");
+    let g = "<?php /** @return number */ function g() { return 1.5; }\n";
+    assert_eq!(return_count(g), 0, "1.5 satisfies @return number");
+}
+
+/// `phpdoc_advanced_int_range_keyword`: Phan's `int-range<0, 255>` is PHPStan's
+/// `int<0, 255>` under a second base name — one lowering, both spellings.
+#[test]
+fn int_range_keyword_is_the_int_range() {
+    let f = "<?php /** @param int-range<0, 255> $value */ function f($value): void {}\n";
+    assert_eq!(param_count(&format!("{f}f(200);")), 0, "200 is inside int-range<0, 255>");
+    assert_eq!(param_count(&format!("{f}f(0);")), 0, "the lower bound is inclusive");
+    assert_eq!(param_count(&format!("{f}f(255);")), 0, "the upper bound is inclusive");
+    assert_eq!(param_count(&format!("{f}f(256);")), 1, "256 is above the bounds");
+    assert_eq!(param_count(&format!("{f}f(-1);")), 1, "-1 is below the bounds");
+    // The `int<…>` spelling keeps its existing meaning, bounds grammar included.
+    let g = "<?php /** @param int<min, 0> $value */ function g($value): void {}\n";
+    assert_eq!(param_count(&format!("{g}g(0);")), 0, "min/max bounds still resolve");
+    assert_eq!(param_count(&format!("{g}g(1);")), 1, "int<min, 0> still rejects 1");
+}
+
+/// The convergence itself: a class name is *not* keyword vocabulary, so it must
+/// still ride the is-a oracle and the `is_known_class` gate rather than be judged
+/// as a contract atom. An unresolved identifier (a `@template` param or a
+/// `@phpstan-type` alias) must stay silent — the latent false positive the one
+/// table's `Class` catch-all would otherwise manufacture.
+#[test]
+fn unknown_identifier_stays_silent_after_convergence() {
+    let f = "<?php /** @template T\n * @param T $value */ function f($value): void {}\n";
+    assert_eq!(param_count(&format!("{f}f(1);")), 0, "a template param denotes anything → silent");
+    let g = "<?php /** @param Undefined_Alias $value */ function g($value): void {}\n";
+    assert_eq!(param_count(&format!("{g}g(1);")), 0, "an unresolved alias stays silent");
+    let k = "<?php class K {}\n/** @param K $value */ function k($value): void {}\n";
+    assert_eq!(param_count(&format!("{k}k(1);")), 1, "a scalar is never an instance of a known class");
+}
+
+/// `phpdoc_advanced_pseudotype_class_precedence`: a same-named class in scope
+/// takes precedence over a phpdoc **pseudo-type** keyword (PHPStan's
+/// `TypeNodeResolver::tryResolvePseudoTypeClassType`). PHP does not reserve
+/// `Integer`/`Boolean`/`Double`/`Number`, so each is a legal class name — and
+/// resolving `@param Integer` to `int` would both miss the real violation and
+/// manufacture one against an actual `Integer` instance.
+#[test]
+fn a_same_named_class_shadows_a_pseudo_type_keyword() {
+    let f = "<?php final class Integer {}\n/** @param Integer $value */ function f($value): void {}\n";
+    assert_eq!(
+        param_count(&format!("{f}f(new Integer());")),
+        0,
+        "an Integer instance satisfies the class-resolved parameter"
+    );
+    assert_eq!(
+        param_count(&format!("{f}f(5);")),
+        1,
+        "a plain int is not an Integer instance"
+    );
+    // Without such a class in scope the keyword still means `int`.
+    let g = "<?php /** @param Integer $value */ function g($value): void {}\n";
+    assert_eq!(param_count(&format!("{g}g(5);")), 0, "unshadowed, `Integer` is the int keyword");
+    assert_eq!(param_count(&format!("{g}g('x');")), 1, "unshadowed, a string still violates it");
+}
+
+/// The other half of the precedence rule: PHP **reserves** its native type words,
+/// so no class can be named `int`/`string`/`bool`/`mixed` and the keyword can never
+/// be shadowed. (The declaration below is not legal PHP; the point is that the
+/// keyword wins regardless of what the class table happens to hold.)
+#[test]
+fn a_reserved_type_word_is_never_shadowed() {
+    let f = "<?php /** @param int $value */ function f($value): void {}\n";
+    assert_eq!(param_count(&format!("{f}f(5);")), 0, "int is int");
+    assert_eq!(param_count(&format!("{f}f('5');")), 1, "and still rejects a numeric string");
+}

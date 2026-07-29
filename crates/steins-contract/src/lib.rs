@@ -238,7 +238,21 @@ pub(crate) fn is_array_key_ty(ty: &ContractTy) -> bool {
     )
 }
 
-fn lower_identifier(name: &str) -> ContractTy {
+/// **The one identifier table**: what every phpdoc *keyword* spelled as a bare
+/// identifier means, lowered to a [`ContractTy`]. Both lanes read this table and
+/// neither keeps a sibling — ADR-0030's no-second-relation discipline applied to
+/// atoms, exactly as [`shape_verdict`] applies it to shapes (ADR-0062 §5): one
+/// relation, lane-local leaf judges. The fact lane arrives here through [`lower`];
+/// `steins-infer`'s proven-value lane calls it directly and judges the result with
+/// [`admits_val`].
+///
+/// The catch-all is load-bearing, not a fallback: a name that is **not** a keyword
+/// lowers to [`ContractTy::Class`], which is each lane's signal to hand the name to
+/// its own class machinery (the trinary is-a oracle and the `is_known_class` gate
+/// in `steins-infer`) — the one identifier judgment this crate cannot host, since
+/// the value domain has no object inhabitant (ADR-0035/0038).
+#[must_use]
+pub fn lower_identifier(name: &str) -> ContractTy {
     let norm = name.trim_start_matches('\\').to_ascii_lowercase();
     match norm.as_str() {
         "int" | "integer" => ContractTy::Base(Base::Int),
@@ -263,6 +277,11 @@ fn lower_identifier(name: &str) -> ContractTy {
             ContractTy::Base(Base::Float),
             ContractTy::StrWith(StrPreds::NUMERIC.close()),
         ]),
+        // `number` is `numeric` minus its string member — `int|float` and nothing
+        // else, so a numeric string is *not* a `number`.
+        "number" => {
+            ContractTy::Union(vec![ContractTy::Base(Base::Int), ContractTy::Base(Base::Float)])
+        }
         "numeric-string" => ContractTy::StrWith(StrPreds::NUMERIC.close()),
         "non-empty-string" => ContractTy::StrWith(StrPreds::NON_EMPTY),
         "non-falsy-string" | "truthy-string" => ContractTy::StrWith(StrPreds::NON_FALSY.close()),
@@ -276,6 +295,14 @@ fn lower_identifier(name: &str) -> ContractTy {
         "non-positive-int" => {
             ContractTy::IntIn(IntRange::new(i64::MIN, 0).expect("valid range"))
         }
+        // The one sign refinement that is not a single interval: a union with the
+        // hole punched at zero, which is the whole point of the spelling. Flattening
+        // it back to one range would lose the hole (PHPStan resolves it the same
+        // way: `int<min, -1>|int<1, max>`).
+        "non-zero-int" => ContractTy::Union(vec![
+            ContractTy::IntIn(IntRange::new(i64::MIN, -1).expect("valid range")),
+            ContractTy::IntIn(IntRange::new(1, i64::MAX).expect("valid range")),
+        ]),
         "array" => ContractTy::ArrayAny { non_empty: false },
         "non-empty-array" => ContractTy::ArrayAny { non_empty: true },
         "list" => ContractTy::ListOf { elem: Box::new(ContractTy::Mixed), non_empty: false },
@@ -293,7 +320,60 @@ fn lower_identifier(name: &str) -> ContractTy {
     }
 }
 
-fn lower_generic(base: &str, args: &[steins_phpdoc::ast::GenericArg]) -> ContractTy {
+/// Whether a same-named class in scope takes precedence over this keyword — the
+/// vocabulary half of the pseudo-type/class precedence rule (PHPStan's
+/// `TypeNodeResolver::tryResolvePseudoTypeClassType`).
+///
+/// PHP **reserves** its native type words — `int`, `float`, `string`, `bool`,
+/// `true`, `false`, `null`, `mixed`, `never`, `void`, `iterable`, `object`,
+/// `callable`, `array`, `static`, `self`, `parent` — so no class can be declared
+/// with one of those names and the keyword always wins. Every other spelling
+/// [`lower_identifier`] knows is a phpdoc **pseudo-type**: `integer`, `boolean`,
+/// `double`, `number`, `numeric`, `scalar`, `closure`, … are all legal class names,
+/// so a class named `Integer` in scope makes `@param Integer` *that class*, not
+/// `int`. A hyphenated keyword (`positive-int`, `non-empty-string`) is not a legal
+/// PHP identifier at all, so nothing can shadow it.
+///
+/// This is the whole of the rule this crate can answer. The *precedence* half needs
+/// a class registry to ask whether such a class is actually in scope, and that
+/// lives in `steins-infer` — so a caller pairs this predicate with its own
+/// class-lookup gate.
+#[must_use]
+pub fn is_shadowable_pseudo_type(name: &str) -> bool {
+    let norm = name.trim_start_matches('\\').to_ascii_lowercase();
+    if norm.contains('-') {
+        return false;
+    }
+    !matches!(
+        norm.as_str(),
+        "int"
+            | "float"
+            | "string"
+            | "bool"
+            | "true"
+            | "false"
+            | "null"
+            | "mixed"
+            | "never"
+            | "void"
+            | "iterable"
+            | "object"
+            | "callable"
+            | "array"
+            | "static"
+            | "self"
+            | "parent"
+    )
+}
+
+/// **The one generic table**: the parameterized phpdoc vocabulary, lowered to a
+/// [`ContractTy`]. The companion of [`lower_identifier`], and public for the same
+/// reason — `steins-infer`'s proven-value lane reads it rather than restating the
+/// bound grammar or the recognized base names. Its catch-all carries the same
+/// meaning: a base name that is not vocabulary lowers to [`ContractTy::Class`], the
+/// signal to hand it to the caller's class-generic machinery.
+#[must_use]
+pub fn lower_generic(base: &str, args: &[steins_phpdoc::ast::GenericArg]) -> ContractTy {
     let norm = base.trim_start_matches('\\').to_ascii_lowercase();
     let arg = |i: usize| args.get(i).map(|a| lower(&a.ty));
     match (norm.as_str(), args.len()) {
@@ -311,7 +391,9 @@ fn lower_generic(base: &str, args: &[steins_phpdoc::ast::GenericArg]) -> Contrac
             elem: Box::new(arg(0).expect("len checked")),
             non_empty: norm.starts_with("non-empty"),
         },
-        ("int", 2) => lower_int_range(args),
+        // `int<lo, hi>` (PHPStan/Psalm/Mago) and `int-range<lo, hi>` (Phan) are the
+        // same bounded range under two base names — one lowering, not two.
+        ("int" | "int-range", 2) => lower_int_range(args),
         ("iterable", 1) => ContractTy::IterableOf {
             key: Box::new(ContractTy::Mixed),
             val: Box::new(arg(0).expect("len checked")),

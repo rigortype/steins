@@ -13233,92 +13233,148 @@ fn accepts(cx: &Cx, cfile: usize, coff: u32, ty: &PType, v: &CVal) -> Tri {
     }
 }
 
-/// Acceptance for a bare identifier type: the scalar keyword table, the string/int
-/// predicate refinements, `mixed`/`scalar`/`array-key`/`object`, or a class name.
+/// Acceptance for a bare identifier type.
+///
+/// **One identifier table** (ADR-0030's no-second-relation discipline, ADR-0062 §5
+/// — the same convergence [`accepts_shape`] performs for shapes). The keyword
+/// vocabulary is *not* restated here: the name is lowered by
+/// [`steins_contract::lower_identifier`] — the table the abstract-fact lane in
+/// [`check_phpdoc_param`] already lowers through — and the lowered contract is
+/// judged against the proven value by [`steins_contract::admits_val`].
+///
+/// The divergence this convergence removed: this lane kept a hand-maintained
+/// sibling match on the raw phpdoc AST, and it had drifted. `non-positive-int`,
+/// `numeric`, `number`, `non-zero-int`, `int-range<…>` and the `boolean`/`integer`/
+/// `double` synonyms were enforced against an abstract fact and silent against a
+/// *proven* value — strictly less knowledge applied to strictly more information.
+///
+/// Two judgments stay lane-local, because the value domain has no inhabitant for
+/// them (ADR-0035/0038 — there is no `Val::Object`):
+///
+/// * a **class name** — which the one table reports as its `Class` catch-all —
+///   rides this crate's trinary is-a oracle and its `is_known_class` gate;
+/// * a value the domain cannot express (an **object**, or an array holding one) is
+///   judged by [`unrepresentable_verdict`], which reads the *lowered* contract, not
+///   the keyword — so it is a leaf judge, not a second table.
 fn accepts_identifier(cx: &Cx, cfile: usize, coff: u32, name: &str, v: &CVal) -> Tri {
-    let scalar = match v {
-        CVal::Scalar(s) => Some(s),
-        _ => None,
-    };
-    let yes_no = |b: bool| if b { Tri::Yes } else { Tri::No };
-    match name.to_ascii_lowercase().as_str() {
-        "mixed" => Tri::Yes,
-        "int" => yes_no(matches!(scalar, Some(ArgValue::Int(_)))),
-        // `int` is accepted by `float` (PHPStan core semantics).
-        "float" => yes_no(matches!(scalar, Some(ArgValue::Float(_) | ArgValue::Int(_)))),
-        "string" => yes_no(matches!(scalar, Some(ArgValue::Str(_)))),
-        "bool" => yes_no(matches!(scalar, Some(ArgValue::Bool(_)))),
-        "true" => yes_no(matches!(scalar, Some(ArgValue::Bool(true)))),
-        "false" => yes_no(matches!(scalar, Some(ArgValue::Bool(false)))),
-        "null" => yes_no(matches!(scalar, Some(ArgValue::Null))),
-        "scalar" => yes_no(matches!(
-            scalar,
-            Some(ArgValue::Int(_) | ArgValue::Float(_) | ArgValue::Str(_) | ArgValue::Bool(_))
-        )),
-        "array-key" => yes_no(matches!(scalar, Some(ArgValue::Int(_) | ArgValue::Str(_)))),
-        "positive-int" => match scalar {
-            Some(ArgValue::Int(i)) => yes_no(*i > 0),
+    let cty = steins_contract::lower_identifier(name);
+    // Not a keyword → a class name, whose judgment this crate owns.
+    if matches!(cty, steins_contract::ContractTy::Class(_)) {
+        return accepts_class_name(cx, cfile, coff, name, v);
+    }
+    // Pseudo-type/class precedence (PHPStan's `tryResolvePseudoTypeClassType`): a
+    // keyword PHP does not *reserve* — `integer`, `boolean`, `double`, `number`,
+    // `closure`, … — is a legal class name, and a class of that name in scope wins
+    // over the keyword. `steins-contract` answers the vocabulary half (which
+    // spellings are shadowable at all); the registry half is necessarily ours, and
+    // this is why the identifier path delegates rather than being replaced by the
+    // one table outright.
+    //
+    // The gate is **in-project declaration**, not `is_known_class`, and that is a
+    // deliberate narrowing of PHPStan's rule: the seeded catalog carries global
+    // class-likes whose names collide with pseudo-types (`number` is in there,
+    // implementing `Stringable`), and letting those shadow would silently turn the
+    // overwhelmingly-intended `@param number` (int|float) into a class contract in
+    // every non-namespaced file — a false positive manufactured out of a name
+    // collision the docblock author never saw. A project that declares its own
+    // `class Integer` and then writes `@param Integer` plainly means that class;
+    // that is the case the rule exists for, and the case the conformance fixture
+    // states. Same in-project/catalog cut as `ProjectIsa::is_final` (ADR-0043 A11).
+    if steins_contract::is_shadowable_pseudo_type(name)
+        && cx.find_class(&cx.resolve_pclass(cfile, coff, name)).is_some()
+    {
+        return accepts_class_name(cx, cfile, coff, name, v);
+    }
+    match cval_as_val(v) {
+        Some(val) => steins_contract::admits_val(&cty, &val),
+        None => unrepresentable_verdict(&cty, v),
+    }
+}
+
+/// The conversion seam from the contract lane's proven value into the domain's
+/// [`Val`], so the shared acceptance relation can judge it. `None` for a value the
+/// domain has no inhabitant for: an object, or an array holding one (ADR-0035/0038
+/// — the value lattice is object-free).
+fn cval_as_val(v: &CVal) -> Option<Val> {
+    match v {
+        // The array minor-version question is already settled: a `CVal`'s keys are
+        // normalized (`NormKey`), so no next-int guess is needed here.
+        CVal::Scalar(s) => val_of(s, None),
+        CVal::Array(entries) => entries
+            .iter()
+            .map(|(k, cv)| cval_as_val(cv).map(|val| (domain_key(k), val)))
+            .collect::<Option<Vec<_>>>()
+            .map(Val::Array),
+        CVal::Object(..) => None,
+    }
+}
+
+/// The lane-local leaf judge for a value the domain cannot represent — an **object**
+/// (ADR-0043's world, which the object-free value lattice has no inhabitant for) or
+/// an array holding one.
+///
+/// It reads the **lowered** contract rather than the keyword, so it states only what
+/// is true of *every* object, or of an array whose members are unknown — no keyword
+/// knowledge is duplicated here. This is the convergence debt of the identifier
+/// path, and it is exactly the debt `steins-contract` cannot retire: hosting it
+/// would mean giving the value domain an object inhabitant.
+fn unrepresentable_verdict(cty: &steins_contract::ContractTy, v: &CVal) -> Tri {
+    use steins_contract::ContractTy as C;
+    match v {
+        CVal::Object(..) => match cty {
+            C::Mixed | C::ObjectAny => Tri::Yes,
+            // An object may be `Traversable`, may have `__invoke`, and a
+            // provenance-flavored string type is non-extensional (ADR-0038) — none
+            // of it provable from the class name alone.
+            C::Opaque | C::IterableOf { .. } | C::CallableTy(_) | C::StrOpaque => Tri::Maybe,
+            // Every other lowered form denotes scalars, null, or arrays, of which no
+            // object is a member (pure set membership, no coercion — ADR-0030).
             _ => Tri::No,
         },
-        "negative-int" => match scalar {
-            Some(ArgValue::Int(i)) => yes_no(*i < 0),
+        // An array with an unrepresentable member: its array-ness is decided, its
+        // contents are not, so only the contract's own array-ness answers.
+        CVal::Array(_) => match cty {
+            C::Mixed | C::ArrayAny { non_empty: false } => Tri::Yes,
+            C::ArrayAny { .. }
+            | C::ListOf { .. }
+            | C::MapOf { .. }
+            | C::IterableOf { .. }
+            | C::Shape { .. }
+            | C::CallableTy(_)
+            | C::Opaque => Tri::Maybe,
             _ => Tri::No,
         },
-        "non-negative-int" => match scalar {
-            Some(ArgValue::Int(i)) => yes_no(*i >= 0),
-            _ => Tri::No,
+        // Unreachable in practice: `resolve_cval` yields only literal scalars here.
+        // The honest floor, not a verdict.
+        CVal::Scalar(_) => Tri::Maybe,
+    }
+}
+
+/// A class-name type (ADR-0043 stage 4) — the identifier judgment the one table
+/// cannot host. Rides the trinary is-a oracle for a proven object value
+/// (`Yes`→Yes, `No`→No, `Unknown`→Maybe) and rejects a proven scalar against a
+/// *known* class — phpdoc acceptance is pure set membership (ADR-0030 registry 1,
+/// no coercion), so no scalar is ever a class instance, in either mode. The
+/// `is_known_class` gate is the safety valve: an unresolved bare identifier may be
+/// a `@template` param or a `@phpstan-type` alias (which can denote a scalar), so
+/// it stays silent — the same closure discipline the is-a oracle applies to
+/// non-membership.
+fn accepts_class_name(cx: &Cx, cfile: usize, coff: u32, name: &str, v: &CVal) -> Tri {
+    let target = cx.resolve_pclass(cfile, coff, name);
+    match v {
+        CVal::Object(obj, _) => match cx.is_a(obj, &target) {
+            IsA::Yes => Tri::Yes,
+            // A definite `No` requires a *known* target: an object whose own
+            // hierarchy is closed is-a-No against an unresolved name, but that
+            // name may be a `@template`/`@phpstan-type` alias the object *does*
+            // satisfy — so gate on `is_known_class`, as for the scalar arm.
+            IsA::No if cx.is_known_class(&target) => Tri::No,
+            IsA::No | IsA::Unknown => Tri::Maybe,
         },
-        "numeric-string" => match scalar {
-            Some(ArgValue::Str(s)) => yes_no(php_is_numeric(s)),
-            _ => Tri::No,
-        },
-        "non-empty-string" => match scalar {
-            Some(ArgValue::Str(s)) => yes_no(!s.is_empty()),
-            _ => Tri::No,
-        },
-        "non-falsy-string" | "truthy-string" => match scalar {
-            Some(ArgValue::Str(s)) => yes_no(!s.is_empty() && s != "0"),
-            _ => Tri::No,
-        },
-        "array" => yes_no(matches!(v, CVal::Array(_))),
-        "object" => yes_no(matches!(v, CVal::Object(..))),
-        // `iterable`: a proven array satisfies it; an object might be Traversable
-        // (unprovable) → silent; a scalar is silent too (not in the checked set).
-        "iterable" => match v {
-            CVal::Array(_) => Tri::Yes,
-            _ => Tri::Maybe,
-        },
-        // Types we deliberately keep silent this slice (class-string, self/static,
-        // callable-string, void/never, …).
-        "class-string" | "self" | "static" | "parent" | "void" | "never" | "callable-string"
-        | "interface-string" | "trait-string" | "enum-string" | "literal-string"
-        | "callable" | "closure" | "resource" | "empty" | "value-of" | "key-of" => Tri::Maybe,
-        // A class-name type (ADR-0043 stage 4). Rides the trinary is-a oracle for a
-        // proven object value (`Yes`→Yes, `No`→No, `Unknown`→Maybe) and rejects a
-        // proven scalar against a *known* class — phpdoc acceptance is pure set
-        // membership (ADR-0030 registry 1, no coercion), so no scalar is ever a
-        // class instance, in either mode. The `is_known_class` gate is the safety
-        // valve: an unresolved bare identifier may be a `@template` param or a
-        // `@phpstan-type` alias (which can denote a scalar), so it stays silent —
-        // the same closure discipline the is-a oracle applies to non-membership.
-        _ => {
-            let target = cx.resolve_pclass(cfile, coff, name);
-            match v {
-                CVal::Object(obj, _) => match cx.is_a(obj, &target) {
-                    IsA::Yes => Tri::Yes,
-                    // A definite `No` requires a *known* target: an object whose own
-                    // hierarchy is closed is-a-No against an unresolved name, but that
-                    // name may be a `@template`/`@phpstan-type` alias the object *does*
-                    // satisfy — so gate on `is_known_class`, as for the scalar arm.
-                    IsA::No if cx.is_known_class(&target) => Tri::No,
-                    IsA::No | IsA::Unknown => Tri::Maybe,
-                },
-                CVal::Scalar(_) if cx.is_known_class(&target) => Tri::No,
-                // An array is likewise never a class instance, but it is left
-                // silent this slice (out of the stage-4 scope).
-                _ => Tri::Maybe,
-            }
-        }
+        CVal::Scalar(_) if cx.is_known_class(&target) => Tri::No,
+        // An array is likewise never a class instance, but it is left
+        // silent this slice (out of the stage-4 scope).
+        _ => Tri::Maybe,
     }
 }
 
@@ -13394,18 +13450,16 @@ fn accepts_generic(
             };
             check_arraylike(cx, cfile, coff, entries, key_ty, val_ty, require_list, non_empty)
         }
-        // `int<lo, hi>` with simple integer/`min`/`max` bounds.
-        "int" => match (args, v) {
-            ([lo, hi], CVal::Scalar(ArgValue::Int(i))) => {
-                match (int_bound(&lo.ty, i64::MIN), int_bound(&hi.ty, i64::MAX)) {
-                    (Some(lo), Some(hi)) => {
-                        if *i >= lo && *i <= hi { Tri::Yes } else { Tri::No }
-                    }
-                    _ => Tri::Maybe,
-                }
+        // `int<lo, hi>` and Phan's `int-range<lo, hi>` — the same bounded range under
+        // two base names. Neither the recognized spellings nor the bound grammar
+        // (`min`/`max`/integer literals, an unparseable bound → `Opaque` → silent)
+        // is restated here: the one generic table lowers it and the shared relation
+        // judges it, exactly as the identifier path does (ADR-0030, ADR-0062 §5).
+        "int" | "int-range" if args.len() == 2 => match cval_as_val(v) {
+            Some(val) => {
+                steins_contract::admits_val(&steins_contract::lower_generic(base, args), &val)
             }
-            ([_, _], CVal::Scalar(_)) => Tri::No, // non-int can't inhabit an int range
-            _ => Tri::Maybe,
+            None => Tri::Maybe,
         },
         // A class-level generic `Class<A, …>` (ADR-0032 tier 3, issue #10).
         _ => accepts_class_generic(cx, cfile, coff, base, args, v),
@@ -13454,18 +13508,6 @@ fn accepts_class_generic(
         }
     }
     r
-}
-
-/// The bound of a simple `int<…>` argument: an integer literal, or `min`/`max`
-/// keywords (mapped to `default`). Anything else → `None` (not a simple bound).
-fn int_bound(ty: &PType, default: i64) -> Option<i64> {
-    match &ty.kind {
-        PKind::Const(ConstExpr::Int(s)) => s.parse::<i64>().ok(),
-        PKind::Identifier(name) if name.eq_ignore_ascii_case("min") || name.eq_ignore_ascii_case("max") => {
-            Some(default)
-        }
-        _ => None,
-    }
 }
 
 /// Membership for an `array`/`list` generic (per phpstan#14939): a value is a list

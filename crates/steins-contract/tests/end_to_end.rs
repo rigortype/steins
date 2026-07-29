@@ -225,3 +225,77 @@ proptest! {
         }
     }
 }
+
+// ==========================================================================
+// Conformance slice C1 — vocabulary added to the one identifier/generic table.
+// ==========================================================================
+
+#[test]
+fn number_is_int_or_float_but_not_a_numeric_string() {
+    // `number` is `numeric` minus its string member — the whole distinction.
+    assert_eq!(admits_val(&ty("number"), &Val::Int(1)), Yes);
+    assert_eq!(admits_val(&ty("number"), &Val::Float(1.5)), Yes);
+    assert_eq!(admits_val(&ty("number"), &s("1")), No);
+    assert_eq!(admits_val(&ty("number"), &Val::Bool(true)), No);
+    assert_eq!(admits_val(&ty("number"), &Val::Null), No);
+    // The contrast, on the same values.
+    assert_eq!(admits_val(&ty("numeric"), &s("1")), Yes);
+    assert_eq!(admits_val(&ty("numeric"), &s("abc")), No);
+    // Abstract facts agree: a general int is wholly inside `number`.
+    assert_eq!(
+        admits_fact(&ty("number"), &Fact::General { base: Base::Int, nullable: false }),
+        Yes
+    );
+    assert_eq!(
+        admits_fact(&ty("number"), &Fact::General { base: Base::String, nullable: false }),
+        No
+    );
+}
+
+#[test]
+fn non_zero_int_keeps_the_hole_at_zero() {
+    // The union must not flatten: `int<min, -1>|int<1, max>`, not `int<min, max>`.
+    assert_eq!(admits_val(&ty("non-zero-int"), &Val::Int(1)), Yes);
+    assert_eq!(admits_val(&ty("non-zero-int"), &Val::Int(-1)), Yes);
+    assert_eq!(admits_val(&ty("non-zero-int"), &Val::Int(0)), No);
+    assert_eq!(admits_val(&ty("non-zero-int"), &s("1")), No);
+    // A general `int` only *jointly* inhabits the two arms, so the documented
+    // under-approximation answers `Maybe` — never a wrong `Yes`.
+    assert_eq!(
+        admits_fact(&ty("non-zero-int"), &Fact::General { base: Base::Int, nullable: false }),
+        Maybe
+    );
+    // A refined int wholly on one side of the hole is decided.
+    assert_eq!(
+        admits_fact(
+            &ty("non-zero-int"),
+            &Fact::Refined {
+                base: Base::Int,
+                refinement: Refinement::Int(IntRange::new(1, 10).unwrap()),
+                nullable: false,
+            }
+        ),
+        Yes
+    );
+}
+
+#[test]
+fn int_range_keyword_is_the_int_range() {
+    // Phan's `int-range<lo, hi>` and PHPStan's `int<lo, hi>` are one lowering.
+    assert_eq!(ty("int-range<0, 255>"), ty("int<0, 255>"));
+    assert_eq!(admits_val(&ty("int-range<0, 255>"), &Val::Int(200)), Yes);
+    assert_eq!(admits_val(&ty("int-range<0, 255>"), &Val::Int(256)), No);
+    assert_eq!(admits_val(&ty("int-range<0, 255>"), &Val::Int(-1)), No);
+    assert_eq!(admits_val(&ty("int-range<0, 255>"), &s("200")), No);
+    // The bound grammar comes along with it (`min`/`max`).
+    assert_eq!(ty("int-range<min, 0>"), ty("non-positive-int"));
+}
+
+#[test]
+fn non_positive_int_covers_zero() {
+    assert_eq!(admits_val(&ty("non-positive-int"), &Val::Int(0)), Yes);
+    assert_eq!(admits_val(&ty("non-positive-int"), &Val::Int(-1)), Yes);
+    assert_eq!(admits_val(&ty("non-positive-int"), &Val::Int(1)), No);
+    // Exactly one value apart from `negative-int` — which is the point.
+    assert_eq!(admits_val(&ty("negative-int"), &Val::Int(0)), No);
+}
