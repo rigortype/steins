@@ -709,6 +709,7 @@ fn is_refined_scalar_keyword(n: &str) -> bool {
             | "lowercase-string"
             | "uppercase-string"
             | "non-empty-lowercase-string"
+            | "non-empty-uppercase-string"
             | "class-string"
             | "interned-string"
             | "literal-string"

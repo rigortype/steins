@@ -72,10 +72,10 @@ Three further observations, none a defect:
    `StrPreds::NUMERIC` are unclosed values of the type, so two syntactically
    different `Refined` facts can denote the same set.
 
-4. **One of the eight predicate sets is unreachable.** `{NonFalsy, Numeric}`
-   without `NonEmpty` cannot be built through `StrPreds`: `union` closes and
-   `intersect` cannot add bits. The vector universe carries the seven reachable
-   sets and says so. (This is a stronger statement than the type admits, and a
+4. **One of the eight casing-free predicate sets is unreachable.**
+   `{NonFalsy, Numeric}` without `NonEmpty` cannot be built through `StrPreds`:
+   `union` closes and `intersect` cannot add bits. The vector universe carries
+   the seven reachable sets and says so. (This is a stronger statement than the type admits, and a
    mildly encouraging one: the closure invariant is enforced by construction
    everywhere except the single-bit constants.)
 
@@ -139,7 +139,54 @@ a termination measure to descend on:
 
 Both make the spec *weaker* (an `unknown` slot admits everything), so no
 theorem is put at risk, and neither is reachable from the vector universe —
-which is why Rust and Lean agree on all 5,569 data lines.
+which is why Rust and Lean agree on all 9,856 data lines.
+
+## The casing predicates (conformance slice C2)
+
+`StrPreds` gained `lowercase` and `uppercase` — PHPStan's `lowercase-string` /
+`uppercase-string`, which are *identity under the case function*
+(`strtolower($s) === $s`), not letter tests. Two consequences the lattice cares
+about, and both are now vectors: an uncased string (`""`, `"123"`) satisfies
+**both**, and neither predicate interacts with the Horn closure in either
+direction (`""` is lowercase, so no casing entails `NonEmpty`; `"1e5"` and
+`"1E5"` are both numeric with opposite casings, so `Numeric` entails no casing).
+
+**Proved, for every input.** Every law the three casing-free predicates had —
+`close_idem`, `closed_close`, `close_containsAll`, `inter_closed`,
+`union_closed`, the partial-order laws, the meet laws, `inter_mono`,
+`containsAll_empty`, `isEmpty_iff` — is the *same statement* over five
+predicates, and all still hold. Nothing was weakened and nothing was dropped.
+
+**Two proofs changed shape, and the second is an improvement.** With five
+predicates a three-argument `decide` is 2^15 cases (past the heartbeat limit)
+and a four-argument one 2^20 (a build hazard). So:
+
+* `containsAll_iff` is new — the bitset subset test read as field-wise
+  implication, a two-argument `decide`. `containsAll_trans` and
+  `containsAll_inter` go through it, and so does `Queries.lean`'s
+  `nonFalsy_of_containsAll`.
+* `inter_assoc` is `simp [inter, Bool.and_assoc]`, and `inter_mono` is now
+  derived from the meet laws (`containsAll_inter` of two `containsAll_trans`).
+  That is the better proof: monotonicity of the meet is a consequence of `inter`
+  being the greatest lower bound, not of there being finitely many predicates.
+  None of these proofs grows with the predicate count any more.
+
+**Checked, not proved** (the classifier, as always). `StrPreds::of`'s casing
+evaluator is a `Model` parameter, so what binds it is the atom table: the vector
+universe gained `"ABC"` — rank 5, since `'A' < 'a'` — which is the only atom
+that is uppercase and not lowercase, and every `atom` line now carries the
+casing bits. `crates/steins-domain/tests/php_oracle.rs` additionally asks the
+real engine for `strtolower($s) === $s` over 22 cases, multibyte included: the
+byte-oriented rule is not an approximation of PHP 8.2+'s locale-independent
+`strtolower`, it is exactly it.
+
+The predicate universe grew from 7 sets to 17 — a **spanning subset** of the
+4× cross product the two orthogonal bits allow, not the product itself, which
+would have multiplied the fact universe by four and the associativity tally by
+sixty-four for no new interaction class. The ten added sets are each casing
+alone, both at once, each against the length half, both against it, and casing
+against the falsy/numeric axes; the four the shipped `lower_identifier` table
+lowers to are among them. Fact universe 48 → 68, agreed lines 6,039 → 9,868.
 
 ## The narrowing operators (ADR-0062 S4)
 
@@ -240,8 +287,8 @@ is also why `Fact` and `Refinement` are declared in `Shape.lean` rather than
 
 ## What is not proved: associativity
 
-`join` associativity is **checked, not proved**: 110,592 triples over the
-48-fact vector universe, computed independently in Lean and in Rust, zero
+`join` associativity is **checked, not proved**: 314,432 triples over the
+68-fact vector universe, computed independently in Lean and in Rust, zero
 mismatches (the `assoc` line in the fixture, plus
 `join_is_associative_over_the_vector_universe`).
 
@@ -306,7 +353,7 @@ ordinary `test` job on every PR.
 | File | Contents |
 | --- | --- |
 | `SteinsDomain/Certainty.lean` | the trinary judgment; Kleene laws; `allOf` as the quantifier |
-| `SteinsDomain/Preds.lean` | `StrPreds` as three named `Bool`s; `containsAll` a partial order, `inter` its meet; the Horn closure claim |
+| `SteinsDomain/Preds.lean` | `StrPreds` as five named `Bool`s; `containsAll` a partial order, `inter` its meet; the Horn closure claim; the casing pair's orthogonality |
 | `SteinsDomain/Range.lean` | `IntRange`; hull/intersection laws by `omega` |
 | `SteinsDomain/Val.lean` | values, the `(rank, tie)` total order and its three laws, and `Model` — the classifier parameters with their two coherence laws |
 | `SteinsDomain/Canon.lean` | the sorted-deduped finite layer and its canonicity |

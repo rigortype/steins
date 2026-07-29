@@ -3,9 +3,11 @@
 //! The set is deliberately closed: adding a predicate is one constant plus
 //! its evaluator, and every interaction stays exhaustively checkable. The
 //! implication closure (`Numeric ⇒ NonEmpty`, `NonFalsy ⇒ NonEmpty`) is
-//! applied at construction so subset tests never miss an entailed fact.
+//! applied at construction so subset tests never miss an entailed fact. The
+//! casing predicates add no implication in either direction — that is the
+//! design claim `casing_is_orthogonal_to_the_closure` pins.
 
-use crate::php::{php_is_numeric, php_str_is_falsy};
+use crate::php::{php_is_numeric, php_str_is_falsy, php_str_is_lowercase, php_str_is_uppercase};
 
 /// A set of string predicates, canonically closed under implication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -18,6 +20,17 @@ impl StrPreds {
     pub const NON_FALSY: StrPreds = StrPreds(1 << 1);
     /// `numeric-string`: `is_numeric()` holds.
     pub const NUMERIC: StrPreds = StrPreds(1 << 2);
+    /// `lowercase-string`: `strtolower()` leaves the value unchanged.
+    ///
+    /// Orthogonal to every predicate above, and deliberately so: `"1e5"` is
+    /// numeric *and* lowercase, `"1E5"` is numeric and **not** lowercase, so
+    /// `Numeric` entails no casing and no casing entails `NonEmpty` (`""` is
+    /// lowercase). The one entailment worth naming is the one that is *not*
+    /// exclusion: `Lowercase` and `Uppercase` hold together exactly when the
+    /// string has no cased character at all (`""`, `"123"`).
+    pub const LOWERCASE: StrPreds = StrPreds(1 << 3);
+    /// `uppercase-string`: `strtoupper()` leaves the value unchanged.
+    pub const UPPERCASE: StrPreds = StrPreds(1 << 4);
 
     /// The empty predicate set (no knowledge — the General form's content).
     #[must_use]
@@ -75,6 +88,12 @@ impl StrPreds {
         if php_is_numeric(s) {
             p = p.union(StrPreds::NUMERIC);
         }
+        if php_str_is_lowercase(s) {
+            p = p.union(StrPreds::LOWERCASE);
+        }
+        if php_str_is_uppercase(s) {
+            p = p.union(StrPreds::UPPERCASE);
+        }
         p
     }
 
@@ -98,7 +117,9 @@ mod tests {
 
     #[test]
     fn summaries() {
-        assert_eq!(StrPreds::of(""), StrPreds::empty());
+        // `""` knows nothing on the length/numeric axis, but it *is* unchanged
+        // by both case functions — the empty string satisfies both casings.
+        assert_eq!(StrPreds::of(""), StrPreds::LOWERCASE.union(StrPreds::UPPERCASE));
         // "0": non-empty but falsy and numeric.
         let zero = StrPreds::of("0");
         assert!(zero.contains_all(StrPreds::NON_EMPTY));
@@ -108,6 +129,50 @@ mod tests {
         let abc = StrPreds::of("abc");
         assert!(abc.contains_all(StrPreds::NON_FALSY));
         assert!(!abc.contains_all(StrPreds::NUMERIC));
+    }
+
+    #[test]
+    fn casing_summaries_follow_the_fixtures() {
+        // The four conformance fixtures, as predicate summaries.
+        let abc = StrPreds::of("abc");
+        assert!(abc.contains_all(StrPreds::LOWERCASE));
+        assert!(!abc.contains_all(StrPreds::UPPERCASE));
+        let upper = StrPreds::of("ABC");
+        assert!(upper.contains_all(StrPreds::UPPERCASE));
+        assert!(!upper.contains_all(StrPreds::LOWERCASE));
+        // A single cased character decides the whole string.
+        assert!(!StrPreds::of("abC").contains_all(StrPreds::LOWERCASE));
+        assert!(!StrPreds::of("ABc").contains_all(StrPreds::UPPERCASE));
+        // Nothing to case: both hold at once, and `''` is the one that also
+        // fails the length half — the two halves fail independently.
+        for uncased in ["", "123"] {
+            let p = StrPreds::of(uncased);
+            assert!(p.contains_all(StrPreds::LOWERCASE), "{uncased:?}");
+            assert!(p.contains_all(StrPreds::UPPERCASE), "{uncased:?}");
+        }
+        assert!(!StrPreds::of("").contains_all(StrPreds::NON_EMPTY));
+        assert!(StrPreds::of("123").contains_all(StrPreds::NON_EMPTY));
+    }
+
+    #[test]
+    fn casing_is_orthogonal_to_the_closure() {
+        // Casing entails nothing, and nothing entails casing.
+        assert_eq!(StrPreds::LOWERCASE.close(), StrPreds::LOWERCASE);
+        assert_eq!(StrPreds::UPPERCASE.close(), StrPreds::UPPERCASE);
+        assert!(!StrPreds::LOWERCASE.contains_all(StrPreds::NON_EMPTY));
+        // `"1e5"` is numeric and lowercase; `"1E5"` is numeric and uppercase —
+        // so `Numeric` cannot entail either casing.
+        assert!(StrPreds::of("1e5").contains_all(StrPreds::NUMERIC.union(StrPreds::LOWERCASE)));
+        assert!(!StrPreds::of("1e5").contains_all(StrPreds::UPPERCASE));
+        assert!(StrPreds::of("1E5").contains_all(StrPreds::NUMERIC.union(StrPreds::UPPERCASE)));
+        assert!(!StrPreds::of("1E5").contains_all(StrPreds::LOWERCASE));
+        // Every predicate is jointly satisfiable — `"5"` witnesses it, which is
+        // why the abstract-fact leg of `admits` can never refute a `StrWith`.
+        let all = StrPreds::NON_FALSY
+            .union(StrPreds::NUMERIC)
+            .union(StrPreds::LOWERCASE)
+            .union(StrPreds::UPPERCASE);
+        assert!(StrPreds::of("5").contains_all(all));
     }
 
     #[test]

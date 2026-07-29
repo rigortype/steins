@@ -1,6 +1,7 @@
 //! Ask-the-real-thing at the unit level: our `php_is_numeric` must agree
-//! with the engine's `is_numeric()` cell for cell. Skips (loudly) when no
-//! `php` binary is available.
+//! with the engine's `is_numeric()` cell for cell, and our casing predicates
+//! with `strtolower()`/`strtoupper()` identity. Skips (loudly) when no `php`
+//! binary is available.
 
 use std::process::Command;
 
@@ -50,6 +51,84 @@ fn is_numeric_matches_the_engine() {
         assert_eq!(
             ours, engine,
             "is_numeric disagreement on {case:?}: engine={engine}, ours={ours}"
+        );
+    }
+}
+
+/// The casing cases, including the multibyte ones the byte-oriented rule makes
+/// a claim about: a UTF-8 `"Ä"` has no `A-Z` byte, so the engine's
+/// `strtolower()` leaves it alone and it *is* a `lowercase-string`.
+const CASING_CASES: &[&str] = &[
+    "", "abc", "ABC", "abC", "ABc", "123", "1e5", "1E5", "snake_case", "SCREAMING_CASE",
+    "camelCase", "-", " ", "a1", "A1", "0", "Ä", "ä", "Ärger", "ärger", "日本語", "ABCä",
+];
+
+/// Escape one PHP string as a JSON string literal — `char::escape_default` is
+/// Rust syntax, not JSON, and the multibyte cases need real `\uXXXX`.
+fn json_string(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_ascii_graphic() || c == ' ' => out.push(c),
+            c => {
+                let mut buf = [0u16; 2];
+                for unit in c.encode_utf16(&mut buf) {
+                    out.push_str(&format!("\\u{unit:04x}"));
+                }
+            }
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[test]
+fn casing_predicates_match_the_engine() {
+    let probe = Command::new("php").arg("--version").output();
+    if probe.is_err() {
+        eprintln!("SKIP: php not on PATH; oracle comparison not run");
+        return;
+    }
+
+    // `lowercase-string` / `uppercase-string` are *identity* under the case
+    // functions, which is exactly what this asks the engine.
+    let script = r#"
+        $cases = json_decode(stream_get_contents(STDIN), true, 512, JSON_THROW_ON_ERROR);
+        foreach ($cases as $c) {
+            echo (strtolower($c) === $c ? "1" : "0"), (strtoupper($c) === $c ? "1" : "0"), "\n";
+        }
+    "#;
+    let mut child = Command::new("php")
+        .args(["-d", "display_errors=stderr", "-r", script])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn php");
+    {
+        use std::io::Write;
+        let json: Vec<String> = CASING_CASES.iter().map(|c| json_string(c)).collect();
+        let payload = format!("[{}]", json.join(","));
+        child.stdin.take().expect("stdin").write_all(payload.as_bytes()).expect("write");
+    }
+    let out = child.wait_with_output().expect("php run");
+    assert!(out.status.success(), "php failed: {}", String::from_utf8_lossy(&out.stderr));
+    let answers: Vec<&str> = std::str::from_utf8(&out.stdout).expect("utf8").lines().collect();
+    assert_eq!(answers.len(), CASING_CASES.len(), "answer count mismatch");
+
+    for (case, answer) in CASING_CASES.iter().zip(answers) {
+        let engine_lower = answer.starts_with('1');
+        let engine_upper = answer.ends_with('1');
+        assert_eq!(
+            steins_domain::php_str_is_lowercase(case),
+            engine_lower,
+            "strtolower identity disagreement on {case:?}"
+        );
+        assert_eq!(
+            steins_domain::php_str_is_uppercase(case),
+            engine_upper,
+            "strtoupper identity disagreement on {case:?}"
         );
     }
 }

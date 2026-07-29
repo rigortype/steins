@@ -63,6 +63,29 @@ pub fn php_str_is_falsy(s: &str) -> bool {
     s.is_empty() || s == "0"
 }
 
+/// PHP's `strtolower($s) === $s` — the definition of PHPStan's
+/// `lowercase-string` (`AccessoryLowercaseStringType`), not "made of lowercase
+/// letters": a string with no cased character at all (`""`, `"123"`) qualifies.
+///
+/// Byte-oriented on the ASCII letters, because that is what the engine does:
+/// since PHP 8.2 `strtolower()` is locale-independent and maps exactly `A-Z`
+/// to `a-z`, leaving every other byte alone. A UTF-8 `"Ä"` is therefore a
+/// `lowercase-string` under this rule *and* under the engine — its bytes are
+/// all >= 0x80, so no `A-Z` byte occurs. `tests/php_oracle.rs` asks the real
+/// engine, including the multibyte cases.
+#[must_use]
+pub fn php_str_is_lowercase(s: &str) -> bool {
+    !s.as_bytes().iter().any(u8::is_ascii_uppercase)
+}
+
+/// PHP's `strtoupper($s) === $s` — the mirror of [`php_str_is_lowercase`], and
+/// the definition of PHPStan's `uppercase-string`. The two are *not* exclusive:
+/// a string with no cased character satisfies both.
+#[must_use]
+pub fn php_str_is_uppercase(s: &str) -> bool {
+    !s.as_bytes().iter().any(u8::is_ascii_lowercase)
+}
+
 /// PHP falsiness of a scalar value, expressed over the domain's [`Val`](crate::Val).
 ///
 /// Falsy: `false`, `0`, `0.0` (and `-0.0`), `""`, `"0"`, `null`, `[]`.
@@ -100,5 +123,27 @@ mod tests {
         for truthy in ["0.0", " ", "00", "false", "0x0"] {
             assert!(!php_str_is_falsy(truthy), "expected truthy: {truthy:?}");
         }
+    }
+
+    #[test]
+    fn casing_is_the_identity_test_not_a_letter_test() {
+        // Uncased strings satisfy both — the lattice fact the fixtures state.
+        // Multibyte: UTF-8 bytes are all >= 0x80, so no ASCII-cased byte occurs
+        // and `strtolower`/`strtoupper` leave the value alone (oracle-checked).
+        for both in ["", "123", "-", "\u{00c4}\u{00e4}", "\u{65e5}\u{672c}\u{8a9e}"] {
+            assert!(php_str_is_lowercase(both), "expected lowercase: {both:?}");
+            assert!(php_str_is_uppercase(both), "expected uppercase: {both:?}");
+        }
+        for lower in ["abc", "a1", "snake_case", "1e5"] {
+            assert!(php_str_is_lowercase(lower), "expected lowercase: {lower:?}");
+            assert!(!php_str_is_uppercase(lower), "expected not uppercase: {lower:?}");
+        }
+        for upper in ["ABC", "A1", "SCREAMING_CASE", "1E5"] {
+            assert!(php_str_is_uppercase(upper), "expected uppercase: {upper:?}");
+            assert!(!php_str_is_lowercase(upper), "expected not lowercase: {upper:?}");
+        }
+        // A single cased character disqualifies the whole string.
+        assert!(!php_str_is_lowercase("abC"));
+        assert!(!php_str_is_uppercase("ABc"));
     }
 }

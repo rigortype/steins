@@ -26,8 +26,9 @@ use steins_domain::{
 /// The string atoms of the spec, in rank order — which is `str::cmp` order,
 /// because the spec models a string value as its position in the total order.
 /// The trailing field of each `atom` line is `StrPreds::of` applied to these:
-/// the classifier check.
-const STR_ATOMS: [&str; 6] = ["", " 5 ", "0", "00", "5", "abc"];
+/// the classifier check. `"ABC"` is the atom that separates the two casing
+/// predicates (`'A' < 'a'`, hence its rank).
+const STR_ATOMS: [&str; 7] = ["", " 5 ", "0", "00", "5", "ABC", "abc"];
 
 /// The float atoms, with the literal text the spec prints for each.
 const FLOAT_ATOMS: [(f64, &str); 3] = [(-1.5, "-1.5"), (0.0, "0.0"), (2.5, "2.5")];
@@ -136,6 +137,12 @@ fn render_preds(p: StrPreds) -> String {
     }
     if p.contains_all(StrPreds::NUMERIC) {
         parts.push("NUM");
+    }
+    if p.contains_all(StrPreds::LOWERCASE) {
+        parts.push("LC");
+    }
+    if p.contains_all(StrPreds::UPPERCASE) {
+        parts.push("UC");
     }
     if parts.is_empty() { "-".to_owned() } else { parts.join("|") }
 }
@@ -333,9 +340,16 @@ fn values() -> Vec<Val> {
     out
 }
 
-/// The seven predicate sets a caller can build through `StrPreds`. The eighth
-/// subset — `{NonFalsy, Numeric}` without `NonEmpty` — is unreachable, because
-/// `union` closes and `intersect` cannot add bits.
+/// The predicate sets a caller can build through `StrPreds`. The casing-free
+/// seven come first; the eighth casing-free subset — `{NonFalsy, Numeric}`
+/// without `NonEmpty` — is unreachable, because `union` closes and `intersect`
+/// cannot add bits.
+///
+/// The casing tail is a spanning subset rather than the 4× cross product the two
+/// orthogonal bits allow: each casing alone, both at once (an uncased string),
+/// each against the length half, and casing against the falsy/numeric axes. See
+/// `SteinsDomain.Vectors.predsUniverse`, which must list exactly these, in this
+/// order.
 fn preds_universe() -> Vec<StrPreds> {
     vec![
         StrPreds::empty(),
@@ -345,6 +359,20 @@ fn preds_universe() -> Vec<StrPreds> {
         StrPreds::NON_FALSY.close(),
         StrPreds::NUMERIC.close(),
         StrPreds::NON_FALSY.union(StrPreds::NUMERIC),
+        StrPreds::LOWERCASE,
+        StrPreds::UPPERCASE,
+        StrPreds::LOWERCASE.union(StrPreds::UPPERCASE),
+        StrPreds::NON_EMPTY.union(StrPreds::LOWERCASE),
+        StrPreds::NON_EMPTY.union(StrPreds::UPPERCASE),
+        StrPreds::NON_EMPTY.union(StrPreds::LOWERCASE).union(StrPreds::UPPERCASE),
+        // `of("abc")` — non-falsy and lowercase.
+        StrPreds::of("abc"),
+        // numeric and cased, without non-falsy: the `'0'`-in-the-set class,
+        // reachable as `of("0") ⊓ of("1e5")` (resp. `of("1E5")`).
+        StrPreds::NUMERIC.close().union(StrPreds::LOWERCASE),
+        StrPreds::NUMERIC.close().union(StrPreds::UPPERCASE),
+        // `of("5")` — every predicate at once, the joint-satisfiability witness.
+        StrPreds::of("5"),
     ]
 }
 

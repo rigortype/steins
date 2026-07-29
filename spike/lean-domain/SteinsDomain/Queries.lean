@@ -22,8 +22,8 @@ variable {M : Model}
 
 /-- `NON_FALSY ⊆ p` is exactly the `nonFalsy` bit. -/
 private theorem nonFalsy_of_containsAll {p : StrPreds}
-    (h : p.containsAll StrPreds.NON_FALSY = true) : p.nonFalsy = true := by
-  obtain ⟨a, b, c⟩ := p; revert a b c; decide
+    (h : p.containsAll StrPreds.NON_FALSY = true) : p.nonFalsy = true :=
+  (StrPreds.containsAll_iff.mp h).2.1 rfl
 
 /-! ## Reading a decided verdict off the abstract layers -/
 

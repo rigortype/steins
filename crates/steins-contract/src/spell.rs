@@ -451,13 +451,38 @@ fn float_literal(f: f64) -> String {
 
 /// The tightest refined-string keyword a predicate summary admits (the keyword half
 /// of the precision ladder). `numeric-string` ⊐ `non-falsy-string` ⊐
-/// `non-empty-string` ⊐ `string`.
+/// `non-empty-string` ⊐ `string`, with the casing pair spelled where PHPStan has a
+/// **single** word for it: `lowercase-string` / `uppercase-string` and their
+/// `non-empty-` intersections.
+///
+/// One keyword comes out, never an intersection (`non-falsy-string&lowercase-string`
+/// is PHPStan's spelling for that set; this crate emits phpdoc that has to lower
+/// back through [`crate::lower_identifier`], so it keeps to the named atoms). When a
+/// set is nameable on both axes the core class wins and the casing half is dropped —
+/// a *widening*, which is the safe direction for every consumer of a spelling, and
+/// it keeps every casing-free set spelled exactly as before this pair existed.
+/// `Lowercase ∧ Uppercase` (a string with no cased character) has no single keyword
+/// either, so it falls through to the core ladder for the same reason.
 #[must_use]
 pub fn preds_keyword(preds: StrPreds) -> String {
+    let casing = match (
+        preds.contains_all(StrPreds::LOWERCASE),
+        preds.contains_all(StrPreds::UPPERCASE),
+    ) {
+        (true, false) => Some("lowercase"),
+        (false, true) => Some("uppercase"),
+        _ => None,
+    };
     if preds.contains_all(StrPreds::NUMERIC) {
         "numeric-string".to_owned()
     } else if preds.contains_all(StrPreds::NON_FALSY) {
         "non-falsy-string".to_owned()
+    } else if let Some(c) = casing {
+        if preds.contains_all(StrPreds::NON_EMPTY) {
+            format!("non-empty-{c}-string")
+        } else {
+            format!("{c}-string")
+        }
     } else if preds.contains_all(StrPreds::NON_EMPTY) {
         "non-empty-string".to_owned()
     } else {

@@ -69,6 +69,45 @@ fn refinement_predicates_on_proven_scalars() {
     assert_eq!(param_count(&format!("{nf}f(\"1\");")), 0);
 }
 
+/// The casing pair, straight off the conformance fixtures
+/// (`phpdoc_advanced_fallback_{,non_empty_}{lower,upper}case_string`): the
+/// refinement is `strtolower($s) === $s`, so an uncased literal satisfies both
+/// and the `non-empty-` half fails independently of the casing half.
+#[test]
+fn casing_predicates_on_proven_string_literals() {
+    let lc = "<?php /** @param lowercase-string $s */ function f($s): void {}\n";
+    assert_eq!(param_count(&format!("{lc}f('abc');")), 0);
+    assert_eq!(param_count(&format!("{lc}f('123');")), 0, "nothing to lowercase");
+    assert_eq!(param_count(&format!("{lc}f('');")), 0, "'' is a lowercase-string");
+    assert_eq!(param_count(&format!("{lc}f('ABC');")), 1, "'ABC' is not lowercase");
+    assert_eq!(param_count(&format!("{lc}f('abC');")), 1, "one character decides it");
+
+    let uc = "<?php /** @param uppercase-string $s */ function f($s): void {}\n";
+    assert_eq!(param_count(&format!("{uc}f('ABC');")), 0);
+    assert_eq!(param_count(&format!("{uc}f('123');")), 0, "nothing to uppercase");
+    assert_eq!(param_count(&format!("{uc}f('');")), 0, "'' is an uppercase-string");
+    assert_eq!(param_count(&format!("{uc}f('abc');")), 1, "'abc' is not uppercase");
+    assert_eq!(param_count(&format!("{uc}f('ABc');")), 1, "one character decides it");
+
+    let nelc = "<?php /** @param non-empty-lowercase-string $s */ function f($s): void {}\n";
+    assert_eq!(param_count(&format!("{nelc}f('abc');")), 0);
+    assert_eq!(param_count(&format!("{nelc}f('123');")), 0);
+    assert_eq!(param_count(&format!("{nelc}f('');")), 1, "lowercase, but empty");
+    assert_eq!(param_count(&format!("{nelc}f('ABC');")), 1, "non-empty, but not lowercase");
+
+    let neuc = "<?php /** @param non-empty-uppercase-string $s */ function f($s): void {}\n";
+    assert_eq!(param_count(&format!("{neuc}f('ABC');")), 0);
+    assert_eq!(param_count(&format!("{neuc}f('123');")), 0);
+    assert_eq!(param_count(&format!("{neuc}f('');")), 1, "uppercase, but empty");
+    assert_eq!(param_count(&format!("{neuc}f('abc');")), 1, "non-empty, but not uppercase");
+
+    // The other direction of the fixtures: a casing-refined *value* satisfies a
+    // native `string` parameter.
+    let flow = "<?php /** @return lowercase-string */ function g() { return 'abc'; }\n\
+                function h(string $s): void {}\n";
+    assert_eq!(param_count(&format!("{flow}h(g());")), 0, "lowercase-string is a string");
+}
+
 // ==========================================================================
 // 2. list<T> / array<K,V> / non-empty per phpstan#14939.
 // ==========================================================================

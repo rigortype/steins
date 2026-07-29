@@ -88,10 +88,11 @@ pub enum ContractTy {
     Base(Base),
     /// `int<lo, hi>`, `positive-int`, ….
     IntIn(IntRange),
-    /// `numeric-string`, `non-empty-string`, `non-falsy-string`.
+    /// `numeric-string`, `non-empty-string`, `non-falsy-string`,
+    /// `lowercase-string`, `uppercase-string` and their intersections.
     StrWith(StrPreds),
     /// A string-based type whose membership is non-extensional or unmodeled
-    /// (`class-string`, `literal-string`, `lowercase-string`, …): strings
+    /// (`class-string`, `literal-string`, `callable-string`, …): strings
     /// are `Maybe`, everything else `No` (ADR-0038).
     StrOpaque,
     /// Integer literal type.
@@ -285,10 +286,21 @@ pub fn lower_identifier(name: &str) -> ContractTy {
         "numeric-string" => ContractTy::StrWith(StrPreds::NUMERIC.close()),
         "non-empty-string" => ContractTy::StrWith(StrPreds::NON_EMPTY),
         "non-falsy-string" | "truthy-string" => ContractTy::StrWith(StrPreds::NON_FALSY.close()),
-        "literal-string" | "class-string" | "interface-string" | "enum-string" | "trait-string"
-        | "lowercase-string" | "uppercase-string" | "callable-string" | "numeric-int-string" => {
-            ContractTy::StrOpaque
+        // The casing pair, and their `non-empty-` intersections. `lowercase-string`
+        // is `strtolower($s) === $s` — an *identity* under the case function, not
+        // "made of lowercase letters" — so an uncased string (`''`, `'123'`)
+        // satisfies both at once, and the length half is genuinely orthogonal
+        // (`''` fails only `non-empty-`, `'ABC'` only the casing half).
+        "lowercase-string" => ContractTy::StrWith(StrPreds::LOWERCASE),
+        "uppercase-string" => ContractTy::StrWith(StrPreds::UPPERCASE),
+        "non-empty-lowercase-string" => {
+            ContractTy::StrWith(StrPreds::NON_EMPTY.union(StrPreds::LOWERCASE))
         }
+        "non-empty-uppercase-string" => {
+            ContractTy::StrWith(StrPreds::NON_EMPTY.union(StrPreds::UPPERCASE))
+        }
+        "literal-string" | "class-string" | "interface-string" | "enum-string" | "trait-string"
+        | "callable-string" | "numeric-int-string" => ContractTy::StrOpaque,
         "positive-int" => ContractTy::IntIn(IntRange::POSITIVE),
         "negative-int" => ContractTy::IntIn(IntRange::NEGATIVE),
         "non-negative-int" => ContractTy::IntIn(IntRange::NON_NEGATIVE),

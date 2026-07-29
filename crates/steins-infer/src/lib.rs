@@ -14325,16 +14325,31 @@ fn describe_fact(f: &Fact) -> String {
             (n, *nullable)
         }
         Fact::Refined { base: Base::String, refinement: Refinement::Str(p), nullable } => {
-            let n = if p.contains_all(StrPreds::NON_FALSY) {
-                "non-falsy-string"
-            } else if p.contains_all(StrPreds::NUMERIC) {
-                "numeric-string"
-            } else if p.contains_all(StrPreds::NON_EMPTY) {
-                "non-empty-string"
-            } else {
-                "string"
+            let casing = match (
+                p.contains_all(StrPreds::LOWERCASE),
+                p.contains_all(StrPreds::UPPERCASE),
+            ) {
+                (true, false) => Some("lowercase"),
+                (false, true) => Some("uppercase"),
+                // Neither, or both (nothing cased to change): no single keyword.
+                _ => None,
             };
-            (n.to_owned(), *nullable)
+            let n = if p.contains_all(StrPreds::NON_FALSY) {
+                "non-falsy-string".to_owned()
+            } else if p.contains_all(StrPreds::NUMERIC) {
+                "numeric-string".to_owned()
+            } else if let Some(c) = casing {
+                if p.contains_all(StrPreds::NON_EMPTY) {
+                    format!("non-empty-{c}-string")
+                } else {
+                    format!("{c}-string")
+                }
+            } else if p.contains_all(StrPreds::NON_EMPTY) {
+                "non-empty-string".to_owned()
+            } else {
+                "string".to_owned()
+            };
+            (n, *nullable)
         }
         Fact::Refined { base, nullable, .. } => (base_kw(*base).to_owned(), *nullable),
         // Finite facts do not reach here, and the array stratum has no

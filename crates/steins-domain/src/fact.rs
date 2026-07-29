@@ -526,8 +526,11 @@ mod tests {
         let vals: Vec<Val> =
             ["5", "12", "3.4", "007", " 8 ", "9e2", "44", "0", "17"].iter().map(|v| s(v)).collect();
         let f = Fact::from_vals(vals).unwrap();
-        // All numeric (hence non-empty), but "0" kills NON_FALSY.
-        let expected = StrPreds::NUMERIC.union(StrPreds::NON_EMPTY);
+        // All numeric (hence non-empty), but "0" kills NON_FALSY. All lowercase
+        // too — `"9e2"` has a cased character and it is the lowercase one, so
+        // only UPPERCASE falls out of the intersection.
+        let expected =
+            StrPreds::NUMERIC.union(StrPreds::NON_EMPTY).union(StrPreds::LOWERCASE);
         assert_eq!(f, Fact::refined(Base::String, Refinement::Str(expected), false));
     }
 

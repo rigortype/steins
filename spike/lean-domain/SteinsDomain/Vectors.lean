@@ -32,17 +32,28 @@ namespace Vectors
 The atom tables. Rank order matches Rust's `Ord` on the concrete values these
 stand for; the `atom` lines in the output are what pins that down. -/
 
-/-- `StrPreds::of` for the six string atoms. Ranks are the atoms' positions in
+/-- `StrPreds::of` for the seven string atoms. Ranks are the atoms' positions in
 the **byte order** of the concrete strings they stand for — `"" < " 5 " < "0" <
-"00" < "5" < "abc"` — because the spec's `Val.str rank` order has to be the real
-order for the abstraction to be faithful. The `order` line checks it. -/
+"00" < "5" < "ABC" < "abc"` — because the spec's `Val.str rank` order has to be
+the real order for the abstraction to be faithful. The `order` line checks it.
+
+`"ABC"` is the atom the casing predicates need: without a value that is
+uppercase and *not* lowercase, no vector would tell the two apart. Note that
+every uncased atom (`""`, `" 5 "`, `"0"`, `"00"`, `"5"`) carries **both**
+casings — `lowercase-string` is `strtolower($s) === $s`, an identity, not a
+letter test. -/
 def vecPreds : Nat → StrPreds
-  | 0 => { }                                                        -- ""
-  | 1 => { nonEmpty := true, nonFalsy := true, numeric := true }     -- " 5 "  (PHP 8 trims)
-  | 2 => { nonEmpty := true, numeric := true }                      -- "0"
-  | 3 => { nonEmpty := true, nonFalsy := true, numeric := true }     -- "00"   (leading zeros are numeric)
-  | 4 => { nonEmpty := true, nonFalsy := true, numeric := true }     -- "5"
-  | 5 => { nonEmpty := true, nonFalsy := true }                      -- "abc"
+  | 0 => { lowercase := true, uppercase := true }                   -- ""
+  | 1 => { nonEmpty := true, nonFalsy := true, numeric := true,
+           lowercase := true, uppercase := true }                   -- " 5 "  (PHP 8 trims)
+  | 2 => { nonEmpty := true, numeric := true,
+           lowercase := true, uppercase := true }                   -- "0"
+  | 3 => { nonEmpty := true, nonFalsy := true, numeric := true,
+           lowercase := true, uppercase := true }                   -- "00"   (leading zeros are numeric)
+  | 4 => { nonEmpty := true, nonFalsy := true, numeric := true,
+           lowercase := true, uppercase := true }                   -- "5"
+  | 5 => { nonEmpty := true, nonFalsy := true, uppercase := true }   -- "ABC"
+  | 6 => { nonEmpty := true, nonFalsy := true, lowercase := true }   -- "abc"
   | _ => { }
 
 /-- `php_str_is_falsy`: exactly `""` and `"0"`. Out-of-table ranks are `true` to
@@ -50,7 +61,7 @@ keep `nonFalsy_iff` total. -/
 def vecStrFalsy : Nat → Bool
   | 0 => true
   | 2 => true
-  | 1 | 3 | 4 | 5 => false
+  | 1 | 3 | 4 | 5 | 6 => false
   | _ => true
 
 /-- Float atoms: `-1.5`, `0.0`, `2.5`. -/
@@ -89,14 +100,14 @@ def vecArrFalsy (r : Nat) : Bool := (vecArrEntries r).isEmpty
 theorem vecPreds_closed : ∀ r, (vecPreds r).Closed := by
   intro r
   match r with
-  | 0 | 1 | 2 | 3 | 4 | 5 => rfl
-  | _ + 6 => rfl
+  | 0 | 1 | 2 | 3 | 4 | 5 | 6 => rfl
+  | _ + 7 => rfl
 
 theorem vecPreds_nonFalsy_iff : ∀ r, (vecPreds r).nonFalsy = !vecStrFalsy r := by
   intro r
   match r with
-  | 0 | 1 | 2 | 3 | 4 | 5 => rfl
-  | _ + 6 => rfl
+  | 0 | 1 | 2 | 3 | 4 | 5 | 6 => rfl
+  | _ + 7 => rfl
 
 /-- The model the vectors are computed in — a lawful `Model`, so every theorem in
 `SteinsDomain.Soundness` and `SteinsDomain.Queries` applies to these very
@@ -121,7 +132,8 @@ def renderBase : Base → String
 
 def renderPreds (p : StrPreds) : String :=
   let parts := (if p.nonEmpty then ["NE"] else []) ++ (if p.nonFalsy then ["NF"] else [])
-    ++ (if p.numeric then ["NUM"] else [])
+    ++ (if p.numeric then ["NUM"] else []) ++ (if p.lowercase then ["LC"] else [])
+    ++ (if p.uppercase then ["UC"] else [])
   if parts.isEmpty then "-" else String.intercalate "|" parts
 
 def renderInt (n : Int) : String :=
@@ -222,21 +234,45 @@ def values : List Val :=
   [ .null, .bool false, .bool true,
     .int i64Min, .int (-1), .int 0, .int 1, .int 2, .int 8, .int 9, .int i64Max,
     .float 0, .float 1, .float 2,
-    .str 0, .str 1, .str 2, .str 3, .str 4, .str 5,
+    .str 0, .str 1, .str 2, .str 3, .str 4, .str 5, .str 6,
     .arr 0, .arr 1 ]
 
 /-- The predicate sets a Rust caller can actually build, closed and unclosed
-alike: the five closed sets, plus the two bare constants `NON_FALSY` and
-`NUMERIC`, which are values of the Rust type but are not implication-closed.
+alike: the five closed casing-free sets, plus the two bare constants
+`NON_FALSY` and `NUMERIC`, which are values of the Rust type but are not
+implication-closed, and then ten casing sets.
 
 `{NonFalsy, Numeric}` without `NonEmpty` is deliberately **absent**: `union`
 closes and `intersect` cannot add bits, so no sequence of `StrPreds` operations
 reaches it. Recorded in `REPORT.md` — closure is enforced by construction for
-every set except the single-bit constants. -/
+every set except the single-bit constants.
+
+The casing tail is a **spanning subset**, not the 4× cross product the two new
+orthogonal bits would allow: the full product multiplies the fact universe by
+four and the associativity tally by sixty-four, for no interaction class the ten
+below miss. They are: each casing alone; both together (an uncased string); each
+against the length half; both against it; and casing against `NonFalsy` and
+against `Numeric` in each direction — the last three written as `StrPreds::of`
+of the string that produces them, which is how the Rust side builds them too.
+The four the shipped table lowers to (`lowercase-string`, `uppercase-string`
+and their `non-empty-` forms) are all in here. -/
 def predsUniverse : List StrPreds :=
-  [ ⟨false, false, false⟩, ⟨true, false, false⟩, ⟨false, true, false⟩,
-    ⟨false, false, true⟩, ⟨true, true, false⟩, ⟨true, false, true⟩,
-    ⟨true, true, true⟩ ]
+  [ ⟨false, false, false, false, false⟩, ⟨true, false, false, false, false⟩,
+    ⟨false, true, false, false, false⟩, ⟨false, false, true, false, false⟩,
+    ⟨true, true, false, false, false⟩, ⟨true, false, true, false, false⟩,
+    ⟨true, true, true, false, false⟩,
+    -- LOWERCASE, UPPERCASE, and the uncased set that carries both
+    ⟨false, false, false, true, false⟩, ⟨false, false, false, false, true⟩,
+    ⟨false, false, false, true, true⟩,
+    -- the `non-empty-` intersections (two of them are shipped table rows)
+    ⟨true, false, false, true, false⟩, ⟨true, false, false, false, true⟩,
+    ⟨true, false, false, true, true⟩,
+    -- casing × the truthiness/numeric axes: `of "abc"`; numeric-and-cased
+    -- without non-falsy (the `"0"`-in-the-set class, reachable as
+    -- `of "0" ⊓ of "1e5"`); and `of "5"`, the witness that every predicate is
+    -- jointly satisfiable
+    ⟨true, true, false, true, false⟩, ⟨true, false, true, true, false⟩,
+    ⟨true, false, true, false, true⟩, ⟨true, true, true, true, true⟩ ]
 
 def rangeUniverse : List IntRange :=
   [ IntRange.full, ⟨1, i64Max⟩, ⟨i64Min, -1⟩, ⟨0, i64Max⟩, ⟨0, 0⟩, ⟨1, 9⟩, ⟨-5, 5⟩ ]
@@ -393,7 +429,8 @@ private def atomLines : List String :=
     "atom str#2 \"0\" " ++ renderPreds (vecPreds 2),
     "atom str#3 \"00\" " ++ renderPreds (vecPreds 3),
     "atom str#4 \"5\" " ++ renderPreds (vecPreds 4),
-    "atom str#5 \"abc\" " ++ renderPreds (vecPreds 5),
+    "atom str#5 \"ABC\" " ++ renderPreds (vecPreds 5),
+    "atom str#6 \"abc\" " ++ renderPreds (vecPreds 6),
     "atom float#0 -1.5 " ++ (if vecFloatFalsy 0 then "falsy" else "truthy"),
     "atom float#1 0.0 " ++ (if vecFloatFalsy 1 then "falsy" else "truthy"),
     "atom float#2 2.5 " ++ (if vecFloatFalsy 2 then "falsy" else "truthy"),

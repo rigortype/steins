@@ -33,8 +33,11 @@ rules instead of a keyword zoo:
 
 - `scalar` → the union of the four bases.
 - `positive-int`, `negative-int`, `non-negative-int`, `int<lo, hi>` → `IntIn`.
-- `numeric-string`, `non-empty-string`, `non-falsy-string` → `StrWith`.
-- `class-string`, `literal-string`, `lowercase-string`, … → `StrOpaque`.
+- `numeric-string`, `non-empty-string`, `non-falsy-string`, `lowercase-string`,
+  `uppercase-string`, `non-empty-lowercase-string`, `non-empty-uppercase-string`
+  → `StrWith`. The casing pair is `strtolower($s) === $s` (an identity, so an
+  uncased string satisfies both) and is orthogonal to the length/falsy axis.
+- `class-string`, `literal-string`, `callable-string`, … → `StrOpaque`.
 - `list<T>`, `non-empty-list<T>` → `ListOf`; `array<K, V>`, `T[]` → `MapOf`;
   `iterable<K, V>` → `IterableOf`.
 - `array{…}` / `list{…}` → `Shape`.
