@@ -55,3 +55,20 @@ gate — a curated row a later PHP minor could falsify is the documented trap
 
 DR1 is a half-day design task and gates the rest; DR2–DR4 are ordinary
 protocol slices.
+
+## 5. DR1 census outcomes (2026-07-29, amendment)
+
+The census (scratchpad dr_census/DR-CENSUS.md) confirmed the taxonomy with
+two recorded exceptions rather than forced fits:
+
+- **By-ref out-param facts fit no seam.** `preg_match`'s real value is the
+  `$matches` shape, an out-parameter fact channel — that belongs to
+  ADR-0063 P2's `mutate.local` world plus a future out-param fact lane,
+  not to any of the five seams. Recorded here so no DR slice force-fits it.
+- **`array_replace_recursive`** (surprisingly frequent) exceeds the
+  current shape algebra's reach (recursive N-array merging); deferred with
+  its frequency noted, not silently dropped.
+- Queue headline: the `is_*`/`ctype_*` type-narrowing guard family is
+  entirely unported (seam v) and `assert` inherits every addition for
+  free; `sprintf` (the #1 builtin by frequency) is already fully served by
+  the fold seam — no work fits.
