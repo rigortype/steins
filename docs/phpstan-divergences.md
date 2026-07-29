@@ -28,11 +28,18 @@ it (`steins_contract::normalize`, ADR-0052 N1) — never built up front.
 
 ## Levels 0–9 vs layers + named stages
 
-PHPStan's strictness is a numeric ladder. Steins gives each diagnostic a
-**semantic layer** — proof (runtime breakage, zero-FP) / contract (declared
-debt) / mechanics (anti-rot) / debug (requested introspection) — and makes
-strictness an opt-in through **named stages** (`default` → `throws-direct`
-→ `contracts`), per the lenient-default principle (ADR-0050/0053). Numeric
+PHPStan's strictness is a numeric ladder, with possibly-grade offset
+reports additionally gated behind config flags
+(`reportPossiblyNonexistentConstantArrayOffset` and its general-array
+sibling). Steins gives each diagnostic a **semantic layer** — proof
+(runtime breakage, zero-FP) / contract (declared debt) / mechanics
+(anti-rot) / debug (requested introspection) — and makes strictness an
+opt-in through **named stages** (`default` → `throws-direct` → `contracts`
+→ `strict`), per the lenient-default principle (ADR-0050/0053). Each id
+carries one `surface_floor` attribute placing it on that cumulative ladder
+(ADR-0062 A-G10); the possibly-grade offset ids ship measurement-first —
+the triage instrument measures a project before the surface is enabled,
+because zero-FP means *calibrated defaults*, never omitted checks. Numeric
 levels are refused: stages have names and definitions, not numbers.
 
 ## treatPhpDocTypesAsCertain vs the trust stratum
@@ -95,3 +102,69 @@ inference tracks envelope excess and Liskov widening through a
 via-provenance fixpoint. Where ImpurePoint gathers evidence of impurity,
 the Effect System *types* side effects — forced by this project's end
 goal of structurally separating effectful code from testable code.
+
+The conditional-purity chapter diverges the same way (ADR-0063, pending
+ratification): PHPStan's endorsed fix for higher-order purity is a
+*declared* contract (`@pure-unless-callable-is-impure`) because modular
+analysis cannot see the callback; Steins answers **semantically first** —
+a callback-position catalog joins the callee envelope with the visible
+callback's envelope through the existing fixpoint — and consults the
+declared conditional form only for opaque `callable` parameters. By-ref
+out-params get a `mutate.local` effect color that Pure envelopes tolerate,
+instead of the per-function `hasSideEffects` flag PHPStan's maintainers
+rejected twice as a lie.
+
+## ConstantArrayType vs order-witnessed values + order-declared shapes
+
+PHPStan's `ConstantArrayType` is one class carrying declared key order,
+`optionalKeys`, `nextAutoIndexes` and an `isList` flag — and it trusts the
+declared order inconsistently: acceptance is order-insensitive, while the
+positional projections (`array_keys`, `array_values`, `array_slice`,
+`array_reverse`) read declaration order as runtime order, a documented
+real-FP class. Steins splits the truth by **provenance** (ADR-0062): the
+value lane holds **order-witnessed** concrete arrays (insertion order
+observed — order-dependent results are sound there and only there), and
+one canonical **shape fact** — fields (key, presence with its own trust
+stratum, value slot) + sealed/unsealed tail + denotational `isList`
+trinary + non-emptiness + key covers — is the fifth fact form, the single
+degenerate home of `array` / `array<K, V>` / `list<T>` / `array{…}`.
+Lifting a concrete array into the shape world is where order-witnessed-ness
+is honestly lost. Positional projections over shape-only truth take the
+sound widening, never declaration order. The #14939 model (`array{…}` a
+key *set*, `list{…}` a key *sequence*, `isList` computed over the admitted
+value set) runs natively, ahead of PHPStan stable — including `list{…}`
+acceptance rejecting permutations and the D4 `list{…}` rendering. Declined
+with reasons: an abstract `nextAutoIndexes` (concrete-only, version-aware),
+and `ARRAY_COUNT_LIMIT`-style union degradation (replaced by the computed
+OneOf descent; the 256 constant survives only as the single-shape
+field-width bound).
+
+## Expression-keyed narrowing vs cover facts + arm subtraction
+
+PHPStan's Scope keys narrowings by expression, so it cannot carry the
+disjunctive fact `isset($x['a']) || isset($x['b'])` into the right arm of
+`$x['a'] ?? $x['b']` — the motivating false positive this work imports and
+fixes. Steins records a **KeyCover** on the shape fact itself — an
+antichain of key sets in two flavors, `Isset` (non-null member exists) and
+`KeyExists` (member exists, possibly null), with genuinely different
+discharge strength at `??` (a KeyExists cover discharges only over
+non-nullable slots, because present-null falls through at runtime).
+Discriminated unions live in the arm lane and are narrowed by
+**subtraction**: sealed-powered `isset` discrimination and tag
+discrimination (`match`/`===` on a constant-key projection, judged by the
+field contract's `admits`), collapsing to a single shape fact when one arm
+survives (ADR-0062 A-G3/A-G4/A-G8/A-G11).
+
+## DynamicReturnTypeExtension vs five named seams
+
+PHPStan ships per-call return computation and guard narrowing as
+runtime-pluggable extension classes
+(`Dynamic*ReturnTypeExtension`, `*TypeSpecifyingExtension`). Steins builds
+**no extension mechanism** for this (ADR-0064, pending ratification):
+every imported behavior classifies into exactly one of five existing
+seams — sidecar folding, symbolic argument-dependent transfer rules,
+probe-gated curated return rows, the plugin surface (framework dynamics),
+or the guard vocabulary — with the import queue ordered by conformance
+rows and corpus frequency, not taste. A sixth open-ended hook would be a
+second extension mechanism competing with the plugin contract, so it is
+refused.

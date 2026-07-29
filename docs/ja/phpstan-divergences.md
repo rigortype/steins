@@ -35,9 +35,19 @@ PHPStan の厳格度は数値レベルの梯子で、レベル N で何が報告
 Steins は診断そのものに**意味論的な層**を持たせた: proof(実行時破壊の証明、
 zero-FP)/ contract(宣言契約違反 = 負債報告)/ mechanics(装置自身の防錆)/
 debug(要求された内省)(ADR-0050/0053)。既定の表示面は proof + mechanics
-のみで、厳格化は `default` → `throws-direct` → `contracts` という**名前付き
-段階**へのオプトインである(lenient-default 原則、ADR-0050 amendment)。
-数値レベルは refuse された — 段階には名前と定義があり、番号はない。
+のみで、厳格化は `default` → `throws-direct` → `contracts` → `strict` という
+**名前付き段階**へのオプトインである(lenient-default 原則、ADR-0050
+amendment)。数値レベルは refuse された — 段階には名前と定義があり、番号はない。
+
+なお PHPStan が「存在しないかもしれない offset の読み」を
+`reportPossiblyNonexistentConstantArrayOffset` /
+`…GeneralArrayOffset` という**設定フラグ**の裏に置くのに対し、Steins は
+各診断 ID が梯子上の位置を示す `surface_floor` 属性をひとつ持ち
+(ADR-0062 A-G10)、possibly 級の offset 診断は **measurement-first** で
+出荷される: 有効化の前に triage 計器がプロジェクトを実測し、その実態を
+見てから面を上げる。zero-FP とは「プロジェクトの実態に合わせた既定の校正」
+であって「偽陽性になりうる検査の省略」ではない、という所有者ルーリング
+(2026-07-29)がこの配線の典拠である。
 
 ## treatPhpDocTypesAsCertain vs 信頼の層序(stratum)
 
@@ -114,3 +124,66 @@ ImpurePoint が「不純である点の証拠集め」であるのに対し、Ef
 「副作用の型付け」である — 副作用のあるコードとテスト可能なコードを構造的に
 分離するという、このプロジェクトの最終目的(consult-rector の後継としての
 リファクタリング支援)がこの拡張を強いた。
+
+条件付き純度の章も同じ形で分岐する(ADR-0063、批准待ち)。PHPStan で
+維持者が合意した高階純度の解は `@pure-unless-callable-is-impure` という
+**宣言**である — modular 解析はコールバックの本体を見られないからだ。
+Steins は**意味論を先に**答える: 即時起動コールバック位置のカタログを引き、
+可視のコールバックの envelope を既存の不動点で join する。宣言形を参照する
+のは本体の見えない不透明 `callable` 引数だけである。by-ref out 引数
+(`preg_match` の `$matches`)には Pure envelope が許容する `mutate.local`
+色を与える — PHPStan 側で「嘘のフラグ」として二度却下された関数単位の
+`hasSideEffects=false` は採らない。
+
+## ConstantArrayType vs order-witnessed な値 + order-declared な shape
+
+PHPStan の `ConstantArrayType` はひとつのクラスが宣言キー順・
+`optionalKeys`・`nextAutoIndexes`・`isList` フラグを併せ持つ。そして
+宣言順の信用が**一貫していない**: 受理は順序非依存なのに、位置射影
+(`array_keys` / `array_values` / `array_slice` / `array_reverse`)は
+宣言順を実行時順として読む — 到達可能な分岐を "always false" と誤報する
+実在の FP クラスがここから生じる(#14940)。
+
+Steins は真実を**来歴(provenance)**で分けた(ADR-0062): 値レーンは
+**order-witnessed** — 挿入順を実際に観測した具体配列であり、順序依存の
+結果が健全なのはここだけ。抽象側は単一の正準 **shape fact** — fields
+(キー・presence(それ自身が信頼層序を持つ)・値スロット)+
+sealed/unsealed tail + 外延的 `isList` 三値 + 非空性 + KeyCover — が
+第五の fact 形であり、`array` / `array<K, V>` / `list<T>` / `array{…}` は
+すべてこの一形の退化ケースである。具体配列を shape 世界へ持ち上げる瞬間が、
+order-witnessed 性が正直に失われる場所として明文化されている。shape しか
+知らない場面での位置射影は健全な widening のみを取り、宣言順は決して
+読まない。#14939 のモデル(`array{…}` はキー**集合**、`list{…}` はキー**列**、
+`isList` は許容値集合上で計算)は PHPStan stable に先行してネイティブに
+走る — `list{…}` 受理の順列拒否、D4 の `list{…}` 綴りを含む。理由付きの
+不採用: 抽象 `nextAutoIndexes`(具体側のみ・バージョン対応 A12)、
+`ARRAY_COUNT_LIMIT` 型の union 縮退(計算された OneOf 降下で置換;256 は
+単一 shape のフィールド幅上界としてのみ生存)。
+
+## 式キーの narrowing vs cover fact + arm 減算
+
+PHPStan の Scope は narrowing を式単位で持つため、
+`isset($x['a']) || isset($x['b'])` という**選言の事実**を
+`$x['a'] ?? $x['b']` の右腕まで運べない — 本作業の発端となった FP が
+これである。Steins は shape fact 自身に **KeyCover** を記録する:
+キー集合の反鎖で、`Isset`(非 null で存在する要素がある)と
+`KeyExists`(存在するが null かもしれない)の二風味を持ち、`??` での
+discharge 強度が本当に異なる(KeyExists cover は不在側スロットが非
+nullable のときだけ discharge する — present-null は実行時にフォール
+スルーするからで、これは不正確さではなく PHP の意味論そのものである)。
+判別 union は arm レーンに住み、**減算**で絞られる: sealed が効かせる
+isset 判別と、定数キー射影上の `match` / `===` によるタグ判別(フィールド
+契約の `admits` が No の arm を消す)。1 本に収束した時点で shape fact が
+鋳造される(ADR-0062 A-G3/A-G4/A-G8/A-G11)。
+
+## DynamicReturnTypeExtension vs 五つの名前付き継ぎ目
+
+PHPStan は呼び出しごとの戻り型計算とガード narrowing を実行時プラガブルな
+拡張クラス群(`Dynamic*ReturnTypeExtension` / `*TypeSpecifyingExtension`)
+として出荷する。Steins はこのための**拡張機構を作らない**(ADR-0064、
+批准待ち): 輸入する各挙動は既存の五つの継ぎ目 — sidecar 畳み込み /
+記号的な引数依存転送則 / probe でゲートされたキュレーション行 /
+プラグイン面(フレームワーク魔術はここ)/ ガード語彙 — のちょうど
+ひとつに分類され、輸入の優先度は conformance 表と corpus 頻度という
+計測が決める。六つ目の開いたフックはプラグイン契約と競合する第二の
+拡張機構になるため refuse である。
