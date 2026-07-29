@@ -359,6 +359,39 @@ pub struct Param {
 /// envelope (ADR-0005) is a contract about the function's *code*, not a single
 /// execution path, so the mere presence of an effectful construct in the body is
 /// what `Pure` forbids.
+/// The classification of one call argument's **lvalue root**, for by-ref
+/// out-parameter effect coloring (ADR-0063 §2.3). Recorded for every positional
+/// argument of a statically-named call; the effects pass reads only the
+/// positions `steins_catalog::out_params` declares by-ref, so the classification
+/// costs nothing when the callee has no out-parameter row.
+///
+/// The distinction is the whole point of the `mutate.local` color: `preg_match`
+/// writing `$matches` and `preg_match` writing `$this->matches` are the same
+/// function and *different effects*, and only the argument says which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RefTarget {
+    /// A binding **private to the calling frame**: a plain `$v` (or an offset
+    /// under one, `$v['k']`) that is not a by-ref parameter, in a frame with no
+    /// aliasing construct. A write through it cannot be observed from outside
+    /// the frame → `mutate.local`.
+    Local,
+    /// A superglobal root (`$_SESSION`, `$GLOBALS`, `$_SERVER`, …): an
+    /// interpreter-global surface (ADR-0055 amendment) → `global.write`.
+    Superglobal,
+    /// The write escapes the frame, or its target cannot be classified: a
+    /// property / static-property / class-constant root, a by-ref parameter, any
+    /// variable in a frame carrying an aliasing construct (`global`, `static`,
+    /// `$$v`, `extract`, `$a = &$b`, `use (&$x)`), or any other expression. The
+    /// conservative parent `mutate` — never `mutate.local`.
+    Escaping,
+}
+
+/// The nine PHP superglobals. A by-ref write whose root is one of these is an
+/// interpreter-global write however local the syntax looks.
+const SUPERGLOBALS: &[&str] = &[
+    "GLOBALS", "_SERVER", "_GET", "_POST", "_FILES", "_COOKIE", "_SESSION", "_REQUEST", "_ENV",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EffectOrigin {
     /// A call to a statically-named function at `span` (the callee identifier).
@@ -367,7 +400,17 @@ pub enum EffectOrigin {
     /// (classified via the catalog), a user function anywhere in the project (an
     /// effect propagation edge), or nothing (ambiguous → taints exhaustiveness).
     /// Dynamic and method calls are not recorded here.
-    Call { name: NameRef, span: Span },
+    ///
+    /// `arg_targets` classifies each **positional** argument's lvalue root for
+    /// by-ref out-parameter coloring (ADR-0063 §2.3), in order — so its length is
+    /// the positional arity, which is the conditional row's arity leg. It is
+    /// `None` when the argument list uses a named or spread argument: positional
+    /// mapping is defeated there, and every argument-conditional judgment is then
+    /// withheld rather than guessed (the same silence an uncatalogued builtin
+    /// gets). `Some(vec![])` is a genuine zero-argument call and is *not* the
+    /// same thing — `preg_match(matches: $m, …)` supplies its out-parameter,
+    /// `preg_match()` does not.
+    Call { name: NameRef, span: Span, arg_targets: Option<Vec<RefTarget>> },
     /// An `echo` / `print` / short-echo (`<?=`) construct at `span` — the
     /// `output` effect. `keyword` is the spelling for diagnostics.
     Output { keyword: &'static str, span: Span },
@@ -399,7 +442,19 @@ pub enum EffectOrigin {
     /// param (its own base is pure); otherwise it falls back to normal `callee`
     /// resolution (the callback is just an argument). `arg_count` is the positional
     /// arity, so a resolvable callback at a *non*-callback position still taints.
-    HigherOrder { callee: NameRef, callbacks: Vec<(usize, CallbackRef)>, arg_count: usize, span: Span },
+    ///
+    /// `arg_targets` is the same per-position lvalue-root classification
+    /// [`Self::Call`] carries, and is always `arg_count` long here (this variant
+    /// is only produced for all-positional argument lists). Higher-order invokers
+    /// are out-parameter writers too — `usort($rows, $cmp)` sorts `$rows` in
+    /// place — so the by-ref row must be read on this arm as well.
+    HigherOrder {
+        callee: NameRef,
+        callbacks: Vec<(usize, CallbackRef)>,
+        arg_count: usize,
+        arg_targets: Vec<RefTarget>,
+        span: Span,
+    },
     /// A direct `$fn()` variable call resolved (by a body-local single-assignment
     /// analysis) to a known callback (ADR-0033). Its effects join the caller's
     /// (immediate invocation); `span` is the call. An unresolvable `$fn()` stays
@@ -2767,10 +2822,14 @@ fn lower_function(
 ) -> FunctionDecl {
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
-    let locals = collect_body_callables(f.body.statements.iter());
+    let cx = EffectScanCx::new(
+        &f.parameter_list,
+        collect_body_callables(f.body.statements.iter()),
+        body_aliased(f.body.statements.iter()),
+    );
     for s in f.body.statements.iter() {
-        scan_effect_origins(&Node::Statement(s), &locals, &mut effect_origins);
-        scan_throw_origins(&Node::Statement(s), &[], &[], &locals, &mut throw_origins);
+        scan_effect_origins(&Node::Statement(s), &cx, &mut effect_origins);
+        scan_throw_origins(&Node::Statement(s), &[], &[], &cx.locals, &mut throw_origins);
     }
 
     FunctionDecl {
@@ -3184,10 +3243,14 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
     if let MethodBody::Concrete(block) = &m.body {
-        let locals = collect_body_callables(block.statements.iter());
+        let cx = EffectScanCx::new(
+            &m.parameter_list,
+            collect_body_callables(block.statements.iter()),
+            body_aliased(block.statements.iter()),
+        );
         for s in block.statements.iter() {
-            scan_effect_origins(&Node::Statement(s), &locals, &mut effect_origins);
-            scan_throw_origins(&Node::Statement(s), &[], &[], &locals, &mut throw_origins);
+            scan_effect_origins(&Node::Statement(s), &cx, &mut effect_origins);
+            scan_throw_origins(&Node::Statement(s), &[], &[], &cx.locals, &mut throw_origins);
         }
     }
 
@@ -3505,6 +3568,105 @@ fn higher_order_of_call(fc: &FunctionCall<'_>) -> Option<HigherOrderCall> {
     Some((name_ref(id), callbacks, pos))
 }
 
+/// The per-position lvalue-root classification of a named call's arguments
+/// (ADR-0063 §2.3). `None` when a named or spread argument defeats positional
+/// mapping — see [`EffectOrigin::Call`]'s `arg_targets`.
+fn arg_targets_of_call(fc: &FunctionCall<'_>, cx: &EffectScanCx) -> Option<Vec<RefTarget>> {
+    let mut targets = Vec::new();
+    for arg in fc.argument_list.arguments.iter() {
+        match arg {
+            Argument::Positional(p) if p.ellipsis.is_none() => {
+                targets.push(ref_target_of_arg(p.value, cx));
+            }
+            _ => return None,
+        }
+    }
+    Some(targets)
+}
+
+/// Classify one argument expression's **lvalue root** ([`RefTarget`]).
+///
+/// Offsets are transparent: `sort($rows[3])` writes into `$rows`, so the root of
+/// an `ArrayAccess` chain is what decides. Everything that is not a plain
+/// variable root — a property fetch, a static property, a call result, `$$v` —
+/// is [`RefTarget::Escaping`], the conservative answer.
+fn ref_target_of_arg(expr: &Expression<'_>, cx: &EffectScanCx) -> RefTarget {
+    let mut cur = expr.unparenthesized();
+    // Peel offsets down to the base being written through.
+    while let Expression::ArrayAccess(aa) = cur {
+        cur = aa.array.unparenthesized();
+    }
+    let Expression::Variable(Variable::Direct(dv)) = cur else {
+        // Property / static-property / class-constant roots, `$$v`, call
+        // results, literals — none of them is a frame-private binding.
+        return RefTarget::Escaping;
+    };
+    let name = strip_dollar(bytes_to_string(dv.name));
+    if SUPERGLOBALS.contains(&name.as_str()) {
+        return RefTarget::Superglobal;
+    }
+    // A by-ref parameter is an alias of the *caller's* binding: writing it is
+    // caller-observable, so it is not local to this frame.
+    if cx.byref_params.contains(&name) {
+        return RefTarget::Escaping;
+    }
+    // In an aliased frame no name is provably frame-private: `global $rows;`
+    // makes `$rows` the interpreter's, `$a = &$b` makes two names one binding,
+    // `extract()`/`$$v` can bind anything. The flag is frame-wide because the
+    // constructs are: proving *which* names survive is a dataflow question this
+    // structural scan deliberately does not ask (ADR-0001 give-up discipline).
+    if cx.frame_aliased {
+        return RefTarget::Escaping;
+    }
+    RefTarget::Local
+}
+
+/// The per-frame context [`scan_effect_origins`] consults: the ADR-0033
+/// callback-resolution map, plus the two facts by-ref out-parameter coloring
+/// needs about the enclosing frame (ADR-0063 §2.3).
+struct EffectScanCx {
+    /// Body-local single-assignment `$var → CallbackRef` map (ADR-0033).
+    locals: HashMap<String, CallbackRef>,
+    /// Names bound by a by-ref parameter (`function f(array &$rows)`): writes
+    /// through them are caller-observable.
+    byref_params: HashSet<String>,
+    /// Whether the frame carries any construct that defeats "this name is a
+    /// frame-private binding" — `global`, `static`, `$$v`, `extract`/`compact`,
+    /// `eval`, `include`, a reference assignment, or a by-ref `use (&$x)`. This
+    /// is exactly the ADR-0001 give-up list ([`scan_opaque`]), reused: every
+    /// member of it is a locality-defeating aliasing or scope-injection
+    /// construct, so the give-up list and the locality question have the same
+    /// answer and cannot drift apart.
+    frame_aliased: bool,
+}
+
+impl EffectScanCx {
+    /// Build the context for a function-like frame from its parameter list, its
+    /// already-collected callback map, and the frame's aliasing verdict.
+    fn new(
+        params: &mago_syntax::cst::FunctionLikeParameterList<'_>,
+        locals: HashMap<String, CallbackRef>,
+        frame_aliased: bool,
+    ) -> Self {
+        let byref_params = params
+            .parameters
+            .iter()
+            .filter(|p| p.is_reference())
+            .map(|p| strip_dollar(bytes_to_string(p.variable.name)))
+            .collect();
+        Self { locals, byref_params, frame_aliased }
+    }
+}
+
+/// Whether any statement of a frame carries an ADR-0001 give-up-list construct —
+/// the [`EffectScanCx::frame_aliased`] verdict for a statement body.
+fn body_aliased<'a, 'arena>(statements: impl Iterator<Item = &'a Statement<'arena>>) -> bool
+where
+    'arena: 'a,
+{
+    statements.into_iter().any(|s| node_poisons(&Node::Statement(s)))
+}
+
 /// The bare callee variable name of a `$fn(...)` dynamic function call, if the
 /// callee is a direct variable (`$fn`); `None` for other dynamic callees.
 fn direct_var_callee(fc: &FunctionCall<'_>) -> Option<String> {
@@ -3632,11 +3794,7 @@ fn collect_callable_assigns(
 /// descend into nested scopes (function/closure/arrow/class-like bodies), whose
 /// effects are their own concern. `locals` resolves a `$fn()` variable call to a
 /// body-local single-assignment closure (ADR-0033).
-fn scan_effect_origins(
-    node: &Node<'_, '_>,
-    locals: &HashMap<String, CallbackRef>,
-    out: &mut Vec<EffectOrigin>,
-) {
+fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut Vec<EffectOrigin>) {
     match node {
         // A statically-named call is either a builtin (catalog-classified) or a
         // same-file user function (a propagation edge) — the effects pass decides.
@@ -3644,16 +3802,29 @@ fn scan_effect_origins(
             if let Expression::Identifier(id) = fc.function {
                 // A named call passing a resolvable callback is a HigherOrder origin
                 // (the invocation-shape redemption); otherwise a plain Call edge.
+                // `higher_order_of_call` and `arg_targets_of_call` reject the same
+                // named/spread argument lists, so on the `Some` arm the target
+                // vector is exactly `arg_count` long.
+                let arg_targets = arg_targets_of_call(fc, cx);
                 match higher_order_of_call(fc) {
-                    Some((callee, callbacks, arg_count)) => out.push(EffectOrigin::HigherOrder {
-                        callee,
-                        callbacks,
-                        arg_count,
-                        span: to_span(fc.span()),
+                    Some((callee, callbacks, arg_count)) => {
+                        out.push(EffectOrigin::HigherOrder {
+                            callee,
+                            callbacks,
+                            arg_count,
+                            // Both helpers reject the same argument lists, so this
+                            // is always `Some` on this arm.
+                            arg_targets: arg_targets.clone().unwrap_or_default(),
+                            span: to_span(fc.span()),
+                        });
+                    }
+                    None => out.push(EffectOrigin::Call {
+                        name: name_ref(id),
+                        span: to_span(id.span()),
+                        arg_targets,
                     }),
-                    None => out.push(EffectOrigin::Call { name: name_ref(id), span: to_span(id.span()) }),
                 }
-            } else if let Some(cb) = direct_var_callee(fc).and_then(|v| locals.get(&v).cloned()) {
+            } else if let Some(cb) = direct_var_callee(fc).and_then(|v| cx.locals.get(&v).cloned()) {
                 // `$fn()` resolved to a body-local single-assignment closure.
                 out.push(EffectOrigin::Callback { cbref: cb, span: to_span(fc.span()) });
             } else {
@@ -3720,7 +3891,7 @@ fn scan_effect_origins(
         _ => {}
     }
     for child in node.children() {
-        scan_effect_origins(&child, locals, out);
+        scan_effect_origins(&child, cx, out);
     }
 }
 
@@ -4844,16 +5015,22 @@ fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>, rc: &Ref
     let mut stmts = Vec::new();
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
-    let locals = collect_body_callables(cl.body.statements.iter());
     let mut method_calls = Vec::new();
     // The closure's own scope is poisoned by a by-ref `use (&$x)` capture (its
     // captured var is a reference alias) or any in-body poison marker.
     let mut opaque = Vec::new();
     push_byref_captures(cl, &mut opaque, false);
+    // A by-ref capture aliases an enclosing binding, so it defeats frame-locality
+    // for the whole closure body just as an in-body `global` would.
+    let cx = EffectScanCx::new(
+        &cl.parameter_list,
+        collect_body_callables(cl.body.statements.iter()),
+        !opaque.is_empty() || body_aliased(cl.body.statements.iter()),
+    );
     for s in cl.body.statements.iter() {
         lower_stmt(s, &mut stmts);
-        scan_effect_origins(&Node::Statement(s), &locals, &mut effect_origins);
-        scan_throw_origins(&Node::Statement(s), &[], &[], &locals, &mut throw_origins);
+        scan_effect_origins(&Node::Statement(s), &cx, &mut effect_origins);
+        scan_throw_origins(&Node::Statement(s), &[], &[], &cx.locals, &mut throw_origins);
         scan_method_calls(&Node::Statement(s), &mut method_calls);
         scan_opaque(&Node::Statement(s), &mut opaque, false);
     }
@@ -4880,9 +5057,13 @@ fn build_closure_scope_from_arrow(af: &mago_syntax::cst::ArrowFunction<'_>, rc: 
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
     // An arrow body is a single expression — no local assignments to resolve.
-    let locals: HashMap<String, CallbackRef> = HashMap::new();
-    scan_effect_origins(&Node::Expression(af.expression), &locals, &mut effect_origins);
-    scan_throw_origins(&Node::Expression(af.expression), &[], &[], &locals, &mut throw_origins);
+    let cx = EffectScanCx::new(
+        &af.parameter_list,
+        HashMap::new(),
+        node_poisons(&Node::Expression(af.expression)),
+    );
+    scan_effect_origins(&Node::Expression(af.expression), &cx, &mut effect_origins);
+    scan_throw_origins(&Node::Expression(af.expression), &[], &[], &cx.locals, &mut throw_origins);
     let mut method_calls = Vec::new();
     scan_method_calls(&Node::Expression(af.expression), &mut method_calls);
     // The arrow body is its return value: lower as a `return <expr>;` trace.

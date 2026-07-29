@@ -66,6 +66,46 @@ pub enum AssertKind {
     IfFalse,
 }
 
+/// Which **conditional-purity** contract a tag declares (ADR-0063 §2 decision 2).
+///
+/// Both spellings are merged upstream in `phpstan/phpdoc-parser` 2.3.3
+/// (`PureUnlessCallableIsImpureTagValueNode`, `PureUnlessParameterIsPassedTagValueNode`),
+/// whose grammar for either tag is `parseRequiredVariableName` followed by an
+/// optional description — no type. Steins honors the spelling as merged; it does
+/// not invent one (ADR-0016 lets us lead, but only where upstream has settled).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PurityCondition {
+    /// `@pure-unless-callable-is-impure $cb` — the declaring function is pure
+    /// except for whatever the callable bound to `$cb` does.
+    CallableIsImpure,
+    /// `@pure-unless-parameter-passed $out` — the declaring function is pure
+    /// unless the named parameter is actually supplied at the call site. The
+    /// by-ref sister of the callable form, and the declarative twin of P2's
+    /// conditional out-param rows.
+    ParameterIsPassed,
+}
+
+impl PurityCondition {
+    /// Recognize a conditional-purity tag name, returning the condition and
+    /// whether it carried the `@phpstan-` precedence prefix.
+    ///
+    /// Upstream registers exactly the bare and `@phpstan-`-prefixed spellings for
+    /// this family — there is **no** `@psalm-` alias — so unlike the rest of
+    /// [`TagKind::from_name`] this does not strip `psalm-`.
+    fn from_tag_name(name: &str) -> Option<(Self, bool)> {
+        let (bare, prefixed) = match name.strip_prefix("phpstan-") {
+            Some(rest) => (rest, true),
+            None => (name, false),
+        };
+        let cond = match bare {
+            "pure-unless-callable-is-impure" => Self::CallableIsImpure,
+            "pure-unless-parameter-passed" => Self::ParameterIsPassed,
+            _ => return None,
+        };
+        Some((cond, prefixed))
+    }
+}
+
 /// The envelope-bearing tag kinds Steins reads, plus the assertion family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TagKind {
@@ -73,6 +113,10 @@ pub enum TagKind {
     Return,
     Var,
     Throws,
+    /// A conditional-purity tag (`@pure-unless-callable-is-impure $cb` and its
+    /// by-ref sister). It carries **no type**: the payload is the parameter name
+    /// alone, in the shared [`DocTag::var_name`] field, and `type_text` is empty.
+    ConditionalPurity(PurityCondition),
     /// An assertion tag (`@phpstan-assert` / `@psalm-assert` and the
     /// `-if-true`/`-if-false` variants). `negated` records the leading `!` of the
     /// negated form (`@phpstan-assert !T $x`). The declared type and target reuse
@@ -90,6 +134,11 @@ impl TagKind {
     /// `negated` is set to `false` and fixed up by [`scan_line`] once the type text
     /// (which carries the leading `!`) has been isolated.
     fn from_name(name: &str) -> Option<(TagKind, bool)> {
+        // The conditional-purity family is checked first: its spellings admit no
+        // `@psalm-` alias, so it must not go through the shared prefix strip.
+        if let Some((cond, prefixed)) = PurityCondition::from_tag_name(name) {
+            return Some((TagKind::ConditionalPurity(cond), prefixed));
+        }
         let (bare, prefixed) = match name
             .strip_prefix("phpstan-")
             .or_else(|| name.strip_prefix("psalm-"))
@@ -122,6 +171,10 @@ impl TagKind {
 
     fn is_assert(self) -> bool {
         matches!(self, TagKind::Assert { .. })
+    }
+
+    fn is_conditional_purity(self) -> bool {
+        matches!(self, TagKind::ConditionalPurity(_))
     }
 }
 
@@ -227,7 +280,20 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
 
     // For @param/@var/@…-assert, split the type off at the first `$variable`.
     let mut assert_property_target = false;
-    let (type_start, type_end, var_name) = if kind.carries_var_name() {
+    let (type_start, type_end, var_name) = if kind.is_conditional_purity() {
+        // Upstream grammar: `parseRequiredVariableName` then an optional
+        // description — the variable must be the *first* token, and there is no
+        // type. Anything else is malformed: drop just this tag.
+        if bytes[rest_start] != b'$' {
+            return None;
+        }
+        let var_name = read_variable(text, bytes, rest_start, rest_end);
+        if var_name.len() <= 1 {
+            return None;
+        }
+        // Zero-width type region: this family declares a condition, not a type.
+        (rest_start, rest_start, Some(var_name))
+    } else if kind.carries_var_name() {
         match find_variable(bytes, rest_start, rest_end) {
             Some(var_pos) => {
                 let var_name = read_variable(text, bytes, var_pos, rest_end);
@@ -501,6 +567,66 @@ mod tests {
         // PHPStan has no unprefixed `@assert`; it must not be recognized.
         let doc = "/** @assert int $x */";
         assert!(scan_docblock(doc).is_empty());
+    }
+
+    // ---- Conditional purity (ADR-0063 P4; phpdoc-parser 2.3.3) -------------
+
+    #[test]
+    fn scans_pure_unless_callable_is_impure() {
+        let doc = "/** @pure-unless-callable-is-impure $callback */";
+        let tags = scan_docblock(doc);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].kind, TagKind::ConditionalPurity(PurityCondition::CallableIsImpure));
+        assert_eq!(tags[0].var_name.as_deref(), Some("$callback"));
+        // The family declares a condition, not a type.
+        assert_eq!(tags[0].type_text, "");
+        assert!(!tags[0].prefixed);
+    }
+
+    #[test]
+    fn scans_pure_unless_parameter_passed_and_the_phpstan_prefix() {
+        let tags = scan_docblock("/** @phpstan-pure-unless-parameter-passed $matches */");
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].kind, TagKind::ConditionalPurity(PurityCondition::ParameterIsPassed));
+        assert_eq!(tags[0].var_name.as_deref(), Some("$matches"));
+        assert!(tags[0].prefixed, "the `@phpstan-` spelling is the prefixed form");
+    }
+
+    #[test]
+    fn conditional_purity_tolerates_a_trailing_description() {
+        // Upstream grammar is `parseRequiredVariableName` + optional description.
+        let doc = "/**\n * @pure-unless-callable-is-impure $fn as long as it is pure\n */";
+        let tags = scan_docblock(doc);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].var_name.as_deref(), Some("$fn"));
+    }
+
+    #[test]
+    fn psalm_prefixed_conditional_purity_is_not_a_tag() {
+        // Upstream registers only the bare and `@phpstan-` spellings for this
+        // family — there is no `@psalm-` alias to honor.
+        assert!(scan_docblock("/** @psalm-pure-unless-callable-is-impure $cb */").is_empty());
+    }
+
+    #[test]
+    fn conditional_purity_needs_the_variable_first() {
+        // `parseRequiredVariableName` reads the *next* token; a description that
+        // precedes the variable is not the grammar. Malformed → this tag alone is
+        // dropped, siblings survive.
+        let doc = "/**\n * @pure-unless-callable-is-impure the $cb param\n * @param string $s\n */";
+        let tags = scan_docblock(doc);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].kind, TagKind::Param);
+    }
+
+    #[test]
+    fn bare_pure_is_still_not_a_tag() {
+        // ADR-0063 imports the *conditional* contracts only: a metadata-only
+        // `@pure` flag is the rejected-upstream lie, and Steins spells
+        // unconditional purity `#[\Steins\Pure]`.
+        assert!(scan_docblock("/** @pure */").is_empty());
+        assert!(scan_docblock("/** @phpstan-pure */").is_empty());
+        assert!(scan_docblock("/** @phpstan-impure */").is_empty());
     }
 
     #[test]

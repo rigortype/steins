@@ -1613,7 +1613,7 @@ struct EffectSet {
 fn callback_effect_edge(cx: &Cx, cbref: &steins_syntax::CallbackRef) -> Option<Sym> {
     match cbref {
         steins_syntax::CallbackRef::Closure(off) => Some(Sym::Closure(cx.path().to_owned(), *off)),
-        steins_syntax::CallbackRef::Named(name) => match cx.resolve_function(name) {
+        steins_syntax::CallbackRef::Named(name) => match cx.resolve_effect_function(name) {
             FnResolution::User(site) => Some(Sym::Func(cx.fn_decl(site).fqn.clone())),
             FnResolution::Builtin | FnResolution::Unknown => None,
         },
@@ -1635,18 +1635,134 @@ fn add_callback_effects(
         steins_syntax::CallbackRef::Closure(off) => {
             e.insert(Sym::Closure(cx.path().to_owned(), *off));
         }
-        steins_syntax::CallbackRef::Named(name) => match cx.resolve_function(name) {
+        steins_syntax::CallbackRef::Named(name) => match cx.resolve_effect_function(name) {
             FnResolution::User(site) => {
                 e.insert(Sym::Func(cx.fn_decl(site).fqn.clone()));
             }
             FnResolution::Builtin => {
-                for f in builtin_findings(name.simple(), span, cx.tree(), cx.path()) {
+                // A builtin passed *as* a callback is invoked by the higher-order
+                // callee with arguments of its choosing, never with an lvalue of
+                // this frame — the conditional out-param row cannot apply.
+                for f in builtin_findings(name.simple(), span, cx.tree(), cx.path(), None) {
                     d.insert(f);
                 }
             }
             FnResolution::Unknown => *ex = false,
         },
     }
+}
+
+/// A function's declared **conditional-purity** contracts (ADR-0063 §2 decision 2),
+/// resolved from parameter names to positional indices.
+#[derive(Debug, Default, Clone)]
+struct ConditionalPurity {
+    /// Positions flagged by `@pure-unless-callable-is-impure $cb`: this
+    /// function's envelope is the join of the callables bound here.
+    callables: Vec<usize>,
+    /// Positions flagged by `@pure-unless-parameter-passed $out`: this function
+    /// is pure unless the argument is supplied. The declarative twin of a catalog
+    /// out-param row — a userland row, written by the author instead of curated.
+    passed: Vec<usize>,
+}
+
+impl ConditionalPurity {
+    fn is_empty(&self) -> bool {
+        self.callables.is_empty() && self.passed.is_empty()
+    }
+}
+
+/// Read a declaration's conditional-purity tags, mapping each flagged parameter
+/// name to its positional index. `None` when the docblock declares none.
+///
+/// A tag naming a parameter the signature does not have is dropped, not
+/// diagnosed: the crate's tag discipline is that a malformed or stale tag costs
+/// its own effect and nothing else.
+fn conditional_purity(docblock: Option<&String>, params: &[steins_syntax::Param]) -> Option<ConditionalPurity> {
+    let text = docblock?;
+    // Cheap gate: both spellings share this substring, and it is vanishingly rare
+    // in prose. Scanning every docblock in the project would not be.
+    if !text.contains("pure-unless") {
+        return None;
+    }
+    let mut cp = ConditionalPurity::default();
+    for tag in scan_docblock(text) {
+        let TagKind::ConditionalPurity(cond) = tag.kind else { continue };
+        let Some(var) = &tag.var_name else { continue };
+        let name = var.trim_start_matches('$');
+        let Some(pos) = params.iter().position(|p| p.name == name) else { continue };
+        let slot = match cond {
+            steins_phpdoc::PurityCondition::CallableIsImpure => &mut cp.callables,
+            steins_phpdoc::PurityCondition::ParameterIsPassed => &mut cp.passed,
+        };
+        if !slot.contains(&pos) {
+            slot.push(pos);
+        }
+    }
+    (!cp.is_empty()).then_some(cp)
+}
+
+/// How a call to a **user** function contributes to the caller's effect set, once
+/// the callee's conditional-purity contracts (ADR-0063 §2 decision 2) are honored.
+struct UserCallEffects {
+    /// Whether the callee's *exhaustiveness taint* is discharged by its contract.
+    ///
+    /// A tagged function's body calls its callable parameter dynamically
+    /// (`$cb(...)`), which is an [`EffectOrigin::Opaque`] and taints the callee
+    /// forever — the very unprovability the contract exists to answer. When every
+    /// flagged condition is decided at this call site (the callable is a
+    /// resolvable callback, or the flagged argument is simply absent), the
+    /// declaration discharges that taint.
+    ///
+    /// This does not invert ADR-0037's "proven beats declared": every finding the
+    /// fixpoint *proved* about the callee still propagates. A declaration is only
+    /// permitted to answer what inference left unknown.
+    discharge_taint: bool,
+    /// Labels the call contributes directly — the `@pure-unless-parameter-passed`
+    /// leg, resolved against the argument's lvalue root exactly as a catalog
+    /// out-param row would be.
+    labels: Vec<&'static str>,
+}
+
+/// Evaluate a user callee's conditional-purity contracts against one call site.
+///
+/// `callbacks` are the resolvable callback arguments by position (empty for a
+/// plain [`EffectOrigin::Call`]); `arg_targets` is `None` when positional mapping
+/// was defeated, in which case no condition can be evaluated and nothing is
+/// discharged.
+fn eval_conditional_purity(
+    cp: &ConditionalPurity,
+    callbacks: &[(usize, steins_syntax::CallbackRef)],
+    arg_targets: Option<&[steins_syntax::RefTarget]>,
+    mut on_callback: impl FnMut(&steins_syntax::CallbackRef),
+) -> UserCallEffects {
+    let Some(targets) = arg_targets else {
+        return UserCallEffects { discharge_taint: false, labels: Vec::new() };
+    };
+    let arity = targets.len();
+    let mut discharge = true;
+    let mut labels: Vec<&'static str> = Vec::new();
+    for &p in &cp.callables {
+        // Not supplied → the condition is vacuous and the function is pure.
+        if p >= arity {
+            continue;
+        }
+        match callbacks.iter().find(|(q, _)| *q == p) {
+            // Visible callback: its envelope joins the caller's (ADR-0063
+            // decision 1's semantic answer, reached through the declaration).
+            Some((_, cbref)) => on_callback(cbref),
+            // An opaque `callable` sits in the flagged slot — precisely the case
+            // the contract cannot resolve either. The taint stands, as today.
+            None => discharge = false,
+        }
+    }
+    for &p in &cp.passed {
+        let Some(&target) = targets.get(p) else { continue };
+        let label = by_ref_label(target);
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+    }
+    UserCallEffects { discharge_taint: discharge, labels }
 }
 
 /// The unified effect fixpoint for **every** function and method in the whole
@@ -1690,26 +1806,59 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
 
     let mut direct: HashMap<Sym, HashSet<EffectFinding>> = HashMap::new();
     let mut edges: HashMap<Sym, HashSet<Sym>> = HashMap::new();
+    // Edges whose findings propagate but whose exhaustiveness taint does not — a
+    // callee whose ADR-0063 conditional-purity contract was fully decided here.
+    let mut untainting: HashMap<Sym, HashSet<Sym>> = HashMap::new();
     let mut exhaustive: HashMap<Sym, bool> = HashMap::new();
     for unit in &ulist {
         let cx = Cx::new(units, index, unit.file);
         let d = direct.entry(unit.sym.clone()).or_default();
         let e = edges.entry(unit.sym.clone()).or_default();
+        let nt = untainting.entry(unit.sym.clone()).or_default();
         let ex = exhaustive.entry(unit.sym.clone()).or_insert(true);
         for origin in unit.origins {
             match origin {
-                EffectOrigin::Call { name, span } => match cx.resolve_function(name) {
-                    FnResolution::User(site) => {
-                        e.insert(Sym::Func(cx.fn_decl(site).fqn.clone()));
-                    }
-                    FnResolution::Builtin => {
-                        for f in builtin_findings(name.simple(), *span, cx.tree(), cx.path()) {
-                            d.insert(f);
+                EffectOrigin::Call { name, span, arg_targets } => {
+                    let targets = arg_targets.as_deref();
+                    match cx.resolve_effect_function(name) {
+                        FnResolution::User(site) => {
+                            let decl = cx.fn_decl(site);
+                            let sym = Sym::Func(decl.fqn.clone());
+                            match conditional_purity(decl.docblock.as_ref(), &decl.params) {
+                                Some(cp) => {
+                                    let r = eval_conditional_purity(&cp, &[], targets, |cbref| {
+                                        add_callback_effects(&cx, cbref, *span, d, e, ex);
+                                    });
+                                    for label in r.labels {
+                                        d.insert(EffectFinding {
+                                            label: label.to_owned(),
+                                            origin: name.simple().to_owned(),
+                                            line: cx.tree().position(span.start).line,
+                                            path: cx.path().to_owned(),
+                                        });
+                                    }
+                                    if r.discharge_taint {
+                                        nt.insert(sym);
+                                    } else {
+                                        e.insert(sym);
+                                    }
+                                }
+                                None => {
+                                    e.insert(sym);
+                                }
+                            }
                         }
+                        FnResolution::Builtin => {
+                            for f in
+                                builtin_findings(name.simple(), *span, cx.tree(), cx.path(), targets)
+                            {
+                                d.insert(f);
+                            }
+                        }
+                        // Ambiguous / unresolved: effects unknown → non-exhaustive.
+                        FnResolution::Unknown => *ex = false,
                     }
-                    // Ambiguous / unresolved: effects unknown → non-exhaustive.
-                    FnResolution::Unknown => *ex = false,
-                },
+                }
                 EffectOrigin::Output { keyword, span } => {
                     d.insert(EffectFinding {
                         label: "output".to_owned(),
@@ -1736,7 +1885,8 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
                 }
                 // A higher-order call: the callback's effects join the caller's, or
                 // the base call resolves normally for a non-invoker callee (ADR-0033).
-                EffectOrigin::HigherOrder { callee, callbacks, arg_count, span } => {
+                EffectOrigin::HigherOrder { callee, callbacks, arg_count, arg_targets, span } => {
+                    let targets = Some(arg_targets.as_slice());
                     match steins_catalog::invocation_shape(callee.simple()) {
                         Some(shape) => {
                             // ADR-0063 P1: the call's effect is the invoker's OWN
@@ -1744,8 +1894,12 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
                             // immediately invokes. The own-color leg runs first and
                             // unconditionally — an unresolvable (or absent) callback
                             // never *weakens* the invoker's declared color; it only
-                            // adds the `…?` taint below.
-                            for f in builtin_findings(callee.simple(), *span, cx.tree(), cx.path()) {
+                            // adds the `…?` taint below. P2 is what puts anything in
+                            // that leg for the sort family: `usort`'s own color is
+                            // the by-ref write to its array argument.
+                            for f in
+                                builtin_findings(callee.simple(), *span, cx.tree(), cx.path(), targets)
+                            {
                                 d.insert(f);
                             }
                             if shape.callback_param < *arg_count {
@@ -1758,14 +1912,48 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
                                 }
                             }
                         }
-                        // Not a known invoker: the callee is a normal edge; the
-                        // callback arg is just data (its own body, if user, owns it).
-                        None => match cx.resolve_function(callee) {
+                        // Not a known invoker: the callee is a normal edge, unless it
+                        // is a user function declaring a conditional-purity contract
+                        // — a userland catalog row (ADR-0063 §2 decision 2).
+                        None => match cx.resolve_effect_function(callee) {
                             FnResolution::User(site) => {
-                                e.insert(Sym::Func(cx.fn_decl(site).fqn.clone()));
+                                let decl = cx.fn_decl(site);
+                                let sym = Sym::Func(decl.fqn.clone());
+                                match conditional_purity(decl.docblock.as_ref(), &decl.params) {
+                                    Some(cp) => {
+                                        let r = eval_conditional_purity(
+                                            &cp,
+                                            callbacks,
+                                            targets,
+                                            |cbref| add_callback_effects(&cx, cbref, *span, d, e, ex),
+                                        );
+                                        for label in r.labels {
+                                            d.insert(EffectFinding {
+                                                label: label.to_owned(),
+                                                origin: callee.simple().to_owned(),
+                                                line: cx.tree().position(span.start).line,
+                                                path: cx.path().to_owned(),
+                                            });
+                                        }
+                                        if r.discharge_taint {
+                                            nt.insert(sym);
+                                        } else {
+                                            e.insert(sym);
+                                        }
+                                    }
+                                    None => {
+                                        e.insert(sym);
+                                    }
+                                }
                             }
                             FnResolution::Builtin => {
-                                for f in builtin_findings(callee.simple(), *span, cx.tree(), cx.path()) {
+                                for f in builtin_findings(
+                                    callee.simple(),
+                                    *span,
+                                    cx.tree(),
+                                    cx.path(),
+                                    targets,
+                                ) {
                                     d.insert(f);
                                 }
                             }
@@ -1789,12 +1977,17 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
         let mut changed = false;
         for sym in &syms {
             let callees: Vec<Sym> = edges.get(sym).into_iter().flatten().cloned().collect();
+            // Contract-discharged callees (ADR-0063 §2 decision 2): their proven
+            // findings still join, their unknown remainder does not.
+            let untainted: Vec<Sym> = untainting.get(sym).into_iter().flatten().cloned().collect();
             let mut incoming: Vec<EffectFinding> = Vec::new();
             let mut callee_taint = false;
-            for c in &callees {
+            for c in callees.iter().chain(untainted.iter()) {
                 if let Some(ce) = findings.get(c) {
                     incoming.extend(ce.iter().cloned());
                 }
+            }
+            for c in &callees {
                 if exhaustive.get(c).copied() == Some(false) {
                     callee_taint = true;
                 }
@@ -1921,12 +2114,12 @@ fn effect_summary_units(units: &[FileUnit], index: &Index, target: usize) -> Vec
 /// per-call-site loop. This type is the connection, and nothing more — it adds no
 /// effect semantics of its own.
 ///
-/// Purity is read against the **current** `Pure` envelope semantics (ADR-0055): a
-/// `Pure` envelope declares an empty label set and therefore tolerates no label at
-/// all. ADR-0063's `mutate.local` tolerance is slice P2 and does not exist yet, so a
-/// by-ref out-param builtin still colors its caller impure here — the same verdict
-/// a `#[\Steins\Pure]` declaration would get today, which is the point: one purity
-/// relation, two consumers.
+/// Purity is read against the same relation the envelope check uses, so the two
+/// consumers cannot disagree: a label is disqualifying here exactly when
+/// [`exceeds`] would report it against an empty envelope. In particular a closure
+/// that `preg_match`es into one of its own locals satisfies `pure-callable` —
+/// ADR-0063 §2.3's `mutate.local` tolerance — while the same closure writing
+/// `$this->matches` does not.
 struct PurityOracle {
     effects: HashMap<Sym, EffectSet>,
 }
@@ -1967,8 +2160,13 @@ impl PurityOracle {
     /// answer that can never manufacture a finding. Non-exhaustiveness can hide an
     /// effect, never invent one, so a *non-empty* finding set is a definite verdict
     /// regardless of it.
+    ///
+    /// Findings every envelope tolerates ([`tolerated_by_every_envelope`]) do not
+    /// count: they are proven, but they are not impurity.
     fn provably_impure(&self, sym: &Sym) -> bool {
-        self.effects.get(sym).is_some_and(|e| !e.findings.is_empty())
+        self.effects.get(sym).is_some_and(|e| {
+            e.findings.iter().any(|f| !tolerated_by_every_envelope(&f.label))
+        })
     }
 }
 
@@ -2145,21 +2343,34 @@ fn report_unit(
     let labels = &envelope.labels;
     for origin in origins {
         match origin {
-            EffectOrigin::Call { name, span } => match cx.resolve_function(name) {
-                FnResolution::User(site) => {
-                    let callee = Sym::Func(cx.fn_decl(site).fqn.clone());
-                    emit_transitive(out, cx, &callee, effects, span.start, display, labels);
-                }
-                FnResolution::Builtin => {
-                    for f in builtin_findings(name.simple(), *span, cx.tree(), cx.path()) {
-                        if exceeds(labels, &f.label) {
-                            let prefix = format!("{}() has effect {}", name.simple(), f.label);
-                            out.push(exceeded_diag(cx, span.start, &prefix, display, labels, &f.label));
+            EffectOrigin::Call { name, span, arg_targets } => {
+                let targets = arg_targets.as_deref();
+                match cx.resolve_effect_function(name) {
+                    FnResolution::User(site) => {
+                        let decl = cx.fn_decl(site);
+                        let callee = Sym::Func(decl.fqn.clone());
+                        emit_transitive(out, cx, &callee, effects, span.start, display, labels);
+                        // The `@pure-unless-parameter-passed` leg: a userland
+                        // out-param row, reported like the catalog's.
+                        report_conditional_purity(
+                            out, cx, decl, &[], targets, effects, *span, display, labels,
+                        );
+                    }
+                    FnResolution::Builtin => {
+                        for f in
+                            builtin_findings(name.simple(), *span, cx.tree(), cx.path(), targets)
+                        {
+                            if exceeds(labels, &f.label) {
+                                let prefix = format!("{}() has effect {}", name.simple(), f.label);
+                                out.push(exceeded_diag(
+                                    cx, span.start, &prefix, display, labels, &f.label,
+                                ));
+                            }
                         }
                     }
+                    FnResolution::Unknown => {}
                 }
-                FnResolution::Unknown => {}
-            },
+            }
             EffectOrigin::Output { keyword, span } if exceeds(labels, "output") => {
                 let prefix = format!("{keyword} has effect output");
                 out.push(exceeded_diag(cx, span.start, &prefix, display, labels, "output"));
@@ -2177,13 +2388,16 @@ fn report_unit(
             // at the shape's callback param contributes its effects with the
             // callback's own origin in the provenance (ADR-0033). A non-invoker
             // callee resolves as a normal edge.
-            EffectOrigin::HigherOrder { callee, callbacks, arg_count, span } => {
+            EffectOrigin::HigherOrder { callee, callbacks, arg_count, arg_targets, span } => {
+                let targets = Some(arg_targets.as_slice());
                 match steins_catalog::invocation_shape(callee.simple()) {
                     Some(shape) => {
                         // ADR-0063 P1 own-color leg, mirroring `compute_effects`:
                         // the invoker's own catalog color is reported whether or not
                         // the callback at the shape's position resolves.
-                        for f in builtin_findings(callee.simple(), *span, cx.tree(), cx.path()) {
+                        for f in
+                            builtin_findings(callee.simple(), *span, cx.tree(), cx.path(), targets)
+                        {
                             if exceeds(labels, &f.label) {
                                 let prefix = format!("{}() has effect {}", callee.simple(), f.label);
                                 out.push(exceeded_diag(cx, span.start, &prefix, display, labels, &f.label));
@@ -2197,11 +2411,21 @@ fn report_unit(
                         }
                     }
                     None => {
-                        if let FnResolution::User(site) = cx.resolve_function(callee) {
-                            let cs = Sym::Func(cx.fn_decl(site).fqn.clone());
+                        if let FnResolution::User(site) = cx.resolve_effect_function(callee) {
+                            let decl = cx.fn_decl(site);
+                            let cs = Sym::Func(decl.fqn.clone());
                             emit_transitive(out, cx, &cs, effects, span.start, display, labels);
-                        } else if let FnResolution::Builtin = cx.resolve_function(callee) {
-                            for f in builtin_findings(callee.simple(), *span, cx.tree(), cx.path()) {
+                            report_conditional_purity(
+                                out, cx, decl, callbacks, targets, effects, *span, display, labels,
+                            );
+                        } else if let FnResolution::Builtin = cx.resolve_effect_function(callee) {
+                            for f in builtin_findings(
+                                callee.simple(),
+                                *span,
+                                cx.tree(),
+                                cx.path(),
+                                targets,
+                            ) {
                                 if exceeds(labels, &f.label) {
                                     let prefix = format!("{}() has effect {}", callee.simple(), f.label);
                                     out.push(exceeded_diag(cx, span.start, &prefix, display, labels, &f.label));
@@ -2221,6 +2445,39 @@ fn report_unit(
     }
 }
 
+/// Emit the envelope-exceeded violations a callee's **conditional-purity**
+/// contracts produce at this call site (ADR-0063 §2 decision 2), mirroring the
+/// `compute_effects` arm: the bound callables' effects for
+/// `@pure-unless-callable-is-impure`, the by-ref color for
+/// `@pure-unless-parameter-passed`.
+#[expect(clippy::too_many_arguments, reason = "mirrors report_unit's own parameter set")]
+fn report_conditional_purity(
+    out: &mut Vec<Diagnostic>,
+    cx: &Cx,
+    decl: &FunctionDecl,
+    callbacks: &[(usize, steins_syntax::CallbackRef)],
+    arg_targets: Option<&[steins_syntax::RefTarget]>,
+    effects: &HashMap<Sym, EffectSet>,
+    span: steins_syntax::Span,
+    display: &str,
+    labels: &[String],
+) {
+    let Some(cp) = conditional_purity(decl.docblock.as_ref(), &decl.params) else { return };
+    let mut pending: Vec<steins_syntax::CallbackRef> = Vec::new();
+    let r = eval_conditional_purity(&cp, callbacks, arg_targets, |cbref| {
+        pending.push(cbref.clone());
+    });
+    for cbref in &pending {
+        report_callback(out, cx, cbref, effects, span.start, display, labels);
+    }
+    for label in r.labels {
+        if exceeds(labels, label) {
+            let prefix = format!("{}() has effect {label}", decl.name);
+            out.push(exceeded_diag(cx, span.start, &prefix, display, labels, label));
+        }
+    }
+}
+
 /// Emit envelope-exceeded violations for a resolved callback (ADR-0033): a
 /// closure/user callback's transitive effects, or a builtin callback's catalog
 /// effect, each named with the callback in the provenance.
@@ -2236,9 +2493,15 @@ fn report_callback(
     if let Some(sym) = callback_effect_edge(cx, cbref) {
         emit_transitive(out, cx, &sym, effects, offset, display, labels);
     } else if let steins_syntax::CallbackRef::Named(name) = cbref
-        && let FnResolution::Builtin = cx.resolve_function(name)
+        && let FnResolution::Builtin = cx.resolve_effect_function(name)
     {
-        for f in builtin_findings(name.simple(), steins_syntax::Span { start: offset, end: offset }, cx.tree(), cx.path()) {
+        for f in builtin_findings(
+            name.simple(),
+            steins_syntax::Span { start: offset, end: offset },
+            cx.tree(),
+            cx.path(),
+            None,
+        ) {
             if exceeds(labels, &f.label) {
                 let prefix = format!("{}() has effect {}", name.simple(), f.label);
                 out.push(exceeded_diag(cx, offset, &prefix, display, labels, &f.label));
@@ -2279,8 +2542,32 @@ fn emit_transitive(
     }
 }
 
+/// The by-ref-into-a-caller-local color (ADR-0063 §2.3).
+const MUTATE_LOCAL: &str = "mutate.local";
+
+/// Whether an effect label is tolerated by **every** envelope, `#[\Steins\Pure]`
+/// included (ADR-0063 §2.3).
+///
+/// `mutate.local` is the only member and, by construction, the only one there can
+/// be: it names a write whose target lives inside the calling frame, so no
+/// observer outside that frame can distinguish a run where it happened from one
+/// where it did not. An envelope constrains what a *caller* may observe; a label
+/// no caller can observe cannot exceed one.
+///
+/// The ADR states the tolerance for `Pure` specifically. It is implemented for
+/// every envelope because `Pure` is the *tightest* envelope in the lattice —
+/// tolerating a label there while rejecting it under a wider declaration would
+/// make the check non-monotone, and `#[\Steins\Effect('output')]` (strictly
+/// weaker than `Pure`) would flag a call `#[\Steins\Pure]` accepts.
+fn tolerated_by_every_envelope(effect_label: &str) -> bool {
+    effect_label == MUTATE_LOCAL
+}
+
 /// Whether an inferred `effect_label` **exceeds** the declared `labels`.
 fn exceeds(labels: &[String], effect_label: &str) -> bool {
+    if tolerated_by_every_envelope(effect_label) {
+        return false;
+    }
     !labels.iter().any(|l| steins_catalog::subsumes(l, effect_label))
 }
 
@@ -2307,29 +2594,82 @@ fn exceeded_diag(
     Diagnostic { id: EFFECT_ID, path: cx.path().to_owned(), line: pos.line, column: pos.column, message: msg, facet: None }
 }
 
-/// The proven effect findings a builtin `name` carries (empty for pure or
-/// uncatalogued builtins).
+/// The effect label a by-ref write through an argument with this lvalue root
+/// carries (ADR-0063 §2.3) — the **target leg** of the conditional out-param row.
+///
+/// The three answers are three genuinely different contracts, which is exactly
+/// why the row cannot be a per-function flag: `preg_match($p, $s, $m)` writes
+/// only the frame, `preg_match($p, $s, $this->m)` mutates an object every caller
+/// shares, and `preg_match($p, $s, $_SESSION['m'])` writes interpreter-global
+/// state.
+///
+/// Non-local targets stop at the conservative parent `mutate` rather than pick an
+/// ADR-0055 child (`mutate.self` / `mutate.instance` / `mutate.static`): that
+/// taxonomy's *inference* is ADR-0055 slice E2, unbuilt, and a coarse-but-true
+/// label is worth more than a precise guess. So Steins **does** distinguish the
+/// targets — property-rooted by-ref writes never claim `mutate.local` — while
+/// declining to name which flavor of escape it is.
+fn by_ref_label(target: steins_syntax::RefTarget) -> &'static str {
+    match target {
+        steins_syntax::RefTarget::Local => MUTATE_LOCAL,
+        steins_syntax::RefTarget::Superglobal => "global.write",
+        steins_syntax::RefTarget::Escaping => "mutate",
+    }
+}
+
+/// The by-ref out-parameter labels a call to `name` carries, given the classified
+/// argument list (ADR-0063 §2.3). `arg_targets` is `None` when positional mapping
+/// was defeated by a named/spread argument — every conditional judgment is then
+/// withheld, because `preg_match(matches: $m, …)` and `preg_match($p, $s)` cannot
+/// be told apart by position and a guess in either direction is a lie.
+fn out_param_labels(name: &str, arg_targets: Option<&[steins_syntax::RefTarget]>) -> Vec<&'static str> {
+    let (Some(positions), Some(targets)) = (steins_catalog::out_params(name), arg_targets) else {
+        return Vec::new();
+    };
+    let mut labels: Vec<&'static str> = Vec::new();
+    for &p in positions {
+        // The arity leg: an argument that was not supplied is not written.
+        let Some(&target) = targets.get(p) else { continue };
+        let label = by_ref_label(target);
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+    }
+    labels
+}
+
+/// The proven effect findings a builtin `name` carries: its unconditional catalog
+/// color ([`steins_catalog::effect_labels`]) joined with the **conditional**
+/// by-ref out-parameter color this particular call earns
+/// ([`steins_catalog::out_params`]).
+///
+/// The two axes are independent and both may fire: `shuffle($rows)` is
+/// `nondet.random` *and* `mutate.local`. Empty for a pure or uncatalogued builtin
+/// called without an out-parameter.
 fn builtin_findings(
     name: &str,
     span: steins_syntax::Span,
     tree: &SourceTree,
     path: &str,
+    arg_targets: Option<&[steins_syntax::RefTarget]>,
 ) -> Vec<EffectFinding> {
-    match steins_catalog::effect_labels(name) {
-        Some(labels) => {
-            let line = tree.position(span.start).line;
-            labels
-                .iter()
-                .map(|&label| EffectFinding {
-                    label: label.to_owned(),
-                    origin: name.to_owned(),
-                    line,
-                    path: path.to_owned(),
-                })
-                .collect()
-        }
-        None => Vec::new(),
+    let colored = steins_catalog::effect_labels(name).unwrap_or(&[]);
+    let by_ref = out_param_labels(name, arg_targets);
+    if colored.is_empty() && by_ref.is_empty() {
+        return Vec::new();
     }
+    let line = tree.position(span.start).line;
+    colored
+        .iter()
+        .copied()
+        .chain(by_ref)
+        .map(|label| EffectFinding {
+            label: label.to_owned(),
+            origin: name.to_owned(),
+            line,
+            path: path.to_owned(),
+        })
+        .collect()
 }
 
 /// Resolve a method-call effect origin to the unit it edges to (project-wide).
@@ -3277,7 +3617,30 @@ impl<'a> Cx<'a> {
 
     /// Resolve a **function** call reference per PHP name resolution (ADR-0001).
     fn resolve_function(&self, r: &NameRef) -> FnResolution {
-        let catalog_knows = |n: &str| steins_catalog::effect_labels(n).is_some();
+        self.resolve_function_with(r, &|n| steins_catalog::effect_labels(n).is_some())
+    }
+
+    /// [`Self::resolve_function`] with the **effects pass's** wider notion of a
+    /// known builtin: a name carrying a by-ref out-parameter row
+    /// ([`steins_catalog::out_params`]) is catalogued too, even when it has no
+    /// unconditional color and is not foldable — `preg_match` and `sort` are
+    /// exactly that, and P2 is what gives them something to say.
+    ///
+    /// Scoped to the effects pass on purpose. The same widening would also change
+    /// how the *throws* pass classifies these names (from an unresolved taint to
+    /// a `builtin_throws` consultation) — a real gap, but a different pass's
+    /// accounting, and this slice does not move that baseline behind its back.
+    fn resolve_effect_function(&self, r: &NameRef) -> FnResolution {
+        self.resolve_function_with(r, &|n| {
+            steins_catalog::effect_labels(n).is_some() || steins_catalog::out_params(n).is_some()
+        })
+    }
+
+    fn resolve_function_with(
+        &self,
+        r: &NameRef,
+        catalog_knows: &dyn Fn(&str) -> bool,
+    ) -> FnResolution {
         match r.kind {
             RefKind::FullyQualified => {
                 let fqn = r.raw.to_ascii_lowercase();
@@ -13689,6 +14052,9 @@ fn parse_envelopes(docblock: Option<&str>) -> Option<Envelopes> {
                 }
             }
             TagKind::Var | TagKind::Throws => {}
+            // Conditional purity is an effect contract (ADR-0063), not a type
+            // envelope; `conditional_purity` is its consumer.
+            TagKind::ConditionalPurity(_) => {}
             // Assertion tags are consumed above (collected into `assert_params`);
             // they never contribute a `@param`/`@return` envelope.
             TagKind::Assert { .. } => {}

@@ -34,7 +34,7 @@ ffi
 global.read   global.write
 io   io.db   io.fs   io.fs.read   io.fs.write   io.ipc
      io.net  io.net.http   io.process   io.signal
-mutate
+mutate   mutate.local
 nondet   nondet.random   nondet.time
 output   output.header
 failure   failure.environment   failure.input   failure.resource
@@ -48,6 +48,23 @@ mean `io.net`). Typo safety is Steins' own job, not the user's.
 *value provenance* — why the arm exists — rather than an effect. They share the
 registry so prefix subsumption works and a future boundary profile can name them
 (ADR-0042). See [divergence-registry.md](divergence-registry.md).
+
+`mutate.local` is the degenerate member of the `mutate` family and the one label
+**every** envelope tolerates, `#[\Steins\Pure]` included (ADR-0063 §2.3). It
+names a by-ref out-parameter write whose target is a binding of the *calling*
+frame — `preg_match($p, $s, $matches)`, `sort($localRows)`. Nothing escapes the
+frame, so no caller can observe it, and an envelope constrains only what a caller
+can observe. The tolerance is implemented for every envelope rather than for
+`Pure` alone because `Pure` is the tightest one: tolerating a label there and
+rejecting it under a wider declaration would make the check non-monotone.
+
+The same builtin call *does* exceed `Pure` when its by-ref argument points
+somewhere else. The color is decided per call site by the argument's lvalue root:
+a frame-private binding earns `mutate.local`, a superglobal earns `global.write`,
+and a property, static property, by-ref parameter, or unclassifiable target earns
+the conservative parent `mutate`. Refining that parent into ADR-0055's
+`mutate.self` / `mutate.instance` / `mutate.static` is that ADR's slice E2; until
+it exists, the coarse-but-true label is preferred to a precise guess.
 
 `ffi` is a deliberate top-level escape hatch beside `exit`: FFI runs arbitrary C,
 so the catalog can prove nothing about it. No plain builtin is colored `ffi`

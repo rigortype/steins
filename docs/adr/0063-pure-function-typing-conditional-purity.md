@@ -77,3 +77,61 @@ phpdoc-parser #259 open).
 
 P3 overlaps the conformance C-phase (it *is* four of its rows); sequence P3
 inside whichever phase opens first.
+
+## Amendment (2026-07-30): P2 + P4 outcomes
+
+**The sister tag is merged, not open.** §1 cites phpdoc-parser #259 as still
+open. The copy vendored at `harness/phpdoc-oracle` is 2.3.3 (2026-07-08) and
+ships `PureUnlessParameterIsPassedTagValueNode` alongside its callable sibling,
+registered under `@pure-unless-parameter-passed` and
+`@phpstan-pure-unless-parameter-passed`. Both tags are therefore implemented
+from the merged grammar (`parseRequiredVariableName` + optional description, no
+type, no `@psalm-` alias) — no ADR-0016 lead was needed, and no spelling was
+guessed.
+
+**`preg_replace`'s count is argument 4.** The P2 brief listed it at 3 alongside
+`str_replace`. The optional `$limit` sits between subject and count, so
+`str_replace`/`str_ireplace` are 3 and `preg_replace`/`preg_replace_callback`
+are 4. Rows are transcribed from the stubs, not from the brief.
+
+**Conditionality needed a second catalog axis, not a wider label set.**
+`effect_labels` answers per *function*; an out-parameter write is a property of
+the *call*. `out_params(name) -> Option<&[usize]>` is the new row, resolved at
+each call site against two legs: arity (`arg_count > position`) and target (the
+argument's lvalue root, classified in `steins-syntax` as `RefTarget`). The
+variadic-by-ref family (`sscanf`, `array_multisort`) is deliberately absent —
+its positions are open-ended, and an under-approximated target leg would
+downgrade an escaping write to `mutate.local`.
+
+**Target distinction: Steins has it.** Property, static-property, by-ref
+parameter, superglobal, and aliased-frame targets are each recognized and never
+claim `mutate.local`. What Steins declines is naming *which* escape it is: those
+all land on the conservative parent `mutate`, because ADR-0055's
+`mutate.self`/`.instance`/`.static` inference (slice E2) does not exist. The
+frame-locality claim is additionally gated on the frame carrying no ADR-0001
+give-up-list construct (`global`, `static`, `$$v`, `extract`, `$a = &$b`,
+`use (&$x)`) — a coarse gate, but each member genuinely defeats "this name is a
+frame-private binding".
+
+**The tolerance is universal, not `Pure`-only.** §2.3 states it for `Pure`.
+Implemented for every envelope: `Pure` is the tightest one, so tolerating a
+label there while rejecting it under a wider declaration would be non-monotone.
+
+**P1's own-color leg is now live.** It was inert because the catalog had no
+color for `usort`/`array_walk` to contribute. Their by-ref row supplies one, so
+`usort($localRows, $pureCmp)` under `Pure` is clean (tolerated) while
+`usort($this->rows, …)` is not.
+
+**P4 lowers to a taint discharge, not a purity override.** A tagged callee's
+proven findings still propagate (ADR-0037). What the declaration buys is the
+*unknown*: a tagged function's body calls its callable parameter dynamically and
+is therefore permanently non-exhaustive, and when every flagged condition is
+decided at a call site the contract discharges that taint there. An opaque
+callable in the flagged slot decides nothing, so the taint stands.
+
+**Declined this slice.** The tag is honored on free functions only —
+`EffectOrigin::MethodCall` records neither arguments nor callbacks, so a method
+carrying the tag falls back to the plain edge. Widening the effects pass's
+notion of a catalogued builtin (so `preg_match`/`sort` resolve as builtins at
+all) was scoped to that pass: the same widening would change how the *throws*
+pass classifies those names, which is a real gap and a different baseline.

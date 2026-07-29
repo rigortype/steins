@@ -198,6 +198,82 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     colored.or_else(|| foldable(name).then_some(EMPTY))
 }
 
+/// The **by-ref out-parameter rows** (ADR-0063 §2.3): the 0-based positional
+/// indices a builtin writes through a reference parameter.
+///
+/// This is the catalog's one **conditional** row shape, and the conditionality is
+/// the point. [`effect_labels`] answers "what color does calling this function
+/// have", unconditionally — a per-function flag. An out-parameter write is not a
+/// property of the function, it is a property of the *call*: `preg_match($p, $s)`
+/// writes nothing, `preg_match($p, $s, $m)` writes `$m`, and the same two calls
+/// differ again in *whose* binding `$m` is. Flattening that into an
+/// unconditional color is exactly the metadata-only-purity lie ADR-0063 imports
+/// the refusal of (php-src #11884: "conditional on the argument, not a
+/// per-function lie"). So the row carries positions only, and the consumer
+/// resolves it against the call site:
+///
+/// * a position `p` contributes **nothing** unless the call actually supplies
+///   `p` (`arg_count > p`) — the arity leg;
+/// * what it contributes depends on the *lvalue root* of argument `p`
+///   (`steins_syntax::RefTarget`) — the target leg: a binding of the calling
+///   frame earns `mutate.local`, a superglobal earns `global.write`, anything
+///   that escapes or cannot be classified earns the conservative parent
+///   `mutate`.
+///
+/// A builtin may carry both an unconditional color and an out-param row: the two
+/// axes join (`shuffle` is `nondet.random` *and* writes argument 0).
+///
+/// ## Membership
+///
+/// Rows are transcribed from the php-src stubs at `PINNED_PHP`, restricted to
+/// **fixed positional** reference parameters, which is what a positional index
+/// can express faithfully. The variadic-by-ref family (`sscanf`, `fscanf`,
+/// `array_multisort`) is deliberately absent: its reference positions are
+/// open-ended, so a positions row could only under-approximate, and an
+/// under-approximated *target* leg would silently downgrade a property write to
+/// `mutate.local`. Silence beats a wrong color.
+///
+/// `extract()` is likewise absent — it writes the caller's symbol *table*, not a
+/// named argument, which is the ADR-0046 dynamism world, not this one.
+#[must_use]
+pub fn out_params(name: &str) -> Option<&'static [usize]> {
+    const P0: &[usize] = &[0];
+    const P2: &[usize] = &[2];
+    const P3: &[usize] = &[3];
+    const P4: &[usize] = &[4];
+
+    match name.to_ascii_lowercase().as_str() {
+        // Array sort / rearrangement / stack-and-queue: the array itself is
+        // argument 0 and is always by-ref, so the arity leg is satisfied by any
+        // well-formed call. `usort`/`uasort`/`uksort`/`array_walk` are also
+        // callback invokers (`invocation_shape`) — the two rows compose.
+        "sort" | "rsort" | "asort" | "arsort" | "ksort" | "krsort" | "usort" | "uasort"
+        | "uksort" | "natsort" | "natcasesort" | "shuffle" | "array_splice" | "array_push"
+        | "array_pop" | "array_shift" | "array_unshift" | "array_walk"
+        | "array_walk_recursive" => Some(P0),
+        // Internal array-pointer moves: `array|object &$array` in the stubs.
+        "reset" | "end" | "next" | "prev" => Some(P0),
+        // `settype(mixed &$var, string $type)`.
+        "settype" => Some(P0),
+        // `preg_match(string $pattern, string $subject, array &$matches = null, …)`
+        // — the ADR's headline case: optional, so the arity leg does real work.
+        "preg_match" | "preg_match_all" => Some(P2),
+        // `similar_text(string $string1, string $string2, float &$percent = null)`.
+        "similar_text" => Some(P2),
+        // `str_replace(…, …, $subject, int &$count = null)`.
+        "str_replace" | "str_ireplace" => Some(P3),
+        // `preg_replace_callback_array(array $pattern, $subject, int $limit = -1,
+        // int &$count = null, int $flags = 0)`.
+        "preg_replace_callback_array" => Some(P3),
+        // `preg_replace($pattern, $replacement, $subject, int $limit = -1,
+        // int &$count = null, int $flags = 0)` — `$count` is position **4**, not
+        // 3: the optional `$limit` sits between subject and count. Same shape for
+        // `preg_replace_callback`, whose callback is argument 1.
+        "preg_replace" | "preg_replace_callback" => Some(P4),
+        _ => None,
+    }
+}
+
 /// The hierarchical **label registry** (ADR-0018): the set of known effect
 /// labels. A declared envelope label outside this set (and not an ancestor of
 /// any entry — see [`is_known_label`]) earns an `effect.unknown-label`
@@ -247,6 +323,17 @@ pub fn known_labels() -> &'static [&'static str] {
         // observable OS interaction, parallel to `io.process`.
         "io.signal",
         "mutate",
+        // By-ref out-parameter write landing in a binding of the *calling* frame
+        // (ADR-0063 §2.3): `preg_match($p, $s, $matches)`, `sort($localArray)`.
+        // The degenerate member of the `mutate` family — nothing escapes the
+        // caller, so no observer outside the frame can tell it happened, which is
+        // why every envelope tolerates it (see `steins-infer`'s `exceeds`). It
+        // still earns a label rather than silence because the annotate/summary
+        // surface, and a future by-ref out-param fact lane, want to name it. Its
+        // caller-*observable* siblings (`mutate.arg`/`.self`/`.instance`/
+        // `.static`, ADR-0055 point 1) are not inferred yet; this slice's
+        // non-local targets stop at the parent `mutate` rather than guess a child.
+        "mutate.local",
         "nondet",
         "nondet.random",
         "nondet.time",
@@ -980,7 +1067,7 @@ mod tests {
         assert_eq!(effect_labels("STRTOLOWER"), Some(&[][..]));
     }
 
-    use super::{is_known_label, nearest_label, subsumes};
+    use super::{is_known_label, nearest_label, out_params, subsumes};
 
     #[test]
     fn subsumption_is_prefix_and_segment_aware() {
@@ -1033,6 +1120,56 @@ mod tests {
         assert!(!subsumes("io.signal", "io.ipc"), "siblings do not subsume");
         // ffi is a top-level escape hatch, not under io.
         assert!(!subsumes("io", "ffi"));
+    }
+
+    #[test]
+    fn mutate_local_is_registered_under_mutate() {
+        assert!(is_known_label("mutate.local"));
+        assert!(subsumes("mutate", "mutate.local"), "a coarse `mutate` admits it");
+        assert!(!subsumes("mutate.local", "mutate"), "and not the other way round");
+    }
+
+    #[test]
+    fn out_param_rows_carry_the_stub_positions() {
+        // The headline optional out-parameter, and the `$limit`-shifted sibling
+        // that makes reading the stub (rather than guessing) matter.
+        assert_eq!(out_params("preg_match"), Some(&[2][..]));
+        assert_eq!(out_params("preg_match_all"), Some(&[2][..]));
+        assert_eq!(out_params("similar_text"), Some(&[2][..]));
+        assert_eq!(out_params("str_replace"), Some(&[3][..]));
+        assert_eq!(out_params("str_ireplace"), Some(&[3][..]));
+        // `preg_replace(..., $subject, $limit, &$count)` — count is 4, not 3.
+        assert_eq!(out_params("preg_replace"), Some(&[4][..]));
+        assert_eq!(out_params("preg_replace_callback"), Some(&[4][..]));
+        assert_eq!(out_params("preg_replace_callback_array"), Some(&[3][..]));
+        // The always-by-ref array family.
+        for f in ["sort", "usort", "shuffle", "array_push", "array_pop", "reset", "settype"] {
+            assert_eq!(out_params(f), Some(&[0][..]), "{f} writes argument 0");
+        }
+        // Case-insensitive, like every other row.
+        assert_eq!(out_params("PREG_MATCH"), Some(&[2][..]));
+    }
+
+    #[test]
+    fn variadic_by_ref_builtins_are_deliberately_absent() {
+        // Their reference positions are open-ended: a positions row could only
+        // under-approximate, and an under-approximated target leg would downgrade
+        // an escaping write to `mutate.local`. Silence beats a wrong color.
+        for f in ["sscanf", "fscanf", "array_multisort", "extract"] {
+            assert_eq!(out_params(f), None, "{f} has no positional out-param row");
+        }
+    }
+
+    #[test]
+    fn the_two_catalog_axes_are_independent() {
+        // `shuffle` is colored AND writes by reference; `sort` only writes;
+        // `rand` only has a color. The consumer joins them.
+        assert_eq!(effect_labels("shuffle"), Some(&["nondet.random"][..]));
+        assert_eq!(out_params("shuffle"), Some(&[0][..]));
+        assert_eq!(out_params("rand"), None);
+        // `preg_match` has no unconditional color at all — its only effect is the
+        // conditional one, which is why it was uncatalogued before ADR-0063 P2.
+        assert_eq!(effect_labels("preg_match"), None);
     }
 
     #[test]

@@ -115,6 +115,23 @@ unimplemented. `@method`,
 `@phpstan-pure`, and `@phpstan-impure` are not recognized. See
 [not-implemented.md](not-implemented.md).
 
+The two **conditional-purity** tags *are* read (ADR-0063 §2 decision 2), in the
+spelling merged upstream in `phpstan/phpdoc-parser` 2.3.3 — bare or
+`@phpstan-`-prefixed, no `@psalm-` alias, a required `$parameter` followed by an
+optional description:
+
+```php
+/** @pure-unless-callable-is-impure $callback */
+/** @pure-unless-parameter-passed $matches */
+```
+
+The first makes a call's effect the join of the callables bound at the flagged
+positions; the second makes the flagged parameter a userland by-ref
+out-parameter row, colored by its argument exactly as a catalog row is. The
+unconditional `@phpstan-pure` flag stays unread on purpose: it is the metadata
+lie upstream rejected twice, and Steins spells unconditional purity
+`#[\Steins\Pure]`, where inference can check it.
+
 ## Annotation restraint
 
 A design stance rather than a mechanism, stated here because it explains what
