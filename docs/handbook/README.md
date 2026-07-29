@@ -85,7 +85,7 @@ Written after tonight's release; listed here so you know the map:
    `throws-direct` stage. Grounded in
    [throws.md](../type-specification/throws.md).
 7. **Profiles, baselines, and suppression** — the named stages
-   (`default` → `throws-direct` → `contracts`), the JSONL
+   (`default` → `throws-direct` → `contracts` → `strict`), the JSONL
    baseline ratchet, inline `@steins-ignore`, and why there is no
    message-regex suppression. Grounded in
    [profiles-and-baseline](../guide/profiles-and-baseline.md) and

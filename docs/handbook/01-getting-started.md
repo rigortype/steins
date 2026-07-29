@@ -165,7 +165,7 @@ For CI, only the exit code matters:
 For example, an unknown profile is a config error, not a finding:
 
 ```text
-steins: unknown profile `nope` (built-ins: default, contracts, throws-direct; or define [profile.nope])
+steins: unknown profile `nope` (built-ins: default, contracts, throws-direct, strict; or define [profile.nope])
 ```
 
 and exits `2`, so a misconfigured CI job fails loudly rather than

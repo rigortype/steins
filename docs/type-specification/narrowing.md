@@ -253,5 +253,8 @@ unknown widens to silence. The first three are ADR-0052's N5/N6 slices,
   true positives only.
 - **`try`/`catch`/`finally` control flow.** Catch *matching* consumes contract
   facts, but the construct itself is `Opaque` for value flow.
-- **Array element narrowing.** An array is a fact only when *fully* known.
+- **Array element narrowing.** A *shape* narrows through the
+  `isset`/`array_key_exists`/`empty`/`??` family (ADR-0062); an unprovable write
+  widens the shape rather than refining it, and the *value* lane still holds an
+  array only when it is fully known.
 - **Reachability analysis** — the all-branches-early-return gap above.

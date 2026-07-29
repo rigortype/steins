@@ -2,7 +2,7 @@
 
 The default `check` surface is proof-only on purpose. Strictness in Steins
 is not a numeric dial — it is a set of **named stages** a project declares
-for itself and ratchets through as it modernizes. This page covers the three
+for itself and ratchets through as it modernizes. This page covers the four
 built-in stages, the baseline round-trip that makes raising a stage
 survivable, and the config that ties them to a repo.
 
@@ -13,7 +13,7 @@ project declares in config (ADR-0050). A project's appetite for debt
 reporting tracks its modernization stage, so the tool never guesses it — the
 repo declares it, reviewably.
 
-## The three named stages
+## The four named stages
 
 A profile is a named selection over diagnostic *layers* — `proof` (provable
 runtime break), `contract` (a proven behavior violates something the code
@@ -21,15 +21,29 @@ runtime break), `contract` (a proven behavior violates something the code
 `mechanics` prints in every profile; the stages differ in how much of the
 contract layer they surface.
 
+Every diagnostic id carries the lowest **rung** that admits it, and the three
+cumulative built-ins are that ladder: `default ⊂ contracts ⊂ strict`. One
+layer can therefore hold ids at two rungs, which is exactly what the contract
+layer does now (ADR-0062). `throws-direct` sits beside the ladder rather than
+on it: it is `default` plus one faceted id.
+
 - **`default`** — proof + mechanics. Only what provably breaks, plus
   anti-rot. This is a bare `check`.
 - **`throws-direct`** — default plus `throw.undeclared` findings whose escape
   originates in the annotated declaration's *own body* (`origin = direct`).
   The high-signal subset: a `@throws` that is wrong about the method you are
   reading.
-- **`contracts`** — default plus the whole contract layer: every
-  `throw.undeclared` (direct and propagated), `phpdoc.*` mismatches, and
-  effect-envelope violations.
+- **`contracts`** — default plus the contract layer's main body: every
+  `throw.undeclared` (direct and propagated), `phpdoc.*` mismatches,
+  effect-envelope violations, and `offset.undeclared` — a read of a key the
+  declared array shape proves is not there.
+- **`strict`** — contracts plus the strict-rung ids. Today that is
+  `offset.maybe-missing`: a read of a key the declared shape says is
+  *optional*, on a path where no guard discharges it. This is the stage that
+  asks you to prove presence rather than assume it.
+
+`boundary` is a reserved name (ADR-0042): selecting or defining it is a
+config error until its ADR lands.
 
 The counts climb as the surface widens. Kimai's `src/` tree, same code, the
 three stages in order:
