@@ -117,7 +117,9 @@ pub enum ContractTy {
         /// Reject the empty list.
         non_empty: bool,
     },
-    /// `array<K, V>` / `T[]` / `non-empty-array<K, V>`.
+    /// `array<K, V>` / `T[]` / `non-empty-array<K, V>`, and Phan's
+    /// `associative-array<K, V>` / `non-empty-associative-array<K, V>` — the same
+    /// key/value contract plus a refusal of list realizations.
     MapOf {
         /// Key contract.
         key: Box<ContractTy>,
@@ -125,6 +127,12 @@ pub enum ContractTy {
         val: Box<ContractTy>,
         /// Reject the empty array.
         non_empty: bool,
+        /// Phan's `associative-array` refinement: reject a realization whose keys
+        /// happen to be a list (`0..n-1` in order). Seeds the shape fact's
+        /// `is_list` at `No` instead of `Maybe` (`to_shape_fact`) — the same
+        /// denotational trinary ADR-0062 landed for `list<T>`'s `Yes` seed, run
+        /// in the other direction.
+        not_list: bool,
     },
     /// `iterable<K, V>` — arrays behave as `MapOf`; scalar values are `No`.
     IterableOf {
@@ -196,6 +204,7 @@ pub fn lower(ty: &Type) -> ContractTy {
             key: Box::new(array_key()),
             val: Box::new(lower(elem)),
             non_empty: false,
+            not_list: false,
         },
         TypeKind::Generic { base, args } => lower_generic(base, args),
         TypeKind::Callable(c) => lower_callable(c),
@@ -317,6 +326,21 @@ pub fn lower_identifier(name: &str) -> ContractTy {
         ]),
         "array" => ContractTy::ArrayAny { non_empty: false },
         "non-empty-array" => ContractTy::ArrayAny { non_empty: true },
+        // Phan's `associative-array`/`non-empty-associative-array`: an array that
+        // is additionally not a list. Bare (unparameterized) form — `<K, V>` is
+        // `lower_generic`'s job, below.
+        "associative-array" => ContractTy::MapOf {
+            key: Box::new(array_key()),
+            val: Box::new(ContractTy::Mixed),
+            non_empty: false,
+            not_list: true,
+        },
+        "non-empty-associative-array" => ContractTy::MapOf {
+            key: Box::new(array_key()),
+            val: Box::new(ContractTy::Mixed),
+            non_empty: true,
+            not_list: true,
+        },
         "list" => ContractTy::ListOf { elem: Box::new(ContractTy::Mixed), non_empty: false },
         "non-empty-list" => {
             ContractTy::ListOf { elem: Box::new(ContractTy::Mixed), non_empty: true }
@@ -393,11 +417,29 @@ pub fn lower_generic(base: &str, args: &[steins_phpdoc::ast::GenericArg]) -> Con
             key: Box::new(array_key()),
             val: Box::new(arg(0).expect("len checked")),
             non_empty: norm.starts_with("non-empty"),
+            not_list: false,
         },
         ("array" | "non-empty-array", 2) => ContractTy::MapOf {
             key: Box::new(arg(0).expect("len checked")),
             val: Box::new(arg(1).expect("len checked")),
             non_empty: norm.starts_with("non-empty"),
+            not_list: false,
+        },
+        // Phan's `associative-array<K, V>` / `non-empty-associative-array<K, V>` —
+        // the same `array<K, V>` lowering plus the not-a-list refusal (census
+        // bucket ix; ADR-0062's landed `is_list` trinary is exactly the predicate
+        // this needs, seeded via `to_shape_fact`'s `MapOf` arm below).
+        ("associative-array" | "non-empty-associative-array", 1) => ContractTy::MapOf {
+            key: Box::new(array_key()),
+            val: Box::new(arg(0).expect("len checked")),
+            non_empty: norm.starts_with("non-empty"),
+            not_list: true,
+        },
+        ("associative-array" | "non-empty-associative-array", 2) => ContractTy::MapOf {
+            key: Box::new(arg(0).expect("len checked")),
+            val: Box::new(arg(1).expect("len checked")),
+            non_empty: norm.starts_with("non-empty"),
+            not_list: true,
         },
         ("list" | "non-empty-list", 1) => ContractTy::ListOf {
             elem: Box::new(arg(0).expect("len checked")),
@@ -532,6 +574,7 @@ fn lower_shape(shape: &steins_phpdoc::ast::ArrayShape) -> ContractTy {
 /// | `array` / `non-empty-array` | no fields, untyped unsealed tail |
 /// | `array<K, V>` | no fields, tail typed by `K`'s key class and `V`'s fact |
 /// | `list<T>` | no fields, int-keyed tail typed by `T`, `is_list` seeded `Yes` |
+/// | `associative-array<K, V>` | no fields, tail as `array<K, V>`, `is_list` seeded `No` |
 /// | `array{…}` / `list{…}` | the declared fields and tail |
 ///
 /// `is_list` is never taken from the caller as truth: the seed is *sharpened*
@@ -554,13 +597,13 @@ pub fn to_shape_fact(ty: &ContractTy) -> Option<ShapeFact> {
             *non_empty,
             Vec::new(),
         )),
-        ContractTy::MapOf { key, val, non_empty } => Some(ShapeFact::normalize(
+        ContractTy::MapOf { key, val, non_empty, not_list } => Some(ShapeFact::normalize(
             Vec::new(),
             DTail::Unsealed {
                 key: contract_key_class(key),
                 value: to_fact(val).map(Box::new),
             },
-            Certainty::Maybe,
+            if *not_list { Certainty::No } else { Certainty::Maybe },
             *non_empty,
             Vec::new(),
         )),

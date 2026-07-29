@@ -146,9 +146,14 @@ fn non_empty_keyword(base: &str, non_empty: bool) -> String {
 /// list never prints a key (its key class is `int` by definition), and a
 /// value-less list/map prints `mixed` — the loosest honest keyword, so the
 /// spelling still round-trips to the same fact.
+///
+/// `not_list` renders Phan's `associative-array` base word instead of `array`
+/// (census bucket ix) — mutually exclusive with `is_list` by construction (a
+/// `ListOf` arm never sets it), never both true.
 #[must_use]
 pub fn spell_generic_array(
     is_list: bool,
+    not_list: bool,
     non_empty: bool,
     key: Option<&str>,
     value: Option<&str>,
@@ -160,7 +165,8 @@ pub fn spell_generic_array(
             value.unwrap_or("mixed")
         );
     }
-    let kw = non_empty_keyword("array", non_empty);
+    let base = if not_list { "associative-array" } else { "array" };
+    let kw = non_empty_keyword(base, non_empty);
     match (key, value) {
         (None, None) => kw,
         (None, Some(v)) => format!("{kw}<{v}>"),
@@ -173,13 +179,15 @@ pub fn spell_generic_array(
 /// variant set [`spell_arms`]'s match arm does.
 fn spell_array_arm(ty: &ContractTy) -> String {
     match ty {
-        ContractTy::ArrayAny { non_empty } => spell_generic_array(false, *non_empty, None, None),
-        ContractTy::ListOf { elem, non_empty } => {
-            spell_generic_array(true, *non_empty, None, Some(&spell_nested(elem)))
+        ContractTy::ArrayAny { non_empty } => {
+            spell_generic_array(false, false, *non_empty, None, None)
         }
-        ContractTy::MapOf { key, val, non_empty } => {
+        ContractTy::ListOf { elem, non_empty } => {
+            spell_generic_array(true, false, *non_empty, None, Some(&spell_nested(elem)))
+        }
+        ContractTy::MapOf { key, val, non_empty, not_list } => {
             let k = (!is_array_key_ty(key)).then(|| spell_nested(key));
-            spell_generic_array(false, *non_empty, k.as_deref(), Some(&spell_nested(val)))
+            spell_generic_array(false, *not_list, *non_empty, k.as_deref(), Some(&spell_nested(val)))
         }
         ContractTy::Shape { list, fields, sealed, non_empty, unsealed } => {
             spell_contract_shape(*list, fields, *sealed, *non_empty, unsealed)
@@ -612,6 +620,20 @@ mod array_vocabulary_tests {
     #[test]
     fn map_generic_spells_both_key_and_value() {
         assert_eq!(spell_ty("array<string, int>"), "array<string, int>");
+    }
+
+    #[test]
+    fn associative_array_generic_spells_the_phan_keyword() {
+        // Census bucket ix: round-trips through the `not_list` `MapOf` flag,
+        // not a bare `array<K, V>` — the whole point of the spelling.
+        assert_eq!(
+            spell_ty("associative-array<int, string>"),
+            "associative-array<int, string>"
+        );
+        assert_eq!(
+            spell_ty("non-empty-associative-array<string, int>"),
+            "non-empty-associative-array<string, int>"
+        );
     }
 
     #[test]

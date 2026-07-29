@@ -74,6 +74,43 @@ fn lists_and_maps() {
     assert_eq!(admits_val(&ty("int[]"), &list(vec![Val::Int(1)])), Yes);
 }
 
+/// Phan's `associative-array<K, V>` / `non-empty-associative-array<K, V>`
+/// (census bucket ix): `array<K, V>` plus a refusal of list realizations — the
+/// ADR-0062 `is_list` trinary seeded `No` instead of `Maybe`.
+#[test]
+fn associative_array_rejects_list_realizations() {
+    let assoc = ty("associative-array<int, string>");
+    // A non-sequential int-keyed array is associative everywhere.
+    assert_eq!(
+        admits_val(&assoc, &arr(vec![(Key::Int(5), s("a")), (Key::Int(9), s("b"))])),
+        Yes
+    );
+    // Same element types, but the keys ARE a list — Phan rejects it.
+    assert_eq!(admits_val(&assoc, &list(vec![s("a"), s("b"), s("c")])), No);
+    // Non-array values never satisfied it in the first place.
+    assert_eq!(admits_val(&assoc, &Val::Int(1)), No);
+
+    let non_empty_assoc = ty("non-empty-associative-array<string, int>");
+    assert_eq!(
+        admits_val(&non_empty_assoc, &arr(vec![(Key::Str("a".into()), Val::Int(1))])),
+        Yes
+    );
+    // Empty violates non-empty.
+    assert_eq!(admits_val(&non_empty_assoc, &arr(vec![])), No);
+    // A list violates the associative part.
+    assert_eq!(
+        admits_val(&non_empty_assoc, &list(vec![Val::Int(1), Val::Int(2), Val::Int(3)])),
+        No
+    );
+
+    // The bare (unparameterized) spellings lower too, same not-list refusal.
+    assert_eq!(admits_val(&ty("associative-array"), &list(vec![Val::Int(1)])), No);
+    assert_eq!(
+        admits_val(&ty("associative-array"), &arr(vec![(Key::Int(1), Val::Int(1))])),
+        Yes
+    );
+}
+
 #[test]
 fn shapes_follow_14939() {
     let shape = ty("array{id: int, name?: string}");

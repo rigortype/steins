@@ -56,9 +56,13 @@ pub fn admits_val(ty: &ContractTy, v: &Val) -> Certainty {
             Val::Array(items) => admits_list(elem, *non_empty, items),
             _ => No,
         },
-        ContractTy::MapOf { key, val, non_empty } => match v {
+        ContractTy::MapOf { key, val, non_empty, not_list } => match v {
             Val::Array(items) => {
                 if *non_empty && items.is_empty() {
+                    No
+                } else if *not_list && is_list(items) {
+                    // Phan's `associative-array`: a list realization is rejected
+                    // outright, key/value membership never consulted.
                     No
                 } else {
                     admits_entries(key, val, items)

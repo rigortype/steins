@@ -4957,9 +4957,13 @@ fn render_shape_fact(shape: &ShapeFact, nullable: bool) -> String {
             KeyClass::Str => Some("string"),
         };
         // A key-agnostic, value-agnostic tail IS plain `array`, which the
-        // speller produces from the two `None`s.
+        // speller produces from the two `None`s. A denotational `No` (never
+        // `Yes`, handled above) is Phan's `associative-array` — the fact-lane
+        // mirror of `to_shape_fact`'s `MapOf.not_list` seed.
+        let not_list = shape.is_list == Certainty::No;
         let body = steins_contract::spell::spell_generic_array(
             is_list,
+            not_list,
             shape.non_empty,
             key_text,
             val.as_deref(),
@@ -13461,6 +13465,20 @@ fn accepts_generic(
             }
             None => Tri::Maybe,
         },
+        // Phan's `associative-array<K, V>` / `non-empty-associative-array<K, V>`
+        // (census bucket ix): unlike the plain-array arm above, this does not
+        // restate a hand-rolled list check — `lower_generic` already carries the
+        // not-a-list refusal (`MapOf.not_list`, seeded `is_list = No` via
+        // `to_shape_fact`), so the shared relation judges it exactly as the
+        // `int`/`int-range` delegation just above does.
+        "associative-array" | "non-empty-associative-array" if matches!(args.len(), 1 | 2) => {
+            match cval_as_val(v) {
+                Some(val) => {
+                    steins_contract::admits_val(&steins_contract::lower_generic(base, args), &val)
+                }
+                None => Tri::Maybe,
+            }
+        }
         // A class-level generic `Class<A, …>` (ADR-0032 tier 3, issue #10).
         _ => accepts_class_generic(cx, cfile, coff, base, args, v),
     }

@@ -619,6 +619,49 @@ fn int_range_keyword_is_the_int_range() {
     assert_eq!(param_count(&format!("{g}g(1);")), 1, "int<min, 0> still rejects 1");
 }
 
+/// `phpdoc_advanced_associative_array`: Phan treats `associative-array<K, V>` as
+/// an array that is specifically not a list, so a plain list argument is
+/// rejected even though its element types match (census bucket ix, ADR-0062's
+/// `is_list` trinary).
+#[test]
+fn associative_array_rejects_a_list_argument() {
+    let f = "<?php /** @param associative-array<int, string> $map */ \
+             function f($map): void {}\n";
+    assert_eq!(
+        param_count(&format!("{f}f([5 => 'a', 9 => 'b']);")),
+        0,
+        "a non-sequential int-keyed array is associative everywhere"
+    );
+    assert_eq!(
+        param_count(&format!("{f}f(['a', 'b', 'c']);")),
+        1,
+        "a plain list is not an associative-array"
+    );
+}
+
+/// `phpdoc_advanced_phan_non_empty_associative_array`: combines the not-a-list
+/// refusal with `non-empty` — both violations must be caught independently.
+#[test]
+fn non_empty_associative_array_rejects_empty_and_list_arguments() {
+    let f = "<?php /** @param non-empty-associative-array<string, int> $map */ \
+             function f($map): void {}\n";
+    assert_eq!(
+        param_count(&format!("{f}f(['a' => 1]);")),
+        0,
+        "a non-empty string-keyed array satisfies the parameter"
+    );
+    assert_eq!(
+        param_count(&format!("{f}f([]);")),
+        1,
+        "an empty array is not a non-empty-associative-array"
+    );
+    assert_eq!(
+        param_count(&format!("{f}f([1, 2, 3]);")),
+        1,
+        "a list violates the associative part"
+    );
+}
+
 /// The convergence itself: a class name is *not* keyword vocabulary, so it must
 /// still ride the is-a oracle and the `is_known_class` gate rather than be judged
 /// as a contract atom. An unresolved identifier (a `@template` param or a
