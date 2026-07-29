@@ -5480,9 +5480,12 @@ fn render_shape_fact(shape: &ShapeFact, nullable: bool) -> String {
     // brace shape with only a tail in it: `array`, `array<K, V>`, `list<T>` —
     // which is both what they lowered from and what they round-trip back to.
     // `array{...<int, string>}` would parse to the same fact, but nobody writes
-    // it and PHPStan does not print it.
+    // it and PHPStan does not print it. `covers` does not gate this: neither
+    // spelling prints a disjunctive-presence fact (A-G8 lives in the domain,
+    // not the surface), so a fieldless covers-bearing fact still spells the
+    // generic keyword — PHPStan's own `non-empty-array` for the
+    // `array_key_exists(A) || array_key_exists(B)` join.
     if shape.fields.is_empty()
-        && shape.covers.is_empty()
         && let Tail::Unsealed { key, value } = &shape.tail
     {
         let val = value.as_ref().map(|f| render_dump_fact(f));
