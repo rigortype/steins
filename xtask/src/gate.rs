@@ -258,7 +258,21 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // OSS package is unchanged (the soundness signal — a wrong envelope would light
     // up well-typed OSS too). Runtime/proof layer stays GREEN (0). throw.* is
     // unmoved by this change (44563 before and after).
-    ("pxxxx-monorepo", 477),
+    // 477 → 487 (+10), 2026-07-29 with DR2 (is_* guard narrowing, ADR-0064
+    // seam v): the by-ref exemption now lets a request-param string's fact
+    // SURVIVE a pure `is_numeric`/`is_array` guard instead of being
+    // forgotten, so the guarded value reaches the call and the phpdoc layer
+    // judges it. All 10 were baseline-diffed (set-diff vs the pre-slice
+    // build; 0 disappeared) and triaged verbatim: every one is the standing
+    // stringly-typed request-param idiom — `is_numeric($x)`-guarded
+    // string/numeric-string handed to a `@param int`/`int[]` method
+    // (`is_numeric` proves numeric-STRING-ness, not int-ness). PHPStan
+    // reports each identically at level 6+. Every OSS package is unchanged
+    // (the soundness signal); proof layer stays 0 — one proof-layer FP the
+    // slice initially introduced (a refuting guard leaving a stale
+    // Singleton premise on an unreachable branch) was found by this same
+    // gate and fixed in-slice: a refuted fact now DROPS.
+    ("pxxxx-monorepo", 487),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).
