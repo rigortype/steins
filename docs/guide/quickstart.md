@@ -171,10 +171,10 @@ through profiles, deliberately, never dumped on you by a first run.
 - `1` — at least one fail-level finding was displayed.
 - `2` — usage or config error (unknown flag, unknown profile, bad
   `steins.toml`). For example `--profile nope` prints
-  `steins: unknown profile 'nope' (built-ins: default, contracts, throws-direct; …)`
+  ``steins: unknown profile `nope` (built-ins: default, contracts, throws-direct, strict; …)``
   and exits `2`.
 
-## Known limitations (v0.1.0, honest)
+## Known limitations (v0.1.2, honest)
 
 - **No warm or incremental runs.** Every `check` is a cold batch analysis.
 - **No LSP or editor server yet.** `annotate` gives a one-shot margin view

@@ -144,8 +144,11 @@ the seed, and without a sidecar nothing is seeded.
 - **No closure values.** A closure rides in its own binding slot (ADR-0033;
   [closures.md](closures.md)).
 - **No partial arrays.** `Val::Array` is a *fully known* array. An array with
-  one unknown element is not representable, so the fact is dropped. This is why
-  the offset family only fires on fully-proven containers.
+  one unknown element is not representable in this domain, so the *value* is
+  dropped. This is why the proof-layer offset ids only fire on fully-proven
+  containers; a partially-known array is carried in the fact lane instead, as a
+  `Fact::Shape` (ADR-0062), where it feeds the contract-layer
+  `offset.undeclared` / `offset.maybe-missing` and nothing on the proof layer.
 - **No generic type arguments.** The domain carries none, by design. Class
   generics are judged in the contract lane instead: type-argument *values* are
   inferred at a direct-`new` argument position (ADR-0032 stage 1, landed);

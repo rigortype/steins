@@ -277,11 +277,12 @@ false ones, because an unknown widens to silence:
   narrowing (catch *matching* against declared types still works).
 - **Property chains as guard operands** — one level of property
   access is modeled; chained lvalues (`$a->b->c`) are not.
-- **`??` in guard position** does not yet refine the way an
-  explicit `$a !== null ? $a : $b` does; it yields a value fact
-  only.
-- **Array element narrowing** — an array is a fact only when
-  *fully* known.
+- **`??` in guard position** refines an *array offset* (ADR-0062);
+  over any other operand it does not yet refine the way an explicit
+  `$a !== null ? $a : $b` does, and yields a value fact only.
+- **Array element narrowing** — an array *shape* narrows through the
+  `isset`/`array_key_exists`/`empty`/`??` family, but a write at a key
+  Steins cannot prove widens the shape rather than refining it.
 
 When narrowing is not recognised, both edges keep the entry fact.
 Steins stays conservative rather than making a wrong call.

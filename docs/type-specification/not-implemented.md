@@ -27,8 +27,7 @@ the semantic inventory.
 
 | Surface | ADR | Note |
 | --- | --- | --- |
-| `call.undefined-function`, `class.undefined` | 0049 S4 | Registered with layers; no emitter. Scoped into v0.1.0, not landed. |
-| `call.too-many-arguments` | 0049 §6 | Internal targets only — userland too-many runs clean and is never a finding. Waits on the sidecar reflect slice. |
+| `call.too-many-arguments` | 0049 §6 | Internal targets only — userland too-many runs clean and is never a finding. Waits on the sidecar reflect slice. The only registered id with no emitter. |
 | Scoped policy — `[paths.sets]`, `[[policy]]` | 0023 | Designed in full, including semantic `where` matchers. The pipeline stage exists as a no-op with a seam. |
 | `sarif` / `github` formats | 0054 | With CI auto-detection and format invariance as the binding rule. Decided out of v0.1.0 by owner. |
 | `doctor` (full report) | 0054 | The **minimal** `doctor` (ADR-0054 C3 scope — index-bound posture report, runs no emitter) has **landed**. Deferred: `--format json`, the richer audits (deeper catalog audit, full baseline capture-surface report). |
@@ -60,8 +59,13 @@ Places where Steins is quieter than it could be.
   describe an unreachable path.
 - Static properties are not a fact lane; property chains (`$a->b->c`) are a
   `Barrier` (ADR-0052 N5, same owner deferral).
-- `??` in guard position does not refine; it yields a value fact only.
-- Array elements do not narrow — an array is a fact only when *fully* known.
+- `??` refines an *array offset* in guard position (ADR-0062 S5); over any other
+  operand it yields a value fact only.
+- Array shapes carry key presence, optionality and list-ness, and the
+  `isset`/`array_key_exists`/`empty`/`??` family narrows them (ADR-0062) — but a
+  write at a key Steins cannot prove widens the whole shape rather than refining
+  it, and `array_slice` and the value side of `in_array`/`array_search` decline to
+  project through a shape at all.
 
 **Objects** ([object-model.md](object-model.md)):
 
