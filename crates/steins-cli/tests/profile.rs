@@ -366,24 +366,22 @@ const STRICT_ONLY: &str = "<?php\n\
     function f(array $d): void { $x = $d['a']; $y = $d['zzz']; }\n";
 
 #[test]
-fn strict_leg_ids_are_invisible_on_default_and_contracts() {
-    // The measurement-first posture, end to end: S6 emits these findings, and no
-    // profile below `strict` shows one. This is what keeps the two pre-existing
-    // surfaces byte-identical to their pre-S6 output for the same file.
+fn strict_leg_ids_respect_their_post_triage_floors() {
+    // Post-triage floors (the 2026-07-29 sweep ruling): default shows neither id;
+    // contracts shows `offset.undeclared` (promoted to its A-G10 END state after
+    // measuring zero corpus findings) but never `offset.maybe-missing` (held at
+    // strict until the assertion-helper discharge lands). Default stays
+    // byte-identical to its pre-S6 output for the same file.
     let dir = workdir("strict-hidden");
     write(&dir, "a.php", STRICT_ONLY);
-    for profile in [vec!["check", "--no-php", "a.php"], vec![
-        "check",
-        "--no-php",
-        "--profile",
-        "contracts",
-        "a.php",
-    ]] {
-        let r = run_in(&dir, &profile);
-        assert_eq!(r.code, 0, "clean below strict; stdout:\n{}", r.stdout);
-        assert!(!r.stdout.contains("offset.maybe-missing"), "got:\n{}", r.stdout);
-        assert!(!r.stdout.contains("offset.undeclared"), "got:\n{}", r.stdout);
-    }
+    let r = run_in(&dir, &["check", "--no-php", "a.php"]);
+    assert_eq!(r.code, 0, "default is clean; stdout:\n{}", r.stdout);
+    assert!(!r.stdout.contains("offset.maybe-missing"), "got:\n{}", r.stdout);
+    assert!(!r.stdout.contains("offset.undeclared"), "got:\n{}", r.stdout);
+    let r = run_in(&dir, &["check", "--no-php", "--profile", "contracts", "a.php"]);
+    assert_eq!(r.code, 1, "the promoted id surfaces on contracts; stdout:\n{}", r.stdout);
+    assert_eq!(r.stdout.matches("offset.undeclared").count(), 1, "got:\n{}", r.stdout);
+    assert!(!r.stdout.contains("offset.maybe-missing"), "still strict-only:\n{}", r.stdout);
 }
 
 #[test]

@@ -268,11 +268,15 @@ fn every_registered_id_has_a_surface_floor() {
 /// the whole reason a floor attribute was needed (a layer can now straddle rungs).
 #[test]
 fn floors_reproduce_the_pre_s6_layer_selection() {
-    let strict_leg = [OFFSET_UNDECLARED_ID, OFFSET_MAYBE_MISSING_ID];
+    // The S6 pair, post-triage (2026-07-29 sweep): `offset.undeclared` measured
+    // ZERO corpus findings and took A-G10's END-state promotion to `Contracts`;
+    // `offset.maybe-missing` stays `Strict` until the assertion-helper
+    // discharge lands (its 3 sweep findings were all that one gap).
+    let promoted = [(OFFSET_UNDECLARED_ID, Floor::Contracts), (OFFSET_MAYBE_MISSING_ID, Floor::Strict)];
     for &(id, layer_of, floor) in DIAGNOSTIC_REGISTRY {
-        if strict_leg.contains(&id) {
+        if let Some(&(_, expected_floor)) = promoted.iter().find(|(p, _)| *p == id) {
             assert_eq!(layer_of, Layer::Contract, "the strict leg is contract-layer");
-            assert_eq!(floor, Floor::Strict, "`{id}` is S6's measurement-first pair");
+            assert_eq!(floor, expected_floor, "`{id}` floor per the 2026-07-29 triage ruling");
             continue;
         }
         let expected = match layer_of {

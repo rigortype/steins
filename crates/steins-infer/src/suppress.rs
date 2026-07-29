@@ -257,14 +257,15 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // Contract-layer evidence (the Asserted declared envelope), admitted only by
     // the `strict` rung.
     //
-    // NOTE (A-G10's END state vs. THIS slice): the amendment puts
-    // `offset.undeclared` at floor `Contracts` once the corpus says it is
-    // zero-FP. That promotion is deliberately NOT taken here. The calibrated-
-    // defaults doctrine is measure → judge → enable, so S6 ships BOTH ids at
-    // `Floor::Strict` and the slice's corpus triage is the evidence the owner
-    // promotes on. Moving `offset.undeclared` to `Floor::Contracts` is a
-    // one-line change to this row plus its registry test.
-    (OFFSET_UNDECLARED_ID, Layer::Contract, Floor::Strict),
+    // A-G10's END state, reached by its own protocol: S6 shipped BOTH ids at
+    // `Floor::Strict` (measure → judge → enable), and the 2026-07-29 corpus
+    // sweep measured `offset.undeclared` at ZERO findings across 99,522 files
+    // — the cleanest possible promotion case, so it sits at `Contracts` per
+    // the amendment. `offset.maybe-missing` stays at `Strict`: its sweep found
+    // 3 findings, all one discharge-ladder gap (an `isset()` passed to a
+    // userland `@phpstan-assert true` helper); it is not promoted until that
+    // discharge lands.
+    (OFFSET_UNDECLARED_ID, Layer::Contract, Floor::Contracts),
     (OFFSET_MAYBE_MISSING_ID, Layer::Contract, Floor::Strict),
     // mechanics — apparatus hygiene (red on sight, suppression-exempt).
     (SUPPRESS_UNMATCHED_ID, Layer::Mechanics, Floor::Default),

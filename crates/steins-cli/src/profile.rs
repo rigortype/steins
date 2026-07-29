@@ -689,16 +689,24 @@ mod tests {
 
     #[test]
     fn the_strict_floor_ids_are_invisible_below_strict() {
-        // The measurement-first posture, at the surface: S6's ids exist and are
-        // emitted, but no profile below `strict` displays or captures them — which
-        // is what keeps default/contracts byte-identical to their pre-S6 output.
-        for profile in [None, Some("contracts"), Some("throws-direct")] {
+        // Post-triage floors (the 2026-07-29 sweep ruling): `offset.undeclared`
+        // took its A-G10 END-state promotion to the contracts rung after
+        // measuring zero corpus findings; `offset.maybe-missing` stays at
+        // strict until the assertion-helper discharge lands. Below each id's
+        // floor, nothing displays or captures — default stays byte-identical
+        // to its pre-S6 output.
+        for profile in [None, Some("throws-direct")] {
             let s = empty().resolve(profile).unwrap();
             for id in [OFFSET_UNDECLARED_ID, OFFSET_MAYBE_MISSING_ID] {
                 assert!(!s.is_surfaced(&diag(id, None)), "`{id}` must not display on {profile:?}");
                 assert!(!s.surfaces_id(id), "`{id}` must not be captured on {profile:?}");
             }
         }
+        let c = empty().resolve(Some("contracts")).unwrap();
+        assert!(c.is_surfaced(&diag(OFFSET_UNDECLARED_ID, None)), "promoted to contracts");
+        assert!(c.surfaces_id(OFFSET_UNDECLARED_ID), "promoted to contracts");
+        assert!(!c.is_surfaced(&diag(OFFSET_MAYBE_MISSING_ID, None)), "still strict-only");
+        assert!(!c.surfaces_id(OFFSET_MAYBE_MISSING_ID), "still strict-only");
     }
 
     #[test]

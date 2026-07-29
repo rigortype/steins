@@ -70,14 +70,19 @@ const AB: &str = "array{a?: string, b?: string}";
 // ---- Registry wiring (A-G10) -----------------------------------------------
 
 #[test]
-fn both_strict_leg_ids_are_contract_layer_at_the_strict_floor() {
-    // The measurement-first posture: A-G10's END state puts `offset.undeclared` at
-    // the `contracts` floor, but S6 ships BOTH at `strict` so the corpus triage is
-    // what promotes it. This test is the tripwire for that promotion — moving the
-    // registry row without a deliberate decision fails here.
-    for id in [OFFSET_UNDECLARED_ID, OFFSET_MAYBE_MISSING_ID] {
+fn the_strict_leg_floors_pin_the_post_triage_ruling() {
+    // The measurement-first posture, completed: S6 shipped both ids at `strict`,
+    // the 2026-07-29 corpus sweep measured `offset.undeclared` at ZERO findings
+    // across 99,522 files, and the orchestrator took A-G10's END-state promotion
+    // to `contracts`. `offset.maybe-missing` (3 sweep findings, all one
+    // assertion-helper discharge gap) stays at `strict` until that discharge
+    // lands. This test remains the tripwire: either floor moving again without
+    // a deliberate ruling fails here.
+    for (id, floor) in
+        [(OFFSET_UNDECLARED_ID, Floor::Contracts), (OFFSET_MAYBE_MISSING_ID, Floor::Strict)]
+    {
         assert_eq!(layer(id), Some(steins_infer::Layer::Contract), "{id} is contract-layer");
-        assert_eq!(surface_floor(id), Some(Floor::Strict), "{id} ships at the strict floor");
+        assert_eq!(surface_floor(id), Some(floor), "{id} floor per the triage ruling");
     }
 }
 
