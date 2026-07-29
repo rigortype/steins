@@ -8779,13 +8779,21 @@ fn truthy_narrow(f: &Fact) -> Option<Fact> {
 
 /// Add string predicates to a String-based abstract fact (union-closed); a
 /// non-string or finite fact is returned unchanged.
+///
+/// **Both arms close under implication.** [`StrPreds`] documents itself as
+/// "canonically closed", and the `Refined` arm gets that for free from
+/// [`StrPreds::union`] — the `General` arm, which starts from no predicates, has
+/// to ask for it. Storing a raw `NON_FALSY` bit produces a fact that renders as
+/// `non-falsy-string` but answers `false` to "is it non-empty?", which is the
+/// closure existing to prevent: a consumer testing the weaker predicate (DR3's
+/// `explode` separator gate is the first) would silently miss the stronger one.
 fn add_str_preds(f: &Fact, preds: StrPreds) -> Fact {
     match f {
         Fact::Refined { base: Base::String, refinement: Refinement::Str(have), nullable } => {
             Fact::refined(Base::String, Refinement::Str(have.union(preds)), *nullable)
         }
         Fact::General { base: Base::String, nullable } => {
-            Fact::refined(Base::String, Refinement::Str(preds), *nullable)
+            Fact::refined(Base::String, Refinement::Str(preds.close()), *nullable)
         }
         other => other.clone(),
     }
@@ -15390,6 +15398,13 @@ fn shape_builtin_return_fact(
     if poisoned {
         return None;
     }
+    // The argument-DISPATCHED family (ADR-0064 seam ii, DR3) sits at the same
+    // seam, one step earlier: its rules read arguments this rung's single-shape
+    // pattern cannot even bind (a separator, a literal flag, a subject's base).
+    // Declining falls straight through to the shape rung below, unchanged.
+    if let Some(out) = arg_dispatch_return_fact(cx, folder, name, args, env) {
+        return Some(out);
+    }
     let [ArgValue::Var(var)] = args else { return None };
     let known = env.get(var)?;
     let Some(Fact::Shape { shape, nullable: false }) = &known.fact else { return None };
@@ -15493,6 +15508,265 @@ fn shape_projection_fact(
     }
     let reflected = folder.builtin_return_type(name)?;
     declared.iter().any(|d| d.eq_ignore_ascii_case(&reflected)).then_some(out)
+}
+
+/// **The argument-dispatched transfers** (ADR-0064 seam ii, the DR3 batch).
+///
+/// [`shape_builtin_return_fact`]'s own rung reads exactly one argument, and that
+/// argument has to be an array — `count($x)`, `array_values($x)`. The transfers
+/// here need strictly more: which argument decides the answer varies by function
+/// (`explode`'s separator, `var_export`'s flag, `preg_replace`'s subject), and
+/// the deciding fact is a scalar, not a shape. So the seam gains ONE thing — a
+/// per-argument fact reader ([`transfer_arg_fact`]) — and every rule stays a
+/// plain `&[ArgValue] -> Option<Fact>` function behind the same gate.
+///
+/// **The admission gate is [`shape_projection_fact`]'s, verbatim**: the running
+/// engine's own reflected *declaration* must be the one the rule was written
+/// against. These results are array/nullable-union facts the scalar envelope path
+/// (`envelope_fact`) cannot represent at all, so there is no envelope to be
+/// extensionally inside — the declaration is what countersigns them, and it
+/// carries the same sidecar-presence and A9 monkey-patch legs. A run with no PHP,
+/// a monkey-patch extension, a project function shadowing the name, or an engine
+/// whose declaration has moved withholds the rule rather than trusting it.
+///
+/// **Stratum is ADR-0061 §3's derivation clause**: `min` over every argument the
+/// call passes, exactly as [`value_stratum`]'s own `Call` arm computes it — a
+/// transfer premised on a docblock-claimed separator is `Asserted` and can never
+/// premise a proof-layer finding.
+///
+/// Every rule below is **independently implemented** (ADR-0061 §4): authored from
+/// `php -r` probes against `PINNED_PHP` and php.net's documented semantics, not
+/// from phpstan-src text — hence no port header on this module.
+fn arg_dispatch_return_fact(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    name: &str,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+) -> Option<(Fact, Stratum)> {
+    /// `explode`/`range`: `array` (PHP 8.5.8 `ReflectionFunction::getReturnType`).
+    const ARRAY: &[&str] = &["array"];
+    /// `var_export`: `?string` — the flag is what strips the null arm.
+    const NULLABLE_STRING: &[&str] = &["?string", "string|null"];
+    /// `preg_replace`: the three-member union, either rendering order.
+    const PREG_REPLACE: &[&str] = &["array|string|null", "string|array|null"];
+
+    let (out, declared): (Fact, &[&str]) = match name.to_ascii_lowercase().as_str() {
+        "explode" => (explode_transfer(cx, folder, args, env)?, ARRAY),
+        "range" => (range_transfer(cx, folder, args, env)?, ARRAY),
+        "preg_replace" => (preg_replace_transfer(cx, folder, args, env)?, PREG_REPLACE),
+        "var_export" => (var_export_transfer(cx, folder, args, env)?, NULLABLE_STRING),
+        // `json_decode` is the batch's recorded DECLINE, not an omission: its
+        // reflected declaration is bare `mixed`, and the soundest envelope any
+        // flag combination admits — `$assoc = true` still allows
+        // `array|int|float|string|bool|null` — is a six-base union the four-layer
+        // domain has no single `Fact` for (`envelope_fact`'s multi-base `None`).
+        // A rule that cannot state its own answer declines (ADR-0061 §1).
+        _ => return None,
+    };
+    if cx.index.has_simple_function(name) {
+        return None;
+    }
+    let reflected = folder.builtin_return_type(name)?;
+    if !declared.iter().any(|d| d.eq_ignore_ascii_case(&reflected)) {
+        return None;
+    }
+    let stratum = args.iter().fold(Stratum::Verified, |acc, v| acc.min(value_stratum(v, env, None)));
+    Some((out, stratum))
+}
+
+/// The fact one call argument carries: a bound variable's env fact, else the
+/// literal (or fold-resolved) value's own Singleton. The seam's whole extension
+/// beyond the single-shape-argument pattern.
+fn transfer_arg_fact(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+) -> Option<Fact> {
+    if let ArgValue::Var(v) = value {
+        return env.get(v).and_then(|k| k.fact.clone());
+    }
+    let lit = cx.resolve_literal(value, env, false, folder)?;
+    singleton_fact(&lit, cx.php_minor)
+}
+
+/// `explode($separator, $string)` → **`non-empty-list<string>`**.
+///
+/// PHP 8 removed `explode`'s `false` arm (the empty separator became a
+/// `ValueError`), and the split of *any* string on a non-empty separator has at
+/// least one piece — `explode(',', '')` is `['']`, not `[]`. Witnesses at
+/// `PINNED_PHP` (8.5.8): `explode(',', '')` → `array(1){ [0]=> "" }`;
+/// `explode('', 'abc')` → `ValueError: explode(): Argument #1 ($separator) must
+/// not be empty`.
+///
+/// **Two declines, both load-bearing.** An empty (or not-known-non-empty)
+/// separator declines — the `ValueError` form has no return value to describe,
+/// and an unknown separator might be it. And the three-argument form declines
+/// **because `$limit` breaks non-emptiness outright**: the probe
+/// `explode(',', 'a,b,c', -5)` returns `array(0){}` at 8.5.8, so a rule that kept
+/// `non-empty` across a limit argument would be a false premise, not a lost
+/// refinement.
+fn explode_transfer(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+) -> Option<Fact> {
+    // Exactly two arguments — see the `$limit` witness above.
+    let [sep, _string] = args else { return None };
+    let sep = transfer_arg_fact(cx, folder, sep, env)?;
+    // The `$string` argument is deliberately unread: it is declared `string`, so
+    // anything reaching the body is one (or was coerced to one), and every string
+    // splits to at least one string piece.
+    fact_is_non_empty_string(&sep)
+        .then(|| list_transfer_fact(true, Some(Fact::General { base: Base::String, nullable: false })))
+}
+
+/// `range($start, $end [, $step])` → **`non-empty-list<int>`** for integral
+/// bounds and step, **`non-empty-list<mixed>`** otherwise.
+///
+/// The unconditional half is the stronger claim and the one worth having: PHP's
+/// `range` always returns a *packed* array — keys `0..n-1`, so a list — with at
+/// least one entry, because equal bounds still produce one (`range(1, 1)` →
+/// `[1]`, witnessed at 8.5.8). No argument shape changes that: `range(3, 1)` is
+/// the three-element descending list, and `range('a', 'c')` is
+/// `['a', 'b', 'c']` — a non-empty list of strings. Every input PHP 8.3+ refuses
+/// (`$step` of `0`, a `$step` larger than the span, a negative `$step` on an
+/// increasing range — all three witnessed as `ValueError` at 8.5.8) produces no
+/// value at all, so non-emptiness survives them vacuously.
+///
+/// The element bound is where the arguments dispatch, and it is **narrower than
+/// "any float involved"** on purpose: PHP 8.3's saner-`range` semantics make
+/// `range(1, 3, 1.0)` an *int* array (witnessed), so a float step does not imply
+/// a float result, while `range(1, 2, 0.5)` and `range(1.0, 3.0)` are float
+/// arrays. Rather than encode that fractional-part rule, the transfer claims
+/// `int` only when every bound and the step are known integral and leaves the
+/// element unknown otherwise — the list-ness and the non-emptiness still land.
+///
+/// The integrality test is [`fact_is_int`], which also passes a *nullable* int.
+/// That is sound for the same vacuous reason the `ValueError` inputs are:
+/// `range(null, 3)` is a `TypeError` at 8.3+, so the `null` member of such a fact
+/// contributes no returned value for the claim to be wrong about.
+fn range_transfer(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+) -> Option<Fact> {
+    // `range` accepts two or three arguments; any other arity is an
+    // `ArgumentCountError`, and the seam refuses to describe a call PHP rejects.
+    if !(2..=3).contains(&args.len()) {
+        return None;
+    }
+    let mut integral = true;
+    for a in args {
+        // No short-circuit: every argument's fact is read, so the decision is a
+        // function of the whole call rather than of evaluation order.
+        integral &= transfer_arg_fact(cx, folder, a, env).as_ref().is_some_and(fact_is_int);
+    }
+    Some(list_transfer_fact(
+        true,
+        integral.then_some(Fact::General { base: Base::Int, nullable: false }),
+    ))
+}
+
+/// `preg_replace($pattern, $replacement, $subject, …)` → **`string|null`** for a
+/// string subject, **`array|null`** for an array one.
+///
+/// The reflected declaration is the three-member `array|string|null`, which
+/// `envelope_fact` cannot represent (multi-base) — so today the call carries *no*
+/// fact at all, and the subject's own base is exactly what splits it. `$subject`
+/// alone governs: `preg_replace(['/a/', '/b/'], 'z', 'ab')` is `'zz'`, a string,
+/// despite the array `$pattern` (witnessed at 8.5.8).
+///
+/// The `null` arm is **kept on both sides**, deliberately. A string subject
+/// genuinely returns `null` on a PCRE error (`@preg_replace('/a', 'b', 'aaa')` →
+/// `NULL`, witnessed). The array-subject probes returned `array(0){}` rather than
+/// `null` on the same errors — but "no probe produced null" is not a proof that
+/// none can, and ADR-0061 §2's ledger only balances one way: a kept-but-impossible
+/// `null` costs one arm of precision, a dropped-but-possible one is a false
+/// premise. `$limit`/`&$count` may follow without changing the answer.
+fn preg_replace_transfer(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+) -> Option<Fact> {
+    if !(3..=5).contains(&args.len()) {
+        return None;
+    }
+    let string_or_null = || Fact::General { base: Base::String, nullable: true };
+    let array_or_null =
+        || Fact::Shape { shape: Box::new(ShapeFact::plain_array()), nullable: true };
+    match transfer_arg_fact(cx, folder, &args[2], env)? {
+        Fact::Singleton(Val::Str(_)) => Some(string_or_null()),
+        Fact::Singleton(Val::Array(_)) => Some(array_or_null()),
+        Fact::OneOf(ref vals) if vals.iter().all(|v| matches!(v, Val::Str(_))) => {
+            Some(string_or_null())
+        }
+        Fact::OneOf(ref vals) if vals.iter().all(|v| matches!(v, Val::Array(_))) => {
+            Some(array_or_null())
+        }
+        // A nullable subject declines: `null` is a deprecation-plus-coercion in
+        // weak mode and a `TypeError` in strict mode, and neither is a case this
+        // rule was probed against.
+        Fact::Refined { base: Base::String, nullable: false, .. }
+        | Fact::General { base: Base::String, nullable: false } => Some(string_or_null()),
+        Fact::Shape { nullable: false, .. } => Some(array_or_null()),
+        _ => None,
+    }
+}
+
+/// `var_export($value, true)` → **`string`**.
+///
+/// The reflected declaration is `?string`, and the `null` half is precisely the
+/// `$return = false` behavior: the export is *printed* and nothing is returned.
+/// A literal `true` flag is therefore the whole transfer — it strips the null
+/// arm, and nothing else about `$value` matters (`var_export(null, true)` is the
+/// four-character string `'NULL'`, not `null`; witnessed at 8.5.8).
+///
+/// The one-argument and literal-`false` forms decline: the reflected `?string`
+/// envelope already describes them exactly, and a rule that restated its own
+/// envelope would add a stratum-carrying fact where a `Verified` one already
+/// stands (ADR-0061 §3's replace-if-weaker corollary).
+fn var_export_transfer(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+) -> Option<Fact> {
+    let [_value, flag] = args else { return None };
+    let flag = transfer_arg_fact(cx, folder, flag, env)?;
+    (flag == Fact::Singleton(Val::Bool(true)))
+        .then_some(Fact::General { base: Base::String, nullable: false })
+}
+
+/// A `list<T>` / `non-empty-list<T>` fact, through the canonical constructor —
+/// `None` element is the unknown floor (`list<mixed>`).
+fn list_transfer_fact(non_empty: bool, elem: Option<Fact>) -> Fact {
+    use steins_domain::{KeyClass, Tail};
+    shape_fact(ShapeFact::normalize(
+        Vec::new(),
+        Tail::Unsealed { key: KeyClass::Int, value: elem.map(Box::new) },
+        Certainty::Yes,
+        non_empty,
+        Vec::new(),
+    ))
+}
+
+/// Is every value this fact admits a non-empty string? A literal (or literal set)
+/// answers by inspection; an abstract string answers through the predicate the
+/// domain already models. Anything else — including a nullable string — is `false`.
+fn fact_is_non_empty_string(f: &Fact) -> bool {
+    match f {
+        Fact::Singleton(Val::Str(s)) => !s.is_empty(),
+        Fact::OneOf(vals) => vals.iter().all(|v| matches!(v, Val::Str(s) if !s.is_empty())),
+        Fact::Refined { base: Base::String, refinement: Refinement::Str(p), nullable: false } => {
+            p.contains_all(StrPreds::NON_EMPTY)
+        }
+        _ => false,
+    }
 }
 
 fn shape_fact(shape: ShapeFact) -> Fact {
