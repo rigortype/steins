@@ -188,6 +188,54 @@ alone, both at once, each against the length half, both against it, and casing
 against the falsy/numeric axes; the four the shipped `lower_identifier` table
 lowers to are among them. Fact universe 48 → 68, agreed lines 6,039 → 9,868.
 
+## The array-key-cast pair (conformance slice C5)
+
+`StrPreds` gained `decimalInt` and `nonDecimalInt` — PHPStan's
+`decimal-int-string` / `non-decimal-int-string`, which are the engine's own
+array-key cast: `$a['123']` stores under an `int` key, `$a['007']` does not. The
+spec's job here is the same as always (the classifier is a `Model` parameter),
+but the pair puts a genuinely new question to the lattice, and the answer is
+worth recording because it is a *limit*, not a law.
+
+**Proved, for every input.** Every law is again the same statement, now over
+seven predicates, and all still hold — including `inter_closed`, whose whole
+argument is that the implications are Horn clauses over positive literals.
+`decimalInt`'s three consequents (`Numeric`, `Lowercase`, `Uppercase`) are Horn
+in exactly that sense, so the argument is unchanged rather than re-made. The
+one-and-two-argument `decide` laws grew 4× and 16× and now carry an explicit
+`maxHeartbeats`; the three- and four-argument laws ride `containsAll_iff` and
+the meet laws, which do not grow with the predicate count at all. That is the
+C2 refactor paying for itself: **no proof needed restructuring this slice.**
+
+**The negation ceiling, stated where it belongs.** `decimalInt` and
+`nonDecimalInt` are complementary *under the classifier*, and the spec cannot
+see that — `predsOf` is a parameter. So the set carrying both bits is a lawful
+value of the type, it is reachable (`DECIMAL_INT.union NON_DECIMAL_INT`), and it
+denotes ∅. Every theorem holds for it; none of them says it is empty, because
+that would be a statement about the classifier and not about the lattice. This
+is not a modelling shortcut — it is the same ceiling the shipped Rust hits:
+`admits_val` decides the pair exactly (it asks `StrPreds::of`), while the
+abstract-fact leg answers `Maybe` where an exclusion-aware representation would
+answer `No`. The vector file carries the ⊥ set for exactly this reason: its
+`admits` lines all read `false` and its `satisfiesstr` lines still read `maybe`,
+on both sides, which is the ceiling written out as data.
+
+**Checked, not proved** (the classifier, as always). No new atom was needed:
+`"0"` and `"5"` are decimal-int strings, and `" 5 "` and `"00"` are the two the
+whole fixture family turns on — `is_numeric` yet *not* canonical, so they keep
+their string identity as an array key. Every atom carries exactly one of the two
+bits, so the classifier table is itself the check that they are complementary.
+`crates/steins-domain/tests/php_oracle.rs` asks the real engine over 36 cases by
+inserting each as an array key and reading back `is_int(array_key_first(...))` —
+the definition, not a proxy for it — and it agreed on the first run, including
+`"-0"` (PHP writes zero back as `"0"`), `PHP_INT_MAX`, and one past it.
+
+The predicate universe grew from 17 sets to 22, a spanning subset again: the
+closed `DecimalInt`, the bare complement bit, `of "00"`, the complement against
+the length axis, and the ⊥ set. Fact universe 68 → 78, agreed lines 9,868 →
+12,208, associativity tally 314,432 → 474,552 triples with zero failures.
+
+
 ## The narrowing operators (ADR-0062 S4)
 
 Four targeted refinement operators (A-G7 — never a general ⊓) mirror
@@ -353,7 +401,7 @@ ordinary `test` job on every PR.
 | File | Contents |
 | --- | --- |
 | `SteinsDomain/Certainty.lean` | the trinary judgment; Kleene laws; `allOf` as the quantifier |
-| `SteinsDomain/Preds.lean` | `StrPreds` as five named `Bool`s; `containsAll` a partial order, `inter` its meet; the Horn closure claim; the casing pair's orthogonality |
+| `SteinsDomain/Preds.lean` | `StrPreds` as seven named `Bool`s; `containsAll` a partial order, `inter` its meet; the Horn closure claim; the casing pair's orthogonality; the array-key-cast pair and the negation ceiling it names |
 | `SteinsDomain/Range.lean` | `IntRange`; hull/intersection laws by `omega` |
 | `SteinsDomain/Val.lean` | values, the `(rank, tie)` total order and its three laws, and `Model` — the classifier parameters with their two coherence laws |
 | `SteinsDomain/Canon.lean` | the sorted-deduped finite layer and its canonicity |

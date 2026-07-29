@@ -712,3 +712,151 @@ fn a_reserved_type_word_is_never_shadowed() {
     assert_eq!(param_count(&format!("{f}f(5);")), 0, "int is int");
     assert_eq!(param_count(&format!("{f}f('5');")), 1, "and still rejects a numeric string");
 }
+
+// ==========================================================================
+// C5 — the array-key-cast pair (census bucket vii).
+//
+// `decimal-int-string` is the string PHP writes an integer back as, so it is
+// cast to `int` as an array key; `non-decimal-int-string` is its complement
+// within `string`. The two fixtures
+// (`phpdoc_advanced_fallback_{,non_}decimal_int_string`) probe exactly the
+// strings that separate them from `numeric-string`.
+// ==========================================================================
+
+#[test]
+fn decimal_int_string_rejects_the_non_canonical_numerics() {
+    let f = "<?php /** @param decimal-int-string $value */ function f($value): void {}\n";
+    // Canonical decimal notation, negative included.
+    assert_eq!(param_count(&format!("{f}f('123');")), 0);
+    assert_eq!(param_count(&format!("{f}f('-1');")), 0);
+    assert_eq!(param_count(&format!("{f}f('0');")), 0, "'0' is canonical, though falsy");
+    // Numeric, but not how PHP writes the integer back — the fixture's E? lines.
+    assert_eq!(param_count(&format!("{f}f('007');")), 1, "leading zeros survive as a key");
+    assert_eq!(param_count(&format!("{f}f('+1');")), 1, "'+1' survives as a key");
+    assert_eq!(param_count(&format!("{f}f('abc');")), 1, "not an integer at all");
+    // The edges the fixture does not probe but the predicate decides.
+    assert_eq!(param_count(&format!("{f}f('-0');")), 1, "PHP writes zero back as '0'");
+    assert_eq!(
+        param_count(&format!("{f}f('9223372036854775808');")),
+        1,
+        "one past PHP_INT_MAX stays a string key"
+    );
+    assert_eq!(param_count(&format!("{f}f('9223372036854775807');")), 0, "PHP_INT_MAX casts");
+    // A non-string is not in the running at all.
+    assert_eq!(param_count(&format!("{f}f(123);")), 1, "an int is not a decimal-int-STRING");
+}
+
+#[test]
+fn non_decimal_int_string_rejects_only_canonical_decimals() {
+    let f = "<?php /** @param non-decimal-int-string $value */ function f($value): void {}\n";
+    // Wider than the name suggests: anything that keeps its string identity.
+    for ok in ["'00'", "'1.2'", "'foo'", "'+1'", "'18E+3'", "''", "'-0'"] {
+        assert_eq!(param_count(&format!("{f}f({ok});")), 0, "{ok} keeps its key identity");
+    }
+    // The one thing excluded — the fixture's two E? lines.
+    assert_eq!(param_count(&format!("{f}f('123');")), 1);
+    assert_eq!(param_count(&format!("{f}f('-1');")), 1);
+}
+
+/// The `decimal-int-string` return value satisfies a native `string` parameter
+/// (both fixtures open with this, and it is the leg that runs through the
+/// *fact* lane rather than a proven value).
+#[test]
+fn the_decimal_pair_lowers_to_string_facts() {
+    let src = "<?php\n\
+        /** @return decimal-int-string */ function r() { return '123'; }\n\
+        function s(string $v): void {}\n\
+        s(r());\n";
+    assert_eq!(findings(src).len(), 0, "a decimal-int-string is a string");
+    let src2 = "<?php\n\
+        /** @return non-decimal-int-string */ function r() { return '00'; }\n\
+        function s(string $v): void {}\n\
+        s(r());\n";
+    assert_eq!(findings(src2).len(), 0, "a non-decimal-int-string is a string");
+}
+
+/// The negation ceiling, stated as a test rather than a comment: the predicate
+/// set is a conjunction over positive literals, so an *abstract* fact carrying
+/// one bit cannot be refuted against the other. Only proven values decide —
+/// which they do, so the ceiling costs precision exactly when the value is not
+/// in hand (here: a returned value the analyzer cannot evaluate).
+#[test]
+fn the_complementary_pair_is_not_refutable_abstractly() {
+    let abstract_src = "<?php\n\
+        /** @return decimal-int-string */ function r() { return (string) \\rand(); }\n\
+        /** @param non-decimal-int-string $v */ function s($v): void {}\n\
+        s(r());\n";
+    assert_eq!(
+        param_findings(abstract_src).len(),
+        0,
+        "a decimal-int-string FACT is silently accepted by non-decimal-int-string \
+         — sound (never a wrong verdict), imprecise, and the honest ceiling"
+    );
+    // The same relation with the value in hand: decided, because `admits_val`
+    // asks `StrPreds::of` rather than reasoning about the bits.
+    let proven_src = "<?php\n\
+        /** @return decimal-int-string */ function r() { return '123'; }\n\
+        /** @param non-decimal-int-string $v */ function s($v): void {}\n\
+        s(r());\n";
+    assert_eq!(param_findings(proven_src).len(), 1, "the proven value decides");
+}
+
+// ==========================================================================
+// C6 — the subtraction spellings (census bucket x): `non-null-mixed`,
+// `non-empty-mixed`, `non-empty-scalar`.
+// ==========================================================================
+
+#[test]
+fn non_null_mixed_excludes_exactly_null() {
+    let f = "<?php /** @param non-null-mixed $value */ function f($value): void {}\n";
+    for ok in ["5", "0", "''", "'x'", "[]", "false", "new \\stdClass()"] {
+        assert_eq!(param_count(&format!("{f}f({ok});")), 0, "{ok} is not null");
+    }
+    assert_eq!(param_count(&format!("{f}f(null);")), 1, "null is excluded");
+}
+
+#[test]
+fn non_empty_mixed_subtracts_every_falsy_value_of_every_type() {
+    let f = "<?php /** @param non-empty-mixed $value */ function f($value): void {}\n";
+    for ok in ["1", "'x'", "[1]", "new \\stdClass()", "-1", "1.5", "true", "'0.0'", "'00'"] {
+        assert_eq!(param_count(&format!("{f}f({ok});")), 0, "{ok} is truthy");
+    }
+    for falsy in ["''", "0", "[]", "null", "false", "0.0", "'0'"] {
+        assert_eq!(param_count(&format!("{f}f({falsy});")), 1, "{falsy} is falsy");
+    }
+}
+
+#[test]
+fn non_empty_scalar_subtracts_the_falsy_member_of_each_base() {
+    let f = "<?php /** @param non-empty-scalar $value */ function f($value): void {}\n";
+    for ok in ["1", "1.5", "'x'", "true", "-1"] {
+        assert_eq!(param_count(&format!("{f}f({ok});")), 0, "{ok} is a truthy scalar");
+    }
+    // The five E? lines. `0`/`0.0` are the two PHPStan stays silent on (its
+    // `float` member is never narrowed and swallows both); Steins spells the
+    // subtraction itself, so all five are decided.
+    for falsy in ["0", "0.0", "''", "false", "'0'"] {
+        assert_eq!(param_count(&format!("{f}f({falsy});")), 1, "{falsy} is falsy");
+    }
+    // The `scalar` half still holds: a non-scalar is out regardless of truth.
+    assert_eq!(param_count(&format!("{f}f([1]);")), 1, "an array is not a scalar");
+    assert_eq!(param_count(&format!("{f}f(null);")), 1, "null is not a scalar");
+}
+
+/// The cuts decide against a *fact* only where the fact's own refinement
+/// carries the answer — everything else stays silent rather than guessing.
+#[test]
+fn the_falsy_cut_decides_abstractly_only_where_the_refinement_answers() {
+    // `non-falsy-string` IS the string half of the cut → accepted, no finding.
+    let ok = "<?php\n\
+        /** @return non-falsy-string */ function r() { return 'x'; }\n\
+        /** @param non-empty-mixed $v */ function f($v): void {}\n\
+        f(r());\n";
+    assert_eq!(param_findings(ok).len(), 0);
+    // A plain `string` fact holds both `''` and `'x'` → silent, not refuted.
+    let maybe = "<?php\n\
+        /** @return string */ function r() { return 'x'; }\n\
+        /** @param non-empty-mixed $v */ function f($v): void {}\n\
+        f(r());\n";
+    assert_eq!(param_findings(maybe).len(), 0, "a string fact is not refutable here");
+}

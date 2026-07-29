@@ -1,6 +1,7 @@
 //! Ask-the-real-thing at the unit level: our `php_is_numeric` must agree
-//! with the engine's `is_numeric()` cell for cell, and our casing predicates
-//! with `strtolower()`/`strtoupper()` identity. Skips (loudly) when no `php`
+//! with the engine's `is_numeric()` cell for cell, our casing predicates
+//! with `strtolower()`/`strtoupper()` identity, and `php_str_is_decimal_int`
+//! with the engine's own array-key cast. Skips (loudly) when no `php`
 //! binary is available.
 
 use std::process::Command;
@@ -129,6 +130,63 @@ fn casing_predicates_match_the_engine() {
             steins_domain::php_str_is_uppercase(case),
             engine_upper,
             "strtoupper identity disagreement on {case:?}"
+        );
+    }
+}
+
+/// The `decimal-int-string` cases. The interesting ones are all *numeric*
+/// strings that are nevertheless not canonical (`"007"`, `"+1"`, `"00"`,
+/// `"-0"`), plus both int-range edges — `PHP_INT_MAX` casts, one past it does
+/// not, and `PHP_INT_MIN` does.
+const DECIMAL_INT_CASES: &[&str] = &[
+    "", "0", "-0", "1", "-1", "007", "-007", "00", "+1", "+0", "1234", "-1234", "1.2", "0.0",
+    "18E+3", "1e5", "1E5", " 1", "1 ", " 1 ", "\t1", "1,3", "foo", "abc", "-", "--1", "0x1A",
+    "0b1", "1_000", "9223372036854775807", "9223372036854775808", "-9223372036854775808",
+    "-9223372036854775809", "10000000000000000000", "01", "0777",
+];
+
+/// The engine's own answer to "does this string keep its identity as an array
+/// key": insert it and ask whether the key came back an `int`. That *is*
+/// `decimal-int-string`, so this is the definition, not a proxy for it.
+#[test]
+fn decimal_int_string_matches_the_array_key_cast() {
+    let probe = Command::new("php").arg("--version").output();
+    if probe.is_err() {
+        eprintln!("SKIP: php not on PATH; oracle comparison not run");
+        return;
+    }
+
+    let script = r#"
+        $cases = json_decode(stream_get_contents(STDIN), true, 512, JSON_THROW_ON_ERROR);
+        foreach ($cases as $c) {
+            $a = [];
+            $a[$c] = 1;
+            echo is_int(array_key_first($a)) ? "1\n" : "0\n";
+        }
+    "#;
+    let mut child = Command::new("php")
+        .args(["-d", "display_errors=stderr", "-r", script])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn php");
+    {
+        use std::io::Write;
+        let json: Vec<String> = DECIMAL_INT_CASES.iter().map(|c| json_string(c)).collect();
+        let payload = format!("[{}]", json.join(","));
+        child.stdin.take().expect("stdin").write_all(payload.as_bytes()).expect("write");
+    }
+    let out = child.wait_with_output().expect("php run");
+    assert!(out.status.success(), "php failed: {}", String::from_utf8_lossy(&out.stderr));
+    let answers: Vec<&str> = std::str::from_utf8(&out.stdout).expect("utf8").lines().collect();
+    assert_eq!(answers.len(), DECIMAL_INT_CASES.len(), "answer count mismatch");
+
+    for (case, answer) in DECIMAL_INT_CASES.iter().zip(answers) {
+        let engine = answer == "1";
+        let ours = steins_domain::php_str_is_decimal_int(case);
+        assert_eq!(
+            ours, engine,
+            "array-key cast disagreement on {case:?}: engine={engine}, ours={ours}"
         );
     }
 }

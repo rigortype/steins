@@ -27,7 +27,10 @@ use steins_domain::{
 /// because the spec models a string value as its position in the total order.
 /// The trailing field of each `atom` line is `StrPreds::of` applied to these:
 /// the classifier check. `"ABC"` is the atom that separates the two casing
-/// predicates (`'A' < 'a'`, hence its rank).
+/// predicates (`'A' < 'a'`, hence its rank); `"00"` and `" 5 "` are the atoms
+/// that separate `decimal-int-string` from `numeric-string` — numeric, but not
+/// how PHP writes an integer back, so they keep their string identity as an
+/// array key.
 const STR_ATOMS: [&str; 7] = ["", " 5 ", "0", "00", "5", "ABC", "abc"];
 
 /// The float atoms, with the literal text the spec prints for each.
@@ -143,6 +146,12 @@ fn render_preds(p: StrPreds) -> String {
     }
     if p.contains_all(StrPreds::UPPERCASE) {
         parts.push("UC");
+    }
+    if p.contains_all(StrPreds::DECIMAL_INT) {
+        parts.push("DEC");
+    }
+    if p.contains_all(StrPreds::NON_DECIMAL_INT) {
+        parts.push("NDEC");
     }
     if parts.is_empty() { "-".to_owned() } else { parts.join("|") }
 }
@@ -371,8 +380,18 @@ fn preds_universe() -> Vec<StrPreds> {
         // reachable as `of("0") ⊓ of("1e5")` (resp. `of("1E5")`).
         StrPreds::NUMERIC.close().union(StrPreds::LOWERCASE),
         StrPreds::NUMERIC.close().union(StrPreds::UPPERCASE),
-        // `of("5")` — every predicate at once, the joint-satisfiability witness.
+        // `of("5")` — every predicate but the complement bit, the
+        // joint-satisfiability witness.
         StrPreds::of("5"),
+        // The array-key-cast pair. `of("0")` is the falsy decimal-int-string;
+        // `of("00")` is the near miss the whole fixture family turns on
+        // (numeric, NOT canonical); and the last is the ⊥ set carrying both
+        // complementary bits — reachable through `union`, denoting ∅.
+        StrPreds::DECIMAL_INT.close(),
+        StrPreds::NON_DECIMAL_INT,
+        StrPreds::of("00"),
+        StrPreds::NON_EMPTY.union(StrPreds::NON_DECIMAL_INT),
+        StrPreds::DECIMAL_INT.union(StrPreds::NON_DECIMAL_INT),
     ]
 }
 

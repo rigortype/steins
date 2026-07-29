@@ -74,12 +74,40 @@ pub enum CKey {
     Str(String),
 }
 
+/// What a [`ContractTy::MixedMinus`] subtracts from `mixed`.
+///
+/// Both cuts are defined by a *value* predicate the domain already owns, not by
+/// a type-algebra difference: this is the whole reason the pair needs one leaf
+/// variant rather than a general subtraction operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MixedCut {
+    /// `null` only — Phan's `non-null-mixed`.
+    Null,
+    /// Every falsy value — `false`, `0`, `0.0`, `''`, `'0'`, `null`, `[]` —
+    /// PHPStan's `non-empty-mixed` (`MixedType` with `StaticTypeFactory::falsey()`
+    /// subtracted). Subsumes [`MixedCut::Null`].
+    Falsy,
+}
+
 /// The semantic contract type — the lowered, normalized form phpdoc types
 /// are checked through.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContractTy {
     /// `mixed` — admits everything, including null.
     Mixed,
+    /// `mixed` with a cut removed: `non-null-mixed` (Phan) and
+    /// `non-empty-mixed` (PHPStan).
+    ///
+    /// A **negative** leaf, and the only one — every other variant here states
+    /// what a value must *be*. It exists because neither spelling is a union of
+    /// the forms above: there is no `Val::Object` to put in a union (so
+    /// "anything but null" cannot be enumerated), and no float refinement (so
+    /// "float minus `0.0`" cannot be spelled either). Judging the cut against a
+    /// concrete value is exact — [`steins_domain::php_is_falsy`] *is* the
+    /// definition; judging it against an abstract fact decides only where the
+    /// fact's own refinement already answers (a string knowing `non-falsy`, an
+    /// int range missing zero), and answers `Maybe` otherwise.
+    MixedMinus(MixedCut),
     /// `never` — admits nothing.
     Never,
     /// The null type.
@@ -232,6 +260,18 @@ fn array_key() -> ContractTy {
     ContractTy::Union(vec![ContractTy::Base(Base::Int), ContractTy::Base(Base::String)])
 }
 
+/// The `scalar` union — the four scalar bases, in the canonical member order.
+/// Shared by the `scalar` keyword and by `non-empty-scalar`, which is this
+/// union intersected with the falsy cut.
+fn scalar() -> ContractTy {
+    ContractTy::Union(vec![
+        ContractTy::Base(Base::Int),
+        ContractTy::Base(Base::Float),
+        ContractTy::Base(Base::String),
+        ContractTy::Base(Base::Bool),
+    ])
+}
+
 /// Is `ty` exactly the `array-key` union [`array_key`] lowers to? A `MapOf`
 /// key of this shape is the honest floor a single-arg `array<V>`/`T[]`
 /// lowers to (`lower`/`lower_generic`, above) — the speller collapses it back
@@ -275,13 +315,26 @@ pub fn lower_identifier(name: &str) -> ContractTy {
         "mixed" => ContractTy::Mixed,
         "never" | "never-return" | "never-returns" | "no-return" | "noreturn" => ContractTy::Never,
         "void" => ContractTy::Opaque,
-        "scalar" => ContractTy::Union(vec![
-            ContractTy::Base(Base::Int),
-            ContractTy::Base(Base::Float),
-            ContractTy::Base(Base::String),
-            ContractTy::Base(Base::Bool),
-        ]),
+        "scalar" => scalar(),
         "array-key" => array_key(),
+        // The three subtraction spellings (census bucket x). `non-null-mixed`
+        // is Phan's; `non-empty-mixed` is PHPStan's `mixed` with the falsy
+        // values removed; `non-empty-scalar` is the same cut intersected with
+        // `scalar` — one cut, reused, rather than three hand-written value sets.
+        "non-null-mixed" => ContractTy::MixedMinus(MixedCut::Null),
+        "non-empty-mixed" => ContractTy::MixedMinus(MixedCut::Falsy),
+        // PHPStan resolves this to `float|int<min, -1>|int<1, max>|
+        // non-falsy-string|true` and so stays silent on `0`/`0.0` — its `float`
+        // member is never narrowed and an int is accepted wherever a float is
+        // expected, which lets both falsy numbers back in through the side door.
+        // Steins spells the subtraction itself instead, so `0` and `0.0` are
+        // rejected with the other three. Deliberate, and within the fixture's
+        // `E?` latitude (it names the PHPStan behaviour as an artifact of that
+        // widening, not as the semantics of the keyword).
+        "non-empty-scalar" => ContractTy::Inter(vec![
+            scalar(),
+            ContractTy::MixedMinus(MixedCut::Falsy),
+        ]),
         "numeric" => ContractTy::Union(vec![
             ContractTy::Base(Base::Int),
             ContractTy::Base(Base::Float),
@@ -308,6 +361,16 @@ pub fn lower_identifier(name: &str) -> ContractTy {
         "non-empty-uppercase-string" => {
             ContractTy::StrWith(StrPreds::NON_EMPTY.union(StrPreds::UPPERCASE))
         }
+        // The array-key-cast pair. `decimal-int-string` is the string PHP writes
+        // an integer back as, so it is cast to `int` as an array key; the
+        // `non-` form is its complement *within string*, which is wider than
+        // the name suggests — `'+1'`, `'00'`, `'18E+3'`, `'1.2'` and `'foo'`
+        // all keep their string identity, so all qualify. Two bits rather than
+        // one bit and a negation: the predicate set is a conjunction over
+        // positive literals, and the set that carries both denotes ∅
+        // (`StrPreds`'s module doc, and the ceiling noted on `admits_fact`).
+        "decimal-int-string" => ContractTy::StrWith(StrPreds::DECIMAL_INT.close()),
+        "non-decimal-int-string" => ContractTy::StrWith(StrPreds::NON_DECIMAL_INT),
         "literal-string" | "class-string" | "interface-string" | "enum-string" | "trait-string"
         | "callable-string" | "numeric-int-string" => ContractTy::StrOpaque,
         "positive-int" => ContractTy::IntIn(IntRange::POSITIVE),

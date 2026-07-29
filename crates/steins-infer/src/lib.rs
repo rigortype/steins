@@ -13324,9 +13324,16 @@ fn cval_as_val(v: &CVal) -> Option<Val> {
 /// would mean giving the value domain an object inhabitant.
 fn unrepresentable_verdict(cty: &steins_contract::ContractTy, v: &CVal) -> Tri {
     use steins_contract::ContractTy as C;
+    use steins_contract::MixedCut;
     match v {
         CVal::Object(..) => match cty {
             C::Mixed | C::ObjectAny => Tri::Yes,
+            // Both cuts of `mixed` keep every object: an object is not null,
+            // and PHP has considered every object truthy since PHP 7 (no
+            // `count()`-based falsiness survives), so `non-empty-mixed` admits
+            // it too. This is the arm that keeps `f(new stdClass())` against
+            // `@param non-empty-mixed` from being a manufactured `No`.
+            C::MixedMinus(_) => Tri::Yes,
             // An object may be `Traversable`, may have `__invoke`, and a
             // provenance-flavored string type is non-extensional (ADR-0038) — none
             // of it provable from the class name alone.
@@ -13337,8 +13344,15 @@ fn unrepresentable_verdict(cty: &steins_contract::ContractTy, v: &CVal) -> Tri {
         },
         // An array with an unrepresentable member: its array-ness is decided, its
         // contents are not, so only the contract's own array-ness answers.
-        CVal::Array(_) => match cty {
+        CVal::Array(entries) => match cty {
             C::Mixed | C::ArrayAny { non_empty: false } => Tri::Yes,
+            // An array's falsiness is its emptiness alone, and that *is*
+            // decided here however unrepresentable its members are — so both
+            // cuts answer exactly, with no reference to the contents.
+            C::MixedMinus(MixedCut::Null) => Tri::Yes,
+            C::MixedMinus(MixedCut::Falsy) => {
+                if entries.is_empty() { Tri::No } else { Tri::Yes }
+            }
             C::ArrayAny { .. }
             | C::ListOf { .. }
             | C::MapOf { .. }

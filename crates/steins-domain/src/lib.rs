@@ -48,7 +48,10 @@ mod value;
 
 pub use certainty::Certainty;
 pub use fact::{Fact, Refinement, CAP};
-pub use php::{php_is_falsy, php_is_numeric, php_str_is_lowercase, php_str_is_uppercase};
+pub use php::{
+    php_is_falsy, php_is_numeric, php_str_is_decimal_int, php_str_is_lowercase,
+    php_str_is_uppercase,
+};
 pub use preds::StrPreds;
 pub use range::IntRange;
 pub use shape::{

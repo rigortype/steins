@@ -336,3 +336,157 @@ fn non_positive_int_covers_zero() {
     // Exactly one value apart from `negative-int` — which is the point.
     assert_eq!(admits_val(&ty("negative-int"), &Val::Int(0)), No);
 }
+
+// ---------------------------------------------------------------------------
+// C5 — the array-key-cast pair.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn decimal_int_string_is_the_array_key_cast_not_is_numeric() {
+    let d = ty("decimal-int-string");
+    for yes in ["0", "1", "1234", "-1", "9223372036854775807", "-9223372036854775808"] {
+        assert_eq!(admits_val(&d, &s(yes)), Yes, "{yes:?}");
+    }
+    // Numeric, but not canonical — every one keeps its string identity.
+    for no in ["007", "+1", "00", "-0", "1.2", "18E+3", "9223372036854775808", "", "abc"] {
+        assert_eq!(admits_val(&d, &s(no)), No, "{no:?}");
+    }
+    // A `decimal-int-string` is a `numeric-string` and a `non-empty-string`
+    // (the closure), but NOT a `non-falsy-string` — `'0'` is one and is falsy.
+    assert_eq!(admits_val(&ty("numeric-string"), &s("0")), Yes);
+    assert_eq!(admits_val(&ty("non-falsy-string"), &s("0")), No);
+    assert_eq!(admits_val(&d, &s("0")), Yes);
+    // Not a string at all: out, without consulting the predicate.
+    assert_eq!(admits_val(&d, &Val::Int(123)), No);
+}
+
+#[test]
+fn non_decimal_int_string_is_the_complement_within_string() {
+    let n = ty("non-decimal-int-string");
+    for yes in ["+1", "00", "18E+3", "1.2", "1,3", "foo", "", "-0", "007"] {
+        assert_eq!(admits_val(&n, &s(yes)), Yes, "{yes:?}");
+    }
+    for no in ["123", "-1", "0"] {
+        assert_eq!(admits_val(&n, &s(no)), No, "{no:?}");
+    }
+    assert_eq!(admits_val(&n, &Val::Int(1)), No, "not a string");
+}
+
+/// The negation ceiling. `StrPreds` is a conjunction over positive literals, so
+/// the abstract leg can conclude "every string with these predicates also has
+/// those" but never "no string has both". The pair is therefore decided exactly
+/// against a **value** and only one-directionally against a **fact**.
+#[test]
+fn the_complementary_pair_cannot_be_refuted_abstractly() {
+    let decimal_fact = Fact::Refined {
+        base: Base::String,
+        refinement: Refinement::Str(StrPreds::DECIMAL_INT.close()),
+        nullable: false,
+    };
+    // The entailed direction is decided: a decimal-int-string IS numeric,
+    // non-empty, and (having no cased character) both lowercase and uppercase.
+    assert_eq!(admits_fact(&ty("numeric-string"), &decimal_fact), Yes);
+    assert_eq!(admits_fact(&ty("non-empty-string"), &decimal_fact), Yes);
+    assert_eq!(admits_fact(&ty("lowercase-string"), &decimal_fact), Yes);
+    assert_eq!(admits_fact(&ty("uppercase-string"), &decimal_fact), Yes);
+    assert_eq!(admits_fact(&ty("decimal-int-string"), &decimal_fact), Yes);
+    // The un-entailed one is honestly undecided rather than wrong.
+    assert_eq!(admits_fact(&ty("non-falsy-string"), &decimal_fact), Maybe);
+    // And the ceiling itself: the exclusion is real but inexpressible, so the
+    // complement answers `Maybe` where an exclusion-aware lattice would say No.
+    assert_eq!(admits_fact(&ty("non-decimal-int-string"), &decimal_fact), Maybe);
+    // With the value in hand there is no ceiling at all.
+    assert_eq!(admits_val(&ty("non-decimal-int-string"), &s("123")), No);
+}
+
+// ---------------------------------------------------------------------------
+// C6 — the subtraction spellings.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn non_null_mixed_removes_exactly_null() {
+    let t = ty("non-null-mixed");
+    for v in [Val::Int(0), Val::Bool(false), s(""), Val::Float(0.0), arr(vec![])] {
+        assert_eq!(admits_val(&t, &v), Yes, "{v:?} is not null");
+    }
+    assert_eq!(admits_val(&t, &Val::Null), No);
+    // Against a fact: the base part is non-null by construction, so a
+    // non-nullable fact is admitted outright. A *nullable* fact is the
+    // crate-wide "some members yes, some no" case, which `all_of` reports as
+    // `Maybe` — a `?int` argument really is sometimes null and sometimes not,
+    // and only a proven `No` is ever reported.
+    assert_eq!(admits_fact(&t, &Fact::General { base: Base::Int, nullable: false }), Yes);
+    assert_eq!(admits_fact(&t, &Fact::General { base: Base::Int, nullable: true }), Maybe);
+    // Compare: the same shape for any other null-excluding contract.
+    assert_eq!(admits_fact(&ty("int"), &Fact::General { base: Base::Int, nullable: true }), Maybe);
+}
+
+#[test]
+fn non_empty_mixed_removes_every_falsy_value() {
+    let t = ty("non-empty-mixed");
+    for truthy in [Val::Int(1), Val::Float(1.5), s("x"), s("0.0"), s("00"), Val::Bool(true)] {
+        assert_eq!(admits_val(&t, &truthy), Yes, "{truthy:?}");
+    }
+    for falsy in [
+        Val::Int(0),
+        Val::Float(0.0),
+        s(""),
+        s("0"),
+        Val::Bool(false),
+        Val::Null,
+        arr(vec![]),
+    ] {
+        assert_eq!(admits_val(&t, &falsy), No, "{falsy:?}");
+    }
+    assert_eq!(admits_val(&t, &list(vec![Val::Int(1)])), Yes, "a non-empty array is truthy");
+}
+
+#[test]
+fn the_falsy_cut_decides_a_fact_only_where_the_refinement_answers() {
+    let t = ty("non-empty-mixed");
+    // `non-falsy-string` IS the string half of the cut.
+    let non_falsy = Fact::Refined {
+        base: Base::String,
+        refinement: Refinement::Str(StrPreds::NON_FALSY.close()),
+        nullable: false,
+    };
+    assert_eq!(admits_fact(&t, &non_falsy), Yes);
+    // A general string holds both `''` and `'x'` — undecided, not refuted.
+    assert_eq!(admits_fact(&t, &Fact::General { base: Base::String, nullable: false }), Maybe);
+    // An int range missing zero is decided; one straddling it is not; the point
+    // range at zero is refuted.
+    let int_in = |lo, hi| Fact::Refined {
+        base: Base::Int,
+        refinement: Refinement::Int(IntRange::new(lo, hi).unwrap()),
+        nullable: false,
+    };
+    assert_eq!(admits_fact(&t, &int_in(1, 10)), Yes);
+    assert_eq!(admits_fact(&t, &int_in(-1, 10)), Maybe);
+    assert_eq!(admits_fact(&t, &int_in(0, 0)), No);
+    // A nullable fact's null half is refuted, but its base half is not, so the
+    // for-all lands on the crate-wide mixed answer.
+    assert_eq!(admits_fact(&t, &Fact::General { base: Base::String, nullable: true }), Maybe);
+    let non_falsy_nullable = Fact::Refined {
+        base: Base::String,
+        refinement: Refinement::Str(StrPreds::NON_FALSY.close()),
+        nullable: true,
+    };
+    assert_eq!(admits_fact(&t, &non_falsy_nullable), Maybe, "Yes base half, No null half");
+}
+
+#[test]
+fn non_empty_scalar_is_the_cut_intersected_with_scalar() {
+    let t = ty("non-empty-scalar");
+    for ok in [Val::Int(1), Val::Int(-1), Val::Float(1.5), s("x"), Val::Bool(true)] {
+        assert_eq!(admits_val(&t, &ok), Yes, "{ok:?}");
+    }
+    // All five of the fixture's probes, including the two PHPStan stays silent
+    // on (`0`/`0.0`, which its un-narrowed `float` member swallows). Steins
+    // spells the subtraction, so all five are decided.
+    for falsy in [Val::Int(0), Val::Float(0.0), s(""), Val::Bool(false), s("0")] {
+        assert_eq!(admits_val(&t, &falsy), No, "{falsy:?}");
+    }
+    // The `scalar` half still holds independently of truthiness.
+    assert_eq!(admits_val(&t, &list(vec![Val::Int(1)])), No, "an array is not a scalar");
+    assert_eq!(admits_val(&t, &Val::Null), No, "null is not a scalar");
+}

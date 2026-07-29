@@ -7,8 +7,8 @@
 //! `int<min,0>|int<0,max>` over general `int`) answers `Maybe`, never a
 //! wrong verdict.
 
-use crate::{CField, CKey, ContractTy};
-use steins_domain::{Base, Certainty, Fact, Refinement, StrPreds, Val};
+use crate::{CField, CKey, ContractTy, MixedCut};
+use steins_domain::{Base, Certainty, Fact, Refinement, StrPreds, Val, php_is_falsy};
 use steins_domain::Key as VKey;
 
 /// Is the concrete value admitted by the contract?
@@ -20,6 +20,10 @@ pub fn admits_val(ty: &ContractTy, v: &Val) -> Certainty {
         ContractTy::Never => No,
         ContractTy::Opaque => Maybe,
         ContractTy::Null => Certainty::from_bool(*v == Val::Null),
+        // Exact against a concrete value: the cut is a value predicate, and
+        // `php_is_falsy` is the engine's own answer (null included).
+        ContractTy::MixedMinus(MixedCut::Null) => Certainty::from_bool(*v != Val::Null),
+        ContractTy::MixedMinus(MixedCut::Falsy) => Certainty::from_bool(!php_is_falsy(v)),
         ContractTy::Base(b) => match (b, v) {
             // int is accepted where float is expected (PHPStan core).
             (Base::Float, Val::Int(_)) => Yes,
@@ -134,6 +138,31 @@ fn base_only(ty: &ContractTy, base: Base, refinement: Option<Refinement>) -> Cer
         ContractTy::Never => No,
         ContractTy::Opaque => Maybe,
         ContractTy::Null => No,
+        // The base part of a fact is non-null by construction, so the null cut
+        // is already satisfied here; the fact's own `nullable` half is judged by
+        // the caller through `admits_val(ty, Val::Null)`, which answers `No`.
+        ContractTy::MixedMinus(MixedCut::Null) => Yes,
+        // The falsy cut decides only where the refinement already carries the
+        // answer. Everything else is `Maybe` — the honest floor for a base part
+        // that holds both falsy and truthy values.
+        ContractTy::MixedMinus(MixedCut::Falsy) => match (base, refinement) {
+            // `non-falsy-string` is exactly "not `''`, not `'0'`" — the whole
+            // string half of the cut. Its absence is *not* a refutation (a
+            // `non-empty-string` fact still holds truthy members), so `Maybe`.
+            (Base::String, Some(Refinement::Str(have))) => {
+                if have.contains_all(StrPreds::NON_FALSY) { Yes } else { Maybe }
+            }
+            (Base::Int, Some(Refinement::Int(have))) => {
+                if !have.contains(0) {
+                    Yes
+                } else if have.lo() == 0 && have.hi() == 0 {
+                    No
+                } else {
+                    Maybe
+                }
+            }
+            _ => Maybe,
+        },
         ContractTy::Base(b) => match (b, base) {
             (b, base) if *b == base => Yes,
             (Base::Float, Base::Int) => Yes,

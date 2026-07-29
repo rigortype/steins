@@ -22,7 +22,7 @@
 
 use steins_domain::{Base, Certainty, IntRange, Key, StrPreds, Val, CAP};
 
-use crate::{is_array_key_ty, shape_is_list, CField, CKey, ContractTy};
+use crate::{is_array_key_ty, shape_is_list, CField, CKey, ContractTy, MixedCut};
 
 /// Spell a summarized contract-arm list as a terminal-safe phpdoc type, or `None`
 /// when no faithful scalar spelling exists (an array/object/otherwise-unmodeled
@@ -250,6 +250,8 @@ fn spell_nested(ty: &ContractTy) -> String {
         ContractTy::Mixed => "mixed".to_owned(),
         ContractTy::Never => "never".to_owned(),
         ContractTy::Opaque => "mixed".to_owned(),
+        ContractTy::MixedMinus(MixedCut::Null) => "non-null-mixed".to_owned(),
+        ContractTy::MixedMinus(MixedCut::Falsy) => "non-empty-mixed".to_owned(),
         ContractTy::Class(name) => name.clone(),
         ContractTy::ObjectAny => "object".to_owned(),
         ContractTy::CallableTy(_) => "callable".to_owned(),
@@ -471,6 +473,18 @@ fn float_literal(f: f64) -> String {
 /// it keeps every casing-free set spelled exactly as before this pair existed.
 /// `Lowercase ∧ Uppercase` (a string with no cased character) has no single keyword
 /// either, so it falls through to the core ladder for the same reason.
+///
+/// The array-key-cast pair is deliberately **not** a rung. `decimal-int-string`
+/// would be a legitimate one (it is tighter than `numeric-string`), but the
+/// predicate is computed by `StrPreds::of` for every string value, so adding it
+/// would silently re-spell every *value-derived* all-canonical-decimal set —
+/// `'1'|'2'` widening to `decimal-int-string` rather than `numeric-string` — as
+/// a side effect of teaching the checker a keyword. `non-decimal-int-string` is
+/// not a rung for the mirror reason: nearly every string carries the bit, so it
+/// says almost nothing about a set. Both therefore widen away here, which is the
+/// same safe direction the casing half already takes. A declared
+/// `decimal-int-string` consequently round-trips as `numeric-string` — a
+/// widening, never a lie.
 #[must_use]
 pub fn preds_keyword(preds: StrPreds) -> String {
     let casing = match (

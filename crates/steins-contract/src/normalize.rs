@@ -167,6 +167,12 @@ pub fn subsumes(a: &ContractTy, b: &ContractTy) -> Certainty {
         | ContractTy::Shape { .. }
         | ContractTy::CallableTy(_)
         | ContractTy::StrOpaque
+        // A cut of `mixed` still spans every base — objects included — so it has
+        // no scalar-fact denotation to ask the acceptance relation about, and
+        // only `mixed` itself provably covers it. (`a` being the *same* cut is
+        // the reflexive case a future `subsumes` refinement could decide; the
+        // honest `Maybe` here never collapses an arm unsoundly.)
+        | ContractTy::MixedMinus(_)
         | ContractTy::Opaque => match a {
             ContractTy::Mixed => Yes,
             _ => Maybe,

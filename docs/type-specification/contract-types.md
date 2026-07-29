@@ -34,9 +34,34 @@ rules instead of a keyword zoo:
 - `scalar` → the union of the four bases.
 - `positive-int`, `negative-int`, `non-negative-int`, `int<lo, hi>` → `IntIn`.
 - `numeric-string`, `non-empty-string`, `non-falsy-string`, `lowercase-string`,
-  `uppercase-string`, `non-empty-lowercase-string`, `non-empty-uppercase-string`
+  `uppercase-string`, `non-empty-lowercase-string`, `non-empty-uppercase-string`,
+  `decimal-int-string`, `non-decimal-int-string`
   → `StrWith`. The casing pair is `strtolower($s) === $s` (an identity, so an
   uncased string satisfies both) and is orthogonal to the length/falsy axis.
+  The array-key-cast pair is the engine's own `ZEND_HANDLE_NUMERIC_STR` rule —
+  `'123'` becomes an `int` key, `'007'`/`'+1'`/`'-0'` and anything past
+  `PHP_INT_MAX` stay string keys — so `decimal-int-string` is strictly narrower
+  than `numeric-string` and entails it (plus, its alphabet being uncased, both
+  casings). It does *not* entail `non-falsy-string`: `'0'` is one.
+  `non-decimal-int-string` is the complement **within `string`**, so it is far
+  wider than its name (`''`, `'foo'`, `'1.2'`, `'18E+3'` all qualify).
+  `StrPreds` is a conjunction over positive literals, so the two are two bits
+  rather than one bit and a negation: a *proven value* is decided exactly, while
+  an *abstract fact* carrying one bit answers `Maybe` against the other — sound,
+  and the honest ceiling of a lattice with no negation.
+- `non-null-mixed`, `non-empty-mixed` → `MixedMinus(MixedCut::{Null, Falsy})`,
+  and `non-empty-scalar` → `Inter[scalar, MixedMinus(Falsy)]`. The only
+  **negative** leaf in the vocabulary: neither spelling is a union of the forms
+  above, because the value lattice has no object inhabitant (so "anything but
+  null" cannot be enumerated) and no float refinement (so "float minus `0.0`"
+  cannot be spelled). The cut is a *value* predicate — `php_is_falsy` is the
+  definition — so a proven value is decided exactly; against an abstract fact it
+  decides only where the fact's own refinement answers (a `non-falsy-string`, an
+  int range missing zero) and is `Maybe` elsewhere. Deliberate divergence:
+  PHPStan resolves `non-empty-scalar` to `float|int<min, -1>|int<1, max>|
+  non-falsy-string|true` and so stays silent on `0` and `0.0` (its `float`
+  member is never narrowed and int-is-accepted-where-float-is-expected lets both
+  back in); Steins spells the subtraction and rejects them.
 - `class-string`, `literal-string`, `callable-string`, … → `StrOpaque`.
 - `list<T>`, `non-empty-list<T>` → `ListOf`; `array<K, V>`, `T[]` → `MapOf`;
   `iterable<K, V>` → `IterableOf`.

@@ -2,12 +2,25 @@
 //!
 //! The set is deliberately closed: adding a predicate is one constant plus
 //! its evaluator, and every interaction stays exhaustively checkable. The
-//! implication closure (`Numeric ⇒ NonEmpty`, `NonFalsy ⇒ NonEmpty`) is
-//! applied at construction so subset tests never miss an entailed fact. The
-//! casing predicates add no implication in either direction — that is the
-//! design claim `casing_is_orthogonal_to_the_closure` pins.
+//! implication closure (`Numeric ⇒ NonEmpty`, `NonFalsy ⇒ NonEmpty`,
+//! `DecimalInt ⇒ Numeric ∧ Lowercase ∧ Uppercase`) is applied at construction
+//! so subset tests never miss an entailed fact. The casing predicates entail
+//! nothing themselves — that is the design claim
+//! `casing_is_orthogonal_to_the_closure` pins.
+//!
+//! **The set is a conjunction of predicates, not a satisfiable-by-construction
+//! one.** `DecimalInt` and `NonDecimalInt` are complementary, so the set that
+//! carries both denotes ∅ — a legitimate value of the type (`union` builds it),
+//! and the one place a `StrWith` contract admits no string at all. What the
+//! representation cannot do is *reason* about that exclusion abstractly: a
+//! subset test over positive literals can conclude "every string with these
+//! predicates also has those", never "no string has both". See
+//! `complementary_bits_are_a_conjunction_not_a_contradiction`.
 
-use crate::php::{php_is_numeric, php_str_is_falsy, php_str_is_lowercase, php_str_is_uppercase};
+use crate::php::{
+    php_is_numeric, php_str_is_decimal_int, php_str_is_falsy, php_str_is_lowercase,
+    php_str_is_uppercase,
+};
 
 /// A set of string predicates, canonically closed under implication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -31,6 +44,24 @@ impl StrPreds {
     pub const LOWERCASE: StrPreds = StrPreds(1 << 3);
     /// `uppercase-string`: `strtoupper()` leaves the value unchanged.
     pub const UPPERCASE: StrPreds = StrPreds(1 << 4);
+    /// `decimal-int-string`: the string spells an integer the way PHP writes
+    /// one back, so an array key made of it is cast to `int`
+    /// ([`php_str_is_decimal_int`]).
+    ///
+    /// The one predicate here that entails others: a decimal integer string is
+    /// numeric (hence non-empty), and its alphabet — digits and `-` — has no
+    /// cased character, so it is both lowercase and uppercase. It does **not**
+    /// entail `NonFalsy`: `"0"` is a decimal-int-string and is falsy.
+    pub const DECIMAL_INT: StrPreds = StrPreds(1 << 5);
+    /// `non-decimal-int-string`: the complement of [`DECIMAL_INT`] within
+    /// `string` — every string that keeps its identity as an array key, which
+    /// is wider than the name suggests (`"+1"`, `"00"`, `"18E+3"`, `"1.2"`,
+    /// `"foo"` and `""` all qualify).
+    ///
+    /// Entails nothing and is entailed by nothing: its members range over the
+    /// whole lattice. Being the *complement* of a sibling bit is not something
+    /// the closure can express — see the module doc.
+    pub const NON_DECIMAL_INT: StrPreds = StrPreds(1 << 6);
 
     /// The empty predicate set (no knowledge — the General form's content).
     #[must_use]
@@ -63,11 +94,19 @@ impl StrPreds {
         self.0 & other.0 == other.0
     }
 
-    /// Apply the implication closure: `NonFalsy ⇒ NonEmpty`,
+    /// Apply the implication closure: `DecimalInt ⇒ Numeric`,
+    /// `DecimalInt ⇒ Lowercase ∧ Uppercase`, `NonFalsy ⇒ NonEmpty`,
     /// `Numeric ⇒ NonEmpty`.
+    ///
+    /// One pass reaches the fixpoint because the clauses are applied in
+    /// dependency order: `DecimalInt`'s consequents are discharged first, and
+    /// the only clause they feed (`Numeric ⇒ NonEmpty`) runs after.
     #[must_use]
     pub const fn close(self) -> Self {
         let mut bits = self.0;
+        if bits & StrPreds::DECIMAL_INT.0 != 0 {
+            bits |= StrPreds::NUMERIC.0 | StrPreds::LOWERCASE.0 | StrPreds::UPPERCASE.0;
+        }
         if bits & (StrPreds::NON_FALSY.0 | StrPreds::NUMERIC.0) != 0 {
             bits |= StrPreds::NON_EMPTY.0;
         }
@@ -94,6 +133,11 @@ impl StrPreds {
         if php_str_is_uppercase(s) {
             p = p.union(StrPreds::UPPERCASE);
         }
+        if php_str_is_decimal_int(s) {
+            p = p.union(StrPreds::DECIMAL_INT);
+        } else {
+            p = p.union(StrPreds::NON_DECIMAL_INT);
+        }
         p
     }
 
@@ -118,8 +162,12 @@ mod tests {
     #[test]
     fn summaries() {
         // `""` knows nothing on the length/numeric axis, but it *is* unchanged
-        // by both case functions — the empty string satisfies both casings.
-        assert_eq!(StrPreds::of(""), StrPreds::LOWERCASE.union(StrPreds::UPPERCASE));
+        // by both case functions — the empty string satisfies both casings —
+        // and it is not a decimal-int-string, so it carries the complement bit.
+        assert_eq!(
+            StrPreds::of(""),
+            StrPreds::LOWERCASE.union(StrPreds::UPPERCASE).union(StrPreds::NON_DECIMAL_INT)
+        );
         // "0": non-empty but falsy and numeric.
         let zero = StrPreds::of("0");
         assert!(zero.contains_all(StrPreds::NON_EMPTY));
@@ -156,7 +204,9 @@ mod tests {
 
     #[test]
     fn casing_is_orthogonal_to_the_closure() {
-        // Casing entails nothing, and nothing entails casing.
+        // Casing entails nothing, and nothing on the length/numeric axis
+        // entails casing. (`DecimalInt` does — its alphabet has no cased
+        // character — which is a clause *into* casing, not out of it.)
         assert_eq!(StrPreds::LOWERCASE.close(), StrPreds::LOWERCASE);
         assert_eq!(StrPreds::UPPERCASE.close(), StrPreds::UPPERCASE);
         assert!(!StrPreds::LOWERCASE.contains_all(StrPreds::NON_EMPTY));
@@ -166,13 +216,65 @@ mod tests {
         assert!(!StrPreds::of("1e5").contains_all(StrPreds::UPPERCASE));
         assert!(StrPreds::of("1E5").contains_all(StrPreds::NUMERIC.union(StrPreds::UPPERCASE)));
         assert!(!StrPreds::of("1E5").contains_all(StrPreds::LOWERCASE));
-        // Every predicate is jointly satisfiable — `"5"` witnesses it, which is
-        // why the abstract-fact leg of `admits` can never refute a `StrWith`.
+        // Every predicate *except the complementary pair* is jointly
+        // satisfiable — `"5"` witnesses it, which is why the abstract-fact leg
+        // of `admits` can never refute a `StrWith` drawn from these.
         let all = StrPreds::NON_FALSY
             .union(StrPreds::NUMERIC)
             .union(StrPreds::LOWERCASE)
-            .union(StrPreds::UPPERCASE);
+            .union(StrPreds::UPPERCASE)
+            .union(StrPreds::DECIMAL_INT);
         assert!(StrPreds::of("5").contains_all(all));
+    }
+
+    #[test]
+    fn decimal_int_closure_and_the_fixture_summaries() {
+        // The clause set, each direction pinned separately.
+        let d = StrPreds::DECIMAL_INT.close();
+        assert!(d.contains_all(StrPreds::NUMERIC));
+        assert!(d.contains_all(StrPreds::NON_EMPTY));
+        assert!(d.contains_all(StrPreds::LOWERCASE));
+        assert!(d.contains_all(StrPreds::UPPERCASE));
+        // …and the one clause that is NOT entailed: `"0"` is a
+        // decimal-int-string and PHP calls it falsy.
+        assert!(!d.contains_all(StrPreds::NON_FALSY));
+        assert!(StrPreds::of("0").contains_all(StrPreds::DECIMAL_INT));
+        assert!(!StrPreds::of("0").contains_all(StrPreds::NON_FALSY));
+        // Nothing entails `DecimalInt` — numeric is the near miss the fixture
+        // is built around (`"007"` is numeric, not decimal).
+        assert!(!StrPreds::NUMERIC.close().contains_all(StrPreds::DECIMAL_INT));
+        assert!(StrPreds::of("007").contains_all(StrPreds::NUMERIC));
+        assert!(!StrPreds::of("007").contains_all(StrPreds::DECIMAL_INT));
+        // `NonDecimalInt` is a closure leaf in both directions.
+        assert_eq!(StrPreds::NON_DECIMAL_INT.close(), StrPreds::NON_DECIMAL_INT);
+        // The two fixture accept-sets, as summaries.
+        for decimal in ["123", "-1", "0"] {
+            let p = StrPreds::of(decimal);
+            assert!(p.contains_all(StrPreds::DECIMAL_INT), "{decimal:?}");
+            assert!(!p.contains_all(StrPreds::NON_DECIMAL_INT), "{decimal:?}");
+        }
+        for non_decimal in ["00", "1.2", "foo", "+1", "007", "abc", ""] {
+            let p = StrPreds::of(non_decimal);
+            assert!(p.contains_all(StrPreds::NON_DECIMAL_INT), "{non_decimal:?}");
+            assert!(!p.contains_all(StrPreds::DECIMAL_INT), "{non_decimal:?}");
+        }
+    }
+
+    #[test]
+    fn complementary_bits_are_a_conjunction_not_a_contradiction() {
+        // The set carrying both is reachable (`union` builds it) and denotes ∅:
+        // no string satisfies it, so `contains_all` refuses it for every atom.
+        let bottom = StrPreds::DECIMAL_INT.union(StrPreds::NON_DECIMAL_INT);
+        assert_eq!(bottom, bottom.close());
+        for s in ["", "0", "007", "5", "foo", "-1"] {
+            assert!(!StrPreds::of(s).contains_all(bottom), "{s:?}");
+        }
+        // What the representation cannot do: conclude `No` *abstractly*. A set
+        // knowing `DecimalInt` does not "contain" `NonDecimalInt`, which reads
+        // as "not proven", not as "refuted" — the negation ceiling, and the
+        // reason the abstract-fact leg of `admits` answers `Maybe` there.
+        assert!(!StrPreds::DECIMAL_INT.close().contains_all(StrPreds::NON_DECIMAL_INT));
+        assert!(!StrPreds::NON_DECIMAL_INT.contains_all(StrPreds::DECIMAL_INT));
     }
 
     #[test]

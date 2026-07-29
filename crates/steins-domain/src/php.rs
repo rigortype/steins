@@ -86,6 +86,39 @@ pub fn php_str_is_uppercase(s: &str) -> bool {
     !s.as_bytes().iter().any(u8::is_ascii_lowercase)
 }
 
+/// PHP's array-key cast identity for integer-like strings — the definition of
+/// PHPStan's `decimal-int-string` (`AccessoryDecimalIntegerStringType`): the
+/// string spells an integer *the way PHP writes one back*, so `$a[$s]` stores
+/// it under an `int` key instead of keeping it a string key.
+///
+/// The engine's rule (`ZEND_HANDLE_NUMERIC_STR`), to the letter:
+///
+/// * an optional leading `-`, then one or more ASCII digits and nothing else —
+///   no `+`, no whitespace, no `.`/`e`, no hex/octal/binary prefix;
+/// * no leading zero, unless the whole string is exactly `"0"`. `"-0"` is
+///   therefore **not** one: PHP writes zero back as `"0"`, so `"-0"` survives
+///   as a string key even though `is_numeric("-0")` is true;
+/// * the value fits in a platform `int`. `"9223372036854775808"` is one past
+///   `PHP_INT_MAX` and stays a string key, while `"-9223372036854775808"`
+///   (`PHP_INT_MIN`) does not.
+///
+/// This is strictly narrower than [`php_is_numeric`]: `"007"`, `"+1"`, `"00"`,
+/// `"1.2"`, `"18E+3"` and `" 1 "` are all numeric and all keep their string
+/// identity. `tests/php_oracle.rs` asks the real engine by inserting each case
+/// as an array key and reading back `is_int(array_key_first(...))`.
+#[must_use]
+pub fn php_str_is_decimal_int(s: &str) -> bool {
+    let b = s.as_bytes();
+    let digits = if b.first() == Some(&b'-') { &b[1..] } else { b };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    if digits[0] == b'0' && s.len() > 1 {
+        return false;
+    }
+    s.parse::<i64>().is_ok()
+}
+
 /// PHP falsiness of a scalar value, expressed over the domain's [`Val`](crate::Val).
 ///
 /// Falsy: `false`, `0`, `0.0` (and `-0.0`), `""`, `"0"`, `null`, `[]`.
@@ -145,5 +178,25 @@ mod tests {
         // A single cased character disqualifies the whole string.
         assert!(!php_str_is_lowercase("abC"));
         assert!(!php_str_is_uppercase("ABc"));
+    }
+
+    #[test]
+    fn decimal_int_is_the_array_key_cast_not_is_numeric() {
+        // The canonical spellings the fixture names, plus the range edges.
+        for yes in ["0", "1", "1234", "-1", "123", "9223372036854775807", "-9223372036854775808"] {
+            assert!(php_str_is_decimal_int(yes), "expected decimal-int: {yes:?}");
+        }
+        // Numeric but not canonical — every one of these survives as a string
+        // key, which is exactly what separates this from `php_is_numeric`.
+        for no in ["007", "+1", "00", "-0", "1.2", "18E+3", "1e5", " 1", "1 ", "0.0", "-0.0"] {
+            assert!(php_is_numeric(no), "fixture check — {no:?} should be numeric");
+            assert!(!php_str_is_decimal_int(no), "expected not decimal-int: {no:?}");
+        }
+        // Out of int range by one, on the positive side only.
+        assert!(!php_str_is_decimal_int("9223372036854775808"));
+        // Not integer-like at all.
+        for no in ["", "abc", "-", "1,3", "0x1A", "１２３"] {
+            assert!(!php_str_is_decimal_int(no), "expected not decimal-int: {no:?}");
+        }
     }
 }

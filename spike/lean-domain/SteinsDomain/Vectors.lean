@@ -41,19 +41,33 @@ the real order for the abstraction to be faithful. The `order` line checks it.
 uppercase and *not* lowercase, no vector would tell the two apart. Note that
 every uncased atom (`""`, `" 5 "`, `"0"`, `"00"`, `"5"`) carries **both**
 casings — `lowercase-string` is `strtolower($s) === $s`, an identity, not a
-letter test. -/
+letter test.
+
+The array-key-cast pair needed no new atom: `"0"` and `"5"` are decimal-int
+strings, and `" 5 "` and `"00"` are the two that separate the predicate from
+`numeric` — both are `is_numeric` and both keep their string identity as an
+array key. Every atom carries exactly one of the two bits, which is what makes
+the classifier table itself the check that they are complementary (the type
+cannot state it — see `Preds.lean`). -/
 def vecPreds : Nat → StrPreds
-  | 0 => { lowercase := true, uppercase := true }                   -- ""
+  | 0 => { lowercase := true, uppercase := true,
+           nonDecimalInt := true }                                  -- ""
   | 1 => { nonEmpty := true, nonFalsy := true, numeric := true,
-           lowercase := true, uppercase := true }                   -- " 5 "  (PHP 8 trims)
+           lowercase := true, uppercase := true,
+           nonDecimalInt := true }                                  -- " 5 "  (PHP 8 trims)
   | 2 => { nonEmpty := true, numeric := true,
-           lowercase := true, uppercase := true }                   -- "0"
+           lowercase := true, uppercase := true,
+           decimalInt := true }                                     -- "0"
   | 3 => { nonEmpty := true, nonFalsy := true, numeric := true,
-           lowercase := true, uppercase := true }                   -- "00"   (leading zeros are numeric)
+           lowercase := true, uppercase := true,
+           nonDecimalInt := true }                                  -- "00"   (leading zeros are numeric, not canonical)
   | 4 => { nonEmpty := true, nonFalsy := true, numeric := true,
-           lowercase := true, uppercase := true }                   -- "5"
-  | 5 => { nonEmpty := true, nonFalsy := true, uppercase := true }   -- "ABC"
-  | 6 => { nonEmpty := true, nonFalsy := true, lowercase := true }   -- "abc"
+           lowercase := true, uppercase := true,
+           decimalInt := true }                                     -- "5"
+  | 5 => { nonEmpty := true, nonFalsy := true, uppercase := true,
+           nonDecimalInt := true }                                  -- "ABC"
+  | 6 => { nonEmpty := true, nonFalsy := true, lowercase := true,
+           nonDecimalInt := true }                                  -- "abc"
   | _ => { }
 
 /-- `php_str_is_falsy`: exactly `""` and `"0"`. Out-of-table ranks are `true` to
@@ -133,7 +147,8 @@ def renderBase : Base → String
 def renderPreds (p : StrPreds) : String :=
   let parts := (if p.nonEmpty then ["NE"] else []) ++ (if p.nonFalsy then ["NF"] else [])
     ++ (if p.numeric then ["NUM"] else []) ++ (if p.lowercase then ["LC"] else [])
-    ++ (if p.uppercase then ["UC"] else [])
+    ++ (if p.uppercase then ["UC"] else []) ++ (if p.decimalInt then ["DEC"] else [])
+    ++ (if p.nonDecimalInt then ["NDEC"] else [])
   if parts.isEmpty then "-" else String.intercalate "|" parts
 
 def renderInt (n : Int) : String :=
@@ -255,24 +270,47 @@ against the length half; both against it; and casing against `NonFalsy` and
 against `Numeric` in each direction — the last three written as `StrPreds::of`
 of the string that produces them, which is how the Rust side builds them too.
 The four the shipped table lowers to (`lowercase-string`, `uppercase-string`
-and their `non-empty-` forms) are all in here. -/
+and their `non-empty-` forms) are all in here.
+
+The array-key-cast tail is a spanning subset for the same reason, and it adds
+the one class no earlier predicate could produce: a set carrying **both**
+complementary bits. `union` builds it (`DECIMAL_INT.union NON_DECIMAL_INT`), it
+is a lawful value of the type, and it denotes ∅ — so every `admits` line for it
+reads `false` while `satisfiesstr` still reads `maybe`, which is the negation
+ceiling written out as data on both sides. -/
 def predsUniverse : List StrPreds :=
-  [ ⟨false, false, false, false, false⟩, ⟨true, false, false, false, false⟩,
-    ⟨false, true, false, false, false⟩, ⟨false, false, true, false, false⟩,
-    ⟨true, true, false, false, false⟩, ⟨true, false, true, false, false⟩,
-    ⟨true, true, true, false, false⟩,
+  [ ⟨false, false, false, false, false, false, false⟩,
+    ⟨true, false, false, false, false, false, false⟩,
+    ⟨false, true, false, false, false, false, false⟩,
+    ⟨false, false, true, false, false, false, false⟩,
+    ⟨true, true, false, false, false, false, false⟩,
+    ⟨true, false, true, false, false, false, false⟩,
+    ⟨true, true, true, false, false, false, false⟩,
     -- LOWERCASE, UPPERCASE, and the uncased set that carries both
-    ⟨false, false, false, true, false⟩, ⟨false, false, false, false, true⟩,
-    ⟨false, false, false, true, true⟩,
+    ⟨false, false, false, true, false, false, false⟩,
+    ⟨false, false, false, false, true, false, false⟩,
+    ⟨false, false, false, true, true, false, false⟩,
     -- the `non-empty-` intersections (two of them are shipped table rows)
-    ⟨true, false, false, true, false⟩, ⟨true, false, false, false, true⟩,
-    ⟨true, false, false, true, true⟩,
+    ⟨true, false, false, true, false, false, false⟩,
+    ⟨true, false, false, false, true, false, false⟩,
+    ⟨true, false, false, true, true, false, false⟩,
     -- casing × the truthiness/numeric axes: `of "abc"`; numeric-and-cased
     -- without non-falsy (the `"0"`-in-the-set class, reachable as
-    -- `of "0" ⊓ of "1e5"`); and `of "5"`, the witness that every predicate is
-    -- jointly satisfiable
-    ⟨true, true, false, true, false⟩, ⟨true, false, true, true, false⟩,
-    ⟨true, false, true, false, true⟩, ⟨true, true, true, true, true⟩ ]
+    -- `of "0" ⊓ of "1e5"`); and `of "5"`, which carries every predicate but
+    -- the complement bit
+    ⟨true, true, false, true, false, false, true⟩,
+    ⟨true, false, true, true, false, false, false⟩,
+    ⟨true, false, true, false, true, false, false⟩,
+    ⟨true, true, true, true, true, true, false⟩,
+    -- the array-key-cast pair: `DECIMAL_INT.close` (= `of "0"`, the falsy
+    -- decimal); the bare complement bit; `of "00"` (numeric and NOT canonical —
+    -- the class the whole fixture family turns on); the complement against the
+    -- length axis; and the both-bits ⊥ set
+    ⟨true, false, true, true, true, true, false⟩,
+    ⟨false, false, false, false, false, false, true⟩,
+    ⟨true, true, true, true, true, false, true⟩,
+    ⟨true, false, false, false, false, false, true⟩,
+    ⟨true, false, true, true, true, true, true⟩ ]
 
 def rangeUniverse : List IntRange :=
   [ IntRange.full, ⟨1, i64Max⟩, ⟨i64Min, -1⟩, ⟨0, i64Max⟩, ⟨0, 0⟩, ⟨1, 9⟩, ⟨-5, 5⟩ ]
