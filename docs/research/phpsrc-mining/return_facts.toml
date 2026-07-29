@@ -182,6 +182,69 @@ return_type = "string"
 confidence = "verified-probe"
 probe = "uniqid()=6a63673e90616; uniqid(\"\")=6a63673e9061a — always >=13 hex chars (a prefix is prepended, never removed). Never \"\" nor \"0\" ⇒ non-falsy for any args."
 
+# ─────────────────── DR4 refined-string extension (ADR-0064 seam iii) ───────────────────
+# The final DR slice extends the R4 family with the two candidates whose probes
+# survived; the third (`dirname`) was REFUTED and is recorded in the refused table
+# below. Reflected envelope for all three is a single `string` (verbatim, 8.5.8):
+#   php -r 'foreach (["dirname","get_debug_type","spl_object_hash"] as $fn) {
+#     $rf = new ReflectionFunction($fn);
+#     printf("%s rt=%s tentative=%s\n", $fn, (string)($rf->getReturnType() ?? "NULL"),
+#       (string)($rf->getTentativeReturnType() ?? "NULL")); }'
+#   dirname rt=string tentative=NULL
+#   get_debug_type rt=string tentative=NULL
+#   spl_object_hash rt=string tentative=NULL
+# None is deprecated at the pin (ReflectionFunction::isDeprecated() === false for
+# all three), so no row rests on a function scheduled for removal.
+#
+# spl_object_hash probe (verbatim, /opt/homebrew/bin/php 8.5.8):
+#   spl_object_hash(new Foo)       = 00000000000000010000000000000000  len=32
+#   spl_object_hash(new stdClass)  = 00000000000000020000000000000000  len=32
+#   spl_object_hash(function(){})  = 00000000000000030000000000000000  len=32
+#   spl_object_hash(new class{})   = 00000000000000040000000000000000  len=32
+#   spl_object_hash(new ArrayObject([])) = 00000000000000050000000000000000  len=32
+#   5000-object sweep: distinct lengths=32  allhex=true  anyfalsy=false  alllowercase=true
+# ARGUMENT-INSENSITIVE argument: the parameter is typed `object`, so there is no
+# empty-in path at all — the bin2hex trap (empty in ⇒ empty out) is structurally
+# unreachable. Every return is a fixed 32-character lowercase hex digest, so it is
+# neither "" nor "0" (both falsy strings have length <= 1) for EVERY argument.
+# This mirrors sha1/md5 exactly, including the discipline of curating only
+# NON_FALSY: the fixed length and lowercase-hex charset are real but have no
+# StrPreds spelling, so they are recorded here as evidence and NOT claimed.
+#
+# get_debug_type probe (verbatim, /opt/homebrew/bin/php 8.5.8) — the full return-set
+# shape, adversarial values first:
+#   ""        => 'string'   "0"      => 'string'   0     => 'int'    -1  => 'int'
+#   1.5/NAN/INF => 'float'  true/false => 'bool'   null  => 'null'
+#   []        => 'array'    [1,2]    => 'array'
+#   new Foo   => 'Foo'      new stdClass => 'stdClass'  function(){} => 'Closure'
+#   new class{} => 'class@anonymous'
+#   enum E{case A;}  E::A   => 'E'    (len 1 — the SHORTEST observed return)
+#   enum EB:string{case A="0";} EB::A => 'EB'   (a "0"-BACKED enum still names the class)
+#   fopen("php://memory","r") => 'resource (stream)'   after fclose => 'resource (closed)'
+# Every return is non-empty and none is "0". The two open-ended arms are checked:
+#   - type keywords: 'bool','int','float','string','array','null','resource (stream)',
+#     'resource (closed)' — all >= 3 chars.
+#   - class/enum/interface names: PHP's label grammar forbids a leading digit, so "0"
+#     is not a nameable class. Confirmed: php -r 'var_dump(class_exists("0"));' => bool(false)
+# NOT falsifiable by a plausible future minor: the claim is only "never "" nor "0"",
+# and a future PHP would have to introduce a type keyword or permit a class name that
+# is the single character "0" to break it. A stronger enum-ish claim (OneOf over the
+# fixed keywords) is REFUSED here because the class-name arm is open-ended by design.
+
+[[function]]
+name = "get_debug_type"
+refinement = "non-falsy-string"
+return_type = "string"
+confidence = "verified-probe"
+probe = "get_debug_type(\"\")=string; get_debug_type(\"0\")=string; get_debug_type(null)=null; get_debug_type([])=array; get_debug_type(new class{})=class@anonymous; enum E{case A;} get_debug_type(E::A)=E (len 1, shortest observed); get_debug_type($closedRes)=resource (closed). Always a type keyword (>=3 chars) or a class name; PHP's label grammar forbids a leading digit so \"0\" is not nameable (class_exists(\"0\")===false). Never \"\" nor \"0\" for any input ⇒ non-falsy."
+
+[[function]]
+name = "spl_object_hash"
+refinement = "non-falsy-string"
+return_type = "string"
+confidence = "verified-probe"
+probe = "spl_object_hash(new stdClass)=00000000000000020000000000000000 (32 lowercase hex chars); 5000-object sweep gave distinct lengths=32, allhex=true, alllowercase=true, anyfalsy=false. The parameter is typed `object`, so there is no empty-in path (the bin2hex trap is unreachable). Never \"\" nor \"0\" ⇒ non-falsy for any argument."
+
 # ─────────────────────── R4 refused rows ───────────────────────
 # bin2hex        rt=string  — REFUSED: bin2hex("")==="" (probe: bin2hex("")=[] empty).
 #                             ARGUMENT-SENSITIVE (empty in ⇒ empty out); a
@@ -196,3 +259,40 @@ probe = "uniqid()=6a63673e90616; uniqid(\"\")=6a63673e9061a — always >=13 hex 
 #                             trim("  ")=[] , trim("0")=[0]). No refinement — neither
 #                             non-empty (all-whitespace in) nor non-falsy ("0" out)
 #                             holds for all args. Comment-refused to preempt a wrong row.
+
+# ─────────────────────── DR4 refused rows ───────────────────────
+# dirname        rt=string  — REFUSED TWICE. The DR4 census proposed `non-falsy-string`
+#                             on the reasoning that dirname never returns "" and that
+#                             dirname("0") returns "." — both legs are WRONG, and each
+#                             failure is independently fatal.
+#
+#   (a) non-falsy-string is FALSE. A path segment may itself be the single character
+#       "0", and dirname returns that segment verbatim — a FALSY string:
+#         php -r 'var_export(dirname("0/x"));'   => '0'      (falsy, len 1)
+#         php -r 'var_export(dirname("0//x"));'  => '0'
+#         php -r 'var_export(dirname("0/a/b", 2));' => '0'   (the $levels form too)
+#       The census's `dirname("0")` observation was a true but IRRELEVANT probe:
+#       dirname("0")==="." only because "0" is a bare basename with no directory part.
+#       The counterexample needs "0" in DIRECTORY position, not basename position.
+#
+#   (b) non-empty-string is ALSO FALSE — the fallback claim does not survive either.
+#       dirname of the empty string is the empty string, the exact bin2hex
+#       empty-in/empty-out shape:
+#         php -r 'var_export(dirname(""));'      => ''       (empty, len 0)
+#         php -r 'var_export(dirname("", 1));'   => ''       ($levels form too)
+#
+#       Supporting probes that do NOT rescue a claim (recorded so the refusal is not
+#       re-litigated): dirname("/")='/'  dirname(".")='.'  dirname("a")='.'
+#       dirname("..")='.'  dirname("//")='/'  dirname("///")='/'  dirname("0/")='.'
+#       dirname("00/x")='00'  dirname("0/0/x")='0/0'  dirname("日本/x")='日本'
+#       dirname("x/0")='x'  dirname(" /x")=' '  dirname("a/b/c",99)='.'
+#       dirname("/a/b",5)='/'. Windows-style separators are NOT separators on this
+#       runtime (PHP_OS_FAMILY=Darwin, DIRECTORY_SEPARATOR=/), so
+#       dirname("C:\foo\bar")='.' — the platform-dependence is itself a reason not
+#       to curate a path-shape refinement from one OS's answers.
+#
+#       So NO StrPreds refinement holds for all arguments: not NON_FALSY (a),
+#       not NON_EMPTY (b). The reflected `string` envelope stands alone, which the
+#       envelope machinery already seeds without a row. Refused — a row here would
+#       be a WRONG premise for dirname("0/x") and dirname(""), the ADR's named FP
+#       channel (a curated fact "disproving" a correct docblock).

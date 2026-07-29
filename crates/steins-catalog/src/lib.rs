@@ -751,11 +751,19 @@ mod tests {
             assert_eq!(super::return_fact(name), Some("int<0, max>"), "{name} must curate int<0, max>");
         }
         // R4 refined-string: `non-falsy-string` within the reflected `string` envelope.
-        for name in ["sha1", "md5", "uniqid"] {
+        // DR4 extends the same family with two probe-verified rows: `get_debug_type`
+        // (every return is a type keyword or a class name — PHP's label grammar forbids
+        // a leading digit, so "0" is not nameable) and `spl_object_hash` (a fixed
+        // 32-char lowercase hex digest; its `object` parameter has no empty-in path).
+        for name in ["sha1", "md5", "uniqid", "get_debug_type", "spl_object_hash"] {
             assert_eq!(super::return_fact(name), Some("non-falsy-string"), "{name} must curate non-falsy-string");
         }
         // Refused rows carry no curated fact (argument-sensitive / multi-base).
-        for name in ["abs", "bin2hex", "trim", "strtoupper", "preg_match_all", "str_word_count", "sha1_file"] {
+        // `dirname` is the DR4 refusal: `dirname("0/x")==="0"` is falsy AND
+        // `dirname("")===""` is empty, so neither NON_FALSY nor NON_EMPTY holds.
+        for name in
+            ["abs", "bin2hex", "trim", "strtoupper", "preg_match_all", "str_word_count", "sha1_file", "dirname"]
+        {
             assert_eq!(super::return_fact(name), None, "{name} is a refused row — no curated fact");
         }
         // Case-insensitive lookup and leading-backslash trimming both hit.
@@ -764,6 +772,47 @@ mod tests {
         // The generated table is well-formed (sorted for binary search).
         let t = super::return_facts_generated::RETURN_FACTS;
         assert!(t.windows(2).all(|w| w[0].0 < w[1].0), "RETURN_FACTS must be strictly sorted by key");
+    }
+
+    #[test]
+    fn return_facts_dr4_refined_string_rows() {
+        // ADR-0064 seam iii (DR4) extends the R4 `non-falsy-string` family with the two
+        // candidates whose probes survived the three-leg gate at PHP 8.5.8. Both have a
+        // single `string` reflected envelope, so the refinement narrows strictly within it.
+        //
+        // `spl_object_hash` — a fixed 32-character lowercase hex digest
+        // (5000-object sweep: distinct lengths=32, allhex, alllowercase, none falsy).
+        // Its parameter is typed `object`, so the bin2hex empty-in/empty-out trap is
+        // structurally unreachable: there is no empty input to produce an empty output.
+        assert_eq!(super::return_fact("spl_object_hash"), Some("non-falsy-string"));
+        // `get_debug_type` — every return is either a type keyword ('bool','int','float',
+        // 'string','array','null','resource (stream)','resource (closed)', all >= 3 chars)
+        // or a class/enum name. `get_debug_type("")` is 'string' and `get_debug_type("0")`
+        // is 'string' — the value never leaks into the result — and PHP's label grammar
+        // forbids a leading digit, so no class can be named "0" (class_exists("0") is false).
+        assert_eq!(super::return_fact("get_debug_type"), Some("non-falsy-string"));
+        // Both honour the shared lookup contract (case-insensitive, backslash-trimmed).
+        assert_eq!(super::return_fact("SPL_OBJECT_HASH"), Some("non-falsy-string"));
+        assert_eq!(super::return_fact("\\get_debug_type"), Some("non-falsy-string"));
+    }
+
+    #[test]
+    fn return_facts_dirname_stays_refused() {
+        // The DR4 census proposed `dirname(): non-falsy-string`; the probes REFUTED it
+        // twice over, so `dirname` is a refused row and must never gain a curated fact.
+        //
+        //   (a) NOT non-falsy: a path segment can itself be "0", returned verbatim —
+        //       dirname("0/x") === "0", a FALSY string (the census's contrary
+        //       dirname("0") === "." only holds because "0" is there a bare basename).
+        //   (b) NOT non-empty either: dirname("") === "" — the exact bin2hex
+        //       empty-in/empty-out shape that refused bin2hex.
+        //
+        // Neither StrPreds refinement holds for all arguments, so the reflected `string`
+        // envelope must stand alone. A row here would be a wrong premise — the ADR's
+        // named FP channel (a curated fact "disproving" a correct docblock).
+        assert_eq!(super::return_fact("dirname"), None);
+        assert_eq!(super::return_fact("DIRNAME"), None);
+        assert_eq!(super::return_fact("\\dirname"), None);
     }
 
     #[test]
