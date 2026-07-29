@@ -20,7 +20,10 @@ pub mod spell;
 
 pub use admit::{ShapeSpec, admits_fact, admits_val, shape_verdict};
 
-use steins_domain::{Base, IntRange, StrPreds};
+use steins_domain::{
+    Base, Certainty, IntRange, KeyClass, Key as DKey, Presence as DPresence, ShapeFact, StrPreds,
+    Tail as DTail,
+};
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, ShapeKey, StringLit, Type, TypeKind};
 
 /// A lowered `callable(P1, P2=): R` signature (issue #11): the parameter
@@ -219,6 +222,22 @@ fn array_key() -> ContractTy {
     ContractTy::Union(vec![ContractTy::Base(Base::Int), ContractTy::Base(Base::String)])
 }
 
+/// Is `ty` exactly the `array-key` union [`array_key`] lowers to? A `MapOf`
+/// key of this shape is the honest floor a single-arg `array<V>`/`T[]`
+/// lowers to (`lower`/`lower_generic`, above) — the speller collapses it back
+/// to the terser single-arg spelling rather than the verbose
+/// `array<int|string, V>` (round-trip faithful either way; terser is nicer).
+#[must_use]
+pub(crate) fn is_array_key_ty(ty: &ContractTy) -> bool {
+    matches!(
+        ty,
+        ContractTy::Union(members)
+            if members.len() == 2
+                && members.contains(&ContractTy::Base(Base::Int))
+                && members.contains(&ContractTy::Base(Base::String))
+    )
+}
+
 fn lower_identifier(name: &str) -> ContractTy {
     let norm = name.trim_start_matches('\\').to_ascii_lowercase();
     match norm.as_str() {
@@ -404,6 +423,68 @@ fn lower_shape(shape: &steins_phpdoc::ast::ArrayShape) -> ContractTy {
         (u.key.as_ref().map(|k| Box::new(lower(k))), Box::new(lower(&u.value)))
     });
     ContractTy::Shape { list, fields, sealed: shape.sealed, non_empty, unsealed }
+}
+
+/// The denotational `is_list` trinary for a declared `Shape` arm's fields/tail
+/// (ADR-0062 §6, D4): the ONE computation, reused from
+/// [`steins_domain::ShapeFact::normalize`] rather than re-implemented here or
+/// in the speller (`spell.rs` calls this, never its own copy). Value slots are
+/// irrelevant to `is_list` (it is purely key structure), so every field lowers
+/// with an unknown (`None`) slot; only the key, presence, and tail shape
+/// matter.
+///
+/// `list` is the declared `list{…}`/`array{…}` keyword: it seeds the
+/// `Certainty` [`ShapeFact::normalize`] sharpens (never contradicts) exactly
+/// as `list<T>`'s own lowering does (A-G1) — a `list{…}`-declared shape is
+/// forced `Yes` unless the fields themselves prove otherwise (e.g. a required
+/// string key, a genuine contradiction).
+#[must_use]
+pub(crate) fn shape_is_list(
+    list: bool,
+    fields: &[CField],
+    sealed: bool,
+    non_empty: bool,
+    unsealed: &Option<(Option<Box<ContractTy>>, Box<ContractTy>)>,
+) -> Certainty {
+    let dfields: Vec<(DKey, DPresence, Option<Box<steins_domain::Fact>>)> = fields
+        .iter()
+        .map(|f| {
+            let key = ckey_to_domain(&f.key);
+            let presence =
+                if f.optional { DPresence::Optional } else { DPresence::Required { witnessed: false } };
+            (key, presence, None)
+        })
+        .collect();
+    let tail = if sealed {
+        DTail::Sealed
+    } else {
+        let key_class = unsealed
+            .as_ref()
+            .and_then(|(k, _)| k.as_deref())
+            .map(contract_key_class)
+            .unwrap_or(KeyClass::ArrayKey);
+        DTail::Unsealed { key: key_class, value: None }
+    };
+    let given = if list { Certainty::Yes } else { Certainty::Maybe };
+    ShapeFact::normalize(dfields, tail, given, non_empty, Vec::new()).is_list
+}
+
+fn ckey_to_domain(k: &CKey) -> DKey {
+    match k {
+        CKey::Int(i) => DKey::Int(*i),
+        CKey::Str(s) => DKey::Str(s.clone()),
+    }
+}
+
+/// The unsealed-tail key class a lowered key contract denotes: bare `int`/
+/// `string` narrow the tail's key class, anything else (including the
+/// `array-key` union) is the honest `ArrayKey` floor.
+fn contract_key_class(ty: &ContractTy) -> KeyClass {
+    match ty {
+        ContractTy::Base(Base::Int) => KeyClass::Int,
+        ContractTy::Base(Base::String) => KeyClass::Str,
+        _ => KeyClass::ArrayKey,
+    }
 }
 
 fn lower_const(c: &ConstExpr) -> ContractTy {

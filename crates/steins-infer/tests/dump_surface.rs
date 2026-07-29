@@ -235,6 +235,54 @@ fn phpdoc_type_is_honest_when_no_contract_is_declared() {
     assert_eq!(pd[0].message, "dumped phpdoc type: no declared contract");
 }
 
+// ---- ADR-0062 S1 — the array vocabulary (D4) -------------------------------
+//
+// A seeded `array{…}` @param no longer renders "no declared contract" (#51
+// L1) — the ONE speller (`spell_arms`) now spells the array vocabulary, so
+// the declared-side view shows the spelled arm list. Concrete `dumpType`
+// arrays spell value-precisely through the same speller's value-side
+// counterpart.
+
+#[test]
+fn phpdoc_type_spells_a_seeded_optional_shape_instead_of_no_contract() {
+    let src = "<?php\n/** @param array{a?: string, b?: string} $data */\n\
+               function f($data) { \\PHPStan\\dumpPhpDocType($data); }\n";
+    assert_eq!(one_phpdoc(src), "dumped phpdoc type: array{a?: string, b?: string} (asserted)");
+}
+
+#[test]
+fn phpdoc_type_spells_list_generic() {
+    let src = "<?php\n/** @param list<string> $l */\nfunction f($l) { \\PHPStan\\dumpPhpDocType($l); }\n";
+    assert_eq!(one_phpdoc(src), "dumped phpdoc type: list<string> (asserted)");
+}
+
+#[test]
+fn phpdoc_type_spells_map_generic() {
+    let src = "<?php\n/** @param array<string, int> $m */\nfunction f($m) { \\PHPStan\\dumpPhpDocType($m); }\n";
+    assert_eq!(one_phpdoc(src), "dumped phpdoc type: array<string, int> (asserted)");
+}
+
+#[test]
+fn phpdoc_type_spells_non_empty_shape() {
+    let src = "<?php\n/** @param non-empty-array{a: int} $x */\n\
+               function f($x) { \\PHPStan\\dumpPhpDocType($x); }\n";
+    assert_eq!(one_phpdoc(src), "dumped phpdoc type: non-empty-array{a: int} (asserted)");
+}
+
+#[test]
+fn dump_type_spells_a_keyed_concrete_array() {
+    let src = "<?php\n$arr = ['a' => 'v'];\n\\PHPStan\\dumpType($arr);\n";
+    assert_eq!(one_type(src), "dumped type: array{a: 'v'}");
+}
+
+#[test]
+fn dump_type_spells_a_sequential_concrete_array_as_a_list() {
+    // The D4-native divergence (ADR-0062 §6): a Yes-list value spells `list{…}`,
+    // never PHPStan stable's own `array{…}` for the same value.
+    let src = "<?php\n$l = ['x', 'y'];\n\\PHPStan\\dumpType($l);\n";
+    assert_eq!(one_type(src), "dumped type: list{'x', 'y'}");
+}
+
 // ---- Transparency (ADR-0053 §10 §3) ----------------------------------------
 
 #[test]

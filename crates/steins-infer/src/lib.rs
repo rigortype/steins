@@ -3525,7 +3525,7 @@ impl<'a> Cx<'a> {
 
 /// The domain value-fact (four layers), aliased as `Fact` throughout the walk.
 use steins_domain::Fact;
-use steins_domain::{Base, IntRange, Key as VKey, Refinement, StrPreds, Val};
+use steins_domain::{Base, IntRange, Key as VKey, Refinement, ShapeFact, StrPreds, Val};
 
 /// The conversion seam **into** the domain: a literal (or fully-literal array)
 /// [`ArgValue`] to a domain [`Val`]. Array keys carry PHP key-normalization in
@@ -4833,31 +4833,70 @@ fn render_dump_fact(fact: &Fact) -> String {
         }
         Fact::Refined { base, nullable, .. } => with_null(base_keyword(*base).to_owned(), *nullable),
         Fact::General { base, nullable } => with_null(base_keyword(*base).to_owned(), *nullable),
-        // Finite layers are handled above. The array stratum (ADR-0062
-        // `Fact::Shape`) has no faithful spelling until the array-vocabulary
-        // slice teaches the speller, so it renders as honest `DUMP_UNKNOWN` —
-        // the same answer an array member already gets.
-        Fact::Singleton(_) | Fact::OneOf(_) | Fact::Shape { .. } => DUMP_UNKNOWN.to_owned(),
+        // The abstract array stratum (ADR-0062 `Fact::Shape`, S2): routed through
+        // the same ONE speller as the contract-arm and concrete-value paths.
+        Fact::Shape { shape, nullable } => render_shape_fact(shape, *nullable),
+        // Finite layers are handled above.
+        Fact::Singleton(_) | Fact::OneOf(_) => unreachable!("finite_members handled above"),
     }
+}
+
+/// Spell an abstract [`ShapeFact`] for the dump surface (ADR-0062 §6, D4) — the
+/// same array-vocabulary decision [`render_contract_arms`]'s `Shape` arm and
+/// [`render_finite_precise`]'s concrete-array path make, run over the flow-side
+/// fact form instead of the declared or concrete one. `Fact::Shape` has no
+/// construction sites yet (S2 groundwork only), so this exists for the future S3
+/// consumers to inherit for free — every field/tail value slot recurses through
+/// [`render_dump_fact`] itself (the domain's `Fact` is recursive, ADR-0062 §3).
+fn render_shape_fact(shape: &ShapeFact, nullable: bool) -> String {
+    use steins_domain::{KeyClass, Presence, Tail};
+
+    let is_list = shape.is_list == Certainty::Yes;
+    let fields: Vec<(VKey, bool, String)> = shape
+        .fields
+        .iter()
+        .filter(|(_, p, _)| !matches!(p, Presence::Absent))
+        .map(|(k, p, slot)| {
+            let value = slot.as_ref().map_or_else(|| "mixed".to_owned(), |f| render_dump_fact(f));
+            (k.clone(), p.is_required(), value)
+        })
+        .collect();
+    let tail = match &shape.tail {
+        Tail::Sealed => steins_contract::spell::ShapeTail::Sealed,
+        Tail::Unsealed { key: KeyClass::ArrayKey, value: None } => {
+            steins_contract::spell::ShapeTail::Untyped
+        }
+        Tail::Unsealed { key, value } => {
+            let val_spelling = value.as_ref().map_or_else(|| "mixed".to_owned(), |f| render_dump_fact(f));
+            let key_spelling = match key {
+                KeyClass::ArrayKey => None,
+                KeyClass::Int => Some("int".to_owned()),
+                KeyClass::Str => Some("string".to_owned()),
+            };
+            steins_contract::spell::ShapeTail::Typed { key: key_spelling, value: val_spelling }
+        }
+    };
+    let body = steins_contract::spell::spell_shape(is_list, shape.non_empty, &fields, &tail);
+    with_null(body, nullable)
 }
 
 /// Value-precise spelling of a finite value set (`Singleton`/`OneOf` members) for
 /// the dump surface: int/float/bool literals verbatim (`123`, `-5`, `123.0`,
 /// `false`), string literals single-quoted through the shared speller's own literal
 /// escaping ([`steins_contract::spell::string_literal`] — ONE speller, no second
-/// string escaper), `null` as `null`. Members are sorted+deduped and joined with `|`
-/// in the domain's canonical [`Val`] order (int, float, string, bool, null) — order
-/// is immaterial to the harness (it sorts union atoms) but kept stable for readable
-/// output. `None` when any member is an array (no faithful spelling — the caller
-/// falls to honest [`DUMP_UNKNOWN`]), matching the pre-fix refusal.
+/// string escaper), `null` as `null`, and — ADR-0062 §6 — an array member through
+/// the shared D4 spelling ([`steins_contract::spell::spell_val`], the `spell_arms`
+/// "value-side counterpart": a list value `list{…}`, everything else keyed
+/// `array{…}`, nested arrays recursing). Members are sorted+deduped and joined with
+/// `|` in the domain's canonical [`Val`] order (int, float, string, bool, null,
+/// array) — order is immaterial to the harness (it sorts union atoms) but kept
+/// stable for readable output. `None` only for an empty member slice (unreachable
+/// from `Fact::finite_members`, which is never empty by construction) — every
+/// `Val`, including an array, now has a faithful spelling here.
 fn render_finite_precise(members: &[Val]) -> Option<String> {
     let mut vals = members.to_vec();
     vals.sort();
     vals.dedup();
-    // Any array member has no faithful scalar spelling (§7).
-    if vals.iter().any(|v| matches!(v, Val::Array(_))) {
-        return None;
-    }
     // Emit in the canonical spelling order `summarize_vals` fixes (int, float,
     // string, bool, null) — value-precise per member. Order is immaterial to the
     // harness (it sorts atoms) but kept stable and PHPStan-shaped for readable output.
@@ -4885,6 +4924,12 @@ fn render_finite_precise(members: &[Val]) -> Option<String> {
     if vals.contains(&Val::Null) {
         parts.push("null".to_owned());
     }
+    // Array members: the D4 spelling, appended last (mirroring spell_arms's own
+    // array-vocabulary placement — scalar members first, arrays after).
+    parts.extend(vals.iter().filter_map(|v| match v {
+        Val::Array(_) => Some(steins_contract::spell::spell_val(v)),
+        _ => None,
+    }));
     (!parts.is_empty()).then(|| parts.join("|"))
 }
 
@@ -13368,11 +13413,44 @@ mod dump_render_tests {
     }
 
     #[test]
-    fn array_bearing_fact_is_honest_unknown() {
-        // A set the domain cannot faithfully spell (an array member) dumps `unknown`,
-        // never a guess (§7).
+    fn array_bearing_fact_spells_through_the_d4_array_vocabulary() {
+        // ADR-0062 §6 flip: the array-vocabulary slice teaches the speller, so an
+        // array-bearing fact is no longer an honest-unknown refusal. The empty
+        // array is denotationally a Yes-list (array_is_list([]) is vacuously
+        // true, §3) — the D4-native `list{}` spelling, a deliberate divergence
+        // from PHPStan stable's own `array{}` for the empty/Yes-list case.
         let fact = Fact::Singleton(Val::Array(vec![]));
-        assert_eq!(render_dump_fact(&fact), DUMP_UNKNOWN);
+        assert_eq!(render_dump_fact(&fact), "list{}");
+    }
+
+    #[test]
+    fn concrete_array_values_spell_value_precisely() {
+        // Point 3 of the S1 mission fixtures: a keyed non-list value spells
+        // keyed `array{…}`; a sequential list value spells `list{…}`.
+        let map = Fact::Singleton(Val::Array(vec![(VKey::Str("a".to_owned()), s("v"))]));
+        assert_eq!(render_dump_fact(&map), "array{a: 'v'}");
+        let list = Fact::Singleton(Val::Array(vec![(VKey::Int(0), s("x")), (VKey::Int(1), s("y"))]));
+        assert_eq!(render_dump_fact(&list), "list{'x', 'y'}");
+    }
+
+    #[test]
+    fn shape_fact_spells_through_the_shared_speller() {
+        // ADR-0062 S1 point 4: `Fact::Shape` has no construction sites yet
+        // (S2 groundwork only), but it already spells correctly, so S3's
+        // consumers inherit the rendering for free.
+        use steins_domain::{Presence, ShapeFact, Tail};
+        let shape = ShapeFact::normalize(
+            vec![(VKey::Str("a".to_owned()), Presence::Required { witnessed: false }, None)],
+            Tail::Sealed,
+            steins_domain::Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        let fact = Fact::Shape { shape: Box::new(shape), nullable: false };
+        // `ShapeFact::normalize` sets `non_empty` from the `Required` field
+        // itself (shape.rs), so the rendering carries the (redundant but
+        // honest) `non-empty-` modifier.
+        assert_eq!(render_dump_fact(&fact), "non-empty-array{a: mixed}");
     }
 }
 
