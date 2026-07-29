@@ -520,7 +520,93 @@ pub fn lower_generic(base: &str, args: &[steins_phpdoc::ast::GenericArg]) -> Con
             val: Box::new(arg(1).expect("len checked")),
         },
         ("class-string", _) => ContractTy::StrOpaque,
+        // `key-of<T>` / `value-of<T>` — the two *derived* spellings: their content
+        // is not written down, it is projected out of another type. The operand is
+        // lowered first through this same table, so the projection sees a
+        // [`ContractTy`] and never re-reads the AST — one lowering, then one
+        // projection over its result (ADR-0030's no-second-relation discipline).
+        ("key-of", 1) => project_key_of(&arg(0).expect("len checked")),
+        ("value-of", 1) => project_value_of(&arg(0).expect("len checked")),
         _ => ContractTy::Class(norm),
+    }
+}
+
+/// Fold projected members into one contract: nothing is [`ContractTy::Never`]
+/// (the empty shape genuinely has no keys and no values), one member is itself,
+/// and the rest is a `Union` in declaration order with duplicates dropped —
+/// `value-of<array{a: int, b: int}>` is `int`, not `int|int`.
+fn union_of(members: Vec<ContractTy>) -> ContractTy {
+    let mut uniq: Vec<ContractTy> = Vec::with_capacity(members.len());
+    for m in members {
+        if !uniq.contains(&m) {
+            uniq.push(m);
+        }
+    }
+    match uniq.len() {
+        0 => ContractTy::Never,
+        1 => uniq.pop().expect("len checked"),
+        _ => ContractTy::Union(uniq),
+    }
+}
+
+/// `key-of<T>`: the type of the keys `T`'s realizations carry, projected out of
+/// the already-lowered operand.
+///
+/// Enumerable exactly where the declaration pins the key set down:
+///
+/// | Operand | `key-of` |
+/// | --- | --- |
+/// | sealed `array{a: int, b: string}` / `list{…}` | the literal key union (`'a'\|'b'` / `0\|1`) |
+/// | `array<K, V>` / `associative-array<K, V>` | `K` — already the key contract |
+/// | `list<T>` / `non-empty-list<T>` | `int<0, max>`, by #14939's `0..n-1` keys |
+/// | `array` / `non-empty-array` | `array-key` |
+/// | anything else | [`ContractTy::Opaque`] |
+///
+/// **Optional keys count.** A `b?:` field is still a key the array *may* carry,
+/// and PHPStan's `Type::getKeysArray()` includes it, so the projection does not
+/// filter on `CField::optional`. (No conformance fixture exercises an optional
+/// key here — the rule is taken from PHPStan's semantics, not derived from a
+/// probe.)
+///
+/// **An unsealed shape is not enumerable**: `array{a: int, ...}` admits keys the
+/// declaration never named, so its key set is open and the honest answer is
+/// `Opaque` rather than the declared prefix. Same for a template, a const fetch,
+/// a class or any non-array operand — all of which reach here already lowered to
+/// something this table cannot read a key set out of.
+#[must_use]
+pub fn project_key_of(inner: &ContractTy) -> ContractTy {
+    match inner {
+        ContractTy::Shape { fields, sealed: true, .. } => union_of(
+            fields
+                .iter()
+                .map(|f| match &f.key {
+                    CKey::Int(i) => ContractTy::LitInt(*i),
+                    CKey::Str(s) => ContractTy::LitStr(s.clone()),
+                })
+                .collect(),
+        ),
+        ContractTy::ListOf { .. } => ContractTy::IntIn(IntRange::NON_NEGATIVE),
+        ContractTy::MapOf { key, .. } => (**key).clone(),
+        ContractTy::ArrayAny { .. } => array_key(),
+        _ => ContractTy::Opaque,
+    }
+}
+
+/// `value-of<T>`: the type of the values `T`'s realizations carry — the mirror
+/// of [`project_key_of`], enumerable under the same conditions.
+///
+/// `array` / `non-empty-array` is deliberately **not** projected to `mixed`
+/// here: an unparameterized array states nothing about its values, and
+/// `Opaque` is the same silence with less to go wrong.
+#[must_use]
+pub fn project_value_of(inner: &ContractTy) -> ContractTy {
+    match inner {
+        ContractTy::Shape { fields, sealed: true, .. } => {
+            union_of(fields.iter().map(|f| f.ty.clone()).collect())
+        }
+        ContractTy::ListOf { elem, .. } => (**elem).clone(),
+        ContractTy::MapOf { val, .. } => (**val).clone(),
+        _ => ContractTy::Opaque,
     }
 }
 

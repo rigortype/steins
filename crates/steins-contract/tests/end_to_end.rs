@@ -111,6 +111,96 @@ fn associative_array_rejects_list_realizations() {
     );
 }
 
+/// `key-of<T>` / `value-of<T>` (census bucket vi, inline tier): the projection
+/// over an operand this crate can enumerate on its own.
+#[test]
+fn key_of_and_value_of_project_enumerable_operands() {
+    // The two conformance fixtures, exactly.
+    let k = ty("key-of<array{name: string, age: int}>");
+    assert_eq!(admits_val(&k, &s("name")), Yes);
+    assert_eq!(admits_val(&k, &s("age")), Yes);
+    assert_eq!(admits_val(&k, &s("missing")), No);
+    // A *value* of the shape is not a key of it — the mistake the spelling invites.
+    assert_eq!(admits_val(&k, &Val::Int(0)), No);
+
+    let v = ty("value-of<array{a: int, b: int}>");
+    assert_eq!(admits_val(&v, &Val::Int(1)), Yes);
+    assert_eq!(admits_val(&v, &s("x")), No);
+    // `'a'` is a key of the shape, not a value of it.
+    assert_eq!(admits_val(&v, &s("a")), No);
+
+    // Duplicate member types collapse: `int|int` is `int`, so any int qualifies.
+    assert_eq!(admits_val(&v, &Val::Int(9999)), Yes);
+
+    // A heterogeneous shape keeps both value members.
+    let hv = ty("value-of<array{a: int, b: string}>");
+    assert_eq!(admits_val(&hv, &Val::Int(1)), Yes);
+    assert_eq!(admits_val(&hv, &s("x")), Yes);
+    assert_eq!(admits_val(&hv, &Val::Bool(true)), No);
+
+    // A `list{…}` shape's keys are its positions.
+    let lk = ty("key-of<list{int, string}>");
+    assert_eq!(admits_val(&lk, &Val::Int(0)), Yes);
+    assert_eq!(admits_val(&lk, &Val::Int(1)), Yes);
+    assert_eq!(admits_val(&lk, &Val::Int(2)), No);
+    assert_eq!(admits_val(&lk, &s("0")), No);
+
+    // `list<T>` keys are `int<0, max>`; its values are `T`.
+    assert_eq!(admits_val(&ty("key-of<list<string>>"), &Val::Int(7)), Yes);
+    assert_eq!(admits_val(&ty("key-of<list<string>>"), &Val::Int(-1)), No);
+    assert_eq!(admits_val(&ty("value-of<list<string>>"), &s("x")), Yes);
+    assert_eq!(admits_val(&ty("value-of<list<string>>"), &Val::Int(1)), No);
+
+    // `array<K, V>` projects to its own key/value contracts.
+    assert_eq!(admits_val(&ty("key-of<array<string, int>>"), &s("k")), Yes);
+    assert_eq!(admits_val(&ty("key-of<array<string, int>>"), &Val::Int(1)), No);
+    assert_eq!(admits_val(&ty("value-of<array<string, int>>"), &Val::Int(1)), Yes);
+}
+
+/// The optional-key rule, and the operands the projection refuses.
+#[test]
+fn key_of_keeps_optional_keys_and_floors_open_operands() {
+    // PHPStan's `Type::getKeysArray()` includes an optional field's key: a `b?:`
+    // field is still a key the array MAY carry. No conformance fixture probes
+    // this — the rule is taken from PHPStan's semantics, not derived from a test.
+    let k = ty("key-of<array{a: int, b?: string}>");
+    assert_eq!(admits_val(&k, &s("a")), Yes);
+    assert_eq!(admits_val(&k, &s("b")), Yes);
+    assert_eq!(admits_val(&k, &s("c")), No);
+    // Same on the value side.
+    let v = ty("value-of<array{a: int, b?: string}>");
+    assert_eq!(admits_val(&v, &s("x")), Yes);
+    assert_eq!(admits_val(&v, &Val::Int(1)), Yes);
+    assert_eq!(admits_val(&v, &Val::Bool(false)), No);
+
+    // An UNSEALED shape's key set is open — the declaration names a prefix, not
+    // the whole set — so the projection declines rather than enumerate a lie.
+    assert_eq!(admits_val(&ty("key-of<array{a: int, ...}>"), &s("zzz")), Maybe);
+    assert_eq!(admits_val(&ty("value-of<array{a: int, ...}>"), &s("zzz")), Maybe);
+
+    // Operands with no enumerable key/value set stay at the Opaque floor: a
+    // template parameter, a class-constant fetch (the const tier resolves that in
+    // `steins-infer`, which has the project index this crate does not), a class.
+    assert_eq!(admits_val(&ty("key-of<T>"), &s("anything")), Maybe);
+    assert_eq!(admits_val(&ty("value-of<T>"), &s("anything")), Maybe);
+    assert_eq!(admits_val(&ty("key-of<Config::MAP>"), &s("anything")), Maybe);
+    assert_eq!(admits_val(&ty("value-of<Suit>"), &s("anything")), Maybe);
+    assert_eq!(admits_val(&ty("value-of<int>"), &s("anything")), Maybe);
+
+    // `array` states nothing about its values, but its keys are still `array-key`.
+    assert_eq!(admits_val(&ty("key-of<array>"), &s("k")), Yes);
+    assert_eq!(admits_val(&ty("key-of<array>"), &Val::Bool(true)), No);
+    assert_eq!(admits_val(&ty("value-of<array>"), &Val::Bool(true)), Maybe);
+
+    // The empty shape has no keys and no values at all — `never`, not silence.
+    assert_eq!(admits_val(&ty("key-of<array{}>"), &s("a")), No);
+    assert_eq!(admits_val(&ty("value-of<array{}>"), &Val::Int(1)), No);
+
+    // The bare, unparameterized keywords keep their Opaque floor.
+    assert_eq!(admits_val(&ty("key-of"), &s("a")), Maybe);
+    assert_eq!(admits_val(&ty("value-of"), &s("a")), Maybe);
+}
+
 #[test]
 fn shapes_follow_14939() {
     let shape = ty("array{id: int, name?: string}");

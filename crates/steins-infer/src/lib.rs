@@ -13441,6 +13441,60 @@ fn string_lit_value(lit: &StringLit) -> &str {
     }
 }
 
+/// Resolve a `key-of<Foo::MAP>` / `value-of<Foo::MAP>` operand — a class constant
+/// holding an array literal — to the sealed [`ContractTy::Shape`] the shared
+/// projection reads (census bucket vi, const tier).
+///
+/// This is an **operand resolver, not a second projection**: it answers only "what
+/// array does this reference denote", and hands the answer to the same
+/// `project_key_of`/`project_value_of` the inline tier uses. It lives here rather
+/// than in `steins-contract` because the answer needs the project index, which that
+/// crate deliberately does not carry.
+///
+/// `None` — the honest floor, which the caller turns back into the context-free
+/// delegation and hence into silence — whenever any step is unproven: a
+/// non-const-fetch operand, an unresolvable class, a constant with no *literal*
+/// initializer (`ClassDecl::consts` records only literals, so absence never means
+/// "no such constant"), a non-array constant, an array whose runtime keys are
+/// version-dependent, or an element that is not a scalar literal.
+///
+/// Deliberately **not** covered: a backed **enum** operand (`value-of<Suit>`).
+/// Its backing values are recorded (`EnumCaseDecl::value`) but never read — the
+/// const resolver returns an enum case as an *object* by design (ADR-0043 §2), so
+/// projecting backing scalars would be new semantics, not a new resolver. Named as
+/// a ceiling rather than guessed at.
+fn const_operand_shape(cx: &Cx, cfile: usize, coff: u32, ty: &PType) -> Option<ContractTy> {
+    let PKind::Const(ConstExpr::Fetch { class, name }) = &ty.kind else { return None };
+    let fqn = cx.resolve_pclass(cfile, coff, class);
+    let ArgValue::Array(items) = cx.resolve_const_literal(&fqn, name)? else { return None };
+    let normalized = normalize_array(&items, cx.php_minor)?;
+    let mut fields = Vec::with_capacity(normalized.len());
+    for (k, v) in normalized {
+        let key = match k {
+            NormKey::Int(i) => steins_contract::CKey::Int(i),
+            NormKey::Str(s) => steins_contract::CKey::Str(s),
+        };
+        fields.push(steins_contract::CField { key, optional: false, ty: literal_contract(&v)? });
+    }
+    let non_empty = !fields.is_empty();
+    Some(ContractTy::Shape { list: false, fields, sealed: true, non_empty, unsealed: None })
+}
+
+/// The literal contract one *proven* array element denotes. `None` for anything
+/// that is not a scalar literal (a nested array, an object, an unresolved
+/// reference) — which drops the whole operand to silence rather than projecting a
+/// partial key/value set.
+fn literal_contract(v: &ArgValue) -> Option<ContractTy> {
+    Some(match v {
+        ArgValue::Int(i) => ContractTy::LitInt(*i),
+        ArgValue::Float(f) => ContractTy::LitFloat(*f),
+        ArgValue::Str(s) => ContractTy::LitStr(s.clone()),
+        ArgValue::Bool(b) => ContractTy::LitBool(*b),
+        ArgValue::Null => ContractTy::Null,
+        _ => return None,
+    })
+}
+
 /// Acceptance for a generic type: `array<…>`/`list<…>`/`non-empty-*<…>` (per the
 /// phpstan#14939 list semantics), simple `int<lo, hi>` ranges; everything else
 /// (`Collection<…>`, `iterable<…>`, template generics) is silent.
@@ -13491,6 +13545,35 @@ fn accepts_generic(
                     steins_contract::admits_val(&steins_contract::lower_generic(base, args), &val)
                 }
                 None => Tri::Maybe,
+            }
+        }
+        // `key-of<T>` / `value-of<T>` (census bucket vi, inline tier): the one
+        // generic table projects the key/value set out of the lowered operand and
+        // the shared relation judges the result, so this lane restates neither the
+        // projection nor the "which operands are enumerable" rule. An operand the
+        // projection cannot read (a template, a class-constant fetch, an unsealed
+        // shape) lowers to `Opaque`, which is `Maybe` for every value — the floor
+        // arrives through the same delegation rather than a guard here.
+        "key-of" | "value-of" if args.len() == 1 => {
+            let Some(val) = cval_as_val(v) else { return Tri::Maybe };
+            // The operand comes from one of two resolvers, and the projection that
+            // reads it is the SAME function either way: `lower_generic` resolves the
+            // context-free operands (an inline shape, `array<K, V>`, `list<T>`), and
+            // the const-fetch resolver just below supplies the one operand only this
+            // lane can see — a class constant holding an array, which needs the
+            // project index. Two resolvers, one projection rule (ADR-0030).
+            let projected = const_operand_shape(cx, cfile, coff, &args[0].ty).map(|shape| {
+                if base_lc == "key-of" {
+                    steins_contract::project_key_of(&shape)
+                } else {
+                    steins_contract::project_value_of(&shape)
+                }
+            });
+            match projected {
+                Some(ty) => steins_contract::admits_val(&ty, &val),
+                None => {
+                    steins_contract::admits_val(&steins_contract::lower_generic(base, args), &val)
+                }
             }
         }
         // A class-level generic `Class<A, …>` (ADR-0032 tier 3, issue #10).
