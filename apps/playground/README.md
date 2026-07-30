@@ -9,6 +9,10 @@ By default every run here is the documented **sound subset** (ADR-0004): no PHP
 sidecar, so findings that require executing PHP are omitted and nothing false is
 added. The banner at the bottom of the page is the analysis envelope's `notice`
 field — the same sentence `steins check --no-php` prints — rendered as data.
+With the optional engine loaded that sentence is no longer the posture, so the
+banner states what the engine did and points at the boundary panel; the
+envelope's `notice` text itself is untouched, because the UI decides what to
+show and not what is true.
 
 ## The optional PHP engine (issue #64)
 
@@ -38,17 +42,35 @@ its own thread's timers, so no in-thread timeout exists), or any engine failure
 falls back to the plain call for that run and says so in the engine bar. A
 half-converged envelope is a partial lie and is never shown.
 
-What lights up is **reflection and existence**: builtin return envelopes and the
-absence family (`call.undefined-function` and friends), plus the boot-surface
-label. Not folded values — php-wasm 0.1.0's PHP 8.5 is a 32-bit build, and a
-fold is only sound on a provably 64-bit engine (ADR-0066 §4).
+### What lights up, and what does not
+
+php-wasm 0.1.0 is PHP **8.5.2 built 32-bit** (`PHP_INT_SIZE = 4`), and that
+machine — not the version — decides the boundary. On it:
+
+| lane | state | why |
+| --- | --- | --- |
+| folded values | **19 of 22** allowlisted builtins | the verified width-safe subset (ADR-0066 S1.5 amendment), under an argument range guard of ±(2³¹−1) counting array keys |
+| `abs`, `intval`, `sprintf` | refused | their result *is* an integer in the machine's word; `sprintf("%x", -1)` is `"ffffffff"` here and `"ffffffffffffffff"` on a 64-bit runtime |
+| reflected return envelopes | live | a declared return type is platform-independent |
+| the absence family | live | existence is not arithmetic |
+| curated refinement rows | declined | a curated row is verified against the 64-bit engine at the pinned minor; `strlen()` is `int` here, not `int<0, max>` |
+
+None of that is written into the frontend. Every replay envelope carries a
+`boot` object — the engine surface **as the shared fold policy sees it**,
+computed from the same helpers that gate admission — and the engine bar plus its
+*Precision boundary* panel are composed from it. A gate change moves the page in
+the same commit; a 64-bit engine answering instead would make the same code say
+"all 22" and name no refusals. That is issue #61's second half: the boundary is
+legible, and it cannot go stale in the safe-but-illegible direction the way the
+sound-subset banner did once an engine was actually present.
 
 ## Files
 
 - `index.html` — the whole frontend: CodeMirror 6 (from esm.sh via an import
   map, so the module graph shares one instance of each package), a 600 ms
-  debounced check, wavy underlines + a findings panel, the posture banner, and
-  the engine toggle + replay orchestration.
+  debounced check, wavy underlines + a findings panel, the posture banner, the
+  engine toggle + replay orchestration, and the *Precision boundary* panel
+  composed from the envelope's `boot` object.
 - `worker.js` — the analysis thread; owns the wasm instance. Runs the plain
   pair, or one replay iteration when the request carries a table.
 - `php-worker.js` — the PHP thread; owns the php-wasm instance. Hand-written
@@ -94,10 +116,14 @@ node apps/playground/smoke-replay.mjs
 ```
 
 `smoke.mjs` pins the ABI (the pending contract, the key format, a fold landing
-once the table is complete) against a canned table captured from a real `php`.
-`smoke-replay.mjs` pins the loop against php-src itself: that it converges, that
-the absence family lights up with the engine and is silent without it, and that
-`env` is asked once and never again.
+once the table is complete, and the `boot` object of a 64-bit engine) against a
+canned table captured from a real `php`. `smoke-replay.mjs` pins the loop against
+php-src itself: the flagship `dumpType(greet(2, "World"))` inlining to
+`'Hello, World! Hello, World! '`, issue #61's own two table rows folding in the
+margin and being absent without the engine, `abs(-3)` widening because the name
+is width-refused, the `boot` object matching the engine that actually booted, the
+absence family lighting up with the engine and silent without it, and `env` being
+asked once and never again.
 
 ## Attribution
 

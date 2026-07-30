@@ -71,14 +71,17 @@ function analyzer(source, profile = "") {
   };
 }
 
-// 2. A snippet with a builtin call converges — the engine answers, the loop
-//    stops, and it stops well inside the cap.
+// 2. THE FLAGSHIP (issue #64 acceptance criterion 1). `dumpType(greet(2,
+//    "World"))` inlines through the real engine: a project call in argument
+//    position (#60) whose body concatenates (#59) and folds `str_repeat` — which
+//    is on the verified width-safe subset, so it folds on this 32-bit build.
 const FLAGSHIP = `<?php
 function greet(int $times, string $name): string {
     return str_repeat("Hello, " . $name . "! ", $times);
 }
 \\PHPStan\\dumpType(greet(2, "World"));
 `;
+const GREETING = "Hello, World! Hello, World! ";
 
 const table = Object.create(null);
 const flagship = await driveReplay({ analyze: analyzer(FLAGSHIP), answer, table });
@@ -86,11 +89,90 @@ console.log(`flagship: ${flagship.status} in ${flagship.iterations} iteration(s)
 assert(flagship.status === "converged", `the loop converges over the real engine (got ${flagship.status}${flagship.reason ? `: ${flagship.reason}` : ""})`);
 assert(flagship.iterations <= ITERATION_CAP, `the fixpoint came inside the cap (${flagship.iterations} <= ${ITERATION_CAP})`);
 assert(flagship.value.pending.length === 0, "the rendered envelope has no pending requests");
+// TWO batches, exactly: one to learn the machine (and reflect `greet`), one to
+// fold `str_repeat` now that the width gate admits it. Before S1.5 this was one
+// batch because the fold was refused outright — the extra round trip IS the
+// flagship lighting up, so the count is pinned rather than loosened.
+const flagshipBatches = asked.length;
+assert(flagshipBatches === 2, `the flagship takes two engine batches (got ${flagshipBatches})`);
 
-// 3. `env` is asked exactly once, on the first iteration, and never again — the
-//    property the whole memo table exists for.
+const dump = flagship.value.findings.find((f) => f.id === "debug.type");
+console.log(`flagship dump: ${dump && dump.message}`);
+assert(
+  dump !== undefined && dump.message === `dumped type: '${GREETING}'`,
+  `the flagship inlines through the real engine (got: ${dump && dump.message})`,
+);
+
+assert(
+  steins.check(FLAGSHIP).findings.some((f) => f.message === "dumped type: string"),
+  "…and without the engine the same snippet is the sound subset's `string`",
+);
+
+// …and issue #61's own table, in the margin the "Show types" overlay renders.
+// Those two rows are the ones that reported `unknown` in the browser and a value
+// on the CLI; through the real engine the browser now agrees with the CLI.
+for (const [src, want] of [
+  ['<?php\n$a = strtoupper("ab");\n', '$a = "AB"'],
+  ['<?php\n$a = str_repeat("ab", 2);\n', '$a = "abab"'],
+]) {
+  const run = await driveReplay({ analyze: analyzer(src), answer, table });
+  const margin = steins.annotateReplay(src, table);
+  const texts = margin.lines.map((l) => l.text);
+  assert(
+    run.status === "converged" && margin.pending.length === 0 && texts.includes(want),
+    `issue #61's table row folds in the margin: ${want} (got ${JSON.stringify(texts)})`,
+  );
+  assert(
+    !steins.annotate(src).lines.map((l) => l.text).includes(want),
+    `…and is NOT there without the engine (${src.trim().split("\n").pop()})`,
+  );
+}
+
+// 3. The boot object (issue #64 S3): the engine surface as the analysis' own
+//    gates see it, which is what the page renders its boundary from. On the
+//    machine the browser actually gets — php-wasm's 32-bit 8.5 — that is the
+//    width-safe fold subset, no curated rows, absence family live.
+const boot = flagship.value.boot;
+console.log(`boot: ${JSON.stringify(boot)}`);
+assert(boot !== undefined && boot !== null, "a replay envelope carries a boot object");
+assert(boot.php_version === engine.version, `boot.php_version is the engine's own (${boot.php_version} vs ${engine.version})`);
+assert(boot.int_size === engine.intSize, `boot.int_size is the engine's own (${boot.int_size} vs ${engine.intSize})`);
+assert(boot.fold_lane === "width_safe_subset", `a 32-bit engine folds the width-safe subset (got ${boot.fold_lane})`);
+assert(boot.fold_safe === 19 && boot.fold_total === 22, `the counts come from the catalog (${boot.fold_safe}/${boot.fold_total})`);
+assert(
+  Array.isArray(boot.refused_folds) && boot.refused_folds.join(",") === "abs,intval,sprintf",
+  `the refused folds are named (got ${JSON.stringify(boot.refused_folds)})`,
+);
+assert(boot.curated_rows === false, "a curated row is pinned to a machine, not only a version");
+assert(boot.absence_family === true, "existence is not arithmetic — the absence family is live");
+assert(typeof boot.label === "string" && boot.label.includes(engine.version), `boot.label names the boot surface (${boot.label})`);
+assert(steins.annotateReplay(FLAGSHIP, table).boot.fold_lane === boot.fold_lane, "both lanes report the same engine");
+assert(steins.check(FLAGSHIP).boot === undefined, "the engine-free envelope carries no boot object at all");
+
+// 4. …and the boundary is honest in the other direction: `abs` is a REFUSED
+//    name on a 32-bit engine (`abs("3000000000")` is int there and float here —
+//    the type tag flips), so it must not fold. What comes back is a type, not a
+//    wrong value: the fold declines, the reflected `int|float` envelope is not a
+//    single fact either, and the dump widens all the way.
+const REFUSED = '<?php\n\\PHPStan\\dumpType(abs(-3));\n';
+const refused = await driveReplay({ analyze: analyzer(REFUSED), answer, table });
+assert(refused.status === "converged", `the refused-fold snippet converges (got ${refused.status})`);
+const refusedDump = refused.value.findings.find((f) => f.id === "debug.type");
+console.log(`refused dump: ${refusedDump && refusedDump.message}`);
+assert(
+  refusedDump !== undefined && refusedDump.message === "dumped type: unknown",
+  `a width-refused builtin widens instead of folding (got: ${refusedDump && refusedDump.message})`,
+);
+assert(
+  refusedDump.message !== "dumped type: 3",
+  "the value a 64-bit engine would have folded never appears on a 32-bit one",
+);
+
+// 5. `env` is asked exactly once, on the first iteration, and never again — the
+//    property the whole memo table exists for. The flagship takes TWO batches:
+//    one to learn the machine (and reflect `greet`), one to fold `str_repeat`
+//    now that the width gate admits it — the round trip S1.5 bought.
 assert(asked.length > 0 && asked[0].includes(ENV_KEY), "the first iteration asks the environment");
-assert(asked.length === 1, `one engine batch answered the whole analysis (got ${asked.length})`);
 assert(
   asked.slice(1).every((batch) => !batch.includes(ENV_KEY)),
   "later iterations do not re-ask the environment",
@@ -99,7 +181,7 @@ assert(ENV_KEY in table, "the env answer is in the table");
 assert(typeof table[ENV_KEY].php_version === "string", `the env answer carries a php_version (${table[ENV_KEY] && table[ENV_KEY].php_version})`);
 assert(table[ENV_KEY].int_size === engine.intSize, "the env answer's width agrees with the boot probe");
 
-// 4. The absence family: structurally silent without the engine, witnessed with
+// 6. The absence family: structurally silent without the engine, witnessed with
 //    it. This is the surface lighting up, not a fold — it is what a 32-bit build
 //    still proves (ADR-0066 §4).
 const ABSENT = "<?php\ntyop();\n";
@@ -117,20 +199,20 @@ const absence = withEngine.value.findings.find((f) => f.id === "call.undefined-f
 console.log(`absence finding: ${absence && absence.message}`);
 assert(absence !== undefined && absence.line === 2, "the absence finding lands on the call's line");
 
-// 5. The table is session-global and monotone: the second analysis reused the
-//    first one's env answer instead of asking again.
+// 7. The table is session-global and monotone: a repeat analysis reuses the
+//    table's answers instead of asking again.
 const batchesBefore = asked.length;
 const again = await driveReplay({ analyze: analyzer(ABSENT), answer, table });
 assert(again.status === "converged", "a repeat analysis converges");
 assert(asked.length === batchesBefore, "a repeat analysis asks the engine nothing at all");
 
-// 6. The annotate lane rides the same table.
+// 8. The annotate lane rides the same table.
 const annotate = steins.annotateReplay(FLAGSHIP, table);
 assert(annotate.ok === true, "annotate replay envelope ok");
 assert(annotate.pending.length === 0, "annotate reaches its fixpoint on the check's table");
 assert(annotate.lines.length > 0, `annotate returns margin facts (${annotate.lines.length} lines)`);
 
-// 7. The cap is the caller's, and exhausting it is a status, not a hang: an
+// 9. The cap is the caller's, and exhausting it is a status, not a hang: an
 //    answerer that answers nothing usable must stop the loop, not spin it.
 const stubborn = await driveReplay({
   analyze: analyzer(FLAGSHIP),
@@ -169,7 +251,7 @@ assert(
   "the degraded run carries no folded value",
 );
 
-// 8. A structured engine failure, not a throw, for a request the engine cannot
+// 10. A structured engine failure, not a throw, for a request the engine cannot
 //    make sense of.
 const bogus = await answer(['{"method":"nope","params":{}}']);
 console.log(`bogus dispatch: ${JSON.stringify(bogus)}`);

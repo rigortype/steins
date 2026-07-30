@@ -11,9 +11,16 @@
     tokens, and interaction model follow the rigor-playground frontend (rigor
     ADR-29), the sibling project this page's spec comes from.
 
-    Every run here is the documented sound subset (no PHP sidecar in a
-    browser): the banner at the bottom is the envelope's `notice` field
-    rendered as data — the same sentence `steins check --no-php` prints.
+    By DEFAULT every run is the documented sound subset (no PHP engine): the
+    banner at the bottom is the envelope's `notice` field rendered as data —
+    the same sentence `steins check --no-php` prints.
+
+    With the optional php-wasm engine loaded (issue #64), the banner, the
+    engine line and the "Precision boundary" panel are composed from the
+    envelope's `boot` object instead: the engine surface as the ANALYSIS' OWN
+    GATES see it (ADR-0066). Nothing about the boundary is asserted here —
+    every number and every refused name below travels as data, so the page
+    cannot state a boundary the analysis does not apply.
   -->
 
   <!-- Set theme before first paint to avoid a flash of the wrong theme -->
@@ -187,18 +194,27 @@
     }
     #posture strong { color: var(--accent); font-weight: 600; }
 
-    /* The optional PHP engine's state, and the attribution it obliges. */
+    /* The optional PHP engine's state, the boundary it makes legible, and the
+       attribution it obliges. */
     #engine-bar {
       display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
       padding: 5px 16px; font-size: 12px; color: var(--muted);
       background: var(--surface); border-top: 1px solid var(--border);
     }
     #engine-line.failed { color: var(--c-error); }
+    #engine-line.on { color: var(--text); }
     #engine-note { color: var(--c-warning); }
     #attribution { margin-left: auto; }
-    #attribution summary { cursor: pointer; }
-    #attribution p { margin: 6px 0 2px; max-width: 92ch; line-height: 1.55; }
+    #engine-bar details summary { cursor: pointer; }
+    #engine-bar details p { margin: 6px 0 2px; max-width: 92ch; line-height: 1.55; }
     #engine-bar a { color: var(--accent); }
+    #boundary ul { margin: 4px 0 2px; padding-left: 18px; max-width: 92ch; }
+    #boundary li { margin: 3px 0; line-height: 1.55; }
+    #boundary h4 {
+      margin: 8px 0 0; font-size: 12px; font-weight: 600; color: var(--text-strong);
+    }
+    #boundary code { font-family: var(--st-mono); font-size: 11.5px; color: var(--accent); }
+    #boundary .framing { color: var(--text); }
     .btn:disabled { opacity: 0.6; cursor: default; }
 
     /* Wavy underlines + gutter markers */
@@ -244,7 +260,7 @@
     <span id="status" aria-live="polite">Loading analyzer…</span>
     <div class="toolbar">
       <button class="btn" id="engine-btn" aria-pressed="false"
-              title="Run the real PHP engine in your browser (php-wasm) so the analysis can ask it about reflection and existence">Load PHP engine (~4 MB)</button>
+              title="Run real php-src in your browser (php-wasm) and let the analysis ask it directly — builtin folds, declared return types, and whether a name exists. The engine bar states exactly what that buys.">Load PHP engine (~4 MB)</button>
       <label class="ctl-label" for="profile-sel">Profile</label>
       <select class="ctl" id="profile-sel" aria-label="Analysis profile">
         <option value="default" selected>default</option>
@@ -275,6 +291,10 @@
   <div id="engine-bar">
     <span id="engine-line">PHP engine: off</span>
     <span id="engine-note" hidden></span>
+    <details id="boundary" hidden>
+      <summary>Precision boundary</summary>
+      <div id="boundary-body"></div>
+    </details>
     <details id="attribution">
       <summary>Attribution</summary>
       <p>
@@ -306,9 +326,14 @@
     // 3 at strict — so the cumulative model is visible in three clicks.
     const SAMPLE = `<?php
 // Steins Playground — edit this code and see findings in real time.
-// The analyzer runs entirely in your browser, as the documented sound
-// subset: no PHP sidecar here, so findings that require executing PHP
-// are omitted — and nothing false is added.
+// The analyzer runs entirely in your browser. By default it is the
+// documented sound subset: no PHP engine, so findings that require
+// executing PHP are omitted — and nothing false is added.
+//
+// Click "Load PHP engine" to run real php-src here too. greet() below
+// then inlines to its actual string, undefined names are caught, and the
+// engine bar states exactly which lanes that lights up and which it
+// does not.
 //
 // Try the Profile selector: strictness in Steins is a cumulative ladder,
 // default < contracts < strict, and this sample climbs it —
@@ -339,6 +364,11 @@ function greet(int $times, string $name): string {
 }
 
 greet("three", "World"); // default: "three" can never satisfy int
+
+// The precision boundary, in one line. With the PHP engine loaded this
+// folds to its real value, because the engine computes it; without one
+// the analyzer widens rather than guess. Turn the types overlay on.
+$greeting = str_repeat("Hello, " . "World" . "! ", 2);
 `
 
     // ── Worker transport ──────────────────────────────────────────────────
@@ -609,8 +639,16 @@ greet("three", "World"); // default: "three" can never satisfy int
         })
         if (stale()) return
         // Converged is the only status whose envelope may be rendered.
-        if (run.status === "converged") result = run.value
-        else degraded = run.reason || run.status
+        if (run.status === "converged") {
+          result = run.value
+          // A converged run always describes the engine it asked (the boot
+          // surface is itself one of the questions), so this is where the
+          // engine bar and the boundary panel learn what is live.
+          if (result.check.ok && result.check.boot) {
+            engineBoot = result.check.boot
+            setEngineState("on")
+          }
+        } else degraded = run.reason || run.status
       }
       if (!result) {
         result = await analyze(source, wantAnnotate)
@@ -623,7 +661,7 @@ greet("three", "World"); // default: "three" can never satisfy int
         setStatus("error", check.error)
         return
       }
-      showPosture(check.notice)
+      showPosture(check.notice, check.boot)
       if (wantAnnotate && annotate && annotate.ok) applyFacts(annotate.lines)
       const findings = check.findings
       const parseErrors = check.parse_errors
@@ -759,26 +797,59 @@ greet("three", "World"); // default: "three" can never satisfy int
       }
     })
 
-    // ── PHP engine toggle + state line (issue #64) ────────────────────────
-    // The copy stays honest about what this build can prove: php-wasm 0.1.0's
-    // PHP 8.5 is a 32-bit build, and a fold is only sound on a provably 64-bit
-    // engine (ADR-0066 §4), so what lights up here is reflection and existence —
-    // declared return types and the absence family — not folded values.
+    // ── PHP engine toggle + the boundary widget (issue #64 S3, #61) ───────
+    // Every word below that makes a CLAIM about precision is composed from the
+    // envelope's `boot` object — the engine surface as the shared fold policy
+    // sees it (ADR-0066). Nothing here re-derives a gate, and no count or
+    // refused name is typed into this file: which builtins fold on the machine
+    // that actually booted is the analysis' answer, not the page's opinion.
+    //
+    // What this buys: with php-wasm's 32-bit PHP 8.5 the page says "folding
+    // 19/22 width-safe builtins" and names `abs`/`intval`/`sprintf` as refused,
+    // and if a 64-bit engine ever answers instead the same code says "all 22"
+    // and names nothing. The line and the panel cannot go stale the way
+    // "no PHP sidecar — findings that require executing PHP are omitted" did.
     const engineBtn = document.getElementById("engine-btn")
     const engineLine = document.getElementById("engine-line")
     const engineNote = document.getElementById("engine-note")
+    const boundary = document.getElementById("boundary")
+    const boundaryBody = document.getElementById("boundary-body")
+
+    // The last engine surface a CONVERGED run described. It describes the
+    // engine, not the run, so a run that fell back to the built-in analysis
+    // leaves it standing.
+    let engineBoot = null
 
     const ENGINE_BTN_LABEL = {
       loading: "Loading PHP engine…",
       on: "PHP engine on",
       failed: "PHP engine unavailable",
     }
+
+    // `int_size` is bytes; the page speaks bits.
+    const bitsOf = (b) => (b.int_size ? `${b.int_size * 8}-bit` : "unverified integer width")
+
+    function foldPhrase(b) {
+      if (b.fold_lane === "full") return `folding all ${b.fold_total} allowlisted builtins`
+      if (b.fold_lane === "width_safe_subset") {
+        return `folding ${b.fold_safe}/${b.fold_total} width-safe builtins`
+      }
+      return "folding nothing"
+    }
+
+    function engineSummary() {
+      const b = engineBoot
+      if (!b || !b.php_version) return `${engineLabel} — loaded`
+      const proves = b.absence_family ? "reflection & existence live" : "reflection & existence declined"
+      return `PHP ${b.php_version} (php-wasm, ${bitsOf(b)}) — ${foldPhrase(b)}, ${proves}`
+    }
+
     function setEngineState(state, detail = "") {
       engineState = state
       const line = {
         off: "off",
         loading: "loading…",
-        on: `${engineLabel} — answers reflection & existence`,
+        on: engineSummary(),
         failed: `failed (using built-in analysis)${detail ? ` — ${detail}` : ""}`,
       }[state]
       engineLine.textContent = `PHP engine: ${line}`
@@ -788,6 +859,50 @@ greet("three", "World"); // default: "three" can never satisfy int
       engineBtn.disabled = state === "loading" || state === "failed"
       engineBtn.classList.toggle("active", state === "on")
       engineBtn.setAttribute("aria-pressed", String(state === "on"))
+      renderBoundary(state === "on" ? engineBoot : null)
+    }
+
+    // The boundary panel: what this engine proves, and what it does not.
+    // Both lists come out of `boot`; the framing sentence is the only editorial
+    // line on the page, and it is the true one — a declined lane widens, so the
+    // page is less precise there and never wrong.
+    function renderBoundary(b) {
+      if (!b || !b.php_version) { boundary.hidden = true; return }
+      boundary.hidden = false
+
+      const live = []
+      live.push(b.fold_lane === "full"
+        ? `<strong>Folded values</strong> from the real engine — all ${b.fold_total} builtins on the folding allowlist.`
+        : `<strong>Folded values</strong> from the real engine — ${b.fold_safe} of the ${b.fold_total} builtins on the folding allowlist: the ones a ${bitsOf(b)} engine is verified to answer exactly as a 64-bit one does. <code>str_repeat("ab", 2)</code> is <code>'abab'</code> here, as on the CLI.`)
+      live.push(`<strong>Reflected return envelopes</strong> — a builtin's declared return type, read back from this engine rather than guessed (<code>strtoupper($x)</code> is <code>string</code>).`)
+      if (b.absence_family) {
+        live.push(`<strong>The absence family</strong> — <code>call.undefined-function</code> and its siblings, witnessed against ${escHtml(b.label ?? "the running engine")}. Without an engine these are structurally silent.`)
+      }
+      if (b.curated_rows) {
+        live.push(`<strong>Curated refinements</strong> — the pinned-version rows that narrow inside a reflected envelope (<code>strlen()</code> as <code>int&lt;0, max&gt;</code>).`)
+      }
+
+      const off = []
+      if (b.refused_folds && b.refused_folds.length) {
+        const names = b.refused_folds.map((n) => `<code>${escHtml(n)}()</code>`).join(", ")
+        off.push(`${names} <strong>do not fold.</strong> Their job is to produce or render an integer in the machine's own word, and this build's word is ${bitsOf(b)}: <code>sprintf("%x", -1)</code> is <code>"ffffffff"</code> here and <code>"ffffffffffffffff"</code> on the 64-bit PHP you deploy on. They widen instead of answering.`)
+        off.push(`<strong>Integers outside ±2147483647 decline</strong> — counted through array literals, and over integer keys as well as values.`)
+      }
+      if (!b.curated_rows) {
+        off.push(`<strong>Curated refinements are off.</strong> A curated row is verified against the 64-bit engine at the pinned version, and a narrower machine at the same version can violate it — so <code>strlen()</code> is <code>int</code> here, not <code>int&lt;0, max&gt;</code>.`)
+      }
+      if (b.fold_lane === "declined") {
+        off.push(`<strong>Nothing folds.</strong> This engine did not report an integer width the fold lane has been verified against, and an unknown machine is not assumed.`)
+      }
+
+      const list = (items) => `<ul>${items.map((i) => `<li>${i}</li>`).join("")}</ul>`
+      const framing = off.length
+        ? `Everything in the second list <em>widens</em>: the analysis declines rather than guesses, so the browser is less precise than the CLI there and never wrong. Everything in the first list is a real php-src answer, not a re-implementation.`
+        : `This engine answers everything the analysis knows how to ask, so nothing is held back here. Every answer above is a real php-src answer, not a re-implementation.`
+      boundaryBody.innerHTML =
+        `<h4>Live — answered by php-src itself</h4>${list(live)}` +
+        (off.length ? `<h4>Not answered here</h4>${list(off)}` : "") +
+        `<p class="framing">${framing}</p>`
     }
     function showEngineNote(reason) {
       engineNote.hidden = !reason
@@ -812,12 +927,20 @@ greet("three", "World"); // default: "three" can never satisfy int
     })
 
     // ── Posture banner + status ───────────────────────────────────────────
-    function showPosture(notice) {
+    // The banner states the posture of THIS run. Without an engine that is the
+    // envelope's own `notice`, rendered as data — the sentence `steins check
+    // --no-php` prints. With one, that sentence is stale in the safe-but-
+    // illegible direction ("no PHP sidecar" is no longer true), so the banner
+    // says what the engine did and points at the boundary panel instead. The
+    // envelope's `notice` text is untouched: the UI decides what to show, not
+    // what is true.
+    function showPosture(notice, boot) {
       const el = document.getElementById("posture")
-      if (el.hidden) {
-        el.hidden = false
-        el.innerHTML = `<strong>sound subset</strong> — ${escHtml(notice.replace(/^note:\s*/, ""))}`
-      }
+      el.hidden = false
+      const live = boot && boot.php_version
+      el.innerHTML = live
+        ? `<strong>real engine</strong> — this run asked PHP ${escHtml(boot.php_version)} itself, in your browser, so findings that require executing PHP are included. What it does not answer is listed under <em>Precision boundary</em> below — less precise there, never wrong.`
+        : `<strong>sound subset</strong> — ${escHtml(notice.replace(/^note:\s*/, ""))}`
     }
     function setStatus(cls, text) {
       const el = document.getElementById("status")
