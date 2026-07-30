@@ -4,7 +4,9 @@
 The only code that exists is the sidecar's `plugin` method, which is a
 documented stub returning `{kind: "widen", reason: "unimplemented"}`. This
 document records the design so a reader can tell the seam from the feature.
-ADR-0012, ADR-0039.
+ADR-0012, ADR-0039. For *effect* facts specifically — which lane they enter,
+who may register which label roots, how facts version against the described
+package — see ADR-0068.
 
 ## Why it matters that this is absent
 
