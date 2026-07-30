@@ -499,8 +499,8 @@ pub enum EffectRecv {
     /// contributes the *declared* envelope of a project interface's method — never
     /// a proven effect, and never a resolved body edge. A receiver whose declared
     /// type is not a project interface (or whose method carries no envelope)
-    /// resolves to nothing and taints exhaustiveness, exactly as [`Self::Opaque`]
-    /// did before this variant existed.
+    /// resolves to nothing and taints exhaustiveness, exactly as
+    /// [`EffectOrigin::Opaque`] did before this variant existed.
     Var(String),
     /// `$this->repo->m()` where `repo` is a property this frame never writes — the
     /// property-read twin of [`Self::Var`], carrying the property name. Resolved
