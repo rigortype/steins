@@ -104,9 +104,9 @@ relationship goes.
 ## Origin closure
 
 Effects have exactly two origins (ADR-0005): **catalogued builtin/extension
-functions**, and **language constructs**. Nothing else creates an effect; user
-code only propagates. An uncatalogued function widens to *unknown effect*, which
-taints exhaustiveness but produces no finding.
+functions and methods**, and **language constructs**. Nothing else creates an
+effect; user code only propagates. An uncatalogued function or method widens to
+*unknown effect*, which taints exhaustiveness but produces no finding.
 
 Recognized origins in a body:
 
@@ -115,7 +115,7 @@ Recognized origins in a body:
 | a statically-named function call | the catalog's labels for it, or a propagation edge to a project function |
 | `echo` / `print` / `<?=` | `output` |
 | `exit` / `die` | `exit` (ADR-0019 rule 4 — `Pure` forbids exit) |
-| a resolvable method call (`$this->`, `self::`, `parent::`, `Foo::`, `new Foo()->`) | a method→method propagation edge |
+| a resolvable method call (`$this->`, `self::`, `parent::`, `Foo::`, `new Foo()->`) | a method→method propagation edge into the project class, else the catalog's labels for the *builtin* class's method |
 | a higher-order builtin with a resolvable callback | the callback's effects, per the [invocation shape](closures.md) |
 | a `$fn()` call resolved to a known callback | the callback's effects |
 | anything else dynamic | **no** effect, but exhaustiveness is tainted |
@@ -123,6 +123,15 @@ Recognized origins in a body:
 The `$this->`/`self::` edges are drawn under a **final/private guard**: a
 non-final public method may be overridden, so its resolved body is not
 authoritative. `parent::` and `Foo::` are exact.
+
+The **builtin-class** leg (issue #67) is consulted only when the named class is
+one the project does not define, and only when the receiver's name resolves to a
+*global* FQN — a project `PDO` shadows the catalog outright, and an unimported
+`PDO` inside `namespace App;` is `App\PDO`, somebody else's class. Everything
+else about a method call is unchanged: a variable receiver (`$pdo->query()`) is
+not a named class at all, so it contributes no effect and taints exhaustiveness,
+exactly as before. Receiver *types* do not flow yet, which is why
+`(new PDO(…))->prepare(…)->execute()` colors only the `prepare` half.
 
 The origin scan is **structural, not reachability-aware**: an `echo` in provably
 dead code is still an origin. This is deliberate — an envelope is a contract

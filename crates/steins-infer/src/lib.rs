@@ -2468,12 +2468,22 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
                         path: cx.path().to_owned(),
                     });
                 }
-                EffectOrigin::MethodCall { receiver, method, .. } => {
+                EffectOrigin::MethodCall { receiver, method, span } => {
                     match resolve_effect_edge(&cx, unit.class_fqn.as_deref(), receiver, method) {
                         Some(callee) => {
                             e.insert(callee);
                         }
-                        None => *ex = false,
+                        // No project edge — the builtin-class catalog gets its say
+                        // (`new PDO(...)->query()` is `io.db`); an uncatalogued
+                        // receiver or method stays the taint it has always been.
+                        None => match builtin_method_findings(&cx, receiver, method, *span) {
+                            Some(fs) => {
+                                for f in fs {
+                                    d.insert(f);
+                                }
+                            }
+                            None => *ex = false,
+                        },
                     }
                 }
                 // A higher-order call: the callback's effects join the caller's, or
@@ -2975,6 +2985,16 @@ fn report_unit(
             EffectOrigin::MethodCall { receiver, method, span } => {
                 if let Some(callee) = resolve_effect_edge(cx, class_fqn, receiver, method) {
                     emit_transitive(out, cx, &callee, effects, span.start, display, labels);
+                } else if let Some(fs) = builtin_method_findings(cx, receiver, method, *span) {
+                    // A builtin-class catalog row, reported like a builtin call's.
+                    for f in fs {
+                        if exceeds(labels, &f.label) {
+                            let prefix = format!("{}() has effect {}", f.origin, f.label);
+                            out.push(exceeded_diag(
+                                cx, span.start, &prefix, display, labels, &f.label,
+                            ));
+                        }
+                    }
                 }
             }
             // A higher-order call (the array_map redemption): a resolvable callback
@@ -3290,6 +3310,55 @@ fn resolve_effect_edge(
         }
     }
     Some(Sym::Method(r.declaring_class.fqn.clone(), r.method.name.clone()))
+}
+
+/// The **builtin-class catalog** answer for a method-call origin whose receiver
+/// draws no project edge (issue #67): the findings a
+/// [`steins_catalog::method_effect_labels`] row contributes, `Some(vec![])` for a
+/// catalogued-pure row, and `None` when the catalog says nothing — which is the
+/// caller's cue to taint exhaustiveness, exactly as an unresolved receiver does
+/// today.
+///
+/// Three gates stand between a method call and a row, and each one is the
+/// FP-safe side of a question the analyzer cannot otherwise answer:
+///
+/// * the receiver must be a **named class** (`new PDO(...)->query()`,
+///   `PDO::…`) — `$this`/`self`/`parent` are the project's own world, and a
+///   `$pdo->query()` variable receiver never reaches here at all (the origin scan
+///   records it as [`EffectOrigin::Opaque`], which taints);
+/// * the name must resolve to a class the project **does not define**
+///   ([`Cx::class_absent`]) — a project `PDO` shadows the catalog, because its
+///   body is the truth and [`resolve_effect_edge`] already drew that edge;
+/// * the resolved FQN must be **global** — the engine's classes are unnamespaced,
+///   so an unimported `PDO` inside `namespace App;` is `App\PDO`, some class of
+///   the user's that Steins simply has not indexed, and coloring it `io.db` would
+///   be the guess this analyzer does not make.
+fn builtin_method_findings(
+    cx: &Cx,
+    receiver: &EffectRecv,
+    method: &str,
+    span: steins_syntax::Span,
+) -> Option<Vec<EffectFinding>> {
+    let EffectRecv::ClassName(name) = receiver else { return None };
+    let fqn = cx.class_fqn(name);
+    if fqn.contains('\\') || !cx.class_absent(&fqn) {
+        return None;
+    }
+    let labels = steins_catalog::method_effect_labels(&fqn, method)?;
+    // The source spelling, as the function rows use `name.simple()`.
+    let origin = format!("{}::{}", name.simple(), method);
+    let line = cx.tree().position(span.start).line;
+    Some(
+        labels
+            .iter()
+            .map(|label| EffectFinding {
+                label: (*label).to_owned(),
+                origin: origin.clone(),
+                line,
+                path: cx.path().to_owned(),
+            })
+            .collect(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -4068,6 +4137,15 @@ impl<'a> Cx<'a> {
     /// Resolve a class reference (in the current file's context) to its FQN.
     fn class_fqn(&self, r: &NameRef) -> String {
         self.tree().resolve_class_fqn(r)
+    }
+
+    /// Whether `fqn` names **no** project class at all. Stricter than
+    /// `find_class(..).is_none()`, which also answers "none" for an *ambiguous*
+    /// name (two project declarations): that is a project class Steins merely
+    /// cannot pick, not an absent one, and the builtin-class catalog must not
+    /// speak over it (issue #67 precedence).
+    fn class_absent(&self, fqn: &str) -> bool {
+        matches!(self.index.resolve_class(fqn), Res::Absent)
     }
 
     /// Find a class by FQN (case-insensitive), returning its file and decl.

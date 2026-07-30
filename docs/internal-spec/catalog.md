@@ -67,6 +67,30 @@ Recorded imprecisions, stated rather than hidden:
 - `exit` / `die` are **language constructs**, not functions; they never reach
   this table and are detected structurally.
 
+## `method_effect_labels(class, method)` — method-shaped effect rows
+
+The class-world twin of `effect_labels`, keyed by `(class, method)` instead of a
+function name, with the same three-valued contract: `Some(labels)` is coloured,
+`Some(&[])` is catalogued-pure, `None` is uncatalogued and widens. Both keys
+match case-insensitively — PHP folds case on class *and* method names.
+
+The class key is the **global** name, no namespace: these are engine classes. A
+consumer resolves the receiver to an FQN first and only then keys the table, so a
+namespaced `App\PDO` never collides with the engine's `PDO`; and a class the
+*project* defines shadows the table entirely, because the project's own
+method→method effect edge is a better answer than a hand-written row.
+
+Membership today is one family — `PDO::query`/`exec`/`prepare` and
+`PDOStatement::execute`/`fetch`/`fetchAll`, all `io.db` (issue #67). That is the
+first producer of a label the registry had carried since ADR-0018 with nothing to
+emit it. `prepare` takes the same coarse colour as the rest: whether it is a
+round trip to the server depends on PDO's emulated-prepares setting, which is
+runtime configuration the catalog cannot read, so the row takes the upper bound.
+
+Breadth — mysqli, the rest of the mining data's method rows — belongs to the
+ADR-0014 generator, not to hand-seeding. What ships here is the row format and
+its receiver-resolution contract.
+
 ## `known_labels()` / `subsumes()` / `is_known_label()` / `nearest_label()`
 
 The effect label registry and prefix subsumption. Semantics are specified in
@@ -150,8 +174,10 @@ refutable with proven arguments).
 This is the honest-union + policy-profile replacement for the erased benevolent
 union ([`divergence-registry.md`](../type-specification/divergence-registry.md)).
 
-Method-shaped rows from the mining data (`DateTime::createFromFormat`) are
-deferred — the current API is function-keyed.
+Method-shaped rows from the mining data (`DateTime::createFromFormat`) are still
+deferred **here**: `failure_arms` is function-keyed, and nothing consumes it yet
+either. The effect table is no longer — `method_effect_labels` above is the row
+format the other tables will follow once a consumer wants them.
 
 ## Not implemented
 

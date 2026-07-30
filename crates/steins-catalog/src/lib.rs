@@ -302,6 +302,45 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     colored.or_else(|| foldable(name).then_some(EMPTY))
 }
 
+/// **Method-shaped effect rows**: the effect labels of a call to `method` on an
+/// instance of the *builtin* class `class`, or `None` for uncatalogued.
+///
+/// The class-world twin of [`effect_labels`], with the same three-valued
+/// contract: `Some(labels)` is a colored row, `Some(&[])` is a catalogued-pure
+/// row, and `None` says the catalog knows nothing — which widens to
+/// unknown-effect (exhaustiveness taint, no finding), never a guess.
+///
+/// Both keys match **case-insensitively**: PHP class *and* method names fold
+/// case, so `new pdo(...)->QUERY()` is the same row as `PDO::query`.
+///
+/// The key is the **global** class name, no namespace — these are engine classes.
+/// A consumer must resolve the receiver's name to an FQN first and only then key
+/// this table, so a namespaced `App\PDO` never collides with the engine's `PDO`;
+/// and a class the *project* defines shadows this table entirely (the project's
+/// own method→method edge is the better answer, and its body is the truth).
+///
+/// # Membership (issue #67)
+///
+/// One class family, deliberately: `PDO`/`PDOStatement`, the first producer of
+/// the `io.db` label, which the registry has carried since ADR-0018 with nothing
+/// to emit it. `io.db` is the coarse label for the whole family — statement
+/// preparation is as much a round trip to the server as execution is (`PDO`'s
+/// emulated-prepares setting decides whether `prepare` talks to the server at
+/// all, which is runtime configuration this catalog cannot read, so the row takes
+/// the upper bound). Breadth — mysqli, the rest of the mined method rows — comes
+/// from the ADR-0014 generator, not from hand-seeding here.
+#[must_use]
+pub fn method_effect_labels(class: &str, method: &str) -> Option<&'static [&'static str]> {
+    const IO_DB: &[&str] = &["io.db"];
+
+    // Per-call lowercase copies keep the arms readable; PHP names are ASCII.
+    match (class.to_ascii_lowercase().as_str(), method.to_ascii_lowercase().as_str()) {
+        ("pdo", "query" | "exec" | "prepare") => Some(IO_DB),
+        ("pdostatement", "execute" | "fetch" | "fetchall") => Some(IO_DB),
+        _ => None,
+    }
+}
+
 /// The **by-ref out-parameter rows** (ADR-0063 §2.3): the 0-based positional
 /// indices a builtin writes through a reference parameter.
 ///
@@ -1213,6 +1252,54 @@ mod tests {
         assert_eq!(effect_labels("RAND"), Some(&["nondet.random"][..]));
         assert_eq!(effect_labels("File_Put_Contents"), Some(&["io.fs.write"][..]));
         assert_eq!(effect_labels("STRTOLOWER"), Some(&[][..]));
+    }
+
+    use super::method_effect_labels;
+
+    #[test]
+    fn pdo_methods_are_colored_io_db() {
+        for method in ["query", "exec", "prepare"] {
+            assert_eq!(
+                method_effect_labels("PDO", method),
+                Some(&["io.db"][..]),
+                "PDO::{method} is io.db"
+            );
+        }
+        for method in ["execute", "fetch", "fetchAll"] {
+            assert_eq!(
+                method_effect_labels("PDOStatement", method),
+                Some(&["io.db"][..]),
+                "PDOStatement::{method} is io.db"
+            );
+        }
+    }
+
+    #[test]
+    fn method_rows_match_both_keys_case_insensitively() {
+        // PHP folds case on class AND method names, so every spelling is one row.
+        assert_eq!(method_effect_labels("pdo", "QUERY"), Some(&["io.db"][..]));
+        assert_eq!(method_effect_labels("PdoStatement", "FetchAll"), Some(&["io.db"][..]));
+    }
+
+    #[test]
+    fn uncatalogued_methods_stay_none() {
+        // A real PDO method the table does not carry widens, it does not go pure:
+        // silence is the only honest answer for a row that was never written.
+        assert_eq!(method_effect_labels("PDO", "getAttribute"), None);
+        assert_eq!(method_effect_labels("PDO", "beginTransaction"), None);
+        // A class with no rows at all, and a same-named method on it.
+        assert_eq!(method_effect_labels("mysqli", "query"), None);
+        assert_eq!(method_effect_labels("Foo", "query"), None);
+    }
+
+    #[test]
+    fn io_db_is_a_registered_label() {
+        // The row would be unusable otherwise: `#[\Steins\Effect('io.db')]` must be
+        // a valid declaration, and a coarse `io` must admit it.
+        assert!(is_known_label("io.db"));
+        assert!(subsumes("io", "io.db"), "coarse io admits io.db");
+        assert!(!subsumes("io.db", "io"), "and not the other way round");
+        assert!(!subsumes("io.fs", "io.db"), "siblings do not subsume");
     }
 
     use super::{is_known_label, nearest_label, out_params, subsumes};
