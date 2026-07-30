@@ -25,6 +25,17 @@ function mystery(): void
     some_uncatalogued_builtin();
 }
 
+interface Clock
+{
+    #[\Steins\Effect('nondet.time')]
+    public function now(): int;
+}
+
+function stamp(Clock $c): int
+{
+    return $c->now();
+}
+
 $upper = strtoupper("xy");
 $named = price();
 $count = 42;

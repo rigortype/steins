@@ -1250,11 +1250,13 @@ fn run_annotate(args: &[String]) -> ExitCode {
 }
 
 /// `annotate --format json`'s document (issue #65): a top-level `functions`
-/// array, one entry per analyzed function/method, each carrying the same two
-/// dimensions the text margin's `effects: {…}` / `…?` spells — the sorted
-/// proven labels and the exhaustiveness bit — as distinct fields rather than
-/// one flattened string. Room is deliberately left for a future `declared`
-/// lane: only proven labels go in `effects`.
+/// array, one entry per analyzed function/method, each carrying the same
+/// dimensions the text margin's `effects: {…}` / `≤` / `…?` spells — the sorted
+/// proven labels, the sorted **declared** bounds (ADR-0067), and the
+/// exhaustiveness bit — as distinct fields rather than one flattened string.
+/// Only proven labels go in `effects`; the two lanes are never merged here, and
+/// `declared` arrives already normalized against `effects` (a bound the proven
+/// lane subsumes is dropped, exactly as the margin drops it).
 fn print_annotate_json(summaries: &[EffectSummary]) {
     let functions: Vec<serde_json::Value> = summaries
         .iter()
@@ -1263,6 +1265,7 @@ fn print_annotate_json(summaries: &[EffectSummary]) {
                 "name": s.symbol,
                 "line": s.line,
                 "effects": s.labels,
+                "declared": s.declared,
                 "exhaustive": s.exhaustive,
             })
         })

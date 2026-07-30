@@ -2,7 +2,8 @@
 
 **Status: implemented** for the labels, envelopes, propagation, and checks
 described below. The plugin channel that would open the registry is **designed,
-not implemented**. ADR-0005, ADR-0006, ADR-0008, ADR-0018, ADR-0019, ADR-0033.
+not implemented**. ADR-0005, ADR-0006, ADR-0008, ADR-0018, ADR-0019, ADR-0033,
+ADR-0067.
 
 ## The second dimension
 
@@ -108,6 +109,11 @@ functions and methods**, and **language constructs**. Nothing else creates an
 effect; user code only propagates. An uncatalogued function or method widens to
 *unknown effect*, which taints exhaustiveness but produces no finding.
 
+A declared envelope is a third kind of source, and a different kind: it does not
+create a *proven* effect but a **declared bound** (ADR-0067) — see "The declared
+lane" below. The two-origin closure is a statement about the proven lane, and
+stays exactly true of it.
+
 Recognized origins in a body:
 
 | Origin | Effect |
@@ -118,6 +124,7 @@ Recognized origins in a body:
 | a resolvable method call (`$this->`, `self::`, `parent::`, `Foo::`, `new Foo()->`) | a method→method propagation edge into the project class, else the catalog's labels for the *builtin* class's method |
 | a higher-order builtin with a resolvable callback | the callback's effects, per the [invocation shape](closures.md) |
 | a `$fn()` call resolved to a known callback | the callback's effects |
+| a method call on a receiver whose declared type is a project **interface** | the interface method's envelope labels, in the **declared** lane (ADR-0067) |
 | anything else dynamic | **no** effect, but exhaustiveness is tainted |
 
 The `$this->`/`self::` edges are drawn under a **final/private guard**: a
@@ -164,6 +171,50 @@ an implementation whose proven effects exceed the envelope declared on the class
 or interface method it overrides is a finding. Implementations may be purer,
 never less pure ([closures.md](closures.md)).
 
+## The declared lane
+
+Dependency injection breaks the call graph on purpose: a controller holding a
+repository *interface* has no resolvable callee, so the proven lane can only
+shrug and taint. The declaration is still there, though, and it is a bound. So a
+summary carries **two** lanes (ADR-0067):
+
+```text
+function f(Repo $r) { return $r->find(1); }     //=> effects: {≤io.db}
+```
+
+`Repo::find()` declares `#[\Steins\Effect('io.db')]`, so the call *cannot* do
+more than `io.db` whichever implementation is injected. That label joins the
+caller's **declared** lane — rendered with a `≤` prefix inside the same braces
+(`effects: {output, ≤io.db}`) and never conflated with a proven one. Declared
+labels travel call edges exactly as proven ones do, monotone to the same
+fixpoint.
+
+The rules that make this safe:
+
+- A declared label **never** enters the proven set, so `effect.envelope-exceeded`
+  and `effect.liskov-widened` cannot see it. A body whose only `io.db` is a
+  declared one satisfies `#[\Steins\Pure]` — the bound describes code Steins did
+  not analyze, and a contract about someone else's body is not a violation in
+  this one.
+- The bound **discharges its own call site's** exhaustiveness taint, and only
+  that one: another unresolved call in the same body still marks the summary
+  `…?`.
+- A method with no envelope imports nothing and taints exactly as before. Absence
+  of a contract is not a contract.
+- At rendering time a declared label already subsumed by a proven label of the
+  same summary is dropped: the proven lane says strictly more.
+
+The receiver forms are deliberately narrow — a parameter (`$r->find()`) or a
+`$this` property read (`$this->repo->find()`) whose declared type names one
+project interface, and which the body **never writes**. Any write to the name,
+anywhere in the body, disqualifies it: the binding is no longer provably the one
+the declaration typed.
+
+`annotate --format json` carries the lane as a `declared` array beside `effects`
+and `exhaustive`, normalized the same way and never flattened into the proven
+one — a consumer that only wants occurrences can keep reading `effects` and
+ignore the new field.
+
 ## Folding is gated on effects
 
 The connection between the effect system and value precision (ADR-0008): an
@@ -182,16 +233,22 @@ pseudo-constant configuration this slice does not implement. See
 
 - **The plugin channel** (ADR-0012 / ADR-0039) that registers ecosystem labels
   and library effect signatures.
-- **Envelope carrier interfaces as an ecosystem story** — the mechanism works
-  (an interface method's envelope binds implementations), but no PSR knowledge
-  ships to make DI-mediated effects checkable out of the box (ADR-0045).
-- **The envelope as an effect source.** An interface envelope checks its
-  implementations (`effect.liskov-widened`), but a call through an
-  interface-typed receiver contributes no effects to the caller — a variable
-  receiver only taints exhaustiveness. DI-mediated effects therefore do not
-  reach the caller's summary yet. The design that lifts this — a **declared**
-  lane beside the proven one, envelope bounds imported per call site with
-  taint discharge, diagnostics staying proven-only — is ADR-0067.
+- **Envelope carrier interfaces as an ecosystem story** — the mechanism works in
+  both directions now (an interface method's envelope binds implementations, and
+  a call through an interface-typed receiver imports it as a declared bound), but
+  no PSR knowledge ships to make DI-mediated effects checkable out of the box
+  (ADR-0045).
+- **The envelope as an effect source, past the first receiver forms.** What ships
+  is the declared lane above (ADR-0067): a call whose receiver
+  is a never-written parameter or `$this` property read, declared as one project
+  **interface** whose method carries an envelope, imports that envelope and
+  discharges its own call site's taint. What does not: **non-final classes as
+  carriers** — ADR-0067 §2 admits them, this slice reads interfaces only, because
+  a class has a body and its envelope and its inferred effects are two facts the
+  proven lane already reasons about — and **broader receiver-type recovery**, so
+  a receiver the flow environment could type but the structural scan cannot (a
+  local assigned from a factory, an array element, a chained call result) still
+  only taints.
 - **The full effect catalog.** What exists is the frequency-seeded starter set
   above; ADR-0014's php-src stub sourcing is not built.
 - **A computed purity property.** Folding permission stays an allowlist.

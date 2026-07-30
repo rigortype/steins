@@ -421,8 +421,11 @@ pub enum EffectOrigin {
     /// can resolve without a flow environment (`$this->`, `self::`, `parent::`,
     /// `Foo::`, `new Foo()->`). Recorded so a `#[\Steins\Pure]` method can have
     /// its resolved method→method effect edges propagated (the class-world
-    /// analogue of the `EffectOrigin::Call` function edge). Dynamic receivers
-    /// (`$var->m()`, `static::m()`) are **not** recorded — no provable edge.
+    /// analogue of the `EffectOrigin::Call` function edge), and so a *declared*
+    /// receiver ([`EffectRecv::Var`] / [`EffectRecv::PropRead`], ADR-0067) can
+    /// carry an interface envelope into the caller's declared lane. Receivers
+    /// outside those forms (`static::m()`, `$o->$m()`, a written-to variable) are
+    /// **not** recorded — no provable edge and no declared bound either.
     MethodCall { receiver: EffectRecv, method: String, span: Span },
     /// A call the scan cannot classify to a statically-named target: a dynamic
     /// function call (`$f()`, `$arr['x']()`), or a method / static call whose
@@ -490,6 +493,20 @@ pub enum EffectRecv {
     /// exact. Carries the full [`NameRef`] so the class resolves project-wide to
     /// its FQN.
     ClassName(NameRef),
+    /// `$r->m()` where `$r` is a name this frame **never writes** (ADR-0067
+    /// declared lane). Carries the variable name (no `$`); the effects pass reads
+    /// the enclosing declaration's parameter list for its declared type, and
+    /// contributes the *declared* envelope of a project interface's method — never
+    /// a proven effect, and never a resolved body edge. A receiver whose declared
+    /// type is not a project interface (or whose method carries no envelope)
+    /// resolves to nothing and taints exhaustiveness, exactly as [`Self::Opaque`]
+    /// did before this variant existed.
+    Var(String),
+    /// `$this->repo->m()` where `repo` is a property this frame never writes — the
+    /// property-read twin of [`Self::Var`], carrying the property name. Resolved
+    /// against the enclosing class's declared (or constructor-promoted) property
+    /// type under the same declared-lane rules.
+    PropRead(String),
 }
 
 /// One `catch` clause's caught types plus its bound variable, for the throw
@@ -2929,6 +2946,7 @@ fn lower_function(
         &f.parameter_list,
         collect_body_callables(f.body.statements.iter()),
         body_aliased(f.body.statements.iter()),
+        receiver_writes(f.body.statements.iter()),
     );
     for s in f.body.statements.iter() {
         scan_effect_origins(&Node::Statement(s), &cx, &mut effect_origins);
@@ -3350,6 +3368,7 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
             &m.parameter_list,
             collect_body_callables(block.statements.iter()),
             body_aliased(block.statements.iter()),
+            receiver_writes(block.statements.iter()),
         );
         for s in block.statements.iter() {
             scan_effect_origins(&Node::Statement(s), &cx, &mut effect_origins);
@@ -3741,15 +3760,19 @@ struct EffectScanCx {
     /// construct, so the give-up list and the locality question have the same
     /// answer and cannot drift apart.
     frame_aliased: bool,
+    /// What this frame writes, for the ADR-0067 declared-receiver gate.
+    writes: ReceiverWrites,
 }
 
 impl EffectScanCx {
     /// Build the context for a function-like frame from its parameter list, its
-    /// already-collected callback map, and the frame's aliasing verdict.
+    /// already-collected callback map, the frame's aliasing verdict, and the
+    /// frame's receiver-write set (ADR-0067).
     fn new(
         params: &mago_syntax::cst::FunctionLikeParameterList<'_>,
         locals: HashMap<String, CallbackRef>,
         frame_aliased: bool,
+        writes: ReceiverWrites,
     ) -> Self {
         let byref_params = params
             .parameters
@@ -3757,8 +3780,222 @@ impl EffectScanCx {
             .filter(|p| p.is_reference())
             .map(|p| strip_dollar(bytes_to_string(p.variable.name)))
             .collect();
-        Self { locals, byref_params, frame_aliased }
+        Self { locals, byref_params, frame_aliased, writes }
     }
+}
+
+/// What a frame **writes**, for the ADR-0067 declared-receiver gate.
+///
+/// A receiver carries its declaration's effect envelope only while the binding it
+/// names is still the one the declaration typed. So the gate is not a dataflow
+/// question but a frame-wide veto: any write to the name anywhere in the body —
+/// an assignment, an increment, a `foreach`/`catch` binding, or merely handing it
+/// to a call that could take it by reference — disqualifies **every** use of that
+/// name as a declared receiver. The fallback is the pre-ADR-0067 behavior: the
+/// receiver resolves to nothing and taints exhaustiveness.
+#[derive(Debug, Default)]
+struct ReceiverWrites {
+    /// Variable names (no `$`) the body may write, over-approximated.
+    vars: HashSet<String>,
+    /// `$this->…` property names the body may write, over-approximated.
+    props: HashSet<String>,
+    /// Treat *every* name as written — a frame the gate does not model (a
+    /// closure/arrow body, or one that lets `$this` itself escape to another
+    /// name, through which any property could be written behind our back).
+    all: bool,
+}
+
+impl ReceiverWrites {
+    /// The verdict for a frame the gate does not model: nothing is stable.
+    fn poisoned() -> Self {
+        Self { vars: HashSet::new(), props: HashSet::new(), all: true }
+    }
+
+    fn writes_var(&self, name: &str) -> bool {
+        self.all || self.vars.contains(name)
+    }
+
+    fn writes_prop(&self, name: &str) -> bool {
+        self.all || self.props.contains(name)
+    }
+}
+
+/// Collect a statement body's [`ReceiverWrites`]. Variables reuse the existing
+/// over-approximating collectors (every assignment lvalue, increment, binding —
+/// plus every variable handed to a call, which a by-ref parameter could rebind),
+/// joined with the frame-rebinding constructs those collectors deliberately do
+/// not see ([`collect_frame_rebinds`]); properties get the same treatment through
+/// [`collect_this_prop_writes`].
+fn receiver_writes<'a, 'arena>(statements: impl Iterator<Item = &'a Statement<'arena>>) -> ReceiverWrites
+where
+    'arena: 'a,
+{
+    let mut vars: Vec<String> = Vec::new();
+    let mut w = ReceiverWrites::default();
+    for s in statements {
+        let node = Node::Statement(s);
+        collect_assign_writes(&node, &mut vars);
+        collect_call_vars(&node, &mut vars);
+        collect_frame_rebinds(&node, &mut vars);
+        collect_this_prop_writes(&node, &mut w);
+    }
+    w.vars = vars.into_iter().collect();
+    w
+}
+
+/// The two ways a frame's *binding* changes without any assignment the shared
+/// collectors can see — both of them writes as far as the declared-receiver gate
+/// is concerned:
+///
+/// * a **by-ref closure capture**, `function () use (&$r) { … }`. The capture
+///   aliases the enclosing binding, so the closure can rebind `$r` from inside a
+///   scope [`collect_assign_writes`] deliberately stops at — and it can do so
+///   whenever it is *called*, which is not a fact this structural scan tracks.
+///   The name is therefore written unconditionally, whatever the closure body
+///   does with it. A by-value `use ($r)` or an arrow-function capture is a copy
+///   and rebinds nothing, so neither disqualifies the receiver.
+/// * a **`global $r;`** statement, which rebinds the name to the interpreter's
+///   global of that name — legal even when `$r` is a parameter. (`static $r;`
+///   over a parameter name is a PHP compile error, so there is nothing to catch.)
+///
+/// Over-collection is sound here: it only ever makes a receiver fall back to the
+/// pre-ADR-0067 taint. So the walk descends through nested closures too — a
+/// capture found there names *that* frame's binding, and forgetting one more name
+/// in ours costs nothing. Named function/class-like declarations are their own
+/// lexical world and are not descended.
+fn collect_frame_rebinds(node: &Node<'_, '_>, out: &mut Vec<String>) {
+    match node {
+        Node::Closure(cl) => {
+            if let Some(use_clause) = &cl.use_clause {
+                for v in use_clause.variables.iter() {
+                    if v.ampersand.is_some() {
+                        let name = strip_dollar(bytes_to_string(v.variable.name));
+                        if !out.contains(&name) {
+                            out.push(name);
+                        }
+                    }
+                }
+            }
+        }
+        Node::Global(g) => {
+            for v in g.variables.iter() {
+                if let Variable::Direct(dv) = v {
+                    let name = strip_dollar(bytes_to_string(dv.name));
+                    if !out.contains(&name) {
+                        out.push(name);
+                    }
+                }
+            }
+        }
+        Node::Function(_)
+        | Node::AnonymousClass(_)
+        | Node::Class(_)
+        | Node::Interface(_)
+        | Node::Trait(_)
+        | Node::Enum(_) => return,
+        _ => {}
+    }
+    for child in node.children() {
+        collect_frame_rebinds(&child, out);
+    }
+}
+
+/// Record every `$this->prop` a subtree may **write** (and poison the whole
+/// property set when `$this` itself escapes into another binding). Mirrors
+/// [`collect_assign_writes`]'s traversal discipline with one deliberate
+/// difference: it **descends into closures and arrow functions**, because a
+/// non-static one declared in a method binds the very same `$this`, so
+/// `function () { $this->repo = …; }` writes *this* frame's property. Descending
+/// into a `static function () {}` (whose `$this` is unbound) over-collects, which
+/// is the sound direction. Named function/class-like declarations, whose `$this`
+/// is genuinely foreign, are still not descended.
+fn collect_this_prop_writes(node: &Node<'_, '_>, w: &mut ReceiverWrites) {
+    match node {
+        Node::Assignment(a) => {
+            collect_this_props(&Node::Expression(a.lhs), &mut w.props);
+            // `$x = $this;` — every property is writable through the other name.
+            if is_this_expr(a.rhs) {
+                w.all = true;
+            }
+            collect_this_prop_writes(&Node::Expression(a.rhs), w);
+            return;
+        }
+        Node::UnaryPrefix(u) => {
+            if matches!(
+                u.operator,
+                UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_)
+            ) {
+                collect_this_props(&Node::Expression(u.operand), &mut w.props);
+            }
+        }
+        Node::UnaryPostfix(u) => collect_this_props(&Node::Expression(u.operand), &mut w.props),
+        Node::ForeachValueTarget(t) => {
+            collect_this_props(&Node::Expression(t.value), &mut w.props);
+            return;
+        }
+        Node::ForeachKeyValueTarget(t) => {
+            collect_this_props(&Node::Expression(t.key), &mut w.props);
+            collect_this_props(&Node::Expression(t.value), &mut w.props);
+            return;
+        }
+        Node::Unset(u) => {
+            for v in u.values.iter() {
+                collect_this_props(&Node::Expression(v), &mut w.props);
+            }
+        }
+        // An argument may be taken by reference (or stored), so a property handed
+        // to a call is written as far as this gate is concerned — and `$this`
+        // handed to one escapes entirely.
+        Node::FunctionCall(c) => note_argument_escapes(&c.argument_list, w),
+        Node::MethodCall(c) => note_argument_escapes(&c.argument_list, w),
+        Node::NullSafeMethodCall(c) => note_argument_escapes(&c.argument_list, w),
+        Node::StaticMethodCall(c) => note_argument_escapes(&c.argument_list, w),
+        // A foreign `$this` — these declarations are their own object's world.
+        // Closures and arrow functions are pointedly NOT here: theirs is ours.
+        Node::Function(_)
+        | Node::AnonymousClass(_)
+        | Node::Class(_)
+        | Node::Interface(_)
+        | Node::Trait(_)
+        | Node::Enum(_) => return,
+        _ => {}
+    }
+    for child in node.children() {
+        collect_this_prop_writes(&child, w);
+    }
+}
+
+/// Record one call's argument list into the declared-receiver write set.
+fn note_argument_escapes(list: &mago_syntax::cst::ArgumentList<'_>, w: &mut ReceiverWrites) {
+    for arg in list.arguments.iter() {
+        let value = arg.value().unparenthesized();
+        if is_this_expr(value) {
+            w.all = true;
+        }
+        collect_this_props(&Node::Expression(value), &mut w.props);
+    }
+}
+
+/// Collect every `$this->prop` property name in a subtree (over-collection is
+/// intended: this feeds write positions, where forgetting more is sound).
+fn collect_this_props(node: &Node<'_, '_>, out: &mut HashSet<String>) {
+    if let Node::PropertyAccess(pa) = node
+        && let Some((var, prop)) = prop_fetch_of(pa.object, &pa.property)
+        && var == "this"
+    {
+        out.insert(prop);
+    }
+    for child in node.children() {
+        collect_this_props(&child, out);
+    }
+}
+
+/// Whether an expression is exactly `$this`.
+fn is_this_expr(expr: &Expression<'_>) -> bool {
+    matches!(
+        expr.unparenthesized(),
+        Expression::Variable(Variable::Direct(dv)) if strip_dollar(bytes_to_string(dv.name)) == "this"
+    )
 }
 
 /// Whether any statement of a frame carries an ADR-0001 give-up-list construct —
@@ -3955,7 +4192,7 @@ fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut Vec<Eff
         // `new Foo()->`). Dynamic receivers record nothing.
         Node::MethodCall(mc) => {
             if let (Some(recv), Some(method)) =
-                (effect_recv_of_object(mc.object), method_name_of(&mc.method))
+                (effect_recv_of_object_declared(mc.object, cx), method_name_of(&mc.method))
             {
                 out.push(EffectOrigin::MethodCall { receiver: recv, method, span: to_span(mc.span()) });
             } else {
@@ -3965,7 +4202,7 @@ fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut Vec<Eff
         }
         Node::NullSafeMethodCall(mc) => {
             if let (Some(recv), Some(method)) =
-                (effect_recv_of_object(mc.object), method_name_of(&mc.method))
+                (effect_recv_of_object_declared(mc.object, cx), method_name_of(&mc.method))
             {
                 out.push(EffectOrigin::MethodCall { receiver: recv, method, span: to_span(mc.span()) });
             } else {
@@ -4618,6 +4855,39 @@ fn effect_recv_of_object(object: &Expression<'_>) -> Option<EffectRecv> {
     }
 }
 
+/// The effect-graph receiver of a method-call object **including** the ADR-0067
+/// declared forms: a never-written variable (`$r->m()`) and a never-written
+/// `$this` property read (`$this->repo->m()`). Both are recorded by *name* only —
+/// they name no class here; the effects pass resolves the declared type and
+/// decides whether an interface envelope applies (and taints exactly as before
+/// when it does not).
+///
+/// The proven forms come first and unchanged: this is a strict extension of
+/// [`effect_recv_of_object`], which the throw scan keeps using as-is.
+fn effect_recv_of_object_declared(object: &Expression<'_>, cx: &EffectScanCx) -> Option<EffectRecv> {
+    if let Some(recv) = effect_recv_of_object(object) {
+        return Some(recv);
+    }
+    // In an aliased frame no name is provably still its own binding (the same
+    // give-up list `RefTarget` reads), so no declared receiver survives it.
+    if cx.frame_aliased {
+        return None;
+    }
+    match object.unparenthesized() {
+        Expression::Variable(Variable::Direct(dv)) => {
+            let name = strip_dollar(bytes_to_string(dv.name));
+            // `$this` is handled by `effect_recv_of_object` above; anything else
+            // qualifies exactly while the frame never writes it.
+            (!cx.writes.writes_var(&name)).then_some(EffectRecv::Var(name))
+        }
+        Expression::Access(Access::Property(pa)) => {
+            let (var, prop) = prop_fetch_of(pa.object, &pa.property)?;
+            (var == "this" && !cx.writes.writes_prop(&prop)).then_some(EffectRecv::PropRead(prop))
+        }
+        _ => None,
+    }
+}
+
 /// The effect-graph receiver of a static-call class expression (`static::` and
 /// dynamic classes are unresolvable → `None`).
 fn effect_recv_of_class(class: &Expression<'_>) -> Option<EffectRecv> {
@@ -5207,10 +5477,14 @@ fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>, rc: &Ref
     push_byref_captures(cl, &mut opaque, false);
     // A by-ref capture aliases an enclosing binding, so it defeats frame-locality
     // for the whole closure body just as an in-body `global` would.
+    // A closure body is not a declared-receiver frame: the effects pass keys it by
+    // definition offset and has no parameter list to read a receiver's declared
+    // type from, so every name stays unmodelled (today's `Opaque` taint).
     let cx = EffectScanCx::new(
         &cl.parameter_list,
         collect_body_callables(cl.body.statements.iter()),
         !opaque.is_empty() || body_aliased(cl.body.statements.iter()),
+        ReceiverWrites::poisoned(),
     );
     for s in cl.body.statements.iter() {
         lower_stmt(s, &mut stmts);
@@ -5246,6 +5520,7 @@ fn build_closure_scope_from_arrow(af: &mago_syntax::cst::ArrowFunction<'_>, rc: 
         &af.parameter_list,
         HashMap::new(),
         node_poisons(&Node::Expression(af.expression)),
+        ReceiverWrites::poisoned(),
     );
     scan_effect_origins(&Node::Expression(af.expression), &cx, &mut effect_origins);
     scan_throw_origins(&Node::Expression(af.expression), &[], &[], &cx.locals, &mut throw_origins);

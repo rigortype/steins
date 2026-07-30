@@ -262,6 +262,7 @@ fn annotate_json_shape_pins_colored_pure_and_tainted_functions() {
     // A catalogued-pure function: proven-empty effects, exhaustive, name+line.
     let price = by_name("price");
     assert_eq!(price["effects"], serde_json::json!([]));
+    assert_eq!(price["declared"], serde_json::json!([]));
     assert_eq!(price["exhaustive"], serde_json::json!(true));
     assert_eq!(price["line"], serde_json::json!(8), "declaration line, got:\n{doc}");
 
@@ -269,6 +270,7 @@ fn annotate_json_shape_pins_colored_pure_and_tainted_functions() {
     // exhaustive — the catalog fully accounts for the body.
     let writer = by_name("writer");
     assert_eq!(writer["effects"], serde_json::json!(["io.fs.write"]));
+    assert_eq!(writer["declared"], serde_json::json!([]));
     assert_eq!(writer["exhaustive"], serde_json::json!(true));
 
     // An exhaustiveness-tainted function: the uncatalogued/dynamic call widens
@@ -276,7 +278,17 @@ fn annotate_json_shape_pins_colored_pure_and_tainted_functions() {
     // from the catalogued-pure `price` above, which is the acceptance bar.
     let mystery = by_name("mystery");
     assert_eq!(mystery["effects"], serde_json::json!([]));
+    assert_eq!(mystery["declared"], serde_json::json!([]));
     assert_eq!(mystery["exhaustive"], serde_json::json!(false));
+
+    // The declared lane (ADR-0067): a call through an interface-typed parameter
+    // proves nothing and bounds everything. `declared` is its own array — the
+    // label never leaks into `effects` — and the bound discharges the taint the
+    // same call would otherwise carry, so `exhaustive` stays true.
+    let stamp = by_name("stamp");
+    assert_eq!(stamp["effects"], serde_json::json!([]));
+    assert_eq!(stamp["declared"], serde_json::json!(["nondet.time"]));
+    assert_eq!(stamp["exhaustive"], serde_json::json!(true));
 }
 
 #[test]
@@ -287,6 +299,12 @@ fn annotate_json_is_opt_in_default_format_stays_the_text_margin() {
     let r = run(&["annotate", path.to_str().unwrap()]);
     assert_eq!(r.code, 0);
     assert!(r.stdout.contains("//=> effects: {io.fs.write}"), "text margin unchanged, got:\n{}", r.stdout);
+    // The same declared bound the JSON reports, in the margin's own spelling.
+    assert!(
+        r.stdout.contains("//=> effects: {≤nondet.time}"),
+        "declared lane in the margin, got:\n{}",
+        r.stdout
+    );
     assert!(
         serde_json::from_str::<serde_json::Value>(&r.stdout).is_err(),
         "default output is the text margin, not JSON, got:\n{}",

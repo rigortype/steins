@@ -2109,7 +2109,9 @@ fn dedup(out: &mut Vec<Diagnostic>) {
 /// One proven fact the `annotate` margin can print against a source line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FactKind {
-    Effects { labels: Vec<String>, exhaustive: bool },
+    /// The inferred effect set: `labels` is the proven lane, `declared` the
+    /// ADR-0067 declared one (rendered `≤label`, normalized against `labels`).
+    Effects { labels: Vec<String>, declared: Vec<String>, exhaustive: bool },
     /// The inferred throw set (ADR-0040): the classes a function/method can raise
     /// that escape it, with a shared `…?` taint marker when non-exhaustive.
     Throws { classes: Vec<String>, exhaustive: bool },
@@ -2130,8 +2132,12 @@ impl LineFact {
     #[must_use]
     pub fn body(&self) -> String {
         match &self.kind {
-            FactKind::Effects { labels, exhaustive } => {
+            FactKind::Effects { labels, declared, exhaustive } => {
                 let mut parts = labels.clone();
+                // A declared bound shares the braces with the proven labels but
+                // wears a `≤`: "at most this, because a contract says so" — never
+                // "this happens, because we saw it" (ADR-0067).
+                parts.extend(declared.iter().map(|l| format!("≤{l}")));
                 if !*exhaustive {
                     parts.push("…?".to_owned());
                 }
@@ -2248,7 +2254,11 @@ fn annotate_units(
         let throws_present = !s.throws.is_empty() || !s.throws_exhaustive;
         facts.push(LineFact {
             line: s.line,
-            kind: FactKind::Effects { labels: s.labels, exhaustive: s.exhaustive },
+            kind: FactKind::Effects {
+                labels: s.labels,
+                declared: s.declared,
+                exhaustive: s.exhaustive,
+            },
         });
         // Throws print on the same line, after effects, only when non-empty
         // (or tainted) — one color, one spelling (ADR-0006): throws are their
@@ -2319,10 +2329,22 @@ enum Sym {
     Closure(String, u32),
 }
 
-/// One unit's fixpoint result: its proven effect findings and exhaustiveness.
+/// One unit's fixpoint result: its proven effect findings, its **declared** lane,
+/// and exhaustiveness.
+///
+/// The two lanes never mix (ADR-0067). `findings` is what inference *proved* —
+/// the only lane `effect.envelope-exceeded` and `effect.liskov-widened` read, so
+/// a declaration can never manufacture a finding. `declared` is what a
+/// declaration *bounds*: the envelope labels imported at a call through an
+/// interface-typed receiver, joined along call edges exactly as findings are. Both
+/// lanes are stored raw — the display-time normalization that drops a declared
+/// label already covered by a proven one lives in [`effect_summary_units`].
 #[derive(Debug, Clone, Default)]
 struct EffectSet {
     findings: HashSet<EffectFinding>,
+    /// Declared-lane labels (ADR-0018 dot-paths), no provenance: they name a
+    /// bound, not an origin, so nothing ever reports them at a source position.
+    declared: HashSet<String>,
     exhaustive: bool,
 }
 
@@ -2493,11 +2515,20 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
         file: usize,
         class_fqn: Option<String>,
         origins: &'a [EffectOrigin],
+        /// The frame's declared parameters — read only to type an ADR-0067
+        /// declared receiver (`EffectRecv::Var`).
+        params: &'a [steins_syntax::Param],
     }
     let mut ulist: Vec<Unit> = Vec::new();
     for (fi, u) in units.iter().enumerate() {
         for f in u.tree.functions() {
-            ulist.push(Unit { sym: Sym::Func(f.fqn.clone()), file: fi, class_fqn: None, origins: &f.effect_origins });
+            ulist.push(Unit {
+                sym: Sym::Func(f.fqn.clone()),
+                file: fi,
+                class_fqn: None,
+                origins: &f.effect_origins,
+                params: &f.params,
+            });
         }
         for c in u.tree.classes() {
             for m in &c.methods {
@@ -2506,6 +2537,7 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
                     file: fi,
                     class_fqn: Some(c.fqn.clone()),
                     origins: &m.effect_origins,
+                    params: &m.params,
                 });
             }
         }
@@ -2518,12 +2550,16 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
                     file: fi,
                     class_fqn: None,
                     origins: &scope.effect_origins,
+                    params: &scope.params,
                 });
             }
         }
     }
 
     let mut direct: HashMap<Sym, HashSet<EffectFinding>> = HashMap::new();
+    // Declared-lane labels imported *locally* — one entry per call site whose
+    // receiver's declared interface method carries an envelope (ADR-0067).
+    let mut declared_direct: HashMap<Sym, HashSet<String>> = HashMap::new();
     let mut edges: HashMap<Sym, HashSet<Sym>> = HashMap::new();
     // Edges whose findings propagate but whose exhaustiveness taint does not — a
     // callee whose ADR-0063 conditional-purity contract was fully decided here.
@@ -2532,6 +2568,7 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
     for unit in &ulist {
         let cx = Cx::new(units, index, unit.file);
         let d = direct.entry(unit.sym.clone()).or_default();
+        let dc = declared_direct.entry(unit.sym.clone()).or_default();
         let e = edges.entry(unit.sym.clone()).or_default();
         let nt = untainting.entry(unit.sym.clone()).or_default();
         let ex = exhaustive.entry(unit.sym.clone()).or_insert(true);
@@ -2600,15 +2637,35 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
                             e.insert(callee);
                         }
                         // No project edge — the builtin-class catalog gets its say
-                        // (`new PDO(...)->query()` is `io.db`); an uncatalogued
-                        // receiver or method stays the taint it has always been.
+                        // (`new PDO(...)->query()` is `io.db`), and failing that the
+                        // receiver may still carry a *declared* bound: an interface
+                        // envelope caps what the call can do even when no body is
+                        // resolvable (ADR-0067). Importing it discharges **this**
+                        // call site's taint and nothing else — another unresolved
+                        // call in the same body still marks the summary `…?`. An
+                        // uncatalogued, undeclared receiver stays the taint it has
+                        // always been.
+                        //
+                        // The two legs cannot both fire: `builtin_method_findings`
+                        // answers only for `EffectRecv::ClassName` (a catalogued
+                        // external class), `resolve_declared_bound` only for the
+                        // declared receivers, which name no class here.
                         None => match builtin_method_findings(&cx, receiver, method, *span) {
                             Some(fs) => {
                                 for f in fs {
                                     d.insert(f);
                                 }
                             }
-                            None => *ex = false,
+                            None => match resolve_declared_bound(
+                                &cx,
+                                unit.class_fqn.as_deref(),
+                                unit.params,
+                                receiver,
+                                method,
+                            ) {
+                                Some(labels) => dc.extend(labels),
+                                None => *ex = false,
+                            },
                         },
                     }
                 }
@@ -2700,8 +2757,12 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
     }
 
     // Fixpoint: effects(u) = direct(u) ∪ ⋃ effects(callees); exhaustive taints.
+    // The declared lane rides the same edges, monotone in the same way (ADR-0067):
+    // declared(u) = locally-imported bounds(u) ∪ ⋃ declared(callees). A declared
+    // label never crosses into `findings`, in either direction.
     let syms: Vec<Sym> = ulist.iter().map(|u| u.sym.clone()).collect();
     let mut findings: HashMap<Sym, HashSet<EffectFinding>> = direct;
+    let mut declared: HashMap<Sym, HashSet<String>> = declared_direct;
     loop {
         let mut changed = false;
         for sym in &syms {
@@ -2710,10 +2771,14 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
             // findings still join, their unknown remainder does not.
             let untainted: Vec<Sym> = untainting.get(sym).into_iter().flatten().cloned().collect();
             let mut incoming: Vec<EffectFinding> = Vec::new();
+            let mut incoming_declared: Vec<String> = Vec::new();
             let mut callee_taint = false;
             for c in callees.iter().chain(untainted.iter()) {
                 if let Some(ce) = findings.get(c) {
                     incoming.extend(ce.iter().cloned());
+                }
+                if let Some(cd) = declared.get(c) {
+                    incoming_declared.extend(cd.iter().cloned());
                 }
             }
             for c in &callees {
@@ -2724,6 +2789,10 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
             let set = findings.entry(sym.clone()).or_default();
             for ef in incoming {
                 changed |= set.insert(ef);
+            }
+            let dset = declared.entry(sym.clone()).or_default();
+            for label in incoming_declared {
+                changed |= dset.insert(label);
             }
             if callee_taint && exhaustive.get(sym).copied() != Some(false) {
                 exhaustive.insert(sym.clone(), false);
@@ -2738,8 +2807,9 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
     syms.into_iter()
         .map(|s| {
             let f = findings.remove(&s).unwrap_or_default();
+            let dc = declared.remove(&s).unwrap_or_default();
             let ex = exhaustive.get(&s).copied().unwrap_or(true);
-            (s, EffectSet { findings: f, exhaustive: ex })
+            (s, EffectSet { findings: f, declared: dc, exhaustive: ex })
         })
         .collect()
 }
@@ -2750,6 +2820,13 @@ pub struct EffectSummary {
     pub symbol: String,
     pub line: u32,
     pub labels: Vec<String>,
+    /// The **declared** effect labels (ADR-0067), sorted: bounds imported from an
+    /// interface envelope at a call through an injected receiver, not effects
+    /// inference proved. Rendered with a `≤` prefix; never a finding's input.
+    ///
+    /// Normalized for display: a declared label already covered by a proven label
+    /// of this same summary is dropped, since the proven lane says strictly more.
+    pub declared: Vec<String>,
     pub exhaustive: bool,
     /// The inferred escaping throw classes (ADR-0040), sorted; empty when none.
     pub throws: Vec<String>,
@@ -2787,6 +2864,21 @@ fn effect_summary_units(units: &[FileUnit], index: &Index, target: usize) -> Vec
         labels.dedup();
         labels
     };
+    // The declared lane, normalized against this summary's own proven labels
+    // (ADR-0067 rendering rule): `≤io.db` beside a proven `io` (or a proven
+    // `io.db`) says nothing the proven lane has not already said, so it is dropped
+    // from the display. The stored lanes keep their raw sets.
+    let declared_labels = |sym: &Sym, proven: &[String]| -> Vec<String> {
+        let mut labels: Vec<String> = effects
+            .get(sym)
+            .into_iter()
+            .flat_map(|e| e.declared.iter().cloned())
+            .filter(|l| !proven.iter().any(|p| steins_catalog::subsumes(p, l)))
+            .collect();
+        labels.sort();
+        labels.dedup();
+        labels
+    };
     let exhaustive = |sym: &Sym| effects.get(sym).is_none_or(|e| e.exhaustive);
     // Escaping throw classes (Yes or Maybe escape) as compact simple names.
     let throw_classes = |sym: &Sym| -> Vec<String> {
@@ -2804,10 +2896,13 @@ fn effect_summary_units(units: &[FileUnit], index: &Index, target: usize) -> Vec
     let mut out = Vec::new();
     for f in tree.functions() {
         let sym = Sym::Func(f.fqn.clone());
+        let labels = sorted_labels(&sym);
+        let declared = declared_labels(&sym, &labels);
         out.push(EffectSummary {
             symbol: f.name.clone(),
             line: tree.position(f.span.start).line,
-            labels: sorted_labels(&sym),
+            labels,
+            declared,
             exhaustive: exhaustive(&sym),
             throws: throw_classes(&sym),
             throws_exhaustive: throws_exhaustive(&sym),
@@ -2819,10 +2914,13 @@ fn effect_summary_units(units: &[FileUnit], index: &Index, target: usize) -> Vec
                 continue;
             }
             let sym = Sym::Method(c.fqn.clone(), m.name.clone());
+            let labels = sorted_labels(&sym);
+            let declared = declared_labels(&sym, &labels);
             out.push(EffectSummary {
                 symbol: format!("{}::{}", c.name, m.name),
                 line: tree.position(m.span.start).line,
-                labels: sorted_labels(&sym),
+                labels,
+                declared,
                 exhaustive: exhaustive(&sym),
                 throws: throw_classes(&sym),
                 throws_exhaustive: throws_exhaustive(&sym),
@@ -3111,6 +3209,10 @@ fn report_unit(
             EffectOrigin::MethodCall { receiver, method, span } => {
                 if let Some(callee) = resolve_effect_edge(cx, class_fqn, receiver, method) {
                     emit_transitive(out, cx, &callee, effects, span.start, display, labels);
+                // There is deliberately no declared-lane leg here: a declared bound
+                // is not a proven effect, and this function only reports proven
+                // ones (ADR-0067 decision 5). An ADR-0067 receiver reaches neither
+                // arm and so reports nothing, which is the whole point.
                 } else if let Some(fs) = builtin_method_findings(cx, receiver, method, *span) {
                     // A builtin-class catalog row, reported like a builtin call's.
                     for f in fs {
@@ -3422,6 +3524,10 @@ fn resolve_effect_edge(
         EffectRecv::This | EffectRecv::SelfKw => (enclosing?.to_owned(), false),
         EffectRecv::Parent => (cx.parent_fqn(enclosing?)?, true),
         EffectRecv::ClassName(name) => (cx.class_fqn(name), true),
+        // A declared receiver (ADR-0067) names an abstraction, never a body: the
+        // whole point is that dependency injection put an unknown implementation
+        // behind it. It draws no propagation edge — see [`resolve_declared_bound`].
+        EffectRecv::Var(_) | EffectRecv::PropRead(_) => return None,
     };
     let Resolution::Found(r) = resolve_in_chain(cx, &start, method) else { return None };
     if r.method.visibility == Visibility::Private
@@ -3450,8 +3556,9 @@ fn resolve_effect_edge(
 ///
 /// * the receiver must be a **named class** (`new PDO(...)->query()`,
 ///   `PDO::…`) — `$this`/`self`/`parent` are the project's own world, and a
-///   `$pdo->query()` variable receiver never reaches here at all (the origin scan
-///   records it as [`EffectOrigin::Opaque`], which taints);
+///   `$pdo->query()` variable receiver names no class to look up (it is either an
+///   [`EffectOrigin::Opaque`] or an ADR-0067 declared receiver, and both taint
+///   here);
 /// * the name must resolve to a class the project **does not define**
 ///   ([`Cx::class_absent`]) — a project `PDO` shadows the catalog, because its
 ///   body is the truth and [`resolve_effect_edge`] already drew that edge;
@@ -3485,6 +3592,103 @@ fn builtin_method_findings(
             })
             .collect(),
     )
+}
+
+/// The **declared** effect bound a call through a declared receiver imports
+/// (ADR-0067): the effect envelope carried by `method` on the project interface
+/// the receiver's declared type names.
+///
+/// `None` is the pre-ADR-0067 answer — the receiver has no declared type, the type
+/// is not a single project interface, the interface does not declare the method,
+/// or the declaration carries no envelope. In every one of those cases the call
+/// site keeps tainting exhaustiveness: *absence of a contract is not a contract*.
+///
+/// Only interfaces qualify. A non-final class is an abstraction carrier too, but a
+/// class *has* a body, so its envelope and its inferred effects are two different
+/// facts that the proven lane already reasons about; keeping the declared lane to
+/// interfaces keeps the two from arguing.
+fn resolve_declared_bound(
+    cx: &Cx,
+    enclosing: Option<&str>,
+    params: &[steins_syntax::Param],
+    receiver: &EffectRecv,
+    method: &str,
+) -> Option<Vec<String>> {
+    let ty = match receiver {
+        // `f(Repo $r) { $r->find(); }` — the parameter's own declared type. The
+        // syntax gate already proved this frame never writes `$r`, so the binding
+        // still holds what the signature typed.
+        EffectRecv::Var(name) => params.iter().find(|p| &p.name == name)?.ty.as_ref()?,
+        // `$this->repo->find()` — the declared (or constructor-promoted) type of
+        // the property, inherited members included.
+        EffectRecv::PropRead(prop) => {
+            cx.class_props(enclosing?).into_iter().find(|p| &p.name == prop)?.ty.as_ref()?
+        }
+        EffectRecv::This | EffectRecv::SelfKw | EffectRecv::Parent | EffectRecv::ClassName(_) => {
+            return None;
+        }
+    };
+    let fqn = sole_object_fqn(ty)?;
+    let (file, decl) = cx.find_class(&fqn)?;
+    if !decl.is_interface {
+        return None;
+    }
+    nearest_interface_envelope(cx, file, decl, method)
+}
+
+/// The FQN of a declared type that names **exactly one** object type, or `None`
+/// for a union, an intersection, or a scalar. A nullable single object type still
+/// qualifies: `null` never reaches the method, so the interface's envelope still
+/// bounds every call that actually happens.
+fn sole_object_fqn(ty: &steins_syntax::NativeType) -> Option<String> {
+    match ty.members.as_slice() {
+        [steins_syntax::TypeMember::Instance { fqn, .. }] => Some(fqn.clone()),
+        _ => None,
+    }
+}
+
+/// The nearest effect envelope declared for `method` on an interface hierarchy,
+/// searched breadth-first from the interface itself outward through the
+/// interfaces it extends — so the nearest carrier wins. An interface that
+/// redeclares the method without an envelope does not erase an ancestor's bound
+/// (an implementation owes both, and the ancestor's is the one that was written).
+fn nearest_interface_envelope<'a>(
+    cx: &Cx<'a>,
+    start_file: usize,
+    start: &'a ClassDecl,
+    method: &str,
+) -> Option<Vec<String>> {
+    let mut level: Vec<(usize, &'a ClassDecl)> = vec![(start_file, start)];
+    let mut seen: HashSet<String> = HashSet::new();
+    while !level.is_empty() {
+        let mut next: Vec<(usize, &'a ClassDecl)> = Vec::new();
+        for (file, id) in level {
+            if !seen.insert(id.fqn.to_ascii_lowercase()) {
+                continue;
+            }
+            if let Some(m) = id.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))
+                && let Some(env) = &m.effect_envelope
+            {
+                return Some(env.labels.clone());
+            }
+            let tree = cx.units[file].tree;
+            let parents = id
+                .parent
+                .iter()
+                .chain(id.implements.iter())
+                .map(|r| tree.resolve_class_fqn(r))
+                .collect::<Vec<String>>();
+            for fqn in parents {
+                if let Some((f, d)) = cx.find_class(&fqn)
+                    && d.is_interface
+                {
+                    next.push((f, d));
+                }
+            }
+        }
+        level = next;
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
