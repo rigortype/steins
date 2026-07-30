@@ -1566,6 +1566,14 @@ pub enum CondOperand {
     /// contributes no value-lane refinement. Only the shape-narrowing pass reads
     /// it, which is what keeps this a purely additive lowering change.
     Offset { var: String, key: Box<ArgValue> },
+    /// A bare **global-constant fetch** (`PHP_VERSION_ID`, `SOME_CONST`), carried
+    /// as the reference was written (issue #29). Lowered so the version-guard
+    /// fold can recognize the engine's `PHP_VERSION_ID` and decide the branch
+    /// against the resolved target range; for every other consumer this variant
+    /// behaves exactly as [`Self::Other`] did before it existed — it decides no
+    /// verdict and contributes no refinement, which is what keeps this a purely
+    /// additive lowering change.
+    Const(NameRef),
     /// Anything else (a call, a property fetch, an arithmetic sub-expression, …).
     Other,
 }
@@ -2173,6 +2181,20 @@ pub struct SourceTree {
     /// consumed by `steins doctor`'s coverage posture and by nothing that decides a
     /// finding. See [`ReflectionKind`] — the list is a guess until measured.
     reflection: Vec<ReflectionSite>,
+    /// Whether this file declares a userland constant named `PHP_VERSION_ID` —
+    /// a `const PHP_VERSION_ID = …;` statement (in any namespace: the check is
+    /// deliberately name-only and project-conservative) or a
+    /// `define('…PHP_VERSION_ID', …)` with a literal name (issue #29). One such
+    /// declaration anywhere disables the engine-constant version-guard fold for
+    /// the whole project — the honest reading when constant resolution is
+    /// otherwise unmodeled.
+    php_version_id_declared: bool,
+    /// Whether this file `use const`-imports something under the alias
+    /// `PHP_VERSION_ID` (issue #29). File-scoped: an unqualified
+    /// `PHP_VERSION_ID` in such a file names the import, not the engine
+    /// constant, so the version-guard fold declines here. Constants are
+    /// case-sensitive; the match is exact.
+    php_version_id_aliased: bool,
     /// Class references at the four hard-error positions (ADR-0049 §5 / S4), read by
     /// the `class.undefined` per-file pass.
     hard_class_refs: Vec<NameRef>,
@@ -2288,6 +2310,8 @@ impl SourceTree {
             class_alias_edges: lowered.class_alias_edges,
             anon_class_edges: lowered.anon_class_edges,
             reflection: lowered.reflection,
+            php_version_id_declared: lowered.php_version_id_declared,
+            php_version_id_aliased: lowered.php_version_id_aliased,
             hard_class_refs: lowered.hard_class_refs,
             parse_errors,
             comments,
@@ -2406,6 +2430,20 @@ impl SourceTree {
         &self.parse_errors
     }
 
+    /// Whether this file declares a userland constant named `PHP_VERSION_ID`
+    /// (issue #29) — see the field docs for the project-wide consequence.
+    #[must_use]
+    pub fn php_version_id_declared(&self) -> bool {
+        self.php_version_id_declared
+    }
+
+    /// Whether this file `use const`-imports the alias `PHP_VERSION_ID`
+    /// (issue #29) — file-scoped; an unqualified reference here is the import.
+    #[must_use]
+    pub fn php_version_id_aliased(&self) -> bool {
+        self.php_version_id_aliased
+    }
+
     /// The comment trivia found in the file, in source order (ADR-0023 inline
     /// `@steins-ignore` channel). Whitespace trivia is not included.
     #[must_use]
@@ -2451,6 +2489,10 @@ struct Lowered {
     anon_class_edges: Vec<AnonClassEdge>,
     /// Reflection-driven invocation sites (issue #30) — report-only.
     reflection: Vec<ReflectionSite>,
+    /// Issue #29: see [`SourceTree::php_version_id_declared`].
+    php_version_id_declared: bool,
+    /// Issue #29: see [`SourceTree::php_version_id_aliased`].
+    php_version_id_aliased: bool,
     /// Class references at the four **hard-error positions** (ADR-0049 §5 / S4):
     /// `new X`, `X::m()`, `X::CONST`, `X::$prop`. Explicit named classes only —
     /// `self`/`static`/`parent`, dynamic class exprs, and the `X::class` magic
@@ -2490,7 +2532,39 @@ fn walk(
                     span: to_span(c.span()),
                 });
             }
+            // `define('…PHP_VERSION_ID', …)` with a literal name (issue #29): a
+            // userland constant that could shadow the engine's version id in some
+            // namespace's fallback resolution. Name-only, deliberately over-broad
+            // (any namespace prefix counts) — one hit disables the version-guard
+            // fold project-wide. A define with a computed name is not scanned;
+            // that residue is recorded in the fold's documentation.
+            if let Expression::Identifier(id) = c.function
+                && bytes_to_string(id.last_segment()).eq_ignore_ascii_case("define")
+                && let Some(first) = c.argument_list.arguments.iter().next()
+                && let Expression::Literal(Literal::String(ls)) = first.value().unparenthesized()
+                && ls.value.is_some_and(|bytes| bytes_to_string(bytes).ends_with("PHP_VERSION_ID"))
+            {
+                out.php_version_id_declared = true;
+            }
             out.calls.push(lower_call(c));
+        }
+        // `const PHP_VERSION_ID = …;` (issue #29): a userland twin of the engine
+        // constant. Name-only and namespace-blind on purpose — the conservative
+        // reading disables the version-guard fold project-wide.
+        Node::Constant(con) => {
+            if con.items.iter().any(|i| bytes_to_string(i.name.value) == "PHP_VERSION_ID") {
+                out.php_version_id_declared = true;
+            }
+        }
+        // `use const … as PHP_VERSION_ID` / `use const …\PHP_VERSION_ID` (issue
+        // #29): an unqualified `PHP_VERSION_ID` in this FILE names the import,
+        // not the engine constant. Constant names are case-sensitive; the match
+        // is exact. Const imports are otherwise unlowered (out of scope), so
+        // this flag is the only thing read from them.
+        Node::Use(u) => {
+            if use_binds_php_version_id(u) {
+                out.php_version_id_aliased = true;
+            }
         }
         // Reflection-driven invocation through a method name (issue #30,
         // report-only): recognized by the method name alone, which is why the
@@ -5690,6 +5764,9 @@ fn lower_cond_operand(expr: &Expression<'_>) -> CondOperand {
             let (var, key) = const_key_offset(other).expect("checked");
             CondOperand::Offset { var, key: Box::new(key) }
         }
+        // A bare constant fetch (issue #29). `true`/`false`/`null` never reach
+        // here — they lex as literals and lower through the arm below.
+        Expression::ConstantAccess(ca) => CondOperand::Const(name_ref(&ca.name)),
         other => match lower_arg_value(other) {
             // A scalar literal, or a fully-concrete array literal — the latter lets a
             // `$x === []` / `$x === [1, 2]` guard narrow `$x` to a `Singleton` array
@@ -6227,6 +6304,28 @@ fn add_use(u: &mago_syntax::cst::Use<'_>, ctx: &mut NsCtx) {
 /// The lowercase-normalized import alias for a `use` item: its explicit `as` alias,
 /// else the last segment of the imported name (PHP class/function names are
 /// case-insensitive, so the map keys on the lowercased form).
+/// Whether a `use` statement binds the (case-sensitive) alias `PHP_VERSION_ID`
+/// through any of its **const** item forms (issue #29). The exact-case binding
+/// name is the explicit `as` alias, else the imported name's last segment.
+fn use_binds_php_version_id(u: &mago_syntax::cst::Use<'_>) -> bool {
+    let item_binds = |item: &mago_syntax::cst::UseItem<'_>| -> bool {
+        let bound = match &item.alias {
+            Some(a) => bytes_to_string(a.identifier.value),
+            None => bytes_to_string(item.name.last_segment()),
+        };
+        bound == "PHP_VERSION_ID"
+    };
+    match &u.items {
+        UseItems::TypedSequence(seq) if seq.r#type.is_const() => seq.items.iter().any(item_binds),
+        UseItems::TypedList(list) if list.r#type.is_const() => list.items.iter().any(item_binds),
+        UseItems::MixedList(list) => list
+            .items
+            .iter()
+            .any(|mti| mti.r#type.as_ref().is_some_and(|t| t.is_const()) && item_binds(&mti.item)),
+        _ => false,
+    }
+}
+
 fn use_item_alias(item: &mago_syntax::cst::UseItem<'_>) -> String {
     match &item.alias {
         Some(a) => bytes_to_string(a.identifier.value),

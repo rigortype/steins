@@ -794,17 +794,55 @@ const NEXT_INT_BOUNDARY: (u16, u16) = (8, 3);
 ///   trustworthy only when every version the analysis is about is the pin —
 ///   a target range is skewed unless it is exactly the pin; no target falls
 ///   back to the runtime-vs-pin comparison (A11 unchanged).
+/// - The **version-id interval** feeds the issue-#29 `PHP_VERSION_ID` guard
+///   fold — see [`PhpView::version_id`].
+///
+/// (This doc describes [`effective_php_view`]; the two small id helpers below
+/// are its arithmetic.)
+///
+/// The lowest `PHP_VERSION_ID` a `(major, minor)` admits (patch `00`).
+fn version_id_lo(m: (u16, u16)) -> u32 {
+    u32::from(m.0) * 10_000 + u32::from(m.1.min(99)) * 100
+}
+
+/// The highest `PHP_VERSION_ID` a `(major, minor)` ceiling admits (patch `99`;
+/// a `(maj, u16::MAX)` "any minor of this major" ceiling caps at minor 99 —
+/// PHP_VERSION_ID reserves two digits per component).
+fn version_id_hi(m: (u16, u16)) -> u32 {
+    u32::from(m.0) * 10_000 + u32::from(m.1.min(99)) * 100 + 99
+}
+
+/// The per-run PHP view (issues #28/#29): the three version answers the checker
+/// consumes, all derived from the one target-or-runtime seam.
+#[derive(Debug, PartialEq, Eq)]
+struct PhpView {
+    /// The effective minor for version-keyed value rules (ADR-0049 A12) — see
+    /// [`effective_php_view`].
+    effective_minor: Option<(u16, u16)>,
+    /// The ADR-0052 A11 catalog-skew flag.
+    catalog_skew: bool,
+    /// The `PHP_VERSION_ID` interval `[lo, hi]` the analysis is about (issue
+    /// #29): the declared target range's, else the runtime minor's (its exact
+    /// patch is unknown, so the interval spans the minor). `hi = None` is an
+    /// open upper bound; the whole thing `None` when no version is known at all.
+    version_id: Option<(u32, Option<u32>)>,
+}
+
 fn effective_php_view(
     runtime: Option<(u16, u16)>,
     target: Option<&steins_db::PhpTarget>,
-) -> (Option<(u16, u16)>, bool) {
+) -> PhpView {
     match target {
-        Some(t) => {
-            let effective =
-                if t.straddles(NEXT_INT_BOUNDARY) { None } else { Some(t.floor) };
-            (effective, !t.is_exactly(steins_catalog::PINNED_PHP))
-        }
-        None => (runtime, runtime.is_some_and(|m| m != steins_catalog::PINNED_PHP)),
+        Some(t) => PhpView {
+            effective_minor: if t.straddles(NEXT_INT_BOUNDARY) { None } else { Some(t.floor) },
+            catalog_skew: !t.is_exactly(steins_catalog::PINNED_PHP),
+            version_id: Some((version_id_lo(t.floor), t.ceiling.map(version_id_hi))),
+        },
+        None => PhpView {
+            effective_minor: runtime,
+            catalog_skew: runtime.is_some_and(|m| m != steins_catalog::PINNED_PHP),
+            version_id: runtime.map(|m| (version_id_lo(m), Some(version_id_hi(m)))),
+        },
     }
 }
 
@@ -1365,7 +1403,17 @@ fn check_units(
     // ADR-0049 A12 (the next-int rule, through `normalize_array`) both follow
     // this one seam.
     let runtime_minor = folder.php_minor();
-    let (php_minor, catalog_skew) = effective_php_view(runtime_minor, layout.php_target());
+    let view = effective_php_view(runtime_minor, layout.php_target());
+    let (php_minor, catalog_skew) = (view.effective_minor, view.catalog_skew);
+    // The PHP_VERSION_ID guard fold (issue #29) is disabled project-wide the
+    // moment any file declares a userland constant of that name — constant
+    // resolution is otherwise unmodeled, so the conservative reading is the
+    // only sound one.
+    let version_id = if units.iter().any(|u| u.tree.php_version_id_declared()) {
+        None
+    } else {
+        view.version_id
+    };
 
     // The callable-purity oracle (ADR-0063 P3): one whole-project effect fixpoint per
     // run, shared by every file's context, and built only when some docblock actually
@@ -1381,6 +1429,7 @@ fn check_units(
             warning_handler_abort,
             php_minor,
             catalog_skew,
+            version_id,
             purity.as_ref(),
         );
 
@@ -3483,6 +3532,10 @@ struct Cx<'a> {
     /// — any minor of the declared target range, else the runtime minor — is
     /// not the catalog pin. Computed once per run by [`effective_php_view`].
     catalog_skew: bool,
+    /// The `PHP_VERSION_ID` interval the analysis is about (issue #29), for the
+    /// version-guard fold — already `None` when a userland constant of that
+    /// name is declared anywhere in the project. See [`PhpView::version_id`].
+    version_id: Option<(u32, Option<u32>)>,
     /// The whole-project purity answer for the callable-purity obligation
     /// (ADR-0063 P3), or `None` when no purity-bearing callable is spelled anywhere
     /// (and therefore also for every auxiliary pass, which reports no findings of
@@ -3501,6 +3554,7 @@ impl<'a> Cx<'a> {
             warning_handler_abort: true,
             php_minor: None,
             catalog_skew: false,
+            version_id: None,
             purity: None,
         }
     }
@@ -3515,9 +3569,10 @@ impl<'a> Cx<'a> {
         warning_handler_abort: bool,
         php_minor: Option<(u16, u16)>,
         catalog_skew: bool,
+        version_id: Option<(u32, Option<u32>)>,
         purity: Option<&'a PurityOracle>,
     ) -> Self {
-        Self { units, index, cur, dam, warning_handler_abort, php_minor, catalog_skew, purity }
+        Self { units, index, cur, dam, warning_handler_abort, php_minor, catalog_skew, version_id, purity }
     }
 
     /// A context pointing at a different file (for cross-file descent); the runtime
@@ -3531,6 +3586,7 @@ impl<'a> Cx<'a> {
             warning_handler_abort: self.warning_handler_abort,
             php_minor: self.php_minor,
             catalog_skew: self.catalog_skew,
+            version_id: self.version_id,
             purity: self.purity,
         }
     }
@@ -7415,6 +7471,131 @@ fn check_call_on_null(
 /// (`method_exists`/`function_exists`/`class_exists` …, ADR-0049 §4 / N3) folds to
 /// a real verdict by asking the runtime boot surface (the A2ii homonym oracle);
 /// every other arm is env-only and ignores it.
+/// Whether `r` names the ENGINE's `PHP_VERSION_ID` in the current file (issue
+/// #29). Constants are case-sensitive, so the match is exact. A fully-qualified
+/// `\PHP_VERSION_ID` always does (the engine defines it first; a `define` of an
+/// already-defined constant is a no-op). An unqualified reference does unless
+/// this file `use const`-imports the alias — the namespace fallback otherwise
+/// lands on the global. Qualified/relative spellings never do. The remaining
+/// residue — a userland `const`/literal `define` twin anywhere in the project —
+/// zeroes [`Cx::version_id`] before this is ever consulted; a define with a
+/// *computed* name is not scanned, the one modeled-out corner (recorded here
+/// deliberately: the only consumer is branch pruning, and a computed define
+/// minting a namespaced `PHP_VERSION_ID` twin has no known occurrence in the
+/// wild).
+fn is_engine_version_id(cx: &Cx, r: &NameRef) -> bool {
+    if r.raw != "PHP_VERSION_ID" {
+        return false;
+    }
+    match r.kind {
+        RefKind::FullyQualified => true,
+        RefKind::Unqualified => !cx.tree().php_version_id_aliased(),
+        _ => false,
+    }
+}
+
+/// The issue-#29 version-guard fold: `Some(verdict)` when one operand is the
+/// engine `PHP_VERSION_ID` and the other an int literal — including the
+/// `Maybe` verdict for an interval the literal splits (a target range that
+/// straddles the comparison keeps both arms live). `None` hands the comparison
+/// to the ordinary evaluation.
+fn eval_version_id_cmp(
+    cx: &Cx,
+    op: CmpOp,
+    lhs: &CondOperand,
+    rhs: &CondOperand,
+) -> Option<Certainty> {
+    let (lo, hi) = cx.version_id?;
+    let (r, lit, flipped) = match (lhs, rhs) {
+        (CondOperand::Const(r), CondOperand::Literal(ArgValue::Int(n))) => (r, *n, false),
+        (CondOperand::Literal(ArgValue::Int(n)), CondOperand::Const(r)) => (r, *n, true),
+        _ => return None,
+    };
+    if !is_engine_version_id(cx, r) {
+        return None;
+    }
+    // Mirror the operator when the constant sits on the right (`80400 <=
+    // PHP_VERSION_ID` asks `PHP_VERSION_ID >= 80400`).
+    let op = if flipped {
+        match op {
+            CmpOp::Lt => CmpOp::Gt,
+            CmpOp::Le => CmpOp::Ge,
+            CmpOp::Gt => CmpOp::Lt,
+            CmpOp::Ge => CmpOp::Le,
+            other => other,
+        }
+    } else {
+        op
+    };
+    let lo = i64::from(lo);
+    let hi = hi.map(i64::from);
+    // Interval-vs-point trichotomy. `hi = None` is an open upper bound: the
+    // interval can then never sit entirely below a literal.
+    let all_ge = |p: i64| lo >= p;
+    let all_le = |p: i64| hi.is_some_and(|h| h <= p);
+    let verdict = match op {
+        CmpOp::Ge => {
+            if all_ge(lit) {
+                Certainty::Yes
+            } else if all_le(lit - 1) {
+                Certainty::No
+            } else {
+                Certainty::Maybe
+            }
+        }
+        CmpOp::Gt => {
+            if all_ge(lit + 1) {
+                Certainty::Yes
+            } else if all_le(lit) {
+                Certainty::No
+            } else {
+                Certainty::Maybe
+            }
+        }
+        CmpOp::Le => {
+            if all_le(lit) {
+                Certainty::Yes
+            } else if all_ge(lit + 1) {
+                Certainty::No
+            } else {
+                Certainty::Maybe
+            }
+        }
+        CmpOp::Lt => {
+            if all_le(lit - 1) {
+                Certainty::Yes
+            } else if all_ge(lit) {
+                Certainty::No
+            } else {
+                Certainty::Maybe
+            }
+        }
+        // `==`/`===` (int against int: the loose and strict tables agree): `Yes`
+        // only when the interval IS the point — unreachable at minor precision
+        // (the interval always spans 100 patch ids) but written generally; a
+        // point outside the interval is a definite `No`.
+        CmpOp::Identical | CmpOp::Loose => {
+            if lit < lo || hi.is_some_and(|h| lit > h) {
+                Certainty::No
+            } else if hi == Some(lo) && lit == lo {
+                Certainty::Yes
+            } else {
+                Certainty::Maybe
+            }
+        }
+        CmpOp::NotIdentical | CmpOp::NotLoose => {
+            if lit < lo || hi.is_some_and(|h| lit > h) {
+                Certainty::Yes
+            } else if hi == Some(lo) && lit == lo {
+                Certainty::No
+            } else {
+                Certainty::Maybe
+            }
+        }
+    };
+    Some(verdict)
+}
+
 fn eval_cond(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -7425,6 +7606,14 @@ fn eval_cond(
 ) -> Certainty {
     match cond {
         CondExpr::Cmp { op, lhs, rhs } => {
+            // The PHP_VERSION_ID guard fold (issue #29): a comparison of the
+            // engine's version id against an int literal decides against the
+            // resolved target interval, and the ordinary decided-branch pruning
+            // does the rest — a straddled boundary stays `Maybe` (both arms
+            // live), never a guess.
+            if let Some(v) = eval_version_id_cmp(w.cx, *op, lhs, rhs) {
+                return v;
+            }
             match (operand_values(lhs, env, poisoned), operand_values(rhs, env, poisoned)) {
                 (Some(lv), Some(rv)) => eval_cmp(*op, &lv, &rv, w.cx.php_minor),
                 _ => Certainty::Maybe,
@@ -17097,8 +17286,18 @@ mod n4_carrier_tests {
         let tree = SourceTree::parse(src);
         let units = [FileUnit { path: "t.php", tree: &tree }];
         let index = Index::from_units(&units);
-        let (php_minor, skew) = effective_php_view(php_minor, None);
-        let cx = Cx::new_with(&units, &index, 0, &EMPTY_DAM, true, php_minor, skew, None);
+        let view = effective_php_view(php_minor, None);
+        let cx = Cx::new_with(
+            &units,
+            &index,
+            0,
+            &EMPTY_DAM,
+            true,
+            view.effective_minor,
+            view.catalog_skew,
+            view.version_id,
+            None,
+        );
         f(&cx)
     }
 
@@ -17959,36 +18158,45 @@ mod php_view_tests {
         PhpTarget { floor, ceiling, source: PhpTargetSource::Require, raw: String::new() }
     }
 
-    /// Issue #28: the one seam both A11 and A12 follow.
+    /// Issue #28: the one seam both A11 and A12 follow (and, since #29, the
+    /// PHP_VERSION_ID guard interval).
     #[test]
     fn a_declared_target_overrides_the_runtime() {
         // A range straddling the A12 boundary declines the effective minor
-        // (boundary-sensitive literals must decline) and skews the catalog.
+        // (boundary-sensitive literals must decline) and skews the catalog; the
+        // version-id interval spans the declared range [8.1.00, 8.99.99].
         let caret81 = target((8, 1), Some((8, u16::MAX)));
-        assert_eq!(effective_php_view(Some((8, 5)), Some(&caret81)), (None, true));
+        let v = effective_php_view(Some((8, 5)), Some(&caret81));
+        assert_eq!((v.effective_minor, v.catalog_skew), (None, true));
+        assert_eq!(v.version_id, Some((80100, Some(89999))));
         // A range entirely below the boundary answers with its floor.
         let old = target((8, 1), Some((8, 2)));
-        assert_eq!(effective_php_view(Some((8, 5)), Some(&old)), (Some((8, 1)), true));
-        // A range entirely at/above the boundary answers with its floor too.
-        let new = target((8, 3), Some((8, u16::MAX)));
-        assert_eq!(effective_php_view(Some((8, 1)), Some(&new)), (Some((8, 3)), true));
+        let v = effective_php_view(Some((8, 5)), Some(&old));
+        assert_eq!((v.effective_minor, v.catalog_skew), (Some((8, 1)), true));
+        assert_eq!(v.version_id, Some((80100, Some(80299))));
+        // A range entirely at/above the boundary answers with its floor too; an
+        // open ceiling is an open interval.
+        let new = target((8, 3), None);
+        let v = effective_php_view(Some((8, 1)), Some(&new));
+        assert_eq!((v.effective_minor, v.catalog_skew), (Some((8, 3)), true));
+        assert_eq!(v.version_id, Some((80300, None)));
         // A target pinned exactly to the catalog pin carries no skew.
         let pinned = target(steins_catalog::PINNED_PHP, Some(steins_catalog::PINNED_PHP));
-        assert_eq!(
-            effective_php_view(None, Some(&pinned)),
-            (Some(steins_catalog::PINNED_PHP), false)
-        );
+        let v = effective_php_view(None, Some(&pinned));
+        assert_eq!((v.effective_minor, v.catalog_skew), (Some(steins_catalog::PINNED_PHP), false));
     }
 
     /// No declaration: the pre-#28 posture, verbatim — runtime minor passthrough,
-    /// skew iff the runtime differs from the pin.
+    /// skew iff the runtime differs from the pin; the version-id interval spans
+    /// the runtime's minor (the exact patch is unknown).
     #[test]
     fn no_target_falls_back_to_the_runtime() {
-        assert_eq!(
-            effective_php_view(Some(steins_catalog::PINNED_PHP), None),
-            (Some(steins_catalog::PINNED_PHP), false)
-        );
-        assert_eq!(effective_php_view(Some((8, 1)), None), (Some((8, 1)), true));
-        assert_eq!(effective_php_view(None, None), (None, false));
+        let v = effective_php_view(Some(steins_catalog::PINNED_PHP), None);
+        assert_eq!((v.effective_minor, v.catalog_skew), (Some(steins_catalog::PINNED_PHP), false));
+        let v = effective_php_view(Some((8, 1)), None);
+        assert_eq!((v.effective_minor, v.catalog_skew), (Some((8, 1)), true));
+        assert_eq!(v.version_id, Some((80100, Some(80199))));
+        let v = effective_php_view(None, None);
+        assert_eq!((v.effective_minor, v.catalog_skew, v.version_id), (None, false, None));
     }
 }
