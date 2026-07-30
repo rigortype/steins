@@ -648,6 +648,59 @@ impl<E: FoldEngine> EngineFolder<E> {
         self.engine_int_size() == Some(8)
     }
 
+    /// Gate 2 of the ADR-0056 §2 admission sequence, on its own: whether a
+    /// **curated** return-fact row may refine the reflected envelope.
+    ///
+    /// A curated row is verified against the 64-bit engine at
+    /// [`steins_catalog::PINNED_PHP`] and nowhere else, so the row is admitted only
+    /// when the analysis is about exactly that version *and* that machine. With a
+    /// declared target (issue #28) the WHOLE range must be the pin; with no target
+    /// the runtime-vs-pin comparison stands as it did before #28.
+    ///
+    /// Extracted so [`Self::surface_summary`] reports the same verdict the gate
+    /// applies rather than a second copy of it.
+    fn curated_rows_admitted(&mut self) -> bool {
+        self.engine_is_64_bit()
+            && match &self.php_target {
+                Some(t) => t.is_exactly(steins_catalog::PINNED_PHP),
+                None => self.php_minor() == Some(steins_catalog::PINNED_PHP),
+            }
+    }
+
+    /// Describe the engine surface **as this folder's own gates see it** — the
+    /// data a frontend needs to state its precision boundary (issue #64 S3).
+    ///
+    /// Every field is read off the same helpers that decide admission
+    /// ([`Self::boot_surface_label`], `engine_int_size`, `fold_lane_at_width`,
+    /// `curated_rows_admitted`, [`Folder::absence_family_available`] — the last two
+    /// private, hence plain spans), so a description and the behaviour it
+    /// describes cannot drift: changing a gate changes what this reports, in the
+    /// same commit and by construction. Nothing here is prose — the wording of the
+    /// boundary belongs to whoever renders it.
+    ///
+    /// Asking is not free of consequence on the replay transport: an unanswered
+    /// `env` is recorded as pending exactly as any other miss is, so a caller that
+    /// summarizes *before* collecting pending gets a run that asks for the boot
+    /// surface it could not describe, and converges one iteration later with it.
+    /// That is the intended shape: a converged run always has a complete summary.
+    pub fn surface_summary(&mut self) -> SurfaceSummary {
+        let label = self.boot_surface_label();
+        let php_version = self.engine.env().map(|e| e.php_version);
+        let int_size = self.engine_int_size();
+        SurfaceSummary {
+            label,
+            php_version,
+            int_size,
+            fold_lane: fold_lane_at_width(int_size),
+            curated_rows: self.absence_family_available() && self.curated_rows_admitted(),
+            absence_family: self.absence_family_available(),
+            fold_total: steins_catalog::width_safe_names().len()
+                + steins_catalog::width_refused_names().len(),
+            fold_safe: steins_catalog::width_safe_names().len(),
+            refused_folds: steins_catalog::width_refused_names(),
+        }
+    }
+
     /// Compute the builtin return fact for `key` (already lowercased) — the
     /// admission gate of ADR-0056 §2 assembled from three whole-run engine
     /// answers. Called once per name; [`Folder::builtin_return_fact`] memoizes.
@@ -675,11 +728,7 @@ impl<E: FoldEngine> EngineFolder<E> {
         // platform-independent claim, and the 32-bit build reports the same ones —
         // so an unpinned or narrow-integer engine still SEEDS, it just does not
         // get the curated refinement.
-        let minor_matches_pin = self.engine_is_64_bit()
-            && match &self.php_target {
-                Some(t) => t.is_exactly(steins_catalog::PINNED_PHP),
-                None => self.php_minor() == Some(steins_catalog::PINNED_PHP),
-            };
+        let minor_matches_pin = self.curated_rows_admitted();
         // The reflected return envelope — the running engine's own declaration.
         let refl = self.engine.reflect(key)?;
         if !refl.function_exists {
@@ -859,11 +908,88 @@ impl<E: FoldEngine> EngineFolder<E> {
 /// Declining is spelled as it always was: the caller returns `None`, which widens.
 /// Nothing here fabricates, and nothing here narrows on a guess.
 fn fold_admitted_at_width(int_size: Option<u32>, name: &str, args: &[FoldArg]) -> bool {
-    match int_size {
-        Some(8) => true,
-        Some(4) => steins_catalog::width_safe(name) && args.iter().all(fold_arg_fits_i32),
-        _ => false,
+    match fold_lane_at_width(int_size) {
+        FoldLane::Full => true,
+        FoldLane::WidthSafeSubset => {
+            steins_catalog::width_safe(name) && args.iter().all(fold_arg_fits_i32)
+        }
+        FoldLane::Declined => false,
     }
+}
+
+/// Which fold lane an engine of this integer width gets — the width half of
+/// [`fold_admitted_at_width`], named so a description of the boundary
+/// ([`EngineFolder::surface_summary`]) reads the same three cases the gate
+/// branches on instead of restating them.
+fn fold_lane_at_width(int_size: Option<u32>) -> FoldLane {
+    match int_size {
+        Some(8) => FoldLane::Full,
+        Some(4) => FoldLane::WidthSafeSubset,
+        _ => FoldLane::Declined,
+    }
+}
+
+/// The fold lane an engine's integer width admits (issue #64 / ADR-0066 §4 and its
+/// S1.5 amendment).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldLane {
+    /// A provably 64-bit engine: the whole [`steins_catalog::foldable`] allowlist,
+    /// which is the machine every value rule here assumes.
+    Full,
+    /// A provably 32-bit engine: [`steins_catalog::width_safe_names`] only, and
+    /// only for argument tuples the range guard admits.
+    WidthSafeSubset,
+    /// An unreported or unprobed width: nothing folds. Default-deny — an old or
+    /// foreign runner is unknown, not assumed.
+    Declined,
+}
+
+impl FoldLane {
+    /// A stable machine-readable spelling, for an envelope that carries the lane
+    /// as data (the playground's boot object).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::WidthSafeSubset => "width_safe_subset",
+            Self::Declined => "declined",
+        }
+    }
+}
+
+/// The engine surface as the shared fold policy sees it — what
+/// [`EngineFolder::surface_summary`] answers.
+///
+/// This is **data about the gates**, not prose about them: each field is the
+/// verdict of a gate that is applied elsewhere in this file, read from the same
+/// helper. A renderer decides what to say; nothing here decides for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SurfaceSummary {
+    /// The ADR-0049 §9 boot-surface label (`PHP 8.5.2 (32 extensions)`), or `None`
+    /// when no engine answered.
+    pub label: Option<String>,
+    /// The engine's own `PHP_VERSION`, verbatim.
+    pub php_version: Option<String>,
+    /// `PHP_INT_SIZE` in bytes. `None` = unreported, which every gate here reads
+    /// as "not provably anything".
+    pub int_size: Option<u32>,
+    /// Which builtins may fold at that width.
+    pub fold_lane: FoldLane,
+    /// Whether a curated return-fact row may refine a reflected envelope — both
+    /// ADR-0056 gates, conjoined as the admission sequence conjoins them.
+    pub curated_rows: bool,
+    /// Whether the ADR-0049 A9 absence family is available (a live engine, no
+    /// monkey-patch extension, and a runtime the declared target admits).
+    pub absence_family: bool,
+    /// The size of the folding allowlist, and how much of it
+    /// [`FoldLane::WidthSafeSubset`] keeps — the catalog's own counts, so a
+    /// renderer states the boundary without a number of its own.
+    pub fold_total: usize,
+    /// See [`Self::fold_total`].
+    pub fold_safe: usize,
+    /// The folds a [`FoldLane::WidthSafeSubset`] engine does **not** get, by name:
+    /// the catalog complement (`foldable ∧ !width_safe`), never a second list.
+    pub refused_folds: &'static [&'static str],
 }
 
 /// The 32-bit argument range guard: `[-(2^31 - 1), 2^31 - 1]`.

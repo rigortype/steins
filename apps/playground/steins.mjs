@@ -12,8 +12,12 @@
 //   sw_dealloc(ptr, len)
 //
 // The replay pair (ADR-0066) takes a JSON object mapping request key -> raw
-// JSON-RPC `result`, and returns the envelope with a `pending` array: the
-// requests the run could not answer. A NON-EMPTY `pending` means the results are
+// JSON-RPC `result`, and returns the envelope with two extra keys: `boot` — the
+// engine surface as the analysis' own gates see it (version, PHP_INT_SIZE, fold
+// lane, whether curated rows and the absence family are live, and the folds a
+// narrow engine is refused), which is what makes the precision boundary
+// renderable — and `pending`: the requests the run could not answer. A NON-EMPTY
+// `pending` means the results are
 // NoFold-degraded and must NOT be rendered — answer the pending keys (each parses
 // as {"method", "params"}), put the answers back under the same key strings, and
 // call again. The answered set strictly grows, so the loop terminates; the

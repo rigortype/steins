@@ -23,3 +23,9 @@ steins-db = { path = "../steins-db" }
 steins-infer = { path = "../steins-infer" }
 steins-syntax = { path = "../steins-syntax" }
 serde_json.workspace = true
+
+# Tests only, and deliberately so: the boot object's refused-fold list must be the
+# catalog's own complement rather than a list spelled in this crate, so the pin
+# reads the catalog while the shipped module never names it.
+[dev-dependencies]
+steins-catalog = { path = "../steins-catalog" }

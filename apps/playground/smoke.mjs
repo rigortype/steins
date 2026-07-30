@@ -142,6 +142,21 @@ assert(
   `the flagship folds through the replay loop (got: ${folded && folded.message})`,
 );
 
+// 7. The boot object (issue #64 S3): the engine surface as data, so the page can
+// state its precision boundary instead of asserting a stale one. The canned env
+// above is 64-bit at the pinned minor, so every lane is live — and the refused
+// folds are not named because on this machine there are none.
+assert(empty.boot !== undefined, "a replay envelope always carries a boot object");
+assert(empty.boot.fold_lane === "declined", "before the env answer, nothing folds");
+assert(empty.boot.label === null && empty.boot.int_size === null, "…and nothing is described");
+const boot = result.boot;
+assert(boot.php_version === "8.5.8" && boot.int_size === 8, `boot reports the engine (${JSON.stringify(boot)})`);
+assert(boot.fold_lane === "full", `a 64-bit engine folds the whole allowlist (got ${boot.fold_lane})`);
+assert(boot.curated_rows === true && boot.absence_family === true, "every lane is live at the pin");
+assert(boot.refused_folds === undefined, "nothing is refused on the full lane");
+assert(boot.fold_total === 22 && boot.fold_safe === 19, "the catalog's own counts travel");
+assert(steins.check(flagship).boot === undefined, "the sound-subset envelope carries no boot key");
+
 // annotate rides the same loop.
 const ann2 = steins.annotateReplay(flagship, table);
 assert(ann2.ok === true && ann2.pending.length === 0, "annotate reaches its fixpoint on the same table");

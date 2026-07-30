@@ -123,6 +123,30 @@ fn width_refused(name: &str) -> bool {
     WIDTH_REFUSED.iter().any(|&f| name.eq_ignore_ascii_case(f))
 }
 
+/// The verified width-safe names, in catalog order — the *extension* of
+/// [`width_safe`], for a caller that must **name** the subset rather than test a
+/// membership.
+///
+/// The playground's boundary widget (issue #64 S3) is the caller: it states how
+/// much of the folding allowlist is live on the engine the browser actually
+/// booted, and the counts have to come from the catalog rather than from a number
+/// typed into JS, or the page can drift from the gate it describes.
+#[must_use]
+pub fn width_safe_names() -> &'static [&'static str] {
+    WIDTH_SAFE
+}
+
+/// The refused names, in catalog order — the complement of [`width_safe_names`]
+/// *within* the folding allowlist ([`foldable`] is the union of the two by
+/// construction, so this is that complement and not a third list to keep in step).
+///
+/// These are the folds a 32-bit engine does not get, by name. See `WIDTH_REFUSED`
+/// for each refusal's probe evidence.
+#[must_use]
+pub fn width_refused_names() -> &'static [&'static str] {
+    WIDTH_REFUSED
+}
+
 /// The verified width-safe half of the folding allowlist (issue #64 S1.5).
 ///
 /// Grouped by *why* the width cannot reach the result:
@@ -996,6 +1020,26 @@ mod tests {
         for name in ["strtoupper", "substr", "str_repeat", "count", "in_array", "STRLEN"] {
             assert!(width_safe(name), "{name} is a verified width-safe fold");
         }
+    }
+
+    /// The two name accessors ARE the two predicates, extensionally — the boundary
+    /// widget (issue #64 S3) names the subset through them, and a list that drifted
+    /// from the predicate would make the page describe a gate that is not the gate.
+    #[test]
+    fn the_name_accessors_agree_with_the_predicates() {
+        use super::{width_refused, width_refused_names, width_safe_names};
+        assert_eq!(width_safe_names(), WIDTH_SAFE);
+        assert_eq!(width_refused_names(), WIDTH_REFUSED);
+        for name in width_safe_names() {
+            assert!(width_safe(name), "{name} is listed safe but the predicate declines it");
+        }
+        for name in width_refused_names() {
+            assert!(!width_safe(name), "{name} is listed refused but the predicate admits it");
+            assert!(width_refused(name), "{name} is listed refused but is not in the complement");
+            assert!(foldable(name), "a refused name is still on the folding allowlist");
+        }
+        assert_eq!(width_safe_names().len(), 19);
+        assert_eq!(width_refused_names().len(), 3);
     }
 
     /// Default-deny: a name nobody classified is not width-safe, foldable or not.

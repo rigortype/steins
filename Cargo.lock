@@ -1123,6 +1123,7 @@ name = "steins-wasm"
 version = "0.1.2"
 dependencies = [
  "serde_json",
+ "steins-catalog",
  "steins-db",
  "steins-infer",
  "steins-syntax",

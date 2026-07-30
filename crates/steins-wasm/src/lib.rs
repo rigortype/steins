@@ -33,8 +33,9 @@
 //! is reached by a **request-replay fixpoint** (ADR-0066) rather than by calling
 //! out mid-walk. `sw_check_replay` / `sw_annotate_replay` take one extra buffer —
 //! a JSON object mapping *request key* to the raw JSON-RPC `result` for that
-//! request — and add `"pending"` to the envelope: the requests the run could not
-//! answer, in first-occurrence order, deduped.
+//! request — and add two keys to the envelope: `"pending"`, the requests the run
+//! could not answer (first-occurrence order, deduped), and `"boot"`, the engine
+//! surface as the shared fold policy sees it (see the private `boot_json`).
 //!
 //! The caller's loop is:
 //!
@@ -52,6 +53,12 @@
 //! is by the answered set strictly growing; the iteration cap belongs to the
 //! caller, and exhausting it means falling back to the non-replay entry points,
 //! never to displaying a half-converged run.
+//!
+//! `boot` exists because the *precision boundary* has to be legible (issue #61's
+//! second half): with an engine loaded, "which lanes are live" is a property of
+//! the engine that booted, and only the policy knows it. It travels as **data**
+//! for the same reason the `notice` does — a wasm module has no stream a user
+//! reads — and the frontend, not this crate, decides how to say it.
 //!
 //! Every envelope carries `"ok"`: `true` with the analysis payload, `false` with
 //! an `"error"` string (an unknown profile — the CLI's exit-2 analogue as data,
@@ -227,7 +234,7 @@ pub unsafe extern "C" fn sw_check_replay(
     // that fixes it.
     let mut folder = TableFolder::with_table(table);
     let mut envelope = check_with_folder(source, selected, &mut folder);
-    set_result(with_pending(&mut envelope, &mut folder))
+    set_result(with_replay_extras(&mut envelope, &mut folder))
 }
 
 /// [`sw_annotate`] with a **replay table** — the annotate twin of
@@ -252,7 +259,7 @@ pub unsafe extern "C" fn sw_annotate_replay(
     };
     let mut folder = TableFolder::with_table(table);
     let mut envelope = annotate_with_folder(source, &mut folder);
-    set_result(with_pending(&mut envelope, &mut folder))
+    set_result(with_replay_extras(&mut envelope, &mut folder))
 }
 
 /// Read the replay table buffer: a JSON **object** of key → raw `result` value.
@@ -278,18 +285,56 @@ unsafe fn read_table(
     }
 }
 
-/// Attach the run's unanswered requests to `envelope` and hand it back. Always
-/// present, so a caller never has to distinguish "complete" from "an older module
-/// that does not report pending".
-fn with_pending(
+/// Attach the two replay-only keys — `"boot"` and `"pending"` — to `envelope` and
+/// hand it back. Both are always present on a replay envelope, so a caller never
+/// has to distinguish "complete" from "an older module that does not report
+/// pending"; neither ever appears on the plain [`sw_check`]/[`sw_annotate`]
+/// envelopes, which stay byte-identical to ADR-0065's.
+///
+/// Order matters. The summary is taken **before** the pending list, so the `env`
+/// question it needs is recorded as a miss like any other: a run that could not
+/// describe its own boot surface reports that as pending and converges one
+/// iteration later with the description filled in. A converged run therefore
+/// always carries a complete `boot`.
+fn with_replay_extras(
     envelope: &mut serde_json::Value,
     folder: &mut TableFolder,
 ) -> serde_json::Value {
+    let boot = boot_json(&folder.surface_summary());
     let pending = folder.take_pending();
     if let Some(obj) = envelope.as_object_mut() {
+        obj.insert("boot".to_owned(), boot);
         obj.insert("pending".to_owned(), serde_json::json!(pending));
     }
     envelope.take()
+}
+
+/// The boot object (issue #64 S3): the engine surface **as the shared policy sees
+/// it**, as data.
+///
+/// Every field comes from [`steins_infer::SurfaceSummary`], which reads the very
+/// helpers that gate admission — so this describes the gates rather than
+/// paraphrasing them, and the refused-fold names are the catalog's own complement
+/// rather than a list typed into a frontend. The prose belongs to the UI; what
+/// travels is the shape.
+fn boot_json(s: &steins_infer::SurfaceSummary) -> serde_json::Value {
+    let mut obj = serde_json::json!({
+        "label": s.label,
+        "php_version": s.php_version,
+        "int_size": s.int_size,
+        "fold_lane": s.fold_lane.as_str(),
+        "fold_total": s.fold_total,
+        "fold_safe": s.fold_safe,
+        "curated_rows": s.curated_rows,
+        "absence_family": s.absence_family,
+    });
+    // Named only where naming them is the boundary: on the width-safe subset the
+    // refusals are exactly what the visitor does not get, and everywhere else the
+    // lane already says the whole story (all of it, or none of it).
+    if s.fold_lane == steins_infer::FoldLane::WidthSafeSubset {
+        obj["refused_folds"] = serde_json::json!(s.refused_folds);
+    }
+    obj
 }
 
 /// The target-agnostic body of [`sw_check`] — also what the native tests pin.
@@ -537,13 +582,25 @@ mod replay {
         ])
     }
 
+    /// The `env` answer php-wasm 0.1.0 actually gives: PHP 8.5.2 — the pinned
+    /// minor — on a 32-bit `embed` build. The whole point of the boot object is
+    /// that this row, and not the version string alone, decides what is live.
+    fn php_wasm_env() -> serde_json::Value {
+        serde_json::json!({
+            "php_version": "8.5.2",
+            "extensions": ["Core", "standard"],
+            "sapi": "embed",
+            "int_size": 4,
+        })
+    }
+
     fn check_replay(
         source: &str,
         table: HashMap<String, serde_json::Value>,
     ) -> serde_json::Value {
         let mut folder = TableFolder::with_table(table);
         let mut envelope = check_with_folder(source, None, &mut folder);
-        with_pending(&mut envelope, &mut folder)
+        with_replay_extras(&mut envelope, &mut folder)
     }
 
     fn pending_of(v: &serde_json::Value) -> Vec<String> {
@@ -599,15 +656,7 @@ mod replay {
     #[test]
     fn the_flagship_folds_on_a_32_bit_engine() {
         let mut table = answered_table();
-        table.insert(
-            ENV_KEY.to_owned(),
-            serde_json::json!({
-                "php_version": "8.5.2",
-                "extensions": ["Core", "standard"],
-                "sapi": "embed",
-                "int_size": 4,
-            }),
-        );
+        table.insert(ENV_KEY.to_owned(), php_wasm_env());
         let v = check_replay(FLAGSHIP, table);
         assert_eq!(v["ok"], true);
         assert_eq!(pending_of(&v), Vec::<String>::new(), "the fixpoint is reached");
@@ -633,15 +682,7 @@ mod replay {
             r#"{"method":"fold","params":{"function":"intval","args":["3000000000"]}}"#;
         const INTVAL_REFLECT_KEY: &str = r#"{"method":"reflect","params":{"target":"intval"}}"#;
         let mut table = HashMap::from([
-            (
-                ENV_KEY.to_owned(),
-                serde_json::json!({
-                    "php_version": "8.5.2",
-                    "extensions": ["Core", "standard"],
-                    "sapi": "embed",
-                    "int_size": 4,
-                }),
-            ),
+            (ENV_KEY.to_owned(), php_wasm_env()),
             (
                 INTVAL_KEY.to_owned(),
                 serde_json::json!({ "kind": "value", "value": 2_147_483_647_i64, "type": "int" }),
@@ -695,12 +736,100 @@ mod replay {
         assert_eq!(dumps, vec!["dumped type: 2147483647"]);
     }
 
+    /// The boot object on the machine the browser actually has (issue #64 S3):
+    /// the boundary a visitor must be able to read, as data.
+    ///
+    /// Each field is pinned against the gate it reports, not against a constant:
+    /// the width-safe lane, curated rows DECLINED (ADR-0066's amendment keeps
+    /// Gate 2's `int_size == 8` leg), the absence family LIVE (existence is not
+    /// arithmetic), and the refused names taken from the catalog complement rather
+    /// than spelled here — a fourth refusal added to the catalog appears in the
+    /// envelope without anyone editing JS.
+    #[test]
+    fn the_boot_object_describes_a_32_bit_engine() {
+        let mut table = answered_table();
+        table.insert(ENV_KEY.to_owned(), php_wasm_env());
+        let v = check_replay(FLAGSHIP, table);
+        assert_eq!(pending_of(&v), Vec::<String>::new(), "a converged run describes its engine");
+        let boot = &v["boot"];
+        assert_eq!(boot["php_version"], "8.5.2");
+        assert_eq!(boot["int_size"], 4);
+        assert_eq!(boot["label"], "PHP 8.5.2 (2 extensions)");
+        assert_eq!(boot["fold_lane"], "width_safe_subset");
+        assert_eq!(boot["curated_rows"], false, "a curated row is pinned to a machine too");
+        assert_eq!(boot["absence_family"], true, "existence is not arithmetic");
+        assert_eq!(boot["fold_total"], 22);
+        assert_eq!(boot["fold_safe"], 19);
+        assert_eq!(
+            boot["refused_folds"],
+            serde_json::json!(steins_catalog::width_refused_names()),
+            "the refusals are the catalog complement"
+        );
+        assert_eq!(boot["refused_folds"], serde_json::json!(["abs", "intval", "sprintf"]));
+    }
+
+    /// …and on a 64-bit engine at the pinned minor the whole surface is live, so
+    /// the refusals are not named at all: there are none to name.
+    #[test]
+    fn the_boot_object_describes_a_64_bit_engine() {
+        let v = check_replay(FLAGSHIP, answered_table());
+        assert_eq!(pending_of(&v), Vec::<String>::new());
+        let boot = &v["boot"];
+        assert_eq!(boot["php_version"], "8.5.8");
+        assert_eq!(boot["int_size"], 8);
+        assert_eq!(boot["fold_lane"], "full");
+        assert_eq!(boot["curated_rows"], true);
+        assert_eq!(boot["absence_family"], true);
+        assert!(boot.get("refused_folds").is_none(), "nothing is refused on the full lane");
+    }
+
+    /// A run that could not reach the engine describes nothing, and SAYS so by
+    /// asking: `env` is pending, so the loop answers it and the next iteration
+    /// carries the description. A converged run always has a complete boot object
+    /// — which is what lets the UI read one without a null check per field.
+    #[test]
+    fn an_unanswered_run_has_an_empty_boot_and_asks_for_it() {
+        let v = check_replay("<?php\n$a = 1;\n", HashMap::new());
+        let boot = &v["boot"];
+        assert!(boot["label"].is_null());
+        assert!(boot["php_version"].is_null());
+        assert!(boot["int_size"].is_null());
+        assert_eq!(boot["fold_lane"], "declined", "an unknown width folds nothing");
+        assert_eq!(boot["curated_rows"], false);
+        assert_eq!(boot["absence_family"], false);
+        assert!(boot.get("refused_folds").is_none());
+        assert_eq!(
+            pending_of(&v),
+            vec![ENV_KEY.to_owned()],
+            "a snippet with no engine question still asks for the boot surface"
+        );
+    }
+
+    /// The annotate lane carries the same boot object — the engine bar reads one
+    /// envelope, and the two lanes must not disagree about the machine.
+    #[test]
+    fn the_annotate_envelope_carries_the_same_boot_object() {
+        let mut table = answered_table();
+        table.insert(ENV_KEY.to_owned(), php_wasm_env());
+        let mut folder = TableFolder::with_table(table.clone());
+        let mut envelope = annotate_with_folder(FLAGSHIP, &mut folder);
+        let annotated = with_replay_extras(&mut envelope, &mut folder);
+        let checked = check_replay(FLAGSHIP, table);
+        assert_eq!(annotated["boot"], checked["boot"]);
+    }
+
     /// The same source through the sound-subset entry point stays NoFold: the
     /// replay exports are additive, and `sw_check` is byte-identical to before.
+    /// Neither replay-only key may appear here — engine-off behaviour is the
+    /// acceptance criterion, and an extra envelope key IS a behaviour change.
     #[test]
     fn the_non_replay_entry_point_is_unchanged() {
         let plain = check_impl(FLAGSHIP, None);
         assert!(plain.get("pending").is_none(), "no pending key on the sound-subset envelope");
+        assert!(plain.get("boot").is_none(), "no boot key on the sound-subset envelope");
+        let annotated = annotate_impl(FLAGSHIP);
+        assert!(annotated.get("pending").is_none(), "nor on the annotate twin");
+        assert!(annotated.get("boot").is_none(), "nor on the annotate twin");
         let dumps: Vec<&str> = plain["findings"]
             .as_array()
             .expect("findings")
@@ -716,13 +845,13 @@ mod replay {
     fn annotate_replay_reaches_its_fixpoint_too() {
         let mut folder = TableFolder::with_table(HashMap::new());
         let mut envelope = annotate_with_folder(FLAGSHIP, &mut folder);
-        let first = with_pending(&mut envelope, &mut folder);
+        let first = with_replay_extras(&mut envelope, &mut folder);
         assert_eq!(first["ok"], true);
         assert!(!pending_of(&first).is_empty());
 
         let mut folder = TableFolder::with_table(answered_table());
         let mut envelope = annotate_with_folder(FLAGSHIP, &mut folder);
-        let done = with_pending(&mut envelope, &mut folder);
+        let done = with_replay_extras(&mut envelope, &mut folder);
         assert_eq!(pending_of(&done), Vec::<String>::new());
         assert!(!done["lines"].as_array().expect("lines").is_empty());
     }
@@ -750,7 +879,7 @@ mod replay {
     fn an_unknown_profile_still_errors_under_replay() {
         let mut folder = TableFolder::with_table(answered_table());
         let mut envelope = check_with_folder(FLAGSHIP, Some("nope"), &mut folder);
-        let v = with_pending(&mut envelope, &mut folder);
+        let v = with_replay_extras(&mut envelope, &mut folder);
         assert_eq!(v["ok"], false);
         assert!(v["error"].as_str().expect("error").contains("unknown profile"));
         assert!(v.get("pending").is_some(), "pending is always present");
@@ -783,3 +912,4 @@ mod strict_leg {
         assert_eq!(v["findings"].as_array().unwrap().len(), 0, "quiet at contracts");
     }
 }
+
