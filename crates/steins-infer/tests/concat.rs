@@ -142,6 +142,9 @@ fn float_operand_widens() {
     // the runtime's to state, not ours. `strval` stays on the allowlist for this.
     assert_eq!(dumped(r#""f=" . 1.5"#), "unknown");
     assert_eq!(dumped(r#""f=" . 0.1"#), "unknown");
+    // A float by *promotion* rather than by spelling (issue #62) takes the same
+    // refusal — the admission rule reads the value, not how it was written.
+    assert_eq!(dumped(r#""f=" . 9223372036854775808"#), "unknown");
 }
 
 #[test]
@@ -181,12 +184,9 @@ fn arithmetic_is_not_lowered() {
 /// The operand spellings the cast admits, as PHP source. Each is concatenated onto
 /// `"<"` and `">"` so an empty result is still visible in the comparison.
 ///
-/// The int bounds stop at `±(2^63 - 1)`. `-9223372036854775808` is deliberately
-/// absent: PHP parses it as unary minus over a literal that *overflows int*, so the
-/// engine yields a float, while lowering wraps it to `i64::MIN`. That divergence is
-/// a pre-existing integer-literal lowering defect with nothing to do with `.`
-/// (issue #62), and pinning it here would tie this fixture to a bug. Restore the
-/// spelling when #62 lands.
+/// The int bounds run to `±(2^63 - 1)`. `-9223372036854775808` is a *float* operand
+/// in PHP (unary minus over a literal that overflows int, issue #62), so it belongs
+/// with the refusals below, not here — `float_operand_widens` covers it.
 const ADMITTED: &[&str] = &[
     r#""""#,
     r#""abc""#,

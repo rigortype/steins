@@ -4921,7 +4921,22 @@ fn lower_array_key(expr: &Expression<'_>) -> Option<ArrayKey> {
         ArgValue::Int(i) => Some(ArrayKey::Int(i)),
         ArgValue::Bool(b) => Some(ArrayKey::Int(i64::from(b))),
         ArgValue::Null => Some(ArrayKey::Str(String::new())),
-        ArgValue::Float(f) if f.is_finite() => Some(ArrayKey::Int(f.trunc() as i64)),
+        // A float key truncates toward zero — but only when the truncated value is
+        // actually an `int`. Outside that range PHP does not produce a key at all:
+        // it emits "The float … is not representable as an int, cast occurred"
+        // (a WARNING, i.e. a proven runtime break under the abort posture) and the
+        // resulting key is the C wraparound, which Rust's saturating `as` does not
+        // reproduce — `9.2e18 as i64` is `i64::MAX` here and `i64::MIN` there. So the
+        // range test is load-bearing, not defensive: without it this arm would fold a
+        // key to the wrong value. Reachable since issue #62 made an out-of-range
+        // integer literal a `Float`, which is exactly the input that lands here.
+        ArgValue::Float(f)
+            if f.is_finite()
+                && f.trunc() >= -9_223_372_036_854_775_808.0
+                && f.trunc() < 9_223_372_036_854_775_808.0 =>
+        {
+            Some(ArrayKey::Int(f.trunc() as i64))
+        }
         ArgValue::Str(s) => Some(match php_canonical_int_string(&s) {
             Some(i) => ArrayKey::Int(i),
             None => ArrayKey::Str(s),
@@ -4944,9 +4959,64 @@ pub fn php_canonical_int_string(s: &str) -> Option<i64> {
     (i.to_string() == s).then_some(i)
 }
 
+/// Lower an integer literal from its **source spelling** (issue #62).
+///
+/// PHP's lexer promotes an integer literal that does not fit `int` to `float`, and
+/// the promotion is base-blind: decimal, `0x`, `0b`, `0o`, legacy-octal and
+/// underscore-separated spellings all follow it. So the decision is made on the
+/// magnitude, and the magnitude has to come from the text — see the call site for
+/// why the parser's `value` cannot answer it.
+///
+/// Three outcomes:
+/// * fits `i64` → [`ArgValue::Int`], the overwhelmingly common case;
+/// * fits `u64` but not `i64` → [`ArgValue::Float`], PHP's promotion;
+/// * beyond `u64` → a decimal literal still converts exactly (Rust and PHP both
+///   round the digit string to the nearest double, so `99999999999999999999` is
+///   `1.0E+20` in both), and any other base yields [`ArgValue::Other`]. Converting a
+///   hex/octal/binary literal wider than 64 bits would need big-integer arithmetic
+///   for a spelling that essentially does not occur; silence is the safe side, and
+///   it is a ceiling rather than a wrong value.
+fn lower_int_literal(raw: &[u8]) -> ArgValue {
+    let text = String::from_utf8_lossy(raw);
+    // Underscores are digit separators anywhere in the literal (PHP 7.4+).
+    let text: String = text.chars().filter(|c| *c != '_').collect();
+    let (digits, radix) = match text.as_bytes() {
+        [b'0', b'x' | b'X', rest @ ..] => (rest, 16),
+        [b'0', b'b' | b'B', rest @ ..] => (rest, 2),
+        [b'0', b'o' | b'O', rest @ ..] => (rest, 8),
+        // Legacy octal: a leading `0` followed by more digits. Bare `0` is decimal
+        // zero, and `0` alone must not fall into the octal arm with empty digits.
+        [b'0', rest @ ..] if !rest.is_empty() => (rest, 8),
+        all => (all, 10),
+    };
+    let Ok(digits) = std::str::from_utf8(digits) else { return ArgValue::Other };
+    match u64::from_str_radix(digits, radix) {
+        Ok(v) => i64::try_from(v).map_or_else(|_| ArgValue::Float(v as f64), ArgValue::Int),
+        // Beyond `u64`. Decimal converts exactly the way PHP's does; other bases
+        // decline rather than guess.
+        Err(_) if radix == 10 => {
+            digits.parse::<f64>().map_or(ArgValue::Other, ArgValue::Float)
+        }
+        Err(_) => ArgValue::Other,
+    }
+}
+
 fn lower_literal(lit: &Literal<'_>) -> ArgValue {
     match lit {
-        Literal::Integer(li) => li.value.map_or(ArgValue::Other, |v| ArgValue::Int(v as i64)),
+        // An integer literal that does not fit `int` is a **float** in PHP, not a
+        // wrapped int (issue #62). The promotion is the lexer's and applies to every
+        // base — decimal, hex, octal, binary, underscore-separated alike — so the
+        // test is on the parsed value, not the spelling. `9223372036854775808` was
+        // previously `v as i64` = `i64::MIN`, a wrong *value* the analyzer then
+        // propagated with full confidence; `-9223372036854775808` reached the same
+        // place because `wrapping_neg` is a no-op there. (`PHP_INT_MIN` has no
+        // integer-literal spelling at all — it is written `-PHP_INT_MAX - 1`.)
+        //
+        // The parser's own `value` is NOT usable for the overflow decision: it is a
+        // `u64` that SATURATES, so `99999999999999999999` arrives as `u64::MAX` —
+        // indistinguishable from a real `0xFFFFFFFFFFFFFFFF` and three orders of
+        // magnitude off PHP's `1.0E+20`. The spelling is re-read instead.
+        Literal::Integer(li) => lower_int_literal(li.raw),
         Literal::Float(lf) => ArgValue::Float(lf.value.0),
         Literal::String(ls) => {
             ls.value.map_or(ArgValue::Other, |bytes| ArgValue::Str(bytes_to_string(bytes)))
