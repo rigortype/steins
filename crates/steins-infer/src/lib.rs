@@ -37,8 +37,9 @@ use steins_contract::normalize;
 use steins_db::{
     Db, DeclSite, Project, ProjectIndex, ProjectLayout, Resolve, SourceFile, parse, project_index,
 };
+use steins_sidecar::{EnvInfo, FoldArg, FoldKey, FoldResult, FoldValue, Reflection};
 #[cfg(not(target_arch = "wasm32"))]
-use steins_sidecar::{FoldArg, FoldKey, FoldResult, FoldValue, Sidecar};
+use steins_sidecar::Sidecar;
 use steins_syntax::CallExpr;
 use steins_syntax::Span;
 use steins_syntax::{
@@ -490,34 +491,74 @@ impl Folder for NoFold {
     }
 }
 
-/// A [`Folder`] backed by a lazily-spawned PHP [`Sidecar`], with a per-run memo
-/// so a repeated `(name, args)` never triggers duplicate IPC.
-#[cfg(not(target_arch = "wasm32"))]
-pub struct SidecarFolder {
-    sidecar: Option<Sidecar>,
+// ---------------------------------------------------------------------------
+// The fold seam, split transport-from-policy (ADR-0066).
+//
+// `FoldEngine` is the transport: three questions, no judgment. `EngineFolder` is
+// the policy: every memo, every gate, the whole ADR-0056 admission sequence — and
+// it exists EXACTLY ONCE, generic over the transport. That is the point of the
+// split. The browser's replay transport (issue #64) and the native process
+// transport answer the same questions, so they cannot disagree about what the
+// answers MEAN; issue #63 was a bug in precisely this seam, found only because a
+// second caller reached the policy by a second path.
+// ---------------------------------------------------------------------------
+
+/// The **transport** half of the fold seam: the three questions the analysis puts
+/// to the project's own PHP (ADR-0004/0024), with no policy attached.
+///
+/// An implementation answers or declines; it never decides what an answer licenses.
+/// [`ProcessEngine`] talks to a resident `php` child, and [`TableEngine`] answers
+/// from a supplied memo table and records its misses (ADR-0066).
+///
+/// Declining is spelled the way the wire spells it: `None` for `env`/`reflect`,
+/// [`FoldResult::Widen`] for `fold`. No implementation may fabricate an answer —
+/// a wrong answer here becomes a wrong diagnostic, which is the one thing the
+/// zero-FP contract forbids.
+pub trait FoldEngine {
+    /// The engine's environment (version, loaded extensions, SAPI, integer width).
+    fn env(&mut self) -> Option<EnvInfo>;
+    /// Whether the engine knows `target` as a resident function / class-like, plus
+    /// its declared return type when it is a function.
+    fn reflect(&mut self, target: &str) -> Option<Reflection>;
+    /// Run `name(args)` on the engine and report the outcome.
+    fn fold(&mut self, name: &str, args: &[FoldArg]) -> FoldResult;
+}
+
+/// The **policy** half of the fold seam: a [`Folder`] over any [`FoldEngine`],
+/// carrying every per-run memo and every admission gate.
+///
+/// Two folders ship on top of it — [`SidecarFolder`] (the resident `php` child)
+/// and [`TableFolder`] (the replay table) — and they differ ONLY in their engine.
+/// Every question of *what an answer licenses* is decided here: the A9
+/// monkey-patch veto, the issue-#28 target/runtime agreement, the ADR-0056 curated
+/// admission gates, the issue-#64 integer-width gate. A gate added here is added
+/// for both transports at once, which is the property the split exists to buy.
+pub struct EngineFolder<E: FoldEngine> {
+    engine: E,
     memo: HashMap<(String, Vec<ArgValue>), Option<ArgValue>>,
-    disabled: bool,
-    spawn_failed: bool,
-    notified: bool,
     /// Cached ADR-0049 A9 verdict: whether the absence family is available (a live
-    /// sidecar and no monkey-patch extension). Computed once from the sidecar's
-    /// `env` and then memoized — a whole-run property (ADR-0048 query answer).
+    /// engine and no monkey-patch extension). Computed once from `env` and then
+    /// memoized — a whole-run property (ADR-0048 query answer).
     absence_available: Option<bool>,
     /// Per-FQN memo of the A2ii homonym oracle so a repeated chain class never
-    /// triggers duplicate `reflect` IPC.
+    /// triggers duplicate `reflect` traffic.
     boot_surface_memo: HashMap<String, Option<bool>>,
     /// Per-FQN memo of the arity family's function-homonym oracle (ADR-0049 §6),
     /// the function-namespace analogue of [`Self::boot_surface_memo`].
     boot_surface_fn_memo: HashMap<String, Option<bool>>,
-    /// Memoized project PHP `(major, minor)` from the sidecar `env()` (ADR-0052
-    /// A11) — a whole-run query answer. `Some(None)` records "asked, unanswerable".
+    /// Memoized project PHP `(major, minor)` from `env` (ADR-0052 A11) — a
+    /// whole-run query answer. `Some(None)` records "asked, unanswerable".
     php_minor: Option<Option<(u16, u16)>>,
-    /// Memoized boot-surface description (`PHP 8.5.8 (32 extensions)`) from the
-    /// sidecar `env()` — the ADR-0049 §9 message register's closure-evidence clause
-    /// for the existence ids. `Some(None)` records "asked, unanswerable".
+    /// Memoized `PHP_INT_SIZE` from `env` (issue #64) — the engine's integer width
+    /// in bytes. `Some(None)` records "asked, unanswerable". Engine-intrinsic, so
+    /// unlike the target-dependent memos it survives [`Self::set_php_target`].
+    int_size: Option<Option<u32>>,
+    /// Memoized boot-surface description (`PHP 8.5.8 (32 extensions)`) from `env`
+    /// — the ADR-0049 §9 message register's closure-evidence clause for the
+    /// existence ids. `Some(None)` records "asked, unanswerable".
     boot_surface_label: Option<Option<String>>,
     /// Per-name memo of the builtin return-fact (ADR-0056 R1) so a repeated call to
-    /// the same builtin never triggers duplicate `reflect` IPC. Keyed by the
+    /// the same builtin never triggers duplicate `reflect` traffic. Keyed by the
     /// lowercased simple name (PHP function names are case-insensitive).
     return_fact_memo: HashMap<String, Option<Fact>>,
     /// Per-name memo of the raw reflected return-type declaration (ADR-0062 S7's
@@ -530,22 +571,18 @@ pub struct SidecarFolder {
     php_target: Option<steins_db::PhpTarget>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-impl SidecarFolder {
-    /// Create a folder. `disabled` (the CLI's `--no-php`) makes it a permanent
-    /// no-op that never spawns PHP.
-    #[must_use]
-    pub fn new(disabled: bool) -> Self {
+impl<E: FoldEngine> EngineFolder<E> {
+    /// Wrap `engine` in the shared policy. Every memo starts empty: a folder is a
+    /// per-run object, and its answers are whole-run query answers (ADR-0048).
+    pub fn with_engine(engine: E) -> Self {
         Self {
-            sidecar: None,
+            engine,
             memo: HashMap::new(),
-            disabled,
-            spawn_failed: false,
-            notified: true, // suppress our own notice; only spawn-failure re-arms it.
             absence_available: None,
             boot_surface_memo: HashMap::new(),
             boot_surface_fn_memo: HashMap::new(),
             php_minor: None,
+            int_size: None,
             boot_surface_label: None,
             return_fact_memo: HashMap::new(),
             return_type_memo: HashMap::new(),
@@ -553,17 +590,20 @@ impl SidecarFolder {
         }
     }
 
-    /// Create an enabled folder that will emit the sound-subset notice itself if
-    /// it cannot spawn PHP.
-    #[must_use]
-    pub fn enabled() -> Self {
-        Self { notified: false, ..Self::new(false) }
+    /// The engine, for a caller that owns transport-specific state on it (the
+    /// replay transport's pending list).
+    pub fn engine_mut(&mut self) -> &mut E {
+        &mut self.engine
     }
 
     /// Declare the project's target PHP range (issue #28), from the resolved
     /// layout. Target-dependent memos are dropped on a change, so a resident
     /// folder reused across projects (the corpus gate's thread-local) answers
     /// each project under its own target.
+    ///
+    /// The env-derived memos ([`Self::php_minor`], [`Self::int_size`]) are NOT
+    /// dropped: they describe the engine, not the project, and no target changes
+    /// what version the engine is or how wide its integers are.
     pub fn set_php_target(&mut self, target: Option<steins_db::PhpTarget>) {
         if self.php_target != target {
             self.absence_available = None;
@@ -575,53 +615,102 @@ impl SidecarFolder {
         self.php_target = target;
     }
 
-    /// Ensure a live sidecar, or record that we cannot have one.
-    fn ensure_sidecar(&mut self) -> Option<&mut Sidecar> {
-        if self.disabled || self.spawn_failed {
+    /// The engine's integer width in bytes (`PHP_INT_SIZE`), memoized like the
+    /// other whole-run `env` answers. `None` = unanswerable, which every caller
+    /// here treats as "not provably 64-bit".
+    fn engine_int_size(&mut self) -> Option<u32> {
+        if let Some(cached) = self.int_size {
+            return cached;
+        }
+        let answer = self.engine.env().and_then(|e| e.int_size);
+        self.int_size = Some(answer);
+        answer
+    }
+
+    /// Whether the engine's integer machine is the one every value rule here
+    /// assumes: 64-bit (issue #64).
+    ///
+    /// A minor is not a machine. php-wasm 0.1.0 is PHP 8.5.2 — the pinned minor,
+    /// which every existing version gate admits — built 32-bit, and on it
+    /// `ip2long('255.255.255.255')` is `-1`, `crc32('x')` is negative, `1 << 40` is
+    /// `0`, `hexdec('FFFFFFFFF')` promotes to float and `strtotime('2040-01-01')` is
+    /// `false`. Those are silently wrong *values*, not failures: nothing widens,
+    /// nothing throws, and a fold would carry the wrong literal straight into a
+    /// proof. So the fold lane and the ADR-0056 curated admission both require a
+    /// **provably** 64-bit engine, and an unknown width declines.
+    ///
+    /// Deliberately default-deny and deliberately coarse. A later slice may admit a
+    /// width-safe subset of the foldable allowlist (`strtolower` cannot care about
+    /// `PHP_INT_MAX`); until such a subset is curated and verified, the whole lane
+    /// declines rather than guesses which builtins are width-blind.
+    fn engine_is_64_bit(&mut self) -> bool {
+        self.engine_int_size() == Some(8)
+    }
+
+    /// Compute the builtin return fact for `key` (already lowercased) — the
+    /// admission gate of ADR-0056 §2 assembled from three whole-run engine
+    /// answers. Called once per name; [`Folder::builtin_return_fact`] memoizes.
+    fn compute_builtin_return_fact(&mut self, key: &str) -> Option<Fact> {
+        // Gate 1 — a live engine and no runtime-redefinition extension. A
+        // monkey-patched builtin (uopz/runkit7/Componere) can return a type its
+        // native declaration disowns, so the reflected envelope is not trustworthy;
+        // this is the ADR-0049 A9 posture applied to the value domain. Also covers
+        // the no-engine sound subset (returns `false`).
+        if !self.absence_family_available() {
             return None;
         }
-        if self.sidecar.is_none() {
-            match Sidecar::spawn() {
-                Ok(sc) => self.sidecar = Some(sc),
-                Err(_) => {
-                    self.spawn_failed = true;
-                    if !self.notified {
-                        // The one place a *library* crate writes to a user-facing
-                        // stream, and it obeys the CLI's output seam rule (issue
-                        // #44): `eprintln!` panics when the write fails, and
-                        // `steins check 2>&1 | head` closes stderr like any other
-                        // pipe. A lost notice is not a reason to abort a run, so
-                        // the error is dropped rather than propagated — the seam's
-                        // stderr policy, stated in `steins-cli/src/out.rs`.
-                        use std::io::Write;
-                        let _ = writeln!(std::io::stderr(), "{SOUND_SUBSET_NOTICE}");
-                        self.notified = true;
-                    }
-                    return None;
-                }
-            }
+        // Gate 2 (minor pin, ADR-0052 A11 / ADR-0056 §2, target-aware per issue
+        // #28) — governs the CURATED refinement only; the reflected envelope is
+        // version-correct by construction and needs no pin. A curated row is
+        // verified at PINNED_PHP and nowhere else, so with a declared target the
+        // row is admitted only when the WHOLE range is the pin (`§2`'s hole is
+        // exactly cross-version drift); with no target, the runtime-vs-pin
+        // comparison stands as before.
+        //
+        // The pin is a version AND a machine (issue #64): a curated row is verified
+        // against the 64-bit engine at that minor, and a 32-bit engine at the SAME
+        // minor can violate it (`hexdec` returning float where the row says int).
+        // The reflected envelope is unaffected — a declared return type is a
+        // platform-independent claim, and the 32-bit build reports the same ones —
+        // so an unpinned or narrow-integer engine still SEEDS, it just does not
+        // get the curated refinement.
+        let minor_matches_pin = self.engine_is_64_bit()
+            && match &self.php_target {
+                Some(t) => t.is_exactly(steins_catalog::PINNED_PHP),
+                None => self.php_minor() == Some(steins_catalog::PINNED_PHP),
+            };
+        // The reflected return envelope — the running engine's own declaration.
+        let refl = self.engine.reflect(key)?;
+        if !refl.function_exists {
+            return None;
         }
-        self.sidecar.as_mut()
+        let return_type = refl.return_type.as_deref()?;
+        let curated = steins_catalog::return_fact(key);
+        admit_return_fact(return_type, curated, minor_matches_pin)
+    }
+
+    /// The raw reflected return-type declaration for `key` (already lowercased),
+    /// under the same A9 / sound-subset gate [`Self::compute_builtin_return_fact`]
+    /// applies. Called once per name; [`Folder::builtin_return_type`] memoizes.
+    ///
+    /// No integer-width gate: this is the engine's own declaration read back
+    /// verbatim, and a declaration does not change with the integer machine.
+    fn compute_builtin_return_type(&mut self, key: &str) -> Option<String> {
+        if !self.absence_family_available() {
+            return None;
+        }
+        let refl = self.engine.reflect(key)?;
+        refl.function_exists.then_some(refl.return_type).flatten()
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-impl Folder for SidecarFolder {
+impl<E: FoldEngine> Folder for EngineFolder<E> {
     fn fold(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue> {
         let key = (name.to_owned(), args.to_vec());
         if let Some(cached) = self.memo.get(&key) {
             return cached.clone();
         }
-        let folded = self.ensure_sidecar().and_then(|sc| {
-            let fargs: Vec<FoldArg> = args.iter().filter_map(arg_to_fold).collect();
-            if fargs.len() != args.len() {
-                return None;
-            }
-            match sc.fold(name, &fargs) {
-                FoldResult::Value(v) => fold_value_to_arg(&v),
-                FoldResult::Throw { .. } | FoldResult::Widen { .. } => None,
-            }
-        });
+        let folded = self.fold_uncached(name, args);
         self.memo.insert(key, folded.clone());
         folded
     }
@@ -630,13 +719,17 @@ impl Folder for SidecarFolder {
         if let Some(cached) = self.absence_available {
             return cached;
         }
-        // No live sidecar ⇒ the family is silent (the ADR-0004 sound subset covers
+        // No live engine ⇒ the family is silent (the ADR-0004 sound subset covers
         // it — A2ii). Otherwise consult the loaded-extension list once (A9), and
         // (issue #28) require the runtime to BE a declared-supported version:
         // every absence claim is evidence about THIS boot surface, and proof of
         // absence on a version the project does not ship on proves nothing about
         // the versions it does. A runtime inside the declared range stays a
         // legitimate witness — absence on it is a break on a supported version.
+        //
+        // The integer width is NOT consulted: existence is not arithmetic. A
+        // 32-bit engine knows exactly the same names as a 64-bit one at the same
+        // version, so an absence claim from it is as good.
         let target_admits_runtime = |minor: Option<(u16, u16)>, t: &Option<steins_db::PhpTarget>| {
             match (t, minor) {
                 (Some(t), Some(m)) => t.contains(m),
@@ -644,7 +737,7 @@ impl Folder for SidecarFolder {
                 (None, _) => true,        // no declaration: the pre-#28 posture
             }
         };
-        let verdict = match self.ensure_sidecar().and_then(Sidecar::env) {
+        let verdict = match self.engine.env() {
             Some(env) => {
                 let clean = !env.extensions.iter().any(|e| {
                     MONKEY_PATCH_EXTENSIONS.iter().any(|m| e.eq_ignore_ascii_case(m))
@@ -662,10 +755,7 @@ impl Folder for SidecarFolder {
         if let Some(cached) = self.boot_surface_memo.get(fqn) {
             return *cached;
         }
-        let answer = self
-            .ensure_sidecar()
-            .and_then(|sc| sc.reflect(fqn))
-            .map(|r| r.class_like_exists);
+        let answer = self.engine.reflect(fqn).map(|r| r.class_like_exists);
         self.boot_surface_memo.insert(fqn.to_owned(), answer);
         answer
     }
@@ -674,10 +764,7 @@ impl Folder for SidecarFolder {
         if let Some(cached) = self.boot_surface_fn_memo.get(fqn) {
             return *cached;
         }
-        let answer = self
-            .ensure_sidecar()
-            .and_then(|sc| sc.reflect(fqn))
-            .map(|r| r.function_exists);
+        let answer = self.engine.reflect(fqn).map(|r| r.function_exists);
         self.boot_surface_fn_memo.insert(fqn.to_owned(), answer);
         answer
     }
@@ -686,9 +773,9 @@ impl Folder for SidecarFolder {
         if let Some(cached) = self.php_minor {
             return cached;
         }
-        // Parse the sidecar-reported `php_version` (`"8.5.8"`) to `(major, minor)`;
+        // Parse the engine-reported `php_version` (`"8.5.8"`) to `(major, minor)`;
         // an unparseable / absent report stays `None` (no detectable skew — A11).
-        let answer = self.ensure_sidecar().and_then(Sidecar::env).and_then(|e| parse_php_minor(&e.php_version));
+        let answer = self.engine.env().and_then(|e| parse_php_minor(&e.php_version));
         self.php_minor = Some(answer);
         answer
     }
@@ -698,8 +785,8 @@ impl Folder for SidecarFolder {
             return cached.clone();
         }
         let answer = self
-            .ensure_sidecar()
-            .and_then(Sidecar::env)
+            .engine
+            .env()
             .map(|e| format!("PHP {} ({} extensions)", e.php_version, e.extensions.len()));
         self.boot_surface_label = Some(answer.clone());
         answer
@@ -726,50 +813,273 @@ impl Folder for SidecarFolder {
     }
 }
 
+impl<E: FoldEngine> EngineFolder<E> {
+    /// The uncached body of [`Folder::fold`].
+    fn fold_uncached(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue> {
+        // The integer-width gate (issue #64): a fold is a VALUE, and a 32-bit
+        // engine answers arithmetic questions differently while failing at
+        // nothing. Asked before the engine is touched, so a narrow engine is
+        // never even dispatched to.
+        if !self.engine_is_64_bit() {
+            return None;
+        }
+        let fargs: Vec<FoldArg> = args.iter().filter_map(arg_to_fold).collect();
+        if fargs.len() != args.len() {
+            return None;
+        }
+        match self.engine.fold(name, &fargs) {
+            FoldResult::Value(v) => fold_value_to_arg(&v),
+            FoldResult::Throw { .. } | FoldResult::Widen { .. } => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The native transport: a resident `php` child.
+// ---------------------------------------------------------------------------
+
+/// The process [`FoldEngine`]: a lazily-spawned PHP [`Sidecar`] (ADR-0004/0024).
+///
+/// Owns exactly the transport's own state — whether folding is disabled, whether
+/// the spawn already failed, and whether the sound-subset notice has been printed.
+/// No analysis policy lives here; that is [`EngineFolder`]'s.
 #[cfg(not(target_arch = "wasm32"))]
-impl SidecarFolder {
-    /// Compute the builtin return fact for `key` (already lowercased) — the
-    /// admission gate of ADR-0056 §2 assembled from three whole-run sidecar
-    /// answers. Called once per name; [`Self::builtin_return_fact`] memoizes.
-    fn compute_builtin_return_fact(&mut self, key: &str) -> Option<Fact> {
-        // Gate 1 — a live sidecar and no runtime-redefinition extension. A
-        // monkey-patched builtin (uopz/runkit7/Componere) can return a type its
-        // native declaration disowns, so the reflected envelope is not trustworthy;
-        // this is the ADR-0049 A9 posture applied to the value domain. Also covers
-        // the no-sidecar sound subset (returns `false`).
-        if !self.absence_family_available() {
-            return None;
+pub struct ProcessEngine {
+    sidecar: Option<Sidecar>,
+    disabled: bool,
+    spawn_failed: bool,
+    notified: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ProcessEngine {
+    /// `disabled` (the CLI's `--no-php`) makes this a permanent no-op that never
+    /// spawns PHP, and never announces the sound subset (the user asked for it).
+    #[must_use]
+    pub fn new(disabled: bool) -> Self {
+        Self {
+            sidecar: None,
+            disabled,
+            spawn_failed: false,
+            notified: true, // suppress our own notice; only spawn-failure re-arms it.
         }
-        // Gate 2 (minor pin, ADR-0052 A11 / ADR-0056 §2, target-aware per issue
-        // #28) — governs the CURATED refinement only; the reflected envelope is
-        // version-correct by construction and needs no pin. A curated row is
-        // verified at PINNED_PHP and nowhere else, so with a declared target the
-        // row is admitted only when the WHOLE range is the pin (`§2`'s hole is
-        // exactly cross-version drift); with no target, the runtime-vs-pin
-        // comparison stands as before.
-        let minor_matches_pin = match &self.php_target {
-            Some(t) => t.is_exactly(steins_catalog::PINNED_PHP),
-            None => self.php_minor() == Some(steins_catalog::PINNED_PHP),
-        };
-        // The reflected return envelope — the running engine's own declaration.
-        let refl = self.ensure_sidecar().and_then(|sc| sc.reflect(key))?;
-        if !refl.function_exists {
-            return None;
-        }
-        let return_type = refl.return_type.as_deref()?;
-        let curated = steins_catalog::return_fact(key);
-        admit_return_fact(return_type, curated, minor_matches_pin)
     }
 
-    /// The raw reflected return-type declaration for `key` (already lowercased),
-    /// under the same A9 / sound-subset gate [`Self::compute_builtin_return_fact`]
-    /// applies. Called once per name; [`Self::builtin_return_type`] memoizes.
-    fn compute_builtin_return_type(&mut self, key: &str) -> Option<String> {
-        if !self.absence_family_available() {
+    /// An enabled engine that emits the sound-subset notice itself if it cannot
+    /// spawn PHP.
+    #[must_use]
+    pub fn enabled() -> Self {
+        Self { notified: false, ..Self::new(false) }
+    }
+
+    /// Ensure a live sidecar, or record that we cannot have one.
+    fn ensure(&mut self) -> Option<&mut Sidecar> {
+        if self.disabled || self.spawn_failed {
             return None;
         }
-        let refl = self.ensure_sidecar().and_then(|sc| sc.reflect(key))?;
-        refl.function_exists.then_some(refl.return_type).flatten()
+        if self.sidecar.is_none() {
+            match Sidecar::spawn() {
+                Ok(sc) => self.sidecar = Some(sc),
+                Err(_) => {
+                    self.spawn_failed = true;
+                    if !self.notified {
+                        // The one place a *library* crate writes to a user-facing
+                        // stream, and it obeys the CLI's output seam rule (issue
+                        // #44): `eprintln!` panics when the write fails, and
+                        // `steins check 2>&1 | head` closes stderr like any other
+                        // pipe. A lost notice is not a reason to abort a run, so
+                        // the error is dropped rather than propagated — the seam's
+                        // stderr policy, stated in `steins-cli/src/out.rs`.
+                        use std::io::Write;
+                        let _ = writeln!(std::io::stderr(), "{SOUND_SUBSET_NOTICE}");
+                        self.notified = true;
+                    }
+                    return None;
+                }
+            }
+        }
+        self.sidecar.as_mut()
+    }
+
+    /// Send `method`/`params` verbatim to the child and return the raw `result`.
+    /// The native answering half of an ADR-0066 replay request; `None` when no
+    /// sidecar can be had or the request failed.
+    pub fn call_raw(&mut self, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
+        self.ensure()?.call_raw(method, params)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl FoldEngine for ProcessEngine {
+    fn env(&mut self) -> Option<EnvInfo> {
+        self.ensure().and_then(Sidecar::env)
+    }
+
+    fn reflect(&mut self, target: &str) -> Option<Reflection> {
+        self.ensure().and_then(|sc| sc.reflect(target))
+    }
+
+    fn fold(&mut self, name: &str, args: &[FoldArg]) -> FoldResult {
+        match self.ensure() {
+            Some(sc) => sc.fold(name, args),
+            None => FoldResult::widen("no sidecar"),
+        }
+    }
+}
+
+/// The default native folder: the shared policy over the process transport.
+///
+/// A type alias, not a wrapper — [`EngineFolder`] IS the policy, and giving the
+/// native pairing a name keeps every existing call site (`SidecarFolder::new`,
+/// `SidecarFolder::enabled`, `set_php_target`, `impl Folder`) spelled as before.
+#[cfg(not(target_arch = "wasm32"))]
+pub type SidecarFolder = EngineFolder<ProcessEngine>;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl EngineFolder<ProcessEngine> {
+    /// Create a folder. `disabled` (the CLI's `--no-php`) makes it a permanent
+    /// no-op that never spawns PHP.
+    #[must_use]
+    pub fn new(disabled: bool) -> Self {
+        Self::with_engine(ProcessEngine::new(disabled))
+    }
+
+    /// Create an enabled folder that will emit the sound-subset notice itself if
+    /// it cannot spawn PHP.
+    #[must_use]
+    pub fn enabled() -> Self {
+        Self::with_engine(ProcessEngine::enabled())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The replay transport: a supplied answer table, plus the misses (ADR-0066).
+// ---------------------------------------------------------------------------
+
+/// The canonical key of a sidecar request: the JSON-RPC request object **minus its
+/// `id`**, serialized.
+///
+/// `id` is framing, not identity: two `fold(strtoupper, ["ab"])` requests differ in
+/// `id` and ask the same question, and a memo table keyed on the whole request
+/// would never hit. Everything else IS identity, and it comes from the wire
+/// module's own `*_params` constructors, so a key built here and a request sent by
+/// the process transport agree by construction.
+///
+/// The string is also the interchange format: the replay loop hands these keys out
+/// as its pending list and takes them back as table keys, and each one parses as
+/// `{"method": …, "params": …}` — everything a caller needs to answer it.
+#[must_use]
+pub fn request_key(method: &str, params: &serde_json::Value) -> String {
+    serde_json::json!({ "method": method, "params": params }).to_string()
+}
+
+/// The replay [`FoldEngine`] (ADR-0066): answers from a supplied table of
+/// already-known results, and records the questions it could not answer.
+///
+/// This is the transport that makes the sidecar surface reachable where no
+/// process can be spawned — the browser (issue #64), where php-wasm answers
+/// asynchronously and the analysis walk is synchronous. One run is one pass: a
+/// miss declines *immediately* and is appended to [`Self::pending`], the caller
+/// answers the pending set and runs again, and the answered set strictly grows,
+/// so the fixpoint terminates. The iteration cap lives with the caller.
+///
+/// **A miss never fabricates.** It declines exactly as a dead sidecar declines,
+/// which means a run with non-empty pending is a NoFold-grade run: sound, less
+/// precise, and never to be shown to a user as if it were complete.
+pub struct TableEngine {
+    /// `request_key` → the raw JSON-RPC `result` value for that request.
+    table: HashMap<String, serde_json::Value>,
+    /// The misses, in order of first occurrence, deduped.
+    pending: Vec<String>,
+    /// Membership index for `pending`'s dedupe.
+    asked: HashSet<String>,
+}
+
+impl TableEngine {
+    /// A replay engine over `table` (`request_key` → raw `result` value). An empty
+    /// table is the normal starting point: the first run answers nothing and
+    /// reports every question the walk asked.
+    #[must_use]
+    pub fn new(table: HashMap<String, serde_json::Value>) -> Self {
+        Self { table, pending: Vec::new(), asked: HashSet::new() }
+    }
+
+    /// The unanswered requests recorded so far, in first-occurrence order.
+    #[must_use]
+    pub fn pending(&self) -> &[String] {
+        &self.pending
+    }
+
+    /// Take the unanswered requests, leaving the recorder empty.
+    pub fn take_pending(&mut self) -> Vec<String> {
+        self.asked.clear();
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Answer one request from the table, or record the miss and decline.
+    fn ask(&mut self, method: &str, params: &serde_json::Value) -> Option<serde_json::Value> {
+        let key = request_key(method, params);
+        if let Some(answer) = self.table.get(&key) {
+            return Some(answer.clone());
+        }
+        if self.asked.insert(key.clone()) {
+            self.pending.push(key);
+        }
+        None
+    }
+}
+
+impl FoldEngine for TableEngine {
+    fn env(&mut self) -> Option<EnvInfo> {
+        let answer = self.ask("env", &steins_sidecar::env_params())?;
+        steins_sidecar::parse_env_result(&answer)
+    }
+
+    fn reflect(&mut self, target: &str) -> Option<Reflection> {
+        let answer = self.ask("reflect", &steins_sidecar::reflect_params(target))?;
+        steins_sidecar::parse_reflection_result(&answer, target)
+    }
+
+    fn fold(&mut self, name: &str, args: &[FoldArg]) -> FoldResult {
+        match self.ask("fold", &steins_sidecar::fold_params(name, args)) {
+            Some(answer) => steins_sidecar::parse_fold_result(&answer),
+            // Unanswered: the same decline a dead sidecar gives.
+            None => FoldResult::widen("pending"),
+        }
+    }
+}
+
+/// The replay folder: the shared policy over the [`TableEngine`] transport.
+///
+/// # Replayability (ADR-0048)
+///
+/// A run of this folder is a **pure function of its table**. The walk is already
+/// replayable — analysis is a function of (CST, canonical entry state, query
+/// answers, fold memo) with no reliance on global ordering — and a `TableFolder`
+/// adds nothing that could break that: it consults no clock, no process, no
+/// filesystem, and no ambient state. The same source and the same table produce
+/// the same findings and the same pending list, every time and on any target.
+pub type TableFolder = EngineFolder<TableEngine>;
+
+impl EngineFolder<TableEngine> {
+    /// A fresh replay folder over `table`. Fresh per analysis run by construction:
+    /// the memos inside are whole-run answers, and reusing them across tables
+    /// would let a stale decline outlive the answer that fixes it.
+    #[must_use]
+    pub fn with_table(table: HashMap<String, serde_json::Value>) -> Self {
+        Self::with_engine(TableEngine::new(table))
+    }
+
+    /// The unanswered requests this run recorded, in first-occurrence order.
+    /// Non-empty ⇒ the run's results are NoFold-degraded and must not be shown.
+    #[must_use]
+    pub fn pending(&self) -> &[String] {
+        self.engine.pending()
+    }
+
+    /// Take this run's unanswered requests, leaving the recorder empty.
+    pub fn take_pending(&mut self) -> Vec<String> {
+        self.engine.take_pending()
     }
 }
 
@@ -848,7 +1158,6 @@ fn effective_php_view(
 
 /// Parse a PHP version string (`"8.5.8"`, `"8.5.8-dev"`) to `(major, minor)`.
 /// `None` when the first two dotted components are not both integers.
-#[cfg(not(target_arch = "wasm32"))]
 fn parse_php_minor(v: &str) -> Option<(u16, u16)> {
     let mut it = v.split('.');
     let major = it.next()?.parse().ok()?;
@@ -947,7 +1256,6 @@ fn is_fold_arg(arg: &ArgValue) -> bool {
 
 /// Convert a literal or literal-array [`ArgValue`] to a [`FoldArg`]; anything else
 /// (and anything over the budget) yields `None`, which widens.
-#[cfg(not(target_arch = "wasm32"))]
 fn arg_to_fold(arg: &ArgValue) -> Option<FoldArg> {
     let mut budget = FOLD_ARRAY_MAX_ENTRIES;
     arg_to_fold_within(arg, FOLD_ARRAY_MAX_DEPTH, &mut budget)
@@ -958,7 +1266,6 @@ fn arg_to_fold(arg: &ArgValue) -> Option<FoldArg> {
 /// next-int rule assigns it, and a duplicate key is resolved by PHP's own
 /// last-wins. Nothing here re-derives array semantics — that is precisely what
 /// running the fold on the project's PHP is for (ADR-0004/0028).
-#[cfg(not(target_arch = "wasm32"))]
 fn arg_to_fold_within(arg: &ArgValue, depth: u8, budget: &mut usize) -> Option<FoldArg> {
     match arg {
         ArgValue::Int(v) => Some(FoldArg::Int(*v)),
@@ -1010,7 +1317,6 @@ fn arg_to_fold_within(arg: &ArgValue, depth: u8, budget: &mut usize) -> Option<F
 }
 
 /// Convert a folded value back to a literal [`ArgValue`].
-#[cfg(not(target_arch = "wasm32"))]
 fn fold_value_to_arg(value: &FoldValue) -> Option<ArgValue> {
     Some(match value {
         FoldValue::Int(v) => ArgValue::Int(*v),
@@ -16442,7 +16748,6 @@ fn check_callable_arg(
 ///   Otherwise the envelope stands alone. Curation may narrow within the envelope;
 ///   it may never widen or cross bases — so a stale curated row loses precision,
 ///   never manufactures a wrong premise the runtime disowns.
-#[cfg(not(target_arch = "wasm32"))]
 fn admit_return_fact(return_type: &str, curated: Option<&str>, minor_matches_pin: bool) -> Option<Fact> {
     let envelope_ty = steins_contract::lower_str(return_type)?;
     let envelope = envelope_fact(&envelope_ty)?;
@@ -16468,7 +16773,6 @@ fn admit_return_fact(return_type: &str, curated: Option<&str>, minor_matches_pin
 ///
 /// [`General`]: Fact::General
 /// [`Refined`]: Fact::Refined
-#[cfg(not(target_arch = "wasm32"))]
 fn fact_base(f: &Fact) -> Option<Base> {
     match f {
         Fact::General { base, .. } | Fact::Refined { base, .. } => Some(*base),
@@ -16482,7 +16786,6 @@ fn fact_base(f: &Fact) -> Option<Base> {
 /// a bare `Base(b)` → `General{b}`, and a two-member `?T` union (`{Null, Base(b)}`)
 /// → `General{b, nullable}`. Everything else (multi-base unions, non-scalars,
 /// `mixed`) yields `None`.
-#[cfg(not(target_arch = "wasm32"))]
 fn envelope_fact(ty: &ContractTy) -> Option<Fact> {
     match ty {
         ContractTy::Base(b) => Some(Fact::General { base: *b, nullable: false }),
@@ -16504,7 +16807,6 @@ fn envelope_fact(ty: &ContractTy) -> Option<Fact> {
 /// Unions of more than the nullable pair, and non-scalars, yield `None` — a
 /// curated row that cannot be a single fact simply does not refine (the envelope
 /// stands).
-#[cfg(not(target_arch = "wasm32"))]
 fn contractty_to_fact(ty: &ContractTy) -> Option<Fact> {
     match ty {
         ContractTy::Base(b) => Some(Fact::General { base: *b, nullable: false }),

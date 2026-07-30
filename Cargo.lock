@@ -1087,6 +1087,7 @@ name = "steins-infer"
 version = "0.1.2"
 dependencies = [
  "salsa",
+ "serde_json",
  "steins-catalog",
  "steins-contract",
  "steins-db",

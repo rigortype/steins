@@ -14,13 +14,15 @@ steins-db = { path = "../steins-db" }
 steins-syntax = { path = "../steins-syntax" }
 steins-catalog = { path = "../steins-catalog" }
 steins-phpdoc = { path = "../steins-phpdoc" }
-
-# Native-only: the sidecar spawns the project's own PHP over IPC, which no wasm
-# runtime can do. Gating the DEPENDENCY (not just the code) keeps `std::process`
-# out of the wasm dependency graph entirely — the playground build cannot even
-# try to spawn (ADR-0065). The wasm target runs the sound subset via `NoFold`.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The sidecar dependency is UNCONDITIONAL as of ADR-0066. The process transport
+# — the half that spawns the project's own PHP — is cfg-gated inside
+# `steins-sidecar` itself, so `std::process` still never enters the wasm
+# dependency graph (the ADR-0065 property, now enforced one crate lower down).
+# What crosses to wasm is the wire format alone: the same `FoldArg`/`FoldResult`
+# types and the same JSON codec, so the browser's replay transport (issue #64)
+# cannot speak a dialect of the protocol.
 steins-sidecar = { path = "../steins-sidecar" }
+serde_json.workspace = true
 
 [dev-dependencies]
 steins-db = { path = "../steins-db" }
