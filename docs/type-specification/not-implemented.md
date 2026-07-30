@@ -22,6 +22,7 @@ the semantic inventory.
 | Value-provenance labels | 0038 | Reserved as the general mechanism in place of taint analysis. |
 | Ecosystem packs — PSL, Serde, Valinor, PSR | 0044, 0045 | Dependent shapes, witness refs, mapper returns as runtime truth. The mapper-boundary types are exactly where legacy modernization needs truth. |
 | Plugin contract | 0012, 0039 | Composer-distributed declaration suppliers with pattern subscriptions. The sidecar's `plugin` method is a documented stub returning `widen`. Consequence: ecosystem effect labels (`io.redis`, `email.send`) cannot be registered, so they are correctly unknown. |
+| Per-package vendor budgets | 0015 | Descent into `vendor/` bodies is implemented (diagnostics off); the budget cap that would bound it, naming its cutoff per the Certainty discipline, has no code. Vendor propagation runs uncapped today. |
 
 ### Diagnostics and CLI
 
@@ -78,7 +79,6 @@ Places where Steins is quieter than it could be.
 
 - Binding descent is capped at 8 frames (`MAX_BINDING_DEPTH`), plus on-stack
   recursion detection. Past the cap: silence.
-- Vendor propagation is budgeted per package (ADR-0015).
 
 **Docblock tags not read** ([phpdoc-grammar.md](phpdoc-grammar.md)):
 `@method`, `@property`, `@mixin`, `@phpstan-type` aliases,

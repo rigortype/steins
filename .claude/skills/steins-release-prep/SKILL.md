@@ -239,6 +239,16 @@ they are part of the reviewed diff.
 - **ROADMAP** — [`docs/ROADMAP.md`](../../../docs/ROADMAP.md): move the milestone
   this release completes, and check its exit criteria actually hold rather than
   assuming.
+- **`why-effects.md` honesty banner** —
+  [`docs/why-effects.md`](../../../docs/why-effects.md) and its Japanese twin
+  [`docs/ja/why-effects.md`](../../../docs/ja/why-effects.md) open with a
+  `[!NOTE]` banner: the document mixes design goals with shipped behavior, dated
+  by owner decision (2026-07-31). Each release, re-audit the document's
+  present-tense claims against what actually shipped, refresh the banner's date,
+  and keep the two language versions in lockstep — an edit to one without the
+  other is drift. When everything the document describes is implemented, remove
+  the banner from both files **and delete this bullet plus its checklist line**;
+  the audit exists only as long as the banner does.
 - **README** — the docs index still resolves; the pitch matches what ships.
 
 If nothing changed, say so and move on — but actually look; doc drift is silent.
@@ -461,6 +471,9 @@ is the thing to check — the release itself is unaffected.
 - Docs reconciled: quickstart's usage block matches the real binary, the install
   sections name the channels this release creates, `not-implemented.md` no longer
   lists what shipped, ROADMAP milestone moved.
+- `why-effects.md` banner audited (en **and** ja): claims re-checked against what
+  shipped, banner date refreshed — or banner and audit removed if everything the
+  document describes now exists.
 - `[workspace.package] version` and all eleven `Cargo.lock` entries equal `x.y.z`.
 - `THIRD-PARTY-LICENSES.md` regenerated if dependencies changed (`git diff` is
   the arbiter); `cargo deny check licenses` clean.

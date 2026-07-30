@@ -1,5 +1,11 @@
 # Why Effects?
 
+> [!NOTE]
+> This document states design goals as well as shipped behavior. As of
+> 2026-07-31, much of what it describes is not yet implemented or not yet
+> wired together. For the precise current state, see
+> [What is not implemented](type-specification/not-implemented.md).
+
 Steins started with a question: can a PHP analyzer tell us not only what value
 a method returns, but what calling that method can do to the world?
 

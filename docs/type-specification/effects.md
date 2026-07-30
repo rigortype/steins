@@ -166,6 +166,11 @@ pseudo-constant configuration this slice does not implement. See
 - **Envelope carrier interfaces as an ecosystem story** — the mechanism works
   (an interface method's envelope binds implementations), but no PSR knowledge
   ships to make DI-mediated effects checkable out of the box (ADR-0045).
+- **The envelope as an effect source.** An interface envelope checks its
+  implementations (`effect.liskov-widened`), but a call through an
+  interface-typed receiver contributes no effects to the caller — a variable
+  receiver only taints exhaustiveness. DI-mediated effects therefore do not
+  reach the caller's summary yet.
 - **The full effect catalog.** What exists is the frequency-seeded starter set
   above; ADR-0014's php-src stub sourcing is not built.
 - **A computed purity property.** Folding permission stays an allowlist.
