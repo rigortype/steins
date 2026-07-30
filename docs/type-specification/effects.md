@@ -166,6 +166,25 @@ flattened `…?` string. A catalogued-pure function reports `effects: []` and
 `--format json` is opt-in, mirroring `check --format json`'s posture
 (ADR-0053/0054) without sharing that command's document shape.
 
+`steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json]
+<paths...>` (issue #69) puts the same summaries to work as a **review** surface.
+`--set-baseline` captures every analyzed function's proven labels, declared
+bounds and exhaustiveness bit into `steins-effects-baseline.json`; a later run
+reports the delta, one line per changed function — `a.php Checkout::confirm: +
+io.net.http` when an occurrence appeared. It is a sidecar of its own: it shares
+nothing with the diagnostic baseline (ADR-0022) but that file's path handling,
+suppresses nothing, and always exits 0, because an effect delta is information,
+not a verdict. Three rules keep it honest. Only functions present on **both**
+sides are compared, so a rename or a deletion is counted in a one-line footer
+and never reported as a lost effect. A proven label that vanished is claimed
+confidently only when the *current* summary is exhaustive — "and possibly more"
+cannot prove an absence, so the candidate is otherwise reported hedged. And a
+label that left the declared lane to appear in the proven one is a
+**materialization** (ADR-0067 §2.6), one event rather than a removal plus an
+addition; exhaustiveness transitions are their own category, never folded into a
+label event. `--format json` carries the same events as an `events` array of
+`file`, `symbol`, `category`, `label`, beside the footer counts.
+
 `effect.liskov-widened` applies the same proven-only rule across an override:
 an implementation whose proven effects exceed the envelope declared on the class
 or interface method it overrides is a finding. Implementations may be purer,

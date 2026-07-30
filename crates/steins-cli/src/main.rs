@@ -14,6 +14,7 @@ mod out;
 
 mod baseline;
 mod doctor;
+mod effect_baseline;
 mod sha256;
 
 // The profile engine (Surface, the rung ladder, user-profile resolution) moved to
@@ -59,12 +60,13 @@ fn dispatch(args: &[String]) -> ExitCode {
         Some("check") => run_check(&args[1..]),
         Some("annotate") => run_annotate(&args[1..]),
         Some("transform") => run_transform(&args[1..]),
+        Some("effect-diff") => run_effect_diff(&args[1..]),
         Some("doctor") => doctor::run_doctor(&args[1..]),
         Some("version" | "--version" | "-v") => print_version(),
         Some("license" | "licenses") => print_license(),
         Some(other) => {
             errln!(
-                "steins: unknown command `{other}` (available: check, annotate, transform, doctor, version, license)"
+                "steins: unknown command `{other}` (available: check, annotate, transform, effect-diff, doctor, version, license)"
             );
             ExitCode::from(2)
         }
@@ -75,6 +77,9 @@ fn dispatch(args: &[String]) -> ExitCode {
             errln!("       steins annotate [--no-php] [--format text|json] <file.php>");
             errln!(
                 "       steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--format text|json] <paths...>"
+            );
+            errln!(
+                "       steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>"
             );
             errln!("       steins doctor [--no-php] [--baseline <path>] [path]");
             errln!("       steins version | -v | --version");
@@ -1271,6 +1276,211 @@ fn print_annotate_json(summaries: &[EffectSummary]) {
         })
         .collect();
     let doc = serde_json::json!({ "functions": functions });
+    match serde_json::to_string_pretty(&doc) {
+        Ok(s) => outln!("{s}"),
+        Err(e) => errln!("steins: failed to serialize json: {e}"),
+    }
+}
+
+/// `steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json]
+/// <paths...>` (issue #69) — capture the project's per-function effect summaries,
+/// or report how today's differ from a captured past.
+///
+/// The review story for an effect-neutral refactor: capture before, refactor,
+/// run again, and read one line per changed function. It touches neither `check`
+/// nor the diagnostic baseline — its own sidecar file, its own format, no
+/// suppression, and no verdict. The diff is informational, so a run that finds
+/// changes still exits 0; only a usage or file error exits 2. Gating a build on
+/// an effect delta is a policy decision (ADR-0023's territory), not this
+/// surface's.
+fn run_effect_diff(args: &[String]) -> ExitCode {
+    let mut format = Format::Text;
+    let mut set_baseline = false;
+    let mut baseline_path: Option<String> = None;
+    let mut paths: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--set-baseline" => {
+                set_baseline = true;
+                i += 1;
+            }
+            "--baseline" => {
+                let Some(value) = args.get(i + 1) else {
+                    errln!("steins: --baseline requires a path argument");
+                    return ExitCode::from(2);
+                };
+                baseline_path = Some(value.clone());
+                i += 2;
+            }
+            "--format" => {
+                let Some(value) = args.get(i + 1) else {
+                    errln!("steins: --format requires an argument (text|json)");
+                    return ExitCode::from(2);
+                };
+                match value.as_str() {
+                    "text" => format = Format::Text,
+                    "json" => format = Format::Json,
+                    other => {
+                        errln!("steins: unknown format `{other}` (text|json)");
+                        return ExitCode::from(2);
+                    }
+                }
+                i += 2;
+            }
+            other if other.starts_with('-') => {
+                errln!("steins: unknown flag `{other}` for effect-diff");
+                return ExitCode::from(2);
+            }
+            other => {
+                paths.push(other.to_owned());
+                i += 1;
+            }
+        }
+    }
+
+    if paths.is_empty() {
+        errln!("steins: no paths given");
+        return ExitCode::from(2);
+    }
+
+    let mut files = Vec::new();
+    for p in &paths {
+        collect_php_files(Path::new(p), &mut files);
+    }
+    files.sort();
+    files.dedup();
+
+    // No sidecar, no folder: effect summaries are a pure static fixpoint, so this
+    // command never needs `php` and takes no `--no-php`.
+    let db = SteinsDatabase::default();
+    let mut inputs: Vec<SourceFile> = Vec::new();
+    for file_path in &files {
+        let text = match std::fs::read(file_path) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(e) => {
+                errln!("steins: cannot read {}: {e}", file_path.display());
+                continue;
+            }
+        };
+        inputs.push(SourceFile::new(&db, file_path.to_string_lossy().into_owned(), text));
+    }
+    let layout = resolve_layout(&paths);
+    let project = Project::new(&db, inputs.clone(), layout.clone());
+
+    // The sidecar file, resolved exactly like the diagnostic baseline's: the
+    // `--baseline` path, else the default name in the working directory. Entry
+    // paths are relative to its directory (ADR-0022's relativization, reused).
+    let file = PathBuf::from(baseline_path.as_deref().unwrap_or(effect_baseline::DEFAULT_FILE));
+    let dir = baseline::base_dir(&file);
+    let current = capture_effect_entries(&db, project, &inputs, &layout, &dir);
+
+    if set_baseline {
+        let n = current.len();
+        return match std::fs::write(&file, effect_baseline::render(current)) {
+            Ok(()) => {
+                errln!("steins: wrote {n} effect summaries to {}", file.display());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                errln!("steins: cannot write effect baseline {}: {e}", file.display());
+                ExitCode::from(2)
+            }
+        };
+    }
+
+    let text = match std::fs::read_to_string(&file) {
+        Ok(t) => t,
+        Err(e) => {
+            errln!(
+                "steins: cannot read effect baseline {}: {e} (run --set-baseline to capture one)",
+                file.display()
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let doc = match effect_baseline::parse(&text) {
+        Ok(d) => d,
+        Err(e) => {
+            errln!("steins: {}: {e}", file.display());
+            return ExitCode::from(2);
+        }
+    };
+
+    let report = effect_baseline::diff(&doc.functions, &current);
+    match format {
+        Format::Text => {
+            for event in &report.events {
+                outln!("{}", event.line());
+            }
+            if let Some(footer) = effect_baseline::footer(&report) {
+                outln!("{footer}");
+            }
+        }
+        Format::Json => print_effect_diff_json(&report),
+    }
+    ExitCode::SUCCESS
+}
+
+/// The current run's effect summaries as baseline entries, one per analyzed
+/// non-vendor function/method.
+///
+/// Vendor files are excluded exactly as `check` excludes vendor findings
+/// (ADR-0015): they are still indexed and still contribute to every summary
+/// through the call graph, but someone else's function is not this project's
+/// effect surface to review.
+fn capture_effect_entries(
+    db: &SteinsDatabase,
+    project: Project,
+    inputs: &[SourceFile],
+    layout: &ProjectLayout,
+    dir: &Path,
+) -> Vec<effect_baseline::Entry> {
+    let mut entries = Vec::new();
+    for &input in inputs {
+        let path = input.path(db).to_owned();
+        if layout.is_vendor(&path) {
+            continue;
+        }
+        let rel = baseline::relativize(dir, &path);
+        // One whole-project effect fixpoint per target file — the same cost
+        // `annotate` pays per invocation, paid once per file here. Acceptable for a
+        // capture-and-compare surface; if it ever bites, the fixpoint (not this
+        // loop) is what should learn to answer for every file at once.
+        for s in effect_summaries_project(db, project, input) {
+            entries.push(effect_baseline::Entry {
+                file: rel.clone(),
+                symbol: s.qualified,
+                proven: s.labels,
+                declared: s.declared,
+                exhaustive: s.exhaustive,
+            });
+        }
+    }
+    entries
+}
+
+/// `effect-diff --format json`: the itemized `events` array plus the footer
+/// counts, so a CI job can read the same delta the text lines spell.
+fn print_effect_diff_json(report: &effect_baseline::Diff) {
+    let events: Vec<serde_json::Value> = report
+        .events
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "file": e.file,
+                "symbol": e.symbol,
+                "category": e.category.as_str(),
+                "label": e.label,
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "events": events,
+        "compared": report.compared,
+        "not_in_baseline": report.not_in_baseline,
+        "no_longer_present": report.no_longer_present,
+    });
     match serde_json::to_string_pretty(&doc) {
         Ok(s) => outln!("{s}"),
         Err(e) => errln!("steins: failed to serialize json: {e}"),

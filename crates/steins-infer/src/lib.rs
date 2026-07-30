@@ -2818,6 +2818,16 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectSummary {
     pub symbol: String,
+    /// The same function under its **namespace-qualified** name — `App\Checkout::confirm`
+    /// for a method, `App\render_page` for a function — while [`Self::symbol`] stays the
+    /// short display name the margin prints. Two declarations with the same short name in
+    /// one file (one per namespace block) are legal PHP; a consumer that *keys* on a
+    /// summary (the effect baseline of issue #69) needs the name that tells them apart.
+    ///
+    /// Casing follows the declaration for the simple name and the resolved class FQN;
+    /// a function's namespace prefix is the index's lowercase-normalized one, since PHP
+    /// folds namespace and function case anyway.
+    pub qualified: String,
     pub line: u32,
     pub labels: Vec<String>,
     /// The **declared** effect labels (ADR-0067), sorted: bounds imported from an
@@ -2893,6 +2903,16 @@ fn effect_summary_units(units: &[FileUnit], index: &Index, target: usize) -> Vec
     };
     let throws_exhaustive = |sym: &Sym| throws.get(sym).is_none_or(|t| t.exhaustive);
 
+    // The namespace prefix of a function's index FQN (lowercase-normalized), rejoined
+    // with the simple name as declared: `app\renderPage` rather than `app\renderpage`.
+    // A global function has no prefix and reads exactly like its declaration.
+    let qualify_func = |f: &FunctionDecl| -> String {
+        match f.fqn.rsplit_once('\\') {
+            Some((ns, _)) => format!("{ns}\\{}", f.name),
+            None => f.name.clone(),
+        }
+    };
+
     let mut out = Vec::new();
     for f in tree.functions() {
         let sym = Sym::Func(f.fqn.clone());
@@ -2900,6 +2920,7 @@ fn effect_summary_units(units: &[FileUnit], index: &Index, target: usize) -> Vec
         let declared = declared_labels(&sym, &labels);
         out.push(EffectSummary {
             symbol: f.name.clone(),
+            qualified: qualify_func(f),
             line: tree.position(f.span.start).line,
             labels,
             declared,
@@ -2909,6 +2930,9 @@ fn effect_summary_units(units: &[FileUnit], index: &Index, target: usize) -> Vec
         });
     }
     for c in tree.classes() {
+        // The resolved FQN with the source's casing, when the tree-build pass has
+        // stamped it; the simple name is the pre-stamp (and global-namespace) reading.
+        let class_display = if c.display.is_empty() { c.name.as_str() } else { c.display.as_str() };
         for m in &c.methods {
             if m.is_abstract {
                 continue;
@@ -2918,6 +2942,7 @@ fn effect_summary_units(units: &[FileUnit], index: &Index, target: usize) -> Vec
             let declared = declared_labels(&sym, &labels);
             out.push(EffectSummary {
                 symbol: format!("{}::{}", c.name, m.name),
+                qualified: format!("{class_display}::{}", m.name),
                 line: tree.position(m.span.start).line,
                 labels,
                 declared,
