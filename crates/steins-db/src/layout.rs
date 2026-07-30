@@ -41,6 +41,85 @@
 
 use std::path::{Component, Path, PathBuf};
 
+/// Where a resolved [`PhpTarget`] came from, in precedence order (issue #28):
+/// `config.platform.php` is Composer's own "resolve as if on this PHP" pin and
+/// beats the `require.php` constraint when both are present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhpTargetSource {
+    /// `config.platform.php` — a concrete version Composer resolves against.
+    Platform,
+    /// `require.php` — the declared support constraint; the floor is the target.
+    Require,
+}
+
+impl PhpTargetSource {
+    /// The manifest spelling, for `doctor`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            PhpTargetSource::Platform => "config.platform.php",
+            PhpTargetSource::Require => "require.php",
+        }
+    }
+}
+
+/// The **target PHP version range** a project declares (issue #28), in
+/// `(major, minor)` space — the version the analysis is *about*, as distinct
+/// from the version the sidecar happens to run.
+///
+/// A ceiling of `Some((8, u16::MAX))` spells "any minor of major 8" (what
+/// `^8.1` means); `None` spells an open upper bound (`>=8.1`). Patch levels are
+/// deliberately dropped: every version-sensitive decision Steins makes keys on
+/// the minor (ADR-0049 A12, ADR-0052 A11, ADR-0056 §2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhpTarget {
+    /// The lowest `(major, minor)` the project declares support for.
+    pub floor: (u16, u16),
+    /// The highest declared `(major, minor)`, inclusive; `None` when open.
+    pub ceiling: Option<(u16, u16)>,
+    /// Which manifest field produced this target.
+    pub source: PhpTargetSource,
+    /// The constraint text as written, for `doctor`.
+    pub raw: String,
+}
+
+impl PhpTarget {
+    /// Whether `minor` lies inside the declared range.
+    #[must_use]
+    pub fn contains(&self, minor: (u16, u16)) -> bool {
+        self.floor <= minor && self.ceiling.is_none_or(|c| minor <= c)
+    }
+
+    /// Whether the range is exactly the single minor `m`.
+    #[must_use]
+    pub fn is_exactly(&self, m: (u16, u16)) -> bool {
+        self.floor == m && self.ceiling == Some(m)
+    }
+
+    /// Whether the range spans versions on both sides of `boundary` — i.e. some
+    /// declared minor is below it and some declared (or open-bound) minor is at
+    /// or above it. This is what generalizes ADR-0049 A12's per-literal unknown
+    /// leg to a range: a rule keyed on `boundary` has no single answer for a
+    /// straddling target, so a boundary-sensitive question must decline.
+    #[must_use]
+    pub fn straddles(&self, boundary: (u16, u16)) -> bool {
+        self.floor < boundary && self.ceiling.is_none_or(|c| c >= boundary)
+    }
+
+    /// Render the resolved range for `doctor`: `8.1+`, `8.1–8.3`, `8.1 (8.x)`,
+    /// `8.1 (exact)`.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let f = format!("{}.{}", self.floor.0, self.floor.1);
+        match self.ceiling {
+            None => format!("{f}+"),
+            Some(c) if c == self.floor => format!("{f} (exact)"),
+            Some((maj, m)) if m == u16::MAX => format!("{f} ({maj}.x)"),
+            Some((maj, m)) => format!("{f}\u{2013}{maj}.{m}"),
+        }
+    }
+}
+
 /// One `composer.json` and the roots it declares. Paths are absolute and
 /// lexically normalized (see [`normalize`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +132,8 @@ pub struct GoverningRoot {
     vendor: Vec<PathBuf>,
     /// First-party roots: the autoload PSR-4 / PSR-0 / classmap directories.
     first_party: Vec<PathBuf>,
+    /// The target PHP range this manifest declares (issue #28), when it does.
+    php_target: Option<PhpTarget>,
 }
 
 impl GoverningRoot {
@@ -60,7 +141,20 @@ impl GoverningRoot {
     /// directory; both root lists are resolved against it.
     #[must_use]
     pub fn new(manifest: PathBuf, dir: PathBuf, vendor: Vec<PathBuf>, first_party: Vec<PathBuf>) -> Self {
-        Self { dir, manifest, vendor, first_party }
+        Self { dir, manifest, vendor, first_party, php_target: None }
+    }
+
+    /// Attach the manifest's declared PHP target (issue #28).
+    #[must_use]
+    pub fn with_php_target(mut self, target: Option<PhpTarget>) -> Self {
+        self.php_target = target;
+        self
+    }
+
+    /// The target PHP range this manifest declares, when it does.
+    #[must_use]
+    pub fn php_target(&self) -> Option<&PhpTarget> {
+        self.php_target.as_ref()
     }
 
     /// The directory this root governs.
@@ -150,6 +244,19 @@ impl ProjectLayout {
     #[must_use]
     pub fn is_fallback(&self) -> bool {
         self.roots.is_empty()
+    }
+
+    /// The analysis's **target PHP range** (issue #28): the declaration of the
+    /// *outermost* governing root — the top-level project, whose
+    /// `config.platform.php` / `require.php` describes what the whole tree
+    /// deploys on. Nested manifests (monorepo subprojects, vendored packages)
+    /// deliberately do not override it: a library's `^7.4` support claim does
+    /// not change what the application ships on. Roots are kept deepest-first,
+    /// so the outermost is the last; ties (sibling projects analyzed together)
+    /// resolve to the sort order's last, and `doctor` names the manifest.
+    #[must_use]
+    pub fn php_target(&self) -> Option<&PhpTarget> {
+        self.roots.last().and_then(GoverningRoot::php_target)
     }
 
     /// Whether `path` — an analyzed file's path, absolute or relative to the

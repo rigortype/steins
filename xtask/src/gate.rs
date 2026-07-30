@@ -701,8 +701,19 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
 
     // Paths are `root`-relative above, so the layout resolves against `root`
     // (ADR-0015): the package's own `composer.json` decides what is vendor.
-    let project = Project::new(&db, inputs, composer::discover(&[dir.to_path_buf()], root));
-    let mut diags: Vec<Diagnostic> = FOLDER.with(|f| check_project(&db, project, &mut *f.borrow_mut()));
+    let layout = composer::discover(&[dir.to_path_buf()], root);
+    // The declared target PHP range (issue #28) gates the folder's absence
+    // family and curated-fact admission — the gate measures the analyzer as the
+    // CLI ships it, so the corpus packages' own `require.php` declarations
+    // apply here too. The resident folder drops target-dependent memos on the
+    // change, so cross-package reuse stays sound.
+    let php_target = layout.php_target().cloned();
+    let project = Project::new(&db, inputs, layout);
+    let mut diags: Vec<Diagnostic> = FOLDER.with(|f| {
+        let mut folder = f.borrow_mut();
+        folder.set_php_target(php_target);
+        check_project(&db, project, &mut *folder)
+    });
     diags.retain(|d| !parse_err_set.contains(d.path.as_str()));
     diags.sort_by(|a, b| (&a.path, a.line, a.column).cmp(&(&b.path, b.line, b.column)));
     // Measurement-mode split (ADR-0050 §9): contract-layer findings are reported +

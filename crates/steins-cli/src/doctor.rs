@@ -32,7 +32,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use steins_db::{ProjectLayout, composer};
+use steins_db::{PhpTarget, ProjectLayout, composer};
 use steins_infer::{
     DamKind, FileUnit, MONKEY_PATCH_EXTENSIONS, SOUND_SUBSET_NOTICE, THROW_UNDECLARED_ID,
     dam_facts,
@@ -105,7 +105,7 @@ pub fn run_doctor(args: &[String]) -> ExitCode {
     let layout = composer::discover(std::slice::from_ref(&root), &cwd);
     let files = parse_project(&root);
 
-    section_runtime(no_php);
+    section_runtime(no_php, &layout);
     let surface = section_config(&mut contradiction);
     section_layout(&root, &cwd, &layout);
     section_coverage(&root, &files, &layout);
@@ -121,13 +121,15 @@ pub fn run_doctor(args: &[String]) -> ExitCode {
 }
 
 /// Section 1 — Runtime (ADR-0054 §9.1, minimal): sidecar spawn health, PHP version,
-/// SAPI, loaded-extension count, and the monkey-patch line (ADR-0049 A9). No
-/// reachable PHP is the sound-subset posture (ADR-0004): named loudly, exit 0.
-fn section_runtime(no_php: bool) {
+/// SAPI, loaded-extension count, the monkey-patch line (ADR-0049 A9), and the
+/// analysis TARGET version with its skew against the runtime (issue #28).
+fn section_runtime(no_php: bool, layout: &ProjectLayout) {
     outln!();
     outln!("Runtime");
+    let target = layout.php_target();
     if no_php {
         outln!("  PHP sidecar: disabled (--no-php)");
+        section_target(target, None);
         outln!("  posture: sound subset — findings that require executing PHP are omitted");
         outln!("  (a degraded environment is not a failure — exit stays 0, ADR-0004)");
         return;
@@ -154,6 +156,7 @@ fn section_runtime(no_php: bool) {
                         present.join(", ")
                     );
                 }
+                section_target(target, parse_env_minor(&env.php_version));
             }
             None => {
                 outln!("  PHP sidecar: spawned, but the env() query failed");
@@ -225,6 +228,47 @@ fn section_config(contradiction: &mut bool) -> profile::Surface {
         surface.surface_ids().len()
     );
     surface
+}
+
+/// The Runtime section's TARGET lines (issue #28): what version range the
+/// analysis is about, where that came from, and — when a runtime answered —
+/// the skew between the two, named in the direction it degrades.
+fn section_target(target: Option<&PhpTarget>, runtime_minor: Option<(u16, u16)>) {
+    match target {
+        None => {
+            outln!("  analysis target: none declared — the runtime PHP is the target");
+        }
+        Some(t) => {
+            outln!(
+                "  analysis target: PHP {} (from {} \"{}\")",
+                t.render(),
+                t.source.as_str(),
+                t.raw
+            );
+            if let Some(m) = runtime_minor {
+                if !t.contains(m) {
+                    outln!(
+                        "  version skew: runtime {}.{} is OUTSIDE the declared range — the absence family and reflection-seeded facts are disabled this run (the boot surface is not a version this project ships on)",
+                        m.0, m.1
+                    );
+                } else if t.floor < m {
+                    outln!(
+                        "  version skew: runtime {}.{} sits above the {}.{} floor — reflection describes the runtime, so symbols newer than the floor are not proven absent for it (silence, never a false claim)",
+                        m.0, m.1, t.floor.0, t.floor.1
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The `(major, minor)` of the sidecar's version report, for the skew line.
+fn parse_env_minor(v: &str) -> Option<(u16, u16)> {
+    let mut it = v.split('.');
+    let major = it.next()?.parse().ok()?;
+    let minor: u16 =
+        it.next()?.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok()?;
+    Some((major, minor))
 }
 
 /// Section 3 — Layout (ADR-0015): which trees this run treats as somebody else's.

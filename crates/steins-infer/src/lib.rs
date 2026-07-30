@@ -523,6 +523,11 @@ pub struct SidecarFolder {
     /// Per-name memo of the raw reflected return-type declaration (ADR-0062 S7's
     /// projection gate), the string sibling of [`Self::return_fact_memo`].
     return_type_memo: HashMap<String, Option<String>>,
+    /// The project's declared target PHP range (issue #28), when the layout
+    /// resolved one. Set by the CLI after layout discovery; gates the absence
+    /// family (the boot surface interrogated must be a declared-supported
+    /// version) and the curated return-fact admission.
+    php_target: Option<steins_db::PhpTarget>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -544,6 +549,7 @@ impl SidecarFolder {
             boot_surface_label: None,
             return_fact_memo: HashMap::new(),
             return_type_memo: HashMap::new(),
+            php_target: None,
         }
     }
 
@@ -552,6 +558,21 @@ impl SidecarFolder {
     #[must_use]
     pub fn enabled() -> Self {
         Self { notified: false, ..Self::new(false) }
+    }
+
+    /// Declare the project's target PHP range (issue #28), from the resolved
+    /// layout. Target-dependent memos are dropped on a change, so a resident
+    /// folder reused across projects (the corpus gate's thread-local) answers
+    /// each project under its own target.
+    pub fn set_php_target(&mut self, target: Option<steins_db::PhpTarget>) {
+        if self.php_target != target {
+            self.absence_available = None;
+            self.return_fact_memo.clear();
+            self.return_type_memo.clear();
+            self.boot_surface_memo.clear();
+            self.boot_surface_fn_memo.clear();
+        }
+        self.php_target = target;
     }
 
     /// Ensure a live sidecar, or record that we cannot have one.
@@ -610,11 +631,27 @@ impl Folder for SidecarFolder {
             return cached;
         }
         // No live sidecar ⇒ the family is silent (the ADR-0004 sound subset covers
-        // it — A2ii). Otherwise consult the loaded-extension list once (A9).
+        // it — A2ii). Otherwise consult the loaded-extension list once (A9), and
+        // (issue #28) require the runtime to BE a declared-supported version:
+        // every absence claim is evidence about THIS boot surface, and proof of
+        // absence on a version the project does not ship on proves nothing about
+        // the versions it does. A runtime inside the declared range stays a
+        // legitimate witness — absence on it is a break on a supported version.
+        let target_admits_runtime = |minor: Option<(u16, u16)>, t: &Option<steins_db::PhpTarget>| {
+            match (t, minor) {
+                (Some(t), Some(m)) => t.contains(m),
+                (Some(_), None) => false, // a declared target, an unparseable runtime: no witness
+                (None, _) => true,        // no declaration: the pre-#28 posture
+            }
+        };
         let verdict = match self.ensure_sidecar().and_then(Sidecar::env) {
-            Some(env) => !env.extensions.iter().any(|e| {
-                MONKEY_PATCH_EXTENSIONS.iter().any(|m| e.eq_ignore_ascii_case(m))
-            }),
+            Some(env) => {
+                let clean = !env.extensions.iter().any(|e| {
+                    MONKEY_PATCH_EXTENSIONS.iter().any(|m| e.eq_ignore_ascii_case(m))
+                });
+                let minor = parse_php_minor(&env.php_version);
+                clean && target_admits_runtime(minor, &self.php_target)
+            }
             None => false,
         };
         self.absence_available = Some(verdict);
@@ -703,11 +740,17 @@ impl SidecarFolder {
         if !self.absence_family_available() {
             return None;
         }
-        // Gate 2 (minor pin, ADR-0052 A11 / ADR-0056 §2) — governs the CURATED
-        // refinement only; the reflected envelope is version-correct by
-        // construction and needs no pin. `None` minor (unparseable) is treated as
-        // no-detectable-skew, keeping the envelope but not admitting curation.
-        let minor_matches_pin = self.php_minor() == Some(steins_catalog::PINNED_PHP);
+        // Gate 2 (minor pin, ADR-0052 A11 / ADR-0056 §2, target-aware per issue
+        // #28) — governs the CURATED refinement only; the reflected envelope is
+        // version-correct by construction and needs no pin. A curated row is
+        // verified at PINNED_PHP and nowhere else, so with a declared target the
+        // row is admitted only when the WHOLE range is the pin (`§2`'s hole is
+        // exactly cross-version drift); with no target, the runtime-vs-pin
+        // comparison stands as before.
+        let minor_matches_pin = match &self.php_target {
+            Some(t) => t.is_exactly(steins_catalog::PINNED_PHP),
+            None => self.php_minor() == Some(steins_catalog::PINNED_PHP),
+        };
         // The reflected return envelope — the running engine's own declaration.
         let refl = self.ensure_sidecar().and_then(|sc| sc.reflect(key))?;
         if !refl.function_exists {
@@ -727,6 +770,41 @@ impl SidecarFolder {
         }
         let refl = self.ensure_sidecar().and_then(|sc| sc.reflect(key))?;
         refl.function_exists.then_some(refl.return_type).flatten()
+    }
+}
+
+/// The ADR-0049 A12 boundary: the minor where PHP changed the next-auto-index
+/// rule for array literals with negative keys. The one version boundary any
+/// value rule keys on today.
+const NEXT_INT_BOUNDARY: (u16, u16) = (8, 3);
+
+/// The analysis PHP view (issue #28): fold the sidecar's **runtime** minor and
+/// the project's **declared target** into the two per-run answers the checker
+/// consumes.
+///
+/// - The **effective minor** feeds `normalize_array` (ADR-0049 A12): with a
+///   declared target, the range must agree on the next-int boundary — a range
+///   entirely on one side answers with its floor (any minor on that side picks
+///   the same rule), a straddling range answers `None`, which is exactly A12's
+///   existing unknown leg (a boundary-sensitive literal declines; every other
+///   literal still resolves). With no target, the runtime minor answers, as it
+///   did before #28.
+/// - The **catalog skew** flag feeds ADR-0052 A11's arm-deletion demotion: the
+///   catalog is verified at [`steins_catalog::PINNED_PHP`], so the verdicts are
+///   trustworthy only when every version the analysis is about is the pin —
+///   a target range is skewed unless it is exactly the pin; no target falls
+///   back to the runtime-vs-pin comparison (A11 unchanged).
+fn effective_php_view(
+    runtime: Option<(u16, u16)>,
+    target: Option<&steins_db::PhpTarget>,
+) -> (Option<(u16, u16)>, bool) {
+    match target {
+        Some(t) => {
+            let effective =
+                if t.straddles(NEXT_INT_BOUNDARY) { None } else { Some(t.floor) };
+            (effective, !t.is_exactly(steins_catalog::PINNED_PHP))
+        }
+        None => (runtime, runtime.is_some_and(|m| m != steins_catalog::PINNED_PHP)),
     }
 }
 
@@ -1279,9 +1357,15 @@ fn check_units(
     // every file's context. Consumed by the absence family's conditional-decl leg.
     let dam = dam_facts(units, layout);
 
-    // The project PHP minor (ADR-0052 A11): one sidecar `env()` query answer per run,
-    // shared by every file's context; drives the catalog version-skew demotion.
-    let php_minor = folder.php_minor();
+    // The analysis PHP view (issue #28): the TARGET the project declares
+    // (`config.platform.php` / `require.php`, via the layout) is what
+    // version-sensitive decisions key on; the sidecar's runtime minor is the
+    // fallback when the project declares nothing. One computation per run,
+    // shared by every file's context — ADR-0052 A11 (catalog skew) and
+    // ADR-0049 A12 (the next-int rule, through `normalize_array`) both follow
+    // this one seam.
+    let runtime_minor = folder.php_minor();
+    let (php_minor, catalog_skew) = effective_php_view(runtime_minor, layout.php_target());
 
     // The callable-purity oracle (ADR-0063 P3): one whole-project effect fixpoint per
     // run, shared by every file's context, and built only when some docblock actually
@@ -1289,8 +1373,16 @@ fn check_units(
     let purity = PurityOracle::build(units, index);
 
     for fi in 0..units.len() {
-        let cx =
-            Cx::new_with(units, index, fi, &dam, warning_handler_abort, php_minor, purity.as_ref());
+        let cx = Cx::new_with(
+            units,
+            index,
+            fi,
+            &dam,
+            warning_handler_abort,
+            php_minor,
+            catalog_skew,
+            purity.as_ref(),
+        );
 
         // --- Propagation pass FIRST: it walks every scope and, as a side
         // product, proves dead regions (decided branches, unreachable tails) —
@@ -3378,13 +3470,19 @@ struct Cx<'a> {
     /// Error-grade `offset.on-unsupported` object case (deferred in this slice) is
     /// posture-independent and would emit under both.
     warning_handler_abort: bool,
-    /// The project's own PHP `(major, minor)`, as reported by the sidecar `env()`
-    /// (ADR-0052 amendment A11), or `None` when no sidecar answered (the sound
-    /// default — no reported minor means no detectable skew, so the catalog pin is
-    /// trusted, exactly as before A11). Compared against
-    /// [`steins_catalog::PINNED_PHP`] to decide whether a catalog-backed is-a
-    /// verdict used for **arm deletion** must be demoted to `Unknown`.
+    /// The **effective analysis minor** for version-keyed value rules (issue
+    /// #28): the target floor when the project declares a target whose range
+    /// agrees on the ADR-0049 A12 next-int boundary, `None` when the declared
+    /// range straddles it (a boundary-sensitive literal must then decline —
+    /// A12's unknown leg, generalized to a range), and the sidecar's runtime
+    /// minor when the project declares nothing (the pre-#28 behavior).
+    /// Computed once per run by [`effective_php_view`].
     php_minor: Option<(u16, u16)>,
+    /// Whether a catalog-backed is-a verdict used for **arm deletion** must be
+    /// demoted to `Unknown` (ADR-0052 A11): some version the analysis is about
+    /// — any minor of the declared target range, else the runtime minor — is
+    /// not the catalog pin. Computed once per run by [`effective_php_view`].
+    catalog_skew: bool,
     /// The whole-project purity answer for the callable-purity obligation
     /// (ADR-0063 P3), or `None` when no purity-bearing callable is spelled anywhere
     /// (and therefore also for every auxiliary pass, which reports no findings of
@@ -3402,11 +3500,13 @@ impl<'a> Cx<'a> {
             dam: &EMPTY_DAM,
             warning_handler_abort: true,
             php_minor: None,
+            catalog_skew: false,
             purity: None,
         }
     }
 
     /// A context carrying an explicit runtime config (the top-level analysis pass).
+    #[allow(clippy::too_many_arguments)]
     fn new_with(
         units: &'a [FileUnit<'a>],
         index: &'a Index,
@@ -3414,9 +3514,10 @@ impl<'a> Cx<'a> {
         dam: &'a DamFacts,
         warning_handler_abort: bool,
         php_minor: Option<(u16, u16)>,
+        catalog_skew: bool,
         purity: Option<&'a PurityOracle>,
     ) -> Self {
-        Self { units, index, cur, dam, warning_handler_abort, php_minor, purity }
+        Self { units, index, cur, dam, warning_handler_abort, php_minor, catalog_skew, purity }
     }
 
     /// A context pointing at a different file (for cross-file descent); the runtime
@@ -3429,6 +3530,7 @@ impl<'a> Cx<'a> {
             dam: self.dam,
             warning_handler_abort: self.warning_handler_abort,
             php_minor: self.php_minor,
+            catalog_skew: self.catalog_skew,
             purity: self.purity,
         }
     }
@@ -3445,7 +3547,7 @@ impl<'a> Cx<'a> {
     /// differs from the catalog pin. When the minor is unknown or matches, catalog
     /// verdicts stand.
     fn a11_demote_catalog(&self) -> bool {
-        self.php_minor.is_some_and(|m| m != steins_catalog::PINNED_PHP)
+        self.catalog_skew
     }
 
     fn tree(&self) -> &'a SourceTree {
@@ -16989,12 +17091,14 @@ mod n4_carrier_tests {
     use super::*;
 
     /// Build a `Cx` over a one-file project and run `f` against it. `php_minor` seeds
-    /// the A11 version input.
+    /// the A11 version input; the skew flag is derived from it exactly as
+    /// [`effective_php_view`] does with no declared target.
     fn with_cx<R>(src: &str, php_minor: Option<(u16, u16)>, f: impl FnOnce(&Cx) -> R) -> R {
         let tree = SourceTree::parse(src);
         let units = [FileUnit { path: "t.php", tree: &tree }];
         let index = Index::from_units(&units);
-        let cx = Cx::new_with(&units, &index, 0, &EMPTY_DAM, true, php_minor, None);
+        let (php_minor, skew) = effective_php_view(php_minor, None);
+        let cx = Cx::new_with(&units, &index, 0, &EMPTY_DAM, true, php_minor, skew, None);
         f(&cx)
     }
 
@@ -17843,5 +17947,48 @@ mod shape_projection_tests {
         assert_eq!(project_reverse(&optional_str).is_list, Certainty::Maybe);
         // The entry count is preserved, so `non_empty` carries.
         assert!(project_reverse(&declared_shape()).non_empty);
+    }
+}
+
+#[cfg(test)]
+mod php_view_tests {
+    use super::*;
+    use steins_db::{PhpTarget, PhpTargetSource};
+
+    fn target(floor: (u16, u16), ceiling: Option<(u16, u16)>) -> PhpTarget {
+        PhpTarget { floor, ceiling, source: PhpTargetSource::Require, raw: String::new() }
+    }
+
+    /// Issue #28: the one seam both A11 and A12 follow.
+    #[test]
+    fn a_declared_target_overrides_the_runtime() {
+        // A range straddling the A12 boundary declines the effective minor
+        // (boundary-sensitive literals must decline) and skews the catalog.
+        let caret81 = target((8, 1), Some((8, u16::MAX)));
+        assert_eq!(effective_php_view(Some((8, 5)), Some(&caret81)), (None, true));
+        // A range entirely below the boundary answers with its floor.
+        let old = target((8, 1), Some((8, 2)));
+        assert_eq!(effective_php_view(Some((8, 5)), Some(&old)), (Some((8, 1)), true));
+        // A range entirely at/above the boundary answers with its floor too.
+        let new = target((8, 3), Some((8, u16::MAX)));
+        assert_eq!(effective_php_view(Some((8, 1)), Some(&new)), (Some((8, 3)), true));
+        // A target pinned exactly to the catalog pin carries no skew.
+        let pinned = target(steins_catalog::PINNED_PHP, Some(steins_catalog::PINNED_PHP));
+        assert_eq!(
+            effective_php_view(None, Some(&pinned)),
+            (Some(steins_catalog::PINNED_PHP), false)
+        );
+    }
+
+    /// No declaration: the pre-#28 posture, verbatim — runtime minor passthrough,
+    /// skew iff the runtime differs from the pin.
+    #[test]
+    fn no_target_falls_back_to_the_runtime() {
+        assert_eq!(
+            effective_php_view(Some(steins_catalog::PINNED_PHP), None),
+            (Some(steins_catalog::PINNED_PHP), false)
+        );
+        assert_eq!(effective_php_view(Some((8, 1)), None), (Some((8, 1)), true));
+        assert_eq!(effective_php_view(None, None), (None, false));
     }
 }

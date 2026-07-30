@@ -15,7 +15,7 @@ use steins_syntax::{FunctionDecl, SourceTree};
 pub mod composer;
 pub mod layout;
 
-pub use layout::{GoverningRoot, ProjectLayout, fallback_is_vendor};
+pub use layout::{GoverningRoot, PhpTarget, PhpTargetSource, ProjectLayout, fallback_is_vendor};
 
 /// The database trait analysis queries are written against. Downstream crates
 /// (e.g. `steins-infer`) define tracked queries taking `&dyn Db`.

@@ -293,6 +293,9 @@ fn run_check(args: &[String]) -> ExitCode {
         inputs.push(SourceFile::new(&db, path, text));
     }
     let layout = resolve_layout(&paths);
+    // The declared target PHP range (issue #28) gates the folder's absence
+    // family and curated-fact admission; the checker reads it from the layout.
+    folder.set_php_target(layout.php_target().cloned());
     let project = Project::new(&db, inputs.clone(), layout.clone());
     // `[runtime]` pseudo-constants (ADR-0037 §2): the boot truth the checker cannot
     // observe from source (e.g. `warning-handler = "null"`). Parsed above with the
@@ -1192,6 +1195,7 @@ fn run_annotate(args: &[String]) -> ExitCode {
     let facts = match target {
         Some(target_file) => {
             let layout = resolve_layout(&[root.to_string_lossy().into_owned()]);
+            folder.set_php_target(layout.php_target().cloned());
             let project = Project::new(&db, inputs, layout);
             annotate_project(&db, project, target_file, &mut folder)
         }
