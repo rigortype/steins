@@ -32,8 +32,9 @@ use steins_edit::{
     unified_diff,
 };
 use steins_infer::{
-    Diagnostic, LineFact, NoFold, SOUND_SUBSET_NOTICE, SidecarFolder, annotate_file,
-    annotate_project, apply_inline_ignores, check_project, check_project_with_runtime,
+    Diagnostic, EffectSummary, LineFact, NoFold, SOUND_SUBSET_NOTICE, SidecarFolder,
+    annotate_file, annotate_project, apply_inline_ignores, check_project,
+    check_project_with_runtime, effect_summaries_file, effect_summaries_project,
 };
 use steins_syntax::SourceTree;
 
@@ -71,7 +72,7 @@ fn dispatch(args: &[String]) -> ExitCode {
             errln!(
                 "usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor-diagnostics] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
             );
-            errln!("       steins annotate [--no-php] <file.php>");
+            errln!("       steins annotate [--no-php] [--format text|json] <file.php>");
             errln!(
                 "       steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--format text|json] <paths...>"
             );
@@ -1100,11 +1101,14 @@ fn print_transform_json(report: &TransformReport, postcheck: &PostCheck, applied
     }
 }
 
-/// `steins annotate [--no-php] <file.php>` — reprint one file with a right-margin
-/// column of proven inferred facts (ADR-0020). Never modifies the file; output
-/// goes to stdout. Exits 2 on a usage error (directory, missing/extra args).
+/// `steins annotate [--no-php] [--format text|json] <file.php>` — reprint one
+/// file with a right-margin column of proven inferred facts (ADR-0020), or (with
+/// `--format json`) emit the same effect summaries as a machine-readable
+/// document (issue #65). Never modifies the file; output goes to stdout. Exits
+/// 2 on a usage error (directory, missing/extra args).
 fn run_annotate(args: &[String]) -> ExitCode {
     let mut no_php = false;
+    let mut format = Format::Text;
     let mut project_dir: Option<String> = None;
     let mut paths: Vec<String> = Vec::new();
     let mut i = 0;
@@ -1122,6 +1126,21 @@ fn run_annotate(args: &[String]) -> ExitCode {
                 project_dir = Some(dir.clone());
                 i += 2;
             }
+            "--format" => {
+                let Some(value) = args.get(i + 1) else {
+                    errln!("steins: --format requires an argument (text|json)");
+                    return ExitCode::from(2);
+                };
+                match value.as_str() {
+                    "text" => format = Format::Text,
+                    "json" => format = Format::Json,
+                    other => {
+                        errln!("steins: unknown format `{other}` (text|json)");
+                        return ExitCode::from(2);
+                    }
+                }
+                i += 2;
+            }
             other if other.starts_with('-') => {
                 errln!("steins: unknown flag `{other}` for annotate");
                 return ExitCode::from(2);
@@ -1135,7 +1154,7 @@ fn run_annotate(args: &[String]) -> ExitCode {
 
     let [path] = paths.as_slice() else {
         errln!(
-            "steins: annotate takes exactly one file (usage: steins annotate [--no-php] [--project <dir>] <file.php>)"
+            "steins: annotate takes exactly one file (usage: steins annotate [--no-php] [--format text|json] [--project <dir>] <file.php>)"
         );
         return ExitCode::from(2);
     };
@@ -1191,22 +1210,68 @@ fn run_annotate(args: &[String]) -> ExitCode {
     }
 
     // If the target file was not found under the root (e.g. an explicit path
-    // outside the project dir), fall back to a one-file project.
-    let facts = match target {
-        Some(target_file) => {
-            let layout = resolve_layout(&[root.to_string_lossy().into_owned()]);
-            folder.set_php_target(layout.php_target().cloned());
-            let project = Project::new(&db, inputs, layout);
-            annotate_project(&db, project, target_file, &mut folder)
+    // outside the project dir), fall back to a one-file project. `--format
+    // json` (issue #65) reads the same [`EffectSummary`]s the text margin's
+    // effect facts are rendered from, so the two surfaces cannot disagree.
+    match format {
+        Format::Text => {
+            let facts = match target {
+                Some(target_file) => {
+                    let layout = resolve_layout(&[root.to_string_lossy().into_owned()]);
+                    folder.set_php_target(layout.php_target().cloned());
+                    let project = Project::new(&db, inputs, layout);
+                    annotate_project(&db, project, target_file, &mut folder)
+                }
+                None => {
+                    let input =
+                        SourceFile::new(&db, path.to_string_lossy().into_owned(), text.clone());
+                    annotate_file(&db, input, &mut folder)
+                }
+            };
+            out!("{}", render_annotation(&text, &facts));
         }
-        None => {
-            let input = SourceFile::new(&db, path.to_string_lossy().into_owned(), text.clone());
-            annotate_file(&db, input, &mut folder)
+        Format::Json => {
+            let summaries = match target {
+                Some(target_file) => {
+                    let layout = resolve_layout(&[root.to_string_lossy().into_owned()]);
+                    let project = Project::new(&db, inputs, layout);
+                    effect_summaries_project(&db, project, target_file)
+                }
+                None => {
+                    let input =
+                        SourceFile::new(&db, path.to_string_lossy().into_owned(), text.clone());
+                    effect_summaries_file(&db, input)
+                }
+            };
+            print_annotate_json(&summaries);
         }
-    };
-
-    out!("{}", render_annotation(&text, &facts));
+    }
     ExitCode::SUCCESS
+}
+
+/// `annotate --format json`'s document (issue #65): a top-level `functions`
+/// array, one entry per analyzed function/method, each carrying the same two
+/// dimensions the text margin's `effects: {…}` / `…?` spells — the sorted
+/// proven labels and the exhaustiveness bit — as distinct fields rather than
+/// one flattened string. Room is deliberately left for a future `declared`
+/// lane: only proven labels go in `effects`.
+fn print_annotate_json(summaries: &[EffectSummary]) {
+    let functions: Vec<serde_json::Value> = summaries
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.symbol,
+                "line": s.line,
+                "effects": s.labels,
+                "exhaustive": s.exhaustive,
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({ "functions": functions });
+    match serde_json::to_string_pretty(&doc) {
+        Ok(s) => outln!("{s}"),
+        Err(e) => errln!("steins: failed to serialize json: {e}"),
+    }
 }
 
 /// Render the annotated file: each source line reprinted verbatim, and lines

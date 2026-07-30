@@ -140,6 +140,16 @@ consequences are asymmetric on purpose:
 - The **exhaustiveness bit** never produces a finding. It surfaces in
   `annotate` as a `…?` marker: "these effects, and possibly more".
 
+`steins annotate --format json` (issue #65) is the machine-readable exit for
+the same two facts: a `functions` array, one entry per analyzed
+function/method, each carrying `name`, `line`, the sorted proven `effects`
+labels, and the `exhaustive` bit as distinct fields rather than the margin's
+flattened `…?` string. A catalogued-pure function reports `effects: []` and
+`exhaustive: true`; an uncatalogued/dynamic-tainted one reports
+`exhaustive: false`. The default `annotate` output is still the text margin —
+`--format json` is opt-in, mirroring `check --format json`'s posture
+(ADR-0053/0054) without sharing that command's document shape.
+
 `effect.liskov-widened` applies the same proven-only rule across an override:
 an implementation whose proven effects exceed the envelope declared on the class
 or interface method it overrides is a finding. Implementations may be purer,

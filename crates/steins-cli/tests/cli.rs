@@ -245,6 +245,55 @@ fn annotate_no_php_drops_folded_value_keeps_the_rest() {
     );
 }
 
+// ---- annotate --format json (issue #65): machine-readable effect summaries -
+
+#[test]
+fn annotate_json_shape_pins_colored_pure_and_tainted_functions() {
+    let path = fixture("annotate/annotate.php");
+    let r = run(&["annotate", "--format", "json", path.to_str().unwrap()]);
+    assert_eq!(r.code, 0, "annotate never fails on a readable file, got:\n{}", r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid json object");
+    let functions = doc["functions"].as_array().expect("functions array");
+
+    let by_name = |name: &str| -> &serde_json::Value {
+        functions.iter().find(|f| f["name"] == name).unwrap_or_else(|| panic!("no `{name}` entry"))
+    };
+
+    // A catalogued-pure function: proven-empty effects, exhaustive, name+line.
+    let price = by_name("price");
+    assert_eq!(price["effects"], serde_json::json!([]));
+    assert_eq!(price["exhaustive"], serde_json::json!(true));
+    assert_eq!(price["line"], serde_json::json!(8), "declaration line, got:\n{doc}");
+
+    // A colored function (calls file_put_contents): one proven label, still
+    // exhaustive — the catalog fully accounts for the body.
+    let writer = by_name("writer");
+    assert_eq!(writer["effects"], serde_json::json!(["io.fs.write"]));
+    assert_eq!(writer["exhaustive"], serde_json::json!(true));
+
+    // An exhaustiveness-tainted function: the uncatalogued/dynamic call widens
+    // to no proven label but flips the exhaustiveness bit — distinguishable
+    // from the catalogued-pure `price` above, which is the acceptance bar.
+    let mystery = by_name("mystery");
+    assert_eq!(mystery["effects"], serde_json::json!([]));
+    assert_eq!(mystery["exhaustive"], serde_json::json!(false));
+}
+
+#[test]
+fn annotate_json_is_opt_in_default_format_stays_the_text_margin() {
+    // The default surface is unchanged (design constraint): no `--format` flag
+    // still produces the `//=>` margin, byte-for-byte, not JSON.
+    let path = fixture("annotate/annotate.php");
+    let r = run(&["annotate", path.to_str().unwrap()]);
+    assert_eq!(r.code, 0);
+    assert!(r.stdout.contains("//=> effects: {io.fs.write}"), "text margin unchanged, got:\n{}", r.stdout);
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&r.stdout).is_err(),
+        "default output is the text margin, not JSON, got:\n{}",
+        r.stdout
+    );
+}
+
 #[test]
 fn annotate_errors_politely_on_a_directory() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");

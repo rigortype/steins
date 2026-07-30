@@ -2072,6 +2072,41 @@ pub fn annotate_project(
     annotate_units(&units, &index, target_idx, folder, project.layout(db))
 }
 
+/// Salsa-fed single-file effect summaries — the data source behind `annotate
+/// --format json` (issue #65). Mirrors [`annotate_file`], but returns the
+/// [`EffectSummary`] list itself rather than rendered [`LineFact`]s, so a JSON
+/// consumer keeps the proven-labels/exhaustiveness dimensions distinct instead
+/// of reading the `…?`-flattened margin string.
+#[must_use]
+pub fn effect_summaries_file(db: &dyn Db, file: SourceFile) -> Vec<EffectSummary> {
+    let tree = parse(db, file);
+    let units = [FileUnit { path: file.path(db), tree }];
+    let index = Index::from_units(&units);
+    effect_summary_units(&units, &index, 0)
+}
+
+/// Project-aware effect summaries (issue #65): the same cross-file resolution
+/// [`annotate_project`] uses for the margin, returning [`EffectSummary`] for
+/// the target file only.
+#[must_use]
+pub fn effect_summaries_project(
+    db: &dyn Db,
+    project: Project,
+    target: SourceFile,
+) -> Vec<EffectSummary> {
+    let handles: Vec<SourceFile> = project.files(db).to_vec();
+    let units: Vec<FileUnit> =
+        handles.iter().map(|&f| FileUnit { path: f.path(db), tree: parse(db, f) }).collect();
+    let db_index = project_index(db, project);
+    let pos: HashMap<SourceFile, usize> =
+        handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
+    let index = Index::from_db(db_index, &pos);
+    let Some(target_idx) = handles.iter().position(|&f| f == target) else {
+        return Vec::new();
+    };
+    effect_summary_units(&units, &index, target_idx)
+}
+
 /// Compute the annotate facts for `target` file within a project view.
 fn annotate_units(
     units: &[FileUnit],
