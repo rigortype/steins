@@ -204,3 +204,138 @@ outlive the answer that fixes it.
 - The pending list is a public interchange format. Changing the key shape breaks
   a caller's table, so it is pinned by hardcoded key strings in the `steins-wasm`
   tests and in `apps/playground/smoke.mjs`.
+
+## Amendment (2026-07-31): the width-safe fold subset (issue #64 S1.5)
+
+§4 declined the **whole** fold lane on any engine that is not provably 64-bit, and
+said so deliberately: "a later slice may admit a *curated width-safe subset* of the
+foldable allowlist… until such a subset is verified against a 32-bit engine, the
+whole lane declines rather than guesses which builtins are width-blind." This is
+that slice. The subset is now verified and the lane is relaxed to it. Nothing else
+in §4 changes — in particular **ADR-0056 Gate 2 keeps its `int_size == 8` leg**, and
+`int_size == None` still declines everything.
+
+### The rule
+
+A fold is admitted on a `PHP_INT_SIZE == 4` engine when **both** legs hold:
+
+1. `steins_catalog::width_safe(name)` — the callee is on the verified subset.
+2. **The argument range guard**: every integer occurring anywhere in the arguments
+   lies within `[-(2^31 - 1), 2^31 - 1]`, counted recursively through array
+   literals and over explicit integer **keys** as well as values.
+
+Neither leg means anything alone: the catalog's verdict is stated *for exactly the
+tuples the range guard admits*. Anything else — a refused name, an out-of-range
+integer, an unreported width, a width nobody has probed — declines exactly as
+before, with the same shape (`None` / `Widen`). Nothing fabricates.
+
+The guard's lower bound is `-(2^31 - 1)` and **not** `-2^31`. `PHP_INT_MIN` on a
+32-bit engine is the one integer whose magnitude that machine cannot represent, so
+it is the seed of every boundary flip: `abs(-2147483648)` promotes to float there
+and stays `int` on a 64-bit engine. Excluding it means no admitted integer has an
+out-of-range magnitude, which makes the `abs`-shaped flip structurally unreachable
+rather than merely unobserved. The cost is one value per call site.
+
+Keys are guarded because a key is not decoration. `count([3000000000 => 'a', 'b'])`
+has no out-of-range *value*, and yet the key is what PHP's next-int rule reads to
+decide whether the array has one element or two.
+
+### The classification criterion
+
+A name is width-safe iff, for every argument tuple the range guard admits, the
+32-bit engine either returns the **identical value and type tag** the 64-bit engine
+returns, or **declines** (throws, or widens).
+
+The decline clause is deliberate and it is the sound direction: a decline is
+precisely what the blanket §4 gate does for every name today, so the browser loses
+precision there and can never gain a wrong literal. Requiring bit-equality
+*including* declines would refuse `str_repeat` — `str_repeat("", "3000000000")` is
+`""` on a 64-bit engine and a `TypeError` on a 32-bit one, because an oversized
+numeric string landing on an `int` parameter is coerced by the *engine's* width —
+and `str_repeat` is the builtin in this issue's own flagship acceptance criterion.
+The hazard §4 names is the *silent* divergence ("None of these fail. They return
+silently wrong values"), and that is what the criterion excludes.
+
+Two divergence directions are therefore refusals, and both were checked for:
+
+- **silent** — both engines return a value and the values or their type tags
+  differ. Unsound: a wrong literal enters a proof.
+- **reverse** — the 32-bit engine returns a value where the 64-bit engine declines.
+  Also unsound: the browser would show a value the real 64-bit runtime never
+  produces. **Zero rows observed**, on any name.
+
+### The evidence
+
+310 adversarial `(name, args)` tuples, every one of them passing the range guard,
+run through the **same** `steins_handle` dispatch core on both machines — 64-bit
+`php` 8.5.8 over the runner's own NDJSON protocol, 32-bit php-wasm 0.1.0
+(PHP 8.5.2, `PHP_INT_SIZE = 4`, `sapi = embed`) over the ADR §5 patched prologue.
+Same dispatch function on both sides, so a difference is the machine and not a
+second semantics. Both builds report `precision = 14` and
+`serialize_precision = -1`, which is what makes the float-rendering names agree.
+
+The probe families: boundary integers `±(2^31 - 1)`, oversized numeric strings
+(`"3000000000"`, `"9223372036854775807"`, `"9007199254740993"`), oversized and
+denormal floats, negative inputs, `-0.0`, explicit integer array keys at
+`PHP_INT_MAX`, length- and position-derived results, base-converting arguments, and
+every format specifier `sprintf` has for an integer.
+
+### The 22-name disposition
+
+| name | verdict | probes (silent/reverse/decline) | one-line reason |
+| --- | --- | --- | --- |
+| `strtolower` | safe | 16 (0/0/0) | string in, string out; an in-range coerced integer has one decimal spelling |
+| `strtoupper` | safe | 14 (0/0/0) | as `strtolower` |
+| `ucfirst` | safe | 10 (0/0/0) | as `strtolower` |
+| `lcfirst` | safe | 10 (0/0/0) | as `strtolower` |
+| `trim` | safe | 11 (0/0/0) | byte transform of the subject; charlist is a string |
+| `ltrim` | safe | 8 (0/0/0) | as `trim` |
+| `rtrim` | safe | 8 (0/0/0) | as `trim` |
+| `strrev` | safe | 9 (0/0/0) | as `trim` |
+| `substr` | safe | 22 (0/0/7) | int params, but an in-range offset/length clamps identically; the 7 declines are `TypeError` on an oversized numeric-string or float offset |
+| `str_replace` | safe | 12 (0/0/0) | no int parameter is passed (`$count` is by-ref and absent) |
+| `str_repeat` | safe | 16 (0/0/2) | the repeated bytes do not depend on the width; the 2 declines are `TypeError` on an oversized count |
+| `implode` | safe | 13 (0/0/1) | each element renders under the same `precision`; the decline is an unassignable next-int key |
+| `sprintf` | **REFUSED** | 19 (9/0/0) | `%b`/`%x`/`%o`/`%u` render the machine word — `sprintf("%x", -1)` is `"ffffffffffffffff"` vs `"ffffffff"` — and `%d` re-imports `intval`'s saturation |
+| `strlen` | safe | 12 (0/0/0) | result bounded by the subject, which is bounded by the engine's own memory |
+| `abs` | **REFUSED** | 16 (6/0/0) | the **type tag** flips: `abs("3000000000")` is `int` vs `float`; a numeric string re-enters as an integer by the engine's width, past the range guard |
+| `intdiv` | safe | 17 (0/0/3) | `\|intdiv(a, b)\| <= \|a\|`, so an in-range pair yields an in-range result; the 3 declines are `TypeError`/`ArithmeticError` |
+| `intval` | **REFUSED** | 17 (10/0/0) | saturation and wraparound by definition: `intval("3000000000")` is `3000000000` vs `2147483647`; `intval(4.2e9)` is `4200000000` vs `-94967296` |
+| `floatval` | safe | 15 (0/0/0) | returns an IEEE double, 64-bit on both machines |
+| `strval` | safe | 18 (0/0/0) | renders under the same `precision = 14`; an in-range integer has one spelling |
+| `boolval` | safe | 17 (0/0/0) | returns a bool; truthiness is not arithmetic |
+| `in_array` | safe | 21 (0/0/0) | returns a bool from php-src's own `zendi_smart_strcmp`, whose overflow guard makes two oversized numeric strings compare as *strings* on both machines |
+| `count` | safe | 9 (0/0/1) | element count, bounded by the fold seam's 256-entry array budget; the decline is an unassignable next-int key |
+
+19 safe, 3 refused. The three refusals are exactly the builtins whose *job* is to
+render or produce an integer in the machine's own width — which is the result the
+subset was supposed to isolate.
+
+`sprintf` could in principle be sub-classified by format string (`%s` is as safe as
+`strval`). That is deliberately not attempted: the safe/unsafe line would live
+inside a string literal, which is the wrong place for a soundness gate.
+
+### Why curated rows are not relaxed with it
+
+A fold is a claim about **one argument tuple**, and a range guard can bound a tuple.
+A curated return-fact row is a claim about a builtin's **whole return domain**,
+verified against the 64-bit engine at `PINNED_PHP`; there is no per-call tuple to
+bound it with, so there is nothing here for it to be the analogue of. `strlen` is on
+the width-safe fold subset and its curated `int<0, max>` row still declines at
+`int_size == 4` — that contrast is pinned by a test.
+
+### A runner fatal found en route
+
+Rebuilding an array literal runs PHP's own key rules, and those rules can **throw**:
+`[PHP_INT_MAX => 'a', 'b']` raises "Cannot add element to the array as the next
+element is already occupied". `steins_decode_args` ran outside `steins_fold`'s
+`try`, so that Error escaped as an **uncaught fatal** — it took the resident runner
+down mid-NDJSON and with it every later request in the run, on the native 64-bit
+sidecar as much as under php-wasm. The decode now has its own catch and widens
+("undecodable argument"), which is a fact about the argument rather than a result of
+the folded call, and which honours the runner's standing contract that any misuse
+widens.
+
+It surfaced here because the threshold is the engine's own `PHP_INT_MAX`: at
+`int_size == 4` it drops from 2^63-1, which no source realistically writes, to
+2147483647 — inside the range guard, and a key a human plausibly types.
