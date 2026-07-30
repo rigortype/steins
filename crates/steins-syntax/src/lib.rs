@@ -2609,12 +2609,15 @@ fn signature_is_typed(
 /// matched (the prefix is `invoke`, not `_`).
 fn push_reflection_method(selector: &ClassLikeMemberSelector<'_>, span: Span, out: &mut Lowered) {
     let Some(name) = method_name_of(selector) else { return };
-    let kind = if name.len() >= "invoke".len() && name[.."invoke".len()].eq_ignore_ascii_case("invoke")
-    {
+    // `get(..n)`, never `[..n]`: PHP identifiers can be multibyte (a method named
+    // in Japanese is real code — ec-cube), and a byte-length check does not make
+    // byte index `n` a char boundary. A prefix slice that lands mid-character is
+    // simply not the ASCII prefix `invoke`/`newInstance`.
+    let has_prefix =
+        |p: &str| name.get(..p.len()).is_some_and(|head| head.eq_ignore_ascii_case(p));
+    let kind = if has_prefix("invoke") {
         ReflectionKind::Invoke
-    } else if name.len() >= "newInstance".len()
-        && name[.."newInstance".len()].eq_ignore_ascii_case("newInstance")
-    {
+    } else if has_prefix("newInstance") {
         ReflectionKind::NewInstance
     } else {
         return;

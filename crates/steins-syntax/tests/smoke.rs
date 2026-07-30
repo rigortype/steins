@@ -920,3 +920,20 @@ fn reflection_sites_poison_nothing() {
     assert!(tree.scopes().iter().all(|s| !s.poisoned));
     assert!(tree.dynamism_sites().is_empty());
 }
+
+/// A method name in a multibyte script must not panic the reflection-site
+/// lowering (issue #30's inventory): `name[..11]` on a Japanese method name is
+/// not a char boundary. Found by running the analyzer over ec-cube, whose
+/// domain methods are named in Japanese — real code, not a fuzzer artifact.
+#[test]
+fn multibyte_method_names_do_not_panic_reflection_lowering() {
+    let src = "<?php\n\
+        $q->キャンセル処理を実行する();\n\
+        $q->invoke何か();\n\
+        $q->newInstance生成();\n\
+        $q->invokeHandler();\n";
+    let tree = steins_syntax::SourceTree::parse(src);
+    // The ASCII-prefixed calls still classify; the multibyte-led one is simply
+    // not a reflection site.
+    assert!(tree.parse_errors().is_empty());
+}
