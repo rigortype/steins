@@ -745,7 +745,8 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
     // apply here too. The resident folder drops target-dependent memos on the
     // change, so cross-package reuse stays sound.
     let php_target = layout.php_target().cloned();
-    let project = Project::new(&db, inputs, layout);
+    let plugins = steins_db::PluginFacts::discover(&layout, None);
+    let project = Project::new(&db, inputs, layout, plugins);
     let mut diags: Vec<Diagnostic> = check_under_target(&db, project, php_target);
     diags.retain(|d| !parse_err_set.contains(d.path.as_str()));
     diags.sort_by(|a, b| (&a.path, a.line, a.column).cmp(&(&b.path, b.line, b.column)));
@@ -824,7 +825,8 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
     // to go straight to the resident folder, inheriting whichever corpus package's
     // target the worker last held.
     let php_target = layout.php_target().cloned();
-    let project = Project::new(&db, inputs, layout.clone());
+    let plugins = steins_db::PluginFacts::discover(&layout, None);
+    let project = Project::new(&db, inputs, layout.clone(), plugins);
     let mut diags: Vec<Diagnostic> = check_under_target(&db, project, php_target);
     diags.retain(|d| !parse_err_set.contains(d.path.as_str()));
 

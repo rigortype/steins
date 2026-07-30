@@ -565,8 +565,12 @@ fn replay_and_direct_runs_agree_on_the_annotations() {
     let annotate = |folder: &mut dyn Folder| -> Vec<(u32, String)> {
         let db = steins_db::SteinsDatabase::default();
         let file = steins_db::SourceFile::new(&db, "test.php".to_owned(), FLAGSHIP.to_owned());
-        let project =
-            steins_db::Project::new(&db, vec![file], steins_db::ProjectLayout::fallback());
+        let project = steins_db::Project::new(
+            &db,
+            vec![file],
+            steins_db::ProjectLayout::fallback(),
+            steins_db::PluginFacts::none(),
+        );
         annotate_project(&db, project, file, folder)
             .iter()
             .map(|f: &LineFact| (f.line, f.body()))

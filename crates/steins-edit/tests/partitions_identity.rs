@@ -28,7 +28,7 @@ fn project(db: &SteinsDatabase) -> Project {
         .iter()
         .map(|(p, t)| SourceFile::new(db, (*p).to_owned(), (*t).to_owned()))
         .collect();
-    Project::new(db, inputs, steins_db::ProjectLayout::fallback())
+    Project::new(db, inputs, steins_db::ProjectLayout::fallback(), steins_db::PluginFacts::none())
 }
 
 /// A fully-declared map assigning svc-a, a shared lib, and observers — the richest

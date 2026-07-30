@@ -121,7 +121,7 @@ pub fn run(dir_arg: Option<&str>) -> Result<(), String> {
         // Each file is its own single-file project (a standalone universe).
         let db = SteinsDatabase::default();
         let input = SourceFile::new(&db, name.clone(), text);
-        let project = Project::new(&db, vec![input], steins_db::ProjectLayout::fallback());
+        let project = Project::new(&db, vec![input], steins_db::ProjectLayout::fallback(), steins_db::PluginFacts::none());
         let observations = collect_assert_types(&db, project, &mut folder);
         for obs in observations {
             records.push(Record::classify(&name, obs));

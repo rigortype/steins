@@ -1,0 +1,16 @@
+{
+    "packages": [
+        {
+            "name": "acme/cache",
+            "version": "1.0.0",
+            "type": "library"
+        },
+        {
+            "name": "acme/steins-plugin",
+            "version": "1.0.0",
+            "type": "steins-plugin"
+        }
+    ],
+    "dev": false,
+    "dev-package-names": []
+}

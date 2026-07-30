@@ -1,0 +1,8 @@
+{
+    "name": "acme/steins-plugin",
+    "description": "Steins effect facts for the Acme cache client.",
+    "type": "steins-plugin",
+    "require": {
+        "acme/cache": "^1.0"
+    }
+}

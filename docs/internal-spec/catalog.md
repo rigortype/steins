@@ -91,11 +91,19 @@ Breadth — mysqli, the rest of the mining data's method rows — belongs to the
 ADR-0014 generator, not to hand-seeding. What ships here is the row format and
 its receiver-resolution contract.
 
-## `known_labels()` / `subsumes()` / `is_known_label()` / `nearest_label()`
+## `known_labels()` / `subsumes()` / `is_known_label()` / `nearest_label()` / `LabelRegistry`
 
 The effect label registry and prefix subsumption. Semantics are specified in
 [`effects.md`](../type-specification/effects.md). `nearest_label` supplies a
 Levenshtein-based typo suggestion (distance ≤ 2).
+
+`known_labels()` is the **builtin** half and stays a closed constant. What
+inference actually asks is `LabelRegistry`: that table plus the extension labels
+the ADR-0068 plugin channel registered for the project at hand.
+`LabelRegistry::builtin()` is the default and answers identically to the free
+functions, so every caller without a project in hand (a single-file check, the
+browser) is unaffected. `core_roots()` / `is_core_label()` name the roots Steins
+owns — the other side of the vendor-root rule a plugin registration passes.
 
 ## `hierarchy_generated` — the builtin class hierarchy
 

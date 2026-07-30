@@ -1,0 +1,10 @@
+{
+    "name": "acme/cache",
+    "description": "The described package. Steins reads no PHP of it; the plugin beside it says what it does.",
+    "type": "library",
+    "autoload": {
+        "files": [
+            "src/cache.php"
+        ]
+    }
+}

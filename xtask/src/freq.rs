@@ -100,7 +100,7 @@ fn count_package(dir: &std::path::Path) -> (HashMap<String, u64>, usize) {
             SourceFile::new(&db, f.to_string_lossy().into_owned(), text)
         })
         .collect();
-    let project = Project::new(&db, inputs.clone(), steins_db::ProjectLayout::fallback());
+    let project = Project::new(&db, inputs.clone(), steins_db::ProjectLayout::fallback(), steins_db::PluginFacts::none());
     let index = project_index(&db, project);
 
     for &input in &inputs {

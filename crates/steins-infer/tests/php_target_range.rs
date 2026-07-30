@@ -35,7 +35,7 @@ fn dump_under(layout: ProjectLayout) -> String {
     let db = SteinsDatabase::default();
     let src = "<?php\n$a = [-5 => \"a\", \"b\"];\n\\PHPStan\\dumpType($a);\n";
     let file = SourceFile::new(&db, "/proj/t.php".to_owned(), src.to_owned());
-    let project = Project::new(&db, vec![file], layout);
+    let project = Project::new(&db, vec![file], layout, steins_db::PluginFacts::none());
     let ds = check_project_with_runtime(&db, project, &mut NoFold, true);
     ds.into_iter().find(|d| d.id == "debug.type").expect("one dump").message
 }
@@ -75,7 +75,7 @@ fn no_target_and_no_runtime_still_declines() {
     let db = SteinsDatabase::default();
     let src = "<?php\n$a = [1, 2];\n\\PHPStan\\dumpType($a);\n";
     let file = SourceFile::new(&db, "/proj/t.php".to_owned(), src.to_owned());
-    let project = Project::new(&db, vec![file], layout_with(None));
+    let project = Project::new(&db, vec![file], layout_with(None), steins_db::PluginFacts::none());
     let ds = check_project_with_runtime(&db, project, &mut NoFold, true);
     let msg = ds.into_iter().find(|d| d.id == "debug.type").expect("one dump").message;
     assert_ne!(msg, "dumped type: unknown", "version-independent literals resolve");

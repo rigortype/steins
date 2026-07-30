@@ -35,7 +35,8 @@ use std::collections::{HashMap, HashSet};
 use steins_contract::ContractTy;
 use steins_contract::normalize;
 use steins_db::{
-    Db, DeclSite, Project, ProjectIndex, ProjectLayout, Resolve, SourceFile, parse, project_index,
+    Db, DeclSite, PluginFacts, Project, ProjectIndex, ProjectLayout, Resolve, SourceFile, parse,
+    project_index,
 };
 use steins_sidecar::{EnvInfo, FoldArg, FoldKey, FoldResult, FoldValue, Reflection};
 #[cfg(not(target_arch = "wasm32"))]
@@ -107,7 +108,9 @@ pub use steins_domain::Certainty;
 
 /// The registry id for the unknown-effect-label check (ADR-0018/0022): a declared
 /// `#[\Steins\Effect(...)]` label that is not in the label registry
-/// ([`steins_catalog::is_known_label`]) — a typo or an unregistered private label.
+/// (`steins_catalog::LabelRegistry` — the builtin taxonomy plus whatever the
+/// ADR-0068 plugin channel registered for this project) — a typo, or a private
+/// label no plugin registers.
 pub const UNKNOWN_LABEL_ID: &str = "effect.unknown-label";
 
 /// The registry id for the `@throws` envelope check (ADR-0040/0007): a **checked**
@@ -1766,7 +1769,7 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let tree = parse(db, file);
     let units = [FileUnit { path: file.path(db), tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, &mut NoFold, true, &ProjectLayout::fallback())
+    check_units(&units, &index, &mut NoFold, true, &ProjectLayout::fallback(), &PluginFacts::none())
 }
 
 /// The folding-aware check for one file (run **outside** salsa; ADR-0004),
@@ -1776,7 +1779,7 @@ pub fn check_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec
     let tree = parse(db, file);
     let units = [FileUnit { path: file.path(db), tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, folder, true, &ProjectLayout::fallback())
+    check_units(&units, &index, folder, true, &ProjectLayout::fallback(), &PluginFacts::none())
 }
 
 /// The folding-aware check for a whole **project** (ADR-0009/0015): every file
@@ -1807,7 +1810,14 @@ pub fn check_project_with_runtime(
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
     let index = Index::from_db(db_index, &pos);
-    check_units(&units, &index, folder, warning_handler_abort, project.layout(db))
+    check_units(
+        &units,
+        &index,
+        folder,
+        warning_handler_abort,
+        project.layout(db),
+        project.plugins(db),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1892,7 +1902,7 @@ pub fn check_with(
     let _ = functions; // authoritative list comes from `tree.functions()`
     let units = [FileUnit { path, tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, folder, true, &ProjectLayout::fallback())
+    check_units(&units, &index, folder, true, &ProjectLayout::fallback(), &PluginFacts::none())
 }
 
 /// The single-file check with a folder **and** the `warning-handler` posture
@@ -1910,7 +1920,14 @@ pub fn check_full(
 ) -> Vec<Diagnostic> {
     let units = [FileUnit { path, tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, folder, warning_handler_abort, &ProjectLayout::fallback())
+    check_units(
+        &units,
+        &index,
+        folder,
+        warning_handler_abort,
+        &ProjectLayout::fallback(),
+        &PluginFacts::none(),
+    )
 }
 
 /// The project checking core: direct + propagation passes over every file's
@@ -1921,6 +1938,7 @@ fn check_units(
     folder: &mut dyn Folder,
     warning_handler_abort: bool,
     layout: &ProjectLayout,
+    plugins: &PluginFacts,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
 
@@ -1951,7 +1969,7 @@ fn check_units(
     // The callable-purity oracle (ADR-0063 P3): one whole-project effect fixpoint per
     // run, shared by every file's context, and built only when some docblock actually
     // spells a purity-bearing callable.
-    let purity = PurityOracle::build(units, index);
+    let purity = PurityOracle::build(units, index, plugins);
 
     for fi in 0..units.len() {
         let cx = Cx::new_with(
@@ -2087,7 +2105,7 @@ fn check_units(
     }
 
     // --- Effects pass (ADR-0005), computed once over the whole project. ------
-    out.extend(effect_diagnostics(units, index));
+    out.extend(effect_diagnostics(units, index, plugins));
 
     // --- Throw system (ADR-0040/0007): `@throws` envelope + Liskov. ----------
     out.extend(throw_diagnostics(units, index));
@@ -2169,7 +2187,7 @@ pub fn annotate_facts(
     let _ = (functions, classes);
     let units = [FileUnit { path, tree }];
     let index = Index::from_units(&units);
-    annotate_units(&units, &index, 0, folder, &ProjectLayout::fallback())
+    annotate_units(&units, &index, 0, folder, &ProjectLayout::fallback(), &PluginFacts::none())
 }
 
 /// Salsa-fed single-file annotate.
@@ -2178,7 +2196,7 @@ pub fn annotate_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> 
     let tree = parse(db, file);
     let units = [FileUnit { path: file.path(db), tree }];
     let index = Index::from_units(&units);
-    annotate_units(&units, &index, 0, folder, &ProjectLayout::fallback())
+    annotate_units(&units, &index, 0, folder, &ProjectLayout::fallback(), &PluginFacts::none())
 }
 
 /// Project-aware annotate (ADR-0020, `--project`): compute the margin facts for
@@ -2201,7 +2219,7 @@ pub fn annotate_project(
     let Some(target_idx) = handles.iter().position(|&f| f == target) else {
         return Vec::new();
     };
-    annotate_units(&units, &index, target_idx, folder, project.layout(db))
+    annotate_units(&units, &index, target_idx, folder, project.layout(db), project.plugins(db))
 }
 
 /// Salsa-fed single-file effect summaries — the data source behind `annotate
@@ -2214,7 +2232,7 @@ pub fn effect_summaries_file(db: &dyn Db, file: SourceFile) -> Vec<EffectSummary
     let tree = parse(db, file);
     let units = [FileUnit { path: file.path(db), tree }];
     let index = Index::from_units(&units);
-    effect_summary_units(&units, &index, 0)
+    effect_summary_units(&units, &index, 0, &PluginFacts::none())
 }
 
 /// Project-aware effect summaries (issue #65): the same cross-file resolution
@@ -2236,7 +2254,7 @@ pub fn effect_summaries_project(
     let Some(target_idx) = handles.iter().position(|&f| f == target) else {
         return Vec::new();
     };
-    effect_summary_units(&units, &index, target_idx)
+    effect_summary_units(&units, &index, target_idx, project.plugins(db))
 }
 
 /// Compute the annotate facts for `target` file within a project view.
@@ -2246,11 +2264,12 @@ fn annotate_units(
     target: usize,
     folder: &mut dyn Folder,
     layout: &ProjectLayout,
+    plugins: &PluginFacts,
 ) -> Vec<LineFact> {
     let mut facts: Vec<LineFact> = Vec::new();
 
     // 1. Effects (and throws) on each declaration line in the target file.
-    for s in effect_summary_units(units, index, target) {
+    for s in effect_summary_units(units, index, target, plugins) {
         let throws_present = !s.throws.is_empty() || !s.throws_exhaustive;
         facts.push(LineFact {
             line: s.line,
@@ -2292,7 +2311,7 @@ fn annotate_units(
 
     // 3. Findings on the target file (project-wide check, filtered by path).
     let target_path = units[target].path;
-    for d in check_units(units, index, folder, true, layout) {
+    for d in check_units(units, index, folder, true, layout, plugins) {
         if d.path == target_path {
             facts.push(LineFact { line: d.line, kind: FactKind::Finding { id: d.id } });
         }
@@ -2506,9 +2525,44 @@ fn eval_conditional_purity(
     UserCallEffects { discharge_taint: discharge, labels }
 }
 
+/// The plugin channel's coloring for a statically-named call that resolved to
+/// **nothing** — no project body, no catalog row (ADR-0068 §1).
+///
+/// Precedence is structural rather than compared: this is only ever reached from
+/// the `FnResolution::Unknown` arm, so a builtin row and a project function have
+/// both already won. The extra guards below are for the two shapes `Unknown` also
+/// covers and a plugin must not speak for: an **ambiguous** name (the project does
+/// define it, twice) and a **namespaced** name (a plugin manifest colors global
+/// functions, which is what `acme_cache_get` is).
+///
+/// The caller puts the answer in the DECLARED lane and keeps the exhaustiveness
+/// taint. That is the opposite of ADR-0067's interface-envelope import, and
+/// deliberately so: an envelope is a checked contract (`effect.liskov-widened`
+/// holds every analyzed implementation to it), while nothing checks a plugin's
+/// assertion. Assert, never prove — so the summary reads "declared `acme.cache`,
+/// and possibly more", which is the truth of an unchecked claim.
+fn plugin_call_labels<'p>(
+    cx: &Cx,
+    plugins: &'p PluginFacts,
+    name: &NameRef,
+) -> Option<&'p [String]> {
+    let simple = name.simple();
+    if simple != name.raw.trim_start_matches('\\') {
+        return None; // a namespaced userland name is not a global function
+    }
+    if cx.index.has_simple_function(simple) {
+        return None; // the project defines it (ambiguously, or we would be elsewhere)
+    }
+    plugins.effect_labels(simple)
+}
+
 /// The unified effect fixpoint for **every** function and method in the whole
 /// project, keyed by [`Sym`] (FQN-based, so cross-file edges match).
-fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet> {
+fn compute_effects(
+    units: &[FileUnit],
+    index: &Index,
+    plugins: &PluginFacts,
+) -> HashMap<Sym, EffectSet> {
     // Each effect unit with the file it lives in and its enclosing class FQN.
     struct Unit<'a> {
         sym: Sym,
@@ -2612,7 +2666,15 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
                             }
                         }
                         // Ambiguous / unresolved: effects unknown → non-exhaustive.
-                        FnResolution::Unknown => *ex = false,
+                        // The plugin channel gets the last word here and nowhere
+                        // else (ADR-0068 precedence): a project body and a catalog
+                        // row are both already spoken for above.
+                        FnResolution::Unknown => {
+                            if let Some(labels) = plugin_call_labels(&cx, plugins, name) {
+                                dc.extend(labels.iter().cloned());
+                            }
+                            *ex = false;
+                        }
                     }
                 }
                 EffectOrigin::Output { keyword, span } => {
@@ -2743,7 +2805,12 @@ fn compute_effects(units: &[FileUnit], index: &Index) -> HashMap<Sym, EffectSet>
                                     d.insert(f);
                                 }
                             }
-                            FnResolution::Unknown => *ex = false,
+                            FnResolution::Unknown => {
+                                if let Some(labels) = plugin_call_labels(&cx, plugins, callee) {
+                                    dc.extend(labels.iter().cloned());
+                                }
+                                *ex = false;
+                            }
                         },
                     }
                 }
@@ -2855,13 +2922,18 @@ pub fn effect_summary(
     let _ = (functions, classes);
     let units = [FileUnit { path: "", tree }];
     let index = Index::from_units(&units);
-    effect_summary_units(&units, &index, 0)
+    effect_summary_units(&units, &index, 0, &PluginFacts::none())
 }
 
 /// The proven effect set of every concrete function/method in the `target` file.
 #[must_use]
-fn effect_summary_units(units: &[FileUnit], index: &Index, target: usize) -> Vec<EffectSummary> {
-    let effects = compute_effects(units, index);
+fn effect_summary_units(
+    units: &[FileUnit],
+    index: &Index,
+    target: usize,
+    plugins: &PluginFacts,
+) -> Vec<EffectSummary> {
+    let effects = compute_effects(units, index, plugins);
     let throws = compute_throws(units, index);
     let tree = units[target].tree;
     let sorted_labels = |sym: &Sym| -> Vec<String> {
@@ -2986,7 +3058,7 @@ impl PurityOracle {
     /// judgment by being *written*, and every purity-bearing spelling in the
     /// vocabulary (`pure-callable`, `pure-closure`, `static-pure-closure`) contains
     /// one of the two literal substrings tested.
-    fn build(units: &[FileUnit], index: &Index) -> Option<Self> {
+    fn build(units: &[FileUnit], index: &Index, plugins: &PluginFacts) -> Option<Self> {
         let spells_purity = |doc: Option<&String>| {
             doc.is_some_and(|t| t.contains("pure-callable") || t.contains("pure-closure"))
         };
@@ -3000,7 +3072,7 @@ impl PurityOracle {
         if !any {
             return None;
         }
-        Some(PurityOracle { effects: compute_effects(units, index) })
+        Some(PurityOracle { effects: compute_effects(units, index, plugins) })
     }
 
     /// Whether `sym`'s inferred effect envelope is **provably** not pure: the
@@ -3023,7 +3095,7 @@ impl PurityOracle {
 }
 
 /// Effect-envelope diagnostics for the whole project (proven violations only).
-fn effect_diagnostics(units: &[FileUnit], index: &Index) -> Vec<Diagnostic> {
+fn effect_diagnostics(units: &[FileUnit], index: &Index, plugins: &PluginFacts) -> Vec<Diagnostic> {
     // Fast path: no envelope anywhere → nothing to check.
     let any_envelope = units.iter().any(|u| {
         u.tree.functions().iter().any(|f| f.effect_envelope.is_some())
@@ -3033,13 +3105,16 @@ fn effect_diagnostics(units: &[FileUnit], index: &Index) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let effects = compute_effects(units, index);
+    let effects = compute_effects(units, index, plugins);
+    // The registry this project's declared labels are judged against (ADR-0068):
+    // builtin taxonomy plus whatever the plugin channel registered.
+    let registry = plugins.registry();
     let mut out = Vec::new();
     for fi in 0..units.len() {
         let cx = Cx::new(units, index, fi);
         for f in cx.tree().functions() {
             let Some(env) = &f.effect_envelope else { continue };
-            report_unit(&mut out, &cx, None, &f.name, env, &f.effect_origins, &effects);
+            report_unit(&mut out, &cx, None, &f.name, env, &f.effect_origins, &effects, registry);
         }
         for c in cx.tree().classes() {
             for m in &c.methods {
@@ -3053,6 +3128,7 @@ fn effect_diagnostics(units: &[FileUnit], index: &Index) -> Vec<Diagnostic> {
                         env,
                         &m.effect_origins,
                         &effects,
+                        registry,
                     );
                 }
                 // Liskov (ADR-0033 point 5): a concrete implementation whose PROVEN
@@ -3160,6 +3236,7 @@ fn nearest_parent_effect(cx: &Cx, class: &ClassDecl, method: &str) -> Option<(St
 }
 
 /// Emit the diagnostics for one declared-envelope unit (ADR-0005/0018).
+#[allow(clippy::too_many_arguments)]
 fn report_unit(
     out: &mut Vec<Diagnostic>,
     cx: &Cx,
@@ -3168,13 +3245,15 @@ fn report_unit(
     envelope: &EffectEnvelope,
     origins: &[EffectOrigin],
     effects: &HashMap<Sym, EffectSet>,
+    registry: &steins_catalog::LabelRegistry,
 ) {
     // 1. Unknown declared labels (one diagnostic each, at the attribute span).
     for label in &envelope.labels {
-        if steins_catalog::is_known_label(label) {
+        if registry.is_known(label) {
             continue;
         }
-        let suggestion = steins_catalog::nearest_label(label)
+        let suggestion = registry
+            .nearest(label)
             .map(|s| format!(" — did you mean '{s}'?"))
             .unwrap_or_default();
         let msg = format!(

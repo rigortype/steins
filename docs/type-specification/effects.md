@@ -1,9 +1,10 @@
 # Effects
 
 **Status: implemented** for the labels, envelopes, propagation, and checks
-described below. The plugin channel that would open the registry is **designed,
-not implemented**. ADR-0005, ADR-0006, ADR-0008, ADR-0018, ADR-0019, ADR-0033,
-ADR-0067.
+described below. The plugin channel that opens the registry is **partly
+implemented**: a Composer package's manifest registers labels and colors plain
+functions; the sidecar half that would boot the framework does not exist.
+ADR-0005, ADR-0006, ADR-0008, ADR-0018, ADR-0019, ADR-0033, ADR-0067, ADR-0068.
 
 ## The second dimension
 
@@ -26,8 +27,8 @@ A declared `io` therefore admits an inferred `io.net.http`.
 
 ### The registry
 
-The known-label set is closed today. It is the union of every label the catalog
-can color a builtin with, plus the ADR-0018 taxonomy roots:
+The **builtin** label set is the union of every label the catalog can color a
+builtin with, plus the ADR-0018 taxonomy roots:
 
 ```text
 exit
@@ -71,10 +72,48 @@ it exists, the coarse-but-true label is preferred to a precise guess.
 so the catalog can prove nothing about it. No plain builtin is colored `ffi`
 (FFI is OO-only); the label exists so `#[\Steins\Effect('ffi')]` is valid.
 
-**Ecosystem and private labels** (`io.redis`, `email.send`) are *correctly*
-unknown today: they become known only through the ADR-0012 plugin channel, which
-is not implemented. The registry is designed to be open; it is closed in practice
-because nothing can open it yet.
+**Ecosystem and private labels** (`io.redis`, `email.send`) are not builtin, and
+before issue #68 they were *correctly* unknown, because nothing could open the
+registry. A Composer package of `type: steins-plugin` now can, through the
+manifest channel.
+
+A plugin ships a `steins-plugin.json` at its own package root:
+
+```json
+{
+    "steins-plugin-api": 1,
+    "labels": ["acme.cache"],
+    "effects": { "acme_cache_get": ["acme.cache"] }
+}
+```
+
+Steins reads it directly from `vendor/<name>/steins-plugin.json` after finding
+the package in `vendor/composer/installed.json` — no PHP runs, so discovery is
+deterministic and `--no-php` loses nothing. A `steins.toml` `[plugins] allow =
+[…]` list **replaces** discovery with exactly the named packages (ADR-0039: the
+explicit listing wins) and vouches for their identity.
+
+Two rules govern what a plugin may say, both from ADR-0068:
+
+- **Root ownership (§2).** A registered label must descend from a core taxonomy
+  root (`io.redis`) or open a new root equal to the plugin's Composer *vendor*
+  name (`acme/steins-plugin` may register `acme.*`). Anything else is rejected
+  and reported by name on stderr, while the rest of the plugin loads. An
+  explicitly listed plugin is exempt — the owner's listing is the vouching act.
+- **Lane and taint (§1).** A plugin's function coloring enters the **declared**
+  lane and does *not* discharge the call's exhaustiveness taint. Nothing checks a
+  plugin's assertion the way `effect.liskov-widened` checks an interface
+  envelope, so a plugin-covered call reads "declared `acme.cache`, and possibly
+  more". Plugin facts therefore never reach the proven lane, and never
+  manufacture a finding. Builtin catalog rows and project bodies are consulted
+  first; a plugin recolors neither.
+
+What the manifest channel does **not** do yet: boot the sidecar to ask the real
+framework (ADR-0039's `plugin` JSON-RPC method is still the stub returning
+`widen`), supply synthetic declarations, color *methods* rather than plain
+functions, register value-provenance labels, or cache anything by environment
+fingerprint. The framework packs of ADR-0044/0045 sit downstream of the parts
+that are still missing.
 
 ## Envelopes
 
@@ -217,7 +256,11 @@ The rules that make this safe:
   this one.
 - The bound **discharges its own call site's** exhaustiveness taint, and only
   that one: another unresolved call in the same body still marks the summary
-  `…?`.
+  `…?`. Discharge is a property of the *checked* stratum, not of the lane: an
+  interface envelope is held to by `effect.liskov-widened`, so importing it
+  bounds the call. A **plugin** coloring (ADR-0068 §1) shares the lane and not
+  the discharge — nothing checks a third party's assertion, so a plugin-covered
+  call keeps its taint and reads "declared this, and possibly more".
 - A method with no envelope imports nothing and taints exactly as before. Absence
   of a contract is not a contract.
 - At rendering time a declared label already subsumed by a proven label of the
@@ -250,8 +293,11 @@ pseudo-constant configuration this slice does not implement. See
 
 ## Not implemented
 
-- **The plugin channel** (ADR-0012 / ADR-0039) that registers ecosystem labels
-  and library effect signatures.
+- **The sidecar half of the plugin channel** (ADR-0012 / ADR-0039). The manifest
+  half ships (see [The registry](#the-registry)); what does not is booting the
+  project's own autoload to ask the real framework, synthetic declarations,
+  pattern subscriptions, method colorings, and response caching by environment
+  fingerprint.
 - **Envelope carrier interfaces as an ecosystem story** — the mechanism works in
   both directions now (an interface method's envelope binds implementations, and
   a call through an interface-typed receiver imports it as a declared bound), but

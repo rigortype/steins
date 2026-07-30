@@ -448,11 +448,41 @@ pub fn out_params(name: &str) -> Option<&'static [usize]> {
 ///
 /// It is the union of every label the catalog can color a builtin with
 /// ([`effect_labels`]) and the core taxonomy roots/parents of ADR-0018. Ecosystem
-/// and private labels (`io.redis`, `email.send`) are **not** here — they become
-/// known only once the ADR-0012 plugin channel can register them, which this
-/// slice does not implement, so they are (correctly) unknown for now.
+/// and private labels (`io.redis`, `email.send`) are **not** here: they are the
+/// *builtin* set, and a plugin opens the registry beside it rather than inside it
+/// — see [`LabelRegistry`], which is what inference actually asks.
 #[must_use]
 pub fn known_labels() -> &'static [&'static str] {
+    BUILTIN_LABELS
+}
+
+/// The **core taxonomy roots** of ADR-0018 — the label roots Steins itself owns.
+///
+/// A plugin may register *descendants* of these (`io.redis`, `io.db.dynamo`), which
+/// is why descendants are the recommended spelling for anything transport-like:
+/// subsumption then works with no new machinery. A **new root** must instead equal
+/// the plugin's composer vendor name (ADR-0068 §2); this list is what the
+/// vendor-root rule checks the other side of.
+///
+/// `global` appears here as a root even though the registry lists only its
+/// `global.read` / `global.write` children — root ownership is about the *name
+/// space*, not about which nodes happen to be colorable today.
+#[must_use]
+pub fn core_roots() -> &'static [&'static str] {
+    &["exit", "failure", "ffi", "global", "io", "mutate", "nondet", "output"]
+}
+
+/// Whether `label` lies under some [`core_roots`] entry — equal to a root, or a
+/// dot-path descendant of one. The ADR-0068 §2 predicate a plugin registration
+/// passes when it refines Steins' own taxonomy instead of opening a new root.
+#[must_use]
+pub fn is_core_label(label: &str) -> bool {
+    core_roots().iter().any(|&r| r == label || subsumes(r, label))
+}
+
+/// The builtin label table [`known_labels`] returns, shared with [`LabelRegistry`]
+/// so the builtin-only and extended views cannot drift.
+const BUILTIN_LABELS: &[&str] = {
     // Kept sorted for readability; the taxonomy of ADR-0018 plus every label used
     // in `effect_labels` coloring (all of which are already taxonomy nodes).
     &[
@@ -510,7 +540,7 @@ pub fn known_labels() -> &'static [&'static str] {
         // name it precisely.
         "output.header",
     ]
-}
+};
 
 /// Whether `envelope_label` **subsumes** `effect_label` under ADR-0018 prefix
 /// subsumption: true iff they are equal, or `effect_label` extends
@@ -532,7 +562,7 @@ pub fn subsumes(envelope_label: &str, effect_label: &str) -> bool {
 /// every registry root is accepted.
 #[must_use]
 pub fn is_known_label(label: &str) -> bool {
-    known_labels().iter().any(|&k| k == label || subsumes(label, k))
+    known_labels().iter().any(|&k| admits(label, k))
 }
 
 /// The registry label nearest to an unknown `label`, for a typo suggestion
@@ -540,12 +570,87 @@ pub fn is_known_label(label: &str) -> bool {
 /// simple Levenshtein distance capped so only genuinely near names suggest.
 #[must_use]
 pub fn nearest_label(label: &str) -> Option<&'static str> {
-    known_labels()
-        .iter()
-        .map(|&k| (levenshtein(label, k), k))
+    nearest_of(label, known_labels().iter().copied())
+}
+
+/// Whether a registry entry `entry` makes declared `label` known: `label` is the
+/// entry itself, or an ancestor path of it. The one rule [`is_known_label`] and
+/// [`LabelRegistry::is_known`] share, so the builtin-only and extended views
+/// cannot answer differently for the same entry.
+fn admits(label: &str, entry: &str) -> bool {
+    entry == label || subsumes(label, entry)
+}
+
+/// The nearest of `entries` to `label` under the capped Levenshtein metric.
+fn nearest_of<'a>(label: &str, entries: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    entries
+        .map(|k| (levenshtein(label, k), k))
         .filter(|&(d, _)| d <= 2)
         .min_by_key(|&(d, _)| d)
         .map(|(_, k)| k)
+}
+
+/// The label registry **as one run sees it**: the builtin table ([`known_labels`])
+/// plus whatever the ADR-0012/0039 plugin channel registered for this project
+/// (ADR-0068). Inference asks this, not the free functions, so an ecosystem label
+/// a plugin registered stops earning `effect.unknown-label` without the builtin
+/// table growing a single ecosystem row.
+///
+/// [`LabelRegistry::builtin`] is the closed view, and it is the default: every
+/// caller that has no project in hand (a single-file check, a unit test, the
+/// browser) gets exactly today's answers. Extension labels are validated *before*
+/// they arrive here — the vendor-root rule of ADR-0068 §2 is a load-time gate in
+/// the discovery layer, not a property this type re-derives.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LabelRegistry {
+    /// Registered extension labels, sorted and deduplicated so two runs that
+    /// discovered the same plugins compare equal (a salsa input's requirement).
+    extensions: Vec<String>,
+}
+
+impl LabelRegistry {
+    /// The builtin-only registry — the closed set, and what every caller without a
+    /// plugin channel wants.
+    #[must_use]
+    pub fn builtin() -> Self {
+        Self { extensions: Vec::new() }
+    }
+
+    /// The builtin registry extended with `labels` (already vendor-root checked).
+    #[must_use]
+    pub fn with_extensions<I: IntoIterator<Item = String>>(labels: I) -> Self {
+        let mut extensions: Vec<String> = labels.into_iter().collect();
+        extensions.sort();
+        extensions.dedup();
+        Self { extensions }
+    }
+
+    /// The registered extension labels, sorted.
+    #[must_use]
+    pub fn extensions(&self) -> &[String] {
+        &self.extensions
+    }
+
+    /// Whether this registry has no extensions — i.e. it answers exactly as the
+    /// free functions do.
+    #[must_use]
+    pub fn is_builtin_only(&self) -> bool {
+        self.extensions.is_empty()
+    }
+
+    /// [`is_known_label`] over builtins **and** extensions.
+    #[must_use]
+    pub fn is_known(&self, label: &str) -> bool {
+        is_known_label(label) || self.extensions.iter().any(|k| admits(label, k))
+    }
+
+    /// [`nearest_label`] over builtins **and** extensions — so a typo of a
+    /// registered ecosystem label suggests that label, not a core one.
+    #[must_use]
+    pub fn nearest(&self, label: &str) -> Option<&str> {
+        let builtin = known_labels().iter().copied();
+        nearest_of(label, builtin.chain(self.extensions.iter().map(String::as_str)))
+    }
 }
 
 /// The **builtin SPL/engine exception hierarchy** (ADR-0040): the parent of a
@@ -1346,7 +1451,7 @@ mod tests {
         assert!(!subsumes("io.fs", "io.db"), "siblings do not subsume");
     }
 
-    use super::{is_known_label, nearest_label, out_params, subsumes};
+    use super::{is_core_label, is_known_label, nearest_label, out_params, subsumes};
 
     #[test]
     fn subsumption_is_prefix_and_segment_aware() {
@@ -1385,6 +1490,47 @@ mod tests {
         assert_eq!(nearest_label("outputt"), Some("output"));
         // Something wildly off has no near suggestion.
         assert_eq!(nearest_label("completely-different"), None);
+    }
+
+    #[test]
+    fn the_builtin_registry_answers_exactly_as_the_free_functions_do() {
+        let r = super::LabelRegistry::builtin();
+        assert!(r.is_builtin_only());
+        for label in ["io", "io.db", "nondet.time", "exit", "mutate.local"] {
+            assert_eq!(r.is_known(label), is_known_label(label), "{label}");
+        }
+        for label in ["io.netw", "email.send", "acme.cache"] {
+            assert!(!r.is_known(label), "{label} is not in the closed set");
+        }
+        assert_eq!(r.nearest("io.netw"), Some("io.net"));
+    }
+
+    #[test]
+    fn an_extension_label_becomes_known_without_the_builtin_table_growing() {
+        let r = super::LabelRegistry::with_extensions(["acme.cache".to_owned()]);
+        assert!(r.is_known("acme.cache"));
+        // The free function — the builtin-only view — is unmoved.
+        assert!(!is_known_label("acme.cache"));
+        // A typo of the extension is still unknown, and now suggests it.
+        assert!(!r.is_known("acme.cach"));
+        assert_eq!(r.nearest("acme.cach"), Some("acme.cache"));
+        // Ancestor-of-an-entry is known (the taxonomy path), finer is not — the
+        // same rule the builtin table follows.
+        assert!(r.is_known("acme"));
+        assert!(!r.is_known("acme.cache.hit"));
+    }
+
+    #[test]
+    fn core_roots_are_the_ones_a_plugin_may_only_refine() {
+        // ADR-0068 §2: descendants of these are open to any plugin.
+        assert!(is_core_label("io.redis"));
+        assert!(is_core_label("io"));
+        assert!(is_core_label("global.write"));
+        // A new root is not — that is what the vendor-name rule adjudicates.
+        assert!(!is_core_label("acme.cache"));
+        assert!(!is_core_label("email.send"));
+        // Segment-aware, like every other label predicate here.
+        assert!(!is_core_label("iota.thing"));
     }
 
     #[test]

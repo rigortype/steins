@@ -14,8 +14,10 @@ use steins_syntax::{FunctionDecl, SourceTree};
 
 pub mod composer;
 pub mod layout;
+pub mod plugins;
 
 pub use layout::{GoverningRoot, PhpTarget, PhpTargetSource, ProjectLayout, fallback_is_vendor};
+pub use plugins::PluginFacts;
 
 /// The database trait analysis queries are written against. Downstream crates
 /// (e.g. `steins-infer`) define tracked queries taking `&dyn Db`.
@@ -65,12 +67,21 @@ pub fn function_index(db: &dyn Db, file: SourceFile) -> Vec<FunctionDecl> {
 /// (ADR-0015), and a replay must reach the same verdict from the same inputs
 /// (ADR-0048). Resolved once at the boundary by [`composer::discover`];
 /// [`ProjectLayout::fallback`] is the honest answer for a tree with no manifest.
+///
+/// [`PluginFacts`] rides along as a third input for the same reason (ADR-0068):
+/// the labels a Composer plugin registered and the functions it colors are project
+/// input state, read once from the vendor tree by [`plugins::PluginFacts::discover`],
+/// and a replay must reach the same verdict from the same inputs.
+/// [`PluginFacts::none`] is the empty channel — a project with no plugin behaves
+/// exactly as it did before the channel existed.
 #[salsa::input]
 pub struct Project {
     #[returns(deref)]
     pub files: Vec<SourceFile>,
     #[returns(ref)]
     pub layout: ProjectLayout,
+    #[returns(ref)]
+    pub plugins: PluginFacts,
 }
 
 /// Where a declaration lives: the owning file and its index in that file's

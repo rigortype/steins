@@ -43,7 +43,7 @@ fn old_range() -> ProjectLayout {
 fn check_under(src: &str, layout: ProjectLayout) -> Vec<Diagnostic> {
     let db = SteinsDatabase::default();
     let file = SourceFile::new(&db, "/proj/t.php".to_owned(), src.to_owned());
-    let project = Project::new(&db, vec![file], layout);
+    let project = Project::new(&db, vec![file], layout, steins_db::PluginFacts::none());
     check_project_with_runtime(&db, project, &mut NoFold, true)
 }
 

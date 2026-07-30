@@ -273,11 +273,14 @@ a folded value is trustworthy.
 
 Recorded honestly:
 
-- **The plugin channel** that would open the label registry to
-  ecosystem effects (`io.redis`, `email.send`) and library effect
-  signatures. The registry is *designed* to be open; it is closed
-  in practice because nothing can open it yet — so those labels
-  are correctly `unknown` today.
+- **Most of the plugin channel.** A Composer package of `type:
+  steins-plugin` can now register ecosystem effect labels and color
+  plain functions with them, through a `steins-plugin.json` manifest
+  Steins reads out of `vendor/`; those labels stop being `unknown`
+  and their colorings reach caller summaries in the *declared* lane.
+  What does not ship: library effect signatures, method colorings,
+  and anything that would need the sidecar to boot your framework
+  and ask it.
 - **PSR-mediated envelopes as an out-of-the-box story.** The
   mechanism works (an interface method's envelope binds its
   implementations, as the Liskov example shows), but no framework

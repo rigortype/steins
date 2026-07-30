@@ -1058,6 +1058,7 @@ version = "0.1.2"
 dependencies = [
  "salsa",
  "serde_json",
+ "steins-catalog",
  "steins-syntax",
 ]
 

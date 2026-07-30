@@ -1,0 +1,11 @@
+{
+    "steins-plugin-api": 1,
+    "labels": [
+        "acme.cache"
+    ],
+    "effects": {
+        "acme_cache_get": [
+            "acme.cache"
+        ]
+    }
+}

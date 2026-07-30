@@ -88,7 +88,14 @@ function steins_handle($method, array $params)
             return steins_fold($params);
         case 'reflect':
             return steins_reflect($params);
-        // Documented stub (ADR-0024): the seam exists, the behavior does not yet.
+        // Documented stub (ADR-0024), and it stays one. The plugin channel's
+        // first facts (issue #68) arrive by a MANIFEST the Rust side reads
+        // directly — `vendor/<name>/steins-plugin.json`, carrying label
+        // registrations and function colorings — because those are static per
+        // installed version, and reading them here would make discovery depend
+        // on a working `php`. This method remains for the half a manifest cannot
+        // answer (ADR-0039): booting the project's own autoload and asking the
+        // real framework for synthetic declarations.
         case 'plugin':
             return ['kind' => 'widen', 'reason' => 'unimplemented'];
         default:

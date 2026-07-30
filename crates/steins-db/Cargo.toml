@@ -9,4 +9,7 @@ publish.workspace = true
 [dependencies]
 salsa.workspace = true
 steins-syntax = { path = "../steins-syntax" }
+# The label registry the plugin channel extends (ADR-0068): plugin discovery has
+# to judge a registration against the core taxonomy roots, which the catalog owns.
+steins-catalog = { path = "../steins-catalog" }
 serde_json.workspace = true

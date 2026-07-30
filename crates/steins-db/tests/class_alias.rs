@@ -34,7 +34,7 @@ fn resolve(files: &[(&str, &str)], fqn: &str) -> Resolve {
         .iter()
         .map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned()))
         .collect();
-    let project = Project::new(&db, inputs, steins_db::ProjectLayout::fallback());
+    let project = Project::new(&db, inputs, steins_db::ProjectLayout::fallback(), steins_db::PluginFacts::none());
     project_index(&db, project).resolve_class(fqn)
 }
 

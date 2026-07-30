@@ -27,7 +27,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use steins_db::{Project, ProjectLayout, SourceFile, SteinsDatabase, composer, parse as parse_tree};
+use steins_db::{
+    PluginFacts, Project, ProjectLayout, SourceFile, SteinsDatabase, composer,
+    parse as parse_tree,
+};
 use steins_edit::{
     PartitionMap, TransformReport, VouchSet, plan_phpdoc_honesty, plan_phpdoc_to_native,
     unified_diff,
@@ -257,9 +260,9 @@ fn run_check(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let (check_cfg, profile_tbl, runtime_cfg) = match config {
-        Some(c) => (c.check, c.profile, c.runtime),
-        None => (None, None, None),
+    let (check_cfg, profile_tbl, runtime_cfg, plugin_allow) = match config {
+        Some(c) => (c.check, c.profile, c.runtime, allow_list(c.plugins)),
+        None => (None, None, None, None),
     };
 
     // The active display surface (ADR-0050 §5): resolve the selected profile before
@@ -302,7 +305,9 @@ fn run_check(args: &[String]) -> ExitCode {
     // The declared target PHP range (issue #28) gates the folder's absence
     // family and curated-fact admission; the checker reads it from the layout.
     folder.set_php_target(layout.php_target().cloned());
-    let project = Project::new(&db, inputs.clone(), layout.clone());
+    // The plugin channel (ADR-0068), read once at the boundary like the layout.
+    let plugins = load_plugins(&layout, plugin_allow.as_deref());
+    let project = Project::new(&db, inputs.clone(), layout.clone(), plugins);
     // `[runtime]` pseudo-constants (ADR-0037 §2): the boot truth the checker cannot
     // observe from source (e.g. `warning-handler = "null"`). Parsed above with the
     // rest of the config; an unknown *value* on a known key still warns and keeps the
@@ -649,7 +654,9 @@ fn run_transform(args: &[String]) -> ExitCode {
         texts.insert(path.clone(), text.clone());
         inputs.push(SourceFile::new(&db, path, text));
     }
-    let project = Project::new(&db, inputs.clone(), resolve_layout(&paths));
+    let layout = resolve_layout(&paths);
+    let plugins = load_plugins(&layout, allow_list_from_disk().as_deref());
+    let project = Project::new(&db, inputs.clone(), layout, plugins);
 
     // Plan the transform (pure — no writes, no re-check).
     // ADR-0047 Slice A: the region map is threaded into the planners but not yet
@@ -720,6 +727,22 @@ struct SteinsConfig {
     check: Option<CheckConfig>,
     /// The `[profile.<name>]` table (ADR-0050 §5): user-defined profiles.
     profile: Option<std::collections::BTreeMap<String, ProfileEntryConfig>>,
+    /// The `[plugins]` section (ADR-0039/0068): the explicit plugin listing.
+    plugins: Option<PluginsConfig>,
+}
+
+/// The `[plugins]` section (ADR-0039 discovery, ADR-0068 §2 ownership).
+///
+/// `allow = ["acme/steins-plugin"]` **replaces** `installed.json` discovery with
+/// exactly these Composer package names — the explicit listing wins, which is why
+/// `allow = []` is a meaningful value (load nothing) rather than a missing one.
+/// Listing a plugin also vouches for its identity, lifting the vendor-root rule on
+/// the labels it may register.
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct PluginsConfig {
+    #[serde(default)]
+    allow: Vec<String>,
 }
 
 /// The `[check]` section (ADR-0050 §5): repo defaults for `steins check`. Today it
@@ -834,6 +857,36 @@ fn load_vouches(config_path: Option<&str>) -> (VouchSet, Vec<String>) {
         }
     }
     (VouchSet::from_entries(entries), warnings)
+}
+
+/// The `[plugins] allow` list from an already-parsed config: `Some(names)` when
+/// the section is present (an empty list is a deliberate "load nothing"), `None`
+/// when it is absent, which leaves `installed.json` discovery in charge.
+fn allow_list(plugins: Option<PluginsConfig>) -> Option<Vec<String>> {
+    plugins.map(|p| p.allow)
+}
+
+/// [`allow_list`] for the surfaces that do not already hold a parsed config
+/// (`annotate`, `effect-diff`, `transform`). Leniently: a `steins.toml` that does
+/// not parse leaves discovery in charge here, because `check`/`doctor` are the
+/// surfaces that turn a malformed config into exit 2, and they run first.
+fn allow_list_from_disk() -> Option<Vec<String>> {
+    allow_list(read_steins_config().ok().flatten().and_then(|c| c.plugins))
+}
+
+/// Load the plugin channel (ADR-0068) for `layout`, reporting every load-time
+/// refusal on stderr.
+///
+/// A rejected label, an unsupported `steins-plugin-api`, a package with no
+/// manifest: each is one line, naming the plugin. Never a diagnostic — the zero-FP
+/// banner covers what Steins proves about the user's code, and a third party's
+/// packaging mistake is not that. Silence names itself instead.
+fn load_plugins(layout: &ProjectLayout, allow: Option<&[String]>) -> PluginFacts {
+    let facts = PluginFacts::discover(layout, allow);
+    for notice in facts.notices() {
+        errln!("steins: {notice}");
+    }
+    facts
 }
 
 /// Read and parse `./steins.toml` once for `check`/`doctor` (ADR-0050 §7 /
@@ -976,7 +1029,8 @@ fn post_check(
     }
     // The edited project is the same project: it must classify vendor the same way
     // or the before/after comparison is measuring the layout, not the edit.
-    let eproject = Project::new(&edb, einputs, project.layout(db).clone());
+    let eproject =
+        Project::new(&edb, einputs, project.layout(db).clone(), project.plugins(db).clone());
     let after = filtered_diagnostics(eproject.layout(&edb), check_project(&edb, eproject, &mut NoFold));
 
     let mut before_counts: HashMap<&str, usize> = HashMap::new();
@@ -1224,7 +1278,8 @@ fn run_annotate(args: &[String]) -> ExitCode {
                 Some(target_file) => {
                     let layout = resolve_layout(&[root.to_string_lossy().into_owned()]);
                     folder.set_php_target(layout.php_target().cloned());
-                    let project = Project::new(&db, inputs, layout);
+                    let plugins = load_plugins(&layout, allow_list_from_disk().as_deref());
+                    let project = Project::new(&db, inputs, layout, plugins);
                     annotate_project(&db, project, target_file, &mut folder)
                 }
                 None => {
@@ -1239,7 +1294,8 @@ fn run_annotate(args: &[String]) -> ExitCode {
             let summaries = match target {
                 Some(target_file) => {
                     let layout = resolve_layout(&[root.to_string_lossy().into_owned()]);
-                    let project = Project::new(&db, inputs, layout);
+                    let plugins = load_plugins(&layout, allow_list_from_disk().as_deref());
+                    let project = Project::new(&db, inputs, layout, plugins);
                     effect_summaries_project(&db, project, target_file)
                 }
                 None => {
@@ -1366,7 +1422,8 @@ fn run_effect_diff(args: &[String]) -> ExitCode {
         inputs.push(SourceFile::new(&db, file_path.to_string_lossy().into_owned(), text));
     }
     let layout = resolve_layout(&paths);
-    let project = Project::new(&db, inputs.clone(), layout.clone());
+    let plugins = load_plugins(&layout, allow_list_from_disk().as_deref());
+    let project = Project::new(&db, inputs.clone(), layout.clone(), plugins);
 
     // The sidecar file, resolved exactly like the diagnostic baseline's: the
     // `--baseline` path, else the default name in the working directory. Entry

@@ -80,7 +80,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
-use steins_db::{Project, ProjectLayout, SourceFile, SteinsDatabase, parse};
+use steins_db::{PluginFacts, Project, ProjectLayout, SourceFile, SteinsDatabase, parse};
 use steins_infer::profile::ProfileConfigs;
 use steins_infer::suppress::apply_inline_ignores;
 use steins_infer::{
@@ -361,7 +361,7 @@ fn check_with_folder(
 
     let db = SteinsDatabase::default();
     let file = SourceFile::new(&db, SNIPPET_PATH.to_owned(), source.to_owned());
-    let project = Project::new(&db, vec![file], ProjectLayout::fallback());
+    let project = Project::new(&db, vec![file], ProjectLayout::fallback(), PluginFacts::none());
     // `warning_handler_abort = true` is the CLI's DEFAULT (ADR-0049 §7: a proven
     // E_WARNING is a proven runtime break; only `[runtime] warning-handler =
     // "null"` opts out, and a browser snippet has no steins.toml). Passing false
@@ -432,7 +432,7 @@ fn annotate_impl(source: &str) -> serde_json::Value {
 fn annotate_with_folder(source: &str, folder: &mut dyn Folder) -> serde_json::Value {
     let db = SteinsDatabase::default();
     let file = SourceFile::new(&db, SNIPPET_PATH.to_owned(), source.to_owned());
-    let project = Project::new(&db, vec![file], ProjectLayout::fallback());
+    let project = Project::new(&db, vec![file], ProjectLayout::fallback(), PluginFacts::none());
     let facts = annotate_project(&db, project, file, folder);
 
     let lines: Vec<serde_json::Value> = facts
