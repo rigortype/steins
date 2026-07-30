@@ -2,7 +2,7 @@
 //!
 //! Everything here is pure `serde_json` data manipulation, so it compiles on every
 //! target including `wasm32-unknown-unknown` (ADR-0066). The process transport that
-//! spawns `php` lives in [`crate::process`] and is native-only; a browser transport
+//! spawns `php` lives in the crate's `process` module and is native-only; a browser transport
 //! (php-wasm, issue #64) speaks the *same* request/response shapes by construction,
 //! because it calls the same constructors and the same parsers.
 //!

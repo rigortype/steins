@@ -601,9 +601,9 @@ impl<E: FoldEngine> EngineFolder<E> {
     /// folder reused across projects (the corpus gate's thread-local) answers
     /// each project under its own target.
     ///
-    /// The env-derived memos ([`Self::php_minor`], [`Self::int_size`]) are NOT
-    /// dropped: they describe the engine, not the project, and no target changes
-    /// what version the engine is or how wide its integers are.
+    /// The env-derived memos (`php_minor`, `int_size`) are NOT dropped: they
+    /// describe the engine, not the project, and no target changes what version
+    /// the engine is or how wide its integers are.
     pub fn set_php_target(&mut self, target: Option<steins_db::PhpTarget>) {
         if self.php_target != target {
             self.absence_available = None;
