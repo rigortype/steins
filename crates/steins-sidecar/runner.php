@@ -217,7 +217,25 @@ function steins_fold(array $params)
     }
 
     // Positional args only — never named.
-    $decoded = steins_decode_args(array_values($raw));
+    //
+    // Decoding gets its OWN catch, and it is not the call's. Rebuilding an array
+    // literal runs PHP's own key rules (`$arr[] =` for an absent key), and those
+    // rules can THROW: `[PHP_INT_MAX => 'a', 'b']` raises "Cannot add element to
+    // the array as the next element is already occupied". That is a fact about the
+    // argument, not a result of the folded call, so it widens rather than
+    // reporting `kind => throw` — and it must be caught here rather than left to
+    // escape, because an uncaught Error is a FATAL that takes the resident runner
+    // down mid-NDJSON and with it every later request in the run. The runner's
+    // standing contract is that any misuse widens.
+    //
+    // The threshold is the engine's own `PHP_INT_MAX`, so on a 32-bit build
+    // (php-wasm, issue #64) it is 2147483647 — well inside what the fold seam's
+    // width guard admits, and a key a human plausibly writes.
+    try {
+        $decoded = steins_decode_args(array_values($raw));
+    } catch (\Throwable $e) {
+        return ['kind' => 'widen', 'reason' => 'undecodable argument'];
+    }
     if ($decoded === null) {
         return ['kind' => 'widen', 'reason' => 'undecodable argument'];
     }

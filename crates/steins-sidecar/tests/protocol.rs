@@ -246,6 +246,37 @@ fn php_assigns_absent_keys_and_resolves_duplicates() {
     );
 }
 
+/// Rebuilding an array literal runs PHP's own key rules, and those rules can
+/// THROW: `[PHP_INT_MAX => 'a', 'b']` raises "Cannot add element to the array as
+/// the next element is already occupied". Before issue #64 S1.5 that Error escaped
+/// `steins_fold` as an uncaught FATAL, killing the resident runner mid-NDJSON and
+/// widening every later request in the run. It must widen, and the process must
+/// survive — the runner's standing contract that any misuse widens.
+///
+/// The threshold is the engine's OWN `PHP_INT_MAX`, so on php-wasm's 32-bit build
+/// it is 2147483647 — a key inside what the fold seam's width guard admits, and
+/// one a human plausibly writes.
+#[test]
+fn an_overflowing_next_int_key_widens_and_leaves_the_runner_alive() {
+    let Some(mut sc) = spawn_or_skip("an_overflowing_next_int_key_widens_and_leaves_the_runner_alive")
+    else {
+        return;
+    };
+    let overflowing =
+        FoldArg::Array(vec![(Some(FoldKey::Int(i64::MAX)), s("a")), (None, s("b"))]);
+    let r = sc.fold("count", std::slice::from_ref(&overflowing));
+    assert!(matches!(r, FoldResult::Widen { .. }), "an unassignable next key widens, got {r:?}");
+    assert!(!sc.is_poisoned(), "widening is not a protocol failure");
+    // The same process answers the next question — the fatal is gone.
+    assert_eq!(
+        sc.fold("strtoupper", &[s("still alive")]),
+        FoldResult::Value(FoldValue::Str("STILL ALIVE".to_owned()))
+    );
+    // And the boundary below it is an ordinary, answerable array.
+    let ok = FoldArg::Array(vec![(Some(FoldKey::Int(i64::MAX - 1)), s("a")), (None, s("b"))]);
+    assert_eq!(sc.fold("count", &[ok]), FoldResult::Value(FoldValue::Int(2)));
+}
+
 #[test]
 fn an_array_returning_fold_widens() {
     let Some(mut sc) = spawn_or_skip("an_array_returning_fold_widens") else { return };
