@@ -667,8 +667,45 @@ fn measurement_regressions(
 // Default posture (ADR-0004): the gate folds via the PHP sidecar. Each rayon
 // worker owns one resident `SidecarFolder` (thread-local), reused across the
 // packages that worker analyzes.
+//
+// Reuse makes the folder CARRY STATE between projects, so every use must go
+// through [`check_under_target`] — see its comment for what forgetting cost.
 thread_local! {
     static FOLDER: RefCell<SidecarFolder> = RefCell::new(SidecarFolder::enabled());
+}
+
+/// Check `project` on the resident folder, configured for **this** project's
+/// declared PHP target (issue #28).
+///
+/// The ONE way to reach `FOLDER`, because the pairing is not optional. A resident
+/// folder reused across projects keeps the previous project's `php_target`, and that
+/// target gates the ADR-0056 curated return-fact admission (`range == {PINNED_PHP}`
+/// exactly) and the absence family (`target_admits_runtime`). Analyzing a project
+/// under a *different* project's declared target therefore silently changes which
+/// facts are seeded.
+///
+/// That is exactly what issue #63 was: `analyze_local` called `check_project` on the
+/// resident folder directly and never set the target, so each local project was
+/// judged under whichever corpus package's target its rayon worker happened to hold
+/// — `>=8.4.1`, `7.2.5`, `^7.4 || ^8.0`, whatever the work-stealing produced. The
+/// local corpus's `phpdoc.*` count swung between 536 and 483 run to run on unchanged
+/// code, and with `RAYON_NUM_THREADS=1` (one worker, always the same leftover
+/// target) it looked perfectly stable. Two sessions' triage was spent on a
+/// "regression" that was this.
+///
+/// Taking the target by argument rather than reading it back off the layout keeps the
+/// call sites honest: there is no way to check a project without saying what it
+/// targets.
+fn check_under_target(
+    db: &SteinsDatabase,
+    project: Project,
+    php_target: Option<steins_db::PhpTarget>,
+) -> Vec<Diagnostic> {
+    FOLDER.with(|f| {
+        let mut folder = f.borrow_mut();
+        folder.set_php_target(php_target);
+        check_project(db, project, &mut *folder)
+    })
 }
 
 /// Analyze one package as a single project and time it.
@@ -709,11 +746,7 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
     // change, so cross-package reuse stays sound.
     let php_target = layout.php_target().cloned();
     let project = Project::new(&db, inputs, layout);
-    let mut diags: Vec<Diagnostic> = FOLDER.with(|f| {
-        let mut folder = f.borrow_mut();
-        folder.set_php_target(php_target);
-        check_project(&db, project, &mut *folder)
-    });
+    let mut diags: Vec<Diagnostic> = check_under_target(&db, project, php_target);
     diags.retain(|d| !parse_err_set.contains(d.path.as_str()));
     diags.sort_by(|a, b| (&a.path, a.line, a.column).cmp(&(&b.path, b.line, b.column)));
     // Measurement-mode split (ADR-0050 §9): contract-layer findings are reported +
@@ -787,8 +820,12 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
     let parse_err_set: HashSet<&str> = parse_error_files.iter().map(String::as_str).collect();
 
     let layout = composer::discover(&[root.to_path_buf()], root);
+    // A local project declares a target like any other (issue #63): this call used
+    // to go straight to the resident folder, inheriting whichever corpus package's
+    // target the worker last held.
+    let php_target = layout.php_target().cloned();
     let project = Project::new(&db, inputs, layout.clone());
-    let mut diags: Vec<Diagnostic> = FOLDER.with(|f| check_project(&db, project, &mut *f.borrow_mut()));
+    let mut diags: Vec<Diagnostic> = check_under_target(&db, project, php_target);
     diags.retain(|d| !parse_err_set.contains(d.path.as_str()));
 
     // Vendor default (ADR-0015): vendor code was fully indexed and inferred, but
