@@ -6,8 +6,19 @@
 //   sw_alloc(len) -> ptr          caller writes UTF-8 into wasm memory
 //   sw_check(sp, sl, pp, pl)      envelope -> result buffer
 //   sw_annotate(sp, sl)           envelope -> result buffer
+//   sw_check_replay(sp, sl, pp, pl, tp, tl)   + a fold-answer table
+//   sw_annotate_replay(sp, sl, tp, tl)        + a fold-answer table
 //   sw_result_ptr() / sw_result_len()
 //   sw_dealloc(ptr, len)
+//
+// The replay pair (ADR-0066) takes a JSON object mapping request key -> raw
+// JSON-RPC `result`, and returns the envelope with a `pending` array: the
+// requests the run could not answer. A NON-EMPTY `pending` means the results are
+// NoFold-degraded and must NOT be rendered — answer the pending keys (each parses
+// as {"method", "params"}), put the answers back under the same key strings, and
+// call again. The answered set strictly grows, so the loop terminates; the
+// iteration cap is the caller's, and exhausting it means falling back to the
+// non-replay call, never to showing a half-converged run.
 //
 // Views into wasm memory are recreated after every call: a call can grow the
 // memory, and growth detaches every existing ArrayBuffer view.
@@ -59,6 +70,32 @@ export async function loadSteins(source) {
         return readResult();
       } finally {
         ex.sw_dealloc(src.ptr, src.len);
+      }
+    },
+    // One replay iteration. `table` maps request key -> raw JSON-RPC `result`;
+    // `{}` starts a loop. The envelope's `pending` says whether it is finished.
+    checkReplay(source, table = {}, profile = "") {
+      const src = writeString(source);
+      const prof = writeString(profile);
+      const tbl = writeString(JSON.stringify(table));
+      try {
+        ex.sw_check_replay(src.ptr, src.len, prof.ptr, prof.len, tbl.ptr, tbl.len);
+        return readResult();
+      } finally {
+        ex.sw_dealloc(src.ptr, src.len);
+        ex.sw_dealloc(prof.ptr, prof.len);
+        ex.sw_dealloc(tbl.ptr, tbl.len);
+      }
+    },
+    annotateReplay(source, table = {}) {
+      const src = writeString(source);
+      const tbl = writeString(JSON.stringify(table));
+      try {
+        ex.sw_annotate_replay(src.ptr, src.len, tbl.ptr, tbl.len);
+        return readResult();
+      } finally {
+        ex.sw_dealloc(src.ptr, src.len);
+        ex.sw_dealloc(tbl.ptr, tbl.len);
       }
     },
   };

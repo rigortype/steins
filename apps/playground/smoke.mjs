@@ -67,4 +67,88 @@ assert(broken.parse_errors.length > 0, "parse errors are reported in the envelop
 for (let i = 0; i < 50; i++) steins.check(snippet + `// edit ${i}\n`);
 assert(true, "50 repeated checks on one instance");
 
+// 6. The replay round trip (ADR-0066). No php-wasm here yet — the answers are a
+// canned table captured from a real `php` by the differential oracle in
+// crates/steins-infer/tests/replay_fold.rs — so what this pins is the ABI: the
+// pending contract, the key format the JS loop echoes back, and the fold landing
+// in the envelope once the table is complete.
+const flagship = `<?php
+function greet(int $times, string $name): string {
+    return str_repeat("Hello, " . $name . "! ", $times);
+}
+\\PHPStan\\dumpType(greet(2, "World"));
+`;
+
+const ANSWERS = {
+  '{"method":"env","params":{}}': {
+    php_version: "8.5.8",
+    extensions: ["Core", "standard"],
+    sapi: "cli",
+    int_size: 8,
+  },
+  '{"method":"fold","params":{"function":"str_repeat","args":["Hello, World! ",2]}}': {
+    kind: "value",
+    value: "Hello, World! Hello, World! ",
+    type: "string",
+  },
+  '{"method":"reflect","params":{"target":"greet"}}': {
+    kind: "reflection",
+    target: "greet",
+    exists: false,
+    function: false,
+    class_like: false,
+    return_type: null,
+    return_type_tentative: false,
+  },
+};
+
+const empty = steins.checkReplay(flagship, {});
+assert(empty.ok === true, "replay envelope ok with an empty table");
+assert(Array.isArray(empty.pending) && empty.pending.length > 0, "an empty table reports pending requests");
+assert(
+  empty.pending.every((k) => {
+    const req = JSON.parse(k);
+    return typeof req.method === "string" && req.params !== undefined;
+  }),
+  "every pending key parses as {method, params}",
+);
+assert(
+  empty.findings.every((f) => f.message !== "dumped type: 'Hello, World! Hello, World! '"),
+  "a degraded run does not carry the folded value",
+);
+
+// The loop, exactly as the frontend will run it: answer pending from the canned
+// table, re-call, stop when pending is empty. The cap is defensive.
+let table = {};
+let result = null;
+let iterations = 0;
+for (; iterations < 8; iterations++) {
+  result = steins.checkReplay(flagship, table);
+  if (result.pending.length === 0) break;
+  let answered = 0;
+  for (const key of result.pending) {
+    if (key in ANSWERS) {
+      table[key] = ANSWERS[key];
+      answered += 1;
+    }
+  }
+  if (answered === 0) break; // no progress: the canned table is incomplete
+}
+assert(result.pending.length === 0, `the loop reached a fixpoint (${iterations} iterations)`);
+assert(iterations < 8, "the fixpoint came well inside the cap");
+const folded = result.findings.find((f) => f.id === "debug.type");
+assert(
+  folded !== undefined && folded.message === "dumped type: 'Hello, World! Hello, World! '",
+  `the flagship folds through the replay loop (got: ${folded && folded.message})`,
+);
+
+// annotate rides the same loop.
+const ann2 = steins.annotateReplay(flagship, table);
+assert(ann2.ok === true && ann2.pending.length === 0, "annotate reaches its fixpoint on the same table");
+assert(ann2.lines.length > 0, "annotate replay returns margin facts");
+
+// A malformed table is data, not a trap.
+const badTable = steins.checkReplay(flagship, "not an object");
+assert(badTable.ok === false && badTable.error.includes("replay table"), "a malformed table is a structured error");
+
 process.exit(failures === 0 ? 0 : 1);

@@ -5,11 +5,15 @@
 //!
 //! # Posture
 //!
-//! The browser has no PHP, so every run here is the **sound subset** (ADR-0004):
-//! the folder is [`NoFold`], findings that require executing PHP are omitted, and
-//! nothing false is added. On the CLI that posture is announced on stderr; a wasm
-//! module has no stderr a user reads, so the notice travels as **data** — the
-//! `notice` field of every envelope — and the frontend renders it as a banner.
+//! The browser has no PHP *of its own*, so [`sw_check`]/[`sw_annotate`] are the
+//! **sound subset** (ADR-0004): the folder is [`NoFold`], findings that require
+//! executing PHP are omitted, and nothing false is added. On the CLI that posture
+//! is announced on stderr; a wasm module has no stderr a user reads, so the notice
+//! travels as **data** — the `notice` field of every envelope — and the frontend
+//! renders it as a banner.
+//!
+//! When the caller *can* run PHP (php-wasm, issue #64), the replay entry points
+//! below lift that posture — see [Replay](#replay).
 //!
 //! # ABI
 //!
@@ -22,6 +26,32 @@
 //!    thread-local is just the idiomatic non-`static mut` spelling);
 //! 3. `sw_result_ptr()` / `sw_result_len()` to read it;
 //! 4. `sw_dealloc` the source buffer.
+//!
+//! # Replay
+//!
+//! `Folder::fold` is synchronous and php-wasm's JS API is not, so the fold surface
+//! is reached by a **request-replay fixpoint** (ADR-0066) rather than by calling
+//! out mid-walk. `sw_check_replay` / `sw_annotate_replay` take one extra buffer —
+//! a JSON object mapping *request key* to the raw JSON-RPC `result` for that
+//! request — and add `"pending"` to the envelope: the requests the run could not
+//! answer, in first-occurrence order, deduped.
+//!
+//! The caller's loop is:
+//!
+//! 1. call with the table it has (`{}` on the first pass);
+//! 2. if `pending` is empty, the run is complete — render it;
+//! 3. otherwise answer each pending key — it parses as `{"method", "params"}`, and
+//!    the answer is the raw `result` object `steins_handle` returns for exactly
+//!    that method/params — insert the answers under the SAME key strings, and go
+//!    to 1.
+//!
+//! **A non-empty `pending` means the results are NoFold-degraded and MUST NOT be
+//! rendered.** An unanswered request declines exactly as a dead sidecar declines,
+//! so what comes back is sound and less precise — never a partial lie — but
+//! showing it would flicker findings in and out as the loop converges. Termination
+//! is by the answered set strictly growing; the iteration cap belongs to the
+//! caller, and exhausting it means falling back to the non-replay entry points,
+//! never to displaying a half-converged run.
 //!
 //! Every envelope carries `"ok"`: `true` with the analysis payload, `false` with
 //! an `"error"` string (an unknown profile — the CLI's exit-2 analogue as data,
@@ -41,12 +71,14 @@
 //! real tool, including `suppress.unmatched` anti-rot.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use steins_db::{Project, ProjectLayout, SourceFile, SteinsDatabase, parse};
 use steins_infer::profile::ProfileConfigs;
 use steins_infer::suppress::apply_inline_ignores;
-use steins_infer::{NoFold, SOUND_SUBSET_NOTICE, annotate_project, check_project_with_runtime};
+use steins_infer::{
+    Folder, NoFold, SOUND_SUBSET_NOTICE, TableFolder, annotate_project, check_project_with_runtime,
+};
 
 /// The diagnostic path a playground snippet analyzes under. One file, one
 /// project; the name only has to be stable and self-describing in messages.
@@ -157,8 +189,122 @@ pub unsafe extern "C" fn sw_annotate(src_ptr: *const u8, src_len: usize) -> i32 
     set_result(annotate_impl(source))
 }
 
+/// [`sw_check`] with a **replay table** (ADR-0066): `table` is a UTF-8 JSON object
+/// mapping request key to the raw JSON-RPC `result` for that request (`{}` is
+/// valid and is how a loop starts). The envelope gains `"pending"`, always present
+/// and empty exactly when the run is complete.
+///
+/// Non-empty `pending` ⇒ the findings are NoFold-degraded and MUST NOT be
+/// rendered; answer the pending requests, insert them into the table under the
+/// same key strings, and call again. See the module docs.
+///
+/// # Safety
+///
+/// All three pointer/length pairs must describe readable wasm memory.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sw_check_replay(
+    src_ptr: *const u8,
+    src_len: usize,
+    prof_ptr: *const u8,
+    prof_len: usize,
+    table_ptr: *const u8,
+    table_len: usize,
+) -> i32 {
+    let Ok(source) = (unsafe { read_str(src_ptr, src_len) }) else {
+        return set_result(error_envelope("source is not valid UTF-8"));
+    };
+    let Ok(prof) = (unsafe { read_str(prof_ptr, prof_len) }) else {
+        return set_result(error_envelope("profile name is not valid UTF-8"));
+    };
+    let table = match unsafe { read_table(table_ptr, table_len) } {
+        Ok(t) => t,
+        Err(e) => return set_result(error_envelope(e)),
+    };
+    let selected = if prof.is_empty() { None } else { Some(prof) };
+
+    // A FRESH folder per call, by construction: the ABI takes the table by value
+    // and drops the folder here, so a stale decline can never outlive the answer
+    // that fixes it.
+    let mut folder = TableFolder::with_table(table);
+    let mut envelope = check_with_folder(source, selected, &mut folder);
+    set_result(with_pending(&mut envelope, &mut folder))
+}
+
+/// [`sw_annotate`] with a **replay table** — the annotate twin of
+/// [`sw_check_replay`], with the same `pending` contract.
+///
+/// # Safety
+///
+/// Both pointer/length pairs must describe readable wasm memory.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sw_annotate_replay(
+    src_ptr: *const u8,
+    src_len: usize,
+    table_ptr: *const u8,
+    table_len: usize,
+) -> i32 {
+    let Ok(source) = (unsafe { read_str(src_ptr, src_len) }) else {
+        return set_result(error_envelope("source is not valid UTF-8"));
+    };
+    let table = match unsafe { read_table(table_ptr, table_len) } {
+        Ok(t) => t,
+        Err(e) => return set_result(error_envelope(e)),
+    };
+    let mut folder = TableFolder::with_table(table);
+    let mut envelope = annotate_with_folder(source, &mut folder);
+    set_result(with_pending(&mut envelope, &mut folder))
+}
+
+/// Read the replay table buffer: a JSON **object** of key → raw `result` value.
+/// Anything else (invalid UTF-8, unparseable JSON, a non-object) is the
+/// `error_envelope` path — a malformed table is a caller bug, not a fold outcome.
+///
+/// # Safety
+///
+/// The pointer/length pair must describe readable wasm memory.
+unsafe fn read_table(
+    ptr: *const u8,
+    len: usize,
+) -> Result<HashMap<String, serde_json::Value>, &'static str> {
+    let text = unsafe { read_str(ptr, len) }.map_err(|()| "replay table is not valid UTF-8")?;
+    if text.trim().is_empty() {
+        return Ok(HashMap::new());
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|_| "replay table is not valid JSON")?;
+    match value {
+        serde_json::Value::Object(map) => Ok(map.into_iter().collect()),
+        _ => Err("replay table must be a JSON object"),
+    }
+}
+
+/// Attach the run's unanswered requests to `envelope` and hand it back. Always
+/// present, so a caller never has to distinguish "complete" from "an older module
+/// that does not report pending".
+fn with_pending(
+    envelope: &mut serde_json::Value,
+    folder: &mut TableFolder,
+) -> serde_json::Value {
+    let pending = folder.take_pending();
+    if let Some(obj) = envelope.as_object_mut() {
+        obj.insert("pending".to_owned(), serde_json::json!(pending));
+    }
+    envelope.take()
+}
+
 /// The target-agnostic body of [`sw_check`] — also what the native tests pin.
 fn check_impl(source: &str, selected: Option<&str>) -> serde_json::Value {
+    check_with_folder(source, selected, &mut NoFold)
+}
+
+/// [`check_impl`] over an arbitrary folder. The ONE analysis body: the sound-subset
+/// entry point and the replay entry point differ in the folder they hand it and in
+/// nothing else, so the replay path cannot acquire a different pipeline.
+fn check_with_folder(
+    source: &str,
+    selected: Option<&str>,
+    folder: &mut dyn Folder,
+) -> serde_json::Value {
     // No steins.toml in a browser: the profile table is empty, so `selected`
     // resolves against the built-ins alone and an unknown name is the CLI's
     // exit-2 config error, delivered as data.
@@ -171,14 +317,13 @@ fn check_impl(source: &str, selected: Option<&str>) -> serde_json::Value {
     let db = SteinsDatabase::default();
     let file = SourceFile::new(&db, SNIPPET_PATH.to_owned(), source.to_owned());
     let project = Project::new(&db, vec![file], ProjectLayout::fallback());
-    let mut folder = NoFold;
     // `warning_handler_abort = true` is the CLI's DEFAULT (ADR-0049 §7: a proven
     // E_WARNING is a proven runtime break; only `[runtime] warning-handler =
     // "null"` opts out, and a browser snippet has no steins.toml). Passing false
     // here silently withheld every warning-backed finding — offset.maybe-missing
     // among them — which is how the playground's strict rung first shipped
     // quieter than `steins check --profile strict`.
-    let mut findings = check_project_with_runtime(&db, project, &mut folder, true);
+    let mut findings = check_project_with_runtime(&db, project, folder, true);
 
     // The CLI pipeline (ADR-0050 §6) minus the snippet-meaningless channels:
     // vendor (nothing here is vendored), policy (no config), baseline (no fs).
@@ -234,11 +379,16 @@ fn check_impl(source: &str, selected: Option<&str>) -> serde_json::Value {
 
 /// The target-agnostic body of [`sw_annotate`].
 fn annotate_impl(source: &str) -> serde_json::Value {
+    annotate_with_folder(source, &mut NoFold)
+}
+
+/// [`annotate_impl`] over an arbitrary folder — the annotate twin of
+/// [`check_with_folder`].
+fn annotate_with_folder(source: &str, folder: &mut dyn Folder) -> serde_json::Value {
     let db = SteinsDatabase::default();
     let file = SourceFile::new(&db, SNIPPET_PATH.to_owned(), source.to_owned());
     let project = Project::new(&db, vec![file], ProjectLayout::fallback());
-    let mut folder = NoFold;
-    let facts = annotate_project(&db, project, file, &mut folder);
+    let facts = annotate_project(&db, project, file, folder);
 
     let lines: Vec<serde_json::Value> = facts
         .iter()
@@ -324,6 +474,182 @@ mod tests {
         assert_eq!(v["ok"], true);
         assert_eq!(v["notice"], SOUND_SUBSET_NOTICE);
         assert!(!v["lines"].as_array().unwrap().is_empty());
+    }
+}
+
+/// The replay ABI (ADR-0066), pinned natively: the `pending` contract, the
+/// malformed-table path, and a fully-answered canned table folding the flagship.
+///
+/// The table is captured from the differential oracle in
+/// `steins-infer/tests/replay_fold.rs` — a real `php` answered these exact
+/// requests — and hardcoded here so the pin survives without a PHP dependency.
+/// Only the extension list is trimmed; nothing else is edited. Hardcoding the key
+/// strings is deliberate: they are the interchange format S2's loop echoes back,
+/// so a silent change to the key shape must break a test.
+#[cfg(test)]
+mod replay {
+    use super::*;
+
+    /// The issue-#59/#60 flagship: a project call in argument position whose body
+    /// folds through the engine.
+    const FLAGSHIP: &str = "<?php\n\
+        function greet(int $times, string $name): string {\n\
+            return str_repeat(\"Hello, \" . $name . \"! \", $times);\n\
+        }\n\
+        \\PHPStan\\dumpType(greet(2, \"World\"));\n";
+
+    const ENV_KEY: &str = r#"{"method":"env","params":{}}"#;
+    const FOLD_KEY: &str =
+        r#"{"method":"fold","params":{"function":"str_repeat","args":["Hello, World! ",2]}}"#;
+    const REFLECT_KEY: &str = r#"{"method":"reflect","params":{"target":"greet"}}"#;
+
+    fn answered_table() -> HashMap<String, serde_json::Value> {
+        HashMap::from([
+            (
+                ENV_KEY.to_owned(),
+                serde_json::json!({
+                    "php_version": "8.5.8",
+                    "extensions": ["Core", "standard"],
+                    "sapi": "cli",
+                    "int_size": 8,
+                }),
+            ),
+            (
+                FOLD_KEY.to_owned(),
+                serde_json::json!({
+                    "kind": "value",
+                    "value": "Hello, World! Hello, World! ",
+                    "type": "string",
+                }),
+            ),
+            (
+                REFLECT_KEY.to_owned(),
+                serde_json::json!({
+                    "kind": "reflection",
+                    "target": "greet",
+                    "exists": false,
+                    "function": false,
+                    "class_like": false,
+                    "return_type": serde_json::Value::Null,
+                    "return_type_tentative": false,
+                }),
+            ),
+        ])
+    }
+
+    fn check_replay(
+        source: &str,
+        table: HashMap<String, serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut folder = TableFolder::with_table(table);
+        let mut envelope = check_with_folder(source, None, &mut folder);
+        with_pending(&mut envelope, &mut folder)
+    }
+
+    fn pending_of(v: &serde_json::Value) -> Vec<String> {
+        v["pending"]
+            .as_array()
+            .expect("pending is always present")
+            .iter()
+            .map(|k| k.as_str().expect("a pending key is a string").to_owned())
+            .collect()
+    }
+
+    /// An empty table: a real envelope, and the questions the run wants answered.
+    /// The first one is always `env` — the integer-width gate (issue #64) will not
+    /// dispatch a value question to an engine whose arithmetic it has not
+    /// established.
+    #[test]
+    fn an_empty_table_returns_an_ok_envelope_and_pending_requests() {
+        let v = check_replay(FLAGSHIP, HashMap::new());
+        assert_eq!(v["ok"], true);
+        let pending = pending_of(&v);
+        assert!(!pending.is_empty(), "an unanswered run reports its questions");
+        assert!(pending.contains(&ENV_KEY.to_owned()), "got {pending:?}");
+        // Every key parses as the request it stands for.
+        for key in &pending {
+            let req: serde_json::Value = serde_json::from_str(key).expect("a key is JSON");
+            assert!(req.get("method").and_then(serde_json::Value::as_str).is_some(), "{key}");
+            assert!(req.get("params").is_some(), "{key}");
+        }
+    }
+
+    /// A fully-answered table: the flagship folds, and `pending` is empty — the
+    /// one state in which a caller may render the result.
+    #[test]
+    fn a_fully_answered_table_folds_the_flagship_with_nothing_pending() {
+        let v = check_replay(FLAGSHIP, answered_table());
+        assert_eq!(v["ok"], true);
+        assert_eq!(pending_of(&v), Vec::<String>::new(), "the fixpoint is reached");
+        let dumps: Vec<&str> = v["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .filter(|f| f["id"] == "debug.type")
+            .map(|f| f["message"].as_str().expect("message"))
+            .collect();
+        assert_eq!(dumps, vec!["dumped type: 'Hello, World! Hello, World! '"]);
+    }
+
+    /// The same source through the sound-subset entry point stays NoFold: the
+    /// replay exports are additive, and `sw_check` is byte-identical to before.
+    #[test]
+    fn the_non_replay_entry_point_is_unchanged() {
+        let plain = check_impl(FLAGSHIP, None);
+        assert!(plain.get("pending").is_none(), "no pending key on the sound-subset envelope");
+        let dumps: Vec<&str> = plain["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .filter(|f| f["id"] == "debug.type")
+            .map(|f| f["message"].as_str().expect("message"))
+            .collect();
+        assert_eq!(dumps, vec!["dumped type: string"], "engine-not-loaded behavior unchanged");
+    }
+
+    /// Annotate rides the same loop and carries the same `pending` contract.
+    #[test]
+    fn annotate_replay_reaches_its_fixpoint_too() {
+        let mut folder = TableFolder::with_table(HashMap::new());
+        let mut envelope = annotate_with_folder(FLAGSHIP, &mut folder);
+        let first = with_pending(&mut envelope, &mut folder);
+        assert_eq!(first["ok"], true);
+        assert!(!pending_of(&first).is_empty());
+
+        let mut folder = TableFolder::with_table(answered_table());
+        let mut envelope = annotate_with_folder(FLAGSHIP, &mut folder);
+        let done = with_pending(&mut envelope, &mut folder);
+        assert_eq!(pending_of(&done), Vec::<String>::new());
+        assert!(!done["lines"].as_array().expect("lines").is_empty());
+    }
+
+    /// A malformed table is the caller's bug, delivered as data on the existing
+    /// error path — never a trap, and never a silently empty table.
+    #[test]
+    fn a_malformed_table_is_a_structured_error() {
+        for (bytes, want) in [
+            ("not json", "replay table is not valid JSON"),
+            ("[1, 2]", "replay table must be a JSON object"),
+            ("\"a string\"", "replay table must be a JSON object"),
+        ] {
+            let table = unsafe { read_table(bytes.as_ptr(), bytes.len()) };
+            assert_eq!(table.err(), Some(want), "input {bytes:?}");
+        }
+        // An empty buffer is the same as `{}` — the natural first call.
+        let empty = unsafe { read_table(std::ptr::null(), 0) }.expect("empty buffer is a table");
+        assert!(empty.is_empty());
+    }
+
+    /// An unknown profile still errors the way it does without a table, and the
+    /// envelope still carries `pending` — the key is unconditional.
+    #[test]
+    fn an_unknown_profile_still_errors_under_replay() {
+        let mut folder = TableFolder::with_table(answered_table());
+        let mut envelope = check_with_folder(FLAGSHIP, Some("nope"), &mut folder);
+        let v = with_pending(&mut envelope, &mut folder);
+        assert_eq!(v["ok"], false);
+        assert!(v["error"].as_str().expect("error").contains("unknown profile"));
+        assert!(v.get("pending").is_some(), "pending is always present");
     }
 }
 
