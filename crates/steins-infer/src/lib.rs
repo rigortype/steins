@@ -904,6 +904,40 @@ fn fits_fold_budget(v: &ArgValue, depth: u8, budget: &mut usize) -> bool {
     }
 }
 
+/// The PHP string cast of a proven operand of `.` (issue #59), or `None` when the
+/// cast is not one this crate may derive.
+///
+/// # Why this is derived here and not sent to the sidecar
+///
+/// The fold seam's standing rule is that PHP semantics are answered by running the
+/// project's own PHP (ADR-0004/0028), never re-derived in Rust. Concatenation earns
+/// an exception on a narrow, checkable ground: for the operand types admitted below
+/// the cast is *total and environment-independent*. Byte concatenation of two
+/// strings consults no locale, no encoding, and no ini setting; `int` has one
+/// decimal spelling; `bool` and `null` have fixed one-character-or-empty spellings.
+/// There is no configuration under which php-src answers differently, so there is
+/// nothing for the sidecar to arbitrate.
+///
+/// That is also why `float` is **excluded**. PHP's float-to-string conversion is
+/// governed by the `precision` ini directive (default 14), so `0.1 + 0.2` prints as
+/// `0.3` on a stock build and as `0.30000000000000004` under `precision=17`. A value
+/// that depends on the runtime's configuration is exactly what this crate must not
+/// invent: `strval(1.5)` stays on the `foldable` allowlist and is answered by the
+/// real engine, which knows the real setting. `Float` here therefore widens.
+///
+/// Arrays (`"Array"` plus a warning), objects (`__toString` or an `Error`) and every
+/// unresolved carrier widen for the ordinary reason — the result is not proven.
+fn concat_cast(v: &ArgValue) -> Option<String> {
+    match v {
+        ArgValue::Str(s) => Some(s.clone()),
+        ArgValue::Int(i) => Some(i.to_string()),
+        // `true` is "1", `false` is "" — verified against php-src, not assumed.
+        ArgValue::Bool(b) => Some(if *b { "1".to_owned() } else { String::new() }),
+        ArgValue::Null => Some(String::new()),
+        _ => None,
+    }
+}
+
 /// Whether `arg` may be sent to the sidecar at all: a scalar literal, or an array
 /// literal that is concrete all the way down *and* inside the budget.
 fn is_fold_arg(arg: &ArgValue) -> bool {
@@ -963,6 +997,11 @@ fn arg_to_fold_within(arg: &ArgValue, depth: u8, budget: &mut usize) -> Option<F
         | ArgValue::Clone(_)
         | ArgValue::Coalesce(..)
         | ArgValue::OffsetRead { .. }
+        // A concatenation is not a wire value: `try_fold` resolves each argument
+        // through `resolve_literal` first, so a provable `"a" . $b` arrives here
+        // already collapsed to its `Str`. One that did not resolve is unproven, and
+        // sending its operands would be sending a different call than was written.
+        | ArgValue::Concat(..)
         // Object-world values (ADR-0043) are not fold arguments — unproven, == Other.
         | ArgValue::ClassConst(..)
         | ArgValue::EnumCase(..)
@@ -3993,6 +4032,15 @@ impl<'a> Cx<'a> {
                 }
                 self.try_fold(name, args, env, poisoned, folder).map(|(lit, _prov)| lit)
             }
+            // `$a . $b` (issue #59): proven iff BOTH operands resolve to values whose
+            // string cast is total and environment-independent (`concat_cast`). One
+            // unresolved operand yields `None` — the same silence as any other
+            // unprovable value, never a partial string.
+            ArgValue::Concat(a, b) => {
+                let l = self.resolve_literal(a, env, poisoned, folder)?;
+                let r = self.resolve_literal(b, env, poisoned, folder)?;
+                Some(ArgValue::Str(concat_cast(&l)? + &concat_cast(&r)?))
+            }
             // An array is proven iff every element value is proven (keys are fixed
             // at lowering). Folding is never applied to arrays (ADR-0001).
             ArgValue::Array(items) => {
@@ -4295,6 +4343,9 @@ fn val_of(arg: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<Val> {
         // An offset read is never a proven `Val` — the walk judges it separately
         // (ADR-0049 §7); it manufactures no fact here (the safe side).
         | ArgValue::OffsetRead { .. }
+        // Like the carriers above, a concatenation is structural: it becomes a `Val`
+        // only by way of `resolve_literal`, which needs the env this seam does not see.
+        | ArgValue::Concat(..)
         // Object-world values (ADR-0043): not domain `Val`s — unproven, == Other.
         | ArgValue::ClassConst(..)
         | ArgValue::EnumCase(..)
@@ -5440,6 +5491,12 @@ fn value_stratum(value: &ArgValue, env: &HashMap<String, Known>, store: Option<&
         }
         // `$a ?? $b` consumes both operands' facts (a widening join): `min` (§5).
         ArgValue::Coalesce(a, b) => {
+            value_stratum(a, env, store).min(value_stratum(b, env, store))
+        }
+        // `$a . $b` consumes both operands' facts to build one string — the same
+        // derivation clause: `min`. An asserted operand must not launder itself into
+        // a verified result string.
+        ArgValue::Concat(a, b) => {
             value_stratum(a, env, store).min(value_stratum(b, env, store))
         }
         _ => Stratum::Verified,
@@ -13991,6 +14048,9 @@ fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
         | ArgValue::PropFetch { .. }
         | ArgValue::Clone(_)
         | ArgValue::ClassConst(..)
+        // A concatenation reaching here did not resolve — an operand's value is
+        // unknown, so the result string is too. (A resolved one arrives as `Str`.)
+        | ArgValue::Concat(..)
         // A closure value against a scalar/union param is never a scalar finding
         // (a `callable`/`Closure` param is not a native scalar type this checks).
         | ArgValue::Closure(_)

@@ -986,6 +986,20 @@ pub enum ArgValue {
     /// or an array element never fires (the array element case collapses the whole
     /// literal to [`Self::Other`], as an offset read is not a proven element value).
     OffsetRead { base: Box<ArgValue>, key: Box<ArgValue> },
+    /// A string concatenation `$a . $b` (issue #59). Lowered **structurally**, not
+    /// folded here: the operands commonly include a [`Self::Var`] whose value only
+    /// the walk knows (a parameter bound to a caller's literal, say), so the join
+    /// belongs at resolution time where the env is in hand. Left-nested for a chain
+    /// (`a . b . c` is `Concat(Concat(a, b), c)`), matching PHP's left associativity.
+    ///
+    /// This is not itself a proven value ([`Self::is_literal`] is `false`) — it
+    /// resolves to one exactly when both operands resolve to values whose string
+    /// cast is *total and environment-independent*. See the inference layer's
+    /// `concat_cast` for that admission rule and why `float` is excluded.
+    ///
+    /// A compound `.=` still lowers its rvalue to [`Self::Other`] (see [`StmtKind`]);
+    /// that is a documented deferral, not a semantic claim.
+    Concat(Box<ArgValue>, Box<ArgValue>),
     Other,
 }
 
@@ -1216,6 +1230,10 @@ impl std::hash::Hash for ArgValue {
                 base.hash(state);
                 key.hash(state);
             }
+            ArgValue::Concat(l, r) => {
+                l.hash(state);
+                r.hash(state);
+            }
             ArgValue::ClassConst(class, name) => {
                 class.hash(state);
                 name.hash(state);
@@ -1289,6 +1307,7 @@ impl ArgValue {
             ArgValue::PropFetch { var, prop } => format!("${var}->{prop}"),
             ArgValue::Clone(v) => format!("clone ${v}"),
             ArgValue::Coalesce(l, r) => format!("({} ?? {})", l.render(), r.render()),
+            ArgValue::Concat(l, r) => format!("({} . {})", l.render(), r.render()),
             ArgValue::OffsetRead { base, key } => format!("{}[{}]", base.render(), key.render()),
             ArgValue::ClassConst(class, name) => format!("{}::{name}", class.render()),
             ArgValue::EnumCase(class, case) => format!("{class}::{case}"),
@@ -4832,6 +4851,18 @@ fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
         // yields no fact (so `$arr['k'] ?? …` manufactures nothing).
         Expression::Binary(b) if b.operator.is_null_coalesce() => {
             ArgValue::Coalesce(Box::new(lower_arg_value(b.lhs)), Box::new(lower_arg_value(b.rhs)))
+        }
+        // String concatenation `$a . $b` (issue #59). Structural, like `??` above:
+        // an operand's value is an env fact, so the join runs in the walk. Note this
+        // is the ONE binary operator lowered as a value — arithmetic still widens to
+        // `Other`, because `+`/`-`/`*` carry overflow and int/float promotion
+        // questions that byte concatenation does not.
+        //
+        // Unrepresentable operands are lowered anyway rather than collapsing the
+        // whole node: resolution fails on the operand, which is the same silence,
+        // and keeping the tree lets a later slice resolve one side independently.
+        Expression::Binary(b) if b.operator.is_concatenation() => {
+            ArgValue::Concat(Box::new(lower_arg_value(b.lhs)), Box::new(lower_arg_value(b.rhs)))
         }
         // An array/offset read `$base[$key]` (ADR-0049 §7 / S3). Lowered
         // structurally in every rvalue position; the walk fires `offset.missing` /
