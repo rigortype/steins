@@ -29,6 +29,14 @@ Entries accumulate under this heading as work lands; the `steins-release-prep`
 skill seals them into a version section at release time, reconstructing from
 `git log` if the discipline slipped.
 
+### Added
+
+- **A browser playground** — the analyzer compiled to WebAssembly, running fully in-browser with no backend (ADR-0065). A static page under `apps/playground/` with a CodeMirror editor, live findings on a 600 ms debounce, the `steins annotate` margin as a toggleable overlay, a profile selector over the `default ⊂ contracts ⊂ strict` ladder with a sample whose findings appear as the rung climbs, and dark/light/auto themes. Every run is the documented sound subset — the browser has no PHP, so the same notice `steins check --no-php` prints is rendered as a banner, and recovered parse errors are reported in the panel rather than swallowed. Deployment is not part of this entry; locally, `apps/playground/build.sh` plus any static file server serves it.
+
+### Fixed
+
+- **An int written to a typed `float` property now reads back as the float PHP actually stores.** PHP converts at every typed-property boundary — `$this->float = 1` stores `1.0`, in strict and coercive mode alike — but Steins recorded the assigned int, and a later read could fold `$x === 1` to true where the runtime, holding `1.0`, takes the other branch. That was a demonstrated **false positive on the proof layer**: a dead branch's `null` premised a "proven" `call.on-null` on code that runs clean. The write path, promoted constructor properties, and literal property defaults (`public float $d = 3;`) all store the converted value now; a conversion whose result differs between strict and coercive mode (a numeric string into a `float` slot) stores nothing rather than something wrong in one of them. Parameter binding already converted correctly and is unchanged; a `float`-declared return over an int return never leaked the int (the call site sees the declared envelope) and is pinned as such.
+
 ## [0.1.2] - 2026-07-30
 
 Steins learns arrays. Until now an array was a fact only when every one of its elements was already known, which meant a `@param array{id: int, name?: string}` told the analyzer nothing it could use. This release makes the shape itself a fact — which keys are present, which are optional, whether it is a list, what each slot holds — carried through reads, `isset`/`array_key_exists`/`??` guards, writes, and the array builtins. Two new offset diagnostics and a fourth built-in profile, `strict`, are built on it.

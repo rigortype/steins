@@ -6490,6 +6490,13 @@ fn build_new_object(
         }
         if let Some(default) = &p.default
             && let Some(fact) = singleton_fact(default, cx.php_minor)
+            // A typed slot stores the boundary-converted default (issue #48):
+            // `public float $d = 3;` holds `3.0`, not `3` — PHP converts the
+            // compile-time default exactly as it converts a write.
+            && let Some(fact) = match p.ty.as_ref() {
+                Some(ty) => coerce_fact_to_native(ty, fact),
+                None => Some(fact),
+            }
         {
             // Skip null-admitting facts (unsound to flow past unmodeled guards). A
             // literal default is `Verified` (no env fact consumed).
@@ -6528,7 +6535,16 @@ fn build_new_object(
                 Some(a) => match cx
                     .resolve_literal(a, env, w.scope.poisoned, folder)
                     .and_then(|lit| singleton_fact(&lit, cx.php_minor))
-                {
+                    // The promoted slot stores the boundary-converted argument
+                    // (issue #48): `__construct(public float $g)` called with `2`
+                    // holds `2.0`. A mode-dependent conversion falls back to the
+                    // native seed — `General` of the declared scalar covers
+                    // whatever the runtime conversion produces (or the write
+                    // fatals), so the seed stays sound where the value is not.
+                    .and_then(|f| match param.ty.as_ref() {
+                        Some(ty) => coerce_fact_to_native(ty, f),
+                        None => Some(f),
+                    }) {
                     Some(f) => (Some(f), value_stratum(a, env, Some(&*store))),
                     None => (seed_fact(param), Stratum::Verified),
                 },
@@ -6776,7 +6792,22 @@ fn apply_prop_assign(
         // Unknown so reads (dumps, receivers, depth-1 prop-fetch) fall back to
         // arbitrary code rather than the assigned value.
         Some(fact) if !rval_is_object && !hooked => {
-            obj.props.insert(prop.to_owned(), PropFact { fact, stratum: rvalue_strat });
+            // A TYPED slot stores what PHP's boundary conversion makes of the
+            // rvalue, not the rvalue (issue #48): an int written to a `float`
+            // property IS a float. A fact the conversion cannot answer
+            // mode-independently drops to Unknown (sound both ways).
+            let stored = match pdecl.and_then(|pd| pd.ty.as_ref()) {
+                Some(ty) => coerce_fact_to_native(ty, fact),
+                None => Some(fact),
+            };
+            match stored {
+                Some(fact) => {
+                    obj.props.insert(prop.to_owned(), PropFact { fact, stratum: rvalue_strat });
+                }
+                None => {
+                    obj.props.remove(prop);
+                }
+            }
         }
         _ => {
             obj.props.remove(prop);
@@ -13766,6 +13797,123 @@ fn coerce_into_param(cx: &Cx, ty: &NativeType, value: &ArgValue) -> Option<ArgVa
         return Some(value.clone());
     }
     None
+}
+
+/// The fact a **native-typed slot** actually stores after PHP's typed-boundary
+/// conversion (issue #48) — a typed property write, a promoted-param
+/// construction, a literal property default — or `None` when no sound fact can
+/// be stored and the slot must stay Unknown.
+///
+/// PHP converts at every typed boundary; recording the *assigned* fact verbatim
+/// is how #48's soundness hole opened: an int written to a `float` property read
+/// back as the int `1`, `=== 1` folded true on a value the runtime holds as
+/// `1.0`, and a dead branch's `null` premised a proof-layer `call.on-null` on
+/// code that runs clean.
+///
+/// The table is deliberately narrower than [`coerce_scalar`]'s coercive-mode
+/// table, because a stored fact must be right under `declare(strict_types=1)`
+/// and without it alike, and this seam does not consult the file's mode. Only
+/// **mode-independent** outcomes are stored:
+///
+/// - a value/base whose runtime type exactly matches a union member stores
+///   as-is (no conversion happens in either mode);
+/// - an int into a type with a `float` member and no `int` member stores as the
+///   float it becomes — the ONE implicit conversion PHP performs in both modes
+///   (the strict-mode int→float widening exception), value-precisely for the
+///   finite layers and as `General` float for the abstract ones (the int
+///   refinement is an int-domain claim; the domain has no float refinement, so
+///   widening drops it — wider, never wrong);
+/// - `null` into a nullable type stores as-is;
+/// - everything else drops the fact: under strict types the write fatals (no
+///   fact is the soundest fact), and under coercive mode the conversion may be
+///   computable but storing nothing is sound where storing the unconverted
+///   fact was not.
+///
+/// An object-bearing type stores verbatim (ADR-0043 stage 1: the native scalar
+/// machinery treats such a slot as untracked, and the object arm never reaches
+/// here — object rvalues are excluded before storage).
+fn coerce_fact_to_native(ty: &NativeType, fact: Fact) -> Option<Fact> {
+    if ty.has_instance() {
+        return Some(fact);
+    }
+    // "int arrives, a float slot converts it": a float member with no int member.
+    let float_slot = ty.members.iter().any(|m| matches!(m, TypeMember::Scalar(ScalarType::Float)))
+        && !ty.members.iter().any(|m| matches!(m, TypeMember::Scalar(ScalarType::Int)));
+    match fact {
+        Fact::Singleton(v) => coerce_val_to_native(ty, float_slot, v).map(Fact::Singleton),
+        Fact::OneOf(vs) => {
+            let coerced: Option<Vec<Val>> =
+                vs.into_iter().map(|v| coerce_val_to_native(ty, float_slot, v)).collect();
+            // int→float can merge previously-distinct members; `from_vals` re-dedupes.
+            coerced.and_then(Fact::from_vals)
+        }
+        Fact::Refined { base, refinement, nullable } => {
+            if native_has_base(ty, base) {
+                Some(Fact::Refined { base, refinement, nullable })
+            } else if base == Base::Int && float_slot {
+                Some(Fact::General { base: Base::Float, nullable })
+            } else {
+                None
+            }
+        }
+        Fact::General { base, nullable } => {
+            if native_has_base(ty, base) {
+                Some(Fact::General { base, nullable })
+            } else if base == Base::Int && float_slot {
+                Some(Fact::General { base: Base::Float, nullable })
+            } else {
+                None
+            }
+        }
+        // A tracked native type is scalars-only (an `array` member lowers the
+        // whole hint to `None`), so an array fact never inhabits one.
+        Fact::Shape { .. } => None,
+    }
+}
+
+/// The [`Val`] half of [`coerce_fact_to_native`]: exact-member match keeps the
+/// value, int→float converts value-precisely (PHP's long→double is the same
+/// IEEE conversion as `as f64`), `null` needs the nullable flag, anything else
+/// is mode-dependent and drops.
+fn coerce_val_to_native(ty: &NativeType, float_slot: bool, v: Val) -> Option<Val> {
+    match &v {
+        Val::Null => ty.nullable.then_some(v),
+        Val::Int(i) if float_slot => Some(Val::Float(*i as f64)),
+        Val::Int(_) | Val::Float(_) | Val::Str(_) | Val::Bool(_) => ty
+            .members
+            .iter()
+            .any(|m| native_member_matches_val(m, &v))
+            .then_some(v),
+        Val::Array(_) => None,
+    }
+}
+
+/// Whether a union `member` matches the runtime type of scalar value `v`
+/// exactly — the [`Val`]-shaped sibling of [`member_matches_exact`].
+fn native_member_matches_val(m: &TypeMember, v: &Val) -> bool {
+    match (m, v) {
+        (TypeMember::Scalar(ScalarType::Int), Val::Int(_))
+        | (TypeMember::Scalar(ScalarType::Float), Val::Float(_))
+        | (TypeMember::Scalar(ScalarType::String), Val::Str(_))
+        | (TypeMember::Scalar(ScalarType::Bool), Val::Bool(_)) => true,
+        (TypeMember::BoolLiteral(b), Val::Bool(x)) => x == b,
+        _ => false,
+    }
+}
+
+/// Whether the native type carries the FULL scalar member for `base`. A
+/// `true`/`false` literal member deliberately does not count — a `General` bool
+/// covers both values, and only one inhabits the slot.
+fn native_has_base(ty: &NativeType, base: Base) -> bool {
+    ty.members.iter().any(|m| {
+        matches!(
+            (m, base),
+            (TypeMember::Scalar(ScalarType::Int), Base::Int)
+                | (TypeMember::Scalar(ScalarType::Float), Base::Float)
+                | (TypeMember::Scalar(ScalarType::String), Base::String)
+                | (TypeMember::Scalar(ScalarType::Bool), Base::Bool)
+        )
+    })
 }
 
 /// Whether a union `member` matches the *runtime type* of the non-null literal
