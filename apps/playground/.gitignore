@@ -1,1 +1,5 @@
 steins_wasm.wasm
+# The vendored PHP engine (build.sh: php-wasm at its pin + a copy of the sidecar
+# runner). Build products, like the wasm module above; the license texts they
+# oblige live in vendor-licenses/ and ARE tracked.
+vendor/
