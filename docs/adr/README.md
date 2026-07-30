@@ -101,3 +101,4 @@ list in one place.
 | ADR-0063 | [Pure-function typing: semantic effect propagation first, conditional-purity contracts second](0063-pure-function-typing-conditional-purity.md) |
 | ADR-0064 | [Dynamic return typing: the PHPStan extension-point import lands in five named seams](0064-dynamic-return-import-taxonomy.md) |
 | ADR-0065 | [Browser playground: the analysis core as a static wasm asset, no backend](0065-browser-playground-wasm.md) |
+| ADR-0066 | [The fold surface reaches the browser by request replay, over a transport the policy does not know](0066-replay-fold-transport.md) |

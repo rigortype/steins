@@ -1,5 +1,13 @@
 # Browser playground: the analysis core as a static wasm asset, no backend
 
+> Amended by ADR-0066: §2 mechanism 1 is now enforced one crate lower down.
+> `steins-infer`'s `steins-sidecar` dependency is unconditional; the sidecar's
+> own `php`-spawning half is what carries the `cfg(not(target_arch =
+> "wasm32"))`, so the wasm dependency graph still contains no `std::process`.
+> `steins-wasm` can also construct a `TableFolder`, which reaches the fold
+> surface by replaying answers a caller supplies rather than by executing PHP
+> itself; `sw_check`/`sw_annotate` remain `NoFold` and byte-identical.
+
 Owner directive (2026-07-30): implement the browser playground, following the
 spec of the rigor-playground app (rigor ADR-29) in its **end state** — the
 engine runs fully in-browser, the wasm module is served as a static asset, and

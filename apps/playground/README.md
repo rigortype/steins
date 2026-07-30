@@ -11,6 +11,15 @@ false is added. The banner at the bottom of the page is the analysis
 envelope's `notice` field — the same sentence `steins check --no-php` prints —
 rendered as data.
 
+The module also exposes a **replay** pair (ADR-0066, issue #64) for a caller
+that *can* run PHP — php-wasm, once the frontend loads it. `checkReplay` /
+`annotateReplay` take a table of already-known fold/reflect/env answers and
+return the envelope plus `pending`: the requests the run could not answer.
+Answer them, put them back under the same key strings, call again, stop when
+`pending` is empty. A non-empty `pending` means the results are degraded to the
+sound subset and **must not be rendered**. The frontend half of that loop is
+not wired up yet; `smoke.mjs` drives it over a canned table.
+
 ## Files
 
 - `index.html` — the whole frontend: CodeMirror 6 (from esm.sh via an import
