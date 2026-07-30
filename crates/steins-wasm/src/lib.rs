@@ -591,6 +591,110 @@ mod replay {
         assert_eq!(dumps, vec!["dumped type: 'Hello, World! Hello, World! '"]);
     }
 
+    /// The issue-#64 acceptance criterion on the machine the browser actually
+    /// has: php-wasm 0.1.0 is PHP **8.5.2** built **32-bit**, and the flagship
+    /// still inlines there. `str_repeat` is on the verified width-safe subset
+    /// (ADR-0066 S1.5 amendment) and every integer in the call is in range, so the
+    /// fold is admitted — the whole point of relaxing the blanket width decline.
+    #[test]
+    fn the_flagship_folds_on_a_32_bit_engine() {
+        let mut table = answered_table();
+        table.insert(
+            ENV_KEY.to_owned(),
+            serde_json::json!({
+                "php_version": "8.5.2",
+                "extensions": ["Core", "standard"],
+                "sapi": "embed",
+                "int_size": 4,
+            }),
+        );
+        let v = check_replay(FLAGSHIP, table);
+        assert_eq!(v["ok"], true);
+        assert_eq!(pending_of(&v), Vec::<String>::new(), "the fixpoint is reached");
+        let dumps: Vec<&str> = v["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .filter(|f| f["id"] == "debug.type")
+            .map(|f| f["message"].as_str().expect("message"))
+            .collect();
+        assert_eq!(dumps, vec!["dumped type: 'Hello, World! Hello, World! '"]);
+    }
+
+    /// …and a width-REFUSED builtin stays declined on that same 32-bit engine,
+    /// even with the answer sitting in the table. `intval("3000000000")` is
+    /// `3000000000` on a 64-bit engine and the saturated `2147483647` on a 32-bit
+    /// one, silently — so the gate is upstream of the table and a pre-answered
+    /// wrong literal cannot reach a finding.
+    #[test]
+    fn a_width_refused_builtin_stays_declined_on_a_32_bit_engine() {
+        const SRC: &str = "<?php\n$x = intval(\"3000000000\");\n\\PHPStan\\dumpType($x);\n";
+        const INTVAL_KEY: &str =
+            r#"{"method":"fold","params":{"function":"intval","args":["3000000000"]}}"#;
+        const INTVAL_REFLECT_KEY: &str = r#"{"method":"reflect","params":{"target":"intval"}}"#;
+        let mut table = HashMap::from([
+            (
+                ENV_KEY.to_owned(),
+                serde_json::json!({
+                    "php_version": "8.5.2",
+                    "extensions": ["Core", "standard"],
+                    "sapi": "embed",
+                    "int_size": 4,
+                }),
+            ),
+            (
+                INTVAL_KEY.to_owned(),
+                serde_json::json!({ "kind": "value", "value": 2_147_483_647_i64, "type": "int" }),
+            ),
+            // The declined fold falls back to the reflected return envelope
+            // (ADR-0056 R1), which is width-independent — so the run still reaches
+            // its fixpoint, one rung less precise.
+            (
+                INTVAL_REFLECT_KEY.to_owned(),
+                serde_json::json!({
+                    "kind": "reflection",
+                    "target": "intval",
+                    "exists": true,
+                    "function": true,
+                    "class_like": false,
+                    "return_type": "int",
+                    "return_type_tentative": false,
+                }),
+            ),
+        ]);
+        let v = check_replay(SRC, table.clone());
+        assert_eq!(v["ok"], true);
+        assert_eq!(pending_of(&v), Vec::<String>::new(), "a refused fold asks nothing");
+        let dumps: Vec<&str> = v["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .filter(|f| f["id"] == "debug.type")
+            .map(|f| f["message"].as_str().expect("message"))
+            .collect();
+        assert_eq!(dumps, vec!["dumped type: int"], "the saturated literal never lands");
+        // The SAME table on a 64-bit engine folds it — so the decline is the
+        // width and not a missing answer.
+        table.insert(
+            ENV_KEY.to_owned(),
+            serde_json::json!({
+                "php_version": "8.5.8",
+                "extensions": ["Core", "standard"],
+                "sapi": "cli",
+                "int_size": 8,
+            }),
+        );
+        let v = check_replay(SRC, table);
+        let dumps: Vec<&str> = v["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .filter(|f| f["id"] == "debug.type")
+            .map(|f| f["message"].as_str().expect("message"))
+            .collect();
+        assert_eq!(dumps, vec!["dumped type: 2147483647"]);
+    }
+
     /// The same source through the sound-subset entry point stays NoFold: the
     /// replay exports are additive, and `sw_check` is byte-identical to before.
     #[test]

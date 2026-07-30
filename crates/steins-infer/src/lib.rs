@@ -636,13 +636,14 @@ impl<E: FoldEngine> EngineFolder<E> {
     /// `0`, `hexdec('FFFFFFFFF')` promotes to float and `strtotime('2040-01-01')` is
     /// `false`. Those are silently wrong *values*, not failures: nothing widens,
     /// nothing throws, and a fold would carry the wrong literal straight into a
-    /// proof. So the fold lane and the ADR-0056 curated admission both require a
-    /// **provably** 64-bit engine, and an unknown width declines.
+    /// proof. So the ADR-0056 curated admission requires a **provably** 64-bit
+    /// engine, and an unknown width declines.
     ///
-    /// Deliberately default-deny and deliberately coarse. A later slice may admit a
-    /// width-safe subset of the foldable allowlist (`strtolower` cannot care about
-    /// `PHP_INT_MAX`); until such a subset is curated and verified, the whole lane
-    /// declines rather than guesses which builtins are width-blind.
+    /// This is the CURATED-ROW leg, and it stays all-or-nothing on purpose. A
+    /// curated row is a claim about a builtin's whole return domain, verified
+    /// against the 64-bit engine at `PINNED_PHP`; there is no per-call argument
+    /// tuple to range-check it against, so there is nothing for the fold lane's
+    /// width-safe subset (below) to be the analogue of.
     fn engine_is_64_bit(&mut self) -> bool {
         self.engine_int_size() == Some(8)
     }
@@ -818,19 +819,80 @@ impl<E: FoldEngine> EngineFolder<E> {
     fn fold_uncached(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue> {
         // The integer-width gate (issue #64): a fold is a VALUE, and a 32-bit
         // engine answers arithmetic questions differently while failing at
-        // nothing. Asked before the engine is touched, so a narrow engine is
-        // never even dispatched to.
-        if !self.engine_is_64_bit() {
-            return None;
-        }
+        // nothing. Asked before the engine is dispatched to, so a narrow engine
+        // is never handed a question its machine would answer wrongly.
+        //
+        // The width is asked FIRST, before the arguments are even encoded, so the
+        // first iteration of a replay loop reports the `env` question and nothing
+        // else — the round trip that establishes the machine.
+        let width = self.engine_int_size();
         let fargs: Vec<FoldArg> = args.iter().filter_map(arg_to_fold).collect();
         if fargs.len() != args.len() {
+            return None;
+        }
+        if !fold_admitted_at_width(width, name, &fargs) {
             return None;
         }
         match self.engine.fold(name, &fargs) {
             FoldResult::Value(v) => fold_value_to_arg(&v),
             FoldResult::Throw { .. } | FoldResult::Widen { .. } => None,
         }
+    }
+}
+
+/// The fold lane's integer-width admission (issue #64 S1.5) — a pure function of
+/// the engine's reported `PHP_INT_SIZE`, the callee, and the encoded arguments.
+///
+/// Three cases, and only three:
+///
+/// * `Some(8)` — the machine every value rule here assumes. Admit everything, so
+///   this is byte-identical to the pre-S1.5 behaviour on every native run.
+/// * `Some(4)` — the **width-safe subset**. Admit `name` only when the catalog
+///   certifies it ([`steins_catalog::width_safe`]) *and* every integer occurring
+///   anywhere in the arguments is inside [`I32_SAFE`]. Both legs are required:
+///   the catalog verdict is stated for exactly the tuples this range guard admits,
+///   so neither leg means anything alone.
+/// * anything else (`None`, or a width nobody has verified) — **default-deny**.
+///   An old or foreign runner is unknown, not assumed; and there is no verified
+///   subset for a 16-bit or 128-bit machine because nobody has probed one.
+///
+/// Declining is spelled as it always was: the caller returns `None`, which widens.
+/// Nothing here fabricates, and nothing here narrows on a guess.
+fn fold_admitted_at_width(int_size: Option<u32>, name: &str, args: &[FoldArg]) -> bool {
+    match int_size {
+        Some(8) => true,
+        Some(4) => steins_catalog::width_safe(name) && args.iter().all(fold_arg_fits_i32),
+        _ => false,
+    }
+}
+
+/// The 32-bit argument range guard: `[-(2^31 - 1), 2^31 - 1]`.
+///
+/// Deliberately **not** `-2^31`. `PHP_INT_MIN` on a 32-bit engine is the one
+/// integer whose magnitude is not representable, so it is the seed of every
+/// boundary flip — `abs(-2147483648)` promotes to float there and stays `int` on
+/// a 64-bit engine. Excluding it means no admitted integer has an out-of-range
+/// magnitude, which is what makes the `abs`-shaped flip structurally unreachable
+/// rather than merely unobserved. The cost is one value per call site.
+const I32_SAFE: std::ops::RangeInclusive<i64> = -2_147_483_647..=2_147_483_647;
+
+/// Whether every integer `arg` carries is inside [`I32_SAFE`] — recursively
+/// through array literals, and over **keys as well as values**.
+///
+/// The keys matter as much as the values. `count([3000000000 => 'a', 'b'])` has no
+/// out-of-range integer *value*, and yet the key decides what PHP's next-int rule
+/// assigns to `'b'` and therefore whether the array has one element or two. Only
+/// `FoldKey::Int` is charged: a `FoldKey::Str` is a string key by the time it
+/// reaches the wire (lowering already applied PHP's key normalization), and a
+/// `FoldArg::Float` is an IEEE double on both machines.
+fn fold_arg_fits_i32(arg: &FoldArg) -> bool {
+    match arg {
+        FoldArg::Int(v) => I32_SAFE.contains(v),
+        FoldArg::Array(entries) => entries.iter().all(|(k, v)| {
+            let key_ok = !matches!(k, Some(FoldKey::Int(i)) if !I32_SAFE.contains(i));
+            key_ok && fold_arg_fits_i32(v)
+        }),
+        FoldArg::Float(_) | FoldArg::Str(_) | FoldArg::Bool(_) | FoldArg::Null => true,
     }
 }
 

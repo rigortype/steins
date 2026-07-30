@@ -28,3 +28,6 @@ serde_json.workspace = true
 steins-db = { path = "../steins-db" }
 steins-syntax = { path = "../steins-syntax" }
 steins-domain = { path = "../steins-domain" }
+# The width classification the fold gate consults (issue #64 S1.5), so the gate
+# tests can assert against the catalog's verdict rather than restate it.
+steins-catalog = { path = "../steins-catalog" }

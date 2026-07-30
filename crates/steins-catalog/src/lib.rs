@@ -65,42 +65,146 @@ mod return_facts_generated;
 /// A folded *result* is still scalar-only: a builtin that returns an array (say
 /// `str_replace` over an array subject) widens, because carrying an array back
 /// would seed synthesized array facts rather than read written ones (#41/#42).
+///
+/// # Where the list lives
+///
+/// The allowlist is spelled as the union of the two integer-width classes,
+/// `WIDTH_SAFE` and `WIDTH_REFUSED` (issue #64 S1.5), rather than as a third list
+/// they are checked against. A name is foldable *by being classified*, so a name
+/// added without a width verdict is not foldable at all — the invariant holds by
+/// construction rather than by a test that could be forgotten. The two lists keep
+/// the allowlist's own composition rules: ASCII-cased string builtins only (the
+/// `mb_*` and locale-sensitive variants are deliberately excluded, as are all
+/// `nondet` builtins), and the array-taking members (`in_array`, `count`,
+/// `implode`, `str_replace`, `sprintf`) which lit up when the fold seam learned
+/// to carry an array literal (issue #39) without this list changing at all.
 #[must_use]
 pub fn foldable(name: &str) -> bool {
-    // Sorted for readability; matched case-insensitively (PHP function names are
-    // case-insensitive).
-    const ALLOWLIST: &[&str] = &[
-        // String transforms — pure, locale-independent (ASCII-cased builtins;
-        // the `mb_*` and locale-sensitive variants are deliberately excluded).
-        "strtolower",
-        "strtoupper",
-        "ucfirst",
-        "lcfirst",
-        "trim",
-        "ltrim",
-        "rtrim",
-        "strrev",
-        "substr",
-        "str_replace",
-        "str_repeat",
-        "implode",
-        "sprintf",
-        "strlen",
-        // Numeric / conversion — pure and deterministic.
-        "abs",
-        "intdiv",
-        "intval",
-        "floatval",
-        "strval",
-        "boolval",
-        // Array/collection predicates — pure (qualify only once array literals
-        // exist in the IR).
-        "in_array",
-        "count",
-    ];
-
-    ALLOWLIST.iter().any(|&f| name.eq_ignore_ascii_case(f))
+    width_safe(name) || width_refused(name)
 }
+
+/// Whether folding `name` is **safe on a 32-bit engine** (case-insensitive), given
+/// that the caller has already applied the argument range guard.
+///
+/// # The rule
+///
+/// A `foldable` name is width-safe when, for every argument tuple in which every
+/// integer occurring anywhere in the arguments (values *and* explicit array keys,
+/// recursively) lies within `[-(2^31 - 1), 2^31 - 1]`, a 32-bit engine either
+/// returns the **identical value and type tag** a 64-bit engine returns, or
+/// **declines** (throws, or widens). A decline is the sound direction — it is
+/// exactly what the blanket ADR-0066 §4 gate does for every name today — so the
+/// browser loses precision there and never gains a wrong literal.
+///
+/// The guard's lower bound is `-(2^31 - 1)` and **not** `-2^31`: excluding
+/// `PHP_INT_MIN`-on-32-bit is what makes the `abs`-shaped boundary flip
+/// unreachable, because no in-range integer has an out-of-range magnitude.
+///
+/// This is the width-safe subset ADR-0066 §4 deferred, and it is **verified, not
+/// reasoned**: every name below was probed differentially against php-wasm 0.1.0
+/// (PHP 8.5.2, `PHP_INT_SIZE = 4`) and `php` 8.5.8 (`PHP_INT_SIZE = 8`) through the
+/// *same* `steins_handle` dispatch core, 310 adversarial tuples over boundary
+/// integers, oversized numeric strings, oversized floats, negative inputs and
+/// integer array keys at `PHP_INT_MAX`. See the ADR-0066 amendment for the table.
+///
+/// A `false` here is not a claim that the name is width-*sensitive* in general —
+/// it is a refusal to certify it. Default-deny: an unclassified or newly added
+/// name folds only on a provably 64-bit engine.
+#[must_use]
+pub fn width_safe(name: &str) -> bool {
+    WIDTH_SAFE.iter().any(|&f| name.eq_ignore_ascii_case(f))
+}
+
+/// The complement of [`width_safe`] *within the folding allowlist* — a name that
+/// is foldable and whose 32-bit behaviour is refused. Not the same as
+/// `!width_safe(name)`, which is also true of every name that is not foldable at
+/// all; see `WIDTH_REFUSED` for the refusals and their probes.
+fn width_refused(name: &str) -> bool {
+    WIDTH_REFUSED.iter().any(|&f| name.eq_ignore_ascii_case(f))
+}
+
+/// The verified width-safe half of the folding allowlist (issue #64 S1.5).
+///
+/// Grouped by *why* the width cannot reach the result:
+///
+/// * **string in, string out.** The result is a byte transform of the subject.
+///   The only integer in sight is a coerced subject (`strtoupper(2147483647)`),
+///   and an in-range integer has the same decimal spelling on both machines.
+/// * **result bounded by the input.** `strlen`/`count` return a length or an
+///   element count, bounded by a string that fits in the engine's own memory and
+///   by the fold seam's 256-entry array budget — neither can reach 2^31.
+/// * **int parameters, in-range results.** `substr`/`str_repeat`/`intdiv` take
+///   `int` parameters, but an in-range argument yields an in-range result
+///   (`|intdiv(a, b)| <= |a|`). The one divergence class they have is a *decline*:
+///   an oversized numeric string or float landing on an `int` parameter
+///   (`substr("abcdef", "3000000000")`) is a `TypeError` on the 32-bit engine
+///   where the 64-bit engine answers — the sound direction.
+/// * **no integer in the result at all.** `floatval` returns a double (64-bit on
+///   both machines), `boolval` returns a bool, `strval` renders under the same
+///   `precision` ini (14 on both builds, verified), and `in_array` returns a
+///   bool from php-src's own `zendi_smart_strcmp`, whose overflow guard makes two
+///   oversized numeric strings compare as strings on BOTH machines
+///   (`in_array("9007199254740993", ["9007199254740992"])` is `false` on each).
+const WIDTH_SAFE: &[&str] = &[
+    "strtolower",
+    "strtoupper",
+    "ucfirst",
+    "lcfirst",
+    "trim",
+    "ltrim",
+    "rtrim",
+    "strrev",
+    "substr",
+    "str_replace",
+    "str_repeat",
+    "implode",
+    "strlen",
+    "intdiv",
+    "floatval",
+    "strval",
+    "boolval",
+    "in_array",
+    "count",
+];
+
+/// The **refused rows** of the width classification, with the divergence that
+/// refused each — the ADR-0061 refused-row discipline (the `bin2hex` trap style)
+/// applied to the integer machine. Every probe below passes the argument range
+/// guard, so the guard cannot exclude it; only refusing the name can.
+///
+/// Each row is a *silent* divergence: both engines return a value, and the values
+/// (or their type tags) differ. Nothing throws, nothing widens, nothing warns —
+/// which is precisely the ADR-0066 §4 hazard, and why these three cannot be
+/// certified. Probes are verbatim `fold` results, 64-bit `php` 8.5.8 vs 32-bit
+/// php-wasm 0.1.0 (PHP 8.5.2).
+///
+/// * `abs`      — REFUSED: the **type tag** flips. A numeric string is coerced to
+///   the `int|float` parameter by the *engine's* width, so an argument the range
+///   guard never sees as an integer re-enters as one.
+///   `abs("3000000000")` = `int(3000000000)` / `float(3000000000)`;
+///   `abs("-2147483648")` = `int(2147483648)` / `float(2147483648)`.
+///   The guard's exclusion of `-2^31` closes the *integer* path to this flip; it
+///   cannot close the numeric-string path, so the name goes.
+/// * `intval`   — REFUSED: saturation and wraparound, by definition of the cast.
+///   `intval("3000000000")` = `3000000000` / `2147483647` (saturated);
+///   `intval("-3000000000")` = `-3000000000` / `-2147483648`;
+///   `intval("FFFFFFFFF", 16)` = `68719476735` / `2147483647`;
+///   `intval(4.2e9)` = `4200000000` / `-94967296` (wrapped);
+///   `intval(1.0e30)` = `5076964154930102000` / `0`.
+///   Ten of seventeen probes diverged — this is the width-sensitive builtin.
+/// * `sprintf`  — REFUSED: the integer conversion specifiers render the machine
+///   word, so an **in-range** argument suffices.
+///   `sprintf("%b", -1)` = 64 ones / 32 ones;
+///   `sprintf("%x", -1)` = `"ffffffffffffffff"` / `"ffffffff"`;
+///   `sprintf("%x", -2147483647)` = `"ffffffff80000001"` / `"80000001"`;
+///   `sprintf("%o", -1)` = `"1777777777777777777777"` / `"37777777777"`;
+///   `sprintf("%u", -1)` = `"18446744073709551615"` / `"4294967295"`;
+///   and `%d` re-imports the `intval` saturation for a numeric-string or float
+///   argument: `sprintf("%d", 3.0e9)` = `"3000000000"` / `"-1294967296"`.
+///   A format-string-aware sub-classification is possible in principle and is
+///   deliberately not attempted: the safe/unsafe line would live inside a string
+///   literal, which is the wrong place for a soundness gate.
+const WIDTH_REFUSED: &[&str] = &["abs", "intval", "sprintf"];
 
 /// The effect labels (ADR-0018 hierarchical dot-paths) a builtin carries, or
 /// `None` when the function is **uncatalogued** (unknown effects — the safe,
@@ -817,7 +921,51 @@ fn levenshtein(a: &str, b: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{effect_labels, foldable};
+    use super::{WIDTH_REFUSED, WIDTH_SAFE, effect_labels, foldable, width_safe};
+
+    /// The allowlist is the union of the two width classes, so "every foldable
+    /// name has a width verdict" is structural. What still needs pinning is that
+    /// the two classes are DISJOINT (a name in both would be silently admitted on
+    /// a 32-bit engine while the refused table claims otherwise) and that the size
+    /// is the 22 the ADR-0066 amendment tabulates.
+    #[test]
+    fn the_width_classes_partition_the_allowlist() {
+        for name in WIDTH_SAFE {
+            assert!(!WIDTH_REFUSED.contains(name), "{name} is classified twice");
+            assert!(foldable(name), "{name} is classified but not foldable");
+        }
+        for name in WIDTH_REFUSED {
+            assert!(foldable(name), "{name} is classified but not foldable");
+        }
+        assert_eq!(WIDTH_SAFE.len(), 19, "the verified width-safe subset");
+        assert_eq!(WIDTH_REFUSED.len(), 3, "the refused rows");
+        assert_eq!(
+            WIDTH_SAFE.len() + WIDTH_REFUSED.len(),
+            22,
+            "the allowlist size the ADR-0066 amendment tabulates"
+        );
+    }
+
+    /// The three refused rows, named. Each is a *silent* value divergence on a
+    /// 32-bit engine — see `WIDTH_REFUSED` for the verbatim probes.
+    #[test]
+    fn the_width_sensitive_builtins_are_refused() {
+        for name in ["abs", "intval", "sprintf", "ABS", "IntVal", "SPRINTF"] {
+            assert!(!width_safe(name), "{name} must not be certified width-safe");
+        }
+        // …and the certification is real, not vacuous.
+        for name in ["strtoupper", "substr", "str_repeat", "count", "in_array", "STRLEN"] {
+            assert!(width_safe(name), "{name} is a verified width-safe fold");
+        }
+    }
+
+    /// Default-deny: a name nobody classified is not width-safe, foldable or not.
+    #[test]
+    fn an_unclassified_name_is_not_width_safe() {
+        for name in ["some_unknown_fn", "ip2long", "crc32", "hexdec", "dechex", "strtotime"] {
+            assert!(!width_safe(name), "{name} must not be certified width-safe");
+        }
+    }
 
     #[test]
     fn known_pure_builtins_are_foldable() {

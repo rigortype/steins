@@ -267,6 +267,12 @@ fn a_non_pinned_minor_declines_the_curated_row_and_still_seeds_the_envelope() {
 /// narrow one can violate them (`hexdec` promoting to float where the row says
 /// int), so the width declines the refinement. The envelope still seeds: a
 /// declared return type is a platform-independent claim.
+///
+/// S1.5 deliberately does NOT relax this leg. The fold lane gained a width-safe
+/// subset because a fold is a claim about one argument tuple, which a range guard
+/// can bound; a curated row is a claim about a builtin's whole return domain, and
+/// there is no per-call tuple to bound it with. `strlen` is on the width-safe fold
+/// subset and its curated row still declines here — that contrast IS the pin.
 #[test]
 fn a_32_bit_engine_at_the_pinned_minor_declines_the_curated_row_and_still_seeds() {
     let engine = FakeEngine::new("8.5.2", Some(4)).with_function("strlen", "int");
@@ -275,17 +281,55 @@ fn a_32_bit_engine_at_the_pinned_minor_declines_the_curated_row_and_still_seeds(
     assert_eq!(fact, Fact::General { base: Base::Int, nullable: false }, "envelope alone: {fact:?}");
     // The raw reflected declaration is unaffected by the width, too.
     assert_eq!(folder.builtin_return_type("strlen").as_deref(), Some("int"));
+    // …and `strlen` IS width-safe for the fold lane, on the same folder, at the
+    // same width. The two gates are genuinely independent.
+    assert!(steins_catalog::width_safe("strlen"));
 }
 
-/// The fold lane's width gate (issue #64): a 32-bit engine folds NOTHING, and is
-/// not even dispatched to. `1 << 40` is `0` there and `crc32('x')` is negative —
-/// silently wrong values, which a fold would carry straight into a proof.
+/// The width-safe subset over the REPLAY transport, end to end: a 32-bit table
+/// answers a `strtoupper` fold, and the browser's engine is the one that answered
+/// it. This is what S2 will see in the playground.
 #[test]
-fn a_32_bit_engine_folds_nothing_and_is_never_dispatched_to() {
+fn the_replay_transport_folds_the_width_safe_subset_on_a_32_bit_table() {
+    let mut t = Table::new();
+    with_env(&mut t, "8.5.2", 4); // php-wasm 0.1.0
+    with_fold(
+        &mut t,
+        "strtoupper",
+        &[FoldArg::Str("ab".to_owned())],
+        serde_json::json!({ "kind": "value", "type": "string", "value": "AB" }),
+    );
+    with_fold(
+        &mut t,
+        "intval",
+        &[FoldArg::Str("3000000000".to_owned())],
+        serde_json::json!({ "kind": "value", "type": "int", "value": 2_147_483_647_i64 }),
+    );
+    let mut folder = TableFolder::with_table(t);
+    assert_eq!(
+        folder.fold("strtoupper", &[ArgValue::Str("ab".to_owned())]),
+        Some(ArgValue::Str("AB".to_owned()))
+    );
+    // The refused name declines even though the table HAS the (wrong) answer —
+    // the gate is upstream of the table, so a saturated 32-bit literal cannot
+    // reach a proof by being pre-answered.
+    assert_eq!(folder.fold("intval", &[ArgValue::Str("3000000000".to_owned())]), None);
+    assert!(folder.pending().is_empty(), "a refused fold asks nothing: {:?}", folder.pending());
+}
+
+/// The fold lane's width gate, refused leg (issue #64 S1.5): a builtin the
+/// catalog does NOT certify width-safe folds nothing on a 32-bit engine, and is
+/// not even dispatched to — not even with innocent arguments. `intval` is the
+/// refusal's own worst case: `intval("3000000000")` is `3000000000` on a 64-bit
+/// engine and the saturated `2147483647` on a 32-bit one, silently.
+#[test]
+fn a_width_refused_name_folds_nothing_on_a_32_bit_engine() {
     let engine = FakeEngine::new("8.5.2", Some(4))
-        .with_fold("strtoupper", FoldResult::Value(steins_sidecar::FoldValue::Str("AB".to_owned())));
+        .with_fold("intval", FoldResult::Value(steins_sidecar::FoldValue::Int(7)));
     let mut folder = EngineFolder::with_engine(engine);
-    assert_eq!(folder.fold("strtoupper", &[ArgValue::Str("ab".to_owned())]), None);
+    // Innocent arguments — every integer in range, nothing suspicious about the
+    // call. The refusal is per-NAME and the arguments cannot buy it back.
+    assert_eq!(folder.fold("intval", &[ArgValue::Str("7".to_owned())]), None);
     assert!(
         folder.engine_mut().dispatched.is_empty(),
         "the gate refuses before the engine is touched: {:?}",
@@ -295,10 +339,81 @@ fn a_32_bit_engine_folds_nothing_and_is_never_dispatched_to() {
     assert!(folder.absence_family_available(), "a 32-bit engine still witnesses absence");
 }
 
-/// An engine that does not report its width is not provably 64-bit, so the fold
-/// lane declines. Default-deny: an old or foreign runner is unknown, not assumed.
+/// The fold lane's width gate, ADMITTED leg (issue #64 S1.5): a verified
+/// width-safe builtin over in-range arguments folds on a 32-bit engine and IS
+/// dispatched to. Without this the width tests would all be satisfied by a lane
+/// that folds nothing at all.
 #[test]
-fn an_unreported_width_declines_the_fold_lane() {
+fn a_32_bit_engine_folds_the_verified_width_safe_subset() {
+    let engine = FakeEngine::new("8.5.2", Some(4))
+        .with_fold("strtoupper", FoldResult::Value(steins_sidecar::FoldValue::Str("AB".to_owned())));
+    let mut folder = EngineFolder::with_engine(engine);
+    assert_eq!(
+        folder.fold("strtoupper", &[ArgValue::Str("ab".to_owned())]),
+        Some(ArgValue::Str("AB".to_owned()))
+    );
+    assert_eq!(folder.engine_mut().dispatched, vec!["strtoupper".to_owned()]);
+}
+
+/// The range guard reaches array KEYS, recursively. `count` is width-safe, every
+/// *value* here is in range, and the one out-of-range integer is a key two levels
+/// down — which is exactly where it matters, because the key is what PHP's
+/// next-int rule reads to decide whether the sibling is a new element.
+#[test]
+fn an_out_of_range_key_buried_in_a_nested_array_declines_the_fold() {
+    use steins_syntax::ArrayKey;
+    let nested = ArgValue::Array(vec![
+        (ArrayKey::Auto, ArgValue::Int(1)),
+        // 2^31 — one past the guard, and the engine's own PHP_INT_MAX at width 4.
+        (ArrayKey::Int(2_147_483_648), ArgValue::Str("a".to_owned())),
+    ]);
+    let outer = ArgValue::Array(vec![(ArrayKey::Auto, nested)]);
+    let engine = FakeEngine::new("8.5.2", Some(4))
+        .with_fold("count", FoldResult::Value(steins_sidecar::FoldValue::Int(1)));
+    let mut folder = EngineFolder::with_engine(engine);
+    assert_eq!(folder.fold("count", std::slice::from_ref(&outer)), None);
+    assert!(
+        folder.engine_mut().dispatched.is_empty(),
+        "an out-of-range key is refused before dispatch: {:?}",
+        folder.engine_mut().dispatched
+    );
+    // The SAME shape one below the boundary folds, so the guard is a boundary and
+    // not a blanket refusal of nested arrays.
+    let ok_nested = ArgValue::Array(vec![
+        (ArrayKey::Auto, ArgValue::Int(1)),
+        (ArrayKey::Int(2_147_483_647), ArgValue::Str("a".to_owned())),
+    ]);
+    let engine = FakeEngine::new("8.5.2", Some(4))
+        .with_fold("count", FoldResult::Value(steins_sidecar::FoldValue::Int(1)));
+    let mut folder = EngineFolder::with_engine(engine);
+    assert_eq!(
+        folder.fold("count", &[ArgValue::Array(vec![(ArrayKey::Auto, ok_nested)])]),
+        Some(ArgValue::Int(1))
+    );
+    assert_eq!(folder.engine_mut().dispatched, vec!["count".to_owned()]);
+}
+
+/// `-2^31` is excluded even though it is a legal 32-bit integer: it is the one
+/// value whose magnitude the machine cannot represent, and excluding it is what
+/// makes the `abs`-shaped boundary flip unreachable rather than merely unobserved.
+#[test]
+fn the_range_guard_excludes_php_int_min_on_a_32_bit_machine() {
+    for (arg, expected) in [(-2_147_483_648_i64, None), (-2_147_483_647_i64, Some(0_usize))] {
+        let engine = FakeEngine::new("8.5.2", Some(4))
+            .with_fold("strval", FoldResult::Value(steins_sidecar::FoldValue::Str("x".to_owned())));
+        let mut folder = EngineFolder::with_engine(engine);
+        let folded = folder.fold("strval", &[ArgValue::Int(arg)]);
+        assert_eq!(folded.is_some(), expected.is_some(), "arg {arg}");
+        assert_eq!(folder.engine_mut().dispatched.is_empty(), expected.is_none(), "arg {arg}");
+    }
+}
+
+/// An engine that does not report its width is not provably 64-bit, so the fold
+/// lane declines — INCLUDING the width-safe subset. Default-deny: an old or
+/// foreign runner is unknown, not assumed, and the subset is verified against a
+/// specific machine rather than against "not 64-bit".
+#[test]
+fn an_unreported_width_declines_even_the_width_safe_subset() {
     let engine = FakeEngine::new("8.5.2", None)
         .with_fold("strtoupper", FoldResult::Value(steins_sidecar::FoldValue::Str("AB".to_owned())));
     let mut folder = EngineFolder::with_engine(engine);
@@ -306,7 +421,7 @@ fn an_unreported_width_declines_the_fold_lane() {
     assert!(folder.engine_mut().dispatched.is_empty());
 }
 
-/// The 64-bit control for the two tests above: same fake engine, width 8, and
+/// The 64-bit control for the tests above: same fake engine, width 8, and
 /// everything flows. Without this the width tests could be passing for the wrong
 /// reason.
 #[test]
@@ -319,6 +434,29 @@ fn a_64_bit_engine_folds_normally() {
         Some(ArgValue::Str("AB".to_owned()))
     );
     assert_eq!(folder.engine_mut().dispatched, vec!["strtoupper".to_owned()]);
+}
+
+/// The 64-bit control for S1.5 specifically: at width 8 NEITHER new leg applies —
+/// a width-refused name folds, and so does an argument far outside the 32-bit
+/// range. The subset is a relaxation of the 32-bit decline, not a new restriction
+/// on the machine every native run and every corpus gate uses.
+#[test]
+fn a_64_bit_engine_is_untouched_by_the_width_safe_subset() {
+    let engine = FakeEngine::new("8.5.2", Some(8))
+        .with_fold("intval", FoldResult::Value(steins_sidecar::FoldValue::Int(3_000_000_000)))
+        .with_fold("strval", FoldResult::Value(steins_sidecar::FoldValue::Str("9e18".to_owned())));
+    let mut folder = EngineFolder::with_engine(engine);
+    // A width-REFUSED name, with an argument the 32-bit range guard would reject.
+    assert_eq!(
+        folder.fold("intval", &[ArgValue::Str("3000000000".to_owned())]),
+        Some(ArgValue::Int(3_000_000_000))
+    );
+    // A width-SAFE name, with an argument beyond 2^31.
+    assert_eq!(
+        folder.fold("strval", &[ArgValue::Int(9_000_000_000_000_000_000)]),
+        Some(ArgValue::Str("9e18".to_owned()))
+    );
+    assert_eq!(folder.engine_mut().dispatched, vec!["intval".to_owned(), "strval".to_owned()]);
 }
 
 // ---------------------------------------------------------------------------
