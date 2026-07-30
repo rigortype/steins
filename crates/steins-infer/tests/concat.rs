@@ -231,3 +231,16 @@ fn oracle_agrees_on_every_admitted_cast() {
         assert_eq!(ours, expected, "operand `{op}`: engine said {expected:?}, we said {ours:?}");
     }
 }
+
+#[test]
+fn flagship_greet_inlines_in_argument_position() {
+    // The report's LITERAL form (issue #60 closing the loop #59 opened): the call
+    // dumped directly, no assignment detour. Identical to
+    // `flagship_greet_inlines_to_its_value` in every way but the position.
+    let src = "<?php\n\
+        function greet(int $times, string $name): string {\n\
+            return str_repeat(\"Hello, \" . $name . \"! \", $times);\n\
+        }\n\
+        \\PHPStan\\dumpType(greet(2, \"World\"));\n";
+    assert_eq!(one_folded(src), "'Hello, World! Hello, World! '");
+}

@@ -228,3 +228,18 @@ fn a_float_write_to_a_float_slot_is_untouched() {
     );
     assert_eq!(dumped, ["dumped type: 2.5"]);
 }
+/// The positive side of the drop test above, closed by the issue-#60 run: the
+/// summary now CONVERTS through the declared return boundary (the same
+/// `coerce_fact_to_native` the property/param writes use), so both call forms see
+/// the float PHP actually returns — value-precise, not just non-leaking.
+#[test]
+fn a_float_return_converts_the_int_value_precisely() {
+    let dumped = dumps(
+        "<?php\n\
+         function r(int $n): float { return 1; }\n\
+         $x = r(5);\n\
+         \\PHPStan\\dumpType($x);\n\
+         \\PHPStan\\dumpType(r(5));\n",
+    );
+    assert_eq!(dumped, vec!["dumped type: 1.0", "dumped type: 1.0"]);
+}

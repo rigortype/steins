@@ -305,15 +305,30 @@ fn constant_function_flow_flagged() {
 
 #[test]
 fn non_constant_functions_are_silent() {
-    // Two statements in the body → not constant.
+    // Two statements in the body → not constant, and ZERO-ARG calls do not
+    // descend (ADR-0057 §3 / A5) — the summary lane adds nothing here.
     let two = "<?php\nfunction width(int $w): int { return $w; }\nfunction price(): string { $x = 1; return \"abc\"; }\nwidth(price());";
     assert_eq!(n(two), 0, "two-statement body is not constant");
-    // Has a parameter → only zero-arg calls qualify, and it isn't constant.
-    let params = "<?php\nfunction width(int $w): int { return $w; }\nfunction price(string $s): string { return \"abc\"; }\nwidth(price(\"x\"));";
-    assert_eq!(n(params), 0, "parametrized function is not a constant function");
-    // Has a branch → body is a Barrier, not `[Return(literal)]`.
+    // Has a branch → body is a Barrier, not `[Return(literal)]`; zero-arg again.
     let branch = "<?php\nfunction width(int $w): int { return $w; }\nfunction price(): string { if (true) { return \"a\"; } return \"abc\"; }\nwidth(price());";
     assert_eq!(n(branch), 0, "branching function is not constant");
+}
+
+#[test]
+fn parametrized_call_crosses_via_the_summary_lane() {
+    // Pre-#60 this pinned silence ("parametrized function is not a constant
+    // function"). The parametrized call now resolves through the T0 binding
+    // descent in argument position: `"x"` binds `$s`, `price` provably returns
+    // `"abc"`, and the boundary TypeError fires — a TRUE positive the constant-
+    // function lane's arity ceiling used to hide.
+    let params = "<?php\nfunction width(int $w): int { return $w; }\nfunction price(string $s): string { return \"abc\"; }\nwidth(price(\"x\"));";
+    let d = only(params);
+    assert!(
+        d.message.contains("returned from price()"),
+        "provenance names the summary lane: {}",
+        d.message
+    );
+    assert!(d.message.contains("argument \"abc\""), "the proven value is named: {}", d.message);
 }
 
 #[test]

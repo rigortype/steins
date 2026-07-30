@@ -897,9 +897,16 @@ pub enum ArgValue {
     Null,
     /// A bare local variable reference `$name` (name stored without the `$`).
     Var(String),
-    /// A call `name(args...)` to a statically-named function. `args` are the
-    /// lowered argument values (only zero-argument calls are resolvable in this
-    /// slice, so the vector's contents matter only for `is_empty()`).
+    /// A call `name(args...)` to a statically-named function. `name` is the
+    /// identifier's **last segment** (no namespace survives into the value IR), so
+    /// value-position resolution is by unique simple name project-wide. `args` are
+    /// the lowered argument values: a zero-argument call resolves through the
+    /// constant-function lane, and a call **with** arguments resolves through the
+    /// T0 binding-descent summary (issue #60) — as a dumped/checked argument and
+    /// as a nested argument of another descent. (A builtin's fold gate still sees
+    /// only direct literals: `strtoupper(g(1))` widens — the value lane must not
+    /// be reachable from `resolve_literal`, whose call sites carry no recursion
+    /// guard.)
     Call(String, Vec<ArgValue>),
     /// `new ClassName(args...)` — a construction rvalue. [`NameRef`] is the class
     /// reference as written (resolved to an FQN project-wide at use time).

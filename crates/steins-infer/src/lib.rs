@@ -5911,6 +5911,10 @@ fn best_dump_type(
     value: &ArgValue,
     env: &HashMap<String, Known>,
     store: &Store,
+    // The dump argument's span start — the provenance anchor for the issue-#60
+    // value-lane descent below (its findings are suppressed, so this surfaces only
+    // in the bound params' internal provenance strings).
+    span_start: u32,
 ) -> DumpRendering {
     let cx = w.cx;
     let poisoned = w.scope.poisoned;
@@ -6026,6 +6030,28 @@ fn best_dump_type(
             asserted: value_stratum(value, env, Some(store)) == Stratum::Asserted,
         };
     }
+    // A project-function call in argument position (issue #60): the T0 return-fact
+    // summary, sitting exactly where the assignment ladder puts it (fold > summary >
+    // builtin envelope > arms). `summary_binds` keeps the two forms observably
+    // identical: a summary the assignment would not bind falls through to the same
+    // arms floor here. The descent's findings go to a scratch — the dump surface
+    // reads facts, it never emits for the callee (emission stays the statement-level
+    // descent's job) — and `descent: None` is sound because `emit_dumps` runs only
+    // in the plain per-scope pass.
+    if let ArgValue::Call(name, cargs) = value
+        && !cargs.is_empty()
+    {
+        let mut scratch: Vec<Diagnostic> = Vec::new();
+        if let Some(ReturnSummary { value: Some(sv), .. }) = project_call_summary(
+            cx, folder, name, cargs, env, poisoned, span_start, None, &mut scratch,
+        ) && summary_binds(&sv.fact)
+        {
+            return DumpRendering {
+                text: render_dump_fact(&sv.fact),
+                asserted: sv.stratum == Stratum::Asserted,
+            };
+        }
+    }
     // The argument-dependent type rung (ADR-0061 §1) — `count`/`array_is_list` over
     // an abstract shape (ADR-0062 §4) — sits above the envelope here exactly as it
     // does at the assignment seam, and carries the argument's stratum.
@@ -6047,16 +6073,48 @@ fn best_dump_type(
     {
         return DumpRendering { text: render_dump_fact(&fact), asserted: false };
     }
+    // The declared-return floor of an unresolved project call (issue #60): the
+    // callee's `: string` is a fact the caller should see even when no summary
+    // crossed — `unknown` where the source declares a return type reads as a
+    // defect. Exactly the arm list the assignment form seeds into the contract
+    // store, rendered through the same speller; a call with no declared return
+    // type still falls through to honest unknown.
+    if let ArgValue::Call(name, _) = value
+        && let Some(arms) = call_return_arms_by_name(cx, folder, name)
+        && let Some(text) = render_contract_arms(cx, &arms)
+    {
+        return DumpRendering {
+            text,
+            asserted: arms.iter().any(|a| a.stratum == Stratum::Asserted),
+        };
+    }
     DumpRendering { text: DUMP_UNKNOWN.to_owned(), asserted: false }
 }
 
 /// The declared-side view of a dump argument (ADR-0053 §2, `debug.phpdoc-type`): the
 /// contract-fact arm list (the declared envelope as narrowed by guards), or
 /// `no declared contract` when the carrier is empty — never a synthesized type.
-fn best_dump_phpdoc_type(cx: &Cx, value: &ArgValue, store: &Store) -> DumpRendering {
+fn best_dump_phpdoc_type(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    store: &Store,
+) -> DumpRendering {
     if let ArgValue::Var(name) = value
         && let Some(arms) = store.contract_arms(name)
         && let Some(text) = render_contract_arms(cx, arms)
+    {
+        return DumpRendering {
+            text,
+            asserted: arms.iter().any(|a| a.stratum == Stratum::Asserted),
+        };
+    }
+    // A project call in argument position (issue #60): its declared envelope is the
+    // same arm list the assignment form would seed into the contract store — parity
+    // between `dumpPhpDocType(f(…))` and `$x = f(…); dumpPhpDocType($x)`.
+    if let ArgValue::Call(name, _) = value
+        && let Some(arms) = call_return_arms_by_name(cx, folder, name)
+        && let Some(text) = render_contract_arms(cx, &arms)
     {
         return DumpRendering {
             text,
@@ -6115,8 +6173,8 @@ fn emit_dumps(
         }
         for arg in &call.args {
             let rendering = match family {
-                DumpFamily::Type => best_dump_type(w, folder, &arg.value, env, store),
-                DumpFamily::PhpDocType => best_dump_phpdoc_type(cx, &arg.value, store),
+                DumpFamily::Type => best_dump_type(w, folder, &arg.value, env, store, arg.span.start),
+                DumpFamily::PhpDocType => best_dump_phpdoc_type(cx, folder, &arg.value, store),
             };
             let pos = cx.tree().position(arg.span.start);
             out.push(Diagnostic {
@@ -6140,7 +6198,7 @@ fn emit_dumps(
             return;
         }
         for arg in &call.args {
-            let rendering = best_dump_type(w, folder, &arg.value, env, store);
+            let rendering = best_dump_type(w, folder, &arg.value, env, store, arg.span.start);
             let pos = cx.tree().position(arg.span.start);
             out.push(Diagnostic {
                 id: DEBUG_VAR_DUMP_ID,
@@ -6189,7 +6247,7 @@ fn emit_asserts(
         return;
     }
     let expected = assert_expected_string(cx, &call.args[0].value, env, w.scope.poisoned, folder);
-    let rendering = best_dump_type(w, folder, &call.args[1].value, env, store);
+    let rendering = best_dump_type(w, folder, &call.args[1].value, env, store, call.args[1].span.start);
     let pos = cx.tree().position(call.span.start);
     let obs = AssertObservation {
         path: cx.path().to_owned(),
@@ -8471,7 +8529,22 @@ fn refine_contract_arms(
 /// builtin return envelope) has declined. `None` for a builtin / unknown / dynamic
 /// target, or a target with no declared return type at all.
 fn call_return_arms(cx: &Cx, call: &CallExpr) -> Option<Vec<ContractArm>> {
-    let site = cx.resolve_user_fn_any(call)?;
+    fn_return_arms(cx, cx.resolve_user_fn_any(call)?)
+}
+
+/// [`call_return_arms`] for a call known only by its **simple name** (issue #60):
+/// the declared-return floor of a call in value position, where no [`CallExpr`]
+/// exists. Resolution is [`value_lane_fn_site`], the same hardened rule as the
+/// value lane's [`project_call_summary`] — the two must agree on the target or the
+/// floor could name a different function than the summary descended into.
+fn call_return_arms_by_name(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Option<Vec<ContractArm>> {
+    fn_return_arms(cx, value_lane_fn_site(cx, folder, name)?)
+}
+
+/// The declared-return contract arms of the project function at `site` — the shared
+/// body of [`call_return_arms`] (a resolved [`CallExpr`]) and
+/// [`call_return_arms_by_name`] (a value-position simple name).
+fn fn_return_arms(cx: &Cx, site: Site) -> Option<Vec<ContractArm>> {
     let decl = cx.fn_decl(site);
     let native: Vec<ContractTy> = decl.ret.as_ref().map(native_arms).unwrap_or_default();
     // The callee's own `@return` envelope (with its function-level `@template` names
@@ -10522,7 +10595,7 @@ fn check_propagated_call(
                     Some((v, prov))
                 }),
                 ArgValue::Call(name, args) => {
-                    if args.is_empty() {
+                    let direct = if args.is_empty() {
                         cx.resolve_const_fn(name)
                             .map(|(lit, line)| {
                                 (lit, format!("from {name}(), defined at line {line}"))
@@ -10530,7 +10603,34 @@ fn check_propagated_call(
                             .or_else(|| cx.try_fold(name, args, env, poisoned, folder))
                     } else {
                         cx.try_fold(name, args, env, poisoned, folder)
-                    }
+                    };
+                    // A nested project call (issue #60): its Singleton return summary
+                    // is the argument's proven value — `takesInt(g(1))` sees what `g`
+                    // provably returns, the same crossing `$x = g(1); takesInt($x)`
+                    // always had. Plain per-scope pass only: a fresh descent tree
+                    // started from inside a live descent would evade the on-stack
+                    // recursion guard (mutual recursion through an argument position
+                    // would loop), and the plain pass walks every scope anyway, so
+                    // the descent-pass decline loses no site. `Verified`-only: the
+                    // native proof below consumes an all-Verified premise (ADR-0052
+                    // §5), and an Asserted summary must not launder into it. Findings
+                    // are a scratch — the callee's own walk is the emission site.
+                    direct.or_else(|| {
+                        if in_descent {
+                            return None;
+                        }
+                        let mut scratch: Vec<Diagnostic> = Vec::new();
+                        let summary = project_call_summary(
+                            cx, folder, name, args, env, poisoned, arg.span.start, None,
+                            &mut scratch,
+                        )?;
+                        let sv = summary.value?;
+                        if sv.stratum != Stratum::Verified {
+                            return None;
+                        }
+                        let Fact::Singleton(v) = &sv.fact else { return None };
+                        Some((arg_of_val(v), format!("returned from {name}()")))
+                    })
                 }
                 // A property read `$o->p` (ADR-0036): a `Singleton` prop fact flows.
                 ArgValue::PropFetch { var, prop } if !poisoned => {
@@ -10647,6 +10747,7 @@ fn try_descend_function(
     let site = cx.resolve_user_fn(call)?;
     let decl = cx.fn_decl(site);
     let (callee_file, callee_scope) = cx.fn_scope(site)?;
+    let arg_values: Vec<&ArgValue> = call.args.iter().map(|a| &a.value).collect();
     descend(
         cx,
         folder,
@@ -10656,13 +10757,145 @@ fn try_descend_function(
         &decl.fqn,
         &decl.name,
         None,
-        call,
+        &arg_values,
+        call.span.start,
         &[],
         env,
         poisoned,
         descent,
         out,
     )
+}
+
+/// The T0 binding descent reached from **value position** (issue #60): resolve a
+/// project function by its unique simple name and compute its [`ReturnSummary`]
+/// for these argument values. This is what makes `dumpType(greet(2, "World"))`,
+/// `takesInt(g(1))` and `$x = f(g(1))` see the same summary the assignment form
+/// `$x = greet(2, "World")` always saw — the machinery is [`descend`] verbatim,
+/// only the entry point differs.
+///
+/// # Name resolution is the `resolve_const_fn` precedent
+///
+/// An [`ArgValue::Call`] carries the call's **simple name only** (lowering takes
+/// the identifier's last segment; no [`NameRef`] survives into the value IR), so
+/// resolution here is `unique_fn_by_simple` — exactly the rule the zero-argument
+/// `resolve_const_fn` value lane has always used. A project with two same-named
+/// functions in different namespaces declines (the statement-level descent, which
+/// has the full `NameRef`, still resolves those). Widening this would mean carrying
+/// the resolved FQN in the value IR — a deliberate non-goal this slice.
+///
+/// # Recursion discipline
+///
+/// The caller's `descent` MUST be threaded whenever one is live: the on-stack
+/// binding-key guard is what turns mutual recursion (`f` calling `g` calling `f`)
+/// into a bounded decline instead of an unbounded tree of fresh stacks. A `None`
+/// here is only correct at a **plain-pass** entry (the dump surface and the
+/// propagated-argument check, both `descent.is_none()`-gated), where the fresh
+/// tree is the same shape `try_descend_function` has always created. Expression
+/// nesting across such trees is bounded by the source's own nesting depth — each
+/// level is one bounded tree, never a loop.
+#[allow(clippy::too_many_arguments)]
+fn project_call_summary(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    name: &str,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    span_start: u32,
+    descent: Option<&mut Descent<'_>>,
+    out: &mut Vec<Diagnostic>,
+) -> Option<ReturnSummary> {
+    let site = value_lane_fn_site(cx, folder, name)?;
+    let decl = cx.fn_decl(site);
+    let (callee_file, callee_scope) = cx.fn_scope(site)?;
+    let arg_values: Vec<&ArgValue> = args.iter().collect();
+    descend(
+        cx,
+        folder,
+        &decl.params,
+        callee_file,
+        callee_scope,
+        &decl.fqn,
+        &decl.name,
+        None,
+        &arg_values,
+        span_start,
+        &[],
+        env,
+        poisoned,
+        descent,
+        out,
+    )
+}
+
+/// The project function a **value-position** simple name may be trusted to mean
+/// (issue #60) — `unique_fn_by_simple` hardened against the two ways a written
+/// simple name can target a *different* function at runtime:
+///
+/// * **A conditional declaration** (the `function_exists`-guarded polyfill shape,
+///   ADR-0049 A2i): which body binds is a load-order fact, so a summary from this
+///   body could describe a function the runtime never defined. Declined — the same
+///   re-damming instinct the arity check applies to conditional targets.
+/// * **A homonym of a runtime function**: for a namespaced project function the
+///   unqualified call outside its namespace falls back to the RUNTIME function
+///   (and the value IR does not carry the caller's qualification); for a *global*
+///   one the program could not even have loaded (a fatal redeclaration), so there
+///   is no runtime behavior to speak for. Both decline — the same posture the
+///   ADR-0061 rule seam takes on a shadowed builtin, pinned by
+///   `a_project_function_shadowing_the_name_declines`. The runtime is asked three
+///   ways, any positive answer declining: the boot-surface reflect oracle, a
+///   reflected builtin return type, and (folderless — the playground) the static
+///   catalog standing in for the common builtins.
+///
+/// What this deliberately does NOT close: a `use function … as …` alias shadowing
+/// a same-named project function at one call site. The written simple name is all
+/// the value IR carries (the alias residue is shared verbatim with
+/// `resolve_const_fn`, which has always resolved this way); closing it means
+/// carrying the resolved FQN in [`ArgValue::Call`] — a follow-up, not this slice.
+fn value_lane_fn_site(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Option<Site> {
+    let site = cx.index.unique_fn_by_simple(name)?;
+    let decl = cx.fn_decl(site);
+    if decl.conditional {
+        return None;
+    }
+    let runtime_knows = matches!(folder.boot_surface_function(name), Some(true))
+        || folder.builtin_return_type(name).is_some()
+        || steins_catalog::foldable(name)
+        || steins_catalog::effect_labels(name).is_some();
+    if runtime_knows {
+        return None;
+    }
+    Some(site)
+}
+
+/// [`project_call_summary`] narrowed to what a **binding** can consume (issue #60):
+/// a `Singleton` summary as the concrete [`ArgValue`] it names, with the summary's
+/// stratum. `None` for anything else — a non-call, a zero-argument call (that is
+/// `resolve_const_fn`'s lane, already tried by `resolve_literal`), an abstract or
+/// absent summary. A non-`Singleton` fact (say `positive-int`) is real knowledge,
+/// but a bound parameter seeds from a concrete value; carrying abstract facts into
+/// bindings is a documented ceiling, not an oversight.
+#[allow(clippy::too_many_arguments)]
+fn nested_call_singleton(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    span_start: u32,
+    descent: Option<&mut Descent<'_>>,
+    out: &mut Vec<Diagnostic>,
+) -> Option<(ArgValue, Stratum)> {
+    let ArgValue::Call(name, cargs) = value else { return None };
+    if cargs.is_empty() {
+        return None;
+    }
+    let summary =
+        project_call_summary(cx, folder, name, cargs, env, poisoned, span_start, descent, out)?;
+    let sv = summary.value?;
+    let Fact::Singleton(v) = &sv.fact else { return None };
+    Some((arg_of_val(v), sv.stratum))
 }
 
 /// Handle a `$fn(...)` variable call (ADR-0033): resolve the callee variable
@@ -10701,6 +10934,7 @@ fn handle_var_call(
                 let display = format!("closure (defined on line {})", cv.def_line);
                 // T0 consumes summaries only at direct-function-call assignment sites;
                 // a `$fn(...)` closure-call result is not rebound here (deferred).
+                let arg_values: Vec<&ArgValue> = call.args.iter().map(|a| &a.value).collect();
                 let _ = descend(
                     cx,
                     folder,
@@ -10710,7 +10944,8 @@ fn handle_var_call(
                     &format!("closure@{def_offset}"),
                     &display,
                     None,
-                    call,
+                    &arg_values,
+                    call.span.start,
                     &cv.captures,
                     env,
                     scope.poisoned,
@@ -10853,11 +11088,16 @@ fn descend(
     key_name: &str,
     display_name: &str,
     body_this_exact: Option<String>,
-    call: &CallExpr,
+    // The call's positional argument values + its span start (for the provenance
+    // line). Taken apart rather than as a `&CallExpr` (issue #60): a nested call in
+    // argument position exists only as an `ArgValue::Call` — no `CallExpr` is ever
+    // lowered for it — and these two pieces are all the descent ever used.
+    args: &[&ArgValue],
+    span_start: u32,
     captures: &[(String, Fact)],
     env: &HashMap<String, Known>,
     poisoned: bool,
-    descent: Option<&mut Descent<'_>>,
+    mut descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
 ) -> Option<ReturnSummary> {
     if callee_scope.poisoned {
@@ -10870,15 +11110,36 @@ fn descend(
     // `Asserted` argument narrows into the descent without laundering to `Verified`.
     let mut bound: Vec<(String, ArgValue, Stratum)> = Vec::new();
     let mut render_args: Vec<ArgValue> = Vec::new();
-    for (i, arg) in call.args.iter().enumerate() {
+    for (i, arg_value) in args.iter().enumerate() {
         let Some(param) = params.get(i) else { break };
         if param.variadic {
             break;
         }
-        let Some(value) = cx.resolve_literal(&arg.value, env, poisoned, folder) else {
-            continue;
+        // Direct resolution first; when it declines and the argument is itself a
+        // project call, the T0 machinery answers for its own argument position
+        // (issue #60): `f(g(1))` binds `g(1)`'s Singleton summary. The CURRENT
+        // descent is threaded (reborrowed), so the on-stack recursion guard and
+        // `MAX_BINDING_DEPTH` bound the nested resolution exactly as they bound a
+        // statement-level chain; the nested walk emits through the same `out` a
+        // statement-level descent would.
+        let (value, strat) = match cx.resolve_literal(arg_value, env, poisoned, folder) {
+            Some(v) => (v, value_stratum(arg_value, env, None)),
+            None => {
+                let Some(vs) = nested_call_singleton(
+                    cx,
+                    folder,
+                    arg_value,
+                    env,
+                    poisoned,
+                    span_start,
+                    descent.as_deref_mut(),
+                    out,
+                ) else {
+                    continue;
+                };
+                vs
+            }
         };
-        let strat = value_stratum(&arg.value, env, None);
         render_args.push(value.clone());
         if param.by_ref {
             return None;
@@ -10917,7 +11178,7 @@ fn descend(
     let (provenance, next_depth): (&str, usize) = match &descent {
         Some(d) => (d.provenance, d.depth + 1),
         None => {
-            let line = cx.tree().position(call.span.start).line;
+            let line = cx.tree().position(span_start).line;
             let render = render_call(display_name, &render_args);
             new_provenance = if cross {
                 format!("bound at {render} call at {} line {line}", cx.path())
@@ -11021,8 +11282,30 @@ fn join_summary(
     callee_scope: &Scope,
     exits: &[ExitContribution],
 ) -> Option<ReturnSummary> {
-    let floor = cx.scope_return(callee_scope).and_then(|(ty, _)| native_value_floor(ty));
-    let (fact, stratum) = join_exits(exits, floor.as_ref())?;
+    let ret = cx.scope_return(callee_scope).map(|(ty, _)| ty);
+    let floor = ret.and_then(native_value_floor);
+    // The declared return type is a CONVERSION boundary, not just an envelope
+    // (the #48 family, return edition): PHP hands the caller what the boundary
+    // converts, so `return 1` under `: float` crosses as `1.0`, never as the
+    // callee's raw int — an int-based summary there is a wrong value, the exact
+    // FP class #48 closed for property writes and promoted params. A2 already
+    // dropped the *violating* exits at collection; this converts the admitted
+    // ones, and an admitted-but-unconvertible fact degrades to the declared
+    // floor (the A3 side — wider, never wrong).
+    let coerced: Vec<ExitContribution> = exits
+        .iter()
+        .map(|e| match (e, ret) {
+            (ExitContribution::Fact(f, s), Some(ty)) => {
+                match coerce_fact_to_native(ty, f.clone()) {
+                    Some(cf) => ExitContribution::Fact(cf, *s),
+                    None => ExitContribution::Floor,
+                }
+            }
+            (ExitContribution::Fact(f, s), None) => ExitContribution::Fact(f.clone(), *s),
+            (ExitContribution::Floor, _) => ExitContribution::Floor,
+        })
+        .collect();
+    let (fact, stratum) = join_exits(&coerced, floor.as_ref())?;
     Some(ReturnSummary { value: Some(SummaryValue { fact, stratum }), heap: None })
 }
 
@@ -13772,6 +14055,7 @@ fn handle_method_call(
     let display = display_of_call(&call.receiver, &target.declaring_class.name, &target.method.name);
     // T0 consumes summaries only at direct-function-call assignment sites; a method
     // call's summary is computed (memo/machinery shared) but not rebound here (T1).
+    let arg_values: Vec<&ArgValue> = call.args.iter().map(|a| &a.value).collect();
     let _ = descend(
         cx,
         folder,
@@ -13781,7 +14065,8 @@ fn handle_method_call(
         &format!("{}::{}", target.declaring_class.fqn, target.method.name),
         &display,
         target.this_exact,
-        call,
+        &arg_values,
+        call.span.start,
         &[],
         env,
         scope.poisoned,

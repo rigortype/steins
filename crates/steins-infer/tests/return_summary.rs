@@ -353,3 +353,216 @@ fn summary_value_premises_no_false_finding() {
     // positive-int into int: no argument-mismatch, no return-mismatch, nothing.
     assert_eq!(findings(src).len(), 0, "a sound summary premises no finding: {:?}", findings(src));
 }
+
+// ==========================================================================
+// Argument position (issue #60): a call's summary crosses WITHOUT the
+// assignment detour. Every fixture here pins the argument form against the
+// assignment form — the two must stay observably identical.
+// ==========================================================================
+
+#[test]
+fn flagship_crosses_in_argument_position() {
+    // The flagship proof, dumped directly: `dumpType(f(1, rand()))` — no `$x`.
+    let arg_form = "<?php\n\
+        function f(int $trigger, int $n): int {\n\
+            assert($n > 0);\n\
+            return $n;\n\
+        }\n\
+        \\PHPStan\\dumpType(f(1, rand()));\n";
+    let assigned_form = "<?php\n\
+        function f(int $trigger, int $n): int {\n\
+            assert($n > 0);\n\
+            return $n;\n\
+        }\n\
+        $x = f(1, rand());\n\
+        \\PHPStan\\dumpType($x);\n";
+    assert_eq!(one_type(arg_form), "dumped type: positive-int");
+    assert_eq!(one_type(arg_form), one_type(assigned_form), "the two forms are identical");
+}
+
+#[test]
+fn mixed_strata_render_asserted_in_argument_position() {
+    // The (ii) fixture's shape, argument form: the Asserted exit's marker survives
+    // the position change — a docblock claim must not launder by being dumped
+    // directly instead of through a variable.
+    let src = "<?php\n\
+        /** @phpstan-assert positive-int $v */\n\
+        function assertPos($v): void {}\n\
+        function f(int $trigger, int $n, $m, bool $b): int {\n\
+            if ($b) {\n\
+                assert($n > 0);\n\
+                return $n;\n\
+            }\n\
+            assertPos($m);\n\
+            return $m;\n\
+        }\n\
+        \\PHPStan\\dumpType(f(1, rand(), rand(), (bool) rand()));\n";
+    assert_eq!(one_type(src), "dumped type: positive-int (asserted)");
+}
+
+#[test]
+fn factless_exit_degrades_to_declared_floor_in_argument_position() {
+    // The (iii) degrade, argument form. The floor here is the issue-#60 declared
+    // arm list rendered at the dump — observably the same `int` the assignment
+    // form reads back off the contract store.
+    let arg_form = "<?php\n\
+        function f(int $trigger, int $n, bool $b): int {\n\
+            if ($b) {\n\
+                assert($n > 0);\n\
+                return $n;\n\
+            }\n\
+            return rand();\n\
+        }\n\
+        \\PHPStan\\dumpType(f(1, rand(), (bool) rand()));\n";
+    assert_eq!(one_type(arg_form), "dumped type: int");
+}
+
+#[test]
+fn declared_floor_spells_nullable_in_argument_position() {
+    // `?int` floor: the argument form spells `int|null` exactly as the assigned
+    // form does (the nullable arm is part of the declared envelope, not a bonus).
+    let src = "<?php\n\
+        function f(int $trigger, ?int $n): ?int {\n\
+            return $n;\n\
+        }\n\
+        \\PHPStan\\dumpType(f(1, rand()));\n";
+    assert_eq!(one_type(src), "dumped type: int|null");
+}
+
+#[test]
+fn no_declared_type_stays_unknown_in_argument_position() {
+    // No summary (the body returns opaque `rand()`), no declared return type — the
+    // floor has nothing to spell, and the dump stays honestly unknown rather than
+    // inventing `mixed`.
+    let src = "<?php\n\
+        function f($t) { return rand(); }\n\
+        \\PHPStan\\dumpType(f(1));\n";
+    assert_eq!(one_type(src), "dumped type: unknown");
+}
+
+#[test]
+fn nested_call_boundary_finding_fires() {
+    // Issue #60's argument-checking criterion: `takesInt(g(1))` sees `g`'s proven
+    // return value and fires the boundary TypeError — previously invisible without
+    // an intermediate variable.
+    let src = "<?php\n\
+        function g(int $t): string { return \"hi\"; }\n\
+        function takesInt(int $n): int { return $n; }\n\
+        takesInt(g(1));\n";
+    let ds: Vec<Diagnostic> =
+        findings(src).into_iter().filter(|d| d.id == "type.argument-mismatch").collect();
+    assert_eq!(ds.len(), 1, "the nested call's value reaches the boundary check: {ds:?}");
+    assert!(
+        ds[0].message.contains("returned from g()"),
+        "provenance names the nested call: {}",
+        ds[0].message
+    );
+}
+
+#[test]
+fn nested_call_binds_one_level_deep() {
+    // `$x = f(g(1))`: `g`'s Singleton summary binds `f`'s parameter, and `f`'s own
+    // summary then crosses — one level of expression nesting, the issue-#60
+    // acceptance bound. (The body concatenation is the #59 lane: proven operands,
+    // no folder needed.)
+    let src = "<?php\n\
+        function g(int $t): string { return \"hi\"; }\n\
+        function f(string $s): string { return $s . \"!\"; }\n\
+        $x = f(g(1));\n\
+        \\PHPStan\\dumpType($x);\n";
+    assert_eq!(one_type(src), "dumped type: 'hi!'");
+}
+
+#[test]
+fn recursion_in_argument_position_terminates_to_floor() {
+    // Self-recursion and mutual recursion through argument position: the on-stack
+    // guard (threaded descents) and the plain-pass-only gate (fresh trees) keep
+    // both bounded; each degrades to the declared arm floor.
+    let self_rec = "<?php\n\
+        function r(int $n): int { return r($n); }\n\
+        \\PHPStan\\dumpType(r(1));\n";
+    assert_eq!(one_type(self_rec), "dumped type: int");
+    let mutual = "<?php\n\
+        function m1(int $n): int { return m2($n); }\n\
+        function m2(int $n): int { return m1($n); }\n\
+        \\PHPStan\\dumpType(m1(1));\n";
+    assert_eq!(one_type(mutual), "dumped type: int");
+}
+
+#[test]
+fn ambiguous_simple_name_declines_in_argument_position() {
+    // The value IR carries the call's simple name only, so value-position
+    // resolution is unique-by-simple (the `resolve_const_fn` precedent). Two
+    // same-named functions decline — the documented ceiling, pinned so widening it
+    // is a decision rather than an accident. (The ASSIGNED form still resolves via
+    // the statement's `NameRef` — the forms are NOT identical in this corner.)
+    let src = "<?php\n\
+        namespace A { function d(int $x): string { return \"a\"; } }\n\
+        namespace B { function d(int $x): string { return \"b\"; } }\n\
+        namespace C {\n\
+            \\PHPStan\\dumpType(\\A\\d(1));\n\
+        }\n";
+    assert_eq!(one_type(src), "dumped type: unknown");
+}
+
+#[test]
+fn phpdoc_type_dump_reaches_argument_position() {
+    // `dumpPhpDocType(f(…))` spells the declared envelope — parity with the
+    // assigned form's contract store, same speller.
+    let src = "<?php\n\
+        function f(int $trigger, int $n): int {\n\
+            return rand();\n\
+        }\n\
+        \\PHPStan\\dumpPhpDocType(f(1, rand()));\n";
+    let ds: Vec<Diagnostic> = findings(src)
+        .into_iter()
+        .filter(|d| d.id == "debug.phpdoc-type")
+        .collect();
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].message, "dumped phpdoc type: int");
+}
+
+#[test]
+fn conditional_polyfill_declines_in_value_position() {
+    // A `function_exists`-guarded polyfill: which body binds is a load-order fact
+    // (ADR-0049 A2i), so neither the summary nor the declared floor may speak for
+    // it — the same re-damming instinct the arity check applies.
+    let src = "<?php\n\
+        if (!function_exists('poly')) { function poly(int $x): string { return \"p\"; } }\n\
+        \\PHPStan\\dumpType(poly(1));\n";
+    assert_eq!(one_type(src), "dumped type: unknown");
+}
+
+#[test]
+fn namespaced_builtin_homonym_declines_in_value_position() {
+    // A namespaced project function shadowing a builtin's simple name: the value IR
+    // cannot see the caller's qualification, and an unqualified call outside the
+    // namespace targets the BUILTIN — so the value lane declines (here via the
+    // static catalog, this test running folderless). Conservative on purpose: even
+    // this same-namespace call, which really does target the shadow, is declined.
+    let src = "<?php\n\
+        namespace Util;\n\
+        function strtoupper(int $x): string { return \"shadow\"; }\n\
+        \\PHPStan\\dumpType(strtoupper(1));\n";
+    assert_eq!(one_type(src), "dumped type: unknown");
+}
+
+#[test]
+fn nested_descent_emits_callee_finding_exactly_once() {
+    // A caller-bound proof INSIDE the nested callee: binding `$t = 1` into `g`
+    // makes `needsString($t)` a proven strict-mode TypeError. The threaded nested
+    // descent emits it exactly once — the value-lane scratch walks (the dump and
+    // argument-check entries) must never add a second copy.
+    let src = "<?php\n\
+        declare(strict_types=1);\n\
+        function needsString(string $s): void {}\n\
+        function g(int $t): string { needsString($t); return \"x\"; }\n\
+        function f(string $s): string { return $s; }\n\
+        $x = f(g(1));\n\
+        \\PHPStan\\dumpType($x);\n";
+    let ds = findings(src);
+    let mismatches: Vec<&Diagnostic> =
+        ds.iter().filter(|d| d.id == "type.argument-mismatch").collect();
+    assert_eq!(mismatches.len(), 1, "exactly once: {mismatches:?}");
+    assert_eq!(one_type(src), "dumped type: 'x'");
+}
