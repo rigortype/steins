@@ -339,3 +339,85 @@ widens.
 It surfaced here because the threshold is the engine's own `PHP_INT_MAX`: at
 `int_size == 4` it drops from 2^63-1, which no source realistically writes, to
 2147483647 — inside the range guard, and a key a human plausibly types.
+
+## Amendment (2026-07-31): the boot surface travels as data (issue #64 S3)
+
+§7 promised the playground "the boot-surface label" once the JS loop landed, and
+§4 promised a lane that degrades. Both arrived — and the page went on saying
+`SOUND_SUBSET_NOTICE` ("no PHP sidecar — findings that require executing PHP are
+omitted") with php-src running inside it. That is stale in the *safe* direction,
+which is exactly the failure mode issue #61 names: a visitor cannot tell a
+deliberate subset boundary from a missing feature, and now could not tell it from
+a boundary that had already moved.
+
+The fix is the one this ADR already made for the notice: **the description
+travels as data, and the prose lives in the UI.**
+
+### The `boot` object
+
+Both replay envelopes gain a `boot` object beside `pending`:
+
+```json
+"boot": {
+  "label": "PHP 8.5.2 (25 extensions)",
+  "php_version": "8.5.2",
+  "int_size": 4,
+  "fold_lane": "width_safe_subset",
+  "fold_total": 22,
+  "fold_safe": 19,
+  "curated_rows": false,
+  "absence_family": true,
+  "refused_folds": ["abs", "intval", "sprintf"]
+}
+```
+
+`fold_lane` is `full` | `width_safe_subset` | `declined`. `refused_folds` is
+present only on the middle lane — on the other two the lane already says the
+whole story — and it is the **catalog complement** (`foldable ∧ !width_safe`),
+never a second list. The plain `sw_check` / `sw_annotate` envelopes are
+unchanged and carry no `boot` key at all: engine-off behaviour is byte-identical
+to ADR-0065's, which is an acceptance criterion and now an assertion.
+
+### Why it is computed by the policy and not by the frontend
+
+`EngineFolder::surface_summary` reads the same helpers the gates read —
+`boot_surface_label`, `engine_int_size`, `fold_lane_at_width`,
+`curated_rows_admitted`, `absence_family_available` — and `fold_lane_at_width`
+was extracted *out of* `fold_admitted_at_width` rather than written beside it, so
+the description branches on the same three cases the gate does. `curated_rows`
+is likewise the ADR-0056 Gate 2 predicate itself, lifted out of
+`compute_builtin_return_fact`.
+
+The alternative — a frontend that knows php-wasm is 32-bit and hardcodes
+"19/22", "abs, intval, sprintf" — is the same class of defect as issue #63: a
+second copy of a policy, reached by a second path, drifting silently. Here it
+would drift into *claiming a boundary the analysis does not apply*, which is the
+one thing a page whose whole subject is soundness cannot afford. Relaxing the
+width gate, or refusing a 23rd builtin, moves the page in the same commit.
+
+### The extra round trip, and why it is wanted
+
+`surface_summary` is taken **before** `take_pending`, so an unanswered `env` is
+recorded as a miss like any other. A snippet that asks the engine nothing —
+`$a = 1;` — therefore reports `env` as pending and converges on the next
+iteration with the boot object filled in. A converged run always carries a
+complete description, so the UI reads one without a null check per field, and
+the cost is one round trip per session (the table is session-global and
+monotone).
+
+### Consequences
+
+- The engine bar reads `PHP 8.5.2 (php-wasm, 32-bit) — folding 19/22 width-safe
+  builtins, reflection & existence live`, and a `<details>` panel lists both
+  sides of the line: what php-src answered, and what widens (the three refused
+  names with the `sprintf("%x", -1)` divergence, the ±2147483647 argument guard
+  including array keys, curated rows off with `strlen()` as `int`).
+- The seeded sample gains one line, `$greeting = str_repeat("Hello, " . "World"
+  . "! ", 2);`, which has no margin fact without the engine and folds to
+  `"Hello, World! Hello, World! "` with it. The rung ladder is unchanged: 1
+  finding at `default`, 2 at `contracts`, 3 at `strict`, engine on or off.
+- `apps/playground/smoke-replay.mjs` pins the flagship end to end over the real
+  php-wasm — `dumpType(greet(2, "World"))` inlining to `'Hello, World! Hello,
+  World! '` — plus issue #61's own two table rows in the margin, `abs(-3)`
+  widening to `dumped type: unknown` because the name is width-refused, and the
+  `boot` object agreeing with the engine's own boot probe.
