@@ -21,8 +21,17 @@
 
 // Keep stdout pure NDJSON — divert any warning/notice/deprecation text to
 // stderr (which the parent discards) so it can never corrupt a response line.
-ini_set('display_errors', 'stderr');
-ini_set('log_errors', '0');
+//
+// The routing goes through the ERROR LOG, not `display_errors = 'stderr'`. That
+// special value is honored only by the cli/cgi SAPIs: under an `embed` SAPI —
+// which is what php-wasm is (issue #64) — it is accepted, round-trips through
+// `ini_get`, and is inert, so a notice would land mid-NDJSON on stdout and
+// corrupt the response. `log_errors` + `error_log = 'php://stderr'` works on
+// both. The only difference on a cli run is a `PHP Warning: ` prefix on a
+// stream the parent discards.
+ini_set('display_errors', '0');
+ini_set('log_errors', '1');
+ini_set('error_log', 'php://stderr');
 
 $in = fopen('php://stdin', 'r');
 $out = fopen('php://stdout', 'w');
@@ -98,6 +107,12 @@ function steins_env()
         'php_version' => PHP_VERSION,
         'extensions' => array_values(get_loaded_extensions()),
         'sapi' => PHP_SAPI,
+        // The engine's INTEGER WIDTH in bytes (issue #64). A version string does
+        // not determine the integer machine: php-wasm 0.1.0 is PHP 8.5.2 built
+        // 32-bit, where `1 << 40` is 0, `crc32()` goes negative and `hexdec()`
+        // promotes to float. Same minor, different arithmetic — so the Rust side
+        // gates the fold lane on this, not on the minor alone.
+        'int_size' => PHP_INT_SIZE,
     ];
 }
 

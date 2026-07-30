@@ -91,6 +91,16 @@ pub struct EnvInfo {
     pub php_version: String,
     pub extensions: Vec<String>,
     pub sapi: String,
+    /// `PHP_INT_SIZE` — the engine's integer width in **bytes** (issue #64).
+    /// `None` when the runner did not report one (a foreign or older runner).
+    ///
+    /// The version string does not determine the integer machine. php-wasm 0.1.0
+    /// is PHP 8.5.2 — the pinned minor — built 32-bit, and on it `1 << 40` is `0`,
+    /// `crc32('x')` is negative, `hexdec('FFFFFFFFF')` promotes to float and
+    /// `strtotime('2040-01-01')` is `false`. Every one of those is a *silently
+    /// wrong value*, not a failure, so the minor gate alone is unsound and the
+    /// fold lane consults this instead.
+    pub int_size: Option<u32>,
 }
 
 /// The result of a `reflect(target)` existence query (ADR-0024 surface / ADR-0049
@@ -208,6 +218,9 @@ pub fn parse_env_result(result: &serde_json::Value) -> Option<EnvInfo> {
             .filter_map(|e| e.as_str().map(ToOwned::to_owned))
             .collect(),
         sapi: result.get("sapi")?.as_str()?.to_owned(),
+        // Absent on a runner that predates the field: unknown width, which the
+        // fold gate treats as "not provably 64-bit" and declines.
+        int_size: result.get("int_size").and_then(serde_json::Value::as_u64).and_then(|n| u32::try_from(n).ok()),
     })
 }
 
@@ -334,6 +347,7 @@ mod tests {
             "php_version": "8.5.8",
             "extensions": ["Core", "standard"],
             "sapi": "cli",
+            "int_size": 8,
         });
         assert_eq!(
             parse_env_result(&ok),
@@ -341,11 +355,33 @@ mod tests {
                 php_version: "8.5.8".to_owned(),
                 extensions: vec!["Core".to_owned(), "standard".to_owned()],
                 sapi: "cli".to_owned(),
+                int_size: Some(8),
             })
         );
         // A missing field is unanswerable, not a partial environment.
         assert_eq!(parse_env_result(&serde_json::json!({ "php_version": "8.5.8" })), None);
         assert_eq!(parse_env_result(&serde_json::json!("nope")), None);
+    }
+
+    /// `int_size` is the one OPTIONAL env field: a runner that predates it still
+    /// answers, and the width reads as unknown (which the fold gate declines on).
+    #[test]
+    fn an_absent_int_size_is_unknown_not_a_failed_env() {
+        let old = serde_json::json!({
+            "php_version": "8.5.8",
+            "extensions": [],
+            "sapi": "cli",
+        });
+        let env = parse_env_result(&old).expect("env still parses");
+        assert_eq!(env.int_size, None);
+        // A 32-bit engine reports its real width — this is php-wasm's shape.
+        let wasm = serde_json::json!({
+            "php_version": "8.5.2",
+            "extensions": [],
+            "sapi": "embed",
+            "int_size": 4,
+        });
+        assert_eq!(parse_env_result(&wasm).expect("env").int_size, Some(4));
     }
 
     #[test]

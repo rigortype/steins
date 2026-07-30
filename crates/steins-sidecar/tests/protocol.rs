@@ -39,6 +39,33 @@ fn env_round_trips() {
     assert!(env.php_version.starts_with('8'), "PHP 8.x expected, got {}", env.php_version);
     assert!(env.extensions.iter().any(|e| e == "Core" || e == "standard"), "core ext present");
     assert!(!env.sapi.is_empty());
+    // The integer machine, not just the version (issue #64). A local `php` is a
+    // 64-bit build; php-wasm at the same minor is not, which is the whole reason
+    // this field exists.
+    assert_eq!(env.int_size, Some(8), "a native php build is 64-bit");
+}
+
+/// The runner's stdout stays pure NDJSON even when the folded call emits a
+/// diagnostic. `display_errors = 'stderr'` is honored only by cli/cgi, so the
+/// routing goes through `log_errors`/`error_log` — a change that must be a no-op
+/// here and is load-bearing under php-wasm's `embed` SAPI (issue #64).
+#[test]
+fn a_warning_emitting_fold_does_not_corrupt_the_stream() {
+    let Some(mut sc) = spawn_or_skip("a_warning_emitting_fold_does_not_corrupt_the_stream") else {
+        return;
+    };
+    // `1/0` raises DivisionByZeroError; `str_repeat` with a negative count is a
+    // ValueError. Both are results, and both must leave the stream usable.
+    assert!(matches!(
+        sc.fold("str_repeat", &[s("x"), int(-1)]),
+        FoldResult::Throw { .. } | FoldResult::Widen { .. }
+    ));
+    // The very next request still round-trips, i.e. no stray text desynced us.
+    assert_eq!(
+        sc.fold("strtolower", &[s("ABC")]),
+        FoldResult::Value(FoldValue::Str("abc".to_owned()))
+    );
+    assert!(!sc.is_poisoned(), "the stream survived a diagnostic-emitting call");
 }
 
 #[test]
