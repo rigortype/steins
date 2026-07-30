@@ -170,7 +170,9 @@ pseudo-constant configuration this slice does not implement. See
   implementations (`effect.liskov-widened`), but a call through an
   interface-typed receiver contributes no effects to the caller — a variable
   receiver only taints exhaustiveness. DI-mediated effects therefore do not
-  reach the caller's summary yet.
+  reach the caller's summary yet. The design that lifts this — a **declared**
+  lane beside the proven one, envelope bounds imported per call site with
+  taint discharge, diagnostics staying proven-only — is ADR-0067.
 - **The full effect catalog.** What exists is the frequency-seeded starter set
   above; ADR-0014's php-src stub sourcing is not built.
 - **A computed purity property.** Folding permission stays an allowlist.
