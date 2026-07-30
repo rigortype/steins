@@ -187,6 +187,20 @@
     }
     #posture strong { color: var(--accent); font-weight: 600; }
 
+    /* The optional PHP engine's state, and the attribution it obliges. */
+    #engine-bar {
+      display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+      padding: 5px 16px; font-size: 12px; color: var(--muted);
+      background: var(--surface); border-top: 1px solid var(--border);
+    }
+    #engine-line.failed { color: var(--c-error); }
+    #engine-note { color: var(--c-warning); }
+    #attribution { margin-left: auto; }
+    #attribution summary { cursor: pointer; }
+    #attribution p { margin: 6px 0 2px; max-width: 92ch; line-height: 1.55; }
+    #engine-bar a { color: var(--accent); }
+    .btn:disabled { opacity: 0.6; cursor: default; }
+
     /* Wavy underlines + gutter markers */
     .cm-lintRange-error { text-decoration: underline wavy var(--c-error); text-decoration-thickness: 1.5px; }
     .cm-lintRange-warning { text-decoration: underline wavy var(--c-warning); text-decoration-thickness: 1.5px; }
@@ -229,6 +243,8 @@
     <span class="brand">Steins <span class="product">Playground</span></span>
     <span id="status" aria-live="polite">Loading analyzer…</span>
     <div class="toolbar">
+      <button class="btn" id="engine-btn" aria-pressed="false"
+              title="Run the real PHP engine in your browser (php-wasm) so the analysis can ask it about reflection and existence">Load PHP engine (~4 MB)</button>
       <label class="ctl-label" for="profile-sel">Profile</label>
       <select class="ctl" id="profile-sel" aria-label="Analysis profile">
         <option value="default" selected>default</option>
@@ -256,6 +272,24 @@
 
   <div id="posture" hidden></div>
 
+  <div id="engine-bar">
+    <span id="engine-line">PHP engine: off</span>
+    <span id="engine-note" hidden></span>
+    <details id="attribution">
+      <summary>Attribution</summary>
+      <p>
+        The optional engine runs PHP via
+        <a href="https://github.com/seanmorris/php-wasm" rel="noopener">php-wasm</a>
+        by Sean Morris, Apache-2.0
+        (<a href="vendor-licenses/php-wasm-LICENSE">LICENSE</a>,
+        <a href="vendor-licenses/php-wasm-NOTICE">NOTICE</a>).
+        This product includes PHP software, freely available from
+        &lt;<a href="https://www.php.net/software/" rel="noopener">https://www.php.net/software/</a>&gt;
+        (<a href="vendor-licenses/PHP-LICENSE-3.01">PHP License 3.01</a>).
+      </p>
+    </details>
+  </div>
+
   <script type="module">
     import { basicSetup } from "codemirror"
     import { EditorState, Prec, StateField, StateEffect } from "@codemirror/state"
@@ -265,6 +299,7 @@
     import { lintGutter, setDiagnostics } from "@codemirror/lint"
     import { tags as t } from "@lezer/highlight"
     import LZString from "https://esm.sh/lz-string@1.5.0"
+    import { driveReplay } from "./replay.mjs"
 
     // The seeded sample demonstrates the rung ladder (ADR-0062 A-G10):
     // findings APPEAR as the profile climbs — 1 at default, 2 at contracts,
@@ -313,18 +348,108 @@ greet("three", "World"); // default: "three" can never satisfy int
     let seq = 0
     const pending = new Map()
     worker.onmessage = (e) => {
-      const { seq: n, check, annotate } = e.data
-      const resolve = pending.get(n)
-      if (resolve) { pending.delete(n); resolve({ check, annotate }) }
+      const resolve = pending.get(e.data.seq)
+      if (resolve) { pending.delete(e.data.seq); resolve(e.data) }
     }
-    function analyze(source, wantAnnotate) {
+    function analyze(source, wantAnnotate, table) {
       const n = ++seq
       return new Promise((resolve) => {
         pending.set(n, resolve)
-        worker.postMessage({ seq: n, source, profile: currentProfile, wantAnnotate })
+        worker.postMessage({ seq: n, source, profile: currentProfile, wantAnnotate, table })
       })
     }
-    const isStale = (n) => n !== seq
+
+    // ── The optional PHP engine (issue #64) ───────────────────────────────
+    // OFF by default, and off means today's page exactly: the plain
+    // check/annotate pair, no php-wasm fetched, no behavior changed. Turning it
+    // on is a deliberate click because it downloads a php-src build (~16 MB, a
+    // few MB over the wire compressed).
+    //
+    // On, an analysis runs the ADR-0066 replay loop: check the source against a
+    // session-global answer table, hand whatever it could not answer to the PHP
+    // worker, merge, repeat until nothing is pending. ONLY a converged run is
+    // rendered — the cap, a deadline, or an engine failure falls back to the
+    // plain call for that run and says so in the engine bar. A half-converged
+    // envelope is a partial lie and is never shown.
+    const ENGINE_BOOT_DEADLINE_MS = 120000
+    const ENGINE_BATCH_DEADLINE_MS = 10000
+
+    // Session-global and monotone: an answer is a pure function of its request
+    // key, so it stays valid across analyses and across profiles. The engine is
+    // asked each question once per session.
+    const engineTable = Object.create(null)
+    let engineState = "off"   // off | loading | on | failed
+    let engineEverLoaded = false
+    let engineLabel = ""
+    let phpWorker = null
+    let phpSeq = 0
+    const phpPending = new Map()
+
+    function spawnPhpWorker() {
+      phpWorker = new Worker(new URL("./php-worker.js", import.meta.url), { type: "module" })
+      phpWorker.onmessage = (e) => {
+        const settle = phpPending.get(e.data.seq)
+        if (settle) { phpPending.delete(e.data.seq); settle.resolve(e.data) }
+      }
+      phpWorker.onerror = (e) => rejectPhpPending(e.message || "the PHP worker failed to start")
+    }
+    function rejectPhpPending(reason) {
+      for (const settle of phpPending.values()) settle.reject(new Error(reason))
+      phpPending.clear()
+    }
+    function terminatePhpWorker(reason) {
+      rejectPhpPending(reason)
+      if (phpWorker) phpWorker.terminate()
+      phpWorker = null
+    }
+
+    // The ONLY enforceable timeout. A PHP busy loop starves the timers of its own
+    // thread, so a deadline can only be raced from here — and the only way to end
+    // a run that breached it is to terminate the worker and boot a fresh one.
+    function phpCall(payload, deadlineMs) {
+      if (!phpWorker) spawnPhpWorker()
+      const worker = phpWorker
+      const n = ++phpSeq
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          phpPending.delete(n)
+          if (phpWorker === worker) rebootEngine()
+          reject(new Error(`the engine exceeded its ${Math.round(deadlineMs / 1000)}s deadline`))
+        }, deadlineMs)
+        phpPending.set(n, {
+          resolve: (data) => {
+            clearTimeout(timer)
+            if (data.error) reject(new Error(data.error))
+            else resolve(data)
+          },
+          reject: (err) => { clearTimeout(timer); reject(err) },
+        })
+        worker.postMessage({ seq: n, ...payload })
+      })
+    }
+
+    async function bootEngine() {
+      const reply = await phpCall({}, ENGINE_BOOT_DEADLINE_MS)
+      engineLabel = `PHP ${reply.version} (php-wasm)`
+      return reply
+    }
+    function rebootEngine() {
+      terminatePhpWorker("the engine was terminated on its deadline")
+      spawnPhpWorker()
+      bootEngine().catch((err) => setEngineState("failed", err.message))
+    }
+    async function askEngine(keys) {
+      const reply = await phpCall({ requests: keys }, ENGINE_BATCH_DEADLINE_MS)
+      return { answers: reply.answers, failures: reply.failures }
+    }
+
+    // One replay iteration, in the shape driveReplay wants.
+    function replayAnalyzer(source, wantAnnotate) {
+      return async (table) => {
+        const data = await analyze(source, wantAnnotate, table)
+        return { ok: data.check.ok, pending: data.pending || [], value: data }
+      }
+    }
 
     // ── The annotate overlay (#56): steins annotate's margin facts ────────
     // A LineFact is a per-line string in the CLI's own vocabulary (the
@@ -461,18 +586,45 @@ greet("three", "World"); // default: "three" can never satisfy int
       }, 600)
     }
 
+    // `runToken` is the staleness guard: a run may make several worker round
+    // trips (the replay loop does), so what matters is whether a NEWER run has
+    // started, not whether a newer message was sent.
+    let runToken = 0
+
     async function runCheck() {
-      const mySeq = seq + 1
+      const myToken = ++runToken
+      const stale = () => myToken !== runToken
+      const source = view.state.doc.toString()
+      const wantAnnotate = typesVisible
       setStatus("checking", "Checking…")
-      const { check, annotate } = await analyze(view.state.doc.toString(), typesVisible)
-      if (isStale(mySeq)) return
+
+      let result = null
+      let degraded = null
+      if (engineState === "on") {
+        const run = await driveReplay({
+          analyze: replayAnalyzer(source, wantAnnotate),
+          answer: askEngine,
+          table: engineTable,
+          aborted: stale,
+        })
+        if (stale()) return
+        // Converged is the only status whose envelope may be rendered.
+        if (run.status === "converged") result = run.value
+        else degraded = run.reason || run.status
+      }
+      if (!result) {
+        result = await analyze(source, wantAnnotate)
+        if (stale()) return
+      }
+      showEngineNote(degraded)
+      const { check, annotate } = result
 
       if (!check.ok) {
         setStatus("error", check.error)
         return
       }
       showPosture(check.notice)
-      if (typesVisible && annotate && annotate.ok) applyFacts(annotate.lines)
+      if (wantAnnotate && annotate && annotate.ok) applyFacts(annotate.lines)
       const findings = check.findings
       const parseErrors = check.parse_errors
       applyLintMarkers(findings, parseErrors)
@@ -605,6 +757,58 @@ greet("three", "World"); // default: "three" can never satisfy int
       } else {
         clearFacts()
       }
+    })
+
+    // ── PHP engine toggle + state line (issue #64) ────────────────────────
+    // The copy stays honest about what this build can prove: php-wasm 0.1.0's
+    // PHP 8.5 is a 32-bit build, and a fold is only sound on a provably 64-bit
+    // engine (ADR-0066 §4), so what lights up here is reflection and existence —
+    // declared return types and the absence family — not folded values.
+    const engineBtn = document.getElementById("engine-btn")
+    const engineLine = document.getElementById("engine-line")
+    const engineNote = document.getElementById("engine-note")
+
+    const ENGINE_BTN_LABEL = {
+      loading: "Loading PHP engine…",
+      on: "PHP engine on",
+      failed: "PHP engine unavailable",
+    }
+    function setEngineState(state, detail = "") {
+      engineState = state
+      const line = {
+        off: "off",
+        loading: "loading…",
+        on: `${engineLabel} — answers reflection & existence`,
+        failed: `failed (using built-in analysis)${detail ? ` — ${detail}` : ""}`,
+      }[state]
+      engineLine.textContent = `PHP engine: ${line}`
+      engineLine.className = state
+      engineBtn.textContent = ENGINE_BTN_LABEL[state]
+        ?? (engineEverLoaded ? "PHP engine off" : "Load PHP engine (~4 MB)")
+      engineBtn.disabled = state === "loading" || state === "failed"
+      engineBtn.classList.toggle("active", state === "on")
+      engineBtn.setAttribute("aria-pressed", String(state === "on"))
+    }
+    function showEngineNote(reason) {
+      engineNote.hidden = !reason
+      engineNote.textContent = reason ? `this run used the built-in analysis (${reason})` : ""
+    }
+    engineBtn.addEventListener("click", async () => {
+      if (engineState === "on") { setEngineState("off"); runCheck(); return }
+      if (engineState !== "off") return
+      if (engineEverLoaded) { setEngineState("on"); runCheck(); return }
+      setEngineState("loading")
+      try {
+        await bootEngine()
+        engineEverLoaded = true
+        setEngineState("on")
+      } catch (err) {
+        // Permanent for this session: the button stays disabled and every run
+        // keeps using the built-in analysis.
+        terminatePhpWorker("the engine failed to load")
+        setEngineState("failed", err.message)
+      }
+      runCheck()
     })
 
     // ── Posture banner + status ───────────────────────────────────────────
