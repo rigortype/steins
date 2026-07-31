@@ -79,7 +79,7 @@ is the only channel available to hand the runner its own source.
 | --- | --- | --- |
 | `env` | `{php_version, extensions, sapi}` — coverage-posture material and the PHP-minor check for catalog version skew | implemented |
 | `fold` | a call's value, tagged with its PHP type | implemented |
-| `reflect` | whether a name is a resident function and/or class-like on this PHP, autoload **disabled**; for a resident function also its **reflected return type** (`return_type`, with `return_type_tentative` when the engine carries only a tentative type) — the envelope the ADR-0056 return-fact seeder reads | implemented |
+| `reflect` | whether a name is a resident function and/or class-like on this PHP, autoload **disabled**; for a resident function also its **reflected return type** (`return_type`, with `return_type_tentative` when the engine carries only a tentative type) — the envelope the ADR-0056 return-fact seeder reads — and its **parameter counts** (`params_total`, `params_required`) | implemented |
 | `plugin` | — | **stub**: returns `{kind: "widen", reason: "unimplemented"}` |
 
 `reflect`'s reply is always structured: a name that exists nowhere is a
@@ -90,6 +90,16 @@ unsound.
 
 Autoload is deliberately disabled: the sidecar runs no project autoloader, and
 the question is strictly "is this name resident on this PHP".
+
+The **parameter counts** (`ReflectionFunction::getNumberOfParameters()` /
+`getNumberOfRequiredParameters()`) sit inside the same try/catch as the return
+type, so a reflection failure leaves both `null` rather than guessing. They exist
+for ADR-0064 Amendment B's mixed-pin ruling: a builtin declaring a bare `mixed`
+return countersigns a transfer rule with nothing, so such a rule pins the live
+*signature* instead. Absent counts — an older runner, a canned replay table
+recorded before the field, a reflection failure — withhold the rule exactly as an
+absent declaration does; **older replies keep parsing unchanged**, which is what
+lets the pre-existing replay tables stay valid.
 
 `fold` returns one of three outcomes, and the middle one is the interesting one:
 

@@ -74,3 +74,68 @@ two recorded exceptions rather than forced fits:
   entirely unported (seam v) and `assert` inherits every addition for
   free; `sprintf` (the #1 builtin by frequency) is already fully served by
   the fold seam — no work fits.
+
+## Amendment B (2026-07-31): a `mixed` declaration pin is inadmissible alone —
+## seam (ii) rules for such names carry an arity second leg
+
+Owner-directed, landed with the array read-position family (issue #76). Where
+this amendment contradicts §1's seam-(ii) description, the amendment governs.
+
+**The hole.** Every seam-(ii) transfer is admitted by countersignature: the
+running engine's own reflected *declaration* must be the one the rule was
+written against (ADR-0061 §2, as `shape_projection_fact` and
+`arg_dispatch_return_fact` implement it). The check is meaningful because a
+declaration is a real, movable claim — when php-src adds an arm, the reflected
+string changes and the stale rule stops firing. That reasoning fails exactly
+when the declaration is **`mixed`**. `mixed` is the top of the type lattice, so
+every possible rule output is inside it; the check degenerates from "this engine
+still agrees with the rule" to "this engine has heard of the name". A rule
+admitted on a `mixed` pin is, in gate terms, admitted on nothing.
+
+This is not a corner case. The whole array read-position family — `current`,
+`reset`, `end`, `next`, `prev`, `array_pop`, `array_shift`, `array_first`,
+`array_last` — declares `mixed` (`key` alone declares `string|int|null` and
+needs none of this), and the survey for issue #75 ranked that family first by
+measured corpus impact. Declining every `mixed`-declared name outright would
+have forfeited the top of the import queue; admitting them on the degenerate
+pin would have put the family's facts into the tree on nobody's evidence.
+
+**The ruling.** A seam-(ii) rule whose name's reflected declaration is a bare
+`mixed` is **inadmissible on the declaration alone** and must carry a second
+leg: an **arity pin** against the live signature. The `reflect` wire reply gains
+`params_total` / `params_required` (`ReflectionFunction::getNumberOfParameters()`
+and `getNumberOfRequiredParameters()`), surfaced through
+`Folder::builtin_param_counts`, and the rule fires only when the engine reports
+the signature the rule was written against — `(1, 1)` for all ten names of this
+family, measured at `PINNED_PHP` rather than assumed.
+
+Three properties make this a real countersignature and not a ceremony:
+
+- **It is a claim about *this* engine that can fail.** A parameter added,
+  removed, or made optional across a PHP minor moves the counts, and a rule
+  written against the old signature stops firing — the same failure direction
+  the declaration check gives for a widened return type.
+- **Absence withholds, exactly as declaration-absence does.** An engine that
+  reports no arity — an older runner, a canned replay table recorded before the
+  field, a reflection failure — yields `None`, and the rule is withheld rather
+  than admitted un-countersigned. Nothing here weakens ADR-0061 §2; it is a
+  conjunct added to it, never a substitute for it.
+- **It is checked mechanically, not by discipline.** The rule table pairs each
+  arm's declaration pin with its arity pin, and a debug assertion refuses any arm
+  that names `mixed` without one, so the obligation cannot be forgotten by the
+  next author.
+
+**What it does not license.** The arity pin admits a rule; it never *supplies*
+one. A `mixed`-declared name still gets no envelope to be extensionally inside
+(ADR-0061 §2's honest limit), so its rule remains responsible for stating an
+answer the four-layer domain can actually spell, and declines when it cannot —
+`json_decode` stays declined under this amendment for exactly the reason §1
+recorded, and the read-position family declines every `∪ false` that would need
+a two-base union. Nor does the pin extend to seam (iii): a curated row's
+admission gate is unchanged.
+
+**Side effect, recorded so it is not rediscovered as new work.** The reflect
+arity surface is precisely what `call.too-many-arguments` for internal targets
+has been waiting on (docs/internal-spec/catalog.md, "Builtin *signatures*").
+That checker is a separate slice; this amendment lands the surface only, and no
+consumer of it exists beyond the pin.
