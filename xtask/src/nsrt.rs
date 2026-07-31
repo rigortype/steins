@@ -421,6 +421,15 @@ fn is_supported_atom(a: &str) -> bool {
         "non-empty-string",
         "non-falsy-string",
         "numeric-string",
+        // The casing pair (issue #77): `preds_keyword` has spelled
+        // `lowercase-string` / `uppercase-string` since the casing predicates
+        // landed, so gating them here measured the harness's own vocabulary rather
+        // than the analyzer's — the identical defect S1.5 fixed for the array
+        // atoms. Their `non-empty-` intersections are NOT listed: PHPStan spells
+        // that set `lowercase-string&non-empty-string`, which is an intersection
+        // and stays unsupported on its own terms.
+        "lowercase-string",
+        "uppercase-string",
         "positive-int",
         "negative-int",
         "non-negative-int",
@@ -1027,6 +1036,15 @@ mod tests {
         assert_eq!(unsupported_pattern("positive-int"), None);
         assert_eq!(unsupported_pattern("stdClass"), None);
         assert_eq!(unsupported_pattern("'foo'|'bar'"), None);
+        // The casing pair (issue #77): spelled by `preds_keyword`, so measured.
+        assert_eq!(unsupported_pattern("lowercase-string"), None);
+        assert_eq!(unsupported_pattern("uppercase-string"), None);
+        // …and their PHPStan spelling as an intersection stays gated on its own
+        // terms — this opened one keyword each, not the `&` operator.
+        assert_eq!(
+            unsupported_pattern("lowercase-string&non-empty-string"),
+            Some("intersection")
+        );
     }
 
     /// S1.5 (ADR-0062): the array vocabulary itself is no longer gated — the

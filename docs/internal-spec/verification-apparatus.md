@@ -237,6 +237,46 @@ Future slices are measured against the S1.5 numbers above, not against the pre-#
 pair (734 / 7,792, in which the 24 subsumptions were counted as losses) or the
 post-#47/pre-S1.5 pair (734 / 6,987/24/7,768) superseded here.
 
+### The casing-keyword reseed (2026-07-31, issue #77)
+
+The same defect S1.5 fixed for the array atoms was still open for two scalar ones.
+`steins_contract::spell::preds_keyword` has spelled `lowercase-string` and
+`uppercase-string` since the casing predicates landed, but neither appeared in
+`is_supported_atom`'s keyword list, so every expectation naming one was gated
+**before `got` was ever read** — 88 records sitting in `unsupported`, including two
+(`more-types.php:50`/`:52`) where Steins already rendered the asserted keyword
+exactly. Adding the pair is a classify-logic change only; no analyzer code moves
+with it.
+
+The pair is added, their `non-empty-` intersections are not: PHPStan spells that
+set `lowercase-string&non-empty-string`, which is an intersection and stays
+unsupported on its own terms. A Steins answer of `non-empty-lowercase-string`
+against a bare `lowercase-string` assertion therefore scores `subsumed`, not
+`match` — the same discipline as everywhere else.
+
+Reseeded baseline (at the issue-#77 slice):
+
+| | count |
+| --- | --- |
+| match (**headline**) | 961 |
+| unsupported | 2,488 |
+| subsumed | 33 |
+| differ | 12,057 |
+| measured | 15,539 |
+
+Of the 33 headline gains, 17 are rows that were already measured and became
+`match` when the string-predicate transfers landed (headline 928 → 945 with that
+commit alone); 2 are the `more-types.php` pair that needed no analyzer change at
+all; the other 14 are transfer answers this reseed made scoreable. **Zero rows
+left `match`**, verified as a per-row set diff keyed on file+line.
+
+The phpstan-src checkout is a **live working tree** (`corpus.local.toml`), and it
+moved during this slice: the measured total rose from 15,509 to 15,539 as seven
+nsrt files gained 31 observations. All 31 are new `differ`/`unsupported` rows and
+none is a `match`, so the headline movement above is the slice's alone — but a
+future comparison against these numbers should re-measure its own baseline rather
+than assume the corpus stood still.
+
 ## `gen-catalog`
 
 Regenerates `steins-catalog::hierarchy_generated` from
