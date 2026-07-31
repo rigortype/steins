@@ -34,9 +34,18 @@ grade of tool-shipped phpdoc:
 - **Asserted, not Verified.** The floor seeds the dump surface and
   contracts-tier reasoning. It is never a proof-layer premise; the zero-FP
   default surface cannot cite it by construction.
-- **Any engine answer wins.** The rung sits strictly below
-  `builtin_return_fact`; with a live sidecar or the browser engine loaded,
-  the floor is dead code.
+- **Any engine answer wins — per name, not per run.** The rung sits
+  strictly below `builtin_return_fact` and fires exactly where the folder
+  yielded `None` for the asked name. `--no-php` is only the total case;
+  with a live engine the floor still speaks where the engine is silent —
+  a name whose extension is not loaded on the analyzing PHP
+  (`mysqli_fetch_field` without mysqli), or a name with no declared
+  return type in reflection. An absence-family finding may stand beside
+  such a floor fact, and the pair is complementary, not contradictory:
+  the call fails on the analyzing PHP, and if the runtime has it, this
+  is its declared shape. Where the engine *answers*, the floor never
+  overrides it — the consuming engine may not be the pinned one, and a
+  static row must not outvote the real thing.
 - **Return envelopes only.** Declared types, lowered through the same
   `lower_str` → `envelope_fact` seam the reflected envelope uses — one
   lowering, two provenances. No param types, no arity, no curated-grade
@@ -87,7 +96,16 @@ lives beside the thing it licenses.
 - `--no-php` and the pre-boot browser gain declared types for builtin
   calls with variable operands; their notices say the types come from the
   catalog's declarations, unverified.
-- The engine-present paths are byte-identical: the floor is unreachable.
+- Where the engine answers a name, behavior is unchanged. Where it is
+  silent — engine absent, extension unloaded, no declared type — the
+  floor now speaks, Asserted.
+- The first slice is deliberately narrower than the source. It takes
+  plain functions only (method rows like `Phar::getSignature` are
+  skipped) and only rows whose type lowers to an envelope (base / `?T`);
+  the rows where functionMap genuinely exceeds reflection — shaped
+  arrays, `T|false` unions — are dropped at generation and counted, and
+  await a contracts-grade Asserted slice that seeds through the full
+  `lower_str` lowering rather than `envelope_fact`.
 - A new failure mode exists and is accepted: a floor row can be wrong for
   the user's actual runtime (a patched PHP, an exotic build). It can
   mislead a dump or a contracts-tier fact; it cannot mint a proof-layer
