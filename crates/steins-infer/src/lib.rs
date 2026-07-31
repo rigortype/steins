@@ -371,9 +371,13 @@ pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
 pub const MAX_BINDING_DEPTH: usize = 8;
 
 /// The one-line coverage-posture notice (ADR-0004): printed to stderr when a run
-/// executes as the sound subset because the PHP sidecar is unavailable.
-pub const SOUND_SUBSET_NOTICE: &str =
-    "note: running as sound subset (no PHP sidecar) — findings that require executing PHP are omitted";
+/// executes as the sound subset because the PHP sidecar is unavailable, and served
+/// as the browser envelope's `notice` field for the engine-off playground (ADR-0065).
+///
+/// The second clause is ADR-0069's: with no engine to reflect them, a builtin's
+/// return type comes from the catalog's mined declaration, which is a claim rather
+/// than a runtime answer — so the sentence says so where the posture is stated.
+pub const SOUND_SUBSET_NOTICE: &str = "note: running as sound subset (no PHP sidecar) — findings that require executing PHP are omitted, and builtin return types come from the catalog's declarations, unverified";
 
 // ---------------------------------------------------------------------------
 // Folding seam (ADR-0004 / ADR-0024). Unchanged from the per-file slice.

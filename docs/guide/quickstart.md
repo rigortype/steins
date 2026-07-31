@@ -86,7 +86,7 @@ If PHP is absent, or you pass `--no-php`, the run degrades to a **sound
 subset** and says so on the first line:
 
 ```
-note: running as sound subset (no PHP sidecar) — findings that require executing PHP are omitted
+note: running as sound subset (no PHP sidecar) — findings that require executing PHP are omitted, and builtin return types come from the catalog's declarations, unverified
 ```
 
 The zero-FP bar still holds in the sound subset — nothing false is added —

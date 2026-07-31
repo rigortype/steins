@@ -7,7 +7,8 @@ state, where the engine is a cached static asset.
 
 By default every run here is the documented **sound subset** (ADR-0004): no PHP
 sidecar, so findings that require executing PHP are omitted and nothing false is
-added. The banner at the bottom of the page is the analysis envelope's `notice`
+added. A builtin's return type then comes from the catalog's mined declaration
+(ADR-0069), rendered `(asserted)` — a claim, never a runtime answer. The banner at the bottom of the page is the analysis envelope's `notice`
 field — the same sentence `steins check --no-php` prints — rendered as data.
 With the optional engine loaded that sentence is no longer the posture, so the
 banner states what the engine did and points at the boundary panel; the

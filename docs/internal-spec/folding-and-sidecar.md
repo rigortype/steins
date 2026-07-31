@@ -155,7 +155,7 @@ wrong or lost diagnostic.
 A run without a sidecar prints one line to stderr and continues:
 
 ```text
-note: running as sound subset (no PHP sidecar) — findings that require executing PHP are omitted
+note: running as sound subset (no PHP sidecar) — findings that require executing PHP are omitted, and builtin return types come from the catalog's declarations, unverified
 ```
 
 The zero-FP bar still holds; the run is *incomplete*, not *degraded*, and it says

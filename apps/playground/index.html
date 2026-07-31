@@ -13,7 +13,9 @@
 
     By DEFAULT every run is the documented sound subset (no PHP engine): the
     banner at the bottom is the envelope's `notice` field rendered as data —
-    the same sentence `steins check --no-php` prints.
+    the same sentence `steins check --no-php` prints. That sentence now also
+    names the ADR-0069 floor: with no engine to reflect them, a builtin's
+    return type comes from the catalog's declaration, unverified.
 
     With the optional php-wasm engine loaded (issue #64), the banner, the
     engine line and the "Precision boundary" panel are composed from the
@@ -328,7 +330,9 @@
 // Steins Playground — edit this code and see findings in real time.
 // The analyzer runs entirely in your browser. By default it is the
 // documented sound subset: no PHP engine, so findings that require
-// executing PHP are omitted — and nothing false is added.
+// executing PHP are omitted — and nothing false is added. Builtin
+// return types then come from the catalog's declarations, marked
+// (asserted) because a declaration is not a runtime answer.
 //
 // Click "Load PHP engine" to run real php-src here too. greet() below
 // then inlines to its actual string, undefined names are caught, and the

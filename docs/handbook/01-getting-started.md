@@ -128,7 +128,7 @@ So when PHP is absent, or you pass `--no-php`, the run degrades
 to a **sound subset** and says so on the first line:
 
 ```text
-note: running as sound subset (no PHP sidecar) — findings that require executing PHP are omitted
+note: running as sound subset (no PHP sidecar) — findings that require executing PHP are omitted, and builtin return types come from the catalog's declarations, unverified
 ```
 
 The zero-false-positive bar still holds — nothing false is ever
@@ -136,7 +136,7 @@ added — but findings that need the runtime **widen away into
 silence**. A value mismatch that folds statically still fires:
 
 ```text
-note: running as sound subset (no PHP sidecar) — findings that require executing PHP are omitted
+note: running as sound subset (no PHP sidecar) — findings that require executing PHP are omitted, and builtin return types come from the catalog's declarations, unverified
 demo.php:6:1: error[type.argument-mismatch]: argument "abc" to takesInt() cannot become int $x — proven TypeError (strict mode)
 ```
 
