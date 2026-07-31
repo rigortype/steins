@@ -127,6 +127,20 @@ pub struct Reflection {
     /// function declared no `getReturnType()` but the engine carries a tentative
     /// one). Still the engine's own claim; recorded distinctly per ADR-0056 §7.
     pub return_type_tentative: bool,
+    /// The resident function's `ReflectionFunction::getNumberOfParameters()` — the
+    /// **arity second leg** of ADR-0064's mixed-pin ruling. A rule whose name
+    /// declares a bare `mixed` return (the array read-position family) has no
+    /// structural declaration to countersign it, so it pins the live *signature*
+    /// instead: this count must be the one the rule was written against.
+    ///
+    /// `None` when the name is not a resident function, when reflection failed, or
+    /// when the reply came from a runner predating the field — all three are
+    /// "unanswerable", and a consumer withholds its rule exactly as it does on an
+    /// absent declaration. Never a guess.
+    pub params_total: Option<u32>,
+    /// The resident function's `ReflectionFunction::getNumberOfRequiredParameters()`,
+    /// the companion of [`Self::params_total`] with the same `None` semantics.
+    pub params_required: Option<u32>,
 }
 
 impl Reflection {
@@ -254,7 +268,20 @@ pub fn parse_reflection_result(result: &serde_json::Value, target: &str) -> Opti
             .get("return_type_tentative")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
+        // Absent (a runner predating the arity surface — including every canned
+        // replay table recorded before it) or JSON `null` both map to `None`: an
+        // unanswerable arity, on which a mixed-pinned rule withholds. Back-compat
+        // is load-bearing here — an old reply must keep parsing, not become a
+        // parse failure that would silence the reflected envelope too.
+        params_total: parse_count(result.get("params_total")),
+        params_required: parse_count(result.get("params_required")),
     })
+}
+
+/// One parameter count off a reflection reply: a non-negative JSON integer, or
+/// `None` for absent / null / anything that is not one.
+fn parse_count(v: Option<&serde_json::Value>) -> Option<u32> {
+    v.and_then(serde_json::Value::as_u64).and_then(|n| u32::try_from(n).ok())
 }
 
 /// Interpret a `fold` `result` object (`{kind, ...}`) as a [`FoldResult`]. Any
@@ -399,6 +426,58 @@ mod tests {
         assert!(r.function_exists && !r.class_like_exists && r.exists());
         assert_eq!(r.return_type.as_deref(), Some("int"));
         assert!(!r.return_type_tentative);
+    }
+
+    #[test]
+    fn reflection_carries_the_parameter_counts() {
+        let refl = serde_json::json!({
+            "kind": "reflection",
+            "target": "substr",
+            "function": true,
+            "class_like": false,
+            "return_type": "string",
+            "return_type_tentative": false,
+            "params_total": 3,
+            "params_required": 2,
+        });
+        let r = parse_reflection_result(&refl, "substr").expect("reflection");
+        assert_eq!(r.params_total, Some(3));
+        assert_eq!(r.params_required, Some(2));
+    }
+
+    #[test]
+    fn an_old_format_reflection_reply_still_parses_with_no_arity() {
+        // BACK-COMPAT PIN: a reply recorded before the arity surface (every canned
+        // replay table in the tree, and any older runner) must keep parsing — the
+        // reflected envelope it carries stays usable, and only the arity-pinned
+        // rules withhold.
+        let old = serde_json::json!({
+            "kind": "reflection",
+            "target": "strlen",
+            "exists": true,
+            "function": true,
+            "class_like": false,
+            "return_type": "int",
+            "return_type_tentative": false,
+        });
+        let r = parse_reflection_result(&old, "strlen").expect("an old reply still parses");
+        assert_eq!(r.return_type.as_deref(), Some("int"));
+        assert_eq!(r.params_total, None);
+        assert_eq!(r.params_required, None);
+        // An explicit JSON `null` (a reflection failure on a live runner) reads the
+        // same way: unanswerable, never zero.
+        let failed = serde_json::json!({
+            "kind": "reflection",
+            "target": "strlen",
+            "function": true,
+            "class_like": false,
+            "return_type": null,
+            "params_total": null,
+            "params_required": null,
+        });
+        let r = parse_reflection_result(&failed, "strlen").expect("reflection");
+        assert_eq!(r.params_total, None);
+        assert_eq!(r.params_required, None);
     }
 
     #[test]

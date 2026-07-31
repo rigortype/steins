@@ -213,8 +213,22 @@ impl FakeEngine {
                 class_like_exists: false,
                 return_type: Some(return_type.to_owned()),
                 return_type_tentative: false,
+                // No arity: an engine that answers a declaration but no parameter
+                // counts is exactly the old-runner case, and the mixed-pinned rules
+                // must withhold on it.
+                params_total: None,
+                params_required: None,
             },
         );
+        self
+    }
+
+    /// [`Self::with_function`] plus the reflected arity — ADR-0064's second leg.
+    fn with_arity(mut self, name: &str, return_type: &str, total: u32, required: u32) -> Self {
+        self = self.with_function(name, return_type);
+        let r = self.reflections.get_mut(name).expect("just inserted");
+        r.params_total = Some(total);
+        r.params_required = Some(required);
         self
     }
 

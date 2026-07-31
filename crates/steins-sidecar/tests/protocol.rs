@@ -142,12 +142,41 @@ fn reflect_reports_the_native_return_type() {
 }
 
 #[test]
+fn reflect_reports_the_parameter_counts() {
+    // ADR-0064's mixed-pin ruling: the reply carries the live signature's arity, so
+    // a rule whose name declares a bare `mixed` has something to countersign
+    // against. Every expectation below is the real engine's answer at PINNED_PHP.
+    let Some(mut sc) = spawn_or_skip("reflect_reports_the_parameter_counts") else { return };
+    let strlen = sc.reflect("strlen").expect("reflection reply");
+    assert_eq!(strlen.params_total, Some(1), "strlen(string $string), {strlen:?}");
+    assert_eq!(strlen.params_required, Some(1));
+    // An optional tail is where total and required diverge:
+    // `substr(string $string, int $offset, ?int $length = null)`.
+    let substr = sc.reflect("substr").expect("reflection reply");
+    assert_eq!(substr.params_total, Some(3), "substr has three parameters, {substr:?}");
+    assert_eq!(substr.params_required, Some(2), "only $string and $offset are required");
+    // The array read-position family: one required parameter each — the arity the
+    // ADR-0064 rules pin against, measured rather than assumed.
+    for name in [
+        "current", "reset", "end", "next", "prev", "key", "array_pop", "array_shift",
+        "array_first", "array_last",
+    ] {
+        let r = sc.reflect(name).expect("reflection reply");
+        assert!(r.function_exists, "{name} is resident on this PHP: {r:?}");
+        assert_eq!(r.params_total, Some(1), "{name} takes one parameter: {r:?}");
+        assert_eq!(r.params_required, Some(1), "{name}'s parameter is required: {r:?}");
+    }
+}
+
+#[test]
 fn reflect_return_type_is_none_for_a_class_like() {
     // A class-like name is not a function — no return type surface.
     let Some(mut sc) = spawn_or_skip("reflect_return_type_is_none_for_a_class_like") else { return };
     let ex = sc.reflect("Exception").expect("reflection reply");
     assert!(ex.class_like_exists && !ex.function_exists);
     assert_eq!(ex.return_type, None, "a class-like carries no return type: {ex:?}");
+    assert_eq!(ex.params_total, None, "a class-like carries no arity: {ex:?}");
+    assert_eq!(ex.params_required, None);
 }
 
 #[test]

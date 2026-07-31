@@ -248,6 +248,19 @@ format the other tables will follow once a consumer wants them.
   array, a `T|false` union, a refinement). That is why
   `call.too-many-arguments` for internal targets waits on the sidecar `reflect`
   slice.
+
+  **The arity half of that wait is now over** (issue #76). The `reflect` reply
+  carries `params_total` / `params_required`
+  (`ReflectionFunction::getNumberOfParameters()` and
+  `getNumberOfRequiredParameters()`), surfaced on
+  `steins_sidecar::Reflection` and reachable through
+  `steins_infer::Folder::builtin_param_counts`. It landed as ADR-0064's
+  mixed-pin second leg — a rule whose name declares a bare `mixed` countersigns
+  itself against the live signature — and **no checker consumes it yet**:
+  `call.too-many-arguments` for internal targets is a separate slice that can now
+  read this surface instead of a parameter table. Absent counts (an older runner,
+  a canned replay table recorded before the field, a reflection failure) stay
+  `None`, which withholds rather than guesses.
 - **Flag inspection** — `json_decode`/`json_encode` throw `JsonException` only
   under `JSON_THROW_ON_ERROR`; without flag inspection those rows stay
   uncatalogued (widen) rather than manufacture a throw. The keys are present in

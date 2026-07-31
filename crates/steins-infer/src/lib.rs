@@ -479,6 +479,28 @@ pub trait Folder {
         let _ = name;
         None
     }
+
+    /// The **reflected parameter counts** of a uniquely-resolved builtin `name` —
+    /// `(getNumberOfParameters(), getNumberOfRequiredParameters())` off the running
+    /// engine's own signature.
+    ///
+    /// This is the **arity second leg** of ADR-0064's mixed-pin ruling. The
+    /// declaration pin ([`Self::builtin_return_type`]) is what countersigns a
+    /// structural transfer — but a name declaring a bare `mixed` (the whole array
+    /// read-position family: `current`, `array_pop`, `array_first`, …) pins
+    /// *nothing*: `mixed` is compatible with any rule output, so the check degenerates
+    /// to a presence test. The ruling is that such a rule is inadmissible on the
+    /// declaration alone and must additionally pin the live signature, which is a
+    /// real, movable fact about this engine's version of the function.
+    ///
+    /// It carries the same gates the declaration does — a live sidecar, no
+    /// runtime-redefinition extension loaded — so nothing is weakened by using it.
+    /// The default is `None`: no arity, no rule (the sound subset, ADR-0004), which
+    /// is also what an older runner's reply and every pre-arity replay table yield.
+    fn builtin_param_counts(&mut self, name: &str) -> Option<(u32, u32)> {
+        let _ = name;
+        None
+    }
 }
 
 /// The runtime-redefinition extensions that void the absence family (ADR-0049 A9):
@@ -571,6 +593,10 @@ pub struct EngineFolder<E: FoldEngine> {
     /// Per-name memo of the raw reflected return-type declaration (ADR-0062 S7's
     /// projection gate), the string sibling of [`Self::return_fact_memo`].
     return_type_memo: HashMap<String, Option<String>>,
+    /// Per-name memo of the reflected `(total, required)` parameter counts —
+    /// ADR-0064's mixed-pin second leg, riding the same `reflect` reply as the two
+    /// memos above and following the same per-name pattern.
+    param_counts_memo: HashMap<String, Option<(u32, u32)>>,
     /// The project's declared target PHP range (issue #28), when the layout
     /// resolved one. Set by the CLI after layout discovery; gates the absence
     /// family (the boot surface interrogated must be a declared-supported
@@ -593,6 +619,7 @@ impl<E: FoldEngine> EngineFolder<E> {
             boot_surface_label: None,
             return_fact_memo: HashMap::new(),
             return_type_memo: HashMap::new(),
+            param_counts_memo: HashMap::new(),
             php_target: None,
         }
     }
@@ -616,6 +643,7 @@ impl<E: FoldEngine> EngineFolder<E> {
             self.absence_available = None;
             self.return_fact_memo.clear();
             self.return_type_memo.clear();
+            self.param_counts_memo.clear();
             self.boot_surface_memo.clear();
             self.boot_surface_fn_memo.clear();
         }
@@ -759,6 +787,23 @@ impl<E: FoldEngine> EngineFolder<E> {
         let refl = self.engine.reflect(key)?;
         refl.function_exists.then_some(refl.return_type).flatten()
     }
+
+    /// The reflected `(total, required)` parameter counts for `key` (already
+    /// lowercased), under the same gate the two computations above apply. Called
+    /// once per name; [`Folder::builtin_param_counts`] memoizes.
+    ///
+    /// Both counts must be present: a reply carrying one and not the other is not a
+    /// signature, and a half-known arity pins nothing.
+    fn compute_builtin_param_counts(&mut self, key: &str) -> Option<(u32, u32)> {
+        if !self.absence_family_available() {
+            return None;
+        }
+        let refl = self.engine.reflect(key)?;
+        if !refl.function_exists {
+            return None;
+        }
+        Some((refl.params_total?, refl.params_required?))
+    }
 }
 
 impl<E: FoldEngine> Folder for EngineFolder<E> {
@@ -866,6 +911,16 @@ impl<E: FoldEngine> Folder for EngineFolder<E> {
         }
         let answer = self.compute_builtin_return_type(&key);
         self.return_type_memo.insert(key, answer.clone());
+        answer
+    }
+
+    fn builtin_param_counts(&mut self, name: &str) -> Option<(u32, u32)> {
+        let key = name.to_ascii_lowercase();
+        if let Some(cached) = self.param_counts_memo.get(&key) {
+            return *cached;
+        }
+        let answer = self.compute_builtin_param_counts(&key);
+        self.param_counts_memo.insert(key, answer);
         answer
     }
 }

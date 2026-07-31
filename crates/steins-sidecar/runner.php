@@ -168,6 +168,23 @@ function steins_env()
  * types are NOT surfaced in v1 (the value-domain seed is the ordinary return
  * only). Any reflection failure leaves `return_type` null — never a guess.
  *
+ * ## Arity surface (ADR-0064's mixed-pin ruling)
+ *
+ * Alongside the return type, a resident function reports its **parameter counts**:
+ * `params_total` is `ReflectionFunction::getNumberOfParameters()` and
+ * `params_required` is `getNumberOfRequiredParameters()`. They exist because a
+ * declared return type of `mixed` pins nothing — the array read-position family
+ * (`current`, `array_pop`, …) all declare `mixed` — so a structural transfer rule
+ * written against such a name countersigns itself against the live *signature*
+ * instead: the engine must still take the one argument the rule was written for.
+ * (The same surface is what `call.too-many-arguments` for internal targets has
+ * been waiting on; this reply carries it, no checker consumes it yet.)
+ *
+ * Both counts sit inside the same try/catch as the return type, so a reflection
+ * failure leaves them `null` — an absent count is unanswerable, never a guess, and
+ * a consumer that cannot read the arity withholds its rule exactly as it withholds
+ * on an absent declaration.
+ *
  * @param array<mixed> $params
  * @return array<string, mixed>
  */
@@ -195,6 +212,8 @@ function steins_reflect(array $params)
     // never crash — a reflection failure yields a null return type (widen-safe).
     $return_type = null;
     $tentative = false;
+    $params_total = null;
+    $params_required = null;
     if ($function) {
         try {
             $rf = new ReflectionFunction($name);
@@ -209,9 +228,13 @@ function steins_reflect(array $params)
             if ($rt !== null) {
                 $return_type = (string) $rt;
             }
+            $params_total = $rf->getNumberOfParameters();
+            $params_required = $rf->getNumberOfRequiredParameters();
         } catch (\Throwable $e) {
             $return_type = null;
             $tentative = false;
+            $params_total = null;
+            $params_required = null;
         }
     }
 
@@ -223,6 +246,8 @@ function steins_reflect(array $params)
         'class_like' => $class_like,
         'return_type' => $return_type,
         'return_type_tentative' => $tentative,
+        'params_total' => $params_total,
+        'params_required' => $params_required,
     ];
 }
 
