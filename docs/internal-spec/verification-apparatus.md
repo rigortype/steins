@@ -277,6 +277,40 @@ none is a `match`, so the headline movement above is the slice's alone — but a
 future comparison against these numbers should re-measure its own baseline rather
 than assume the corpus stood still.
 
+### The foldable-allowlist reseed (2026-08-01, issue #78)
+
+Eighteen builtins joined the width-safe fold subset and six more joined the
+width-refused rows (which still fold on this 64-bit measuring machine). No
+analyzer code moved with them — the fold lane reads the catalog — and nsrt is
+where that shows up as precision.
+
+Reseeded baseline (at the issue-#78 slice):
+
+| | count |
+| --- | --- |
+| match (**headline**) | 1,003 |
+| unsupported | 2,488 |
+| subsumed | 37 |
+| differ | 12,011 |
+| measured | 15,539 |
+
+The corpus did **not** move this time: the record set is the same 15,849 keys
+(15,539 measured + 310 skipped), verified as a symmetric difference of zero on
+file+line, so every movement below is the slice's.
+
+All 42 headline gains are `differ → match`, and **zero rows left `match`** —
+per-row set diff keyed on file+line. By file: `str_increment.php` 18,
+`str_decrement.php` 15, `gettype.php` 3, `functions.php` 2, `str-casing.php` 2,
+`version-compare-php7.php` 1, `version-compare-php8.php` 1. The four
+`differ → subsumed` rows are all `functions.php:168–171`, where a folded `''`
+is a proper subtype of the asserted `string`/`string|false`.
+
+Two of these are worth naming. `version_compare` scores as a *width-refused*
+row: it folds on the 64-bit measuring machine and declines in the browser, and
+nsrt measures the former. And `gettype.php` moved because `gettype` returns one
+word from a fixed vocabulary, which the declared `string` envelope could never
+say.
+
 ## `gen-catalog`
 
 Regenerates `steins-catalog::hierarchy_generated` from

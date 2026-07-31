@@ -23,6 +23,41 @@
 //! without ADR-0008's opt-in "pseudo-constant settings" config, which this slice
 //! does not implement. `nondet` builtins (`time`, `rand`, `microtime`, …) are
 //! excluded by definition.
+//!
+//! ## Two kinds of refusal, and why they are not the same list
+//!
+//! A name in `WIDTH_REFUSED` **is** on the allowlist — it folds on a provably
+//! 64-bit engine and declines on a 32-bit one. So a builtin that fails ADR-0008's
+//! purity/determinism bar can never be written as a refused row: that would admit
+//! it. Those names are refused from the allowlist *entirely*, and are recorded here
+//! with the evidence, pinned absent by `impure_and_locale_sensitive_are_excluded`:
+//!
+//! * `strtotime`, `date`, `idate` — **nondet.time**, and timezone-coupled even when
+//!   handed an explicit timestamp: `idate("Y", 0)` is `1970` under `UTC` and `1969`
+//!   under `Pacific/Kiritimati` (probed). `strtotime("2020-01-01")` differed between
+//!   the two probe engines by exactly their timezone offset (`1577804400` vs
+//!   `1577836800`), which is the divergence in its purest form.
+//! * `mb_*` — encoding-coupled (`mbstring.internal_encoding`). The browser engine
+//!   settles it a second way: php-wasm 0.1.0 has **no mbstring extension**, so all
+//!   eleven `mb_*` probes answered `widen: unknown function` there.
+//! * `strcmp`, `strcasecmp` — the *contract* is the sign; the *value* is `memcmp`'s,
+//!   which C leaves implementation-defined. Both probe engines agreed on all 36
+//!   tuples (`strcmp("A","a")` = `-32`, `strcmp("zzz","a")` = `25` on each), so this
+//!   is **not** a width verdict — it is an ADR-0008 one. Folding would pin a literal
+//!   the language does not promise, and a sign-normalized admission would have the
+//!   catalog report `-1` where the engine returns `-32`: forking semantics, which the
+//!   fold seam must never do. Declining costs nothing that a two-literal `strcmp`
+//!   call was going to buy.
+//! * `number_format` — held out with the `mb_*` family by the issue-#78 must-not
+//!   list. Recorded honestly: the width probe found no divergence, and the historical
+//!   locale coupling of float rendering is gone at `PINNED_PHP` (`de_DE.UTF-8` and
+//!   `C` render `number_format(1234.5678, 2)` identically, and `precision` does not
+//!   move it). It stays out on the conservative side and may be admitted later on
+//!   its own evidence rather than smuggled in on this slice's.
+//! * `bin2hex` — carries a standing refused row in the ADR-0056 return-fact table
+//!   (`docs/research/phpsrc-mining/return_facts.toml`, the empty-in/empty-out trap).
+//!   That row is about a different table and is **not relitigated here**; the width
+//!   probe found no divergence, and the name simply does not enter on this slice.
 
 /// The PHP minor version the builtin catalog is pinned to (`major`, `minor`) —
 /// the php-src mining data (`docs/research/phpsrc-mining/hierarchy.toml`, pin
@@ -109,9 +144,12 @@ pub fn foldable(name: &str) -> bool {
 /// This is the width-safe subset ADR-0066 §4 deferred, and it is **verified, not
 /// reasoned**: every name below was probed differentially against php-wasm 0.1.0
 /// (PHP 8.5.2, `PHP_INT_SIZE = 4`) and `php` 8.5.8 (`PHP_INT_SIZE = 8`) through the
-/// *same* `steins_handle` dispatch core, 310 adversarial tuples over boundary
-/// integers, oversized numeric strings, oversized floats, negative inputs and
-/// integer array keys at `PHP_INT_MAX`. See the ADR-0066 amendment for the table.
+/// *same* `steins_handle` dispatch core: **661 adversarial tuples** over two rounds
+/// (310 at issue #64 S1.5, 351 more for issue #78's candidate round) covering
+/// boundary integers, oversized numeric strings, oversized floats, negative inputs,
+/// integer array keys at `PHP_INT_MAX`, engine-minted binary strings, out-of-alphabet
+/// string arithmetic and both `strtr` arities. See the ADR-0066 amendments for the
+/// per-name tables.
 ///
 /// A `false` here is not a claim that the name is width-*sensitive* in general —
 /// it is a refusal to certify it. Default-deny: an unclassified or newly added
@@ -175,6 +213,36 @@ pub fn width_refused_names() -> &'static [&'static str] {
 ///   bool from php-src's own `zendi_smart_strcmp`, whose overflow guard makes two
 ///   oversized numeric strings compare as strings on BOTH machines
 ///   (`in_array("9007199254740993", ["9007199254740992"])` is `false` on each).
+///
+/// Issue #78 grew the table by eighteen names, probed the same way and falling
+/// into the same groups:
+///
+/// * **byte transform of the subject.** `ucwords`, `strtr` (both arities),
+///   `preg_quote`, `addslashes`, `urlencode`/`urldecode`,
+///   `rawurlencode`/`rawurldecode`, `base64_encode`/`base64_decode`. No integer
+///   enters the result, and a coerced integer subject has one decimal spelling in
+///   range. The case-touching member is **locale-free at `PINNED_PHP`**: `ucwords`
+///   has been ASCII-only since PHP 8.2's locale-independent case conversion, which
+///   is what lets it sit beside `strtoupper` here.
+/// * **string arithmetic that never becomes machine arithmetic.**
+///   `str_increment`/`str_decrement` (8.3+, present on both builds) carry the
+///   digits in the *string*, so `str_increment("9223372036854775807")` is
+///   `"9223372036854775808"` on both machines where any integer path would have
+///   overflowed. Out-of-alphabet input is a `ValueError` on both.
+/// * **int parameters, in-range results.** `str_pad`, `substr_replace` (scalar
+///   subject). Their `int` parameters are an offset, a length or a target width, so
+///   an in-range argument clamps against the subject identically; the divergence
+///   class is again a *decline* — `str_pad("abc", "-3000000000")` answers `"abc"`
+///   on 64-bit and is a `TypeError` on 32-bit.
+/// * **no integer in the result at all.** `str_starts_with`, `str_contains` and
+///   `str_ends_with` return a bool from a byte comparison, and `gettype` returns
+///   one word from a fixed vocabulary.
+///
+/// `substr_replace` is listed for its **scalar** subject. Handed an array subject
+/// it returns an array, and an array *result* widens on the Rust side exactly as
+/// `str_replace`'s does — the same documented #41/#42 boundary, reached by the same
+/// path, and identical on both engines (`substr_replace(["aa","bb"], "X", 0)` is
+/// `["X","X"]` on each, so there is nothing for the width classification to catch).
 const WIDTH_SAFE: &[&str] = &[
     "strtolower",
     "strtoupper",
@@ -195,6 +263,28 @@ const WIDTH_SAFE: &[&str] = &[
     "boolval",
     "in_array",
     "count",
+    // issue #78 — byte transforms of the subject
+    "ucwords",
+    "strtr",
+    "preg_quote",
+    "addslashes",
+    "urlencode",
+    "urldecode",
+    "rawurlencode",
+    "rawurldecode",
+    "base64_encode",
+    "base64_decode",
+    // issue #78 — string arithmetic (8.3+)
+    "str_increment",
+    "str_decrement",
+    // issue #78 — int parameters, in-range results
+    "str_pad",
+    "substr_replace",
+    // issue #78 — no integer in the result at all
+    "str_starts_with",
+    "str_contains",
+    "str_ends_with",
+    "gettype",
 ];
 
 /// The **refused rows** of the width classification, with the divergence that
@@ -234,7 +324,53 @@ const WIDTH_SAFE: &[&str] = &[
 ///   A format-string-aware sub-classification is possible in principle and is
 ///   deliberately not attempted: the safe/unsafe line would live inside a string
 ///   literal, which is the wrong place for a soundness gate.
-const WIDTH_REFUSED: &[&str] = &["abs", "intval", "sprintf"];
+///
+/// Issue #78 adds six rows, all of the same shape — a builtin whose *job* is to
+/// read or write an integer in the machine's own width:
+///
+/// * `dechex`   — REFUSED: renders the machine word for a negative argument, and
+///   the argument is **in range**, so no guard can exclude it.
+///   `dechex(-1)` = `"ffffffffffffffff"` / `"ffffffff"`;
+///   `dechex(-2147483647)` = `"ffffffff80000001"` / `"80000001"`.
+/// * `decbin`   — REFUSED: same shape, 64 ones versus 32.
+///   `decbin(-1)` = 64 × `1` / 32 × `1`;
+///   `decbin(-2147483647)` = `"…110000000000000000000000000000001"` (64 digits) /
+///   `"10000000000000000000000000000001"` (32).
+/// * `decoct`   — REFUSED: same shape in base 8.
+///   `decoct(-1)` = `"1777777777777777777777"` / `"37777777777"`;
+///   `decoct(-2147483647)` = `"1777777777760000000001"` / `"20000000001"`.
+/// * `bindec`   — REFUSED: the **type tag** flips at the width boundary, the
+///   `abs` failure mode reached from a plain string argument.
+///   `bindec("11111111111111111111111111111111")` = `int(4294967295)` /
+///   `float(4294967295)`.
+/// * `hexdec`   — REFUSED: as `bindec`. `hexdec("FFFFFFFF")` = `int(4294967295)` /
+///   `float(4294967295)`; `hexdec("FFFFFFFFF")` = `int(68719476735)` /
+///   `float(68719476735)`; `hexdec("7FFFFFFFFFFFFFFF")` = `int` / `float`.
+/// * `version_compare` — REFUSED, and the *surprise* of issue #78. It looks like
+///   pure string work and its documented return is `-1|0|1` (or a bool), but
+///   php-src compares each numeric run of a canonicalized version through a C
+///   `long`, so on a 32-bit engine two oversized runs both saturate and compare
+///   **equal**. The arguments are strings, so the range guard never sees an
+///   integer to reject:
+///   `version_compare("2147483647", "2147483648")` = `-1` / `0`;
+///   `version_compare("3000000000", "4000000000")` = `-1` / `0`;
+///   `version_compare("1.3000000000", "1.4000000000")` = `-1` / `0`;
+///   `version_compare("9223372036854775807", "9223372036854775806")` = `1` / `0`.
+///   The three-argument (bool) form inherits the same comparison, so it is refused
+///   with it rather than split.
+const WIDTH_REFUSED: &[&str] = &[
+    "abs",
+    "intval",
+    "sprintf",
+    // issue #78 — machine-word rendering and its inverse
+    "dechex",
+    "decbin",
+    "decoct",
+    "bindec",
+    "hexdec",
+    // issue #78 — a `long` hiding inside string work
+    "version_compare",
+];
 
 /// The effect labels (ADR-0018 hierarchical dot-paths) a builtin carries, or
 /// `None` when the function is **uncatalogued** (unknown effects — the safe,
@@ -1165,36 +1301,112 @@ mod tests {
     /// The allowlist is the union of the two width classes, so "every foldable
     /// name has a width verdict" is structural. What still needs pinning is that
     /// the two classes are DISJOINT (a name in both would be silently admitted on
-    /// a 32-bit engine while the refused table claims otherwise) and that the size
-    /// is the 22 the ADR-0066 amendment tabulates.
+    /// a 32-bit engine while the refused table claims otherwise), that no name is
+    /// listed twice within a class, and that the size is the 46 the ADR-0066
+    /// amendments tabulate.
     #[test]
     fn the_width_classes_partition_the_allowlist() {
         for name in WIDTH_SAFE {
             assert!(!WIDTH_REFUSED.contains(name), "{name} is classified twice");
             assert!(foldable(name), "{name} is classified but not foldable");
+            assert_eq!(
+                WIDTH_SAFE.iter().filter(|&n| n == name).count(),
+                1,
+                "{name} is listed twice in WIDTH_SAFE"
+            );
         }
         for name in WIDTH_REFUSED {
             assert!(foldable(name), "{name} is classified but not foldable");
+            assert_eq!(
+                WIDTH_REFUSED.iter().filter(|&n| n == name).count(),
+                1,
+                "{name} is listed twice in WIDTH_REFUSED"
+            );
         }
-        assert_eq!(WIDTH_SAFE.len(), 19, "the verified width-safe subset");
-        assert_eq!(WIDTH_REFUSED.len(), 3, "the refused rows");
+        assert_eq!(WIDTH_SAFE.len(), 37, "the verified width-safe subset");
+        assert_eq!(WIDTH_REFUSED.len(), 9, "the refused rows");
         assert_eq!(
             WIDTH_SAFE.len() + WIDTH_REFUSED.len(),
-            22,
-            "the allowlist size the ADR-0066 amendment tabulates"
+            46,
+            "the allowlist size the ADR-0066 amendments tabulate"
         );
     }
 
-    /// The three refused rows, named. Each is a *silent* value divergence on a
+    /// The nine refused rows, named. Each is a *silent* value divergence on a
     /// 32-bit engine — see `WIDTH_REFUSED` for the verbatim probes.
     #[test]
     fn the_width_sensitive_builtins_are_refused() {
-        for name in ["abs", "intval", "sprintf", "ABS", "IntVal", "SPRINTF"] {
+        for name in [
+            "abs",
+            "intval",
+            "sprintf",
+            "dechex",
+            "decbin",
+            "decoct",
+            "bindec",
+            "hexdec",
+            "version_compare",
+            "ABS",
+            "IntVal",
+            "SPRINTF",
+            "DecHex",
+            "Version_Compare",
+        ] {
             assert!(!width_safe(name), "{name} must not be certified width-safe");
+            assert!(foldable(name), "{name} is refused on width, not off the allowlist");
         }
         // …and the certification is real, not vacuous.
-        for name in ["strtoupper", "substr", "str_repeat", "count", "in_array", "STRLEN"] {
+        for name in [
+            "strtoupper",
+            "substr",
+            "str_repeat",
+            "count",
+            "in_array",
+            "STRLEN",
+            "str_contains",
+            "base64_decode",
+            "strtr",
+            "substr_replace",
+            "str_increment",
+            "GetType",
+        ] {
             assert!(width_safe(name), "{name} is a verified width-safe fold");
+        }
+    }
+
+    /// The issue-#78 admissions, spelled out: every new name is on the allowlist
+    /// AND carries the empty effect set, which is the `foldable` fallthrough in
+    /// [`effect_labels`] doing its job — no second table to keep in step.
+    #[test]
+    fn the_issue_78_admissions_are_foldable_and_pure() {
+        for name in [
+            "ucwords",
+            "strtr",
+            "preg_quote",
+            "addslashes",
+            "urlencode",
+            "urldecode",
+            "rawurlencode",
+            "rawurldecode",
+            "base64_encode",
+            "base64_decode",
+            "str_increment",
+            "str_decrement",
+            "str_pad",
+            "substr_replace",
+            "str_starts_with",
+            "str_contains",
+            "str_ends_with",
+            "gettype",
+        ] {
+            assert!(width_safe(name), "{name} is an admitted width-safe fold");
+            assert!(foldable(name), "{name} is on the folding allowlist");
+            assert_eq!(effect_labels(name), Some(&[][..]), "{name} is catalogued pure");
+        }
+        for name in ["dechex", "decbin", "decoct", "bindec", "hexdec", "version_compare"] {
+            assert!(foldable(name), "{name} folds on a 64-bit engine");
+            assert!(!width_safe(name), "{name} is refused on a 32-bit engine");
+            assert_eq!(effect_labels(name), Some(&[][..]), "{name} is catalogued pure");
         }
     }
 
@@ -1214,15 +1426,23 @@ mod tests {
             assert!(width_refused(name), "{name} is listed refused but is not in the complement");
             assert!(foldable(name), "a refused name is still on the folding allowlist");
         }
-        assert_eq!(width_safe_names().len(), 19);
-        assert_eq!(width_refused_names().len(), 3);
+        assert_eq!(width_safe_names().len(), 37);
+        assert_eq!(width_refused_names().len(), 9);
     }
 
     /// Default-deny: a name nobody classified is not width-safe, foldable or not.
+    ///
+    /// `hexdec`/`dechex` used to sit in this roster and have since been *classified*
+    /// (refused, issue #78), so they moved to
+    /// `the_width_sensitive_builtins_are_refused`; what is pinned here is the
+    /// unclassified case, which must stay populated for the test to mean anything.
     #[test]
     fn an_unclassified_name_is_not_width_safe() {
-        for name in ["some_unknown_fn", "ip2long", "crc32", "hexdec", "dechex", "strtotime"] {
+        for name in
+            ["some_unknown_fn", "ip2long", "crc32", "strtotime", "str_word_count", "strcmp"]
+        {
             assert!(!width_safe(name), "{name} must not be certified width-safe");
+            assert!(!foldable(name), "{name} is not on the allowlist at all");
         }
     }
 
@@ -1240,18 +1460,31 @@ mod tests {
         assert!(foldable("StrLen"));
     }
 
+    /// The refusals that are **not** width rows (issue #78). A `WIDTH_REFUSED` entry
+    /// is still `foldable`, so a name that fails ADR-0008's purity/determinism bar
+    /// cannot be written as one — it has to be absent from both tables, and that
+    /// absence is what this pins. See the module docs for each name's evidence.
     #[test]
     fn impure_and_locale_sensitive_are_excluded() {
         for name in [
-            "mb_strtolower", // encoding-dependent
-            "time",          // nondet
-            "rand",          // nondet
-            "setlocale",     // global-write
+            "mb_strtolower",     // encoding-dependent
+            "mb_strlen",         // encoding-dependent (and absent from the wasm build)
+            "mb_substr",         // encoding-dependent
+            "time",              // nondet
+            "rand",              // nondet
+            "setlocale",         // global-write
             "file_get_contents", // io
-            "printf",        // output
-            "date",          // global-read (timezone) + nondet
+            "printf",            // output
+            "date",              // global-read (timezone) + nondet
+            "strtotime",         // nondet.time, timezone-coupled
+            "idate",             // timezone-coupled even with an explicit timestamp
+            "strcmp",            // magnitude is memcmp's, implementation-defined
+            "strcasecmp",        // as strcmp
+            "number_format",     // held out with the mb_* family (issue #78)
+            "bin2hex",           // standing ADR-0056 refused row, not reopened here
         ] {
             assert!(!foldable(name), "{name} must not be foldable");
+            assert!(!width_safe(name), "{name} must not be certified width-safe");
         }
     }
 

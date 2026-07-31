@@ -138,9 +138,10 @@ assert(boot !== undefined && boot !== null, "a replay envelope carries a boot ob
 assert(boot.php_version === engine.version, `boot.php_version is the engine's own (${boot.php_version} vs ${engine.version})`);
 assert(boot.int_size === engine.intSize, `boot.int_size is the engine's own (${boot.int_size} vs ${engine.intSize})`);
 assert(boot.fold_lane === "width_safe_subset", `a 32-bit engine folds the width-safe subset (got ${boot.fold_lane})`);
-assert(boot.fold_safe === 19 && boot.fold_total === 22, `the counts come from the catalog (${boot.fold_safe}/${boot.fold_total})`);
+assert(boot.fold_safe === 37 && boot.fold_total === 46, `the counts come from the catalog (${boot.fold_safe}/${boot.fold_total})`);
 assert(
-  Array.isArray(boot.refused_folds) && boot.refused_folds.join(",") === "abs,intval,sprintf",
+  Array.isArray(boot.refused_folds) &&
+    boot.refused_folds.join(",") === "abs,intval,sprintf,dechex,decbin,decoct,bindec,hexdec,version_compare",
   `the refused folds are named (got ${JSON.stringify(boot.refused_folds)})`,
 );
 assert(boot.curated_rows === false, "a curated row is pinned to a machine, not only a version");

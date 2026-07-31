@@ -421,3 +421,139 @@ monotone).
   World! '` — plus issue #61's own two table rows in the margin, `abs(-3)`
   widening to `dumped type: unknown` because the name is width-refused, and the
   `boot` object agreeing with the engine's own boot probe.
+
+## Amendment (2026-08-01): the allowlist grows by twenty-four names (issue #78)
+
+The S1.5 amendment above verified a width-safe subset of a **22-name** allowlist.
+This is that allowlist's own growth path walked once: every candidate = an ADR-0008
+purity/determinism argument + a 32/64-bit differential probe verdict + a
+`WIDTH_SAFE`/`WIDTH_REFUSED` row. **No mechanism moved.** The fold lane, the range
+guard, the replay loop, the `#73` declared-return floor and the boot object picked
+the names up because the tables are what they read.
+
+### The same instrument, one more round
+
+**351 further adversarial `(name, args)` tuples** (running total **661**), every one
+passing the range guard, through the **same** `steins_handle` dispatch core on both
+machines — 64-bit `php` 8.5.8 over the runner's NDJSON protocol, 32-bit php-wasm
+0.1.0 (PHP 8.5.2, `PHP_INT_SIZE = 4`) over the §5 patched prologue. Both builds
+again report `precision = 14`, `serialize_precision = -1`, `memory_limit = 256M`.
+
+New probe families this round: engine-*minted* binary strings (`base64_decode("gA==")`,
+`urldecode("%80")` — the fold wire is JSON, so a raw `0x80` cannot travel as an
+argument, and the interesting case is where the callee produces one), out-of-alphabet
+string arithmetic, both `strtr` arities including array-key ordering, array *subjects*
+that make a scalar-shaped builtin return an array, and the base-conversion pair in
+both directions.
+
+One probe is **deliberately absent** and says so: `str_pad("abc", "3000000000")`. Its
+`int` parameter is a target *width*, so unlike `str_repeat`'s count it cannot be
+neutralised with an empty subject — on the 64-bit engine it is a three-gigabyte
+allocation, a PHP fatal, and the resident runner dies mid-NDJSON taking the rest of the
+run with it. The identical coercion path is probed from the negative side
+(`str_pad("abc", "-3000000000")`), which produces the same `TypeError`-vs-answer
+decline at zero bytes.
+
+### The candidate disposition (21 probed, 18 admitted safe, 1 width-refused, 2 declined)
+
+| name | verdict | probes (silent/reverse/decline) | one-line reason |
+| --- | --- | --- | --- |
+| `ucwords` | safe | 14 (0/0/0) | byte transform; ASCII-only since PHP 8.2's locale-independent case conversion, delimiters form included |
+| `strtr` | safe | 20 (0/0/0) | both arities; the 2-arg array form is longest-key-first by PHP's own rule, order-independent on both engines |
+| `preg_quote` | safe | 12 (0/0/0) | escaping table is a constant of the build, not of the word size |
+| `addslashes` | safe | 10 (0/0/0) | as `preg_quote` |
+| `urlencode` | safe | 12 (0/0/0) | percent-encoding is a byte table |
+| `urldecode` | safe | 12 (0/0/0) | as `urlencode`; `%80` mints a non-UTF-8 string and the runner widens it identically on both |
+| `rawurlencode` | safe | 11 (0/0/0) | as `urlencode` |
+| `rawurldecode` | safe | 11 (0/0/0) | as `urldecode` |
+| `base64_encode` | safe | 10 (0/0/0) | fixed alphabet |
+| `base64_decode` | safe | 15 (0/0/0) | including the strict second argument: `base64_decode("!!!", true)` is `false` on both, `""` non-strict on both |
+| `str_increment` | safe | 18 (0/0/0) | 8.3+, present on both builds; the digits live in the string — `str_increment("9223372036854775807")` is `"9223372036854775808"` on each |
+| `str_decrement` | safe | 17 (0/0/0) | as `str_increment`; `ValueError` on `'0'`, `'a'`, `'A'`, empty and non-alphanumeric, identically |
+| `str_pad` | safe | 16 (0/0/1) | an in-range target width clamps against the subject identically; the decline is `TypeError` on an oversized numeric-string width |
+| `substr_replace` | safe | 17 (0/0/2) | scalar subject; in-range offset/length clamp identically, the 2 declines are `TypeError` on oversized numeric-string offsets |
+| `str_starts_with` | safe | 10 (0/0/0) | returns a bool from a byte comparison |
+| `str_contains` | safe | 10 (0/0/0) | as `str_starts_with` |
+| `str_ends_with` | safe | 10 (0/0/0) | as `str_starts_with` |
+| `gettype` | safe | 12 (0/0/0) | one word from a fixed vocabulary |
+| `version_compare` | **WIDTH-REFUSED** | 19 (6/0/0) | php-src compares each numeric run of a canonicalized version through a C `long`, so two oversized runs both saturate and compare **equal** on 32-bit: `version_compare("2147483647","2147483648")` = `-1` / `0` |
+| `strcmp` | **NOT ADMITTED** | 18 (0/0/0) | zero width divergence — the refusal is ADR-0008's, not the gate's: see below |
+| `strcasecmp` | **NOT ADMITTED** | 18 (0/0/0) | as `strcmp` |
+
+`version_compare` is the round's surprise and the reason the instrument exists. It
+reads as pure string work, its documented return is `-1|0|1` (or a bool), and its
+arguments are **strings** — so the range guard has no integer to reject and could
+never have caught it. Only the differential did:
+
+```
+version_compare("2147483647", "2147483648")   64: -1   32: 0
+version_compare("3000000000", "4000000000")   64: -1   32: 0
+version_compare("1.3000000000","1.4000000000") 64: -1  32: 0
+version_compare("9223372036854775807","9223372036854775806") 64: 1  32: 0
+```
+
+The three-argument (bool) form runs the same comparison, so it is refused with the
+two-argument form rather than split.
+
+### `strcmp`/`strcasecmp`: a refusal that is not a width verdict
+
+Both names probed **clean** — 36 tuples, zero silent, zero reverse, zero decline, the
+two engines agreeing to the byte. They are still not admitted, and the distinction
+matters enough to write down: a `WIDTH_REFUSED` row is still `foldable`, so a name that
+fails ADR-0008's determinism bar cannot be parked there. It has to be absent from both
+tables.
+
+The bar it fails: PHP's contract for these functions is the **sign**. The value is
+`memcmp`'s, which C leaves implementation-defined, and both builds pass it straight
+through — `strcmp("A", "a")` is `-32`, `strcmp("zzz", "a")` is `25`, `strcasecmp("ß",
+"SS")` is `80`. Folding would pin a literal the language does not promise, on a
+quantity two agreeing samples do not make portable. A sign-normalised admission was
+considered and rejected: it would have the catalog report `-1` where the engine
+returns `-32`, which is forking semantics — the one thing the fold seam must never do,
+since its entire premise (ADR-0004) is that the engine is the oracle. Declining costs
+nothing a two-literal `strcmp` call was going to buy.
+
+### The must-not list, with its evidence
+
+Also probed, so the exclusions cite something. Two of these are width rows; the rest
+are ADR-0008 refusals and therefore **off the allowlist entirely**, pinned absent by
+`steins_catalog`'s `impure_and_locale_sensitive_are_excluded`:
+
+| name | disposition | evidence |
+| --- | --- | --- |
+| `dechex` | **WIDTH-REFUSED** | `dechex(-1)` = `"ffffffffffffffff"` / `"ffffffff"`; `dechex(-2147483647)` = `"ffffffff80000001"` / `"80000001"` — an **in-range** argument suffices |
+| `decbin` | **WIDTH-REFUSED** | `decbin(-1)` = 64 ones / 32 ones |
+| `decoct` | **WIDTH-REFUSED** | `decoct(-1)` = `"1777777777777777777777"` / `"37777777777"` |
+| `bindec` | **WIDTH-REFUSED** | the **type tag** flips: `bindec("11111111111111111111111111111111")` = `int(4294967295)` / `float(4294967295)` |
+| `hexdec` | **WIDTH-REFUSED** | `hexdec("FFFFFFFF")` = `int` / `float`; `hexdec("FFFFFFFFF")` = `int(68719476735)` / `float(68719476735)` |
+| `strtotime` | off the allowlist | `nondet.time`, and timezone-coupled: `strtotime("2020-01-01")` = `1577804400` / `1577836800`, the engines' timezone offset exactly |
+| `date` | off the allowlist | already colored `nondet.time`; `date("Y-m-d")` = `"2026-08-01"` / `"2026-07-31"` between the two clocks |
+| `idate` | off the allowlist | timezone-coupled **even with an explicit timestamp**: `idate("Y", 0)` is `1970` under `UTC` and `1969` under `Pacific/Kiritimati` |
+| `mb_*` | off the allowlist | encoding-coupled (`mbstring.internal_encoding`), and settled a second way: php-wasm 0.1.0 has **no mbstring**, so all 11 `mb_*` probes answered `widen: unknown function` there |
+| `number_format` | off the allowlist | held out with the `mb_*` family by the issue. Recorded honestly: 5 probes, no width divergence, and the historical locale coupling of float rendering is **gone** at `PINNED_PHP` (`de_DE.UTF-8` and `C` render `number_format(1234.5678, 2)` identically; `precision` does not move it). It stays out on the conservative side and may be admitted later on its own evidence, not smuggled in on this slice's |
+| `bin2hex` | off the allowlist | carries a standing refused row in the ADR-0056 return-fact table (the empty-in/empty-out trap, `return_facts.toml`). That row is about a different table and is **not relitigated**; the width probe found no divergence and the name simply does not enter here |
+
+### The 46-name disposition, and what moved with it
+
+`WIDTH_SAFE` is now **37**, `WIDTH_REFUSED` **9**, the allowlist **46**. The counts in
+the playground's engine bar and boundary panel came from
+`width_safe_names()`/`width_refused_names()` before this slice and still do — the page
+went from "19/22" to "37/46" and named six more refusals without a line of JS
+changing, which is the property issue #64 S3 built the boot object for. What did need
+editing is the places that *pin* the old numbers on purpose, and only those:
+`steins-catalog`'s partition test, `steins-wasm`'s boot-object test, and the two
+playground smokes.
+
+### Consequences
+
+- Two of the new rows are load-bearing beyond their own fold. `str_contains` and its
+  siblings fold to real booleans, which the narrowing lane can act on where a declared
+  `bool` envelope cannot; and `strtr`'s 2-argument form lit up the array-literal seam
+  (issue #39) without the seam changing, exactly as `in_array`/`count`/`implode` did.
+- `version_compare` folding on the CLI and declining in the browser is the first
+  width-refused row a reader is likely to *meet* — `abs`/`intval`/`sprintf` look like
+  integer functions, and this one does not. The boundary panel names it.
+- The 32-bit half of every verdict is testable only through the replay table
+  (`replay_fold.rs`) and the real php-wasm smoke; the machine that runs the Rust suite
+  is 64-bit, and the probe harness — not the test suite — is where the differential
+  lives. That is unchanged from S1.5 and remains the standing cost of the arrangement.

@@ -758,14 +758,27 @@ mod replay {
         assert_eq!(boot["fold_lane"], "width_safe_subset");
         assert_eq!(boot["curated_rows"], false, "a curated row is pinned to a machine too");
         assert_eq!(boot["absence_family"], true, "existence is not arithmetic");
-        assert_eq!(boot["fold_total"], 22);
-        assert_eq!(boot["fold_safe"], 19);
+        assert_eq!(boot["fold_total"], 46);
+        assert_eq!(boot["fold_safe"], 37);
         assert_eq!(
             boot["refused_folds"],
             serde_json::json!(steins_catalog::width_refused_names()),
             "the refusals are the catalog complement"
         );
-        assert_eq!(boot["refused_folds"], serde_json::json!(["abs", "intval", "sprintf"]));
+        assert_eq!(
+            boot["refused_folds"],
+            serde_json::json!([
+                "abs",
+                "intval",
+                "sprintf",
+                "dechex",
+                "decbin",
+                "decoct",
+                "bindec",
+                "hexdec",
+                "version_compare"
+            ])
+        );
     }
 
     /// …and on a 64-bit engine at the pinned minor the whole surface is live, so
