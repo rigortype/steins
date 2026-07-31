@@ -878,7 +878,7 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
       live.push(b.fold_lane === "full"
         ? `<strong>Folded values</strong> from the real engine — all ${b.fold_total} builtins on the folding allowlist.`
         : `<strong>Folded values</strong> from the real engine — ${b.fold_safe} of the ${b.fold_total} builtins on the folding allowlist: the ones a ${bitsOf(b)} engine is verified to answer exactly as a 64-bit one does. <code>str_repeat("ab", 2)</code> is <code>'abab'</code> here, as on the CLI.`)
-      live.push(`<strong>Reflected return envelopes</strong> — a builtin's declared return type, read back from this engine rather than guessed (<code>strtoupper($x)</code> is <code>string</code>).`)
+      live.push(`<strong>Reflected return envelopes</strong> — a builtin's declared return type, read back from this engine rather than guessed (<code>strtoupper($x)</code> is <code>uppercase-string</code> once the predicate transfers refine it).`)
       if (b.absence_family) {
         live.push(`<strong>The absence family</strong> — <code>call.undefined-function</code> and its siblings, witnessed against ${escHtml(b.label ?? "the running engine")}. Without an engine these are structurally silent.`)
       }
