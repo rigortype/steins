@@ -139,3 +139,9 @@ tuple only. Member-wise engine calls over a bounded product, composed to
 a union and declining on any widened member, are issue #74 — they ride
 the existing fold memo, the width gate, and the #64 replay loop without
 new wire machinery.
+
+**Closed 2026-08-01.** The union of constants now folds member-wise; the
+mechanism, its bounds and its replayability argument are ADR-0028's
+2026-08-01 amendment. The table above therefore reads across without a
+caveat: the fold lane answers a constant *or a bounded union of
+constants*, and every rung below it is unmoved.

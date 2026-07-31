@@ -1434,6 +1434,16 @@ fn parse_php_minor(v: &str) -> Option<(u16, u16)> {
 const FOLD_ARRAY_MAX_ENTRIES: usize = 256;
 const FOLD_ARRAY_MAX_DEPTH: u8 = 8;
 
+/// The member-wise union fold's bounds (issue #74): at most this many members in
+/// any one argument's union, and at most [`UNION_FOLD_COMBINATION_CAP`]
+/// combinations across the whole argument list.
+///
+/// Busting either bound **declines** — [`Cx::try_union_fold`] never truncates the
+/// product. A union missing a member is a *wrong* value domain, not a wider one,
+/// and widening is the only safe direction (ADR-0002).
+const UNION_FOLD_MEMBER_CAP: usize = 4;
+const UNION_FOLD_COMBINATION_CAP: usize = 16;
+
 /// Charge `v` against the fold seam's array budget: `false` when it nests deeper
 /// than `depth` or its entries (recursively) exhaust `budget`, or when it is not a
 /// self-evident value at all. A scalar literal always fits and costs nothing.
@@ -5106,6 +5116,153 @@ impl<'a> Cx<'a> {
         Some((folded, format!("folded from {}", render_call(name, &resolved))))
     }
 
+    /// Fold an allowlisted builtin over a **bounded union of constant arguments**,
+    /// composing the members' answers into one value fact (issue #74).
+    ///
+    /// # Why this rung exists
+    ///
+    /// PHPStan's dynamic return extensions accept a constant *or a union of
+    /// constants*, call the real function once per member and compose the results.
+    /// ADR-0069's amendment tabulates Steins' return ladder against that stack and
+    /// names the union of constants as the one condition the fold lane could not
+    /// meet: [`Self::try_fold`] admits a single constant tuple, so `$x = $c ? 'a' :
+    /// 'b'; strtoupper($x)` widened where PHPStan answers `'A'|'B'`. This closes it.
+    ///
+    /// # The resolution ladder, per argument
+    ///
+    /// 1. whatever [`Self::resolve_literal`] proves — a written literal, a
+    ///    `Singleton` env fact, a nested fold, a proven concatenation or array;
+    /// 2. failing that, a `Fact::OneOf` env fact **every** member of which converts
+    ///    to a foldable argument.
+    ///
+    /// An argument that resolves to neither declines the whole fold — the existing
+    /// silence, reached one rung later. A `Singleton` is simply the one-member case
+    /// of the same ladder, which is what makes `intdiv($u, 2)` work: the literal
+    /// lane and the union lane compose in the product.
+    ///
+    /// # The bounds, and why busting one declines
+    ///
+    /// At most [`UNION_FOLD_MEMBER_CAP`] members per argument and
+    /// [`UNION_FOLD_COMBINATION_CAP`] combinations in total. Over either bound the
+    /// fold **declines**; it never truncates. A union missing a member is a *wrong*
+    /// value domain, not a wider one — the analyzer would claim `'A'|'B'` for a
+    /// value that can also be `'C'`, which is the one thing ADR-0002 forbids.
+    ///
+    /// # Every combination is an ordinary fold
+    ///
+    /// Each member tuple goes back through [`Self::try_fold`] — the same seam a
+    /// literal call takes — so the name gates, the per-argument fold budget, the
+    /// `(name, args)` memo, the issue-#64 integer-width gate with its argument
+    /// range guard, and (in the browser) the ADR-0066 replay loop all apply
+    /// unchanged and un-duplicated. A member that widens or throws answers `None`,
+    /// and the whole fold declines with it: a union that quietly drops its throwing
+    /// member is the same wrong domain the cap refuses to mint. (Treating a
+    /// *uniform* throw as a proven throw is a later slice's question.) Every
+    /// combination is nonetheless *asked* before the decline is returned, so a
+    /// replay transport learns the whole batch in one round trip.
+    ///
+    /// # Replayability (ADR-0028 / ADR-0048)
+    ///
+    /// The enumeration is a pure function of (CST, entry state, fold memo): the
+    /// arguments are in source order and a `Fact::OneOf` is canonically sorted, so
+    /// the product is walked in one fixed order with no map iteration anywhere.
+    ///
+    /// Returns the composed fact, its stratum, and a provenance string.
+    fn try_union_fold(
+        &self,
+        name: &str,
+        args: &[ArgValue],
+        env: &HashMap<String, Known>,
+        poisoned: bool,
+        folder: &mut dyn Folder,
+    ) -> Option<(Fact, Stratum, String)> {
+        if poisoned || args.is_empty() {
+            return None;
+        }
+        // The two name gates `try_fold` opens with, asked before any enumeration so
+        // a shadowed or non-allowlisted name costs nothing at all.
+        if self.index.has_simple_function(name) || !steins_catalog::foldable(name) {
+            return None;
+        }
+        let mut lanes: Vec<Vec<ArgValue>> = Vec::with_capacity(args.len());
+        let mut combinations: usize = 1;
+        for arg in args {
+            let members: Vec<ArgValue> = match self.resolve_literal(arg, env, poisoned, folder) {
+                Some(lit) => vec![lit],
+                None => {
+                    let ArgValue::Var(var) = arg else { return None };
+                    let Some(Fact::OneOf(vals)) = env.get(var).and_then(|k| k.fact.as_ref()) else {
+                        return None;
+                    };
+                    if vals.len() > UNION_FOLD_MEMBER_CAP {
+                        return None;
+                    }
+                    vals.iter().map(arg_of_val).collect()
+                }
+            };
+            // The gate `try_fold` applies per call, applied here per member: a
+            // member that is not a self-evident value (or busts the array budget)
+            // takes the whole fold down rather than being quietly dropped.
+            if !members.iter().all(is_fold_arg) {
+                return None;
+            }
+            combinations = combinations.checked_mul(members.len())?;
+            if combinations > UNION_FOLD_COMBINATION_CAP {
+                return None;
+            }
+            lanes.push(members);
+        }
+        // One combination is the plain fold, and `resolve_literal` already owns it
+        // (this rung is only ever reached after that one declined).
+        if combinations < 2 {
+            return None;
+        }
+        // The bounded cartesian product, last argument varying fastest.
+        //
+        // EVERY combination is asked, even once one has declined. The verdict is
+        // unaffected — one declining member declines the whole fold — but the
+        // browser's replay transport (ADR-0066) collects a *batch* of unanswered
+        // requests per iteration, so asking them all in one pass is the difference
+        // between one round trip and one per member. On the native transport the
+        // extra questions are bounded by the combination cap and memoized.
+        let mut vals: Vec<Val> = Vec::with_capacity(combinations);
+        let mut declined = false;
+        let mut odometer = vec![0usize; lanes.len()];
+        for _ in 0..combinations {
+            let combo: Vec<ArgValue> =
+                lanes.iter().zip(&odometer).map(|(lane, i)| lane[*i].clone()).collect();
+            match self
+                .try_fold(name, &combo, env, poisoned, folder)
+                .and_then(|(folded, _)| val_of(&folded, self.php_minor))
+            {
+                Some(v) => vals.push(v),
+                None => declined = true,
+            }
+            for k in (0..odometer.len()).rev() {
+                odometer[k] += 1;
+                if odometer[k] < lanes[k].len() {
+                    break;
+                }
+                odometer[k] = 0;
+            }
+        }
+        if declined {
+            return None;
+        }
+        // `Fact::from_vals` is the narrowing lanes' own composition: deduped and
+        // sorted, a `Singleton` when every member agreed, a `OneOf` up to the
+        // domain's own CAP, and past that the *computed* widening — sound, and the
+        // same summary any other value set would get.
+        let fact = Fact::from_vals(vals)?;
+        // Stratum (ADR-0048 N2 / ADR-0052 §5's derivation clause): each member
+        // answer is engine-`Verified`, but the INPUT union carries its own trust,
+        // and the composed fact consumed all of them — `min` over the arguments.
+        // An `Asserted` union in, an `Asserted` result out.
+        let stratum =
+            args.iter().fold(Stratum::Verified, |acc, a| acc.min(value_stratum(a, env, None)));
+        Some((fact, stratum, format!("folded from {name}() over {combinations} argument combinations")))
+    }
+
     /// Resolve a zero-argument constant function anywhere in the project by its
     /// simple name: unique definition, no params, body exactly `return <lit>`,
     /// scope not poisoned. Returns the literal and the definition line.
@@ -7025,6 +7182,19 @@ fn best_dump_type(
             asserted: value_stratum(value, env, Some(store)) == Stratum::Asserted,
         };
     }
+    // The MEMBER-WISE UNION FOLD (issue #74): the fold lane's own generalization —
+    // an argument that is a bounded union of constants is enumerated, each
+    // combination folded through the very seam a literal call takes, and the
+    // answers composed. It sits with the fold it generalizes, above every type rung
+    // below: this is a VALUE the real engine answered, member by member.
+    if let ArgValue::Call(name, cargs) = value
+        && let Some((fact, stratum, _prov)) = cx.try_union_fold(name, cargs, env, poisoned, folder)
+    {
+        return DumpRendering {
+            text: render_dump_fact(&fact),
+            asserted: stratum == Stratum::Asserted,
+        };
+    }
     // A project-function call in argument position (issue #60): the T0 return-fact
     // summary, sitting exactly where the assignment ladder puts it (fold > summary >
     // builtin envelope > arms). `summary_binds` keeps the two forms observably
@@ -7472,6 +7642,31 @@ fn apply_assign(
             // refinement (ADR-0056 R1). Enters at `Verified` — a native declaration
             // (§2). A more-precise fold above already returned; this is the floor.
             None => match value {
+                // The MEMBER-WISE UNION FOLD (issue #74): still the fold lane, one
+                // rung wider — an argument that is a bounded union of constants is
+                // enumerated and every combination answered by the real engine. It
+                // therefore binds where a folded literal binds, above every type
+                // rung below, and carries the input union's own stratum (N2's min),
+                // not the engine's `Verified`.
+                ArgValue::Call(name, args)
+                    if let Some((fact, strat, prov)) =
+                        cx.try_union_fold(name, args, env, w.scope.poisoned, folder) =>
+                {
+                    // A product whose members all agreed composes to a `Singleton`
+                    // — a proven value, and the margin says so exactly as it does
+                    // for the single-tuple fold.
+                    if let (Fact::Singleton(v), Some(facts)) = (&fact, facts.as_deref_mut()) {
+                        facts.push(LineFact {
+                            line,
+                            kind: FactKind::Value {
+                                var: var.to_owned(),
+                                rendered: render_val(v),
+                            },
+                        });
+                    }
+                    env.insert(var.to_owned(), Known::value_strat(fact, line, Some(prov), strat));
+                    store.unbind(var);
+                }
                 // The type rung above the envelope (ADR-0061 §1): a rule that reads
                 // the call's ARGUMENT facts — here ADR-0062 §4's `count`/
                 // `array_is_list` shape transfers. Enters at the argument's own

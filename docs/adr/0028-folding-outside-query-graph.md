@@ -69,3 +69,52 @@ contributing nothing to the **entry state** (a literal needs no seeding),
 and reading no whole-project iteration order (**no global-ordering
 dependence**). ADR-0052 §5's derivation clause needs no new case either:
 an all-literal argument list is `Verified` by construction.
+
+## Amendment (2026-08-01): a bounded union of constants folds member-wise (issue #74)
+
+A fold argument was one constant. ADR-0069's amendment tabulates the return
+ladder against PHPStan's extension stack and names the residue: an extension
+takes a constant **or a union of constants**, calls the real function per
+member, and composes. `$x = $c ? 'a' : 'b'; strtoupper($x)` widened here
+where PHPStan answers `'A'|'B'`. The seam now enumerates the union.
+
+1. **Nothing new crosses the wire, and no second lowering exists.** Each
+   member combination is an ordinary fold: it is handed back to the same
+   `try_fold` a written literal call takes, so the allowlist, the shadowing
+   refusal, the array budget of the amendment above, the `(function, args)`
+   memo and issue #64's integer-width gate apply once, in one place. The
+   member→argument conversion is the domain's own `Val`→`ArgValue` seam.
+
+2. **The resolution ladder is literal, then union.** An argument resolves by
+   `resolve_literal` (which already reduces a `Singleton` env fact, a nested
+   fold and a proven concatenation), else by a `Fact::OneOf` env fact every
+   member of which is a foldable argument. Anything else declines the whole
+   call — the silence that was already there, reached one rung later. A
+   `Singleton` is the one-member case of the same ladder, which is what makes
+   `str_repeat($union, 2)` a product of four and one.
+
+3. **Bounds, and a decline rather than a truncation.** At most 4 members per
+   argument and 16 combinations in total, charged **before** any combination
+   is built so an over-wide union costs no engine traffic. Over either bound
+   the fold declines. This is not the array budget's reasoning, which widens
+   for cost: a union missing a member is a *wrong* value domain, not a wider
+   one, so there is no admissible partial answer to fall back on. A member
+   that widens or throws declines the whole fold for the same reason.
+
+4. **Every combination is asked before the decline is returned.** The verdict
+   is unchanged, but the browser's replay transport (ADR-0066) collects a
+   *batch* of unanswered requests per iteration, so asking the whole product
+   in one pass is the difference between one round trip and one per member.
+
+5. **Composition is `Fact::from_vals`** — the narrowing lanes' own finite
+   constructor. Past the domain's `OneOf` CAP it hands back its *computed*
+   widening (ADR-0035), which is sound and still strictly better than the
+   declared envelope.
+
+Against ADR-0048 again: the enumeration order is fixed by the argument list's
+source order and the `OneOf`'s own canonical (sorted, deduped) order, with the
+last argument varying fastest — no map iteration enters it, so the walk stays
+the same pure function of (CST, entry state, query answers, fold memo). The
+stratum is the §5 derivation clause verbatim: every member answer is
+engine-`Verified`, but the composed fact consumed the input facts, so it
+carries `min` over them — an `Asserted` union in, an `Asserted` fact out.

@@ -128,7 +128,42 @@ for (const [src, want] of [
   );
 }
 
-// 3. The boot object (issue #64 S3): the engine surface as the analysis' own
+// 3. THE UNION FOLD (issue #74): an argument that is a bounded union of
+//    constants is folded once per member combination, and the members ride the
+//    replay loop as ordinary pending requests — no new wire machinery at all.
+//    The whole product is asked in ONE batch, which is the property worth
+//    pinning: the loop learns every member per round trip, not one member per
+//    round trip, so a union costs the browser the same two iterations a single
+//    constant does.
+const UNION = `<?php
+function f(bool $c): void {
+    $x = $c ? 'a' : 'b';
+    \\PHPStan\\dumpType(strtoupper($x));
+}
+`;
+const askedBeforeUnion = asked.length;
+const union = await driveReplay({ analyze: analyzer(UNION), answer, table });
+const unionBatches = asked.slice(askedBeforeUnion);
+console.log(`union: ${union.status} in ${union.iterations} iteration(s); batches ${JSON.stringify(unionBatches)}`);
+assert(union.status === "converged", `the union fold converges over the real engine (got ${union.status}${union.reason ? `: ${union.reason}` : ""})`);
+assert(union.value.pending.length === 0, "the rendered envelope has no pending requests");
+assert(unionBatches.length === 1, `the whole product is asked in one batch (got ${unionBatches.length}: ${JSON.stringify(unionBatches)})`);
+const memberFolds = (unionBatches[0] ?? []).filter((k) => k.includes('"method":"fold"'));
+console.log(`union member folds: ${JSON.stringify(memberFolds)}`);
+assert(memberFolds.length === 2, `both members appear as pending fold requests (got ${JSON.stringify(memberFolds)})`);
+const unionDump = union.value.findings.find((f) => f.id === "debug.type");
+console.log(`union dump: ${unionDump && unionDump.message}`);
+assert(
+  unionDump !== undefined && unionDump.message === "dumped type: 'A'|'B'",
+  `the members compose to a union (got: ${unionDump && unionDump.message})`,
+);
+const unionPlain = steins.check(UNION).findings.find((f) => f.id === "debug.type");
+assert(
+  unionPlain !== undefined && unionPlain.message !== "dumped type: 'A'|'B'",
+  `…and without the engine the same snippet takes a lower rung (got: ${unionPlain && unionPlain.message})`,
+);
+
+// 4. The boot object (issue #64 S3): the engine surface as the analysis' own
 //    gates see it, which is what the page renders its boundary from. On the
 //    machine the browser actually gets — php-wasm's 32-bit 8.5 — that is the
 //    width-safe fold subset, no curated rows, absence family live.
@@ -150,7 +185,7 @@ assert(typeof boot.label === "string" && boot.label.includes(engine.version), `b
 assert(steins.annotateReplay(FLAGSHIP, table).boot.fold_lane === boot.fold_lane, "both lanes report the same engine");
 assert(steins.check(FLAGSHIP).boot === undefined, "the engine-free envelope carries no boot object at all");
 
-// 4. …and the boundary is honest in the other direction: `abs` is a REFUSED
+// 5. …and the boundary is honest in the other direction: `abs` is a REFUSED
 //    name on a 32-bit engine (`abs("3000000000")` is int there and float here —
 //    the type tag flips), so it must not fold. What comes back is a type, not a
 //    wrong value: the fold declines, the reflected `int|float` envelope is not a
@@ -169,7 +204,7 @@ assert(
   "the value a 64-bit engine would have folded never appears on a 32-bit one",
 );
 
-// 5. `env` is asked exactly once, on the first iteration, and never again — the
+// 6. `env` is asked exactly once, on the first iteration, and never again — the
 //    property the whole memo table exists for. The flagship takes TWO batches:
 //    one to learn the machine (and reflect `greet`), one to fold `str_repeat`
 //    now that the width gate admits it — the round trip S1.5 bought.
@@ -182,7 +217,7 @@ assert(ENV_KEY in table, "the env answer is in the table");
 assert(typeof table[ENV_KEY].php_version === "string", `the env answer carries a php_version (${table[ENV_KEY] && table[ENV_KEY].php_version})`);
 assert(table[ENV_KEY].int_size === engine.intSize, "the env answer's width agrees with the boot probe");
 
-// 6. The absence family: structurally silent without the engine, witnessed with
+// 7. The absence family: structurally silent without the engine, witnessed with
 //    it. This is the surface lighting up, not a fold — it is what a 32-bit build
 //    still proves (ADR-0066 §4).
 const ABSENT = "<?php\ntyop();\n";
@@ -200,20 +235,20 @@ const absence = withEngine.value.findings.find((f) => f.id === "call.undefined-f
 console.log(`absence finding: ${absence && absence.message}`);
 assert(absence !== undefined && absence.line === 2, "the absence finding lands on the call's line");
 
-// 7. The table is session-global and monotone: a repeat analysis reuses the
+// 8. The table is session-global and monotone: a repeat analysis reuses the
 //    table's answers instead of asking again.
 const batchesBefore = asked.length;
 const again = await driveReplay({ analyze: analyzer(ABSENT), answer, table });
 assert(again.status === "converged", "a repeat analysis converges");
 assert(asked.length === batchesBefore, "a repeat analysis asks the engine nothing at all");
 
-// 8. The annotate lane rides the same table.
+// 9. The annotate lane rides the same table.
 const annotate = steins.annotateReplay(FLAGSHIP, table);
 assert(annotate.ok === true, "annotate replay envelope ok");
 assert(annotate.pending.length === 0, "annotate reaches its fixpoint on the check's table");
 assert(annotate.lines.length > 0, `annotate returns margin facts (${annotate.lines.length} lines)`);
 
-// 9. The cap is the caller's, and exhausting it is a status, not a hang: an
+// 10. The cap is the caller's, and exhausting it is a status, not a hang: an
 //    answerer that answers nothing usable must stop the loop, not spin it.
 const stubborn = await driveReplay({
   analyze: analyzer(FLAGSHIP),
@@ -252,7 +287,7 @@ assert(
   "the degraded run carries no folded value",
 );
 
-// 10. A structured engine failure, not a throw, for a request the engine cannot
+// 11. A structured engine failure, not a throw, for a request the engine cannot
 //    make sense of.
 const bogus = await answer(['{"method":"nope","params":{}}']);
 console.log(`bogus dispatch: ${JSON.stringify(bogus)}`);
