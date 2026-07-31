@@ -50,8 +50,8 @@ machine — not the version — decides the boundary. On it:
 
 | lane | state | why |
 | --- | --- | --- |
-| folded values | **19 of 22** allowlisted builtins | the verified width-safe subset (ADR-0066 S1.5 amendment), under an argument range guard of ±(2³¹−1) counting array keys |
-| `abs`, `intval`, `sprintf` | refused | their result *is* an integer in the machine's word; `sprintf("%x", -1)` is `"ffffffff"` here and `"ffffffffffffffff"` on a 64-bit runtime |
+| folded values | **37 of 46** allowlisted builtins | the verified width-safe subset (ADR-0066 amendments), under an argument range guard of ±(2³¹−1) counting array keys — the page derives the live counts from the catalog |
+| the width-refused names (`abs`, `intval`, `sprintf`, `version_compare`, the `dec*`/`bindec`/`hexdec` family) | refused | their result *is* an integer in the machine's word; `sprintf("%x", -1)` is `"ffffffff"` here and `"ffffffffffffffff"` on a 64-bit runtime, and `version_compare` compares numeric runs through a C `long` |
 | reflected return envelopes | live | a declared return type is platform-independent |
 | the absence family | live | existence is not arithmetic |
 | curated refinement rows | declined | a curated row is verified against the 64-bit engine at the pinned minor; `strlen()` is `int` here, not `int<0, max>` |

@@ -809,7 +809,7 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
     // that actually booted is the analysis' answer, not the page's opinion.
     //
     // What this buys: with php-wasm's 32-bit PHP 8.5 the page says "folding
-    // 19/22 width-safe builtins" and names `abs`/`intval`/`sprintf` as refused,
+    // width-safe builtins" and names the refused set (both derived live from boot data),
     // and if a 64-bit engine ever answers instead the same code says "all 22"
     // and names nothing. The line and the panel cannot go stale the way
     // "no PHP sidecar — findings that require executing PHP are omitted" did.
