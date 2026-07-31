@@ -265,7 +265,12 @@ fn the_member_cap_declines_rather_than_truncating() {
 
     let mock = Mock::default();
     let five = merge_src(&[("x", &["'a'", "'b'", "'c'", "'d'", "'e'"])], "strtoupper($x)");
-    assert_eq!(dump(&five, &mut mock.clone()), "unknown", "five members: no fold at all");
+    // The FOLD declines — that is what `mock.count() == 0` measures, and it is the
+    // property this test owns. The rendered type is then whatever the rungs below
+    // supply, and since issue #79 that is ADR-0069's Asserted floor stating
+    // functionMap's `uppercase-string`. The `(asserted)` marker is how a reader
+    // tells a declared claim from a folded one.
+    assert_eq!(dump(&five, &mut mock.clone()), "uppercase-string (asserted)", "five members: no fold");
     assert_eq!(mock.count(), 0, "the cap is charged before any combination: {:?}", mock.asks());
 }
 
@@ -385,10 +390,13 @@ fn the_composed_fact_takes_the_input_unions_stratum() {
     );
     // Verified in, verified out: the ternary's arms are written literals.
     assert_eq!(dump(&ternary("'a'", "'b'", "strtoupper($x)"), &mut Mock::default()), "'A'|'B'");
-    // …and the caps are stratum-blind: an over-wide asserted union declines too.
+    // …and the caps are stratum-blind: an over-wide asserted union declines the fold
+    // too, leaving ADR-0069's Asserted floor to state functionMap's declaration
+    // (issue #79 — the row is a refinement #73 counted and dropped). What proves the
+    // fold declined is the absence of any `'A'|…` composition, not the word unknown.
     assert_eq!(
         dump(&shape_read("'a'|'b'|'c'|'d'|'e'", "strtoupper($s)"), &mut Mock::default()),
-        "unknown"
+        "uppercase-string (asserted)"
     );
 }
 
@@ -432,15 +440,17 @@ fn the_standing_declines_are_unmoved() {
 
     let mock = Mock::default();
     // A name that is not on the allowlist at all: the ladder falls all the way to
-    // ADR-0069's declared-envelope floor, exactly as it did before this slice.
+    // ADR-0069's declared-return floor, exactly as it did before this slice.
     assert_eq!(dump(&ternary("'a'", "'b'", "nl2br($x)"), &mut mock.clone()), "string (asserted)");
     assert_eq!(mock.count(), 0);
 
     let mock = Mock::default();
     // An argument that is neither a proven literal nor a finite union: an
-    // abstract `string` envelope offers no members to enumerate.
+    // abstract `string` envelope offers no members to enumerate, so the fold asks
+    // nothing (`count() == 0`) and the ADR-0069 floor answers below it with
+    // functionMap's `uppercase-string` (issue #79's widened lowering).
     let abstract_arg = "<?php\nfunction f(string $s): void { \\PHPStan\\dumpType(strtoupper($s)); }\n";
-    assert_eq!(dump(abstract_arg, &mut mock.clone()), "unknown");
+    assert_eq!(dump(abstract_arg, &mut mock.clone()), "uppercase-string (asserted)");
     assert_eq!(mock.count(), 0);
 }
 

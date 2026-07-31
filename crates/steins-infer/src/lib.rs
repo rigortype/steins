@@ -7238,14 +7238,17 @@ fn best_dump_type(
     {
         return DumpRendering { text: render_dump_fact(&fact), asserted: false };
     }
-    // The DECLARED-ENVELOPE FLOOR (ADR-0069): the rung strictly below, reached only
+    // The DECLARED-RETURN FLOOR (ADR-0069): the rung strictly below, reached only
     // where the engine said nothing about this name. Always `(asserted)` — the row
     // is a catalog declaration, not a runtime answer, and the marker is how the dump
-    // surface says which rung answered.
+    // surface says which rung answered. Rendered through the arm speller, the same
+    // one the project-call floor below uses, so a `string|false` row spells the way
+    // the contract lane spells it rather than degrading to its base.
     if let ArgValue::Call(name, _) = value
-        && let Some(fact) = builtin_return_floor(cx, name)
+        && let Some(arms) = builtin_return_floor(cx, name)
+        && let Some(text) = render_contract_arms(cx, &arms)
     {
-        return DumpRendering { text: render_dump_fact(&fact), asserted: true };
+        return DumpRendering { text, asserted: true };
     }
     // The declared-return floor of an unresolved project call (issue #60): the
     // callee's `: string` is a fact the caller should see even when no summary
@@ -7294,6 +7297,15 @@ fn best_dump_phpdoc_type(
             text,
             asserted: arms.iter().any(|a| a.stratum == Stratum::Asserted),
         };
+    }
+    // A BUILTIN call, through the ADR-0069 floor (issue #79). Same parity claim, one
+    // rung lower: the row IS a declared contract, so the declared-side surface must
+    // show it wherever the assignment form would seed it into the contract store.
+    if let ArgValue::Call(name, _) = value
+        && let Some(arms) = builtin_return_floor(cx, name)
+        && let Some(text) = render_contract_arms(cx, &arms)
+    {
+        return DumpRendering { text, asserted: true };
     }
     DumpRendering { text: DUMP_NO_CONTRACT.to_owned(), asserted: false }
 }
@@ -7692,24 +7704,40 @@ fn apply_assign(
                     env.insert(var.to_owned(), Known::value(fact, line, None));
                     store.unbind(var);
                 }
-                // The DECLARED-ENVELOPE FLOOR (ADR-0069): strictly below the rung
+                // The DECLARED-RETURN FLOOR (ADR-0069): strictly below the rung
                 // above, reached only where the engine said nothing about this name.
                 // Enters `Asserted` — a catalog declaration, not a runtime answer —
                 // so the proof layer's all-Verified premise rule keeps every finding
                 // off it, and the derivation clause carries that down every step.
+                //
+                // BOTH carriers are seeded, as the `@param` entry seeding does with
+                // `seed_contract_arms` + `seed_shape_fact`: the arm lane holds the
+                // declaration itself (so a `string|false` row survives to both dump
+                // surfaces and to whatever the arm lane learns to subtract), and the
+                // value lane holds the one fact the arms denote where they denote
+                // one. A multi-arm row has no single fact and lives in the arm lane
+                // alone — observably identical to a hand-written `@param string|false`.
                 ArgValue::Call(name, _)
-                    if !w.scope.poisoned && let Some(fact) = builtin_return_floor(cx, name) =>
+                    if !w.scope.poisoned && let Some(arms) = builtin_return_floor(cx, name) =>
                 {
-                    env.insert(
-                        var.to_owned(),
-                        Known::value_strat(
-                            fact,
-                            line,
-                            Some(CATALOG_FLOOR.to_owned()),
-                            Stratum::Asserted,
-                        ),
-                    );
                     store.unbind(var);
+                    match floor_value_fact(&arms) {
+                        Some(fact) => {
+                            env.insert(
+                                var.to_owned(),
+                                Known::value_strat(
+                                    fact,
+                                    line,
+                                    Some(CATALOG_FLOOR.to_owned()),
+                                    Stratum::Asserted,
+                                ),
+                            );
+                        }
+                        None => {
+                            env.remove(var);
+                        }
+                    }
+                    store.contract.insert(var.to_owned(), arms);
                 }
                 // The return-fact SUMMARY, then the arm FLOOR (ADR-0057 amendment T0 /
                 // ADR-0052 §9). `unbind` first (it voids any stale arm lane on `var`).
@@ -9695,33 +9723,7 @@ fn refine_contract_arms(
 ) -> Option<Vec<ContractArm>> {
     match phpdoc {
         Some(pt) => {
-            let arms = flatten_arms(steins_contract::lower(pt));
-            let out: Vec<ContractArm> = arms
-                .into_iter()
-                .filter_map(|ty| {
-                    // Resolve a top-level class arm against the declaring namespace; the
-                    // native member list already holds FQNs, so this aligns the two.
-                    let ty = match ty {
-                        ContractTy::Class(n) => ContractTy::Class(resolve_class(&n)),
-                        other => other,
-                    };
-                    if !native.is_empty() {
-                        let covered = native
-                            .iter()
-                            .fold(Certainty::No, |acc, n| acc.or(normalize::subsumes(n, &ty)));
-                        if covered.is_no() {
-                            return None;
-                        }
-                    }
-                    let stratum = if native.iter().any(|n| normalize::arm_eq(n, &ty)) {
-                        Stratum::Verified
-                    } else {
-                        Stratum::Asserted
-                    };
-                    Some(ContractArm { ty, stratum })
-                })
-                .collect();
-            (!out.is_empty()).then_some(out)
+            refine_declared_arms(native, flatten_arms(steins_contract::lower(pt)), resolve_class)
         }
         None => {
             let out: Vec<ContractArm> =
@@ -9729,6 +9731,48 @@ fn refine_contract_arms(
             (!out.is_empty()).then_some(out)
         }
     }
+}
+
+/// [`refine_contract_arms`]' declared-side body, over an **already-flattened** arm
+/// list rather than a parsed docblock.
+///
+/// Split out for the ADR-0069 builtin floor (issue #79), which reaches the same law
+/// from a catalog type *string*: the row is lowered by `lower_str`, flattened by
+/// [`flatten_arms`], and refined here against an empty native list — so a builtin's
+/// declared return and a project function's declared return travel one lowering
+/// path, and the builtin's arms come out `Asserted` for the same structural reason
+/// a phpdoc arm over an untyped signature does (nothing runtime-enforced covers it).
+fn refine_declared_arms(
+    native: &[ContractTy],
+    declared: Vec<ContractTy>,
+    resolve_class: &dyn Fn(&str) -> String,
+) -> Option<Vec<ContractArm>> {
+    let out: Vec<ContractArm> = declared
+        .into_iter()
+        .filter_map(|ty| {
+            // Resolve a top-level class arm against the declaring namespace; the
+            // native member list already holds FQNs, so this aligns the two.
+            let ty = match ty {
+                ContractTy::Class(n) => ContractTy::Class(resolve_class(&n)),
+                other => other,
+            };
+            if !native.is_empty() {
+                let covered = native
+                    .iter()
+                    .fold(Certainty::No, |acc, n| acc.or(normalize::subsumes(n, &ty)));
+                if covered.is_no() {
+                    return None;
+                }
+            }
+            let stratum = if native.iter().any(|n| normalize::arm_eq(n, &ty)) {
+                Stratum::Verified
+            } else {
+                Stratum::Asserted
+            };
+            Some(ContractArm { ty, stratum })
+        })
+        .collect();
+    (!out.is_empty()).then_some(out)
 }
 
 /// The declared-return arm list to seed the assigned variable of `$x = f(...)` at a
@@ -17764,9 +17808,9 @@ fn builtin_call_return_fact(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Opt
 /// them must see one string.
 const CATALOG_FLOOR: &str = "declared in the builtin catalog, unverified";
 
-/// The **declared-envelope floor** (ADR-0069, issue #73): the bottom rung of the
-/// return ladder, seeded from `steins_catalog::declared_envelope` at the
-/// `Asserted` stratum.
+/// The **declared-return floor** (ADR-0069, issues #73/#79): the bottom rung of the
+/// return ladder, seeded from `steins_catalog::declared_return` as a declared-contract
+/// **arm list**, every arm `Asserted`.
 ///
 /// It fires exactly where [`builtin_call_return_fact`] yielded `None` for this
 /// name — which is *per name*, not per run. `--no-php` (and the browser before
@@ -17783,30 +17827,67 @@ const CATALOG_FLOOR: &str = "declared in the builtin catalog, unverified";
 ///    shadows (or makes ambiguous) the builtin, and the project's own definition is
 ///    the better answer.
 /// 2. **Version discipline** ([`floor_target_admits`]) — the A11-shaped target gate.
-/// 3. **The lowering is the same one** — `lower_str` → [`envelope_fact`], the seam
-///    the reflected envelope uses. One lowering, two provenances (ADR-0069 §2). A
-///    row that failed to lower would have been dropped at generation time, so this
-///    is a re-derivation, not a second filter.
+/// 3. **The lowering is the declared-return lowering** — `lower_str` →
+///    [`flatten_arms`] → [`refine_declared_arms`] against an empty native list,
+///    which is byte for byte the path a project function's `@return` takes at a call
+///    site ([`fn_return_arms`], issue #60). One lowering, two provenances
+///    (ADR-0069 §2). Issue #79 replaced the #73 `envelope_fact` rung with this one
+///    rather than stacking a second: a bare base is a trivial arm set, so the
+///    envelope case is subsumed, and a `string|false` row now seeds the same way.
 ///
-/// The stratum is not returned: every caller seeds `Asserted`, and the proof
-/// layer's all-Verified premise rule then keeps the fact out of every finding by
-/// construction. The absence family never comes here at all — existence is a
-/// boot-surface fact, and this table answers only about return types.
-fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Fact> {
+/// The stratum is not returned: `refine_declared_arms` over an empty native list
+/// marks every arm `Asserted`, and the proof layer's all-Verified premise rule then
+/// keeps the fact out of every finding by construction. The absence family never
+/// comes here at all — existence is a boot-surface fact, and this table answers only
+/// about return types.
+fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Vec<ContractArm>> {
     if cx.index.has_simple_function(name) {
         return None;
     }
     if !floor_target_admits(name, cx.php_target) {
         return None;
     }
-    let declared = steins_catalog::declared_envelope(name)?;
-    envelope_fact(&steins_contract::lower_str(declared)?)
+    let declared = steins_catalog::declared_return(name)?;
+    let arms = flatten_arms(steins_contract::lower_str(declared)?);
+    // No class arm can occur (the mining admits scalar arms only), so the resolver
+    // is the identity — the seam is shared, not the namespace context.
+    refine_declared_arms(&[], arms, &|n: &str| n.to_owned())
+}
+
+/// The value-lane seed a floor arm list contributes: the single value-domain
+/// [`Fact`] its arms denote, or `None` when they denote more than one.
+///
+/// The sibling of [`seed_shape_fact`] on the scalar side, and the reason the #73
+/// pins survive the #79 widening unchanged: a one-arm row (`string`) still binds
+/// `$r = str_repeat(...)` to a `General{String}` fact, which is what premises the
+/// contract-layer return check. A genuinely multi-arm row (`string|false`) has no
+/// single fact — the value domain has no scalar union layer — so it stays in the
+/// arm lane alone, exactly where a hand-written `@param string|false` would live,
+/// and narrows through the same operators.
+///
+/// A `?T` pair is one fact (the domain carries `nullable` as a side flag), which is
+/// how the `?string` rows keep the rendering they had at #73.
+fn floor_value_fact(arms: &[ContractArm]) -> Option<Fact> {
+    let mut nullable = false;
+    let mut fact: Option<Fact> = None;
+    for arm in arms {
+        if matches!(arm.ty, ContractTy::Null) {
+            nullable = true;
+            continue;
+        }
+        if fact.is_some() {
+            return None;
+        }
+        fact = Some(contractty_to_fact(&arm.ty)?);
+    }
+    let fact = fact?;
+    if nullable { fact_with_null(&fact) } else { Some(fact) }
 }
 
 /// The floor's version gate (ADR-0069 §3, A11-shaped): whether the project's
 /// declared PHP target agrees with the minor the mined row was stated at.
 ///
-/// `steins_catalog::declared_envelope_changed_at` is the change oracle — a
+/// `steins_catalog::declared_return_changed_at` is the change oracle — a
 /// `Some(m)` says the builtin's declared return type last moved at minor `m`, so
 /// the mined row (stated at the pin) is only known good for a target lying
 /// **wholly at or above** `m`. That is stricter than "does not straddle": a target
@@ -17817,7 +17898,7 @@ fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Fact> {
 /// tolerate that grade. A name the oracle does not list admits unconditionally —
 /// its declared return type never moved across the supported line.
 fn floor_target_admits(name: &str, target: Option<&steins_db::PhpTarget>) -> bool {
-    let Some(boundary) = steins_catalog::declared_envelope_changed_at(name) else {
+    let Some(boundary) = steins_catalog::declared_return_changed_at(name) else {
         return true;
     };
     match target {
@@ -20168,12 +20249,11 @@ mod return_fact_admission_tests {
 
     /// The ADR-0069 floor's version gate, against the real change oracle.
     ///
-    /// It is pinned here rather than end to end because at this pin the two mined
-    /// tables are **disjoint**: every version-sensitive name (`str_split`,
-    /// `gc_status`, `opcache_get_configuration`, `session_get_cookie_params`)
-    /// returns an array or a list, so none of them carries an admitted envelope.
-    /// The gate is nonetheless real machinery that a later pin will need, and this
-    /// exercises it against the shipped data rather than a fixture.
+    /// The gate's own law, unit-tested against the shipped data: `str_split` is the
+    /// witness whose declared return type moved at 8.2. (Whether that particular
+    /// name also carries an admitted row is a property of the mining, not of this
+    /// gate — `declared_return_floor.rs` pins the end-to-end decline on a name that
+    /// does.)
     #[test]
     fn floor_target_gate_declines_below_a_names_change_boundary() {
         use steins_db::{PhpTarget, PhpTargetSource};
@@ -20184,7 +20264,7 @@ mod return_fact_admission_tests {
             raw: "test".to_owned(),
         };
         // `str_split`'s declared return type moved at 8.2.
-        assert_eq!(steins_catalog::declared_envelope_changed_at("str_split"), Some((8, 2)));
+        assert_eq!(steins_catalog::declared_return_changed_at("str_split"), Some((8, 2)));
 
         // A STRADDLING target has no single answer — decline (the A11 shape).
         assert!(!floor_target_admits("str_split", Some(&target((8, 1), Some((8, 5))))));

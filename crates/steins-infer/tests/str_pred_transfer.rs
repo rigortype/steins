@@ -667,8 +667,17 @@ fn a_moved_declaration_withholds_the_rule() {
 #[test]
 fn an_engine_silent_about_the_name_withholds_the_rule() {
     // No declaration, no countersignature (ADR-0061 §2's sidecar-presence leg).
+    // The RULE still withholds; what answers is the rung below it, ADR-0069's
+    // Asserted declared-return floor, and the `(asserted)` marker is the difference
+    // — the transfer's own answer is Verified and carries none (see the sibling
+    // `strtoupper` assertion). functionMap declares `strtolower` as
+    // `lowercase-string`, a scalar refinement issue #73 counted and dropped and
+    // issue #79 admitted, so this pin moved with the widened lowering.
     let mut silent = Mock::silent_about("strtolower");
-    assert_eq!(dump_with("string", "strtolower($v)", &mut silent), "dumped type: unknown");
+    assert_eq!(
+        dump_with("string", "strtolower($v)", &mut silent),
+        "dumped type: lowercase-string (asserted)"
+    );
     assert_eq!(
         dump_with("string", "strtoupper($v)", &mut silent),
         "dumped type: uppercase-string"

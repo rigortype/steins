@@ -187,17 +187,20 @@ assert(steins.check(FLAGSHIP).boot === undefined, "the engine-free envelope carr
 
 // 5. …and the boundary is honest in the other direction: `abs` is a REFUSED
 //    name on a 32-bit engine (`abs("3000000000")` is int there and float here —
-//    the type tag flips), so it must not fold. What comes back is a type, not a
+//    the type tag flips), so it must not fold. What comes back is a TYPE, not a
 //    wrong value: the fold declines, the reflected `int|float` envelope is not a
-//    single fact either, and the dump widens all the way.
+//    single fact either, and the answer falls to ADR-0069's Asserted declared-
+//    return floor. Since issue #79 that floor states functionMap's own
+//    `positive-int|0|float` — a multi-base union #73 counted and dropped — and the
+//    `(asserted)` marker is what says a declaration answered rather than a fold.
 const REFUSED = '<?php\n\\PHPStan\\dumpType(abs(-3));\n';
 const refused = await driveReplay({ analyze: analyzer(REFUSED), answer, table });
 assert(refused.status === "converged", `the refused-fold snippet converges (got ${refused.status})`);
 const refusedDump = refused.value.findings.find((f) => f.id === "debug.type");
 console.log(`refused dump: ${refusedDump && refusedDump.message}`);
 assert(
-  refusedDump !== undefined && refusedDump.message === "dumped type: unknown",
-  `a width-refused builtin widens instead of folding (got: ${refusedDump && refusedDump.message})`,
+  refusedDump !== undefined && refusedDump.message.endsWith(" (asserted)"),
+  `a width-refused builtin widens to a declared type instead of folding (got: ${refusedDump && refusedDump.message})`,
 );
 assert(
   refusedDump.message !== "dumped type: 3",

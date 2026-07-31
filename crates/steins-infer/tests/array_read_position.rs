@@ -362,13 +362,23 @@ fn an_engine_silent_on_the_declaration_declines() {
             None
         }
     }
-    for f in ["current", "key", "array_pop", "next"] {
+    let dumped = |f: &str| {
         let src = format!(
             "<?php\n/** @param array{{a: int, b: int}} $v */\n\
              function f(array $v): void {{ \\PHPStan\\dumpType({f}($v)); }}\n"
         );
-        assert_eq!(one_type_with(&src, &mut NoPhp), "dumped type: unknown", "{f} withholds");
+        one_type_with(&src, &mut NoPhp)
+    };
+    for f in ["current", "array_pop", "next"] {
+        assert_eq!(dumped(f), "dumped type: unknown", "{f} withholds");
     }
+    // `key` withholds here too — what answers instead is the rung BELOW, ADR-0069's
+    // Asserted declared-return floor, whose row functionMap states as
+    // `int|string|null`. The distinction is the `(asserted)` marker: this rule would
+    // have said `'a'`, and does not. The row was counted-and-dropped at issue #73
+    // (a multi-base union no envelope could hold) and admitted by #79, so this pin
+    // changed with the widened lowering rather than with anything in this family.
+    assert_eq!(dumped("key"), "dumped type: int|string|null (asserted)");
 }
 
 #[test]

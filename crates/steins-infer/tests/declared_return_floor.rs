@@ -1,8 +1,14 @@
-//! ADR-0069 / issue #73 — the Asserted declared-envelope floor.
+//! ADR-0069 / issues #73, #79 — the Asserted declared-return floor.
 //!
 //! The bottom rung of the return ladder: where the engine says nothing about a
 //! builtin's return type, the catalog's mined declaration speaks instead, at the
-//! `Asserted` stratum. Everything worth pinning about it is a *boundary*:
+//! `Asserted` stratum. Issue #79 widened what "the declaration" may be — a
+//! `T|false` failure union or a scalar refinement as well as a bare envelope — by
+//! seeding through the declared-return ARM lane instead of `envelope_fact`. The
+//! grade, the firewall and the per-name silence condition are unchanged, and the
+//! #73 pins below are the evidence for that.
+//!
+//! Everything worth pinning about it is a *boundary*:
 //!
 //! * it answers where the engine is silent — **per name**, not per run;
 //! * the engine's answer wins wherever the engine has one;
@@ -17,11 +23,15 @@
 //! than through prose.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
+use steins_db::{
+    GoverningRoot, PhpTarget, PhpTargetSource, Project, ProjectLayout, SourceFile, SteinsDatabase,
+};
 use steins_domain::{Base, Fact};
 use steins_infer::{
-    CALL_UNDEFINED_FUNCTION_ID, DEBUG_TYPE_ID, Diagnostic, Folder, Layer, RETURN_MISMATCH_ID, check,
-    check_with, layer,
+    CALL_UNDEFINED_FUNCTION_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, Diagnostic, Folder, Layer,
+    NoFold, RETURN_MISMATCH_ID, check, check_project_with_runtime, check_with, layer,
 };
 use steins_syntax::{ArgValue, SourceTree};
 
@@ -108,6 +118,32 @@ fn run(src: &str, folder: &mut dyn Folder) -> Vec<Diagnostic> {
     check_with(&tree, &[], "t.php", folder)
 }
 
+fn require_target(raw: &str, floor: (u16, u16), ceiling: Option<(u16, u16)>) -> PhpTarget {
+    PhpTarget { floor, ceiling, source: PhpTargetSource::Require, raw: raw.to_owned() }
+}
+
+/// The dumped type of a `strstr` call under a project whose layout DECLARES
+/// `target` — the seam `floor_target_admits` reads (issue #28's layout→Cx path).
+fn dump_under_target(target: Option<PhpTarget>) -> String {
+    let root = GoverningRoot::new(
+        PathBuf::from("/proj/composer.json"),
+        PathBuf::from("/proj"),
+        vec![PathBuf::from("/proj/vendor")],
+        vec![],
+    )
+    .with_php_target(target);
+    let layout = ProjectLayout::new(PathBuf::from("/proj"), vec![root]);
+    let db = SteinsDatabase::default();
+    let src = "<?php\nfunction f(string $s): void { \\PHPStan\\dumpType(strstr($s, $s)); }\n";
+    let file = SourceFile::new(&db, "/proj/t.php".to_owned(), src.to_owned());
+    let project = Project::new(&db, vec![file], layout, steins_db::PluginFacts::none());
+    check_project_with_runtime(&db, project, &mut NoFold, true)
+        .into_iter()
+        .find(|d| d.id == DEBUG_TYPE_ID)
+        .expect("one dump")
+        .message
+}
+
 // ---------------------------------------------------------------------------
 // The acceptance criterion: `--no-php` gains declared types.
 // ---------------------------------------------------------------------------
@@ -129,24 +165,126 @@ fn str_repeat_of_variables_dumps_string_under_no_php() {
     );
 }
 
+/// The `debug.type` message body of one call expression under the sound subset.
+fn probe(call: &str) -> String {
+    let src =
+        format!("<?php\nfunction f(string $s, int $n, $h): void {{ \\PHPStan\\dumpType({call}); }}\n");
+    no_php_dumps(&src).first().cloned().unwrap_or_default()
+}
+
 #[test]
 fn the_floor_covers_the_scalar_bases_and_nothing_else() {
     // One row per envelope shape the table can carry, so a lowering regression in
-    // `envelope_fact` shows up here rather than as a silent loss of rows.
-    let probe = |call: &str| {
-        let src = format!(
-            "<?php\nfunction f(string $s, int $n, $h): void {{ \\PHPStan\\dumpType({call}); }}\n"
-        );
-        no_php_dumps(&src).first().cloned().unwrap_or_default()
-    };
+    // the arm seeding shows up here rather than as a silent loss of rows.
     assert_eq!(probe("str_pad($s, $n)"), "dumped type: string (asserted)");
     assert_eq!(probe("curl_errno($h)"), "dumped type: int (asserted)");
     assert_eq!(probe("acos($n)"), "dumped type: float (asserted)");
     assert_eq!(probe("array_key_exists($s, [])"), "dumped type: bool (asserted)");
-    // A `?T` row keeps its nullability — the floor states an envelope, not a base.
+    // A `?T` row keeps its nullability — the floor states a type, not a base.
     assert_eq!(probe("curl_multi_getcontent($h)"), "dumped type: string|null (asserted)");
     // A name with no admitted row stays honestly unknown; the floor invents nothing.
     assert_eq!(probe("sodium_add($s, $s)"), "dumped type: unknown");
+}
+
+// ---------------------------------------------------------------------------
+// Issue #79: the rows richer than an envelope.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_t_false_row_renders_as_the_contract_lane_spells_it() {
+    // The slice's acceptance criterion. `strstr` is `string|false` in functionMap —
+    // a row #73 counted and dropped, because `envelope_fact` had nowhere to put the
+    // `false` arm. It now seeds the declared-return ARM lane, so the dump surface
+    // spells the union the way `spell_arms` spells every other contract arm list,
+    // and the `(asserted)` marker still says which rung answered.
+    assert_eq!(probe("strstr($s, $s)"), "dumped type: string|false (asserted)");
+    assert_eq!(probe("strrchr($s, $s)"), "dumped type: string|false (asserted)");
+    assert_eq!(probe("file_get_contents($s)"), "dumped type: string|false (asserted)");
+    // Three or more arms compose the same way — no special case for the pair.
+    assert_eq!(probe("array_search($s, [])"), "dumped type: int|string|false (asserted)");
+    // The other #79 bucket: a scalar refinement functionMap states and reflection
+    // cannot. These are the rows `envelope_fact` would have flattened to their base.
+    assert_eq!(probe("mb_strtoupper($s)"), "dumped type: uppercase-string (asserted)");
+    assert_eq!(probe("preg_match($s, $s)"), "dumped type: 0|1|false (asserted)");
+}
+
+#[test]
+fn a_t_false_row_survives_the_assignment_rung_and_the_declared_surface() {
+    // The assignment seam seeds BOTH carriers, as the `@param` entry seeding does.
+    // A multi-arm row has no single value-domain fact — the domain carries no scalar
+    // union layer — so it lives in the contract-arm lane alone, and both dump
+    // surfaces read it from there. The four forms must agree on the type: the two
+    // argument-position forms (`dumpType(f(…))`, `dumpPhpDocType(f(…))`) and the two
+    // assigned forms. Each is its own snippet because an intervening unresolved call
+    // sweeps the scope's carriers — long-standing behavior, not this slice's.
+    let dumped = |src: &str| {
+        let tree = SourceTree::parse(src);
+        let msgs: Vec<String> = check(&tree, &[], "t.php")
+            .into_iter()
+            .filter(|d| d.id == DEBUG_TYPE_ID || d.id == DEBUG_PHPDOC_TYPE_ID)
+            .map(|d| d.message)
+            .collect();
+        msgs.first().cloned().unwrap_or_default()
+    };
+    let fun = |body: &str| format!("<?php\nfunction f(string $s): void {{ {body} }}\n");
+    assert_eq!(
+        dumped(&fun("\\PHPStan\\dumpType(strstr($s, $s));")),
+        "dumped type: string|false (asserted)"
+    );
+    assert_eq!(
+        dumped(&fun("\\PHPStan\\dumpPhpDocType(strstr($s, $s));")),
+        "dumped phpdoc type: string|false (asserted)"
+    );
+    assert_eq!(
+        dumped(&fun("$r = strstr($s, $s); \\PHPStan\\dumpType($r);")),
+        "dumped type: string|false (asserted)"
+    );
+    assert_eq!(
+        dumped(&fun("$r = strstr($s, $s); \\PHPStan\\dumpPhpDocType($r);")),
+        "dumped phpdoc type: string|false (asserted)"
+    );
+}
+
+#[test]
+fn an_engine_answer_wins_over_a_rich_row_too() {
+    // Engine-wins, re-pinned on a row the #73 slice could not carry. The engine
+    // reflects a bare `string` for `strstr` — deliberately NOT the catalog's
+    // `string|false` — and its answer stands, marker-free.
+    let src = "<?php\nfunction f(string $s): void { \\PHPStan\\dumpType(strstr($s, $s)); }\n";
+    let mut engine = Engine::reflecting("strstr", general(Base::String));
+    assert_eq!(dumps_with(src, &mut engine), vec!["dumped type: string".to_owned()]);
+    // And through the assignment rung, which is a separate call site.
+    let assigned =
+        "<?php\nfunction f(string $s): void { $r = strstr($s, $s); \\PHPStan\\dumpType($r); }\n";
+    let mut engine = Engine::reflecting("strstr", general(Base::String));
+    assert_eq!(dumps_with(assigned, &mut engine), vec!["dumped type: string".to_owned()]);
+}
+
+#[test]
+fn the_version_gate_still_guards_the_widened_rung() {
+    // The A11-shaped target gate is unchanged by the widening, and at this pin it
+    // cannot be exercised end to end: all four version-sensitive names return an
+    // array or a list, which the arm lane does not carry, so none of them has a row.
+    // `steins-catalog`'s `declared_return_version_sensitivity_is_recorded` asserts
+    // that disjointness and is the tripwire that will demand a fixture here.
+    //
+    // What IS observable is the complement, and it is worth pinning: a rich row
+    // whose declared return type never moved across the supported line answers for
+    // every target, including one that straddles a minor boundary. A gate that
+    // over-fired would silence the whole table on any ranged target.
+    for (raw, floor, ceiling) in [
+        ("^8.1", (8, 1), Some((8, u16::MAX))),
+        (">=8.3", (8, 3), None),
+        (">=8.1 <8.3", (8, 1), Some((8, 2))),
+    ] {
+        assert_eq!(
+            dump_under_target(Some(require_target(raw, floor, ceiling))),
+            "dumped type: string|false (asserted)",
+            "the floor must answer under a declared target of {raw}",
+        );
+    }
+    // And with no declared target at all, which the gate admits by design.
+    assert_eq!(dump_under_target(None), "dumped type: string|false (asserted)");
 }
 
 #[test]
@@ -247,6 +385,71 @@ fn a_floor_fact_premises_a_contract_finding_but_never_a_proof_one() {
     assert!(
         verified.iter().all(|d| layer(d.id) != Some(Layer::Proof)),
         "no proof-layer id consumes an abstract return fact yet: {verified:?}"
+    );
+}
+
+#[test]
+fn a_rich_floor_row_never_premises_a_proof_finding() {
+    // The #79 extension of the pin above, and the regression this slice must not
+    // introduce. A `string|false` row is a strictly stronger premise than an
+    // envelope — it says a call *can* return `false`, which is exactly the shape a
+    // proof-layer consumer would want to reason from — so the firewall is asserted
+    // against the whole diagnostic set on sources that exercise the arm lane in
+    // every direction it can be exercised: bound, guarded, subtracted, returned.
+    let sources = [
+        // Bound, then dumped.
+        "<?php\nfunction f(string $s): void { $r = strstr($s, $s); \\PHPStan\\dumpType($r); }\n",
+        // Guarded: the `!== false` subtraction is the arm lane doing real work.
+        "<?php\nfunction f(string $s): void {\n\
+         $r = strstr($s, $s);\n\
+         if ($r !== false) { \\PHPStan\\dumpType($r); }\n}\n",
+        // Used where a `false` would be a type error if anything trusted the row.
+        "<?php\nfunction f(string $s): int { $r = strstr($s, $s); return strlen($r); }\n",
+        // Returned against a declared contract the `false` arm violates.
+        "<?php\n/** @return string */\nfunction f(string $s) { $r = strstr($s, $s); return $r; }\n",
+        // The refinement bucket, same question.
+        "<?php\nfunction f(string $s): void { $r = mb_strtoupper($s); \\PHPStan\\dumpType($r); }\n",
+    ];
+    for src in sources {
+        let tree = SourceTree::parse(src);
+        let ds = check(&tree, &[], "t.php");
+        let proof: Vec<&Diagnostic> =
+            ds.iter().filter(|d| layer(d.id) == Some(Layer::Proof)).collect();
+        assert!(proof.is_empty(), "a rich floor row reached the proof layer in {src:?}: {proof:?}");
+    }
+}
+
+#[test]
+fn a_rich_floor_row_behaves_exactly_like_a_declared_one_under_guards() {
+    // The floor row is a declared contract and nothing more, so it must narrow the
+    // way a written one does — the same lane, the same operators, no bespoke
+    // behavior for the catalog's rows.
+    //
+    // A runtime type predicate narrows it (`is_string` is checked on the branch, so
+    // the branch fact is Verified and carries no marker — the floor is not the
+    // premise there, the guard is). A `!== false` comparison does NOT subtract the
+    // `false` arm: ADR-0052 §9's arm subtraction is instanceof-driven, and the
+    // scalar-arm case is unwired. That is a pre-existing limitation of the arm lane,
+    // not of this slice — the second pair of assertions shows a hand-written
+    // `@param string|false` behaving identically — and it is precisely what issue
+    // #75's flag-conditioned false-arm strips would build on.
+    let guarded = |decl: &str, param: &str, bind: &str, guard: &str| {
+        let src = format!(
+            "<?php\n{decl}function f({param}): void {{ {bind} if ({guard}) {{ \\PHPStan\\dumpType($r); }} }}\n"
+        );
+        no_php_dumps(&src).first().cloned().unwrap_or_default()
+    };
+    let floor = ("", "string $s", "$r = strstr($s, $s);");
+    let written = ("/** @param string|false $r */\n", "$r", "");
+    assert_eq!(guarded(floor.0, floor.1, floor.2, "is_string($r)"), "dumped type: string");
+    assert_eq!(guarded(written.0, written.1, written.2, "is_string($r)"), "dumped type: string");
+    assert_eq!(
+        guarded(floor.0, floor.1, floor.2, "$r !== false"),
+        "dumped type: string|false (asserted)"
+    );
+    assert_eq!(
+        guarded(written.0, written.1, written.2, "$r !== false"),
+        "dumped type: string|false (asserted)"
     );
 }
 

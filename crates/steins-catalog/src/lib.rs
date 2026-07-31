@@ -84,11 +84,11 @@ mod hierarchy_generated;
 /// Consulted only by [`return_fact`]. May be empty (R1 lands zero rows).
 mod return_facts_generated;
 
-/// The builtin declared-return envelope floor (ADR-0069), generated from
-/// `docs/research/phpstan-mining/declared_envelopes.toml` by `cargo xtask
-/// gen-catalog`. Consulted only by [`declared_envelope`] and
-/// [`declared_envelope_changed_at`].
-mod declared_envelopes_generated;
+/// The builtin declared-return floor (ADR-0069), generated from
+/// `docs/research/phpstan-mining/declared_returns.toml` by `cargo xtask
+/// gen-catalog`. Consulted only by [`declared_return`] and
+/// [`declared_return_changed_at`].
+mod declared_returns_generated;
 
 /// Whether `name` is on the folding allowlist (case-insensitive).
 ///
@@ -1213,9 +1213,9 @@ pub fn return_fact(name: &str) -> Option<&'static str> {
         .map(|i| return_facts_generated::RETURN_FACTS[i].1)
 }
 
-/// The **declared return envelope** of a builtin `name` (ADR-0069, issue #73): the
-/// canonical spelling of the type the builtin declares (`"string"`, `"?int"`), or
-/// `None` when no row covers it.
+/// The **declared return type** of a builtin `name` (ADR-0069, issues #73/#79): the
+/// canonical phpdoc spelling of the type the builtin declares (`"string"`,
+/// `"string|false"`, `"non-empty-string"`), or `None` when no row covers it.
 ///
 /// This is the bottom rung of the return ladder and nothing more. It exists for the
 /// runs where every other rung is engine-gated and a builtin call with variable
@@ -1243,16 +1243,22 @@ pub fn return_fact(name: &str) -> Option<&'static str> {
 ///
 /// The rows are mined from PHPStan's `resources/functionMap.php` at a pinned
 /// commit — itself inherited from Phan; see the root `NOTICE` — filtered to types
-/// that lower to a single-base envelope, and each one countersigned at generation
-/// time by the pinned engine's own reflection. Matching is case-insensitive and a
-/// leading `\` is stripped, as everywhere else in this crate.
+/// whose lowering flattens to an arm list the declared-contract lane carries, and
+/// each one countersigned at generation time, arm-wise, against the pinned engine's
+/// own reflection. Matching is case-insensitive and a leading `\` is stripped, as
+/// everywhere else in this crate.
+///
+/// Issue #79 widened the filter from single-base envelopes to the full scalar arm
+/// vocabulary, so a value here may be a `T|false` failure union or a refinement
+/// (`non-empty-string`, `non-negative-int`) as well as a bare base. The grade is
+/// unchanged: still Asserted, still never a proof premise.
 #[must_use]
-pub fn declared_envelope(name: &str) -> Option<&'static str> {
+pub fn declared_return(name: &str) -> Option<&'static str> {
     let key = name.trim_start_matches('\\').to_ascii_lowercase();
-    declared_envelopes_generated::DECLARED_ENVELOPES
+    declared_returns_generated::DECLARED_RETURNS
         .binary_search_by(|(n, _)| (*n).cmp(key.as_str()))
         .ok()
-        .map(|i| declared_envelopes_generated::DECLARED_ENVELOPES[i].1)
+        .map(|i| declared_returns_generated::DECLARED_RETURNS[i].1)
 }
 
 /// The minor at which a builtin's declared **return type** last moved across the
@@ -1265,17 +1271,18 @@ pub fn declared_envelope(name: &str) -> Option<&'static str> {
 /// consumer declines the row otherwise; an undeclared target admits it, because the
 /// row is Asserted anyway.
 ///
-/// Deliberately **independent** of [`declared_envelope`]: a name can be
-/// version-sensitive without carrying an admitted envelope (at the current pin,
-/// every version-sensitive name returns an array or a list, so none does), and the
-/// gate must stay complete if a future pin makes the two sets overlap.
+/// Deliberately **independent** of [`declared_return`]: a name can be
+/// version-sensitive without carrying an admitted row, and the gate must stay
+/// complete either way. The two sets were disjoint at the #73 pin (every
+/// version-sensitive name returned an array); the #79 relaxation makes them
+/// overlap, which is exactly the case this gate was wired ahead of.
 #[must_use]
-pub fn declared_envelope_changed_at(name: &str) -> Option<(u16, u16)> {
+pub fn declared_return_changed_at(name: &str) -> Option<(u16, u16)> {
     let key = name.trim_start_matches('\\').to_ascii_lowercase();
-    declared_envelopes_generated::ENVELOPE_VERSION_SENSITIVE
+    declared_returns_generated::RETURN_VERSION_SENSITIVE
         .binary_search_by(|(n, _)| (*n).cmp(key.as_str()))
         .ok()
-        .map(|i| declared_envelopes_generated::ENVELOPE_VERSION_SENSITIVE[i].1)
+        .map(|i| declared_returns_generated::RETURN_VERSION_SENSITIVE[i].1)
 }
 
 /// Plain Levenshtein edit distance (small strings, so the quadratic DP is fine).
@@ -1593,75 +1600,119 @@ mod tests {
         assert_eq!(super::return_fact("\\dirname"), None);
     }
 
+    /// Every spelling in the shipped table that a *single-base envelope* can state:
+    /// the #73 population. Everything else is the issue-#79 reach.
+    const ENVELOPE_SPELLINGS: &[&str] = &[
+        "bool",
+        "int",
+        "float",
+        "string",
+        "bool|null",
+        "int|null",
+        "float|null",
+        "string|null",
+    ];
+
     #[test]
-    fn declared_envelope_rows_and_their_shape() {
+    fn declared_return_rows_and_their_shape() {
         // ADR-0069 / issue #73: the Asserted floor's rows. `str_repeat` is the ADR's
         // own worked example — `string` with the sidecar, `unknown` without it before
-        // this table existed.
-        assert_eq!(super::declared_envelope("str_repeat"), Some("string"));
-        assert_eq!(super::declared_envelope("str_pad"), Some("string"));
-        assert_eq!(super::declared_envelope("array_key_exists"), Some("bool"));
-        assert_eq!(super::declared_envelope("acos"), Some("float"));
+        // this table existed. Every #73 row is still here, spelled the same way.
+        assert_eq!(super::declared_return("str_repeat"), Some("string"));
+        assert_eq!(super::declared_return("str_pad"), Some("string"));
+        assert_eq!(super::declared_return("array_key_exists"), Some("bool"));
+        assert_eq!(super::declared_return("acos"), Some("float"));
+        assert_eq!(super::declared_return("curl_multi_getcontent"), Some("string|null"));
+        // Issue #79's reach: the rows functionMap states more richly than any
+        // envelope could, which #73 counted and dropped.
+        assert_eq!(super::declared_return("strstr"), Some("string|false"));
+        assert_eq!(super::declared_return("strrchr"), Some("string|false"));
+        assert_eq!(super::declared_return("file_get_contents"), Some("string|false"));
+        assert_eq!(super::declared_return("array_search"), Some("int|string|false"));
+        assert_eq!(super::declared_return("preg_match"), Some("0|1|false"));
+        assert_eq!(super::declared_return("ctype_alpha"), Some("bool"));
+        // A scalar refinement — the other #79 bucket. functionMap states what
+        // reflection cannot: `mb_strtoupper` never returns a lowercase character.
+        assert_eq!(super::declared_return("mb_strtoupper"), Some("uppercase-string"));
         // Case-insensitive lookup and leading-backslash trimming, as everywhere else.
-        assert_eq!(super::declared_envelope("STR_REPEAT"), Some("string"));
-        assert_eq!(super::declared_envelope("\\str_repeat"), Some("string"));
+        assert_eq!(super::declared_return("STRSTR"), Some("string|false"));
+        assert_eq!(super::declared_return("\\str_repeat"), Some("string"));
         // A name nothing covers stays silent.
-        assert_eq!(super::declared_envelope("some_unknown_fn"), None);
-        // Every value is a canonical envelope spelling — a bare scalar base or its
-        // `?T` nullable form. Anything else would be a row the consuming seam drops
-        // silently, which is exactly what generation-time filtering exists to prevent.
-        for (name, ty) in super::declared_envelopes_generated::DECLARED_ENVELOPES {
-            assert!(
-                matches!(*ty, "bool" | "int" | "float" | "string" | "?bool" | "?int" | "?float" | "?string"),
-                "{name} carries a non-envelope spelling `{ty}`"
-            );
+        assert_eq!(super::declared_return("some_unknown_fn"), None);
+
+        let t = super::declared_returns_generated::DECLARED_RETURNS;
+        assert!(t.windows(2).all(|w| w[0].0 < w[1].0), "DECLARED_RETURNS must be strictly sorted by key");
+        for (name, ty) in t {
+            assert!(!ty.is_empty(), "{name} carries an empty spelling");
         }
-        let t = super::declared_envelopes_generated::DECLARED_ENVELOPES;
-        assert!(t.windows(2).all(|w| w[0].0 < w[1].0), "DECLARED_ENVELOPES must be strictly sorted by key");
-        assert!(t.len() > 500, "the mined table should carry hundreds of rows, not {}", t.len());
+        // The mining counts, pinned. The #73 slice admitted 919 rows, every one a
+        // single-base envelope; #79 keeps all of them (the countersign still admits a
+        // row that BOUNDS the engine) and adds 439 richer ones. A drop below 919, or a
+        // collapse of the rich population, means the widened lowering regressed.
+        let rich = t.iter().filter(|(_, ty)| !ENVELOPE_SPELLINGS.contains(ty)).count();
+        assert_eq!(t.len(), 1358, "admitted rows at this pin");
+        assert_eq!(t.len() - rich, 919, "the #73 envelope population must be preserved exactly");
+        assert_eq!(rich, 439, "the issue-#79 rich admissions");
     }
 
     #[test]
-    fn declared_envelope_excludes_what_the_engine_disowns() {
+    fn declared_return_excludes_what_the_engine_disowns() {
         // The generation-time reflection cross-check is the ADR-0069 §3 answer to
         // ADR-0014's silent-rot warning, and these are its live catches at the pin:
         // functionMap says `string`, the engine's own declaration says `void`
         // (`sodium_add`) or `?string` (`xml_error_string`, a null the row would have
         // hidden), or `int` against the engine's `string` (`pg_port`). Every one is
-        // excluded and listed verbatim in `declared_envelopes.toml`.
+        // excluded and listed verbatim in `declared_returns.toml`.
+        //
+        // The #79 widening keeps ALL of them. That is the load-bearing property of the
+        // arm-wise clause: "the row refines the engine" on its own would have readmitted
+        // exactly these — `string` is a perfectly good refinement of `?string` unless
+        // dropping the engine's own `null` arm is itself a disagreement.
         for name in ["sodium_add", "sodium_increment", "xml_error_string", "pg_port", "imageinterlace"] {
-            assert_eq!(super::declared_envelope(name), None, "{name} must stay excluded");
+            assert_eq!(super::declared_return(name), None, "{name} must stay excluded");
+        }
+        for name in ["intlcal_get", "socket_cmsg_space", "ldap_compare", "pg_last_notice"] {
+            assert_eq!(super::declared_return(name), None, "{name}: the row drops an engine arm");
+        }
+        // The catches the RICH rows brought with them — the map's own rot, now visible
+        // because these rows are candidates at all. `imageloadfont` is the sharpest:
+        // functionMap still says `int|false` where PHP 8 returns a `GdFont` object.
+        for name in ["imageloadfont", "pow", "rewinddir", "substr_compare", "fpassthru"] {
+            assert_eq!(super::declared_return(name), None, "{name}: an #79 candidate the engine disowns");
         }
         // Alternate signatures that disagree on the return type exclude the name too:
-        // a floor row must state ONE envelope.
+        // a floor row must state ONE type.
         for name in ["base64_decode", "phpversion", "getenv"] {
-            assert_eq!(super::declared_envelope(name), None, "{name} has disagreeing alternates");
+            assert_eq!(super::declared_return(name), None, "{name} has disagreeing alternates");
         }
     }
 
     #[test]
-    fn declared_envelope_version_sensitivity_is_recorded() {
+    fn declared_return_version_sensitivity_is_recorded() {
         // The A11-shaped change oracle (ADR-0069 §3): `str_split` returned
         // `non-empty-list<string>` through 8.1 and `list<string>` from 8.2, so a row
         // for it is only known good at or above 8.2.
-        assert_eq!(super::declared_envelope_changed_at("str_split"), Some((8, 2)));
-        assert_eq!(super::declared_envelope_changed_at("gc_status"), Some((8, 3)));
-        assert_eq!(super::declared_envelope_changed_at("session_get_cookie_params"), Some((8, 5)));
-        assert_eq!(super::declared_envelope_changed_at("STR_SPLIT"), Some((8, 2)));
-        assert_eq!(super::declared_envelope_changed_at("str_repeat"), None);
-        assert_eq!(super::declared_envelope_changed_at("some_unknown_fn"), None);
-        let t = super::declared_envelopes_generated::ENVELOPE_VERSION_SENSITIVE;
+        assert_eq!(super::declared_return_changed_at("str_split"), Some((8, 2)));
+        assert_eq!(super::declared_return_changed_at("gc_status"), Some((8, 3)));
+        assert_eq!(super::declared_return_changed_at("session_get_cookie_params"), Some((8, 5)));
+        assert_eq!(super::declared_return_changed_at("STR_SPLIT"), Some((8, 2)));
+        assert_eq!(super::declared_return_changed_at("str_repeat"), None);
+        assert_eq!(super::declared_return_changed_at("some_unknown_fn"), None);
+        let t = super::declared_returns_generated::RETURN_VERSION_SENSITIVE;
         assert!(!t.is_empty(), "the change oracle must not be silently empty");
         assert!(
             t.windows(2).all(|w| w[0].0 < w[1].0),
-            "ENVELOPE_VERSION_SENSITIVE must be strictly sorted by key"
+            "RETURN_VERSION_SENSITIVE must be strictly sorted by key"
         );
-        // At this pin the two tables do not overlap: every version-sensitive name
-        // returns an array or a list, so none of them lowers to an envelope. The gate
-        // is still wired (and pinned in steins-infer), because a later pin can change
-        // this and a gate that only exists once it is needed is a gate that is missed.
+        // The two tables STILL do not overlap after the #79 widening: all four
+        // version-sensitive names return an array or a list, which the arm lane does
+        // not carry, so none of them reaches the shipped table. The gate stays wired
+        // (and pinned in steins-infer), because a later pin can change this and a gate
+        // that only exists once it is needed is a gate that is missed. This assertion
+        // is the tripwire: the day a version-sensitive name gains a row, it fails and
+        // the end-to-end decline gets its fixture.
         for (name, _) in t {
-            assert_eq!(super::declared_envelope(name), None, "{name}: the sets are expected disjoint at this pin");
+            assert_eq!(super::declared_return(name), None, "{name}: the sets are expected disjoint at this pin");
         }
     }
 

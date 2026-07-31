@@ -105,7 +105,10 @@ lives beside the thing it licenses.
   the rows where functionMap genuinely exceeds reflection — shaped
   arrays, `T|false` unions — are dropped at generation and counted, and
   await a contracts-grade Asserted slice that seeds through the full
-  `lower_str` lowering rather than `envelope_fact`.
+  `lower_str` lowering rather than `envelope_fact`. *(Closed for the
+  `T|false` and scalar-refinement rows by the 2026-08-01 amendment below;
+  shaped arrays and object arms stay counted-and-dropped, for a reason
+  that turned out to be the countersign rather than the lowering.)*
 - A new failure mode exists and is accepted: a floor row can be wrong for
   the user's actual runtime (a patched PHP, an exotic build). It can
   mislead a dump or a contracts-tier fact; it cannot mint a proof-layer
@@ -145,3 +148,106 @@ mechanism, its bounds and its replayability argument are ADR-0028's
 2026-08-01 amendment. The table above therefore reads across without a
 caveat: the fold lane answers a constant *or a bounded union of
 constants*, and every rung below it is unmoved.
+
+## Amendment (2026-08-01): the floor stops being envelope-only
+
+§5's "first slice is deliberately narrower than the source" named its own
+follow-up, and issue #79 is it. The floor no longer lowers through
+`envelope_fact`; it lowers through the **declared-return arm lane** — the
+same `lower_str` → `flatten_arms` → `refine_contract_arms` path a project
+function's `: string` / `@return` takes at a call site (issue #60). Three
+things follow, and none of them touches the grade.
+
+**The lowering widened; the seam did not multiply.** The #73 rung is
+*replaced*, not stacked: a bare base is a trivial arm set, so the envelope
+case is subsumed and `str_repeat` still answers `string`. What is new is
+that a `string|false` row now has somewhere to go. The rung seeds both
+carriers, exactly as the `@param` entry state does: the arm lane holds the
+declaration, and the value lane holds the one fact the arms denote *where
+they denote one*. A genuinely multi-arm row has no single fact — the value
+domain carries no scalar-union layer — so it lives in the arm lane alone,
+and the dump surface spells it through `spell_arms`, the one speller.
+
+**The countersign widened with it, and kept its catches.** Generation-time
+agreement is no longer "the row's envelope subsumes the engine's
+declaration". A row is admitted when *either* it **bounds** the engine
+(`engine ⊆ row`, the #73 rule verbatim — a coarse upper bound says less
+than the engine but nothing false) *or* it **refines** the engine
+arm-wise: every row arm under some engine arm, and every engine arm over
+some row arm. The second half of that second clause is load-bearing.
+Without it, "the row refines" readmits precisely the rows #73 caught — a
+`string` row hiding the `null` in the engine's `?string`, an `int` row
+hiding the `false` in `int|false` — because dropping an arm is
+indistinguishable from sharpening one unless you insist the engine's arms
+all survive. All 33 of the #73 exclusions are still excluded, and the
+richer candidate population brought 14 more, the sharpest being
+`imageloadfont`: functionMap still says `int|false` where PHP 8 returns a
+`GdFont`.
+
+**The numbers, re-mined at the same phpstan-src pin
+(`dcde2be6`, PHP 8.5.8) so the delta is the lowering and nothing else:**
+
+| | #73 | #79 |
+|---|---|---|
+| carriable by the lowering | 3,051 | 3,612 |
+| — of which richer than an envelope | 0 | 561 |
+| dropped: shaped arrays / lists | 388 | 388 |
+| dropped: multi-base unions | 1,119 | 630 |
+| dropped: scalar refinements | 74 | 2 |
+| dropped: objects / resource / callable | 620 | 620 |
+| dropped: void / never / mixed | 139 | 139 |
+| dropped: unparseable | 304 | 304 |
+| engine disagreements | 33 | 47 |
+| names the engine does not know | 2,099 | 2,207 |
+| **admitted** | **919** | **1,358** |
+| — of which richer than an envelope | 0 | 439 |
+
+The four unmoved drop buckets are unmoved *because* the classification is
+still made on the lowered top-level shape; the union and refinement rows
+that moved are exactly the population this slice was sized against. The
+919 envelope admissions are preserved name for name.
+
+**What `lower_str` did and did not cover.** It covered every scalar arm
+the contract vocabulary has: the four bases, their literals, `null`, the
+integer intervals (`int<lo, hi>`, `positive-int`, `non-negative-int`) and
+the string predicate classes (`non-empty-string`, `non-falsy-string`,
+`numeric-string`, `lowercase-string`, `uppercase-string`) — and any union
+of them, which is what admitted the `T|false` family whole. Nothing was
+stretched to make that happen.
+
+It did **not** cover, and §5's deferral therefore stands for:
+
+- **Shaped arrays (388).** `lower_str` parses them perfectly well —
+  `array{a: int}`, `list<string>`, `array<string, int>` all lower. The
+  blocker is downstream and it is two-part: seeding needs the shape lane
+  (`to_shape_fact` / `seed_shape_fact`, which admits a *single* array
+  arm), and — decisively — `normalize::subsumes` has no denotation for an
+  array arm and answers `Maybe`, so the engine countersign would be
+  vacuous for every one of these rows. A shape-aware acceptance relation
+  is what unblocks them, not more lowering.
+- **Objects, class names, `callable`, `resource`, intersections (620).**
+  The same vacuity, for the same reason: `subsumes` falls to the reflexive
+  is-a floor here, and steins-contract carries no hierarchy. These rows
+  would enter uncountersigned, which is the one thing §3 refuses.
+- **`void` / `never` / `mixed` and the `mixed`-minus cuts (139).** Nothing
+  to state.
+- **The 304 unparseable rows** (PHPStan-internal spellings such as
+  `__benevolent<…>`, and rows with an empty return type) and the opaque
+  string form, which `spell_arms` cannot spell back.
+- **The 6,658 method rows**, untouched — the floor is still function-keyed.
+
+**Everything else is unchanged and re-pinned.** Asserted stratum, per-name
+engine silence, engine-wins, the A11 version gate, and the absence family's
+non-consumption all carry over verbatim, and `declared_return_floor.rs`
+re-asserts each of them on a rich row as well as an envelope one. The
+proof-layer negative pin is extended to the `T|false` case explicitly: a
+row that says a call *can* return `false` is a strictly stronger premise
+than an envelope, so it is the one most worth proving the firewall against.
+The two mined tables remain disjoint at this pin (all four
+version-sensitive names return arrays), so the version gate's end-to-end
+decline still has no fixture; the catalog test asserting that disjointness
+is the tripwire that will demand one.
+
+Naming caught up with the data: the table, its TOML and its accessors are
+`declared_return` rather than `declared_envelope`, because a
+`string|false` row is not an envelope in this codebase's vocabulary.

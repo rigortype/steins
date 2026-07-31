@@ -271,7 +271,16 @@ fn the_declined_projections_say_nothing() {
     // `array_slice` (offset/length govern the key structure) and the value side
     // of `array_search` are v1 declines — honest silence, not a wrong widening.
     assert_eq!(dump("array{a: int, b?: int}", "array_slice($v, 1)"), "dumped type: unknown");
-    assert_eq!(dump("array{a: int, b?: int}", "array_search(1, $v)"), "dumped type: unknown");
+    // `array_search` still declines HERE: what answers is the rung below, ADR-0069's
+    // Asserted declared-return floor, and the `(asserted)` marker is the difference.
+    // This projection would have said `'a'|'b'`; it says nothing, and the catalog's
+    // `int|string|false` row speaks instead. The row is a multi-base union that issue
+    // #73 counted and dropped, so this pin moved with the #79 widened lowering rather
+    // than with anything in this family.
+    assert_eq!(
+        dump("array{a: int, b?: int}", "array_search(1, $v)"),
+        "dumped type: int|string|false (asserted)"
+    );
 }
 
 #[test]
