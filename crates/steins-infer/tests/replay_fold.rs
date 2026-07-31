@@ -174,6 +174,55 @@ fn reflect_drives_the_builtin_return_fact() {
     assert_eq!(folder.builtin_return_type("strlen").as_deref(), Some("int"));
 }
 
+/// Issue #76: the arity second leg reaches the **replay** transport through the
+/// same `reflect` table entry the declaration comes from — no new wire method, so
+/// the browser lane needs nothing beyond the runner it already ships.
+#[test]
+fn reflect_drives_the_parameter_counts_over_the_replay_transport() {
+    let mut t = pinned_env_table();
+    with_reflect(
+        &mut t,
+        "substr",
+        serde_json::json!({
+            "kind": "reflection",
+            "target": "substr",
+            "function": true,
+            "class_like": false,
+            "return_type": "string",
+            "params_total": 3,
+            "params_required": 2,
+        }),
+    );
+    // A row recorded BEFORE the arity surface existed: it still answers the
+    // declaration, and reports no arity — which withholds an arity-pinned rule
+    // instead of admitting it un-countersigned.
+    with_reflect(&mut t, "strlen", fn_reflection("strlen", "int"));
+    let mut folder = TableFolder::with_table(t);
+    assert_eq!(folder.builtin_param_counts("substr"), Some((3, 2)));
+    assert_eq!(folder.builtin_return_type("substr").as_deref(), Some("string"));
+    assert_eq!(folder.builtin_param_counts("strlen"), None, "a pre-arity row answers no arity");
+    assert_eq!(folder.builtin_return_type("strlen").as_deref(), Some("int"));
+    // Case-insensitive, memoized per name, and no extra traffic for either.
+    assert_eq!(folder.builtin_param_counts("SUBSTR"), Some((3, 2)));
+    assert!(folder.pending().is_empty());
+}
+
+/// The gate the arity surface inherits: without a live engine (`env` unanswered)
+/// nothing is reflected at all, so the counts are silent too.
+#[test]
+fn the_parameter_counts_are_withheld_without_a_live_engine() {
+    let engine = FakeEngine::new("8.5.8", Some(8)).with_arity("substr", "string", 3, 2);
+    let mut folder = EngineFolder::with_engine(engine);
+    assert_eq!(folder.builtin_param_counts("substr"), Some((3, 2)));
+    // A monkey-patch extension voids the whole surface (ADR-0049 A9) — a redefined
+    // builtin disowns its signature exactly as it disowns its declared type.
+    let mut engine = FakeEngine::new("8.5.8", Some(8)).with_arity("substr", "string", 3, 2);
+    engine.env.as_mut().expect("env").extensions.push("uopz".to_owned());
+    let mut folder = EngineFolder::with_engine(engine);
+    assert_eq!(folder.builtin_param_counts("substr"), None);
+    assert_eq!(folder.builtin_return_type("substr"), None);
+}
+
 // ---------------------------------------------------------------------------
 // (ii) The shared gates, driven through a fake engine
 // ---------------------------------------------------------------------------

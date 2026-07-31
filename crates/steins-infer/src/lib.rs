@@ -17729,42 +17729,127 @@ fn shape_builtin_return_fact(
 /// It carries the same sidecar-presence and A9 monkey-patch legs the ADR-0061 §2
 /// envelope gate does, so a redefined builtin, or a run with no PHP, withholds
 /// the rule rather than trusting it.
+///
+/// # The read-position family and its arity second leg (ADR-0064 Amendment B)
+///
+/// The ten names `current reset end next prev key array_pop array_shift
+/// array_first array_last` read *a position* rather than restructuring the array,
+/// so their answer is drawn from the shape's **value** union (or, for `key`, its
+/// key union) rather than from a new shape. `key` reuses the `array_key_first`
+/// arm verbatim — same widening, same real `string|int|null` pin.
+///
+/// The nine value forms declare a bare **`mixed`**, which pins nothing: every rule
+/// output is inside `mixed`, so the declaration check degenerates to a presence
+/// test. ADR-0064 Amendment B rules that inadmissible and requires the **arity
+/// second leg** — [`Folder::builtin_param_counts`] must report the signature the
+/// rule was written against (`(1, 1)` for all ten, measured at `PINNED_PHP`).
+/// An engine that cannot answer the arity withholds the rule exactly as an engine
+/// silent on the declaration does.
+///
+/// **The internal pointer is not modeled**, and that boundary is where each arm's
+/// `false`/`null` arm comes from (probes at 8.5.8):
+///
+/// * `next`/`prev` are **unconditionally** `∪ false` — they step off the end of
+///   even a non-empty array (`$a = [1]; next($a) === false`).
+/// * `current`/`reset`/`end` add `false` only when the shape may be empty
+///   (`current([]) === false`); on a non-empty shape they take the union alone,
+///   which is upstream PHPStan's position too. It assumes the pointer has not
+///   already been advanced past the end — the one place this family reads a
+///   runtime state Steins does not carry. It is tolerable exactly here: the fact
+///   is shape-derived, so ADR-0062 A-G9's corollary keeps it out of every
+///   proof-layer premise, and the fp-gate is the standing instrument.
+/// * `array_pop`/`array_shift`/`array_first`/`array_last` never touch the pointer;
+///   they add `null` on a possibly-empty shape (`array_pop($e = []) === null`).
+///
+/// A `∪ false` that the four-layer domain cannot spell — `int|false` is a
+/// two-base union with no single [`Fact`] — **declines**, exactly as `json_decode`
+/// does in the sibling dispatch rung. A rule that cannot state its own answer says
+/// nothing.
+///
+/// **Mutation is not this function's business, and must not be.** Six of the ten
+/// (`array_pop array_shift next prev reset end`) take argument 0 by reference and
+/// move or shorten it. The *return* is computed from the pre-call shape, which is
+/// correct; the argument's own fact is dropped after the statement by the walk's
+/// unconditional call-argument invalidation (`Stmt::invalidated`, fed by
+/// `collect_call_vars`), and `steins_catalog::out_params` carries all six so the
+/// ADR-0063 §2.3 by-ref coloring agrees. No stale shape survives a mutating call.
 fn shape_projection_fact(
     cx: &Cx,
     folder: &mut dyn Folder,
     name: &str,
     shape: &ShapeFact,
 ) -> Option<Fact> {
-    /// The `(string)` renderings of `array_key_first`/`array_key_last`'s declared
-    /// return type. PHP 8 renders the union in its own order; both are accepted so
-    /// the gate tests the *declaration*, not the engine's spelling of it.
+    /// The `(string)` renderings of `array_key_first`/`array_key_last`/`key`'s
+    /// declared return type. PHP 8 renders the union in its own order; both are
+    /// accepted so the gate tests the *declaration*, not the engine's spelling of it.
     const KEY_OR_NULL: &[&str] = &["string|int|null", "int|string|null"];
     const ARRAY: &[&str] = &["array"];
+    /// The read-position family's declaration: `mixed`, which pins nothing on its
+    /// own — every arm using it MUST carry [`ARITY_1`] (ADR-0064 Amendment B, and
+    /// the `debug_assert!` at the gate below).
+    const MIXED: &[&str] = &["mixed"];
+    /// The read-position family's live signature at `PINNED_PHP`: one parameter,
+    /// required. Measured, not assumed — see `reflect_reports_the_parameter_counts`.
+    const ARITY_1: Option<(u32, u32)> = Some((1, 1));
 
     let lower = name.to_ascii_lowercase();
-    let (out, declared): (Fact, &[&str]) = match lower.as_str() {
+    let (out, declared, arity): (Fact, &[&str], Option<(u32, u32)>) = match lower.as_str() {
         // `array_values($x)`: the values in witnessed order, reindexed. The key
         // structure is gone (a list), the value set is preserved exactly, and an
         // array with an entry still has one after the projection.
-        "array_values" => (shape_fact(project_values(shape)), ARRAY),
+        "array_values" => (shape_fact(project_values(shape)), ARRAY, None),
         // `array_keys($x)`: a list whose ELEMENTS are the keys. Enumerable only
         // under a sealed tail, where every present key is a declared key.
-        "array_keys" => (shape_fact(project_keys(shape)), ARRAY),
+        "array_keys" => (shape_fact(project_keys(shape)), ARRAY, None),
         // `array_flip($x)`: keys and values swap. Both bounds widen (see the
         // helper), and `non_empty` is *dropped* — flip silently skips an entry
         // whose value is not `int|string`, so a non-empty input can flip to `[]`.
-        "array_flip" => (shape_fact(project_flip(shape)), ARRAY),
+        "array_flip" => (shape_fact(project_flip(shape)), ARRAY, None),
         // `array_reverse($x)` — the one-argument form only, whose `$preserve_keys`
         // is `false`: string keys survive, integer keys are renumbered.
-        "array_reverse" => (shape_fact(project_reverse(shape)), ARRAY),
+        "array_reverse" => (shape_fact(project_reverse(shape)), ARRAY, None),
         // `array_key_first`/`array_key_last`: **SOME key of the set**, never the
         // declared-first one — ADR-0062 §2's rule at its sharpest. `null` joins in
         // unless the shape proves the array is non-empty (PHP returns `null` for
         // `[]`).
-        "array_key_first" | "array_key_last" => {
+        //
+        // `key($x)` reads the key AT THE INTERNAL POINTER, which is the same
+        // widening — some key of the set, or `null` — so it shares this arm
+        // verbatim, and shares the real `string|int|null` pin with it (the one
+        // member of the read-position family whose declaration says something).
+        "array_key_first" | "array_key_last" | "key" => {
             let keys = shape_key_union(shape)?;
             let out = if shape.non_empty { keys } else { fact_admitting_null(&keys)? };
-            (out, KEY_OR_NULL)
+            (out, KEY_OR_NULL, None)
+        }
+        // ---- The read-position VALUE forms: `mixed` declaration + arity pin ----
+        //
+        // `array_pop`/`array_shift` take the last/first entry OFF the array and
+        // return it; `array_first`/`array_last` (PHP 8.5) read the same entries
+        // without mutating. All four ignore the internal pointer, and all four
+        // return `null` — not `false` — on an empty array.
+        "array_pop" | "array_shift" | "array_first" | "array_last" => {
+            (read_position_value(shape, Val::Null)?, MIXED, ARITY_1)
+        }
+        // `reset`/`end` move the pointer to the first/last entry and return it;
+        // `current` returns the entry at wherever the pointer already is. Their
+        // empty-array answer is `false` (`current([]) === false`), and on a
+        // non-empty shape they take the value union alone — the pointer assumption
+        // documented above.
+        "current" | "reset" | "end" => {
+            (read_position_value(shape, Val::Bool(false))?, MIXED, ARITY_1)
+        }
+        // `next`/`prev` STEP the pointer, and a step off either end returns `false`
+        // — from a non-empty array just as readily as from an empty one
+        // (`$a = [1]; next($a) === false`; `$a = [1, 2]; prev($a) === false`). So
+        // the `false` arm is unconditional here, and `non_empty` buys nothing.
+        "next" | "prev" => {
+            let out = if shape.can_be_non_empty() {
+                fact_admitting_false(&shape_value_union(shape)?)?
+            } else {
+                Fact::Singleton(Val::Bool(false))
+            };
+            (out, MIXED, ARITY_1)
         }
         // Declined in v1 (stated in the ADR-0062 S7 report): `array_slice` (its
         // offset/length arguments govern the result's key structure, and this seam
@@ -17773,11 +17858,64 @@ fn shape_projection_fact(
         // value-side of `in_array`/`array_search`.
         _ => return None,
     };
+    // ADR-0064 Amendment B, enforced structurally: a `mixed` declaration pin is
+    // inadmissible on its own, so every arm declaring it carries an arity pin.
+    debug_assert!(
+        !declared.iter().any(|d| d.eq_ignore_ascii_case("mixed")) || arity.is_some(),
+        "{lower}: a `mixed` declaration pin requires the arity second leg"
+    );
     if cx.index.has_simple_function(name) {
         return None;
     }
     let reflected = folder.builtin_return_type(name)?;
-    declared.iter().any(|d| d.eq_ignore_ascii_case(&reflected)).then_some(out)
+    if !declared.iter().any(|d| d.eq_ignore_ascii_case(&reflected)) {
+        return None;
+    }
+    // The second leg. An engine that answers no arity (an older runner, a canned
+    // replay table recorded before the field) withholds, same as a silent
+    // declaration; an arity that is not the one the rule was written against means
+    // this engine's signature has moved and the rule is stale.
+    if let Some(pin) = arity
+        && folder.builtin_param_counts(name)? != pin
+    {
+        return None;
+    }
+    Some(out)
+}
+
+/// One entry of an admitted array, read by position: the shape's value union, plus
+/// `empty` when the shape does not prove the array is non-empty.
+///
+/// `empty` is the builtin's own empty-array answer — [`Val::Null`] for the
+/// `array_pop`/`array_first` half of the family, `false` for the pointer half. A
+/// union the addition makes unspellable (`int|false` is two bases) declines.
+///
+/// A shape that admits **only** `[]` (a sealed tail with no present field) answers
+/// with the empty-array value exactly: `current(array{})` is `false`, and
+/// `array_first(array{})` is `null`. That case has to be taken before the value
+/// union, which is `None` there for the uninformative reason — an empty join, not
+/// an unrepresentable one.
+fn read_position_value(shape: &ShapeFact, empty: Val) -> Option<Fact> {
+    if !shape.can_be_non_empty() {
+        return Some(Fact::Singleton(empty));
+    }
+    let values = shape_value_union(shape)?;
+    if shape.non_empty {
+        return Some(values);
+    }
+    match empty {
+        Val::Null => fact_admitting_null(&values),
+        other => values.join(&Fact::Singleton(other)),
+    }
+}
+
+/// Add `false` to a fact's denotation. Unlike `null` there is no side-flag for it,
+/// so this is the plain domain join: finite layers absorb it as another member, and
+/// an abstract non-`bool` base yields `None` — `int|false` is a two-base union the
+/// four-layer domain does not name, and a rule that cannot state its answer
+/// declines (ADR-0061 §1).
+fn fact_admitting_false(f: &Fact) -> Option<Fact> {
+    f.join(&Fact::Singleton(Val::Bool(false)))
 }
 
 /// **The argument-dispatched transfers** (ADR-0064 seam ii, the DR3 batch).
