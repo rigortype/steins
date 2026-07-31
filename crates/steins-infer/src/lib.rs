@@ -5645,7 +5645,6 @@ impl Store {
     /// The returned arms are the seeded declared type minus every guard subtraction
     /// on the live branch (e.g. `{Guest}` after the else of `instanceof User` over
     /// `User|Guest`); each carries its stratum for the min-premise rule.
-    #[allow(dead_code)] // consumed by ADR-0049 S6; N4 builds the lane, emits nothing
     fn contract_arms(&self, var: &str) -> Option<&[ContractArm]> {
         self.contract.get(var).map(Vec::as_slice)
     }
@@ -7053,7 +7052,7 @@ fn best_dump_type(
     // does at the assignment seam, and carries the argument's stratum.
     if let ArgValue::Call(name, args) = value
         && let Some((fact, stratum)) =
-            shape_builtin_return_fact(cx, folder, name, args, env, poisoned)
+            shape_builtin_return_fact(cx, folder, name, args, env, Some(store), poisoned)
     {
         return DumpRendering {
             text: render_dump_fact(&fact),
@@ -7484,6 +7483,7 @@ fn apply_assign(
                         name,
                         args,
                         env,
+                        Some(&*store),
                         w.scope.poisoned,
                     ) =>
                 {
@@ -17663,6 +17663,7 @@ fn shape_builtin_return_fact(
     name: &str,
     args: &[ArgValue],
     env: &HashMap<String, Known>,
+    store: Option<&Store>,
     poisoned: bool,
 ) -> Option<(Fact, Stratum)> {
     if poisoned {
@@ -17672,7 +17673,7 @@ fn shape_builtin_return_fact(
     // seam, one step earlier: its rules read arguments this rung's single-shape
     // pattern cannot even bind (a separator, a literal flag, a subject's base).
     // Declining falls straight through to the shape rung below, unchanged.
-    if let Some(out) = arg_dispatch_return_fact(cx, folder, name, args, env) {
+    if let Some(out) = arg_dispatch_return_fact(cx, folder, name, args, env, store) {
         return Some(out);
     }
     let [ArgValue::Var(var)] = args else { return None };
@@ -17951,6 +17952,7 @@ fn arg_dispatch_return_fact(
     name: &str,
     args: &[ArgValue],
     env: &HashMap<String, Known>,
+    store: Option<&Store>,
 ) -> Option<(Fact, Stratum)> {
     /// `explode`/`range`: `array` (PHP 8.5.8 `ReflectionFunction::getReturnType`).
     const ARRAY: &[&str] = &["array"];
@@ -17959,19 +17961,34 @@ fn arg_dispatch_return_fact(
     /// `preg_replace`: the three-member union, either rendering order.
     const PREG_REPLACE: &[&str] = &["array|string|null", "string|array|null"];
 
-    let (out, declared): (Fact, &[&str]) = match name.to_ascii_lowercase().as_str() {
-        "explode" => (explode_transfer(cx, folder, args, env)?, ARRAY),
-        "range" => (range_transfer(cx, folder, args, env)?, ARRAY),
-        "preg_replace" => (preg_replace_transfer(cx, folder, args, env)?, PREG_REPLACE),
-        "var_export" => (var_export_transfer(cx, folder, args, env)?, NULLABLE_STRING),
+    let lower = name.to_ascii_lowercase();
+    let (out, declared): (Fact, &[&str]) = match lower.as_str() {
+        "explode" => (explode_transfer(cx, folder, args, env, store)?, ARRAY),
+        "range" => (range_transfer(cx, folder, args, env, store)?, ARRAY),
+        "preg_replace" => (preg_replace_transfer(cx, folder, args, env, store)?, PREG_REPLACE),
+        "var_export" => (var_export_transfer(cx, folder, args, env, store)?, NULLABLE_STRING),
         // `json_decode` is the batch's recorded DECLINE, not an omission: its
         // reflected declaration is bare `mixed`, and the soundest envelope any
         // flag combination admits — `$assoc = true` still allows
         // `array|int|float|string|bool|null` — is a six-base union the four-layer
         // domain has no single `Fact` for (`envelope_fact`'s multi-base `None`).
         // A rule that cannot state its own answer declines (ADR-0061 §1).
-        _ => return None,
+        //
+        // The string-predicate transfer family (issue #77) is keyed inside its own
+        // table rather than spelled out here — ~25 names sharing one `string` pin
+        // (`strlen`: `int`), so a per-name arm would be a transcription of that
+        // table with nothing added.
+        other => str_pred_transfer(cx, folder, other, args, env, store)?,
     };
+    // ADR-0064 Amendment B, enforced structurally at this rung too: a bare `mixed`
+    // pin countersigns nothing, so no arm here may name one. This rung has no arity
+    // second leg to offer (its rules read arguments, not a single shape, and none of
+    // its names declares `mixed`), so the assertion is a *refusal* rather than an
+    // obligation — `json_decode`'s `mixed` is the recorded decline above.
+    debug_assert!(
+        !declared.iter().any(|d| d.eq_ignore_ascii_case("mixed")),
+        "{lower}: a bare `mixed` declaration pin is inadmissible at the dispatch rung"
+    );
     if cx.index.has_simple_function(name) {
         return None;
     }
@@ -17979,7 +17996,15 @@ fn arg_dispatch_return_fact(
     if !declared.iter().any(|d| d.eq_ignore_ascii_case(&reflected)) {
         return None;
     }
-    let stratum = args.iter().fold(Stratum::Verified, |acc, v| acc.min(value_stratum(v, env, None)));
+    // ADR-0061 §3's derivation clause, over the facts the rules actually read: an
+    // argument answered from the declared arm lane contributes that lane's own
+    // (`Asserted`) stratum, and everything else contributes what it always did.
+    let stratum = args.iter().fold(Stratum::Verified, |acc, v| {
+        acc.min(
+            transfer_arg_known(cx, folder, v, env, store)
+                .map_or_else(|| value_stratum(v, env, store), |(_, s)| s),
+        )
+    });
     Some((out, stratum))
 }
 
@@ -17991,12 +18016,73 @@ fn transfer_arg_fact(
     folder: &mut dyn Folder,
     value: &ArgValue,
     env: &HashMap<String, Known>,
+    store: Option<&Store>,
 ) -> Option<Fact> {
+    transfer_arg_known(cx, folder, value, env, store).map(|(fact, _)| fact)
+}
+
+/// The same fact **with the stratum it enters at** — the two are computed together
+/// because the second leg below can change both at once.
+///
+/// The env fact is the first answer, as it always was. Where it is only the
+/// *envelope* (`Fact::General`, which is what a native `string $s` parameter seeds
+/// and says nothing this rung can transfer), the **declared contract arm lane** is
+/// consulted instead: `@param non-empty-string $s` on a natively-typed `string`
+/// parameter lives there and nowhere else, because ADR-0052 §9's entry-state
+/// seeding puts only *array* arms into the value lane (ADR-0062 A-G9's corollary),
+/// leaving every scalar refinement in the arm lane for the contract surface.
+///
+/// Reading it here is the narrowest possible widening of that seam: nothing about
+/// entry state moves, the variable's own dump is unchanged, and only a rule that
+/// asked for this argument sees it. The arm's own stratum comes with it, so a
+/// refinement the docblock merely *claims* enters `Asserted` and can never premise
+/// a proof-layer finding (ADR-0061 §3's derivation clause). An arm lane that
+/// lowers to no better than the envelope contributes nothing, so a plain native
+/// `string $s` keeps the `Verified` stratum it already had.
+fn transfer_arg_known(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<(Fact, Stratum)> {
     if let ArgValue::Var(v) = value {
-        return env.get(v).and_then(|k| k.fact.clone());
+        let known = env.get(v);
+        let env_fact = known.and_then(|k| k.fact.clone());
+        let env_stratum = known.map_or(Stratum::Verified, |k| k.stratum);
+        if let Some(fact) = env_fact.clone()
+            && !matches!(fact, Fact::General { .. })
+        {
+            return Some((fact, env_stratum));
+        }
+        if let Some(arms) = store.and_then(|s| s.contract_arms(v))
+            && let Some((fact, stratum)) = declared_arm_known(arms)
+            && !matches!(fact, Fact::General { .. })
+        {
+            return Some((fact, stratum));
+        }
+        return env_fact.map(|f| (f, env_stratum));
     }
     let lit = cx.resolve_literal(value, env, false, folder)?;
-    singleton_fact(&lit, cx.php_minor)
+    Some((singleton_fact(&lit, cx.php_minor)?, value_stratum(value, env, store)))
+}
+
+/// The declared contract lane as ONE fact, with the weakest stratum any arm of it
+/// carries. Every arm must lower ([`steins_contract::to_fact`]) and the domain must
+/// be able to join them — `'foo'|'bar'` becomes a `OneOf`, `int|string` declines,
+/// which is the same honest floor the value-slot lowering takes everywhere else.
+fn declared_arm_known(arms: &[ContractArm]) -> Option<(Fact, Stratum)> {
+    let mut acc: Option<Fact> = None;
+    let mut stratum = Stratum::Verified;
+    for arm in arms {
+        let f = steins_contract::to_fact(&arm.ty)?;
+        stratum = stratum.min(arm.stratum);
+        acc = Some(match acc {
+            None => f,
+            Some(prev) => prev.join(&f)?,
+        });
+    }
+    Some((acc?, stratum))
 }
 
 /// `explode($separator, $string)` → **`non-empty-list<string>`**.
@@ -18020,10 +18106,11 @@ fn explode_transfer(
     folder: &mut dyn Folder,
     args: &[ArgValue],
     env: &HashMap<String, Known>,
+    store: Option<&Store>,
 ) -> Option<Fact> {
     // Exactly two arguments — see the `$limit` witness above.
     let [sep, _string] = args else { return None };
-    let sep = transfer_arg_fact(cx, folder, sep, env)?;
+    let sep = transfer_arg_fact(cx, folder, sep, env, store)?;
     // The `$string` argument is deliberately unread: it is declared `string`, so
     // anything reaching the body is one (or was coerced to one), and every string
     // splits to at least one string piece.
@@ -18061,6 +18148,7 @@ fn range_transfer(
     folder: &mut dyn Folder,
     args: &[ArgValue],
     env: &HashMap<String, Known>,
+    store: Option<&Store>,
 ) -> Option<Fact> {
     // `range` accepts two or three arguments; any other arity is an
     // `ArgumentCountError`, and the seam refuses to describe a call PHP rejects.
@@ -18071,7 +18159,7 @@ fn range_transfer(
     for a in args {
         // No short-circuit: every argument's fact is read, so the decision is a
         // function of the whole call rather than of evaluation order.
-        integral &= transfer_arg_fact(cx, folder, a, env).as_ref().is_some_and(fact_is_int);
+        integral &= transfer_arg_fact(cx, folder, a, env, store).as_ref().is_some_and(fact_is_int);
     }
     Some(list_transfer_fact(
         true,
@@ -18100,6 +18188,7 @@ fn preg_replace_transfer(
     folder: &mut dyn Folder,
     args: &[ArgValue],
     env: &HashMap<String, Known>,
+    store: Option<&Store>,
 ) -> Option<Fact> {
     if !(3..=5).contains(&args.len()) {
         return None;
@@ -18107,7 +18196,7 @@ fn preg_replace_transfer(
     let string_or_null = || Fact::General { base: Base::String, nullable: true };
     let array_or_null =
         || Fact::Shape { shape: Box::new(ShapeFact::plain_array()), nullable: true };
-    match transfer_arg_fact(cx, folder, &args[2], env)? {
+    match transfer_arg_fact(cx, folder, &args[2], env, store)? {
         Fact::Singleton(Val::Str(_)) => Some(string_or_null()),
         Fact::Singleton(Val::Array(_)) => Some(array_or_null()),
         Fact::OneOf(ref vals) if vals.iter().all(|v| matches!(v, Val::Str(_))) => {
@@ -18143,11 +18232,495 @@ fn var_export_transfer(
     folder: &mut dyn Folder,
     args: &[ArgValue],
     env: &HashMap<String, Known>,
+    store: Option<&Store>,
 ) -> Option<Fact> {
     let [_value, flag] = args else { return None };
-    let flag = transfer_arg_fact(cx, folder, flag, env)?;
+    let flag = transfer_arg_fact(cx, folder, flag, env, store)?;
     (flag == Fact::Singleton(Val::Bool(true)))
         .then_some(Fact::General { base: Base::String, nullable: false })
+}
+
+/// **The string-predicate transfers** (issue #77) — the residual half of the names
+/// whose constant half the fold lane already owns.
+///
+/// A string builtin called on a *known constant* folds to a Singleton one rung up
+/// (ADR-0028). Called on a string the walk only knows *predicates* about —
+/// `non-empty-string`, `lowercase-string`, a `'foo'|'bar'` union — nothing computed
+/// before this table. It answers one question per name: **which
+/// [`StrPreds`](steins_domain::StrPreds) bits survive the call, and which does the
+/// call establish on its own?**
+///
+/// The shape is uniform, so the whole family is one rule rather than twenty-five:
+///
+/// ```text
+/// out = (preds(arg0) ∩ KEEP(name, args)) ∪ FORCE(name, args)
+/// ```
+///
+/// with `out == ∅` meaning **decline** — an empty summary is exactly the reflected
+/// `string` envelope, and restating an envelope would put a stratum-carrying fact
+/// where a `Verified` one already stands (ADR-0061 §3's replace-if-weaker
+/// corollary, the same reason [`var_export_transfer`] declines its one-argument
+/// form). `strlen` is the one member whose output is not a string: a non-empty
+/// subject makes it `int<1, max>`, one notch inside the curated `int<0, max>` row.
+///
+/// # What the two casing bits MEAN here, and why the forced leg is total
+///
+/// `LOWERCASE` is `strtolower($s) === $s`, which
+/// [`php_str_is_lowercase`](steins_domain::php_str_is_lowercase) implements as **no
+/// ASCII uppercase byte** — PHP 8.2+ made the two case functions locale-insensitive
+/// and byte-wise, so nothing outside `A-Z`/`a-z` participates. Two consequences the
+/// table leans on, both probed at `PINNED_PHP` (8.5.8):
+///
+/// * `strtolower('ÄB') === 'Äb'` — the non-ASCII byte is untouched, and the result
+///   still has no ASCII uppercase byte. So `strtolower` **forces** `LOWERCASE` for
+///   *any* input, including one carrying no fact at all, and `strtoupper` mirrors it
+///   (`strtoupper('äb') === 'äB'`). This is the one leg that fires without reading
+///   the subject: the claim is about the function, not its argument.
+/// * A transfer that only ever *removes* bytes or *inserts* uncased ones preserves
+///   both casing bits — `trim`, `substr`, `strrev`, `str_repeat`, `implode`. That is
+///   why an explicit `trim` charlist changes nothing here: the output is still a
+///   substring of the input.
+///
+/// # The table as it landed
+///
+/// | name(s) | keeps | forces | declines |
+/// | --- | --- | --- | --- |
+/// | `trim ltrim rtrim chop` | casing | — | length (`trim('  ') === ''`) |
+/// | `substr` | casing | — | length in v1 (`substr('abc', 0, 0) === ''`) |
+/// | `strrev` | casing + length | — | — |
+/// | `str_repeat` | casing always; length at a provable multiplier ≥ 1 | — | length at `str_repeat('a', 0) === ''` |
+/// | `str_pad` | length; casing when the pad argument carries it | `NON_EMPTY` at a provable length ≥ 1 | casing under an unknown pad |
+/// | `strtolower` / `strtoupper` | length | `LOWERCASE` / `UPPERCASE` | the opposite casing |
+/// | `ucfirst` / `ucwords` | length + `UPPERCASE` | — | `LOWERCASE` (`ucfirst('abc') === 'Abc'`) |
+/// | `lcfirst` | length + `LOWERCASE` | — | `UPPERCASE` |
+/// | `implode` / `join` | casing, over the glue **and** every element | — | length (an empty array implodes to `''`) |
+/// | `addslashes addcslashes escapeshellarg urlencode rawurlencode preg_quote` | length | — | casing |
+/// | `htmlspecialchars` / `htmlentities` | length, **only** under `ENT_SUBSTITUTE` | — | casing; everything under a non-constant flags argument |
+/// | `urldecode` / `rawurldecode` | `NON_EMPTY` only | — | `NON_FALSY` (`urldecode('%30') === '0'`) |
+/// | `sprintf` | — | `NON_EMPTY` at a constant format with a literal byte | everything else |
+/// | `strlen` | — | `int<1, max>` at a non-empty subject | — |
+///
+/// Only those four bits move. `NUMERIC`, `DECIMAL_INT` and `NON_DECIMAL_INT` are
+/// never propagated even where they would survive (`ucfirst(' 1e5')` is still
+/// numeric): dropping a bit is a widening, and keeping the table to the axis the
+/// slice measured is worth more than the two rows it would buy.
+///
+/// # The declines, each for a stated reason
+///
+/// * **`escapeshellcmd`** — in upstream PHPStan's own non-empty set, and **wrong**
+///   there: `escapeshellcmd("\x80") === ''` at 8.5.8 (it drops an invalid multibyte
+///   sequence). A measured counterexample outranks upstream's say-so (ADR-0061 §2:
+///   "upstream's say-so is provenance, not evidence"), so the name is refused.
+/// * **`urldecode`/`rawurldecode` keep `NON_EMPTY` only** — upstream propagates
+///   non-falsiness through them too, and `urldecode('%30') === '0'` refutes it.
+/// * **Any `mb_*` name** — encoding- and locale-dependent, the catalog's standing
+///   exclusion (`steins_catalog` lib.rs "Deliberate exclusions"). `mb_strtolower`
+///   and `mb_substr` are *absent by that rule*, not by oversight.
+/// * **`substr` non-emptiness** — `substr($nonEmpty, 0, 1)` really is non-empty, but
+///   only once offset and length are both known to select a character inside the
+///   subject's bounds, and the subject's length is exactly what a predicate summary
+///   does not carry. v1 keeps casing and says nothing about length.
+/// * **`sprintf` casing, and every non-constant format** — a conversion may emit
+///   uppercase (`sprintf('%X', 255) === 'FF'`) or nothing at all
+///   (`sprintf('%.0s', 'abc') === ''`), so only a *literal byte in a constant
+///   format* is claimed, and the scanner refuses any format it cannot parse.
+/// * **`str_replace`/`substr_replace`/`parse_str`** — nsrt asks for casing through
+///   them too; they need a second subject's predicates (or an out-parameter) rather
+///   than this table's single-subject shape. Left for a later slice.
+///
+/// # Unions are read directly (the #75 survey's nuance)
+///
+/// A `Fact::OneOf` of constant strings answers by **intersecting** each member's
+/// summary — `'foo'|'bar'` is `LOWERCASE`, and `trim($fooOrBar, $s)` is a
+/// `lowercase-string`. That path needs no fold and is not blocked on #74, which
+/// gates only the sidecar route; [`fact_str_preds`] is the whole of it.
+fn str_pred_transfer(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    lower: &str,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<(Fact, &'static [&'static str])> {
+    /// Every member of the family declares a real `string` (PHP 8.5.8
+    /// `ReflectionFunction::getReturnType`, non-tentative) — a pin that moves when
+    /// php-src adds an arm, so ADR-0064 Amendment B's `mixed` hole never opens here.
+    const STRING: &[&str] = &["string"];
+    /// `strlen` is the one member returning an `int`.
+    const INT: &[&str] = &["int"];
+
+    if lower == "strlen" {
+        // `strlen($nonEmpty)` is `int<1, max>`: one byte in, one byte counted. The
+        // curated `int<0, max>` row (ADR-0056 R3) stays the floor for every other
+        // subject, and this narrows strictly inside it.
+        let [subject] = args else { return None };
+        let preds = arg_str_preds(cx, folder, subject, env, store)?;
+        if !preds.contains_all(StrPreds::NON_EMPTY) {
+            return None;
+        }
+        return Some((Fact::refined(Base::Int, Refinement::Int(IntRange::POSITIVE), false), INT));
+    }
+    let out = str_pred_out(cx, folder, lower, args, env, store)?;
+    if out.is_empty() {
+        return None;
+    }
+    Some((Fact::refined(Base::String, Refinement::Str(out), false), STRING))
+}
+
+/// The table itself: the output predicate summary for one call, or `None` where the
+/// name is not a member (or its arity is not one this rule was written against).
+/// Every arm is authored from `php -r` probes at `PINNED_PHP` and php.net's
+/// documented semantics — see [`str_pred_transfer`] for the reasoning per row.
+fn str_pred_out(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    lower: &str,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<StrPreds> {
+    /// The length axis: `non-empty-string` and its `non-falsy-string` refinement.
+    const LENGTH: StrPreds = StrPreds::NON_EMPTY.union(StrPreds::NON_FALSY);
+    /// The casing pair. Both bits together is "no cased character at all", which is
+    /// a legitimate summary (`''`, `'123'`) and survives every transfer that keeps
+    /// either one.
+    const CASING: StrPreds = StrPreds::LOWERCASE.union(StrPreds::UPPERCASE);
+    /// Everything this table ever propagates.
+    const BOTH_AXES: StrPreds = LENGTH.union(CASING);
+    /// `ENT_SUBSTITUTE`. Without it, `htmlspecialchars` answers `''` for a
+    /// non-empty subject holding an invalid encoding sequence — witnessed at 8.5.8:
+    /// `htmlspecialchars("\x80", ENT_QUOTES) === ''`, while
+    /// `htmlspecialchars("\x80", ENT_SUBSTITUTE)` is the three-byte U+FFFD.
+    const ENT_SUBSTITUTE: i64 = 8;
+
+    // Argument 0 is the subject for every member but `implode`, whose own arm
+    // ignores this. A zero-argument call is not one of these builtins at all.
+    let subject = arg_str_preds(cx, folder, args.first()?, env, store).unwrap_or_default();
+
+    match lower {
+        // ---- Removal only: the output is a SUBSTRING of the subject ----------
+        //
+        // `trim('  ') === ''` kills the length axis outright, and an explicit
+        // charlist changes nothing on either axis — `ltrim('0abc', '0') === 'abc'`
+        // is still a substring, so casing survives a charlist that could strip the
+        // whole string. `chop` is `rtrim` (same reflected `string`, same 1..=2).
+        "trim" | "ltrim" | "rtrim" | "chop" => {
+            (1..=2).contains(&args.len()).then(|| subject.intersect(CASING))
+        }
+        // `substr('abc', 0, 0) === ''` — same shape, and the length axis needs
+        // bounds arithmetic this rung does not carry (see the doc's declines).
+        "substr" => (2..=3).contains(&args.len()).then(|| subject.intersect(CASING)),
+        // ---- Permutation: the byte MULTISET is preserved -------------------
+        //
+        // `strrev` keeps the length exactly, so `''`/`'0'` can only come from
+        // `''`/`'0'`: both length bits survive alongside both casing bits.
+        "strrev" => {
+            let [_] = args else { return None };
+            Some(subject.intersect(BOTH_AXES))
+        }
+        // ---- Repetition: length survives only at a provable multiplier ≥ 1 ----
+        //
+        // `str_repeat('a', 0) === ''`. Casing survives regardless — `''` carries
+        // both casing bits, so the zero case cannot falsify a casing claim.
+        "str_repeat" => {
+            let [_subject, times] = args else { return None };
+            let once = transfer_arg_fact(cx, folder, times, env, store)
+                .as_ref()
+                .is_some_and(fact_is_positive_int);
+            Some(subject.intersect(if once { BOTH_AXES } else { CASING }))
+        }
+        // ---- Padding: the subject is a SUBSEQUENCE of the output --------------
+        //
+        // So the length axis always survives (`str_pad` never shortens: a `$length`
+        // below the subject's own returns it unchanged). The output length is
+        // `max(strlen($subject), $length)`, which makes a provable `$length >= 1`
+        // FORCE non-emptiness whatever the subject was — `str_pad('', 1) === ' '`,
+        // while `str_pad('', 0) === ''` and `str_pad('', -5) === ''`.
+        //
+        // Casing needs the pad string too, since the padding is inserted verbatim.
+        // An absent pad argument is `' '`, which has no cased character and so
+        // carries both bits; an unknown one contributes nothing and drops casing.
+        "str_pad" => {
+            if !(2..=4).contains(&args.len()) {
+                return None;
+            }
+            let pad = match args.get(2) {
+                None => CASING,
+                Some(p) => arg_str_preds(cx, folder, p, env, store).unwrap_or_default().intersect(CASING),
+            };
+            let forced = if transfer_arg_fact(cx, folder, &args[1], env, store)
+                .as_ref()
+                .is_some_and(fact_is_positive_int)
+            {
+                StrPreds::NON_EMPTY
+            } else {
+                StrPreds::empty()
+            };
+            Some(subject.intersect(LENGTH.union(pad)).union(forced))
+        }
+        // ---- The FORCED casing pair ------------------------------------------
+        //
+        // Byte-wise ASCII case mapping (locale-insensitive since 8.2): the length is
+        // preserved, so both length bits survive, and the target casing holds for
+        // ANY input — the one leg that fires with no subject fact at all. The
+        // OPPOSITE casing is dropped: `strtolower('AB')` is `'ab'`, which has
+        // lowercase bytes, so an `uppercase-string` subject does not stay one.
+        "strtolower" => {
+            let [_] = args else { return None };
+            Some(subject.intersect(LENGTH).union(StrPreds::LOWERCASE))
+        }
+        "strtoupper" => {
+            let [_] = args else { return None };
+            Some(subject.intersect(LENGTH).union(StrPreds::UPPERCASE))
+        }
+        // ---- Selective casing: length survives, one casing bit does ----------
+        //
+        // `ucfirst('abc') === 'Abc'` breaks `LOWERCASE` but cannot break
+        // `UPPERCASE` (it only ever uppercases). `lcfirst` is the mirror. `ucwords`
+        // is `ucfirst` at every word boundary, with the same asymmetry, and its
+        // optional `$separators` argument does not change it.
+        "ucfirst" => {
+            let [_] = args else { return None };
+            Some(subject.intersect(LENGTH.union(StrPreds::UPPERCASE)))
+        }
+        "lcfirst" => {
+            let [_] = args else { return None };
+            Some(subject.intersect(LENGTH.union(StrPreds::LOWERCASE)))
+        }
+        "ucwords" => {
+            (1..=2).contains(&args.len()).then(|| subject.intersect(LENGTH.union(StrPreds::UPPERCASE)))
+        }
+        // ---- Concatenation: EVERY contributor must carry the claim -----------
+        //
+        // The output's bytes are the elements' bytes plus the glue's, so a casing
+        // bit holds exactly when the glue and every admitted element hold it. The
+        // one-argument form's glue is `''`, which carries both. The length axis is
+        // NOT claimed: `implode(',', [])` is `''`, and proving otherwise needs the
+        // array's non-emptiness *and* an element's — a join this arm leaves to a
+        // later slice.
+        "implode" | "join" => {
+            let (glue, array) = match args {
+                [array] => (CASING, array),
+                [glue, array] => {
+                    (arg_str_preds(cx, folder, glue, env, store).unwrap_or_default().intersect(CASING), array)
+                }
+                _ => return None,
+            };
+            Some(glue.intersect(implode_element_preds(cx, folder, array, env, store)?))
+        }
+        // ---- The escaping family: insertion only ------------------------------
+        //
+        // Each of these only ever *inserts* bytes (backslashes, entities, percent
+        // escapes) or copies them, so a non-empty subject stays non-empty and a
+        // non-falsy one cannot collapse to `'0'` (that would need a one-byte output
+        // from a one-byte non-`'0'` input, and every one-byte input either survives
+        // or grows). Casing is NOT claimed: `htmlspecialchars('<')` is `'&lt;'`
+        // (lowercase letters appear) and `urlencode('ä')` is `'%C3%A4'` (uppercase
+        // hex), so both bits genuinely break.
+        "addslashes" | "escapeshellarg" | "urlencode" | "rawurlencode" => {
+            let [_] = args else { return None };
+            Some(subject.intersect(LENGTH))
+        }
+        "addcslashes" => {
+            let [_, _] = args else { return None };
+            Some(subject.intersect(LENGTH))
+        }
+        "preg_quote" => (1..=2).contains(&args.len()).then(|| subject.intersect(LENGTH)),
+        // `urldecode('%30') === '0'`: decoding SHRINKS, so a non-falsy subject can
+        // decode to the falsy `'0'`. Non-emptiness still holds — every `%XX` triple
+        // yields one byte and every other byte yields itself, so the output is never
+        // shorter than one byte for a non-empty input.
+        "urldecode" | "rawurldecode" => {
+            let [_] = args else { return None };
+            Some(subject.intersect(StrPreds::NON_EMPTY))
+        }
+        // The one gated pair, and the gate is the engine's own: without
+        // `ENT_SUBSTITUTE` an invalid encoding sequence makes the whole call answer
+        // `''`. A missing flags argument is the 8.1+ default
+        // (`ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401` == 11, read off
+        // `ReflectionFunction` at the pin), which carries the bit; an explicit
+        // non-constant flags argument cannot be checked and declines everything.
+        // The `$encoding`/`$double_encode` arguments do not move the boundary —
+        // probed at 8.5.8 across UTF-8, ISO-8859-1, SJIS and two unsupported
+        // charsets, every substitute-flag answer for a non-empty subject was
+        // non-empty.
+        "htmlspecialchars" | "htmlentities" => {
+            if !(1..=4).contains(&args.len()) {
+                return None;
+            }
+            let substitutes = match args.get(1) {
+                None => true,
+                Some(flags) => fact_int_bits_all_set(
+                    &transfer_arg_fact(cx, folder, flags, env, store)?,
+                    ENT_SUBSTITUTE,
+                ),
+            };
+            substitutes.then(|| subject.intersect(LENGTH))
+        }
+        // ---- `sprintf`: a literal byte in a CONSTANT format --------------------
+        //
+        // Every conversion can produce nothing (`sprintf('%.0s', 'abc') === ''`), so
+        // the only thing a format proves on its own is the literal text between the
+        // conversions. `'%%'` counts — it emits one `'%'`.
+        "sprintf" => {
+            let Some(Fact::Singleton(Val::Str(fmt))) = transfer_arg_fact(cx, folder, &args[0], env, store)
+            else {
+                return None;
+            };
+            sprintf_emits_a_literal(fmt.as_bytes())?.then_some(StrPreds::NON_EMPTY)
+        }
+        _ => None,
+    }
+}
+
+/// The predicate summary an argument's fact carries, or `None` when the fact is not
+/// a string one at all. `General { String }` answers the *empty* summary — it is a
+/// string, just one nothing is known about — so a caller intersecting against it
+/// declines for the right reason.
+fn arg_str_preds(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<StrPreds> {
+    fact_str_preds(&transfer_arg_fact(cx, folder, value, env, store)?)
+}
+
+/// The predicate summary EVERY value a fact admits satisfies.
+///
+/// The finite layers are read directly, which is the #75 survey's union nuance in
+/// one line: a `OneOf` of constant strings intersects its members' summaries, so
+/// `'foo'|'bar'` is `LOWERCASE` and `'foo'|'BAR'` is neither casing. No fold and no
+/// #74 dependency — that issue gates the sidecar route only.
+fn fact_str_preds(f: &Fact) -> Option<StrPreds> {
+    match f {
+        Fact::Singleton(Val::Str(s)) => Some(StrPreds::of(s)),
+        Fact::OneOf(vals) => {
+            let mut acc: Option<StrPreds> = None;
+            for v in vals {
+                let Val::Str(s) = v else { return None };
+                let p = StrPreds::of(s);
+                acc = Some(acc.map_or(p, |a| a.intersect(p)));
+            }
+            acc
+        }
+        Fact::Refined { base: Base::String, refinement: Refinement::Str(p), nullable: false } => {
+            Some(*p)
+        }
+        Fact::General { base: Base::String, nullable: false } => Some(StrPreds::empty()),
+        _ => None,
+    }
+}
+
+/// The predicate summary every element of `implode`'s array argument satisfies.
+///
+/// An abstract shape answers through [`shape_value_union`] — one unknown slot there
+/// already yields `None`, which is exactly the decline this rule wants. A fully
+/// known array answers by intersecting its values, and the empty array answers the
+/// summary of `''` (both casing bits), because that is what it implodes to.
+/// A non-string element declines: `implode` casts it, and what the cast produces is
+/// the element's business, not this rule's.
+fn implode_element_preds(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<StrPreds> {
+    match transfer_arg_fact(cx, folder, value, env, store)? {
+        Fact::Shape { shape, nullable: false } => fact_str_preds(&shape_value_union(&shape)?),
+        Fact::Singleton(Val::Array(entries)) => {
+            let mut acc = StrPreds::of("");
+            for (_, v) in &entries {
+                let Val::Str(s) = v else { return None };
+                acc = acc.intersect(StrPreds::of(s));
+            }
+            Some(acc)
+        }
+        _ => None,
+    }
+}
+
+/// Is every value this fact admits an integer of at least 1? The multiplier gate
+/// for `str_repeat` and the length gate for `str_pad` — both of which turn on
+/// exactly that boundary (`str_repeat('a', 0) === ''`, `str_pad('', 0) === ''`).
+fn fact_is_positive_int(f: &Fact) -> bool {
+    match f {
+        Fact::Singleton(Val::Int(n)) => *n >= 1,
+        // `all` over an empty set is vacuously true; a `OneOf` is never empty in
+        // practice, and the guard says so rather than relying on it.
+        Fact::OneOf(vals) => {
+            !vals.is_empty() && vals.iter().all(|v| matches!(v, Val::Int(n) if *n >= 1))
+        }
+        Fact::Refined { base: Base::Int, refinement: Refinement::Int(r), nullable: false } => {
+            r.lo() >= 1
+        }
+        _ => false,
+    }
+}
+
+/// Does every integer this fact admits have all of `bits` set? A flags argument the
+/// rule cannot see through (a variable, an abstract int) answers `false`, which is
+/// the decline `htmlspecialchars` needs.
+fn fact_int_bits_all_set(f: &Fact, bits: i64) -> bool {
+    match f {
+        Fact::Singleton(Val::Int(n)) => n & bits == bits,
+        Fact::OneOf(vals) => {
+            !vals.is_empty() && vals.iter().all(|v| matches!(v, Val::Int(n) if n & bits == bits))
+        }
+        _ => false,
+    }
+}
+
+/// Does this `sprintf` format guarantee at least one output byte?
+///
+/// `Some(true)` when a byte is emitted no matter what the arguments are — a literal
+/// outside any conversion, or a `'%%'` escape. `Some(false)` when the format is all
+/// conversions (`'%s'`, `'%.0s'`), each of which may emit nothing. **`None` when the
+/// scanner does not recognize the format**, which is a decline, not a `false`: a
+/// mis-parsed conversion specifier read as a literal would be a false premise, so
+/// anything outside the documented `%[argnum$][flags][width][.precision]specifier`
+/// grammar refuses the rule outright. A trailing `%` is a `ValueError` at 8.5.8 and
+/// lands in the same refusal — there is no return value to describe.
+fn sprintf_emits_a_literal(fmt: &[u8]) -> Option<bool> {
+    /// php-src's `php_formatted_print` conversion characters.
+    const SPECIFIERS: &[u8] = b"bcdeEfFgGosuxX";
+
+    let mut i = 0;
+    let mut literal = false;
+    while i < fmt.len() {
+        if fmt[i] != b'%' {
+            literal = true;
+            i += 1;
+            continue;
+        }
+        i += 1;
+        if *fmt.get(i)? == b'%' {
+            // `sprintf('%%') === '%'` — a guaranteed byte.
+            literal = true;
+            i += 1;
+            continue;
+        }
+        loop {
+            match *fmt.get(i)? {
+                // `%'x5s`: the byte after the quote is the custom padding char.
+                b'\'' => {
+                    i += 2;
+                    if i > fmt.len() {
+                        return None;
+                    }
+                }
+                b'-' | b'+' | b' ' | b'.' | b'$' | b'0'..=b'9' => i += 1,
+                _ => break,
+            }
+        }
+        if !SPECIFIERS.contains(fmt.get(i)?) {
+            return None;
+        }
+        i += 1;
+    }
+    Some(literal)
 }
 
 /// A `list<T>` / `non-empty-list<T>` fact, through the canonical constructor —

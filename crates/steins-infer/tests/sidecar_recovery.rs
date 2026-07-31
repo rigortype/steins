@@ -49,5 +49,11 @@ fn a_bomb_fold_does_not_disable_the_folder_for_the_rest_of_the_run() {
         );
         return;
     }
-    assert_eq!(dumps(BOMB_THEN_FOLDABLE, &mut folder), vec!["string", "'AB'"]);
+    // The bomb's dump is the rung BELOW the fold, not a folded value: since issue
+    // #77 that rung is the string-predicate transfer, which reads `str_repeat`'s
+    // literal subject `"x"` and its multiplier `>= 1` and answers
+    // `non-falsy-string`. A folded answer would be the two-billion-character
+    // literal itself, so this spelling is still exactly the evidence the test
+    // wants — the fold did NOT happen, and the analysis carried on.
+    assert_eq!(dumps(BOMB_THEN_FOLDABLE, &mut folder), vec!["non-falsy-string", "'AB'"]);
 }
