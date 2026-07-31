@@ -32,6 +32,42 @@ fn spawn_or_skip(test: &str) -> Option<Sidecar> {
     }
 }
 
+/// Regression tripwire for the temp-dir leak this crate used to have: the
+/// runner source now travels as a `php -r` argv element, so `spawn` must
+/// touch no file or dir under `$TMPDIR` at all — in particular none named
+/// `steins-sidecar-<ourpid>*`, the pattern the old per-instance/per-process
+/// temp dir used. Scoped to our own pid so this does not trip over an
+/// unrelated leftover from a different process's run.
+#[test]
+fn spawn_leaves_no_temp_dir_behind() {
+    let Some(sc) = spawn_or_skip("spawn_leaves_no_temp_dir_behind") else { return };
+    let prefix = format!("steins-sidecar-{}", std::process::id());
+    let leaked: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+        .expect("read temp dir")
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+        .map(|entry| entry.path())
+        .collect();
+    assert!(leaked.is_empty(), "spawn must create no steins-sidecar-<pid>* temp entry, found: {leaked:?}");
+    drop(sc);
+}
+
+/// The runner source is passed whole as a single `-r` argv element (no temp
+/// file to hold it), so its size is now bounded by the OS argv limit rather
+/// than disk space. Linux's `MAX_ARG_STRLEN` caps a single argv element at
+/// 128 KiB (macOS's `ARG_MAX`, ~1 MiB shared across all argv+envp, is far
+/// more generous). 100,000 bytes leaves comfortable headroom under the
+/// tighter Linux ceiling while still catching runaway growth early.
+#[test]
+fn runner_size_stays_under_the_argv_limit() {
+    const RUNNER_SRC: &str = include_str!("../runner.php");
+    assert!(
+        RUNNER_SRC.len() < 100_000,
+        "runner.php is {} bytes, approaching Linux's 128 KiB MAX_ARG_STRLEN argv limit",
+        RUNNER_SRC.len()
+    );
+}
+
 #[test]
 fn env_round_trips() {
     let Some(mut sc) = spawn_or_skip("env_round_trips") else { return };

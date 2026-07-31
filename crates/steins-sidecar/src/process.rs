@@ -7,9 +7,7 @@
 //! only the framing, the timeout, and the poison-and-respawn discipline.
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -19,8 +17,25 @@ use crate::wire::{
     parse_fold_result, parse_reflection_result, reflect_params,
 };
 
-/// The runner source, baked into the binary. Written to disk at spawn time.
+/// The runner source, baked into the binary.
+///
+/// Passed to `php -r` as an argv element (see [`Channel::open`]) — nothing is
+/// ever written to disk, so there is no per-instance or per-process temp file
+/// to leak or to clean up.
 const RUNNER_SRC: &str = include_str!("../runner.php");
+
+/// [`RUNNER_SRC`] with its leading `<?php` tag line removed, ready for `-r`
+/// (which forbids the open tag — the code it runs is implicitly PHP already).
+/// Stripped by prefix rather than a hardcoded byte offset, so a change to the
+/// tag line (e.g. trailing whitespace) fails loudly here instead of silently
+/// mis-slicing the program.
+fn runner_code() -> &'static str {
+    RUNNER_SRC.strip_prefix("<?php\n").expect(
+        "runner.php must start with the literal \"<?php\\n\" tag line: `-r` runs its \
+         argument as already-PHP code and rejects an explicit open tag, so the tag is \
+         stripped here rather than passed through",
+    )
+}
 
 /// Default per-request timeout (ADR-0024). Generous for a local `php` call;
 /// anything slower is treated as misbehavior and widened.
@@ -47,10 +62,34 @@ struct Channel {
 }
 
 impl Channel {
-    /// Launch `php <runner_path>` and start draining its stdout.
-    fn open(runner_path: &Path) -> std::io::Result<Self> {
+    /// Launch `php -r <code>` — the runner source passed as a single argv
+    /// element, never touching disk — and start draining its stdout.
+    ///
+    /// # Why argv, not a file, and not stdin
+    ///
+    /// stdin is already spoken for: it *is* the NDJSON request stream this
+    /// `Channel` writes to below. `php < script.php` (or piping the source in)
+    /// would have PHP consume stdin to EOF as the program text before running
+    /// anything, which would eat the protocol stream instead of the source.
+    /// argv is the channel with no such conflict, and `runner.php` qualifies:
+    /// it uses none of `__FILE__`/`__DIR__`/`$argv` and has no closing `?>`,
+    /// so it means the same thing whether PHP reads it from a file or from
+    /// `-r`. At ~16 KB it sits far under both `ARG_MAX` (~1 MB on macOS) and
+    /// Linux's `MAX_ARG_STRLEN` (128 KB) — see `runner_size_stays_under_the_argv_limit`.
+    ///
+    /// Two trade-offs are accepted: the source is visible in `ps`/`/proc`
+    /// (it is not a secret — the same file ships readable in the binary), and
+    /// a PHP parse error would report against "Command line code" rather than
+    /// a filename (moot in practice: stderr is discarded below regardless).
+    ///
+    /// File-based invocation (`php <path>`) is not gone as a *concept* — it is
+    /// still what a future php-wasm lane (issue #64) would write into that
+    /// runtime's virtual FS — it is just not exercised by this native
+    /// transport, which has no reason to touch disk at all.
+    fn open() -> std::io::Result<Self> {
         let mut child = Command::new("php")
-            .arg(runner_path)
+            .arg("-r")
+            .arg(runner_code())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Discard PHP's stderr: warnings/notices must never reach us, and we
@@ -144,38 +183,21 @@ pub struct Sidecar {
     poisoned: bool,
     /// Respawns already attempted, against `RESPAWN_CAP`.
     respawns: u32,
-    /// Temp file holding the runner; removed (with its dir) on drop.
-    runner_path: PathBuf,
 }
 
 impl Sidecar {
-    /// Spawn the sidecar: write `runner.php` to a fresh temp dir and launch
-    /// `php <runner>`, resolving `php` from `PATH`. Returns an error only when
-    /// the process cannot be started (missing `php`, IO failure) — the caller
-    /// turns that into the sound-subset posture.
+    /// Spawn the sidecar: launch `php -r <runner source>`, resolving `php`
+    /// from `PATH`. Returns an error only when the process cannot be started
+    /// (missing `php`, IO failure) — the caller turns that into the
+    /// sound-subset posture.
+    ///
+    /// Nothing is written to disk (the runner source travels as a `php -r`
+    /// argv element): there is no temp file or dir for this instance to own,
+    /// so there is nothing for `Drop` to clean up either.
     pub fn spawn() -> std::io::Result<Self> {
-        // A unique per-*instance* temp dir avoids collisions between concurrent
-        // sidecars (rayon workers in the gate, parallel tests): each owns its
-        // dir and removes only its own on drop. A respawn reuses this same dir,
-        // so a revived child runs the identical runner from the identical path.
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut dir = std::env::temp_dir();
-        dir.push(format!("steins-sidecar-{}-{seq}", std::process::id()));
-        std::fs::create_dir_all(&dir)?;
-        let runner_path = dir.join("steins-runner.php");
-        std::fs::write(&runner_path, RUNNER_SRC)?;
+        let chan = Channel::open()?;
 
-        let chan = Channel::open(&runner_path)?;
-
-        Ok(Self {
-            chan,
-            next_id: 1,
-            timeout: DEFAULT_TIMEOUT,
-            poisoned: false,
-            respawns: 0,
-            runner_path,
-        })
+        Ok(Self { chan, next_id: 1, timeout: DEFAULT_TIMEOUT, poisoned: false, respawns: 0 })
     }
 
     /// Make sure a live child is available, replacing a dead one if the cap
@@ -194,12 +216,10 @@ impl Sidecar {
         }
         self.respawns += 1;
         self.chan.close();
-        // Rewrite the runner: the dir is ours, but a long-lived run has no
-        // guarantee a temp cleaner left the file alone.
-        if std::fs::write(&self.runner_path, RUNNER_SRC).is_err() {
-            return false;
-        }
-        match Channel::open(&self.runner_path) {
+        // No file to go stale and no dir to re-share: every `Channel::open`
+        // passes the runner source fresh, straight from the binary's
+        // `RUNNER_SRC`.
+        match Channel::open() {
             Ok(chan) => {
                 self.chan = chan;
                 self.poisoned = false;
@@ -354,11 +374,12 @@ impl Sidecar {
 impl Drop for Sidecar {
     fn drop(&mut self) {
         // Closing stdin lets a healthy runner exit on its own; kill covers a
-        // hung or poisoned child. Then join the reader and clean the temp dir —
-        // the dir a respawn kept reusing, so there is still exactly one.
+        // hung or poisoned child; `Channel::close` also reaps the child and
+        // joins the reader thread. Nothing else to do: the runner source is
+        // passed as argv (see [`Channel::open`]) and never written to disk,
+        // so there is no per-instance temp file or dir left to remove — the
+        // filesystem leak this type used to have is gone because the
+        // filesystem use it depended on is gone.
         self.chan.close();
-        if let Some(parent) = self.runner_path.parent() {
-            let _ = std::fs::remove_dir_all(parent);
-        }
     }
 }

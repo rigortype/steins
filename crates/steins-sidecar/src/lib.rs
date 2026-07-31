@@ -15,9 +15,10 @@
 //! # Protocol
 //!
 //! JSON-RPC 2.0 with NDJSON framing over the child's stdin/stdout. The PHP side
-//! is a single, dependency-free file (`runner.php`, embedded via [`include_str!`]
-//! and written to a per-process temp dir), launched as `php <runner>`. `php` is
-//! resolved from `PATH` at spawn time — the *project's own* PHP, per ADR-0004.
+//! is a single, dependency-free file (`runner.php`, embedded via [`include_str!`]),
+//! launched as `php -r <source>` — the source itself as an argv element, never
+//! written to disk. `php` is resolved from `PATH` at spawn time — the *project's
+//! own* PHP, per ADR-0004.
 //!
 //! # Zero-FP contract (ADR-0024, binding)
 //!

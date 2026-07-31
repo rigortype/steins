@@ -69,9 +69,11 @@ simply do not qualify, and light up automatically when array arguments arrive.
 
 JSON-RPC 2.0 with NDJSON framing over the child's stdin/stdout. The PHP side is
 a **single, dependency-free file** (`runner.php`) embedded in the binary via
-`include_str!` and written to a per-process temp dir, launched as
-`php <runner>`. `php` is resolved from `PATH` at spawn time — the *project's
-own* PHP.
+`include_str!` and launched as `php -r <source>` — the source (minus its
+leading `<?php` tag, which `-r` forbids) passed as a single argv element,
+never written to disk. `php` is resolved from `PATH` at spawn time — the
+*project's own* PHP. stdin is reserved for the NDJSON request stream, so argv
+is the only channel available to hand the runner its own source.
 
 | Method | Answers | Status |
 | --- | --- | --- |
