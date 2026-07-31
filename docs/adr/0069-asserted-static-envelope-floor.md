@@ -112,3 +112,30 @@ lives beside the thing it licenses.
   finding. That asymmetry is the entire design.
 - ADR-0056 §6 and ADR-0064 §3 carry narrowed-by notes pointing here; their
   refusals remain in force for the Verified lane.
+
+## Amendment (2026-07-31): the ladder is PHPStan's extension stack, graded
+
+Owner review surfaced the correspondence this floor completes. PHPStan's
+dynamic return extensions receive a constant **or a union of constants**,
+call the real function per member, and compose the results; an extension
+that cannot meet its condition returns `null` and PHPStan falls back to
+the next provider, ultimately the functionMap signature. Steins' return
+ladder is the same stack with grades made explicit:
+
+| PHPStan | Steins | grade |
+|---|---|---|
+| extension, constant args, calls the real thing | fold lane (sidecar) | Verified |
+| argument-dependent extension | DR3 dispatch + shape transfers (ADR-0061/0062/0064) | reflection-checked |
+| extension returns `null` → next provider | rung returns `None` → next rung | — |
+| functionMap fallback | this ADR's Asserted floor | Asserted |
+
+Two consequences are recorded rather than implied. First, a future
+extension-porting layer is coverage growth of the DR3 rung under the
+ADR-0064 taxonomy, not a new mechanism (issue #75); a ported extension
+whose essence is a value question routes through the fold lane, never a
+Rust reimplementation. Second, the one condition Steins cannot yet meet
+is the **union of constants**: the fold gate admits a single constant
+tuple only. Member-wise engine calls over a bounded product, composed to
+a union and declining on any widened member, are issue #74 — they ride
+the existing fold memo, the width gate, and the #64 replay loop without
+new wire machinery.
