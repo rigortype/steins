@@ -176,7 +176,10 @@ the fix).
 - **Wholesale functionMap import** (PHPStan's or any lineage): bulk
   unaudited rows are the rot ADR-0014 exists to prevent and the
   divergence registry's spirit rejects; the per-row evidence bar is
-  the point, not an inconvenience.
+  the point, not an inconvenience. *Narrowed by ADR-0069 (owner
+  decision, 2026-07-31): the refusal holds for this ADR's Verified
+  lane; an Asserted floor with generation-time reflection audit is
+  admitted there.*
 - **Per-fact version tags / a version matrix**: owner-refused
   accommodation; the single `PINNED_PHP` gate plus A11's future
   per-minor generation is the whole story.

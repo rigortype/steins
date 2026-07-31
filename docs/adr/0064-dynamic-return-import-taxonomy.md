@@ -42,7 +42,9 @@ gate — a curated row a later PHP minor could falsify is the documented trap
   the five seams cover the behaviors; a sixth open-ended hook would be a
   second extension mechanism competing with ADR-0012 plugins.
 - Bulk functionMap transcription — rows enter through (ii)/(iii) with their
-  gates, never by mass import (the ADR-0056 subset-hole lesson).
+  gates, never by mass import (the ADR-0056 subset-hole lesson). *Narrowed
+  by ADR-0069: mass import is admitted into the Asserted floor only, never
+  into these Verified-lane seams.*
 
 ## 4. Slices
 
