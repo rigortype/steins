@@ -270,12 +270,7 @@ fn without_the_reflected_declaration_every_transfer_is_withheld() {
             None
         }
     }
-    for expr in [
-        "explode(',', $s)",
-        "range(1, 3)",
-        "preg_replace('/a/', 'b', $s)",
-        "var_export($s, true)",
-    ] {
+    for expr in ["explode(',', $s)", "range(1, 3)", "preg_replace('/a/', 'b', $s)"] {
         let src =
             format!("<?php\nfunction f(string $s): void {{ \\PHPStan\\dumpType({expr}); }}\n");
         assert_eq!(
@@ -284,6 +279,14 @@ fn without_the_reflected_declaration_every_transfer_is_withheld() {
             "no-PHP run must withhold {expr}"
         );
     }
+    // `var_export($s, true)` used to join them at `unknown`. It no longer does, and
+    // the reason is not this rung: ADR-0069's declared-envelope FLOOR now answers
+    // underneath it with `var_export`'s own declared `?string`, marked `(asserted)`
+    // because a catalog declaration is not a runtime answer. The ADR-0061 §2 gate
+    // this test is about is untouched — the *transfer* is still withheld, and what
+    // reaches the dump is the coarse declaration, never the rule's output.
+    let src = "<?php\nfunction f(string $s): void { \\PHPStan\\dumpType(var_export($s, true)); }\n";
+    assert_eq!(one_type_with(src, &mut NoPhp), "dumped type: string|null (asserted)");
 }
 
 #[test]

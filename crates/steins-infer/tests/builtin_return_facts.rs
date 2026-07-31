@@ -86,18 +86,38 @@ function f($x) { $b = is_int($x); return $b; }";
     assert!(return_mismatches(src, &mut m).is_empty(), "bool return vs @return bool is fine");
 }
 
-// ── no sidecar: the sound subset seeds nothing ──────────────────────────────
+// ── no sidecar: the declared floor, then silence ────────────────────────────
 
 #[test]
-fn no_sidecar_seeds_nothing() {
-    // The default `Folder` (NoFold-equivalent) returns no fact — the mock with an
-    // EMPTY fact map is that sound subset. No seed ⇒ no return premise ⇒ silence,
-    // even against the lying docblock.
+fn no_sidecar_falls_through_to_the_declared_floor() {
+    // SEMANTICS CHANGED by ADR-0069 (issue #73), deliberately. This used to assert
+    // that an empty fact map seeds nothing at all. It no longer does: below this
+    // rung sits the declared-envelope FLOOR, and `is_int` carries a mined `bool`
+    // row, so the sound subset now premises the same contract finding a live engine
+    // would — at the `Asserted` stratum, which is what keeps it out of the proof
+    // layer. This is the feature, not a weakened pin.
     let src = "<?php
 /** @return string */
 function f($x) { $b = is_int($x); return $b; }";
     let mut m = Mock::default(); // no facts registered
-    assert!(return_mismatches(src, &mut m).is_empty(), "without a sidecar fact, nothing fires");
+    assert_eq!(
+        return_mismatches(src, &mut m).len(),
+        1,
+        "the floor seeds `is_int(): bool` where the engine said nothing"
+    );
+}
+
+#[test]
+fn no_sidecar_and_no_floor_row_seeds_nothing() {
+    // The unchanged half of the old pin, restated on a name the floor does NOT
+    // cover: `preg_replace` declares `array|string|null`, a multi-base union that
+    // is not envelope-representable and was dropped at generation. No engine fact
+    // and no floor row ⇒ no return premise ⇒ silence, even against a lying docblock.
+    let src = "<?php
+/** @return int */
+function f($x) { $b = preg_replace(\"/a/\", \"b\", $x); return $b; }";
+    let mut m = Mock::default();
+    assert!(return_mismatches(src, &mut m).is_empty(), "with neither rung, nothing fires");
 }
 
 // ── precedence: folding is the floor below the return fact ───────────────────

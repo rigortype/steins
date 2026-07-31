@@ -1982,6 +1982,7 @@ fn check_units(
             catalog_skew,
             version_id,
             purity.as_ref(),
+            layout.php_target(),
         );
 
         // --- Propagation pass FIRST: it walks every scope and, as a side
@@ -4487,6 +4488,13 @@ struct Cx<'a> {
     /// this family). `None` makes [`Self::provably_impure`] answer `false`, i.e. the
     /// obligation stays silent — the safe side.
     purity: Option<&'a PurityOracle>,
+    /// The PHP target range the project DECLARES, verbatim (issue #73). The
+    /// version-keyed value rules read [`Self::php_minor`], which has already
+    /// collapsed the range to one effective minor; the ADR-0069 floor's gate needs
+    /// the range itself, because it asks a different question — whether the whole
+    /// declared range lies at or above one builtin's change boundary. `None` is an
+    /// undeclared target, which the floor admits.
+    php_target: Option<&'a steins_db::PhpTarget>,
 }
 
 impl<'a> Cx<'a> {
@@ -4501,6 +4509,7 @@ impl<'a> Cx<'a> {
             catalog_skew: false,
             version_id: None,
             purity: None,
+            php_target: None,
         }
     }
 
@@ -4516,8 +4525,20 @@ impl<'a> Cx<'a> {
         catalog_skew: bool,
         version_id: Option<(u32, Option<u32>)>,
         purity: Option<&'a PurityOracle>,
+        php_target: Option<&'a steins_db::PhpTarget>,
     ) -> Self {
-        Self { units, index, cur, dam, warning_handler_abort, php_minor, catalog_skew, version_id, purity }
+        Self {
+            units,
+            index,
+            cur,
+            dam,
+            warning_handler_abort,
+            php_minor,
+            catalog_skew,
+            version_id,
+            purity,
+            php_target,
+        }
     }
 
     /// A context pointing at a different file (for cross-file descent); the runtime
@@ -4533,6 +4554,7 @@ impl<'a> Cx<'a> {
             catalog_skew: self.catalog_skew,
             version_id: self.version_id,
             purity: self.purity,
+            php_target: self.php_target,
         }
     }
 
@@ -6988,6 +7010,15 @@ fn best_dump_type(
     {
         return DumpRendering { text: render_dump_fact(&fact), asserted: false };
     }
+    // The DECLARED-ENVELOPE FLOOR (ADR-0069): the rung strictly below, reached only
+    // where the engine said nothing about this name. Always `(asserted)` — the row
+    // is a catalog declaration, not a runtime answer, and the marker is how the dump
+    // surface says which rung answered.
+    if let ArgValue::Call(name, _) = value
+        && let Some(fact) = builtin_return_floor(cx, name)
+    {
+        return DumpRendering { text: render_dump_fact(&fact), asserted: true };
+    }
     // The declared-return floor of an unresolved project call (issue #60): the
     // callee's `: string` is a fact the caller should see even when no summary
     // crossed — `unknown` where the source declares a return type reads as a
@@ -7405,6 +7436,25 @@ fn apply_assign(
                         && let Some(fact) = builtin_call_return_fact(cx, folder, name) =>
                 {
                     env.insert(var.to_owned(), Known::value(fact, line, None));
+                    store.unbind(var);
+                }
+                // The DECLARED-ENVELOPE FLOOR (ADR-0069): strictly below the rung
+                // above, reached only where the engine said nothing about this name.
+                // Enters `Asserted` — a catalog declaration, not a runtime answer —
+                // so the proof layer's all-Verified premise rule keeps every finding
+                // off it, and the derivation clause carries that down every step.
+                ArgValue::Call(name, _)
+                    if !w.scope.poisoned && let Some(fact) = builtin_return_floor(cx, name) =>
+                {
+                    env.insert(
+                        var.to_owned(),
+                        Known::value_strat(
+                            fact,
+                            line,
+                            Some(CATALOG_FLOOR.to_owned()),
+                            Stratum::Asserted,
+                        ),
+                    );
                     store.unbind(var);
                 }
                 // The return-fact SUMMARY, then the arm FLOOR (ADR-0057 amendment T0 /
@@ -17455,6 +17505,73 @@ fn builtin_call_return_fact(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Opt
     folder.builtin_return_fact(name)
 }
 
+/// The `Known::bound` provenance a floor-seeded fact carries. A constant rather
+/// than a literal at each site because two rungs stamp it and a reader comparing
+/// them must see one string.
+const CATALOG_FLOOR: &str = "declared in the builtin catalog, unverified";
+
+/// The **declared-envelope floor** (ADR-0069, issue #73): the bottom rung of the
+/// return ladder, seeded from `steins_catalog::declared_envelope` at the
+/// `Asserted` stratum.
+///
+/// It fires exactly where [`builtin_call_return_fact`] yielded `None` for this
+/// name — which is *per name*, not per run. `--no-php` (and the browser before
+/// php-wasm loads) is only the total case; with a live engine the floor still
+/// speaks where that engine is **silent** about a name: an extension the analyzing
+/// PHP does not load, a builtin with no declared return type. Where the engine
+/// answers, the caller never reaches here, so a static row can never outvote the
+/// real thing — the consuming engine may not be the pinned one.
+///
+/// Three gates, and each is the same gate an existing rung already applies:
+///
+/// 1. **Project shadow wins** — `has_simple_function` refuses exactly as
+///    [`builtin_call_return_fact`] does: a project function of the same simple name
+///    shadows (or makes ambiguous) the builtin, and the project's own definition is
+///    the better answer.
+/// 2. **Version discipline** ([`floor_target_admits`]) — the A11-shaped target gate.
+/// 3. **The lowering is the same one** — `lower_str` → [`envelope_fact`], the seam
+///    the reflected envelope uses. One lowering, two provenances (ADR-0069 §2). A
+///    row that failed to lower would have been dropped at generation time, so this
+///    is a re-derivation, not a second filter.
+///
+/// The stratum is not returned: every caller seeds `Asserted`, and the proof
+/// layer's all-Verified premise rule then keeps the fact out of every finding by
+/// construction. The absence family never comes here at all — existence is a
+/// boot-surface fact, and this table answers only about return types.
+fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Fact> {
+    if cx.index.has_simple_function(name) {
+        return None;
+    }
+    if !floor_target_admits(name, cx.php_target) {
+        return None;
+    }
+    let declared = steins_catalog::declared_envelope(name)?;
+    envelope_fact(&steins_contract::lower_str(declared)?)
+}
+
+/// The floor's version gate (ADR-0069 §3, A11-shaped): whether the project's
+/// declared PHP target agrees with the minor the mined row was stated at.
+///
+/// `steins_catalog::declared_envelope_changed_at` is the change oracle — a
+/// `Some(m)` says the builtin's declared return type last moved at minor `m`, so
+/// the mined row (stated at the pin) is only known good for a target lying
+/// **wholly at or above** `m`. That is stricter than "does not straddle": a target
+/// entirely *below* the boundary does not straddle it either, and the row would be
+/// as wrong there as in the straddling case.
+///
+/// An **undeclared target admits**: the row is Asserted anyway, and its consumers
+/// tolerate that grade. A name the oracle does not list admits unconditionally —
+/// its declared return type never moved across the supported line.
+fn floor_target_admits(name: &str, target: Option<&steins_db::PhpTarget>) -> bool {
+    let Some(boundary) = steins_catalog::declared_envelope_changed_at(name) else {
+        return true;
+    };
+    match target {
+        Some(t) => t.floor >= boundary,
+        None => true,
+    }
+}
+
 /// The **argument-dependent** return rung (ADR-0061 §1) for the two ADR-0062 §4
 /// transfers that read the abstract array stratum: `count($x)` and
 /// `array_is_list($x)`. `None` — decline — is a first-class outcome (ADR-0061 §1),
@@ -18553,6 +18670,7 @@ mod n4_carrier_tests {
             view.catalog_skew,
             view.version_id,
             None,
+            None,
         );
         f(&cx)
     }
@@ -19081,6 +19199,44 @@ mod return_fact_admission_tests {
             envelope_fact(&ContractTy::Union(vec![ContractTy::Base(Base::Int), ContractTy::LitBool(false)])),
             None
         );
+    }
+
+    /// The ADR-0069 floor's version gate, against the real change oracle.
+    ///
+    /// It is pinned here rather than end to end because at this pin the two mined
+    /// tables are **disjoint**: every version-sensitive name (`str_split`,
+    /// `gc_status`, `opcache_get_configuration`, `session_get_cookie_params`)
+    /// returns an array or a list, so none of them carries an admitted envelope.
+    /// The gate is nonetheless real machinery that a later pin will need, and this
+    /// exercises it against the shipped data rather than a fixture.
+    #[test]
+    fn floor_target_gate_declines_below_a_names_change_boundary() {
+        use steins_db::{PhpTarget, PhpTargetSource};
+        let target = |floor: (u16, u16), ceiling: Option<(u16, u16)>| PhpTarget {
+            floor,
+            ceiling,
+            source: PhpTargetSource::Require,
+            raw: "test".to_owned(),
+        };
+        // `str_split`'s declared return type moved at 8.2.
+        assert_eq!(steins_catalog::declared_envelope_changed_at("str_split"), Some((8, 2)));
+
+        // A STRADDLING target has no single answer — decline (the A11 shape).
+        assert!(!floor_target_admits("str_split", Some(&target((8, 1), Some((8, 5))))));
+        assert!(!floor_target_admits("str_split", Some(&target((8, 1), None))));
+        // A target lying entirely BELOW the boundary is just as wrong: the mined row
+        // states the type at the pin, which that project never runs.
+        assert!(!floor_target_admits("str_split", Some(&target((8, 1), Some((8, 1))))));
+        // Wholly at or above the boundary: the row is exactly what that range runs.
+        assert!(floor_target_admits("str_split", Some(&target((8, 2), Some((8, 2))))));
+        assert!(floor_target_admits("str_split", Some(&target((8, 3), None))));
+        // An UNDECLARED target admits — the row is Asserted anyway, and its
+        // consumers tolerate that grade (ADR-0069 §3).
+        assert!(floor_target_admits("str_split", None));
+        // A name the oracle does not list is admitted for every target: its declared
+        // return type never moved across the supported line.
+        assert!(floor_target_admits("str_repeat", Some(&target((8, 1), None))));
+        assert!(floor_target_admits("str_repeat", None));
     }
 }
 
