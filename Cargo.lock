@@ -1454,8 +1454,10 @@ dependencies = [
  "serde_json",
  "steins-contract",
  "steins-db",
+ "steins-domain",
  "steins-infer",
  "steins-phpdoc",
+ "steins-sidecar",
  "steins-syntax",
  "toml",
 ]

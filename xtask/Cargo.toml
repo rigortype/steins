@@ -21,6 +21,12 @@ steins-phpdoc = { path = "../crates/steins-phpdoc" }
 # harness must judge "narrower than" with the SAME relation the checker enforces
 # (`normalize::subsumes`), not a second harness-local definition that would drift.
 steins-contract = { path = "../crates/steins-contract" }
+# The value-domain bases and the real PHP sidecar, for `mine-function-map`
+# (issue #73): the declared-envelope floor's rows are filtered through the SAME
+# lowering the analyzer uses and countersigned by the SAME engine transport, so
+# the generator can never admit a row the seam would drop or the runtime disowns.
+steins-domain = { path = "../crates/steins-domain" }
+steins-sidecar = { path = "../crates/steins-sidecar" }
 
 rayon.workspace = true
 toml.workspace = true

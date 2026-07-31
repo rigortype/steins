@@ -9,6 +9,7 @@
 //!   gen-catalog              regenerate the builtin hierarchy table from mining TOML
 //!   lean-check [--bless]     check the committed Lean 4 vectors against the spec
 //!   licenses                 regenerate THIRD-PARTY-LICENSES.md, merging typographic variants
+//!   mine-function-map [DIR]  mine phpstan-src's functionMap into the declared-envelope TOML
 //!   nsrt [DIR]               assertType harness (oracle idea B) over phpstan-src nsrt
 //!   phpdoc-oracle [--check]  diff steins-phpdoc against the real phpstan/phpdoc-parser
 //! ```
@@ -21,6 +22,7 @@ mod corpus_local;
 mod freq;
 mod licenses;
 mod gate;
+mod mine_function_map;
 mod gen_catalog;
 mod lean_check;
 mod nsrt;
@@ -63,6 +65,13 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => fail(&e),
         },
+        Some("mine-function-map") => {
+            let dir = args.get(1).filter(|a| !a.starts_with("--")).map(String::as_str);
+            match mine_function_map::run(dir) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => fail(&e),
+            }
+        }
         Some("nsrt") => {
             let dir = args.get(1).filter(|a| !a.starts_with("--")).map(String::as_str);
             match nsrt::run(dir) {
@@ -78,11 +87,11 @@ fn main() -> ExitCode {
             }
         }
         Some(other) => fail(&format!(
-            "unknown command `{other}` (corpus-sync | fp-gate | freq | gen-catalog | lean-check | licenses | nsrt | phpdoc-oracle)"
+            "unknown command `{other}` (corpus-sync | fp-gate | freq | gen-catalog | lean-check | licenses | mine-function-map | nsrt | phpdoc-oracle)"
         )),
         None => {
             eprintln!(
-                "usage: cargo xtask <corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | nsrt [DIR] | phpdoc-oracle [--check]>"
+                "usage: cargo xtask <corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-function-map [DIR] | nsrt [DIR] | phpdoc-oracle [--check]>"
             );
             ExitCode::from(2)
         }
