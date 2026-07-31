@@ -300,7 +300,7 @@ fn process_is_reused_across_many_folds() {
 }
 
 #[test]
-fn timeout_poisons_and_subsequent_calls_widen_fast() {
+fn timeout_poisons_and_the_lost_request_widens() {
     let Some(mut sc) = spawn_or_skip("timeout_poisons") else { return };
     // Force the timeout path with a tiny deadline against a deliberately slow
     // call. `usleep` is not on the fold allowlist, but the runner does not gate
@@ -309,7 +309,77 @@ fn timeout_poisons_and_subsequent_calls_widen_fast() {
     let r = sc.fold("usleep", &[FoldArg::Int(1_000_000)]); // 1s > 20ms
     assert!(matches!(r, FoldResult::Widen { .. }), "timeout widens, got {r:?}");
     assert!(sc.is_poisoned(), "timeout poisons the instance");
-    // A poisoned instance widens immediately without touching the (dead) child.
-    let r2 = sc.fold("strtolower", &[FoldArg::Str("ABC".to_owned())]);
-    assert!(matches!(r2, FoldResult::Widen { .. }), "poisoned widens, got {r2:?}");
+    // The timed-out request is lost for good: it is never re-sent to the
+    // replacement child, because it is the request that misbehaved.
+    //
+    // The next request is a different matter — it revives the instance. Give it
+    // a deadline a fresh `php` can actually meet (a respawn pays a full PHP
+    // startup, tens of milliseconds, well past the 20ms this test forced).
+    sc.set_timeout(Duration::from_secs(2));
+    assert_eq!(
+        sc.fold("strtolower", &[FoldArg::Str("ABC".to_owned())]),
+        FoldResult::Value(FoldValue::Str("abc".to_owned())),
+        "the next request respawns and answers"
+    );
+    assert!(!sc.is_poisoned(), "a revived instance is not poisoned");
+}
+
+/// A `str_repeat` whose result exceeds the runner's `memory_limit` dies as an
+/// *uncatchable* fatal: memory exhaustion is not a `Throwable`, so unlike the
+/// unassignable-array-key case above, no `catch` in the runner can turn it into
+/// a widen. The child simply stops mid-NDJSON.
+///
+/// The call is ordinary source — `str_repeat("x", 2000000000)` is a literal call
+/// on the folding allowlist — so the answer must be a widen and the *next*
+/// request must still be answerable. That second half is the respawn: the same
+/// `Sidecar` is now talking to a different process.
+#[test]
+fn a_memory_exhausting_fold_widens_and_the_next_request_still_answers() {
+    let Some(mut sc) = spawn_or_skip("a_memory_exhausting_fold_widens_and_the_next_request_answers")
+    else {
+        return;
+    };
+    let r = sc.fold("str_repeat", &[s("x"), int(2_000_000_000)]);
+    assert!(matches!(r, FoldResult::Widen { .. }), "a memory bomb widens, got {r:?}");
+    assert!(sc.is_poisoned(), "the child died, so the transport is poisoned");
+    // The lost answer costs one request, not the rest of the run.
+    assert_eq!(
+        sc.fold("strtoupper", &[s("still alive")]),
+        FoldResult::Value(FoldValue::Str("STILL ALIVE".to_owned()))
+    );
+    assert!(!sc.is_poisoned(), "the respawned child is healthy");
+}
+
+/// The storm brake. Recovery is bounded at three respawns per `Sidecar`, so
+/// input engineered to kill children cannot buy an unbounded number of PHP
+/// startups. Past the cap the instance is what it was before recovery existed:
+/// permanently poisoned, every request widening immediately.
+#[test]
+fn the_respawn_cap_bounds_recovery_and_then_poisons_permanently() {
+    let Some(mut sc) = spawn_or_skip("the_respawn_cap_bounds_recovery") else { return };
+    let bomb = [s("x"), int(2_000_000_000)];
+
+    // Three bombs, three recoveries: each one widens, and the next fold answers.
+    for i in 0..3 {
+        assert!(matches!(sc.fold("str_repeat", &bomb), FoldResult::Widen { .. }), "bomb {i} widens");
+        assert_eq!(
+            sc.fold("strtoupper", &[s("alive")]),
+            FoldResult::Value(FoldValue::Str("ALIVE".to_owned())),
+            "respawn {i} answered"
+        );
+    }
+
+    // The fourth bomb kills the third replacement, and there is no fourth.
+    assert!(matches!(sc.fold("str_repeat", &bomb), FoldResult::Widen { .. }), "the last bomb widens");
+    assert!(sc.is_poisoned());
+    let start = std::time::Instant::now();
+    for _ in 0..5 {
+        let r = sc.fold("strtoupper", &[s("alive")]);
+        assert!(matches!(r, FoldResult::Widen { .. }), "past the cap every fold widens, got {r:?}");
+    }
+    // Widening past the cap touches no process at all, so it cannot cost a
+    // timeout. The bound is loose on purpose — this asserts "no hang", not a
+    // performance figure.
+    assert!(start.elapsed() < Duration::from_secs(1), "a capped sidecar widens without waiting");
+    assert!(sc.is_poisoned(), "the poison is permanent now");
 }

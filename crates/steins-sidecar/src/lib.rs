@@ -22,17 +22,24 @@
 //! # Zero-FP contract (ADR-0024, binding)
 //!
 //! Sidecar misbehavior must NEVER become a wrong diagnostic. Every failure mode
-//! — spawn failure, IO error, per-request timeout, malformed response — maps to
-//! [`FoldResult::Widen`], never a value. On any such failure the child is killed
-//! and the instance is **poisoned**: later calls widen immediately instead of
-//! hanging or reviving a half-dead process.
+//! — spawn failure, IO error, per-request timeout, malformed response, a child
+//! that died outright — maps to [`FoldResult::Widen`], never a value. On any such
+//! failure the child is killed and the instance is **poisoned**: the request in
+//! flight is lost, and no half-dead process is ever trusted for an answer.
+//!
+//! Poison is a lost *answer*, not a lost run. A child can die uncatchably — an
+//! allocation past `memory_limit` is a fatal no PHP `catch` can see — so the
+//! *next* request replaces it with a fresh one, a bounded number of times per
+//! instance ([`Sidecar`]). The request that killed the child is never retried on
+//! the replacement.
 //!
 //! # Concurrency model
 //!
 //! No async runtime. A single background thread drains the child's stdout into a
 //! channel; each request writes a line and waits on the channel with a timeout
 //! ([`std::sync::mpsc::Receiver::recv_timeout`]). Requests are strictly
-//! serialized (`&mut self`) and stateless, so a restart would be transparent.
+//! serialized (`&mut self`) and stateless, which is precisely what makes a
+//! restart transparent: there is nothing to replay into the new child.
 
 pub mod wire;
 

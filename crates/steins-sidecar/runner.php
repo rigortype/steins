@@ -33,6 +33,24 @@ ini_set('display_errors', '0');
 ini_set('log_errors', '1');
 ini_set('error_log', 'php://stderr');
 
+// Bound the memory a single fold may claim. Two purposes, both load-bearing:
+//
+// 1. Blast radius. An allocation that exhausts `memory_limit` is a FATAL, not a
+//    Throwable — `steins_fold`'s catch cannot see it, and the process dies
+//    mid-NDJSON taking every later request in the run with it. The limit does
+//    not make that fatal catchable; it makes it cheap and quick, and the parent
+//    recovers by respawning (see `Sidecar::revive` on the Rust side).
+// 2. Host independence. Without this, whether `str_repeat('x', 200000000)`
+//    folds depends on the machine's php.ini — the same source would fold here
+//    and widen on a colleague's box. Pinning the limit makes the fold outcome a
+//    property of the code, not of the host.
+//
+// 256M is far above anything a legitimate fold needs (array arguments are
+// capped at a few hundred entries, and the rest are snippet-sized literals),
+// and far below the point where a runaway allocation costs real time. A fold
+// that would only succeed above it now fatals, which widens — sound.
+ini_set('memory_limit', '256M');
+
 $in = fopen('php://stdin', 'r');
 $out = fopen('php://stdout', 'w');
 

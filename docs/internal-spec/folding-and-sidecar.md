@@ -104,20 +104,49 @@ Binding, from ADR-0024:
 > Sidecar misbehavior must NEVER become a wrong diagnostic.
 
 Every failure mode — spawn failure, IO error, per-request timeout, malformed
-response — maps to `Widen`, never to a value. On any such failure the child is
-killed and the instance is **poisoned**: later calls widen immediately rather
-than hanging or reviving a half-dead process.
+response, a child that died outright — maps to `Widen`, never to a value. On any
+such failure the child is killed and the instance is **poisoned**: the request in
+flight is lost, and no half-dead process is ever trusted for an answer.
 
 Default per-request timeout: 2 seconds. Generous for a local `php` call;
 anything slower is treated as misbehavior.
+
+### Poison is a lost answer, not a lost run
+
+A child can die in ways PHP cannot catch. An allocation past `memory_limit` is a
+FATAL, not a `Throwable`, and `str_repeat("x", 2000000000)` is an ordinary
+literal call on the folding allowlist — so a single snippet could once kill the
+resident runner and widen every later request in the run. Stack overflows and
+extension segfaults are the same class.
+
+Two defences, neither of which tries to predict the bomb:
+
+* The runner pins `memory_limit = 256M`. It cannot make the fatal catchable; it
+  bounds the blast radius, and it makes fold outcomes a property of the *code*
+  rather than of the host's `php.ini`.
+* The transport replaces a dead child. The request that killed it still widens
+  and is **never** retried on the replacement — it is the likely bomb. The *next*
+  request revives the instance, at most three times per `Sidecar` (the storm
+  brake against input engineered to kill children; past it the instance is
+  permanently poisoned, as it always was).
+
+Respawn is deliberately blind to *why* the child died, which is what makes it
+cover the whole class. The rejected alternative — a per-function result-size
+budget in Rust, bounding `str_repeat`'s `count × strlen` and so on — needs
+resource knowledge of every builtin, is silently incomplete for every future
+allowlist member, and does nothing about a segfault.
+
+Nothing is replayed into the fresh child, because the runner keeps no
+cross-request state (see below).
 
 ## Concurrency model
 
 No async runtime. A single background thread drains the child's stdout into a
 channel; each request writes a line and waits with `recv_timeout`. Requests are
-strictly serialized (`&mut self`) and **stateless**, so a restart would be
-transparent to the caller — which is also the property an LSP session needs to
-survive a sidecar kill without a wrong or lost diagnostic.
+strictly serialized (`&mut self`) and **stateless**, which is precisely what
+makes a restart transparent to the caller — the property the respawn above
+relies on, and the one an LSP session needs to survive a sidecar kill without a
+wrong or lost diagnostic.
 
 ## The coverage posture
 
