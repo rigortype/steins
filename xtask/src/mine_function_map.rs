@@ -11,19 +11,21 @@
 //! 2. **Rust lowers.** Every candidate return-type string is lowered through
 //!    [`steins_contract::lower_str`] and kept only when the lowering flattens to an
 //!    **arm list the declared-contract machinery carries**: the scalar bases, their
-//!    literals, the two scalar refinements (`int<lo, hi>`, the string predicates)
-//!    and `null` — exactly the vocabulary `steins-infer`'s declared-return arm
-//!    lane already seeds for a project function (ADR-0052 §9), and exactly what
-//!    `spell_arms` can render back. A row the arm lane could not carry is dropped
-//!    here, at generation time, so the shipped table has no rows the seam would
-//!    silently discard.
+//!    literals, the two scalar refinements (`int<lo, hi>`, the string predicates),
+//!    `null` and the array vocabulary — exactly the vocabulary `steins-infer`'s
+//!    declared-return arm lane already seeds for a project function (ADR-0052 §9).
+//!    A row the arm lane could not carry is dropped here, at generation time, so
+//!    the shipped table has no rows the seam would silently discard.
 //!
-//!    Issue #79 widened this filter. The #73 slice kept only rows that lowered to
-//!    a single-base **envelope** (`string`, `?int`); the `T|false` failure unions
-//!    and the scalar refinements — the rows where functionMap genuinely exceeds
-//!    reflection — were counted and dropped, awaiting the contracts-grade slice
-//!    this is. Arrays, objects, `mixed`/`void`/`never` and the opaque-string form
-//!    stay dropped, still counted: the arm lane has no faithful seeding for them.
+//!    The filter widened twice. Issue #79 dropped the #73 requirement that a row
+//!    lower to a single-base **envelope** (`string`, `?int`), admitting the
+//!    `T|false` failure unions and the scalar refinements — the rows where
+//!    functionMap genuinely exceeds reflection. ADR-0071 then admitted the **array
+//!    vocabulary** (`array`, `list<T>`, `array<K, V>`, `array{…}`, `iterable<K,
+//!    V>`), whose blocker was never the lowering but the countersign: `subsumes`
+//!    answered `Maybe` about every array pair, so stage 3 could not have signed
+//!    them. Objects, `mixed`/`void`/`never` and the opaque-string form stay
+//!    dropped, still counted — the same vacuity, awaiting the same treatment.
 //! 3. **The engine countersigns.** Every surviving row is put to the *real*
 //!    sidecar's `reflect(name)` at the pin (PHP 8.5.8) and judged **arm-wise**
 //!    through [`steins_contract::normalize::subsumes`] — the same acceptance
@@ -109,11 +111,12 @@ pub fn run(checkout: Option<&str>) -> Result<(), String> {
     // does not flatten to an arm list the declared-contract lane carries is dropped.
     //
     // The drop is counted BY REASON, and the reasons are classified on the LOWERED
-    // TOP-LEVEL shape exactly as the #73 slice classified them, so the two runs'
-    // buckets are directly comparable. Post-#79 the union and refinement buckets
-    // hold only their *residue* — a union with an array/object/mixed arm, a string
-    // whose only spelling is the opaque form — while the array, object, void and
-    // unparseable buckets are untouched by the relaxation and must read identically.
+    // TOP-LEVEL shape exactly as the #73 slice classified them, so every run's
+    // buckets are directly comparable. Each widening empties a bucket and shrinks
+    // the union residue beside it: #79 took the multi-base unions and the scalar
+    // refinements, ADR-0071 takes the shaped arrays and the unions whose only
+    // uncarriable arm was an array one. The object, void and unparseable buckets
+    // are untouched by either relaxation and must read identically across all three.
     let mut candidates: BTreeMap<String, Row> = BTreeMap::new();
     let mut dropped = Dropped::default();
     for (name, ty) in &mined.rows {
@@ -249,14 +252,17 @@ struct Counts {
 /// Rows dropped for lowering to something the declared-contract arm lane cannot
 /// carry, split by reason (ADR-0069 §5), classified on the LOWERED TOP-LEVEL shape.
 ///
-/// The classification is deliberately unchanged from the #73 slice so the two runs
-/// compare directly: the array, object, void and unparseable buckets are untouched
-/// by the #79 relaxation and must read identically, while the union and refinement
-/// buckets shrink to their residue — the unions carrying an arm from one of the
-/// other buckets, and the strings whose only spelling is the opaque form.
+/// The classification is deliberately unchanged from the #73 slice so every run
+/// compares directly. The object, void and unparseable buckets are untouched by
+/// both the #79 and the ADR-0071 relaxations and must read identically across all
+/// three runs; the array bucket empties at ADR-0071, and the union bucket shrinks
+/// each time to its residue — the unions still carrying an arm from one of the
+/// remaining buckets, and the strings whose only spelling is the opaque form.
 #[derive(Default)]
 struct Dropped {
     /// `array{…}`, `list<T>`, `array<K, V>`, `iterable<T>` — the shaped-array rows.
+    /// Emptied by ADR-0071, which gave the countersign a denotation for them; the
+    /// bucket stays so a later pin's regression is legible rather than invisible.
     arrays: usize,
     /// Multi-base unions that are not the `?T` nullable pair — `string|false`,
     /// `int|string`, the whole `T|false` failure-arm family.
@@ -359,18 +365,27 @@ fn flatten_arms(cty: ContractTy) -> Vec<ContractTy> {
 }
 
 /// Whether one arm is carriable by the declared-contract lane the floor seeds into
-/// (ADR-0052 §9): the scalar bases, their literals, the two scalar refinements and
-/// `null`. This is exactly the vocabulary `spell_arms` renders and `subsumes`
-/// decides extensionally, so an admitted row can always be spelled back and always
-/// countersigned against the engine.
+/// (ADR-0052 §9): the scalar bases, their literals, the two scalar refinements,
+/// `null`, and — since ADR-0071 — the **array vocabulary** (`array`, `list<T>`,
+/// `array<K, V>`, `iterable<K, V>`, `array{…}`). This is the vocabulary `subsumes`
+/// decides *extensionally*, so the engine countersign is a real question for every
+/// admitted row rather than a vacuous `Maybe`.
+///
+/// The array arms were the #79 slice's largest deferral, and the deferral was never
+/// about lowering: `lower_str` has always parsed `array{a: int}`. It was about the
+/// relation. ADR-0071 gave `subsumes` a structural denotation for the whole
+/// vocabulary — `array ⊇ array{dirname: string}` now answers `Yes`, and
+/// `?array ⊉ array` answers a *proven* `No` — so the countersign discharges here.
+/// Seeding was already plumbed: a single array arm reaches the value lane through
+/// `seed_shape_fact`, a multi-arm row lives in the arm lane exactly as
+/// `string|false` does (ADR-0069's value-lane rule).
 ///
 /// Everything else stays out, still counted (ADR-0069 §5 as amended by #79):
-/// the array vocabulary (the arm lane carries it, but a *builtin* row would need
-/// the shape lane's `to_shape_fact` seeding and a shape-aware countersign — a
-/// slice of its own), classes/`object`/`callable`/`resource` and intersections
-/// (no scalar denotation, so `subsumes` can only answer `Maybe` and the countersign
-/// would be vacuous), `mixed`/`never`/the `mixed`-minus cuts (nothing to say), and
-/// `StrOpaque` (no faithful spelling — `spell_arms` refuses it).
+/// classes/`object`/`callable`/`resource` and intersections (`subsumes_class` is a
+/// reflexive floor and steins-contract carries no hierarchy — ADR-0071 §2.3 routes
+/// those rows through a later slice), `mixed`/`never`/the `mixed`-minus cuts
+/// (nothing to say), and `StrOpaque` (no faithful spelling — `spell_arms` refuses
+/// it).
 fn arm_is_carriable(ty: &ContractTy) -> bool {
     matches!(
         ty,
@@ -382,6 +397,11 @@ fn arm_is_carriable(ty: &ContractTy) -> bool {
             | ContractTy::LitStr(_)
             | ContractTy::IntIn(_)
             | ContractTy::StrWith(_)
+            | ContractTy::ArrayAny { .. }
+            | ContractTy::ListOf { .. }
+            | ContractTy::MapOf { .. }
+            | ContractTy::IterableOf { .. }
+            | ContractTy::Shape { .. }
     )
 }
 
@@ -544,22 +564,25 @@ fn render(
          # admitted             rows emitted into the shipped table\n\
          # admitted_rich        of those, the rows RICHER than a single-base envelope —\n\
          #                      the `T|false` failure unions and the scalar refinements\n\
-         #                      that issue #79 admitted (the #73 slice counted and\n\
-         #                      dropped them)\n\
+         #                      issue #79 admitted, and the array-vocabulary rows\n\
+         #                      ADR-0071 admitted (the #73 slice counted and dropped\n\
+         #                      every one of them)\n\
          #\n\
          # WHAT IS STILL DEFERRED (ADR-0069 §5 as amended 2026-08-01): `methods_skipped`\n\
-         # and the array / object / void / unparseable buckets. The array vocabulary\n\
-         # lowers fine — `lower_str` spells `array{…}` and `list<T>` — but seeding it\n\
-         # needs the SHAPE lane (`to_shape_fact`) and a shape-aware countersign, which\n\
-         # is a slice of its own. Object, `callable` and `resource` arms have no scalar\n\
-         # denotation, so `subsumes` can only answer `Maybe` and the countersign would\n\
-         # be vacuous. Nothing here is lost data; it is deferred data, counted so the\n\
-         # deferral stays visible.\n\
+         # and the object / void / unparseable buckets. Object, `callable` and `resource`\n\
+         # arms have no extensional denotation — `subsumes_class` is a reflexive floor\n\
+         # and steins-contract carries no hierarchy — so the countersign could only\n\
+         # answer `Maybe`, and a row entering uncountersigned is the one thing ADR-0069\n\
+         # §3 refuses. ADR-0071 §2.3 routes them through a later slice. Nothing here is\n\
+         # lost data; it is deferred data, counted so the deferral stays visible.\n\
          #\n\
-         # The union and refinement buckets now hold only their RESIDUE: a union with an\n\
-         # array/object/mixed arm, a string whose only spelling is the opaque form. The\n\
-         # other four buckets are untouched by the #79 relaxation and read exactly as\n\
-         # they did at #73.\n",
+         # The ARRAY bucket is emptied by ADR-0071: `subsumes` gained a structural\n\
+         # denotation for `array` / `list<T>` / `array<K, V>` / `array{…}`, so the\n\
+         # countersign is a real question for a shaped row rather than a vacuous\n\
+         # `Maybe`. The union and refinement buckets hold only their RESIDUE — a union\n\
+         # with an object or `mixed` arm, a string whose only spelling is the opaque\n\
+         # form. The object, void and unparseable buckets read exactly as they did\n\
+         # at #73.\n",
     );
     let _ = writeln!(s, "[counts]");
     let _ = writeln!(s, "total_keys = {}", counts.total_keys);
@@ -675,11 +698,21 @@ mod tests {
         assert_eq!(canon("int|false").as_deref(), Some("int|false"));
         assert_eq!(canon("non-empty-string").as_deref(), Some("non-empty-string"));
         assert_eq!(canon("int<0, max>").as_deref(), Some("non-negative-int"));
-        // Still out, still counted: no faithful arm-lane seeding exists for them.
-        assert_eq!(canon("array"), None);
-        assert_eq!(canon("array{a: int}"), None);
-        assert_eq!(canon("array|false"), None);
+        // What ADR-0071 added: the array vocabulary, alone and inside a union. The
+        // blocker was never the lowering — it was `subsumes`, which answered `Maybe`
+        // about every array pair and so made the stage-3 countersign vacuous.
+        assert_eq!(canon("array").as_deref(), Some("array"));
+        assert_eq!(canon("array{a: int}").as_deref(), Some("array{a: int}"));
+        assert_eq!(canon("list<string>").as_deref(), Some("list<string>"));
+        assert_eq!(canon("array<string, int>").as_deref(), Some("array<string, int>"));
+        // A union whose only uncarriable arm WAS the array one now travels whole. The
+        // canonical order is the speller's — array members follow the scalar ones
+        // (ADR-0062 §6, D4) — so the stored spelling is `false|array`, not the source's.
+        assert_eq!(canon("array|false").as_deref(), Some("false|array"));
+        // Still out, still counted: the countersign has no extensional denotation for
+        // them, so a row would enter unsigned (ADR-0071 §2.3 — a slice of its own).
         assert_eq!(canon("resource"), None);
+        assert_eq!(canon("array|resource"), None);
         assert_eq!(canon("void"), None);
         assert_eq!(canon("mixed"), None);
         assert_eq!(canon(""), None);
@@ -724,5 +757,36 @@ mod tests {
         assert!(!countersigned(&arms("int"), "bool"), "imageinterlace's shape");
         // An engine type this cannot lower is an answer it cannot judge — refuse.
         assert!(!countersigned(&arms("string"), "void"), "sodium_add's shape");
+    }
+
+    #[test]
+    fn the_countersign_decides_array_rows_rather_than_shrugging_at_them() {
+        let arms = |ty: &str| floor_row(ty).expect("carriable").arms;
+        // The mining workhorse (ADR-0071 §2.1, the `b = Shape` row): a reflected
+        // `array` is all PHP can natively declare, and the row refines it. Clause (2)
+        // signs it — every row arm under an engine arm, every engine arm over a row
+        // arm — where before ADR-0071 `subsumes` answered `Maybe` and clause (2) could
+        // never close. This is the entire 388-row bucket in one assertion.
+        assert!(countersigned(&arms("array{dirname: string, basename: string}"), "array"));
+        assert!(countersigned(&arms("list<string>"), "array"), "str_split's shape");
+        assert!(countersigned(&arms("array<string, int>"), "array"));
+        assert!(countersigned(&arms("non-empty-array"), "array"));
+        // Reflexively, and through the `?T` pair on both sides.
+        assert!(countersigned(&arms("array"), "array"));
+        assert!(countersigned(&arms("array{a: int}|null"), "?array"));
+        // A DROPPED arm is refused for arrays exactly as for scalars: the engine's
+        // `?array` can return a null the row does not state. `ftp_raw`'s shape, and
+        // the reason ADR-0071's proven `No` matters as much as its proven `Yes`.
+        assert!(!countersigned(&arms("array"), "?array"), "ftp_raw's shape");
+        assert!(!countersigned(&arms("array{a: int}"), "?array"));
+        assert!(!countersigned(&arms("null|array"), "array|false|null"), "mysqli_fetch_row's shape");
+        // An arm outside the declaration is refused, and the array arm does not
+        // bootstrap a bound: `array{a: int}` neither refines `string` nor covers it.
+        assert!(!countersigned(&arms("array{a: int}"), "string"));
+        assert!(!countersigned(&arms("list<string>"), "int|false"));
+        // And the scalar-shaped catch that has an ARRAY on the engine side keeps its
+        // verdict: clause (2) needs every engine arm to cover some row arm, and the
+        // engine's `array` covers nothing in a row of `{string}`.
+        assert!(!countersigned(&arms("string"), "array|string|bool"), "pg_last_notice's shape");
     }
 }

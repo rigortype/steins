@@ -37,38 +37,41 @@ generator = "cargo xtask mine-function-map"
 # admitted             rows emitted into the shipped table
 # admitted_rich        of those, the rows RICHER than a single-base envelope —
 #                      the `T|false` failure unions and the scalar refinements
-#                      that issue #79 admitted (the #73 slice counted and
-#                      dropped them)
+#                      issue #79 admitted, and the array-vocabulary rows
+#                      ADR-0071 admitted (the #73 slice counted and dropped
+#                      every one of them)
 #
 # WHAT IS STILL DEFERRED (ADR-0069 §5 as amended 2026-08-01): `methods_skipped`
-# and the array / object / void / unparseable buckets. The array vocabulary
-# lowers fine — `lower_str` spells `array{…}` and `list<T>` — but seeding it
-# needs the SHAPE lane (`to_shape_fact`) and a shape-aware countersign, which
-# is a slice of its own. Object, `callable` and `resource` arms have no scalar
-# denotation, so `subsumes` can only answer `Maybe` and the countersign would
-# be vacuous. Nothing here is lost data; it is deferred data, counted so the
-# deferral stays visible.
+# and the object / void / unparseable buckets. Object, `callable` and `resource`
+# arms have no extensional denotation — `subsumes_class` is a reflexive floor
+# and steins-contract carries no hierarchy — so the countersign could only
+# answer `Maybe`, and a row entering uncountersigned is the one thing ADR-0069
+# §3 refuses. ADR-0071 §2.3 routes them through a later slice. Nothing here is
+# lost data; it is deferred data, counted so the deferral stays visible.
 #
-# The union and refinement buckets now hold only their RESIDUE: a union with an
-# array/object/mixed arm, a string whose only spelling is the opaque form. The
-# other four buckets are untouched by the #79 relaxation and read exactly as
-# they did at #73.
+# The ARRAY bucket is emptied by ADR-0071: `subsumes` gained a structural
+# denotation for `array` / `list<T>` / `array<K, V>` / `array{…}`, so the
+# countersign is a real question for a shaped row rather than a vacuous
+# `Maybe`. The union and refinement buckets hold only their RESIDUE — a union
+# with an object or `mixed` arm, a string whose only spelling is the opaque
+# form. The object, void and unparseable buckets read exactly as they did
+# at #73.
 [counts]
 total_keys = 12461
 methods_skipped = 6658
 alternates_disagree = 18
-not_lowerable = 2083
-not_lowerable_shaped_arrays = 388
-not_lowerable_multi_base_unions = 630
+not_lowerable = 1352
+not_lowerable_shaped_arrays = 0
+not_lowerable_multi_base_unions = 287
 not_lowerable_scalar_refinements = 2
 not_lowerable_object_or_resource = 620
 not_lowerable_void_never_mixed = 139
 not_lowerable_unparseable = 304
-reflection_disagree = 47
-reflection_missing = 2207
-engine_typeless = 16
-admitted = 1358
-admitted_rich = 439
+reflection_disagree = 55
+reflection_missing = 2682
+engine_typeless = 22
+admitted = 1606
+admitted_rich = 687
 
 # The admitted rows: lowercased builtin name -> canonical phpdoc spelling.
 # The consumer re-lowers this string through the SAME `lower_str` ->
@@ -83,15 +86,52 @@ admitted_rich = 439
 "acosh" = "float"
 "addcslashes" = "string"
 "addslashes" = "string"
+"array_change_key_case" = "array"
+"array_chunk" = "list<array>"
+"array_column" = "array"
+"array_combine" = "associative-array<mixed>"
+"array_count_values" = "array<positive-int>"
+"array_diff" = "array"
+"array_diff_assoc" = "array"
+"array_diff_key" = "array"
+"array_diff_uassoc" = "array"
+"array_diff_ukey" = "array"
+"array_fill" = "array"
+"array_fill_keys" = "array"
+"array_filter" = "array"
+"array_flip" = "array"
+"array_intersect" = "array"
+"array_intersect_assoc" = "array"
+"array_intersect_key" = "array"
+"array_intersect_uassoc" = "array"
+"array_intersect_ukey" = "array"
 "array_key_exists" = "bool"
 "array_key_first" = "int|string|null"
 "array_key_last" = "int|string|null"
+"array_keys" = "list<int|string>"
+"array_map" = "array"
+"array_merge" = "array"
+"array_merge_recursive" = "array"
 "array_multisort" = "bool"
+"array_pad" = "array"
 "array_product" = "int|float"
 "array_push" = "int"
+"array_replace" = "array"
+"array_replace_recursive" = "array"
+"array_reverse" = "array"
 "array_search" = "int|string|false"
+"array_slice" = "array"
+"array_splice" = "array"
 "array_sum" = "int|float"
+"array_udiff" = "array"
+"array_udiff_assoc" = "array"
+"array_udiff_uassoc" = "array"
+"array_uintersect" = "array"
+"array_uintersect_assoc" = "array"
+"array_uintersect_uassoc" = "array"
+"array_unique" = "array"
 "array_unshift" = "positive-int"
+"array_values" = "list<mixed>"
 "array_walk" = "bool"
 "array_walk_recursive" = "bool"
 "arsort" = "bool"
@@ -100,6 +140,8 @@ admitted_rich = 439
 "asort" = "bool"
 "assert" = "bool"
 "ast\\get_kind_name" = "string"
+"ast\\get_metadata" = "array<int, ast\\metadata>"
+"ast\\get_supported_versions" = "array<int, int>"
 "ast\\kind_uses_flags" = "bool"
 "atan" = "float"
 "atan2" = "float"
@@ -127,11 +169,14 @@ admitted_rich = 439
 "bzcompress" = "int|string"
 "bzdecompress" = "int|string|false"
 "bzerrno" = "int"
+"bzerror" = "array"
 "bzerrstr" = "string"
 "bzflush" = "bool"
 "bzread" = "string|false"
 "bzwrite" = "int|false"
 "cal_days_in_month" = "int"
+"cal_from_jd" = "array"
+"cal_info" = "array"
 "cal_to_jd" = "int"
 "ceil" = "float"
 "chdir" = "bool"
@@ -145,6 +190,9 @@ admitted_rich = 439
 "chunk_split" = "string"
 "class_alias" = "bool"
 "class_exists" = "bool"
+"class_implements" = "array<string,interface-string>|false"
+"class_parents" = "array<string,class-string>|false"
+"class_uses" = "array<string,trait-string>|false"
 "cli_set_process_title" = "bool"
 "closelog" = "bool"
 "collator_asort" = "bool"
@@ -159,6 +207,7 @@ admitted_rich = 439
 "collator_set_strength" = "bool"
 "collator_sort" = "bool"
 "collator_sort_with_sort_keys" = "bool"
+"compact" = "array<string, mixed>"
 "connection_aborted" = "0|1"
 "convert_uudecode" = "string|false"
 "convert_uuencode" = "string"
@@ -166,6 +215,7 @@ admitted_rich = 439
 "cos" = "float"
 "cosh" = "float"
 "count" = "positive-int|0"
+"count_chars" = "string|array<int, int>"
 "crc32" = "int"
 "crypt" = "non-empty-string"
 "ctype_alnum" = "bool"
@@ -187,6 +237,7 @@ admitted_rich = 439
 "curl_multi_errno" = "int"
 "curl_multi_exec" = "int"
 "curl_multi_getcontent" = "string|null"
+"curl_multi_info_read" = "false|array"
 "curl_multi_remove_handle" = "int"
 "curl_multi_select" = "int"
 "curl_multi_setopt" = "bool"
@@ -196,12 +247,17 @@ admitted_rich = 439
 "curl_share_errno" = "int"
 "curl_share_setopt" = "bool"
 "curl_unescape" = "string|false"
+"curl_version" = "false|array"
 "date" = "string"
 "date_default_timezone_get" = "string"
 "date_default_timezone_set" = "bool"
 "date_format" = "string"
+"date_get_last_errors" = "false|array{error_count: positive-int|0, errors: list<string>, warning_count: positive-int|0, warnings: list<string>}"
 "date_interval_format" = "string"
 "date_offset_get" = "int"
+"date_parse" = "array<string, mixed>"
+"date_parse_from_format" = "array{day: int|false, error_count: int, errors: array<string>, fraction: float|false, hour: int|false, is_dst?: bool, is_localtime: bool, minute: int|false, month: int|false, relative?: array{day: int, first_day_of_month?: bool, hour: int, last_day_of_month?: bool, minute: int, month: int, second: int, weekday?: int, weekdays?: int, year: int}, second: int|false, tz_abbr?: string, tz_id?: string, warning_count: int, warnings: array<string>, year: int|false, zone?: int|bool, zone_type?: int|bool}"
+"date_sun_info" = "array{astronomical_twilight_begin: int|bool, astronomical_twilight_end: int|bool, civil_twilight_begin: int|bool, civil_twilight_end: int|bool, nautical_twilight_begin: int|bool, nautical_twilight_end: int|bool, sunrise: int|bool, sunset: int|bool, transit: int|bool}"
 "date_timestamp_get" = "int"
 "datefmt_format" = "string|false"
 "datefmt_format_object" = "string|false"
@@ -214,6 +270,7 @@ admitted_rich = 439
 "datefmt_get_timetype" = "int|false"
 "datefmt_get_timezone_id" = "string|false"
 "datefmt_is_lenient" = "bool"
+"datefmt_localtime" = "false|array"
 "datefmt_parse" = "int|float|false"
 "datefmt_set_calendar" = "bool"
 "datefmt_set_pattern" = "bool"
@@ -222,13 +279,17 @@ admitted_rich = 439
 "dba_exists" = "bool"
 "dba_fetch" = "string|false"
 "dba_firstkey" = "string|false"
+"dba_handlers" = "array"
 "dba_insert" = "bool"
+"dba_key_split" = "false|array"
+"dba_list" = "array"
 "dba_nextkey" = "string|false"
 "dba_optimize" = "bool"
 "dba_replace" = "bool"
 "dba_sync" = "bool"
 "dcgettext" = "string"
 "dcngettext" = "string"
+"debug_backtrace" = "list<array{function:string,line?:int,file?:string,class?:class-string,type?:'::'|'->',args?:list<mixed>,object?:object}>"
 "decbin" = "string"
 "dechex" = "string"
 "decoct" = "string"
@@ -245,18 +306,22 @@ admitted_rich = 439
 "dngettext" = "string"
 "dns_check_record" = "bool"
 "dns_get_mx" = "bool"
+"dns_get_record" = "false|list<array>"
 "doubleval" = "float"
 "easter_date" = "int"
 "easter_days" = "int"
+"error_get_last" = "null|array{file: string, line: int, message: string, type: int}"
 "error_log" = "bool"
 "error_reporting" = "int"
 "escapeshellarg" = "string"
 "escapeshellcmd" = "string"
 "exec" = "string|false"
 "exif_imagetype" = "int|false"
+"exif_read_data" = "false|array"
 "exif_tagname" = "string|false"
 "exif_thumbnail" = "string|false"
 "exp" = "float"
+"explode" = "list<string>"
 "expm1" = "float"
 "extension_loaded" = "bool"
 "extract" = "positive-int|0"
@@ -265,7 +330,9 @@ admitted_rich = 439
 "feof" = "bool"
 "fflush" = "bool"
 "fgetc" = "string|false"
+"fgetcsv" = "false|non-empty-list<string>|list{null}"
 "fgets" = "string|false"
+"file" = "false|list<string>"
 "file_exists" = "bool"
 "file_get_contents" = "string|false"
 "file_put_contents" = "positive-int|0|false"
@@ -280,6 +347,9 @@ admitted_rich = 439
 "filetype" = "string|false"
 "filter_has_var" = "bool"
 "filter_id" = "int|false"
+"filter_input_array" = "false|null|array"
+"filter_list" = "non-empty-list<non-falsy-string>"
+"filter_var_array" = "false|null|array"
 "finfo_buffer" = "string|false"
 "finfo_close" = "bool"
 "finfo_file" = "string|false"
@@ -295,6 +365,7 @@ admitted_rich = 439
 "fread" = "string|false"
 "frenchtojd" = "int"
 "fseek" = "0|-1"
+"fstat" = "false|array"
 "ftell" = "int|false"
 "ftok" = "int"
 "ftp_alloc" = "bool"
@@ -311,14 +382,17 @@ admitted_rich = 439
 "ftp_login" = "bool"
 "ftp_mdtm" = "int"
 "ftp_mkdir" = "string|false"
+"ftp_mlsd" = "false|array"
 "ftp_nb_continue" = "int"
 "ftp_nb_fget" = "int"
 "ftp_nb_fput" = "int"
 "ftp_nb_get" = "int|false"
 "ftp_nb_put" = "int|false"
+"ftp_nlist" = "false|array"
 "ftp_pasv" = "bool"
 "ftp_put" = "bool"
 "ftp_pwd" = "string|false"
+"ftp_rawlist" = "false|array"
 "ftp_rename" = "bool"
 "ftp_rmdir" = "bool"
 "ftp_set_option" = "bool"
@@ -326,38 +400,69 @@ admitted_rich = 439
 "ftp_size" = "int"
 "ftp_systype" = "string|false"
 "ftruncate" = "bool"
+"func_get_args" = "list<mixed>"
 "func_num_args" = "positive-int|0"
 "function_exists" = "bool"
 "fwrite" = "positive-int|0|false"
 "gc_collect_cycles" = "int"
 "gc_enabled" = "bool"
 "gc_mem_caches" = "int"
+"gc_status" = "array{application_time: float, buffer_size: int, collected: int, collector_time: float, destructor_time: float, free_time: float, full: bool, protected: bool, roots: int, running: bool, runs: int, threshold: int}"
+"gd_info" = "array"
+"get_class_methods" = "list<non-falsy-string>"
+"get_class_vars" = "array"
 "get_current_user" = "string"
 "get_debug_type" = "string"
+"get_declared_classes" = "list<class-string>"
+"get_declared_interfaces" = "list<interface-string>"
+"get_declared_traits" = "list<trait-string>"
+"get_defined_constants" = "array<string, mixed>"
+"get_defined_functions" = "array{internal:non-empty-list<callable-string>,user:list<callable-string>}"
+"get_defined_vars" = "array<string, mixed>"
+"get_extension_funcs" = "list<callable-string>|false"
+"get_headers" = "false|array"
+"get_html_translation_table" = "array"
 "get_include_path" = "string|false"
+"get_included_files" = "list<string>"
+"get_loaded_extensions" = "list<string>"
+"get_mangled_object_vars" = "array"
+"get_meta_tags" = "false|array"
+"get_object_vars" = "array<mixed>"
+"get_required_files" = "list<string>"
 "get_resource_id" = "int"
 "get_resource_type" = "string"
+"get_resources" = "array<int, resource>"
 "getcwd" = "non-empty-string|false"
+"getdate" = "array{seconds: int<0, 59>, minutes: int<0, 59>, hours: int<0, 23>, mday: int<1, 31>, wday: int<0, 6>, mon: int<1, 12>, year: int, yday: int<0, 365>, weekday: \"Monday\"|\"Tuesday\"|\"Wednesday\"|\"Thursday\"|\"Friday\"|\"Saturday\"|\"Sunday\", month: \"January\"|\"February\"|\"March\"|\"April\"|\"May\"|\"June\"|\"July\"|\"August\"|\"September\"|\"October\"|\"November\"|\"December\", 0: int}"
 "gethostbyaddr" = "string|false"
 "gethostbyname" = "string"
+"gethostbynamel" = "false|list<string>"
 "gethostname" = "string|false"
+"getimagesize" = "false|array{positive-int|0, positive-int|0, int, string, bits?: int, channels?: int, mime: string}"
+"getimagesizefromstring" = "false|array{positive-int|0, positive-int|0, int, string, bits?: int, channels?: int, mime: string}"
 "getlastmod" = "int|false"
 "getmxrr" = "bool"
 "getmygid" = "int|false"
 "getmyinode" = "int|false"
 "getmypid" = "int|false"
 "getmyuid" = "int|false"
+"getopt" = "false|array<string, string>|array<string, false>|array<string, list<mixed>>"
 "getprotobyname" = "int|false"
 "getprotobynumber" = "string|false"
 "getrandmax" = "int"
+"getrusage" = "false|array"
 "getservbyname" = "int|false"
 "getservbyport" = "string|false"
 "gettext" = "string"
+"gettimeofday" = "float|array"
 "gettype" = "string"
+"glob" = "false|list<string>"
 "gmdate" = "string"
 "gmmktime" = "int|false"
 "gmp_cmp" = "int"
+"gmp_div_qr" = "array"
 "gmp_export" = "string"
+"gmp_gcdext" = "array"
 "gmp_hamdist" = "int"
 "gmp_intval" = "int"
 "gmp_jacobi" = "int"
@@ -367,9 +472,11 @@ admitted_rich = 439
 "gmp_perfect_square" = "bool"
 "gmp_popcount" = "int"
 "gmp_prob_prime" = "int"
+"gmp_rootrem" = "array<int, gmp>"
 "gmp_scan0" = "int"
 "gmp_scan1" = "int"
 "gmp_sign" = "int"
+"gmp_sqrtrem" = "array"
 "gmp_strval" = "string"
 "gmp_testbit" = "bool"
 "gmstrftime" = "string|false"
@@ -380,15 +487,21 @@ admitted_rich = 439
 "gnupg_clearencryptkeys" = "bool"
 "gnupg_clearsignkeys" = "bool"
 "gnupg_decrypt" = "string|false"
+"gnupg_decryptverify" = "array"
 "gnupg_deletekey" = "bool"
 "gnupg_encrypt" = "string|false"
 "gnupg_encryptsign" = "string|false"
 "gnupg_export" = "string|false"
+"gnupg_getengineinfo" = "array"
 "gnupg_geterror" = "string|false"
 "gnupg_getprotocol" = "int"
+"gnupg_import" = "false|array"
+"gnupg_keyinfo" = "false|array"
+"gnupg_listsignatures" = "null|array"
 "gnupg_setarmor" = "bool"
 "gnupg_setsignmode" = "bool"
 "gnupg_sign" = "string|false"
+"gnupg_verify" = "false|array"
 "grapheme_extract" = "string|false"
 "grapheme_stripos" = "int|false"
 "grapheme_stristr" = "string|false"
@@ -404,6 +517,7 @@ admitted_rich = 439
 "gzdeflate" = "string|false"
 "gzencode" = "string|false"
 "gzeof" = "bool"
+"gzfile" = "false|list<string>"
 "gzgetc" = "string|false"
 "gzgets" = "string|false"
 "gzinflate" = "string|false"
@@ -416,32 +530,38 @@ admitted_rich = 439
 "gzuncompress" = "string|false"
 "gzwrite" = "int|false"
 "hash" = "non-falsy-string"
+"hash_algos" = "non-empty-list<non-falsy-string>"
 "hash_equals" = "bool"
 "hash_file" = "non-falsy-string|false"
 "hash_final" = "non-falsy-string"
 "hash_hkdf" = "non-falsy-string"
 "hash_hmac" = "non-falsy-string"
+"hash_hmac_algos" = "non-empty-list<non-falsy-string>"
 "hash_hmac_file" = "non-falsy-string|false"
 "hash_pbkdf2" = "non-falsy-string"
 "hash_update" = "bool"
 "hash_update_file" = "bool"
 "hash_update_stream" = "int"
 "header_register_callback" = "bool"
+"headers_list" = "list<non-empty-string>"
 "headers_sent" = "bool"
 "hebrev" = "string"
 "hex2bin" = "string|false"
 "hexdec" = "int|float"
 "highlight_file" = "string|bool"
 "highlight_string" = "string|bool"
+"hrtime" = "int|float|false|list{int, int}"
 "html_entity_decode" = "string"
 "htmlentities" = "string"
 "htmlspecialchars" = "string"
 "htmlspecialchars_decode" = "string"
 "http_build_query" = "string"
+"http_get_last_response_headers" = "null|list<string>"
 "http_response_code" = "int|bool"
 "hypot" = "float"
 "iconv" = "string|false"
 "iconv_mime_decode" = "string|false"
+"iconv_mime_decode_headers" = "false|array"
 "iconv_mime_encode" = "string|false"
 "iconv_set_encoding" = "bool"
 "iconv_strlen" = "positive-int|0|false"
@@ -454,6 +574,8 @@ admitted_rich = 439
 "ignore_user_abort" = "0|1"
 "image_type_to_extension" = "string|false"
 "image_type_to_mime_type" = "string"
+"imageaffinematrixconcat" = "false|list{float, float, float, float, float, float}"
+"imageaffinematrixget" = "false|list{float, float, float, float, float, float}"
 "imagealphablending" = "bool"
 "imageantialias" = "bool"
 "imagearc" = "bool"
@@ -470,6 +592,7 @@ admitted_rich = 439
 "imagecolormatch" = "bool"
 "imagecolorresolve" = "non-negative-int"
 "imagecolorresolvealpha" = "non-negative-int"
+"imagecolorsforindex" = "array{alpha: int<0, 127>, blue: int<0, 255>, green: int<0, 255>, red: int<0, 255>}"
 "imagecolorstotal" = "int<0, 256>"
 "imagecolortransparent" = "int"
 "imageconvolution" = "bool"
@@ -491,9 +614,12 @@ admitted_rich = 439
 "imageflip" = "bool"
 "imagefontheight" = "int"
 "imagefontwidth" = "int"
+"imageftbbox" = "false|array"
+"imagefttext" = "false|array"
 "imagegammacorrect" = "bool"
 "imagegd" = "bool"
 "imagegd2" = "bool"
+"imagegetclip" = "array<int, int>"
 "imagegif" = "bool"
 "imageistruecolor" = "bool"
 "imagejpeg" = "bool"
@@ -517,6 +643,8 @@ admitted_rich = 439
 "imagesx" = "positive-int"
 "imagesy" = "positive-int"
 "imagetruecolortopalette" = "bool"
+"imagettfbbox" = "false|array"
+"imagettftext" = "false|array"
 "imagetypes" = "int"
 "imagewbmp" = "bool"
 "imagewebp" = "bool"
@@ -530,6 +658,7 @@ admitted_rich = 439
 "inflate_get_status" = "int|false"
 "ini_alter" = "string|false"
 "ini_get" = "string|false"
+"ini_get_all" = "false|array"
 "ini_set" = "string|false"
 "intdiv" = "int"
 "interface_exists" = "bool"
@@ -542,6 +671,7 @@ admitted_rich = 439
 "intlcal_before" = "bool"
 "intlcal_clear" = "bool"
 "intlcal_equals" = "bool"
+"intlcal_get_available_locales" = "array"
 "intlcal_get_now" = "float"
 "intlcal_get_repeated_wall_time_option" = "int"
 "intlcal_get_skipped_wall_time_option" = "int"
@@ -574,6 +704,7 @@ admitted_rich = 439
 "intval" = "int"
 "ip2long" = "int|false"
 "iptcembed" = "string|bool"
+"iptcparse" = "false|array<string, list<string>>"
 "is_a" = "bool"
 "is_array" = "bool"
 "is_bool" = "bool"
@@ -606,6 +737,7 @@ admitted_rich = 439
 "is_writeable" = "bool"
 "iterator_apply" = "positive-int|0"
 "iterator_count" = "positive-int|0"
+"iterator_to_array" = "array"
 "jdmonthname" = "string"
 "jdtofrench" = "string"
 "jdtogregorian" = "string"
@@ -637,10 +769,15 @@ admitted_rich = 439
 "ldap_escape" = "string"
 "ldap_exop_passwd" = "string|bool"
 "ldap_exop_whoami" = "string|bool"
+"ldap_explode_dn" = "false|array"
 "ldap_first_attribute" = "string|false"
 "ldap_free_result" = "bool"
+"ldap_get_attributes" = "array"
 "ldap_get_dn" = "string|false"
+"ldap_get_entries" = "false|array"
 "ldap_get_option" = "bool"
+"ldap_get_values" = "false|array"
+"ldap_get_values_len" = "false|array"
 "ldap_mod_add" = "bool"
 "ldap_mod_del" = "bool"
 "ldap_mod_replace" = "bool"
@@ -658,6 +795,7 @@ admitted_rich = 439
 "ldap_unbind" = "bool"
 "levenshtein" = "int"
 "libxml_disable_entity_loader" = "bool"
+"libxml_get_errors" = "list<libxmlerror>"
 "libxml_set_external_entity_loader" = "bool"
 "libxml_use_internal_errors" = "bool"
 "link" = "bool"
@@ -666,6 +804,7 @@ admitted_rich = 439
 "locale_canonicalize" = "non-empty-string|null"
 "locale_compose" = "string|false"
 "locale_filter_matches" = "bool|null"
+"locale_get_all_variants" = "null|array"
 "locale_get_default" = "non-empty-string"
 "locale_get_display_language" = "non-empty-string|false"
 "locale_get_display_name" = "non-empty-string|false"
@@ -676,16 +815,21 @@ admitted_rich = 439
 "locale_get_region" = "string|null"
 "locale_get_script" = "string|null"
 "locale_lookup" = "string|null"
+"locale_parse" = "null|array"
 "locale_set_default" = "bool"
+"localeconv" = "array{currency_symbol: string, decimal_point: string, frac_digits: int, grouping: list<int>, int_curr_symbol: string, int_frac_digits: int, mon_decimal_point: string, mon_grouping: array<int, int>, mon_thousands_sep: string, n_cs_precedes: int, n_sep_by_space: int, n_sign_posn: int, negative_sign: string, p_cs_precedes: int, p_sep_by_space: int, p_sign_posn: int, positive_sign: string, thousands_sep: string}"
+"localtime" = "array"
 "log" = "float"
 "log10" = "float"
 "log1p" = "float"
 "long2ip" = "string|false"
+"lstat" = "false|array"
 "ltrim" = "string"
 "mail" = "bool"
 "mb_check_encoding" = "bool"
 "mb_chr" = "string|false"
 "mb_convert_case" = "string"
+"mb_convert_encoding" = "string|false|array"
 "mb_convert_kana" = "string"
 "mb_convert_variables" = "string|false"
 "mb_decode_mimeheader" = "string"
@@ -693,17 +837,22 @@ admitted_rich = 439
 "mb_detect_encoding" = "string|false"
 "mb_encode_mimeheader" = "string"
 "mb_encode_numericentity" = "string"
+"mb_encoding_aliases" = "list<non-falsy-string>"
 "mb_ereg_match" = "bool"
 "mb_ereg_replace" = "string|false|null"
 "mb_ereg_replace_callback" = "string|false|null"
 "mb_ereg_search" = "bool"
 "mb_ereg_search_getpos" = "int"
+"mb_ereg_search_getregs" = "false|array"
 "mb_ereg_search_init" = "bool"
+"mb_ereg_search_pos" = "false|array"
+"mb_ereg_search_regs" = "false|array"
 "mb_ereg_search_setpos" = "bool"
 "mb_http_output" = "string|bool"
 "mb_internal_encoding" = "string|bool"
 "mb_language" = "string|bool"
 "mb_lcfirst" = "string"
+"mb_list_encodings" = "non-empty-list<non-falsy-string>"
 "mb_ord" = "int|false"
 "mb_output_handler" = "string"
 "mb_parse_str" = "bool"
@@ -712,6 +861,8 @@ admitted_rich = 439
 "mb_regex_set_options" = "string"
 "mb_scrub" = "string"
 "mb_send_mail" = "bool"
+"mb_split" = "false|list<string>"
+"mb_str_split" = "list<string>"
 "mb_strcut" = "string"
 "mb_strimwidth" = "string"
 "mb_stripos" = "positive-int|0|false"
@@ -747,12 +898,15 @@ admitted_rich = 439
 "msg_remove_queue" = "bool"
 "msg_send" = "bool"
 "msg_set_queue" = "bool"
+"msg_stat_queue" = "false|array"
 "msgfmt_format" = "string|false"
 "msgfmt_format_message" = "string|false"
 "msgfmt_get_error_code" = "int"
 "msgfmt_get_error_message" = "string"
 "msgfmt_get_locale" = "string"
 "msgfmt_get_pattern" = "string|false"
+"msgfmt_parse" = "false|array"
+"msgfmt_parse_message" = "false|array"
 "msgfmt_set_pattern" = "bool"
 "mt_getrandmax" = "int"
 "mt_rand" = "int"
@@ -770,13 +924,22 @@ admitted_rich = 439
 "mysqli_dump_debug_info" = "bool"
 "mysqli_errno" = "int"
 "mysqli_error" = "string|null"
+"mysqli_error_list" = "array"
+"mysqli_fetch_all" = "list<array>"
+"mysqli_fetch_array" = "false|null|array"
+"mysqli_fetch_assoc" = "false|null|array<string, int|float|string|null>"
 "mysqli_fetch_column" = "int|float|string|false|null"
+"mysqli_fetch_fields" = "list<stdclass&object>"
+"mysqli_fetch_lengths" = "false|array"
 "mysqli_field_count" = "int"
 "mysqli_field_seek" = "bool"
 "mysqli_field_tell" = "int"
 "mysqli_get_client_info" = "string"
+"mysqli_get_client_stats" = "false|array"
 "mysqli_get_client_version" = "int"
+"mysqli_get_connection_stats" = "false|array"
 "mysqli_get_host_info" = "string"
+"mysqli_get_links_stats" = "array"
 "mysqli_get_proto_info" = "int"
 "mysqli_get_server_info" = "string"
 "mysqli_get_server_version" = "int"
@@ -812,6 +975,7 @@ admitted_rich = 439
 "mysqli_stmt_close" = "bool"
 "mysqli_stmt_errno" = "int"
 "mysqli_stmt_error" = "string"
+"mysqli_stmt_error_list" = "list<array{errno: int, error: string, sqlstate: string}>"
 "mysqli_stmt_execute" = "bool"
 "mysqli_stmt_fetch" = "bool|null"
 "mysqli_stmt_field_count" = "positive-int|0"
@@ -828,6 +992,7 @@ admitted_rich = 439
 "mysqli_warning_count" = "int"
 "natcasesort" = "bool"
 "natsort" = "bool"
+"net_get_interfaces" = "false|array"
 "ngettext" = "string"
 "nl2br" = "string"
 "nl_langinfo" = "string|false"
@@ -859,6 +1024,7 @@ admitted_rich = 439
 "ob_get_flush" = "string|false"
 "ob_get_length" = "int|false"
 "ob_get_level" = "non-negative-int"
+"ob_get_status" = "array"
 "ob_gzhandler" = "string|false"
 "ob_start" = "bool"
 "octdec" = "int|float"
@@ -868,6 +1034,7 @@ admitted_rich = 439
 "odbc_error" = "string"
 "odbc_errormsg" = "string"
 "odbc_execute" = "bool"
+"odbc_fetch_array" = "false|array"
 "odbc_fetch_into" = "int|false"
 "odbc_fetch_row" = "bool"
 "odbc_field_len" = "int|false"
@@ -885,6 +1052,8 @@ admitted_rich = 439
 "odbc_rollback" = "bool"
 "odbc_setoption" = "bool"
 "opcache_compile_file" = "bool"
+"opcache_get_configuration" = "false|array{blacklist: list<string>, directives: array{'opcache.blacklist_filename': string, 'opcache.cache_id'?: string, 'opcache.dups_fix': bool, 'opcache.enable': bool, 'opcache.enable_cli': bool, 'opcache.enable_file_override': bool, 'opcache.error_log': string, 'opcache.file_cache': string, 'opcache.file_cache_consistency_checks': bool, 'opcache.file_cache_fallback'?: bool, 'opcache.file_cache_only': bool, 'opcache.file_update_protection': int, 'opcache.force_restart_timeout': int, 'opcache.huge_code_pages'?: bool, 'opcache.interned_strings_buffer': int, 'opcache.jit'?: string, 'opcache.jit_bisect_limit'?: int, 'opcache.jit_blacklist_root_trace'?: int, 'opcache.jit_blacklist_side_trace'?: int, 'opcache.jit_buffer_size'?: int, 'opcache.jit_debug'?: int, 'opcache.jit_hot_func'?: int, 'opcache.jit_hot_loop'?: int, 'opcache.jit_hot_return'?: int, 'opcache.jit_hot_side_exit'?: int, 'opcache.jit_max_exit_counters'?: int, 'opcache.jit_max_loop_unrolls'?: int, 'opcache.jit_max_polymorphic_calls'?: int, 'opcache.jit_max_recursive_calls'?: int, 'opcache.jit_max_recursive_returns'?: int, 'opcache.jit_max_root_traces'?: int, 'opcache.jit_max_side_traces'?: int, 'opcache.jit_max_trace_length'?: int, 'opcache.jit_prof_threshold'?: float, 'opcache.lockfile_path'?: string, 'opcache.log_verbosity_level': int, 'opcache.max_accelerated_files': int, 'opcache.max_file_size': int, 'opcache.max_wasted_percentage': float, 'opcache.memory_consumption': int, 'opcache.mmap_base'?: string, 'opcache.opt_debug_level': int, 'opcache.optimization_level': int, 'opcache.preferred_memory_model': string, 'opcache.preload': string, 'opcache.preload_user'?: string, 'opcache.protect_memory': bool, 'opcache.record_warnings': bool, 'opcache.restrict_api': string, 'opcache.revalidate_freq': int, 'opcache.revalidate_path': bool, 'opcache.save_comments': bool, 'opcache.use_cwd': bool, 'opcache.validate_permission': bool, 'opcache.validate_root'?: bool, 'opcache.validate_timestamps': bool}, version: array{opcache_product_name: non-empty-string, version: non-empty-string}}"
+"opcache_get_status" = "false|array"
 "opcache_invalidate" = "bool"
 "opcache_is_script_cached" = "bool"
 "opcache_reset" = "bool"
@@ -892,11 +1061,16 @@ admitted_rich = 439
 "openssl_cipher_iv_length" = "int|false"
 "openssl_csr_export" = "bool"
 "openssl_csr_export_to_file" = "bool"
+"openssl_csr_get_subject" = "false|array"
 "openssl_decrypt" = "string|false"
 "openssl_dh_compute_key" = "string|false"
 "openssl_digest" = "string|false"
 "openssl_encrypt" = "string|false"
 "openssl_error_string" = "string|false"
+"openssl_get_cert_locations" = "array<non-falsy-string, string>"
+"openssl_get_cipher_methods" = "list<string>"
+"openssl_get_curve_names" = "false|list<string>"
+"openssl_get_md_methods" = "list<string>"
 "openssl_open" = "bool"
 "openssl_pbkdf2" = "string|false"
 "openssl_pkcs12_export" = "bool"
@@ -910,6 +1084,7 @@ admitted_rich = 439
 "openssl_pkey_derive" = "string|false"
 "openssl_pkey_export" = "bool"
 "openssl_pkey_export_to_file" = "bool"
+"openssl_pkey_get_details" = "false|array"
 "openssl_private_decrypt" = "bool"
 "openssl_private_encrypt" = "bool"
 "openssl_public_decrypt" = "bool"
@@ -927,13 +1102,20 @@ admitted_rich = 439
 "openssl_x509_export" = "bool"
 "openssl_x509_export_to_file" = "bool"
 "openssl_x509_fingerprint" = "string|false"
+"openssl_x509_parse" = "false|array"
 "ord" = "int<0, 255>"
 "output_add_rewrite_var" = "bool"
 "output_reset_rewrite_vars" = "bool"
 "pack" = "string"
+"parse_ini_file" = "false|array"
+"parse_ini_string" = "false|array"
+"parse_url" = "int|string|false|null|array"
+"password_algos" = "list<string>"
+"password_get_info" = "array"
 "password_hash" = "non-empty-string"
 "password_needs_rehash" = "bool"
 "password_verify" = "bool"
+"pathinfo" = "string|array"
 "pclose" = "int"
 "pcntl_alarm" = "int"
 "pcntl_async_signals" = "bool"
@@ -956,6 +1138,7 @@ admitted_rich = 439
 "pcntl_wifstopped" = "bool"
 "pcntl_wstopsig" = "int|false"
 "pcntl_wtermsig" = "int|false"
+"pdo_drivers" = "array"
 "pg_affected_rows" = "int"
 "pg_cancel_query" = "bool"
 "pg_client_encoding" = "string"
@@ -965,14 +1148,22 @@ admitted_rich = 439
 "pg_connection_reset" = "bool"
 "pg_connection_status" = "int"
 "pg_consume_input" = "bool"
+"pg_convert" = "false|array"
 "pg_copy_from" = "bool"
+"pg_copy_to" = "false|array"
 "pg_dbname" = "string"
 "pg_end_copy" = "bool"
+"pg_fetch_all" = "array<non-empty-list<string|null>>"
+"pg_fetch_all_columns" = "false|array"
+"pg_fetch_array" = "false|array"
+"pg_fetch_assoc" = "false|non-empty-array<string, mixed>"
+"pg_fetch_row" = "false|non-empty-list<mixed>"
 "pg_field_name" = "string|false"
 "pg_field_num" = "int"
 "pg_field_size" = "int"
 "pg_field_type" = "string"
 "pg_free_result" = "bool"
+"pg_get_notify" = "false|array"
 "pg_get_pid" = "int|false"
 "pg_host" = "string"
 "pg_last_error" = "string"
@@ -984,6 +1175,7 @@ admitted_rich = 439
 "pg_lo_truncate" = "bool"
 "pg_lo_unlink" = "bool"
 "pg_lo_write" = "int|false"
+"pg_meta_data" = "false|array"
 "pg_num_fields" = "int"
 "pg_num_rows" = "int"
 "pg_options" = "string"
@@ -994,6 +1186,7 @@ admitted_rich = 439
 "pg_trace" = "bool"
 "pg_transaction_status" = "int"
 "pg_unescape_bytea" = "string"
+"pg_version" = "array"
 "php_ini_loaded_file" = "non-empty-string|false"
 "php_ini_scanned_files" = "string|false"
 "php_sapi_name" = "non-empty-string|false"
@@ -1010,11 +1203,17 @@ admitted_rich = 439
 "posix_getegid" = "int"
 "posix_geteuid" = "int"
 "posix_getgid" = "int"
+"posix_getgrgid" = "false|array{gid: int, members: list<string>, name: string, passwd: string}"
+"posix_getgrnam" = "false|array{gid: int, members: list<string>, name: string, passwd: string}"
+"posix_getgroups" = "false|list<int>"
 "posix_getlogin" = "string|false"
 "posix_getpgid" = "int|false"
 "posix_getpgrp" = "int"
 "posix_getpid" = "int"
 "posix_getppid" = "int"
+"posix_getpwnam" = "false|array{dir: string, gecos: string, gid: int, name: string, passwd: string, shell: string, uid: int}"
+"posix_getpwuid" = "false|array{dir: string, gecos: string, gid: int, name: string, passwd: string, shell: string, uid: int}"
+"posix_getrlimit" = "false|array"
 "posix_getsid" = "int|false"
 "posix_getuid" = "int"
 "posix_initgroups" = "bool"
@@ -1030,14 +1229,23 @@ admitted_rich = 439
 "posix_setsid" = "int"
 "posix_setuid" = "bool"
 "posix_strerror" = "string"
+"posix_times" = "false|array"
 "posix_ttyname" = "string|false"
+"posix_uname" = "false|array"
+"preg_filter" = "string|null|array"
+"preg_grep" = "false|array"
 "preg_last_error" = "int"
 "preg_match" = "0|1|false"
 "preg_match_all" = "positive-int|0|false"
 "preg_quote" = "string"
+"preg_replace" = "string|null|array"
+"preg_replace_callback" = "string|null|array"
+"preg_replace_callback_array" = "string|null|array"
+"preg_split" = "false|list<string>|list<list{string, non-negative-int}>"
 "print_r" = "string|true"
 "printf" = "int"
 "proc_close" = "int"
+"proc_get_status" = "array{command: string, exitcode: int, pid: int, running: bool, signaled: bool, stopped: bool, stopsig: int, termsig: int}"
 "proc_nice" = "bool"
 "proc_terminate" = "bool"
 "property_exists" = "bool"
@@ -1049,6 +1257,7 @@ admitted_rich = 439
 "rand" = "int"
 "random_bytes" = "non-empty-string"
 "random_int" = "int"
+"range" = "array"
 "rawurldecode" = "string"
 "rawurlencode" = "string"
 "readdir" = "non-empty-string|false"
@@ -1064,12 +1273,14 @@ admitted_rich = 439
 "readline_write_history" = "bool"
 "readlink" = "string|false"
 "realpath" = "non-empty-string|false"
+"realpath_cache_get" = "array"
 "realpath_cache_size" = "int"
 "register_tick_function" = "bool"
 "rename" = "bool"
 "resourcebundle_count" = "int"
 "resourcebundle_get_error_code" = "int"
 "resourcebundle_get_error_message" = "string"
+"resourcebundle_locales" = "false|array"
 "restore_error_handler" = "true"
 "restore_exception_handler" = "true"
 "rewind" = "bool"
@@ -1077,6 +1288,7 @@ admitted_rich = 439
 "round" = "float"
 "rsort" = "bool"
 "rtrim" = "string"
+"scandir" = "false|list<string>"
 "sem_acquire" = "bool"
 "sem_release" = "bool"
 "sem_remove" = "bool"
@@ -1090,6 +1302,7 @@ admitted_rich = 439
 "session_destroy" = "bool"
 "session_encode" = "string|false"
 "session_gc" = "int|false"
+"session_get_cookie_params" = "array{domain: string, httponly: bool, lifetime: positive-int|0, partitioned: bool, path: non-falsy-string, samesite: 'Lax'|'None'|'Strict'|'lax'|'none'|'strict', secure: bool}"
 "session_id" = "string|false"
 "session_module_name" = "string|false"
 "session_name" = "non-falsy-string|false"
@@ -1125,9 +1338,13 @@ admitted_rich = 439
 "sizeof" = "int"
 "sleep" = "int|false"
 "snmp2_getnext" = "string|false"
+"snmp2_real_walk" = "false|array<string, string>"
 "snmp2_set" = "bool"
+"snmp2_walk" = "false|array"
 "snmp3_getnext" = "string|false"
+"snmp3_real_walk" = "false|array"
 "snmp3_set" = "bool"
+"snmp3_walk" = "false|array"
 "snmp_get_quick_print" = "bool"
 "snmp_get_valueretrieval" = "int"
 "snmp_read_mib" = "bool"
@@ -1137,7 +1354,11 @@ admitted_rich = 439
 "snmp_set_quick_print" = "true"
 "snmp_set_valueretrieval" = "true"
 "snmpgetnext" = "string|false"
+"snmprealwalk" = "false|array<string, string>"
 "snmpset" = "bool"
+"snmpwalk" = "false|array<string, string>"
+"snmpwalkoid" = "false|array<string, string>"
+"socket_addrinfo_explain" = "array"
 "socket_bind" = "bool"
 "socket_connect" = "bool"
 "socket_create_pair" = "bool"
@@ -1196,10 +1417,12 @@ admitted_rich = 439
 "sodium_crypto_generichash_update" = "bool"
 "sodium_crypto_kdf_derive_from_key" = "string"
 "sodium_crypto_kdf_keygen" = "string"
+"sodium_crypto_kx_client_session_keys" = "array<int, string>"
 "sodium_crypto_kx_keypair" = "string"
 "sodium_crypto_kx_publickey" = "string"
 "sodium_crypto_kx_secretkey" = "string"
 "sodium_crypto_kx_seed_keypair" = "string"
+"sodium_crypto_kx_server_session_keys" = "array<int, string>"
 "sodium_crypto_pwhash" = "string"
 "sodium_crypto_pwhash_scryptsalsa208sha256" = "string"
 "sodium_crypto_pwhash_scryptsalsa208sha256_str" = "string"
@@ -1213,7 +1436,9 @@ admitted_rich = 439
 "sodium_crypto_secretbox_keygen" = "string"
 "sodium_crypto_secretbox_open" = "string|false"
 "sodium_crypto_secretstream_xchacha20poly1305_init_pull" = "string"
+"sodium_crypto_secretstream_xchacha20poly1305_init_push" = "array"
 "sodium_crypto_secretstream_xchacha20poly1305_keygen" = "string"
+"sodium_crypto_secretstream_xchacha20poly1305_pull" = "false|array"
 "sodium_crypto_secretstream_xchacha20poly1305_push" = "string"
 "sodium_crypto_shorthash" = "string"
 "sodium_crypto_shorthash_keygen" = "string"
@@ -1239,33 +1464,46 @@ admitted_rich = 439
 "sort" = "bool"
 "soundex" = "string"
 "spl_autoload_extensions" = "string"
+"spl_autoload_functions" = "list<callable(string):void>"
 "spl_autoload_register" = "bool"
 "spl_autoload_unregister" = "bool"
+"spl_classes" = "array"
 "spl_object_hash" = "string"
 "spl_object_id" = "int"
 "sprintf" = "string"
 "sqrt" = "float"
+"stat" = "false|array"
 "str_contains" = "bool"
 "str_decrement" = "non-empty-string"
 "str_ends_with" = "bool"
+"str_getcsv" = "non-empty-list<string|null>"
 "str_increment" = "non-falsy-string"
+"str_ireplace" = "string|array<string>"
 "str_pad" = "string"
 "str_repeat" = "string"
+"str_replace" = "string|array"
 "str_rot13" = "string"
 "str_shuffle" = "string"
+"str_split" = "list<string>"
 "str_starts_with" = "bool"
 "strcasecmp" = "int<-1, 1>"
 "strchr" = "string|false"
 "strcmp" = "int<-1, 1>"
 "strcoll" = "int<-1, 1>"
 "strcspn" = "non-negative-int"
+"stream_context_get_options" = "array"
+"stream_context_get_params" = "array{notification: string, options: array<mixed>}"
 "stream_context_set_option" = "bool"
 "stream_context_set_params" = "bool"
 "stream_copy_to_stream" = "int|false"
 "stream_filter_register" = "bool"
 "stream_filter_remove" = "bool"
 "stream_get_contents" = "string|false"
+"stream_get_filters" = "list<string>"
 "stream_get_line" = "string|false"
+"stream_get_meta_data" = "array{base64?: bool, blocked: bool, crypto?: array{alpn_protocol?: string, cipher_bits: int, cipher_name: string, cipher_version: string, protocol: string}, eof: bool, mediatype?: string, mode: string, seekable: bool, stream_type: string, timed_out: bool, unread_bytes: int, uri?: string, wrapper_data: mixed, wrapper_type: string}"
+"stream_get_transports" = "list<string>"
+"stream_get_wrappers" = "list<string>"
 "stream_is_local" = "bool"
 "stream_isatty" = "bool"
 "stream_resolve_include_path" = "string|false"
@@ -1277,6 +1515,7 @@ admitted_rich = 439
 "stream_set_write_buffer" = "int"
 "stream_socket_enable_crypto" = "0|bool"
 "stream_socket_get_name" = "string|false"
+"stream_socket_pair" = "resource[]|false"
 "stream_socket_recvfrom" = "string|false"
 "stream_socket_sendto" = "int|false"
 "stream_socket_shutdown" = "bool"
@@ -1297,6 +1536,7 @@ admitted_rich = 439
 "strncmp" = "int<-1, 1>"
 "strpbrk" = "string|false"
 "strpos" = "positive-int|0|false"
+"strptime" = "false|array"
 "strrchr" = "string|false"
 "strrev" = "string"
 "strripos" = "int|false"
@@ -1311,8 +1551,10 @@ admitted_rich = 439
 "strval" = "string"
 "substr" = "string"
 "substr_count" = "positive-int|0"
+"substr_replace" = "string|array"
 "symlink" = "bool"
 "sys_get_temp_dir" = "string"
+"sys_getloadavg" = "false|list{float, float, float}"
 "syslog" = "bool"
 "system" = "string|false"
 "tan" = "float"
@@ -1324,6 +1566,7 @@ admitted_rich = 439
 "tidy_config_count" = "int"
 "tidy_diagnose" = "bool"
 "tidy_error_count" = "int"
+"tidy_get_config" = "array"
 "tidy_get_error_buffer" = "string|false"
 "tidy_get_html_ver" = "int"
 "tidy_get_opt_doc" = "string|false"
@@ -1336,16 +1579,23 @@ admitted_rich = 439
 "tidy_repair_string" = "string|false"
 "tidy_warning_count" = "int"
 "time" = "positive-int"
+"time_nanosleep" = "bool|array{nanoseconds: positive-int|0, seconds: positive-int|0}"
 "time_sleep_until" = "bool"
+"timezone_abbreviations_list" = "array<string, list<array{dst: bool, offset: int, timezone_id: string|null}>>"
+"timezone_identifiers_list" = "list<string>"
+"timezone_location_get" = "false|array{comments: string, country_code: string, latitude: float, longitude: float}"
 "timezone_name_from_abbr" = "string|false"
 "timezone_name_get" = "string"
 "timezone_offset_get" = "int"
+"timezone_transitions_get" = "false|list<array{abbr: string, isdst: bool, offset: int, time: string, ts: int}>"
 "timezone_version_get" = "string"
+"token_get_all" = "list<string|list{int, string, int}>"
 "token_name" = "non-falsy-string"
 "touch" = "bool"
 "trait_exists" = "bool"
 "transliterator_get_error_code" = "int|false"
 "transliterator_get_error_message" = "string|false"
+"transliterator_list_ids" = "false|list<string>"
 "transliterator_transliterate" = "string|false"
 "trigger_error" = "bool"
 "trim" = "string"
@@ -1357,6 +1607,7 @@ admitted_rich = 439
 "uniqid" = "non-empty-string"
 "unixtojd" = "int|false"
 "unlink" = "bool"
+"unpack" = "false|array"
 "urldecode" = "string"
 "urlencode" = "string"
 "use_soap_error_handler" = "bool"
@@ -1454,16 +1705,23 @@ admitted_rich = 439
 # does not load, or a name gone from the engine). Existence is a boot-surface
 # fact and this table refuses to guess at it.
 reflection_missing = [
+  "accelerator_get_configuration",
+  "accelerator_get_scripts",
+  "accelerator_get_status",
   "apache_child_terminate",
+  "apache_get_modules",
   "apache_get_version",
   "apache_getenv",
   "apache_note",
+  "apache_request_headers",
   "apache_reset_timeout",
+  "apache_response_headers",
   "apache_setenv",
   "apc_bin_dump",
   "apc_bin_dumpfile",
   "apc_bin_load",
   "apc_bin_loadfile",
+  "apc_cache_info",
   "apc_cas",
   "apc_clear_cache",
   "apc_dec",
@@ -1471,13 +1729,20 @@ reflection_missing = [
   "apc_delete",
   "apc_inc",
   "apc_load_constants",
+  "apc_sma_info",
+  "apcu_cache_info",
   "apcu_cas",
   "apcu_clear_cache",
   "apcu_dec",
   "apcu_inc",
+  "apcu_sma_info",
   "apd_breakpoint",
+  "apd_callstack",
   "apd_continue",
+  "apd_dump_persistent_resources",
+  "apd_dump_regular_resources",
   "apd_echo",
+  "apd_get_active_symbols",
   "apd_set_pprof_trace",
   "apd_set_session_trace_socket",
   "bbcode_add_element",
@@ -1513,8 +1778,18 @@ reflection_missing = [
   "blenc_encrypt",
   "bson\\fromarray",
   "bson\\fromjson",
+  "bson\\toarray",
   "bson\\tojson",
+  "bson_decode",
   "bson_encode",
+  "cairo_available_fonts",
+  "cairo_available_surfaces",
+  "cairo_clip_extents",
+  "cairo_clip_rectangle_list",
+  "cairo_device_to_user",
+  "cairo_device_to_user_distance",
+  "cairo_fill_extents",
+  "cairo_font_extents",
   "cairo_font_face_get_type",
   "cairo_font_face_status",
   "cairo_font_options_equal",
@@ -1526,6 +1801,8 @@ reflection_missing = [
   "cairo_font_options_status",
   "cairo_format_stride_for_width",
   "cairo_get_antialias",
+  "cairo_get_current_point",
+  "cairo_get_dash",
   "cairo_get_dash_count",
   "cairo_get_fill_rule",
   "cairo_get_line_cap",
@@ -1542,27 +1819,46 @@ reflection_missing = [
   "cairo_image_surface_get_width",
   "cairo_in_fill",
   "cairo_in_stroke",
+  "cairo_matrix_transform_distance",
+  "cairo_matrix_transform_point",
+  "cairo_path_extents",
   "cairo_pattern_get_color_stop_count",
+  "cairo_pattern_get_color_stop_rgba",
   "cairo_pattern_get_extend",
   "cairo_pattern_get_filter",
+  "cairo_pattern_get_linear_points",
+  "cairo_pattern_get_radial_circles",
+  "cairo_pattern_get_rgba",
   "cairo_pattern_get_type",
   "cairo_pattern_status",
+  "cairo_ps_get_levels",
   "cairo_ps_level_to_string",
   "cairo_ps_surface_get_eps",
+  "cairo_scaled_font_extents",
   "cairo_scaled_font_get_type",
+  "cairo_scaled_font_glyph_extents",
   "cairo_scaled_font_status",
+  "cairo_scaled_font_text_extents",
   "cairo_status",
   "cairo_status_to_string",
+  "cairo_stroke_extents",
   "cairo_surface_get_content",
+  "cairo_surface_get_device_offset",
   "cairo_surface_get_type",
   "cairo_surface_status",
+  "cairo_svg_get_versions",
+  "cairo_svg_surface_get_versions",
   "cairo_svg_version_to_string",
+  "cairo_text_extents",
+  "cairo_user_to_device",
+  "cairo_user_to_device_distance",
   "cairo_version",
   "cairo_version_string",
   "calcul_hmac",
   "calculhmac",
   "chdb_create",
   "chroot",
+  "classkit_import",
   "classkit_method_add",
   "classkit_method_copy",
   "classkit_method_redefine",
@@ -1585,11 +1881,15 @@ reflection_missing = [
   "cubrid_close",
   "cubrid_close_prepare",
   "cubrid_close_request",
+  "cubrid_col_get",
   "cubrid_col_size",
+  "cubrid_column_names",
+  "cubrid_column_types",
   "cubrid_commit",
   "cubrid_current_oid",
   "cubrid_data_seek",
   "cubrid_db_name",
+  "cubrid_db_parameter",
   "cubrid_disconnect",
   "cubrid_drop",
   "cubrid_errno",
@@ -1598,6 +1898,10 @@ reflection_missing = [
   "cubrid_error_code_facility",
   "cubrid_error_msg",
   "cubrid_execute",
+  "cubrid_fetch_array",
+  "cubrid_fetch_assoc",
+  "cubrid_fetch_lengths",
+  "cubrid_fetch_row",
   "cubrid_field_flags",
   "cubrid_field_len",
   "cubrid_field_name",
@@ -1609,10 +1913,12 @@ reflection_missing = [
   "cubrid_get_charset",
   "cubrid_get_class_name",
   "cubrid_get_client_info",
+  "cubrid_get_db_parameter",
   "cubrid_get_query_timeout",
   "cubrid_get_server_info",
   "cubrid_insert_id",
   "cubrid_is_instance",
+  "cubrid_list_dbs",
   "cubrid_load_from_glo",
   "cubrid_lob2_bind",
   "cubrid_lob2_close",
@@ -1628,6 +1934,7 @@ reflection_missing = [
   "cubrid_lob2_write",
   "cubrid_lob_close",
   "cubrid_lob_export",
+  "cubrid_lob_get",
   "cubrid_lob_send",
   "cubrid_lob_size",
   "cubrid_lock_read",
@@ -1644,6 +1951,7 @@ reflection_missing = [
   "cubrid_result",
   "cubrid_rollback",
   "cubrid_save_to_glo",
+  "cubrid_schema",
   "cubrid_send_glo",
   "cubrid_seq_drop",
   "cubrid_seq_insert",
@@ -1656,6 +1964,7 @@ reflection_missing = [
   "cubrid_version",
   "cyrus_bind",
   "cyrus_close",
+  "cyrus_query",
   "cyrus_unbind",
   "datefmt_set_timezone_id",
   "db2_bind_param",
@@ -1666,6 +1975,9 @@ reflection_missing = [
   "db2_cursor_type",
   "db2_escape_string",
   "db2_execute",
+  "db2_fetch_array",
+  "db2_fetch_assoc",
+  "db2_fetch_both",
   "db2_fetch_row",
   "db2_field_display_size",
   "db2_field_name",
@@ -1689,6 +2001,9 @@ reflection_missing = [
   "dbase_add_record",
   "dbase_close",
   "dbase_delete_record",
+  "dbase_get_header_info",
+  "dbase_get_record",
+  "dbase_get_record_with_names",
   "dbase_numfields",
   "dbase_numrecords",
   "dbase_pack",
@@ -1712,6 +2027,7 @@ reflection_missing = [
   "dbplus_next",
   "dbplus_prev",
   "dbplus_rchperm",
+  "dbplus_resolve",
   "dbplus_restorepos",
   "dbplus_rrename",
   "dbplus_runlink",
@@ -1735,6 +2051,7 @@ reflection_missing = [
   "dbx_sort",
   "dio_read",
   "dio_seek",
+  "dio_stat",
   "dio_tcsetattr",
   "dio_truncate",
   "dio_write",
@@ -1754,17 +2071,21 @@ reflection_missing = [
   "eio_nreqs",
   "eio_nthreads",
   "eio_poll",
+  "enchant_broker_describe",
   "enchant_broker_dict_exists",
   "enchant_broker_free",
   "enchant_broker_free_dict",
   "enchant_broker_get_dict_path",
   "enchant_broker_get_error",
+  "enchant_broker_list_dicts",
   "enchant_broker_set_dict_path",
   "enchant_broker_set_ordering",
   "enchant_dict_check",
+  "enchant_dict_describe",
   "enchant_dict_get_error",
   "enchant_dict_is_in_session",
   "enchant_dict_quick_check",
+  "enchant_dict_suggest",
   "ereg",
   "ereg_replace",
   "eregi",
@@ -1792,6 +2113,7 @@ reflection_missing = [
   "event_timer_set",
   "expect_expectl",
   "fam_cancel_monitor",
+  "fam_next_event",
   "fam_pending",
   "fam_resume_monitor",
   "fam_suspend_monitor",
@@ -1805,9 +2127,12 @@ reflection_missing = [
   "fann_destroy_train",
   "fann_get_activation_function",
   "fann_get_activation_steepness",
+  "fann_get_bias_array",
   "fann_get_bit_fail",
   "fann_get_bit_fail_limit",
+  "fann_get_cascade_activation_functions",
   "fann_get_cascade_activation_functions_count",
+  "fann_get_cascade_activation_steepnesses",
   "fann_get_cascade_activation_steepnesses_count",
   "fann_get_cascade_candidate_change_fraction",
   "fann_get_cascade_candidate_limit",
@@ -1821,9 +2146,11 @@ reflection_missing = [
   "fann_get_cascade_output_change_fraction",
   "fann_get_cascade_output_stagnation_epochs",
   "fann_get_cascade_weight_multiplier",
+  "fann_get_connection_array",
   "fann_get_connection_rate",
   "fann_get_errno",
   "fann_get_errstr",
+  "fann_get_layer_array",
   "fann_get_learning_momentum",
   "fann_get_learning_rate",
   "fann_get_mse",
@@ -1853,6 +2180,7 @@ reflection_missing = [
   "fann_num_output_train_data",
   "fann_randomize_weights",
   "fann_reset_mse",
+  "fann_run",
   "fann_save",
   "fann_save_train",
   "fann_scale_input",
@@ -1930,6 +2258,10 @@ reflection_missing = [
   "fbsql_drop_db",
   "fbsql_errno",
   "fbsql_error",
+  "fbsql_fetch_array",
+  "fbsql_fetch_assoc",
+  "fbsql_fetch_lengths",
+  "fbsql_fetch_row",
   "fbsql_field_flags",
   "fbsql_field_len",
   "fbsql_field_name",
@@ -1937,6 +2269,7 @@ reflection_missing = [
   "fbsql_field_table",
   "fbsql_field_type",
   "fbsql_free_result",
+  "fbsql_get_autostart_info",
   "fbsql_hostname",
   "fbsql_insert_id",
   "fbsql_next_result",
@@ -1961,6 +2294,7 @@ reflection_missing = [
   "fdf_errno",
   "fdf_error",
   "fdf_get_ap",
+  "fdf_get_attachment",
   "fdf_get_encoding",
   "fdf_get_file",
   "fdf_get_flags",
@@ -1989,8 +2323,10 @@ reflection_missing = [
   "filepro_fieldwidth",
   "filepro_retrieve",
   "filepro_rowcount",
+  "fpm_get_status",
   "fribidi_log2vis",
   "gearman_job_handle",
+  "gearman_job_status",
   "geoip_asnum_by_name",
   "geoip_continent_code_by_name",
   "geoip_country_code3_by_name",
@@ -1999,14 +2335,20 @@ reflection_missing = [
   "geoip_database_info",
   "geoip_db_avail",
   "geoip_db_filename",
+  "geoip_db_get_all_info",
   "geoip_domain_by_name",
   "geoip_id_by_name",
   "geoip_isp_by_name",
   "geoip_netspeedcell_by_name",
   "geoip_org_by_name",
+  "geoip_record_by_name",
+  "geoip_region_by_name",
   "geoip_region_name_by_code",
   "geoip_time_zone_by_country_and_region",
   "get_magic_quotes_runtime",
+  "getallheaders",
+  "gnupg_gettrustlist",
+  "gopher_parsedir",
   "gupnp_context_get_host_ip",
   "gupnp_context_get_port",
   "gupnp_context_get_subscription_timeout",
@@ -2017,6 +2359,7 @@ reflection_missing = [
   "gupnp_control_point_browse_stop",
   "gupnp_control_point_callback_set",
   "gupnp_device_action_callback_set",
+  "gupnp_device_info_get",
   "gupnp_root_device_get_available",
   "gupnp_root_device_get_relative_location",
   "gupnp_root_device_set_available",
@@ -2026,12 +2369,15 @@ reflection_missing = [
   "gupnp_service_action_return_error",
   "gupnp_service_action_set",
   "gupnp_service_freeze_notify",
+  "gupnp_service_info_get",
+  "gupnp_service_introspection_get_state_variable",
   "gupnp_service_notify",
   "gupnp_service_proxy_action_set",
   "gupnp_service_proxy_add_notify",
   "gupnp_service_proxy_callback_set",
   "gupnp_service_proxy_get_subscribed",
   "gupnp_service_proxy_remove_notify",
+  "gupnp_service_proxy_send_action",
   "gupnp_service_proxy_set_subscribed",
   "gupnp_service_thaw_notify",
   "http_build_cookie",
@@ -2044,6 +2390,7 @@ reflection_missing = [
   "http_deflate",
   "http_get",
   "http_get_request_body",
+  "http_get_request_headers",
   "http_head",
   "http_inflate",
   "http_match_etag",
@@ -2052,6 +2399,7 @@ reflection_missing = [
   "http_negotiate_charset",
   "http_negotiate_content_type",
   "http_negotiate_language",
+  "http_parse_headers",
   "http_persistent_handles_clean",
   "http_persistent_handles_ident",
   "http_post_data",
@@ -2076,6 +2424,8 @@ reflection_missing = [
   "http_support",
   "hw_array2objrec",
   "hw_changeobject",
+  "hw_children",
+  "hw_childrenobj",
   "hw_close",
   "hw_connect",
   "hw_cp",
@@ -2092,12 +2442,26 @@ reflection_missing = [
   "hw_error",
   "hw_errormsg",
   "hw_free_document",
+  "hw_getanchors",
+  "hw_getanchorsobj",
   "hw_getandlock",
+  "hw_getchildcoll",
+  "hw_getchildcollobj",
+  "hw_getchilddoccoll",
+  "hw_getchilddoccollobj",
+  "hw_getobjectbyquery",
+  "hw_getobjectbyquerycoll",
+  "hw_getobjectbyquerycollobj",
+  "hw_getobjectbyqueryobj",
+  "hw_getparents",
+  "hw_getparentsobj",
   "hw_getrellink",
   "hw_getremote",
+  "hw_getsrcbydestobj",
   "hw_gettext",
   "hw_getusername",
   "hw_identify",
+  "hw_incollections",
   "hw_info",
   "hw_inscoll",
   "hw_insdoc",
@@ -2108,6 +2472,7 @@ reflection_missing = [
   "hw_modifyobject",
   "hw_mv",
   "hw_new_document",
+  "hw_objrec2array",
   "hw_output_document",
   "hw_pconnect",
   "hw_pipedocument",
@@ -2115,6 +2480,7 @@ reflection_missing = [
   "hw_setlinkroot",
   "hw_stat",
   "hw_unlock",
+  "hw_who",
   "ibase_add_user",
   "ibase_affected_rows",
   "ibase_blob_cancel",
@@ -2122,6 +2488,7 @@ reflection_missing = [
   "ibase_blob_echo",
   "ibase_blob_get",
   "ibase_blob_import",
+  "ibase_blob_info",
   "ibase_close",
   "ibase_commit",
   "ibase_commit_ret",
@@ -2130,6 +2497,9 @@ reflection_missing = [
   "ibase_drop_db",
   "ibase_errcode",
   "ibase_errmsg",
+  "ibase_fetch_assoc",
+  "ibase_fetch_row",
+  "ibase_field_info",
   "ibase_free_event_handler",
   "ibase_free_query",
   "ibase_free_result",
@@ -2140,6 +2510,7 @@ reflection_missing = [
   "ibase_num_fields",
   "ibase_num_params",
   "ibase_num_rows",
+  "ibase_param_info",
   "ibase_rollback",
   "ibase_rollback_ret",
   "ibase_server_info",
@@ -2149,7 +2520,9 @@ reflection_missing = [
   "id3_get_frame_long_name",
   "id3_get_frame_short_name",
   "id3_get_genre_id",
+  "id3_get_genre_list",
   "id3_get_genre_name",
+  "id3_get_tag",
   "id3_get_version",
   "id3_remove_tag",
   "id3_set_tag",
@@ -2164,11 +2537,15 @@ reflection_missing = [
   "ifx_do",
   "ifx_error",
   "ifx_errormsg",
+  "ifx_fetch_row",
+  "ifx_fieldproperties",
+  "ifx_fieldtypes",
   "ifx_free_blob",
   "ifx_free_char",
   "ifx_free_result",
   "ifx_get_blob",
   "ifx_get_char",
+  "ifx_getsqlca",
   "ifx_htmltbl_result",
   "ifx_nullformat",
   "ifx_num_fields",
@@ -2201,11 +2578,15 @@ reflection_missing = [
   "iis_start_service",
   "iis_stop_server",
   "iis_stop_service",
+  "imageaffineconcat",
+  "imagepsbbox",
   "imagepsencodefont",
   "imagepsextendfont",
   "imagepsfreefont",
   "imagepsslantfont",
+  "imagepstext",
   "imap_8bit",
+  "imap_alerts",
   "imap_append",
   "imap_base64",
   "imap_binary",
@@ -2216,17 +2597,31 @@ reflection_missing = [
   "imap_createmailbox",
   "imap_delete",
   "imap_deletemailbox",
+  "imap_errors",
   "imap_expunge",
+  "imap_fetch_overview",
   "imap_fetchbody",
   "imap_fetchheader",
   "imap_fetchmime",
   "imap_fetchtext",
   "imap_gc",
+  "imap_get_quota",
+  "imap_get_quotaroot",
+  "imap_getacl",
+  "imap_getmailboxes",
+  "imap_getsubscribed",
+  "imap_headers",
   "imap_last_error",
+  "imap_list",
+  "imap_listmailbox",
+  "imap_listscan",
+  "imap_listsubscribed",
+  "imap_lsub",
   "imap_mail",
   "imap_mail_compose",
   "imap_mail_copy",
   "imap_mail_move",
+  "imap_mime_header_decode",
   "imap_msgno",
   "imap_mutf7_to_utf8",
   "imap_num_msg",
@@ -2236,12 +2631,18 @@ reflection_missing = [
   "imap_rename",
   "imap_renamemailbox",
   "imap_reopen",
+  "imap_rfc822_parse_adrlist",
   "imap_rfc822_write_address",
   "imap_savebody",
+  "imap_scan",
+  "imap_scanmailbox",
+  "imap_search",
   "imap_set_quota",
   "imap_setacl",
   "imap_setflag_full",
+  "imap_sort",
   "imap_subscribe",
+  "imap_thread",
   "imap_uid",
   "imap_undelete",
   "imap_unsubscribe",
@@ -2250,6 +2651,7 @@ reflection_missing = [
   "imap_utf8",
   "imap_utf8_to_mutf7",
   "import_request_variables",
+  "inclued_get_data",
   "ingres_autocommit",
   "ingres_autocommit_state",
   "ingres_charset",
@@ -2261,7 +2663,10 @@ reflection_missing = [
   "ingres_errsqlstate",
   "ingres_escape_string",
   "ingres_execute",
+  "ingres_fetch_array",
+  "ingres_fetch_assoc",
   "ingres_fetch_proc_return",
+  "ingres_fetch_row",
   "ingres_field_length",
   "ingres_field_name",
   "ingres_field_nullable",
@@ -2277,9 +2682,14 @@ reflection_missing = [
   "ingres_set_environment",
   "inotify_add_watch",
   "inotify_queue_len",
+  "inotify_read",
   "inotify_rm_watch",
   "is_real",
   "is_tainted",
+  "java_reload",
+  "java_require",
+  "java_set_encoding",
+  "jobqueue_license_info",
   "judy_type",
   "judy_version",
   "kadm5_chpass_principal",
@@ -2287,10 +2697,15 @@ reflection_missing = [
   "kadm5_delete_principal",
   "kadm5_destroy",
   "kadm5_flush",
+  "kadm5_get_policies",
+  "kadm5_get_principal",
+  "kadm5_get_principals",
   "kadm5_modify_principal",
   "ldap_8859_to_t61",
   "ldap_exop_refresh",
   "ldap_t61_to_8859",
+  "litespeed_request_headers",
+  "litespeed_response_headers",
   "lzf_compress",
   "lzf_decompress",
   "lzf_optimized_for",
@@ -2311,6 +2726,7 @@ reflection_missing = [
   "m_numcolumns",
   "m_numrows",
   "m_parsecommadelimited",
+  "m_responsekeys",
   "m_responseparam",
   "m_returnstatus",
   "m_setblocking",
@@ -2334,8 +2750,12 @@ reflection_missing = [
   "mailparse_msg_extract_part_file",
   "mailparse_msg_extract_whole_part_file",
   "mailparse_msg_free",
+  "mailparse_msg_get_part_data",
+  "mailparse_msg_get_structure",
   "mailparse_msg_parse",
+  "mailparse_rfc822_parse_addresses",
   "mailparse_stream_encode",
+  "mailparse_uudecode_all",
   "maxdb_affected_rows",
   "maxdb_autocommit",
   "maxdb_change_user",
@@ -2351,6 +2771,8 @@ reflection_missing = [
   "maxdb_enable_rpl_parse",
   "maxdb_errno",
   "maxdb_error",
+  "maxdb_fetch_assoc",
+  "maxdb_fetch_lengths",
   "maxdb_field_count",
   "maxdb_field_seek",
   "maxdb_field_tell",
@@ -2414,6 +2836,7 @@ reflection_missing = [
   "mcrypt_enc_get_iv_size",
   "mcrypt_enc_get_key_size",
   "mcrypt_enc_get_modes_name",
+  "mcrypt_enc_get_supported_key_sizes",
   "mcrypt_enc_is_block_algorithm",
   "mcrypt_enc_is_block_algorithm_mode",
   "mcrypt_enc_is_block_mode",
@@ -2427,9 +2850,12 @@ reflection_missing = [
   "mcrypt_get_cipher_name",
   "mcrypt_get_iv_size",
   "mcrypt_get_key_size",
+  "mcrypt_list_algorithms",
+  "mcrypt_list_modes",
   "mcrypt_module_close",
   "mcrypt_module_get_algo_block_size",
   "mcrypt_module_get_algo_key_size",
+  "mcrypt_module_get_supported_key_sizes",
   "mcrypt_module_is_block_algorithm",
   "mcrypt_module_is_block_algorithm_mode",
   "mcrypt_module_is_block_mode",
@@ -2438,18 +2864,24 @@ reflection_missing = [
   "mdecrypt_generic",
   "memcache_debug",
   "ming_keypress",
+  "monitor_license_info",
   "mqseries_strerror",
   "ms_getversion",
   "ms_getversionint",
   "ms_iogetstdoutbufferbytes",
   "ms_iostripstdoutbuffercontenttype",
+  "ms_tokenizemap",
   "msession_connect",
   "msession_count",
   "msession_create",
   "msession_destroy",
+  "msession_find",
   "msession_get",
+  "msession_get_array",
   "msession_get_data",
   "msession_inc",
+  "msession_list",
+  "msession_listvar",
   "msession_lock",
   "msession_plugin",
   "msession_randstr",
@@ -2464,6 +2896,8 @@ reflection_missing = [
   "msql_data_seek",
   "msql_drop_db",
   "msql_error",
+  "msql_fetch_array",
+  "msql_fetch_row",
   "msql_field_flags",
   "msql_field_len",
   "msql_field_name",
@@ -2478,7 +2912,10 @@ reflection_missing = [
   "mssql_bind",
   "mssql_close",
   "mssql_data_seek",
+  "mssql_fetch_array",
+  "mssql_fetch_assoc",
   "mssql_fetch_batch",
+  "mssql_fetch_row",
   "mssql_field_length",
   "mssql_field_name",
   "mssql_field_seek",
@@ -2503,6 +2940,10 @@ reflection_missing = [
   "mysql_errno",
   "mysql_error",
   "mysql_escape_string",
+  "mysql_fetch_array",
+  "mysql_fetch_assoc",
+  "mysql_fetch_lengths",
+  "mysql_fetch_row",
   "mysql_field_flags",
   "mysql_field_len",
   "mysql_field_name",
@@ -2531,6 +2972,7 @@ reflection_missing = [
   "mysqli_embedded_server_start",
   "mysqli_enable_reads_from_master",
   "mysqli_enable_rpl_parse",
+  "mysqli_get_cache_stats",
   "mysqli_master_query",
   "mysqli_rpl_parse_enabled",
   "mysqli_rpl_probe",
@@ -2539,8 +2981,14 @@ reflection_missing = [
   "mysqli_send_query",
   "mysqli_set_local_infile_handler",
   "mysqli_slave_query",
+  "mysqlnd_memcache_get_config",
   "mysqlnd_memcache_set",
+  "mysqlnd_ms_dump_servers",
+  "mysqlnd_ms_fabric_select_global",
+  "mysqlnd_ms_fabric_select_shard",
   "mysqlnd_ms_get_last_gtid",
+  "mysqlnd_ms_get_last_used_connection",
+  "mysqlnd_ms_get_stats",
   "mysqlnd_ms_match_wild",
   "mysqlnd_ms_query_is_select",
   "mysqlnd_ms_set_qos",
@@ -2551,6 +2999,12 @@ reflection_missing = [
   "mysqlnd_ms_xa_rollback",
   "mysqlnd_qc_change_handler",
   "mysqlnd_qc_clear_cache",
+  "mysqlnd_qc_get_available_handlers",
+  "mysqlnd_qc_get_cache_info",
+  "mysqlnd_qc_get_core_stats",
+  "mysqlnd_qc_get_handler",
+  "mysqlnd_qc_get_normalized_query_trace_log",
+  "mysqlnd_qc_get_query_trace_log",
   "mysqlnd_qc_set_cache_condition",
   "mysqlnd_qc_set_storage_handler",
   "mysqlnd_qc_set_user_handlers",
@@ -2713,11 +3167,15 @@ reflection_missing = [
   "newrelic_start_transaction",
   "newt_centered_window",
   "newt_checkbox_get_value",
+  "newt_checkbox_tree_find_item",
   "newt_checkbox_tree_get_entry_value",
+  "newt_checkbox_tree_get_multi_selection",
+  "newt_checkbox_tree_get_selection",
   "newt_entry_get_value",
   "newt_finished",
   "newt_init",
   "newt_listbox_get_current",
+  "newt_listbox_get_selection",
   "newt_listbox_item_count",
   "newt_open_window",
   "newt_reflow_text",
@@ -2726,6 +3184,7 @@ reflection_missing = [
   "newt_win_entries",
   "newt_win_menu",
   "newt_win_ternary",
+  "notes_body",
   "notes_copy_db",
   "notes_create_db",
   "notes_create_note",
@@ -2735,7 +3194,11 @@ reflection_missing = [
   "notes_mark_read",
   "notes_mark_unread",
   "notes_nav_create",
+  "notes_search",
+  "notes_unread",
   "notes_version",
+  "nsapi_request_headers",
+  "nsapi_response_headers",
   "nsapi_virtual",
   "nthmac",
   "oauth_get_sbs",
@@ -2759,9 +3222,13 @@ reflection_missing = [
   "oci_collection_trim",
   "oci_commit",
   "oci_define_by_name",
+  "oci_error",
   "oci_execute",
   "oci_fetch",
   "oci_fetch_all",
+  "oci_fetch_array",
+  "oci_fetch_assoc",
+  "oci_fetch_row",
   "oci_field_is_null",
   "oci_field_name",
   "oci_field_precision",
@@ -2828,6 +3295,9 @@ reflection_missing = [
   "openal_source_set",
   "openal_source_stop",
   "override_function",
+  "parsekit_compile_file",
+  "parsekit_compile_string",
+  "parsekit_func_arginfo",
   "password_make_salt",
   "pcnlt_sigwaitinfo",
   "pcntl_sigtimedwait",
@@ -2987,6 +3457,7 @@ reflection_missing = [
   "pdf_utf8_to_utf16",
   "php_check_syntax",
   "php_logo_guid",
+  "phpdbg_end_oplog",
   "ps_add_bookmark",
   "ps_add_launchlink",
   "ps_add_locallink",
@@ -3015,6 +3486,7 @@ reflection_missing = [
   "ps_get_buffer",
   "ps_get_parameter",
   "ps_get_value",
+  "ps_hyphenate",
   "ps_include_file",
   "ps_lineto",
   "ps_makespotcolor",
@@ -3055,6 +3527,7 @@ reflection_missing = [
   "ps_show_boxed",
   "ps_show_xy",
   "ps_show_xy2",
+  "ps_string_geometry",
   "ps_stringwidth",
   "ps_stroke",
   "ps_symbol",
@@ -3079,18 +3552,24 @@ reflection_missing = [
   "pspell_new_personal",
   "pspell_save_wordlist",
   "pspell_store_replacement",
+  "pspell_suggest",
   "px_close",
   "px_create_fp",
   "px_date2string",
   "px_delete",
   "px_delete_record",
+  "px_get_field",
+  "px_get_info",
   "px_get_parameter",
+  "px_get_record",
+  "px_get_schema",
   "px_get_value",
   "px_insert_record",
   "px_numfields",
   "px_numrecords",
   "px_open_fp",
   "px_put_record",
+  "px_retrieve_record",
   "px_set_blob_file",
   "px_set_parameter",
   "px_set_targetencoding",
@@ -3109,6 +3588,7 @@ reflection_missing = [
   "radius_demangle_mppe_key",
   "radius_get_tagged_attr_data",
   "radius_get_tagged_attr_tag",
+  "radius_get_vendor_attr",
   "radius_put_addr",
   "radius_put_attr",
   "radius_put_int",
@@ -3126,8 +3606,10 @@ reflection_missing = [
   "rar_broken_is",
   "rar_close",
   "rar_comment_get",
+  "rar_list",
   "rar_solid_is",
   "rar_wrapper_cache_stats",
+  "readline_list_history",
   "recode",
   "recode_file",
   "recode_string",
@@ -3138,12 +3620,17 @@ reflection_missing = [
   "rpm_version",
   "rrd_create",
   "rrd_error",
+  "rrd_fetch",
   "rrd_first",
+  "rrd_graph",
+  "rrd_info",
   "rrd_last",
+  "rrd_lastupdate",
   "rrd_restore",
   "rrd_tune",
   "rrd_update",
   "rrd_version",
+  "rrd_xport",
   "runkit_class_adopt",
   "runkit_class_emancipate",
   "runkit_constant_add",
@@ -3163,6 +3650,7 @@ reflection_missing = [
   "runkit_method_remove",
   "runkit_method_rename",
   "runkit_return_value_used",
+  "runkit_superglobals",
   "sapi_windows_cp_conv",
   "sapi_windows_cp_get",
   "sapi_windows_cp_is_utf8",
@@ -3171,9 +3659,11 @@ reflection_missing = [
   "sapi_windows_vt100_support",
   "session_is_registered",
   "session_pgsql_add_error",
+  "session_pgsql_get_error",
   "session_pgsql_get_field",
   "session_pgsql_reset",
   "session_pgsql_set_field",
+  "session_pgsql_status",
   "session_register",
   "session_unregister",
   "set_magic_quotes_runtime",
@@ -3248,11 +3738,18 @@ reflection_missing = [
   "sodium_version_string",
   "solid_fetch_prev",
   "solr_get_version",
+  "split",
+  "spliti",
   "sql_regcase",
+  "sqlite_array_query",
   "sqlite_changes",
+  "sqlite_current",
   "sqlite_error_string",
   "sqlite_escape_string",
   "sqlite_exec",
+  "sqlite_fetch_all",
+  "sqlite_fetch_array",
+  "sqlite_fetch_column_types",
   "sqlite_fetch_single",
   "sqlite_field_name",
   "sqlite_has_more",
@@ -3268,16 +3765,21 @@ reflection_missing = [
   "sqlite_prev",
   "sqlite_rewind",
   "sqlite_seek",
+  "sqlite_single_query",
   "sqlite_udf_decode_binary",
   "sqlite_udf_encode_binary",
   "sqlite_valid",
   "sqlsrv_begin_transaction",
   "sqlsrv_cancel",
+  "sqlsrv_client_info",
   "sqlsrv_close",
   "sqlsrv_commit",
   "sqlsrv_configure",
+  "sqlsrv_errors",
   "sqlsrv_execute",
   "sqlsrv_fetch",
+  "sqlsrv_fetch_array",
+  "sqlsrv_field_metadata",
   "sqlsrv_free_stmt",
   "sqlsrv_has_rows",
   "sqlsrv_next_result",
@@ -3286,25 +3788,31 @@ reflection_missing = [
   "sqlsrv_rollback",
   "sqlsrv_rows_affected",
   "sqlsrv_send_stream_data",
+  "sqlsrv_server_info",
   "ssdeep_fuzzy_compare",
   "ssdeep_fuzzy_hash",
   "ssdeep_fuzzy_hash_filename",
   "ssh2_auth_agent",
   "ssh2_auth_hostbased_file",
+  "ssh2_auth_none",
   "ssh2_auth_password",
   "ssh2_auth_pubkey_file",
   "ssh2_disconnect",
   "ssh2_fingerprint",
+  "ssh2_methods_negotiated",
   "ssh2_publickey_add",
+  "ssh2_publickey_list",
   "ssh2_publickey_remove",
   "ssh2_scp_recv",
   "ssh2_scp_send",
   "ssh2_sftp_chmod",
+  "ssh2_sftp_lstat",
   "ssh2_sftp_mkdir",
   "ssh2_sftp_readlink",
   "ssh2_sftp_realpath",
   "ssh2_sftp_rename",
   "ssh2_sftp_rmdir",
+  "ssh2_sftp_stat",
   "ssh2_sftp_symlink",
   "ssh2_sftp_unlink",
   "stats_absolute_deviation",
@@ -3364,6 +3872,8 @@ reflection_missing = [
   "stats_rand_gen_noncentral_t",
   "stats_rand_gen_normal",
   "stats_rand_gen_t",
+  "stats_rand_get_seeds",
+  "stats_rand_phrase_to_seeds",
   "stats_rand_ranf",
   "stats_skew",
   "stats_standard_deviation",
@@ -3385,21 +3895,27 @@ reflection_missing = [
   "stomp_commit",
   "stomp_connect_error",
   "stomp_error",
+  "stomp_get_read_timeout",
   "stomp_get_session_id",
   "stomp_has_frame",
+  "stomp_read_frame",
   "stomp_send",
   "stomp_subscribe",
   "stomp_unsubscribe",
   "stomp_version",
   "stream_encoding",
   "suhosin_encrypt_cookie",
+  "suhosin_get_raw_cookies",
   "svn_add",
   "svn_auth_get_parameter",
+  "svn_blame",
   "svn_cat",
   "svn_checkout",
   "svn_cleanup",
   "svn_client_version",
+  "svn_commit",
   "svn_delete",
+  "svn_diff",
   "svn_export",
   "svn_fs_abort_txn",
   "svn_fs_change_node_prop",
@@ -3407,6 +3923,7 @@ reflection_missing = [
   "svn_fs_contents_changed",
   "svn_fs_copy",
   "svn_fs_delete",
+  "svn_fs_dir_entries",
   "svn_fs_file_length",
   "svn_fs_is_dir",
   "svn_fs_is_file",
@@ -3418,12 +3935,17 @@ reflection_missing = [
   "svn_fs_revision_prop",
   "svn_fs_youngest_rev",
   "svn_import",
+  "svn_log",
+  "svn_ls",
   "svn_mkdir",
   "svn_repos_fs_commit_txn",
   "svn_repos_hotcopy",
   "svn_repos_recover",
   "svn_revert",
+  "svn_status",
   "svn_update",
+  "swf_getbitmapinfo",
+  "swf_getfontinfo",
   "swf_getframe",
   "swf_nextid",
   "swf_textwidth",
@@ -3440,6 +3962,7 @@ reflection_missing = [
   "swoole_event_del",
   "swoole_event_set",
   "swoole_event_write",
+  "swoole_get_local_ip",
   "swoole_last_error",
   "swoole_select",
   "swoole_strerror",
@@ -3450,6 +3973,9 @@ reflection_missing = [
   "sybase_affected_rows",
   "sybase_close",
   "sybase_data_seek",
+  "sybase_fetch_array",
+  "sybase_fetch_assoc",
+  "sybase_fetch_row",
   "sybase_field_seek",
   "sybase_free_result",
   "sybase_get_last_message",
@@ -3464,11 +3990,171 @@ reflection_missing = [
   "tidy_save_config",
   "tidy_set_encoding",
   "tidy_setopt",
+  "trader_acos",
+  "trader_ad",
+  "trader_add",
+  "trader_adosc",
+  "trader_adx",
+  "trader_adxr",
+  "trader_apo",
+  "trader_aroon",
+  "trader_aroonosc",
+  "trader_asin",
+  "trader_atan",
+  "trader_atr",
+  "trader_avgprice",
+  "trader_bbands",
+  "trader_beta",
+  "trader_bop",
+  "trader_cci",
+  "trader_cdl2crows",
+  "trader_cdl3blackcrows",
+  "trader_cdl3inside",
+  "trader_cdl3linestrike",
+  "trader_cdl3outside",
+  "trader_cdl3starsinsouth",
+  "trader_cdl3whitesoldiers",
+  "trader_cdlabandonedbaby",
+  "trader_cdladvanceblock",
+  "trader_cdlbelthold",
+  "trader_cdlbreakaway",
+  "trader_cdlclosingmarubozu",
+  "trader_cdlconcealbabyswall",
+  "trader_cdlcounterattack",
+  "trader_cdldarkcloudcover",
+  "trader_cdldoji",
+  "trader_cdldojistar",
+  "trader_cdldragonflydoji",
+  "trader_cdlengulfing",
+  "trader_cdleveningdojistar",
+  "trader_cdleveningstar",
+  "trader_cdlgapsidesidewhite",
+  "trader_cdlgravestonedoji",
+  "trader_cdlhammer",
+  "trader_cdlhangingman",
+  "trader_cdlharami",
+  "trader_cdlharamicross",
+  "trader_cdlhighwave",
+  "trader_cdlhikkake",
+  "trader_cdlhikkakemod",
+  "trader_cdlhomingpigeon",
+  "trader_cdlidentical3crows",
+  "trader_cdlinneck",
+  "trader_cdlinvertedhammer",
+  "trader_cdlkicking",
+  "trader_cdlkickingbylength",
+  "trader_cdlladderbottom",
+  "trader_cdllongleggeddoji",
+  "trader_cdllongline",
+  "trader_cdlmarubozu",
+  "trader_cdlmatchinglow",
+  "trader_cdlmathold",
+  "trader_cdlmorningdojistar",
+  "trader_cdlmorningstar",
+  "trader_cdlonneck",
+  "trader_cdlpiercing",
+  "trader_cdlrickshawman",
+  "trader_cdlrisefall3methods",
+  "trader_cdlseparatinglines",
+  "trader_cdlshootingstar",
+  "trader_cdlshortline",
+  "trader_cdlspinningtop",
+  "trader_cdlstalledpattern",
+  "trader_cdlsticksandwich",
+  "trader_cdltakuri",
+  "trader_cdltasukigap",
+  "trader_cdlthrusting",
+  "trader_cdltristar",
+  "trader_cdlunique3river",
+  "trader_cdlupsidegap2crows",
+  "trader_cdlxsidegap3methods",
+  "trader_ceil",
+  "trader_cmo",
+  "trader_correl",
+  "trader_cos",
+  "trader_cosh",
+  "trader_dema",
+  "trader_div",
+  "trader_dx",
+  "trader_ema",
   "trader_errno",
+  "trader_exp",
+  "trader_floor",
   "trader_get_compat",
   "trader_get_unstable_period",
+  "trader_ht_dcperiod",
+  "trader_ht_dcphase",
+  "trader_ht_phasor",
+  "trader_ht_sine",
+  "trader_ht_trendline",
+  "trader_ht_trendmode",
+  "trader_kama",
+  "trader_linearreg",
+  "trader_linearreg_angle",
+  "trader_linearreg_intercept",
+  "trader_linearreg_slope",
+  "trader_ln",
+  "trader_log10",
+  "trader_ma",
+  "trader_macd",
+  "trader_macdext",
+  "trader_macdfix",
+  "trader_mama",
+  "trader_mavp",
+  "trader_max",
+  "trader_maxindex",
+  "trader_medprice",
+  "trader_mfi",
+  "trader_midpoint",
+  "trader_midprice",
+  "trader_min",
+  "trader_minindex",
+  "trader_minmax",
+  "trader_minmaxindex",
+  "trader_minus_di",
+  "trader_minus_dm",
+  "trader_mom",
+  "trader_mult",
+  "trader_natr",
+  "trader_obv",
+  "trader_plus_di",
+  "trader_plus_dm",
+  "trader_ppo",
+  "trader_roc",
+  "trader_rocp",
+  "trader_rocr",
+  "trader_rocr100",
+  "trader_rsi",
+  "trader_sar",
+  "trader_sarext",
+  "trader_sin",
+  "trader_sinh",
+  "trader_sma",
+  "trader_sqrt",
+  "trader_stddev",
+  "trader_stoch",
+  "trader_stochf",
+  "trader_stochrsi",
+  "trader_sub",
+  "trader_sum",
+  "trader_t3",
+  "trader_tan",
+  "trader_tanh",
+  "trader_tema",
+  "trader_trange",
+  "trader_trima",
+  "trader_trix",
+  "trader_tsf",
+  "trader_typprice",
+  "trader_ultosc",
+  "trader_var",
+  "trader_wclprice",
+  "trader_willr",
+  "trader_wma",
   "udm_add_search_limit",
   "udm_api_version",
+  "udm_cat_list",
+  "udm_cat_path",
   "udm_check_charset",
   "udm_check_stored",
   "udm_clear_search_limits",
@@ -3486,10 +4172,12 @@ reflection_missing = [
   "udm_load_ispell_data",
   "udm_open_stored",
   "udm_set_agent_param",
+  "ui\\draw\\text\\font\\fontfamilies",
   "untaint",
   "uopz_add_function",
   "uopz_del_function",
   "uopz_flags",
+  "uopz_get_static",
   "uopz_set_hook",
   "uopz_set_return",
   "uopz_unset_return",
@@ -3505,6 +4193,8 @@ reflection_missing = [
   "vpopmail_alias_add",
   "vpopmail_alias_del",
   "vpopmail_alias_del_domain",
+  "vpopmail_alias_get",
+  "vpopmail_alias_get_all",
   "vpopmail_auth_user",
   "vpopmail_del_domain",
   "vpopmail_del_domain_ex",
@@ -3521,26 +4211,42 @@ reflection_missing = [
   "win32_continue_service",
   "win32_get_last_control_message",
   "win32_pause_service",
+  "win32_ps_list_procs",
+  "win32_ps_stat_mem",
+  "win32_ps_stat_proc",
   "win32_set_service_status",
   "win32_start_service",
   "win32_stop_service",
+  "wincache_fcache_fileinfo",
+  "wincache_fcache_meminfo",
   "wincache_lock",
+  "wincache_ocache_fileinfo",
+  "wincache_ocache_meminfo",
   "wincache_refresh_if_changed",
+  "wincache_rplist_fileinfo",
+  "wincache_rplist_meminfo",
+  "wincache_scache_info",
+  "wincache_scache_meminfo",
   "wincache_ucache_add",
   "wincache_ucache_cas",
   "wincache_ucache_clear",
   "wincache_ucache_delete",
   "wincache_ucache_exists",
   "wincache_ucache_inc",
+  "wincache_ucache_info",
+  "wincache_ucache_meminfo",
   "wincache_ucache_set",
   "wincache_unlock",
   "xattr_get",
+  "xattr_list",
   "xattr_remove",
   "xattr_set",
   "xattr_supported",
   "xcache_asm",
   "xcache_coredump",
   "xcache_count",
+  "xcache_coverager_decode",
+  "xcache_coverager_get",
   "xcache_dasm_file",
   "xcache_dasm_string",
   "xcache_dec",
@@ -3552,8 +4258,10 @@ reflection_missing = [
   "xcache_get_opcode",
   "xcache_get_opcode_spec",
   "xcache_inc",
+  "xcache_info",
   "xcache_is_autoglobal",
   "xcache_isset",
+  "xcache_list",
   "xcache_set",
   "xcache_unset",
   "xcache_unset_by_prefix",
@@ -3566,9 +4274,14 @@ reflection_missing = [
   "xdebug_code_coverage_started",
   "xdebug_connect_to_client",
   "xdebug_dump_aggr_profiling_data",
+  "xdebug_get_code_coverage",
   "xdebug_get_collected_errors",
+  "xdebug_get_declared_vars",
   "xdebug_get_function_count",
+  "xdebug_get_function_stack",
   "xdebug_get_gcstats_filename",
+  "xdebug_get_headers",
+  "xdebug_get_monitored_functions",
   "xdebug_get_profiler_filename",
   "xdebug_get_stack_depth",
   "xdebug_get_tracefile_name",
@@ -3577,6 +4290,7 @@ reflection_missing = [
   "xdebug_memory_usage",
   "xdebug_notify",
   "xdebug_peak_memory_usage",
+  "xdebug_print_function_stack",
   "xdebug_start_gcstats",
   "xdebug_start_trace",
   "xdebug_stop_gcstats",
@@ -3597,10 +4311,15 @@ reflection_missing = [
   "xdiff_string_patch",
   "xdiff_string_patch_binary",
   "xdiff_string_rabdiff",
+  "xhprof_disable",
+  "xhprof_sample_disable",
+  "xmlrpc_decode",
+  "xmlrpc_decode_request",
   "xmlrpc_encode",
   "xmlrpc_encode_request",
   "xmlrpc_get_type",
   "xmlrpc_is_fault",
+  "xmlrpc_parse_method_descriptions",
   "xmlrpc_server_add_introspection_data",
   "xmlrpc_server_call_method",
   "xmlrpc_server_destroy",
@@ -3634,23 +4353,30 @@ reflection_missing = [
   "yaz_element",
   "yaz_errno",
   "yaz_error",
+  "yaz_es_result",
   "yaz_get_option",
   "yaz_hits",
   "yaz_present",
   "yaz_record",
+  "yaz_scan_result",
   "yaz_search",
+  "yp_cat",
   "yp_err_string",
   "yp_errno",
+  "yp_first",
   "yp_get_default_domain",
   "yp_master",
   "yp_match",
+  "yp_next",
   "yp_order",
   "zend_current_obfuscation_level",
   "zend_disk_cache_clear",
   "zend_disk_cache_store",
+  "zend_get_id",
   "zend_loader_current_file",
   "zend_loader_enabled",
   "zend_loader_file_encoded",
+  "zend_loader_file_licensed",
   "zend_loader_install_license",
   "zend_logo_guid",
   "zend_obfuscate_class_name",
@@ -3700,6 +4426,8 @@ reflection_missing = [
 "curl_share_strerror" = ["string", "?string"]
 "curl_strerror" = ["string", "?string"]
 "fpassthru" = ["positive-int|0|false", "int"]
+"fscanf" = ["int|false|list<mixed>", "array|int|false|null"]
+"ftp_raw" = ["array", "?array"]
 "grapheme_strlen" = ["positive-int|0|false", "int|false|null"]
 "imagecolorexact" = ["non-negative-int|false", "int"]
 "imagecolorexactalpha" = ["non-negative-int|false", "int"]
@@ -3721,10 +4449,14 @@ reflection_missing = [
 "intlcal_get_weekend_transition" = ["int", "int|false"]
 "intltz_get_offset" = ["int", "bool"]
 "ldap_compare" = ["bool", "int|bool"]
+"locale_get_keywords" = ["null|array", "array|false|null"]
 "mb_ereg" = ["int|false", "bool"]
 "mb_eregi" = ["int", "bool"]
 "mb_eregi_replace" = ["string|false", "string|false|null"]
+"mysqli_fetch_row" = ["null|array", "array|false|null"]
 "mysqli_stmt_num_rows" = ["positive-int|0", "string|int"]
+"ob_list_handlers" = ["false|list<string>", "array"]
+"odbc_data_source" = ["false|array", "array|false|null"]
 "pg_field_type_oid" = ["int|false", "string|int"]
 "pg_last_notice" = ["string", "array|string|bool"]
 "pg_last_oid" = ["string|false", "string|int|false"]
@@ -3736,9 +4468,11 @@ reflection_missing = [
 "pg_send_query_params" = ["bool", "int|bool"]
 "pow" = ["int|float", "object|int|float"]
 "rewinddir" = ["false|null", "void"]
+"socket_addrinfo_lookup" = ["array<addressinfo>", "array|false"]
 "socket_cmsg_space" = ["int", "?int"]
 "sodium_add" = ["string", "void"]
 "sodium_increment" = ["string", "void"]
+"str_word_count" = ["int|false|array<int, string>", "array|int"]
 "substr_compare" = ["int<-1, 1>|false", "int"]
 "xml_error_string" = ["string", "?string"]
 "xml_parse_into_struct" = ["int", "int|false"]
