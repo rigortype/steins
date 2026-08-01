@@ -272,7 +272,19 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // slice initially introduced (a refuting guard leaving a stale
     // Singleton premise on an unreachable branch) was found by this same
     // gate and fixed in-slice: a refuted fact now DROPS.
-    ("pxxxx-monorepo", 487),
+    // 487 → 497 (+10), 2026-08-02: the ADR-0072 designed unlock (shape
+    // facts judged against contracts — the acceptance relation's third
+    // face). Baseline-diffed against the pre-slice build: exactly 10 new,
+    // 0 disappeared. Triaged verbatim, 10/10 TRUE, one class: a sealed
+    // `array{…}` @param that under-declares keys its call sites provably
+    // always pass (both docblock declarations read at source for the
+    // sampled pair — the callee's four-key sealed shape against a caller
+    // contract carrying six required keys), plus one plural-records-vs-
+    // singular-record annotation where presence and value obligations
+    // fail together. PHPStan reports the identical class for sealed
+    // shapes. Every OSS package unchanged (the CI fp-gate stayed green on
+    // the same commit); proof layer 0 throughout; nsrt LOST 0.
+    ("pxxxx-monorepo", 497),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).
