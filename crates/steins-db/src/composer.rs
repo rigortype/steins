@@ -100,11 +100,28 @@ pub fn discover(paths: &[PathBuf], cwd: &Path) -> ProjectLayout {
 
 /// The directories the walk starts from: each analyzed path, absolutized and
 /// normalized, with a file path standing in for its parent directory.
+///
+/// A path that names *nothing* seeds nothing. The parent substitution exists so
+/// that `steins check src/Foo.php` discovers the manifest governing `src/`; read
+/// as "when not a directory, use the parent" it also fired on paths that do not
+/// exist, and then discovery walked a tree the caller never named. For a
+/// top-level `/typo` that tree is `/` — the whole filesystem, downward, which is
+/// the unbounded walk that made `doctor /typo` look like a hang rather than an
+/// error. Dropping the seed is what bounds `discover` on a nonexistent root
+/// regardless of which caller passes one; callers that want a *diagnosis* of the
+/// bad argument must reject it themselves (ADR-0050 §7 amendment for the
+/// path-walking commands, ADR-0054 §10 for doctor).
 fn seed_dirs(paths: &[PathBuf], cwd: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for p in paths {
         let abs = if p.is_absolute() { normalize(p) } else { normalize(&cwd.join(p)) };
-        let dir = if abs.is_dir() { abs } else { abs.parent().map_or(abs.clone(), Path::to_path_buf) };
+        let dir = if abs.is_dir() {
+            abs
+        } else if abs.is_file() {
+            abs.parent().map_or(abs.clone(), Path::to_path_buf)
+        } else {
+            continue;
+        };
         if !out.contains(&dir) {
             out.push(dir);
         }
@@ -475,6 +492,44 @@ mod tests {
         let t = Tree::new("no-manifest");
         t.dir("src");
         assert!(t.layout().is_fallback());
+    }
+
+    /// A file path still stands in for its directory — the substitution
+    /// [`seed_dirs`] exists for. Pinned next to the nonexistent-root case below
+    /// because that case is fixed by narrowing this one.
+    #[test]
+    fn a_file_path_seeds_its_own_directory() {
+        let t = Tree::new("file-seed");
+        t.write("composer.json", r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#);
+        t.write("src/Foo.php", "<?php\n");
+        let l = discover(&[t.0.join("src/Foo.php")], &t.0);
+        assert!(!l.is_fallback(), "the manifest above the named file governs it");
+    }
+
+    /// A root that names nothing seeds nothing, so `discover` terminates instead
+    /// of substituting the parent and walking it. Before this, a top-level
+    /// `/typo` seeded `/` and the downward walk descended the entire filesystem
+    /// — `doctor /typo` looked like an infinite hang. The assertion that matters
+    /// is that this test *returns at all*; the fallback layout is the honest
+    /// answer for a tree that was never there.
+    #[test]
+    fn a_nonexistent_root_terminates_and_falls_back() {
+        let cwd = std::env::temp_dir();
+        assert!(discover(&[PathBuf::from("/definitely-not-a-real-path-9x8")], &cwd).is_fallback());
+        // Relative spelling: resolved against `cwd`, and equally absent.
+        assert!(discover(&[PathBuf::from("definitely-not-a-real-path-9x8")], &cwd).is_fallback());
+    }
+
+    /// One good path among bad ones still governs: a missing seed is dropped,
+    /// not fatal, so `discover` stays the total function its callers assume.
+    #[test]
+    fn a_missing_seed_does_not_disown_a_real_one() {
+        let t = Tree::new("mixed-seeds");
+        t.write("composer.json", r#"{"config":{"vendor-dir":"3rdparty"},"autoload":{"psr-4":{"App\\":"src/"}}}"#);
+        t.dir("src");
+        let l = discover(&[PathBuf::from("/definitely-not-a-real-path-9x8"), t.0.join("src")], &t.0);
+        assert!(!l.is_fallback());
+        assert!(l.is_vendor(&t.path("3rdparty/pkg/Lib.php")));
     }
 }
 
