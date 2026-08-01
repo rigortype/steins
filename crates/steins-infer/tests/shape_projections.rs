@@ -26,6 +26,7 @@ use steins_syntax::{ArgValue, ArrayKey, SourceTree};
 struct Mock {
     facts: HashMap<String, Fact>,
     types: HashMap<String, String>,
+    arities: HashMap<String, (u32, u32)>,
     absence: bool,
 }
 
@@ -53,7 +54,13 @@ impl Mock {
             types.insert(f.to_owned(), "string|int|null".to_owned());
         }
         types.insert("count".to_owned(), "int".to_owned());
-        Mock { facts, types, absence: true }
+        // `array_slice` is the one member of the family reading its siblings
+        // POSITIONALLY, so it carries the ADR-0064 Amendment B second leg as well
+        // as its `array` declaration: `array_slice(array $array, int $offset,
+        // ?int $length = null, bool $preserve_keys = false)` — four parameters, two
+        // required, measured at 8.5.8.
+        let arities = HashMap::from([("array_slice".to_owned(), (4, 2))]);
+        Mock { facts, types, arities, absence: true }
     }
 }
 
@@ -105,6 +112,9 @@ impl Folder for Mock {
     fn builtin_return_type(&mut self, name: &str) -> Option<String> {
         self.types.get(&name.to_ascii_lowercase()).cloned()
     }
+    fn builtin_param_counts(&mut self, name: &str) -> Option<(u32, u32)> {
+        self.arities.get(&name.to_ascii_lowercase()).copied()
+    }
 }
 
 fn diagnostics(src: &str) -> Vec<Diagnostic> {
@@ -133,6 +143,15 @@ fn dump(decl: &str, expr: &str) -> String {
 /// A value-lane fixture: statements, then one dump.
 fn dump_body(body: &str) -> String {
     one_type(&format!("<?php\nfunction f(): void {{ {body} }}\n"))
+}
+
+/// A shape-declared fixture with a second, natively-typed parameter — the way a
+/// call gets an argument carrying no literal for a rule to read.
+fn dump_two(decl: &str, extra: &str, expr: &str) -> String {
+    one_type(&format!(
+        "<?php\n/** @param {decl} $v */\n\
+         function f(array $v, {extra}): void {{ \\PHPStan\\dumpType({expr}); }}\n"
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -268,23 +287,176 @@ fn array_reverse_and_array_flip_take_their_stated_widenings() {
 
 #[test]
 fn the_declined_projections_say_nothing() {
-    // `array_slice` (offset/length govern the key structure) and the value side
-    // of `array_search` are v1 declines — honest silence, not a wrong widening.
-    // Both now show the rung BELOW instead of `unknown`: ADR-0069's Asserted floor,
-    // and the `(asserted)` marker is the difference. `array_slice`'s projection would
-    // have described the key structure; it says nothing, and the catalog's bare
-    // `array` — which describes no key structure at all — stands in its place. That
-    // row is one ADR-0071 admitted; the `array_search` row below is a multi-base
-    // union #73 counted and dropped and #79 admitted. Neither moved with anything in
-    // this family.
-    assert_eq!(
-        dump("array{a: int, b?: int}", "array_slice($v, 1)"),
-        "dumped type: array (asserted)"
-    );
+    // The value side of `array_search` is the family's ONE remaining v1 decline —
+    // honest silence, not a wrong widening. It shows the rung BELOW instead of
+    // `unknown`: ADR-0069's Asserted floor, and the `(asserted)` marker is the
+    // difference. That row is a multi-base union #73 counted and dropped and #79
+    // admitted; it did not move with anything in this family.
+    //
+    // `array_slice` used to stand beside it, declined because "the seam is
+    // single-argument by construction". Issue #118 answered that by growing the
+    // seam — see the section below.
     assert_eq!(
         dump("array{a: int, b?: int}", "array_search(1, $v)"),
         "dumped type: int|string|false (asserted)"
     );
+}
+
+// ---------------------------------------------------------------------------
+// array_slice: the grown argument channel (issue #118, ADR-0062 Amendment B)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn array_slice_keeps_the_element_type_and_the_list_ness() {
+    // THE claim that retires the v1 "carries no more than the reflected `array`
+    // envelope" argument: the element type survives, and the envelope says `array`.
+    assert_eq!(dump("list<string>", "array_slice($v, 1)"), "dumped type: list<string> (asserted)");
+    // A sealed shape's values union into the element bound, and its all-int keys are
+    // renumbered `0..` — so the result is a list even though the subject is not.
+    assert_eq!(
+        dump("array{a: int, b?: int}", "array_slice($v, 1)"),
+        "dumped type: array<string, int> (asserted)"
+    );
+    assert_eq!(
+        dump("array{0: int, 1: string}", "array_slice($v, 1)"),
+        "dumped type: list<mixed> (asserted)"
+    );
+    // The optional `$length` changes nothing about the claim: every part of the
+    // widening is sound for ANY offset and length.
+    assert_eq!(
+        dump("list<string>", "array_slice($v, 1, 2)"),
+        "dumped type: list<string> (asserted)"
+    );
+}
+
+#[test]
+fn array_slice_never_keeps_non_emptiness() {
+    // `array_slice([1,2,3], 10) === []` and `array_slice([1,2,3], 1, 0) === []`: a
+    // non-empty subject slices to nothing, so the flag is dropped unconditionally —
+    // note the `non-empty-list<int>` subject and the plain `list<int>` result.
+    assert_eq!(
+        dump("non-empty-list<int>", "array_slice($v, 1)"),
+        "dumped type: list<int> (asserted)"
+    );
+    assert_eq!(
+        dump("array{a: int}", "array_slice($v, 0)"),
+        "dumped type: array<string, int> (asserted)"
+    );
+}
+
+#[test]
+fn preserve_keys_degrades_list_ness_honestly() {
+    // A literal `true` keeps every surviving key as it was, so the renumbering that
+    // makes the result a list does not happen (`array_slice([1,2,3], 1, null, true)
+    // === [1 => 2, 2 => 3]`).
+    assert_eq!(
+        dump("list<string>", "array_slice($v, 1, null, true)"),
+        "dumped type: array<int, string> (asserted)"
+    );
+    // An explicit literal `false` is the default, and keeps the list-ness.
+    assert_eq!(
+        dump("list<string>", "array_slice($v, 1, null, false)"),
+        "dumped type: list<string> (asserted)"
+    );
+    // An UNKNOWN flag degrades exactly as a truthy one does — the rule joins the two
+    // branches rather than guessing which was passed.
+    assert_eq!(
+        dump_two("list<string>", "bool $keep", "array_slice($v, 1, null, $keep)"),
+        "dumped type: array<int, string> (asserted)"
+    );
+}
+
+#[test]
+fn array_slice_of_a_witnessed_array_projects_exactly() {
+    // **The §2 boundary at its sharpest**: the value lane is order-witnessed, so the
+    // projection is EXECUTED rather than widened. The offset and length are
+    // Singletons and the subject is a sealed all-required shape (the lift of a real
+    // array), which is the exact rung's whole premise.
+    assert_eq!(
+        dump_body("$a = ['x', 'y', 'z']; \\PHPStan\\dumpType(array_slice($a, 1));"),
+        "dumped type: list{'y', 'z'}"
+    );
+    // Negative offsets and lengths take php-src's own clamping
+    // (`array_slice([1,2,3,4,5], 1, -1) === [2,3,4]`).
+    assert_eq!(
+        dump_body("$a = [1, 2, 3, 4, 5]; \\PHPStan\\dumpType(array_slice($a, 1, -1));"),
+        "dumped type: list{2, 3, 4}"
+    );
+    assert_eq!(
+        dump_body("$a = [1, 2, 3]; \\PHPStan\\dumpType(array_slice($a, 10));"),
+        "dumped type: list{}"
+    );
+    // `$preserve_keys = true` keeps the keys; the default renumbers integers and
+    // leaves strings alone.
+    assert_eq!(
+        dump_body("$a = ['a' => 1, 5 => 2, 'b' => 3]; \\PHPStan\\dumpType(array_slice($a, 1));"),
+        "dumped type: array{2, b: 3}"
+    );
+    assert_eq!(
+        dump_body(
+            "$a = ['a' => 1, 5 => 2, 'b' => 3]; \\PHPStan\\dumpType(array_slice($a, 1, null, true));"
+        ),
+        "dumped type: array{5: 2, b: 3}"
+    );
+}
+
+#[test]
+fn a_witnessed_subject_with_an_unproven_offset_falls_to_the_widening() {
+    // The exact rung's premises are not met, so the LIFT of the same entries takes
+    // the widening — a value-lane subject is never worse off than a declared one.
+    assert_eq!(
+        one_type(
+            "<?php\nfunction f(int $n): void { $a = ['x', 'y']; \\PHPStan\\dumpType(array_slice($a, $n)); }\n"
+        ),
+        "dumped type: list<'x'|'y'>"
+    );
+}
+
+#[test]
+fn the_contract_lane_never_projects_positionally() {
+    // **The negative test of this slice** (§2, §7's declined import 1). A declared
+    // `array{a: int, b: string}` is a key SET: `['b' => 's', 'a' => 1]` is admitted
+    // just as well, so `array_slice($v, 1)` cannot be `array{b: string}` — the
+    // widening is the only sound answer, whatever the offset and length say. That is
+    // the boundary the grown seam did NOT move: what it reads is a flag and an
+    // offset, never field declaration order.
+    assert_eq!(
+        dump("array{a: int, b: string}", "array_slice($v, 1, 1)"),
+        "dumped type: array<string, mixed> (asserted)"
+    );
+    assert_eq!(
+        dump("array{a: int, b: string}", "array_slice($v, 1, 1, true)"),
+        "dumped type: array<string, mixed> (asserted)"
+    );
+}
+
+#[test]
+fn array_slice_declines_outside_its_measured_signature() {
+    // An arity PHP itself rejects (`array_slice($v)` is an `ArgumentCountError`) has
+    // no return value for the rule to describe, and a fifth argument is a different
+    // function than the pinned `(4, 2)` signature.
+    assert_eq!(dump("list<string>", "array_slice($v)"), "dumped type: array (asserted)");
+    assert_eq!(
+        dump("list<string>", "array_slice($v, 1, 2, true, 5)"),
+        "dumped type: array (asserted)"
+    );
+}
+
+#[test]
+fn an_engine_that_answers_no_arity_withholds_the_slice() {
+    // ADR-0064 Amendment B's second leg, on the one arm that reads its siblings
+    // positionally: a runner that cannot state `array_slice`'s signature withholds
+    // the rule exactly as one silent on the declaration does, and the ADR-0069 floor
+    // stands in its place.
+    let mut mock = Mock::sidecar();
+    mock.arities.clear();
+    let src = "<?php\n/** @param list<string> $v */\n\
+               function f(array $v): void { \\PHPStan\\dumpType(array_slice($v, 1)); }\n";
+    let tree = SourceTree::parse(src);
+    let ds = check_with(&tree, &[], "t.php", &mut mock);
+    let ty: Vec<&Diagnostic> = ds.iter().filter(|d| d.id == DEBUG_TYPE_ID).collect();
+    assert_eq!(ty.len(), 1);
+    assert_eq!(ty[0].message, "dumped type: array (asserted)");
 }
 
 #[test]

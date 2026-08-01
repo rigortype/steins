@@ -18314,11 +18314,34 @@ fn shape_builtin_return_fact(
     if let Some(out) = arg_dispatch_return_fact(cx, folder, name, args, env, store) {
         return Some(out);
     }
-    let [ArgValue::Var(var)] = args else { return None };
+    let [ArgValue::Var(var), rest @ ..] = args else { return None };
     let known = env.get(var)?;
+    // ADR-0061 §3's derivation clause over **every** argument the call passes. For
+    // the single-argument arms this is `known.stratum` unchanged (the fold is over
+    // one element, and that element is the subject); the argument-reading arm
+    // (`array_slice`, issue #118) is where the other arguments can lower it.
+    let stratum = args.iter().fold(known.stratum, |acc, v| {
+        acc.min(
+            transfer_arg_known(cx, folder, v, env, store)
+                .map_or_else(|| value_stratum(v, env, store), |(_, s)| s),
+        )
+    });
+
+    // **The value lane's own privilege** (ADR-0062 §2): a subject whose fact is a
+    // witnessed `Val::Array` carries true insertion order, so the order-dependent
+    // projection may be *executed* rather than widened. Taken before the shape
+    // binding below, because a `Singleton` is not a `Fact::Shape` — and refused for
+    // every name but the one issue #118 authored it for.
+    if let Some(Fact::Singleton(Val::Array(entries))) = &known.fact {
+        return witnessed_projection_fact(cx, folder, name, entries, args, env, store)
+            .map(|fact| (fact, stratum));
+    }
+
     let Some(Fact::Shape { shape, nullable: false }) = &known.fact else { return None };
 
-    let out = if name.eq_ignore_ascii_case("count") || name.eq_ignore_ascii_case("sizeof") {
+    let out = if rest.is_empty()
+        && (name.eq_ignore_ascii_case("count") || name.eq_ignore_ascii_case("sizeof"))
+    {
         let range = shape.count_range();
         if range.lo() == range.hi() {
             // The one place a shape has an exact size: a sealed, all-required
@@ -18327,7 +18350,7 @@ fn shape_builtin_return_fact(
         } else {
             Fact::refined(Base::Int, Refinement::Int(range), false)
         }
-    } else if name.eq_ignore_ascii_case("array_is_list") {
+    } else if rest.is_empty() && name.eq_ignore_ascii_case("array_is_list") {
         match shape.is_list {
             // The answer IS the denotational flag (§4's row) — no structural
             // inspection, and `Maybe` answers nothing.
@@ -18339,12 +18362,48 @@ fn shape_builtin_return_fact(
         // The positional-projection family (ADR-0062 S7) carries its own
         // admission gate — the reflected *declaration*, since its results are not
         // facts the scalar envelope path can name.
-        return shape_projection_fact(cx, folder, name, shape)
-            .map(|fact| (fact, known.stratum));
+        return shape_projection_fact(cx, folder, name, shape, args, env, store)
+            .map(|fact| (fact, stratum));
     };
 
     let envelope = builtin_call_return_fact(cx, folder, name)?;
-    (envelope.join(&out).as_ref() == Some(&envelope)).then_some((out, known.stratum))
+    (envelope.join(&out).as_ref() == Some(&envelope)).then_some((out, stratum))
+}
+
+/// **The admission gate both symbolic-transfer rungs share** (ADR-0061 §2): the
+/// running engine's own reflected *declaration* must be the one the rule was
+/// written against, and — where the declaration pins too little on its own —
+/// its arity must be too (ADR-0064 Amendment B).
+///
+/// Three refusals, each of which an existing rung already applied by hand before
+/// issue #118 gave them one home:
+///
+/// 1. **A project function shadowing the simple name** is not the builtin.
+/// 2. **A silent engine withholds.** No sidecar, an A9 monkey-patch extension
+///    loaded, or a name the engine declares nothing about: the rule is withheld
+///    rather than trusted.
+/// 3. **A moved signature withholds.** An engine that answers no arity (an older
+///    runner, a replay table recorded before the field) withholds exactly as a
+///    silent declaration does; an arity that is not the pinned one means this
+///    engine's signature has moved and the rule is stale.
+fn transfer_declaration_admits(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    name: &str,
+    declared: &[&str],
+    arity: Option<(u32, u32)>,
+) -> bool {
+    if cx.index.has_simple_function(name) {
+        return false;
+    }
+    let Some(reflected) = folder.builtin_return_type(name) else { return false };
+    if !declared.iter().any(|d| d.eq_ignore_ascii_case(&reflected)) {
+        return false;
+    }
+    match arity {
+        None => true,
+        Some(pin) => folder.builtin_param_counts(name) == Some(pin),
+    }
 }
 
 /// **The positional projections over the order-DECLARED lane** (ADR-0062 §4's
@@ -18412,11 +18471,25 @@ fn shape_builtin_return_fact(
 /// unconditional call-argument invalidation (`Stmt::invalidated`, fed by
 /// `collect_call_vars`), and `steins_catalog::out_params` carries all six so the
 /// ADR-0063 §2.3 by-ref coloring agrees. No stale shape survives a mutating call.
+///
+/// # The argument channel (issue #118, ADR-0062 Amendment B)
+///
+/// The v1 report declined `array_slice` because "the seam is single-argument by
+/// construction". That constraint was the decline's whole content, so this slice
+/// removed the constraint rather than weakening the rule: the rung now receives
+/// the CALL's argument list, and an arm may read a sibling argument's fact through
+/// [`transfer_arg_fact`] — the very reader the DR3 rung next door already owns.
+/// Every arm that does not ask keeps the single-shape shape it always had, and the
+/// §2 order boundary is untouched: what the arms read is a `$preserve_keys` flag
+/// and an offset, never field declaration order.
 fn shape_projection_fact(
     cx: &Cx,
     folder: &mut dyn Folder,
     name: &str,
     shape: &ShapeFact,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
 ) -> Option<Fact> {
     /// The `(string)` renderings of `array_key_first`/`array_key_last`/`key`'s
     /// declared return type. PHP 8 renders the union in its own order; both are
@@ -18430,8 +18503,35 @@ fn shape_projection_fact(
     /// The read-position family's live signature at `PINNED_PHP`: one parameter,
     /// required. Measured, not assumed — see `reflect_reports_the_parameter_counts`.
     const ARITY_1: Option<(u32, u32)> = Some((1, 1));
+    /// `array_slice`'s live signature at `PINNED_PHP` (8.5.8): four parameters, two
+    /// required — `array_slice(array $array, int $offset, ?int $length = null,
+    /// bool $preserve_keys = false)`. Measured, not assumed. Its `array`
+    /// declaration is already a real pin, so Amendment B does not *demand* the
+    /// second leg here; the arm carries it anyway because it is the one arm that
+    /// reads its siblings **positionally**, and a php-src signature that grew a
+    /// parameter in front of `$preserve_keys` would make the read stale while the
+    /// declaration still said `array`.
+    const ARITY_SLICE: Option<(u32, u32)> = Some((4, 2));
 
     let lower = name.to_ascii_lowercase();
+    // ---- The ARGUMENT-READING arm (issue #118), taken first ------------------
+    //
+    // `array_slice($x, $offset [, $length [, $preserve_keys]])`: the WIDENING FLOOR
+    // of the two rungs — see [`slice_widening`] for what it claims and why each
+    // part is sound for any offset/length whatever. The exact rung lives in
+    // [`witnessed_projection_fact`], on the value lane alone.
+    //
+    // It is matched *before* the arity binding below because it is the one arm the
+    // grown seam gave an argument channel to; everything after this point is
+    // single-argument by construction.
+    if lower == "array_slice" {
+        let out = slice_widening(cx, folder, shape, args, env, store)?;
+        return transfer_declaration_admits(cx, folder, name, ARRAY, ARITY_SLICE).then_some(out);
+    }
+    // The rest of the family reads exactly ONE argument, and a call passing more is
+    // a different function than the rule describes: `array_reverse($x, true)`
+    // preserves keys, `current($x, 1)` is an `ArgumentCountError`.
+    let [_] = args else { return None };
     let (out, declared, arity): (Fact, &[&str], Option<(u32, u32)>) = match lower.as_str() {
         // `array_values($x)`: the values in witnessed order, reindexed. The key
         // structure is gone (a list), the value set is preserved exactly, and an
@@ -18490,11 +18590,12 @@ fn shape_projection_fact(
             };
             (out, MIXED, ARITY_1)
         }
-        // Declined in v1 (stated in the ADR-0062 S7 report): `array_slice` (its
-        // offset/length arguments govern the result's key structure, and this seam
-        // is single-argument by construction — the shape-only answer carries no
-        // more than the reflected `array` envelope already does), and the
-        // value-side of `in_array`/`array_search`.
+        // Still declined, and now for the only reason left: the value side of
+        // `in_array`/`array_search` is a multi-base union (`int|string|false`) the
+        // four-layer domain has no single `Fact` for, so the rule cannot state its
+        // own answer (ADR-0061 §1). `array_slice`'s v1 decline — "the seam is
+        // single-argument by construction" — was answered by growing the seam, not
+        // by weakening the rule (ADR-0062 Amendment B).
         _ => return None,
     };
     // ADR-0064 Amendment B, enforced structurally: a `mixed` declaration pin is
@@ -18503,23 +18604,253 @@ fn shape_projection_fact(
         !declared.iter().any(|d| d.eq_ignore_ascii_case("mixed")) || arity.is_some(),
         "{lower}: a `mixed` declaration pin requires the arity second leg"
     );
-    if cx.index.has_simple_function(name) {
+    transfer_declaration_admits(cx, folder, name, declared, arity).then_some(out)
+}
+
+/// **`array_slice` on the ORDER-WITNESSED lane** (ADR-0062 §2), the exact rung of
+/// issue #118's two.
+///
+/// The subject's fact is a `Singleton(Val::Array)`: a real array whose entries sit
+/// in true insertion order, built by observing the construction (a literal, a
+/// write, ADR-0001 call-site propagation). Order-dependent results are sound *here
+/// and only here*, so this is the one place the projection may be **executed**
+/// rather than widened — the same privilege the fold seam exercises when it hands
+/// a written literal to the real engine, reached natively because a fold result is
+/// scalar-only and this one is an array.
+///
+/// The window arithmetic is php-src's, probed verbatim at `PINNED_PHP` (8.5.8):
+///
+/// ```text
+/// start = offset < 0 ? max(0, n + offset) : min(offset, n)
+/// end   = length is null ? n
+///       : length < 0    ? max(start, n + length)
+///       :                 min(start + length, n)
+/// ```
+///
+/// with witnesses `array_slice([1,2,3,4,5], 1, -1) === [2,3,4]`,
+/// `array_slice([1,2,3,4,5], 1, -10) === []`,
+/// `array_slice([1,2,3,4,5], -10) === [1,2,3,4,5]` and
+/// `array_slice([1,2,3], -1, -1) === []`.
+///
+/// Keys follow the same probes: `$preserve_keys = false` (the default) renumbers
+/// **integer** keys `0..` in the surviving order and leaves **string** keys alone
+/// (`array_slice(['a' => 1, 5 => 2, 'b' => 3, 9 => 4], 1) === [0 => 2, 'b' => 3,
+/// 1 => 4]`), while `true` keeps every key as it was.
+///
+/// **Three declines, and every one of them falls to the widening rather than to
+/// silence**: an offset or length that is not a `Singleton` int, a `$preserve_keys`
+/// that is not a literal bool, and any other name in the family. The shape the
+/// widening then reads is [`ShapeFact::lift`] of the same entries — which is
+/// exactly where order-witnessed-ness is honestly lost — so a value-lane subject is
+/// never *worse* off than a declared one.
+fn witnessed_projection_fact(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    name: &str,
+    entries: &[(VKey, Val)],
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<Fact> {
+    /// The one name this lane answers for; see [`shape_projection_fact`]'s own
+    /// `array_slice` arm for the widening the others take.
+    const ARRAY: &[&str] = &["array"];
+    const ARITY_SLICE: Option<(u32, u32)> = Some((4, 2));
+
+    if !name.eq_ignore_ascii_case("array_slice") || !(2..=4).contains(&args.len()) {
         return None;
     }
-    let reflected = folder.builtin_return_type(name)?;
-    if !declared.iter().any(|d| d.eq_ignore_ascii_case(&reflected)) {
+    if !transfer_declaration_admits(cx, folder, name, ARRAY, ARITY_SLICE) {
         return None;
     }
-    // The second leg. An engine that answers no arity (an older runner, a canned
-    // replay table recorded before the field) withholds, same as a silent
-    // declaration; an arity that is not the one the rule was written against means
-    // this engine's signature has moved and the rule is stale.
-    if let Some(pin) = arity
-        && folder.builtin_param_counts(name)? != pin
-    {
+    match slice_window(cx, folder, args, env, store) {
+        Some((offset, length, preserve)) => {
+            Some(Fact::Singleton(Val::Array(slice_entries(entries, offset, length, preserve))))
+        }
+        // The widening reads the LIFT of the same entries — which is exactly where
+        // order-witnessed-ness is honestly lost — so a value-lane subject is never
+        // worse off than a declared one.
+        None => slice_widening(cx, folder, &ShapeFact::lift(entries), args, env, store),
+    }
+}
+
+/// The exact rung's three premises, read together: a `Singleton` offset, a
+/// `Singleton`-or-absent length, and a literal `$preserve_keys`. `None` — the
+/// caller takes the widening — as soon as one of them is not proven.
+fn slice_window(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<(i64, Option<i64>, bool)> {
+    let Some(Fact::Singleton(Val::Int(offset))) = transfer_arg_fact(cx, folder, &args[1], env, store)
+    else {
+        return None;
+    };
+    let length = match args.get(2) {
+        None => None,
+        Some(a) => match transfer_arg_fact(cx, folder, a, env, store)? {
+            // `$length = null` is the documented "to the end" spelling, and the
+            // parameter's own default.
+            Fact::Singleton(Val::Null) => None,
+            Fact::Singleton(Val::Int(l)) => Some(l),
+            _ => return None,
+        },
+    };
+    let preserve = match slice_preserve_keys(cx, folder, args, env, store) {
+        PreserveKeys::No => false,
+        PreserveKeys::Yes => true,
+        PreserveKeys::Unknown => return None,
+    };
+    Some((offset, length, preserve))
+}
+
+/// The witnessed window of `entries`, keyed as PHP keys it (see
+/// [`witnessed_projection_fact`] for the probes both halves are written from).
+fn slice_entries(
+    entries: &[(VKey, Val)],
+    offset: i64,
+    length: Option<i64>,
+    preserve: bool,
+) -> Vec<(VKey, Val)> {
+    let n = i64::try_from(entries.len()).unwrap_or(i64::MAX);
+    let start = if offset < 0 { (n.saturating_add(offset)).max(0) } else { offset.min(n) };
+    let end = match length {
+        None => n,
+        Some(l) if l < 0 => n.saturating_add(l).max(start),
+        Some(l) => start.saturating_add(l).min(n),
+    };
+    // `0 <= start <= end <= n` holds by the three arms above, so both casts are
+    // in range; the fallback keeps the function total rather than trusting that.
+    let (lo, hi) = (usize::try_from(start).unwrap_or(0), usize::try_from(end).unwrap_or(0));
+    let mut next = 0i64;
+    entries[lo.min(entries.len())..hi.min(entries.len())]
+        .iter()
+        .map(|(k, v)| match k {
+            VKey::Str(_) => (k.clone(), v.clone()),
+            VKey::Int(_) if preserve => (k.clone(), v.clone()),
+            VKey::Int(_) => {
+                let key = VKey::Int(next);
+                next += 1;
+                (key, v.clone())
+            }
+        })
+        .collect()
+}
+
+/// What the call says about `array_slice`'s fourth argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreserveKeys {
+    /// Absent, or a literal `false` — the reindexing default.
+    No,
+    /// A literal `true`.
+    Yes,
+    /// Present but not a literal bool. Every rule here takes the join of the two
+    /// branches, which is the honest widening.
+    Unknown,
+}
+
+/// Read `$preserve_keys` off the call. A non-literal (including a truthy `int`
+/// that weak mode would coerce) is [`PreserveKeys::Unknown`], never guessed.
+fn slice_preserve_keys(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> PreserveKeys {
+    let Some(arg) = args.get(3) else { return PreserveKeys::No };
+    match transfer_arg_fact(cx, folder, arg, env, store) {
+        Some(Fact::Singleton(Val::Bool(false))) => PreserveKeys::No,
+        Some(Fact::Singleton(Val::Bool(true))) => PreserveKeys::Yes,
+        _ => PreserveKeys::Unknown,
+    }
+}
+
+/// **`array_slice` on the ORDER-DECLARED lane** — the widening floor, sound for
+/// *any* offset and length (issue #118, ADR-0062 Amendment B).
+///
+/// The v1 decline's stated cost was that "the shape-only answer carries no more
+/// than the reflected `array` envelope already does". That is false, and the
+/// element union is the counterexample: `array_slice(list<Foo>, $n)` is a
+/// `list<Foo>`, and the envelope says `array`. Four claims, each read from
+/// order-INDEPENDENT structure only (§2 — no field declaration order is consulted,
+/// and the arguments the arm reads are a flag and an offset):
+///
+/// * **Element bound** — the slice's values are a subset of the subject's, so
+///   [`shape_value_union`] carries across unchanged.
+/// * **Key class** — a slice never *invents* a key class. `$preserve_keys = true`
+///   keeps each surviving key as it was; `false` renumbers integer keys and leaves
+///   string keys alone (probe: `array_slice(['a' => 1, 5 => 2], 0) ===
+///   ['a' => 1, 0 => 2]`). Either way an all-int subject yields all-int keys and an
+///   all-string subject all-string ones, so the class is the subject's own.
+/// * **List-ness survives exactly one combination.** An all-integer-keyed subject
+///   sliced with `$preserve_keys` absent-or-false is renumbered `0..n-1`, which
+///   *is* a list. Under a truthy — or merely *unknown* — flag it degrades to
+///   `Maybe` (`array_slice([1,2,3], 1, null, true) === [1 => 2, 2 => 3]`), and so
+///   does any subject that can carry a string key. Never `No`: the empty array a
+///   slice can always return is itself a list.
+/// * **`non_empty` NEVER survives.** Every possibly-empty result is reachable from
+///   a non-empty subject — `array_slice([1,2,3], 10) === []`,
+///   `array_slice([1,2,3], 1, 0) === []` — so the flag is dropped unconditionally.
+///
+/// **The size bound is deliberately not claimed.** The result's entry count is
+/// bounded above by the subject's, and expressing that would need a sealed result
+/// shape with keys the projection cannot name; the tail is unsealed instead, which
+/// is the sound direction. The issue left this optional and the widening is worth
+/// more than the arithmetic.
+fn slice_widening(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    shape: &ShapeFact,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<Fact> {
+    use steins_domain::{KeyClass, Tail};
+    // Two required, four total (`ARITY_SLICE`) — a call PHP itself rejects with an
+    // `ArgumentCountError` has no return value for the rule to describe.
+    if !(2..=4).contains(&args.len()) {
         return None;
     }
-    Some(out)
+    let preserve = slice_preserve_keys(cx, folder, args, env, store);
+    let (all_int, all_str) = shape_key_classes(shape);
+    let key = if all_int {
+        KeyClass::Int
+    } else if all_str {
+        KeyClass::Str
+    } else {
+        KeyClass::ArrayKey
+    };
+    let is_list = if all_int && preserve == PreserveKeys::No { Certainty::Yes } else { Certainty::Maybe };
+    Some(shape_fact(ShapeFact::normalize(
+        Vec::new(),
+        Tail::Unsealed { key, value: shape_value_union(shape).map(Box::new) },
+        is_list,
+        false,
+        Vec::new(),
+    )))
+}
+
+/// `(every key is an int, every key is a string)` over the shape's declared,
+/// non-`Absent` keys **and** its tail class. A `Sealed` tail contributes nothing
+/// (it admits no undeclared key), so a sealed shape answers from its fields alone
+/// and `array{}` answers `(true, true)` vacuously — which is right: the only array
+/// it admits is `[]`.
+fn shape_key_classes(shape: &ShapeFact) -> (bool, bool) {
+    use steins_domain::{KeyClass, Presence, Tail};
+    let declared = |want: fn(&VKey) -> bool| {
+        shape.fields.iter().all(|(k, p, _)| matches!(p, Presence::Absent) || want(k))
+    };
+    let tail = |want: KeyClass| match &shape.tail {
+        Tail::Sealed => true,
+        Tail::Unsealed { key, .. } => *key == want,
+    };
+    (
+        declared(|k| matches!(k, VKey::Int(_))) && tail(KeyClass::Int),
+        declared(|k| matches!(k, VKey::Str(_))) && tail(KeyClass::Str),
+    )
 }
 
 /// One entry of an admitted array, read by position: the shape's value union, plus
@@ -18598,13 +18929,28 @@ fn arg_dispatch_return_fact(
     const NULLABLE_STRING: &[&str] = &["?string", "string|null"];
     /// `preg_replace`: the three-member union, either rendering order.
     const PREG_REPLACE: &[&str] = &["array|string|null", "string|array|null"];
+    /// `min`/`max`: a bare **`mixed`**, which pins nothing on its own — the arm
+    /// declaring it MUST carry [`ARITY_MIN_MAX`] (ADR-0064 Amendment B, and the
+    /// `debug_assert!` at the gate below).
+    const MIXED: &[&str] = &["mixed"];
+    /// `min`/`max`'s live signature at `PINNED_PHP` (8.5.8): variadic, `(total,
+    /// required) = (2, 1)` — `min(mixed $value, mixed ...$values)`. Measured, not
+    /// assumed; a variadic reports the *declared* parameters, not a call's.
+    const ARITY_MIN_MAX: Option<(u32, u32)> = Some((2, 1));
 
     let lower = name.to_ascii_lowercase();
-    let (out, declared): (Fact, &[&str]) = match lower.as_str() {
-        "explode" => (explode_transfer(cx, folder, args, env, store)?, ARRAY),
-        "range" => (range_transfer(cx, folder, args, env, store)?, ARRAY),
-        "preg_replace" => (preg_replace_transfer(cx, folder, args, env, store)?, PREG_REPLACE),
-        "var_export" => (var_export_transfer(cx, folder, args, env, store)?, NULLABLE_STRING),
+    let (out, declared, arity): (Fact, &[&str], Option<(u32, u32)>) = match lower.as_str() {
+        "explode" => (explode_transfer(cx, folder, args, env, store)?, ARRAY, None),
+        "range" => (range_transfer(cx, folder, args, env, store)?, ARRAY, None),
+        "preg_replace" => {
+            (preg_replace_transfer(cx, folder, args, env, store)?, PREG_REPLACE, None)
+        }
+        "var_export" => {
+            (var_export_transfer(cx, folder, args, env, store)?, NULLABLE_STRING, None)
+        }
+        "min" | "max" => {
+            (min_max_transfer(cx, folder, &lower, args, env, store)?, MIXED, ARITY_MIN_MAX)
+        }
         // `json_decode` is the batch's recorded DECLINE, not an omission: its
         // reflected declaration is bare `mixed`, and the soundest envelope any
         // flag combination admits — `$assoc = true` still allows
@@ -18616,22 +18962,23 @@ fn arg_dispatch_return_fact(
         // table rather than spelled out here — ~25 names sharing one `string` pin
         // (`strlen`: `int`), so a per-name arm would be a transcription of that
         // table with nothing added.
-        other => str_pred_transfer(cx, folder, other, args, env, store)?,
+        other => {
+            let (fact, declared) = str_pred_transfer(cx, folder, other, args, env, store)?;
+            (fact, declared, None)
+        }
     };
-    // ADR-0064 Amendment B, enforced structurally at this rung too: a bare `mixed`
-    // pin countersigns nothing, so no arm here may name one. This rung has no arity
-    // second leg to offer (its rules read arguments, not a single shape, and none of
-    // its names declares `mixed`), so the assertion is a *refusal* rather than an
-    // obligation — `json_decode`'s `mixed` is the recorded decline above.
+    // ADR-0064 Amendment B, enforced structurally at this rung too. Until issue #118
+    // this assertion was a flat *refusal* — the rung had no arity leg to offer, so a
+    // `mixed` pin could only be a hole, and `json_decode`'s is the recorded decline
+    // above. `min`/`max` declare a bare `mixed` and are otherwise the batch's most
+    // load-bearing rule, so the rung grew the same second leg the S7 rung next door
+    // already carried, and the assertion became the same OBLIGATION: name `mixed`
+    // and you must pin the signature the rule was written against.
     debug_assert!(
-        !declared.iter().any(|d| d.eq_ignore_ascii_case("mixed")),
-        "{lower}: a bare `mixed` declaration pin is inadmissible at the dispatch rung"
+        !declared.iter().any(|d| d.eq_ignore_ascii_case("mixed")) || arity.is_some(),
+        "{lower}: a `mixed` declaration pin requires the arity second leg"
     );
-    if cx.index.has_simple_function(name) {
-        return None;
-    }
-    let reflected = folder.builtin_return_type(name)?;
-    if !declared.iter().any(|d| d.eq_ignore_ascii_case(&reflected)) {
+    if !transfer_declaration_admits(cx, folder, name, declared, arity) {
         return None;
     }
     // ADR-0061 §3's derivation clause, over the facts the rules actually read: an
@@ -18849,6 +19196,131 @@ fn preg_replace_transfer(
         Fact::Refined { base: Base::String, nullable: false, .. }
         | Fact::General { base: Base::String, nullable: false } => Some(string_or_null()),
         Fact::Shape { nullable: false, .. } => Some(array_or_null()),
+        _ => None,
+    }
+}
+
+/// `min(…)` / `max(…)` → **the union of what the arguments already say** (issue
+/// #118, ADR-0061's rung).
+///
+/// # The load-bearing PHP fact
+///
+/// **`min`/`max` RETURN ONE OF THEIR ARGUMENTS**, whatever PHP's comparison
+/// semantics did on the way — not a coerced copy of one, and never a value that
+/// was not passed in. Witnessed at `PINNED_PHP` (8.5.8): `min('a', 1)` is
+/// `int(1)`, the second argument verbatim, and `min([3, '1', 2])` is
+/// `string(1) "1"`, an element verbatim. So the union of the argument facts admits
+/// the result **unconditionally** — the rule needs no premise about comparability,
+/// ordering, or type juggling, which is exactly what makes it worth having where a
+/// per-type case analysis would not be.
+///
+/// # The ladder
+///
+/// 1. **Two or more arguments, all int-ranged** → the *composed interval*, which is
+///    strictly sharper than the union: for `a ∈ [l₁, h₁]`, `b ∈ [l₂, h₂]`,
+///    `min(a, b) ∈ [min(l₁, l₂), min(h₁, h₂)]` (`min(a, b) ≤ a ≤ h₁` and
+///    `≤ b ≤ h₂`, and both endpoints are attained), and `max` dually. This is
+///    interval arithmetic over declared knowledge — the `count()`/`strlen`
+///    precedent — never a re-derivation of what PHP compared. A composition that
+///    collapses to a point spells the point (`min(1, 2)` is `1`), which is what
+///    keeps the rule from being *worse* than a fold on constant arguments; `min`
+///    and `max` are not on the folding allowlist, so nothing else answers them.
+/// 2. **Two or more arguments otherwise** → the plain domain join of the facts.
+/// 3. **One argument** → the unary ARRAY form: the shape's own value union
+///    ([`shape_value_union`]), because the result is one of the array's *elements*.
+///    A witnessed array lifts first, so `min([1, 2, 3])` is `1|2|3`.
+///
+/// # The declines, each for a stated reason
+///
+/// * **Any argument without a usable fact declines the whole rule.** A union over
+///   the arguments that *did* answer is not sound — the missing one could hold the
+///   winner — so there is no partial answer to give.
+/// * **A join the four-layer domain cannot spell declines** — `min($int, $string)`
+///   is an `int|string`, a two-base union with no single [`Fact`], exactly as
+///   `json_decode`'s six-base envelope is. See the deviation note in ADR-0062
+///   Amendment B: the design called for these to enter the *arm* lane, which has no
+///   argument-dependent channel at this seam, so the honest floor stands instead.
+/// * **A nullable int leaves the interval path** and takes the union: `min(null, 5)`
+///   is `NULL` at 8.5.8, so an `?int` argument must not yield a bare `int` claim.
+///   The union carries the null side correctly (`int|null` is one fact).
+/// * **A one-argument call whose fact is not an array declines** — `min(5)` is a
+///   `TypeError`, and a rule describes a call that returns.
+/// * **A zero-argument call declines** — `min()` is an `ArgumentCountError`.
+///
+/// `min([])` throwing a `ValueError` costs the rule nothing and buys it no
+/// `non_empty` premise: a throw is the *absence* of a return, so there is no value
+/// for the claim to be wrong about (the same vacuity [`range_transfer`] leans on).
+fn min_max_transfer(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    lower: &str,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<Fact> {
+    let [first, rest @ ..] = args else { return None };
+    if rest.is_empty() {
+        // The unary array form. A `Singleton(Val::Array)` lifts (A-G5) rather than
+        // being read positionally: which element wins is a comparison question, and
+        // the union is the claim this rule makes on either lane.
+        return match transfer_arg_fact(cx, folder, first, env, store)? {
+            Fact::Shape { shape, nullable: false } => shape_value_union(&shape),
+            Fact::Singleton(Val::Array(entries)) => shape_value_union(&ShapeFact::lift(&entries)),
+            _ => None,
+        };
+    }
+    let mut facts = Vec::with_capacity(args.len());
+    for a in args {
+        // No short-circuit and no skipping: an argument with no fact declines the
+        // whole rule, so the answer is a function of the entire call.
+        facts.push(transfer_arg_fact(cx, folder, a, env, store)?);
+    }
+    min_max_interval(lower == "min", &facts).or_else(|| {
+        facts.iter().skip(1).try_fold(facts[0].clone(), |acc, f| acc.join(f))
+    })
+}
+
+/// The composed interval of a `min`/`max` call whose every argument is a
+/// non-nullable int — see [`min_max_transfer`] for the arithmetic and why it is
+/// tight. `None` as soon as one argument is anything else, which routes the call
+/// to the union.
+fn min_max_interval(is_min: bool, facts: &[Fact]) -> Option<Fact> {
+    let mut acc: Option<IntRange> = None;
+    for f in facts {
+        let r = fact_int_range(f)?;
+        acc = Some(match acc {
+            None => r,
+            Some(a) => {
+                let (lo, hi) = if is_min {
+                    (a.lo().min(r.lo()), a.hi().min(r.hi()))
+                } else {
+                    (a.lo().max(r.lo()), a.hi().max(r.hi()))
+                };
+                // `lo <= hi` holds for both arms (a pointwise min/max of two
+                // ordered pairs stays ordered); the fallback keeps this total.
+                IntRange::new(lo, hi)?
+            }
+        });
+    }
+    let r = acc?;
+    Some(if r.lo() == r.hi() {
+        Fact::Singleton(Val::Int(r.lo()))
+    } else {
+        Fact::refined(Base::Int, Refinement::Int(r), false)
+    })
+}
+
+/// The interval a fact pins on a **non-nullable int**, or `None` for anything else.
+/// A `OneOf` is deliberately excluded: its finite member set is what the union path
+/// carries exactly, and hulling it here would trade a gap-free answer for an
+/// interval.
+fn fact_int_range(f: &Fact) -> Option<IntRange> {
+    match f {
+        Fact::Singleton(Val::Int(i)) => Some(IntRange::point(*i)),
+        Fact::Refined { base: Base::Int, refinement: Refinement::Int(r), nullable: false } => {
+            Some(*r)
+        }
+        Fact::General { base: Base::Int, nullable: false } => Some(IntRange::FULL),
         _ => None,
     }
 }
