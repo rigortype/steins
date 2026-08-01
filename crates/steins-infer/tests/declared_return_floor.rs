@@ -824,6 +824,47 @@ fn a_class_row_mixed_with_a_non_class_arm_is_inert_on_the_dump_surface() {
 }
 
 #[test]
+fn a_class_row_raises_nothing_anywhere_it_is_consumed() {
+    // The consumer audit for this slice, asserted rather than argued. Only two
+    // places read the FQN out of a class arm: the dump renderer (cosmetic) and
+    // `phpdoc.undefined-method`. Everything else — instanceof subtraction through
+    // `subtrahend_covers`, the runtime-predicate and shape subtractors, the argument
+    // check's `to_fact` — is FQN-agnostic or floors to `Maybe`/`None`.
+    //
+    // The FQNs a floor row carries are builtins the PROJECT index does not know, and
+    // that is the FP-safe side of every one of those paths: `is_final` is
+    // project-only so the positive instanceof branch keeps the arm, `is_a` answers
+    // `No`/`Maybe` so the negative branch keeps it, and the method chain hits
+    // `find_class` → silent before it can emit. So the whole-diagnostic-set
+    // assertion is the honest pin, not just the proof-layer one.
+    let sources = [
+        // The method-existence family's shape: a class arm with a method call on it.
+        "<?php\nfunction f(string $s): void { $r = gmp_init($s); $r->nope(); }\n",
+        // instanceof, both polarities, against a class the project does not declare.
+        "<?php\nfunction f(string $s): void {\n\
+         $r = gmp_init($s);\n\
+         if ($r instanceof \\Countable) { $r->count(); }\n}\n",
+        "<?php\nfunction f(string $s): void {\n\
+         $r = gmp_init($s);\n\
+         if (!($r instanceof \\Countable)) { $r->nope(); }\n}\n",
+        // Returned against a declared contract the class arm cannot satisfy. The
+        // contracts tier reads the VALUE lane, which a class row leaves empty, so
+        // there is nothing to mismatch against.
+        "<?php\n/** @return string */\nfunction f(string $s) { $r = gmp_init($s); return $r; }\n",
+        // Passed where a scalar is declared, the argument-side twin.
+        "<?php\nfunction g(string $x): void {}\n\
+         function f(string $s): void { $r = gmp_init($s); g($r); }\n",
+        // The nullable pair used without a guard.
+        "<?php\nfunction f(string $s): void { $r = collator_create($s); $r->nope(); }\n",
+    ];
+    for src in sources {
+        let tree = SourceTree::parse(src);
+        let ds = check(&tree, &[], "t.php");
+        assert!(ds.is_empty(), "a class floor row raised a finding in {src:?}: {ds:?}");
+    }
+}
+
+#[test]
 fn a_class_floor_row_is_not_an_existence_vouch_either() {
     // The absence family's posture is UNCHANGED by this slice, and the class rows
     // are the population most likely to tempt a reader into thinking otherwise — a
