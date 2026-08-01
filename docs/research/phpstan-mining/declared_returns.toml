@@ -37,41 +37,50 @@ generator = "cargo xtask mine-function-map"
 # admitted             rows emitted into the shipped table
 # admitted_rich        of those, the rows RICHER than a single-base envelope —
 #                      the `T|false` failure unions and the scalar refinements
-#                      issue #79 admitted, and the array-vocabulary rows
-#                      ADR-0071 admitted (the #73 slice counted and dropped
-#                      every one of them)
+#                      issue #79 admitted, the array-vocabulary rows
+#                      ADR-0071 admitted, and the class rows the object slice
+#                      admitted (the #73 slice counted and dropped every one
+#                      of them)
 #
 # WHAT IS STILL DEFERRED (ADR-0069 §5 as amended 2026-08-01): `methods_skipped`
-# and the object / void / unparseable buckets. Object, `callable` and `resource`
-# arms have no extensional denotation — `subsumes_class` is a reflexive floor
-# and steins-contract carries no hierarchy — so the countersign could only
-# answer `Maybe`, and a row entering uncountersigned is the one thing ADR-0069
-# §3 refuses. ADR-0071 §2.3 routes them through a later slice. Nothing here is
-# lost data; it is deferred data, counted so the deferral stays visible.
+# and the void / unparseable buckets, plus what is LEFT in the object one —
+# `callable`, the intersections, and `resource`. Those have no extensional
+# denotation the countersign could use: a reflexive floor says nothing about a
+# signature, and `resource` is a KNOWN_UNENFORCED keyword lowering to an opaque
+# arm rather than to a class. A row entering uncountersigned is the one thing
+# ADR-0069 §3 refuses, so they stay out. Nothing here is lost data; it is
+# deferred data, counted so the deferral stays visible.
 #
 # The ARRAY bucket is emptied by ADR-0071: `subsumes` gained a structural
 # denotation for `array` / `list<T>` / `array<K, V>` / `array{…}`, so the
 # countersign is a real question for a shaped row rather than a vacuous
-# `Maybe`. The union and refinement buckets hold only their RESIDUE — a union
-# with an object or `mixed` arm, a string whose only spelling is the opaque
-# form. The object, void and unparseable buckets read exactly as they did
-# at #73.
+# `Maybe`. The OBJECT bucket then loses its object half with no new rule at
+# all: `subsumes_class` is reflexive, and a row naming the class the engine
+# names countersigns on that alone. A row naming a DIFFERENT class stays
+# `Maybe` and is refused — which is exactly how the stale pre-8.0 rows are
+# kept out, since the floor only ever admits a name the engine itself spelled.
+# The union and refinement buckets hold only their RESIDUE — a union with a
+# `resource`, `callable` or `mixed` arm, a string whose only spelling is the
+# opaque form. Note that `not_lowerable_object_or_resource` also holds every
+# `void` row (`void` lowers to an opaque arm, not to a value type), so it is a
+# coarser bucket than its name suggests; the refinement, void and unparseable
+# buckets read exactly as they did at #73.
 [counts]
 total_keys = 12461
 methods_skipped = 6658
 alternates_disagree = 18
-not_lowerable = 1352
+not_lowerable = 1119
 not_lowerable_shaped_arrays = 0
-not_lowerable_multi_base_unions = 287
+not_lowerable_multi_base_unions = 200
 not_lowerable_scalar_refinements = 2
-not_lowerable_object_or_resource = 620
+not_lowerable_object_or_resource = 474
 not_lowerable_void_never_mixed = 139
 not_lowerable_unparseable = 304
-reflection_disagree = 55
-reflection_missing = 2682
+reflection_disagree = 75
+reflection_missing = 2793
 engine_typeless = 22
-admitted = 1606
-admitted_rich = 687
+admitted = 1708
+admitted_rich = 789
 
 # The admitted rows: lowercased builtin name -> canonical phpdoc spelling.
 # The consumer re-lowers this string through the SAME `lower_str` ->
@@ -79,6 +88,12 @@ admitted_rich = 687
 # and seeds the resulting arms Asserted — one lowering, two provenances
 # (ADR-0069 §2). The spelling is `spell_arms` over the lowered arms and is
 # verified at generation time to re-lower to the arms that were countersigned.
+# Where `spell_arms` declines the arms outright — it has no faithful spelling
+# for a class arm — the row keeps functionMap's OWN string, which lowers back
+# to the countersigned arms by construction and, unlike a canonical respelling,
+# preserves the class's source casing (`ContractTy::Class` case-folds and could
+# not restate it). That is why a few rows read `__benevolent<...>`: it is
+# PHPStan's spelling of a plain union, and the parser expands it to one.
 [declared]
 "_" = "string"
 "abs" = "positive-int|0|float"
@@ -143,6 +158,8 @@ admitted_rich = 687
 "ast\\get_metadata" = "array<int, ast\\metadata>"
 "ast\\get_supported_versions" = "array<int, int>"
 "ast\\kind_uses_flags" = "bool"
+"ast\\parse_code" = "ast\\Node"
+"ast\\parse_file" = "ast\\Node"
 "atan" = "float"
 "atan2" = "float"
 "atanh" = "float"
@@ -197,6 +214,7 @@ admitted_rich = 687
 "closelog" = "bool"
 "collator_asort" = "bool"
 "collator_compare" = "int|false"
+"collator_create" = "?Collator"
 "collator_get_attribute" = "int|false"
 "collator_get_error_code" = "int|false"
 "collator_get_error_message" = "string|false"
@@ -233,6 +251,8 @@ admitted_rich = 687
 "curl_error" = "string"
 "curl_escape" = "string|false"
 "curl_exec" = "string|bool"
+"curl_file_create" = "CURLFile"
+"curl_init" = "__benevolent<CurlHandle|false>"
 "curl_multi_add_handle" = "int"
 "curl_multi_errno" = "int"
 "curl_multi_exec" = "int"
@@ -249,25 +269,42 @@ admitted_rich = 687
 "curl_unescape" = "string|false"
 "curl_version" = "false|array"
 "date" = "string"
+"date_add" = "DateTime"
+"date_create" = "DateTime|false"
+"date_create_from_format" = "DateTime|false"
+"date_create_immutable" = "DateTimeImmutable|false"
+"date_create_immutable_from_format" = "DateTimeImmutable|false"
+"date_date_set" = "DateTime"
 "date_default_timezone_get" = "string"
 "date_default_timezone_set" = "bool"
+"date_diff" = "DateInterval"
 "date_format" = "string"
 "date_get_last_errors" = "false|array{error_count: positive-int|0, errors: list<string>, warning_count: positive-int|0, warnings: list<string>}"
+"date_interval_create_from_date_string" = "DateInterval|false"
 "date_interval_format" = "string"
+"date_isodate_set" = "DateTime"
+"date_modify" = "DateTime|false"
 "date_offset_get" = "int"
 "date_parse" = "array<string, mixed>"
 "date_parse_from_format" = "array{day: int|false, error_count: int, errors: array<string>, fraction: float|false, hour: int|false, is_dst?: bool, is_localtime: bool, minute: int|false, month: int|false, relative?: array{day: int, first_day_of_month?: bool, hour: int, last_day_of_month?: bool, minute: int, month: int, second: int, weekday?: int, weekdays?: int, year: int}, second: int|false, tz_abbr?: string, tz_id?: string, warning_count: int, warnings: array<string>, year: int|false, zone?: int|bool, zone_type?: int|bool}"
+"date_sub" = "DateTime"
 "date_sun_info" = "array{astronomical_twilight_begin: int|bool, astronomical_twilight_end: int|bool, civil_twilight_begin: int|bool, civil_twilight_end: int|bool, nautical_twilight_begin: int|bool, nautical_twilight_end: int|bool, sunrise: int|bool, sunset: int|bool, transit: int|bool}"
+"date_time_set" = "DateTime"
 "date_timestamp_get" = "int"
+"date_timestamp_set" = "DateTime"
+"date_timezone_get" = "DateTimeZone|false"
+"date_timezone_set" = "DateTime"
 "datefmt_format" = "string|false"
 "datefmt_format_object" = "string|false"
 "datefmt_get_calendar" = "int|false"
+"datefmt_get_calendar_object" = "IntlCalendar|false|null"
 "datefmt_get_datetype" = "int|false"
 "datefmt_get_error_code" = "int"
 "datefmt_get_error_message" = "string"
 "datefmt_get_locale" = "string|false"
 "datefmt_get_pattern" = "string|false"
 "datefmt_get_timetype" = "int|false"
+"datefmt_get_timezone" = "IntlTimeZone|false"
 "datefmt_get_timezone_id" = "string|false"
 "datefmt_is_lenient" = "bool"
 "datefmt_localtime" = "false|array"
@@ -298,6 +335,7 @@ admitted_rich = 687
 "deflate_add" = "string|false"
 "deg2rad" = "float"
 "dgettext" = "string"
+"dir" = "Directory|false"
 "dirname" = "string"
 "disk_free_space" = "float|false"
 "disk_total_space" = "float|false"
@@ -459,26 +497,54 @@ admitted_rich = 687
 "glob" = "false|list<string>"
 "gmdate" = "string"
 "gmmktime" = "int|false"
+"gmp_abs" = "GMP"
+"gmp_add" = "GMP"
+"gmp_and" = "GMP"
+"gmp_binomial" = "GMP|false"
 "gmp_cmp" = "int"
+"gmp_com" = "GMP"
+"gmp_div" = "GMP"
+"gmp_div_q" = "GMP"
 "gmp_div_qr" = "array"
+"gmp_div_r" = "GMP"
+"gmp_divexact" = "GMP"
 "gmp_export" = "string"
+"gmp_fact" = "GMP"
+"gmp_gcd" = "GMP"
 "gmp_gcdext" = "array"
 "gmp_hamdist" = "int"
+"gmp_import" = "GMP"
+"gmp_init" = "GMP"
 "gmp_intval" = "int"
+"gmp_invert" = "GMP|false"
 "gmp_jacobi" = "int"
 "gmp_kronecker" = "int"
+"gmp_lcm" = "GMP"
 "gmp_legendre" = "int"
+"gmp_mod" = "GMP"
+"gmp_mul" = "GMP"
+"gmp_neg" = "GMP"
+"gmp_nextprime" = "GMP"
+"gmp_or" = "GMP"
 "gmp_perfect_power" = "bool"
 "gmp_perfect_square" = "bool"
 "gmp_popcount" = "int"
+"gmp_pow" = "GMP"
+"gmp_powm" = "GMP"
 "gmp_prob_prime" = "int"
+"gmp_random_bits" = "GMP"
+"gmp_random_range" = "GMP"
+"gmp_root" = "GMP"
 "gmp_rootrem" = "array<int, gmp>"
 "gmp_scan0" = "int"
 "gmp_scan1" = "int"
 "gmp_sign" = "int"
+"gmp_sqrt" = "GMP"
 "gmp_sqrtrem" = "array"
 "gmp_strval" = "string"
+"gmp_sub" = "GMP"
 "gmp_testbit" = "bool"
+"gmp_xor" = "GMP"
 "gmstrftime" = "string|false"
 "gnupg_adddecryptkey" = "bool"
 "gnupg_addencryptkey" = "bool"
@@ -531,6 +597,7 @@ admitted_rich = 687
 "gzwrite" = "int|false"
 "hash" = "non-falsy-string"
 "hash_algos" = "non-empty-list<non-falsy-string>"
+"hash_copy" = "HashContext"
 "hash_equals" = "bool"
 "hash_file" = "non-falsy-string|false"
 "hash_final" = "non-falsy-string"
@@ -538,6 +605,7 @@ admitted_rich = 687
 "hash_hmac" = "non-falsy-string"
 "hash_hmac_algos" = "non-empty-list<non-falsy-string>"
 "hash_hmac_file" = "non-falsy-string|false"
+"hash_init" = "HashContext"
 "hash_pbkdf2" = "non-falsy-string"
 "hash_update" = "bool"
 "hash_update_file" = "bool"
@@ -574,6 +642,7 @@ admitted_rich = 687
 "ignore_user_abort" = "0|1"
 "image_type_to_extension" = "string|false"
 "image_type_to_mime_type" = "string"
+"imageaffine" = "false|object"
 "imageaffinematrixconcat" = "false|list{float, float, float, float, float, float}"
 "imageaffinematrixget" = "false|list{float, float, float, float, float, float}"
 "imagealphablending" = "bool"
@@ -601,6 +670,21 @@ admitted_rich = 687
 "imagecopymergegray" = "bool"
 "imagecopyresampled" = "bool"
 "imagecopyresized" = "bool"
+"imagecreate" = "__benevolent<GdImage|false>"
+"imagecreatefrombmp" = "false|object"
+"imagecreatefromgd" = "false|object"
+"imagecreatefromgd2" = "false|object"
+"imagecreatefromgd2part" = "false|object"
+"imagecreatefromgif" = "false|object"
+"imagecreatefromjpeg" = "false|object"
+"imagecreatefrompng" = "false|object"
+"imagecreatefromstring" = "false|object"
+"imagecreatefromwbmp" = "false|object"
+"imagecreatefromwebp" = "false|object"
+"imagecreatefromxbm" = "false|object"
+"imagecreatetruecolor" = "__benevolent<GdImage|false>"
+"imagecrop" = "false|object"
+"imagecropauto" = "false|object"
 "imagedashedline" = "bool"
 "imagedestroy" = "bool"
 "imageellipse" = "bool"
@@ -630,7 +714,9 @@ admitted_rich = 687
 "imagepng" = "bool"
 "imagepolygon" = "bool"
 "imagerectangle" = "bool"
+"imagerotate" = "false|object"
 "imagesavealpha" = "bool"
+"imagescale" = "false|object"
 "imagesetbrush" = "bool"
 "imagesetclip" = "bool"
 "imagesetinterpolation" = "bool"
@@ -675,6 +761,7 @@ admitted_rich = 687
 "intlcal_get_now" = "float"
 "intlcal_get_repeated_wall_time_option" = "int"
 "intlcal_get_skipped_wall_time_option" = "int"
+"intlcal_get_time_zone" = "IntlTimeZone|false"
 "intlcal_get_type" = "string"
 "intlcal_in_daylight_time" = "bool"
 "intlcal_is_equivalent_to" = "bool"
@@ -689,6 +776,7 @@ admitted_rich = 687
 "intlcal_set_skipped_wall_time_option" = "bool"
 "intlcal_set_time" = "bool"
 "intlcal_set_time_zone" = "bool"
+"intlcal_to_date_time" = "DateTime|false"
 "intltz_count_equivalent_ids" = "int|false"
 "intltz_get_canonical_id" = "string|false"
 "intltz_get_display_name" = "string|false"
@@ -700,6 +788,7 @@ admitted_rich = 687
 "intltz_get_raw_offset" = "int"
 "intltz_get_tz_data_version" = "string|false"
 "intltz_has_same_rules" = "bool"
+"intltz_to_date_time_zone" = "DateTimeZone|false"
 "intltz_use_daylight_time" = "bool"
 "intval" = "int"
 "ip2long" = "int|false"
@@ -796,6 +885,7 @@ admitted_rich = 687
 "levenshtein" = "int"
 "libxml_disable_entity_loader" = "bool"
 "libxml_get_errors" = "list<libxmlerror>"
+"libxml_get_last_error" = "LibXMLError|false"
 "libxml_set_external_entity_loader" = "bool"
 "libxml_use_internal_errors" = "bool"
 "link" = "bool"
@@ -917,6 +1007,7 @@ admitted_rich = 687
 "mysqli_character_set_name" = "string"
 "mysqli_close" = "bool"
 "mysqli_commit" = "bool"
+"mysqli_connect" = "mysqli|false|null"
 "mysqli_connect_errno" = "int"
 "mysqli_connect_error" = "string|null"
 "mysqli_data_seek" = "bool"
@@ -931,6 +1022,7 @@ admitted_rich = 687
 "mysqli_fetch_column" = "int|float|string|false|null"
 "mysqli_fetch_fields" = "list<stdclass&object>"
 "mysqli_fetch_lengths" = "false|array"
+"mysqli_fetch_object" = "object|false|null"
 "mysqli_field_count" = "int"
 "mysqli_field_seek" = "bool"
 "mysqli_field_tell" = "int"
@@ -943,7 +1035,9 @@ admitted_rich = 687
 "mysqli_get_proto_info" = "int"
 "mysqli_get_server_info" = "string"
 "mysqli_get_server_version" = "int"
+"mysqli_get_warnings" = "mysqli_warning|false"
 "mysqli_info" = "string|null"
+"mysqli_init" = "mysqli|false"
 "mysqli_insert_id" = "int|string"
 "mysqli_kill" = "bool"
 "mysqli_more_results" = "bool"
@@ -954,9 +1048,12 @@ admitted_rich = 687
 "mysqli_options" = "bool"
 "mysqli_ping" = "bool"
 "mysqli_poll" = "int|false"
+"mysqli_prepare" = "mysqli_stmt|false"
+"mysqli_query" = "mysqli_result|bool"
 "mysqli_real_connect" = "bool"
 "mysqli_real_escape_string" = "string"
 "mysqli_real_query" = "bool"
+"mysqli_reap_async_query" = "mysqli_result|false"
 "mysqli_refresh" = "bool"
 "mysqli_release_savepoint" = "bool"
 "mysqli_report" = "bool"
@@ -979,16 +1076,22 @@ admitted_rich = 687
 "mysqli_stmt_execute" = "bool"
 "mysqli_stmt_fetch" = "bool|null"
 "mysqli_stmt_field_count" = "positive-int|0"
+"mysqli_stmt_get_result" = "mysqli_result|false"
+"mysqli_stmt_get_warnings" = "mysqli_warning|false"
+"mysqli_stmt_init" = "mysqli_stmt|false"
 "mysqli_stmt_more_results" = "bool"
 "mysqli_stmt_next_result" = "bool"
 "mysqli_stmt_param_count" = "positive-int|0"
 "mysqli_stmt_prepare" = "bool"
 "mysqli_stmt_reset" = "bool"
+"mysqli_stmt_result_metadata" = "mysqli_result|false"
 "mysqli_stmt_send_long_data" = "bool"
 "mysqli_stmt_sqlstate" = "non-empty-string"
 "mysqli_stmt_store_result" = "bool"
+"mysqli_store_result" = "mysqli_result|false"
 "mysqli_thread_id" = "int"
 "mysqli_thread_safe" = "bool"
+"mysqli_use_result" = "mysqli_result|false"
 "mysqli_warning_count" = "int"
 "natcasesort" = "bool"
 "natsort" = "bool"
@@ -1036,6 +1139,7 @@ admitted_rich = 687
 "odbc_execute" = "bool"
 "odbc_fetch_array" = "false|array"
 "odbc_fetch_into" = "int|false"
+"odbc_fetch_object" = "object|false"
 "odbc_fetch_row" = "bool"
 "odbc_field_len" = "int|false"
 "odbc_field_name" = "string|false"
@@ -1278,6 +1382,7 @@ admitted_rich = 687
 "register_tick_function" = "bool"
 "rename" = "bool"
 "resourcebundle_count" = "int"
+"resourcebundle_create" = "?ResourceBundle"
 "resourcebundle_get_error_code" = "int"
 "resourcebundle_get_error_message" = "string"
 "resourcebundle_locales" = "false|array"
@@ -1333,6 +1438,9 @@ admitted_rich = 687
 "shmop_write" = "int"
 "shuffle" = "bool"
 "similar_text" = "int"
+"simplexml_import_dom" = "SimpleXMLElement|null"
+"simplexml_load_file" = "SimpleXMLElement|false"
+"simplexml_load_string" = "SimpleXMLElement|false"
 "sin" = "float"
 "sinh" = "float"
 "sizeof" = "int"
@@ -1491,6 +1599,7 @@ admitted_rich = 687
 "strcmp" = "int<-1, 1>"
 "strcoll" = "int<-1, 1>"
 "strcspn" = "non-negative-int"
+"stream_bucket_new" = "object"
 "stream_context_get_options" = "array"
 "stream_context_get_params" = "array{notification: string, options: array<mixed>}"
 "stream_context_set_option" = "bool"
@@ -1575,6 +1684,8 @@ admitted_rich = 687
 "tidy_get_status" = "int"
 "tidy_is_xhtml" = "bool"
 "tidy_is_xml" = "bool"
+"tidy_parse_file" = "tidy|false"
+"tidy_parse_string" = "tidy|false"
 "tidy_repair_file" = "string|false"
 "tidy_repair_string" = "string|false"
 "tidy_warning_count" = "int"
@@ -1587,12 +1698,16 @@ admitted_rich = 687
 "timezone_name_from_abbr" = "string|false"
 "timezone_name_get" = "string"
 "timezone_offset_get" = "int"
+"timezone_open" = "DateTimeZone|false"
 "timezone_transitions_get" = "false|list<array{abbr: string, isdst: bool, offset: int, time: string, ts: int}>"
 "timezone_version_get" = "string"
 "token_get_all" = "list<string|list{int, string, int}>"
 "token_name" = "non-falsy-string"
 "touch" = "bool"
 "trait_exists" = "bool"
+"transliterator_create" = "?Transliterator"
+"transliterator_create_from_rules" = "?Transliterator"
+"transliterator_create_inverse" = "?Transliterator"
 "transliterator_get_error_code" = "int|false"
 "transliterator_get_error_message" = "string|false"
 "transliterator_list_ids" = "false|list<string>"
@@ -1624,6 +1739,8 @@ admitted_rich = 687
 "xml_get_current_line_number" = "int"
 "xml_get_error_code" = "int"
 "xml_parse" = "int"
+"xml_parser_create" = "XMLParser"
+"xml_parser_create_ns" = "XMLParser"
 "xml_parser_free" = "bool"
 "xml_parser_set_option" = "bool"
 "xml_set_character_data_handler" = "bool"
@@ -1712,6 +1829,7 @@ reflection_missing = [
   "apache_get_modules",
   "apache_get_version",
   "apache_getenv",
+  "apache_lookup_uri",
   "apache_note",
   "apache_request_headers",
   "apache_reset_timeout",
@@ -1786,12 +1904,16 @@ reflection_missing = [
   "cairo_available_surfaces",
   "cairo_clip_extents",
   "cairo_clip_rectangle_list",
+  "cairo_copy_path",
+  "cairo_copy_path_flat",
+  "cairo_create",
   "cairo_device_to_user",
   "cairo_device_to_user_distance",
   "cairo_fill_extents",
   "cairo_font_extents",
   "cairo_font_face_get_type",
   "cairo_font_face_status",
+  "cairo_font_options_create",
   "cairo_font_options_equal",
   "cairo_font_options_get_antialias",
   "cairo_font_options_get_hint_metrics",
@@ -1812,6 +1934,9 @@ reflection_missing = [
   "cairo_get_operator",
   "cairo_get_tolerance",
   "cairo_has_current_point",
+  "cairo_image_surface_create",
+  "cairo_image_surface_create_for_data",
+  "cairo_image_surface_create_from_png",
   "cairo_image_surface_get_data",
   "cairo_image_surface_get_format",
   "cairo_image_surface_get_height",
@@ -1819,22 +1944,44 @@ reflection_missing = [
   "cairo_image_surface_get_width",
   "cairo_in_fill",
   "cairo_in_stroke",
+  "cairo_matrix_create_scale",
+  "cairo_matrix_init",
+  "cairo_matrix_init_identity",
+  "cairo_matrix_init_rotate",
+  "cairo_matrix_init_scale",
+  "cairo_matrix_init_translate",
+  "cairo_matrix_multiply",
   "cairo_matrix_transform_distance",
   "cairo_matrix_transform_point",
   "cairo_path_extents",
+  "cairo_pattern_create_for_surface",
+  "cairo_pattern_create_linear",
+  "cairo_pattern_create_radial",
+  "cairo_pattern_create_rgb",
+  "cairo_pattern_create_rgba",
   "cairo_pattern_get_color_stop_count",
   "cairo_pattern_get_color_stop_rgba",
   "cairo_pattern_get_extend",
   "cairo_pattern_get_filter",
   "cairo_pattern_get_linear_points",
+  "cairo_pattern_get_matrix",
   "cairo_pattern_get_radial_circles",
   "cairo_pattern_get_rgba",
+  "cairo_pattern_get_surface",
   "cairo_pattern_get_type",
   "cairo_pattern_status",
+  "cairo_pdf_surface_create",
   "cairo_ps_get_levels",
   "cairo_ps_level_to_string",
+  "cairo_ps_surface_create",
   "cairo_ps_surface_get_eps",
+  "cairo_scaled_font_create",
   "cairo_scaled_font_extents",
+  "cairo_scaled_font_get_ctm",
+  "cairo_scaled_font_get_font_face",
+  "cairo_scaled_font_get_font_matrix",
+  "cairo_scaled_font_get_font_options",
+  "cairo_scaled_font_get_scale_matrix",
   "cairo_scaled_font_get_type",
   "cairo_scaled_font_glyph_extents",
   "cairo_scaled_font_status",
@@ -1842,11 +1989,14 @@ reflection_missing = [
   "cairo_status",
   "cairo_status_to_string",
   "cairo_stroke_extents",
+  "cairo_surface_create_similar",
   "cairo_surface_get_content",
   "cairo_surface_get_device_offset",
+  "cairo_surface_get_font_options",
   "cairo_surface_get_type",
   "cairo_surface_status",
   "cairo_svg_get_versions",
+  "cairo_svg_surface_create",
   "cairo_svg_surface_get_versions",
   "cairo_svg_version_to_string",
   "cairo_text_extents",
@@ -1866,10 +2016,13 @@ reflection_missing = [
   "classkit_method_rename",
   "com_create_guid",
   "com_event_sink",
+  "com_get_active_object",
   "com_isenum",
   "com_load_typelib",
   "com_message_pump",
   "com_print_typeinfo",
+  "componere\\cast",
+  "componere\\cast_by_ref",
   "connection_timeout",
   "crack_check",
   "crack_closedict",
@@ -1900,7 +2053,9 @@ reflection_missing = [
   "cubrid_execute",
   "cubrid_fetch_array",
   "cubrid_fetch_assoc",
+  "cubrid_fetch_field",
   "cubrid_fetch_lengths",
+  "cubrid_fetch_object",
   "cubrid_fetch_row",
   "cubrid_field_flags",
   "cubrid_field_len",
@@ -1967,7 +2122,9 @@ reflection_missing = [
   "cyrus_query",
   "cyrus_unbind",
   "datefmt_set_timezone_id",
+  "db2_autocommit",
   "db2_bind_param",
+  "db2_client_info",
   "db2_close",
   "db2_commit",
   "db2_conn_error",
@@ -1978,6 +2135,7 @@ reflection_missing = [
   "db2_fetch_array",
   "db2_fetch_assoc",
   "db2_fetch_both",
+  "db2_fetch_object",
   "db2_fetch_row",
   "db2_field_display_size",
   "db2_field_name",
@@ -1995,6 +2153,7 @@ reflection_missing = [
   "db2_num_rows",
   "db2_pclose",
   "db2_rollback",
+  "db2_server_info",
   "db2_set_option",
   "db2_stmt_error",
   "db2_stmt_errormsg",
@@ -2046,6 +2205,7 @@ reflection_missing = [
   "dbplus_xunlockrel",
   "dbx_close",
   "dbx_compare",
+  "dbx_connect",
   "dbx_error",
   "dbx_escape_string",
   "dbx_sort",
@@ -2060,8 +2220,16 @@ reflection_missing = [
   "dom_document_schema_validate",
   "dom_document_schema_validate_file",
   "dom_document_xinclude",
+  "dom_xpath_query",
   "dom_xpath_register_ns",
+  "domxml_new_doc",
+  "domxml_open_file",
+  "domxml_open_mem",
   "domxml_version",
+  "domxml_xmltree",
+  "domxml_xslt_stylesheet",
+  "domxml_xslt_stylesheet_doc",
+  "domxml_xslt_stylesheet_file",
   "domxml_xslt_version",
   "dotnet_load",
   "eio_event_loop",
@@ -2120,6 +2288,7 @@ reflection_missing = [
   "fann_cascadetrain_on_data",
   "fann_cascadetrain_on_file",
   "fann_clear_scaling_params",
+  "fann_create_shortcut",
   "fann_descale_input",
   "fann_descale_output",
   "fann_descale_train",
@@ -2260,7 +2429,9 @@ reflection_missing = [
   "fbsql_error",
   "fbsql_fetch_array",
   "fbsql_fetch_assoc",
+  "fbsql_fetch_field",
   "fbsql_fetch_lengths",
+  "fbsql_fetch_object",
   "fbsql_fetch_row",
   "fbsql_field_flags",
   "fbsql_field_len",
@@ -2399,8 +2570,12 @@ reflection_missing = [
   "http_negotiate_charset",
   "http_negotiate_content_type",
   "http_negotiate_language",
+  "http_parse_cookie",
   "http_parse_headers",
+  "http_parse_message",
+  "http_parse_params",
   "http_persistent_handles_clean",
+  "http_persistent_handles_count",
   "http_persistent_handles_ident",
   "http_post_data",
   "http_post_fields",
@@ -2422,6 +2597,9 @@ reflection_missing = [
   "http_send_status",
   "http_send_stream",
   "http_support",
+  "hw_api_attribute",
+  "hw_api_content",
+  "hw_api_object",
   "hw_array2objrec",
   "hw_changeobject",
   "hw_children",
@@ -2481,6 +2659,10 @@ reflection_missing = [
   "hw_stat",
   "hw_unlock",
   "hw_who",
+  "hwapi_attribute_new",
+  "hwapi_content_new",
+  "hwapi_hgcsp",
+  "hwapi_object_new",
   "ibase_add_user",
   "ibase_affected_rows",
   "ibase_blob_cancel",
@@ -2498,6 +2680,7 @@ reflection_missing = [
   "ibase_errcode",
   "ibase_errmsg",
   "ibase_fetch_assoc",
+  "ibase_fetch_object",
   "ibase_fetch_row",
   "ibase_field_info",
   "ibase_free_event_handler",
@@ -2579,6 +2762,9 @@ reflection_missing = [
   "iis_stop_server",
   "iis_stop_service",
   "imageaffineconcat",
+  "imagecreatefromxpm",
+  "imagegrabscreen",
+  "imagegrabwindow",
   "imagepsbbox",
   "imagepsencodefont",
   "imagepsextendfont",
@@ -2591,6 +2777,8 @@ reflection_missing = [
   "imap_base64",
   "imap_binary",
   "imap_body",
+  "imap_bodystruct",
+  "imap_check",
   "imap_clearflag_full",
   "imap_close",
   "imap_create",
@@ -2603,6 +2791,7 @@ reflection_missing = [
   "imap_fetchbody",
   "imap_fetchheader",
   "imap_fetchmime",
+  "imap_fetchstructure",
   "imap_fetchtext",
   "imap_gc",
   "imap_get_quota",
@@ -2610,6 +2799,7 @@ reflection_missing = [
   "imap_getacl",
   "imap_getmailboxes",
   "imap_getsubscribed",
+  "imap_headerinfo",
   "imap_headers",
   "imap_last_error",
   "imap_list",
@@ -2621,6 +2811,7 @@ reflection_missing = [
   "imap_mail_compose",
   "imap_mail_copy",
   "imap_mail_move",
+  "imap_mailboxmsginfo",
   "imap_mime_header_decode",
   "imap_msgno",
   "imap_mutf7_to_utf8",
@@ -2632,6 +2823,7 @@ reflection_missing = [
   "imap_renamemailbox",
   "imap_reopen",
   "imap_rfc822_parse_adrlist",
+  "imap_rfc822_parse_headers",
   "imap_rfc822_write_address",
   "imap_savebody",
   "imap_scan",
@@ -2641,6 +2833,7 @@ reflection_missing = [
   "imap_setacl",
   "imap_setflag_full",
   "imap_sort",
+  "imap_status",
   "imap_subscribe",
   "imap_thread",
   "imap_uid",
@@ -2665,6 +2858,7 @@ reflection_missing = [
   "ingres_execute",
   "ingres_fetch_array",
   "ingres_fetch_assoc",
+  "ingres_fetch_object",
   "ingres_fetch_proc_return",
   "ingres_fetch_row",
   "ingres_field_length",
@@ -2684,8 +2878,11 @@ reflection_missing = [
   "inotify_queue_len",
   "inotify_read",
   "inotify_rm_watch",
+  "intltz_getgmt",
+  "intlz_create_default",
   "is_real",
   "is_tainted",
+  "java_last_exception_get",
   "java_reload",
   "java_require",
   "java_set_encoding",
@@ -2773,6 +2970,7 @@ reflection_missing = [
   "maxdb_error",
   "maxdb_fetch_assoc",
   "maxdb_fetch_lengths",
+  "maxdb_fetch_object",
   "maxdb_field_count",
   "maxdb_field_seek",
   "maxdb_field_tell",
@@ -2792,6 +2990,7 @@ reflection_missing = [
   "maxdb_num_rows",
   "maxdb_options",
   "maxdb_ping",
+  "maxdb_prepare",
   "maxdb_real_connect",
   "maxdb_real_escape_string",
   "maxdb_real_query",
@@ -2816,6 +3015,7 @@ reflection_missing = [
   "maxdb_stmt_error",
   "maxdb_stmt_execute",
   "maxdb_stmt_fetch",
+  "maxdb_stmt_init",
   "maxdb_stmt_num_rows",
   "maxdb_stmt_param_count",
   "maxdb_stmt_reset",
@@ -2866,6 +3066,7 @@ reflection_missing = [
   "ming_keypress",
   "monitor_license_info",
   "mqseries_strerror",
+  "ms_geterrorobj",
   "ms_getversion",
   "ms_getversionint",
   "ms_iogetstdoutbufferbytes",
@@ -2897,6 +3098,8 @@ reflection_missing = [
   "msql_drop_db",
   "msql_error",
   "msql_fetch_array",
+  "msql_fetch_field",
+  "msql_fetch_object",
   "msql_fetch_row",
   "msql_field_flags",
   "msql_field_len",
@@ -2915,6 +3118,8 @@ reflection_missing = [
   "mssql_fetch_array",
   "mssql_fetch_assoc",
   "mssql_fetch_batch",
+  "mssql_fetch_field",
+  "mssql_fetch_object",
   "mssql_fetch_row",
   "mssql_field_length",
   "mssql_field_name",
@@ -2942,7 +3147,9 @@ reflection_missing = [
   "mysql_escape_string",
   "mysql_fetch_array",
   "mysql_fetch_assoc",
+  "mysql_fetch_field",
   "mysql_fetch_lengths",
+  "mysql_fetch_object",
   "mysql_fetch_row",
   "mysql_field_flags",
   "mysql_field_len",
@@ -2973,6 +3180,7 @@ reflection_missing = [
   "mysqli_enable_reads_from_master",
   "mysqli_enable_rpl_parse",
   "mysqli_get_cache_stats",
+  "mysqli_link_construct",
   "mysqli_master_query",
   "mysqli_rpl_parse_enabled",
   "mysqli_rpl_probe",
@@ -3190,6 +3398,7 @@ reflection_missing = [
   "notes_create_note",
   "notes_drop_db",
   "notes_find_note",
+  "notes_header_info",
   "notes_list_msgs",
   "notes_mark_read",
   "notes_mark_unread",
@@ -3228,6 +3437,7 @@ reflection_missing = [
   "oci_fetch_all",
   "oci_fetch_array",
   "oci_fetch_assoc",
+  "oci_fetch_object",
   "oci_fetch_row",
   "oci_field_is_null",
   "oci_field_name",
@@ -3259,6 +3469,8 @@ reflection_missing = [
   "oci_lob_truncate",
   "oci_lob_write",
   "oci_lob_write_temporary",
+  "oci_new_collection",
+  "oci_new_descriptor",
   "oci_num_fields",
   "oci_num_rows",
   "oci_password_change",
@@ -3577,6 +3789,7 @@ reflection_missing = [
   "px_timestamp2string",
   "px_update_record",
   "qdom_error",
+  "qdom_tree",
   "radius_add_server",
   "radius_close",
   "radius_config",
@@ -3606,7 +3819,9 @@ reflection_missing = [
   "rar_broken_is",
   "rar_close",
   "rar_comment_get",
+  "rar_entry_get",
   "rar_list",
+  "rar_open",
   "rar_solid_is",
   "rar_wrapper_cache_stats",
   "readline_list_history",
@@ -3747,9 +3962,11 @@ reflection_missing = [
   "sqlite_error_string",
   "sqlite_escape_string",
   "sqlite_exec",
+  "sqlite_factory",
   "sqlite_fetch_all",
   "sqlite_fetch_array",
   "sqlite_fetch_column_types",
+  "sqlite_fetch_object",
   "sqlite_fetch_single",
   "sqlite_field_name",
   "sqlite_has_more",
@@ -3763,11 +3980,13 @@ reflection_missing = [
   "sqlite_num_fields",
   "sqlite_num_rows",
   "sqlite_prev",
+  "sqlite_query",
   "sqlite_rewind",
   "sqlite_seek",
   "sqlite_single_query",
   "sqlite_udf_decode_binary",
   "sqlite_udf_encode_binary",
+  "sqlite_unbuffered_query",
   "sqlite_valid",
   "sqlsrv_begin_transaction",
   "sqlsrv_cancel",
@@ -3779,6 +3998,7 @@ reflection_missing = [
   "sqlsrv_execute",
   "sqlsrv_fetch",
   "sqlsrv_fetch_array",
+  "sqlsrv_fetch_object",
   "sqlsrv_field_metadata",
   "sqlsrv_free_stmt",
   "sqlsrv_has_rows",
@@ -3904,6 +4124,7 @@ reflection_missing = [
   "stomp_unsubscribe",
   "stomp_version",
   "stream_encoding",
+  "stream_notification_callback",
   "suhosin_encrypt_cookie",
   "suhosin_get_raw_cookies",
   "svn_add",
@@ -3949,6 +4170,7 @@ reflection_missing = [
   "swf_getframe",
   "swf_nextid",
   "swf_textwidth",
+  "swfsound",
   "swoole_async_dns_lookup",
   "swoole_async_read",
   "swoole_async_readfile",
@@ -3975,6 +4197,8 @@ reflection_missing = [
   "sybase_data_seek",
   "sybase_fetch_array",
   "sybase_fetch_assoc",
+  "sybase_fetch_field",
+  "sybase_fetch_object",
   "sybase_fetch_row",
   "sybase_field_seek",
   "sybase_free_result",
@@ -4181,7 +4405,9 @@ reflection_missing = [
   "uopz_set_hook",
   "uopz_set_return",
   "uopz_unset_return",
+  "variant_cast",
   "variant_cmp",
+  "variant_date_from_timestamp",
   "variant_date_to_timestamp",
   "variant_get_type",
   "virtual",
@@ -4326,8 +4552,10 @@ reflection_missing = [
   "xmlrpc_server_register_introspection_callback",
   "xmlrpc_server_register_method",
   "xmlrpc_set_type",
+  "xpath_new_context",
   "xpath_register_ns",
   "xpath_register_ns_auto",
+  "xptr_new_context",
   "xsl_xsltprocessor_get_parameter",
   "xsl_xsltprocessor_get_security_prefs",
   "xsl_xsltprocessor_has_exslt_support",
@@ -4425,6 +4653,8 @@ reflection_missing = [
 "curl_multi_strerror" = ["string", "?string"]
 "curl_share_strerror" = ["string", "?string"]
 "curl_strerror" = ["string", "?string"]
+"datefmt_create" = ["IntlDateFormatter|false", "?IntlDateFormatter"]
+"dom_import_simplexml" = ["DOMElement|false", "DOMAttr|DOMElement"]
 "fpassthru" = ["positive-int|0|false", "int"]
 "fscanf" = ["int|false|list<mixed>", "array|int|false|null"]
 "ftp_raw" = ["array", "?array"]
@@ -4433,13 +4663,16 @@ reflection_missing = [
 "imagecolorexactalpha" = ["non-negative-int|false", "int"]
 "imageinterlace" = ["int", "bool"]
 "imageloadfont" = ["int|false", "GdFont|false"]
+"intlcal_create_instance" = ["IntlCalendar", "?IntlCalendar"]
 "intlcal_field_difference" = ["int", "int|false"]
+"intlcal_from_date_time" = ["IntlCalendar", "?IntlCalendar"]
 "intlcal_get" = ["int", "int|false"]
 "intlcal_get_actual_maximum" = ["int", "int|false"]
 "intlcal_get_actual_minimum" = ["int", "int|false"]
 "intlcal_get_day_of_week_type" = ["int", "int|false"]
 "intlcal_get_first_day_of_week" = ["int", "int|false"]
 "intlcal_get_greatest_minimum" = ["int", "int|false"]
+"intlcal_get_keyword_values_for_locale" = ["Iterator|false", "IntlIterator|false"]
 "intlcal_get_least_maximum" = ["int", "int|false"]
 "intlcal_get_locale" = ["string", "string|false"]
 "intlcal_get_maximum" = ["int", "int|false"]
@@ -4447,14 +4680,21 @@ reflection_missing = [
 "intlcal_get_minimum" = ["int", "int|false"]
 "intlcal_get_time" = ["float", "float|false"]
 "intlcal_get_weekend_transition" = ["int", "int|false"]
+"intltz_create_enumeration" = ["IntlIterator", "IntlIterator|false"]
+"intltz_create_time_zone" = ["IntlTimeZone", "?IntlTimeZone"]
+"intltz_from_date_time_zone" = ["IntlTimeZone", "?IntlTimeZone"]
 "intltz_get_offset" = ["int", "bool"]
+"json_last_error" = ["JSON_ERROR_NONE|JSON_ERROR_DEPTH|JSON_ERROR_STATE_MISMATCH|JSON_ERROR_CTRL_CHAR|JSON_ERROR_SYNTAX|JSON_ERROR_UTF8|JSON_ERROR_RECURSION|JSON_ERROR_INF_OR_NAN|JSON_ERROR_UNSUPPORTED_TYPE|JSON_ERROR_INVALID_PROPERTY_NAME|JSON_ERROR_UTF16", "int"]
 "ldap_compare" = ["bool", "int|bool"]
 "locale_get_keywords" = ["null|array", "array|false|null"]
 "mb_ereg" = ["int|false", "bool"]
 "mb_eregi" = ["int", "bool"]
 "mb_eregi_replace" = ["string|false", "string|false|null"]
+"msgfmt_create" = ["MessageFormatter", "?MessageFormatter"]
 "mysqli_fetch_row" = ["null|array", "array|false|null"]
+"mysqli_get_charset" = ["object", "?object"]
 "mysqli_stmt_num_rows" = ["positive-int|0", "string|int"]
+"numfmt_create" = ["NumberFormatter", "?NumberFormatter"]
 "ob_list_handlers" = ["false|list<string>", "array"]
 "odbc_data_source" = ["false|array", "array|false|null"]
 "pg_field_type_oid" = ["int|false", "string|int"]
@@ -4468,11 +4708,19 @@ reflection_missing = [
 "pg_send_query_params" = ["bool", "int|bool"]
 "pow" = ["int|float", "object|int|float"]
 "rewinddir" = ["false|null", "void"]
+"session_status" = ["PHP_SESSION_NONE|PHP_SESSION_DISABLED|PHP_SESSION_ACTIVE", "int"]
 "socket_addrinfo_lookup" = ["array<addressinfo>", "array|false"]
 "socket_cmsg_space" = ["int", "?int"]
 "sodium_add" = ["string", "void"]
 "sodium_increment" = ["string", "void"]
 "str_word_count" = ["int|false|array<int, string>", "array|int"]
+"stream_bucket_make_writeable" = ["stdClass|null", "?StreamBucket"]
 "substr_compare" = ["int<-1, 1>|false", "int"]
+"tidy_get_body" = ["tidyNode", "?tidyNode"]
+"tidy_get_head" = ["tidyNode", "?tidyNode"]
+"tidy_get_html" = ["tidyNode", "?tidyNode"]
+"tidy_get_root" = ["tidyNode", "?tidyNode"]
 "xml_error_string" = ["string", "?string"]
 "xml_parse_into_struct" = ["int", "int|false"]
+"xmlwriter_open_memory" = ["XMLWriter", "XMLWriter|false"]
+"xmlwriter_open_uri" = ["XMLWriter", "XMLWriter|false"]

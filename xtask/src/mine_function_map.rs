@@ -128,12 +128,15 @@ pub fn run(checkout: Option<&str>) -> Result<(), String> {
         }
     }
     let rich = candidates.values().filter(|r| !r.envelope).count();
+    let source_spelled = candidates.values().filter(|r| r.source_spelled).count();
     println!(
-        "mine-function-map: {} carriable by the arm lane ({} of them richer than an envelope); \
+        "mine-function-map: {} carriable by the arm lane ({} of them richer than an envelope, \
+         {} spelled from source because `spell_arms` declined); \
          {} dropped ({} shaped arrays/lists, {} multi-base unions, {} scalar refinements, \
          {} object/resource, {} void/never/mixed, {} unparseable)",
         candidates.len(),
         rich,
+        source_spelled,
         dropped.total(),
         dropped.arrays,
         dropped.unions,
@@ -234,6 +237,14 @@ struct Row {
     /// `?T` nullable pair. The complement is the #79 population, counted separately
     /// so the slice's own reach stays legible in the header.
     envelope: bool,
+    /// Whether [`Self::canon`] is the **raw source spelling** rather than
+    /// `spell_arms`' canonical one, because the speller declined the arms. Counted
+    /// (not stored in the TOML) so the size of that path stays visible: `spell_arms`
+    /// refuses a class arm outright, so every object row takes it. Such a row
+    /// countersigns and lowers correctly — the source string lowers by construction —
+    /// but the *dump* surface renders it through its own class-aware path rather than
+    /// through the speller.
+    source_spelled: bool,
 }
 
 /// The counts the provenance header carries.
@@ -253,11 +264,13 @@ struct Counts {
 /// carry, split by reason (ADR-0069 §5), classified on the LOWERED TOP-LEVEL shape.
 ///
 /// The classification is deliberately unchanged from the #73 slice so every run
-/// compares directly. The object, void and unparseable buckets are untouched by
-/// both the #79 and the ADR-0071 relaxations and must read identically across all
-/// three runs; the array bucket empties at ADR-0071, and the union bucket shrinks
-/// each time to its residue — the unions still carrying an arm from one of the
-/// remaining buckets, and the strings whose only spelling is the opaque form.
+/// compares directly. The array bucket empties at ADR-0071, the object bucket loses
+/// its object half at the object slice, and the union bucket shrinks each time to
+/// its residue — the unions still carrying an arm from one of the remaining
+/// buckets, and the strings whose only spelling is the opaque form. The
+/// refinement, void and unparseable buckets are untouched by all three relaxations
+/// and must read identically across every run; that invariance is the check that
+/// the classification is still made on the same lowered top-level shape.
 #[derive(Default)]
 struct Dropped {
     /// `array{…}`, `list<T>`, `array<K, V>`, `iterable<T>` — the shaped-array rows.
@@ -270,7 +283,22 @@ struct Dropped {
     /// Scalar types richer than a base: `non-empty-string`, `int<0, 255>`,
     /// `positive-int`, literal types, the opaque string family.
     refinements: usize,
-    /// Objects, class names, `resource`, `callable`.
+    /// Everything lowering to `Opaque` or `CallableTy` — and, before the object
+    /// slice, `Class`/`ObjectAny` too.
+    ///
+    /// **The name undersells what it holds, and the composition is worth writing
+    /// down** because the label alone would mislead a later reader. `void` lowers to
+    /// `Opaque` (it is not a value type), and so does the `resource` family
+    /// (`resource`/`open-resource`/`closed-resource` are `KNOWN_UNENFORCED`
+    /// keywords), so both land here rather than in [`Self::voidish`], which holds
+    /// only `mixed`/`never`/the `mixed`-minus cuts. At the ADR-0071 pin the 620 rows
+    /// were 146 class/`object`, 322 `void`, 149 `resource`, 2 `Closure` (the callable
+    /// keyword, not a class arm) and 1 `int-mask<…>`; the object slice carries the
+    /// 146 and leaves 474.
+    ///
+    /// The split is left as it is rather than corrected, because these counts are
+    /// the cross-run comparison series ADR-0069's table is built on and moving a row
+    /// between buckets now would make the columns incomparable for a naming reason.
     objects: usize,
     /// `void`, `never`, `mixed`, and the `mixed`-minus-a-cut spellings.
     voidish: usize,
@@ -380,12 +408,32 @@ fn flatten_arms(cty: ContractTy) -> Vec<ContractTy> {
 /// `seed_shape_fact`, a multi-arm row lives in the arm lane exactly as
 /// `string|false` does (ADR-0069's value-lane rule).
 ///
+/// Since the object slice it also carries the **class vocabulary** — a named class
+/// (`ContractTy::Class`) and bare `object` — and that widening needed no new rule at
+/// all. `subsumes_class` is a *reflexive* floor, and reflexivity is exactly the
+/// question a functionMap row poses: the row says `GdFont`, the engine says `GdFont`,
+/// and `GdFont ⊆ GdFont` answers `Yes` in both directions, so clause (2) of
+/// [`countersigned`] admits it. The asymmetry is the whole point. A row whose name
+/// *differs* from the engine's leaves `subsumes_class` at `Maybe`, which is not
+/// `Yes`, so the row is refused and listed — and the stale pre-8.0 rows are precisely
+/// that population (functionMap still says `resource` where PHP 8 returns a `GdImage`
+/// or a `CurlHandle`). The floor cannot admit a hierarchy claim it has no hierarchy
+/// to check, and it never needs to: it only ever admits a name the engine itself
+/// spelled the same way.
+///
+/// The check is **per arm**, so `?ClassName` — a `Null` arm beside a `Class` one —
+/// becomes carriable by composition rather than by a case of its own.
+///
 /// Everything else stays out, still counted (ADR-0069 §5 as amended by #79):
-/// classes/`object`/`callable`/`resource` and intersections (`subsumes_class` is a
-/// reflexive floor and steins-contract carries no hierarchy — ADR-0071 §2.3 routes
-/// those rows through a later slice), `mixed`/`never`/the `mixed`-minus cuts
-/// (nothing to say), and `StrOpaque` (no faithful spelling — `spell_arms` refuses
-/// it).
+/// `callable` (a `CallableTy` countersign would still be vacuous — the reflexive
+/// floor says nothing about a signature), intersections, and `resource`, which is
+/// *not* a class arm: `resource`/`open-resource`/`closed-resource` are
+/// `KNOWN_UNENFORCED` keywords and lower to `ContractTy::Opaque`, so they never
+/// reach the class vocabulary and this widening does not touch them. Also out:
+/// `mixed`/`never`/the `mixed`-minus cuts (nothing to say), and `StrOpaque` (no
+/// faithful spelling — `spell_arms` refuses it). `self`/`static`/`parent` lower to
+/// `Opaque` for the same keyword reason, so no relative-class spelling survives
+/// lowering into a `Class` arm either.
 fn arm_is_carriable(ty: &ContractTy) -> bool {
     matches!(
         ty,
@@ -402,6 +450,8 @@ fn arm_is_carriable(ty: &ContractTy) -> bool {
             | ContractTy::MapOf { .. }
             | ContractTy::IterableOf { .. }
             | ContractTy::Shape { .. }
+            | ContractTy::Class(_)
+            | ContractTy::ObjectAny
     )
 }
 
@@ -428,11 +478,11 @@ fn floor_row(ty: &str) -> Option<Row> {
     if arms.is_empty() || !arms.iter().all(arm_is_carriable) {
         return None;
     }
-    let canon = steins_contract::spell::spell_arms(&arms)
-        .filter(|spelled| round_trips(spelled, &arms))
-        .unwrap_or_else(|| ty.to_owned());
+    let spelled = steins_contract::spell::spell_arms(&arms).filter(|s| round_trips(s, &arms));
+    let source_spelled = spelled.is_none();
+    let canon = spelled.unwrap_or_else(|| ty.to_owned());
     let envelope = is_envelope(&arms);
-    Some(Row { canon, arms, envelope })
+    Some(Row { canon, arms, envelope, source_spelled })
 }
 
 /// Whether re-lowering `spelled` yields the same arm **multiset** as `arms`.
@@ -564,25 +614,34 @@ fn render(
          # admitted             rows emitted into the shipped table\n\
          # admitted_rich        of those, the rows RICHER than a single-base envelope —\n\
          #                      the `T|false` failure unions and the scalar refinements\n\
-         #                      issue #79 admitted, and the array-vocabulary rows\n\
-         #                      ADR-0071 admitted (the #73 slice counted and dropped\n\
-         #                      every one of them)\n\
+         #                      issue #79 admitted, the array-vocabulary rows\n\
+         #                      ADR-0071 admitted, and the class rows the object slice\n\
+         #                      admitted (the #73 slice counted and dropped every one\n\
+         #                      of them)\n\
          #\n\
          # WHAT IS STILL DEFERRED (ADR-0069 §5 as amended 2026-08-01): `methods_skipped`\n\
-         # and the object / void / unparseable buckets. Object, `callable` and `resource`\n\
-         # arms have no extensional denotation — `subsumes_class` is a reflexive floor\n\
-         # and steins-contract carries no hierarchy — so the countersign could only\n\
-         # answer `Maybe`, and a row entering uncountersigned is the one thing ADR-0069\n\
-         # §3 refuses. ADR-0071 §2.3 routes them through a later slice. Nothing here is\n\
-         # lost data; it is deferred data, counted so the deferral stays visible.\n\
+         # and the void / unparseable buckets, plus what is LEFT in the object one —\n\
+         # `callable`, the intersections, and `resource`. Those have no extensional\n\
+         # denotation the countersign could use: a reflexive floor says nothing about a\n\
+         # signature, and `resource` is a KNOWN_UNENFORCED keyword lowering to an opaque\n\
+         # arm rather than to a class. A row entering uncountersigned is the one thing\n\
+         # ADR-0069 §3 refuses, so they stay out. Nothing here is lost data; it is\n\
+         # deferred data, counted so the deferral stays visible.\n\
          #\n\
          # The ARRAY bucket is emptied by ADR-0071: `subsumes` gained a structural\n\
          # denotation for `array` / `list<T>` / `array<K, V>` / `array{…}`, so the\n\
          # countersign is a real question for a shaped row rather than a vacuous\n\
-         # `Maybe`. The union and refinement buckets hold only their RESIDUE — a union\n\
-         # with an object or `mixed` arm, a string whose only spelling is the opaque\n\
-         # form. The object, void and unparseable buckets read exactly as they did\n\
-         # at #73.\n",
+         # `Maybe`. The OBJECT bucket then loses its object half with no new rule at\n\
+         # all: `subsumes_class` is reflexive, and a row naming the class the engine\n\
+         # names countersigns on that alone. A row naming a DIFFERENT class stays\n\
+         # `Maybe` and is refused — which is exactly how the stale pre-8.0 rows are\n\
+         # kept out, since the floor only ever admits a name the engine itself spelled.\n\
+         # The union and refinement buckets hold only their RESIDUE — a union with a\n\
+         # `resource`, `callable` or `mixed` arm, a string whose only spelling is the\n\
+         # opaque form. Note that `not_lowerable_object_or_resource` also holds every\n\
+         # `void` row (`void` lowers to an opaque arm, not to a value type), so it is a\n\
+         # coarser bucket than its name suggests; the refinement, void and unparseable\n\
+         # buckets read exactly as they did at #73.\n",
     );
     let _ = writeln!(s, "[counts]");
     let _ = writeln!(s, "total_keys = {}", counts.total_keys);
@@ -607,7 +666,13 @@ fn render(
          # `flatten_arms` seam a PROJECT function's declared return takes (issue #60),\n\
          # and seeds the resulting arms Asserted — one lowering, two provenances\n\
          # (ADR-0069 §2). The spelling is `spell_arms` over the lowered arms and is\n\
-         # verified at generation time to re-lower to the arms that were countersigned.\n",
+         # verified at generation time to re-lower to the arms that were countersigned.\n\
+         # Where `spell_arms` declines the arms outright — it has no faithful spelling\n\
+         # for a class arm — the row keeps functionMap's OWN string, which lowers back\n\
+         # to the countersigned arms by construction and, unlike a canonical respelling,\n\
+         # preserves the class's source casing (`ContractTy::Class` case-folds and could\n\
+         # not restate it). That is why a few rows read `__benevolent<...>`: it is\n\
+         # PHPStan's spelling of a plain union, and the parser expands it to one.\n",
     );
     let _ = writeln!(s, "[declared]");
     for (name, ty) in admitted {
@@ -709,13 +774,88 @@ mod tests {
         // canonical order is the speller's — array members follow the scalar ones
         // (ADR-0062 §6, D4) — so the stored spelling is `false|array`, not the source's.
         assert_eq!(canon("array|false").as_deref(), Some("false|array"));
-        // Still out, still counted: the countersign has no extensional denotation for
-        // them, so a row would enter unsigned (ADR-0071 §2.3 — a slice of its own).
+        // What the object slice added: a named class and bare `object`, per arm — so
+        // `?GdFont` follows without a case of its own. `spell_arms` refuses a class
+        // arm, so the stored spelling is the SOURCE string, which keeps the engine's
+        // casing (`ContractTy::Class` normalizes to lowercase and could not restate
+        // it) and lowers back by construction.
+        assert_eq!(canon("GdFont").as_deref(), Some("GdFont"));
+        assert_eq!(canon("?GdFont").as_deref(), Some("?GdFont"));
+        assert_eq!(canon("object").as_deref(), Some("object"));
+        assert_eq!(canon("GdImage|false").as_deref(), Some("GdImage|false"));
+        // Still out, still counted. `resource` is the load-bearing one: it is a
+        // KNOWN_UNENFORCED keyword lowering to `Opaque`, NOT a `Class` arm, so
+        // widening the class vocabulary leaves the whole resource family outside —
+        // which is what keeps the stale pre-8.0 `resource` rows uncarriable instead
+        // of letting them countersign reflexively against each other.
         assert_eq!(canon("resource"), None);
+        assert_eq!(canon("open-resource"), None);
+        assert_eq!(canon("closed-resource"), None);
+        assert_eq!(canon("resource|false"), None);
         assert_eq!(canon("array|resource"), None);
+        // `callable` and the intersections keep their deferral: a reflexive floor
+        // says nothing about a signature, so their countersign stays vacuous.
+        assert_eq!(canon("callable"), None);
+        // `Closure` is the callable KEYWORD in this vocabulary, not a class arm —
+        // `lower_identifier` case-folds before it consults the table, so the class
+        // spelling and the keyword are the same name and the keyword wins.
+        assert_eq!(canon("Closure"), None);
+        assert_eq!(canon("Countable&Traversable"), None);
+        // The relative-class spellings lower to `Opaque` as keywords, so none of them
+        // sneaks in as a `Class` arm.
+        assert_eq!(canon("static"), None);
+        assert_eq!(canon("self"), None);
         assert_eq!(canon("void"), None);
         assert_eq!(canon("mixed"), None);
         assert_eq!(canon(""), None);
+    }
+
+    #[test]
+    fn the_countersign_decides_class_rows_by_reflexivity_alone() {
+        let arms = |ty: &str| floor_row(ty).expect("carriable").arms;
+        // The admitting case, and the ONLY one: the row names the class the engine
+        // names. `subsumes_class` is reflexive, so both directions of clause (2)
+        // close without a hierarchy anywhere in steins-contract.
+        assert!(countersigned(&arms("GdFont"), "GdFont"), "imageloadfont's shape");
+        assert!(countersigned(&arms("GdFont"), "\\GdFont"), "the leading `\\` is normalized away");
+        assert!(countersigned(&arms("gdfont"), "GdFont"), "class names are case-folded");
+        assert!(countersigned(&arms("?GdFont"), "?GdFont"));
+        assert!(countersigned(&arms("object"), "object"));
+        // A row may still be a coarse upper BOUND, clause (1), exactly as `bool` is
+        // over the engine's `true`: every class instance is an object.
+        assert!(countersigned(&arms("object"), "GdFont"));
+        // And it may REFINE in the one direction that needs no hierarchy: a class
+        // under bare `object` is the class analogue of `non-empty-string` under
+        // `string`, decided by the universal "every instance is an object" rule
+        // rather than by any is-a edge.
+        assert!(countersigned(&arms("GdImage"), "object"));
+        // Different names stay `Maybe`, which is not `Yes` — refused and listed. This
+        // is the asymmetry the whole widening rests on: the floor admits only a name
+        // the engine itself spelled, so it never states a hierarchy claim it has no
+        // hierarchy to check.
+        assert!(!countersigned(&arms("GdFont"), "GdImage"));
+        // The genuinely HIERARCHY-DEPENDENT question is refused in both directions,
+        // which is the deferral ADR-0071 §2.3 names. A real is-a oracle would decide
+        // these; the reflexive floor answers `Maybe` and the row is listed.
+        assert!(!countersigned(&arms("ArrayObject"), "Traversable"), "a subclass row");
+        assert!(!countersigned(&arms("Traversable"), "ArrayObject"), "a superclass row");
+        // The stale pre-8.0 population, from both sides. A `resource` row is not even
+        // carriable (it lowers to `Opaque`), so it never reaches here; were it forced
+        // through, `Opaque` is `Maybe` on both clauses and the row is still refused.
+        // Either way it lands in a count, never in the table.
+        assert!(floor_row("resource").is_none(), "the resource rows stay uncarriable");
+        assert!(
+            !countersigned(&[steins_contract::ContractTy::Opaque], "GdImage"),
+            "curl_init's era: functionMap says `resource`, PHP 8 returns a CurlHandle"
+        );
+        // A DROPPED arm is refused for classes exactly as for scalars and arrays: the
+        // row hides the null the engine declares. This is `ftp_raw`'s catch one
+        // vocabulary over.
+        assert!(!countersigned(&arms("GdFont"), "?GdFont"), "a class row may not hide a null");
+        assert!(countersigned(&arms("?GdFont"), "GdFont"), "but it may bound one, clause (1)");
+        // A row that INVENTS an arm the engine excludes AND fails to bound is refused:
+        // `GdImage` neither lands under the engine's `GdFont` nor covers it.
+        assert!(!countersigned(&arms("GdFont|GdImage"), "?GdFont"));
     }
 
     #[test]
