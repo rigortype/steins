@@ -65,8 +65,13 @@ Places where Steins is quieter than it could be.
 - Array shapes carry key presence, optionality and list-ness, and the
   `isset`/`array_key_exists`/`empty`/`??` family narrows them (ADR-0062) — but a
   write at a key Steins cannot prove widens the whole shape rather than refining
-  it, and `array_slice` and the value side of `in_array`/`array_search` decline to
-  project through a shape at all.
+  it, and the value side of `in_array`/`array_search` declines to project through
+  a shape at all (its answer is a multi-base union the value domain cannot spell).
+- `array_slice` projects through a shape (ADR-0062 Amendment B), but only as far
+  as the element union, the key class and list-ness carry: it claims no size
+  bound, and it never projects *positionally* from a declared shape — a key set
+  has no runtime order (§2). An order-witnessed array is where the exact slice
+  comes from, and only there.
 
 **Objects** ([object-model.md](object-model.md)):
 
