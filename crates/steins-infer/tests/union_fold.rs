@@ -284,7 +284,11 @@ fn the_combination_cap_is_charged_on_the_product() {
         &[("a", &["'a'", "'b'", "'c'"]), ("b", &["'x'", "'y'", "'z'"]), ("c", &["'aa'", "'ab'", "'ac'"])],
         "str_replace($a, $b, $c)",
     );
-    assert_eq!(dump(&twenty_seven, &mut mock.clone()), "unknown", "27 > 16 declines");
+    // The FOLD declines — `mock.count() == 0` is the property this test owns. What
+    // renders is the rung below: `str_replace` is `string|array` in functionMap, a
+    // row ADR-0071 admitted because one of its two arms is an array, and the
+    // `(asserted)` marker separates that declaration from a folded answer.
+    assert_eq!(dump(&twenty_seven, &mut mock.clone()), "string|array (asserted)", "27 > 16 declines");
     assert_eq!(mock.count(), 0, "…and dispatches nothing: {:?}", mock.asks());
 
     let mock = Mock::default();

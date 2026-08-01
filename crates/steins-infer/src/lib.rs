@@ -18014,39 +18014,47 @@ fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Vec<ContractArm>> {
     }
     let declared = steins_catalog::declared_return(name)?;
     let arms = flatten_arms(steins_contract::lower_str(declared)?);
-    // No class arm can occur (the mining admits scalar arms only), so the resolver
-    // is the identity — the seam is shared, not the namespace context.
+    // No class arm can occur at the TOP level — the mining admits the scalar and the
+    // array vocabularies only, and ADR-0071 §2.3 leaves object arms to a later slice —
+    // so the resolver is the identity. A class *inside* an array row's element type is
+    // already a builtin FQN, never a project name needing namespace context: the seam
+    // is shared, the namespace context is not.
     refine_declared_arms(&[], arms, &|n: &str| n.to_owned())
 }
 
 /// The value-lane seed a floor arm list contributes: the single value-domain
 /// [`Fact`] its arms denote, or `None` when they denote more than one.
 ///
-/// The sibling of [`seed_shape_fact`] on the scalar side, and the reason the #73
-/// pins survive the #79 widening unchanged: a one-arm row (`string`) still binds
-/// `$r = str_repeat(...)` to a `General{String}` fact, which is what premises the
-/// contract-layer return check. A genuinely multi-arm row (`string|false`) has no
-/// single fact — the value domain has no scalar union layer — so it stays in the
+/// Both abstract layers are reachable from here, through the lowering each already
+/// owns — [`seed_shape_fact`] for an array arm (ADR-0062 S3), [`contractty_to_fact`]
+/// for a scalar one. That is the whole of ADR-0071's consumption side: the array
+/// vocabulary needed no new seam, because a builtin row and a project function's
+/// `@return array{…}` are the same arm list by the time they arrive here.
+///
+/// The single-fact rule is the reason the #73 pins survive every widening unchanged.
+/// A one-arm row (`string`, `array{a: int}`) binds `$r = f(...)` to one fact, which
+/// is what premises the contract-layer return check. A genuinely multi-arm row
+/// (`string|false`, `false|array`) has no single fact — the value domain carries no
+/// union layer over either the scalar or the array vocabulary — so it stays in the
 /// arm lane alone, exactly where a hand-written `@param string|false` would live,
 /// and narrows through the same operators.
 ///
-/// A `?T` pair is one fact (the domain carries `nullable` as a side flag), which is
-/// how the `?string` rows keep the rendering they had at #73.
+/// A `?T` **scalar** pair is one fact (the domain carries `nullable` as a side flag),
+/// which is how the `?string` rows keep the rendering they had at #73. A `?array{…}`
+/// row is **not**: [`fact_with_null`] refuses a shape, so the row lives in the arm
+/// lane alone. That is a designed refusal rather than a gap — the floor states one
+/// nullability rule and applies it to whatever the arms denote, and declining is the
+/// FP-safe side of it (the arms still carry the null, so nothing is lost to the
+/// declared surface or to guard subtraction).
 fn floor_value_fact(arms: &[ContractArm]) -> Option<Fact> {
-    let mut nullable = false;
-    let mut fact: Option<Fact> = None;
-    for arm in arms {
-        if matches!(arm.ty, ContractTy::Null) {
-            nullable = true;
-            continue;
-        }
-        if fact.is_some() {
-            return None;
-        }
-        fact = Some(contractty_to_fact(&arm.ty)?);
-    }
-    let fact = fact?;
-    if nullable { fact_with_null(&fact) } else { Some(fact) }
+    let (nulls, rest): (Vec<ContractArm>, Vec<ContractArm>) =
+        arms.iter().cloned().partition(|a| matches!(a.ty, ContractTy::Null));
+    let [only] = rest.as_slice() else { return None };
+    let fact = match seed_shape_fact(&rest) {
+        Some(shape) => shape,
+        None => contractty_to_fact(&only.ty)?,
+    };
+    if nulls.is_empty() { Some(fact) } else { fact_with_null(&fact) }
 }
 
 /// The floor's version gate (ADR-0069 §3, A11-shaped): whether the project's

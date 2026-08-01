@@ -135,17 +135,27 @@ fn explode_takes_the_separators_own_predicate_not_just_a_literal() {
 fn explode_declines_an_empty_or_unknown_separator() {
     // `explode('', 'abc')` is a `ValueError` at 8.5.8 — there is no return value
     // to describe, and an unknown separator might be that call.
-    assert_eq!(dump("string $s", "explode('', $s)"), "dumped type: unknown");
-    assert_eq!(dump("string $sep, string $s", "explode($sep, $s)"), "dumped type: unknown");
+    //
+    // What the dump shows is the ADR-0069 FLOOR two rungs below, which since
+    // ADR-0071 carries `explode`'s array row: the coarse catalog `list<string>`,
+    // marked `(asserted)`. The decline this test is about is intact and legible in
+    // that marker — the rule's own answer is `non-empty-list<string>` and carries no
+    // marker, so a transfer that leaked would be visible here, not hidden by it.
+    assert_eq!(dump("string $s", "explode('', $s)"), "dumped type: list<string> (asserted)");
+    assert_eq!(
+        dump("string $sep, string $s", "explode($sep, $s)"),
+        "dumped type: list<string> (asserted)"
+    );
 }
 
 #[test]
 fn explode_declines_the_limit_form_because_a_limit_can_empty_the_result() {
     // THE load-bearing decline of this rule: `explode(',', 'a,b,c', -5)` returns
     // `[]` at 8.5.8, so carrying `non-empty` across a limit argument would be a
-    // false premise rather than a lost refinement.
-    assert_eq!(dump("string $s", "explode(',', $s, 2)"), "dumped type: unknown");
-    assert_eq!(dump("string $s", "explode(',', $s, -5)"), "dumped type: unknown");
+    // false premise rather than a lost refinement. The floor's `list<string>` is
+    // what stands instead, and it is exactly right about the empty case.
+    assert_eq!(dump("string $s", "explode(',', $s, 2)"), "dumped type: list<string> (asserted)");
+    assert_eq!(dump("string $s", "explode(',', $s, -5)"), "dumped type: list<string> (asserted)");
 }
 
 // ---------------------------------------------------------------------------
@@ -178,9 +188,12 @@ fn range_keeps_the_list_and_the_non_emptiness_when_the_element_is_unknown() {
 #[test]
 fn range_declines_an_arity_php_itself_rejects() {
     // One argument, or four, is an `ArgumentCountError` — the seam refuses to
-    // describe a call PHP will not make.
-    assert_eq!(dump("", "range(1)"), "dumped type: unknown");
-    assert_eq!(dump("", "range(1, 2, 3, 4)"), "dumped type: unknown");
+    // describe a call PHP will not make. The floor below is arity-blind by design
+    // (ADR-0069 §2 imports return envelopes and nothing else), so it answers
+    // `range`'s bare catalog `array`; the refined `non-empty-list<int>` this rule
+    // would have produced is what the decline withholds, and the marker says so.
+    assert_eq!(dump("", "range(1)"), "dumped type: array (asserted)");
+    assert_eq!(dump("", "range(1, 2, 3, 4)"), "dumped type: array (asserted)");
 }
 
 // ---------------------------------------------------------------------------
@@ -218,9 +231,18 @@ fn preg_replace_of_an_array_subject_is_array_or_null() {
 #[test]
 fn preg_replace_declines_a_subject_it_cannot_place() {
     // A subject of unknown base could be either arm, and a nullable one is a
-    // case the rule was never probed against.
-    assert_eq!(dump("", "preg_replace('/a/', 'b', $u)"), "dumped type: unknown");
-    assert_eq!(dump("?string $s", "preg_replace('/a/', 'b', $s)"), "dumped type: unknown");
+    // case the rule was never probed against. Withholding the SPLIT is the point:
+    // what stands is the floor's unsplit `string|null|array`, which states both
+    // arms rather than choosing one, and carries the `(asserted)` marker the rule's
+    // own `string|null` would not.
+    assert_eq!(
+        dump("", "preg_replace('/a/', 'b', $u)"),
+        "dumped type: string|null|array (asserted)"
+    );
+    assert_eq!(
+        dump("?string $s", "preg_replace('/a/', 'b', $s)"),
+        "dumped type: string|null|array (asserted)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -270,33 +292,41 @@ fn without_the_reflected_declaration_every_transfer_is_withheld() {
             None
         }
     }
-    for expr in ["explode(',', $s)", "range(1, 3)", "preg_replace('/a/', 'b', $s)"] {
+    // Every one of these used to read `unknown`. None of them does any more, and the
+    // reason is never this rung: ADR-0069's declared-return FLOOR answers underneath
+    // it with the name's own catalog declaration, marked `(asserted)` because a
+    // catalog row is not a runtime answer. The ADR-0061 §2 gate this test is about is
+    // untouched — the *transfer* is still withheld, and what reaches the dump is the
+    // coarse declaration, never the rule's output. The two are distinguishable at a
+    // glance: every refined answer here is `non-empty-*` or a split, and none of them
+    // appears below.
+    for (expr, floor) in [
+        ("explode(',', $s)", "list<string>"),
+        ("range(1, 3)", "array"),
+        ("preg_replace('/a/', 'b', $s)", "string|null|array"),
+        ("var_export($s, true)", "string|null"),
+    ] {
         let src =
             format!("<?php\nfunction f(string $s): void {{ \\PHPStan\\dumpType({expr}); }}\n");
         assert_eq!(
             one_type_with(&src, &mut NoPhp),
-            "dumped type: unknown",
-            "no-PHP run must withhold {expr}"
+            format!("dumped type: {floor} (asserted)"),
+            "no-PHP run must withhold the transfer for {expr} and fall to the floor"
         );
     }
-    // `var_export($s, true)` used to join them at `unknown`. It no longer does, and
-    // the reason is not this rung: ADR-0069's declared-envelope FLOOR now answers
-    // underneath it with `var_export`'s own declared `?string`, marked `(asserted)`
-    // because a catalog declaration is not a runtime answer. The ADR-0061 §2 gate
-    // this test is about is untouched — the *transfer* is still withheld, and what
-    // reaches the dump is the coarse declaration, never the rule's output.
-    let src = "<?php\nfunction f(string $s): void { \\PHPStan\\dumpType(var_export($s, true)); }\n";
-    assert_eq!(one_type_with(src, &mut NoPhp), "dumped type: string|null (asserted)");
 }
 
 #[test]
 fn a_declaration_the_rule_was_not_written_against_withholds_it() {
     // Widening staleness (ADR-0061 §2): this engine declares something else for
-    // `explode`, so the rule's claim is not countersigned and is discarded.
+    // `explode`, so the rule's claim is not countersigned and is discarded. The
+    // engine's own `array|false` seeds no fact either (multi-base), so the rung
+    // yields `None` and the ADR-0069 floor speaks — the coarse `list<string>`, and
+    // never the discarded `non-empty-list<string>`.
     let mut mock = Mock::sidecar();
     mock.types.insert("explode".to_owned(), "array|false".to_owned());
     let src = "<?php\nfunction f(string $s): void { \\PHPStan\\dumpType(explode(',', $s)); }\n";
-    assert_eq!(one_type_with(src, &mut mock), "dumped type: unknown");
+    assert_eq!(one_type_with(src, &mut mock), "dumped type: list<string> (asserted)");
 }
 
 #[test]
