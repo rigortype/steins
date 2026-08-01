@@ -70,8 +70,14 @@ ADR-0031 machinery (`CondExpr` → `eval_cond` verdicts → `Refine` collection
      none**. Base-level subtraction happens one carrier up: `!is_int($x)`
      on a declared `int|string` deletes the `int` *arm* of the contract
      fact (an arm dies when the subtrahend subsumes it with Certainty
-     Yes; Maybe keeps it — the silence side). Null subtracts via the
-     nullable bit as everywhere. Rejected: a bounded excluded-value set on
+     Yes; Maybe keeps it — the silence side). The single **partial**
+     deletion on the arm carrier is the `Refined` clause's endpoint rule
+     one carrier up: an `int<lo, hi>` arm minus one of its own endpoints
+     shrinks by one (a two-point interval collapses to the surviving
+     literal; the point interval dies), and an interior point leaves the
+     arm whole — an interval minus an interior point is not an interval,
+     and the gap has no arm spelling. Null subtracts via the nullable
+     bit as everywhere. Rejected: a bounded excluded-value set on
      the abstract layers (`General{base, not: [Val]}`) — for a proof-layer
      tool its yield is a definite-No only when the exclusion removes the
      *last* admissible value of a literal contract, a shape the finite
@@ -613,6 +619,19 @@ The interior-point discipline holds here as it does for the `Value`
 subtrahend: `5` beside `int<1, max>` is not an absorption case at all —
 subsumption has already deleted it — and the merge refuses it besides.
 
+The absorption's one known cost — an endpoint swallowed into the
+interval could no longer be subtracted, so `!== 0` over the absorbed
+`int<0, max>` narrowed nothing where `positive-int|0` would have lost
+its `0` arm — is discharged by the follow-up slice: `subtract` gains
+the absorption's mirror, the point-2 endpoint rule on the arm carrier
+(`subtract_arm`, the per-arm judgment stratified carriers map with).
+An `int<lo, hi>` arm minus one of its own endpoints shrinks by one, a
+two-point interval collapses to the surviving literal, the point
+interval dies, and an interior point keeps the arm whole. Merge and
+clip are one refusal read in both directions: arms combine only where
+the union IS a single arm, and an arm partially deletes only where the
+remainder IS a single arm.
+
 This adds one name to the point-4 API, `merge_int_arms(a, b) ->
 Option<ContractTy>`, which is the pairwise primitive the fixpoint runs
 and the only way a stratified carrier can reuse the rule without
@@ -643,6 +662,9 @@ countersigned two and silently fallen back to functionMap's own string.
 
 Fixtures: `crates/steins-contract/src/normalize.rs` (the rule, its
 fixpoint, the gap and interior-point refusals, the boundary
-denotation-preservation and the `min`/`max` overflow guards);
-`crates/steins-infer/tests/false_arm_strip.rs` (`strpos` reads
-`int<0, max>|false`, and `int<0, max>` under the guard).
+denotation-preservation and the `min`/`max` overflow guards — and, for
+the clip, both endpoints, the literal collapse, the point-interval
+death, and the i64 domain ends); `crates/steins-infer/tests/`
+`false_arm_strip.rs` (`strpos` reads `int<0, max>|false`,
+`int<0, max>` under the `!== false` guard, `int<1, max>|false` under
+`!== 0`, and the interior-point refusal under `!== 5`).
