@@ -10029,6 +10029,12 @@ fn refine_declared_arms(
             Some(ContractArm { ty, stratum })
         })
         .collect();
+    // Canonicalize the minted list before it enters the lane: a mined row like
+    // `strpos`' `positive-int|0|false` carries the two-armed spelling of one
+    // interval, and every later reader (guard subtraction, join, dump) should see
+    // the denotation once (issue #90).
+    let mut out = out;
+    absorb_contract_arms(&mut out);
     (!out.is_empty()).then_some(out)
 }
 
@@ -11843,7 +11849,39 @@ fn dedup_contract_arms(arms: &mut Vec<ContractArm>) {
         });
         kept.push(ContractArm { ty: arm.ty, stratum });
     }
+    absorb_contract_arms(&mut kept);
     *arms = kept;
+}
+
+/// Run a contract-arm list to the interval-absorption fixpoint (issue #90), the
+/// stratified analogue of the pass [`normalize::dedup_arms`] gained: `int<1, max>`
+/// beside `0` is one denotation spelled two ways, and subsumption cannot collapse
+/// it because neither arm covers the other.
+///
+/// The merged arm takes the **min** stratum of the pair, for the same reason the
+/// subsumption widening above does (ADR-0052 §5): the merged arm is only as
+/// strongly held as the weaker of the two claims it replaces, so a `Verified`
+/// twin can never lift an `Asserted` one.
+///
+/// Runs wherever an arm list is minted or joined, so the lane never *stores* the
+/// two-armed spelling — the collapse is semantic, not a rendering choice, and the
+/// dump surface inherits it rather than deciding it (the ADR-0052 §4 charter).
+fn absorb_contract_arms(arms: &mut Vec<ContractArm>) {
+    loop {
+        let mut merged_at: Option<(usize, usize, ContractArm)> = None;
+        'outer: for i in 0..arms.len() {
+            for j in (i + 1)..arms.len() {
+                if let Some(ty) = normalize::merge_int_arms(&arms[i].ty, &arms[j].ty) {
+                    let stratum = arms[i].stratum.min(arms[j].stratum);
+                    merged_at = Some((i, j, ContractArm { ty, stratum }));
+                    break 'outer;
+                }
+            }
+        }
+        let Some((i, j, m)) = merged_at else { return };
+        arms[i] = m;
+        arms.remove(j);
+    }
 }
 
 // ---------------------------------------------------------------------------
