@@ -1730,6 +1730,26 @@ mod tests {
         // And an array arm inside a union, which was the other half of the movement:
         // the row was uncarriable only because ONE of its arms was an array.
         assert_eq!(super::declared_return("scandir"), Some("false|list<string>"));
+        // The object slice: class rows, admitted by the reflexive countersign alone.
+        // These keep functionMap's OWN casing rather than a canonical respelling —
+        // `spell_arms` has no faithful spelling for a class arm, so the row stores the
+        // source string, which lowers back by construction and is the only place the
+        // builtin's casing survives at all (`ContractTy::Class` case-folds).
+        assert_eq!(super::declared_return("gmp_init"), Some("GMP"));
+        assert_eq!(super::declared_return("date_diff"), Some("DateInterval"));
+        assert_eq!(super::declared_return("hash_init"), Some("HashContext"));
+        // A class arm paired with `null`, carriable per ARM and so needing no case of
+        // its own; and a class arm paired with a scalar one.
+        assert_eq!(super::declared_return("collator_create"), Some("?Collator"));
+        assert_eq!(super::declared_return("simplexml_load_string"), Some("SimpleXMLElement|false"));
+        // A namespaced builtin FQN, which is why the consuming resolver must be the
+        // identity: `ast\Node` is already global, and a project-namespace resolver
+        // would mangle it.
+        assert_eq!(super::declared_return("ast\\parse_code"), Some("ast\\Node"));
+        // PHPStan's own spelling of a plain union survives verbatim, because the
+        // phpdoc parser expands `__benevolent<T1|T2>` to the union it wraps before
+        // anything lowers it.
+        assert_eq!(super::declared_return("curl_init"), Some("__benevolent<CurlHandle|false>"));
         // Case-insensitive lookup and leading-backslash trimming, as everywhere else.
         assert_eq!(super::declared_return("STRSTR"), Some("string|false"));
         assert_eq!(super::declared_return("\\str_repeat"), Some("string"));
@@ -1744,12 +1764,13 @@ mod tests {
         // The mining counts, pinned. The #73 slice admitted 919 rows, every one a
         // single-base envelope; #79 kept all of them (the countersign still admits a
         // row that BOUNDS the engine) and added 439 richer ones; ADR-0071's array
-        // widening keeps those 1,358 name for name and adds 248 more. A drop below
-        // 919, or a collapse of the rich population, means a lowering regressed.
+        // widening keeps those 1,358 name for name and adds 248 more; the object
+        // slice keeps all 1,606 and adds 102. A drop below 919, or a collapse of the
+        // rich population, means a lowering regressed.
         let rich = t.iter().filter(|(_, ty)| !ENVELOPE_SPELLINGS.contains(ty)).count();
-        assert_eq!(t.len(), 1606, "admitted rows at this pin");
+        assert_eq!(t.len(), 1708, "admitted rows at this pin");
         assert_eq!(t.len() - rich, 919, "the #73 envelope population must be preserved exactly");
-        assert_eq!(rich, 687, "the #79 and ADR-0071 rich admissions");
+        assert_eq!(rich, 789, "the #79, ADR-0071 and object-slice rich admissions");
     }
 
     #[test]
@@ -1794,6 +1815,40 @@ mod tests {
             "socket_addrinfo_lookup",
         ] {
             assert_eq!(super::declared_return(name), None, "{name}: an ADR-0071 candidate the engine disowns");
+        }
+        // And the object slice's own catches, which are the resource-era rot made
+        // visible. `stream_bucket_make_writeable` is the sharpest of the whole table:
+        // functionMap says the call returns a bare `stdClass`, where PHP 8 declares a
+        // real `StreamBucket` — the stand-in outlived the thing it stood in for, and
+        // the reflexive countersign refuses it because the two names simply differ.
+        // The rest are the familiar dropped-arm shape wearing class names:
+        // `intlcal_create_instance` and the four `tidy_get_*` rows hide the engine's
+        // `null` exactly as `ftp_raw` hid one; `xmlwriter_open_uri` hides its `false`;
+        // `dom_import_simplexml` drops the engine's `DOMAttr` arm AND invents a
+        // `false`. None of them could have been caught before, because none of them
+        // was a candidate.
+        for name in [
+            "stream_bucket_make_writeable",
+            "intlcal_create_instance",
+            "intltz_create_time_zone",
+            "msgfmt_create",
+            "numfmt_create",
+            "tidy_get_root",
+            "tidy_get_body",
+            "datefmt_create",
+            "dom_import_simplexml",
+            "xmlwriter_open_uri",
+            "mysqli_get_charset",
+        ] {
+            assert_eq!(super::declared_return(name), None, "{name}: a class candidate the engine disowns");
+        }
+        // A constant-union row is refused for the same mechanical reason, and the
+        // refusal matters more than it looks: a CONSTANT name is not vocabulary, so
+        // `lower_identifier`'s catch-all lowers it to a `Class` arm, which the object
+        // slice made carriable. The countersign is what keeps those rows out — the
+        // engine declares `int`, no class name matches, and the row is listed.
+        for name in ["json_last_error", "session_status"] {
+            assert_eq!(super::declared_return(name), None, "{name}: constants are not class names");
         }
         // Alternate signatures that disagree on the return type exclude the name too:
         // a floor row must state ONE type.

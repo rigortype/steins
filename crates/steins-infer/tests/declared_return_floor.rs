@@ -6,9 +6,11 @@
 //! `T|false` failure union or a scalar refinement as well as a bare envelope — by
 //! seeding through the declared-return ARM lane instead of `envelope_fact`, and
 //! ADR-0071 widened it again to the array vocabulary once the generation-time
-//! countersign could decide an array pair at all. The grade, the firewall and the
-//! per-name silence condition are unchanged through both, and the #73 pins below
-//! are the evidence for that.
+//! countersign could decide an array pair at all, then to the CLASS vocabulary,
+//! which needed no widening of the relation whatsoever — `subsumes_class` was
+//! already reflexive, and reflexivity is the whole question a functionMap row
+//! poses. The grade, the firewall and the per-name silence condition are unchanged
+//! through all three, and the #73 pins below are the evidence for that.
 //!
 //! Everything worth pinning about it is a *boundary*:
 //!
@@ -699,5 +701,152 @@ fn the_version_gate_declines_below_a_change_boundary() {
         dump_call_under_target("str_split($s)", None),
         "dumped type: list<string> (asserted)",
     );
+}
+
+// ---------------------------------------------------------------------------
+// The object slice: the class rows.
+//
+// The other half of the 620-row bucket, and the one that needed no new relation
+// at all — `subsumes_class` is reflexive, so a row naming the class the engine
+// names countersigns on that alone (ADR-0071 §2.3). What is new HERE is that a
+// `ContractTy::Class` arm can now reach the consuming floor at the TOP level,
+// where before it could only appear inside an array row's element type. These
+// fixtures pin the two things that follow: the arm lane carries it, and the value
+// lane stays empty.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_class_row_reaches_the_declared_surface_and_the_arm_lane() {
+    // A mined single-class row, end to end from the catalog string. Both the call
+    // form and the bound form reach it, and both carry the `(asserted)` marker —
+    // the floor answered, and it says so.
+    assert_eq!(probe("gmp_init($s)"), "dumped type: gmp (asserted)");
+    assert_eq!(probe("date_diff($h, $h)"), "dumped type: dateinterval (asserted)");
+    assert_eq!(after("$r = gmp_init($s);", "$r"), "dumped type: gmp (asserted)");
+    // The declared surface agrees with the value surface, the parity every rung
+    // above this one also keeps.
+    let src = "<?php\nfunction f(string $s): void { \\PHPStan\\dumpPhpDocType(gmp_init($s)); }\n";
+    let tree = SourceTree::parse(src);
+    let phpdoc: Vec<String> = check(&tree, &[], "t.php")
+        .into_iter()
+        .filter(|d| d.id == DEBUG_PHPDOC_TYPE_ID)
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(phpdoc, vec!["dumped phpdoc type: gmp (asserted)".to_owned()]);
+}
+
+#[test]
+fn a_class_row_renders_lowercased_because_nothing_holds_the_builtins_casing() {
+    // A NAMED RESIDUAL, pinned so it is a decision rather than a surprise. The
+    // catalog stores functionMap's own casing (`GMP`, `HashContext`, `XMLParser`),
+    // but `ContractTy::Class` case-folds on the way in — that is what makes the
+    // countersign's `class_eq` comparison work — and the display path recovers the
+    // source casing from the PROJECT index (`Cx::class_display_fqn`), which knows
+    // nothing about a builtin. So the dump renders the normalized key.
+    //
+    // PHPStan would say `GMP` here. Closing the gap needs a builtin-class display-
+    // name table beside the hierarchy catalog (which keys on the lowercased name and
+    // so cannot answer it either) — a mining slice of its own, not a rendering tweak.
+    // Until then this is a fidelity gap in the dump surface ONLY: every judgment
+    // downstream compares through `class_eq`, which is case-insensitive, so nothing
+    // decides differently because of it.
+    assert_eq!(probe("hash_init($s)"), "dumped type: hashcontext (asserted)");
+    assert_eq!(probe("xml_parser_create()"), "dumped type: xmlparser (asserted)");
+}
+
+#[test]
+fn a_nullable_class_row_keeps_its_null_arm_and_subtracts_it_under_a_guard() {
+    // `?Collator` is carriable per ARM — a `Null` beside a `Class` — so it needed no
+    // case of its own in either the mining filter or the lowering.
+    assert_eq!(probe("collator_create($s)"), "dumped type: null|collator (asserted)");
+    // And the arm lane does real work on it: `!== null` subtracts the null arm.
+    // This is the leg that a `!== false` guard does NOT have (see
+    // `a_rich_floor_row_behaves_exactly_like_a_declared_one_under_guards`) — null
+    // subtraction is wired, scalar-literal subtraction is not — so a class row is
+    // strictly better served by the existing operators than a `T|false` one.
+    let src = "<?php\nfunction f(string $s): void {\n\
+               $r = collator_create($s);\n\
+               if ($r !== null) { \\PHPStan\\dumpType($r); }\n}\n";
+    assert_eq!(
+        no_php_dumps(src).first().cloned().unwrap_or_default(),
+        "dumped type: collator (asserted)"
+    );
+}
+
+#[test]
+fn a_class_row_seeds_no_value_fact_at_all() {
+    // The value domain has no object inhabitant (ADR-0035/0038), so a class row is
+    // ARM-LANE ONLY — not "a fact this declines to seed" but "no fact exists to
+    // seed". Both lowerings say so independently: `contractty_to_fact` has no arm
+    // for `Class`, and `to_shape_fact` has none either, so `floor_value_fact`
+    // returns `None` by two routes.
+    //
+    // The consequence is the one worth pinning: with nothing in the value lane there
+    // is no premise anywhere, so no class row can reach the proof layer no matter
+    // how it is exercised. Asserted grade would have kept it out anyway; this is the
+    // stronger statement, that there is nothing there to keep out.
+    let sources = [
+        "<?php\nfunction f(string $s): void { $r = gmp_init($s); \\PHPStan\\dumpType($r); }\n",
+        "<?php\nfunction f(string $s): void {\n\
+         $r = collator_create($s);\n\
+         if ($r !== null) { \\PHPStan\\dumpType($r); }\n}\n",
+        // Used where the class would be a type error if anything trusted the row.
+        "<?php\nfunction f(string $s): int { $r = gmp_init($s); return strlen($r); }\n",
+        // Returned against a declared contract the class arm violates.
+        "<?php\n/** @return string */\nfunction f(string $s) { $r = gmp_init($s); return $r; }\n",
+        // The nullable pair, unguarded — the shape most likely to premise something.
+        "<?php\nfunction f(string $s): void { $r = collator_create($s); \\PHPStan\\dumpType($r); }\n",
+    ];
+    for src in sources {
+        let tree = SourceTree::parse(src);
+        let ds = check(&tree, &[], "t.php");
+        let proof: Vec<&Diagnostic> =
+            ds.iter().filter(|d| layer(d.id) == Some(Layer::Proof)).collect();
+        assert!(proof.is_empty(), "a class floor row reached the proof layer in {src:?}: {proof:?}");
+    }
+}
+
+#[test]
+fn a_class_row_mixed_with_a_non_class_arm_is_inert_on_the_dump_surface() {
+    // `render_contract_arms`' class path spells a PURE class/`null` arm list and
+    // refuses anything else, so a `Class|false` row and a bare `object` row have no
+    // faithful spelling and the surface falls to honest unknown rather than guessing.
+    //
+    // Inert on the RENDERER, not dropped from the lane: these rows countersigned and
+    // they seed their arms exactly as the rows above do. The same posture the array
+    // slice recorded for the two rows `spell_arms` refuses to spell back.
+    assert_eq!(probe("simplexml_load_string($s)"), "dumped type: unknown");
+    assert_eq!(probe("stream_bucket_new($h, $s)"), "dumped type: unknown");
+    // `curl_init` is the same shape wearing PHPStan's own spelling of a plain union:
+    // the catalog stores `__benevolent<CurlHandle|false>`, which the phpdoc parser
+    // expands to `CurlHandle|false` before it is ever lowered.
+    assert_eq!(probe("curl_init()"), "dumped type: unknown");
+}
+
+#[test]
+fn a_class_floor_row_is_not_an_existence_vouch_either() {
+    // The absence family's posture is UNCHANGED by this slice, and the class rows
+    // are the population most likely to tempt a reader into thinking otherwise — a
+    // row naming `GMP` still says nothing about whether the ext is loaded, because
+    // existence is a boot-surface fact and this table answers only about return
+    // types. Same assertion as `a_floor_row_is_not_an_existence_vouch`, on a row
+    // whose declaration is a class rather than a scalar.
+    let covered = "<?php\nfunction f($g): void { gmp_init($g); }\n";
+    let uncovered = "<?php\nfunction f($g): void { typo_nope($g); }\n";
+    let mut engine = Engine::default().with_boot_surface(&[]);
+    let count = |src: &str, e: &mut Engine| {
+        run(src, e).iter().filter(|d| d.id == CALL_UNDEFINED_FUNCTION_ID).count()
+    };
+    assert_eq!(count(covered, &mut engine), 1, "a class floor row must not vouch for existence");
+    assert_eq!(count(uncovered, &mut engine), 1);
+}
+
+#[test]
+fn an_engine_answer_wins_over_a_class_row_too() {
+    // The floor is the floor, for this vocabulary as for every other: where the
+    // engine reflects, the engine's answer stands and the marker is absent.
+    let src = "<?php\nfunction f(string $s): void { \\PHPStan\\dumpType(gmp_init($s)); }\n";
+    let mut engine = Engine::reflecting("gmp_init", general(Base::Int));
+    assert_eq!(dumps_with(src, &mut engine), vec!["dumped type: int".to_owned()]);
 }
 
