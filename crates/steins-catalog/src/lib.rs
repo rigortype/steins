@@ -79,6 +79,11 @@ pub const PINNED_PHP: (u16, u16) = (8, 5);
 /// and `xtask/src/gen_catalog.rs` for the generation contract.
 mod hierarchy_generated;
 
+/// The builtin class **display-name** table, generated from the same mining
+/// data by the same command — lowercased key → the casing php-src declares.
+/// Consulted only by [`builtin_class_display`].
+mod display_names_generated;
+
 /// The builtin return-fact refinement table (ADR-0056), generated from
 /// `docs/research/phpsrc-mining/return_facts.toml` by `cargo xtask gen-catalog`.
 /// Consulted only by [`return_fact`]. May be empty (R1 lands zero rows).
@@ -963,6 +968,34 @@ pub fn builtin_class_supers(name: &str) -> Option<Vec<&'static str>> {
         .binary_search_by(|(n, _)| (*n).cmp(key.as_str()))
         .ok()
         .map(|i| hierarchy_generated::HIERARCHY[i].1.to_vec())
+}
+
+/// The casing php-src **declares** a builtin class/interface/enum with (`gmp` →
+/// `GMP`, `hashcontext` → `HashContext`), or `None` for a name the mining data
+/// does not declare — mined from the same `hierarchy.toml` pin as
+/// [`builtin_class_supers`], so the two tables cannot drift apart.
+///
+/// **Display fidelity only.** `ContractTy::Class` case-folds on the way in —
+/// that is what makes the countersign's `class_eq` comparison work — so by the
+/// time a class name reaches a rendering surface its source casing is gone, and
+/// the project index cannot recover it for a class no project file declares.
+/// This table closes exactly that gap (the ADR-0069 third-amendment residual:
+/// `dumpType(gmp_init($x))` read `gmp` where PHPStan reads `GMP`). No judgment
+/// may consult it: everything downstream compares case-insensitively, and a
+/// consumer that decided on casing would be deciding on nothing.
+///
+/// Matching is case-insensitive and a leading backslash is stripped, as in
+/// [`builtin_class_supers`]; namespaced builtins are resolved the same way
+/// (`ffi\cdata` → `FFI\CData`). **Enums are present here** even though the
+/// hierarchy table skips them: that exclusion guards the is-a oracle against an
+/// incomplete super-edge set, and a display name has no such soundness gate.
+#[must_use]
+pub fn builtin_class_display(name: &str) -> Option<&'static str> {
+    let key = name.trim_start_matches('\\').to_ascii_lowercase();
+    display_names_generated::DISPLAY_NAMES
+        .binary_search_by(|(n, _)| (*n).cmp(key.as_str()))
+        .ok()
+        .map(|i| display_names_generated::DISPLAY_NAMES[i].1)
 }
 
 /// The **measured/curated** throw facts of a builtin call (ADR-0040 source #2):
@@ -1977,6 +2010,51 @@ mod tests {
         // `builtin_class_supers` silently misses entries. Guards regen drift.
         let t = super::hierarchy_generated::HIERARCHY;
         assert!(t.windows(2).all(|w| w[0].0 < w[1].0), "HIERARCHY must be strictly sorted by key");
+    }
+
+    #[test]
+    fn display_names_answer_the_declared_casing() {
+        use super::builtin_class_display as d;
+        // The names the residual was pinned on (ADR-0069 third amendment).
+        assert_eq!(d("gmp"), Some("GMP"));
+        assert_eq!(d("hashcontext"), Some("HashContext"));
+        assert_eq!(d("xmlparser"), Some("XMLParser"));
+        assert_eq!(d("dateinterval"), Some("DateInterval"));
+        // Case-insensitive, leading backslash stripped, namespaced keys resolved
+        // — the same key discipline as `builtin_class_supers`.
+        assert_eq!(d("GMP"), Some("GMP"));
+        assert_eq!(d("\\DateInterval"), Some("DateInterval"));
+        assert_eq!(d("ffi\\cdata"), Some("FFI\\CData"));
+        // An all-lowercase declaration answers itself — the row states the
+        // declared casing, not a beautification.
+        assert_eq!(d("com"), Some("com"));
+        // Enums ARE here, even though `builtin_class_supers` skips them: the
+        // hierarchy exclusion guards the is-a oracle, not the display surface.
+        assert_eq!(d("roundingmode"), Some("RoundingMode"));
+        assert_eq!(super::builtin_class_supers("roundingmode"), None);
+        // An unknown external stays unknown.
+        assert_eq!(d("App\\GMP"), None);
+        assert_eq!(d("nosuchclass"), None);
+    }
+
+    #[test]
+    fn display_name_table_is_sorted_and_self_consistent() {
+        // Sorted, or `binary_search_by` in `builtin_class_display` silently
+        // misses entries; each key the lowercase of its value, or the lookup
+        // and the answer describe two different classes. Guards regen drift.
+        let t = super::display_names_generated::DISPLAY_NAMES;
+        assert!(t.windows(2).all(|w| w[0].0 < w[1].0), "DISPLAY_NAMES must be strictly sorted");
+        for &(key, name) in t {
+            assert_eq!(key, name.to_ascii_lowercase(), "key must be the lowercased value");
+        }
+        // One mining source, two projections: every hierarchy key has a display
+        // row (the converse cannot hold — enums are display-only by design).
+        for &(key, _) in super::hierarchy_generated::HIERARCHY {
+            assert!(
+                super::builtin_class_display(key).is_some(),
+                "hierarchy key `{key}` has no display row"
+            );
+        }
     }
 
     #[test]

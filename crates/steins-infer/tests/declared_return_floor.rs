@@ -719,9 +719,9 @@ fn a_class_row_reaches_the_declared_surface_and_the_arm_lane() {
     // A mined single-class row, end to end from the catalog string. Both the call
     // form and the bound form reach it, and both carry the `(asserted)` marker —
     // the floor answered, and it says so.
-    assert_eq!(probe("gmp_init($s)"), "dumped type: gmp (asserted)");
-    assert_eq!(probe("date_diff($h, $h)"), "dumped type: dateinterval (asserted)");
-    assert_eq!(after("$r = gmp_init($s);", "$r"), "dumped type: gmp (asserted)");
+    assert_eq!(probe("gmp_init($s)"), "dumped type: GMP (asserted)");
+    assert_eq!(probe("date_diff($h, $h)"), "dumped type: DateInterval (asserted)");
+    assert_eq!(after("$r = gmp_init($s);", "$r"), "dumped type: GMP (asserted)");
     // The declared surface agrees with the value surface, the parity every rung
     // above this one also keeps.
     let src = "<?php\nfunction f(string $s): void { \\PHPStan\\dumpPhpDocType(gmp_init($s)); }\n";
@@ -731,33 +731,39 @@ fn a_class_row_reaches_the_declared_surface_and_the_arm_lane() {
         .filter(|d| d.id == DEBUG_PHPDOC_TYPE_ID)
         .map(|d| d.message)
         .collect();
-    assert_eq!(phpdoc, vec!["dumped phpdoc type: gmp (asserted)".to_owned()]);
+    assert_eq!(phpdoc, vec!["dumped phpdoc type: GMP (asserted)".to_owned()]);
 }
 
 #[test]
-fn a_class_row_renders_lowercased_because_nothing_holds_the_builtins_casing() {
-    // A NAMED RESIDUAL, pinned so it is a decision rather than a surprise. The
-    // catalog stores functionMap's own casing (`GMP`, `HashContext`, `XMLParser`),
-    // but `ContractTy::Class` case-folds on the way in — that is what makes the
-    // countersign's `class_eq` comparison work — and the display path recovers the
-    // source casing from the PROJECT index (`Cx::class_display_fqn`), which knows
-    // nothing about a builtin. So the dump renders the normalized key.
-    //
-    // PHPStan would say `GMP` here. Closing the gap needs a builtin-class display-
-    // name table beside the hierarchy catalog (which keys on the lowercased name and
-    // so cannot answer it either) — a mining slice of its own, not a rendering tweak.
-    // Until then this is a fidelity gap in the dump surface ONLY: every judgment
-    // downstream compares through `class_eq`, which is case-insensitive, so nothing
-    // decides differently because of it.
-    assert_eq!(probe("hash_init($s)"), "dumped type: hashcontext (asserted)");
-    assert_eq!(probe("xml_parser_create()"), "dumped type: xmlparser (asserted)");
+fn a_class_row_renders_the_casing_php_src_declares() {
+    // Formerly the third-amendment NAMED RESIDUAL (a class row rendered
+    // lowercased, `gmp` where PHPStan says `GMP`): `ContractTy::Class` case-folds
+    // on the way in — that is what makes the countersign's `class_eq` comparison
+    // work — and the project index knows nothing about a builtin. The builtin
+    // display-name table beside the hierarchy catalog now holds the casing
+    // php-src declares, mined from the same pin, and `Cx::class_display_fqn`
+    // consults it exactly where the project index misses. Display fidelity only:
+    // every judgment downstream still compares through the case-insensitive
+    // `class_eq`, so nothing decides differently because of it.
+    assert_eq!(probe("hash_init($s)"), "dumped type: HashContext (asserted)");
+    assert_eq!(probe("xml_parser_create()"), "dumped type: XMLParser (asserted)");
+    // A PROJECT class of the same name still wins — the catalog speaks only for
+    // a name no project file declares (`class_absent`, issue #67 precedence).
+    let src = "<?php\nclass Gmp {}\nfunction f(Gmp $g): void { \\PHPStan\\dumpType($g); }\n";
+    let tree = SourceTree::parse(src);
+    let dumps: Vec<String> = check(&tree, &[], "t.php")
+        .into_iter()
+        .filter(|d| d.id == DEBUG_TYPE_ID)
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(dumps, vec!["dumped type: Gmp".to_owned()]);
 }
 
 #[test]
 fn a_nullable_class_row_keeps_its_null_arm_and_subtracts_it_under_a_guard() {
     // `?Collator` is carriable per ARM — a `Null` beside a `Class` — so it needed no
     // case of its own in either the mining filter or the lowering.
-    assert_eq!(probe("collator_create($s)"), "dumped type: null|collator (asserted)");
+    assert_eq!(probe("collator_create($s)"), "dumped type: null|Collator (asserted)");
     // And the arm lane does real work on it: `!== null` subtracts the null arm.
     // This is the leg that a `!== false` guard does NOT have (see
     // `a_rich_floor_row_behaves_exactly_like_a_declared_one_under_guards`) — null
@@ -768,7 +774,7 @@ fn a_nullable_class_row_keeps_its_null_arm_and_subtracts_it_under_a_guard() {
                if ($r !== null) { \\PHPStan\\dumpType($r); }\n}\n";
     assert_eq!(
         no_php_dumps(src).first().cloned().unwrap_or_default(),
-        "dumped type: collator (asserted)"
+        "dumped type: Collator (asserted)"
     );
 }
 
