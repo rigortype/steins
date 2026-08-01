@@ -199,6 +199,16 @@ fn a_may_have_key_fires_nothing() {
     assert_eq!(param_count(&param_case("array<string, int>", "array{}")), 0);
 }
 
+/// A `non-empty-array` fact forces every member to carry *some* entry, but the
+/// contract may declare the key it lands on — `['a' => 1]` satisfies
+/// `array{a: int}`. Only a contract with no field for it to land in refutes.
+#[test]
+fn a_forced_entry_does_not_refute_a_contract_that_declares_its_key() {
+    assert_eq!(param_count(&param_case("non-empty-array", "array{a: int}")), 0);
+    assert_eq!(param_count(&param_case("non-empty-array", "array{a?: int}")), 0);
+    assert_eq!(param_count(&param_case("non-empty-array", "array{}")), 1);
+}
+
 /// The ADR-0071 §2 union haircut, imported by ADR-0072 §3: an or-fold that
 /// ends at `No` degrades unless every member is array-incapable.
 #[test]
