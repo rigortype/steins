@@ -219,6 +219,13 @@ Negative guard information removes arms from a contract-fact arm list
 — the silence side. Surviving arms keep their own stratum, so an `Asserted` arm
 can never launder to `Verified` through subtraction.
 
+One partial deletion is layered on that law: an `int<lo, hi>` arm minus one of
+its own **endpoints** shrinks by one (`!== 0` clips `int<0, max>` to
+`int<1, max>`; a two-point interval collapses to the surviving literal; the
+point interval dies). An **interior** point keeps the arm whole — an interval
+minus an interior point is not an interval, and the gap has no arm spelling. A
+narrowed arm keeps the stratum of the arm it shrinks.
+
 The `Class` subtrahend is **polarity-asymmetric**, and the asymmetry is a
 soundness rule, not an optimization: on the negative branch (`!($v instanceof
 T)`) is-a is inherited, so every arm that is provably a `T` dies; on the positive

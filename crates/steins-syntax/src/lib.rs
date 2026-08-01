@@ -2527,6 +2527,26 @@ impl SourceTree {
         &self.comments
     }
 
+    /// The `/** … */` docblock immediately preceding `stmt_start` — only
+    /// whitespace between its end and `stmt_start` — or `None`. The
+    /// statement-level analogue of the declaration adoption rule (ADR-0029's
+    /// "only whitespace between"), consumed by the inline-`@var` cast seeding
+    /// (ADR-0073): a docblock that leads a trace statement speaks about that
+    /// statement. A non-doc comment sitting in the gap breaks the adjacency,
+    /// exactly as any code would.
+    #[must_use]
+    pub fn stmt_docblock(&self, stmt_start: u32) -> Option<&Comment> {
+        // Comment trivia are recovered in source order and never overlap, so
+        // `span.end` is monotone and the nearest preceding one is binary-searchable.
+        let idx = self.comments.partition_point(|c| c.span.end <= stmt_start).checked_sub(1)?;
+        let c = &self.comments[idx];
+        if c.kind != CommentKind::DocBlock {
+            return None;
+        }
+        let gap = self.text.get(c.span.end as usize..stmt_start as usize)?;
+        gap.chars().all(char::is_whitespace).then_some(c)
+    }
+
     /// Whether everything on `offset`'s line *before* `offset` is whitespace —
     /// i.e. the token at `offset` is the first non-whitespace on its line. Drives
     /// the `@steins-ignore` placement rule (ADR-0023): a comment that leads its

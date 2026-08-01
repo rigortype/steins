@@ -23,9 +23,13 @@
 //! instead of reimplementing it. There is deliberately still **no**
 //! `union(A, B)` and no generic `remove(T, S)`: joins stay the value domain's
 //! job (ADR-0030), and [`merge_int_arms`] is not one — it answers only where
-//! the union of two arms IS a single arm, and refuses everywhere else. [`subtract`] (and the public per-arm judgment
-//! [`subtrahend_covers`]) consult a real is-a [`IsaOracle`]; N4 wires the project
-//! hierarchy through that seam, N1 shipped the [`ReflexiveFloor`] default.
+//! the union of two arms IS a single arm, and refuses everywhere else. Its
+//! subtraction mirror is [`subtract_arm`]'s endpoint clip: an arm is partially
+//! deleted only where the remainder IS a single arm (an interval less its own
+//! endpoint), and an interior point is refused everywhere else. [`subtract`]
+//! (and the public per-arm judgment [`subtract_arm`] / [`subtrahend_covers`])
+//! consult a real is-a [`IsaOracle`]; N4 wires the project hierarchy through
+//! that seam, N1 shipped the [`ReflexiveFloor`] default.
 //!
 //! ### ADR-0030 registry entry 5 (semantic type equality)
 //! Semantic type equality is defined **only** as mutual subsumption (Yes/Yes)
@@ -46,8 +50,10 @@ use crate::{CField, CKey, ContractTy, MixedCut, admits_fact, admits_val};
 use steins_domain::{Base, Certainty, Fact, IntRange, Refinement, StrPreds, Val};
 
 /// The set a guard's negative information removes from an arm list (ADR-0052
-/// §2). Judged arm-wise by [`subtract`]: an arm dies iff the subtrahend
-/// subsumes it with [`Certainty::Yes`]; `Maybe` keeps it (the silence side).
+/// §2). Judged arm-wise by [`subtract`] / [`subtract_arm`]: an arm dies iff
+/// the subtrahend subsumes it with [`Certainty::Yes`]; `Maybe` keeps it (the
+/// silence side) — except an interval arm losing its own endpoint, which
+/// shrinks instead ([`ArmFate::Narrows`]).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Subtrahend {
     /// `!== null` — the nullable bit / the `null` arm.
@@ -1174,23 +1180,83 @@ fn summarize_string_group(strings: &[&str]) -> Vec<ContractTy> {
 }
 
 /// Subtract a guard's negative information from an arm list, arm-wise
-/// (ADR-0052 §2). An arm dies iff the subtrahend subsumes it with
-/// [`Certainty::Yes`]; `Maybe` keeps it (the silence side). An arm list that
-/// this empties is left empty — the caller drops it to no-fact (never a death
-/// signal; the verdict owns death, ADR-0052 §2).
+/// (ADR-0052 §2), by each arm's [`subtract_arm`] fate: an arm dies iff the
+/// subtrahend subsumes it with [`Certainty::Yes`] (`Maybe` keeps it — the
+/// silence side), except that a [`ContractTy::IntIn`] arm minus one of its own
+/// **endpoints** is partially deleted — it shrinks by one instead of surviving
+/// whole. An arm list that this empties is left empty — the caller drops it to
+/// no-fact (never a death signal; the verdict owns death, ADR-0052 §2).
 pub fn subtract(arms: &mut Vec<ContractTy>, sub: &Subtrahend, oracle: &dyn IsaOracle) {
-    arms.retain(|arm| !subtrahend_covers(sub, arm, oracle).is_yes());
+    arms.retain_mut(|arm| match subtract_arm(sub, arm, oracle) {
+        ArmFate::Survives => true,
+        ArmFate::Dies => false,
+        ArmFate::Narrows(narrowed) => {
+            *arm = narrowed;
+            true
+        }
+    });
+}
+
+/// One arm's fate under a subtrahend — the per-arm judgment [`subtract`] runs.
+///
+/// Public (with [`subtract_arm`]) so a caller carrying a **parallel** per-arm
+/// structure (steins-infer's stratified contract lane) can map its arms in
+/// lockstep with the exact same judgment — the single deletion oracle, no
+/// second copy of the polarity or endpoint law.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArmFate {
+    /// The subtrahend does not provably cover the arm — it survives whole.
+    Survives,
+    /// The subtrahend covers the whole arm — it is deleted.
+    Dies,
+    /// The subtrahend removes an endpoint of an interval arm — the arm is
+    /// replaced by the shrunk remainder (the one partial deletion).
+    Narrows(ContractTy),
+}
+
+/// The fate of `arm` under `sub` (ADR-0052 §2): [`ArmFate::Dies`] iff
+/// [`subtrahend_covers`] answers [`Certainty::Yes`], plus the one **partial**
+/// deletion the arm vocabulary can spell back — a [`ContractTy::IntIn`] arm
+/// minus one of its own endpoints shrinks by one (`int<lo, hi>` less `lo` is
+/// `int<lo+1, hi>`; a two-point interval collapses to the surviving literal;
+/// the point interval dies). An **interior** point must not split the interval
+/// — the gap has no arm spelling — so the arm survives whole: the same
+/// interior-point discipline as point 2's `Refined` clause, one carrier up.
+#[must_use]
+pub fn subtract_arm(sub: &Subtrahend, arm: &ContractTy, oracle: &dyn IsaOracle) -> ArmFate {
+    if let (Subtrahend::Value(Val::Int(n)), ContractTy::IntIn(r)) = (sub, arm) {
+        return clip_int_endpoint(*n, *r);
+    }
+    if subtrahend_covers(sub, arm, oracle).is_yes() { ArmFate::Dies } else { ArmFate::Survives }
+}
+
+/// An interval minus one point: the point interval dies, an endpoint is clipped
+/// off, an interior (or outside) point changes nothing. The point-interval case
+/// is decided first, so the `lo + 1` / `hi - 1` below runs only on a
+/// multi-point interval (`lo < hi`) and cannot leave the i64 domain; the
+/// [`IntRange::new`] `Option` still backstops the arithmetic.
+fn clip_int_endpoint(n: i64, r: IntRange) -> ArmFate {
+    if r.lo() == r.hi() {
+        return if n == r.lo() { ArmFate::Dies } else { ArmFate::Survives };
+    }
+    let clipped = if n == r.lo() {
+        IntRange::new(r.lo() + 1, r.hi())
+    } else if n == r.hi() {
+        IntRange::new(r.lo(), r.hi() - 1)
+    } else {
+        return ArmFate::Survives;
+    };
+    match clipped {
+        Some(c) if c.lo() == c.hi() => ArmFate::Narrows(ContractTy::LitInt(c.lo())),
+        Some(c) => ArmFate::Narrows(ContractTy::IntIn(c)),
+        None => ArmFate::Dies,
+    }
 }
 
 /// The [`Certainty`] that the subtrahend's denotation covers (subsumes) the whole
-/// arm — an arm dies iff this is [`Certainty::Yes`]. `Null`/`Value`/`Base` reduce
-/// to a [`ContractTy`] and reuse [`subsumes`]; the class subtrahend carries the
-/// polarity asymmetry and consults the real is-a `oracle`.
-///
-/// Public so a caller carrying a **parallel** per-arm structure (steins-infer's
-/// stratified contract lane, `Vec<(ContractTy, Stratum)>`) can `retain` in lockstep
-/// with the exact same judgment [`subtract`] uses — the single deletion oracle, no
-/// second copy of the polarity law.
+/// arm — the whole-arm half of [`subtract_arm`]'s judgment. `Null`/`Value`/`Base`
+/// reduce to a [`ContractTy`] and reuse [`subsumes`]; the class subtrahend carries
+/// the polarity asymmetry and consults the real is-a `oracle`.
 #[must_use]
 pub fn subtrahend_covers(sub: &Subtrahend, arm: &ContractTy, oracle: &dyn IsaOracle) -> Certainty {
     match sub {
@@ -1930,6 +1996,83 @@ mod tests {
         let mut arms = vec![ContractTy::Null];
         subtract(&mut arms, &Subtrahend::Null, &ReflexiveFloor);
         assert!(arms.is_empty());
+    }
+
+    // ---- subtract: interval endpoints (the one partial deletion) ------------
+
+    #[test]
+    fn subtract_lo_endpoint_clips_the_interval() {
+        // The issue-#90 follow-up headline: `int<0, max>` less `0` is
+        // `int<1, max>` — the absorbed `positive-int|0` narrows again.
+        let mut arms = vec![ContractTy::IntIn(IntRange::NON_NEGATIVE)];
+        subtract(&mut arms, &Subtrahend::Value(Val::Int(0)), &ReflexiveFloor);
+        assert_eq!(arms, vec![ContractTy::IntIn(IntRange::POSITIVE)]);
+    }
+
+    #[test]
+    fn subtract_hi_endpoint_clips_the_interval() {
+        let mut arms = vec![rng(0, 10)];
+        subtract(&mut arms, &Subtrahend::Value(Val::Int(10)), &ReflexiveFloor);
+        assert_eq!(arms, vec![rng(0, 9)]);
+    }
+
+    #[test]
+    fn subtract_interior_point_keeps_the_interval_whole() {
+        // An interior point would split the interval into two arms — a gap the
+        // arm vocabulary has no way to spell back — so the honest answer is the
+        // unchanged arm (ADR-0052 §2's interior-point discipline, one carrier up).
+        let mut arms = vec![rng(0, 10)];
+        subtract(&mut arms, &Subtrahend::Value(Val::Int(5)), &ReflexiveFloor);
+        assert_eq!(arms, vec![rng(0, 10)]);
+    }
+
+    #[test]
+    fn subtract_point_outside_the_interval_changes_nothing() {
+        let mut arms = vec![rng(0, 10)];
+        subtract(&mut arms, &Subtrahend::Value(Val::Int(42)), &ReflexiveFloor);
+        assert_eq!(arms, vec![rng(0, 10)]);
+    }
+
+    #[test]
+    fn subtract_two_point_interval_collapses_to_the_surviving_literal() {
+        // `int<0, 1>` less `0` is the point `1`, spelled as the literal — the
+        // canonical arm the #90 absorption would rebuild the interval from.
+        let mut arms = vec![rng(0, 1)];
+        subtract(&mut arms, &Subtrahend::Value(Val::Int(0)), &ReflexiveFloor);
+        assert_eq!(arms, vec![lit_i(1)]);
+    }
+
+    #[test]
+    fn subtract_point_interval_dies_like_its_literal() {
+        // `int<5, 5>` less `5` empties the interval; the emptied arm dies and an
+        // emptied list stays the caller's no-fact signal, as everywhere in §2.
+        let mut arms = vec![rng(5, 5)];
+        subtract(&mut arms, &Subtrahend::Value(Val::Int(5)), &ReflexiveFloor);
+        assert!(arms.is_empty());
+    }
+
+    #[test]
+    fn subtract_endpoint_is_safe_at_the_i64_domain_ends() {
+        // Clipping FULL at either end must not overflow the bound arithmetic.
+        let mut arms = vec![ContractTy::IntIn(IntRange::FULL)];
+        subtract(&mut arms, &Subtrahend::Value(Val::Int(i64::MIN)), &ReflexiveFloor);
+        assert_eq!(arms, vec![rng(i64::MIN + 1, i64::MAX)]);
+
+        let mut arms = vec![ContractTy::IntIn(IntRange::FULL)];
+        subtract(&mut arms, &Subtrahend::Value(Val::Int(i64::MAX)), &ReflexiveFloor);
+        assert_eq!(arms, vec![rng(i64::MIN, i64::MAX - 1)]);
+
+        // The single-point interval at a domain end dies rather than clipping.
+        let mut arms = vec![rng(i64::MAX, i64::MAX)];
+        subtract(&mut arms, &Subtrahend::Value(Val::Int(i64::MAX)), &ReflexiveFloor);
+        assert!(arms.is_empty());
+    }
+
+    #[test]
+    fn subtract_non_int_value_leaves_an_interval_alone() {
+        let mut arms = vec![ContractTy::IntIn(IntRange::NON_NEGATIVE)];
+        subtract(&mut arms, &Subtrahend::Value(Val::Bool(false)), &ReflexiveFloor);
+        assert_eq!(arms, vec![ContractTy::IntIn(IntRange::NON_NEGATIVE)]);
     }
 
     // ---- subtract with a REAL is-a oracle (N4) ------------------------------
