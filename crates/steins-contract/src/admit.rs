@@ -7,7 +7,6 @@
 //! `int<min,0>|int<0,max>` over general `int`) answers `Maybe`, never a
 //! wrong verdict.
 
-use crate::normalize::array_incapable;
 use crate::{CField, CKey, ContractTy, MixedCut, ckey_to_domain};
 use steins_domain::Key as VKey;
 use steins_domain::{
@@ -623,13 +622,17 @@ fn admits_shape_fact(ty: &ContractTy, sf: &ShapeFact) -> Certainty {
         ContractTy::Shape { list, fields, sealed, non_empty, unsealed } => {
             shape_vs_fact(sf, *list, fields, *sealed, *non_empty, unsealed)
         }
-        // The ADR-0071 §2 haircut, imported verbatim by ADR-0072 §3: an or-fold
-        // that ends at `No` degrades to `Maybe` unless every member refuses for
-        // the same base reason — it admits no array at all — so that any array
-        // member of the denotation is a witness the whole union shares.
+        // NO haircut here, by ratified decision (ADR-0072 as-built amendment):
+        // under this relation's disjointness reading the or-fold is exact —
+        // a union rejects a value iff every member does, so "every member
+        // disjoint from the fact" IS "the union disjoint from the fact",
+        // member-wise. ADR-0071 §2's haircut exists because *coverage* is not
+        // member-wise; disjointness is. The jointly-covering case the haircut
+        // protected (`list<int>|non-empty-array` over an []-admitting fact)
+        // needs no protection: the `non-empty-array` member already answers
+        // the honest `Maybe` from its own row, and `Maybe` survives the fold.
         ContractTy::Union(members) => {
-            let folded = members.iter().fold(No, |acc, m| acc.or(admits_shape_fact(m, sf)));
-            if folded.is_no() && !members.iter().all(array_incapable) { Maybe } else { folded }
+            members.iter().fold(No, |acc, m| acc.or(admits_shape_fact(m, sf)))
         }
         // `A ∩ B` admits a member iff both do: `and` is sound in both
         // directions here, as it is for the scalar arms.
@@ -1437,10 +1440,13 @@ mod shape_fact_tests {
 
     // ---- unions and intersections -----------------------------------------
 
-    /// The ADR-0071 §2 haircut, imported by ADR-0072 §3: a fold ending at `No`
-    /// degrades to `Maybe` unless every member is array-incapable.
+    /// A jointly-covering union needs NO haircut under the disjointness
+    /// reading (ADR-0072 as-built amendment): the `non-empty-array` member
+    /// answers `Maybe` from its own row (the fact admits `[]` alongside
+    /// non-empty members), and `Maybe` survives the or-fold. The fold's `No`
+    /// is member-wise exact for disjointness, unlike ADR-0071's coverage.
     #[test]
-    fn union_haircut_protects_a_jointly_covering_union() {
+    fn a_jointly_covering_union_stays_undecided_without_a_haircut() {
         let ne_ints = ShapeFact::normalize(
             Vec::new(),
             open(KeyClass::Int, Some(int_fact())),
@@ -1462,9 +1468,12 @@ mod shape_fact_tests {
         assert_eq!(judge("string|int", &int_pair()), Certainty::No);
         assert_eq!(judge("string|int|null", &ShapeFact::plain_array()), Certainty::No);
         assert_eq!(judge("SomeClass|pure-closure", &int_pair()), Certainty::No);
-        // One array-capable member and the fold degrades — even though every
-        // member does in fact refute (the haircut is ADR-0071 §2 verbatim).
-        assert_ne!(judge("string|list<int>", &keyed_int()), Certainty::No);
+        // One array-capable member that ALSO genuinely refutes (the fact is
+        // definitely keyed, so `list<int>` is disjoint too): under the
+        // disjointness reading the fold's `No` is exact and STANDS — the
+        // ADR-0072 as-built amendment's ruling that this relation takes no
+        // ADR-0071 haircut. This is the true positive the haircut would cost.
+        assert_eq!(judge("string|list<int>", &keyed_int()), Certainty::No);
     }
 
     #[test]
