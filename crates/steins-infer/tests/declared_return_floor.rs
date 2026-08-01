@@ -433,12 +433,14 @@ fn a_rich_floor_row_behaves_exactly_like_a_declared_one_under_guards() {
     //
     // A runtime type predicate narrows it (`is_string` is checked on the branch, so
     // the branch fact is Verified and carries no marker — the floor is not the
-    // premise there, the guard is). A `!== false` comparison does NOT subtract the
-    // `false` arm: ADR-0052 §9's arm subtraction is instanceof-driven, and the
-    // scalar-arm case is unwired. That is a pre-existing limitation of the arm lane,
-    // not of this slice — the second pair of assertions shows a hand-written
-    // `@param string|false` behaving identically — and it is precisely what issue
-    // #75's flag-conditioned false-arm strips would build on.
+    // premise there, the guard is). A `!== false` comparison now subtracts the
+    // `false` arm too: the ADR-0052 §2 `Value` subtrahend is wired, so the arm lane
+    // narrows on identity guards as well as on `instanceof` and `!== null`. The
+    // grade survives it — the surviving arm is still the catalog's claim, so the
+    // `(asserted)` marker stays — and the hand-written `@param string|false` pair
+    // below is the whole point: the floor row narrows the way a written row does,
+    // with no bespoke behavior for the catalog. `false_arm_strip.rs` owns the
+    // mechanism; these two assertions are the floor/hand-written parity pins.
     let guarded = |decl: &str, param: &str, bind: &str, guard: &str| {
         let src = format!(
             "<?php\n{decl}function f({param}): void {{ {bind} if ({guard}) {{ \\PHPStan\\dumpType($r); }} }}\n"
@@ -449,13 +451,10 @@ fn a_rich_floor_row_behaves_exactly_like_a_declared_one_under_guards() {
     let written = ("/** @param string|false $r */\n", "$r", "");
     assert_eq!(guarded(floor.0, floor.1, floor.2, "is_string($r)"), "dumped type: string");
     assert_eq!(guarded(written.0, written.1, written.2, "is_string($r)"), "dumped type: string");
-    assert_eq!(
-        guarded(floor.0, floor.1, floor.2, "$r !== false"),
-        "dumped type: string|false (asserted)"
-    );
+    assert_eq!(guarded(floor.0, floor.1, floor.2, "$r !== false"), "dumped type: string (asserted)");
     assert_eq!(
         guarded(written.0, written.1, written.2, "$r !== false"),
-        "dumped type: string|false (asserted)"
+        "dumped type: string (asserted)"
     );
 }
 

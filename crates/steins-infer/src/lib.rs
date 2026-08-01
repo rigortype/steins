@@ -10206,6 +10206,27 @@ fn collect_instanceof<'a>(
 ///    executed): the positive branch adds `T` to `yes`, the negative to `no`.
 /// 3. A `!== null` on this branch subtracts the `null` arm from the contract lane
 ///    (the nullable-bit analogue for the arm carrier).
+/// 4. A `!== v` on this branch subtracts the **value** `v` from the contract lane
+///    ([`normalize::Subtrahend::Value`], ADR-0052 §2): an arm dies iff the literal
+///    provably covers the whole arm (`Yes`), and `Maybe` keeps it. This is what
+///    strips the `false` arm of a `T|false` row under `if (strpos(…) !== false)`,
+///    and it is general over literals — an `!== 2` deletes a `2` arm, an `!== 'GET'`
+///    deletes a `'GET'` arm. The interior-point rule is exactly what keeps it
+///    sound: `false` does NOT cover a general `bool` arm (a `bool` may still be
+///    `true`), so a `bool` arm survives `!== false`.
+///
+/// Two neighbouring narrowings are deliberately NOT here:
+///
+/// * **`Refine::Truthy`** (`if ($pos)` over an `int|false` row). Truthiness kills
+///   `0` and `''` as well as `false`, so it is not a value subtraction at all;
+///   pretending it were would silently narrow `int|false` to `int` on a branch
+///   where `$pos` cannot be `0`. That is PHPStan's classic `strpos` footgun and it
+///   needs its own designed subtrahend, not a reuse of this seam.
+/// * **Keep-only narrowing on the positive branch** (`if ($x === false)` ⇒ the arm
+///   lane becomes `{false}`). The value lane's `Refine::Exact` already owns the
+///   positive branch, and an arm lane is a *subtraction* carrier by construction
+///   (§2): every mutation here removes arms it can prove dead. Intersecting to a
+///   singleton is a different judgment and is left unlanded.
 fn apply_class_narrowing(w: &WalkCx, cond: &CondExpr, then: bool, store: &mut Store) {
     let oracle = ProjectIsa { cx: w.cx, demote_catalog: w.cx.a11_demote_catalog() };
 
@@ -10228,12 +10249,28 @@ fn apply_class_narrowing(w: &WalkCx, cond: &CondExpr, then: bool, store: &mut St
         }
     }
 
-    // (3) `!== null` on this branch → drop the `null` arm of the contract lane.
+    // (3)/(4) `!== null` and `!== v` on this branch → subtract from the contract
+    // lane. `collect_refine` already carries the branch polarity, so both spellings
+    // of the same guard arrive here: `!== v` on the then-branch and `=== v` on the
+    // else-branch both produce `Exclude` (and `var_literal` normalizes the Yoda
+    // order). `Refine::Exact`, `Truthy` and `IntRange` are the value lane's — see
+    // the refusals in this function's doc comment.
     let mut refs = Vec::new();
     collect_refine(cond, then, &mut refs, w.cx.php_minor);
     for r in &refs {
-        if let Refine::NotNull(var) = r {
-            subtract_contract_lane(store, var, &normalize::Subtrahend::Null, &oracle);
+        match r {
+            Refine::NotNull(var) => {
+                subtract_contract_lane(store, var, &normalize::Subtrahend::Null, &oracle);
+            }
+            Refine::Exclude(var, v) => {
+                subtract_contract_lane(
+                    store,
+                    var,
+                    &normalize::Subtrahend::Value(v.clone()),
+                    &oracle,
+                );
+            }
+            _ => {}
         }
     }
 }
