@@ -3,14 +3,18 @@
 //!
 //! These are the rules whose answer depends on an argument the S3/S7 rung cannot
 //! even bind: `explode`'s separator, `range`'s bounds, `preg_replace`'s subject,
-//! `var_export`'s literal flag. Each one is asserted from both sides — the
-//! refinement it lands, and the decline it takes when its premise is missing.
-//! Declining is a first-class outcome (ADR-0061 §1), so every rule here owns at
-//! least one `unknown` fixture.
+//! `var_export`'s literal flag, `min`/`max`'s whole argument list. Each one is
+//! asserted from both sides — the refinement it lands, and the decline it takes
+//! when its premise is missing. Declining is a first-class outcome (ADR-0061 §1),
+//! so every rule here owns at least one `unknown` fixture.
 //!
 //! `json_decode` appears only in the decline section: its reflected declaration
 //! is bare `mixed` and its soundest per-flag envelope is a six-base union the
 //! domain has no single `Fact` for. That is a measured refusal, not a gap.
+//! `min`/`max` (issue #118) declare the same bare `mixed` and are nonetheless
+//! admitted — the difference is the ADR-0064 Amendment B arity second leg, which
+//! this rung grew for them and which `json_decode`'s six-base envelope would still
+//! not survive.
 //!
 //! Zero emission is asserted on every fixture, as in `shape_projections.rs`: a
 //! transfer-derived fact never premises a finding.
@@ -28,6 +32,7 @@ use steins_syntax::{ArgValue, SourceTree};
 struct Mock {
     types: HashMap<String, String>,
     facts: HashMap<String, Fact>,
+    arities: HashMap<String, (u32, u32)>,
     absence: bool,
 }
 
@@ -40,9 +45,17 @@ impl Mock {
             ("preg_replace", "array|string|null"),
             ("var_export", "?string"),
             ("json_decode", "mixed"),
+            // `min`/`max` declare a bare `mixed` too, so the ADR-0064 Amendment B
+            // second leg is what admits them where it refuses `json_decode`.
+            ("min", "mixed"),
+            ("max", "mixed"),
         ] {
             types.insert(f.to_owned(), t.to_owned());
         }
+        // `min(mixed $value, mixed ...$values)` at 8.5.8: variadic, two declared
+        // parameters, one required. Measured through the same
+        // `ReflectionFunction::getNumberOfParameters()` pair the sidecar reports.
+        let arities = HashMap::from([("min".to_owned(), (2, 1)), ("max".to_owned(), (2, 1))]);
         // `var_export`'s envelope is representable (`?string`) and is the rung
         // BELOW the transfer — its presence is what makes the null-strip visible
         // as a refinement rather than as an answer out of nowhere.
@@ -51,7 +64,7 @@ impl Mock {
             "var_export".to_owned(),
             Fact::General { base: Base::String, nullable: true },
         );
-        Mock { types, facts, absence: true }
+        Mock { types, facts, arities, absence: true }
     }
 }
 
@@ -67,6 +80,9 @@ impl Folder for Mock {
     }
     fn builtin_return_type(&mut self, name: &str) -> Option<String> {
         self.types.get(&name.to_ascii_lowercase()).cloned()
+    }
+    fn builtin_param_counts(&mut self, name: &str) -> Option<(u32, u32)> {
+        self.arities.get(&name.to_ascii_lowercase()).copied()
     }
 }
 
@@ -264,6 +280,113 @@ fn var_export_without_the_flag_falls_back_to_its_own_envelope() {
     assert_eq!(dump("int $v", "var_export($v)"), "dumped type: string|null");
     assert_eq!(dump("int $v", "var_export($v, false)"), "dumped type: string|null");
     assert_eq!(dump("int $v, bool $b", "var_export($v, $b)"), "dumped type: string|null");
+}
+
+// ---------------------------------------------------------------------------
+// min / max: the argument-fact union, and the interval that sharpens it
+// ---------------------------------------------------------------------------
+
+#[test]
+fn min_and_max_compose_the_intervals_of_int_arguments() {
+    // `min(a, b) ∈ [min(lo), min(hi)]`, `max` dually — interval arithmetic over
+    // what the arguments already declare, in either argument order.
+    assert_eq!(
+        dump_doc("@param int<0, max> $r", "int $r", "min($r, 100)"),
+        "dumped type: int<0, 100> (asserted)"
+    );
+    assert_eq!(
+        dump_doc("@param int<0, max> $r", "int $r", "min(100, $r)"),
+        "dumped type: int<0, 100> (asserted)"
+    );
+    assert_eq!(
+        dump_doc("@param int<min, 100> $r", "int $r", "max($r, 0)"),
+        "dumped type: int<0, 100> (asserted)"
+    );
+    assert_eq!(
+        dump_doc("@param int<1, 6> $r", "int $r", "min($r, 4)"),
+        "dumped type: int<1, 4> (asserted)"
+    );
+    assert_eq!(
+        dump_doc("@param int<1, 6> $r", "int $r", "max(4, $r)"),
+        "dumped type: int<4, 6> (asserted)"
+    );
+    // A bare `int` parameter is the full interval, and the composition still bounds
+    // one side of it.
+    assert_eq!(dump("int $i", "min($i, 5)"), "dumped type: int<min, 5>");
+    assert_eq!(dump("int $i", "max($i, 5)"), "dumped type: int<5, max>");
+    // Three arguments compose left to right, and a composition that collapses to a
+    // point spells the point — `min`/`max` are not on the folding allowlist, so
+    // nothing else answers a constant call.
+    assert_eq!(dump("int $i", "min(3, 1, 2)"), "dumped type: 1");
+    assert_eq!(dump("int $i", "max(3, 1, 2)"), "dumped type: 3");
+}
+
+#[test]
+fn the_union_is_the_answer_where_the_interval_is_not() {
+    // THE load-bearing fact: `min`/`max` return one of their ARGUMENTS, so the union
+    // of the argument facts is sound with no premise about comparison semantics
+    // whatever. Witnessed at 8.5.8: `min('a', 1) === 1`, the second argument
+    // verbatim.
+    assert_eq!(dump_doc("@param 'a'|'b' $s", "string $s", "min($s, 'c')"), "dumped type: 'a'|'b'|'c' (asserted)");
+    // Two facts of the same base with no interval between them join in the domain.
+    assert_eq!(dump("string $s", "max($s, 'c')"), "dumped type: string");
+}
+
+#[test]
+fn the_unary_array_form_answers_from_the_shape() {
+    // One argument is the ARRAY form: the result is one of the array's elements, so
+    // the shape's value union is the claim. `min([])` throws, which is the absence of
+    // a return — it buys the rule no `non_empty` premise and costs it nothing.
+    assert_eq!(
+        dump_doc("@param array{a: int, b: int} $v", "array $v", "max($v)"),
+        "dumped type: int (asserted)"
+    );
+    assert_eq!(
+        dump_doc("@param list<string> $v", "array $v", "min($v)"),
+        "dumped type: string (asserted)"
+    );
+    // A witnessed array lifts first — which element wins is a comparison question
+    // this rule declines to answer, and the union is what it claims on either lane.
+    assert_eq!(
+        one_type("<?php\nfunction f(): void { \\PHPStan\\dumpType(min([1, 2, 3])); }\n"),
+        "dumped type: 1|2|3"
+    );
+}
+
+#[test]
+fn min_and_max_decline_where_they_cannot_state_an_answer() {
+    // An argument with NO usable fact declines the whole rule: a union over the
+    // arguments that did answer is not sound, because the missing one could hold the
+    // winner. `$u` here carries nothing at all.
+    let src = "<?php\nfunction f(int $i): void { $u = frobnicate(); \\PHPStan\\dumpType(min($i, $u)); }\n";
+    assert_eq!(one_type(src), "dumped type: unknown");
+    // A join the four-layer domain cannot spell declines — `int|string` is a
+    // two-base union with no single `Fact`, exactly as `json_decode`'s six-base
+    // envelope is.
+    assert_eq!(dump("int $i, string $s", "min($i, $s)"), "dumped type: unknown");
+    // A nullable int leaves the INTERVAL path (`min(null, 5)` is `NULL` at 8.5.8)
+    // and takes the union, which carries the null side correctly.
+    assert_eq!(dump("?int $i", "min($i, 5)"), "dumped type: int|null");
+    // A one-argument call whose fact is not an array declines — `min(5)` is a
+    // `TypeError`, and a rule describes a call that returns.
+    assert_eq!(dump("int $i", "min($i)"), "dumped type: unknown");
+    assert_eq!(dump("int $i", "min()"), "dumped type: unknown");
+}
+
+#[test]
+fn an_engine_that_answers_no_arity_withholds_min_and_max() {
+    // ADR-0064 Amendment B, and the whole reason this rung grew a second leg: a bare
+    // `mixed` declaration pins nothing — every rule output is inside it — so the
+    // signature is what countersigns `min`/`max`. A runner that cannot state it
+    // withholds the rule exactly as one silent on the declaration does.
+    let mut mock = Mock::sidecar();
+    mock.arities.clear();
+    let src = "<?php\nfunction f(int $i): void { \\PHPStan\\dumpType(min($i, 5)); }\n";
+    assert_eq!(one_type_with(src, &mut mock), "dumped type: unknown");
+    // A signature that has MOVED withholds it too — the rule would be stale.
+    let mut mock = Mock::sidecar();
+    mock.arities.insert("min".to_owned(), (3, 2));
+    assert_eq!(one_type_with(src, &mut mock), "dumped type: unknown");
 }
 
 // ---------------------------------------------------------------------------
