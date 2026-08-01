@@ -139,3 +139,18 @@ arity surface is precisely what `call.too-many-arguments` for internal targets
 has been waiting on (docs/internal-spec/catalog.md, "Builtin *signatures*").
 That checker is a separate slice; this amendment lands the surface only, and no
 consumer of it exists beyond the pin.
+
+**Extent, corrected (2026-08-02, issue #118).** The amendment landed with the
+arity leg on the *shape-projection* rung alone, and the argument-dispatched rung
+carried a debug assertion **refusing** `mixed` outright — the note there read
+"this rung has no arity second leg to offer". That was a statement about the
+implementation, not about the taxonomy: both rungs are seam (ii), both are
+admitted by the same countersignature, and the obligation stated above is
+written for the seam, not for one of its two tables. `min`/`max` declare a bare
+`mixed` and are the batch's highest-ranked remaining import, so the dispatch
+rung grew the same leg, pinned at the measured `(2, 1)`, and its assertion
+became the same obligation the projection rung's already was: **name `mixed` and
+you must pin the signature.** The seam classification of neither name moved —
+`min`/`max` are seam (ii) argument-dispatched as surveyed, `array_slice` is seam
+(ii) shape-projection as surveyed. `json_decode` is unaffected: its decline was
+never about the pin.

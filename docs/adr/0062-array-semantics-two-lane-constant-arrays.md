@@ -122,7 +122,7 @@ so the spec becomes an inductive type with a size measure.
 | `?? ` | unchanged | right-most arm judged under ¬isset(left arms), consuming KeyCover (#51 L5) |
 | `count($x)` | fold | sealed all-required → exact `LitInt` (the one place PHPStan has exact size — mirrored); optionals/unsealed → `IntIn(required-count, max)`; `non_empty` floors at 1 |
 | `array_is_list($x)` | fold-grade by inspection | answer = `is_list`; true-branch narrowing sets Yes, false-branch No — the RFC's C1: a pure flag flip, no structural surgery |
-| `array_values` / `array_keys` / `array_slice` / `array_reverse` | execute on the witnessed order (sound) | **sound widening only**: value/key unions with list-ness and size bounds from §3 — never declaration-order `list{k1, k2}` (the declined import, §2) |
+| `array_values` / `array_keys` / `array_slice` / `array_reverse` | execute on the witnessed order (sound) | **sound widening only**: value/key unions with list-ness and size bounds from §3 — never declaration-order `list{k1, k2}` (the declined import, §2). `array_slice` additionally reads its own `$offset`/`$preserve_keys` arguments, which are not order (Amendment B) |
 | `foreach` | real order | order-independent: key/value unions over fields + tail; first-iteration facts are unions, not the first declared field |
 | `array_all` / `array_any` (8.4) | n/a (callback) | v1 imports only the [redesign note's](https://github.com/zonuexe/phpstan-notes/blob/master/array-all-any-type-specifying/02-redesign.md) unconditional legs: `array_all` falsy → `non_empty`, `array_any` truthy → `non_empty`. The empty-array vacuity trap (its probe E: never manufacture `never` — `array_all([], f)` is true) is the same principle `Certainty::all_of` already proves maybe-on-empty for (ADR-0059). Callback descent is deferred. |
 
@@ -331,3 +331,98 @@ amendment governs.
   `array_all`/`array_any` legs (A8). Rationale: covers live inside the
   shape fact (A-G8), so arms-first would force a temporary cover home and
   a migration.
+
+## Amendment B (2026-08-02): the S7 seam grows an argument channel — PENDING ratification
+
+S7 shipped with `array_slice` **declined**, and the report gave the
+decline one reason: *the seam is single-argument by construction, so the
+shape-only answer carries no more than the reflected `array` envelope
+already does*. Both halves of that sentence are addressed here, and
+neither by weakening a rule.
+
+**The constraint was the decline's whole content, so the constraint
+went.** The projection rung now receives the call's own argument list and
+may read a sibling argument's fact through the same per-argument reader
+the ADR-0064 seam-ii rung next door already owns. Nothing about the rung's
+*shape* changed: every arm that does not ask keeps the single-shape
+pattern it had, and an arm that asks states the arity it was written
+against.
+
+**§2's order boundary is untouched, and that is the load-bearing claim.**
+What the grown channel carries is a `$preserve_keys` flag and an offset —
+values, not order. No arm may read field declaration order as runtime
+order, so the declined import (§7.1) stands exactly as written: a
+contract-lane subject never projects positionally, whatever its offset
+argument says. The negative fixture is explicit — a declared
+`array{a: int, b: string}` sliced at offset 1 takes the widening, because
+`['b' => 's', 'a' => 1]` is admitted just as well and upstream's
+`array{b: string}` is wrong on it.
+
+**The widening floor supersedes the "no more than the envelope" claim.**
+The element union is the counterexample the v1 report missed:
+`array_slice(list<Foo>, $n)` is a `list<Foo>` and the envelope says
+`array`. The floor is sound for *any* offset and length, and claims four
+things, each read from order-independent structure:
+
+- **element bound** — the slice's values are a subset of the subject's, so
+  the value union carries across unchanged;
+- **key class** — a slice never invents a key class; `$preserve_keys =
+  true` keeps each surviving key, `false` renumbers integer keys and
+  leaves string keys alone, so an all-int subject yields all-int keys
+  either way;
+- **list-ness for exactly one combination** — an all-integer-keyed subject
+  under an absent-or-false flag is renumbered `0..n-1` and *is* a list; a
+  truthy — or merely *unknown* — flag degrades it to `Maybe`, never to
+  `No` (the empty array a slice can always return is itself a list);
+- **`non_empty` never** — `array_slice([1,2,3], 10)` is `[]`, so the flag
+  is dropped unconditionally.
+
+The size bound is deliberately not claimed: expressing "at most the
+subject's count" needs a sealed result shape with keys the projection
+cannot name, and an unsealed tail is the sound direction.
+
+**The exact rung is the value lane's privilege, and only its.** A subject
+whose fact is a witnessed `Val::Array` carries true insertion order, so
+with a `Singleton` offset and length and a literal `$preserve_keys` the
+projection is *executed* over php-src's own window arithmetic rather than
+widened. Failing any of those three premises falls to the widening over
+the **lift** of the same entries — which is where order-witnessed-ness is
+honestly lost — so a value-lane subject is never worse off than a
+declared one.
+
+**`min`/`max` (the same slice, the DR3 rung).** They return **one of their
+arguments**, whatever the comparison did, so the union of the argument
+facts admits the result unconditionally — no premise about ordering or
+type juggling is needed, which is what makes the rule worth having where a
+per-type case analysis would not be. Two or more int-ranged arguments
+compose intervals instead (`min(a, b) ∈ [min(lo), min(hi)]`, `max`
+dually), which is interval arithmetic over declared knowledge — the
+`count()`/`strlen` precedent — and never a re-derivation of the
+comparison. One argument is the array form and answers from the shape's
+value union; `min([])` throwing costs the rule nothing, because a throw is
+the absence of a return.
+
+**ADR-0064 Amendment B's arity leg reaches the DR3 rung.** `min`/`max`
+declare a bare `mixed`, which pins nothing on its own, so the rung grew
+the same second leg S7 already carried: the measured `(2, 1)` signature is
+what countersigns the rule, and an engine that cannot state it withholds.
+The rung's `mixed` assertion turned from a flat refusal into the same
+obligation — name `mixed`, pin the signature. `json_decode` remains
+declined for its own reason (a six-base envelope with no single `Fact`),
+which no arity leg would change.
+
+**Deviation from the slice design, recorded.** The design routed a
+multi-base `min`/`max` union (`min($int, $string)` → `int|string`) into the
+**arm lane**. The arm lane has no argument-dependent channel at this seam:
+ADR-0069's floor is keyed by *name* alone (`builtin_return_floor(name)`),
+and the return-fact rungs carry one `Fact`, not an arm list. Rather than
+grow a second channel for one row, such a call **declines** — the honest
+floor, and the same outcome `json_decode`'s unspellable envelope already
+takes (ADR-0061 §1: a rule that cannot state its own answer says nothing).
+Should a consumer want those unions, the argument-dependent arm channel is
+its own slice.
+
+**§7's registry is unchanged.** `array_slice` was never a declined
+*import*; it was an unimplemented transfer, and the one entry the family
+still has — the value side of `in_array`/`array_search` — declines for the
+domain reason, not the seam one.
