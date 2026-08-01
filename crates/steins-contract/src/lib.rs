@@ -322,7 +322,10 @@ pub fn lower_str(input: &str) -> Option<ContractTy> {
     Some(lower(&parsed.ty))
 }
 
-fn array_key() -> ContractTy {
+/// The `array-key` union (`int|string`). `pub(crate)` so [`normalize`]'s array
+/// rules (ADR-0071 §2.1) ask "does this key contract cover *every* array key?"
+/// against the same spelling the lowering produces, rather than a second copy.
+pub(crate) fn array_key() -> ContractTy {
     ContractTy::Union(vec![ContractTy::Base(Base::Int), ContractTy::Base(Base::String)])
 }
 

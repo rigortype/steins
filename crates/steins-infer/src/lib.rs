@@ -11678,9 +11678,12 @@ fn dedup_contract_arms(arms: &mut Vec<ContractArm>) {
     for arm in arms.drain(..) {
         // Collapse a structurally-identical arm FIRST (`ty == ty`), keeping the min
         // stratum. This is the reflexive tie `subsumes`/`arm_eq` deliberately cannot
-        // prove for the non-extensional arms (`StrOpaque`, `ArrayAny`/`ListOf`/`MapOf`,
-        // `CallableTy`, `Opaque` — ADR-0038: membership is unmodeled, so `subsumes(x, x)`
-        // is `Maybe`, not `Yes`). Exact structural equality is a strictly stronger
+        // prove for the non-extensional arms (`StrOpaque`, `CallableTy`, `Opaque` —
+        // ADR-0038: membership is unmodeled, so `subsumes(x, x)` is `Maybe`, not
+        // `Yes`). The array vocabulary (`ArrayAny`/`ListOf`/`MapOf`/`IterableOf`/
+        // `Shape`) left that list with ADR-0071, which gave it a structural
+        // denotation and hence arm_eq-reflexivity; this fast path still collapses it
+        // first, and more cheaply. Exact structural equality is a strictly stronger
         // witness of same-denotation than mutual subsumption, so keeping one is sound
         // and loses no precision — and it is what stops a branch-union from *doubling*
         // a pile of identical opaque arms at every join. Without it an `array`/`Closure`
@@ -19968,18 +19971,24 @@ mod n4_carrier_tests {
     #[test]
     fn dedup_collapses_identical_opaque_arms() {
         // Survey non-termination regression (nextcloud `core/Migrations`): the
-        // non-extensional arms (`ArrayAny`/`CallableTy`/`StrOpaque`/`Opaque`)
-        // have `subsumes(x, x) == Maybe`, so `arm_eq` alone could NOT collapse two
+        // non-extensional arms (`CallableTy`/`StrOpaque`/`Opaque`) have
+        // `subsumes(x, x) == Maybe`, so `arm_eq` alone could NOT collapse two
         // identical copies — a branch-union then doubled the pile at every join,
         // reaching 2^depth. Structural equality must collapse them. A whole pile of
         // one opaque arm dedups to a single arm regardless of count.
         // (`Mixed`/`ObjectAny` are arm_eq-reflexive already, so were never affected.)
-        // The two arms observed exploding in the survey (`array $options`,
-        // `\Closure $schemaClosure`) plus the other non-extensional floors. Each is an
-        // arm `arm_eq` cannot prove equal to ITSELF (`subsumes(x, x) == Maybe`), so
-        // before the fix a 64-copy pile stayed 64 and doubled at the next join.
+        // The `\Closure $schemaClosure` arm observed exploding in the survey, plus
+        // the other non-extensional floors. Each is an arm `arm_eq` cannot prove
+        // equal to ITSELF (`subsumes(x, x) == Maybe`), so before the fix a 64-copy
+        // pile stayed 64 and doubled at the next join.
+        //
+        // The survey's OTHER exploding arm, `array $options`, is deliberately no
+        // longer in this list: ADR-0071 gave the array vocabulary a structural
+        // denotation, so every array arm is now arm_eq-reflexive (asserted below,
+        // and pinned in steins-contract's `array_arms_are_arm_eq_reflexive`). The
+        // structural-equality collapse still catches it first, so the regression
+        // this test guards stays guarded from both sides.
         for ty in [
-            ContractTy::ArrayAny { non_empty: false },
             ContractTy::CallableTy { sig: None, obl: steins_contract::CallableObl::default() },
             ContractTy::StrOpaque,
             ContractTy::Opaque,
@@ -19990,6 +19999,13 @@ mod n4_carrier_tests {
             dedup_contract_arms(&mut arms);
             assert_eq!(arms, vec![arm(ty.clone(), Stratum::Verified)], "{ty:?} pile must collapse to one");
         }
+        // The array arm collapses too, now for the stronger reason (ADR-0071).
+        let array = ContractTy::ArrayAny { non_empty: false };
+        assert!(normalize::arm_eq(&array, &array), "array arms are arm_eq-reflexive since ADR-0071");
+        let mut arms: Vec<ContractArm> =
+            (0..64).map(|_| arm(array.clone(), Stratum::Verified)).collect();
+        dedup_contract_arms(&mut arms);
+        assert_eq!(arms, vec![arm(array, Stratum::Verified)], "array pile must collapse to one");
     }
 
     #[test]
