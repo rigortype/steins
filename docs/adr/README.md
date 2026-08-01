@@ -109,3 +109,4 @@ list in one place.
 | ADR-0071 | [The acceptance relation learns the array vocabulary](0071-array-vocabulary-subsumption.md) |
 | ADR-0072 | [The acceptance relation's third face: a shape fact judged against a contract](0072-shape-fact-acceptance.md) |
 | ADR-0073 | [A statement-level inline `@var` is a cast: it re-seeds the lane a `@param` would have seeded](0073-inline-var-cast-seeding.md) |
+| ADR-0074 | [A `@psalm-trace` docblock asks the dump surface's question](0074-trace-annotation.md) |
