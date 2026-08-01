@@ -133,11 +133,15 @@ pub enum TagKind {
     /// of the dump surface's question. Like the assertion family it exists in
     /// **prefixed form only** (`@psalm-trace` is the canonical Psalm vocabulary,
     /// `@phpstan-trace` rides the uniform strip; bare `@trace` is not a tag), and
-    /// like [`Self::ConditionalPurity`] its payload is a variable name alone in
+    /// like [`Self::ConditionalPurity`] its payload is variable names alone in
     /// the shared [`DocTag::var_name`] field, `type_text` empty — no type, no
     /// expression. A comma-list payload (`$a, $b` — Psalm's multi-variable form,
-    /// ADR-0074 §7) is **not emitted at all** in this slice: the breadth slice
-    /// (issue #95) extends to lists, and until then silence is the safe side.
+    /// ADR-0074 §7) scans as **one `DocTag` per named variable, in source
+    /// order**, every span shared (the whole tag's), so consumers read the list
+    /// exactly like N single-variable tags. A malformed item anywhere in the
+    /// list — a non-`$` token between commas, a dangling comma — drops the
+    /// whole tag: silence is the safe side (a missed trace is a missed service,
+    /// never a wrong answer).
     ///
     /// Named `TraceTag`, not `Trace`: bare `trace` is the trace IR's word in this
     /// codebase (ADR-0074 §4's naming rule).
@@ -210,12 +214,13 @@ pub fn scan_docblock(text: &str) -> Vec<DocTag> {
     let mut line_start = 0usize;
 
     // Walk physical lines. On each line, strip a leading run of whitespace and
-    // `*` (the docblock gutter), then look for a leading `@tag`.
+    // `*` (the docblock gutter), then look for a leading `@tag`. A line yields
+    // at most one tag — except a trace annotation's comma list (ADR-0074 §7),
+    // which yields one tag per named variable — so `scan_line` pushes rather
+    // than returns.
     while line_start <= bytes.len() {
         let line_end = memchr(bytes, line_start, b'\n').unwrap_or(bytes.len());
-        if let Some(tag) = scan_line(text, line_start, line_end) {
-            tags.push(tag);
-        }
+        scan_line(text, line_start, line_end, &mut tags);
         if line_end == bytes.len() {
             break;
         }
@@ -245,12 +250,12 @@ fn skip_gutter(bytes: &[u8], line_start: usize, line_end: usize) -> usize {
     i
 }
 
-fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
+fn scan_line(text: &str, line_start: usize, line_end: usize, tags: &mut Vec<DocTag>) {
     let bytes = text.as_bytes();
     let i = skip_gutter(bytes, line_start, line_end);
 
     if i >= line_end || bytes[i] != b'@' {
-        return None;
+        return;
     }
     // The byte offset of the `@` — the start of the tag proper (past the gutter).
     let at_offset = i;
@@ -261,7 +266,7 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
         j += 1;
     }
     let name = &text[name_start..j];
-    let (mut kind, prefixed) = TagKind::from_name(name)?;
+    let Some((mut kind, prefixed)) = TagKind::from_name(name) else { return };
 
     // The remainder of the line, minus a trailing ` */` and whitespace.
     let mut rest_start = j;
@@ -300,40 +305,76 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
         }
     }
     if rest_start >= rest_end {
-        return None;
+        return;
     }
 
-    // For @param/@var/@…-assert, split the type off at the first `$variable`.
-    let mut property_target = false;
-    let (type_start, type_end, var_name) = if kind.is_conditional_purity()
-        || kind.is_trace_annotation()
-    {
-        // The variable-name-only families. Conditional purity by upstream
-        // grammar (`parseRequiredVariableName` then an optional description);
-        // the trace annotation by ADR-0074 §2 (variable names only — no type
-        // text, no expression). The variable must be the *first* token, and
-        // there is no type. Anything else is malformed: drop just this tag.
-        if bytes[rest_start] != b'$' {
-            return None;
-        }
-        let var_name = read_variable(text, bytes, rest_start, rest_end);
-        if var_name.len() <= 1 {
-            return None;
-        }
-        // A trace annotation whose payload is a comma list (`$a, $b`) is
-        // Psalm's multi-variable form — the breadth slice (issue #95, ADR-0074
-        // §7). This slice does not emit the tag at all: a missed trace is a
-        // missed service, never a wrong answer, so silence is the safe side.
-        if kind.is_trace_annotation() {
-            let mut k = rest_start + var_name.len();
+    // The trace annotation (ADR-0074 §2/§7): variable names only — `$x`, or
+    // Psalm's comma-separated multi-variable form `$a, $b` (spaced or tight
+    // commas), with a trailing description after the last variable tolerated
+    // like the single form. One `DocTag` per named variable, pushed in source
+    // order, every span shared (the whole tag's) — the consumer reports each
+    // at the tag's own position. A malformed item anywhere — a non-`$` token
+    // between commas, a dangling comma — drops the WHOLE tag: silence is the
+    // safe side (a missed trace is a missed service, never a wrong answer),
+    // the same posture as the single form's malformed payloads.
+    if kind.is_trace_annotation() {
+        let mut names = Vec::new();
+        let mut k = rest_start;
+        loop {
+            if k >= rest_end || bytes[k] != b'$' {
+                return;
+            }
+            let var_name = read_variable(text, bytes, k, rest_end);
+            if var_name.len() <= 1 {
+                return;
+            }
+            k += var_name.len();
+            names.push(var_name);
             while k < rest_end && (bytes[k] == b' ' || bytes[k] == b'\t') {
                 k += 1;
             }
             if k < rest_end && bytes[k] == b',' {
-                return None;
+                k += 1;
+                while k < rest_end && (bytes[k] == b' ' || bytes[k] == b'\t') {
+                    k += 1;
+                }
+                continue;
             }
+            // No comma: whatever remains (if anything) is a trailing
+            // description, tolerated like the single form's.
+            break;
         }
-        // Zero-width type region: these families declare no type.
+        for var_name in names {
+            tags.push(DocTag {
+                kind,
+                // Zero-width type region: the family declares no type.
+                type_text: String::new(),
+                type_span: Span::new(rest_start as u32, rest_start as u32),
+                tag_span: Span::new(at_offset as u32, rest_end as u32),
+                line_span: Span::new(line_start as u32, line_end as u32),
+                var_name: Some(var_name),
+                prefixed,
+                property_target: false,
+            });
+        }
+        return;
+    }
+
+    // For @param/@var/@…-assert, split the type off at the first `$variable`.
+    let mut property_target = false;
+    let (type_start, type_end, var_name) = if kind.is_conditional_purity() {
+        // The other variable-name-only family, by upstream grammar
+        // (`parseRequiredVariableName` then an optional description). The
+        // variable must be the *first* token, and there is no type. Anything
+        // else is malformed: drop just this tag.
+        if bytes[rest_start] != b'$' {
+            return;
+        }
+        let var_name = read_variable(text, bytes, rest_start, rest_end);
+        if var_name.len() <= 1 {
+            return;
+        }
+        // Zero-width type region: the family declares no type.
         (rest_start, rest_start, Some(var_name))
     } else if kind.carries_var_name() {
         match find_variable(bytes, rest_start, rest_end) {
@@ -361,21 +402,21 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
                 }
                 if te <= rest_start {
                     // `@param $x` with no type — nothing to offer.
-                    return None;
+                    return;
                 }
                 (rest_start, te, Some(var_name))
             }
             // No `$var`. For `@param`/`@var` this is a bare `@var T`: the whole
             // remainder is the type. An assertion tag with no target is malformed —
             // ignore just this tag.
-            None if kind.is_assert() => return None,
+            None if kind.is_assert() => return,
             None => (rest_start, rest_end, None),
         }
     } else {
         (rest_start, rest_end, None)
     };
 
-    Some(DocTag {
+    tags.push(DocTag {
         kind,
         type_text: text[type_start..type_end].to_owned(),
         type_span: Span::new(type_start as u32, type_end as u32),
@@ -387,7 +428,7 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
         var_name,
         prefixed,
         property_target,
-    })
+    });
 }
 
 /// Whether `name` (the token right after the `@`) is a `@template` declaration
@@ -685,13 +726,42 @@ mod tests {
     }
 
     #[test]
-    fn trace_annotation_comma_list_is_not_emitted_this_slice() {
-        // `@psalm-trace $a, $b` is Psalm's multi-variable form (ADR-0074 §7) —
-        // the breadth slice (issue #95). Until it lands the scanner emits the
-        // tag not at all: silence, never a half-answered list. Both the spaced
-        // and the tight spelling drop.
-        assert!(scan_docblock("/** @psalm-trace $a, $b */").is_empty());
-        assert!(scan_docblock("/** @psalm-trace $a,$b */").is_empty());
+    fn trace_annotation_comma_list_scans_one_tag_per_variable() {
+        // `@psalm-trace $a, $b` is Psalm's multi-variable form (ADR-0074 §7):
+        // one `DocTag` per named variable, in source order, spaced and tight
+        // commas alike. Every span is the whole tag's, so the consumer reports
+        // each variable at the tag's own position.
+        for doc in ["/** @psalm-trace $a, $b */", "/** @psalm-trace $a,$b */"] {
+            let tags = scan_docblock(doc);
+            assert_eq!(tags.len(), 2, "{doc}");
+            assert!(tags.iter().all(|t| t.kind == TagKind::TraceTag));
+            assert_eq!(tags[0].var_name.as_deref(), Some("$a"));
+            assert_eq!(tags[1].var_name.as_deref(), Some("$b"));
+            assert_eq!(tags[0].tag_span, tags[1].tag_span, "the list shares the tag's span");
+            assert!(tags.iter().all(|t| t.type_text.is_empty()));
+        }
+    }
+
+    #[test]
+    fn trace_annotation_list_tolerates_a_trailing_description() {
+        // A description after the LAST variable is tolerated exactly like the
+        // single form's; it never reads as another list item.
+        let tags = scan_docblock("/** @psalm-trace $a, $b watch these */");
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0].var_name.as_deref(), Some("$a"));
+        assert_eq!(tags[1].var_name.as_deref(), Some("$b"));
+    }
+
+    #[test]
+    fn trace_annotation_list_with_a_malformed_item_drops_the_whole_tag() {
+        // A non-`$` token between commas, or a dangling comma, is a malformed
+        // list: the WHOLE tag drops (no half-answered list) — silence is the
+        // safe side, mirroring the single form's malformed posture.
+        assert!(scan_docblock("/** @psalm-trace $a, b */").is_empty());
+        assert!(scan_docblock("/** @psalm-trace $a, int $b */").is_empty());
+        assert!(scan_docblock("/** @psalm-trace $a, $ */").is_empty());
+        assert!(scan_docblock("/** @psalm-trace $a, */").is_empty());
+        assert!(scan_docblock("/** @psalm-trace $a,, $b */").is_empty());
     }
 
     #[test]

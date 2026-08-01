@@ -290,3 +290,27 @@ ADR by section:
   edge fixtures; `unknown`-per-variable independence.
 - **Docs seal (issue #96)** — the user-facing documentation and
   type-specification catch-up, sealing the surface as built.
+
+## Amendment (2026-08-02): emission tracks the walk's coverage
+
+The breadth slice (issue #95) pinned two postures §5's dump-parity
+principle decides but the original text did not spell out. Both are
+parity holding as **silence-parity**, and both are recorded so the
+fixtures that pin them read as intent, not accident:
+
+- **A dead statement answers nothing.** The walk proves a
+  post-terminator region dead and never enters it; a `dumpType` at the
+  mirror position is equally silent. The annotation asks the walk's
+  question, and a question about a point the walk proves unreachable
+  has no answering walk state — for either spelling.
+- **Emission is gated by the walk's construct coverage.** A `while`
+  body or `try`/`catch` interior is still opaque to the walk
+  (ADR-0027's ratchet), so neither the annotation nor a mirror
+  `dumpType` emits there today. §6's adoption promise is unaffected —
+  the per-file query associates at any depth — but an adopted tag only
+  answers where the walk walks. The parity fixtures hold the two
+  spellings together, so when a loop or try lowering lands, both
+  surfaces light up in the same commit, or the fixtures fail.
+
+Neither posture is a refusal: both are the current coverage honestly
+stated, and both widen automatically with the walk.
