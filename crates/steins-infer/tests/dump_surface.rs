@@ -287,18 +287,67 @@ fn dump_type_spells_a_sequential_concrete_array_as_a_list() {
 
 #[test]
 fn a_dump_reads_facts_and_binds_nothing() {
-    // Transparency (§10 §3): `emit_dumps` reads, never binds. A recognized dump
-    // perturbs the env EXACTLY as an equivalent unresolved call does (§6 keeps the
-    // conservative unresolved-call treatment) — no more (it adds no binding), no
-    // less. So after either an unknown `foo($x)` or a `dumpType($x)`, a following
-    // dump reads the identical (conservatively invalidated) state.
-    let after_unknown = one_type("<?php $x = 5; foo($x); \\PHPStan\\dumpType($x);\n");
-    let after_dump = {
-        let ds = dumps("<?php $x = 5; \\PHPStan\\dumpType($x); \\PHPStan\\dumpType($x);\n");
-        ds.last().expect("two dumps").message.clone()
-    };
-    assert_eq!(after_unknown, after_dump, "a dump perturbs the env exactly as any unknown call");
-    assert_eq!(after_unknown, "dumped type: unknown");
+    // Transparency (§10 §3): `emit_dumps` reads, never binds — "facts before and
+    // after the call are identical". A dump site is exempt from the blanket
+    // call-argument drop (the ADR-0070 gate's dump-read exception), so a second
+    // dump of the same variable answers exactly what the first did, while a
+    // genuinely unknown call still invalidates conservatively.
+    let ds = dumps("<?php $x = 5; \\PHPStan\\dumpType($x); \\PHPStan\\dumpType($x);\n");
+    assert_eq!(ds.len(), 2, "{ds:?}");
+    assert_eq!(ds[0].message, "dumped type: 5");
+    assert_eq!(ds[1].message, "dumped type: 5", "a dump must not perturb the env");
+    // The contrast pin: an unknown `foo($x)` between assignment and dump still
+    // drops the fact (§6 keeps the conservative unresolved-call treatment there).
+    assert_eq!(one_type("<?php $x = 5; foo($x); \\PHPStan\\dumpType($x);\n"), "dumped type: unknown");
+}
+
+#[test]
+fn a_second_dump_of_a_docblock_param_keeps_the_contract() {
+    // Regression (2026-08-02): the second dump of the same variable inside one
+    // function body degraded to `unknown` — the blanket call-argument drop ate
+    // the contract lane after the first dump rendered. A dump is a read: every
+    // later dump must answer what the first one did.
+    let src = "<?php\n/** @param non-empty-string $method */\nfunction c($method) {\n\
+               \\PHPStan\\dumpType($method);\n\\PHPStan\\dumpType($method);\n}\n";
+    let ds = dumps(src);
+    assert_eq!(ds.len(), 2, "{ds:?}");
+    assert_eq!(ds[0].message, "dumped type: non-empty-string (asserted)");
+    assert_eq!(ds[1].message, "dumped type: non-empty-string (asserted)");
+}
+
+#[test]
+fn dump_type_then_var_dump_of_one_variable_agree_across_ids() {
+    // The cross-id shape of the same regression: `dumpType($v)` then `var_dump($v)`
+    // — the D4 report shares the fact source (§2) and must not read a state the
+    // D3 site's own statement degraded.
+    let src = "<?php $verb = 'POST'; \\PHPStan\\dumpType($verb); var_dump($verb);\n";
+    assert_eq!(one_type(src), "dumped type: 'POST'");
+    let vd = var_dumps(src);
+    assert_eq!(vd.len(), 1, "{vd:?}");
+    assert_eq!(vd[0].message, "dumped type: 'POST'");
+}
+
+#[test]
+fn var_dump_is_a_transparent_read_too() {
+    // D4 is the same read surface: two `var_dump`s of one variable agree, and a
+    // `var_dump` before a `dumpType` does not degrade the explicit dump either.
+    let vd = var_dumps("<?php $x = 5; var_dump($x); var_dump($x);\n");
+    assert_eq!(vd.len(), 2, "{vd:?}");
+    assert_eq!(vd[0].message, "dumped type: 5");
+    assert_eq!(vd[1].message, "dumped type: 5");
+    assert_eq!(one_type("<?php $x = 5; var_dump($x); \\PHPStan\\dumpType($x);\n"), "dumped type: 5");
+}
+
+#[test]
+fn a_second_dump_of_an_object_holder_keeps_the_class() {
+    // The exception spans the object gate too (ADR-0070 condition 3): a dump
+    // hands the handle nowhere that could mutate the referent, so the heap
+    // binding survives and the second dump still renders the exact class.
+    let src = "<?php\nclass Foo {}\n$x = new Foo();\n\\PHPStan\\dumpType($x);\n\\PHPStan\\dumpType($x);\n";
+    let ds = dumps(src);
+    assert_eq!(ds.len(), 2, "{ds:?}");
+    assert_eq!(ds[0].message, "dumped type: Foo");
+    assert_eq!(ds[1].message, "dumped type: Foo");
 }
 
 // ============================================================================

@@ -6681,6 +6681,18 @@ fn walk_trace(
 /// 5. Language constructs never reach this path: `isset`/`empty`/`unset`/`list`
 ///    are not call nodes, so the lowering records no site for them.
 ///
+/// # The dump-surface exception (ADR-0053)
+///
+/// A recognized dump callee — the reserved `PHPStan\dumpType` pair (D3) or the
+/// global `var_dump` (D4) — is a **read**: it observes the walk's facts at the
+/// call position and binds nothing (§10 §3). Such a site keeps the argument's
+/// every binding (object holders included — nothing is handed anywhere that
+/// could mutate the referent's state) and is exempt from conditions 1–3, so the
+/// dump surface stays idempotent: the second dump of a variable answers exactly
+/// what the first one did. Recognition is the emitters' own — resolved-FQN,
+/// definition-insensitive for the reserved pair ([`dump_family`]'s rule) — so
+/// the gate and the emitter can never disagree about what a dump is.
+///
 /// # Replayability (ADR-0048)
 ///
 /// The verdict is a **pure function** of (the statement's recorded sites, the
@@ -6705,18 +6717,33 @@ fn by_value_survivors<'s>(
         return kept;
     }
     let mut refused: HashSet<&'s str> = HashSet::new();
+    // Names that already passed the value-semantic gate (condition 3) — a memo of
+    // its own, since `kept` can now also hold dump-read survivors that never took
+    // that gate.
+    let mut sem_ok: HashSet<&'s str> = HashSet::new();
     for site in &stmt.call_args {
         let var = site.var.as_str();
         if refused.contains(var) {
+            continue;
+        }
+        // The dump-surface exception (ADR-0053, doc above): a dump reads and
+        // binds nothing, so this occurrence keeps the name — object bindings
+        // included — and never condemns it.
+        if is_dump_read_site(cx, &site.callee) {
+            kept.insert(var);
             continue;
         }
         // Condition 3, asked once per name and BEFORE any index work: a name with
         // an object binding refuses whatever its callees say, and a name with no
         // binding at all has nothing to save (dropping it is already a no-op), so
         // neither is worth resolving a callee for.
-        if !kept.contains(var) && !is_value_semantic(var, env, store) {
-            refused.insert(var);
-            continue;
+        if !sem_ok.contains(var) {
+            if !is_value_semantic(var, env, store) {
+                kept.remove(var);
+                refused.insert(var);
+                continue;
+            }
+            sem_ok.insert(var);
         }
         if arg_is_by_value(cx, site) {
             kept.insert(var);
@@ -6728,6 +6755,16 @@ fn by_value_survivors<'s>(
         }
     }
     kept
+}
+
+/// Whether a call-argument site's callee is a **dump-surface read** (ADR-0053):
+/// the reserved `PHPStan\dumpType` pair (D3) by resolved FQN, or the global
+/// `var_dump` (D4) by the PHP fallback rule — each by exactly the recognizer its
+/// emitter uses ([`dump_family`]'s FQN rule, [`recognizes_var_dump`]'s name
+/// core), so the survival gate and the emitters can never disagree about what a
+/// dump is. See the exception paragraph on [`by_value_survivors`].
+fn is_dump_read_site(cx: &Cx<'_>, r: &NameRef) -> bool {
+    is_dump_family_fqn(&resolved_fn_fqn(cx, r)) || name_reaches_global_var_dump(cx, r)
 }
 
 /// Whether `var` holds a **value-semantic** binding worth saving — a scalar, a
@@ -6946,6 +6983,13 @@ fn dump_family(cx: &Cx, call: &CallExpr) -> Option<DumpFamily> {
 fn recognizes_var_dump(cx: &Cx, call: &CallExpr) -> bool {
     let Callee::Function(_) = &call.receiver else { return false };
     let Some(r) = call.callee_ref.as_ref() else { return false };
+    name_reaches_global_var_dump(cx, r)
+}
+
+/// The name-resolution core of [`recognizes_var_dump`] (legs a–d; e/f are call-
+/// shape questions its caller answers). Split out so the ADR-0070 survival
+/// gate's dump-read recognition ([`is_dump_read_site`]) shares it verbatim.
+fn name_reaches_global_var_dump(cx: &Cx, r: &NameRef) -> bool {
     match r.kind {
         // (a) `\var_dump` — the global builtin (a single segment, no namespace).
         RefKind::FullyQualified => r.raw.eq_ignore_ascii_case("var_dump"),
