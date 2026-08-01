@@ -5421,6 +5421,35 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// The `@template` shadow set in force over a scope's *body* (issue #5 applied
+    /// to statement-level docblocks): the owning declaration's own template names
+    /// plus, for a method, the enclosing class-level ones — the same two idempotent
+    /// stages [`Cx::scope_envelopes`] applies to the declaration's envelopes. Empty
+    /// for top-level and closure scopes (no owning docblock).
+    fn scope_template_shadow(&self, scope: &Scope) -> HashSet<String> {
+        match &scope.owner {
+            ScopeOwner::TopLevel | ScopeOwner::Closure { .. } => HashSet::new(),
+            ScopeOwner::Function(name) => self
+                .tree()
+                .functions()
+                .iter()
+                .find(|f| f.name.eq_ignore_ascii_case(name))
+                .map_or_else(HashSet::new, |f| template_names_of(f.docblock.as_deref())),
+            ScopeOwner::Method { class, method } => {
+                let Some(cd) =
+                    self.tree().classes().iter().find(|c| c.fqn.eq_ignore_ascii_case(class))
+                else {
+                    return HashSet::new();
+                };
+                let mut shadow = template_names_of(cd.docblock.as_deref());
+                if let Some(m) = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method)) {
+                    shadow.extend(template_names_of(m.docblock.as_deref()));
+                }
+                shadow
+            }
+        }
+    }
+
     /// The native return type and display name of a scope's owning function or
     /// method (the same file this `Cx` points at), or `None` for the top-level
     /// script scope or an owner with no native scalar/union return type.
@@ -6294,6 +6323,16 @@ fn walk_trace(
     let cx = w.cx;
     let scope = w.scope;
     for (stmt_idx, stmt) in stmts.iter().enumerate() {
+        // 0. Statement-level inline `@var` casts (ADR-0073), applied before the
+        // statement's own checks read the env — the docblock precedes the
+        // statement, so its cast is in force for everything the statement does.
+        // A tag above an `Assign` to the same variable is erased by step 2's own
+        // rebind: the assignment-form `@var` (PHPStan casts the RHS there) is a
+        // separate feature this slice deliberately leaves a silence, never a
+        // wrong claim. Plain per-scope pass only (see `apply_inline_var_casts`).
+        if descent.is_none() {
+            apply_inline_var_casts(w, stmt, env, store);
+        }
         // The return-fact summary of a `$x = f(...)` RHS descent (ADR-0057 amendment
         // T0), captured in step 1 and consumed by `apply_assign` in step 2. For an
         // `Assign` statement `checkable_calls` yields exactly the RHS call, so the
@@ -9951,6 +9990,98 @@ fn seed_shape_fact(arms: &[ContractArm]) -> Option<Fact> {
         shape = Some(lowered);
     }
     Some(Fact::Shape { shape: Box::new(shape?), nullable })
+}
+
+/// Statement-level inline `/** @var T $x */` casts (ADR-0073): the docblock
+/// immediately preceding a trace statement re-declares the named variable's type
+/// from that statement on — PHPStan's inline-`@var` reading. The lowering is the
+/// `@param` entry seeding's ([`seed_contract_arms`]) minus the native envelope:
+/// every arm seeds `Asserted` (ADR-0037 — a docblock the runtime never checks),
+/// and a lane whose array vocabulary collapsed to one arm seeds the value lane
+/// with its canonical shape fact exactly as ADR-0062 S3's entry seeding does.
+///
+/// It is a **cast, not a refinement**: every carrier of the old value dies first
+/// (`env.remove` + [`Store::unbind`] — the same forgetting a rebind performs),
+/// because the tag re-declares what the variable holds rather than narrowing the
+/// declared possibilities. Losing a proven value to an assertion only ever
+/// silences (the proof-layer consumers take `Verified` facts, which the cast
+/// never mints), so the trade is PHPStan parity at zero FP cost.
+///
+/// The guards, each its own reason:
+///
+/// * **property targets** (`@var T $this->p`, `@var T $obj->p`, bare `$this`)
+///   never cast — the tag speaks about the property, and casting the *receiver*
+///   could manufacture declared-receiver findings (S6) out of a tag that says
+///   nothing about the receiver;
+/// * **`@template` names shadow** exactly as in the declaration envelopes (issue
+///   #5): the enclosing declaration's and, for a method, the class-level set;
+/// * **an unparseable or unlowerable type casts nothing** — the same status-quo
+///   silence a malformed `@param` gets (ADR-0029: a missing envelope only
+///   silences), never a `Barrier`-style erasure;
+/// * **a prefixed `@phpstan-var`/`@psalm-var` displaces the plain `@var`** for
+///   the same variable in the same docblock (the ADR-0029 precedence rule).
+///
+/// Applied in the plain per-scope pass only: a binding descent carries
+/// call-site-proven values, and propagated truth outranks a docblock assertion —
+/// the same reason the ADR-0052 §9 entry seeding skips a descent-bound param
+/// (a bound value moots the declared lane).
+fn apply_inline_var_casts(
+    w: &WalkCx,
+    stmt: &Stmt,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    let cx = w.cx;
+    let Some(doc) = cx.tree().stmt_docblock(stmt.span.start) else { return };
+    let tags = scan_docblock(&doc.text);
+    // Computed on the first acting tag only — most adjacent docblocks carry none.
+    let mut shadow: Option<HashSet<String>> = None;
+    for tag in &tags {
+        if !matches!(tag.kind, TagKind::Var) || tag.property_target {
+            continue;
+        }
+        let Some(var) = &tag.var_name else { continue };
+        let name = var.trim_start_matches('$');
+        if name.is_empty() || name == "this" {
+            continue;
+        }
+        if !tag.prefixed
+            && tags.iter().any(|t| {
+                matches!(t.kind, TagKind::Var) && t.prefixed && t.var_name == tag.var_name
+            })
+        {
+            continue;
+        }
+        let Some(mut pt) = parse_tag_type(&tag.type_text) else { continue };
+        let sh = shadow.get_or_insert_with(|| cx.scope_template_shadow(w.scope));
+        neutralize_templates(&mut pt, sh);
+        // Class arms resolve in the statement's namespace context, matching the
+        // FQNs the `instanceof` subtrahend and S6's `find_class` carry.
+        let resolve = |n: &str| {
+            cx.resolve_pclass(cx.cur, stmt.span.start, n).trim_start_matches('\\').to_ascii_lowercase()
+        };
+        let Some(arms) = refine_contract_arms(&[], Some(&pt), &resolve) else { continue };
+        if arms.is_empty() {
+            continue;
+        }
+        env.remove(name);
+        store.unbind(name);
+        if let Some(fact) = seed_shape_fact(&arms) {
+            let line = cx.tree().position(stmt.span.start).line;
+            env.insert(
+                name.to_owned(),
+                // ALWAYS `Asserted` — the same A-G9 corollary the entry seeding
+                // pins: shape-derived facts never feed proof-layer findings.
+                Known::value_strat(
+                    fact,
+                    line,
+                    Some("declared array shape".to_owned()),
+                    Stratum::Asserted,
+                ),
+            );
+        }
+        store.contract.insert(name.to_owned(), arms);
+    }
 }
 
 /// The shared core of declared-contract arm refinement (ADR-0052 §9), used for both
