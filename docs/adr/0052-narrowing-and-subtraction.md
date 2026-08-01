@@ -547,3 +547,48 @@ What this does **not** open, on purpose:
 - **The stratum rule is load-bearing, not decorative:** the projected
   fact's grade is what keeps a lying docblock unable to forge a proof
   through a transfer rule's output (point 5, ADR-0037).
+
+## Note (2026-08-01): the `Value` subtrahend is wired to the arm lane
+
+Completion of point 2, not new design. `Subtrahend::Value(Val)` has been
+part of the point-2 API since the normalizer slice, and
+`normalize::subtrahend_covers` has judged it arm-wise and soundly since
+then; what was missing was the **wire** from the walk. Guard subtraction
+on the contract arm lane reached it only for `instanceof`
+(`Subtrahend::Class`) and `!== null` (`Subtrahend::Null`), so an
+identity guard over a scalar arm list — `if (strpos($h, $n) !== false)`,
+the single most recognizable PHPStan narrowing there is — left the
+declared arm list wholly untouched.
+
+`Refine::Exclude` now subtracts `Subtrahend::Value(v)` from the
+variable's lane on the branch that establishes it. The judgment is the
+one point 2 already states: **an arm dies iff the subtrahend covers it
+with `Yes`; `Maybe` keeps it.** Nothing about the relation moved. What
+made this worth doing now is the ADR-0069 / issue #79 declared-return
+floor and the #81 line: 1,708 mined functionMap rows now enter the arm
+lane, hundreds of them `T|false`, and every one of them was previously
+un-narrowable at exactly the guard PHP code writes.
+
+The rule's two sides are one rule, and both are pinned: `!== false`
+deletes a `false` arm, and does **not** delete a general `bool` arm —
+`bool` has an interior point (`true`) the guard says nothing about, so
+the coverage is `Maybe`. The interior-point discipline of point 2's
+`Refined` clause is the same discipline here, one carrier up.
+
+Deliberately **not** landed:
+
+- **`Refine::Truthy` reaches nothing.** `if ($pos)` over `int|false`
+  excludes `0` as well as `false`, so it is not a value subtraction at
+  all. Wiring it as one would silently narrow to `int` on a branch where
+  the value cannot be `0` — PHPStan's classic `strpos` footgun, mirrored.
+  It needs its own designed subtrahend and its own measured slice.
+- **No keep-only narrowing on the positive branch.** `if ($x === false)`
+  does not intersect the arm lane down to `{false}`; the value lane's
+  `Refine::Exact` already owns that branch, and the arm lane is a
+  subtraction carrier by construction — every mutation on it removes
+  arms it can prove dead.
+
+Fixtures: `crates/steins-infer/tests/false_arm_strip.rs` (the mechanism,
+both directions, all four identity spellings, the two refusals);
+`crates/steins-infer/tests/declared_return_floor.rs` (the floor-row /
+hand-written-row parity pins, re-pinned by this change).

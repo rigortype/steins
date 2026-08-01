@@ -441,8 +441,9 @@ decline and `floor_value_fact` returns `None` by two independent routes. That is
 a stronger statement than the Asserted grade: the firewall keeps Asserted facts
 out of proof premises, and here there is no fact to keep out. The arm lane in
 exchange does real work — `?Collator` renders its null arm and a `!== null` guard
-subtracts it, which is a leg the `T|false` rows still lack, since arm subtraction
-is instanceof-driven and the scalar-literal case is unwired.
+subtracts it. The `T|false` rows lacked the analogous leg while arm subtraction
+was instanceof-driven; ADR-0052's 2026-08-01 note wired the `Value` subtrahend,
+so `!== false` now strips the false arm of these rows the same way.
 
 `builtin_return_floor`'s identity resolver was previously correct because no class
 arm could reach it; it is now correct for a reason worth stating.
