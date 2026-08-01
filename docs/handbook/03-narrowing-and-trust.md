@@ -40,6 +40,22 @@ A bare truthiness check (`if ($name)`) does the same and more —
 it also removes the empty and `"0"` strings on the truthy edge,
 because those are PHP's falsy strings.
 
+The committable spelling sees the same narrowing: a
+`/** @psalm-trace $name */` docblock above a statement in the
+branch reports the narrowed `string` too, as a warn-level
+`debug.trace` you may leave in. Its answer is the statement's
+*exit* fact — the tag applies to the next statement and reports
+what that statement leaves behind:
+
+```php
+function shoutTraced(?string $name): void {
+    if ($name !== null) {
+        /** @psalm-trace $name */
+        $exclaim = $name . '!';   // traced type of $name: string
+    }
+}
+```
+
 ## Type guards
 
 `is_int`, `is_string`, and kin narrow the branch to the tested

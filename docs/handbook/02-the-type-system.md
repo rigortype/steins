@@ -82,6 +82,21 @@ you read the rest of the chapter:
 2. `dumpType` names a function PHP does not have. A committed call
    is a fatal, so Steins prints it at fail level to nag you into
    deleting it. Use it while exploring; strip it before you ship.
+   When you want the answer to *stay* in the source, ask with the
+   docblock spelling instead: `/** @psalm-trace $x */` above a
+   statement emits `debug.trace` with the same rendering a
+   `dumpType($x)` placed *after* that statement would print —
+   Psalm's rule: the annotation applies to the next statement and
+   reports what it leaves behind — at warn level, exit-neutral,
+   because a comment is runtime-inert and legal to commit:
+
+   ```php
+   /** @psalm-trace $i */
+   $i = 42;
+   ```
+
+   prints `warning[debug.trace]: traced type of $i: 42`. A comma
+   list (`@psalm-trace $a, $b`) reports each variable in turn.
 
 ## The four-layer value domain
 

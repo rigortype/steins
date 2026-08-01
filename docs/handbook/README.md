@@ -128,6 +128,21 @@ exact tail of the line Steins prints
 (`error[debug.type]: dumped type: 'hello'`). Chapter 2 explains
 the display grammar in full.
 
+The same question has a committable spelling: a
+`/** @psalm-trace $x */` docblock above a statement reports the
+same rendering as a warn-level `debug.trace` — the trigger is
+a comment, so it never reds the build and may stay in the
+source. The answer is the statement's *exit* fact — what the
+variable is after the line below the tag has run:
+
+```php
+/** @psalm-trace $s */
+$s = "hello";
+```
+
+prints `warning[debug.trace]: traced type of $s: 'hello'` at
+the tag's own line.
+
 When a chapter references a more formal document, the link takes
 you out of the handbook into the binding spec corpus or the ADRs:
 

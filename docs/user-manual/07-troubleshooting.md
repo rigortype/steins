@@ -647,11 +647,15 @@ $ echo $?
 
 **Fix.** Delete the call before committing. There is no flag or profile
 setting to soften this one — `debug.type`/`debug.phpdoc-type` are fixed at
-fail level on purpose. A leftover `var_dump()`, by contrast, reports its
-arguments' inferred facts at **warn** level by default (exit-neutral) and
-*can* be silenced project-wide with `disable = ["debug.var-dump"]` in a
-named profile, because `var_dump()` is legal working PHP and `dumpType()`
-is not. See
+fail level on purpose. If you want the answer to *survive* in committed
+code, ask with the docblock spelling instead: a `/** @psalm-trace $x */`
+above a statement reports the same rendering as a `debug.trace` at **warn**
+level, exit-neutral, against the statement's exit facts — a comment is
+runtime-inert and legal to commit (ADR-0074). A leftover `var_dump()`, by
+contrast, reports its arguments' inferred facts at **warn** level by default
+(exit-neutral) and *can* be silenced project-wide with
+`disable = ["debug.var-dump"]` in a named profile, because `var_dump()` is
+legal working PHP and `dumpType()` is not. See
 [profiles, baseline, and suppression](05-profiles-and-baseline.md#the-dump-ids).
 
 ## Where to go next

@@ -330,8 +330,9 @@ bounds, and `exhaustive` is the bit the `…?` renders. Nothing is flattened.
 > **If you know PHPStan or Psalm:** this is the batch answer to what you get
 > from sprinkling `\PHPStan\dumpType()` and rerunning — a whole file's
 > inferred facts at once, with no edit to the source. The dump functions
-> work too, and report as `debug.type` findings in `check`; `annotate` is
-> for reading, the dumps are for asking one pointed question.
+> work too, and report as `debug.type` findings in `check`, as does the
+> committable `/** @psalm-trace $x */` docblock (`debug.trace`, warn-level);
+> `annotate` is for reading, the dumps are for asking one pointed question.
 
 `annotate` never reports a verdict: a file full of proven breaks still exits
 `0`. Run `check` for that.

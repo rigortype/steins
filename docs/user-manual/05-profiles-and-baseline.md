@@ -503,8 +503,11 @@ diff either agrees with you or names the function where you were wrong.
 
 The `debug` layer is the fourth kind of claim, and it answers a question you
 asked in the source (ADR-0053). `debug.type` reports what `PHPStan\dumpType()`
-saw, `debug.phpdoc-type` the same for `dumpPhpDocType()`, and
-`debug.var-dump` reports the engine's inferred facts at every default-on
+saw, `debug.phpdoc-type` the same for `dumpPhpDocType()`, `debug.trace` the
+same answer as `debug.type` for a `/** @psalm-trace $x */` (or
+`@phpstan-trace`) docblock above a statement — the committable spelling of
+the question, answered against that statement's *exit* facts (ADR-0074) —
+and `debug.var-dump` reports the engine's inferred facts at every default-on
 `var_dump()` call.
 
 The layer sits outside the profile ladder: every stage shows dumps, and
@@ -513,13 +516,18 @@ purpose. The explicit pair is fail-level, because `PHPStan\dumpType` is not a
 real PHP function and a committed call is a guaranteed fatal. `debug.var-dump`
 is warn-level and exit-neutral by construction, since a leftover `var_dump()`
 is legal working PHP and reddening a build over it would invert the
-quiet-default identity.
+quiet-default identity. `debug.trace` is warn-level and exit-neutral for the
+mirror reason: its trigger is a runtime-inert comment that is legal to
+commit, so the question is answered visibly on every run without holding CI
+hostage.
 
 `@steins-ignore` does not reach them — an ignore naming `debug.type` reports
-`suppress.unmatched`. The remedy for an unwanted dump is deleting the call.
-Silence `var_dump()` reporting for a whole repo with
-`disable = ["debug.var-dump"]` in a named profile. [Chapter
-4](04-findings.md) shows what each one prints.
+`suppress.unmatched`. The remedy for an unwanted dump is deleting the call
+(or, for a trace, the comment). Silence `var_dump()` reporting for a whole
+repo with `disable = ["debug.var-dump"]` in a named profile; `debug.trace`
+has no such switch — an annotation is always an authored question, never an
+incidental call somebody else wrote. [Chapter 4](04-findings.md) shows what
+each one prints.
 
 ## Where to go next
 
