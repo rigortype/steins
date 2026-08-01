@@ -228,6 +228,14 @@ $preserve_keys = false)` — every parameter by value. Its splicing sibling
 tables corroborate each other exactly as `current`/`reset` do, and the
 near-name pair is pinned in the catalog's own tests.
 
-**Measurement.** MEASUREMENT-PENDING — nsrt before/after and fp-gate to
-be recorded here from the run accompanying this amendment. Per §6, the
-kept fact is a new premise and the gate remains the standing instrument.
+**Measurement.** On the ADR-0073 base (inline `@var` seeding merged,
+which is what makes the `array-slice.php` groups reachable at all), the
+nsrt harness over phpstan-src's corpus moves 1602 → 1607 matches — +5
+from this certification alone, with zero rows lost
+(`array-slice.php` 34/38/46 — each group's second row — and
+`bug-10721.php` 90/91); differ 11347 → 11342 and no other verdict class
+moves. Three further rows (`array-slice.php` 42/50/54) improve from the
+bare `array` floor to a structured answer without reaching match — their
+remaining distance is `slice_widening` precision (`$preserve_keys`,
+zero-length slices), not survival. Per §6, the kept fact is a new
+premise and the fp-gate remains the standing instrument.

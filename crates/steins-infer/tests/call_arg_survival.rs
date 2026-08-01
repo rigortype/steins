@@ -186,6 +186,32 @@ fn the_array_slice_stack_reproduced_end_to_end() {
     );
 }
 
+#[test]
+fn an_inline_var_cast_outlives_the_slice_like_a_param_would() {
+    // The same stack seeded by ADR-0073's inline `@var` cast instead of a
+    // `@param` — phpstan-src's `array-slice.php` spelling verbatim. The cast
+    // seeds the same contract lane, so the survival gate must not distinguish
+    // the two seedings.
+    let src = "<?php\nfunction f(array $arr): void {\n\
+               /** @var array<int, bool> $arr */\n\
+               \\PHPStan\\dumpType(array_slice($arr, 1, 2));\n\
+               \\PHPStan\\dumpType(array_slice($arr, 1, 2));\n}\n";
+    let tree = SourceTree::parse(src);
+    let got: Vec<String> = check_with(&tree, &[], "t.php", &mut Mock)
+        .into_iter()
+        .filter(|d| d.id == DEBUG_TYPE_ID)
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            "dumped type: list<bool> (asserted)".to_owned(),
+            "dumped type: list<bool> (asserted)".to_owned()
+        ],
+        "the cast-seeded fact must survive the first slice"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The negative half: every reason the gate refuses
 // ---------------------------------------------------------------------------
