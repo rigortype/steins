@@ -60,7 +60,7 @@ grade.
 | `proof` | The program provably breaks on a live path. | Zero false positives. Any FP on corpus code is a release blocker (ADR-0013). |
 | `contract` | A proven behavior violates something the code *declares* about itself. The program still works. | True findings legitimately abound in released code; gated as increase tripwires, never on sight. |
 | `mechanics` | The analyzer's own hygiene — a finding whose absence would let another channel rot silently. | Red on sight. |
-| `debug` | Requested introspection: a report that exists *because a call site asked for it* (`PHPStan\dumpType()`). | Excluded from every gate counter (ADR-0053). Landed in full (D1–D4): the lane, its three ids, the shared rendering, and both emit slices. |
+| `debug` | Requested introspection: a report that exists *because the source asked for it* (`PHPStan\dumpType()`, a `/** @psalm-trace $x */` docblock). | Excluded from every gate counter (ADR-0053). Landed in full (D1–D4): the lane, the shared rendering, and both emit slices; ADR-0074 added the docblock-triggered fourth id. |
 
 A bare `steins check` surfaces `proof` + `mechanics` only. The contract layer is
 reached through a named profile. See [diagnostic-policy.md](diagnostic-policy.md).
@@ -115,7 +115,9 @@ Emitting ids, by layer (the registry is the source of truth —
   `effect.unknown-label` (a typo'd label is apparatus rot, not a contract
   claim).
 - **debug** — `debug.type`, `debug.phpdoc-type` (fail-level, profile-inert),
-  `debug.var-dump` (warn-level, exit-neutral, disableable) — ADR-0053 D3/D4.
+  `debug.var-dump` (warn-level, exit-neutral, disableable) — ADR-0053 D3/D4;
+  `debug.trace` (warn-level, exit-neutral, profile-inert — the
+  `/** @psalm-trace $x */` docblock trigger) — ADR-0074.
 
 Registered but **not yet emitted** — the registry reserves the id and its layer
 so `@steins-ignore` can name it and a profile can select it, but no emitter

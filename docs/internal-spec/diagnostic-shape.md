@@ -61,8 +61,10 @@ counter; a dump is not a finding).
 sidecar `reflect` slice's signature layer). The existence ids
 `call.undefined-function` and `class.undefined` lit up at ADR-0049 S4 and are
 now emittable (their emitters run under the full dam-gated ladder). The whole
-dump surface — `debug.type` / `debug.phpdoc-type` (D3) and `debug.var-dump`
-(D4) — is emittable.
+dump surface — `debug.type` / `debug.phpdoc-type` (D3), `debug.var-dump` (D4),
+and `debug.trace` (ADR-0074: registered `(Layer::Debug, Floor::Default)`,
+level warn, fixed — the docblock trigger is committable, so exit-neutrality
+replaces the explicit pair's forced fail) — is emittable.
 
 Semantics of layers, facets, prefix matching, and profiles:
 [`diagnostic-policy.md`](../type-specification/diagnostic-policy.md).

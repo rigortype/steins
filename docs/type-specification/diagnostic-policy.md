@@ -85,12 +85,12 @@ pattern.
 `warn` demotes an id to **report-without-fail**. Every surfaced finding is
 `fail` by default in every layer but `debug` — see below.
 
-## The debug lane (ADR-0053)
+## The debug lane (ADR-0053, ADR-0074)
 
-The dump surface's contract, decided in full and **landed in full**
-(D1–D4): the lane, its three registered ids, the shared plain-text
-rendering, and both emit slices (the D3 explicit pair and D4
-`var_dump`), gate-excluded and byte-identical throughout.
+The dump surface's contract, decided in full and **landed in full**: the
+lane, its registered ids, the shared plain-text rendering, and the emit
+slices (ADR-0053's D3 explicit pair and D4 `var_dump`, plus ADR-0074's
+docblock trigger), gate-excluded and byte-identical throughout.
 
 - **`debug.type` / `debug.phpdoc-type`** (explicit `PHPStan\dumpType` /
   `dumpPhpDocType`, recognized unconditionally by resolved FQN): level
@@ -102,10 +102,22 @@ rendering, and both emit slices (the D3 explicit pair and D4
   structurally **exit-neutral forever**; no channel can promote it to fail
   (that would be a lint rule, which Steins refuses). Default-ON in the
   built-in profiles, **disableable** in a named profile.
-- All three are **exempt from all three suppression channels** — never
+- **`debug.trace`** (ADR-0074: a statement-adopted `/** @psalm-trace $x */`
+  or `@phpstan-trace` docblock, read through the shared `stmt_docblock`
+  adoption rule): the docblock spelling of the `dumpType` question, answered
+  through the same renderer against the adopted statement's **exit** facts
+  (Psalm's semantics — the tag applies to the next statement and reports
+  what it leaves behind), one report per named variable of a comma list, in
+  source order. Level **warn**, fixed and exit-neutral — the trigger is a
+  runtime-inert comment, legal to commit, so the explicit pair's forcing
+  argument does not apply. **Profile-inert** like the explicit pair: an
+  annotation is always an authored question, so there is no
+  `debug.var-dump`-style disable. Emission tracks the walk's construct
+  coverage (silence-parity with a `dumpType` at the mirror position).
+- All four are **exempt from all three suppression channels** — never
   baselined, never matched by `@steins-ignore` or `[[policy]]`. The remedy
-  for an unwanted dump is deleting the call; an ignore naming a debug id
-  reports `suppress.unmatched`.
+  for an unwanted dump is deleting the call (or the comment); an ignore
+  naming a debug id reports `suppress.unmatched`.
 - The layer is **excluded from every fp-gate counter** — a dump is an
   answer, not a finding.
 

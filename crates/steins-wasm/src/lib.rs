@@ -520,6 +520,30 @@ mod tests {
         assert_eq!(v["notice"], SOUND_SUBSET_NOTICE);
         assert!(!v["lines"].as_array().unwrap().is_empty());
     }
+
+    /// The trace annotation (ADR-0074) emits in the playground: the scanner and
+    /// the shared `stmt_docblock` adoption are in the zero-dep path, so a
+    /// statement-adopted `/** @psalm-trace $x */` reports `debug.trace` through
+    /// the wasm envelope exactly as in the CLI — warn-level, debug lane, at the
+    /// tag's own position, carrying the statement's exit fact.
+    #[test]
+    fn trace_annotation_emits_in_the_playground() {
+        let src = "<?php\n/** @psalm-trace $x */\n$x = 'GET';\n";
+        let v = check_impl(src, None);
+        assert_eq!(v["ok"], true);
+        let traces: Vec<&serde_json::Value> = v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["id"] == "debug.trace")
+            .collect();
+        assert_eq!(traces.len(), 1, "got {:?}", v["findings"]);
+        let t = traces[0];
+        assert_eq!(t["message"], "traced type of $x: 'GET'");
+        assert_eq!(t["layer"], "debug");
+        assert_eq!(t["level"], "warn");
+        assert_eq!(t["line"], 2, "reported at the tag's line, not the statement's");
+    }
 }
 
 /// The replay ABI (ADR-0066), pinned natively: the `pending` contract, the

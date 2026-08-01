@@ -122,9 +122,10 @@ misspelled id, a typo'd effect label. Their absence would silently rot
 another channel, so they print in every profile and no suppression channel
 reaches them.
 
-**debug** — requested introspection (ADR-0053). You wrote `dumpType()` or
-`var_dump()`; Steins answers. A dump is an answer, not a finding, so the
-layer sits outside the profile ladder and outside every gate.
+**debug** — requested introspection (ADR-0053, ADR-0074). You wrote
+`dumpType()`, a `@psalm-trace` docblock, or `var_dump()`; Steins answers. A
+dump is an answer, not a finding, so the layer sits outside the profile
+ladder and outside every gate.
 
 Which profile puts each layer on the surface:
 
@@ -674,7 +675,7 @@ underneath. Ignore syntax and placement rules are in
 
 ### `debug.*` — you asked, Steins answered
 
-Three ids, debug layer, on every surface. These report what the analyzer
+Four ids, debug layer, on every surface. These report what the analyzer
 inferred at a point, which makes them the fastest way to find out why some
 *other* finding did or did not fire.
 
@@ -708,14 +709,37 @@ literal `'POST'`, not the type `string`. `debug.phpdoc-type` renders the
 declared side instead, the contract arms as narrowed by guards.
 `debug.var-dump` reports one line per argument of any default-on `var_dump()`.
 
+The fourth id is the committable spelling of the `debug.type` question
+(ADR-0074): a `/** @psalm-trace $x */` (or `@phpstan-trace`) docblock above
+a statement reports the same rendering, answered against that statement's
+*exit* facts — the tag applies to the next statement and reports what it
+leaves behind, so a trace above an assignment prints what the variable
+became. A comma list (`@psalm-trace $a, $b`) reports each named variable in
+source order.
+
+```php
+<?php
+
+/** @psalm-trace $verb */
+$verb = 'PUT';
+```
+
+```
+$ steins check src/Trace.php
+src/Trace.php:3:5: warning[debug.trace]: traced type of $verb: 'PUT'
+```
+
 The levels differ on purpose. The explicit pair is **fail** and reds your
 build, because `PHPStan\dumpType` is not a real PHP function and a committed
 call is a guaranteed fatal. `var_dump()` is legal working PHP, so
 `debug.var-dump` is **warn** and exit-neutral by construction — no channel
 can promote it to fail. Silence it with `disable = ["debug.var-dump"]` in a
-named profile.
+named profile. `debug.trace` is **warn** and exit-neutral for the mirror
+reason — a docblock is runtime-inert and legal to commit — but it has no
+disable switch: an annotation is always an authored question, and the remedy
+is deleting the comment.
 
-All three are exempt from `@steins-ignore` — an ignore naming `debug.type`
+All four are exempt from `@steins-ignore` — an ignore naming `debug.type`
 reports `suppress.unmatched`. ADR-0053 exempts them from the baseline as
 well, though the current binary still captures a dump entry there; that gap
 is tracked as issue #108. The remedy for an unwanted dump is deleting the call

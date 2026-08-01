@@ -308,8 +308,12 @@ contain no `.php` files is a genuine no-op and still exits `0`.
   of inferred types and effects; a resident `lsp` server is later work.
 - **The dump surface is live.** `PHPStan\dumpType($e)` prints the inferred
   fact and **reds the build** (fail-level — remove it before committing, as
-  with PHPStan); `var_dump()` reports its arguments' inferred facts by
-  default at warn level (exit-neutral; disable with a profile's
+  with PHPStan); a `/** @psalm-trace $e */` docblock above a statement asks
+  the same question committably — the trigger is a comment, so `debug.trace`
+  reports at warn level and never moves the exit code, and the answer is the
+  statement's *exit* fact (what `$e` is after that statement runs);
+  `var_dump()` reports its arguments' inferred facts by default at warn
+  level (exit-neutral; disable with a profile's
   `disable = ["debug.var-dump"]`). See the handbook's type-system chapter
   for a tour built on `dumpType()`.
 - **Conformance posture, not a scoreboard.** Steins tracks the

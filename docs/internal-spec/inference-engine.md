@@ -193,7 +193,12 @@ Every doubt leg in every table is **silence** — the family widens the finding
 surface, never the proof standard. The dump surface's `emit_dumps` (ADR-0053
 D3) sits beside them: a recognized `PHPStan\dumpType()` /
 `PHPStan\dumpPhpDocType()` call emits its fact rendering as a debug-layer
-answer.
+answer. `emit_trace_annotations` (ADR-0074) is its docblock twin, in the same
+walk: a statement-adopted `/** @psalm-trace $x */` (the shared `stmt_docblock`
+query, resolved at the top of the walk's per-statement step) flushes
+`debug.trace` at the step's exit — the same rendering, against the statement's
+**exit** facts, reported at the tag's own position, in the plain per-scope
+pass only, with declaration statements inert.
 
 Two read surfaces reach one level into the heap (ADR-0052 §7): a **depth-1
 property fetch** `$var->prop` — allocation-keyed through the object store — reads
