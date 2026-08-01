@@ -622,10 +622,12 @@ pub fn out_params(name: &str) -> Option<&'static [usize]> {
 ///
 /// * the folding allowlist ([`foldable`]), which is pure by construction, plus
 /// * the ADR-0062/0064 array read-position and shape-projection family that does
-///   **not** carry an out-param row (`array_first`/`array_last`/`array_values`/…;
-///   `current` and `key` take `array|object $array`, while their pointer-moving
-///   siblings `reset`/`end`/`next`/`prev` take `&$array` and are rowed above —
-///   the two tables corroborate each other), plus
+///   **not** carry an out-param row (`array_first`/`array_last`/`array_values`/…,
+///   and `array_slice` since the Amendment B seam growth; `current` and `key`
+///   take `array|object $array`, while their pointer-moving siblings
+///   `reset`/`end`/`next`/`prev` take `&$array` and are rowed above — the two
+///   tables corroborate each other, as do `array_slice` and its rowed splicing
+///   sibling `array_splice`), plus
 /// * the alias spellings of foldable names (`chop`, `join`, `sizeof`), which are
 ///   the same C function under a second name.
 ///
@@ -657,6 +659,13 @@ pub fn by_value_arg(name: &str, position: usize) -> Option<bool> {
         "array_keys",
         "array_flip",
         "array_reverse",
+        // The family's grown seam (ADR-0062 Amendment B): `array_slice(array
+        // $array, int $offset, ?int $length = null, bool $preserve_keys =
+        // false)` — every parameter by value at `PINNED_PHP`. Its *splicing*
+        // sibling `array_splice` takes `&$array` and is an `out_params` row
+        // above; the two tables corroborate each other exactly as
+        // `current`/`reset` do.
+        "array_slice",
     ];
     match out_params(name) {
         // A transcribed row states this name's by-ref positions exhaustively.
@@ -2295,9 +2304,15 @@ mod tests {
         // projection family.
         for f in ["chop", "join", "sizeof", "array_first", "array_last", "current", "key",
                   "array_values", "array_keys", "array_flip", "array_reverse",
-                  "array_key_first", "array_key_last"] {
+                  "array_key_first", "array_key_last", "array_slice"] {
             assert_eq!(by_value_arg(f, 0), Some(true), "{f} is certified by value");
         }
+        // The near-name pair the certification must not blur: `array_slice` is
+        // by value at every position, `array_splice` writes its subject.
+        for p in 0..4 {
+            assert_eq!(by_value_arg("array_slice", p), Some(true), "array_slice position {p}");
+        }
+        assert_eq!(by_value_arg("array_splice", 0), Some(false), "array_splice is by ref");
     }
 
     #[test]

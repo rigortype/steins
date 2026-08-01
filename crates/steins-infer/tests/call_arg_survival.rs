@@ -114,12 +114,18 @@ impl Folder for Mock {
         None
     }
     fn builtin_return_type(&mut self, name: &str) -> Option<String> {
-        matches!(name.to_ascii_lowercase().as_str(), "array_first" | "array_last")
-            .then(|| "mixed".to_owned())
+        match name.to_ascii_lowercase().as_str() {
+            "array_first" | "array_last" => Some("mixed".to_owned()),
+            "array_slice" => Some("array".to_owned()),
+            _ => None,
+        }
     }
     fn builtin_param_counts(&mut self, name: &str) -> Option<(u32, u32)> {
-        matches!(name.to_ascii_lowercase().as_str(), "array_first" | "array_last")
-            .then_some((1, 1))
+        match name.to_ascii_lowercase().as_str() {
+            "array_first" | "array_last" => Some((1, 1)),
+            "array_slice" => Some((4, 2)),
+            _ => None,
+        }
     }
 }
 
@@ -145,6 +151,38 @@ fn the_issue_76_blocker_reproduced_end_to_end() {
             "dumped type: 'bar'|'foo' (asserted)".to_owned()
         ],
         "the second read must see the same shape as the first"
+    );
+}
+
+#[test]
+fn the_array_slice_stack_reproduced_end_to_end() {
+    // phpstan-src's `array-slice.php` shape in miniature: several consecutive
+    // reads of ONE declared variable, each through `array_slice` — the variable's
+    // occurrence is a *nested* call position under the dump, so the dump-read
+    // exception never sees it and survival rides entirely on `array_slice`'s
+    // certification (the ADR-0062 Amendment B member of the certified set).
+    // Before that certification the second row answered the bare `array` floor
+    // and the variable itself was gone.
+    let src = "<?php\n/** @param array<int, bool> $arr */\n\
+               function f(array $arr): void {\n\
+               \\PHPStan\\dumpType(array_slice($arr, 1, 2));\n\
+               \\PHPStan\\dumpType(array_slice($arr, 1, 2));\n\
+               \\PHPStan\\dumpType($arr);\n}\n";
+    let tree = SourceTree::parse(src);
+    let got: Vec<String> = check_with(&tree, &[], "t.php", &mut Mock)
+        .into_iter()
+        .filter(|d| d.id == DEBUG_TYPE_ID)
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(got.len(), 3, "expected three debug.type dumps, got {got:?}");
+    assert_eq!(
+        got[0], got[1],
+        "the second slice must see the same declared shape as the first"
+    );
+    assert_eq!(got[0], "dumped type: list<bool> (asserted)");
+    assert_eq!(
+        got[2], "dumped type: array<int, bool> (asserted)",
+        "the declared fact itself must outlive both slices"
     );
 }
 

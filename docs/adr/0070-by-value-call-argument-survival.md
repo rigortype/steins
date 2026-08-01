@@ -202,3 +202,32 @@ table's consumers conclude.
 * The precise path costs one index resolution per described site, and only for
   names the walk actually holds something for; a statement with no describable
   site short-circuits before any lookup.
+
+## Amendment A (2026-08-02): `array_slice` joins the certified set — PENDING ratification
+
+§2.1 closed the certified set over "the names Steins' own rules already
+reason about" and made widening it a separate act with its own measurement
+run. This amendment is one such act, with one name.
+
+**The membership case.** ADR-0062 Amendment B grew the shape-projection
+seam to `array_slice`: the projection rung executes it on the
+order-witnessed lane and answers the widening floor on the order-declared
+lane. That made it a member of exactly the family §2.1 already lists
+(`array_values`, `array_keys`, `array_flip`, `array_reverse`) while the
+certified set still predated the growth — so a *nested* read like
+`dumpType(array_slice($arr, 1, 2))` computed a precise answer and then
+paid for it by dropping `$arr`: the site's callee is `array_slice`, not
+the dump, so the dump-read exception never applies, and an uncertified
+name refuses (`by_value_arg` answered `None`). Every row after a group's
+first answered the bare envelope floor.
+
+**The certification.** At `PINNED_PHP` (8.5.8) the stub declares
+`array_slice(array $array, int $offset, ?int $length = null, bool
+$preserve_keys = false)` — every parameter by value. Its splicing sibling
+`array_splice(array &$array, …)` stays an `out_params` row, so the two
+tables corroborate each other exactly as `current`/`reset` do, and the
+near-name pair is pinned in the catalog's own tests.
+
+**Measurement.** MEASUREMENT-PENDING — nsrt before/after and fp-gate to
+be recorded here from the run accompanying this amendment. Per §6, the
+kept fact is a new premise and the gate remains the standing instrument.
