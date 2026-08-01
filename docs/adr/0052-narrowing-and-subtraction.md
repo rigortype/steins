@@ -510,3 +510,40 @@ exit-2 path — the intended hard-config-error outcome); the assert
 fixtures are re-pinned at Verified. The `@phpstan-assert` tag family is
 unchanged (Asserted). The type specification now describes the
 Verified-always behavior.
+
+## Amendment (2026-08-01): a dispatch rung may read the contract lane where the value lane holds only the envelope
+
+Landed with the string-predicate transfer slice (issue #77) as a flagged
+deviation; recorded here for ratification. Point 1 splits the carriers —
+scalar declarations live in the **contract arm lane**, the value lane
+holds proven values and guard refinements — and point 9 seeds entry
+states accordingly: a native `string $s` contributes `Fact::General` to
+the value lane, and the `@param non-empty-string` refinement exists only
+as an `Asserted` arm beside it. The argument-dependent return rung
+(ADR-0061) dispatched on the value lane alone, so a transfer rule that
+asks "what do we know about the subject string?" was blind to the
+declared refinement even though the checker carried it.
+
+The amendment: **at a dispatch site, where the value-lane fact is only
+the envelope (`Fact::General`), the rung may read the variable's
+declared contract arm lane instead** — lowered to ONE fact
+(`steins_contract::to_fact` over every arm; any arm that does not lower,
+or a multi-fact list, declines), carrying the **weakest stratum any arm
+holds**. A refinement the docblock merely claims therefore enters the
+transfer `Asserted` and can never premise a proof-layer finding; a
+value-lane fact stronger than the envelope still wins outright.
+
+What this does **not** open, on purpose:
+
+- **No second seeding.** Entry states are untouched; the read is
+  dispatch-site-local and read-only, so point 9's replayability argument
+  carries over verbatim (the arm lane consulted is walk-local state).
+- **The carriers stay split.** The value lane gains no union-of-bases
+  layer and no scalar-refinement copy of the arm lane; the read
+  *projects* the arm lane at one consumption point. The union-fold seam
+  (ADR-0028's 2026-08-01 amendment) deliberately declined the same
+  projection for scalar `@param` unions — a projection is justified
+  per-consumer, not granted globally.
+- **The stratum rule is load-bearing, not decorative:** the projected
+  fact's grade is what keeps a lying docblock unable to forge a proof
+  through a transfer rule's output (point 5, ADR-0037).
