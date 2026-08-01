@@ -41,8 +41,9 @@ Two things worth knowing before you start:
    `--set-baseline` never runs in CI, a `jq` recipe for inline
    annotations, `steins doctor` as a preflight, and copy-pasteable
    workflow templates in [`ci-templates/`](ci-templates/README.md).
-7. **Troubleshooting** *(planned)* — `steins doctor`, sidecar failures, and
-   a symptom-indexed list of common problems.
+7. [**Troubleshooting**](07-troubleshooting.md) — `steins doctor` section
+   by section, every sidecar failure mode with its fix, and a
+   symptom-indexed list of common first-run problems.
 
 ## Where the manual ends
 
