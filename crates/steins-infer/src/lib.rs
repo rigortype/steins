@@ -18014,11 +18014,26 @@ fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Vec<ContractArm>> {
     }
     let declared = steins_catalog::declared_return(name)?;
     let arms = flatten_arms(steins_contract::lower_str(declared)?);
-    // No class arm can occur at the TOP level — the mining admits the scalar and the
-    // array vocabularies only, and ADR-0071 §2.3 leaves object arms to a later slice —
-    // so the resolver is the identity. A class *inside* an array row's element type is
-    // already a builtin FQN, never a project name needing namespace context: the seam
-    // is shared, the namespace context is not.
+    // The resolver is the **identity**, and now that the mining admits class rows
+    // (`imageloadfont` = `GdFont`) that is a claim worth stating rather than an
+    // accident of there being nothing to resolve.
+    //
+    // `refine_declared_arms`' resolver exists to turn a *relative* class name in a
+    // project docblock into an FQN against the declaring namespace — `@return Node`
+    // inside `namespace App;` means `App\Node`. A functionMap row has no declaring
+    // namespace and never carries a relative name: every class it names is a global
+    // builtin FQN, written as PHP resolves it (`GdFont`, `CurlHandle`, and the
+    // already-qualified `ast\Node` for a namespaced extension). Running a project
+    // namespace resolver over those would MANGLE them — `GdFont` read from inside
+    // `namespace App;` would become `App\GdFont`, a class that does not exist — so
+    // the identity is not merely sufficient here, it is the only correct resolver.
+    //
+    // `ContractTy::Class` already normalizes on the way in (`lower_identifier` strips
+    // a leading `\` and case-folds), so the arms compare by `class_eq` exactly as the
+    // generation-time countersign compared them, and the identity preserves that
+    // normalization instead of disturbing it. The same argument covered a class
+    // *inside* an array row's element type before this slice; it now covers the top
+    // level too, for the same reason and through the same seam.
     refine_declared_arms(&[], arms, &|n: &str| n.to_owned())
 }
 
@@ -18046,6 +18061,15 @@ fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Vec<ContractArm>> {
 /// nullability rule and applies it to whatever the arms denote, and declining is the
 /// FP-safe side of it (the arms still carry the null, so nothing is lost to the
 /// declared surface or to guard subtraction).
+///
+/// A **class** row (`GdFont`, `?GdFont`, bare `object`) declines here too, and for a
+/// stronger reason than either of those: the value domain has no object inhabitant at
+/// all (ADR-0035/0038), so there is no fact to seed rather than a fact this refuses to
+/// seed. Both lowerings say so independently — [`contractty_to_fact`] has no arm for
+/// `Class`/`ObjectAny`, and `to_shape_fact` (through [`seed_shape_fact`]) has none
+/// either. A class row is therefore **arm-lane only**, unconditionally: it reaches the
+/// declared surface and guard subtraction, and it puts nothing whatever into the value
+/// lane, which is why it can never become a premise anywhere.
 fn floor_value_fact(arms: &[ContractArm]) -> Option<Fact> {
     let (nulls, rest): (Vec<ContractArm>, Vec<ContractArm>) =
         arms.iter().cloned().partition(|a| matches!(a.ty, ContractTy::Null));
