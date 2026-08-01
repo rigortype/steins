@@ -1,0 +1,48 @@
+# The Steins User Manual
+
+How to run Steins and shape what it reports. This is the operational half of
+the documentation: install it, run it, configure it, wire it into CI, fix it
+when it misbehaves. The [handbook](../handbook/README.md) explains what the
+analysis *means*, and the [type specification](../type-specification/README.md)
+is the binding record when either disagrees with it.
+
+Two things worth knowing before you start:
+
+1. **A bare `check` is proof-only.** It reports what provably breaks at
+   runtime and nothing else. Debt reporting — undeclared `@throws`, PHPDoc
+   mismatches, effect-envelope violations — is real and abundant in released
+   code, so it lives behind a named profile you opt into, never in a first
+   run.
+2. **Silence is not a safety claim.** Steins printing nothing about a call
+   means it could not decide, not that it decided the call is fine.
+
+## Chapters
+
+1. [**Installation and quickstart**](01-installation-and-quickstart.md) —
+   the four install channels, your first `steins check .`, reading the
+   default surface, the PHP sidecar and `--no-php`, exit codes, and the
+   honest limits of the current release.
+2. **CLI reference** *(planned)* — every subcommand and every flag: `check`,
+   `annotate`, `transform`, `effect-diff`, `doctor`, `version`, `license`.
+3. **Configuration** *(planned)* — the `steins.toml` key-by-key reference,
+   discovery, and how config keys interact with command-line flags.
+4. **Findings** *(planned)* — the finding-id families, the anatomy of a
+   message line, and the proof / contract / mechanics layers.
+5. [**Profiles, baseline, and suppression**](05-profiles-and-baseline.md) —
+   the named strictness stages, the JSONL baseline ratchet, user profiles in
+   `steins.toml`, inline `@steins-ignore`, and why mechanics ids can never
+   be switched off.
+6. **CI integration** *(planned)* — running Steins in CI, the exit-code
+   contract, the baseline loop, and copy-pasteable workflow templates.
+7. **Troubleshooting** *(planned)* — `steins doctor`, sidecar failures, and
+   a symptom-indexed list of common problems.
+
+## Where the manual ends
+
+- [`docs/handbook/`](../handbook/README.md) — a cover-to-cover walkthrough
+  of what Steins proves and why, written for PHP programmers with no
+  static-analysis background.
+- [`docs/type-specification/`](../type-specification/README.md) — the
+  normative specification of what the analysis means.
+- [`docs/adr/`](../adr/) — architecture decision records, the binding
+  source on any conflict.

@@ -12,14 +12,14 @@ composer require --dev typedduck/steins
 
 Composer installs a PHP shim that fetches the matching release binary on first use, verifies its published sha256, and runs it — so the analyzer pins in `composer.lock` beside the code it analyzes.
 
-Or `brew install rigortype/tap/steins`, a [prebuilt binary](https://github.com/rigortype/steins/releases), or `cargo install --git https://github.com/rigortype/steins steins-cli`. [Quickstart](docs/guide/quickstart.md) covers which fits what, and `steins doctor --no-php` confirms any of them.
+Or `brew install rigortype/tap/steins`, a [prebuilt binary](https://github.com/rigortype/steins/releases), or `cargo install --git https://github.com/rigortype/steins steins-cli`. [Quickstart](docs/user-manual/01-installation-and-quickstart.md) covers which fits what, and `steins doctor --no-php` confirms any of them.
 
 ## Docs
 
 - [Why effects?](docs/why-effects.md) — the motivation, the Flix and PHPStan lineage, the intended value, and why this is not algebraic effects for PHP.
-- [Quickstart](docs/guide/quickstart.md) — install, first run, exit codes, limits.
+- [Quickstart](docs/user-manual/01-installation-and-quickstart.md) — install, first run, exit codes, limits.
 - [Handbook](docs/handbook/README.md) — a guided tour of what Steins proves: the guarantee, the type system, narrowing, and effects.
-- [Profiles and baseline](docs/guide/profiles-and-baseline.md) — named stages, the baseline ratchet, `steins.toml`.
+- [Profiles and baseline](docs/user-manual/05-profiles-and-baseline.md) — named stages, the baseline ratchet, `steins.toml`.
 
 ### Specifications
 

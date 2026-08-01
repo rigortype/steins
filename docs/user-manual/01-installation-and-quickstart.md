@@ -145,7 +145,8 @@ live path — "the program works" outranks the worst-case static reading. So
 (a proven `TypeError`), while a value that merely *looks* risky but works at
 runtime is silent by construction. This is the lenient-default principle:
 defaults are lenient, strictness is opt-in and named (see
-[profiles-and-baseline](profiles-and-baseline.md)). Debt reporting —
+[profiles, baseline, and suppression](05-profiles-and-baseline.md)). Debt
+reporting —
 true-but-not-breaking findings such as undeclared `@throws` — is reached
 through profiles, deliberately, never dumped on you by a first run.
 

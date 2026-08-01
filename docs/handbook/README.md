@@ -37,7 +37,7 @@ than once, and you want to know:
 The handbook answers those questions. It does **not** replace
 the [normative type specification](../type-specification/README.md),
 which is the binding source when this handbook disagrees, nor
-the [operational guide](../guide/quickstart.md) that lists
+the [user manual](../user-manual/README.md) that lists
 every flag and config key.
 
 > **If you know PHPStan or Psalm:** you already have the reflexes
@@ -88,7 +88,7 @@ Written after tonight's release; listed here so you know the map:
    (`default` → `throws-direct` → `contracts` → `strict`), the JSONL
    baseline ratchet, inline `@steins-ignore`, and why there is no
    message-regex suppression. Grounded in
-   [profiles-and-baseline](../guide/profiles-and-baseline.md) and
+   [profiles-and-baseline](../user-manual/05-profiles-and-baseline.md) and
    [diagnostic-policy.md](../type-specification/diagnostic-policy.md).
 8. **Understanding findings** — the finding-id catalogue by
    layer (`type.*`, `call.*`, `offset.*`, `phpdoc.*`, `throw.*`,
@@ -132,7 +132,7 @@ you out of the handbook into the binding spec corpus or the ADRs:
 
 - [`docs/type-specification/`](../type-specification/README.md)
   — the normative specification of what the analysis *means*.
-- [`docs/guide/`](../guide/quickstart.md) — the operational guide
+- [`docs/user-manual/`](../user-manual/README.md) — the user manual
   (install, flags, profiles, baseline).
 - [`docs/adr/`](../adr/) — architecture decision records, the
   binding source on any conflict.
