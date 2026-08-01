@@ -84,8 +84,10 @@ fn else_branch(decl: &str, cond: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// The ADR-0069 / issue #79 declared-return floor puts `strpos`' functionMap row
-/// into the arm lane verbatim — `positive-int|0|false`, three arms, no single
-/// value-domain fact — so before this slice the guard had nothing to bite on.
+/// into the arm lane — mined as `positive-int|0|false`, which the seeding
+/// canonicalizes to two arms (issue #90: the literal and the interval it abuts are
+/// one denotation) — no single value-domain fact, so before this slice the guard
+/// had nothing to bite on.
 const STRPOS_GUARDED: &str = "<?php
 function f(string $h, string $n): void {
     $pos = strpos($h, $n);
@@ -103,11 +105,12 @@ function f(string $h, string $n): void {
 #[test]
 fn the_strpos_floor_row_loses_its_false_arm_under_the_guard() {
     // The control: the whole mined row, at the `Asserted` grade the floor seeds.
-    assert_eq!(one_type(STRPOS_UNGUARDED), "dumped type: positive-int|0|false (asserted)");
-    // …and under the guard, the `false` arm is gone. The two int arms both survive
-    // (`positive-int` and `0` are each disjoint from `false`), which is strictly
-    // more than PHPStan's `int` — the row says so, so the lane says so.
-    assert_eq!(one_type(STRPOS_GUARDED), "dumped type: positive-int|0 (asserted)");
+    // Its `positive-int|0` reads as the one interval it denotes (issue #90).
+    assert_eq!(one_type(STRPOS_UNGUARDED), "dumped type: non-negative-int|false (asserted)");
+    // …and under the guard, the `false` arm is gone. The int arm survives (it is
+    // disjoint from `false`), which is strictly more than PHPStan's `int` — the row
+    // says so, so the lane says so.
+    assert_eq!(one_type(STRPOS_GUARDED), "dumped type: non-negative-int (asserted)");
 }
 
 #[test]
