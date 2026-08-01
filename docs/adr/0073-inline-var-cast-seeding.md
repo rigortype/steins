@@ -24,6 +24,16 @@ subject through an inline `@var` rather than a `@param`; the issue #118
 `array_slice` transfers, correct over `@param` subjects, could move one
 row.
 
+**This supersedes the #76-era "deliberate non-trust" reading** (recorded
+in the 2026-08-01 run notes and restated in PR #120's body), which
+declined to seed inline `@var` at all. That posture conflated two
+worries this ADR separates: importing PHPStan's order-declared defect —
+still declined, §4 — and trusting a docblock in the proof layer — never
+at stake, because the cast seeds `Asserted` arms only, the same trust
+grade every `@param` envelope already gets. Refusing the *spelling*
+while accepting the identical declaration one line higher, on the
+function docblock, was an inconsistency, not a safety property.
+
 ## 2. Decision: the tag is a cast, lowered by the `@param` machinery
 
 A docblock **immediately preceding a trace statement** (only whitespace
