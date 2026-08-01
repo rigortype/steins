@@ -22,8 +22,10 @@ Two things worth knowing before you start:
    the four install channels, your first `steins check .`, reading the
    default surface, the PHP sidecar and `--no-php`, exit codes, and the
    honest limits of the current release.
-2. **CLI reference** *(planned)* — every subcommand and every flag: `check`,
-   `annotate`, `transform`, `effect-diff`, `doctor`, `version`, `license`.
+2. [**CLI reference**](02-cli-reference.md) — every subcommand and every
+   flag: `check`, `annotate`, `transform`, `effect-diff`, `doctor`,
+   `version`, `license`, the `text`/`json` output modes, and the exit-code
+   contract per command.
 3. [**Configuration**](03-configuration.md) — the `steins.toml` key-by-key
    reference: discovery, which sections parse strictly and which leniently,
    and how config keys interact with command-line flags.
