@@ -307,3 +307,53 @@ filter, a format-specific omission) would violate this amendment even
 though it violates neither point in isolation — the binding claim is the
 conjunction, stated once so it cannot be split apart by a change that
 respects each half separately.
+
+## Amendment (2026-08-01): §7 — a nonexistent explicit path is a usage error
+
+Point 7 fixed `2` for "usage/config errors" but never said what an
+explicitly-passed path that does not exist *is*. It fell through
+`collect_php_files` (not a dir, no `.php` extension → dropped), so
+`steins check /typo` produced an empty report and exit `0`:
+indistinguishable from a genuinely clean run in both text and JSON. A
+CI job stays green after a directory is renamed. That is the
+crying-wolf prohibition inverted — not a false alarm, a false
+all-clear, and the worse of the two for a tool whose whole claim is
+that a silent run means something.
+
+1. **A path argument naming nothing is a usage error: exit 2.** It is
+   argv, not analysis — the user asserted a location and the
+   filesystem refutes it, which is exactly the shape doctor already
+   exits `1` on for a config path-set reference to nothing (ADR-0054
+   §10), and exactly what `annotate` already exits `2` on for an
+   unreadable file. `check`, `transform` and `effect-diff` — every
+   command that walks a path set — were the outliers, not the
+   precedent. The error names every missing path in one message, so a
+   ten-path invocation reports all of its typos at once instead of one
+   per re-run.
+2. **Validated before anything is emitted.** The check happens
+   immediately after argument parsing, ahead of config load and any
+   analysis, so `--format json` produces *no document* — stderr plus
+   code `2`, never a well-formed `{"findings": []}` a consumer would
+   read as clean. This is the same fail-fast ordering §7 already
+   requires of profile resolution and config parse.
+3. **Existence is the discriminator; emptiness is not.** A path that
+   exists and yields zero `.php` files — an empty directory, a tree
+   before its sources land — stays exit `0`. It is a real location the
+   run genuinely had nothing to say about. The empty-glob worry that
+   motivated asking is not actually in tension with point 1: under
+   `nullglob` an unmatched `src/*.php` reaches the CLI as *no paths*
+   (already `2`, "no paths given"), and without it the literal
+   `src/*.php` reaches the CLI as a path naming nothing — where "path
+   does not exist: src/*.php" is the more useful of the two answers,
+   not a regression.
+4. **Refusals.**
+   - **Flagging an existing-but-unanalyzable explicit file**
+     (`steins check README.md`) — a distinct decision from this one:
+     the argument names something real and the tool merely has
+     nothing to say about it. Left at `0` deliberately, not
+     overlooked; revisit only with a case where it bit someone.
+   - **`--allow-missing-paths` or any per-run escape hatch** — a flag
+     to re-enable a false all-clear is a flag to re-open the bug.
+   - **Touching `doctor`'s exit posture** — its always-`0`
+     environment-degradation stance and `1`-on-contradiction split
+     (ADR-0054 §10) are unchanged by this amendment.

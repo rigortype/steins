@@ -170,9 +170,17 @@ through profiles, deliberately, never dumped on you by a first run.
 - `0` — nothing fail-level was displayed (a clean run, or a warn-only run).
 - `1` — at least one fail-level finding was displayed.
 - `2` — usage or config error (unknown flag, unknown profile, bad
-  `steins.toml`). For example `--profile nope` prints
+  `steins.toml`, **a path argument that does not exist**). For example
+  `--profile nope` prints
   ``steins: unknown profile `nope` (built-ins: default, contracts, throws-direct, strict; …)``
   and exits `2`.
+
+A path you pass that names nothing is a usage error, not a clean run —
+`steins check src/Typo` prints `steins: path does not exist: src/Typo` and
+exits `2`, and under `--format json` emits no document at all, so a renamed
+directory reds the build instead of keeping it green (ADR-0050 §7). A path
+that *exists* and happens to contain no `.php` files is a genuine no-op and
+still exits `0`.
 
 ## Known limitations (v0.1.2, honest)
 
