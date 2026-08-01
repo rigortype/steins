@@ -347,3 +347,138 @@ so they are inert there — carried for the arm lane, not the renderer. A
 future slice that wants element-level countersigning knows where to
 stand: it is the same sidecar `reflect` extension the object bucket
 needs.
+
+## Amendment (2026-08-01, third): the object half rides the reflexive floor
+
+The 620-row bucket the two amendments above kept deferring was never one
+population, and splitting it is most of this slice's result. ADR-0071 §2.3
+designed the object half's admission and predicted it would need no new
+relation; it did not. `subsumes_class` has been reflexive since N1, and
+reflexivity is exactly the question a functionMap row poses — the row says
+`GdFont`, the engine says `GdFont`, `GdFont ⊆ GdFont` answers `Yes` in both
+directions, and the arm-wise clause closes. The only change is
+`arm_is_carriable`, widened to `Class` and `ObjectAny`, per arm, so
+`?ClassName` follows by composition.
+
+**The asymmetry is the whole design, not a limitation of it.** A row naming a
+*different* class leaves `subsumes_class` at `Maybe`, which is not `Yes`, so it
+is refused and listed. The floor therefore only ever admits a name the engine
+itself spelled, and it never states a hierarchy claim it has no hierarchy to
+check. One direction does resolve without a hierarchy and is admitted: a class
+row under a bare `object` declaration, the class analogue of `non-empty-string`
+under `string`, decided by the universal every-instance-is-an-object rule.
+
+**Re-mined at the same pin (`dcde2be6`, PHP 8.5.8) so the delta is the
+carriability filter and nothing else:**
+
+| | #73 | #79 | ADR-0071 | objects |
+|---|---|---|---|---|
+| carriable by the lowering | 3,051 | 3,612 | 4,343 | 4,576 |
+| — of which richer than an envelope | 0 | 561 | 1,292 | 1,525 |
+| dropped: shaped arrays / lists | 388 | 388 | 0 | 0 |
+| dropped: multi-base unions | 1,119 | 630 | 287 | 200 |
+| dropped: scalar refinements | 74 | 2 | 2 | 2 |
+| dropped: objects / resource / callable | 620 | 620 | 620 | **474** |
+| dropped: void / never / mixed | 139 | 139 | 139 | 139 |
+| dropped: unparseable | 304 | 304 | 304 | 304 |
+| engine disagreements | 33 | 47 | 55 | 75 |
+| names the engine does not know | 2,099 | 2,207 | 2,682 | 2,793 |
+| **admitted** | **919** | **1,358** | **1,606** | **1,708** |
+| — of which richer than an envelope | 0 | 439 | 687 | 789 |
+
+**What moved, and what the bucket actually held.** 146 rows leave the object
+bucket and 87 leave the union bucket — the two halves of one widening, exactly
+as the array slice's 388 and 343 were. Of those 233 new candidates, 102 are
+admitted, 20 disagree, and 111 are names the pinned engine does not know
+(`ast\*`, `cubrid_*`, the `gmp_*` and `tidy_*` families in a build without those
+extensions). The refinement, void and unparseable buckets read identically across
+all four runs, which is the check that the classification is still made on the
+same lowered top-level shape.
+
+The 474 that remain deserve their composition written down, because the bucket's
+label has been overselling what it holds since #73: they are 322 `void`, 149
+`resource`, 2 `Closure` and 1 `int-mask<…>`. `void` lowers to an opaque arm
+rather than to a value type, so it lands here and not in the void/never/mixed
+bucket beside it. The counts are left as they are — they are the comparison
+series this table is built on, and moving a row between buckets for a naming
+reason would make the columns incomparable — but the real object deferral is now
+`resource` and `callable` alone, and it is smaller than 474 suggests.
+
+**The catches survived, and the new ones are the value demonstration.** All 55
+recorded disagreements are excluded verbatim — same names, same `[row, engine]`
+pairs — and twenty join them. `stream_bucket_make_writeable` is the sharpest in
+the table so far: functionMap says the call returns a bare `stdClass` where PHP 8
+declares a real `StreamBucket`. That is the resource era's rot in its purest
+form — a stand-in type that outlived the thing it stood in for — and nothing
+about it is subtle to the countersign, because the two names simply differ. The
+rest are the familiar dropped-arm shape wearing class names:
+`intlcal_create_instance` and the four `tidy_get_*` rows hide the engine's `null`
+exactly as `ftp_raw` hid one, `xmlwriter_open_uri` hides its `false`, and
+`dom_import_simplexml` both drops the engine's `DOMAttr` arm and invents a
+`false`. None of them could have been caught before, because none of them was a
+candidate.
+
+The `resource` rows are the same demonstration from the other side. They are
+*not* class arms — `resource`, `open-resource` and `closed-resource` are
+`KNOWN_UNENFORCED` keywords lowering to an opaque arm — so the 149 stale rows
+where functionMap still says `resource` and PHP 8 returns a `GdImage` or a
+`CurlHandle` stay uncarriable and counted, never admitted. The widening reaches
+the rows the engine agrees with and leaves the rot where it was.
+
+One refusal is worth naming because it is load-bearing rather than incidental. A
+*constant* name is not vocabulary, so `lower_identifier`'s catch-all lowers
+`JSON_ERROR_NONE` to a `Class` arm, and the object slice made class arms
+carriable — which means `json_last_error` and `session_status` became candidates
+spelling a union of constants as a union of classes. The countersign is the only
+thing that keeps them out, and it does: the engine declares `int`, no class name
+matches, and both rows are listed. The `engine_typeless` count is unchanged at 22,
+so no new row was admitted down the uncountersigned path.
+
+**Consumption needed no new seam, and the value lane needed nothing at all.** A
+class row is *arm-lane only*, unconditionally — the value domain has no object
+inhabitant (ADR-0035/0038), so `contractty_to_fact` and `to_shape_fact` both
+decline and `floor_value_fact` returns `None` by two independent routes. That is
+a stronger statement than the Asserted grade: the firewall keeps Asserted facts
+out of proof premises, and here there is no fact to keep out. The arm lane in
+exchange does real work — `?Collator` renders its null arm and a `!== null` guard
+subtracts it, which is a leg the `T|false` rows still lack, since arm subtraction
+is instanceof-driven and the scalar-literal case is unwired.
+
+`builtin_return_floor`'s identity resolver was previously correct because no class
+arm could reach it; it is now correct for a reason worth stating.
+`refine_declared_arms`' resolver exists to qualify a *relative* class name against
+a declaring namespace, and a functionMap row has no declaring namespace: every
+class it names is a global builtin FQN, `ast\Node` included. A project-namespace
+resolver would mangle them, so the identity is the only correct choice, not merely
+a sufficient one.
+
+**Two residuals, named so they are decisions.** First, `spell_arms` has no
+faithful spelling for a class arm, so all 246 class-bearing rows store
+functionMap's own string rather than a canonical respelling — which is the better
+outcome, since `ContractTy::Class` case-folds and could not restate `GdFont`. Three
+of those strings are PHPStan's `__benevolent<…>`, which the phpdoc parser expands
+to the plain union it wraps before anything lowers it. Rows whose arms mix a class
+with a non-class (`SimpleXMLElement|false`, bare `object`) are inert on the *dump
+surface* — `render_contract_arms` spells a pure class/`null` list and refuses
+anything else — while remaining fully live in the arm lane, the same posture the
+array slice recorded for its two unspellable rows.
+
+Second, and user-visible: a class row renders **lowercased**. `ContractTy::Class`
+normalizes on the way in, which is what makes the countersign's `class_eq`
+comparison work, and `Cx::class_display_fqn` recovers source casing from the
+*project* index, which knows nothing about a builtin — so `dumpType(gmp_init($x))`
+reads `gmp` where PHPStan reads `GMP`. The hierarchy catalog cannot answer it
+either, since it keys on the lowercased name. Closing this needs a builtin-class
+display-name table of its own; until then it is a fidelity gap in the dump surface
+and nowhere else, because every judgment downstream compares through the
+case-insensitive `class_eq`.
+
+**What stays out**, and it is the same stand the element-level residual takes:
+`callable` and the intersections, because a reflexive floor says nothing about a
+signature and their countersign would still be vacuous; `resource`, because it is
+not a class at all; and every genuinely *hierarchy-dependent* row — a functionMap
+row naming a subclass or a superclass of what the engine declares stays `Maybe`
+and is refused in both directions. Deciding those needs a real is-a oracle at
+generation time, which is the same sidecar `reflect` extension element-level
+countersigning needs. One extension, two deferrals, and both now have their
+numbers written down.
