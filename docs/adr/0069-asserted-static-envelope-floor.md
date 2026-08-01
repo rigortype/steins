@@ -329,3 +329,21 @@ pinned: a `?array{…}` row declines the value lane, because the floor
 states one nullability rule (`fact_with_null`) and that rule refuses a
 shape. The arms still carry both the shape and the null, so the decline
 costs the shape-lane consumer and nothing else.
+
+**One residual is a widening, named here so it is a decision and not an
+accident.** Carriability is a *top-level* check and the pinned engine
+only ever declares `array`, so eleven of the new rows carry an element
+claim the countersign never examined — `get_declared_classes` =
+`list<class-string>`, `get_resources` = `array<int, resource>`,
+`debug_backtrace`'s shape among them. The countersign vouches for the
+array-ness; the element type is functionMap's word alone, which is the
+Asserted grade stated honestly rather than a breach of §3 — and the fact
+lane cannot over-consume it (`to_fact` returns `None` for those leaves,
+so the seeded shape carries an untyped tail). Two rows
+(`debug_backtrace`, `get_defined_functions`) additionally store their
+raw source spelling because `spell_arms` refuses to spell them back;
+they countersign and lower correctly but the dump surface declines them,
+so they are inert there — carried for the arm lane, not the renderer. A
+future slice that wants element-level countersigning knows where to
+stand: it is the same sidecar `reflect` extension the object bucket
+needs.
