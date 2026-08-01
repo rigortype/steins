@@ -1755,7 +1755,9 @@ mod tests {
         // a list, a keyed map and a full shape all ship now.
         assert_eq!(super::declared_return("array_merge"), Some("array"));
         assert_eq!(super::declared_return("str_split"), Some("list<string>"));
-        assert_eq!(super::declared_return("array_count_values"), Some("array<positive-int>"));
+        // The stored spelling is the speller's, and an int range spells as the
+        // interval PHPStan itself states (issue #90) — not the phpdoc keyword sugar.
+        assert_eq!(super::declared_return("array_count_values"), Some("array<int<1, max>>"));
         assert_eq!(
             super::declared_return("imagecolorsforindex"),
             Some("array{alpha: int<0, 127>, blue: int<0, 255>, green: int<0, 255>, red: int<0, 255>}")
