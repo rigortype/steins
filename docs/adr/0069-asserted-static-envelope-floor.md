@@ -474,6 +474,23 @@ display-name table of its own; until then it is a fidelity gap in the dump surfa
 and nowhere else, because every judgment downstream compares through the
 case-insensitive `class_eq`.
 
+**Closed 2026-08-02.** The display-name table landed beside the hierarchy
+catalog: `cargo xtask gen-catalog` now emits `display_names_generated.rs` from
+the same `hierarchy.toml` pin — lowercased key → the casing php-src declares,
+**enums included**, since the hierarchy table's enum exclusion guards the is-a
+oracle against an incomplete super-edge set and a display name has no such
+soundness gate. `Cx::class_display_fqn` consults it
+(`steins_catalog::builtin_class_display`) exactly where the project index
+misses, and only for a name no project file declares at all (`class_absent`,
+so an ambiguous project name keeps issue #67 precedence and never reads the
+catalog). `dumpType(gmp_init($x))` now reads `GMP`, `hash_init` renders
+`HashContext`, `collator_create` renders `null|Collator`. The judgment half of
+the residual's statement is unchanged and is the point: no judgment consults
+the table, everything downstream still compares through `class_eq`, and the
+pinning test moved from
+`a_class_row_renders_lowercased_because_nothing_holds_the_builtins_casing` to
+`a_class_row_renders_the_casing_php_src_declares`.
+
 **What stays out**, and it is the same stand the element-level residual takes:
 `callable` and the intersections, because a reflexive floor says nothing about a
 signature and their countersign would still be vacuous; `resource`, because it is

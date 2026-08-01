@@ -4683,15 +4683,26 @@ impl<'a> Cx<'a> {
 
     /// The source-cased, namespace-qualified display form of a class FQN (the
     /// spelling diagnostics use, matching PHPStan — no leading `\`). A project class
-    /// contributes its declared casing ([`ClassDecl::display`]); a class the index
-    /// cannot uniquely resolve (a builtin/external name Steins only holds
-    /// lowercase-normalized) falls back to the given key with any leading `\`
-    /// stripped. Drives the dump surface's class rendering (ADR-0053 §7 / the class
-    /// rendering-fidelity fix).
+    /// contributes its declared casing ([`ClassDecl::display`]); a name **no**
+    /// project file declares ([`Cx::class_absent`] — so an ambiguous project name
+    /// keeps issue #67 precedence and never reads the catalog) recovers the casing
+    /// php-src declares from the builtin display-name table
+    /// ([`steins_catalog::builtin_class_display`]): `dumpType(gmp_init($x))` reads
+    /// `GMP`, as PHPStan does. Anything still unresolved falls back to the given
+    /// key with any leading `\` stripped. Drives the dump surface's class rendering
+    /// (ADR-0053 §7 / the class rendering-fidelity fix; builtin casing closes the
+    /// ADR-0069 third-amendment residual).
     fn class_display_fqn(&self, fqn: &str) -> String {
         match self.find_class(fqn) {
             Some((_, cd)) if !cd.display.is_empty() => cd.display.clone(),
-            _ => fqn.trim_start_matches('\\').to_owned(),
+            _ => {
+                if self.class_absent(fqn)
+                    && let Some(declared) = steins_catalog::builtin_class_display(fqn)
+                {
+                    return declared.to_owned();
+                }
+                fqn.trim_start_matches('\\').to_owned()
+            }
         }
     }
 
