@@ -237,6 +237,19 @@ pub const DEBUG_PHPDOC_TYPE_ID: &str = "debug.phpdoc-type";
 /// fixed — exit-neutral forever (§3), profile-disableable (§4). Emitted from D4.
 pub const DEBUG_VAR_DUMP_ID: &str = "debug.var-dump";
 
+/// The registry id for the `@psalm-trace` annotation (ADR-0074, debug layer): a
+/// statement-adopted docblock tag naming a variable asks the SAME question
+/// `PHPStan\dumpType($x)` asks, and gets the same answer through the same
+/// machinery (§5) — the trust-ordered best fact, the one renderer, the
+/// `(asserted)` stratum marker. Warn-level, fixed (§8): the trigger is a
+/// runtime-inert comment, so the explicit pair's fail-forcing argument (a
+/// committed call to a function that does not exist) does not apply. No
+/// profile-disable (§8): an annotation is always an authored question — the
+/// remedy for an unwanted trace is deleting the comment. The id string is the
+/// ONE place the bare word "trace" names this feature (§4's naming rule);
+/// internal symbols use `TraceTag` / `emit_trace_annotations`-style names.
+pub const DEBUG_TRACE_ID: &str = "debug.trace";
+
 /// The resolved FQN of `PHPStan\dumpType` (ADR-0053 §2), lowercase-normalized and
 /// leading-`\`-stripped — the case-insensitive matching key (PHP function names are
 /// case-insensitive).
@@ -358,6 +371,9 @@ pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
     // PHPDOC_UNDEFINED_METHOD_ID lit up at S6 — now in ALL_EMITTABLE_IDS.
     // The dump surface's debug ids (ADR-0053) all lit up: the explicit pair at D3 and
     // `debug.var-dump` at D4 — all now in ALL_EMITTABLE_IDS.
+    // The trace annotation (ADR-0074, issue #94): registered by the groundwork
+    // slice, moved to ALL_EMITTABLE_IDS when `emit_trace_annotations` lands.
+    DEBUG_TRACE_ID,
 ];
 
 /// The maximum depth of interprocedural argument-binding descent (Feature B).
@@ -16591,6 +16607,10 @@ fn parse_envelopes(docblock: Option<&str>) -> Option<Envelopes> {
             // Assertion tags are consumed above (collected into `assert_params`);
             // they never contribute a `@param`/`@return` envelope.
             TagKind::Assert { .. } => {}
+            // The trace annotation (ADR-0074) is a statement-level introspection
+            // trigger, never a declaration envelope; its consumer is the
+            // statement-docblock emitter, not this seam.
+            TagKind::TraceTag => {}
         }
     }
     // Return an envelope set whenever there is anything to check *or* any assertion

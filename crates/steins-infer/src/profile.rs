@@ -52,7 +52,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::{
-    DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, DIAGNOSTIC_REGISTRY, Diagnostic, Facet,
+    DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, DIAGNOSTIC_REGISTRY,
+    Diagnostic, Facet,
     Floor, Layer, Origin, THROW_UNDECLARED_ID, layer, pattern_is_known, pattern_matches,
     surface_floor,
 };
@@ -281,7 +282,9 @@ impl Surface {
         // `surfaces_id` (baseline-exempt, §8). The explicit pair is profile-inert (no
         // profile disables or demotes it, like mechanics); `debug.var-dump` is the one
         // profile-disableable dump (`disable = ["debug.var-dump"]`), ON by default in
-        // every built-in.
+        // every built-in. It stays the ONE (ADR-0074 §8): `debug.trace` has no
+        // disable escape hatch — an annotation is always an authored question,
+        // with no incidental case to decline; the remedy is deleting the comment.
         if let Some(Layer::Debug) = layer(d.id) {
             if d.id == DEBUG_VAR_DUMP_ID {
                 return !self.disable.iter().any(|p| pattern_matches(p, d.id));
@@ -306,7 +309,11 @@ impl Surface {
         // function that does not exist at runtime — a guaranteed fatal), `var_dump`
         // warns (exit-neutral forever — a leftover `var_dump` is working PHP; a lint
         // rule is refused, ADR-0017). No channel promotes `debug.var-dump` to fail.
-        if id == DEBUG_VAR_DUMP_ID {
+        // `debug.trace` warns too, fixed (ADR-0074 §8): its trigger is a
+        // runtime-inert docblock, legal to commit — the pair's fail-forcing
+        // argument (a guaranteed runtime fatal) simply does not apply, and warn
+        // answers the asked question visibly without holding CI hostage.
+        if id == DEBUG_VAR_DUMP_ID || id == DEBUG_TRACE_ID {
             return Level::Warn;
         }
         if id == DEBUG_TYPE_ID || id == DEBUG_PHPDOC_TYPE_ID {
@@ -610,7 +617,7 @@ mod tests {
         // `var_dump` is disableable but ON by default here (no built-in disables it).
         for profile in [None, Some("contracts"), Some("throws-direct")] {
             let s = empty().resolve(profile).unwrap();
-            for id in [DEBUG_TYPE_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_VAR_DUMP_ID] {
+            for id in [DEBUG_TYPE_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_VAR_DUMP_ID, DEBUG_TRACE_ID] {
                 assert!(
                     s.is_surfaced(&diag(id, None)),
                     "`{id}` must display on every built-in profile ({profile:?})"
@@ -637,6 +644,10 @@ mod tests {
         assert_eq!(s.level(DEBUG_TYPE_ID), Level::Fail);
         assert_eq!(s.level(DEBUG_PHPDOC_TYPE_ID), Level::Fail);
         assert_eq!(s.level(DEBUG_VAR_DUMP_ID), Level::Warn);
+        // `debug.trace` is born at warn and fixed there (ADR-0074 §8): the
+        // trigger is a runtime-inert docblock, so the pair's fail-forcing
+        // argument does not apply.
+        assert_eq!(s.level(DEBUG_TRACE_ID), Level::Warn);
 
         let mut m = BTreeMap::new();
         m.insert(
@@ -646,6 +657,7 @@ mod tests {
         let w = ProfileConfigs(m).resolve(Some("p")).unwrap();
         assert_eq!(w.level(DEBUG_TYPE_ID), Level::Fail, "the pair is fail-fixed, warn cannot demote");
         assert_eq!(w.level(DEBUG_VAR_DUMP_ID), Level::Warn);
+        assert_eq!(w.level(DEBUG_TRACE_ID), Level::Warn);
     }
 
     #[test]
@@ -670,6 +682,25 @@ mod tests {
         );
         let s2 = ProfileConfigs(m2).resolve(Some("try")).unwrap();
         assert!(s2.is_surfaced(&diag(DEBUG_TYPE_ID, None)), "the explicit pair ignores disable");
+    }
+
+    #[test]
+    fn trace_annotation_has_no_profile_disable_escape_hatch() {
+        // ADR-0074 §8: unlike `debug.var-dump` (an incidental trigger whose
+        // authors never asked Steins anything), `@psalm-trace` is always an
+        // authored question — there is no incidental case to decline, so
+        // `disable = ["debug.trace"]` is a no-op like the explicit pair's. The
+        // remedy for an unwanted trace is deleting the comment.
+        let mut m = BTreeMap::new();
+        m.insert(
+            "mute".to_owned(),
+            UserProfile { disable: vec!["debug.trace".to_owned()], ..Default::default() },
+        );
+        let s = ProfileConfigs(m).resolve(Some("mute")).unwrap();
+        assert!(s.is_surfaced(&diag(DEBUG_TRACE_ID, None)), "debug.trace is profile-inert");
+        // `debug.var-dump` stays the ONE disableable debug id — the special case
+        // is not extended.
+        assert!(s.is_surfaced(&diag(DEBUG_VAR_DUMP_ID, None)), "var_dump untouched by this profile");
     }
 
     #[test]

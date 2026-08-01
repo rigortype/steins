@@ -28,7 +28,7 @@ use crate::Diagnostic;
 use crate::{
     CALL_ON_NULL_ID, CALL_TOO_FEW_ARGUMENTS_ID, CALL_TOO_MANY_ARGUMENTS_ID,
     CALL_UNDEFINED_FUNCTION_ID, CALL_UNDEFINED_METHOD_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID,
-    CLASS_UNDEFINED_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, EFFECT_ID,
+    CLASS_UNDEFINED_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, EFFECT_ID,
     EFFECT_LISKOV_ID, ID, OFFSET_MAYBE_MISSING_ID, OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID,
     OFFSET_UNDECLARED_ID, PARAM_MISMATCH_ID,
     PHPDOC_PROP_MISMATCH_ID, PHPDOC_UNDEFINED_METHOD_ID, PROP_MISMATCH_ID, READONLY_REASSIGNED_ID,
@@ -280,6 +280,9 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     (DEBUG_TYPE_ID, Layer::Debug, Floor::Default),
     (DEBUG_PHPDOC_TYPE_ID, Layer::Debug, Floor::Default),
     (DEBUG_VAR_DUMP_ID, Layer::Debug, Floor::Default),
+    // The trace annotation (ADR-0074 §4): the docblock spelling of the dump
+    // surface's question, riding the same S1 register-ahead-of-emission pattern.
+    (DEBUG_TRACE_ID, Layer::Debug, Floor::Default),
 ];
 
 /// The flat id list, **derived** from [`DIAGNOSTIC_REGISTRY`] so there is exactly

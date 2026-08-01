@@ -12,7 +12,8 @@ use std::collections::HashSet;
 use steins_infer::{
     ALL_EMITTABLE_IDS, CALL_ON_NULL_ID, CALL_TOO_FEW_ARGUMENTS_ID, CALL_TOO_MANY_ARGUMENTS_ID,
     CALL_UNDEFINED_FUNCTION_ID, CALL_UNDEFINED_METHOD_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID,
-    CLASS_UNDEFINED_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, DIAGNOSTIC_IDS,
+    CLASS_UNDEFINED_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID,
+    DIAGNOSTIC_IDS,
     DIAGNOSTIC_REGISTRY, EFFECT_ID, EFFECT_LISKOV_ID, FACET_ORIGIN, Facet, Floor, ID, Layer,
     OFFSET_MAYBE_MISSING_ID, OFFSET_UNDECLARED_ID, surface_floor,
     OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID, Origin, PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID,
@@ -125,6 +126,9 @@ fn classification_matches_adr_0050_section_1() {
     assert_eq!(layer(DEBUG_TYPE_ID), Some(Layer::Debug));
     assert_eq!(layer(DEBUG_PHPDOC_TYPE_ID), Some(Layer::Debug));
     assert_eq!(layer(DEBUG_VAR_DUMP_ID), Some(Layer::Debug));
+    // trace annotation (ADR-0074 §4): the docblock spelling of the same question,
+    // same layer.
+    assert_eq!(layer(DEBUG_TRACE_ID), Some(Layer::Debug));
 }
 
 /// The finding-breadth family lights up stage by stage (ADR-0049). At S2 the
@@ -172,9 +176,15 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
     assert!(pending.contains(too_many), "`{too_many}` should be registered-not-yet-emitted");
     assert!(!emittable.contains(too_many), "`{too_many}` must not be emittable before its stage");
     assert!(layer(too_many).is_some(), "`{too_many}` must be registered with a layer");
-    // One id is registered-not-yet-emitted: the too-many arm. All three ADR-0053
-    // dump-surface debug ids have lit up (checked in `all_three_debug_ids_emit`).
-    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 1);
+    // Two ids are registered-not-yet-emitted: the too-many arm, and the ADR-0074
+    // trace annotation `debug.trace` (registered by the #94 groundwork slice,
+    // lit up by its emit slice). All three ADR-0053 dump-surface debug ids have
+    // lit up (checked in `all_three_debug_ids_emit`).
+    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 2);
+    assert!(
+        REGISTERED_NOT_YET_EMITTED.contains(&DEBUG_TRACE_ID),
+        "`debug.trace` is registered ahead of emission (ADR-0074, S1 pattern)"
+    );
 }
 
 /// The ADR-0053 dump surface: all three debug ids emit — the explicit pair
