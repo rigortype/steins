@@ -7,9 +7,13 @@
 //! `int<min,0>|int<0,max>` over general `int`) answers `Maybe`, never a
 //! wrong verdict.
 
-use crate::{CField, CKey, ContractTy, MixedCut};
-use steins_domain::{Base, Certainty, Fact, Refinement, StrPreds, Val, php_is_falsy};
+use crate::normalize::array_incapable;
+use crate::{CField, CKey, ContractTy, MixedCut, ckey_to_domain};
 use steins_domain::Key as VKey;
+use steins_domain::{
+    Base, Certainty, Fact, KeyClass, Presence, Refinement, ShapeFact, StrPreds, Tail, Val,
+    php_is_falsy,
+};
 
 /// Is the concrete value admitted by the contract?
 #[must_use]
@@ -114,11 +118,18 @@ pub fn admits_fact(ty: &ContractTy, fact: &Fact) -> Certainty {
     let (base, refinement, nullable) = match fact {
         Fact::Refined { base, refinement, nullable } => (*base, Some(*refinement), *nullable),
         Fact::General { base, nullable } => (*base, None, *nullable),
-        // The array stratum (ADR-0062 `Fact::Shape`) has no scalar base, and
-        // judging a shape fact against a contract is the acceptance-convergence
-        // slice's work, not this one. Answer with the honest middle — the same
-        // silence this site produces for a fact it knows nothing about.
-        Fact::Shape { .. } => return Certainty::Maybe,
+        // The array stratum (ADR-0062 `Fact::Shape`) has no scalar base: it is
+        // judged by its own rule table (ADR-0072), which shares this arm's
+        // nullable split — the denotation is the shape's members ∪ {null}, and
+        // both halves must agree.
+        Fact::Shape { shape, nullable } => {
+            let array_part = admits_shape_fact(ty, shape);
+            return if *nullable {
+                Certainty::all_of([array_part, admits_val(ty, &Val::Null)])
+            } else {
+                array_part
+            };
+        }
         Fact::Singleton(_) | Fact::OneOf(_) => unreachable!("finite handled above"),
     };
     let base_part = base_only(ty, base, refinement);
@@ -389,4 +400,1115 @@ fn admits_shape(
         &mut |ty, v| admits_val(ty, v),
         &mut |ty, k| admits_val(ty, &key_as_val(k)),
     )
+}
+
+// ---------------------------------------------------------------------------
+// The relation's third face: a contract against an abstract *array* fact
+// (ADR-0072). `shape_verdict` above is type-vs-value, `normalize::subsumes_array`
+// is type-vs-type, and this is type-vs-abstract-fact — the for-all judgment over
+// everything a [`ShapeFact`] admits.
+//
+// **What `No` means here, and why it is not what ADR-0072 §3's table reads.**
+// `admits_fact`'s three answers are `Yes` ⇒ every member of the fact's
+// denotation is admitted (subset), `No` ⇒ *no* member is (disjoint), `Maybe` ⇒
+// neither is proven. That is the documented contract at every consumer ("only a
+// definite `No` — every value the fact admits is rejected — reports") and it is
+// what the scalar arms above already implement: `admits_fact(LitInt(1),
+// int<0,5>)` is `Maybe`, not `No`, although `0` is a member the literal rejects.
+//
+// ADR-0072 §2 states the `No` gate as "a member of the fact's denotation the
+// contract provably rejects". That is a *necessary* condition, and §3's table
+// then reads several rows as if it were sufficient ("else No (`[]` witness)",
+// "a fact field at `Optional` → No"). Under this relation a single escaping
+// witness proves only ¬`Yes`. Every such row is implemented at the sound
+// verdict — `Maybe` — and each one says so at its site. Firing `No` there would
+// report `array $a` passed to `@param non-empty-array`, which is the FP class
+// ADR-0072 §4.5 calls a stop-the-line defect, and this face's consumers turn
+// `No` straight into a `phpdoc.*` finding.
+//
+// The composition rule that makes the rest of the table work: each obligation
+// below is itself a for-all over the same denotation (`Yes` = every member
+// satisfies it, `No` = no member does), so Kleene `and` composes them exactly —
+// one obligation no member can satisfy rejects every member, which *is* `No`.
+// ---------------------------------------------------------------------------
+
+/// Does the shape fact admit `[]`? **Lemma 1 of ADR-0072 §2.**
+///
+/// Taken from the domain's own extensional membership test rather than
+/// restated: [`ShapeFact::admits`] *is* the concretization, so this is exact in
+/// both directions — which is what lets a `Yes` below rest on it.
+///
+/// It is strictly sharper than the ADR's prose ("no `Required` field and
+/// `non_empty` false"), which omits the two other ways a shape excludes the
+/// empty array: `is_list == No` (`[]` **is** a list, so a shape none of whose
+/// members is a list has no `[]` member) and a non-empty `covers` (a cover
+/// demands some key be present). Both sharpenings move the same way — they make
+/// "admits `[]`" *rarer*, so the `[]`-shaped rules refute less often, never
+/// more. Reading `covers` only here is consistent with §3's refusal: the ADR
+/// declines to *discharge obligations* with covers, which is the direction that
+/// could widen toward a wrong pole.
+fn admits_empty(sf: &ShapeFact) -> bool {
+    sf.admits(&[])
+}
+
+/// Is every member of the denotation the empty array?
+///
+/// [`ShapeFact::can_be_non_empty`] is over-approximate on the permissive side,
+/// so a `false` is a *proof* that no non-empty array is admitted — the gate a
+/// `No` needs before it may rest on the `[]` cut alone.
+fn only_empty(sf: &ShapeFact) -> bool {
+    !sf.can_be_non_empty()
+}
+
+/// Is the shape fact's denotation provably empty?
+///
+/// ADR-0072 §3 asserts a shape fact always denotes something. [`ShapeFact::normalize`]
+/// makes that nearly true (a `Sealed` tail strips `Absent` fields), but it is
+/// not an invariant: `normalize(vec![], Sealed, _, non_empty = true, vec![])`
+/// admits no array at all. Every verdict is vacuous on an empty denotation, so
+/// this declines to decide — the stance [`Certainty::all_of`] already takes for
+/// an empty iterator, and the guard ADR-0071 spells `denotes_nothing`.
+fn denotes_no_array(sf: &ShapeFact) -> bool {
+    !admits_empty(sf) && only_empty(sf)
+}
+
+/// The `covers_ne` column of ADR-0072 §3, in this relation's idiom.
+///
+/// A `non-empty-*` contract — and [`MixedCut::Falsy`], whose cut removes exactly
+/// `[]` from the array world ([`php_is_falsy`]) — rejects one member and one
+/// only, so lemma 1 decides it outright:
+///
+/// * `[]` is not in the denotation → the cut removes nothing → `Yes`;
+/// * the denotation is `{[]}` → the cut removes everything → `No`;
+/// * otherwise the denotation straddles the cut → `Maybe`.
+///
+/// **Deviation from ADR-0072 §3, deliberate** (see the module note above): the
+/// table's `ArrayAny{ne}` and `MixedMinus(Falsy)` rows read "else No". Here an
+/// `[]`-admitting fact that also admits non-empty arrays is `Maybe` — its
+/// non-empty members are admitted, so the denotations are not disjoint.
+fn ne_gate(sf: &ShapeFact) -> Certainty {
+    if !admits_empty(sf) {
+        Certainty::Yes
+    } else if only_empty(sf) {
+        Certainty::No
+    } else {
+        Certainty::Maybe
+    }
+}
+
+/// A field or tail value slot against a value contract.
+///
+/// A `None` slot is the domain's "no fact" floor (A-G1a): it realizes as *any*
+/// value, so it can neither refute — some value satisfies any inhabited
+/// contract — nor prove, except against `mixed`, which admits every value there
+/// is (the one sharpening ADR-0072 §3 names). **This is the FP-killer
+/// invariant**: an unknown slot must never manufacture a refutation, so the
+/// `None` arm may not reach `No` by any path.
+fn slot_verdict(ty: &ContractTy, slot: &Option<Box<Fact>>) -> Certainty {
+    match slot {
+        Some(f) => admits_fact(ty, f),
+        None if matches!(ty, ContractTy::Mixed) => Certainty::Yes,
+        None => Certainty::Maybe,
+    }
+}
+
+/// Does the key contract cover every key a [`KeyClass`] can supply?
+///
+/// A tail's key class says what an *undeclared* key may be, so the query is the
+/// same for-all judgment one stratum down: `Int` asks whether the contract
+/// admits every int, `Str` every string, `ArrayKey` both — folded with
+/// [`Certainty::all_of`], so a contract covering one half only answers `Maybe`.
+fn key_class_verdict(key_ty: &ContractTy, class: KeyClass) -> Certainty {
+    let of_base = |b: Base| admits_fact(key_ty, &Fact::General { base: b, nullable: false });
+    match class {
+        KeyClass::Int => of_base(Base::Int),
+        KeyClass::Str => of_base(Base::String),
+        KeyClass::ArrayKey => Certainty::all_of([of_base(Base::Int), of_base(Base::String)]),
+    }
+}
+
+/// Demote an obligation only the *realized* members carry.
+///
+/// A [`Presence::Optional`] field and an unsealed tail both describe entries
+/// some members have and others do not. Such an obligation can still prove
+/// `Yes` — every member that carries the entry satisfies it, and the ones
+/// without are unconstrained by it — but never `No`, because the members
+/// lacking the entry are not refuted by it. [`Presence::Required`] entries need
+/// no demotion: every member carries them, which is what makes a required
+/// field's key or value obligation able to refute the whole denotation.
+fn conditional(c: Certainty) -> Certainty {
+    if c.is_no() { Certainty::Maybe } else { c }
+}
+
+/// A **required** contract field against an entry the fact does not guarantee
+/// (an `Optional` fact field, or a key only the fact's tail may supply).
+///
+/// Both witness families are in the denotation and `No` needs both to refute:
+///
+/// * the member **without** the key violates the required field outright;
+/// * the member **with** the key violates only when the value obligation does.
+///
+/// So `No` exactly when the value obligation is `No`, and `Maybe` otherwise —
+/// never `Yes`, since the key-less member always escapes. ADR-0072 §3 reads
+/// "a fact field at `Optional` → No" on the first witness alone; that proves
+/// ¬`Yes`, not disjointness, so the unconditional `No` is not taken here.
+fn required_vs_may_have(value: Certainty) -> Certainty {
+    if value.is_no() { Certainty::No } else { Certainty::Maybe }
+}
+
+/// Is the fact's tail forced on *every* member?
+///
+/// The witness: the shape is non-empty, so each member has at least one entry;
+/// every declared field is `Absent`, so no declared key can supply it; the entry
+/// is therefore undeclared and the tail governs it. When this holds the tail's
+/// obligations need no [`conditional`] demotion and may refute — which is how a
+/// `non-empty-list<string>` fact refutes `@param list<int>`.
+fn tail_is_forced(sf: &ShapeFact) -> bool {
+    sf.non_empty && sf.fields.iter().all(|(_, p, _)| matches!(p, Presence::Absent))
+}
+
+/// Is *every* array the shape fact admits also admitted by the contract?
+///
+/// The ADR-0072 §3 rule table, dispatched on the contract arm. `covers`
+/// (disjunctive presence, A-G8) is deliberately not consulted to discharge
+/// obligations (§3, §5) — ignoring it only widens toward `Maybe`.
+fn admits_shape_fact(ty: &ContractTy, sf: &ShapeFact) -> Certainty {
+    use Certainty::{Maybe, No, Yes};
+
+    // Vacuity guard: nothing is provable about an empty denotation.
+    if denotes_no_array(sf) {
+        return Maybe;
+    }
+
+    match ty {
+        // `mixed` covers everything; the null cut removes no array.
+        ContractTy::Mixed | ContractTy::MixedMinus(MixedCut::Null) => Yes,
+        ContractTy::Opaque => Maybe,
+        // The falsy cut removes exactly `[]` from the array world.
+        ContractTy::MixedMinus(MixedCut::Falsy) => ne_gate(sf),
+        // `never` admits nothing, and the vacuity guard above already proved
+        // this denotation nonempty — so every member is rejected.
+        ContractTy::Never => No,
+        // Array-incapable arms: the denotation holds arrays only, and none of
+        // these admits an array, so the two are disjoint.
+        ContractTy::Null
+        | ContractTy::Base(_)
+        | ContractTy::IntIn(_)
+        | ContractTy::StrWith(_)
+        | ContractTy::StrOpaque
+        | ContractTy::LitInt(_)
+        | ContractTy::LitFloat(_)
+        | ContractTy::LitStr(_)
+        | ContractTy::LitBool(_)
+        | ContractTy::Class(_)
+        | ContractTy::ObjectAny => No,
+        // A `callable` *value* may be a two-element method array, so the
+        // question stays open; a `*-closure` spelling (ADR-0063 P3) demands a
+        // `Closure` instance, which no array ever is. ADR-0072 §5 refuses the
+        // pair-array-vs-signature refinement outright.
+        ContractTy::CallableTy { obl, .. } => {
+            if obl.closure_only { No } else { Maybe }
+        }
+        ContractTy::ArrayAny { non_empty } => {
+            if *non_empty { ne_gate(sf) } else { Yes }
+        }
+        ContractTy::ListOf { elem, non_empty } => list_of_fact(sf, elem, *non_empty),
+        ContractTy::MapOf { key, val, non_empty, not_list } => {
+            map_of_fact(sf, key, val, *non_empty, *not_list)
+        }
+        // `iterable<K, V>` is `array<K, V>` without the non-emptiness and
+        // list-ness cuts: the fact denotes arrays only, every one of which
+        // `iterable` covers when K and V do.
+        ContractTy::IterableOf { key, val } => map_of_fact(sf, key, val, false, false),
+        ContractTy::Shape { list, fields, sealed, non_empty, unsealed } => {
+            shape_vs_fact(sf, *list, fields, *sealed, *non_empty, unsealed)
+        }
+        // The ADR-0071 §2 haircut, imported verbatim by ADR-0072 §3: an or-fold
+        // that ends at `No` degrades to `Maybe` unless every member refuses for
+        // the same base reason — it admits no array at all — so that any array
+        // member of the denotation is a witness the whole union shares.
+        ContractTy::Union(members) => {
+            let folded = members.iter().fold(No, |acc, m| acc.or(admits_shape_fact(m, sf)));
+            if folded.is_no() && !members.iter().all(array_incapable) { Maybe } else { folded }
+        }
+        // `A ∩ B` admits a member iff both do: `and` is sound in both
+        // directions here, as it is for the scalar arms.
+        ContractTy::Inter(members) => {
+            members.iter().fold(Yes, |acc, m| acc.and(admits_shape_fact(m, sf)))
+        }
+    }
+}
+
+/// `list<T>` / `non-empty-list<T>` against a shape fact.
+///
+/// `is_list` is consumed as the denotational trinary it is (lemma 2, RFC #14939)
+/// and never recomputed from the key set — the ADR-0062 A-G lesson. `No` there
+/// means no member is a list while the contract admits lists only, which is
+/// disjointness; `Yes` discharges the list obligation; `Maybe` leaves it open
+/// and the `and` below can then only reach `Maybe` or a `No` some *other*
+/// obligation proved.
+///
+/// `list<T>` types values and not keys, so only the value slots are read.
+fn list_of_fact(sf: &ShapeFact, elem: &ContractTy, non_empty: bool) -> Certainty {
+    let mut verdict = if non_empty { ne_gate(sf) } else { Certainty::Yes };
+    verdict = verdict.and(sf.is_list);
+    for (_, presence, slot) in &sf.fields {
+        if matches!(presence, Presence::Absent) {
+            continue;
+        }
+        let value = slot_verdict(elem, slot);
+        verdict = verdict.and(if presence.is_required() { value } else { conditional(value) });
+    }
+    if let Tail::Unsealed { value, .. } = &sf.tail {
+        let tail_value = slot_verdict(elem, value);
+        verdict =
+            verdict.and(if tail_is_forced(sf) { tail_value } else { conditional(tail_value) });
+    }
+    verdict
+}
+
+/// `array<K, V>` / `non-empty-array<K, V>` / `associative-array<K, V>` /
+/// `iterable<K, V>` against a shape fact.
+///
+/// A declared field's key is a literal, so it goes through [`admits_val`]; the
+/// tail's key is a class, so it goes through [`key_class_verdict`]. Phan's
+/// `not_list` is the mirror of the `list<T>` gate: the contract rejects list
+/// realizations, so `is_list == Yes` makes every member rejected and
+/// `is_list == No` discharges the obligation — exactly [`Certainty::not`].
+fn map_of_fact(
+    sf: &ShapeFact,
+    key: &ContractTy,
+    val: &ContractTy,
+    non_empty: bool,
+    not_list: bool,
+) -> Certainty {
+    let mut verdict = if non_empty { ne_gate(sf) } else { Certainty::Yes };
+    if not_list {
+        verdict = verdict.and(sf.is_list.not());
+    }
+    for (k, presence, slot) in &sf.fields {
+        if matches!(presence, Presence::Absent) {
+            continue;
+        }
+        let entry = admits_val(key, &key_as_val(k)).and(slot_verdict(val, slot));
+        verdict = verdict.and(if presence.is_required() { entry } else { conditional(entry) });
+    }
+    if let Tail::Unsealed { key: class, value } = &sf.tail {
+        let entry = key_class_verdict(key, *class).and(slot_verdict(val, value));
+        verdict = verdict.and(if tail_is_forced(sf) { entry } else { conditional(entry) });
+    }
+    verdict
+}
+
+/// A declared `array{…}` / `list{…}` contract against a shape fact — ADR-0072
+/// §3's structural heart.
+///
+/// Three obligation families, `and`-composed with the list-ness and
+/// non-emptiness gates:
+///
+/// 1. every **contract field** must be satisfied by every member
+///    ([`contract_field_vs_fact`]);
+/// 2. every **fact entry** the contract does not declare must land in the
+///    contract's tail, or the contract must be unsealed;
+/// 3. the **fact's own tail** must land in the contract's extra surface.
+fn shape_vs_fact(
+    sf: &ShapeFact,
+    list: bool,
+    fields: &[CField],
+    sealed: bool,
+    non_empty: bool,
+    unsealed: &Option<(Option<Box<ContractTy>>, Box<ContractTy>)>,
+) -> Certainty {
+    let mut verdict = if non_empty { ne_gate(sf) } else { Certainty::Yes };
+    if list {
+        verdict = verdict.and(sf.is_list);
+    }
+
+    for f in fields {
+        verdict = verdict.and(contract_field_vs_fact(sf, f));
+    }
+
+    for (k, presence, slot) in &sf.fields {
+        if matches!(presence, Presence::Absent) {
+            continue;
+        }
+        // A key the contract declares is obligation family 1's business.
+        if fields.iter().any(|f| key_eq(&f.key, k)) {
+            continue;
+        }
+        let entry = extra_key_vs_contract(sealed, unsealed, k, slot);
+        verdict = verdict.and(if presence.is_required() { entry } else { conditional(entry) });
+    }
+
+    if let Tail::Unsealed { key: class, value } = &sf.tail {
+        let entry = fact_tail_vs_contract(sealed, unsealed, *class, value);
+        verdict = verdict.and(if tail_is_forced(sf) { entry } else { conditional(entry) });
+    }
+    verdict
+}
+
+/// One declared contract field against the fact's knowledge of that key.
+fn contract_field_vs_fact(sf: &ShapeFact, f: &CField) -> Certainty {
+    let key = ckey_to_domain(&f.key);
+    match sf.field(&key) {
+        // Present in every member: the value obligation is the whole story, and
+        // it may refute (a required `array{a: int}` field against a fact whose
+        // `a` is a string rejects every member).
+        Some((_, Presence::Required { .. }, slot)) => slot_verdict(&f.ty, slot),
+        // The subtle row. Members both with and without the key are in the
+        // denotation, so an *optional* contract field only constrains the ones
+        // with it, and a *required* one is refuted only when both witnesses land
+        // (see [`required_vs_may_have`]).
+        Some((_, Presence::Optional, slot)) => {
+            let value = slot_verdict(&f.ty, slot);
+            if f.optional { conditional(value) } else { required_vs_may_have(value) }
+        }
+        // Proven absent (post-`unset`, the false branch of `isset`): no member
+        // carries the key, so a required contract field rejects every one of
+        // them and an optional field is satisfied by all.
+        Some((_, Presence::Absent, _)) => Certainty::from_bool(f.optional),
+        None => match &sf.tail {
+            // Sealed: no member carries an undeclared key — same verdict as
+            // proven absence, on the same witness.
+            Tail::Sealed => Certainty::from_bool(f.optional),
+            Tail::Unsealed { key: class, value } => {
+                if class.admits_key(&key) {
+                    // The tail says *may*, not *must*.
+                    let tail_value = slot_verdict(&f.ty, value);
+                    if f.optional {
+                        conditional(tail_value)
+                    } else {
+                        required_vs_may_have(tail_value)
+                    }
+                } else {
+                    // The tail's key class excludes this key outright, so no
+                    // member can carry it: proven absence again.
+                    Certainty::from_bool(f.optional)
+                }
+            }
+        },
+    }
+}
+
+/// A fact entry whose key the contract's fields do not declare.
+///
+/// The same three-way structure [`shape_verdict`] uses on the value lane: the
+/// contract's typed tail judges key and value, an untyped `...` admits
+/// anything, and a sealed contract rejects the entry outright — which refutes
+/// every member when the entry is `Required` (the caller's [`conditional`]
+/// demotion handles the `Optional` case).
+fn extra_key_vs_contract(
+    sealed: bool,
+    unsealed: &Option<(Option<Box<ContractTy>>, Box<ContractTy>)>,
+    k: &VKey,
+    slot: &Option<Box<Fact>>,
+) -> Certainty {
+    match unsealed {
+        Some((key_ty, val_ty)) => {
+            let key_ok =
+                key_ty.as_deref().map_or(Certainty::Yes, |t| admits_val(t, &key_as_val(k)));
+            key_ok.and(slot_verdict(val_ty, slot))
+        }
+        None if sealed => Certainty::No,
+        // Unsealed without a declared tail type: anything goes.
+        None => Certainty::Yes,
+    }
+}
+
+/// The fact's unsealed tail against the contract's extra surface.
+///
+/// Deliberately conservative in one place: the fact's tail governs keys the
+/// *fact* does not declare, which can include keys the *contract* declares as
+/// fields. Judging the whole tail against the contract's tail therefore demands
+/// slightly more than necessary for `Yes` — the safe side — and its `No` is
+/// demoted by the caller unless [`tail_is_forced`].
+fn fact_tail_vs_contract(
+    sealed: bool,
+    unsealed: &Option<(Option<Box<ContractTy>>, Box<ContractTy>)>,
+    class: KeyClass,
+    value: &Option<Box<Fact>>,
+) -> Certainty {
+    match unsealed {
+        Some((key_ty, val_ty)) => {
+            let key_ok = key_ty.as_deref().map_or(Certainty::Yes, |t| key_class_verdict(t, class));
+            key_ok.and(slot_verdict(val_ty, value))
+        }
+        None if sealed => Certainty::No,
+        None => Certainty::Yes,
+    }
+}
+
+/// ADR-0072 — the shape-fact face of the acceptance relation, one vector per
+/// rule row, each naming the witness (for a `No`) or the coverage argument (for
+/// a `Yes`) that licenses it.
+#[cfg(test)]
+mod shape_fact_tests {
+    use super::*;
+    use crate::lower_str;
+    use steins_domain::{IntRange, Key};
+
+    fn ty(src: &str) -> ContractTy {
+        lower_str(src).unwrap_or_else(|| panic!("`{src}` must lower"))
+    }
+
+    fn fact(sf: ShapeFact) -> Fact {
+        Fact::Shape { shape: Box::new(sf), nullable: false }
+    }
+
+    fn judge(src: &str, sf: &ShapeFact) -> Certainty {
+        admits_fact(&ty(src), &fact(sf.clone()))
+    }
+
+    fn req(k: Key, v: Option<Fact>) -> (Key, Presence, Option<Box<Fact>>) {
+        (k, Presence::Required { witnessed: true }, v.map(Box::new))
+    }
+
+    fn opt(k: Key, v: Option<Fact>) -> (Key, Presence, Option<Box<Fact>>) {
+        (k, Presence::Optional, v.map(Box::new))
+    }
+
+    fn absent(k: Key) -> (Key, Presence, Option<Box<Fact>>) {
+        (k, Presence::Absent, None)
+    }
+
+    fn ikey(n: i64) -> Key {
+        Key::Int(n)
+    }
+
+    fn skey(s: &str) -> Key {
+        Key::Str(s.to_owned())
+    }
+
+    fn int_fact() -> Fact {
+        Fact::General { base: Base::Int, nullable: false }
+    }
+
+    fn str_fact() -> Fact {
+        Fact::General { base: Base::String, nullable: false }
+    }
+
+    fn open(key: KeyClass, value: Option<Fact>) -> Tail {
+        Tail::Unsealed { key, value: value.map(Box::new) }
+    }
+
+    /// `array{0: int, 1: int}`-flavored fact: a sealed two-entry int list.
+    fn int_pair() -> ShapeFact {
+        ShapeFact::normalize(
+            vec![req(ikey(0), Some(int_fact())), req(ikey(1), Some(int_fact()))],
+            Tail::Sealed,
+            Certainty::Yes,
+            true,
+            Vec::new(),
+        )
+    }
+
+    /// `array{'a': int}`-flavored fact: one required string key.
+    fn keyed_int() -> ShapeFact {
+        ShapeFact::normalize(
+            vec![req(skey("a"), Some(int_fact()))],
+            Tail::Sealed,
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        )
+    }
+
+    // ---- lemma 1: the `[]` membership test ---------------------------------
+
+    #[test]
+    fn lemma_one_is_exact_both_ways() {
+        // No required field and not flagged non-empty → `[]` is a member.
+        assert!(admits_empty(&ShapeFact::plain_array()));
+        // A required field forces an entry.
+        assert!(!admits_empty(&keyed_int()));
+        // The flag alone forces one.
+        let flagged = ShapeFact::normalize(
+            Vec::new(),
+            open(KeyClass::ArrayKey, None),
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        );
+        assert!(!admits_empty(&flagged));
+        // Sharper than the ADR's prose: `[]` IS a list, so `is_list == No`
+        // excludes it too.
+        let not_a_list = ShapeFact::normalize(
+            Vec::new(),
+            open(KeyClass::Str, None),
+            Certainty::No,
+            false,
+            Vec::new(),
+        );
+        assert!(!admits_empty(&not_a_list));
+    }
+
+    // ---- `mixed`, the cuts, `never`, the scalar arms -----------------------
+
+    #[test]
+    fn mixed_and_the_null_cut_cover_every_array() {
+        assert_eq!(judge("mixed", &ShapeFact::plain_array()), Certainty::Yes);
+        assert_eq!(judge("non-null-mixed", &ShapeFact::plain_array()), Certainty::Yes);
+        assert_eq!(judge("mixed", &int_pair()), Certainty::Yes);
+    }
+
+    #[test]
+    fn opaque_is_the_floor() {
+        assert_eq!(judge("int-mask<1, 2>", &int_pair()), Certainty::Maybe);
+    }
+
+    /// The falsy cut removes exactly `[]`, so lemma 1 decides it — `Yes` when no
+    /// member is `[]`, `Maybe` when the denotation straddles the cut (the ADR's
+    /// table reads `No` there; see [`ne_gate`]'s deviation note).
+    #[test]
+    fn falsy_cut_is_decided_by_lemma_one() {
+        assert_eq!(judge("non-empty-mixed", &int_pair()), Certainty::Yes);
+        assert_eq!(judge("non-empty-mixed", &ShapeFact::plain_array()), Certainty::Maybe);
+        // The one denotation the cut removes entirely: `{[]}` — sealed, no
+        // fields, so `can_be_non_empty` is provably false.
+        let only_empty_shape =
+            ShapeFact::normalize(Vec::new(), Tail::Sealed, Certainty::Yes, false, Vec::new());
+        assert_eq!(judge("non-empty-mixed", &only_empty_shape), Certainty::No);
+    }
+
+    /// `never` admits nothing while the fact's denotation holds an array — the
+    /// nonemptiness the vacuity guard establishes first.
+    #[test]
+    fn never_refutes_every_shape_fact() {
+        assert_eq!(judge("never", &int_pair()), Certainty::No);
+        assert_eq!(judge("never", &ShapeFact::plain_array()), Certainty::No);
+    }
+
+    /// The witness is any member at all: an array is not a scalar, an object or
+    /// `null`, so the denotations are disjoint. This is the row that turns an
+    /// array literal passed to `@param string` into a finding.
+    #[test]
+    fn array_incapable_arms_refute_on_every_member() {
+        for src in [
+            "string",
+            "int",
+            "float",
+            "bool",
+            "null",
+            "positive-int",
+            "numeric-string",
+            "class-string",
+            "'lit'",
+            "5",
+            "true",
+            "SomeClass",
+            "object",
+        ] {
+            assert_eq!(judge(src, &int_pair()), Certainty::No, "{src} admits no array");
+            assert_eq!(
+                judge(src, &ShapeFact::plain_array()),
+                Certainty::No,
+                "{src} admits no array"
+            );
+        }
+    }
+
+    /// A pair-array may be a `[$obj, 'method']` callable, so a bare `callable`
+    /// stays open; a `*-closure` spelling demands a `Closure` **instance**,
+    /// which no array is (ADR-0063 P3). Bare `Closure` carries the default
+    /// obligation, so it is open too — the lowering's own call, unchanged here.
+    #[test]
+    fn callable_is_open_unless_closure_only() {
+        assert_eq!(judge("callable", &int_pair()), Certainty::Maybe);
+        assert_eq!(judge("pure-callable", &int_pair()), Certainty::Maybe);
+        assert_eq!(judge("Closure", &int_pair()), Certainty::Maybe);
+        assert_eq!(judge("pure-closure", &int_pair()), Certainty::No);
+        assert_eq!(judge("static-closure", &int_pair()), Certainty::No);
+    }
+
+    // ---- `ArrayAny` --------------------------------------------------------
+
+    #[test]
+    fn array_any_covers_everything_and_the_ne_form_reads_lemma_one() {
+        assert_eq!(judge("array", &ShapeFact::plain_array()), Certainty::Yes);
+        assert_eq!(judge("array", &int_pair()), Certainty::Yes);
+        // Coverage: no member is `[]`, so the non-emptiness cut removes nothing.
+        assert_eq!(judge("non-empty-array", &int_pair()), Certainty::Yes);
+        // Straddles the cut — the members that are not `[]` are admitted.
+        assert_eq!(judge("non-empty-array", &ShapeFact::plain_array()), Certainty::Maybe);
+    }
+
+    // ---- `ListOf`: the three `is_list` cases -------------------------------
+
+    #[test]
+    fn list_of_reads_the_is_list_trinary_as_given() {
+        // `Yes` + every value slot ⊆ int → coverage proven.
+        assert_eq!(judge("list<int>", &int_pair()), Certainty::Yes);
+        // `No` — the witness is that no member is a list at all, and `list<T>`
+        // admits lists only. `['a' => 1]` carries exactly this fact.
+        assert_eq!(judge("list<int>", &keyed_int()), Certainty::No);
+        // `Maybe` — nothing proven either way, and the value slots agree.
+        let unknown_listness = ShapeFact::normalize(
+            Vec::new(),
+            open(KeyClass::ArrayKey, Some(int_fact())),
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(judge("list<int>", &unknown_listness), Certainty::Maybe);
+    }
+
+    #[test]
+    fn list_of_refutes_on_a_required_slot_whose_values_it_rejects() {
+        let str_list = ShapeFact::normalize(
+            vec![req(ikey(0), Some(str_fact()))],
+            Tail::Sealed,
+            Certainty::Yes,
+            true,
+            Vec::new(),
+        );
+        // Witness: every member carries key 0 with a string, which `list<int>`
+        // rejects — so every member is rejected.
+        assert_eq!(judge("list<int>", &str_list), Certainty::No);
+        assert_eq!(judge("list<string>", &str_list), Certainty::Yes);
+    }
+
+    /// A `non-empty-list<string>` fact: the tail is forced on every member (the
+    /// shape is non-empty and declares no field), so its value obligation may
+    /// refute — the [`tail_is_forced`] row.
+    #[test]
+    fn a_forced_tail_refutes_where_a_conditional_one_could_not() {
+        let ne_str_list = ShapeFact::normalize(
+            Vec::new(),
+            open(KeyClass::Int, Some(str_fact())),
+            Certainty::Yes,
+            true,
+            Vec::new(),
+        );
+        assert_eq!(judge("list<int>", &ne_str_list), Certainty::No);
+        assert_eq!(judge("list<string>", &ne_str_list), Certainty::Yes);
+        // The same tail without the non-emptiness flag: a member may carry no
+        // undeclared entry at all, so nothing is refuted.
+        let maybe_empty = ShapeFact::normalize(
+            Vec::new(),
+            open(KeyClass::Int, Some(str_fact())),
+            Certainty::Yes,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(judge("list<int>", &maybe_empty), Certainty::Maybe);
+    }
+
+    #[test]
+    fn non_empty_list_needs_the_ne_gate() {
+        assert_eq!(judge("non-empty-list<int>", &int_pair()), Certainty::Yes);
+        let maybe_empty_int_list = ShapeFact::normalize(
+            Vec::new(),
+            open(KeyClass::Int, Some(int_fact())),
+            Certainty::Yes,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(judge("list<int>", &maybe_empty_int_list), Certainty::Yes);
+        assert_eq!(judge("non-empty-list<int>", &maybe_empty_int_list), Certainty::Maybe);
+    }
+
+    // ---- `MapOf` / `IterableOf` -------------------------------------------
+
+    /// A required field's key literal is in *every* member, so a key contract
+    /// that rejects it rejects the whole denotation — this is what refutes a
+    /// list fact against `@param array<string, int>`.
+    #[test]
+    fn map_key_contract_refutes_through_a_required_key() {
+        assert_eq!(judge("array<string, int>", &int_pair()), Certainty::No);
+        assert_eq!(judge("array<int, int>", &int_pair()), Certainty::Yes);
+        assert_eq!(judge("array<string, int>", &keyed_int()), Certainty::Yes);
+    }
+
+    #[test]
+    fn map_value_contract_refutes_through_a_required_slot() {
+        assert_eq!(judge("array<string, string>", &keyed_int()), Certainty::No);
+        assert_eq!(judge("array<array-key, int>", &keyed_int()), Certainty::Yes);
+    }
+
+    /// The tail's key *class* is judged by coverage of the class's whole key
+    /// world: `ArrayKey` needs both halves, so a `string` key contract answers
+    /// `Maybe` — and never `No`, because a member need not carry an undeclared
+    /// key at all.
+    #[test]
+    fn map_tail_key_class_coverage() {
+        let open_int_vals = ShapeFact::normalize(
+            Vec::new(),
+            open(KeyClass::Int, Some(int_fact())),
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(judge("array<int, int>", &open_int_vals), Certainty::Yes);
+        assert_eq!(judge("array<array-key, int>", &open_int_vals), Certainty::Yes);
+        assert_eq!(judge("array<string, int>", &open_int_vals), Certainty::Maybe);
+        let open_any = ShapeFact::normalize(
+            Vec::new(),
+            open(KeyClass::ArrayKey, Some(int_fact())),
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(judge("array<int, int>", &open_any), Certainty::Maybe);
+        assert_eq!(judge("array<array-key, int>", &open_any), Certainty::Yes);
+    }
+
+    /// Phan's `associative-array` rejects list realizations, so `is_list == Yes`
+    /// rejects every member and `is_list == No` discharges the obligation.
+    #[test]
+    fn associative_array_is_the_not_list_mirror() {
+        assert_eq!(judge("associative-array<array-key, int>", &int_pair()), Certainty::No);
+        assert_eq!(judge("associative-array<array-key, int>", &keyed_int()), Certainty::Yes);
+        let unknown = ShapeFact::normalize(
+            Vec::new(),
+            open(KeyClass::ArrayKey, Some(int_fact())),
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(judge("associative-array<array-key, int>", &unknown), Certainty::Maybe);
+    }
+
+    /// `iterable<K, V>` is `array<K, V>` without the cuts: the fact denotes
+    /// arrays only, all of which `iterable` covers when K and V do.
+    #[test]
+    fn iterable_covers_a_matching_array_fact() {
+        assert_eq!(judge("iterable<int, int>", &int_pair()), Certainty::Yes);
+        assert_eq!(judge("iterable<string, int>", &keyed_int()), Certainty::Yes);
+        assert_eq!(judge("iterable<string, int>", &int_pair()), Certainty::No);
+    }
+
+    // ---- contract `Shape` vs fact shape ------------------------------------
+
+    /// The two witness families ADR-0072 §3 names, both realized. A fact field
+    /// at `Optional` puts members with AND without the key in the denotation: a
+    /// required contract field is violated by the member *without* it, and a
+    /// sealed contract is violated by the member *with* it. Each proves ¬`Yes`;
+    /// neither alone proves disjointness, which is what `No` means here.
+    #[test]
+    fn optional_fact_field_vs_required_contract_field() {
+        let maybe_a = ShapeFact::normalize(
+            vec![opt(skey("a"), Some(int_fact()))],
+            Tail::Sealed,
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        // Witness 1 (the member without 'a') refutes `Yes` only.
+        assert_eq!(judge("array{a: int}", &maybe_a), Certainty::Maybe);
+        // Both witnesses land: the member without 'a' misses the required field,
+        // and the member with it carries an int where a string is declared. Now
+        // every member is rejected.
+        assert_eq!(judge("array{a: string}", &maybe_a), Certainty::No);
+        // The optional contract field is satisfied by every member.
+        assert_eq!(judge("array{a?: int}", &maybe_a), Certainty::Yes);
+    }
+
+    /// Witness 2 alone, on a *sealed* contract: the member carrying the
+    /// undeclared key is rejected, the member without it is not.
+    #[test]
+    fn optional_fact_field_vs_sealed_contract_is_not_disjoint() {
+        let maybe_b = ShapeFact::normalize(
+            vec![req(skey("a"), Some(int_fact())), opt(skey("b"), Some(int_fact()))],
+            Tail::Sealed,
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        );
+        assert_eq!(judge("array{a: int}", &maybe_b), Certainty::Maybe);
+        // A *required* extra key is a witness every member carries → disjoint.
+        let always_b = ShapeFact::normalize(
+            vec![req(skey("a"), Some(int_fact())), req(skey("b"), Some(int_fact()))],
+            Tail::Sealed,
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        );
+        assert_eq!(judge("array{a: int}", &always_b), Certainty::No);
+        // Unsealing the contract, or typing its tail, covers the extra key.
+        assert_eq!(judge("array{a: int, ...}", &always_b), Certainty::Yes);
+        assert_eq!(judge("array{a: int, ...<string, int>}", &always_b), Certainty::Yes);
+        assert_eq!(judge("array{a: int, ...<int, int>}", &always_b), Certainty::No);
+    }
+
+    /// A proven-absent key, and a sealed fact tail, are the same witness: no
+    /// member carries the key, so a required contract field rejects them all.
+    #[test]
+    fn required_contract_field_vs_proven_absence() {
+        let a_absent = ShapeFact::normalize(
+            vec![req(skey("x"), Some(int_fact())), absent(skey("a"))],
+            open(KeyClass::Str, Some(int_fact())),
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        );
+        assert_eq!(judge("array{a: int}", &a_absent), Certainty::No);
+        assert_eq!(judge("array{a?: int, ...}", &a_absent), Certainty::Yes);
+        // Sealed and undeclared: same witness.
+        assert_eq!(judge("array{q: int}", &keyed_int()), Certainty::No);
+        // A tail whose key class cannot supply the key is the witness too.
+        let int_keys_only = ShapeFact::normalize(
+            Vec::new(),
+            open(KeyClass::Int, Some(int_fact())),
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(judge("array{a: int}", &int_keys_only), Certainty::No);
+    }
+
+    /// An unsealed *fact* tail against a required contract field: the tail says
+    /// *may*, not *must*, so neither pole is reachable.
+    #[test]
+    fn unsealed_fact_tail_leaves_a_required_contract_field_open() {
+        let open_str = ShapeFact::normalize(
+            Vec::new(),
+            open(KeyClass::Str, Some(int_fact())),
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(judge("array{a: int}", &open_str), Certainty::Maybe);
+        // …and against a sealed contract the fact's tail is likewise only a
+        // *may*, so the sealing refutes nothing.
+        assert_eq!(judge("array{}", &open_str), Certainty::Maybe);
+    }
+
+    #[test]
+    fn contract_shape_typed_tail_covers_the_fact_tail() {
+        let str_keyed_ints = ShapeFact::normalize(
+            vec![req(skey("a"), Some(int_fact()))],
+            open(KeyClass::Str, Some(int_fact())),
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        );
+        assert_eq!(judge("array{a: int, ...<string, int>}", &str_keyed_ints), Certainty::Yes);
+        assert_eq!(judge("array{a: int, ...}", &str_keyed_ints), Certainty::Yes);
+        // The tail's value type is not covered — but a member may carry no
+        // undeclared entry, so this is `Maybe`, not `No`.
+        assert_eq!(judge("array{a: int, ...<string, string>}", &str_keyed_ints), Certainty::Maybe);
+    }
+
+    #[test]
+    fn contract_list_shape_demands_the_is_list_trinary() {
+        assert_eq!(judge("list{int, int}", &int_pair()), Certainty::Yes);
+        assert_eq!(judge("list{int}", &keyed_int()), Certainty::No);
+    }
+
+    #[test]
+    fn contract_shape_non_emptiness_uses_the_same_gate() {
+        let empty_ok = ShapeFact::normalize(
+            Vec::new(),
+            open(KeyClass::ArrayKey, None),
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(judge("non-empty-array{a?: int, ...}", &empty_ok), Certainty::Maybe);
+    }
+
+    // ---- `None` value slots: the FP-killer pins ----------------------------
+
+    /// **The inverted-hazard pin.** A `None` value slot realizes as any value,
+    /// so it can neither prove nor refute. Every contract below agrees with this
+    /// fact on the parts the fact *does* know — its string keys, its non-empty
+    /// flag, its `is_list == No` — so a `No` could only have been manufactured
+    /// by an unknown slot, and none is.
+    fn unknown_slots() -> ShapeFact {
+        ShapeFact::normalize(
+            vec![req(skey("a"), None), opt(skey("b"), None)],
+            open(KeyClass::Str, None),
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn a_none_value_slot_never_manufactures_a_refutation() {
+        let sf = unknown_slots();
+        for src in [
+            "array",
+            "non-empty-array",
+            "array<string, int>",
+            "array<string, string>",
+            "array<array-key, mixed>",
+            "associative-array<string, int>",
+            "iterable<string, int>",
+            "iterable",
+            "array{a: int, ...<string, string>}",
+            "array{a: string, ...}",
+            "array{a?: int, ...}",
+            "non-empty-array{a: int, ...}",
+            "mixed",
+            "non-empty-mixed",
+        ] {
+            assert_ne!(
+                judge(src, &sf),
+                Certainty::No,
+                "{src} must not refute a fact whose slots are unknown"
+            );
+        }
+    }
+
+    /// The teeth on the pin above: fill the same slot with a *known* fact the
+    /// contract rejects and the very same contracts refute. The silence is the
+    /// unknown slot's doing, not a dead code path.
+    #[test]
+    fn the_same_shape_with_a_known_slot_does_refute() {
+        let known = ShapeFact::normalize(
+            vec![req(skey("a"), Some(str_fact())), opt(skey("b"), None)],
+            open(KeyClass::Str, None),
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        );
+        assert_eq!(judge("array<string, int>", &known), Certainty::No);
+        assert_eq!(judge("array{a: int, ...<string, string>}", &known), Certainty::No);
+        assert_eq!(judge("array{a: int, ...<string, string>}", &unknown_slots()), Certainty::Maybe);
+    }
+
+    /// The same pin from the other end: the *degenerate* shape (plain `array`)
+    /// knows nothing at all and must refute no array contract whatsoever.
+    #[test]
+    fn the_degenerate_shape_refutes_no_array_contract() {
+        for src in [
+            "array",
+            "non-empty-array",
+            "list<int>",
+            "non-empty-list<string>",
+            "array<string, int>",
+            "associative-array<array-key, int>",
+            "iterable<int, SomeClass>",
+            "array{a: int}",
+            "array{a?: int, ...}",
+            "list{int, string}",
+            "array{}",
+        ] {
+            assert_ne!(
+                judge(src, &ShapeFact::plain_array()),
+                Certainty::No,
+                "plain `array` knows nothing and must refute {src} not at all"
+            );
+        }
+    }
+
+    /// A `mixed` value contract is the one sharpening a `None` slot may prove:
+    /// it admits every value there is.
+    #[test]
+    fn a_none_slot_proves_yes_against_mixed_only() {
+        let unknown = ShapeFact::normalize(
+            vec![req(skey("a"), None)],
+            Tail::Sealed,
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        );
+        assert_eq!(judge("array{a: mixed}", &unknown), Certainty::Yes);
+        assert_eq!(judge("array{a: int}", &unknown), Certainty::Maybe);
+    }
+
+    // ---- unions and intersections -----------------------------------------
+
+    /// The ADR-0071 §2 haircut, imported by ADR-0072 §3: a fold ending at `No`
+    /// degrades to `Maybe` unless every member is array-incapable.
+    #[test]
+    fn union_haircut_protects_a_jointly_covering_union() {
+        let ne_ints = ShapeFact::normalize(
+            Vec::new(),
+            open(KeyClass::Int, Some(int_fact())),
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        assert_ne!(judge("list<int>|non-empty-array", &ne_ints), Certainty::No);
+        // The haircut is a floor, not a ceiling: a member that covers outright
+        // still answers `Yes`.
+        assert_eq!(judge("string|array", &ne_ints), Certainty::Yes);
+    }
+
+    /// An all-scalar union is the case the haircut lets through: every member
+    /// admits no array at all, so every array in the denotation is a witness the
+    /// whole union shares.
+    #[test]
+    fn all_scalar_union_refutes_genuinely() {
+        assert_eq!(judge("string|int", &int_pair()), Certainty::No);
+        assert_eq!(judge("string|int|null", &ShapeFact::plain_array()), Certainty::No);
+        assert_eq!(judge("SomeClass|pure-closure", &int_pair()), Certainty::No);
+        // One array-capable member and the fold degrades — even though every
+        // member does in fact refute (the haircut is ADR-0071 §2 verbatim).
+        assert_ne!(judge("string|list<int>", &keyed_int()), Certainty::No);
+    }
+
+    #[test]
+    fn intersection_is_an_and_fold() {
+        assert_eq!(judge("array&iterable<int, int>", &int_pair()), Certainty::Yes);
+    }
+
+    // ---- the nullable half -------------------------------------------------
+
+    /// A nullable shape fact denotes the shape's members ∪ `{null}`, so both
+    /// halves must agree — exactly the split the scalar arms use.
+    #[test]
+    fn nullable_shape_fact_splits_like_every_other_fact() {
+        let nullable = Fact::Shape { shape: Box::new(int_pair()), nullable: true };
+        assert_eq!(admits_fact(&ty("array"), &nullable), Certainty::Maybe);
+        assert_eq!(admits_fact(&ty("array|null"), &nullable), Certainty::Yes);
+        assert_eq!(admits_fact(&ty("string"), &nullable), Certainty::No);
+        assert_eq!(admits_fact(&ty("?string"), &nullable), Certainty::Maybe);
+    }
+
+    // ---- vacuity -----------------------------------------------------------
+
+    /// A shape whose denotation is provably empty decides nothing — the stance
+    /// [`Certainty::all_of`] already takes for an empty iterator.
+    #[test]
+    fn an_uninhabited_shape_decides_nothing() {
+        let nothing =
+            ShapeFact::normalize(Vec::new(), Tail::Sealed, Certainty::Maybe, true, Vec::new());
+        assert!(denotes_no_array(&nothing));
+        assert_eq!(judge("string", &nothing), Certainty::Maybe);
+        assert_eq!(judge("never", &nothing), Certainty::Maybe);
+    }
+
+    // ---- recursion through nested slots ------------------------------------
+
+    #[test]
+    fn nested_shape_slots_recurse_through_admits_fact() {
+        let inner = ShapeFact::normalize(
+            vec![req(ikey(0), Some(str_fact()))],
+            Tail::Sealed,
+            Certainty::Yes,
+            true,
+            Vec::new(),
+        );
+        let outer = ShapeFact::normalize(
+            vec![req(skey("rows"), Some(fact(inner)))],
+            Tail::Sealed,
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        );
+        assert_eq!(judge("array{rows: list<string>}", &outer), Certainty::Yes);
+        assert_eq!(judge("array{rows: list<int>}", &outer), Certainty::No);
+        assert_eq!(judge("array{rows: string}", &outer), Certainty::No);
+    }
+
+    #[test]
+    fn refined_slots_recurse_too() {
+        let positive = ShapeFact::normalize(
+            vec![req(
+                skey("n"),
+                Some(Fact::refined(Base::Int, Refinement::Int(IntRange::POSITIVE), false)),
+            )],
+            Tail::Sealed,
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        );
+        assert_eq!(judge("array{n: positive-int}", &positive), Certainty::Yes);
+        assert_eq!(judge("array{n: int}", &positive), Certainty::Yes);
+        assert_eq!(judge("array{n: int<min, 0>}", &positive), Certainty::No);
+        assert_eq!(judge("array{n: string}", &positive), Certainty::No);
+    }
 }
