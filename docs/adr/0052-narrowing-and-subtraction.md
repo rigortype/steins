@@ -592,3 +592,57 @@ Fixtures: `crates/steins-infer/tests/false_arm_strip.rs` (the mechanism,
 both directions, all four identity spellings, the two refusals);
 `crates/steins-infer/tests/declared_return_floor.rs` (the floor-row /
 hand-written-row parity pins, re-pinned by this change).
+
+## Note (2026-08-02): adjacent int arms absorb, and an int range spells as PHPStan spells it
+
+Two rulings from issue #90, on either side of the point-4 cut, which is
+why they are recorded together.
+
+**Semantics.** `positive-int|0` and `int<0, max>` are one denotation
+spelled two ways, and the point-4 dedup could not see it: neither arm
+subsumes the other, so both survive. `dedup_arms` therefore gains an
+**interval absorption** — a literal adjacent to an interval extends it,
+and two touching or overlapping intervals become their hull. This is a
+*computed collapse* in exactly the sense point 4 already grants the
+normalizer for literal groups (numeric literals → `numeric-string`, the
+bool pair → `bool`), not a widening: the merge is refused wherever the
+union is not itself an interval, so a gap is never bridged, and it never
+narrows because both inputs stay inside the result.
+
+The interior-point discipline holds here as it does for the `Value`
+subtrahend: `5` beside `int<1, max>` is not an absorption case at all —
+subsumption has already deleted it — and the merge refuses it besides.
+
+This adds one name to the point-4 API, `merge_int_arms(a, b) ->
+Option<ContractTy>`, which is the pairwise primitive the fixpoint runs
+and the only way a stratified carrier can reuse the rule without
+reimplementing it. The arm lane in steins-infer does exactly that: it
+keeps its own stratified dedup (arms carry strata, arm lists do not), and
+a merged arm takes the **min** stratum of the pair, for the derivation
+clause's reason — it is only as strongly held as the weaker of the two
+claims it replaces.
+
+**Spelling.** Separately, and on the renderer's side of the cut where
+point 4 puts it: an int range now spells as `int<lo, hi>` with `min`/`max`
+for the domain ends, never as `positive-int` / `non-negative-int` /
+`negative-int`. Those three remain phpdoc **input** sugar that
+`lower_identifier` accepts; they are not output, because PHPStan folds
+each into an integer range and describes every range as the interval — no
+nsrt fixture asserts a keyword form anywhere. Spelling the sugar back out
+was the dump disagreeing with PHPStan about a set the two agreed on.
+`describe_fact`'s diagnostic prose is unaffected: a finding message is not
+the dump surface.
+
+Because the collapse is semantic rather than rendered, the mined
+functionMap canon is undisturbed by it — `floor_row` lowers and flattens
+without deduping, and its round-trip check compares that pre-dedup arm
+multiset — so the canon still states `int<1, max>|0` and the consumer
+absorbs it when the row enters the lane. Had the collapse been renderer
+policy instead, every such row would have re-lowered to one arm against a
+countersigned two and silently fallen back to functionMap's own string.
+
+Fixtures: `crates/steins-contract/src/normalize.rs` (the rule, its
+fixpoint, the gap and interior-point refusals, the boundary
+denotation-preservation and the `min`/`max` overflow guards);
+`crates/steins-infer/tests/false_arm_strip.rs` (`strpos` reads
+`int<0, max>|false`, and `int<0, max>` under the guard).
