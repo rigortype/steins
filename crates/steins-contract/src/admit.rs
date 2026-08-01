@@ -742,7 +742,14 @@ fn shape_vs_fact(
 
     if let Tail::Unsealed { key: class, value } = &sf.tail {
         let entry = fact_tail_vs_contract(sealed, unsealed, *class, value);
-        verdict = verdict.and(if tail_is_forced(sf) { entry } else { conditional(entry) });
+        // [`tail_is_forced`] proves every member carries an entry the **fact**
+        // does not declare — which is not enough here, because the *contract*
+        // may declare that very key: a `non-empty-array` fact's forced entry can
+        // be the `a` of `array{a: int}`, and that member is admitted. The
+        // obligation is unconditional only when the contract declares no field
+        // for the entry to land in.
+        let unconditional = tail_is_forced(sf) && fields.is_empty();
+        verdict = verdict.and(if unconditional { entry } else { conditional(entry) });
     }
     verdict
 }
@@ -1295,6 +1302,26 @@ mod shape_fact_tests {
         assert_eq!(judge("list{int}", &keyed_int()), Certainty::No);
     }
 
+    /// A `non-empty-array` fact against a sealed contract shape. Every member
+    /// carries an entry the *fact* does not declare — but the *contract* may
+    /// declare its key, and `['a' => 1]` is then admitted, so the sealing
+    /// refutes nothing. Only a contract with no fields at all turns the forced
+    /// entry into a refutation.
+    #[test]
+    fn a_forced_fact_tail_refutes_only_a_fieldless_sealed_contract() {
+        let ne_any = ShapeFact::normalize(
+            Vec::new(),
+            open(KeyClass::ArrayKey, None),
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        );
+        assert_eq!(judge("array{a: int}", &ne_any), Certainty::Maybe);
+        assert_eq!(judge("array{a?: int}", &ne_any), Certainty::Maybe);
+        // `array{}` declares nothing and seals: every non-empty array is out.
+        assert_eq!(judge("array{}", &ne_any), Certainty::No);
+    }
+
     #[test]
     fn contract_shape_non_emptiness_uses_the_same_gate() {
         let empty_ok = ShapeFact::normalize(
@@ -1469,6 +1496,176 @@ mod shape_fact_tests {
         assert!(denotes_no_array(&nothing));
         assert_eq!(judge("string", &nothing), Certainty::Maybe);
         assert_eq!(judge("never", &nothing), Certainty::Maybe);
+    }
+
+    // ---- the cross-relation FP oracle --------------------------------------
+
+    /// The array vocabulary, as the lowering sees it.
+    const ARRAY_SPELLINGS: [&str; 18] = [
+        "array",
+        "non-empty-array",
+        "list<int>",
+        "list<string>",
+        "non-empty-list<int>",
+        "array<int, int>",
+        "array<string, int>",
+        "array<array-key, int>",
+        "array<string, string>",
+        "associative-array<string, int>",
+        "array{a: int}",
+        "array{a?: int}",
+        "array{a: int, b: string}",
+        "array{a: int, ...}",
+        "array{a: int, ...<string, int>}",
+        "array{}",
+        "list{int}",
+        "list{int, string}",
+    ];
+
+    /// **The FP oracle, run against the other face of the relation.** ADR-0071's
+    /// `subsumes` is type-vs-type; this one is type-vs-fact. Where `b ⊇ a` is
+    /// *proven*, `b` cannot be disjoint from anything inside `a` — so judging
+    /// `a`'s own fact form against `b` must never answer `No`.
+    ///
+    /// The argument survives the lowering's widening: `to_shape_fact` may drop a
+    /// slot it cannot spell (`to_fact` returns `None` for `float`, classes,
+    /// intersections), which makes the fact *wider* than `a`. A `No` over a
+    /// wider denotation implies `No` over the narrower one, so the property is
+    /// if anything harder to satisfy, not easier.
+    #[test]
+    fn a_proven_subsumption_is_never_refuted_by_the_fact_face() {
+        for a_src in ARRAY_SPELLINGS {
+            let a = ty(a_src);
+            let Some(sf) = crate::to_shape_fact(&a) else { continue };
+            for b_src in ARRAY_SPELLINGS {
+                let b = ty(b_src);
+                if crate::normalize::subsumes(&b, &a) != Certainty::Yes {
+                    continue;
+                }
+                assert_ne!(
+                    admits_fact(&b, &fact(sf.clone())),
+                    Certainty::No,
+                    "`{b_src}` provably subsumes `{a_src}`, so it cannot refute its fact"
+                );
+            }
+        }
+    }
+
+    /// The same oracle with the scalar and `mixed` arms in the `b` position:
+    /// anything that subsumes an array spelling must not refute its fact.
+    #[test]
+    fn a_proven_subsumption_from_outside_the_array_world_is_not_refuted() {
+        for a_src in ARRAY_SPELLINGS {
+            let a = ty(a_src);
+            let Some(sf) = crate::to_shape_fact(&a) else { continue };
+            for b_src in ["mixed", "iterable", "iterable<array-key, mixed>", "array|null", "?array"]
+            {
+                let b = ty(b_src);
+                if crate::normalize::subsumes(&b, &a) != Certainty::Yes {
+                    continue;
+                }
+                assert_ne!(
+                    admits_fact(&b, &fact(sf.clone())),
+                    Certainty::No,
+                    "`{b_src}` provably subsumes `{a_src}`, so it cannot refute its fact"
+                );
+            }
+        }
+    }
+
+    /// Small concrete arrays to probe a denotation with.
+    fn witness_pool() -> Vec<Vec<(Key, Val)>> {
+        let i = |n: i64| Val::Int(n);
+        let s = |t: &str| Val::Str(t.to_owned());
+        vec![
+            vec![],
+            vec![(ikey(0), i(1))],
+            vec![(ikey(0), i(1)), (ikey(1), i(2))],
+            vec![(ikey(0), s("x"))],
+            vec![(ikey(0), i(1)), (ikey(1), s("x"))],
+            vec![(ikey(1), i(1))],
+            vec![(skey("a"), i(1))],
+            vec![(skey("a"), s("x"))],
+            vec![(skey("a"), i(1)), (skey("b"), s("x"))],
+            vec![(skey("a"), i(1)), (skey("b"), i(2))],
+            vec![(skey("b"), i(1))],
+            vec![(skey("a"), i(1)), (ikey(0), i(2))],
+        ]
+    }
+
+    /// **The definitional oracle.** `Yes` must mean every member is admitted and
+    /// `No` must mean none is — so every witness the fact admits is checked
+    /// against [`admits_val`], which is the extensional judge. This is the pin
+    /// that would catch a rule whose verdict outruns its witness argument: the
+    /// `non-empty-array`-fact-vs-`array{a: int}` wrong `No` was exactly such a
+    /// rule, and this test refutes it directly.
+    #[test]
+    fn every_verdict_agrees_with_the_values_the_fact_admits() {
+        let pool = witness_pool();
+        let contracts: Vec<&str> = ARRAY_SPELLINGS
+            .iter()
+            .copied()
+            .chain(["mixed", "non-empty-mixed", "string", "iterable", "iterable<int, int>"])
+            .collect();
+        // Facts the lowering produces, plus hand-built ones reaching the shapes
+        // it cannot spell: proven absence, unknown slots, a forced tail.
+        let mut facts: Vec<(String, ShapeFact)> = ARRAY_SPELLINGS
+            .iter()
+            .filter_map(|src| crate::to_shape_fact(&ty(src)).map(|sf| ((*src).to_owned(), sf)))
+            .collect();
+        facts.push(("absent-a".to_owned(), {
+            ShapeFact::normalize(
+                vec![req(skey("b"), Some(int_fact())), absent(skey("a"))],
+                open(KeyClass::Str, Some(int_fact())),
+                Certainty::Maybe,
+                true,
+                Vec::new(),
+            )
+        }));
+        facts.push(("unknown-slots".to_owned(), unknown_slots()));
+        facts.push(("forced-str-tail".to_owned(), {
+            ShapeFact::normalize(
+                Vec::new(),
+                open(KeyClass::Int, Some(str_fact())),
+                Certainty::Yes,
+                true,
+                Vec::new(),
+            )
+        }));
+        facts.push(("optional-only".to_owned(), {
+            ShapeFact::normalize(
+                vec![opt(skey("a"), Some(int_fact()))],
+                Tail::Sealed,
+                Certainty::Maybe,
+                false,
+                Vec::new(),
+            )
+        }));
+        for (a_src, sf) in &facts {
+            let members: Vec<&Vec<(Key, Val)>> = pool.iter().filter(|w| sf.admits(w)).collect();
+            if members.is_empty() {
+                continue;
+            }
+            for b_src in &contracts {
+                let b = ty(b_src);
+                let verdict = admits_fact(&b, &fact(sf.clone()));
+                for w in &members {
+                    let concrete = admits_val(&b, &Val::Array((*w).clone()));
+                    if verdict.is_no() {
+                        assert!(
+                            !concrete.is_yes(),
+                            "`{b_src}` answered No for the fact of `{a_src}` yet admits a member of it: {w:?}"
+                        );
+                    }
+                    if verdict.is_yes() {
+                        assert!(
+                            !concrete.is_no(),
+                            "`{b_src}` answered Yes for the fact of `{a_src}` yet rejects a member of it: {w:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // ---- recursion through nested slots ------------------------------------
