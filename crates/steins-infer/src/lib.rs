@@ -7018,10 +7018,11 @@ fn render_dump_fact(fact: &Fact) -> String {
 /// Spell an abstract [`ShapeFact`] for the dump surface (ADR-0062 §6, D4) — the
 /// same array-vocabulary decision [`render_contract_arms`]'s `Shape` arm and
 /// [`render_finite_precise`]'s concrete-array path make, run over the flow-side
-/// fact form instead of the declared or concrete one. `Fact::Shape` has no
-/// construction sites yet (S2 groundwork only), so this exists for the future S3
-/// consumers to inherit for free — every field/tail value slot recurses through
-/// [`render_dump_fact`] itself (the domain's `Fact` is recursive, ADR-0062 §3).
+/// fact form instead of the declared or concrete one. Every field/tail value
+/// slot recurses through [`render_dump_fact`] itself (the domain's `Fact` is
+/// recursive, ADR-0062 §3). [`describe_fact`] inherits it for the
+/// `phpdoc.*-mismatch` messages ADR-0072 unlocked, so the diagnostic surface
+/// and the dump surface name a shape fact identically.
 fn render_shape_fact(shape: &ShapeFact, nullable: bool) -> String {
     use steins_domain::{KeyClass, Presence, Tail};
 
@@ -19608,9 +19609,14 @@ fn describe_fact(f: &Fact) -> String {
             (n, *nullable)
         }
         Fact::Refined { base, nullable, .. } => (base_kw(*base).to_owned(), *nullable),
-        // Finite facts do not reach here, and the array stratum has no
-        // diagnostic spelling yet: both take the site's own generic wording.
-        Fact::Singleton(_) | Fact::OneOf(_) | Fact::Shape { .. } => ("value".to_owned(), false),
+        // The array stratum reaches this surface as of ADR-0072 (a shape fact is
+        // now judged against a contract, so it can be the thing a
+        // `phpdoc.*-mismatch` names). It spells through the ONE speller the dump
+        // surface uses — `render_shape_fact` already carries the null half, so
+        // the `nullable` flag stays `false` here rather than doubling it.
+        Fact::Shape { shape, nullable } => (render_shape_fact(shape, *nullable), false),
+        // Finite facts do not reach here: the callers gate on `finite_members`.
+        Fact::Singleton(_) | Fact::OneOf(_) => ("value".to_owned(), false),
     };
     if nullable {
         format!("a value of type {name}|null")
