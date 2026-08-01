@@ -251,3 +251,81 @@ is the tripwire that will demand one.
 Naming caught up with the data: the table, its TOML and its accessors are
 `declared_return` rather than `declared_envelope`, because a
 `string|false` row is not an envelope in this codebase's vocabulary.
+
+## Amendment (2026-08-01, second): the array bucket discharges
+
+The 388-row deferral above named its own blocker precisely — "a
+shape-aware acceptance relation is what unblocks them, not more lowering"
+— and ADR-0071 is that relation. With `subsumes` able to answer `Yes` and
+`No` about an array pair, the generation-time countersign became a real
+question for a shaped row, and `arm_is_carriable` widened to the array
+vocabulary (`array`, `list<T>`, `array<K, V>`, `iterable<K, V>`,
+`array{…}`). Objects stay deferred for the reason §5 gave, now recorded as
+ADR-0071 §2.3.
+
+**Re-mined at the same pin (`dcde2be6`, PHP 8.5.8) so the delta is the
+carriability filter and nothing else:**
+
+| | #73 | #79 | ADR-0071 |
+|---|---|---|---|
+| carriable by the lowering | 3,051 | 3,612 | 4,343 |
+| — of which richer than an envelope | 0 | 561 | 1,292 |
+| dropped: shaped arrays / lists | 388 | 388 | **0** |
+| dropped: multi-base unions | 1,119 | 630 | 287 |
+| dropped: scalar refinements | 74 | 2 | 2 |
+| dropped: objects / resource / callable | 620 | 620 | 620 |
+| dropped: void / never / mixed | 139 | 139 | 139 |
+| dropped: unparseable | 304 | 304 | 304 |
+| engine disagreements | 33 | 47 | 55 |
+| names the engine does not know | 2,099 | 2,207 | 2,682 |
+| **admitted** | **919** | **1,358** | **1,606** |
+| — of which richer than an envelope | 0 | 439 | 687 |
+
+**What moved.** The shaped-array bucket empties outright, and the union
+bucket loses the 343 rows whose only uncarriable arm was an array one
+(`string|array`, `false|list<string>`) — the two halves of the same
+widening. Of the 731 new candidates, 248 are admitted, 8 disagree, and 475
+are names the pinned engine does not know. That last number is the one
+worth a sentence, because it is the only bucket that moved for a reason
+outside this slice: array-returning builtins concentrate in PECL and
+legacy extensions a stock build does not load — 158 of the 475 are
+`trader_*` alone, then `cairo_*` (28), `imap_*` (21), `hw_*`, `mysqlnd_*`,
+`cubrid_*`, `wincache_*`, `svn_*` — so widening carriability put 731 more
+names to `reflect()` and most of them simply are not there. The 2,207
+previously-unknown names are all still unknown; none crossed back. The
+three drop buckets the widening does not touch —
+objects, void/never/mixed, unparseable — read identically across all three
+runs, which is the check that the classification is still made on the same
+lowered top-level shape. All 1,358 previously admitted rows are preserved
+name for name and spelling for spelling.
+
+**The catches survived, and gained.** All 47 recorded engine
+disagreements are excluded verbatim — same names, same
+`[row, engine]` pairs — and eight join them. They are the same shape one
+vocabulary over: `ftp_raw` says `array` where PHP 8.5 declares `?array`,
+so the row hides a null exactly as `xml_error_string`'s `string` hid one
+under `?string`; `mysqli_fetch_row` and `locale_get_keywords` say
+`null|array` and hide the engine's `false`; `str_word_count` invents
+instead, still carrying a `false` arm PHP 8 replaced with a `ValueError`.
+`ftp_raw` is the sharpest because it is the minimal case: two spellings of
+"an array", one of which admits null, and the arm-wise clause is the only
+thing between the row and the table.
+
+**The version gate stopped being hypothetical.** §5's last paragraph
+recorded that all four version-sensitive names return arrays, so the two
+mined tables were disjoint and the A11 gate had no end-to-end fixture; the
+catalog test asserting that disjointness was named as the tripwire. It
+fired. The tables now intersect, that assertion is inverted to say so with
+this ADR as the reason, and the fixture it was written to demand exists:
+a project declaring 8.1 gets no `str_split` row, one declaring 8.2 does, a
+range straddling 8.2 declines, and an undeclared target admits.
+
+**Consumption needed no new seam,** as ADR-0071 §3 predicted. A
+single-array-arm row reaches the value lane through `seed_shape_fact`, so
+`$r = imagecolorsforindex(...)` binds a shape fact and `$r['alpha']` reads
+`int<0, 127>` at `Asserted`; a multi-arm row (`string|array`) lives in the
+arm lane and spells through `spell_arms`. One narrowing is deliberate and
+pinned: a `?array{…}` row declines the value lane, because the floor
+states one nullability rule (`fact_with_null`) and that rule refuses a
+shape. The arms still carry both the shape and the null, so the decline
+costs the shape-lane consumer and nothing else.
