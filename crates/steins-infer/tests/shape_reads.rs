@@ -194,7 +194,7 @@ fn count_of_an_optional_only_shape_starts_at_zero() {
 #[test]
 fn count_of_a_non_empty_generic_floors_at_one() {
     // An unsealed tail has no ceiling, so the range IS `positive-int`.
-    assert_eq!(dump("non-empty-list<string>", "count($v)"), "dumped type: positive-int (asserted)");
+    assert_eq!(dump("non-empty-list<string>", "count($v)"), "dumped type: int<1, max> (asserted)");
 }
 
 #[test]
@@ -215,7 +215,7 @@ fn a_second_argument_declines_the_count_rule() {
     // `count($x, COUNT_RECURSIVE)` counts something else entirely.
     assert_eq!(
         dump("array{x: int, y: int}", "count($v, COUNT_RECURSIVE)"),
-        "dumped type: non-negative-int"
+        "dumped type: int<0, max>"
     );
 }
 
@@ -296,7 +296,7 @@ fn a_multi_array_arm_lane_seeds_no_shape_fact() {
     // to one (S4). No fact ⇒ no read, no transfer.
     let src = "<?php\n/** @param array{a: string}|array{b: int} $v */\n\
                function f(array $v): void { \\PHPStan\\dumpType(count($v)); }\n";
-    assert_eq!(one_type(src), "dumped type: non-negative-int");
+    assert_eq!(one_type(src), "dumped type: int<0, max>");
 }
 
 #[test]
@@ -304,7 +304,7 @@ fn a_mixed_union_seeds_no_shape_fact() {
     // A-G2: mixed-base unions stay un-facted, exactly as for scalars.
     let src = "<?php\n/** @param array{a: string}|string $v */\n\
                function f($v): void { \\PHPStan\\dumpType(count($v)); }\n";
-    assert_eq!(one_type(src), "dumped type: non-negative-int");
+    assert_eq!(one_type(src), "dumped type: int<0, max>");
 }
 
 #[test]
@@ -313,5 +313,5 @@ fn a_nullable_shape_keeps_the_null_arm_in_the_fact() {
     // nullable base declines every read until S4 narrows it.
     let src = "<?php\n/** @param array{a: string}|null $v */\n\
                function f(?array $v): void { \\PHPStan\\dumpType(count($v)); }\n";
-    assert_eq!(one_type(src), "dumped type: non-negative-int");
+    assert_eq!(one_type(src), "dumped type: int<0, max>");
 }

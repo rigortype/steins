@@ -560,7 +560,7 @@ fn an_array_row_spells_through_the_one_speller_on_both_surfaces() {
         "dumped type: array{alpha: int<0, 127>, blue: int<0, 255>, green: int<0, 255>, red: int<0, 255>} (asserted)"
     );
     assert_eq!(probe("str_split($s)"), "dumped type: list<string> (asserted)");
-    assert_eq!(probe("array_count_values([])"), "dumped type: array<positive-int> (asserted)");
+    assert_eq!(probe("array_count_values([])"), "dumped type: array<int<1, max>> (asserted)");
     // The declared-side surface agrees, through the assignment rung — the parity
     // claim ADR-0069 makes for every row shape.
     let phpdoc = "<?php\nfunction f(string $s): void { $r = str_split($s); \\PHPStan\\dumpPhpDocType($r); }\n";

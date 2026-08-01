@@ -7247,18 +7247,13 @@ fn base_keyword(b: Base) -> &'static str {
     }
 }
 
-/// The tightest int-range keyword (mirrors [`describe_fact`]'s ladder): the named
-/// predicate classes, else the explicit `int<lo, hi>` interval.
+/// How an int interval spells on the dump surface — the shared
+/// [`steins_contract::spell::int_range_keyword`], not a second copy of the ladder,
+/// so the value-fact path and the contract-arm path cannot disagree about a range
+/// (issue #90). [`describe_fact`] keeps its own keyword prose: a finding message
+/// is not the dump surface and reads better with the phpdoc sugar.
 fn int_range_keyword(r: IntRange) -> String {
-    if r == IntRange::POSITIVE {
-        "positive-int".to_owned()
-    } else if r == IntRange::NEGATIVE {
-        "negative-int".to_owned()
-    } else if r == IntRange::NON_NEGATIVE {
-        "non-negative-int".to_owned()
-    } else {
-        format!("int<{}, {}>", r.lo(), r.hi())
-    }
+    steins_contract::spell::int_range_keyword(r)
 }
 
 /// Render a narrowed contract-fact arm list (ADR-0052 §1 carrier) for the dump
@@ -20480,10 +20475,11 @@ mod dump_render_tests {
             render_dump_fact(&Fact::General { base: Base::String, nullable: true }),
             "string|null"
         );
-        // Refined int range: the named predicate class.
+        // Refined int range: the interval, PHPStan's own spelling for every range
+        // (issue #90 — `positive-int` is phpdoc input sugar, never dump output).
         assert_eq!(
             render_dump_fact(&Fact::refined(Base::Int, Refinement::Int(IntRange::POSITIVE), false)),
-            "positive-int"
+            "int<1, max>"
         );
         // Refined string: reuse the speller's own preds_keyword so a refined-string
         // dump and its spell_arms rendering agree.

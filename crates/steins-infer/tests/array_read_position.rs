@@ -312,12 +312,12 @@ fn a_mutating_read_position_call_invalidates_the_argument_fact() {
         );
         let got = one_type_with(&src, &mut Mock::sidecar());
         assert_ne!(got, "dumped type: 3", "{f} must not leave the pre-call count standing");
-        assert_eq!(got, "dumped type: non-negative-int", "{f} drops the argument's fact");
+        assert_eq!(got, "dumped type: int<0, max>", "{f} drops the argument's fact");
     }
     // The same, one layer up: the shape lane must not answer from a moved shape.
     let src = "<?php\n/** @param array{a: int, b: int} $v */\n\
                function f(array $v): void { array_pop($v); \\PHPStan\\dumpType(count($v)); }\n";
-    assert_eq!(one_type_with(src, &mut Mock::sidecar()), "dumped type: non-negative-int");
+    assert_eq!(one_type_with(src, &mut Mock::sidecar()), "dumped type: int<0, max>");
     // …while the RETURN, computed from the pre-call shape, is still the sharp one.
     assert_eq!(dump("array{a: int, b: int}", "array_pop($v)"), "dumped type: int (asserted)");
 }

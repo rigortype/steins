@@ -51,7 +51,7 @@ fn flagship_positive_int_crosses_verified() {
         }\n\
         $x = f(1, rand());\n\
         \\PHPStan\\dumpType($x);\n";
-    assert_eq!(one_type(src), "dumped type: positive-int");
+    assert_eq!(one_type(src), "dumped type: int<1, max>");
 }
 
 // ==========================================================================
@@ -77,7 +77,7 @@ fn mixed_strata_join_renders_asserted() {
         }\n\
         $x = f(1, rand(), rand(), (bool) rand());\n\
         \\PHPStan\\dumpType($x);\n";
-    assert_eq!(one_type(src), "dumped type: positive-int (asserted)");
+    assert_eq!(one_type(src), "dumped type: int<1, max> (asserted)");
 }
 
 // ==========================================================================
@@ -166,7 +166,7 @@ fn phpdoc_return_mismatch_crosses_walk_truth() {
         $x = f(1, rand());\n\
         \\PHPStan\\dumpType($x);\n";
     assert_eq!(count(src, RETURN_MISMATCH_ID), 1, "the phpdoc lie is reported on the callee");
-    assert_eq!(one_type(src), "dumped type: negative-int", "the walk truth crosses");
+    assert_eq!(one_type(src), "dumped type: int<min, -1>", "the walk truth crosses");
 }
 
 // ==========================================================================
@@ -250,7 +250,7 @@ fn summary_composes_through_two_levels() {
         }\n\
         $x = f(9);\n\
         \\PHPStan\\dumpType($x);\n";
-    assert_eq!(one_type(src), "dumped type: positive-int");
+    assert_eq!(one_type(src), "dumped type: int<1, max>");
 }
 
 // ==========================================================================
@@ -290,7 +290,7 @@ fn memo_replay_is_deterministic() {
         .filter(|d| d.id == DEBUG_TYPE_ID)
         .map(|d| d.message)
         .collect();
-    assert_eq!(ds, vec!["dumped type: positive-int".to_owned(), "dumped type: positive-int".to_owned()]);
+    assert_eq!(ds, vec!["dumped type: int<1, max>".to_owned(), "dumped type: int<1, max>".to_owned()]);
 }
 
 // ==========================================================================
@@ -376,7 +376,7 @@ fn flagship_crosses_in_argument_position() {
         }\n\
         $x = f(1, rand());\n\
         \\PHPStan\\dumpType($x);\n";
-    assert_eq!(one_type(arg_form), "dumped type: positive-int");
+    assert_eq!(one_type(arg_form), "dumped type: int<1, max>");
     assert_eq!(one_type(arg_form), one_type(assigned_form), "the two forms are identical");
 }
 
@@ -397,7 +397,7 @@ fn mixed_strata_render_asserted_in_argument_position() {
             return $m;\n\
         }\n\
         \\PHPStan\\dumpType(f(1, rand(), rand(), (bool) rand()));\n";
-    assert_eq!(one_type(src), "dumped type: positive-int (asserted)");
+    assert_eq!(one_type(src), "dumped type: int<1, max> (asserted)");
 }
 
 #[test]
