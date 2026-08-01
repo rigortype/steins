@@ -1,0 +1,34 @@
+# Steins — GitHub Actions workflow (minimal).
+#
+# Copy to .github/workflows/steins.yml. Checks out the repo, puts a PHP on
+# PATH matching the project's floor, installs Steins through the Composer
+# channel (pinned in composer.lock, so this step never silently moves the
+# analyzer version — see docs/user-manual/01-installation-and-quickstart.md),
+# and runs `check`. Exit 1 (findings) and exit 2 (usage/config error, e.g. a
+# renamed path) both fail the job; only exit 0 is green. See
+# docs/user-manual/06-ci.md for the exit-code contract and the baseline loop
+# this template assumes is already committed as .steins-baseline.jsonl.
+name: steins
+
+on: [push, pull_request]
+
+jobs:
+  steins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Match this to your composer.json "require": { "php": "..." } floor.
+      # Steins runs the project's own PHP over IPC (ADR-0004), so the version
+      # here is what gets asked, not a version Steins emulates.
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          coverage: none
+
+      # Installs the Composer shim (~100KB of PHP), which on first use
+      # downloads the matching release binary and checks it against the
+      # published sha256. Later runs in the same job reuse it from cache.
+      - run: composer require --dev typedduck/steins
+
+      - run: vendor/bin/steins check .

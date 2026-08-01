@@ -36,8 +36,11 @@ Two things worth knowing before you start:
    the four named strictness stages, the `.steins-baseline.jsonl` ratchet,
    user profiles in `steins.toml`, inline `@steins-ignore`, `effect-diff`'s
    separate capture loop, and why mechanics ids can never be switched off.
-6. **CI integration** *(planned)* — running Steins in CI, the exit-code
-   contract, the baseline loop, and copy-pasteable workflow templates.
+6. [**CI integration**](06-ci.md) — the exit-code contract in CI, install
+   channels and the PHP sidecar on runners, the baseline loop and why
+   `--set-baseline` never runs in CI, a `jq` recipe for inline
+   annotations, `steins doctor` as a preflight, and copy-pasteable
+   workflow templates in [`ci-templates/`](ci-templates/README.md).
 7. **Troubleshooting** *(planned)* — `steins doctor`, sidecar failures, and
    a symptom-indexed list of common problems.
 
