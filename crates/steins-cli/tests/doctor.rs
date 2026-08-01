@@ -8,9 +8,11 @@
 //! `--no-php` for determinism (no dependency on a `php` on PATH); the Runtime section
 //! still renders (the sound-subset posture) and every run stays exit-neutral there.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
@@ -37,6 +39,56 @@ fn run_in(dir: &Path, args: &[&str]) -> Run {
         code: out.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
+/// Wall-clock ceiling for the usage-error runs below. Generous next to a doctor
+/// run that does no work at all (it exits before the header), tight next to the
+/// unbounded filesystem walk it guards against.
+const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// [`run_in`] with a deadline: on expiry the child is killed and the test fails
+/// with a hang report rather than blocking the suite.
+///
+/// `Command::output` waits forever, which is the wrong failure mode for a
+/// regression whose symptom *is* not terminating — CI would stall on a red build
+/// instead of reporting one. Piped output is drained on a thread so a child that
+/// fills its pipe buffer cannot deadlock against the timer.
+fn run_in_within(dir: &Path, args: &[&str], timeout: Duration) -> Run {
+    let mut child = Command::new(bin())
+        .args(args)
+        .current_dir(dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn steins");
+    let mut out = child.stdout.take().expect("piped stdout");
+    let mut err = child.stderr.take().expect("piped stderr");
+    let reader = std::thread::spawn(move || {
+        let (mut o, mut e) = (Vec::new(), Vec::new());
+        let _ = out.read_to_end(&mut o);
+        let _ = err.read_to_end(&mut e);
+        (o, e)
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait().expect("wait on steins") {
+            Some(status) => break status,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                panic!("`steins {}` did not terminate within {timeout:?}", args.join(" "));
+            }
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    let (o, e) = reader.join().expect("output reader");
+    Run {
+        code: status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&o).into_owned(),
+        stderr: String::from_utf8_lossy(&e).into_owned(),
     }
 }
 
@@ -269,6 +321,55 @@ fn doctor_rejects_unknown_flag() {
     let dir = workdir("badflag");
     let r = run_in(&dir, &["doctor", "--nope"]);
     assert_eq!(r.code, 2, "unknown flag → usage error exit 2; stderr:\n{}", r.stderr);
+}
+
+/// ADR-0054 §10 amendment: a path argument that names nothing is doctor's own
+/// usage error (2) — the open half of the ADR-0050 §7 amendment, which settled
+/// the same question for `check`/`transform`/`effect-diff` and left doctor out.
+///
+/// Run under a timeout because the bug this closes was a *hang*, not a wrong
+/// code: `composer::discover` substituted the parent of a nonexistent path and,
+/// for a top-level `/typo`, walked all of `/`. A regression must red this test,
+/// not wedge CI until the job's own timeout kills it.
+#[test]
+fn doctor_rejects_a_path_that_names_nothing() {
+    let dir = workdir("missing-path");
+    let r = run_in_within(&dir, &["doctor", "--no-php", "/definitely-not-a-real-path-9x8"], TIMEOUT);
+    assert_eq!(r.code, 2, "nonexistent path → usage error exit 2; stderr:\n{}", r.stderr);
+    assert!(
+        r.stderr.contains("path does not exist: /definitely-not-a-real-path-9x8"),
+        "the missing path is named, with the same message the path-walking commands use; stderr:\n{}",
+        r.stderr
+    );
+    // Checked ahead of the header line: no posture report about a tree that is
+    // not there, not even the banner.
+    assert!(r.stdout.is_empty(), "no report emitted; stdout:\n{}", r.stdout);
+}
+
+/// The relative spelling is the same usage error, and is the one that actually
+/// bites: a typo'd subdirectory resolves against the CWD, so before the fix its
+/// seed was the *real* project root and doctor produced a plausible report about
+/// the wrong tree.
+#[test]
+fn doctor_rejects_a_relative_path_that_names_nothing() {
+    let dir = workdir("missing-relative");
+    write(&dir, "composer.json", r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#);
+    let r = run_in_within(&dir, &["doctor", "--no-php", "src-typo"], TIMEOUT);
+    assert_eq!(r.code, 2, "nonexistent relative path → exit 2; stdout:\n{}", r.stdout);
+    assert!(r.stderr.contains("path does not exist: src-typo"), "stderr:\n{}", r.stderr);
+    assert!(r.stdout.is_empty(), "stdout:\n{}", r.stdout);
+}
+
+/// The discriminator is existence, not emptiness — §10's exit-0 environment lane
+/// is untouched. A directory that exists and holds nothing is a real place doctor
+/// genuinely has a posture to report about.
+#[test]
+fn doctor_reports_on_an_existing_empty_path_at_zero() {
+    let dir = workdir("existing-empty");
+    std::fs::create_dir_all(dir.join("src")).expect("create empty subdir");
+    let r = run_in_within(&dir, &["doctor", "--no-php", "src"], TIMEOUT);
+    assert_eq!(r.code, 0, "an existing empty dir still reports at 0; stderr:\n{}", r.stderr);
+    assert!(r.stdout.contains("posture report"), "stdout:\n{}", r.stdout);
 }
 
 // ------------------------------------------------ coverage posture (issue #30) ---

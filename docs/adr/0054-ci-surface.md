@@ -409,3 +409,80 @@ doctor is user-side adoption readiness).
     - **SARIF for `transform`** — transform's report is a diff/plan,
       not findings; if code scanning ever wants it, it needs its own
       mapping ADR, not a widening of this one.
+
+## Amendment (2026-08-01): §10 — a nonexistent path argument is usage (2)
+
+ADR-0050's §7 amendment ruled that an explicitly-passed path naming
+nothing is a usage error for every command that walks a path set, and
+explicitly left `doctor` out of scope — doctor's exit codes mean
+something else, so the answer could not be inherited. This is that open
+half, decided rather than defaulted.
+
+1. **`steins doctor /typo` exits 2.** Not 0, and not 1. The three-way
+   split in point 10 is *about what the report describes*: 0 is a fact
+   about the environment, 1 is the configuration asserting something
+   the world refutes. A path in argv is neither — it is the question
+   doctor was asked, not an answer it found. Nothing in the environment
+   is degraded when a caller mistypes a directory; the run has no
+   subject at all. Point 10's third code is "doctor's own usage
+   errors", and doctor's own arguments are precisely what this is. It
+   already exits 2 for a second path and for `--baseline` with no
+   argument; a path that names nothing joins them, and doctor stops
+   being the one path-taking command whose typo is silent.
+
+2. **Why not 0 (the environment lane).** The argument for 0 is that
+   doctor is the command safe to run anywhere and must not red a CI job
+   for facts about the box. That argument is about *degradation*, and it
+   survives intact: a sidecar-less box, a monkey-patched runtime and a
+   dormant baseline all still report at 0 (the lenient-default
+   principle, ADR-0004). A missing argument is not a degraded
+   environment. Worse, the report doctor would produce at 0 is not
+   merely thin — it *mixes two trees*: layout discovery seeds the
+   nonexistent path's parent, so `doctor src-typo` in a project root
+   renders the Layout section of the real project beside a Coverage
+   section for a directory that is not there. Every line of it is
+   plausible and none of it answers the question asked. Reporting 0
+   would make that the sanctioned behaviour.
+
+3. **Why not 1 (the contradiction lane).** Point 10 exits 1 when *the
+   config* names something that is not there — a path-set or
+   `[[policy]]` reference to nothing. That is a durable, committed
+   assertion, and 1 says "the file in your repo is wrong". A path typed
+   at the shell is transient and belongs to the invocation, not the
+   project. Collapsing the two would make a shell typo indistinguishable
+   from a repo that fails for everyone, and would put the
+   config-contradiction code on a run where the config may be perfect.
+   The distinction is argv versus committed intent, and it is the same
+   line ADR-0050 §7 draws.
+
+4. **Existence is the discriminator, as it is for check.** A path that
+   exists and holds no `.php` files still reports at 0 — a real location
+   doctor genuinely has a posture about, coverage section included
+   ("no .php files under …" is a finding about the world, not a broken
+   question).
+
+5. **Validated before the header line.** Doctor's first act was to print
+   its banner; the check runs ahead of it, so a failed run emits stderr
+   and nothing else. Same fail-fast ordering ADR-0050 §7 requires of the
+   JSON document.
+
+6. **The hang was a separate bug, fixed separately.** `doctor /typo` did
+   not exit wrongly — it never exited. `composer::discover` substituted
+   the parent directory of any non-directory path, a rule written for
+   files (`check src/Foo.php` should find `src/`'s manifest) that also
+   fired on paths that do not exist; for a top-level `/typo` the parent
+   is `/`, and the downward walk descended the entire filesystem.
+   `seed_dirs` now drops a seed that names nothing, so `discover`
+   terminates on a nonexistent root no matter which caller passes one.
+   That fix is a termination guarantee at the IO boundary and is
+   independent of this exit-code decision: the boundary must not hang
+   even when the layer above it has already rejected the argument.
+
+7. **Refusals.**
+   - **A flag to analyze anyway** — the same escape hatch ADR-0050 §7
+     refused, and re-opening the bug is what it would do.
+   - **Widening 1 to cover argv** — see point 3; the codes stay
+     distinguishable or they stop carrying information.
+   - **Changing what 0 covers** — the environment-degradation lane is
+     untouched by this amendment, exactly as ADR-0050's amendment
+     promised.

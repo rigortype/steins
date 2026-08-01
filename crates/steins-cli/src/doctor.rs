@@ -15,7 +15,12 @@
 //! * **1** — a hard *configuration contradiction*: an unparseable `steins.toml`, a
 //!   profile-resolution error, or an unparseable baseline file — exactly the
 //!   conditions under which `check` diverges from declared intent.
-//! * **2** — doctor's own usage errors.
+//! * **2** — doctor's own usage errors: an unknown flag, a second path, a
+//!   `--baseline` with no argument, and — §10 amendment — a path argument that
+//!   names nothing. The last one is argv, not environment: doctor reports the
+//!   world at 0, but only about a tree the caller actually named. Reporting on
+//!   `/typo`'s *parent* is not a degraded posture, it is an answer to a different
+//!   question, so it does not belong to the exit-0 lane.
 //!
 //! # Scope
 //!
@@ -93,6 +98,13 @@ pub fn run_doctor(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // A path argument naming nothing is doctor's own usage error (ADR-0054 §10
+    // amendment) — the third exit code, not the environment-degradation 0 and not
+    // the config-contradiction 1. Checked before the header line: a report about a
+    // tree that is not there is worse than no report.
+    if let Err(code) = crate::reject_missing_paths(&paths) {
+        return code;
+    }
 
     // Environment facts report at exit 0 (ADR-0054 §10); a configuration the world
     // refutes flips this and exits 1.

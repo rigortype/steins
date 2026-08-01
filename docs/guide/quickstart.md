@@ -75,6 +75,13 @@ checks at all. It is also the quickest way to confirm an install works:
 steins doctor --no-php
 ```
 
+Doctor's own exits are deliberately narrow: `0` for any posture it can report,
+including degraded ones (no PHP on `PATH` is a mode, not a failure); `1` when
+the configuration asserts something the world refutes (an unparseable
+`steins.toml`, an unknown profile, a bad baseline file); `2` for doctor's own
+usage errors — including a `path` argument that does not exist, which reds
+rather than reporting on some other directory (ADR-0054 §10).
+
 ## Requirements
 
 Steins types literals by executing the **project's own PHP** over IPC — its
