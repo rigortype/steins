@@ -129,6 +129,19 @@ pub enum TagKind {
     /// Only the **prefixed** spellings are recognized — PHPStan has no bare
     /// `@assert` tag, so an unprefixed `@assert` is not a tag at all.
     Assert { kind: AssertKind, negated: bool },
+    /// A trace annotation (`@psalm-trace $x`, ADR-0074 §2) — the docblock spelling
+    /// of the dump surface's question. Like the assertion family it exists in
+    /// **prefixed form only** (`@psalm-trace` is the canonical Psalm vocabulary,
+    /// `@phpstan-trace` rides the uniform strip; bare `@trace` is not a tag), and
+    /// like [`Self::ConditionalPurity`] its payload is a variable name alone in
+    /// the shared [`DocTag::var_name`] field, `type_text` empty — no type, no
+    /// expression. A comma-list payload (`$a, $b` — Psalm's multi-variable form,
+    /// ADR-0074 §7) is **not emitted at all** in this slice: the breadth slice
+    /// (issue #95) extends to lists, and until then silence is the safe side.
+    ///
+    /// Named `TraceTag`, not `Trace`: bare `trace` is the trace IR's word in this
+    /// codebase (ADR-0074 §4's naming rule).
+    TraceTag,
 }
 
 impl TagKind {
@@ -163,6 +176,11 @@ impl TagKind {
             "assert-if-false" if prefixed => {
                 TagKind::Assert { kind: AssertKind::IfFalse, negated: false }
             }
+            // The trace annotation exists only in prefixed form (`@psalm-trace`
+            // canonical, `@phpstan-trace` via the uniform strip); a bare `@trace`
+            // is not a recognized tag — the assertion-family precedent verbatim
+            // (ADR-0074 §2).
+            "trace" if prefixed => TagKind::TraceTag,
             _ => return None,
         };
         Some((kind, prefixed))
@@ -178,6 +196,10 @@ impl TagKind {
 
     fn is_conditional_purity(self) -> bool {
         matches!(self, TagKind::ConditionalPurity(_))
+    }
+
+    fn is_trace_annotation(self) -> bool {
+        matches!(self, TagKind::TraceTag)
     }
 }
 
@@ -283,10 +305,14 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
 
     // For @param/@var/@…-assert, split the type off at the first `$variable`.
     let mut property_target = false;
-    let (type_start, type_end, var_name) = if kind.is_conditional_purity() {
-        // Upstream grammar: `parseRequiredVariableName` then an optional
-        // description — the variable must be the *first* token, and there is no
-        // type. Anything else is malformed: drop just this tag.
+    let (type_start, type_end, var_name) = if kind.is_conditional_purity()
+        || kind.is_trace_annotation()
+    {
+        // The variable-name-only families. Conditional purity by upstream
+        // grammar (`parseRequiredVariableName` then an optional description);
+        // the trace annotation by ADR-0074 §2 (variable names only — no type
+        // text, no expression). The variable must be the *first* token, and
+        // there is no type. Anything else is malformed: drop just this tag.
         if bytes[rest_start] != b'$' {
             return None;
         }
@@ -294,7 +320,20 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
         if var_name.len() <= 1 {
             return None;
         }
-        // Zero-width type region: this family declares a condition, not a type.
+        // A trace annotation whose payload is a comma list (`$a, $b`) is
+        // Psalm's multi-variable form — the breadth slice (issue #95, ADR-0074
+        // §7). This slice does not emit the tag at all: a missed trace is a
+        // missed service, never a wrong answer, so silence is the safe side.
+        if kind.is_trace_annotation() {
+            let mut k = rest_start + var_name.len();
+            while k < rest_end && (bytes[k] == b' ' || bytes[k] == b'\t') {
+                k += 1;
+            }
+            if k < rest_end && bytes[k] == b',' {
+                return None;
+            }
+        }
+        // Zero-width type region: these families declare no type.
         (rest_start, rest_start, Some(var_name))
     } else if kind.carries_var_name() {
         match find_variable(bytes, rest_start, rest_end) {
@@ -613,6 +652,54 @@ mod tests {
         // Upstream registers only the bare and `@phpstan-` spellings for this
         // family — there is no `@psalm-` alias to honor.
         assert!(scan_docblock("/** @psalm-pure-unless-callable-is-impure $cb */").is_empty());
+    }
+
+    // ---- Trace annotation (ADR-0074 §2, issue #94) -------------------------
+
+    #[test]
+    fn scans_psalm_trace_with_a_variable_payload() {
+        // The canonical spelling: Psalm's own vocabulary (ADR-0029 compat).
+        let doc = "/** @psalm-trace $x */";
+        let tags = scan_docblock(doc);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].kind, TagKind::TraceTag);
+        assert_eq!(tags[0].var_name.as_deref(), Some("$x"));
+        // Variable name only — the tag declares no type.
+        assert_eq!(tags[0].type_text, "");
+        assert!(tags[0].prefixed);
+    }
+
+    #[test]
+    fn phpstan_trace_rides_the_uniform_prefix_strip() {
+        let tags = scan_docblock("/** @phpstan-trace $value */");
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].kind, TagKind::TraceTag);
+        assert_eq!(tags[0].var_name.as_deref(), Some("$value"));
+    }
+
+    #[test]
+    fn bare_trace_is_not_a_tag() {
+        // Neither upstream tool recognizes an unprefixed `@trace`; recognizing it
+        // would be invented vocabulary (the assertion-family precedent, ADR-0074 §2).
+        assert!(scan_docblock("/** @trace $x */").is_empty());
+    }
+
+    #[test]
+    fn trace_annotation_comma_list_is_not_emitted_this_slice() {
+        // `@psalm-trace $a, $b` is Psalm's multi-variable form (ADR-0074 §7) —
+        // the breadth slice (issue #95). Until it lands the scanner emits the
+        // tag not at all: silence, never a half-answered list. Both the spaced
+        // and the tight spelling drop.
+        assert!(scan_docblock("/** @psalm-trace $a, $b */").is_empty());
+        assert!(scan_docblock("/** @psalm-trace $a,$b */").is_empty());
+    }
+
+    #[test]
+    fn trace_annotation_without_a_variable_is_malformed() {
+        // The payload must be a variable name first (no type, no expression).
+        assert!(scan_docblock("/** @psalm-trace */").is_empty());
+        assert!(scan_docblock("/** @psalm-trace int $x */").is_empty());
+        assert!(scan_docblock("/** @psalm-trace $ */").is_empty());
     }
 
     #[test]

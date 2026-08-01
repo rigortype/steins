@@ -12,7 +12,8 @@ use std::collections::HashSet;
 use steins_infer::{
     ALL_EMITTABLE_IDS, CALL_ON_NULL_ID, CALL_TOO_FEW_ARGUMENTS_ID, CALL_TOO_MANY_ARGUMENTS_ID,
     CALL_UNDEFINED_FUNCTION_ID, CALL_UNDEFINED_METHOD_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID,
-    CLASS_UNDEFINED_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, DIAGNOSTIC_IDS,
+    CLASS_UNDEFINED_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID,
+    DIAGNOSTIC_IDS,
     DIAGNOSTIC_REGISTRY, EFFECT_ID, EFFECT_LISKOV_ID, FACET_ORIGIN, Facet, Floor, ID, Layer,
     OFFSET_MAYBE_MISSING_ID, OFFSET_UNDECLARED_ID, surface_floor,
     OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID, Origin, PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID,
@@ -125,6 +126,9 @@ fn classification_matches_adr_0050_section_1() {
     assert_eq!(layer(DEBUG_TYPE_ID), Some(Layer::Debug));
     assert_eq!(layer(DEBUG_PHPDOC_TYPE_ID), Some(Layer::Debug));
     assert_eq!(layer(DEBUG_VAR_DUMP_ID), Some(Layer::Debug));
+    // trace annotation (ADR-0074 §4): the docblock spelling of the same question,
+    // same layer.
+    assert_eq!(layer(DEBUG_TRACE_ID), Some(Layer::Debug));
 }
 
 /// The finding-breadth family lights up stage by stage (ADR-0049). At S2 the
@@ -172,29 +176,35 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
     assert!(pending.contains(too_many), "`{too_many}` should be registered-not-yet-emitted");
     assert!(!emittable.contains(too_many), "`{too_many}` must not be emittable before its stage");
     assert!(layer(too_many).is_some(), "`{too_many}` must be registered with a layer");
-    // One id is registered-not-yet-emitted: the too-many arm. All three ADR-0053
-    // dump-surface debug ids have lit up (checked in `all_three_debug_ids_emit`).
+    // One id is registered-not-yet-emitted: the too-many arm. The debug lane's
+    // four ids — the three ADR-0053 dump-surface ids and the ADR-0074 trace
+    // annotation `debug.trace` — have all lit up (checked in
+    // `all_four_debug_ids_emit`).
     assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 1);
 }
 
-/// The ADR-0053 dump surface: all three debug ids emit — the explicit pair
-/// (`debug.type` / `debug.phpdoc-type`) at D3, and `debug.var-dump` at D4. Each carries
+/// The debug lane: all four debug ids emit — the ADR-0053 explicit pair
+/// (`debug.type` / `debug.phpdoc-type`) at D3, `debug.var-dump` at D4, and the
+/// ADR-0074 trace annotation `debug.trace` at issue #94's emit slice. Each carries
 /// `Layer::Debug`, is in `ALL_EMITTABLE_IDS` (left `REGISTERED_NOT_YET_EMITTED`), and
 /// keeps its pinned kebab-case `debug.*` spelling.
 #[test]
-fn all_three_debug_ids_emit() {
+fn all_four_debug_ids_emit() {
     let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
     let emittable: HashSet<&str> = ALL_EMITTABLE_IDS.iter().copied().collect();
 
-    for id in [DEBUG_TYPE_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_VAR_DUMP_ID] {
+    for id in [DEBUG_TYPE_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_VAR_DUMP_ID, DEBUG_TRACE_ID] {
         assert_eq!(layer(id), Some(Layer::Debug), "`{id}` must be a Debug-layer id");
-        assert!(emittable.contains(id), "`{id}` must be emittable (D3/D4)");
+        assert!(emittable.contains(id), "`{id}` must be emittable (D3/D4/#94)");
         assert!(!pending.contains(id), "`{id}` must have left REGISTERED_NOT_YET_EMITTED");
     }
-    // The kebab-case spellings are pinned (ADR-0053 §2 / ADR-0022).
+    // The kebab-case spellings are pinned (ADR-0053 §2 / ADR-0074 §4 / ADR-0022).
     assert_eq!(DEBUG_TYPE_ID, "debug.type");
     assert_eq!(DEBUG_PHPDOC_TYPE_ID, "debug.phpdoc-type");
     assert_eq!(DEBUG_VAR_DUMP_ID, "debug.var-dump");
+    // The one bare-word site: the id string names the user-facing vocabulary
+    // (Psalm's issue name); internal symbols never use bare `trace` (§4).
+    assert_eq!(DEBUG_TRACE_ID, "debug.trace");
 }
 
 /// An unregistered id has no layer (the lookup is exact, not prefix-based).
