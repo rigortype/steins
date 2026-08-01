@@ -6019,6 +6019,8 @@ impl Known {
 }
 
 /// A binding-descent key: the callee (by FQN-ish key) plus its bound params.
+/// Method descents may also carry a `this:` pseudo-binding for the exact
+/// receiver (ADR-0075 §2.1); closure descents carry `use:{name}` captures.
 type BindingKey = (String, Vec<(String, ArgValue)>);
 
 /// A **return-fact summary** (ADR-0057 amendment, slice T0): the join, over a
@@ -6369,10 +6371,12 @@ fn walk_trace(
         } else {
             None
         };
-        // The return-fact summary of a `$x = f(...)` RHS descent (ADR-0057 amendment
-        // T0), captured in step 1 and consumed by `apply_assign` in step 2. For an
-        // `Assign` statement `checkable_calls` yields exactly the RHS call, so the
-        // Function-arm summary below is unambiguously this assignment's.
+        // The return-fact summary of a `$x = f(...)` / `$x = $o->m(...)` RHS
+        // descent (ADR-0057 amendment T0; ADR-0075 for methods/statics), captured
+        // in step 1 and consumed by `apply_assign` in step 2. For an `Assign`
+        // statement `checkable_calls` yields exactly the RHS call, so the summary
+        // below is unambiguously this assignment's. Constructors keep descending
+        // for diagnostics but never fill this slot (ADR-0075 §3).
         let mut stmt_summary: Option<ReturnSummary> = None;
         // 1. Check + descend every statically-named call this statement carries.
         for call in checkable_calls(&stmt.kind) {
@@ -6425,7 +6429,7 @@ fn walk_trace(
                         // variant is unsound — see `resolve_arity_method`).
                         check_arity(cx, folder, call, store, scope.poisoned, out);
                     }
-                    handle_method_call(
+                    let method_summary = handle_method_call(
                         cx,
                         folder,
                         scope,
@@ -6437,6 +6441,12 @@ fn walk_trace(
                         descent.as_mut(),
                         out,
                     );
+                    // ADR-0075: a resolved method/static summary rebinds on the same
+                    // rungs as a function's. Constructors keep their exactness lane
+                    // (ADR-0036) and leave the summary unread.
+                    if !matches!(call.receiver, Callee::Construct { .. }) {
+                        stmt_summary = method_summary;
+                    }
                 }
                 // `$fn(...)` — resolve the callee variable against the env: a proven
                 // closure value descends into its scope (ADR-0033), a proven string
@@ -6554,15 +6564,22 @@ fn walk_trace(
         if let StmtKind::Return { value, .. } = &stmt.kind
             && let Some(sc) = &w.summary
         {
-            // Composition (A1): when the returned expression IS a call, its own
-            // summary (captured into `stmt_summary` by the step-1 descent) is this
-            // exit's fact — `return g(...)` crosses g's proven fact. A recursive /
-            // unbindable inner call left `stmt_summary` empty, so this falls through
-            // to the direct value fact (and thence the A3 floor).
-            let composed = matches!(value, ArgValue::Call(_, _))
-                .then(|| stmt_summary.as_ref().and_then(|s| s.value.as_ref()))
-                .flatten()
-                .map(|sv| (sv.fact.clone(), sv.stratum));
+            // Composition (A1): when the returned expression IS a call whose
+            // summary step 1 captured into `stmt_summary`, that summary is this
+            // exit's fact — `return g(...)` and `return $o->m(...)` / `return C::m(...)`
+            // (ADR-0075) cross the proven fact. A constructor `return new Foo(...)`
+            // is `ArgValue::New` and never composes a construct-body summary as a
+            // value (object return is T1). A recursive / unbindable inner call left
+            // `stmt_summary` empty, so this falls through to the direct value fact
+            // (and thence the A3 floor).
+            let composed = if matches!(value, ArgValue::New(..)) {
+                None
+            } else {
+                stmt_summary
+                    .as_ref()
+                    .and_then(|s| s.value.as_ref())
+                    .map(|sv| (sv.fact.clone(), sv.stratum))
+            };
             let exit_fact = composed.or_else(|| return_value_fact(w, folder, value, env, store));
             let contrib = match exit_fact {
                 // A2 — native-envelope violation: a proven boundary `TypeError`, the
@@ -13063,10 +13080,21 @@ fn descend(
     // The binding key incorporates the captured snapshot so two calls of the same
     // closure with different snapshots memoize distinctly (adversarial #1). The
     // stratum is a trust attribute, not an identity — it is excluded from the key.
+    //
+    // ADR-0075 §2.1: a method body reached through `resolve_exact` is keyed by
+    // declaring FQN (`Base::m`), but two exact receivers (`Sub1`, `Sub2`) can
+    // inherit the same body while `$this->hook()` inside it dispatches differently.
+    // When `body_this_exact` is `Some`, a `this:` pseudo-binding carries that
+    // receiver so the memo never replays one receiver's value (or emissions) for
+    // the other. Guarded resolutions pass `None` and key exactly as before — a
+    // final/private body's inner dispatch is a pure function of its declaring class.
     let mut key_binding: Vec<(String, ArgValue)> =
         bound.iter().map(|(n, v, _)| (n.clone(), v.clone())).collect();
     for (name, fact) in captures {
         key_binding.push((format!("use:{name}"), arg_of_fact_key(fact)));
+    }
+    if let Some(exact) = &body_this_exact {
+        key_binding.push(("this:".to_owned(), ArgValue::Str(exact.clone())));
     }
     key_binding.sort_by(|a, b| a.0.cmp(&b.0));
     let key: BindingKey = (key_name.to_owned(), key_binding);
@@ -15901,7 +15929,11 @@ fn emit_offset(
     out.push(Diagnostic { id, path: cx.path().to_owned(), line: pos.line, column: pos.column, message, facet: None });
 }
 
-/// Check + descend one method / static / constructor call.
+/// Check + descend one method / static / constructor call. Returns the callee's
+/// [`ReturnSummary`] when the descent produced one (ADR-0075): the walk-trace
+/// rebinds it at the same rungs a function summary uses (`apply_assign`, return
+/// composition). Constructors still descend for diagnostics; the caller leaves
+/// their summary unread (ADR-0075 §3 — construction is the ADR-0036 exactness lane).
 #[allow(clippy::too_many_arguments)]
 fn handle_method_call(
     cx: &Cx,
@@ -15914,12 +15946,9 @@ fn handle_method_call(
     enclosing_class: Option<&str>,
     descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
-) {
-    let Some(target) =
-        resolve_call_target(cx, &call.receiver, store, this_exact, enclosing_class, scope.poisoned)
-    else {
-        return;
-    };
+) -> Option<ReturnSummary> {
+    let target =
+        resolve_call_target(cx, &call.receiver, store, this_exact, enclosing_class, scope.poisoned)?;
 
     let callee_name = format!("{}::{}", target.declaring_class.name, target.method.name);
     let class_templates = template_names_of(target.declaring_class.docblock.as_deref());
@@ -15945,18 +15974,15 @@ fn handle_method_call(
     // positional-only (a named/spread call's parameter binding is not modeled here);
     // the contract check above already covered the arguments.
     if !call.positional_only {
-        return;
+        return None;
     }
-    let Some(callee_scope) =
-        cx.method_scope(target.class_file, &target.declaring_class.fqn, &target.method.name)
-    else {
-        return;
-    };
+    let callee_scope =
+        cx.method_scope(target.class_file, &target.declaring_class.fqn, &target.method.name)?;
     let display = display_of_call(&call.receiver, &target.declaring_class.name, &target.method.name);
-    // T0 consumes summaries only at direct-function-call assignment sites; a method
-    // call's summary is computed (memo/machinery shared) but not rebound here (T1).
+    // ADR-0075: the same `descend` path functions use; the walk-trace rebinds the
+    // summary for method/static calls and leaves constructors unread.
     let arg_values: Vec<&ArgValue> = call.args.iter().map(|a| &a.value).collect();
-    let _ = descend(
+    descend(
         cx,
         folder,
         &target.method.params,
@@ -15972,7 +15998,7 @@ fn handle_method_call(
         scope.poisoned,
         descent,
         out,
-    );
+    )
 }
 
 /// The provenance render base for a bound method/constructor call.

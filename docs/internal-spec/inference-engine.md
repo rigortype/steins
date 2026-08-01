@@ -87,6 +87,11 @@ BindingKey = (callee-key, [(param, ArgValue)])
 Descent { provenance, depth, stack, memo }
 ```
 
+The binding vector also admits pseudo-bindings: `use:{name}` for closure capture
+snapshots, and `this:` (carrying the exact receiver class) for method descents
+under `resolve_exact` (ADR-0075 §2.1) so two subclasses sharing an inherited body
+never replay one receiver's memo entry for the other.
+
 Three bounds, all producing **silence** rather than a finding when hit:
 
 1. **`MAX_BINDING_DEPTH = 8`** — a chain of calls propagating a literal is
@@ -101,15 +106,18 @@ A budget cutoff **names itself as silence** and never manufactures a finding
 `params`.
 
 The same descent also yields a **return-fact summary** (`ReturnSummary`,
-ADR-0057 amendment slice T0): the join, over a callee's returning exits, of the
-returned expression's value-domain fact, carried at the `min` trust stratum over
-those exits (an `Asserted` exit drags the whole summary to `Asserted`). It rides
-the same `BindingKey` memo — now a value map — and is consumed at the call-result
-binding as the value **floor** above the declared arms. It is a pure function of
-`(callee CST, bound entry state)`, so it is a legitimate replayable query answer.
-The struct carries a heap-object component slot (ADR-0057 §1) for slice **T1**;
-in T0 that slot is present but always `None` — no returned allocation is
-transferred yet.
+ADR-0057 amendment slice T0; ADR-0075 for methods/statics): the join, over a
+callee's returning exits, of the returned expression's value-domain fact, carried
+at the `min` trust stratum over those exits (an `Asserted` exit drags the whole
+summary to `Asserted`). It rides the same `BindingKey` memo — now a value map —
+and is consumed at the call-result binding as the value **floor** above the
+declared arms, for both free functions and resolved method/static calls.
+Constructors still descend for diagnostics but leave the summary unread (the
+construction rvalue is the ADR-0036 exactness lane). It is a pure function of
+`(callee CST, bound entry state [, exact receiver])`, so it is a legitimate
+replayable query answer. The struct carries a heap-object component slot
+(ADR-0057 §1) for slice **T1**; in T0 that slot is present but always `None` —
+no returned allocation is transferred yet.
 
 ## The folding seam
 

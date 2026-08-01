@@ -1,8 +1,7 @@
 # A method call's summary rebinds where a function's does
 
-Issue #126. Status: SKETCH — drafted at the owner's request (2026-08-02),
-pending ratification. Siblings: #127 (fold gate through project calls),
-#128 (closure return lane).
+Issue #126. Implemented 2026-08-02 (branch `feature/126-method-call-summary-rebinding`).
+Siblings: #127 (fold gate through project calls), #128 (closure return lane).
 
 ## 1. Context: the walk already pays for what the call site never reads
 
