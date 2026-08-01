@@ -454,20 +454,32 @@ fn spell_string_literals(strings: &[&str]) -> Option<Vec<String>> {
     Some(vec![preds_keyword(preds)])
 }
 
-/// The tightest int-range keyword a phpdoc interval arm spells as: the three named
-/// predicate classes, else the explicit `int<lo, hi>` interval (PHPStan's own
-/// spelling, spaces after the comma). Mirrors the dump surface's own ladder so the
-/// contract-arm renderer and the value-fact renderer agree.
-fn int_range_keyword(r: IntRange) -> String {
-    if r == IntRange::POSITIVE {
-        "positive-int".to_owned()
-    } else if r == IntRange::NEGATIVE {
-        "negative-int".to_owned()
-    } else if r == IntRange::NON_NEGATIVE {
-        "non-negative-int".to_owned()
-    } else {
-        format!("int<{}, {}>", r.lo(), r.hi())
-    }
+/// How an int interval spells: always PHPStan's explicit `int<lo, hi>` form, with
+/// `min`/`max` for the domain ends and a space after the comma.
+///
+/// `positive-int`, `non-negative-int`, and `negative-int` are phpdoc **input**
+/// sugar — [`crate::lower_identifier`] still accepts all three — but they are not
+/// output spellings: PHPStan folds each into an integer range and describes every
+/// range as the interval, which is why no nsrt fixture asserts a keyword form
+/// anywhere (issue #90). Spelling the sugar back made the dump disagree with
+/// PHPStan on a set the two actually agreed about.
+///
+/// The `min`/`max` sentinels matter for the same reason: `int<17, max>` is
+/// PHPStan's spelling of a half-open range, and printing `i64::MAX` in full
+/// digits was a second way to say the same set differently.
+///
+/// This is the ONE int-range spelling — the value-fact renderer on the dump
+/// surface calls it too, so the two paths cannot drift.
+#[must_use]
+pub fn int_range_keyword(r: IntRange) -> String {
+    let bound = |v: i64, sentinel: i64, name: &str| {
+        if v == sentinel { name.to_owned() } else { v.to_string() }
+    };
+    format!(
+        "int<{}, {}>",
+        bound(r.lo(), i64::MIN, "min"),
+        bound(r.hi(), i64::MAX, "max")
+    )
 }
 
 /// Spell a float literal as PHPStan does: an integral value keeps a visible

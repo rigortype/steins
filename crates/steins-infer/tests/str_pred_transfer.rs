@@ -617,9 +617,9 @@ fn the_sprintf_format_scanner_matches_the_engine_on_every_probed_shape() {
 fn strlen_of_a_non_empty_subject_is_a_positive_int() {
     // One byte in, one byte counted — strictly inside the curated `int<0, max>`
     // row, which stays the floor for every other subject.
-    assert_eq!(dump("non-empty-string", "strlen($v)"), "dumped type: positive-int (asserted)");
-    assert_eq!(dump("non-falsy-string", "strlen($v)"), "dumped type: positive-int (asserted)");
-    assert_eq!(dump("numeric-string", "strlen($v)"), "dumped type: positive-int (asserted)");
+    assert_eq!(dump("non-empty-string", "strlen($v)"), "dumped type: int<1, max> (asserted)");
+    assert_eq!(dump("non-falsy-string", "strlen($v)"), "dumped type: int<1, max> (asserted)");
+    assert_eq!(dump("numeric-string", "strlen($v)"), "dumped type: int<1, max> (asserted)");
     // A subject with no non-emptiness proof falls through to the envelope.
     assert_eq!(dump("string", "strlen($v)"), "dumped type: int");
     assert_eq!(dump("lowercase-string", "strlen($v)"), "dumped type: int");

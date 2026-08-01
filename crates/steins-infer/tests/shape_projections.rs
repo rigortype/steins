@@ -151,7 +151,7 @@ fn an_unproven_binding_still_widens_to_the_envelope() {
     // Resolution is opportunistic: an argument that does not resolve is judged
     // exactly as it was before, so the envelope stands.
     let src = "<?php\nfunction f(array $u): void { $a = $u; \\PHPStan\\dumpType(count($a)); }\n";
-    assert_eq!(one_type(src), "dumped type: non-negative-int");
+    assert_eq!(one_type(src), "dumped type: int<0, max>");
 }
 
 #[test]

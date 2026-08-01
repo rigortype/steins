@@ -762,7 +762,11 @@ mod tests {
         assert_eq!(canon("string|false").as_deref(), Some("string|false"));
         assert_eq!(canon("int|false").as_deref(), Some("int|false"));
         assert_eq!(canon("non-empty-string").as_deref(), Some("non-empty-string"));
-        assert_eq!(canon("int<0, max>").as_deref(), Some("non-negative-int"));
+        // An int range canonicalizes to the interval it already was: the speller
+        // states PHPStan's own spelling rather than the phpdoc keyword sugar
+        // (issue #90), so this row is now a fixed point of the mining.
+        assert_eq!(canon("int<0, max>").as_deref(), Some("int<0, max>"));
+        assert_eq!(canon("non-negative-int").as_deref(), Some("int<0, max>"));
         // What ADR-0071 added: the array vocabulary, alone and inside a union. The
         // blocker was never the lowering — it was `subsumes`, which answered `Maybe`
         // about every array pair and so made the stage-3 countersign vacuous.

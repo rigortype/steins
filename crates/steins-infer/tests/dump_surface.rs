@@ -526,10 +526,12 @@ fn one_phpdoc(src: &str) -> String {
 fn scalar_param_positive_int_seeds_an_asserted_arm() {
     // No native base: the `@param positive-int` envelope alone seeds an Asserted arm,
     // rendered on both surfaces. `dumpType` shows the arm (no value fact exists).
+    // Both dumps state the interval: the keyword is accepted on the way IN and
+    // spelled as PHPStan spells it on the way out (issue #90).
     let pd = "<?php\n/** @param positive-int $n */\nfunction f($n) { \\PHPStan\\dumpPhpDocType($n); }\n";
-    assert_eq!(one_phpdoc(pd), "dumped phpdoc type: positive-int (asserted)");
+    assert_eq!(one_phpdoc(pd), "dumped phpdoc type: int<1, max> (asserted)");
     let ty = "<?php\n/** @param positive-int $n */\nfunction f($n) { \\PHPStan\\dumpType($n); }\n";
-    assert_eq!(one_type(ty), "dumped type: positive-int (asserted)");
+    assert_eq!(one_type(ty), "dumped type: int<1, max> (asserted)");
 }
 
 #[test]
@@ -543,7 +545,7 @@ fn scalar_param_refines_within_a_native_base() {
     // `@param positive-int` on a native `int` refines within it — Asserted (a strict
     // subset, not an exact match), and the native value seed still wins on dumpType.
     let pd = "<?php\n/** @param positive-int $m */\nfunction f(int $m) { \\PHPStan\\dumpPhpDocType($m); }\n";
-    assert_eq!(one_phpdoc(pd), "dumped phpdoc type: positive-int (asserted)");
+    assert_eq!(one_phpdoc(pd), "dumped phpdoc type: int<1, max> (asserted)");
     let ty = "<?php\n/** @param positive-int $m */\nfunction f(int $m) { \\PHPStan\\dumpType($m); }\n";
     assert_eq!(one_type(ty), "dumped type: int");
 }
@@ -589,7 +591,7 @@ fn declared_return_phpdoc_refines_asserted() {
     // the arm floor).
     let src = "<?php\n/** @return positive-int */\nfunction mk(int $s): int { return $s + 1; }\n\
                function g() { $x = mk(5); \\PHPStan\\dumpPhpDocType($x); }\n";
-    assert_eq!(one_phpdoc(src), "dumped phpdoc type: positive-int (asserted)");
+    assert_eq!(one_phpdoc(src), "dumped phpdoc type: int<1, max> (asserted)");
 }
 
 #[test]

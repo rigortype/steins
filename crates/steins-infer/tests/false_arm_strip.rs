@@ -106,11 +106,11 @@ function f(string $h, string $n): void {
 fn the_strpos_floor_row_loses_its_false_arm_under_the_guard() {
     // The control: the whole mined row, at the `Asserted` grade the floor seeds.
     // Its `positive-int|0` reads as the one interval it denotes (issue #90).
-    assert_eq!(one_type(STRPOS_UNGUARDED), "dumped type: non-negative-int|false (asserted)");
+    assert_eq!(one_type(STRPOS_UNGUARDED), "dumped type: int<0, max>|false (asserted)");
     // …and under the guard, the `false` arm is gone. The int arm survives (it is
     // disjoint from `false`), which is strictly more than PHPStan's `int` — the row
     // says so, so the lane says so.
-    assert_eq!(one_type(STRPOS_GUARDED), "dumped type: non-negative-int (asserted)");
+    assert_eq!(one_type(STRPOS_GUARDED), "dumped type: int<0, max> (asserted)");
 }
 
 #[test]
