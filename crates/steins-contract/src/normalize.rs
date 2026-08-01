@@ -16,9 +16,14 @@
 //!
 //! The public surface is complete and final (ADR-0052 §4): pairwise
 //! [`subsumes`], [`arm_eq`], [`dedup_arms`], the value-set → normal-form
-//! [`summarize_vals`], and arm-wise [`subtract`]. There is deliberately **no**
+//! [`summarize_vals`], and arm-wise [`subtract`] — plus [`merge_int_arms`],
+//! the one addition the §4 note of 2026-08-02 records. It is the pairwise
+//! primitive behind [`dedup_arms`]' interval absorption, published so a
+//! *stratified* arm carrier (steins-infer's contract lane) can reuse the rule
+//! instead of reimplementing it. There is deliberately still **no**
 //! `union(A, B)` and no generic `remove(T, S)`: joins stay the value domain's
-//! job (ADR-0030). [`subtract`] (and the public per-arm judgment
+//! job (ADR-0030), and [`merge_int_arms`] is not one — it answers only where
+//! the union of two arms IS a single arm, and refuses everywhere else. [`subtract`] (and the public per-arm judgment
 //! [`subtrahend_covers`]) consult a real is-a [`IsaOracle`]; N4 wires the project
 //! hierarchy through that seam, N1 shipped the [`ReflexiveFloor`] default.
 //!
