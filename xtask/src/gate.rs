@@ -351,7 +351,17 @@ const THROW_EXPECTED: &[(&str, usize)] = &[
     // Exception_MethodNotAllowed, a bare Throwable) — TRUE contract findings on
     // newly-landed application code, none runtime breakage. The proof layer
     // stayed at ZERO over the new files. Reseeded consciously.
-    ("pxxxx-monorepo", 44372),
+    // 44372 → 44343 (−29), 2026-08-01: the standing DOWNWARD live-tree drift,
+    // reseeded in its own pass (never inside a fix commit). The −29 has been
+    // observed unchanged across every session and checker commit since
+    // 2026-07-25 — cross-commit stability plus the #63 determinism fix rule
+    // out a checker-side cause; the monorepo working tree simply moved under
+    // the table (the same unpinned checkout the +408 entry above documents).
+    // Today's run: 44,343 = 44,342 undeclared + 1 liskov, phpdoc EXACT and
+    // proof-layer 0 alongside — a corpus change, not a behavior change. The
+    // gate trips on INCREASE only, so this entry existed as a permanent
+    // "below expected" nudge; this reseed retires it.
+    ("pxxxx-monorepo", 44343),
 ];
 
 /// The expected `throw.*` count for a package/local-project name (0 if untabled).
