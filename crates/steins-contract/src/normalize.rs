@@ -357,7 +357,10 @@ fn subsumes_array(a: &ContractTy, b: &ContractTy) -> Certainty {
 /// denotation is a witness the *whole* union refuses, and the fold's `No` is
 /// proven. A union with even one array-capable member may cover `b` jointly
 /// (`list|non-empty-array ⊇ array`) and its fold's `No` is degraded to `Maybe`.
-fn array_incapable(t: &ContractTy) -> bool {
+///
+/// Shared with `admit.rs`: ADR-0072 §3 imports this haircut verbatim for the
+/// shape-fact face, so the predicate stays one definition rather than two.
+pub(crate) fn array_incapable(t: &ContractTy) -> bool {
     match t {
         ContractTy::Never
         | ContractTy::Null

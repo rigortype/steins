@@ -1017,7 +1017,7 @@ pub(crate) fn shape_is_list(
     shape_fact_of_parts(list, fields, sealed, non_empty, unsealed).is_list
 }
 
-fn ckey_to_domain(k: &CKey) -> DKey {
+pub(crate) fn ckey_to_domain(k: &CKey) -> DKey {
     match k {
         CKey::Int(i) => DKey::Int(*i),
         CKey::Str(s) => DKey::Str(s.clone()),
