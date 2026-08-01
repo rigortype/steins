@@ -90,10 +90,11 @@ Written after tonight's release; listed here so you know the map:
    message-regex suppression. Grounded in
    [profiles-and-baseline](../user-manual/05-profiles-and-baseline.md) and
    [diagnostic-policy.md](../type-specification/diagnostic-policy.md).
-8. **Understanding findings** — the finding-id catalogue by
-   layer (`type.*`, `call.*`, `offset.*`, `phpdoc.*`, `throw.*`,
-   `effect.*`), how to read a message, and the difference between
-   a `proof`, `contract`, and `mechanics` finding.
+8. **Understanding findings** — *written, and it lives in the
+   user manual:* [findings](../user-manual/04-findings.md) —
+   the finding-id catalogue by family, the anatomy of a message
+   line, and the proof / contract / mechanics / debug layers.
+   The handbook does not repeat it.
 9. **Transforms** — `steins transform phpdoc-to-native` and
    `phpdoc-honesty`: what the value-propagation engine can
    rewrite safely, and the vouch valve for dynamic-code sites.

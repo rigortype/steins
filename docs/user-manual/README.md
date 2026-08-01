@@ -29,8 +29,9 @@ Two things worth knowing before you start:
 3. [**Configuration**](03-configuration.md) — the `steins.toml` key-by-key
    reference: discovery, which sections parse strictly and which leniently,
    and how config keys interact with command-line flags.
-4. **Findings** *(planned)* — the finding-id families, the anatomy of a
-   message line, and the proof / contract / mechanics layers.
+4. [**Findings**](04-findings.md) — the finding-id catalogue by family,
+   the anatomy of a message line, and the proof / contract / mechanics /
+   debug layers with the profile that surfaces each.
 5. [**Profiles, baseline, and suppression**](05-profiles-and-baseline.md) —
    the named strictness stages, the JSONL baseline ratchet, user profiles in
    `steins.toml`, inline `@steins-ignore`, and why mechanics ids can never

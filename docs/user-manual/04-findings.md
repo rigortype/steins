@@ -1,0 +1,737 @@
+# Findings
+
+CI just failed and printed a line you have not seen before. This chapter
+tells you how to read it, which of Steins' four claim layers it comes from,
+and what the analyzer had to prove before it was allowed to say anything.
+
+Start with the line itself:
+
+```
+src/Native.php:19:8: error[type.argument-mismatch]: argument "1200" to charge() cannot become int $cents — proven TypeError (strict mode)
+```
+
+That is one finding. Every line Steins prints has the same shape.
+
+## Reading one line
+
+```
+path:line:column: level[id]: message — tail
+```
+
+**Path, line, column.** The path is relative to where you ran `check`. The
+column anchors the sub-expression the check judged, which is usually
+narrower than the whole statement — here it lands on the `"1200"` argument
+inside the `charge(...)` call.
+
+**Level.** `error` or `warning`. `error` means the finding is fail-level and
+the run exits `1`. `warning` means report-without-fail and, on its own, exit
+`0`. A profile's `warn = [...]` list is what demotes an id from one to the
+other, and `--format json` spells the same two levels `fail` and `warn`. See
+[profiles, baseline, and suppression](05-profiles-and-baseline.md) for the
+config side.
+
+**The id.** `type.argument-mismatch`, in `family.rule` form. The id names the
+*finding*, never the code that found it, so an id survives a rewrite of its
+emitter (ADR-0022). It is also the only handle you get: ids are what
+`@steins-ignore` accepts, what profiles select over, and what the baseline
+records. There is no message-text matching anywhere in Steins.
+
+**The message.** What Steins found, in the vocabulary of your source. It
+names the value it folded (`"1200"`), the target it judged against
+(`int $cents`), and the callee. Message wording is not a contract and keeps
+improving.
+
+**The tail.** The clause after the em dash, and the part worth reading
+twice. It is Steins showing its work: either the runtime consequence it
+proved, or the evidence that closed the case. `proven TypeError (strict
+mode)` is a consequence. `hierarchy fully enumerated (Mailer), no __call` is
+evidence — the reason the analyzer was entitled to claim absence rather than
+stay quiet. Mechanics and debug lines carry no tail; they are not proofs.
+
+The same tail records *why* the same code is silent elsewhere. Take the
+`declare(strict_types=1)` away and pass both a numeric string and a
+non-numeric one:
+
+```php
+<?php
+
+function charge(int $cents): void {}
+
+charge("1200");
+charge("twelve");
+```
+
+```
+$ steins check src/Coercive.php
+src/Coercive.php:6:8: error[type.argument-mismatch]: argument "twelve" to charge() cannot become int $cents — proven TypeError (coercive mode)
+```
+
+Only the second call reports. `charge("1200")` works under coercive mode, so
+Steins stays quiet about it; `charge("twelve")` still fatals, and the tail
+now says `coercive mode`. That is the whole posture in one file: "the
+program works" outranks the worst-case static reading (ADR-0002).
+
+> **If you know PHPStan or Psalm:** the id is PHPStan's *identifier*, and it
+> carries all the weight here that the error message carries there. Steins
+> has no `ignoreErrors` with a `message:` regex and never will — diagnostic
+> wording is not a contract, so ids plus semantic scope are always the
+> substitute (ADR-0023). Grep your CI logs for `[` and you have the whole
+> vocabulary of a run.
+
+`--format json` emits the same finding structured, with the layer made
+explicit:
+
+```
+$ steins check --format json src/Coercive.php
+{
+  "findings": [
+    {
+      "id": "type.argument-mismatch",
+      "layer": "proof",
+      "level": "fail",
+      "path": "src/Coercive.php",
+      "line": 6,
+      "column": 8,
+      "message": "argument \"twelve\" to charge() cannot become int $cents — proven TypeError (coercive mode)"
+    }
+  ],
+  "profile": "default",
+  "vendor_suppressed": 0,
+  "suppressed": 0,
+  "baselined": 0
+}
+```
+
+## The four layers
+
+Every id carries a **layer** as a registry attribute, and the layer names
+what *kind of claim* the finding makes. It is not a severity dial (ADR-0050).
+
+**proof** — your program provably breaks on a live path. A `TypeError`, an
+`Error`, an `ArgumentCountError`, a warning-and-null read. Held to a
+zero-false-positive bar. If a proof finding is wrong, that is a bug in
+Steins, not a tuning problem.
+
+**contract** — a proven behavior violates something your code *declares
+about itself*: a `@param`, a `@return`, a `@throws`, an effect envelope, an
+array shape. The program still works. These findings are true and abundant
+in released code, which is why they are opt-in.
+
+**mechanics** — the analyzer's own hygiene. A stale `@steins-ignore`, a
+misspelled id, a typo'd effect label. Their absence would silently rot
+another channel, so they print in every profile and no suppression channel
+reaches them.
+
+**debug** — requested introspection (ADR-0053). You wrote `dumpType()` or
+`var_dump()`; Steins answers. A dump is an answer, not a finding, so the
+layer sits outside the profile ladder and outside every gate.
+
+Which profile puts each layer on the surface:
+
+| Layer | `default` | `throws-direct` | `contracts` | `strict` |
+| --- | --- | --- | --- | --- |
+| proof | yes | yes | yes | yes |
+| mechanics | yes | yes | yes | yes |
+| contract | no | `throw.undeclared`, direct escapes only | all but `offset.maybe-missing` | yes |
+| debug | yes | yes | yes | yes |
+
+`steins doctor` prints the resolved surface for your build and config, which
+is the authoritative answer for a given binary — two lines out of its
+`Config + active surface` section:
+
+```
+$ steins doctor --no-php .
+  active profile: `default` (from built-in default)
+  surface: layers [mechanics, proof], 16 checked id(s)
+```
+
+Today that count runs 16 ids at `default`, 17 at `throws-direct`, 25 at
+`contracts`, 26 at `strict`. The stages, the baseline ratchet that makes
+raising one survivable, and user-defined profiles all live in
+[chapter 5](05-profiles-and-baseline.md). The normative rules for layers,
+facets, and suppression are in
+[diagnostic-policy.md](../type-specification/diagnostic-policy.md).
+
+> **If you know PHPStan or Psalm:** a profile is not a level. Moving from
+> `default` to `contracts` admits a different *kind* of claim, one the
+> engine always computed and always withheld; the checks themselves do not
+> get more aggressive. Nothing about inference changes when you raise a
+> profile (ADR-0050 §10).
+
+## The catalogue
+
+Ten families, twenty-nine registered ids, twenty-eight of them with a live
+emitter. The registry is a closed set bound by a totality test, so an id
+that reaches your terminal is in it and an id outside it cannot be emitted
+(ADR-0022). Every id below is shown with the PHP that triggers it and the
+transcript it produces, and every transcript was produced by the v0.1.2
+binary against PHP 8.5.8. The one id without an emitter is called out where
+its family appears.
+
+Ids grow by ADR. `steins doctor` is the current answer for your build; this
+catalogue is the current answer for this release.
+
+### `type.*` — native declared types, proven
+
+Three ids, all proof layer, all on the default surface. Each fires only when
+a folded value provably raises a `TypeError` against a *native* declaration
+under that file's own coercion mode.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+final class Invoice
+{
+    public int $total = 0;
+
+    public function tax(): int
+    {
+        return "0.08";
+    }
+}
+
+function charge(int $cents): void {}
+
+$invoice = new Invoice();
+$invoice->total = "1200";
+charge("1200");
+```
+
+```
+$ steins check src/Native.php
+src/Native.php:11:16: error[type.return-mismatch]: return "0.08" cannot become int (return type of Invoice::tax()) — proven TypeError (strict mode)
+src/Native.php:18:1: error[type.property-mismatch]: Cannot assign "1200" to property Invoice::$total of type int — proven TypeError (strict mode)
+src/Native.php:19:8: error[type.argument-mismatch]: argument "1200" to charge() cannot become int $cents — proven TypeError (strict mode)
+```
+
+`type.argument-mismatch` judges an argument against a parameter,
+`type.return-mismatch` a `return` expression against a return type,
+`type.property-mismatch` an assignment against a property type. The handbook's
+[type system chapter](../handbook/02-the-type-system.md) covers what "cannot
+become" means for each PHP type.
+
+### `call.*` — calls that cannot complete
+
+Six ids, proof layer, default surface. The family splits into three
+questions: is the receiver alive, does the target exist, do the arguments
+bind.
+
+**`call.on-null`** — the receiver is proven `null` on this path, so the call
+is a guaranteed `Error`. Only a proven `null` fires. A value that merely
+*might* be null stays silent, which is the single most common reason Steins
+says nothing about code you expected it to flag (see the handbook's
+[narrowing chapter](../handbook/03-narrowing-and-trust.md)).
+
+```php
+<?php
+
+declare(strict_types=1);
+
+function stamp(?DateTimeImmutable $at): string
+{
+    if ($at === null) {
+        return $at->format('c');
+    }
+
+    return $at->format('c');
+}
+```
+
+```
+$ steins check src/OnNull.php
+src/OnNull.php:8:16: error[call.on-null]: method call $at->format() — $at is proven null on this path — proven Error (Call to a member function on null)
+```
+
+**`call.undefined-method`** and **`call.undefined-function`** — the target
+does not exist. Absence is hard to prove, and the tail tells you what closed
+it: a fully enumerated hierarchy with no `__call` for the method, and the
+live PHP's own answer for the function.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+final class Mailer
+{
+    public function send(string $to): void {}
+}
+
+$mailer = new Mailer();
+$mailer->sendMail("ops@example.com");
+
+echo str_slugify("Hello World");
+```
+
+```
+$ steins check src/Absence.php
+src/Absence.php:11:1: error[call.undefined-method]: call to undefined method Mailer::sendMail() — hierarchy fully enumerated (Mailer), no __call
+src/Absence.php:13:6: error[call.undefined-function]: call to undefined function str_slugify() — not defined in the project, not on PHP 8.5.8 (70 extensions)
+```
+
+`70 extensions` is not a static table. Steins asked the PHP on your `PATH`.
+Run with `--no-php` and this family goes quiet, because the sound subset
+cannot rule out an extension homonym.
+
+**`call.too-few-arguments`** and **`call.unknown-named-argument`** — the
+arguments do not bind. Both need a uniquely resolved target.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+function schedule(string $job, int $delay): void {}
+
+schedule("reindex");
+schedule(job: "reindex", timeout: 30);
+```
+
+```
+$ steins check src/Arity.php
+src/Arity.php:7:1: error[call.too-few-arguments]: too few arguments to schedule(): 1 passed, 2 required — provable ArgumentCountError
+src/Arity.php:8:1: error[call.unknown-named-argument]: unknown named argument $timeout to schedule() — no parameter $timeout, provable Error
+```
+
+**`call.too-many-arguments`** is registered and not yet emitted. Extra
+arguments to a userland function are silently ignored by PHP, so they are
+never a finding; only an *internal* non-variadic target fatals, and that arm
+waits on the reflection slice. The id is nameable today in `@steins-ignore`
+and in profiles, and it produces nothing.
+
+### `class.*` — a class name that resolves to nothing
+
+One id, proof layer, default surface. It fires at hard-error positions only:
+`new`, a static call, a class-constant or static-property fetch. Like the
+absence ids above, it needs the sidecar.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace App;
+
+$client = new QueueClient();
+```
+
+```
+$ steins check src/Queue.php
+src/Queue.php:7:15: error[class.undefined]: reference to undefined class App\QueueClient — not defined in the project, not on PHP 8.5.8 (70 extensions)
+```
+
+### `offset.*` — array reads that do not land
+
+Four ids, split across two layers and three profile rungs. This is the one
+family where reading the layer matters, because two ids prove things about
+*values* and two prove things about *declarations* (ADR-0062).
+
+**`offset.missing`** and **`offset.on-unsupported`** are proof layer, on the
+default surface. Steins folded the container itself, so it knows the keys.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+function host(): string
+{
+    $config = ['host' => 'localhost', 'port' => 5432];
+
+    return $config['hostname'];
+}
+
+function port(): int
+{
+    $port = 5432;
+
+    return $port['host'];
+}
+```
+
+```
+$ steins check src/Offsets.php
+src/Offsets.php:9:12: error[offset.missing]: offset 'hostname' provably missing — $config is ['host' => 'localhost', 'port' => 5432] on this path; reads null with "Undefined array key "hostname""
+src/Offsets.php:16:12: error[offset.on-unsupported]: offset read on $port — provably int; reads null with "Trying to access array offset on int"
+```
+
+**`offset.undeclared`** and **`offset.maybe-missing`** are contract layer.
+The evidence is your docblock rather than a folded value, so the claim is
+conditional on the declaration being true — which is exactly why they are
+not proof-layer findings. `offset.undeclared` reaches the `contracts` rung;
+`offset.maybe-missing` reaches only `strict`.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+/** @param array{host: string, port?: int} $dsn */
+function scheme(array $dsn): string
+{
+    return $dsn['scheme'];
+}
+
+/** @param array{host: string, port?: int} $dsn */
+function port(array $dsn): int
+{
+    return $dsn['port'];
+}
+```
+
+```
+$ steins check --profile contracts src/Shape.php
+src/Shape.php:8:12: error[offset.undeclared]: offset 'scheme' is outside the declared shape — $dsn is non-empty-array{host: string, port?: int}, which cannot carry the key; reads null with "Undefined array key "scheme""
+```
+
+```
+$ steins check --profile strict src/Shape.php
+src/Shape.php:8:12: error[offset.undeclared]: offset 'scheme' is outside the declared shape — $dsn is non-empty-array{host: string, port?: int}, which cannot carry the key; reads null with "Undefined array key "scheme""
+src/Shape.php:14:12: error[offset.maybe-missing]: offset 'port' may be missing — $dsn is non-empty-array{host: string, port?: int}, which declares the key optional, and no guard on this path discharges it; reads null with "Undefined array key "port""
+```
+
+A guard discharges `offset.maybe-missing`. Wrap the read in
+`isset($dsn['port'])` or `array_key_exists('port', $dsn)`, or put it behind
+`??`, and the finding goes away on that path. `strict` is the stage that
+asks you to prove presence instead of assuming it.
+
+### `readonly.*` — a second write to a readonly property
+
+One id, proof layer, default surface. Two proven writes on one path are a
+guaranteed `Error`, including inside the constructor that made the first.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+final class Order
+{
+    public function __construct(public readonly int $id)
+    {
+        $this->id = 7;
+    }
+}
+```
+
+```
+$ steins check src/Readonly.php
+src/Readonly.php:9:9: error[readonly.reassigned]: Cannot modify readonly property Order::$id — proven Error
+```
+
+### `phpdoc.*` — declared contracts you wrote in a docblock
+
+Four ids, contract layer, `contracts` rung. PHP does not enforce PHPDoc at
+runtime, so nothing here breaks your program. What breaks is the promise the
+docblock makes to every reader and every tool downstream.
+
+The acceptance relation is stricter than the runtime one. `"60"` satisfies a
+native `int` parameter under coercive mode and never satisfies a
+`@param int` — the docblock says the value *is* an int, and a numeric string
+is not (ADR-0030,
+[contract-types.md](../type-specification/contract-types.md)).
+
+```php
+<?php
+
+declare(strict_types=1);
+
+final class Session
+{
+    /** @var int */
+    public $ttl = 60;
+
+    /** @return int */
+    public function remaining()
+    {
+        return "30";
+    }
+}
+
+/** @param int $seconds */
+function extend($seconds): void {}
+
+$session = new Session();
+$session->ttl = "60";
+extend("60");
+```
+
+```
+$ steins check --profile contracts src/Contract.php
+src/Contract.php:13:16: error[phpdoc.return-mismatch]: return value "30" violates declared @return int of Session::remaining() — declared contract violation
+src/Contract.php:21:1: error[phpdoc.property-mismatch]: value "60" assigned to property Session::$ttl violates declared @var int — declared contract violation
+src/Contract.php:22:8: error[phpdoc.param-mismatch]: argument "60" to extend() violates declared @param int $seconds — declared contract violation
+```
+
+**`phpdoc.undefined-method`** is the family's fourth id and a different
+shape: a method call whose receiver type comes from a `@param` rather than
+from a folded value. Absence is proven under descendant closure, so an open
+class with a subclass that defines the method stays silent.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+final class Clock
+{
+    public function now(): int
+    {
+        return 0;
+    }
+}
+
+/** @param Clock $clock */
+function stamp($clock): int
+{
+    return $clock->currentTime();
+}
+```
+
+```
+$ steins check --profile contracts src/Receiver.php
+src/Receiver.php:16:12: error[phpdoc.undefined-method]: call to undefined method Clock::currentTime() — declared receiver $clock narrowed to {Clock}, hierarchy and descendants fully enumerated, no __call
+```
+
+### `throw.*` — `@throws` envelopes
+
+Two ids, contract layer. An unannotated function is never envelope-checked;
+writing `@throws` is what opts a declaration in (ADR-0040).
+
+**`throw.undeclared`** is the one id with a *facet*: `origin`, either
+`direct` (the exception is thrown in the annotated body itself) or
+`propagated` (it escapes through a call). The `throws-direct` profile
+surfaces only the direct ones — the high-signal subset, where the docblock
+is wrong about the method you are reading.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+final class Importer
+{
+    /** @throws LogicException */
+    public function run(): void
+    {
+        throw new RuntimeException('disk full');
+    }
+
+    /** @throws LogicException */
+    public function runAll(): void
+    {
+        $this->run();
+    }
+}
+```
+
+```
+$ steins check --profile throws-direct src/Throws.php
+src/Throws.php:10:9: error[throw.undeclared]: RuntimeException can escape Importer::run() but is not declared (@throws LogicException) — proven escape
+```
+
+```
+$ steins check --profile contracts src/Throws.php
+src/Throws.php:10:9: error[throw.undeclared]: RuntimeException can escape Importer::run() but is not declared (@throws LogicException) — proven escape
+src/Throws.php:10:9: error[throw.undeclared]: RuntimeException can escape Importer::runAll() but is not declared (@throws LogicException) — proven escape
+```
+
+Both findings point at the same `throw` statement, and the escaping function
+named in the message is what distinguishes them. `contracts` added the
+propagated one. Only proven escapes report — a `Maybe` escape, or a class
+whose hierarchy Steins cannot fully resolve, stays silent.
+
+**`throw.liskov-widened`** fires when an override declares a checked
+exception the abstraction does not, and only when both sides declare
+`@throws`.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+abstract class Job
+{
+    /** @throws LogicException */
+    abstract public function run(): void;
+}
+
+final class ImportJob extends Job
+{
+    /** @throws RuntimeException */
+    public function run(): void {}
+}
+```
+
+```
+$ steins check --profile contracts src/Liskov.php
+src/Liskov.php:14:21: error[throw.liskov-widened]: RuntimeException is declared thrown by ImportJob::run() but Job::run() (its abstraction) declares only @throws LogicException — Liskov widening
+```
+
+### `effect.*` — effect envelopes
+
+Three ids in two layers. Effects are the second dimension Steins infers, and
+the handbook's [effects chapter](../handbook/04-effects.md) is the tour.
+
+**`effect.envelope-exceeded`** and **`effect.liskov-widened`** are contract
+layer, `contracts` rung. The first judges a body against its own
+`#[\Steins\Pure]` or `#[\Steins\Effect(...)]` declaration; the second judges
+an override against the abstraction's declaration. Implementations may be
+purer, never less pure.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+abstract class Formatter
+{
+    #[\Steins\Pure]
+    abstract public function format(string $line): string;
+}
+
+final class EchoFormatter extends Formatter
+{
+    public function format(string $line): string
+    {
+        echo $line;
+
+        return $line;
+    }
+}
+
+#[\Steins\Pure]
+function slugify(string $line): string
+{
+    echo $line;
+
+    return $line;
+}
+```
+
+```
+$ steins check --profile contracts src/Effects.php
+src/Effects.php:13:21: error[effect.liskov-widened]: EchoFormatter::format() has proven effect output but Formatter::format() (its abstraction) is declared #[\Steins\Pure] — Liskov effect widening
+src/Effects.php:24:5: error[effect.envelope-exceeded]: echo has effect output, but slugify() is declared #[\Steins\Pure]
+```
+
+**`effect.unknown-label`** is mechanics, and prints in every profile
+including a bare `check`. A typo'd label silently disables the envelope that
+contains it, which is the rot the mechanics layer exists to catch.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+#[\Steins\Effect('io.netwrok')]
+function fetch(string $url): string
+{
+    return $url;
+}
+```
+
+```
+$ steins check src/Label.php
+src/Label.php:5:3: error[effect.unknown-label]: unknown effect label 'io.netwrok' in #[\Steins\Effect] on fetch()
+```
+
+### `suppress.*` — the ignore channel keeping itself honest
+
+Two ids, mechanics layer, every profile, fail level, exempt from every
+suppression channel. You cannot ignore them, baseline them, or turn them off
+in a profile — a dead suppression that never bites is a suppression nobody
+ever removes.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+function charge(int $cents): void {}
+
+// @steins-ignore call.on-null
+charge(1200);
+
+// @steins-ignore type.argument-mismach
+charge("1200");
+```
+
+```
+$ steins check src/Ignore.php
+src/Ignore.php:7:1: error[suppress.unmatched]: @steins-ignore of call.on-null matches no diagnostic on line 8
+src/Ignore.php:10:1: error[suppress.unknown-id]: @steins-ignore names unknown diagnostic id 'type.argument-mismach'
+src/Ignore.php:11:8: error[type.argument-mismatch]: argument "1200" to charge() cannot become int $cents — proven TypeError (strict mode)
+```
+
+Three lines from two mistakes. The first ignore names a real id that matches
+nothing on its target line. The second misspells `type.argument-mismatch`,
+so the ignore is rejected *and* the finding it meant to suppress prints
+underneath. Ignore syntax and placement rules are in
+[chapter 5](05-profiles-and-baseline.md).
+
+### `debug.*` — you asked, Steins answered
+
+Three ids, debug layer, on every surface. These report what the analyzer
+inferred at a point, which makes them the fastest way to find out why some
+*other* finding did or did not fire.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+/** @param non-empty-string $method */
+function route($method): void
+{
+    \PHPStan\dumpPhpDocType($method);
+}
+
+$verb = 'POST';
+\PHPStan\dumpType($verb);
+
+$limit = 25;
+var_dump($limit);
+```
+
+```
+$ steins check src/Dump.php
+src/Dump.php:8:29: error[debug.phpdoc-type]: dumped phpdoc type: non-empty-string (asserted)
+src/Dump.php:12:19: error[debug.type]: dumped type: 'POST'
+src/Dump.php:15:10: warning[debug.var-dump]: dumped type: 25
+```
+
+`debug.type` renders the walk's best knowledge of a value — here the proven
+literal `'POST'`, not the type `string`. `debug.phpdoc-type` renders the
+declared side instead, the contract arms as narrowed by guards.
+`debug.var-dump` reports one line per argument of any default-on `var_dump()`.
+
+The levels differ on purpose. The explicit pair is **fail** and reds your
+build, because `PHPStan\dumpType` is not a real PHP function and a committed
+call is a guaranteed fatal. `var_dump()` is legal working PHP, so
+`debug.var-dump` is **warn** and exit-neutral by construction — no channel
+can promote it to fail. Silence it with `disable = ["debug.var-dump"]` in a
+named profile.
+
+All three are exempt from the baseline and from `@steins-ignore`. The remedy
+for an unwanted dump is deleting the call (ADR-0053).
+
+## What to do with a finding
+
+1. **Fix it.** For a proof finding this is the only real option. It is a
+   runtime break, and Steins was held to a zero-false-positive bar before it
+   was allowed to say so.
+2. **Discharge it.** Some findings are answered by code rather than by
+   configuration: a guard discharges `offset.maybe-missing`, a `catch` dams
+   a `throw.undeclared`, a widened envelope admits an effect.
+3. **Suppress the one site**, with an `@steins-ignore` naming the id.
+4. **Freeze today's debt** with a baseline when you raise a profile over an
+   existing codebase, so only new findings fail CI.
+
+Options 3 and 4, the four named stages, and the ratchet workflow that walks
+a repo from `default` to `strict` without a first run that buries you are
+all in [profiles, baseline, and suppression](05-profiles-and-baseline.md).
+The binding rules behind everything on this page are in
+[diagnostic-policy.md](../type-specification/diagnostic-policy.md).
