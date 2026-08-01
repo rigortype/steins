@@ -7791,8 +7791,12 @@ fn adopted_trace_docblock<'a>(w: &'a WalkCx, stmt: &Stmt) -> Option<&'a Comment>
 /// Psalm's semantics: the annotation is "applied to the next statement" and
 /// reports what that statement leaves behind — what `dumpType($x)` would report
 /// were it the following statement), and reported at the TAG's own position
-/// (the question's own text, like a dump call reports at the call). Reads
-/// facts, binds nothing (§9 transparency).
+/// (the question's own text, like a dump call reports at the call). A comma
+/// list (`@psalm-trace $a, $b`, §7) arrives from the scanner as one tag per
+/// named variable in source order, so this loop emits one diagnostic per
+/// variable — each rendered independently (one variable's `unknown` never
+/// perturbs its neighbors), all at the tag's position. Reads facts, binds
+/// nothing (§9 transparency).
 ///
 /// `pending` is the adoption [`adopted_trace_docblock`] resolved at the step's
 /// top — `None` (nothing adopted, or a descent pass) flushes nothing. The walk
@@ -7841,9 +7845,9 @@ fn emit_trace_annotations(
             path: cx.path().to_owned(),
             line: pos.line,
             column: pos.column,
-            // The label names the variable so the #95 list form stays
-            // unambiguous; the rendered fact after the final ": " is the
-            // parity-pinned part, the frame wording is not a contract (§5).
+            // The label names the variable so the list form stays unambiguous;
+            // the rendered fact after the final ": " is the parity-pinned
+            // part, the frame wording is not a contract (§5).
             message: dump_message(&format!("traced type of {var}"), &rendering),
         });
     }
