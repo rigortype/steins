@@ -16406,7 +16406,7 @@ fn parse_envelopes(docblock: Option<&str>) -> Option<Envelopes> {
         // on entry, so a call-site argument cannot violate it. The spec is also
         // recorded (with its parsed type) for post-call application (Feature D).
         if let TagKind::Assert { kind: akind, negated } = tag.kind
-            && !tag.assert_property_target
+            && !tag.property_target
             && let Some(var) = &tag.var_name
         {
             let name = var.trim_start_matches('$').to_owned();

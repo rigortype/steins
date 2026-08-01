@@ -795,7 +795,7 @@ fn assert_targets(tags: &[DocTag], name: &str) -> bool {
     let want = format!("${name}");
     tags.iter().any(|t| {
         matches!(t.kind, TagKind::Assert { .. })
-            && !t.assert_property_target
+            && !t.property_target
             && t.var_name.as_deref() == Some(want.as_str())
     })
 }

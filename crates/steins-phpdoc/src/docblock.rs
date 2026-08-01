@@ -41,13 +41,16 @@ pub struct DocTag {
     /// the plain `@param`/`@return` for the same target, so consumers should prefer
     /// a prefixed tag when both are present (ADR-0029).
     pub prefixed: bool,
-    /// `true` when this is an assertion-family tag whose target is a property /
-    /// `$this->…` position rather than a plain parameter. Such targets are parsed
-    /// (so the tag is recognized, not treated as malformed) but carry **no
-    /// exemption effect** in the current slice — a docblock property assertion says
-    /// nothing about the acceptability of a call-site *argument*. See
+    /// `true` when this is an assertion-family or `@var` tag whose target is a
+    /// property / `$this->…` position rather than a plain variable. Such targets
+    /// are parsed (so the tag is recognized, not treated as malformed) but the
+    /// consumers that act on a *variable* — the assert-exemption reader and the
+    /// inline-`@var` cast seeding (ADR-0073) — must skip them: an assertion on a
+    /// property says nothing about a call-site argument, and a `@var` naming
+    /// `$obj->prop` speaks about the property, never about `$obj` itself (acting
+    /// on the receiver there could manufacture findings). See
     /// [`crate::docblock::TagKind::Assert`].
-    pub assert_property_target: bool,
+    pub property_target: bool,
 }
 
 /// The three shapes of an assertion tag (PHPStan/Psalm `@…-assert` family).
@@ -279,7 +282,7 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
     }
 
     // For @param/@var/@…-assert, split the type off at the first `$variable`.
-    let mut assert_property_target = false;
+    let mut property_target = false;
     let (type_start, type_end, var_name) = if kind.is_conditional_purity() {
         // Upstream grammar: `parseRequiredVariableName` then an optional
         // description — the variable must be the *first* token, and there is no
@@ -297,16 +300,20 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
         match find_variable(bytes, rest_start, rest_end) {
             Some(var_pos) => {
                 let var_name = read_variable(text, bytes, var_pos, rest_end);
-                // A `$this->prop` / `$obj->prop` / `$this::$static` assertion target
-                // is a *property*, not a parameter: recognized (not malformed) but
-                // exemption-inert this slice. Detect the accessor right after the
-                // variable name, and treat a bare `$this` target likewise.
+                // A `$this->prop` / `$obj->prop` / `$this::$static` target is a
+                // *property*, not a plain variable: recognized (not malformed) but
+                // flagged so variable-acting consumers skip it. Detect the accessor
+                // right after the variable name, and treat a bare `$this` target
+                // likewise. `@param` grammar admits no accessor, so the flag is
+                // scoped to the kinds where the property spelling occurs.
                 let var_end = var_pos + var_name.len();
                 let followed_by_accessor = bytes[var_end..rest_end.min(bytes.len())]
                     .starts_with(b"->")
                     || bytes[var_end..rest_end.min(bytes.len())].starts_with(b"::");
-                if kind.is_assert() && (followed_by_accessor || var_name == "$this") {
-                    assert_property_target = true;
+                if (kind.is_assert() || matches!(kind, TagKind::Var))
+                    && (followed_by_accessor || var_name == "$this")
+                {
+                    property_target = true;
                 }
                 // Type is everything before the variable (trimmed).
                 let mut te = var_pos;
@@ -340,7 +347,7 @@ fn scan_line(text: &str, line_start: usize, line_end: usize) -> Option<DocTag> {
         line_span: Span::new(line_start as u32, line_end as u32),
         var_name,
         prefixed,
-        assert_property_target,
+        property_target,
     })
 }
 
@@ -527,7 +534,7 @@ mod tests {
         assert_eq!(tags[0].type_text, "int");
         assert_eq!(tags[0].var_name.as_deref(), Some("$x"));
         assert!(tags[0].prefixed);
-        assert!(!tags[0].assert_property_target);
+        assert!(!tags[0].property_target);
     }
 
     #[test]
@@ -639,8 +646,29 @@ mod tests {
             let tags = scan_docblock(doc);
             assert_eq!(tags.len(), 1, "{doc}");
             assert!(tags[0].kind.is_assert());
-            assert!(tags[0].assert_property_target, "{doc} should be a property target");
+            assert!(tags[0].property_target, "{doc} should be a property target");
         }
+    }
+
+    #[test]
+    fn var_property_target_is_marked() {
+        // A `@var` naming a property position must never read as a cast of the
+        // receiver variable (ADR-0073's zero-FP guard).
+        for doc in [
+            "/** @var int $this->prop */",
+            "/** @var int $obj->field */",
+            "/** @var int $this */",
+        ] {
+            let tags = scan_docblock(doc);
+            assert_eq!(tags.len(), 1, "{doc}");
+            assert_eq!(tags[0].kind, TagKind::Var);
+            assert!(tags[0].property_target, "{doc} should be a property target");
+        }
+        // …while a plain variable target stays unflagged.
+        let tags = scan_docblock("/** @var array{a: int} $arr */");
+        assert_eq!(tags.len(), 1);
+        assert!(!tags[0].property_target);
+        assert_eq!(tags[0].var_name.as_deref(), Some("$arr"));
     }
 
     // ---- @template name scanning (issue #5 shadow set) ----
