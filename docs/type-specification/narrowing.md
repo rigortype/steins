@@ -52,6 +52,31 @@ on *every* branch makes all fall-through code dead, so even a fact about a
 variable it never reads could describe an unreachable path. Closing that needs
 real reachability analysis and is deferred until the trace models control flow.
 
+### What a statement's calls cost
+
+A variable handed to a call is forgotten *after* that statement — a callee's
+`&$x` parameter is an alias of the caller's lvalue. That drop is **declined**
+for a variable the callee provably cannot reach (ADR-0070). PHP passes scalars,
+strings and arrays by value with copy-on-write, so a by-value parameter is a
+copy and the caller's binding is untouchable; `array_first($a)` therefore leaves
+`$a`'s shape standing for the next line. All five must hold, per variable:
+
+1. **every** occurrence of the name in the statement is a plain positional
+   argument of a callee that resolves — a project function (its declared
+   `&$x` bit answers) or a builtin whose argument semantics the catalog states;
+2. the argument is **by value** at that position;
+3. the binding is **value-semantic**, not an object handle (a handle is copied,
+   the object is not, so its heap facts always drop);
+4. neither the calling scope nor the callee's own body is poisoned (below) —
+   the callee half is what excludes a `global $x` reaching a caller local;
+5. `isset`/`empty`/`unset`/`list` are constructs, not calls, and never route
+   through this path at all.
+
+Anything else keeps the blanket drop, and so do the v1 exclusions: method,
+static and constructor calls, dynamic callees, named and spread arguments,
+variadic positions, and the `Opaque` write set above. `preg_match($re, $s, $m)`
+is the shape of the whole rule — `$s` survives, `$m` does not.
+
 ### Scope poisoning
 
 A scope containing `extract`/`compact`, `global`, `static $x`,

@@ -105,3 +105,4 @@ list in one place.
 | ADR-0067 | [Proven and declared are two effect lanes; an envelope can be a source only in the second](0067-proven-declared-effect-lanes.md) |
 | ADR-0068 | [Plugin effect facts live in the declared lane; label roots follow the vendor name](0068-plugin-effect-facts-declared-lane-label-ownership.md) |
 | ADR-0069 | [A builtin's declared return type gets an Asserted floor, imported by name and firewalled by grade](0069-asserted-static-envelope-floor.md) |
+| ADR-0070 | [A fact survives a call that takes its variable by value](0070-by-value-call-argument-survival.md) |
