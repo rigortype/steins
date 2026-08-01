@@ -18316,16 +18316,7 @@ fn shape_builtin_return_fact(
     }
     let [ArgValue::Var(var), rest @ ..] = args else { return None };
     let known = env.get(var)?;
-    // ADR-0061 §3's derivation clause over **every** argument the call passes. For
-    // the single-argument arms this is `known.stratum` unchanged (the fold is over
-    // one element, and that element is the subject); the argument-reading arm
-    // (`array_slice`, issue #118) is where the other arguments can lower it.
-    let stratum = args.iter().fold(known.stratum, |acc, v| {
-        acc.min(
-            transfer_arg_known(cx, folder, v, env, store)
-                .map_or_else(|| value_stratum(v, env, store), |(_, s)| s),
-        )
-    });
+    let subject_stratum = known.stratum;
 
     // **The value lane's own privilege** (ADR-0062 §2): a subject whose fact is a
     // witnessed `Val::Array` carries true insertion order, so the order-dependent
@@ -18333,8 +18324,8 @@ fn shape_builtin_return_fact(
     // binding below, because a `Singleton` is not a `Fact::Shape` — and refused for
     // every name but the one issue #118 authored it for.
     if let Some(Fact::Singleton(Val::Array(entries))) = &known.fact {
-        return witnessed_projection_fact(cx, folder, name, entries, args, env, store)
-            .map(|fact| (fact, stratum));
+        let out = witnessed_projection_fact(cx, folder, name, entries, args, env, store)?;
+        return Some((out, derivation_stratum(cx, folder, args, env, store, subject_stratum)));
     }
 
     let Some(Fact::Shape { shape, nullable: false }) = &known.fact else { return None };
@@ -18362,12 +18353,37 @@ fn shape_builtin_return_fact(
         // The positional-projection family (ADR-0062 S7) carries its own
         // admission gate — the reflected *declaration*, since its results are not
         // facts the scalar envelope path can name.
-        return shape_projection_fact(cx, folder, name, shape, args, env, store)
-            .map(|fact| (fact, stratum));
+        let fact = shape_projection_fact(cx, folder, name, shape, args, env, store)?;
+        return Some((fact, derivation_stratum(cx, folder, args, env, store, subject_stratum)));
     };
 
     let envelope = builtin_call_return_fact(cx, folder, name)?;
-    (envelope.join(&out).as_ref() == Some(&envelope)).then_some((out, stratum))
+    (envelope.join(&out).as_ref() == Some(&envelope)).then_some((out, subject_stratum))
+}
+
+/// **ADR-0061 §3's derivation clause over every argument the call passes**: `min`
+/// of the subject's own stratum and each other argument's.
+///
+/// For the single-argument arms this is the subject's stratum unchanged, so the
+/// two forms are observably identical there; the argument-reading arm
+/// (`array_slice`, issue #118) is where an offset read out of a docblock-claimed
+/// binding can lower it. It is computed **after** a rule has produced a fact and
+/// never before, because reaching an argument's fact can dispatch to the engine
+/// and most calls arriving here are not in this family at all.
+fn derivation_stratum(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+    subject: Stratum,
+) -> Stratum {
+    args.iter().fold(subject, |acc, v| {
+        acc.min(
+            transfer_arg_known(cx, folder, v, env, store)
+                .map_or_else(|| value_stratum(v, env, store), |(_, s)| s),
+        )
+    })
 }
 
 /// **The admission gate both symbolic-transfer rungs share** (ADR-0061 §2): the
