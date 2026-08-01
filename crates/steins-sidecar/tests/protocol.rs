@@ -156,16 +156,55 @@ fn reflect_reports_the_parameter_counts() {
     assert_eq!(substr.params_total, Some(3), "substr has three parameters, {substr:?}");
     assert_eq!(substr.params_required, Some(2), "only $string and $offset are required");
     // The array read-position family: one required parameter each — the arity the
-    // ADR-0064 rules pin against, measured rather than assumed.
-    for name in [
-        "current", "reset", "end", "next", "prev", "key", "array_pop", "array_shift",
-        "array_first", "array_last",
-    ] {
+    // ADR-0064 rules pin against, measured rather than assumed. Eight of the ten
+    // names are resident on every supported minor, so they keep an unconditional
+    // residency assert.
+    for name in ["current", "reset", "end", "next", "prev", "key", "array_pop", "array_shift"] {
         let r = sc.reflect(name).expect("reflection reply");
         assert!(r.function_exists, "{name} is resident on this PHP: {r:?}");
         assert_eq!(r.params_total, Some(1), "{name} takes one parameter: {r:?}");
         assert_eq!(r.params_required, Some(1), "{name}'s parameter is required: {r:?}");
     }
+    // `array_first`/`array_last` are the two odd members: PHP 8.5 additions, not
+    // present at all before that minor. CI pins PHP 8.4 for `cargo test`
+    // (.github/workflows/ci.yml) while local engines run PINNED_PHP (8.5), so a
+    // hard-coded residency assert here is exactly the kind of assumed-not-measured
+    // fact this test otherwise avoids. The conditional below reads the LIVE
+    // engine's own minor rather than PINNED_PHP or the CI pin, and takes the same
+    // per-name stance ADR-0069 takes for the Asserted floor ("any engine answer
+    // wins — per name, not per run"): where the engine has the name, the pin keeps
+    // its teeth (residency + arity); where it does not, the expected answer *is* a
+    // structured not-found, and that is asserted explicitly rather than the name
+    // being silently dropped from the loop.
+    let env = sc.env().expect("env reply");
+    let minor = php_minor(&env.php_version);
+    for name in ["array_first", "array_last"] {
+        let r = sc.reflect(name).expect("reflection reply");
+        if minor >= (8, 5) {
+            assert!(r.function_exists, "{name} is resident on PHP {} (>=8.5): {r:?}", env.php_version);
+            assert_eq!(r.params_total, Some(1), "{name} takes one parameter: {r:?}");
+            assert_eq!(r.params_required, Some(1), "{name}'s parameter is required: {r:?}");
+        } else {
+            assert!(
+                !r.function_exists && !r.class_like_exists,
+                "{name} does not exist on PHP {} (added in 8.5): {r:?}",
+                env.php_version
+            );
+            assert!(!r.exists(), "{name} is a structured not-found on PHP {}: {r:?}", env.php_version);
+            assert_eq!(r.params_total, None, "no arity for a name that is not resident: {r:?}");
+            assert_eq!(r.params_required, None, "no arity for a name that is not resident: {r:?}");
+        }
+    }
+}
+
+/// Parse `major.minor` off an `EnvInfo::php_version` string (e.g. `"8.4.10"` or
+/// `"8.5.8"`). Local to this test file rather than a shared `PINNED_PHP`-style
+/// constant — it reads the live engine's own answer, never a pin.
+fn php_minor(version: &str) -> (u16, u16) {
+    let mut parts = version.split('.');
+    let major = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let minor = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    (major, minor)
 }
 
 #[test]
