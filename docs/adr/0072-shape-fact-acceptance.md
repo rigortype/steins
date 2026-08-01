@@ -116,7 +116,60 @@ as a **conscious baseline move**, not a green-preserving change:
 5. any triage sample that is NOT a true violation is a stop-the-line
    defect in the rules above — the FP identity outranks the unlock.
 
-## 5. Refusals
+## 5. Amendment (2026-08-01): as-built ratification — the `No` is disjointness
+
+The implementing slice found §3's table written in the wrong idiom, and
+the correction is ratified here as the design.
+
+**`admits_fact`'s `No` means *disjoint* — every value the fact admits is
+rejected — not "a witness escapes".** The consumers document exactly
+that contract ("only a definite `No` reports"), and the scalar rows
+already implement it: `int<0, 5>` against a fact admitting `0` and `7`
+is `Maybe`, although a witness escapes. §2's "`No` only with a witness"
+is necessary, never sufficient; several §3 rows read it as sufficient,
+and implementing them literally would have fired `param-mismatch` on
+`array $a` against `@param non-empty-array` — the §4.5 stop-the-line
+class, caught before landing. The corrected rows, each at the sound
+verdict:
+
+| §3 row as written | ratified |
+|---|---|
+| `ArrayAny{ne}` / `MixedMinus(Falsy)`: "else No" | `Maybe`; `No` only when the fact admits *only* `[]` |
+| required contract field vs `Optional` fact field → No | `Maybe`, unless the value obligation is *also* `No` (then every realization fails one way or the other — genuine disjointness) |
+| sealed contract vs `Optional` fact field → No | `Maybe` (the member *with* the key may be the one that violates nothing else) |
+| sealed contract vs unsealed fact tail → No | `Maybe` (`Unsealed` says *may*, not *must*) |
+
+Rows that survive as written: `Never`, the array-incapable arms,
+`is_list = No` vs `ListOf`, `not_list` vs `is_list = Yes`,
+`Absent`-or-sealed vs a required contract field, a `Required` fact
+field vs a sealed contract, and `Inter`.
+
+**The union haircut is REMOVED from this relation** (a ratified
+strengthening, not a deviation): disjointness is member-wise exact —
+a union rejects a value iff every member does, so an or-fold ending at
+`No` *is* the proof, with no shared-witness argument needed. ADR-0071's
+haircut answers a coverage question, which is not member-wise; importing
+it here cost true positives (`string|list<int>` against a
+definitely-keyed fact is a genuine, now-firing disjointness). The
+jointly-covering case it protected needs no protection: the
+`non-empty-array` member answers `Maybe` from its own corrected row,
+and `Maybe` survives the fold.
+
+Also ratified from the slice: lemma 1 is *computed* as
+`ShapeFact::admits(&[])` rather than restated (it additionally sees
+`is_list = No` and non-empty `covers`, both of which make refutation
+rarer); a provably uninhabited shape answers `Maybe` (the vacuity
+guard — `normalize` does not guarantee nonemptiness, so `Never`'s row
+argument needed the guard); `Fact::Shape` travels `Asserted` and every
+consumer already accepts that stratum — no new stratum rule. Recorded
+residual, same class as ADR-0071's `denotes_nothing` note: a
+`covers`-bearing shape whose covered keys are all `Absent` is
+uninhabited and escapes the guard. The slice's definitional oracle
+(probe each fact with concrete arrays it admits; `admits_val` must
+agree) caught one genuine FP in the fact-tail rule before landing —
+the oracle pair is the reviewer this table keeps.
+
+## 6. Refusals
 
 * **No `Fact::Shape` vs callable-signature refinement** — the
   pair-array case stays Maybe; judging `[$obj, 'method']` shapes

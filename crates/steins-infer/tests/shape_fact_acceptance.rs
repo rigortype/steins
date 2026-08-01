@@ -209,14 +209,20 @@ fn a_forced_entry_does_not_refute_a_contract_that_declares_its_key() {
     assert_eq!(param_count(&param_case("non-empty-array", "array{}")), 1);
 }
 
-/// The ADR-0071 §2 union haircut, imported by ADR-0072 §3: an or-fold that
-/// ends at `No` degrades unless every member is array-incapable.
+/// Union verdicts are member-wise exact for disjointness (ADR-0072 as-built
+/// amendment — this relation takes NO ADR-0071 haircut): a union fires iff
+/// every member is provably disjoint from the fact, and stays silent the
+/// moment one member merely *might* admit it.
 #[test]
-fn a_union_with_an_array_capable_member_fires_nothing() {
-    assert_eq!(param_count(&param_case("array{a: int}", "string|list<int>")), 0);
+fn a_union_fires_iff_every_member_refutes() {
+    // `array{a: int}` is definitely keyed (required string key ⇒ not a list),
+    // so `string` AND `list<int>` are each disjoint — the union genuinely
+    // refutes, the true positive a haircut would have cost.
+    assert_eq!(param_count(&param_case("array{a: int}", "string|list<int>")), 1);
+    // `non-empty-array` may admit the fact's members → Maybe survives the
+    // fold → silent, with no haircut needed to say so.
     assert_eq!(param_count(&param_case("array{a: int}", "list<int>|non-empty-array")), 0);
-    // Every member array-incapable → the witness is shared, and the fold's
-    // `No` stands.
+    // Every member array-incapable → disjoint outright.
     assert_eq!(param_count(&param_case("array{a: int}", "string|int")), 1);
 }
 
