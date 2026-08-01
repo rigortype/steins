@@ -224,3 +224,51 @@ vacuous.
   union haircut is the rule that keeps the closure-variance seam
   honest, and it gets its own adversarial tests
   (`list|non-empty-array ⊇ array` must not answer No).
+
+## Amendment (2026-08-01): as-built sharpenings
+
+The implementing slice held §2's posture and corrected §2.1's table
+where its entries could not be argued. Each correction below replaces
+the table's entry; the posture (§2) is unchanged and every change is
+pinned by a test.
+
+**Two laws subsume the `covers_ne` column.** Before any `a`-side
+dispatch: (1) a `b` whose entry-bearing members provably do not exist
+(`list<never>`, a required-`never` field) collapses the question to
+`admits_val(a, [])` — an uninhabited `b` is subsumed by everything,
+generalizing the `Never` row; (2) `admits_val(·, [])` is *exact* on
+both sides of this vocabulary, so "`b` admits `[]` and `a` rejects it"
+is a proven `No`. Non-emptiness is therefore *computed*, not flagged:
+`associative-array<K,V> ⊉ array<K,V>` is a proven `No` because `[]` is
+a list.
+
+**Softened (the table licensed a `No` with no witness):** a typed-tail
+shape `b` against a sealed shape `a` (and typed-tail-vs-typed-tail
+mismatches) answers `Maybe`, not `No` — the tail's key *type* alone
+does not prove a key outside `a`'s fields is admitted. The
+untyped-unsealed case stays `No` (any key is free there).
+
+**Strengthened (a witness existed where the table said `Maybe`, or the
+rule was wrong):**
+
+* `MapOf`-b vs `ListOf`-a: `No` whenever `b`'s key type admits a key
+  that cannot begin a list (probes `1` and `"k"`). This *replaces* the
+  table's `No iff nl' ∧ ne'`, which could not even answer the required
+  `list<int> ⊉ array<int,int>`.
+* `ArrayAny`-b / `ListOf`-b vs `MapOf{not_list}`-a: proven `No`
+  (`[0 => v]`, or every-member-is-a-list). The `ArrayAny` row's "No
+  never" is withdrawn.
+* `MapOf`-b vs `MapOf{not_list}`-a: decided by `0 ∈ K'` (list
+  realization provable / refuted / unknown), not the flat `nl ⇒ nl'`.
+* Untyped-unsealed shape `b` vs `MapOf`-a: `No` via one concrete
+  refused extra entry (keyed by the first undeclared int).
+* `ListOf`-b vs sealed shape `a`: `No` — a list longer than every
+  declared key escapes the seal.
+
+**Recorded residual:** uninhabitedness detection covers `never` and
+its algebraic closures only; an element type uninhabited for an
+unmodeled reason (`int&string`) can make an entry witness vacuous — a
+wrong `No` confined to seams where `No` is not a finding trigger (the
+closure-variance seam excludes the vocabulary via `scalar_decidable`).
+Documented at `denotes_nothing`; an inhabitation oracle is not worth
+its weight today.
