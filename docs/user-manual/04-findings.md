@@ -715,8 +715,11 @@ call is a guaranteed fatal. `var_dump()` is legal working PHP, so
 can promote it to fail. Silence it with `disable = ["debug.var-dump"]` in a
 named profile.
 
-All three are exempt from the baseline and from `@steins-ignore`. The remedy
-for an unwanted dump is deleting the call (ADR-0053).
+All three are exempt from `@steins-ignore` — an ignore naming `debug.type`
+reports `suppress.unmatched`. ADR-0053 exempts them from the baseline as
+well, though the current binary still captures a dump entry there; that gap
+is tracked as issue #108. The remedy for an unwanted dump is deleting the call
+(ADR-0053).
 
 ## What to do with a finding
 
