@@ -214,11 +214,22 @@ fn binding_descent_two_hop_this_private() {
 fn exact_class_fact_survives_method_call_while_literal_dies() {
     // An intervening *method call* on `$x` (`$x->other()`) cannot rebind the
     // caller's `$x`, so its exact-class fact survives and `$x->m("abc")` still
-    // resolves. `$n` (a literal) IS invalidated by touch($n), so width($n) is
-    // silent. Exactly one finding: the surviving `$x->m()`.
+    // resolves. `$n` is handed to `touch($z)` — a BY-VALUE parameter, which
+    // under ADR-0070 cannot reach the caller's binding either, so the literal
+    // survives too and `width($n)` is a second proven TypeError.
     let src = "<?php\nclass Foo { public function m(int $w): void {} public function other(): void {} }\nfunction touch($z): void {}\nfunction width(int $w): void {}\n$x = new Foo();\n$n = \"abc\";\n$x->other();\ntouch($n);\nwidth($n);\n$x->m(\"abc\");\n";
     let f = findings(src);
-    assert_eq!(f.len(), 1, "class fact survives a method call, literal fact dies: {f:#?}");
+    assert_eq!(f.len(), 2, "the class fact AND the by-value literal survive: {f:#?}");
+    assert!(f[0].message.contains("to width()"), "{}", f[0].message);
+    assert_eq!(f[0].line, 9);
+    assert!(f[1].message.contains("to Foo::m()"), "{}", f[1].message);
+    assert_eq!(f[1].line, 10);
+
+    // …and the literal DOES die when the same call takes it by reference, which
+    // is the half of this pin the by-value reading must never launder.
+    let by_ref = "<?php\nclass Foo { public function m(int $w): void {} public function other(): void {} }\nfunction touch(&$z): void {}\nfunction width(int $w): void {}\n$x = new Foo();\n$n = \"abc\";\n$x->other();\ntouch($n);\nwidth($n);\n$x->m(\"abc\");\n";
+    let f = findings(by_ref);
+    assert_eq!(f.len(), 1, "a by-ref touch() still kills the literal fact: {f:#?}");
     assert!(f[0].message.contains("to Foo::m()"), "{}", f[0].message);
     assert_eq!(f[0].line, 10);
 }

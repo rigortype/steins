@@ -61,6 +61,59 @@ fn lowers_scopes_trace_and_poison() {
 }
 
 #[test]
+fn call_arg_sites_are_recorded_beside_the_blanket_list() {
+    // ADR-0070: the syntax layer records WHERE each handed-over variable went,
+    // and decides nothing. `Stmt::invalidated` stays the complete sound floor.
+    let tree = SourceTree::parse("<?php $s = 'a'; trim($s);");
+    let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
+    let st = &top.stmts[1];
+    assert_eq!(st.invalidated, vec!["s".to_owned()]);
+    assert_eq!(st.call_args.len(), 1);
+    assert_eq!(st.call_args[0].var, "s");
+    assert_eq!(st.call_args[0].callee.raw, "trim");
+    assert_eq!(st.call_args[0].position, 0);
+
+    // Positions are the argument indices, and a nested call is descended into
+    // exactly as the blanket collector descends.
+    let tree = SourceTree::parse("<?php $a = 1; $b = 2; f($a, g($b));");
+    let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
+    let st = &top.stmts[2];
+    let mut sites: Vec<(String, String, usize)> = st
+        .call_args
+        .iter()
+        .map(|s| (s.var.clone(), s.callee.raw.clone(), s.position))
+        .collect();
+    sites.sort();
+    assert_eq!(
+        sites,
+        vec![("a".to_owned(), "f".to_owned(), 0), ("b".to_owned(), "g".to_owned(), 0)]
+    );
+}
+
+#[test]
+fn an_indescribable_occurrence_removes_the_name_from_the_site_list() {
+    // The completeness invariant: a name appears in `call_args` only when EVERY
+    // occurrence of it in the statement is describable. A method call, a dynamic
+    // callee, a named argument and a spread each defeat one, and the name then
+    // has no site at all — while `invalidated` still names it.
+    for (src, why) in [
+        ("<?php $s = 'a'; $o = new C(); $x = f($s) . $o->m($s);", "method call"),
+        ("<?php $s = 'a'; $fn = 'trim'; $x = f($s) . $fn($s);", "dynamic callee"),
+        ("<?php $s = 'a'; $x = f($s) . g(x: $s);", "named argument"),
+        ("<?php $s = 'a'; $r = []; $x = f($s) . g($s, ...$r);", "spread"),
+    ] {
+        let tree = SourceTree::parse(src);
+        let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
+        let st = top.stmts.last().unwrap();
+        assert!(st.invalidated.contains(&"s".to_owned()), "{why}: still blanket-invalidated");
+        assert!(
+            !st.call_args.iter().any(|c| c.var == "s"),
+            "{why}: one indescribable occurrence removes every site for the name"
+        );
+    }
+}
+
+#[test]
 fn poison_markers_are_detected() {
     for (src, why) in [
         ("<?php $r = &$w; width($w);", "reference assignment"),

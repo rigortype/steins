@@ -240,12 +240,25 @@ fn try_catch_forgets_only_catch_param() {
 
 #[test]
 fn variable_written_via_call_in_construct_becomes_unknown() {
-    // `$w` handed to a call *inside* the construct is by-ref-conservatively part
-    // of the write set → forgotten (a callee could mutate it by reference).
-    let src = format!(
+    // `$w` handed to a call *inside* the construct is forgotten when that call
+    // could write it by reference — the by-ref conservatism, now asked of the
+    // declaration rather than of every call (ADR-0070).
+    let by_ref = format!(
+        "{COERCIVE_INT}function sink(&$x): void {{}}\n$w = \"abc\";\nif ($cond) {{ sink($w); }}\nwidth($w);"
+    );
+    assert_eq!(n(&by_ref), 0, "$w passed BY REF inside the if → forgotten");
+    // A callee nobody can resolve is the same answer for the same reason.
+    let unknown = format!(
+        "{COERCIVE_INT}$w = \"abc\";\nif ($cond) {{ sink($w); }}\nwidth($w);"
+    );
+    assert_eq!(n(&unknown), 0, "$w passed to an unresolvable callee inside the if → forgotten");
+    // A BY-VALUE parameter cannot reach the caller's binding, in a branch as
+    // anywhere else, so the literal survives the construct and the later
+    // `width("abc")` is a proven TypeError on every path.
+    let by_value = format!(
         "{COERCIVE_INT}function sink($x): void {{}}\n$w = \"abc\";\nif ($cond) {{ sink($w); }}\nwidth($w);"
     );
-    assert_eq!(n(&src), 0, "$w passed to a call inside the if → forgotten");
+    assert_eq!(n(&by_value), 1, "$w passed BY VALUE inside the if → survives");
 }
 
 #[test]
@@ -264,10 +277,19 @@ fn poison_inside_construct_still_poisons() {
 
 #[test]
 fn variable_passed_to_another_call_becomes_unknown() {
-    // `$w` handed to `sink()` might be mutated by-ref, so its value is no longer
-    // trusted at the later `width($w)`.
-    let src = "<?php\nfunction width(int $w): int { return $w; }\nfunction sink($x) { return $x; }\n$w = \"abc\";\nsink($w);\nwidth($w);";
-    assert_eq!(n(src), 0, "$w passed to a call → unknown afterwards");
+    // `$w` handed to a `&$x` parameter really is mutated by reference, so its
+    // value is no longer trusted at the later `width($w)`.
+    let by_ref = "<?php\nfunction width(int $w): int { return $w; }\nfunction sink(&$x) { return $x; }\n$w = \"abc\";\nsink($w);\nwidth($w);";
+    assert_eq!(n(by_ref), 0, "$w passed BY REF → unknown afterwards");
+    // The same for a callee the index and the catalog both fail to describe: an
+    // unresolvable name is not a by-value promise.
+    let unknown = "<?php\nfunction width(int $w): int { return $w; }\n$w = \"abc\";\nsink($w);\nwidth($w);";
+    assert_eq!(n(unknown), 0, "$w passed to an unresolvable callee → unknown afterwards");
+    // ADR-0070: a BY-VALUE parameter receives a copy, so `$w` is still `"abc"`
+    // at the later call and `width("abc")` is a proven TypeError. This is the
+    // finding the blanket drop used to hide.
+    let by_value = "<?php\nfunction width(int $w): int { return $w; }\nfunction sink($x) { return $x; }\n$w = \"abc\";\nsink($w);\nwidth($w);";
+    assert_eq!(n(by_value), 1, "$w passed BY VALUE → the literal survives the call");
 }
 
 #[test]

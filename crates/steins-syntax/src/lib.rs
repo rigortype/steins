@@ -1851,7 +1851,40 @@ pub struct Stmt {
     /// checker marks them unknown *after* the statement — PHP by-reference
     /// parameters could mutate them, so a value can't be trusted past a call it
     /// was handed to (conservatively covering unseen `&$x` signatures).
+    ///
+    /// This is the **sound floor** and it is complete: every variable the
+    /// statement hands to a call is here, whatever [`Self::call_args`] says.
     pub invalidated: Vec<String>,
+    /// The precise reading of [`Self::invalidated`] (ADR-0070): one entry per
+    /// occurrence of a variable as a **plain positional argument of a statically
+    /// named call**, naming the callee and the position. The walk consults the
+    /// index and the catalog with it and may decline the drop for a variable
+    /// every one of whose occurrences is provably by value.
+    ///
+    /// The syntax layer takes no such decision itself — it cannot, it knows no
+    /// signatures. What it *does* own is the **completeness invariant** the
+    /// consumer relies on: a variable appears here only when EVERY occurrence of
+    /// it in this statement's call arguments is describable as such a site.
+    /// An occurrence the lowering cannot describe — a dynamic callee, a method /
+    /// static / constructor receiver, a named or spread argument list, a first-
+    /// class callable — removes the variable from this list entirely, so a
+    /// consumer that finds a name here knows it has seen all of that name's
+    /// uses. Anything not here keeps the blanket drop.
+    pub call_args: Vec<CallArgSite>,
+}
+
+/// One occurrence of a local variable as a plain positional argument of a
+/// statically named call (ADR-0070). See [`Stmt::call_args`] for the invariant
+/// that makes a set of these safe to reason from.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CallArgSite {
+    /// The variable name, without the leading `$`.
+    pub var: String,
+    /// The callee's full reference (raw spelling + qualification + offset), for
+    /// project-wide resolution — the same [`NameRef`] a [`CallExpr`] carries.
+    pub callee: NameRef,
+    /// The zero-based positional index of this argument.
+    pub position: usize,
 }
 
 /// Placeholder span for [`Stmt`]s under construction — overwritten with the
@@ -5528,14 +5561,14 @@ fn build_closure_scope_from_arrow(af: &mago_syntax::cst::ArrowFunction<'_>, rc: 
     scan_method_calls(&Node::Expression(af.expression), &mut method_calls);
     // The arrow body is its return value: lower as a `return <expr>;` trace.
     let value = lower_arg_value(af.expression);
-    let mut invalidated = Vec::new();
-    collect_call_vars(&Node::Expression(af.expression), &mut invalidated);
+    let (invalidated, call_args) = call_invalidation(&Node::Expression(af.expression));
     let call = named_call(af.expression);
     let span = to_span(af.expression.span());
     let ret = Stmt {
         span,
         kind: StmtKind::Return { value, call, span },
         invalidated,
+        call_args,
     };
     let mut opaque = Vec::new();
     scan_opaque(&Node::Expression(af.expression), &mut opaque, false);
@@ -5628,32 +5661,45 @@ fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         Statement::Return(r) => {
             let value = r.value.map_or(ArgValue::Other, lower_arg_value);
             let mut invalidated = Vec::new();
+            let mut call_args = Vec::new();
             let mut call = None;
             // Point the diagnostic at the returned value, else the `return` word.
             let span = r.value.map_or_else(|| to_span(r.span()), |e| to_span(e.span()));
             if let Some(e) = r.value {
-                collect_call_vars(&Node::Expression(e), &mut invalidated);
+                (invalidated, call_args) = call_invalidation(&Node::Expression(e));
                 // `return f($s);` — carry the call so propagation/descent reach it.
                 call = named_call(e);
             }
-            Stmt { span: ZERO_SPAN, kind: StmtKind::Return { value, call, span }, invalidated }
+            Stmt { span: ZERO_SPAN, kind: StmtKind::Return { value, call, span }, invalidated, call_args }
         }
         // `echo e1, e2, …;` — collect the statically-named calls among the
         // operands so propagation/descent check them; env stays conservative.
         Statement::Echo(e) => {
             let mut calls = Vec::new();
             let mut invalidated = Vec::new();
+            // The ADR-0070 sites, accumulated over the WHOLE echo before the
+            // completeness invariant is applied: `echo trim($x), $o->m($x);` must
+            // disqualify `$x` from the `trim` site too, so the filter runs once,
+            // at statement scope, never per operand.
+            let mut sites = Vec::new();
+            let mut opaque = Vec::new();
             for v in e.values.iter() {
                 collect_call_vars(&Node::Expression(v), &mut invalidated);
+                scan_call_arg_sites(&Node::Expression(v), &mut sites, &mut opaque);
                 // An embedded assignment (`echo $x = 5;`) writes a variable, so
                 // collect its write targets too: the walk no longer blanket-clears
                 // on echo (ADR-0031), it invalidates only what echo can mutate.
                 collect_assign_writes(&Node::Expression(v), &mut invalidated);
+                // …and a name this echo WRITES is not a by-value-argument question
+                // at all — the write is the reason it is invalidated, and no
+                // signature can excuse it.
+                collect_assign_writes(&Node::Expression(v), &mut opaque);
                 if let Some(c) = named_call(v) {
                     calls.push(c);
                 }
             }
-            Stmt { span: ZERO_SPAN, kind: StmtKind::Echo(calls), invalidated }
+            sites.retain(|s: &CallArgSite| !opaque.contains(&s.var));
+            Stmt { span: ZERO_SPAN, kind: StmtKind::Echo(calls), invalidated, call_args: sites }
         }
         // `if`/`elseif`/`else` is structured (ADR-0031 stage 1): its control flow
         // is modeled, not erased.
@@ -5688,12 +5734,13 @@ fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
                 span: ZERO_SPAN,
                 kind: StmtKind::OffsetUnset { base, key },
                 invalidated: Vec::new(),
+                call_args: Vec::new(),
             }
         }
         // Everything else (declarations, `goto`, labels, `declare`, other unsets,
         // `__halt_compiler`, …) stays a full Barrier: the sound floor for
         // anything whose write set the lowering cannot bound.
-        _ => Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated: Vec::new() },
+        _ => Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated: Vec::new(), call_args: Vec::new() },
     };
     out.push(Stmt { span: stmt_span, ..stmt });
 }
@@ -5747,6 +5794,7 @@ fn lower_if(if_stmt: &mago_syntax::cst::If<'_>) -> Stmt {
         span: ZERO_SPAN,
         kind: StmtKind::If { cond, then_trace, elseifs, else_trace },
         invalidated: Vec::new(),
+        call_args: Vec::new(),
     }
 }
 
@@ -5798,6 +5846,7 @@ fn lower_match_stmt(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
         span: ZERO_SPAN,
         kind: StmtKind::Match { subject, arms, default, loose: false },
         invalidated: Vec::new(),
+        call_args: Vec::new(),
     })
 }
 
@@ -5887,6 +5936,7 @@ fn lower_switch(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
         span: ZERO_SPAN,
         kind: StmtKind::Match { subject, arms, default, loose: true },
         invalidated: Vec::new(),
+        call_args: Vec::new(),
     })
 }
 
@@ -6176,7 +6226,7 @@ fn cond_reads(expr: &Expression<'_>) -> Vec<String> {
 fn lower_opaque(s: &Statement<'_>) -> Stmt {
     let node = Node::Statement(s);
     let (writes, reads, poisons) = opaque_sets(&node);
-    Stmt { span: ZERO_SPAN, kind: StmtKind::Opaque { writes, reads, poisons }, invalidated: Vec::new() }
+    Stmt { span: ZERO_SPAN, kind: StmtKind::Opaque { writes, reads, poisons }, invalidated: Vec::new(), call_args: Vec::new() }
 }
 
 /// Compute an `Opaque` construct's `(writes, reads, poisons)` over its subtree.
@@ -6206,14 +6256,14 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
                 // Only a plain `=` yields a value; compound ops (`+=`, `.=`, …)
                 // make the variable unknown.
                 let value = if a.operator.is_assign() { lower_arg_value(a.rhs) } else { ArgValue::Other };
-                let mut invalidated = Vec::new();
-                collect_call_vars(&Node::Expression(a.rhs), &mut invalidated);
+                let (invalidated, call_args) = call_invalidation(&Node::Expression(a.rhs));
                 // `$x = f($s);` — carry the RHS call for propagation/descent.
                 let call = if a.operator.is_assign() { named_call(a.rhs) } else { None };
                 Stmt {
                     span: ZERO_SPAN,
                     kind: StmtKind::Assign { var, value, span: to_span(a.lhs.span()), call },
                     invalidated,
+                    call_args,
                 }
             } else if let Expression::Access(Access::Property(pa)) = a.lhs.unparenthesized()
                 && let Some((target_var, prop)) = prop_fetch_of(pa.object, &pa.property)
@@ -6222,12 +6272,12 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
                 // compound op (`+=`, `.=`, …) makes the property value unknown.
                 let value = if a.operator.is_assign() { lower_arg_value(a.rhs) } else { ArgValue::Other };
                 let value_call = if a.operator.is_assign() { named_call(a.rhs) } else { None };
-                let mut invalidated = Vec::new();
-                collect_call_vars(&Node::Expression(a.rhs), &mut invalidated);
+                let (invalidated, call_args) = call_invalidation(&Node::Expression(a.rhs));
                 Stmt {
                     span: ZERO_SPAN,
                     kind: StmtKind::PropAssign { target_var, prop, value, value_call, span: to_span(a.lhs.span()) },
                     invalidated,
+                    call_args,
                 }
             } else if a.operator.is_assign()
                 && let Some((base, keys)) = const_key_offset_path(a.lhs)
@@ -6235,19 +6285,19 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
                 // `$var[<lit>] = …` / `$var[<lit>][<lit>] = …` (ADR-0062 A-G8).
                 // Still a barrier in the walk — see `StmtKind::OffsetWrite` — but
                 // one that names the base and key so the shape lane survives it.
-                let mut invalidated = Vec::new();
-                collect_call_vars(&Node::Expression(a.rhs), &mut invalidated);
+                let (invalidated, call_args) = call_invalidation(&Node::Expression(a.rhs));
                 Stmt {
                     span: ZERO_SPAN,
                     kind: StmtKind::OffsetWrite { base, keys, value: lower_arg_value(a.rhs) },
                     invalidated,
+                    call_args,
                 }
             } else {
                 // Assignment to a non-simple lvalue (`$a[] = …`, `$a[$i] = …`,
                 // `$o->$p = …`, `$a->b->c = …`, `Foo::$s = …`). Barrier (the sound
                 // floor); a by-ref property alias `$r = &$x->p` is caught by the
                 // poison family above.
-                Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated: Vec::new() }
+                Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated: Vec::new(), call_args: Vec::new() }
             }
         }
         Expression::Call(Call::Function(fc)) => {
@@ -6256,11 +6306,10 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
             // mutates its argument by reference), so the narrowed variables carry no
             // invalidation; a non-lowerable argument falls back to a plain `Call`.
             if let Some(cond) = assert_stmt_cond(fc) {
-                Stmt { span: ZERO_SPAN, kind: StmtKind::Assert { cond }, invalidated: Vec::new() }
+                Stmt { span: ZERO_SPAN, kind: StmtKind::Assert { cond }, invalidated: Vec::new(), call_args: Vec::new() }
             } else {
-                let mut invalidated = Vec::new();
-                collect_call_vars(&Node::Expression(expr), &mut invalidated);
-                Stmt { span: ZERO_SPAN, kind: StmtKind::Call(lower_call(fc)), invalidated }
+                let (invalidated, call_args) = call_invalidation(&Node::Expression(expr));
+                Stmt { span: ZERO_SPAN, kind: StmtKind::Call(lower_call(fc)), invalidated, call_args }
             }
         }
         // Statement-level method / static / constructor calls. A resolvable
@@ -6269,14 +6318,12 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
         Expression::Call(Call::Method(_) | Call::NullSafeMethod(_) | Call::StaticMethod(_))
         | Expression::Instantiation(_) => match named_call(expr) {
             Some(call) => {
-                let mut invalidated = Vec::new();
-                collect_call_vars(&Node::Expression(expr), &mut invalidated);
-                Stmt { span: ZERO_SPAN, kind: StmtKind::Call(call), invalidated }
+                let (invalidated, call_args) = call_invalidation(&Node::Expression(expr));
+                Stmt { span: ZERO_SPAN, kind: StmtKind::Call(call), invalidated, call_args }
             }
             None => {
-                let mut invalidated = Vec::new();
-                collect_call_vars(&Node::Expression(expr), &mut invalidated);
-                Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated }
+                let (invalidated, call_args) = call_invalidation(&Node::Expression(expr));
+                Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated, call_args }
             }
         },
         // A statement-position `match` (ADR-0031 Part B): structure its arms when
@@ -6286,21 +6333,20 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
         Expression::Match(m) => lower_match_stmt(m).unwrap_or_else(|| {
             let node = Node::Expression(expr);
             let (writes, reads, poisons) = opaque_sets(&node);
-            Stmt { span: ZERO_SPAN, kind: StmtKind::Opaque { writes, reads, poisons }, invalidated: Vec::new() }
+            Stmt { span: ZERO_SPAN, kind: StmtKind::Opaque { writes, reads, poisons }, invalidated: Vec::new(), call_args: Vec::new() }
         }),
         // `throw <expr>;` — a trace terminator (ADR-0031). Variables the thrown
         // expression hands to a call are still invalidated (by-ref conservatism),
         // though the terminator makes anything after it unreachable.
         Expression::Throw(t) => {
-            let mut invalidated = Vec::new();
-            collect_call_vars(&Node::Expression(t.exception), &mut invalidated);
-            Stmt { span: ZERO_SPAN, kind: StmtKind::Throw { span: to_span(expr.span()) }, invalidated }
+            let (invalidated, call_args) = call_invalidation(&Node::Expression(t.exception));
+            Stmt { span: ZERO_SPAN, kind: StmtKind::Throw { span: to_span(expr.span()) }, invalidated, call_args }
         }
         // `exit;` / `die;` — a trace terminator (ADR-0019 never-returns).
         Expression::Construct(Construct::Exit(_) | Construct::Die(_)) => {
-            Stmt { span: ZERO_SPAN, kind: StmtKind::Exit { span: to_span(expr.span()) }, invalidated: Vec::new() }
+            Stmt { span: ZERO_SPAN, kind: StmtKind::Exit { span: to_span(expr.span()) }, invalidated: Vec::new(), call_args: Vec::new() }
         }
-        _ => Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated: Vec::new() },
+        _ => Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated: Vec::new(), call_args: Vec::new() },
     }
 }
 
@@ -6326,6 +6372,92 @@ fn collect_call_vars(node: &Node<'_, '_>, out: &mut Vec<String>) {
     }
     for child in node.children() {
         collect_call_vars(&child, out);
+    }
+}
+
+/// The pair a trace entry carries about the variables it hands to calls: the
+/// complete blanket list ([`Stmt::invalidated`]) and its precise reading
+/// ([`Stmt::call_args`], ADR-0070). Every construction site takes both from here
+/// so the two can never be computed over different subtrees.
+fn call_invalidation(node: &Node<'_, '_>) -> (Vec<String>, Vec<CallArgSite>) {
+    let mut invalidated = Vec::new();
+    collect_call_vars(node, &mut invalidated);
+    (invalidated, call_arg_sites(node))
+}
+
+/// The [`CallArgSite`]s of a subtree, with [`Stmt::call_args`]' completeness
+/// invariant applied: a variable with even one occurrence the lowering cannot
+/// describe positionally is dropped from the result entirely.
+fn call_arg_sites(node: &Node<'_, '_>) -> Vec<CallArgSite> {
+    let mut sites = Vec::new();
+    let mut opaque = Vec::new();
+    scan_call_arg_sites(node, &mut sites, &mut opaque);
+    if !opaque.is_empty() {
+        sites.retain(|s| !opaque.contains(&s.var));
+    }
+    sites
+}
+
+/// The walk behind [`call_arg_sites`]: exactly [`collect_call_vars`]' shape —
+/// the same four call nodes, the same "a bare `$v` argument" recognition, the
+/// same descent — so the two can never disagree about *which* variables a
+/// statement hands to a call. It only adds the question of whether each
+/// occurrence is describable, appending to `sites` when it is and to `opaque`
+/// when it is not.
+///
+/// Not describable, and therefore v1 exclusions kept on the blanket drop:
+///
+/// * a method / nullsafe-method / static-method call — the receiver's own
+///   mutability is a separate question (ADR-0070 §4) and no `NameRef` names the
+///   target anyway;
+/// * a dynamic function callee (`$f($a)`, `($o->cb)($a)`) — nothing to resolve;
+/// * an argument list carrying a **named** or **spread** argument, or a
+///   first-class callable (`f(...)`) — positional mapping is defeated there, so
+///   a position index would be a guess.
+///
+/// Language constructs (`isset`, `empty`, `unset`, `list`, `eval`, `exit`) are
+/// not call nodes and never reach either walk, so this path cannot change their
+/// semantics.
+fn scan_call_arg_sites(
+    node: &Node<'_, '_>,
+    sites: &mut Vec<CallArgSite>,
+    opaque: &mut Vec<String>,
+) {
+    let arguments = match node {
+        Node::FunctionCall(c) => {
+            let callee = match c.function {
+                Expression::Identifier(id) => Some(name_ref(id)),
+                _ => None,
+            };
+            Some((&c.argument_list, callee))
+        }
+        Node::MethodCall(c) => Some((&c.argument_list, None)),
+        Node::NullSafeMethodCall(c) => Some((&c.argument_list, None)),
+        Node::StaticMethodCall(c) => Some((&c.argument_list, None)),
+        _ => None,
+    };
+    if let Some((list, callee)) = arguments {
+        // One named or spread argument anywhere makes every index in the list
+        // unreliable, so the verdict is taken over the whole list, not per
+        // argument.
+        let all_positional = list
+            .arguments
+            .iter()
+            .all(|a| matches!(a, Argument::Positional(p) if p.ellipsis.is_none()));
+        for (position, arg) in list.arguments.iter().enumerate() {
+            if let Expression::Variable(Variable::Direct(dv)) = arg.value().unparenthesized() {
+                let var = strip_dollar(bytes_to_string(dv.name));
+                match &callee {
+                    Some(c) if all_positional => {
+                        sites.push(CallArgSite { var, callee: c.clone(), position });
+                    }
+                    _ => opaque.push(var),
+                }
+            }
+        }
+    }
+    for child in node.children() {
+        scan_call_arg_sites(&child, sites, opaque);
     }
 }
 

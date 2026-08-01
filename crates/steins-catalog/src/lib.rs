@@ -583,6 +583,88 @@ pub fn out_params(name: &str) -> Option<&'static [usize]> {
     }
 }
 
+/// Whether argument `position` of the builtin `name` is passed **by value** —
+/// the ADR-0070 argument-semantics question, three-valued.
+///
+/// * `Some(true)` — certified by value. PHP copies the argument into the
+///   parameter (copy-on-write for strings and arrays), so the callee cannot
+///   reach the caller's binding through it, whatever it does to the parameter.
+/// * `Some(false)` — a certified **by-reference** position: the parameter is an
+///   alias of the caller's lvalue and the call may rewrite it.
+/// * `None` — the catalog does not know this name's argument semantics. The
+///   consumer must assume the worst; a name nobody knows is not a by-value
+///   promise.
+///
+/// # How the two legs compose
+///
+/// An [`out_params`] row is transcribed from the php-src stubs *per name* and
+/// lists every fixed positional reference parameter that name has, so for a name
+/// carrying a row the row is complete and every other position is by value —
+/// that is what makes `preg_match($re, $s, $m)` answer `true` for `$s` and
+/// `false` for `$m` off a single table.
+///
+/// Absence of a row is **not** a by-value statement: the row set is deliberately
+/// restricted (the variadic-by-ref family `sscanf`/`fscanf`/`array_multisort`
+/// is absent by design, and the table only ever aimed to cover the names the
+/// effect layer colors). So a name with no row must be *positively certified*
+/// below, and everything else answers `None`.
+///
+/// # Membership of the certified set
+///
+/// Certification means: at `PINNED_PHP`, **every** parameter of the name is
+/// declared by value in the php-src stub. The set is closed and motivated — it
+/// is exactly the names Steins' own inference rules already reason about:
+///
+/// * the folding allowlist ([`foldable`]), which is pure by construction, plus
+/// * the ADR-0062/0064 array read-position and shape-projection family that does
+///   **not** carry an out-param row (`array_first`/`array_last`/`array_values`/…;
+///   `current` and `key` take `array|object $array`, while their pointer-moving
+///   siblings `reset`/`end`/`next`/`prev` take `&$array` and are rowed above —
+///   the two tables corroborate each other), plus
+/// * the alias spellings of foldable names (`chop`, `join`, `sizeof`), which are
+///   the same C function under a second name.
+///
+/// Widening this set is deliberately a separate act with its own measurement
+/// run: every added name is a new premise for every kept fact downstream.
+#[must_use]
+pub fn by_value_arg(name: &str, position: usize) -> Option<bool> {
+    /// Certified all-by-value names outside the folding allowlist. See the
+    /// membership rules above; each is transcribed from the `PINNED_PHP` stub.
+    const CERTIFIED_EXTRA: &[&str] = &[
+        // Alias spellings of foldable names.
+        "chop",     // = rtrim
+        "join",     // = implode
+        "sizeof",   // = count
+        // The read-position family's non-mutating members (PHP 8.5 for the
+        // first pair): `array_first(array $array)`, `array_last(array $array)`.
+        "array_first",
+        "array_last",
+        "array_key_first",
+        "array_key_last",
+        // `current(array|object $array)` / `key(array|object $array)` — by value
+        // since PHP 8.0; their `&$array`-taking siblings are the `out_params`
+        // rows `reset`/`end`/`next`/`prev`.
+        "current",
+        "key",
+        // The shape-projection family (ADR-0062): all take `array $array` by
+        // value and return a new array.
+        "array_values",
+        "array_keys",
+        "array_flip",
+        "array_reverse",
+    ];
+    match out_params(name) {
+        // A transcribed row states this name's by-ref positions exhaustively.
+        Some(positions) => Some(!positions.contains(&position)),
+        // No row: the name itself must be certified.
+        None => {
+            let certified = foldable(name)
+                || CERTIFIED_EXTRA.iter().any(|&f| name.eq_ignore_ascii_case(f));
+            certified.then_some(true)
+        }
+    }
+}
+
 /// The hierarchical **label registry** (ADR-0018): the set of known effect
 /// labels. A declared envelope label outside this set (and not an ancestor of
 /// any entry — see [`is_known_label`]) earns an `effect.unknown-label`
@@ -1878,7 +1960,7 @@ mod tests {
         assert!(!subsumes("io.fs", "io.db"), "siblings do not subsume");
     }
 
-    use super::{is_core_label, is_known_label, nearest_label, out_params, subsumes};
+    use super::{by_value_arg, is_core_label, is_known_label, nearest_label, out_params, subsumes};
 
     #[test]
     fn subsumption_is_prefix_and_segment_aware() {
@@ -2009,6 +2091,52 @@ mod tests {
         // an escaping write to `mutate.local`. Silence beats a wrong color.
         for f in ["sscanf", "fscanf", "array_multisort", "extract"] {
             assert_eq!(out_params(f), None, "{f} has no positional out-param row");
+        }
+    }
+
+    #[test]
+    fn by_value_arg_reads_the_out_param_row_positionally() {
+        // The ADR-0070 sharpest pin: one call, two opposite answers.
+        // `preg_match(string $pattern, string $subject, array &$matches = null)`.
+        assert_eq!(by_value_arg("preg_match", 0), Some(true));
+        assert_eq!(by_value_arg("preg_match", 1), Some(true), "$subject is by value");
+        assert_eq!(by_value_arg("preg_match", 2), Some(false), "$matches is by ref");
+        // `str_replace(..., $subject, int &$count = null)` — 3, not 2.
+        assert_eq!(by_value_arg("str_replace", 2), Some(true));
+        assert_eq!(by_value_arg("str_replace", 3), Some(false));
+        // The always-by-ref array family writes argument 0 and nothing else.
+        assert_eq!(by_value_arg("array_pop", 0), Some(false));
+        assert_eq!(by_value_arg("sort", 0), Some(false));
+        assert_eq!(by_value_arg("usort", 1), Some(true), "the comparator is by value");
+        // Case-insensitive, like every other row.
+        assert_eq!(by_value_arg("PREG_MATCH", 2), Some(false));
+    }
+
+    #[test]
+    fn by_value_arg_certifies_the_rowless_names_positively() {
+        // The folding allowlist is pure by construction.
+        for f in ["trim", "ltrim", "rtrim", "sprintf", "implode", "strlen", "in_array"] {
+            assert_eq!(by_value_arg(f, 0), Some(true), "{f} is certified by value");
+            assert_eq!(by_value_arg(f, 1), Some(true), "{f} argument 1 too");
+        }
+        // The certified extras: aliases and the non-mutating read-position /
+        // projection family.
+        for f in ["chop", "join", "sizeof", "array_first", "array_last", "current", "key",
+                  "array_values", "array_keys", "array_flip", "array_reverse",
+                  "array_key_first", "array_key_last"] {
+            assert_eq!(by_value_arg(f, 0), Some(true), "{f} is certified by value");
+        }
+    }
+
+    #[test]
+    fn by_value_arg_declines_every_name_it_has_not_certified() {
+        // Absence of an `out_params` row is NOT a by-value statement: the
+        // variadic-by-ref family and every uncatalogued name answer `None`, so a
+        // consumer cannot mistake silence for a promise.
+        for f in ["sscanf", "fscanf", "array_multisort", "extract", "parse_str", "exec",
+                  "my_helper", "some_unknown_function"] {
+            assert_eq!(by_value_arg(f, 0), None, "{f} is not certified");
+            assert_eq!(by_value_arg(f, 1), None, "{f} is not certified at any position");
         }
     }
 

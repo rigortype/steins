@@ -4849,6 +4849,21 @@ impl<'a> Cx<'a> {
         })
     }
 
+    /// [`Self::resolve_function`] with the **ADR-0070** notion of a known
+    /// builtin: a name whose *argument semantics* the catalog can state
+    /// ([`steins_catalog::by_value_arg`], three-valued — a `None` there is
+    /// exactly "the catalog does not know this name"). That is a different
+    /// question from having an effect color or a by-ref row, and either alone
+    /// would be the wrong widening: `trim` has no out-param row and is still
+    /// fully described, `sscanf` has neither and must stay unknown.
+    ///
+    /// Scoped to the call-argument survival gate, in the same spirit as
+    /// [`Self::resolve_effect_function`]'s scoping: no other pass's baseline
+    /// moves behind its back.
+    fn resolve_arg_function(&self, r: &NameRef) -> FnResolution {
+        self.resolve_function_with(r, &|n| steins_catalog::by_value_arg(n, 0).is_some())
+    }
+
     fn resolve_function_with(
         &self,
         r: &NameRef,
@@ -6597,9 +6612,11 @@ fn walk_trace(
         }
 
         // 4. After the statement, invalidate any variable handed to a call — except
-        // one an assertion just narrowed (its post-call fact is known).
+        // one an assertion just narrowed (its post-call fact is known), and except
+        // one every occurrence of which is a proven by-value argument (ADR-0070).
+        let by_value = by_value_survivors(cx, scope, stmt, env, store);
         for v in &stmt.invalidated {
-            if asserted.contains(v) {
+            if asserted.contains(v) || by_value.contains(v.as_str()) {
                 continue;
             }
             env.remove(v);
@@ -6613,6 +6630,151 @@ fn walk_trace(
         }
     }
     Flow::FellThrough
+}
+
+/// The variables `stmt` hands to a call whose facts nevertheless **survive** it
+/// (ADR-0070) — the precise reading of the blanket `Stmt::invalidated` drop.
+///
+/// # Why anything may survive at all
+///
+/// PHP passes scalars, strings and arrays **by value** (copy-on-write): the
+/// callee's parameter is a separate zval, and writing it cannot reach the
+/// caller's binding. So `array_first($a)` — a by-value argument — leaves `$a`
+/// exactly as it was, and forgetting `$a`'s shape there is a precision loss with
+/// no soundness content. Only a `&$x` parameter (an alias of the caller's
+/// lvalue) and an object *handle* (whose referent the callee can mutate) pierce
+/// that, and both are refused below.
+///
+/// # The gate — all five must hold, per variable
+///
+/// 1. **Every** occurrence of the name in this statement's call arguments is a
+///    [`CallArgSite`] (the syntax layer's completeness invariant), and each of
+///    those callees **resolves with a known signature**: a project function the
+///    index knows (its declared [`Param::by_ref`] answers directly), or a
+///    builtin whose argument semantics the catalog states
+///    ([`steins_catalog::by_value_arg`]). A name nobody knows refuses.
+/// 2. The argument is **by value** at that position. Call-time pass-by-reference
+///    was removed in PHP 8, so this is a property of the declaration alone; a
+///    `&$x` parameter, an argument past the declared arity, and a variadic
+///    position all refuse.
+/// 3. The variable denotes a **value-semantic** thing. An object binding (a heap
+///    handle, a guard-derived class bound, a closure value) always drops: the
+///    handle is copied, the object is not.
+/// 4. The scope is **not poisoned**. Every aliasing / scope-injection construct
+///    (`$x = &$y`, `global`, `static $x`, `$$v`, `extract`/`compact`, `eval`,
+///    `include`, a by-ref `use (&$x)`) poisons the whole scope, so a live
+///    reference into a local can never coexist with a surviving fact here. The
+///    same veto is applied to the *callee's* body for a project function, which
+///    is what closes the one route a by-value argument does not describe — a
+///    callee reaching a caller local through `global` at top-level scope.
+/// 5. Language constructs never reach this path: `isset`/`empty`/`unset`/`list`
+///    are not call nodes, so the lowering records no site for them.
+///
+/// # Replayability (ADR-0048)
+///
+/// The verdict is a **pure function** of (the statement's recorded sites, the
+/// project index, the static catalog, the walk-local env/store at this point).
+/// It asks the engine nothing — no sidecar reflection, no boot surface, no fold
+/// — so there is no per-name engine state to memo (the issue #63 discipline
+/// applies vacuously here, and deliberately so), and no global ordering can
+/// enter a kept fact. Two runs over the same sources decide identically, with or
+/// without PHP.
+fn by_value_survivors<'s>(
+    cx: &Cx<'_>,
+    scope: &Scope,
+    stmt: &'s Stmt,
+    env: &HashMap<String, Known>,
+    store: &Store,
+) -> HashSet<&'s str> {
+    let mut kept: HashSet<&'s str> = HashSet::new();
+    // Condition 4 (this scope's half) and the fast path: a statement with no
+    // describable site, and every scope on the ADR-0001 give-up list, keep the
+    // blanket drop outright.
+    if stmt.call_args.is_empty() || scope.poisoned {
+        return kept;
+    }
+    let mut refused: HashSet<&'s str> = HashSet::new();
+    for site in &stmt.call_args {
+        let var = site.var.as_str();
+        if refused.contains(var) {
+            continue;
+        }
+        // Condition 3, asked once per name and BEFORE any index work: a name with
+        // an object binding refuses whatever its callees say, and a name with no
+        // binding at all has nothing to save (dropping it is already a no-op), so
+        // neither is worth resolving a callee for.
+        if !kept.contains(var) && !is_value_semantic(var, env, store) {
+            refused.insert(var);
+            continue;
+        }
+        if arg_is_by_value(cx, site) {
+            kept.insert(var);
+        } else {
+            // One by-ref (or unresolvable) occurrence condemns the name for the
+            // whole statement, whatever its other occurrences promised.
+            kept.remove(var);
+            refused.insert(var);
+        }
+    }
+    kept
+}
+
+/// Whether `var` holds a **value-semantic** binding worth saving — a scalar, a
+/// string or an array — rather than an object handle or nothing at all
+/// (ADR-0070 condition 3).
+///
+/// [`Fact`] has no object layer by construction (its `Val` is int/float/string/
+/// bool/null/array), so the object question is asked of the carriers that do
+/// hold one: the heap handle lane, the guard-derived class-bound lane, and the
+/// closure value on the binding itself. Class identity is *not* the reason the
+/// heap lane refuses — a by-value call cannot change what class an object is —
+/// the object's own mutable state is.
+///
+/// A name none of the lanes mention answers `false` too, and that leg is purely
+/// a cost gate: invalidating an unbound name is already a no-op, so the callee
+/// resolution behind conditions 1 and 2 would be work spent on nothing. Most
+/// call arguments in real code are exactly that, which is what keeps the precise
+/// path off the hot path.
+fn is_value_semantic(var: &str, env: &HashMap<String, Known>, store: &Store) -> bool {
+    if store.refs.contains_key(var) || store.members.contains_key(var) {
+        return false;
+    }
+    match env.get(var) {
+        Some(k) => k.closure.is_none(),
+        // No value binding: only a declared-arm (contract) lane is left to save.
+        None => store.contract.contains_key(var),
+    }
+}
+
+/// Whether one [`CallArgSite`] is a **by-value** argument position of a callee
+/// with a known signature (ADR-0070 conditions 1 and 2). The refusing answer is
+/// `false` for every uncertainty — an unresolved name, an ambiguous one, a
+/// method, an argument past the declared arity.
+fn arg_is_by_value(cx: &Cx<'_>, site: &steins_syntax::CallArgSite) -> bool {
+    match cx.resolve_arg_function(&site.callee) {
+        // The catalog states this name's argument semantics; `Some(true)` is the
+        // only admitting answer (`None` cannot occur — it is what made the name
+        // resolve to `Builtin` — but is spelled out rather than assumed).
+        FnResolution::Builtin => {
+            steins_catalog::by_value_arg(&site.callee.raw, site.position) == Some(true)
+        }
+        FnResolution::User(fn_site) => {
+            // The declaration answers condition 2 directly, and it is the cheap
+            // half — asked first so a by-ref parameter refuses without the scope
+            // lookup below. A variadic position refuses: this slice does not
+            // model spread/variadic binding (v1). An argument past the declared
+            // arity is `func_get_args()` territory, with nothing to read.
+            match cx.fn_decl(fn_site).params.get(site.position) {
+                Some(p) if !p.by_ref && !p.variadic => {}
+                _ => return false,
+            }
+            // Condition 4's callee half: a body that itself defeats value
+            // tracking (`global $w`, `extract`, `$$v`, `eval`) may reach the
+            // caller's binding by a route argument passing does not describe.
+            matches!(cx.fn_scope(fn_site), Some((_, body)) if !body.poisoned)
+        }
+        FnResolution::Unknown => false,
+    }
 }
 
 /// The trust stratum a resolved value carries (ADR-0052 §5 derivation clause): the
