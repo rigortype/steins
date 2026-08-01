@@ -1928,9 +1928,12 @@ pub struct AssertObservation {
 
 thread_local! {
     /// The harness-only assertType sink (oracle idea B). `None` during every normal
-    /// check — the [`emit_asserts`] recognizer is a no-op then, so the check surface
-    /// is byte-identical (assertType stays an ordinary call). [`collect_assert_types`]
-    /// installs a fresh buffer for one project run and drains it.
+    /// check — the [`emit_asserts`] recognizer is a no-op then and the ADR-0070
+    /// survival gate's assertType read exception ([`is_assert_read_site`]) is off,
+    /// so the check surface is byte-identical (assertType stays an ordinary call).
+    /// [`collect_assert_types`] installs a fresh buffer for one project run and
+    /// drains it; both consumers key on the same installed-sink condition, so the
+    /// harness universe is entered and left as one piece.
     static ASSERT_SINK: std::cell::RefCell<Option<Vec<AssertObservation>>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -1939,8 +1942,11 @@ thread_local! {
 /// `project` exactly as [`check_project`] would, but collect every
 /// `PHPStan\Testing\assertType('T', $e)` call's (expected string, Steins rendering)
 /// pair. NOT part of the check surface — recognition is gated on the installed sink,
-/// so a normal check never sees `assertType` as anything but an ordinary call, and
-/// the returned diagnostics of `check_project` are unchanged (and here discarded).
+/// so a normal check never sees `assertType` as anything but an ordinary call. Inside
+/// THIS run the sink also makes every `assertType` site a transparent read (the
+/// ADR-0070 gate's assertType exception), so repeated assertions on one variable
+/// each observe the undegraded env; the diagnostics `check_project` returns under
+/// that universe are discarded here, never reported.
 #[must_use]
 pub fn collect_assert_types(
     db: &dyn Db,
@@ -6693,15 +6699,35 @@ fn walk_trace(
 /// definition-insensitive for the reserved pair ([`dump_family`]'s rule) — so
 /// the gate and the emitter can never disagree about what a dump is.
 ///
+/// # The harness assertType exception (oracle idea B)
+///
+/// In the **harness universe only** — the [`ASSERT_SINK`] installed by
+/// [`collect_assert_types`] — a `PHPStan\Testing\assertType('T', $e)` site is
+/// the same kind of read: the observer records facts at the call position and
+/// binds nothing, so its arguments survive exactly like a dump's. This is what
+/// keeps the measurement honest when a corpus file asserts one variable twice
+/// (phpstan-src's nsrt files do, routinely): the second assertion must observe
+/// the same env the first did, not one degraded by the first assertion's own
+/// scaffolding. The exception is deliberately **not** unconditional, unlike the
+/// dump pair's: the dumps earn theirs by being normal-check-surface features
+/// (D3/D4 emit diagnostics in every check), while `assertType` has no
+/// normal-check emitter — with the sink absent, [`is_assert_read_site`] is
+/// `false` everywhere and the check surface stays byte-identical (the
+/// [`emit_asserts`] pin), so a project that really calls
+/// `PHPStan\Testing\assertType` keeps the ordinary conservative treatment.
+///
 /// # Replayability (ADR-0048)
 ///
 /// The verdict is a **pure function** of (the statement's recorded sites, the
-/// project index, the static catalog, the walk-local env/store at this point).
+/// project index, the static catalog, the walk-local env/store at this point,
+/// and which universe is running — the harness sink is installed for a whole
+/// [`collect_assert_types`] run and absent for a whole check, never toggled
+/// mid-walk, so it selects a universe rather than injecting per-name state).
 /// It asks the engine nothing — no sidecar reflection, no boot surface, no fold
 /// — so there is no per-name engine state to memo (the issue #63 discipline
 /// applies vacuously here, and deliberately so), and no global ordering can
-/// enter a kept fact. Two runs over the same sources decide identically, with or
-/// without PHP.
+/// enter a kept fact. Two runs of the same universe over the same sources
+/// decide identically, with or without PHP.
 fn by_value_survivors<'s>(
     cx: &Cx<'_>,
     scope: &Scope,
@@ -6726,10 +6752,11 @@ fn by_value_survivors<'s>(
         if refused.contains(var) {
             continue;
         }
-        // The dump-surface exception (ADR-0053, doc above): a dump reads and
-        // binds nothing, so this occurrence keeps the name — object bindings
-        // included — and never condemns it.
-        if is_dump_read_site(cx, &site.callee) {
+        // The read-site exceptions (docs above): a dump (ADR-0053) — and, in
+        // the harness universe only, an `assertType` observation (oracle idea
+        // B) — reads and binds nothing, so this occurrence keeps the name —
+        // object bindings included — and never condemns it.
+        if is_dump_read_site(cx, &site.callee) || is_assert_read_site(cx, &site.callee) {
             kept.insert(var);
             continue;
         }
@@ -6765,6 +6792,18 @@ fn by_value_survivors<'s>(
 /// dump is. See the exception paragraph on [`by_value_survivors`].
 fn is_dump_read_site(cx: &Cx<'_>, r: &NameRef) -> bool {
     is_dump_family_fqn(&resolved_fn_fqn(cx, r)) || name_reaches_global_var_dump(cx, r)
+}
+
+/// Whether a call-argument site's callee is the **harness assertType read**
+/// (oracle idea B): the reserved `PHPStan\Testing\assertType` FQN, recognized
+/// only while the [`ASSERT_SINK`] is installed — the same condition, and the
+/// same resolved-FQN rule ([`ASSERT_TYPE_FQN`]), that gates [`emit_asserts`],
+/// so the survival gate and the observer can never disagree about what an
+/// assertion is. With no sink (every normal check) this is `false` for every
+/// site and `assertType` stays an ordinary call — the check surface is
+/// byte-identical. See the exception paragraph on [`by_value_survivors`].
+fn is_assert_read_site(cx: &Cx<'_>, r: &NameRef) -> bool {
+    ASSERT_SINK.with(|s| s.borrow().is_some()) && resolved_fn_fqn(cx, r) == ASSERT_TYPE_FQN
 }
 
 /// Whether `var` holds a **value-semantic** binding worth saving — a scalar, a
