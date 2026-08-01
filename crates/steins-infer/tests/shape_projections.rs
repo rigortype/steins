@@ -270,13 +270,17 @@ fn array_reverse_and_array_flip_take_their_stated_widenings() {
 fn the_declined_projections_say_nothing() {
     // `array_slice` (offset/length govern the key structure) and the value side
     // of `array_search` are v1 declines — honest silence, not a wrong widening.
-    assert_eq!(dump("array{a: int, b?: int}", "array_slice($v, 1)"), "dumped type: unknown");
-    // `array_search` still declines HERE: what answers is the rung below, ADR-0069's
-    // Asserted declared-return floor, and the `(asserted)` marker is the difference.
-    // This projection would have said `'a'|'b'`; it says nothing, and the catalog's
-    // `int|string|false` row speaks instead. The row is a multi-base union that issue
-    // #73 counted and dropped, so this pin moved with the #79 widened lowering rather
-    // than with anything in this family.
+    // Both now show the rung BELOW instead of `unknown`: ADR-0069's Asserted floor,
+    // and the `(asserted)` marker is the difference. `array_slice`'s projection would
+    // have described the key structure; it says nothing, and the catalog's bare
+    // `array` — which describes no key structure at all — stands in its place. That
+    // row is one ADR-0071 admitted; the `array_search` row below is a multi-base
+    // union #73 counted and dropped and #79 admitted. Neither moved with anything in
+    // this family.
+    assert_eq!(
+        dump("array{a: int, b?: int}", "array_slice($v, 1)"),
+        "dumped type: array (asserted)"
+    );
     assert_eq!(
         dump("array{a: int, b?: int}", "array_search(1, $v)"),
         "dumped type: int|string|false (asserted)"
@@ -286,11 +290,13 @@ fn the_declined_projections_say_nothing() {
 #[test]
 fn a_second_argument_or_a_nullable_base_declines() {
     // The seam is single-argument by construction, and a nullable base may be
-    // `null` (a TypeError, not a projection).
-    assert_eq!(dump("array{a: int}", "array_reverse($v, true)"), "dumped type: unknown");
+    // `null` (a TypeError, not a projection). What is withheld is the PROJECTION —
+    // the key structure this family computes from the argument's own shape — and the
+    // floor's argument-blind row stands in its place, marked.
+    assert_eq!(dump("array{a: int}", "array_reverse($v, true)"), "dumped type: array (asserted)");
     let src = "<?php\n/** @param array{a: int}|null $v */\n\
                function f(?array $v): void { \\PHPStan\\dumpType(array_values($v)); }\n";
-    assert_eq!(one_type(src), "dumped type: unknown");
+    assert_eq!(one_type(src), "dumped type: list<mixed> (asserted)");
 }
 
 #[test]
@@ -310,7 +316,10 @@ fn a_project_function_shadowing_the_name_declines() {
 fn without_the_reflected_declaration_the_rule_is_withheld() {
     // The ADR-0061 §2 admission gate: no live PHP (or a monkey-patch extension
     // loaded) means the engine's own declaration is unavailable, and the transfer
-    // is withheld rather than trusted.
+    // is withheld rather than trusted. `--no-php` is exactly where ADR-0069's floor
+    // is loudest, so the gate's observable is the marker rather than `unknown`: the
+    // catalog's `list<mixed>` says the result is a list and nothing more, while the
+    // withheld transfer would have carried `$v`'s own element type across.
     struct NoPhp;
     impl Folder for NoPhp {
         fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
@@ -323,5 +332,5 @@ fn without_the_reflected_declaration_the_rule_is_withheld() {
     let ds = check_with(&tree, &[], "t.php", &mut NoPhp);
     let ty: Vec<&Diagnostic> = ds.iter().filter(|d| d.id == DEBUG_TYPE_ID).collect();
     assert_eq!(ty.len(), 1);
-    assert_eq!(ty[0].message, "dumped type: unknown");
+    assert_eq!(ty[0].message, "dumped type: list<mixed> (asserted)");
 }

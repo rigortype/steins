@@ -1,12 +1,14 @@
-//! ADR-0069 / issues #73, #79 — the Asserted declared-return floor.
+//! ADR-0069 / issues #73, #79, ADR-0071 — the Asserted declared-return floor.
 //!
 //! The bottom rung of the return ladder: where the engine says nothing about a
 //! builtin's return type, the catalog's mined declaration speaks instead, at the
 //! `Asserted` stratum. Issue #79 widened what "the declaration" may be — a
 //! `T|false` failure union or a scalar refinement as well as a bare envelope — by
-//! seeding through the declared-return ARM lane instead of `envelope_fact`. The
-//! grade, the firewall and the per-name silence condition are unchanged, and the
-//! #73 pins below are the evidence for that.
+//! seeding through the declared-return ARM lane instead of `envelope_fact`, and
+//! ADR-0071 widened it again to the array vocabulary once the generation-time
+//! countersign could decide an array pair at all. The grade, the firewall and the
+//! per-name silence condition are unchanged through both, and the #73 pins below
+//! are the evidence for that.
 //!
 //! Everything worth pinning about it is a *boundary*:
 //!
@@ -122,9 +124,9 @@ fn require_target(raw: &str, floor: (u16, u16), ceiling: Option<(u16, u16)>) -> 
     PhpTarget { floor, ceiling, source: PhpTargetSource::Require, raw: raw.to_owned() }
 }
 
-/// The dumped type of a `strstr` call under a project whose layout DECLARES
-/// `target` — the seam `floor_target_admits` reads (issue #28's layout→Cx path).
-fn dump_under_target(target: Option<PhpTarget>) -> String {
+/// The dumped type of `call` under a project whose layout DECLARES `target` — the
+/// seam `floor_target_admits` reads (issue #28's layout→Cx path).
+fn dump_call_under_target(call: &str, target: Option<PhpTarget>) -> String {
     let root = GoverningRoot::new(
         PathBuf::from("/proj/composer.json"),
         PathBuf::from("/proj"),
@@ -134,14 +136,21 @@ fn dump_under_target(target: Option<PhpTarget>) -> String {
     .with_php_target(target);
     let layout = ProjectLayout::new(PathBuf::from("/proj"), vec![root]);
     let db = SteinsDatabase::default();
-    let src = "<?php\nfunction f(string $s): void { \\PHPStan\\dumpType(strstr($s, $s)); }\n";
-    let file = SourceFile::new(&db, "/proj/t.php".to_owned(), src.to_owned());
+    let src =
+        format!("<?php\nfunction f(string $s, int $n): void {{ \\PHPStan\\dumpType({call}); }}\n");
+    let file = SourceFile::new(&db, "/proj/t.php".to_owned(), src);
     let project = Project::new(&db, vec![file], layout, steins_db::PluginFacts::none());
     check_project_with_runtime(&db, project, &mut NoFold, true)
         .into_iter()
         .find(|d| d.id == DEBUG_TYPE_ID)
         .expect("one dump")
         .message
+}
+
+/// The same on `strstr`, whose declared return type never moved across the
+/// supported line — the version gate's complement.
+fn dump_under_target(target: Option<PhpTarget>) -> String {
+    dump_call_under_target("strstr($s, $s)", target)
 }
 
 // ---------------------------------------------------------------------------
@@ -262,16 +271,11 @@ fn an_engine_answer_wins_over_a_rich_row_too() {
 
 #[test]
 fn the_version_gate_still_guards_the_widened_rung() {
-    // The A11-shaped target gate is unchanged by the widening, and at this pin it
-    // cannot be exercised end to end: all four version-sensitive names return an
-    // array or a list, which the arm lane does not carry, so none of them has a row.
-    // `steins-catalog`'s `declared_return_version_sensitivity_is_recorded` asserts
-    // that disjointness and is the tripwire that will demand a fixture here.
-    //
-    // What IS observable is the complement, and it is worth pinning: a rich row
-    // whose declared return type never moved across the supported line answers for
-    // every target, including one that straddles a minor boundary. A gate that
-    // over-fired would silence the whole table on any ranged target.
+    // The complement of the gate, and the half that was observable before ADR-0071:
+    // a rich row whose declared return type never moved across the supported line
+    // answers for every target, including one that straddles a minor boundary. A
+    // gate that over-fired would silence the whole table on any ranged target.
+    // (The declining half is `the_version_gate_declines_below_a_change_boundary`.)
     for (raw, floor, ceiling) in [
         ("^8.1", (8, 1), Some((8, u16::MAX))),
         (">=8.3", (8, 3), None),
@@ -520,5 +524,180 @@ fn a_more_precise_rung_still_wins() {
     let mut engine =
         Engine::reflecting("array_key_exists", general(Base::Bool)).and_reflecting("noop", general(Base::Int));
     assert_eq!(dumps_with(src, &mut engine), vec!["dumped type: bool".to_owned()]);
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0071: the array-vocabulary rows.
+//
+// The 388-row bucket #73 and #79 both counted and dropped. Nothing about the
+// consuming side is new — a single array arm has always reached the value lane
+// through `seed_shape_fact`, and a multi-arm row has always lived in the arm lane
+// — so these fixtures pin that a builtin row travels those seams exactly as a
+// project function's `@return array{…}` does, and that the seeded lane is the one
+// the arms denote rather than whichever happens to render the same text.
+// ---------------------------------------------------------------------------
+
+/// The dumped type of `$r` (or of an expression over it) after `bind`, under the
+/// sound subset. Each probe is its own snippet: an intervening unresolved call
+/// sweeps the scope's carriers, so two dumps in one body would not both read the
+/// binding — long-standing behavior, not this slice's.
+fn after(bind: &str, expr: &str) -> String {
+    let src = format!(
+        "<?php\nfunction f(string $s, int $n): void {{ {bind} \\PHPStan\\dumpType({expr}); }}\n"
+    );
+    no_php_dumps(&src).first().cloned().unwrap_or_default()
+}
+
+#[test]
+fn an_array_row_spells_through_the_one_speller_on_both_surfaces() {
+    // A shape, a list and a map — one row per array spelling the table now carries,
+    // so a lowering or spelling regression shows up here rather than as a silent
+    // loss. `spell_arms` is the one speller (ADR-0062 §6, D4): the same renderer
+    // that spells a hand-written `@return array{…}`, reached from a catalog string.
+    assert_eq!(
+        probe("imagecolorsforindex($n, $n)"),
+        "dumped type: array{alpha: int<0, 127>, blue: int<0, 255>, green: int<0, 255>, red: int<0, 255>} (asserted)"
+    );
+    assert_eq!(probe("str_split($s)"), "dumped type: list<string> (asserted)");
+    assert_eq!(probe("array_count_values([])"), "dumped type: array<positive-int> (asserted)");
+    // The declared-side surface agrees, through the assignment rung — the parity
+    // claim ADR-0069 makes for every row shape.
+    let phpdoc = "<?php\nfunction f(string $s): void { $r = str_split($s); \\PHPStan\\dumpPhpDocType($r); }\n";
+    let tree = SourceTree::parse(phpdoc);
+    let msgs: Vec<String> = check(&tree, &[], "t.php")
+        .into_iter()
+        .filter(|d| d.id == DEBUG_PHPDOC_TYPE_ID)
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(msgs, vec!["dumped phpdoc type: list<string> (asserted)".to_owned()]);
+}
+
+#[test]
+fn a_single_array_arm_row_seeds_the_shape_lane_end_to_end() {
+    // The value lane, not just the arm lane — and the difference is only visible
+    // through a consumer that reads a `Fact::Shape`. An offset read is that
+    // consumer: the field's own declared type comes back, `Asserted` because the
+    // shape it was read from is.
+    assert_eq!(after("$r = imagecolorsforindex($n, $n);", "$r['alpha']"), "dumped type: int<0, 127> (asserted)");
+    assert_eq!(after("$r = str_split($s);", "$r[0]"), "dumped type: string (asserted)");
+    // The seal is the row's own: `array{…}` with no tail declares those keys and no
+    // others, so an undeclared key reads honestly unknown rather than `mixed`.
+    assert_eq!(after("$r = imagecolorsforindex($n, $n);", "$r['nope']"), "dumped type: unknown");
+}
+
+#[test]
+fn a_nullable_array_row_stays_in_the_arm_lane_alone() {
+    // A DESIGNED refusal, not a gap. `floor_value_fact` states one nullability rule
+    // — `fact_with_null` — and that rule refuses a shape: the value domain carries
+    // `nullable` on a shape as a side flag, but the floor declines to be the thing
+    // that sets it, because a row saying "an array or null" denotes two states and
+    // ADR-0069's value-lane rule seeds only where the arms denote one.
+    //
+    // Nothing is lost to the surfaces: the arms still carry both the shape and the
+    // null, and both dump surfaces read them.
+    assert_eq!(
+        probe("error_get_last()"),
+        "dumped type: null|array{file: string, line: int, message: string, type: int} (asserted)"
+    );
+    // What the decline costs is exactly the shape-lane consumer — compare with the
+    // non-nullable row above, where the same read answers.
+    assert_eq!(after("$r = error_get_last();", "$r['file']"), "dumped type: unknown");
+}
+
+#[test]
+fn an_array_scalar_union_row_lives_in_the_arm_lane() {
+    // `pathinfo` is `string|array` in functionMap: the row was uncarriable through
+    // #79 only because ONE of its two arms was an array. It is a genuinely multi-arm
+    // row, so it behaves exactly as `string|false` does — the arm lane holds it, the
+    // one speller spells it, and no value lane is seeded because the arms denote no
+    // single fact.
+    assert_eq!(probe("pathinfo($s)"), "dumped type: string|array (asserted)");
+    assert_eq!(after("$r = pathinfo($s);", "$r"), "dumped type: string|array (asserted)");
+    assert_eq!(after("$r = pathinfo($s);", "$r['dirname']"), "dumped type: unknown");
+}
+
+#[test]
+fn an_engine_answer_wins_over_an_array_row_too() {
+    // Engine-wins, re-pinned one vocabulary over. The engine reflects a bare
+    // `string` for `str_split` — deliberately not the catalog's `list<string>` —
+    // and its answer stands, marker-free.
+    let src = "<?php\nfunction f(string $s): void { \\PHPStan\\dumpType(str_split($s)); }\n";
+    let mut engine = Engine::reflecting("str_split", general(Base::String));
+    assert_eq!(dumps_with(src, &mut engine), vec!["dumped type: string".to_owned()]);
+}
+
+#[test]
+fn an_array_floor_row_never_premises_a_proof_finding() {
+    // The firewall on the richest premise the table now carries. A shape row states
+    // key presence and per-field types — strictly more than any envelope — so it is
+    // the row most worth proving the all-Verified premise rule against, over every
+    // direction the shape lane can be exercised: bound, read, iterated, returned.
+    let sources = [
+        "<?php\nfunction f(int $n): void { $r = imagecolorsforindex($n, $n); \\PHPStan\\dumpType($r); }\n",
+        "<?php\nfunction f(int $n): void { $r = imagecolorsforindex($n, $n); echo $r['alpha']; }\n",
+        "<?php\nfunction f(int $n): void { $r = imagecolorsforindex($n, $n); echo $r['nope']; }\n",
+        "<?php\nfunction f(string $s): void { $r = str_split($s); foreach ($r as $p) { echo $p; } }\n",
+        "<?php\nfunction f(string $s): void { $r = str_split($s); echo $r[99]; }\n",
+        "<?php\n/** @return string */\nfunction f(string $s) { $r = str_split($s); return $r; }\n",
+        "<?php\nfunction f(): void { $r = error_get_last(); echo $r['file']; }\n",
+        "<?php\nfunction f(string $s): void { $r = pathinfo($s); echo $r; }\n",
+    ];
+    for src in sources {
+        let tree = SourceTree::parse(src);
+        let ds = check(&tree, &[], "t.php");
+        let proof: Vec<&Diagnostic> =
+            ds.iter().filter(|d| layer(d.id) == Some(Layer::Proof)).collect();
+        assert!(proof.is_empty(), "an array floor row reached the proof layer in {src:?}: {proof:?}");
+    }
+}
+
+#[test]
+fn the_version_gate_declines_below_a_change_boundary() {
+    // The end-to-end fixture ADR-0069's amendment predicted and steins-catalog's
+    // tripwire demanded. Every version-sensitive name at this pin returns an array,
+    // so the two mined tables were disjoint through #73 and #79 and this gate had
+    // nothing to decide; ADR-0071 admits all four, and the gate is live.
+    //
+    // The rule is "wholly at or above the boundary", which is STRICTER than "does
+    // not straddle": a target entirely below the boundary does not straddle it
+    // either, and the row states the type as of the pin, so it would be as wrong
+    // there as in the straddling case.
+    for (name, call, below, at) in [
+        ("str_split", "str_split($s)", (8, 1), (8, 2)),
+        ("gc_status", "gc_status()", (8, 2), (8, 3)),
+        ("session_get_cookie_params", "session_get_cookie_params()", (8, 4), (8, 5)),
+    ] {
+        let raw_below = format!(">={}.{}", below.0, below.1);
+        assert_eq!(
+            dump_call_under_target(call, Some(require_target(&raw_below, below, None))),
+            "dumped type: unknown",
+            "{name} must decline below its change boundary",
+        );
+        let raw_at = format!(">={}.{}", at.0, at.1);
+        let admitted = dump_call_under_target(call, Some(require_target(&raw_at, at, None)));
+        // The spellings of the two shape rows are long enough to be their own
+        // maintenance burden; what this leg owns is that the gate ADMITS, and the
+        // marker is what proves the floor rather than another rung answered.
+        // `str_split`'s exact spelling is pinned by the undeclared-target leg below.
+        assert!(
+            admitted.ends_with(" (asserted)"),
+            "{name} must answer at or above its boundary, got {admitted}",
+        );
+    }
+    // A ranged target that STRADDLES the boundary declines for the same reason the
+    // wholly-below one does — part of the range is a PHP the row is wrong for.
+    assert_eq!(
+        dump_call_under_target(
+            "str_split($s)",
+            Some(require_target(">=8.1 <8.3", (8, 1), Some((8, 2))))
+        ),
+        "dumped type: unknown",
+    );
+    // And an UNDECLARED target admits, by design: the row is Asserted anyway, and
+    // its consumers tolerate that grade (ADR-0069 §3).
+    assert_eq!(
+        dump_call_under_target("str_split($s)", None),
+        "dumped type: list<string> (asserted)",
+    );
 }
 

@@ -1355,9 +1355,10 @@ pub fn declared_return(name: &str) -> Option<&'static str> {
 ///
 /// Deliberately **independent** of [`declared_return`]: a name can be
 /// version-sensitive without carrying an admitted row, and the gate must stay
-/// complete either way. The two sets were disjoint at the #73 pin (every
-/// version-sensitive name returned an array); the #79 relaxation makes them
-/// overlap, which is exactly the case this gate was wired ahead of.
+/// complete either way. The two sets were disjoint through the #73 and #79 pins —
+/// every version-sensitive name returns an array, which the floor could not then
+/// carry — and ADR-0071's array widening makes them **overlap**, which is exactly
+/// the case this gate was wired ahead of and now decides for real.
 #[must_use]
 pub fn declared_return_changed_at(name: &str) -> Option<(u16, u16)> {
     let key = name.trim_start_matches('\\').to_ascii_lowercase();
@@ -1716,6 +1717,19 @@ mod tests {
         // A scalar refinement — the other #79 bucket. functionMap states what
         // reflection cannot: `mb_strtoupper` never returns a lowercase character.
         assert_eq!(super::declared_return("mb_strtoupper"), Some("uppercase-string"));
+        // The ADR-0071 bucket: the array vocabulary, which #73 and #79 both counted
+        // and dropped because the countersign could only shrug at it. A bare `array`,
+        // a list, a keyed map and a full shape all ship now.
+        assert_eq!(super::declared_return("array_merge"), Some("array"));
+        assert_eq!(super::declared_return("str_split"), Some("list<string>"));
+        assert_eq!(super::declared_return("array_count_values"), Some("array<positive-int>"));
+        assert_eq!(
+            super::declared_return("imagecolorsforindex"),
+            Some("array{alpha: int<0, 127>, blue: int<0, 255>, green: int<0, 255>, red: int<0, 255>}")
+        );
+        // And an array arm inside a union, which was the other half of the movement:
+        // the row was uncarriable only because ONE of its arms was an array.
+        assert_eq!(super::declared_return("scandir"), Some("false|list<string>"));
         // Case-insensitive lookup and leading-backslash trimming, as everywhere else.
         assert_eq!(super::declared_return("STRSTR"), Some("string|false"));
         assert_eq!(super::declared_return("\\str_repeat"), Some("string"));
@@ -1728,13 +1742,14 @@ mod tests {
             assert!(!ty.is_empty(), "{name} carries an empty spelling");
         }
         // The mining counts, pinned. The #73 slice admitted 919 rows, every one a
-        // single-base envelope; #79 keeps all of them (the countersign still admits a
-        // row that BOUNDS the engine) and adds 439 richer ones. A drop below 919, or a
-        // collapse of the rich population, means the widened lowering regressed.
+        // single-base envelope; #79 kept all of them (the countersign still admits a
+        // row that BOUNDS the engine) and added 439 richer ones; ADR-0071's array
+        // widening keeps those 1,358 name for name and adds 248 more. A drop below
+        // 919, or a collapse of the rich population, means a lowering regressed.
         let rich = t.iter().filter(|(_, ty)| !ENVELOPE_SPELLINGS.contains(ty)).count();
-        assert_eq!(t.len(), 1358, "admitted rows at this pin");
+        assert_eq!(t.len(), 1606, "admitted rows at this pin");
         assert_eq!(t.len() - rich, 919, "the #73 envelope population must be preserved exactly");
-        assert_eq!(rich, 439, "the issue-#79 rich admissions");
+        assert_eq!(rich, 687, "the #79 and ADR-0071 rich admissions");
     }
 
     #[test]
@@ -1762,6 +1777,24 @@ mod tests {
         for name in ["imageloadfont", "pow", "rewinddir", "substr_compare", "fpassthru"] {
             assert_eq!(super::declared_return(name), None, "{name}: an #79 candidate the engine disowns");
         }
+        // And the catches ADR-0071's array candidates brought, which are the SAME
+        // dropped-arm shape one vocabulary over: `ftp_raw` says `array` where the
+        // engine declares `?array`, so the row hides a null exactly as
+        // `xml_error_string` did; `mysqli_fetch_row` and `locale_get_keywords` hide
+        // the engine's `false`. `str_word_count` invents one instead — functionMap
+        // still carries a `false` arm PHP 8 replaced with a ValueError.
+        for name in [
+            "ftp_raw",
+            "mysqli_fetch_row",
+            "locale_get_keywords",
+            "odbc_data_source",
+            "str_word_count",
+            "fscanf",
+            "ob_list_handlers",
+            "socket_addrinfo_lookup",
+        ] {
+            assert_eq!(super::declared_return(name), None, "{name}: an ADR-0071 candidate the engine disowns");
+        }
         // Alternate signatures that disagree on the return type exclude the name too:
         // a floor row must state ONE type.
         for name in ["base64_decode", "phpversion", "getenv"] {
@@ -1786,15 +1819,19 @@ mod tests {
             t.windows(2).all(|w| w[0].0 < w[1].0),
             "RETURN_VERSION_SENSITIVE must be strictly sorted by key"
         );
-        // The two tables STILL do not overlap after the #79 widening: all four
-        // version-sensitive names return an array or a list, which the arm lane does
-        // not carry, so none of them reaches the shipped table. The gate stays wired
-        // (and pinned in steins-infer), because a later pin can change this and a gate
-        // that only exists once it is needed is a gate that is missed. This assertion
-        // is the tripwire: the day a version-sensitive name gains a row, it fails and
-        // the end-to-end decline gets its fixture.
+        // The tripwire fired, as ADR-0069's amendment predicted it would. All four
+        // version-sensitive names return an array or a list; the arm lane could not
+        // carry those through #73 and #79, so the tables were disjoint and the gate
+        // had no end-to-end fixture. ADR-0071's array widening admits all four, so
+        // this assertion is INVERTED: the tables now INTERSECT, and the gate is a
+        // live decision rather than a wired-but-unreached one. The end-to-end fixture
+        // the old assertion was designed to demand lives in steins-infer's
+        // `declared_return_floor.rs` (`the_version_gate_declines_below_the_boundary`).
         for (name, _) in t {
-            assert_eq!(super::declared_return(name), None, "{name}: the sets are expected disjoint at this pin");
+            assert!(
+                super::declared_return(name).is_some(),
+                "{name}: a version-sensitive name must carry a row for the gate to decide"
+            );
         }
     }
 
