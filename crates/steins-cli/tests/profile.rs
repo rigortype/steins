@@ -319,6 +319,28 @@ fn var_dump_json_carries_debug_layer_and_warn_level() {
     assert_eq!(r.code, 0);
 }
 
+// ------------------------------------------- ADR-0074: trace-annotation lane ---
+
+/// A fixture whose ONLY finding is a `@psalm-trace` annotation report (#94) —
+/// the canonical Psalm placement: the annotation above the assignment reports
+/// the type that statement leaves behind (ADR-0074 §5 exit facts).
+const TRACE_ANNOTATION_ONLY: &str = "<?php\n/** @psalm-trace $x */\n$x = 5;\n";
+
+#[test]
+fn trace_annotation_warns_by_default_and_is_exit_neutral() {
+    // ADR-0074 §8: `debug.trace` is born at warn and fixed there — the trigger
+    // is a runtime-inert, committable docblock, so the explicit pair's
+    // fail-forcing argument does not apply and a trace-only run exits 0. No
+    // CLI-side plumbing is trace-specific (layer and level flow from the
+    // registry); this test pins that the text surface indeed says so.
+    let dir = workdir("trace-annotation");
+    write(&dir, "a.php", TRACE_ANNOTATION_ONLY);
+    let r = run_in(&dir, &["check", "--no-php", "a.php"]);
+    assert!(r.stdout.contains("warning[debug.trace]"), "trace reports at warn:\n{}", r.stdout);
+    assert!(r.stdout.contains("traced type of $x: 5"), "the answer rides the message:\n{}", r.stdout);
+    assert_eq!(r.code, 0, "a trace-only run is exit-neutral; stdout:\n{}", r.stdout);
+}
+
 #[test]
 fn var_dump_is_profile_disableable() {
     // ADR-0053 §4: a named profile `disable = ["debug.var-dump"]` turns the incidental

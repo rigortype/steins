@@ -44,7 +44,7 @@ use steins_sidecar::Sidecar;
 use steins_syntax::CallExpr;
 use steins_syntax::Span;
 use steins_syntax::{
-    ArgValue, ArrayKey, Callee, CatchClause, ClassDecl, ClosureRef, CmpOp, CondExpr, CondOperand,
+    ArgValue, ArrayKey, Callee, CatchClause, ClassDecl, ClosureRef, CmpOp, Comment, CondExpr, CondOperand,
     EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, MatchArmT, MethodDecl, NameRef, NamedArg,
     NativeType, NormKey, Param, PropertyDecl, Receiver, RefKind, ScalarType, Scope, ScopeOwner, SourceTree,
     StaticClass, Stmt, StmtKind, ThrowKind, ThrowOrigin, TypeMember, Visibility, normalize_array,
@@ -344,6 +344,11 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     DEBUG_TYPE_ID,
     DEBUG_PHPDOC_TYPE_ID,
     DEBUG_VAR_DUMP_ID,
+    // The trace annotation (ADR-0074, issue #94), lit up from
+    // `emit_trace_annotations` (the walk's per-statement pass): a statement-adopted
+    // `@psalm-trace $x` docblock asks the `debug.type` question at that program
+    // point, answered through the same machinery.
+    DEBUG_TRACE_ID,
     suppress::SUPPRESS_UNMATCHED_ID,
     suppress::SUPPRESS_UNKNOWN_ID,
 ];
@@ -371,9 +376,8 @@ pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
     // PHPDOC_UNDEFINED_METHOD_ID lit up at S6 — now in ALL_EMITTABLE_IDS.
     // The dump surface's debug ids (ADR-0053) all lit up: the explicit pair at D3 and
     // `debug.var-dump` at D4 — all now in ALL_EMITTABLE_IDS.
-    // The trace annotation (ADR-0074, issue #94): registered by the groundwork
-    // slice, moved to ALL_EMITTABLE_IDS when `emit_trace_annotations` lands.
-    DEBUG_TRACE_ID,
+    // DEBUG_TRACE_ID (ADR-0074, issue #94) lit up from `emit_trace_annotations` —
+    // now in ALL_EMITTABLE_IDS.
 ];
 
 /// The maximum depth of interprocedural argument-binding descent (Feature B).
@@ -6349,6 +6353,22 @@ fn walk_trace(
         if descent.is_none() {
             apply_inline_var_casts(w, stmt, env, store);
         }
+        // 0b. The trace annotation (ADR-0074, issue #94): a statement-adopted
+        // `@psalm-trace $x` docblock asks the dump surface's question against
+        // this statement's EXIT facts (§5, Psalm's semantics: the annotation is
+        // "applied to the next statement" and reports what it leaves behind).
+        // Adoption is resolved here — the same shared `stmt_docblock` query the
+        // step-0 cast reads (§6: one position, one adoption grammar) — and the
+        // answer is flushed via `.take()` on whichever exit this iteration
+        // takes: the divergent `return`s in step 2 or the common bottom, so
+        // every annotated site (diverging statements included) answers exactly
+        // once. Plain per-scope pass only (the `emit_dumps` gate): never
+        // per-caller under a binding descent.
+        let mut pending_trace = if descent.is_none() {
+            adopted_trace_docblock(w, stmt)
+        } else {
+            None
+        };
         // The return-fact summary of a `$x = f(...)` RHS descent (ADR-0057 amendment
         // T0), captured in step 1 and consumed by `apply_assign` in step 2. For an
         // `Assign` statement `checkable_calls` yields exactly the RHS call, so the
@@ -6629,6 +6649,9 @@ fn walk_trace(
                     env.remove(v);
                     store.unbind(v);
                 }
+                // A `return $x;` under the annotation still answers (ADR-0074
+                // §5): flush the pending trace at this divergent exit.
+                emit_trace_annotations(w, folder, pending_trace.take(), stmt, env, store, out);
                 return Flow::Terminated;
             }
             StmtKind::Throw { .. } | StmtKind::Exit { .. } => {
@@ -6636,6 +6659,9 @@ fn walk_trace(
                     env.remove(v);
                     store.unbind(v);
                 }
+                // A diverging `throw`/`exit` under the annotation still
+                // answers (ADR-0074 §5).
+                emit_trace_annotations(w, folder, pending_trace.take(), stmt, env, store, out);
                 return Flow::Terminated;
             }
             StmtKind::Assign { var, value, span, call } => {
@@ -6694,6 +6720,14 @@ fn walk_trace(
             env.remove(v);
             store.unbind(v);
         }
+
+        // Flush the pending trace annotation at the iteration's common exit —
+        // the statement's own effect (step 2), its assert narrowings (step 3)
+        // and the by-ref invalidation (step 4) have all applied, so this env IS
+        // the state the next statement would enter with (ADR-0074 §5's exit
+        // facts). Covers the fall-through path and the diverging `If`/`Match`
+        // below alike; the step-2 terminators flushed at their own `return`s.
+        emit_trace_annotations(w, folder, pending_trace.take(), stmt, env, store, out);
 
         if flow == Flow::Terminated {
             // The rest of this trace is proven unreachable (ADR-0031).
@@ -7702,6 +7736,116 @@ fn emit_dumps(
                 message: dump_message("dumped type", &rendering),
             });
         }
+    }
+}
+
+/// Whether the statement starting at `stmt_start` is itself a **declaration**
+/// (function / class / interface / enum / trait). Declarations lower to
+/// [`StmtKind::Barrier`] in the trace IR, so the kind alone cannot say; the
+/// tree's declaration indexes can — a named function's or class-like's name span
+/// falls inside the declaration statement's own span, and inside no other
+/// `Barrier`'s (a declaration nested in an `if`/loop sits under a `StmtKind::If`
+/// / `Opaque` statement, never a `Barrier`, so the containment test is exact for
+/// the caller's Barrier-gated use).
+///
+/// Why it matters (ADR-0074 §6: "declaration statements are inert at the
+/// emitter"): a docblock a declaration owns is a contract surface, never a
+/// statement trigger. The shared adoption query (`stmt_docblock`, ADR-0073's
+/// tag-agnostic rule) does NOT exclude declaration-owned docblocks — a
+/// docblock before a `function`/`class`/`interface`/`enum`/`trait` declaration
+/// statement IS returned by it — so this guard is load-bearing for all five
+/// declaration kinds; the trace-specific exclusion lives here, with the trace
+/// emitter, keeping the query shared.
+fn stmt_is_declaration(tree: &SourceTree, span: Span) -> bool {
+    let within = |s: Span| span.start <= s.start && s.start < span.end;
+    tree.functions().iter().any(|f| within(f.span))
+        || tree.classes().iter().any(|c| within(c.span))
+}
+
+/// The docblock the statement adopts as a trace-annotation trigger (ADR-0074
+/// §6), or `None` for every deliberate silence: a docblock the statement did
+/// not adopt under the shared statement-adoption rule (`stmt_docblock`, the
+/// same query the inline-`@var` cast reads — nothing but whitespace between
+/// the nearest preceding comment trivium, which must be a docblock, and the
+/// statement), and a declaration statement's docblock (a contract surface,
+/// inert at the emitter for all five declaration kinds — see
+/// [`stmt_is_declaration`]). Resolved at the top of the walk's per-statement
+/// step; the answer is flushed by [`emit_trace_annotations`] at the step's
+/// exit.
+fn adopted_trace_docblock<'a>(w: &'a WalkCx, stmt: &Stmt) -> Option<&'a Comment> {
+    let tree = w.cx.tree();
+    let comment = tree.stmt_docblock(stmt.span.start)?;
+    // Only a `Barrier` can be a declaration statement (see
+    // `stmt_is_declaration`), so every other kind skips the index scan outright.
+    if matches!(stmt.kind, StmtKind::Barrier) && stmt_is_declaration(tree, stmt.span) {
+        return None;
+    }
+    Some(comment)
+}
+
+/// Emit the trace-annotation reports a statement's adopted docblock asks for
+/// (ADR-0074 §5/§6): a `/** @psalm-trace $x */` directly above the statement is
+/// the docblock spelling of `PHPStan\dumpType($x)` — the SAME question, answered
+/// through the same machinery ([`best_dump_type`] → the one renderer, honoring
+/// the `(asserted)` stratum marker) against the statement's **EXIT facts** (§5,
+/// Psalm's semantics: the annotation is "applied to the next statement" and
+/// reports what that statement leaves behind — what `dumpType($x)` would report
+/// were it the following statement), and reported at the TAG's own position
+/// (the question's own text, like a dump call reports at the call). Reads
+/// facts, binds nothing (§9 transparency).
+///
+/// `pending` is the adoption [`adopted_trace_docblock`] resolved at the step's
+/// top — `None` (nothing adopted, or a descent pass) flushes nothing. The walk
+/// calls this exactly once per statement, on whichever exit the statement
+/// takes: the divergent `return`s (a `return`/`throw`/`exit` under the
+/// annotation still answers, §5) or the common bottom of the iteration. A
+/// named variable with no fact renders honest `unknown` — a missing answer is
+/// incompleteness, never silence.
+///
+/// Runs in the plain per-scope pass only (the capture site gates on
+/// `descent.is_none()` exactly like [`emit_dumps`]'s call site), so an
+/// annotated site emits once — never re-reported per caller under a binding
+/// descent.
+fn emit_trace_annotations(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    pending: Option<&Comment>,
+    stmt: &Stmt,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    out: &mut Vec<Diagnostic>,
+) {
+    let cx = w.cx;
+    let Some(comment) = pending else { return };
+    for tag in scan_docblock(&comment.text) {
+        if tag.kind != TagKind::TraceTag {
+            continue;
+        }
+        let Some(var) = tag.var_name.as_deref() else { continue };
+        let name = var.trim_start_matches('$');
+        let rendering = best_dump_type(
+            w,
+            folder,
+            &ArgValue::Var(name.to_owned()),
+            env,
+            store,
+            stmt.span.start,
+        );
+        // The diagnostic sits at the tag's own line/column: the tag span is
+        // docblock-relative (`comment.text` is the exact source substring at
+        // `comment.span`), so the comment's file span start maps it back.
+        let pos = cx.tree().position(comment.span.start + tag.tag_span.start);
+        out.push(Diagnostic {
+            id: DEBUG_TRACE_ID,
+            facet: None,
+            path: cx.path().to_owned(),
+            line: pos.line,
+            column: pos.column,
+            // The label names the variable so the #95 list form stays
+            // unambiguous; the rendered fact after the final ": " is the
+            // parity-pinned part, the frame wording is not a contract (§5).
+            message: dump_message(&format!("traced type of {var}"), &rendering),
+        });
     }
 }
 
