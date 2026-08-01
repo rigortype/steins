@@ -965,6 +965,12 @@ pub fn arm_eq(a: &ContractTy, b: &ContractTy) -> bool {
 /// Remove arms that another surviving arm subsumes with [`Certainty::Yes`],
 /// preserving the stable order of the survivors. Mutually-subsuming
 /// (`arm_eq`) duplicates keep their **first** occurrence.
+///
+/// The survivors are then run to an interval-absorption fixpoint
+/// ([`merge_int_arms`]): `int<1, max>|0` and `int<0, max>` are one denotation
+/// spelled two ways, and this pass picks the interval (issue #90). Subsumption
+/// dedup alone cannot do it — neither arm covers the other — so the collapse is
+/// a *computed* one, in the [`summarize_vals`] sense, not a renderer choice.
 pub fn dedup_arms(arms: &mut Vec<ContractTy>) {
     let mut kept: Vec<ContractTy> = Vec::with_capacity(arms.len());
     for arm in arms.drain(..) {
@@ -977,7 +983,84 @@ pub fn dedup_arms(arms: &mut Vec<ContractTy>) {
         kept.retain(|k| !subsumes(&arm, k).is_yes());
         kept.push(arm);
     }
+    absorb_int_arms(&mut kept);
     *arms = kept;
+}
+
+/// Run an arm list to the [`merge_int_arms`] fixpoint in place, keeping the
+/// stable order: a merged pair takes the **earlier** arm's slot, so the list
+/// stays declaration-ordered around it.
+///
+/// Iterating matters — one merge can expose the next (`int<2, max>`, `1`, `0`
+/// merges twice, to `int<0, max>`) — and it terminates because every merge
+/// removes exactly one arm.
+fn absorb_int_arms(arms: &mut Vec<ContractTy>) {
+    loop {
+        let mut merged_at: Option<(usize, usize, ContractTy)> = None;
+        'outer: for i in 0..arms.len() {
+            for j in (i + 1)..arms.len() {
+                if let Some(m) = merge_int_arms(&arms[i], &arms[j]) {
+                    merged_at = Some((i, j, m));
+                    break 'outer;
+                }
+            }
+        }
+        let Some((i, j, m)) = merged_at else { return };
+        arms[i] = m;
+        arms.remove(j);
+    }
+}
+
+/// The one **denotation-preserving** int-arm merge (issue #90): when the union
+/// of two int-flavored arms IS an interval, that interval; `None` otherwise.
+///
+/// Exactly three shapes qualify, and the rule is symmetric in its arguments:
+///
+/// * `LitInt(n)` + `IntIn(lo, hi)` with `n == lo - 1` → `IntIn(n, hi)`;
+/// * `LitInt(n)` + `IntIn(lo, hi)` with `n == hi + 1` → `IntIn(lo, n)`;
+/// * `IntIn(a, b)` + `IntIn(c, d)` that overlap **or touch** → their hull.
+///
+/// Every other pair is refused, and two refusals carry the rule's whole
+/// soundness argument:
+///
+/// * a **gap** is never bridged — `1|int<3, max>` stays two arms, because
+///   `int<1, max>` would admit `2`, which neither input does;
+/// * an **interior** literal (`5` beside `int<1, max>`) never reaches here at
+///   all, because [`dedup_arms`]' subsumption pass already dropped it as
+///   covered. Were it to reach here it would still be refused (`5` is neither
+///   `lo - 1` nor `hi + 1`), so the interior-point trap is closed twice over.
+///
+/// Boundary arithmetic is checked, not wrapped: `hi + 1` at `i64::MAX` and
+/// `lo - 1` at `i64::MIN` return `None`. Those are the `min`/`max` open ends,
+/// where no adjacent literal can exist — the guard is written anyway so the
+/// rule never depends on that argument holding.
+#[must_use]
+pub fn merge_int_arms(a: &ContractTy, b: &ContractTy) -> Option<ContractTy> {
+    match (a, b) {
+        (ContractTy::LitInt(n), ContractTy::IntIn(r))
+        | (ContractTy::IntIn(r), ContractTy::LitInt(n)) => {
+            let extended = if r.lo().checked_sub(1) == Some(*n) {
+                IntRange::new(*n, r.hi())
+            } else if r.hi().checked_add(1) == Some(*n) {
+                IntRange::new(r.lo(), *n)
+            } else {
+                None
+            };
+            extended.map(ContractTy::IntIn)
+        }
+        (ContractTy::IntIn(x), ContractTy::IntIn(y)) => {
+            // Touching or overlapping ⟺ neither sits strictly beyond the
+            // other's successor. `hi + 1` is checked: an open `max` end can
+            // never be *below* another arm's `lo`, so the saturating fallback
+            // is only ever the correct "no gap" answer.
+            let touches = |p: IntRange, q: IntRange| match p.hi().checked_add(1) {
+                Some(next) => q.lo() <= next,
+                None => true,
+            };
+            (touches(*x, *y) && touches(*y, *x)).then(|| ContractTy::IntIn(x.hull(*y)))
+        }
+        _ => None,
+    }
 }
 
 /// The value-set → canonical normal-form (arm list) half of the extraction
@@ -1604,6 +1687,109 @@ mod tests {
         let mut arms = vec![lit_s("a"), lit_s("a")];
         dedup_arms(&mut arms);
         assert_eq!(arms, vec![lit_s("a")]);
+    }
+
+    // ---- interval absorption (issue #90) ------------------------------------
+
+    fn rng(lo: i64, hi: i64) -> ContractTy {
+        ContractTy::IntIn(IntRange::new(lo, hi).expect("valid range"))
+    }
+
+    #[test]
+    fn the_literal_below_an_interval_is_absorbed_into_it() {
+        // The headline: `positive-int|0` and `int<0, max>` are one denotation.
+        let mut arms = vec![ContractTy::IntIn(IntRange::POSITIVE), lit_i(0)];
+        dedup_arms(&mut arms);
+        assert_eq!(arms, vec![ContractTy::IntIn(IntRange::NON_NEGATIVE)]);
+    }
+
+    #[test]
+    fn the_literal_above_an_interval_is_absorbed_too() {
+        let mut arms = vec![lit_i(11), rng(1, 10)];
+        dedup_arms(&mut arms);
+        assert_eq!(arms, vec![rng(1, 11)]);
+    }
+
+    #[test]
+    fn absorption_runs_to_a_fixpoint_over_chained_literals() {
+        // `0` reaches the interval only after `1` has already extended it.
+        let mut arms = vec![rng(2, 9), lit_i(0), lit_i(1)];
+        dedup_arms(&mut arms);
+        assert_eq!(arms, vec![rng(0, 9)]);
+    }
+
+    #[test]
+    fn absorption_merges_two_touching_intervals_into_their_hull() {
+        let mut arms = vec![rng(0, 4), rng(5, 9)];
+        dedup_arms(&mut arms);
+        assert_eq!(arms, vec![rng(0, 9)]);
+        // Overlapping is the same answer.
+        let mut arms = vec![rng(0, 6), rng(5, 9)];
+        dedup_arms(&mut arms);
+        assert_eq!(arms, vec![rng(0, 9)]);
+    }
+
+    #[test]
+    fn absorption_never_bridges_a_gap() {
+        // `2` is in neither input, so the hull is NOT the union — refuse.
+        let mut arms = vec![lit_i(1), rng(3, 9)];
+        dedup_arms(&mut arms);
+        assert_eq!(arms, vec![lit_i(1), rng(3, 9)]);
+        let mut arms = vec![rng(0, 1), rng(3, 9)];
+        dedup_arms(&mut arms);
+        assert_eq!(arms, vec![rng(0, 1), rng(3, 9)]);
+    }
+
+    #[test]
+    fn an_interior_literal_is_dropped_by_subsumption_and_never_absorbed() {
+        // The interior-point trap (issue #90): `5` inside `int<1, max>` is already
+        // covered, so the subsumption pass deletes it — the interval is unchanged,
+        // not extended. Pinned on both halves: the list, and the merge's refusal.
+        let mut arms = vec![ContractTy::IntIn(IntRange::POSITIVE), lit_i(5)];
+        dedup_arms(&mut arms);
+        assert_eq!(arms, vec![ContractTy::IntIn(IntRange::POSITIVE)]);
+        assert_eq!(merge_int_arms(&ContractTy::IntIn(IntRange::POSITIVE), &lit_i(5)), None);
+    }
+
+    #[test]
+    fn absorption_is_denotation_preserving_at_the_boundary() {
+        // Never widens: the merged arm covers each input with `Yes`…
+        let lit = lit_i(0);
+        let interval = ContractTy::IntIn(IntRange::POSITIVE);
+        let merged = merge_int_arms(&lit, &interval).expect("adjacent");
+        assert_eq!(subsumes(&merged, &lit), Certainty::Yes);
+        assert_eq!(subsumes(&merged, &interval), Certainty::Yes);
+        // …and never narrows: each input is still inside it (mutual subsumption
+        // with the hand-written spelling of the same set).
+        assert!(arm_eq(&merged, &ContractTy::IntIn(IntRange::NON_NEGATIVE)));
+        // Boundary honesty: the point just below the merged `lo` is refused.
+        assert_eq!(subsumes(&merged, &lit_i(-1)), Certainty::No);
+    }
+
+    #[test]
+    fn absorption_does_not_wrap_at_the_domain_ends() {
+        // `hi + 1` at `max` and `lo - 1` at `min` are the open ends: no literal can
+        // be adjacent on the open side, and the checked arithmetic says so rather
+        // than wrapping into a bogus merge.
+        assert_eq!(merge_int_arms(&ContractTy::IntIn(IntRange::POSITIVE), &lit_i(i64::MIN)), None);
+        assert_eq!(merge_int_arms(&ContractTy::IntIn(IntRange::NEGATIVE), &lit_i(i64::MAX)), None);
+        // The full domain absorbs any literal by subsumption, never by extension.
+        assert_eq!(merge_int_arms(&ContractTy::IntIn(IntRange::FULL), &lit_i(0)), None);
+    }
+
+    #[test]
+    fn absorption_leaves_non_int_arms_alone() {
+        // Only the int vocabulary merges; a string/bool neighbour is untouched, and
+        // the surviving order stays declaration-stable around the merge.
+        let mut arms =
+            vec![ContractTy::Base(Base::String), ContractTy::IntIn(IntRange::POSITIVE), lit_i(0)];
+        dedup_arms(&mut arms);
+        assert_eq!(
+            arms,
+            vec![ContractTy::Base(Base::String), ContractTy::IntIn(IntRange::NON_NEGATIVE)]
+        );
+        assert_eq!(merge_int_arms(&lit_i(0), &lit_s("a")), None);
+        assert_eq!(merge_int_arms(&lit_i(0), &lit_i(1)), None);
     }
 
     // ---- summarize_vals -----------------------------------------------------
