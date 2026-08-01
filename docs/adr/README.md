@@ -107,3 +107,4 @@ list in one place.
 | ADR-0069 | [A builtin's declared return type gets an Asserted floor, imported by name and firewalled by grade](0069-asserted-static-envelope-floor.md) |
 | ADR-0070 | [A fact survives a call that takes its variable by value](0070-by-value-call-argument-survival.md) |
 | ADR-0071 | [The acceptance relation learns the array vocabulary](0071-array-vocabulary-subsumption.md) |
+| ADR-0072 | [The acceptance relation's third face: a shape fact judged against a contract](0072-shape-fact-acceptance.md) |
