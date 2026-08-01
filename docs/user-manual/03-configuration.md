@@ -1,0 +1,280 @@
+# Configuration
+
+`steins.toml` is the one config file Steins reads. Every key in it is
+optional — an absent file, or an absent key inside a present file, leaves
+the built-in default in force (ADR-0023). This chapter is the key-by-key
+reference: what each key means, what it defaults to, and how it interacts
+with the equivalent command-line flag. For the *subcommands* and their
+flags, see [the CLI reference](02-cli-reference.md); for what a profile
+stage actually surfaces, see
+[profiles, baseline, and suppression](05-profiles-and-baseline.md).
+
+## A complete example
+
+Every section below appears here at least once, each with a one-line
+comment. This file parses clean — `steins doctor` reports it as found and
+resolved, `steins check` reports no config warnings:
+
+```toml
+# steins.toml lives at the repo root; every key below is optional, and an
+# absent file leaves every built-in default in force.
+
+[check]
+# The default profile for a bare `steins check` — this repo's declared
+# strictness stage. `--profile <name>` on the command line overrides this.
+profile = "migration"
+
+# A user-defined profile: `extends` a built-in or another user profile,
+# then refines it with ADR-0022 prefix id-arrays.
+[profile.migration]
+extends = "contracts"
+warn    = ["throw.*"]
+
+[runtime]
+# What a proven E_WARNING does at runtime (ADR-0049 §7). "abort" (the
+# default) treats it as a proven break; "null" declares the app tolerates
+# it, and the corresponding proof-layer findings stay silent.
+warning-handler = "abort"
+
+[plugins]
+# Explicit plugin allowlist, by Composer package name (ADR-0039/0068).
+# Replaces installed.json discovery outright; allow = [] loads nothing.
+allow = []
+
+[transform.vouch]
+# Dynamic-code sites a human has reviewed and vouched for (ADR-0046 §2).
+# Read only by `steins transform`.
+sites = []
+
+[transform.partitions]
+# Path sets that may reference any partition without triggering a
+# cross-partition finding (ADR-0047 §1). Read only by `steins transform`.
+observers = ["tests/**"]
+
+[transform.partitions.sets]
+core = ["src/**"]
+```
+
+Running `check` against a project with this file and one undeclared
+`throw` shows the `migration` profile in force — `throw.*` demoted to
+`warning`, exit `0`:
+
+```
+$ steins doctor .
+Config + active surface
+  steins.toml: found
+  active profile: `migration` (from [check] profile)
+  surface: layers [contract, mechanics, proof], 25 checked id(s)
+
+$ steins check src/
+src/App.php:11:9: warning[throw.undeclared]: RuntimeException can escape Svc::run() but is not declared (@throws LogicException) — proven escape
+$ echo $?
+0
+```
+
+## Discovery
+
+`check` and `doctor` read exactly one path: `steins.toml`, resolved
+relative to the **current working directory** — literally, no walk-up of
+parent directories and no search for a project root. Run either command
+from a subdirectory and a `steins.toml` sitting one level up is invisible;
+it takes the built-in defaults instead of erroring — silently, because a
+missing file is a legitimate zero-config state (ADR-0020). Neither
+subcommand accepts a `--config` flag — there is no way to point either one
+at a file elsewhere.
+
+`transform` accepts `--config <path>` to read from somewhere other than
+`./steins.toml`; omitting the flag falls back to the same
+current-working-directory `./steins.toml` the other subcommands use.
+`annotate` and `effect-diff` read only the `[plugins]` table (below), and
+do so leniently — a malformed file is treated the same as no file, with no
+warning printed.
+
+> **If you know PHPStan or Psalm:** both tools search upward for
+> `phpstan.neon`/`psalm.xml` from the analyzed path. Steins does not — put
+> `steins.toml` where you run the command from, normally the repo root
+> that also holds `composer.json`, though nothing enforces that the two
+> coincide.
+
+**Parsing is strict where a wrong default is dangerous, lenient
+elsewhere.** `check` and `doctor` parse the whole file up front, before any
+analysis runs, and a malformed file is a **hard config error**: exit `2`
+for `check`, and for `doctor` a reported *configuration contradiction*
+(exit `1`, the report still renders on the built-in `default` surface).
+This includes an unrecognized key inside `[runtime]` or `[plugins]` — both
+reject unknown fields on purpose, because a silently-ignored typo there
+(`warning-hadler`, say) would leave the safe default in force while you
+believed you had overridden it. `transform`'s `[transform.vouch]` and
+`[transform.partitions]` readers are lenient instead: a parse error there
+prints a warning and the run proceeds with no vouches or no partitions,
+because a config typo should not stop a transform from running.
+
+An unrecognized *top-level table*, and an unrecognized key inside `[check]`
+or `[profile.<name>]`, are silently ignored everywhere — they carry no
+`deny_unknown_fields` guard. A misspelled `[chekc]` produces no warning and
+no error; it never takes effect. `steins doctor` is the fast way to
+confirm a section landed: its "Config + active surface" section names the
+active profile and its provenance.
+
+## Key-by-key reference
+
+### `[check]`
+
+Repo defaults for `steins check`.
+
+| Key | Type | Default | Effect |
+| --- | --- | --- | --- |
+| `profile` | string | unset (built-in `default`) | The profile name to run when `--profile` is not given on the command line. |
+
+### `[profile.<name>]`
+
+Zero or more named tables, each defining one user profile (ADR-0050 §5).
+The table name is the profile name; `default`, `contracts`,
+`throws-direct`, and `strict` are built in and cannot be redefined, and
+`boundary` is reserved (see below) — defining or selecting either is a
+config error.
+
+| Key | Type | Default | Effect |
+| --- | --- | --- | --- |
+| `extends` | string | `"default"` | The base profile this one refines: a built-in name or another `[profile.<name>]`. `extends` chains that cycle are a config error. |
+| `enable` | array of string | `[]` | ADR-0022 prefix id-patterns (`"throw.*"`, or a full id) forced onto the surface beyond what `extends` already admits. |
+| `disable` | array of string | `[]` | Prefix id-patterns removed from the surface. Mechanics-layer ids (`suppress.*`, `effect.unknown-label`) ignore this — they print on every profile, unconditionally. |
+| `warn` | array of string | `[]` | Prefix id-patterns demoted from `fail` to `warn`: still printed, but the run exits `0` on those findings alone. |
+
+A pattern that names no registered id (`not.an.id`) is a config error, as
+is a facet-shaped pattern (`throw.undeclared@direct`) — v1 reaches the
+`origin` facet only through the built-in `throws-direct` profile, not
+through a user one.
+
+### `[runtime]`
+
+Boot-truth facts the checker cannot observe from source (ADR-0037 §2).
+This section rejects unrecognized keys outright.
+
+| Key | Type | Default | Effect |
+| --- | --- | --- | --- |
+| `warning-handler` | `"abort"` \| `"null"` | `"abort"` | What a proven `E_WARNING` does at runtime. `"abort"` treats it as a proven break, so the corresponding proof-layer findings fire. `"null"` declares the app tolerates the warning; those findings go silent. An unrecognized *value* (not an unrecognized key) warns and falls back to `"abort"` rather than erroring. |
+
+There is no CLI flag for `warning-handler` — it is config-only.
+
+### `[plugins]`
+
+The explicit plugin listing (ADR-0039 discovery, ADR-0068 §2 ownership).
+This section rejects unrecognized keys outright.
+
+| Key | Type | Default | Effect |
+| --- | --- | --- | --- |
+| `allow` | array of string | unset (installed.json discovery governs) | Composer package names to load as plugins, **replacing** `installed.json` discovery outright. `allow = []` is meaningful — it loads no plugins — distinct from omitting the key, which leaves discovery in charge. Listing a plugin also vouches for its identity for label-registration purposes. |
+
+Every subcommand reads `[plugins]`, and does so leniently: a malformed
+`steins.toml` is treated as no plugin config (discovery governs) rather
+than aborting the command, even for `check` and `doctor`, which are
+otherwise strict about the rest of the file.
+
+### `[transform.vouch]`
+
+Dynamic-code sites vouched for by a human (ADR-0046 §2). Read only by
+`steins transform`.
+
+| Key | Type | Default | Effect |
+| --- | --- | --- | --- |
+| `sites` | array of string | `[]` | `"file:line"` entries marking a dynamic-code site (`eval`, a non-literal `include`, a runtime-name `class_alias`) as reviewed. A malformed entry — no colon, or a non-numeric line — is skipped with a warning; it does not fail the run. |
+
+### `[transform.partitions]`
+
+Declared project regions for cross-partition precondition checking
+(ADR-0047 §7). Read only by `steins transform`. With this section absent,
+the whole project is one region and transform behavior is unchanged.
+
+| Key | Type | Default | Effect |
+| --- | --- | --- | --- |
+| `observers` | array of string | `[]` | Path globs (tests, dev-scripts) allowed to reference any partition without a cross-partition finding. |
+| `sets` | table of string → array of string (as `[transform.partitions.sets]`) | `{}` | Partition name → path-glob list. Partitions must be pairwise disjoint; two sets whose globs can match the same path is a config error (exit `2`). |
+
+## Designed, not yet shipped
+
+ADR-0023 also specifies `[paths.sets]` (named path sets, referenced as
+`@name`) and `[[policy]]` (scoped enable/disable rules matched by path set
+and by semantic `where` matchers) as the third suppression channel,
+alongside the baseline and inline `@steins-ignore`. Neither exists in the
+binary yet — `[[policy]]` is tracked as issue #15 and ships as a no-op
+pipeline stage. Writing either table into `steins.toml` today parses
+without error and does precisely nothing, for the same reason a misspelled
+`[check]` does nothing: neither is a field on any config struct the binary
+deserializes, so both fall through the same silent top-level-table
+tolerance described above. Do not rely on this working — it is a gap
+that closes, not a feature.
+
+## Precedence: CLI flag versus config key
+
+Only one key has a same-purpose CLI counterpart: `[check] profile` and
+`--profile <name>` on `steins check` both select the active profile. The
+flag wins. Verified:
+
+```
+$ steins check src/                 # steins.toml sets [check] profile = "migration"
+src/App.php:11:9: warning[throw.undeclared]: … — proven escape
+$ echo $?
+0
+$ steins check --profile default src/
+$ echo $?
+0
+```
+
+The second run's `--profile default` overrides the config's
+`profile = "migration"` outright — the surface it resolves is plain
+`default` (proof + mechanics only), which is why the `throw.undeclared`
+finding above disappears entirely rather than merely changing level.
+Absent both a flag and a `[check] profile` key, the active profile is the
+built-in `default`. `steins doctor` has no `--profile` flag of its own, so
+its "active profile" line reports only `[check] profile` or
+`built-in default` as the provenance — it names what the config declared,
+not what a flag would have overridden.
+
+Every other key is config-only: `[runtime] warning-handler`,
+`[plugins] allow`, `[transform.vouch]`, and `[transform.partitions]` have
+no flag equivalent. `[profile.<name>]` *definitions* are config-only too —
+selecting one is `--profile <name>`, but there is no way to define a
+profile's `enable`/`disable`/`warn` arrays from the command line. The
+baseline file path is the mirror case: `--baseline <path>` is a flag with
+no config-key equivalent; `steins.toml` carries no baseline setting at
+all, so an unqualified `check --set-baseline` and a bare `doctor` both
+fall back to the hardcoded conventional filename. See
+[profiles, baseline, and suppression](05-profiles-and-baseline.md) for
+that filename and the baseline workflow.
+
+## What is deliberately not configurable
+
+Three things `steins.toml` will never grow, on purpose:
+
+- **No per-diagnostic on/off switch for a mechanics id.** `suppress.*` and
+  `effect.unknown-label` print on every profile regardless of `disable`,
+  because their whole job is to catch a suppression channel rotting —
+  disabling the watchdog defeats it.
+- **No ad-hoc `--enable id,id` flag.** Every surface a project runs under
+  CI is a named profile in `steins.toml`, reviewable in a diff and stable
+  across runs; an unnamed command-line surface is neither.
+- **`boundary` is a reserved profile name** (ADR-0042). Selecting it with
+  `--profile boundary` or `[check] profile = "boundary"`, or defining
+  `[profile.boundary]`, is a config error until the boundary-profile
+  design lands — verified:
+
+  ```
+  $ steins check --profile boundary src/
+  steins: profile `boundary` is a reserved name (deferred to its ADR); it cannot be selected or extended yet
+  $ echo $?
+  2
+  ```
+
+The rationale for all three lives with the profile and surface semantics
+they protect — see
+[profiles, baseline, and suppression](05-profiles-and-baseline.md).
+
+## Where to go next
+
+- **Every flag, every subcommand:** [the CLI reference](02-cli-reference.md).
+- **What a profile actually surfaces:**
+  [profiles, baseline, and suppression](05-profiles-and-baseline.md) — the
+  named stages, the ratchet workflow, exit-level semantics, and
+  `@steins-ignore`.
+- **Wiring this into CI:** [CI integration](06-ci.md).

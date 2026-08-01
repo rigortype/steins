@@ -222,7 +222,7 @@ path M3 promises. They drift as features land. Reconcile against the **sealed
 changelog** and the **actual binary**, and fold fixes into the release branch so
 they are part of the reviewed diff.
 
-- **CLI surface** — [`docs/guide/quickstart.md`](../../../docs/guide/quickstart.md)
+- **CLI surface** — [`docs/user-manual/01-installation-and-quickstart.md`](../../../docs/user-manual/01-installation-and-quickstart.md)
   reproduces the usage block verbatim. Check it against what the binary prints
   when run with no arguments (`./target/release/steins`), not against memory. Every
   subcommand and flag it exposes should appear, and none that it does not.

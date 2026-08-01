@@ -1,0 +1,41 @@
+# Steins — GitHub Actions workflow (with inline annotations).
+#
+# Copy to .github/workflows/steins.yml. Same install as github-actions.yml,
+# but the check step emits `--format json` and a jq recipe turns each
+# finding into a GitHub Actions workflow command
+# (`::error file=...,line=...,col=...,title=...::message`), which the
+# runner renders as an inline annotation on the diff. This is the interim
+# annotation path: Steins has no `--format github` yet (SARIF and a native
+# GitHub format are designed and deferred, ADR-0054 §5) — see
+# docs/user-manual/06-ci.md for the recipe explained line by line and why
+# `set -o pipefail` is load-bearing here.
+name: steins
+
+on: [push, pull_request]
+
+jobs:
+  steins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          coverage: none
+
+      - run: composer require --dev typedduck/steins
+
+      - name: steins check (annotated)
+        run: |
+          set -o pipefail
+          vendor/bin/steins check --format json . | tee steins.json | jq -r '
+            .findings[]
+            | (if .level == "fail" then "error" else "warning" end) as $cmd
+            | "::" + $cmd
+              + " file=" + .path
+              + ",line=" + (.line | tostring)
+              + ",col=" + (.column | tostring)
+              + ",title=" + .id
+              + "::" + .message
+          '
