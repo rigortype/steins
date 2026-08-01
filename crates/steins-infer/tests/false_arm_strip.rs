@@ -251,6 +251,33 @@ fn an_int_literal_exclusion_deletes_its_arm() {
     assert_eq!(else_branch("1|2|3", "$x === 2"), "dumped type: 1|3 (asserted)");
     // A literal not in the lane deletes nothing.
     assert_eq!(then_branch("1|2|3", "$x !== 7"), "dumped type: 1|2|3 (asserted)");
+    // A run of literals is NOT absorbed into an interval (issue #90 merges a
+    // literal only into an interval it abuts, never literal-to-literal). That
+    // refusal is what keeps this whole family narrowable: `int<1, 3>` has no arm
+    // for `!== 2` to delete, so collapsing `1|2|3` would have cost exactly the
+    // discrimination these arms exist to carry.
+}
+
+#[test]
+fn subtracting_an_endpoint_of_an_interval_arm_does_not_narrow_it() {
+    // The known cost of the issue #90 absorption, pinned so it stays visible.
+    // `strpos`' row denotes `int<0, max>|false`, and one arm cannot be partly
+    // deleted: `subtrahend_covers(Value(0), int<0, max>)` is `Maybe`, so the arm
+    // survives whole where the pre-absorption `positive-int|0` would have lost
+    // its `0` arm and left `positive-int`.
+    //
+    // Sound either way — the survivor is a superset, never a false positive — and
+    // the fix is a capability this slice does not have: subtracting a boundary
+    // point FROM an interval (`int<0, max>` less `0` is `int<1, max>`), which
+    // PHPStan does do. That is interval arithmetic in `subtract`, not a spelling
+    // question, so it wants its own measured slice.
+    let src = "<?php
+function f(string $h, string $n): void {
+    $pos = strpos($h, $n);
+    if ($pos !== 0) { \\PHPStan\\dumpType($pos); }
+}
+";
+    assert_eq!(one_type(src), "dumped type: int<0, max>|false (asserted)");
 }
 
 #[test]
