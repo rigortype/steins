@@ -55,6 +55,7 @@ use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::UseItems;
 use mago_syntax::cst::Variable;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
@@ -2277,6 +2278,15 @@ pub struct SourceTree {
     parse_errors: Vec<ParseError>,
     /// The comment trivia in the file, in source order (ADR-0023 inline ignores).
     comments: Vec<Comment>,
+    /// Every `/** … */` docblock trivium in the file, in source order (full file
+    /// span + exact source text) — the statement-association channel (ADR-0073,
+    /// issue #93), read by [`Self::stmt_docblock`].
+    doc_blocks: Vec<(Span, String)>,
+    /// Span starts of the docblocks the declaration lowering adopted
+    /// (function/method/property/class-like), sorted and deduplicated.
+    /// [`Self::stmt_docblock`] refuses these: a docblock a declaration owns is
+    /// never also statement-adopted (ADR-0073 exclusivity).
+    claimed_docs: Vec<u32>,
     /// The namespace contexts of the file; index 0 is always the global context.
     contexts: Vec<NsCtx>,
     /// One `(start, end, ctx_index)` per namespace declaration in the file, so a
@@ -2376,6 +2386,14 @@ impl SourceTree {
             .map(|e| ParseError { message: e.to_string(), span: to_span(e.span()) })
             .collect();
 
+        // Statement-level docblock channel (ADR-0073, issue #93): keep every
+        // docblock with its span, plus the set the declaration lowering above
+        // already claimed, so `stmt_docblock` can associate a leading docblock
+        // to a statement without ever double-adopting a declaration's.
+        let DocIndex { blocks: doc_blocks, claimed, .. } = docs;
+        let mut claimed_docs: Vec<u32> = claimed.into_inner().into_iter().collect();
+        claimed_docs.sort_unstable();
+
         Self {
             strict_types: lowered.strict_types,
             functions: lowered.functions,
@@ -2391,6 +2409,8 @@ impl SourceTree {
             hard_class_refs: lowered.hard_class_refs,
             parse_errors,
             comments,
+            doc_blocks,
+            claimed_docs,
             contexts,
             regions,
             line_starts: line_starts(source),
@@ -2537,6 +2557,35 @@ impl SourceTree {
         let line_start = self.line_starts.get(line_idx).copied().unwrap_or(0) as usize;
         let end = (offset as usize).min(self.text.len());
         self.text.get(line_start..end).is_none_or(|s| s.trim().is_empty())
+    }
+
+    /// The docblock the statement starting at `stmt_start` adopts, as
+    /// `(text, span)` — the `/** … */` trivium directly above it (ADR-0073,
+    /// issue #93). Association is the declaration discipline (ADR-0029: nothing
+    /// but whitespace between the block's end and `stmt_start`; any intervening
+    /// code, `//`/`#` comment, or other docblock refuses) plus two
+    /// statement-side tightenings (ADR-0073 placement rule): the gap may
+    /// contain **at most one line break**, so a docblock separated by a blank
+    /// line — a file header, a detached note — associates with nothing; and the
+    /// docblock must **lead its line**, so a block trailing another statement's
+    /// line never associates forward (the line-leading inline form
+    /// `/** … */ $x = 1;` still adopts — leading, just written inline).
+    ///
+    /// A docblock a declaration adopted (function/method/property/class-like)
+    /// is never returned here, even though a `function` or `class` declaration
+    /// is itself a statement: one docblock, one owner. `text` is the exact
+    /// source substring at `span`, so a docblock-relative tag offset maps into
+    /// the file by adding `span.start`. This is a placement seam only — no tag
+    /// inside the block is recognized here.
+    #[must_use]
+    pub fn stmt_docblock(&self, stmt_start: u32) -> Option<(&str, Span)> {
+        let (span, text) = whitespace_adjacent_block(&self.text, &self.doc_blocks, stmt_start)?;
+        let gap = self.text.get(span.end as usize..stmt_start as usize)?;
+        let directly_above = gap.bytes().filter(|&b| b == b'\n').count() <= 1;
+        (directly_above
+            && self.is_line_leading(span.start)
+            && self.claimed_docs.binary_search(&span.start).is_err())
+            .then_some((text.as_str(), span))
     }
 
     /// Resolve a byte offset to a 1-based line/column (column counted in
@@ -3466,6 +3515,15 @@ struct DocIndex<'a> {
     /// `(span, text)` of each docblock, in source order. `span` is the full file
     /// span of the `/** … */` trivium; `text` is its exact source substring.
     blocks: Vec<(Span, String)>,
+    /// The span starts of the blocks a declaration query adopted (RefCell — the
+    /// lowering walk shares the index immutably). Every [`Self::preceding_block`]
+    /// hit *is* a declaration claiming its docblock, so recording the claim here,
+    /// at the moment of adoption, is exact; re-deriving it from the lowered
+    /// declarations would not be (their stored spans are name-identifier spans,
+    /// not the head offsets the adoption keyed on). The statement channel
+    /// (ADR-0073, issue #93) refuses exactly these blocks — one docblock, one
+    /// owner — via [`SourceTree::stmt_docblock`].
+    claimed: RefCell<HashSet<u32>>,
 }
 
 impl<'a> DocIndex<'a> {
@@ -3476,21 +3534,16 @@ impl<'a> DocIndex<'a> {
             .filter(|t| matches!(t.kind, TriviaKind::DocBlockComment))
             .map(|t| (to_span(t.span), bytes_to_string(t.value)))
             .collect();
-        Self { source, blocks }
+        Self { source, blocks, claimed: RefCell::new(HashSet::new()) }
     }
 
     /// The docblock immediately preceding `decl_start` (only whitespace between
-    /// its end and `decl_start`), if any — as `(span, text)`.
+    /// its end and `decl_start`), if any — as `(span, text)`. A hit is recorded
+    /// in [`Self::claimed`]: every caller is a declaration adopting its docblock.
     fn preceding_block(&self, decl_start: u32) -> Option<(Span, &String)> {
-        let mut best: Option<(Span, &String)> = None;
-        for (span, text) in &self.blocks {
-            if span.end <= decl_start && best.is_none_or(|(bs, _)| span.end > bs.end) {
-                best = Some((*span, text));
-            }
-        }
-        let (span, text) = best?;
-        let gap = self.source.get(span.end as usize..decl_start as usize)?;
-        gap.chars().all(char::is_whitespace).then_some((span, text))
+        let (span, text) = whitespace_adjacent_block(self.source, &self.blocks, decl_start)?;
+        self.claimed.borrow_mut().insert(span.start);
+        Some((span, text))
     }
 
     /// The text of the docblock immediately preceding `decl_start`, if any.
@@ -3502,6 +3555,30 @@ impl<'a> DocIndex<'a> {
     fn preceding_span(&self, decl_start: u32) -> Option<Span> {
         self.preceding_block(decl_start).map(|(span, _)| span)
     }
+}
+
+/// The docblock in `blocks` immediately preceding `target_start`: the nearest
+/// block ending at or before it, adopted iff **only whitespace** separates its
+/// end from `target_start`. This is the single association predicate behind
+/// both the declaration channel ([`DocIndex::preceding_block`], ADR-0029) and
+/// the statement channel ([`SourceTree::stmt_docblock`], ADR-0073): any
+/// intervening non-whitespace — code, a `//` or `#` comment, another
+/// docblock — breaks adoption. A wrong association would be a wrong contract
+/// (a false-positive vector), so the rule is deliberately strict.
+fn whitespace_adjacent_block<'b>(
+    source: &str,
+    blocks: &'b [(Span, String)],
+    target_start: u32,
+) -> Option<(Span, &'b String)> {
+    let mut best: Option<(Span, &'b String)> = None;
+    for (span, text) in blocks {
+        if span.end <= target_start && best.is_none_or(|(bs, _)| span.end > bs.end) {
+            best = Some((*span, text));
+        }
+    }
+    let (span, text) = best?;
+    let gap = source.get(span.end as usize..target_start as usize)?;
+    gap.chars().all(char::is_whitespace).then_some((span, text))
 }
 
 /// The canonical, case-folded identity of the `Steins\Pure` class — leading
