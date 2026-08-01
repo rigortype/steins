@@ -10294,8 +10294,8 @@ fn collect_instanceof<'a>(
 /// 1. Each `instanceof T` guard on this branch subtracts from the variable's
 ///    **contract lane** — the negative branch deletes arm `M` iff `is_a(M, T) = Yes`
 ///    (is-a inherited), the positive branch deletes `M` only when `M` is final/enum
-///    and `is_a(M, T) = No` — through steins-contract's single deletion judgment
-///    ([`normalize::subtrahend_covers`]), preserving each surviving arm's stratum.
+///    and `is_a(M, T) = No` — through steins-contract's single per-arm judgment
+///    ([`normalize::subtract_arm`]), preserving each surviving arm's stratum.
 ///    An emptied lane drops to no-fact (never a death signal, §2). The `oracle`
 ///    threads the A11 demotion into exactly these arm-deletion queries.
 /// 2. The same guard binds the **`Member`** fact at `Verified` (the runtime test
@@ -10309,7 +10309,10 @@ fn collect_instanceof<'a>(
 ///    and it is general over literals — an `!== 2` deletes a `2` arm, an `!== 'GET'`
 ///    deletes a `'GET'` arm. The interior-point rule is exactly what keeps it
 ///    sound: `false` does NOT cover a general `bool` arm (a `bool` may still be
-///    `true`), so a `bool` arm survives `!== false`.
+///    `true`), so a `bool` arm survives `!== false`. The one **partial** deletion
+///    is the interval endpoint: `!== 0` clips an `int<0, max>` arm to
+///    `int<1, max>` ([`normalize::ArmFate::Narrows`]), while an interior `!== 5`
+///    leaves it whole — the gap has no arm spelling.
 ///
 /// Two neighbouring narrowings are deliberately NOT here:
 ///
@@ -10372,8 +10375,10 @@ fn apply_class_narrowing(w: &WalkCx, cond: &CondExpr, then: bool, store: &mut St
 }
 
 /// Subtract `sub` from `var`'s contract lane in `store`, arm-wise, preserving each
-/// surviving arm's stratum (the single deletion judgment [`normalize::subtrahend_covers`]
-/// applied to the stratified lane); an emptied lane drops to no-fact.
+/// surviving arm's stratum (the single per-arm judgment [`normalize::subtract_arm`]
+/// applied to the stratified lane — a partial deletion, an interval arm clipped at
+/// its endpoint, keeps the stratum of the arm it shrinks); an emptied lane drops
+/// to no-fact.
 fn subtract_contract_lane(
     store: &mut Store,
     var: &str,
@@ -10381,7 +10386,14 @@ fn subtract_contract_lane(
     oracle: &dyn normalize::IsaOracle,
 ) {
     if let Some(arms) = store.contract.get_mut(var) {
-        arms.retain(|a| !normalize::subtrahend_covers(sub, &a.ty, oracle).is_yes());
+        arms.retain_mut(|a| match normalize::subtract_arm(sub, &a.ty, oracle) {
+            normalize::ArmFate::Survives => true,
+            normalize::ArmFate::Dies => false,
+            normalize::ArmFate::Narrows(narrowed) => {
+                a.ty = narrowed;
+                true
+            }
+        });
         if arms.is_empty() {
             store.contract.remove(var);
         }

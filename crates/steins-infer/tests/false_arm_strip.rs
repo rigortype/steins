@@ -14,7 +14,10 @@
 //! it with `Yes`; `Maybe` keeps it.** That single rule is simultaneously the reason
 //! `false` deletes a `false` arm and the reason it does NOT delete a general `bool`
 //! arm — `bool` has an interior point (`true`) the guard says nothing about. Both
-//! directions are asserted below, because only the pair is the rule.
+//! directions are asserted below, because only the pair is the rule. The one
+//! partial deletion layered on it (the issue #90 follow-up) is pinned here too:
+//! an `int<lo, hi>` arm minus one of its own **endpoints** shrinks by one, while
+//! an interior point keeps it whole — a gap has no arm spelling.
 //!
 //! Two deliberate non-changes are pinned here as well, so a later reader can tell a
 //! refusal from an oversight:
@@ -259,25 +262,58 @@ fn an_int_literal_exclusion_deletes_its_arm() {
 }
 
 #[test]
-fn subtracting_an_endpoint_of_an_interval_arm_does_not_narrow_it() {
-    // The known cost of the issue #90 absorption, pinned so it stays visible.
-    // `strpos`' row denotes `int<0, max>|false`, and one arm cannot be partly
-    // deleted: `subtrahend_covers(Value(0), int<0, max>)` is `Maybe`, so the arm
-    // survives whole where the pre-absorption `positive-int|0` would have lost
-    // its `0` arm and left `positive-int`.
-    //
-    // Sound either way — the survivor is a superset, never a false positive — and
-    // the fix is a capability this slice does not have: subtracting a boundary
-    // point FROM an interval (`int<0, max>` less `0` is `int<1, max>`), which
-    // PHPStan does do. That is interval arithmetic in `subtract`, not a spelling
-    // question, so it wants its own measured slice.
+fn subtracting_an_endpoint_of_an_interval_arm_clips_it() {
+    // The measured slice the issue #90 pin asked for: an interval arm CAN now be
+    // partly deleted, exactly at its endpoints. `strpos`' row denotes
+    // `int<0, max>|false`, and `!== 0` clips the interval's own lower endpoint:
+    // `subtract_arm(Value(0), int<0, max>)` narrows the arm to `int<1, max>` —
+    // what the pre-absorption `positive-int|0` lost by whole-arm deletion, and
+    // what PHPStan spells on this guard. The `false` arm is disjoint from `0`
+    // and survives untouched.
     let src = "<?php
 function f(string $h, string $n): void {
     $pos = strpos($h, $n);
     if ($pos !== 0) { \\PHPStan\\dumpType($pos); }
 }
 ";
+    assert_eq!(one_type(src), "dumped type: int<1, max>|false (asserted)");
+}
+
+#[test]
+fn subtracting_an_interior_point_of_an_interval_arm_keeps_it_whole() {
+    // The refusal that bounds the clip: an interior point would split the
+    // interval into two arms — a gap the arm vocabulary has no way to spell
+    // back — so the honest answer is the unchanged arm (the interior-point
+    // discipline ADR-0052 §2 states for the value lane, one carrier up).
+    let src = "<?php
+function f(string $h, string $n): void {
+    $pos = strpos($h, $n);
+    if ($pos !== 5) { \\PHPStan\\dumpType($pos); }
+}
+";
     assert_eq!(one_type(src), "dumped type: int<0, max>|false (asserted)");
+}
+
+#[test]
+fn a_hand_written_interval_clips_at_both_endpoints_and_only_there() {
+    // The same rule over a bounded, hand-declared `int<lo, hi>`: each endpoint
+    // clips by one, the interior refuses.
+    assert_eq!(then_branch("int<0, 10>", "$x !== 0"), "dumped type: int<1, 10> (asserted)");
+    assert_eq!(then_branch("int<0, 10>", "$x !== 10"), "dumped type: int<0, 9> (asserted)");
+    assert_eq!(then_branch("int<0, 10>", "$x !== 5"), "dumped type: int<0, 10> (asserted)");
+    // A point outside the interval deletes nothing and clips nothing.
+    assert_eq!(then_branch("int<0, 10>", "$x !== 42"), "dumped type: int<0, 10> (asserted)");
+}
+
+#[test]
+fn repeated_endpoint_clips_walk_the_interval_down_to_a_literal() {
+    // Two clips compose: `int<0, 2>` less `0` is `int<1, 2>`, and less `1` is
+    // the point — which collapses to the literal `2`, the canonical arm the #90
+    // absorption vocabulary would rebuild an interval from.
+    assert_eq!(
+        then_branch("int<0, 2>", "$x !== 0 && $x !== 1"),
+        "dumped type: 2 (asserted)"
+    );
 }
 
 #[test]
