@@ -231,6 +231,9 @@ fn run_check(args: &[String]) -> ExitCode {
         errln!("steins: no paths given");
         return ExitCode::from(2);
     }
+    if let Err(code) = reject_missing_paths(&paths) {
+        return code;
+    }
 
     let mut files = Vec::new();
     for p in &paths {
@@ -609,6 +612,9 @@ fn run_transform(args: &[String]) -> ExitCode {
     if paths.is_empty() {
         errln!("steins: no paths given");
         return ExitCode::from(2);
+    }
+    if let Err(code) = reject_missing_paths(&paths) {
+        return code;
     }
 
     // Load the vouching valve (ADR-0046 §2): `steins.toml [transform.vouch]` from
@@ -1399,6 +1405,9 @@ fn run_effect_diff(args: &[String]) -> ExitCode {
         errln!("steins: no paths given");
         return ExitCode::from(2);
     }
+    if let Err(code) = reject_missing_paths(&paths) {
+        return code;
+    }
 
     let mut files = Vec::new();
     for p in &paths {
@@ -1668,6 +1677,29 @@ fn print_json(
         Ok(s) => outln!("{s}"),
         Err(e) => errln!("steins: failed to serialize json: {e}"),
     }
+}
+
+/// Reject explicitly-passed paths that name nothing (ADR-0050 §7 amendment).
+///
+/// A nonexistent path argument is argv, not analysis: it fell through
+/// `collect_php_files` silently, so `steins check /typo` reported an empty
+/// findings set and exit 0 — a false all-clear indistinguishable from a clean
+/// run, which is how a renamed directory keeps a CI job green. Every missing
+/// path is named in one message so a multi-path invocation reports all of its
+/// typos at once. Callers must run this BEFORE emitting anything, so a
+/// `--format json` run produces no document rather than a well-formed empty one.
+///
+/// Existence is the whole discriminator: a path that exists and yields zero
+/// `.php` files is a real location with nothing to say, and stays exit 0.
+fn reject_missing_paths(paths: &[String]) -> Result<(), ExitCode> {
+    let missing: Vec<&String> = paths.iter().filter(|p| !Path::new(p.as_str()).exists()).collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    for p in &missing {
+        errln!("steins: path does not exist: {p}");
+    }
+    Err(ExitCode::from(2))
 }
 
 /// Recursively collect `.php` files under `path` (or `path` itself if it is a

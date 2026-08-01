@@ -380,3 +380,65 @@ fn fold_strval_flagged_in_strict_silent_in_coercive() {
     assert_eq!(coercive.code, 0, "\"5\" coerces to int in coercive mode, got:\n{}", coercive.stdout);
     assert!(coercive.stdout.is_empty());
 }
+
+/// ADR-0050 §7 amendment: an explicitly-passed path naming nothing is a usage
+/// error (exit 2), not an empty clean report. The regression it closes is a CI
+/// job staying green after a directory rename.
+#[test]
+fn nonexistent_path_is_a_usage_error() {
+    let r = run(&["check", "/definitely-not-a-real-path-9x8"]);
+    assert_eq!(r.code, 2, "nonexistent path is exit 2, got stdout:\n{}", r.stdout);
+    assert!(
+        r.stderr.contains("path does not exist: /definitely-not-a-real-path-9x8"),
+        "the missing path is named, got:\n{}",
+        r.stderr
+    );
+    assert!(r.stdout.is_empty(), "no report emitted, got:\n{}", r.stdout);
+
+    // §7 amendment point 2: --format json emits NO document — a consumer must
+    // never see a well-formed empty findings set for a path that names nothing.
+    let j = run(&["check", "--format", "json", "/definitely-not-a-real-path-9x8"]);
+    assert_eq!(j.code, 2);
+    assert!(j.stdout.is_empty(), "json run emitted a document:\n{}", j.stdout);
+
+    // Every command that walks a path set shares the contract; annotate already did.
+    let t = run(&["transform", "phpdoc-to-native", "/definitely-not-a-real-path-9x8"]);
+    assert_eq!(t.code, 2, "transform too, got stdout:\n{}", t.stdout);
+    assert!(t.stderr.contains("path does not exist"), "got:\n{}", t.stderr);
+
+    let e = run(&["effect-diff", "/definitely-not-a-real-path-9x8"]);
+    assert_eq!(e.code, 2, "effect-diff too, got stdout:\n{}", e.stdout);
+    assert!(e.stderr.contains("path does not exist"), "got:\n{}", e.stderr);
+}
+
+/// Every missing path is named in one message, so a multi-path invocation
+/// reports all of its typos at once rather than one per re-run. A real path
+/// alongside them does not rescue the run.
+#[test]
+fn all_missing_paths_are_named_at_once() {
+    let real = fixture("silent.php");
+    let r = run(&["check", "/no-such-a-1", real.to_str().unwrap(), "/no-such-b-2"]);
+    assert_eq!(r.code, 2, "one bad path fails the run, got stdout:\n{}", r.stdout);
+    assert!(r.stderr.contains("/no-such-a-1"), "got:\n{}", r.stderr);
+    assert!(r.stderr.contains("/no-such-b-2"), "second typo also named, got:\n{}", r.stderr);
+}
+
+/// §7 amendment point 3: existence is the discriminator, emptiness is not. A
+/// directory that exists and holds no `.php` files is a real location the run
+/// genuinely had nothing to say about — still exit 0, still an empty report.
+#[test]
+fn existing_but_empty_dir_stays_clean() {
+    let dir = std::env::temp_dir().join("steins-empty-dir-test");
+    std::fs::create_dir_all(&dir).expect("create empty dir");
+
+    let r = run(&["check", dir.to_str().unwrap()]);
+    assert_eq!(r.code, 0, "empty dir is a no-op, got stderr:\n{}", r.stderr);
+    assert!(r.stdout.is_empty(), "got:\n{}", r.stdout);
+
+    let j = run(&["check", "--format", "json", dir.to_str().unwrap()]);
+    assert_eq!(j.code, 0);
+    let v: serde_json::Value = serde_json::from_str(&j.stdout).expect("json object");
+    assert_eq!(v["findings"].as_array().expect("findings array").len(), 0);
+
+    std::fs::remove_dir(&dir).ok();
+}
