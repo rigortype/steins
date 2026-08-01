@@ -2,7 +2,7 @@
 """Extract class/interface/enum declarations with extends/implements from php-src stubs."""
 import os, re, sys, glob
 
-ROOT = "/Users/megurine/local/src/php-src"
+ROOT = os.environ.get("PHP_SRC_ROOT", os.path.expanduser("~/local/src/php-src"))
 stubs = sorted(glob.glob(os.path.join(ROOT, "**", "*.stub.php"), recursive=True))
 
 # Match a type declaration keyword sequence. We scan the file, and when we find a
