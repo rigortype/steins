@@ -31,6 +31,12 @@ Entries accumulate under this heading as work lands; the `steins-release-prep`
 skill seals them into a version section at release time, reconstructing from
 `git log` if the discipline slipped.
 
+## [0.1.3] - 2026-08-02
+
+Two investments pay off this release. Effects grow real teeth — PDO calls, project-interface envelopes, and Composer-plugin declarations all now contribute to the `effect.*` family, and `steins effect-diff` gives CI a channel of its own for tracking them independently of the diagnostic baseline. And exact values travel much further: project functions, methods, and closures now propagate their proven return value into dumps, nested calls, and argument positions rather than only direct assignments, and a matching growth in the builtin-fold allowlist and its constant-union handling lets more of that precision actually reach a finding.
+
+Alongside that: a browser playground runs Steins entirely client-side, array and shape facts are checked against phpdoc contracts for the first time, inline `@var` casts and `@psalm-trace`/`@phpstan-trace` annotations both gained a seam into the analyzer, and a run of bugs found while writing the user manual against the 0.1.2 binary — a profile `warn` that could demote a mechanics diagnostic, a debug baseline entry that outlived its capture exemption, a sidecar that could go silent mid-run without saying so — are closed. This is still a preview, so the `0.1.x` series continues rather than jumping a minor. **Several of these entries change what your CI reports, in both directions** — read them, not the version number, to know what moves.
+
 ### Added
 
 - **A browser playground now runs Steins entirely in-browser with live findings, an `annotate` overlay, profile selection, and themes.**
@@ -39,8 +45,8 @@ skill seals them into a version section at release time, reconstructing from
   - Findings such as `call.undefined-function` can disappear from compatibility branches that the declared PHP range proves dead; ranges that straddle a comparison keep both branches, and user-defined or imported constants with the same name disable the fold.
 - **String concatenation now participates in value inference across assignments, returns, and builtin-fold arguments.**
   - Resolved string, integer, boolean, and null operands can produce exact strings, so downstream findings can appear or disappear where concatenation previously widened to `unknown`; float stringification remains runtime-dependent and is not guessed.
-- **Project-function return summaries now work in dumps, nested arguments, nested calls, and other value positions rather than only direct assignments.**
-  - Exact returns can newly expose findings such as `type.argument-mismatch`, while calls that cannot be summarized retain their declared return floor and recursion or depth exhaustion declines conservatively.
+- **A project function's exact return value now resolves in any value position — direct assignment, `dumpType()`, nested arguments, nested calls, and more.**
+  - Exact returns can expose findings such as `type.argument-mismatch`; calls that cannot be summarized retain their declared return floor, and recursion or depth exhaustion declines conservatively. The summary walk accounts for returns inside `foreach` and `try` coverage and for nullable fallthrough, so it does not pin an exact value where the function's real range is wider.
 - **Statically resolved PDO calls now contribute the `io.db` effect and propagate it through proven call chains.**
   - `effect.envelope-exceeded` can begin firing when `PDO::query`, `PDO::exec`, `PDO::prepare`, `PDOStatement::execute`, `PDOStatement::fetch`, or `PDOStatement::fetchAll` violates a proven effect envelope; unresolved receivers remain conservative.
 - **Calls through project-interface types now preserve their declared effect envelopes in caller summaries.**
@@ -99,14 +105,12 @@ skill seals them into a version section at release time, reconstructing from
   - The affected fold widens while later requests continue, so later exact results and their findings are no longer silently lost.
 - **A memory-exhausting fold no longer disables folding for the rest of the run.**
   - The failing request widens without retry, the bounded PHP child is restarted for later requests with a restart cap, and restored later results can cause findings that were previously lost after the failure to appear.
-- **`check`, `transform`, `effect-diff`, and `doctor` now reject nonexistent input paths with exit `2`, and `doctor` no longer walks the filesystem indefinitely for such a path.**
-  - This is a breaking exit-code correction for CI with stale or mistyped paths; all missing paths are reported together, no JSON success document is emitted, and an existing path containing no PHP files remains a successful no-op.
+- **`check`, `transform`, and `doctor` now reject nonexistent input paths with exit `2`, and `doctor` no longer walks the filesystem indefinitely for such a path.**
+  - This is a breaking exit-code correction for CI with stale or mistyped paths; all missing paths are reported together, no JSON success document is emitted, and an existing path containing no PHP files remains a successful no-op. `effect-diff`, new in this release, rejects a nonexistent path the same way from the start.
 - **Type dumps now render builtin classes using the casing declared by PHP.**
   - Names such as `GMP`, `HashContext`, `XMLParser`, and `DateInterval` now match PHP's declarations, with no finding added, removed, or re-identified.
 - **Dump and assertion calls now preserve the facts of variables they read.**
   - Repeated `PHPStan\dumpType`, `dumpPhpDocType`, `var_dump`, and harness assertions no longer turn later reads into `unknown`; retained facts can make subsequent findings appear or disappear.
-- **Return summaries now account for returns inside `foreach` and `try` coverage and for nullable fallthrough instead of pinning an unsound exact value.**
-  - This removes false downstream findings, including the observed false `call.on-null` produced when a visible `return null` was incorrectly treated as the function's only possible result.
 - **A profile's `warn` can no longer demote a mechanics diagnostic, and `--set-baseline` no longer captures the debug layer.**
   - This is a breaking correction for a green CI that depended on either gap: a `warn` pattern matching `suppress.*` or `effect.unknown-label` no longer turns those ids into exit-neutral warnings, and a committed `PHPStan\dumpType()` frozen into an existing baseline starts failing again — a leftover `debug.*` baseline entry is now reported as stale instead of suppressing the dump. `steins doctor` also names the contract layer under the `throws-direct` profile, which it previously omitted from its surface line.
 - **`check` and `annotate` now report the degraded posture when the PHP sidecar spawns but a request goes unanswered — at startup or partway through the run.**
@@ -212,7 +216,8 @@ The trade is deliberate. Steins finds less than a conventional analyzer, and wha
 - **Windows is not shipped.** The sidecar spawns PHP through a temp-dir path that is unverified there, and a binary that mis-spawned it would degrade silently to the sound subset — worse than not shipping.
 - **What Steins does not do yet** is written down rather than left to discovery: see [`docs/type-specification/not-implemented.md`](docs/type-specification/not-implemented.md). It is also not a linter or a formatter, and will not become one.
 
-[Unreleased]: https://github.com/rigortype/steins/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/rigortype/steins/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/rigortype/steins/releases/tag/v0.1.3
 [0.1.2]: https://github.com/rigortype/steins/releases/tag/v0.1.2
 [0.1.1]: https://github.com/rigortype/steins/releases/tag/v0.1.1
 [0.1.0]: https://github.com/rigortype/steins/releases/tag/v0.1.0
