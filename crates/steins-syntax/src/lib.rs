@@ -920,10 +920,10 @@ pub enum ArgValue {
     /// the lowered argument values: a zero-argument call resolves through the
     /// constant-function lane, and a call **with** arguments resolves through the
     /// T0 binding-descent summary (issue #60) — as a dumped/checked argument and
-    /// as a nested argument of another descent. (A builtin's fold gate still sees
-    /// only direct literals: `strtoupper(g(1))` widens — the value lane must not
-    /// be reachable from `resolve_literal`, whose call sites carry no recursion
-    /// guard.)
+    /// as a nested argument of another descent. A foldable builtin's argument that
+    /// is itself a project call resolves the same way (issue #127): `strtoupper(g(1))`
+    /// folds once `g(1)`'s Singleton summary is a concrete arg, under the same
+    /// descent guard as nested binding.
     Call(String, Vec<ArgValue>),
     /// `new ClassName(args...)` — a construction rvalue. [`NameRef`] is the class
     /// reference as written (resolved to an FQN project-wide at use time).

@@ -5069,12 +5069,33 @@ impl<'a> Cx<'a> {
     }
 
     /// Resolve an [`ArgValue`] to a concrete literal, if provable.
+    ///
+    /// Equivalent to [`Self::resolve_literal_under`] with no live descent — the
+    /// common call sites (assignment, dump, property checks) that are not mid-
+    /// binding. Project-call arguments of foldable builtins still resolve via a
+    /// fresh descent tree (issue #127); live-descent callers must use
+    /// [`Self::resolve_literal_under`] so the on-stack guard is threaded.
     fn resolve_literal(
         &self,
         value: &ArgValue,
         env: &HashMap<String, Known>,
         poisoned: bool,
         folder: &mut dyn Folder,
+    ) -> Option<ArgValue> {
+        self.resolve_literal_under(value, env, poisoned, folder, None)
+    }
+
+    /// [`Self::resolve_literal`] with an optional live [`Descent`] (issue #127).
+    /// Threading the descent is what keeps mutual recursion through a fold arg
+    /// (`strtoupper(b($n))` inside `a` that calls `b` that calls `a`) bounded by
+    /// the same on-stack key and `MAX_BINDING_DEPTH` as a statement-level chain.
+    fn resolve_literal_under(
+        &self,
+        value: &ArgValue,
+        env: &HashMap<String, Known>,
+        poisoned: bool,
+        folder: &mut dyn Folder,
+        mut descent: Option<&mut Descent<'_>>,
     ) -> Option<ArgValue> {
         if poisoned {
             return None;
@@ -5088,15 +5109,21 @@ impl<'a> Cx<'a> {
                 {
                     return Some(lit);
                 }
-                self.try_fold(name, args, env, poisoned, folder).map(|(lit, _prov)| lit)
+                // Builtin fold (allowlist + project-shadow gate). Project-call
+                // arguments of the fold are resolved inside `try_fold_under`
+                // (issue #127). A bare project call (`g(1)` as a value) is *not*
+                // resolved here — that stays the caller's job (`nested_call_singleton`
+                // / `project_call_summary`) so findings still emit on the live `out`.
+                self.try_fold_under(name, args, env, poisoned, folder, descent)
+                    .map(|(lit, _prov)| lit)
             }
             // `$a . $b` (issue #59): proven iff BOTH operands resolve to values whose
             // string cast is total and environment-independent (`concat_cast`). One
             // unresolved operand yields `None` — the same silence as any other
             // unprovable value, never a partial string.
             ArgValue::Concat(a, b) => {
-                let l = self.resolve_literal(a, env, poisoned, folder)?;
-                let r = self.resolve_literal(b, env, poisoned, folder)?;
+                let l = self.resolve_literal_under(a, env, poisoned, folder, descent.as_deref_mut())?;
+                let r = self.resolve_literal_under(b, env, poisoned, folder, descent.as_deref_mut())?;
                 Some(ArgValue::Str(concat_cast(&l)? + &concat_cast(&r)?))
             }
             // An array is proven iff every element value is proven (keys are fixed
@@ -5104,7 +5131,8 @@ impl<'a> Cx<'a> {
             ArgValue::Array(items) => {
                 let mut resolved = Vec::with_capacity(items.len());
                 for (k, v) in items {
-                    let rv = self.resolve_literal(v, env, poisoned, folder)?;
+                    let rv =
+                        self.resolve_literal_under(v, env, poisoned, folder, descent.as_deref_mut())?;
                     resolved.push((k.clone(), rv));
                 }
                 Some(ArgValue::Array(resolved))
@@ -5134,6 +5162,13 @@ impl<'a> Cx<'a> {
     /// `count`) is answered by the real engine over the real, order-witnessed
     /// array (ADR-0062 §2's value lane), never by a re-derivation here.
     ///
+    /// # Project-call arguments (issue #127)
+    ///
+    /// A foldable arg that is itself a project call (`strtoupper(g(1))`) resolves
+    /// through the T0 summary under the same descent guard as a nested binding —
+    /// see [`Self::resolve_literal_under`]. Budget exhaustion widens (the gate
+    /// declines); it never partially folds.
+    ///
     /// Provenance names the *resolved* call — the call that actually ran.
     fn try_fold(
         &self,
@@ -5143,6 +5178,19 @@ impl<'a> Cx<'a> {
         poisoned: bool,
         folder: &mut dyn Folder,
     ) -> Option<(ArgValue, String)> {
+        self.try_fold_under(name, args, env, poisoned, folder, None)
+    }
+
+    /// [`Self::try_fold`] with an optional live [`Descent`] (issue #127).
+    fn try_fold_under(
+        &self,
+        name: &str,
+        args: &[ArgValue],
+        env: &HashMap<String, Known>,
+        poisoned: bool,
+        folder: &mut dyn Folder,
+        mut descent: Option<&mut Descent<'_>>,
+    ) -> Option<(ArgValue, String)> {
         // Any project user function sharing this simple name shadows the builtin
         // (or makes it ambiguous) — do not fold. Conservative, never an FP.
         if self.index.has_simple_function(name) {
@@ -5151,10 +5199,32 @@ impl<'a> Cx<'a> {
         if !steins_catalog::foldable(name) {
             return None;
         }
-        let resolved: Vec<ArgValue> = args
-            .iter()
-            .map(|a| self.resolve_literal(a, env, poisoned, folder).unwrap_or_else(|| a.clone()))
-            .collect();
+        let mut resolved = Vec::with_capacity(args.len());
+        for a in args {
+            // Resolve under the live descent so a project-call arg's summary
+            // reuses the on-stack guard (issue #127). `resolve_literal_under`
+            // covers literals / env / nested folds; a project call that is not
+            // itself foldable is answered by `nested_call_singleton` (scratch
+            // sink — the outer statement's own descent, when any, owns emission).
+            let r = self
+                .resolve_literal_under(a, env, poisoned, folder, descent.as_deref_mut())
+                .or_else(|| {
+                    let mut scratch: Vec<Diagnostic> = Vec::new();
+                    nested_call_singleton(
+                        self,
+                        folder,
+                        a,
+                        env,
+                        poisoned,
+                        0,
+                        descent.as_deref_mut(),
+                        &mut scratch,
+                    )
+                    .map(|(v, _)| v)
+                })
+                .unwrap_or_else(|| a.clone());
+            resolved.push(r);
+        }
         // Every argument must be a self-evident value: a scalar literal, or an
         // array literal that is concrete all the way down and inside the fold
         // budget (issue #39). This is the gate the `count`/`in_array`/`implode`
@@ -13204,7 +13274,17 @@ fn descend(
         // `MAX_BINDING_DEPTH` bound the nested resolution exactly as they bound a
         // statement-level chain; the nested walk emits through the same `out` a
         // statement-level descent would.
-        let (value, strat) = match cx.resolve_literal(arg_value, env, poisoned, folder) {
+        // Thread the live descent into literal resolution so a foldable builtin
+        // whose arg is a project call (`strtoupper(g($x))` inside a callee)
+        // reuses the on-stack guard (issue #127). Project-call-only args still
+        // fall through to `nested_call_singleton` with the real `out`.
+        let (value, strat) = match cx.resolve_literal_under(
+            arg_value,
+            env,
+            poisoned,
+            folder,
+            descent.as_deref_mut(),
+        ) {
             Some(v) => (v, value_stratum(arg_value, env, None)),
             None => {
                 let Some(vs) = nested_call_singleton(
