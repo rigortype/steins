@@ -6263,11 +6263,14 @@ fn analyze_scope(
         && let Some(sc) = w.summary
     {
         let mut exits = sc.exits.into_inner();
-        // Untyped fallthrough is PHP's implicit `return null` (ADR-0057 §5). A
-        // native non-void return that falls through is a boundary TypeError — it
-        // contributes nothing, exactly like an A2-dropped exit. `scope_return` is
-        // `None` for untyped (and for void/never, which also yield no value fact).
-        if flow == Flow::FellThrough && cx.scope_return(scope).is_none() {
+        // Untyped fallthrough is PHP's implicit `return null` (ADR-0057 §5). The
+        // test is the **raw** written return hint (`ret_hint`), not whether Steins
+        // lowers a representable `NativeType`: `void` / `never` / `: object` /
+        // `: array` all leave `scope_return` as `None` but must not contribute null.
+        // A written non-void hint that falls through is a boundary TypeError —
+        // nothing is contributed (same as an A2-dropped exit). Generators refuse
+        // summaries entirely (`join_summary`); they also skip fallthrough null.
+        if flow == Flow::FellThrough && scope.ret_hint.is_none() && !scope.is_generator {
             exits.push(ExitContribution::Fact(Fact::Singleton(Val::Null), Stratum::Verified));
         }
         *out = exits;
@@ -6386,7 +6389,13 @@ fn walk_trace(
         // statement `checkable_calls` yields exactly the RHS call, so the summary
         // below is unambiguously this assignment's. Constructors keep descending
         // for diagnostics but never fill this slot (ADR-0075 §3).
+        //
+        // `stmt_return_arms` is the declared return floor resolved **before**
+        // `apply_assign` unbinds the assignment target (self-assign
+        // `$o = $o->m(1)` would otherwise drop the exact receiver before floor
+        // re-resolution).
         let mut stmt_summary: Option<ReturnSummary> = None;
+        let mut stmt_return_arms: Option<Vec<ContractArm>> = None;
         // 1. Check + descend every statically-named call this statement carries.
         for call in checkable_calls(&stmt.kind) {
             match &call.receiver {
@@ -6417,6 +6426,7 @@ fn walk_trace(
                     }
                     stmt_summary =
                         try_descend_function(cx, folder, call, env, scope.poisoned, descent.as_mut(), out);
+                    stmt_return_arms = cx.resolve_user_fn_any(call).and_then(|site| fn_return_arms(cx, site));
                 }
                 Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
                     // Branch-sensitive null-dereference proof (ADR-0031): a `$v->m()`
@@ -6438,7 +6448,7 @@ fn walk_trace(
                         // variant is unsound — see `resolve_arity_method`).
                         check_arity(cx, folder, call, store, scope.poisoned, out);
                     }
-                    let method_summary = handle_method_call(
+                    let outcome = handle_method_call(
                         cx,
                         folder,
                         scope,
@@ -6452,9 +6462,10 @@ fn walk_trace(
                     );
                     // ADR-0075: a resolved method/static summary rebinds on the same
                     // rungs as a function's. Constructors keep their exactness lane
-                    // (ADR-0036) and leave the summary unread.
+                    // (ADR-0036) and leave the summary/arms unread.
                     if !matches!(call.receiver, Callee::Construct { .. }) {
-                        stmt_summary = method_summary;
+                        stmt_summary = outcome.summary;
+                        stmt_return_arms = outcome.return_arms;
                     }
                 }
                 // `$fn(...)` — resolve the callee variable against the env: a proven
@@ -6701,8 +6712,17 @@ fn walk_trace(
             }
             StmtKind::Assign { var, value, span, call } => {
                 apply_assign(
-                    w, folder, var, value, call.as_ref(), span.start, env, store, facts,
+                    w,
+                    folder,
+                    var,
+                    value,
+                    call.as_ref(),
+                    span.start,
+                    env,
+                    store,
+                    facts,
                     stmt_summary.as_ref(),
+                    stmt_return_arms.as_deref(),
                 );
                 Flow::FellThrough
             }
@@ -7960,6 +7980,8 @@ fn assert_expected_string(
 }
 
 /// Apply a plain `$var = <value>;` assignment to the env (extracted from the walk).
+/// `return_arms` is the declared return floor resolved at the call site **before**
+/// this assignment may unbind its own target (self-assign `$o = $o->m(1)`).
 #[allow(clippy::too_many_arguments)]
 fn apply_assign(
     w: &WalkCx,
@@ -7972,6 +7994,7 @@ fn apply_assign(
     store: &mut Store,
     facts: &mut Option<&mut Vec<LineFact>>,
     summary: Option<&ReturnSummary>,
+    return_arms: Option<&[ContractArm]>,
 ) {
     let cx = w.cx;
     let line = cx.tree().position(span_start).line;
@@ -8249,6 +8272,10 @@ fn apply_assign(
                             var.to_owned(),
                             Known::value_strat(sv.fact.clone(), line, None, sv.stratum),
                         );
+                    } else if let Some(arms) = return_arms {
+                        // Prefer arms captured at resolution (before this unbind),
+                        // so method self-assign keeps the declared floor.
+                        store.contract.insert(var.to_owned(), arms.to_vec());
                     } else if let Some(c) = call
                         && let Some(arms) = call_return_arms(
                             cx,
@@ -8259,6 +8286,7 @@ fn apply_assign(
                             w.scope.poisoned,
                         )
                     {
+                        // Fallback: free-function / non-self-assign paths.
                         store.contract.insert(var.to_owned(), arms);
                     }
                 }
@@ -13273,6 +13301,11 @@ fn join_summary(
     callee_scope: &Scope,
     exits: &[ExitContribution],
 ) -> Option<ReturnSummary> {
+    // Generators: the call result is a Generator, not the value of `return`
+    // after `yield` (ADR-0057 §5). Refuse the whole value summary.
+    if callee_scope.is_generator {
+        return None;
+    }
     let ret = cx.scope_return(callee_scope).map(|(ty, _)| ty);
     let floor = ret.and_then(native_value_floor);
     // The declared return type is a CONVERSION boundary, not just an envelope
@@ -15992,11 +16025,18 @@ fn emit_offset(
     out.push(Diagnostic { id, path: cx.path().to_owned(), line: pos.line, column: pos.column, message, facet: None });
 }
 
+/// Outcome of a resolved method/static call (ADR-0075): the return-fact summary
+/// **and** the declared return arms, both computed against the store **before**
+/// the assignment may unbind a self-assign receiver (`$o = $o->m(1)`).
+struct MethodCallOutcome {
+    summary: Option<ReturnSummary>,
+    return_arms: Option<Vec<ContractArm>>,
+}
+
 /// Check + descend one method / static / constructor call. Returns the callee's
-/// [`ReturnSummary`] when the descent produced one (ADR-0075): the walk-trace
-/// rebinds it at the same rungs a function summary uses (`apply_assign`, return
-/// composition). Constructors still descend for diagnostics; the caller leaves
-/// their summary unread (ADR-0075 §3 — construction is the ADR-0036 exactness lane).
+/// summary and declared return arms when the target resolves (ADR-0075). Constructors
+/// still descend for diagnostics; the walk-trace leaves their outcome unread
+/// (ADR-0075 §3 — construction is the ADR-0036 exactness lane).
 #[allow(clippy::too_many_arguments)]
 fn handle_method_call(
     cx: &Cx,
@@ -16009,9 +16049,20 @@ fn handle_method_call(
     enclosing_class: Option<&str>,
     descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
-) -> Option<ReturnSummary> {
-    let target =
-        resolve_call_target(cx, &call.receiver, store, this_exact, enclosing_class, scope.poisoned)?;
+) -> MethodCallOutcome {
+    let empty = MethodCallOutcome { summary: None, return_arms: None };
+    let Some(target) =
+        resolve_call_target(cx, &call.receiver, store, this_exact, enclosing_class, scope.poisoned)
+    else {
+        return empty;
+    };
+
+    // Capture arms at resolution — before any later store mutation at the assign site.
+    let return_arms = if matches!(call.receiver, Callee::Construct { .. }) {
+        None
+    } else {
+        method_return_arms(cx, &target)
+    };
 
     let callee_name = format!("{}::{}", target.declaring_class.name, target.method.name);
     let class_templates = template_names_of(target.declaring_class.docblock.as_deref());
@@ -16037,15 +16088,18 @@ fn handle_method_call(
     // positional-only (a named/spread call's parameter binding is not modeled here);
     // the contract check above already covered the arguments.
     if !call.positional_only {
-        return None;
+        return MethodCallOutcome { summary: None, return_arms };
     }
-    let callee_scope =
-        cx.method_scope(target.class_file, &target.declaring_class.fqn, &target.method.name)?;
+    let Some(callee_scope) =
+        cx.method_scope(target.class_file, &target.declaring_class.fqn, &target.method.name)
+    else {
+        return MethodCallOutcome { summary: None, return_arms };
+    };
     let display = display_of_call(&call.receiver, &target.declaring_class.name, &target.method.name);
     // ADR-0075: the same `descend` path functions use; the walk-trace rebinds the
     // summary for method/static calls and leaves constructors unread.
     let arg_values: Vec<&ArgValue> = call.args.iter().map(|a| &a.value).collect();
-    descend(
+    let summary = descend(
         cx,
         folder,
         &target.method.params,
@@ -16061,7 +16115,8 @@ fn handle_method_call(
         scope.poisoned,
         descent,
         out,
-    )
+    );
+    MethodCallOutcome { summary, return_arms }
 }
 
 /// The provenance render base for a bound method/constructor call.

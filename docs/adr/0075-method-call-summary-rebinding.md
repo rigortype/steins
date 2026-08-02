@@ -90,16 +90,32 @@ Silence widens to the arm floor; it never lies.
 
 ### 2.4 Return coverage is part of summary soundness
 
-Enabling method rebinding surfaces a pre-existing hole in the **shared**
-return-summary collector: an `Opaque` construct (`foreach`, `try`, …) that
-contains a `return` contributes no exit, so a visible sibling `return null`
-could join alone as `Singleton(null)` and rebind a false premise
-(`call.on-null` on Composer `findPackage`). The Opaque variant therefore
-carries `may_return`; when set, a summary walk contributes the declared
-**Floor** (A3) so hidden exits widen the join. Untyped fallthrough contributes
-`Singleton(null)` (PHP's implicit return); a native non-void fallthrough is a
-boundary TypeError and contributes nothing. Both rules apply to free functions
-and methods alike.
+Enabling method rebinding surfaces pre-existing holes in the **shared**
+return-summary collector:
+
+* An `Opaque` construct (`foreach`, `try`, …) that contains a `return`
+  contributes no exit, so a visible sibling `return null` could join alone as
+  `Singleton(null)` and rebind a false premise (`call.on-null` on Composer
+  `findPackage`). The Opaque variant therefore carries `may_return`; when set,
+  a summary walk contributes the declared **Floor** (A3).
+* Untyped fallthrough contributes `Singleton(null)` (PHP's implicit return).
+  The test is the **raw written return hint** on the scope (`ret_hint`), not
+  whether Steins lowers a representable `NativeType` — `void` / `never` /
+  `: object` / `: array` all leave `scope_return` as `None` but must not
+  invent null. A written non-void hint that falls through is a boundary
+  TypeError and contributes nothing.
+* Generators (`yield` / `yield from` in the body, `is_generator` on the scope)
+  refuse the whole value summary (ADR-0057 §5): the call result is a
+  `Generator`, not the value of a trailing `return`.
+
+These rules apply to free functions and methods alike.
+
+### 2.5 Declared return arms are captured at resolution
+
+Method declared-return arms are computed when `resolve_call_target` succeeds,
+**before** `apply_assign` may unbind the assignment target. Self-assign
+`$o = $o->m(1)` therefore keeps the floor even though the receiver binding is
+gone by the time the floor is seeded.
 
 ## 3. v1 exclusions — kept deliberately
 

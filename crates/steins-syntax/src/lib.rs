@@ -1990,6 +1990,20 @@ pub struct OpaqueSite {
     pub span: Span,
 }
 
+/// Classification of a written return type hint (`: T`), independent of whether
+/// Steins lowers `T` to a [`NativeType`]. Used by return-fact summary fallthrough
+/// (ADR-0075): only a fully **untyped** declaration (no hint at all) contributes
+/// PHP's implicit `return null`; `void` / `never` / any other written hint do not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RetHintKind {
+    /// `: void`
+    Void,
+    /// `: never`
+    Never,
+    /// Any non-void/never hint — scalar, class, `array`, union, …
+    Other,
+}
+
 /// One analysis scope: the top-level script, a function body, or a method body.
 /// Carries the linear trace and a whole-scope `poisoned` flag (ADR-0001 give-up
 /// list).
@@ -2003,6 +2017,14 @@ pub struct Scope {
     pub function_name: Option<String>,
     /// The precise owner of this scope (top-level / function / method).
     pub owner: ScopeOwner,
+    /// The written return type hint's kind, if any. `None` means untyped (no
+    /// `: T`). Distinct from [`Self::ret_ty`] / the decl's lowered `ret`, which
+    /// collapse void/never/object/array to silence for the return-type check.
+    pub ret_hint: Option<RetHintKind>,
+    /// `true` when the body contains `yield` / `yield from` — the call result is
+    /// a `Generator`, not the value of a trailing `return` (ADR-0057 §5). Return
+    /// summaries refuse such scopes.
+    pub is_generator: bool,
     /// `true` if the scope contains any construct that defeats local value
     /// tracking (`extract`/`compact`, `global`, `static $x`, variable-variables,
     /// reference assignment, by-ref closure capture, `include`/`require`/`eval`).
@@ -5389,7 +5411,7 @@ fn lower_scopes(
         flatten_top_level(s, &mut top);
     }
     let rc = RefResolver { contexts, regions };
-    let mut scopes = vec![build_scope_from(ScopeOwner::TopLevel, &top)];
+    let mut scopes = vec![build_scope_from(ScopeOwner::TopLevel, &top, None)];
     collect_scopes(&Node::Program(program), contexts, regions, &rc, &mut scopes);
     scopes
 }
@@ -5423,7 +5445,11 @@ fn collect_scopes(
     match node {
         Node::Function(f) => {
             let name = bytes_to_string(f.name.value);
-            out.push(build_scope(ScopeOwner::Function(name), f.body.statements.as_slice()));
+            out.push(build_scope(
+                ScopeOwner::Function(name),
+                f.body.statements.as_slice(),
+                ret_hint_of(f.return_type_hint.as_ref()),
+            ));
         }
         Node::Class(c) => {
             let simple = bytes_to_string(c.name.value);
@@ -5441,7 +5467,11 @@ fn collect_scopes(
                 {
                     let method = bytes_to_string(m.name.value);
                     let owner = ScopeOwner::Method { class: class_fqn.clone(), method };
-                    out.push(build_scope(owner, block.statements.as_slice()));
+                    out.push(build_scope(
+                        owner,
+                        block.statements.as_slice(),
+                        ret_hint_of(m.return_type_hint.as_ref()),
+                    ));
                 }
             }
         }
@@ -5460,21 +5490,33 @@ fn collect_scopes(
 }
 
 /// Lower one scope's statements to a linear trace, and compute its poison flag.
-fn build_scope(owner: ScopeOwner, statements: &[Statement<'_>]) -> Scope {
+fn build_scope(
+    owner: ScopeOwner,
+    statements: &[Statement<'_>],
+    ret_hint: Option<RetHintKind>,
+) -> Scope {
     let refs: Vec<&Statement<'_>> = statements.iter().collect();
-    build_scope_from(owner, &refs)
+    build_scope_from(owner, &refs, ret_hint)
 }
 
 /// Lower a scope from a borrowed statement list (shared by the flattened
 /// top-level scope and the direct function/method paths).
-fn build_scope_from(owner: ScopeOwner, statements: &[&Statement<'_>]) -> Scope {
+fn build_scope_from(
+    owner: ScopeOwner,
+    statements: &[&Statement<'_>],
+    ret_hint: Option<RetHintKind>,
+) -> Scope {
     let mut opaque = Vec::new();
     let mut stmts = Vec::new();
     let mut method_calls = Vec::new();
+    let mut is_generator = false;
     for s in statements {
         lower_stmt(s, &mut stmts);
         scan_method_calls(&Node::Statement(s), &mut method_calls);
         scan_opaque(&Node::Statement(s), &mut opaque, false);
+        if !is_generator {
+            is_generator = node_is_generator(&Node::Statement(s));
+        }
     }
     // The flag IS the inventory being non-empty (never a second computation).
     let poisoned = !opaque.is_empty();
@@ -5485,6 +5527,8 @@ fn build_scope_from(owner: ScopeOwner, statements: &[&Statement<'_>]) -> Scope {
     Scope {
         function_name,
         owner,
+        ret_hint,
+        is_generator,
         poisoned,
         opaque,
         stmts,
@@ -5494,6 +5538,38 @@ fn build_scope_from(owner: ScopeOwner, statements: &[&Statement<'_>]) -> Scope {
         effect_origins: Vec::new(),
         throw_origins: Vec::new(),
         is_static: false,
+    }
+}
+
+/// Classify a written return type hint for summary fallthrough (ADR-0075).
+fn ret_hint_of(hint: Option<&mago_syntax::cst::FunctionLikeReturnTypeHint<'_>>) -> Option<RetHintKind> {
+    hint.map(|r| classify_ret_hint(&r.hint))
+}
+
+fn classify_ret_hint(hint: &Hint<'_>) -> RetHintKind {
+    match hint {
+        Hint::Void(_) => RetHintKind::Void,
+        Hint::Never(_) => RetHintKind::Never,
+        Hint::Parenthesized(p) => classify_ret_hint(p.hint),
+        _ => RetHintKind::Other,
+    }
+}
+
+/// Whether the subtree contains a `yield` / `yield from` that makes this scope a
+/// generator. Nested function/method/closure bodies are their own scopes and are
+/// not counted.
+fn node_is_generator(node: &Node<'_, '_>) -> bool {
+    match node {
+        Node::Yield(_) | Node::YieldFrom(_) | Node::YieldPair(_) | Node::YieldValue(_) => true,
+        Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_) => false,
+        _ => {
+            for child in node.children() {
+                if node_is_generator(&child) {
+                    return true;
+                }
+            }
+            false
+        }
     }
 }
 
@@ -5545,17 +5621,23 @@ fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>, rc: &Ref
         !opaque.is_empty() || body_aliased(cl.body.statements.iter()),
         ReceiverWrites::poisoned(),
     );
+    let mut is_generator = false;
     for s in cl.body.statements.iter() {
         lower_stmt(s, &mut stmts);
         scan_effect_origins(&Node::Statement(s), &cx, &mut effect_origins);
         scan_throw_origins(&Node::Statement(s), &[], &[], &cx.locals, &mut throw_origins);
         scan_method_calls(&Node::Statement(s), &mut method_calls);
         scan_opaque(&Node::Statement(s), &mut opaque, false);
+        if !is_generator {
+            is_generator = node_is_generator(&Node::Statement(s));
+        }
     }
     let poisoned = !opaque.is_empty();
     Scope {
         function_name: None,
         owner: ScopeOwner::Closure { def_offset: closure_def_offset(cl) },
+        ret_hint: ret_hint_of(cl.return_type_hint.as_ref()),
+        is_generator,
         poisoned,
         opaque,
         stmts,
@@ -5599,9 +5681,12 @@ fn build_closure_scope_from_arrow(af: &mago_syntax::cst::ArrowFunction<'_>, rc: 
     let mut opaque = Vec::new();
     scan_opaque(&Node::Expression(af.expression), &mut opaque, false);
     let poisoned = !opaque.is_empty();
+    let is_generator = node_is_generator(&Node::Expression(af.expression));
     Scope {
         function_name: None,
         owner: ScopeOwner::Closure { def_offset: arrow_def_offset(af) },
+        ret_hint: ret_hint_of(af.return_type_hint.as_ref()),
+        is_generator,
         poisoned,
         opaque,
         stmts: vec![ret],

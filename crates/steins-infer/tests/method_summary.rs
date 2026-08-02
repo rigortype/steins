@@ -336,22 +336,120 @@ fn foreach_hidden_return_does_not_pin_null_on_function_twin() {
 
 #[test]
 fn asserted_method_summary_does_not_premise_proof_finding() {
-    // An Asserted argument (inline `@var`) seeds an Asserted summary; the proof
-    // layer's all-Verified premise rule keeps type.argument-mismatch off it.
+    // Body-side Asserted (phpstan-assert helper) crosses as Asserted summary —
+    // same shape as `return_summary::mixed_strata_join_renders_asserted`, method
+    // twin. The proof layer's all-Verified premise rule keeps findings off it.
+    // (Inline `@var` on an assignment to the same name is erased by rebind —
+    // `inline_var_casts`; a bare `@var int` seeds arms, not a bindable Singleton.)
     let src = "<?php\n\
+        /** @phpstan-assert positive-int $v */\n\
+        function assertPos($v): void {}\n\
         final class C {\n\
-            public function id(int $n): int { return $n; }\n\
+            public function f(int $trigger, $m): int {\n\
+                assertPos($m);\n\
+                return $m;\n\
+            }\n\
         }\n\
         function takesString(string $s): void {}\n\
-        /** @var int $n */\n\
-        $n = rand();\n\
-        $x = (new C())->id($n);\n\
+        $x = (new C())->f(1, rand());\n\
+        \\PHPStan\\dumpType($x);\n\
         takesString($x);\n";
+    assert_eq!(one_type(src), "int<1, max> (asserted)");
     assert_eq!(
         count(src, ARG_MISMATCH_ID),
         0,
         "Asserted method summary must not premise a proof-layer finding"
     );
+}
+
+// ==========================================================================
+// Self-assign keeps method declared floor (arms captured before unbind).
+// ==========================================================================
+
+#[test]
+fn method_self_assign_keeps_declared_int_floor() {
+    // `$o = $o->m(1)` unbinds `$o` before the floor would re-resolve the receiver;
+    // arms must be captured at the method resolution that still sees `$o`.
+    let src = "<?php\n\
+        final class C {\n\
+            public function m(int $x): int { return rand(); }\n\
+        }\n\
+        $o = new C();\n\
+        $o = $o->m(1);\n\
+        \\PHPStan\\dumpType($o);\n";
+    assert_eq!(one_type(src), "int");
+}
+
+// ==========================================================================
+// Generators refuse value summaries (ADR-0057 §5).
+// ==========================================================================
+
+#[test]
+fn generator_method_does_not_rebind_return_value() {
+    // `$x = (new C())->g(1)` is a Generator, not 7. A summary that rebinds 7 would
+    // premise false argument mismatches on object sinks.
+    let src = "<?php\n\
+        final class C {\n\
+            public function g(int $trigger) {\n\
+                yield 1;\n\
+                return 7;\n\
+            }\n\
+        }\n\
+        function takesObject(object $o): void {}\n\
+        $x = (new C())->g(1);\n\
+        \\PHPStan\\dumpType($x);\n\
+        takesObject($x);\n";
+    assert_ne!(one_type(src), "7", "generator call must not rebind the return value");
+    assert_eq!(
+        count(src, ARG_MISMATCH_ID),
+        0,
+        "generator result is an object (Generator), not int 7"
+    );
+}
+
+#[test]
+fn generator_function_twin_does_not_rebind_return_value() {
+    let src = "<?php\n\
+        function g(int $trigger) {\n\
+            yield 1;\n\
+            return 7;\n\
+        }\n\
+        function takesObject(object $o): void {}\n\
+        $x = g(1);\n\
+        \\PHPStan\\dumpType($x);\n\
+        takesObject($x);\n";
+    assert_ne!(one_type(src), "7");
+    assert_eq!(count(src, ARG_MISMATCH_ID), 0);
+}
+
+// ==========================================================================
+// never / typed fallthrough must not invent Singleton(null).
+// ==========================================================================
+
+#[test]
+fn never_return_fallthrough_does_not_pin_null() {
+    // `: never` leaves scope_return as None (unrepresentable), but is not untyped.
+    // Fallthrough must not contribute Singleton(null) as a call-result premise.
+    let src = "<?php\n\
+        function f(int $trigger): never {}\n\
+        $x = f(1);\n\
+        $x->m();\n";
+    assert_eq!(
+        count(src, "call.on-null"),
+        0,
+        ": never fallthrough must not invent null"
+    );
+}
+
+#[test]
+fn object_return_hint_fallthrough_does_not_pin_null() {
+    // `: object` also leaves scope_return as None (no scalar floor) but is a written
+    // hint — fallthrough is TypeError, not null.
+    let src = "<?php\n\
+        function f(int $trigger): object {}\n\
+        $x = f(1);\n\
+        $x->m();\n";
+    assert_eq!(count(src, "call.on-null"), 0);
 }
 
 // ==========================================================================
