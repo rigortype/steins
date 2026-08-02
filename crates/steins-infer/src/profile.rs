@@ -319,6 +319,16 @@ impl Surface {
         if id == DEBUG_TYPE_ID || id == DEBUG_PHPDOC_TYPE_ID {
             return Level::Fail;
         }
+        // Mechanics ids are profile-inert (ADR-0050 §1, diagnostic-policy.md "no
+        // profile disables OR DEMOTES mechanics ids"): `surfaces_id` already makes
+        // `disable` powerless via `layer_always_on`, and `warn` must be equally
+        // powerless, or a profile's `warn = ["suppress.*"]` demotes
+        // `suppress.unmatched` to a report-without-fail and a stale `@steins-ignore`
+        // stops failing CI — exactly the rot the mechanics layer exists to prevent
+        // (issue #108).
+        if layer(id) == Some(Layer::Mechanics) {
+            return Level::Fail;
+        }
         if self.warn.iter().any(|p| pattern_matches(p, id)) {
             Level::Warn
         } else {
@@ -501,6 +511,27 @@ mod tests {
         );
         let s = ProfileConfigs(m).resolve(Some("p")).unwrap();
         assert!(s.is_surfaced(&diag(SUPPRESS_UNMATCHED_ID, None)), "mechanics ignores disable");
+    }
+
+    #[test]
+    fn mechanics_ignore_warn_too() {
+        // issue #108, defect 1: `disable` was already powerless against mechanics
+        // ids (the test above); `warn` was NOT — a profile's `warn = ["suppress.*"]`
+        // demoted `suppress.unmatched` to report-without-fail, so a stale
+        // `@steins-ignore` stopped failing CI. diagnostic-policy.md is explicit: "no
+        // profile disables OR DEMOTES mechanics ids." Both channels must be inert.
+        let mut m = BTreeMap::new();
+        m.insert(
+            "quiet".to_owned(),
+            UserProfile { extends: Some("default".to_owned()), warn: vec!["suppress.*".to_owned()], ..Default::default() },
+        );
+        let s = ProfileConfigs(m).resolve(Some("quiet")).unwrap();
+        assert!(s.is_surfaced(&diag(SUPPRESS_UNMATCHED_ID, None)), "mechanics still surfaced");
+        assert_eq!(
+            s.level(SUPPRESS_UNMATCHED_ID),
+            Level::Fail,
+            "warn cannot demote a mechanics id — a stale @steins-ignore must keep failing CI"
+        );
     }
 
     #[test]
