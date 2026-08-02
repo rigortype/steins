@@ -1,8 +1,8 @@
 # A method call's summary rebinds where a function's does
 
-Issue #126. Status: SKETCH — drafted at the owner's request (2026-08-02),
-pending ratification. Siblings: #127 (fold gate through project calls),
-#128 (closure return lane).
+Issue #126. Status: implementing (2026-08-02) — acceptance fixtures and
+fp-gate green are the gate for "implemented". Siblings: #127 (fold gate
+through project calls), #128 (closure return lane).
 
 ## 1. Context: the walk already pays for what the call site never reads
 
@@ -31,14 +31,21 @@ throw and heap layers.)
 
 ## 2. Decision
 
-A resolved method or static call's `ReturnSummary` is consumed at exactly the
-rungs where the function summary is consumed today: the `apply_assign` ladder
-and the dump surface (`best_dump_type`), which remain observationally
-identical by construction. `summary_binds` is unchanged — `Singleton`,
-`OneOf` and `Refined` bind; a bare `General` stays the arm floor it already
-is. No new binding machinery, no new budget: `MAX_BINDING_DEPTH`, the
-on-stack `BindingKey` guard and the memo replay discipline apply verbatim
-because they are the same code path.
+A resolved method or static call's `ReturnSummary` is consumed at the same
+assignment rung free functions use: the `apply_assign` ladder. When the
+summary binds (`Singleton` / `OneOf` / `Refined`), the assigned variable gets
+that value fact; when it degrades to a bare `General` (or is absent), the
+declared return arms of the resolved method seed the contract floor — the same
+rung free functions already take via `call_return_arms`. The dump surface then
+reads the env/contract of that variable through the existing
+`best_dump_type` path; it does **not** resolve method calls in value position
+directly (see §3). `summary_binds` is unchanged. No new binding machinery, no
+new budget: `MAX_BINDING_DEPTH`, the on-stack `BindingKey` guard and the memo
+replay discipline apply verbatim because they are the same code path.
+
+Return composition (`return $o->m(...)` as an outer exit) uses the same
+`stmt_summary` capture, so a method call returned from a function crosses
+exactly as a nested free-function call does.
 
 ### 2.1 The binding key grows a receiver component
 
@@ -46,21 +53,24 @@ because they are the same code path.
 name (`DeclaringClass::method`) can be reached from two *different* exact
 receivers — `Sub1` and `Sub2` both inheriting `Base::m`. The walked body is
 the same; the dispatch of `$this->hook()` *inside* it under `this_exact` is
-not. A summary memoized under the bare declaring key would replay one
-receiver's value for the other.
+not. A summary memoized under the bare declaring key would let the first
+receiver's walk answer a memo hit for the second: the second body is not
+re-walked, so its summary (and any emissions unique to that receiver) are
+lost.
 
 The key therefore gains a `this:` pseudo-binding carrying `body_this_exact`
-when it is `Some`. The spelling has precedent: closure capture snapshots
-already enter the key as `use:{name}` pseudo-bindings, and the `this:`
-component sorts among them under the existing normalization. Guarded
-resolutions (`this_exact = None`) key exactly as today — a final/private
-body's inner dispatch is a pure function of its declaring class, so the bare
-key is already sound there.
+when it is `Some` — the exact **class FQN**, not an allocation id. Same-class
+allocations share a key (their entry state for `$this` dispatch is the same
+class). The spelling has precedent: closure capture snapshots already enter
+the key as `use:{name}` pseudo-bindings, and the `this:` component sorts
+among them under the existing normalization. Guarded resolutions
+(`this_exact = None`) key exactly as today — a final/private body's inner
+dispatch is a pure function of its declaring class, so the bare key is
+already sound there.
 
 This component is a correctness sharpening that lands *with* the rebinding,
 not after it: today's discard hides the collision on the value surface, but
-the memo also replays emissions, so the audit of existing behavior is part of
-the slice.
+the memo also suppresses re-walk (and thus re-emission) on hit.
 
 ### 2.2 What may reach `Singleton`
 
@@ -78,12 +88,48 @@ Unchanged from `resolve_call_target`'s refusals: `Receiver::Prop` (ADR-0052
 overridable method under the guard, and any poisoned scope on either side.
 Silence widens to the arm floor; it never lies.
 
+### 2.4 Return coverage is part of summary soundness
+
+Enabling method rebinding surfaces pre-existing holes in the **shared**
+return-summary collector:
+
+* An `Opaque` construct (`foreach`, `try`, …) that contains a `return`
+  contributes no exit, so a visible sibling `return null` could join alone as
+  `Singleton(null)` and rebind a false premise (`call.on-null` on Composer
+  `findPackage`). The Opaque variant therefore carries `may_return`; when set,
+  a summary walk contributes the declared **Floor** (A3).
+* Untyped fallthrough contributes `Singleton(null)` (PHP's implicit return).
+  The test is the **raw written return hint** on the scope (`ret_hint`), not
+  whether Steins lowers a representable `NativeType`. A written hint that
+  falls through does not get a fallthrough-null contribution here.
+* A written return hint Steins cannot lower (`: object`, `: array`, `: void`,
+  `: never`, …) leaves `scope_return` as `None`, so the A2 native oracle has
+  no arms and cannot drop boundary TypeErrors (`return null` under
+  `: object`). **The whole value summary is refused** rather than rebinding an
+  uncheckable exit. (Note on `: void`: PHP *does* yield `NULL` for
+  `$x = f()` when `f(): void {}`, but v1 deliberately does not put that in a
+  value summary — the same refuse path as other unrepresentable hints.)
+* Generators (`yield` / `yield from` in the body, `is_generator` on the scope)
+  refuse the whole value summary (ADR-0057 §5): the call result is a
+  `Generator`, not the value of a trailing `return`.
+
+These rules apply to free functions and methods alike.
+
+### 2.5 Declared return arms are captured at resolution
+
+Method declared-return arms are computed when `resolve_call_target` succeeds,
+**before** `apply_assign` may unbind the assignment target. Self-assign
+`$o = $o->m(1)` therefore keeps the floor even though the receiver binding is
+gone by the time the floor is seeded.
+
 ## 3. v1 exclusions — kept deliberately
 
 * **Value/argument-position method calls.** `ArgValue::Call` carries a simple
   function name only; a method call in argument position never reaches the
   value IR. Extending the carrier is a syntax-layer design round of its own,
-  and #127's fold-gate lane sees no methods until it happens.
+  and #127's fold-gate lane sees no methods until it happens. Observability
+  for methods is via `$x = $o->m(...); dumpType($x)` (assignment rebind +
+  existing dump of the variable).
 * **Constructors.** `new Foo(...)` is not a value-returning call on this
   surface — its descend keeps running for diagnostics, its summary stays
   unread. The construction rvalue's exactness lane (ADR-0036) is untouched.
@@ -93,6 +139,7 @@ Silence widens to the arm floor; it never lies.
 * **By-ref parameters refuse, variadics stop the binding prefix** — inherited
   from `descend` unchanged, restated here only so the slice review has the
   full refusal list in one place.
+* **Closures** (`$fn(...)`) — still deferred (#128).
 
 ## 4. Replayability (ADR-0048)
 
@@ -107,13 +154,14 @@ this is the standing property.
 ## 5. Consequences
 
 * The flagship reflects across the receiver seam: `$g->greet(3, 'World')`
-  types as its literal, and every fixture family that today works for a
-  function twin gains a method row.
+  types as its literal (via assignment), and function-family fixtures gain
+  method rows where the same proof is reachable.
 * A rebound fact is a **new premise**. The fp-gate is the instrument;
   movement in either direction is a triage event. Conformance rows involving
   method returns may flip and each flip is read, not assumed.
-* Memo entries multiply by receiver exactness — bounded by allocation sites,
-  which the store already tracks; no new cap is introduced.
-* The `this:` key component retroactively tightens diagnostic replay for
-  inherited-body descents, a behavior audit that must be run and recorded
-  even where no fixture moves.
+* Memo entries multiply by **exact receiver class FQN** — bounded by the
+  distinct exact classes seen as receivers for a given declaring body, not by
+  allocation count.
+* The `this:` key component tightens diagnostic separation for inherited-body
+  descents under a shared memo; fixtures must force both calls into one outer
+  descent to exercise the collision.

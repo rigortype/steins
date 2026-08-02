@@ -6019,6 +6019,8 @@ impl Known {
 }
 
 /// A binding-descent key: the callee (by FQN-ish key) plus its bound params.
+/// Method descents may also carry a `this:` pseudo-binding for the exact
+/// receiver (ADR-0075 §2.1); closure descents carry `use:{name}` captures.
 type BindingKey = (String, Vec<(String, ArgValue)>);
 
 /// A **return-fact summary** (ADR-0057 amendment, slice T0): the join, over a
@@ -6255,11 +6257,23 @@ fn analyze_scope(
         alloc: std::cell::Cell::new(alloc_start),
         summary,
     };
-    walk_trace(&w, folder, &scope.stmts, &mut env, &mut store, &mut descent, &mut facts, false, out);
+    let flow =
+        walk_trace(&w, folder, &scope.stmts, &mut env, &mut store, &mut descent, &mut facts, false, out);
     if let Some(out) = ret_exits
         && let Some(sc) = w.summary
     {
-        *out = sc.exits.into_inner();
+        let mut exits = sc.exits.into_inner();
+        // Untyped fallthrough is PHP's implicit `return null` (ADR-0057 §5). The
+        // test is the **raw** written return hint (`ret_hint`), not whether Steins
+        // lowers a representable `NativeType`: `void` / `never` / `: object` /
+        // `: array` all leave `scope_return` as `None` but must not contribute null.
+        // A written non-void hint that falls through is a boundary TypeError —
+        // nothing is contributed (same as an A2-dropped exit). Generators refuse
+        // summaries entirely (`join_summary`); they also skip fallthrough null.
+        if flow == Flow::FellThrough && scope.ret_hint.is_none() && !scope.is_generator {
+            exits.push(ExitContribution::Fact(Fact::Singleton(Val::Null), Stratum::Verified));
+        }
+        *out = exits;
     }
     if let Some(sink) = dead_out {
         sink.extend(w.dead.into_inner());
@@ -6369,11 +6383,19 @@ fn walk_trace(
         } else {
             None
         };
-        // The return-fact summary of a `$x = f(...)` RHS descent (ADR-0057 amendment
-        // T0), captured in step 1 and consumed by `apply_assign` in step 2. For an
-        // `Assign` statement `checkable_calls` yields exactly the RHS call, so the
-        // Function-arm summary below is unambiguously this assignment's.
+        // The return-fact summary of a `$x = f(...)` / `$x = $o->m(...)` RHS
+        // descent (ADR-0057 amendment T0; ADR-0075 for methods/statics), captured
+        // in step 1 and consumed by `apply_assign` in step 2. For an `Assign`
+        // statement `checkable_calls` yields exactly the RHS call, so the summary
+        // below is unambiguously this assignment's. Constructors keep descending
+        // for diagnostics but never fill this slot (ADR-0075 §3).
+        //
+        // `stmt_return_arms` is the declared return floor resolved **before**
+        // `apply_assign` unbinds the assignment target (self-assign
+        // `$o = $o->m(1)` would otherwise drop the exact receiver before floor
+        // re-resolution).
         let mut stmt_summary: Option<ReturnSummary> = None;
+        let mut stmt_return_arms: Option<Vec<ContractArm>> = None;
         // 1. Check + descend every statically-named call this statement carries.
         for call in checkable_calls(&stmt.kind) {
             match &call.receiver {
@@ -6404,6 +6426,7 @@ fn walk_trace(
                     }
                     stmt_summary =
                         try_descend_function(cx, folder, call, env, scope.poisoned, descent.as_mut(), out);
+                    stmt_return_arms = cx.resolve_user_fn_any(call).and_then(|site| fn_return_arms(cx, site));
                 }
                 Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
                     // Branch-sensitive null-dereference proof (ADR-0031): a `$v->m()`
@@ -6425,7 +6448,7 @@ fn walk_trace(
                         // variant is unsound — see `resolve_arity_method`).
                         check_arity(cx, folder, call, store, scope.poisoned, out);
                     }
-                    handle_method_call(
+                    let outcome = handle_method_call(
                         cx,
                         folder,
                         scope,
@@ -6437,6 +6460,13 @@ fn walk_trace(
                         descent.as_mut(),
                         out,
                     );
+                    // ADR-0075: a resolved method/static summary rebinds on the same
+                    // rungs as a function's. Constructors keep their exactness lane
+                    // (ADR-0036) and leave the summary/arms unread.
+                    if !matches!(call.receiver, Callee::Construct { .. }) {
+                        stmt_summary = outcome.summary;
+                        stmt_return_arms = outcome.return_arms;
+                    }
                 }
                 // `$fn(...)` — resolve the callee variable against the env: a proven
                 // closure value descends into its scope (ADR-0033), a proven string
@@ -6554,15 +6584,22 @@ fn walk_trace(
         if let StmtKind::Return { value, .. } = &stmt.kind
             && let Some(sc) = &w.summary
         {
-            // Composition (A1): when the returned expression IS a call, its own
-            // summary (captured into `stmt_summary` by the step-1 descent) is this
-            // exit's fact — `return g(...)` crosses g's proven fact. A recursive /
-            // unbindable inner call left `stmt_summary` empty, so this falls through
-            // to the direct value fact (and thence the A3 floor).
-            let composed = matches!(value, ArgValue::Call(_, _))
-                .then(|| stmt_summary.as_ref().and_then(|s| s.value.as_ref()))
-                .flatten()
-                .map(|sv| (sv.fact.clone(), sv.stratum));
+            // Composition (A1): when the returned expression IS a call whose
+            // summary step 1 captured into `stmt_summary`, that summary is this
+            // exit's fact — `return g(...)` and `return $o->m(...)` / `return C::m(...)`
+            // (ADR-0075) cross the proven fact. A constructor `return new Foo(...)`
+            // is `ArgValue::New` and never composes a construct-body summary as a
+            // value (object return is T1). A recursive / unbindable inner call left
+            // `stmt_summary` empty, so this falls through to the direct value fact
+            // (and thence the A3 floor).
+            let composed = if matches!(value, ArgValue::New(..)) {
+                None
+            } else {
+                stmt_summary
+                    .as_ref()
+                    .and_then(|s| s.value.as_ref())
+                    .map(|sv| (sv.fact.clone(), sv.stratum))
+            };
             let exit_fact = composed.or_else(|| return_value_fact(w, folder, value, env, store));
             let contrib = match exit_fact {
                 // A2 — native-envelope violation: a proven boundary `TypeError`, the
@@ -6603,8 +6640,12 @@ fn walk_trace(
             StmtKind::Echo(_) => Flow::FellThrough,
             // A still-`Opaque` construct (loop / switch / try) forgets what it may
             // write AND what it branches on (reads) — unchanged from ADR-0027,
-            // since the trace does not model its control flow.
-            StmtKind::Opaque { writes, reads, poisons } => {
+            // since the trace does not model its control flow. When the subtree
+            // may `return` (`may_return`), a summary walk contributes the declared
+            // floor so those hidden exits join the visible ones (ADR-0057 A3;
+            // ADR-0075 / #126: without this, a sibling `return null` alone pins
+            // Singleton(null) and manufactures call.on-null FPs).
+            StmtKind::Opaque { writes, reads, poisons, may_return } => {
                 if *poisons {
                     env.clear();
                     store.clear();
@@ -6613,6 +6654,11 @@ fn walk_trace(
                         env.remove(v);
                         store.unbind(v);
                     }
+                }
+                if *may_return
+                    && let Some(sc) = &w.summary
+                {
+                    sc.exits.borrow_mut().push(ExitContribution::Floor);
                 }
                 Flow::FellThrough
             }
@@ -6666,8 +6712,17 @@ fn walk_trace(
             }
             StmtKind::Assign { var, value, span, call } => {
                 apply_assign(
-                    w, folder, var, value, call.as_ref(), span.start, env, store, facts,
+                    w,
+                    folder,
+                    var,
+                    value,
+                    call.as_ref(),
+                    span.start,
+                    env,
+                    store,
+                    facts,
                     stmt_summary.as_ref(),
+                    stmt_return_arms.as_deref(),
                 );
                 Flow::FellThrough
             }
@@ -7925,6 +7980,8 @@ fn assert_expected_string(
 }
 
 /// Apply a plain `$var = <value>;` assignment to the env (extracted from the walk).
+/// `return_arms` is the declared return floor resolved at the call site **before**
+/// this assignment may unbind its own target (self-assign `$o = $o->m(1)`).
 #[allow(clippy::too_many_arguments)]
 fn apply_assign(
     w: &WalkCx,
@@ -7937,6 +7994,7 @@ fn apply_assign(
     store: &mut Store,
     facts: &mut Option<&mut Vec<LineFact>>,
     summary: Option<&ReturnSummary>,
+    return_arms: Option<&[ContractArm]>,
 ) {
     let cx = w.cx;
     let line = cx.tree().position(span_start).line;
@@ -8214,9 +8272,21 @@ fn apply_assign(
                             var.to_owned(),
                             Known::value_strat(sv.fact.clone(), line, None, sv.stratum),
                         );
+                    } else if let Some(arms) = return_arms {
+                        // Prefer arms captured at resolution (before this unbind),
+                        // so method self-assign keeps the declared floor.
+                        store.contract.insert(var.to_owned(), arms.to_vec());
                     } else if let Some(c) = call
-                        && let Some(arms) = call_return_arms(cx, c)
+                        && let Some(arms) = call_return_arms(
+                            cx,
+                            c,
+                            store,
+                            w.this_exact,
+                            w.enclosing_class,
+                            w.scope.poisoned,
+                        )
                     {
+                        // Fallback: free-function / non-self-assign paths.
                         store.contract.insert(var.to_owned(), arms);
                     }
                 }
@@ -10328,11 +10398,13 @@ fn refine_declared_arms(
     (!out.is_empty()).then_some(out)
 }
 
-/// The declared-return arm list to seed the assigned variable of `$x = f(...)` at a
-/// call site (ADR-0052 §9, the return direction). For a uniquely-resolved USER
-/// function target (the same `resolve_user_fn_any` the contract lane uses, so it fires
-/// on named-argument calls too), the native return type seeds `Verified` arms and the
-/// `@return` phpdoc refines `Asserted` within it, through [`refine_contract_arms`].
+/// The declared-return arm list to seed the assigned variable of `$x = f(...)` /
+/// `$x = $o->m(...)` at a call site (ADR-0052 §9, the return direction; ADR-0075
+/// for methods). For a uniquely-resolved USER function target (the same
+/// `resolve_user_fn_any` the contract lane uses, so it fires on named-argument
+/// calls too), or a resolved method/static target via [`resolve_call_target`], the
+/// native return type seeds `Verified` arms and the `@return` phpdoc refines
+/// `Asserted` within it, through [`refine_contract_arms`].
 ///
 /// **Verified membership is never exactness.** A `: Foo` native return seeds an
 /// Instance-*membership* arm (`ContractTy::Class`), NOT an exact-class object: PHP
@@ -10342,10 +10414,26 @@ fn refine_declared_arms(
 /// leg (the ADR-0052 §3 NOT-fed list: no S2/arity/descent consumption, the G1/A1
 /// membership-is-not-exactness discipline). The arms are the FLOOR below values: a
 /// caller seeds them only after every proven-value path (a folded literal, the R1
-/// builtin return envelope) has declined. `None` for a builtin / unknown / dynamic
-/// target, or a target with no declared return type at all.
-fn call_return_arms(cx: &Cx, call: &CallExpr) -> Option<Vec<ContractArm>> {
-    fn_return_arms(cx, cx.resolve_user_fn_any(call)?)
+/// builtin return envelope, a bindable summary) has declined. `None` for a
+/// builtin / unknown / dynamic target, a constructor, or a target with no declared
+/// return type at all.
+fn call_return_arms(
+    cx: &Cx,
+    call: &CallExpr,
+    store: &Store,
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
+    poisoned: bool,
+) -> Option<Vec<ContractArm>> {
+    if let Some(site) = cx.resolve_user_fn_any(call) {
+        return fn_return_arms(cx, site);
+    }
+    // Constructors are the ADR-0036 exactness lane, not a value-return floor.
+    if matches!(call.receiver, Callee::Construct { .. }) {
+        return None;
+    }
+    let target = resolve_call_target(cx, &call.receiver, store, this_exact, enclosing_class, poisoned)?;
+    method_return_arms(cx, &target)
 }
 
 /// [`call_return_arms`] for a call known only by its **simple name** (issue #60):
@@ -10371,6 +10459,26 @@ fn fn_return_arms(cx: &Cx, site: Site) -> Option<Vec<ContractArm>> {
     let off = decl.span.start;
     let resolve = |n: &str| {
         cx.resolve_pclass(site.file, off, n).trim_start_matches('\\').to_ascii_lowercase()
+    };
+    refine_contract_arms(&native, phpdoc.as_ref(), &resolve)
+}
+
+/// The declared-return contract arms of a resolved method/static target (ADR-0075
+/// floor parity with free functions). Same native + `@return` refinement as
+/// [`fn_return_arms`]; class-level `@template` names shadow in the method docblock
+/// (issue #5), matching [`scope_return_phpdoc`]'s method leg.
+fn method_return_arms(cx: &Cx, target: &CallTarget<'_>) -> Option<Vec<ContractArm>> {
+    let method = target.method;
+    let native: Vec<ContractTy> = method.ret.as_ref().map(native_arms).unwrap_or_default();
+    let mut envelopes = parse_envelopes(method.docblock.as_deref());
+    if let Some(e) = &mut envelopes {
+        e.shadow_templates(&template_names_of(target.declaring_class.docblock.as_deref()));
+    }
+    let phpdoc = envelopes.and_then(|e| e.ret);
+    let off = method.span.start;
+    let file = target.class_file;
+    let resolve = |n: &str| {
+        cx.resolve_pclass(file, off, n).trim_start_matches('\\').to_ascii_lowercase()
     };
     refine_contract_arms(&native, phpdoc.as_ref(), &resolve)
 }
@@ -13063,10 +13171,21 @@ fn descend(
     // The binding key incorporates the captured snapshot so two calls of the same
     // closure with different snapshots memoize distinctly (adversarial #1). The
     // stratum is a trust attribute, not an identity — it is excluded from the key.
+    //
+    // ADR-0075 §2.1: a method body reached through `resolve_exact` is keyed by
+    // declaring FQN (`Base::m`), but two exact receivers (`Sub1`, `Sub2`) can
+    // inherit the same body while `$this->hook()` inside it dispatches differently.
+    // When `body_this_exact` is `Some`, a `this:` pseudo-binding carries that
+    // receiver so the memo never replays one receiver's value (or emissions) for
+    // the other. Guarded resolutions pass `None` and key exactly as before — a
+    // final/private body's inner dispatch is a pure function of its declaring class.
     let mut key_binding: Vec<(String, ArgValue)> =
         bound.iter().map(|(n, v, _)| (n.clone(), v.clone())).collect();
     for (name, fact) in captures {
         key_binding.push((format!("use:{name}"), arg_of_fact_key(fact)));
+    }
+    if let Some(exact) = &body_this_exact {
+        key_binding.push(("this:".to_owned(), ArgValue::Str(exact.clone())));
     }
     key_binding.sort_by(|a, b| a.0.cmp(&b.0));
     let key: BindingKey = (key_name.to_owned(), key_binding);
@@ -13182,7 +13301,20 @@ fn join_summary(
     callee_scope: &Scope,
     exits: &[ExitContribution],
 ) -> Option<ReturnSummary> {
+    // Generators: the call result is a Generator, not the value of `return`
+    // after `yield` (ADR-0057 §5). Refuse the whole value summary.
+    if callee_scope.is_generator {
+        return None;
+    }
     let ret = cx.scope_return(callee_scope).map(|(ty, _)| ty);
+    // A written return hint Steins cannot lower (`: object`, `: array`, `: void`,
+    // `: never`, …) leaves `scope_return` as `None`, so the A2 native-oracle arms
+    // are empty and `native_violates` cannot drop boundary TypeErrors
+    // (`return null` under `: object`). Refuse the whole value summary rather than
+    // rebind an uncheckable exit as a Singleton premise (ADR-0075 review).
+    if ret.is_none() && callee_scope.ret_hint.is_some() {
+        return None;
+    }
     let floor = ret.and_then(native_value_floor);
     // The declared return type is a CONVERSION boundary, not just an envelope
     // (the #48 family, return edition): PHP hands the caller what the boundary
@@ -15901,7 +16033,18 @@ fn emit_offset(
     out.push(Diagnostic { id, path: cx.path().to_owned(), line: pos.line, column: pos.column, message, facet: None });
 }
 
-/// Check + descend one method / static / constructor call.
+/// Outcome of a resolved method/static call (ADR-0075): the return-fact summary
+/// **and** the declared return arms, both computed against the store **before**
+/// the assignment may unbind a self-assign receiver (`$o = $o->m(1)`).
+struct MethodCallOutcome {
+    summary: Option<ReturnSummary>,
+    return_arms: Option<Vec<ContractArm>>,
+}
+
+/// Check + descend one method / static / constructor call. Returns the callee's
+/// summary and declared return arms when the target resolves (ADR-0075). Constructors
+/// still descend for diagnostics; the walk-trace leaves their outcome unread
+/// (ADR-0075 §3 — construction is the ADR-0036 exactness lane).
 #[allow(clippy::too_many_arguments)]
 fn handle_method_call(
     cx: &Cx,
@@ -15914,11 +16057,19 @@ fn handle_method_call(
     enclosing_class: Option<&str>,
     descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
-) {
+) -> MethodCallOutcome {
+    let empty = MethodCallOutcome { summary: None, return_arms: None };
     let Some(target) =
         resolve_call_target(cx, &call.receiver, store, this_exact, enclosing_class, scope.poisoned)
     else {
-        return;
+        return empty;
+    };
+
+    // Capture arms at resolution — before any later store mutation at the assign site.
+    let return_arms = if matches!(call.receiver, Callee::Construct { .. }) {
+        None
+    } else {
+        method_return_arms(cx, &target)
     };
 
     let callee_name = format!("{}::{}", target.declaring_class.name, target.method.name);
@@ -15945,18 +16096,18 @@ fn handle_method_call(
     // positional-only (a named/spread call's parameter binding is not modeled here);
     // the contract check above already covered the arguments.
     if !call.positional_only {
-        return;
+        return MethodCallOutcome { summary: None, return_arms };
     }
     let Some(callee_scope) =
         cx.method_scope(target.class_file, &target.declaring_class.fqn, &target.method.name)
     else {
-        return;
+        return MethodCallOutcome { summary: None, return_arms };
     };
     let display = display_of_call(&call.receiver, &target.declaring_class.name, &target.method.name);
-    // T0 consumes summaries only at direct-function-call assignment sites; a method
-    // call's summary is computed (memo/machinery shared) but not rebound here (T1).
+    // ADR-0075: the same `descend` path functions use; the walk-trace rebinds the
+    // summary for method/static calls and leaves constructors unread.
     let arg_values: Vec<&ArgValue> = call.args.iter().map(|a| &a.value).collect();
-    let _ = descend(
+    let summary = descend(
         cx,
         folder,
         &target.method.params,
@@ -15973,6 +16124,7 @@ fn handle_method_call(
         descent,
         out,
     );
+    MethodCallOutcome { summary, return_arms }
 }
 
 /// The provenance render base for a bound method/constructor call.
