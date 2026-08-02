@@ -250,3 +250,34 @@ fn memo_does_not_launder_asserted_after_verified_same_value() {
         "Verified memo must not launder Asserted same-value call into a proof premise"
     );
 }
+
+#[test]
+fn memo_does_not_launder_asserted_capture_after_verified_same_value() {
+    // The parameter-stratum fixture above does not by itself prove that
+    // `use:{name}` entries carry stratum too. Two walks of `wrap` share one memo
+    // and instantiate the same closure definition with equal capture values but
+    // different trust; omitting capture stratum would replay the first summary.
+    let src = "<?php\n\
+        /** @phpstan-assert 'hi' $v */\n\
+        function claimHi($v): void {}\n\
+        function takesInt(int $n): void {}\n\
+        function wrap(string $x): string {\n\
+            $f = function () use ($x): string { return $x; };\n\
+            return $f();\n\
+        }\n\
+        function outer(int $trigger, $u): string {\n\
+            $a = wrap('hi');\n\
+            claimHi($u);\n\
+            $b = wrap($u);\n\
+            return $b;\n\
+        }\n\
+        $result = outer(1, (string) rand());\n\
+        \\PHPStan\\dumpType($result);\n\
+        takesInt($result);\n";
+    assert_eq!(one_type(src), "'hi' (asserted)");
+    assert_eq!(
+        count(src, ARG_MISMATCH_ID),
+        0,
+        "Verified capture memo must not launder an Asserted same-value capture"
+    );
+}
