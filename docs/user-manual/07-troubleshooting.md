@@ -261,7 +261,7 @@ those ids need a live PHP to rule out every candidate name. See
 ["findings vanished after adding `--no-php`"](#findings-vanished-after-adding---no-php)
 below for what that looks like on real code.
 
-### The sidecar spawns but never answers
+### The sidecar spawns but a request goes unanswered
 
 **What you see.** `steins doctor` reports a third, distinct Runtime line —
 not "not spawnable", but "spawned, but the env() query failed":
@@ -275,39 +275,53 @@ Runtime
 …
 ```
 
-**Cause.** `php` exists on `PATH` and the process starts, but it never
-answers the sidecar's opening handshake — a `php` wrapper script that never
-execs real PHP, a broken `php.ini` that hangs on startup, an
-`auto_prepend_file` that never returns, a `php` built without the pieces
-the sidecar's inline script needs. This is the "protocol mismatch" case:
-the process is alive, but it is not speaking the sidecar's JSON-RPC
-framing, so the request times out and the whole run poisons and continues
-sound-subset for the rest of the invocation.
+That line is `doctor`'s own opening-handshake probe; the failure it describes
+is one instance of a broader one, below.
 
-**`check` and `annotate` now say so.** Unlike the two failure modes above,
-this one used to reach the exit with no notice at all — the request
-silently widened to `FoldResult::Widen` per call, which was correct
+**Cause.** `php` exists on `PATH` and the process starts, but a request never
+gets answered — a `php` wrapper script that never execs real PHP, a broken
+`php.ini` that hangs on startup, an `auto_prepend_file` that never returns, a
+`php` built without the pieces the sidecar's inline script needs. This can
+happen at the very first request (the opening `env()` handshake, which is
+what `doctor`'s probe above catches) or partway through an otherwise healthy
+run — the same causes, just not hit until later, or a child that answers
+fine and then dies or hangs answering some particular call. Either way this
+is the "protocol mismatch" case: the process is alive, but it is not
+speaking the sidecar's JSON-RPC framing for that one request, so it times
+out and that specific fold widens; the sidecar recovers on the next request
+(respawning up to a small cap) but the finding that request would have
+proven is already lost.
+
+**`check` and `annotate` now say so, either way.** Unlike the two failure
+modes above, this one used to reach the exit with no notice at all — the
+request silently widened to `FoldResult::Widen` per call, which was correct
 (nothing false was ever reported) but invisible, the one degradation mode
 that broke ADR-0004's "incompleteness is never silent" posture (issue
 #110). Both commands now print a dedicated notice on stderr the first time
-a spawned sidecar fails to answer, worded differently from the "no `php`
-on `PATH`" notice above because the cause and the fix differ:
+a spawned sidecar fails to answer a request — whether that is the opening
+handshake or a request encountered later in an otherwise-successful run —
+worded differently from the "no `php` on `PATH`" notice above because the
+cause and the fix differ:
 
 ```
 $ env PATH=/path/to/broken-php-wrapper steins check .
-note: PHP sidecar spawned but never answered the env() handshake — running as sound subset (degraded): findings that require executing PHP are omitted, and builtin return types come from the catalog's declarations, unverified; run `steins doctor` for detail
+note: PHP sidecar stopped answering — running as sound subset (degraded): findings that require executing PHP are omitted, and builtin return types come from the catalog's declarations, unverified; run `steins doctor` for detail
 ./src/Greeter.php:16:22: error[type.argument-mismatch]: argument null to Greeter::greet() cannot become string $name — proven TypeError (coercive mode)
 $ echo $?
 1
 ```
 
-The notice prints **once per run**, not once per widened fold — a run
-that keeps hitting the same dead sidecar on every argument would otherwise
-drown its own findings in a repeated line. The exit code is unaffected
-either way (ADR-0004): a degraded environment is surfaced, not failed.
-`steins doctor` remains the place to confirm the diagnosis and see the
-full posture, including the version-skew detail the one-line notice has no
-room for.
+The notice prints **once per run**, the first time any request fails this
+way — not once per widened fold, and not only when the very first request
+fails. A run that keeps hitting the same dead sidecar on every argument
+would otherwise drown its own findings in a repeated line, and a sidecar
+that answers its first few requests fine and then goes quiet is exactly as
+worth flagging as one that never answered at all: a lost reply is never
+retried, so that one finding is gone regardless of what the sidecar does
+afterward. The exit code is unaffected either way (ADR-0004): a degraded
+environment is surfaced, not failed. `steins doctor` remains the place to
+confirm the diagnosis and see the full posture, including the version-skew
+detail the one-line notice has no room for.
 
 **Fix.** Confirm `php -v` runs a working interpreter from a plain
 shell (not through whatever wrapper `PATH` resolves inside your CI runner
