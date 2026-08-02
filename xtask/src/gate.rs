@@ -284,7 +284,18 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // fail together. PHPStan reports the identical class for sealed
     // shapes. Every OSS package unchanged (the CI fp-gate stayed green on
     // the same commit); proof layer 0 throughout; nsrt LOST 0.
-    ("pxxxx-monorepo", 497),
+    // 497 → 498 (+1), 2026-08-02, with ADR-0073 (inline `@var` cast seeding,
+    // PR #121): the new finding is the SAME sealed-array-shape class the
+    // +10/ADR-0072 entry above already recorded, surfaced by a different
+    // path — a controller's statement-level `/** @var array{9 keys} */`
+    // cast now seeds the full shape it names, and the very next statement
+    // hands that value to a sibling class's static setter whose declared
+    // `@param array{…}` is sealed at 8 keys — one key short of the cast.
+    // TRUE: read both docblocks at source (not just the finding text) —
+    // the setter's contract genuinely under-declares what its one caller
+    // (the inline cast says so explicitly) always passes. Every OSS
+    // package unchanged; proof layer 0; the gate is GREEN again at 498.
+    ("pxxxx-monorepo", 498),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).
