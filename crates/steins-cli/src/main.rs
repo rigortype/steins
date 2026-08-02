@@ -535,11 +535,25 @@ fn match_baseline(
     // never looked for; it does not fit a debug entry, which is not "outside this
     // surface" but a mistake that can never become valid again (debug findings now
     // always bypass the matcher, above, so such an entry can never be consumed by
-    // any future run either). Folding `Layer::Debug` into the stale predicate
-    // surfaces it once, the same way any other stale entry surfaces, so
-    // `--set-baseline` clears it instead of it sitting invisible forever.
-    let stale = matcher.stale_count_within(surface.rung(), |id| {
-        surface.surfaces_id(id) || matches!(steins_infer::layer(id), Some(steins_infer::Layer::Debug))
+    // any future run either).
+    //
+    // A debug entry must surface as stale on EVERY run, not only once the run's
+    // rung reaches its own capture rung — the ADR-0062 A-G10 "not yet analyzed
+    // that surface" reading behind `captured <= rung` answers a question that
+    // does not apply here: a debug finding is checked unconditionally on every
+    // profile (`is_surfaced`), so an entry captured at `strict` and consulted on
+    // a `default` run is just as dead as one captured at `default` (review
+    // finding on issue #108, PR #133 — the first cut of this fix kept the rung
+    // comparison and left a `strict`-captured debug entry silently dormant on a
+    // `default` run). Debug ids therefore ignore `captured` entirely here, the
+    // same way `match_baseline`'s per-finding loop above ignores it when
+    // deciding whether to bypass the matcher.
+    let stale = matcher.stale_count_within(|id, captured| {
+        if matches!(steins_infer::layer(id), Some(steins_infer::Layer::Debug)) {
+            true
+        } else {
+            captured <= surface.rung() && surface.surfaces_id(id)
+        }
     });
 
     // The drowns-loudly notice (ADR-0050 §8): ids the current surface admits that

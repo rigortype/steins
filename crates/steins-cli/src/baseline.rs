@@ -233,23 +233,31 @@ impl Matcher {
     }
 
     /// Surface-aware staleness (ADR-0050 §8, ADR-0062 A-G10): the number of
-    /// unconsumed entries that the current run **could** have matched. Two
-    /// independent conditions, both required:
+    /// unconsumed entries `admits` accepts, given each entry's id and the rung it
+    /// was captured at. The ordinary reading bundles two independent conditions:
     ///
-    /// * the entry's id is inside the current run's surface (`in_surface`) — an id
-    ///   this profile never looked for is **dormant**, kept and not counted; and
-    /// * the entry's capture rung is at or below `rung` — an entry captured at
-    ///   `strict` never cries unmatched on a `default` run, even for an id whose
-    ///   floor would admit it, because that run did not analyze the same surface.
+    /// * the entry's id is inside the current run's surface — an id this profile
+    ///   never looked for is **dormant**, kept and not counted; and
+    /// * the entry's capture rung is at or below the run's rung — an entry
+    ///   captured at `strict` never cries unmatched on a `default` run, even for
+    ///   an id whose floor would admit it, because that run did not analyze the
+    ///   same surface.
     ///
-    /// Passing `Floor::Strict` with `|_| true` recovers the pre-ADR-0050
-    /// unconditional stale count. Legacy untagged entries read as `Floor::Default`,
-    /// so the second clause is vacuous for them and behavior is unchanged.
+    /// `|_, captured| captured <= Floor::Strict` recovers the pre-ADR-0050
+    /// unconditional stale count (legacy untagged entries read as `Floor::Default`,
+    /// so the clause is vacuous for them and behavior is unchanged). The rung
+    /// argument only makes sense for ids the rung ladder actually governs — the
+    /// debug lane (ADR-0053 §4/§8, issue #108) is judged on **every** rung, since
+    /// a debug finding is checked on every profile and a debug baseline entry can
+    /// never be matched again regardless of rung (the caller bypasses the matcher
+    /// for it unconditionally); a caller carving that out ignores `captured`
+    /// entirely for those ids rather than this method special-casing a layer it
+    /// has no way to name.
     #[must_use]
-    pub fn stale_count_within(&self, rung: Floor, in_surface: impl Fn(&str) -> bool) -> usize {
+    pub fn stale_count_within(&self, admits: impl Fn(&str, Floor) -> bool) -> usize {
         self.counts
             .iter()
-            .filter(|((id, _, _), (n, captured))| *n > 0 && *captured <= rung && in_surface(id))
+            .filter(|((id, _, _), (n, captured))| *n > 0 && admits(id, *captured))
             .map(|(_, (n, _))| *n)
             .sum()
     }
@@ -283,14 +291,14 @@ mod tests {
         assert!(m.take("x", "a", "h"));
         assert!(m.take("x", "a", "h"));
         assert!(!m.take("x", "a", "h"), "third finding exhausts the two entries");
-        assert_eq!(m.stale_count_within(Floor::Strict, |_| true), 0);
+        assert_eq!(m.stale_count_within(|_, _| true), 0);
     }
 
     #[test]
     fn unconsumed_entries_are_stale() {
         let e = Entry { id: "x".into(), path: "a".into(), hash: "h".into(), surface: None };
         let m = Matcher::new(&[e]);
-        assert_eq!(m.stale_count_within(Floor::Strict, |_| true), 1, "never matched → stale");
+        assert_eq!(m.stale_count_within(|_, _| true), 1, "never matched → stale");
     }
 
     #[test]
@@ -339,9 +347,9 @@ mod tests {
         ];
         let m = Matcher::new(&entries);
         // Neither consumed. Under a proof-only surface, throw.undeclared is dormant.
-        assert_eq!(m.stale_count_within(Floor::Strict, |_| true), 2, "raw stale counts both");
+        assert_eq!(m.stale_count_within(|_, _| true), 2, "raw stale counts both");
         assert_eq!(
-            m.stale_count_within(Floor::Strict, |id| id == "call.on-null"),
+            m.stale_count_within(|id, _| id == "call.on-null"),
             1,
             "only the in-surface entry is stale; the other is dormant"
         );
@@ -410,9 +418,21 @@ mod tests {
         let m = Matcher::new(&entries);
         // The id itself IS fireable at default — so only the capture rung can make
         // this dormant, which is exactly what the per-entry tag buys.
-        assert_eq!(m.stale_count_within(Floor::Default, |_| true), 0, "dormant on a default run");
-        assert_eq!(m.stale_count_within(Floor::Contracts, |_| true), 0, "still below strict");
-        assert_eq!(m.stale_count_within(Floor::Strict, |_| true), 1, "judged on a strict run");
+        assert_eq!(
+            m.stale_count_within(|_, captured| captured <= Floor::Default),
+            0,
+            "dormant on a default run"
+        );
+        assert_eq!(
+            m.stale_count_within(|_, captured| captured <= Floor::Contracts),
+            0,
+            "still below strict"
+        );
+        assert_eq!(
+            m.stale_count_within(|_, captured| captured <= Floor::Strict),
+            1,
+            "judged on a strict run"
+        );
     }
 
     #[test]
@@ -425,8 +445,35 @@ mod tests {
         }];
         let m = Matcher::new(&entries);
         for rung in [Floor::Default, Floor::Contracts, Floor::Strict] {
-            assert_eq!(m.stale_count_within(rung, |_| true), 1, "{rung:?}");
+            assert_eq!(m.stale_count_within(|_, captured| captured <= rung), 1, "{rung:?}");
         }
+    }
+
+    #[test]
+    fn a_debug_entry_is_stale_at_every_rung_regardless_of_its_own_capture_rung() {
+        // Review finding on issue #108 (PR #133): a debug entry captured under
+        // `strict` and consulted on a `default` run kept `*captured <= rung` in
+        // the predicate, so it read as `Strict <= Default` = false — silently
+        // dormant forever, contradicting the PR's own stated ruling that a
+        // leftover debug entry is dead weight at every rung and must surface as
+        // stale. The rung comparison only makes sense for ids the ladder governs;
+        // a caller carving out the debug lane must ignore `captured` for it
+        // entirely, which is what `main.rs`'s `match_baseline` now does.
+        let entries = vec![Entry {
+            id: "debug.type".into(),
+            path: "a".into(),
+            hash: "h".into(),
+            surface: Some("strict".into()),
+        }];
+        let m = Matcher::new(&entries);
+        let admits_ignoring_rung_for_debug = |id: &str, captured: Floor| {
+            if id == "debug.type" { true } else { captured <= Floor::Default }
+        };
+        assert_eq!(
+            m.stale_count_within(admits_ignoring_rung_for_debug),
+            1,
+            "a debug entry is stale on every run, not just at or above its own capture rung"
+        );
     }
 
     #[test]
