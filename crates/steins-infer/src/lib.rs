@@ -5474,6 +5474,13 @@ impl<'a> Cx<'a> {
     /// method, or closure (the same file this `Cx` points at), or `None` for the
     /// top-level script scope or an owner with no native scalar/union return type.
     fn scope_return(&self, scope: &'a Scope) -> Option<(&'a NativeType, String)> {
+        // A generator's declared return type names the `Generator` object the
+        // *call* yields, not the values of in-body `return` (those are
+        // `Generator::getReturn()`). Checking body returns against `: Generator`
+        // is a false positive (issue #128 review).
+        if scope.is_generator {
+            return None;
+        }
         match &scope.owner {
             ScopeOwner::TopLevel => None,
             ScopeOwner::Function(name) => {
@@ -5499,7 +5506,10 @@ impl<'a> Cx<'a> {
 
     /// The `@return` phpdoc envelope and display name of a scope's owning function
     /// or method (same file this `Cx` points at), or `None` when there is no
-    /// docblock `@return` (or the scope is top-level).
+    /// docblock `@return` (or the scope is top-level / a closure).
+    ///
+    /// Closures: deferred (issue #128) — the scope carries no adopted docblock yet,
+    /// so `@return` checking for arrow/block closures is a follow-up, not this slice.
     fn scope_return_phpdoc(&self, scope: &Scope) -> Option<(PType, String)> {
         match &scope.owner {
             ScopeOwner::TopLevel => None,
@@ -5520,6 +5530,7 @@ impl<'a> Cx<'a> {
                 let ret = env.ret?;
                 Some((ret, format!("{}::{}", cd.name, m.name)))
             }
+            // Issue #128: no docblock carrier on `Scope` for closures yet.
             ScopeOwner::Closure { .. } => None,
         }
     }
@@ -12944,7 +12955,7 @@ fn handle_var_call(
     out: &mut Vec<Diagnostic>,
 ) -> VarCallOutcome {
     let empty = VarCallOutcome { summary: None, return_arms: None };
-    if scope.poisoned || !call.positional_only {
+    if scope.poisoned {
         return empty;
     }
     let Some(known) = env.get(name) else { return empty };
@@ -12956,6 +12967,9 @@ fn handle_var_call(
                 let Some(callee_scope) = cx.closure_scope(*def_offset) else {
                     return empty;
                 };
+                // Declared return floor first — same rung free functions/methods keep
+                // when named/spread refuse binding descent (issue #128 review).
+                let return_arms = closure_return_arms(callee_scope);
                 // Argument type check at the `$fn(...)` site (mirrors the direct /
                 // propagated check for named calls, which never see a variable call).
                 check_callable_args(
@@ -12969,9 +12983,11 @@ fn handle_var_call(
                     env,
                     out,
                 );
+                // Named/spread: no positional binding map — keep arms, skip summary.
+                if !call.positional_only {
+                    return VarCallOutcome { summary: None, return_arms };
+                }
                 let display = format!("closure (defined on line {})", cv.def_line);
-                // Declared return floor from the closure's own `: R` (on the scope).
-                let return_arms = closure_return_arms(callee_scope);
                 let arg_values: Vec<&ArgValue> = call.args.iter().map(|a| &a.value).collect();
                 let summary = descend(
                     cx,
@@ -12999,6 +13015,9 @@ fn handle_var_call(
     }
 
     // 2. Proven string value → resolve as a function name (`$fn = 'strtolower';`).
+    if !call.positional_only {
+        return empty;
+    }
     if let Some(ArgValue::Str(s)) = known.singleton() {
         let nameref = NameRef { raw: s.clone(), kind: RefKind::Unqualified, offset: call.span.start };
         return dispatch_named_callable(cx, folder, scope.poisoned, &nameref, call, env, descent, out);
@@ -13007,7 +13026,8 @@ fn handle_var_call(
 }
 
 /// Declared-return contract arms of a closure scope from its native `: R`
-/// (issue #128). No phpdoc lane on the scope yet — native only.
+/// (issue #128). Phpdoc `@return` on closures is deferred (no docblock on the
+/// scope yet) — native only for this slice.
 fn closure_return_arms(callee_scope: &Scope) -> Option<Vec<ContractArm>> {
     let ty = callee_scope.ret_ty.as_ref()?;
     let native = native_arms(ty);

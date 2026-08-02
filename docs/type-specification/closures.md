@@ -38,10 +38,15 @@ Consequences:
 - Binding descent can **descend into a closure body** with the arguments an
   invocation site provides.
 - A native return type on the closure (`: R`) is checked at the body's return
-  sites exactly as for free functions (`type.return-mismatch`).
+  sites exactly as for free functions (`type.return-mismatch`), except for
+  **generators** (`yield` in the body): the declared type names the `Generator`
+  object, not in-body `return` values (`Generator::getReturn()`).
 - A `$fn(...)` invocation on a proven closure binding rebinds the body's return
   summary on the same rungs free functions and methods use (issue #128), so
-  `$f = fn(int $x): int => $x; $y = $f(42)` dumps `42`.
+  `$f = fn(int $x): int => $x; $y = $f(42)` dumps `42`. Named/spread calls keep
+  the declared return floor when binding descent refuses.
+- **Phpdoc `@return` on closures is deferred** (the scope carries no adopted
+  docblock yet) — native `: R` only for this slice.
 - A closure is an effect node in the effect fixpoint, and a throw node in the
   throw fixpoint. Its effects are its caller's effects
   ([effects.md](effects.md)).

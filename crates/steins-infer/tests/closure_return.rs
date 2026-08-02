@@ -83,6 +83,28 @@ fn block_closure_return_mismatch_fires() {
     assert_eq!(count(src, RETURN_ID), 1);
 }
 
+#[test]
+fn generator_closure_return_is_not_checked_against_generator() {
+    // `: Generator` names the *call* result. In-body `return 7` is getReturn()'s
+    // value and must not fire type.return-mismatch (issue #128 review).
+    let src = "<?php\n\
+        $f = function (): Generator {\n\
+            yield 1;\n\
+            return 7;\n\
+        };\n";
+    assert_eq!(count(src, RETURN_ID), 0, "generator body return is not a Generator value");
+}
+
+#[test]
+fn generator_function_return_is_not_checked_against_generator() {
+    let src = "<?php\n\
+        function gen(): Generator {\n\
+            yield 1;\n\
+            return 7;\n\
+        }\n";
+    assert_eq!(count(src, RETURN_ID), 0);
+}
+
 // ==========================================================================
 // (b) Value lane — `$fn(...)` summary rebinds at assignment
 // ==========================================================================
@@ -112,6 +134,17 @@ fn closure_call_factless_falls_to_declared_floor() {
     let src = "<?php\n\
         $f = fn(int $x): int => rand();\n\
         $y = $f(1);\n\
+        \\PHPStan\\dumpType($y);\n";
+    assert_eq!(one_type(src), "int");
+}
+
+#[test]
+fn named_arg_closure_call_keeps_declared_floor() {
+    // Named args refuse binding descent (positional map), but the declared
+    // return arms must still seed the floor — same rung as free functions.
+    let src = "<?php\n\
+        $f = fn(int $x): int => rand();\n\
+        $y = $f(x: 1);\n\
         \\PHPStan\\dumpType($y);\n";
     assert_eq!(one_type(src), "int");
 }
