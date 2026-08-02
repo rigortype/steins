@@ -95,18 +95,30 @@ fn stub_php_dir() -> PathBuf {
 /// quiet on the request that actually drives analysis — the case a first cut
 /// of the issue #110 fix missed (review finding on PR #134) by latching on
 /// "one success ever" instead of "one failure this run".
+///
+/// The `id` extraction is plain POSIX parameter expansion
+/// (`${_line#*"id":}` / `${id%%,*}`), not `sed` or any other external
+/// command: `PATH` below is narrowed to this directory ALONE (the same
+/// isolation [`run_against_stub`] always uses), so an external command is not
+/// resolvable — a first draft that shelled out to `sed` failed silently
+/// (`Sidecar` discards the child's stderr) into an empty `id` and malformed
+/// JSON, which poisoned on the very first request and made this test pass by
+/// accident, for the opening-handshake reason rather than the mid-run one it
+/// claims to test (review finding on PR #134, round 2).
 fn stub_php_dir_mid_run() -> PathBuf {
     write_stub_php(
         "midrun",
         "#!/bin/sh\n\
          # issue #110 repro (PR #134 review): answers env() for real, then goes\n\
          # silent on the first request that isn't env() — a mid-run hang, not an\n\
-         # opening one.\n\
+         # opening one. No external commands (PATH is narrowed to this directory\n\
+         # alone) — id extraction is POSIX parameter expansion only.\n\
          while :; do\n\
          \tread -r _line || exit 0\n\
          \tcase \"$_line\" in\n\
          \t*'\"method\":\"env\"'*)\n\
-         \t\tid=$(printf '%s' \"$_line\" | sed -n 's/.*\"id\":\\([0-9]*\\).*/\\1/p')\n\
+         \t\tid=${_line#*\\\"id\\\":}\n\
+         \t\tid=${id%%,*}\n\
          \t\tprintf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"php_version\":\"8.5.0\",\"extensions\":[],\"sapi\":\"cli\",\"int_size\":8}}\\n' \"$id\"\n\
          \t\t;;\n\
          \t*) : ;;\n\
@@ -214,10 +226,30 @@ fn check_surfaces_the_notice_when_the_sidecar_stops_answering_mid_run() {
     let path = fixture("fold_mixed.php");
     let start = std::time::Instant::now();
     let r = run_against_stub(&stub_php_dir_mid_run(), &["check", path.to_str().unwrap()]);
+    let elapsed = start.elapsed();
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(30),
-        "a hung sidecar must still bound the run — this is not a real hang, got {:?}",
-        start.elapsed()
+        elapsed < std::time::Duration::from_secs(30),
+        "a hung sidecar must still bound the run — this is not a real hang, got {elapsed:?}"
+    );
+    // A regression guard for the stub itself (PR #134 review, round 2): a first
+    // draft of `stub_php_dir_mid_run` shelled out to `sed` to extract the
+    // request id, which is not resolvable under the narrowed `PATH` this test
+    // relies on — `Sidecar` discards the child's stderr, so the failure was
+    // invisible, the reply came back malformed, and the run poisoned on the
+    // very first request (`env()` itself) instead of the fold that comes
+    // after it. That variant still made every assertion below pass, just for
+    // the wrong reason — the same notice text fires whether the opening
+    // handshake or a later request is what failed. A near-instant run is the
+    // signature of that failure mode (no real ADR-0024 timeout paid at all,
+    // since the malformed reply is rejected synchronously); the genuine
+    // mid-run path pays at least one real ~2s timeout, so require this run to
+    // be slower than the always-hang stub could ever fail on its very first
+    // request, which rules out "env() itself never got a valid reply".
+    assert!(
+        elapsed >= std::time::Duration::from_secs(1),
+        "a near-instant run means env() itself failed (e.g. the stub's id \
+         extraction silently broke) rather than a genuine mid-run timeout \
+         after a real handshake, got {elapsed:?}"
     );
 
     // Same sound-subset shape as the opening-handshake case: the direct
