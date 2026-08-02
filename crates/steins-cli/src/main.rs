@@ -444,6 +444,16 @@ fn write_baseline(
     let dir = baseline::base_dir(file);
     let entries: Vec<baseline::Entry> = findings
         .iter()
+        // The debug lane (ADR-0053 §4/§8) displays on every profile — `is_surfaced`
+        // says so on purpose (a dump is an answered question, always shown) — but
+        // must NEVER be captured: `surfaces_id`/`surface_ids` already exclude it
+        // from the capture predicate everywhere else, and this filter is what makes
+        // that exclusion hold here too. Without it, a committed `\PHPStan\dumpType()`
+        // (which reaches `inline.kept` because both the surface stage and the inline
+        // channel exempt the debug lane) gets baselined, and a later run reports it
+        // as "1 findings in baseline" at exit 0 — a guaranteed runtime fatal frozen
+        // green (issue #108).
+        .filter(|d| !matches!(steins_infer::layer(d.id), Some(steins_infer::Layer::Debug)))
         .map(|d| {
             let rel = baseline::relativize(&dir, &d.path);
             let hash = texts
@@ -498,6 +508,16 @@ fn match_baseline(
     let mut reported = Vec::new();
     let mut baselined = 0usize;
     for d in findings {
+        // The debug lane is exempt from the baseline on the MATCH side too (ADR-0053
+        // §4/§8): "never matched by a baseline entry" is symmetric with "never
+        // captured" (write_baseline, above). A debug finding must always report even
+        // if a stale entry happens to share its `(id, path, hash)` — e.g. a baseline
+        // written before this fix, or a hand-edit — so it bypasses the matcher
+        // entirely rather than consuming (and hiding behind) such an entry.
+        if matches!(steins_infer::layer(d.id), Some(steins_infer::Layer::Debug)) {
+            reported.push(d);
+            continue;
+        }
         let rel = baseline::relativize(&dir, &d.path);
         let hash = texts
             .get(&d.path)
@@ -508,7 +528,33 @@ fn match_baseline(
             reported.push(d);
         }
     }
-    let stale = matcher.stale_count_within(surface.rung(), |id| surface.surfaces_id(id));
+    // Staleness (§8) folds in the debug-layer carve-out. `surface.surfaces_id`
+    // always excludes debug ids (the capture predicate never admits the lane), so
+    // reading it alone would call every leftover debug entry *dormant* — kept,
+    // never reported, forever. That reading fits an id the active surface simply
+    // never looked for; it does not fit a debug entry, which is not "outside this
+    // surface" but a mistake that can never become valid again (debug findings now
+    // always bypass the matcher, above, so such an entry can never be consumed by
+    // any future run either).
+    //
+    // A debug entry must surface as stale on EVERY run, not only once the run's
+    // rung reaches its own capture rung — the ADR-0062 A-G10 "not yet analyzed
+    // that surface" reading behind `captured <= rung` answers a question that
+    // does not apply here: a debug finding is checked unconditionally on every
+    // profile (`is_surfaced`), so an entry captured at `strict` and consulted on
+    // a `default` run is just as dead as one captured at `default` (review
+    // finding on issue #108, PR #133 — the first cut of this fix kept the rung
+    // comparison and left a `strict`-captured debug entry silently dormant on a
+    // `default` run). Debug ids therefore ignore `captured` entirely here, the
+    // same way `match_baseline`'s per-finding loop above ignores it when
+    // deciding whether to bypass the matcher.
+    let stale = matcher.stale_count_within(|id, captured| {
+        if matches!(steins_infer::layer(id), Some(steins_infer::Layer::Debug)) {
+            true
+        } else {
+            captured <= surface.rung() && surface.surfaces_id(id)
+        }
+    });
 
     // The drowns-loudly notice (ADR-0050 §8): ids the current surface admits that
     // the captured surface did not. A pre-ADR-0050 header (no capture surface) can

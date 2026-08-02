@@ -250,6 +250,120 @@ fn duplicate_findings_and_entries_match_one_for_one() {
     assert!(!r.stdout.contains("stale"), "consumed entry is not stale, got:\n{}", r.stdout);
 }
 
+// ------------------------------------------------ debug lane exemption (#108) ---
+//
+// ADR-0053 §4/§8: the debug lane is exempt from the baseline on BOTH sides —
+// never captured (`write_baseline`) and never matched (`match_baseline`). Before
+// issue #108's fix, `write_baseline` captured a `debug.type` entry (the surface
+// stage deliberately keeps the whole debug lane displayed, ADR-0053 §4, so a
+// dump reached `inline.kept` uncaptured-but-present) and a rerun then baselined
+// it, silently downgrading a guaranteed runtime fatal to "N findings in
+// baseline" at exit 0.
+
+#[test]
+fn set_baseline_never_captures_a_debug_dump_entry() {
+    let dir = workdir("debug-no-capture");
+    // One ordinary finding plus one dumpType() call: only the ordinary finding
+    // may reach the baseline.
+    write(&dir, "a.php", &format!("{WIDTH_DEF}width(\"abc\");\n$y = 1; \\PHPStan\\dumpType($y);\n"));
+    let r = run_in(&dir, &["check", "--set-baseline", "a.php"]);
+    assert_eq!(r.code, 0, "set-baseline exits 0; stderr:\n{}", r.stderr);
+    assert!(
+        r.stderr.contains("wrote 1 baseline entries"),
+        "only the ordinary finding is captured, not the dump; stderr:\n{}",
+        r.stderr
+    );
+
+    let text = std::fs::read_to_string(dir.join(".steins-baseline.jsonl")).expect("baseline written");
+    assert!(!text.contains("debug.type"), "no debug entry written, got:\n{text}");
+    assert!(text.contains("type.argument-mismatch"), "the ordinary finding IS captured, got:\n{text}");
+}
+
+#[test]
+fn debug_dump_still_fails_after_set_baseline_rerun() {
+    // A dump-only fixture: `--set-baseline` has nothing to capture, and the dump
+    // must keep reporting — and keep failing — on the very next run.
+    let dir = workdir("debug-still-fails");
+    write(&dir, "a.php", "<?php\n$x = 1;\n\\PHPStan\\dumpType($x);\n");
+    let set = run_in(&dir, &["check", "--set-baseline", "a.php"]);
+    assert_eq!(set.code, 0, "set-baseline exits 0; stderr:\n{}", set.stderr);
+    assert!(set.stderr.contains("wrote 0 baseline entries"), "stderr:\n{}", set.stderr);
+
+    let r = run_in(&dir, &["check", "a.php"]);
+    assert_eq!(r.code, 1, "the dump still reds CI after --set-baseline; stdout:\n{}", r.stdout);
+    assert!(r.stdout.contains("error[debug.type]"), "got:\n{}", r.stdout);
+    assert!(!r.stdout.contains("in baseline"), "nothing was baselined, got:\n{}", r.stdout);
+}
+
+#[test]
+fn a_leftover_debug_baseline_entry_never_suppresses_and_is_reported_stale() {
+    // A pre-fix baseline (or a hand-edit) may still carry a `debug.*` entry.
+    // ADR-0053's exemption is symmetric, so `match_baseline` must refuse it on the
+    // read side exactly as `write_baseline` now refuses to write one. A debug
+    // finding bypasses the matcher unconditionally (main.rs), so the outcome does
+    // not depend on the forged entry's hash matching anything real — the fixture
+    // uses an arbitrary one on purpose, to pin that the hash is irrelevant.
+    //
+    // The ruling this pins (defect 2's open question): a leftover debug entry is
+    // NOT silently "dormant" (ADR-0050 §8's reading for an id outside the active
+    // surface, which would keep it forever unreported) — it can never become
+    // valid again, so it is reported the same way any other stale entry is:
+    // counted in "N baseline entries no longer match (stale — rerun
+    // --set-baseline)", which cleans it out on the next capture.
+    let dir = workdir("debug-leftover-entry");
+    write(&dir, "a.php", "<?php\n$x = 1;\n\\PHPStan\\dumpType($x);\n");
+    assert_eq!(run_in(&dir, &["check", "--set-baseline", "a.php"]).code, 0);
+
+    let header = std::fs::read_to_string(dir.join(".steins-baseline.jsonl")).unwrap();
+    let header_line = header.lines().next().expect("header line");
+    let forged = format!(
+        "{header_line}\n{{\"id\":\"debug.type\",\"path\":\"a.php\",\"hash\":\"deadbeefdeadbeef\"}}\n"
+    );
+    std::fs::write(dir.join(".steins-baseline.jsonl"), forged).unwrap();
+
+    let r = run_in(&dir, &["check", "a.php"]);
+    assert_eq!(r.code, 1, "the dump still fails despite the leftover entry; stdout:\n{}", r.stdout);
+    assert!(r.stdout.contains("error[debug.type]"), "not suppressed, got:\n{}", r.stdout);
+    assert!(!r.stdout.contains("in baseline"), "not consumed as a baselined finding, got:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("1 baseline entries no longer match (stale"),
+        "the leftover entry surfaces as stale, not silently dormant; got:\n{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn a_strict_captured_debug_entry_is_stale_on_a_default_run_too() {
+    // Review finding on issue #108 (PR #133): the first cut of the stale fix kept
+    // ADR-0062 A-G10's `captured <= rung` rung gate alongside the debug carve-out,
+    // so a `debug.type` entry tagged `"surface":"strict"` and consulted on a
+    // `default` run read as `Strict <= Default` = false and was silently kept —
+    // dormant forever, exactly the bug the ruling above was meant to close. A
+    // debug entry is dead weight at every rung (a debug finding is checked on
+    // every profile, and it can never be matched — see the leftover-entry test
+    // above), so the rung it happened to be captured at must not matter.
+    let dir = workdir("debug-leftover-entry-strict-rung");
+    write(&dir, "a.php", "<?php\n$x = 1;\n\\PHPStan\\dumpType($x);\n");
+    assert_eq!(run_in(&dir, &["check", "--set-baseline", "--profile", "strict", "a.php"]).code, 0);
+
+    let header = std::fs::read_to_string(dir.join(".steins-baseline.jsonl")).unwrap();
+    let header_line = header.lines().next().expect("header line");
+    let forged = format!(
+        "{header_line}\n{{\"id\":\"debug.type\",\"path\":\"a.php\",\"hash\":\"deadbeefdeadbeef\",\"surface\":\"strict\"}}\n"
+    );
+    std::fs::write(dir.join(".steins-baseline.jsonl"), forged).unwrap();
+
+    // Run under the DEFAULT profile — lower rung than the entry's own capture tag.
+    let r = run_in(&dir, &["check", "a.php"]);
+    assert_eq!(r.code, 1, "the dump still fails on a lower-rung run; stdout:\n{}", r.stdout);
+    assert!(r.stdout.contains("error[debug.type]"), "not suppressed, got:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("1 baseline entries no longer match (stale"),
+        "a strict-captured debug entry is stale even on a default run, got:\n{}",
+        r.stdout
+    );
+}
+
 #[test]
 fn ignore_baseline_bypasses() {
     let dir = workdir("bypass");

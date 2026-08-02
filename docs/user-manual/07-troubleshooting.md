@@ -623,11 +623,10 @@ during debugging, with a `debug.type` finding.
 **Cause.** This is deliberate, not a bug. `dumpType()` and
 `dumpPhpDocType()` are introspection calls — "what does Steins believe this
 value is right now" — and they report at **fail level unconditionally**,
-on every profile, out of reach of `@steins-ignore` (and of the baseline by
-design; issue #108 tracks the binary gap there). A committed one is also a
-runtime fatal in real PHP if the shim
-is not stripped; failing the build is the CI feedback that the debug call
-was left in, the same posture PHPStan takes on its own `dumpType()`.
+on every profile, out of reach of `@steins-ignore` and of the baseline by
+design. A committed one is also a runtime fatal in real PHP if the shim is
+not stripped; failing the build is the CI feedback that the debug call was
+left in, the same posture PHPStan takes on its own `dumpType()`.
 
 ```php
 <?php

@@ -611,8 +611,19 @@ fn section_baseline(cli_path: Option<&str>, surface: &profile::Surface, contradi
                 surface.surface_ids().len()
             );
             // Dormant (ADR-0050 §8): an entry whose id is outside the ACTIVE surface —
-            // kept, not stale, because this profile simply never looks for it.
-            let dormant = entries.iter().filter(|e| !surface.surfaces_id(&e.id)).count();
+            // kept, not stale, because this profile simply never looks for it. The
+            // debug lane (ADR-0053 §4/§8, issue #108) never reads "outside the
+            // surface" — `surfaces_id` excludes it unconditionally, so it would
+            // otherwise always count here — but a debug finding is checked on
+            // every profile and a debug baseline entry can never be matched again,
+            // so "kept, not stale" is the wrong story for it; `check` (main.rs's
+            // `match_baseline`) reports the same entry as stale, and this line must
+            // not contradict that by calling it dormant.
+            let dormant = entries
+                .iter()
+                .filter(|e| !surface.surfaces_id(&e.id))
+                .filter(|e| !matches!(steins_infer::layer(&e.id), Some(steins_infer::Layer::Debug)))
+                .count();
             if dormant > 0 {
                 outln!(
                     "  {dormant} dormant entr{} (id outside the active surface — kept, not stale)",

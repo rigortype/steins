@@ -351,13 +351,14 @@ channel. A stale `@steins-ignore` that nothing removes is an ignore nobody
 ever cleans up. A typo'd effect label silently disables the envelope that
 contains it.
 
-So they print in every profile, they default to `fail`, and `disable` does not
-reach them. A profile that tries anyway changes nothing:
+So they print in every profile, they default to `fail`, and neither `disable`
+nor `warn` reaches them. A profile that tries either changes nothing:
 
 ```toml
 [profile.quiet]
 extends = "default"
 disable = ["effect.*", "suppress.*"]
+warn     = ["effect.*", "suppress.*"]
 ```
 
 ```
@@ -366,6 +367,12 @@ src/Fetcher.php:9:7: error[effect.unknown-label]: unknown effect label 'io.netwr
 $ echo $?
 1
 ```
+
+`warn` matters here as much as `disable` does: a mechanics id that could be
+demoted to a report-without-fail would let a stale `@steins-ignore` render as
+a harmless `warning[suppress.unmatched]` and exit `0` — the exact rot the
+mechanics layer exists to catch, reopened through a different door. Neither
+channel gets one.
 
 They are also exempt from the baseline. `--set-baseline` writes zero entries
 for a run whose only finding is a `suppress.unmatched`, so a stale ignore

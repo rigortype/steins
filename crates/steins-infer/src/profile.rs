@@ -248,15 +248,25 @@ impl Surface {
     #[must_use]
     pub fn surfaces_id(&self, id: &str) -> bool {
         let Some(l) = layer(id) else { return false };
+        // The debug lane's capture exemption (§4/§8) is a LAYER property, decided
+        // BEFORE `enable`/`disable` are even consulted — unlike the ladder below, it
+        // is not something a profile can vote on. A prior revision let an explicit
+        // `enable = ["debug.type"]` pattern force `on` back to `true` past this
+        // point (issue #108 review): `pattern_is_known` accepts any registered id,
+        // debug ids included, so that pattern validates in a real `steins.toml` and
+        // reached `layers_on()` / `surface_ids()` — the debug lane's own doc
+        // comments on those two functions claim it never does. Returning here,
+        // before `layer_always_on` and the ladder, closes the corner instead of
+        // documenting it: no pattern in any channel can pull a debug id into the
+        // capture surface. Its DISPLAY is unaffected — that is decided separately
+        // and unconditionally in [`Surface::is_surfaced`].
+        if l == Layer::Debug {
+            return false;
+        }
         if layer_always_on(l) {
             return true;
         }
-        // The debug lane's capture exemption (§4/§8) is a LAYER property, decided
-        // before the ladder: a dump displays everywhere but is never captured, so
-        // its floor never gets a vote. Keeping this arm here (rather than inventing
-        // an unreachable floor) preserves the pre-S6 reading exactly, including the
-        // corner where an explicit `enable` pattern below forces a debug id on.
-        let mut on = l != Layer::Debug && surface_floor(id).is_some_and(|f| f <= self.rung);
+        let mut on = surface_floor(id).is_some_and(|f| f <= self.rung);
         if self.enable.iter().any(|p| pattern_matches(p, id)) {
             on = true;
         }
@@ -319,6 +329,16 @@ impl Surface {
         if id == DEBUG_TYPE_ID || id == DEBUG_PHPDOC_TYPE_ID {
             return Level::Fail;
         }
+        // Mechanics ids are profile-inert (ADR-0050 §1, diagnostic-policy.md "no
+        // profile disables OR DEMOTES mechanics ids"): `surfaces_id` already makes
+        // `disable` powerless via `layer_always_on`, and `warn` must be equally
+        // powerless, or a profile's `warn = ["suppress.*"]` demotes
+        // `suppress.unmatched` to a report-without-fail and a stale `@steins-ignore`
+        // stops failing CI — exactly the rot the mechanics layer exists to prevent
+        // (issue #108).
+        if layer(id) == Some(Layer::Mechanics) {
+            return Level::Fail;
+        }
         if self.warn.iter().any(|p| pattern_matches(p, id)) {
             Level::Warn
         } else {
@@ -328,25 +348,32 @@ impl Surface {
 
     /// The named layers on this surface, sorted (ADR-0054 §9: the doctor's
     /// "surface described" line). Mechanics is always-on regardless of membership
-    /// (§1); every rung carries it, so this is a faithful summary. The debug lane is
+    /// (§1); every rung carries it, so it always appears. The debug lane is
     /// display-only and never a surface layer (§8 capture/display split), so it does
-    /// not appear here.
+    /// not appear here even though it always displays.
     ///
-    /// Derived from the rung rather than a stored set, and byte-identical to the
-    /// pre-S6 built-in sets: `default` was `{proof, mechanics}`, `contracts` added
-    /// `contract`. `strict` names the SAME three layers — it is a floor within the
-    /// contract layer, not a fourth layer (A-G10), which is precisely why the
-    /// registry needed a floor attribute instead of another `Layer` variant.
+    /// Derived from the ids actually admitted by [`Surface::surfaces_id`] — every
+    /// registered id's layer, deduped — rather than a static rung-to-layer table.
+    /// The prior table read the rung alone, which was byte-identical for every
+    /// built-in EXCEPT `throws-direct`: that profile reaches `throw.undeclared` (a
+    /// contract-layer id) through its `enable` list rather than through its rung
+    /// (`rung = Floor::Default`, same as `default`), so the rung-only table reported
+    /// `[mechanics, proof]` and hid the contract layer the surface actually checks
+    /// (issue #108). Reading the real admitted ids fixes `throws-direct` and stays
+    /// byte-identical for `default` / `contracts` / `strict`, none of which uses
+    /// `enable` to reach outside its rung: `default` admits only `Floor::Default`
+    /// ids (proof + mechanics; debug is capture-excluded per `surfaces_id`),
+    /// `contracts` and `strict` additionally admit `Floor::Contracts`/`Floor::Strict`
+    /// contract-layer ids — the same two/three layers the old table named.
     #[must_use]
     pub fn layers_on(&self) -> Vec<&'static str> {
-        let layers: &[Layer] = match self.rung {
-            Floor::Default => &[Layer::Proof, Layer::Mechanics],
-            Floor::Contracts | Floor::Strict => {
-                &[Layer::Proof, Layer::Mechanics, Layer::Contract]
-            }
-        };
-        let mut v: Vec<&'static str> = layers.iter().map(|l| l.as_str()).collect();
+        let mut v: Vec<&'static str> = DIAGNOSTIC_REGISTRY
+            .iter()
+            .filter(|(id, ..)| self.surfaces_id(id))
+            .map(|(_, l, _)| l.as_str())
+            .collect();
         v.sort_unstable();
+        v.dedup();
         v
     }
 
@@ -504,6 +531,27 @@ mod tests {
     }
 
     #[test]
+    fn mechanics_ignore_warn_too() {
+        // issue #108, defect 1: `disable` was already powerless against mechanics
+        // ids (the test above); `warn` was NOT — a profile's `warn = ["suppress.*"]`
+        // demoted `suppress.unmatched` to report-without-fail, so a stale
+        // `@steins-ignore` stopped failing CI. diagnostic-policy.md is explicit: "no
+        // profile disables OR DEMOTES mechanics ids." Both channels must be inert.
+        let mut m = BTreeMap::new();
+        m.insert(
+            "quiet".to_owned(),
+            UserProfile { extends: Some("default".to_owned()), warn: vec!["suppress.*".to_owned()], ..Default::default() },
+        );
+        let s = ProfileConfigs(m).resolve(Some("quiet")).unwrap();
+        assert!(s.is_surfaced(&diag(SUPPRESS_UNMATCHED_ID, None)), "mechanics still surfaced");
+        assert_eq!(
+            s.level(SUPPRESS_UNMATCHED_ID),
+            Level::Fail,
+            "warn cannot demote a mechanics id — a stale @steins-ignore must keep failing CI"
+        );
+    }
+
+    #[test]
     fn user_profile_extends_and_warn_demotes() {
         let mut m = BTreeMap::new();
         m.insert(
@@ -632,6 +680,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn an_enable_pattern_cannot_pull_a_debug_id_into_the_capture_surface() {
+        // Review finding on issue #108 (PR #133): `enable = ["debug.type"]` is a
+        // pattern `pattern_is_known` accepts (debug ids are registered, so the
+        // config layer never rejects it) and used to reach past `surfaces_id`'s
+        // debug carve-out — the `on = true` write happened unconditionally,
+        // regardless of layer. That leaked a debug id into `layers_on()` (doctor's
+        // surface line) and `surface_ids()` (the baseline capture header),
+        // contradicting both functions' own doc comments. `surfaces_id` now
+        // returns for the debug lane before `enable`/`disable` are even read.
+        let mut m = BTreeMap::new();
+        m.insert(
+            "debug-enabled".to_owned(),
+            UserProfile { enable: vec![DEBUG_TYPE_ID.to_owned()], ..Default::default() },
+        );
+        let s = ProfileConfigs(m).resolve(Some("debug-enabled")).unwrap();
+        assert!(s.is_surfaced(&diag(DEBUG_TYPE_ID, None)), "still displays — enable didn't need to help");
+        assert!(!s.surfaces_id(DEBUG_TYPE_ID), "enable cannot pull a debug id into the capture predicate");
+        assert!(
+            !s.surface_ids().iter().any(|c| c == DEBUG_TYPE_ID),
+            "enable cannot pull a debug id into the baseline capture set"
+        );
+        assert_eq!(
+            s.layers_on(),
+            vec!["mechanics", "proof"],
+            "debug must not appear in the surface's layer list even under an explicit enable"
+        );
     }
 
     #[test]
@@ -764,6 +841,19 @@ mod tests {
         assert_eq!(c.layers_on(), s.layers_on());
         assert_eq!(s.layers_on(), vec!["contract", "mechanics", "proof"]);
         assert_eq!(empty().resolve(None).unwrap().layers_on(), vec!["mechanics", "proof"]);
+    }
+
+    #[test]
+    fn throws_direct_names_the_contract_layer_it_actually_checks() {
+        // issue #108, defect 3: `throws-direct` sits at `Floor::Default` (same rung
+        // as `default`) and reaches `throw.undeclared` — a CONTRACT-layer id —
+        // through its `enable` list, not through its rung. The old rung-only table
+        // read only the rung and reported `[mechanics, proof]`, hiding the contract
+        // layer `doctor` (and this surface) actually checks. `layers_on` must derive
+        // from the ids really admitted by `surfaces_id`, which already accounts for
+        // `enable`.
+        let td = empty().resolve(Some("throws-direct")).unwrap();
+        assert_eq!(td.layers_on(), vec!["contract", "mechanics", "proof"]);
     }
 
     #[test]
