@@ -741,9 +741,10 @@ is deleting the comment.
 
 All four are exempt from `@steins-ignore` — an ignore naming `debug.type`
 reports `suppress.unmatched`. ADR-0053 exempts them from the baseline as
-well, though the current binary still captures a dump entry there; that gap
-is tracked as issue #108. The remedy for an unwanted dump is deleting the call
-(ADR-0053).
+well: `--set-baseline` never writes a debug entry, and a leftover one (from
+before this exemption, or a hand-edit) never suppresses a dump either — it
+resurfaces as a stale baseline entry instead. The remedy for an unwanted
+dump is deleting the call (ADR-0053).
 
 ## What to do with a finding
 

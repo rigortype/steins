@@ -247,10 +247,11 @@ that filename and the baseline workflow.
 
 Three things `steins.toml` will never grow, on purpose:
 
-- **No per-diagnostic on/off switch for a mechanics id.** `suppress.*` and
-  `effect.unknown-label` print on every profile regardless of `disable`,
-  because their whole job is to catch a suppression channel rotting —
-  disabling the watchdog defeats it.
+- **No per-diagnostic on/off or demotion switch for a mechanics id.**
+  `suppress.*` and `effect.unknown-label` print, and fail, on every profile
+  regardless of `disable` or `warn`, because their whole job is to catch a
+  suppression channel rotting — disabling or merely demoting the watchdog
+  defeats it.
 - **No ad-hoc `--enable id,id` flag.** Every surface a project runs under
   CI is a named profile in `steins.toml`, reviewable in a diff and stable
   across runs; an unnamed command-line surface is neither.
