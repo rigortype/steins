@@ -109,6 +109,8 @@ skill seals them into a version section at release time, reconstructing from
   - This removes false downstream findings, including the observed false `call.on-null` produced when a visible `return null` was incorrectly treated as the function's only possible result.
 - **A profile's `warn` can no longer demote a mechanics diagnostic, and `--set-baseline` no longer captures the debug layer.**
   - This is a breaking correction for a green CI that depended on either gap: a `warn` pattern matching `suppress.*` or `effect.unknown-label` no longer turns those ids into exit-neutral warnings, and a committed `PHPStan\dumpType()` frozen into an existing baseline starts failing again — a leftover `debug.*` baseline entry is now reported as stale instead of suppressing the dump. `steins doctor` also names the contract layer under the `throws-direct` profile, which it previously omitted from its surface line.
+- **`check` and `annotate` now report the degraded posture when the PHP sidecar spawns but a request goes unanswered — at startup or partway through the run.**
+  - A `php` that starts and then fails to answer a request — a wrapper script that never execs PHP, a configuration that hangs on startup, or a child that answers fine at first and then stops — previously produced a run that looked complete while the affected fold silently widened. One stderr notice per run now names the case, on the first occurrence regardless of when it happens, and points at `steins doctor`; findings, exit codes, and the sound-subset behavior itself are unchanged.
 
 ## [0.1.2] - 2026-07-30
 
