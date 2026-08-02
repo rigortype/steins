@@ -174,6 +174,26 @@ fn doctor_reflects_configured_profile() {
 }
 
 #[test]
+fn doctor_names_the_contract_layer_under_throws_direct() {
+    // issue #108, defect 3: `throws-direct` sits at the SAME rung as `default`
+    // (`Floor::Default`) and reaches `throw.undeclared` — a contract-layer id —
+    // through its `enable` list rather than its rung. `layers_on` used to read
+    // only the rung, so this profile's doctor line read "layers [mechanics,
+    // proof]" even though it checks a contract-layer id and reports it. The
+    // printed layer list must name every layer the surface actually admits.
+    let dir = workdir("throws-direct-layers");
+    write(&dir, "a.php", THREE_THROWS);
+    write(&dir, "steins.toml", "[check]\nprofile = \"throws-direct\"\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.stdout.contains("surface: layers [contract, mechanics, proof]"),
+        "the contract layer must be named under throws-direct; stdout:\n{}",
+        r.stdout
+    );
+}
+
+#[test]
 fn doctor_default_profile_provenance() {
     let dir = workdir("default-prof");
     write(&dir, "a.php", THREE_THROWS);

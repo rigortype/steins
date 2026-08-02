@@ -338,25 +338,32 @@ impl Surface {
 
     /// The named layers on this surface, sorted (ADR-0054 §9: the doctor's
     /// "surface described" line). Mechanics is always-on regardless of membership
-    /// (§1); every rung carries it, so this is a faithful summary. The debug lane is
+    /// (§1); every rung carries it, so it always appears. The debug lane is
     /// display-only and never a surface layer (§8 capture/display split), so it does
-    /// not appear here.
+    /// not appear here even though it always displays.
     ///
-    /// Derived from the rung rather than a stored set, and byte-identical to the
-    /// pre-S6 built-in sets: `default` was `{proof, mechanics}`, `contracts` added
-    /// `contract`. `strict` names the SAME three layers — it is a floor within the
-    /// contract layer, not a fourth layer (A-G10), which is precisely why the
-    /// registry needed a floor attribute instead of another `Layer` variant.
+    /// Derived from the ids actually admitted by [`Surface::surfaces_id`] — every
+    /// registered id's layer, deduped — rather than a static rung-to-layer table.
+    /// The prior table read the rung alone, which was byte-identical for every
+    /// built-in EXCEPT `throws-direct`: that profile reaches `throw.undeclared` (a
+    /// contract-layer id) through its `enable` list rather than through its rung
+    /// (`rung = Floor::Default`, same as `default`), so the rung-only table reported
+    /// `[mechanics, proof]` and hid the contract layer the surface actually checks
+    /// (issue #108). Reading the real admitted ids fixes `throws-direct` and stays
+    /// byte-identical for `default` / `contracts` / `strict`, none of which uses
+    /// `enable` to reach outside its rung: `default` admits only `Floor::Default`
+    /// ids (proof + mechanics; debug is capture-excluded per `surfaces_id`),
+    /// `contracts` and `strict` additionally admit `Floor::Contracts`/`Floor::Strict`
+    /// contract-layer ids — the same two/three layers the old table named.
     #[must_use]
     pub fn layers_on(&self) -> Vec<&'static str> {
-        let layers: &[Layer] = match self.rung {
-            Floor::Default => &[Layer::Proof, Layer::Mechanics],
-            Floor::Contracts | Floor::Strict => {
-                &[Layer::Proof, Layer::Mechanics, Layer::Contract]
-            }
-        };
-        let mut v: Vec<&'static str> = layers.iter().map(|l| l.as_str()).collect();
+        let mut v: Vec<&'static str> = DIAGNOSTIC_REGISTRY
+            .iter()
+            .filter(|(id, ..)| self.surfaces_id(id))
+            .map(|(_, l, _)| l.as_str())
+            .collect();
         v.sort_unstable();
+        v.dedup();
         v
     }
 
@@ -795,6 +802,19 @@ mod tests {
         assert_eq!(c.layers_on(), s.layers_on());
         assert_eq!(s.layers_on(), vec!["contract", "mechanics", "proof"]);
         assert_eq!(empty().resolve(None).unwrap().layers_on(), vec!["mechanics", "proof"]);
+    }
+
+    #[test]
+    fn throws_direct_names_the_contract_layer_it_actually_checks() {
+        // issue #108, defect 3: `throws-direct` sits at `Floor::Default` (same rung
+        // as `default`) and reaches `throw.undeclared` — a CONTRACT-layer id —
+        // through its `enable` list, not through its rung. The old rung-only table
+        // read only the rung and reported `[mechanics, proof]`, hiding the contract
+        // layer `doctor` (and this surface) actually checks. `layers_on` must derive
+        // from the ids really admitted by `surfaces_id`, which already accounts for
+        // `enable`.
+        let td = empty().resolve(Some("throws-direct")).unwrap();
+        assert_eq!(td.layers_on(), vec!["contract", "mechanics", "proof"]);
     }
 
     #[test]
