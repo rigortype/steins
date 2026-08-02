@@ -6035,9 +6035,11 @@ impl Known {
 }
 
 /// A binding-descent key: the callee (by FQN-ish key) plus its bound params.
+/// Each binding carries its trust [`Stratum`] so a Verified summary cannot be
+/// replayed for an Asserted entry with the same value (issue #128 review).
 /// Method descents may also carry a `this:` pseudo-binding for the exact
 /// receiver (ADR-0075 §2.1); closure descents carry `use:{name}` captures.
-type BindingKey = (String, Vec<(String, ArgValue)>);
+type BindingKey = (String, Vec<(String, ArgValue, Stratum)>);
 
 /// A **return-fact summary** (ADR-0057 amendment, slice T0): the join, over a
 /// callee's returning exits, of the returned expression's value-domain fact — a
@@ -13241,8 +13243,11 @@ fn descend(
     }
 
     // The binding key incorporates the captured snapshot so two calls of the same
-    // closure with different snapshots memoize distinctly (adversarial #1). The
-    // stratum is a trust attribute, not an identity — it is excluded from the key.
+    // closure with different snapshots memoize distinctly (adversarial #1). Each
+    // binding's stratum is part of the key (issue #128 review): a Verified summary
+    // for `$f('hi')` must not replay as Verified when the next call is `$f($u)` with
+    // `$u` Asserted Singleton('hi') — otherwise the Asserted claim launders into a
+    // proof premise through the memo.
     //
     // ADR-0075 §2.1: a method body reached through `resolve_exact` is keyed by
     // declaring FQN (`Base::m`), but two exact receivers (`Sub1`, `Sub2`) can
@@ -13251,13 +13256,20 @@ fn descend(
     // receiver so the memo never replays one receiver's value (or emissions) for
     // the other. Guarded resolutions pass `None` and key exactly as before — a
     // final/private body's inner dispatch is a pure function of its declaring class.
-    let mut key_binding: Vec<(String, ArgValue)> =
-        bound.iter().map(|(n, v, _)| (n.clone(), v.clone())).collect();
-    for (name, fact, _strat) in captures {
-        key_binding.push((format!("use:{name}"), arg_of_fact_key(fact)));
+    let mut key_binding: Vec<(String, ArgValue, Stratum)> = bound
+        .iter()
+        .map(|(n, v, s)| (n.clone(), v.clone(), *s))
+        .collect();
+    for (name, fact, strat) in captures {
+        key_binding.push((format!("use:{name}"), arg_of_fact_key(fact), *strat));
     }
     if let Some(exact) = &body_this_exact {
-        key_binding.push(("this:".to_owned(), ArgValue::Str(exact.clone())));
+        // Exact receiver is a runtime-proven identity — Verified.
+        key_binding.push((
+            "this:".to_owned(),
+            ArgValue::Str(exact.clone()),
+            Stratum::Verified,
+        ));
     }
     key_binding.sort_by(|a, b| a.0.cmp(&b.0));
     let key: BindingKey = (key_name.to_owned(), key_binding);

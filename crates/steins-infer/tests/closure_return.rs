@@ -222,3 +222,31 @@ fn asserted_capture_summary_stays_asserted() {
         "Asserted capture summary must not premise type.argument-mismatch"
     );
 }
+
+#[test]
+fn memo_does_not_launder_asserted_after_verified_same_value() {
+    // Issue #128 review: BindingKey without stratum collides Verified `$f('hi')`
+    // with Asserted `$f($u)` (same Singleton value) inside one outer descent —
+    // memo replay would hand a Verified summary to the Asserted call and premise
+    // a proof finding. Stratum is part of the key so the second call re-walks.
+    let src = "<?php\n\
+        /** @phpstan-assert 'hi' $v */\n\
+        function claimHi($v): void {}\n\
+        function takesInt(int $n): void {}\n\
+        function outer(int $trigger, $u): string {\n\
+            $f = fn(string $x): string => $x;\n\
+            $a = $f('hi');\n\
+            claimHi($u);\n\
+            $b = $f($u);\n\
+            return $b;\n\
+        }\n\
+        $result = outer(1, (string) rand());\n\
+        \\PHPStan\\dumpType($result);\n\
+        takesInt($result);\n";
+    assert_eq!(one_type(src), "'hi' (asserted)");
+    assert_eq!(
+        count(src, ARG_MISMATCH_ID),
+        0,
+        "Verified memo must not launder Asserted same-value call into a proof premise"
+    );
+}
