@@ -7,7 +7,7 @@
 //! shadow, unique-simple-name, conditional polyfill, non-Singleton summary)
 //! still declines.
 
-use steins_infer::{DEBUG_TYPE_ID, Diagnostic, Folder, check, check_with};
+use steins_infer::{DEBUG_TYPE_ID, Diagnostic, Folder, ID as ARG_MISMATCH_ID, check, check_with};
 use steins_syntax::{ArgValue, SourceTree};
 
 struct Mock;
@@ -50,6 +50,10 @@ fn one_type(src: &str) -> String {
         .collect();
     assert_eq!(ds.len(), 1, "expected exactly one debug.type dump, got {ds:?}");
     ds[0].message.replace("dumped type: ", "")
+}
+
+fn count(src: &str, id: &str, folder: Option<&mut dyn Folder>) -> usize {
+    findings(src, folder).iter().filter(|d| d.id == id).count()
 }
 
 // ==========================================================================
@@ -137,6 +141,30 @@ fn zero_arg_project_call_stays_on_const_fn_lane() {
 // ==========================================================================
 // Recursion through a fold arg terminates
 // ==========================================================================
+
+#[test]
+fn asserted_project_summary_fold_stays_asserted() {
+    // Issue #127 review: nested_call_singleton's Asserted stratum must min into
+    // the fold result — not be discarded and re-read from the syntactic Call tree
+    // (which would launder to Verified and premise a proof-layer finding).
+    let src = "<?php\n\
+        /** @phpstan-assert 'hi' $v */\n\
+        function claimHi($v): void {}\n\
+        function g(int $trigger, $x): string {\n\
+            claimHi($x);\n\
+            return $x;\n\
+        }\n\
+        function takesInt(int $n): void {}\n\
+        $result = strtoupper(g(1, (string) rand()));\n\
+        \\PHPStan\\dumpType($result);\n\
+        takesInt($result);\n";
+    assert_eq!(one_folded(src), "'HI' (asserted)");
+    assert_eq!(
+        count(src, ARG_MISMATCH_ID, Some(&mut Mock)),
+        0,
+        "Asserted fold result must not premise type.argument-mismatch"
+    );
+}
 
 #[test]
 fn mutual_recursion_through_fold_arg_terminates() {
