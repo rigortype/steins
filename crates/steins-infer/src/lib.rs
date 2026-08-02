@@ -5242,6 +5242,7 @@ impl<'a> Cx<'a> {
     }
 
     /// [`Self::try_fold`] with optional live [`Descent`] and findings sink (issue #127).
+    #[allow(clippy::too_many_arguments)]
     fn try_fold_under(
         &self,
         name: &str,
@@ -12833,11 +12834,9 @@ fn check_propagated_call(
                             })
                             .or_else(|| {
                                 cx.try_fold_emit(name, args, env, poisoned, folder, out)
-                                    .map(|(lit, prov, strat)| (lit, prov, strat))
                             })
                     } else {
                         cx.try_fold_emit(name, args, env, poisoned, folder, out)
-                            .map(|(lit, prov, strat)| (lit, prov, strat))
                     };
                     // A nested project call (issue #60): its Singleton return summary
                     // is the argument's proven value — `takesInt(g(1))` sees what `g`
