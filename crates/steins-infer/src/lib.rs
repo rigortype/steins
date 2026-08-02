@@ -5470,10 +5470,10 @@ impl<'a> Cx<'a> {
         }
     }
 
-    /// The native return type and display name of a scope's owning function or
-    /// method (the same file this `Cx` points at), or `None` for the top-level
-    /// script scope or an owner with no native scalar/union return type.
-    fn scope_return(&self, scope: &Scope) -> Option<(&'a NativeType, String)> {
+    /// The native return type and display name of a scope's owning function,
+    /// method, or closure (the same file this `Cx` points at), or `None` for the
+    /// top-level script scope or an owner with no native scalar/union return type.
+    fn scope_return(&self, scope: &'a Scope) -> Option<(&'a NativeType, String)> {
         match &scope.owner {
             ScopeOwner::TopLevel => None,
             ScopeOwner::Function(name) => {
@@ -5489,8 +5489,11 @@ impl<'a> Cx<'a> {
                 let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
                 m.ret.as_ref().map(|r| (r, format!("{}::{}", cd.name, m.name)))
             }
-            // Closure return-type checking is deferred this slice (documented).
-            ScopeOwner::Closure { .. } => None,
+            // Issue #128: closures carry their native `: R` on the scope itself
+            // (`Scope::ret_ty`) — same check surface as free functions.
+            ScopeOwner::Closure { .. } => {
+                scope.ret_ty.as_ref().map(|r| (r, "closure".to_owned()))
+            }
         }
     }
 
@@ -6472,7 +6475,14 @@ fn walk_trace(
                 // closure value descends into its scope (ADR-0033), a proven string
                 // resolves as a function name.
                 Callee::DynamicVar(name) => {
-                    handle_var_call(cx, folder, scope, name, call, env, descent.as_mut(), out);
+                    // Issue #128: a `$fn(...)` on a proven closure rebinds its
+                    // return summary on the same rungs as free functions / methods.
+                    let outcome =
+                        handle_var_call(cx, folder, scope, name, call, env, descent.as_mut(), out);
+                    stmt_summary = outcome.summary;
+                    if stmt_return_arms.is_none() {
+                        stmt_return_arms = outcome.return_arms;
+                    }
                 }
                 Callee::Dynamic => {}
             }
@@ -12906,12 +12916,22 @@ fn nested_call_singleton(
     Some((arg_of_val(v), sv.stratum))
 }
 
+/// Outcome of a `$fn(...)` variable call (issue #128): the return-fact summary
+/// and optional declared return arms for the assignment floor.
+struct VarCallOutcome {
+    summary: Option<ReturnSummary>,
+    return_arms: Option<Vec<ContractArm>>,
+}
+
 /// Handle a `$fn(...)` variable call (ADR-0033): resolve the callee variable
 /// against the env. A proven closure value → argument check against the closure's
 /// params + binding descent into the closure scope (with the capture snapshot
 /// seeded); a proven `Singleton(Str)` → resolve as a function name through the
 /// normal function path. An unresolved `$fn` does nothing (opaque; the effects
 /// pass taints exhaustiveness separately).
+///
+/// Returns the callee's [`ReturnSummary`] when one was computed (issue #128), so
+/// `$x = $fn(...)` rebinds on the same rungs as free functions and methods.
 #[allow(clippy::too_many_arguments)]
 fn handle_var_call(
     cx: &Cx,
@@ -12922,28 +12942,38 @@ fn handle_var_call(
     env: &HashMap<String, Known>,
     descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
-) {
+) -> VarCallOutcome {
+    let empty = VarCallOutcome { summary: None, return_arms: None };
     if scope.poisoned || !call.positional_only {
-        return;
+        return empty;
     }
-    let Some(known) = env.get(name) else { return };
+    let Some(known) = env.get(name) else { return empty };
 
     // 1. Proven closure value → check args + descend into the closure scope.
     if let Some(cv) = &known.closure {
-        match &cv.target {
+        return match &cv.target {
             ClosureTarget::Scope(def_offset) => {
-                let Some(callee_scope) = cx.closure_scope(*def_offset) else { return };
+                let Some(callee_scope) = cx.closure_scope(*def_offset) else {
+                    return empty;
+                };
                 // Argument type check at the `$fn(...)` site (mirrors the direct /
                 // propagated check for named calls, which never see a variable call).
                 check_callable_args(
-                    cx, folder, scope.poisoned, descent.is_some(), &callee_scope.params, "closure",
-                    call, env, out,
+                    cx,
+                    folder,
+                    scope.poisoned,
+                    descent.is_some(),
+                    &callee_scope.params,
+                    "closure",
+                    call,
+                    env,
+                    out,
                 );
                 let display = format!("closure (defined on line {})", cv.def_line);
-                // T0 consumes summaries only at direct-function-call assignment sites;
-                // a `$fn(...)` closure-call result is not rebound here (deferred).
+                // Declared return floor from the closure's own `: R` (on the scope).
+                let return_arms = closure_return_arms(callee_scope);
                 let arg_values: Vec<&ArgValue> = call.args.iter().map(|a| &a.value).collect();
-                let _ = descend(
+                let summary = descend(
                     cx,
                     folder,
                     &callee_scope.params,
@@ -12960,19 +12990,31 @@ fn handle_var_call(
                     descent,
                     out,
                 );
+                VarCallOutcome { summary, return_arms }
             }
             ClosureTarget::Named(nameref) => {
-                dispatch_named_callable(cx, folder, scope.poisoned, nameref, call, env, descent, out);
+                dispatch_named_callable(cx, folder, scope.poisoned, nameref, call, env, descent, out)
             }
-        }
-        return;
+        };
     }
 
     // 2. Proven string value → resolve as a function name (`$fn = 'strtolower';`).
     if let Some(ArgValue::Str(s)) = known.singleton() {
-        let nameref = NameRef { raw: s, kind: RefKind::Unqualified, offset: call.span.start };
-        dispatch_named_callable(cx, folder, scope.poisoned, &nameref, call, env, descent, out);
+        let nameref = NameRef { raw: s.clone(), kind: RefKind::Unqualified, offset: call.span.start };
+        return dispatch_named_callable(cx, folder, scope.poisoned, &nameref, call, env, descent, out);
     }
+    empty
+}
+
+/// Declared-return contract arms of a closure scope from its native `: R`
+/// (issue #128). No phpdoc lane on the scope yet — native only.
+fn closure_return_arms(callee_scope: &Scope) -> Option<Vec<ContractArm>> {
+    let ty = callee_scope.ret_ty.as_ref()?;
+    let native = native_arms(ty);
+    if native.is_empty() {
+        return None;
+    }
+    refine_contract_arms(&native, None, &|n: &str| n.to_ascii_lowercase())
 }
 
 /// Dispatch a `$fn(...)` call whose target is a named free function (a first-class
@@ -12988,15 +13030,17 @@ fn dispatch_named_callable(
     env: &HashMap<String, Known>,
     descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
-) {
+) -> VarCallOutcome {
     let synth = synth_function_call(call, nameref);
+    let return_arms = cx.resolve_user_fn_any(&synth).and_then(|site| fn_return_arms(cx, site));
     if let Some(site) = cx.resolve_user_fn(&synth) {
         let decl = cx.fn_decl(site);
         check_callable_args(
             cx, folder, poisoned, descent.is_some(), &decl.params, &decl.name, call, env, out,
         );
     }
-    try_descend_function(cx, folder, &synth, env, poisoned, descent, out);
+    let summary = try_descend_function(cx, folder, &synth, env, poisoned, descent, out);
+    VarCallOutcome { summary, return_arms }
 }
 
 /// A synthetic named-function [`CallExpr`] from a `$fn(...)` variable call and a
