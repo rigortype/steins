@@ -400,22 +400,29 @@ pub const MAX_BINDING_DEPTH: usize = 8;
 pub const SOUND_SUBSET_NOTICE: &str = "note: running as sound subset (no PHP sidecar) — findings that require executing PHP are omitted, and builtin return types come from the catalog's declarations, unverified";
 
 /// The sibling notice for issue #110's degradation mode: `php` resolves and
-/// spawns, but never answers the opening `env()` handshake (a wrapper script
-/// that never execs real PHP, a `php.ini` that hangs on startup, an
-/// `auto_prepend_file` that never returns). This is NOT [`SOUND_SUBSET_NOTICE`]
-/// reused verbatim — the cause and the remedy differ from "no PHP sidecar":
-/// `php` exists and starts, it is just not speaking the ADR-0024 JSON-RPC
-/// framing, so pointing the reader at `--no-php`'s cause (no PHP at all) would
-/// be a wrong diagnosis; `steins doctor` is the tool that already distinguishes
-/// this exact case ("PHP sidecar: spawned, but the env() query failed"), so the
-/// notice sends the reader there.
+/// spawns, but a request goes unanswered — the opening `env()` handshake (a
+/// wrapper script that never execs real PHP, a `php.ini` that hangs on
+/// startup, an `auto_prepend_file` that never returns) or a later request
+/// mid-run (the same causes, just not hit until then, or a child that dies
+/// answering one request and cannot be revived — [`Sidecar`]'s `RESPAWN_CAP`
+/// exhausted). Both are covered: the issue's own acceptance criterion is "the
+/// handshake fails **or times out mid-run**", and a first cut of this fix that
+/// only caught the opening case (permanently suppressing itself after any one
+/// success) missed the second half — review finding on PR #134. This is NOT
+/// [`SOUND_SUBSET_NOTICE`] reused verbatim — the cause and the remedy differ
+/// from "no PHP sidecar": `php` exists and starts, it is just not speaking the
+/// ADR-0024 JSON-RPC framing, so pointing the reader at `--no-php`'s cause (no
+/// PHP at all) would be a wrong diagnosis; `steins doctor` is the tool that
+/// already distinguishes the opening case ("PHP sidecar: spawned, but the
+/// env() query failed"), so the notice sends the reader there.
 ///
 /// Printed to stderr **at most once per run** by [`ProcessEngine`]'s own latch
-/// (`handshake_notified`), the same mechanism [`SOUND_SUBSET_NOTICE`] uses for
-/// the spawn-failure case — a run that cannot execute PHP must say so exactly
-/// once, not once per widened fold request. A notice only: the ADR-0004
-/// exit-code contract is unchanged, this never flips a run's exit status.
-pub const SIDECAR_HANDSHAKE_NOTICE: &str = "note: PHP sidecar spawned but never answered the env() handshake — running as sound subset (degraded): findings that require executing PHP are omitted, and builtin return types come from the catalog's declarations, unverified; run `steins doctor` for detail";
+/// (`unresponsive_notified`), the same mechanism [`SOUND_SUBSET_NOTICE`] uses
+/// for the spawn-failure case — a run that stops getting real answers must say
+/// so exactly once, not once per widened fold request. A notice only: the
+/// ADR-0004 exit-code contract is unchanged, this never flips a run's exit
+/// status.
+pub const SIDECAR_HANDSHAKE_NOTICE: &str = "note: PHP sidecar stopped answering — running as sound subset (degraded): findings that require executing PHP are omitted, and builtin return types come from the catalog's declarations, unverified; run `steins doctor` for detail";
 
 // ---------------------------------------------------------------------------
 // Folding seam (ADR-0004 / ADR-0024). Unchanged from the per-file slice.
@@ -1130,7 +1137,7 @@ fn fold_arg_fits_i32(arg: &FoldArg) -> bool {
 ///
 /// Owns exactly the transport's own state — whether folding is disabled, whether
 /// the spawn already failed, whether the sound-subset notice has been printed,
-/// and (issue #110) whether the spawned child has ever actually answered.
+/// and (issue #110) whether the "stopped answering" notice has been printed.
 /// No analysis policy lives here; that is [`EngineFolder`]'s.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct ProcessEngine {
@@ -1138,26 +1145,28 @@ pub struct ProcessEngine {
     disabled: bool,
     spawn_failed: bool,
     notified: bool,
-    /// Whether the resident sidecar has completed at least one request since it
-    /// was spawned (issue #110). `Sidecar::is_poisoned` alone cannot answer the
-    /// question this notice needs — a healthy sidecar poisons routinely (a
-    /// memory-bomb fold, a timeout mid-run) and *recovers* via its own respawn
-    /// discipline, and that recovered failure is not silent incompleteness, it
-    /// is the tolerance `Sidecar`'s own doc comment describes. What ADR-0004
-    /// forbids leaving unsaid is the child that spawns and then NEVER speaks the
-    /// wire format at all — so this flips true on the first successful round
-    /// trip and, once true, the handshake notice can never fire again for this
-    /// instance: only the state *before* any reply ever arrived counts as the
-    /// handshake failing.
-    handshake_ok: bool,
     /// Whether [`SIDECAR_HANDSHAKE_NOTICE`] has already been printed this run —
-    /// the issue #110 latch, sibling to `notified` above but for "spawned, never
-    /// answered" rather than "could not spawn at all". The two notices are
-    /// mutually exclusive per instance (a spawn failure never reaches a live
-    /// sidecar to fail a handshake on), but are kept as separate flags since
+    /// the issue #110 latch, sibling to `notified` above but for "spawned, then
+    /// a request went unanswered" rather than "could not spawn at all". The two
+    /// notices are mutually exclusive per instance (a spawn failure never
+    /// reaches a live sidecar to poison), but are kept as separate flags since
     /// they guard different text and, unlike `notified`, this one can still be
     /// meaningfully false after `ensure` has long since stopped being consulted.
-    handshake_notified: bool,
+    ///
+    /// A prior revision also tracked "has any request ever succeeded" and used
+    /// that to permanently suppress this notice after the first success — on
+    /// the theory that later poisoning is always the respawn-tolerant failure
+    /// mode `Sidecar`'s own doc comment describes, and therefore not silent
+    /// incompleteness. That theory does not hold: `Sidecar`'s own contract is
+    /// that "the request whose reply never arrived still fails... it is never
+    /// retried" — respawn makes the INSTANCE recover, it does not un-widen the
+    /// answer that request already lost. A mid-run timeout after a healthy
+    /// opening handshake is exactly as silent, to the caller, as one at the
+    /// very start, and the issue's own acceptance criterion says so ("fails or
+    /// times out mid-run"). So this is a plain once-per-run latch now, armed by
+    /// the first poisoning event at any point in the run — no permanent
+    /// suppression from an earlier success (review finding on PR #134).
+    unresponsive_notified: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1171,16 +1180,16 @@ impl ProcessEngine {
             disabled,
             spawn_failed: false,
             notified: true, // suppress our own notice; only spawn-failure re-arms it.
-            handshake_ok: false,
-            handshake_notified: true, // suppress; only enabled() re-arms it (mirrors `notified`).
+            unresponsive_notified: true, // suppress; only enabled() re-arms it (mirrors `notified`).
         }
     }
 
     /// An enabled engine that emits the sound-subset notice itself if it cannot
-    /// spawn PHP, or the handshake notice if it spawns but never answers.
+    /// spawn PHP, or the "stopped answering" notice the first time a request
+    /// poisons the sidecar, at any point in the run.
     #[must_use]
     pub fn enabled() -> Self {
-        Self { notified: false, handshake_notified: false, ..Self::new(false) }
+        Self { notified: false, unresponsive_notified: false, ..Self::new(false) }
     }
 
     /// Ensure a live sidecar, or record that we cannot have one.
@@ -1213,38 +1222,36 @@ impl ProcessEngine {
     }
 
     /// Run one request against the live sidecar (spawning it first if needed),
-    /// then update the issue #110 handshake latch from the transport's OWN
-    /// post-call state (`Sidecar::is_poisoned`) rather than from `op`'s return
-    /// value: a `fold` that legitimately widens — an argument out of the
-    /// width-safe range, a callee not on the allowlist, an exception result — is
-    /// not a transport failure and must never arm the notice; only the child
-    /// actually going silent or dying does. `None` when no sidecar can be had at
-    /// all (disabled, or a prior spawn already failed — [`Self::ensure`] already
-    /// speaks for that case).
+    /// then check the issue #110 latch from the transport's OWN post-call state
+    /// (`Sidecar::is_poisoned`) rather than from `op`'s return value: a `fold`
+    /// that legitimately widens — an argument out of the width-safe range, a
+    /// callee not on the allowlist, an exception result — is not a transport
+    /// failure and must never arm the notice; only the child actually going
+    /// silent or dying does. `None` when no sidecar can be had at all (disabled,
+    /// or a prior spawn already failed — [`Self::ensure`] already speaks for
+    /// that case).
     fn call<T>(&mut self, op: impl FnOnce(&mut Sidecar) -> T) -> Option<T> {
         let sc = self.ensure()?;
         let result = op(sc);
-        let poisoned = sc.is_poisoned();
-        self.note_handshake(!poisoned);
+        if sc.is_poisoned() {
+            self.note_unresponsive();
+        }
         Some(result)
     }
 
-    /// The latch body: `ok` is whether the request [`Self::call`] just ran left
-    /// the sidecar unpoisoned. Once any request has ever succeeded, later
-    /// poisoning is the respawn-tolerant failure mode and is never reported here
-    /// again; until then, every failure is a candidate for "never answered", and
-    /// the first one prints [`SIDECAR_HANDSHAKE_NOTICE`] and latches so a run
-    /// that keeps widening folds against a permanently poisoned child says it
-    /// exactly once, not once per request.
-    fn note_handshake(&mut self, ok: bool) {
-        if ok {
-            self.handshake_ok = true;
+    /// The latch body: the request [`Self::call`] just ran left the sidecar
+    /// poisoned. Prints [`SIDECAR_HANDSHAKE_NOTICE`] on the FIRST such event in
+    /// the run, wherever it falls — the opening `env()` handshake or a request
+    /// deep into an otherwise-healthy run — and never again after. There is
+    /// deliberately no "but a request succeeded before this one" escape: a
+    /// widened request stays widened regardless of what the sidecar does next
+    /// (`Sidecar`'s own contract — a lost reply is never retried), so a mid-run
+    /// failure is exactly as silent to the caller as one at the very start.
+    fn note_unresponsive(&mut self) {
+        if self.unresponsive_notified {
             return;
         }
-        if self.handshake_ok || self.handshake_notified {
-            return;
-        }
-        self.handshake_notified = true;
+        self.unresponsive_notified = true;
         // Same stderr policy as the spawn-failure notice above: a dropped write
         // is not a reason to abort a run (issue #44 / steins-cli/src/out.rs).
         use std::io::Write;
