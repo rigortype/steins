@@ -13307,6 +13307,14 @@ fn join_summary(
         return None;
     }
     let ret = cx.scope_return(callee_scope).map(|(ty, _)| ty);
+    // A written return hint Steins cannot lower (`: object`, `: array`, `: void`,
+    // `: never`, …) leaves `scope_return` as `None`, so the A2 native-oracle arms
+    // are empty and `native_violates` cannot drop boundary TypeErrors
+    // (`return null` under `: object`). Refuse the whole value summary rather than
+    // rebind an uncheckable exit as a Singleton premise (ADR-0075 review).
+    if ret.is_none() && callee_scope.ret_hint.is_some() {
+        return None;
+    }
     let floor = ret.and_then(native_value_floor);
     // The declared return type is a CONVERSION boundary, not just an envelope
     // (the #48 family, return edition): PHP hands the caller what the boundary

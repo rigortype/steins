@@ -100,10 +100,15 @@ return-summary collector:
   a summary walk contributes the declared **Floor** (A3).
 * Untyped fallthrough contributes `Singleton(null)` (PHP's implicit return).
   The test is the **raw written return hint** on the scope (`ret_hint`), not
-  whether Steins lowers a representable `NativeType` — `void` / `never` /
-  `: object` / `: array` all leave `scope_return` as `None` but must not
-  invent null. A written non-void hint that falls through is a boundary
-  TypeError and contributes nothing.
+  whether Steins lowers a representable `NativeType`. A written hint that
+  falls through does not get a fallthrough-null contribution here.
+* A written return hint Steins cannot lower (`: object`, `: array`, `: void`,
+  `: never`, …) leaves `scope_return` as `None`, so the A2 native oracle has
+  no arms and cannot drop boundary TypeErrors (`return null` under
+  `: object`). **The whole value summary is refused** rather than rebinding an
+  uncheckable exit. (Note on `: void`: PHP *does* yield `NULL` for
+  `$x = f()` when `f(): void {}`, but v1 deliberately does not put that in a
+  value summary — the same refuse path as other unrepresentable hints.)
 * Generators (`yield` / `yield from` in the body, `is_generator` on the scope)
   refuse the whole value summary (ADR-0057 §5): the call result is a
   `Generator`, not the value of a trailing `return`.

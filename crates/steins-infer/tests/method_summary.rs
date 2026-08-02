@@ -453,6 +453,54 @@ fn object_return_hint_fallthrough_does_not_pin_null() {
 }
 
 // ==========================================================================
+// Unrepresentable written return: refuse summary (no A2 oracle).
+// ==========================================================================
+
+#[test]
+fn object_return_null_does_not_rebind_on_method() {
+    // `: object` is a written hint Steins does not lower, so the A2 native oracle
+    // is empty. Without a refuse, `return null` would rebind Singleton(null) and
+    // premise call.on-null — a boundary TypeError that never reaches the caller.
+    let src = "<?php\n\
+        final class C {\n\
+            public function m(int $trigger): object {\n\
+                return null;\n\
+            }\n\
+        }\n\
+        $x = (new C())->m(1);\n\
+        $x->foo();\n";
+    assert_eq!(
+        count(src, "call.on-null"),
+        0,
+        ": object {{ return null }} must not rebind Singleton(null)"
+    );
+}
+
+#[test]
+fn object_return_null_does_not_rebind_on_function_twin() {
+    let src = "<?php\n\
+        function m(int $trigger): object {\n\
+            return null;\n\
+        }\n\
+        $x = m(1);\n\
+        $x->foo();\n";
+    assert_eq!(count(src, "call.on-null"), 0);
+}
+
+#[test]
+fn array_return_null_does_not_rebind_on_method() {
+    let src = "<?php\n\
+        final class C {\n\
+            public function m(int $trigger): array {\n\
+                return null;\n\
+            }\n\
+        }\n\
+        $x = (new C())->m(1);\n\
+        $x->foo();\n";
+    assert_eq!(count(src, "call.on-null"), 0);
+}
+
+// ==========================================================================
 // Recursion / depth degrade soundly.
 // ==========================================================================
 
