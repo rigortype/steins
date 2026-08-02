@@ -194,6 +194,30 @@ fn doctor_names_the_contract_layer_under_throws_direct() {
 }
 
 #[test]
+fn doctor_layer_line_excludes_debug_even_under_an_explicit_enable() {
+    // Review finding on issue #108 (PR #133): `enable = ["debug.type"]` is a
+    // pattern the config layer accepts (debug ids are registered), and it used to
+    // reach past `surfaces_id`'s debug carve-out and pull "debug" into this exact
+    // line — contradicting `layers_on`'s own doc comment ("the debug lane is
+    // display-only and never a surface layer"). `surfaces_id` now excludes the
+    // debug lane before `enable`/`disable` are even consulted.
+    let dir = workdir("debug-enable-layers");
+    write(&dir, "a.php", THREE_THROWS);
+    write(
+        &dir,
+        "steins.toml",
+        "[check]\nprofile = \"debug-enabled\"\n\n[profile.debug-enabled]\nenable = [\"debug.type\"]\n",
+    );
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0, "stdout:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("surface: layers [mechanics, proof]"),
+        "debug must not appear in the layer line even under an explicit enable; stdout:\n{}",
+        r.stdout
+    );
+}
+
+#[test]
 fn doctor_default_profile_provenance() {
     let dir = workdir("default-prof");
     write(&dir, "a.php", THREE_THROWS);
@@ -270,6 +294,34 @@ fn doctor_reports_baseline_capture_surface_and_dormant() {
     assert!(r.stdout.contains("capture surface: profile `contracts`"), "stdout:\n{}", r.stdout);
     assert!(r.stdout.contains("active surface: profile `default`"), "stdout:\n{}", r.stdout);
     assert!(r.stdout.contains("dormant entr"), "the out-of-surface throw entry is dormant; stdout:\n{}", r.stdout);
+}
+
+#[test]
+fn doctor_never_counts_a_leftover_debug_entry_as_dormant() {
+    // `surfaces_id` excludes the debug lane unconditionally (issue #108), so a
+    // leftover `debug.type` baseline entry would otherwise always satisfy
+    // `!surface.surfaces_id(id)` and be folded into this line's "dormant" count —
+    // "kept, not stale", the exact opposite of `check`'s own ruling that a debug
+    // entry is dead weight at every rung and always resurfaces as stale
+    // (`match_baseline` in main.rs). `doctor` must not tell a contradicting story
+    // about the same file.
+    let dir = workdir("debug-not-dormant");
+    write(&dir, "a.php", "<?php\n$x = 1;\n\\PHPStan\\dumpType($x);\n");
+    assert_eq!(run_in(&dir, &["check", "--no-php", "--set-baseline", "a.php"]).code, 0);
+
+    let header = std::fs::read_to_string(dir.join(".steins-baseline.jsonl")).unwrap();
+    let header_line = header.lines().next().expect("header line");
+    let forged =
+        format!("{header_line}\n{{\"id\":\"debug.type\",\"path\":\"a.php\",\"hash\":\"deadbeefdeadbeef\"}}\n");
+    std::fs::write(dir.join(".steins-baseline.jsonl"), forged).unwrap();
+
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0, "stdout:\n{}", r.stdout);
+    assert!(
+        !r.stdout.contains("dormant entr"),
+        "a leftover debug entry must not be reported as dormant; stdout:\n{}",
+        r.stdout
+    );
 }
 
 #[test]
