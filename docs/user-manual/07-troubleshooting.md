@@ -284,24 +284,30 @@ the process is alive, but it is not speaking the sidecar's JSON-RPC
 framing, so the request times out and the whole run poisons and continues
 sound-subset for the rest of the invocation.
 
-**This is the one failure mode `check` never mentions.** Unlike the
-"no `php` on `PATH`" case, a spawn that succeeds but then fails to answer
-prints **no notice at all** on `check` — the request silently widens to
-`FoldResult::Widen` per call, which is correct (nothing false is ever
-reported) but invisible. If a run feels thinner than it should and `which
-php` finds something, `steins doctor` is the only place that says why:
+**`check` and `annotate` now say so.** Unlike the two failure modes above,
+this one used to reach the exit with no notice at all — the request
+silently widened to `FoldResult::Widen` per call, which was correct
+(nothing false was ever reported) but invisible, the one degradation mode
+that broke ADR-0004's "incompleteness is never silent" posture (issue
+#110). Both commands now print a dedicated notice on stderr the first time
+a spawned sidecar fails to answer, worded differently from the "no `php`
+on `PATH`" notice above because the cause and the fix differ:
 
 ```
 $ env PATH=/path/to/broken-php-wrapper steins check .
+note: PHP sidecar spawned but never answered the env() handshake — running as sound subset (degraded): findings that require executing PHP are omitted, and builtin return types come from the catalog's declarations, unverified; run `steins doctor` for detail
 ./src/Greeter.php:16:22: error[type.argument-mismatch]: argument null to Greeter::greet() cannot become string $name — proven TypeError (coercive mode)
 $ echo $?
 1
 ```
 
-Same finding, same exit code, zero indication anything degraded — `check`
-still proves what it can prove from source alone. Run `doctor` whenever a
-run's yield looks suspiciously thin. Issue #110 tracks surfacing this on
-`check` itself.
+The notice prints **once per run**, not once per widened fold — a run
+that keeps hitting the same dead sidecar on every argument would otherwise
+drown its own findings in a repeated line. The exit code is unaffected
+either way (ADR-0004): a degraded environment is surfaced, not failed.
+`steins doctor` remains the place to confirm the diagnosis and see the
+full posture, including the version-skew detail the one-line notice has no
+room for.
 
 **Fix.** Confirm `php -v` runs a working interpreter from a plain
 shell (not through whatever wrapper `PATH` resolves inside your CI runner
