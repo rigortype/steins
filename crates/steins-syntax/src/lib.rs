@@ -1807,13 +1807,19 @@ pub enum StmtKind {
     ///   (reference/`global`/`static`/variable-variable/`extract`/`include`/
     ///   by-ref `use`, …). When set, the walk clears the whole env, exactly as a
     ///   `Barrier` would; the enclosing scope is independently poisoned too.
+    /// * `may_return` — `true` if the subtree contains a `return` the walk cannot
+    ///   see as a top-level [`StmtKind::Return`] (e.g. `return` inside a
+    ///   `foreach`/`try` body). Return-fact summaries (ADR-0057 T0) contribute the
+    ///   declared floor for such a construct so a visible sibling `return null`
+    ///   cannot become a false Singleton (ADR-0075 / issue #126 review). Nested
+    ///   function/closure bodies are separate scopes and are not counted.
     ///
     /// Remaining theoretical gap (NOT closed here; ADR-0027 ratchet direction): a
     /// construct that early-returns on *every* branch makes all fall-through code
     /// dead, so even a fact about a variable the construct never reads could
     /// describe an unreachable path. Recovering that precision needs real
     /// branch/reachability analysis, deferred until the trace models control flow.
-    Opaque { writes: Vec<String>, reads: Vec<String>, poisons: bool },
+    Opaque { writes: Vec<String>, reads: Vec<String>, poisons: bool, may_return: bool },
     /// `$var[<lit>] = <rvalue>;` / `$var[<lit>][<lit>] = <rvalue>;` — a
     /// **constant-key offset write** (ADR-0062 A-G8's invalidation table).
     ///
@@ -6245,17 +6251,23 @@ fn cond_reads(expr: &Expression<'_>) -> Vec<String> {
 /// its poison flag and its over-approximated write set (see the variant docs).
 fn lower_opaque(s: &Statement<'_>) -> Stmt {
     let node = Node::Statement(s);
-    let (writes, reads, poisons) = opaque_sets(&node);
-    Stmt { span: ZERO_SPAN, kind: StmtKind::Opaque { writes, reads, poisons }, invalidated: Vec::new(), call_args: Vec::new() }
+    let (writes, reads, poisons, may_return) = opaque_sets(&node);
+    Stmt {
+        span: ZERO_SPAN,
+        kind: StmtKind::Opaque { writes, reads, poisons, may_return },
+        invalidated: Vec::new(),
+        call_args: Vec::new(),
+    }
 }
 
-/// Compute an `Opaque` construct's `(writes, reads, poisons)` over its subtree.
-/// `reads` is every direct variable mentioned that is not already a write —
-/// including branch conditions — so a construct that branches on a variable and
+/// Compute an `Opaque` construct's `(writes, reads, poisons, may_return)` over its
+/// subtree. `reads` is every direct variable mentioned that is not already a write
+/// — including branch conditions — so a construct that branches on a variable and
 /// early-returns invalidates the fall-through binding (soundness; see the
 /// [`StmtKind::Opaque`] docs). Nested function-like bodies are not descended.
-fn opaque_sets(node: &Node<'_, '_>) -> (Vec<String>, Vec<String>, bool) {
+fn opaque_sets(node: &Node<'_, '_>) -> (Vec<String>, Vec<String>, bool, bool) {
     let poisons = node_poisons(node);
+    let may_return = node_may_return(node);
     let mut writes = Vec::new();
     // By-ref conservatism: every variable handed to any call in the subtree.
     collect_call_vars(node, &mut writes);
@@ -6264,7 +6276,26 @@ fn opaque_sets(node: &Node<'_, '_>) -> (Vec<String>, Vec<String>, bool) {
     // Everything else the subtree merely reads / branches on.
     let mut reads = Vec::new();
     collect_read_vars(node, &writes, &mut reads);
-    (writes, reads, poisons)
+    (writes, reads, poisons, may_return)
+}
+
+/// Whether `node`'s subtree contains a `return` statement the walk will not see as
+/// a top-level [`StmtKind::Return`] — the load-bearing bit of [`StmtKind::Opaque`]'s
+/// `may_return`. Nested function / method / closure / arrow bodies are their own
+/// scopes and are not descended (their returns are not this scope's exits).
+fn node_may_return(node: &Node<'_, '_>) -> bool {
+    match node {
+        Node::Return(_) => true,
+        Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_) => false,
+        _ => {
+            for child in node.children() {
+                if node_may_return(&child) {
+                    return true;
+                }
+            }
+            false
+        }
+    }
 }
 
 /// Lower an expression-statement to a trace entry.
@@ -6352,8 +6383,13 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
         // unsound for the first-match / no-default-throws rules).
         Expression::Match(m) => lower_match_stmt(m).unwrap_or_else(|| {
             let node = Node::Expression(expr);
-            let (writes, reads, poisons) = opaque_sets(&node);
-            Stmt { span: ZERO_SPAN, kind: StmtKind::Opaque { writes, reads, poisons }, invalidated: Vec::new(), call_args: Vec::new() }
+            let (writes, reads, poisons, may_return) = opaque_sets(&node);
+            Stmt {
+                span: ZERO_SPAN,
+                kind: StmtKind::Opaque { writes, reads, poisons, may_return },
+                invalidated: Vec::new(),
+                call_args: Vec::new(),
+            }
         }),
         // `throw <expr>;` — a trace terminator (ADR-0031). Variables the thrown
         // expression hands to a call are still invalidated (by-ref conservatism),

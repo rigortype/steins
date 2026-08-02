@@ -6257,11 +6257,20 @@ fn analyze_scope(
         alloc: std::cell::Cell::new(alloc_start),
         summary,
     };
-    walk_trace(&w, folder, &scope.stmts, &mut env, &mut store, &mut descent, &mut facts, false, out);
+    let flow =
+        walk_trace(&w, folder, &scope.stmts, &mut env, &mut store, &mut descent, &mut facts, false, out);
     if let Some(out) = ret_exits
         && let Some(sc) = w.summary
     {
-        *out = sc.exits.into_inner();
+        let mut exits = sc.exits.into_inner();
+        // Untyped fallthrough is PHP's implicit `return null` (ADR-0057 §5). A
+        // native non-void return that falls through is a boundary TypeError — it
+        // contributes nothing, exactly like an A2-dropped exit. `scope_return` is
+        // `None` for untyped (and for void/never, which also yield no value fact).
+        if flow == Flow::FellThrough && cx.scope_return(scope).is_none() {
+            exits.push(ExitContribution::Fact(Fact::Singleton(Val::Null), Stratum::Verified));
+        }
+        *out = exits;
     }
     if let Some(sink) = dead_out {
         sink.extend(w.dead.into_inner());
@@ -6620,8 +6629,12 @@ fn walk_trace(
             StmtKind::Echo(_) => Flow::FellThrough,
             // A still-`Opaque` construct (loop / switch / try) forgets what it may
             // write AND what it branches on (reads) — unchanged from ADR-0027,
-            // since the trace does not model its control flow.
-            StmtKind::Opaque { writes, reads, poisons } => {
+            // since the trace does not model its control flow. When the subtree
+            // may `return` (`may_return`), a summary walk contributes the declared
+            // floor so those hidden exits join the visible ones (ADR-0057 A3;
+            // ADR-0075 / #126: without this, a sibling `return null` alone pins
+            // Singleton(null) and manufactures call.on-null FPs).
+            StmtKind::Opaque { writes, reads, poisons, may_return } => {
                 if *poisons {
                     env.clear();
                     store.clear();
@@ -6630,6 +6643,11 @@ fn walk_trace(
                         env.remove(v);
                         store.unbind(v);
                     }
+                }
+                if *may_return
+                    && let Some(sc) = &w.summary
+                {
+                    sc.exits.borrow_mut().push(ExitContribution::Floor);
                 }
                 Flow::FellThrough
             }
@@ -8232,7 +8250,14 @@ fn apply_assign(
                             Known::value_strat(sv.fact.clone(), line, None, sv.stratum),
                         );
                     } else if let Some(c) = call
-                        && let Some(arms) = call_return_arms(cx, c)
+                        && let Some(arms) = call_return_arms(
+                            cx,
+                            c,
+                            store,
+                            w.this_exact,
+                            w.enclosing_class,
+                            w.scope.poisoned,
+                        )
                     {
                         store.contract.insert(var.to_owned(), arms);
                     }
@@ -10345,11 +10370,13 @@ fn refine_declared_arms(
     (!out.is_empty()).then_some(out)
 }
 
-/// The declared-return arm list to seed the assigned variable of `$x = f(...)` at a
-/// call site (ADR-0052 §9, the return direction). For a uniquely-resolved USER
-/// function target (the same `resolve_user_fn_any` the contract lane uses, so it fires
-/// on named-argument calls too), the native return type seeds `Verified` arms and the
-/// `@return` phpdoc refines `Asserted` within it, through [`refine_contract_arms`].
+/// The declared-return arm list to seed the assigned variable of `$x = f(...)` /
+/// `$x = $o->m(...)` at a call site (ADR-0052 §9, the return direction; ADR-0075
+/// for methods). For a uniquely-resolved USER function target (the same
+/// `resolve_user_fn_any` the contract lane uses, so it fires on named-argument
+/// calls too), or a resolved method/static target via [`resolve_call_target`], the
+/// native return type seeds `Verified` arms and the `@return` phpdoc refines
+/// `Asserted` within it, through [`refine_contract_arms`].
 ///
 /// **Verified membership is never exactness.** A `: Foo` native return seeds an
 /// Instance-*membership* arm (`ContractTy::Class`), NOT an exact-class object: PHP
@@ -10359,10 +10386,26 @@ fn refine_declared_arms(
 /// leg (the ADR-0052 §3 NOT-fed list: no S2/arity/descent consumption, the G1/A1
 /// membership-is-not-exactness discipline). The arms are the FLOOR below values: a
 /// caller seeds them only after every proven-value path (a folded literal, the R1
-/// builtin return envelope) has declined. `None` for a builtin / unknown / dynamic
-/// target, or a target with no declared return type at all.
-fn call_return_arms(cx: &Cx, call: &CallExpr) -> Option<Vec<ContractArm>> {
-    fn_return_arms(cx, cx.resolve_user_fn_any(call)?)
+/// builtin return envelope, a bindable summary) has declined. `None` for a
+/// builtin / unknown / dynamic target, a constructor, or a target with no declared
+/// return type at all.
+fn call_return_arms(
+    cx: &Cx,
+    call: &CallExpr,
+    store: &Store,
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
+    poisoned: bool,
+) -> Option<Vec<ContractArm>> {
+    if let Some(site) = cx.resolve_user_fn_any(call) {
+        return fn_return_arms(cx, site);
+    }
+    // Constructors are the ADR-0036 exactness lane, not a value-return floor.
+    if matches!(call.receiver, Callee::Construct { .. }) {
+        return None;
+    }
+    let target = resolve_call_target(cx, &call.receiver, store, this_exact, enclosing_class, poisoned)?;
+    method_return_arms(cx, &target)
 }
 
 /// [`call_return_arms`] for a call known only by its **simple name** (issue #60):
@@ -10388,6 +10431,26 @@ fn fn_return_arms(cx: &Cx, site: Site) -> Option<Vec<ContractArm>> {
     let off = decl.span.start;
     let resolve = |n: &str| {
         cx.resolve_pclass(site.file, off, n).trim_start_matches('\\').to_ascii_lowercase()
+    };
+    refine_contract_arms(&native, phpdoc.as_ref(), &resolve)
+}
+
+/// The declared-return contract arms of a resolved method/static target (ADR-0075
+/// floor parity with free functions). Same native + `@return` refinement as
+/// [`fn_return_arms`]; class-level `@template` names shadow in the method docblock
+/// (issue #5), matching [`scope_return_phpdoc`]'s method leg.
+fn method_return_arms(cx: &Cx, target: &CallTarget<'_>) -> Option<Vec<ContractArm>> {
+    let method = target.method;
+    let native: Vec<ContractTy> = method.ret.as_ref().map(native_arms).unwrap_or_default();
+    let mut envelopes = parse_envelopes(method.docblock.as_deref());
+    if let Some(e) = &mut envelopes {
+        e.shadow_templates(&template_names_of(target.declaring_class.docblock.as_deref()));
+    }
+    let phpdoc = envelopes.and_then(|e| e.ret);
+    let off = method.span.start;
+    let file = target.class_file;
+    let resolve = |n: &str| {
+        cx.resolve_pclass(file, off, n).trim_start_matches('\\').to_ascii_lowercase()
     };
     refine_contract_arms(&native, phpdoc.as_ref(), &resolve)
 }

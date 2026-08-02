@@ -88,9 +88,16 @@ Descent { provenance, depth, stack, memo }
 ```
 
 The binding vector also admits pseudo-bindings: `use:{name}` for closure capture
-snapshots, and `this:` (carrying the exact receiver class) for method descents
-under `resolve_exact` (ADR-0075 §2.1) so two subclasses sharing an inherited body
-never replay one receiver's memo entry for the other.
+snapshots, and `this:` (carrying the exact receiver **class FQN**) for method
+descents under `resolve_exact` (ADR-0075 §2.1) so two subclasses sharing an
+inherited body never share a memo hit. A memo hit does not re-walk: the first
+receiver's summary answers for the key, and the second receiver's walk (and any
+emissions unique to it) are suppressed — hence the key component.
+
+An `Opaque` construct with `may_return` contributes the declared return floor to
+the summary join (hidden exits inside `foreach`/`try`/…); untyped fallthrough
+contributes `Singleton(null)`. Both keep a visible `return null` from becoming a
+false Singleton when other exits were invisible.
 
 Three bounds, all producing **silence** rather than a finding when hit:
 

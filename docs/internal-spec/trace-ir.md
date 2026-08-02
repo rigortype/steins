@@ -54,7 +54,7 @@ is the answer whenever `call_args` is silent about a name.
 | `Match { subject, arms, default, loose }` | statement-position `match` (strict, first-match, throws on no match) and `switch` (loose, falls through) |
 | `Assert { cond }` | `assert($expr)` with a lowerable condition |
 | `Throw { span }` / `Exit { span }` | trace terminators |
-| `Opaque { writes, reads, poisons }` | a recognized control-flow construct whose internals are not modeled but whose write and read sets are |
+| `Opaque { writes, reads, poisons, may_return }` | a recognized control-flow construct whose internals are not modeled but whose write and read sets are; `may_return` is true when the subtree contains a `return` the walk cannot see as a top-level `Return` |
 | `Barrier` | anything unmodeled *and* unbounded — `goto`, labels, `declare`, `__halt_compiler`. Erases all known values |
 
 Compound assignment (`+=`, `.=`) lowers its value to `Other` — the statement is

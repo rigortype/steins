@@ -5,8 +5,13 @@
 //! descends into a resolved method body, and the summary that descent produces is
 //! now consumed at `apply_assign` (and return composition) exactly as a function's
 //! is. Value/argument-position method calls and constructors stay out of scope.
+//!
+//! Shared return-coverage soundness (opaque `may_return`, untyped fallthrough) is
+//! pinned here too: enabling method rebinding surfaces those holes on public
+//! corpus methods (Composer `findPackage`), so the fix lives in the shared
+//! machinery and is regression-tested on both function and method twins.
 
-use steins_infer::{DEBUG_TYPE_ID, Diagnostic, Folder, check, check_with};
+use steins_infer::{DEBUG_TYPE_ID, Diagnostic, Folder, ID as ARG_MISMATCH_ID, check, check_with};
 use steins_syntax::{ArgValue, SourceTree};
 
 /// Canned folder for the two allowlisted builtins the greeter flagship needs.
@@ -54,6 +59,10 @@ fn one_folded(src: &str) -> String {
         .collect();
     assert_eq!(ds.len(), 1, "expected exactly one debug.type dump, got {ds:?}");
     ds[0].message.replace("dumped type: ", "")
+}
+
+fn count(src: &str, id: &str) -> usize {
+    findings(src, None).iter().filter(|d| d.id == id).count()
 }
 
 // ==========================================================================
@@ -126,15 +135,15 @@ fn method_positive_int_crosses_verified() {
 }
 
 // ==========================================================================
-// Inheritance: the `this:` key component keeps Sub1/Sub2 summaries distinct.
+// Inheritance: the `this:` key must separate receivers inside ONE memo tree.
 // ==========================================================================
 
 #[test]
-fn inherited_body_does_not_replay_across_receivers() {
-    // `Base::m` is the declaring key for both exact receivers. Inside the body,
-    // `$this->tag($x)` dispatches under `this_exact`. Without a `this:` component on
-    // the binding key, the first call's summary would replay for the second.
-    // (Zero-arg callees do not descend in T0, so `tag` takes a positional arg.)
+fn inherited_body_does_not_replay_across_receivers_in_shared_memo() {
+    // Top-level independent descents each mint a fresh memo, so they cannot show
+    // a collision. Force both calls into one outer descent's memo (`outer` binds
+    // its trigger arg and descends). Without `this:` on the key, Sub1's summary
+    // would replay for Sub2 and `$x` would be `'A'` instead of `'B'`.
     let src = "<?php\n\
         class Base {\n\
             public function m(int $x): string {\n\
@@ -148,22 +157,23 @@ fn inherited_body_does_not_replay_across_receivers() {
         final class Sub2 extends Base {\n\
             public function tag(int $x): string { return \"B\"; }\n\
         }\n\
-        $a = (new Sub1())->m(1);\n\
-        $b = (new Sub2())->m(1);\n\
-        \\PHPStan\\dumpType($a);\n\
-        \\PHPStan\\dumpType($b);\n";
-    assert_eq!(types(src), vec!["'A'".to_owned(), "'B'".to_owned()]);
+        function outer(int $trigger): string {\n\
+            $a = (new Sub1())->m(1);\n\
+            return (new Sub2())->m(1);\n\
+        }\n\
+        $x = outer(1);\n\
+        \\PHPStan\\dumpType($x);\n";
+    assert_eq!(one_type(src), "'B'");
 }
 
 // ==========================================================================
-// Silences: overridable / unknown receivers stay on the arm floor.
+// Silences and exact dispatch.
 // ==========================================================================
 
 #[test]
 fn exact_receiver_dispatches_inherited_override() {
     // `(new Sub())->call(1)` resolves `Base::call` with `this_exact = Sub`, so the
-    // inner `$this->m` hits `Sub::m` and rebinds 99 — the `this:` key component
-    // keeps this distinct from a bare `Base` walk.
+    // inner `$this->m` hits `Sub::m` and rebinds 99.
     let src = "<?php\n\
         class Base {\n\
             public function m(int $x): int { return $x; }\n\
@@ -207,7 +217,7 @@ fn constructor_assignment_stays_on_exactness_lane() {
 }
 
 // ==========================================================================
-// Return composition: `return $o->m(...)` crosses into an outer summary.
+// Return composition: `return $o->m(...)` / static crosses into an outer summary.
 // ==========================================================================
 
 #[test]
@@ -225,4 +235,142 @@ fn method_summary_composes_through_function_return() {
         $x = f(9);\n\
         \\PHPStan\\dumpType($x);\n";
     assert_eq!(one_type(src), "int<1, max>");
+}
+
+#[test]
+fn static_summary_composes_through_function_return() {
+    let src = "<?php\n\
+        final class C {\n\
+            public static function g(int $trigger, int $n): int {\n\
+                assert($n > 0);\n\
+                return $n;\n\
+            }\n\
+        }\n\
+        function f(int $t): int {\n\
+            return C::g(1, rand());\n\
+        }\n\
+        $x = f(9);\n\
+        \\PHPStan\\dumpType($x);\n";
+    assert_eq!(one_type(src), "int<1, max>");
+}
+
+// ==========================================================================
+// Declared return floor when the summary degrades to General (function parity).
+// ==========================================================================
+
+#[test]
+fn method_factless_summary_falls_to_declared_int_floor() {
+    // `return rand()` is factless int → arm floor. Free-function twin dumps `int`;
+    // method must too (ADR-0075 same-rung promise), not `unknown`.
+    let via_method = "<?php\n\
+        final class C {\n\
+            public function m(int $x): int { return rand(); }\n\
+        }\n\
+        $x = (new C())->m(1);\n\
+        \\PHPStan\\dumpType($x);\n";
+    let via_function = "<?php\n\
+        function m(int $x): int { return rand(); }\n\
+        $x = m(1);\n\
+        \\PHPStan\\dumpType($x);\n";
+    assert_eq!(one_type(via_method), "int");
+    assert_eq!(one_type(via_method), one_type(via_function));
+}
+
+// ==========================================================================
+// Opaque may_return: hidden returns join the floor (Composer findPackage shape).
+// ==========================================================================
+
+#[test]
+fn foreach_hidden_return_does_not_pin_null_on_method() {
+    // The Composer shape: a loop body returns a package, then `return null`. The
+    // foreach is Opaque — without may_return→Floor the summary was Singleton(null)
+    // and `$pkg->name()` fired call.on-null. With the floor join the object return
+    // has no representable value floor → no summary → no false null pin.
+    let src = "<?php\n\
+        final class Pkg { public function name(): string { return \"p\"; } }\n\
+        final class Repo {\n\
+            /** @return list<Pkg> */\n\
+            public function getPackages(): array { return []; }\n\
+            public function findPackage(string $name): ?Pkg {\n\
+                foreach ($this->getPackages() as $package) {\n\
+                    if ($package->name() === $name) {\n\
+                        return $package;\n\
+                    }\n\
+                }\n\
+                return null;\n\
+            }\n\
+        }\n\
+        $repo = new Repo();\n\
+        $pkg = $repo->findPackage(\"php\");\n\
+        $pkg->name();\n";
+    assert_eq!(
+        count(src, "call.on-null"),
+        0,
+        "must not prove $pkg is null when the loop may return a package"
+    );
+}
+
+#[test]
+fn foreach_hidden_return_does_not_pin_null_on_function_twin() {
+    // Same hole, free-function form — the fix is shared summary machinery, not a
+    // method-only special case. Master already had this latent for functions.
+    let src = "<?php\n\
+        final class Pkg { public function name(): string { return \"p\"; } }\n\
+        /** @param list<Pkg> $packages */\n\
+        function findPackage(array $packages, string $name): ?Pkg {\n\
+            foreach ($packages as $package) {\n\
+                if ($package->name() === $name) {\n\
+                    return $package;\n\
+                }\n\
+            }\n\
+            return null;\n\
+        }\n\
+        $pkg = findPackage([], \"php\");\n\
+        $pkg->name();\n";
+    assert_eq!(count(src, "call.on-null"), 0);
+}
+
+// ==========================================================================
+// Asserted stratum does not launder into proof-layer findings.
+// ==========================================================================
+
+#[test]
+fn asserted_method_summary_does_not_premise_proof_finding() {
+    // An Asserted argument (inline `@var`) seeds an Asserted summary; the proof
+    // layer's all-Verified premise rule keeps type.argument-mismatch off it.
+    let src = "<?php\n\
+        final class C {\n\
+            public function id(int $n): int { return $n; }\n\
+        }\n\
+        function takesString(string $s): void {}\n\
+        /** @var int $n */\n\
+        $n = rand();\n\
+        $x = (new C())->id($n);\n\
+        takesString($x);\n";
+    assert_eq!(
+        count(src, ARG_MISMATCH_ID),
+        0,
+        "Asserted method summary must not premise a proof-layer finding"
+    );
+}
+
+// ==========================================================================
+// Recursion / depth degrade soundly.
+// ==========================================================================
+
+#[test]
+fn method_recursion_terminates_to_arm_floor() {
+    let src = "<?php\n\
+        final class C {\n\
+            public function f(int $n, bool $b): int {\n\
+                if ($b) {\n\
+                    return $this->f($n, false);\n\
+                }\n\
+                return $n;\n\
+            }\n\
+        }\n\
+        $x = (new C())->f(3, true);\n\
+        \\PHPStan\\dumpType($x);\n";
+    let ty = one_type(src);
+    assert!(ty == "int" || ty == "3", "sound + terminating: {ty}");
 }
