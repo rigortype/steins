@@ -5086,11 +5086,12 @@ impl<'a> Cx<'a> {
         poisoned: bool,
         folder: &mut dyn Folder,
     ) -> Option<ArgValue> {
-        self.resolve_literal_under(value, env, poisoned, folder, None).map(|(v, _)| v)
+        self.resolve_literal_under(value, env, poisoned, folder, None, None)
+            .map(|(v, _)| v)
     }
 
     /// Like [`Self::resolve_literal`], but also returns the trust stratum of the
-    /// resolved value (issue #127 review: fold-arg Asserted must not launder).
+    /// resolved value (issue #127: fold-arg Asserted must not launder).
     fn resolve_literal_strat(
         &self,
         value: &ArgValue,
@@ -5098,16 +5099,28 @@ impl<'a> Cx<'a> {
         poisoned: bool,
         folder: &mut dyn Folder,
     ) -> Option<(ArgValue, Stratum)> {
-        self.resolve_literal_under(value, env, poisoned, folder, None)
+        self.resolve_literal_under(value, env, poisoned, folder, None, None)
     }
 
-    /// [`Self::resolve_literal`] with an optional live [`Descent`] (issue #127).
-    /// Threading the descent is what keeps mutual recursion through a fold arg
-    /// (`strtoupper(b($n))` inside `a` that calls `b` that calls `a`) bounded by
-    /// the same on-stack key and `MAX_BINDING_DEPTH` as a statement-level chain.
-    ///
-    /// Returns `(value, stratum)`: for a fold, stratum is `min` over the resolved
-    /// fold arguments (including a nested project-call summary's stratum).
+    /// [`Self::resolve_literal_strat`] with optional live descent and findings sink
+    /// (issue #127). Nested project-call descents for fold args emit through `out`
+    /// when provided so binding-specific diagnostics are not discarded.
+    fn resolve_literal_strat_ex(
+        &self,
+        value: &ArgValue,
+        env: &HashMap<String, Known>,
+        poisoned: bool,
+        folder: &mut dyn Folder,
+        descent: Option<&mut Descent<'_>>,
+        out: Option<&mut Vec<Diagnostic>>,
+    ) -> Option<(ArgValue, Stratum)> {
+        self.resolve_literal_under(value, env, poisoned, folder, descent, out)
+    }
+
+    /// [`Self::resolve_literal`] with an optional live [`Descent`] and findings sink
+    /// (issue #127). Returns `(value, stratum)`: for a fold, stratum is `min` over
+    /// the resolved fold arguments (including a nested project-call summary's
+    /// stratum).
     fn resolve_literal_under(
         &self,
         value: &ArgValue,
@@ -5115,6 +5128,7 @@ impl<'a> Cx<'a> {
         poisoned: bool,
         folder: &mut dyn Folder,
         mut descent: Option<&mut Descent<'_>>,
+        mut out: Option<&mut Vec<Diagnostic>>,
     ) -> Option<(ArgValue, Stratum)> {
         if poisoned {
             return None;
@@ -5136,7 +5150,7 @@ impl<'a> Cx<'a> {
                 // (issue #127). A bare project call (`g(1)` as a value) is *not*
                 // resolved here — that stays the caller's job (`nested_call_singleton`
                 // / `project_call_summary`) so findings still emit on the live `out`.
-                self.try_fold_under(name, args, env, poisoned, folder, descent)
+                self.try_fold_under(name, args, env, poisoned, folder, descent, out)
                     .map(|(lit, _prov, strat)| (lit, strat))
             }
             // `$a . $b` (issue #59): proven iff BOTH operands resolve to values whose
@@ -5144,10 +5158,12 @@ impl<'a> Cx<'a> {
             // unresolved operand yields `None` — the same silence as any other
             // unprovable value, never a partial string.
             ArgValue::Concat(a, b) => {
-                let (l, sl) =
-                    self.resolve_literal_under(a, env, poisoned, folder, descent.as_deref_mut())?;
-                let (r, sr) =
-                    self.resolve_literal_under(b, env, poisoned, folder, descent.as_deref_mut())?;
+                let (l, sl) = self.resolve_literal_under(
+                    a, env, poisoned, folder, descent.as_deref_mut(), out.as_deref_mut(),
+                )?;
+                let (r, sr) = self.resolve_literal_under(
+                    b, env, poisoned, folder, descent.as_deref_mut(), out.as_deref_mut(),
+                )?;
                 Some((ArgValue::Str(concat_cast(&l)? + &concat_cast(&r)?), sl.min(sr)))
             }
             // An array is proven iff every element value is proven (keys are fixed
@@ -5156,8 +5172,9 @@ impl<'a> Cx<'a> {
                 let mut resolved = Vec::with_capacity(items.len());
                 let mut strat = Stratum::Verified;
                 for (k, v) in items {
-                    let (rv, s) =
-                        self.resolve_literal_under(v, env, poisoned, folder, descent.as_deref_mut())?;
+                    let (rv, s) = self.resolve_literal_under(
+                        v, env, poisoned, folder, descent.as_deref_mut(), out.as_deref_mut(),
+                    )?;
                     strat = strat.min(s);
                     resolved.push((k.clone(), rv));
                 }
@@ -5207,10 +5224,24 @@ impl<'a> Cx<'a> {
         poisoned: bool,
         folder: &mut dyn Folder,
     ) -> Option<(ArgValue, String, Stratum)> {
-        self.try_fold_under(name, args, env, poisoned, folder, None)
+        self.try_fold_under(name, args, env, poisoned, folder, None, None)
     }
 
-    /// [`Self::try_fold`] with an optional live [`Descent`] (issue #127).
+    /// Like [`Self::try_fold`], threading a findings sink so nested project-call
+    /// descents for fold arguments emit binding-specific diagnostics (issue #127).
+    fn try_fold_emit(
+        &self,
+        name: &str,
+        args: &[ArgValue],
+        env: &HashMap<String, Known>,
+        poisoned: bool,
+        folder: &mut dyn Folder,
+        out: &mut Vec<Diagnostic>,
+    ) -> Option<(ArgValue, String, Stratum)> {
+        self.try_fold_under(name, args, env, poisoned, folder, None, Some(out))
+    }
+
+    /// [`Self::try_fold`] with optional live [`Descent`] and findings sink (issue #127).
     fn try_fold_under(
         &self,
         name: &str,
@@ -5219,6 +5250,7 @@ impl<'a> Cx<'a> {
         poisoned: bool,
         folder: &mut dyn Folder,
         mut descent: Option<&mut Descent<'_>>,
+        mut out: Option<&mut Vec<Diagnostic>>,
     ) -> Option<(ArgValue, String, Stratum)> {
         // Any project user function sharing this simple name shadows the builtin
         // (or makes it ambiguous) — do not fold. Conservative, never an FP.
@@ -5230,18 +5262,30 @@ impl<'a> Cx<'a> {
         }
         let mut resolved = Vec::with_capacity(args.len());
         let mut arg_strat = Stratum::Verified;
+        // When no external sink is provided (dump surface, pure resolution), use a
+        // scratch so nested descents stay silent. Walk/check paths pass a real
+        // `out` so binding-specific findings under `g(1)` in `strtoupper(g(1))`
+        // are not discarded (issue #127 review).
+        let mut scratch: Vec<Diagnostic> = Vec::new();
         for a in args {
             // Resolve under the live descent so a project-call arg's summary
             // reuses the on-stack guard (issue #127). `resolve_literal_under`
             // covers literals / env / nested folds; a project call that is not
-            // itself foldable is answered by `nested_call_singleton` (scratch
-            // sink — the outer statement's own descent, when any, owns emission).
-            let (r, s) = if let Some((v, s)) =
-                self.resolve_literal_under(a, env, poisoned, folder, descent.as_deref_mut())
-            {
+            // itself foldable is answered by `nested_call_singleton`.
+            let (r, s) = if let Some((v, s)) = self.resolve_literal_under(
+                a,
+                env,
+                poisoned,
+                folder,
+                descent.as_deref_mut(),
+                out.as_deref_mut(),
+            ) {
                 (v, s)
             } else if let Some((v, s)) = {
-                let mut scratch: Vec<Diagnostic> = Vec::new();
+                let sink: &mut Vec<Diagnostic> = match out.as_deref_mut() {
+                    Some(o) => o,
+                    None => &mut scratch,
+                };
                 nested_call_singleton(
                     self,
                     folder,
@@ -5250,7 +5294,7 @@ impl<'a> Cx<'a> {
                     poisoned,
                     0,
                     descent.as_deref_mut(),
-                    &mut scratch,
+                    sink,
                 )
             } {
                 (v, s)
@@ -6654,15 +6698,28 @@ fn walk_trace(
             let mut native_fired = false;
             // A proven scalar (env/fold), or a proven object / class constant
             // (ADR-0043 stage 3 return path); the object arm rides the is-a oracle.
-            let ret_val = cx
-                .resolve_literal(value, env, scope.poisoned, folder)
-                .or_else(|| cx.resolve_static_value(value, w.enclosing_class));
+            // Stratum rides with the resolution (issue #127 review): an Asserted
+            // fold (`return strtoupper(g(...))`) must not launder to Verified via a
+            // syntactic re-read. Nested fold descents emit through `out`.
+            let ret_resolved: Option<(ArgValue, Stratum)> = cx
+                .resolve_literal_strat_ex(
+                    value,
+                    env,
+                    scope.poisoned,
+                    folder,
+                    descent.as_mut(),
+                    Some(&mut *out),
+                )
+                .or_else(|| {
+                    cx.resolve_static_value(value, w.enclosing_class)
+                        .map(|v| (v, Stratum::Verified))
+                });
             // The native return check is proof-layer (`type.return-mismatch`): a
             // returned value proven only through an `Asserted` fact stays silent
             // (ADR-0052 §5). The phpdoc contract check below accepts `Asserted`.
             if let Some((ret, display)) = w.ret_info
-                && value_stratum(value, env, Some(&*store)) == Stratum::Verified
-                && let Some(lit) = ret_val.as_ref()
+                && let Some((lit, strat)) = ret_resolved.as_ref()
+                && *strat == Stratum::Verified
                 && is_type_error(cx, ret, lit)
                 && !object_world_guard_blind(descent.is_some(), ret, lit)
             {
@@ -6855,6 +6912,7 @@ fn walk_trace(
                     facts,
                     stmt_summary.as_ref(),
                     stmt_return_arms.as_deref(),
+                    out,
                 );
                 Flow::FellThrough
             }
@@ -8128,6 +8186,7 @@ fn apply_assign(
     facts: &mut Option<&mut Vec<LineFact>>,
     summary: Option<&ReturnSummary>,
     return_arms: Option<&[ContractArm]>,
+    out: &mut Vec<Diagnostic>,
 ) {
     let cx = w.cx;
     let line = cx.tree().position(span_start).line;
@@ -8279,9 +8338,17 @@ fn apply_assign(
                 }
             }
         }
-        _ => match cx.resolve_literal_strat(value, env, w.scope.poisoned, folder).and_then(
-            |(lit, strat)| singleton_fact(&lit, cx.php_minor).map(|f| (lit, f, strat)),
-        ) {
+        _ => match cx
+            .resolve_literal_strat_ex(
+                value,
+                env,
+                w.scope.poisoned,
+                folder,
+                None,
+                Some(&mut *out),
+            )
+            .and_then(|(lit, strat)| singleton_fact(&lit, cx.php_minor).map(|f| (lit, f, strat)))
+        {
             Some((lit, fact, strat)) => {
                 if let Some(facts) = facts.as_deref_mut() {
                     facts.push(LineFact {
@@ -8292,7 +8359,9 @@ fn apply_assign(
                 // Derivation clause: folds and array composition resolve through
                 // `resolve_literal`, consuming env facts and nested project-call
                 // summary strata (issue #127) — stamp that min, not a re-read of
-                // the syntactic Call tree alone.
+                // the syntactic Call tree alone. Nested project-call descents for
+                // fold args emit through `out` so binding-specific findings under
+                // `strtoupper(g(1))` are not discarded (issue #127 review).
                 env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
                 store.unbind(var);
             }
@@ -8712,19 +8781,21 @@ fn build_new_object(
             // (`Verified`).
             let (fact, stratum) = match bound {
                 Some(a) => match cx
-                    .resolve_literal(a, env, w.scope.poisoned, folder)
-                    .and_then(|lit| singleton_fact(&lit, cx.php_minor))
+                    .resolve_literal_strat(a, env, w.scope.poisoned, folder)
+                    .and_then(|(lit, strat)| {
+                        singleton_fact(&lit, cx.php_minor).map(|f| (f, strat))
+                    })
                     // The promoted slot stores the boundary-converted argument
                     // (issue #48): `__construct(public float $g)` called with `2`
                     // holds `2.0`. A mode-dependent conversion falls back to the
                     // native seed — `General` of the declared scalar covers
                     // whatever the runtime conversion produces (or the write
                     // fatals), so the seed stays sound where the value is not.
-                    .and_then(|f| match param.ty.as_ref() {
-                        Some(ty) => coerce_fact_to_native(ty, f),
-                        None => Some(f),
+                    .and_then(|(f, strat)| match param.ty.as_ref() {
+                        Some(ty) => coerce_fact_to_native(ty, f).map(|f| (f, strat)),
+                        None => Some((f, strat)),
                     }) {
-                    Some(f) => (Some(f), value_stratum(a, env, Some(&*store))),
+                    Some((f, strat)) => (Some(f), strat),
                     None => (seed_fact(param), Stratum::Verified),
                 },
                 None => (seed_fact(param), Stratum::Verified),
@@ -8845,9 +8916,13 @@ fn apply_prop_assign(
     // Resolve the rvalue to a proven literal (for the native check) and a fact
     // (for storage + the abstract phpdoc check). The rvalue's trust stratum
     // (ADR-0052 §5) gates the proof-layer native check and is recorded on the prop
-    // (derivation clause — heap write).
-    let proven_lit = cx.resolve_literal(value, env, false, folder);
-    let rvalue_strat = value_stratum(value, env, Some(&*store));
+    // (derivation clause — heap write). Stratum rides with the resolution so an
+    // Asserted fold does not launder to Verified (issue #127 review).
+    let proven = cx.resolve_literal_strat_ex(value, env, false, folder, None, Some(&mut *out));
+    let (proven_lit, rvalue_strat) = match &proven {
+        Some((lit, strat)) => (Some(lit.clone()), *strat),
+        None => (None, value_stratum(value, env, Some(&*store))),
+    };
     let prop_fact_val: Option<Fact> = proven_lit.as_ref().and_then(|l| singleton_fact(l, cx.php_minor)).or_else(|| {
         match value {
             ArgValue::PropFetch { var: rv, prop: rp } => store.prop_fact(rv, rp).cloned(),
@@ -12733,28 +12808,36 @@ fn check_propagated_call(
 
         let mut native_fired = false;
         if let Some(ty) = param.ty.as_ref() {
-            let resolved: Option<(ArgValue, String)> = match &arg.value {
+            // Resolved value + provenance + the trust stratum that arrived with the
+            // resolution (issue #127 review). The proof gate must use this stratum —
+            // never a re-read of the syntactic call tree via `value_stratum`, which
+            // would launder an Asserted fold (`strtoupper(g(...))`) into Verified.
+            let resolved: Option<(ArgValue, String, Stratum)> = match &arg.value {
                 ArgValue::Var(name) if !poisoned => env.get(name).and_then(|k| {
                     let v = k.singleton()?;
                     let prov = match &k.bound {
                         Some(b) => format!("from ${name}, {b}"),
                         None => format!("from ${name}, assigned at line {}", k.line),
                     };
-                    Some((v, prov))
+                    Some((v, prov, k.stratum))
                 }),
                 ArgValue::Call(name, args) => {
                     let direct = if args.is_empty() {
                         cx.resolve_const_fn(name)
                             .map(|(lit, line)| {
-                                (lit, format!("from {name}(), defined at line {line}"))
+                                (
+                                    lit,
+                                    format!("from {name}(), defined at line {line}"),
+                                    Stratum::Verified,
+                                )
                             })
                             .or_else(|| {
-                                cx.try_fold(name, args, env, poisoned, folder)
-                                    .map(|(lit, prov, _)| (lit, prov))
+                                cx.try_fold_emit(name, args, env, poisoned, folder, out)
+                                    .map(|(lit, prov, strat)| (lit, prov, strat))
                             })
                     } else {
-                        cx.try_fold(name, args, env, poisoned, folder)
-                            .map(|(lit, prov, _)| (lit, prov))
+                        cx.try_fold_emit(name, args, env, poisoned, folder, out)
+                            .map(|(lit, prov, strat)| (lit, prov, strat))
                     };
                     // A nested project call (issue #60): its Singleton return summary
                     // is the argument's proven value — `takesInt(g(1))` sees what `g`
@@ -12766,28 +12849,32 @@ fn check_propagated_call(
                     // the descent-pass decline loses no site. `Verified`-only: the
                     // native proof below consumes an all-Verified premise (ADR-0052
                     // §5), and an Asserted summary must not launder into it. Findings
-                    // are a scratch — the callee's own walk is the emission site.
+                    // go to the real `out` so a binding-specific proof under `g(1)`
+                    // is not discarded (issue #127 review); dedup absorbs any
+                    // binding-independent copy already emitted by the plain walk.
                     direct.or_else(|| {
                         if in_descent {
                             return None;
                         }
-                        let mut scratch: Vec<Diagnostic> = Vec::new();
                         let summary = project_call_summary(
-                            cx, folder, name, args, env, poisoned, arg.span.start, None,
-                            &mut scratch,
+                            cx, folder, name, args, env, poisoned, arg.span.start, None, out,
                         )?;
                         let sv = summary.value?;
                         if sv.stratum != Stratum::Verified {
                             return None;
                         }
                         let Fact::Singleton(v) = &sv.fact else { return None };
-                        Some((arg_of_val(v), format!("returned from {name}()")))
+                        Some((arg_of_val(v), format!("returned from {name}()"), sv.stratum))
                     })
                 }
                 // A property read `$o->p` (ADR-0036): a `Singleton` prop fact flows.
                 ArgValue::PropFetch { var, prop } if !poisoned => {
                     store.prop_fact(var, prop).and_then(|f| match f {
-                        Fact::Singleton(v) => Some((arg_of_val(v), format!("from ${var}->{prop}"))),
+                        Fact::Singleton(v) => Some((
+                            arg_of_val(v),
+                            format!("from ${var}->{prop}"),
+                            store.prop_stratum(var, prop),
+                        )),
                         _ => None,
                     })
                 }
@@ -12797,8 +12884,8 @@ fn check_propagated_call(
             // `type.argument-mismatch` fires only on an all-`Verified` premise. A
             // value proven through an `Asserted` env/heap fact stays silent (the
             // phpdoc contract check below still accepts it).
-            if let Some((value, provenance)) = resolved
-                && value_stratum(&arg.value, env, Some(store)) == Stratum::Verified
+            if let Some((value, provenance, strat)) = resolved
+                && strat == Stratum::Verified
                 && is_type_error(cx, ty, &value)
                 && !object_world_guard_blind(in_descent, ty, &value)
             {
@@ -13232,27 +13319,31 @@ fn check_callable_args(
         let Some(ty) = param.ty.as_ref() else { continue };
         // Resolve the argument to a proven value (literal directly; `$var`/fold via
         // the env). Provenance names the variable/fold source where applicable.
-        let resolved: Option<(ArgValue, Option<String>)> = match &arg.value {
-            v if v.is_literal() => Some((v.clone(), None)),
+        // Stratum rides with the resolution (issue #127 review) — never a syntactic
+        // re-read that would launder an Asserted fold into Verified.
+        let resolved: Option<(ArgValue, Option<String>, Stratum)> = match &arg.value {
+            v if v.is_literal() => Some((v.clone(), None, Stratum::Verified)),
             ArgValue::Var(vn) if !poisoned => env.get(vn).and_then(|k| {
                 let v = k.singleton()?;
                 let prov = match &k.bound {
                     Some(b) => format!("from ${vn}, {b}"),
                     None => format!("from ${vn}, assigned at line {}", k.line),
                 };
-                Some((v, Some(prov)))
+                Some((v, Some(prov), k.stratum))
             }),
             ArgValue::Call(cn, cargs) => cx
-                .try_fold(cn, cargs, env, poisoned, folder)
-                .map(|(lit, prov, _)| (lit, Some(prov))),
+                .try_fold_emit(cn, cargs, env, poisoned, folder, out)
+                .map(|(lit, prov, strat)| (lit, Some(prov), strat)),
             // A proven object (`new` / enum case) or resolved class constant
             // (ADR-0043 stage 3); env-free, `self`/`parent` unavailable here.
-            _ => cx.resolve_static_value(&arg.value, None).map(|v| (v, None)),
+            _ => cx
+                .resolve_static_value(&arg.value, None)
+                .map(|v| (v, None, Stratum::Verified)),
         };
         // Proof-layer consumption rule (ADR-0052 §5): silent on an `Asserted`
         // premise (no store here — a prop-fetch arg never resolves to a fire).
-        if let Some((value, provenance)) = resolved
-            && value_stratum(&arg.value, env, None) == Stratum::Verified
+        if let Some((value, provenance, strat)) = resolved
+            && strat == Stratum::Verified
             && is_type_error(cx, ty, &value)
             && !object_world_guard_blind(in_descent, ty, &value)
         {
@@ -13327,9 +13418,12 @@ fn descend(
             poisoned,
             folder,
             descent.as_deref_mut(),
+            Some(&mut *out),
         ) {
             // Stratum comes from the fold/env path (includes nested project-call
-            // Asserted summaries — issue #127 review).
+            // Asserted summaries — issue #127 review). Nested project-call descents
+            // for fold args emit through `out` so binding-specific findings are not
+            // discarded.
             Some(vs) => vs,
             None => {
                 let Some(vs) = nested_call_singleton(
@@ -13621,10 +13715,14 @@ fn return_value_fact(
     {
         return Some((fact, known.stratum));
     }
-    if let Some(lit) = w.cx.resolve_literal(value, env, poisoned, folder)
+    // Stratum from the resolution itself (issue #127 review): a fold over an
+    // Asserted project-call summary stays Asserted — never re-read from the
+    // syntactic tree. Scratch sink: findings for nested fold args are owned by the
+    // return-check / assignment paths that resolve with a real `out`.
+    if let Some((lit, strat)) = w.cx.resolve_literal_strat(value, env, poisoned, folder)
         && let Some(fact) = singleton_fact(&lit, w.cx.php_minor)
     {
-        return Some((fact, value_stratum(value, env, Some(store))));
+        return Some((fact, strat));
     }
     if let ArgValue::PropFetch { var, prop } = value
         && !poisoned
@@ -16382,47 +16480,60 @@ fn check_method_args(
 
         let mut native_fired = false;
         if let Some(ty) = param.ty.as_ref() {
-            let resolved: Option<(ArgValue, Option<String>)> = match &arg.value {
-                v if v.is_literal() => Some((v.clone(), None)),
+            // Resolved value + provenance + trust stratum (issue #127 review): the
+            // proof gate uses the stratum that arrived with the resolution, not a
+            // syntactic re-read that would launder an Asserted fold to Verified.
+            let resolved: Option<(ArgValue, Option<String>, Stratum)> = match &arg.value {
+                v if v.is_literal() => Some((v.clone(), None, Stratum::Verified)),
                 ArgValue::Var(name) if !poisoned => env.get(name).and_then(|k| {
                     let v = k.singleton()?;
                     let prov = match &k.bound {
                         Some(b) => format!("from ${name}, {b}"),
                         None => format!("from ${name}, assigned at line {}", k.line),
                     };
-                    Some((v, Some(prov)))
+                    Some((v, Some(prov), k.stratum))
                 }),
                 ArgValue::Call(name, args) => {
                     if args.is_empty() {
                         cx.resolve_const_fn(name)
                             .map(|(lit, line)| {
-                                (lit, Some(format!("from {name}(), defined at line {line}")))
+                                (
+                                    lit,
+                                    Some(format!("from {name}(), defined at line {line}")),
+                                    Stratum::Verified,
+                                )
                             })
                             .or_else(|| {
-                                cx.try_fold(name, args, env, poisoned, folder)
-                                    .map(|(l, p, _)| (l, Some(p)))
+                                cx.try_fold_emit(name, args, env, poisoned, folder, out)
+                                    .map(|(l, p, s)| (l, Some(p), s))
                             })
                     } else {
-                        cx.try_fold(name, args, env, poisoned, folder)
-                            .map(|(l, p, _)| (l, Some(p)))
+                        cx.try_fold_emit(name, args, env, poisoned, folder, out)
+                            .map(|(l, p, s)| (l, Some(p), s))
                     }
                 }
                 // A property read `$o->p` (ADR-0036): a `Singleton` prop fact flows.
                 ArgValue::PropFetch { var, prop } if !poisoned => {
                     store.prop_fact(var, prop).and_then(|f| match f {
-                        Fact::Singleton(v) => Some((arg_of_val(v), Some(format!("from ${var}->{prop}")))),
+                        Fact::Singleton(v) => Some((
+                            arg_of_val(v),
+                            Some(format!("from ${var}->{prop}")),
+                            store.prop_stratum(var, prop),
+                        )),
                         _ => None,
                     })
                 }
                 // A proven object (`new` / enum case) or resolved class constant
                 // (ADR-0043 stage 3). Env-free; `self`/`parent` at the call site are
                 // not available here, so only a written class name resolves.
-                _ => cx.resolve_static_value(&arg.value, None).map(|v| (v, None)),
+                _ => cx
+                    .resolve_static_value(&arg.value, None)
+                    .map(|v| (v, None, Stratum::Verified)),
             };
             // Proof-layer consumption rule (ADR-0052 §5): silent on an `Asserted`
             // premise; the phpdoc contract check below still accepts it.
-            if let Some((value, prov)) = resolved
-                && value_stratum(&arg.value, env, Some(store)) == Stratum::Verified
+            if let Some((value, prov, strat)) = resolved
+                && strat == Stratum::Verified
                 && is_type_error(cx, ty, &value)
                 && !object_world_guard_blind(in_descent, ty, &value)
             {

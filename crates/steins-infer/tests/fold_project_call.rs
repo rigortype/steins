@@ -7,7 +7,9 @@
 //! shadow, unique-simple-name, conditional polyfill, non-Singleton summary)
 //! still declines.
 
-use steins_infer::{DEBUG_TYPE_ID, Diagnostic, Folder, ID as ARG_MISMATCH_ID, check, check_with};
+use steins_infer::{
+    DEBUG_TYPE_ID, Diagnostic, Folder, ID as ARG_MISMATCH_ID, RETURN_ID, check, check_with,
+};
 use steins_syntax::{ArgValue, SourceTree};
 
 struct Mock;
@@ -142,27 +144,118 @@ fn zero_arg_project_call_stays_on_const_fn_lane() {
 // Recursion through a fold arg terminates
 // ==========================================================================
 
-#[test]
-fn asserted_project_summary_fold_stays_asserted() {
-    // Issue #127 review: nested_call_singleton's Asserted stratum must min into
-    // the fold result — not be discarded and re-read from the syntactic Call tree
-    // (which would launder to Verified and premise a proof-layer finding).
-    let src = "<?php\n\
+/// Shared helpers for the Asserted-fold laundering fixtures (issue #127 review).
+/// `g` asserts its second arg is `'hi'` and returns it; `strtoupper(g(...))` folds
+/// to `'HI'` at Asserted — every proof-layer consumer must stay silent.
+const ASSERTED_FOLD_PRELUDE: &str = "\
         /** @phpstan-assert 'hi' $v */\n\
         function claimHi($v): void {}\n\
         function g(int $trigger, $x): string {\n\
             claimHi($x);\n\
             return $x;\n\
         }\n\
-        function takesInt(int $n): void {}\n\
+        function takesInt(int $n): void {}\n";
+
+#[test]
+fn asserted_project_summary_fold_stays_asserted() {
+    // Assignment path: fold result binds Asserted; env-read `takesInt($result)`
+    // must not launder to Verified.
+    let src = format!(
+        "<?php\n{ASSERTED_FOLD_PRELUDE}\
         $result = strtoupper(g(1, (string) rand()));\n\
         \\PHPStan\\dumpType($result);\n\
-        takesInt($result);\n";
-    assert_eq!(one_folded(src), "'HI' (asserted)");
+        takesInt($result);\n"
+    );
+    assert_eq!(one_folded(&src), "'HI' (asserted)");
     assert_eq!(
-        count(src, ARG_MISMATCH_ID, Some(&mut Mock)),
+        count(&src, ARG_MISMATCH_ID, Some(&mut Mock)),
         0,
         "Asserted fold result must not premise type.argument-mismatch"
+    );
+}
+
+#[test]
+fn asserted_fold_direct_free_function_argument_stays_silent() {
+    // Direct argument position — no assignment detour. The argument checker must
+    // use the fold's resolved stratum, not a syntactic re-read of the Call tree.
+    let src = format!(
+        "<?php\n{ASSERTED_FOLD_PRELUDE}\
+        takesInt(strtoupper(g(1, (string) rand())));\n"
+    );
+    assert_eq!(
+        count(&src, ARG_MISMATCH_ID, Some(&mut Mock)),
+        0,
+        "direct free-function arg: Asserted fold must not premise type.argument-mismatch"
+    );
+}
+
+#[test]
+fn asserted_fold_direct_method_argument_stays_silent() {
+    // Method argument path — same stratum rule as free-function args.
+    let src = format!(
+        "<?php\n{ASSERTED_FOLD_PRELUDE}\
+        class Sink {{\n\
+            public function takesInt(int $n): void {{}}\n\
+        }}\n\
+        (new Sink)->takesInt(strtoupper(g(1, (string) rand())));\n"
+    );
+    assert_eq!(
+        count(&src, ARG_MISMATCH_ID, Some(&mut Mock)),
+        0,
+        "direct method arg: Asserted fold must not premise type.argument-mismatch"
+    );
+}
+
+#[test]
+fn asserted_fold_return_position_stays_silent() {
+    // Native return check must use the fold's resolved stratum.
+    let src = format!(
+        "<?php\n{ASSERTED_FOLD_PRELUDE}\
+        function f(): int {{\n\
+            return strtoupper(g(1, (string) rand()));\n\
+        }}\n\
+        f();\n"
+    );
+    assert_eq!(
+        count(&src, RETURN_ID, Some(&mut Mock)),
+        0,
+        "return strtoupper(g(...)): Asserted fold must not premise type.return-mismatch"
+    );
+    assert_eq!(
+        count(&src, ARG_MISMATCH_ID, Some(&mut Mock)),
+        0,
+        "no collateral argument mismatch either"
+    );
+}
+
+#[test]
+fn fold_arg_emits_binding_specific_finding() {
+    // Issue #127 review (High): when `g(1)` is resolved only as a fold argument,
+    // the nested descent must emit through the real findings sink — not a scratch
+    // that discards binding-specific diagnostics plain walk cannot see.
+    // Strict mode: int→string is a proven TypeError only under the binding `$x = 1`.
+    let src = "<?php\n\
+        declare(strict_types=1);\n\
+        function takesString(string $s): void {}\n\
+        function g(int $x): string {\n\
+            takesString($x);\n\
+            return 'hi';\n\
+        }\n\
+        $result = strtoupper(g(1));\n\
+        \\PHPStan\\dumpType($result);\n";
+    assert_eq!(one_folded(src), "'HI'");
+    let ds = findings(src, Some(&mut Mock));
+    let mismatches: Vec<&Diagnostic> =
+        ds.iter().filter(|d| d.id == ARG_MISMATCH_ID).collect();
+    assert_eq!(
+        mismatches.len(),
+        1,
+        "binding-specific finding under fold arg must emit once: {mismatches:?}"
+    );
+    assert!(
+        mismatches[0].message.contains("bound at"),
+        "provenance should name the binding: {}",
+        mismatches[0].message
     );
 }
 
