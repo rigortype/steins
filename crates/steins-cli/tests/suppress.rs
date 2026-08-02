@@ -333,6 +333,38 @@ fn a_leftover_debug_baseline_entry_never_suppresses_and_is_reported_stale() {
 }
 
 #[test]
+fn a_strict_captured_debug_entry_is_stale_on_a_default_run_too() {
+    // Review finding on issue #108 (PR #133): the first cut of the stale fix kept
+    // ADR-0062 A-G10's `captured <= rung` rung gate alongside the debug carve-out,
+    // so a `debug.type` entry tagged `"surface":"strict"` and consulted on a
+    // `default` run read as `Strict <= Default` = false and was silently kept —
+    // dormant forever, exactly the bug the ruling above was meant to close. A
+    // debug entry is dead weight at every rung (a debug finding is checked on
+    // every profile, and it can never be matched — see the leftover-entry test
+    // above), so the rung it happened to be captured at must not matter.
+    let dir = workdir("debug-leftover-entry-strict-rung");
+    write(&dir, "a.php", "<?php\n$x = 1;\n\\PHPStan\\dumpType($x);\n");
+    assert_eq!(run_in(&dir, &["check", "--set-baseline", "--profile", "strict", "a.php"]).code, 0);
+
+    let header = std::fs::read_to_string(dir.join(".steins-baseline.jsonl")).unwrap();
+    let header_line = header.lines().next().expect("header line");
+    let forged = format!(
+        "{header_line}\n{{\"id\":\"debug.type\",\"path\":\"a.php\",\"hash\":\"deadbeefdeadbeef\",\"surface\":\"strict\"}}\n"
+    );
+    std::fs::write(dir.join(".steins-baseline.jsonl"), forged).unwrap();
+
+    // Run under the DEFAULT profile — lower rung than the entry's own capture tag.
+    let r = run_in(&dir, &["check", "a.php"]);
+    assert_eq!(r.code, 1, "the dump still fails on a lower-rung run; stdout:\n{}", r.stdout);
+    assert!(r.stdout.contains("error[debug.type]"), "not suppressed, got:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("1 baseline entries no longer match (stale"),
+        "a strict-captured debug entry is stale even on a default run, got:\n{}",
+        r.stdout
+    );
+}
+
+#[test]
 fn ignore_baseline_bypasses() {
     let dir = workdir("bypass");
     write(&dir, "a.php", &one_finding());

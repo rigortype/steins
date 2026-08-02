@@ -248,15 +248,25 @@ impl Surface {
     #[must_use]
     pub fn surfaces_id(&self, id: &str) -> bool {
         let Some(l) = layer(id) else { return false };
+        // The debug lane's capture exemption (§4/§8) is a LAYER property, decided
+        // BEFORE `enable`/`disable` are even consulted — unlike the ladder below, it
+        // is not something a profile can vote on. A prior revision let an explicit
+        // `enable = ["debug.type"]` pattern force `on` back to `true` past this
+        // point (issue #108 review): `pattern_is_known` accepts any registered id,
+        // debug ids included, so that pattern validates in a real `steins.toml` and
+        // reached `layers_on()` / `surface_ids()` — the debug lane's own doc
+        // comments on those two functions claim it never does. Returning here,
+        // before `layer_always_on` and the ladder, closes the corner instead of
+        // documenting it: no pattern in any channel can pull a debug id into the
+        // capture surface. Its DISPLAY is unaffected — that is decided separately
+        // and unconditionally in [`Surface::is_surfaced`].
+        if l == Layer::Debug {
+            return false;
+        }
         if layer_always_on(l) {
             return true;
         }
-        // The debug lane's capture exemption (§4/§8) is a LAYER property, decided
-        // before the ladder: a dump displays everywhere but is never captured, so
-        // its floor never gets a vote. Keeping this arm here (rather than inventing
-        // an unreachable floor) preserves the pre-S6 reading exactly, including the
-        // corner where an explicit `enable` pattern below forces a debug id on.
-        let mut on = l != Layer::Debug && surface_floor(id).is_some_and(|f| f <= self.rung);
+        let mut on = surface_floor(id).is_some_and(|f| f <= self.rung);
         if self.enable.iter().any(|p| pattern_matches(p, id)) {
             on = true;
         }
@@ -670,6 +680,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn an_enable_pattern_cannot_pull_a_debug_id_into_the_capture_surface() {
+        // Review finding on issue #108 (PR #133): `enable = ["debug.type"]` is a
+        // pattern `pattern_is_known` accepts (debug ids are registered, so the
+        // config layer never rejects it) and used to reach past `surfaces_id`'s
+        // debug carve-out — the `on = true` write happened unconditionally,
+        // regardless of layer. That leaked a debug id into `layers_on()` (doctor's
+        // surface line) and `surface_ids()` (the baseline capture header),
+        // contradicting both functions' own doc comments. `surfaces_id` now
+        // returns for the debug lane before `enable`/`disable` are even read.
+        let mut m = BTreeMap::new();
+        m.insert(
+            "debug-enabled".to_owned(),
+            UserProfile { enable: vec![DEBUG_TYPE_ID.to_owned()], ..Default::default() },
+        );
+        let s = ProfileConfigs(m).resolve(Some("debug-enabled")).unwrap();
+        assert!(s.is_surfaced(&diag(DEBUG_TYPE_ID, None)), "still displays — enable didn't need to help");
+        assert!(!s.surfaces_id(DEBUG_TYPE_ID), "enable cannot pull a debug id into the capture predicate");
+        assert!(
+            !s.surface_ids().iter().any(|c| c == DEBUG_TYPE_ID),
+            "enable cannot pull a debug id into the baseline capture set"
+        );
+        assert_eq!(
+            s.layers_on(),
+            vec!["mechanics", "proof"],
+            "debug must not appear in the surface's layer list even under an explicit enable"
+        );
     }
 
     #[test]
