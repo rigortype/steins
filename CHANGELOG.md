@@ -4,6 +4,7 @@ All notable changes to Steins are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<!-- Maintainer and agent instructions:
 **This file is load-bearing, not decorative.** `.github/workflows/release.yml`
 extracts a version's section verbatim as the body of its GitHub Release, so what
 is written here is what users read. Two consequences:
@@ -22,6 +23,7 @@ did not before is a **breaking** change for anyone with a green CI, and says so.
 
 Diagnostic **ids** are the contract (ADR-0023) — message wording is not. Reference
 findings by id (`call.undefined-function`), never by the sentence they print.
+-->
 
 ## [Unreleased]
 
