@@ -5661,8 +5661,10 @@ enum ClosureTarget {
 #[derive(Clone)]
 struct ClosureVal {
     target: ClosureTarget,
-    /// The by-value captured variable facts, snapshotted at creation.
-    captures: Vec<(String, Fact)>,
+    /// The by-value captured variable facts, snapshotted at creation with their
+    /// trust stratum (issue #128 review). Seeding the descent without the stratum
+    /// would launder an `Asserted` capture into a `Verified` summary premise.
+    captures: Vec<(String, Fact, Stratum)>,
     /// The closure definition line, for descent provenance.
     def_line: u32,
 }
@@ -8905,6 +8907,8 @@ fn parse_var_type(docblock: &str) -> Option<PType> {
 /// A capture whose variable has no proven scalar fact is simply omitted (the
 /// closure body sees it as unknown — sound); a captured closure is not re-snapshot
 /// (nested closure capture is not modeled — the body treats it as unknown).
+/// Each captured fact keeps its trust stratum so descent seeding cannot launder
+/// an `Asserted` claim into a `Verified` summary (issue #128 review).
 fn build_closure_val(
     cx: &Cx,
     cref: &steins_syntax::ClosureRef,
@@ -8914,22 +8918,19 @@ fn build_closure_val(
     use steins_syntax::ClosureRef;
     match cref {
         ClosureRef::Anonymous { def_offset, captures } => {
-            let mut snapshot: Vec<(String, Fact)> = Vec::new();
+            let mut snapshot: Vec<(String, Fact, Stratum)> = Vec::new();
             for name in captures {
                 if let Some(k) = env.get(name)
                     && let Some(f) = &k.fact
-                    // A `Fact::Shape` is deliberately NOT captured (ADR-0062 S3).
-                    // Two reasons, both structural: the descent key collapses every
-                    // non-`Singleton` fact to `Other` (`arg_of_fact_key`), so a
-                    // captured shape carries no binding information — it would only
-                    // flip the "descend at all" test below; and the capture lane
-                    // seeds the callee env at `Verified`, which would launder the
-                    // shape's `Asserted` stratum and break A-G9's corollary
-                    // (shape-derived facts never feed proof-layer findings). The
-                    // capture lane grows a stratum before a shape may ride it.
+                    // A `Fact::Shape` is deliberately NOT captured (ADR-0062 S3):
+                    // the descent key collapses every non-`Singleton` fact to
+                    // `Other` (`arg_of_fact_key`), so a captured shape carries no
+                    // binding information — it would only flip the "descend at
+                    // all" test. (Stratum is now snapshotted for scalars, but
+                    // shapes stay out until the key can spell them.)
                     && !matches!(f, Fact::Shape { .. })
                 {
-                    snapshot.push((name.clone(), f.clone()));
+                    snapshot.push((name.clone(), f.clone(), k.stratum));
                 }
             }
             Some(ClosureVal { target: ClosureTarget::Scope(*def_offset), captures: snapshot, def_line: line })
@@ -11655,6 +11656,13 @@ fn assert_fact_of(cty: &steins_contract::ContractTy) -> Option<Fact> {
         C::IntIn(r) => Some(Fact::refined(Base::Int, Refinement::Int(*r), false)),
         C::StrWith(p) => Some(Fact::refined(Base::String, Refinement::Str(*p), false)),
         C::Null => Some(Fact::Singleton(Val::Null)),
+        // Literal claims (`@phpstan-assert 'hi' $v`, `42`, `true`) are Singleton
+        // facts — the same denotation `steins_contract::fact_of` uses. Needed so a
+        // captured Asserted literal can surface on a closure summary (issue #128).
+        C::LitInt(i) => Some(Fact::Singleton(Val::Int(*i))),
+        C::LitFloat(f) => Some(Fact::Singleton(Val::Float(*f))),
+        C::LitStr(s) => Some(Fact::Singleton(Val::Str(s.clone()))),
+        C::LitBool(b) => Some(Fact::Singleton(Val::Bool(*b))),
         C::Union(members) => {
             let has_null = members.iter().any(|m| matches!(m, C::Null));
             let non_null: Vec<&C> = members.iter().filter(|m| !matches!(m, C::Null)).collect();
@@ -13015,9 +13023,9 @@ fn handle_var_call(
     }
 
     // 2. Proven string value → resolve as a function name (`$fn = 'strtolower';`).
-    if !call.positional_only {
-        return empty;
-    }
+    // Named/spread still route through `dispatch_named_callable` so the declared
+    // return floor is kept when binding refuses (issue #128 review) — same rung as
+    // local closures and first-class callables.
     if let Some(ArgValue::Str(s)) = known.singleton() {
         let nameref = NameRef { raw: s.clone(), kind: RefKind::Unqualified, offset: call.span.start };
         return dispatch_named_callable(cx, folder, scope.poisoned, &nameref, call, env, descent, out);
@@ -13166,7 +13174,7 @@ fn descend(
     // lowered for it — and these two pieces are all the descent ever used.
     args: &[&ArgValue],
     span_start: u32,
-    captures: &[(String, Fact)],
+    captures: &[(String, Fact, Stratum)],
     env: &HashMap<String, Known>,
     poisoned: bool,
     mut descent: Option<&mut Descent<'_>>,
@@ -13245,7 +13253,7 @@ fn descend(
     // final/private body's inner dispatch is a pure function of its declaring class.
     let mut key_binding: Vec<(String, ArgValue)> =
         bound.iter().map(|(n, v, _)| (n.clone(), v.clone())).collect();
-    for (name, fact) in captures {
+    for (name, fact, _strat) in captures {
         key_binding.push((format!("use:{name}"), arg_of_fact_key(fact)));
     }
     if let Some(exact) = &body_this_exact {
@@ -13290,10 +13298,12 @@ fn descend(
         .collect();
     // Closure captures (ADR-0033): the by-value snapshot seeds the initial env,
     // UNDER the param bindings (a param of the same name shadows a capture, PHP
-    // semantics — `use ($x)` is ignored if `$x` is also a parameter).
-    for (name, fact) in captures {
+    // semantics — `use ($x)` is ignored if `$x` is also a parameter). The capture's
+    // snapshotted stratum is restored so an Asserted claim does not launder to
+    // Verified in the summary rebound to the caller (issue #128 review).
+    for (name, fact, strat) in captures {
         bound_env.entry(name.clone()).or_insert_with(|| {
-            Known::value(fact.clone(), 0, Some(provenance.to_owned()))
+            Known::value_strat(fact.clone(), 0, Some(provenance.to_owned()), *strat)
         });
     }
 

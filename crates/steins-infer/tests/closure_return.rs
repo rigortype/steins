@@ -6,7 +6,9 @@
 //! `Scope::ret_ty`, and a proven-closure `$fn(args)` rebinds its summary like a
 //! free function.
 
-use steins_infer::{DEBUG_TYPE_ID, Diagnostic, Folder, RETURN_ID, check, check_with};
+use steins_infer::{
+    DEBUG_TYPE_ID, Diagnostic, Folder, ID as ARG_MISMATCH_ID, RETURN_ID, check, check_with,
+};
 use steins_syntax::{ArgValue, SourceTree};
 
 struct Mock;
@@ -169,4 +171,54 @@ fn string_callable_summary_rebinds() {
         $y = $fn(1);\n\
         \\PHPStan\\dumpType($y);\n";
     assert_eq!(one_type(src), "7");
+}
+
+#[test]
+fn named_arg_string_callable_keeps_declared_floor() {
+    // Issue #128 review: string-callable named/spread must keep the return floor
+    // like local closures and first-class callables — not fall to `unknown`.
+    let src = "<?php\n\
+        function pick(int $x): int { return rand(); }\n\
+        $fn = 'pick';\n\
+        $y = $fn(x: 1);\n\
+        \\PHPStan\\dumpType($y);\n";
+    assert_eq!(one_type(src), "int");
+}
+
+#[test]
+fn named_arg_first_class_callable_keeps_declared_floor() {
+    let src = "<?php\n\
+        function pick(int $x): int { return rand(); }\n\
+        $fn = pick(...);\n\
+        $y = $fn(x: 1);\n\
+        \\PHPStan\\dumpType($y);\n";
+    assert_eq!(one_type(src), "int");
+}
+
+// ==========================================================================
+// Capture stratum — Asserted must not launder through the summary (issue #128)
+// ==========================================================================
+
+#[test]
+fn asserted_capture_summary_stays_asserted() {
+    // Capture snapshot used to drop stratum and re-seed as Verified, so
+    // `$result = $f()` laundered Asserted 'hi' into a proof premise.
+    let src = "<?php\n\
+        /** @phpstan-assert 'hi' $v */\n\
+        function claimHi($v): void {}\n\
+        function takesInt(int $n): void {}\n\
+        $x = (string) rand();\n\
+        claimHi($x);\n\
+        $f = function () use ($x): string {\n\
+            return $x;\n\
+        };\n\
+        $result = $f();\n\
+        \\PHPStan\\dumpType($result);\n\
+        takesInt($result);\n";
+    assert_eq!(one_type(src), "'hi' (asserted)");
+    assert_eq!(
+        count(src, ARG_MISMATCH_ID),
+        0,
+        "Asserted capture summary must not premise type.argument-mismatch"
+    );
 }
