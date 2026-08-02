@@ -2,7 +2,7 @@
 
 > [!NOTE]
 > This document states design goals as well as shipped behavior. As of
-> 2026-07-31, much of what it describes is not yet implemented or not yet
+> 2026-08-02, much of what it describes is not yet implemented or not yet
 > wired together. For the precise current state, see
 > [What is not implemented](type-specification/not-implemented.md).
 
