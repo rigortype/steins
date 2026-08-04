@@ -487,7 +487,7 @@ pub fn apply_inline_ignores(
 fn meta_diag(id: &'static str, path: &str, d: &Directive, message: String) -> Diagnostic {
     // Mechanics meta-diagnostics declare no facet (ADR-0050 §4: only
     // `throw.undeclared` does).
-    Diagnostic { id, path: path.to_owned(), line: d.line, column: d.column, message, facet: None }
+    Diagnostic { id, path: path.to_owned(), line: d.line, column: d.column, message, facet: None, fix: None }
 }
 
 #[cfg(test)]

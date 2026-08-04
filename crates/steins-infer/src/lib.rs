@@ -1641,6 +1641,39 @@ pub struct Diagnostic {
     /// part in equality/hash, but harmlessly: two findings that were previously
     /// equal share an origin file+offset and so compute the same facet.
     pub facet: Option<Facet>,
+    /// The fix-it this finding carries as a first-class payload (ADR-0010), or
+    /// `None` for the many findings whose remedy is a judgment call. v1: only
+    /// the explicit dump pair (`debug.type` / `debug.phpdoc-type`) ships one —
+    /// delete the whole dump expression-statement, the remedy ADR-0053 itself
+    /// names. Additive like `facet`: the `--format json` output shows it as an
+    /// extra key only when present, `check --fix` applies it, and the value
+    /// never participates in a check's inference behavior. Equality/hash
+    /// participation is likewise harmless — equal findings compute equal fixes.
+    pub fix: Option<Fix>,
+}
+
+/// The mechanical remedy a diagnostic carries (ADR-0010): byte-span edits
+/// that, applied together, resolve the finding. The edit shape mirrors
+/// steins-edit's `Edit` (path + `[start, end)` byte span + replacement), so
+/// the CLI can pour a run's fixes into one atomic `EditPlan` — and a JSON
+/// consumer can apply them with the same splice — without translation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Fix {
+    /// A short human label of the remedy ("remove the dump statement").
+    pub title: &'static str,
+    /// The non-overlapping edits, in file order.
+    pub edits: Vec<FixEdit>,
+}
+
+/// One byte-span replacement of a [`Fix`]: splice `replacement` over the
+/// `[start, end)` byte range of `path`'s current contents. Deletion is an
+/// empty replacement; insertion is a zero-width span.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FixEdit {
+    pub path: String,
+    pub start: u32,
+    pub end: u32,
+    pub replacement: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -3287,6 +3320,7 @@ fn emit_effect_liskov(
                 column: pos.column,
                 message: msg,
                 facet: None,
+                fix: None,
             });
         }
     }
@@ -3364,6 +3398,7 @@ fn report_unit(
             column: pos.column,
             message: msg,
             facet: None,
+            fix: None,
         });
     }
 
@@ -3633,7 +3668,7 @@ fn exceeded_diag(
     };
     let msg = format!("{prefix}, but {display}() is declared {clause}");
     let pos = cx.tree().position(offset);
-    Diagnostic { id: EFFECT_ID, path: cx.path().to_owned(), line: pos.line, column: pos.column, message: msg, facet: None }
+    Diagnostic { id: EFFECT_ID, path: cx.path().to_owned(), line: pos.line, column: pos.column, message: msg, facet: None, fix: None }
 }
 
 /// The effect label a by-ref write through an argument with this lvalue root
@@ -4405,6 +4440,7 @@ fn emit_undeclared(
             column: pos.column,
             message: msg,
             facet: Some(Facet::Origin(origin)),
+            fix: None,
         });
     }
 }
@@ -4441,6 +4477,7 @@ fn emit_liskov(out: &mut Vec<Diagnostic>, cx: &Cx, class: &ClassDecl, m: &Method
                 column: pos.column,
                 message: msg,
                 facet: None,
+                fix: None,
             });
         }
     }
@@ -5514,7 +5551,7 @@ impl<'a> Cx<'a> {
                 value.render(), callee, ty.render(), param_name, mode,
             ),
         };
-        Diagnostic { id: ID, path: self.path().to_owned(), line: pos.line, column: pos.column, message, facet: None }
+        Diagnostic { id: ID, path: self.path().to_owned(), line: pos.line, column: pos.column, message, facet: None, fix: None }
     }
 
     /// Build a `type.return-mismatch` diagnostic. `display` is the owning
@@ -5543,6 +5580,7 @@ impl<'a> Cx<'a> {
             column: pos.column,
             message,
             facet: None,
+            fix: None,
         }
     }
 
@@ -6587,7 +6625,13 @@ fn walk_trace(
                         // `PHPStan\dumpType`-family or `var_dump` call emits its fact
                         // rendering at this position. Plain per-scope pass only, so a
                         // site is dumped once (never re-emitted under a binding descent).
-                        emit_dumps(w, folder, call, env, store, out);
+                        // A statement-position call (`StmtKind::Call` — the dump IS the
+                        // whole expression-statement) also hands its statement span
+                        // down, so the explicit pair's findings can carry the
+                        // statement-deletion fix payload (ADR-0010, issue #114).
+                        let removal =
+                            matches!(stmt.kind, StmtKind::Call(_)).then_some(stmt.span);
+                        emit_dumps(w, folder, call, env, store, removal, out);
                         // Oracle idea B (harness-only): when the assertType sink is
                         // installed, record this call's (expected, rendering) pair.
                         // A no-op in every normal check (the sink is absent), so this
@@ -6755,6 +6799,7 @@ fn walk_trace(
                     out.push(Diagnostic {
                         id: RETURN_MISMATCH_ID,
                         facet: None,
+                        fix: None,
                         path: cx.path().to_owned(),
                         line: pos.line,
                         column: pos.column,
@@ -7921,12 +7966,24 @@ fn dump_message(label: &str, r: &DumpRendering) -> String {
 /// per positional argument, in argument order; a zero-argument `dumpType()` still
 /// reports (fail-level, "nothing to dump" — the committed call is a runtime fatal
 /// either way). Reads the walk's facts at the call position; binds nothing (§10 §3).
+///
+/// `removal` is the enclosing statement's span when the dump call IS the whole
+/// expression-statement (`StmtKind::Call` — the caller decides), and drives the
+/// fix payload (ADR-0010, issue #114): the explicit pair's remedy is deleting
+/// that statement, the one remedy ADR-0053 names, so each `debug.type` /
+/// `debug.phpdoc-type` finding at such a site carries the deletion as a
+/// first-class [`Fix`]. A dump embedded in a larger statement (`$y =
+/// dumpType($x);`, `return dumpType($x);`, `echo dumpType($x);`) gets `None` —
+/// deleting the whole statement there would delete the enclosing binding too,
+/// which is no longer mechanical — and `debug.var-dump` never carries a fix: a
+/// `var_dump()` is legal working PHP, so deleting it is a judgment call.
 fn emit_dumps(
     w: &WalkCx,
     folder: &mut dyn Folder,
     call: &CallExpr,
     env: &HashMap<String, Known>,
     store: &Store,
+    removal: Option<Span>,
     out: &mut Vec<Diagnostic>,
 ) {
     let cx = w.cx;
@@ -7941,6 +7998,23 @@ fn emit_dumps(
                 (DEBUG_PHPDOC_TYPE_ID, "dumped phpdoc type", "PHPStan\\dumpPhpDocType()")
             }
         };
+        // The statement deletion, widened to swallow its whole line when the
+        // statement stands alone on it (no blank gutter line left behind). A
+        // multi-argument dump emits one finding per argument; each carries this
+        // SAME edit — one statement, one deletion — and the CLI's plan builder
+        // dedupes identical edits rather than treating them as an overlap.
+        let fix = removal.map(|span| {
+            let span = cx.tree().whole_line_span(span);
+            Fix {
+                title: "remove the dump statement",
+                edits: vec![FixEdit {
+                    path: cx.path().to_owned(),
+                    start: span.start,
+                    end: span.end,
+                    replacement: String::new(),
+                }],
+            }
+        });
         if call.args.is_empty() {
             // Zero-argument explicit dump: still fail-level (§7) — the runtime fatal
             // stands regardless of what (nothing) it would dump.
@@ -7948,6 +8022,7 @@ fn emit_dumps(
             out.push(Diagnostic {
                 id,
                 facet: None,
+                fix,
                 path: cx.path().to_owned(),
                 line: pos.line,
                 column: pos.column,
@@ -7964,6 +8039,7 @@ fn emit_dumps(
             out.push(Diagnostic {
                 id,
                 facet: None,
+                fix: fix.clone(),
                 path: cx.path().to_owned(),
                 line: pos.line,
                 column: pos.column,
@@ -7987,6 +8063,7 @@ fn emit_dumps(
             out.push(Diagnostic {
                 id: DEBUG_VAR_DUMP_ID,
                 facet: None,
+                fix: None,
                 path: cx.path().to_owned(),
                 line: pos.line,
                 column: pos.column,
@@ -8099,6 +8176,7 @@ fn emit_trace_annotations(
         out.push(Diagnostic {
             id: DEBUG_TRACE_ID,
             facet: None,
+            fix: None,
             path: cx.path().to_owned(),
             line: pos.line,
             column: pos.column,
@@ -8971,6 +9049,7 @@ fn apply_prop_assign(
         out.push(Diagnostic {
             id: PROP_MISMATCH_ID,
             facet: None,
+            fix: None,
             path: cx.path().to_owned(),
             line: pos.line,
             column: pos.column,
@@ -9015,6 +9094,7 @@ fn apply_prop_assign(
             out.push(Diagnostic {
                 id: PHPDOC_PROP_MISMATCH_ID,
                 facet: None,
+                fix: None,
                 path: cx.path().to_owned(),
                 line: pos.line,
                 column: pos.column,
@@ -9039,6 +9119,7 @@ fn apply_prop_assign(
         out.push(Diagnostic {
             id: READONLY_REASSIGNED_ID,
             facet: None,
+            fix: None,
             path: cx.path().to_owned(),
             line: pos.line,
             column: pos.column,
@@ -9558,6 +9639,7 @@ fn check_call_on_null(
     out.push(Diagnostic {
         id: CALL_ON_NULL_ID,
         facet: None,
+        fix: None,
         path: w.cx.path().to_owned(),
         line: pos.line,
         column: pos.column,
@@ -14177,6 +14259,7 @@ fn check_undefined_method(
         column: pos.column,
         message,
         facet: None,
+        fix: None,
     });
 }
 
@@ -14366,6 +14449,7 @@ fn check_undefined_function(
         column: pos.column,
         message: format!("call to undefined function {display}() — {evidence}"),
         facet: None,
+        fix: None,
     });
 }
 
@@ -14421,6 +14505,7 @@ fn check_undefined_class(cx: &Cx, folder: &mut dyn Folder, r: &NameRef, out: &mu
         column: pos.column,
         message: format!("reference to undefined class {display} — {evidence}"),
         facet: None,
+        fix: None,
     });
 }
 
@@ -14696,6 +14781,7 @@ fn emit_arity(cx: &Cx, call: &CallExpr, target: &ArityTarget, out: &mut Vec<Diag
         out.push(Diagnostic {
             id: CALL_UNKNOWN_NAMED_ARGUMENT_ID,
             facet: None,
+            fix: None,
             path: cx.path().to_owned(),
             line: at.line,
             column: at.column,
@@ -14718,6 +14804,7 @@ fn emit_arity(cx: &Cx, call: &CallExpr, target: &ArityTarget, out: &mut Vec<Diag
         out.push(Diagnostic {
             id: CALL_TOO_FEW_ARGUMENTS_ID,
             facet: None,
+            fix: None,
             path: cx.path().to_owned(),
             line: at.line,
             column: at.column,
@@ -15050,6 +15137,7 @@ fn check_phpdoc_undefined_method(
         column: pos.column,
         message,
         facet: None,
+        fix: None,
     });
 }
 
@@ -16348,7 +16436,7 @@ fn emit_offset(
         return;
     }
     let pos = cx.tree().position(span.start);
-    out.push(Diagnostic { id, path: cx.path().to_owned(), line: pos.line, column: pos.column, message, facet: None });
+    out.push(Diagnostic { id, path: cx.path().to_owned(), line: pos.line, column: pos.column, message, facet: None, fix: None });
 }
 
 /// Outcome of a resolved method/static call (ADR-0075): the return-fact summary
@@ -18408,6 +18496,7 @@ fn check_phpdoc_param(
         column: pos.column,
         message,
         facet: None,
+        fix: None,
     });
 }
 
@@ -18727,6 +18816,7 @@ fn push_obligation_diag(
             "callable argument to {callee}() violates declared @param {ty} ${param_name} — {reason}",
         ),
         facet: None,
+        fix: None,
     });
 }
 
@@ -18809,6 +18899,7 @@ fn check_callable_arg(
         column: pos.column,
         message,
         facet: None,
+        fix: None,
     });
 }
 
