@@ -1,6 +1,7 @@
-//! End-to-end CLI tests for `steins transform phpdoc-to-native` (ADR-0020/0034).
-//! Dry-run prints a diff + refusal report and never writes; `--apply` writes only
-//! after the dual-verification post-check passes.
+//! End-to-end CLI tests for `steins transform` (ADR-0020/0034) — all three
+//! transforms. Dry-run prints a diff + refusal report and never writes;
+//! `--apply` writes only after the dual-verification post-check passes, which is
+//! measured on the default display surface (issue #115).
 
 use std::path::PathBuf;
 use std::process::Command;
