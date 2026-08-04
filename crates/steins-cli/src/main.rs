@@ -28,8 +28,8 @@ use steins_db::{
     parse as parse_tree,
 };
 use steins_edit::{
-    PartitionMap, TransformReport, VouchSet, plan_phpdoc_honesty, plan_phpdoc_to_native,
-    unified_diff,
+    ByteSpan, Edit, EditPlan, PartitionMap, TransformReport, VouchSet, plan_phpdoc_honesty,
+    plan_phpdoc_to_native, unified_diff,
 };
 use steins_infer::{
     Diagnostic, EffectSummary, LineFact, NoFold, SOUND_SUBSET_NOTICE, SidecarFolder,
@@ -71,7 +71,7 @@ fn dispatch(args: &[String]) -> ExitCode {
         }
         None => {
             errln!(
-                "usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor-diagnostics] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
+                "usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
             );
             errln!("       steins annotate [--no-php] [--format text|json] <file.php>");
             errln!(
@@ -160,6 +160,7 @@ fn print_license() -> ExitCode {
 fn run_check(args: &[String]) -> ExitCode {
     let mut format = Format::Text;
     let mut no_php = false;
+    let mut fix_requested = false;
     let mut set_baseline = false;
     let mut ignore_baseline = false;
     let mut vendor_diagnostics = false;
@@ -171,6 +172,10 @@ fn run_check(args: &[String]) -> ExitCode {
         match args[i].as_str() {
             "--no-php" => {
                 no_php = true;
+                i += 1;
+            }
+            "--fix" => {
+                fix_requested = true;
                 i += 1;
             }
             "--vendor-diagnostics" => {
@@ -225,6 +230,13 @@ fn run_check(args: &[String]) -> ExitCode {
 
     if paths.is_empty() {
         errln!("steins: no paths given");
+        return ExitCode::from(2);
+    }
+    // `--set-baseline` writes a suppression file instead of reporting; `--fix`
+    // rewrites the analyzed sources. Combining the two has no coherent meaning
+    // (which state would the baseline capture?), so it is a usage error.
+    if fix_requested && set_baseline {
+        errln!("steins: --fix cannot be combined with --set-baseline");
         return ExitCode::from(2);
     }
     if let Err(code) = reject_missing_paths(&paths) {
@@ -394,9 +406,27 @@ fn run_check(args: &[String]) -> ExitCode {
         (a.path.as_str(), a.line, a.column, a.id).cmp(&(b.path.as_str(), b.line, b.column, b.id))
     });
 
+    // `check --fix` (ADR-0010, the exit ADR-0020 reserves): apply the fix
+    // payloads the displayed findings carry, under the transform engine's
+    // transformed-or-refused discipline (ADR-0034). Without the flag this is
+    // `None` and the run takes no new code path — byte-identical to before.
+    let fix_run = fix_requested.then(|| apply_fixes(&db, project, &displayed, &texts));
+
+    // A finding whose fix was applied is no longer a finding of the code on
+    // disk: it leaves both the display and the exit computation. Everything
+    // with a payload was applied (the plan is atomic), so the partition key is
+    // simply the payload's presence. A refused or empty fix run keeps every
+    // finding in place.
+    let (displayed, fixed): (Vec<Diagnostic>, Vec<Diagnostic>) = match &fix_run {
+        Some(run) if run.applied => displayed.into_iter().partition(|d| d.fix.is_none()),
+        _ => (displayed, Vec::new()),
+    };
+
     match format {
         Format::Text => print_text(
             &displayed,
+            &fixed,
+            fix_run.as_ref(),
             &surface,
             vendor_suppressed,
             inline.suppressed,
@@ -404,16 +434,141 @@ fn run_check(args: &[String]) -> ExitCode {
             stale,
             surface_notice.as_deref(),
         ),
-        Format::Json => {
-            print_json(&displayed, &surface, vendor_suppressed, inline.suppressed, baselined)
+        Format::Json => print_json(
+            &displayed,
+            &fixed,
+            fix_run.as_ref(),
+            &surface,
+            vendor_suppressed,
+            inline.suppressed,
+            baselined,
+        ),
+    }
+
+    // The fix run's stderr accounting, after the report like every maintenance
+    // confirmation (`--set-baseline`, `--apply`).
+    if let Some(run) = &fix_run {
+        if run.applied {
+            errln!(
+                "steins: fixed {} finding(s) ({} file(s) written)",
+                fixed.len(),
+                run.files_written
+            );
+        } else if let Some(r) = &run.refusal {
+            errln!("steins: fix refused ({}): {}", r.reason, r.detail);
+        } else {
+            errln!("steins: no fixable findings");
         }
     }
 
     // Exit level (ADR-0050 §7): 1 iff any *fail*-level finding is displayed; a
     // warn-only run exits 0 (that is what `warn` means). Config/usage errors already
-    // exited 2 above.
+    // exited 2 above. Fixed findings are gone from `displayed` (they no longer
+    // exist on disk), so they cannot double as surviving findings here.
     let any_fail = displayed.iter().any(|d| surface.level(d.id) == profile::Level::Fail);
     if any_fail { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+}
+
+/// The outcome of a `check --fix` run. `applied` is true iff the plan's edits
+/// were written to disk; a refusal (post-check regression, an unplannable edit
+/// set, a failed write) leaves the findings exactly as a plain run reports
+/// them.
+struct FixRun {
+    applied: bool,
+    files_written: usize,
+    refusal: Option<FixRefusal>,
+}
+
+/// A named fix refusal (ADR-0034's Refusal discipline, applied to `check
+/// --fix`): a stable machine-readable `reason`, a human `detail`, and — for
+/// the post-check gate — the diagnostics the edits would have surfaced.
+struct FixRefusal {
+    reason: &'static str,
+    detail: String,
+    new_diagnostics: Vec<Diagnostic>,
+}
+
+/// Apply the fix payloads carried by the displayed findings (ADR-0010):
+/// pour every edit into ONE atomic [`EditPlan`], run the transform engine's
+/// dual-verification post-check (ADR-0034 point 3a — zero new diagnostics or
+/// nothing happens), and only then write. Two findings may carry the SAME
+/// edit — a multi-argument dump emits one finding per argument, all remedied
+/// by the one statement deletion — so identical edits dedupe rather than
+/// colliding as overlaps.
+fn apply_fixes(
+    db: &SteinsDatabase,
+    project: Project,
+    displayed: &[Diagnostic],
+    texts: &HashMap<String, String>,
+) -> FixRun {
+    let none = FixRun { applied: false, files_written: 0, refusal: None };
+    let fixes: Vec<&steins_infer::Fix> = displayed.iter().filter_map(|d| d.fix.as_ref()).collect();
+    if fixes.is_empty() {
+        return none;
+    }
+    let mut plan = EditPlan::new();
+    for fix in &fixes {
+        for e in &fix.edits {
+            let edit = Edit {
+                path: e.path.clone(),
+                span: ByteSpan::new(e.start, e.end),
+                replacement: e.replacement.clone(),
+            };
+            if plan.edits.contains(&edit) {
+                continue;
+            }
+            if let Err(err) = plan.add_edit(edit) {
+                // Distinct fixes whose edits overlap cannot form one atomic
+                // transaction. No fix family produces this today (statements
+                // do not overlap); refusing beats guessing which one to drop.
+                return FixRun {
+                    applied: false,
+                    files_written: 0,
+                    refusal: Some(FixRefusal {
+                        reason: "overlapping-fix-edits",
+                        detail: format!("cannot combine this run's fixes into one plan: {err}"),
+                        new_diagnostics: Vec::new(),
+                    }),
+                };
+            }
+        }
+    }
+
+    // The post-check gate (ADR-0034 point 3a), verbatim from `transform`: the
+    // edited project is re-analyzed and any diagnostic id whose count rises
+    // refuses the whole write, by name, with the would-be findings attached.
+    let postcheck = post_check(db, project, &plan, texts);
+    if !postcheck.ok {
+        let n = postcheck.new_diagnostics.len();
+        return FixRun {
+            applied: false,
+            files_written: 0,
+            refusal: Some(FixRefusal {
+                reason: "postcheck-new-diagnostics",
+                detail: format!("applying the fixes would surface {n} new diagnostic(s)"),
+                new_diagnostics: postcheck.new_diagnostics,
+            }),
+        };
+    }
+
+    let mut written = 0usize;
+    for path in plan.edited_paths() {
+        let Some(original) = texts.get(path) else { continue };
+        let updated = plan.apply_file(path, original);
+        if let Err(e) = std::fs::write(path, &updated) {
+            return FixRun {
+                applied: false,
+                files_written: written,
+                refusal: Some(FixRefusal {
+                    reason: "write-failed",
+                    detail: format!("cannot write {path}: {e} ({written} file(s) already written)"),
+                    new_diagnostics: Vec::new(),
+                }),
+            };
+        }
+        written += 1;
+    }
+    FixRun { applied: true, files_written: written, refusal: None }
 }
 
 /// The `[[policy]]` scoped enable/disable stage (ADR-0050 §6): currently an
@@ -716,7 +871,7 @@ fn run_transform(args: &[String]) -> ExitCode {
     // Dual verification (ADR-0034 point 3a): re-analyze the edited project and
     // require zero NEW diagnostics vs. the pre-edit baseline. Run in both dry-run
     // and `--apply`, so a violation is visible before anything is written.
-    let postcheck = post_check(&db, project, &report, &texts);
+    let postcheck = post_check(&db, project, &report.plan, &texts);
 
     match format {
         Format::Json => print_transform_json(&report, &postcheck, apply && postcheck.ok),
@@ -1048,14 +1203,16 @@ struct PostCheck {
 /// Re-analyze the project with the plan's edits applied and report any diagnostic
 /// id whose count increased (ADR-0034 point 3a). Comparison is by per-id count so
 /// it is robust to the line-number shifts a tag deletion causes; vendor findings
-/// are filtered from both sides, matching `check`'s default (ADR-0015).
+/// are filtered from both sides, matching `check`'s default (ADR-0015). Shared by
+/// `transform` (both dry-run and `--apply`) and `check --fix`: one gate, one
+/// discipline.
 fn post_check(
     db: &SteinsDatabase,
     project: Project,
-    report: &TransformReport,
+    plan: &EditPlan,
     texts: &HashMap<String, String>,
 ) -> PostCheck {
-    if report.plan.is_empty() {
+    if plan.is_empty() {
         return PostCheck { ok: true, new_diagnostics: Vec::new() };
     }
     let before = filtered_diagnostics(project.layout(db), check_project(db, project, &mut NoFold));
@@ -1065,7 +1222,7 @@ fn post_check(
     let edb = SteinsDatabase::default();
     let mut einputs: Vec<SourceFile> = Vec::new();
     for (path, original) in texts {
-        let updated = report.plan.apply_file(path, original);
+        let updated = plan.apply_file(path, original);
         einputs.push(SourceFile::new(&edb, path.clone(), updated));
     }
     // The edited project is the same project: it must classify vendor the same way
@@ -1635,6 +1792,8 @@ fn render_annotation(text: &str, facts: &[LineFact]) -> String {
 #[allow(clippy::too_many_arguments)]
 fn print_text(
     findings: &[Diagnostic],
+    fixed: &[Diagnostic],
+    fix_run: Option<&FixRun>,
     surface: &profile::Surface,
     vendor_suppressed: usize,
     suppressed: usize,
@@ -1650,6 +1809,19 @@ fn print_text(
             profile::Level::Warn => "warning",
         };
         outln!("{}:{}:{}: {kind}[{}]: {}", d.path, d.line, d.column, d.id, d.message);
+    }
+    // What `--fix` fixed (ADR-0010): each applied finding on its own line, in
+    // the same position spelling as a finding, marked `fixed[…]`. A refusal
+    // prints its named reason and the diagnostics the edits would have
+    // surfaced (ADR-0034's Refusal discipline). Both empty on a plain run.
+    for d in fixed {
+        outln!("{}:{}:{}: fixed[{}]: {}", d.path, d.line, d.column, d.id, d.message);
+    }
+    if let Some(r) = fix_run.and_then(|run| run.refusal.as_ref()) {
+        outln!("fix refused ({}): {}", r.reason, r.detail);
+        for d in &r.new_diagnostics {
+            outln!("  {}:{}:{}: [{}] {}", d.path, d.line, d.column, d.id, d.message);
+        }
     }
     // Suppression accounting (ADR-0022/0023/0015), each line printed only when
     // nonzero. Vendor is the first channel (ADR-0015), so it prints first.
@@ -1671,43 +1843,88 @@ fn print_text(
     }
 }
 
+/// One finding as a `--format json` object. Shared by the `findings` array,
+/// the `--fix` run's `fixed` array, and a refusal's `new_diagnostics`, so the
+/// three spell a finding identically.
+fn finding_json(d: &Diagnostic, surface: &profile::Surface) -> serde_json::Value {
+    let mut obj = serde_json::json!({
+        "id": d.id,
+        // ADR-0050 §2: the diagnostic layer, additive. Every emitted id is
+        // registered (totality test), so this is always present.
+        "layer": steins_infer::layer(d.id).map(steins_infer::Layer::as_str),
+        // ADR-0050 §7: the exit level (`fail|warn`), additive.
+        "level": surface.level(d.id).as_str(),
+        "path": d.path,
+        "line": d.line,
+        "column": d.column,
+        "message": d.message,
+    });
+    // ADR-0050 §4: the registry-declared facet, additive — present as its own
+    // key (`"origin": "direct"|"propagated"`) only on ids that declare one.
+    if let Some(facet) = d.facet {
+        obj[facet.key()] = serde_json::Value::String(facet.value().to_owned());
+    }
+    // ADR-0010: the fix payload, additive — present only on findings that carry
+    // one (v1: the explicit dump pair). The edit objects mirror steins-edit's
+    // `Edit` serialization (`path` + `span {start, end}` + `replacement`), so a
+    // consumer applies them with the same splice the transform surface speaks.
+    if let Some(fix) = &d.fix {
+        let edits: Vec<serde_json::Value> = fix
+            .edits
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "path": e.path,
+                    "span": { "start": e.start, "end": e.end },
+                    "replacement": e.replacement,
+                })
+            })
+            .collect();
+        obj["fix"] = serde_json::json!({ "title": fix.title, "edits": edits });
+    }
+    obj
+}
+
+#[allow(clippy::too_many_arguments)]
 fn print_json(
     findings: &[Diagnostic],
+    fixed: &[Diagnostic],
+    fix_run: Option<&FixRun>,
     surface: &profile::Surface,
     vendor_suppressed: usize,
     suppressed: usize,
     baselined: usize,
 ) {
-    let array: Vec<serde_json::Value> = findings
-        .iter()
-        .map(|d| {
-            let mut obj = serde_json::json!({
-                "id": d.id,
-                // ADR-0050 §2: the diagnostic layer, additive. Every emitted id is
-                // registered (totality test), so this is always present.
-                "layer": steins_infer::layer(d.id).map(steins_infer::Layer::as_str),
-                // ADR-0050 §7: the exit level (`fail|warn`), additive.
-                "level": surface.level(d.id).as_str(),
-                "path": d.path,
-                "line": d.line,
-                "column": d.column,
-                "message": d.message,
-            });
-            // ADR-0050 §4: the registry-declared facet, additive — present as its own
-            // key (`"origin": "direct"|"propagated"`) only on ids that declare one.
-            if let Some(facet) = d.facet {
-                obj[facet.key()] = serde_json::Value::String(facet.value().to_owned());
-            }
-            obj
-        })
-        .collect();
-    let doc = serde_json::json!({
+    let array: Vec<serde_json::Value> = findings.iter().map(|d| finding_json(d, surface)).collect();
+    let mut doc = serde_json::json!({
         "findings": array,
         "profile": surface.name,
         "vendor_suppressed": vendor_suppressed,
         "suppressed": suppressed,
         "baselined": baselined,
     });
+    // The `--fix` run report, present only when the flag was passed (a plain
+    // run's document is byte-identical to before): whether the edits were
+    // written, the findings they resolved, and — on refusal — the named reason
+    // with the diagnostics the edits would have surfaced.
+    if let Some(run) = fix_run {
+        let fixed_arr: Vec<serde_json::Value> =
+            fixed.iter().map(|d| finding_json(d, surface)).collect();
+        let refusal = run.refusal.as_ref().map(|r| {
+            let new_ds: Vec<serde_json::Value> =
+                r.new_diagnostics.iter().map(|d| finding_json(d, surface)).collect();
+            serde_json::json!({
+                "reason": r.reason,
+                "detail": r.detail,
+                "new_diagnostics": new_ds,
+            })
+        });
+        doc["fix"] = serde_json::json!({
+            "applied": run.applied,
+            "fixed": fixed_arr,
+            "refusal": refusal,
+        });
+    }
     match serde_json::to_string_pretty(&doc) {
         Ok(s) => outln!("{s}"),
         Err(e) => errln!("steins: failed to serialize json: {e}"),
