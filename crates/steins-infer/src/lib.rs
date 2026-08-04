@@ -3287,17 +3287,31 @@ fn effect_summary_units(
 /// a byte span inside a function body (ADR-0076 §2). The purity precondition of
 /// the loop→`array_map` transform is spelled entirely in these four fields.
 ///
-/// Only the **proven** lane is reported. The declared lane (ADR-0067's `≤`
-/// bounds) is deliberately absent: a cap is not an occurrence proof, and a
-/// transform consuming bounds as proof would re-collapse the lane wall at its
-/// first consumer. A call answered *only* by a declaration therefore leaves
-/// [`Self::exhaustive`] `false`, exactly as an uncatalogued one does.
+/// The two lanes stay apart, exactly as ADR-0067 built them. [`Self::labels`] is
+/// what inference **proved**; [`Self::declared`] is what a declaration merely
+/// **bounds** — an envelope imported at an interface-typed receiver, or a plugin
+/// coloring. A cap is not an occurrence proof, so a consumer that needs "provably
+/// no effects" must read a non-empty declared lane as *unproven*, never as a
+/// weaker kind of proof. The two are reported separately rather than merged so
+/// that reading is the consumer's explicit decision.
+///
+/// Carrying the declared lane is load-bearing, not documentation: the effect pass
+/// deliberately **discharges** the exhaustiveness taint at a call whose declared
+/// receiver answered (ADR-0067 — the envelope is a checked contract, so the call
+/// site is no longer "unknown"), which would otherwise let a declared-only call
+/// through a proven-purity gate reading [`Self::exhaustive`] alone.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RegionPurity {
     /// The proven effect labels arising inside the region, sorted and deduped.
     pub labels: Vec<String>,
+    /// The **declared** effect labels bounding calls inside the region, sorted
+    /// and deduped (ADR-0067). Never a proof; a non-empty set means some call was
+    /// answered by a contract rather than by inference.
+    pub declared: Vec<String>,
     /// Whether every call inside the region resolved. `false` means some callee
-    /// is unanalyzable — the region *may* have effects nothing proved.
+    /// is unanalyzable — the region *may* have effects nothing proved. A call
+    /// answered by a declared envelope is *resolved* for this bit's purposes and
+    /// shows up in [`Self::declared`] instead.
     pub exhaustive: bool,
     /// The throw classes (compact simple names) that would escape the region
     /// **with the enclosing `try`/`catch` guards stripped**, sorted and deduped.
@@ -3430,11 +3444,14 @@ fn region_purity_in(
         take(None, &scope.params, &scope.effect_origins, &scope.throw_origins);
     }
 
-    // Join the callees' fixpoint results — the region's transitive answer.
+    // Join the callees' fixpoint results — the region's transitive answer. Both
+    // lanes ride the same edges, monotone in the same way, and never mix.
     let mut labels: Vec<String> = eff.iter().map(|f| f.label.clone()).collect();
+    let mut declared_labels: Vec<String> = declared.into_iter().collect();
     for callee in edges.iter().chain(untainting.iter()) {
         if let Some(set) = effects.get(callee) {
             labels.extend(set.findings.iter().map(|f| f.label.clone()));
+            declared_labels.extend(set.declared.iter().cloned());
         }
     }
     for callee in &edges {
@@ -3444,6 +3461,8 @@ fn region_purity_in(
     }
     labels.sort();
     labels.dedup();
+    declared_labels.sort();
+    declared_labels.dedup();
 
     let mut classes: Vec<String> =
         throw_direct.keys().map(|f| last_segment(&f.class).to_owned()).collect();
@@ -3458,7 +3477,13 @@ fn region_purity_in(
     classes.sort();
     classes.dedup();
 
-    RegionPurity { labels, exhaustive, throws: classes, throws_exhaustive }
+    RegionPurity {
+        labels,
+        declared: declared_labels,
+        exhaustive,
+        throws: classes,
+        throws_exhaustive,
+    }
 }
 
 /// The source span of an [`EffectOrigin`], whatever its shape.

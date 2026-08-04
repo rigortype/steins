@@ -22,10 +22,14 @@
 //!    exhaustiveness bit intact — an unresolved call refuses
 //!    [`REASON_BODY_CALL_UNRESOLVED`] rather than being assumed harmless.
 //! 2. **Declared bounds never qualify** (ADR-0067). The probe
-//!    ([`steins_infer::region_purity_project`]) reports only the proven lane, so
-//!    a `≤` envelope imported at an interface-typed receiver, a plugin coloring,
-//!    or a conditional-purity contract answers *nothing* here: such a call site
-//!    leaves the region non-exhaustive and refuses.
+//!    ([`steins_infer::region_purity_project`]) keeps the two lanes apart, and
+//!    this transform reads a non-empty **declared** lane as *unproven*: a `≤`
+//!    envelope imported at an interface-typed receiver, a plugin coloring, or a
+//!    conditional-purity contract refuses [`REASON_BODY_CALL_UNRESOLVED`]. This
+//!    is not decoration — the effect pass deliberately *discharges* the
+//!    exhaustiveness taint at a call a declared receiver answered, so a gate
+//!    reading exhaustiveness alone would admit exactly the bounds ADR-0067 built
+//!    the lane wall to keep out.
 //! 3. The **proven throw set must be empty**, which `Pure` does not require. A
 //!    body that throws on element `k` leaves `$out` holding the first `k`
 //!    results — observable in every enclosing `catch` — while the rewrite's
@@ -410,11 +414,24 @@ impl Candidate<'_> {
                     .to_owned(),
             ));
         }
+        if !purity.declared.is_empty() {
+            // ADR-0067's lane wall, enforced at its first transform consumer. The
+            // effect pass *discharges* the exhaustiveness taint at a call a
+            // declared receiver answered, so reading `exhaustive` alone would let
+            // a `≤` bound through as if it were proof. A cap cannot witness the
+            // equivalence of two evaluation orders, so it refuses.
+            return Err((
+                REASON_BODY_CALL_UNRESOLVED,
+                format!(
+                    "a call in the body is answered only by a declared bound {{{}}} — a cap, not an occurrence proof (ADR-0067)",
+                    purity.declared.join(", ")
+                ),
+            ));
+        }
         if !purity.exhaustive || !purity.throws_exhaustive {
             return Err((
                 REASON_BODY_CALL_UNRESOLVED,
-                "a call in the body did not resolve, so its effects/throws are unknown (a declared `≤` bound is a cap, not an occurrence proof)"
-                    .to_owned(),
+                "a call in the body did not resolve, so its effects/throws are unknown".to_owned(),
             ));
         }
 
