@@ -111,3 +111,4 @@ list in one place.
 | ADR-0073 | [A statement-level inline `@var` is a cast: it re-seeds the lane a `@param` would have seeded](0073-inline-var-cast-seeding.md) |
 | ADR-0074 | [A `@psalm-trace` docblock asks the dump surface's question](0074-trace-annotation.md) |
 | ADR-0075 | [A method call's summary rebinds where a function's does](0075-method-call-summary-rebinding.md) |
+| ADR-0076 | [Loop-to-array_map: the first effect-preconditioned transform](0076-loop-to-array-map-transform.md) |
