@@ -180,3 +180,50 @@ fn function_and_top_level_scopes_are_never_static() {
     let tree = SourceTree::parse(src);
     assert!(tree.scopes().iter().all(|s| !s.is_static));
 }
+
+// Docblock adoption (issue #128): two positions, one whitespace-gap grammar.
+
+#[test]
+fn closure_scope_adopts_the_inline_docblock() {
+    // Inline: the docblock immediately precedes the closure expression's first
+    // token — `static` included when present.
+    let plain = "<?php\n$f = /** @return string */ function () { return 1; };\n";
+    let statik = "<?php\n$f = /** @return string */ static fn () => 1;\n";
+    for src in [plain, statik] {
+        let tree = SourceTree::parse(src);
+        let scopes = closure_scopes(&tree);
+        assert_eq!(scopes.len(), 1);
+        assert!(
+            scopes[0].docblock.as_deref().unwrap().contains("@return string"),
+            "inline docblock adopted"
+        );
+    }
+}
+
+#[test]
+fn closure_scope_adopts_the_statement_docblock_of_a_simple_assignment() {
+    let src = "<?php\n/** @return string */\n$f = function () { return 1; };\n";
+    let tree = SourceTree::parse(src);
+    let scopes = closure_scopes(&tree);
+    assert_eq!(scopes.len(), 1);
+    assert!(scopes[0].docblock.as_deref().unwrap().contains("@return string"));
+}
+
+#[test]
+fn embedded_closure_adopts_no_statement_docblock() {
+    // A closure in a call-argument position is not the statement's whole RHS;
+    // the statement docblock stays with the statement.
+    let src = "<?php\n/** @return string */\n$r = array_map(function () { return 1; }, []);\n";
+    let tree = SourceTree::parse(src);
+    let scopes = closure_scopes(&tree);
+    assert_eq!(scopes.len(), 1);
+    assert!(scopes[0].docblock.is_none(), "call-argument closures stay statement-silent");
+}
+
+#[test]
+fn function_and_top_level_scopes_carry_no_adopted_docblock() {
+    // Functions adopt on their decls (ADR-0029); the scope field is closure-only.
+    let src = "<?php\n/** @return int */\nfunction f() { return 1; }\n";
+    let tree = SourceTree::parse(src);
+    assert!(tree.scopes().iter().all(|s| s.docblock.is_none()));
+}
