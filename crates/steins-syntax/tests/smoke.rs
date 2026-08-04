@@ -49,7 +49,8 @@ fn lowers_scopes_trace_and_poison() {
     assert!(matches!(kinds[1], StmtKind::Assign { var, .. } if var == "w"));
     assert!(matches!(kinds[2], StmtKind::Call(_)));
     // `width($w)` hands `$w` to a call → invalidated after the statement.
-    assert_eq!(top.stmts[2].invalidated, vec!["w".to_owned()]);
+    assert_eq!(top.stmts[2].invalidated.len(), 1);
+    assert_eq!(top.stmts[2].invalidated[0].name, "w");
 
     // price() is a constant function: body is exactly `[Return(literal)]`.
     let price = tree.scopes().iter().find(|s| s.function_name.as_deref() == Some("price")).unwrap();
@@ -58,57 +59,109 @@ fn lowers_scopes_trace_and_poison() {
     assert!(matches!(&price.stmts[0].kind, StmtKind::Return { value, .. } if value.is_literal()));
 }
 
+/// One `InvalidatedVar` flattened to borrowed parts, so a whole entry list
+/// compares against a literal in one `assert_eq!`.
+type EntryView<'a> = (&'a str, bool, Vec<(&'a str, u32)>);
+
 #[test]
-fn call_arg_sites_are_recorded_beside_the_blanket_list() {
-    // ADR-0070: the syntax layer records WHERE each handed-over variable went,
-    // and decides nothing. `Stmt::invalidated` stays the complete sound floor.
+fn each_invalidated_name_carries_its_call_sites() {
+    // ADR-0070 (issue #135): the syntax layer records WHERE each handed-over
+    // variable went ON the name's own entry, and decides nothing. The entry
+    // list stays the complete sound floor.
     let tree = SourceTree::parse("<?php $s = 'a'; trim($s);");
     let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
     let st = &top.stmts[1];
-    assert_eq!(st.invalidated, vec!["s".to_owned()]);
-    assert_eq!(st.call_args.len(), 1);
-    assert_eq!(st.call_args[0].var, "s");
-    assert_eq!(st.call_args[0].callee.raw, "trim");
-    assert_eq!(st.call_args[0].position, 0);
+    assert_eq!(st.invalidated.len(), 1);
+    let v = &st.invalidated[0];
+    assert_eq!(v.name, "s");
+    assert!(!v.opaque);
+    assert_eq!(v.sites.len(), 1);
+    assert_eq!(v.sites[0].0.raw, "trim");
+    assert_eq!(v.sites[0].1, 0);
 
     // Positions are the argument indices, and a nested call is descended into
-    // exactly as the blanket collector descends.
+    // exactly as the name collection descends — they are one walk.
     let tree = SourceTree::parse("<?php $a = 1; $b = 2; f($a, g($b));");
     let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
     let st = &top.stmts[2];
-    let mut sites: Vec<(String, String, usize)> = st
-        .call_args
+    let entries: Vec<EntryView<'_>> = st
+        .invalidated
         .iter()
-        .map(|s| (s.var.clone(), s.callee.raw.clone(), s.position))
+        .map(|v| {
+            (
+                v.name.as_str(),
+                v.opaque,
+                v.sites.iter().map(|(c, p)| (c.raw.as_str(), *p)).collect(),
+            )
+        })
         .collect();
-    sites.sort();
     assert_eq!(
-        sites,
-        vec![("a".to_owned(), "f".to_owned(), 0), ("b".to_owned(), "g".to_owned(), 0)]
+        entries,
+        vec![("a", false, vec![("f", 0)]), ("b", false, vec![("g", 0)])]
     );
 }
 
 #[test]
-fn an_indescribable_occurrence_removes_the_name_from_the_site_list() {
-    // The completeness invariant: a name appears in `call_args` only when EVERY
-    // occurrence of it in the statement is describable. A method call, a dynamic
-    // callee, a named argument and a spread each defeat one, and the name then
-    // has no site at all — while `invalidated` still names it.
+fn invalidated_names_are_the_bare_call_arguments_in_source_order() {
+    // The name-set invariant: one entry per name, in first-occurrence source
+    // order, and the names are exactly the statement's bare call arguments —
+    // describable or not. `$b` occurs twice and keeps one entry with both
+    // sites; `$d` goes to a method call and keeps an opaque entry; the method
+    // receiver `$o` is not an argument and gets no entry at all.
+    let tree = SourceTree::parse("<?php $x = f($b, $a, g($c), $b) . $o->m($d);");
+    let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
+    let st = top.stmts.last().unwrap();
+    let names: Vec<&str> = st.invalidated.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, vec!["b", "a", "c", "d"]);
+    let b = &st.invalidated[0];
+    assert!(!b.opaque);
+    assert_eq!(
+        b.sites.iter().map(|(c, p)| (c.raw.as_str(), *p)).collect::<Vec<_>>(),
+        vec![("f", 0), ("f", 3)]
+    );
+    let d = &st.invalidated[3];
+    assert!(d.opaque, "a method-call argument is unprovable");
+    assert!(d.sites.is_empty(), "an opaque entry carries no sites");
+}
+
+#[test]
+fn an_unprovable_occurrence_marks_the_entry_opaque_with_no_sites() {
+    // The explicit spelling of the old absence rule: ONE unprovable occurrence
+    // anywhere in the statement makes the name's entry opaque, and an opaque
+    // entry carries no sites — the provable `f($s)` site is discarded, not
+    // kept beside the verdict.
     for (src, why) in [
         ("<?php $s = 'a'; $o = new C(); $x = f($s) . $o->m($s);", "method call"),
+        ("<?php $s = 'a'; $o = new C(); $x = f($s) . $o?->m($s);", "nullsafe method call"),
+        ("<?php $s = 'a'; $x = f($s) . C::m($s);", "static method call"),
         ("<?php $s = 'a'; $fn = 'trim'; $x = f($s) . $fn($s);", "dynamic callee"),
         ("<?php $s = 'a'; $x = f($s) . g(x: $s);", "named argument"),
         ("<?php $s = 'a'; $r = []; $x = f($s) . g($s, ...$r);", "spread"),
+        (
+            "<?php $s = 'a'; $c = function () use ($s) { return g($s); };",
+            "closure-body occurrence",
+        ),
+        ("<?php $s = 'a'; $c = fn() => g($s);", "arrow-body occurrence"),
+        ("<?php $s = 'a'; echo trim($s), $s = 'x';", "echo-embedded write"),
     ] {
         let tree = SourceTree::parse(src);
         let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
         let st = top.stmts.last().unwrap();
-        assert!(st.invalidated.contains(&"s".to_owned()), "{why}: still blanket-invalidated");
-        assert!(
-            !st.call_args.iter().any(|c| c.var == "s"),
-            "{why}: one indescribable occurrence removes every site for the name"
-        );
+        let v = st
+            .invalidated
+            .iter()
+            .find(|v| v.name == "s")
+            .unwrap_or_else(|| panic!("{why}: still blanket-invalidated"));
+        assert!(v.opaque, "{why}: one unprovable occurrence marks the entry opaque");
+        assert!(v.sites.is_empty(), "{why}: an opaque entry carries no sites");
     }
+    // The echo write is statement-scoped in the other direction too: the write
+    // in the FIRST operand disqualifies a provable site in the second.
+    let tree = SourceTree::parse("<?php $s = 'a'; echo $s = 'x', trim($s);");
+    let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
+    let st = top.stmts.last().unwrap();
+    let v = st.invalidated.iter().find(|v| v.name == "s").unwrap();
+    assert!(v.opaque && v.sites.is_empty(), "a site after the write verdict is refused");
 }
 
 #[test]
