@@ -45,8 +45,16 @@ Consequences:
   summary on the same rungs free functions and methods use (issue #128), so
   `$f = fn(int $x): int => $x; $y = $f(42)` dumps `42`. Named/spread calls keep
   the declared return floor when binding descent refuses.
-- **Phpdoc `@return` on closures is deferred** (the scope carries no adopted
-  docblock yet) — native `: R` only for this slice.
+- A docblock `@return` on the closure is checked too (`phpdoc.return-mismatch`),
+  and refines the declared floor a `$fn(...)` result keeps, exactly as for free
+  functions. The docblock is **adopted** by the shared whitespace-gap discipline
+  in two positions, inline winning: immediately before the closure expression's
+  first token (`$f = /** @return string */ function () {…}` — `static` included
+  when present), or above the enclosing statement **only** when that statement
+  is a simple `$f = <closure>;` assignment. A closure embedded in a call
+  argument (`array_map(function () {…}, $xs)`) never adopts the statement's
+  docblock. `@param`/`@throws` on closures stay unread, generators stay exempt,
+  and no enclosing-class `@template` shadowing applies (known limitation).
 - A closure is an effect node in the effect fixpoint, and a throw node in the
   throw fixpoint. Its effects are its caller's effects
   ([effects.md](effects.md)).

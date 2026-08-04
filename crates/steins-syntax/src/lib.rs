@@ -29,6 +29,7 @@ use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::DeclareItem;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::ExpressionStatement;
 use mago_syntax::cst::Function;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Hint;
@@ -2035,6 +2036,14 @@ pub struct Scope {
     /// an inference (ADR-0063 §2 decision 4). Always `false` for function, method
     /// and top-level scopes (the keyword has no meaning there).
     pub is_static: bool,
+    /// Adopted docblock of a closure/arrow scope ([`ScopeOwner::Closure`]) —
+    /// a closure has no [`FunctionDecl`] to adopt one on, so the `@return`
+    /// phpdoc lane (issue #128) reads it here. Adoption is the shared
+    /// whitespace-gap discipline (ADR-0029) in two positions, inline winning
+    /// over statement-level; see `adopt_closure_docblock`. `None` for a closure
+    /// with no adopted docblock and for every non-closure scope (functions and
+    /// methods adopt on their decls).
+    pub docblock: Option<String>,
 }
 
 /// A recovered parse error with its span (ADR-0003: error-tolerant).
@@ -2300,7 +2309,7 @@ impl SourceTree {
         walk(&Node::Program(program), &aliases, &docs, &rc, false, false, &mut lowered);
 
         let mut classes = lower_classes(&Node::Program(program), &aliases, &docs, &rc);
-        let scopes = lower_scopes(program, &contexts, &regions);
+        let scopes = lower_scopes(program, &contexts, &regions, &docs);
 
         // Comment trivia (ADR-0023 inline ignores): whitespace trivia is dropped;
         // every comment shape is kept with its raw spelling and span.
@@ -5374,6 +5383,7 @@ fn lower_scopes(
     program: &Program<'_>,
     contexts: &[NsCtx],
     regions: &[(u32, u32, usize)],
+    docs: &DocIndex<'_>,
 ) -> Vec<Scope> {
     // The script (top-level) scope spans all namespace bodies too: file-scoped
     // `namespace A;` nests the following statements inside the namespace node, so
@@ -5385,7 +5395,7 @@ fn lower_scopes(
     }
     let rc = RefResolver { contexts, regions };
     let mut scopes = vec![build_scope_from(ScopeOwner::TopLevel, &top, None)];
-    collect_scopes(&Node::Program(program), contexts, regions, &rc, &mut scopes);
+    collect_scopes(&Node::Program(program), contexts, regions, &rc, docs, None, &mut scopes);
     scopes
 }
 
@@ -5408,11 +5418,18 @@ fn flatten_top_level<'a, 'arena>(
 /// declarations (→ one scope per concrete method), building a scope for each.
 /// A method scope's owner carries the class **FQN** (lowercase-normalized), so
 /// cross-file resolution addresses it unambiguously.
+///
+/// `stmt_doc` is the statement-level docblock adoption context (issue #128): set
+/// when the walk passed a simple-assignment statement whose RHS is exactly a
+/// closure, carried down unchanged everywhere else (its def-offset gate means
+/// only that one closure can pick it up).
 fn collect_scopes(
     node: &Node<'_, '_>,
     contexts: &[NsCtx],
     regions: &[(u32, u32, usize)],
     rc: &RefResolver,
+    docs: &DocIndex<'_>,
+    stmt_doc: Option<&StmtAdoption>,
     out: &mut Vec<Scope>,
 ) {
     match node {
@@ -5450,16 +5467,90 @@ fn collect_scopes(
         }
         // Closures / arrow fns get their own scope (ADR-0033), addressed by the
         // definition-site byte offset. Params/effects/throws ride on the scope.
-        Node::Closure(cl) => out.push(build_closure_scope_from_closure(cl, rc)),
-        Node::ArrowFunction(af) => out.push(build_closure_scope_from_arrow(af, rc)),
+        Node::Closure(cl) => out.push(build_closure_scope_from_closure(cl, rc, docs, stmt_doc)),
+        Node::ArrowFunction(af) => out.push(build_closure_scope_from_arrow(af, rc, docs, stmt_doc)),
+        // Statement-level docblock adoption (issue #128): a simple assignment
+        // whose RHS is exactly a closure/arrow expression hands the statement's
+        // docblock down to that closure's scope
+        // (`/** @return string */\n$f = function () {…};`). The def-offset gate
+        // keeps every other closure position (a call argument, a nested closure)
+        // statement-silent — inline adjacency is their only route.
+        Node::ExpressionStatement(es) => {
+            let adopt = stmt_closure_adoption(es, docs);
+            for child in node.children() {
+                collect_scopes(&child, contexts, regions, rc, docs, adopt.as_ref(), out);
+            }
+            return;
+        }
         _ => {}
     }
     // Recurse so nested functions (inside methods or blocks) and nested classes
     // also get their scopes. Method scopes are only created above (matching
     // `Node::Class`), so this recursion never double-creates one.
     for child in node.children() {
-        collect_scopes(&child, contexts, regions, rc, out);
+        collect_scopes(&child, contexts, regions, rc, docs, stmt_doc, out);
     }
+}
+
+/// The statement-level docblock adoption context of `collect_scopes` (issue
+/// #128): the docblock preceding a simple-assignment statement, addressed to the
+/// closure that is the statement's whole RHS — the exact trace-IR shape whose
+/// `Assign` value is `ArgValue::Closure` (`lower_expr_stmt`'s direct-variable,
+/// plain-`=` arm), re-read here on the CST because scopes are built before any
+/// trace consumer runs.
+struct StmtAdoption {
+    /// Definition offset of the closure/arrow that is the statement's whole RHS
+    /// — the gate that keeps the docblock from drifting to any other closure.
+    def_offset: u32,
+    /// The enclosing statement's docblock text.
+    doc: String,
+}
+
+/// Recognize `/** … */\n$f = <closure>;` — a docblock-led statement that is a
+/// plain `=` assignment to a direct variable whose RHS (unparenthesized, as
+/// `lower_arg_value` reads it) is exactly a closure or arrow expression. Any
+/// other statement shape — a closure in a call argument, a compound op, a
+/// non-variable lvalue — adopts nothing at statement level.
+fn stmt_closure_adoption(es: &ExpressionStatement<'_>, docs: &DocIndex<'_>) -> Option<StmtAdoption> {
+    let Expression::Assignment(a) = es.expression.unparenthesized() else { return None };
+    if !a.operator.is_assign() {
+        return None;
+    }
+    let Expression::Variable(Variable::Direct(_)) = a.lhs.unparenthesized() else { return None };
+    let def_offset = match a.rhs.unparenthesized() {
+        Expression::Closure(cl) => closure_def_offset(cl),
+        Expression::ArrowFunction(af) => arrow_def_offset(af),
+        _ => return None,
+    };
+    let doc = docs.preceding(to_span(es.span()).start)?;
+    Some(StmtAdoption { def_offset, doc })
+}
+
+/// The docblock a closure/arrow scope adopts (issue #128), by the shared
+/// whitespace-gap discipline (ADR-0029's "only whitespace between", the same
+/// grammar `SourceTree::stmt_docblock` gives the inline-`@var` lane) in two
+/// positions, in precedence order:
+///
+/// 1. **Inline** — the docblock immediately preceding the closure expression's
+///    own first token (`$f = /** @return string */ function () {…}`; the first
+///    token is the attribute list or `static` when present, else
+///    `function`/`fn` — exactly `span().start`).
+/// 2. **Statement-level** — the enclosing statement's docblock, handed down by
+///    `collect_scopes` only when that statement is a simple assignment whose
+///    whole RHS is this very closure (the [`StmtAdoption`] def-offset gate).
+///
+/// Both positions read one grammar (`DocIndex::preceding`): a blank line still
+/// adopts, while an intervening non-doc comment — or any code — breaks the
+/// adjacency.
+fn adopt_closure_docblock(
+    docs: &DocIndex<'_>,
+    first_token: u32,
+    def_offset: u32,
+    stmt_doc: Option<&StmtAdoption>,
+) -> Option<String> {
+    docs.preceding(first_token).or_else(|| {
+        stmt_doc.filter(|sd| sd.def_offset == def_offset).map(|sd| sd.doc.clone())
+    })
 }
 
 /// Lower one scope's statements to a linear trace, and compute its poison flag.
@@ -5511,6 +5602,7 @@ fn build_scope_from(
         effect_origins: Vec::new(),
         throw_origins: Vec::new(),
         is_static: false,
+        docblock: None,
     }
 }
 
@@ -5574,7 +5666,12 @@ fn closure_use_captures(cl: &mago_syntax::cst::Closure<'_>) -> Vec<String> {
 }
 
 /// Build the [`Scope`] for a `function (...) use (...) {...}` closure (ADR-0033).
-fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>, rc: &RefResolver) -> Scope {
+fn build_closure_scope_from_closure(
+    cl: &mago_syntax::cst::Closure<'_>,
+    rc: &RefResolver,
+    docs: &DocIndex<'_>,
+    stmt_doc: Option<&StmtAdoption>,
+) -> Scope {
     let mut stmts = Vec::new();
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
@@ -5606,9 +5703,10 @@ fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>, rc: &Ref
         }
     }
     let poisoned = !opaque.is_empty();
+    let def_offset = closure_def_offset(cl);
     Scope {
         function_name: None,
-        owner: ScopeOwner::Closure { def_offset: closure_def_offset(cl) },
+        owner: ScopeOwner::Closure { def_offset },
         ret_hint: ret_hint_of(cl.return_type_hint.as_ref()),
         is_generator,
         poisoned,
@@ -5620,13 +5718,19 @@ fn build_closure_scope_from_closure(cl: &mago_syntax::cst::Closure<'_>, rc: &Ref
         effect_origins,
         throw_origins,
         is_static: cl.r#static.is_some(),
+        docblock: adopt_closure_docblock(docs, to_span(cl.span()).start, def_offset, stmt_doc),
     }
 }
 
 /// Build the [`Scope`] for an arrow function `fn(...) => expr` (ADR-0033). The
 /// single body expression lowers to one `return <expr>;` statement so a call
 /// inside it (`fn($x) => width($x)`) is a reachable propagation/descent edge.
-fn build_closure_scope_from_arrow(af: &mago_syntax::cst::ArrowFunction<'_>, rc: &RefResolver) -> Scope {
+fn build_closure_scope_from_arrow(
+    af: &mago_syntax::cst::ArrowFunction<'_>,
+    rc: &RefResolver,
+    docs: &DocIndex<'_>,
+    stmt_doc: Option<&StmtAdoption>,
+) -> Scope {
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
     // An arrow body is a single expression — no local assignments to resolve.
@@ -5654,9 +5758,10 @@ fn build_closure_scope_from_arrow(af: &mago_syntax::cst::ArrowFunction<'_>, rc: 
     scan_opaque(&Node::Expression(af.expression), &mut opaque, false);
     let poisoned = !opaque.is_empty();
     let is_generator = node_is_generator(&Node::Expression(af.expression));
+    let def_offset = arrow_def_offset(af);
     Scope {
         function_name: None,
-        owner: ScopeOwner::Closure { def_offset: arrow_def_offset(af) },
+        owner: ScopeOwner::Closure { def_offset },
         ret_hint: ret_hint_of(af.return_type_hint.as_ref()),
         is_generator,
         poisoned,
@@ -5668,6 +5773,7 @@ fn build_closure_scope_from_arrow(af: &mago_syntax::cst::ArrowFunction<'_>, rc: 
         effect_origins,
         throw_origins,
         is_static: af.r#static.is_some(),
+        docblock: adopt_closure_docblock(docs, to_span(af.span()).start, def_offset, stmt_doc),
     }
 }
 

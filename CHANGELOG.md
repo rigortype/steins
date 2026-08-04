@@ -35,6 +35,8 @@ skill seals them into a version section at release time, reconstructing from
 
 - **`steins check --fix` now removes committed `\PHPStan\dumpType()` / `\PHPStan\dumpPhpDocType()` statements — the first fix-it family.**
   - The `debug.type` and `debug.phpdoc-type` findings carry their remedy as a machine-readable payload: `--format json` shows a per-finding `fix` object (byte-span edits plus replacement) an agent or editor can apply directly, and findings without a fix carry no such key. `--fix` applies the payloads atomically, re-analyzes the project, and refuses to write with a named reason if any new diagnostic would surface; an applied fix is reported as fixed and no longer counts toward exit `1`. Without `--fix`, text output and exit codes are unchanged. `debug.var-dump` is deliberately not auto-fixed — deleting a legal `var_dump()` is a judgment call.
+- **Closure and arrow-function docblock `@return` declarations are now adopted and checked, at the body's return sites and at proven `$fn(...)` call sites.**
+  - This is a breaking finding expansion for green `contracts` CI: `phpdoc.return-mismatch` can newly fire on closure bodies. A docblock is adopted from exactly two spellings — inline, immediately before the closure expression itself (`$f = /** @return string */ function () {…}`, inline wins when both are present), or above a simple `$f = <closure>;` assignment statement — while a closure passed directly as a call argument never adopts the statement's docblock. The adopted `@return` also refines the declared floor a `$fn(...)` result keeps when binding declines. Generators stay exempt from return checking, and `@param`/`@throws` on closures remain unread.
 
 ### Changed
 
