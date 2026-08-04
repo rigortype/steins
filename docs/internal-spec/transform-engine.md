@@ -197,6 +197,26 @@ no bearing. It is also the one transform measured on the default surface alone
 (see above) — the recorded surface decision, and the only transform for which
 it holds.
 
+**`loop-to-array-map`** — ADR-0010's flagship, landed under ADR-0076. The first
+transform whose precondition is an **effect** judgment: an append loop becomes
+`array_map` only where the engine proves the body's effect lane empty on every
+label, the exhaustiveness bit intact, and — stricter than ADR-0006 `Pure`, which
+admits `throw` — the proven throw set empty, because a body throwing on element
+*k* leaves the accumulator holding the first *k* results and every enclosing
+`catch` can see it. Declared `≤` bounds never qualify (ADR-0067): the probe keeps
+the lanes apart and the transform reads a non-empty declared lane as unproven,
+which matters because the effect pass deliberately discharges the exhaustiveness
+taint at a call a declared receiver answered.
+
+The seam is `steins_infer::region_purity_project`: each pass's per-origin
+classification, applied to a byte span instead of a whole unit, so the
+precondition is the fixpoints' own verdict rather than a second opinion. The
+subject's `array` / `is_list` facts come from `steins_infer::probe_subjects`, a
+thread-local probe the walk answers from a statement's entry environment.
+
+Candidates are **every** `foreach` in the analyzed set, so the refusal
+distribution measures v1's narrowness instead of hiding it.
+
 Measured whole-universe closing run of the first two: **23,148 / 509 candidates
 enumerated, 0 transformed** — dynamic dispatch is the sound floor, and
 partitioning is the recorded way past it.
@@ -207,8 +227,6 @@ partitioning is the recorded way past it.
   → enum. Queued for M7 (ADR-0034).
 - **Fold- and dataflow-backed transform proofs.** v1's dominance argument is
   literal-only (`argument-not-proven`, ADR-0041 §1).
-- **Effect-precondition transforms** (loop → map requires purity). The effect
-  system exists; no transform consumes it.
 - **`steins mcp`** — the dry-run → diff → approve → apply loop over MCP, with
   `EditPlan` as the wire currency (ADR-0010, roadmap M7).
 - **Fix-its** — a transform attached to a diagnostic as a payload (`check

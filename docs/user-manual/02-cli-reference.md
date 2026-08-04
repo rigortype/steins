@@ -26,7 +26,7 @@ whole surface to stderr and exits `2`:
 $ steins
 usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
        steins annotate [--no-php] [--format text|json] <file.php>
-       steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope> [--apply] [--format text|json] <paths...>
+       steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--format text|json] <paths...>
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
        steins doctor [--no-php] [--baseline <path>] [path]
        steins version | -v | --version
@@ -423,11 +423,11 @@ Plan — and optionally apply — a source-to-source rewrite. Dry-run by
 default.
 
 ```
-steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope> [--apply]
-                 [--config <path>] [--format text|json] <paths...>
+steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map>
+                 [--apply] [--config <path>] [--format text|json] <paths...>
 ```
 
-Three transforms:
+Four transforms:
 
 - **`phpdoc-to-native`** promotes a PHPDoc `@param`/`@return` type to a
   native declaration when every call site proves the native hint cannot
@@ -440,6 +440,8 @@ Three transforms:
   when absent, appending to it losslessly when present — so a repo can adopt
   the `throws-direct` and `contracts` profiles by running one command
   instead of hand-writing envelopes.
+- **`loop-to-array-map`** rewrites an append loop to `array_map` when the
+  engine *proves* the loop body has no effects and cannot throw.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
@@ -537,7 +539,7 @@ line, so that no docblock can go above it without rewriting bytes that are
 not its own, refuses `declaration-mid-line`. Those four names are the whole
 refusal taxonomy for this transform.
 
-Unlike the two PHPDoc transforms, `throws-envelope` consults no vouch valve:
+Unlike the other three transforms, `throws-envelope` consults no vouch valve:
 a proven escape is a forward fact of the declaration's own body and callees,
 so the dynamic-code obstacles that make "all callers proven" unknowable have
 no bearing on it. A `[transform.vouch]` section is simply inert for this
@@ -545,8 +547,9 @@ transform, and no per-entry no-op warning is printed for it.
 
 The post-check for `throws-envelope` is measured on the **default** display
 surface — proof and mechanics, what a bare `check` reports — and it is the
-only transform for which that is true. `phpdoc-to-native` and
-`phpdoc-honesty` are measured against every layer, contract included.
+only transform for which that is true. `phpdoc-to-native`,
+`phpdoc-honesty`, and `loop-to-array-map` are measured against every layer,
+contract included.
 
 The asymmetry is deliberate, and pinned by a test. Seeding an envelope is
 *supposed* to move the contract surface: writing `@throws` onto an override
@@ -556,9 +559,71 @@ against the contract layer, a correct seed would veto itself and refuse to
 write. That finding is existing debt the envelope makes visible — run
 `check --profile contracts` after seeding to see it — not a regression.
 
-The other two have no such property: a promotion or an honesty repair is not
-meant to change what a docblock promises, so a new `phpdoc.*` finding after
-their edit is a regression and still blocks the write.
+The other three have no such property: a promotion or an honesty repair is
+not meant to change what a docblock promises, and a loop rewrite does not
+touch a docblock at all, so a new `phpdoc.*` finding after their edit is a
+regression and still blocks the write.
+
+`loop-to-array-map` is the first transform whose precondition is an
+*effect* judgment rather than a type one. It rewrites
+
+```php
+$out = [];
+foreach ($xs as $x) {
+    $out[] = f($x);
+}
+```
+
+into `$out = array_map(fn ($x) => f($x), $xs);` — but only when the engine
+proves all of the following, and refuses by name otherwise:
+
+- the loop body's **proven** effect lane is empty on every label, and every
+  call in it resolved (a declared `≤` bound is a cap, not a proof, and does
+  not qualify);
+- the body's **proven throw set is empty** — a stricter bar than
+  `#[\Steins\Pure]`, which admits `throw`. A body that throws on element
+  *k* leaves `$out` holding the first *k* results, which every enclosing
+  `catch` can see; the rewritten form leaves `$out` unassigned;
+- the subject proves `array` **and** `is_list = Yes` (`array_map` preserves
+  keys, the append renumbers `0..n-1`);
+- the iteration variable is not used after the loop, the accumulator is not
+  read inside it, and `$out = [];` is the statement immediately before it.
+
+Every `foreach` in the analyzed set is a candidate, so the oracle counts
+show exactly how narrow this first version is:
+
+```
+$ steins transform loop-to-array-map src/
+--- a/src/Report.php
++++ b/src/Report.php
+@@ -6,10 +6,7 @@
+ function labels(): array
+ {
+     $rows = [3, 1, 4];
+-    $out = [];
+-    foreach ($rows as $row) {
+-        $out[] = label($row);
+-    }
++    $out = array_map(fn ($row) => label($row), $rows);
+ 
+     return $out;
+ }
+
+Refusals (2):
+  src/Report.php:21:5: foreach [body-effects] — the body's proven effect lane is non-empty: {io}
+  src/Report.php:34:5: foreach [subject-not-proven-list] — `$rows` is not proven `is_list = Yes`; array_map preserves keys while the append renumbers 0..n-1
+
+3 enumerated: 1 rewritten, 2 refused
+Post-check OK — no new diagnostics.
+```
+
+The refusal reasons are stable names: `key-binding`, `reference-binding`,
+`value-binding-not-variable`, `subject-not-variable`,
+`subject-not-proven-array`, `subject-not-proven-list`,
+`accumulator-init-not-adjacent`, `accumulator-not-empty`,
+`accumulator-read-in-body`, `iteration-var-live-after`, `early-exit`,
+`body-not-single-append`, `body-effects`, `body-throws`,
+`body-call-unresolved`.
 
 `--apply` writes and says how many files it touched, on stderr:
 
@@ -577,7 +642,8 @@ dynamic-code obstacle site, which the text mode caps at five per obstacle.
 Errors exit `2`: an unknown transform name, a missing name, no paths, a
 `--config` with no argument. The name is positional, so forgetting it makes
 your first path the name — `steins transform src/` reports
-``steins: unknown transform `src/` (available: phpdoc-to-native, phpdoc-honesty, throws-envelope)``.
+``steins: unknown transform `src/` (available: phpdoc-to-native, phpdoc-honesty,
+throws-envelope, loop-to-array-map)``.
 Like `check`, `transform` treats an unknown `--flag` as a path, which then
 fails the existence check. A `--config` path that cannot be read warns and
 proceeds with no vouches, since a vouch typo must not stop the run.

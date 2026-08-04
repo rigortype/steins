@@ -95,9 +95,10 @@ Written after tonight's release; listed here so you know the map:
    the finding-id catalogue by family, the anatomy of a message
    line, and the proof / contract / mechanics / debug layers.
    The handbook does not repeat it.
-9. **Transforms** — `steins transform phpdoc-to-native` and
-   `phpdoc-honesty`: what the value-propagation engine can
-   rewrite safely, and the vouch valve for dynamic-code sites.
+9. **Transforms** — `steins transform phpdoc-to-native`,
+   `phpdoc-honesty`, `throws-envelope` and `loop-to-array-map`: what
+   the value-propagation and effect engines can rewrite safely, and
+   the vouch valve for dynamic-code sites.
 10. **Coming from PHPStan / Psalm** — a concept-by-concept map:
     levels vs layers, `ignoreErrors` vs the id registry, version
     emulation vs asking the real PHP, and the intentional

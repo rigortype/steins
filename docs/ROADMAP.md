@@ -52,7 +52,8 @@ CLI (ADR-0020, partially landed):
 - Landed: `check` (`--format text|json`, `--no-php` sound subset,
   `--vendor-diagnostics`, baseline set/match/stale per ADR-0022),
   `annotate` (margin facts, `…?` non-exhaustiveness), `transform`
-  (`phpdoc-to-native`, `phpdoc-honesty`; dry-run default, `--apply`
+  (`phpdoc-to-native`, `phpdoc-honesty`, `throws-envelope`,
+  `loop-to-array-map`; dry-run default, `--apply`
   gated on zero-new-diagnostics; vouch valve + partition regions read
   from `steins.toml`). Inline `@steins-ignore` with anti-rot.
 - NOT landed (declared in ADR-0020/0023, absent from the binary):
@@ -68,6 +69,10 @@ CLI (ADR-0020, partially landed):
 Transforms (ADR-0034/0041): promotion + honesty landed through method
 scope (ADR-0043 stage 5) with the full refusal taxonomy, eval/include
 obstacles (ADR-0046), `no-observed-callers`, and the vouch valve.
+ADR-0010's flagship loop→`array_map` landed under ADR-0076 — the first
+transform preconditioned on a *proven* effect judgment (and a proven
+throw set, stricter than `Pure`), with a differential fixture that runs
+both spellings under the real PHP.
 Whole-universe closing measurement: 23,148 / 509 candidates enumerated,
 0 transformed — dynamic dispatch is the sound floor; partitioning
 (ADR-0047) is the recorded precision axis (slice A landed, B in flight,
