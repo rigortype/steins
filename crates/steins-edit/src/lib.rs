@@ -24,12 +24,16 @@
 //! - [`honesty`] — the second transform, phpdoc-honesty repair (ADR-0037 point 4
 //!   / ADR-0041 point 4): the inverse of promotion, widening a *lying*
 //!   `@param`/`@return` to the proven truth from call-site / return evidence.
+//! - [`envelope`] — the third transform, `@throws` envelope seeding (issue #115
+//!   / ADR-0040): writes the proven-escape set behind `throw.undeclared` as
+//!   declared `@throws` tags, creating or losslessly extending docblocks.
 //!
 //! ADR-0034's dual verification (post-check: zero new diagnostics after apply;
 //! oracle: every site transformed-or-refused) is the safety net the CLI wires in.
 
 pub mod common;
 pub mod diff;
+pub mod envelope;
 pub mod honesty;
 pub mod obstacles;
 pub mod plan;
@@ -38,6 +42,7 @@ pub mod regions;
 pub mod transform;
 
 pub use diff::unified_diff;
+pub use envelope::{ThrowsEnvelope, plan_throws_envelope};
 pub use honesty::{PhpdocHonesty, plan_phpdoc_honesty};
 pub use obstacles::{DynamismObstacles, VouchSet};
 pub use plan::{ByteSpan, Edit, EditPlan, NewFile, PlanError};
