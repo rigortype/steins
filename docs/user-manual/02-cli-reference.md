@@ -26,7 +26,7 @@ whole surface to stderr and exits `2`:
 $ steins
 usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
        steins annotate [--no-php] [--format text|json] <file.php>
-       steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--format text|json] <paths...>
+       steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope> [--apply] [--format text|json] <paths...>
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
        steins doctor [--no-php] [--baseline <path>] [path]
        steins version | -v | --version
@@ -423,17 +423,23 @@ Plan — and optionally apply — a source-to-source rewrite. Dry-run by
 default.
 
 ```
-steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--config <path>]
-                 [--format text|json] <paths...>
+steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope> [--apply]
+                 [--config <path>] [--format text|json] <paths...>
 ```
 
-Two transforms:
+Three transforms:
 
 - **`phpdoc-to-native`** promotes a PHPDoc `@param`/`@return` type to a
   native declaration when every call site proves the native hint cannot
   change behavior.
 - **`phpdoc-honesty`** rewrites a `@param`/`@return` tag that *lies* to the
   type the call sites and return sites actually prove.
+- **`throws-envelope`** seeds `@throws` tags from proven escapes: for every
+  declaration the engine proves throws (the machinery behind
+  `throw.undeclared`), it writes the missing tags — creating the docblock
+  when absent, appending to it losslessly when present — so a repo can adopt
+  the `throws-direct` and `contracts` profiles by running one command
+  instead of hand-writing envelopes.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
@@ -498,6 +504,53 @@ $ steins transform phpdoc-honesty src/
 Post-check OK — no new diagnostics.
 ```
 
+`throws-envelope` writes the proven escape set as `@throws` tags — one tag
+per exception class, fully qualified, in the proven set's source order:
+
+```
+$ steins transform throws-envelope src/
+--- a/src/Loader.php
++++ b/src/Loader.php
+@@ -1,4 +1,7 @@
+ <?php
++/**
++ * @throws \RuntimeException
++ */
+ function load(string $path): string
+ {
+     throw new \RuntimeException("cannot read $path");
+
+1 enumerated: 1 seeded, 0 refused
+Post-check OK — no new diagnostics.
+```
+
+Only **proven** escapes are written — a Maybe escape refuses with
+`escape-not-proven`, because a seeded tag is a contract the repo then owns
+(written-by-tool is declared, not proven). A declaration whose proven
+escapes are all covered already refuses `already-declared`, which is also
+why running the transform twice is a no-op. An existing docblock is
+extended by inserting whole lines before its closing `*/` — every existing
+line is byte-preserved — and a docblock with no such insertion point (a
+single-line `/** … */`, or content sharing the closing line) refuses
+`docblock-not-round-trippable`. A declaration that does not start its own
+line, so that no docblock can go above it without rewriting bytes that are
+not its own, refuses `declaration-mid-line`. Those four names are the whole
+refusal taxonomy for this transform.
+
+Unlike the two PHPDoc transforms, `throws-envelope` consults no vouch valve:
+a proven escape is a forward fact of the declaration's own body and callees,
+so the dynamic-code obstacles that make "all callers proven" unknowable have
+no bearing on it. A `[transform.vouch]` section is simply inert for this
+transform, and no per-entry no-op warning is printed for it.
+
+The post-check for `throws-envelope` runs on the **default** display
+surface, like the other transforms. That choice is deliberate and pinned by
+a test: under a throws-checking profile a freshly seeded envelope can
+legitimately surface contract findings (for example `throw.liskov-widened`
+on an override whose parent declares a narrower envelope). That is existing
+debt the seeding makes visible — run `check --profile contracts` after
+seeding to see it — not a regression for the post-check to veto.
+
 `--apply` writes and says how many files it touched, on stderr:
 
 ```
@@ -515,7 +568,7 @@ dynamic-code obstacle site, which the text mode caps at five per obstacle.
 Errors exit `2`: an unknown transform name, a missing name, no paths, a
 `--config` with no argument. The name is positional, so forgetting it makes
 your first path the name — `steins transform src/` reports
-``steins: unknown transform `src/` (available: phpdoc-to-native, phpdoc-honesty)``.
+``steins: unknown transform `src/` (available: phpdoc-to-native, phpdoc-honesty, throws-envelope)``.
 Like `check`, `transform` treats an unknown `--flag` as a path, which then
 fails the existence check. A `--config` path that cannot be read warns and
 proceeds with no vouches, since a vouch typo must not stop the run.

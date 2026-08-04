@@ -1,8 +1,9 @@
 # The Transform Engine
 
 **Status: implemented** for `EditPlan`, the refusal taxonomy, the completeness
-oracle, obstacles and the vouch valve, the region model (slice A), and two
-transforms. ADR-0010, ADR-0034, ADR-0037, ADR-0041, ADR-0046, ADR-0047.
+oracle, obstacles and the vouch valve, the region model (slice A), and three
+transforms. ADR-0010, ADR-0034, ADR-0037, ADR-0040, ADR-0041, ADR-0046,
+ADR-0047.
 
 ## What a transform is
 
@@ -64,6 +65,10 @@ agent reads and can act on. The taxonomy in use today includes:
 | `native-contradicts-proven` | the existing native type disagrees with the evidence |
 | `phpdoc-finer-than-native` | promoting would *lose* information |
 | `default-not-admitted-by-native` / `implicit-nullable-default` | the parameter default would break under the new type |
+| `escape-not-proven` | every envelope-relevant escape is Maybe — never annotated |
+| `already-declared` | every proven escape is already covered (the idempotent no-op) |
+| `docblock-not-round-trippable` | no lossless insertion point, or the seeded tag fails the re-parse round-trip |
+| `declaration-mid-line` | the declaration head does not start its own line |
 
 ## The completeness oracle
 
@@ -87,6 +92,15 @@ ADR-0034's safety net, wired in by the CLI:
 2. **Oracle** — every site transformed or refused.
 
 Dry-run is the default. `--apply` is explicit.
+
+The post-check compares per-id counts **on the default surface** (proof +
+mechanics, vendor-filtered), uniformly across transforms — the issue #115
+decision, pinned by a CLI test. A transform whose product *is* a contract
+(`throws-envelope`) legitimately makes contract-layer findings visible under an
+opt-up profile (a seeded `@throws` on an override can surface
+`throw.liskov-widened` against a narrower ancestor envelope); that is debt made
+visible, not a regression, and the post-check must not veto it. The safety net
+is the proof layer — the fp-gate discipline transposed to rewriting.
 
 ## Dynamism obstacles and the vouch valve
 
@@ -131,7 +145,7 @@ yet**. With one region the planner is byte-identical to whole-universe behavior.
 Slices B–E are the recorded precision axis: the prediction to be judged against
 measurement is 3,000–4,000 additional unlocked sites (ADR-0047 §8).
 
-## The two shipped transforms
+## The three shipped transforms
 
 **`phpdoc-to-native`** — promotion (ADR-0034 point 4, ADR-0037). Turns a
 docblock-only type into a runtime-enforced native declaration when every call
@@ -143,9 +157,22 @@ a *lying* `@param`/`@return` to the proven truth from call-site and return
 evidence. Where promotion tightens code toward the runtime, honesty repair makes
 the documentation stop lying about it.
 
-Measured whole-universe closing run: **23,148 / 509 candidates enumerated, 0
-transformed** — dynamic dispatch is the sound floor, and partitioning is the
-recorded way past it.
+**`throws-envelope`** — `@throws` envelope seeding (issue #115, ADR-0040). For
+every declaration with an envelope-relevant escaping throw class, writes the
+**proven** escape set — exactly the classes behind `throw.undeclared` — as
+`@throws \FQN` tags, creating the docblock when absent and extending it
+losslessly when present (whole inserted lines; every existing line
+byte-preserved, verified by a re-parse round-trip before the edit enters the
+plan). A Maybe escape refuses `escape-not-proven`, never annotates (ADR-0037:
+written-by-tool is declared, not proven); the second run refuses
+`already-declared` (idempotence). Unlike its siblings it consults no vouch
+valve: proven escapes are forward facts, so caller-enumeration obstacles have
+no bearing. Its post-check runs on the default surface (see above) — the
+recorded surface decision for this transform.
+
+Measured whole-universe closing run of the first two: **23,148 / 509 candidates
+enumerated, 0 transformed** — dynamic dispatch is the sound floor, and
+partitioning is the recorded way past it.
 
 ## Not implemented
 
