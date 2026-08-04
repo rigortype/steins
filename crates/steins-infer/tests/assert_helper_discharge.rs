@@ -1,5 +1,5 @@
 //! **Userland assertion helpers as guards** — ADR-0058's tag lane meeting
-//! ADR-0062's discharge ladder (the S6-residue slice).
+//! ADR-0062's discharge ladder.
 //!
 //! `assert(isset($d['a']))` discharges a strict-leg finding because its argument
 //! survives lowering as a condition. `Util_Assert::true(isset($d['a']))` — the
@@ -18,8 +18,8 @@
 //!   helper carrying only a `@phpstan-assert` tag is **Asserted** — the discharge
 //!   is real (the finding is contract-layer over an `Asserted` shape, A-G9), but
 //!   no proof-layer id may be premised on it, and the presence promotion records
-//!   the declared stratum, not a witness. Verified needs the §3 descent proof
-//!   (slice I2), not this slice.
+//!   the declared stratum, not a witness. Verified needs the §3 descent proof,
+//!   which this file does not exercise.
 //! * **No tag, no discharge.** An untagged helper — however obviously it throws —
 //!   is silent here; its body proof is I2's job.
 
@@ -139,8 +139,8 @@ fn the_read_still_fires_where_the_helper_guarded_a_different_key() {
 #[test]
 fn an_untagged_helper_discharges_nothing() {
     // It throws exactly as hard as the tagged one, and Steins does not look:
-    // ADR-0058's descent proof (§3, slice I2) is what reads a body. Until then
-    // the tag is the whole contract, and a missing tag is silence.
+    // ADR-0058's descent proof (§3) is what reads a body. Without it the tag is
+    // the whole contract, and a missing tag is silence.
     let src = fixture("array{a?: string}", "Assert::untagged(isset($d['a'])); $x = $d['a'];");
     assert_eq!(ids(&src), [OFFSET_MAYBE_MISSING_ID]);
 }
@@ -238,13 +238,13 @@ fn a_base_also_handed_over_directly_keeps_the_conservative_forgetting() {
     );
 }
 
-// ---- Scope: what this slice deliberately does not do ------------------------
+// ---- Scope: what this file deliberately does not do -------------------------
 
 #[test]
 fn an_if_true_tag_in_statement_position_is_not_a_statement_assertion() {
     // `-if-true` is conditional on the RETURN VALUE, so a statement-position call
     // establishes nothing — the `Always` kind is the whole statement lane
-    // (ADR-0030 Feature D, unchanged).
+    // (ADR-0030 Feature D).
     let src = "<?php\nfinal class B {\n\
                /** @phpstan-assert-if-true true $c */\n\
                public static function t(bool $c): bool { return $c; }\n\

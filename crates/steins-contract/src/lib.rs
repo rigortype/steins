@@ -86,8 +86,8 @@ impl CallableObl {
 ///
 /// `callable-object` is deliberately *not* `closure_only`: it means "an object that
 /// is callable" (any `__invoke`), which is wider than `Closure`. Bare `Closure` is
-/// likewise left obligation-free this slice — tightening it is a separate, wider
-/// change than the refined spellings ADR-0063 P3 names.
+/// likewise obligation-free — tightening it is a separate, wider change than the
+/// refined spellings ADR-0063 P3 names.
 #[must_use]
 fn callable_obl(norm: &str) -> Option<CallableObl> {
     let obl = match norm {
@@ -266,8 +266,8 @@ pub enum ContractTy {
     ///
     /// `obl` carries the refined spellings' obligations (ADR-0063 P3):
     /// `pure-callable`, `pure-closure`, `static-closure`, `static-pure-closure`.
-    /// A [`CallableObl::is_bare`] obligation is exactly the historical
-    /// `callable`/`Closure` behavior, so every pre-existing consumer is unchanged.
+    /// A [`CallableObl::is_bare`] obligation is exactly the plain
+    /// `callable`/`Closure` behavior, so every bare-callable consumer is unaffected.
     CallableTy { sig: Option<Box<CallableSig>>, obl: CallableObl },
     /// Union.
     Union(Vec<ContractTy>),
@@ -363,13 +363,13 @@ pub(crate) fn is_array_key_ty(ty: &ContractTy) -> bool {
 /// identifier table and the generic table share one normalized-name space, so
 /// one list serves both).
 ///
-/// Before this list existed, every one of these names fell through the
-/// catch-all to [`ContractTy::Class`] — a **nonexistent-class reference**,
-/// which is a hazard, not mere silence: the class leg of acceptance answers a
-/// definite `No` for any non-object value (`admits_val`/`accepts_class_name`),
-/// so `@param resource $h` would report a false positive on every scalar/array
-/// argument the checker could resolve. This is exactly the wrong-No hazard C7
-/// fixed for `key-of`/`value-of` (ADR-0062), applied to the names PHPStan's own
+/// Without this list, each of these names would fall through the catch-all to
+/// [`ContractTy::Class`] — a **nonexistent-class reference**, which is a hazard,
+/// not mere silence: the class leg of acceptance answers a definite `No` for any
+/// non-object value (`admits_val`/`accepts_class_name`), so `@param resource $h`
+/// would report a false positive on every scalar/array argument the checker
+/// could resolve. This is the same wrong-No hazard handled for
+/// `key-of`/`value-of` (ADR-0062), applied to the names PHPStan's own
 /// curation corpus already documents as "falls back to a nonexistent-class
 /// reference" (`php-typing-conformance/conformance/results/steins/*.toml`,
 /// `status` field) — Steins does not model these constructs, so the honest
@@ -995,9 +995,9 @@ fn shape_fact_of_parts(
 }
 
 /// The denotational `is_list` trinary for a declared `Shape` arm's fields/tail
-/// (ADR-0062 §6, D4): the ONE computation, reused from
+/// (ADR-0062 §6): the ONE computation, reused from
 /// [`steins_domain::ShapeFact::normalize`] rather than re-implemented here or
-/// in the speller (`spell.rs` calls this, never its own copy) — now via the
+/// in the speller (`spell.rs` calls this, never its own copy) — via the
 /// same [`shape_fact_of_parts`] lowering [`to_shape_fact`] uses, so the
 /// spelled verdict and the seeded fact can never disagree.
 ///
@@ -1057,10 +1057,10 @@ fn string_lit_value(lit: &StringLit) -> String {
     }
 }
 
-/// C-phase residue: the [`KNOWN_UNENFORCED`] hazard fix — a known-vocabulary
-/// pseudo-type spelling floors to [`ContractTy::Opaque`] (always `Maybe`) rather
-/// than the nonexistent-class-reference `Class` catch-all, which would otherwise
-/// manufacture a `No` for every non-object value (the same hazard C7 fixed for
+/// The [`KNOWN_UNENFORCED`] hazard fix — a known-vocabulary pseudo-type spelling
+/// floors to [`ContractTy::Opaque`] (always `Maybe`) rather than the
+/// nonexistent-class-reference `Class` catch-all, which would otherwise
+/// manufacture a `No` for every non-object value (the same hazard handled for
 /// `key-of`/`value-of`).
 #[cfg(test)]
 mod known_unenforced_tests {

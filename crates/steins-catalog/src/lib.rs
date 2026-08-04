@@ -1,63 +1,33 @@
-//! Builtin / extension catalog — the curated signatures and effect entries for
-//! PHP builtins and extension functions.
+//! Curated signatures and effect entries for PHP builtins and extensions.
 //!
-//! # Folding gate (this milestone)
+//! # Folding gate
 //!
-//! The full effect catalog (ADR-0014 sourcing, ADR-0021 seeding) is not built
-//! yet. What exists here is the **folding gate of ADR-0008 applied as an
-//! allowlist**: [`foldable`] names a small set of builtins that are pure and
-//! deterministic under ADR-0008's rule — an expression folds only when all
-//! effect colors are empty and `nondet` is absent on the concrete path — so a
-//! sidecar fold of them yields a value that is portable to the source.
+//! [`foldable`] is the hand-curated ADR-0008 allowlist. A function is admitted
+//! only when it is pure and deterministic on the concrete path; unlisted names
+//! widen. Locale-, timezone-, encoding-, global-, and nondeterminism-sensitive
+//! functions remain excluded.
 //!
-//! This is deliberately a *hand-picked allowlist*, not a computed property:
-//! uncolored functions widen (a miss, never a false positive), the only seeding
-//! order compatible with the zero-FP bar (ADR-0002). The names are drawn from
-//! the top of `docs/notes/20260722-builtin-frequency.md` where safely pure.
+//! `WIDTH_REFUSED` differs from exclusion: its names are foldable on a proven
+//! 64-bit engine but decline on 32-bit. The following excluded names have
+//! separate portability or semantic evidence:
 //!
-//! # Deliberate exclusions
-//!
-//! Locale- or global-sensitive functions are **not** here, even when frequent:
-//! `mb_*` (encoding-dependent), anything affected by `setlocale`, the current
-//! timezone, or `mb_regex_encoding`-class settings. Their value is not portable
-//! without ADR-0008's opt-in "pseudo-constant settings" config, which this slice
-//! does not implement. `nondet` builtins (`time`, `rand`, `microtime`, …) are
-//! excluded by definition.
-//!
-//! ## Two kinds of refusal, and why they are not the same list
-//!
-//! A name in `WIDTH_REFUSED` **is** on the allowlist — it folds on a provably
-//! 64-bit engine and declines on a 32-bit one. So a builtin that fails ADR-0008's
-//! purity/determinism bar can never be written as a refused row: that would admit
-//! it. Those names are refused from the allowlist *entirely*, and are recorded here
-//! with the evidence, pinned absent by `impure_and_locale_sensitive_are_excluded`:
-//!
-//! * `strtotime`, `date`, `idate` — **nondet.time**, and timezone-coupled even when
-//!   handed an explicit timestamp: `idate("Y", 0)` is `1970` under `UTC` and `1969`
-//!   under `Pacific/Kiritimati` (probed). `strtotime("2020-01-01")` differed between
-//!   the two probe engines by exactly their timezone offset (`1577804400` vs
-//!   `1577836800`), which is the divergence in its purest form.
-//! * `mb_*` — encoding-coupled (`mbstring.internal_encoding`). The browser engine
-//!   settles it a second way: php-wasm 0.1.0 has **no mbstring extension**, so all
-//!   eleven `mb_*` probes answered `widen: unknown function` there.
-//! * `strcmp`, `strcasecmp` — the *contract* is the sign; the *value* is `memcmp`'s,
-//!   which C leaves implementation-defined. Both probe engines agreed on all 36
-//!   tuples (`strcmp("A","a")` = `-32`, `strcmp("zzz","a")` = `25` on each), so this
-//!   is **not** a width verdict — it is an ADR-0008 one. Folding would pin a literal
-//!   the language does not promise, and a sign-normalized admission would have the
-//!   catalog report `-1` where the engine returns `-32`: forking semantics, which the
-//!   fold seam must never do. Declining costs nothing that a two-literal `strcmp`
-//!   call was going to buy.
-//! * `number_format` — held out with the `mb_*` family by the issue-#78 must-not
-//!   list. Recorded honestly: the width probe found no divergence, and the historical
-//!   locale coupling of float rendering is gone at `PINNED_PHP` (`de_DE.UTF-8` and
-//!   `C` render `number_format(1234.5678, 2)` identically, and `precision` does not
-//!   move it). It stays out on the conservative side and may be admitted later on
-//!   its own evidence rather than smuggled in on this slice's.
-//! * `bin2hex` — carries a standing refused row in the ADR-0056 return-fact table
-//!   (`docs/research/phpsrc-mining/return_facts.toml`, the empty-in/empty-out trap).
-//!   That row is about a different table and is **not relitigated here**; the width
-//!   probe found no divergence, and the name simply does not enter on this slice.
+//! * `strtotime`, `date`, `idate` are `nondet.time` and timezone-coupled even
+//!   with explicit timestamps. Probes gave `idate("Y", 0)` as `1970` under UTC
+//!   and `1969` under Pacific/Kiritimati; `strtotime("2020-01-01")` differed by
+//!   the engine timezone offset (`1577804400` versus `1577836800`).
+//! * `mb_*` depends on `mbstring.internal_encoding`; php-wasm 0.1.0 also lacks
+//!   mbstring, and all eleven probes widened as unknown functions.
+//! * `strcmp` and `strcasecmp` promise a sign, not `memcmp`'s
+//!   implementation-defined magnitude. Both engines agreed on all 36 tuples,
+//!   including `strcmp("A", "a") == -32` and `strcmp("zzz", "a") == 25`, but
+//!   folding those literals would promise more than PHP does. Sign-normalizing
+//!   would instead diverge from the executing engine.
+//! * `number_format` remains conservatively excluded. Width probes found no
+//!   divergence, and at `PINNED_PHP` both `de_DE.UTF-8` and `C` rendered
+//!   `number_format(1234.5678, 2)` identically, unaffected by `precision`.
+//! * `bin2hex` remains excluded because ADR-0056 records its empty-in/empty-out
+//!   return-fact refusal in `docs/research/phpsrc-mining/return_facts.toml`.
+//!   Width probes found no divergence.
 
 /// The PHP minor version the builtin catalog is pinned to (`major`, `minor`) —
 /// the php-src mining data (`docs/research/phpsrc-mining/hierarchy.toml`, pin
@@ -86,7 +56,7 @@ mod display_names_generated;
 
 /// The builtin return-fact refinement table (ADR-0056), generated from
 /// `docs/research/phpsrc-mining/return_facts.toml` by `cargo xtask gen-catalog`.
-/// Consulted only by [`return_fact`]. May be empty (R1 lands zero rows).
+/// Consulted only by [`return_fact`]. The table may be empty.
 mod return_facts_generated;
 
 /// The builtin declared-return floor (ADR-0069), generated from
@@ -101,12 +71,9 @@ mod declared_returns_generated;
 /// inference engine still requires the callee to be a non-user function and all
 /// arguments to be literals the IR carries before it asks the sidecar.
 ///
-/// Several allowlisted functions (`sprintf`, `str_replace`, `in_array`, `count`,
-/// `implode`) commonly take **array** arguments. Those calls now qualify: an
-/// argument may be a scalar literal *or* an array literal that is concrete all the
-/// way down (issue #39). `in_array`/`count`/`implode` were parked here waiting for
-/// exactly that, and lit up when the fold seam learned to carry an array — this
-/// list never changed, which is the point.
+/// Arguments may be scalar literals or recursively concrete array literals.
+/// This permits array-taking entries such as `sprintf`, `str_replace`, `in_array`,
+/// `count`, and `implode` (issue #39).
 ///
 /// A folded *result* is still scalar-only: a builtin that returns an array (say
 /// `str_replace` over an array subject) widens, because carrying an array back
@@ -114,16 +81,11 @@ mod declared_returns_generated;
 ///
 /// # Where the list lives
 ///
-/// The allowlist is spelled as the union of the two integer-width classes,
-/// `WIDTH_SAFE` and `WIDTH_REFUSED` (issue #64 S1.5), rather than as a third list
-/// they are checked against. A name is foldable *by being classified*, so a name
-/// added without a width verdict is not foldable at all — the invariant holds by
-/// construction rather than by a test that could be forgotten. The two lists keep
-/// the allowlist's own composition rules: ASCII-cased string builtins only (the
-/// `mb_*` and locale-sensitive variants are deliberately excluded, as are all
-/// `nondet` builtins), and the array-taking members (`in_array`, `count`,
-/// `implode`, `str_replace`, `sprintf`) which lit up when the fold seam learned
-/// to carry an array literal (issue #39) without this list changing at all.
+/// The allowlist is the union of the integer-width classes `WIDTH_SAFE` and
+/// `WIDTH_REFUSED` (issue #64). A name without a width verdict is not foldable.
+/// Entries are limited to portable ASCII-cased string operations and other
+/// deterministic functions; `mb_*`, locale-sensitive, and `nondet` functions are
+/// excluded.
 #[must_use]
 pub fn foldable(name: &str) -> bool {
     width_safe(name) || width_refused(name)
@@ -138,19 +100,16 @@ pub fn foldable(name: &str) -> bool {
 /// integer occurring anywhere in the arguments (values *and* explicit array keys,
 /// recursively) lies within `[-(2^31 - 1), 2^31 - 1]`, a 32-bit engine either
 /// returns the **identical value and type tag** a 64-bit engine returns, or
-/// **declines** (throws, or widens). A decline is the sound direction — it is
-/// exactly what the blanket ADR-0066 §4 gate does for every name today — so the
-/// browser loses precision there and never gains a wrong literal.
+/// **declines** (throws or widens). A decline loses precision without producing a
+/// wrong literal (ADR-0066 §4).
 ///
 /// The guard's lower bound is `-(2^31 - 1)` and **not** `-2^31`: excluding
 /// `PHP_INT_MIN`-on-32-bit is what makes the `abs`-shaped boundary flip
 /// unreachable, because no in-range integer has an out-of-range magnitude.
 ///
-/// This is the width-safe subset ADR-0066 §4 deferred, and it is **verified, not
-/// reasoned**: every name below was probed differentially against php-wasm 0.1.0
+/// The subset is verified by differential probes against php-wasm 0.1.0
 /// (PHP 8.5.2, `PHP_INT_SIZE = 4`) and `php` 8.5.8 (`PHP_INT_SIZE = 8`) through the
-/// *same* `steins_handle` dispatch core: **661 adversarial tuples** over two rounds
-/// (310 at issue #64 S1.5, 351 more for issue #78's candidate round) covering
+/// same `steins_handle` dispatch core: **661 adversarial tuples** covering
 /// boundary integers, oversized numeric strings, oversized floats, negative inputs,
 /// integer array keys at `PHP_INT_MAX`, engine-minted binary strings, out-of-alphabet
 /// string arithmetic and both `strtr` arities. See the ADR-0066 amendments for the
@@ -176,10 +135,8 @@ fn width_refused(name: &str) -> bool {
 /// [`width_safe`], for a caller that must **name** the subset rather than test a
 /// membership.
 ///
-/// The playground's boundary widget (issue #64 S3) is the caller: it states how
-/// much of the folding allowlist is live on the engine the browser actually
-/// booted, and the counts have to come from the catalog rather than from a number
-/// typed into JS, or the page can drift from the gate it describes.
+/// The playground boundary widget uses this catalog-backed list so its displayed
+/// subset cannot drift from the folding gate (issue #64).
 #[must_use]
 pub fn width_safe_names() -> &'static [&'static str] {
     WIDTH_SAFE
@@ -196,7 +153,7 @@ pub fn width_refused_names() -> &'static [&'static str] {
     WIDTH_REFUSED
 }
 
-/// The verified width-safe half of the folding allowlist (issue #64 S1.5).
+/// The verified width-safe half of the folding allowlist (issue #64).
 ///
 /// Grouped by *why* the width cannot reach the result:
 ///
@@ -219,8 +176,7 @@ pub fn width_refused_names() -> &'static [&'static str] {
 ///   oversized numeric strings compare as strings on BOTH machines
 ///   (`in_array("9007199254740993", ["9007199254740992"])` is `false` on each).
 ///
-/// Issue #78 grew the table by eighteen names, probed the same way and falling
-/// into the same groups:
+/// The following names use the same verified categories:
 ///
 /// * **byte transform of the subject.** `ucwords`, `strtr` (both arities),
 ///   `preg_quote`, `addslashes`, `urlencode`/`urldecode`,
@@ -330,8 +286,7 @@ const WIDTH_SAFE: &[&str] = &[
 ///   deliberately not attempted: the safe/unsafe line would live inside a string
 ///   literal, which is the wrong place for a soundness gate.
 ///
-/// Issue #78 adds six rows, all of the same shape — a builtin whose *job* is to
-/// read or write an integer in the machine's own width:
+/// Six further rows read or write an integer in the machine's own width:
 ///
 /// * `dechex`   — REFUSED: renders the machine word for a negative argument, and
 ///   the argument is **in range**, so no guard can exclude it.
@@ -389,22 +344,18 @@ const WIDTH_REFUSED: &[&str] = &[
 ///   call these freely.
 /// * `Some(&[label, …])` — **catalogued with effects**: calling it from a
 ///   `Pure` envelope is a proven `effect.envelope-exceeded` violation.
-/// * `None` — **uncatalogued**: the effect is unknown. Proven-only checking
-///   stays silent here (the design's "cannot-verify" maybe-diagnostic, ADR-0005,
-///   is deliberately deferred to a later slice).
+/// * `None` — **uncatalogued**: the effect is unknown, so proven-only checking
+///   emits no finding (ADR-0005).
 ///
 /// Matching is case-insensitive (PHP function names are).
 ///
-/// # Provisional hand list (ADR-0021)
+/// # Curated labels (ADR-0021)
 ///
-/// This coloring is a small, hand-curated seed drawn from the same
-/// frequency-driven sourcing as [`foldable`]; it is **not** the eventual
-/// generated catalog (ADR-0014/0021). Labels follow ADR-0018's taxonomy; where a
-/// function's effect is argument-dependent the entry takes the *no-arg-analysis
-/// upper bound* (the safe, coarser reading):
+/// Labels follow ADR-0018's taxonomy. Argument-dependent effects use the safe,
+/// argument-insensitive upper bound:
 ///
-/// * `fopen` stays at the parent `io.fs` label — its read/write split is
-///   mode-string-dependent, which this slice does not inspect.
+/// * `fopen` uses parent label `io.fs` because its read/write split depends on
+///   the mode string.
 /// * `print_r`/`var_export`/`var_dump` are colored `output` even though the
 ///   first two are pure when their second argument is `true` (return-mode); the
 ///   upper bound is the arg-blind safe choice.
@@ -492,14 +443,9 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
 ///
 /// # Membership (issue #67)
 ///
-/// One class family, deliberately: `PDO`/`PDOStatement`, the first producer of
-/// the `io.db` label, which the registry has carried since ADR-0018 with nothing
-/// to emit it. `io.db` is the coarse label for the whole family — statement
-/// preparation is as much a round trip to the server as execution is (`PDO`'s
-/// emulated-prepares setting decides whether `prepare` talks to the server at
-/// all, which is runtime configuration this catalog cannot read, so the row takes
-/// the upper bound). Breadth — mysqli, the rest of the mined method rows — comes
-/// from the ADR-0014 generator, not from hand-seeding here.
+/// Rows cover `PDO`/`PDOStatement` with coarse label `io.db`. Because runtime
+/// configuration controls whether emulated `prepare` contacts the server,
+/// `prepare` takes the argument-insensitive upper bound.
 #[must_use]
 pub fn method_effect_labels(class: &str, method: &str) -> Option<&'static [&'static str]> {
     const IO_DB: &[&str] = &["io.db"];
@@ -515,16 +461,10 @@ pub fn method_effect_labels(class: &str, method: &str) -> Option<&'static [&'sta
 /// The **by-ref out-parameter rows** (ADR-0063 §2.3): the 0-based positional
 /// indices a builtin writes through a reference parameter.
 ///
-/// This is the catalog's one **conditional** row shape, and the conditionality is
-/// the point. [`effect_labels`] answers "what color does calling this function
-/// have", unconditionally — a per-function flag. An out-parameter write is not a
-/// property of the function, it is a property of the *call*: `preg_match($p, $s)`
-/// writes nothing, `preg_match($p, $s, $m)` writes `$m`, and the same two calls
-/// differ again in *whose* binding `$m` is. Flattening that into an
-/// unconditional color is exactly the metadata-only-purity lie ADR-0063 imports
-/// the refusal of (php-src #11884: "conditional on the argument, not a
-/// per-function lie"). So the row carries positions only, and the consumer
-/// resolves it against the call site:
+/// Out-parameter writes are call-dependent, unlike the unconditional function
+/// labels from [`effect_labels`]: `preg_match($p, $s)` writes nothing, while
+/// `preg_match($p, $s, $m)` writes `$m`. Rows therefore carry positions and the
+/// consumer resolves them at the call site (ADR-0063; php-src #11884):
 ///
 /// * a position `p` contributes **nothing** unless the call actually supplies
 ///   `p` (`arg_count > p`) — the arity leg;
@@ -616,15 +556,14 @@ pub fn out_params(name: &str) -> Option<&'static [usize]> {
 ///
 /// # Membership of the certified set
 ///
-/// Certification means: at `PINNED_PHP`, **every** parameter of the name is
-/// declared by value in the php-src stub. The set is closed and motivated — it
-/// is exactly the names Steins' own inference rules already reason about:
+/// Certification means that at `PINNED_PHP` every parameter is declared by
+/// value in the php-src stub. The set covers names used by inference:
 ///
 /// * the folding allowlist ([`foldable`]), which is pure by construction, plus
 /// * the ADR-0062/0064 array read-position and shape-projection family that does
 ///   **not** carry an out-param row (`array_first`/`array_last`/`array_values`/…,
-///   and `array_slice` since the Amendment B seam growth; `current` and `key`
-///   take `array|object $array`, while their pointer-moving siblings
+///   including `array_slice`; `current` and `key` take `array|object $array`,
+///   while their pointer-moving siblings
 ///   `reset`/`end`/`next`/`prev` take `&$array` and are rowed above — the two
 ///   tables corroborate each other, as do `array_slice` and its rowed splicing
 ///   sibling `array_splice`), plus
@@ -659,12 +598,9 @@ pub fn by_value_arg(name: &str, position: usize) -> Option<bool> {
         "array_keys",
         "array_flip",
         "array_reverse",
-        // The family's grown seam (ADR-0062 Amendment B): `array_slice(array
-        // $array, int $offset, ?int $length = null, bool $preserve_keys =
-        // false)` — every parameter by value at `PINNED_PHP`. Its *splicing*
-        // sibling `array_splice` takes `&$array` and is an `out_params` row
-        // above; the two tables corroborate each other exactly as
-        // `current`/`reset` do.
+        // `array_slice(array $array, int $offset, ?int $length = null,
+        // bool $preserve_keys = false)` is entirely by value at `PINNED_PHP`;
+        // sibling `array_splice` takes `&$array` and has an `out_params` row.
         "array_slice",
     ];
     match out_params(name) {
@@ -702,9 +638,8 @@ pub fn known_labels() -> &'static [&'static str] {
 /// the plugin's composer vendor name (ADR-0068 §2); this list is what the
 /// vendor-root rule checks the other side of.
 ///
-/// `global` appears here as a root even though the registry lists only its
-/// `global.read` / `global.write` children — root ownership is about the *name
-/// space*, not about which nodes happen to be colorable today.
+/// `global` is a root even though only its `global.read` and `global.write`
+/// children are registry entries; root ownership applies to the namespace.
 #[must_use]
 pub fn core_roots() -> &'static [&'static str] {
     &["exit", "failure", "ffi", "global", "io", "mutate", "nondet", "output"]
@@ -729,8 +664,7 @@ const BUILTIN_LABELS: &[&str] = {
         // replacement. These label a `false`/`null` failure arm's *value
         // provenance* (why the arm exists), not an effect; they share the ADR-0018
         // registry so prefix subsumption (`failure` admits `failure.environment`)
-        // works, and so a future boundary profile can name them. See
-        // [`failure_arms`].
+        // works. See [`failure_arms`].
         "failure",
         "failure.environment",
         "failure.input",
@@ -738,8 +672,8 @@ const BUILTIN_LABELS: &[&str] = {
         // Opaque native boundary (php-src FFI): runs arbitrary C, so the catalog
         // can prove nothing about it — a deliberately top-level escape hatch
         // beside `exit`/`mutate` (effects_gaps.md §3). FFI is OO-only, so no plain
-        // builtin is colored `ffi` yet; the label exists so an `@effects ffi`
-        // envelope declaration is valid.
+        // builtin is colored `ffi`; the label permits an `@effects ffi`
+        // envelope declaration.
         "ffi",
         "global.read",
         "global.write",
@@ -763,11 +697,9 @@ const BUILTIN_LABELS: &[&str] = {
         // The degenerate member of the `mutate` family — nothing escapes the
         // caller, so no observer outside the frame can tell it happened, which is
         // why every envelope tolerates it (see `steins-infer`'s `exceeds`). It
-        // still earns a label rather than silence because the annotate/summary
-        // surface, and a future by-ref out-param fact lane, want to name it. Its
-        // caller-*observable* siblings (`mutate.arg`/`.self`/`.instance`/
-        // `.static`, ADR-0055 point 1) are not inferred yet; this slice's
-        // non-local targets stop at the parent `mutate` rather than guess a child.
+        // still earns a label for annotate/summary output. Non-local targets
+        // stop at parent `mutate` rather than guessing a caller-observable child
+        // (`mutate.arg`/`.self`/`.instance`/`.static`; ADR-0055 point 1).
         "mutate.local",
         "nondet",
         "nondet.random",
@@ -795,7 +727,7 @@ pub fn subsumes(envelope_label: &str, effect_label: &str) -> bool {
 /// Whether a declared envelope `label` is **known** to the registry: it is a
 /// registry entry, or an ancestor of one (an internal taxonomy path). Since the
 /// registry already lists every internal node, the ancestor clause matters only
-/// for labels finer than the shipped taxonomy — `io.netw` is neither a node nor
+/// for labels finer than the registry taxonomy — `io.netw` is neither a node nor
 /// an ancestor of one, so it stays unknown (→ `effect.unknown-label`), while
 /// every registry root is accepted.
 #[must_use]
@@ -836,7 +768,7 @@ fn nearest_of<'a>(label: &str, entries: impl Iterator<Item = &'a str>) -> Option
 ///
 /// [`LabelRegistry::builtin`] is the closed view, and it is the default: every
 /// caller that has no project in hand (a single-file check, a unit test, the
-/// browser) gets exactly today's answers. Extension labels are validated *before*
+/// browser) gets the builtin-only answers. Extension labels are validated *before*
 /// they arrive here — the vendor-root rule of ADR-0068 §2 is a load-time gate in
 /// the discovery layer, not a property this type re-derives.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -908,9 +840,8 @@ impl LabelRegistry {
 /// This is the **frozen throw-system projection** of the builtin hierarchy: it
 /// covers exactly the core SPL/engine `Throwable` tree the throw accounting
 /// (ADR-0040) reasons over, and is deliberately *not* widened to the full mined
-/// hierarchy ([`builtin_class_supers`]) — expanding the throw world is the job of
-/// the throw-catalog slices (ADR-0043 §5 gate discipline), not the is-a
-/// ingestion. A test (`exception_parent_agrees_with_generated_hierarchy`) proves
+/// hierarchy ([`builtin_class_supers`]); ADR-0043 §5 keeps throw-catalog scope
+/// separate from is-a ingestion. A test (`exception_parent_agrees_with_generated_hierarchy`) proves
 /// this projection never conflicts with the generated table, so there is still a
 /// single source of truth for every edge both know.
 #[must_use]
@@ -1010,7 +941,7 @@ pub fn builtin_class_display(name: &str) -> Option<&'static str> {
 /// The **measured/curated** throw facts of a builtin call (ADR-0040 source #2):
 /// the global class names a builtin provably raises. Deliberately tiny and
 /// hand-verified — an uncatalogued builtin simply contributes no throw fact
-/// (widen, never a false positive). Empty slice = catalogued-but-throwless.
+/// (widen, never a false positive). An empty list means catalogued-but-throwless.
 #[must_use]
 pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
     // intdiv has TWO input-determined arms (php-src `ext/standard/math.c`,
@@ -1041,9 +972,8 @@ pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
             Some(VALUE_ERROR)
         }
         // `json_decode`/`json_encode` throw JsonException only under
-        // JSON_THROW_ON_ERROR; without flag inspection this stays uncatalogued
-        // (widen) rather than manufacture a throw — listed for when flag
-        // inspection lands. (The plain `json_decode` key above carries its
+        // JSON_THROW_ON_ERROR; without flag inspection this synthetic key stays
+        // uncatalogued in real calls. (The plain `json_decode` key above carries its
         // *unconditional* `$depth`-misuse ValueError, a separate arm.)
         "json_decode_throwing" | "json_encode_throwing" => Some(JSON),
         _ => None,
@@ -1052,10 +982,9 @@ pub fn builtin_throws(name: &str) -> Option<&'static [&'static str]> {
 
 /// The **cause** of a builtin's `false`/`null` failure arm (ADR-0042): a fact the
 /// catalog can state, never a probability it cannot. Each maps to a `failure.*`
-/// value-provenance label ([`known_labels`]) that a future boundary profile
-/// consumes to decide must-check policy (default exempts [`Resource`], includes
-/// [`Environment`]; strict includes both) — the honest-union + policy-profile
-/// replacement for ADR-0030's erased benevolent union.
+/// value-provenance label ([`known_labels`]) for boundary-profile must-check
+/// policy (default exempts [`Resource`] and includes [`Environment`]; strict
+/// includes both), replacing ADR-0030's erased benevolent union.
 ///
 /// [`Resource`]: FailureCause::Resource
 /// [`Environment`]: FailureCause::Environment
@@ -1102,9 +1031,8 @@ impl FailureCause {
 ///   *explicitly not a failure*, deliberately distinct from…
 /// * `None` — **unclassified**: the catalog states nothing about this name.
 ///
-/// Nothing consumes this yet (the boundary profiles of ADR-0037 are future work),
-/// so it is behavior-neutral catalog data; the shape is the minimal one those
-/// profiles need — a per-call cause set plus the sentinel exclusion.
+/// This is behavior-neutral catalog data until consumed by ADR-0037 boundary
+/// profiles. Its shape is a per-call cause set plus the sentinel exclusion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureArms {
     /// The distinct failure causes the arm(s) were traced to (order: as recorded).
@@ -1188,8 +1116,8 @@ pub enum Invocation {
 }
 
 /// Where a higher-order builtin draws the callback's arguments from (ADR-0033).
-/// Consumed only by the value-level fold path (deferred this milestone); the
-/// effects/throws join needs only [`InvocationShape::callback_param`].
+/// Reserved for value-level folding; effects/throws joining uses only
+/// [`InvocationShape::callback_param`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgSource {
     /// The callback receives the *elements* of the array at this positional index
@@ -1205,7 +1133,7 @@ pub enum ArgSource {
 /// immediate or deferred, and where the callback's arguments come from. This is
 /// the invocation-shape metadata that lets the effects/throws passes treat
 /// `array_map($cb, $xs)` as *callback-effects ∪ own-effects* instead of an opaque
-/// taint — the redemption of ADR-0005's array_map claim.
+/// taint, as required by ADR-0005.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvocationShape {
     /// The positional index (0-based) of the callback argument.
@@ -1220,8 +1148,8 @@ pub struct InvocationShape {
 /// is not a known higher-order invoker (its callback argument, if any, stays an
 /// opaque taint — the FP-safe side).
 ///
-/// Matching is case-insensitive (PHP function names are). The starter set follows
-/// ADR-0033's list. Notes on the argument-order quirks that make this a table and
+/// Matching is case-insensitive (PHP function names are). Rows follow ADR-0033.
+/// Argument-order quirks make this a table rather than a rule:
 /// not a rule:
 ///
 /// * `array_map($cb, $arr)` — callback first, elements of param 1. (The
@@ -1244,10 +1172,10 @@ pub struct InvocationShape {
 /// * `preg_replace_callback($pat, $cb, $subj)` — callback at 1, immediate; the
 ///   callback receives match arrays, not elements of an argument → `None`.
 ///
-/// # The immediately-invoked rows (ADR-0063 P1)
+/// # Immediately invoked rows (ADR-0063 P1)
 ///
-/// ADR-0063 decision 1 makes this table the **callback-position catalog** that
-/// drives the higher-order effect join: a row asserts that the named position is
+/// This callback-position catalog drives the higher-order effect join: a row
+/// asserts that the named position is
 /// *immediately invoked* during the call, so the callback's inferred envelope is
 /// part of this call's effect. Each row below is here because PHP evaluates the
 /// callback inside the call, before it returns:
@@ -1273,9 +1201,8 @@ pub struct InvocationShape {
 ///   callable is *stored* and invoked later by the engine (on an error, an
 ///   unresolved class, a tick, a flush), not during the call. They are the
 ///   `register_shutdown_function` family: **not immediately invoked**. The one
-///   grandfathered `Deferred` row (`register_shutdown_function`, ADR-0033) is
-///   kept as-is; ADR-0063 P1 adds no new deferred rows, so a non-immediate
-///   position contributes nothing new.
+///   existing `Deferred` row (`register_shutdown_function`, ADR-0033) remains;
+///   other non-immediate positions contribute nothing.
 /// * `preg_replace_callback_array($patternsToCallbacks, $subj)` — the callables
 ///   are *values inside* an associative array at position 0, not a positional
 ///   callback argument. [`InvocationShape::callback_param`] cannot name them and
@@ -1325,8 +1252,8 @@ pub fn invocation_shape(name: &str) -> Option<InvocationShape> {
 /// row can therefore lose precision, never manufacture a wrong premise.
 ///
 /// The table (`return_facts_generated::RETURN_FACTS`) is generated from
-/// `return_facts.toml`; it is EMPTY in R1 (the bool-predicate family's reflected
-/// envelope is already `bool`, so no refinement adds precision). Matching is
+/// `return_facts.toml`. The bool-predicate family has no rows because its
+/// reflected envelope is already `bool`, so no refinement adds precision. Matching is
 /// case-insensitive; the generated keys are lowercased and sorted for binary search.
 #[must_use]
 pub fn return_fact(name: &str) -> Option<&'static str> {
@@ -1372,10 +1299,9 @@ pub fn return_fact(name: &str) -> Option<&'static str> {
 /// own reflection. Matching is case-insensitive and a leading `\` is stripped, as
 /// everywhere else in this crate.
 ///
-/// Issue #79 widened the filter from single-base envelopes to the full scalar arm
-/// vocabulary, so a value here may be a `T|false` failure union or a refinement
-/// (`non-empty-string`, `non-negative-int`) as well as a bare base. The grade is
-/// unchanged: still Asserted, still never a proof premise.
+/// Values may use the full scalar-arm vocabulary, including a `T|false` failure
+/// union or a refinement (`non-empty-string`, `non-negative-int`) as well as a
+/// bare base. Every value remains Asserted and never a proof premise.
 #[must_use]
 pub fn declared_return(name: &str) -> Option<&'static str> {
     let key = name.trim_start_matches('\\').to_ascii_lowercase();
@@ -1397,10 +1323,8 @@ pub fn declared_return(name: &str) -> Option<&'static str> {
 ///
 /// Deliberately **independent** of [`declared_return`]: a name can be
 /// version-sensitive without carrying an admitted row, and the gate must stay
-/// complete either way. The two sets were disjoint through the #73 and #79 pins —
-/// every version-sensitive name returns an array, which the floor could not then
-/// carry — and ADR-0071's array widening makes them **overlap**, which is exactly
-/// the case this gate was wired ahead of and now decides for real.
+/// complete either way. The sets overlap because ADR-0071 permits array return
+/// floors; the version gate therefore applies to names carrying admitted rows.
 #[must_use]
 pub fn declared_return_changed_at(name: &str) -> Option<(u16, u16)> {
     let key = name.trim_start_matches('\\').to_ascii_lowercase();
@@ -1542,9 +1466,8 @@ mod tests {
         }
     }
 
-    /// The two name accessors ARE the two predicates, extensionally — the boundary
-    /// widget (issue #64 S3) names the subset through them, and a list that drifted
-    /// from the predicate would make the page describe a gate that is not the gate.
+    /// The name accessors equal the predicate extensions, so the boundary widget's
+    /// displayed subsets cannot drift from the gate (issue #64).
     #[test]
     fn the_name_accessors_agree_with_the_predicates() {
         use super::{width_refused, width_refused_names, width_safe_names};
@@ -1562,12 +1485,8 @@ mod tests {
         assert_eq!(width_refused_names().len(), 9);
     }
 
-    /// Default-deny: a name nobody classified is not width-safe, foldable or not.
-    ///
-    /// `hexdec`/`dechex` used to sit in this roster and have since been *classified*
-    /// (refused, issue #78), so they moved to
-    /// `the_width_sensitive_builtins_are_refused`; what is pinned here is the
-    /// unclassified case, which must stay populated for the test to mean anything.
+    /// Default-deny: a name without a width classification is not width-safe.
+    /// This roster remains populated to exercise the unclassified case.
     #[test]
     fn an_unclassified_name_is_not_width_safe() {
         for name in
@@ -1651,17 +1570,16 @@ mod tests {
 
     #[test]
     fn return_facts_r3_r4_rows() {
-        // ADR-0056 R3+R4 populate the curated table with the int-range and
-        // refined-string families. The bool-predicate family (R1) still has NO row —
-        // its reflected envelope is already `bool`, nothing to refine.
+        // The table contains int-range and refined-string families. Bool predicates
+        // have no row because their reflected `bool` envelope cannot be refined.
         assert_eq!(super::return_fact("is_int"), None);
         assert_eq!(super::return_fact("some_unknown_fn"), None);
-        // R3 int-range: `int<0, max>` within the reflected `int` envelope.
+        // `int<0, max>` refines the reflected `int` envelope.
         for name in ["count", "sizeof", "strlen", "mb_strlen", "substr_count", "func_num_args", "array_push", "array_unshift"] {
             assert_eq!(super::return_fact(name), Some("int<0, max>"), "{name} must curate int<0, max>");
         }
-        // R4 refined-string: `non-falsy-string` within the reflected `string` envelope.
-        // DR4 extends the same family with two probe-verified rows: `get_debug_type`
+        // `non-falsy-string` refines the reflected `string` envelope. Two
+        // probe-verified rows are `get_debug_type`
         // (every return is a type keyword or a class name — PHP's label grammar forbids
         // a leading digit, so "0" is not nameable) and `spl_object_hash` (a fixed
         // 32-char lowercase hex digest; its `object` parameter has no empty-in path).
@@ -1669,7 +1587,7 @@ mod tests {
             assert_eq!(super::return_fact(name), Some("non-falsy-string"), "{name} must curate non-falsy-string");
         }
         // Refused rows carry no curated fact (argument-sensitive / multi-base).
-        // `dirname` is the DR4 refusal: `dirname("0/x")==="0"` is falsy AND
+        // `dirname` is refused: `dirname("0/x")==="0"` is falsy and
         // `dirname("")===""` is empty, so neither NON_FALSY nor NON_EMPTY holds.
         for name in
             ["abs", "bin2hex", "trim", "strtoupper", "preg_match_all", "str_word_count", "sha1_file", "dirname"]
@@ -1686,9 +1604,9 @@ mod tests {
 
     #[test]
     fn return_facts_dr4_refined_string_rows() {
-        // ADR-0064 seam iii (DR4) extends the R4 `non-falsy-string` family with the two
-        // candidates whose probes survived the three-leg gate at PHP 8.5.8. Both have a
-        // single `string` reflected envelope, so the refinement narrows strictly within it.
+        // These two `non-falsy-string` rows passed the three-leg probe gate at PHP
+        // 8.5.8. Each has a single `string` reflected envelope, so the refinement
+        // narrows strictly within it.
         //
         // `spl_object_hash` — a fixed 32-character lowercase hex digest
         // (5000-object sweep: distinct lengths=32, allhex, alllowercase, none falsy).
@@ -1708,8 +1626,8 @@ mod tests {
 
     #[test]
     fn return_facts_dirname_stays_refused() {
-        // The DR4 census proposed `dirname(): non-falsy-string`; the probes REFUTED it
-        // twice over, so `dirname` is a refused row and must never gain a curated fact.
+        // Probes refute `dirname(): non-falsy-string` twice, so `dirname` remains
+        // refused.
         //
         //   (a) NOT non-falsy: a path segment can itself be "0", returned verbatim —
         //       dirname("0/x") === "0", a FALSY string (the census's contrary
@@ -1725,8 +1643,7 @@ mod tests {
         assert_eq!(super::return_fact("\\dirname"), None);
     }
 
-    /// Every spelling in the shipped table that a *single-base envelope* can state:
-    /// the #73 population. Everything else is the issue-#79 reach.
+    /// Spellings treated as single-base envelopes when partitioning generated rows.
     const ENVELOPE_SPELLINGS: &[&str] = &[
         "bool",
         "int",
@@ -1740,28 +1657,23 @@ mod tests {
 
     #[test]
     fn declared_return_rows_and_their_shape() {
-        // ADR-0069 / issue #73: the Asserted floor's rows. `str_repeat` is the ADR's
-        // own worked example — `string` with the sidecar, `unknown` without it before
-        // this table existed. Every #73 row is still here, spelled the same way.
+        // Asserted-floor rows (ADR-0069). `str_repeat` is the worked example.
         assert_eq!(super::declared_return("str_repeat"), Some("string"));
         assert_eq!(super::declared_return("str_pad"), Some("string"));
         assert_eq!(super::declared_return("array_key_exists"), Some("bool"));
         assert_eq!(super::declared_return("acos"), Some("float"));
         assert_eq!(super::declared_return("curl_multi_getcontent"), Some("string|null"));
-        // Issue #79's reach: the rows functionMap states more richly than any
-        // envelope could, which #73 counted and dropped.
+        // Rows may preserve functionMap types richer than a base envelope.
         assert_eq!(super::declared_return("strstr"), Some("string|false"));
         assert_eq!(super::declared_return("strrchr"), Some("string|false"));
         assert_eq!(super::declared_return("file_get_contents"), Some("string|false"));
         assert_eq!(super::declared_return("array_search"), Some("int|string|false"));
         assert_eq!(super::declared_return("preg_match"), Some("0|1|false"));
         assert_eq!(super::declared_return("ctype_alpha"), Some("bool"));
-        // A scalar refinement — the other #79 bucket. functionMap states what
+        // A scalar refinement: functionMap states what
         // reflection cannot: `mb_strtoupper` never returns a lowercase character.
         assert_eq!(super::declared_return("mb_strtoupper"), Some("uppercase-string"));
-        // The ADR-0071 bucket: the array vocabulary, which #73 and #79 both counted
-        // and dropped because the countersign could only shrug at it. A bare `array`,
-        // a list, a keyed map and a full shape all ship now.
+        // ADR-0071 permits a bare array, list, keyed map, and full shape.
         assert_eq!(super::declared_return("array_merge"), Some("array"));
         assert_eq!(super::declared_return("str_split"), Some("list<string>"));
         // The stored spelling is the speller's, and an int range spells as the
@@ -1771,11 +1683,10 @@ mod tests {
             super::declared_return("imagecolorsforindex"),
             Some("array{alpha: int<0, 127>, blue: int<0, 255>, green: int<0, 255>, red: int<0, 255>}")
         );
-        // And an array arm inside a union, which was the other half of the movement:
-        // the row was uncarriable only because ONE of its arms was an array.
+        // Array arms are also permitted inside unions.
         assert_eq!(super::declared_return("scandir"), Some("false|list<string>"));
-        // The object slice: class rows, admitted by the reflexive countersign alone.
-        // These keep functionMap's OWN casing rather than a canonical respelling —
+        // Class rows are admitted by the reflexive countersign. They keep
+        // functionMap's own casing rather than a canonical respelling:
         // `spell_arms` has no faithful spelling for a class arm, so the row stores the
         // source string, which lowers back by construction and is the only place the
         // builtin's casing survives at all (`ContractTy::Class` case-folds).
@@ -1805,12 +1716,8 @@ mod tests {
         for (name, ty) in t {
             assert!(!ty.is_empty(), "{name} carries an empty spelling");
         }
-        // The mining counts, pinned. The #73 slice admitted 919 rows, every one a
-        // single-base envelope; #79 kept all of them (the countersign still admits a
-        // row that BOUNDS the engine) and added 439 richer ones; ADR-0071's array
-        // widening keeps those 1,358 name for name and adds 248 more; the object
-        // slice keeps all 1,606 and adds 102. A drop below 919, or a collapse of the
-        // rich population, means a lowering regressed.
+        // Pinned mining contract: 1,708 rows comprise 919 single-base envelopes and
+        // 789 richer rows. Any count change indicates a generation or lowering change.
         let rich = t.iter().filter(|(_, ty)| !ENVELOPE_SPELLINGS.contains(ty)).count();
         assert_eq!(t.len(), 1708, "admitted rows at this pin");
         assert_eq!(t.len() - rich, 919, "the #73 envelope population must be preserved exactly");
@@ -1826,24 +1733,21 @@ mod tests {
         // hidden), or `int` against the engine's `string` (`pg_port`). Every one is
         // excluded and listed verbatim in `declared_returns.toml`.
         //
-        // The #79 widening keeps ALL of them. That is the load-bearing property of the
-        // arm-wise clause: "the row refines the engine" on its own would have readmitted
-        // exactly these — `string` is a perfectly good refinement of `?string` unless
-        // dropping the engine's own `null` arm is itself a disagreement.
+        // The arm-wise clause keeps these excluded: a row cannot drop the engine's
+        // own arm merely because the remaining row is a refinement.
         for name in ["sodium_add", "sodium_increment", "xml_error_string", "pg_port", "imageinterlace"] {
             assert_eq!(super::declared_return(name), None, "{name} must stay excluded");
         }
         for name in ["intlcal_get", "socket_cmsg_space", "ldap_compare", "pg_last_notice"] {
             assert_eq!(super::declared_return(name), None, "{name}: the row drops an engine arm");
         }
-        // The catches the RICH rows brought with them — the map's own rot, now visible
-        // because these rows are candidates at all. `imageloadfont` is the sharpest:
+        // Rich-row countersigning also excludes stale map entries. For example,
         // functionMap still says `int|false` where PHP 8 returns a `GdFont` object.
         for name in ["imageloadfont", "pow", "rewinddir", "substr_compare", "fpassthru"] {
             assert_eq!(super::declared_return(name), None, "{name}: an #79 candidate the engine disowns");
         }
-        // And the catches ADR-0071's array candidates brought, which are the SAME
-        // dropped-arm shape one vocabulary over: `ftp_raw` says `array` where the
+        // Array candidates use the same dropped-arm check: `ftp_raw` says `array`
+        // where the
         // engine declares `?array`, so the row hides a null exactly as
         // `xml_error_string` did; `mysqli_fetch_row` and `locale_get_keywords` hide
         // the engine's `false`. `str_word_count` invents one instead — functionMap
@@ -1860,8 +1764,8 @@ mod tests {
         ] {
             assert_eq!(super::declared_return(name), None, "{name}: an ADR-0071 candidate the engine disowns");
         }
-        // And the object slice's own catches, which are the resource-era rot made
-        // visible. `stream_bucket_make_writeable` is the sharpest of the whole table:
+        // Class candidates expose stale resource-era rows.
+        // `stream_bucket_make_writeable` is the sharpest example:
         // functionMap says the call returns a bare `stdClass`, where PHP 8 declares a
         // real `StreamBucket` — the stand-in outlived the thing it stood in for, and
         // the reflexive countersign refuses it because the two names simply differ.
@@ -1869,8 +1773,7 @@ mod tests {
         // `intlcal_create_instance` and the four `tidy_get_*` rows hide the engine's
         // `null` exactly as `ftp_raw` hid one; `xmlwriter_open_uri` hides its `false`;
         // `dom_import_simplexml` drops the engine's `DOMAttr` arm AND invents a
-        // `false`. None of them could have been caught before, because none of them
-        // was a candidate.
+        // `false`.
         for name in [
             "stream_bucket_make_writeable",
             "intlcal_create_instance",
@@ -1887,9 +1790,8 @@ mod tests {
             assert_eq!(super::declared_return(name), None, "{name}: a class candidate the engine disowns");
         }
         // A constant-union row is refused for the same mechanical reason, and the
-        // refusal matters more than it looks: a CONSTANT name is not vocabulary, so
-        // `lower_identifier`'s catch-all lowers it to a `Class` arm, which the object
-        // slice made carriable. The countersign is what keeps those rows out — the
+        // A CONSTANT name is not vocabulary, so `lower_identifier`'s catch-all
+        // lowers it to a `Class` arm. The countersign keeps those rows out: the
         // engine declares `int`, no class name matches, and the row is listed.
         for name in ["json_last_error", "session_status"] {
             assert_eq!(super::declared_return(name), None, "{name}: constants are not class names");
@@ -2225,7 +2127,7 @@ mod tests {
 
     #[test]
     fn new_effect_labels_are_registered_and_subsume() {
-        // S4 additions (effects_gaps.md) are known and prefix-subsume correctly.
+        // Labels from effects_gaps.md are known and prefix-subsume correctly.
         for label in ["ffi", "io.signal", "io.ipc", "output.header"] {
             assert!(is_known_label(label), "{label} should be a known registry label");
         }
@@ -2334,8 +2236,7 @@ mod tests {
         assert_eq!(effect_labels("shuffle"), Some(&["nondet.random"][..]));
         assert_eq!(out_params("shuffle"), Some(&[0][..]));
         assert_eq!(out_params("rand"), None);
-        // `preg_match` has no unconditional color at all — its only effect is the
-        // conditional one, which is why it was uncatalogued before ADR-0063 P2.
+        // `preg_match` has no unconditional color; its effect is conditional.
         assert_eq!(effect_labels("preg_match"), None);
     }
 
@@ -2466,7 +2367,7 @@ mod tests {
         ] {
             assert_eq!(invocation_shape(n), None, "{n} must stay excluded");
         }
-        // The one grandfathered deferred row is untouched by ADR-0063 P1.
+        // The ADR-0033 deferred row remains represented.
         assert_eq!(
             invocation_shape("register_shutdown_function").map(|s| s.invocation),
             Some(Invocation::Deferred)

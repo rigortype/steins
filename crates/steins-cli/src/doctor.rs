@@ -1,4 +1,4 @@
-//! `steins doctor` (ADR-0054 Part II: slice C3, plus C4's coverage posture).
+//! `steins doctor` (ADR-0054 Part II).
 //!
 //! Doctor is the **index-bound posture mirror** (ADR-0054 §8): it reads
 //! configuration, the environment (via the sidecar's `env()`), and index-level
@@ -28,11 +28,10 @@
 //! monkey-patch line), Config + active surface, Layout (the ADR-0015 vendor
 //! resolution and the manifest that answered), Coverage posture (ADR-0054 §9.2 and
 //! issue #30 — the dam statistics and the opaque-construct inventory), Envelopes
-//! (the G1-demote written-but-unchecked notice), and Baseline. Still deferred from
+//! (the G1-demote written-but-unchecked notice), and Baseline. Not covered from
 //! the full ADR-0054 §9 list: Catalog skew, Registry totality, the SAPI-undeclared
-//! A6 line, `[runtime]` pseudo-constant reporting. `doctor --format json` is
-//! likewise deferred with design (§14: the section structure is the schema; it ships
-//! when a consumer exists).
+//! A6 line, `[runtime]` pseudo-constant reporting, and `doctor --format json`
+//! (§14: the section structure is the schema; it ships when a consumer exists).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -316,7 +315,7 @@ fn section_layout(root: &Path, cwd: &Path, layout: &ProjectLayout) {
 /// full of `extract()` and a scope proven clean print the same nothing. Steins is
 /// *correct* on those scopes — `Scope::poisoned` makes every local unknown, so the
 /// "eval rewrote my local" false-positive class is structurally impossible
-/// (ADR-0046 §1) — and until now it threw the evidence away. Under the
+/// (ADR-0046 §1). Under the
 /// crying-wolf prohibition the risk is symmetrical: a quiet analyzer that cannot say
 /// *why* it is quiet is asking to be trusted on nothing. This section is the
 /// measurement, so a silent run is a claim with numbers behind it.

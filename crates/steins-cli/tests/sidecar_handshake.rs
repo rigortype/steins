@@ -2,16 +2,14 @@
 //! unanswered — at the opening handshake, or mid-run.
 //!
 //! Three sidecar outcomes exist (ADR-0004/0024). `--no-php` and "no `php` on
-//! PATH" both already print a stderr notice and keep exit-neutral (ADR-0004's
+//! PATH" both print a stderr notice and keep exit-neutral (ADR-0004's
 //! "incompleteness is never silent"). The third — `php` resolves and starts,
 //! but a request never gets a reply (a wrapper that never execs real PHP, a
 //! `php.ini` that hangs on startup, an `auto_prepend_file` that never
 //! returns, or a child that answers fine at first and then hangs or dies
-//! partway through) — used to degrade in total silence: every fold widened,
-//! the absence-proof family went quiet, and the run looked exactly like a
-//! healthy one. `steins doctor` already named the opening-handshake case
-//! ("PHP sidecar: spawned, but the env() query failed"); `check` now names
-//! both.
+//! partway through) — must not degrade in silence: `check` names both the
+//! opening-handshake and mid-run cases rather than letting every fold widen
+//! and the run look healthy.
 //!
 //! Two stub `php` scripts below, each put on a PRIVATE `PATH` passed only to
 //! the child `steins` process (`Command::env`, never `std::env::set_var` on
@@ -19,12 +17,11 @@
 //! binary). [`stub_php_dir`] never speaks the wire format at all; the harder
 //! case, [`stub_php_dir_mid_run`], answers a real `env()` request correctly —
 //! so the opening handshake succeeds — and only goes silent on whatever comes
-//! after (a `fold`), which is the shape a first cut of this fix missed
-//! (review finding on PR #134): it latched on "any request has ever
-//! succeeded" and never reported again for the rest of the run, even though
-//! `Sidecar`'s own contract is that a lost reply is never retried — a mid-run
-//! timeout loses that specific finding exactly as silently as an opening one.
-//! Both stubs need no real `php` on the host, unlike the sidecar tests in
+//! after (a `fold`). This pins the review finding on PR #134: a fix that
+//! latches on "any request has ever succeeded" stops reporting for the rest
+//! of the run, even though `Sidecar` never retries a lost reply — a mid-run
+//! timeout loses that finding exactly as silently as an opening one. Both
+//! stubs need no real `php` on the host, unlike the sidecar tests in
 //! `crates/steins-sidecar/tests/protocol.rs`.
 
 use std::path::{Path, PathBuf};
@@ -231,20 +228,10 @@ fn check_surfaces_the_notice_when_the_sidecar_stops_answering_mid_run() {
         elapsed < std::time::Duration::from_secs(30),
         "a hung sidecar must still bound the run — this is not a real hang, got {elapsed:?}"
     );
-    // A regression guard for the stub itself (PR #134 review, round 2): a first
-    // draft of `stub_php_dir_mid_run` shelled out to `sed` to extract the
-    // request id, which is not resolvable under the narrowed `PATH` this test
-    // relies on — `Sidecar` discards the child's stderr, so the failure was
-    // invisible, the reply came back malformed, and the run poisoned on the
-    // very first request (`env()` itself) instead of the fold that comes
-    // after it. That variant still made every assertion below pass, just for
-    // the wrong reason — the same notice text fires whether the opening
-    // handshake or a later request is what failed. A near-instant run is the
-    // signature of that failure mode (no real ADR-0024 timeout paid at all,
-    // since the malformed reply is rejected synchronously); the genuine
-    // mid-run path pays at least one real ~2s timeout, so require this run to
-    // be slower than the always-hang stub could ever fail on its very first
-    // request, which rules out "env() itself never got a valid reply".
+    // Regression guard for the stub itself (PR #134 review): a helper unavailable
+    // on the narrowed `PATH` can corrupt the `env()` reply while leaving every
+    // output assertion green. A near-instant run identifies that synchronous
+    // failure; a genuine mid-run failure pays the measured ~2s ADR-0024 timeout.
     assert!(
         elapsed >= std::time::Duration::from_secs(1),
         "a near-instant run means env() itself failed (e.g. the stub's id \

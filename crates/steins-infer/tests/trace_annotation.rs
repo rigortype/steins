@@ -1,6 +1,6 @@
 //! ADR-0074 issues #94/#95 — the trace annotation: a statement-adopted
 //! `/** @psalm-trace $x */` docblock emits `debug.trace` carrying the engine's
-//! best fact for `$x`, end to end; the breadth slice (#95) adds §7's comma
+//! best fact for `$x`, end to end. Issue #95 covers §7's comma
 //! list (one diagnostic per named variable, in source order, each rendered
 //! independently), the placement-matrix remainder, and the replay edges.
 //!
@@ -182,8 +182,8 @@ fn the_rendered_fact_is_byte_equal_with_the_annotate_margin() {
     // records the assignment's post-statement fact at the assignment's line —
     // exactly the position the trace above it answers for — and the two
     // spellings are byte-equal. (An int literal — the margin and the dump path
-    // share its spelling; the string-literal quoting divergence between the
-    // two surfaces predates this id and is not reopened here.)
+    // share its spelling; the string-literal quoting divergence between the two
+    // surfaces is pre-existing and out of scope here.)
     let src = "<?php\n/** @psalm-trace $x */\n$x = 5;\n$y = $x;\n";
     let trace_fact = one_trace(src)
         .message
@@ -208,8 +208,6 @@ fn a_blank_line_detached_docblock_still_adopts() {
     // The shared rule (`stmt_docblock`, identical for `@var` casts) does not
     // break adoption on a blank line: the nearest preceding trivium is the
     // docblock and the gap is all whitespace, so the annotation still answers.
-    // (An earlier draft's one-line-break maximum was dropped when the shared
-    // rule landed first — §6.)
     let src = "<?php\n/** @psalm-trace $x */\n\n$x = 1;\n";
     assert_eq!(one_trace(src).message, "traced type of $x: 1");
 }
@@ -437,13 +435,8 @@ fn a_nested_declaration_statement_is_inert() {
 
 #[test]
 fn a_loop_body_annotation_mirrors_the_dump_surface() {
-    // Dump-parity inside a loop body, at whatever multiplicity the walk
-    // yields — nothing hand-picked. Today a `while` body is `Opaque` (the walk
-    // does not model loop control flow, ADR-0027 ratchet), so the walk never
-    // reaches the annotated statement and BOTH surfaces are silent: the
-    // rendered-fact lists agree byte-for-byte at multiplicity zero. When a
-    // loop lowering lands, both surfaces move together and this parity holds
-    // at the new multiplicity.
+    // A `while` body is `Opaque` because loop control flow is unmodeled
+    // (ADR-0027), so both trace and dump surfaces are silent.
     let trace_src = "<?php\n$x = 1;\nwhile ($x < 3) {\n/** @psalm-trace $x */\n$y = 2;\n}\n";
     let dump_src = "<?php\n$x = 1;\nwhile ($x < 3) {\n$y = 2;\n\\PHPStan\\dumpType($x);\n}\n";
     assert_eq!(
@@ -455,7 +448,7 @@ fn a_loop_body_annotation_mirrors_the_dump_surface() {
 
 #[test]
 fn a_try_body_annotation_mirrors_the_dump_surface() {
-    // Same parity for `try`/`catch` bodies: the construct is `Opaque` today,
+    // Same parity for `try`/`catch` bodies: the construct is `Opaque`,
     // so trace and dump mirror are equally silent — the annotation is never
     // chattier than the question's call spelling at the mirror position.
     let trace_src = "<?php\ntry {\n/** @psalm-trace $x */\n$x = 1;\n} catch (Exception $e) {\n\

@@ -73,9 +73,7 @@ fn dumped(expr: &str) -> String {
     ts.into_iter().next().expect("one dump")
 }
 
-// ==========================================================================
 // (i) The flagship — the reported case, end to end.
-// ==========================================================================
 
 #[test]
 fn flagship_greet_inlines_to_its_value() {
@@ -101,9 +99,7 @@ fn a_concat_argument_reaches_the_fold_gate() {
     assert_eq!(one_folded(src), "'ABCD'");
 }
 
-// ==========================================================================
 // (ii) The admitted casts — proven WITHOUT a folder, i.e. in the playground too.
-// ==========================================================================
 
 #[test]
 fn literal_chain_folds_left_associatively() {
@@ -132,9 +128,7 @@ fn non_string_scalars_take_their_php_cast() {
     assert_eq!(dumped(r#""z=" . null"#), "'z='");
 }
 
-// ==========================================================================
 // (iii) The refusals — each one a value this crate declines to invent.
-// ==========================================================================
 
 #[test]
 fn float_operand_widens() {
@@ -164,8 +158,8 @@ fn array_operand_widens() {
 
 #[test]
 fn compound_concat_assign_is_still_unproven() {
-    // `.=` lowers its rvalue to `Other` — a documented deferral (see `StmtKind`),
-    // pinned here so a later slice changes it deliberately rather than by accident.
+    // `.=` lowers its rvalue to `Other` (see `StmtKind`); this negative pin keeps
+    // unsupported compound assignment from being treated as plain concatenation.
     let src = "<?php\n$s = \"a\";\n$s .= \"b\";\n\\PHPStan\\dumpType($s);\n";
     assert_eq!(types(src), vec!["unknown"]);
 }
@@ -177,9 +171,7 @@ fn arithmetic_is_not_lowered() {
     assert_eq!(dumped("1 + 2"), "unknown");
 }
 
-// ==========================================================================
 // (iv) The oracle — the admitted casts, checked against the real engine.
-// ==========================================================================
 
 /// The operand spellings the cast admits, as PHP source. Each is concatenated onto
 /// `"<"` and `">"` so an empty result is still visible in the comparison.

@@ -1,7 +1,6 @@
-//! Tests for docblock association on declarations (ADR-0029): the `/** … */`
-//! trivium immediately preceding a function/method (only whitespace between,
-//! attributes included on the declaration side) is attached; a floating docblock
-//! separated by intervening code is not.
+//! PHP docblocks attach only to an immediately following declaration or
+//! statement when the gap is whitespace (ADR-0029, ADR-0073). Attributes belong
+//! to the declaration, and attached spans preserve the exact source slice.
 
 use steins_syntax::SourceTree;
 
@@ -23,8 +22,6 @@ fn method_adopts_immediately_preceding_docblock() {
 
 #[test]
 fn docblock_before_attributes_still_attaches() {
-    // The declaration span starts at the attribute list, so a docblock above the
-    // attribute is still separated only by whitespace.
     let src = "<?php\n/** @param int $n */\n#[SomeAttr]\nfunction f($n): void {}\n";
     let tree = SourceTree::parse(src);
     assert!(tree.functions()[0].docblock.as_deref().unwrap().contains("@param int $n"));
@@ -46,9 +43,7 @@ fn undocumented_function_has_no_docblock() {
 
 #[test]
 fn docblock_span_maps_text_back_to_the_file() {
-    // The transform engine (ADR-0034) relies on `docblock` being the exact source
-    // substring at `docblock_span`, so a tag's docblock-relative offset maps into
-    // the file by adding `docblock_span.start`.
+    // Transform offsets rely on `docblock_span` selecting the exact source (ADR-0034).
     let src = "<?php\n/** @param int $n */\nfunction f($n): void {}\n";
     let tree = SourceTree::parse(src);
     let f = &tree.functions()[0];
@@ -65,11 +60,8 @@ fn no_docblock_means_no_span() {
     assert!(tree.functions()[0].docblock_span.is_none());
 }
 
-// ---- Statement-level docblock adjacency (ADR-0073 inline `@var`) ----
-
 use steins_syntax::ScopeOwner;
 
-/// The trace of the first free-function scope in `tree`.
 fn fn_scope(tree: &SourceTree) -> &steins_syntax::Scope {
     tree.scopes()
         .iter()
@@ -96,7 +88,6 @@ fn a_comment_in_the_gap_breaks_statement_adjacency() {
 
 #[test]
 fn a_statement_in_the_gap_breaks_statement_adjacency() {
-    // The docblock leads `$x = 1;` — the SECOND statement adopts nothing.
     let src = "<?php\nfunction f(array $a): void {\n  /** @var array{a: int} $a */\n  $x = 1;\n  foo($a);\n}\n";
     let tree = SourceTree::parse(src);
     let scope = fn_scope(&tree);
@@ -106,8 +97,6 @@ fn a_statement_in_the_gap_breaks_statement_adjacency() {
 
 #[test]
 fn a_property_docblock_never_reaches_a_method_statement() {
-    // `public $x;` sits between the property docblock and the method body's
-    // first statement, so the whitespace-gap rule rejects the association.
     let src = "<?php\nclass C {\n  /** @var int $x */\n  public $x;\n  public function m(): void { foo(1); }\n}\n";
     let tree = SourceTree::parse(src);
     let scope = tree

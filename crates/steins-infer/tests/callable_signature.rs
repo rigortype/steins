@@ -28,9 +28,7 @@ fn param_count(src: &str) -> usize {
 const INT_TO_STRING: &str =
     "<?php /** @param callable(int): string $cb */ function takes(callable $cb): void {}\n";
 
-// ==========================================================================
 // 1. Parameter contravariance — both directions.
-// ==========================================================================
 
 #[test]
 fn param_narrower_than_contract_is_violation() {
@@ -54,9 +52,7 @@ fn param_wider_than_contract_is_ok() {
     assert_eq!(param_count(&src), 0, "int|string param accepts supplied int");
 }
 
-// ==========================================================================
 // 2. Return covariance — both directions.
-// ==========================================================================
 
 #[test]
 fn return_disjoint_from_contract_is_violation() {
@@ -81,9 +77,7 @@ fn return_narrower_than_contract_is_ok() {
     assert_eq!(param_count(&src), 0, "int return is narrower than int|string, fine");
 }
 
-// ==========================================================================
 // 3. Arity — a closure requiring more params than the contract supplies.
-// ==========================================================================
 
 #[test]
 fn closure_requiring_more_params_is_violation() {
@@ -109,9 +103,7 @@ fn closure_extra_optional_param_is_ok() {
     assert_eq!(param_count(&src), 0, "extra optional param is fine");
 }
 
-// ==========================================================================
 // 4. Silence matrix — every undecidable shape stays silent (zero-FP).
-// ==========================================================================
 
 #[test]
 fn bare_callable_contract_never_fires() {
@@ -162,9 +154,7 @@ fn byref_closure_param_is_silent() {
     assert_eq!(param_count(&src), 0, "by-ref param position is skipped");
 }
 
-// ==========================================================================
 // 5. First-class callables — judged only where a user target resolves uniquely.
-// ==========================================================================
 
 #[test]
 fn first_class_callable_to_user_fn_is_judged() {

@@ -27,14 +27,12 @@ fn assigned_value<'a>(tree: &'a SourceTree, var: &str) -> Option<&'a ArgValue> {
 fn closure_expression_lowers_to_closure_value_with_own_scope() {
     let src = "<?php\n$f = function () { return 1; };\n";
     let tree = SourceTree::parse(src);
-    // The rvalue is a Closure value naming an anonymous scope.
     match assigned_value(&tree, "f") {
         Some(ArgValue::Closure(ClosureRef::Anonymous { captures, .. })) => {
             assert!(captures.is_empty(), "no use() → no captures");
         }
         other => panic!("expected Closure value, got {other:?}"),
     }
-    // A closure scope was built for the body.
     assert_eq!(closure_scopes(&tree).len(), 1, "one closure scope");
 }
 
@@ -63,7 +61,6 @@ fn arrow_params_are_not_captures() {
         }
         other => panic!("expected Closure value, got {other:?}"),
     }
-    // The closure scope carries the typed param $w.
     let cs = closure_scopes(&tree);
     assert_eq!(cs.len(), 1);
     assert_eq!(cs[0].params.len(), 1);
@@ -97,7 +94,6 @@ fn by_ref_use_poisons_enclosing_and_closure_scope() {
     let cs = closure_scopes(&tree);
     assert_eq!(cs.len(), 1);
     assert!(cs[0].poisoned, "by-ref use poisons the closure's own scope");
-    // A by-ref capture is NOT recorded as a by-value capture name.
     match assigned_value(&tree, "f") {
         Some(ArgValue::Closure(ClosureRef::Anonymous { captures, .. })) => {
             assert!(captures.is_empty(), "by-ref use is not a by-value capture");
@@ -116,13 +112,12 @@ fn first_class_callable_lowers_to_function_name() {
         }
         other => panic!("expected first-class callable, got {other:?}"),
     }
-    // A first-class callable of a NAMED function does not create a closure scope.
     assert_eq!(closure_scopes(&tree).len(), 0);
 }
 
 #[test]
 fn method_first_class_callable_is_deferred_to_other() {
-    // $obj->m(...) and Foo::m(...) are deferred this slice → Other, no scope.
+    // $obj->m(...) and Foo::m(...) lower to Other with no scope.
     let src = "<?php\n$f = $obj->m(...);\n$g = Foo::m(...);\n";
     let tree = SourceTree::parse(src);
     assert!(matches!(assigned_value(&tree, "f"), Some(ArgValue::Other)));
@@ -131,7 +126,6 @@ fn method_first_class_callable_is_deferred_to_other() {
 
 #[test]
 fn closure_body_effect_and_throw_origins_are_captured() {
-    // The closure scope records its own effect (echo → output) and throw origins.
     let src = "<?php\n$f = function () { echo 1; throw new \\RuntimeException(); };\n";
     let tree = SourceTree::parse(src);
     let cs = closure_scopes(&tree);
@@ -151,7 +145,6 @@ fn nested_closures_each_get_a_scope() {
 fn closure_inside_function_body_gets_its_own_scope() {
     let src = "<?php\nfunction outer() { $f = fn () => 1; return $f; }\n";
     let tree = SourceTree::parse(src);
-    // Function scope + closure scope both present.
     assert!(tree.scopes().iter().any(|s| matches!(&s.owner, ScopeOwner::Function(n) if n == "outer")));
     assert_eq!(closure_scopes(&tree).len(), 1);
 }

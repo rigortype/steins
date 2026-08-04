@@ -14,7 +14,6 @@ fn lowers_functions_calls_and_strict() {
         f.params[0].ty,
         Some(NativeType { members: vec![TypeMember::Scalar(ScalarType::Int)], nullable: false })
     );
-    // The native scalar return type `: int` is lowered too.
     assert_eq!(
         f.ret,
         Some(NativeType { members: vec![TypeMember::Scalar(ScalarType::Int)], nullable: false })
@@ -38,7 +37,6 @@ fn parse_error_no_panic() {
 fn lowers_scopes_trace_and_poison() {
     use steins_syntax::StmtKind;
 
-    // Top-level scope + one function scope.
     let src = "<?php\nfunction price(): string { return \"abc\"; }\n$w = \"abc\";\nwidth($w);\n";
     let tree = SourceTree::parse(src);
     assert_eq!(tree.scopes().len(), 2, "top-level + price()");
@@ -198,7 +196,6 @@ fn recognizes_effect_with_string_literal_labels() {
         .expect("recognized");
     assert_eq!(e.labels, vec!["io".to_owned(), "nondet.time".to_owned()]);
 
-    // Qualified spelling and case-insensitivity.
     let e = envelope("<?php #[Steins\\Effect('io.fs.read')] function f(): void {}").expect("qualified");
     assert_eq!(e.labels, vec!["io.fs.read".to_owned()]);
 }
@@ -224,7 +221,6 @@ fn effect_with_non_literal_args_is_unrecognized() {
         envelope("<?php #[\\Steins\\Effect(Effects::IO)] function f(): void {}").is_none(),
         "class-constant arg → whole attribute ignored"
     );
-    // Concatenation and named args likewise.
     assert!(envelope("<?php #[\\Steins\\Effect('io' . '.fs')] function f(): void {}").is_none());
     assert!(envelope("<?php #[\\Steins\\Effect(label: 'io')] function f(): void {}").is_none());
     // A non-string literal (int) is also not a label.
@@ -236,7 +232,6 @@ fn pure_wins_over_effect_when_both_present() {
     let e = envelope("<?php #[\\Steins\\Pure]\n#[\\Steins\\Effect('io')] function f(): void {}")
         .expect("recognized");
     assert!(e.labels.is_empty(), "Pure (empty upper bound) wins the contradiction");
-    // Order-independent: Effect first, Pure second.
     let e = envelope("<?php #[\\Steins\\Effect('io')]\n#[\\Steins\\Pure] function f(): void {}")
         .expect("recognized");
     assert!(e.labels.is_empty());
@@ -350,7 +345,6 @@ fn method_bodies_become_method_scopes() {
         &method_scopes[0].owner,
         ScopeOwner::Method { class, method } if class == "Foo" && method == "go"
     ));
-    // A method scope is not a free-function scope.
     assert!(method_scopes[0].function_name.is_none());
 }
 
@@ -395,7 +389,7 @@ fn lowers_method_and_static_call_receivers() {
 #[test]
 fn nested_closure_bodies_are_not_scanned() {
     // The echo is inside a closure — a separate scope — so it is NOT an origin
-    // of the outer function (closures deferred this slice).
+    // of the outer function (closure bodies are not scanned).
     let src = "<?php function f(): void { $g = function () { echo 1; }; }";
     let tree = SourceTree::parse(src);
     let f = &tree.functions()[0];
@@ -415,7 +409,6 @@ fn comments_are_exposed_with_kind_span_and_text() {
     assert!(comments[0].text.contains("line one"));
     assert_eq!(comments[1].kind, CommentKind::Hash);
     assert_eq!(comments[2].kind, CommentKind::Block);
-    // The span resolves to the right line.
     assert_eq!(tree.position(comments[0].span.start).line, 2);
 }
 
@@ -630,7 +623,6 @@ fn trait_enters_the_class_like_index_as_a_name() {
     assert!(t.is_trait, "trait carries is_trait");
     assert!(!t.is_interface && !t.is_enum);
     assert_eq!(t.fqn, "app\\greet", "trait FQN is indexed lowercase");
-    // Names only — no member flattening in S1.
     assert!(t.methods.is_empty(), "trait members are not lowered in S1");
     assert!(!t.conditional, "a top-level namespaced trait is unconditional");
 }

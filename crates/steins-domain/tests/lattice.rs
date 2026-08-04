@@ -25,7 +25,6 @@ fn arb_scalar() -> impl Strategy<Value = Val> {
     ]
 }
 
-/// A fact together with witness values it must admit.
 fn arb_fact_with_witnesses() -> impl Strategy<Value = (Fact, Vec<Val>)> {
     prop::collection::vec(arb_scalar(), 1..14).prop_filter_map(
         "representable value sets only",

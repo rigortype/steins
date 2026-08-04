@@ -4,12 +4,9 @@
 //! When a binding descent imports a call-site `null` argument as a parameter's
 //! fact (`Singleton(null)`), an `instanceof` guard on that parameter must REFUTE
 //! it: `null instanceof T` is `false` for every `T` in PHP, so the then-branch is
-//! dead on that path. Before the value-side pre-check, `eval_instanceof` answered
-//! `Maybe` for a non-object-valued operand (no heap object → `member_instanceof`
-//! → `Maybe`), the then-branch walked LIVE with the null fact intact, and a
-//! `call.on-null` "proven null on this path" fired INSIDE the guard that proves
-//! the opposite — 3 live proof-layer false positives in the field (kimai ×2,
-//! firefly-iii ×1).
+//! dead on that path. Otherwise the then branch retains the null fact and can
+//! emit `call.on-null` inside a guard that proves the opposite: three measured
+//! field false positives (kimai ×2, firefly-iii ×1).
 //!
 //! The rule is a **value-side** verdict that precedes all class reasoning: if the
 //! operand's value-domain fact proves a non-object value (`null`/int/float/string/
@@ -34,12 +31,10 @@ fn ids(src: &str) -> Vec<String> {
     findings(src).into_iter().map(|d| d.id.to_owned()).collect()
 }
 
-// ==========================================================================
-// 1. The isolated repro cases (case4 / case5) — FP before, SILENT after.
-//    Descent imports the caller's `null` as the param fact; the `instanceof`
+// 1. Isolated FP regressions (case4/case5): descent imports the caller's `null`;
+//    the `instanceof`
 //    guard refutes it → then-branch dead → no `call.on-null`. Class resolution
 //    is NOT required (case4 uses an unresolvable class, case5 a defined one).
-// ==========================================================================
 
 #[test]
 fn case4_descent_null_unresolvable_class_is_silent() {
@@ -82,13 +77,11 @@ function caller5(): void {
     assert_eq!(n(src), 0, "null instanceof (defined) → No → then-branch dead → no call.on-null");
 }
 
-// ==========================================================================
 // 2. The kimai field shape: `mixed $value`, `instanceof \DateTimeInterface`
 //    (a BUILTIN interface), a separate caller passing null. Plus the
 //    non-monotonicity pin: the same class WITHOUT the null-passing caller must
 //    produce identical (zero) findings — adding the caller must not flip a
 //    verdict on the guarded line.
-// ==========================================================================
 
 #[test]
 fn kimai_shape_mixed_builtin_interface_null_caller_is_silent() {
@@ -129,12 +122,10 @@ class DateStringFormatter {
     assert_eq!(n(src), 0, "class alone → zero; identical to the with-null-caller shape");
 }
 
-// ==========================================================================
 // 3. The firefly-iii field shape: `?Carbon`-style nullable class param.
 //    (a) caller passes null → guarded call silent.
 //    (b) caller passes a REAL instance → the guarded call still resolves/checks
 //        (no lost precision — the heap-object path is untouched).
-// ==========================================================================
 
 #[test]
 fn firefly_shape_nullable_class_null_caller_is_silent() {
@@ -186,9 +177,7 @@ function firefly_caller2(): void {
     );
 }
 
-// ==========================================================================
 // 4. Boundary pins from the survey.
-// ==========================================================================
 
 #[test]
 fn boundary_eq_null_first_guard_stays_clean() {
@@ -235,11 +224,9 @@ function caller7(): void {
     assert_eq!(n(src), 0, "instanceof, no null-check sibling → value-side No → clean");
 }
 
-// ==========================================================================
 // 5. Value-side matrix: every proven non-object operand → instanceof No (dead
 //    then-branch, no finding, ELSE branch stays live); a genuine could-be-object
 //    operand → Maybe (both branches live). `width(int)` fires on a bad arg.
-// ==========================================================================
 
 const HDR: &str = "<?php declare(strict_types=1);
 function width(int $w): int { return $w; }
@@ -296,10 +283,8 @@ function handle(?Thing2 $x): void {
     assert_eq!(n(src), 0, "un-narrowed ?Thing → Maybe → both branches live → no proof finding");
 }
 
-// ==========================================================================
 // 6. TRUE-positive retention: the value-side rule silences ONLY the genuinely
 //    dead branch — a real null dereference must still fire.
-// ==========================================================================
 
 #[test]
 fn retention_unguarded_null_deref_still_fires() {

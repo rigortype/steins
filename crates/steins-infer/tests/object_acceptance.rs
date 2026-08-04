@@ -1,15 +1,13 @@
-//! ADR-0043 stage 3 — native object acceptance (definite-No opening).
+//! Native object acceptance against scalar/union/object parameter and return
+//! types via the trinary is-a oracle (ADR-0043). Only a **definite No** (every
+//! union member rejects the value's exact class) fires; any `Unknown` stays
+//! silent.
 //!
-//! The acceptance matrix for object values against native (scalar/union/object)
-//! parameter and return types, riding the trinary is-a oracle. Only a **definite
-//! No** (every union member provenly rejects the value's exact class) fires; any
-//! `Unknown` (incomplete hierarchy, unresolvable class) stays silent.
-//!
-//! The object↔scalar coercion cells were verified against PHP 8.5.8 (`php -r`):
-//! - a `__toString` object *coerces* to a `string` parameter in **coercive** mode
-//!   (no error) but `TypeError`s in **strict** mode; a plain object errors in both.
-//! - no object (even `__toString`) ever coerces to `int`/`float`/`bool`.
-//! - an enum case is an **object**, never its backing scalar.
+//! Object↔scalar coercion cells verified against PHP 8.5.8:
+//! - a `__toString` object coerces to `string` in coercive mode but `TypeError`s
+//!   in strict mode; a plain object errors in both.
+//! - no object (even `__toString`) coerces to `int`/`float`/`bool`.
+//! - an enum case is an object, never its backing scalar.
 
 use steins_infer::{Diagnostic, check};
 use steins_syntax::SourceTree;
@@ -28,9 +26,7 @@ fn ids(src: &str) -> Vec<String> {
     findings(src).into_iter().map(|d| d.id.to_owned()).collect()
 }
 
-// ==========================================================================
 // 1. Object value vs object (Instance) member — is-a Yes / No / Unknown.
-// ==========================================================================
 
 #[test]
 fn object_vs_instance_definite_no() {
@@ -88,9 +84,7 @@ f(new Dog());";
     assert_eq!(n(src), 0, "Dog is-a Animal (Yes) → silent");
 }
 
-// ==========================================================================
 // 2. Object value vs scalar member (object → scalar rejection).
-// ==========================================================================
 
 #[test]
 fn object_vs_int_rejected_both_modes() {
@@ -123,9 +117,7 @@ f(new Box());";
     assert_eq!(n(coercive), 0, "object vs string coercive → silent (may __toString)");
 }
 
-// ==========================================================================
 // 3. Scalar value vs object (Instance) member — the reverse rejection.
-// ==========================================================================
 
 #[test]
 fn scalar_vs_enum_instance_rejected() {
@@ -148,9 +140,7 @@ function f(int|Foo $v): void {}
     assert_eq!(n(&format!("{base}f(\"abc\");")), 1, "no member accepts abc (strict)");
 }
 
-// ==========================================================================
 // 4. Enum cases are objects, not their backing scalar.
-// ==========================================================================
 
 #[test]
 fn enum_case_is_object_not_backing_scalar() {
@@ -180,9 +170,7 @@ f(Dir::N);";
     assert_eq!(n(src), 1, "unit enum case (object) vs int → flagged");
 }
 
-// ==========================================================================
 // 5. Class constants — literal resolution and hierarchy walk.
-// ==========================================================================
 
 #[test]
 fn class_const_int_vs_string_rejected() {
@@ -249,9 +237,7 @@ f(Foo::class);";
     assert_eq!(ids(bad), vec!["type.argument-mismatch"], "::class string vs int param");
 }
 
-// ==========================================================================
 // 6. Nullable interplay (preserve existing logic; null-vs-object stays silent).
-// ==========================================================================
 
 #[test]
 fn nullable_object_param_accepts_matching_and_rejects_foreign() {
@@ -275,9 +261,7 @@ f(null);";
     assert_eq!(n(src), 0, "null-vs-object stays silent");
 }
 
-// ==========================================================================
 // 7. Return path.
-// ==========================================================================
 
 #[test]
 fn return_object_definite_no() {
@@ -305,9 +289,7 @@ function make(): string { return Status::Active; }";
     assert_eq!(ids(src), vec!["type.return-mismatch"], "enum case object returned as string");
 }
 
-// ==========================================================================
 // 8. Variable bound to a proven object (ADR-0036 heap).
-// ==========================================================================
 
 #[test]
 fn var_bound_object_rejected() {
@@ -320,9 +302,7 @@ f($r);";
     assert_eq!(ids(src), vec!["type.argument-mismatch"], "$r holds Robot, rejected by User");
 }
 
-// ==========================================================================
 // 9. Negative — Unknown / unresolved stays silent everywhere.
-// ==========================================================================
 
 #[test]
 fn unresolved_class_new_silent() {
@@ -356,9 +336,7 @@ f(new Uses());";
     assert_eq!(n(src), 0, "external parent → incomplete hierarchy → silent");
 }
 
-// ==========================================================================
 // 10. Diagnostic rendering — object types show source-declared casing.
-// ==========================================================================
 
 #[test]
 fn message_renders_object_union_with_declared_casing() {
@@ -448,13 +426,11 @@ f('active');";
     );
 }
 
-// ==========================================================================
 // 11. Native intersection types (`A&B&…`, ADR-0043 conjunctive member).
 //     An object satisfies the intersection only when it is-a EVERY conjunct;
 //     it is a definite No the moment the oracle proves `IsA::No` against ANY
 //     one conjunct. Any conjunct that stays Unknown (with no proven No) keeps
 //     the whole intersection silent.
-// ==========================================================================
 
 #[test]
 fn intersection_missing_one_conjunct_rejected() {

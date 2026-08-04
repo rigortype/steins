@@ -39,10 +39,8 @@ use steins_infer::{
 };
 use steins_syntax::{ArgValue, SourceTree};
 
-// ---------------------------------------------------------------------------
 // Mocks. There is no PHP in a unit test, so a live engine is a `Folder` that
 // answers `builtin_return_fact` (and, for the absence legs, the boot surface).
-// ---------------------------------------------------------------------------
 
 /// An engine that reflects a return type for the names it was given and is silent
 /// for every other name — the shape of a real PHP whose extension set does not
@@ -155,9 +153,7 @@ fn dump_under_target(target: Option<PhpTarget>) -> String {
     dump_call_under_target("strstr($s, $s)", target)
 }
 
-// ---------------------------------------------------------------------------
 // The acceptance criterion: `--no-php` gains declared types.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn str_repeat_of_variables_dumps_string_under_no_php() {
@@ -197,13 +193,11 @@ fn the_floor_covers_the_scalar_bases_and_nothing_else() {
     assert_eq!(probe("sodium_add($s, $s)"), "dumped type: unknown");
 }
 
-// ---------------------------------------------------------------------------
 // Issue #79: the rows richer than an envelope.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_t_false_row_renders_as_the_contract_lane_spells_it() {
-    // The slice's acceptance criterion. `strstr` is `string|false` in functionMap —
+    // Issue #79's acceptance criterion. `strstr` is `string|false` in functionMap —
     // a row #73 counted and dropped, because `envelope_fact` had nowhere to put the
     // `false` arm. It now seeds the declared-return ARM lane, so the dump surface
     // spells the union the way `spell_arms` spells every other contract arm list,
@@ -227,7 +221,7 @@ fn a_t_false_row_survives_the_assignment_rung_and_the_declared_surface() {
     // surfaces read it from there. The four forms must agree on the type: the two
     // argument-position forms (`dumpType(f(…))`, `dumpPhpDocType(f(…))`) and the two
     // assigned forms. Each is its own snippet because an intervening unresolved call
-    // sweeps the scope's carriers — long-standing behavior, not this slice's.
+    // sweeps the scope's carriers.
     let dumped = |src: &str| {
         let tree = SourceTree::parse(src);
         let msgs: Vec<String> = check(&tree, &[], "t.php")
@@ -258,7 +252,7 @@ fn a_t_false_row_survives_the_assignment_rung_and_the_declared_surface() {
 
 #[test]
 fn an_engine_answer_wins_over_a_rich_row_too() {
-    // Engine-wins, re-pinned on a row the #73 slice could not carry. The engine
+    // Engine-wins, re-pinned on a row issue #73 could not carry. The engine
     // reflects a bare `string` for `strstr` — deliberately NOT the catalog's
     // `string|false` — and its answer stands, marker-free.
     let src = "<?php\nfunction f(string $s): void { \\PHPStan\\dumpType(strstr($s, $s)); }\n";
@@ -303,9 +297,7 @@ fn a_project_function_shadows_the_floor() {
     assert_eq!(no_php_dumps(src), vec!["dumped type: unknown".to_owned()]);
 }
 
-// ---------------------------------------------------------------------------
 // Which rung answered: the engine wins wherever it speaks.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn an_engine_answer_wins_over_the_floor() {
@@ -339,9 +331,7 @@ fn the_floor_fills_the_engines_silence_per_name_not_per_run() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The proof-layer firewall.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_floor_seeds_asserted_and_never_verified() {
@@ -396,7 +386,7 @@ fn a_floor_fact_premises_a_contract_finding_but_never_a_proof_one() {
 
 #[test]
 fn a_rich_floor_row_never_premises_a_proof_finding() {
-    // The #79 extension of the pin above, and the regression this slice must not
+    // The #79 extension of the pin above, and the regression #79 must not
     // introduce. A `string|false` row is a strictly stronger premise than an
     // envelope — it says a call *can* return `false`, which is exactly the shape a
     // proof-layer consumer would want to reason from — so the firewall is asserted
@@ -458,9 +448,7 @@ fn a_rich_floor_row_behaves_exactly_like_a_declared_one_under_guards() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The absence family: not a consumer, and not suppressed.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_absence_family_stays_silent_under_no_php() {
@@ -511,9 +499,7 @@ fn a_floor_row_is_not_an_existence_vouch() {
     assert_eq!(count(uncovered, &mut engine), 1);
 }
 
-// ---------------------------------------------------------------------------
 // Precedence against the rungs above.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_more_precise_rung_still_wins() {
@@ -527,7 +513,6 @@ fn a_more_precise_rung_still_wins() {
     assert_eq!(dumps_with(src, &mut engine), vec!["dumped type: bool".to_owned()]);
 }
 
-// ---------------------------------------------------------------------------
 // ADR-0071: the array-vocabulary rows.
 //
 // The 388-row bucket #73 and #79 both counted and dropped. Nothing about the
@@ -536,12 +521,11 @@ fn a_more_precise_rung_still_wins() {
 // — so these fixtures pin that a builtin row travels those seams exactly as a
 // project function's `@return array{…}` does, and that the seeded lane is the one
 // the arms denote rather than whichever happens to render the same text.
-// ---------------------------------------------------------------------------
 
 /// The dumped type of `$r` (or of an expression over it) after `bind`, under the
 /// sound subset. Each probe is its own snippet: an intervening unresolved call
 /// sweeps the scope's carriers, so two dumps in one body would not both read the
-/// binding — long-standing behavior, not this slice's.
+/// binding.
 fn after(bind: &str, expr: &str) -> String {
     let src = format!(
         "<?php\nfunction f(string $s, int $n): void {{ {bind} \\PHPStan\\dumpType({expr}); }}\n"
@@ -702,8 +686,7 @@ fn the_version_gate_declines_below_a_change_boundary() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The object slice: the class rows.
+// The object vocabulary: the class rows.
 //
 // The other half of the 620-row bucket, and the one that needed no new relation
 // at all — `subsumes_class` is reflexive, so a row naming the class the engine
@@ -712,7 +695,6 @@ fn the_version_gate_declines_below_a_change_boundary() {
 // where before it could only appear inside an array row's element type. These
 // fixtures pin the two things that follow: the arm lane carries it, and the value
 // lane stays empty.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_class_row_reaches_the_declared_surface_and_the_arm_lane() {
@@ -818,8 +800,8 @@ fn a_class_row_mixed_with_a_non_class_arm_is_inert_on_the_dump_surface() {
     // faithful spelling and the surface falls to honest unknown rather than guessing.
     //
     // Inert on the RENDERER, not dropped from the lane: these rows countersigned and
-    // they seed their arms exactly as the rows above do. The same posture the array
-    // slice recorded for the two rows `spell_arms` refuses to spell back.
+    // they seed their arms exactly as the rows above do, matching the array rows
+    // that `spell_arms` refuses to spell back.
     assert_eq!(probe("simplexml_load_string($s)"), "dumped type: unknown");
     assert_eq!(probe("stream_bucket_new($h, $s)"), "dumped type: unknown");
     // `curl_init` is the same shape wearing PHPStan's own spelling of a plain union:
@@ -830,7 +812,7 @@ fn a_class_row_mixed_with_a_non_class_arm_is_inert_on_the_dump_surface() {
 
 #[test]
 fn a_class_row_raises_nothing_anywhere_it_is_consumed() {
-    // The consumer audit for this slice, asserted rather than argued. Only two
+    // The consumer audit is asserted rather than argued. Only two
     // places read the FQN out of a class arm: the dump renderer (cosmetic) and
     // `phpdoc.undefined-method`. Everything else — instanceof subtraction through
     // `subtrahend_covers`, the runtime-predicate and shape subtractors, the argument
@@ -871,8 +853,8 @@ fn a_class_row_raises_nothing_anywhere_it_is_consumed() {
 
 #[test]
 fn a_class_floor_row_is_not_an_existence_vouch_either() {
-    // The absence family's posture is UNCHANGED by this slice, and the class rows
-    // are the population most likely to tempt a reader into thinking otherwise — a
+    // Class rows do NOT change the absence family's posture, and they are the
+    // population most likely to tempt a reader into thinking otherwise — a
     // row naming `GMP` still says nothing about whether the ext is loaded, because
     // existence is a boot-surface fact and this table answers only about return
     // types. Same assertion as `a_floor_row_is_not_an_existence_vouch`, on a row

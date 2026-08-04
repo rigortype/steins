@@ -9,12 +9,12 @@
 //! acceptance judgment (`steins-contract::admits_*`), refusal assembly, and the
 //! edit mechanics — none of which need the inference internals.
 //!
-//! Only **free-function** targets are swept: v1 promotion scope is free functions
-//! (method call-site resolution across receivers is a materially larger surface,
-//! deferred with design). A candidate is safe to promote only when *every* call
-//! that could reach it is accounted for; the sweep therefore also records the
-//! project-wide obstacles that make "all callers" unknowable — dynamic calls,
-//! first-class/string references, and unresolved same-name calls.
+//! This sweep covers **free-function** targets; method call-site resolution across
+//! receivers is the parallel [`sweep_methods`] below. A candidate is safe to
+//! promote only when *every* call that could reach it is accounted for; the sweep
+//! therefore also records the project-wide obstacles that make "all callers"
+//! unknowable — dynamic calls, first-class/string references, and unresolved
+//! same-name calls.
 
 use std::collections::{HashMap, HashSet};
 
@@ -40,15 +40,14 @@ pub struct ObservedArg {
     pub value: ArgValue,
 }
 
-/// A recorded obstacle *site* in a sweep (ADR-0047 §6 / Slice B): a file path plus
-/// a source position. Mirrors the `steins_edit::transform::SiteRef` shape used for
-/// dynamism obstacles (`steins-edit/src/obstacles.rs`) minus its human `label` —
-/// the label is a rendering concern the planner owns, and region attribution
-/// (ADR-0047 §2, a later slice) keys purely on `path`; `line`/`column` only spell a
-/// better message. Carrying the site (instead of a bare boolean or bare name) is
-/// what lets the partition planner attribute each obstacle to its declaring region.
-/// With one region a site list degenerates to "present / absent" — exactly what the
-/// old `any_dynamic_*` boolean carried, so this slice is behavior-preserving.
+/// A recorded obstacle *site* in a sweep (ADR-0047 §6): a file path plus a source
+/// position. Mirrors the `steins_edit::transform::SiteRef` shape used for dynamism
+/// obstacles (`steins-edit/src/obstacles.rs`) minus its human `label` — the label
+/// is a rendering concern the planner owns, and region attribution (ADR-0047 §2)
+/// keys purely on `path`; `line`/`column` only spell a better message. Carrying
+/// the site (instead of a bare boolean or bare name) is what lets the partition
+/// planner attribute each obstacle to its declaring region. With one region a site
+/// list is used only as "present / absent".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SweepSite {
     pub path: String,
@@ -80,16 +79,16 @@ pub struct FreeFnSweep {
     pub targets: HashMap<String, TargetSweep>,
     /// The sites of dynamic (`$fn()`) or otherwise unrepresentable calls. Such a
     /// call could target *any* free function, so while the list is non-empty every
-    /// candidate is tainted (`dynamic-call-present`). Conservative and sound. A
-    /// **non-empty** list is the old `any_dynamic_call == true`; an empty one is
-    /// `false` — region attribution (ADR-0047 §2) is a later slice.
+    /// candidate is tainted (`dynamic-call-present`). Conservative and sound: a
+    /// non-empty list taints every candidate, an empty one taints none. Region
+    /// attribution of the sites (ADR-0047 §2) is not yet consumed.
     pub dynamic_call_sites: Vec<SweepSite>,
     /// Lowercased names (every qualified spelling seen, plus its last segment) that
     /// appear as string or first-class-callable *values* → the sites at which they
     /// so appear — the `function-referenced-as-value` trigger. A candidate whose
     /// FQN or simple name is **present as a key** cannot be promoted (a
-    /// `call_user_func`-style caller is invisible to call resolution). Key-presence
-    /// is the old set membership; the site list is the Slice B carriage.
+    /// `call_user_func`-style caller is invisible to call resolution). Key presence
+    /// is the taint predicate; the site list preserves where the taint arose.
     pub value_referenced_names: HashMap<String, Vec<SweepSite>>,
     /// Lowercased simple names of function-callee calls that did **not** resolve to
     /// a unique user function (ambiguous / builtin-shadowed / unknown) → the sites
@@ -264,8 +263,8 @@ fn insert_name_forms(raw: &str, site: &SweepSite, map: &mut HashMap<String, Vec<
 }
 
 /// Record `site` under `name` in a name→sites taint map (ADR-0047 §6 carriage):
-/// key-presence preserves the old set-membership semantics; the appended site is
-/// what a later slice region-attributes.
+/// key presence is the taint predicate; the appended site records where the taint
+/// arose, for region attribution (ADR-0047 §2) and better messages.
 fn push_name(map: &mut HashMap<String, Vec<SweepSite>>, name: String, site: &SweepSite) {
     map.entry(name).or_default().push(site.clone());
 }
@@ -309,12 +308,12 @@ fn callable_arg_is_opaque(v: &ArgValue) -> bool {
 // *method name* project-wide — the conservative soundness rule (a method M is
 // enumerable only if EVERY call that could reach M is resolved).
 //
-// Precision deliberately deferred (soundness-first, ADR-0043 §6): a `$var->m()`
-// receiver is resolved only when the sweep can prove `$var`'s exact class, which
-// (having no per-scope object heap here) it never can — so every `$var->m()`
-// taints its method name. Enclosing-class-aware `$this->`/`self::`/`parent::` and
-// explicit `Foo::`/`new Foo()->` resolution IS performed, so private/final methods
-// reachable only through those forms still enumerate precisely.
+// Soundness-first precision limit (ADR-0043 §6): a `$var->m()` receiver resolves
+// only when the sweep can prove `$var`'s exact class. The sweep has no per-scope
+// object heap, so every `$var->m()` taints its method name. Enclosing-class-aware
+// `$this->`/`self::`/`parent::` and explicit `Foo::`/`new Foo()->` resolution is
+// precise, so private/final methods reachable only through those forms remain
+// enumerable.
 // ===========================================================================
 
 /// A method target key: `(class_fqn, method_name)`, both ASCII-lowercased — the
@@ -349,8 +348,8 @@ pub struct MethodSweep {
     /// The sites of dynamic method calls (`$o->$m()`, `$o::{$m}()`, or any
     /// [`Callee::Dynamic`]) — each could target *any* method, so while the list is
     /// non-empty every candidate is tainted (the `dynamic-call-present` refusal).
-    /// Conservative and sound. A **non-empty** list is the old
-    /// `any_dynamic_method == true`.
+    /// Conservative and sound: a non-empty list taints every method candidate, an
+    /// empty one taints none.
     pub dynamic_method_sites: Vec<SweepSite>,
     /// Lowercased method names that appear in a method call the sweep could NOT
     /// resolve to a unique target (an unknown-class `$var->m()`, a non-final
@@ -504,9 +503,8 @@ fn resolve_one_method_call(
         }
         None => {
             // Unresolved to a unique target → taint the method name project-wide.
-            // The first site recorded (source order) stays the representative the
-            // `resolution-ambiguous` refusal names — byte-identical to the old
-            // `or_insert` single-site behavior.
+            // The first site recorded (source order) is the representative the
+            // `resolution-ambiguous` refusal names.
             let p = tree.position(call.span.start);
             out.unresolved_method_names
                 .entry(method_name.to_ascii_lowercase())
@@ -636,8 +634,8 @@ fn overrides_ancestor(cx: &Cx, class_fqn: &str, method: &str) -> AncestorVerdict
 /// method at all, so it cannot be added to `set`; left undetected, it would be a
 /// caller invisible to *every* method of whatever name `$var` resolves to at
 /// runtime (issue #6). Context-sensitively tracking what the variable might hold
-/// is out of scope (v1 posture, ADR-0041/0046): instead this mirrors the existing
-/// `$o->$m()` (`Callee::Dynamic`) handling and sets `any_dynamic` — the broadest,
+/// is out of scope (ADR-0041/0046): instead this mirrors the existing `$o->$m()`
+/// (`Callee::Dynamic`) handling and records a dynamic site — the broadest,
 /// conservative fallback that taints every method project-wide, exactly like an
 /// unresolvable dynamic method-call selector.
 fn collect_method_value_names(

@@ -14,8 +14,8 @@
 //!   identity `(class_fqn, method)` and prove against [`sweep_methods`], subject to
 //!   the same ADR-0041 §1 eligibility split as method promotion (a non-eligible
 //!   method refuses `method-inheritance`; a magic method refuses `magic-method`).
-//!   Free-function planning is byte-identical to before this extension — the two
-//!   sweeps are independent, and every existing transform test passes unchanged.
+//!   The free-function and method sweeps are independent, so a method candidate's
+//!   verdict never perturbs a free-function one.
 //! - **Literal-only proofs**: a non-literal call-site argument (`@param`) or a
 //!   non-literal return (`@return`) refuses rather than guesses. The
 //!   abstract-fact portion of a mismatch (a typed `$var` with no literal value)
@@ -120,10 +120,10 @@ impl Transform for PhpdocHonesty {
 /// *every* candidate refuses while one remains.
 ///
 /// `partitions` is the region map (ADR-0047 §6), `None` for the single-region
-/// identity. **Slice A wires it through but does not consume it**: no honesty
-/// decision reads the map yet, so the plan is byte-identical whether it is `None`,
-/// an identity [`single_region`](crate::PartitionMap::single_region) map, or a
-/// fully-declared map.
+/// identity. No honesty decision reads the map: the plan is identical whether it
+/// is `None`, an identity [`single_region`](crate::PartitionMap::single_region)
+/// map, or a fully-declared map. The parameter reserves the seam for scoped
+/// enumeration (ADR-0047 §2) without changing any verdict.
 #[must_use]
 pub fn plan_phpdoc_honesty(
     db: &dyn Db,
@@ -131,7 +131,7 @@ pub fn plan_phpdoc_honesty(
     vouches: &VouchSet,
     partitions: Option<&crate::regions::PartitionMap>,
 ) -> TransformReport {
-    // ADR-0047 Slice A: received, deliberately not consumed (zero behavior change).
+    // The region map is accepted but not consumed: no honesty verdict reads it.
     let _ = partitions;
     let sweep = sweep_free_functions(db, project);
     // The class-world reverse sweep (ADR-0043 §6): method targets, taints, and the
@@ -234,8 +234,8 @@ fn plan_params(
         // value that the parameter accepts by native-nullable / `= null` default
         // is not a violation (mirrors `check_phpdoc_param`).
         let matches = |p: usize| if param.variadic { p >= idx } else { p == idx };
-        // ADR-0043 stage 1: an object-bearing native type gives no native-nullable
-        // signal (it lowered to `None` before ADR-0043); only scalar-value types do.
+        // An object-bearing native type gives no native-nullable signal (only
+        // scalar-value types carry one), so it never proves a `null` argument safe.
         let null_ok = param.has_null_default
             || param.ty.as_ref().is_some_and(|t| t.nullable && !t.has_instance());
         let mut lie = false;
@@ -327,9 +327,8 @@ fn decide_param(
 
     // Never contradict an existing native hint (ADR-0041): if the native type does
     // not admit the proven join, that is a different disease (human eyes).
-    // ADR-0043 stage 1: an object-bearing native type is out of the native-guard's
-    // scalar domain (it lowered to `None` before ADR-0043), so skip it — reproducing
-    // the pre-ADR-0043 `None`-typed behavior exactly.
+    // An object-bearing native type is outside the native-guard's scalar domain, so
+    // skip it — only scalar-value hints constrain the docblock rewrite.
     if let Some(nt) = param.ty.as_ref().filter(|t| !t.has_instance()) {
         native_guard(nt, &vals, &param.name)?;
     }
@@ -427,8 +426,8 @@ fn decide_return(
     }
     dedup(&mut vals);
 
-    // ADR-0043 stage 1: an object-bearing native return type is out of the
-    // native-guard's scalar domain — skip it (pre-ADR-0043 `None`-typed behavior).
+    // An object-bearing native return type is outside the native-guard's scalar
+    // domain — skip it; only scalar-value returns constrain the rewrite.
     if let Some(nt) = ret.filter(|t| !t.has_instance()) {
         native_guard(nt, &vals, "return")?;
     }

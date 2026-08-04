@@ -27,11 +27,9 @@
 //! which therefore mints nothing at run time (issue #36) — instead contributes an
 //! index edge; it is never a dam site.)
 //!
-//! **S1 groundwork: this fact is carried and tested, but consumed by nothing.**
-//! The existence ids that read it (`call.undefined-function`, `class.undefined`,
-//! `call.undefined-method`'s homonym leg) land in later stages. The vouch valve
-//! (ADR-0046) and checker-side region scoping (ADR-0047 §9) are deferred with the
-//! consuming stages; v1 is whole-universe.
+//! The existence ids read this fact (`call.undefined-function`, `class.undefined`,
+//! `call.undefined-method`'s homonym leg). The vouch valve (ADR-0046) and
+//! checker-side region scoping (ADR-0047 §9) are deferred; v1 is whole-universe.
 
 use std::collections::HashSet;
 
@@ -63,7 +61,7 @@ pub struct DamSite {
 }
 
 /// The whole-universe dam fact for one run (ADR-0049 §2): every dam site, or none.
-/// A *query answer* recomputed per run (ADR-0048); consumed by nothing in S1.
+/// A *query answer* recomputed per run (ADR-0048).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DamFacts {
     sites: Vec<DamSite>,
@@ -90,8 +88,7 @@ impl DamFacts {
         self.sites.len()
     }
 
-    /// Whether there are no dam sites (alias of [`Self::is_clear`], for the
-    /// `is_empty`/`len` clippy pairing).
+    /// Whether there are no dam sites (alias of [`Self::is_clear`]).
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.sites.is_empty()

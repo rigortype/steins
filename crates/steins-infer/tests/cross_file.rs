@@ -32,8 +32,6 @@ fn only(files: &[(&str, &str)]) -> Diagnostic {
 
 #[test]
 fn cross_file_function_call_flagged() {
-    // render() is defined in lib.php; the bad literal call is in main.php. The
-    // finding exists only because both files are one project.
     let d = only(&[
         ("main.php", "<?php\nrender(\"abc\");\n"),
         ("lib.php", "<?php\nfunction render(int $w): int { return $w; }\n"),
@@ -48,7 +46,6 @@ fn cross_file_function_call_flagged() {
 
 #[test]
 fn namespaced_function_resolves_within_namespace() {
-    // App\greet is defined and called unqualified inside namespace App.
     let d = only(&[
         ("lib.php", "<?php\nnamespace App;\nfunction greet(int $n): int { return $n; }\n"),
         ("main.php", "<?php\nnamespace App;\ngreet(\"abc\");\n"),
@@ -105,8 +102,6 @@ fn duplicate_fqn_is_silent() {
 
 #[test]
 fn cross_file_extends_chain_constructor_flagged() {
-    // Sub (sub.php) extends Base (base.php); `new Sub("abc")` runs the inherited
-    // Base::__construct(int), resolved across two files.
     let d = only(&[
         ("base.php", "<?php\nclass Base { public function __construct(int $w) {} }\n"),
         ("sub.php", "<?php\nclass Sub extends Base {}\n"),
@@ -131,8 +126,6 @@ fn cross_file_exact_receiver_method_flagged() {
 
 #[test]
 fn use_import_class_resolution_flagged() {
-    // `use App\Models\User;` binds User; `new User("abc")` resolves to the
-    // imported FQN and checks its cross-file constructor.
     let d = only(&[
         (
             "user.php",
@@ -185,8 +178,6 @@ fn cross_file_effect_via_provenance_names_the_other_file() {
 
 #[test]
 fn cross_file_const_fn_propagates() {
-    // answer() (lib.php) is a constant function returning "abc"; width(answer())
-    // in main.php resolves it cross-file, then flags "abc" into int $w.
     let d = only(&[
         ("lib.php", "<?php\nfunction answer(): string { return \"abc\"; }\n"),
         ("main.php", "<?php\nfunction width(int $w): int { return $w; }\nwidth(answer());\n"),

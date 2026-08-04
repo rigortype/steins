@@ -24,34 +24,29 @@ fn throw_liskov(src: &str) -> Vec<Diagnostic> {
 
 #[test]
 fn impure_impl_of_pure_interface_fires() {
-    // Interface declares the method #[\Steins\Pure]; the implementation echoes.
     let src = "<?php\ninterface Clock {\n    #[\\Steins\\Pure]\n    public function now(): int;\n}\nclass EchoClock implements Clock {\n    public function now(): int { echo \"tick\"; return 1; }\n}\n";
     let ds = effect_liskov(src);
     assert_eq!(ds.len(), 1, "got: {ds:#?}");
     assert!(ds[0].message.contains("output"), "{}", ds[0].message);
     assert!(ds[0].message.contains("Clock::now()"), "names the abstraction: {}", ds[0].message);
     assert!(ds[0].message.contains("#[\\Steins\\Pure]"), "{}", ds[0].message);
-    // Reported at the implementation site.
     assert_eq!(ds[0].line, 7);
 }
 
 #[test]
 fn purer_impl_of_pure_interface_is_silent() {
-    // A pure implementation of a Pure interface method is always legal.
     let src = "<?php\ninterface Clock {\n    #[\\Steins\\Pure]\n    public function now(): int;\n}\nclass FrozenClock implements Clock {\n    public function now(): int { return 42; }\n}\n";
     assert_eq!(effect_liskov(src).len(), 0, "purer impl is legal");
 }
 
 #[test]
 fn impl_within_effect_envelope_is_silent() {
-    // Interface allows `io`; the impl's file read (io.fs.read) is subsumed.
     let src = "<?php\ninterface Store {\n    #[\\Steins\\Effect('io')]\n    public function load(string $p): string;\n}\nclass FileStore implements Store {\n    public function load(string $p): string { return file_get_contents($p); }\n}\n";
     assert_eq!(effect_liskov(src).len(), 0, "io.fs.read is within the io envelope");
 }
 
 #[test]
 fn impl_exceeding_effect_envelope_fires() {
-    // Interface allows only `nondet`; the impl writes a file (io.fs.write) — exceeds.
     let src = "<?php\ninterface Gen {\n    #[\\Steins\\Effect('nondet')]\n    public function make(): void;\n}\nclass FileGen implements Gen {\n    public function make(): void { file_put_contents(\"/x\", \"y\"); }\n}\n";
     let ds = effect_liskov(src);
     assert_eq!(ds.len(), 1, "got: {ds:#?}");
@@ -95,7 +90,6 @@ fn interface_throws_widened_implementation_fires() {
 
 #[test]
 fn interface_throws_narrower_implementation_is_silent() {
-    // The impl declares a SUBCLASS of the interface's declared throw — narrower, OK.
     let src = "<?php\ninterface Repo {\n    /** @throws \\RuntimeException */\n    public function find(): void;\n}\nclass DbRepo implements Repo {\n    /** @throws \\OutOfBoundsException */\n    public function find(): void { throw new \\OutOfBoundsException(); }\n}\n";
     assert_eq!(throw_liskov(src).len(), 0, "OutOfBoundsException <: RuntimeException — narrower");
 }

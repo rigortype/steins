@@ -53,9 +53,7 @@ fn dump_after(body: &str) -> String {
     one_type(&format!("<?php\nfunction f(bool $b): void {{ {body} \\PHPStan\\dumpType($s); }}\n"))
 }
 
-// ---------------------------------------------------------------------------
 // The positive half: the three measured blockers
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_string_fact_survives_a_by_value_builtin() {
@@ -212,9 +210,7 @@ fn an_inline_var_cast_outlives_the_slice_like_a_param_would() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The negative half: every reason the gate refuses
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_by_ref_builtin_position_still_invalidates() {
@@ -284,7 +280,7 @@ fn a_project_function_answers_from_its_declared_parameter() {
                   function f(): void { $s = 'abc'; g($s); \\PHPStan\\dumpType($s); }\n";
     assert_eq!(one_type(by_ref), "dumped type: unknown");
 
-    // A variadic position refuses too: this slice does not model spread binding.
+    // A variadic position refuses too: spread binding is not modeled.
     let variadic = "<?php\nfunction g(string ...$x): void {}\n\
                     function f(): void { $s = 'abc'; g($s); \\PHPStan\\dumpType($s); }\n";
     assert_eq!(one_type(variadic), "dumped type: unknown");
@@ -371,9 +367,7 @@ fn the_v1_exclusions_keep_the_blanket_drop() {
     assert_eq!(one_type(spread), "dumped type: unknown");
 }
 
-// ---------------------------------------------------------------------------
 // The lowering's own invariant
-// ---------------------------------------------------------------------------
 
 #[test]
 fn language_constructs_are_untouched_by_this_path() {

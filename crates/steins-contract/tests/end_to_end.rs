@@ -45,7 +45,6 @@ fn refinement_keywords() {
     assert_eq!(admits_val(&ty("int<0, 10>"), &Val::Int(10)), Yes);
     assert_eq!(admits_val(&ty("int<0, 10>"), &Val::Int(11)), No);
     assert_eq!(admits_val(&ty("int<min, 0>"), &Val::Int(i64::MIN)), Yes);
-    // Literal types.
     assert_eq!(admits_val(&ty("'a'|'b'"), &s("a")), Yes);
     assert_eq!(admits_val(&ty("'a'|'b'"), &s("c")), No);
     assert_eq!(admits_val(&ty("5.0"), &Val::Int(5)), Yes); // PHP value equality
@@ -95,7 +94,6 @@ fn associative_array_rejects_list_realizations() {
         admits_val(&non_empty_assoc, &arr(vec![(Key::Str("a".into()), Val::Int(1))])),
         Yes
     );
-    // Empty violates non-empty.
     assert_eq!(admits_val(&non_empty_assoc, &arr(vec![])), No);
     // A list violates the associative part.
     assert_eq!(
@@ -115,7 +113,6 @@ fn associative_array_rejects_list_realizations() {
 /// over an operand this crate can enumerate on its own.
 #[test]
 fn key_of_and_value_of_project_enumerable_operands() {
-    // The two conformance fixtures, exactly.
     let k = ty("key-of<array{name: string, age: int}>");
     assert_eq!(admits_val(&k, &s("name")), Yes);
     assert_eq!(admits_val(&k, &s("age")), Yes);
@@ -167,7 +164,6 @@ fn key_of_keeps_optional_keys_and_floors_open_operands() {
     assert_eq!(admits_val(&k, &s("a")), Yes);
     assert_eq!(admits_val(&k, &s("b")), Yes);
     assert_eq!(admits_val(&k, &s("c")), No);
-    // Same on the value side.
     let v = ty("value-of<array{a: int, b?: string}>");
     assert_eq!(admits_val(&v, &s("x")), Yes);
     assert_eq!(admits_val(&v, &Val::Int(1)), Yes);
@@ -231,7 +227,7 @@ fn shapes_follow_14939() {
 }
 
 /// ADR-0062 §5 — the acceptance-convergence fixture, fact-path side. The
-/// proven-value path in `steins-infer` now judges through this very relation
+/// proven-value path in `steins-infer` judges through this very relation
 /// (`shape_verdict`), so its twin fixture — `unsealed_tail_key_contract_is_checked`
 /// in `steins-infer/tests/phpdoc_contract.rs` — must agree verdict for verdict.
 #[test]
@@ -354,7 +350,7 @@ proptest! {
 }
 
 // ==========================================================================
-// Conformance slice C1 — vocabulary added to the one identifier/generic table.
+// Conformance vocabulary in the identifier/generic table.
 // ==========================================================================
 
 #[test]
@@ -553,8 +549,8 @@ fn the_falsy_cut_decides_a_fact_only_where_the_refinement_answers() {
     assert_eq!(admits_fact(&t, &int_in(1, 10)), Yes);
     assert_eq!(admits_fact(&t, &int_in(-1, 10)), Maybe);
     assert_eq!(admits_fact(&t, &int_in(0, 0)), No);
-    // A nullable fact's null half is refuted, but its base half is not, so the
-    // for-all lands on the crate-wide mixed answer.
+    // A nullable fact's null half is refuted, but its base half is not, so
+    // for-all returns the crate-wide mixed answer.
     assert_eq!(admits_fact(&t, &Fact::General { base: Base::String, nullable: true }), Maybe);
     let non_falsy_nullable = Fact::Refined {
         base: Base::String,
@@ -576,7 +572,7 @@ fn non_empty_scalar_is_the_cut_intersected_with_scalar() {
     for falsy in [Val::Int(0), Val::Float(0.0), s(""), Val::Bool(false), s("0")] {
         assert_eq!(admits_val(&t, &falsy), No, "{falsy:?}");
     }
-    // The `scalar` half still holds independently of truthiness.
+    // The `scalar` half holds independently of truthiness.
     assert_eq!(admits_val(&t, &list(vec![Val::Int(1)])), No, "an array is not a scalar");
     assert_eq!(admits_val(&t, &Val::Null), No, "null is not a scalar");
 }

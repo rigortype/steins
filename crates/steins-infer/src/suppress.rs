@@ -165,13 +165,11 @@ pub fn declared_facet(id: &str) -> Option<&'static str> {
 /// below that profile's rung. Ordered smallest-first: `Default < Contracts <
 /// Strict`, and the `Ord` derive is what the admission test uses.
 ///
-/// This is a **unification of the pre-S6 layer selection**, not a new axis: the
-/// built-ins used to name layer *sets* (`default` = proof+mechanics, `contracts` =
-/// those plus contract), and every id's floor below is the lowest built-in whose
-/// set contained its layer. The one thing the floor adds is that a *single* layer
-/// can now straddle two rungs — the contract layer holds both floor-`Contracts`
-/// ids (everything that shipped before S6) and floor-`Strict` ids (the offset
-/// family's strict leg), which a layer-set selection could not express.
+/// A floor is finer than a layer *set*: a built-in profile admits an id when the
+/// id's floor is at or below the profile's rung. This lets a *single* layer
+/// straddle two rungs — the contract layer holds both floor-`Contracts` ids and
+/// floor-`Strict` ids (the offset family's strict leg), which naming layer sets
+/// could not express.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Floor {
     /// On the bare `steins check` surface (and therefore every surface above it).
@@ -232,8 +230,7 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     (CALL_ON_NULL_ID, Layer::Proof, Floor::Default),
     (PROP_MISMATCH_ID, Layer::Proof, Floor::Default),
     (READONLY_REASSIGNED_ID, Layer::Proof, Floor::Default),
-    // proof — finding-breadth family (ADR-0049): registered in S1, emitted from
-    // S2+ (see `REGISTERED_NOT_YET_EMITTED`). No emit site exists yet.
+    // proof — finding-breadth family (ADR-0049).
     (CALL_UNDEFINED_FUNCTION_ID, Layer::Proof, Floor::Default),
     (CALL_UNDEFINED_METHOD_ID, Layer::Proof, Floor::Default),
     (CLASS_UNDEFINED_ID, Layer::Proof, Floor::Default),
@@ -250,44 +247,33 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     (THROW_LISKOV_ID, Layer::Contract, Floor::Contracts),
     (EFFECT_ID, Layer::Contract, Floor::Contracts),
     (EFFECT_LISKOV_ID, Layer::Contract, Floor::Contracts),
-    // contract — finding-breadth declared-receiver lane (ADR-0049 §8), registered
-    // in S1, emitted from S6.
+    // contract — finding-breadth declared-receiver lane (ADR-0049 §8).
     (PHPDOC_UNDEFINED_METHOD_ID, Layer::Contract, Floor::Contracts),
-    // contract — the offset family's STRICT leg (ADR-0062 A-G10, issue #51).
-    // Contract-layer evidence (the Asserted declared envelope), admitted only by
-    // the `strict` rung.
-    //
-    // A-G10's END state, reached by its own protocol: S6 shipped BOTH ids at
-    // `Floor::Strict` (measure → judge → enable), and the 2026-07-29 corpus
-    // sweep measured `offset.undeclared` at ZERO findings across 99,522 files
-    // — the cleanest possible promotion case, so it sits at `Contracts` per
-    // the amendment. `offset.maybe-missing` stays at `Strict`: its sweep found
-    // 3 findings, all one discharge-ladder gap (an `isset()` passed to a
-    // userland `@phpstan-assert true` helper); it is not promoted until that
-    // discharge lands.
+    // contract — the offset family's STRICT leg (ADR-0062 A-G10, issue #51):
+    // Asserted declared-envelope evidence. `offset.undeclared` sits at `Contracts`
+    // (a corpus sweep measured zero findings); `offset.maybe-missing` stays at
+    // `Strict` until the `isset`→`@phpstan-assert` discharge-ladder gap is closed.
     (OFFSET_UNDECLARED_ID, Layer::Contract, Floor::Contracts),
     (OFFSET_MAYBE_MISSING_ID, Layer::Contract, Floor::Strict),
     // mechanics — apparatus hygiene (red on sight, suppression-exempt).
     (SUPPRESS_UNMATCHED_ID, Layer::Mechanics, Floor::Default),
     (SUPPRESS_UNKNOWN_ID, Layer::Mechanics, Floor::Default),
     (UNKNOWN_LABEL_ID, Layer::Mechanics, Floor::Default),
-    // debug — the dump surface (ADR-0053): requested introspection, an answered
-    // question. Registered in D1 ahead of emission (in REGISTERED_NOT_YET_EMITTED
-    // until D3/D4). Suppression- and baseline-exempt (§4), fp-gate counter-exempt
-    // (§8): a dump is not a finding. The floor is `Default` (a dump displays on
-    // every surface, §4) but is INERT for capture: the debug lane's exclusion from
-    // `surfaces_id` is a *layer* property, decided before the ladder is consulted.
+    // debug — the dump surface (ADR-0053): requested introspection, not a finding.
+    // Suppression-, baseline-, and fp-gate-exempt (§4/§8). The `Default` floor is
+    // inert for capture: the debug lane's exclusion from `surfaces_id` is a *layer*
+    // property, decided before the ladder is consulted.
     (DEBUG_TYPE_ID, Layer::Debug, Floor::Default),
     (DEBUG_PHPDOC_TYPE_ID, Layer::Debug, Floor::Default),
     (DEBUG_VAR_DUMP_ID, Layer::Debug, Floor::Default),
     // The trace annotation (ADR-0074 §4): the docblock spelling of the dump
-    // surface's question, riding the same S1 register-ahead-of-emission pattern.
+    // surface's question.
     (DEBUG_TRACE_ID, Layer::Debug, Floor::Default),
 ];
 
 /// The flat id list, **derived** from [`DIAGNOSTIC_REGISTRY`] so there is exactly
 /// one source of truth. Kept as a `&[&str]` for the prefix-matching consumers and
-/// the baseline, whose spellings are unchanged from before ADR-0050.
+/// the baseline.
 pub const DIAGNOSTIC_IDS: &[&str] = &derive_ids();
 
 /// Project the registry down to its ids at compile time (keeps `DIAGNOSTIC_IDS` a

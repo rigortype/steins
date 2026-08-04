@@ -56,7 +56,6 @@ fn happy_promotion_all_callers_literal_int() {
     assert!(report.refusals.is_empty(), "{:#?}", report.refusals);
 
     let out = report.plan.apply_file("lib.php", lib);
-    // Native hint added, @param line removed, docblock still valid.
     assert!(out.contains("function f(int $x)"), "got:\n{out}");
     assert!(!out.contains("@param"), "tag should be gone:\n{out}");
     assert!(out.contains("/**"), "docblock delimiters preserved:\n{out}");
@@ -101,12 +100,10 @@ fn promotes_multi_scalar_nullable_union_long_form() {
 #[test]
 fn refuses_unproven_variable_argument() {
     let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
-    // `$y` is not a proven literal at the call site.
     let main = "<?php\nfunction caller($y) { f($y); }\n";
     let report = plan(&[("lib.php", lib), ("main.php", main)]);
     assert_oracle_complete(&report);
     assert_eq!(only_reason(&report), REASON_ARG_NOT_PROVEN);
-    // Nothing was edited.
     assert!(report.plan.is_empty());
 }
 
@@ -121,7 +118,6 @@ fn refuses_when_a_caller_passes_wrong_literal() {
 #[test]
 fn refuses_on_dynamic_call() {
     let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
-    // A dynamic call could target any free function.
     let main = "<?php\n$fn = 'f';\n$fn(1);\n";
     let report = plan(&[("lib.php", lib), ("main.php", main)]);
     assert_eq!(only_reason(&report), REASON_DYNAMIC_CALL);
@@ -214,11 +210,9 @@ fn refuses_class_type_as_non_representable() {
 
 #[test]
 fn refuses_ambiguous_duplicate_fqn() {
-    // `f` defined twice — resolution is ambiguous.
     let a = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
     let b = "<?php\nfunction f($x) { return $x; }\n";
     let report = plan(&[("a.php", a), ("b.php", b)]);
-    // The documented decl is the only enumerated site; it must refuse ambiguous.
     assert!(report.refusals.iter().any(|r| r.reason == REASON_AMBIGUOUS), "{:#?}", report.refusals);
     assert!(report.plan.is_empty());
 }
@@ -276,7 +270,6 @@ fn tag_deletion_leaves_valid_multiline_docblock() {
     let main = "<?php\nf(1);\n";
     let out = apply_first(&[("lib.php", lib), ("main.php", main)]);
     assert!(out.contains("function f(int $x)"), "got:\n{out}");
-    // The @return line survives; the @param line is gone; delimiters intact.
     assert!(out.contains("@return int"), "sibling tag kept:\n{out}");
     assert!(!out.contains("@param"), "promoted tag removed:\n{out}");
     assert!(out.contains("/**") && out.contains("*/"), "docblock valid:\n{out}");
@@ -289,7 +282,6 @@ fn single_line_docblock_is_removed_whole() {
     let out = apply_first(&[("lib.php", lib), ("main.php", main)]);
     assert!(out.contains("function f(int $x)"), "got:\n{out}");
     assert!(!out.contains("@param"), "tag gone:\n{out}");
-    // No dangling `/**` from a half-deleted single-line docblock.
     assert!(!out.contains("/**"), "single-tag docblock removed whole:\n{out}");
 }
 
@@ -444,7 +436,6 @@ fn eval_in_project_refuses_all_candidates() {
 #[test]
 fn canonical_eval_foo_42_regression() {
     let lib = "<?php\n/** @param int $x */\nfunction foo($x) { return $x; }\n";
-    // No visible call site — only an eval string mentioning foo(42).
     let main = "<?php\neval('foo(42)');\n";
     let report = plan(&[("lib.php", lib), ("main.php", main)]);
     assert_oracle_complete(&report);

@@ -1,14 +1,12 @@
-//! Acceptance tests for match/switch structuring (ADR-0031 Part B): the deferred
-//! sibling of the structured-`if` slice. A statement-position `match` and a
-//! non-fall-through `switch` are lowered to the same `StmtKind::Match` trace node
-//! and walked with first-match `taken` certainty, subject refinement, arm joins,
-//! and the no-`default` `\UnhandledMatchError` terminator.
+//! Match/switch structuring (ADR-0031 Part B). A statement-position `match` and
+//! non-fall-through `switch` lower to `StmtKind::Match`, with first-match
+//! certainty, subject refinement, arm joins, and `\UnhandledMatchError` when
+//! `match` has no default.
 //!
-//! Two-pass reminder (see `branch_analysis.rs`): the env-free **direct** pass
-//! flags every literal call argument regardless of reachability, so a decided
-//! arm's deadness is observed by a **literal-bad** call going silent inside it;
-//! the reachability-sensitive **propagation** pass is driven through a *variable*
-//! (`width($v)`) or through subject **refinement**.
+//! The env-free direct pass flags literal call arguments regardless of
+//! reachability. Deadness is therefore tested with a literal-bad call; the
+//! reachability-sensitive propagation pass is tested through a variable or
+//! subject refinement (see `branch_analysis.rs`).
 
 use steins_infer::{Diagnostic, EffectSummary, check, effect_summary};
 use steins_syntax::SourceTree;
@@ -37,7 +35,7 @@ fn summary(src: &str, symbol: &str) -> EffectSummary {
         .unwrap_or_else(|| panic!("no summary for {symbol}"))
 }
 
-// ---- match: decided first arm prunes later arms dead -----------------------
+// match: decided first arm prunes later arms dead
 
 #[test]
 fn match_decided_first_arm_prunes_later_arms() {
@@ -54,7 +52,7 @@ fn match_decided_first_arm_prunes_later_arms() {
     assert_eq!(n(&live), 1, "the matching arm is live → its bad literal is flagged");
 }
 
-// ---- match: a decided LATER arm requires all earlier arms No ---------------
+// match: a decided LATER arm requires all earlier arms No
 
 #[test]
 fn match_decided_later_arm_needs_earlier_all_no() {
@@ -71,7 +69,7 @@ fn match_decided_later_arm_needs_earlier_all_no() {
     assert_eq!(n(&live), 1);
 }
 
-// ---- match: Maybe walks all arms; fall-through joins -----------------------
+// match: Maybe walks all arms; fall-through joins
 
 #[test]
 fn match_maybe_walks_all_and_join_agree_keeps_singleton() {
@@ -93,7 +91,7 @@ fn match_join_disagree_widens_to_oneof_silent() {
     assert_eq!(n(&src), 0, "disagreeing arms → OneOf → not a proven value → silent");
 }
 
-// ---- match: arm refinement binds the subject var ---------------------------
+// match: arm refinement binds the subject var
 
 #[test]
 fn match_arm_refinement_binds_singleton() {
@@ -117,7 +115,7 @@ match ($s) { \"abc\", \"xyz\" => width($s), default => 0 };
     assert_eq!(n(src), 0, "multi-literal arm → OneOf → no proven single value → silent");
 }
 
-// ---- match without default: no-match throws → tail dead --------------------
+// match without default: no-match throws → tail dead
 
 #[test]
 fn match_no_default_all_no_terminates_tail_dead() {
@@ -145,7 +143,7 @@ function f(): void {
     assert_eq!(n(live), 1, "a default arm makes the match fall through → tail reachable → flagged");
 }
 
-// ---- match without default: UnhandledMatchError surfaces in annotate throws -
+// match without default: UnhandledMatchError surfaces in annotate throws
 
 #[test]
 fn match_no_default_surfaces_unhandled_match_error_throw() {
@@ -170,7 +168,7 @@ fn match_with_default_has_no_unhandled_match_error_throw() {
     );
 }
 
-// ---- throw origins inside match arms (CST scan is trace-independent) -------
+// throw origins inside match arms (CST scan is trace-independent)
 
 #[test]
 fn throw_inside_match_arm_surfaces_and_is_dammed_by_enclosing_try() {
@@ -201,7 +199,7 @@ function g(int $x): void {
     );
 }
 
-// ---- switch: loose `==` evaluation via the measured table ------------------
+// switch: loose `==` evaluation via the measured table
 
 #[test]
 fn switch_loose_case_numeric_string_matches_int() {
@@ -233,7 +231,7 @@ fn switch_loose_trap_zero_vs_non_numeric_string_php8() {
     assert_eq!(n(&live), 1, "0 == \"0\" → case live → flagged");
 }
 
-// ---- switch binds nothing (loose truth sets are multi-valued) --------------
+// switch binds nothing (loose truth sets are multi-valued)
 
 #[test]
 fn switch_binds_nothing_in_arm() {
@@ -252,7 +250,7 @@ match ($s) { \"abc\" => width($s), default => 0 };
     assert_eq!(n(matched), 1, "match binds the subject Singleton → flagged (contrast)");
 }
 
-// ---- adversarial: a fall-through switch stays Opaque -----------------------
+// adversarial: a fall-through switch stays Opaque
 
 #[test]
 fn fallthrough_switch_stays_opaque_no_misbinding() {
@@ -273,7 +271,7 @@ fn fallthrough_switch_stays_opaque_no_misbinding() {
     assert_eq!(n(&structured), 0, "no fall-through → structured → decided-No case pruned");
 }
 
-// ---- non-lowerable arm makes the WHOLE construct Opaque --------------------
+// non-lowerable arm makes the WHOLE construct Opaque
 
 #[test]
 fn non_lowerable_arm_condition_forces_whole_opaque() {
@@ -292,7 +290,7 @@ fn non_lowerable_arm_condition_forces_whole_opaque() {
     assert_eq!(n(&structured), 0, "fully-lowerable → structured → decided-No arm pruned");
 }
 
-// ---- assignment-RHS match is unchanged (not structured) --------------------
+// assignment-RHS match is unchanged (not structured)
 
 #[test]
 fn assignment_rhs_match_is_not_structured() {
@@ -310,7 +308,7 @@ fn assignment_rhs_match_is_not_structured() {
     assert_eq!(n(&stmt), 0, "statement-position match is structured → sibling arm pruned");
 }
 
-// ---- adversarial: first-match ordering with an overlapping truthy subject --
+// adversarial: first-match ordering with an overlapping truthy subject
 
 #[test]
 fn ordering_rule_prevents_later_arm_sole_live_when_earlier_maybe() {

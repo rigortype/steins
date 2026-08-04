@@ -23,10 +23,9 @@
 //!
 //! Profiles select by **rung**, not by layer set: the registry gives every id a
 //! `surface_floor`, and a surface admits an id when `floor(id) <= rung`. The
-//! built-ins are the cumulative ladder `default ⊂ contracts ⊂ strict`. This is a
-//! restatement of the pre-S6 layer-set selection, not a re-levelling — see
-//! [`Surface::surfaces_id`] — and it is what lets ONE layer hold ids at two rungs
-//! (the contract layer now does).
+//! built-ins are the cumulative ladder `default ⊂ contracts ⊂ strict`. Selecting
+//! by rung (rather than by layer set) is what lets ONE layer hold ids at two rungs
+//! — the contract layer does, spanning `Floor::Contracts` and `Floor::Strict`.
 //!
 //! `boundary` is still a **reserved** name (ADR-0042): selecting *or* defining it
 //! is a config error until its ADR lands.
@@ -45,8 +44,8 @@
 //! # Composition (§6)
 //!
 //! vendor filter → **profile surface** → `[[policy]]` scoped enable/disable →
-//! inline ignores → baseline. `[[policy]]` is issue #15 / slice 3: this slice
-//! ships the pipeline with a no-op policy stage and a clear seam (see the CLI).
+//! inline ignores → baseline. The `[[policy]]` stage (issue #15) is currently a
+//! no-op with a clear seam for scoped enable/disable (see the CLI).
 
 use std::collections::BTreeMap;
 use std::fmt;

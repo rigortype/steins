@@ -1,4 +1,4 @@
-//! Stratum-discipline tests (ADR-0052 §5 slice N2): the checked trust bit that
+//! Stratum-discipline tests (ADR-0052 §5 N2): the checked trust bit that
 //! stops a docblock claim from forging a proof-layer finding.
 //!
 //! The through-line: an `Asserted` fact (an `@phpstan-assert` family docblock claim)
@@ -27,9 +27,7 @@ fn on_null(src: &str) -> usize {
     findings(src).iter().filter(|d| d.id == CALL_ON_NULL_ID).count()
 }
 
-// ==========================================================================
-// Control: a Verified null premises the proof layer exactly as before.
-// ==========================================================================
+// Control: a Verified null premises the proof layer.
 
 #[test]
 fn verified_null_into_int_fires_proof() {
@@ -42,9 +40,7 @@ function f(): void { $x = null; takesInt($x); }
     assert_eq!(arg_mismatch(src), 1, "a Verified null must still premise the proof layer");
 }
 
-// ==========================================================================
 // Assert tags (@phpstan-assert null) never premise the proof layer.
-// ==========================================================================
 
 #[test]
 fn asserted_null_cannot_premise_argument_mismatch() {
@@ -93,9 +89,7 @@ function f(mixed $x): void { claimInt($x); takesString($x); }
     );
 }
 
-// ==========================================================================
 // The derivation clause: min-stratum through copy/array composition and joins.
-// ==========================================================================
 
 #[test]
 fn derivation_copy_carries_asserted() {
@@ -154,9 +148,7 @@ function f(bool $c): void {
     assert_eq!(arg_mismatch(src), 1, "Verified ⊔ Verified ⇒ Verified (still premises proof)");
 }
 
-// ==========================================================================
 // Guard-position -if-true / -if-false consumption (Asserted stratum).
-// ==========================================================================
 
 #[test]
 fn guard_if_true_narrows_then_branch_silently() {
@@ -213,8 +205,7 @@ function f(mixed $x): void { if (!isNull($x)) {} else { takesInt($x); } }
 fn bare_assert_if_true_is_not_recognized() {
     // Regression pin (conformance `regressions_string_narrowing_assert_if_true`):
     // the BARE `@assert-if-true` (no vendor prefix, ADR-0029) is NOT a recognized
-    // tag, so it narrows nothing — the guard-call carrier consumes no envelope and
-    // the case stays exactly as silent as before this slice.
+    // tag, so it narrows nothing and the guard-call carrier consumes no envelope.
     let src = "<?php
 /** @assert-if-true null $x */
 function isNull($x): bool { return true; }
@@ -226,24 +217,17 @@ function f(mixed $x): void { if (isNull($x)) { takesInt($x); } }
     assert_eq!(arg_mismatch(src), 0, "a bare @assert-if-true narrows nothing (unchanged behavior)");
 }
 
-// ==========================================================================
 // assert($expr) statement narrowing — Verified UNCONDITIONALLY.
 //
-// FLIPPED by the 2026-07-25 owner ruling (ADR-0052 amendment "assert() reads as a
-// throw-guard", slice I0): `assert($expr)` is statically equivalent to
-// `if (!$expr) throw` — Verified, always; `zend.assertions` is never consulted, and
-// the `[runtime] zend-assertions` pseudo-constant is abolished. The pre-ruling
-// behavior (Asserted-by-default, promotable by a runtime knob) is deleted; these
-// tests pin the NEW behavior. The flip IS the record — see the amendment.
-// ==========================================================================
+// Per the 2026-07-25 owner ruling (ADR-0052 amendment I0), `assert($expr)` is
+// equivalent to `if (!$expr) throw`: always Verified, independent of
+// `zend.assertions`.
 
 #[test]
 fn assert_stmt_narrows_at_verified_and_premises_proof() {
     // `assert($x === null)` narrows `$x` to null and — per the ruling — does so at the
     // Verified stratum unconditionally, so the downstream `takesInt($x)` premises the
-    // proof-layer `type.argument-mismatch`. (Pre-ruling this was SILENT under the
-    // default zend.assertions=-1; the ruling reads assert() as a throw-guard, so the
-    // fact is fit for the proof layer.)
+    // proof-layer `type.argument-mismatch`.
     let src = "<?php
 function takesInt(int $n): void {}
 function f(mixed $x): void { assert($x === null); takesInt($x); }

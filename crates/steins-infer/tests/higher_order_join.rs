@@ -1,15 +1,10 @@
-//! ADR-0063 P1 acceptance tests: the semantic higher-order effect join.
+//! Semantic higher-order effect join (ADR-0063 P1).
 //!
-//! The effect of a call to a cataloged higher-order builtin is the builtin's own
-//! catalog color ⊔ the envelope of the callback it *immediately invokes*, joined
-//! through the existing via-provenance fixpoint (ADR-0033's invocation-shape
-//! catalog, ADR-0018's labels). No annotation is consulted while the callback body
-//! is visible — that is the differentiator against PHPStan's declared
-//! conditional purity, whose contract leg is ADR-0063 P4.
-//!
-//! These tests cover the rows ADR-0063 P1 added (the PHP 8.4 search predicates,
-//! `array_walk_recursive`, `iterator_apply`), the opaque-callback floor, and the
-//! deliberate exclusions (deferred invokers; callables this catalog cannot name).
+//! A cataloged higher-order builtin has its own color joined with the envelope of
+//! a callback it immediately invokes, through the via-provenance fixpoint
+//! (ADR-0033, ADR-0018). While a callback body is visible, annotations are not
+//! consulted. Fixtures cover catalog rows, the opaque-callback floor, deferred
+//! invokers, and unnameable callables.
 
 use steins_infer::{check, effect_summary, Diagnostic, EffectSummary, EFFECT_ID, PARAM_MISMATCH_ID};
 use steins_syntax::SourceTree;
@@ -36,7 +31,7 @@ fn summary(src: &str, symbol: &str) -> EffectSummary {
         .unwrap_or_else(|| panic!("no summary for {symbol}"))
 }
 
-// ---- The new immediately-invoked rows ---------------------------------------
+// The new immediately-invoked rows
 
 #[test]
 fn php84_search_predicates_join_an_impure_callback() {
@@ -87,7 +82,7 @@ fn a_new_row_carries_a_named_user_callback_too() {
     assert!(d.message.contains("output"), "{}", d.message);
 }
 
-// ---- The opaque-callback floor ----------------------------------------------
+// The opaque-callback floor
 
 #[test]
 fn opaque_callback_at_a_cataloged_position_keeps_the_builtins_own_color() {
@@ -99,7 +94,7 @@ fn opaque_callback_at_a_cataloged_position_keeps_the_builtins_own_color() {
     assert!(!summary(src, "f").exhaustive, "unknown callback taints exhaustiveness (…?)");
 }
 
-// ---- Deliberate exclusions contribute nothing new ---------------------------
+// Deliberate exclusions contribute nothing new
 
 #[test]
 fn deferred_invokers_contribute_nothing_new() {
@@ -137,7 +132,7 @@ fn preg_replace_callback_array_is_excluded() {
     assert_eq!(effects(src).len(), 0, "unexpressible callback position stays silent");
 }
 
-// ---- The join is a join, not a replacement ----------------------------------
+// The join is a join, not a replacement
 
 #[test]
 fn a_declared_envelope_admits_the_matching_callback_color() {
@@ -151,7 +146,7 @@ fn a_declared_envelope_admits_the_matching_callback_color() {
     assert!(d.message.contains("nondet.random"), "{}", d.message);
 }
 
-// ---- The C9 pure-callable consumer sees the join automatically --------------
+// The C9 pure-callable consumer sees the join automatically
 
 fn param_mismatches(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);

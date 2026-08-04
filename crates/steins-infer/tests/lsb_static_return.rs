@@ -1,17 +1,11 @@
-//! ADR-0043 amendment — LSB return-position minimum-bound check.
+//! LSB return-position minimum-bound check (ADR-0043 amendment).
 //!
-//! A method declared `: static` / `: self` / `: parent` (nullable variants
-//! included) returning a value whose *exact* class provenly is-a-No against the
-//! declaring class's bound is an unconditional runtime `TypeError`: every valid
-//! late-bound class `T` satisfies `is_a(T, C) = Yes`, so `is_a(V, C) = No` implies
-//! `is_a(V, T) = No` for every possible `T` (verified PHP 8.5.8, both modes). The
-//! check reuses the existing `type.return-mismatch` pipeline — steins-infer needs
-//! no changes; the bound is synthesized at lowering (steins-syntax).
+//! A `static`/`self`/`parent` return whose exact class is proven not to satisfy
+//! the declaring class's bound is an unconditional `TypeError`: every valid
+//! late-bound class `T` is-a the bound, so a value outside the bound cannot be a
+//! `T`. The check uses `type.return-mismatch`; lowering synthesizes the bound.
 //!
-//! This file pins the firing shape and the full silence matrix (amendment §6):
-//! anything conditional (`new self()` in an open class, sibling subclass),
-//! anything uncertain (open hierarchy), and every non-lowered shape (union with
-//! `static`, `?static`+null) stays silent.
+//! Conditional or uncertain cases and non-lowered union shapes stay silent.
 
 use steins_infer::{Diagnostic, check};
 use steins_syntax::SourceTree;
@@ -30,9 +24,7 @@ fn ids(src: &str) -> Vec<String> {
     findings(src).into_iter().map(|d| d.id.to_owned()).collect()
 }
 
-// ==========================================================================
 // Firing: the conformance fixture shape.
-// ==========================================================================
 
 #[test]
 fn static_return_unrelated_class_fires() {
@@ -101,9 +93,7 @@ final class C {
     assert_eq!(ids(src), vec!["type.return-mismatch"], "scalar returned from : static");
 }
 
-// ==========================================================================
 // Silence matrix (amendment §6).
-// ==========================================================================
 
 #[test]
 fn return_this_is_silent() {
@@ -187,8 +177,8 @@ final class C {
 
 #[test]
 fn union_containing_static_is_silent() {
-    // `static|Foo` (legal PHP) is not lowered this slice — the keyword inside a
-    // union keeps §1's silence. No bound is synthesized.
+    // `static|Foo` (legal PHP) is not lowered — the keyword inside a union keeps
+    // §1's silence. No bound is synthesized.
     let src = "<?php declare(strict_types=1);
 final class Foo {}
 final class Unrelated {}

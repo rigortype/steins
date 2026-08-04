@@ -1020,7 +1020,7 @@ mod shape_fact_tests {
     /// A pair-array may be a `[$obj, 'method']` callable, so a bare `callable`
     /// stays open; a `*-closure` spelling demands a `Closure` **instance**,
     /// which no array is (ADR-0063 P3). Bare `Closure` carries the default
-    /// obligation, so it is open too — the lowering's own call, unchanged here.
+    /// obligation, so it is open too — the lowering's own call.
     #[test]
     fn callable_is_open_unless_closure_only() {
         assert_eq!(judge("callable", &int_pair()), Certainty::Maybe);

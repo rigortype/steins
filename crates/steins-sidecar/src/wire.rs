@@ -447,10 +447,8 @@ mod tests {
 
     #[test]
     fn an_old_format_reflection_reply_still_parses_with_no_arity() {
-        // BACK-COMPAT PIN: a reply recorded before the arity surface (every canned
-        // replay table in the tree, and any older runner) must keep parsing — the
-        // reflected envelope it carries stays usable, and only the arity-pinned
-        // rules withhold.
+        // BACK-COMPAT PIN for the absent-arity handling documented in
+        // `parse_reflection_result`: an old reply must keep parsing.
         let old = serde_json::json!({
             "kind": "reflection",
             "target": "strlen",

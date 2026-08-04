@@ -21,9 +21,7 @@ fn n(src: &str) -> usize {
     findings(src).len()
 }
 
-// ==========================================================================
 // 1. Native union / nullable parameter types.
-// ==========================================================================
 
 #[test]
 fn union_param_coercive_cells() {
@@ -152,9 +150,7 @@ fn object_union_member_is_now_modeled_adr0043_stage3() {
     assert_eq!(d[0].id, "type.argument-mismatch");
 }
 
-// ==========================================================================
 // 2. Native return-type checking (`type.return-mismatch`).
-// ==========================================================================
 
 #[test]
 fn return_strict_abc_into_int_flagged() {
@@ -228,8 +224,7 @@ fn return_folded_builtin_value_checked() {
 
 #[test]
 fn return_inside_structured_if_is_now_checked() {
-    // EXPECTATION CHANGE (ADR-0031, was `..._is_silent` → 0): an `if` is now a
-    // structured trace, so a `return "abc";` inside a branch is walked and
+    // ADR-0031: an `if` is a structured trace, so a branch return is walked and
     // proof-checked like a top-level return. With `$c` unknown the guard is Maybe,
     // the then-branch is walked, and `return "abc"` into `int` (strict) is FLAGGED.
     // (The former "only top-of-trace returns are checked" limitation is lifted for

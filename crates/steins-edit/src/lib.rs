@@ -10,10 +10,10 @@
 //! - [`common`] — the machinery the two phpdoc transforms genuinely share: the
 //!   reverse-sweep refusal reasons, candidate/value helpers, and the value-domain
 //!   → ADR-0029 phpdoc **type rendering**.
-//! - [`regions`] — the region model (ADR-0047 Slice A): the pure config→region
-//!   assignment ([`PartitionMap`]). Slice A threads it through to the planners but
-//!   no planner decides on it yet (with one region the planner is byte-identical
-//!   to today's whole-universe behavior).
+//! - [`regions`] — the region model (ADR-0047): the pure config→region
+//!   assignment ([`PartitionMap`]). It is threaded through to the planners but no
+//!   planner decides on it: with one region the planner runs whole-universe, and
+//!   the map reserves the seam for scoped enumeration without changing a verdict.
 //! - [`obstacles`] — project-global dynamic-code obstacle detection (ADR-0046 §2):
 //!   `eval` / dynamic-`include` sites that make "all callers proven" unknowable,
 //!   the vendor presumption, and the `steins.toml` vouching valve.

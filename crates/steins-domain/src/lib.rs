@@ -35,8 +35,7 @@
 //!   honest answer wherever the set admits both outcomes (ADR-0031).
 //!
 //! `steins-infer` re-exports this crate's [`Certainty`] as the one trinary
-//! project-wide (ADR-0031); its stage-1 env migrates onto [`Fact`] with
-//! branch-analysis stage 2.
+//! project-wide (ADR-0031) and builds its environment on [`Fact`].
 
 mod certainty;
 mod fact;

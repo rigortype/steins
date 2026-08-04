@@ -118,9 +118,7 @@ fn dump_doc(doc: &str, sig: &str, expr: &str) -> String {
     ))
 }
 
-// ---------------------------------------------------------------------------
 // explode: non-empty separator ⇒ non-empty-list<string>
-// ---------------------------------------------------------------------------
 
 #[test]
 fn explode_on_a_literal_separator_is_a_non_empty_list_of_strings() {
@@ -151,7 +149,6 @@ fn explode_takes_the_separators_own_predicate_not_just_a_literal() {
 fn explode_declines_an_empty_or_unknown_separator() {
     // `explode('', 'abc')` is a `ValueError` at 8.5.8 — there is no return value
     // to describe, and an unknown separator might be that call.
-    //
     // What the dump shows is the ADR-0069 FLOOR two rungs below, which since
     // ADR-0071 carries `explode`'s array row: the coarse catalog `list<string>`,
     // marked `(asserted)`. The decline this test is about is intact and legible in
@@ -174,9 +171,7 @@ fn explode_declines_the_limit_form_because_a_limit_can_empty_the_result() {
     assert_eq!(dump("string $s", "explode(',', $s, -5)"), "dumped type: list<string> (asserted)");
 }
 
-// ---------------------------------------------------------------------------
 // range: always a non-empty list; integral arguments sharpen the element
-// ---------------------------------------------------------------------------
 
 #[test]
 fn range_of_integral_bounds_is_a_non_empty_list_of_ints() {
@@ -212,9 +207,7 @@ fn range_declines_an_arity_php_itself_rejects() {
     assert_eq!(dump("", "range(1, 2, 3, 4)"), "dumped type: array (asserted)");
 }
 
-// ---------------------------------------------------------------------------
 // preg_replace: the subject's base splits the multi-base declaration
-// ---------------------------------------------------------------------------
 
 #[test]
 fn preg_replace_of_a_string_subject_is_string_or_null() {
@@ -261,9 +254,7 @@ fn preg_replace_declines_a_subject_it_cannot_place() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // var_export: the literal `true` flag strips the envelope's null arm
-// ---------------------------------------------------------------------------
 
 #[test]
 fn var_export_with_a_literal_true_flag_is_a_string() {
@@ -282,9 +273,7 @@ fn var_export_without_the_flag_falls_back_to_its_own_envelope() {
     assert_eq!(dump("int $v, bool $b", "var_export($v, $b)"), "dumped type: string|null");
 }
 
-// ---------------------------------------------------------------------------
 // min / max: the argument-fact union, and the interval that sharpens it
-// ---------------------------------------------------------------------------
 
 #[test]
 fn min_and_max_compose_the_intervals_of_int_arguments() {
@@ -389,9 +378,7 @@ fn an_engine_that_answers_no_arity_withholds_min_and_max() {
     assert_eq!(one_type_with(src, &mut mock), "dumped type: unknown");
 }
 
-// ---------------------------------------------------------------------------
 // json_decode: the batch's measured decline
-// ---------------------------------------------------------------------------
 
 #[test]
 fn json_decode_declines_in_every_form() {
@@ -403,9 +390,7 @@ fn json_decode_declines_in_every_form() {
     assert_eq!(dump("string $s", "json_decode($s, false)"), "dumped type: unknown");
 }
 
-// ---------------------------------------------------------------------------
 // The admission gate (ADR-0061 §2), on the new rules
-// ---------------------------------------------------------------------------
 
 #[test]
 fn without_the_reflected_declaration_every_transfer_is_withheld() {

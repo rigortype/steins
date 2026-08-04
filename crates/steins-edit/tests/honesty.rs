@@ -103,7 +103,6 @@ fn dedup_collapses_repeated_literals() {
     let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
     let main = "<?php\nf(\"a\");\nf(\"a\");\nf(\"a\");\n";
     let out = apply_first(&[("lib.php", lib), ("main.php", main)]);
-    // Three identical string literals collapse to one member.
     assert!(out.contains("@param 'a' $x"), "got:\n{out}");
 }
 
@@ -266,7 +265,6 @@ fn plain_left_untouched_when_it_still_admits_the_join() {
 
 #[test]
 fn return_widens_to_proven_union() {
-    // Every return is a numeric string, but `@return int` is declared.
     let lib = "<?php\n/** @return int */\nfunction f($c) { if ($c) { return \"1\"; } return \"2\"; }\n";
     let report = plan(&[("lib.php", lib)]);
     assert_oracle_complete(&report);
@@ -280,7 +278,6 @@ fn return_widens_to_proven_union() {
 fn return_edit_preserves_the_description_tail() {
     let lib = "<?php\n/** @return int the identifier */\nfunction f() { return \"1\"; }\n";
     let out = apply_first(&[("lib.php", lib)]);
-    // Only the type prefix is replaced; the description survives.
     assert!(out.contains("@return '1' the identifier"), "got:\n{out}");
     assert_docblock_types_parse(&out);
 }
@@ -332,7 +329,6 @@ fn star_slash_string_widens_to_keyword_not_a_broken_literal() {
     assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
     let out = report.plan.apply_file("lib.php", lib);
     assert!(out.contains("@param non-falsy-string $x"), "got:\n{out}");
-    // The applied docblock must contain exactly one `*/` — its own terminator.
     assert_eq!(out.matches("*/").count(), 1, "docblock terminator corrupted:\n{out}");
     assert!(!out.contains("'a*/b'"), "wrote a corrupting literal:\n{out}");
     assert_docblock_types_parse(&out);
@@ -359,7 +355,6 @@ fn newline_bearing_string_widens_to_keyword_not_a_split_literal() {
     let main = "<?php\nf('line1\nline2');\n";
     let out = apply_first(&[("lib.php", lib), ("main.php", main)]);
     assert!(out.contains("@param non-falsy-string $x"), "got:\n{out}");
-    // The docblock stays one physical line: `/** @param … $x */`.
     let doc_line = out.lines().find(|l| l.contains("@param")).unwrap();
     assert!(doc_line.contains("*/"), "docblock split across lines:\n{out}");
     assert_docblock_types_parse(&out);
@@ -384,7 +379,6 @@ fn multiline_docblock_only_type_span_replaced() {
     let lib = "<?php\n/**\n * @param int $x the value\n * @return int\n */\nfunction f($x) { return \"z\"; }\n";
     let main = "<?php\nf(\"a\");\n";
     let out = apply_first(&[("lib.php", lib), ("main.php", main)]);
-    // @param type widened, its description kept; @return also widened.
     assert!(out.contains("@param 'a' $x the value"), "got:\n{out}");
     assert!(out.contains("@return 'z'"), "got:\n{out}");
     assert!(out.contains("/**") && out.contains("*/"), "docblock intact:\n{out}");
@@ -399,7 +393,6 @@ use steins_edit::honesty::{REASON_DYNAMIC_INCLUDE, REASON_EVAL_PRESENT};
 /// `eval-present` rather than being rewritten from partial (unenumerable) evidence.
 #[test]
 fn eval_blocks_honesty_widening() {
-    // `@param int $id` lies (numeric-string callers) — normally widened.
     let lib = "<?php\n/** @param int $id */\nfunction f($id) { return $id; }\n";
     let main = "<?php\nf(1);\nf(\"12\");\n";
     let evil = "<?php\neval('x();');\n";
@@ -414,6 +407,5 @@ fn eval_blocks_honesty_widening() {
     assert_eq!(report.oracle.transformed, 0, "eval must block widening: {:#?}", report.plan);
     assert!(report.refusals.iter().all(|r| r.reason == REASON_EVAL_PRESENT));
     assert_eq!(report.obstacles[0].reason, REASON_EVAL_PRESENT);
-    // Sanity: the dynamic-include reason constant is wired for honesty too.
     let _ = REASON_DYNAMIC_INCLUDE;
 }

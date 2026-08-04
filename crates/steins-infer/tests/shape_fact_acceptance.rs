@@ -1,10 +1,9 @@
 //! ADR-0072 end to end: an abstract **array** fact judged against a declared
 //! `@param`/`@return`/`@var` contract.
 //!
-//! Until this slice `admits_fact(ty, Fact::Shape { … })` answered `Maybe` and
-//! every case below was silent. The relation now decides, and the three
-//! contract-layer consumers turn a definite `No` into a `phpdoc.*-mismatch` —
-//! so the hazard here is **inverted** relative to the rest of the analyzer: a
+//! The three contract-layer consumers turn a definite `No` from
+//! `admits_fact(ty, Fact::Shape { … })` into a `phpdoc.*-mismatch`, so the
+//! hazard here is **inverted** relative to the rest of the analyzer: a
 //! wrong `No` is a user-facing false positive, not a missed finding. Each
 //! firing test therefore names the witness that makes every value the fact
 //! admits a contract violation, and the silent ones are the FP-killer pins.
@@ -43,9 +42,7 @@ fn param_case(declared: &str, ty: &str) -> String {
     )
 }
 
-// ==========================================================================
 // (a) An array-bearing argument against an array-*incapable* contract.
-// ==========================================================================
 
 /// The witness is any member at all: every value the fact admits is an array,
 /// and no array is a string. `explode()` seeds `list<string>` through the
@@ -66,9 +63,8 @@ fn a_declared_shape_violates_the_scalar_contracts() {
     }
 }
 
-/// The relation answers `No` for a class contract too, but the ADR-0043 stage-4
-/// class valve upstream keeps it silent: an undeclared bare identifier may be a
-/// `@template` param or a `@phpstan-type` alias. That gate is unchanged here.
+/// ADR-0043's class valve keeps unknown bare identifiers silent because they may
+/// be a `@template` parameter or `@phpstan-type` alias.
 #[test]
 fn the_class_valve_still_shuts_on_an_unknown_identifier() {
     assert_eq!(param_count(&param_case("array{a: int}", "SomeUnknownName")), 0);
@@ -82,9 +78,7 @@ fn a_declared_shape_is_silent_against_array_capable_contracts() {
     }
 }
 
-// ==========================================================================
 // (b) The `is_list` witness — the denotational trinary, consumed as given.
-// ==========================================================================
 
 /// A required string key means no member of the denotation is a list, and
 /// `list<int>` admits lists only: the two are disjoint.
@@ -109,9 +103,7 @@ fn a_list_shape_violates_a_string_keyed_map_param() {
     assert_eq!(param_count(&param_case("list{int, int}", "array<string, int>")), 1);
 }
 
-// ==========================================================================
 // (c) The compatible cases stay silent — `Yes`/`Maybe` both mean no finding.
-// ==========================================================================
 
 #[test]
 fn a_compatible_shape_against_a_map_contract_is_silent() {
@@ -131,9 +123,7 @@ function f(string $x): void { $a = explode(',', $x); g($a); }
     assert_eq!(param_count(src), 0, "list<string> vs @param list<string> → Yes");
 }
 
-// ==========================================================================
 // (d) The FP-killer: unknown slots and unknown list-ness refute nothing.
-// ==========================================================================
 
 /// Plain `array` knows nothing — no field, an untyped unsealed tail,
 /// `is_list == Maybe`. It must refute no array-shaped contract whatsoever, or
@@ -239,9 +229,7 @@ fn a_nullable_shape_fact_splits_its_two_halves() {
     assert_eq!(param_count(&param_case("array{a: int}|null", "string")), 1);
 }
 
-// ==========================================================================
 // (e) The #81 floor's shape at the return check — the `Asserted` stratum.
-// ==========================================================================
 
 /// `imagecolorsforindex` has a single array arm, so the ADR-0069 floor seeds a
 /// `Fact::Shape` for `$r`. The phpdoc return check consumes facts at the
@@ -282,7 +270,7 @@ function f($im, int $i): void {{ $r = imagecolorsforindex($im, $i); g($r); }}
 }
 
 /// The declared shape rides the return check too, and the message names the
-/// fact through the ONE speller rather than the old generic "value".
+/// fact through the shared speller rather than the generic "value".
 #[test]
 fn a_returned_shape_names_itself_in_the_message() {
     let src = "<?php

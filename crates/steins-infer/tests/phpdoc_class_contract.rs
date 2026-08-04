@@ -1,14 +1,11 @@
-//! ADR-0043 stage 4 — phpdoc-side class contracts (the `contract_touches_class`
-//! opening). The acceptance matrix for **class-typed phpdoc contracts**
-//! (`@param`/`@return`) against proven object values, enum cases, `::class`
-//! strings, and abstract scalar facts — riding the same trinary is-a oracle as the
-//! native object-world (ADR-0043 stage 3, `tests/object_acceptance.rs`).
+//! Class-typed phpdoc contracts (`@param`/`@return`) against proven object values,
+//! enum cases, `::class` strings, and scalar facts, via the trinary is-a oracle
+//! (ADR-0043; see `tests/object_acceptance.rs`).
 //!
-//! The phpdoc relation is **pure set membership, no coercion** (ADR-0030 relation
-//! #1): a proven scalar is *never* a member of a class type, in either mode. A
-//! definite `No` (proven object is-a-No a known class, or a scalar against a known
-//! class) reports; any `Unknown` (incomplete hierarchy) or unresolved identifier
-//! (a `@template` / `@phpstan-type` alias that may denote a scalar) stays silent.
+//! The phpdoc relation is pure set membership with no coercion (ADR-0030): a
+//! proven scalar is never a member of a class type, in either mode. A definite
+//! `No` reports; any `Unknown` (incomplete hierarchy) or unresolved identifier (a
+//! `@template`/`@phpstan-type` alias that may denote a scalar) stays silent.
 
 use steins_infer::{Diagnostic, PARAM_MISMATCH_ID, RETURN_MISMATCH_ID, check};
 use steins_syntax::SourceTree;
@@ -31,9 +28,7 @@ fn ids(src: &str) -> Vec<String> {
     findings(src).into_iter().map(|d| d.id.to_owned()).collect()
 }
 
-// ==========================================================================
 // 1. Proven object value vs class-typed @param — is-a Yes / No / Unknown.
-// ==========================================================================
 
 #[test]
 fn object_vs_class_definite_no() {
@@ -78,9 +73,7 @@ fn object_vs_unresolved_name_stays_silent() {
     assert_eq!(param_count(src), 0, "unresolved target → no manufactured violation");
 }
 
-// ==========================================================================
 // 2. Proven scalar vs class-typed @param — pure membership, no coercion.
-// ==========================================================================
 
 #[test]
 fn scalar_vs_known_class_is_no() {
@@ -106,9 +99,7 @@ fn scalar_vs_class_or_null() {
     assert_eq!(param_count(&format!("{f}f(null);")), 0, "null accepted by Foo|null");
 }
 
-// ==========================================================================
 // 3. Abstract scalar fact vs class contract — the contract_touches_class valve.
-// ==========================================================================
 
 #[test]
 fn abstract_scalar_fact_opens_pure_class_valve() {
@@ -129,9 +120,7 @@ fn abstract_scalar_fact_vs_template_stays_closed() {
     assert_eq!(param_count(src), 0, "template T → valve closed → silent");
 }
 
-// ==========================================================================
 // 4. Enum cases (objects) and ::class strings (ADR-0043 §4).
-// ==========================================================================
 
 #[test]
 fn enum_case_accepted_by_own_enum() {
@@ -182,9 +171,7 @@ fn class_string_literal_vs_real_class_is_no() {
     assert_eq!(param_count(src), 1, "the string \"Foo\" is never a Bar object");
 }
 
-// ==========================================================================
 // 5. @return class contracts.
-// ==========================================================================
 
 #[test]
 fn return_object_vs_class_no() {
@@ -213,10 +200,8 @@ fn return_template_stays_silent() {
     assert_eq!(return_count(src), 0, "template @return T → no FP");
 }
 
-// ==========================================================================
 // 6. Descent guard-blindness — a class-touching verdict is suppressed inside a
 //    binding descent (mirror of the native object_world_guard_blind).
-// ==========================================================================
 
 #[test]
 fn direct_class_verdict_fires_but_descent_is_blind() {
@@ -236,12 +221,10 @@ fn direct_class_verdict_fires_but_descent_is_blind() {
     assert_eq!(param_count(descent), 0, "descent-bound class verdict is guard-blind");
 }
 
-// ==========================================================================
 // 5b. Const-fetch phpdoc types (`self::CONST`, `Enum::Case` as a type) are
 //     unresolved — they must stay silent, never manufacture a No against the very
 //     value they name (regression: pxxxx `@return self::CONST { return self::CONST; }`
 //     and enum-case returns against enum-case-typed unions).
-// ==========================================================================
 
 #[test]
 fn return_of_named_class_const_against_its_own_const_type_is_silent() {
@@ -263,11 +246,9 @@ fn enum_case_return_against_enum_case_typed_union_is_silent() {
     assert_eq!(return_count(src), 0, "enum case vs enum-case-typed union → silent (unresolved const type)");
 }
 
-// ==========================================================================
 // 6b. Implicit `Stringable` — a class with `__toString` (but no explicit
 //     `implements \Stringable`) IS a Stringable in PHP 8+; the is-a oracle must
 //     not manufacture a `No` against it (regression: symfony ChoiceQuestionTest).
-// ==========================================================================
 
 #[test]
 fn class_with_to_string_is_implicitly_stringable() {
@@ -308,10 +289,8 @@ fn stringable_in_array_union_accepts_to_string_object() {
     assert_eq!(param_count(bad), 1, "null is not a member of the union");
 }
 
-// ==========================================================================
 // 7. Liskov interplay — an overridden method carrying a class @param must not
 //    double-fire between the override's and the parent's envelopes (ADR-0033).
-// ==========================================================================
 
 #[test]
 fn overridden_method_class_param_reports_once() {
@@ -322,14 +301,12 @@ fn overridden_method_class_param_reports_once() {
     assert_eq!(param_count(src), 1, "exactly one finding — no envelope double-fire");
 }
 
-// ==========================================================================
 // 8. @template name shadowing a real class (issue #5). A `@template X` in scope
 //    makes X a template parameter — opaque, never the class — inside that
 //    declaration's docblock types, so a same-named real class no longer
 //    manufactures a param/return-mismatch FP. The shadow is a per-declaration
 //    fact (function/method own docblock + enclosing class-like docblock);
 //    qualified references opt out.
-// ==========================================================================
 
 #[test]
 fn template_shadows_real_class_param_proven() {

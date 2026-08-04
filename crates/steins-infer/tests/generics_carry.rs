@@ -1,15 +1,9 @@
-//! ADR-0032 tier 3 / issue #10 — class-level generics carry.
+//! Class-level generic carry (ADR-0032, issue #10).
 //!
-//! Class-level generic type arguments (`Box<int>`, `NamedBox<User>`) are read as
-//! **state, not solving**: a `new Class(args)` carries the per-`@template` values
-//! that flow into it (tier-1 propagation — `T` *is* whatever flowed in), and a
-//! declared `@param Class<A> $p` judges an incoming object's carried arguments
-//! against `A`. No call-site template solver is introduced (ADR-0030 "won't
-//! build"): a template binds only from a *direct* `@param T $p` constructor
-//! parameter, and where knowledge is absent acceptance stays `Maybe`.
-//!
-//! The two `firing` tests are the in-crate twins of the conformance fixtures
-//! `generics_template_box` and `generics_template_bound`.
+//! Generic arguments are **state, not solving**: `new Class(args)` carries values
+//! flowing through direct `@param T` constructor parameters, and
+//! `@param Class<A>` judges the carried arguments against `A`. There is no
+//! call-site template solver (ADR-0030); absent knowledge stays `Maybe`.
 
 use steins_infer::{Diagnostic, PARAM_MISMATCH_ID, check};
 use steins_syntax::SourceTree;
@@ -24,9 +18,7 @@ fn param_count(src: &str) -> usize {
     findings(src).into_iter().filter(|d| d.id == PARAM_MISMATCH_ID).count()
 }
 
-// ==========================================================================
 // 1. The conformance fixtures, in-crate.
-// ==========================================================================
 
 /// `generics_template_box`: `new Box('x')` is a `Box<string>` — rejected where a
 /// `Box<int>` is required; `new Box(1)` is accepted.
@@ -76,9 +68,7 @@ fn named_box_user_rejects_unrelated_element() {
     );
 }
 
-// ==========================================================================
 // 2. Element-add envelope over a project collection shape (issue #10 criterion).
-// ==========================================================================
 
 /// A declared class-level type argument (`TypedList<User>`) is read as an envelope
 /// on the element added at construction: a matching element is accepted, a
@@ -110,9 +100,7 @@ fn collection_shape_element_add_envelope() {
     );
 }
 
-// ==========================================================================
 // 3. Adversarial / honesty bounds — every one must stay silent (zero-FP).
-// ==========================================================================
 
 /// Nested generics: `list<Box<int>>` with a `Box<string>` element fires.
 #[test]

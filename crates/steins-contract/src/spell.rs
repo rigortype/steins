@@ -1,5 +1,5 @@
 //! Plain-text spelling of a summarized contract-arm list (ADR-0053 §7 / ADR-0052
-//! §4, slice D2).
+//! §4).
 //!
 //! [`normalize::summarize_vals`](crate::normalize::summarize_vals) produces the
 //! *semantic* normal form of a proven value set — a sorted, deduped, precision-
@@ -52,9 +52,8 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
     // Int-flavored refinement/literal arms a lowered phpdoc envelope carries but a
     // summarized value set never does (`positive-int`, `int<1, 5>`, `5`). The
     // value-domain callers reach [`spell_arms`] only through `summarize_vals`, whose
-    // int members collapse to `Base(Int)`, so these buckets stay empty there — the
-    // shared speller is unchanged for the docblock renderer, extended for the
-    // contract-arm dump surface (ADR-0052 §9).
+    // int members collapse to `Base(Int)`, so these buckets stay empty there and
+    // carry only the contract-arm dump surface (ADR-0052 §9).
     let mut int_ranges: Vec<String> = Vec::new();
     let mut int_lits: Vec<i64> = Vec::new();
     let mut float_lits: Vec<f64> = Vec::new();
@@ -62,9 +61,9 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
     // (one `StrWith` arm) or the distinct-sorted literal arms — never both.
     let mut string_keyword: Option<String> = None;
     let mut string_lits: Vec<&str> = Vec::new();
-    // Array-vocabulary arms (ADR-0062 §6, D4): spelled in encounter order and
-    // appended after the scalar members — the one speller extended, not a second
-    // renderer. An array arm never blocks the scalar members around it (a
+    // Array-vocabulary arms (ADR-0062 §6): spelled in encounter order and
+    // appended after the scalar members, by the one speller (not a second
+    // renderer). An array arm never blocks the scalar members around it (a
     // `mixed`-ish union of `int|array{…}` still spells both sides), unlike the
     // catch-all refusal below, which is reserved for arms with no faithful
     // spelling at all (`object`, a class, `callable`, …).
@@ -112,7 +111,6 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
         members.push(b.to_owned());
     }
     if nullable {
-        // A `null`-only set spells `null`; a set with scalar members appends it.
         members.push("null".to_owned());
     }
     members.extend(array_members);
@@ -121,7 +119,7 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Array vocabulary (ADR-0062 §6, D4) — the ONE speller extended, not a second
+// Array vocabulary (ADR-0062 §6) — the ONE speller, not a second
 // renderer. [`spell_array_arm`]/[`spell_nested`] spell a `ContractTy` array
 // form; [`spell_val`] spells a concrete `Val` (the "value-side counterpart"),
 // sharing the same brace assembly ([`spell_shape`]) and key spelling
@@ -196,7 +194,7 @@ fn spell_array_arm(ty: &ContractTy) -> String {
     }
 }
 
-/// Spell a `Shape` arm through the shared D4 brace assembly ([`spell_shape`]):
+/// Spell a `Shape` arm through the shared brace assembly ([`spell_shape`]):
 /// lower its declared fields/tail into the shared `(Key, required, spelled
 /// value)` shape, compute the denotational `is_list` ([`shape_is_list`], the
 /// ONE computation, `steins_domain::ShapeFact::normalize` underneath), and
@@ -251,8 +249,8 @@ fn ckey_to_key(k: &CKey) -> Key {
 /// combination floors to the loosest honest keyword rather than inventing syntax
 /// no analyzer would accept.
 ///
-/// The parenthesized signature is *not* rendered here — that predates this slice
-/// (`callable(int): int` has always spelled back as `callable`) and is unchanged.
+/// The parenthesized signature is *not* rendered here: `callable(int): int`
+/// spells back as `callable`.
 fn spell_callable(obl: CallableObl) -> &'static str {
     match (obl.pure, obl.is_static, obl.closure_only) {
         (true, false, false) => "pure-callable",
@@ -313,7 +311,7 @@ pub enum ShapeTail {
     },
 }
 
-/// The shared D4 brace assembly (ADR-0062 §6): the ONE place that decides
+/// The shared brace assembly (ADR-0062 §6): the ONE place that decides
 /// `list{…}` vs `array{…}` and keyless-vs-keyed field spelling, used by both
 /// the contract-arm path (`spell_contract_shape`) and the concrete-value
 /// path ([`spell_val`]).
@@ -500,7 +498,7 @@ fn float_literal(f: f64) -> String {
 /// back through [`crate::lower_identifier`], so it keeps to the named atoms). When a
 /// set is nameable on both axes the core class wins and the casing half is dropped —
 /// a *widening*, which is the safe direction for every consumer of a spelling, and
-/// it keeps every casing-free set spelled exactly as before this pair existed.
+/// it leaves every casing-free set spelled exactly as the core ladder would.
 /// `Lowercase ∧ Uppercase` (a string with no cased character) has no single keyword
 /// either, so it falls through to the core ladder for the same reason.
 ///
@@ -610,7 +608,7 @@ mod tests {
 
     /// Terminal spelling has no `*/` hazard: a `*/`-bearing literal is spelled as
     /// its escaped literal here (the docblock renderer, not this function, widens
-    /// it). This is the deliberate divergence D2 introduces.
+    /// it). This is a deliberate divergence from the docblock renderer.
     #[test]
     fn star_slash_literal_is_spelled_verbatim_in_terminal() {
         assert_eq!(spell_vals(&[s("a*/b")]).unwrap(), "'a*/b'");
@@ -630,8 +628,8 @@ mod tests {
     }
 }
 
-/// ADR-0062 §6 (D4) — the array vocabulary `spell_arms` learns in this slice,
-/// plus its concrete-value counterpart [`spell_val`].
+/// ADR-0062 §6 — the array vocabulary `spell_arms` renders, plus its
+/// concrete-value counterpart [`spell_val`].
 #[cfg(test)]
 mod array_vocabulary_tests {
     use super::*;
@@ -646,9 +644,9 @@ mod array_vocabulary_tests {
 
     #[test]
     fn seeded_optional_shape_spells_instead_of_refusing() {
-        // The #51 L1 fixture: a seeded array param no longer refuses (the "no
-        // declared contract" flip lives on the steins-infer dump surface; this
-        // pins the underlying spelling it now has to spell from).
+        // The #51 fixture: a seeded array param spells rather than refuses (the
+        // "no declared contract" flip lives on the steins-infer dump surface; this
+        // pins the underlying spelling it spells from).
         assert_eq!(
             spell_ty("array{a?: string, b?: string}"),
             "array{a?: string, b?: string}"
@@ -714,7 +712,7 @@ mod array_vocabulary_tests {
 
     #[test]
     fn declared_list_shape_keeps_the_list_keyword_even_though_two_sequential_required_keys_denote_maybe() {
-        // D4: a `list{…}`-declared shape forces is_list Yes (A-G1, mirrored by
+        // A `list{…}`-declared shape forces is_list Yes (A-G1, mirrored by
         // `shape_is_list`'s `given` seed) even though the same two-field key
         // structure denotes Maybe on its own (see the next test) — the keyword
         // tracks the DECLARATION's promise, not just the bare key structure.
@@ -723,7 +721,7 @@ mod array_vocabulary_tests {
 
     #[test]
     fn maybe_list_with_sequential_keys_spells_keyless_array_not_list() {
-        // The D4 divergence point: `array{0: int, 1: string}` is a Maybe-list
+        // The divergence point: `array{0: int, 1: string}` is a Maybe-list
         // (two realizable insertion orders, §3) — NOT forced Yes — so it spells
         // the order-agnostic keyless `array{…}`, which round-trips back to the
         // same Maybe verdict (re-lowering `array{int, string}` gives the same
@@ -736,7 +734,7 @@ mod array_vocabulary_tests {
     fn single_zero_field_is_denotationally_a_list_even_when_declared_with_array() {
         // A single field at key 0 (required or optional), sealed, is Yes-list
         // by the domain's own computation regardless of the `array{}` keyword
-        // the user wrote — D4 spells the canonical answer, not the source
+        // the user wrote — the speller emits the canonical answer, not the source
         // spelling.
         assert_eq!(spell_ty("array{0: int}"), "list{int}");
         assert_eq!(spell_ty("array{0?: int}"), "list{0?: int}");
@@ -770,7 +768,7 @@ mod array_vocabulary_tests {
 
     #[test]
     fn empty_array_value_is_a_list() {
-        // array_is_list([]) is vacuously true (§3) — the D4-native spelling,
+        // array_is_list([]) is vacuously true (§3) — the native spelling,
         // deliberately diverging from PHPStan stable's `array{}` for the empty
         // case (ADR-0062 §6, the nsrt-measured divergence).
         assert_eq!(spell_val(&av(vec![])), "list{}");

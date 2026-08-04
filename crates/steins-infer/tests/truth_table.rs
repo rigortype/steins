@@ -1,5 +1,5 @@
 //! Acceptance tests for `type.argument-mismatch`, exercising the truth table
-//! through the pure `check` core and (for the milestone) the salsa pipeline.
+//! through the pure `check` core and the salsa pipeline.
 
 use steins_infer::{Diagnostic, check};
 use steins_syntax::SourceTree;
@@ -122,9 +122,7 @@ fn message_is_value_precise() {
     );
 }
 
-// ==========================================================================
 // ADR-0001 value propagation: local-variable flow.
-// ==========================================================================
 
 /// Return the single finding, asserting there is exactly one.
 fn only(src: &str) -> Diagnostic {
@@ -170,13 +168,11 @@ fn reassignment_uses_last_literal() {
     );
 }
 
-// ==========================================================================
 // ADR-0027 Feature A: write-set `Opaque` refinement of control-flow barriers.
 //
 // A control-flow construct no longer erases the *whole* env — it forgets only
 // the variables it might write. So a value survives an intervening construct
 // that does not touch it, and is forgotten by one that does.
-// ==========================================================================
 
 #[test]
 fn construct_writing_var_forgets_it() {
@@ -192,8 +188,7 @@ fn construct_writing_var_forgets_it() {
 fn irrelevant_construct_preserves_var() {
     // The surviving case: an `if` that does not write `$w` (only calls a
     // side-effecting helper and writes an unrelated `$y`) leaves `$w` known, so
-    // the proven TypeError at `width($w)` is now FLAGGED — where the old blanket
-    // Barrier would have gone silent.
+    // the proven TypeError at `width($w)` must remain visible.
     let src = format!(
         "{COERCIVE_INT}function log_it(): void {{}}\n$w = \"abc\";\nif ($cond) {{ log_it(); $y = 1; }}\nwidth($w);"
     );
@@ -241,8 +236,7 @@ fn try_catch_forgets_only_catch_param() {
 #[test]
 fn variable_written_via_call_in_construct_becomes_unknown() {
     // `$w` handed to a call *inside* the construct is forgotten when that call
-    // could write it by reference — the by-ref conservatism, now asked of the
-    // declaration rather than of every call (ADR-0070).
+    // could write it by reference, following ADR-0070 declaration-aware conservatism.
     let by_ref = format!(
         "{COERCIVE_INT}function sink(&$x): void {{}}\n$w = \"abc\";\nif ($cond) {{ sink($w); }}\nwidth($w);"
     );
@@ -263,8 +257,8 @@ fn variable_written_via_call_in_construct_becomes_unknown() {
 
 #[test]
 fn poison_inside_construct_still_poisons() {
-    // A poison marker anywhere in a construct's subtree poisons the whole scope,
-    // exactly as before — the write-set refinement never weakens poisoning.
+    // A poison marker anywhere in a construct's subtree poisons the whole scope;
+    // write-set refinement must not weaken poisoning.
     let global = format!("{COERCIVE_INT}$w = \"abc\";\nif ($cond) {{ global $g; }}\nwidth($w);");
     assert_eq!(n(&global), 0, "global inside if → scope poisoned → silent");
     let byref = format!(
@@ -285,9 +279,8 @@ fn variable_passed_to_another_call_becomes_unknown() {
     // unresolvable name is not a by-value promise.
     let unknown = "<?php\nfunction width(int $w): int { return $w; }\n$w = \"abc\";\nsink($w);\nwidth($w);";
     assert_eq!(n(unknown), 0, "$w passed to an unresolvable callee → unknown afterwards");
-    // ADR-0070: a BY-VALUE parameter receives a copy, so `$w` is still `"abc"`
-    // at the later call and `width("abc")` is a proven TypeError. This is the
-    // finding the blanket drop used to hide.
+    // ADR-0070: a by-value parameter receives a copy, so `$w` remains `"abc"`
+    // and `width("abc")` is a proven TypeError.
     let by_value = "<?php\nfunction width(int $w): int { return $w; }\nfunction sink($x) { return $x; }\n$w = \"abc\";\nsink($w);\nwidth($w);";
     assert_eq!(n(by_value), 1, "$w passed BY VALUE → the literal survives the call");
 }
@@ -305,9 +298,7 @@ fn extract_poisoned_scope_is_silent() {
     assert_eq!(n(&src), 0, "extract() poisons the scope");
 }
 
-// ==========================================================================
 // ADR-0001 value propagation: constant-function return flow.
-// ==========================================================================
 
 const CONST_PRICE: &str =
     "<?php\nfunction width(int $w): int { return $w; }\nfunction price(): string { return \"abc\"; }\n";
@@ -338,11 +329,9 @@ fn non_constant_functions_are_silent() {
 
 #[test]
 fn parametrized_call_crosses_via_the_summary_lane() {
-    // Pre-#60 this pinned silence ("parametrized function is not a constant
-    // function"). The parametrized call now resolves through the T0 binding
+    // The parametrized call resolves through the T0 binding
     // descent in argument position: `"x"` binds `$s`, `price` provably returns
-    // `"abc"`, and the boundary TypeError fires — a TRUE positive the constant-
-    // function lane's arity ceiling used to hide.
+    // `"abc"`, and the boundary TypeError fires.
     let params = "<?php\nfunction width(int $w): int { return $w; }\nfunction price(string $s): string { return \"abc\"; }\nwidth(price(\"x\"));";
     let d = only(params);
     assert!(

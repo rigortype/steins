@@ -1,12 +1,11 @@
-//! Acceptance tests for the object-state milestone (ADR-0036): the allocation-keyed
-//! heap, aliasing, `clone` isolation, escape sets and sweeps, `readonly` immunity,
-//! and the three new property checks (`type.property-mismatch`,
-//! `phpdoc.property-mismatch`, `readonly.reassigned`).
+//! Object state (ADR-0036): the allocation-keyed heap, aliasing, `clone`
+//! isolation, escape sets and sweeps, `readonly` immunity, and the property
+//! checks (`type.property-mismatch`, `phpdoc.property-mismatch`,
+//! `readonly.reassigned`).
 //!
-//! Property facts are observed *through diagnostics*: a proven bad property value
-//! read into a native-typed argument (`needInt($o->p)`) fires
-//! `type.argument-mismatch`; its presence or absence witnesses whether the heap
-//! kept the fact.
+//! Property facts are observed through diagnostics: a bad property value read into
+//! a native-typed argument (`needInt($o->p)`) fires `type.argument-mismatch`, so
+//! its presence witnesses whether the heap kept the fact.
 
 use steins_db::{Project, SourceFile, SteinsDatabase};
 use steins_infer::{
@@ -28,11 +27,10 @@ fn count(src: &str) -> usize {
 /// A prelude shared by most tests: an `int`-typed sink and an untyped-property box.
 const PRELUDE: &str = "<?php\nfunction needInt(int $x): int { return $x; }\nclass Box { public $p; }\n";
 
-// ---- Aliasing: writes visible through every alias --------------------------
+// Aliasing: writes visible through every alias
 
 #[test]
 fn alias_write_visible_via_original() {
-    // `$b = $a` shares the object; a write via `$a` is seen through `$b`.
     let src = format!("{PRELUDE}$a = new Box();\n$a->p = \"abc\";\n$b = $a;\nneedInt($b->p);\n");
     let f = findings(&src);
     assert_eq!(f.len(), 1, "{f:#?}");
@@ -41,12 +39,11 @@ fn alias_write_visible_via_original() {
 
 #[test]
 fn alias_write_visible_via_alias() {
-    // A write via the alias `$b` is seen through the original `$a`.
     let src = format!("{PRELUDE}$a = new Box();\n$b = $a;\n$b->p = \"abc\";\nneedInt($a->p);\n");
     assert_eq!(count(&src), 1);
 }
 
-// ---- clone isolation (adversarial #1), both directions ---------------------
+// clone isolation (adversarial #1), both directions
 
 #[test]
 fn clone_isolates_both_directions() {
@@ -64,7 +61,6 @@ fn clone_isolates_both_directions() {
 
 #[test]
 fn clone_write_does_not_leak_to_original() {
-    // Writing the clone never changes the original (the other direction).
     let src = format!(
         "{PRELUDE}$a = new Box();\n$a->p = 5;\n$c = clone $a;\n$c->p = \"abc\";\nneedInt($a->p);\n"
     );
@@ -94,7 +90,7 @@ fn self_clone_yields_writable_isolated_copy() {
     assert_eq!(count(&src), 1, "corrupted prop on the self-cloned object must fire");
 }
 
-// ---- Escape sweep on pass-to-unknown; non-escaped survival (the payoff) -----
+// Escape sweep on pass-to-unknown; non-escaped survival (the payoff)
 
 #[test]
 fn escape_sweep_on_pass_to_unknown() {
@@ -115,7 +111,7 @@ fn non_escaped_survives_unknown_call() {
     assert_eq!(count(&src), 1, "non-escaped object's props must survive");
 }
 
-// ---- Other escape triggers: prop-store, closure capture --------------------
+// Other escape triggers: prop-store, closure capture
 
 #[test]
 fn store_into_property_escapes() {
@@ -133,7 +129,7 @@ fn closure_capture_escapes() {
     assert_eq!(count(&src), 0, "a captured object escapes and is swept");
 }
 
-// ---- $this: overridable-call sweep vs private/final descent survival --------
+// $this: overridable-call sweep vs private/final descent survival
 
 #[test]
 fn this_survives_private_call_but_swept_by_overridable() {
@@ -152,7 +148,7 @@ class Widget {\n\
     assert_eq!(f[0].id, ID);
 }
 
-// ---- readonly immunity: persists through escape + unknown calls ------------
+// readonly immunity: persists through escape + unknown calls
 
 #[test]
 fn readonly_persists_through_escape_and_unknown_call() {
@@ -166,7 +162,7 @@ $r = new Ro(\"abc\");\n$alias = $r;\nsink($r);\nunknownFn();\nneedInt($alias->na
     assert_eq!(f[0].id, ID);
 }
 
-// ---- readonly.reassigned ---------------------------------------------------
+// readonly.reassigned
 
 #[test]
 fn readonly_reassigned_fires_on_proven_double_write() {
@@ -192,7 +188,7 @@ class Acct {\n\
     assert_eq!(count(src), 0, "a conditional second write is not a proven reassignment");
 }
 
-// ---- type.property-mismatch (strict / coercive / silent-on-unknown) --------
+// type.property-mismatch (strict / coercive / silent-on-unknown)
 
 #[test]
 fn property_mismatch_coercive_nonnumeric_string() {
@@ -224,7 +220,7 @@ fn property_mismatch_silent_on_unknown_value() {
     assert_eq!(count(src), 0);
 }
 
-// ---- phpdoc.property-mismatch (@var contract, incl. abstract fact) ----------
+// phpdoc.property-mismatch (@var contract, incl. abstract fact)
 
 #[test]
 fn phpdoc_property_mismatch_proven_value() {
@@ -245,7 +241,7 @@ function set(string $s): void { $p = new P2(); $p->num = $s; }\n";
     assert_eq!(f[0].id, PHPDOC_PROP_MISMATCH_ID);
 }
 
-// ---- Property read flows into a width()-style argument check ----------------
+// Property read flows into a width()-style argument check
 
 #[test]
 fn prop_read_flows_into_arg_check() {
@@ -255,7 +251,7 @@ fn prop_read_flows_into_arg_check() {
     assert_eq!(f[0].id, ID);
 }
 
-// ---- Promoted-param: no double-report --------------------------------------
+// Promoted-param: no double-report
 
 #[test]
 fn promoted_param_no_double_report() {
@@ -266,7 +262,7 @@ fn promoted_param_no_double_report() {
     assert_eq!(f[0].id, ID, "the single finding is the ctor-arg check, not a property one");
 }
 
-// ---- Property hooks (PHP 8.4): a hooked prop binds no value fact (FP class 16) --
+// Property hooks (PHP 8.4): a hooked prop binds no value fact (FP class 16)
 
 #[test]
 fn hooked_promoted_binds_no_fact() {
@@ -303,7 +299,7 @@ fn unhooked_promoted_still_binds_positional_and_named() {
     assert!(f.iter().all(|d| d.id == ID), "both are argument-mismatch findings");
 }
 
-// ---- Adversarial #2: by-ref property alias must not keep a stale fact -------
+// Adversarial #2: by-ref property alias must not keep a stale fact
 
 #[test]
 fn by_ref_property_alias_poisons_and_avoids_stale_fact() {

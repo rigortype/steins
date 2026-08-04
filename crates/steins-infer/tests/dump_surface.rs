@@ -156,7 +156,7 @@ fn unknown_is_honest() {
 #[test]
 fn assert_construct_is_verified_no_marker() {
     // FLIPPED by the 2026-07-25 owner ruling (ADR-0052 amendment "assert() reads as a
-    // throw-guard", slice I0): `assert($x === 5)` narrows at the Verified stratum
+    // throw-guard"): `assert($x === 5)` narrows at the Verified stratum
     // unconditionally — the ruling reads assert() as `if (!$expr) throw` and never
     // consults `zend.assertions`. So the dump carries NO `(asserted)` marker (pre-
     // ruling it printed `5 (asserted)`). The flip IS the record — see the amendment.
@@ -235,7 +235,7 @@ fn phpdoc_type_is_honest_when_no_contract_is_declared() {
     assert_eq!(pd[0].message, "dumped phpdoc type: no declared contract");
 }
 
-// ---- ADR-0062 S1 — the array vocabulary (D4) -------------------------------
+// ---- ADR-0062 — the array vocabulary (D4) ----------------------------------
 //
 // A seeded `array{…}` @param no longer renders "no declared contract" (#51
 // L1) — the ONE speller (`spell_arms`) now spells the array vocabulary, so
@@ -350,9 +350,7 @@ fn a_second_dump_of_an_object_holder_keeps_the_class() {
     assert_eq!(ds[1].message, "dumped type: Foo");
 }
 
-// ============================================================================
 // ADR-0053 D4 — `var_dump` default-on. The six resolution legs of §5.
-// ============================================================================
 
 #[test]
 fn leg_a_fully_qualified_global_var_dump_dumps() {

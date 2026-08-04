@@ -122,8 +122,8 @@ fn nofold_is_silent_for_folded_findings() {
     assert_eq!(check(&tree, &funcs, "d.php").len(), 1);
 }
 
-// ---- array-literal fold arguments (issue #39) -----------------------------
-//
+// array-literal fold arguments (issue #39)
+
 // These assert the GATE — which arguments reach the folder at all. `count`,
 // `in_array` and `implode` were parked on the `foldable` allowlist behind exactly
 // this gate; nothing about the allowlist changes here.

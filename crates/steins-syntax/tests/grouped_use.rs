@@ -43,7 +43,6 @@ fn grouped_function_use() {
     let ctx = imports_at(&tree, src, "format()");
     assert_eq!(ctx.fn_imports.get("format").map(String::as_str), Some("App\\Helpers\\format"));
     assert_eq!(ctx.fn_imports.get("slugify").map(String::as_str), Some("App\\Helpers\\slugify"));
-    // A function group must not pollute the class-import map.
     assert!(!ctx.class_imports.contains_key("format"));
 }
 
@@ -52,9 +51,7 @@ fn mixed_group_use_splits_by_item_type() {
     let src = "<?php\nuse App\\{Model\\User, function util\\fmt, const util\\MAX};\n$u = new User();\n";
     let tree = SourceTree::parse(src);
     let ctx = imports_at(&tree, src, "new User");
-    // Class item → class_imports.
     assert_eq!(ctx.class_imports.get("user").map(String::as_str), Some("App\\Model\\User"));
-    // Function item → fn_imports.
     assert_eq!(ctx.fn_imports.get("fmt").map(String::as_str), Some("App\\util\\fmt"));
     // `const` item → skipped (out of scope), never a class/function import.
     assert!(!ctx.class_imports.contains_key("max"));

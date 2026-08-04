@@ -28,16 +28,12 @@ const HDR: &str = "<?php\nfunction width(int $w): int { return $w; }\n$bad = \"a
 
 #[test]
 fn cond_true_walks_then_branch() {
-    // `$x === 5` with `$x = 5` is Yes → the then-branch is live → `width($bad)`
-    // (bad string via a variable) is FLAGGED.
     let src = format!("{HDR}$x = 5;\nif ($x === 5) {{ width($bad); }}\n");
     assert_eq!(n(&src), 1, "decided-true guard → then-branch live → flagged");
 }
 
 #[test]
 fn cond_false_prunes_then_branch() {
-    // `$x === 6` with `$x = 5` is No → the then-branch is DEAD → the propagated
-    // `width($bad)` inside it is never walked → silent.
     let src = format!("{HDR}$x = 5;\nif ($x === 6) {{ width($bad); }}\n");
     assert_eq!(n(&src), 0, "decided-false guard → then-branch dead → silent");
 }
@@ -55,7 +51,6 @@ function f(): void {
 }
 ";
     assert_eq!(n(src), 0, "code after a terminating decided-true then is unreachable → silent");
-    // Control: without the early return, the tail is reachable and flagged.
     let live = "<?php
 function width(int $w): int { return $w; }
 function f(): void {
@@ -71,8 +66,6 @@ function f(): void {
 
 #[test]
 fn join_agree_keeps_fact() {
-    // Both branches assign the SAME bad value → the join keeps a Singleton →
-    // `width($w)` after the `if` is flagged.
     let src = format!(
         "{HDR}if ($cond) {{ $w = \"abc\"; }} else {{ $w = \"abc\"; }}\nwidth($w);"
     );
@@ -81,8 +74,6 @@ fn join_agree_keeps_fact() {
 
 #[test]
 fn join_differ_becomes_oneof_and_is_silent() {
-    // Disagreeing branches → a OneOf, which never resolves to one proven value →
-    // silent (stage 1 does not flag OneOf at call sites).
     let src = format!(
         "{HDR}if ($cond) {{ $w = \"abc\"; }} else {{ $w = \"xyz\"; }}\nwidth($w);"
     );
@@ -91,7 +82,6 @@ fn join_differ_becomes_oneof_and_is_silent() {
 
 #[test]
 fn join_absent_in_one_branch_drops_fact() {
-    // A fact set in only one branch does not survive the join.
     let src = format!("{HDR}if ($cond) {{ $w = \"abc\"; }}\nwidth($w);");
     assert_eq!(n(&src), 0, "fact absent on the else path → dropped → silent");
 }
@@ -100,8 +90,6 @@ fn join_absent_in_one_branch_drops_fact() {
 
 #[test]
 fn positive_refinement_binds_then_branch() {
-    // `if ($x === "abc")` binds `$x = "abc"` in the then-branch, so `width($x)`
-    // there is a proven TypeError (a NEW finding from refinement).
     let src = "<?php
 function width(int $w): int { return $w; }
 function f($x): void {
@@ -113,7 +101,6 @@ function f($x): void {
 
 #[test]
 fn else_refinement_of_not_identical() {
-    // The else-branch of `$x !== "abc"` proves `$x === "abc"`.
     let src = "<?php
 function width(int $w): int { return $w; }
 function f($x): void {
@@ -163,7 +150,6 @@ f(null);
 
 #[test]
 fn elseif_chain_selects_matching_arm() {
-    // `$x = 2` selects the second arm (`elseif ($x === 2)`), binding `$w = "abc"`.
     let src = format!(
         "{HDR}$x = 2;\nif ($x === 1) {{ $w = \"ok1\"; }} elseif ($x === 2) {{ $w = \"abc\"; }} else {{ $w = \"okz\"; }}\nwidth($w);"
     );
@@ -172,7 +158,6 @@ fn elseif_chain_selects_matching_arm() {
 
 #[test]
 fn nested_ifs_preserve_untouched_fact() {
-    // Nested ifs that never write `$bad` leave it known across both levels.
     let src = format!("{HDR}if ($a) {{ if ($b) {{ echo 1; }} }}\nwidth($bad);");
     assert_eq!(n(&src), 1, "nested ifs not writing $bad → fact survives → flagged");
 }
@@ -212,7 +197,6 @@ fn ternary_undecided_is_oneof_and_silent() {
 
 #[test]
 fn ternary_undecided_agreeing_arms_is_singleton() {
-    // Both arms the SAME bad literal → a Singleton even when undecided → flagged.
     let src = format!("{HDR}$w = $c ? \"abc\" : \"abc\";\nwidth($w);");
     assert_eq!(n(&src), 1, "undecided ternary with equal arms → Singleton → flagged");
 }
@@ -239,7 +223,6 @@ function f($u): void {
 
 #[test]
 fn call_on_null_silent_for_nullsafe() {
-    // `?->` on null is defined (short-circuits) → never fires.
     let src = "<?php
 class U { public function name(): string { return \"x\"; } }
 function f($u): void {
@@ -251,7 +234,6 @@ function f($u): void {
 
 #[test]
 fn call_on_null_silent_for_oneof_including_null() {
-    // A OneOf that merely *includes* null is Maybe → silent.
     let src = "<?php
 class U { public function name(): string { return \"x\"; } }
 function f($c): void {

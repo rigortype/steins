@@ -32,8 +32,7 @@
 //! and there are thousands of them.
 //!
 //! A manifest that cannot be read or parsed is skipped, not fatal: the paths it
-//! would have governed fall through to the floor, which is where they were
-//! before this existed.
+//! would have governed fall through to the floor.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -48,9 +47,8 @@ const NEVER_DESCEND: &[&str] = &["vendor", ".git", "node_modules"];
 
 /// Discover the layout governing `paths`, resolving relative paths against `cwd`.
 ///
-/// Returns [`ProjectLayout::fallback`] when no manifest is found — the behavior
-/// that predates this module, and an honest answer for a tree that is not a
-/// Composer project at all.
+/// Returns [`ProjectLayout::fallback`] when no manifest is found — the honest
+/// answer for a tree that is not a Composer project at all.
 #[must_use]
 pub fn discover(paths: &[PathBuf], cwd: &Path) -> ProjectLayout {
     let seeds = seed_dirs(paths, cwd);
@@ -102,15 +100,13 @@ pub fn discover(paths: &[PathBuf], cwd: &Path) -> ProjectLayout {
 /// normalized, with a file path standing in for its parent directory.
 ///
 /// A path that names *nothing* seeds nothing. The parent substitution exists so
-/// that `steins check src/Foo.php` discovers the manifest governing `src/`; read
-/// as "when not a directory, use the parent" it also fired on paths that do not
-/// exist, and then discovery walked a tree the caller never named. For a
-/// top-level `/typo` that tree is `/` — the whole filesystem, downward, which is
-/// the unbounded walk that made `doctor /typo` look like a hang rather than an
-/// error. Dropping the seed is what bounds `discover` on a nonexistent root
-/// regardless of which caller passes one; callers that want a *diagnosis* of the
-/// bad argument must reject it themselves (ADR-0050 §7 amendment for the
-/// path-walking commands, ADR-0054 §10 for doctor).
+/// that `steins check src/Foo.php` discovers the manifest governing `src/`, but it
+/// applies only when the path exists: a nonexistent `/typo` must not substitute
+/// `/` and walk the whole filesystem downward (an unbounded walk that would make
+/// `doctor /typo` look like a hang rather than an error). Dropping the seed bounds
+/// `discover` on a nonexistent root regardless of which caller passes one; callers
+/// that want a *diagnosis* of the bad argument must reject it themselves (ADR-0050
+/// §7 amendment for the path-walking commands, ADR-0054 §10 for doctor).
 fn seed_dirs(paths: &[PathBuf], cwd: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for p in paths {
@@ -201,7 +197,7 @@ fn read_root(manifest: &Path, dir: &Path) -> Option<GoverningRoot> {
 
 /// Resolve one manifest PHP declaration to a [`PhpTarget`], or `None` when the
 /// constraint cannot be read with confidence — an unparseable constraint yields
-/// *no target*, never a guessed one (the pre-#28 behavior for that project).
+/// *no target*, never a guessed one.
 fn php_target_from(raw: &str, source: PhpTargetSource) -> Option<PhpTarget> {
     let (floor, ceiling) = match source {
         // `config.platform.php` is a concrete version, not a constraint.
@@ -507,11 +503,10 @@ mod tests {
     }
 
     /// A root that names nothing seeds nothing, so `discover` terminates instead
-    /// of substituting the parent and walking it. Before this, a top-level
-    /// `/typo` seeded `/` and the downward walk descended the entire filesystem
-    /// — `doctor /typo` looked like an infinite hang. The assertion that matters
-    /// is that this test *returns at all*; the fallback layout is the honest
-    /// answer for a tree that was never there.
+    /// of substituting the parent and walking it. A top-level `/typo` must not
+    /// seed `/` and descend the entire filesystem (which would make `doctor /typo`
+    /// hang). The assertion that matters is that this test *returns at all*; the
+    /// fallback layout is the honest answer for a tree that was never there.
     #[test]
     fn a_nonexistent_root_terminates_and_falls_back() {
         let cwd = std::env::temp_dir();

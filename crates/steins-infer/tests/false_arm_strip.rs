@@ -1,36 +1,17 @@
-//! ADR-0052 §2 — **value subtraction on the contract arm lane**: the `!== v` guard
-//! reaching the arm carrier.
+//! Value subtraction on the contract-arm lane (ADR-0052 §2).
 //!
-//! Until this slice the arm lane received guard subtraction for exactly two
-//! subtrahends — `instanceof` (`Subtrahend::Class`) and `!== null`
-//! (`Subtrahend::Null`) — so the refinement PHPStan is best known for,
-//! `if (strpos($h, $n) !== false)`, left the declared `T|false` arm list wholly
-//! untouched. steins-contract's side was already complete and already sound:
-//! `normalize::subtrahend_covers(Subtrahend::Value(v), arm)` judges arm-wise and
-//! kills exactly the arms the literal provably covers. What was missing was the
-//! wire, and this file is its fixture-level evidence.
+//! An arm dies iff the subtrahend covers it with `Yes`; `Maybe` keeps it. Thus
+//! `false` deletes a `false` arm but not a general `bool` arm. An `int<lo, hi>`
+//! arm minus an endpoint shrinks by one, while an interior point keeps it whole
+//! because a gap has no arm spelling (issue #90).
 //!
-//! The law it pins is one sentence of §2: **an arm dies iff the subtrahend covers
-//! it with `Yes`; `Maybe` keeps it.** That single rule is simultaneously the reason
-//! `false` deletes a `false` arm and the reason it does NOT delete a general `bool`
-//! arm — `bool` has an interior point (`true`) the guard says nothing about. Both
-//! directions are asserted below, because only the pair is the rule. The one
-//! partial deletion layered on it (the issue #90 follow-up) is pinned here too:
-//! an `int<lo, hi>` arm minus one of its own **endpoints** shrinks by one, while
-//! an interior point keeps it whole — a gap has no arm spelling.
+//! Two deliberate limits are pinned:
+//! * truthiness over `int|false` strips nothing because it excludes both `0` and
+//!   `false`, not one value;
+//! * the positive branch of `=== false` gains no keep-only arm narrowing because
+//!   the value lane's `Refine::Exact` owns it.
 //!
-//! Two deliberate non-changes are pinned here as well, so a later reader can tell a
-//! refusal from an oversight:
-//!
-//! * `if ($pos)` over `int|false` (`Refine::Truthy`) strips nothing. Truthiness
-//!   kills `0` as well as `false`, so it is not a value subtraction; PHPStan's
-//!   classic `strpos` footgun needs its own designed subtrahend.
-//! * The positive branch of `=== false` gains no *keep-only* arm narrowing. The
-//!   value lane's `Refine::Exact` already owns it, and the arm lane is a
-//!   subtraction carrier by construction.
-//!
-//! Zero non-debug emission is asserted on every fixture: narrowing is a *type*,
-//! never a finding.
+//! Narrowing emits no non-debug finding.
 
 use std::collections::HashMap;
 
@@ -82,15 +63,13 @@ fn else_branch(decl: &str, cond: &str) -> String {
     ))
 }
 
-// ---------------------------------------------------------------------------
-// The headline: the catalog floor's `T|false` row loses its `false` arm
-// ---------------------------------------------------------------------------
 
-/// The ADR-0069 / issue #79 declared-return floor puts `strpos`' functionMap row
-/// into the arm lane — mined as `positive-int|0|false`, which the seeding
-/// canonicalizes to two arms (issue #90: the literal and the interval it abuts are
-/// one denotation) — no single value-domain fact, so before this slice the guard
-/// had nothing to bite on.
+// The headline: the catalog floor's `T|false` row loses its `false` arm
+
+
+/// ADR-0069/issue #79 puts `strpos`' functionMap return in the arm lane.
+/// `positive-int|0|false` canonicalizes to an interval plus `false` (issue #90),
+/// with no single value-domain fact.
 const STRPOS_GUARDED: &str = "<?php
 function f(string $h, string $n): void {
     $pos = strpos($h, $n);
@@ -129,9 +108,9 @@ function f(string $needle, array $hay): void {
     assert_eq!(one_type(src), "dumped type: int|string (asserted)");
 }
 
-// ---------------------------------------------------------------------------
+
 // The hand-written declaration: identical behavior, one rung up
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn a_hand_written_string_false_narrows_to_string() {
@@ -159,9 +138,9 @@ function f($x): void {
     assert_eq!(one_phpdoc_type(guarded), "dumped phpdoc type: string (asserted)");
 }
 
-// ---------------------------------------------------------------------------
+
 // Polarity: which spellings produce the exclusion, and on which branch
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn every_identity_spelling_of_the_guard_reaches_the_lane() {
@@ -209,9 +188,9 @@ fn a_loose_comparison_is_not_an_identity_and_subtracts_nothing() {
     );
 }
 
-// ---------------------------------------------------------------------------
+
 // The FP-safety direction: `Maybe` keeps the arm
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn a_general_bool_arm_survives_the_false_exclusion() {
@@ -244,9 +223,9 @@ fn an_emptied_lane_drops_to_no_fact_never_a_death_signal() {
     assert_eq!(then_branch("false", "$x !== false"), "dumped type: unknown");
 }
 
-// ---------------------------------------------------------------------------
+
 // Generality: the subtrahend is a value, not the `false` special case
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn an_int_literal_exclusion_deletes_its_arm() {
@@ -263,13 +242,9 @@ fn an_int_literal_exclusion_deletes_its_arm() {
 
 #[test]
 fn subtracting_an_endpoint_of_an_interval_arm_clips_it() {
-    // The measured slice the issue #90 pin asked for: an interval arm CAN now be
-    // partly deleted, exactly at its endpoints. `strpos`' row denotes
-    // `int<0, max>|false`, and `!== 0` clips the interval's own lower endpoint:
-    // `subtract_arm(Value(0), int<0, max>)` narrows the arm to `int<1, max>` —
-    // what the pre-absorption `positive-int|0` lost by whole-arm deletion, and
-    // what PHPStan spells on this guard. The `false` arm is disjoint from `0`
-    // and survives untouched.
+    // An interval arm can be partly deleted at an endpoint. `strpos` denotes
+    // `int<0, max>|false`; `!== 0` clips it to `int<1, max>|false`, matching
+    // PHPStan. The `false` arm is disjoint and survives.
     let src = "<?php
 function f(string $h, string $n): void {
     $pos = strpos($h, $n);
@@ -281,10 +256,9 @@ function f(string $h, string $n): void {
 
 #[test]
 fn subtracting_an_interior_point_of_an_interval_arm_keeps_it_whole() {
-    // The refusal that bounds the clip: an interior point would split the
-    // interval into two arms — a gap the arm vocabulary has no way to spell
-    // back — so the honest answer is the unchanged arm (the interior-point
-    // discipline ADR-0052 §2 states for the value lane, one carrier up).
+    // An interior point would split the interval into two arms — a gap the arm
+    // vocabulary cannot spell — so the arm is left unchanged (ADR-0052 §2's
+    // interior-point discipline).
     let src = "<?php
 function f(string $h, string $n): void {
     $pos = strpos($h, $n);
@@ -324,9 +298,9 @@ fn a_string_literal_exclusion_deletes_its_arm() {
     );
 }
 
-// ---------------------------------------------------------------------------
+
 // Refusal: truthiness is NOT a value subtraction
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn a_truthiness_guard_strips_no_arm() {
@@ -338,9 +312,9 @@ fn a_truthiness_guard_strips_no_arm() {
     assert_eq!(then_branch("string|false", "$x"), "dumped type: string|false (asserted)");
 }
 
-// ---------------------------------------------------------------------------
+
 // Regression: the `null` path is unchanged
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn the_null_subtrahend_still_works_exactly_as_before() {
@@ -349,9 +323,9 @@ fn the_null_subtrahend_still_works_exactly_as_before() {
     assert_eq!(then_branch("string|null", "null !== $x"), "dumped type: string (asserted)");
 }
 
-// ---------------------------------------------------------------------------
+
 // Consumption: the narrowed lane reaches the argument-dispatch read (issue #77)
-// ---------------------------------------------------------------------------
+
 
 /// A mock PHP answering the two reflection surfaces the string-predicate transfer
 /// rung consults — the declaration (its admission gate) and the reflected envelope

@@ -209,11 +209,11 @@ pub struct Diff {
 /// Baseline proven `io` against current proven `io.net.http` is reported as an
 /// **add** of `io.net.http` and a remove-candidate of `io` (subject to the
 /// exhaustive gate), not as a single "refined" event. Two reasons to keep it
-/// literal in this slice: a hierarchy-aware diff has to decide whether a coarse
+/// literal: a hierarchy-aware diff has to decide whether a coarse
 /// label narrowing is even the same fact — it usually is not, since `io` most
 /// often came from a different call site than `io.net.http` — and a wrong
 /// collapse *hides* an addition, which is the one event this surface exists to
-/// show. Smarter matching can land later; it cannot land by accident.
+/// show. Smarter matching must be deliberate; it cannot happen by accident.
 #[must_use]
 pub fn diff(baseline: &[Entry], current: &[Entry]) -> Diff {
     let index = |entries: &[Entry]| -> BTreeMap<(String, String), Entry> {

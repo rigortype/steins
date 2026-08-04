@@ -67,9 +67,7 @@ fn undef(src: &str) -> Vec<Diagnostic> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
 // Leg 1: the verdict prunes the dead branch.
-// ---------------------------------------------------------------------------
 
 /// The reproduced FP class 15 (phpstan-src `nsrt/static-has-method.php`): the negated
 /// guard returns, so the fall-through is proven dead — the `No` verdict makes
@@ -142,9 +140,7 @@ if (function_exists('nope_absent_function')) {
     assert_eq!(undef(src).len(), 0, "then-branch is dead (function provably absent): {:?}", undef(src));
 }
 
-// ---------------------------------------------------------------------------
 // Verdict `Yes`: present symbol → true-branch live, call resolves, checks run.
-// ---------------------------------------------------------------------------
 
 /// A present method → `Yes` verdict → the guard true-branch stays live: the guarded
 /// call resolves (no undefined-method finding), a sibling absent call inside the same
@@ -180,9 +176,7 @@ if (method_exists(C::class, 'm')) {
     assert_eq!(arity.len(), 1, "too-few-arguments fires inside the live true-branch: {arity:?}");
 }
 
-// ---------------------------------------------------------------------------
 // Leg 2: the conservative guard-respect leg (Maybe verdict → vouch silence).
-// ---------------------------------------------------------------------------
 
 /// The instance-receiver idiom: `method_exists($o,'m')` cannot fold ($o is not a
 /// literal class), so the verdict is `Maybe` and both branches walk live. S2 would
@@ -250,9 +244,7 @@ if (method_exists(C::class, 'm')) {
     assert_eq!(undef(src).len(), 0, "{:?}", undef(src));
 }
 
-// ---------------------------------------------------------------------------
 // Sidecar-availability gate (A9 / A2ii): no boot surface ⇒ no folding.
-// ---------------------------------------------------------------------------
 
 /// Without a live boot surface the verdict is `Maybe` (the sound subset): the negated
 /// guard is NOT proven, both paths walk, and the vouch on the (true) return branch
@@ -292,9 +284,7 @@ rex_var::varsIterator();
     assert_eq!(d.len(), 0, "a boot-surface homonym is silence: {d:?}");
 }
 
-// ---------------------------------------------------------------------------
 // function_exists / class_exists positive verdicts + the polyfill non-regression.
-// ---------------------------------------------------------------------------
 
 /// A catalog builtin function → `function_exists` folds to `Yes`; the true-branch is
 /// live and a sibling absent method call inside it fires.

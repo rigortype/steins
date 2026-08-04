@@ -59,9 +59,7 @@ fn on_null_count(src: &str, layout: ProjectLayout) -> usize {
     check_under(src, layout).iter().filter(|d| d.id == "call.on-null").count()
 }
 
-// ---------------------------------------------------------------------------
 // The decided directions
-// ---------------------------------------------------------------------------
 
 /// The survey's arriving class: an old-PHP compatibility branch under a modern
 /// floor. `PHP_VERSION_ID < 80000` is `No` for every declared version, the arm
@@ -89,9 +87,7 @@ fn the_else_arm_of_a_decided_guard_is_the_live_one() {
     assert_eq!(dump_under(src, old_range()), "dumped type: 's'");
 }
 
-// ---------------------------------------------------------------------------
 // The adversarial set (the issue's named counterexamples)
-// ---------------------------------------------------------------------------
 
 /// A straddling target decides NOTHING: `^8.1` spans both sides of 80400, both
 /// arms stay live, and the join is honest.
@@ -140,9 +136,7 @@ fn the_tail_after_the_guard_sees_the_join() {
     assert_eq!(dump_under(src, caret81()), "dumped type: 2.5");
 }
 
-// ---------------------------------------------------------------------------
 // The corners where the fold must decline
-// ---------------------------------------------------------------------------
 
 /// A userland `const PHP_VERSION_ID` anywhere in the project disables the fold
 /// project-wide — constant resolution is unmodeled, so no reference is safe.

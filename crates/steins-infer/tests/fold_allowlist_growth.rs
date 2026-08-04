@@ -1,17 +1,11 @@
-//! The issue-#78 allowlist admissions, end to end through the **real** sidecar.
+//! Issue #78 allowlist admissions through the real sidecar.
 //!
-//! Every name here reached the catalog the same way: an ADR-0008 purity argument,
-//! a 32/64-bit differential probe verdict, and a `WIDTH_SAFE`/`WIDTH_REFUSED` row.
-//! No mechanism moved with them — the fold lane, the width gate and the replay loop
-//! picked them up because they are on the allowlist, which is exactly what these
-//! fixtures pin: the dump surface renders the engine's own answer, at the value
-//! rung, for names nobody wrote a line of code for.
+//! Each name has an ADR-0008 purity argument, a 32/64-bit differential verdict,
+//! and a `WIDTH_SAFE`/`WIDTH_REFUSED` row. These fixtures assert that the dump
+//! surface renders the engine's answer. `replay_fold.rs` covers the 32-bit width
+//! gate; probe evidence is in the ADR-0066 amendment.
 //!
-//! The 32-bit half of each verdict is not testable from here (this machine's `php`
-//! is 64-bit); `replay_fold.rs` covers the width gate against a synthetic 32-bit
-//! `env`, and the probe evidence itself lives in the ADR-0066 amendment.
-//!
-//! Requires `php` on `PATH`; without it each test skips with an explicit marker.
+//! Requires `php` on `PATH`; otherwise each test skips explicitly.
 
 use steins_infer::{DEBUG_TYPE_ID, Folder, SidecarFolder, check_with};
 use steins_syntax::{ArgValue, SourceTree};
@@ -141,7 +135,7 @@ fn the_admitted_surface_folds() {
 
 /// `substr_replace` is admitted for its **scalar** subject. Handed an array subject
 /// the engine answers with an array, and an array *result* widens on the Rust side —
-/// the documented #41/#42 boundary, unchanged by this slice. The fixture pins that
+/// the documented #41/#42 boundary. The fixture pins that
 /// the scalar sibling on the very next line still folds, so the widen is the result
 /// shape and not a disabled folder.
 #[test]

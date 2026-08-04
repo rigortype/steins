@@ -73,8 +73,7 @@ pub enum TypeKind {
     Conditional(Conditional),
     /// A construct inside the reference grammar that Steins keeps opaque: the raw
     /// source text is retained so callers can render it, but it carries no
-    /// envelope. Currently unused by the parser (the whole reference grammar is
-    /// modelled) — reserved for forward compatibility with upstream additions.
+    /// envelope.
     Unsupported(String),
 }
 

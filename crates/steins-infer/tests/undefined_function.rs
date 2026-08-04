@@ -61,9 +61,7 @@ fn fires(src: &str) -> Vec<Diagnostic> {
     run(src, &mut Boot::ready())
 }
 
-// ---------------------------------------------------------------------------
 // Firing fixtures.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn fires_on_a_bare_undefined_global_call() {
@@ -104,9 +102,7 @@ fn fires_with_arguments_present() {
     assert_eq!(d.len(), 1, "{d:?}");
 }
 
-// ---------------------------------------------------------------------------
 // Silence matrix — one fixture per leg.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn silent_when_family_unavailable() {

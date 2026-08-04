@@ -44,9 +44,6 @@ fn registry_has_no_unemittable_ids() {
     let emittable: HashSet<&str> = ALL_EMITTABLE_IDS.iter().copied().collect();
     let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
 
-    // Disjointness: no id may be both emitted and "not yet emitted". When a stage
-    // lights up a pending id (adds it to ALL_EMITTABLE_IDS), this forces its
-    // removal from REGISTERED_NOT_YET_EMITTED.
     for id in &emittable {
         assert!(
             !pending.contains(id),
@@ -131,10 +128,7 @@ fn classification_matches_adr_0050_section_1() {
     assert_eq!(layer(DEBUG_TRACE_ID), Some(Layer::Debug));
 }
 
-/// The finding-breadth family lights up stage by stage (ADR-0049). At S2 the
-/// flagship `call.undefined-method` is **emitted**; S3 adds the offset pair, S4 the
-/// two existence ids, S5 the userland arity arms, S6 the declared-receiver lane —
-/// leaving only the internal-target too-many arm registered ahead of emission.
+/// Finding-breadth registry coverage by ADR-0049 stage.
 #[test]
 fn finding_breadth_ids_light_up_stage_by_stage() {
     let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
@@ -147,8 +141,8 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
         assert_eq!(layer(id), Some(Layer::Proof));
     }
 
-    // S4: the two existence ids are emittable proof-layer ids and left the pending
-    // list (promoted after the zero-FP measurement run + field survey).
+    // S4: the two existence ids are emittable proof-layer ids following a
+    // zero-FP measurement run and field survey.
     for id in [CALL_UNDEFINED_FUNCTION_ID, CLASS_UNDEFINED_ID] {
         assert!(emittable.contains(id), "`{id}` must be emittable from S4");
         assert!(!pending.contains(id), "`{id}` must have left REGISTERED_NOT_YET_EMITTED");
@@ -169,25 +163,17 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
     assert!(!pending.contains(PHPDOC_UNDEFINED_METHOD_ID), "S6 must have left REGISTERED_NOT_YET_EMITTED");
     assert_eq!(layer(PHPDOC_UNDEFINED_METHOD_ID), Some(Layer::Contract));
 
-    // Only ONE finding-breadth id stays registered ahead of emission: the too-many
-    // arm (internal targets only — userland too-many runs clean, never a finding —
-    // waiting on the reflect slice, M2).
+    // Only the internal-target too-many arm remains pending; userland too-many
+    // measured clean, and internal targets require reflection (M2).
     let too_many = CALL_TOO_MANY_ARGUMENTS_ID;
     assert!(pending.contains(too_many), "`{too_many}` should be registered-not-yet-emitted");
     assert!(!emittable.contains(too_many), "`{too_many}` must not be emittable before its stage");
     assert!(layer(too_many).is_some(), "`{too_many}` must be registered with a layer");
-    // One id is registered-not-yet-emitted: the too-many arm. The debug lane's
-    // four ids — the three ADR-0053 dump-surface ids and the ADR-0074 trace
-    // annotation `debug.trace` — have all lit up (checked in
-    // `all_four_debug_ids_emit`).
     assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 1);
 }
 
-/// The debug lane: all four debug ids emit — the ADR-0053 explicit pair
-/// (`debug.type` / `debug.phpdoc-type`) at D3, `debug.var-dump` at D4, and the
-/// ADR-0074 trace annotation `debug.trace` at issue #94's emit slice. Each carries
-/// `Layer::Debug`, is in `ALL_EMITTABLE_IDS` (left `REGISTERED_NOT_YET_EMITTED`), and
-/// keeps its pinned kebab-case `debug.*` spelling.
+/// All four debug ids emit at `Layer::Debug`, appear in `ALL_EMITTABLE_IDS`, and
+/// retain their ADR-0053/ADR-0074 kebab-case spellings.
 #[test]
 fn all_four_debug_ids_emit() {
     let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
@@ -249,9 +235,7 @@ fn facet_wire_spellings() {
     assert_eq!(Facet::Origin(Origin::Propagated).value(), "propagated");
 }
 
-// ---------------------------------------------------------------------------
 // The `surface_floor` attribute (ADR-0062 A-G10)
-// ---------------------------------------------------------------------------
 
 /// The floor column is **total**: every registered id has one, and the floor lookup
 /// agrees with the registry row (the same binding `layer()` gets).

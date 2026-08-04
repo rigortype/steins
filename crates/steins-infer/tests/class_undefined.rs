@@ -57,9 +57,7 @@ fn fires(src: &str) -> Vec<Diagnostic> {
     run(src, &mut Boot::ready())
 }
 
-// ---------------------------------------------------------------------------
 // Firing fixtures: each of the four hard-error positions.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn fires_on_new() {
@@ -102,9 +100,7 @@ fn fires_on_relative_namespace_new_a8() {
     assert!(d[0].message.contains("App\\Widget"), "{}", d[0].message);
 }
 
-// ---------------------------------------------------------------------------
 // Verified NON-findings (ADR-0049 §5 table): each silent.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn silent_on_instanceof() {
@@ -142,15 +138,13 @@ fn silent_on_self_static_parent() {
 
 #[test]
 fn silent_on_trait_name_static_call() {
-    // A static call through a trait name RUNS (deprecated), never a hard error — the
-    // trait is in the class-like index (S1), so it resolves.
+    // PHP permits a static call through a trait name (with a deprecation), so the
+    // trait resolves through the class-like index rather than raising a hard error.
     let d = fires("<?php\ntrait T { public static function m() {} }\nT::m();\n");
     assert!(d.is_empty(), "{d:?}");
 }
 
-// ---------------------------------------------------------------------------
 // Silence matrix — one fixture per ladder leg.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn silent_on_defined_class() {

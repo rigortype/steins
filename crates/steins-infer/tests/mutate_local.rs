@@ -1,15 +1,10 @@
-//! ADR-0063 P2 acceptance tests: the `mutate.local` color, the **conditional**
-//! by-ref out-parameter rows, and the Pure tolerance.
+//! The `mutate.local` color, conditional by-ref out-parameter rows, and Pure
+//! tolerance (ADR-0063 P2).
 //!
-//! The thesis under test is that an out-parameter write is a property of the
-//! *call*, not of the function. Every test here therefore comes in pairs that
-//! differ only in an argument: supplied vs. omitted (the arity leg), and a frame
-//! local vs. a property or superglobal (the target leg). A per-function flag
-//! could not tell either pair apart — which is the upstream lesson ADR-0063
-//! imports (php-src #11884: conditional on the argument, not a per-function lie).
-//!
-//! The tolerance leg is the other half: `preg_match` into a local is what a pure
-//! function does all day, and 狼少年撲滅 means it must not bark.
+//! An out-parameter write is a property of the *call*, not the function. Fixtures
+//! distinguish supplied from omitted arguments and frame locals from properties
+//! or superglobals (php-src #11884). A Pure function may tolerate writes into its
+//! own frame locals, such as `preg_match` output.
 
 use steins_infer::{check, effect_summary, Diagnostic, EffectSummary, EFFECT_ID, PARAM_MISMATCH_ID};
 use steins_syntax::SourceTree;
@@ -36,7 +31,7 @@ fn summary(src: &str, symbol: &str) -> EffectSummary {
         .unwrap_or_else(|| panic!("no summary for {symbol}"))
 }
 
-// ---- The label exists and is registered -------------------------------------
+// The label exists and is registered
 
 #[test]
 fn mutate_local_is_a_registered_label_under_mutate() {
@@ -54,7 +49,7 @@ fn declaring_mutate_local_is_accepted_by_the_registry() {
     assert_eq!(effects(src).len(), 0, "declared mutate.local is clean");
 }
 
-// ---- The arity leg ----------------------------------------------------------
+// The arity leg
 
 #[test]
 fn the_out_param_color_attaches_only_when_the_argument_is_supplied() {
@@ -112,7 +107,7 @@ fn str_replace_count_sits_at_position_three() {
     assert_eq!(summary(four, "f").labels, vec!["mutate.local".to_owned()]);
 }
 
-// ---- The target leg ---------------------------------------------------------
+// The target leg
 
 #[test]
 fn a_property_target_is_not_local_and_is_not_tolerated() {
@@ -161,7 +156,7 @@ fn an_aliased_frame_cannot_claim_locality() {
     assert!(!d.message.contains("mutate.local"), "{}", d.message);
 }
 
-// ---- Pure tolerance ---------------------------------------------------------
+// Pure tolerance
 
 #[test]
 fn pure_tolerates_preg_match_into_a_local() {
@@ -188,7 +183,7 @@ fn tolerance_does_not_extend_to_the_parent_label() {
     assert_eq!(effects(src).len(), 1, "an escaping mutation still exceeds Pure");
 }
 
-// ---- The composed axes ------------------------------------------------------
+// The composed axes
 
 #[test]
 fn shuffle_carries_both_its_own_color_and_the_by_ref_color() {
@@ -205,13 +200,12 @@ fn shuffle_carries_both_its_own_color_and_the_by_ref_color() {
     assert!(d.message.contains("nondet.random"), "{}", d.message);
 }
 
-// ---- P1's own-color leg, lit up by P2 ---------------------------------------
+// The invoker's own-color leg
 
 #[test]
 fn pure_accepts_usort_over_a_local_with_a_pure_comparator() {
-    // Before P2 the invoker's own-color leg was inert for `usort` — the catalog
-    // had no color for it to contribute. Now it contributes `mutate.local`, and
-    // the tolerance is what keeps this clean.
+    // `usort` contributes `mutate.local` on its own array; the pure tolerance for
+    // a local-only mutation is what keeps this clean.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(array $rows): array {\n    usort($rows, function ($a, $b) { return $a <=> $b; });\n    return $rows;\n}\n";
     assert_eq!(effects(src).len(), 0, "pure comparator over a local array is clean");
     assert_eq!(summary(src, "f").labels, vec!["mutate.local".to_owned()]);
@@ -240,7 +234,7 @@ fn array_walk_over_a_property_reports_the_escaping_write() {
     assert!(d.message.contains("array_walk() has effect mutate"), "{}", d.message);
 }
 
-// ---- The C9 pure-callable consumer inherits the tolerance -------------------
+// The C9 pure-callable consumer inherits the tolerance
 
 fn param_mismatches(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);

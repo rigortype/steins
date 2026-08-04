@@ -1,15 +1,12 @@
 //! ADR-0075 — a method/static call's return summary rebinds on the T0 rungs.
 //!
-//! The function leg of call-site value reflection is covered by `return_summary.rs`
-//! and the `concat.rs` flagship. This file pins the method twin: the walk already
-//! descends into a resolved method body, and the summary that descent produces is
-//! now consumed at `apply_assign` (and return composition) exactly as a function's
-//! is. Value/argument-position method calls and constructors stay out of scope.
+//! The function leg is covered by `return_summary.rs` and `concat.rs`. This file
+//! pins the method twin: the summary from a resolved method body is consumed at
+//! `apply_assign` and return composition exactly as a function's is.
+//! Value/argument-position method calls and constructors are out of scope.
 //!
 //! Shared return-coverage soundness (opaque `may_return`, untyped fallthrough) is
-//! pinned here too: enabling method rebinding surfaces those holes on public
-//! corpus methods (Composer `findPackage`), so the fix lives in the shared
-//! machinery and is regression-tested on both function and method twins.
+//! regression-tested on both function and method twins (Composer `findPackage`).
 
 use steins_infer::{DEBUG_TYPE_ID, Diagnostic, Folder, ID as ARG_MISMATCH_ID, check, check_with};
 use steins_syntax::{ArgValue, SourceTree};
@@ -65,9 +62,7 @@ fn count(src: &str, id: &str) -> usize {
     findings(src, None).iter().filter(|d| d.id == id).count()
 }
 
-// ==========================================================================
 // Flagship — the function twin across the receiver seam.
-// ==========================================================================
 
 #[test]
 fn flagship_method_greet_inlines_to_its_value() {
@@ -116,9 +111,7 @@ fn method_literal_return_agrees_with_function_twin() {
     assert_eq!(one_type(via_method), one_type(via_function), "method and function paths agree");
 }
 
-// ==========================================================================
 // Positive-int proof crosses the method boundary (return_summary flagship twin).
-// ==========================================================================
 
 #[test]
 fn method_positive_int_crosses_verified() {
@@ -134,9 +127,7 @@ fn method_positive_int_crosses_verified() {
     assert_eq!(one_type(src), "int<1, max>");
 }
 
-// ==========================================================================
 // Inheritance: the `this:` key must separate receivers inside ONE memo tree.
-// ==========================================================================
 
 #[test]
 fn inherited_body_does_not_replay_across_receivers_in_shared_memo() {
@@ -166,9 +157,7 @@ fn inherited_body_does_not_replay_across_receivers_in_shared_memo() {
     assert_eq!(one_type(src), "'B'");
 }
 
-// ==========================================================================
 // Silences and exact dispatch.
-// ==========================================================================
 
 #[test]
 fn exact_receiver_dispatches_inherited_override() {
@@ -216,9 +205,7 @@ fn constructor_assignment_stays_on_exactness_lane() {
     assert_eq!(one_type(src), "C");
 }
 
-// ==========================================================================
 // Return composition: `return $o->m(...)` / static crosses into an outer summary.
-// ==========================================================================
 
 #[test]
 fn method_summary_composes_through_function_return() {
@@ -254,9 +241,7 @@ fn static_summary_composes_through_function_return() {
     assert_eq!(one_type(src), "int<1, max>");
 }
 
-// ==========================================================================
 // Declared return floor when the summary degrades to General (function parity).
-// ==========================================================================
 
 #[test]
 fn method_factless_summary_falls_to_declared_int_floor() {
@@ -276,9 +261,7 @@ fn method_factless_summary_falls_to_declared_int_floor() {
     assert_eq!(one_type(via_method), one_type(via_function));
 }
 
-// ==========================================================================
 // Opaque may_return: hidden returns join the floor (Composer findPackage shape).
-// ==========================================================================
 
 #[test]
 fn foreach_hidden_return_does_not_pin_null_on_method() {
@@ -330,9 +313,7 @@ fn foreach_hidden_return_does_not_pin_null_on_function_twin() {
     assert_eq!(count(src, "call.on-null"), 0);
 }
 
-// ==========================================================================
 // Asserted stratum does not launder into proof-layer findings.
-// ==========================================================================
 
 #[test]
 fn asserted_method_summary_does_not_premise_proof_finding() {
@@ -362,9 +343,7 @@ fn asserted_method_summary_does_not_premise_proof_finding() {
     );
 }
 
-// ==========================================================================
 // Self-assign keeps method declared floor (arms captured before unbind).
-// ==========================================================================
 
 #[test]
 fn method_self_assign_keeps_declared_int_floor() {
@@ -380,9 +359,7 @@ fn method_self_assign_keeps_declared_int_floor() {
     assert_eq!(one_type(src), "int");
 }
 
-// ==========================================================================
 // Generators refuse value summaries (ADR-0057 §5).
-// ==========================================================================
 
 #[test]
 fn generator_method_does_not_rebind_return_value() {
@@ -422,9 +399,7 @@ fn generator_function_twin_does_not_rebind_return_value() {
     assert_eq!(count(src, ARG_MISMATCH_ID), 0);
 }
 
-// ==========================================================================
 // never / typed fallthrough must not invent Singleton(null).
-// ==========================================================================
 
 #[test]
 fn never_return_fallthrough_does_not_pin_null() {
@@ -452,9 +427,7 @@ fn object_return_hint_fallthrough_does_not_pin_null() {
     assert_eq!(count(src, "call.on-null"), 0);
 }
 
-// ==========================================================================
 // Unrepresentable written return: refuse summary (no A2 oracle).
-// ==========================================================================
 
 #[test]
 fn object_return_null_does_not_rebind_on_method() {
@@ -500,9 +473,7 @@ fn array_return_null_does_not_rebind_on_method() {
     assert_eq!(count(src, "call.on-null"), 0);
 }
 
-// ==========================================================================
 // Recursion / depth degrade soundly.
-// ==========================================================================
 
 #[test]
 fn method_recursion_terminates_to_arm_floor() {

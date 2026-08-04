@@ -217,8 +217,8 @@ fn interface_method_without_an_envelope_still_taints() {
 
 #[test]
 fn class_typed_receiver_is_out_of_scope_and_taints() {
-    // A non-final class is an abstraction carrier too — out of scope for this
-    // tracer, so it keeps the old behavior rather than guessing.
+    // A non-final class is an abstraction carrier too, but out of scope for this
+    // tracer, so it falls back to the plain taint rather than guessing.
     let src = concat!(
         "<?php\n",
         "class Repo {\n",

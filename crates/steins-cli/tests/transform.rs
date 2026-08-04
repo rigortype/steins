@@ -316,12 +316,11 @@ fn in_universe_include_does_not_obstruct() {
     assert!(r.stdout.contains("1 promoted"), "{}", r.stdout);
 }
 
-// ---- ADR-0047 Slice A: [transform.partitions] parsing (zero behavior change) --
+// ---- [transform.partitions] parsing (ADR-0047) --
 
 /// A well-formed `[transform.partitions]` section parses and threads through to
-/// the planner, but changes nothing this slice: the promotion result is identical
-/// to a run with no partition config (ADR-0047 §6). Round-trips the config surface
-/// from ADR-0047 §7 (observers + `[transform.partitions.sets]`).
+/// the planner without changing the promotion result (ADR-0047 §6). Round-trips
+/// the config surface from ADR-0047 §7 (observers + `[transform.partitions.sets]`).
 #[test]
 fn partitions_config_parses_and_changes_nothing() {
     let proj = TempProject::new("partitions-ok");
@@ -336,7 +335,6 @@ fn partitions_config_parses_and_changes_nothing() {
          batch = [\"batch/**\"]\n",
     );
 
-    // With the config…
     let with_cfg = run(&[
         "transform",
         "phpdoc-to-native",
@@ -348,8 +346,8 @@ fn partitions_config_parses_and_changes_nothing() {
     assert!(with_cfg.stdout.contains("1 promoted"), "should still promote:\n{}", with_cfg.stdout);
     assert!(!with_cfg.stderr.contains("partitions"), "no error expected:\n{}", with_cfg.stderr);
 
-    // …and with no partition config at all: identical oracle line (zero behavior
-    // change). Point --config at a file that has no [transform.partitions].
+    // With no partition config: identical oracle line. Point --config at a file
+    // that has no [transform.partitions].
     let plain = proj.write("plain.toml", "[transform.vouch]\nsites = []\n");
     let without = run(&[
         "transform",

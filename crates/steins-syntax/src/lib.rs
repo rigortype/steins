@@ -8,11 +8,9 @@
 //! plain-data structs. This is the seam ADR-0003 requires so parser backends can
 //! be swapped without touching the analysis crates.
 //!
-//! For the first vertical slice the lowered tree is deliberately small: it
-//! captures exactly what the `type.argument-mismatch` proof-layer check needs —
-//! `declare(strict_types=1)`, user-defined function declarations with scalar
-//! parameter types, and function-call expressions with literal arguments. Spans
-//! are byte offsets, convertible to 1-based line/column via [`SourceTree::position`].
+//! The lowered tree exposes syntax needed by the analysis crates while keeping
+//! parser-backend types private. Spans are byte offsets, convertible to 1-based
+//! line/column via [`SourceTree::position`].
 
 use mago_allocator::LocalArena;
 use mago_database::file::FileId;
@@ -76,8 +74,8 @@ pub struct Position {
     pub column: u32,
 }
 
-/// How a name was written at a *reference* site, driving PHP name resolution
-/// (whole-project slice). This is the syntactic input the resolution rules key
+/// How a name was written at a *reference* site, driving PHP name resolution.
+/// This is the syntactic input the resolution rules key
 /// on; the resolution itself (namespace fallback, `use` imports, builtin
 /// catalog) lives in `steins-infer` against the project index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -174,7 +172,7 @@ impl std::hash::Hash for NsCtx {
     }
 }
 
-/// The scalar native types the slice reasons about (PHP 8.1+; ADR-0011).
+/// The supported scalar native types (PHP 8.1+; ADR-0011).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScalarType {
     Int,
@@ -204,8 +202,8 @@ impl ScalarType {
 /// [`TypeMember::Instance`] carries the namespace-resolved FQN twice: the
 /// lowercase-normalized form (matching [`ClassDecl::fqn`] — the matching key)
 /// and the source-cased form (diagnostics only), so `Foo|null` / `A|B` are one
-/// union shape alongside the scalars. It is **not** [`Copy`] (it owns
-/// `String`s); the whole enum is therefore no longer `Copy`.
+/// union shape alongside the scalars. It is not [`Copy`] because it owns
+/// `String`s.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeMember {
     /// A full scalar type (`int`, `float`, `string`, `bool`).
@@ -215,9 +213,8 @@ pub enum TypeMember {
     /// PHP 8.5: `0`/`""`/`true` into a `false`-only type all `TypeError`).
     BoolLiteral(bool),
     /// An object type: a class / interface / enum name (ADR-0043). The is-a
-    /// oracle consumes this in later stages; native scalar-value acceptance
-    /// stays silent on any union that contains an `Instance` member until the
-    /// definite-No arm opens.
+    /// oracle consumes this; native scalar-value acceptance stays silent on
+    /// unions containing an `Instance` unless object incompatibility is definite.
     Instance {
         /// The namespace-resolved, **lowercase-normalized** FQN (matching
         /// [`ClassDecl::fqn`]). Every matching / resolution consumer keys on
@@ -228,8 +225,7 @@ pub enum TypeMember {
         /// resolution semantics.
         display: String,
     },
-    /// A native **intersection** of object types (`A&B&…`, ADR-0043 — the
-    /// conjunctive object member the union shape deferred). A single union
+    /// A native **intersection** of object types (`A&B&…`, ADR-0043). A single union
     /// member that is itself a *conjunction*: an object satisfies it only when
     /// it is-a **every** listed class, so it is rejected the moment it is-a-`No`
     /// against **any** one of them. PHP forbids scalar/`null` members inside an
@@ -270,13 +266,11 @@ impl TypeMember {
     }
 }
 
-/// A native scalar/union parameter **or return** type Steins reasons about,
-/// lowered from a single scalar, `?T`, or a `T1|T2|…[|null]` union of the four
-/// scalars (plus `false`/`true` literal members). Any member that is not a
-/// scalar or a bool-literal (a class, `array`, `mixed`, `iterable`, `callable`,
-/// `object`, an intersection, `self`/`static`/`parent`, `void`/`never`, …)
-/// lowers the **whole** type to `None` so the checker stays silent on it
-/// (zero-FP; ADR-0002).
+/// A native parameter or return type Steins reasons about: scalar and object
+/// members, intersections, nullable forms, and unions thereof. Unsupported members
+/// (`array`, `mixed`, `iterable`, `callable`, `object`, `self`/`static`/`parent`,
+/// `void`/`never`, …) lower the **whole** type to `None` so the checker stays silent
+/// (ADR-0002).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NativeType {
     /// The union members, in source order. Always non-empty: a hint that would
@@ -302,11 +296,9 @@ impl NativeType {
         parts.join("|")
     }
 
-    /// `true` when any union member is an object ([`TypeMember::Instance`]) type.
-    /// Every native **scalar-value** consumer treats an `Instance`-bearing type
-    /// exactly as it treated an absent (`None`) type before ADR-0043 — the
-    /// zero-behavior-change invariant of stage 1. The definite-No object arm
-    /// (stage 3) is the only place this guard is lifted.
+    /// `true` when any union member is an object type. Native scalar-value
+    /// consumers treat such types as unknown; object checks proceed only when
+    /// incompatibility is definite.
     #[must_use]
     pub fn has_instance(&self) -> bool {
         self.members
@@ -349,8 +341,8 @@ pub struct Param {
 /// findings (uncatalogued builtins widen to silence, same-file user calls become
 /// propagation edges — `steins_catalog::effect_labels` and the effects pass).
 ///
-/// The scan does **not** descend into nested function/closure/class bodies —
-/// those are separate scopes (closures are deferred in this slice). It *does*
+/// The scan does **not** descend into nested function/closure/class bodies,
+/// which are separate scopes. It *does*
 /// see constructs nested inside control flow (an `echo` inside an `if`), which
 /// is why the effects pass reads this instead of the linear trace.
 ///
@@ -499,8 +491,8 @@ pub enum EffectRecv {
     /// contributes the *declared* envelope of a project interface's method — never
     /// a proven effect, and never a resolved body edge. A receiver whose declared
     /// type is not a project interface (or whose method carries no envelope)
-    /// resolves to nothing and taints exhaustiveness, exactly as
-    /// [`EffectOrigin::Opaque`] did before this variant existed.
+    /// resolves to nothing and taints exhaustiveness like
+    /// [`EffectOrigin::Opaque`].
     Var(String),
     /// `$this->repo->m()` where `repo` is a property this frame never writes — the
     /// property-read twin of [`Self::Var`], carrying the property name. Resolved
@@ -580,9 +572,9 @@ pub struct ThrowOrigin {
 /// set is the tightest bound — pure — spelled `#[\Steins\Pure]`; a non-empty set
 /// comes from `#[\Steins\Effect('io', 'nondet.time')]`. When both `#[\Steins\Pure]`
 /// and `#[\Steins\Effect(...)]` decorate the same declaration the two are
-/// contradictory (`Pure` = empty upper bound, the tighter of the two); Pure wins
-/// and `labels` is empty, with no diagnostic about the contradiction in this
-/// slice (see `attrs_effect_envelope`).
+/// contradictory (`Pure` = empty upper bound, the tighter of the two); Pure wins,
+/// `labels` is empty, and no contradiction diagnostic is emitted (see
+/// `attrs_effect_envelope`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EffectEnvelope {
     /// The declared effect labels (ADR-0018 dot-paths). Empty = `Pure`.
@@ -736,9 +728,8 @@ pub struct MethodDecl {
 /// (`public function __construct(public readonly int $x)`), which are properties
 /// too (they carry a native type and populate the object's props at construction).
 ///
-/// Static properties are lowered (so the class surface is complete) but are
-/// **never tracked in the heap** — they are global state, out of the object-state
-/// slice (ADR-0036 "Out of stage 1"); the heap walk skips `is_static` props.
+/// Static properties are lowered to keep the class surface complete but are
+/// **never tracked in the heap** because they are global state (ADR-0036).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PropertyDecl {
     /// Property name without the leading `$`.
@@ -804,13 +795,9 @@ pub struct EnumCaseDecl {
 /// [`Self::enum_backing`]. A class that *uses* a trait sets
 /// [`ClassDecl::uses_traits`] so resolution gives up on it.
 ///
-/// Enum lowering in v1 is deliberately minimal: cases, backing type, and the
-/// `implements` list (for the is-a oracle) are recorded, but enum **method
-/// bodies are not analyzed** (no scope is built for them; [`Self::methods`] is
-/// left empty). This keeps stage 1 zero-behavior-change — an enum body cannot
-/// introduce new throw/effect/Liskov findings — while still placing the enum in
-/// the class index so subtyping can reason about it. Deferred-with-design:
-/// enum method resolution/analysis lands with the method-transform stage.
+/// Enum lowering records cases, the backing type, and the `implements` list for
+/// the is-a oracle. Enum **method bodies are not analyzed**: no scope is built and
+/// [`Self::methods`] is empty. The enum still enters the class index for subtyping.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ClassDecl {
     /// Simple (unqualified) class name as written at the declaration site (used
@@ -844,7 +831,7 @@ pub struct ClassDecl {
     /// `true` when this declaration is a `trait` (ADR-0049 §5, C8/A2i). A trait
     /// enters the class-*like* index as a **name** — the `class.undefined` closure
     /// set is the class-like name set, traits included, since a static call through
-    /// a trait name runs (deprecated, not fatal). V1 lowers the name only: no
+    /// a trait name runs (deprecated, not fatal). Only the name is lowered: no
     /// member flattening (`methods`/`properties`/… are empty), so a trait is inert
     /// for every existing check and merely occupies its FQN in the symbol/ambiguity
     /// table (a trait sharing an FQN with a class is `Ambiguous`, both silent).
@@ -853,8 +840,7 @@ pub struct ClassDecl {
     /// namespace/program node — a function/method body, `if`, `try`, loop, or bare
     /// block (ADR-0049 A2i). A conditional declaration leaves *which* definition
     /// binds to runtime load order (the `if (!class_exists(…))` fallback-stub
-    /// shape), so a chain containing one **re-dams** absence claims. Consumed by
-    /// the finding-breadth family from S2 on; carried but unread in S1.
+    /// shape), so a chain containing one **re-dams** absence claims.
     pub conditional: bool,
     /// A backed enum's backing scalar (`enum E: int` / `enum E: string`), or
     /// `None` for a pure (unit) enum. Only `int`/`string` are legal backings.
@@ -889,15 +875,14 @@ pub struct ClassDecl {
     pub uses_traits: bool,
     /// The raw `/** … */` docblock preceding the class-like declaration, if any.
     /// Read for class-level `@template` names, which shadow same-named classes in
-    /// **every** member docblock of this class-like (issue #5). `None` for a trait
-    /// (traits lower no members this slice, so a class-level template is inert).
+    /// **every** member docblock of this class-like (issue #5). `None` for a trait,
+    /// whose members are not lowered.
     pub docblock: Option<String>,
     /// The span of the class name identifier.
     pub span: Span,
 }
 
-/// The value of a call argument (or an assignment right-hand side), restricted
-/// to what the slice can prove about.
+/// A representable call argument or assignment right-hand side.
 ///
 /// The first five variants are *literals* — concrete, self-evident values. The
 /// [`ArgValue::Var`] and [`ArgValue::Call`] variants are the value-propagation
@@ -946,12 +931,11 @@ pub enum ArgValue {
     /// ([`normalize_array`]), where duplicate keys resolve last-wins.
     Array(Vec<(ArrayKey, ArgValue)>),
     /// A ternary `$c ? A : B` in rvalue position, lowered as a **conditional
-    /// value** (ADR-0031 stage 1): the walk evaluates `cond` against the env and,
+    /// value** (ADR-0031): the walk evaluates `cond` against the env and,
     /// when decided, resolves to the chosen arm; when undecided it joins the two
     /// arms (a `OneOf` if both are literal, else unknown). Short-ternary `?:` and
-    /// null-coalescing `??` are **not** lowered here — they widen to
-    /// [`ArgValue::Other`] this stage (their operands need negative/definedness
-    /// facts the domain does not yet carry).
+    /// null-coalescing `??` are **not** lowered here because their operands need
+    /// negative/definedness facts outside this domain.
     Ternary { cond: Box<CondExpr>, then_val: Box<ArgValue>, else_val: Box<ArgValue> },
     /// A closure value (ADR-0033): a `function (...) use (...) {...}` / arrow
     /// `fn(...) => …` expression lowered to its own [`Scope`], or a first-class
@@ -963,7 +947,7 @@ pub enum ArgValue {
     /// A property read `$var->prop` in rvalue position (ADR-0036 object state). Only
     /// a **simple variable receiver** is represented (`$this->p` uses `var = "this"`);
     /// a chain `$a->b->c` or a dynamic property name (`$a->$p`) lowers to
-    /// [`ArgValue::Other`] this slice. The walk resolves it against the heap: a known
+    /// [`ArgValue::Other`]. The walk resolves it against the heap: a known
     /// object ref with a props entry flows that fact; an unknown receiver yields no
     /// fact (silent).
     PropFetch { var: String, prop: String },
@@ -1005,7 +989,7 @@ pub enum ArgValue {
     /// `false`): the walk resolves the base to a container `Fact` and the key to a
     /// proven value, then judges `offset.missing` / `offset.on-unsupported` **only in
     /// the whitelisted read contexts** (ADR-0049 A7: plain assignment-RHS and return
-    /// operands in v1). It is a *silence carrier* everywhere else — an operand of `??`
+    /// operands). It is a *silence carrier* everywhere else — an operand of `??`
     /// ([`Self::Coalesce`]), a write lvalue, an `isset`/`array_key_exists` argument,
     /// or an array element never fires (the array element case collapses the whole
     /// literal to [`Self::Other`], as an offset read is not a proven element value).
@@ -1021,8 +1005,7 @@ pub enum ArgValue {
     /// cast is *total and environment-independent*. See the inference layer's
     /// `concat_cast` for that admission rule and why `float` is excluded.
     ///
-    /// A compound `.=` still lowers its rvalue to [`Self::Other`] (see [`StmtKind`]);
-    /// that is a documented deferral, not a semantic claim.
+    /// A compound `.=` lowers its rvalue to [`Self::Other`] (see [`StmtKind`]).
     Concat(Box<ArgValue>, Box<ArgValue>),
     Other,
 }
@@ -1044,9 +1027,9 @@ pub enum ClosureRef {
     /// `use ($x)` for closures, the free variables of the body for arrow fns.
     Anonymous { def_offset: u32, captures: Vec<String> },
     /// A first-class callable of a named free function: `strtolower(...)`. Resolves
-    /// as a function name through the existing project/catalog resolution. (Method
-    /// and static first-class callables — `$o->m(...)`, `Foo::m(...)` — lower to
-    /// [`ArgValue::Other`] this slice; documented deferral.)
+    /// as a function name through project/catalog resolution. Method and static
+    /// first-class callables (`$o->m(...)`, `Foo::m(...)`) lower to
+    /// [`ArgValue::Other`].
     FunctionName(NameRef),
 }
 
@@ -1408,10 +1391,9 @@ pub struct NamedArg {
 }
 
 /// What a [`CallExpr`] is called *on* — the receiver dimension that the
-/// class-world resolution rules dispatch on (ADR-0001 sound dispatch). Plain
-/// function calls stay `Function`, so every existing function-world path is
-/// unchanged; the other variants are the method/static/constructor forms whose
-/// resolvability depends on the receiver's exactness (see `steins-infer`).
+/// class-world resolution rules dispatch on (ADR-0001 sound dispatch).
+/// Method/static/constructor resolvability depends on receiver exactness; see
+/// `steins-infer`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Callee {
     /// `f(args...)` — a statically-named function (the last, unqualified name).
@@ -1535,10 +1517,8 @@ pub struct CallExpr {
     /// `||` compositions, a constant-key comparison, a named call), `None`
     /// everywhere else.
     ///
-    /// Why a *second* reading of the same arguments: [`ArgValue`] is a value
-    /// lowering, and `isset($d['a'])` has no value it can express — it lowers to
-    /// [`ArgValue::Other`], which is where a userland assertion helper's argument
-    /// used to disappear. `Util_Assert::true(isset($d['a']));` is a guard the
+    /// [`ArgValue`] cannot express `isset($d['a'])` as a value, but
+    /// `Util_Assert::true(isset($d['a']));` is a guard the
     /// analysis can consume exactly as it consumes `assert(isset($d['a']))`
     /// (ADR-0058's tag lane), but only if the *condition* survives lowering; this
     /// field is where it survives. Populated purely syntactically — the lowering
@@ -1565,7 +1545,7 @@ impl CallExpr {
     }
 }
 
-/// A comparison operator in a lowered [`CondExpr`] (ADR-0031 stage 1).
+/// A comparison operator in a lowered [`CondExpr`] (ADR-0031).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CmpOp {
     /// `===` — strict identity.
@@ -1577,7 +1557,7 @@ pub enum CmpOp {
     /// `!=` / `<>` — loose inequality.
     NotLoose,
     /// `<` — less-than (ordering). Used for int-range guard refinement
-    /// (ADR-0031 stage 2); at the verdict level it decides only for concrete
+    /// (ADR-0031); at the verdict level it decides only for concrete
     /// numeric operands, else `Maybe`.
     Lt,
     /// `<=` — less-than-or-equal.
@@ -1599,29 +1579,25 @@ pub enum CondOperand {
     /// appear here; a non-literal expression lowers the operand to [`Self::Other`].
     Literal(ArgValue),
     /// `$var[<literal>]` — a **constant-key projection**, depth exactly one
-    /// (ADR-0062 A-G4's v1 scope: binding base, constant key). Carried so a
+    /// (ADR-0062 A-G4: binding base, constant key). Carried so a
     /// tagged-union guard (`$s['kind'] === 'circle'`, `match ($s['kind'])`,
     /// `switch ($s['kind'])`) can subtract the base's array arms by the field's
     /// `admits` verdict.
     ///
-    /// For every *other* consumer this variant behaves exactly as
-    /// [`Self::Other`] did before it existed — it decides no verdict and
-    /// contributes no value-lane refinement. Only the shape-narrowing pass reads
-    /// it, which is what keeps this a purely additive lowering change.
+    /// Only the shape-narrowing pass reads this variant. Other consumers derive
+    /// no verdict or value-lane refinement from it.
     Offset { var: String, key: Box<ArgValue> },
     /// A bare **global-constant fetch** (`PHP_VERSION_ID`, `SOME_CONST`), carried
     /// as the reference was written (issue #29). Lowered so the version-guard
     /// fold can recognize the engine's `PHP_VERSION_ID` and decide the branch
-    /// against the resolved target range; for every other consumer this variant
-    /// behaves exactly as [`Self::Other`] did before it existed — it decides no
-    /// verdict and contributes no refinement, which is what keeps this a purely
-    /// additive lowering change.
+    /// against the resolved target range. Other consumers derive no verdict or
+    /// refinement from it.
     Const(NameRef),
     /// Anything else (a call, a property fetch, an arithmetic sub-expression, …).
     Other,
 }
 
-/// A small lowered condition language (ADR-0031 stage 1). The trace evaluator
+/// A small lowered condition language (ADR-0031). The trace evaluator
 /// walks it against the env to a unified `Certainty` (yes/no/maybe). Anything the
 /// lowering does not recognize becomes [`CondExpr::Opaque`], carrying the
 /// variables it reads so the walk can still forget them on the excluded path.
@@ -1645,11 +1621,8 @@ pub enum CondExpr {
     /// `@phpstan-assert-if-true`/`-if-false` envelopes on the matching branch
     /// (ADR-0052 §5, at the `Asserted` stratum) and (b) fold a recognized existence
     /// predicate to a real Yes/No/Maybe verdict (`method_exists`/`function_exists`/
-    /// `class_exists` …, ADR-0049 §4 / N3): the env-threaded short-circuit evaluation
-    /// and the foldable-predicate verdicts landed with N3, so a guard call is no
-    /// longer uniformly `Maybe`. Other (unrecognized) guard calls still evaluate to
-    /// `Maybe`, and `reads` (identical to what the equivalent [`Self::Opaque`] carried)
-    /// invalidates its variables on the excluded path exactly as before.
+    /// `class_exists` …, ADR-0049 §4 / N3). Other guard calls evaluate to
+    /// `Maybe`; `reads` invalidates their variables on the excluded path.
     Call { call: Box<CallExpr>, reads: Vec<String> },
     /// `isset($var[<literal>])` — a **key-presence guard**, depth exactly one
     /// (ADR-0062 S4). PHP's `isset` is true when the key exists *and* its value
@@ -1657,8 +1630,8 @@ pub enum CondExpr {
     /// branch promotes presence and strips `null` from the value slot.
     ///
     /// Only this exact form is lowered. `isset($x)` on a bare variable and an
-    /// `isset` over a property/dynamic key keep their pre-S4 [`Self::Opaque`]
-    /// lowering, so no other lane's behavior moves. `empty($x[<literal>])` —
+    /// `isset` over a property/dynamic key lower to [`Self::Opaque`].
+    /// `empty($x[<literal>])` —
     /// the same depth-one scope — lowers to `!isset(…) || !…` in terms of this
     /// variant (PHP's own definition of the construct); every other `empty`
     /// form stays `Opaque`.
@@ -1729,7 +1702,7 @@ pub enum StmtKind {
     /// so the propagation pass checks/descends them. Echo assigns nothing, so its
     /// env effect stays conservative (a `Barrier`-equivalent clear afterward).
     Echo(Vec<CallExpr>),
-    /// A structured `if`/`elseif`/`else` (ADR-0031 stage 1): the trace models its
+    /// A structured `if`/`elseif`/`else` (ADR-0031): the trace models its
     /// control flow instead of erasing it. `then_trace` is the primary branch;
     /// `elseifs` are the `(condition, branch)` pairs in order; `else_trace` is the
     /// `else` branch when present. Each sub-trace is lowered by the same rules
@@ -1783,9 +1756,8 @@ pub enum StmtKind {
     /// A recognized *control-flow* construct (`while`/`for`/`foreach`/
     /// `do-while`/`switch`/`match`-statement/`try`/nested block) whose internal
     /// data-flow the trace does not model, but whose **write set and read set** it
-    /// does. This is the ADR-0027 ratchet applied to what used to be a blanket
-    /// [`StmtKind::Barrier`]: instead of erasing *all* known values, the walk
-    /// forgets only the variables the construct might touch **or branch on**.
+    /// does. Under the ADR-0027 ratchet, the walk forgets only the variables the
+    /// construct might touch **or branch on**, rather than all known values.
     ///
     /// * `writes` — the over-approximated set of variable names the subtree may
     ///   assign (any assignment lvalue, compound assign, increment/decrement,
@@ -1814,11 +1786,8 @@ pub enum StmtKind {
     ///   cannot become a false Singleton (ADR-0075 / issue #126 review). Nested
     ///   function/closure bodies are separate scopes and are not counted.
     ///
-    /// Remaining theoretical gap (NOT closed here; ADR-0027 ratchet direction): a
-    /// construct that early-returns on *every* branch makes all fall-through code
-    /// dead, so even a fact about a variable the construct never reads could
-    /// describe an unreachable path. Recovering that precision needs real
-    /// branch/reachability analysis, deferred until the trace models control flow.
+    /// Limitation: if every branch returns early, fall-through code is dead, but
+    /// this representation cannot prove that without branch/reachability analysis.
     Opaque { writes: Vec<String>, reads: Vec<String>, poisons: bool, may_return: bool },
     /// `$var[<lit>] = <rvalue>;` / `$var[<lit>][<lit>] = <rvalue>;` — a
     /// **constant-key offset write** (ADR-0062 A-G8's invalidation table).
@@ -1826,9 +1795,7 @@ pub enum StmtKind {
     /// This is a [`Self::Barrier`] carrying one extra piece of information. The
     /// walk still forgets the whole env and store exactly as a barrier does —
     /// an array write can alias anything the lowering cannot bound — and then
-    /// re-establishes *only* the base binding's array shape with the key
-    /// promoted. That containment is deliberate: it means the S4 write rule can
-    /// move the shape lane and nothing else.
+    /// re-establishes *only* the base binding's array shape with the key promoted.
     ///
     /// `keys` has one or two entries (depth 1, plus the autovivification case
     /// A-G8 names); `$x[] = v` (append), a dynamic key, and a compound operator
@@ -2144,9 +2111,8 @@ pub enum DynamismKind {
     /// `class_alias` whose two names are known at compile time (string literals, or
     /// the `X::class` constant — issue #36) instead contributes a
     /// [`ClassAliasEdge`] to the index (see [`SourceTree::class_alias_edges`]) and
-    /// is *not* a dam site. The checker-side finding-breadth dam treats this as a
-    /// dam site (S2+); the transform-side obstacle scan deliberately ignores it in
-    /// S1 to stay byte-identical (ADR-0049 S1 groundwork).
+    /// is *not* a dam site. The finding-breadth dam treats this as a dam site;
+    /// transform obstacle detection does not (ADR-0049).
     ClassAlias,
 }
 
@@ -2165,10 +2131,9 @@ pub struct DynamismSite {
 /// through a value rather than a call site, so the call-site sweep never sees the
 /// target (issue #30).
 ///
-/// Unlike [`OpaqueConstruct`], this is **not** derived from a predicate the analyzer
-/// already acts on — nothing poisons a scope or dams a claim here, and the analyzer's
-/// behaviour is unchanged by it. **The list is a guess until measured**: it is the
-/// shapes a cross-analyzer survey named, recognized syntactically and therefore both
+/// Unlike [`OpaqueConstruct`], this does not poison a scope or dam a claim.
+/// **The list is a guess until measured**: it contains shapes named by a
+/// cross-analyzer survey, recognized syntactically and therefore both
 /// over- and under-inclusive (a `$queue->invoke()` on a plain domain object counts; a
 /// reflective call reached through a helper does not). It is inventoried so the
 /// guess has numbers attached to it and can be corrected against a corpus, which is
@@ -2223,9 +2188,9 @@ pub struct ReflectionSite {
 /// arguments name a class at compile time — a string literal, or the `X::class`
 /// constant resolved through the file's namespace context (issue #36) — so the
 /// alias name resolves, for **existence** purposes, to the target declaration's
-/// site. Folded into the project index
-/// after every textual declaration, sharing the duplicate-decl ambiguity
-/// discipline: an alias colliding with a textual declaration of the same FQN, or
+/// site. Folded into the project index with textual declarations, sharing the
+/// duplicate-declaration ambiguity discipline: an alias colliding with a textual
+/// declaration of the same FQN, or
 /// two alias edges for one name, marks that FQN `Ambiguous` (existence present,
 /// identity unresolved). FQNs are lowercase-normalized, leading `\` stripped — the
 /// same key shape [`ClassDecl::fqn`] and the index use.
@@ -2258,8 +2223,7 @@ pub struct AnonClassEdge {
     pub span: Span,
 }
 
-/// An owned, Mago-free lowering of one parsed PHP file — the syntax-tree
-/// contract for the slice.
+/// An owned, Mago-free lowering of one parsed PHP file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SourceTree {
     strict_types: bool,
@@ -2268,18 +2232,15 @@ pub struct SourceTree {
     calls: Vec<CallExpr>,
     scopes: Vec<Scope>,
     /// Dynamic-code constructs (eval / include / require) found file-wide
-    /// (ADR-0046 §2). Consumed by the transform engine's caller-enumeration
-    /// obstacle detection; the checker never reads it (zero behavior change).
+    /// (ADR-0046 §2), used for caller-enumeration obstacle detection.
     dynamism: Vec<DynamismSite>,
     /// Compile-time `class_alias('Target', 'Alias')` edges found file-wide (ADR-0049
     /// §2). Folded into the project index for existence resolution; a `class_alias`
     /// naming a runtime-minted class is a [`DynamismKind::ClassAlias`] dam site in
-    /// [`Self::dynamism`] instead. Carried but consumed by nothing in the S1
-    /// groundwork slice.
+    /// [`Self::dynamism`] instead.
     class_alias_edges: Vec<ClassAliasEdge>,
-    /// Anonymous-class inheritance edges found file-wide (ADR-0049 A4). Read by the
-    /// declared-receiver lane's descendant closure (S6) — an invisible descendant
-    /// obstacle. Consumed by nothing else.
+    /// Anonymous-class inheritance edges found file-wide (ADR-0049 A4), used by
+    /// declared-receiver descendant closure to detect invisible descendants.
     anon_class_edges: Vec<AnonClassEdge>,
     /// Reflection-driven invocation sites found file-wide (issue #30). Report-only:
     /// consumed by `steins doctor`'s coverage posture and by nothing that decides a
@@ -2970,9 +2931,8 @@ fn classify_class_alias(c: &FunctionCall<'_>, rc: &RefResolver, out: &mut Lowere
 ///   no autoload, no runtime lookup, the named class need not even exist. It is
 ///   therefore *not* a runtime class-name mint and must not dam. Its spelling **is**
 ///   subject to ordinary class-name resolution, so it goes through the same
-///   [`RefResolver`] every other class reference uses — `use` imports (plain,
-///   aliased, and the grouped forms `use A\{B, C}` whose omission previously
-///   mis-resolved names), the enclosing namespace, and the `namespace\X` relative
+///   [`RefResolver`] every other class reference uses — plain, aliased, and grouped
+///   `use` imports; the enclosing namespace; and the `namespace\X` relative
 ///   form — rather than being taken as spelled. Taking the raw spelling would key
 ///   the edge on a name no declaration ever carries.
 ///
@@ -3129,10 +3089,8 @@ fn is_decl_transparent(node: &Node<'_, '_>) -> bool {
 }
 
 /// Lower a `trait` declaration to a name-only [`ClassDecl`] (ADR-0049 §5, C8/A2i).
-/// A trait joins the class-*like* index as a name — the `class.undefined` closure
-/// set is the class-like name set, traits included. V1 lowers **no members** (no
-/// flattening), so the trait is inert for every existing check; it merely occupies
-/// its FQN in the symbol/ambiguity table.
+/// A trait joins the class-*like* index but has no lowered members or flattening,
+/// making it inert except for occupying its FQN in the symbol/ambiguity table.
 fn lower_trait(t: &mago_syntax::cst::Trait<'_>, conditional: bool) -> ClassDecl {
     ClassDecl {
         name: bytes_to_string(t.name.value),
@@ -3152,8 +3110,7 @@ fn lower_trait(t: &mago_syntax::cst::Trait<'_>, conditional: bool) -> ClassDecl 
         properties: Vec::new(),
         consts: Vec::new(),
         uses_traits: false,
-        // A trait lowers no members this slice, so class-level `@template` names on
-        // it never reach a member docblock — carry `None` (nothing to shadow).
+        // No member docblock can observe a trait-level `@template`.
         docblock: None,
         span: to_span(t.name.span()),
     }
@@ -3187,9 +3144,8 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
             ClassLikeMember::Property(Property::Plain(p)) => {
                 lower_plain_property(p, docs, rc, &mut properties);
             }
-            // Hooked properties (`public $x { get => … }`) are virtual/computed —
-            // not lowered this slice (out of object-state scope; never heap-tracked,
-            // so no property check fires on them — the safe side).
+            // Hooked properties are virtual/computed and therefore not heap-tracked
+            // or checked as stored values.
             ClassLikeMember::Property(Property::Hooked(_)) => {}
             ClassLikeMember::Constant(k) => lower_class_consts(k, &mut consts),
             ClassLikeMember::TraitUse(_) => uses_traits = true,
@@ -3368,11 +3324,8 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
 /// implicit `UnitEnum`/`BackedEnum` catalog tree); its cases + backing scalar are
 /// recorded for value reasoning.
 ///
-/// V1 deliberately does **not** analyze enum method bodies: [`methods`] is left
-/// empty and no scope is built (see [`ClassDecl`]), so an enum body introduces no
-/// new throw/effect/Liskov findings — the zero-behavior-change invariant of
-/// stage 1. Deferred-with-design: enum methods land with the method-transform
-/// stage that needs them.
+/// Enum method bodies are not analyzed: [`methods`] is empty and no scope is
+/// built (see [`ClassDecl`]).
 fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _docs: &DocIndex, rc: &RefResolver, conditional: bool) -> ClassDecl {
     let implements: Vec<NameRef> = e
         .implements
@@ -3411,9 +3364,8 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _doc
         }
     }
 
-    // `rc` is unused today (enum name hints are not resolved through it), but kept
-    // in the signature for symmetry with the other class-like lowerers and for the
-    // deferred method-lowering path.
+    // Keep the class-like lowerer signature uniform; enum members need no name
+    // resolution here.
     let _ = rc;
 
     ClassDecl {
@@ -3434,8 +3386,7 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _doc
         properties: Vec::new(),
         consts,
         uses_traits: false,
-        // An enum lowers no method bodies this slice (see above), so a class-level
-        // `@template` on it reaches no analyzed member — carry `None`.
+        // No analyzed member can observe an enum-level `@template`.
         docblock: None,
         span: to_span(e.name.span()),
     }
@@ -3632,10 +3583,9 @@ fn collect_steins_aliases_into(node: &Node<'_, '_>, out: &mut SteinsAttrAliases)
 ///
 /// For `#[\Steins\Effect(...)]` the arguments must be **plain string literals**
 /// (`'io'`, `'nondet.time'`); any non-literal argument (a class constant like
-/// `Effects::IO`, a concatenation, or a named argument) — which this slice cannot
-/// resolve without constant resolution — makes the whole attribute *unrecognized*
-/// (no envelope, no checking), the conservative choice. Class-constant support is
-/// deferred until constant resolution exists.
+/// `Effects::IO`, a concatenation, or a named argument) cannot be resolved
+/// without constant resolution and makes the whole attribute *unrecognized* (no
+/// envelope or checking), the conservative choice.
 ///
 /// `#[\Steins\Pure]` and `#[\Steins\Effect(...)]` on the same declaration are
 /// contradictory (Pure = empty upper bound, the tighter one); **Pure wins**
@@ -3723,7 +3673,7 @@ fn callback_ref_of_arg(expr: &Expression<'_>) -> Option<CallbackRef> {
         }
         Expression::Literal(Literal::String(ls)) => {
             let raw = bytes_to_string(ls.value?);
-            // A string callable naming a method (`Foo::m`) is deferred → not resolved.
+            // Method string callables (`Foo::m`) are not resolved.
             if raw.contains("::") || raw.is_empty() {
                 return None;
             }
@@ -4300,7 +4250,7 @@ fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut Vec<Eff
                 out.push(EffectOrigin::Opaque { span: to_span(sc.span()) });
             }
         }
-        // Nested scopes — do not descend (closures deferred this slice).
+        // Nested scopes are scanned independently.
         Node::Function(_)
         | Node::Closure(_)
         | Node::ArrowFunction(_)
@@ -4347,7 +4297,7 @@ fn scan_method_calls(node: &Node<'_, '_>, out: &mut Vec<CallExpr>) {
         // 8.1) — is not a call but references the method as a value: it produces a
         // `Closure` that can be invoked with *any* arguments later, so it makes the
         // method's callers unenumerable exactly as `[$o, 'm']` does. These lower to
-        // [`ArgValue::Other`] as values (a documented deferral) and so are invisible
+        // [`ArgValue::Other`] as values and so are invisible
         // to the value scan; record them here as non-positional reference-"calls" so
         // the reverse sweep taints the method (unknown receiver → `resolution-
         // ambiguous`; a resolved receiver → `named-or-spread-args`) and never
@@ -4592,8 +4542,8 @@ fn lower_catch_hint(hint: &Hint<'_>, classes: &mut Vec<NameRef>, unresolvable: &
 }
 
 /// Lower a type hint to a [`NativeType`] (single scalar, `?T`, or a union of the
-/// four scalars + `false`/`true`/`null`), or `None` for anything the slice does
-/// not model. A single non-scalar member anywhere (class type, `array`, `mixed`,
+/// four scalars + `false`/`true`/`null`), or `None` for unsupported types. A
+/// single non-scalar member anywhere (`array`, `mixed`,
 /// `iterable`, `callable`, `object`, an intersection, `self`/`static`/`parent`,
 /// `void`/`never`) collapses the **whole** hint to `None` (silent; zero-FP).
 fn lower_hint(hint: &Hint<'_>, rc: &RefResolver) -> Option<NativeType> {
@@ -4628,8 +4578,8 @@ fn lower_hint_into(
         // join the union as an `Instance` member — lowercase-normalized for
         // matching, source-cased for diagnostics. `self`/`static`/`parent` are
         // *not* `Hint::Identifier` (they are their own hint variants) — they
-        // stay in the silence arm below, per ADR-0043 (late-static-binding is
-        // not v1).
+        // stay in the silence arm below because late-static binding is unsupported
+        // (ADR-0043).
         Hint::Identifier(id) => {
             let display = rc.class_display_fqn(&name_ref(id));
             members.push(TypeMember::Instance { fqn: display.to_ascii_lowercase(), display });
@@ -4940,11 +4890,9 @@ fn effect_recv_of_object(object: &Expression<'_>) -> Option<EffectRecv> {
 /// declared forms: a never-written variable (`$r->m()`) and a never-written
 /// `$this` property read (`$this->repo->m()`). Both are recorded by *name* only —
 /// they name no class here; the effects pass resolves the declared type and
-/// decides whether an interface envelope applies (and taints exactly as before
-/// when it does not).
-///
-/// The proven forms come first and unchanged: this is a strict extension of
-/// [`effect_recv_of_object`], which the throw scan keeps using as-is.
+/// decides whether an interface envelope applies; failure taints
+/// exhaustiveness. Proven forms delegate to [`effect_recv_of_object`], which the
+/// throw scan also uses.
 fn effect_recv_of_object_declared(object: &Expression<'_>, cx: &EffectScanCx) -> Option<EffectRecv> {
     if let Some(recv) = effect_recv_of_object(object) {
         return Some(recv);
@@ -5143,7 +5091,7 @@ fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
         // `new Foo(...)` — a construction rvalue carrying its class (for exact-
         // class env tracking) plus its positional and named arguments (both feed the
         // promoted-property seed; only the class name is load-bearing for the class
-        // fact). A spread positional is dropped, as before.
+        // fact). Spread arguments are not represented.
         Expression::Instantiation(inst) => match instantiation_class(inst) {
             Some(class) => match inst.argument_list.as_ref() {
                 Some(list) => {
@@ -5183,8 +5131,8 @@ fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
             def_offset: arrow_def_offset(af),
             captures: arrow_free_vars(af),
         }),
-        // First-class callable of a named free function `strtolower(...)`. Method
-        // and static first-class callables are deferred → `Other` (documented).
+        // First-class callable of a named free function `strtolower(...)`.
+        // Method and static first-class callables lower to `Other`.
         Expression::PartialApplication(PartialApplication::Function(fpa))
             if fpa.argument_list.is_first_class_callable() =>
         {
@@ -5216,9 +5164,8 @@ fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
         // `Other`, because `+`/`-`/`*` carry overflow and int/float promotion
         // questions that byte concatenation does not.
         //
-        // Unrepresentable operands are lowered anyway rather than collapsing the
-        // whole node: resolution fails on the operand, which is the same silence,
-        // and keeping the tree lets a later slice resolve one side independently.
+        // Keep unrepresentable operands in the tree; resolution remains silent
+        // unless both operands become known.
         Expression::Binary(b) if b.operator.is_concatenation() => {
             ArgValue::Concat(Box::new(lower_arg_value(b.lhs)), Box::new(lower_arg_value(b.rhs)))
         }
@@ -5364,10 +5311,9 @@ fn lower_literal(lit: &Literal<'_>) -> ArgValue {
         // An integer literal that does not fit `int` is a **float** in PHP, not a
         // wrapped int (issue #62). The promotion is the lexer's and applies to every
         // base — decimal, hex, octal, binary, underscore-separated alike — so the
-        // test is on the parsed value, not the spelling. `9223372036854775808` was
-        // previously `v as i64` = `i64::MIN`, a wrong *value* the analyzer then
-        // propagated with full confidence; `-9223372036854775808` reached the same
-        // place because `wrapping_neg` is a no-op there. (`PHP_INT_MIN` has no
+        // test is on the parsed value, not the spelling. A cast of
+        // `9223372036854775808` to `i64` would produce the wrong value, `i64::MIN`;
+        // negating it also wraps to itself. (`PHP_INT_MIN` has no
         // integer-literal spelling at all — it is written `-PHP_INT_MAX - 1`.)
         //
         // The parser's own `value` is NOT usable for the overflow decision: it is a
@@ -5797,9 +5743,8 @@ fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
             for v in e.values.iter() {
                 collect_call_vars(&Node::Expression(v), &mut invalidated);
                 scan_call_arg_sites(&Node::Expression(v), &mut sites, &mut opaque);
-                // An embedded assignment (`echo $x = 5;`) writes a variable, so
-                // collect its write targets too: the walk no longer blanket-clears
-                // on echo (ADR-0031), it invalidates only what echo can mutate.
+                // Echo invalidates variables written by embedded assignments
+                // (`echo $x = 5;`) or mutable calls (ADR-0031).
                 collect_assign_writes(&Node::Expression(v), &mut invalidated);
                 // …and a name this echo WRITES is not a by-value-argument question
                 // at all — the write is the reason it is invalidated, and no
@@ -5812,7 +5757,7 @@ fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
             sites.retain(|s: &CallArgSite| !opaque.contains(&s.var));
             Stmt { span: ZERO_SPAN, kind: StmtKind::Echo(calls), invalidated, call_args: sites }
         }
-        // `if`/`elseif`/`else` is structured (ADR-0031 stage 1): its control flow
+        // `if`/`elseif`/`else` is structured (ADR-0031): its control flow
         // is modeled, not erased.
         Statement::If(if_stmt) => lower_if(if_stmt),
         // A `switch` is structured (ADR-0031 Part B) when its subject and every
@@ -5885,7 +5830,7 @@ fn named_call(expr: &Expression<'_>) -> Option<CallExpr> {
     }
 }
 
-/// Lower a structured `if`/`elseif`/`else` statement (ADR-0031 stage 1) to
+/// Lower a structured `if`/`elseif`/`else` statement (ADR-0031) to
 /// [`StmtKind::If`]. Each branch body is lowered by the same statement rules as
 /// the enclosing scope (so nested ifs recurse and unstructured constructs inside
 /// a branch appear as `Opaque`/`Barrier` within the sub-trace). Both the brace
@@ -6128,7 +6073,7 @@ fn node_has_stray_jump(node: &Node<'_, '_>) -> bool {
     })
 }
 
-/// Lower a condition expression to a [`CondExpr`] (ADR-0031 stage 1). Recognized:
+/// Lower a condition expression to a [`CondExpr`] (ADR-0031). Recognized:
 /// `===`/`!==`/`==`/`!=` comparisons, `instanceof`, `!`/`&&`/`||` (incl. the
 /// low-precedence `and`/`or`), and bare truthiness. Everything else becomes
 /// [`CondExpr::Opaque`] carrying the variables it reads.
@@ -6170,7 +6115,7 @@ fn lower_cond(expr: &Expression<'_>) -> CondExpr {
         // depth-one constant-key projection; a multi-argument isset is a
         // conjunction by PHP semantics and lowers to the matching `And` chain.
         // Anything else — `isset($x)`, a property or dynamic key, a mixed list —
-        // falls through to the pre-S4 `Opaque` lowering below, unchanged.
+        // lowers to `Opaque`.
         Expression::Construct(Construct::Isset(iss)) => {
             let operands: Option<Vec<CondExpr>> = iss
                 .values
@@ -6546,7 +6491,7 @@ fn call_arg_sites(node: &Node<'_, '_>) -> Vec<CallArgSite> {
 /// occurrence is describable, appending to `sites` when it is and to `opaque`
 /// when it is not.
 ///
-/// Not describable, and therefore v1 exclusions kept on the blanket drop:
+/// Not describable, and therefore kept on the blanket drop:
 ///
 /// * a method / nullsafe-method / static-method call — the receiver's own
 ///   mutability is a separate question (ADR-0070 §4) and no `NameRef` names the
@@ -6903,13 +6848,9 @@ fn collect_namespaces(
 /// `use function A\{b, c}`, and the mixed `use A\{B, function c, const D}`). Only
 /// `use const` items are skipped (constant resolution is out of scope).
 ///
-/// Grouped-use lowering was previously skipped on the belief that "a miss only
-/// fails to resolve, never mis-resolves" — but that belief is false: an unresolved
-/// grouped import falls back through [`resolve_class_ref`] to the enclosing
-/// namespace (bare, in the global namespace), which can collide with a *different*
-/// real class of that fallback name and mis-resolve. That is a genuine FP source
-/// (ADR-0049 §6 arity surfaced it on `use Contentful\{Delivery\Query}; new Query()`
-/// resolving to an unrelated `Query`), so the grouped forms are now lowered.
+/// Grouped imports must be lowered because an unresolved import falls back through
+/// [`resolve_class_ref`] to the enclosing namespace and can collide with a different
+/// class, producing a false positive (ADR-0049 §6).
 fn add_use(u: &mago_syntax::cst::Use<'_>, ctx: &mut NsCtx) {
     match &u.items {
         UseItems::Sequence(seq) => {

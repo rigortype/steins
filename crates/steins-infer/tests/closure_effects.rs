@@ -45,7 +45,6 @@ fn pure_array_map_inline_impure_closure_fires_with_callback_provenance() {
 
 #[test]
 fn pure_array_map_pure_closure_is_silent() {
-    // A pure inline callback → array_map contributes nothing → Pure holds.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(array $xs): array {\n    return array_map(function ($x) { return $x + 1; }, $xs);\n}\n";
     assert_eq!(effects(src).len(), 0, "pure callback → silent");
 }
@@ -63,8 +62,6 @@ fn pure_array_map_unknown_callable_is_silent_but_taints() {
 
 #[test]
 fn array_filter_reversed_args_finds_callback_at_position_1() {
-    // array_filter($xs, $cb) — callback is the SECOND argument. The impure closure
-    // there must still be found.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(array $xs): array {\n    return array_filter($xs, function ($x) { echo $x; return true; });\n}\n";
     let d = one(src);
     assert!(d.message.contains("output"), "{}", d.message);
@@ -72,8 +69,6 @@ fn array_filter_reversed_args_finds_callback_at_position_1() {
 
 #[test]
 fn array_filter_one_arg_form_has_no_callback() {
-    // The 1-arg form array_filter($xs) has no callback → nothing to join, silent,
-    // and (array_filter being a shaped pure base) exhaustive.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(array $xs): array { return array_filter($xs); }\n";
     assert_eq!(effects(src).len(), 0);
 }
@@ -93,14 +88,12 @@ fn register_shutdown_function_deferred_effects_propagate() {
 
 #[test]
 fn array_map_string_builtin_callback_is_pure() {
-    // 'strtolower' is a catalogued-pure builtin callback → silent.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(array $xs): array { return array_map('strtolower', $xs); }\n";
     assert_eq!(effects(src).len(), 0);
 }
 
 #[test]
 fn array_map_user_impure_named_callback_fires() {
-    // A user function callback that echoes → its effect joins.
     let src = "<?php\nfunction shout($x) { echo $x; return $x; }\n#[\\Steins\\Pure]\nfunction f(array $xs): array { return array_map('shout', $xs); }\n";
     let d = one(src);
     assert!(d.message.contains("output"), "{}", d.message);
@@ -108,7 +101,6 @@ fn array_map_user_impure_named_callback_fires() {
 
 #[test]
 fn array_map_first_class_callable_callback_fires() {
-    // A first-class callable `shout(...)` as the callback.
     let src = "<?php\nfunction shout($x) { echo $x; return $x; }\n#[\\Steins\\Pure]\nfunction f(array $xs): array { return array_map(shout(...), $xs); }\n";
     let d = one(src);
     assert!(d.message.contains("output"), "{}", d.message);

@@ -6,7 +6,7 @@
 //!
 //! * **A-G9** — a read is never null-poisoned. An undischarged optional key
 //!   yields NO fact, never the declared value ∪ null.
-//! * **Zero emission (A-G9's corollary)** — nothing in this slice may produce a
+//! * **Zero emission (A-G9's corollary)** — shape reads must not produce a
 //!   finding. Every test that exercises a shape asserts the non-debug diagnostic
 //!   list is empty, and [`no_findings_from_shape_reads`] sweeps the matrix.
 //!
@@ -19,9 +19,8 @@ use steins_domain::{Base, Fact, IntRange, Refinement};
 use steins_infer::{DEBUG_TYPE_ID, Diagnostic, Folder, check_with};
 use steins_syntax::{ArgValue, SourceTree};
 
-/// A mock sidecar answering exactly the two reflected envelopes the ADR-0061
-/// admission gate consults for this slice's transfers, plus the absence-family
-/// boot surface (there is no PHP in a unit test). Without an envelope the type
+/// A mock sidecar answering the reflected envelopes these transfers consult,
+/// plus the absence-family boot surface (there is no PHP in a unit test). Without an envelope the type
 /// rung is *withheld*, which is the gate working — so a transfer test needs
 /// this mock to observe anything at all.
 #[derive(Default)]
@@ -230,15 +229,9 @@ fn a_transfer_binds_into_the_env_for_later_use() {
 
 #[test]
 fn shape_reads_feed_nothing_but_the_strict_leg() {
-    // A-G9's corollary, restated after ADR-0062 S6 lit the strict leg: a
-    // shape-derived fact may produce the CONTRACT-layer ids `offset.undeclared` /
-    // `offset.maybe-missing` and NOTHING else. Every proof-layer id — above all the
-    // offset family's own proof leg — stays absent from every cell of the matrix.
-    //
-    // (Before S6 this swept for zero findings outright. The sweep's real content was
-    // always "no shape fact reaches a proof-layer emitter", which is what it still
-    // asserts; the two strict ids are enumerated so a third one cannot slip in
-    // unnoticed.)
+    // A-G9: a shape-derived fact may produce only the contract-layer offset ids.
+    // No proof-layer id may appear; enumerating the two allowed ids prevents a new
+    // contract finding from slipping in unnoticed.
     let strict_leg = ["offset.undeclared", "offset.maybe-missing"];
     let bodies = [
         "$x = $v['a']; return;",
@@ -269,9 +262,8 @@ fn shape_reads_feed_nothing_but_the_strict_leg() {
 fn a_shape_seed_does_not_disturb_the_proof_leg() {
     // The PROOF-layer offset check judges proven whole values only; a shape base is
     // silent there, and the `Asserted` seed is invisible to its Verified-only
-    // operand gate to begin with. S6 added a contract-layer leg over the same site —
-    // `$v['nope']` on a sealed shape is a declared absence — so the assertion is
-    // that the proof leg stays out of it, not that the site is silent.
+    // operand gate. The contract-layer leg may report `$v['nope']` as a declared
+    // absence, but the proof leg must remain silent.
     let shaped = "<?php\n/** @param array{a: string} $v */\n\
                   function f(array $v): void { $x = $v['nope']; }\n";
     let ds = diagnostics(shaped);

@@ -154,9 +154,7 @@ fn dump_two(decl: &str, extra: &str, expr: &str) -> String {
     ))
 }
 
-// ---------------------------------------------------------------------------
 // The order-witnessed lane: the fold seam (§1's measured gap)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_bound_array_folds_exactly_like_a_written_literal() {
@@ -167,8 +165,7 @@ fn a_bound_array_folds_exactly_like_a_written_literal() {
 
 #[test]
 fn an_unproven_binding_still_widens_to_the_envelope() {
-    // Resolution is opportunistic: an argument that does not resolve is judged
-    // exactly as it was before, so the envelope stands.
+    // An unresolved argument retains the reflected envelope.
     let src = "<?php\nfunction f(array $u): void { $a = $u; \\PHPStan\\dumpType(count($a)); }\n";
     assert_eq!(one_type(src), "dumped type: int<0, max>");
 }
@@ -185,9 +182,7 @@ fn a_partly_proven_array_literal_folds_through_its_binding() {
 
 #[test]
 fn the_witnessed_order_is_what_the_order_dependent_builtins_see() {
-    // `implode` is order-dependent and the allowlist already admits it; with the
-    // seam closed it now answers over a BOUND array — and it answers in the
-    // observed insertion order, not in any canonical one.
+    // `implode` over a bound array uses observed insertion order, not canonical order.
     assert_eq!(
         dump_body("$a = ['b', 'a']; \\PHPStan\\dumpType(implode(',', $a));"),
         "dumped type: 'b,a'"
@@ -217,9 +212,7 @@ fn a_declared_shape_argument_is_not_a_fold_argument() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The order-declared lane: symbolic transfers (§4's row)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn array_values_of_a_shape_is_a_list_of_the_value_union() {
@@ -251,7 +244,7 @@ fn array_keys_of_a_sealed_shape_enumerates_the_key_set() {
 
 #[test]
 fn array_key_first_is_some_key_of_the_set_never_the_declared_first() {
-    // **The negative test of this slice** (§2, §7's declined import 1): PHPStan
+    // **Negative test** (§2, §7 declined import 1): PHPStan
     // answers `'a'` here and is wrong on `['b' => 2, 'a' => 1]`, which the shape
     // admits just as well.
     assert_eq!(dump("array{a: int, b: int}", "array_key_first($v)"), "dumped type: 'a'|'b' (asserted)");
@@ -292,19 +285,13 @@ fn the_declined_projections_say_nothing() {
     // `unknown`: ADR-0069's Asserted floor, and the `(asserted)` marker is the
     // difference. That row is a multi-base union #73 counted and dropped and #79
     // admitted; it did not move with anything in this family.
-    //
-    // `array_slice` used to stand beside it, declined because "the seam is
-    // single-argument by construction". Issue #118 answered that by growing the
-    // seam — see the section below.
     assert_eq!(
         dump("array{a: int, b?: int}", "array_search(1, $v)"),
         "dumped type: int|string|false (asserted)"
     );
 }
 
-// ---------------------------------------------------------------------------
 // array_slice: the grown argument channel (issue #118, ADR-0062 Amendment B)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn array_slice_keeps_the_element_type_and_the_list_ness() {
@@ -414,7 +401,7 @@ fn a_witnessed_subject_with_an_unproven_offset_falls_to_the_widening() {
 
 #[test]
 fn the_contract_lane_never_projects_positionally() {
-    // **The negative test of this slice** (§2, §7's declined import 1). A declared
+    // **Negative test** (§2, §7 declined import 1). A declared
     // `array{a: int, b: string}` is a key SET: `['b' => 's', 'a' => 1]` is admitted
     // just as well, so `array_slice($v, 1)` cannot be `array{b: string}` — the
     // widening is the only sound answer, whatever the offset and length say. That is

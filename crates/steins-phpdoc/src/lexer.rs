@@ -372,21 +372,18 @@ fn match_float(b: &[u8], pos: usize) -> Option<usize> {
     }
     let after_sign = i;
 
-    // Helper closures operate on absolute index.
     let has_digit = |x: usize| x < b.len() && dec(b[x]);
 
     // Case A: digits+ (.) digits* (exp)?    — requires a dot
     // Case B: digits* (.) digits+ (exp)?    — requires a dot
     // Case C: digits+ exp                   — requires exp, no dot
     // Try A/B (with dot) first, then C.
-    // Parse an optional leading integer part.
     let int_end = if has_digit(after_sign) {
         digits_with_underscores(b, after_sign, dec)
     } else {
         after_sign
     };
 
-    // With a dot:
     if int_end < b.len() && b[int_end] == b'.' {
         let mut j = int_end + 1;
         let frac_present = has_digit(j);
@@ -396,7 +393,6 @@ fn match_float(b: &[u8], pos: usize) -> Option<usize> {
         // Need at least one digit somewhere around the dot.
         let int_present = int_end > after_sign;
         if int_present || frac_present {
-            // optional exponent
             j = match_exponent(b, j);
             return Some(j);
         }

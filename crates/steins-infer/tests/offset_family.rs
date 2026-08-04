@@ -1,12 +1,11 @@
-//! ADR-0049 §7 / S3: the offset family — `offset.missing` / `offset.on-unsupported`.
+//! The offset family — `offset.missing` / `offset.on-unsupported` (ADR-0049 §7).
 //!
-//! A value-domain absence proof: a read `$base[$key]` provably emits an `E_WARNING`
-//! because the container value is a proven `Verified` `Singleton`/all-array `OneOf`
-//! and the key is provably absent, or the base is a proven non-offsetable
-//! scalar/null. The family is gated on the runtime boot surface (ADR-0049 A9), so
-//! these tests drive a [`Ready`] folder that stands in for a live, monkey-patch-free
-//! sidecar. Every ladder leg ships with a **silence fixture** (§10 silence-matrix
-//! discipline) proving the id stays quiet when a leg fails.
+//! A value-domain absence proof: `$base[$key]` provably emits an `E_WARNING`
+//! because the container is a proven `Verified` `Singleton`/all-array `OneOf` with
+//! the key absent, or the base is a proven non-offsetable scalar/null. The family
+//! is gated on the runtime boot surface (ADR-0049 A9), so these tests drive a
+//! [`Ready`] folder standing in for a live sidecar. Each ladder leg has a silence
+//! fixture proving the id stays quiet when a leg fails.
 
 use steins_infer::{
     Diagnostic, Folder, OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID, check_full, check_with,
@@ -56,9 +55,9 @@ fn on_unsupported(src: &str) -> Vec<Diagnostic> {
     offset_diags(src).into_iter().filter(|d| d.id == OFFSET_ON_UNSUPPORTED_ID).collect()
 }
 
-// ---------------------------------------------------------------------------
+
 // Firing fixtures — every leg holds.
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn fires_on_empty_list_guard_branch() {
@@ -130,9 +129,9 @@ fn fires_in_return_position() {
     assert_eq!(d.len(), 1, "a return operand is a whitelisted read: {d:#?}");
 }
 
-// ---------------------------------------------------------------------------
+
 // Canonicalization (A10) — the same key primitive as the write side.
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn string_five_is_the_present_int_key() {
@@ -156,9 +155,9 @@ fn int_key_matches_string_keyed_literal() {
     assert!(d.is_empty(), "int 5 hits the normalized key 5: {d:#?}");
 }
 
-// ---------------------------------------------------------------------------
+
 // Silence matrix (A7 read-context whitelist + §7 provability).
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn silent_on_present_key() {
@@ -230,15 +229,15 @@ fn silent_after_by_ref_argument_poisoning() {
     assert!(missing(src).is_empty(), "by-ref poisoning ⇒ silent");
 }
 
-// ---------------------------------------------------------------------------
+
 // Stratum discipline (N2) — the assert() construct is Verified.
-//
+
 // FLIPPED by the 2026-07-25 owner ruling (ADR-0052 amendment "assert() reads as a
 // throw-guard", slice I0): `assert($v === [])` narrows at the Verified stratum
 // unconditionally (the ruling reads assert() as `if (!$expr) throw` and never
 // consults `zend.assertions`; the abolished `[runtime] zend-assertions` knob is
 // gone). Pre-ruling this fixture was SILENT (Asserted, gated); it now FIRES.
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn fires_on_assert_empty_singleton() {
@@ -262,9 +261,9 @@ fn silent_on_assert_non_empty_list_read() {
     assert!(missing(src).is_empty(), "assert($v !== []) leaves key-0 absence unprovable → silent");
 }
 
-// ---------------------------------------------------------------------------
+
 // A9 availability + warning-handler posture (ADR-0049 §7).
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn silent_without_a_sidecar() {

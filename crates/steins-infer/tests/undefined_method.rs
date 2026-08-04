@@ -1,4 +1,4 @@
-//! ADR-0049 §4 / S2: `call.undefined-method`, the finding-breadth flagship.
+//! ADR-0049 §4 / S2: `call.undefined-method`.
 //!
 //! The absence-proof ladder fires only under complete closure (ADR-0013 zero-FP).
 //! Under the pure `NoFold` subset the id is silent by design (no sidecar to answer
@@ -65,9 +65,7 @@ fn fires(src: &str) -> Vec<Diagnostic> {
     run(src, &mut Boot::ready())
 }
 
-// ---------------------------------------------------------------------------
 // Firing fixtures: every leg holds.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn fires_on_exact_new_receiver() {
@@ -149,9 +147,7 @@ fn fires_under_conditional_decl_when_dam_is_clear() {
     assert_eq!(d.len(), 1, "{d:?}");
 }
 
-// ---------------------------------------------------------------------------
 // Silence matrix — one fixture per ladder leg (ADR-0049 §10).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn silent_when_family_unavailable() {
@@ -293,7 +289,7 @@ fn silent_leg_j_enum_static_call() {
 
 #[test]
 fn silent_leg_g_conditional_decl_under_dam() {
-    // A2i: a conditional declaration + a standing dam site (eval) ⇒ re-dammed ⇒ silent.
+    // A2i: a conditional declaration plus `eval` remains dammed and silent.
     let d = fires("<?php\neval('$x = 1;');\nif (true) {\n  class Order {}\n}\n(new Order())->tyop();\n");
     assert!(d.is_empty(), "{d:?}");
 }
@@ -336,9 +332,7 @@ fn silent_on_inexact_non_final_this_seed() {
     assert!(d.is_empty(), "{d:?}");
 }
 
-// ---------------------------------------------------------------------------
 // Adversarial: constructed counterexamples that must be silenced by a real test.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn adversarial_final_this_still_routes_through_receiver_legs() {

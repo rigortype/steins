@@ -34,7 +34,6 @@ fn plain_list_uses_auto_keys() {
     assert_eq!(it.len(), 3);
     assert!(it.iter().all(|(k, _)| matches!(k, ArrayKey::Auto)));
     assert_eq!(it[0].1, ArgValue::Str("a".into()));
-    // Normalization assigns 0, 1, 2.
     let norm = norm_unknown(it);
     assert_eq!(norm[0].0, NormKey::Int(0));
     assert_eq!(norm[2].0, NormKey::Int(2));
@@ -258,7 +257,6 @@ fn rendering_takes_the_pinned_rule_and_never_declines() {
     assert!(next_int_is_version_dependent(items(&v)));
     assert_eq!(v.render(), "[-5 => 'a', -4 => 'b']");
 
-    // A version-independent literal renders as a plain list, unchanged.
     assert_eq!(first_arg("<?php f(['a', 'b']);").render(), "['a', 'b']");
 }
 

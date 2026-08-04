@@ -1,15 +1,11 @@
-//! Integer-literal magnitude and the `int` → `float` promotion (issue #62).
+//! Integer-literal magnitude and `int` → `float` promotion (issue #62).
 //!
-//! PHP's lexer promotes an integer literal that does not fit `int` to `float`. Before
-//! this was implemented the literal wrapped: `9223372036854775808` lowered to
-//! `i64::MIN` and the analyzer reported `-9223372036854775808` — a wrong *value*,
-//! which under the zero-FP charter (ADR-0002) is strictly worse than `unknown`,
-//! because it seeds an env fact, crosses return boundaries, and reaches the fold gate
-//! as an argument the source never contained.
+//! PHP promotes an integer literal that does not fit `int` to `float`. Reporting
+//! a wrapped value is worse than `unknown` under the zero-FP charter (ADR-0002):
+//! the false fact can cross return boundaries and reach the fold gate.
 //!
-//! The promotion is base-blind, so the fixtures walk every spelling PHP accepts, and
-//! `oracle_agrees_on_every_spelling` checks each against the real engine rather than
-//! against an assumption about it.
+//! Promotion is base-blind, so fixtures cover every accepted spelling and compare
+//! with the real engine.
 
 use std::process::Command;
 
@@ -29,9 +25,7 @@ fn dumped(expr: &str) -> String {
     ds[0].message.replace("dumped type: ", "")
 }
 
-// ==========================================================================
 // (i) The defect itself.
-// ==========================================================================
 
 #[test]
 fn a_literal_above_int_max_promotes_to_float() {
@@ -41,12 +35,11 @@ fn a_literal_above_int_max_promotes_to_float() {
 
 #[test]
 fn the_unary_minus_spelling_promotes_too() {
-    // `-9223372036854775808` is unary minus over an ALREADY-overflowed literal, so it
-    // is a float in PHP as well. It previously reached the same wrong `i64::MIN` by a
-    // second route: `wrapping_neg` is a no-op on `i64::MIN`.
+    // `-9223372036854775808` is unary minus over an already-overflowed literal, so
+    // it is a float in PHP too.
     assert_eq!(dumped("-9223372036854775808"), "-9223372036854775808.0");
-    // `PHP_INT_MIN` has no integer-literal spelling at all — the nearest int literal
-    // is `-(PHP_INT_MAX)`, which stays an int.
+    // `PHP_INT_MIN` has no integer-literal spelling; the nearest int literal is
+    // `-(PHP_INT_MAX)`, which stays an int.
     assert_eq!(dumped("-9223372036854775807"), "-9223372036854775807");
 }
 
@@ -57,9 +50,7 @@ fn the_boundary_is_checked_on_both_sides() {
     assert_eq!(dumped("9223372036854775808"), "9223372036854775808.0");
 }
 
-// ==========================================================================
 // (ii) Every base follows the same rule.
-// ==========================================================================
 
 #[test]
 fn ordinary_literals_are_unaffected_in_every_base() {
@@ -86,16 +77,13 @@ fn beyond_u64_decimal_still_converts_other_bases_decline() {
     // A decimal digit string rounds to the nearest double identically in Rust and
     // PHP, so this is exact, not approximate.
     assert_eq!(dumped("99999999999999999999"), "100000000000000000000.0");
-    // The documented ceiling: a >64-bit hex literal would need big-integer
-    // arithmetic to convert, so it declines rather than guessing. Silence, not a
-    // wrong value — and NOT the parser's saturated `u64::MAX`, which is the trap
-    // this whole fix exists to avoid.
+    // A >64-bit hex literal would need big-integer arithmetic to convert, so it
+    // declines rather than guessing — silence, not the parser's saturated
+    // `u64::MAX`.
     assert_eq!(dumped("0x10000000000000000"), "unknown");
 }
 
-// ==========================================================================
 // (iii) The array-key path the promotion newly routes through.
-// ==========================================================================
 
 #[test]
 fn an_out_of_range_float_key_is_not_folded() {
@@ -111,14 +99,12 @@ fn an_out_of_range_float_key_is_not_folded() {
         .collect();
     assert_eq!(ds.len(), 1);
     assert_eq!(ds[0].message.replace("dumped type: ", ""), "unknown");
-    // An in-range float key still truncates toward zero, unchanged: `1.9` is the
-    // EXPLICIT key 1, not an auto key (which would spell `array{'y'}`).
+    // An in-range float key truncates toward zero: `1.9` is the explicit key 1,
+    // not an auto key (which would spell `array{'y'}`).
     assert_eq!(dumped("[1.9 => 'y']"), "array{1: 'y'}");
 }
 
-// ==========================================================================
 // (iv) The oracle.
-// ==========================================================================
 
 /// Every spelling checked against the engine. Kept as PHP source so the literal the
 /// engine sees is byte-for-byte the literal lowering sees.

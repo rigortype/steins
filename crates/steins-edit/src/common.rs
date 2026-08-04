@@ -162,7 +162,7 @@ pub fn check_method_caller_enumerability(
     method_name: &str,
     sweep: &MethodSweep,
 ) -> Result<(), (&'static str, String)> {
-    // Non-empty site list == the old `any_dynamic_method == true` (ADR-0047 §6).
+    // Any dynamic method-call site anywhere blocks enumerability (ADR-0047 §6).
     if !sweep.dynamic_method_sites.is_empty() {
         return Err((
             REASON_DYNAMIC_CALL,
@@ -170,7 +170,6 @@ pub fn check_method_caller_enumerability(
         ));
     }
     let name = method_name.to_ascii_lowercase();
-    // Key-presence == the old set membership.
     if sweep.value_referenced_methods.contains_key(&name) {
         return Err((
             REASON_REFERENCED_AS_VALUE,
@@ -178,8 +177,7 @@ pub fn check_method_caller_enumerability(
         ));
     }
     if let Some(sites) = sweep.unresolved_method_names.get(&name) {
-        // The first recorded site is the representative (source order) — identical to
-        // the pre-Slice-B single-site value.
+        // Use the first source-ordered site as the representative.
         let site = &sites[0];
         return Err((
             REASON_AMBIGUOUS,
@@ -305,7 +303,7 @@ pub fn check_caller_enumerability(
     sweep: &FreeFnSweep,
     fqn_counts: &HashMap<String, usize>,
 ) -> Result<(), (&'static str, String)> {
-    // Non-empty site list == the old `any_dynamic_call == true` (ADR-0047 §6).
+    // Any dynamic call site anywhere blocks enumerability (ADR-0047 §6).
     if !sweep.dynamic_call_sites.is_empty() {
         return Err((
             REASON_DYNAMIC_CALL,
@@ -313,7 +311,6 @@ pub fn check_caller_enumerability(
         ));
     }
     let simple = func.name.to_ascii_lowercase();
-    // Key-presence == the old set membership.
     if sweep.value_referenced_names.contains_key(&simple)
         || sweep.value_referenced_names.contains_key(&func.fqn)
     {
@@ -337,18 +334,18 @@ pub fn check_caller_enumerability(
 //
 // The *semantic* normal form — sort/dedup, the predicate-class collapse (numeric
 // literals → numeric-string, the bool pair → bool, null-fold) — lives in
-// `steins_contract::normalize::summarize_vals` (ADR-0052 §4, slice N1). The
+// `steins_contract::normalize::summarize_vals` (ADR-0052 §4). The
 // **plain-text arm spelling** — member ordering/join, the CAP-bounded literal-
-// union decision, the predicate-keyword ladder, and single-quote escaping — now
-// lives in `steins_contract::spell` (ADR-0053 §7, slice D2), shared with the
+// union decision, the predicate-keyword ladder, and single-quote escaping —
+// lives in `steins_contract::spell` (ADR-0053 §7), shared with the
 // `annotate`/dump emitters in `steins-infer` (which cannot reach this crate: the
 // dependency runs steins-edit → steins-infer).
 //
 // What *stays* here is the **docblock armor**: the `*/`/raw-newline literal-safety
 // widening that is meaningless in terminal output but corrupts a `/** … */` block.
-// It pre-widens the arm list before delegating to the shared speller. The cut is
-// byte-identical against the honesty tests below (the renderer's oracle) and the
-// cross-crate parity test.
+// It pre-widens the arm list before delegating to the shared speller. The honesty
+// tests below (the renderer's oracle) and the cross-crate parity test pin the
+// armor and the shared spelling against each other.
 
 /// Render a proven set of concrete values as a faithful phpdoc type (ADR-0029
 /// grammar) *safe to embed in a docblock*, or `None` when no faithful spelling
@@ -538,16 +535,15 @@ mod tests {
         round_trips(&r);
     }
 
-    /// The **annotate parity** contract (ADR-0053 §7, slice D2): the shared
+    /// The **annotate parity** contract (ADR-0053 §7): the shared
     /// `steins_contract::spell::spell_arms` — the one the `annotate`/dump emitters
     /// in `steins-infer` call, byte-for-byte — reproduces this crate's docblock
     /// renderer wherever the docblock armor is a no-op (every docblock-safe value
     /// set). The extraction seam is byte-identical, so a dump and an `annotate`
-    /// margin for the same expression will spell the same fact the same way (the
-    /// full same-position pin lands with the emitters at D3). Where a value is not
-    /// docblock-safe (`*/` / raw newline), the two deliberately diverge — the
-    /// docblock renderer widens, the terminal speller spells the literal — and that
-    /// divergence is exactly the armor D2 keeps in `steins-edit`.
+    /// margin for the same expression spell the same fact the same way. Where a
+    /// value is not docblock-safe (`*/` / raw newline), the two deliberately
+    /// diverge — the docblock renderer widens, the terminal speller spells the
+    /// literal — and that divergence is exactly the armor `steins-edit` keeps.
     #[test]
     fn shared_speller_is_byte_equal_to_the_docblock_renderer_on_safe_sets() {
         let safe_sets: Vec<Vec<Val>> = vec![

@@ -28,7 +28,7 @@ fn only(src: &str) -> Diagnostic {
     f.into_iter().next().unwrap()
 }
 
-// ---- Constructor argument mismatch ---------------------------------------
+// Constructor argument mismatch
 
 #[test]
 fn constructor_arg_mismatch_flagged() {
@@ -68,7 +68,7 @@ fn constructor_via_env_binding_descends() {
     assert!(d.message.contains("to Foo::__construct()"), "{}", d.message);
 }
 
-// ---- Exact-class instance receivers --------------------------------------
+// Exact-class instance receivers
 
 #[test]
 fn exact_receiver_direct_new_flagged() {
@@ -100,7 +100,7 @@ fn unknown_receiver_variable_is_silent() {
     assert_eq!(n(src), 0, "unknown receiver class → silent");
 }
 
-// ---- `$this->` under the override guard ----------------------------------
+// `$this->` under the override guard
 
 #[test]
 fn this_call_to_private_method_flagged() {
@@ -128,7 +128,7 @@ fn this_call_to_nonfinal_public_is_silent() {
     assert_eq!(n(src), 0, "non-final public $this->m → silent (may be overridden)");
 }
 
-// ---- Static calls: self / parent / ClassName / static --------------------
+// Static calls: self / parent / ClassName / static
 
 #[test]
 fn static_class_method_flagged() {
@@ -164,7 +164,7 @@ fn static_call_lsb_is_silent() {
     assert_eq!(n(src), 0, "static:: → unknown (LSB)");
 }
 
-// ---- Private visibility skip (call from outside the class) ----------------
+// Private visibility skip (call from outside the class)
 
 #[test]
 fn private_method_from_outside_is_skipped() {
@@ -174,7 +174,7 @@ fn private_method_from_outside_is_skipped() {
     assert_eq!(n(src), 0, "private method from outside → skip (not our error)");
 }
 
-// ---- Trait-using class / chain leaving the file → give up -----------------
+// Trait-using class / chain leaving the file → give up
 
 #[test]
 fn trait_using_class_is_silent() {
@@ -190,7 +190,7 @@ fn chain_leaving_file_is_silent() {
     assert_eq!(n(src), 0, "extends an out-of-file class → silent");
 }
 
-// ---- Binding descent into method bodies (this-context) --------------------
+// Binding descent into method bodies (this-context)
 
 #[test]
 fn binding_descent_two_hop_this_private() {
@@ -208,7 +208,7 @@ fn binding_descent_two_hop_this_private() {
     );
 }
 
-// ---- Exact-class fact semantics ------------------------------------------
+// Exact-class fact semantics
 
 #[test]
 fn exact_class_fact_survives_method_call_while_literal_dies() {
@@ -264,7 +264,7 @@ fn reassigned_object_var_loses_its_class_fact() {
     assert_eq!(n(src), 0, "reassigned $x loses its class fact → silent");
 }
 
-// ---- Effect envelope on a method -----------------------------------------
+// Effect envelope on a method
 
 #[test]
 fn pure_method_flagged_via_method_edge_with_via_provenance() {
@@ -298,7 +298,7 @@ fn pure_method_calling_nonfinal_helper_is_silent() {
     assert_eq!(f.len(), 0, "unresolved method edge → silent");
 }
 
-// ---- Free functions and classes coexist unchanged -------------------------
+// Free functions and classes coexist unchanged
 
 #[test]
 fn method_call_argument_that_is_a_function_call_still_direct_checks() {

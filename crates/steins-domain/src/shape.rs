@@ -369,11 +369,10 @@ impl ShapeFact {
     /// * the surviving covers stay a deterministically ordered antichain.
     ///
     /// `non_empty` follows from the claim and is set: a cover says at least one
-    /// of its keys is present, so no admitted array is empty. This is the same
-    /// reasoning [`ShapeFact::count_range`] already applies when it floors a
-    /// covered shape at one, hoisted to the flag so the *spelling* carries it
-    /// too. It is not double representation — [`ShapeFact::mark_absent`] drops
-    /// the flag and re-derives it, so the two never disagree.
+    /// of its keys is present, so no admitted array is empty — the same floor
+    /// [`ShapeFact::count_range`] applies to a covered shape.
+    /// [`ShapeFact::mark_absent`] drops the flag and re-derives it, so the flag
+    /// and the covers never disagree.
     #[must_use]
     pub fn record_cover(&self, keys: Vec<Key>, flavor: CoverFlavor) -> ShapeFact {
         let mut covers = self.covers.clone();
@@ -603,7 +602,8 @@ impl ShapeFact {
     }
 
     // ------------------------------------------------------------------
-    // Narrowing operators (ADR-0062 S4; A-G7 — targeted, never a general ⊓)
+    // Narrowing operators (ADR-0062 S4; A-G7's targeted refinements — see the
+    // module doc's "No general meet").
     //
     // Each one is a *narrowing*: the returned shape admits every array the
     // receiver admits that also satisfies the guard. Where the guard's exact
@@ -702,10 +702,8 @@ impl ShapeFact {
     ///   `Required` fields: the flag cannot say whether it came from a
     ///   `non-empty-array{…}` declaration or from the key just removed.
     ///
-    /// **Covers containing `k` are killed** rather than shrunk — A-G8's
-    /// invalidation law as written. The sharper "remove `k` from the cover and
-    /// let a singleton normalize to presence" is cover algebra and lands with
-    /// the rest of the cover lane in S5.
+    /// **Covers containing `k` are killed** rather than shrunk, as required by
+    /// A-G8's invalidation law.
     #[must_use]
     pub fn mark_absent(&self, k: &Key) -> ShapeFact {
         let mut fields = self.fields.clone();
@@ -727,8 +725,7 @@ impl ShapeFact {
         ShapeFact::normalize(fields, self.tail.clone(), Certainty::Maybe, false, covers)
     }
 
-    /// **`non_empty` set**: the true branch of `if ($x)` on an array base, and
-    /// the `array_all` / `array_any` legs S8 will add.
+    /// **`non_empty` set**: the true branch of `if ($x)` on an array base.
     #[must_use]
     pub fn set_non_empty(&self) -> ShapeFact {
         ShapeFact::normalize(
@@ -1244,8 +1241,9 @@ mod tests {
 
     #[test]
     fn admits_unsealed_checks_the_tail_key_class_and_value() {
-        // The tail-key gap ADR-0062 §1 measured, closed here:
-        // `array{a: int, ...<string, int>}` must reject `['a' => 1, 9 => 2]`.
+        // An unsealed tail's key class bounds undeclared keys:
+        // `array{a: int, ...<string, int>}` rejects `['a' => 1, 9 => 2]`
+        // (ADR-0062 §1).
         let s = ShapeFact::normalize(
             vec![(ks("a"), req(), slot(Fact::General { base: Base::Int, nullable: false }))],
             Tail::Unsealed {

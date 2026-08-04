@@ -43,10 +43,9 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How many times one [`Sidecar`] will replace a dead child before giving up.
 ///
-/// The storm brake. A run that kills three children is not hitting an accident;
-/// it is being fed input that kills children, and each respawn costs a PHP
-/// startup. Past the cap the instance behaves exactly as it did before respawn
-/// existed — permanently poisoned, every later request widens immediately.
+/// The storm brake. A run that kills three children is being fed input that
+/// kills children, and each respawn costs a PHP startup. Past the cap the
+/// instance stays poisoned and every later request widens immediately.
 const RESPAWN_CAP: u32 = 3;
 
 /// One live child and the thread draining it — everything a respawn replaces.
@@ -81,11 +80,6 @@ impl Channel {
     /// (it is not a secret — the same file ships readable in the binary), and
     /// a PHP parse error would report against "Command line code" rather than
     /// a filename (moot in practice: stderr is discarded below regardless).
-    ///
-    /// File-based invocation (`php <path>`) is not gone as a *concept* — it is
-    /// still what a future php-wasm lane (issue #64) would write into that
-    /// runtime's virtual FS — it is just not exercised by this native
-    /// transport, which has no reason to touch disk at all.
     fn open() -> std::io::Result<Self> {
         let mut child = Command::new("php")
             .arg("-r")
@@ -169,11 +163,6 @@ impl Channel {
 /// the one it replaced, which is what makes a respawn transparent rather than a
 /// resynchronization problem.
 ///
-/// A per-function result-size budget on the Rust side (bounding `str_repeat`'s
-/// `count × strlen` and so on) was considered and rejected: it demands resource
-/// knowledge of every builtin, is silently incomplete for every future allowlist
-/// member, and is helpless against the non-memory death classes. Respawn is
-/// indifferent to *why* the child died.
 pub struct Sidecar {
     chan: Channel,
     next_id: u64,
@@ -190,10 +179,6 @@ impl Sidecar {
     /// from `PATH`. Returns an error only when the process cannot be started
     /// (missing `php`, IO failure) — the caller turns that into the
     /// sound-subset posture.
-    ///
-    /// Nothing is written to disk (the runner source travels as a `php -r`
-    /// argv element): there is no temp file or dir for this instance to own,
-    /// so there is nothing for `Drop` to clean up either.
     pub fn spawn() -> std::io::Result<Self> {
         let chan = Channel::open()?;
 
@@ -216,9 +201,6 @@ impl Sidecar {
         }
         self.respawns += 1;
         self.chan.close();
-        // No file to go stale and no dir to re-share: every `Channel::open`
-        // passes the runner source fresh, straight from the binary's
-        // `RUNNER_SRC`.
         match Channel::open() {
             Ok(chan) => {
                 self.chan = chan;
@@ -241,12 +223,10 @@ impl Sidecar {
     /// Whether the child is dead **right now** — not whether this instance is
     /// finished.
     ///
-    /// The chosen reading of the two available ones. `true` says a prior request
-    /// failed and killed the child; it says nothing about the next request, which
-    /// will revive the instance if the `RESPAWN_CAP` allows. That keeps the
-    /// predicate meaning the same thing it always did (a failure just happened,
-    /// and it was a transport failure rather than a widened answer), which is how
-    /// every caller reads it today.
+    /// `true` says a prior request failed and killed the child; it says nothing
+    /// about the next request, which will revive the instance if the
+    /// `RESPAWN_CAP` allows. The predicate means "a transport failure just
+    /// happened", not "a value was widened".
     ///
     /// The permanent state — cap exhausted, every later request widens — is
     /// deliberately not exposed as a predicate: no caller has a use for it that
@@ -373,13 +353,8 @@ impl Sidecar {
 
 impl Drop for Sidecar {
     fn drop(&mut self) {
-        // Closing stdin lets a healthy runner exit on its own; kill covers a
-        // hung or poisoned child; `Channel::close` also reaps the child and
-        // joins the reader thread. Nothing else to do: the runner source is
-        // passed as argv (see [`Channel::open`]) and never written to disk,
-        // so there is no per-instance temp file or dir left to remove — the
-        // filesystem leak this type used to have is gone because the
-        // filesystem use it depended on is gone.
+        // Closing stdin lets a healthy runner exit; killing covers a hung or
+        // poisoned child. `Channel::close` also reaps it and joins the reader.
         self.chan.close();
     }
 }

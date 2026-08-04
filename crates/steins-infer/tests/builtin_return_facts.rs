@@ -90,12 +90,10 @@ function f($x) { $b = is_int($x); return $b; }";
 
 #[test]
 fn no_sidecar_falls_through_to_the_declared_floor() {
-    // SEMANTICS CHANGED by ADR-0069 (issue #73), deliberately. This used to assert
-    // that an empty fact map seeds nothing at all. It no longer does: below this
+    // ADR-0069 (issue #73): an empty fact map does NOT seed nothing. Below this
     // rung sits the declared-envelope FLOOR, and `is_int` carries a mined `bool`
-    // row, so the sound subset now premises the same contract finding a live engine
-    // would — at the `Asserted` stratum, which is what keeps it out of the proof
-    // layer. This is the feature, not a weakened pin.
+    // row, so the sound subset premises the same contract finding a live engine
+    // would — at the `Asserted` stratum, which keeps it out of the proof layer.
     let src = "<?php
 /** @return string */
 function f($x) { $b = is_int($x); return $b; }";
@@ -109,8 +107,8 @@ function f($x) { $b = is_int($x); return $b; }";
 
 #[test]
 fn no_sidecar_and_no_floor_row_seeds_nothing() {
-    // The unchanged half of the old pin, restated on a name the floor does NOT
-    // cover: `preg_replace` declares `array|string|null`, a multi-base union that
+    // A name the floor does NOT cover: `preg_replace` declares
+    // `array|string|null`, a multi-base union that
     // is not envelope-representable and was dropped at generation. No engine fact
     // and no floor row ⇒ no return premise ⇒ silence, even against a lying docblock.
     let src = "<?php

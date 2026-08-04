@@ -175,9 +175,7 @@ fn dump(decl: &str, expr: &str) -> String {
     dump_with(decl, expr, &mut Mock::sidecar())
 }
 
-// ---------------------------------------------------------------------------
 // Casing survives removal, permutation and repetition
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_trim_family_carries_casing_through_any_charlist() {
@@ -244,9 +242,7 @@ fn strrev_preserves_the_whole_byte_multiset() {
     assert_eq!(dump("uppercase-string", "strrev($v)"), "dumped type: uppercase-string (asserted)");
 }
 
-// ---------------------------------------------------------------------------
 // `str_repeat`: the multiplier is the whole gate on the length axis
-// ---------------------------------------------------------------------------
 
 #[test]
 fn str_repeat_transfers_non_emptiness_only_at_a_multiplier_of_at_least_one() {
@@ -280,9 +276,7 @@ fn str_repeat_carries_casing_at_every_multiplier() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // `str_pad`: the subject is a subsequence, and the length can FORCE non-emptiness
-// ---------------------------------------------------------------------------
 
 #[test]
 fn str_pad_forces_non_emptiness_at_a_length_of_at_least_one() {
@@ -316,9 +310,7 @@ fn str_pad_carries_casing_only_when_the_pad_string_carries_it_too() {
     assert_eq!(dump("lowercase-string", "str_pad($v, 5, $p)"), "dumped type: non-empty-string (asserted)");
 }
 
-// ---------------------------------------------------------------------------
 // The forced casing pair — the predicate-semantics probe, from both sides
-// ---------------------------------------------------------------------------
 
 #[test]
 fn strtolower_and_strtoupper_force_their_casing_for_any_subject() {
@@ -340,9 +332,7 @@ fn strtolower_and_strtoupper_force_their_casing_for_any_subject() {
     assert_eq!(dump("string", "strtolower($v, 1)"), "dumped type: string");
 }
 
-// ---------------------------------------------------------------------------
 // The selective-casing trio: what survives, and the pinned DECLINE
-// ---------------------------------------------------------------------------
 
 #[test]
 fn ucfirst_breaks_lowercase_and_lcfirst_breaks_uppercase() {
@@ -375,9 +365,7 @@ fn the_selective_casing_trio_carries_the_length_axis() {
     assert_eq!(dump("non-empty-string", "ucwords($v, '-')"), "dumped type: non-empty-string (asserted)");
 }
 
-// ---------------------------------------------------------------------------
 // The escaping family, and the two places upstream is WRONG at this engine
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_escaping_family_carries_the_length_axis() {
@@ -486,9 +474,7 @@ fn htmlspecialchars_needs_the_substitute_flag() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // `implode`: every contributor must carry the claim
-// ---------------------------------------------------------------------------
 
 #[test]
 fn implode_carries_casing_from_the_glue_and_every_element() {
@@ -529,9 +515,8 @@ fn implode_carries_casing_from_the_glue_and_every_element() {
 
 #[test]
 fn implode_never_claims_the_length_axis() {
-    // `implode(',', []) === ''` — a non-empty ELEMENT proves nothing about the
-    // result while the array itself may be empty, and the join of the two is left
-    // to a later slice.
+    // `implode(',', []) === ''`: a non-empty element proves nothing about the
+    // result while the array itself may be empty.
     assert_eq!(
         one_type_with(
             "<?php\n/** @param non-empty-array<non-empty-string> $a */\nfunction f(array $a): void { \\PHPStan\\dumpType(implode(',', $a)); }\n",
@@ -541,9 +526,7 @@ fn implode_never_claims_the_length_axis() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // `sprintf`: a literal byte in a constant format, and nothing else
-// ---------------------------------------------------------------------------
 
 #[test]
 fn sprintf_claims_non_emptiness_only_from_a_literal_byte() {
@@ -583,7 +566,7 @@ fn the_sprintf_format_scanner_matches_the_engine_on_every_probed_shape() {
     //   DECLINED (parse)  : '%'  '%s%'  → ValueError "Missing format specifier at end
     //                       of string";  '%z' → ValueError 'Unknown format specifier "z"'
     //
-    // A representative slice of that table, driven through the rule itself.
+    // Representative cases from that table.
     for claims in ["'abc'", "'100%%'", "'x%sy'", "'%s %s'", "'%2$s %1$s'", "'%s%%'"] {
         assert_eq!(
             dump("string", &format!("sprintf({claims}, $v, $v)")),
@@ -609,9 +592,7 @@ fn the_sprintf_format_scanner_matches_the_engine_on_every_probed_shape() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // `strlen`: the one member that answers an int
-// ---------------------------------------------------------------------------
 
 #[test]
 fn strlen_of_a_non_empty_subject_is_a_positive_int() {
@@ -625,9 +606,7 @@ fn strlen_of_a_non_empty_subject_is_a_positive_int() {
     assert_eq!(dump("lowercase-string", "strlen($v)"), "dumped type: int");
 }
 
-// ---------------------------------------------------------------------------
 // Unions are read directly (the #75 survey's nuance, no #74 dependency)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_union_of_constant_strings_answers_by_intersecting_its_members() {
@@ -644,9 +623,7 @@ fn a_union_of_constant_strings_answers_by_intersecting_its_members() {
     assert_eq!(dump("'ABC'", "trim($v, $v)"), "dumped type: uppercase-string (asserted)");
 }
 
-// ---------------------------------------------------------------------------
 // The admission gate: the engine countersigns, or the rule goes quiet
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_moved_declaration_withholds_the_rule() {
@@ -667,12 +644,9 @@ fn a_moved_declaration_withholds_the_rule() {
 #[test]
 fn an_engine_silent_about_the_name_withholds_the_rule() {
     // No declaration, no countersignature (ADR-0061 §2's sidecar-presence leg).
-    // The RULE still withholds; what answers is the rung below it, ADR-0069's
-    // Asserted declared-return floor, and the `(asserted)` marker is the difference
-    // — the transfer's own answer is Verified and carries none (see the sibling
-    // `strtoupper` assertion). functionMap declares `strtolower` as
-    // `lowercase-string`, a scalar refinement issue #73 counted and dropped and
-    // issue #79 admitted, so this pin moved with the widened lowering.
+    // The rule withholds; ADR-0069's Asserted declared-return floor answers instead.
+    // Its `(asserted)` marker distinguishes it from the transfer's Verified answer.
+    // functionMap declares `strtolower` as `lowercase-string`.
     let mut silent = Mock::silent_about("strtolower");
     assert_eq!(
         dump_with("string", "strtolower($v)", &mut silent),
@@ -694,9 +668,7 @@ fn a_project_function_shadowing_the_name_withholds_the_rule() {
     assert_ne!(out, "dumped type: lowercase-string (asserted)");
 }
 
-// ---------------------------------------------------------------------------
 // The `mb_*` exclusion, restated as a test so it cannot drift back in
-// ---------------------------------------------------------------------------
 
 #[test]
 fn no_mb_name_is_a_member() {
@@ -712,9 +684,7 @@ fn no_mb_name_is_a_member() {
     assert_eq!(dump_with("lowercase-string", "mb_substr($v, 5)", &mut m), "dumped type: string");
 }
 
-// ---------------------------------------------------------------------------
 // The predicate algebra the table is written in
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_casing_predicate_is_an_ascii_uppercase_byte_test() {

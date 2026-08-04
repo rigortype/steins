@@ -33,9 +33,7 @@ use steins_infer::{
 use steins_sidecar::{EnvInfo, FoldArg, FoldResult, FoldValue, Reflection};
 use steins_syntax::{ArgValue, SourceTree};
 
-// ---------------------------------------------------------------------------
-// Source shapes that produce a foldable union today
-// ---------------------------------------------------------------------------
+// Foldable-union source shapes
 
 /// `$x = $c ? <a> : <b>` under an undecided guard — a two-member `OneOf` at the
 /// `Verified` stratum (ADR-0031's conditional value).
@@ -47,7 +45,7 @@ fn ternary(then_val: &str, else_val: &str, expr: &str) -> String {
 
 /// A branch merge: `$v` starts at `members[0]` and each `if` re-assigns it, so the
 /// join at the end is an `n`-member `OneOf`, `Verified`. This is how a union wider
-/// than two arms is reachable from a plain function body today.
+/// than two arms is reachable from a plain function body.
 fn merged(var: &str, members: &[&str]) -> String {
     let mut out = format!("${var} = {}; ", members[0]);
     for (i, m) in members.iter().enumerate().skip(1) {
@@ -74,9 +72,7 @@ fn shape_read(slot: &str, expr: &str) -> String {
     )
 }
 
-// ---------------------------------------------------------------------------
 // Folders
-// ---------------------------------------------------------------------------
 
 /// One call the gate forwarded to the folder.
 type Ask = (String, Vec<ArgValue>);
@@ -163,9 +159,7 @@ fn live(test: &str) -> Option<SidecarFolder> {
     Some(folder)
 }
 
-// ---------------------------------------------------------------------------
 // Harness
-// ---------------------------------------------------------------------------
 
 fn diagnostics(src: &str, folder: &mut dyn Folder) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
@@ -192,9 +186,7 @@ fn dump(src: &str, folder: &mut dyn Folder) -> String {
     ds[0].clone()
 }
 
-// ---------------------------------------------------------------------------
 // (1) The flagship, through the real engine
-// ---------------------------------------------------------------------------
 
 /// ADR-0069's named gap, closed: the union of constants reaches the engine member
 /// by member and comes back as a union. `strtoupper` is on the allowlist and its
@@ -235,7 +227,7 @@ fn the_union_fold_outranks_the_predicate_transfer() {
 /// A member that THROWS declines the whole fold. `intdiv($n, 0)` raises
 /// `DivisionByZeroError`, which the wire reports as a throw and the fold lane has
 /// always widened on; a union that quietly dropped it would claim a value domain
-/// the program does not have. (A *uniform* throw is a later slice's question.)
+/// the program does not have.
 #[test]
 fn a_throwing_member_declines_the_whole_fold() {
     let Some(mut folder) = live("a_throwing_member_declines_the_whole_fold") else { return };
@@ -250,9 +242,7 @@ fn a_throwing_member_declines_the_whole_fold() {
     assert_eq!(widened, "int", "the fold declines and the reflected envelope stands");
 }
 
-// ---------------------------------------------------------------------------
 // (2) The caps decline; they never truncate
-// ---------------------------------------------------------------------------
 
 /// The per-argument member cap is 4. At five members the fold declines outright —
 /// and, crucially, dispatches NOTHING: the cap is charged before any combination
@@ -349,9 +339,7 @@ fn the_product_is_enumerated_in_a_canonical_order() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // (3) The width gate, on both engines
-// ---------------------------------------------------------------------------
 
 /// Issue #64's integer-width gate, reached member by member. `strval` is on the
 /// verified width-safe subset, so on a 64-bit engine both members fold and compose.
@@ -377,13 +365,11 @@ fn a_member_the_width_gate_refuses_declines_the_whole_fold() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // (4) Stratum discipline (ADR-0048 N2)
-// ---------------------------------------------------------------------------
 
 /// Each member answer is the engine's, and so `Verified` — but the composed fact
 /// consumed the INPUT union, and takes its stratum by the ordinary `min` clause.
-/// A declared array shape is the reachable `Asserted` union today, and the
+/// A declared array shape provides a reachable `Asserted` union, and the
 /// `(asserted)` marker is how the dump surface says which trust the fact carries.
 #[test]
 fn the_composed_fact_takes_the_input_unions_stratum() {
@@ -428,12 +414,9 @@ fn a_collapsed_verified_product_premises_the_proof_layer_and_an_asserted_one_doe
     );
 }
 
-// ---------------------------------------------------------------------------
-// (5) The declines that were always there
-// ---------------------------------------------------------------------------
+// (5) Standing declines
 
-/// Nothing about the allowlist, the shadowing rule or the argument gate moved.
-/// Each of these declined before this slice and declines identically now.
+/// The allowlist, shadowing rule, and argument gate decline these cases.
 #[test]
 fn the_standing_declines_are_unmoved() {
     let mock = Mock::default();
@@ -443,8 +426,7 @@ fn the_standing_declines_are_unmoved() {
     assert_eq!(mock.count(), 0, "a shadowed name asks nothing: {:?}", mock.asks());
 
     let mock = Mock::default();
-    // A name that is not on the allowlist at all: the ladder falls all the way to
-    // ADR-0069's declared-return floor, exactly as it did before this slice.
+    // A name outside the allowlist falls to ADR-0069's declared-return floor.
     assert_eq!(dump(&ternary("'a'", "'b'", "nl2br($x)"), &mut mock.clone()), "string (asserted)");
     assert_eq!(mock.count(), 0);
 
@@ -468,9 +450,7 @@ fn a_poisoned_scope_folds_no_union() {
     assert_eq!(mock.count(), 0, "a poisoned scope dispatches no member: {:?}", mock.asks());
 }
 
-// ---------------------------------------------------------------------------
 // (6) Zero emission, swept
-// ---------------------------------------------------------------------------
 
 /// Every fixture shape in this file, asserted to emit no non-debug finding. The
 /// `dumps` helper already asserts it per call; this sweeps the matrix so a future

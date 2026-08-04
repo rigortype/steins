@@ -1,12 +1,8 @@
 //! String refinement predicates as a closed bitset (ADR-0035).
 //!
-//! The set is deliberately closed: adding a predicate is one constant plus
-//! its evaluator, and every interaction stays exhaustively checkable. The
-//! implication closure (`Numeric ⇒ NonEmpty`, `NonFalsy ⇒ NonEmpty`,
-//! `DecimalInt ⇒ Numeric ∧ Lowercase ∧ Uppercase`) is applied at construction
-//! so subset tests never miss an entailed fact. The casing predicates entail
-//! nothing themselves — that is the design claim
-//! `casing_is_orthogonal_to_the_closure` pins.
+//! Predicate sets are closed under the implications documented on
+//! [`StrPreds::close`], so subset tests include entailed facts. Casing is
+//! otherwise orthogonal to the length and numeric predicates.
 //!
 //! **The set is a conjunction of predicates, not a satisfiable-by-construction
 //! one.** `DecimalInt` and `NonDecimalInt` are complementary, so the set that
@@ -35,12 +31,10 @@ impl StrPreds {
     pub const NUMERIC: StrPreds = StrPreds(1 << 2);
     /// `lowercase-string`: `strtolower()` leaves the value unchanged.
     ///
-    /// Orthogonal to every predicate above, and deliberately so: `"1e5"` is
-    /// numeric *and* lowercase, `"1E5"` is numeric and **not** lowercase, so
-    /// `Numeric` entails no casing and no casing entails `NonEmpty` (`""` is
-    /// lowercase). The one entailment worth naming is the one that is *not*
-    /// exclusion: `Lowercase` and `Uppercase` hold together exactly when the
-    /// string has no cased character at all (`""`, `"123"`).
+    /// Casing is orthogonal to the length and numeric predicates (`"1e5"` is
+    /// lowercase, `"1E5"` is not, both are numeric; `""` is lowercase).
+    /// `Lowercase` and `Uppercase` hold together exactly when the string has
+    /// no cased character (`""`, `"123"`).
     pub const LOWERCASE: StrPreds = StrPreds(1 << 3);
     /// `uppercase-string`: `strtoupper()` leaves the value unchanged.
     pub const UPPERCASE: StrPreds = StrPreds(1 << 4);
@@ -48,10 +42,9 @@ impl StrPreds {
     /// one back, so an array key made of it is cast to `int`
     /// ([`php_str_is_decimal_int`]).
     ///
-    /// The one predicate here that entails others: a decimal integer string is
-    /// numeric (hence non-empty), and its alphabet — digits and `-` — has no
-    /// cased character, so it is both lowercase and uppercase. It does **not**
-    /// entail `NonFalsy`: `"0"` is a decimal-int-string and is falsy.
+    /// The one predicate here that entails others (see [`StrPreds::close`]).
+    /// It does **not** entail `NonFalsy`: `"0"` is a decimal-int-string and is
+    /// falsy.
     pub const DECIMAL_INT: StrPreds = StrPreds(1 << 5);
     /// `non-decimal-int-string`: the complement of `DECIMAL_INT` within
     /// `string` — every string that keeps its identity as an array key, which
@@ -60,7 +53,7 @@ impl StrPreds {
     ///
     /// Entails nothing and is entailed by nothing: its members range over the
     /// whole lattice. Being the *complement* of a sibling bit is not something
-    /// the closure can express — see the module doc.
+    /// the closure can express (see [`StrPreds`] module docs).
     pub const NON_DECIMAL_INT: StrPreds = StrPreds(1 << 6);
 
     /// The empty predicate set (no knowledge — the General form's content).

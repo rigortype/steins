@@ -1,21 +1,13 @@
 //! Issue #48 — PHP converts at every **native-typed slot** boundary, and the
 //! stored fact must be the converted value, not the assigned one.
 //!
-//! The exposure this fixes was a demonstrated proof-layer FP (the zero-FP
-//! surface): an int written to a `float` property read back as the int `1`,
-//! `$x === 1` folded true on a value the runtime holds as `1.0`, and the dead
-//! branch's `null` premised a "proven" `call.on-null` on code that runs clean.
-//! The regression test below is that probe, verbatim.
+//! The regression is a proof-layer false positive: an int written to a `float`
+//! property was read back as `1`, making `$x === 1` fold true although runtime
+//! holds `1.0`, and producing a false `call.on-null` from the dead branch.
 //!
-//! The four nsrt sites that surfaced the gap (`bug-12393.php:40/56`,
-//! `bug-12393b.php:42/58`) are the `$this->float = $i` shape — a typed-property
-//! write inside a method — pinned here alongside the sibling boundaries the
-//! issue names: promoted constructor properties, literal property defaults, a
-//! float-declared parameter receiving an int argument (already correct via
-//! `coerce_into_param`, pinned so it stays), a typed parameter's default
-//! (value-lane silent by construction, pinned as float-based), and a `float`
-//! return narrowing an int return (the summary lane drops the value — pinned
-//! sound, recorded imprecise).
+//! Fixtures cover typed properties, promoted properties, property and parameter
+//! defaults, parameters, and returns. A `float` return drops an int value from
+//! the summary lane: imprecise but sound.
 
 use steins_domain::Fact;
 use steins_infer::{Diagnostic, Folder, check_with};
@@ -51,9 +43,9 @@ fn dumps(src: &str) -> Vec<String> {
     ds.iter().filter(|d| d.id == "debug.type").map(|d| d.message.clone()).collect()
 }
 
-// ---------------------------------------------------------------------------
+
 // The demonstrated proof-layer FP, as a regression test
-// ---------------------------------------------------------------------------
+
 
 /// The probe that answered the issue's exposure question: this source runs
 /// clean on real PHP (the else branch executes — `1.0 === 1` is false), so the
@@ -73,9 +65,9 @@ fn the_dead_branch_null_call_fp_is_closed() {
     assert!(proof.is_empty(), "the #48 FP is back: {proof:?}");
 }
 
-// ---------------------------------------------------------------------------
+
 // The four-nsrt-site shape: `$this->float = $i` in a method (bug-12393)
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn a_typed_property_write_stores_the_converted_float() {
@@ -103,9 +95,9 @@ fn a_typed_property_write_stores_the_converted_float() {
     assert_eq!(dumped, ["dumped type: 1.0"]);
 }
 
-// ---------------------------------------------------------------------------
+
 // Sibling boundaries (the issue's scope list)
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn a_promoted_float_param_stores_the_converted_argument() {
@@ -161,9 +153,9 @@ fn a_float_return_over_an_int_return_never_leaks_the_int() {
     assert_ne!(dumped[0], "dumped type: 1", "the int leaked through a float return");
 }
 
-// ---------------------------------------------------------------------------
+
 // The conversion table's edges (adversarial set)
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn a_union_with_an_int_member_keeps_the_int() {

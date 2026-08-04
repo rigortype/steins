@@ -26,9 +26,9 @@
 //!   `?T`, and unions of those (plus a `null` member). A finer phpdoc type
 //!   (`positive-int`, `non-empty-string`, `int<0, max>`, a class, an array, …) is
 //!   not representable and is refused `type-not-natively-representable`.
-//! - Only **literal** arguments prove a call site in v1 (folding-backed and
-//!   `$var`-flow proofs are deferred): a non-literal argument at any call site is
-//!   refused `argument-not-proven`.
+//! - Only **literal** arguments prove a call site: a non-literal argument at any
+//!   call site is refused `argument-not-proven`. Folding-backed and `$var`-flow
+//!   proofs are out of scope, so an unprovable literal is a refusal, not a guess.
 //! - A candidate whose enumerated caller set is **empty** — no call site anywhere
 //!   resolved to it — refuses `no-observed-callers` rather than promote on a
 //!   vacuous "all callers proven" (ADR-0047 §4 / ADR-0037; amends ADR-0041 §3):
@@ -77,14 +77,14 @@ pub use crate::common::{
 pub const REASON_NOT_REPRESENTABLE: &str = "type-not-natively-representable";
 /// The phpdoc type is a *refinement* of a native scalar (`positive-int`,
 /// `non-empty-string`, `int<0, max>`, a literal `5`): strictly finer than its
-/// native rendering, so v1 refuses rather than promote-and-keep (ADR-0041 pt 2).
+/// native rendering, so promotion refuses rather than promote-and-keep (ADR-0041 pt 2).
 pub const REASON_FINER_THAN_NATIVE: &str = "phpdoc-finer-than-native";
 /// A `$x = null` default makes the parameter implicitly nullable, but the native
 /// type is not nullable — promoting would emit PHP-8.4-deprecated code.
 pub const REASON_IMPLICIT_NULLABLE: &str = "implicit-nullable-default";
 /// The parameter has a non-null default value that the native type does not
 /// provably admit (`int $x = 'str'` is a compile-time fatal; `int $x = PHP_INT_MAX`
-/// is valid but unprovable in v1). Refusing keeps the emitted declaration legal.
+/// is valid but not provable here). Refusing keeps the emitted declaration legal.
 pub const REASON_DEFAULT_INCOMPATIBLE: &str = "default-not-admitted-by-native";
 
 /// The phpdoc→native promotion transform (ADR-0034 point 4).
@@ -108,10 +108,10 @@ impl Transform for PhpdocToNative {
 /// *every* candidate refuses while one remains.
 ///
 /// `partitions` is the region map (ADR-0047 §6), `None` for the single-region
-/// identity. **Slice A wires it through but does not consume it**: no promotion
-/// decision reads the map yet, so the plan is byte-identical whether it is `None`,
-/// an identity [`single_region`](crate::PartitionMap::single_region) map, or a
-/// fully-declared map — the scoped-enumeration behavior lands in a later slice.
+/// identity. No promotion decision reads the map: the plan is identical whether it
+/// is `None`, an identity [`single_region`](crate::PartitionMap::single_region)
+/// map, or a fully-declared map. The parameter reserves the seam for scoped
+/// enumeration (ADR-0047 §2) without changing any verdict.
 #[must_use]
 pub fn plan_phpdoc_to_native(
     db: &dyn Db,
@@ -119,7 +119,7 @@ pub fn plan_phpdoc_to_native(
     vouches: &VouchSet,
     partitions: Option<&crate::regions::PartitionMap>,
 ) -> TransformReport {
-    // ADR-0047 Slice A: received, deliberately not consumed (zero behavior change).
+    // The region map is accepted but not consumed: no promotion verdict reads it.
     let _ = partitions;
     let sweep = sweep_free_functions(db, project);
     // The class-world reverse sweep (ADR-0043 §6): method targets, taints, and the
@@ -342,8 +342,8 @@ fn native_of_candidate(param: &Param, tag: &DocTag) -> Result<NativeType, (&'sta
     // (b2) Any other default value must be provably admitted by the native type,
     // or the emitted declaration is a compile-time fatal (`int $x = 'str'`,
     // `int $x = 3.0`, `int $x = []`). A non-representable default (a constant,
-    // `self::X`, an expression) is unprovable in v1 and refused conservatively —
-    // `int $x = PHP_INT_MAX` is legal but we cannot show it here.
+    // `self::X`, an expression) cannot be proved by this literal-only analysis and
+    // is refused conservatively — `int $x = PHP_INT_MAX` is legal but unprovable.
     if param.has_default && !param.has_null_default {
         let contract = native_contract(&native);
         let admitted = param
@@ -706,17 +706,16 @@ fn native_member_repr(ty: &PType) -> bool {
 /// [`ContractTy::Class`] is `lower_identifier`'s "not a keyword" signal — neither
 /// counts.
 ///
-/// This is a genuine convergence, not a restatement: the hand-written list this
-/// replaced had drifted from the shared table in both directions — missing
-/// `decimal-int-string`/`non-decimal-int-string` (`StrWith`) and
-/// `interface-string`/`numeric-int-string` (`StrOpaque`), so those four spellings
-/// now correctly refuse promotion instead of silently promoting away a refinement.
+/// Delegating to the shared table keeps this predicate in lock-step with it:
+/// every `StrWith`/`StrOpaque`/`IntIn` spelling the table recognizes
+/// (`decimal-int-string`, `non-decimal-int-string`, `interface-string`,
+/// `numeric-int-string`, …) refuses promotion here, with no parallel list to drift.
 ///
-/// Two spellings the hand list carried are not in `steins-contract`'s table at
-/// all: `interned-string`/`html-escaped-string` are project-local phpdoc
-/// conventions, not part of the cross-analyzer vocabulary the shared table is
-/// curated against — so they stay this predicate's own small residual, the one
-/// piece of vocabulary that cannot delegate.
+/// Two spellings are not in `steins-contract`'s table at all:
+/// `interned-string`/`html-escaped-string` are project-local phpdoc conventions,
+/// not part of the cross-analyzer vocabulary the shared table is curated against —
+/// so they stay this predicate's own small residual, the one piece of vocabulary
+/// that cannot delegate.
 fn is_refined_scalar_keyword(n: &str) -> bool {
     if matches!(n, "interned-string" | "html-escaped-string") {
         return true;
@@ -743,9 +742,9 @@ fn member_of(name: &str) -> Option<TypeMember> {
     }
 }
 
-/// C-phase residue: `is_refined_scalar_keyword`'s convergence onto
-/// `steins_contract::lower_identifier` (the third keyword table this crate used
-/// to hand-maintain a drifted sibling of).
+/// Pins `is_refined_scalar_keyword` to `steins_contract::lower_identifier`: every
+/// refined-scalar spelling the shared table recognizes must refuse promotion, and
+/// the two project-local spellings this predicate owns must too.
 #[cfg(test)]
 mod is_refined_scalar_keyword_tests {
     use super::is_refined_scalar_keyword;
@@ -784,11 +783,9 @@ mod is_refined_scalar_keyword_tests {
         assert!(is_refined_scalar_keyword("html-escaped-string"));
     }
 
-    /// The convergence fix: these four spellings were missing from the old
-    /// hand-rolled list (a census-table drift, exactly like C1's) — they are
-    /// `StrWith`/`StrOpaque` refinements in `steins-contract`'s table, so
-    /// promotion must now refuse them too instead of silently promoting a
-    /// refined type away.
+    /// These four spellings are `StrWith`/`StrOpaque` refinements in
+    /// `steins-contract`'s shared table, so promotion must refuse them rather than
+    /// silently promoting a refined type away.
     #[test]
     fn spellings_missing_from_the_old_hand_list_now_refuse() {
         for n in ["decimal-int-string", "non-decimal-int-string", "interface-string", "numeric-int-string"]

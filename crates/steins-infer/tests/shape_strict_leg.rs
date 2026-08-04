@@ -71,18 +71,13 @@ const AB: &str = "array{a?: string, b?: string}";
 
 #[test]
 fn the_strict_leg_floors_pin_the_post_triage_ruling() {
-    // The measurement-first posture, completed: S6 shipped both ids at `strict`,
-    // the 2026-07-29 corpus sweep measured `offset.undeclared` at ZERO findings
+    // The 2026-07-29 corpus sweep measured `offset.undeclared` at zero findings
     // across 99,522 files, and the orchestrator took A-G10's END-state promotion
     // to `contracts`. `offset.maybe-missing` (3 sweep findings, all one
     // assertion-helper discharge gap) stayed at `strict` pending that discharge.
     //
-    // The discharge has since LANDED (the S6-residue slice: a `@phpstan-assert
-    // true $c` helper routes its condition argument through the S4 guard walk —
-    // see `tests/assert_helper_discharge.rs`), and the floor is deliberately NOT
-    // moved with it: the promotion is a ruling to take on a fresh measurement,
-    // not a side effect of the fix. This test remains the tripwire: either floor
-    // moving without a deliberate ruling fails here.
+    // The assertion-helper discharge does not itself move the floor: promotion
+    // requires a fresh measurement and deliberate ruling.
     for (id, floor) in
         [(OFFSET_UNDECLARED_ID, Floor::Contracts), (OFFSET_MAYBE_MISSING_ID, Floor::Strict)]
     {

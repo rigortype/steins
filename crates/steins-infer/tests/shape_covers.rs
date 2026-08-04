@@ -84,9 +84,7 @@ fn asserted(decl: &str, cond: &str, expr: &str) -> String {
 
 const TWO: &str = "array{a?: string, b?: string}";
 
-// ---------------------------------------------------------------------------
 // The motivating pattern (ADR-0062 A-G11, issue #51 L4/L5)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn an_isset_disjunction_discharges_the_coalesce_right_arm() {
@@ -161,9 +159,7 @@ fn a_mixed_flavor_disjunction_reads_as_key_exists() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // A-G11's refusals
-// ---------------------------------------------------------------------------
 
 /// The KeyExists condition (A-G11's discharge table). `array_key_exists('a', $v)`
 /// is satisfied by a present-**null** `a`, which makes `isset($v['a'])` false — so
@@ -277,9 +273,7 @@ fn a_non_constant_key_records_nothing() {
     assert_eq!(one_type(&src), "dumped type: unknown");
 }
 
-// ---------------------------------------------------------------------------
 // Recording composes with S4
-// ---------------------------------------------------------------------------
 
 /// A cover one of whose keys a guard already promoted normalizes away (the S2
 /// invariant reached through the S5 constructor) — and the read discharges
@@ -306,8 +300,7 @@ fn the_false_branch_marks_every_disjunct_key_absent() {
     assert_eq!(one_type(&src), "dumped type: list{} (asserted)");
 }
 
-/// A declared-`Required` final arm never needed a cover: it is proven present by
-/// the declaration alone, which is the S3 read this slice must not disturb.
+/// A declared-`Required` final arm is proven present without a cover.
 #[test]
 fn a_required_final_arm_needs_no_cover() {
     assert_eq!(

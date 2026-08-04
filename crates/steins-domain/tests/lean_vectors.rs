@@ -1167,9 +1167,9 @@ fn join_is_associative_over_the_vector_universe() {
 /// The array stratum's soundness is *checked* over the shape vector universe
 /// rather than proved in Lean (see `spike/lean-domain/REPORT.md`). The tallies
 /// are data in the vector file — which means a regression would merely change a
-/// committed number — so assert the value the slice established: the join never
-/// loses a member, the lift admits what it lifted, and the computed descent
-/// admits every member it summarized.
+/// committed number — so pin zero failures: the join never loses a member, the
+/// lift admits what it lifted, and the computed descent admits every member it
+/// summarized.
 #[test]
 fn the_array_stratum_loses_no_member_over_the_vector_universe() {
     let lines = generate();

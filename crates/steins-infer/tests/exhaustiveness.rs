@@ -22,7 +22,6 @@ fn summary(src: &str, symbol: &str) -> EffectSummary {
 
 #[test]
 fn effect_free_catalogued_body_is_exhaustive_empty() {
-    // Arithmetic + a catalogued-pure builtin (strtolower): every call classified.
     let src = "<?php\nfunction f(string $s): string { $x = 1 + 2; return strtolower($s); }\n";
     let s = summary(src, "f");
     assert!(s.labels.is_empty(), "no proven effects, got: {:?}", s.labels);
@@ -38,7 +37,6 @@ fn empty_body_is_exhaustive_empty() {
 
 #[test]
 fn proven_effect_is_still_exhaustive() {
-    // A known effect is still a *complete* picture: exhaustive, with the label.
     let src = "<?php\nfunction f(): void { file_put_contents(\"/x\", \"y\"); }\n";
     let s = summary(src, "f");
     assert_eq!(s.labels, vec!["io.fs.write"]);
@@ -64,7 +62,6 @@ fn dynamic_call_makes_body_non_exhaustive() {
 
 #[test]
 fn unresolved_method_call_makes_body_non_exhaustive() {
-    // `$obj->m()` has no statically-resolvable receiver → non-exhaustive.
     let src = "<?php\nfunction f(object $obj): void { $obj->m(); }\n";
     let s = summary(src, "f");
     assert!(!s.exhaustive, "an unresolved method call → not exhaustive");
@@ -95,8 +92,6 @@ fn exhaustive_callee_does_not_taint() {
 
 #[test]
 fn labels_are_sorted_and_deduplicated() {
-    // Two distinct write origins (same label) + a time origin → one io.fs.write
-    // and one nondet.time, sorted.
     let src = "<?php\nfunction f(): void { file_put_contents(\"/x\", \"y\"); unlink(\"/z\"); time(); }\n";
     let s = summary(src, "f");
     assert_eq!(s.labels, vec!["io.fs.write", "nondet.time"], "sorted + deduped");

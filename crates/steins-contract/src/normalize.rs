@@ -1,7 +1,6 @@
 //! The type-side normalizer (ADR-0052 §4), extracted from the honesty
-//! renderer's dedup / subsumption-collapse / precision-ladder logic — not
-//! built as a fresh `TypeCombinator` layer (the ADR-0030 amendment, discharged
-//! by slice N1).
+//! renderer's dedup / subsumption-collapse / precision-ladder logic rather than
+//! built as a separate `TypeCombinator` layer (ADR-0030).
 //!
 //! Types stay syntactic **arm lists** ([`ContractTy`] members) judged arm-wise
 //! through the *single* acceptance relation this crate already owns
@@ -12,10 +11,10 @@
 //! the reflexive is-a floor (`subsumes_class`), and the array vocabulary through
 //! the structural denotation ADR-0071 §2.1 specifies (`subsumes_array`), whose
 //! leaf questions recurse straight back through [`subsumes`] and `admits_val`.
-//! `shape_verdict` remains the only type-vs-*value* shape relation.
+//! (`shape_verdict` in admit.rs is the only type-vs-*value* shape relation.)
 //!
-//! The public surface is complete and final (ADR-0052 §4): pairwise
-//! [`subsumes`], [`arm_eq`], [`dedup_arms`], the value-set → normal-form
+//! The public surface (ADR-0052 §4) provides pairwise [`subsumes`], [`arm_eq`],
+//! [`dedup_arms`], the value-set → normal-form
 //! [`summarize_vals`], and arm-wise [`subtract`] — plus [`merge_int_arms`],
 //! the one addition the §4 note of 2026-08-02 records. It is the pairwise
 //! primitive behind [`dedup_arms`]' interval absorption, published so a
@@ -28,8 +27,8 @@
 //! deleted only where the remainder IS a single arm (an interval less its own
 //! endpoint), and an interior point is refused everywhere else. [`subtract`]
 //! (and the public per-arm judgment [`subtract_arm`] / [`subtrahend_covers`])
-//! consult a real is-a [`IsaOracle`]; N4 wires the project hierarchy through
-//! that seam, N1 shipped the [`ReflexiveFloor`] default.
+//! consult a real is-a [`IsaOracle`]; the caller wires the project hierarchy
+//! through that seam, and [`ReflexiveFloor`] is the default.
 //!
 //! ### ADR-0030 registry entry 5 (semantic type equality)
 //! Semantic type equality is defined **only** as mutual subsumption (Yes/Yes)
@@ -77,13 +76,11 @@ pub enum Subtrahend {
     },
 }
 
-/// The real is-a oracle for class-arm subtraction (ADR-0052 §2, slice N4). Kept
-/// as a trait so steins-contract stays **free of any steins-infer dependency**:
-/// the project class hierarchy, the builtin catalog, and the amendment-A11
-/// version-skew demotion all live in the *caller's* implementor (steins-infer's
-/// `ProjectIsa`). N1 shipped only the reflexive floor ([`ReflexiveFloor`]); N4
-/// wires the real hierarchy through this seam without moving the polarity law out
-/// of this crate.
+/// The is-a oracle for class-arm subtraction (ADR-0052 §2). It is a trait so
+/// steins-contract stays **free of any steins-infer dependency**: the project
+/// class hierarchy, builtin catalog, and amendment-A11 version-skew demotion live
+/// in the caller's implementor (`ProjectIsa`). The hierarchy crosses this seam
+/// without moving the polarity law out of this crate.
 pub trait IsaOracle {
     /// `is_a(sub, sup)`: is every value of exact class `sub` an instance of `sup`?
     ///
@@ -96,7 +93,7 @@ pub trait IsaOracle {
     ///
     /// **Argument order is (arm-class, guard-class)** — the arm `M` is `sub`, the
     /// guard target `T` is `sup`. The negative-branch law asks `is_a(M, T)`; the
-    /// positive branch asks the same order. Reversing it is the C7 implementation
+    /// positive branch asks the same order. Reversing it is the implementation
     /// drift the ADR warns about.
     fn is_a(&self, sub: &str, sup: &str) -> Certainty;
 
@@ -107,10 +104,9 @@ pub trait IsaOracle {
     fn is_final(&self, fqn: &str) -> bool;
 }
 
-/// The reflexive is-a floor N1 shipped: no class hierarchy, so `is_a` decides
-/// `Yes` only reflexively (same normalized class name) and is otherwise honest
-/// `Maybe`; nothing is `final` (every open class survives the positive branch).
-/// This reproduces N1's exact `subtract` behavior when no real oracle is supplied.
+/// The reflexive is-a floor: without a class hierarchy, `is_a` decides `Yes`
+/// only for the same normalized class name and otherwise returns `Maybe`;
+/// nothing is `final`, so every open class survives the positive branch.
 #[derive(Debug, Clone, Copy)]
 pub struct ReflexiveFloor;
 
@@ -251,8 +247,7 @@ fn subsumes_object(a: &ContractTy) -> Certainty {
 // object arms: a rule set *inside* [`subsumes`], not a second relation. Leaf
 // questions (element types, key types, field types) recurse through [`subsumes`]
 // itself, so a scalar element is judged by exactly the rules a scalar arm is.
-// `shape_verdict` (admit.rs) stays the only type-vs-*value* shape relation; this
-// is its type-vs-type face.
+// This is the type-vs-type face of the array vocabulary (see the module docs).
 //
 // Two soundness gates apply to every rule below, and each rule's doc comment
 // names which side it argues:
@@ -985,12 +980,11 @@ pub fn arm_eq(a: &ContractTy, b: &ContractTy) -> bool {
 pub fn dedup_arms(arms: &mut Vec<ContractTy>) {
     let mut kept: Vec<ContractTy> = Vec::with_capacity(arms.len());
     for arm in arms.drain(..) {
-        // An arm already covered (Yes) by something kept adds nothing.
         if kept.iter().any(|k| subsumes(k, &arm).is_yes()) {
             continue;
         }
-        // This arm survives; it may in turn subsume earlier-kept arms — drop
-        // those (the survivor is the wider, more canonical spelling).
+        // The survivor is the wider, more canonical spelling, so it may subsume
+        // earlier-kept arms: eliminate in both directions to reach a fixpoint.
         kept.retain(|k| !subsumes(&arm, k).is_yes());
         kept.push(arm);
     }
@@ -1306,8 +1300,8 @@ fn class_covers(fqn: &str, polarity: bool, arm: &ContractTy, oracle: &dyn IsaOra
 
 /// The literal contract that denotes exactly one value (for the `Value`
 /// subtrahend). An array value has no scalar-literal arm, so it lowers to the
-/// unknown `Opaque` — subtracting it covers nothing (sound: N1 subtracts no
-/// arrays).
+/// unknown `Opaque` — subtracting it covers nothing (sound: no array is
+/// subtracted).
 fn val_contract(v: &Val) -> ContractTy {
     match v {
         Val::Int(i) => ContractTy::LitInt(*i),
@@ -2075,7 +2069,7 @@ mod tests {
         assert_eq!(arms, vec![ContractTy::IntIn(IntRange::NON_NEGATIVE)]);
     }
 
-    // ---- subtract with a REAL is-a oracle (N4) ------------------------------
+    // ---- subtract with a REAL is-a oracle -----------------------------------
 
     /// A fixed-hierarchy mock: `edges[sub]` lists `sub`'s proven supertypes
     /// (transitively closed by the mock), `finals` the final/enum classes. Any
@@ -2134,7 +2128,7 @@ mod tests {
     fn subtract_negative_branch_argument_order_is_m_then_t() {
         // Guard `instanceof Dog` over arm `Animal`: the ADR asks is_a(Animal, Dog)
         // = No (Animal is NOT a Dog) → the Animal arm SURVIVES the negation. A
-        // reversed is_a(Dog, Animal)=Yes would wrongly delete it — the C7 drift.
+        // reversed is_a(Dog, Animal)=Yes would wrongly delete it — the drift.
         let mut arms = vec![class("animal")];
         subtract(&mut arms, &Subtrahend::Class { fqn: "Dog".to_owned(), polarity: false }, &mock());
         assert_eq!(arms, vec![class("animal")], "is_a(M,T) order: Animal is not a Dog, arm kept");

@@ -63,7 +63,7 @@ fn json_format_smoke() {
     let r = run(&["check", "--format", "json", fixture("demo.php").to_str().unwrap()]);
     assert_eq!(r.code, 1);
     let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid json object");
-    // The document is now an object: findings array plus suppression counts.
+    // The document is an object: findings array plus suppression counts.
     assert_eq!(v["suppressed"], 0);
     assert_eq!(v["baselined"], 0);
     let arr = v["findings"].as_array().expect("findings array");
@@ -161,9 +161,7 @@ fn no_php_omits_folded_but_keeps_direct_and_notes_posture() {
 #[test]
 fn array_literals_fold_through_the_untouched_allowlist() {
     // Issue #39's acceptance criterion, end to end: `count`, `in_array` and
-    // `implode` were parked on the `foldable` allowlist behind an argument gate
-    // that no array could pass. Nothing about the allowlist changed — the gate
-    // learned to carry an array literal, and the parked entries lit up.
+    // `implode` fold once the argument gate accepts an array literal.
     let path = fixture("fold_array.php");
     let r = run(&["annotate", path.to_str().unwrap()]);
     assert_eq!(r.code, 0, "annotate never fails on a readable file, got:\n{}", r.stderr);
@@ -266,8 +264,8 @@ fn annotate_json_shape_pins_colored_pure_and_tainted_functions() {
     assert_eq!(price["exhaustive"], serde_json::json!(true));
     assert_eq!(price["line"], serde_json::json!(8), "declaration line, got:\n{doc}");
 
-    // A colored function (calls file_put_contents): one proven label, still
-    // exhaustive — the catalog fully accounts for the body.
+    // A colored function (calls file_put_contents): one proven label, exhaustive
+    // — the catalog fully accounts for the body.
     let writer = by_name("writer");
     assert_eq!(writer["effects"], serde_json::json!(["io.fs.write"]));
     assert_eq!(writer["declared"], serde_json::json!([]));
@@ -293,8 +291,6 @@ fn annotate_json_shape_pins_colored_pure_and_tainted_functions() {
 
 #[test]
 fn annotate_json_is_opt_in_default_format_stays_the_text_margin() {
-    // The default surface is unchanged (design constraint): no `--format` flag
-    // still produces the `//=>` margin, byte-for-byte, not JSON.
     let path = fixture("annotate/annotate.php");
     let r = run(&["annotate", path.to_str().unwrap()]);
     assert_eq!(r.code, 0);
@@ -342,7 +338,6 @@ fn vendor_findings_suppressed_by_default_shown_with_flag() {
         def.stdout
     );
 
-    // --vendor-diagnostics: both findings reported, no summary line.
     let show = run(&["check", "--vendor-diagnostics", dir.to_str().unwrap()]);
     assert_eq!(show.code, 1);
     assert!(show.stdout.contains("to width() cannot become int $w"), "first-party shown");
@@ -354,7 +349,6 @@ fn vendor_findings_suppressed_by_default_shown_with_flag() {
 fn vendor_suppressed_field_present_in_json() {
     let dir = fixture("vendor_proj");
 
-    // Default JSON: one finding (first-party), vendor_suppressed = 1.
     let def = run(&["check", "--format", "json", dir.to_str().unwrap()]);
     let v: serde_json::Value = serde_json::from_str(&def.stdout).expect("json object");
     assert_eq!(v["vendor_suppressed"], 1, "got:\n{}", def.stdout);
@@ -362,7 +356,6 @@ fn vendor_suppressed_field_present_in_json() {
     assert_eq!(arr.len(), 1, "only the first-party finding, got:\n{}", def.stdout);
     assert!(arr[0]["message"].as_str().unwrap().contains("width()"));
 
-    // With the flag: two findings, vendor_suppressed = 0.
     let show = run(&["check", "--vendor-diagnostics", "--format", "json", dir.to_str().unwrap()]);
     let v: serde_json::Value = serde_json::from_str(&show.stdout).expect("json object");
     assert_eq!(v["vendor_suppressed"], 0, "got:\n{}", show.stdout);
@@ -401,7 +394,7 @@ fn nonexistent_path_is_a_usage_error() {
     assert_eq!(j.code, 2);
     assert!(j.stdout.is_empty(), "json run emitted a document:\n{}", j.stdout);
 
-    // Every command that walks a path set shares the contract; annotate already did.
+    // Every command that walks a path set shares the contract.
     let t = run(&["transform", "phpdoc-to-native", "/definitely-not-a-real-path-9x8"]);
     assert_eq!(t.code, 2, "transform too, got stdout:\n{}", t.stdout);
     assert!(t.stderr.contains("path does not exist"), "got:\n{}", t.stderr);

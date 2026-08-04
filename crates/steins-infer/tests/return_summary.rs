@@ -1,13 +1,12 @@
-//! ADR-0057 amendment, slice T0 — return-FACT summaries.
+//! ADR-0057 amendment T0 — return-FACT summaries.
 //!
 //! A callee's return proof crosses the boundary: during the binding descent the
 //! checker already performs for a `$x = f(...)` positional call, the returned
 //! expression's value-domain fact is joined over every returning exit and bound as
-//! the call-result's VALUE fact (the value floor above the declared arms, A1). These
-//! fixtures are A7's acceptance set.
+//! the call-result's VALUE fact (the value floor above the declared arms, A1).
 //!
-//! Zero-arg factories are out of T0 scope (deferred to T2's emission-suppressed
-//! walk); the flagship's precision is arg-independent (the owner's `f(): int` takes
+//! Zero-arg factories do not descend in T0. The main fixture's precision is
+//! arg-independent (the owner's `f(): int` takes
 //! no parameters), so the shape here forces the SAME proof through a positional
 //! descent — an unresolved second argument leaves that parameter on its native-int
 //! seed, the assert narrows it, and the proof crosses.
@@ -35,9 +34,7 @@ fn count(src: &str, id: &str) -> usize {
     findings(src).iter().filter(|d| d.id == id).count()
 }
 
-// ==========================================================================
 // (i) The flagship: the body's positive-int proof crosses, no stratum marker.
-// ==========================================================================
 
 #[test]
 fn flagship_positive_int_crosses_verified() {
@@ -54,9 +51,7 @@ fn flagship_positive_int_crosses_verified() {
     assert_eq!(one_type(src), "dumped type: int<1, max>");
 }
 
-// ==========================================================================
 // (ii) Mixed strata: a Verified exit joined with an Asserted exit renders (asserted).
-// ==========================================================================
 
 #[test]
 fn mixed_strata_join_renders_asserted() {
@@ -80,10 +75,8 @@ fn mixed_strata_join_renders_asserted() {
     assert_eq!(one_type(src), "dumped type: int<1, max> (asserted)");
 }
 
-// ==========================================================================
 // (iii) A factless exit degrades the join to the arm floor — identical to
 //       no-summary (a bare `int`, no stratum marker).
-// ==========================================================================
 
 #[test]
 fn factless_exit_degrades_to_arm_floor() {
@@ -110,10 +103,8 @@ fn factless_exit_degrades_to_arm_floor() {
     assert_eq!(one_type(with_summary), one_type(no_summary), "degrade is observably no-summary");
 }
 
-// ==========================================================================
 // (iv) A native return-mismatch exit is DROPPED; the callee's finding fires, the
 //      caller sees the arm floor.
-// ==========================================================================
 
 #[test]
 fn native_return_mismatch_drops_exit() {
@@ -148,9 +139,7 @@ fn native_return_mismatch_only_exit_no_summary() {
     assert_eq!(one_type(src), "dumped type: int");
 }
 
-// ==========================================================================
 // (v) A phpdoc-only mismatch: the docblock is the lie, the walk truth crosses.
-// ==========================================================================
 
 #[test]
 fn phpdoc_return_mismatch_crosses_walk_truth() {
@@ -169,9 +158,7 @@ fn phpdoc_return_mismatch_crosses_walk_truth() {
     assert_eq!(one_type(src), "dumped type: int<min, -1>", "the walk truth crosses");
 }
 
-// ==========================================================================
 // Recursion terminates and degrades to the arm floor (A5).
-// ==========================================================================
 
 #[test]
 fn recursion_terminates_arm_floor() {
@@ -192,9 +179,7 @@ fn recursion_terminates_arm_floor() {
     assert!(ty == "dumped type: int" || ty == "dumped type: 3", "sound + terminating: {ty}");
 }
 
-// ==========================================================================
 // The literal-return degenerate case agrees with `resolve_const_fn`.
-// ==========================================================================
 
 #[test]
 fn literal_return_agrees_with_resolve_const_fn() {
@@ -212,9 +197,7 @@ fn literal_return_agrees_with_resolve_const_fn() {
     assert_eq!(one_type(via_summary), one_type(via_const_fn), "the two literal paths agree");
 }
 
-// ==========================================================================
 // A Refined-string summary crosses (a guard-narrowed non-empty string).
-// ==========================================================================
 
 #[test]
 fn refined_string_summary_crosses() {
@@ -232,9 +215,7 @@ fn refined_string_summary_crosses() {
     assert_eq!(one_type(src), "dumped type: non-empty-string");
 }
 
-// ==========================================================================
 // The summary composes through two descent levels (A1 replayable query answer).
-// ==========================================================================
 
 #[test]
 fn summary_composes_through_two_levels() {
@@ -253,9 +234,7 @@ fn summary_composes_through_two_levels() {
     assert_eq!(one_type(src), "dumped type: int<1, max>");
 }
 
-// ==========================================================================
 // A bare-parameter return degrades to `General{int}` → the arm floor stands.
-// ==========================================================================
 
 #[test]
 fn bare_general_return_falls_to_arm_floor() {
@@ -270,9 +249,7 @@ fn bare_general_return_falls_to_arm_floor() {
     assert_eq!(one_type(src), "dumped type: int");
 }
 
-// ==========================================================================
 // Memo replay is deterministic: two identical calls render identically (§3).
-// ==========================================================================
 
 #[test]
 fn memo_replay_is_deterministic() {
@@ -293,9 +270,7 @@ fn memo_replay_is_deterministic() {
     assert_eq!(ds, vec!["dumped type: int<1, max>".to_owned(), "dumped type: int<1, max>".to_owned()]);
 }
 
-// ==========================================================================
 // A nullable single-base return: the floor carries `|null` (a factless exit).
-// ==========================================================================
 
 #[test]
 fn nullable_return_floor_carries_null() {
@@ -309,15 +284,11 @@ fn nullable_return_floor_carries_null() {
     assert_eq!(one_type(src), "dumped type: int|null");
 }
 
-// ==========================================================================
-// A zero-arg factory does NOT descend in T0 — it keeps the declared arm floor
-// (deferred to T2). A one-arg twin with the same body DOES cross.
-// ==========================================================================
+// A zero-arg factory does not descend in T0; a one-arg twin does.
 
 #[test]
 fn zero_arg_factory_keeps_arm_floor() {
-    // `make()` is zero-arg: no descent in T0, so `$x` takes the declared `int` arm
-    // (its body's positive-int proof does not cross — deferred to T2).
+    // With no descent, `make()` retains its declared `int` arm.
     let src = "<?php\n\
         function opaque(int $trigger, int $n): int {\n\
             assert($n > 0);\n\
@@ -335,10 +306,8 @@ fn zero_arg_factory_keeps_arm_floor() {
     assert_eq!(one_type(src), "dumped type: int");
 }
 
-// ==========================================================================
 // The summary premises no false proof: a positive-int result flowing into an
 // `int` sink is silent (soundness — the value fits its contract).
-// ==========================================================================
 
 #[test]
 fn summary_value_premises_no_false_finding() {
@@ -354,11 +323,9 @@ fn summary_value_premises_no_false_finding() {
     assert_eq!(findings(src).len(), 0, "a sound summary premises no finding: {:?}", findings(src));
 }
 
-// ==========================================================================
 // Argument position (issue #60): a call's summary crosses WITHOUT the
 // assignment detour. Every fixture here pins the argument form against the
 // assignment form — the two must stay observably identical.
-// ==========================================================================
 
 #[test]
 fn flagship_crosses_in_argument_position() {

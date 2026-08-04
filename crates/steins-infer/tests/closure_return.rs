@@ -1,10 +1,9 @@
 //! Issue #128 — closure return lane: native return checking + T0 summary rebind
 //! for `$fn(...)` invocations.
 //!
-//! Closures already had capture snapshots and binding descent (ADR-0033). This
-//! slice fills the return side: `ScopeOwner::Closure` answers `scope_return` from
-//! `Scope::ret_ty`, and a proven-closure `$fn(args)` rebinds its summary like a
-//! free function.
+//! `ScopeOwner::Closure` answers `scope_return` from `Scope::ret_ty`, and a
+//! proven-closure `$fn(args)` rebinds its summary like a free function. Capture
+//! snapshots and binding descent follow ADR-0033.
 
 use steins_infer::{
     DEBUG_TYPE_ID, Diagnostic, Folder, ID as ARG_MISMATCH_ID, RETURN_ID, check, check_with,
@@ -56,9 +55,7 @@ fn count(src: &str, id: &str) -> usize {
     findings(src, None).iter().filter(|d| d.id == id).count()
 }
 
-// ==========================================================================
 // (a) Conformance — closure return sites against native `: R`
-// ==========================================================================
 
 #[test]
 fn closure_native_return_mismatch_fires() {
@@ -107,9 +104,7 @@ fn generator_function_return_is_not_checked_against_generator() {
     assert_eq!(count(src, RETURN_ID), 0);
 }
 
-// ==========================================================================
 // (b) Value lane — `$fn(...)` summary rebinds at assignment
-// ==========================================================================
 
 #[test]
 fn closure_call_summary_rebinds_literal() {
@@ -175,8 +170,8 @@ fn string_callable_summary_rebinds() {
 
 #[test]
 fn named_arg_string_callable_keeps_declared_floor() {
-    // Issue #128 review: string-callable named/spread must keep the return floor
-    // like local closures and first-class callables — not fall to `unknown`.
+    // A string-callable with named/spread args keeps the declared return floor,
+    // like local closures and first-class callables — not falling to `unknown`.
     let src = "<?php\n\
         function pick(int $x): int { return rand(); }\n\
         $fn = 'pick';\n\
@@ -195,14 +190,12 @@ fn named_arg_first_class_callable_keeps_declared_floor() {
     assert_eq!(one_type(src), "int");
 }
 
-// ==========================================================================
 // Capture stratum — Asserted must not launder through the summary (issue #128)
-// ==========================================================================
 
 #[test]
 fn asserted_capture_summary_stays_asserted() {
-    // Capture snapshot used to drop stratum and re-seed as Verified, so
-    // `$result = $f()` laundered Asserted 'hi' into a proof premise.
+    // Regression: a capture snapshot must preserve stratum. If it re-seeds as
+    // Verified, `$result = $f()` launders an Asserted 'hi' into a proof premise.
     let src = "<?php\n\
         /** @phpstan-assert 'hi' $v */\n\
         function claimHi($v): void {}\n\

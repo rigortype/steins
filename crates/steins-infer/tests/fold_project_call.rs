@@ -1,11 +1,8 @@
-//! Issue #127 — a foldable builtin's argument that is a project call resolves
-//! through the T0 summary, so `strtoupper(g(1))` folds once `g` proves a string.
+//! Issue #127 — a foldable builtin's project-call argument resolves through the
+//! T0 summary, so `strtoupper(g(1))` folds once `g` proves a string.
 //!
-//! Until this slice the composition was one-way: builtin folds flowed into
-//! user-function descents, and user summaries into other user descents, but a
-//! user summary never reached the fold gate. Every existing refusal (project
-//! shadow, unique-simple-name, conditional polyfill, non-Singleton summary)
-//! still declines.
+//! Project shadows, ambiguous simple names, conditional polyfills, and
+//! non-Singleton summaries still decline.
 
 use steins_infer::{
     DEBUG_TYPE_ID, Diagnostic, Folder, ID as ARG_MISMATCH_ID, RETURN_ID, check, check_with,
@@ -58,9 +55,7 @@ fn count(src: &str, id: &str, folder: Option<&mut dyn Folder>) -> usize {
     findings(src, folder).iter().filter(|d| d.id == id).count()
 }
 
-// ==========================================================================
 // Flagship
-// ==========================================================================
 
 #[test]
 fn strtoupper_of_project_call_folds() {
@@ -92,9 +87,7 @@ fn nested_fold_over_project_call_composes() {
     assert_eq!(one_folded(src), "'ABAB'");
 }
 
-// ==========================================================================
 // Refusals — silence, never a partial fold
-// ==========================================================================
 
 #[test]
 fn project_function_shadowing_the_builtin_declines() {
@@ -140,9 +133,7 @@ fn zero_arg_project_call_stays_on_const_fn_lane() {
     assert_eq!(one_folded(src), "'HI'");
 }
 
-// ==========================================================================
 // Recursion through a fold arg terminates
-// ==========================================================================
 
 /// Shared helpers for the Asserted-fold laundering fixtures (issue #127 review).
 /// `g` asserts its second arg is `'hi'` and returns it; `strtoupper(g(...))` folds

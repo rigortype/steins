@@ -1,10 +1,8 @@
-//! The `steins` binary.
-//!
-//! Two commands exist for this milestone (ADR-0020 documents the eventual
-//! six-command surface; the rest are deliberately NOT stubbed). `check` walks
-//! `.php` files, runs the salsa pipeline, prints proof-layer diagnostics, and
-//! exits 1 if any finding was reported. `annotate` reprints a single file with a
-//! right-margin column of *proven* inferred facts (the Rigor-style display).
+//! The `steins` binary (ADR-0020). `check` walks `.php` files, runs the salsa
+//! pipeline, prints proof-layer diagnostics, and exits 1 if any finding was
+//! reported. `annotate` reprints a single file with a right-margin column of
+//! *proven* inferred facts (the Rigor-style display). `transform`, `effect-diff`,
+//! `doctor`, `version`, and `license` complete the command surface.
 
 // The output seam (issue #44) is declared FIRST and `#[macro_use]`d: `outln!` /
 // `out!` / `errln!` are `macro_rules!` macros, which are textually scoped, so
@@ -17,10 +15,8 @@ mod doctor;
 mod effect_baseline;
 mod sha256;
 
-// The profile engine (Surface, the rung ladder, user-profile resolution) moved to
-// `steins_infer::profile` so the wasm playground and the CLI read ONE
-// implementation (the no-second-relation discipline, applied to surface
-// selection). The alias keeps every `profile::` path in this crate unchanged.
+// The CLI and wasm playground share `steins_infer::profile`, preserving the
+// no-second-relation discipline for surface selection.
 pub(crate) use steins_infer::profile;
 
 use std::collections::HashMap;
@@ -341,15 +337,13 @@ fn run_check(args: &[String]) -> ExitCode {
 
     // Profile surface (ADR-0050 §6, second in the pipeline): a finding off the
     // active surface does not exist — it never reaches, nor consumes, a later
-    // channel (inline ignore, baseline). This is the M2 adoption-surface core: a
-    // bare `check` shows proof + mechanics only; the contract layer opts up via a
-    // named profile. Mechanics ids stay on in every profile (anti-rot, §1).
+    // channel (inline ignore, baseline). A bare `check` shows proof + mechanics;
+    // named profiles opt into contracts. Mechanics ids stay on in every profile
+    // (anti-rot, §1).
     findings.retain(|d| surface.is_surfaced(d));
 
-    // Scoped policy (ADR-0050 §6, third in the pipeline): `[[policy]]` per-path
-    // enable/disable is issue #15 / slice 3. This slice ships the seam as a no-op
-    // stage so the composition order is real and slice 3 slots in without moving
-    // the earlier stages.
+    // Scoped policy is reserved as the third stage (ADR-0050 §6). It is currently
+    // an identity, preserving vendor → surface → policy → inline → baseline order.
     let findings = apply_policy_stage(findings);
 
     // Inline `@steins-ignore` applies next (ADR-0023): a finding suppressed
@@ -422,10 +416,9 @@ fn run_check(args: &[String]) -> ExitCode {
     if any_fail { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }
 
-/// The `[[policy]]` scoped enable/disable stage (ADR-0050 §6): issue #15 / slice 3.
-/// A no-op identity today — the structural seam that keeps the composition order
-/// (vendor → surface → policy → inline → baseline) real so slice 3 slots in without
-/// disturbing the surrounding stages.
+/// The `[[policy]]` scoped enable/disable stage (ADR-0050 §6): currently an
+/// identity that keeps the composition order (vendor → surface → policy → inline →
+/// baseline) real.
 fn apply_policy_stage(findings: Vec<Diagnostic>) -> Vec<Diagnostic> {
     findings
 }
@@ -511,9 +504,9 @@ fn match_baseline(
         // The debug lane is exempt from the baseline on the MATCH side too (ADR-0053
         // §4/§8): "never matched by a baseline entry" is symmetric with "never
         // captured" (write_baseline, above). A debug finding must always report even
-        // if a stale entry happens to share its `(id, path, hash)` — e.g. a baseline
-        // written before this fix, or a hand-edit — so it bypasses the matcher
-        // entirely rather than consuming (and hiding behind) such an entry.
+        // if a stale entry happens to share its `(id, path, hash)` — e.g. a
+        // hand-edited entry — so it bypasses the matcher entirely rather than
+        // consuming (and hiding behind) such an entry.
         if matches!(steins_infer::layer(d.id), Some(steins_infer::Layer::Debug)) {
             reported.push(d);
             continue;
@@ -533,21 +526,17 @@ fn match_baseline(
     // reading it alone would call every leftover debug entry *dormant* — kept,
     // never reported, forever. That reading fits an id the active surface simply
     // never looked for; it does not fit a debug entry, which is not "outside this
-    // surface" but a mistake that can never become valid again (debug findings now
-    // always bypass the matcher, above, so such an entry can never be consumed by
-    // any future run either).
+    // surface" but a mistake that can never become valid again (the matcher above
+    // bypasses debug findings, so such an entry can never be consumed either).
     //
     // A debug entry must surface as stale on EVERY run, not only once the run's
     // rung reaches its own capture rung — the ADR-0062 A-G10 "not yet analyzed
-    // that surface" reading behind `captured <= rung` answers a question that
-    // does not apply here: a debug finding is checked unconditionally on every
-    // profile (`is_surfaced`), so an entry captured at `strict` and consulted on
-    // a `default` run is just as dead as one captured at `default` (review
-    // finding on issue #108, PR #133 — the first cut of this fix kept the rung
-    // comparison and left a `strict`-captured debug entry silently dormant on a
-    // `default` run). Debug ids therefore ignore `captured` entirely here, the
-    // same way `match_baseline`'s per-finding loop above ignores it when
-    // deciding whether to bypass the matcher.
+    // that surface" reading behind `captured <= rung` does not apply here: a debug
+    // finding is checked unconditionally on every profile (`is_surfaced`), so an
+    // entry captured at `strict` and consulted on a `default` run is just as dead
+    // as one captured at `default` (issue #108). Debug ids therefore ignore
+    // `captured` entirely here, the same way `match_baseline`'s per-finding loop
+    // above ignores it when deciding whether to bypass the matcher.
     let stale = matcher.stale_count_within(|id, captured| {
         if matches!(steins_infer::layer(id), Some(steins_infer::Layer::Debug)) {
             true
@@ -710,9 +699,9 @@ fn run_transform(args: &[String]) -> ExitCode {
     let plugins = load_plugins(&layout, allow_list_from_disk().as_deref());
     let project = Project::new(&db, inputs.clone(), layout, plugins);
 
-    // Plan the transform (pure — no writes, no re-check).
-    // ADR-0047 Slice A: the region map is threaded into the planners but not yet
-    // consumed by any decision — the plan is identical with or without it.
+    // Plan the transform (pure — no writes, no re-check). The region map (ADR-0047)
+    // is threaded into the planners but not yet consumed by any decision, so the
+    // plan is identical with or without it.
     let report = match kind {
         Kind::Promote => plan_phpdoc_to_native(&db, project, &vouches, partitions.as_ref()),
         Kind::Honesty => plan_phpdoc_honesty(&db, project, &vouches, partitions.as_ref()),
@@ -769,8 +758,8 @@ fn run_transform(args: &[String]) -> ExitCode {
 }
 
 /// `steins.toml` — the `[transform.vouch]` (ADR-0046 §2) and
-/// `[transform.partitions]` (ADR-0047 §7) sections are read this slice. Unknown
-/// keys are ignored so the file can carry future config.
+/// `[transform.partitions]` (ADR-0047 §7) sections. Unknown keys are ignored so
+/// the file can carry additional config.
 #[derive(serde::Deserialize, Default)]
 struct SteinsConfig {
     transform: Option<TransformConfig>,
@@ -797,7 +786,7 @@ struct PluginsConfig {
     allow: Vec<String>,
 }
 
-/// The `[check]` section (ADR-0050 §5): repo defaults for `steins check`. Today it
+/// The `[check]` section (ADR-0050 §5): repo defaults for `steins check`. It
 /// carries the default profile name; the `--profile` flag beats it (§5).
 #[derive(serde::Deserialize, Default)]
 struct CheckConfig {

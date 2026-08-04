@@ -37,20 +37,17 @@ fn pure_calling_rand_is_flagged_with_exact_message() {
         d.message,
         "rand() has effect nondet.random, but withRng() is declared #[\\Steins\\Pure]"
     );
-    // Points at the `rand` call (line 3).
     assert_eq!(d.line, 3);
 }
 
 #[test]
 fn pure_builtin_and_arithmetic_are_silent() {
-    // strtolower is catalogued-pure; arithmetic has no effect.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(string $s): string { $x = 1 + 2; return strtolower($s); }\n";
     assert_eq!(effects(src).len(), 0, "pure builtin + arithmetic → silent");
 }
 
 #[test]
 fn pure_calling_uncatalogued_builtin_is_silent() {
-    // Unknown builtin widens to unknown-effect → deferred maybe → silent.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(): void { some_unknown_fn(); }\n";
     assert_eq!(effects(src).len(), 0, "uncatalogued builtin → silent (deferred)");
 }
@@ -91,7 +88,6 @@ fn transitive_effect_reports_via_origin() {
         d.message,
         "helper() has effect io.fs.write (via file_put_contents at line 4), but f() is declared #[\\Steins\\Pure]"
     );
-    // Reported at the outer `helper()` call site (line 3).
     assert_eq!(d.line, 3);
 }
 
@@ -109,7 +105,6 @@ fn transitive_through_two_hops() {
 
 #[test]
 fn transitive_pure_helper_is_silent() {
-    // helper only calls a pure builtin → no effect propagates.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(string $s): void { helper($s); }\nfunction helper(string $s): string { return strtolower($s); }\n";
     assert_eq!(effects(src).len(), 0, "pure helper → silent");
 }
@@ -118,7 +113,6 @@ fn transitive_pure_helper_is_silent() {
 
 #[test]
 fn mutual_recursion_terminates() {
-    // a ⇄ b with no real effects: converges, reports nothing, does not loop.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction a(): void { b(); }\nfunction b(): void { a(); }\n";
     assert_eq!(effects(src).len(), 0);
     // And with a real effect reachable through the cycle it is still found.
@@ -178,20 +172,16 @@ fn unannotated_function_with_effects_is_silent() {
     assert_eq!(effects(src).len(), 0, "no envelope → no effect check");
 }
 
-// ==========================================================================
 // ADR-0018: hierarchical `#[\Steins\Effect(...)]` envelopes — subsumption.
-// ==========================================================================
 
 #[test]
 fn effect_io_subsumes_io_fs_write() {
-    // #[Effect('io')] admits io.fs.write (coarse declaration, fine catalog).
     let src = "<?php\n#[\\Steins\\Effect('io')]\nfunction f(): void { file_put_contents(\"/tmp/x\", \"y\"); }\n";
     assert_eq!(effects(src).len(), 0, "io subsumes io.fs.write → silent");
 }
 
 #[test]
 fn effect_io_does_not_admit_nondet_random() {
-    // rand() is nondet.random, outside the io subtree → a violation.
     let src = "<?php\n#[\\Steins\\Effect('io')]\nfunction f(): int { return rand(); }\n";
     let d = one(src);
     assert_eq!(
@@ -203,7 +193,6 @@ fn effect_io_does_not_admit_nondet_random() {
 
 #[test]
 fn narrow_read_envelope_flags_a_write() {
-    // #[Effect('io.fs.read')] does not admit io.fs.write.
     let src = "<?php\n#[\\Steins\\Effect('io.fs.read')]\nfunction f(): void { file_put_contents(\"/tmp/x\", \"y\"); }\n";
     let d = one(src);
     assert_eq!(
@@ -220,7 +209,6 @@ fn narrow_read_envelope_admits_a_read() {
 
 #[test]
 fn nondet_envelope_covers_random_and_time() {
-    // Both nondet.random (rand) and nondet.time (time) are under nondet.
     let src = "<?php\n#[\\Steins\\Effect('nondet')]\nfunction f(): int { return rand() + time(); }\n";
     assert_eq!(effects(src).len(), 0, "nondet subsumes both nondet.random and nondet.time");
 }
@@ -289,9 +277,7 @@ fn transitive_effect_within_envelope_is_silent() {
     assert_eq!(effects(src).len(), 0, "transitive io.fs.write under io → silent");
 }
 
-// ==========================================================================
 // ADR-0018: unknown-label registry diagnostic.
-// ==========================================================================
 
 #[test]
 fn typo_label_reports_unknown_with_suggestion() {
@@ -303,7 +289,6 @@ fn typo_label_reports_unknown_with_suggestion() {
         u[0].message,
         "unknown effect label 'io.netw' in #[\\Steins\\Effect] on f() — did you mean 'io.net'?"
     );
-    // Points at the attribute (line 2).
     assert_eq!(u[0].line, 2);
 }
 
@@ -335,9 +320,7 @@ fn pure_never_produces_unknown_label() {
     assert_eq!(unknown_labels(src).len(), 0);
 }
 
-// ==========================================================================
 // Methods: an Effect envelope exceeded via a private `$this->` helper.
-// ==========================================================================
 
 #[test]
 fn method_effect_envelope_exceeded_via_this_helper() {
@@ -347,7 +330,6 @@ fn method_effect_envelope_exceeded_via_this_helper() {
         d.message,
         "Svc::helper() has effect nondet.random (via rand at line 5), but Svc::run() is declared #[\\Steins\\Effect('io')] — nondet.random exceeds the envelope"
     );
-    // Reported at the `$this->helper()` call site (line 4).
     assert_eq!(d.line, 4);
 }
 

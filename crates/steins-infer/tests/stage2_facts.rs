@@ -3,8 +3,7 @@
 //! produce Refined/General facts (Feature C), `@phpstan-assert` application
 //! (Feature D), and contract acceptance consuming abstract facts (Feature E).
 //!
-//! The through-line: an argument that resolves to an *abstract* fact (not a
-//! proven value) is now judged by the domain's **set** acceptance
+//! An argument resolving to an abstract fact is judged by the domain's **set** acceptance
 //! (`steins_contract::admits_fact`) — only a definite `No` reports, `Maybe` is
 //! silent, so the zero-FP bar holds. Includes two adversarial counterexamples.
 
@@ -31,9 +30,7 @@ fn null_count(src: &str) -> usize {
     findings(src).iter().filter(|d| d.id == CALL_ON_NULL_ID).count()
 }
 
-// ==========================================================================
 // B. Native-type parameter seeding feeds the abstract-fact contract check.
-// ==========================================================================
 
 #[test]
 fn seeded_int_param_violates_string_contract() {
@@ -101,9 +98,7 @@ class U { public function m(): void {} }
     );
 }
 
-// ==========================================================================
 // C. Guard refinements produce Refined/General facts.
-// ==========================================================================
 
 #[test]
 fn range_guard_narrows_to_positive_int() {
@@ -193,9 +188,7 @@ function f($c): void { $x = $c ? null : \"s\"; if ($x !== \"s\") { $x->m(); } }
     assert_eq!(null_count(src), 1, "OneOf member removal → Singleton(null) → call.on-null");
 }
 
-// ==========================================================================
 // D. `@phpstan-assert` application (Always).
-// ==========================================================================
 
 #[test]
 fn always_assert_narrows_caller_var_then_contract_fires() {
@@ -231,9 +224,7 @@ function g($s): void { assertNonEmpty($s); wantsEmpty($s); }
     assert_eq!(param_count(src), 1, "asserted non-empty-string, disjoint from ''");
 }
 
-// ==========================================================================
 // E. Contract acceptance on abstract facts — @return path.
-// ==========================================================================
 
 #[test]
 fn seeded_param_returned_violates_return_contract() {
@@ -251,9 +242,7 @@ fn seeded_param_returned_satisfies_return_contract() {
     assert_eq!(return_count(src), 0, "returning a seeded int under @return int → silent");
 }
 
-// ==========================================================================
 // Adversarial counterexamples (self-constructed).
-// ==========================================================================
 
 #[test]
 fn counterexample_by_ref_param_is_not_seeded() {

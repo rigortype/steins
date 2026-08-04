@@ -32,12 +32,10 @@ fn spawn_or_skip(test: &str) -> Option<Sidecar> {
     }
 }
 
-/// Regression tripwire for the temp-dir leak this crate used to have: the
-/// runner source now travels as a `php -r` argv element, so `spawn` must
-/// touch no file or dir under `$TMPDIR` at all — in particular none named
-/// `steins-sidecar-<ourpid>*`, the pattern the old per-instance/per-process
-/// temp dir used. Scoped to our own pid so this does not trip over an
-/// unrelated leftover from a different process's run.
+/// Regression tripwire against a temp-dir leak: the runner source travels as a
+/// `php -r` argv element, so `spawn` must touch no file or dir under `$TMPDIR` —
+/// in particular none named `steins-sidecar-<ourpid>*`. Scoped to our own pid so
+/// it does not trip over an unrelated leftover from another process's run.
 #[test]
 fn spawn_leaves_no_temp_dir_behind() {
     let Some(sc) = spawn_or_skip("spawn_leaves_no_temp_dir_behind") else { return };
@@ -209,7 +207,6 @@ fn php_minor(version: &str) -> (u16, u16) {
 
 #[test]
 fn reflect_return_type_is_none_for_a_class_like() {
-    // A class-like name is not a function — no return type surface.
     let Some(mut sc) = spawn_or_skip("reflect_return_type_is_none_for_a_class_like") else { return };
     let ex = sc.reflect("Exception").expect("reflection reply");
     assert!(ex.class_like_exists && !ex.function_exists);
@@ -248,7 +245,6 @@ fn fold_strtolower_returns_value() {
 #[test]
 fn fold_preserves_float_and_int_types() {
     let Some(mut sc) = spawn_or_skip("fold_preserves_float_and_int_types") else { return };
-    // strlen → int
     assert_eq!(
         sc.fold("strlen", &[FoldArg::Str("hello".to_owned())]),
         FoldResult::Value(FoldValue::Int(5))
@@ -463,7 +459,6 @@ fn the_respawn_cap_bounds_recovery_and_then_poisons_permanently() {
     let Some(mut sc) = spawn_or_skip("the_respawn_cap_bounds_recovery") else { return };
     let bomb = [s("x"), int(2_000_000_000)];
 
-    // Three bombs, three recoveries: each one widens, and the next fold answers.
     for i in 0..3 {
         assert!(matches!(sc.fold("str_repeat", &bomb), FoldResult::Widen { .. }), "bomb {i} widens");
         assert_eq!(

@@ -8,7 +8,7 @@
 //! argument overwriting a positional is a fatal (DEFERRED) `Error`, and the runtime
 //! precedence overwrite ≻ unknown-named ≻ too-few is honored here.
 //!
-//! Like S2, the arity family is silent under the pure `NoFold` subset (no sidecar
+//! Like the absence family, arity is silent under the pure `NoFold` subset (no sidecar
 //! to answer the A2ii homonym leg), so these tests drive a [`Boot`] mock that
 //! stands in for the runtime boot surface. Every ladder/leg ships with a **silence
 //! fixture** proving the id stays quiet when a precondition fails (the §10 silence
@@ -79,9 +79,7 @@ fn unknown_named(d: &Diagnostic) -> bool {
     d.id == CALL_UNKNOWN_NAMED_ARGUMENT_ID
 }
 
-// ---------------------------------------------------------------------------
 // Firing fixtures: every leg holds.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn function_too_few_positional() {
@@ -111,7 +109,6 @@ fn function_unknown_named() {
 
 #[test]
 fn function_too_few_via_named_gap() {
-    // `f(b: 2)` leaves required $a unbound — ArgumentCountError at runtime.
     let d = fires("<?php\nfunction f($a, $b) {}\nf(b: 2);\n");
     assert_eq!(d.len(), 1, "{d:?}");
     assert!(too_few(&d[0]));
@@ -148,7 +145,6 @@ fn method_too_few_across_inherited_chain() {
     );
     assert_eq!(d.len(), 1, "{d:?}");
     assert!(too_few(&d[0]));
-    // The declaring class names the method (PHP: `Base::m`).
     assert!(d[0].message.contains("Base::m(): 1 passed, 2 required"), "{}", d[0].message);
 }
 
@@ -169,7 +165,6 @@ fn method_unknown_named() {
 
 #[test]
 fn by_ref_param_is_required() {
-    // `function f(&$x)` — by-ref params are required exactly like any other.
     let d = fires("<?php\nfunction f(&$x) {}\nf();\n");
     assert_eq!(d.len(), 1, "{d:?}");
     assert!(too_few(&d[0]));
@@ -178,17 +173,14 @@ fn by_ref_param_is_required() {
 
 #[test]
 fn optional_before_required_is_implicitly_required() {
-    // `f($a = 1, $b)` — PHP treats $a as implicitly required (required count 2).
     let d = fires("<?php\nfunction f($a = 1, $b) {}\nf(1);\n");
     assert_eq!(d.len(), 1, "{d:?}");
     assert!(too_few(&d[0]));
     assert!(d[0].message.contains("1 passed, 2 required"), "{}", d[0].message);
 }
 
-// ---------------------------------------------------------------------------
 // Silence matrix — one fixture per leg (ADR-0049 §10: the fixture is written
 // before the id fires on that shape).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn silent_no_sidecar() {
@@ -310,22 +302,18 @@ fn silent_self_static_parent() {
 
 #[test]
 fn silent_variadic_too_few() {
-    // A variadic-only target has 0 required parameters — no too-few possible.
     let d = fires("<?php\nfunction f(...$r) {}\nf();\n");
     assert!(d.is_empty(), "{d:?}");
 }
 
 #[test]
 fn silent_variadic_collects_unknown_name() {
-    // A variadic silently collects an otherwise-unknown named argument
-    // (`fv(x: 1)` → `{"x":1}`) ⇒ no unknown-named finding.
     let d = fires("<?php\nfunction f(...$r) {}\nf(x: 1);\n");
     assert!(d.is_empty(), "{d:?}");
 }
 
 #[test]
 fn silent_variadic_after_params_collects_unknown() {
-    // A declared variadic after explicit params still collects unknown names.
     let d = fires("<?php\nfunction f($a, ...$r) {}\nf(a: 1, zzz: 2);\n");
     assert!(d.is_empty(), "{d:?}");
 }
@@ -372,8 +360,6 @@ fn silent_func_get_args_no_declared_variadic() {
 
 #[test]
 fn silent_builtin_function() {
-    // A catalogued builtin (`strlen`) is the INTERNAL slice (reflect, M2), never the
-    // userland arm — even with too few args.
     let d = fires("<?php\nstrlen();\n");
     assert!(d.is_empty(), "{d:?}");
 }
@@ -390,14 +376,12 @@ fn silent_enum_method() {
 
 #[test]
 fn silent_closure_var_call() {
-    // A `$fn(...)` variable call is the value lane's target, not arity's.
     let d = fires("<?php\nfunction f($a, $b) {}\n$fn = 'f';\n$fn(1);\n");
     assert!(d.is_empty(), "{d:?}");
 }
 
 #[test]
 fn silent_nullsafe_method() {
-    // `?->` is excluded in v1 (a null receiver short-circuits).
     let d = fires("<?php\nclass C { public function m($a, $b) {} }\n$o = new C();\n$o?->m(1);\n");
     assert!(d.is_empty(), "{d:?}");
 }
@@ -439,8 +423,8 @@ fn fires_instance_syntax_call_to_static_method() {
 
 #[test]
 fn silent_magic_call_absent_method() {
-    // A method absent from the chain routes to `__call` (any arity) — S2's job if
-    // undefined, never arity's; and here `m` is absent so no signature exists.
+    // A method absent from the chain may route to `__call` (any arity); absence is
+    // not arity's consequence, and here `m` has no signature to check.
     let d = fires(
         "<?php\nclass C { public function __call($n, $a) {} }\n(new C())->m(1);\n",
     );

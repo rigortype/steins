@@ -364,10 +364,7 @@ fn check_with_folder(
     let project = Project::new(&db, vec![file], ProjectLayout::fallback(), PluginFacts::none());
     // `warning_handler_abort = true` is the CLI's DEFAULT (ADR-0049 §7: a proven
     // E_WARNING is a proven runtime break; only `[runtime] warning-handler =
-    // "null"` opts out, and a browser snippet has no steins.toml). Passing false
-    // here silently withheld every warning-backed finding — offset.maybe-missing
-    // among them — which is how the playground's strict rung first shipped
-    // quieter than `steins check --profile strict`.
+    // "null"` opts out, and a browser snippet has no steins.toml).
     let mut findings = check_project_with_runtime(&db, project, folder, true);
 
     // The CLI pipeline (ADR-0050 §6) minus the snippet-meaningless channels:
@@ -927,12 +924,10 @@ mod replay {
 mod strict_leg {
     use super::*;
 
-    /// The strict rung through the playground path fires exactly as the CLI
-    /// does. This pins the ADR-0049 §7 default: `warning_handler_abort = true`
-    /// is the CLI's no-config posture, and passing `false` here withheld every
-    /// warning-backed finding (offset.maybe-missing among them) — the playground
-    /// must never be quieter than `steins check --profile strict` on the same
-    /// snippet.
+    /// The strict rung through the playground path fires exactly as the CLI does,
+    /// pinning the `warning_handler_abort = true` default documented in
+    /// `check_with_folder`: the playground must never be quieter than
+    /// `steins check --profile strict` on the same snippet.
     #[test]
     fn strict_fixture_fires_maybe_missing() {
         let src = "<?php\n/** @param array{a?: string} $d */\nfunction f(array $d): void { $x = $d[\"a\"]; }\n";

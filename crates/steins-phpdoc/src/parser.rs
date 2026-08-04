@@ -1186,7 +1186,6 @@ fn unescape_single(raw: &str) -> String {
             out.push(bytes[i + 1] as char);
             i += 2;
         } else {
-            // Copy one UTF-8 char.
             let ch_len = utf8_len(bytes[i]);
             out.push_str(&inner[i..i + ch_len]);
             i += ch_len;

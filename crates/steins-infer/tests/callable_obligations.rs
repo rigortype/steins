@@ -46,9 +46,7 @@ const STATIC_CLOSURE: &str =
 const STATIC_PURE_CLOSURE: &str =
     "<?php /** @param static-pure-closure $cb */ function takes($cb): void {}\n";
 
-// ==========================================================================
 // 1. Purity — the semantic half.
-// ==========================================================================
 
 #[test]
 fn echoing_closure_literal_violates_pure_callable() {
@@ -115,9 +113,7 @@ fn plain_callable_spelling_imposes_no_purity() {
     assert_eq!(count(src), 0, "bare callable carries no purity obligation");
 }
 
-// ==========================================================================
 // 2. Static binding — the syntactic half.
-// ==========================================================================
 
 #[test]
 fn non_static_closure_violates_static_closure() {
@@ -153,9 +149,7 @@ fn first_class_callable_satisfies_static_closure() {
     assert_eq!(count(&src), 0, "a free-function first-class callable is unbound");
 }
 
-// ==========================================================================
 // 3. Closure-ness — the value-domain half, which fails independently.
-// ==========================================================================
 
 #[test]
 fn callable_string_is_not_a_closure() {
@@ -185,9 +179,7 @@ fn non_callable_scalar_fails_every_spelling() {
     }
 }
 
-// ==========================================================================
 // 4. Composition — `static-pure-closure` fails each half on its own.
-// ==========================================================================
 
 #[test]
 fn pure_but_not_static_violates_static_pure_closure() {
@@ -211,9 +203,7 @@ fn static_and_pure_satisfies_both_halves() {
     assert_eq!(count(&src), 0, "both halves hold");
 }
 
-// ==========================================================================
 // 5. The obligation composes with the signature half (issue #11).
-// ==========================================================================
 
 #[test]
 fn signature_bearing_pure_callable_still_judges_variance() {
@@ -230,9 +220,7 @@ fn signature_bearing_pure_callable_also_judges_purity() {
     assert!(d.message.contains("not pure"), "the obligation rides the signature: {}", d.message);
 }
 
-// ==========================================================================
 // 6. The `@return` side is NOT judged (the fixtures' explicit non-expectation).
-// ==========================================================================
 
 #[test]
 fn return_position_carries_no_obligation() {

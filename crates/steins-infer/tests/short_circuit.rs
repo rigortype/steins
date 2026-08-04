@@ -1,4 +1,4 @@
-//! Short-circuit refinement acceptance tests (ADR-0052 §6 / slice N3): env-threaded
+//! Short-circuit refinement tests (ADR-0052 §6 / N3): env-threaded
 //! `&&`/`||` verdicts, retained guard calls with sequenced invalidation, nested
 //! `-if-true`/`-if-false` consumption, ternary-arm threading, and the `$a ?? $b`
 //! rvalue fact.
@@ -32,17 +32,13 @@ fn arg_mismatch(src: &str) -> usize {
 /// `function width(int $w)` header + a bad string local `$bad = "abc"`.
 const HDR: &str = "<?php\nfunction width(int $w): int { return $w; }\n";
 
-// ==========================================================================
 // `&&` verdict threading: the right operand sees `then_refinements(left)`.
-// ==========================================================================
 
 #[test]
 fn and_threading_prunes_contradiction() {
     // `$x === 5 && $x === 6`: the right operand evaluates under `$x = 5` (the left's
     // then-refinement), so `$x === 6` is a decided No → the whole `&&` is No → the
-    // then-branch is dead → the propagated `width($bad)` inside it is never walked.
-    // Before threading, both operands saw the unknown param `$x` (Maybe/Maybe →
-    // Maybe), the branch was walked, and the finding fired inside dead code.
+    // then-branch is dead, preventing a finding inside dead code.
     let src = format!(
         "{HDR}function f($x): void {{ $bad = \"abc\"; if ($x === 5 && $x === 6) {{ width($bad); }} }}"
     );
@@ -60,16 +56,13 @@ fn and_threading_control_non_contradiction_stays_live() {
     assert_eq!(n(&src), 1, "&& non-contradiction stays live → flagged");
 }
 
-// ==========================================================================
 // `||` verdict threading: the right operand sees `else_refinements(left)`.
-// ==========================================================================
 
 #[test]
 fn or_threading_prunes_tautology_else() {
     // `$x === 5 || $x === 7` over `$x ∈ {5,7}`: the right operand evaluates under the
     // left's else-refinement (`$x !== 5` → `$x = 7`), so `$x === 7` is Yes → the
-    // `||` is Yes → the else-branch is dead. Before threading the `||` was Maybe and
-    // the else was walked, firing inside dead code.
+    // `||` is Yes and the else branch is dead.
     let src = format!(
         "{HDR}function f($c): void {{ $bad = \"abc\"; $x = $c ? 5 : 7; if ($x === 5 || $x === 7) {{ }} else {{ width($bad); }} }}"
     );
@@ -86,9 +79,7 @@ fn or_threading_control_non_tautology_else_stays_live() {
     assert_eq!(n(&src), 1, "|| non-tautology → else reachable → flagged");
 }
 
-// ==========================================================================
 // Ternary arm env threading (ADR-0052 §6): arms resolve under then/else refinements.
-// ==========================================================================
 
 #[test]
 fn ternary_then_arm_sees_then_refinement() {
@@ -102,9 +93,7 @@ fn ternary_then_arm_sees_then_refinement() {
     assert_eq!(n(&src), 1, "ternary then-arm sees the guard's then-refinement → Singleton → flagged");
 }
 
-// ==========================================================================
 // Retained guard calls: the method receiver survives (issue #9 regression shape).
-// ==========================================================================
 
 #[test]
 fn guard_method_call_preserves_receiver() {
@@ -141,9 +130,7 @@ function f(?U $x): void {
     assert_eq!(n(src), 0, "$x !== null && $x->foo() is silent (no manufactured finding)");
 }
 
-// ==========================================================================
 // Sequenced by-ref invalidation (obligation #2): f's effect lands at its position.
-// ==========================================================================
 
 #[test]
 fn sequenced_by_ref_invalidation_forgets_receiver() {
@@ -183,16 +170,13 @@ function f(): void {
     assert_eq!(n(src), 1, "receiver-position guard call keeps $x → body resolves → flagged");
 }
 
-// ==========================================================================
 // Nested `-if-true`/`-if-false` consumption (§6 payoff (ii)).
-// ==========================================================================
 
 #[test]
 fn nested_if_true_fires_contract_layer() {
     // `if ($c && isInt($x))` — the guard call `isInt` sits in a NESTED `&&` position.
-    // N3 consumes its `@phpstan-assert-if-true int` on the then-branch (Asserted),
-    // so `takesString($x)` fires the CONTRACT layer (`phpdoc.param-mismatch` accepts
-    // Asserted). Before N3 only a TOP-LEVEL guard call was consumed, so this was 0.
+    // Its `@phpstan-assert-if-true int` is consumed on the then branch (Asserted),
+    // so `takesString($x)` fires the contract-layer mismatch.
     let src = "<?php
 /** @phpstan-assert-if-true int $x */
 function isInt($x): bool { return true; }
@@ -225,9 +209,7 @@ function f($c, mixed $x): void {
     assert_eq!(arg_mismatch(src), 0, "an Asserted -if-true in a nested && cannot forge a proof");
 }
 
-// ==========================================================================
 // Short-circuit: right-operand facts must not leak onto the short path.
-// ==========================================================================
 
 #[test]
 fn or_short_path_does_not_leak_right_operand_fact() {
@@ -241,9 +223,7 @@ fn or_short_path_does_not_leak_right_operand_fact() {
     assert_eq!(n(&src), 0, "right-operand fact does not leak onto the || short path");
 }
 
-// ==========================================================================
 // `$a ?? $b` — clear_null(fact($a)) join fact($b) (§6).
-// ==========================================================================
 
 #[test]
 fn coalesce_null_lhs_collapses_to_rhs() {

@@ -1,7 +1,7 @@
-//! Region model (ADR-0047 Slice A): the pure config→region assignment.
+//! Region model (ADR-0047): the pure config→region assignment.
 //!
 //! A partitioned run divides the file universe into regions ([`RegionId`]) whose
-//! *nameability* the scoping rule (ADR-0047 §2) will consult. This module owns
+//! *nameability* the scoping rule (ADR-0047 §2) consults. This module owns
 //! only the assignment — a pure function of config + file path (ADR-0047 §6):
 //! given the declared partition path-sets and observer path-sets, [`PartitionMap`]
 //! answers "which region does this file's declaring scope belong to?".
@@ -15,10 +15,10 @@
 //! - **Observer** O — declared tests / dev-scripts that may reference any
 //!   partition.
 //!
-//! ## Assignment precedence (this module's definition; not yet consumed)
-//! Slice A wires the map through to the planners but no planner *decides* on it
-//! (ADR-0047 §6 — "with one region the planner degenerates to today's behavior").
-//! The order is nonetheless fixed and deterministic:
+//! ## Assignment precedence
+//! Planners receive the map but do not consult it when deciding a transform; the
+//! current planning invariant is whole-universe enumeration (ADR-0047 §6). Region
+//! assignment itself is fixed and deterministic:
 //! 1. **Vendor always wins.** A `vendor/` file is `Shared { vendor: true }` even
 //!    when a partition glob accidentally covers it — vendor is *always* shared
 //!    (ADR-0047 §1/§5), so a partition never claims vendor code.
@@ -111,9 +111,9 @@ struct Partition {
 /// once at planning time; the salsa `Project`, index, and checker are untouched.
 ///
 /// With no declared partitions and no observers this is the **single-region
-/// identity**: every first-party file is [`RegionId::shared`] — the whole-universe
-/// posture that makes a partitioned run byte-identical to today's behavior when
-/// no `[transform.partitions]` section is present.
+/// identity**: every first-party file is [`RegionId::shared`], preserving the
+/// planners' whole-universe posture when no `[transform.partitions]` section is
+/// present.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartitionMap {
     /// Declared partitions, in deterministic (name-sorted) order. Disjoint by
@@ -151,7 +151,7 @@ impl std::error::Error for PartitionConfigError {}
 
 impl PartitionMap {
     /// The single-region identity: no partitions, no observers. Every first-party
-    /// file is [`RegionId::shared`] — today's whole-universe posture (ADR-0047 §1).
+    /// file is [`RegionId::shared`], the whole-universe posture (ADR-0047 §1).
     #[must_use]
     pub fn single_region() -> Self {
         Self::default()
@@ -216,7 +216,7 @@ impl PartitionMap {
         if layout.is_vendor(path) {
             return RegionId::vendor();
         }
-        // 2. Observer.
+        // 2. Observer globs.
         if self.observers.iter().any(|g| glob_match(g, path)) {
             return RegionId::Observer;
         }

@@ -213,11 +213,6 @@ pub fn scan_docblock(text: &str) -> Vec<DocTag> {
     let mut tags = Vec::new();
     let mut line_start = 0usize;
 
-    // Walk physical lines. On each line, strip a leading run of whitespace and
-    // `*` (the docblock gutter), then look for a leading `@tag`. A line yields
-    // at most one tag — except a trace annotation's comma list (ADR-0074 §7),
-    // which yields one tag per named variable — so `scan_line` pushes rather
-    // than returns.
     while line_start <= bytes.len() {
         let line_end = memchr(bytes, line_start, b'\n').unwrap_or(bytes.len());
         scan_line(text, line_start, line_end, &mut tags);
@@ -308,15 +303,8 @@ fn scan_line(text: &str, line_start: usize, line_end: usize, tags: &mut Vec<DocT
         return;
     }
 
-    // The trace annotation (ADR-0074 §2/§7): variable names only — `$x`, or
-    // Psalm's comma-separated multi-variable form `$a, $b` (spaced or tight
-    // commas), with a trailing description after the last variable tolerated
-    // like the single form. One `DocTag` per named variable, pushed in source
-    // order, every span shared (the whole tag's) — the consumer reports each
-    // at the tag's own position. A malformed item anywhere — a non-`$` token
-    // between commas, a dangling comma — drops the WHOLE tag: silence is the
-    // safe side (a missed trace is a missed service, never a wrong answer),
-    // the same posture as the single form's malformed payloads.
+    // The trace annotation: variable names only, single or comma-separated
+    // (ADR-0074 §7). See [`TagKind::TraceTag`] for the payload contract.
     if kind.is_trace_annotation() {
         let mut names = Vec::new();
         let mut k = rest_start;
@@ -363,10 +351,7 @@ fn scan_line(text: &str, line_start: usize, line_end: usize, tags: &mut Vec<DocT
     // For @param/@var/@…-assert, split the type off at the first `$variable`.
     let mut property_target = false;
     let (type_start, type_end, var_name) = if kind.is_conditional_purity() {
-        // The other variable-name-only family, by upstream grammar
-        // (`parseRequiredVariableName` then an optional description). The
-        // variable must be the *first* token, and there is no type. Anything
-        // else is malformed: drop just this tag.
+        // Upstream grammar requires a variable first, then an optional description.
         if bytes[rest_start] != b'$' {
             return;
         }

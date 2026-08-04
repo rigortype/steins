@@ -1,16 +1,10 @@
-//! Regression tests for control-flow soundness around early-return guards.
+//! Control-flow soundness around early-return guards.
 //!
-//! The original mechanism (ADR-0027) was the `Opaque` **read-set** invalidation: a
-//! construct that *reads* a variable dropped it, because the construct might branch
-//! on it and early-return, so the fall-through could exclude the known value.
-//!
-//! Under ADR-0031, `if`/`elseif`/`else` is **structured** — its control flow is
-//! modeled, not erased — so the guard cases here are now handled by real branch
-//! analysis (dead-path pruning, fall-through joins) rather than by blanket
-//! read-invalidation. The read-set rule still governs the constructs that remain
-//! `Opaque` (loops, `switch`, `try`), and it still governs *opaque conditions*
-//! (a by-ref call in a guard). Two tests below record the resulting precision
-//! gains (see their EXPECTATION CHANGE notes).
+//! `Opaque` read-set invalidation drops a read variable because the construct may
+//! branch and early-return, excluding the known value on fall-through (ADR-0027).
+//! Structured `if`/`elseif`/`else` instead uses branch analysis (ADR-0031). The
+//! read-set rule still applies to opaque constructs and opaque conditions, such as
+//! a by-ref call in a guard.
 
 use steins_infer::{Diagnostic, check};
 use steins_syntax::SourceTree;
@@ -25,7 +19,7 @@ fn n(src: &str) -> usize {
     findings(src).len()
 }
 
-// ---- The field reproduction: guard inside a descended callee --------------
+// The field reproduction: guard inside a descended callee
 
 #[test]
 fn null_guard_in_descended_callee_is_silent() {
@@ -68,7 +62,7 @@ make(false);
     assert_eq!(n(src), 0, "false guard filters false before use_token() → silent (no FP)");
 }
 
-// ---- The top-level guard shape --------------------------------------------
+// The top-level guard shape
 
 #[test]
 fn guard_reading_local_survives_structured_if() {
@@ -93,7 +87,7 @@ width($val);
     assert!(f[0].message.contains("argument \"abc\""), "{}", f[0].message);
 }
 
-// ---- Precision preserved: reads of OTHER variables keep the fact ----------
+// Precision preserved: reads of OTHER variables keep the fact
 
 #[test]
 fn construct_reading_other_var_preserves_unrelated_fact() {
@@ -114,7 +108,7 @@ width($w);
     assert!(f[0].message.contains("from $w"), "{}", f[0].message);
 }
 
-// ---- instanceof guard filters exact-class facts the same way --------------
+// instanceof guard filters exact-class facts the same way
 
 #[test]
 fn instanceof_guard_prunes_dead_return_path() {

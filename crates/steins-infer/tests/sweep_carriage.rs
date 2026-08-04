@@ -1,10 +1,7 @@
-//! ADR-0047 Slice B carriage tests: the reverse sweeps now record a *site* for
-//! every caller-enumeration obstacle (`dynamic_call_sites`, the `name → sites`
-//! taint maps) instead of a bare boolean / bare-name set. This slice is
-//! behavior-preserving — key-presence still means "tainted" and a non-empty site
-//! list still means "an obstacle stands" — so these tests assert the two things
-//! Slice B adds: the *right site* is recorded by each producer, and sites
-//! *accumulate* across multiple occurrences (which a set/boolean could not carry).
+//! ADR-0047 reverse-sweep carriage tests. Every caller-enumeration obstacle
+//! records its source site; key presence still means "tainted" and a non-empty
+//! site list means an obstacle stands. These tests pin the recorded site and
+//! accumulation across multiple occurrences.
 
 use steins_db::{Project, SourceFile, SteinsDatabase};
 use steins_infer::promote::{FreeFnSweep, MethodSweep, sweep_free_functions, sweep_methods};
@@ -96,8 +93,8 @@ fn dynamic_free_call_sites_accumulate_across_files() {
 
 #[test]
 fn clean_free_project_records_no_obstacle_sites() {
-    // Non-empty == the old `true`; a clean project must stay empty (== the old
-    // `false`), so consumers still see "enumerable".
+    // A non-empty site list means "not enumerable"; a clean project must stay
+    // empty, so consumers still see "enumerable".
     let src = "<?php\nfunction foo($x) { return $x; }\nfoo(1);\n";
     let sweep = free_sweep(&[("clean.php", src)]);
     assert!(sweep.dynamic_call_sites.is_empty());
@@ -141,8 +138,7 @@ fn nonliteral_callable_array_records_a_dynamic_site() {
 #[test]
 fn unresolved_method_name_keeps_the_first_site_as_representative() {
     // Two unknown-receiver `->probe()` calls (lines 4 and 5): both are recorded, but
-    // the first (source order) stays the representative the refusal names — the
-    // byte-identical pre-Slice-B behavior.
+    // the first in source order remains the representative named by the refusal.
     let src = "<?php\nclass C {\n  public function run($x, $y) {\n    $x->probe();\n    $y->probe();\n  }\n}\n";
     let sweep = method_sweep(&[("m.php", src)]);
     let sites = sweep.unresolved_method_names.get("probe").expect("`probe` tainted");

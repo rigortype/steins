@@ -131,7 +131,6 @@ fn doctor_renders_all_sections_exit_zero() {
 
 #[test]
 fn doctor_default_path_is_dot() {
-    // No path argument defaults to `.`.
     let dir = workdir("defaultpath");
     write(&dir, "a.php", THREE_THROWS);
     let r = run_in(&dir, &["doctor", "--no-php"]);
@@ -175,12 +174,9 @@ fn doctor_reflects_configured_profile() {
 
 #[test]
 fn doctor_names_the_contract_layer_under_throws_direct() {
-    // issue #108, defect 3: `throws-direct` sits at the SAME rung as `default`
-    // (`Floor::Default`) and reaches `throw.undeclared` — a contract-layer id —
-    // through its `enable` list rather than its rung. `layers_on` used to read
-    // only the rung, so this profile's doctor line read "layers [mechanics,
-    // proof]" even though it checks a contract-layer id and reports it. The
-    // printed layer list must name every layer the surface actually admits.
+    // Issue #108: `throws-direct` reaches contract-layer `throw.undeclared`
+    // through `enable`, despite sharing `Floor::Default`. The printed layer list
+    // must name every layer the surface admits.
     let dir = workdir("throws-direct-layers");
     write(&dir, "a.php", THREE_THROWS);
     write(&dir, "steins.toml", "[check]\nprofile = \"throws-direct\"\n");
@@ -196,11 +192,10 @@ fn doctor_names_the_contract_layer_under_throws_direct() {
 #[test]
 fn doctor_layer_line_excludes_debug_even_under_an_explicit_enable() {
     // Review finding on issue #108 (PR #133): `enable = ["debug.type"]` is a
-    // pattern the config layer accepts (debug ids are registered), and it used to
-    // reach past `surfaces_id`'s debug carve-out and pull "debug" into this exact
-    // line — contradicting `layers_on`'s own doc comment ("the debug lane is
-    // display-only and never a surface layer"). `surfaces_id` now excludes the
-    // debug lane before `enable`/`disable` are even consulted.
+    // pattern the config layer accepts (debug ids are registered), but the debug
+    // lane must not surface. `surfaces_id` excludes the debug lane before
+    // `enable`/`disable` are consulted, per `layers_on`'s doc comment ("the debug
+    // lane is display-only and never a surface layer").
     let dir = workdir("debug-enable-layers");
     write(&dir, "a.php", THREE_THROWS);
     write(
@@ -298,13 +293,10 @@ fn doctor_reports_baseline_capture_surface_and_dormant() {
 
 #[test]
 fn doctor_never_counts_a_leftover_debug_entry_as_dormant() {
-    // `surfaces_id` excludes the debug lane unconditionally (issue #108), so a
-    // leftover `debug.type` baseline entry would otherwise always satisfy
-    // `!surface.surfaces_id(id)` and be folded into this line's "dormant" count —
-    // "kept, not stale", the exact opposite of `check`'s own ruling that a debug
-    // entry is dead weight at every rung and always resurfaces as stale
-    // (`match_baseline` in main.rs). `doctor` must not tell a contradicting story
-    // about the same file.
+    // `surfaces_id` excludes the debug lane unconditionally (issue #108). A
+    // leftover `debug.type` baseline entry must not be counted "dormant" here:
+    // `check` treats a debug entry as stale dead weight at every rung
+    // (`match_baseline` in main.rs), and `doctor` must not contradict that.
     let dir = workdir("debug-not-dormant");
     write(&dir, "a.php", "<?php\n$x = 1;\n\\PHPStan\\dumpType($x);\n");
     assert_eq!(run_in(&dir, &["check", "--no-php", "--set-baseline", "a.php"]).code, 0);
@@ -482,7 +474,6 @@ fn doctor_inventories_the_opaque_constructs() {
         "expected the poisoned-scope share; stdout:\n{}",
         r.stdout
     );
-    // Every construct kind named, with its own count.
     for kind in [
         "eval 1",
         "include/require 2",

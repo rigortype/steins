@@ -1,10 +1,8 @@
-//! ADR-0043 stage 2: `instanceof` migrated onto the trinary is-a oracle.
+//! `instanceof` uses the trinary is-a oracle (ADR-0043).
 //!
-//! A proven-false `instanceof` (the operand's exact class is-a-`No` against the
-//! target, under a completely enumerated hierarchy) now yields `Certainty::No`,
-//! making the guarded branch dead — the same dead-region behavior as any other
-//! proven-false condition. An incomplete hierarchy stays `Maybe` (branch live),
-//! and a proven supertype stays `Yes`. Instanceof still binds no exactness fact.
+//! A proven-false `instanceof` yields `Certainty::No` and makes the guarded
+//! branch dead. An incomplete hierarchy stays `Maybe`, and a proven supertype
+//! yields `Yes`. `instanceof` does not bind an exactness fact.
 
 use steins_infer::{Diagnostic, check};
 use steins_syntax::SourceTree;
@@ -32,9 +30,9 @@ if ($x instanceof Bar) { $x->m(\"abc\"); }
 
 #[test]
 fn unknown_instanceof_keeps_branch_live() {
-    // Same shape, but `Foo` extends an uncatalogued external `Ext`, so the is-a
-    // enumeration is incomplete → `Maybe`. The branch stays live and the
-    // wrong-typed call inside it is flagged (the FP-safe side, unchanged).
+    // `Foo` extends an uncatalogued external `Ext`, so the is-a enumeration is
+    // incomplete → `Maybe`. The branch stays live and the wrong-typed call
+    // inside it is flagged (the FP-safe side).
     let src = "<?php
 class Foo extends \\Vendor\\Ext { public function m(int $w): void {} }
 $x = new Foo();
@@ -59,9 +57,8 @@ if ($x instanceof Base) {} else { $x->m(\"abc\"); }
 
 #[test]
 fn control_unrelated_call_without_guard_is_flagged() {
-    // Control for the two `0`-expecting tests: with no dead branch, the same
-    // wrong-typed call IS flagged — proving the silence above is branch death,
-    // not a broken class fact.
+    // Without a dead branch, the wrong-typed call is flagged. This distinguishes
+    // branch death from a missing class fact.
     let src = "<?php
 class Foo { public function m(int $w): void {} }
 $x = new Foo();

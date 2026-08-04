@@ -198,7 +198,6 @@ mod tests {
     #[test]
     fn single_replacement_splices_exactly() {
         let mut plan = EditPlan::new();
-        // Replace "world" with "there" in "hello world".
         plan.add_edit(edit("a.php", 6, 11, "there")).unwrap();
         assert_eq!(plan.apply_file("a.php", "hello world"), "hello there");
     }
@@ -206,7 +205,6 @@ mod tests {
     #[test]
     fn insertion_is_zero_width() {
         let mut plan = EditPlan::new();
-        // Insert "int " at offset 0.
         plan.add_edit(Edit {
             path: "a.php".into(),
             span: ByteSpan::at(0),
@@ -263,7 +261,6 @@ mod tests {
     #[test]
     fn deletion_removes_region() {
         let mut plan = EditPlan::new();
-        // Delete " world".
         plan.add_edit(edit("a.php", 5, 11, "")).unwrap();
         assert_eq!(plan.apply_file("a.php", "hello world"), "hello");
     }

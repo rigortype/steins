@@ -1,10 +1,9 @@
 //! ADR-0052 N4 — class facts and instanceof subtraction, at the walk-integration
-//! level. N4 owns **no finding id** (S6 supplies `phpdoc.undefined-method`); its
-//! whole observable contract here is therefore: (1) it emits nothing new, and
-//! (2) the two new carriers never reach the §3 NOT-fed consumers — most sharply
-//! `call.undefined-method`, whose ladder requires *exactness* a `Member` fact must
-//! not supply. The carrier-level narrowing (the `{Guest}` arm list) is asserted in
-//! the `n4_carrier_tests` unit module.
+//! level. N4 owns **no finding id** (S6 supplies `phpdoc.undefined-method`), so
+//! its observable contract is: (1) it emits nothing new, and (2) its carriers
+//! never reach the §3 NOT-fed consumers — most sharply `call.undefined-method`,
+//! whose ladder requires *exactness* a `Member` fact must not supply. The
+//! carrier-level narrowing is asserted in the `n4_carrier_tests` unit module.
 
 use steins_infer::{CALL_UNDEFINED_METHOD_ID, Diagnostic, Folder, check, check_with};
 use steins_syntax::{ArgValue, SourceTree};
@@ -40,9 +39,9 @@ fn undefined_method(src: &str) -> Vec<Diagnostic> {
         .collect()
 }
 
-/// The conformance deliverable's source. N4 leaves `{Guest}` on the else path but
-/// emits nothing — the `phpdoc.undefined-method` at the `$value->name()` site is
-/// S6's id, not landed. So the whole program is silent under N4.
+/// N4 leaves `{Guest}` on the else path but emits nothing — the
+/// `phpdoc.undefined-method` at the `$value->name()` site is S6's id, so the
+/// whole program is silent under N4.
 const FIXTURE: &str = "<?php
 declare(strict_types=1);
 interface Named { public function name(): string; }
@@ -78,11 +77,10 @@ function f(object $x): void {
 
 #[test]
 fn member_fact_is_not_exactness_no_undefined_method() {
-    // NOT-fed enforcement (§3): a param object narrowed by `instanceof Order` gains a
-    // `Member{yes:[Order]}` fact but NO exactness. `call.undefined-method` requires a
-    // proven-exact receiver (ADR-0049 §4a), so `$x->tyop()` must stay silent even
-    // though `Order` is final and defines no `tyop` — a final `Member` is deliberately
-    // NOT exactness in v1 (no binding descent, no undefined-method).
+    // NOT-fed enforcement (§3): narrowing by `instanceof Order` gains a
+    // `Member{yes:[Order]}` fact but no exactness. `call.undefined-method`
+    // requires a proven-exact receiver (ADR-0049 §4a), so `$x->tyop()` stays
+    // silent even though `Order` is final and defines no `tyop`.
     let src = "<?php
 final class Order {}
 function f(object $x): void {
@@ -97,9 +95,8 @@ function f(object $x): void {
 
 #[test]
 fn exact_receiver_still_fires_control() {
-    // Control: the same missing call on a genuinely EXACT receiver (`new Order()`)
-    // still fires — proving the silence above is the Member/exactness distinction,
-    // not a broken harness.
+    // The same missing call on an exact receiver fires, distinguishing the
+    // Member/exactness rule from a broken harness.
     let src = "<?php
 final class Order {}
 (new Order())->tyop();

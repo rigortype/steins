@@ -130,7 +130,6 @@ impl Hunk {
 /// side of a change and merging changes that fall within `2 * context` of each
 /// other into one hunk.
 fn group_hunks(ops: &[Op], context: usize) -> Vec<Hunk> {
-    // Indices of ops that are actual changes.
     let change_positions: Vec<usize> = ops
         .iter()
         .enumerate()
@@ -233,7 +232,6 @@ mod tests {
 
     #[test]
     fn hunk_header_counts_are_correct() {
-        // 3 old lines, 1 changed → header covers all with context.
         let old = "a\nb\nc\n";
         let new = "a\nB\nc\n";
         let d = unified_diff("f", old, new, 3);
@@ -248,7 +246,6 @@ mod tests {
         new_lines[18] = "CHANGED19".into();
         let new = new_lines.join("\n") + "\n";
         let d = unified_diff("f", &old, &new, 3);
-        // Two separate @@ headers.
         assert_eq!(d.matches("@@ ").count(), 2, "diff was:\n{d}");
     }
 

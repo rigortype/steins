@@ -5,7 +5,7 @@
 //! Four disciplines are pinned here, not just the spellings:
 //!
 //! * **No reachability from a shape truth.** Shape facts are `Asserted`
-//!   (A-G9's corollary), and this slice must not let one decide a guard verdict
+//!   (A-G9's corollary), and they must not decide a guard verdict
 //!   or prune a region — the historical FP class. The tripwire is
 //!   [`shape_facts_do_not_decide_guard_verdicts`].
 //! * **Zero emission.** As in S3, no test here may produce a non-debug finding.
@@ -386,14 +386,9 @@ fn not_array_all_proves_non_empty_via_the_negation_route() {
 
 #[test]
 fn array_all_any_do_not_special_case_the_concrete_lane() {
-    // The S4 pure-guard-call exemption (`cond_invalidations`/`shape_lane_present`)
-    // only spares a base that carries the SHAPE lane (a `Fact::Shape`, or a
-    // contract arm with one) — exactly what this guard's narrowing consumes. A
-    // proven `Singleton` concrete array is neither, so it is NOT exempted and
-    // keeps the pre-existing by-ref-conservative forgetting every other call
-    // argument gets. This is the deliberate absence of special-casing: A8 adds
-    // no concrete-lane logic, so a concrete array survives a guard call exactly
-    // as it did before this slice (compare the unguarded baseline, identical).
+    // The pure-guard-call exemption only spares a base carrying the shape lane.
+    // A proven concrete array is not exempt and retains by-ref-conservative
+    // invalidation, matching the unguarded call-argument baseline.
     let guarded = one_type(
         "<?php\nfunction f(): void { $v = ['a' => 1]; \
          if (array_any($v, fn ($x) => $x > 0)) { \\PHPStan\\dumpType($v); } }\n",
@@ -579,11 +574,11 @@ fn a_by_ref_builtin_drops_the_shape_fact_before_a_write_can_restore_it() {
 
 // ---- The reachability tripwire ---------------------------------------------
 
-/// **Tripwire (S3's report asked for it).** `Fact::truthy`, `is_null`, `int_in`
+/// **Tripwire.** `Fact::truthy`, `is_null`, `int_in`
 /// and `satisfies_str` are all *decisive* on `Fact::Shape` — `truthy` reads
 /// `non_empty`, and the other three answer `No` outright — so the first caller
 /// that routes a shape fact into a guard verdict re-opens the emission question
-/// this slice deliberately leaves closed.
+/// the shape guard contract keeps closed.
 ///
 /// The observable form of "closed": a guard over a shape-facted binding never
 /// prunes a region. If it did, the `else` branch below would be marked dead and

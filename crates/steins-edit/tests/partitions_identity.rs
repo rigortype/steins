@@ -1,7 +1,6 @@
-//! ADR-0047 Slice A zero-behavior gate: threading a [`PartitionMap`] into the
-//! planners must not change any decision. Whether `partitions` is `None`, the
-//! single-region identity, or even a fully-declared multi-partition map, the
-//! [`TransformReport`] is byte-identical — no planner consumes the map this slice
+//! ADR-0047 identity gate: threading a [`PartitionMap`] into the planners must not
+//! change any decision. Whether `partitions` is `None`, the single-region identity,
+//! or a fully-declared multi-partition map, the [`TransformReport`] is byte-identical
 //! (ADR-0047 §6: "with one region the planner degenerates to today's behavior").
 
 use steins_db::{Project, SourceFile, SteinsDatabase};

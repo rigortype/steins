@@ -18,9 +18,7 @@
 //! - An own, spanned [`ast`]. [`std::fmt::Display`] renders the **canonical
 //!   form** matching phpdoc-parser's node `__toString()` — the string the oracle
 //!   compares against.
-//! - A thin [`docblock`] scanner that extracts typed tags with positions — the
-//!   eventual integration seam with `steins-syntax`'s raw comment trivia (not
-//!   wired up this phase).
+//! - A thin [`docblock`] scanner that extracts typed tags with positions.
 //!
 //! # Subset & safety
 //!

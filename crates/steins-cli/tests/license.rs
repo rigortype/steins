@@ -45,7 +45,6 @@ fn license_carries_our_terms_and_the_bundled_notices() {
     assert!(out.contains("Third-Party Licenses"));
     assert!(out.contains("Permission is hereby granted"), "an MIT body must be present");
 
-    // `licenses` is the same command.
     let (code2, out2) = run(&["licenses"]);
     assert_eq!(code2, 0);
     assert_eq!(out, out2);
@@ -61,10 +60,9 @@ fn the_embedded_notices_are_generated_not_a_stub() {
     assert!(out.matches("\n## ").count() >= 8, "expected the licence sections");
     assert!(out.contains("Used by:"));
     assert!(out.contains("— https://"), "entries must carry crate repositories");
-    // The evidence moved with issue #45: sections are now grouped by permission
-    // notice, so there are 9 of them rather than 44 and a section count no longer
-    // measures much. What a stub cannot fake is the *attribution* — thirty-odd
-    // distinct copyright notices, and these named holders among them.
+    // Issue #45 groups sections by permission notice (9, not 44), so a section
+    // count measures little. What a stub cannot fake is the *attribution* —
+    // thirty-odd distinct copyright notices, and these named holders among them.
     let notices = out.lines().filter(|l| l.starts_with("Copyright")).count();
     assert!(notices >= 30, "the bundled copyright notices are missing (found {notices})");
     for holder in ["Copyright (c) 2014 Alex Crichton", "Copyright (c) 2010 The Rust Project Developers"] {

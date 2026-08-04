@@ -289,8 +289,6 @@ fn method_multibyte_body_preserved() {
 
 #[test]
 fn free_function_and_method_coexist() {
-    // A free function promotes while an eligible method also promotes — the two
-    // sweeps do not interfere.
     let src = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\nfinal class C {\n/** @param int $y */\npublic function m($y) { return $y; }\n}\n";
     let main = "<?php\nf(1);\n(new C())->m(2);\n";
     let report = plan(&[("lib.php", src), ("main.php", main)]);

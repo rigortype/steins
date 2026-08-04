@@ -1,34 +1,14 @@
-//! ADR-0030 conformance net: phpstan-src data-provider tests ported as
-//! fixtures ("the ADR-0029 discipline applied to semantics").
+//! PHPStan data-provider ports for `accepts`, `isSuperTypeOf`, and
+//! `TypeCombinator` unions (ADR-0030). Fixture rows retain their source-test and
+//! provider-case provenance.
 //!
-//! PHPStan's denotational core operations — `accepts`, `isSuperTypeOf`, and
-//! the `TypeCombinator` union denotation — are checked against Steins' single
-//! acceptance relation (`admits_val`/`admits_fact`), restricted to the type
-//! surface Steins expresses today (scalar / literal / nullable / union).
+//! Steins has one acceptance relation: `Yes` means subset, `No` disjoint, and
+//! `Maybe` partial or undecided. Rows where PHPStan's relations disagree are
+//! classified explicitly rather than reconciled.
 //!
-//! # How the two sides bridge
-//!
-//! Steins has *one* denotational relation. `admits_fact`'s documented
-//! contract (its property test) is: `Yes` ⇒ every value admitted (subset),
-//! `No` ⇒ none admitted (disjoint), `Maybe` ⇒ partial/undecided. That is
-//! exactly PHPStan's `isSuperTypeOf` three-valued shape, and it coincides
-//! with `accepts` on every row where PHPStan's two relations agree. Where
-//! they disagree (a narrow left-hand type "accepting" a broader right-hand
-//! type — `accepts` says `No`, `isSuperTypeOf` says `Maybe`), Steins reports
-//! the overlap judgment; such rows are quarantined `needs_decision`, never
-//! silently reconciled.
-//!
-//! # The right-hand side as a probe
-//!
-//! PHPStan's operations are type-vs-type. Steins' surface is type-vs-value
-//! and type-vs-abstract-fact. The harness converts the right-hand type string
-//! into a *probe* — a concrete [`Val`] (constant types) or a single-base
-//! [`Fact`] (general / range / predicate types), unions flattened into arms
-//! and folded with [`Certainty::all_of`] (the same "mixed ⇒ Maybe" combinator
-//! PHPStan applies to a union on the subtype side). Right-hand types that
-//! cannot be a probe (object world, `mixed`, `never`, non-extensional string
-//! provenance, arrays) are *out of surface*: not ported here, counted in each
-//! fixture's header instead. See `fixtures/phpstan/*.toml`.
+//! Right-hand types become concrete [`Val`] or abstract [`Fact`] probes; union
+//! arms are folded with [`Certainty::all_of`]. Object types, `mixed`, `never`,
+//! non-extensional strings, and arrays are outside this fixture surface.
 
 use serde::Deserialize;
 use std::path::Path;
@@ -50,25 +30,17 @@ struct Meta {
 
 #[derive(Debug, Deserialize)]
 struct Row {
-    /// Stable identifier, unique within a file (appears in failure output).
     name: String,
-    /// Left-hand (contract) type string, phpdoc / ADR-0029 syntax.
     lhs: String,
-    /// Right-hand (probe) type string.
     rhs: String,
-    /// PHPStan's expected judgment for this provider row.
     phpstan: Judgment,
-    /// Steins' asserted judgment. Absent ⇒ equal to `phpstan` (a PORTED row
-    /// that agrees). Present ⇒ Steins deliberately/observably differs.
+    /// Absent when Steins agrees with `phpstan`.
     #[serde(default)]
     steins: Option<Judgment>,
-    /// Row classification. Default `ported`.
     #[serde(default)]
     status: Status,
-    /// ADR citation — required for `divergent`.
     #[serde(default)]
     adr: Option<String>,
-    /// Analysis — required for `needs_decision`.
     #[serde(default)]
     note: Option<String>,
     /// Provenance: the source test + data-provider case(s).
@@ -181,7 +153,7 @@ fn run_fixture(path: &Path) -> Tally {
             )
         });
 
-        // Every row asserts Steins' *actual* output — the regression net.
+        // Pin Steins' output even on explicit divergences.
         let expected = row.steins.unwrap_or(row.phpstan);
         assert_eq!(
             actual,
@@ -196,7 +168,6 @@ fn run_fixture(path: &Path) -> Tally {
             expected,
         );
 
-        // Classification invariants — keep the taxonomy honest.
         match row.status {
             Status::Ported => {
                 assert_eq!(
@@ -249,10 +220,9 @@ fn fixture_dir() -> std::path::PathBuf {
 #[test]
 fn accepts_fixture() {
     let t = run_fixture(&fixture_dir().join("accepts.toml"));
-    // Guard against silent shrinkage of the net.
+    // Prevent silent fixture shrinkage.
     assert!(t.ported >= 18, "accepts: expected >=18 ported rows, got {}", t.ported);
-    // 5 = 4× class-string non-extensionality (ADR-0038) + 1× no narrow-LHS
-    // accepts strictness (ADR-0030 registry 4, orchestrator-decided).
+    // Four class-string divergences (ADR-0038) and one narrow-LHS case (ADR-0030).
     assert_eq!(t.divergent, 5, "accepts: divergent count changed");
     assert_eq!(t.needs_decision, 0, "accepts: needs_decision count changed");
 }

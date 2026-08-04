@@ -135,51 +135,49 @@ pub const THROW_LISKOV_ID: &str = "throw.liskov-widened";
 pub const EFFECT_LISKOV_ID: &str = "effect.liskov-widened";
 
 // ---------------------------------------------------------------------------
-// The finding-breadth family (ADR-0049): absence-proof ids. Each lights up in its
-// own stage (S2–S6); `call.undefined-method` is live (S2), the rest are registered
-// ahead of emission. A not-yet-emitted id lives in `REGISTERED_NOT_YET_EMITTED`,
-// not `ALL_EMITTABLE_IDS`, until its emit site lands; the totality test binds them.
+// The finding-breadth family (ADR-0049): absence-proof ids. An id not yet wired to
+// an emitter lives in `REGISTERED_NOT_YET_EMITTED` rather than `ALL_EMITTABLE_IDS`;
+// the totality test binds the two lists to the registry.
 // ---------------------------------------------------------------------------
 
 /// The registry id for the undefined-function check (ADR-0049 §3, proof layer): a
 /// call to a function no candidate FQN defines and the sidecar reports not-found,
-/// with the dam clear. Emitted from S4.
+/// with the dam clear.
 pub const CALL_UNDEFINED_FUNCTION_ID: &str = "call.undefined-function";
 
 /// The registry id for the undefined-method check (ADR-0049 §4, proof layer): a
 /// method call on a proven-exact receiver whose fully-enumerated hierarchy defines
-/// no such method, with no `__call`/trait obstacle. Emitted from S2.
+/// no such method, with no `__call`/trait obstacle.
 pub const CALL_UNDEFINED_METHOD_ID: &str = "call.undefined-method";
 
 /// The registry id for the undefined-class check (ADR-0049 §5, proof layer): a
 /// class reference at a hard-error position (`new`, static call, class-const /
 /// static-property fetch) whose FQN is absent from the index, the builtin
-/// hierarchy, and the sidecar, with the dam clear. Emitted from S4.
+/// hierarchy, and the sidecar, with the dam clear.
 pub const CLASS_UNDEFINED_ID: &str = "class.undefined";
 
 /// The registry id for the too-few-arguments check (ADR-0049 §6, proof layer): a
 /// uniquely-resolved call passing fewer positional arguments than the target's
-/// required parameters (always `ArgumentCountError`). Emitted from S5.
+/// required parameters (always `ArgumentCountError`).
 pub const CALL_TOO_FEW_ARGUMENTS_ID: &str = "call.too-few-arguments";
 
 /// The registry id for the too-many-arguments check (ADR-0049 §6, proof layer):
 /// extra arguments to an **internal** non-variadic target (userland silently
-/// ignores them — never a finding). Emitted from S5.
+/// ignores them — never a finding).
 pub const CALL_TOO_MANY_ARGUMENTS_ID: &str = "call.too-many-arguments";
 
 /// The registry id for the unknown-named-argument check (ADR-0049 §6, proof
 /// layer): a named argument binding no parameter of a resolved non-variadic target
-/// (fatal `Error`). Emitted from S5.
+/// (fatal `Error`).
 pub const CALL_UNKNOWN_NAMED_ARGUMENT_ID: &str = "call.unknown-named-argument";
 
 /// The registry id for the missing-offset check (ADR-0049 §7, proof layer): a read
 /// of a key provably absent from a proven container value (`Undefined array key`).
-/// Emitted from S3.
 pub const OFFSET_MISSING_ID: &str = "offset.missing";
 
 /// The registry id for the offset-on-unsupported check (ADR-0049 §7, proof layer):
 /// an offset read on a proven non-offsetable base (object → fatal `Error`;
-/// scalar/null → warning). Emitted from S3.
+/// scalar/null → warning).
 pub const OFFSET_ON_UNSUPPORTED_ID: &str = "offset.on-unsupported";
 
 /// The registry id for the undeclared-offset check (ADR-0062 A-G10, **contract**
@@ -189,7 +187,7 @@ pub const OFFSET_ON_UNSUPPORTED_ID: &str = "offset.on-unsupported";
 ///
 /// The absence is definite **conditional on the docblock**, so the evidence is the
 /// Asserted world and the finding is contract-grade — never a proof-layer claim
-/// (A-G9's corollary). Emitted from S6. v1 scope: shape-declared bases with
+/// (A-G9's corollary). v1 scope: shape-declared bases with
 /// constant/env-resolved keys only.
 pub const OFFSET_UNDECLARED_ID: &str = "offset.undeclared";
 
@@ -201,22 +199,17 @@ pub const OFFSET_UNDECLARED_ID: &str = "offset.undeclared";
 ///
 /// At runtime such a read warns `Undefined array key` and yields `null`, which then
 /// propagates — a real soundness hazard, reported only on the strict surface because
-/// its evidence is the declaration, not a proven value. Emitted from S6. The `??`
+/// its evidence is the declaration, not a proven value. The `??`
 /// chain's non-final arms NEVER fire: the operator itself protects them.
 pub const OFFSET_MAYBE_MISSING_ID: &str = "offset.maybe-missing";
 
 /// The registry id for the declared-receiver undefined-method check (ADR-0049 §8,
 /// **contract** layer): a method absent on a phpdoc-declared receiver narrowed by
-/// branch analysis, under descendant closure. Emitted from S6.
+/// branch analysis, under descendant closure.
 pub const PHPDOC_UNDEFINED_METHOD_ID: &str = "phpdoc.undefined-method";
 
 // ---------------------------------------------------------------------------
-// The dump surface (ADR-0053): the **debug** layer's three ids — requested
-// introspection, an "answered question" (§1). All three carry `Layer::Debug` and
-// are registered ahead of emission (the S1 pattern): they live in
-// `REGISTERED_NOT_YET_EMITTED` through the D1 groundwork and move to
-// `ALL_EMITTABLE_IDS` when their emitter lands (the explicit pair at D3, `var_dump`
-// at D4). No emit site exists yet — D1 is zero behavior.
+// The dump surface (ADR-0053): requested introspection in the debug layer.
 // ---------------------------------------------------------------------------
 
 /// The registry id for the explicit `PHPStan\dumpType($e)` dump (ADR-0053 §2, debug
@@ -237,17 +230,10 @@ pub const DEBUG_PHPDOC_TYPE_ID: &str = "debug.phpdoc-type";
 /// fixed — exit-neutral forever (§3), profile-disableable (§4). Emitted from D4.
 pub const DEBUG_VAR_DUMP_ID: &str = "debug.var-dump";
 
-/// The registry id for the `@psalm-trace` annotation (ADR-0074, debug layer): a
-/// statement-adopted docblock tag naming a variable asks the SAME question
-/// `PHPStan\dumpType($x)` asks, and gets the same answer through the same
-/// machinery (§5) — the trust-ordered best fact, the one renderer, the
-/// `(asserted)` stratum marker. Warn-level, fixed (§8): the trigger is a
-/// runtime-inert comment, so the explicit pair's fail-forcing argument (a
-/// committed call to a function that does not exist) does not apply. No
-/// profile-disable (§8): an annotation is always an authored question — the
-/// remedy for an unwanted trace is deleting the comment. The id string is the
-/// ONE place the bare word "trace" names this feature (§4's naming rule);
-/// internal symbols use `TraceTag` / `emit_trace_annotations`-style names.
+/// The registry id for `@psalm-trace` (ADR-0074, debug layer). It renders the
+/// same trust-ordered fact as `PHPStan\dumpType($x)`, including the `(asserted)`
+/// marker. It is warn-level and cannot be disabled by a profile: the runtime-inert
+/// annotation is an authored question, removed by deleting the comment.
 pub const DEBUG_TRACE_ID: &str = "debug.trace";
 
 /// The resolved FQN of `PHPStan\dumpType` (ADR-0053 §2), lowercase-normalized and
@@ -258,23 +244,13 @@ pub const DUMP_TYPE_FQN: &str = "phpstan\\dumptype";
 /// The resolved FQN of `PHPStan\dumpPhpDocType` (ADR-0053 §2), lowercase-normalized.
 pub const DUMP_PHPDOC_TYPE_FQN: &str = "phpstan\\dumpphpdoctype";
 
-/// The reserved dump-family FQNs (ADR-0053 §5): the explicit pair, recognized
-/// **unconditionally by resolved FQN** — definition-insensitive (a userland
-/// definition of the name does not stand recognition down) and case-insensitive.
-///
-/// **S4 carve-out (ADR-0053 §6), recorded here so it cannot drift:** the future
-/// `call.undefined-function` recognizer (S4, not yet landed) MUST consult this set
-/// and exclude a call whose resolved FQN matches — a recognized dump already reds CI
-/// at that site with a fail-level `debug.type` whose message says what to do, so a
-/// second `call.undefined-function` finding for one deletable line is noise. When S4
-/// lands, its emitter reads `DUMP_FQNS` (or calls [`is_dump_family_fqn`]) directly,
-/// so the exclusion is one source of truth. A pinned fixture in `tests/dump_surface.rs`
-/// (`dump_pair_is_recognized_by_resolved_fqn`) guards the recognizer meanwhile.
+/// The reserved dump-family FQNs (ADR-0053 §5), recognized case-insensitively by
+/// resolved FQN even if userland defines the name. Undefined-function reporting
+/// excludes this set because the fail-level dump diagnostic already accounts for
+/// the call.
 pub const DUMP_FQNS: &[&str] = &[DUMP_TYPE_FQN, DUMP_PHPDOC_TYPE_FQN];
 
-/// Whether `fqn` (lowercase-normalized, leading `\` stripped) is a reserved
-/// dump-family FQN (ADR-0053 §5/§6). The single predicate the dump recognizer and
-/// the future S4 carve-out share.
+/// Whether normalized `fqn` belongs to the reserved dump family.
 #[must_use]
 pub fn is_dump_family_fqn(fqn: &str) -> bool {
     DUMP_FQNS.contains(&fqn)
@@ -307,77 +283,36 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     EFFECT_ID,
     EFFECT_LISKOV_ID,
     UNKNOWN_LABEL_ID,
-    // The finding-breadth flagship, lit up at ADR-0049 S2 (the first absence id to
-    // fire). Its emitter is `check_undefined_method`; the rest of the family stays in
-    // `REGISTERED_NOT_YET_EMITTED` until its own stage.
     CALL_UNDEFINED_METHOD_ID,
-    // The offset family, lit up at ADR-0049 S3 (`check_offset_read`): a value-domain
-    // proof over proven container values under the read-context whitelist.
     OFFSET_MISSING_ID,
     OFFSET_ON_UNSUPPORTED_ID,
-    // The offset family's STRICT leg, lit up at ADR-0062 S6 (`check_shape_read` and
-    // `check_coalesce_final_arm`): declaration-derived absence and undischarged
-    // optionality, at the same whitelisted read positions plus the `??` final arm.
     OFFSET_UNDECLARED_ID,
     OFFSET_MAYBE_MISSING_ID,
-    // The declared-receiver lane, lit up at ADR-0049 S6 (`check_phpdoc_undefined_method`):
-    // the contract-layer method-absence claim over N4's narrowed contract-arm lists,
-    // under per-arm descendant closure.
     PHPDOC_UNDEFINED_METHOD_ID,
-    // The userland arity arms, lit up at ADR-0049 S5 (`check_arity`): too-few and
-    // unknown-named on a uniquely-resolved userland function or a proven-exact
-    // receiver's method/constructor/static. The too-many arm (internal targets
-    // only) and the internal-target arity stay in `REGISTERED_NOT_YET_EMITTED`
-    // until the reflect slice (M2).
     CALL_TOO_FEW_ARGUMENTS_ID,
     CALL_UNKNOWN_NAMED_ARGUMENT_ID,
-    // The existence ids, lit up at ADR-0049 S4 (`check_undefined_function` /
-    // `check_undefined_class`): dammed absence proofs behind a clear whole-universe
-    // dam. Promoted after the measurement run (99,280 corpus files + the nsrt/kimai/
-    // ec-cube2 field survey) yielded ZERO findings — zero FPs, so nothing to pin.
     CALL_UNDEFINED_FUNCTION_ID,
     CLASS_UNDEFINED_ID,
-    // The dump surface's ids (ADR-0053), all lit up from `emit_dumps` (the walk's
-    // call-handling arm): the explicit pair `debug.type` / `debug.phpdoc-type` (D3),
-    // recognized by resolved FQN, and `debug.var-dump` (D4), recognized by the PHP
-    // fallback rule — default-on, one report per argument.
     DEBUG_TYPE_ID,
     DEBUG_PHPDOC_TYPE_ID,
     DEBUG_VAR_DUMP_ID,
-    // The trace annotation (ADR-0074, issue #94), lit up from
-    // `emit_trace_annotations` (the walk's per-statement pass): a statement-adopted
-    // `@psalm-trace $x` docblock asks the `debug.type` question at that program
-    // point, answered through the same machinery.
     DEBUG_TRACE_ID,
     suppress::SUPPRESS_UNMATCHED_ID,
     suppress::SUPPRESS_UNKNOWN_ID,
 ];
 
-/// Ids that are **registered ahead of emission** (ADR-0049 S1 groundwork): the
-/// finding-breadth family's ids exist in [`DIAGNOSTIC_REGISTRY`] — so
-/// `@steins-ignore` can name them and their layer is pinned — but no emitter
-/// produces them yet. Each later stage (S2–S6) that lights up an id **moves** it
-/// from here into [`ALL_EMITTABLE_IDS`].
+/// Ids **registered ahead of emission**: they exist in [`DIAGNOSTIC_REGISTRY`]
+/// (so `@steins-ignore` can name them and their layer is pinned) but no emitter
+/// produces them yet. An id moves into [`ALL_EMITTABLE_IDS`] once its emitter lands.
 ///
-/// The totality test (`tests/registry.rs`) enforces the reconciliation so it
-/// cannot rot silently: every registered id must be in `ALL_EMITTABLE_IDS ∪
-/// REGISTERED_NOT_YET_EMITTED`, the two lists are **disjoint** (an id emitted for
-/// the first time must leave this list — it cannot be both), and every id here must
-/// actually be registered. An emitted id that is not in `ALL_EMITTABLE_IDS` still
-/// fails the forward-totality check exactly as before — this list only carves out
-/// the not-yet-emitted registry entries, never the emitted-but-unregistered defect.
+/// The totality test (`tests/registry.rs`) keeps this honest: every registered id
+/// must be in `ALL_EMITTABLE_IDS ∪ REGISTERED_NOT_YET_EMITTED`, the two lists are
+/// **disjoint**, and every id here must actually be registered. An emitted id
+/// missing from `ALL_EMITTABLE_IDS` still fails forward totality.
 pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
-    // CALL_UNDEFINED_FUNCTION_ID / CLASS_UNDEFINED_ID lit up at S4 — now in
-    // ALL_EMITTABLE_IDS. CALL_UNDEFINED_METHOD_ID lit up at S2. The too-many arm
-    // fires for INTERNAL targets only (userland too-many runs clean — never a
-    // finding), so it waits for the reflect slice (M2).
+    // The too-many-arguments arm fires for INTERNAL targets only (userland
+    // too-many runs clean), so it waits for the reflect slice (M2).
     CALL_TOO_MANY_ARGUMENTS_ID,
-    // OFFSET_MISSING_ID / OFFSET_ON_UNSUPPORTED_ID lit up at S3 — now in ALL_EMITTABLE_IDS.
-    // PHPDOC_UNDEFINED_METHOD_ID lit up at S6 — now in ALL_EMITTABLE_IDS.
-    // The dump surface's debug ids (ADR-0053) all lit up: the explicit pair at D3 and
-    // `debug.var-dump` at D4 — all now in ALL_EMITTABLE_IDS.
-    // DEBUG_TRACE_ID (ADR-0074, issue #94) lit up from `emit_trace_annotations` —
-    // now in ALL_EMITTABLE_IDS.
 ];
 
 /// The maximum depth of interprocedural argument-binding descent (Feature B).
@@ -399,33 +334,15 @@ pub const MAX_BINDING_DEPTH: usize = 8;
 /// than a runtime answer — so the sentence says so where the posture is stated.
 pub const SOUND_SUBSET_NOTICE: &str = "note: running as sound subset (no PHP sidecar) — findings that require executing PHP are omitted, and builtin return types come from the catalog's declarations, unverified";
 
-/// The sibling notice for issue #110's degradation mode: `php` resolves and
-/// spawns, but a request goes unanswered — the opening `env()` handshake (a
-/// wrapper script that never execs real PHP, a `php.ini` that hangs on
-/// startup, an `auto_prepend_file` that never returns) or a later request
-/// mid-run (the same causes, just not hit until then, or a child that dies
-/// answering one request and cannot be revived — [`Sidecar`]'s `RESPAWN_CAP`
-/// exhausted). Both are covered: the issue's own acceptance criterion is "the
-/// handshake fails **or times out mid-run**", and a first cut of this fix that
-/// only caught the opening case (permanently suppressing itself after any one
-/// success) missed the second half — review finding on PR #134. This is NOT
-/// [`SOUND_SUBSET_NOTICE`] reused verbatim — the cause and the remedy differ
-/// from "no PHP sidecar": `php` exists and starts, it is just not speaking the
-/// ADR-0024 JSON-RPC framing, so pointing the reader at `--no-php`'s cause (no
-/// PHP at all) would be a wrong diagnosis; `steins doctor` is the tool that
-/// already distinguishes the opening case ("PHP sidecar: spawned, but the
-/// env() query failed"), so the notice sends the reader there.
-///
-/// Printed to stderr **at most once per run** by [`ProcessEngine`]'s own latch
-/// (`unresponsive_notified`), the same mechanism [`SOUND_SUBSET_NOTICE`] uses
-/// for the spawn-failure case — a run that stops getting real answers must say
-/// so exactly once, not once per widened fold request. A notice only: the
-/// ADR-0004 exit-code contract is unchanged, this never flips a run's exit
-/// status.
+/// The notice for issue #110's degradation mode: PHP spawned but the opening
+/// handshake or a later request stopped answering. This differs from
+/// [`SOUND_SUBSET_NOTICE`], where PHP is unavailable; `steins doctor` diagnoses
+/// the unresponsive-process case. [`ProcessEngine`] emits this at most once per
+/// run, and it never changes the exit status.
 pub const SIDECAR_HANDSHAKE_NOTICE: &str = "note: PHP sidecar stopped answering — running as sound subset (degraded): findings that require executing PHP are omitted, and builtin return types come from the catalog's declarations, unverified; run `steins doctor` for detail";
 
 // ---------------------------------------------------------------------------
-// Folding seam (ADR-0004 / ADR-0024). Unchanged from the per-file slice.
+// Folding seam (ADR-0004 / ADR-0024).
 // ---------------------------------------------------------------------------
 
 /// Something that can fold a builtin call to a concrete literal value, and (from
@@ -498,8 +415,8 @@ pub trait Folder {
     /// monkey-patched builtin disowns its declared type — the ADR-0049 A9 posture,
     /// value-domain edition), a name the runtime does not know as a function, a
     /// return type not representable as a single value-domain [`Fact`] (a
-    /// multi-base union such as `int|false` — deferred to the contract-lane arms
-    /// of a later slice), or no return type at all. The default is `None` (the
+    /// multi-base union such as `int|false` — deferred to the contract-lane arms),
+    /// or no return type at all. The default is `None` (the
     /// sound subset — ADR-0004). Always seeded at the `Verified` stratum: it is a
     /// native declaration read off the engine's own arginfo (§2), never demoted to
     /// Asserted. `name` is the call's simple name (the fold path's key).
@@ -3730,7 +3647,7 @@ fn exceeded_diag(
 ///
 /// Non-local targets stop at the conservative parent `mutate` rather than pick an
 /// ADR-0055 child (`mutate.self` / `mutate.instance` / `mutate.static`): that
-/// taxonomy's *inference* is ADR-0055 slice E2, unbuilt, and a coarse-but-true
+/// taxonomy's *inference* (ADR-0055) is not built, and a coarse-but-true
 /// label is worth more than a precise guess. So Steins **does** distinguish the
 /// targets — property-rooted by-ref writes never claim `mutate.local` — while
 /// declining to name which flavor of escape it is.
@@ -4641,7 +4558,7 @@ struct Cx<'a> {
     /// so warning-grade offset findings leave the proof surface and stay silent (v1
     /// simplification: the ADR-0050 layer-demotion + value-side `null`/`""` adoption
     /// is deferred; v1 either emits under "abort" or silences under "null"). The
-    /// Error-grade `offset.on-unsupported` object case (deferred in this slice) is
+    /// Error-grade `offset.on-unsupported` object case (not yet implemented) is
     /// posture-independent and would emit under both.
     warning_handler_abort: bool,
     /// The **effective analysis minor** for version-keyed value rules (issue
@@ -4963,7 +4880,7 @@ impl<'a> Cx<'a> {
     /// Scoped to the effects pass on purpose. The same widening would also change
     /// how the *throws* pass classifies these names (from an unresolved taint to
     /// a `builtin_throws` consultation) — a real gap, but a different pass's
-    /// accounting, and this slice does not move that baseline behind its back.
+    /// accounting, left untouched here.
     fn resolve_effect_function(&self, r: &NameRef) -> FnResolution {
         self.resolve_function_with(r, &|n| {
             steins_catalog::effect_labels(n).is_some() || steins_catalog::out_params(n).is_some()
@@ -5445,7 +5362,7 @@ impl<'a> Cx<'a> {
     /// unchanged and un-duplicated. A member that widens or throws answers `None`,
     /// and the whole fold declines with it: a union that quietly drops its throwing
     /// member is the same wrong domain the cap refuses to mint. (Treating a
-    /// *uniform* throw as a proven throw is a later slice's question.) Every
+    /// *uniform* throw as a proven throw is a separate inference question.) Every
     /// combination is nonetheless *asked* before the decline is returned, so a
     /// replay transport learns the whole batch in one round trip.
     ///
@@ -5745,7 +5662,7 @@ impl<'a> Cx<'a> {
     /// docblock `@return` (or the scope is top-level / a closure).
     ///
     /// Closures: deferred (issue #128) — the scope carries no adopted docblock yet,
-    /// so `@return` checking for arrow/block closures is a follow-up, not this slice.
+    /// so `@return` checking for arrow/block closures remains a follow-up.
     fn scope_return_phpdoc(&self, scope: &Scope) -> Option<(PType, String)> {
         match &scope.owner {
             ScopeOwner::TopLevel => None,
@@ -5994,11 +5911,11 @@ impl HeapObj {
     }
 }
 
-/// The object store threaded through the walk (ADR-0036), replacing the old flat
-/// `var → class` map. `refs` binds a variable to an allocation id (its ObjRef);
+/// The object store threaded through the walk (ADR-0036). `refs` binds a variable
+/// to an allocation id (its ObjRef);
 /// `heap` maps ids to objects. Aliasing (`$b = $a`) copies the ref (shared id), so
-/// a write through any alias is visible through all. The exact-class fact that
-/// `classes_env` used to hold is now `heap[refs[var]].class`.
+/// a write through any alias is visible through all. A variable's exact-class fact
+/// lives at `heap[refs[var]].class`.
 #[derive(Clone, Default)]
 struct Store {
     refs: HashMap<String, AllocId>,
@@ -6277,14 +6194,13 @@ impl Known {
 /// receiver (ADR-0075 §2.1); closure descents carry `use:{name}` captures.
 type BindingKey = (String, Vec<(String, ArgValue, Stratum)>);
 
-/// A **return-fact summary** (ADR-0057 amendment, slice T0): the join, over a
-/// callee's returning exits, of the returned expression's value-domain fact — a
+/// A **return-fact summary** (ADR-0057 amendment): the join, over a callee's
+/// returning exits, of the returned expression's value-domain fact — a
 /// legitimate query answer (ADR-0048 §2), a pure function of (callee CST, bound
 /// entry state). It rides the same descent, the same [`BindingKey`] memo (now a
 /// value map), and is consumed at the call-result binding as the value FLOOR above
-/// the declared arms (A1). The heap-object component (ADR-0057 §1) is the value
-/// component's heap-bearing sibling — slice T1 populates it; in T0 the slot is
-/// present but always `None`, so the memo/value-map shape is already the one T1 rides.
+/// the declared arms (A1). The heap-object component (ADR-0057 §1) is reserved in
+/// the summary shape but currently always `None`.
 #[derive(Clone)]
 struct ReturnSummary {
     /// The value-domain component (this amendment): the joined returned-expression
@@ -6303,10 +6219,10 @@ struct SummaryValue {
     stratum: Stratum,
 }
 
-/// The heap-object component of a [`ReturnSummary`] (ADR-0057 §1) — reserved for
-/// slice T1 (class/exactness/props/readonly/escape); never constructed in T0.
+/// The heap-object component of a [`ReturnSummary`] (ADR-0057 §1) — reserved for a
+/// later heap summary (class/exactness/props/readonly/escape); never constructed yet.
 #[derive(Clone)]
-#[allow(dead_code)] // T1 slot
+#[allow(dead_code)] // reserved heap-summary slot
 struct HeapSummary;
 
 /// One returning exit's contribution to the summary join (A2/A3). A native-envelope
@@ -6616,8 +6532,8 @@ fn walk_trace(
         // statement, so its cast is in force for everything the statement does.
         // A tag above an `Assign` to the same variable is erased by step 2's own
         // rebind: the assignment-form `@var` (PHPStan casts the RHS there) is a
-        // separate feature this slice deliberately leaves a silence, never a
-        // wrong claim. Plain per-scope pass only (see `apply_inline_var_casts`).
+        // separate unsupported feature that stays silent, never a wrong claim.
+        // Plain per-scope pass only (see `apply_inline_var_casts`).
         if descent.is_none() {
             apply_inline_var_casts(w, stmt, env, store);
         }
@@ -6913,8 +6829,8 @@ fn walk_trace(
             // variable in an echo no longer forgets it (ADR-0031 precision payoff).
             StmtKind::Echo(_) => Flow::FellThrough,
             // A still-`Opaque` construct (loop / switch / try) forgets what it may
-            // write AND what it branches on (reads) — unchanged from ADR-0027,
-            // since the trace does not model its control flow. When the subtree
+            // write AND what it branches on (reads) (ADR-0027), because the trace
+            // does not model its control flow. When the subtree
             // may `return` (`may_return`), a summary walk contributes the declared
             // floor so those hidden exits join the visible ones (ADR-0057 A3;
             // ADR-0075 / #126: without this, a sibling `return null` alone pins
@@ -7267,7 +7183,7 @@ fn arg_is_by_value(cx: &Cx<'_>, site: &steins_syntax::CallArgSite) -> bool {
         FnResolution::User(fn_site) => {
             // The declaration answers condition 2 directly, and it is the cheap
             // half — asked first so a by-ref parameter refuses without the scope
-            // lookup below. A variadic position refuses: this slice does not
+            // lookup below. A variadic position refuses: the analysis does not
             // model spread/variadic binding (v1). An argument past the declared
             // arity is `func_get_args()` territory, with nothing to read.
             match cx.fn_decl(fn_site).params.get(site.position) {
@@ -8638,7 +8554,7 @@ fn eval_coalesce_fact(
         // A projection arm the shape proves present AND non-null is the value: `??`
         // never evaluates anything to its right, so the chain ends here and the
         // arms after it contribute nothing. (Only the shape lane short-circuits;
-        // the operand forms that predate this slice keep their join verbatim.)
+        // the other operand forms keep their join verbatim.)
         if settled {
             break;
         }
@@ -8958,8 +8874,8 @@ fn fact_is_nullish(f: &Fact) -> bool {
         Fact::OneOf(vs) => vs.iter().any(|v| matches!(v, Val::Null)),
         Fact::Refined { nullable, .. } | Fact::General { nullable, .. } => *nullable,
         // The array stratum (ADR-0062 `Fact::Shape`) has no property-seeding
-        // consumer in this slice. Answering `true` keeps it out of the heap
-        // entirely, which is the no-knowledge side of this filter.
+        // consumer. Answering `true` keeps it out of the heap entirely, which is
+        // the no-knowledge side of this filter.
         Fact::Shape { .. } => true,
     }
 }
@@ -9253,7 +9169,7 @@ fn walk_if(
     }
 
     // 2. The guard's own effects on *every* resulting path, sequenced at the calls'
-    // positions (ADR-0052 §6, replacing the old blanket `cond_invalidations`): a
+    // positions (ADR-0052 §6): a
     // retained guard call escapes its object arguments/receiver and sweeps the
     // escaped objects' mutable props (the method receiver's binding survives — a
     // method call does not rebind its receiver variable, the payoff (i) that lets
@@ -10393,7 +10309,7 @@ fn fact_is_non_object(f: &Fact) -> bool {
         Fact::OneOf(vs) => vs.iter().all(val_is_non_object),
         Fact::Refined { .. } | Fact::General { .. } => true,
         // A shape fact does denote arrays, which are non-objects — but the
-        // value-side `instanceof` rule gains no new proof in this slice, so
+        // value-side `instanceof` rule gains no proof from it, so
         // the arm answers "not proven" (no narrowing), the no-knowledge side.
         Fact::Shape { .. } => false,
     }
@@ -10426,7 +10342,7 @@ fn val_is_non_object(v: &Val) -> bool {
 // ---------------------------------------------------------------------------
 
 /// The fact a parameter's **native** type guarantees at runtime (Feature B), or
-/// `None` when nothing representable is seeded this slice. Only a **single scalar**
+/// `None` when nothing representable can be seeded. Only a **single scalar**
 /// type (optionally nullable) seeds — a `General{base, nullable}` fact; unions and
 /// bool-literal members (`string|false`) have no clean single-`Fact` form and are
 /// skipped (documented). By-ref params are never seeded (the caller may hold
@@ -11021,7 +10937,7 @@ fn collect_instanceof<'a>(
 ///   lane becomes `{false}`). The value lane's `Refine::Exact` already owns the
 ///   positive branch, and an arm lane is a *subtraction* carrier by construction
 ///   (§2): every mutation here removes arms it can prove dead. Intersecting to a
-///   singleton is a different judgment and is left unlanded.
+///   singleton is a different judgment and is not implemented.
 fn apply_class_narrowing(w: &WalkCx, cond: &CondExpr, then: bool, store: &mut Store) {
     let oracle = ProjectIsa { cx: w.cx, demote_catalog: w.cx.a11_demote_catalog() };
 
@@ -11097,10 +11013,10 @@ fn subtract_contract_lane(
 }
 
 // ---------------------------------------------------------------------------
-// Type-predicate guard vocabulary (ADR-0064 seam (v), slice DR2).
+// Type-predicate guard vocabulary (ADR-0064 seam (v)).
 //
 // PHPStan ships this family as a `FunctionTypeSpecifyingExtension` set; Steins
-// imports it into the *landed* narrowing machinery (ADR-0052) rather than a new
+// imports it into the existing narrowing machinery (ADR-0052) rather than a new
 // extension mechanism — the arm lane subtracts, the value-fact lane refines, and
 // `assert(is_string($x))` inherits both for free because assert lowers its
 // argument to the same `CondExpr` and runs the same walk.
@@ -11500,7 +11416,7 @@ fn apply_type_narrowing(
                 subtract_pred_arms(store, var, *pred, *positive);
                 // An arm lane that collapsed to a single array arm mints its shape
                 // fact through the SAME gated helper `is_array`'s S4 siblings use —
-                // this slice adds no second minting path.
+                // never a second minting path.
                 mint_collapsed_shape(var, env, store);
                 refine_fact_for_pred(env, var, *pred, *positive);
                 // A value the guard proved is not an object cannot still carry a
@@ -11537,10 +11453,10 @@ fn subtract_pred_arms(store: &mut Store, var: &str, pred: TypePred, positive: bo
 ///
 /// **`None` means "leave the fact exactly as it was", and that is also the answer
 /// when the guard's polarity refutes the whole fact** — a binding proven `int` under
-/// an `is_string` true-branch says the branch is unreachable, and this slice does not
+/// an `is_string` true-branch says the branch is unreachable, and this helper does not
 /// own death (ADR-0052 §2: the verdict does). Rewriting the fact there would mint a
-/// claim about a path the runtime never takes; leaving it reproduces the pre-slice
-/// behavior on exactly that path.
+/// claim about a path the runtime never takes; leaving the fact alone is the
+/// FP-safe answer on exactly that path.
 fn refine_fact_for_pred(
     env: &mut HashMap<String, Known>,
     var: &str,
@@ -11585,8 +11501,8 @@ fn refine_fact_for_pred(
         // premise proof-layer findings about a path the runtime never takes (the
         // measured FP class — `new Identifier($name)` inside `if (is_string($name))`
         // under a call-site descent that bound `$name` to an int). Dropping to
-        // no-fact is exactly the pre-slice behavior, since the guard's base used to
-        // be forgotten wholesale here.
+        // no-fact is the FP-safe fallback: the guard's base is forgotten wholesale
+        // here.
         let holds = pred_holds_on_fact(pred, f);
         if (positive && holds == Certainty::No) || (!positive && holds.is_yes()) {
             return None;
@@ -11657,7 +11573,7 @@ fn refine_fact_for_pred(
 /// known (`Fact::from_vals` re-canonicalizes — one survivor collapses to a
 /// `Singleton`, an over-`CAP` set widens through the computed summary).
 /// FALSE branch: subtraction is exact only on a **finite** fact (`OneOf` minus the
-/// literals, through the landed `exclude_member`); an abstract fact has no
+/// literals, through `exclude_member`); an abstract fact has no
 /// point-complement, so it is left alone.
 /// Either polarity emptying the set means the branch is unreachable — the fact is
 /// left untouched, since the verdict owns death (ADR-0052 §2).
@@ -12092,7 +12008,7 @@ fn asserted_boolean(spec: &AssertSpec) -> Option<bool> {
 ///   witnessed one does, and no proof-layer id can be premised on either.
 ///   Raising this leg to Verified needs the descent proof of ADR-0058 §3 (slice
 ///   I2), which reads the helper's throw-guard out of its body rather than
-///   trusting the tag; that is deliberately not this slice.
+///   trusting the tag; that remains outside this rule.
 /// * **Nothing else.** Polarity, `&&`/`||` distribution, the S5 disjunctive
 ///   cover, tag discrimination and arm subtraction are the walk's, unmodified.
 ///
@@ -12136,7 +12052,7 @@ fn apply_helper_guard(
 /// (ADR-0052 §5 — a docblock is a claim, never a proof). Replace-if-weaker, in two
 /// halves: (1) a stronger finite fact (`Singleton`/`OneOf`) is kept — an assert
 /// never coarsens known-exact knowledge; (2) **an `Asserted` fact never overwrites
-/// a `Verified` one of any layer** — the missing half this slice adds, so a lying
+/// a `Verified` one of any layer**, so a lying
 /// `@phpstan-assert` cannot downgrade a proven fact into a forgeable one (nor
 /// launder its own claim past the stratum gate). A negated `!null` clears
 /// nullability (also `Asserted`); other negated forms are not representable as a
@@ -12202,7 +12118,7 @@ fn apply_assert_to_var(
 /// surviving into the branch can premise a proof-layer `offset.missing` that did
 /// not fire before. So the exemption is granted only to a base that carries the
 /// **shape lane** — a `Fact::Shape`, or a contract lane with an array arm — which
-/// is exactly what this slice's narrowing consumes and is `Asserted` end to end
+/// is exactly what this narrowing consumes and is `Asserted` end to end
 /// (A-G9). A base mentioned anywhere else in the same condition keeps the old
 /// forgetting, because that other mention is what might mutate it.
 fn cond_invalidations(
@@ -12288,8 +12204,8 @@ fn collect_cond_opaque_reads(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) {
         // scalar fact surviving is the entire point of the slice — and every finding
         // it can premise is true by construction, because the value the branch sees
         // is the value the predicate tested. A base mentioned by any OTHER call in
-        // the same condition still gets the old forgetting: that mention is what
-        // might mutate it, and it is collected by the general arm below.
+        // the same condition is still forgotten: that mention is what might mutate
+        // it, and it is collected by the general arm below.
         CondExpr::Call { call, .. }
             if type_predicate(cx, call).is_some()
                 || in_array_literals(cx, call, cx.php_minor).is_some() => {}
@@ -12780,7 +12696,7 @@ fn php_array_loose_eq(
 fn scope_class(scope: &Scope) -> Option<&str> {
     match &scope.owner {
         ScopeOwner::Method { class, .. } => Some(class),
-        // A closure lexically inside a method captures `$this`, but this slice
+        // A closure lexically inside a method captures `$this`, but the analyzer
         // does not thread the enclosing class into the closure scope (documented).
         ScopeOwner::TopLevel | ScopeOwner::Function(_) | ScopeOwner::Closure { .. } => None,
     }
@@ -13104,7 +13020,7 @@ fn try_descend_function(
 /// `resolve_const_fn` value lane has always used. A project with two same-named
 /// functions in different namespaces declines (the statement-level descent, which
 /// has the full `NameRef`, still resolves those). Widening this would mean carrying
-/// the resolved FQN in the value IR — a deliberate non-goal this slice.
+/// the resolved FQN in the value IR — a deliberate non-goal.
 ///
 /// # Recursion discipline
 ///
@@ -13174,7 +13090,7 @@ fn project_call_summary(
 /// a same-named project function at one call site. The written simple name is all
 /// the value IR carries (the alias residue is shared verbatim with
 /// `resolve_const_fn`, which has always resolved this way); closing it means
-/// carrying the resolved FQN in [`ArgValue::Call`] — a follow-up, not this slice.
+/// carrying the resolved FQN in [`ArgValue::Call`] — a follow-up.
 fn value_lane_fn_site(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Option<Site> {
     let site = cx.index.unique_fn_by_simple(name)?;
     let decl = cx.fn_decl(site);
@@ -13320,7 +13236,7 @@ fn handle_var_call(
 
 /// Declared-return contract arms of a closure scope from its native `: R`
 /// (issue #128). Phpdoc `@return` on closures is deferred (no docblock on the
-/// scope yet) — native only for this slice.
+/// scope yet) — native only.
 fn closure_return_arms(callee_scope: &Scope) -> Option<Vec<ContractArm>> {
     let ty = callee_scope.ret_ty.as_ref()?;
     let native = native_arms(ty);
@@ -13904,7 +13820,7 @@ fn resolve_call_target<'a>(
             let class = obj.class.clone();
             if obj.class_exact {
                 // An allocation-proven receiver (`$x = new Foo(); $x->m()`) dispatches
-                // exactly — the landed precision.
+                // exactly — the precise dispatch.
                 resolve_exact(cx, &class, method, enclosing_class, Some(class.clone()))
             } else {
                 // A lower-bound receiver — a laundered `$this` alias (`$u = $this`) or
@@ -14123,7 +14039,7 @@ enum ChainWalk {
 /// Walk `start_fqn`'s parent chain proving the method's *absence* under complete
 /// enumeration (ADR-0049 §4 (b)–(f), (j); A2i/A2iii). Interfaces are not walked:
 /// a PHP interface never carries a method body, so it can never *define* the
-/// method — only the `extends` (class-parent) chain can, exactly as the landed
+/// method — only the `extends` (class-parent) chain can, exactly as
 /// [`resolve_in_chain`] does. Any of these taints closure ⇒ `Silent`:
 /// unresolvable/`Ambiguous`/builtin ancestor (leg b/f/i), a trait name or a
 /// `uses_traits` node (leg e), an `is_enum` node (leg j / A3), the magic fallback
@@ -14222,7 +14138,7 @@ fn check_undefined_method(
         return;
     };
     // Leg A2i: a conditional declaration in the chain re-dams the claim — fire only
-    // when the whole-universe dam is clear (no vouch machinery in this slice).
+    // when the whole-universe dam is clear (vouch machinery is not available here).
     if any_conditional && !cx.dam.is_clear() {
         return;
     }
@@ -14413,7 +14329,7 @@ fn check_undefined_function(
         return;
     }
     // Dam leg (A5): function existence is dammed — a standing dynamism site could mint
-    // the name (the vouch valve is not in scope this slice ⇒ dammed is silent).
+    // the name (the vouch valve is unavailable here, so dammed is silent).
     if !cx.dam.is_clear() {
         return;
     }
@@ -15156,7 +15072,7 @@ fn check_phpdoc_undefined_method(
 /// Severity grade of an offset finding (ADR-0049 §7 verified table). The
 /// `warning-handler` posture gates only [`Self::Warning`]; [`Self::Fatal`] (the
 /// object `Error` / string-key `TypeError` cases) would emit under both — but those
-/// cases are deferred in this slice, so every finding here is currently `Warning`.
+/// cases are not implemented, so every finding here is currently `Warning`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OffsetGrade {
     Warning,
@@ -15683,8 +15599,8 @@ fn judge_coalesce_final(
 // **Reachability is deliberately untouched.** None of this feeds `eval_cond`,
 // `mark_dead`, or the dead-region set. A shape fact is `Asserted` (A-G9's
 // corollary), and a dead region computed from an `Asserted` premise would let
-// the env-free direct pass stop reporting on a live path — the historical FP
-// class this slice must not re-open. `Fact::truthy` / `is_null` / `int_in` /
+// the env-free direct pass stop reporting on a live path — an FP class that must
+// stay closed. `Fact::truthy` / `is_null` / `int_in` /
 // `satisfies_str` are *decisive* on `Fact::Shape` (`truthy` reads `non_empty`,
 // the other three answer `No` outright), so the first caller that routes a
 // shape fact into a verdict re-opens exactly that question; the tripwire test
@@ -15788,7 +15704,7 @@ fn array_all_any_predicate(cx: &Cx, call: &CallExpr) -> Option<&'static str> {
 ///
 /// The polarity walk is `collect_refine`'s, verbatim in structure: `Not` flips,
 /// `And` contributes on the true path, `Or` on the false one (De Morgan).
-/// Everything else contributes nothing, so a condition this slice does not model
+/// Everything else contributes nothing, so an unmodeled condition
 /// narrows nothing rather than narrowing wrongly.
 fn collect_shape_guards(
     cx: &Cx,
@@ -16409,7 +16325,7 @@ fn base_fact_val(f: &Fact) -> Val {
 /// Emit one offset finding, honoring the `warning-handler` posture (ADR-0049 §7):
 /// under `"null"` (`!warning_handler_abort`) a warning-grade finding leaves the
 /// proof surface and is not emitted; a `Fatal`-grade finding would emit under both
-/// (none are produced in this slice).
+/// (none are currently produced).
 fn emit_offset(
     cx: &Cx,
     span: Span,
@@ -16708,7 +16624,7 @@ fn check_method_args(
 }
 
 // ---------------------------------------------------------------------------
-// Value / type helpers (unchanged from the per-file slice).
+// Value / type helpers.
 // ---------------------------------------------------------------------------
 
 /// Render a call with its literal arguments for a folding provenance string.
@@ -16761,7 +16677,7 @@ fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
     let strict = cx.strict();
     match arg {
         // `null` is accepted iff the type is nullable (`?T` / `null` member). An
-        // object-bearing type stays silent on `null` (unchanged from stage 1).
+        // object-bearing type stays silent on `null`.
         ArgValue::Null => !ty.nullable && !ty.has_instance(),
         // A concrete non-null literal: an error iff no member accepts it. `Instance`
         // members contribute nothing (they never accept a scalar) — ADR-0043 stage-3
@@ -17416,7 +17332,7 @@ impl<'a> Cx<'a> {
                     // object stays unresolved (silent) — acceptance never fires on it.
                     //
                     // Generic type arguments are NOT carried through a variable binding
-                    // this slice (the heap object records no type-arg carry); a
+                    // through a variable binding (the heap records no type-arg carry); a
                     // `$x = new Box('x'); f($x)` therefore judges only its class half.
                     // Stage 1 scopes the argument half to the direct `new` argument
                     // position (the conformance fixtures' shape) — empty carry here.
@@ -17766,7 +17682,8 @@ impl normalize::IsaOracle for ProjectIsa<'_, '_> {
 fn accepts(cx: &Cx, cfile: usize, coff: u32, ty: &PType, v: &CVal) -> Tri {
     match &ty.kind {
         PKind::Identifier(name) => accepts_identifier(cx, cfile, coff, name, v),
-        PKind::This => Tri::Maybe, // `$this` — silent this slice
+        // `$this` is intentionally undecided here.
+        PKind::This => Tri::Maybe,
         PKind::Nullable(inner) => match v {
             CVal::Scalar(ArgValue::Null) => Tri::Yes,
             _ => accepts(cx, cfile, coff, inner, v),
@@ -17967,7 +17884,7 @@ fn accepts_class_name(cx: &Cx, cfile: usize, coff: u32, name: &str, v: &CVal) ->
         },
         CVal::Scalar(_) if cx.is_known_class(&target) => Tri::No,
         // An array is likewise never a class instance, but it is left
-        // silent this slice (out of the stage-4 scope).
+        // intentionally undecided here (out of the stage-4 scope).
         _ => Tri::Maybe,
     }
 }
@@ -18899,7 +18816,7 @@ fn check_callable_arg(
 ///   (`bool`, `int`, `string`, `float`, or their `?T` nullable form). A multi-base
 ///   union (`int|false`), a non-scalar (`array`, `object`, a class, `void`), or
 ///   `mixed` is not representable as one [`Fact`] and yields `None` — the union
-///   case is deferred to the contract-lane arms of a later slice (§4).
+///   case belongs to the contract-lane arms (§4) and remains deferred.
 /// * A **curated refinement** (`curated`, a phpdoc type string such as
 ///   `int<0, max>` or `non-empty-string`) is admitted only when `minor_matches_pin`
 ///   holds (the A11 pin, §2), it lowers to a fact of the SAME base as the envelope,
@@ -19068,9 +18985,9 @@ fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Vec<ContractArm>> {
     // `ContractTy::Class` already normalizes on the way in (`lower_identifier` strips
     // a leading `\` and case-folds), so the arms compare by `class_eq` exactly as the
     // generation-time countersign compared them, and the identity preserves that
-    // normalization instead of disturbing it. The same argument covered a class
-    // *inside* an array row's element type before this slice; it now covers the top
-    // level too, for the same reason and through the same seam.
+    // normalization instead of disturbing it. The same argument covers a class
+    // *inside* an array row's element type and at the top level, for the same
+    // reason and through the same seam.
     refine_declared_arms(&[], arms, &|n: &str| n.to_owned())
 }
 
@@ -19363,8 +19280,8 @@ fn transfer_declaration_admits(
 /// # The argument channel (issue #118, ADR-0062 Amendment B)
 ///
 /// The v1 report declined `array_slice` because "the seam is single-argument by
-/// construction". That constraint was the decline's whole content, so this slice
-/// removed the constraint rather than weakening the rule: the rung now receives
+/// construction". That constraint was the decline's whole content, so the
+/// implementation removed it rather than weakening the rule: the rung now receives
 /// the CALL's argument list, and an arm may read a sibling argument's fact through
 /// [`transfer_arg_fact`] — the very reader the DR3 rung next door already owns.
 /// Every arm that does not ask keeps the single-shape shape it always had, and the
@@ -20279,7 +20196,7 @@ fn var_export_transfer(
 ///   why an explicit `trim` charlist changes nothing here: the output is still a
 ///   substring of the input.
 ///
-/// # The table as it landed
+/// # The table
 ///
 /// | name(s) | keeps | forces | declines |
 /// | --- | --- | --- | --- |
@@ -20300,8 +20217,8 @@ fn var_export_transfer(
 ///
 /// Only those four bits move. `NUMERIC`, `DECIMAL_INT` and `NON_DECIMAL_INT` are
 /// never propagated even where they would survive (`ucfirst(' 1e5')` is still
-/// numeric): dropping a bit is a widening, and keeping the table to the axis the
-/// slice measured is worth more than the two rows it would buy.
+/// numeric): dropping a bit is a widening, and keeping the table to the measured
+/// axis is worth more than the two rows it would buy.
 ///
 /// # The declines, each for a stated reason
 ///
@@ -20324,7 +20241,7 @@ fn var_export_transfer(
 ///   format* is claimed, and the scanner refuses any format it cannot parse.
 /// * **`str_replace`/`substr_replace`/`parse_str`** — nsrt asks for casing through
 ///   them too; they need a second subject's predicates (or an out-parameter) rather
-///   than this table's single-subject shape. Left for a later slice.
+///   than this table's single-subject shape. Not modeled by this table.
 ///
 /// # Unions are read directly (the #75 survey's nuance)
 ///
@@ -20495,7 +20412,7 @@ fn str_pred_out(
         // one-argument form's glue is `''`, which carries both. The length axis is
         // NOT claimed: `implode(',', [])` is `''`, and proving otherwise needs the
         // array's non-emptiness *and* an element's — a join this arm leaves to a
-        // later slice.
+        // separate rule.
         "implode" | "join" => {
             let (glue, array) = match args {
                 [array] => (CASING, array),
@@ -21873,9 +21790,8 @@ mod dump_render_tests {
 
     #[test]
     fn shape_fact_spells_through_the_shared_speller() {
-        // ADR-0062 S1 point 4: `Fact::Shape` has no construction sites yet
-        // (S2 groundwork only), but it already spells correctly, so S3's
-        // consumers inherit the rendering for free.
+        // ADR-0062 S1 point 4: `Fact::Shape` spells through the shared speller, so
+        // every consumer inherits the rendering for free.
         use steins_domain::{Presence, ShapeFact, Tail};
         let shape = ShapeFact::normalize(
             vec![(VKey::Str("a".to_owned()), Presence::Required { witnessed: false }, None)],
@@ -21990,7 +21906,7 @@ mod return_fact_admission_tests {
 
     /// The ADR-0069 floor's version gate, against the real change oracle.
     ///
-    /// The gate's own law, unit-tested against the shipped data: `str_split` is the
+    /// The gate's own law, unit-tested against the mined data: `str_split` is the
     /// witness whose declared return type moved at 8.2. (Whether that particular
     /// name also carries an admitted row is a property of the mining, not of this
     /// gate — `declared_return_floor.rs` pins the end-to-end decline on a name that
@@ -22223,7 +22139,7 @@ mod shape_projection_tests {
 
     #[test]
     fn array_key_first_is_never_the_declared_first_key() {
-        // THE negative test of this slice. `array{a: int, b: int}` is a key SET;
+        // Negative soundness test: `array{a: int, b: int}` is a key SET;
         // PHPStan answers `'a'` here (phpstan/phpstan#14940) and is wrong on
         // `['b' => 1, 'a' => 2]`, which the shape admits just as well.
         let shape = ShapeFact::normalize(

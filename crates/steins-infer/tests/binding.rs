@@ -188,8 +188,8 @@ fn well_typed_binding_is_silent() {
 
 #[test]
 fn return_position_call_flagged_via_binding() {
-    // The coordinator's reproduction: `return width($s);` is invisible to the
-    // old propagation pass. It must now flag with binding provenance.
+    // `return width($s);` must flag with binding provenance: a call in return
+    // position is reachable to the propagation pass, not only assignment RHS.
     let src = "<?php\nfunction width(int $w): int { return $w * 2; }\nfunction outer(string $s): int {\n    return width($s);\n}\nouter(\"abc\");\n";
     let d = only(src);
     assert_eq!(d.line, 4, "reported at the `return width($s)` call (line 4)");
@@ -201,8 +201,8 @@ fn return_position_call_flagged_via_binding() {
 
 #[test]
 fn return_position_direct_literal_still_flagged() {
-    // `return width("abc");` — the direct pass already covered literal args in
-    // return position; confirm the IR change did not regress it.
+    // `return width("abc");` — the direct pass covers literal args in return
+    // position; regression guard that the IR reshape kept this working.
     let src = "<?php\nfunction width(int $w): int { return $w; }\nfunction outer(): int { return width(\"abc\"); }\nouter();\n";
     let d = only(src);
     assert_eq!(d.line, 3, "flagged at the return call");
@@ -250,9 +250,8 @@ fn const_fn_return_literal_still_qualifies() {
 
 #[test]
 fn return_call_direct_var_flow_flagged() {
-    // Not interprocedural: a local `$w` flowing into `return width($w)` at top
-    // level is now caught by propagation (return position), where before it was
-    // silent.
+    // Local propagation also checks return position: `$w` flowing into
+    // `return width($w)` is caught without interprocedural descent.
     let src = "<?php\nfunction width(int $w): int { return $w; }\nfunction top(): int { $w = \"abc\"; return width($w); }\ntop();\n";
     let d = only(src);
     assert_eq!(d.line, 3);

@@ -62,8 +62,6 @@ fn a_pure_callback_at_the_flagged_position_stays_clean() {
 
 #[test]
 fn an_echoing_callback_at_the_flagged_position_exceeds_pure() {
-    // The join is the whole mechanism: the callback's own color arrives at the
-    // caller through the declaration, named by its origin.
     let src = format!(
         "{APPLY}#[\\Steins\\Pure]\nfunction f(array $xs): array {{ return applyAll($xs, function ($x) {{ echo $x; return $x; }}); }}\n"
     );

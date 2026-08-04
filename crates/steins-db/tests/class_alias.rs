@@ -2,11 +2,10 @@
 //!
 //! A `class_alias('Target', 'Alias')` whose names are known at compile time — string
 //! literals, or the `X::class` constant (issue #36) — makes `Alias` resolve — for
-//! existence — to `Target`'s declaration site. The edge folds into the project
-//! index after every textual declaration, sharing the duplicate-decl ambiguity
-//! discipline: an alias colliding with a textual decl of the same FQN, or two alias
-//! edges for one name, is `Ambiguous`. An alias whose target does not resolve mints
-//! no edge. Consumed by nothing in S1 — this pins the index machinery directly.
+//! existence — to `Target`'s declaration site. The edge shares textual declarations'
+//! duplicate-decl ambiguity discipline: a collision with a textual declaration, or
+//! two alias edges for one name, is `Ambiguous`. An unresolved target mints no edge.
+//! These tests pin the index machinery directly.
 
 use steins_db::{Project, Resolve, SourceFile, SteinsDatabase, project_index};
 
@@ -47,7 +46,6 @@ fn same_unique(a: Resolve, b: Resolve) -> bool {
 fn literal_class_alias_resolves_to_its_target() {
     let files = &[("a.php", "<?php\nclass Legacy {}\nclass_alias('Legacy', 'Modern');\n")];
     assert_eq!(kind(resolve(files, "Legacy")), Kind::Unique);
-    // The alias resolves to exactly the target's decl site.
     assert!(same_unique(resolve(files, "Modern"), resolve(files, "Legacy")));
 }
 

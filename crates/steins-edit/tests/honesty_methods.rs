@@ -31,7 +31,6 @@ fn only_reason(report: &TransformReport) -> &str {
 
 #[test]
 fn method_param_widens_to_proven_union() {
-    // `@param int $id` but callers pass an int and numeric strings — widen the doc.
     let c = "<?php\nfinal class C {\n/** @param int $id */\npublic function m($id) { return $id; }\npublic function a() { return $this->m(1); }\npublic function b() { return $this->m('12'); }\npublic function d() { return $this->m('34'); }\n}\n";
     let report = plan(&[("c.php", c)]);
     assert_oracle_complete(&report);
@@ -77,13 +76,11 @@ fn method_param_honesty_refuses_on_unresolved_receiver() {
 
 #[test]
 fn method_return_widens_to_proven_union() {
-    // `@return int` but the body returns int and string literals.
     let c = "<?php\nfinal class C {\n/** @return int */\npublic function m($flag) {\nif ($flag) { return 1; }\nreturn 'zero';\n}\n}\n";
     let report = plan(&[("c.php", c)]);
     assert_oracle_complete(&report);
     assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
     let out = report.plan.apply_file("c.php", c);
-    // int + a single string literal → `int|'zero'`.
     assert!(out.contains("@return"), "got:\n{out}");
     assert!(out.contains("int") && out.contains("'zero'"), "widened return:\n{out}");
 }
@@ -116,7 +113,6 @@ fn static_return_method_honesty_unmoved() {
 
 #[test]
 fn honest_method_is_not_enumerated() {
-    // No lie: the `@param` admits every observed literal — nothing to repair.
     let c = "<?php\nfinal class C {\n/** @param int $x */\npublic function m($x) { return $x; }\npublic function a() { return $this->m(1); }\n}\n";
     let report = plan(&[("c.php", c)]);
     assert_eq!(report.oracle.enumerated, 0);

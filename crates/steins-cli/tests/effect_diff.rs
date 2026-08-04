@@ -1,9 +1,5 @@
-//! End-to-end tests for `steins effect-diff` (issue #69): the effect baseline
-//! captures per-function summaries, and a later run reports what a change did to
-//! them.
-//!
-//! Each test runs the real binary in a private temp directory, so the default
-//! `steins-effects-baseline.json` and the relative entry paths are isolated.
+//! End-to-end `steins effect-diff` contracts (issue #69), isolated in private
+//! working directories and baselines.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,7 +9,6 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// A fresh, unique working directory under the system temp dir.
 fn workdir(tag: &str) -> PathBuf {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -29,7 +24,6 @@ struct Run {
     stderr: String,
 }
 
-/// Run `steins <args>` with CWD set to `dir`.
 fn run_in(dir: &Path, args: &[&str]) -> Run {
     let out = Command::new(bin()).args(args).current_dir(dir).output().expect("run steins");
     Run {
@@ -43,8 +37,7 @@ fn write(dir: &Path, name: &str, contents: &str) {
     std::fs::write(dir.join(name), contents).expect("write fixture");
 }
 
-/// Capture a baseline over `a.php`, then rewrite the file and diff against it.
-/// Returns the diff run.
+/// Capture `before`, replace it with `after`, then return the diff run.
 fn capture_then(dir: &Path, before: &str, after: &str, args: &[&str]) -> Run {
     write(dir, "a.php", before);
     let cap = run_in(dir, &["effect-diff", "--set-baseline", "a.php"]);
@@ -56,8 +49,7 @@ fn capture_then(dir: &Path, before: &str, after: &str, args: &[&str]) -> Run {
     run_in(dir, &argv)
 }
 
-/// The DI shape ADR-0067 exists for: an interface envelope reaches the caller's
-/// *declared* lane through a receiver no concrete class resolves.
+/// An unresolved interface receiver contributes its envelope to the declared lane.
 const REPO: &str = concat!(
     "interface Repo {\n",
     "    #[\\Steins\\Effect('io.db')]\n",
@@ -72,15 +64,12 @@ fn capture_then_identical_run_reports_nothing() {
     let r = capture_then(&dir, src, src, &[]);
     assert_eq!(r.code, 0, "informational surface always exits 0");
     assert!(r.stdout.is_empty(), "no events, no footer, got:\n{}", r.stdout);
-    // The diagnostic channel is untouched: its own file is never created here.
     assert!(!dir.join(".steins-baseline.jsonl").exists(), "effect-diff wrote a diagnostic baseline");
     assert!(dir.join("steins-effects-baseline.json").exists(), "its own sidecar file");
 }
 
 #[test]
 fn a_new_occurrence_reads_as_the_headline_line() {
-    // Issue #69's promise, literally: the refactor added `io.db` to
-    // `Checkout::confirm`, and that sentence is what the line says.
     let dir = workdir("added");
     let r = capture_then(
         &dir,
@@ -106,8 +95,7 @@ fn a_removal_is_confident_when_the_current_summary_is_exhaustive() {
 
 #[test]
 fn a_non_exhaustive_current_summary_hedges_the_removal() {
-    // "These effects, and possibly more" cannot prove an absence — so the same
-    // candidate arrives hedged, and the exhaustiveness change is its own line.
+    // A non-exhaustive summary cannot prove removal; coverage changes separately.
     let dir = workdir("hedged");
     let r = capture_then(
         &dir,
@@ -125,8 +113,7 @@ fn a_non_exhaustive_current_summary_hedges_the_removal() {
 
 #[test]
 fn a_declared_bound_becoming_proven_is_one_materialization() {
-    // ADR-0067 §2.6: declared → proven is a materialization, not a removal plus an
-    // addition. Exactly one line, and it names the lane it crossed.
+    // Declared → proven is one materialization event (ADR-0067 §2.6).
     let dir = workdir("materialized");
     let r = capture_then(
         &dir,
@@ -189,8 +176,6 @@ fn an_exhaustiveness_transition_is_never_folded_into_a_label_event() {
 
 #[test]
 fn a_renamed_function_produces_no_removal_noise() {
-    // The acceptance criterion: the effects did not go anywhere, the name did. Only
-    // the footer counts it.
     let dir = workdir("renamed");
     let r = capture_then(
         &dir,

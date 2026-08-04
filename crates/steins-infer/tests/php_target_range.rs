@@ -1,11 +1,10 @@
 //! Issue #28 — the declared **target PHP range** drives version-sensitive
-//! decisions through the layout, end to end: a `composer.json` target reaches
-//! ADR-0049 A12's next-int rule via `check_project_with_runtime`, generalizing
-//! the unknown-minor leg to "the range must agree, else decline".
+//! decisions through the layout: a `composer.json` target reaches ADR-0049
+//! A12's next-int rule via `check_project_with_runtime` ("the range must
+//! agree, else decline").
 //!
-//! The absence-family and curated-admission legs live behind a live sidecar and
-//! are exercised by the CLI-level probes recorded in the commit; what this file
-//! pins is the layout→Cx seam, which needs no PHP at all.
+//! The absence-family and curated-admission legs live behind a live sidecar;
+//! this file pins the layout→Cx seam, which needs no PHP at all.
 
 use std::path::PathBuf;
 
@@ -68,8 +67,8 @@ fn a_target_above_the_boundary_resolves_with_the_new_rule() {
 
 #[test]
 fn no_target_and_no_runtime_still_declines() {
-    // The pre-#28 unknown leg, untouched: no declaration, no sidecar answer —
-    // the straddling literal declines rather than guessing a rule.
+    // No declaration and no sidecar answer: the straddling literal declines
+    // rather than guessing a rule.
     assert_eq!(dump_under(layout_with(None)), "dumped type: unknown");
     // And a version-independent literal still resolves under the same view.
     let db = SteinsDatabase::default();

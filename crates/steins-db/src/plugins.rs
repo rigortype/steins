@@ -1,7 +1,7 @@
 //! The plugin channel (ADR-0012 / ADR-0039 / ADR-0068): Composer-distributed
 //! packages that register effect labels and color functions with them.
 //!
-//! # What this slice reads
+//! # What is read
 //!
 //! A **manifest**, directly from Rust — `vendor/<vendor>/<package>/steins-plugin.json`:
 //!
@@ -14,12 +14,10 @@
 //! No PHP runs. ADR-0039's design has the sidecar boot the project's own autoload
 //! and answer `plugin(id, "declare", …)` on demand, and that remains the plan for
 //! synthetic declarations and for facts only the live framework knows. But the two
-//! facts this slice needs — *which labels exist* and *which plain functions carry
-//! them* — are static per installed version, so reading them out of a JSON file
-//! keeps discovery deterministic, keeps `steins check --no-php` a complete answer,
-//! and keeps the tracer testable without a PHP toolchain. The sidecar `plugin`
-//! method stays the stub it was; this is the fast path that landed first, not a
-//! replacement for it.
+//! facts read here — *which labels exist* and *which plain functions carry them* —
+//! are static per installed version, so reading them out of a JSON file keeps
+//! discovery deterministic, keeps `steins check --no-php` a complete answer, and
+//! keeps the tracer testable without a PHP toolchain.
 //!
 //! # Discovery
 //!
@@ -67,7 +65,8 @@ pub const SUPPORTED_API: u64 = 1;
 /// reach the same verdict (ADR-0048).
 ///
 /// [`PluginFacts::none`] is the empty channel, and it is the default: a project
-/// with no plugin behaves exactly as it did before this existed.
+/// with no plugin loads no registrations and infers exactly as if the channel
+/// were absent.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PluginFacts {
     /// The label registry this project's inference asks — builtin labels plus the

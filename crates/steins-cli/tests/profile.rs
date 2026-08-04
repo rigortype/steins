@@ -1,5 +1,5 @@
-//! End-to-end tests for the profile engine (ADR-0050 slice 2): the proof-only
-//! default surface, the named opt-up stages (`contracts`, `throws-direct`), the
+//! End-to-end tests for the profile engine (ADR-0050): the proof-only default
+//! surface, the named opt-up profiles (`contracts`, `throws-direct`), the
 //! `origin` facet selector, exit levels (`fail`/`warn`), config errors, and
 //! baseline capture-surface awareness.
 //!
@@ -80,7 +80,6 @@ fn contracts_profile_opts_up_the_whole_contract_layer() {
     let r = run_in(&dir, &["check", "--no-php", "--profile", "contracts", "a.php"]);
     assert_eq!(r.code, 1);
     assert!(r.stdout.contains("type.argument-mismatch"), "proof still on");
-    // Both throw findings present (direct RangeException + propagated RuntimeException).
     let n = r.stdout.matches("throw.undeclared").count();
     assert_eq!(n, 2, "both direct and propagated throws shown, got:\n{}", r.stdout);
     assert!(r.stdout.contains("RangeException can escape"));
@@ -93,7 +92,6 @@ fn throws_direct_profile_selects_the_origin_facet() {
     write(&dir, "a.php", MIXED);
     let r = run_in(&dir, &["check", "--no-php", "--profile", "throws-direct", "a.php"]);
     assert_eq!(r.code, 1);
-    // Proof on; exactly the DIRECT throw shown, the propagated one hidden.
     assert!(r.stdout.contains("type.argument-mismatch"), "proof still on");
     let n = r.stdout.matches("throw.undeclared").count();
     assert_eq!(n, 1, "only the direct throw shown, got:\n{}", r.stdout);
@@ -109,11 +107,9 @@ fn config_selects_profile_and_flag_beats_config() {
     write(&dir, "a.php", MIXED);
     write(&dir, "steins.toml", "[check]\nprofile = \"contracts\"\n");
 
-    // Config selects contracts → throws shown.
     let r = run_in(&dir, &["check", "--no-php", "a.php"]);
     assert!(r.stdout.contains("throw.undeclared"), "config profile applied, got:\n{}", r.stdout);
 
-    // Flag beats config → back to default, throws hidden.
     let r = run_in(&dir, &["check", "--no-php", "--profile", "default", "a.php"]);
     assert!(!r.stdout.contains("throw.undeclared"), "flag beats config, got:\n{}", r.stdout);
 }
@@ -172,12 +168,11 @@ fn unknown_runtime_key_is_a_hard_config_error() {
 
 #[test]
 fn abolished_zend_assertions_key_is_a_hard_config_error() {
-    // ADR-0052 amendment (2026-07-25 owner ruling, slice I0): `zend-assertions` is
-    // ABOLISHED from the `[runtime]` vocabulary — `assert($expr)` now reads as a
-    // throw-guard (Verified unconditionally), so the key is not a runtime pseudo-
-    // constant Steins models. A steins.toml still carrying it hits the
-    // `deny_unknown_fields` exit-2 path like any other unknown key — the correct
-    // hard-config-error outcome, not a warn-and-proceed.
+    // ADR-0052 amendment: `zend-assertions` is abolished from the `[runtime]`
+    // vocabulary — `assert($expr)` reads as a throw-guard (Verified
+    // unconditionally), so it is not a runtime pseudo-constant Steins models. A
+    // steins.toml carrying it hits the `deny_unknown_fields` exit-2 path like any
+    // other unknown key — a hard config error, not warn-and-proceed.
     let dir = workdir("runtime-zend-abolished");
     write(&dir, "a.php", THROW_ONLY);
     write(&dir, "steins.toml", "[runtime]\nzend-assertions = \"enabled\"\n");
@@ -245,7 +240,6 @@ fn json_carries_level_and_origin_facet() {
         throws.iter().filter_map(|d| d["origin"].as_str()).collect();
     assert!(origins.contains("direct"), "direct facet present, got:\n{}", r.stdout);
     assert!(origins.contains("propagated"), "propagated facet present");
-    // A proof finding carries no facet key.
     let proof = arr.iter().find(|d| d["id"] == "type.argument-mismatch").expect("proof finding");
     assert!(proof.get("origin").is_none(), "proof finding has no facet key");
 }
@@ -259,7 +253,7 @@ fn baseline_captured_under_default_drowns_loudly_under_contracts() {
     // Capture under the default surface (proof + mechanics only).
     let r = run_in(&dir, &["check", "--no-php", "--set-baseline", "a.php"]);
     assert_eq!(r.code, 0, "set-baseline exits 0");
-    // Now run under contracts: the throw findings are unbaselined → drowns-loudly.
+    // Run under contracts: the throw findings are unbaselined → drowns-loudly.
     let r = run_in(&dir, &["check", "--no-php", "--profile", "contracts", "a.php"]);
     assert!(
         r.stdout.contains("active profile `contracts`") && r.stdout.contains("did not"),
@@ -276,7 +270,7 @@ fn out_of_surface_baseline_entries_are_dormant_not_stale() {
     let r = run_in(&dir, &["check", "--no-php", "--profile", "contracts", "--set-baseline", "a.php"]);
     assert_eq!(r.code, 0);
     // Run under default: the throw entries are outside the surface → dormant, NOT
-    // stale. The proof entry still matches, so there is nothing to report.
+    // stale. The proof entry matches, so there is nothing to report.
     let r = run_in(&dir, &["check", "--no-php", "a.php"]);
     assert!(
         !r.stdout.contains("no longer match"),
@@ -361,8 +355,7 @@ fn var_dump_is_profile_disableable() {
 fn an_inline_ignore_never_suppresses_a_dump() {
     // ADR-0053 §4: the debug lane is exempt from all three suppression channels. An
     // `@steins-ignore debug.var-dump` does NOT mute the dump (it still displays) and,
-    // matching nothing suppressible, earns `suppress.unmatched` — the anti-rot channel
-    // doing its normal job.
+    // matching nothing suppressible, earns `suppress.unmatched`.
     let dir = workdir("vardump-ignore");
     write(&dir, "a.php", "<?php\n$x = 5;\nvar_dump($x); // @steins-ignore debug.var-dump\n");
     let r = run_in(&dir, &["check", "--no-php", "a.php"]);
@@ -389,11 +382,10 @@ const STRICT_ONLY: &str = "<?php\n\
 
 #[test]
 fn strict_leg_ids_respect_their_post_triage_floors() {
-    // Post-triage floors (the 2026-07-29 sweep ruling): default shows neither id;
-    // contracts shows `offset.undeclared` (promoted to its A-G10 END state after
-    // measuring zero corpus findings) but never `offset.maybe-missing` (held at
-    // strict until the assertion-helper discharge lands). Default stays
-    // byte-identical to its pre-S6 output for the same file.
+    // Post-triage floors (2026-07-29 sweep ruling): default shows neither id;
+    // contracts shows `offset.undeclared` (promoted after measuring zero corpus
+    // findings) but never `offset.maybe-missing` (held at strict pending the
+    // assertion-helper discharge). Default stays clean for this file.
     let dir = workdir("strict-hidden");
     write(&dir, "a.php", STRICT_ONLY);
     let r = run_in(&dir, &["check", "--no-php", "a.php"]);
@@ -418,7 +410,7 @@ fn strict_profile_surfaces_the_offset_strict_leg() {
 
 #[test]
 fn strict_profile_keeps_everything_contracts_shows() {
-    // Cumulative, not a replacement: the contract layer's own ids are still there.
+    // Cumulative, not a replacement: the contract layer's own ids remain.
     let dir = workdir("strict-cumulative");
     write(&dir, "a.php", MIXED);
     let r = run_in(&dir, &["check", "--no-php", "--profile", "strict", "a.php"]);

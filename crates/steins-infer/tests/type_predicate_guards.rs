@@ -1,6 +1,5 @@
-//! ADR-0064 seam (v), slice DR2 — the `is_*` type-predicate guard vocabulary and
-//! the strict literal-haystack `in_array` narrowing, wired into the landed
-//! ADR-0052 machinery (arm lane + value-fact lane).
+//! ADR-0064 seam (v): the `is_*` type-predicate guard vocabulary and strict
+//! literal-haystack `in_array` narrowing through the ADR-0052 arm and value-fact lanes.
 //!
 //! **Both polarities are pinned for every implemented predicate**, because they
 //! answer different questions: the TRUE branch deletes the arms the predicate
@@ -231,9 +230,8 @@ fn a_union_naming_predicate_mints_nothing() {
 
 #[test]
 fn a_matching_base_keeps_its_refinement_and_drops_nullability() {
-    // The DR2 by-ref exemption is what makes this observable at all: `is_string`
-    // takes its argument BY VALUE, so the `!== ''` refinement established a moment
-    // earlier is still true inside the branch and is no longer forgotten.
+    // `is_string` takes its argument by value, so the preceding `!== ''` refinement
+    // remains true inside the branch.
     let src = "<?php\nfunction f(string $s): void {\n\
                if ($s !== '' && is_string($s)) { \\PHPStan\\dumpType($s); }\n}\n";
     assert_eq!(dumps(src), vec!["non-empty-string"]);
@@ -263,13 +261,12 @@ fn finite_facts_narrow_by_exact_member_retention_on_both_polarities() {
 
 #[test]
 fn a_refuted_guard_drops_the_fact_because_the_verdict_owns_death() {
-    // `is_int($s)` on a proven-string binding describes an unreachable branch. The
-    // slice neither rewrites the fact into `int` (a claim about a path the runtime
-    // never takes) NOR carries the refuting fact in — that second option is the
+    // `is_int($s)` on a proven-string binding describes an unreachable branch. It
+    // must neither rewrite the fact into `int` nor carry the refuting fact in; the
+    // latter is the
     // measured FP class: a call-site descent binding `$name` to `1` made
     // `new Identifier($name)` inside `if (is_string($name))` a "proven TypeError"
-    // in nikic/PHP-Parser. The fact drops to nothing, which is exactly what the
-    // pre-slice wholesale forgetting produced.
+    // in nikic/PHP-Parser. The refuting fact therefore drops to nothing.
     let src = "<?php\nfunction f(string $s): void {\n\
                if (is_int($s)) { \\PHPStan\\dumpType($s); }\n}\n";
     assert_eq!(dumps(src), vec!["unknown"]);
@@ -417,7 +414,7 @@ fn the_de_morgan_walk_reaches_nested_guards() {
 #[test]
 fn the_guard_threads_into_the_right_operand() {
     // ADR-0052 §6 env threading: `b` in `a && b` evaluates under
-    // `then_refinements(a)` — which now includes the type vocabulary.
+    // `then_refinements(a)`, including the type vocabulary.
     let src = "<?php\n/** @param mixed $v */\nfunction f($v): void {\n\
                if (is_string($v) && $v !== '') { \\PHPStan\\dumpType($v); }\n}\n";
     assert_eq!(dumps(src), vec!["non-empty-string"]);
@@ -430,7 +427,7 @@ fn ctype_functions_are_declined_in_this_slice() {
     // `ctype_digit` and kin look like a `StrPreds::DECIMAL_INT` mapping but are
     // locale-sensitive AND (before PHP 8.1) reinterpreted int arguments in
     // `-128..=255` as byte values, so the mapping is not the one the name
-    // suggests. DR2 declines them; they get their own measured slice.
+    // suggests. They therefore remain declined pending dedicated measurement.
     let src = "<?php\nfunction f(string $s): void {\n\
                if (ctype_digit($s)) { \\PHPStan\\dumpType($s); }\n}\n";
     assert_ne!(dumps(src), vec!["numeric-string".to_owned()]);

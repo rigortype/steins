@@ -318,7 +318,6 @@ mod tests {
         assert!(lines[0].contains(r#""steins-baseline":1"#));
         assert!(lines[1].contains(r#""path":"a.php""#), "sorted by path first");
         assert!(lines[2].contains(r#""path":"z.php""#));
-        // Field order id, path, hash.
         assert!(lines[1].starts_with(r#"{"id":"a","path":"a.php","hash":"1"}"#));
     }
 

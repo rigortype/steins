@@ -147,14 +147,12 @@ fn wrap_and_throw_emits_new_class() {
 #[test]
 fn finally_throw_counts_and_absorbs_nothing() {
     let src = "<?php\n/** @throws \\JsonException */\nfunction f(): void { try {} catch (\\RuntimeException $e) {} finally { throw new \\RuntimeException(); } }\n";
-    // The finally throw is not absorbed by the sibling catch → escapes.
     assert_eq!(n_undeclared(src), 1, "finally throw counts, sibling catch absorbs nothing");
 }
 
 #[test]
 fn nested_trys_compose() {
     let src = "<?php\n/** @throws \\JsonException */\nfunction f(): void { try { try { throw new \\RuntimeException(); } catch (\\TypeError $e) {} } catch (\\RuntimeException $e) {} }\n";
-    // Inner catch (TypeError) misses; outer catch (RuntimeException) absorbs.
     assert_eq!(n_undeclared(src), 0, "outer try absorbs what the inner misses");
 }
 
@@ -240,8 +238,6 @@ fn unannotated_function_is_never_checked() {
 /// positive when the new class is the declared one.
 #[test]
 fn rethrow_after_reassignment_is_not_a_rethrow() {
-    // The FP shape found in review: declared JsonException, caught
-    // RuntimeException swapped for a JsonException before the throw.
     let fp = r#"<?php
 /** @throws \JsonException */
 function fp(): void {
@@ -282,7 +278,6 @@ function pass(): void {
 
 #[test]
 fn own_body_throw_is_direct() {
-    // The RuntimeException is thrown in f()'s own body → direct.
     let src = "<?php\n/** @throws \\JsonException */\nfunction f(): void { throw new \\RuntimeException(); }\n";
     let ds = undeclared(src);
     assert_eq!(ds.len(), 1, "got: {ds:#?}");

@@ -28,9 +28,7 @@ fn return_count(src: &str) -> usize {
     findings(src).into_iter().filter(|d| d.id == RETURN_MISMATCH_ID).count()
 }
 
-// ==========================================================================
 // 1. Scalar / refinement contract strictness (no coercion).
-// ==========================================================================
 
 #[test]
 fn numeric_string_does_not_satisfy_int_contract() {
@@ -108,9 +106,7 @@ fn casing_predicates_on_proven_string_literals() {
     assert_eq!(param_count(&format!("{flow}h(g());")), 0, "lowercase-string is a string");
 }
 
-// ==========================================================================
 // 2. list<T> / array<K,V> / non-empty per phpstan#14939.
-// ==========================================================================
 
 #[test]
 fn list_membership_key_order_and_elements() {
@@ -137,9 +133,7 @@ fn non_empty_variants_reject_empty() {
     assert_eq!(param_count(&format!("{f}f([]);")), 1, "empty violates non-empty-list");
 }
 
-// ==========================================================================
 // 3. Shapes per #14939: order-agnostic array{} vs positional list{}.
-// ==========================================================================
 
 #[test]
 fn array_shape_is_order_agnostic_and_sealed() {
@@ -206,9 +200,7 @@ fn unsealed_tail_key_contract_is_checked() {
     );
 }
 
-// ==========================================================================
 // 4. Class-name envelopes — only New-exact facts checked.
-// ==========================================================================
 
 #[test]
 fn class_name_matches_exact_and_subclass() {
@@ -229,9 +221,7 @@ fn class_name_unresolved_or_non_object_is_silent() {
     assert_eq!(param_count(&format!("{g}g(new Bar());")), 0, "unresolved/unrelated → silent");
 }
 
-// ==========================================================================
 // 5. Native + phpdoc interplay: no double-report.
-// ==========================================================================
 
 #[test]
 fn native_and_phpdoc_do_not_double_report() {
@@ -254,9 +244,7 @@ fn phpdoc_fires_where_native_is_silent() {
     assert_eq!(all[0].id, PARAM_MISMATCH_ID);
 }
 
-// ==========================================================================
 // 6. Value propagation through env, and return checks.
-// ==========================================================================
 
 #[test]
 fn array_flows_through_a_variable() {
@@ -273,13 +261,9 @@ fn return_contract_is_checked() {
     assert_eq!(return_count(ok), 0);
 }
 
-// ==========================================================================
 // 7. Registry / suppressibility.
-// ==========================================================================
 
-// ==========================================================================
 // 8. Effective-nullability and phpstan-tag precedence (FP avoidance, ADR-0029).
-// ==========================================================================
 
 #[test]
 fn null_accepted_by_effectively_nullable_param() {
@@ -332,11 +316,9 @@ fn inline_ignore_suppresses_param_mismatch() {
     assert_eq!(outcome.suppressed, 1);
 }
 
-// ==========================================================================
 // N. Assertion-helper exemption (ADR-0030): a `@…-assert` on parameter `$x`
 //    makes its `@param $x` a POST-condition, so arguments are not checked
 //    against it. Sibling params and `@return` stay checked; native stays a gate.
-// ==========================================================================
 
 #[test]
 fn assert_target_param_is_exempt() {
@@ -415,14 +397,12 @@ fn property_assert_target_does_not_exempt() {
     assert_eq!(param_count(src), 1, "property assert target must NOT exempt the param");
 }
 
-// ==========================================================================
 // 8. Named arguments bind in the contract lane (Gap A).
-//
+
 // A named argument `f(n: <expr>)` binds to its parameter by name (case-sensitive,
 // as PHP does) and is judged against that parameter's `@param` envelope exactly as
 // a positional argument is. Before this landed the whole named/mixed call was
 // skipped by the positional-only guards, so every one of these fired NOTHING.
-// ==========================================================================
 
 #[test]
 fn named_arg_wrong_literal_fires_on_plain_function() {
@@ -497,16 +477,14 @@ fn named_arg_native_nullable_accepts_null() {
     assert_eq!(param_count(&format!("{f}f(n: null);")), 0, "null accepted via nullable default");
 }
 
-// ==========================================================================
 // Conformance slice C1 — the one identifier table.
-//
+
 // Each test below mirrors one `php-typing-conformance` case, and its assertions
 // are read off that fixture's `E?:` probe lines and its silent (accepting) call
 // sites. These spellings were already known to `steins-contract::lower_identifier`
 // (the table the abstract-fact lane lowers through) but were silent on the
 // proven-value lane, which kept a hand-maintained sibling match. The lanes now
 // share one table.
-// ==========================================================================
 
 /// `phpdoc_advanced_param_typehint_boolean_synonym`: `boolean` is `bool`, and is
 /// still *enforced* as one.
@@ -713,15 +691,13 @@ fn a_reserved_type_word_is_never_shadowed() {
     assert_eq!(param_count(&format!("{f}f('5');")), 1, "and still rejects a numeric string");
 }
 
-// ==========================================================================
 // C5 — the array-key-cast pair (census bucket vii).
-//
+
 // `decimal-int-string` is the string PHP writes an integer back as, so it is
 // cast to `int` as an array key; `non-decimal-int-string` is its complement
 // within `string`. The two fixtures
 // (`phpdoc_advanced_fallback_{,non_}decimal_int_string`) probe exactly the
 // strings that separate them from `numeric-string`.
-// ==========================================================================
 
 #[test]
 fn decimal_int_string_rejects_the_non_canonical_numerics() {
@@ -801,10 +777,8 @@ fn the_complementary_pair_is_not_refutable_abstractly() {
     assert_eq!(param_findings(proven_src).len(), 1, "the proven value decides");
 }
 
-// ==========================================================================
 // C6 — the subtraction spellings (census bucket x): `non-null-mixed`,
 // `non-empty-mixed`, `non-empty-scalar`.
-// ==========================================================================
 
 #[test]
 fn non_null_mixed_excludes_exactly_null() {

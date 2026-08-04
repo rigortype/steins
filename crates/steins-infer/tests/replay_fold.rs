@@ -29,9 +29,7 @@ use steins_sidecar::{
 };
 use steins_syntax::{ArgValue, SourceTree};
 
-// ---------------------------------------------------------------------------
 // Table builders
-// ---------------------------------------------------------------------------
 
 type Table = HashMap<String, serde_json::Value>;
 
@@ -75,9 +73,7 @@ fn pinned_env_table() -> Table {
     t
 }
 
-// ---------------------------------------------------------------------------
 // (i) Table semantics
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_table_hit_answers_the_fold() {
@@ -193,9 +189,8 @@ fn reflect_drives_the_parameter_counts_over_the_replay_transport() {
             "params_required": 2,
         }),
     );
-    // A row recorded BEFORE the arity surface existed: it still answers the
-    // declaration, and reports no arity — which withholds an arity-pinned rule
-    // instead of admitting it un-countersigned.
+    // A legacy row with no arity still answers the declaration, but withholds
+    // arity-pinned rules.
     with_reflect(&mut t, "strlen", fn_reflection("strlen", "int"));
     let mut folder = TableFolder::with_table(t);
     assert_eq!(folder.builtin_param_counts("substr"), Some((3, 2)));
@@ -223,9 +218,7 @@ fn the_parameter_counts_are_withheld_without_a_live_engine() {
     assert_eq!(folder.builtin_return_type("substr"), None);
 }
 
-// ---------------------------------------------------------------------------
 // (ii) The shared gates, driven through a fake engine
-// ---------------------------------------------------------------------------
 
 /// A [`FoldEngine`] with canned answers — the transport-level Spy. It exists to
 /// drive the SHARED policy in `EngineFolder`, which is the only copy of it.
@@ -522,9 +515,7 @@ fn a_64_bit_engine_is_untouched_by_the_width_safe_subset() {
     assert_eq!(folder.engine_mut().dispatched, vec!["intval".to_owned(), "strval".to_owned()]);
 }
 
-// ---------------------------------------------------------------------------
 // (iii) The differential fixpoint oracle
-// ---------------------------------------------------------------------------
 
 /// The flagship of issue #60/#59: a project call in argument position, whose body
 /// concatenates and then folds through the engine.

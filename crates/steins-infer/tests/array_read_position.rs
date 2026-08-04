@@ -146,9 +146,7 @@ fn dump(decl: &str, expr: &str) -> String {
     dump_with(decl, expr, &mut Mock::sidecar())
 }
 
-// ---------------------------------------------------------------------------
 // The value forms over a provably NON-EMPTY shape: the union alone
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_non_empty_shape_answers_the_value_union_alone() {
@@ -189,9 +187,7 @@ fn next_and_prev_add_false_even_to_a_non_empty_shape() {
     assert_eq!(dump("array{a: int, b: int}", "current($v)"), "dumped type: int (asserted)");
 }
 
-// ---------------------------------------------------------------------------
 // The value forms over a POSSIBLY-EMPTY shape: null for one half, false for the other
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_possibly_empty_shape_adds_null_to_the_pop_and_first_half() {
@@ -239,9 +235,7 @@ fn a_provably_empty_shape_answers_exactly_the_empty_array_value() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // `key`: the one member with a real declaration pin
-// ---------------------------------------------------------------------------
 
 #[test]
 fn key_reuses_the_array_key_first_widening_and_its_real_pin() {
@@ -260,9 +254,7 @@ fn key_reuses_the_array_key_first_widening_and_its_real_pin() {
     assert_eq!(dump_with("array{a: int, b: int}", "current($v)", &mut old), "dumped type: unknown");
 }
 
-// ---------------------------------------------------------------------------
 // ADR-0064 Amendment B: the arity second leg, from all three sides
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_mixed_declaration_alone_does_not_admit_a_rule() {
@@ -282,9 +274,9 @@ fn a_mixed_declaration_alone_does_not_admit_a_rule() {
         );
     }
 
-    // (c) An ABSENT arity withholds, exactly as an absent declaration does. This is
-    // the old-runner / pre-arity-replay-table case, and it must degrade to silence
-    // rather than to the un-countersigned rule.
+    // (c) An ABSENT arity withholds, exactly as an absent declaration does — a
+    // runner with no arity replay table degrades to silence rather than to the
+    // un-countersigned rule.
     let mut old = Mock::without_arity();
     for f in ["current", "reset", "end", "next", "prev", "array_pop", "array_shift",
               "array_first", "array_last"] {
@@ -296,14 +288,12 @@ fn a_mixed_declaration_alone_does_not_admit_a_rule() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Mutation: a read-position call never leaves a stale shape behind
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_mutating_read_position_call_invalidates_the_argument_fact() {
-    // `$z = [1, 2, 3]; array_pop($z); count($z) === 2` — the old count must not
-    // survive the call. Six of the ten take argument 0 by reference
+    // `$z = [1, 2, 3]; array_pop($z); count($z) === 2` — the pre-call count must
+    // not survive the call. Six of the ten take argument 0 by reference
     // (`steins_catalog::out_params` carries all six), and the walk's
     // call-argument invalidation drops the binding's fact at the statement end.
     for f in ["array_pop", "array_shift", "next", "prev", "reset", "end"] {
@@ -322,9 +312,7 @@ fn a_mutating_read_position_call_invalidates_the_argument_fact() {
     assert_eq!(dump("array{a: int, b: int}", "array_pop($v)"), "dumped type: int (asserted)");
 }
 
-// ---------------------------------------------------------------------------
 // The declines
-// ---------------------------------------------------------------------------
 
 #[test]
 fn no_shape_fact_on_the_argument_declines() {

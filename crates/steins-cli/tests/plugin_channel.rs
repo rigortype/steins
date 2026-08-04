@@ -1,16 +1,8 @@
-//! End-to-end tests for the plugin channel tracer (issue #68, ADR-0068).
+//! End-to-end plugin-channel contracts (issue #68, ADR-0068).
 //!
-//! Every test stages `tests/fixtures/plugin_proj` — a Composer project whose
-//! `vendor/` carries one `type: steins-plugin` package — into a private temp
-//! directory, so a test may edit the plugin's manifest, drop the vendor tree, or
-//! write a `steins.toml` without touching the checked-in fixture. The staged
-//! directory is also the working directory, which is where `steins.toml` is read
-//! from.
-//!
-//! The fixture in one breath: `acme/steins-plugin` registers the label
-//! `acme.cache` and colors the plain function `acme_cache_get` with it;
-//! `src/app.php` declares `#[\Steins\Effect('acme.cache')]`, calls that function,
-//! and — one function further down — misspells the label.
+//! Each test stages a mutable Composer fixture. Its plugin registers
+//! `acme.cache` and assigns it to `acme_cache_get`; the application exercises
+//! propagation, declaration, and typo handling.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,7 +12,6 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// The checked-in fixture project.
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("plugin_proj")
 }
@@ -31,7 +22,6 @@ struct Run {
     stderr: String,
 }
 
-/// A staged, mutable copy of the fixture project, removed on drop.
 struct Staged(PathBuf);
 
 impl Staged {
@@ -55,12 +45,10 @@ impl Staged {
         let _ = std::fs::remove_dir_all(self.0.join(rel));
     }
 
-    /// The plugin's manifest, rewritten.
     fn manifest(&self, contents: &str) {
         self.write("vendor/acme/steins-plugin/steins-plugin.json", contents);
     }
 
-    /// Run `steins <args> src` with the staged project as the working directory.
     fn run(&self, args: &[&str]) -> Run {
         let mut argv: Vec<&str> = args.to_vec();
         argv.push("src");
@@ -77,7 +65,6 @@ impl Staged {
         self.run(&["check", "--no-php"])
     }
 
-    /// `annotate --format json` over the one analyzed file.
     fn annotate_json(&self) -> serde_json::Value {
         let out = Command::new(bin())
             .args(["annotate", "--format", "json", "src/app.php"])
@@ -107,7 +94,6 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-/// The `declared` array `annotate --format json` reports for one function.
 fn declared_of(doc: &serde_json::Value, name: &str) -> Vec<String> {
     doc["functions"]
         .as_array()
@@ -125,10 +111,6 @@ fn declared_of(doc: &serde_json::Value, name: &str) -> Vec<String> {
 
 const UNKNOWN_LABEL: &str = "effect.unknown-label";
 
-// ---------------------------------------------------------------------------
-// GOAL 1 — the registry opens for a registered label, and only for it.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn a_registered_label_is_accepted_and_a_typo_of_it_is_not() {
     let p = Staged::new("registry");
@@ -145,8 +127,7 @@ fn a_registered_label_is_accepted_and_a_typo_of_it_is_not() {
         "the registered label is legal where it is declared:\n{}",
         r.stdout
     );
-    // The suggestion searches the EXTENDED registry, so it can name a label no
-    // builtin table contains.
+    // Suggestions include plugin-registered labels, not only built-ins.
     assert!(
         r.stdout.contains("did you mean 'acme.cache'?"),
         "the plugin's label is the suggestion:\n{}",
@@ -159,17 +140,11 @@ fn a_registered_label_is_accepted_and_a_typo_of_it_is_not() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// GOAL 2 — a plugin coloring reaches caller summaries, in the declared lane.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn a_plugin_coloring_reaches_the_callers_declared_lane_without_discharging_taint() {
     let p = Staged::new("declared");
     let doc = p.annotate_json();
-    // The direct caller of the colored function...
     assert_eq!(declared_of(&doc, "read_cached"), ["acme.cache"]);
-    // ...and its own caller, by ordinary propagation along the call edge.
     assert_eq!(declared_of(&doc, "warm_cache"), ["acme.cache"]);
     for name in ["read_cached", "warm_cache"] {
         let f = doc["functions"]
@@ -178,9 +153,7 @@ fn a_plugin_coloring_reaches_the_callers_declared_lane_without_discharging_taint
             .iter()
             .find(|f| f["name"] == name)
             .unwrap();
-        // ADR-0068 §1: an unchecked assertion bounds nothing. The proven lane
-        // stays empty and the exhaustiveness taint survives — "declared
-        // acme.cache, and possibly more".
+        // Unchecked plugin assertions remain declared and non-exhaustive (ADR-0068 §1).
         assert_eq!(f["effects"].as_array().unwrap().len(), 0, "{name} proves nothing");
         assert_eq!(f["exhaustive"], false, "{name} keeps its taint");
     }
@@ -203,10 +176,6 @@ fn the_declared_label_shows_up_in_the_effect_diff_surface() {
     assert_eq!(warm["proven"], serde_json::json!([]));
 }
 
-// ---------------------------------------------------------------------------
-// GOAL 3 — no plugin, no change.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn a_project_without_the_plugin_behaves_exactly_as_before() {
     let with = Staged::new("with-plugin");
@@ -223,18 +192,12 @@ fn a_project_without_the_plugin_behaves_exactly_as_before() {
     assert!(r.stdout.contains("'acme.cache'") && r.stdout.contains("'acme.cach'"), "{}", r.stdout);
     assert!(r.stderr.lines().all(|l| !l.contains("plugin")), "no vendor tree, nothing to say");
 
-    // And nothing the plugin would have contributed leaks into the summaries.
     let doc = without.annotate_json();
     assert!(declared_of(&doc, "read_cached").is_empty());
     assert!(declared_of(&doc, "warm_cache").is_empty());
 
-    // The two runs differ ONLY in the plugin-derived lines.
     assert_eq!(with.check().code, r.code, "both are findings runs");
 }
-
-// ---------------------------------------------------------------------------
-// ADR-0068 §2 — label-root ownership.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_label_outside_the_vendor_root_is_rejected_on_stderr_and_the_rest_still_loads() {
@@ -252,9 +215,8 @@ fn a_label_outside_the_vendor_root_is_rejected_on_stderr_and_the_rest_still_load
         "the refusal names itself on stderr:\n{}",
         r.stderr
     );
-    // A refusal is a notice, never a diagnostic.
+    // Rejected labels are notices, not diagnostics.
     assert!(!r.stdout.contains("email.send"), "no finding was manufactured:\n{}", r.stdout);
-    // The rest of the plugin loaded: the vendor-root label and the coloring stand.
     assert_eq!(r.stdout.matches(UNKNOWN_LABEL).count(), 1, "{}", r.stdout);
     assert_eq!(declared_of(&p.annotate_json(), "warm_cache"), ["acme.cache"]);
 }
@@ -277,14 +239,9 @@ fn an_explicitly_listed_plugin_may_register_a_cross_vendor_label() {
     assert_eq!(declared_of(&p.annotate_json(), "warm_cache"), ["email.send"]);
 }
 
-// ---------------------------------------------------------------------------
-// Discovery controls.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn an_allow_list_replaces_discovery_rather_than_extending_it() {
     let p = Staged::new("allow-replaces");
-    // The installed plugin is real and of the right type; the list names another.
     p.write("steins.toml", "[plugins]\nallow = [\"other/steins-plugin\"]\n");
     let r = p.check();
     assert_eq!(
@@ -319,15 +276,10 @@ fn an_unsupported_api_version_skips_the_plugin_and_says_so() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Precedence — a plugin recolors nothing that is already spoken for.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn a_project_function_of_the_same_name_shadows_the_plugin_coloring() {
     let p = Staged::new("shadowing");
-    // The project defines the very function the plugin colors. Its own body is
-    // the truth; the plugin's assertion is never reached (ADR-0068 precedence).
+    // Project definitions override plugin colorings (ADR-0068).
     p.write(
         "src/cache.php",
         concat!(
@@ -340,8 +292,6 @@ fn a_project_function_of_the_same_name_shadows_the_plugin_coloring() {
         declared_of(&doc, "read_cached").is_empty(),
         "the project body answers, so no plugin label enters the lane"
     );
-    // And the project's own function is proven pure and exhaustive — the plugin
-    // could neither color it nor taint it.
     let own = doc["functions"]
         .as_array()
         .unwrap()
@@ -350,7 +300,7 @@ fn a_project_function_of_the_same_name_shadows_the_plugin_coloring() {
         .unwrap()
         .clone();
     assert_eq!(own["exhaustive"], true, "a resolved callee leaves no taint");
-    // The envelope label itself is still registered, so it stays legal.
+    // Shadowing a coloring does not unregister its label.
     let r = p.check();
     assert_eq!(r.stdout.matches(UNKNOWN_LABEL).count(), 1, "only the typo:\n{}", r.stdout);
 }

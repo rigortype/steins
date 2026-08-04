@@ -1,6 +1,4 @@
-//! A dependency-free SHA-256 (FIPS 180-4), used only to derive the stable
-//! baseline hash (ADR-0022). Not performance-critical: one short digest per
-//! finding at baseline read/write time.
+//! Dependency-free SHA-256 (FIPS 180-4) for stable baseline hashes (ADR-0022).
 
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,

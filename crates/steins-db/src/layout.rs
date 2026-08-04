@@ -18,8 +18,7 @@
 //! compares against is captured at construction, including the working directory,
 //! so a replay with the same inputs gives the same answer (ADR-0048's canonical
 //! entry state). [`crate::composer::discover`] is the boundary that reads the
-//! filesystem; it runs
-//! once per run, before any salsa input is set.
+//! filesystem; it runs once per run, before any salsa input is set.
 //!
 //! # The rule
 //!
@@ -193,8 +192,7 @@ impl GoverningRoot {
 /// read against, and the governing roots discovered under the analyzed paths.
 ///
 /// [`ProjectLayout::fallback`] is the no-manifest layout — every question falls
-/// through to [`fallback_is_vendor`], which is exactly the behavior that predates
-/// this type.
+/// through to [`fallback_is_vendor`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectLayout {
     /// The directory a relative analyzed path is resolved against. Captured, not
@@ -306,8 +304,8 @@ impl ProjectLayout {
     }
 }
 
-/// The historical predicate: a path is vendor when any component is literally
-/// `vendor` (ADR-0015). Kept as the documented floor under [`ProjectLayout`], and
+/// The directory-name predicate: a path is vendor when any component is literally
+/// `vendor` (ADR-0015). Serves as the documented floor under [`ProjectLayout`], and
 /// as the whole answer when no `composer.json` governs a path.
 #[must_use]
 pub fn fallback_is_vendor(path: &str) -> bool {

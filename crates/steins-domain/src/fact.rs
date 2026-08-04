@@ -412,8 +412,8 @@ fn summarize(vals: &[Val]) -> Option<Fact> {
         return Some(Fact::Singleton(Val::Null));
     };
     // An all-array overflow descends to the abstract array stratum rather than
-    // being dropped (ADR-0062 §3). A *mixed* array/non-array overflow is still
-    // unsummarizable, exactly as before.
+    // being dropped (ADR-0062 §3). A *mixed* array/non-array overflow is
+    // unsummarizable.
     if scalars.iter().all(|v| matches!(v, Val::Array(_))) {
         return Some(shape_descent(&scalars, nullable));
     }

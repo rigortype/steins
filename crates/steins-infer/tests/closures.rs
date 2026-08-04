@@ -60,8 +60,6 @@ fn capture_snapshot_bad_value_fires_with_closure_provenance() {
 
 #[test]
 fn closure_arg_mismatch_fires_at_call_site() {
-    // $f = fn(int $w) => width($w); $f("abc") — the literal "abc" against the arrow
-    // param int $w is a proven coercive TypeError at the call site.
     let src = format!("<?php\n{WIDTH}$f = fn(int $w) => width($w);\n$f(\"abc\");\n");
     let d = only(&src);
     assert!(d.message.contains("cannot become int $w"), "{}", d.message);
@@ -90,8 +88,6 @@ fn reassigned_closure_uses_new_behavior() {
 
 #[test]
 fn reassignment_to_safe_closure_silences() {
-    // The reverse: a bad-arg closure reassigned to a param-less one → the call is
-    // silent (the new closure ignores the arg).
     let src = format!(
         "<?php\n{WIDTH}$f = fn(int $w) => width($w);\n$f = fn() => 1;\n$f(\"abc\");\n"
     );
@@ -114,8 +110,6 @@ fn by_ref_use_poison_suppresses_descent() {
 
 #[test]
 fn string_callable_resolves_as_function_name() {
-    // $fn = 'width'; $fn("abc") — the proven string resolves as the function name,
-    // so the "abc" argument is checked against width(int $w) → fires.
     let src = format!("<?php\n{WIDTH}$fn = \"width\";\n$fn(\"abc\");\n");
     let d = only(&src);
     assert!(d.message.contains("cannot become int"), "{}", d.message);
@@ -125,8 +119,6 @@ fn string_callable_resolves_as_function_name() {
 
 #[test]
 fn unresolved_var_call_is_silent() {
-    // $f is unknown (a parameter with no proven value) → $f("abc") resolves no
-    // target → silent (opaque; no false positive).
     let src = "<?php\nfunction run($f) { $f(\"abc\"); }\n";
     assert_eq!(n(src), 0, "unresolved $f() is silent");
 }

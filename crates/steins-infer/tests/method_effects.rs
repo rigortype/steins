@@ -1,15 +1,12 @@
 //! Acceptance tests for the **method-shaped catalog rows** (issue #67): the
-//! class-world twin of `effect_labels`, and `io.db`'s first producer.
+//! class-world twin of `effect_labels`, and `io.db`'s producer. `PDO::query` is
+//! a row keyed by a class rather than a function name.
 //!
-//! Until now every effect in Steins came from a function name. `PDO::query` is
-//! the first row keyed by a class, and `io.db` — registered since ADR-0018 with
-//! nothing to emit it — finally has one.
-//!
-//! The tracer is deliberately narrow, and the tests are mostly about the *edges*
-//! of that narrowness, because that is where a zero-FP claim is either kept or
-//! lost: a receiver the analyzer cannot name is silent and tainted, a namespaced
-//! `PDO` is somebody else's class, and a project class named `PDO` shadows the
-//! catalog outright — its body is the truth, not a hand-written row.
+//! The tracer is deliberately narrow, and the tests focus on the *edges* of that
+//! narrowness, where a zero-FP claim is kept or lost: a receiver the analyzer
+//! cannot name is silent and tainted, a namespaced `PDO` is somebody else's
+//! class, and a project class named `PDO` shadows the catalog — its body is the
+//! truth, not a hand-written row.
 
 use steins_infer::{Diagnostic, EFFECT_ID, EffectSummary, check, effect_summary};
 use steins_syntax::SourceTree;
@@ -37,7 +34,7 @@ fn summary(src: &str, symbol: &str) -> EffectSummary {
         .unwrap_or_else(|| panic!("no summary for {symbol}"))
 }
 
-// ---- The headline: PDO::query on a Pure function -------------------------
+// The headline: PDO::query on a Pure function
 
 #[test]
 fn pure_calling_pdo_query_is_flagged_with_exact_message() {
@@ -59,7 +56,7 @@ fn io_db_shows_up_in_the_effect_summary() {
     assert!(s.exhaustive, "a catalogued row is a complete answer — no `…?`");
 }
 
-// ---- Subsumption: the envelope that passes and the one that does not ------
+// Subsumption: the envelope that passes and the one that does not
 
 #[test]
 fn effect_io_subsumes_io_db() {
@@ -83,14 +80,12 @@ fn sibling_io_fs_envelope_does_not_admit_io_db() {
     );
 }
 
-// ---- Every row in the tracer, through the one receiver form that resolves --
+// Every row in the tracer, through the one receiver form that resolves
 
 #[test]
 fn all_six_rows_reach_a_pure_envelope() {
-    // The `PDOStatement` half is exercised through a direct `new` receiver: no
-    // real program instantiates one (the constructor is private), but the row is
-    // shipped for the day a `->prepare()` return type flows, and this is the
-    // static form that reaches it today.
+    // `PDOStatement` has a private constructor, but a direct `new` is the only
+    // receiver form that exercises its rows until `->prepare()` return types flow.
     for (class, method) in [
         ("PDO", "query"),
         ("PDO", "exec"),
@@ -119,7 +114,7 @@ fn class_and_method_names_fold_case() {
     assert!(d.message.contains("has effect io.db"), "got: {}", d.message);
 }
 
-// ---- Transitive propagation through a project helper ---------------------
+// Transitive propagation through a project helper
 
 #[test]
 fn io_db_propagates_through_a_helper_with_via_provenance() {
@@ -132,13 +127,13 @@ fn io_db_propagates_through_a_helper_with_via_provenance() {
     assert_eq!(d.line, 3, "reported at the outer rows() call site");
 }
 
-// ---- An unresolvable receiver is exactly as silent as it was -------------
+// An unresolvable receiver is exactly as silent as it was
 
 #[test]
 fn variable_receiver_stays_silent_and_taints() {
-    // `$pdo->query()` is the shape real code writes, and it is deliberately NOT
-    // covered: this tracer adds no value tracking, so the receiver's class is not
-    // proven, and an unproven effect is silence plus taint — never a guess.
+    // `$pdo->query()` is not covered: the tracer adds no value tracking, so the
+    // receiver's class is not proven, and an unproven effect is silence plus
+    // taint — never a guess.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(\\PDO $pdo): void { $pdo->query(\"SELECT 1\"); }\n";
     assert_eq!(effects(src).len(), 0, "unproven receiver → no finding");
     let s = summary(src, "f");
@@ -148,9 +143,7 @@ fn variable_receiver_stays_silent_and_taints() {
 
 #[test]
 fn local_binding_of_a_new_pdo_is_not_tracked_either() {
-    // Same story one step removed: the origin scan records only the receiver
-    // forms it can name without a flow environment, and a local binding is not
-    // one of them.
+    // The origin scan cannot name a local binding without a flow environment.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(): void { $pdo = new \\PDO(\"sqlite::memory:\"); $pdo->query(\"SELECT 1\"); }\n";
     assert_eq!(effects(src).len(), 0, "a bound receiver is still unproven here");
     assert!(!summary(src, "f").exhaustive, "tainted, not colored");
@@ -158,8 +151,8 @@ fn local_binding_of_a_new_pdo_is_not_tracked_either() {
 
 #[test]
 fn a_chained_statement_receiver_is_unproven() {
-    // `->prepare()` return types do not flow yet, so the `->execute()` receiver
-    // has no proven class. The PDOStatement rows are waiting for this to change.
+    // `->prepare()` return types do not flow, so the `->execute()` receiver has
+    // no proven class and the PDOStatement rows stay dormant.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(): void { (new \\PDO(\"x\"))->prepare(\"SELECT 1\")->execute(); }\n";
     let f = effects(src);
     assert_eq!(f.len(), 1, "only the prepare() row fires: {f:#?}");
@@ -176,13 +169,12 @@ fn an_uncatalogued_pdo_method_taints_rather_than_going_pure() {
     assert!(!summary(src, "f").exhaustive, "no row → taint");
 }
 
-// ---- Precedence: a project class shadows the catalog ---------------------
+// Precedence: a project class shadows the catalog
 
 #[test]
 fn a_project_class_named_pdo_shadows_the_catalog() {
-    // The edge case that proves the ordering: the project's own `PDO::query` is
-    // the truth about what `PDO::query` does here, and the catalog never speaks.
-    // Its body's real effect (nondet.random) is what surfaces — not io.db.
+    // The project's own `PDO::query` is the truth here, not the catalog: its
+    // body's real effect (nondet.random) surfaces, not io.db.
     let src = "<?php\nfinal class PDO {\n  public function query(string $q): int { return rand(); }\n}\n#[\\Steins\\Pure]\nfunction f(): void { (new PDO())->query(\"SELECT 1\"); }\n";
     let d = one(src);
     assert_eq!(
@@ -193,14 +185,14 @@ fn a_project_class_named_pdo_shadows_the_catalog() {
 
 #[test]
 fn a_pure_project_pdo_is_silent_under_pure() {
-    // And when the shadowing class is genuinely pure, the whole thing is silent —
-    // the catalog row would have made this a false positive.
+    // A genuinely pure shadowing class is silent — the catalog row would have
+    // made this a false positive.
     let src = "<?php\nfinal class PDO {\n  public function query(string $q): string { return strtolower($q); }\n}\n#[\\Steins\\Pure]\nfunction f(): void { (new PDO())->query(\"SELECT 1\"); }\n";
     assert_eq!(effects(src).len(), 0, "the project class decides, and it is pure");
     assert!(summary(src, "f").exhaustive, "a resolved project edge is exhaustive");
 }
 
-// ---- The key is the global class name, resolved, not spelled -------------
+// The key is the global class name, resolved, not spelled
 
 #[test]
 fn a_namespaced_pdo_is_not_the_engines_pdo() {
@@ -214,14 +206,14 @@ fn a_namespaced_pdo_is_not_the_engines_pdo() {
 
 #[test]
 fn an_imported_pdo_inside_a_namespace_is_the_engines_pdo() {
-    // The same file with `use PDO;` resolves back to the global name, and the row
-    // applies — the lookup keys the resolved FQN, not the spelling.
+    // `use PDO;` resolves back to the global name, so the row applies — the
+    // lookup keys the resolved FQN, not the spelling.
     let src = "<?php\nnamespace App;\nuse PDO;\n#[\\Steins\\Pure]\nfunction f(): void { (new PDO(\"x\"))->query(\"SELECT 1\"); }\n";
     let d = one(src);
     assert!(d.message.contains("PDO::query() has effect io.db"), "got: {}", d.message);
 }
 
-// ---- The rows never leak into the function-keyed world -------------------
+// The rows never leak into the function-keyed world
 
 #[test]
 fn no_plain_function_is_colored_io_db() {

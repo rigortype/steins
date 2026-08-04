@@ -1,6 +1,6 @@
 //! The salsa demand-driven query database (ADR-0009).
 //!
-//! Every fact about a file is a memoized salsa query from day one — not a batch
+//! Every fact about a file is a memoized salsa query, not a batch
 //! pipeline. This crate owns the database, the file input, and the *syntax-level*
 //! queries ([`parse`], [`function_index`]). Semantic queries (the proof-layer
 //! checks) are tracked queries defined in `steins-infer` against the [`Db`] trait
@@ -72,8 +72,8 @@ pub fn function_index(db: &dyn Db, file: SourceFile) -> Vec<FunctionDecl> {
 /// the labels a Composer plugin registered and the functions it colors are project
 /// input state, read once from the vendor tree by [`plugins::PluginFacts::discover`],
 /// and a replay must reach the same verdict from the same inputs.
-/// [`PluginFacts::none`] is the empty channel — a project with no plugin behaves
-/// exactly as it did before the channel existed.
+/// [`PluginFacts::none`] is the empty channel — a project with no plugin carries
+/// no registered labels or colorings.
 #[salsa::input]
 pub struct Project {
     #[returns(deref)]
@@ -111,8 +111,8 @@ pub enum Resolve {
 ///
 /// **Granularity (ADR-0009):** this is one monolithic tracked query, so *any*
 /// file edit invalidates it and every analysis downstream of it. That is
-/// acceptable for the batch CLI; the recorded plan is per-symbol salsa interning
-/// once the LSP lands, so an edit to one file re-indexes only its symbols.
+/// acceptable for the batch CLI; per-symbol salsa interning (so an edit to one
+/// file re-indexes only its symbols) is the recorded plan for the LSP.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ProjectIndex {
     /// Unambiguous function FQN → definition site.

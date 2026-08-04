@@ -2,9 +2,9 @@
 //!
 //! `seed_this_object` binds `$this` to `HeapObj { class: <enclosing class>, … }`,
 //! but the enclosing class is only a **lower bound**: any subclass instance runs the
-//! method. Before the `class_exact` bit, every heap-class consumer read that lower
-//! bound as an *exact* class, so a No-side conclusion (`is_a(enclosing, T) = No`)
-//! manufactured a false positive — the runtime object may be a descendant that *is*
+//! method. Treating that lower bound as exact can make a No-side conclusion
+//! (`is_a(enclosing, T) = No`) manufacture a false positive — the runtime object
+//! may be a descendant that *is*
 //! a `T`. The bit gates every No-side consumer: acceptance definite-No,
 //! `eval_instanceof`'s No verdict, exact-dispatch, and phpdoc `CVal::Object`.
 //!
@@ -28,15 +28,11 @@ fn ids(src: &str) -> Vec<String> {
     findings(src).into_iter().map(|d| d.id.to_owned()).collect()
 }
 
-// ==========================================================================
-// 1. The two live FP shapes from the audit — SILENT after the fix.
-//    (Both FIRED a definite-No `type.argument-mismatch` / a wrong dead branch
-//     before the `class_exact` bit landed.)
-// ==========================================================================
+// 1. Audit FP regressions: both must remain silent.
 
 #[test]
 fn fp_shape1_this_argument_lower_bound_is_silent() {
-    // FIRED BEFORE: `$this` "holds a Node2", `add_leaf` wants a `Leaf`,
+    // Regression: `$this` typed only as Node2 made `add_leaf(Leaf)` appear invalid:
     // is_a(Node2, Leaf) = No under complete enumeration → definite-No FP.
     // Runtime `(new Leaf())->register()` is fine — `$this` IS a Leaf.
     let src = "<?php declare(strict_types=1);
@@ -52,7 +48,7 @@ function add_leaf(Leaf $l): void {}
 
 #[test]
 fn fp_shape2_this_instanceof_subclass_branch_not_dead() {
-    // FIRED BEFORE: `$this instanceof Sub2` answered a definite No, the then-branch
+    // Regression: `$this instanceof Sub2` answered a definite No, so the then branch
     // was treated dead, so `$v` stayed Singleton(1) and `takes_string($v)` fired a
     // definite `type.argument-mismatch`. Runtime `(new Sub2())->m()` sets $v="hello".
     let src = "<?php declare(strict_types=1);
@@ -72,7 +68,7 @@ function takes_string(string $s): void {}
 
 #[test]
 fn fp_shape3_laundered_alias_dispatch_is_guarded() {
-    // FIRED BEFORE: `$u = $this` laundered the enclosing class into an "exact"
+    // Regression: `$u = $this` laundered the enclosing class into an "exact"
     // `Receiver::Var`, so `$u->m("abc")` resolved EXACTLY to Base3::m and checked
     // "abc" against its int param → FP. A subclass may override `m` with a widened
     // (string-accepting) signature — the runtime is not bound to Base3::m — so an
@@ -87,9 +83,7 @@ class Base3 {
     assert_eq!(n(src), 0, "aliased $this is not exact → guarded dispatch → overridable m silent");
 }
 
-// ==========================================================================
 // 2. Retention — TRUE positives must still fire.
-// ==========================================================================
 
 #[test]
 fn retention_new_object_incompatible_param_still_fires() {
@@ -166,9 +160,7 @@ class Base5 {
     assert_eq!(ids(src), vec!["type.argument-mismatch"], "final m resolves under the guard → fires");
 }
 
-// ==========================================================================
 // 3. Alias shares the bit; clone copies the bit.
-// ==========================================================================
 
 #[test]
 fn alias_shares_inexact_bit_silent() {

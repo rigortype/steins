@@ -1,15 +1,11 @@
-//! ADR-0073 — statement-level inline `/** @var T $x */` casts, at fixture level.
+//! Statement-level inline `/** @var T $x */` casts (ADR-0073).
 //!
-//! The tag re-declares the named variable's type from its statement on: the
-//! contract lane is replaced with `Asserted` arms (ADR-0037 — a docblock the
-//! runtime never checks) and a single-array-arm lane seeds the value lane with
-//! its canonical shape fact, exactly as the `@param` entry seeding does
-//! (ADR-0052 §9 / ADR-0062 S3). What the S7 projection family and the dump
-//! surface then see over a cast variable is indistinguishable from the same
-//! declaration arriving as a `@param` — which is the point.
+//! The tag replaces the variable's contract lane with `Asserted` arms (ADR-0037).
+//! A single array arm also seeds the value lane with its canonical shape fact
+//! (ADR-0052 §9, ADR-0062 S3), matching `@param` entry seeding.
 //!
-//! Zero emission is asserted on every fixture here (`one_type`), the A-G9
-//! corollary: a cast-derived fact never premises a finding.
+//! Cast-derived facts never premise a finding; every fixture asserts zero
+//! non-debug emission.
 
 use std::collections::HashMap;
 
@@ -88,9 +84,9 @@ fn cast_dump(decl: &str, expr: &str) -> String {
     ))
 }
 
-// ---------------------------------------------------------------------------
+
 // The cast seeds what a `@param` would (the measured gap)
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn a_cast_shape_feeds_the_projection_family() {
@@ -130,9 +126,9 @@ fn a_nullable_array_cast_declines_the_count_transfer() {
     );
 }
 
-// ---------------------------------------------------------------------------
+
 // Flow: where the cast is (and is not) in force
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn the_cast_is_in_force_from_its_statement_on_and_a_re_cast_replaces_it() {
@@ -149,9 +145,9 @@ fn the_cast_is_in_force_from_its_statement_on_and_a_re_cast_replaces_it() {
 
 #[test]
 fn an_assignment_to_the_variable_erases_the_cast() {
-    // The assignment-form `@var` (PHPStan casts the RHS there) is a separate
-    // feature this slice leaves a silence: the rebind forgets the lane, so the
-    // tail sees plain `array` again — never a stale claim about the old value.
+    // Assignment-form `@var` (PHPStan casts the RHS there) is unsupported: the
+    // rebind forgets the lane, so the tail sees plain `array` again — never a
+    // stale claim about the prior value.
     let src = "<?php\nfunction f(array $arr, $u): void {\n  /** @var array{a: int} $arr */\n  $arr = $u;\n  \\PHPStan\\dumpType(count($arr));\n}\n";
     assert_eq!(one_type(src), "dumped type: int<0, max>");
 }
@@ -162,9 +158,9 @@ fn a_comment_in_the_gap_breaks_the_adjacency() {
     assert_eq!(one_type(src), "dumped type: int<0, max>");
 }
 
-// ---------------------------------------------------------------------------
+
 // The guards: property targets, templates, precedence
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn a_property_target_never_casts_the_receiver() {

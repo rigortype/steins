@@ -1,16 +1,13 @@
-//! ADR-0049 §8 / S6: `phpdoc.undefined-method`, the declared-receiver lane.
+//! `phpdoc.undefined-method`, the declared-receiver lane (ADR-0049 §8 / S6).
 //!
-//! The contract-layer twin of `call.undefined-method` (S2). It fires on a receiver
-//! whose *declared* type — a phpdoc/native `@param`, narrowed by branch analysis
-//! (N4) to a surviving contract-arm list — provably lacks the method under the §8
-//! ladder: the §4 chain legs PLUS **descendant closure** (a subclass, even an
-//! `eval`-minted one, could satisfy the contract and define the method). "Conditional
-//! is not enough" (§8), so the ladder is as strict as any proof id even though the
-//! premises may be `Asserted`.
+//! This contract-layer twin of `call.undefined-method` fires when a receiver's
+//! narrowed declared type provably lacks the method. Its ladder adds descendant
+//! closure: a subclass, including one minted by `eval`, could satisfy the
+//! contract and define the method. "Conditional is not enough" (§8), even when
+//! premises are `Asserted`.
 //!
-//! Every ladder leg ships with a silence fixture (§10 silence-matrix discipline);
-//! the firing fixtures prove it speaks when every leg holds, incl. the disjointness
-//! rule (an exact receiver is S2's id, never both).
+//! Each ladder leg has a silence fixture. Exact receivers remain disjoint and use
+//! S2's id.
 
 use steins_infer::{
     CALL_UNDEFINED_METHOD_ID, Diagnostic, Folder, PHPDOC_UNDEFINED_METHOD_ID, check_with,
@@ -84,9 +81,9 @@ function f(object $value): void {
 }
 ";
 
-// ---------------------------------------------------------------------------
+
 // Firing fixtures.
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn fires_on_the_conformance_narrowing_shape() {
@@ -144,9 +141,9 @@ fn fires_when_a_conditional_decl_in_chain_but_dam_is_clear() {
     assert_eq!(d.len(), 1, "{d:?}");
 }
 
-// ---------------------------------------------------------------------------
+
 // Silence matrix: one fixture per ladder leg.
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn silent_when_a_descendant_defines_the_method() {
@@ -263,9 +260,9 @@ fn silent_on_a_nullsafe_call() {
     assert!(d.is_empty(), "{d:?}");
 }
 
-// ---------------------------------------------------------------------------
+
 // Adversarial (audit G4): descendant-closure edge kinds.
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn silent_on_an_interface_arm_with_an_enum_implementor() {
@@ -306,9 +303,9 @@ fn silent_on_a_lying_param_is_not_claimed_here_it_fires_correctly() {
     assert_eq!(d.len(), 1, "the contract-conditional finding is correct, not an FP: {d:?}");
 }
 
-// ---------------------------------------------------------------------------
+
 // Disjointness with S2.
-// ---------------------------------------------------------------------------
+
 
 #[test]
 fn exact_receiver_is_s2s_id_never_both() {
