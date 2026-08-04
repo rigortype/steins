@@ -29,7 +29,7 @@ use steins_db::{
 };
 use steins_edit::{
     ByteSpan, Edit, EditPlan, PartitionMap, TransformReport, VouchSet, plan_phpdoc_honesty,
-    plan_phpdoc_to_native, unified_diff,
+    plan_phpdoc_to_native, plan_throws_envelope, unified_diff,
 };
 use steins_infer::{
     Diagnostic, EffectSummary, LineFact, NoFold, SOUND_SUBSET_NOTICE, SidecarFolder,
@@ -75,7 +75,7 @@ fn dispatch(args: &[String]) -> ExitCode {
             );
             errln!("       steins annotate [--no-php] [--format text|json] <file.php>");
             errln!(
-                "       steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--format text|json] <paths...>"
+                "       steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope> [--apply] [--format text|json] <paths...>"
             );
             errln!(
                 "       steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>"
@@ -743,12 +743,13 @@ fn match_baseline(
     (reported, baselined, stale, surface_notice)
 }
 
-/// `steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--format
-/// text|json] <paths...>` (ADR-0020/0034). Dry-run by default: prints a unified
-/// diff and a refusal report, and runs the dual-verification post-check (ADR-0034
-/// point 3a — the edited project must produce *zero new diagnostics*). `--apply`
-/// writes the edited files only after the post-check passes. Exits 2 on usage
-/// error, 1 when the post-check fails, 0 otherwise.
+/// `steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope> [--apply]
+/// [--format text|json] <paths...>` (ADR-0020/0034). Dry-run by default: prints a
+/// unified diff and a refusal report, and runs the dual-verification post-check
+/// (ADR-0034 point 3a — the edited project must produce *zero new diagnostics*
+/// on the default surface). `--apply` writes the edited files only after the
+/// post-check passes. Exits 2 on usage error, 1 when the post-check fails, 0
+/// otherwise.
 fn run_transform(args: &[String]) -> ExitCode {
     let mut format = Format::Text;
     let mut apply = false;
@@ -798,23 +799,25 @@ fn run_transform(args: &[String]) -> ExitCode {
 
     // Select the transform planner by subcommand. `action` is the verb the oracle
     // summary uses for an edited site.
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, PartialEq)]
     enum Kind {
         Promote,
         Honesty,
+        ThrowsEnvelope,
     }
     let (kind, action) = match subcommand.as_deref() {
         Some("phpdoc-to-native") => (Kind::Promote, "promoted"),
         Some("phpdoc-honesty") => (Kind::Honesty, "rewritten"),
+        Some("throws-envelope") => (Kind::ThrowsEnvelope, "seeded"),
         Some(other) => {
             errln!(
-                "steins: unknown transform `{other}` (available: phpdoc-to-native, phpdoc-honesty)"
+                "steins: unknown transform `{other}` (available: phpdoc-to-native, phpdoc-honesty, throws-envelope)"
             );
             return ExitCode::from(2);
         }
         None => {
             errln!(
-                "steins: transform requires a name (usage: steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--config steins.toml] [--format text|json] <paths...>)"
+                "steins: transform requires a name (usage: steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope> [--apply] [--config steins.toml] [--format text|json] <paths...>)"
             );
             return ExitCode::from(2);
         }
@@ -880,12 +883,20 @@ fn run_transform(args: &[String]) -> ExitCode {
     let report = match kind {
         Kind::Promote => plan_phpdoc_to_native(&db, project, &vouches, partitions.as_ref()),
         Kind::Honesty => plan_phpdoc_honesty(&db, project, &vouches, partitions.as_ref()),
+        // Envelope seeding takes no vouch set: proven escapes are forward facts
+        // of the declaration's own body/callees, so the ADR-0046 §2 caller-
+        // enumerability obstacles (and their vouching valve) have no bearing.
+        Kind::ThrowsEnvelope => plan_throws_envelope(&db, project, partitions.as_ref()),
     };
 
     // Vouching an already-benign (or nonexistent) site is a no-op the user should
-    // know about (ADR-0046 §2).
-    for entry in vouches.unused() {
-        errln!("steins: vouched site `{entry}` matched no dynamic-code obstacle (no-op)");
+    // know about (ADR-0046 §2). Skipped for a transform that consults no vouches
+    // at all — there, silence about an inert section beats a misleading "no-op"
+    // line per entry.
+    if kind != Kind::ThrowsEnvelope {
+        for entry in vouches.unused() {
+            errln!("steins: vouched site `{entry}` matched no dynamic-code obstacle (no-op)");
+        }
     }
 
     // Dual verification (ADR-0034 point 3a): re-analyze the edited project and
@@ -1226,6 +1237,15 @@ struct PostCheck {
 /// are filtered from both sides, matching `check`'s default (ADR-0015). Shared by
 /// `transform` (both dry-run and `--apply`) and `check --fix`: one gate, one
 /// discipline.
+///
+/// The comparison runs on the **default surface** (proof + mechanics), the same
+/// surface a bare `steins check` shows (issue #115 decision, uniform across
+/// transforms). A transform whose whole point is creating contract-layer
+/// envelopes (`throws-envelope`) legitimately makes contract findings visible
+/// under an opt-up profile — a seeded `@throws` on an override can surface
+/// `throw.liskov-widened` against a narrower ancestor envelope, which is debt
+/// made visible, not a regression. The post-check's safety net is the proof
+/// layer: the fp-gate discipline transposed to rewriting.
 fn post_check(
     db: &SteinsDatabase,
     project: Project,
@@ -1235,7 +1255,14 @@ fn post_check(
     if plan.is_empty() {
         return PostCheck { ok: true, new_diagnostics: Vec::new() };
     }
-    let before = filtered_diagnostics(project.layout(db), check_project(db, project, &mut NoFold));
+    let surface = profile::ProfileConfigs::default()
+        .resolve(None)
+        .expect("the built-in default profile always resolves");
+    let before = filtered_diagnostics(
+        project.layout(db),
+        &surface,
+        check_project(db, project, &mut NoFold),
+    );
 
     // Build the edited project in a fresh database (avoids salsa mutation subtlety
     // and keeps the pre-edit query results intact for `before`).
@@ -1249,7 +1276,11 @@ fn post_check(
     // or the before/after comparison is measuring the layout, not the edit.
     let eproject =
         Project::new(&edb, einputs, project.layout(db).clone(), project.plugins(db).clone());
-    let after = filtered_diagnostics(eproject.layout(&edb), check_project(&edb, eproject, &mut NoFold));
+    let after = filtered_diagnostics(
+        eproject.layout(&edb),
+        &surface,
+        check_project(&edb, eproject, &mut NoFold),
+    );
 
     let mut before_counts: HashMap<&str, usize> = HashMap::new();
     for d in &before {
@@ -1270,8 +1301,15 @@ fn post_check(
     PostCheck { ok: new_diagnostics.is_empty(), new_diagnostics }
 }
 
-fn filtered_diagnostics(layout: &ProjectLayout, mut ds: Vec<Diagnostic>) -> Vec<Diagnostic> {
-    ds.retain(|d| !layout.is_vendor(&d.path));
+/// The post-check's view of a diagnostic run: vendor-filtered (ADR-0015) and
+/// restricted to the default surface (issue #115 — the post-check compares what
+/// a bare `steins check` would show, not the opt-up contract layer).
+fn filtered_diagnostics(
+    layout: &ProjectLayout,
+    surface: &profile::Surface,
+    mut ds: Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
+    ds.retain(|d| !layout.is_vendor(&d.path) && surface.is_surfaced(d));
     ds
 }
 

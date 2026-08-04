@@ -389,3 +389,137 @@ fn overlapping_partitions_are_a_config_error() {
         r.stderr
     );
 }
+
+// ---- throws-envelope (Transform #3, issue #115) ----------------------------
+
+#[test]
+fn throws_envelope_dry_run_prints_diff_and_does_not_write() {
+    let proj = TempProject::new("envelope-dryrun");
+    let lib_before = "<?php\nfunction f(): void { throw new \\RuntimeException(\"boom\"); }\n";
+    proj.write("lib.php", lib_before);
+
+    let r = run(&["transform", "throws-envelope", proj.path()]);
+    assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
+    assert!(
+        r.stdout.contains("+ * @throws \\RuntimeException"),
+        "diff missing seeded tag:\n{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("1 enumerated: 1 seeded, 0 refused"), "oracle line:\n{}", r.stdout);
+    assert!(r.stdout.contains("Post-check OK"), "postcheck:\n{}", r.stdout);
+    // The file on disk is unchanged by a dry run.
+    assert_eq!(proj.read("lib.php"), lib_before);
+}
+
+#[test]
+fn throws_envelope_apply_writes_and_a_second_run_is_a_noop() {
+    let proj = TempProject::new("envelope-idempotent");
+    proj.write("lib.php", "<?php\nfunction f(): void { throw new \\RuntimeException(\"boom\"); }\n");
+
+    let first = run(&["transform", "throws-envelope", "--apply", proj.path()]);
+    assert_eq!(first.code, 0, "stderr:\n{}", first.stderr);
+    let seeded = proj.read("lib.php");
+    assert!(seeded.contains(" * @throws \\RuntimeException"), "not seeded on disk:\n{seeded}");
+
+    // Idempotence (issue #115 acceptance): the second run enumerates the same
+    // candidate and refuses `already-declared` — never a rewrite.
+    let second = run(&["transform", "throws-envelope", "--apply", proj.path()]);
+    assert_eq!(second.code, 0, "stderr:\n{}", second.stderr);
+    assert!(
+        second.stdout.contains("1 enumerated: 0 seeded, 1 refused"),
+        "oracle line:\n{}",
+        second.stdout
+    );
+    assert!(second.stdout.contains("already-declared"), "refusal reason:\n{}", second.stdout);
+    assert_eq!(proj.read("lib.php"), seeded, "second run must not touch the file");
+}
+
+#[test]
+fn throws_envelope_maybe_escape_refuses_and_writes_nothing() {
+    let proj = TempProject::new("envelope-maybe");
+    // MyExc's ancestry leaves known territory; the catch MIGHT absorb it. A
+    // Maybe escape never becomes a declared envelope (ADR-0037/0040).
+    let before = "<?php\nclass MyExc extends \\Vendor\\Base {}\nfunction f(): void { try { throw new MyExc(); } catch (\\Vendor\\Other $e) {} }\n";
+    proj.write("lib.php", before);
+
+    let r = run(&["transform", "throws-envelope", "--apply", proj.path()]);
+    assert_eq!(r.code, 0, "a refusal is not a failure; stderr:\n{}", r.stderr);
+    assert!(r.stdout.contains("escape-not-proven"), "refusal reason:\n{}", r.stdout);
+    assert!(r.stdout.contains("0 seeded, 1 refused"), "oracle:\n{}", r.stdout);
+    assert_eq!(proj.read("lib.php"), before);
+}
+
+/// The adoption arc the issue names: a partial envelope plus a proven direct
+/// escape fails `check --profile throws-direct`; one `transform throws-envelope
+/// --apply` later the same check is clean — no `throw.undeclared` with
+/// `origin = direct` remains for the seeded declaration.
+#[test]
+fn throws_envelope_seeding_clears_throws_direct() {
+    let proj = TempProject::new("envelope-adoption");
+    proj.write(
+        "lib.php",
+        "<?php\n/**\n * @throws \\JsonException\n */\nfunction f(bool $b): void {\n    if ($b) { throw new \\JsonException(\"j\"); }\n    throw new \\RuntimeException(\"boom\");\n}\n",
+    );
+
+    let before = run(&["check", "--no-php", "--profile", "throws-direct", proj.path()]);
+    assert_eq!(before.code, 1, "the direct escape must fail pre-seed:\n{}", before.stdout);
+    assert!(before.stdout.contains("throw.undeclared"), "{}", before.stdout);
+
+    let t = run(&["transform", "throws-envelope", "--apply", proj.path()]);
+    assert_eq!(t.code, 0, "stderr:\n{}", t.stderr);
+    assert!(t.stdout.contains("1 seeded"), "oracle:\n{}", t.stdout);
+    let after_src = proj.read("lib.php");
+    assert!(after_src.contains(" * @throws \\RuntimeException"), "extended:\n{after_src}");
+    assert!(after_src.contains(" * @throws \\JsonException"), "existing tag preserved:\n{after_src}");
+
+    let after = run(&["check", "--no-php", "--profile", "throws-direct", proj.path()]);
+    assert_eq!(after.code, 0, "seeded envelope must clear throws-direct:\n{}", after.stdout);
+    assert!(!after.stdout.contains("throw.undeclared"), "{}", after.stdout);
+}
+
+/// The post-check surface pin (issue #115 decision): the zero-new-diagnostics
+/// post-check runs on the DEFAULT surface. Seeding an override whose ancestor
+/// declares a narrower envelope surfaces `throw.liskov-widened` under an
+/// opt-up profile — debt made visible, not a regression — so the transform must
+/// still pass its post-check and write.
+#[test]
+fn throws_envelope_postcheck_runs_on_the_default_surface() {
+    let proj = TempProject::new("envelope-surface-pin");
+    proj.write(
+        "lib.php",
+        "<?php\nclass P {\n    /**\n     * @throws \\JsonException\n     */\n    public function m(): void {}\n}\nclass C extends P {\n    public function m(): void { throw new \\RuntimeException(\"x\"); }\n}\n",
+    );
+
+    let t = run(&["transform", "throws-envelope", "--apply", proj.path()]);
+    assert_eq!(
+        t.code, 0,
+        "post-check must pass on the default surface; stdout:\n{}\nstderr:\n{}",
+        t.stdout, t.stderr
+    );
+    assert!(t.stdout.contains("1 seeded"), "oracle:\n{}", t.stdout);
+    assert!(t.stdout.contains("Post-check OK"), "postcheck:\n{}", t.stdout);
+    let seeded = proj.read("lib.php");
+    assert!(seeded.contains("@throws \\RuntimeException"), "seeded:\n{seeded}");
+
+    // The interaction is real: the seeded envelope now surfaces the Liskov
+    // widening under the contract layer — exactly what the default-surface
+    // post-check is pinned NOT to veto.
+    let contracts = run(&["check", "--no-php", "--profile", "contracts", proj.path()]);
+    assert_eq!(contracts.code, 1, "the widened override must fail contracts:\n{}", contracts.stdout);
+    assert!(contracts.stdout.contains("throw.liskov-widened"), "{}", contracts.stdout);
+}
+
+#[test]
+fn throws_envelope_json_format_emits_report_and_postcheck() {
+    let proj = TempProject::new("envelope-json");
+    proj.write("lib.php", "<?php\nfunction f(): void { throw new \\RuntimeException(\"boom\"); }\n");
+
+    let r = run(&["transform", "throws-envelope", "--format", "json", proj.path()]);
+    assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
+    let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid json");
+    assert_eq!(v["report"]["oracle"]["enumerated"], 1);
+    assert_eq!(v["report"]["oracle"]["transformed"], 1);
+    assert_eq!(v["postcheck"]["ok"], true);
+    assert_eq!(v["applied"], false);
+    assert_eq!(v["report"]["plan"]["edits"].as_array().unwrap().len(), 1);
+}
