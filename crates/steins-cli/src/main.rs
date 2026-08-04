@@ -471,8 +471,9 @@ fn run_check(args: &[String]) -> ExitCode {
 
 /// The outcome of a `check --fix` run. `applied` is true iff the plan's edits
 /// were written to disk; a refusal (post-check regression, an unplannable edit
-/// set, a failed write) leaves the findings exactly as a plain run reports
-/// them.
+/// set, an unreadable target, a failed write) leaves the findings exactly as a
+/// plain run reports them. Nothing is ever dropped silently: every way this can
+/// fail to write is one of the four named reasons.
 struct FixRun {
     applied: bool,
     files_written: usize,
@@ -553,7 +554,26 @@ fn apply_fixes(
 
     let mut written = 0usize;
     for path in plan.edited_paths() {
-        let Some(original) = texts.get(path) else { continue };
+        // A guard, not a path this run can take: `texts` holds every analyzed
+        // file, and a fix's path is the path of a diagnostic of one of them.
+        // Should that invariant ever break, the splice has no base text — and
+        // skipping the file would be the one silent drop in a surface whose
+        // every other failure is a named refusal: the run would still report
+        // `applied`, and the CLI would partition the finding into `fixed` while
+        // its statement sat untouched on disk. Refuse by name instead.
+        let Some(original) = texts.get(path) else {
+            return FixRun {
+                applied: false,
+                files_written: written,
+                refusal: Some(FixRefusal {
+                    reason: "fix-target-unread",
+                    detail: format!(
+                        "no analyzed source text for {path} ({written} file(s) already written)"
+                    ),
+                    new_diagnostics: Vec::new(),
+                }),
+            };
+        };
         let updated = plan.apply_file(path, original);
         if let Err(e) = std::fs::write(path, &updated) {
             return FixRun {
@@ -2042,5 +2062,57 @@ mod tests {
         // The refusal path returns before any write: the fake path was never
         // created on disk.
         assert!(!Path::new(&path).exists(), "nothing written on refusal");
+    }
+
+    /// A fix whose target has no analyzed source text is refused by name, not
+    /// skipped — the guard the write loop carries. A real run cannot reach it
+    /// (`texts` holds every analyzed file and a fix's path is a diagnostic's
+    /// path), so it is reached here the same way: a SYNTHETIC payload whose
+    /// edit names a file the project never read. The alternative — skipping —
+    /// would leave `applied` true, and the caller would then report the finding
+    /// as fixed with its statement still on disk.
+    #[test]
+    fn a_fix_whose_target_was_never_read_is_refused_by_name() {
+        let db = SteinsDatabase::default();
+        let src = "<?php\n$x = 1;\n";
+        let read = "steins-checkfix-unread-unit-read.php".to_owned();
+        let input = SourceFile::new(&db, read.clone(), src.to_owned());
+        let project = Project::new(
+            &db,
+            vec![input],
+            ProjectLayout::fallback(),
+            steins_db::PluginFacts::default(),
+        );
+        let mut texts: HashMap<String, String> = HashMap::new();
+        texts.insert(read, src.to_owned());
+
+        // The edit targets a path the project never read, so the post-check
+        // sees an unchanged project and passes — the guard is what stops it.
+        let unread = "steins-checkfix-unread-unit-missing.php".to_owned();
+        let displayed = vec![Diagnostic {
+            id: steins_infer::DEBUG_TYPE_ID,
+            path: unread.clone(),
+            line: 1,
+            column: 1,
+            message: "synthetic fix carrier".to_owned(),
+            facet: None,
+            fix: Some(steins_infer::Fix {
+                title: "synthetic edit on an unread file",
+                edits: vec![steins_infer::FixEdit {
+                    path: unread.clone(),
+                    start: 0,
+                    end: 1,
+                    replacement: String::new(),
+                }],
+            }),
+        }];
+
+        let run = apply_fixes(&db, project, &displayed, &texts);
+        assert!(!run.applied, "an unwritable target must not report as applied");
+        assert_eq!(run.files_written, 0);
+        let refusal = run.refusal.expect("the guard names its refusal");
+        assert_eq!(refusal.reason, "fix-target-unread");
+        assert!(refusal.detail.contains(&unread), "the detail names the path: {}", refusal.detail);
+        assert!(!Path::new(&unread).exists(), "nothing written on refusal");
     }
 }
