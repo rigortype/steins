@@ -28,8 +28,8 @@ use steins_db::{
     parse as parse_tree,
 };
 use steins_edit::{
-    ByteSpan, Edit, EditPlan, PartitionMap, TransformReport, VouchSet, plan_phpdoc_honesty,
-    plan_phpdoc_to_native, plan_throws_envelope, unified_diff,
+    ByteSpan, Edit, EditPlan, PartitionMap, TransformReport, VouchSet, plan_loop_to_array_map,
+    plan_phpdoc_honesty, plan_phpdoc_to_native, plan_throws_envelope, unified_diff,
 };
 use steins_infer::{
     Diagnostic, EffectSummary, LineFact, NoFold, SOUND_SUBSET_NOTICE, SidecarFolder,
@@ -75,7 +75,7 @@ fn dispatch(args: &[String]) -> ExitCode {
             );
             errln!("       steins annotate [--no-php] [--format text|json] <file.php>");
             errln!(
-                "       steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope> [--apply] [--format text|json] <paths...>"
+                "       steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--format text|json] <paths...>"
             );
             errln!(
                 "       steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>"
@@ -749,11 +749,12 @@ fn match_baseline(
     (reported, baselined, stale, surface_notice)
 }
 
-/// `steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope> [--apply]
-/// [--format text|json] <paths...>` (ADR-0020/0034). Dry-run by default: prints a
-/// unified diff and a refusal report, and runs the dual-verification post-check
-/// (ADR-0034 point 3a — the edited project must produce *zero new diagnostics*,
-/// on the surface that transform names; see [`PostCheckSurface`]). `--apply`
+/// `steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map>
+/// [--apply] [--format text|json] <paths...>` (ADR-0020/0034). Dry-run by default:
+/// prints a unified diff and a refusal report, and runs the dual-verification
+/// post-check (ADR-0034 point 3a — the edited project must produce *zero new
+/// diagnostics*, on the surface that transform names; see [`PostCheckSurface`]).
+/// `--apply`
 /// writes the edited files only after the post-check passes. Exits 2 on usage
 /// error, 1 when the post-check fails, 0 otherwise.
 fn run_transform(args: &[String]) -> ExitCode {
@@ -810,20 +811,22 @@ fn run_transform(args: &[String]) -> ExitCode {
         Promote,
         Honesty,
         ThrowsEnvelope,
+        LoopToArrayMap,
     }
     let (kind, action) = match subcommand.as_deref() {
         Some("phpdoc-to-native") => (Kind::Promote, "promoted"),
         Some("phpdoc-honesty") => (Kind::Honesty, "rewritten"),
         Some("throws-envelope") => (Kind::ThrowsEnvelope, "seeded"),
+        Some("loop-to-array-map") => (Kind::LoopToArrayMap, "rewritten"),
         Some(other) => {
             errln!(
-                "steins: unknown transform `{other}` (available: phpdoc-to-native, phpdoc-honesty, throws-envelope)"
+                "steins: unknown transform `{other}` (available: phpdoc-to-native, phpdoc-honesty, throws-envelope, loop-to-array-map)"
             );
             return ExitCode::from(2);
         }
         None => {
             errln!(
-                "steins: transform requires a name (usage: steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope> [--apply] [--config steins.toml] [--format text|json] <paths...>)"
+                "steins: transform requires a name (usage: steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--config steins.toml] [--format text|json] <paths...>)"
             );
             return ExitCode::from(2);
         }
@@ -893,6 +896,9 @@ fn run_transform(args: &[String]) -> ExitCode {
         // of the declaration's own body/callees, so the ADR-0046 §2 caller-
         // enumerability obstacles (and their vouching valve) have no bearing.
         Kind::ThrowsEnvelope => plan_throws_envelope(&db, project, partitions.as_ref()),
+        Kind::LoopToArrayMap => {
+            plan_loop_to_array_map(&db, project, &vouches, partitions.as_ref())
+        }
     };
 
     // Vouching an already-benign (or nonexistent) site is a no-op the user should
@@ -916,7 +922,11 @@ fn run_transform(args: &[String]) -> ExitCode {
         // Rewriting a type in a docblock is not supposed to change what the
         // docblock promises, so a new contract-layer finding after the edit is a
         // regression and must veto. Unchanged from before `throws-envelope`.
-        Kind::Promote | Kind::Honesty => PostCheckSurface::Everything,
+        // A loop→`array_map` rewrite is likewise not supposed to move the
+        // contract: it edits statements under a proven-purity precondition and
+        // leaves every docblock alone, so a new contract-layer finding after it
+        // is a regression like any other. It takes the broad net.
+        Kind::Promote | Kind::Honesty | Kind::LoopToArrayMap => PostCheckSurface::Everything,
         // Seeding an envelope IS a contract change: measuring it against the
         // contract layer would let the transform veto its own success.
         Kind::ThrowsEnvelope => PostCheckSurface::DefaultOnly,
