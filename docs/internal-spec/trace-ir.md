@@ -23,23 +23,23 @@ Scope {
 }
 ```
 
-A `Stmt` carries its kind, its whole-statement span, and `invalidated` — the
-variables passed as an argument to *any* call within it. Those are marked
-unknown *after* the statement: PHP by-reference parameters could have mutated
-them, and an unseen `&$x` signature must not be trusted.
+A `Stmt` carries its kind, its whole-statement span, and `invalidated` — one
+`InvalidatedVar { name, opaque, sites }` per variable passed as an argument to
+*any* call within it. Every named variable is marked unknown *after* the
+statement: PHP by-reference parameters could have mutated them, and an unseen
+`&$x` signature must not be trusted.
 
-Beside it, `call_args` carries the **precise reading** of that list (ADR-0070):
-one `CallArgSite { var, callee, position }` per occurrence of a variable as a
-plain positional argument of a statically named call. The syntax layer decides
-nothing with it — it knows no signatures — but it owns the invariant the walk
-relies on: **a variable appears in `call_args` only when every occurrence of it
-in the statement's call arguments is describable as such a site**, so one
-method call, dynamic callee, named argument or spread removes the name from the
-list entirely. The walk then declines the drop for a variable whose every site
-resolves to a by-value parameter (`Param::by_ref == false`, or a builtin
-position `steins_catalog::by_value_arg` certifies) and whose binding is
-value-semantic rather than an object handle. `invalidated` stays complete and
-is the answer whenever `call_args` is silent about a name.
+Each entry also carries the ADR-0070 evidence for its name. The syntax layer
+decides nothing with it — it knows no signatures — but it owns the invariant
+the walk relies on: **`sites` lists every occurrence of the name in the
+statement's call arguments as a `(callee, position)` pair, or `opaque` is set
+and `sites` is empty** — there is no third state. One method call, dynamic
+callee, named argument, spread, closure-body occurrence or echo-embedded write
+turns the entry opaque and discards its sites. The walk then declines the drop
+for a non-opaque entry whose every site resolves to a by-value parameter
+(`Param::by_ref == false`, or a builtin position `steins_catalog::by_value_arg`
+certifies) and whose binding is value-semantic rather than an object handle;
+an opaque entry keeps the blanket drop.
 
 ## Statement kinds
 
