@@ -2013,6 +2013,98 @@ pub fn collect_assert_types(
     ASSERT_SINK.with(|s| s.borrow_mut().take().unwrap_or_default())
 }
 
+/// What the propagation walk knows about one variable at one program point
+/// (ADR-0076 §3, the loop-subject probe). Every field is `false` when the walk
+/// bound nothing there — a missing answer is "not proven", never a guess.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SubjectFact {
+    /// `true` when the bound fact is an array value (an abstract shape or a
+    /// fully-known array literal) that does **not** also admit `null`.
+    pub array: bool,
+    /// `true` when that array's denotational `array_is_list` verdict is `Yes`
+    /// (ADR-0062 §3). `array_map` over a single array preserves keys, while
+    /// `$out[] = …` renumbers `0..n-1`, so anything weaker is not equivalent.
+    pub list: bool,
+    /// `true` when the fact sits at the `Verified` stratum (ADR-0052 §5) — a
+    /// runtime-executed test or a native declaration, fit to premise a proof. A
+    /// docblock-asserted array shape answers `false` here and never qualifies.
+    pub verified: bool,
+}
+
+thread_local! {
+    /// The ADR-0076 loop-subject probe. `None` during every normal check, so the
+    /// walk's per-statement hook is a single `is_some()` test and the check
+    /// surface is byte-identical; [`probe_subjects`] installs a request table for
+    /// one project run and drains the answers.
+    static SUBJECT_PROBE: std::cell::RefCell<Option<SubjectProbeState>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The installed probe's request table plus the answers collected so far.
+#[derive(Default)]
+struct SubjectProbeState {
+    /// `(path, statement start offset)` → the variable name to observe there.
+    wanted: HashMap<(String, u32), String>,
+    /// `(path, statement start offset)` → what the walk knew on entry.
+    answers: HashMap<(String, u32), SubjectFact>,
+}
+
+/// Ask the propagation walk what it knows about a variable at a program point
+/// (ADR-0076 §3): each site is `(path, statement start offset, variable name)`,
+/// and the answer is keyed by `(path, offset)`.
+///
+/// The walk observes **entry** facts — what holds *before* the statement runs —
+/// which is the state a `foreach` head reads its subject in. A site with no
+/// answer (unreachable, poisoned scope, or simply unbound) is absent from the
+/// map, which callers read as [`SubjectFact::default`]: nothing proven.
+///
+/// Analysis runs in the sound subset ([`NoFold`]), matching the rest of the
+/// transform engine: a planned rewrite must not depend on whether a PHP sidecar
+/// happened to be reachable.
+#[must_use]
+pub fn probe_subjects(
+    db: &dyn Db,
+    project: Project,
+    sites: &[(String, u32, String)],
+) -> HashMap<(String, u32), SubjectFact> {
+    if sites.is_empty() {
+        return HashMap::new();
+    }
+    let wanted: HashMap<(String, u32), String> =
+        sites.iter().map(|(p, off, var)| ((p.clone(), *off), var.clone())).collect();
+    SUBJECT_PROBE.with(|s| {
+        *s.borrow_mut() = Some(SubjectProbeState { wanted, answers: HashMap::new() });
+    });
+    let _ = check_project(db, project, &mut NoFold);
+    SUBJECT_PROBE.with(|s| s.borrow_mut().take().map(|st| st.answers).unwrap_or_default())
+}
+
+/// Answer any installed [`SUBJECT_PROBE`] request keyed at this statement, from
+/// the walk's **entry** env. A no-op with no probe installed (every normal
+/// check), and never run under a binding descent — the plain per-scope pass is
+/// the one universal reading, exactly as the dump and trace observers are gated.
+fn record_subject_probe(cx: &Cx<'_>, stmt: &Stmt, env: &HashMap<String, Known>) {
+    SUBJECT_PROBE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(state) = slot.as_mut() else { return };
+        let key = (cx.path().to_owned(), stmt.span.start);
+        let Some(var) = state.wanted.get(&key) else { return };
+        let fact = env.get(var).map_or_else(SubjectFact::default, |known| {
+            let (array, list) = match &known.fact {
+                Some(Fact::Shape { shape, nullable: false }) => {
+                    (true, shape.is_list == Certainty::Yes)
+                }
+                Some(Fact::Singleton(Val::Array(entries))) => {
+                    (true, steins_domain::array_is_list(entries))
+                }
+                _ => (false, false),
+            };
+            SubjectFact { array, list, verified: known.stratum == Stratum::Verified }
+        });
+        state.answers.insert(key, fact);
+    });
+}
+
 /// The pure single-file check (sound subset). Kept for unit tests and callers
 /// that never execute PHP. `functions` is accepted for signature stability; the
 /// tree's own function list is authoritative.
@@ -2757,201 +2849,18 @@ fn compute_effects(
         let e = edges.entry(unit.sym.clone()).or_default();
         let nt = untainting.entry(unit.sym.clone()).or_default();
         let ex = exhaustive.entry(unit.sym.clone()).or_insert(true);
-        for origin in unit.origins {
-            match origin {
-                EffectOrigin::Call { name, span, arg_targets } => {
-                    let targets = arg_targets.as_deref();
-                    match cx.resolve_effect_function(name) {
-                        FnResolution::User(site) => {
-                            let decl = cx.fn_decl(site);
-                            let sym = Sym::Func(decl.fqn.clone());
-                            match conditional_purity(decl.docblock.as_ref(), &decl.params) {
-                                Some(cp) => {
-                                    let r = eval_conditional_purity(&cp, &[], targets, |cbref| {
-                                        add_callback_effects(&cx, cbref, *span, d, e, ex);
-                                    });
-                                    for label in r.labels {
-                                        d.insert(EffectFinding {
-                                            label: label.to_owned(),
-                                            origin: name.simple().to_owned(),
-                                            line: cx.tree().position(span.start).line,
-                                            path: cx.path().to_owned(),
-                                        });
-                                    }
-                                    if r.discharge_taint {
-                                        nt.insert(sym);
-                                    } else {
-                                        e.insert(sym);
-                                    }
-                                }
-                                None => {
-                                    e.insert(sym);
-                                }
-                            }
-                        }
-                        FnResolution::Builtin => {
-                            for f in
-                                builtin_findings(name.simple(), *span, cx.tree(), cx.path(), targets)
-                            {
-                                d.insert(f);
-                            }
-                        }
-                        // Ambiguous / unresolved: effects unknown → non-exhaustive.
-                        // The plugin channel gets the last word here and nowhere
-                        // else (ADR-0068 precedence): a project body and a catalog
-                        // row are both already spoken for above.
-                        FnResolution::Unknown => {
-                            if let Some(labels) = plugin_call_labels(&cx, plugins, name) {
-                                dc.extend(labels.iter().cloned());
-                            }
-                            *ex = false;
-                        }
-                    }
-                }
-                EffectOrigin::Output { keyword, span } => {
-                    d.insert(EffectFinding {
-                        label: "output".to_owned(),
-                        origin: (*keyword).to_owned(),
-                        line: cx.tree().position(span.start).line,
-                        path: cx.path().to_owned(),
-                    });
-                }
-                EffectOrigin::Exit { keyword, span } => {
-                    d.insert(EffectFinding {
-                        label: "exit".to_owned(),
-                        origin: (*keyword).to_owned(),
-                        line: cx.tree().position(span.start).line,
-                        path: cx.path().to_owned(),
-                    });
-                }
-                EffectOrigin::MethodCall { receiver, method, span } => {
-                    match resolve_effect_edge(&cx, unit.class_fqn.as_deref(), receiver, method) {
-                        Some(callee) => {
-                            e.insert(callee);
-                        }
-                        // No project edge — the builtin-class catalog gets its say
-                        // (`new PDO(...)->query()` is `io.db`), and failing that the
-                        // receiver may still carry a *declared* bound: an interface
-                        // envelope caps what the call can do even when no body is
-                        // resolvable (ADR-0067). Importing it discharges **this**
-                        // call site's taint and nothing else — another unresolved
-                        // call in the same body still marks the summary `…?`. An
-                        // uncatalogued, undeclared receiver stays the taint it has
-                        // always been.
-                        //
-                        // The two legs cannot both fire: `builtin_method_findings`
-                        // answers only for `EffectRecv::ClassName` (a catalogued
-                        // external class), `resolve_declared_bound` only for the
-                        // declared receivers, which name no class here.
-                        None => match builtin_method_findings(&cx, receiver, method, *span) {
-                            Some(fs) => {
-                                for f in fs {
-                                    d.insert(f);
-                                }
-                            }
-                            None => match resolve_declared_bound(
-                                &cx,
-                                unit.class_fqn.as_deref(),
-                                unit.params,
-                                receiver,
-                                method,
-                            ) {
-                                Some(labels) => dc.extend(labels),
-                                None => *ex = false,
-                            },
-                        },
-                    }
-                }
-                // A higher-order call: the callback's effects join the caller's, or
-                // the base call resolves normally for a non-invoker callee (ADR-0033).
-                EffectOrigin::HigherOrder { callee, callbacks, arg_count, arg_targets, span } => {
-                    let targets = Some(arg_targets.as_slice());
-                    match steins_catalog::invocation_shape(callee.simple()) {
-                        Some(shape) => {
-                            // ADR-0063 P1: the call's effect is the invoker's OWN
-                            // catalog color ⊔ the envelope of the callback it
-                            // immediately invokes. The own-color leg runs first and
-                            // unconditionally — an unresolvable (or absent) callback
-                            // never *weakens* the invoker's declared color; it only
-                            // adds the `…?` taint below. P2 is what puts anything in
-                            // that leg for the sort family: `usort`'s own color is
-                            // the by-ref write to its array argument.
-                            for f in
-                                builtin_findings(callee.simple(), *span, cx.tree(), cx.path(), targets)
-                            {
-                                d.insert(f);
-                            }
-                            if shape.callback_param < *arg_count {
-                                match callbacks.iter().find(|(p, _)| *p == shape.callback_param) {
-                                    Some((_, cbref)) => {
-                                        add_callback_effects(&cx, cbref, *span, d, e, ex);
-                                    }
-                                    // Callback slot filled by an unresolvable value.
-                                    None => *ex = false,
-                                }
-                            }
-                        }
-                        // Not a known invoker: the callee is a normal edge, unless it
-                        // is a user function declaring a conditional-purity contract
-                        // — a userland catalog row (ADR-0063 §2 decision 2).
-                        None => match cx.resolve_effect_function(callee) {
-                            FnResolution::User(site) => {
-                                let decl = cx.fn_decl(site);
-                                let sym = Sym::Func(decl.fqn.clone());
-                                match conditional_purity(decl.docblock.as_ref(), &decl.params) {
-                                    Some(cp) => {
-                                        let r = eval_conditional_purity(
-                                            &cp,
-                                            callbacks,
-                                            targets,
-                                            |cbref| add_callback_effects(&cx, cbref, *span, d, e, ex),
-                                        );
-                                        for label in r.labels {
-                                            d.insert(EffectFinding {
-                                                label: label.to_owned(),
-                                                origin: callee.simple().to_owned(),
-                                                line: cx.tree().position(span.start).line,
-                                                path: cx.path().to_owned(),
-                                            });
-                                        }
-                                        if r.discharge_taint {
-                                            nt.insert(sym);
-                                        } else {
-                                            e.insert(sym);
-                                        }
-                                    }
-                                    None => {
-                                        e.insert(sym);
-                                    }
-                                }
-                            }
-                            FnResolution::Builtin => {
-                                for f in builtin_findings(
-                                    callee.simple(),
-                                    *span,
-                                    cx.tree(),
-                                    cx.path(),
-                                    targets,
-                                ) {
-                                    d.insert(f);
-                                }
-                            }
-                            FnResolution::Unknown => {
-                                if let Some(labels) = plugin_call_labels(&cx, plugins, callee) {
-                                    dc.extend(labels.iter().cloned());
-                                }
-                                *ex = false;
-                            }
-                        },
-                    }
-                }
-                // A `$fn()` resolved to a body-local closure — its effects join.
-                EffectOrigin::Callback { cbref, span } => {
-                    add_callback_effects(&cx, cbref, *span, d, e, ex);
-                }
-                EffectOrigin::Opaque { .. } => *ex = false,
-            }
-        }
+        classify_effect_origins(
+            &cx,
+            unit.class_fqn.as_deref(),
+            unit.params,
+            unit.origins,
+            plugins,
+            d,
+            dc,
+            e,
+            nt,
+            ex,
+        );
     }
 
     // Fixpoint: effects(u) = direct(u) ∪ ⋃ effects(callees); exhaustive taints.
@@ -3010,6 +2919,222 @@ fn compute_effects(
             (s, EffectSet { findings: f, declared: dc, exhaustive: ex })
         })
         .collect()
+}
+
+/// Classify one unit's (or one **region**'s — ADR-0076) effect origins into the
+/// fixpoint's four accumulators plus the exhaustiveness bit. Split out of
+/// [`compute_effects`] so a *sub-span* of a body can be asked the same question
+/// the whole body is asked, through exactly the same code: the loop→`array_map`
+/// transform's purity precondition is the fixpoint's own verdict restricted to
+/// the loop body, never a second opinion about what an effect is.
+#[allow(clippy::too_many_arguments)]
+fn classify_effect_origins(
+    cx: &Cx,
+    class_fqn: Option<&str>,
+    params: &[steins_syntax::Param],
+    origins: &[EffectOrigin],
+    plugins: &PluginFacts,
+    d: &mut HashSet<EffectFinding>,
+    dc: &mut HashSet<String>,
+    e: &mut HashSet<Sym>,
+    nt: &mut HashSet<Sym>,
+    ex: &mut bool,
+) {
+    for origin in origins {
+        match origin {
+            EffectOrigin::Call { name, span, arg_targets } => {
+                let targets = arg_targets.as_deref();
+                match cx.resolve_effect_function(name) {
+                    FnResolution::User(site) => {
+                        let decl = cx.fn_decl(site);
+                        let sym = Sym::Func(decl.fqn.clone());
+                        match conditional_purity(decl.docblock.as_ref(), &decl.params) {
+                            Some(cp) => {
+                                let r = eval_conditional_purity(&cp, &[], targets, |cbref| {
+                                    add_callback_effects(cx, cbref, *span, d, e, ex);
+                                });
+                                for label in r.labels {
+                                    d.insert(EffectFinding {
+                                        label: label.to_owned(),
+                                        origin: name.simple().to_owned(),
+                                        line: cx.tree().position(span.start).line,
+                                        path: cx.path().to_owned(),
+                                    });
+                                }
+                                if r.discharge_taint {
+                                    nt.insert(sym);
+                                } else {
+                                    e.insert(sym);
+                                }
+                            }
+                            None => {
+                                e.insert(sym);
+                            }
+                        }
+                    }
+                    FnResolution::Builtin => {
+                        for f in
+                            builtin_findings(name.simple(), *span, cx.tree(), cx.path(), targets)
+                        {
+                            d.insert(f);
+                        }
+                    }
+                    // Ambiguous / unresolved: effects unknown → non-exhaustive.
+                    // The plugin channel gets the last word here and nowhere
+                    // else (ADR-0068 precedence): a project body and a catalog
+                    // row are both already spoken for above.
+                    FnResolution::Unknown => {
+                        if let Some(labels) = plugin_call_labels(cx, plugins, name) {
+                            dc.extend(labels.iter().cloned());
+                        }
+                        *ex = false;
+                    }
+                }
+            }
+            EffectOrigin::Output { keyword, span } => {
+                d.insert(EffectFinding {
+                    label: "output".to_owned(),
+                    origin: (*keyword).to_owned(),
+                    line: cx.tree().position(span.start).line,
+                    path: cx.path().to_owned(),
+                });
+            }
+            EffectOrigin::Exit { keyword, span } => {
+                d.insert(EffectFinding {
+                    label: "exit".to_owned(),
+                    origin: (*keyword).to_owned(),
+                    line: cx.tree().position(span.start).line,
+                    path: cx.path().to_owned(),
+                });
+            }
+            EffectOrigin::MethodCall { receiver, method, span } => {
+                match resolve_effect_edge(cx, class_fqn, receiver, method) {
+                    Some(callee) => {
+                        e.insert(callee);
+                    }
+                    // No project edge — the builtin-class catalog gets its say
+                    // (`new PDO(...)->query()` is `io.db`), and failing that the
+                    // receiver may still carry a *declared* bound: an interface
+                    // envelope caps what the call can do even when no body is
+                    // resolvable (ADR-0067). Importing it discharges **this**
+                    // call site's taint and nothing else — another unresolved
+                    // call in the same body still marks the summary `…?`. An
+                    // uncatalogued, undeclared receiver stays the taint it has
+                    // always been.
+                    //
+                    // The two legs cannot both fire: `builtin_method_findings`
+                    // answers only for `EffectRecv::ClassName` (a catalogued
+                    // external class), `resolve_declared_bound` only for the
+                    // declared receivers, which name no class here.
+                    None => match builtin_method_findings(cx, receiver, method, *span) {
+                        Some(fs) => {
+                            for f in fs {
+                                d.insert(f);
+                            }
+                        }
+                        None => match resolve_declared_bound(
+                            cx,
+                            class_fqn,
+                            params,
+                            receiver,
+                            method,
+                        ) {
+                            Some(labels) => dc.extend(labels),
+                            None => *ex = false,
+                        },
+                    },
+                }
+            }
+            // A higher-order call: the callback's effects join the caller's, or
+            // the base call resolves normally for a non-invoker callee (ADR-0033).
+            EffectOrigin::HigherOrder { callee, callbacks, arg_count, arg_targets, span } => {
+                let targets = Some(arg_targets.as_slice());
+                match steins_catalog::invocation_shape(callee.simple()) {
+                    Some(shape) => {
+                        // ADR-0063 P1: the call's effect is the invoker's OWN
+                        // catalog color ⊔ the envelope of the callback it
+                        // immediately invokes. The own-color leg runs first and
+                        // unconditionally — an unresolvable (or absent) callback
+                        // never *weakens* the invoker's declared color; it only
+                        // adds the `…?` taint below. P2 is what puts anything in
+                        // that leg for the sort family: `usort`'s own color is
+                        // the by-ref write to its array argument.
+                        for f in
+                            builtin_findings(callee.simple(), *span, cx.tree(), cx.path(), targets)
+                        {
+                            d.insert(f);
+                        }
+                        if shape.callback_param < *arg_count {
+                            match callbacks.iter().find(|(p, _)| *p == shape.callback_param) {
+                                Some((_, cbref)) => {
+                                    add_callback_effects(cx, cbref, *span, d, e, ex);
+                                }
+                                // Callback slot filled by an unresolvable value.
+                                None => *ex = false,
+                            }
+                        }
+                    }
+                    // Not a known invoker: the callee is a normal edge, unless it
+                    // is a user function declaring a conditional-purity contract
+                    // — a userland catalog row (ADR-0063 §2 decision 2).
+                    None => match cx.resolve_effect_function(callee) {
+                        FnResolution::User(site) => {
+                            let decl = cx.fn_decl(site);
+                            let sym = Sym::Func(decl.fqn.clone());
+                            match conditional_purity(decl.docblock.as_ref(), &decl.params) {
+                                Some(cp) => {
+                                    let r = eval_conditional_purity(
+                                        &cp,
+                                        callbacks,
+                                        targets,
+                                        |cbref| add_callback_effects(cx, cbref, *span, d, e, ex),
+                                    );
+                                    for label in r.labels {
+                                        d.insert(EffectFinding {
+                                            label: label.to_owned(),
+                                            origin: callee.simple().to_owned(),
+                                            line: cx.tree().position(span.start).line,
+                                            path: cx.path().to_owned(),
+                                        });
+                                    }
+                                    if r.discharge_taint {
+                                        nt.insert(sym);
+                                    } else {
+                                        e.insert(sym);
+                                    }
+                                }
+                                None => {
+                                    e.insert(sym);
+                                }
+                            }
+                        }
+                        FnResolution::Builtin => {
+                            for f in builtin_findings(
+                                callee.simple(),
+                                *span,
+                                cx.tree(),
+                                cx.path(),
+                                targets,
+                            ) {
+                                d.insert(f);
+                            }
+                        }
+                        FnResolution::Unknown => {
+                            if let Some(labels) = plugin_call_labels(cx, plugins, callee) {
+                                dc.extend(labels.iter().cloned());
+                            }
+                            *ex = false;
+                        }
+                    },
+                }
+            }
+            // A `$fn()` resolved to a body-local closure — its effects join.
+            EffectOrigin::Callback { cbref, span } => {
+                add_callback_effects(cx, cbref, *span, d, e, ex);
+            }
+            EffectOrigin::Opaque { .. } => *ex = false,
+        }
+    }
 }
 
 /// One line of the `annotate` effect margin.
@@ -3156,6 +3281,197 @@ fn effect_summary_units(
         }
     }
     out
+}
+
+/// What the effect and throw fixpoints prove about one **region** of source —
+/// a byte span inside a function body (ADR-0076 §2). The purity precondition of
+/// the loop→`array_map` transform is spelled entirely in these four fields.
+///
+/// Only the **proven** lane is reported. The declared lane (ADR-0067's `≤`
+/// bounds) is deliberately absent: a cap is not an occurrence proof, and a
+/// transform consuming bounds as proof would re-collapse the lane wall at its
+/// first consumer. A call answered *only* by a declaration therefore leaves
+/// [`Self::exhaustive`] `false`, exactly as an uncatalogued one does.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegionPurity {
+    /// The proven effect labels arising inside the region, sorted and deduped.
+    pub labels: Vec<String>,
+    /// Whether every call inside the region resolved. `false` means some callee
+    /// is unanalyzable — the region *may* have effects nothing proved.
+    pub exhaustive: bool,
+    /// The throw classes (compact simple names) that would escape the region
+    /// **with the enclosing `try`/`catch` guards stripped**, sorted and deduped.
+    /// Stripping is the point: an enclosing `catch` is exactly the observer that
+    /// can tell partial accumulation from an unassigned accumulator, so a body
+    /// whose throw an outer `catch` absorbs is still ineligible (ADR-0076 §2.3).
+    pub throws: Vec<String>,
+    /// Whether the throw set is exhaustive (no dynamic / unresolved taint).
+    pub throws_exhaustive: bool,
+}
+
+/// Ask the effect and throw fixpoints what they prove about each of `regions`
+/// (ADR-0076 §2). Each region is a `(path, start, end)` byte span; the answer at
+/// index `i` is the verdict for `regions[i]`.
+///
+/// The whole-project fixpoints run **once** for the batch, so a transform run
+/// over a project pays for them once however many loops it enumerates.
+///
+/// An origin counts for a region when its span falls inside it, taken over every
+/// effect/throw unit of the region's file — the enclosing function's own origins
+/// plus those of any closure defined inside the region. Counting a closure that
+/// is never invoked can only *refuse* a rewrite, never permit one, which is the
+/// direction conservatism has to fall.
+#[must_use]
+pub fn region_purity_project(
+    db: &dyn Db,
+    project: Project,
+    regions: &[(String, u32, u32)],
+) -> Vec<RegionPurity> {
+    if regions.is_empty() {
+        return Vec::new();
+    }
+    let handles: Vec<SourceFile> = project.files(db).to_vec();
+    let units: Vec<FileUnit> =
+        handles.iter().map(|&f| FileUnit { path: f.path(db), tree: parse(db, f) }).collect();
+    let db_index = project_index(db, project);
+    let pos: HashMap<SourceFile, usize> =
+        handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
+    let index = Index::from_db(db_index, &pos);
+    let plugins = project.plugins(db);
+    let effects = compute_effects(&units, &index, plugins);
+    let throws = compute_throws(&units, &index);
+
+    regions
+        .iter()
+        .map(|(path, start, end)| {
+            let Some(fi) = units.iter().position(|u| u.path == path) else {
+                return RegionPurity::default();
+            };
+            region_purity_in(&units, &index, plugins, fi, (*start, *end), &effects, &throws)
+        })
+        .collect()
+}
+
+/// The per-region half of [`region_purity_project`], against already-computed
+/// fixpoints.
+fn region_purity_in(
+    units: &[FileUnit],
+    index: &Index,
+    plugins: &PluginFacts,
+    file: usize,
+    region: (u32, u32),
+    effects: &HashMap<Sym, EffectSet>,
+    throws: &HashMap<Sym, ThrowSet>,
+) -> RegionPurity {
+    let inside = |s: steins_syntax::Span| s.start >= region.0 && s.end <= region.1;
+    let cx = Cx::new(units, index, file);
+    let tree = units[file].tree;
+
+    // Every effect/throw origin of this file that falls inside the region, kept
+    // with the frame facts its classification needs (the enclosing class for a
+    // `$this->`/`self::` edge, the parameter list for an ADR-0067 receiver type).
+    let mut eff: HashSet<EffectFinding> = HashSet::new();
+    let mut declared: HashSet<String> = HashSet::new();
+    let mut edges: HashSet<Sym> = HashSet::new();
+    let mut untainting: HashSet<Sym> = HashSet::new();
+    let mut exhaustive = true;
+    let mut throw_direct: HashMap<ThrowFact, Certainty> = HashMap::new();
+    let mut throw_edges: Vec<(Sym, Vec<Vec<CatchClause>>)> = Vec::new();
+    let mut throws_exhaustive = true;
+
+    let mut take = |class_fqn: Option<&str>,
+                    params: &[steins_syntax::Param],
+                    eo: &[EffectOrigin],
+                    to: &[ThrowOrigin]| {
+        let picked: Vec<EffectOrigin> =
+            eo.iter().filter(|o| inside(effect_origin_span(o))).cloned().collect();
+        classify_effect_origins(
+            &cx,
+            class_fqn,
+            params,
+            &picked,
+            plugins,
+            &mut eff,
+            &mut declared,
+            &mut edges,
+            &mut untainting,
+            &mut exhaustive,
+        );
+        // The guards are dropped, not carried: this region's own body cannot
+        // hold a `try` (a `try` is a statement, and the eligible body is one
+        // append), so every guard on a picked origin is an ENCLOSING one — and
+        // an enclosing `catch` is the observer that distinguishes the two
+        // spellings, so it must not absorb anything here (ADR-0076 §2.3).
+        let picked_throws: Vec<ThrowOrigin> = to
+            .iter()
+            .filter(|o| inside(o.span))
+            .map(|o| ThrowOrigin { kind: o.kind.clone(), span: o.span, guards: Vec::new() })
+            .collect();
+        classify_throw_origins(
+            &cx,
+            file,
+            class_fqn,
+            &picked_throws,
+            &mut throw_direct,
+            &mut throw_edges,
+            &mut throws_exhaustive,
+        );
+    };
+
+    for f in tree.functions() {
+        take(None, &f.params, &f.effect_origins, &f.throw_origins);
+    }
+    for c in tree.classes() {
+        for m in &c.methods {
+            take(Some(&c.fqn), &m.params, &m.effect_origins, &m.throw_origins);
+        }
+    }
+    for scope in tree.scopes() {
+        take(None, &scope.params, &scope.effect_origins, &scope.throw_origins);
+    }
+
+    // Join the callees' fixpoint results — the region's transitive answer.
+    let mut labels: Vec<String> = eff.iter().map(|f| f.label.clone()).collect();
+    for callee in edges.iter().chain(untainting.iter()) {
+        if let Some(set) = effects.get(callee) {
+            labels.extend(set.findings.iter().map(|f| f.label.clone()));
+        }
+    }
+    for callee in &edges {
+        if effects.get(callee).is_some_and(|s| !s.exhaustive) {
+            exhaustive = false;
+        }
+    }
+    labels.sort();
+    labels.dedup();
+
+    let mut classes: Vec<String> =
+        throw_direct.keys().map(|f| last_segment(&f.class).to_owned()).collect();
+    for (callee, _) in &throw_edges {
+        if let Some(set) = throws.get(callee) {
+            classes.extend(set.facts.keys().map(|f| last_segment(&f.class).to_owned()));
+            if !set.exhaustive {
+                throws_exhaustive = false;
+            }
+        }
+    }
+    classes.sort();
+    classes.dedup();
+
+    RegionPurity { labels, exhaustive, throws: classes, throws_exhaustive }
+}
+
+/// The source span of an [`EffectOrigin`], whatever its shape.
+const fn effect_origin_span(o: &EffectOrigin) -> steins_syntax::Span {
+    match o {
+        EffectOrigin::Call { span, .. }
+        | EffectOrigin::Output { span, .. }
+        | EffectOrigin::Exit { span, .. }
+        | EffectOrigin::MethodCall { span, .. }
+        | EffectOrigin::Opaque { span }
+        | EffectOrigin::HigherOrder { span, .. }
+        | EffectOrigin::Callback { span, .. } => *span,
+    }
 }
 
 /// The bridge between the effect fixpoint and the contract judgment (ADR-0063 P3).
@@ -4140,98 +4456,15 @@ fn compute_throws(units: &[FileUnit], index: &Index) -> HashMap<Sym, ThrowSet> {
         let d = direct.entry(unit.sym.clone()).or_default();
         let e = edges.entry(unit.sym.clone()).or_default();
         let x = ex.entry(unit.sym.clone()).or_insert(true);
-        let add_fact = |class: String, origin: String, span: steins_syntax::Span, cert: Certainty, d: &mut HashMap<ThrowFact, Certainty>| {
-            if cert == Certainty::No {
-                return;
-            }
-            let line = cx.tree().position(span.start).line;
-            let fact = ThrowFact {
-                class,
-                origin,
-                origin_file: unit.file,
-                offset: span.start,
-                line,
-                path: cx.path().to_owned(),
-            };
-            let slot = d.entry(fact).or_insert(Certainty::No);
-            *slot = slot.or(cert);
-        };
-        for origin in unit.origins {
-            match &origin.kind {
-                ThrowKind::New(class) => {
-                    let d_fqn = cx.class_fqn(class);
-                    let esc = escape_through_guards(&cx, &d_fqn, &origin.guards);
-                    let display = format!("new {}", last_segment(&d_fqn));
-                    add_fact(d_fqn, display, origin.span, esc, d);
-                }
-                ThrowKind::Rethrow { caught, has_unresolvable } => {
-                    for cref in caught {
-                        let d_fqn = cx.class_fqn(cref);
-                        let esc = escape_through_guards(&cx, &d_fqn, &origin.guards);
-                        let display = format!("rethrow {}", last_segment(&d_fqn));
-                        add_fact(d_fqn, display, origin.span, esc, d);
-                    }
-                    if *has_unresolvable {
-                        *x = false;
-                    }
-                }
-                ThrowKind::Call(name) => match cx.resolve_function(name) {
-                    FnResolution::User(site) => {
-                        e.push((Sym::Func(cx.fn_decl(site).fqn.clone()), origin.guards.clone()));
-                    }
-                    FnResolution::Builtin => {
-                        if let Some(classes) = steins_catalog::builtin_throws(name.simple()) {
-                            for c in classes {
-                                let esc = escape_through_guards(&cx, c, &origin.guards);
-                                add_fact((*c).to_owned(), format!("{}()", name.simple()), origin.span, esc, d);
-                            }
-                        }
-                    }
-                    FnResolution::Unknown => *x = false,
-                },
-                ThrowKind::MethodCall { receiver, method } => {
-                    match resolve_effect_edge(&cx, unit.class_fqn.as_deref(), receiver, method) {
-                        Some(callee) => e.push((callee, origin.guards.clone())),
-                        None => *x = false,
-                    }
-                }
-                // A resolved callback's throws propagate through this call site's
-                // guards (ADR-0033): a closure/user callback is an edge; a builtin
-                // callback contributes its curated throws; unknown taints.
-                ThrowKind::Callback { cbref } => {
-                    add_callback_throws(&cx, unit.file, cbref, origin.span, &origin.guards, d, e, x);
-                }
-                ThrowKind::HigherOrder { callee, callbacks, arg_count } => {
-                    match steins_catalog::invocation_shape(callee.simple()) {
-                        Some(shape) => {
-                            if shape.callback_param < *arg_count {
-                                match callbacks.iter().find(|(p, _)| *p == shape.callback_param) {
-                                    Some((_, cbref)) => add_callback_throws(
-                                        &cx, unit.file, cbref, origin.span, &origin.guards, d, e, x,
-                                    ),
-                                    None => *x = false,
-                                }
-                            }
-                        }
-                        None => match cx.resolve_function(callee) {
-                            FnResolution::User(site) => {
-                                e.push((Sym::Func(cx.fn_decl(site).fqn.clone()), origin.guards.clone()));
-                            }
-                            FnResolution::Builtin => {
-                                if let Some(classes) = steins_catalog::builtin_throws(callee.simple()) {
-                                    for c in classes {
-                                        let esc = escape_through_guards(&cx, c, &origin.guards);
-                                        add_fact((*c).to_owned(), format!("{}()", callee.simple()), origin.span, esc, d);
-                                    }
-                                }
-                            }
-                            FnResolution::Unknown => *x = false,
-                        },
-                    }
-                }
-                ThrowKind::Taint => *x = false,
-            }
-        }
+        classify_throw_origins(
+            &cx,
+            unit.file,
+            unit.class_fqn.as_deref(),
+            unit.origins,
+            d,
+            e,
+            x,
+        );
     }
 
     // Fixpoint: propagate callee throws through each call site's guards.
@@ -4285,6 +4518,114 @@ fn compute_throws(units: &[FileUnit], index: &Index) -> HashMap<Sym, ThrowSet> {
             (s, ThrowSet { facts: f, exhaustive: x })
         })
         .collect()
+}
+
+/// Classify one unit's (or one **region**'s — ADR-0076) throw origins into the
+/// throw fixpoint's accumulators. The regional twin of [`classify_effect_origins`]:
+/// a sub-span of a body is asked exactly the question the whole body is asked, so
+/// the loop transform's "proven throw set empty" precondition is the throw pass's
+/// own verdict rather than a second opinion about what a throw is.
+fn classify_throw_origins(
+    cx: &Cx,
+    file: usize,
+    class_fqn: Option<&str>,
+    origins: &[ThrowOrigin],
+    d: &mut HashMap<ThrowFact, Certainty>,
+    e: &mut Vec<(Sym, Vec<Vec<CatchClause>>)>,
+    x: &mut bool,
+) {
+    let add_fact = |class: String, origin: String, span: steins_syntax::Span, cert: Certainty, d: &mut HashMap<ThrowFact, Certainty>| {
+        if cert == Certainty::No {
+            return;
+        }
+        let line = cx.tree().position(span.start).line;
+        let fact = ThrowFact {
+            class,
+            origin,
+            origin_file: file,
+            offset: span.start,
+            line,
+            path: cx.path().to_owned(),
+        };
+        let slot = d.entry(fact).or_insert(Certainty::No);
+        *slot = slot.or(cert);
+    };
+    for origin in origins {
+        match &origin.kind {
+            ThrowKind::New(class) => {
+                let d_fqn = cx.class_fqn(class);
+                let esc = escape_through_guards(cx, &d_fqn, &origin.guards);
+                let display = format!("new {}", last_segment(&d_fqn));
+                add_fact(d_fqn, display, origin.span, esc, d);
+            }
+            ThrowKind::Rethrow { caught, has_unresolvable } => {
+                for cref in caught {
+                    let d_fqn = cx.class_fqn(cref);
+                    let esc = escape_through_guards(cx, &d_fqn, &origin.guards);
+                    let display = format!("rethrow {}", last_segment(&d_fqn));
+                    add_fact(d_fqn, display, origin.span, esc, d);
+                }
+                if *has_unresolvable {
+                    *x = false;
+                }
+            }
+            ThrowKind::Call(name) => match cx.resolve_function(name) {
+                FnResolution::User(site) => {
+                    e.push((Sym::Func(cx.fn_decl(site).fqn.clone()), origin.guards.clone()));
+                }
+                FnResolution::Builtin => {
+                    if let Some(classes) = steins_catalog::builtin_throws(name.simple()) {
+                        for c in classes {
+                            let esc = escape_through_guards(cx, c, &origin.guards);
+                            add_fact((*c).to_owned(), format!("{}()", name.simple()), origin.span, esc, d);
+                        }
+                    }
+                }
+                FnResolution::Unknown => *x = false,
+            },
+            ThrowKind::MethodCall { receiver, method } => {
+                match resolve_effect_edge(cx, class_fqn, receiver, method) {
+                    Some(callee) => e.push((callee, origin.guards.clone())),
+                    None => *x = false,
+                }
+            }
+            // A resolved callback's throws propagate through this call site's
+            // guards (ADR-0033): a closure/user callback is an edge; a builtin
+            // callback contributes its curated throws; unknown taints.
+            ThrowKind::Callback { cbref } => {
+                add_callback_throws(cx, file, cbref, origin.span, &origin.guards, d, e, x);
+            }
+            ThrowKind::HigherOrder { callee, callbacks, arg_count } => {
+                match steins_catalog::invocation_shape(callee.simple()) {
+                    Some(shape) => {
+                        if shape.callback_param < *arg_count {
+                            match callbacks.iter().find(|(p, _)| *p == shape.callback_param) {
+                                Some((_, cbref)) => add_callback_throws(
+                                    cx, file, cbref, origin.span, &origin.guards, d, e, x,
+                                ),
+                                None => *x = false,
+                            }
+                        }
+                    }
+                    None => match cx.resolve_function(callee) {
+                        FnResolution::User(site) => {
+                            e.push((Sym::Func(cx.fn_decl(site).fqn.clone()), origin.guards.clone()));
+                        }
+                        FnResolution::Builtin => {
+                            if let Some(classes) = steins_catalog::builtin_throws(callee.simple()) {
+                                for c in classes {
+                                    let esc = escape_through_guards(cx, c, &origin.guards);
+                                    add_fact((*c).to_owned(), format!("{}()", callee.simple()), origin.span, esc, d);
+                                }
+                            }
+                        }
+                        FnResolution::Unknown => *x = false,
+                    },
+                }
+            }
+            ThrowKind::Taint => *x = false,
+        }
+    }
 }
 
 /// The last `\`-segment of an FQN (for a compact throw display).
@@ -6587,6 +6928,12 @@ fn walk_trace(
         // Plain per-scope pass only (see `apply_inline_var_casts`).
         if descent.is_none() {
             apply_inline_var_casts(w, stmt, env, store);
+            // 0a. The ADR-0076 loop-subject probe, read from the ENTRY env (after
+            // the inline cast, which the statement's own checks also see). Gated on
+            // an installed probe, so a normal check pays one `is_some()` and sees
+            // no behaviour change; never under a binding descent, like every other
+            // observer.
+            record_subject_probe(cx, stmt, env);
         }
         // 0b. The trace annotation (ADR-0074, issue #94): a statement-adopted
         // `@psalm-trace $x` docblock asks the dump surface's question against
