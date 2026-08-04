@@ -1978,3 +1978,69 @@ fn collect_php_files(path: &Path, out: &mut Vec<PathBuf>) {
         out.push(path.to_path_buf());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `check --fix` post-check gate refuses a fix whose edits would
+    /// surface a new diagnostic, by name, writing nothing (ADR-0034 point 3a).
+    ///
+    /// Exercised with a SYNTHETIC payload, deliberately: the shipped dump
+    /// family cannot trip the gate through the real engine — a recognized dump
+    /// is transparent (ADR-0053 §10: it reads facts and binds nothing), so
+    /// deleting its statement never changes a downstream fact, which is
+    /// exactly why the issue #114 slice chose it as the riskless tracer. The
+    /// gate is belt-and-braces for the families that come later, and this test
+    /// pins the refusal plumbing they will rely on: an edit that rewrites a
+    /// proven-int argument into a non-numeric string is a guaranteed new
+    /// `type.argument-mismatch` in the edited project.
+    #[test]
+    fn post_check_gate_refuses_a_regressing_fix() {
+        let db = SteinsDatabase::default();
+        let src = "<?php\nfunction width(int $w): int { return $w; }\nwidth(5);\n";
+        let path = "steins-checkfix-gate-unit.php".to_owned();
+        let input = SourceFile::new(&db, path.clone(), src.to_owned());
+        let project = Project::new(
+            &db,
+            vec![input],
+            ProjectLayout::fallback(),
+            steins_db::PluginFacts::default(),
+        );
+        let mut texts: HashMap<String, String> = HashMap::new();
+        texts.insert(path.clone(), src.to_owned());
+
+        // `width(5);` → `width("abc");` — byte 55..56 holds the `5`.
+        let displayed = vec![Diagnostic {
+            id: steins_infer::DEBUG_TYPE_ID,
+            path: path.clone(),
+            line: 3,
+            column: 7,
+            message: "synthetic fix carrier".to_owned(),
+            facet: None,
+            fix: Some(steins_infer::Fix {
+                title: "synthetic regressing edit",
+                edits: vec![steins_infer::FixEdit {
+                    path: path.clone(),
+                    start: 55,
+                    end: 56,
+                    replacement: "\"abc\"".to_owned(),
+                }],
+            }),
+        }];
+
+        let run = apply_fixes(&db, project, &displayed, &texts);
+        assert!(!run.applied, "a regressing fix must not apply");
+        assert_eq!(run.files_written, 0);
+        let refusal = run.refusal.expect("the gate names its refusal");
+        assert_eq!(refusal.reason, "postcheck-new-diagnostics");
+        assert!(
+            refusal.new_diagnostics.iter().any(|d| d.id == "type.argument-mismatch"),
+            "the would-be diagnostics are attached, got {:?}",
+            refusal.new_diagnostics
+        );
+        // The refusal path returns before any write: the fake path was never
+        // created on disk.
+        assert!(!Path::new(&path).exists(), "nothing written on refusal");
+    }
+}
