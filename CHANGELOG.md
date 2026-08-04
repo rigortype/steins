@@ -31,6 +31,11 @@ Entries accumulate under this heading as work lands; the `steins-release-prep`
 skill seals them into a version section at release time, reconstructing from
 `git log` if the discipline slipped.
 
+### Changed
+
+- **`array_slice` widening is sharper in two cases: slicing a proven list from offset `0` with `preserve_keys: true` still yields a list, and a slice whose length is a proven `0` is exactly the empty array.**
+  - Unknown offsets, lengths, or flags and subjects not proven to be lists keep the previous conservative answer; a `null` length still means "to the end". The added precision can make downstream findings appear or disappear.
+
 ## [0.1.3] - 2026-08-02
 
 Two investments pay off this release. Effects grow real teeth — PDO calls, project-interface envelopes, and Composer-plugin declarations all now contribute to the `effect.*` family, and `steins effect-diff` gives CI a channel of its own for tracking them independently of the diagnostic baseline. And exact values travel much further: project functions, methods, and closures now propagate their proven return value into dumps, nested calls, and argument positions rather than only direct assignments, and a matching growth in the builtin-fold allowlist and its constant-union handling lets more of that precision actually reach a finding.

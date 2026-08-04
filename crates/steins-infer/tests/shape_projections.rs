@@ -353,6 +353,109 @@ fn preserve_keys_degrades_list_ness_honestly() {
     );
 }
 
+// issue #137: the two precision claims on the widening floor
+
+#[test]
+fn a_proven_list_sliced_from_offset_zero_keeps_list_ness_under_preserve_keys() {
+    // Claim 1: when the subject's shape PROVES `is_list`, the offset is a proven
+    // int `0`, and the flag is a literal `true`, the surviving keys are `0..k-1`
+    // unchanged — still a list, for any length sign
+    // (`array_slice([1,2,3], 0, null, true) === [1,2,3]`,
+    // `array_slice([1,2,3], 0, -1, true) === [0 => 1, 1 => 2]`).
+    assert_eq!(
+        dump("list<string>", "array_slice($v, 0, null, true)"),
+        "dumped type: list<string> (asserted)"
+    );
+    assert_eq!(
+        dump("list<string>", "array_slice($v, 0, -1, true)"),
+        "dumped type: list<string> (asserted)"
+    );
+    // A witnessed subject with an UNPROVEN length falls off the exact rung to the
+    // widening, where the LIFT still proves its list-ness — so the claim fires on
+    // the value lane too.
+    assert_eq!(
+        one_type(
+            "<?php\nfunction f(int $n): void { $a = [1, 2, 3]; \\PHPStan\\dumpType(array_slice($a, 0, $n, true)); }\n"
+        ),
+        "dumped type: list<1|2|3>"
+    );
+}
+
+#[test]
+fn all_int_keys_alone_do_not_earn_the_preserved_prefix_claim() {
+    // **Negative test** (issue #137, claim 1's counterexample):
+    // `array_slice([5 => 2], 0, null, true) === [5 => 2]` — not a list. The claim
+    // needs the SUBJECT's proven `is_list`, and all-int keys do not prove it.
+    assert_eq!(
+        dump("array{5: int}", "array_slice($v, 0, null, true)"),
+        "dumped type: array<int, int> (asserted)"
+    );
+    // The exact rung agrees end to end: the witnessed probe keeps its key.
+    assert_eq!(
+        dump_body("$a = [5 => 2]; \\PHPStan\\dumpType(array_slice($a, 0, null, true));"),
+        "dumped type: array{5: 2}"
+    );
+}
+
+#[test]
+fn the_preserved_prefix_claim_declines_without_its_premises() {
+    // An UNKNOWN offset keeps today's floor exactly…
+    assert_eq!(
+        dump_two("list<string>", "int $n", "array_slice($v, $n, null, true)"),
+        "dumped type: array<int, string> (asserted)"
+    );
+    // …as does a proven but NONZERO offset (`array_slice([1,2,3], 1, null, true)
+    // === [1 => 2, 2 => 3]`, not a list)…
+    assert_eq!(
+        dump("list<string>", "array_slice($v, 1, null, true)"),
+        "dumped type: array<int, string> (asserted)"
+    );
+    // …and an UNKNOWN flag, which joins both branches rather than guessing.
+    assert_eq!(
+        dump_two("list<string>", "bool $keep", "array_slice($v, 0, null, $keep)"),
+        "dumped type: array<int, string> (asserted)"
+    );
+}
+
+#[test]
+fn a_proven_zero_length_slice_is_the_empty_array() {
+    // Claim 2: a proven `$length = 0` empties the window for ANY subject, offset,
+    // and flag (`array_slice(['a' => 1], 0, 0) === []`,
+    // `array_slice([1,2,3], -2, 0, true) === []`), so the answer is the SEALED
+    // empty shape — which spells `list{}`: the empty array is itself a list —
+    // rather than the unsealed floor.
+    assert_eq!(dump("array{a: int}", "array_slice($v, 0, 0)"), "dumped type: list{} (asserted)");
+    assert_eq!(
+        dump("list<int>", "array_slice($v, -2, 0, true)"),
+        "dumped type: list{} (asserted)"
+    );
+}
+
+#[test]
+fn the_zero_length_claim_wins_over_the_preserved_prefix_claim() {
+    // Both claims apply (`array_slice([1,2,3], 0, 0, true) === []`), and the
+    // sealed `array{}` is the sharper fact — itself a list, so nothing is lost.
+    assert_eq!(
+        dump("list<int>", "array_slice($v, 0, 0, true)"),
+        "dumped type: list{} (asserted)"
+    );
+}
+
+#[test]
+fn the_zero_length_claim_declines_without_a_proven_zero() {
+    // An UNKNOWN length keeps today's floor…
+    assert_eq!(
+        dump_two("array{a: int}", "int $n", "array_slice($v, 0, $n)"),
+        "dumped type: array<string, int> (asserted)"
+    );
+    // …and so does a literal `null` — the documented "to the end" spelling, which
+    // is NOT `0` (`array_slice(['a' => 1], 0, null) === ['a' => 1]`).
+    assert_eq!(
+        dump("array{a: int}", "array_slice($v, 0, null)"),
+        "dumped type: array<string, int> (asserted)"
+    );
+}
+
 #[test]
 fn array_slice_of_a_witnessed_array_projects_exactly() {
     // **The §2 boundary at its sharpest**: the value lane is order-witnessed, so the

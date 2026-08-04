@@ -19285,8 +19285,8 @@ fn transfer_declaration_admits(
 /// the CALL's argument list, and an arm may read a sibling argument's fact through
 /// [`transfer_arg_fact`] — the very reader the DR3 rung next door already owns.
 /// Every arm that does not ask keeps the single-shape shape it always had, and the
-/// §2 order boundary is untouched: what the arms read is a `$preserve_keys` flag
-/// and an offset, never field declaration order.
+/// §2 order boundary is untouched: what the arms read is a `$preserve_keys` flag,
+/// an offset, and a length — never field declaration order.
 fn shape_projection_fact(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -19579,9 +19579,9 @@ fn slice_preserve_keys(
 /// The v1 decline's stated cost was that "the shape-only answer carries no more
 /// than the reflected `array` envelope already does". That is false, and the
 /// element union is the counterexample: `array_slice(list<Foo>, $n)` is a
-/// `list<Foo>`, and the envelope says `array`. Four claims, each read from
+/// `list<Foo>`, and the envelope says `array`. Six claims, each read from
 /// order-INDEPENDENT structure only (§2 — no field declaration order is consulted,
-/// and the arguments the arm reads are a flag and an offset):
+/// and the arguments the arm reads are a flag, an offset, and a length):
 ///
 /// * **Element bound** — the slice's values are a subset of the subject's, so
 ///   [`shape_value_union`] carries across unchanged.
@@ -19590,12 +19590,31 @@ fn slice_preserve_keys(
 ///   string keys alone (probe: `array_slice(['a' => 1, 5 => 2], 0) ===
 ///   ['a' => 1, 0 => 2]`). Either way an all-int subject yields all-int keys and an
 ///   all-string subject all-string ones, so the class is the subject's own.
-/// * **List-ness survives exactly one combination.** An all-integer-keyed subject
-///   sliced with `$preserve_keys` absent-or-false is renumbered `0..n-1`, which
-///   *is* a list. Under a truthy — or merely *unknown* — flag it degrades to
+/// * **List-ness survives under an absent-or-false flag.** An all-integer-keyed
+///   subject sliced with `$preserve_keys` absent-or-false is renumbered `0..n-1`,
+///   which *is* a list. Under a truthy — or merely *unknown* — flag it degrades to
 ///   `Maybe` (`array_slice([1,2,3], 1, null, true) === [1 => 2, 2 => 3]`), and so
 ///   does any subject that can carry a string key. Never `No`: the empty array a
 ///   slice can always return is itself a list.
+/// * **List-ness survives `preserve_keys = true` from offset 0** (issue #137's
+///   first claim). When the subject's shape PROVES `is_list` and the offset is a
+///   proven int `0`, a literal `true` keeps the surviving keys `0..k-1` unchanged
+///   — still a list, for any length sign (probes:
+///   `array_slice([1,2,3], 0, null, true) === [1,2,3]`,
+///   `array_slice([1,2,3], 0, -1, true) === [0 => 1, 1 => 2]`,
+///   `array_slice([1,2,3], 0, 0, true) === []`). The subject's proven list-ness
+///   is load-bearing — all-int keys alone are NOT enough:
+///   `array_slice([5 => 2], 0, null, true) === [5 => 2]`, not a list. An unknown
+///   offset, like a non-list subject, stays `Maybe` exactly as before.
+/// * **A proven zero length is `array{}`** (issue #137's second claim). When the
+///   `$length` argument is a proven int `0`, the window is empty for ANY subject,
+///   offset, and flag — `array_slice(['a' => 1], 0, 0) === []`,
+///   `array_slice([1,2,3], -2, 0, true) === []` — so the answer is the SEALED
+///   empty shape rather than this floor's unsealed tail. Literal int `0` only:
+///   `null` is the documented "to the end" spelling and must not match, and
+///   anything short of a proven `Singleton` int declines to the floor. Taken
+///   before every other claim — `array{}` is the sharper fact and is itself a
+///   list, so it subsumes the preserved-prefix claim when both apply.
 /// * **`non_empty` NEVER survives.** Every possibly-empty result is reachable from
 ///   a non-empty subject — `array_slice([1,2,3], 10) === []`,
 ///   `array_slice([1,2,3], 1, 0) === []` — so the flag is dropped unconditionally.
@@ -19619,6 +19638,18 @@ fn slice_widening(
     if !(2..=4).contains(&args.len()) {
         return None;
     }
+    // The zero-length claim first: a proven `$length = 0` empties the window for
+    // any subject, offset, and flag, and the sealed empty shape it answers is
+    // sharper than anything the unsealed floor below could say.
+    if slice_arg_is_int_zero(cx, folder, args.get(2), env, store) {
+        return Some(shape_fact(ShapeFact::normalize(
+            Vec::new(),
+            Tail::Sealed,
+            Certainty::Yes,
+            false,
+            Vec::new(),
+        )));
+    }
     let preserve = slice_preserve_keys(cx, folder, args, env, store);
     let (all_int, all_str) = shape_key_classes(shape);
     let key = if all_int {
@@ -19628,7 +19659,15 @@ fn slice_widening(
     } else {
         KeyClass::ArrayKey
     };
-    let is_list = if all_int && preserve == PreserveKeys::No { Certainty::Yes } else { Certainty::Maybe };
+    // The two combinations list-ness survives: renumbering (absent-or-false flag
+    // over all-int keys) and the preserved prefix (a PROVEN list kept from a
+    // proven offset 0 under a literal `true`).
+    let renumbered = all_int && preserve == PreserveKeys::No;
+    let preserved_prefix = shape.is_list == Certainty::Yes
+        && preserve == PreserveKeys::Yes
+        && slice_arg_is_int_zero(cx, folder, args.get(1), env, store);
+    let is_list =
+        if renumbered || preserved_prefix { Certainty::Yes } else { Certainty::Maybe };
     Some(shape_fact(ShapeFact::normalize(
         Vec::new(),
         Tail::Unsealed { key, value: shape_value_union(shape).map(Box::new) },
@@ -19636,6 +19675,24 @@ fn slice_widening(
         false,
         Vec::new(),
     )))
+}
+
+/// Is this argument a proven int `0`? The two literal reads issue #137's precision
+/// claims added share the answer — the offset for the preserved-prefix claim, the
+/// length for the zero-length claim — and both take [`transfer_arg_fact`], the same
+/// resolution [`slice_window`] and [`slice_preserve_keys`] use. An absent argument
+/// is `false`, and so is `Singleton(Val::Null)` (`$length = null` means "to the
+/// end"): nothing short of a proven `Singleton` int `0` matches.
+fn slice_arg_is_int_zero(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    arg: Option<&ArgValue>,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> bool {
+    arg.is_some_and(|a| {
+        matches!(transfer_arg_fact(cx, folder, a, env, store), Some(Fact::Singleton(Val::Int(0))))
+    })
 }
 
 /// `(every key is an int, every key is a string)` over the shape's declared,
