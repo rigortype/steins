@@ -538,7 +538,13 @@ fn apply_fixes(
     // The post-check gate (ADR-0034 point 3a), verbatim from `transform`: the
     // edited project is re-analyzed and any diagnostic id whose count rises
     // refuses the whole write, by name, with the would-be findings attached.
-    let postcheck = post_check(db, project, &plan, texts);
+    //
+    // Measured against the broad surface, as it has been since `check --fix`
+    // landed: a fix-it deletes debug scaffolding and is never *meant* to move
+    // the contract layer, so a new `phpdoc.*` or `throw.*` finding after the
+    // edit is a regression and must veto. Only `throws-envelope`, whose product
+    // *is* a contract, earns the narrow surface — see [`PostCheckSurface`].
+    let postcheck = post_check(db, project, &plan, texts, PostCheckSurface::Everything);
     if !postcheck.ok {
         let n = postcheck.new_diagnostics.len();
         return FixRun {
@@ -746,10 +752,10 @@ fn match_baseline(
 /// `steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope> [--apply]
 /// [--format text|json] <paths...>` (ADR-0020/0034). Dry-run by default: prints a
 /// unified diff and a refusal report, and runs the dual-verification post-check
-/// (ADR-0034 point 3a — the edited project must produce *zero new diagnostics*
-/// on the default surface). `--apply` writes the edited files only after the
-/// post-check passes. Exits 2 on usage error, 1 when the post-check fails, 0
-/// otherwise.
+/// (ADR-0034 point 3a — the edited project must produce *zero new diagnostics*,
+/// on the surface that transform names; see [`PostCheckSurface`]). `--apply`
+/// writes the edited files only after the post-check passes. Exits 2 on usage
+/// error, 1 when the post-check fails, 0 otherwise.
 fn run_transform(args: &[String]) -> ExitCode {
     let mut format = Format::Text;
     let mut apply = false;
@@ -902,7 +908,20 @@ fn run_transform(args: &[String]) -> ExitCode {
     // Dual verification (ADR-0034 point 3a): re-analyze the edited project and
     // require zero NEW diagnostics vs. the pre-edit baseline. Run in both dry-run
     // and `--apply`, so a violation is visible before anything is written.
-    let postcheck = post_check(&db, project, &report.plan, &texts);
+    //
+    // Each transform states the surface it is measured against, because the right
+    // answer differs by what the transform does (issue #115). The asymmetry is
+    // deliberate; `PostCheckSurface` carries the reasoning for each arm.
+    let surface = match kind {
+        // Rewriting a type in a docblock is not supposed to change what the
+        // docblock promises, so a new contract-layer finding after the edit is a
+        // regression and must veto. Unchanged from before `throws-envelope`.
+        Kind::Promote | Kind::Honesty => PostCheckSurface::Everything,
+        // Seeding an envelope IS a contract change: measuring it against the
+        // contract layer would let the transform veto its own success.
+        Kind::ThrowsEnvelope => PostCheckSurface::DefaultOnly,
+    };
+    let postcheck = post_check(&db, project, &report.plan, &texts, surface);
 
     match format {
         Format::Json => print_transform_json(&report, &postcheck, apply && postcheck.ok),
@@ -1231,6 +1250,55 @@ struct PostCheck {
     new_diagnostics: Vec<Diagnostic>,
 }
 
+/// Which diagnostics a transform's post-check counts as "new" (ADR-0034 point
+/// 3a). Deliberately **not** a global default: the right answer is a property of
+/// what the transform *does*, so every call site names its own and a reader sees
+/// the choice next to the transform it belongs to (issue #115).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PostCheckSurface {
+    /// Every diagnostic the engine produces, vendor-filtered only (ADR-0015) —
+    /// the proof and mechanics layers **and** the opt-up contract layer.
+    ///
+    /// This is the right net for a transform that rewrites documentation without
+    /// meaning to change what the documentation promises. `phpdoc-honesty`'s most
+    /// plausible regression is precisely a new `phpdoc.*` finding, and the
+    /// contract layer is the only thing that would catch it — so it is measured
+    /// against everything, as both phpdoc transforms always have been.
+    Everything,
+    /// The default display surface alone (proof + mechanics) — what a bare
+    /// `steins check` enforces.
+    ///
+    /// Reserved for a transform whose *product is a contract*, where a new
+    /// contract-layer finding is the intended effect rather than a regression.
+    /// `throws-envelope` is the only one: seeding an `@throws` envelope onto an
+    /// override gives its ancestor's narrower envelope something to be widened
+    /// against, and seeding a parent gives an existing child envelope an
+    /// abstraction carrier it did not have — both surface `throw.liskov-widened`
+    /// under an opt-up profile. Measuring a seed against the contract layer would
+    /// let the transform veto its own success; the safety net that remains is the
+    /// proof layer, the fp-gate discipline transposed to rewriting.
+    ///
+    /// The asymmetry with [`PostCheckSurface::Everything`] is deliberate. It is
+    /// not an inconsistency to smooth away — see the transform-engine spec, and
+    /// the test that pins it by showing the broad surface vetoing a legitimate
+    /// seed.
+    DefaultOnly,
+}
+
+impl PostCheckSurface {
+    /// The display surface to filter through, or `None` to count every layer.
+    fn display(self) -> Option<profile::Surface> {
+        match self {
+            PostCheckSurface::Everything => None,
+            PostCheckSurface::DefaultOnly => Some(
+                profile::ProfileConfigs::default()
+                    .resolve(None)
+                    .expect("the built-in default profile always resolves"),
+            ),
+        }
+    }
+}
+
 /// Re-analyze the project with the plan's edits applied and report any diagnostic
 /// id whose count increased (ADR-0034 point 3a). Comparison is by per-id count so
 /// it is robust to the line-number shifts a tag deletion causes; vendor findings
@@ -1238,29 +1306,22 @@ struct PostCheck {
 /// `transform` (both dry-run and `--apply`) and `check --fix`: one gate, one
 /// discipline.
 ///
-/// The comparison runs on the **default surface** (proof + mechanics), the same
-/// surface a bare `steins check` shows (issue #115 decision, uniform across
-/// transforms). A transform whose whole point is creating contract-layer
-/// envelopes (`throws-envelope`) legitimately makes contract findings visible
-/// under an opt-up profile — a seeded `@throws` on an override can surface
-/// `throw.liskov-widened` against a narrower ancestor envelope, which is debt
-/// made visible, not a regression. The post-check's safety net is the proof
-/// layer: the fp-gate discipline transposed to rewriting.
+/// `surface` is the transform's own answer to "new diagnostics on *what*" — see
+/// [`PostCheckSurface`], which carries the reasoning for each choice.
 fn post_check(
     db: &SteinsDatabase,
     project: Project,
     plan: &EditPlan,
     texts: &HashMap<String, String>,
+    surface: PostCheckSurface,
 ) -> PostCheck {
     if plan.is_empty() {
         return PostCheck { ok: true, new_diagnostics: Vec::new() };
     }
-    let surface = profile::ProfileConfigs::default()
-        .resolve(None)
-        .expect("the built-in default profile always resolves");
+    let display = surface.display();
     let before = filtered_diagnostics(
         project.layout(db),
-        &surface,
+        display.as_ref(),
         check_project(db, project, &mut NoFold),
     );
 
@@ -1278,7 +1339,7 @@ fn post_check(
         Project::new(&edb, einputs, project.layout(db).clone(), project.plugins(db).clone());
     let after = filtered_diagnostics(
         eproject.layout(&edb),
-        &surface,
+        display.as_ref(),
         check_project(&edb, eproject, &mut NoFold),
     );
 
@@ -1301,15 +1362,15 @@ fn post_check(
     PostCheck { ok: new_diagnostics.is_empty(), new_diagnostics }
 }
 
-/// The post-check's view of a diagnostic run: vendor-filtered (ADR-0015) and
-/// restricted to the default surface (issue #115 — the post-check compares what
-/// a bare `steins check` would show, not the opt-up contract layer).
+/// The post-check's view of a diagnostic run: always vendor-filtered (ADR-0015),
+/// and additionally restricted to `surface` when the transform asked for one.
+/// `None` keeps every layer, contract included.
 fn filtered_diagnostics(
     layout: &ProjectLayout,
-    surface: &profile::Surface,
+    surface: Option<&profile::Surface>,
     mut ds: Vec<Diagnostic>,
 ) -> Vec<Diagnostic> {
-    ds.retain(|d| !layout.is_vendor(&d.path) && surface.is_surfaced(d));
+    ds.retain(|d| !layout.is_vendor(&d.path) && surface.is_none_or(|s| s.is_surfaced(d)));
     ds
 }
 
@@ -2152,5 +2213,88 @@ mod tests {
         assert_eq!(refusal.reason, "fix-target-unread");
         assert!(refusal.detail.contains(&unread), "the detail names the path: {}", refusal.detail);
         assert!(!Path::new(&unread).exists(), "nothing written on refusal");
+    }
+
+    /// The case that **forced** the post-check surface asymmetry (issue #115).
+    ///
+    /// One plan, both surfaces. Measured against everything, a correct
+    /// `throws-envelope` seed vetoes its own success: the envelope it writes onto
+    /// the override is exactly what gives the ancestor's narrower envelope
+    /// something to be widened against, so `throw.liskov-widened` appears where
+    /// there was none and the transform refuses to write. Measured on the surface
+    /// a bare `steins check` enforces, the same seed is clean.
+    ///
+    /// This is why `throws-envelope` is measured on [`PostCheckSurface::DefaultOnly`]
+    /// while the two phpdoc transforms keep [`PostCheckSurface::Everything`] — an
+    /// asymmetry with a reason, pinned by the case rather than argued for.
+    #[test]
+    fn the_broad_surface_would_veto_a_legitimate_throws_seed() {
+        const LIB: &str = "<?php\nclass P {\n    /**\n     * @throws \\JsonException\n     */\n    public function m(): void {}\n}\nclass C extends P {\n    public function m(): void { throw new \\RuntimeException(\"x\"); }\n}\n";
+
+        let db = SteinsDatabase::default();
+        let input = SourceFile::new(&db, "lib.php".to_owned(), LIB.to_owned());
+        let project =
+            Project::new(&db, vec![input], ProjectLayout::fallback(), PluginFacts::none());
+        let report = plan_throws_envelope(&db, project, None);
+        assert_eq!(
+            report.oracle.transformed, 1,
+            "the seed itself must be planned, or the test proves nothing: {:#?}",
+            report.refusals
+        );
+        let texts: HashMap<String, String> =
+            [("lib.php".to_owned(), LIB.to_owned())].into_iter().collect();
+
+        let broad = post_check(&db, project, &report.plan, &texts, PostCheckSurface::Everything);
+        assert!(
+            !broad.ok,
+            "the broad surface must veto this seed — if it no longer does, the asymmetry has lost its justification and should be revisited"
+        );
+        assert!(
+            broad.new_diagnostics.iter().any(|d| d.id == steins_infer::THROW_LISKOV_ID),
+            "the veto must be the contract-layer interaction, not an unrelated regression: {:#?}",
+            broad.new_diagnostics
+        );
+
+        let narrow = post_check(&db, project, &report.plan, &texts, PostCheckSurface::DefaultOnly);
+        assert!(
+            narrow.ok,
+            "the same seed must pass the surface it is measured against: {:#?}",
+            narrow.new_diagnostics
+        );
+    }
+
+    /// The other half of the asymmetry: the phpdoc transforms are still measured
+    /// against **everything**, contract layer included. A `phpdoc-honesty` run
+    /// whose rewrite introduced a new `phpdoc.*` finding must still veto, and
+    /// such a finding is invisible on the default surface — so this is the arm
+    /// that would silently stop working if the two were ever unified.
+    #[test]
+    fn the_phpdoc_transforms_are_measured_against_the_contract_layer_too() {
+        assert!(
+            PostCheckSurface::Everything.display().is_none(),
+            "Everything must not filter by display surface"
+        );
+        let default_only =
+            PostCheckSurface::DefaultOnly.display().expect("DefaultOnly resolves a surface");
+
+        let contract_finding = Diagnostic {
+            id: steins_infer::THROW_LISKOV_ID,
+            path: "lib.php".to_owned(),
+            line: 1,
+            column: 1,
+            message: String::new(),
+            facet: None,
+            fix: None,
+        };
+        let layout = ProjectLayout::fallback();
+        assert_eq!(
+            filtered_diagnostics(&layout, None, vec![contract_finding.clone()]).len(),
+            1,
+            "a contract finding must survive the broad surface"
+        );
+        assert!(
+            filtered_diagnostics(&layout, Some(&default_only), vec![contract_finding]).is_empty(),
+            "the same finding must be invisible on the default surface"
+        );
     }
 }

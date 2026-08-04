@@ -43,12 +43,18 @@
 //! never acquires mixed endings.
 //!
 //! ## Post-check surface (issue #115 decision)
-//! The CLI's zero-new-diagnostics post-check runs on the **default surface**
-//! (proof + mechanics), matching the existing transforms. Under a
-//! throws-checking profile a freshly seeded envelope can legitimately surface
-//! contract findings (e.g. `throw.liskov-widened` on an override whose ancestor
-//! declares a narrower envelope) — that is the debt the seeding makes visible,
-//! not a regression the post-check should veto.
+//! The CLI's zero-new-diagnostics post-check measures this transform on the
+//! **default surface** (proof + mechanics) — and this transform *only*. The two
+//! phpdoc transforms stay measured against every layer, contract included.
+//!
+//! The asymmetry is the point, not an inconsistency: seeding an envelope is
+//! supposed to move the contract surface. Writing `@throws` onto an override is
+//! precisely what gives its ancestor's narrower envelope something to be widened
+//! against, so `throw.liskov-widened` appears where there was none; measured
+//! against the contract layer, a correct seed would veto its own success. A
+//! promotion or an honesty repair has no such property, so their broader net
+//! stays. See `PostCheckSurface` in the CLI for the per-transform choice and the
+//! test that pins it.
 
 use steins_db::{Db, Project, SourceFile, parse};
 use steins_infer::escapes::{DeclEscapes, EscapeSweep, sweep_escapes};

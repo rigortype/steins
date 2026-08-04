@@ -478,11 +478,17 @@ fn throws_envelope_seeding_clears_throws_direct() {
     assert!(!after.stdout.contains("throw.undeclared"), "{}", after.stdout);
 }
 
-/// The post-check surface pin (issue #115 decision): the zero-new-diagnostics
-/// post-check runs on the DEFAULT surface. Seeding an override whose ancestor
-/// declares a narrower envelope surfaces `throw.liskov-widened` under an
-/// opt-up profile — debt made visible, not a regression — so the transform must
-/// still pass its post-check and write.
+/// The post-check surface pin (issue #115 decision), end to end: this transform
+/// — and only this transform — is measured on the DEFAULT surface. Seeding an
+/// override whose ancestor declares a narrower envelope surfaces
+/// `throw.liskov-widened` under an opt-up profile: debt made visible, not a
+/// regression, so the transform must still pass its post-check and write.
+///
+/// The unit test `the_broad_surface_would_veto_a_legitimate_throws_seed` in
+/// `main.rs` is the forcing half — it runs this same shape through BOTH
+/// surfaces and shows the broad one refusing the write. This one shows the
+/// user-visible consequence: the seed lands, and the debt is now visible to
+/// `check --profile contracts`.
 #[test]
 fn throws_envelope_postcheck_runs_on_the_default_surface() {
     let proj = TempProject::new("envelope-surface-pin");
