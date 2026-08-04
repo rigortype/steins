@@ -59,6 +59,10 @@ fn lowers_scopes_trace_and_poison() {
     assert!(matches!(&price.stmts[0].kind, StmtKind::Return { value, .. } if value.is_literal()));
 }
 
+/// One `InvalidatedVar` flattened to borrowed parts, so a whole entry list
+/// compares against a literal in one `assert_eq!`.
+type EntryView<'a> = (&'a str, bool, Vec<(&'a str, u32)>);
+
 #[test]
 fn each_invalidated_name_carries_its_call_sites() {
     // ADR-0070 (issue #135): the syntax layer records WHERE each handed-over
@@ -80,7 +84,7 @@ fn each_invalidated_name_carries_its_call_sites() {
     let tree = SourceTree::parse("<?php $a = 1; $b = 2; f($a, g($b));");
     let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
     let st = &top.stmts[2];
-    let entries: Vec<(&str, bool, Vec<(&str, u32)>)> = st
+    let entries: Vec<EntryView<'_>> = st
         .invalidated
         .iter()
         .map(|v| {
