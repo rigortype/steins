@@ -543,13 +543,22 @@ so the dynamic-code obstacles that make "all callers proven" unknowable have
 no bearing on it. A `[transform.vouch]` section is simply inert for this
 transform, and no per-entry no-op warning is printed for it.
 
-The post-check for `throws-envelope` runs on the **default** display
-surface, like the other transforms. That choice is deliberate and pinned by
-a test: under a throws-checking profile a freshly seeded envelope can
-legitimately surface contract findings (for example `throw.liskov-widened`
-on an override whose parent declares a narrower envelope). That is existing
-debt the seeding makes visible — run `check --profile contracts` after
-seeding to see it — not a regression for the post-check to veto.
+The post-check for `throws-envelope` is measured on the **default** display
+surface — proof and mechanics, what a bare `check` reports — and it is the
+only transform for which that is true. `phpdoc-to-native` and
+`phpdoc-honesty` are measured against every layer, contract included.
+
+The asymmetry is deliberate, and pinned by a test. Seeding an envelope is
+*supposed* to move the contract surface: writing `@throws` onto an override
+is exactly what gives its parent's narrower envelope something to be widened
+against, so `throw.liskov-widened` appears where there was none. Measured
+against the contract layer, a correct seed would veto itself and refuse to
+write. That finding is existing debt the envelope makes visible — run
+`check --profile contracts` after seeding to see it — not a regression.
+
+The other two have no such property: a promotion or an honesty repair is not
+meant to change what a docblock promises, so a new `phpdoc.*` finding after
+their edit is a regression and still blocks the write.
 
 `--apply` writes and says how many files it touched, on stderr:
 

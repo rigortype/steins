@@ -93,14 +93,40 @@ ADR-0034's safety net, wired in by the CLI:
 
 Dry-run is the default. `--apply` is explicit.
 
-The post-check compares per-id counts **on the default surface** (proof +
-mechanics, vendor-filtered), uniformly across transforms — the issue #115
-decision, pinned by a CLI test. A transform whose product *is* a contract
-(`throws-envelope`) legitimately makes contract-layer findings visible under an
-opt-up profile (a seeded `@throws` on an override can surface
-`throw.liskov-widened` against a narrower ancestor envelope); that is debt made
-visible, not a regression, and the post-check must not veto it. The safety net
-is the proof layer — the fp-gate discipline transposed to rewriting.
+### Which surface the post-check measures
+
+"Zero new diagnostics" needs a *set* of diagnostics to be zero on, and the
+answer is **not uniform across transforms**. Each one names its own surface at
+its call site (`PostCheckSurface` in the CLI); the asymmetry is deliberate.
+
+| Transform | Measured against | Because |
+| --- | --- | --- |
+| `phpdoc-to-native` | everything, vendor-filtered — proof, mechanics **and** contract | rewriting a type is not meant to change what the docblock promises |
+| `phpdoc-honesty` | same | its most plausible regression *is* a new `phpdoc.*` finding; the contract layer is the only thing that would catch it |
+| `throws-envelope` | the default surface only (proof + mechanics) | its product **is** a contract, so a new contract finding is the intended effect |
+
+The rule that separates them: measure a transform against the layer it is
+*supposed* to move, and it can veto its own success. Seeding an `@throws`
+envelope onto an override is exactly what gives the ancestor's narrower envelope
+something to be widened against — `throw.liskov-widened` appears where there was
+none, and a contract-layer post-check would refuse to write a correct seed.
+Seeding a parent method does the same from the other side, giving an existing
+child envelope an abstraction carrier it did not have. Neither is a regression;
+both are pre-existing debt the envelope makes visible under an opt-up profile.
+
+This is pinned by the case rather than argued for: a CLI unit test runs one
+seeding plan through **both** surfaces and asserts the broad one vetoes it while
+the default one passes. A second test holds the other arm — a contract finding
+survives the broad surface and is invisible on the default one — so unifying the
+two would fail loudly instead of silently weakening the phpdoc transforms' net.
+
+For `throws-envelope` the remaining safety net is the proof layer: the fp-gate
+discipline transposed to rewriting. Note what is *not* reachable, and so not
+relied on — a seed cannot newly raise `throw.undeclared` anywhere, because the
+enumeration domain includes **propagated** escapes: a caller that would gain a
+declared boundary to violate is itself a candidate and is seeded in the same
+run, and the write set is by construction every proven escape not already
+covered.
 
 ## Dynamism obstacles and the vouch valve
 
@@ -167,8 +193,9 @@ plan). A Maybe escape refuses `escape-not-proven`, never annotates (ADR-0037:
 written-by-tool is declared, not proven); the second run refuses
 `already-declared` (idempotence). Unlike its siblings it consults no vouch
 valve: proven escapes are forward facts, so caller-enumeration obstacles have
-no bearing. Its post-check runs on the default surface (see above) — the
-recorded surface decision for this transform.
+no bearing. It is also the one transform measured on the default surface alone
+(see above) — the recorded surface decision, and the only transform for which
+it holds.
 
 Measured whole-universe closing run of the first two: **23,148 / 509 candidates
 enumerated, 0 transformed** — dynamic dispatch is the sound floor, and
