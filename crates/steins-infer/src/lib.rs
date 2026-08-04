@@ -6882,8 +6882,8 @@ fn walk_trace(
                     store.mark_escaped(v);
                 }
                 for v in &stmt.invalidated {
-                    env.remove(v);
-                    store.unbind(v);
+                    env.remove(&v.name);
+                    store.unbind(&v.name);
                 }
                 // A `return $x;` under the annotation still answers (ADR-0074
                 // §5): flush the pending trace at this divergent exit.
@@ -6892,8 +6892,8 @@ fn walk_trace(
             }
             StmtKind::Throw { .. } | StmtKind::Exit { .. } => {
                 for v in &stmt.invalidated {
-                    env.remove(v);
-                    store.unbind(v);
+                    env.remove(&v.name);
+                    store.unbind(&v.name);
                 }
                 // A diverging `throw`/`exit` under the annotation still
                 // answers (ADR-0074 §5).
@@ -6960,11 +6960,11 @@ fn walk_trace(
         // one every occurrence of which is a proven by-value argument (ADR-0070).
         let by_value = by_value_survivors(cx, scope, stmt, env, store);
         for v in &stmt.invalidated {
-            if asserted.contains(v) || by_value.contains(v.as_str()) {
+            if asserted.contains(&v.name) || by_value.contains(v.name.as_str()) {
                 continue;
             }
-            env.remove(v);
-            store.unbind(v);
+            env.remove(&v.name);
+            store.unbind(&v.name);
         }
 
         // Flush the pending trace annotation at the iteration's common exit —
@@ -7000,7 +7000,9 @@ fn walk_trace(
 /// # The gate — all five must hold, per variable
 ///
 /// 1. **Every** occurrence of the name in this statement's call arguments is a
-///    [`CallArgSite`] (the syntax layer's completeness invariant), and each of
+///    recorded site on its [`steins_syntax::InvalidatedVar`] entry — an entry
+///    with an unprovable occurrence anywhere is `opaque` and carries no sites
+///    (the syntax layer's completeness invariant) — and each of
 ///    those callees **resolves with a known signature**: a project function the
 ///    index knows (its declared [`Param::by_ref`] answers directly), or a
 ///    builtin whose argument semantics the catalog states
@@ -7071,49 +7073,55 @@ fn by_value_survivors<'s>(
     store: &Store,
 ) -> HashSet<&'s str> {
     let mut kept: HashSet<&'s str> = HashSet::new();
-    // Condition 4 (this scope's half) and the fast path: a statement with no
-    // describable site, and every scope on the ADR-0001 give-up list, keep the
-    // blanket drop outright.
-    if stmt.call_args.is_empty() || scope.poisoned {
+    // Condition 4 (this scope's half): every scope on the ADR-0001 give-up list
+    // keeps the blanket drop outright.
+    if scope.poisoned {
         return kept;
     }
-    let mut refused: HashSet<&'s str> = HashSet::new();
-    // Names that already passed the value-semantic gate (condition 3) — a memo of
-    // its own, since `kept` can now also hold dump-read survivors that never took
-    // that gate.
-    let mut sem_ok: HashSet<&'s str> = HashSet::new();
-    for site in &stmt.call_args {
-        let var = site.var.as_str();
-        if refused.contains(var) {
+    for entry in &stmt.invalidated {
+        // An opaque entry has an unprovable occurrence somewhere in the
+        // statement — the lowering already discarded whatever provable sites
+        // the name had, so no protection may be granted (the blanket drop).
+        if entry.opaque {
             continue;
         }
-        // The read-site exceptions (docs above): a dump (ADR-0053) — and, in
-        // the harness universe only, an `assertType` observation (oracle idea
-        // B) — reads and binds nothing, so this occurrence keeps the name —
-        // object bindings included — and never condemns it.
-        if is_dump_read_site(cx, &site.callee) || is_assert_read_site(cx, &site.callee) {
-            kept.insert(var);
-            continue;
-        }
-        // Condition 3, asked once per name and BEFORE any index work: a name with
-        // an object binding refuses whatever its callees say, and a name with no
-        // binding at all has nothing to save (dropping it is already a no-op), so
-        // neither is worth resolving a callee for.
-        if !sem_ok.contains(var) {
-            if !is_value_semantic(var, env, store) {
-                kept.remove(var);
-                refused.insert(var);
+        let var = entry.name.as_str();
+        // Whether the name already passed the value-semantic gate (condition 3)
+        // — a memo of its own, since `keep` can also record dump-read survival,
+        // which never takes that gate.
+        let mut sem_ok = false;
+        let mut keep = false;
+        for (callee, position) in &entry.sites {
+            // The read-site exceptions (docs above): a dump (ADR-0053) — and, in
+            // the harness universe only, an `assertType` observation (oracle idea
+            // B) — reads and binds nothing, so this occurrence keeps the name —
+            // object bindings included — and never condemns it.
+            if is_dump_read_site(cx, callee) || is_assert_read_site(cx, callee) {
+                keep = true;
                 continue;
             }
-            sem_ok.insert(var);
+            // Condition 3, asked once per name and BEFORE any index work: a name
+            // with an object binding refuses whatever its callees say, and a name
+            // with no binding at all has nothing to save (dropping it is already a
+            // no-op), so neither is worth resolving a callee for.
+            if !sem_ok {
+                if !is_value_semantic(var, env, store) {
+                    keep = false;
+                    break;
+                }
+                sem_ok = true;
+            }
+            if arg_is_by_value(cx, callee, *position) {
+                keep = true;
+            } else {
+                // One by-ref (or unresolvable) occurrence condemns the name for
+                // the whole statement, whatever its other occurrences promised.
+                keep = false;
+                break;
+            }
         }
-        if arg_is_by_value(cx, site) {
+        if keep {
             kept.insert(var);
-        } else {
-            // One by-ref (or unresolvable) occurrence condemns the name for the
-            // whole statement, whatever its other occurrences promised.
-            kept.remove(var);
-            refused.insert(var);
         }
     }
     kept
@@ -7168,17 +7176,19 @@ fn is_value_semantic(var: &str, env: &HashMap<String, Known>, store: &Store) -> 
     }
 }
 
-/// Whether one [`CallArgSite`] is a **by-value** argument position of a callee
-/// with a known signature (ADR-0070 conditions 1 and 2). The refusing answer is
-/// `false` for every uncertainty — an unresolved name, an ambiguous one, a
-/// method, an argument past the declared arity.
-fn arg_is_by_value(cx: &Cx<'_>, site: &steins_syntax::CallArgSite) -> bool {
-    match cx.resolve_arg_function(&site.callee) {
+/// Whether one recorded site — callee reference plus 0-based argument
+/// `position` — is a **by-value** argument position of a callee with a known
+/// signature (ADR-0070 conditions 1 and 2). The refusing answer is `false` for
+/// every uncertainty — an unresolved name, an ambiguous one, a method, an
+/// argument past the declared arity.
+fn arg_is_by_value(cx: &Cx<'_>, callee: &NameRef, position: u32) -> bool {
+    let position = position as usize;
+    match cx.resolve_arg_function(callee) {
         // The catalog states this name's argument semantics; `Some(true)` is the
         // only admitting answer (`None` cannot occur — it is what made the name
         // resolve to `Builtin` — but is spelled out rather than assumed).
         FnResolution::Builtin => {
-            steins_catalog::by_value_arg(&site.callee.raw, site.position) == Some(true)
+            steins_catalog::by_value_arg(&callee.raw, position) == Some(true)
         }
         FnResolution::User(fn_site) => {
             // The declaration answers condition 2 directly, and it is the cheap
@@ -7186,7 +7196,7 @@ fn arg_is_by_value(cx: &Cx<'_>, site: &steins_syntax::CallArgSite) -> bool {
             // lookup below. A variadic position refuses: the analysis does not
             // model spread/variadic binding (v1). An argument past the declared
             // arity is `func_get_args()` territory, with nothing to read.
-            match cx.fn_decl(fn_site).params.get(site.position) {
+            match cx.fn_decl(fn_site).params.get(position) {
                 Some(p) if !p.by_ref && !p.variadic => {}
                 _ => return false,
             }
@@ -19273,9 +19283,10 @@ fn transfer_declaration_admits(
 /// (`array_pop array_shift next prev reset end`) take argument 0 by reference and
 /// move or shorten it. The *return* is computed from the pre-call shape, which is
 /// correct; the argument's own fact is dropped after the statement by the walk's
-/// unconditional call-argument invalidation (`Stmt::invalidated`, fed by
-/// `collect_call_vars`), and `steins_catalog::out_params` carries all six so the
-/// ADR-0063 §2.3 by-ref coloring agrees. No stale shape survives a mutating call.
+/// call-argument invalidation (the `Stmt::invalidated` entries — a by-ref
+/// position never passes the gate), and `steins_catalog::out_params` carries
+/// all six so the ADR-0063 §2.3 by-ref coloring agrees. No stale shape survives
+/// a mutating call.
 ///
 /// # The argument channel (issue #118, ADR-0062 Amendment B)
 ///
