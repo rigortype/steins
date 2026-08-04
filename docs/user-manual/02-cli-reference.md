@@ -200,19 +200,20 @@ $ echo $?
 ```
 
 The write is gated by the same dual-verification post-check `transform
---apply` runs (ADR-0034): the edited project is re-analyzed, and if any new
-diagnostic would surface — say the dump call was the only thing keeping a
-proven-null receiver conservative — the whole write is refused by name and
-nothing touches disk:
+--apply` runs (ADR-0034): the edited project is re-analyzed, and unless
+every diagnostic id's count is unchanged or lower, the whole write is
+refused by name and nothing touches disk. Today's one family cannot
+actually trip that gate, and that is why it went first — a recognized dump
+is transparent (ADR-0053: it reads facts and binds nothing), so deleting
+its statement cannot change what the rest of the file proves. The gate is
+what will let the families that follow be less obviously riskless. When one
+does refuse, the named reason and the diagnostics the edits would have
+surfaced print on stdout, and the reason again on stderr:
 
 ```
-$ steins check --fix src/Sneaky.php
-src/Sneaky.php:3:19: error[debug.type]: dumped type: null
 fix refused (postcheck-new-diagnostics): applying the fixes would surface 1 new diagnostic(s)
-  src/Sneaky.php:4:1: [call.on-null] method call $x->m() — $x is proven null on this path — proven Error (Call to a member function on null)
+  src/Example.php:4:1: [call.on-null] method call $x->m() — $x is proven null on this path — proven Error (Call to a member function on null)
 steins: fix refused (postcheck-new-diagnostics): applying the fixes would surface 1 new diagnostic(s)
-$ echo $?
-1
 ```
 
 A fixed finding leaves the exit computation — it no longer exists on disk,

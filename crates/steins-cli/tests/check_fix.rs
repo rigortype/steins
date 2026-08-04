@@ -102,27 +102,33 @@ fn fix_removes_the_dump_statement_and_a_rerun_is_clean() {
 }
 
 #[test]
-fn postcheck_gate_refuses_and_writes_nothing() {
-    // The dump call conservatively invalidates its argument (ADR-0053 §6: an
-    // unresolved call could take `$x` by reference), which is exactly what
-    // keeps `$x->m()` silent today. Removing the statement would prove `$x`
-    // null at the call — a NEW `call.on-null` — so the post-check refuses.
-    let proj = TempProject::new("refuses");
+fn the_gate_passes_a_removal_beside_an_unrelated_error() {
+    // Why this family was chosen to go first: a recognized dump is transparent
+    // (ADR-0053 point 10 — it reads facts and binds nothing), so deleting its
+    // statement cannot change what the rest of the file proves. `$x->m()` on a
+    // proven-null receiver already reports BEFORE the edit, so the post-check's
+    // per-id count is unchanged and the gate passes: the dump is removed, and
+    // the unrelated finding survives untouched and still reds the run.
+    //
+    // The refusal side of the gate is exercised where it can be reached at all:
+    // `post_check_gate_refuses_a_regressing_fix` in `crates/steins-cli/src/main.rs`
+    // drives `apply_fixes` with a synthetic regressing payload.
+    let proj = TempProject::new("gatepass");
     let src = "<?php\n$x = null;\n\\PHPStan\\dumpType($x);\n$x->m();\n";
     proj.write("app.php", src);
 
     let r = run(&["check", "--fix", proj.path()]);
-    // Nothing was fixed: the dump finding survives at fail level → exit 1.
+    // The pre-existing error survives at fail level → exit 1.
     assert_eq!(r.code, 1, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
-    assert!(r.stdout.contains("error[debug.type]"), "finding still reports:\n{}", r.stdout);
+    assert!(r.stdout.contains("error[call.on-null]"), "unrelated error survives:\n{}", r.stdout);
+    assert!(r.stdout.contains("fixed[debug.type]"), "the dump was fixed:\n{}", r.stdout);
+    assert!(!r.stdout.contains("fix refused"), "the gate must not refuse:\n{}", r.stdout);
     assert!(
-        r.stdout.contains("fix refused (postcheck-new-diagnostics)"),
-        "named refusal:\n{}",
-        r.stdout
+        r.stderr.contains("steins: fixed 1 finding(s) (1 file(s) written)"),
+        "stderr accounting:\n{}",
+        r.stderr
     );
-    assert!(r.stdout.contains("[call.on-null]"), "would-be diagnostic listed:\n{}", r.stdout);
-    assert!(r.stderr.contains("steins: fix refused"), "stderr:\n{}", r.stderr);
-    assert_eq!(proj.read("app.php"), src, "nothing written on refusal");
+    assert_eq!(proj.read("app.php"), "<?php\n$x = null;\n$x->m();\n", "only the dump line went");
 }
 
 #[test]
