@@ -45,9 +45,24 @@ qualifies:
    fixpoint.
 2. **Declared purity is not sufficient** (ADR-0067): a `≤` bound imported
    from an envelope is a cap, not an occurrence proof, and a cap cannot
-   witness equivalence of two evaluation orders. Declared-lane facts
-   neither qualify nor disqualify; only the proven lane and the taint bit
-   are consulted.
+   witness equivalence of two evaluation orders. The declared lane must be
+   **empty**, and a non-empty one refuses with the bound named.
+
+   *Amendment (2026-08-05, issue #116 implementation).* This clause first
+   read "declared-lane facts neither qualify nor disqualify; only the
+   proven lane and the taint bit are consulted", and that was not a
+   sufficient specification of the bar — it silently assumed the taint bit
+   still reports what the declared lane answers. It does not: ADR-0067
+   decision 3 **discharges a covered call site's taint**, precisely because
+   the bound is the value of the import. So a body whose only unresolved
+   call is answered by an envelope presents as `exhaustive` with an empty
+   proven lane — provably pure to a reader of those two signals alone,
+   while its purity rests entirely on a declaration. Consulting "the proven
+   lane and the taint bit" would therefore have let a declared bound act as
+   proof, which is the lane collapse ADR-0067 exists to prevent. The bar is
+   restated: **the proven lane empty, the declared lane empty, and both
+   exhaustiveness bits intact.** The declared lane must be reported to this
+   transform separately and never merged into the proven one.
 3. **The proven throw set must be empty — stricter than `Pure`.**
    ADR-0006's `Pure` admits `throw`; this transform must not. If the body
    throws on element `k`, the `foreach` leaves `$out` holding the first
