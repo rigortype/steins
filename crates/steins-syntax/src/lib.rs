@@ -2225,6 +2225,93 @@ pub struct AnonClassEdge {
     pub span: Span,
 }
 
+/// One `foreach` statement, lowered for the loop→`array_map` transform
+/// (ADR-0076). **Every** `foreach` in a file produces one of these — the
+/// transform's candidate domain is the whole construct family, so its refusal
+/// distribution measures how narrow v1 is instead of hiding it (ADR-0076 §4).
+///
+/// Syntax only reports *shape*. Whether the body is pure, whether the subject
+/// proves `array`/`is_list`, and therefore whether the rewrite is legal are all
+/// inference questions answered elsewhere; nothing here decides a rewrite.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ForeachSite {
+    /// The whole `foreach (…) …` statement's span — what the rewrite replaces,
+    /// together with [`Self::prev_stmt`]'s span.
+    pub span: Span,
+    /// The iterated expression when it is a plain `$var` (no `$`); `None` for
+    /// every other subject (a call, a property, an offset read, …).
+    pub subject: Option<String>,
+    /// `true` for the `$k => $v` key form.
+    pub key_binding: bool,
+    /// `true` when the value target is bound by reference (`as &$v`).
+    pub by_ref_binding: bool,
+    /// The value target when it is a plain `$var` (no `$`); `None` for a
+    /// destructuring (`as [$a, $b]` / `as list($a, $b)`) or otherwise
+    /// non-variable target.
+    pub value_var: Option<String>,
+    /// The body's lowered shape.
+    pub body: ForeachBodyShape,
+    /// The immediately preceding sibling statement, when the `foreach` is not the
+    /// first statement of its block.
+    pub prev_stmt: Option<PrevStmt>,
+    /// The end offset of the enclosing **variable** scope (the function / method /
+    /// closure body, else the file), so a consumer can scan the remainder of the
+    /// scope for an iteration variable that outlives the loop (ADR-0076 §3).
+    pub scope_end: u32,
+}
+
+/// The statement immediately preceding a [`ForeachSite`], reduced to what the
+/// adjacency rule needs: its span (the rewrite consumes it) and whether it is an
+/// accumulator initializer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PrevStmt {
+    /// The preceding statement's own span.
+    pub span: Span,
+    /// The assignment target when the statement is `$name = <anything>;` with the
+    /// plain `=` operator and a bare variable lvalue; `None` otherwise.
+    pub assign_target: Option<String>,
+    /// `true` when that assignment's right-hand side is an **empty array
+    /// literal** (`[]` or `array()`).
+    pub assigns_empty_array: bool,
+}
+
+/// A [`ForeachSite`] body's lowered shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ForeachBodyShape {
+    /// How many statements the body holds (`0` for `{}` / a bare `;`).
+    pub stmt_count: usize,
+    /// The append, when the body is exactly one `$acc[] = <expr>;` statement.
+    pub append: Option<AppendStmt>,
+    /// `true` when the body contains a `break`, `continue`, `return` or `goto`
+    /// outside any nested function-like body — the loop can end early, so no
+    /// whole-array rewrite reproduces it.
+    pub early_exit: bool,
+}
+
+/// The single `$acc[] = <expr>;` statement of an eligible loop body.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AppendStmt {
+    /// The accumulator variable's name (no `$`).
+    pub acc: String,
+    /// The appended expression's span — the arrow function's body, verbatim.
+    pub value_span: Span,
+    /// Every direct variable the appended expression mentions, in first-seen
+    /// order (nested function-like bodies included: an arrow function's body
+    /// reads the enclosing scope by value, so its names are the loop's names).
+    pub value_vars: Vec<String>,
+    /// `true` when the appended expression **writes** a variable (an embedded
+    /// assignment, `++`, or `--`). No effect label covers a function-local write,
+    /// but `fn` captures by value, so such an expression is not equivalence-
+    /// preserving under the rewrite.
+    pub value_writes: bool,
+    /// `true` when the appended expression carries a construct the effect scan
+    /// does not model as a call: `new`, `clone`, `yield`, a backtick shell
+    /// execute, an ADR-0001 poison construct, or one of the scope-sensitive
+    /// builtins (`compact`, `get_defined_vars`, `func_get_args`,
+    /// `func_num_args`) whose meaning changes inside an arrow function's scope.
+    pub value_unmodelled: bool,
+}
+
 /// An owned, Mago-free lowering of one parsed PHP file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SourceTree {
@@ -2262,6 +2349,10 @@ pub struct SourceTree {
     /// constant, so the version-guard fold declines here. Constants are
     /// case-sensitive; the match is exact.
     php_version_id_aliased: bool,
+    /// Every `foreach` statement in the file, lowered to its transform-relevant
+    /// shape (ADR-0076). Read by the loop→`array_map` transform and nothing else;
+    /// no finding consults it.
+    foreach_sites: Vec<ForeachSite>,
     /// Class references at the four hard-error positions (ADR-0049 §5 / S4), read by
     /// the `class.undefined` per-file pass.
     hard_class_refs: Vec<NameRef>,
@@ -2310,6 +2401,16 @@ impl SourceTree {
 
         let mut classes = lower_classes(&Node::Program(program), &aliases, &docs, &rc);
         let scopes = lower_scopes(program, &contexts, &regions, &docs);
+
+        // Every `foreach` in the file, lowered to its transform-relevant shape
+        // (ADR-0076 §4: the candidate domain is the whole construct family). The
+        // file itself is the outermost variable scope.
+        let mut foreach_sites = Vec::new();
+        collect_foreach_sites(
+            &Node::Program(program),
+            source.len().try_into().unwrap_or(u32::MAX),
+            &mut foreach_sites,
+        );
 
         // Comment trivia (ADR-0023 inline ignores): whitespace trivia is dropped;
         // every comment shape is kept with its raw spelling and span.
@@ -2379,6 +2480,7 @@ impl SourceTree {
             reflection: lowered.reflection,
             php_version_id_declared: lowered.php_version_id_declared,
             php_version_id_aliased: lowered.php_version_id_aliased,
+            foreach_sites,
             hard_class_refs: lowered.hard_class_refs,
             parse_errors,
             comments,
@@ -2469,6 +2571,14 @@ impl SourceTree {
     #[must_use]
     pub fn hard_class_refs(&self) -> &[NameRef] {
         &self.hard_class_refs
+    }
+
+    /// Every `foreach` statement in the file, in source order, lowered to the
+    /// shape the loop→`array_map` transform enumerates (ADR-0076 §4). Purely
+    /// syntactic: no purity, no value fact, no rewrite decision lives here.
+    #[must_use]
+    pub fn foreach_sites(&self) -> &[ForeachSite] {
+        &self.foreach_sites
     }
 
     #[must_use]
@@ -6796,6 +6906,222 @@ fn collect_read_vars(node: &Node<'_, '_>, writes: &[String], out: &mut Vec<Strin
     for child in node.children() {
         collect_read_vars(&child, writes, out);
     }
+}
+
+/// Collect one [`ForeachSite`] per `foreach` statement in the subtree, in source
+/// order (ADR-0076 §4: **every** `foreach` is a candidate, so the transform's
+/// refusal distribution measures its own narrowness).
+///
+/// `scope_end` is the end offset of the enclosing **variable** scope, refreshed
+/// whenever the walk enters a function-like body — PHP's variable scope is the
+/// function, so that is the region an iteration variable can outlive the loop in.
+///
+/// Sibling order comes straight from [`Node::children`]: every statement-sequence
+/// container (the program, a block, a colon-delimited body) emits its statements
+/// as consecutive `Node::Statement` children, so the statement preceding a
+/// `foreach` is whichever statement child came before it here.
+fn collect_foreach_sites(node: &Node<'_, '_>, scope_end: u32, out: &mut Vec<ForeachSite>) {
+    let scope_end = match node {
+        Node::Function(_)
+        | Node::Method(_)
+        | Node::Closure(_)
+        | Node::ArrowFunction(_)
+        | Node::PropertyHook(_) => to_span(node.span()).end,
+        _ => scope_end,
+    };
+    let mut prev: Option<&Statement<'_>> = None;
+    for child in node.children() {
+        if let Node::Statement(s) = child {
+            if let Statement::Foreach(fe) = s {
+                out.push(lower_foreach_site(fe, to_span(s.span()), prev, scope_end));
+            }
+            prev = Some(s);
+        }
+        collect_foreach_sites(&child, scope_end, out);
+    }
+}
+
+/// Lower one `foreach` into its [`ForeachSite`] shape. Purely syntactic — every
+/// field is a fact about how the loop is *written*.
+fn lower_foreach_site(
+    fe: &mago_syntax::cst::Foreach<'_>,
+    span: Span,
+    prev: Option<&Statement<'_>>,
+    scope_end: u32,
+) -> ForeachSite {
+    let target = &fe.target;
+    let value = target.value();
+    ForeachSite {
+        span,
+        subject: direct_var_name(fe.expression),
+        key_binding: target.key().is_some(),
+        by_ref_binding: value.is_reference(),
+        // A by-ref target's operand is still a variable; the by-ref flag is the
+        // refusal-bearing fact, so the name is reported either way.
+        value_var: direct_var_name(strip_reference(value)),
+        body: lower_foreach_body(&fe.body),
+        prev_stmt: prev.map(lower_prev_stmt),
+        scope_end,
+    }
+}
+
+/// The variable name of an expression that is exactly `$name` (no `$`); `None`
+/// for every other expression, including `$$name` and `${…}`.
+fn direct_var_name(expr: &Expression<'_>) -> Option<String> {
+    match expr {
+        Expression::Variable(Variable::Direct(dv)) => {
+            Some(strip_dollar(bytes_to_string(dv.name)))
+        }
+        _ => None,
+    }
+}
+
+/// Peel a leading `&` off a by-reference binding target, so the bound name is
+/// still readable.
+fn strip_reference<'a, 'arena: 'a>(expr: &'a Expression<'arena>) -> &'a Expression<'arena> {
+    match expr {
+        Expression::UnaryPrefix(u) if matches!(u.operator, UnaryPrefixOperator::Reference(_)) => {
+            u.operand
+        }
+        _ => expr,
+    }
+}
+
+/// Reduce the statement preceding a `foreach` to the adjacency rule's inputs
+/// (ADR-0076 §3): is it an assignment, to which variable, and is the right-hand
+/// side an empty array literal?
+fn lower_prev_stmt(s: &Statement<'_>) -> PrevStmt {
+    let span = to_span(s.span());
+    let Statement::Expression(es) = s else {
+        return PrevStmt { span, assign_target: None, assigns_empty_array: false };
+    };
+    let Expression::Assignment(a) = es.expression else {
+        return PrevStmt { span, assign_target: None, assigns_empty_array: false };
+    };
+    if !a.operator.is_assign() {
+        return PrevStmt { span, assign_target: None, assigns_empty_array: false };
+    }
+    PrevStmt {
+        span,
+        assign_target: direct_var_name(a.lhs),
+        assigns_empty_array: is_empty_array_literal(a.rhs),
+    }
+}
+
+/// Whether an expression is an empty array literal — `[]` or `array()`.
+fn is_empty_array_literal(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::Array(a) => a.elements.is_empty(),
+        Expression::LegacyArray(a) => a.elements.is_empty(),
+        _ => false,
+    }
+}
+
+/// Lower a `foreach` body to its [`ForeachBodyShape`].
+///
+/// The braced form `foreach (…) { … }` arrives as a single `Statement::Block`,
+/// so the block is unwrapped: `{ $out[] = $x; }` is a **one**-statement body, not
+/// a one-block one. A `Noop` (`foreach (…) ;`) is an empty body, not a
+/// one-statement one.
+fn lower_foreach_body(body: &mago_syntax::cst::ForeachBody<'_>) -> ForeachBodyShape {
+    let raw: &[Statement<'_>] = match body.statements() {
+        [Statement::Block(b)] => b.statements.as_slice(),
+        other => other,
+    };
+    let statements: Vec<&Statement<'_>> =
+        raw.iter().filter(|s| !matches!(s, Statement::Noop(_))).collect();
+    let append = match statements.as_slice() {
+        [only] => lower_append_stmt(only),
+        _ => None,
+    };
+    let early_exit =
+        statements.iter().copied().any(|s| body_has_early_exit(&Node::Statement(s)));
+    ForeachBodyShape { stmt_count: statements.len(), append, early_exit }
+}
+
+/// Lower a statement that is exactly `$acc[] = <expr>;` into an [`AppendStmt`];
+/// `None` for anything else (a compound `.=`, an offset write `$acc[$k] = …`, a
+/// non-variable base, a call, a nested construct).
+fn lower_append_stmt(s: &Statement<'_>) -> Option<AppendStmt> {
+    let Statement::Expression(es) = s else { return None };
+    let Expression::Assignment(a) = es.expression else { return None };
+    if !a.operator.is_assign() {
+        return None;
+    }
+    let Expression::ArrayAppend(app) = a.lhs else { return None };
+    let acc = direct_var_name(app.array)?;
+
+    let mut value_vars = Vec::new();
+    collect_direct_vars(&Node::Expression(a.rhs), &mut value_vars);
+    let mut writes = Vec::new();
+    collect_assign_writes(&Node::Expression(a.rhs), &mut writes);
+    Some(AppendStmt {
+        acc,
+        value_span: to_span(a.rhs.span()),
+        value_vars,
+        value_writes: !writes.is_empty(),
+        value_unmodelled: expr_is_unmodelled(&Node::Expression(a.rhs)),
+    })
+}
+
+/// Whether a subtree carries a `break` / `continue` / `return` / `goto` that
+/// belongs to the enclosing loop. Nested function-like bodies are skipped: a
+/// `return` inside a closure returns from the closure, not from the loop.
+fn body_has_early_exit(node: &Node<'_, '_>) -> bool {
+    match node {
+        Node::Break(_) | Node::Continue(_) | Node::Return(_) | Node::Goto(_) => return true,
+        Node::Function(_)
+        | Node::Closure(_)
+        | Node::ArrowFunction(_)
+        | Node::AnonymousClass(_)
+        | Node::Class(_)
+        | Node::Interface(_)
+        | Node::Trait(_)
+        | Node::Enum(_) => return false,
+        _ => {}
+    }
+    node.children().iter().any(body_has_early_exit)
+}
+
+/// The scope-sensitive builtins whose meaning is defined by the *frame* they are
+/// written in, so moving the expression into an arrow function changes what they
+/// answer (ADR-0076: read as an unanalyzable call target).
+const FRAME_SENSITIVE_BUILTINS: &[&str] =
+    &["compact", "get_defined_vars", "func_get_args", "func_num_args"];
+
+/// Whether an expression carries a construct the effect scan does not model as a
+/// call, and which therefore cannot be shown effect-free: `new` (constructor
+/// effects are not on the fixpoint), `clone` (`__clone`), `yield`, a backtick
+/// shell execute, an ADR-0001 poison construct, or a frame-sensitive builtin.
+/// Nested function-like bodies are descended deliberately — an arrow function in
+/// the appended expression is part of what the rewrite moves.
+fn expr_is_unmodelled(node: &Node<'_, '_>) -> bool {
+    node_poisons(node) || scan_unmodelled(node)
+}
+
+/// The construct half of [`expr_is_unmodelled`] (the poison half runs once, over
+/// the whole expression, in the caller).
+fn scan_unmodelled(node: &Node<'_, '_>) -> bool {
+    match node {
+        Node::Instantiation(_)
+        | Node::Clone(_)
+        | Node::Yield(_)
+        | Node::YieldFrom(_)
+        | Node::YieldPair(_)
+        | Node::YieldValue(_)
+        | Node::ShellExecuteString(_)
+        | Node::AnonymousClass(_) => return true,
+        Node::FunctionCall(fc) => {
+            if let Expression::Identifier(id) = fc.function {
+                let name = bytes_to_string(id.last_segment()).to_ascii_lowercase();
+                if FRAME_SENSITIVE_BUILTINS.contains(&name.as_str()) {
+                    return true;
+                }
+            }
+        }
+        _ => {}
+    }
+    node.children().iter().any(scan_unmodelled)
 }
 
 /// Whether a node (scanned within a single scope, not descending into nested
