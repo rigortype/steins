@@ -367,6 +367,19 @@ fn the_v1_exclusions_keep_the_blanket_drop() {
     assert_eq!(one_type(spread), "dumped type: unknown");
 }
 
+#[test]
+fn a_closure_body_occurrence_keeps_the_blanket_drop() {
+    // A bare `$s` inside a closure or arrow body is a DIFFERENT scope's
+    // variable — attributing its call site to the enclosing statement's `$s`
+    // would be manufactured evidence, so the entry is opaque (issue #135) and
+    // the blanket drop holds even though `trim` itself is certified by value.
+    assert_eq!(
+        dump_after("$s = 'abc'; $c = function () use ($s) { trim($s); };"),
+        "dumped type: unknown"
+    );
+    assert_eq!(dump_after("$s = 'abc'; $c = fn() => trim($s);"), "dumped type: unknown");
+}
+
 // The lowering's own invariant
 
 #[test]
