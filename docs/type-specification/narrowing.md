@@ -75,7 +75,10 @@ copy and the caller's binding is untouchable; `array_first($a)` therefore leaves
 Anything else keeps the blanket drop, and so do the v1 exclusions: method,
 static and constructor calls, dynamic callees, named and spread arguments,
 variadic positions, and the `Opaque` write set above. `preg_match($re, $s, $m)`
-is the shape of the whole rule — `$s` survives, `$m` does not.
+is the shape of the whole rule — `$s` survives, `$m` does not. Survival and
+*assignment* are different questions: a name the drop condemns here can still be
+re-bound on the branch where the callee is proven to have written it (see
+[Out-parameter seeding](#out-parameter-seeding)).
 
 ### Scope poisoning
 
@@ -262,6 +265,48 @@ layer reasoning but never premise a proof-layer finding. This is the
 `@phpstan-assert` *tag family* — distinct from the `assert($expr)` *construct*,
 which the owner ruling reads as a throw-guard and binds `Verified` (see the table
 above and trust-stratification.md).
+
+## Out-parameter seeding
+
+A builtin that writes through a by-reference parameter may teach the walk *what*
+it wrote (ADR-0077). The fact is a **refinement, not a transfer**: it enters on
+the branch where the call's result is proven truthy, and nowhere else. Nothing
+happens at the call statement, so an unguarded call still leaves the name
+forgotten exactly as it always did.
+
+Truthiness is the soundness condition, not a precision knob. Measured on PHP
+8.5.9, `preg_match` returns `1` and assigns the success shape, `0` and assigns
+`[]`, and — on a pattern PCRE refuses to compile — `false`, assigning **nothing
+at all**, so the variable keeps whatever it held or stays undefined. That third
+outcome is the absence of an assignment, which no value-shaped fact can express;
+an unconditional seed would state a fact that is false on a reachable path.
+Truthy ⟺ the write happened.
+
+The catalog states the witness per name and position, and states one today:
+`preg_match`'s `$matches`. Every other by-reference row (`sort`,
+`similar_text`, `str_replace`, `preg_match_all`, …) states none and seeds
+nothing. The seeded fact binds at the `Asserted` stratum — a declared contract
+plus proven inputs, never an observed run — so it may feed contract-layer
+reasoning but never premises a proof-layer finding.
+
+**What `preg_match` writes**, for a pattern whose capture-group structure the
+catalog's reader fully understands: key `0` plus one key per capture
+group in numeric order, every value a `string`, a named group additionally under
+its string key with the same presence, and a sealed tail. A group that can be
+*trailing* unmatched is an **optional** key, an interior unmatched group is
+**required** — PHP drops the first from the array and writes `''` for the
+second. A group-only pattern asserts `is_list = Yes` (the written keys are a
+prefix of `0..n`); any named group leaves list-ness to the denotational
+computation, because the string key may or may not participate.
+
+The seed refuses, silently and with no finding of its own, whenever a premise is
+missing: a pattern that is not a proven `Singleton` string, a pattern the group
+reader declines, a flags argument that is not a proven `0` (`PREG_OFFSET_CAPTURE`
+and `PREG_UNMATCHED_AS_NULL` both change the entry shape and neither is
+modelled), a named or spread argument, a namespaced or userland-shadowed callee,
+a poisoned scope, and an out-parameter argument that is anything but a plain
+local variable — `$this->m` and `$row['m']` are refused, because the write may
+be visible to callers this scope cannot see.
 
 ## Not implemented
 
