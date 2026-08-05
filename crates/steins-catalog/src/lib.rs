@@ -533,6 +533,58 @@ pub fn out_params(name: &str) -> Option<&'static [usize]> {
     }
 }
 
+/// **When** a by-ref out-parameter write is proven to have happened (ADR-0077
+/// §3.2) — the *written-when* witness an [`out_params`] row may carry.
+///
+/// An out-parameter write is conditional, and the condition is part of the
+/// callee's contract rather than something a caller can see. `preg_match`
+/// measures (PHP 8.5.9) as three outcomes and only two of them write: `1`
+/// assigns the success shape, `0` assigns `[]`, and a pattern PCRE refuses to
+/// compile returns `false` and assigns **nothing at all**, leaving the caller's
+/// variable holding whatever it held. The third case is not a value a fact could
+/// widen to include, which is why the witness names a *return value* rather than
+/// promising an unconditional write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WrittenWhen {
+    /// The write happened on exactly the paths where the call's return value is
+    /// **truthy**. Every falsy return — including one that means "the callee
+    /// refused its inputs" — proves nothing about the argument.
+    ReturnTruthy,
+}
+
+/// The *written-when* witness for position `position` of `name`, or `None` when
+/// the catalog states none (ADR-0077 §3.2).
+///
+/// `None` is the answer for every position of every name but the one row below,
+/// and it means "no seed": the consumer keeps forgetting the argument exactly as
+/// it does today. The engine never guesses a witness — a row is added only when
+/// the callee's documented contract has been read *and* the behavior measured,
+/// because a wrong witness manufactures a fact on a path where the callee never
+/// wrote.
+///
+/// # Membership
+///
+/// * `preg_match` position 2 — measured above.
+///
+/// Deliberately absent, each a decline until measured (ADR-0077 §4):
+/// `preg_match_all`, whose truthiness witness is the same but whose written
+/// *shape* depends on `PREG_PATTERN_ORDER` vs `PREG_SET_ORDER` and is unmodelled;
+/// and every other [`out_params`] row — `sort` and friends write their argument
+/// too, and their contracts deserve the same treatment, but none has been
+/// measured here.
+///
+/// A witness is not by itself a fact: it says *where* a seed would be sound, and
+/// the consumer still has to know what was written.
+#[must_use]
+pub fn out_param_written_when(name: &str, position: usize) -> Option<WrittenWhen> {
+    match (name.to_ascii_lowercase().as_str(), position) {
+        // `preg_match(string $pattern, string $subject, array &$matches = null, …)`:
+        // `1` writes the success shape, `0` writes `[]`, `false` writes nothing.
+        ("preg_match", 2) => Some(WrittenWhen::ReturnTruthy),
+        _ => None,
+    }
+}
+
 /// Whether argument `position` of the builtin `name` is passed **by value** —
 /// the ADR-0070 argument-semantics question, three-valued.
 ///
@@ -2048,7 +2100,10 @@ mod tests {
         assert!(!subsumes("io.fs", "io.db"), "siblings do not subsume");
     }
 
-    use super::{by_value_arg, is_core_label, is_known_label, nearest_label, out_params, subsumes};
+    use super::{
+        WrittenWhen, by_value_arg, is_core_label, is_known_label, nearest_label,
+        out_param_written_when, out_params, subsumes,
+    };
 
     #[test]
     fn subsumption_is_prefix_and_segment_aware() {
@@ -2170,6 +2225,37 @@ mod tests {
         }
         // Case-insensitive, like every other row.
         assert_eq!(out_params("PREG_MATCH"), Some(&[2][..]));
+    }
+
+    #[test]
+    fn the_written_when_witness_is_stated_for_one_row_only() {
+        // The one measured contract: truthy means `preg_match` performed the write.
+        assert_eq!(out_param_written_when("preg_match", 2), Some(WrittenWhen::ReturnTruthy));
+        assert_eq!(out_param_written_when("PREG_MATCH", 2), Some(WrittenWhen::ReturnTruthy));
+        // A position the row does not name is not a by-ref position at all.
+        for p in [0, 1, 3, 4] {
+            assert_eq!(out_param_written_when("preg_match", p), None, "position {p} is by value");
+        }
+        // Every other out-param row stays silent: a witness is added only after the
+        // callee's contract has been measured, never inferred from `out_params`.
+        for f in ["preg_match_all", "similar_text", "str_replace", "sort", "array_pop"] {
+            for p in 0..5 {
+                assert_eq!(out_param_written_when(f, p), None, "{f} states no witness yet");
+            }
+        }
+    }
+
+    #[test]
+    fn a_witness_never_appears_at_a_by_value_position() {
+        // The two tables must not contradict: a stated witness claims the callee
+        // writes through that position, which `by_value_arg` must deny.
+        for f in ["preg_match", "preg_match_all", "sort", "str_replace", "similar_text"] {
+            for p in 0..6 {
+                if out_param_written_when(f, p).is_some() {
+                    assert_eq!(by_value_arg(f, p), Some(false), "{f} argument {p}");
+                }
+            }
+        }
     }
 
     #[test]

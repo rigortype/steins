@@ -9691,6 +9691,16 @@ fn walk_if(
         for (call, returns_true) in then_calls {
             let kind = if returns_true { AssertKind::IfTrue } else { AssertKind::IfFalse };
             apply_guard_asserts(w, call, kind, &mut benv, &mut bclasses);
+            // Out-parameter seed (ADR-0077): a truthy result is the callee's own
+            // witness that it performed its by-ref write, and the ONLY branch where
+            // the written fact is sound — `preg_match` on an uncompilable pattern
+            // returns `false` and writes nothing at all. Runs after the invalidation
+            // of step 2 and rebinds what it forgot (§3.4).
+            if returns_true {
+                for (var, fact) in out_param_seed(w, folder, call, &benv) {
+                    seed_out_param(&var, fact, guard_call_line(w, call), &mut benv, &mut bclasses);
+                }
+            }
             // Guard-respect leg (ADR-0049 §4): a positive existence guard vouches its
             // symbol on the branch where it holds true, silencing the absence family.
             if returns_true && let Some(v) = existence_vouch(w.cx, &bclasses, call) {
@@ -9717,6 +9727,16 @@ fn walk_if(
         for (call, returns_true) in else_calls {
             let kind = if returns_true { AssertKind::IfTrue } else { AssertKind::IfFalse };
             apply_guard_asserts(w, call, kind, &mut benv, &mut bclasses);
+            // The same seed on the other side of the branch, for the same reason and
+            // under the same condition: `if (!preg_match($re, $s, $m)) { return; }`
+            // reaches its else-branch — and everything after it — with the call
+            // proven truthy (ADR-0077 §3.1). The polarity flag, not the branch, is
+            // what decides.
+            if returns_true {
+                for (var, fact) in out_param_seed(w, folder, call, &benv) {
+                    seed_out_param(&var, fact, guard_call_line(w, call), &mut benv, &mut bclasses);
+                }
+            }
             // Guard-respect leg (ADR-0049 §4): the negated-guard branch where the
             // predicate holds true (`if (!method_exists(...)) {} else <here>`) vouches too.
             if returns_true && let Some(v) = existence_vouch(w.cx, &bclasses, call) {
@@ -12372,6 +12392,234 @@ fn apply_stmt_asserts(
     asserted: &mut HashSet<String>,
 ) {
     apply_call_asserts(cx, scope, call, env, store, this_exact, enclosing_class, AssertKind::Always, asserted);
+}
+
+/// The source line of a guard call — the provenance line an out-parameter seed
+/// binds at, which is where the callee performed the write.
+fn guard_call_line(w: &WalkCx, call: &CallExpr) -> u32 {
+    w.cx.tree().position(call.span.start).line
+}
+
+/// The [`Known::bound`] provenance an out-parameter seed stamps (ADR-0077), read
+/// as the clause it becomes: "from `$m`, written by the guard call on this
+/// branch". Both halves of the claim are in it — the fact is the callee's, and it
+/// holds *here* because the branch proved the write happened.
+const OUT_PARAM_SEEDED: &str = "written by the guard call on this branch";
+
+/// **The out-parameter seed** (ADR-0077): the by-ref arguments a guard call
+/// proved it wrote, paired with the fact its contract determines for each.
+///
+/// Called only from the branch where the call's result is proven truthy, and
+/// that is the whole ADR. `preg_match` returns `1` and assigns the success shape,
+/// returns `0` and assigns `[]` — and on a pattern PCRE refuses to compile it
+/// returns `false` and assigns **nothing at all**, leaving the caller's variable
+/// holding whatever it held (measured, PHP 8.5.9). The third outcome is not a
+/// value a fact could widen to include; it is the absence of an assignment. So
+/// truthiness is not merely where the sharper fact is, it is the only place any
+/// fact is sound at all — and a seed at the call statement would manufacture one
+/// on a reachable path.
+///
+/// Every leg refuses **silently**, and a refusal is exactly today's behavior: the
+/// name stays forgotten, no diagnostic is produced, and nothing distinguishes a
+/// pattern this engine cannot read from one it never looked at.
+fn out_param_seed(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+) -> Vec<(String, Fact)> {
+    // A poisoned scope (ADR-0046) has already lost the right to say which name a
+    // binding is — `extract()` and variable-variables can rewrite the frame the
+    // seed would land in. The same gate `apply_call_asserts` applies.
+    if w.scope.poisoned {
+        return Vec::new();
+    }
+    let Some(name) = out_param_seed_callee(w.cx, call) else { return Vec::new() };
+    let Some(positions) = steins_catalog::out_params(name) else { return Vec::new() };
+    let mut seeds = Vec::new();
+    for &position in positions {
+        // The witness leg (§3.2): only a *stated* written-when seeds, and the only
+        // condition the catalog can state is the one the caller just proved.
+        // Nothing is inferred from the mere existence of an `out_params` row.
+        let Some(steins_catalog::WrittenWhen::ReturnTruthy) =
+            steins_catalog::out_param_written_when(name, position)
+        else {
+            continue;
+        };
+        // The arity leg: an argument the call never supplied was never written.
+        let Some(arg) = call.args.get(position) else { continue };
+        // The aliasing leg (§3.6): only a plain local variable. `$this->m`,
+        // `$arr['k']` and a variable-variable all refuse, because the write may be
+        // visible to callers this scope cannot see (ADR-0063 §2.3) and because
+        // nothing here could name the target if it were.
+        let ArgValue::Var(var) = &arg.value else { continue };
+        let Some(fact) = out_param_written_fact(w, folder, name, position, call, env) else {
+            continue;
+        };
+        seeds.push((var.clone(), fact));
+    }
+    seeds
+}
+
+/// The builtin an out-parameter seed may consult, under the same discipline
+/// [`array_guard_predicate`] applies: a namespaced spelling or a user function of
+/// the same name is a **different function**, and a call whose positional mapping
+/// a named or spread argument defeated cannot say which argument is which.
+fn out_param_seed_callee<'a>(cx: &Cx, call: &'a CallExpr) -> Option<&'a str> {
+    let callee = call.callee.as_deref()?;
+    let r = call.callee_ref.as_ref()?;
+    if r.raw.contains('\\') || matches!(cx.resolve_function(r), FnResolution::User(_)) {
+        return None;
+    }
+    call.positional_only.then_some(callee)
+}
+
+/// The fact the callee's contract determines for the out-parameter at
+/// `position`, computed from **proven arguments only** (ADR-0077 §3.3).
+///
+/// One row exists, and the dispatch is by (name, position) because that is what
+/// the witness is keyed by: a second row would be a second arm, not a widening of
+/// this one.
+fn out_param_written_fact(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    name: &str,
+    position: usize,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+) -> Option<Fact> {
+    match (name.to_ascii_lowercase().as_str(), position) {
+        ("preg_match", 2) => preg_match_written_fact(w, folder, call, env),
+        _ => None,
+    }
+}
+
+/// What `preg_match` wrote into `$matches`, for a call whose every premise is
+/// proven — else `None`.
+///
+/// Three refusals live here, and each is a premise the fact would otherwise rest
+/// on without holding it:
+///
+/// * **the pattern** must resolve to a proven `Singleton` string (ADR-0037): a
+///   computed or widened pattern says nothing about the group structure;
+/// * **the group reader declines** (#149) for every pattern whose numbering it
+///   cannot establish, which is also what keeps this out of the business of
+///   deciding whether PCRE would compile the pattern at all;
+/// * **the flags argument**, when supplied, must be a proven `0`.
+///   `PREG_OFFSET_CAPTURE` turns every entry into a `[string, int]` pair and
+///   `PREG_UNMATCHED_AS_NULL` makes the trailing absence an explicit `null`
+///   instead (both measured) — neither is modelled here, so both refuse
+///   (ADR-0077 §4).
+///
+/// The `$offset` argument (position 4) is deliberately *not* consulted: it moves
+/// where matching starts, and measurement confirms it leaves the written key set
+/// alone.
+fn preg_match_written_fact(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+) -> Option<Fact> {
+    let poisoned = w.scope.poisoned;
+    if let Some(flags) = call.args.get(3) {
+        let resolved = w.cx.resolve_literal(&flags.value, env, poisoned, folder)?;
+        if !matches!(resolved, ArgValue::Int(0)) {
+            return None;
+        }
+    }
+    let pattern = w.cx.resolve_literal(&call.args.first()?.value, env, poisoned, folder)?;
+    let ArgValue::Str(pattern) = pattern else { return None };
+    let groups = steins_catalog::preg::capture_groups(&pattern)?;
+    preg_success_shape(&groups)
+}
+
+/// The success shape of `$matches`: key `0` plus one key per capture group in
+/// numeric order, each value a `string`, named groups additionally under their
+/// string key, sealed.
+///
+/// Every claim below was produced by running PHP 8.5.9, and three are
+/// counter-intuitive enough to be worth the ink:
+///
+/// * a **trailing** unmatched group is dropped from the array outright
+///   (`preg_match('/(a)(b)?/', 'a', $m)` gives keys `[0, 1]`), so the slice-A
+///   reader's `can_be_trailing_absent` becomes an **optional** key;
+/// * an **interior** unmatched group is present as `''`
+///   (`preg_match('/(a)(b)?(c)/', 'ac', $m)` gives `[0, 1, 2 => '', 3]`), so it
+///   stays a **required** key — absence is a trailing-only phenomenon and the
+///   reader has already applied that rule;
+/// * a named group occupies its string key **and** a numeric one, both present
+///   exactly when the group's entry is, which is why one presence serves both.
+///
+/// **List-ness.** The keys PHP writes are `0..n` in ascending order and the
+/// trailing drop removes a *suffix* of them, so every realizable key set is a
+/// prefix and `array_is_list($m)` measured `true` for every group-only pattern
+/// probed — including `/(a)(b)?(c)?/` matching only `a`. The shape alone cannot
+/// see this (`array{0: string, 1?: string, 2?: string}` also admits a
+/// hole-bearing `{0, 2}` that PCRE never produces), so the flag is asserted where
+/// the shape would only guess. A named group ends it: its string key makes
+/// `array_is_list` false whenever the group participates, and it may still not
+/// participate (`/(a)(?<b>x)?/` on `'a'` measured a list, on `'ax'` measured not
+/// one) — so a pattern with any name asserts nothing and lets the denotational
+/// computation answer, which is `No` for a name that always participates and
+/// `Maybe` for one that may not.
+fn preg_success_shape(groups: &steins_catalog::preg::CaptureGroups) -> Option<Fact> {
+    use steins_domain::{Presence, SHAPE_WIDTH_LIMIT, Tail};
+
+    // Presence is `witnessed: false` throughout (ADR-0062 §3): this is a declared
+    // contract read off the callee, not a guard that observed the array.
+    let required = Presence::Required { witnessed: false };
+    let string_slot = || Some(Box::new(Fact::General { base: Base::String, nullable: false }));
+
+    let mut fields = vec![(VKey::Int(0), required, string_slot())];
+    for (i, g) in groups.groups.iter().enumerate() {
+        let presence = if g.can_be_trailing_absent { Presence::Optional } else { required };
+        let index = i64::try_from(i + 1).ok()?;
+        fields.push((VKey::Int(index), presence, string_slot()));
+        if let Some(name) = &g.name {
+            fields.push((VKey::Str(name.clone()), presence, string_slot()));
+        }
+    }
+    // A pattern with more groups than a shape may carry has no faithful shape, and
+    // a truncated one would claim a seal it cannot honor.
+    if fields.len() > SHAPE_WIDTH_LIMIT {
+        return None;
+    }
+    let list = groups.groups.iter().all(|g| g.name.is_none());
+    let shape = ShapeFact::normalize(
+        fields,
+        // Sealed: a match writes these keys and no others. The verb family that
+        // would add one (`(*MARK:x)`) is a decline in the reader, not a key here.
+        Tail::Sealed,
+        if list { Certainty::Yes } else { Certainty::Maybe },
+        true,
+        Vec::new(),
+    );
+    Some(Fact::Shape { shape: Box::new(shape), nullable: false })
+}
+
+/// Bind an out-parameter seed on a branch env (ADR-0077 §3.4).
+///
+/// **The order is fixed, and the seed is second.** [`walk_if`] has already run
+/// [`cond_invalidations`] over the pre-branch env, so the name reaches this
+/// function forgotten and this rebinds it; the two never race, and no reader has
+/// to work out which won. The binding is `Asserted` (§3.3): it rests on a
+/// declared contract plus proven inputs, never on observing a run, so it may
+/// silence but never premise a proof.
+fn seed_out_param(
+    var: &str,
+    fact: Fact,
+    line: u32,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    env.insert(
+        var.to_owned(),
+        Known::value_strat(fact, line, Some(OUT_PARAM_SEEDED.to_owned()), Stratum::Asserted),
+    );
+    // The callee assigned the whole variable, so the guard-derived class facts and
+    // the declared-arm lane the old value earned are void — the same reasoning any
+    // rebinding applies.
+    store.unbind(var);
 }
 
 /// Apply a guard-position call's `@phpstan-assert-if-true`/`-if-false` specs to a
