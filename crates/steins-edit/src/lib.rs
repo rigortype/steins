@@ -27,6 +27,11 @@
 //! - [`envelope`] — the third transform, `@throws` envelope seeding (issue #115
 //!   / ADR-0040): writes the proven-escape set behind `throw.undeclared` as
 //!   declared `@throws` tags, creating or losslessly extending docblocks.
+//! - [`loops`] — the fourth transform, loop→`array_map` (ADR-0076 / ADR-0010's
+//!   flagship): the first **effect-preconditioned** rewrite, gated on the engine
+//!   *proving* the loop body's effect lane and throw set empty. Where the phpdoc
+//!   transforms reach for call-site evidence, this one reaches for the effect and
+//!   throw fixpoints, restricted to the loop's own byte span.
 //!
 //! ADR-0034's dual verification (post-check: zero new diagnostics after apply;
 //! oracle: every site transformed-or-refused) is the safety net the CLI wires in.
@@ -35,6 +40,7 @@ pub mod common;
 pub mod diff;
 pub mod envelope;
 pub mod honesty;
+pub mod loops;
 pub mod obstacles;
 pub mod plan;
 pub mod promote;
@@ -44,6 +50,7 @@ pub mod transform;
 pub use diff::unified_diff;
 pub use envelope::{ThrowsEnvelope, plan_throws_envelope};
 pub use honesty::{PhpdocHonesty, plan_phpdoc_honesty};
+pub use loops::{LoopToArrayMap, plan_loop_to_array_map};
 pub use obstacles::{DynamismObstacles, VouchSet};
 pub use plan::{ByteSpan, Edit, EditPlan, NewFile, PlanError};
 pub use regions::{PartitionConfigError, PartitionMap, RegionId};
