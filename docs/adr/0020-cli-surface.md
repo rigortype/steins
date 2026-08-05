@@ -19,3 +19,12 @@ Two deliberate absences:
   Instead, a later step adds **Skill-driven initialization** in the Rigor
   manner — an agent skill walks a project through adoption
   conversationally, rather than a config generator.
+
+**Implementation note (2026-08-05, issue #114).** The `--fix` reservation
+is implemented, with its first fix family: dump-statement removal for the
+explicit dump pair (`debug.type` / `debug.phpdoc-type`, ADR-0053). The
+findings carry the deletion as a first-class payload (ADR-0010), `check
+--fix` applies it, and the write is gated by the transform engine's
+zero-new-diagnostics post-check (ADR-0034). `debug.var-dump` ships no fix
+— deleting legal working PHP is a judgment call, not a mechanical remedy.
+Further families ride later slices.

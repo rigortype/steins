@@ -744,7 +744,12 @@ reports `suppress.unmatched`. ADR-0053 exempts them from the baseline as
 well: `--set-baseline` never writes a debug entry, and a leftover one (from
 before this exemption, or a hand-edit) never suppresses a dump either — it
 resurfaces as a stale baseline entry instead. The remedy for an unwanted
-dump is deleting the call (ADR-0053).
+dump is deleting the call (ADR-0053) — and for the explicit pair, `check
+--fix` does exactly that: `debug.type` and `debug.phpdoc-type` carry the
+statement deletion as a fix payload (ADR-0010), applied under a
+post-check gate. See the [`--fix` section of the CLI
+reference](02-cli-reference.md#--fix). `debug.var-dump` carries no fix —
+deleting working PHP is your judgment call.
 
 ## What to do with a finding
 

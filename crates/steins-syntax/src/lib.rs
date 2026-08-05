@@ -2551,6 +2551,40 @@ impl SourceTree {
         let column = self.text.get(line_start..end).map_or(0, |s| s.chars().count());
         Position { line: line_idx as u32 + 1, column: column as u32 + 1 }
     }
+
+    /// Widen a statement `span` to its whole physical line(s) when nothing else
+    /// shares them: with only whitespace before `span.start` on its first line
+    /// and only whitespace after `span.end` up to the line break, the returned
+    /// span starts at the line start and swallows the trailing newline (CRLF
+    /// included), so deleting it leaves no blank gutter line — the same
+    /// no-leftover discipline steins-edit's docblock tag deletion applies.
+    /// A span that shares a line with anything else — code before it, a
+    /// trailing comment after it — comes back exactly as given, so a deletion
+    /// removes the statement and nothing beside it.
+    #[must_use]
+    pub fn whole_line_span(&self, span: Span) -> Span {
+        let bytes = self.text.as_bytes();
+        let line_idx = self.line_starts.partition_point(|&s| s <= span.start).saturating_sub(1);
+        let line_start = self.line_starts.get(line_idx).copied().unwrap_or(0) as usize;
+        let leading_blank = self
+            .text
+            .get(line_start..span.start as usize)
+            .is_some_and(|s| s.chars().all(char::is_whitespace));
+        if !leading_blank {
+            return span;
+        }
+        // Skip horizontal whitespace (and a CR) after the span, then require the
+        // line to actually end there — at a newline, or at end of file.
+        let mut end = span.end as usize;
+        while bytes.get(end).is_some_and(|&b| b == b' ' || b == b'\t' || b == b'\r') {
+            end += 1;
+        }
+        match bytes.get(end) {
+            Some(&b'\n') => Span { start: line_start as u32, end: (end + 1) as u32 },
+            None => Span { start: line_start as u32, end: end as u32 },
+            Some(_) => span,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

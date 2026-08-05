@@ -34,6 +34,31 @@ fn parse_error_no_panic() {
 }
 
 #[test]
+fn whole_line_span_widens_only_lone_statements() {
+    use steins_syntax::Span;
+
+    // Line 2 ("  foo();") holds nothing but the statement: the span widens to
+    // the line start and swallows the trailing newline. Line 3 shares its line
+    // with a trailing comment: unchanged. Line 4 ends the file without a
+    // newline: widened to the file end.
+    let src = "<?php\n  foo();\nbar(); // t\n  baz();";
+    let tree = SourceTree::parse(src);
+    assert_eq!(tree.whole_line_span(Span { start: 8, end: 14 }), Span { start: 6, end: 15 });
+    assert_eq!(tree.whole_line_span(Span { start: 15, end: 21 }), Span { start: 15, end: 21 });
+    assert_eq!(tree.whole_line_span(Span { start: 29, end: 35 }), Span { start: 27, end: 35 });
+
+    // CRLF line endings: the CR is part of the line break and is swallowed
+    // with the LF.
+    let crlf = SourceTree::parse("<?php\r\nfoo();\r\n");
+    assert_eq!(crlf.whole_line_span(Span { start: 7, end: 13 }), Span { start: 7, end: 15 });
+
+    // Code BEFORE the statement on its line: unchanged (deleting the line
+    // would delete the sibling statement too).
+    let two = SourceTree::parse("<?php\nfoo(); bar();\n");
+    assert_eq!(two.whole_line_span(Span { start: 13, end: 19 }), Span { start: 13, end: 19 });
+}
+
+#[test]
 fn lowers_scopes_trace_and_poison() {
     use steins_syntax::StmtKind;
 

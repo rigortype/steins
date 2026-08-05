@@ -24,7 +24,7 @@ whole surface to stderr and exits `2`:
 
 ```
 $ steins
-usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor-diagnostics] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
+usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
        steins annotate [--no-php] [--format text|json] <file.php>
        steins transform <phpdoc-to-native|phpdoc-honesty> [--apply] [--format text|json] <paths...>
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
@@ -103,8 +103,8 @@ Analyze a tree and report findings. This is the command you run in CI.
 
 ```
 steins check [--format text|json] [--profile <name>] [--no-php]
-             [--vendor-diagnostics] [--set-baseline] [--baseline <path>]
-             [--ignore-baseline] <paths...>
+             [--vendor-diagnostics] [--fix] [--set-baseline]
+             [--baseline <path>] [--ignore-baseline] <paths...>
 ```
 
 | Flag | Default | Effect |
@@ -113,8 +113,9 @@ steins check [--format text|json] [--profile <name>] [--no-php]
 | `--profile <name>` | `[check] profile`, else `default` | Select the display surface — a built-in stage or one named in `steins.toml`. |
 | `--no-php` | off | Skip the PHP sidecar and run the sound subset. |
 | `--vendor-diagnostics` | off | Report findings inside vendor trees too. |
+| `--fix` | off | Apply the fixes findings carry, post-check-gated — see [`--fix`](#--fix). |
 | `--baseline <path>` | `.steins-baseline.jsonl` when it exists | Locate the baseline file. |
-| `--set-baseline` | off | Write the baseline instead of reporting; exits `0`. |
+| `--set-baseline` | off | Write the baseline instead of reporting; exits `0`. Cannot combine with `--fix`. |
 | `--ignore-baseline` | off | Report the full surface, consulting no baseline file. |
 
 `<paths...>` is required — `steins check` with none prints
@@ -175,6 +176,52 @@ note: running as sound subset (no PHP sidecar) — findings that require executi
 > spelling — the same `--baseline` flag locates the file for reading and for
 > writing, and `--set-baseline` decides which.
 
+### `--fix`
+
+Some findings carry their remedy as a first-class payload (ADR-0010), and
+`--fix` applies it. One fix family exists today: a committed
+`\PHPStan\dumpType()` / `\PHPStan\dumpPhpDocType()` statement — `debug.type`
+and `debug.phpdoc-type`, whose only remedy is deleting the call — is removed
+whole (the entire expression-statement, its line when nothing else shares
+it). `debug.var-dump` is deliberately not fixable: a `var_dump()` is legal
+working PHP, and deleting it is your call, not the tool's.
+
+```
+$ steins check src/Dump.php
+src/Dump.php:4:19: error[debug.type]: dumped type: 'POST'
+$ steins check --fix src/Dump.php
+src/Dump.php:4:19: fixed[debug.type]: dumped type: 'POST'
+steins: fixed 1 finding(s) (1 file(s) written)
+$ echo $?
+0
+$ steins check src/Dump.php
+$ echo $?
+0
+```
+
+The write is gated by the same dual-verification post-check `transform
+--apply` runs (ADR-0034): the edited project is re-analyzed, and unless
+every diagnostic id's count is unchanged or lower, the whole write is
+refused by name and nothing touches disk. Today's one family cannot
+actually trip that gate, and that is why it went first — a recognized dump
+is transparent (ADR-0053: it reads facts and binds nothing), so deleting
+its statement cannot change what the rest of the file proves. The gate is
+what will let the families that follow be less obviously riskless. When one
+does refuse, the named reason and the diagnostics the edits would have
+surfaced print on stdout, and the reason again on stderr:
+
+```
+fix refused (postcheck-new-diagnostics): applying the fixes would surface 1 new diagnostic(s)
+  src/Example.php:4:1: [call.on-null] method call $x->m() — $x is proven null on this path — proven Error (Call to a member function on null)
+steins: fix refused (postcheck-new-diagnostics): applying the fixes would surface 1 new diagnostic(s)
+```
+
+A fixed finding leaves the exit computation — it no longer exists on disk,
+so it cannot double as a surviving finding in the same run. A refused (or
+fixless) `--fix` run reports and exits exactly like a plain run. Without
+`--fix`, `check` behaves byte-identically to before; the one additive
+surface is the JSON payload below.
+
 ### `--format json`
 
 The document is one object. `findings` is an array, sorted by path, line,
@@ -212,6 +259,7 @@ Per finding:
 | `line`, `column` | number | 1-based position. |
 | `message` | string | The same text the `text` mode prints after the id. |
 | `origin` | string | Present only on `throw.undeclared`: `direct` or `propagated`. |
+| `fix` | object | Present only on findings that carry a fix payload (today: `debug.type`, `debug.phpdoc-type`). |
 
 `origin` is the one facet v1 defines (ADR-0050 §4); a finding whose id
 declares no facet carries no such key at all. Under `--profile contracts`
@@ -232,6 +280,36 @@ the same run's `throw.undeclared` entry carries it:
 
 Top-level, `profile` names the active surface and `vendor_suppressed` /
 `suppressed` / `baselined` count what each channel held back.
+
+A fix-carrying finding's `fix` object is the remedy in machine form: a
+`title` and an `edits` array of byte-span splices, the same shape
+`transform`'s `EditPlan` serializes, so an agent or editor applies them
+without reinventing the diff. Byte offsets index the file's current
+contents; `end` is exclusive, and an empty `replacement` is a deletion:
+
+```json
+    {
+      "id": "debug.type",
+      "layer": "debug",
+      "level": "fail",
+      "path": "./src/Dump.php",
+      "line": 4,
+      "column": 19,
+      "message": "dumped type: 'POST'",
+      "fix": {
+        "title": "remove the dump statement",
+        "edits": [
+          { "path": "./src/Dump.php", "span": { "start": 24, "end": 47 }, "replacement": "" }
+        ]
+      }
+    }
+```
+
+Under `--fix` the document additionally carries a top-level `fix` object —
+`applied` (whether the edits were written), `fixed` (the findings the run
+resolved, absent from `findings`), and `refusal` (`null`, or the named
+reason with the diagnostics the edits would have surfaced). A run without
+`--fix` has no such key.
 
 Two text-mode lines have no JSON counterpart: the stale-baseline count and
 the surface-widening notice. SARIF and GitHub-annotation formats are

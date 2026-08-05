@@ -31,6 +31,11 @@ Entries accumulate under this heading as work lands; the `steins-release-prep`
 skill seals them into a version section at release time, reconstructing from
 `git log` if the discipline slipped.
 
+### Added
+
+- **`steins check --fix` now removes committed `\PHPStan\dumpType()` / `\PHPStan\dumpPhpDocType()` statements — the first fix-it family.**
+  - The `debug.type` and `debug.phpdoc-type` findings carry their remedy as a machine-readable payload: `--format json` shows a per-finding `fix` object (byte-span edits plus replacement) an agent or editor can apply directly, and findings without a fix carry no such key. `--fix` applies the payloads atomically, re-analyzes the project, and refuses to write with a named reason if any new diagnostic would surface; an applied fix is reported as fixed and no longer counts toward exit `1`. Without `--fix`, text output and exit codes are unchanged. `debug.var-dump` is deliberately not auto-fixed — deleting a legal `var_dump()` is a judgment call.
+
 ### Changed
 
 - **`array_slice` widening is sharper in two cases: slicing a proven list from offset `0` with `preserve_keys: true` still yields a list, and a slice whose length is a proven `0` is exactly the empty array.**

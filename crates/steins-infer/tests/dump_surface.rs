@@ -601,3 +601,131 @@ fn a_folded_return_value_beats_the_return_arm() {
                function g() { $x = mkInt(); \\PHPStan\\dumpType($x); }\n";
     assert_eq!(one_type(src), "dumped type: 1");
 }
+
+// ---- The fix payload (ADR-0010, issue #114) --------------------------------
+//
+// A statement-position explicit dump — the call IS the whole expression-
+// statement — carries its remedy as a first-class payload: delete the
+// statement, the one remedy ADR-0053 names. The payload is byte-span edits
+// mirroring steins-edit's `Edit` shape, so `check --fix` (and any JSON
+// consumer) can apply it by splicing. Embedded dumps and `debug.var-dump`
+// carry none: deleting an enclosing binding, or a legal `var_dump()`, is a
+// judgment call, not a mechanical remedy.
+
+/// Splice a finding's fix edits into `src` (single-file fixtures: every edit
+/// targets the one path).
+fn apply_fix(src: &str, d: &Diagnostic) -> String {
+    let fix = d.fix.as_ref().expect("finding carries a fix");
+    let mut edits: Vec<&steins_infer::FixEdit> = fix.edits.iter().collect();
+    edits.sort_by_key(|e| e.start);
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    for e in edits {
+        out.push_str(&src[cursor..e.start as usize]);
+        out.push_str(&e.replacement);
+        cursor = e.end as usize;
+    }
+    out.push_str(&src[cursor..]);
+    out
+}
+
+#[test]
+fn statement_position_dump_carries_the_statement_deletion_fix() {
+    let src = "<?php\n$x = 5;\n\\PHPStan\\dumpType($x);\n";
+    let ds = dumps(src);
+    assert_eq!(ds.len(), 1);
+    let fix = ds[0].fix.as_ref().expect("statement-position dump carries a fix");
+    assert_eq!(fix.title, "remove the dump statement");
+    // The whole expression-statement, widened to its whole line: bytes 14..36
+    // are `\PHPStan\dumpType($x);`, and the trailing newline is swallowed so
+    // no blank gutter line is left.
+    assert_eq!(fix.edits.len(), 1);
+    let e = &fix.edits[0];
+    assert_eq!((e.path.as_str(), e.start, e.end, e.replacement.as_str()), ("t.php", 14, 37, ""));
+    // Applying the fix yields a clean rerun: the dump is gone, nothing else fires.
+    let after = apply_fix(src, &ds[0]);
+    assert_eq!(after, "<?php\n$x = 5;\n");
+    let tree = SourceTree::parse(&after);
+    assert!(check(&tree, &[], "t.php").is_empty(), "rerun on the fixed source must be clean");
+}
+
+#[test]
+fn indented_dump_statement_fix_swallows_the_whole_line() {
+    let src = "<?php\nfunction f(int $x): int {\n    \\PHPStan\\dumpType($x);\n    return $x;\n}\n";
+    let ds = dumps(src);
+    assert_eq!(ds.len(), 1);
+    let after = apply_fix(src, &ds[0]);
+    assert_eq!(after, "<?php\nfunction f(int $x): int {\n    return $x;\n}\n");
+}
+
+#[test]
+fn dump_with_a_trailing_comment_deletes_only_the_statement() {
+    // Something else shares the line — the deletion stays exactly the
+    // statement span, and the comment survives.
+    let src = "<?php\n$x = 1;\n\\PHPStan\\dumpType($x); // check me\n";
+    let ds = dumps(src);
+    assert_eq!(ds.len(), 1);
+    let after = apply_fix(src, &ds[0]);
+    assert_eq!(after, "<?php\n$x = 1;\n // check me\n");
+}
+
+#[test]
+fn phpdoc_dump_carries_the_fix_too() {
+    let src = "<?php\n/** @param int $x */\nfunction f($x) { \\PHPStan\\dumpPhpDocType($x); }\n";
+    let ds = dumps(src);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].id, DEBUG_PHPDOC_TYPE_ID);
+    let fix = ds[0].fix.as_ref().expect("statement-position phpdoc dump carries a fix");
+    assert_eq!(fix.title, "remove the dump statement");
+}
+
+#[test]
+fn zero_argument_dump_carries_the_fix_too() {
+    // The committed call is a runtime fatal either way, and it is still the
+    // whole statement — the deletion remedy applies unchanged.
+    let src = "<?php\n\\PHPStan\\dumpType();\n";
+    let ds = dumps(src);
+    assert_eq!(ds.len(), 1);
+    let after = apply_fix(src, &ds[0]);
+    assert_eq!(after, "<?php\n");
+}
+
+#[test]
+fn multi_argument_dump_findings_share_one_statement_edit() {
+    // One statement, one deletion: each per-argument finding carries the SAME
+    // edit, so a consumer applying both (with identical-edit dedupe) deletes
+    // the statement once.
+    let src = "<?php\n$x = 1;\n$y = 2;\n\\PHPStan\\dumpType($x, $y);\n";
+    let ds = dumps(src);
+    assert_eq!(ds.len(), 2);
+    let a = ds[0].fix.as_ref().expect("first finding carries the fix");
+    let b = ds[1].fix.as_ref().expect("second finding carries the fix");
+    assert_eq!(a, b);
+    assert_eq!(a.edits.len(), 1);
+}
+
+#[test]
+fn embedded_dumps_carry_no_fix() {
+    // The dump is part of a larger statement — deleting the whole statement
+    // would delete the enclosing binding too, so no fix rides along.
+    for src in [
+        "<?php\n$x = 1;\n$y = \\PHPStan\\dumpType($x);\n",
+        "<?php\nfunction f($x) { return \\PHPStan\\dumpType($x); }\n",
+        "<?php\n$x = 1;\necho \\PHPStan\\dumpType($x);\n",
+    ] {
+        let ds = dumps(src);
+        assert!(!ds.is_empty(), "dump still reports in {src:?}");
+        for d in &ds {
+            assert_eq!(d.fix, None, "embedded dump must carry no fix in {src:?}");
+        }
+    }
+}
+
+#[test]
+fn var_dump_carries_no_fix() {
+    // Scope guard (issue #114): a `var_dump()` is legal working PHP — deleting
+    // it is a judgment call, so `debug.var-dump` ships no fix payload.
+    let ds = var_dumps("<?php\n$x = 1;\nvar_dump($x);\n");
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].fix, None);
+}

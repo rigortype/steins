@@ -474,7 +474,7 @@ mod tests {
     };
 
     fn diag(id: &'static str, facet: Option<Facet>) -> Diagnostic {
-        Diagnostic { id, path: "a.php".to_owned(), line: 1, column: 1, message: String::new(), facet }
+        Diagnostic { id, path: "a.php".to_owned(), line: 1, column: 1, message: String::new(), facet, fix: None }
     }
 
     fn empty() -> ProfileConfigs {
