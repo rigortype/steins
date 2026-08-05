@@ -77,14 +77,31 @@ at exactly that revision, so the gate is reproducible. Current entries include
 `composer/composer`, `sebastianbergmann/phpunit`, `guzzle/guzzle`, and others
 chosen for style diversity rather than size.
 
-`corpus.local.toml` injects **live working trees** that are deliberately not
-pinned and not committed: a private legacy monorepo, and — registered
+`corpus.local.toml` injects **live working trees** that this repo deliberately
+neither checks out nor commits: a private legacy monorepo, and — registered
 2026-07-24 at the v0.1.0 run — `phpstan/phpstan-src` (curated, pathological,
 modern PHP; `tests/` and `e2e/` excluded as deliberately-broken fixtures, so
 `src/` is the clean FP-hunting surface). Its first run: 0 proof-layer, 0
 `phpdoc.*`, 20 `throw.undeclared` — all triaged TRUE and seeded into
 `THROW_EXPECTED`. Total scale at the last recorded run: ~99,490 files (the
 unpinned monorepo drifted +210 during the day and its tripwires were reseeded).
+
+That asymmetry has a cost the public half does not pay. A raised count on a
+pinned package can only be the analyzer, because the corpus is fixed by the
+lock file; a raised count on a live tree is ambiguous between a regression and
+corpus drift, and settling it after the fact means archaeology in a repository
+this one cannot see. So a `[[project]]` entry may carry an optional `revision`
+— the checkout state its seeded baselines were measured at. It does not *pin*
+anything (nothing here checks out a private tree); it records, so the gate can
+compare. On every run the gate reads what the tree is actually on (`git -C
+<path> rev-parse HEAD`, degrading to "unknown" on any failure) and prints it;
+when a tripwire trips it says which of three situations obtains — the revision
+matches, so the increase is a genuine regression; the revision differs, so the
+change may be drift and wants a re-measure before a reseed; or nothing was
+recorded, so the question cannot be settled automatically and here is the value
+to record. The field lives in the gitignored file and the sha is printed only
+to the operator's terminal: a private repository's commit id never enters this
+one. Absent is legal, and an entry without it behaves exactly as before.
 
 Held-out projects used for adoption drills are never used for tuning; that
 separation is what makes an adoption-drill number mean anything. See
