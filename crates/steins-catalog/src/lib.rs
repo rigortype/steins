@@ -65,6 +65,11 @@ mod return_facts_generated;
 /// [`declared_return_changed_at`].
 mod declared_returns_generated;
 
+// The capture-group structure of a literal PCRE pattern (issue #149). Carries
+// its own module documentation, so this is a plain comment: an outer doc here
+// would merge with that header and resolve its intra-doc links in *this* scope.
+pub mod preg;
+
 /// Whether `name` is on the folding allowlist (case-insensitive).
 ///
 /// A `true` here is a *permission to fold*, not a promise the call folds: the
