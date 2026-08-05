@@ -112,3 +112,4 @@ list in one place.
 | ADR-0074 | [A `@psalm-trace` docblock asks the dump surface's question](0074-trace-annotation.md) |
 | ADR-0075 | [A method call's summary rebinds where a function's does](0075-method-call-summary-rebinding.md) |
 | ADR-0076 | [Loop-to-array_map: the first effect-preconditioned transform](0076-loop-to-array-map-transform.md) |
+| ADR-0077 | [A by-reference out-parameter carries a fact only where the call proves it was written](0077-out-parameter-fact-seeding.md) |
