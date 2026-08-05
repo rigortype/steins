@@ -65,7 +65,135 @@ struct PackageReport {
     expected_true: Vec<Diagnostic>,
     /// Vendor findings suppressed from the gate count (local projects only).
     vendor_suppressed: usize,
+    /// The revision recorded in `corpus.local.toml` for this local project, i.e.
+    /// the state its seeded baselines were measured at. `None` for pinned corpus
+    /// packages (whose revision lives in the tracked `corpus.lock.toml`) and for a
+    /// local entry that records none.
+    recorded_revision: Option<String>,
+    /// The revision the local project's checkout is actually on this run, or
+    /// `None` when it could not be read (see [`corpus_local::checkout_revision`]).
+    measured_revision: Option<String>,
     elapsed: Duration,
+}
+
+impl PackageReport {
+    /// How this report's recorded baseline revision relates to the one measured.
+    fn revision(&self) -> RevisionStatus {
+        classify_revision(self.recorded_revision.as_deref(), self.measured_revision.as_deref())
+    }
+}
+
+/// How a local project's **recorded** baseline revision relates to the revision
+/// its checkout was actually sitting on when this run measured it.
+///
+/// This is the whole point of `revision` in `corpus.local.toml`. The pinned
+/// packages are reproducible by construction (`corpus.lock.toml` records a commit
+/// per package), so a count move there can only be the analyzer. A local project
+/// is a live working tree that nothing here checks out, so a count move is
+/// ambiguous between "the analyzer regressed" and "the corpus moved" — and
+/// resolving that ambiguity after the fact costs archaeology in a repository this
+/// one cannot see. Recording the measured revision collapses the ambiguity at the
+/// moment the baseline is seeded, which is the only moment it is cheap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RevisionStatus {
+    /// A revision is recorded and the checkout is on it: the corpus is the same
+    /// one the baseline was seeded against.
+    Matches { revision: String },
+    /// A revision is recorded and the checkout is somewhere else: the corpus moved
+    /// under the baseline.
+    Differs { recorded: String, measured: String },
+    /// No revision is recorded. `measured` is what the checkout is on now (or
+    /// `None` if even that is unknown) — printed so a human can record it.
+    Unrecorded { measured: Option<String> },
+    /// A revision is recorded but the checkout's own revision could not be read,
+    /// so no comparison was possible.
+    Unreadable { recorded: String },
+}
+
+/// Classify a recorded revision against a measured one.
+///
+/// Comparison is case-insensitive and **abbreviation-tolerant**: a human writing
+/// `revision` by hand naturally pastes a short sha, so one value being a prefix of
+/// the other counts as a match provided the shorter is at least
+/// [`MIN_REVISION_PREFIX`] characters. A shorter fragment than that is not enough
+/// evidence of identity and is treated as a difference — erring toward "the corpus
+/// may have moved", which asks for a re-measure rather than silently blessing a
+/// count.
+fn classify_revision(recorded: Option<&str>, measured: Option<&str>) -> RevisionStatus {
+    let norm = |s: &str| s.trim().to_ascii_lowercase();
+    match (recorded.map(&norm).filter(|s| !s.is_empty()), measured.map(&norm)) {
+        (Some(recorded), Some(measured)) => {
+            if revisions_agree(&recorded, &measured) {
+                // Report the longer (more specific) of the two — normally the
+                // measured full sha.
+                let revision =
+                    if measured.len() >= recorded.len() { measured } else { recorded };
+                RevisionStatus::Matches { revision }
+            } else {
+                RevisionStatus::Differs { recorded, measured }
+            }
+        }
+        (Some(recorded), None) => RevisionStatus::Unreadable { recorded },
+        (None, measured) => RevisionStatus::Unrecorded { measured },
+    }
+}
+
+/// Shortest abbreviated sha accepted as evidence of identity (git's own default
+/// abbreviation floor).
+const MIN_REVISION_PREFIX: usize = 7;
+
+/// Whether two (already normalized) revision strings name the same commit, allowing
+/// either to be an abbreviation of the other.
+fn revisions_agree(a: &str, b: &str) -> bool {
+    let shorter = a.len().min(b.len());
+    shorter >= MIN_REVISION_PREFIX && (a.starts_with(b) || b.starts_with(a))
+}
+
+/// The line printed for a local project in the ordinary run — not only on RED. A
+/// gate that speaks only when it is angry teaches nothing: the operator should see
+/// what state the corpus was measured in on every green run too, so that the day it
+/// moves, the previous run's output is already a record of where it moved from.
+fn revision_summary_line(status: &RevisionStatus) -> String {
+    match status {
+        RevisionStatus::Matches { revision } => {
+            format!("revision: {revision} — matches the revision the baselines were seeded at")
+        }
+        RevisionStatus::Differs { recorded, measured } => format!(
+            "revision: {measured} — but the baselines were seeded at {recorded}; the corpus has moved since"
+        ),
+        RevisionStatus::Unrecorded { measured: Some(measured) } => format!(
+            "revision: {measured} — UNPINNED baseline (no `revision` recorded in corpus.local.toml; add `revision = \"{measured}\"` to this project's entry to pin it)"
+        ),
+        RevisionStatus::Unrecorded { measured: None } => {
+            "revision: unknown — not a git checkout, or git is unavailable; the baseline cannot be pinned".to_owned()
+        }
+        RevisionStatus::Unreadable { recorded } => format!(
+            "revision: unknown — not a git checkout, or git is unavailable; the baselines were seeded at {recorded}, which nothing here can compare against"
+        ),
+    }
+}
+
+/// The line printed **beside a tripped tripwire** for a local project: the one
+/// place where the recorded-vs-measured comparison actually decides what the
+/// operator should do about the count that just went up.
+fn revision_tripwire_line(status: &RevisionStatus) -> String {
+    match status {
+        RevisionStatus::Matches { revision } => format!(
+            "revision MATCHES the seeded baseline ({revision}): the corpus is the same one the baseline was measured on, so this increase is a GENUINE REGRESSION — triage the new finding(s), do not reseed."
+        ),
+        RevisionStatus::Differs { recorded, measured } => format!(
+            "revision DIFFERS: the baseline was seeded at {recorded}, this run measured {measured}. The corpus moved under the baseline, so the count change may be CORPUS DRIFT rather than a regression — re-measure against the seeded revision to separate the two, then reseed consciously (the count in xtask/src/gate.rs, and `revision = \"{measured}\"` in corpus.local.toml)."
+        ),
+        RevisionStatus::Unrecorded { measured: Some(measured) } => format!(
+            "revision UNPINNED: no `revision` is recorded for this project, so drift and regression CANNOT be told apart automatically. Record the measured revision so the next run can: `revision = \"{measured}\"`"
+        ),
+        RevisionStatus::Unrecorded { measured: None } => {
+            "revision UNPINNED and unreadable: no `revision` is recorded and the checkout's own revision could not be read (not a git checkout, or git is unavailable), so drift and regression CANNOT be told apart automatically.".to_owned()
+        }
+        RevisionStatus::Unreadable { recorded } => format!(
+            "revision UNCOMPARED: the baseline was seeded at {recorded}, but this checkout's revision could not be read (not a git checkout, or git is unavailable), so corpus drift cannot be ruled out."
+        ),
+    }
 }
 
 /// Which counter partition a finding routes into (ADR-0050 §9 / ADR-0053 §8). The
@@ -818,6 +946,10 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
         effects,
         expected_true,
         vendor_suppressed: 0,
+        // A pinned package's revision is in the tracked `corpus.lock.toml` and the
+        // sync checks it out — reproducible by construction, nothing to compare.
+        recorded_revision: None,
+        measured_revision: None,
         elapsed: start.elapsed(),
     }
 }
@@ -828,6 +960,10 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
 fn analyze_local(proj: &LocalProject) -> PackageReport {
     let start = Instant::now();
     let root = Path::new(&proj.path);
+
+    // Read what the tree is on BEFORE walking it, so the revision reported beside a
+    // count is the one that count was taken at. Unreadable degrades to `None`.
+    let measured_revision = corpus_local::checkout_revision(root);
 
     let files = corpus_local::collect_php_files(root, &proj.exclude);
 
@@ -895,6 +1031,8 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
         effects,
         expected_true,
         vendor_suppressed,
+        recorded_revision: proj.revision.clone(),
+        measured_revision,
         elapsed: start.elapsed(),
     }
 }
@@ -934,6 +1072,11 @@ fn print_report(
             r.diagnostics.len(),
             r.elapsed.as_secs_f64()
         );
+        // What state the corpus was measured in — printed on EVERY run for a local
+        // project, green included, not only when a tripwire trips.
+        if r.local {
+            println!("    {}", revision_summary_line(&r.revision()));
+        }
         if !r.parse_error_files.is_empty() {
             for sample in r.parse_error_files.iter().take(5) {
                 println!("    parse-error: {sample}");
@@ -994,14 +1137,7 @@ fn print_report(
         );
     }
     println!("phpdoc.* TOTAL: {total_phpdoc} (expected baseline {total_expected})");
-    if regressions.is_empty() {
-        println!("phpdoc.* tripwire: OK — no package exceeds its expected baseline.");
-    } else {
-        println!("phpdoc.* tripwire: TRIPPED — the following packages regressed:");
-        for reg in regressions {
-            println!("    {} — {} > expected {}", reg.name, reg.actual, reg.expected);
-        }
-    }
+    print_tripwire("phpdoc", regressions, local_reports);
 
     // Measurement-mode summary for the `throw.*` contract-layer ids (ADR-0040):
     // counted per package against `THROW_EXPECTED`, gating only on INCREASE. The
@@ -1038,14 +1174,7 @@ fn print_report(
         }
     }
     println!("throw.* TOTAL: {total_throw} (expected baseline {total_throw_expected})");
-    if throw_regressions.is_empty() {
-        println!("throw.* tripwire: OK — no package exceeds its expected baseline.");
-    } else {
-        println!("throw.* tripwire: TRIPPED — the following packages regressed:");
-        for reg in throw_regressions {
-            println!("    {} — {} > expected {}", reg.name, reg.actual, reg.expected);
-        }
-    }
+    print_tripwire("throw", throw_regressions, local_reports);
 
     // Measurement-mode summary for the `effect.*` **contract** ids (ADR-0050 §9
     // delta: `effect.envelope-exceeded` / `effect.liskov-widened`). Seeded empty
@@ -1085,14 +1214,7 @@ fn print_report(
             }
         }
         println!("effect.* TOTAL: {total_effect} (expected baseline {total_effect_expected})");
-        if effect_regressions.is_empty() {
-            println!("effect.* tripwire: OK — no package exceeds its expected baseline.");
-        } else {
-            println!("effect.* tripwire: TRIPPED — the following packages regressed:");
-            for reg in effect_regressions {
-                println!("    {} — {} > expected {}", reg.name, reg.actual, reg.expected);
-            }
-        }
+        print_tripwire("effect", effect_regressions, local_reports);
     }
 
     // Summary table: packages and local projects share one table; local rows are
@@ -1156,9 +1278,37 @@ fn print_report(
     }
 }
 
+/// Print one measurement family's tripwire verdict, and — for a tripped **local**
+/// project — the recorded-vs-measured revision line beside it.
+///
+/// That line is where the whole mechanism earns its keep: a raised count on a
+/// pinned package can only be the analyzer, but on a live working tree it is
+/// ambiguous, and the operator is standing right here, at the moment of the RED,
+/// deciding whether to triage findings or re-measure the corpus.
+fn print_tripwire(family: &str, regressions: &[PhpdocRegression], local_reports: &[PackageReport]) {
+    if regressions.is_empty() {
+        println!("{family}.* tripwire: OK — no package exceeds its expected baseline.");
+        return;
+    }
+    println!("{family}.* tripwire: TRIPPED — the following packages regressed:");
+    for reg in regressions {
+        println!("    {} — {} > expected {}", reg.name, reg.actual, reg.expected);
+        if let Some(local) = local_reports.iter().find(|r| r.name == reg.name) {
+            println!("        {}", revision_tripwire_line(&local.revision()));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use steins_infer::is_vendor_path;
+
+    use super::{RevisionStatus, classify_revision, revision_summary_line, revision_tripwire_line};
+
+    // Synthetic revisions only. A real private-corpus sha must never enter a
+    // tracked file, test fixtures included.
+    const REV_A: &str = "0123456789abcdef0123456789abcdef01234567";
+    const REV_B: &str = "fedcba9876543210fedcba9876543210fedcba98";
 
     // The vendor-path predicate (ADR-0015) drives the gate's local-project vendor
     // split; verify its component-boundary behavior here where the gate uses it.
@@ -1174,5 +1324,105 @@ mod tests {
         assert!(!is_vendor_path("vendor_proj/app/Service.php")); // sibling, not a component
         assert!(!is_vendor_path("src/vendored/x.php"));
         assert!(!is_vendor_path("app/vendor.php")); // filename, not a directory
+    }
+
+    #[test]
+    fn a_recorded_revision_equal_to_the_measured_one_matches() {
+        assert_eq!(
+            classify_revision(Some(REV_A), Some(REV_A)),
+            RevisionStatus::Matches { revision: REV_A.to_owned() }
+        );
+        // Case and surrounding whitespace are incidental, not a difference.
+        assert_eq!(
+            classify_revision(Some(format!("  {}  ", REV_A.to_ascii_uppercase()).as_str()), Some(REV_A)),
+            RevisionStatus::Matches { revision: REV_A.to_owned() }
+        );
+    }
+
+    #[test]
+    fn a_hand_written_abbreviation_matches_the_full_measured_sha() {
+        // Humans paste short shas; the full measured one is reported back.
+        assert_eq!(
+            classify_revision(Some(&REV_A[..12]), Some(REV_A)),
+            RevisionStatus::Matches { revision: REV_A.to_owned() }
+        );
+        // Too short to be evidence of identity — treated as a difference, which
+        // asks for a re-measure instead of silently blessing the count.
+        assert_eq!(
+            classify_revision(Some(&REV_A[..4]), Some(REV_A)),
+            RevisionStatus::Differs {
+                recorded: REV_A[..4].to_owned(),
+                measured: REV_A.to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_recorded_revision_unlike_the_measured_one_differs() {
+        assert_eq!(
+            classify_revision(Some(REV_A), Some(REV_B)),
+            RevisionStatus::Differs { recorded: REV_A.to_owned(), measured: REV_B.to_owned() }
+        );
+    }
+
+    #[test]
+    fn an_absent_revision_is_unrecorded_not_an_error() {
+        assert_eq!(
+            classify_revision(None, Some(REV_A)),
+            RevisionStatus::Unrecorded { measured: Some(REV_A.to_owned()) }
+        );
+        // An empty string is a missing value, not a revision.
+        assert_eq!(
+            classify_revision(Some("   "), Some(REV_A)),
+            RevisionStatus::Unrecorded { measured: Some(REV_A.to_owned()) }
+        );
+        // Neither side known (a non-git path, or no git): still legal, still no panic.
+        assert_eq!(classify_revision(None, None), RevisionStatus::Unrecorded { measured: None });
+    }
+
+    #[test]
+    fn an_unreadable_checkout_leaves_a_recorded_revision_uncompared() {
+        assert_eq!(
+            classify_revision(Some(REV_A), None),
+            RevisionStatus::Unreadable { recorded: REV_A.to_owned() }
+        );
+    }
+
+    #[test]
+    fn the_tripwire_line_names_a_match_a_regression_and_a_difference_drift() {
+        let matching = revision_tripwire_line(&classify_revision(Some(REV_A), Some(REV_A)));
+        assert!(matching.contains("MATCHES"), "{matching}");
+        assert!(matching.contains("GENUINE REGRESSION"), "{matching}");
+        assert!(matching.contains(REV_A), "{matching}");
+
+        let differing = revision_tripwire_line(&classify_revision(Some(REV_A), Some(REV_B)));
+        assert!(differing.contains("DIFFERS"), "{differing}");
+        assert!(differing.contains("CORPUS DRIFT"), "{differing}");
+        // Both revisions are named, so the reader knows what to re-measure against.
+        assert!(differing.contains(REV_A) && differing.contains(REV_B), "{differing}");
+        assert!(differing.contains("reseed"), "{differing}");
+
+        let unrecorded = revision_tripwire_line(&classify_revision(None, Some(REV_B)));
+        assert!(unrecorded.contains("UNPINNED"), "{unrecorded}");
+        assert!(unrecorded.contains("CANNOT be told apart"), "{unrecorded}");
+        // Copy-pasteable into corpus.local.toml.
+        assert!(unrecorded.contains(&format!("revision = \"{REV_B}\"")), "{unrecorded}");
+    }
+
+    #[test]
+    fn the_summary_line_reports_the_measured_revision_in_every_case() {
+        assert!(
+            revision_summary_line(&classify_revision(Some(REV_A), Some(REV_A))).contains(REV_A)
+        );
+        let drifted = revision_summary_line(&classify_revision(Some(REV_A), Some(REV_B)));
+        assert!(drifted.contains(REV_B) && drifted.contains(REV_A), "{drifted}");
+        let unpinned = revision_summary_line(&classify_revision(None, Some(REV_B)));
+        assert!(unpinned.contains("UNPINNED"), "{unpinned}");
+        assert!(unpinned.contains(&format!("revision = \"{REV_B}\"")), "{unpinned}");
+        // Degraded reads say so plainly rather than pretending to a comparison.
+        assert!(revision_summary_line(&classify_revision(None, None)).contains("unknown"));
+        assert!(
+            revision_summary_line(&classify_revision(Some(REV_A), None)).contains("unknown")
+        );
     }
 }

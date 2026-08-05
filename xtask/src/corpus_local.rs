@@ -12,6 +12,13 @@
 //! # optional:
 //! exclude = ["cache/**", "assets-origin/**"]
 //!
+//! # optional: the checkout revision the gate's seeded baseline was measured at.
+//! # Recording it is what lets a tripwire distinguish "the analyzer regressed"
+//! # from "the corpus moved" (see `gate::classify_revision`). It lives HERE, in
+//! # the gitignored file, precisely because a private repo's commit sha must
+//! # never enter this repository.
+//! revision = "<the sha the baseline was seeded at>"
+//!
 //! # optional per-project partition declaration (ADR-0047 §7); shape-validated
 //! # and IGNORED this slice (Slice A) — Slice E consumes it for the scoped
 //! # measurement:
@@ -22,9 +29,16 @@
 //! batch = ["batch/**"]
 //! ```
 //!
-//! Local projects are **unpinned** (they are live working trees — no sync, no
-//! lock) and are consumed only by `fp-gate`. `freq` ignores them entirely so the
-//! committed frequency report never contains private-code measurements.
+//! Local projects are **unmanaged** (they are live working trees — no sync, no
+//! lock, nothing this repo can check out) and are consumed only by `fp-gate`.
+//! `freq` ignores them entirely so the committed frequency report never contains
+//! private-code measurements.
+//!
+//! The optional `revision` above does not *pin* such a tree the way
+//! `corpus.lock.toml` pins a public package — nothing here moves the checkout. It
+//! records which state a measurement was taken at, so the gate can say whether a
+//! count moved under a constant corpus (a regression) or under a moving one
+//! (drift). That distinction previously cost a session's archaeology.
 
 use std::path::{Path, PathBuf};
 
@@ -42,6 +56,13 @@ pub struct LocalProject {
     /// Glob patterns (see [`glob_match`]) pruning subtrees/files from the walk.
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// Optional: the checkout revision the gate's seeded baseline for this project
+    /// was measured at. **Absent is legal** and stays legal — an entry without it
+    /// behaves exactly as before, except the gate now says out loud that the
+    /// baseline is unpinned. The value is PRIVATE data: it may be printed to the
+    /// operator's terminal, never written into a tracked file.
+    #[serde(default)]
+    pub revision: Option<String>,
     /// Optional per-project partition declaration (ADR-0047 §7), mapped onto the
     /// same shape as `steins.toml [transform.partitions]`. **Parsed and validated
     /// for shape only this slice (ADR-0047 Slice A) — it is NOT consumed by the
@@ -95,6 +116,32 @@ fn read_local_at(path: &Path) -> Result<Vec<LocalProject>, String> {
         }
         Err(_) => Ok(Vec::new()),
     }
+}
+
+/// The revision a local project's working tree is actually sitting on, read by
+/// asking git itself (`git -C <path> rev-parse HEAD`).
+///
+/// Everything that can go wrong degrades to `None` — "unknown" — and nothing here
+/// can fail the run: a path that is not a git checkout (git exits nonzero), a
+/// missing `git` binary or a spawn failure (`output()` is an `Err`), a detached
+/// empty repo with no commit yet, or output that is not a plain hex object name.
+/// git's stderr is captured rather than inherited, so a non-checkout does not
+/// spray noise into the gate report.
+///
+/// The returned sha is private data (it names a commit in a private repository):
+/// print it to the operator, never persist it into a tracked file.
+pub fn checkout_revision(path: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let rev = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (!rev.is_empty() && rev.chars().all(|c| c.is_ascii_hexdigit())).then_some(rev)
 }
 
 /// Collect every `.php` file under `root`, skipping `.git` and any path matched
@@ -241,6 +288,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_projects_with_and_without_revision() {
+        // Synthetic shas only: a real private-corpus revision must never appear in
+        // a tracked file, fixtures included.
+        let cfg: LocalConfig = toml::from_str(
+            r#"
+            [[project]]
+            name = "pinned"
+            path = "/abs/pinned"
+            revision = "0123456789abcdef0123456789abcdef01234567"
+
+            [[project]]
+            name = "unpinned"
+            path = "/abs/unpinned"
+            "#,
+        )
+        .expect("parses");
+        assert_eq!(
+            cfg.projects[0].revision.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+        // Absent is legal and must stay legal — an unrevisioned entry is not an error.
+        assert!(cfg.projects[1].revision.is_none());
+    }
+
+    #[test]
     fn parses_optional_partitions_passthrough_shape() {
         // ADR-0047 Slice A: the `[project.partitions]` table is shape-validated and
         // carried on the entry, but not consumed by the gate yet (Slice E).
@@ -283,6 +355,14 @@ mod tests {
     fn empty_config_yields_no_projects() {
         let cfg: LocalConfig = toml::from_str("").expect("empty parses");
         assert!(cfg.projects.is_empty());
+    }
+
+    #[test]
+    fn checkout_revision_of_a_non_git_path_is_unknown_not_a_failure() {
+        // The degradation contract: anything unreadable is `None` — never a panic,
+        // never a failed run. A path that does not exist is the cheapest instance.
+        let path = std::env::temp_dir().join("steins-xtask-test-no-such-checkout");
+        assert!(checkout_revision(&path).is_none());
     }
 
     #[test]
