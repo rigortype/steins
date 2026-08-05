@@ -1,9 +1,9 @@
 # The Transform Engine
 
 **Status: implemented** for `EditPlan`, the refusal taxonomy, the completeness
-oracle, obstacles and the vouch valve, the region model (slice A), and three
-transforms. ADR-0010, ADR-0034, ADR-0037, ADR-0040, ADR-0041, ADR-0046,
-ADR-0047.
+oracle, obstacles and the vouch valve, the region model (slice A), three
+transforms, and the fix-it payload behind `check --fix`. ADR-0010, ADR-0034,
+ADR-0037, ADR-0040, ADR-0041, ADR-0046, ADR-0047.
 
 ## What a transform is
 
@@ -222,12 +222,42 @@ Measured whole-universe closing run of the first two: **23,148 / 509 candidates
 enumerated, 0 transformed** — dynamic dispatch is the sound floor, and
 partitioning is the recorded way past it.
 
+## Fix-its
+
+The same machinery reached from the other side (ADR-0010, issue #114): a
+diagnostic may carry its own remedy as a payload — `Fix`, a title plus
+non-overlapping `FixEdit`s whose shape mirrors `Edit` (path, `[start, end)`,
+replacement), so the CLI pours them into an `EditPlan` and a JSON consumer
+splices them with no translation. `steins check --fix` applies a run's fixes as
+**one** atomic plan. Identical edits dedupe rather than colliding as
+overlaps — a multi-argument dump emits one finding per argument and all of them
+are remedied by the single statement deletion — while distinct fixes whose
+edits genuinely overlap refuse the run (`overlapping-fix-edits`) instead of
+guessing which to drop.
+
+The write is gated by the post-check above, verbatim from `--apply` and
+measured against `PostCheckSurface::Everything`: a fix-it deletes debug
+scaffolding and is never *meant* to move the contract layer, so a new
+`phpdoc.*` or `throw.*` finding after the edit is a regression and vetoes the
+whole write. A refusal is named, prints the diagnostics the edits would have
+surfaced, and leaves disk untouched.
+
+One family ships: deleting a committed `\PHPStan\dumpType()` /
+`\PHPStan\dumpPhpDocType()` expression-statement — `debug.type` and
+`debug.phpdoc-type`, whose only remedy is the deletion ADR-0053 itself names.
+It went first because it cannot actually trip the gate: a recognized dump is
+transparent (ADR-0053 — it reads facts and binds nothing), so removing its
+statement cannot change what the rest of the file proves. The gate is what will
+let the families after it be less obviously riskless.
+
 ## Not implemented
 
 - **New transform kinds** — DTO promotion (array-shape sprawl → class), stringly
   → enum. Queued for M7 (ADR-0034).
 - **Fold- and dataflow-backed transform proofs.** v1's dominance argument is
   literal-only (`argument-not-proven`, ADR-0041 §1).
-- **Fix-its** — a transform attached to a diagnostic as a payload (`check
-  --fix`).
+- **Further fix families** — the explicit dump pair is the whole of `check
+  --fix` today. `debug.var-dump` is not among the pending ones: it ships no fix
+  by decision, because a `var_dump()` is legal working PHP and deleting it is
+  the author's call, not the tool's.
 - **Partitioning slices B–E** and the checker-side region scoping (ADR-0047 §9).
