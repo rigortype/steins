@@ -12573,9 +12573,49 @@ fn preg_match_written_fact(
     preg_success_shape(&groups)
 }
 
+/// The element type of one `$matches` entry, read off the sub-pattern that
+/// produced it (issue #156).
+///
+/// Three rules, each a property of the sub-pattern's whole language and each
+/// answering plain `string` — today's behavior — for anything it cannot
+/// establish:
+///
+/// * a floor of one character rules out `''`, so the entry is
+///   `non-empty-string`;
+/// * a floor of **two** rules out `'0'` as well, and those are exactly the
+///   falsy strings, so the entry is `non-falsy-string`;
+/// * a sub-pattern that can produce nothing but ASCII digits, and must produce
+///   at least one, is `numeric-string` — measured, PHP calls every non-empty
+///   ASCII digit run numeric, leading zeros and four hundred digits included.
+///
+/// The floors are counted in **characters**, which is what keeps the second
+/// rule honest for a multi-byte literal: `(£|€)` has a one-character floor and
+/// a two-*byte* one, and PHPStan agrees it is only `non-empty-string`.
+///
+/// Deliberately not implemented: the issue also offers "a mandatory literal
+/// character other than `'0'`" as a second route to `non-falsy-string`. It is
+/// sound — a string containing `'x'` is neither `''` nor `'0'` — but it claims
+/// more than PHPStan does for the same pattern (`/(a|b)|(?:c)/` is
+/// `non-empty-string` there), so it would trade agreement for sharpness on
+/// rows that are otherwise exact. A decline costs nothing and is easy to add
+/// later.
+fn preg_element_fact(text: &steins_catalog::preg::MatchedText) -> Fact {
+    let mut preds = StrPreds::empty();
+    if text.min_chars >= 1 {
+        preds = preds.union(StrPreds::NON_EMPTY);
+        if text.digits_only {
+            preds = preds.union(StrPreds::NUMERIC);
+        }
+    }
+    if text.min_chars >= 2 {
+        preds = preds.union(StrPreds::NON_FALSY);
+    }
+    Fact::refined(Base::String, Refinement::Str(preds), false)
+}
+
 /// The success shape of `$matches`: key `0` plus one key per capture group in
-/// numeric order, each value a `string`, named groups additionally under their
-/// string key, sealed.
+/// numeric order, each value a string refined from the sub-pattern that fills
+/// it, named groups additionally under their string key, sealed.
 ///
 /// Every claim below was produced by running PHP 8.5.9, and three are
 /// counter-intuitive enough to be worth the ink:
@@ -12589,6 +12629,17 @@ fn preg_match_written_fact(
 ///   reader has already applied that rule;
 /// * a named group occupies its string key **and** a numeric one, both present
 ///   exactly when the group's entry is, which is why one presence serves both.
+///
+/// **The element type is coupled to that same absence rule, and the coupling is
+/// the whole hazard.** PHPStan's expectation for `/(a)(b)*(c)(d)*/` is
+/// `array{0: non-falsy-string, 1: 'a', 2: string, 3: 'c', 4?: non-empty-string}`
+/// — the middle `(b)*` and the trailing `(d)*` are the same sub-pattern and get
+/// **different** element types. A group that can be *present* while unmatched
+/// holds `''` on that path, so no refinement of its body may be stated however
+/// its floor reads; only a group whose unmatched case is *absence* keeps the
+/// claim. The reader answers which is which
+/// ([`can_be_present_empty`](steins_catalog::preg::CaptureGroup::can_be_present_empty)),
+/// and getting it backwards would put a false fact on a reachable path.
 ///
 /// **List-ness.** The keys PHP writes are `0..n` in ascending order and the
 /// trailing drop removes a *suffix* of them, so every realizable key set is a
@@ -12608,15 +12659,22 @@ fn preg_success_shape(groups: &steins_catalog::preg::CaptureGroups) -> Option<Fa
     // Presence is `witnessed: false` throughout (ADR-0062 §3): this is a declared
     // contract read off the callee, not a guard that observed the array.
     let required = Presence::Required { witnessed: false };
-    let string_slot = || Some(Box::new(Fact::General { base: Base::String, nullable: false }));
+    let slot = |fact: Fact| Some(Box::new(fact));
 
-    let mut fields = vec![(VKey::Int(0), required, string_slot())];
+    let mut fields = vec![(VKey::Int(0), required, slot(preg_element_fact(&groups.whole)))];
     for (i, g) in groups.groups.iter().enumerate() {
         let presence = if g.can_be_trailing_absent { Presence::Optional } else { required };
+        // A group that may be present as `''` admits the empty string on a
+        // reachable path, so its body's floor says nothing about its entry.
+        let element = if g.can_be_present_empty {
+            Fact::General { base: Base::String, nullable: false }
+        } else {
+            preg_element_fact(&g.body)
+        };
         let index = i64::try_from(i + 1).ok()?;
-        fields.push((VKey::Int(index), presence, string_slot()));
+        fields.push((VKey::Int(index), presence, slot(element.clone())));
         if let Some(name) = &g.name {
-            fields.push((VKey::Str(name.clone()), presence, string_slot()));
+            fields.push((VKey::Str(name.clone()), presence, slot(element)));
         }
     }
     // A pattern with more groups than a shape may carry has no faithful shape, and
