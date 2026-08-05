@@ -353,6 +353,58 @@ fn generator_closure_phpdoc_return_is_not_checked() {
 }
 
 #[test]
+fn generator_function_phpdoc_return_is_not_checked() {
+    // Issue #142's live repro: the docblock is TRUTHFUL (calling `g()` yields a
+    // `Generator`; `42` is `Generator::getReturn()`'s value), the native leg is
+    // silent, and the phpdoc leg fires exactly where the native one did not — so
+    // before the scope-wide guard this reported against a correct annotation.
+    let src = "<?php\n\
+        /** @return \\Generator */\n\
+        function g() {\n\
+            yield 1;\n\
+            return 42;\n\
+        }\n";
+    assert_eq!(count(src, RETURN_MISMATCH_ID), 0, "a truthful @return Generator is not a finding");
+}
+
+#[test]
+fn generator_method_phpdoc_return_is_not_checked() {
+    let src = "<?php\n\
+        class C {\n\
+            /** @return \\Generator */\n\
+            public function g() {\n\
+                yield 1;\n\
+                return 42;\n\
+            }\n\
+        }\n";
+    assert_eq!(count(src, RETURN_MISMATCH_ID), 0);
+}
+
+#[test]
+fn non_generator_function_phpdoc_return_still_fires() {
+    // The control: the guard keys on `yield`, not on the annotation. Drop the
+    // `yield` and the same shape is a plain violated `@return`.
+    let src = "<?php\n\
+        /** @return string */\n\
+        function g() {\n\
+            return 42;\n\
+        }\n";
+    assert_eq!(count(src, RETURN_MISMATCH_ID), 1, "a non-generator body is still checked");
+}
+
+#[test]
+fn non_generator_method_phpdoc_return_still_fires() {
+    let src = "<?php\n\
+        class C {\n\
+            /** @return string */\n\
+            public function g() {\n\
+                return 42;\n\
+            }\n\
+        }\n";
+    assert_eq!(count(src, RETURN_MISMATCH_ID), 1);
+}
+
+#[test]
 fn embedded_closure_does_not_adopt_the_statement_docblock() {
     // A closure in a call-argument position is not the statement's whole RHS —
     // the statement docblock stays with the statement, in both the bare-call
