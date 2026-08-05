@@ -7,6 +7,12 @@
 //! patterns whose group structure it can establish with certainty, and for
 //! everything else it answers `None`.
 //!
+//! This is knowledge about a PHP extension's *argument* rather than its
+//! signature, and so a peer of the crate's other tables: `out_params` already
+//! says position 2 of `preg_match` is written, and this says what the written
+//! array can hold. It stands alone — nothing else in the crate consults it yet,
+//! and it consults nothing.
+//!
 //! # A decline is the normal answer, and it is silent
 //!
 //! `None` carries no diagnostic and no finding. Callers must treat it as "no
@@ -180,7 +186,11 @@ fn split_delimited(pattern: &str) -> Option<&str> {
         start += 1;
     }
     let delim = *bytes.get(start)?;
-    if delim.is_ascii_alphanumeric() || delim == b'\\' {
+    // PHP takes the first *byte* as the delimiter and rejects an alphanumeric
+    // one. A non-ASCII lead byte declines rather than being scanned for: this
+    // is a byte-wise scan, and a delimiter that is half a character would cut
+    // the expression mid-sequence.
+    if !delim.is_ascii() || delim.is_ascii_alphanumeric() || delim == b'\\' {
         return None;
     }
     let closing = match delim {
@@ -1032,6 +1042,16 @@ mod tests {
         // An alphanumeric or backslash delimiter is rejected by PHP itself.
         declines("a(b)a");
         declines(r"\(a)\");
+        // A non-ASCII lead byte would cut the expression mid-character.
+        declines("あ(a)あ");
+    }
+
+    #[test]
+    fn multibyte_text_inside_the_expression_is_read_byte_wise_without_harm() {
+        // No ASCII byte appears inside a UTF-8 multi-byte sequence, so a
+        // byte-wise scan cannot mistake one for a paren or a bracket.
+        assert_eq!(count("/(あ)い(う)/u"), 2);
+        assert_eq!(count("/[あい](う)/u"), 1);
     }
 
     #[test]
