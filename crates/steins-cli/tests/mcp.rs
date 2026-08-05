@@ -1,0 +1,348 @@
+//! End-to-end tests for `steins mcp` (ADR-0010/0020, issue #117): a scripted
+//! MCP client drives the real binary over real stdio — no mocked transport, no
+//! in-process shortcut — and walks the interaction model it is meant to serve:
+//! list the tools, plan a transform, read the diff and the oracle, approve by
+//! applying the handle.
+//!
+//! What each test pins is the model, not the plumbing: planning never writes,
+//! apply is a second call, a handle from anywhere but this process is a named
+//! error rather than a stale write, and the read-only tools leave the tree
+//! exactly as they found it.
+
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+
+use serde_json::{Value, json};
+
+fn bin() -> &'static str {
+    env!("CARGO_BIN_EXE_steins")
+}
+
+/// A throwaway project directory under the OS temp dir, cleaned on drop.
+struct TempProject {
+    dir: PathBuf,
+}
+
+impl TempProject {
+    fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "steins-mcp-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self { dir }
+    }
+    fn write(&self, name: &str, contents: &str) -> PathBuf {
+        let p = self.dir.join(name);
+        std::fs::write(&p, contents).unwrap();
+        p
+    }
+    fn read(&self, name: &str) -> String {
+        std::fs::read_to_string(self.dir.join(name)).unwrap()
+    }
+    fn path(&self) -> &str {
+        self.dir.to_str().unwrap()
+    }
+}
+
+impl Drop for TempProject {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// The scripted client: a real child process, newline-delimited JSON-RPC over
+/// its stdin/stdout, exactly as an MCP host would speak to it.
+struct Client {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    next_id: u64,
+}
+
+impl Client {
+    /// Start a server with `cwd` as its working directory (where a `steins.toml`
+    /// would be looked up) and complete the MCP handshake.
+    fn start(cwd: &str) -> Self {
+        let mut child = Command::new(bin())
+            .arg("mcp")
+            .current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn steins mcp");
+        let stdin = child.stdin.take().expect("stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+        let mut client = Client { child, stdin, stdout, next_id: 1 };
+
+        let init = client.request(
+            "initialize",
+            json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "scripted-client", "version": "0" },
+            }),
+        );
+        assert_eq!(init["result"]["serverInfo"]["name"], "steins", "handshake: {init}");
+        assert_eq!(init["result"]["protocolVersion"], "2025-06-18", "handshake: {init}");
+        assert!(init["result"]["capabilities"]["tools"].is_object(), "no tools capability: {init}");
+        client.notify("notifications/initialized");
+        client
+    }
+
+    fn send(&mut self, message: &Value) {
+        writeln!(self.stdin, "{message}").expect("write request");
+        self.stdin.flush().expect("flush request");
+    }
+
+    /// Send a request and read its response.
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+        let mut line = String::new();
+        self.stdout.read_line(&mut line).expect("read response");
+        assert!(!line.trim().is_empty(), "server closed the stream on `{method}`");
+        let response: Value = serde_json::from_str(line.trim())
+            .unwrap_or_else(|e| panic!("response to `{method}` is not JSON ({e}): {line}"));
+        assert_eq!(response["jsonrpc"], "2.0", "not JSON-RPC: {response}");
+        assert_eq!(response["id"], id, "response id mismatch: {response}");
+        response
+    }
+
+    /// A notification is one-way: nothing may come back, and the server must
+    /// stay live afterwards.
+    fn notify(&mut self, method: &str) {
+        self.send(&json!({ "jsonrpc": "2.0", "method": method }));
+    }
+
+    /// Call a tool, returning its structured document and whether it is an error.
+    fn call(&mut self, name: &str, arguments: Value) -> (Value, bool) {
+        let response = self.request("tools/call", json!({ "name": name, "arguments": arguments }));
+        let result = &response["result"];
+        let is_error = result["isError"].as_bool().unwrap_or(false);
+        // The document is carried twice; a client may read either.
+        let text = result["content"][0]["text"].as_str().expect("text content");
+        let parsed: Value = serde_json::from_str(text).expect("text content is the same JSON");
+        assert_eq!(parsed, result["structuredContent"], "content and structuredContent disagree");
+        (result["structuredContent"].clone(), is_error)
+    }
+
+    /// A tool call that must succeed.
+    fn call_ok(&mut self, name: &str, arguments: Value) -> Value {
+        let (value, is_error) = self.call(name, arguments);
+        assert!(!is_error, "`{name}` failed: {value}");
+        value
+    }
+
+    /// A tool call that must fail, returning the named error object.
+    fn call_err(&mut self, name: &str, arguments: Value) -> Value {
+        let (value, is_error) = self.call(name, arguments);
+        assert!(is_error, "`{name}` unexpectedly succeeded: {value}");
+        value["error"].clone()
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A promotable function beside one that must be refused: the plan carries both
+/// halves of the completeness oracle.
+const LIB: &str = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n/** @param int $y */\nfunction g($y) { return $y; }\n";
+const MAIN: &str = "<?php\nf(1);\ng(\"nope\");\n";
+
+#[test]
+fn a_scripted_client_lists_tools_and_drives_plan_then_apply() {
+    let proj = TempProject::new("loop");
+    proj.write("lib.php", LIB);
+    proj.write("main.php", MAIN);
+    let mut client = Client::start(proj.path());
+
+    // --- list ------------------------------------------------------------
+    let listed = client.request("tools/list", json!({}));
+    let tools = listed["result"]["tools"].as_array().expect("tools array");
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["list_transforms", "plan_transform", "apply_plan", "check"]);
+    for tool in tools {
+        assert!(!tool["description"].as_str().unwrap().is_empty(), "described: {tool}");
+        assert_eq!(tool["inputSchema"]["type"], "object", "schema: {tool}");
+        let read_only = tool["annotations"]["readOnlyHint"].as_bool().unwrap();
+        assert_eq!(read_only, tool["name"] != "apply_plan", "readOnlyHint: {tool}");
+    }
+
+    let transforms = client.call_ok("list_transforms", json!({}));
+    let ids: Vec<&str> = transforms["transforms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"phpdoc-to-native"), "transforms: {transforms}");
+    // Each transform names the surface its post-check is measured on (#115).
+    let envelope = transforms["transforms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == "throws-envelope")
+        .expect("throws-envelope listed");
+    assert_eq!(envelope["post_check_surface"], "default-only");
+
+    // --- plan (dry run) --------------------------------------------------
+    let args = json!({ "transform": "phpdoc-to-native", "paths": [proj.path()] });
+    let plan = client.call_ok("plan_transform", args);
+
+    // The oracle: every enumerated site accounted for as transformed or refused.
+    assert_eq!(plan["report"]["oracle"]["enumerated"], 2, "oracle: {plan}");
+    assert_eq!(plan["report"]["oracle"]["transformed"], 1, "oracle: {plan}");
+    assert_eq!(plan["report"]["oracle"]["refused"], 1, "oracle: {plan}");
+    // The refusal is named, not merely counted.
+    let refusals = plan["report"]["refusals"].as_array().expect("refusals array");
+    assert_eq!(refusals.len(), 1, "refusals: {plan}");
+    assert_eq!(refusals[0]["reason"], "argument-not-proven");
+    assert!(!refusals[0]["detail"].as_str().unwrap().is_empty(), "refusal detail: {plan}");
+    // A per-site diff, the same one the command line prints.
+    let diffs = plan["diffs"].as_array().expect("diffs array");
+    assert_eq!(diffs.len(), 1, "one edited file: {plan}");
+    assert!(diffs[0]["diff"].as_str().unwrap().contains("+function f(int $x)"), "diff: {plan}");
+    assert_eq!(plan["postcheck"]["ok"], true, "postcheck: {plan}");
+    assert_eq!(plan["applied"], false, "planning never writes: {plan}");
+    // Planning wrote nothing.
+    assert_eq!(proj.read("lib.php"), LIB, "the dry run must not touch the tree");
+
+    let handle = plan["plan_handle"].as_str().expect("a plan handle").to_owned();
+
+    // --- apply (the approve step, a separate call) -----------------------
+    let applied = client.call_ok("apply_plan", json!({ "plan_handle": handle }));
+    assert_eq!(applied["applied"], true, "apply: {applied}");
+    assert_eq!(applied["transform"], "phpdoc-to-native");
+    let written = applied["files_written"].as_array().expect("files_written");
+    assert_eq!(written.len(), 1, "one file written: {applied}");
+    assert!(written[0].as_str().unwrap().ends_with("lib.php"), "written: {applied}");
+    assert_eq!(applied["oracle"]["complete"], true, "oracle: {applied}");
+
+    let after = proj.read("lib.php");
+    assert!(after.contains("function f(int $x)"), "not promoted on disk:\n{after}");
+    assert!(after.contains("function g($y)"), "the refused site is untouched:\n{after}");
+
+    // The handle is spent: a plan describes a tree that no longer exists.
+    let err = client.call_err("apply_plan", json!({ "plan_handle": handle }));
+    assert_eq!(err["reason"], "plan-handle-unknown", "second apply: {err}");
+}
+
+#[test]
+fn a_handle_from_another_process_is_refused_and_nothing_is_written() {
+    let proj = TempProject::new("foreign");
+    proj.write("lib.php", LIB);
+    proj.write("main.php", MAIN);
+    let mut client = Client::start(proj.path());
+
+    // Shaped exactly like a handle, minted by nobody here — which is what a
+    // handle from a previous server run looks like after a restart.
+    let err = client.call_err("apply_plan", json!({ "plan_handle": "steins-plan-1-1-1" }));
+    assert_eq!(err["reason"], "plan-handle-foreign-process", "error: {err}");
+    let detail = err["detail"].as_str().unwrap();
+    assert!(detail.contains("process"), "the error explains itself: {detail}");
+
+    // Not a handle at all.
+    let err = client.call_err("apply_plan", json!({ "plan_handle": "please-just-apply-it" }));
+    assert_eq!(err["reason"], "plan-handle-malformed", "error: {err}");
+
+    // Missing argument, unknown transform, and a path that names nothing are
+    // named refusals too — never a panic, never a silent empty answer.
+    let err = client.call_err("apply_plan", json!({}));
+    assert_eq!(err["reason"], "missing-argument");
+    let unknown = json!({ "transform": "rename-everything", "paths": [proj.path()] });
+    let err = client.call_err("plan_transform", unknown);
+    assert_eq!(err["reason"], "unknown-transform", "error: {err}");
+    let err = client.call_err(
+        "plan_transform",
+        json!({ "transform": "phpdoc-to-native", "paths": [format!("{}/nope", proj.path())] }),
+    );
+    assert_eq!(err["reason"], "path-does-not-exist", "error: {err}");
+
+    // Nothing above touched the tree.
+    assert_eq!(proj.read("lib.php"), LIB);
+    assert_eq!(proj.read("main.php"), MAIN);
+}
+
+#[test]
+fn the_read_only_tools_leave_the_tree_untouched() {
+    let proj = TempProject::new("readonly");
+    // A dump statement: a finding that carries a fix payload (issue #114).
+    let src = "<?php\n$x = 5;\n\\PHPStan\\dumpType($x);\n";
+    proj.write("app.php", src);
+    proj.write("lib.php", LIB);
+    proj.write("main.php", MAIN);
+    let mut client = Client::start(proj.path());
+
+    let checked = client.call_ok("check", json!({ "paths": [proj.path()], "no_php": true }));
+    let findings = checked["findings"].as_array().expect("findings array");
+    let dump = findings.iter().find(|f| f["id"] == "debug.type").expect("the dump reports");
+    // The fix rides along as a payload an agent can apply itself.
+    assert_eq!(dump["fix"]["title"], "remove the dump statement");
+    let edits = dump["fix"]["edits"].as_array().expect("fix edits");
+    assert_eq!(edits.len(), 1, "one deletion: {dump}");
+    assert_eq!(edits[0]["replacement"], "");
+    assert_eq!(checked["profile"], "default");
+
+    // Planning and listing are read-only too — three tools, no writes.
+    client.call_ok("list_transforms", json!({}));
+    let args = json!({ "transform": "phpdoc-to-native", "paths": [proj.path()] });
+    client.call_ok("plan_transform", args);
+
+    assert_eq!(proj.read("app.php"), src, "check must not apply the fix it reports");
+    assert_eq!(proj.read("lib.php"), LIB);
+    assert_eq!(proj.read("main.php"), MAIN);
+}
+
+#[test]
+fn a_plan_whose_targets_moved_is_refused_rather_than_spliced() {
+    // The gate that makes a handle safe even inside its own process: a byte
+    // span means nothing against text it was not measured in.
+    let proj = TempProject::new("moved");
+    proj.write("lib.php", LIB);
+    proj.write("main.php", MAIN);
+    let mut client = Client::start(proj.path());
+
+    let args = json!({ "transform": "phpdoc-to-native", "paths": [proj.path()] });
+    let plan = client.call_ok("plan_transform", args);
+    let handle = plan["plan_handle"].as_str().expect("a plan handle").to_owned();
+
+    // Someone edits the file between the diff and the approval.
+    let moved = format!("<?php\n// a comment that shifts every offset\n{}", &LIB[6..]);
+    proj.write("lib.php", &moved);
+
+    let err = client.call_err("apply_plan", json!({ "plan_handle": handle }));
+    assert_eq!(err["reason"], "tree-changed-since-plan", "error: {err}");
+    assert_eq!(proj.read("lib.php"), moved, "the refusal wrote nothing");
+}
+
+#[test]
+fn unknown_tools_and_methods_are_protocol_errors() {
+    let proj = TempProject::new("protocol");
+    proj.write("lib.php", LIB);
+    let mut client = Client::start(proj.path());
+
+    let response = client.request("tools/call", json!({ "name": "rm_rf", "arguments": {} }));
+    assert_eq!(response["error"]["code"], -32602, "unknown tool: {response}");
+    let available = response["error"]["data"]["available"].as_array().expect("available list");
+    assert!(available.iter().any(|t| t == "plan_transform"), "available: {response}");
+
+    let response = client.request("resources/list", json!({}));
+    assert_eq!(response["error"]["code"], -32601, "unknown method: {response}");
+
+    // The server is still serving after refusing two calls.
+    let response = client.request("ping", json!({}));
+    assert!(response["result"].is_object(), "ping: {response}");
+}

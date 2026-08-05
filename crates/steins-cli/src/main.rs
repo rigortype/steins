@@ -13,6 +13,7 @@ mod out;
 mod baseline;
 mod doctor;
 mod effect_baseline;
+mod mcp;
 mod sha256;
 
 // The CLI and wasm playground share `steins_infer::profile`, preserving the
@@ -61,11 +62,12 @@ fn dispatch(args: &[String]) -> ExitCode {
         Some("transform") => run_transform(&args[1..]),
         Some("effect-diff") => run_effect_diff(&args[1..]),
         Some("doctor") => doctor::run_doctor(&args[1..]),
+        Some("mcp") => mcp::run_mcp(&args[1..]),
         Some("version" | "--version" | "-v") => print_version(),
         Some("license" | "licenses") => print_license(),
         Some(other) => {
             errln!(
-                "steins: unknown command `{other}` (available: check, annotate, transform, effect-diff, doctor, version, license)"
+                "steins: unknown command `{other}` (available: check, annotate, transform, effect-diff, doctor, mcp, version, license)"
             );
             ExitCode::from(2)
         }
@@ -81,6 +83,7 @@ fn dispatch(args: &[String]) -> ExitCode {
                 "       steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>"
             );
             errln!("       steins doctor [--no-php] [--baseline <path>] [path]");
+            errln!("       steins mcp");
             errln!("       steins version | -v | --version");
             errln!("       steins license");
             ExitCode::from(2)
@@ -243,12 +246,7 @@ fn run_check(args: &[String]) -> ExitCode {
         return code;
     }
 
-    let mut files = Vec::new();
-    for p in &paths {
-        collect_php_files(Path::new(p), &mut files);
-    }
-    files.sort();
-    files.dedup();
+    let files = collect_files(&paths);
 
     // Coverage posture (ADR-0004): with `--no-php` the run is the sound subset,
     // surfaced up front as a startup notice. Without the flag we fold via a
@@ -289,7 +287,6 @@ fn run_check(args: &[String]) -> ExitCode {
         }
     };
 
-    let db = SteinsDatabase::default();
     // One folder for the whole run: it owns the resident sidecar and the fold
     // memo, so a repeated call across files never re-spawns or re-folds.
     let mut folder = if no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
@@ -298,27 +295,11 @@ fn run_check(args: &[String]) -> ExitCode {
     // ONE project (one salsa DB), so cross-file calls, class chains, and effects
     // resolve. `texts` keeps each file's contents by diagnostic path so the
     // baseline hash can read the flagged line's neighborhood (ADR-0022).
-    let mut inputs: Vec<SourceFile> = Vec::new();
-    let mut texts: HashMap<String, String> = HashMap::new();
-    for file_path in &files {
-        let text = match std::fs::read(file_path) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-            Err(e) => {
-                errln!("steins: cannot read {}: {e}", file_path.display());
-                continue;
-            }
-        };
-        let path = file_path.to_string_lossy().into_owned();
-        texts.insert(path.clone(), text.clone());
-        inputs.push(SourceFile::new(&db, path, text));
-    }
-    let layout = resolve_layout(&paths);
+    let loaded = load_project(&files, &paths, plugin_allow.as_deref());
+    let (db, project, texts) = (&loaded.db, loaded.project, &loaded.texts);
     // The declared target PHP range (issue #28) gates the folder's absence
     // family and curated-fact admission; the checker reads it from the layout.
-    folder.set_php_target(layout.php_target().cloned());
-    // The plugin channel (ADR-0068), read once at the boundary like the layout.
-    let plugins = load_plugins(&layout, plugin_allow.as_deref());
-    let project = Project::new(&db, inputs.clone(), layout.clone(), plugins);
+    folder.set_php_target(loaded.layout.php_target().cloned());
     // `[runtime]` pseudo-constants (ADR-0037 §2): the boot truth the checker cannot
     // observe from source (e.g. `warning-handler = "null"`). Parsed above with the
     // rest of the config; an unknown *value* on a known key still warns and keeps the
@@ -327,43 +308,14 @@ fn run_check(args: &[String]) -> ExitCode {
     for w in &runtime_warnings {
         errln!("steins: {w}");
     }
-    let mut findings: Vec<Diagnostic> = check_project_with_runtime(
-        &db,
-        project,
-        &mut folder,
-        warning_handler_abort,
-    );
+    let findings: Vec<Diagnostic> =
+        check_project_with_runtime(db, project, &mut folder, warning_handler_abort);
 
-    // Vendor filtering applies FIRST (ADR-0015), before inline ignores and the
-    // baseline: vendor code is fully indexed and inferred, but a finding whose
-    // path is inside a `vendor/` directory is suppressed by default and never
-    // reaches — nor consumes — a later channel (a vendor finding must not eat a
-    // baseline entry). `--vendor-diagnostics` opts back in, sending vendor
-    // findings through the normal channels like any first-party finding.
-    let mut vendor_suppressed = 0usize;
-    if !vendor_diagnostics {
-        let before = findings.len();
-        findings.retain(|d| !layout.is_vendor(&d.path));
-        vendor_suppressed = before - findings.len();
-    }
-
-    // Profile surface (ADR-0050 §6, second in the pipeline): a finding off the
-    // active surface does not exist — it never reaches, nor consumes, a later
-    // channel (inline ignore, baseline). A bare `check` shows proof + mechanics;
-    // named profiles opt into contracts. Mechanics ids stay on in every profile
-    // (anti-rot, §1).
-    findings.retain(|d| surface.is_surfaced(d));
-
-    // Scoped policy is reserved as the third stage (ADR-0050 §6). It is currently
-    // an identity, preserving vendor → surface → policy → inline → baseline order.
-    let findings = apply_policy_stage(findings);
-
-    // Inline `@steins-ignore` applies next (ADR-0023): a finding suppressed
-    // inline never reaches — nor consumes — the baseline channel.
-    let trees: Vec<&SourceTree> = inputs.iter().map(|&sf| parse_tree(&db, sf)).collect();
-    let file_pairs: Vec<(String, &SourceTree)> =
-        inputs.iter().zip(trees.iter()).map(|(&sf, &t)| (sf.path(&db).to_owned(), t)).collect();
-    let inline = apply_inline_ignores(findings, &file_pairs);
+    // The suppression channels, in ADR-0050 §6 order (vendor → surface → policy →
+    // inline). The baseline is the one channel that stays here in `check`: it is
+    // the CI ratchet, and which file to consult is this command's own argument.
+    let (inline, vendor_suppressed) =
+        suppression_pipeline(&loaded, findings, &surface, vendor_diagnostics);
 
     // Which baseline file to consult (ADR-0022): `--set-baseline` and an explicit
     // `--baseline` both name a file; otherwise the default is auto-loaded when it
@@ -382,7 +334,7 @@ fn run_check(args: &[String]) -> ExitCode {
 
     if set_baseline {
         let file = baseline_file.expect("set-baseline names a file");
-        return write_baseline(&file, &inline.kept, &texts, &surface);
+        return write_baseline(&file, &inline.kept, texts, &surface);
     }
 
     // Baseline channel: partition the inline survivors into baselined (suppressed,
@@ -392,7 +344,7 @@ fn run_check(args: &[String]) -> ExitCode {
     // surface exceeds the captured one (the drowns-loudly rule).
     let (reported, baselined, stale, surface_notice) = match &baseline_file {
         Some(file) => match std::fs::read_to_string(file) {
-            Ok(text) => match_baseline(file, &text, inline.kept, &texts, &surface),
+            Ok(text) => match_baseline(file, &text, inline.kept, texts, &surface),
             Err(_) => (inline.kept, 0, 0, None),
         },
         None => (inline.kept, 0, 0, None),
@@ -410,7 +362,7 @@ fn run_check(args: &[String]) -> ExitCode {
     // payloads the displayed findings carry, under the transform engine's
     // transformed-or-refused discipline (ADR-0034). Without the flag this is
     // `None` and the run takes no new code path — byte-identical to before.
-    let fix_run = fix_requested.then(|| apply_fixes(&db, project, &displayed, &texts));
+    let fix_run = fix_requested.then(|| apply_fixes(db, project, &displayed, texts));
 
     // A finding whose fix was applied is no longer a finding of the code on
     // disk: it leaves both the display and the exit computation. Everything
@@ -804,26 +756,19 @@ fn run_transform(args: &[String]) -> ExitCode {
         }
     }
 
-    // Select the transform planner by subcommand. `action` is the verb the oracle
-    // summary uses for an edited site.
-    #[derive(Clone, Copy, PartialEq)]
-    enum Kind {
-        Promote,
-        Honesty,
-        ThrowsEnvelope,
-        LoopToArrayMap,
-    }
-    let (kind, action) = match subcommand.as_deref() {
-        Some("phpdoc-to-native") => (Kind::Promote, "promoted"),
-        Some("phpdoc-honesty") => (Kind::Honesty, "rewritten"),
-        Some("throws-envelope") => (Kind::ThrowsEnvelope, "seeded"),
-        Some("loop-to-array-map") => (Kind::LoopToArrayMap, "rewritten"),
-        Some(other) => {
-            errln!(
-                "steins: unknown transform `{other}` (available: phpdoc-to-native, phpdoc-honesty, throws-envelope, loop-to-array-map)"
-            );
-            return ExitCode::from(2);
-        }
+    // Select the transform by subcommand. Everything the name decides — the
+    // planner, the oracle's verb, the post-check surface — lives on
+    // [`TransformKind`], the one table the CLI and the MCP surface share.
+    let kind = match subcommand.as_deref() {
+        Some(name) => match TransformKind::from_id(name) {
+            Some(k) => k,
+            None => {
+                errln!(
+                    "steins: unknown transform `{name}` (available: phpdoc-to-native, phpdoc-honesty, throws-envelope, loop-to-array-map)"
+                );
+                return ExitCode::from(2);
+            }
+        },
         None => {
             errln!(
                 "steins: transform requires a name (usage: steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--config steins.toml] [--format text|json] <paths...>)"
@@ -839,103 +784,21 @@ fn run_transform(args: &[String]) -> ExitCode {
         return code;
     }
 
-    // Load the vouching valve (ADR-0046 §2): `steins.toml [transform.vouch]` from
-    // `--config`, else `./steins.toml` if present. A malformed entry is a warning,
-    // never a hard error (the run proceeds with the well-formed entries).
-    let (vouches, vouch_warnings) = load_vouches(config_path.as_deref());
-    for w in &vouch_warnings {
-        errln!("steins: {w}");
-    }
-
-    // Load the region map (ADR-0047 §7): `steins.toml [transform.partitions]`. With
-    // no such section this is `None` — the single-region identity, so the transform
-    // is byte-identical to a run with no partition config. An *overlap* in the
-    // declared partition path-sets is a hard config error (unlike a vouch typo),
-    // because a non-disjoint partition claim has no defined region assignment.
-    let partitions = match load_partitions(config_path.as_deref()) {
-        Ok(p) => p,
+    let run = match plan_transform_run(kind, &paths, config_path.as_deref()) {
+        Ok(run) => run,
         Err(e) => {
             errln!("steins: {e}");
             return ExitCode::from(2);
         }
     };
-
-    let mut files = Vec::new();
-    for p in &paths {
-        collect_php_files(Path::new(p), &mut files);
+    for notice in &run.notices {
+        errln!("steins: {notice}");
     }
-    files.sort();
-    files.dedup();
-
-    let db = SteinsDatabase::default();
-    let mut inputs: Vec<SourceFile> = Vec::new();
-    let mut texts: HashMap<String, String> = HashMap::new();
-    for file_path in &files {
-        let text = match std::fs::read(file_path) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-            Err(e) => {
-                errln!("steins: cannot read {}: {e}", file_path.display());
-                continue;
-            }
-        };
-        let path = file_path.to_string_lossy().into_owned();
-        texts.insert(path.clone(), text.clone());
-        inputs.push(SourceFile::new(&db, path, text));
-    }
-    let layout = resolve_layout(&paths);
-    let plugins = load_plugins(&layout, allow_list_from_disk().as_deref());
-    let project = Project::new(&db, inputs.clone(), layout, plugins);
-
-    // Plan the transform (pure — no writes, no re-check). The region map (ADR-0047)
-    // is threaded into the planners but not yet consumed by any decision, so the
-    // plan is identical with or without it.
-    let report = match kind {
-        Kind::Promote => plan_phpdoc_to_native(&db, project, &vouches, partitions.as_ref()),
-        Kind::Honesty => plan_phpdoc_honesty(&db, project, &vouches, partitions.as_ref()),
-        // Envelope seeding takes no vouch set: proven escapes are forward facts
-        // of the declaration's own body/callees, so the ADR-0046 §2 caller-
-        // enumerability obstacles (and their vouching valve) have no bearing.
-        Kind::ThrowsEnvelope => plan_throws_envelope(&db, project, partitions.as_ref()),
-        Kind::LoopToArrayMap => {
-            plan_loop_to_array_map(&db, project, &vouches, partitions.as_ref())
-        }
-    };
-
-    // Vouching an already-benign (or nonexistent) site is a no-op the user should
-    // know about (ADR-0046 §2). Skipped for a transform that consults no vouches
-    // at all — there, silence about an inert section beats a misleading "no-op"
-    // line per entry.
-    if kind != Kind::ThrowsEnvelope {
-        for entry in vouches.unused() {
-            errln!("steins: vouched site `{entry}` matched no dynamic-code obstacle (no-op)");
-        }
-    }
-
-    // Dual verification (ADR-0034 point 3a): re-analyze the edited project and
-    // require zero NEW diagnostics vs. the pre-edit baseline. Run in both dry-run
-    // and `--apply`, so a violation is visible before anything is written.
-    //
-    // Each transform states the surface it is measured against, because the right
-    // answer differs by what the transform does (issue #115). The asymmetry is
-    // deliberate; `PostCheckSurface` carries the reasoning for each arm.
-    let surface = match kind {
-        // Rewriting a type in a docblock is not supposed to change what the
-        // docblock promises, so a new contract-layer finding after the edit is a
-        // regression and must veto. Unchanged from before `throws-envelope`.
-        // A loop→`array_map` rewrite is likewise not supposed to move the
-        // contract: it edits statements under a proven-purity precondition and
-        // leaves every docblock alone, so a new contract-layer finding after it
-        // is a regression like any other. It takes the broad net.
-        Kind::Promote | Kind::Honesty | Kind::LoopToArrayMap => PostCheckSurface::Everything,
-        // Seeding an envelope IS a contract change: measuring it against the
-        // contract layer would let the transform veto its own success.
-        Kind::ThrowsEnvelope => PostCheckSurface::DefaultOnly,
-    };
-    let postcheck = post_check(&db, project, &report.plan, &texts, surface);
+    let TransformRun { report, postcheck, texts, .. } = &run;
 
     match format {
-        Format::Json => print_transform_json(&report, &postcheck, apply && postcheck.ok),
-        Format::Text => print_transform_text(&report, &postcheck, &texts, action),
+        Format::Json => print_transform_json(report, postcheck, apply && postcheck.ok),
+        Format::Text => print_transform_text(report, postcheck, texts, kind.action()),
     }
 
     if !postcheck.ok {
@@ -970,6 +833,174 @@ fn run_transform(args: &[String]) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+/// Which transform a run drives (ADR-0034). Hoisted out of [`run_transform`] so
+/// the command line and the MCP surface (issue #117) select a transform, name
+/// its oracle verb, and choose its post-check surface from ONE table — the two
+/// entry points cannot disagree about what `throws-envelope` means.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TransformKind {
+    Promote,
+    Honesty,
+    ThrowsEnvelope,
+    LoopToArrayMap,
+}
+
+impl TransformKind {
+    /// Every transform, in the order the usage line lists them.
+    const ALL: [TransformKind; 4] = [
+        TransformKind::Promote,
+        TransformKind::Honesty,
+        TransformKind::ThrowsEnvelope,
+        TransformKind::LoopToArrayMap,
+    ];
+
+    /// The stable command id — the `transform` subcommand word, and the
+    /// `transform` argument of the MCP `plan_transform` tool.
+    fn id(self) -> &'static str {
+        match self {
+            TransformKind::Promote => "phpdoc-to-native",
+            TransformKind::Honesty => "phpdoc-honesty",
+            TransformKind::ThrowsEnvelope => "throws-envelope",
+            TransformKind::LoopToArrayMap => "loop-to-array-map",
+        }
+    }
+
+    fn from_id(id: &str) -> Option<Self> {
+        TransformKind::ALL.into_iter().find(|k| k.id() == id)
+    }
+
+    /// The verb the completeness-oracle summary uses for an edited site.
+    fn action(self) -> &'static str {
+        match self {
+            TransformKind::Promote => "promoted",
+            TransformKind::Honesty | TransformKind::LoopToArrayMap => "rewritten",
+            TransformKind::ThrowsEnvelope => "seeded",
+        }
+    }
+
+    /// One sentence describing what the transform rewrites — what an agent
+    /// enumerating the surface reads before choosing one.
+    fn summary(self) -> &'static str {
+        match self {
+            TransformKind::Promote => {
+                "promote a `@param`/`@return` tag to a native declaration where call-site propagation proves every project call site flows the type"
+            }
+            TransformKind::Honesty => {
+                "rewrite a docblock type that the engine proves wrong to the type it proves"
+            }
+            TransformKind::ThrowsEnvelope => {
+                "seed `@throws` tags from proven escapes; a declaration whose escapes are only `Maybe` is refused"
+            }
+            TransformKind::LoopToArrayMap => {
+                "rewrite an append `foreach` to `array_map` where the body is proven to have no effects and no throws"
+            }
+        }
+    }
+
+    /// The surface this transform's dual-verification post-check is measured
+    /// against (ADR-0034 point 3a, issue #115). The answer is a property of what
+    /// the transform *does*, so it is named here, once, beside the transform it
+    /// belongs to — and both the command line and the MCP surface route through
+    /// it rather than picking their own.
+    fn post_check_surface(self) -> PostCheckSurface {
+        match self {
+            // Rewriting a type in a docblock is not supposed to change what the
+            // docblock promises, so a new contract-layer finding after the edit is a
+            // regression and must veto. Unchanged from before `throws-envelope`.
+            // A loop→`array_map` rewrite is likewise not supposed to move the
+            // contract: it edits statements under a proven-purity precondition and
+            // leaves every docblock alone, so a new contract-layer finding after it
+            // is a regression like any other. It takes the broad net.
+            TransformKind::Promote | TransformKind::Honesty | TransformKind::LoopToArrayMap => {
+                PostCheckSurface::Everything
+            }
+            // Seeding an envelope IS a contract change: measuring it against the
+            // contract layer would let the transform veto its own success.
+            TransformKind::ThrowsEnvelope => PostCheckSurface::DefaultOnly,
+        }
+    }
+}
+
+/// One planned transform run: the [`TransformReport`] (plan + refusals +
+/// completeness oracle), the dual-verification post-check measured on the
+/// surface the transform names, and the file texts the plan was computed
+/// against.
+///
+/// Producing one writes nothing. Applying it is a separate, later step — that
+/// separation is the interaction model (ADR-0010), not an implementation
+/// detail: `transform --apply` and the MCP `apply_plan` tool both take a run
+/// like this as input and are the only code that reaches the filesystem.
+struct TransformRun {
+    report: TransformReport,
+    postcheck: PostCheck,
+    texts: HashMap<String, String>,
+    /// Human notices to report on the way out: vouch-file problems and
+    /// no-op vouch entries (ADR-0046 §2).
+    notices: Vec<String>,
+}
+
+/// Plan `kind` over `paths` and run its post-check — the dry-run half of the
+/// dry-run → diff → approve → apply loop (ADR-0010), shared by `steins
+/// transform` and the MCP `plan_transform` tool.
+///
+/// `Err` is a config error the caller reports as such (exit 2 on the command
+/// line): overlapping partition path-sets, the one `steins.toml` mistake that
+/// has no defined meaning. A vouch typo is a notice, never an error.
+fn plan_transform_run(
+    kind: TransformKind,
+    paths: &[String],
+    config_path: Option<&str>,
+) -> Result<TransformRun, String> {
+    // Load the vouching valve (ADR-0046 §2): `steins.toml [transform.vouch]` from
+    // `--config`, else `./steins.toml` if present. A malformed entry is a warning,
+    // never a hard error (the run proceeds with the well-formed entries).
+    let (vouches, mut notices) = load_vouches(config_path);
+
+    // Load the region map (ADR-0047 §7): `steins.toml [transform.partitions]`. With
+    // no such section this is `None` — the single-region identity, so the transform
+    // is byte-identical to a run with no partition config. An *overlap* in the
+    // declared partition path-sets is a hard config error (unlike a vouch typo),
+    // because a non-disjoint partition claim has no defined region assignment.
+    let partitions = load_partitions(config_path)?;
+
+    let files = collect_files(paths);
+    let loaded = load_project(&files, paths, allow_list_from_disk().as_deref());
+    let (db, project) = (&loaded.db, loaded.project);
+
+    // Plan the transform (pure — no writes, no re-check). The region map (ADR-0047)
+    // is threaded into the planners but not yet consumed by any decision, so the
+    // plan is identical with or without it.
+    let report = match kind {
+        TransformKind::Promote => plan_phpdoc_to_native(db, project, &vouches, partitions.as_ref()),
+        TransformKind::Honesty => plan_phpdoc_honesty(db, project, &vouches, partitions.as_ref()),
+        // Envelope seeding takes no vouch set: proven escapes are forward facts
+        // of the declaration's own body/callees, so the ADR-0046 §2 caller-
+        // enumerability obstacles (and their vouching valve) have no bearing.
+        TransformKind::ThrowsEnvelope => plan_throws_envelope(db, project, partitions.as_ref()),
+        TransformKind::LoopToArrayMap => {
+            plan_loop_to_array_map(db, project, &vouches, partitions.as_ref())
+        }
+    };
+
+    // Vouching an already-benign (or nonexistent) site is a no-op the user should
+    // know about (ADR-0046 §2). Skipped for a transform that consults no vouches
+    // at all — there, silence about an inert section beats a misleading "no-op"
+    // line per entry.
+    if kind != TransformKind::ThrowsEnvelope {
+        for entry in vouches.unused() {
+            notices.push(format!("vouched site `{entry}` matched no dynamic-code obstacle (no-op)"));
+        }
+    }
+
+    // Dual verification (ADR-0034 point 3a): re-analyze the edited project and
+    // require zero NEW diagnostics vs. the pre-edit baseline. Run in both dry-run
+    // and `--apply`, so a violation is visible before anything is written.
+    let postcheck =
+        post_check(db, project, &report.plan, &loaded.texts, kind.post_check_surface());
+
+    Ok(TransformRun { report, postcheck, texts: loaded.texts, notices })
 }
 
 /// `steins.toml` — the `[transform.vouch]` (ADR-0046 §2) and
@@ -1296,6 +1327,15 @@ enum PostCheckSurface {
 }
 
 impl PostCheckSurface {
+    /// The stable name an agent reads (the MCP `list_transforms` tool reports
+    /// which net each transform is measured against).
+    fn name(self) -> &'static str {
+        match self {
+            PostCheckSurface::Everything => "everything",
+            PostCheckSurface::DefaultOnly => "default-only",
+        }
+    }
+
     /// The display surface to filter through, or `None` to count every layer.
     fn display(self) -> Option<profile::Surface> {
         match self {
@@ -1454,8 +1494,14 @@ fn print_transform_text(
 
 /// Render the transform report as JSON: the serializable [`TransformReport`]
 /// (plan + refusals + oracle) plus the post-check verdict and whether the edits
-/// were written.
-fn print_transform_json(report: &TransformReport, postcheck: &PostCheck, applied: bool) {
+/// were written. Shared with the MCP surface (issue #117), which returns this
+/// document with the per-site diffs and a plan handle added — an agent and a
+/// `--format json` consumer read the same facts, spelled the same way.
+fn transform_json(
+    report: &TransformReport,
+    postcheck: &PostCheck,
+    applied: bool,
+) -> serde_json::Value {
     let new_ds: Vec<serde_json::Value> = postcheck
         .new_diagnostics
         .iter()
@@ -1475,13 +1521,17 @@ fn print_transform_json(report: &TransformReport, postcheck: &PostCheck, applied
             report.vouched_exemptions.len()
         )
     });
-    let doc = serde_json::json!({
+    serde_json::json!({
         "report": report,
         "postcheck": { "ok": postcheck.ok, "new_diagnostics": new_ds },
         "applied": applied,
         "downgrade_note": downgrade_note,
-    });
-    match serde_json::to_string_pretty(&doc) {
+    })
+}
+
+/// Print [`transform_json`] to stdout — the `transform --format json` surface.
+fn print_transform_json(report: &TransformReport, postcheck: &PostCheck, applied: bool) {
+    match serde_json::to_string_pretty(&transform_json(report, postcheck, applied)) {
         Ok(s) => outln!("{s}"),
         Err(e) => errln!("steins: failed to serialize json: {e}"),
     }
@@ -2073,7 +2123,7 @@ fn print_json(
 /// Existence is the whole discriminator: a path that exists and yields zero
 /// `.php` files is a real location with nothing to say, and stays exit 0.
 fn reject_missing_paths(paths: &[String]) -> Result<(), ExitCode> {
-    let missing: Vec<&String> = paths.iter().filter(|p| !Path::new(p.as_str()).exists()).collect();
+    let missing = missing_paths(paths);
     if missing.is_empty() {
         return Ok(());
     }
@@ -2095,6 +2145,125 @@ fn resolve_layout(paths: &[String]) -> ProjectLayout {
     let Ok(cwd) = std::env::current_dir() else { return ProjectLayout::fallback() };
     let roots: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     composer::discover(&roots, &cwd)
+}
+
+/// The path arguments that name nothing on disk. The command line turns these
+/// into exit 2 ([`reject_missing_paths`]); the MCP surface turns them into a
+/// named tool error — the same rule, refusing to report a false all-clear.
+fn missing_paths(paths: &[String]) -> Vec<&String> {
+    paths.iter().filter(|p| !Path::new(p.as_str()).exists()).collect()
+}
+
+/// The `.php` files `paths` names, sorted and deduplicated — the analyzed set.
+fn collect_files(paths: &[String]) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for p in paths {
+        collect_php_files(Path::new(p), &mut files);
+    }
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// One analyzed project: the salsa database, the [`Project`] input, the parsed
+/// file handles, and each file's text keyed by the path diagnostics use.
+///
+/// `db` owns everything the salsa ids point into, so this struct is the unit
+/// that must stay alive for a run — hand out `&loaded.db` and the `Copy`
+/// `loaded.project` rather than moving either out.
+struct LoadedProject {
+    db: SteinsDatabase,
+    project: Project,
+    inputs: Vec<SourceFile>,
+    /// Each analyzed file's contents, by diagnostic path. The baseline hash
+    /// (ADR-0022) reads a flagged line's neighborhood from here, and every
+    /// splice — `transform --apply`, `check --fix`, the MCP `apply_plan` tool —
+    /// uses it as the base text the plan was computed against.
+    texts: HashMap<String, String>,
+    layout: ProjectLayout,
+}
+
+/// Load `files` as ONE project (ADR-0009/0015): one salsa DB, so cross-file
+/// calls, class chains, and effects resolve. `paths` is the argv the layout is
+/// discovered from (ADR-0015) and `allow` the `[plugins] allow` list.
+///
+/// The single door into a project: `check`, `transform`, and the MCP surface
+/// (issue #117) all come through here, so what "the project" means cannot
+/// differ between the command line and an agent's tool call. An unreadable file
+/// is reported on stderr and left out of the project, as it always has been.
+fn load_project(files: &[PathBuf], paths: &[String], allow: Option<&[String]>) -> LoadedProject {
+    let db = SteinsDatabase::default();
+    let mut inputs: Vec<SourceFile> = Vec::new();
+    let mut texts: HashMap<String, String> = HashMap::new();
+    for file_path in files {
+        let text = match std::fs::read(file_path) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(e) => {
+                errln!("steins: cannot read {}: {e}", file_path.display());
+                continue;
+            }
+        };
+        let path = file_path.to_string_lossy().into_owned();
+        texts.insert(path.clone(), text.clone());
+        inputs.push(SourceFile::new(&db, path, text));
+    }
+    let layout = resolve_layout(paths);
+    // The plugin channel (ADR-0068), read once at the boundary like the layout.
+    let plugins = load_plugins(&layout, allow);
+    let project = Project::new(&db, inputs.clone(), layout.clone(), plugins);
+    LoadedProject { db, project, inputs, texts, layout }
+}
+
+/// The suppression channels a check run applies to raw findings, in the
+/// ADR-0050 §6 order: **vendor → surface → policy → inline**. Returns the
+/// inline outcome (survivors, meta-diagnostics, suppressed count) and how many
+/// findings vendor filtering removed.
+///
+/// Shared by `check` and the MCP `check` tool so an agent is told exactly what
+/// the command line would print. The baseline channel is deliberately *not*
+/// here: it is a per-invocation argument (`--baseline`, `--ignore-baseline`,
+/// `--set-baseline`), so each caller decides whether and which file to consult.
+fn suppression_pipeline(
+    loaded: &LoadedProject,
+    mut findings: Vec<Diagnostic>,
+    surface: &profile::Surface,
+    vendor_diagnostics: bool,
+) -> (steins_infer::InlineOutcome, usize) {
+    // Vendor filtering applies FIRST (ADR-0015), before inline ignores and the
+    // baseline: vendor code is fully indexed and inferred, but a finding whose
+    // path is inside a `vendor/` directory is suppressed by default and never
+    // reaches — nor consumes — a later channel (a vendor finding must not eat a
+    // baseline entry). `--vendor-diagnostics` opts back in, sending vendor
+    // findings through the normal channels like any first-party finding.
+    let mut vendor_suppressed = 0usize;
+    if !vendor_diagnostics {
+        let before = findings.len();
+        findings.retain(|d| !loaded.layout.is_vendor(&d.path));
+        vendor_suppressed = before - findings.len();
+    }
+
+    // Profile surface (ADR-0050 §6, second in the pipeline): a finding off the
+    // active surface does not exist — it never reaches, nor consumes, a later
+    // channel (inline ignore, baseline). A bare `check` shows proof + mechanics;
+    // named profiles opt into contracts. Mechanics ids stay on in every profile
+    // (anti-rot, §1).
+    findings.retain(|d| surface.is_surfaced(d));
+
+    // Scoped policy is reserved as the third stage (ADR-0050 §6). It is currently
+    // an identity, preserving vendor → surface → policy → inline → baseline order.
+    let findings = apply_policy_stage(findings);
+
+    // Inline `@steins-ignore` applies next (ADR-0023): a finding suppressed
+    // inline never reaches — nor consumes — the baseline channel.
+    let db = &loaded.db;
+    let trees: Vec<&SourceTree> = loaded.inputs.iter().map(|&sf| parse_tree(db, sf)).collect();
+    let file_pairs: Vec<(String, &SourceTree)> = loaded
+        .inputs
+        .iter()
+        .zip(trees.iter())
+        .map(|(&sf, &t)| (sf.path(db).to_owned(), t))
+        .collect();
+    (apply_inline_ignores(findings, &file_pairs), vendor_suppressed)
 }
 
 fn collect_php_files(path: &Path, out: &mut Vec<PathBuf>) {

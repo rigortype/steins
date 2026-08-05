@@ -127,10 +127,11 @@ produces it (`REGISTERED_NOT_YET_EMITTED`):
 | --- | --- |
 | `call.too-many-arguments` | the sidecar `reflect` slice — the arm fires for *internal* targets only, since userland too-many runs clean and is never a finding |
 
-CLI surface: `check`, `annotate`, `transform`, and a minimal `doctor`
-(ADR-0054 C3 scope — the index-bound posture report, running no emitter).
-ADR-0020 declares six commands; `lsp` and `mcp` are **designed, not
-implemented**, and are deliberately not stubbed. Output formats are `text` and
+CLI surface: `check`, `annotate`, `transform`, a minimal `doctor`
+(ADR-0054 C3 scope — the index-bound posture report, running no emitter), and
+`mcp` (the ADR-0010 agent surface: the transform loop as MCP tools over stdio,
+plan and apply as separate calls). ADR-0020 declares six commands; `lsp` is
+**designed, not implemented**, and is deliberately not stubbed. Output formats are `text` and
 `json`; `sarif` and `github` are designed in ADR-0054 and absent from the binary.
 
 The full gap list is [not-implemented.md](not-implemented.md).

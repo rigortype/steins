@@ -68,11 +68,12 @@ to see the surface:
 
 ```
 $ steins
-usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor-diagnostics] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
+usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
        steins annotate [--no-php] [--format text|json] <file.php>
        steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--format text|json] <paths...>
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
        steins doctor [--no-php] [--baseline <path>] [path]
+       steins mcp
        steins version | -v | --version
        steins license
 ```
@@ -335,8 +336,8 @@ contain no `.php` files is a genuine no-op and still exits `0`.
 ## Where to go next
 
 - **Every flag, every subcommand:** [the CLI reference](02-cli-reference.md)
-  — `check`, `annotate`, `transform`, `effect-diff`, `doctor`, `version`,
-  `license`, in full.
+  — `check`, `annotate`, `transform`, `effect-diff`, `doctor`, `mcp`,
+  `version`, `license`, in full.
 - **`steins.toml`:** [the configuration chapter](03-configuration.md) —
   discovery, key-by-key reference, and how config interacts with flags.
 - **A project with real debt:** [profiles, baseline, and

@@ -34,7 +34,8 @@ time, as an error — never a panic. Adjacency is not overlap: two edits may mee
 at a point.
 
 The plan is JSON-serializable because it is the **currency of the dry-run → diff
-→ approve → apply loop**, and that loop will run over MCP when M7 lands.
+→ approve → apply loop**, and that loop runs over MCP: `steins mcp` returns the
+plan from `plan_transform` and takes a handle to it back in `apply_plan`.
 
 ## Refusals
 
@@ -227,8 +228,6 @@ partitioning is the recorded way past it.
   → enum. Queued for M7 (ADR-0034).
 - **Fold- and dataflow-backed transform proofs.** v1's dominance argument is
   literal-only (`argument-not-proven`, ADR-0041 §1).
-- **`steins mcp`** — the dry-run → diff → approve → apply loop over MCP, with
-  `EditPlan` as the wire currency (ADR-0010, roadmap M7).
 - **Fix-its** — a transform attached to a diagnostic as a payload (`check
   --fix`).
 - **Partitioning slices B–E** and the checker-side region scoping (ADR-0047 §9).

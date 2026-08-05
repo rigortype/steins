@@ -29,23 +29,24 @@ usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor
        steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--format text|json] <paths...>
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
        steins doctor [--no-php] [--baseline <path>] [path]
+       steins mcp
        steins version | -v | --version
        steins license
 $ echo $?
 2
 ```
 
-An unrecognized subcommand names the seven that exist:
+An unrecognized subcommand names the eight that exist:
 
 ```
 $ steins lsp
-steins: unknown command `lsp` (available: check, annotate, transform, effect-diff, doctor, version, license)
+steins: unknown command `lsp` (available: check, annotate, transform, effect-diff, doctor, mcp, version, license)
 $ echo $?
 2
 ```
 
-The command set is ADR-0020's; `lsp` and `mcp` are designed and not yet
-shipped.
+The command set is ADR-0020's. `mcp` ships as of this release; `lsp` is
+designed and not yet shipped.
 
 ### Exit codes
 
@@ -61,10 +62,11 @@ problem". The other two codes vary by subcommand:
 | `transform` | plan produced (and written, under `--apply`) | post-check found new diagnostics, or a write failed | usage error |
 | `effect-diff` | report produced, deltas or none | — | usage error, or an unreadable/unparseable baseline |
 | `doctor` | posture reported, degraded ones included | configuration contradiction | usage error |
+| `mcp` | the client closed the connection | stdin could not be read | an argument was given (it takes none) |
 | `version` | always | — | — |
 | `license` | always | — | — |
 
-Two rules cut across all seven. A path argument that names nothing is a
+Two rules cut across all eight. A path argument that names nothing is a
 usage error everywhere, checked before any output, so a renamed directory
 reds the build instead of producing a clean empty report (ADR-0050 §7,
 ADR-0054 §10). And a hard stdout write failure forces `1` regardless of the
@@ -858,6 +860,66 @@ steins: doctor takes at most one path (usage: steins doctor [--no-php] [--baseli
 Reporting on `/typo`'s parent directory would answer a different question,
 so it reds instead. For symptom-indexed use of this report, see
 [troubleshooting](07-troubleshooting.md).
+
+---
+
+## `mcp`
+
+Serve the transform loop to an AI agent over
+[MCP](https://modelcontextprotocol.io), on stdio.
+
+```
+steins mcp
+```
+
+Takes no arguments: *what* to analyze is a tool argument, because one server
+answers about many paths over its lifetime. It speaks JSON-RPC 2.0 messages
+delimited by newlines on stdin/stdout — the transport an MCP host starts a
+server with — and logs to stderr. It is not meant to be typed at a terminal;
+point your agent's MCP configuration at the binary with the single argument
+`mcp`.
+
+Four tools:
+
+| Tool | Arguments | Answers | Writes? |
+| --- | --- | --- | --- |
+| `list_transforms` | none | every transform this build can plan, with what it rewrites | no |
+| `plan_transform` | `transform`, `paths`, optional `config` | the edit plan, a unified diff per file, the completeness oracle, every refusal with its named reason, the post-check verdict, and a `plan_handle` | no |
+| `apply_plan` | `plan_handle` | the files written | **yes — only this one** |
+| `check` | `paths`, optional `profile`, `no_php`, `vendor_diagnostics` | the findings `check` reports, each with its `fix` payload where one exists | no |
+
+The loop is ADR-0010's, and the pause in the middle of it is the point:
+**plan and apply are separate calls, and there is no call that does both.**
+`plan_transform` writes nothing and hands back a handle; you show the human
+the diff and the refusals; `apply_plan` on that handle writes. An agent that
+wants to skip the approval step has no tool to do it with.
+
+A plan handle is **valid only inside the server process that produced it**.
+There is no daemon and no plan file: the plan is memory belonging to that one
+connection. A handle from a restarted server, from a second connection, or one
+that a previous `apply_plan` already consumed comes back as a named error and
+never as a write — so nothing can splice byte offsets into a tree that nobody
+re-verified. Applying re-reads every target and refuses `tree-changed-since-plan`
+if the bytes moved since planning, then re-runs the same zero-new-diagnostics
+post-check `transform` runs, on the same surface that transform names.
+
+Failures an agent is meant to read come back as tool results carrying
+`isError` and a stable `reason` — `plan-handle-foreign-process`,
+`plan-handle-unknown`, `tree-changed-since-plan`,
+`postcheck-new-diagnostics`, `path-does-not-exist`, … — with a human
+`detail` beside it, the same discipline transform refusals follow. A path
+argument that names nothing is refused here too, for the reason it is
+refused everywhere else: a renamed directory must not come back as a clean
+empty report.
+
+What the tools report is what the command line reports, structured — the same
+plan, the same oracle counts, the same refusal names, the same findings and
+fix payloads — with one deliberate difference: `check` does not consult the
+baseline file. The baseline is a CI ratchet, and an agent asking what is true
+about the code should not be answered through it.
+
+`mcp` exits `2` if given any argument, `1` if stdin cannot be read, and `0`
+when the client closes the connection.
 
 ---
 

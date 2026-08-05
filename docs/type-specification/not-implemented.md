@@ -34,7 +34,7 @@ the semantic inventory.
 | `doctor` (full report) | 0054 | The **minimal** `doctor` (ADR-0054 C3 scope — index-bound posture report, runs no emitter) has **landed**. Deferred: `--format json`, the richer audits (deeper catalog audit, full baseline capture-surface report). |
 | `check --fix` fix-its | 0010 | Autofix as a first-class diagnostic payload. |
 | `lsp` | 0048, roadmap M6 | Position queries are *constrained* today (replay over retention, canonical entry states, no global-ordering dependence) but not built. The flagship capability is type-directed member completion. |
-| `mcp` | 0010, roadmap M7 | The agent-driven dry-run → diff → approve → apply loop. |
+| `mcp` | 0010, roadmap M7 | The agent-driven dry-run → diff → approve → apply loop has **landed** as `steins mcp`: an MCP server on stdio with four tools (`list_transforms`, `plan_transform`, `apply_plan`, `check`), plan and apply deliberately separate, and a plan handle scoped to the serving process. Deferred: an `annotate` tool, MCP resources and prompts, and a tool that applies a finding's `fix` payload (the payload is returned; the agent applies it). |
 | `init` / config generators | 0020 | **Refused**, not deferred — zero-config is the banner. |
 
 ### Runtime knowledge
