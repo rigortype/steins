@@ -65,6 +65,15 @@ mod return_facts_generated;
 /// [`declared_return_changed_at`].
 mod declared_returns_generated;
 
+/// The capture-group structure of a literal PCRE pattern (issue #149).
+///
+/// Knowledge about a PHP extension's *argument* rather than its signature, and
+/// so a peer of the tables above: `out_params` already says position 2 of
+/// `preg_match` is written, and this says what the written array can hold. It
+/// stands alone — nothing else in the crate consults it yet, and it consults
+/// nothing.
+pub mod preg;
+
 /// Whether `name` is on the folding allowlist (case-insensitive).
 ///
 /// A `true` here is a *permission to fold*, not a promise the call folds: the
