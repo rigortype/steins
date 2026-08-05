@@ -1497,7 +1497,11 @@ fn print_transform_text(
 /// were written. Shared with the MCP surface (issue #117), which returns this
 /// document with the per-site diffs and a plan handle added — an agent and a
 /// `--format json` consumer read the same facts, spelled the same way.
-fn transform_json(report: &TransformReport, postcheck: &PostCheck, applied: bool) -> serde_json::Value {
+fn transform_json(
+    report: &TransformReport,
+    postcheck: &PostCheck,
+    applied: bool,
+) -> serde_json::Value {
     let new_ds: Vec<serde_json::Value> = postcheck
         .new_diagnostics
         .iter()
@@ -2253,8 +2257,12 @@ fn suppression_pipeline(
     // inline never reaches — nor consumes — the baseline channel.
     let db = &loaded.db;
     let trees: Vec<&SourceTree> = loaded.inputs.iter().map(|&sf| parse_tree(db, sf)).collect();
-    let file_pairs: Vec<(String, &SourceTree)> =
-        loaded.inputs.iter().zip(trees.iter()).map(|(&sf, &t)| (sf.path(db).to_owned(), t)).collect();
+    let file_pairs: Vec<(String, &SourceTree)> = loaded
+        .inputs
+        .iter()
+        .zip(trees.iter())
+        .map(|(&sf, &t)| (sf.path(db).to_owned(), t))
+        .collect();
     (apply_inline_ignores(findings, &file_pairs), vendor_suppressed)
 }
 

@@ -199,8 +199,8 @@ fn a_scripted_client_lists_tools_and_drives_plan_then_apply() {
     assert_eq!(envelope["post_check_surface"], "default-only");
 
     // --- plan (dry run) --------------------------------------------------
-    let plan = client
-        .call_ok("plan_transform", json!({ "transform": "phpdoc-to-native", "paths": [proj.path()] }));
+    let args = json!({ "transform": "phpdoc-to-native", "paths": [proj.path()] });
+    let plan = client.call_ok("plan_transform", args);
 
     // The oracle: every enumerated site accounted for as transformed or refused.
     assert_eq!(plan["report"]["oracle"]["enumerated"], 2, "oracle: {plan}");
@@ -262,8 +262,8 @@ fn a_handle_from_another_process_is_refused_and_nothing_is_written() {
     // named refusals too — never a panic, never a silent empty answer.
     let err = client.call_err("apply_plan", json!({}));
     assert_eq!(err["reason"], "missing-argument");
-    let err = client
-        .call_err("plan_transform", json!({ "transform": "rename-everything", "paths": [proj.path()] }));
+    let unknown = json!({ "transform": "rename-everything", "paths": [proj.path()] });
+    let err = client.call_err("plan_transform", unknown);
     assert_eq!(err["reason"], "unknown-transform", "error: {err}");
     let err = client.call_err(
         "plan_transform",
@@ -298,7 +298,8 @@ fn the_read_only_tools_leave_the_tree_untouched() {
 
     // Planning and listing are read-only too — three tools, no writes.
     client.call_ok("list_transforms", json!({}));
-    client.call_ok("plan_transform", json!({ "transform": "phpdoc-to-native", "paths": [proj.path()] }));
+    let args = json!({ "transform": "phpdoc-to-native", "paths": [proj.path()] });
+    client.call_ok("plan_transform", args);
 
     assert_eq!(proj.read("app.php"), src, "check must not apply the fix it reports");
     assert_eq!(proj.read("lib.php"), LIB);
@@ -314,8 +315,8 @@ fn a_plan_whose_targets_moved_is_refused_rather_than_spliced() {
     proj.write("main.php", MAIN);
     let mut client = Client::start(proj.path());
 
-    let plan = client
-        .call_ok("plan_transform", json!({ "transform": "phpdoc-to-native", "paths": [proj.path()] }));
+    let args = json!({ "transform": "phpdoc-to-native", "paths": [proj.path()] });
+    let plan = client.call_ok("plan_transform", args);
     let handle = plan["plan_handle"].as_str().expect("a plan handle").to_owned();
 
     // Someone edits the file between the diff and the approval.

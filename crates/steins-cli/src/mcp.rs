@@ -617,7 +617,8 @@ fn tool_apply_plan(session: &mut Session, args: &Value) -> Result<Reply, ToolErr
     // against the project as it stands now, on the surface this transform
     // names — not a cached verdict from planning time.
     let files = crate::collect_files(&stored.paths);
-    let loaded = crate::load_project(&files, &stored.paths, crate::allow_list_from_disk().as_deref());
+    let allow = crate::allow_list_from_disk();
+    let loaded = crate::load_project(&files, &stored.paths, allow.as_deref());
     let postcheck = crate::post_check(
         &loaded.db,
         loaded.project,
