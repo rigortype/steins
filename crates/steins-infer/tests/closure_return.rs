@@ -6,7 +6,8 @@
 //! snapshots and binding descent follow ADR-0033.
 
 use steins_infer::{
-    DEBUG_TYPE_ID, Diagnostic, Folder, ID as ARG_MISMATCH_ID, RETURN_ID, check, check_with,
+    DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, Diagnostic, Folder, ID as ARG_MISMATCH_ID, RETURN_ID,
+    RETURN_MISMATCH_ID, check, check_with,
 };
 use steins_syntax::{ArgValue, SourceTree};
 
@@ -53,6 +54,15 @@ fn one_folded(src: &str) -> String {
 
 fn count(src: &str, id: &str) -> usize {
     findings(src, None).iter().filter(|d| d.id == id).count()
+}
+
+fn one_phpdoc(src: &str) -> String {
+    let ds: Vec<_> = findings(src, None)
+        .into_iter()
+        .filter(|d| d.id == DEBUG_PHPDOC_TYPE_ID)
+        .collect();
+    assert_eq!(ds.len(), 1, "expected one debug.phpdoc-type, got {ds:?}");
+    ds[0].message.replace("dumped phpdoc type: ", "")
 }
 
 // (a) Conformance — closure return sites against native `: R`
@@ -273,4 +283,160 @@ fn memo_does_not_launder_asserted_capture_after_verified_same_value() {
         0,
         "Verified capture memo must not launder an Asserted same-value capture"
     );
+}
+
+// (c) Phpdoc `@return` — docblock adoption (issue #128, second leg). Two
+// spellings share one grammar (ADR-0029 whitespace gap): inline before the
+// closure expression's first token wins; the enclosing statement's docblock is
+// adopted only when the statement is a simple `$f = <closure>;` assignment.
+
+#[test]
+fn inline_phpdoc_return_mismatch_fires() {
+    let src = "<?php\n\
+        $f = /** @return string */ function () {\n\
+            return 42;\n\
+        };\n";
+    assert_eq!(count(src, RETURN_MISMATCH_ID), 1, "inline docblock adopts");
+}
+
+#[test]
+fn statement_phpdoc_return_mismatch_fires() {
+    let src = "<?php\n\
+        /** @return string */\n\
+        $f = function () {\n\
+            return 42;\n\
+        };\n";
+    assert_eq!(count(src, RETURN_MISMATCH_ID), 1, "statement docblock adopts");
+}
+
+#[test]
+fn phpdoc_return_match_is_silent() {
+    let src = "<?php\n\
+        /** @return string */\n\
+        $f = function () {\n\
+            return \"hi\";\n\
+        };\n";
+    assert_eq!(count(src, RETURN_MISMATCH_ID), 0);
+}
+
+#[test]
+fn arrow_fn_statement_phpdoc_return_mismatch_fires() {
+    let src = "<?php\n\
+        /** @return string */\n\
+        $f = fn() => 42;\n";
+    assert_eq!(count(src, RETURN_MISMATCH_ID), 1);
+}
+
+#[test]
+fn static_closure_inline_phpdoc_adjacency_is_to_the_static_keyword() {
+    // The closure expression's first token is `static`, not `function` — the
+    // inline position must still adopt across it.
+    let src = "<?php\n\
+        $f = /** @return string */ static function () {\n\
+            return 42;\n\
+        };\n";
+    assert_eq!(count(src, RETURN_MISMATCH_ID), 1);
+}
+
+#[test]
+fn generator_closure_phpdoc_return_is_not_checked() {
+    // The native leg's generator skip holds for the phpdoc lane identically: a
+    // `yield` body's in-body `return` is `Generator::getReturn()`'s value, so
+    // even a blatant `@return int` mismatch stays silent.
+    let src = "<?php\n\
+        /** @return int */\n\
+        $f = function () {\n\
+            yield 1;\n\
+            return \"hi\";\n\
+        };\n";
+    assert_eq!(count(src, RETURN_MISMATCH_ID), 0, "generator scopes skip the phpdoc check");
+}
+
+#[test]
+fn embedded_closure_does_not_adopt_the_statement_docblock() {
+    // A closure in a call-argument position is not the statement's whole RHS —
+    // the statement docblock stays with the statement, in both the bare-call
+    // and assigned-call spellings.
+    let bare = "<?php\n\
+        /** @return string */\n\
+        array_map(function () {\n\
+            return 42;\n\
+        }, []);\n";
+    let assigned = "<?php\n\
+        /** @return string */\n\
+        $r = array_map(function () {\n\
+            return 42;\n\
+        }, []);\n";
+    assert_eq!(count(bare, RETURN_MISMATCH_ID), 0);
+    assert_eq!(count(assigned, RETURN_MISMATCH_ID), 0);
+}
+
+#[test]
+fn inline_docblock_beats_the_statement_docblock() {
+    // Both positions present: inline wins. `@return string` (inline) is violated
+    // by `return 42` even though the statement-level `@return int` would accept
+    // it — and the mirror image stays silent where the statement-level claim
+    // would have fired.
+    let inline_fires = "<?php\n\
+        /** @return int */\n\
+        $f = /** @return string */ function () {\n\
+            return 42;\n\
+        };\n";
+    let inline_accepts = "<?php\n\
+        /** @return int */\n\
+        $f = /** @return string */ function () {\n\
+            return \"hi\";\n\
+        };\n";
+    assert_eq!(count(inline_fires, RETURN_MISMATCH_ID), 1);
+    assert_eq!(count(inline_accepts, RETURN_MISMATCH_ID), 0);
+}
+
+#[test]
+fn var_only_statement_docblock_leaves_the_closure_unchecked() {
+    // ADR-0073's `@var` cast lane and this `@return` lane read different tags
+    // from the same statement docblock; a `@var`-only docblock carries no
+    // `@return` and so checks nothing on the closure body.
+    let src = "<?php\n\
+        /** @var \\Closure $f */\n\
+        $f = function () {\n\
+            return 42;\n\
+        };\n";
+    assert_eq!(count(src, RETURN_MISMATCH_ID), 0);
+}
+
+#[test]
+fn non_doc_comment_breaks_the_adoption_adjacency() {
+    // The shared grammar: a blank line still adopts; an intervening non-doc
+    // comment silences (exactly `stmt_docblock`'s discipline).
+    let blank_line_adopts = "<?php\n\
+        /** @return string */\n\
+        \n\
+        $f = function () {\n\
+            return 42;\n\
+        };\n";
+    let comment_silences = "<?php\n\
+        /** @return string */\n\
+        // a note\n\
+        $f = function () {\n\
+            return 42;\n\
+        };\n";
+    assert_eq!(count(blank_line_adopts, RETURN_MISMATCH_ID), 1);
+    assert_eq!(count(comment_silences, RETURN_MISMATCH_ID), 0);
+}
+
+#[test]
+fn phpdoc_refines_the_declared_floor_at_a_refused_call() {
+    // The value-lane seam (issue #128 second leg): a named-arg call refuses
+    // binding descent, and the floor it keeps composes native `: int` with the
+    // adopted `@return positive-int` through the same `refine_contract_arms`
+    // precedence free functions use — an Asserted refinement within the
+    // Verified native envelope.
+    let src = "<?php\n\
+        /** @return positive-int */\n\
+        $f = function (int $x): int {\n\
+            return rand();\n\
+        };\n\
+        $y = $f(x: 1);\n\
+        \\PHPStan\\dumpPhpDocType($y);\n";
+    assert_eq!(one_phpdoc(src), "int<1, max> (asserted)");
 }

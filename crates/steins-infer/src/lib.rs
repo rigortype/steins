@@ -5617,6 +5617,9 @@ impl<'a> Cx<'a> {
     /// (ADR-0052 §9) to refine the native member list with the declared `@param`.
     fn scope_envelopes(&self, scope: &Scope) -> Option<Envelopes> {
         match &scope.owner {
+            // Closures: deliberately `None` even though the scope may carry an
+            // adopted docblock (issue #128 lit up `@return` only, via
+            // `scope_return_phpdoc`) — `@param`/`@throws` on closures stays dark.
             ScopeOwner::TopLevel | ScopeOwner::Closure { .. } => None,
             ScopeOwner::Function(name) => {
                 let f = self.tree().functions().iter().find(|f| f.name.eq_ignore_ascii_case(name))?;
@@ -5695,12 +5698,9 @@ impl<'a> Cx<'a> {
         }
     }
 
-    /// The `@return` phpdoc envelope and display name of a scope's owning function
-    /// or method (same file this `Cx` points at), or `None` when there is no
-    /// docblock `@return` (or the scope is top-level / a closure).
-    ///
-    /// Closures: deferred (issue #128) — the scope carries no adopted docblock yet,
-    /// so `@return` checking for arrow/block closures remains a follow-up.
+    /// The `@return` phpdoc envelope and display name of a scope's owning
+    /// function, method, or closure (same file this `Cx` points at), or `None`
+    /// when there is no docblock `@return` (or the scope is top-level).
     fn scope_return_phpdoc(&self, scope: &Scope) -> Option<(PType, String)> {
         match &scope.owner {
             ScopeOwner::TopLevel => None,
@@ -5721,8 +5721,20 @@ impl<'a> Cx<'a> {
                 let ret = env.ret?;
                 Some((ret, format!("{}::{}", cd.name, m.name)))
             }
-            // Issue #128: no docblock carrier on `Scope` for closures yet.
-            ScopeOwner::Closure { .. } => None,
+            // Issue #128: closures carry their adopted docblock on the scope
+            // itself (`Scope::docblock`, two-position adoption in steins-syntax)
+            // — same `parse_envelopes` grammar as free functions. The generator
+            // skip mirrors `scope_return`'s: `@return Generator` names the call
+            // result, not in-body `return` values. No enclosing-class
+            // `@template` shadowing here (known limitation — a closure inside a
+            // templated class could misread a template name as a class name).
+            ScopeOwner::Closure { .. } => {
+                if scope.is_generator {
+                    return None;
+                }
+                let ret = parse_envelopes(scope.docblock.as_deref())?.ret?;
+                Some((ret, "closure".to_owned()))
+            }
         }
     }
 }
@@ -13270,7 +13282,7 @@ fn handle_var_call(
                 };
                 // Declared return floor first — same rung free functions/methods keep
                 // when named/spread refuse binding descent (issue #128 review).
-                let return_arms = closure_return_arms(callee_scope);
+                let return_arms = closure_return_arms(cx, callee_scope);
                 // Argument type check at the `$fn(...)` site (mirrors the direct /
                 // propagated check for named calls, which never see a variable call).
                 check_callable_args(
@@ -13326,16 +13338,24 @@ fn handle_var_call(
     empty
 }
 
-/// Declared-return contract arms of a closure scope from its native `: R`
-/// (issue #128). Phpdoc `@return` on closures is deferred (no docblock on the
-/// scope yet) — native only.
-fn closure_return_arms(callee_scope: &Scope) -> Option<Vec<ContractArm>> {
-    let ty = callee_scope.ret_ty.as_ref()?;
-    let native = native_arms(ty);
-    if native.is_empty() {
-        return None;
-    }
-    refine_contract_arms(&native, None, &|n: &str| n.to_ascii_lowercase())
+/// Declared-return contract arms of a closure scope (issue #128): the native
+/// `: R` member list refined by the scope's adopted-docblock `@return` — the
+/// same [`refine_contract_arms`] composition (and so the same native-vs-phpdoc
+/// precedence: phpdoc refines *within* the runtime-enforced native envelope,
+/// never past it) as [`fn_return_arms`]. Class arms in the `@return` resolve in
+/// the closure's own file/namespace, at its definition offset.
+fn closure_return_arms(cx: &Cx, callee_scope: &Scope) -> Option<Vec<ContractArm>> {
+    let native: Vec<ContractTy> =
+        callee_scope.ret_ty.as_ref().map(native_arms).unwrap_or_default();
+    let phpdoc = parse_envelopes(callee_scope.docblock.as_deref()).and_then(|e| e.ret);
+    let off = match &callee_scope.owner {
+        ScopeOwner::Closure { def_offset } => *def_offset,
+        _ => 0,
+    };
+    let resolve = |n: &str| {
+        cx.resolve_pclass(cx.cur, off, n).trim_start_matches('\\').to_ascii_lowercase()
+    };
+    refine_contract_arms(&native, phpdoc.as_ref(), &resolve)
 }
 
 /// Dispatch a `$fn(...)` call whose target is a named free function (a first-class
