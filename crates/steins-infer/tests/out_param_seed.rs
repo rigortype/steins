@@ -283,6 +283,69 @@ fn a_userland_shadow_is_a_different_function() {
     );
 }
 
+#[test]
+fn a_fully_qualified_spelling_seeds_the_same_shape() {
+    // `\preg_match(...)` inside a namespace is the global builtin — the spelling a
+    // namespaced file uses when it wants the global function unambiguously — and
+    // it seeds exactly what the unqualified spelling does (issue #153).
+    let src = "<?php\nnamespace App;\nfunction f(string $s): void {\n\
+               if (\\preg_match('/(a)/', $s, $m)) { \\PHPStan\\dumpType($m); }\n}\n";
+    assert_eq!(one_dump(src), "non-empty-list{string, string} (asserted)");
+}
+
+#[test]
+fn a_fully_qualified_spelling_reaches_past_a_same_namespace_homonym() {
+    // Measured (php 8.5.9): with an `App\is_string` declared alongside,
+    // `\is_string("x")` still answers the global builtin's `true`. The leading `\`
+    // is what makes the shadow irrelevant, so the seed stands here too.
+    let src = "<?php\nnamespace App;\nfunction preg_match($p, $s, &$m): int { return 1; }\n\
+               function f(string $s): void {\n\
+               if (\\preg_match('/(a)/', $s, $m)) { \\PHPStan\\dumpType($m); }\n}\n";
+    assert_eq!(one_dump(src), "non-empty-list{string, string} (asserted)");
+}
+
+#[test]
+fn a_namespaced_twin_is_a_different_function() {
+    // `App\preg_match` is a name of its own, whether or not the project declares
+    // it — nothing here knows its contract.
+    let src = "<?php\nnamespace App;\nfunction f(string $s): void {\n\
+               if (\\App\\preg_match('/(a)/', $s, $m)) { \\PHPStan\\dumpType($m); }\n}\n";
+    let d = dumps(src);
+    assert!(
+        d.iter().all(|t| !t.contains("non-empty-list")),
+        "a namespaced twin must not seed the builtin's shape: {d:?}"
+    );
+}
+
+#[test]
+fn a_namespace_relative_spelling_is_a_different_function() {
+    // `namespace\preg_match` resolves to `App\preg_match` ONLY, with no global
+    // fallback — measured on php 8.5.9 as a fatal "Call to undefined function".
+    // The `namespace\` prefix is stripped from the stored raw name, so only the
+    // reference *kind* can tell this spelling apart from the global one.
+    let src = "<?php\nnamespace App;\nfunction f(string $s): void {\n\
+               if (namespace\\preg_match('/(a)/', $s, $m)) { \\PHPStan\\dumpType($m); }\n}\n";
+    let d = dumps(src);
+    assert!(
+        d.iter().all(|t| !t.contains("non-empty-list")),
+        "a namespace-relative twin must not seed the builtin's shape: {d:?}"
+    );
+}
+
+#[test]
+fn an_aliased_import_is_a_different_function() {
+    // `use function Other\thing as preg_match;` sends the unqualified call to
+    // `Other\thing` with no fallback (measured: a fatal naming `Other\thing()`).
+    let src = "<?php\nnamespace App;\nuse function Other\\thing as preg_match;\n\
+               function f(string $s): void {\n\
+               if (preg_match('/(a)/', $s, $m)) { \\PHPStan\\dumpType($m); }\n}\n";
+    let d = dumps(src);
+    assert!(
+        d.iter().all(|t| !t.contains("non-empty-list")),
+        "an aliased import must not seed the builtin's shape: {d:?}"
+    );
+}
+
 // ---- Emission discipline ---------------------------------------------------
 
 #[test]

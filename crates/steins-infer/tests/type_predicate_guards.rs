@@ -8,9 +8,13 @@
 //!
 //! Three disciplines beyond the spellings:
 //!
-//! * **Recognition discipline.** A namespaced (`Foo\is_string`) or
-//!   userland-shadowed twin is a DIFFERENT function and narrows nothing — the
-//!   same rule [`existence_predicate`] and `array_guard_predicate` already carry.
+//! * **Recognition discipline.** A namespaced (`Foo\is_string`), namespace-
+//!   relative (`namespace\is_string`), aliased-import or userland-shadowed twin
+//!   is a DIFFERENT function and narrows nothing, while the fully-qualified
+//!   `\is_string` IS the global builtin and narrows exactly as the bare spelling
+//!   does. One helper answers that for every recognizer (issue #153), so
+//!   [`existence_predicate`], `array_guard_predicate` and the out-parameter seed
+//!   all agree by construction; the PHP claims are measured on php 8.5.9.
 //! * **`assert()` inherits for free.** `assert(is_int($x))` narrows through the
 //!   identical walk; no assert-specific plumbing exists, and these tests are what
 //!   keeps that true.
@@ -380,6 +384,85 @@ fn a_userland_shadow_is_a_different_function() {
                /** @param int|string $v */\nfunction f($v): void {\n\
                if (is_string($v)) { \\PHPStan\\dumpType($v); }\n}\n";
     assert_ne!(dumps(src), vec!["string".to_owned()]);
+}
+
+#[test]
+fn a_fully_qualified_spelling_is_the_global_builtin() {
+    // `\is_string($v)` inside a namespace IS the global function — that is what
+    // the leading `\` is for, and what a style guide mandating it relies on.
+    // Measured (php 8.5.9): with an `App\is_string` returning false declared
+    // alongside, `\is_string("x")` still answers `true`.
+    let src = "<?php\nnamespace App;\n/** @param int|string $v */\nfunction f($v): void {\n\
+               if (\\is_string($v)) { \\PHPStan\\dumpType($v); }\n}\n";
+    assert_eq!(dumps(src), vec!["string".to_owned()]);
+}
+
+#[test]
+fn a_fully_qualified_spelling_survives_a_same_namespace_homonym() {
+    // The shadowing check is about the function the call actually reaches, and a
+    // fully-qualified name reaches past `App\is_string` to the global one
+    // (measured, php 8.5.9).
+    let src = "<?php\nnamespace App;\nfunction is_string($v): bool { return false; }\n\
+               /** @param int|string $v */\nfunction f($v): void {\n\
+               if (\\is_string($v)) { \\PHPStan\\dumpType($v); }\n}\n";
+    assert_eq!(dumps(src), vec!["string".to_owned()]);
+}
+
+#[test]
+fn a_namespace_relative_spelling_is_a_different_function() {
+    // `namespace\is_string` resolves against the enclosing namespace ONLY, with
+    // no global fallback: measured on php 8.5.9 it is a fatal "Call to undefined
+    // function App\is_string()". It can never be the builtin, so it narrows
+    // nothing — the `namespace\` prefix is stripped from the stored raw name, so
+    // a textual backslash test would wrongly let it through.
+    let src = "<?php\nnamespace App;\n/** @param int|string $v */\nfunction f($v): void {\n\
+               if (namespace\\is_string($v)) { \\PHPStan\\dumpType($v); }\n}\n";
+    assert_ne!(dumps(src), vec!["string".to_owned()]);
+}
+
+#[test]
+fn a_namespace_relative_spelling_in_the_root_namespace_is_the_builtin() {
+    // In the root namespace the enclosing namespace IS global, so the same
+    // spelling does denote the builtin (measured: `namespace\is_string("x")`
+    // answers `true` in a file with no `namespace` declaration).
+    let src = "<?php\n/** @param int|string $v */\nfunction f($v): void {\n\
+               if (namespace\\is_string($v)) { \\PHPStan\\dumpType($v); }\n}\n";
+    assert_eq!(dumps(src), vec!["string".to_owned()]);
+}
+
+#[test]
+fn an_aliased_import_binds_the_spelling_elsewhere() {
+    // `use function Other\thing as is_string;` sends the unqualified call to
+    // `Other\thing` with no fallback (measured: a fatal naming `Other\thing()`),
+    // so the spelling is not the builtin however unqualified it looks.
+    let src = "<?php\nnamespace App;\nuse function Other\\thing as is_string;\n\
+               /** @param int|string $v */\nfunction f($v): void {\n\
+               if (is_string($v)) { \\PHPStan\\dumpType($v); }\n}\n";
+    assert_ne!(dumps(src), vec!["string".to_owned()]);
+}
+
+#[test]
+fn importing_the_global_name_itself_is_still_the_builtin() {
+    // `use function is_string;` names the global function, so the call reaches it
+    // (measured: `true`). The import leg rejects a *different* target, not the
+    // presence of an import.
+    let src = "<?php\nnamespace App;\nuse function is_string;\n\
+               /** @param int|string $v */\nfunction f($v): void {\n\
+               if (is_string($v)) { \\PHPStan\\dumpType($v); }\n}\n";
+    assert_eq!(dumps(src), vec!["string".to_owned()]);
+}
+
+#[test]
+fn the_in_array_recognizer_carries_the_same_rule() {
+    // The rule is one helper, so `in_array` answers exactly as `is_string` does:
+    // the fully-qualified spelling is the builtin, the namespace-relative one is
+    // not.
+    let fq = "<?php\nnamespace App;\n/** @param int|string $v */\nfunction f($v): void {\n\
+              if (\\in_array($v, [1, 2], true)) { \\PHPStan\\dumpType($v); }\n}\n";
+    assert_eq!(dumps(fq), vec!["1|2".to_owned()]);
+    let rel = "<?php\nnamespace App;\n/** @param int|string $v */\nfunction f($v): void {\n\
+               if (namespace\\in_array($v, [1, 2], true)) { \\PHPStan\\dumpType($v); }\n}\n";
+    assert_ne!(dumps(rel), vec!["1|2".to_owned()]);
 }
 
 #[test]

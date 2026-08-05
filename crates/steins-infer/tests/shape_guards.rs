@@ -401,6 +401,55 @@ fn array_all_any_do_not_special_case_the_concrete_lane() {
     assert_eq!(guarded, unguarded_but_still_a_call_argument);
 }
 
+// ---- Recognition discipline (issue #153) -----------------------------------
+//
+// One helper answers "does this reference denote the global function `name`?" for
+// every recognizer in the file; these pin the answer on the array-predicate side.
+// Each PHP claim below was measured on php 8.5.9.
+
+/// The one dump a namespaced fixture's guarded read produces.
+fn ns_guarded(guard: &str) -> String {
+    one_type(&format!(
+        "<?php\nnamespace App;\n/** @param array{{a?: string}} $v */\n\
+         function f(array $v): void {{ if ({guard}) {{ \\PHPStan\\dumpType($v['a']); }} }}\n"
+    ))
+}
+
+#[test]
+fn a_fully_qualified_array_predicate_is_the_global_builtin() {
+    // `\array_key_exists(...)` is the global function whatever the namespace —
+    // the spelling a namespaced file uses when it wants exactly that.
+    assert_eq!(
+        ns_guarded("\\array_key_exists('a', $v)"),
+        "dumped type: string (asserted)"
+    );
+}
+
+#[test]
+fn a_namespaced_array_predicate_is_a_different_function() {
+    assert_eq!(ns_guarded("\\App\\array_key_exists('a', $v)"), "dumped type: unknown");
+}
+
+#[test]
+fn a_namespace_relative_array_predicate_is_a_different_function() {
+    // `namespace\array_key_exists` reaches `App\array_key_exists` ONLY — no
+    // global fallback, a fatal at runtime when undefined. The stored raw name has
+    // the `namespace\` prefix stripped, so only the reference kind distinguishes
+    // it from the global spelling.
+    assert_eq!(ns_guarded("namespace\\array_key_exists('a', $v)"), "dumped type: unknown");
+}
+
+#[test]
+fn an_aliased_import_is_a_different_array_predicate() {
+    // `use function Other\thing as array_key_exists;` sends the call to
+    // `Other\thing`, with no fallback to the builtin.
+    let src = "<?php\nnamespace App;\nuse function Other\\thing as array_key_exists;\n\
+               /** @param array{a?: string} $v */\n\
+               function f(array $v): void \
+               { if (array_key_exists('a', $v)) { \\PHPStan\\dumpType($v['a']); } }\n";
+    assert_eq!(one_type(src), "dumped type: unknown");
+}
+
 // ---- Arm subtraction + the collapse mint (A-G3 / A-G4) ---------------------
 
 /// A two-array-arm union: the fact lane is empty at entry (A-G3 keeps the union
