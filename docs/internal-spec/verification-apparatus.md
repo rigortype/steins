@@ -103,6 +103,26 @@ to record. The field lives in the gitignored file and the sha is printed only
 to the operator's terminal: a private repository's commit id never enters this
 one. Absent is legal, and an entry without it behaves exactly as before.
 
+A matching revision is not by itself a statement about the *files*, and these
+trees are somebody's working checkout, where dirty is the normal state rather
+than an edge case. So the gate also asks `git -C <path> status --porcelain`
+(same degradation: unknown, never assumed clean) and only a **clean** match
+issues the confident "this is a genuine regression, stop looking at the corpus"
+verdict. A dirty match says the recorded commit agrees while uncommitted or
+untracked content sits on top, so the measured files are not exactly that
+revision; an undeterminable one says so rather than implying clean. Untracked
+content counts as dirty without exception — the gate walks the filesystem, not
+the index, so an untracked `.php` file is measured like any other.
+
+What this cannot do is keep the two halves in sync. The counts live in tracked
+Rust; the revision lives in an untracked file no check in this repository can
+read. A reseed that updates the count and forgets the revision leaves a record
+that is not merely stale but actively wrong — it will assert the confident
+verdict against a baseline seeded somewhere else. That is why the revision
+prints on every run including green ones: putting both halves in front of the
+operator at every reseed opportunity is the only available mitigation, and it
+is a discipline rather than a guarantee.
+
 Held-out projects used for adoption drills are never used for tuning; that
 separation is what makes an adoption-drill number mean anything. See
 `docs/notes/20260724-adoption-drill-record.md`.

@@ -73,13 +73,53 @@ struct PackageReport {
     /// The revision the local project's checkout is actually on this run, or
     /// `None` when it could not be read (see [`corpus_local::checkout_revision`]).
     measured_revision: Option<String>,
+    /// Whether that checkout also carries uncommitted or untracked content, which
+    /// decides whether a matching revision may be believed (see [`WorktreeState`]).
+    worktree: WorktreeState,
     elapsed: Duration,
 }
 
 impl PackageReport {
     /// How this report's recorded baseline revision relates to the one measured.
     fn revision(&self) -> RevisionStatus {
-        classify_revision(self.recorded_revision.as_deref(), self.measured_revision.as_deref())
+        classify_revision(
+            self.recorded_revision.as_deref(),
+            self.measured_revision.as_deref(),
+            self.worktree,
+        )
+    }
+}
+
+/// Whether a local project's working tree carries anything on top of the revision
+/// it reports — the difference between "the files measured ARE that commit" and
+/// "the files measured are that commit plus whatever the operator has in flight".
+///
+/// This exists because a revision match alone is not evidence about the *files*,
+/// and a private corpus is somebody's working checkout, where a dirty tree is the
+/// normal state. The match arm is the one message that tells the operator to stop
+/// looking at the corpus and go triage findings; issuing it confidently against a
+/// tree that is not exactly the recorded commit is a wrong answer in the direction
+/// of "don't look", which is the expensive direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorktreeState {
+    /// `git status --porcelain` was empty.
+    Clean,
+    /// Non-empty: modified, staged, or untracked content sits on top. The gate
+    /// walks the filesystem rather than the index, so untracked counts as dirty.
+    Dirty,
+    /// Undeterminable (not a git checkout, no `git`, a spawn failure, a non-zero
+    /// exit) — reported as unknown rather than assumed clean.
+    Unknown,
+}
+
+impl WorktreeState {
+    /// Map the tri-state `Option<bool>` [`corpus_local::checkout_is_dirty`] returns.
+    fn from_dirty(dirty: Option<bool>) -> Self {
+        match dirty {
+            Some(true) => Self::Dirty,
+            Some(false) => Self::Clean,
+            None => Self::Unknown,
+        }
     }
 }
 
@@ -96,9 +136,10 @@ impl PackageReport {
 /// moment the baseline is seeded, which is the only moment it is cheap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RevisionStatus {
-    /// A revision is recorded and the checkout is on it: the corpus is the same
-    /// one the baseline was seeded against.
-    Matches { revision: String },
+    /// A revision is recorded and the checkout is on it. `worktree` decides how far
+    /// that may be believed: only a CLEAN tree makes the measured files identical
+    /// to the seeded ones.
+    Matches { revision: String, worktree: WorktreeState },
     /// A revision is recorded and the checkout is somewhere else: the corpus moved
     /// under the baseline.
     Differs { recorded: String, measured: String },
@@ -119,7 +160,15 @@ enum RevisionStatus {
 /// evidence of identity and is treated as a difference — erring toward "the corpus
 /// may have moved", which asks for a re-measure rather than silently blessing a
 /// count.
-fn classify_revision(recorded: Option<&str>, measured: Option<&str>) -> RevisionStatus {
+///
+/// `worktree` is carried onto a match and nowhere else: a revision that already
+/// differs, or was never recorded, is inconclusive whatever the tree's cleanliness,
+/// while a match is the one verdict cleanliness can overturn.
+fn classify_revision(
+    recorded: Option<&str>,
+    measured: Option<&str>,
+    worktree: WorktreeState,
+) -> RevisionStatus {
     let norm = |s: &str| s.trim().to_ascii_lowercase();
     match (recorded.map(&norm).filter(|s| !s.is_empty()), measured.map(&norm)) {
         (Some(recorded), Some(measured)) => {
@@ -128,7 +177,7 @@ fn classify_revision(recorded: Option<&str>, measured: Option<&str>) -> Revision
                 // measured full sha.
                 let revision =
                     if measured.len() >= recorded.len() { measured } else { recorded };
-                RevisionStatus::Matches { revision }
+                RevisionStatus::Matches { revision, worktree }
             } else {
                 RevisionStatus::Differs { recorded, measured }
             }
@@ -155,9 +204,15 @@ fn revisions_agree(a: &str, b: &str) -> bool {
 /// moves, the previous run's output is already a record of where it moved from.
 fn revision_summary_line(status: &RevisionStatus) -> String {
     match status {
-        RevisionStatus::Matches { revision } => {
-            format!("revision: {revision} — matches the revision the baselines were seeded at")
-        }
+        RevisionStatus::Matches { revision, worktree: WorktreeState::Clean } => format!(
+            "revision: {revision} — matches the revision the baselines were seeded at, working tree clean"
+        ),
+        RevisionStatus::Matches { revision, worktree: WorktreeState::Dirty } => format!(
+            "revision: {revision} — matches the revision the baselines were seeded at, but the working tree is DIRTY (uncommitted or untracked content sits on top, so the files measured are not exactly that revision)"
+        ),
+        RevisionStatus::Matches { revision, worktree: WorktreeState::Unknown } => format!(
+            "revision: {revision} — matches the revision the baselines were seeded at; whether the working tree is clean could not be determined"
+        ),
         RevisionStatus::Differs { recorded, measured } => format!(
             "revision: {measured} — but the baselines were seeded at {recorded}; the corpus has moved since"
         ),
@@ -178,8 +233,14 @@ fn revision_summary_line(status: &RevisionStatus) -> String {
 /// operator should do about the count that just went up.
 fn revision_tripwire_line(status: &RevisionStatus) -> String {
     match status {
-        RevisionStatus::Matches { revision } => format!(
-            "revision MATCHES the seeded baseline ({revision}): the corpus is the same one the baseline was measured on, so this increase is a GENUINE REGRESSION — triage the new finding(s), do not reseed."
+        RevisionStatus::Matches { revision, worktree: WorktreeState::Clean } => format!(
+            "revision MATCHES the seeded baseline ({revision}) and the working tree is CLEAN: the files just measured are the same ones the baseline was measured on, so this increase is a GENUINE REGRESSION — triage the new finding(s), do not reseed."
+        ),
+        RevisionStatus::Matches { revision, worktree: WorktreeState::Dirty } => format!(
+            "revision matches the seeded baseline ({revision}) BUT the working tree is DIRTY: uncommitted or untracked content sits on top of that commit, so the files just measured are NOT exactly the revision the baseline was seeded at and this increase may still be corpus-side. Check `git status` in the corpus checkout — a clean tree at this revision would make it a genuine regression."
+        ),
+        RevisionStatus::Matches { revision, worktree: WorktreeState::Unknown } => format!(
+            "revision matches the seeded baseline ({revision}), but whether the working tree is clean could not be determined (not a git checkout, or git is unavailable): the recorded commit agrees while the measured FILES are unverified, so a regression cannot be asserted on the revision alone."
         ),
         RevisionStatus::Differs { recorded, measured } => format!(
             "revision DIFFERS: the baseline was seeded at {recorded}, this run measured {measured}. The corpus moved under the baseline, so the count change may be CORPUS DRIFT rather than a regression — re-measure against the seeded revision to separate the two, then reseed consciously (the count in xtask/src/gate.rs, and `revision = \"{measured}\"` in corpus.local.toml)."
@@ -976,6 +1037,7 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
         // sync checks it out — reproducible by construction, nothing to compare.
         recorded_revision: None,
         measured_revision: None,
+        worktree: WorktreeState::Unknown,
         elapsed: start.elapsed(),
     }
 }
@@ -987,9 +1049,11 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
     let start = Instant::now();
     let root = Path::new(&proj.path);
 
-    // Read what the tree is on BEFORE walking it, so the revision reported beside a
-    // count is the one that count was taken at. Unreadable degrades to `None`.
+    // Read what the tree is on BEFORE walking it, so the revision and cleanliness
+    // reported beside a count describe the state that count was taken at. Both
+    // reads degrade to "unknown" rather than failing or asserting.
     let measured_revision = corpus_local::checkout_revision(root);
+    let worktree = WorktreeState::from_dirty(corpus_local::checkout_is_dirty(root));
 
     let files = corpus_local::collect_php_files(root, &proj.exclude);
 
@@ -1059,6 +1123,7 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
         vendor_suppressed,
         recorded_revision: proj.revision.clone(),
         measured_revision,
+        worktree,
         elapsed: start.elapsed(),
     }
 }
@@ -1329,12 +1394,21 @@ fn print_tripwire(family: &str, regressions: &[PhpdocRegression], local_reports:
 mod tests {
     use steins_infer::is_vendor_path;
 
-    use super::{RevisionStatus, classify_revision, revision_summary_line, revision_tripwire_line};
+    use super::{
+        RevisionStatus, WorktreeState, classify_revision, revision_summary_line,
+        revision_tripwire_line,
+    };
 
     // Synthetic revisions only. A real private-corpus sha must never enter a
     // tracked file, test fixtures included.
     const REV_A: &str = "0123456789abcdef0123456789abcdef01234567";
     const REV_B: &str = "fedcba9876543210fedcba9876543210fedcba98";
+
+    /// Classify with a clean tree — the common case for the revision-comparison
+    /// tests, which are about the shas rather than the working tree.
+    fn classify(recorded: Option<&str>, measured: Option<&str>) -> RevisionStatus {
+        classify_revision(recorded, measured, WorktreeState::Clean)
+    }
 
     // The vendor-path predicate (ADR-0015) drives the gate's local-project vendor
     // split; verify its component-boundary behavior here where the gate uses it.
@@ -1355,13 +1429,13 @@ mod tests {
     #[test]
     fn a_recorded_revision_equal_to_the_measured_one_matches() {
         assert_eq!(
-            classify_revision(Some(REV_A), Some(REV_A)),
-            RevisionStatus::Matches { revision: REV_A.to_owned() }
+            classify(Some(REV_A), Some(REV_A)),
+            RevisionStatus::Matches { revision: REV_A.to_owned(), worktree: WorktreeState::Clean }
         );
         // Case and surrounding whitespace are incidental, not a difference.
         assert_eq!(
-            classify_revision(Some(format!("  {}  ", REV_A.to_ascii_uppercase()).as_str()), Some(REV_A)),
-            RevisionStatus::Matches { revision: REV_A.to_owned() }
+            classify(Some(format!("  {}  ", REV_A.to_ascii_uppercase()).as_str()), Some(REV_A)),
+            RevisionStatus::Matches { revision: REV_A.to_owned(), worktree: WorktreeState::Clean }
         );
     }
 
@@ -1369,13 +1443,13 @@ mod tests {
     fn a_hand_written_abbreviation_matches_the_full_measured_sha() {
         // Humans paste short shas; the full measured one is reported back.
         assert_eq!(
-            classify_revision(Some(&REV_A[..12]), Some(REV_A)),
-            RevisionStatus::Matches { revision: REV_A.to_owned() }
+            classify(Some(&REV_A[..12]), Some(REV_A)),
+            RevisionStatus::Matches { revision: REV_A.to_owned(), worktree: WorktreeState::Clean }
         );
         // Too short to be evidence of identity — treated as a difference, which
         // asks for a re-measure instead of silently blessing the count.
         assert_eq!(
-            classify_revision(Some(&REV_A[..4]), Some(REV_A)),
+            classify(Some(&REV_A[..4]), Some(REV_A)),
             RevisionStatus::Differs {
                 recorded: REV_A[..4].to_owned(),
                 measured: REV_A.to_owned()
@@ -1386,7 +1460,7 @@ mod tests {
     #[test]
     fn a_recorded_revision_unlike_the_measured_one_differs() {
         assert_eq!(
-            classify_revision(Some(REV_A), Some(REV_B)),
+            classify(Some(REV_A), Some(REV_B)),
             RevisionStatus::Differs { recorded: REV_A.to_owned(), measured: REV_B.to_owned() }
         );
     }
@@ -1394,41 +1468,42 @@ mod tests {
     #[test]
     fn an_absent_revision_is_unrecorded_not_an_error() {
         assert_eq!(
-            classify_revision(None, Some(REV_A)),
+            classify(None, Some(REV_A)),
             RevisionStatus::Unrecorded { measured: Some(REV_A.to_owned()) }
         );
         // An empty string is a missing value, not a revision.
         assert_eq!(
-            classify_revision(Some("   "), Some(REV_A)),
+            classify(Some("   "), Some(REV_A)),
             RevisionStatus::Unrecorded { measured: Some(REV_A.to_owned()) }
         );
         // Neither side known (a non-git path, or no git): still legal, still no panic.
-        assert_eq!(classify_revision(None, None), RevisionStatus::Unrecorded { measured: None });
+        assert_eq!(classify(None, None), RevisionStatus::Unrecorded { measured: None });
     }
 
     #[test]
     fn an_unreadable_checkout_leaves_a_recorded_revision_uncompared() {
         assert_eq!(
-            classify_revision(Some(REV_A), None),
+            classify(Some(REV_A), None),
             RevisionStatus::Unreadable { recorded: REV_A.to_owned() }
         );
     }
 
     #[test]
     fn the_tripwire_line_names_a_match_a_regression_and_a_difference_drift() {
-        let matching = revision_tripwire_line(&classify_revision(Some(REV_A), Some(REV_A)));
+        let matching = revision_tripwire_line(&classify(Some(REV_A), Some(REV_A)));
         assert!(matching.contains("MATCHES"), "{matching}");
+        assert!(matching.contains("CLEAN"), "{matching}");
         assert!(matching.contains("GENUINE REGRESSION"), "{matching}");
         assert!(matching.contains(REV_A), "{matching}");
 
-        let differing = revision_tripwire_line(&classify_revision(Some(REV_A), Some(REV_B)));
+        let differing = revision_tripwire_line(&classify(Some(REV_A), Some(REV_B)));
         assert!(differing.contains("DIFFERS"), "{differing}");
         assert!(differing.contains("CORPUS DRIFT"), "{differing}");
         // Both revisions are named, so the reader knows what to re-measure against.
         assert!(differing.contains(REV_A) && differing.contains(REV_B), "{differing}");
         assert!(differing.contains("reseed"), "{differing}");
 
-        let unrecorded = revision_tripwire_line(&classify_revision(None, Some(REV_B)));
+        let unrecorded = revision_tripwire_line(&classify(None, Some(REV_B)));
         assert!(unrecorded.contains("UNPINNED"), "{unrecorded}");
         assert!(unrecorded.contains("CANNOT be told apart"), "{unrecorded}");
         // Copy-pasteable into corpus.local.toml.
@@ -1436,19 +1511,88 @@ mod tests {
     }
 
     #[test]
+    fn a_dirty_tree_carries_onto_a_match_and_nowhere_else() {
+        // Cleanliness is what makes a matching revision believable about the FILES,
+        // so it is recorded on the match…
+        assert_eq!(
+            classify_revision(Some(REV_A), Some(REV_A), WorktreeState::Dirty),
+            RevisionStatus::Matches { revision: REV_A.to_owned(), worktree: WorktreeState::Dirty }
+        );
+        assert_eq!(
+            classify_revision(Some(REV_A), Some(REV_A), WorktreeState::Unknown),
+            RevisionStatus::Matches { revision: REV_A.to_owned(), worktree: WorktreeState::Unknown }
+        );
+        // …and nowhere else: an already-inconclusive verdict is inconclusive
+        // whatever the tree looks like, so the other states are unaffected by it.
+        for tree in [WorktreeState::Clean, WorktreeState::Dirty, WorktreeState::Unknown] {
+            assert_eq!(
+                classify_revision(Some(REV_A), Some(REV_B), tree),
+                RevisionStatus::Differs { recorded: REV_A.to_owned(), measured: REV_B.to_owned() }
+            );
+            assert_eq!(
+                classify_revision(None, Some(REV_B), tree),
+                RevisionStatus::Unrecorded { measured: Some(REV_B.to_owned()) }
+            );
+            assert_eq!(
+                classify_revision(Some(REV_A), None, tree),
+                RevisionStatus::Unreadable { recorded: REV_A.to_owned() }
+            );
+        }
+    }
+
+    #[test]
+    fn a_dirty_or_unverified_tree_withholds_the_regression_verdict() {
+        // The point of the hedge: only a CLEAN match may say "genuine regression".
+        // A dirty one must not tell the operator to stop looking at the corpus.
+        let dirty = revision_tripwire_line(&classify_revision(
+            Some(REV_A),
+            Some(REV_A),
+            WorktreeState::Dirty,
+        ));
+        assert!(dirty.contains("DIRTY"), "{dirty}");
+        assert!(dirty.contains("NOT exactly"), "{dirty}");
+        assert!(dirty.contains("may still be corpus-side"), "{dirty}");
+        assert!(!dirty.contains("GENUINE REGRESSION"), "{dirty}");
+
+        let unknown = revision_tripwire_line(&classify_revision(
+            Some(REV_A),
+            Some(REV_A),
+            WorktreeState::Unknown,
+        ));
+        // Unknown says so rather than implying clean.
+        assert!(unknown.contains("could not be determined"), "{unknown}");
+        assert!(!unknown.contains("GENUINE REGRESSION"), "{unknown}");
+        assert!(!unknown.contains("CLEAN"), "{unknown}");
+
+        // The summary line makes the same three distinctions on every run.
+        let s_clean =
+            revision_summary_line(&classify_revision(Some(REV_A), Some(REV_A), WorktreeState::Clean));
+        assert!(s_clean.contains("working tree clean"), "{s_clean}");
+        let s_dirty =
+            revision_summary_line(&classify_revision(Some(REV_A), Some(REV_A), WorktreeState::Dirty));
+        assert!(s_dirty.contains("DIRTY"), "{s_dirty}");
+        let s_unknown = revision_summary_line(&classify_revision(
+            Some(REV_A),
+            Some(REV_A),
+            WorktreeState::Unknown,
+        ));
+        assert!(s_unknown.contains("could not be determined"), "{s_unknown}");
+    }
+
+    #[test]
     fn the_summary_line_reports_the_measured_revision_in_every_case() {
         assert!(
-            revision_summary_line(&classify_revision(Some(REV_A), Some(REV_A))).contains(REV_A)
+            revision_summary_line(&classify(Some(REV_A), Some(REV_A))).contains(REV_A)
         );
-        let drifted = revision_summary_line(&classify_revision(Some(REV_A), Some(REV_B)));
+        let drifted = revision_summary_line(&classify(Some(REV_A), Some(REV_B)));
         assert!(drifted.contains(REV_B) && drifted.contains(REV_A), "{drifted}");
-        let unpinned = revision_summary_line(&classify_revision(None, Some(REV_B)));
+        let unpinned = revision_summary_line(&classify(None, Some(REV_B)));
         assert!(unpinned.contains("UNPINNED"), "{unpinned}");
         assert!(unpinned.contains(&format!("revision = \"{REV_B}\"")), "{unpinned}");
         // Degraded reads say so plainly rather than pretending to a comparison.
-        assert!(revision_summary_line(&classify_revision(None, None)).contains("unknown"));
+        assert!(revision_summary_line(&classify(None, None)).contains("unknown"));
         assert!(
-            revision_summary_line(&classify_revision(Some(REV_A), None)).contains("unknown")
+            revision_summary_line(&classify(Some(REV_A), None)).contains("unknown")
         );
     }
 }

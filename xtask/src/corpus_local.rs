@@ -144,6 +144,39 @@ pub fn checkout_revision(path: &Path) -> Option<String> {
     (!rev.is_empty() && rev.chars().all(|c| c.is_ascii_hexdigit())).then_some(rev)
 }
 
+/// Whether a local project's working tree carries anything on top of the revision
+/// [`checkout_revision`] reports: `Some(true)` dirty, `Some(false)` clean, `None`
+/// unknown.
+///
+/// A recorded revision matching the measured one does NOT establish that the files
+/// just measured are that revision — and on a private corpus, which is somebody's
+/// working checkout, a dirty tree is the normal state rather than an edge case.
+/// Without this, the one message whose job is to say "stop looking at the corpus,
+/// this is a regression" would be issued against a tree that is not exactly the
+/// recorded commit.
+///
+/// Asked as `git -C <path> status --porcelain`, and **any** non-empty output means
+/// dirty. Untracked content counts exactly as much as a modification: the gate
+/// walks the FILESYSTEM, not the index, so an untracked `.php` file is measured
+/// like any other. No attempt is made to be clever about which porcelain status
+/// codes matter.
+///
+/// Degrades exactly as [`checkout_revision`] does — spawn failure, missing `git`,
+/// non-zero exit all yield `None` ("unknown"), never a panic and never a changed
+/// verdict.
+pub fn checkout_is_dirty(path: &Path) -> Option<bool> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(!out.stdout.iter().all(u8::is_ascii_whitespace))
+}
+
 /// Collect every `.php` file under `root`, skipping `.git` and any path matched
 /// by an `exclude` glob. Directory subtrees whose whole contents are excluded
 /// (patterns of the form `<prefix>/**` or `**`) are pruned without descent.
@@ -363,6 +396,15 @@ mod tests {
         // never a failed run. A path that does not exist is the cheapest instance.
         let path = std::env::temp_dir().join("steins-xtask-test-no-such-checkout");
         assert!(checkout_revision(&path).is_none());
+    }
+
+    #[test]
+    fn dirtiness_of_a_non_git_path_is_unknown_not_assumed_clean() {
+        // Same degradation contract as `checkout_revision`, and the direction
+        // matters: an unreadable tree must not read as `Some(false)`, which would
+        // let the gate assert a regression on a tree it never inspected.
+        let path = std::env::temp_dir().join("steins-xtask-test-no-such-checkout");
+        assert_eq!(checkout_is_dirty(&path), None);
     }
 
     #[test]
