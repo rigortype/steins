@@ -499,7 +499,22 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //     be: identifying which finding is new needs the previous corpus
     //     state, which nobody retained. That is exactly the gap the
     //     `revision` record in the paired commit closes going forward.
-    ("pxxxx-monorepo", 499),
+    // 499 → 500 (+1), 2026-08-05, with ADR-0077 (out-parameter fact seeding,
+    // PR #152): the designed unlock, and the first finding this capability
+    // could ever have produced. A capture-group element read after a guard
+    // that proved the match happened now carries `string` where it carried
+    // nothing at all before, and that read is handed straight to a method
+    // whose docblock declares an int parameter — so the annotation and the
+    // value genuinely disagree. TRUE, triaged by reading the site rather
+    // than inferred from the count: the group is a digit class, which is
+    // what makes the annotation look plausible and is exactly no defence —
+    // PCRE hands back a string whatever the group matched. It is the same
+    // stringly-typed-value → `@param int` class the +43/ADR-0056 and
+    // +10/DR2 entries above already recorded, reached by a new path. Every
+    // OSS package is unchanged (the CI fp-gate is green on this same
+    // commit — the soundness signal); proof layer 0; `throw.*` unmoved at
+    // its own baseline, so `THROW_EXPECTED` does not move with this.
+    ("pxxxx-monorepo", 500),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).
