@@ -157,6 +157,21 @@ pairs must agree for a verdict; any disagreement or undecidable pair yields
 PHP 8.5.8** rather than from the manual's table; ordering comparisons decide only
 for concrete numeric operands, and any other pairing is `Maybe`.
 
+**Which call is the builtin.** Every recognizer that matches a callee against a
+builtin vocabulary — the `is_*` family, strict `in_array`, the `*_exists`
+family, `array_key_exists`/`key_exists`/`array_is_list`, `array_all`/`array_any`,
+and the out-parameter seed below — asks one question first, in one place: does
+this reference denote the *global* function of that name? The answers follow
+PHP's own resolution and are measured against the interpreter. `\is_string($x)`
+does, whatever the file's namespace and whatever same-named function the
+namespace declares. A bare `is_string($x)` does, through PHP's function fallback,
+unless the project defines a function that wins or a `use function` alias binds
+the spelling elsewhere. `Foo\is_string($x)` does not. `namespace\is_string($x)`
+inside a namespace does not either — it reaches that namespace only, with no
+global fallback, so an undefined one is a fatal error rather than the builtin —
+though in the root namespace the same spelling *is* the global one. Anything that
+does not denote the builtin narrows nothing, silently.
+
 `instanceof` additionally decides on the **value side, before any class
 reasoning**: an operand whose value-domain fact proves it holds a non-object
 value (a `null` or scalar `Singleton`/`OneOf`, any `Refined`/`General` — all
@@ -303,8 +318,8 @@ The seed refuses, silently and with no finding of its own, whenever a premise is
 missing: a pattern that is not a proven `Singleton` string, a pattern the group
 reader declines, a flags argument that is not a proven `0` (`PREG_OFFSET_CAPTURE`
 and `PREG_UNMATCHED_AS_NULL` both change the entry shape and neither is
-modelled), a named or spread argument, a namespaced or userland-shadowed callee,
-a poisoned scope, and an out-parameter argument that is anything but a plain
+modelled), a named or spread argument, a callee that does not denote the global
+`preg_match` (the rule under [Guards](#guards)), a poisoned scope, and an out-parameter argument that is anything but a plain
 local variable — `$this->m` and `$row['m']` are refused, because the write may
 be visible to callers this scope cannot see.
 

@@ -10285,21 +10285,72 @@ fn eval_cond(
 // leans on the conservative guard-respect leg (the per-symbol vouch) for silence.
 // ---------------------------------------------------------------------------
 
-/// The recognized existence predicate a guard call names, or `None` when the call
-/// is not one of them / is a namespaced or userland-shadowed twin (a `Foo\class_exists`
-/// or a same-named user function is a DIFFERENT function, never the global builtin).
-fn existence_predicate(cx: &Cx, call: &CallExpr) -> Option<&'static str> {
+/// Whether a function reference **denotes the global function it spells** — the
+/// one question every builtin recognizer in this file asks before matching a name
+/// against its vocabulary. It lives here, once, so the next recognizer someone
+/// adds is correct by construction rather than by copying (issue #153).
+///
+/// The load-bearing distinction is that `\foo` denotes the global function while
+/// `Ns\foo` does not, and the rule is emphatically **not** "reject a backslash":
+/// [`NameRef::raw`] already has a leading `\` stripped and a `namespace\` prefix
+/// dropped, so a purely textual test silently reads the wrong thing on two
+/// spellings. Every leg below was measured against `php` 8.5.9:
+///
+/// * `\is_string($x)` — the global builtin whatever the file's namespace, even
+///   where an `App\is_string` is declared alongside it. `\Foo\is_string` keeps a
+///   separator and is a different function.
+/// * `is_string($x)` — PHP's function fallback reaches the global name from any
+///   namespace, so the spelling denotes it (the shadowing leg below is what
+///   removes the cases where a project function wins).
+/// * `Foo\is_string($x)` — relative to the current namespace: never global.
+/// * `namespace\is_string($x)` inside `namespace App;` — resolves to
+///   `App\is_string` **only**, with no global fallback: PHP fatals with "Call to
+///   undefined function App\is_string()". In the root namespace the enclosing
+///   namespace *is* global, so there the same spelling does denote the builtin.
+/// * `use function Other\thing as is_string;` — the call goes to `Other\thing`
+///   and never falls back, so the spelling is not the builtin; a plain
+///   `use function is_string;` names the global one and still is.
+///
+/// The two rejected legs mirror [`name_reaches_global_var_dump`], which asks the
+/// same question of one hard-coded name and reached the same answers.
+///
+/// The **shadowing** leg is a separate guarantee, unchanged and deliberately
+/// kept: a project-defined function of the name is a different function whatever
+/// the spelling would otherwise denote.
+fn denotes_global_function(cx: &Cx, r: &NameRef) -> bool {
+    let spells_global = match r.kind {
+        RefKind::FullyQualified => !r.raw.contains('\\'),
+        RefKind::Qualified => false,
+        RefKind::Relative => {
+            !r.raw.contains('\\') && cx.tree().ctx_at(r.offset).namespace.is_empty()
+        }
+        RefKind::Unqualified => {
+            match cx.tree().ctx_at(r.offset).fn_imports.get(&r.raw.to_ascii_lowercase()) {
+                Some(target) => target.eq_ignore_ascii_case(&r.raw),
+                None => true,
+            }
+        }
+    };
+    spells_global && !matches!(cx.resolve_function(r), FnResolution::User(_))
+}
+
+/// The simple name a call's callee spells, when the reference denotes the
+/// **global** function of that name ([`denotes_global_function`]) — the single
+/// entry point every builtin recognizer below opens with. `None` for a dynamic
+/// callee, a namespaced or namespace-relative twin, an aliased import, or a
+/// userland shadow.
+fn global_function_callee<'a>(cx: &Cx, call: &'a CallExpr) -> Option<&'a str> {
     let callee = call.callee.as_deref()?;
     let r = call.callee_ref.as_ref()?;
-    // A qualified name (`Foo\method_exists`) is a different function; the raw has its
-    // leading `\` stripped, so any remaining backslash means a namespace prefix.
-    if r.raw.contains('\\') {
-        return None;
-    }
-    // A userland function of the same (unqualified) name shadows the builtin.
-    if matches!(cx.resolve_function(r), FnResolution::User(_)) {
-        return None;
-    }
+    denotes_global_function(cx, r).then_some(callee)
+}
+
+/// The recognized existence predicate a guard call names, or `None` when the call
+/// is not one of them / does not denote the global builtin (a `Foo\class_exists`
+/// or a same-named user function is a DIFFERENT function — see
+/// [`global_function_callee`], which owns that whole rule).
+fn existence_predicate(cx: &Cx, call: &CallExpr) -> Option<&'static str> {
+    let callee = global_function_callee(cx, call)?;
     const PREDS: &[&str] = &[
         "method_exists",
         "function_exists",
@@ -11786,17 +11837,13 @@ fn pred_base(pred: TypePred) -> Option<Base> {
     }
 }
 
-/// The recognized type predicate a guard call names, or `None` for a namespaced or
-/// userland-shadowed twin — the SAME discipline [`existence_predicate`] and
-/// [`array_guard_predicate`] apply (a `Foo\is_string` or a same-named user function
-/// is a different function, never the global builtin). Every member of the family
-/// takes exactly one by-value argument.
+/// The recognized type predicate a guard call names, or `None` for a call that
+/// does not denote the global builtin — the SAME [`global_function_callee`] every
+/// other recognizer opens with (a `Foo\is_string` or a same-named user function is
+/// a different function). Every member of the family takes exactly one by-value
+/// argument.
 fn type_predicate(cx: &Cx, call: &CallExpr) -> Option<TypePred> {
-    let callee = call.callee.as_deref()?;
-    let r = call.callee_ref.as_ref()?;
-    if r.raw.contains('\\') || matches!(cx.resolve_function(r), FnResolution::User(_)) {
-        return None;
-    }
+    let callee = global_function_callee(cx, call)?;
     if !call.positional_only || call.args.len() != 1 {
         return None;
     }
@@ -11843,11 +11890,7 @@ fn in_array_literals(
     call: &CallExpr,
     php_minor: Option<(u16, u16)>,
 ) -> Option<(String, Vec<Val>)> {
-    let callee = call.callee.as_deref()?;
-    let r = call.callee_ref.as_ref()?;
-    if r.raw.contains('\\') || matches!(cx.resolve_function(r), FnResolution::User(_)) {
-        return None;
-    }
+    let callee = global_function_callee(cx, call)?;
     if !call.positional_only || !callee.eq_ignore_ascii_case("in_array") {
         return None;
     }
@@ -12461,16 +12504,13 @@ fn out_param_seed(
     seeds
 }
 
-/// The builtin an out-parameter seed may consult, under the same discipline
-/// [`array_guard_predicate`] applies: a namespaced spelling or a user function of
-/// the same name is a **different function**, and a call whose positional mapping
-/// a named or spread argument defeated cannot say which argument is which.
+/// The builtin an out-parameter seed may consult: the name must denote the
+/// **global** function ([`global_function_callee`] — a namespaced spelling or a
+/// user function of the same name is a *different function*), and a call whose
+/// positional mapping a named or spread argument defeated cannot say which
+/// argument is which.
 fn out_param_seed_callee<'a>(cx: &Cx, call: &'a CallExpr) -> Option<&'a str> {
-    let callee = call.callee.as_deref()?;
-    let r = call.callee_ref.as_ref()?;
-    if r.raw.contains('\\') || matches!(cx.resolve_function(r), FnResolution::User(_)) {
-        return None;
-    }
+    let callee = global_function_callee(cx, call)?;
     call.positional_only.then_some(callee)
 }
 
@@ -16412,15 +16452,11 @@ fn guard_key(arg: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<VKey> {
     offset_key_of(&val_of(arg, php_minor)?)
 }
 
-/// The recognized array-predicate a guard call names, or `None` for a namespaced
-/// or userland-shadowed twin (the same discipline [`existence_predicate`] applies:
-/// a `Foo\array_key_exists` or a same-named user function is a different function).
+/// The recognized array-predicate a guard call names, or `None` for a call that
+/// does not denote the global builtin ([`global_function_callee`]: a
+/// `Foo\array_key_exists` or a same-named user function is a different function).
 fn array_guard_predicate(cx: &Cx, call: &CallExpr) -> Option<&'static str> {
-    let callee = call.callee.as_deref()?;
-    let r = call.callee_ref.as_ref()?;
-    if r.raw.contains('\\') || matches!(cx.resolve_function(r), FnResolution::User(_)) {
-        return None;
-    }
+    let callee = global_function_callee(cx, call)?;
     if !call.positional_only {
         return None;
     }
@@ -16429,16 +16465,12 @@ fn array_guard_predicate(cx: &Cx, call: &CallExpr) -> Option<&'static str> {
         .find(|p| callee.eq_ignore_ascii_case(p))
 }
 
-/// The recognized `array_all`/`array_any` name a guard call names (A8), under the
-/// same namespace/userland-shadow discipline as [`array_guard_predicate`] — kept
-/// as a separate lookup because the two calls have a different arity (`$array,
+/// The recognized `array_all`/`array_any` name a guard call names (A8), through
+/// the same [`global_function_callee`] as [`array_guard_predicate`] — kept as a
+/// separate lookup because the two calls have a different arity (`$array,
 /// $callback`) and a different firing rule than the presence/list-flag guards.
 fn array_all_any_predicate(cx: &Cx, call: &CallExpr) -> Option<&'static str> {
-    let callee = call.callee.as_deref()?;
-    let r = call.callee_ref.as_ref()?;
-    if r.raw.contains('\\') || matches!(cx.resolve_function(r), FnResolution::User(_)) {
-        return None;
-    }
+    let callee = global_function_callee(cx, call)?;
     if !call.positional_only {
         return None;
     }
