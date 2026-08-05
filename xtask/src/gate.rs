@@ -423,7 +423,22 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // the setter's contract genuinely under-declares what its one caller
     // (the inline cast says so explicitly) always passes. Every OSS
     // package unchanged; proof layer 0; the gate is GREEN again at 498.
-    ("pxxxx-monorepo", 498),
+    // 498 → 499 (+1), 2026-08-05: CORPUS STATE, not an engine change, and
+    // attributed as such two ways rather than by triaging the finding.
+    // (a) Every public package's count is EXACT in the same run — a checker
+    //     change that manufactured a phpdoc finding would light up
+    //     well-typed OSS too, and none moved. (b) Running the gate at the
+    //     very commit where 498 was seeded GREEN, against today's local
+    //     checkout, reproduces 499 exactly — so the movement is on the
+    //     corpus side of the measurement by construction, with Steins held
+    //     fixed. The local checkout was on a feature branch when 498 was
+    //     seeded and has since advanced to its own master plus two pulls:
+    //     813 files changed, 350 of them PHP.
+    //     NOT triaged finding-by-finding, and this entry does not claim to
+    //     be: identifying which finding is new needs the previous corpus
+    //     state, which nobody retained. That is exactly the gap the
+    //     `revision` record in the paired commit closes going forward.
+    ("pxxxx-monorepo", 499),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).
@@ -512,7 +527,18 @@ const THROW_EXPECTED: &[(&str, usize)] = &[
     // proof-layer 0 alongside — a corpus change, not a behavior change. The
     // gate trips on INCREASE only, so this entry existed as a permanent
     // "below expected" nudge; this reseed retires it.
-    ("pxxxx-monorepo", 44343),
+    // 44343 → 44374 (+31), 2026-08-05: the same corpus-state movement the
+    // PHPDOC_EXPECTED entry for this project records, in the same run and
+    // established the same two ways — every public package's throw.* count
+    // is EXACT, and the gate run at the commit where 44343 was seeded GREEN
+    // reproduces 44374 against today's checkout with the engine held fixed.
+    // A +31 across a corpus delta of 813 files (350 PHP) is the standing
+    // homogeneous checked-exception debt arriving with new application
+    // code, the same class every reseed of this entry has recorded. NOT
+    // triaged finding-by-finding — at this volume the only honest evidence
+    // is the attribution above, and a finding-level diff would need the
+    // previous corpus state, which was not retained.
+    ("pxxxx-monorepo", 44374),
 ];
 
 /// The expected `throw.*` count for a package/local-project name (0 if untabled).
