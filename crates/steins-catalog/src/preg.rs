@@ -1025,17 +1025,30 @@ fn is_escape_argument_byte(b: u8) -> bool {
 /// Whether a character class admits **only** ASCII digits, reading its body —
 /// everything between the `[` and its terminator.
 ///
-/// Only three members are modelled: a digit, a range whose both ends are
-/// digits, and `\d` where the `u` modifier has not widened it. Everything else
-/// answers `false`, which is the only claim a caller may not act on. A negated
-/// class answers `false` outright — measured, `preg_match('/([^a])/', '0', $m)`
-/// captures a digit, and any other complement can too.
+/// Only four members are modelled: a digit, a range whose both ends are digits,
+/// and `\d` or `[:digit:]` where the `u` modifier has not widened them.
+/// Everything else answers `false`, which is the only claim a caller may not act
+/// on. A negated class answers `false` outright — measured,
+/// `preg_match('/([^a])/', '0', $m)` captures a digit, and any other complement
+/// can too.
 fn class_is_digits_only(body: &[u8], ucp_digits: bool) -> bool {
+    /// The one POSIX class whose members are all digits — measured ASCII-only
+    /// without `u` (`'/([[:digit:]]+)/'` refuses Arabic-Indic digits) and
+    /// Unicode-wide with it, exactly like `\d`.
+    const POSIX_DIGIT: &[u8] = b"[:digit:]";
+
     if body.first() == Some(&b'^') {
         return false;
     }
     let mut i = 0;
     while i < body.len() {
+        if body[i] == b'[' {
+            if body[i..].starts_with(POSIX_DIGIT) && !ucp_digits {
+                i += POSIX_DIGIT.len();
+                continue;
+            }
+            return false;
+        }
         if body[i] == b'\\' {
             if body.get(i + 1) == Some(&b'd') && !ucp_digits {
                 i += 2;
@@ -1856,6 +1869,10 @@ mod tests {
         assert_eq!(digits("/(0|12)/"), [true]);
         assert_eq!(digits(r"/(\d+(?=x))/"), [true]);
         assert_eq!(digits("/([0-46-9])/"), [true]);
+        // Measured: `preg_match('/([[:digit:]]+)/', '١٢٣', $m)` fails without
+        // the `u` modifier, so the POSIX class is ASCII there.
+        assert_eq!(digits("/([[:digit:]])/"), [true]);
+        assert_eq!(digits("/([[:digit:]0-9])/"), [true]);
     }
 
     #[test]
@@ -1866,6 +1883,9 @@ mod tests {
         // explicit `[0-9]` is unaffected.
         assert_eq!(digits(r"/(\d+)/u"), [false]);
         assert_eq!(digits(r"/([\d])/u"), [false]);
+        // Measured the same way: `preg_match('/([[:digit:]]+)/u', '١٢٣', $m)`
+        // succeeds, so the POSIX class loses the claim under `u` too.
+        assert_eq!(digits("/([[:digit:]])/u"), [false]);
         assert_eq!(digits("/([0-9]+)/u"), [true]);
         assert_eq!(digits("/(42)/u"), [true]);
     }
@@ -1881,7 +1901,10 @@ mod tests {
         assert_eq!(digits("/([^0-9])/"), [false]);
         assert_eq!(digits("/(.)/"), [false]);
         assert_eq!(digits("/([0-9a])/"), [false]);
-        assert_eq!(digits("/([[:digit:]])/"), [false]);
+        // Measured: both spellings of a negated POSIX class reach `'a'`.
+        assert_eq!(digits("/([[:^digit:]])/"), [false]);
+        assert_eq!(digits("/([^[:digit:]])/"), [false]);
+        assert_eq!(digits("/([[:alpha:]])/"), [false]);
         assert_eq!(digits(r"/(\d|x)/"), [false]);
         assert_eq!(digits(r"/(\dx)/"), [false]);
         assert_eq!(digits(r"/(\x{30})/"), [false]);
@@ -1894,6 +1917,8 @@ mod tests {
         // numeric-string, 1: numeric-string, 2: non-empty-string}`.
         assert_eq!(floors(r"/\w-(?P<num>\d+)-(\w)/"), [1, 1]);
         assert_eq!(digits(r"/\w-(?P<num>\d+)-(\w)/"), [true, false]);
-        assert_eq!(whole(r"/\w-(?P<num>\d+)-(\w)/").min_chars, 4);
+        // Measured: `preg_match('/\w-(?P<num>\d+)-(\w)/', 'a-12-b', $m)`
+        // matches, and no subject shorter than five characters can.
+        assert_eq!(whole(r"/\w-(?P<num>\d+)-(\w)/").min_chars, 5);
     }
 }
