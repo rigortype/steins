@@ -77,14 +77,51 @@ at exactly that revision, so the gate is reproducible. Current entries include
 `composer/composer`, `sebastianbergmann/phpunit`, `guzzle/guzzle`, and others
 chosen for style diversity rather than size.
 
-`corpus.local.toml` injects **live working trees** that are deliberately not
-pinned and not committed: a private legacy monorepo, and — registered
+`corpus.local.toml` injects **live working trees** that this repo deliberately
+neither checks out nor commits: a private legacy monorepo, and — registered
 2026-07-24 at the v0.1.0 run — `phpstan/phpstan-src` (curated, pathological,
 modern PHP; `tests/` and `e2e/` excluded as deliberately-broken fixtures, so
 `src/` is the clean FP-hunting surface). Its first run: 0 proof-layer, 0
 `phpdoc.*`, 20 `throw.undeclared` — all triaged TRUE and seeded into
 `THROW_EXPECTED`. Total scale at the last recorded run: ~99,490 files (the
 unpinned monorepo drifted +210 during the day and its tripwires were reseeded).
+
+That asymmetry has a cost the public half does not pay. A raised count on a
+pinned package can only be the analyzer, because the corpus is fixed by the
+lock file; a raised count on a live tree is ambiguous between a regression and
+corpus drift, and settling it after the fact means archaeology in a repository
+this one cannot see. So a `[[project]]` entry may carry an optional `revision`
+— the checkout state its seeded baselines were measured at. It does not *pin*
+anything (nothing here checks out a private tree); it records, so the gate can
+compare. On every run the gate reads what the tree is actually on (`git -C
+<path> rev-parse HEAD`, degrading to "unknown" on any failure) and prints it;
+when a tripwire trips it says which of three situations obtains — the revision
+matches, so the increase is a genuine regression; the revision differs, so the
+change may be drift and wants a re-measure before a reseed; or nothing was
+recorded, so the question cannot be settled automatically and here is the value
+to record. The field lives in the gitignored file and the sha is printed only
+to the operator's terminal: a private repository's commit id never enters this
+one. Absent is legal, and an entry without it behaves exactly as before.
+
+A matching revision is not by itself a statement about the *files*, and these
+trees are somebody's working checkout, where dirty is the normal state rather
+than an edge case. So the gate also asks `git -C <path> status --porcelain`
+(same degradation: unknown, never assumed clean) and only a **clean** match
+issues the confident "this is a genuine regression, stop looking at the corpus"
+verdict. A dirty match says the recorded commit agrees while uncommitted or
+untracked content sits on top, so the measured files are not exactly that
+revision; an undeterminable one says so rather than implying clean. Untracked
+content counts as dirty without exception — the gate walks the filesystem, not
+the index, so an untracked `.php` file is measured like any other.
+
+What this cannot do is keep the two halves in sync. The counts live in tracked
+Rust; the revision lives in an untracked file no check in this repository can
+read. A reseed that updates the count and forgets the revision leaves a record
+that is not merely stale but actively wrong — it will assert the confident
+verdict against a baseline seeded somewhere else. That is why the revision
+prints on every run including green ones: putting both halves in front of the
+operator at every reseed opportunity is the only available mitigation, and it
+is a discipline rather than a guarantee.
 
 Held-out projects used for adoption drills are never used for tuning; that
 separation is what makes an adoption-drill number mean anything. See
