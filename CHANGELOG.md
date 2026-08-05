@@ -50,6 +50,11 @@ skill seals them into a version section at release time, reconstructing from
 - **`array_slice` widening is sharper in two cases: slicing a proven list from offset `0` with `preserve_keys: true` still yields a list, and a slice whose length is a proven `0` is exactly the empty array.**
   - Unknown offsets, lengths, or flags and subjects not proven to be lists keep the previous conservative answer; a `null` length still means "to the end". The added precision can make downstream findings appear or disappear.
 
+### Fixed
+
+- **A generator function or method with a `@return \Generator` docblock no longer reports `phpdoc.return-mismatch` against its own `return` statements.**
+  - A generator's declared return type names the `Generator` object the *call* produces; an in-body `return 42` is what `Generator::getReturn()` later hands back, and comparing the two is meaningless. The native `type.return-mismatch` leg has skipped generator bodies for some time and the closure `@return` leg skipped them from the day it landed, but functions and methods did not — and because the phpdoc check runs exactly where the native one stayed silent, `/** @return \Generator */ function g() { yield 1; return 42; }` reported a mismatch against a perfectly truthful annotation. Generator scopes are now exempt from `@return` checking on every owner. This can only remove findings.
+
 ## [0.1.3] - 2026-08-02
 
 Two investments pay off this release. Effects grow real teeth — PDO calls, project-interface envelopes, and Composer-plugin declarations all now contribute to the `effect.*` family, and `steins effect-diff` gives CI a channel of its own for tracking them independently of the diagnostic baseline. And exact values travel much further: project functions, methods, and closures now propagate their proven return value into dumps, nested calls, and argument positions rather than only direct assignments, and a matching growth in the builtin-fold allowlist and its constant-union handling lets more of that precision actually reach a finding.

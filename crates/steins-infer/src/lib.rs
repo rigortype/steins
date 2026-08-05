@@ -6069,6 +6069,16 @@ impl<'a> Cx<'a> {
     /// function, method, or closure (same file this `Cx` points at), or `None`
     /// when there is no docblock `@return` (or the scope is top-level).
     fn scope_return_phpdoc(&self, scope: &Scope) -> Option<(PType, String)> {
+        // Scope-wide, mirroring [`Cx::scope_return`]'s native guard (issue #142):
+        // a generator's declared return type names the `Generator` object the
+        // *call* yields, not the values of in-body `return` (those are
+        // `Generator::getReturn()`). Checking body returns against
+        // `@return Generator` is a false positive (issue #128 review) — and the
+        // phpdoc leg fires exactly where the native one stayed silent, so
+        // guarding only the native side left the FP alive on every owner arm.
+        if scope.is_generator {
+            return None;
+        }
         match &scope.owner {
             ScopeOwner::TopLevel => None,
             ScopeOwner::Function(name) => {
@@ -6090,15 +6100,11 @@ impl<'a> Cx<'a> {
             }
             // Issue #128: closures carry their adopted docblock on the scope
             // itself (`Scope::docblock`, two-position adoption in steins-syntax)
-            // — same `parse_envelopes` grammar as free functions. The generator
-            // skip mirrors `scope_return`'s: `@return Generator` names the call
-            // result, not in-body `return` values. No enclosing-class
-            // `@template` shadowing here (known limitation — a closure inside a
-            // templated class could misread a template name as a class name).
+            // — same `parse_envelopes` grammar as free functions. No
+            // enclosing-class `@template` shadowing here (known limitation — a
+            // closure inside a templated class could misread a template name as
+            // a class name).
             ScopeOwner::Closure { .. } => {
-                if scope.is_generator {
-                    return None;
-                }
                 let ret = parse_envelopes(scope.docblock.as_deref())?.ret?;
                 Some((ret, "closure".to_owned()))
             }
