@@ -137,8 +137,8 @@ fn non_empty_keyword(base: &str, non_empty: bool) -> String {
 /// model's own rule, which is not the generic-array rule.
 ///
 /// A sealed shape declares its whole key set, so the braces already carry
-/// everything the `list` / `non-empty-` modifiers would add — with one
-/// exception, which is exactly the exception the reference model carves out:
+/// everything the `list` / `non-empty-` modifiers would add — with two
+/// exceptions, which are exactly the ones the reference model carves out:
 ///
 /// * **`non-empty-` is implied by any required key.** `array{a: int}` cannot be
 ///   the empty array; writing `non-empty-array{a: int}` says it twice. A sealed
@@ -368,7 +368,8 @@ pub enum ShapeTail {
 /// order-witnessed, §2 again — the one place order is sound to print).
 ///
 /// **A sealed shape spells the way the reference model does** (issue #159):
-/// the keyword comes from [`sealed_keyword`], and the fields are positional
+/// the keyword comes from `sealed_keyword` (private, just above), and the
+/// fields are positional
 /// (`array{T, U}` — bare values, no key labels) exactly when the printed keys
 /// are `0..n-1` in order and every one of them is required. That is an
 /// all-or-nothing decision over the whole field list, not a per-field one: one
