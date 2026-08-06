@@ -70,13 +70,13 @@ fn a_proven_pattern_seeds_the_success_shape_on_the_truthy_branch() {
     // refined from the sub-pattern that fills it (#156).
     assert_eq!(
         shape(r"'/(\d+)-(\w+)/'"),
-        "array{non-falsy-string, numeric-string, non-empty-string} (asserted)"
+        "list{non-falsy-string, numeric-string, non-empty-string} (asserted)"
     );
 }
 
 #[test]
 fn a_pattern_with_no_groups_writes_the_whole_match_alone() {
-    assert_eq!(shape("'/abc/'"), "array{non-falsy-string} (asserted)");
+    assert_eq!(shape("'/abc/'"), "list{non-falsy-string} (asserted)");
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn a_trailing_absent_group_is_an_optional_key() {
     // trailing unmatched group rather than writing `''` for it.
     assert_eq!(
         shape("'/(a)(b)?/'"),
-        "array{0: non-empty-string, 1: non-empty-string, 2?: non-empty-string} (asserted)"
+        "list{0: non-empty-string, 1: non-empty-string, 2?: non-empty-string} (asserted)"
     );
 }
 
@@ -96,7 +96,7 @@ fn an_interior_unmatched_group_stays_a_required_key() {
     // — and its `''` is why it stays a bare `string` while its neighbours sharpen.
     assert_eq!(
         shape("'/(a)(b)?(c)/'"),
-        "array{non-falsy-string, non-empty-string, string, non-empty-string} (asserted)"
+        "list{non-falsy-string, non-empty-string, string, non-empty-string} (asserted)"
     );
 }
 
@@ -147,7 +147,7 @@ fn a_middle_optional_group_admits_the_empty_string_and_a_trailing_one_does_not()
     // reachable path.
     assert_eq!(
         shape("'/(a)(b)*(c)(d)*/'"),
-        "array{0: non-falsy-string, 1: non-empty-string, 2: string, 3: non-empty-string, \
+        "list{0: non-falsy-string, 1: non-empty-string, 2: string, 3: non-empty-string, \
          4?: non-empty-string} (asserted)"
     );
 }
@@ -159,9 +159,10 @@ fn a_trailing_absent_group_with_a_group_after_it_still_admits_the_empty_string()
     // 'c']` — group 2 is an optional KEY and can still hold `''`, because group
     // 3 may participate where it does not. Only the last group is exempt.
     //
-    // The one seeded row that keeps the `list` head (issue #159): with TWO
-    // optional keys the key set alone admits the gapped `[0, 1, 3]`, so the
-    // word is the only thing ruling that out and dropping it would widen.
+    // This is the row issue #159 special-cased to keep its `list` head, and the
+    // row that shows the special case was redundant: the seed asserts a
+    // Yes-list, so issue #163's rule reaches the same head from the fact, and
+    // every sibling above now reads the same way.
     assert_eq!(
         shape("'/(a)(b)?(c)?/'"),
         "list{0: non-empty-string, 1: non-empty-string, 2?: string, \
@@ -175,17 +176,17 @@ fn a_two_character_floor_is_what_earns_non_falsy() {
     // both. A floor of one excludes only `''` — measured,
     // `preg_match('/([\w-])/', '0', $m)` captures the falsy `'0'`, which is why
     // PHPStan calls that group `non-empty-string` and not more.
-    assert_eq!(shape("'/ab/'"), "array{non-falsy-string} (asserted)");
-    assert_eq!(shape("'/a/'"), "array{non-empty-string} (asserted)");
+    assert_eq!(shape("'/ab/'"), "list{non-falsy-string} (asserted)");
+    assert_eq!(shape("'/a/'"), "list{non-empty-string} (asserted)");
     assert_eq!(
         shape(r"'/([\w-])/'"),
-        "array{non-empty-string, non-empty-string} (asserted)"
+        "list{non-empty-string, non-empty-string} (asserted)"
     );
     // Measured: `£` is one character and two bytes, so counting characters is
     // what keeps this from claiming non-falsy for a one-character capture.
     assert_eq!(
         shape("'/(£|€)/u'"),
-        "array{non-empty-string, non-empty-string} (asserted)"
+        "list{non-empty-string, non-empty-string} (asserted)"
     );
 }
 
@@ -193,24 +194,24 @@ fn a_two_character_floor_is_what_earns_non_falsy() {
 fn a_sub_pattern_that_can_only_produce_digits_is_numeric() {
     assert_eq!(
         shape(r"'/x([0-9]+)/'"),
-        "array{non-falsy-string, numeric-string} (asserted)"
+        "list{non-falsy-string, numeric-string} (asserted)"
     );
     // Measured, and it overturns the obvious reading: PHP's `u` modifier turns
     // on PCRE2's Unicode properties, so `preg_match('/(\d+)/u', '١٢٣', $m)`
     // succeeds while `is_numeric('١٢٣')` is `false`. The claim comes off.
     assert_eq!(
         shape(r"'/x(\d+)/u'"),
-        "array{non-falsy-string, non-empty-string} (asserted)"
+        "list{non-falsy-string, non-empty-string} (asserted)"
     );
     // An explicit ASCII range is unaffected by the modifier.
     assert_eq!(
         shape("'/x([0-9]+)/u'"),
-        "array{non-falsy-string, numeric-string} (asserted)"
+        "list{non-falsy-string, numeric-string} (asserted)"
     );
     // Measured: `preg_match('/([\d.]+)/', '...', $m)` captures `'...'`.
     assert_eq!(
         shape(r"'/x([\d.]+)/'"),
-        "array{non-falsy-string, non-empty-string} (asserted)"
+        "list{non-falsy-string, non-empty-string} (asserted)"
     );
 }
 
@@ -219,12 +220,12 @@ fn a_sub_pattern_that_can_match_nothing_earns_nothing() {
     // Every rule's decline is the same answer, and it is today's behavior.
     assert_eq!(
         shape("'/x(a*)/'"),
-        "array{non-empty-string, string} (asserted)"
+        "list{non-empty-string, string} (asserted)"
     );
     // `\K` moves where the overall match starts, so the expression's own length
     // says nothing about entry 0 — measured, `preg_match('/a\K0/', 'a0', $m)`
     // gives the falsy `'0'` for a two-character expression.
-    assert_eq!(shape(r"'/a\K(b)/'"), "array{string, non-empty-string} (asserted)");
+    assert_eq!(shape(r"'/a\K(b)/'"), "list{string, non-empty-string} (asserted)");
 }
 
 // ---- Where the fact holds, and where it must not ---------------------------
@@ -252,7 +253,7 @@ fn the_early_return_idiom_carries_the_fact_past_the_guard() {
     // everything after the guard runs on a proven-truthy call.
     let src = "<?php\nfunction f(string $s): void {\n\
                if (!preg_match('/(a)/', $s, $m)) { return; }\n\\PHPStan\\dumpType($m);\n}\n";
-    assert_eq!(one_dump(src), "array{non-empty-string, non-empty-string} (asserted)");
+    assert_eq!(one_dump(src), "list{non-empty-string, non-empty-string} (asserted)");
 }
 
 #[test]
@@ -266,7 +267,7 @@ fn a_negated_guards_own_branch_carries_nothing() {
 fn an_and_chain_seeds_on_the_branch_where_both_held() {
     let src = "<?php\nfunction f(string $s, bool $b): void {\n\
                if ($b && preg_match('/(a)/', $s, $m)) { \\PHPStan\\dumpType($m); }\n}\n";
-    assert_eq!(one_dump(src), "array{non-empty-string, non-empty-string} (asserted)");
+    assert_eq!(one_dump(src), "list{non-empty-string, non-empty-string} (asserted)");
 }
 
 #[test]
@@ -324,7 +325,7 @@ fn a_proven_zero_flags_argument_is_modelled() {
     // written keys.
     let src = "<?php\nfunction f(string $s): void {\n\
                if (preg_match('/(a)/', $s, $m, 0, 1)) { \\PHPStan\\dumpType($m); }\n}\n";
-    assert_eq!(one_dump(src), "array{non-empty-string, non-empty-string} (asserted)");
+    assert_eq!(one_dump(src), "list{non-empty-string, non-empty-string} (asserted)");
 }
 
 #[test]
@@ -382,7 +383,7 @@ fn a_userland_shadow_is_a_different_function() {
                if (preg_match('/(a)/', $s, $m)) { \\PHPStan\\dumpType($m); }\n}\n";
     let d = dumps(src);
     assert!(
-        d.iter().all(|t| !t.contains("array{")),
+        d.iter().all(|t| !t.contains("list{")),
         "a userland twin must not seed the builtin's shape: {d:?}"
     );
 }
@@ -394,7 +395,7 @@ fn a_fully_qualified_spelling_seeds_the_same_shape() {
     // it seeds exactly what the unqualified spelling does (issue #153).
     let src = "<?php\nnamespace App;\nfunction f(string $s): void {\n\
                if (\\preg_match('/(a)/', $s, $m)) { \\PHPStan\\dumpType($m); }\n}\n";
-    assert_eq!(one_dump(src), "array{non-empty-string, non-empty-string} (asserted)");
+    assert_eq!(one_dump(src), "list{non-empty-string, non-empty-string} (asserted)");
 }
 
 #[test]
@@ -405,7 +406,7 @@ fn a_fully_qualified_spelling_reaches_past_a_same_namespace_homonym() {
     let src = "<?php\nnamespace App;\nfunction preg_match($p, $s, &$m): int { return 1; }\n\
                function f(string $s): void {\n\
                if (\\preg_match('/(a)/', $s, $m)) { \\PHPStan\\dumpType($m); }\n}\n";
-    assert_eq!(one_dump(src), "array{non-empty-string, non-empty-string} (asserted)");
+    assert_eq!(one_dump(src), "list{non-empty-string, non-empty-string} (asserted)");
 }
 
 #[test]
@@ -416,7 +417,7 @@ fn a_namespaced_twin_is_a_different_function() {
                if (\\App\\preg_match('/(a)/', $s, $m)) { \\PHPStan\\dumpType($m); }\n}\n";
     let d = dumps(src);
     assert!(
-        d.iter().all(|t| !t.contains("array{")),
+        d.iter().all(|t| !t.contains("list{")),
         "a namespaced twin must not seed the builtin's shape: {d:?}"
     );
 }
@@ -431,7 +432,7 @@ fn a_namespace_relative_spelling_is_a_different_function() {
                if (namespace\\preg_match('/(a)/', $s, $m)) { \\PHPStan\\dumpType($m); }\n}\n";
     let d = dumps(src);
     assert!(
-        d.iter().all(|t| !t.contains("array{")),
+        d.iter().all(|t| !t.contains("list{")),
         "a namespace-relative twin must not seed the builtin's shape: {d:?}"
     );
 }
@@ -445,7 +446,7 @@ fn an_aliased_import_is_a_different_function() {
                if (preg_match('/(a)/', $s, $m)) { \\PHPStan\\dumpType($m); }\n}\n";
     let d = dumps(src);
     assert!(
-        d.iter().all(|t| !t.contains("array{")),
+        d.iter().all(|t| !t.contains("list{")),
         "an aliased import must not seed the builtin's shape: {d:?}"
     );
 }

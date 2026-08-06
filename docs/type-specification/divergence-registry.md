@@ -32,13 +32,23 @@ an order-agnostic key *set*, `list{}` a positional key *sequence*, and
 `list<T>` requires keys exactly `0..n-1`. Steins implements the RFC's
 resolution, which current PHPStan does not — since ADR-0062 this includes
 the denotational `isList` trinary (computed over the admitted value set,
-optional-key combinatorics included). The *rendering* is deliberately not a
-divergence (issue #159): a sealed shape spells exactly as PHPStan spells it —
-positional `array{…}` for keys `0..n-1` all required, every key printed
-otherwise, `non-empty-` dropped where a required key implies it, and the `list`
-word kept only where two or more optional keys make the key set admit a gap.
-Unsealed shapes keep the native spelling, where both modifiers still carry
-information the braces do not.
+optional-key combinatorics included) and, since issue #163, the *rendering*:
+a sealed shape's head keyword is decided by its own `isList` — `list{…}` for a
+proven key sequence, `array{…}` for anything else — so re-parsing what we print
+yields a shape with the same `isList`. **The spelling follows the model, not the
+oracle**, and the cost is named rather than hidden: PHPStan stable's
+`ConstantArrayType` conflates the two (its `array{A, B}` retains key order, so
+it means what we spell `list{A, B}`), and stating the sequence fact moves those
+nsrt rows off the headline `match` count onto `subsumed` — "narrower than the
+assertion", which is the correct verdict when we state a sequence and the oracle
+states a set. Issue #159's attempt to adopt the conflated spelling bought that
+headline at the price of a rendering that did not round-trip; it is reverted in
+the head keyword only. Key *layout* still spells as PHPStan spells it —
+positional fields for keys `0..n-1` all required, every key printed otherwise,
+`non-empty-` dropped where a required key implies it, and the empty shape
+`array{}` (vacuously a list, but the braces already say so and both spellings
+re-parse alike). Unsealed shapes keep the native spelling, where the modifiers
+still carry information the braces do not.
 
 **3. No benevolent unions.** `BenevolentUnionType` compensates for worst-case
 false positives that a proof layer does not emit. The grammar is accepted
