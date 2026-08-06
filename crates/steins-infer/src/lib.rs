@@ -21844,6 +21844,10 @@ fn shape_key_union(shape: &ShapeFact) -> Option<Fact> {
     }
 }
 
+/// One shape field as the domain stores it — `steins_domain`'s own `Field`
+/// alias, which is not exported.
+type ShapeField = (VKey, steins_domain::Presence, Option<Box<Fact>>);
+
 /// **The SEQUENCE lane's structural gate** (issue #165): the fields of a
 /// *sealed* shape whose own `is_list` fact is `Yes`, verified to spell the
 /// sequence the flag claims — keys exactly `0..n-1` (the field order is the
@@ -21862,9 +21866,7 @@ fn shape_key_union(shape: &ShapeFact) -> Option<Fact> {
 /// does not cohere with it (the intersection admits nothing), and a projection
 /// built from such fields would reason from positions no admitted value has.
 /// Those shapes decline to the set widening instead.
-fn sealed_list_sequence(
-    shape: &ShapeFact,
-) -> Option<&[(VKey, steins_domain::Presence, Option<Box<Fact>>)]> {
+fn sealed_list_sequence(shape: &ShapeFact) -> Option<&[ShapeField]> {
     use steins_domain::{Presence, Tail};
     if shape.is_list != Certainty::Yes || !matches!(shape.tail, Tail::Sealed) {
         return None;
