@@ -278,12 +278,14 @@ fn dump_type_spells_a_keyed_concrete_array() {
 }
 
 #[test]
-fn dump_type_spells_a_sequential_concrete_array_positionally() {
-    // Issue #159 closes the D4-native divergence ADR-0062 §6 recorded here: a
-    // sealed shape with keys 0..n-1 all required is spelled the way the
-    // reference model spells it, positionally under an `array{…}` head.
+fn dump_type_spells_a_sequential_concrete_array_as_a_positional_list() {
+    // The D4-native divergence (ADR-0062 §6), restored by issue #163: a concrete
+    // array is order-witnessed, so this value IS a key sequence and spells
+    // `list{…}` — positionally, which is issue #159's rule and stays. PHPStan
+    // stable writes `array{…}` here because its `ConstantArrayType` conflates the
+    // two; we spell the fact.
     let src = "<?php\n$l = ['x', 'y'];\n\\PHPStan\\dumpType($l);\n";
-    assert_eq!(one_type(src), "dumped type: array{'x', 'y'}");
+    assert_eq!(one_type(src), "dumped type: list{'x', 'y'}");
 }
 
 // ---- Transparency (ADR-0053 §10 §3) ----------------------------------------

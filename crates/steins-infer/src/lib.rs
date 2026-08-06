@@ -16269,9 +16269,10 @@ fn strict_leg_message(kind: &str, base: &str, shape: &ShapeFact, canon: &VKey) -
     let (our_key, php_key) = render_offset_key(canon);
     let declared = render_shape_fact(shape, false);
     // `{base} is {declared}` mirrors `offset.missing`'s own evidence clause. The
-    // spelling is the shape fact's, which may differ from the source text (issue
-    // #159 canonicalizes every sealed shape's head) — the same rendering the dump
-    // surface shows, so the two never disagree about what Steins believes.
+    // spelling is the shape fact's, which may differ from the source text (a
+    // sealed shape's head is canonicalized, and issue #163 takes it from the
+    // shape's own `is_list`) — the same rendering the dump surface shows, so the
+    // two never disagree about what Steins believes.
     match kind {
         "undeclared" => format!(
             "offset {our_key} is outside the declared shape — {base} is {declared}, which cannot carry the key; reads null with \"Undefined array key {php_key}\""
@@ -22666,10 +22667,11 @@ mod dump_render_tests {
     #[test]
     fn array_bearing_fact_spells_through_the_d4_array_vocabulary() {
         // ADR-0062 §6 flip: the array-vocabulary slice teaches the speller, so an
-        // array-bearing fact is no longer an honest-unknown refusal. A concrete
-        // value is a sealed shape, and issue #159 spells every sealed shape the
-        // way the reference model does — so the empty array is `array{}`, no
-        // longer the D4-native `list{}` ADR-0062 §6 recorded as a divergence.
+        // array-bearing fact is no longer an honest-unknown refusal. The empty
+        // array is denotationally a Yes-list (array_is_list([]) is vacuously
+        // true, §3), and it is the one shape issue #163 does not print the word
+        // for: `array{}` already says "no keys at all" and re-parses to the very
+        // same `Yes`.
         let fact = Fact::Singleton(Val::Array(vec![]));
         assert_eq!(render_dump_fact(&fact), "array{}");
     }
@@ -22677,12 +22679,13 @@ mod dump_render_tests {
     #[test]
     fn concrete_array_values_spell_value_precisely() {
         // Point 3 of the S1 mission fixtures: a keyed non-list value spells its
-        // keys; a sequential value spells positionally (issue #159 — both under
-        // the one `array{…}` head, as the reference model writes them).
+        // keys under `array{…}`; a sequential value IS a key sequence (a concrete
+        // array is order-witnessed) and spells positionally under `list{…}`,
+        // stating the fact rather than the oracle's spelling of it (issue #163).
         let map = Fact::Singleton(Val::Array(vec![(VKey::Str("a".to_owned()), s("v"))]));
         assert_eq!(render_dump_fact(&map), "array{a: 'v'}");
         let list = Fact::Singleton(Val::Array(vec![(VKey::Int(0), s("x")), (VKey::Int(1), s("y"))]));
-        assert_eq!(render_dump_fact(&list), "array{'x', 'y'}");
+        assert_eq!(render_dump_fact(&list), "list{'x', 'y'}");
     }
 
     #[test]

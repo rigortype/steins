@@ -133,11 +133,18 @@ is honestly lost. Positional projections over shape-only truth take the
 sound widening, never declaration order. The #14939 model (`array{…}` a
 key *set*, `list{…}` a key *sequence*, `isList` computed over the admitted
 value set) runs natively, ahead of PHPStan stable — including `list{…}`
-acceptance rejecting permutations. The *rendering* is deliberately not a
-divergence: a sealed shape is spelled exactly as PHPStan spells it
-(positional `array{…}` for contiguous required keys, every key printed
-otherwise, `non-empty-` dropped where a required key implies it, and the
-`list` word kept only where two or more optional keys make it load-bearing).
+acceptance rejecting permutations and the *rendering*, which follows the
+model rather than the oracle: a sealed shape's head keyword is its own
+`isList` — `list{…}` for a proven key sequence, `array{…}` otherwise — so
+what we print round-trips to the fact we printed. PHPStan stable's
+`ConstantArrayType` conflates the two (its `array{A, B}` retains key order
+and so means our `list{A, B}`), and the cost of not conflating them is
+named: the nsrt headline `match` count falls, with those rows landing on
+`subsumed` — "narrower than the assertion", the correct verdict when we
+state a sequence and the oracle states a set. Key *layout* is still spelled
+the way PHPStan spells it (positional fields for contiguous required keys,
+every key printed otherwise, `non-empty-` dropped where a required key
+implies it, the empty shape `array{}`), and unsealed shapes are untouched.
 Declined
 with reasons: an abstract `nextAutoIndexes` (concrete-only, version-aware),
 and `ARRAY_COUNT_LIMIT`-style union degradation (replaced by the computed

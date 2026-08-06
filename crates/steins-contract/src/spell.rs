@@ -133,42 +133,47 @@ fn non_empty_keyword(base: &str, non_empty: bool) -> String {
     if non_empty { format!("non-empty-{base}") } else { base.to_owned() }
 }
 
-/// The base keyword a **sealed** shape spells (issue #159) — the reference
-/// model's own rule, which is not the generic-array rule.
+/// The base keyword a **sealed** shape spells — decided by the shape's own
+/// `is_list` fact (issue #163), not by its key structure.
 ///
-/// A sealed shape declares its whole key set, so the braces already carry
-/// everything the `list` / `non-empty-` modifiers would add — with two
-/// exceptions, which are exactly the ones the reference model carves out:
+/// The #14939 model the domain already implements draws the line denotationally:
+/// `array{…}` is an order-agnostic key *set*, `list{…}` a key *sequence*, and
+/// `steins_domain`'s own `compute_is_list` answers `Yes` only when no
+/// permutation is realizable. So the head keyword states which of the two the
+/// shape actually is:
 ///
+/// * **`is_list == Yes` → `list`**, because the sequence guarantee is a fact we
+///   hold and `array{…}` would drop it on the way out. A sealed `array{0: A, 1:
+///   B}` admits `[1 => B, 0 => A]` and so carries `Maybe`; a `list{A, B}`
+///   carries `Yes`. Spelling both `array{A, B}` (as issue #159 did) makes one
+///   name for two types and does not round-trip — re-parsing the rendering must
+///   yield a shape with the same `is_list`, and that is what pins this rule.
+/// * **anything else → `array`.** `Maybe` and `No` are both "not proven a
+///   sequence", which is exactly what the key-set spelling says.
+///
+/// Two things the keys still decide, unchanged from issue #159:
+///
+/// * **the empty shape stays `array{}`.** It is vacuously a `Yes`-list, but its
+///   braces already say "no keys at all", so neither word adds anything and both
+///   re-parse to `Yes` — the reference model's own spelling wins the tie.
 /// * **`non-empty-` is implied by any required key.** `array{a: int}` cannot be
 ///   the empty array; writing `non-empty-array{a: int}` says it twice. A sealed
 ///   shape with *no* required key (`non-empty-array{a?: int}`, which denotes
 ///   exactly `['a' => …]`) keeps the modifier — there the non-emptiness is a
 ///   real extra claim the keys do not make.
-/// * **`list` is implied unless two or more keys are optional.** With at most
-///   one optional key the admitted key sets are `0..n-1` and `0..n-2`, both
-///   lists; with two (`array{0: A, 1?: B, 2?: C}`) the keys also admit the
-///   gapped `[0 => …, 2 => …]`, so the `list` word is the only thing ruling it
-///   out and must survive. This mirrors PHPStan's `shouldBeDescribedAsAList`
-///   exactly, including its single-optional-key position test, so the two
-///   spellings cannot drift on the case where the word carries information.
+///
+/// Issue #159's "two or more optional keys" carve-out is gone, and it is gone
+/// because it was redundant rather than wrong: it kept `list` exactly where the
+/// key set alone admits a gap, which is a proxy for "the keys do not prove
+/// list-ness" — the thing `is_list` says directly. Every shape it selected has
+/// `is_list == Yes` (nothing else reaches a `list` head at all), so the fact now
+/// selects a superset and no row it protected changed.
 ///
 /// Unsealed shapes are deliberately NOT routed here: an unsealed tail can admit
-/// keys the braces never mention, so both modifiers stay genuinely informative
-/// and keep the spelling they have always had.
+/// keys the braces never mention, so `non-empty-` stays genuinely informative and
+/// keeps the spelling it has always had.
 fn sealed_keyword(is_list: bool, non_empty: bool, fields: &[(Key, bool, String)]) -> String {
-    let optional: Vec<usize> = fields
-        .iter()
-        .enumerate()
-        .filter_map(|(i, (_, required, _))| (!*required).then_some(i))
-        .collect();
-    let describe_as_list = is_list
-        && match optional.as_slice() {
-            [] => false,
-            [only] => *only != fields.len() - 1,
-            _ => true,
-        };
-    let base = if describe_as_list { "list" } else { "array" };
+    let base = if is_list && !fields.is_empty() { "list" } else { "array" };
     let implied_non_empty = fields.iter().any(|(_, required, _)| *required);
     non_empty_keyword(base, non_empty && !implied_non_empty)
 }
@@ -367,8 +372,9 @@ pub enum ShapeTail {
 /// concrete value's caller passes true insertion order (the value lane is
 /// order-witnessed, §2 again — the one place order is sound to print).
 ///
-/// **A sealed shape spells the way the reference model does** (issue #159):
-/// the keyword comes from `sealed_keyword` (private, just above), and the
+/// **A sealed shape spells its head from its own `is_list` fact** (issue #163):
+/// the keyword comes from `sealed_keyword` (private, just above) — `list{…}`
+/// when the fact says the shape is a key sequence, `array{…}` otherwise — and the
 /// fields are positional
 /// (`array{T, U}` — bare values, no key labels) exactly when the printed keys
 /// are `0..n-1` in order and every one of them is required. That is an
@@ -709,6 +715,60 @@ mod array_vocabulary_tests {
         spell_arms(std::slice::from_ref(&ty)).unwrap_or_else(|| panic!("{src} did not spell"))
     }
 
+    /// The denotational `is_list` of a lowered array-shape arm — the same ONE
+    /// computation `spell_contract_shape` spells from.
+    fn is_list_of(src: &str) -> Certainty {
+        match lower_str(src).unwrap_or_else(|| panic!("{src} failed to lower")) {
+            ContractTy::Shape { list, fields, sealed, non_empty, unsealed } => {
+                shape_is_list(list, &fields, sealed, non_empty, &unsealed)
+            }
+            _ => panic!("{src} did not lower to a shape"),
+        }
+    }
+
+    #[test]
+    fn re_parsing_a_spelled_shape_yields_the_same_is_list() {
+        // Issue #163's self-check, and the property issue #159 broke: the head
+        // keyword is a claim about the shape's `is_list`, so reading our own
+        // output back has to reproduce it. Any rule that spells from key
+        // structure instead of from the fact fails this on the `list{A, B}` row —
+        // it renders `array{A, B}`, which re-parses to `Maybe`.
+        for src in [
+            // Sealed, every list-ness verdict the domain can reach.
+            "array{}",
+            "array{int}",
+            "array{0: int}",
+            "array{0?: int}",
+            "non-empty-array{0?: int}",
+            "list{int}",
+            "list{int, string}",
+            "array{0: int, 1: string}",
+            "array{0: int, 2: string}",
+            "list{int, 1?: string, 2?: int}",
+            "array{0: int, 1?: string, 2?: int}",
+            "array{0: int, name?: string}",
+            "array{a: int}",
+            "non-empty-array{a: int}",
+            "non-empty-array{a?: int}",
+            "array{a?: string, b?: string}",
+            "array{a: int, b: string}",
+            "array{'a b': int}",
+            // Unsealed, which issue #159 left alone and #163 keeps alone.
+            "array{a: int, ...}",
+            "non-empty-array{a: int, ...}",
+            "array{a: int, ...<string, int>}",
+            "array{0: int, ...}",
+        ] {
+            let before = is_list_of(src);
+            let spelled = spell_ty(src);
+            assert_eq!(
+                is_list_of(&spelled),
+                before,
+                "{src} spelled {spelled}, whose is_list is not the one it was spelled from"
+            );
+        }
+    }
+
     #[test]
     fn seeded_optional_shape_spells_instead_of_refusing() {
         // The #51 fixture: a seeded array param spells rather than refuses (the
@@ -793,36 +853,43 @@ mod array_vocabulary_tests {
     }
 
     #[test]
-    fn a_declared_list_shape_spells_the_same_positional_array_a_keyed_one_does() {
-        // Issue #159. Both of these are sealed with keys 0 and 1 both required,
-        // so both denote exactly the same set — the `list{…}` DECLARATION's
-        // extra Yes-list promise (A-G1's `given` seed) is about insertion order,
-        // which no admitted value of a fully-required contiguous shape can
-        // violate. The reference model spells both `array{int, string}`, and
-        // rendering them differently made two names for one set.
-        assert_eq!(spell_ty("list{int, string}"), "array{int, string}");
+    fn a_declared_list_shape_keeps_the_list_word_a_keyed_one_never_earns() {
+        // Issue #163, and the whole point of it. These two are NOT the same
+        // type: `array{0: int, 1: string}` is a key SET and admits
+        // `[1 => 'x', 0 => 1]`, so its `is_list` is `Maybe`; the `list{…}`
+        // declaration promises a key SEQUENCE and carries `Yes`. The head
+        // keyword states which one we hold.
+        assert_eq!(spell_ty("list{int, string}"), "list{int, string}");
         assert_eq!(spell_ty("array{0: int, 1: string}"), "array{int, string}");
     }
 
     #[test]
-    fn single_zero_field_spells_positionally_but_an_optional_one_keeps_its_key() {
-        // A single required field at key 0 is the one-element positional form.
-        // Make it optional and the shape is no longer `0..n-1` all-required, so
-        // every field prints its key — and the `list` keyword goes away anyway,
-        // because sealed keys `{0?}` admit only `[]` and `[0 => …]`, both lists.
-        assert_eq!(spell_ty("array{0: int}"), "array{int}");
-        assert_eq!(spell_ty("array{0?: int}"), "array{0?: int}");
+    fn a_single_key_zero_shape_is_a_sequence_however_it_is_declared() {
+        // At most one key — key `0` — can appear, so no permutation is
+        // realizable and `compute_is_list` answers `Yes` without any
+        // declaration: both of these ARE sequences and say so. Making the field
+        // optional also takes the shape out of the `0..n-1` all-required run, so
+        // its key is printed.
+        assert_eq!(spell_ty("array{0: int}"), "list{int}");
+        assert_eq!(spell_ty("array{0?: int}"), "list{0?: int}");
     }
 
     #[test]
-    fn two_optional_keys_keep_the_list_word_because_the_keys_admit_a_gap() {
-        // The one sealed case where `list` still carries information (PHPStan's
-        // own `shouldBeDescribedAsAList` carve-out): keys `{0, 1?, 2?}` admit
-        // `[0 => …, 2 => …]`, which is not a list, so only the keyword rules it
-        // out. Dropping it here would WIDEN the type, not just re-spell it.
+    fn two_optional_keys_keep_the_list_word_from_the_fact_not_a_carve_out() {
+        // Issue #159 special-cased this row (PHPStan's `shouldBeDescribedAsAList`):
+        // keys `{0, 1?, 2?}` admit the gapped `[0 => …, 2 => …]`, so dropping the
+        // word would WIDEN the type. Issue #163 removed the special case and the
+        // row did not move — the declaration's `Yes` is what kept the word, and
+        // "the keys do not prove list-ness" was only ever a proxy for it.
         assert_eq!(
             spell_ty("list{int, 1?: string, 2?: int}"),
             "list{0: int, 1?: string, 2?: int}"
+        );
+        // The same key structure WITHOUT the declaration is only `Maybe`, and
+        // that is the row the carve-out could never have distinguished.
+        assert_eq!(
+            spell_ty("array{0: int, 1?: string, 2?: int}"),
+            "array{0: int, 1?: string, 2?: int}"
         );
     }
 
@@ -867,8 +934,9 @@ mod array_vocabulary_tests {
             ),
             "array{int, ...<string, int>}"
         );
-        // …and the same field list, sealed, takes the new spelling.
-        assert_eq!(spell_shape(true, true, &one, &ShapeTail::Sealed), "array{int}");
+        // …and the same field list, sealed, drops the implied `non-empty-` while
+        // keeping the `list` word the `is_list` argument asserts (issue #163).
+        assert_eq!(spell_shape(true, true, &one, &ShapeTail::Sealed), "list{int}");
         assert_eq!(spell_ty("non-empty-array{a: int, ...}"), "non-empty-array{a: int, ...}");
     }
 
@@ -886,10 +954,10 @@ mod array_vocabulary_tests {
 
     #[test]
     fn empty_array_value_spells_the_empty_shape() {
-        // array_is_list([]) is vacuously true (§3), but a concrete value is a
-        // sealed shape and `array{}` already says "no keys at all" — so the
-        // `list` word adds nothing here, and issue #159 closes what ADR-0062 §6
-        // recorded as a deliberate divergence from the reference model.
+        // array_is_list([]) is vacuously true (§3), so this is a `Yes`-list —
+        // the one place issue #163 does NOT print the word. `array{}` already
+        // says "no keys at all", both spellings re-parse to the same `Yes`, and
+        // the reference model's own spelling wins the tie.
         assert_eq!(spell_val(&av(vec![])), "array{}");
     }
 
@@ -902,15 +970,16 @@ mod array_vocabulary_tests {
     }
 
     #[test]
-    fn sequential_list_value_spells_the_positional_shape() {
-        // Sealed, keys 0..n-1, all required: the positional form, spelled
-        // `array{…}` as the reference model spells it (issue #159).
+    fn sequential_list_value_spells_the_positional_list() {
+        // A concrete array is order-witnessed (ADR-0062 §2), so `array_is_list`
+        // answers exactly and this value IS a sequence — spelled `list{…}` in
+        // the positional form (issue #163).
         assert_eq!(
             spell_val(&av(vec![
                 (Key::Int(0), Val::Str("x".to_owned())),
                 (Key::Int(1), Val::Str("y".to_owned())),
             ])),
-            "array{'x', 'y'}"
+            "list{'x', 'y'}"
         );
     }
 
@@ -921,7 +990,7 @@ mod array_vocabulary_tests {
                 Key::Int(0),
                 av(vec![(Key::Int(0), Val::Int(1)), (Key::Int(1), Val::Int(2))])
             )])),
-            "array{array{1, 2}}"
+            "list{list{1, 2}}"
         );
     }
 

@@ -464,13 +464,13 @@ fn array_slice_of_a_witnessed_array_projects_exactly() {
     // array), which is the exact rung's whole premise.
     assert_eq!(
         dump_body("$a = ['x', 'y', 'z']; \\PHPStan\\dumpType(array_slice($a, 1));"),
-        "dumped type: array{'y', 'z'}"
+        "dumped type: list{'y', 'z'}"
     );
     // Negative offsets and lengths take php-src's own clamping
     // (`array_slice([1,2,3,4,5], 1, -1) === [2,3,4]`).
     assert_eq!(
         dump_body("$a = [1, 2, 3, 4, 5]; \\PHPStan\\dumpType(array_slice($a, 1, -1));"),
-        "dumped type: array{2, 3, 4}"
+        "dumped type: list{2, 3, 4}"
     );
     assert_eq!(
         dump_body("$a = [1, 2, 3]; \\PHPStan\\dumpType(array_slice($a, 10));"),
