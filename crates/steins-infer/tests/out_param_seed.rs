@@ -11,7 +11,8 @@
 //!   unguarded path below must stay exactly as untyped as they were.
 //! * **Every premise is proven or the seed refuses**, silently: the pattern is a
 //!   literal the group reader (#149) fully understands, the flags argument is
-//!   absent or a proven `0`, and the out-parameter is a plain local variable.
+//!   absent or a proven int whose every set bit is modeled (issue #168), and the
+//!   out-parameter is a plain local variable.
 //! * **Emission stays in the contract layer.** The seeded shape is `Asserted`, so
 //!   it may feed the strict offset leg (a read of a key the sealed shape excludes)
 //!   and must never reach the proof layer.
@@ -306,16 +307,96 @@ fn a_pattern_the_group_reader_declines_refuses() {
 }
 
 #[test]
-fn a_flags_argument_refuses() {
-    // `PREG_OFFSET_CAPTURE` makes every entry a `[string, int]` pair and
-    // `PREG_UNMATCHED_AS_NULL` turns the trailing absence into an explicit null
-    // (both measured). Neither is modelled, so both refuse (ADR-0077 §4).
-    for flag in ["PREG_OFFSET_CAPTURE", "PREG_UNMATCHED_AS_NULL", "$flags"] {
+fn an_unproven_flags_argument_refuses() {
+    // Issue #168 rule 6: a present flags argument seeds only when it is a proven
+    // int whose every set bit is modeled. A parameter proves nothing; an unknown
+    // bit (8 is a real PCRE-adjacent value nothing here models) declines whole.
+    for flag in ["$flags", "8", "1024"] {
         refuses(&format!(
             "<?php\nfunction f(string $s, int $flags): void {{\n\
              if (preg_match('/(a)/', $s, $m, {flag})) {{ \\PHPStan\\dumpType($m); }}\n}}\n"
         ));
     }
+    // The order bits are `preg_match_all` vocabulary: measured (PHP 8.5.9),
+    // `preg_match(…, PREG_SET_ORDER)` throws a `ValueError` and writes nothing,
+    // so they stay outside `preg_match`'s allowed mask and decline.
+    for flag in ["PREG_PATTERN_ORDER", "PREG_SET_ORDER", "1", "2"] {
+        refuses(&format!(
+            "<?php\nfunction f(string $s): void {{\n\
+             if (preg_match('/(a)/', $s, $m, {flag})) {{ \\PHPStan\\dumpType($m); }}\n}}\n"
+        ));
+    }
+}
+
+#[test]
+fn the_unmatched_as_null_flag_turns_optionality_into_nullability() {
+    // Issue #168 rule 4, measured: `preg_match('/(a)(b)?/', 'a', $m,
+    // PREG_UNMATCHED_AS_NULL)` gives `['a', 'a', null]` — the trailing group is
+    // PRESENT with value `null`, so the optional key becomes a required nullable
+    // one. The flag resolves by VALUE (512), never by name.
+    let src = "<?php\nfunction f(string $s): void {\n\
+               if (preg_match('/(a)(b)?/', $s, $m, PREG_UNMATCHED_AS_NULL)) { \\PHPStan\\dumpType($m); }\n}\n";
+    let with_const = one_dump(src);
+    assert_eq!(
+        with_const,
+        "list{non-empty-string, non-empty-string, non-empty-string|null} (asserted)"
+    );
+    let src_value = "<?php\nfunction f(string $s): void {\n\
+               if (preg_match('/(a)(b)?/', $s, $m, 512)) { \\PHPStan\\dumpType($m); }\n}\n";
+    assert_eq!(one_dump(src_value), with_const, "the constant IS its value");
+    // An interior group keeps its body refinement: the `''` padding is gone —
+    // measured, `preg_match('/(a)(b)?(c)/', 'ac', $m, PREG_UNMATCHED_AS_NULL)`
+    // gives `['ac', 'a', null, 'c']`, so the entry is its body's floor or null.
+    let interior = "<?php\nfunction f(string $s): void {\n\
+               if (preg_match('/(a)(b)?(c)/', $s, $m, PREG_UNMATCHED_AS_NULL)) { \\PHPStan\\dumpType($m); }\n}\n";
+    assert_eq!(
+        one_dump(interior),
+        "list{non-falsy-string, non-empty-string, non-empty-string|null, non-empty-string} (asserted)"
+    );
+}
+
+#[test]
+fn the_offset_capture_flag_wraps_every_entry_in_a_measured_pair() {
+    // Issue #168 rule 5, probed rather than assumed: a participating group's
+    // offset is a byte position (`>= 0`); an unmatched group's WRITTEN entry is
+    // `['', -1]` (measured on `/(a)(b)?(c)/` matching `'ac'`), so `-1` reaches
+    // exactly the interior can-be-present-empty group. Presence is unchanged: a
+    // trailing unmatched group is still dropped under this flag (measured).
+    let interior = "<?php\nfunction f(string $s): void {\n\
+               if (preg_match('/(a)(b)?(c)/', $s, $m, PREG_OFFSET_CAPTURE)) { \\PHPStan\\dumpType($m); }\n}\n";
+    assert_eq!(
+        one_dump(interior),
+        "list{list{non-falsy-string, int<0, max>}, list{non-empty-string, int<0, max>}, \
+         list{string, int<-1, max>}, list{non-empty-string, int<0, max>}} (asserted)"
+    );
+    let trailing = "<?php\nfunction f(string $s): void {\n\
+               if (preg_match('/(a)(b)?/', $s, $m, PREG_OFFSET_CAPTURE)) { \\PHPStan\\dumpType($m); }\n}\n";
+    assert_eq!(
+        one_dump(trailing),
+        "list{0: list{non-empty-string, int<0, max>}, 1: list{non-empty-string, int<0, max>}, \
+         2?: list{non-empty-string, int<0, max>}} (asserted)"
+    );
+}
+
+#[test]
+fn a_userland_twin_of_a_flag_constant_disables_value_resolution() {
+    // PHP resolves an unqualified constant through the current namespace before
+    // the global fallback, so a project that declares its own `PREG_SET_ORDER`
+    // makes the name ambiguous — the engine value may not be assumed anywhere.
+    refuses(
+        "<?php\nnamespace App;\nconst PREG_UNMATCHED_AS_NULL = 0;\n\
+         function f(string $s): void {\n\
+         if (preg_match('/(a)(b)?/', $s, $m, PREG_UNMATCHED_AS_NULL)) { \\PHPStan\\dumpType($m); }\n}\n",
+    );
+    // The fully-qualified spelling names the engine constant regardless: the
+    // engine defines it first, and a redefine of an existing constant is a no-op.
+    let fq = "<?php\nnamespace App;\nconst PREG_UNMATCHED_AS_NULL = 0;\n\
+              function f(string $s): void {\n\
+              if (preg_match('/(a)(b)?/', $s, $m, \\PREG_UNMATCHED_AS_NULL)) { \\PHPStan\\dumpType($m); }\n}\n";
+    assert_eq!(
+        one_dump(fq),
+        "list{non-empty-string, non-empty-string, non-empty-string|null} (asserted)"
+    );
 }
 
 #[test]
@@ -329,12 +410,20 @@ fn a_proven_zero_flags_argument_is_modelled() {
 }
 
 #[test]
-fn preg_match_all_refuses() {
-    // Its witness is the same truthiness, but `PREG_PATTERN_ORDER` versus
-    // `PREG_SET_ORDER` doubles the written shape and neither is measured here.
+fn preg_match_all_seeds_through_the_same_witness() {
+    // Slice D (issue #168): `preg_match_all` joined the witness table with the
+    // same `ReturnTruthy` discipline. The written shape itself is pinned in
+    // `preg_match_all_seed.rs`; here only the seam: the guard seeds, the
+    // unguarded call does not.
+    let src = "<?php\nfunction f(string $s): void {\n\
+               if (preg_match_all('/(a)/', $s, $m)) { \\PHPStan\\dumpType($m); }\n}\n";
+    assert_eq!(
+        one_dump(src),
+        "list{non-empty-list<non-empty-string>, non-empty-list<non-empty-string>} (asserted)"
+    );
     refuses(
         "<?php\nfunction f(string $s): void {\n\
-         if (preg_match_all('/(a)/', $s, $m)) { \\PHPStan\\dumpType($m); }\n}\n",
+         preg_match_all('/(a)/', $s, $m);\n\\PHPStan\\dumpType($m);\n}\n",
     );
 }
 

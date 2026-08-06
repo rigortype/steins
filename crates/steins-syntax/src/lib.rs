@@ -1008,6 +1008,15 @@ pub enum ArgValue {
     ///
     /// A compound `.=` lowers its rvalue to [`Self::Other`] (see [`StmtKind`]).
     Concat(Box<ArgValue>, Box<ArgValue>),
+    /// A bare **global-constant fetch** (`PREG_SET_ORDER`, `SOME_CONST`) in value
+    /// position (issue #168), carried with its qualification kind. Like
+    /// [`ArgValue::ClassConst`] this is an **unproven** value (never a literal,
+    /// never concrete): PHP resolves an unqualified constant through the current
+    /// namespace before falling back to the global one, so only a consumer that
+    /// applies the engine-constant shadow discipline (issue #29's `PHP_VERSION_ID`
+    /// rules) may read a value out of it. Every other consumer treats it exactly
+    /// like the [`ArgValue::Other`] it lowered to before.
+    GlobalConst(NameRef),
     Other,
 }
 
@@ -1250,6 +1259,7 @@ impl std::hash::Hash for ArgValue {
                 class.hash(state);
                 case.hash(state);
             }
+            ArgValue::GlobalConst(r) => r.hash(state),
             ArgValue::Null | ArgValue::Other => {}
         }
     }
@@ -1319,6 +1329,7 @@ impl ArgValue {
             ArgValue::OffsetRead { base, key } => format!("{}[{}]", base.render(), key.render()),
             ArgValue::ClassConst(class, name) => format!("{}::{name}", class.render()),
             ArgValue::EnumCase(class, case) => format!("{class}::{case}"),
+            ArgValue::GlobalConst(r) => r.raw.clone(),
             ArgValue::Other => "<expr>".to_owned(),
         }
     }
@@ -2383,6 +2394,18 @@ pub struct SourceTree {
     /// constant, so the version-guard fold declines here. Constants are
     /// case-sensitive; the match is exact.
     php_version_id_aliased: bool,
+    /// Whether this file declares a userland twin of one of the modeled `PREG_*`
+    /// flag constants (issue #168) — a `const PREG_SET_ORDER = …;` in any
+    /// namespace, or a `define('…PREG_SET_ORDER', …)` with a literal name. Same
+    /// deliberately name-only, project-conservative reading as
+    /// [`Self::php_version_id_declared`]: one such declaration anywhere disables
+    /// the engine-constant flags resolution for the whole project.
+    preg_flag_const_declared: bool,
+    /// Whether this file `use const`-imports something under the alias of one of
+    /// the modeled `PREG_*` flag constants (issue #168). File-scoped, exact-case,
+    /// mirroring [`Self::php_version_id_aliased`]: an unqualified `PREG_SET_ORDER`
+    /// in such a file names the import, not the engine constant.
+    preg_flag_const_aliased: bool,
     /// Every `foreach` statement in the file, lowered to its transform-relevant
     /// shape (ADR-0076). Read by the loop→`array_map` transform and nothing else;
     /// no finding consults it.
@@ -2514,6 +2537,8 @@ impl SourceTree {
             reflection: lowered.reflection,
             php_version_id_declared: lowered.php_version_id_declared,
             php_version_id_aliased: lowered.php_version_id_aliased,
+            preg_flag_const_declared: lowered.preg_flag_const_declared,
+            preg_flag_const_aliased: lowered.preg_flag_const_aliased,
             foreach_sites,
             hard_class_refs: lowered.hard_class_refs,
             parse_errors,
@@ -2655,6 +2680,21 @@ impl SourceTree {
         self.php_version_id_aliased
     }
 
+    /// Whether this file declares a userland twin of a modeled `PREG_*` flag
+    /// constant (issue #168) — see the field docs for the project-wide consequence.
+    #[must_use]
+    pub fn preg_flag_const_declared(&self) -> bool {
+        self.preg_flag_const_declared
+    }
+
+    /// Whether this file `use const`-imports the alias of a modeled `PREG_*` flag
+    /// constant (issue #168) — file-scoped; an unqualified reference here is the
+    /// import.
+    #[must_use]
+    pub fn preg_flag_const_aliased(&self) -> bool {
+        self.preg_flag_const_aliased
+    }
+
     /// The comment trivia found in the file, in source order (ADR-0023 inline
     /// `@steins-ignore` channel). Whitespace trivia is not included.
     #[must_use]
@@ -2758,6 +2798,10 @@ struct Lowered {
     php_version_id_declared: bool,
     /// Issue #29: see [`SourceTree::php_version_id_aliased`].
     php_version_id_aliased: bool,
+    /// Issue #168: see [`SourceTree::preg_flag_const_declared`].
+    preg_flag_const_declared: bool,
+    /// Issue #168: see [`SourceTree::preg_flag_const_aliased`].
+    preg_flag_const_aliased: bool,
     /// Class references at the four **hard-error positions** (ADR-0049 §5 / S4):
     /// `new X`, `X::m()`, `X::CONST`, `X::$prop`. Explicit named classes only —
     /// `self`/`static`/`parent`, dynamic class exprs, and the `X::class` magic
@@ -2811,6 +2855,21 @@ fn walk(
             {
                 out.php_version_id_declared = true;
             }
+            // `define('…PREG_SET_ORDER', …)` and siblings (issue #168): the same
+            // name-only, deliberately over-broad scan for the modeled preg flag
+            // constants — one hit disables the engine-constant flags resolution
+            // project-wide.
+            if let Expression::Identifier(id) = c.function
+                && bytes_to_string(id.last_segment()).eq_ignore_ascii_case("define")
+                && let Some(first) = c.argument_list.arguments.iter().next()
+                && let Expression::Literal(Literal::String(ls)) = first.value().unparenthesized()
+                && ls.value.is_some_and(|bytes| {
+                    let name = bytes_to_string(bytes);
+                    PREG_FLAG_CONST_NAMES.iter().any(|n| name.ends_with(n))
+                })
+            {
+                out.preg_flag_const_declared = true;
+            }
             out.calls.push(lower_call(c));
         }
         // `const PHP_VERSION_ID = …;` (issue #29): a userland twin of the engine
@@ -2819,6 +2878,15 @@ fn walk(
         Node::Constant(con) => {
             if con.items.iter().any(|i| bytes_to_string(i.name.value) == "PHP_VERSION_ID") {
                 out.php_version_id_declared = true;
+            }
+            // `const PREG_SET_ORDER = …;` and siblings (issue #168): a userland
+            // twin of a modeled preg flag constant, same conservative reading.
+            if con
+                .items
+                .iter()
+                .any(|i| PREG_FLAG_CONST_NAMES.contains(&bytes_to_string(i.name.value).as_str()))
+            {
+                out.preg_flag_const_declared = true;
             }
         }
         // `use const … as PHP_VERSION_ID` / `use const …\PHP_VERSION_ID` (issue
@@ -2829,6 +2897,9 @@ fn walk(
         Node::Use(u) => {
             if use_binds_php_version_id(u) {
                 out.php_version_id_aliased = true;
+            }
+            if use_binds_preg_flag_const(u) {
+                out.preg_flag_const_aliased = true;
             }
         }
         // Reflection-driven invocation through a method name (issue #30,
@@ -5358,6 +5429,12 @@ fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
             base: Box::new(lower_arg_value(aa.array)),
             key: Box::new(lower_arg_value(aa.index)),
         },
+        // A bare global-constant fetch (`PREG_SET_ORDER`, `SOME_CONST`) in value
+        // position (issue #168). `true`/`false`/`null` never reach here — they lex
+        // as literals. Carried with its qualification kind so a consumer can apply
+        // the engine-constant discipline (issue #29's `PHP_VERSION_ID` rules); an
+        // unconsumed fetch stays exactly as unproven as the `Other` it replaced.
+        Expression::ConstantAccess(ca) => ArgValue::GlobalConst(name_ref(&ca.name)),
         _ => ArgValue::Other,
     }
 }
@@ -7496,12 +7573,34 @@ fn add_use(u: &mago_syntax::cst::Use<'_>, ctx: &mut NsCtx) {
 /// through any of its **const** item forms (issue #29). The exact-case binding
 /// name is the explicit `as` alias, else the imported name's last segment.
 fn use_binds_php_version_id(u: &mago_syntax::cst::Use<'_>) -> bool {
+    use_binds_const_named(u, |bound| bound == "PHP_VERSION_ID")
+}
+
+/// The modeled `PREG_*` flag constant names (issue #168) — the four whose values
+/// the out-parameter seed resolves. Kept beside the shadow scans that consult it;
+/// the values live with the consumer (`steins-infer`), not here.
+const PREG_FLAG_CONST_NAMES: &[&str] =
+    &["PREG_PATTERN_ORDER", "PREG_SET_ORDER", "PREG_OFFSET_CAPTURE", "PREG_UNMATCHED_AS_NULL"];
+
+/// `use const … as PREG_SET_ORDER` / `use const …\PREG_SET_ORDER` and siblings
+/// (issue #168) — see [`use_binds_php_version_id`], whose rules this mirrors for
+/// the modeled preg flag constants.
+fn use_binds_preg_flag_const(u: &mago_syntax::cst::Use<'_>) -> bool {
+    use_binds_const_named(u, |bound| PREG_FLAG_CONST_NAMES.contains(&bound))
+}
+
+/// Whether a `use` statement `use const`-imports something whose **bound name**
+/// (the alias if present, else the last segment) satisfies `wanted`. Constant
+/// names are case-sensitive; the match is exact. Const imports are otherwise
+/// unlowered (out of scope), so the flags fed from this are the only thing read
+/// from them.
+fn use_binds_const_named(u: &mago_syntax::cst::Use<'_>, wanted: impl Fn(&str) -> bool) -> bool {
     let item_binds = |item: &mago_syntax::cst::UseItem<'_>| -> bool {
         let bound = match &item.alias {
             Some(a) => bytes_to_string(a.identifier.value),
             None => bytes_to_string(item.name.last_segment()),
         };
-        bound == "PHP_VERSION_ID"
+        wanted(&bound)
     };
     match &u.items {
         UseItems::TypedSequence(seq) if seq.r#type.is_const() => seq.items.iter().any(item_binds),

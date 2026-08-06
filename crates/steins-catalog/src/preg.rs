@@ -75,9 +75,10 @@
 //! # Not in this module
 //!
 //! The trust gate (is the pattern a proven literal?), the out-parameter seed,
-//! and the modifier-dependent entry shape (`PREG_OFFSET_CAPTURE`,
-//! `PREG_UNMATCHED_AS_NULL`) all belong to later slices. This module knows only
-//! about the pattern string.
+//! and the flag-dependent entry shapes (`PREG_OFFSET_CAPTURE`,
+//! `PREG_UNMATCHED_AS_NULL`, `PREG_SET_ORDER` — issue #168) all live with the
+//! seed's consumer in `steins-infer`. This module knows only about the pattern
+//! string.
 //!
 //! Enumerating a sub-pattern's *language* — `(a)` yielding `'a'` rather than a
 //! refined `string` — is a different derivation and is not attempted here.
@@ -176,6 +177,23 @@ pub struct CaptureGroup {
     /// another path. Any group with a group after it can be present-and-empty,
     /// so only the final group is exempt.
     pub can_be_present_empty: bool,
+    /// Whether **some successful match can leave this group unmatched at all** —
+    /// the raw, position-independent bit the two positional projections above are
+    /// computed from (issue #168).
+    ///
+    /// This is the `preg_match_all` PATTERN_ORDER padding predicate: in that mode
+    /// every column has exactly `ret` entries and an unmatched group contributes
+    /// `''` (or `null` under `PREG_UNMATCHED_AS_NULL`) to its column **wherever it
+    /// sits** (measured: `preg_match_all('/(\d)(a)?/', '1a 2 3a', $m)` gives
+    /// `$m[2] === ['a', '', 'a']`). The middle-vs-trailing machinery of the two
+    /// fields above is a `preg_match` phenomenon and must not be consulted for a
+    /// column element — which is why the raw bit is carried rather than
+    /// reconstructed from the projections.
+    ///
+    /// Same bias as its projections: `true` wherever participation cannot be
+    /// proven, because a spurious `''`/`null` union member only weakens the fact
+    /// while a missing one manufactures it.
+    pub can_go_unmatched: bool,
     /// What this group's entry holds when the group participates — its body,
     /// with the group's own quantifier excluded.
     ///
@@ -297,6 +315,7 @@ fn apply_trailing_absence(raw: Vec<RawGroup>) -> Vec<CaptureGroup> {
             name: g.name,
             can_be_trailing_absent: g.can_go_unmatched && !guaranteed_after,
             can_be_present_empty: g.can_go_unmatched && i != last,
+            can_go_unmatched: g.can_go_unmatched,
             body: g.body,
         });
         if !g.can_go_unmatched {
