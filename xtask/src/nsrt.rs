@@ -17,7 +17,7 @@
 //! SEPARATE single-file projects sharing one resident sidecar folder — fast, and
 //! free of cross-file namespace collisions.
 //!
-//! Four-verdict taxonomy (see [`classify`]):
+//! Five-verdict taxonomy (see [`classify`]):
 //!
 //! - `match` — semantically equal after normalization (case, `|` order, nullable
 //!   forms, int-range spelling). Generous only where equivalence is certain.
@@ -27,12 +27,22 @@
 //!   (ADR-0062), the full array vocabulary (`array{…}`, `list{…}`,
 //!   `array<K, V>`, `list<T>`, bare `array`/`list`, and their `non-empty-`
 //!   forms) is **not** on this list — S1 taught the speller to spell it, so it
-//!   now flows into the normal match/subsumed/differ comparison below.
+//!   now flows into the normal match/equal/subsumed/differ comparison below.
+//! - `equal` — proven-equal-but-differently-spelled (issue #172): the acceptance
+//!   relation proves **both** directions (`expected ⊇ got` and `got ⊇ expected`,
+//!   each `Certainty::Yes`) while the normalized strings differ. The proof is the
+//!   relation's, never a string trick — no normalization rule may claim this
+//!   bucket. The canonical inhabitants are the D4-native spelling pairs
+//!   (oracle: `array{X}`, Steins: `list{X}` for the same denotation).
 //! - `subsumed` — Steins is strictly **more precise** than the oracle: what Steins
-//!   renders is a proper subtype of what PHPStan asserts (issue #47).
+//!   renders is a proper subtype of what PHPStan asserts (issue #47). Mutual
+//!   subsumption is claimed by `equal` before `subsumed` is consulted, so this
+//!   bucket stays strict.
 //! - `differ` — Steins renders something semantically different (the gap
 //!   inventory), including `unknown` where PHPStan asserts a concrete type (a
-//!   reach gap).
+//!   reach gap). A pair a human reads as equal that the relation answers
+//!   asymmetrically stays here — that is a relation gap to file, not a
+//!   normalization to add.
 //!
 //! ## `subsumed`: why it is not `differ`, and why it is not `match` either
 //!
@@ -43,8 +53,9 @@
 //! precision would be booked as a regression. `true` is admissible under `bool` —
 //! Steins did not get it wrong, it answered a question the oracle left open.
 //!
-//! **The relation is the checker's own.** [`is_subsumption`] lowers both strings
-//! through `steins_contract::lower_str` and asks `normalize::subsumes` — the single
+//! **The relation is the checker's own.** [`subsumption_directions`] lowers both
+//! strings through `steins_contract::lower_str` and asks `normalize::subsumes` —
+//! in both directions, once per pair — the single
 //! acceptance relation the contract layer already uses for param contravariance /
 //! return covariance, and the same one behind ADR-0056's envelope subset check. A
 //! harness-local notion of "narrower than" would measure something the analyzer
@@ -70,8 +81,12 @@
 //! What fixes issue #47 is that these rows leave `differ`, not that they join
 //! `match`: a slice that converts ten `differ`s into `subsumed`s now reads as
 //! differ falling and subsumed rising, never as a regression. The report prints
-//! `match + subsumed` as an explicit secondary **admissible** figure so that
-//! movement is visible without unverified claims entering the headline.
+//! `match + equal + subsumed` as an explicit secondary **admissible** figure so
+//! that movement is visible without unverified claims entering the headline.
+//! `equal` sits in admissible on stronger footing than `subsumed` — the relation
+//! proves agreement in both directions — but it stays out of the headline for
+//! the same reason: the headline counts string-level reproduction of the oracle,
+//! and an `equal` row reproduces the denotation, not the spelling.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -148,7 +163,7 @@ fn default_nsrt_dir() -> PathBuf {
 // classification
 // ----------------------------------------------------------------------------
 
-/// The four-verdict taxonomy. Observations whose expected slot could not be
+/// The five-verdict taxonomy. Observations whose expected slot could not be
 /// resolved to a plain string (`::class`/concat) never reach [`classify`] — they are
 /// recorded as the `"skipped"` housekeeping bucket directly in [`Record::classify`]
 /// and kept out of the measurement denominator.
@@ -156,6 +171,14 @@ fn default_nsrt_dir() -> PathBuf {
 enum Verdict {
     Match,
     Unsupported,
+    /// Proven-equal-but-differently-spelled (issue #172): the acceptance relation
+    /// answers `Yes` in **both** directions while the normalized strings differ.
+    ///
+    /// The proof is [`is_subsumption`]'s own relation run both ways — never a
+    /// string comparison. The bucket exists so the D4-native spelling class
+    /// (ADR-0062 §6, as amended) is countable and listable instead of buried in
+    /// `differ` among genuine gaps.
+    Equal,
     /// Steins' answer is a proper subtype of the assertion (issue #47; see the
     /// module docs for why this is neither `Match` nor `Differ`).
     ///
@@ -180,8 +203,9 @@ struct Record {
     /// Steins' rendering.
     got: String,
     asserted: bool,
-    /// For `unsupported`: the named vocabulary pattern. For `differ`/`subsumed`:
-    /// the coarse gap-class key. Empty for `match`/`skipped`.
+    /// For `unsupported`: the named vocabulary pattern. For
+    /// `differ`/`subsumed`/`equal`: the coarse gap-class key (for `equal` it names
+    /// the spelling pair). Empty for `match`/`skipped`.
     class: String,
 }
 
@@ -217,6 +241,7 @@ fn verdict_name(v: Verdict) -> &'static str {
     match v {
         Verdict::Match => "match",
         Verdict::Unsupported => "unsupported",
+        Verdict::Equal => "equal",
         Verdict::Subsumed => "subsumed",
         Verdict::Differ => "differ",
     }
@@ -224,14 +249,20 @@ fn verdict_name(v: Verdict) -> &'static str {
 
 /// Classify one (expected, got) pair. Unsupported-vocabulary expected strings are
 /// classified first (Steins does not aim there); otherwise the two are normalized
-/// and compared for certain semantic equivalence, then — only when they are not
-/// equal — asked the one-directional subsumption question (issue #47).
+/// and compared for certain semantic equivalence, then asked the acceptance
+/// relation's question in both directions: both `Yes` is proven equality
+/// (issue #172), the strict covering direction alone is subsumption (issue #47),
+/// anything else is the gap inventory. `equal` claims mutual subsumption before
+/// `subsumed` is consulted, which is what keeps `subsumed` strict.
 fn classify(expected: &str, got: &str) -> (Verdict, String) {
     if let Some(pattern) = unsupported_pattern(expected) {
         return (Verdict::Unsupported, pattern.to_owned());
     }
     if normalize(expected) == normalize(got) {
         return (Verdict::Match, String::new());
+    }
+    if is_proven_equal(expected, got) {
+        return (Verdict::Equal, gap_class(expected, got));
     }
     if is_subsumption(expected, got) {
         return (Verdict::Subsumed, gap_class(expected, got));
@@ -249,35 +280,73 @@ fn classify(expected: &str, got: &str) -> (Verdict, String) {
 /// guard is explicit so a future sentinel cannot quietly become "more precise".
 const STEINS_SENTINELS: &[&str] = &["unknown", "no declared contract"];
 
-/// Whether `got` is strictly narrower than `expected` — Steins answering a question
-/// the oracle left open (issue #47).
+/// Both directions of the acceptance question for one pair, asked once. Named so
+/// the two verdicts built on it ([`Verdict::Equal`], [`Verdict::Subsumed`]) read
+/// off the same evidence instead of re-deriving it.
+#[derive(Debug, Clone, Copy)]
+struct SubsumptionDirections {
+    /// `expected ⊇ got` answered `Certainty::Yes`.
+    covers: bool,
+    /// `got ⊇ expected` answered `Certainty::Yes`.
+    covered: bool,
+}
+
+/// Ask the checker's own acceptance relation in both directions for one
+/// (expected, got) pair (issues #47 and #172).
 ///
 /// Both strings are lowered through the ordinary phpdoc path
 /// (`steins_contract::lower_str`) and judged by `normalize::subsumes`, the single
 /// acceptance relation the contract layer already enforces (param contravariance /
 /// return covariance, and ADR-0056's envelope subset check). No second definition
-/// of narrowing lives in this harness: if the checker would not call `got` an
-/// acceptable inhabitant of `expected`, neither does the instrument.
+/// of narrowing — and no definition of equality other than mutual `Yes` — lives in
+/// this harness: if the checker would not call one side an acceptable inhabitant
+/// of the other, neither does the instrument.
 ///
-/// Strictness is the covering direction answering `Yes` while the reverse does not.
-/// Anything the relation cannot decide (`Maybe`, the honest floor for `Opaque`, for
-/// class hierarchies steins-contract carries no oracle for, and for arrays/shapes)
-/// is **not** a subsumption — it stays in the `differ` inventory where it can be
-/// triaged, which is the FP-safe direction for a metric.
-fn is_subsumption(expected: &str, got: &str) -> bool {
+/// Only `Certainty::Yes` counts in either direction. Anything the relation cannot
+/// decide (`Maybe`, the honest floor for `Opaque`, for class hierarchies
+/// steins-contract carries no oracle for) yields `false` for that direction — the
+/// pair stays in the `differ` inventory where it can be triaged, which is the
+/// FP-safe direction for a metric. The sentinel and int/float-coercion guards
+/// veto the question entirely (both directions `false`): a sentinel is not a type
+/// string, and a coercion-crossing pair is answered by a rule this harness is not
+/// asking about (see [`crosses_int_float`]).
+fn subsumption_directions(expected: &str, got: &str) -> SubsumptionDirections {
+    const NEITHER: SubsumptionDirections = SubsumptionDirections { covers: false, covered: false };
     if STEINS_SENTINELS.contains(&got.trim()) {
-        return false;
+        return NEITHER;
     }
     if crosses_int_float(expected, got) {
-        return false;
+        return NEITHER;
     }
     let (Some(exp_ty), Some(got_ty)) =
         (steins_contract::lower_str(expected), steins_contract::lower_str(got))
     else {
-        return false; // one side does not parse as a type — not a comparison at all
+        return NEITHER; // one side does not parse as a type — not a comparison at all
     };
     use steins_contract::normalize::subsumes;
-    subsumes(&exp_ty, &got_ty).is_yes() && !subsumes(&got_ty, &exp_ty).is_yes()
+    SubsumptionDirections {
+        covers: subsumes(&exp_ty, &got_ty).is_yes(),
+        covered: subsumes(&got_ty, &exp_ty).is_yes(),
+    }
+}
+
+/// Whether the relation proves the pair equal in both directions (issue #172):
+/// `expected ⊇ got` and `got ⊇ expected`, each `Certainty::Yes`. This — and only
+/// this — awards [`Verdict::Equal`]; no string comparison is consulted.
+fn is_proven_equal(expected: &str, got: &str) -> bool {
+    let dirs = subsumption_directions(expected, got);
+    dirs.covers && dirs.covered
+}
+
+/// Whether `got` is strictly narrower than `expected` — Steins answering a question
+/// the oracle left open (issue #47).
+///
+/// Strictness is the covering direction answering `Yes` while the reverse does
+/// not; a mutual `Yes` is proven equality and belongs to [`Verdict::Equal`], never
+/// here (pinned by `mutual_subsumption_is_not_strict`).
+fn is_subsumption(expected: &str, got: &str) -> bool {
+    let dirs = subsumption_directions(expected, got);
+    dirs.covers && !dirs.covered
 }
 
 /// Whether the pair straddles the int/float boundary in the widening direction —
@@ -798,27 +867,30 @@ fn report(records: &[Record], elapsed: f64) {
     let count = |v: &str| records.iter().filter(|r| r.verdict == v).count();
     let (m, u, d, s) = (count("match"), count("unsupported"), count("differ"), count("skipped"));
     let sub = count("subsumed");
+    let eq = count("equal");
     // The measurement denominator excludes skipped (unresolvable expected slots).
-    let measured = m + u + sub + d;
+    let measured = m + u + eq + sub + d;
     let pct = |n: usize| if measured == 0 { 0.0 } else { 100.0 * n as f64 / measured as f64 };
 
     println!("=== nsrt assertType harness — verdict summary ===\n");
     println!("total assertType observations: {total}");
     println!("  skipped (expected unresolvable ::class/concat): {s}");
-    println!("measured (match + unsupported + subsumed + differ): {measured}\n");
+    println!("measured (match + unsupported + equal + subsumed + differ): {measured}\n");
     println!("  {:<13} {:>6}   {:>6}", "verdict", "count", "% meas");
     println!("  {}", "-".repeat(30));
     println!("  {:<13} {:>6}   {:>5.1}%", "match", m, pct(m));
     println!("  {:<13} {:>6}   {:>5.1}%", "unsupported", u, pct(u));
+    println!("  {:<13} {:>6}   {:>5.1}%", "equal", eq, pct(eq));
     println!("  {:<13} {:>6}   {:>5.1}%", "subsumed", sub, pct(sub));
     println!("  {:<13} {:>6}   {:>5.1}%", "differ", d, pct(d));
     println!("  {}", "-".repeat(30));
     println!("  {:<13} {:>6}   ({:.2}s)", "TOTAL meas", measured, elapsed);
-    // The headline stays `match` — oracle-confirmed agreement. `subsumed` rows are
-    // only *unfalsified* by the oracle, so they are reported beside it, never inside
-    // it (issue #47; the argument is in this module's docs).
+    // The headline stays `match` — oracle-confirmed agreement at the string level.
+    // `equal` rows are proven by the relation and `subsumed` rows are only
+    // *unfalsified* by the oracle; both are reported beside the headline, never
+    // inside it (issues #47/#172; the argument is in this module's docs).
     println!("\n  HEADLINE (match, oracle-confirmed):   {m}");
-    println!("  admissible (match + subsumed):        {}\n", m + sub);
+    println!("  admissible (match + equal + subsumed): {}\n", m + eq + sub);
 
     // Unsupported pattern breakdown.
     let mut unsup: BTreeMap<&str, usize> = BTreeMap::new();
@@ -830,6 +902,20 @@ fn report(records: &[Record], elapsed: f64) {
     println!("=== unsupported-vocabulary patterns ({u} total) ===\n");
     for (pat, n) in &unsup_sorted {
         println!("  {:<20} {:>6}", pat, n);
+    }
+
+    // Equal listing — the whole point of the bucket (issue #172) is that the
+    // proven-equal-but-differently-spelled class is countable and listable, so
+    // print it whole: each row is a spelling divergence the relation proves
+    // denotation-equal in both directions.
+    let equals: Vec<&Record> = records.iter().filter(|r| r.verdict == "equal").collect();
+    println!("\n=== equal: proven equal, differently spelled ({eq} total) ===\n");
+    for r in &equals {
+        let mark = if r.asserted { " (asserted)" } else { "" };
+        println!(
+            "  {}:{}\n      phpstan: {}\n      steins:  {}{}",
+            r.file, r.line, r.expected, r.got, mark
+        );
     }
 
     // Subsumption listing — small enough to print whole, and worth reading row by
@@ -989,7 +1075,9 @@ mod tests {
 
     /// An equal-but-differently-spelled pair is mutual subsumption, not a *strict*
     /// subtype — it must not enter the subsumed bucket through the back door. (The
-    /// normalizer catches the spellings it is certain about before this test runs.)
+    /// normalizer catches the spellings it is certain about before this test runs;
+    /// since issue #172, mutual subsumption is claimed by `equal` before `subsumed`
+    /// is consulted, so this exclusion is load-bearing for the ladder order.)
     #[test]
     fn mutual_subsumption_is_not_strict() {
         assert!(!is_subsumption("int", "int"));
@@ -1095,11 +1183,35 @@ mod tests {
     }
 
     /// A genuine D4-native divergence — Steins spells an empty/sequential array
-    /// value as `list{…}` where PHPStan stable asserts `array{…}` — must land in
-    /// `differ` and stay visible, never be normalized away (ADR-0062 §6).
+    /// value as `list{…}` where PHPStan stable asserts `array{…}` — lands in the
+    /// dedicated `equal` verdict and stays visible, never normalized away
+    /// (ADR-0062 §6 as amended 2026-08-07, issue #172). The award is the
+    /// relation's own proof of both directions, not a spelling rule: `normalize`
+    /// still distinguishes the two strings, so `match` never claims the pair.
     #[test]
-    fn d4_native_list_vs_array_divergence_is_differ() {
-        assert_eq!(classify("array{}", "list{}").0, Verdict::Differ);
+    fn d4_native_list_vs_array_divergence_is_equal() {
+        assert_eq!(classify("array{}", "list{}").0, Verdict::Equal);
+        assert_ne!(normalize("array{}"), normalize("list{}"));
+        // The proof, spelled out: mutual Yes through the checker's own relation.
+        let dirs = subsumption_directions("array{}", "list{}");
+        assert!(dirs.covers && dirs.covered);
+    }
+
+    /// The boundary of `equal` (issue #172): the verdict is *proven* equality
+    /// through the relation run both ways, never a string trick. A pair the
+    /// relation answers asymmetrically — however equal a human reads it — stays
+    /// `differ` (a relation gap to file), and sentinels never qualify.
+    #[test]
+    fn equal_requires_mutual_proof_never_spelling() {
+        // Strict narrowing is still `subsumed`, not `equal`.
+        assert_eq!(classify("bool", "true").0, Verdict::Subsumed);
+        // Widening is still `differ` — `equal` opens no reverse-direction door.
+        assert_eq!(classify("true", "bool").0, Verdict::Differ);
+        // Sentinels are not type strings; no direction is ever proven.
+        assert_eq!(classify("array{}", "unknown").0, Verdict::Differ);
+        // String-level identical pairs stay `match`; `equal` needs the spellings
+        // to actually differ.
+        assert_eq!(classify("array{}", "array{}").0, Verdict::Match);
     }
 
     /// A pattern the speller still cannot spell (a non-array generic class, here
