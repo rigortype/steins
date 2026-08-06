@@ -531,11 +531,19 @@ fn vs_array_any(a: &ContractTy) -> Certainty {
 /// `No`: a positional (`list{…}`) `a` rejects `['a' => 0]`, and a required field
 /// is missing from the `b`-member whose only key is a fresh one — `array` holds
 /// an array for every one of the infinitely many keys `a` does not require.
+/// A keys-prove-list `a` (issue #169) falls to the same member witness as the
+/// positional one, whatever keyword spelled it: `['a' => 0]` is a string-keyed
+/// array that no sealed key-`0`-only shape admits.
 /// `Yes`: a keyed shape whose fields are all optional and all `⊇ mixed`, over an
 /// extra-entry surface that accepts every remaining key and value.
 fn shape_vs_array_any(v: &ShapeView<'_>) -> Certainty {
     use Certainty::{Maybe, No, Yes};
-    if v.list || v.fields.iter().any(|f| !f.optional) {
+    // The third disjunct is issue #169's No-sharpening, and ADR-0071 demands
+    // its member witness: `['a' => 0]` is a member of `b` — a string-keyed
+    // array, non-empty, so both `ne` flavors of `b` hold it — and a
+    // `keys_prove_list` `a` has a sealed tail and possible keys ⊆ {0}, so no
+    // member of `a` carries the key `'a'` and `a` provably rejects the witness.
+    if v.list || v.fields.iter().any(|f| !f.optional) || keys_prove_list(v) {
         return No;
     }
     let fields_open = v.fields.iter().all(|f| covers(&f.ty, &ContractTy::Mixed));
@@ -716,7 +724,7 @@ fn list_vs_shape(elem: &ContractTy, bv: &ShapeView<'_>) -> Certainty {
 /// which the judgment never reads — goes through [`ShapeFact::normalize`], and
 /// the answer is its denotational `is_list`. One definition of list-ness in
 /// the codebase, so the two layers cannot drift. An unsealed tail is passed as
-/// the widest key class it could admit; the `Yes` this caller consumes
+/// the widest key class it could admit; the `Yes` its callers consume
 /// requires a sealed tail, so the widening cannot manufacture one.
 fn keys_prove_list(bv: &ShapeView<'_>) -> bool {
     let fields = bv
@@ -871,8 +879,11 @@ fn entry_refuted(key: &ContractTy, val: &ContractTy, fields: &[CField]) -> bool 
 ///    be an extra entry whose key escapes `a`'s declared fields, which the tail
 ///    key type alone does not prove.
 /// 4. **Flags.** A positional `a` over a keyed `b` stays `Maybe` — `b`'s
-///    order-agnostic realizations (#14939) need not be lists — unless a required
-///    string key proves none of them is. Non-emptiness was law 2's.
+///    order-agnostic realizations (#14939) need not be lists — unless `b`'s key
+///    structure alone proves every realization a list ([`keys_prove_list`],
+///    issue #169: the flag mismatch is then spelling, not denotation, and the
+///    field/tail obligations above already decide), or a required string key
+///    proves none of them is (`No`). Non-emptiness was law 2's.
 fn shape_vs_shape(av: &ShapeView<'_>, bv: &ShapeView<'_>) -> Certainty {
     use Certainty::{Maybe, No, Yes};
     let realizable = all_fields_inhabited(bv);
@@ -941,8 +952,11 @@ fn shape_vs_shape(av: &ShapeView<'_>, bv: &ShapeView<'_>) -> Certainty {
         (Extras::Typed(..), Extras::Sealed) => verdict = verdict.and(Maybe),
     }
 
-    // (4) Flags.
-    if av.list && !bv.list {
+    // (4) Flags. The `keys_prove_list` disjunct is issue #169's bridge: a `b`
+    // whose keys alone prove every realization a list satisfies a positional
+    // `a`'s ordering constraint whatever keyword spelled it, and every changed
+    // `Yes` is still earned field by field in obligations 1–3 above.
+    if av.list && !bv.list && !keys_prove_list(bv) {
         if bv.fields.iter().any(|f| !f.optional && matches!(f.key, CKey::Str(_))) {
             return No;
         }
@@ -1676,6 +1690,123 @@ mod tests {
                 "{src}: acceptance {accepted:?} disagrees with domain is_list {domain:?}"
             );
         }
+    }
+
+    #[test]
+    fn positional_shape_acceptance_does_not_depend_on_the_spelling_of_a_proven_key_set() {
+        // Issue #169, `shape_vs_shape`'s flag row: a sealed subject whose only
+        // possible key is `0` is a sequence whatever keyword introduced it, so
+        // under a positional acceptor `array{null}` and `list{null}` must get
+        // the same verdict — and it is Yes, earned by obligations 1–3.
+        for a in ["list{string|null}", "list{0?: string|null}"] {
+            let keyed = subsumes(&ty(a), &ty("array{null}"));
+            let positional = subsumes(&ty(a), &ty("list{null}"));
+            assert_eq!(keyed, positional, "{a}: the verdict read the keyword, not the keys");
+            assert_eq!(keyed, Certainty::Yes, "{a} must accept the single-key-0 sealed shape");
+        }
+        // The optional twin realizes `[]` and `[0 => v]` — both admitted by an
+        // all-optional positional acceptor.
+        assert_eq!(subsumes(&ty("list{0?: int}"), &ty("array{0?: int}")), Certainty::Yes);
+    }
+
+    #[test]
+    fn positional_shape_does_not_accept_a_subject_admitting_a_gapped_key_set() {
+        // The unsound direction of issue #169's flag row, mirroring #161's
+        // pins: these subjects admit a permuted (`[1 => 1, 0 => 1]`) or gapped
+        // (`[0 => 1, 2 => 1]`, which fails `array_is_list`) realization, so a
+        // `Yes` under a positional acceptor would be a wrong Yes.
+        assert_eq!(
+            subsumes(&ty("list{int, int}"), &ty("array{0: int, 1: int}")),
+            Certainty::Maybe
+        );
+        assert_eq!(
+            subsumes(
+                &ty("list{0?: int, 1?: int, 2?: int}"),
+                &ty("array{0?: int, 1?: int, 2: int}")
+            ),
+            Certainty::Maybe
+        );
+        // Two optional keys with no gap still admit `{1}` alone (`[1 => 1]`).
+        assert_eq!(
+            subsumes(&ty("list{0?: int, 1?: int}"), &ty("array{0?: int, 1?: int}")),
+            Certainty::Maybe
+        );
+    }
+
+    #[test]
+    fn positional_shape_acceptance_yes_agrees_with_the_domain_is_list_judgment() {
+        // The same drift-guard as #161's matrix, on `shape_vs_shape`'s flag
+        // row: the acceptor's optional fields cover every subject's fields, so
+        // the denotational list judgment is the only discriminator left, and
+        // acceptance may answer Yes exactly where the domain proves every
+        // realization a list.
+        // (spelling, [(int key, required)], sealed)
+        type MatrixCase = (&'static str, &'static [(i64, bool)], bool);
+        let cases: &[MatrixCase] = &[
+            ("array{null}", &[(0, true)], true),
+            ("array{0?: null}", &[(0, false)], true),
+            ("array{0: null, 1: null}", &[(0, true), (1, true)], true),
+            ("array{0?: null, 1?: null}", &[(0, false), (1, false)], true),
+            ("array{0?: null, 1?: null, 2: null}", &[(0, false), (1, false), (2, true)], true),
+            ("array{1: null}", &[(1, true)], true),
+            ("array{null, ...}", &[(0, true)], false),
+            ("array{null, ...<int, null>}", &[(0, true)], false),
+        ];
+        for (src, keys, sealed) in cases {
+            let fields = keys
+                .iter()
+                .map(|(k, required)| {
+                    let presence = if *required {
+                        Presence::Required { witnessed: false }
+                    } else {
+                        Presence::Optional
+                    };
+                    (Key::Int(*k), presence, None)
+                })
+                .collect();
+            let tail = if *sealed {
+                Tail::Sealed
+            } else {
+                Tail::Unsealed { key: KeyClass::ArrayKey, value: None }
+            };
+            let domain =
+                ShapeFact::normalize(fields, tail, Certainty::Maybe, false, Vec::new()).is_list;
+            let accepted = subsumes(&ty("list{0?: null, 1?: null, 2?: null}"), &ty(src));
+            assert_eq!(
+                accepted.is_yes(),
+                domain.is_yes(),
+                "{src}: acceptance {accepted:?} disagrees with domain is_list {domain:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn proven_list_shape_rejects_the_general_array_whatever_keyword_spelled_it() {
+        // Issue #169, `shape_vs_array_any`'s No-sharpening, with its member
+        // witness measured in this run rather than asserted by analogy:
+        // `['a' => 0]` is a member of `b = array` (string-keyed, non-empty, so
+        // both `ne` flavors hold it) that every sealed key-`0`-only acceptor
+        // provably rejects — its possible keys are ⊆ {0}, so no member carries
+        // the key `'a'`.
+        let witness = Val::Array(vec![(Key::Str("a".to_owned()), Val::Int(0))]);
+        assert_eq!(admits_val(&ty("array"), &witness), Certainty::Yes);
+        assert_eq!(admits_val(&ty("non-empty-array"), &witness), Certainty::Yes);
+        for a in ["array{0?: int}", "list{0?: int}", "array{}"] {
+            assert_eq!(admits_val(&ty(a), &witness), Certainty::No, "{a} must reject the witness");
+            assert_eq!(subsumes(&ty(a), &ty("array")), Certainty::No, "{a} vs array");
+            assert_eq!(
+                subsumes(&ty(a), &ty("non-empty-array")),
+                Certainty::No,
+                "{a} vs non-empty-array"
+            );
+        }
+        // The required twin was already No under both spellings (a required
+        // field is missing from the fresh-keyed member); pinned so the row
+        // stays spelling-blind end to end.
+        let keyed = subsumes(&ty("array{int}"), &ty("array"));
+        let positional = subsumes(&ty("list{int}"), &ty("array"));
+        assert_eq!(keyed, positional, "the verdict read the keyword, not the keys");
+        assert_eq!(keyed, Certainty::No);
     }
 
     #[test]
