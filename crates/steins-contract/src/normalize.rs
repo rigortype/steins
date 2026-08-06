@@ -1638,8 +1638,9 @@ mod tests {
         // conversion between the layers cannot drift. `list{…}` spellings are
         // excluded by design: the keyword adds order information the key set
         // alone does not carry.
-        let cases: &[(&str, &[(i64, bool)], bool)] = &[
-            // (spelling, [(int key, required)], sealed)
+        // (spelling, [(int key, required)], sealed)
+        type MatrixCase = (&'static str, &'static [(i64, bool)], bool);
+        let cases: &[MatrixCase] = &[
             ("array{null}", &[(0, true)], true),
             ("array{0?: null}", &[(0, false)], true),
             ("array{0: null, 1: null}", &[(0, true), (1, true)], true),
