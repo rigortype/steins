@@ -144,3 +144,43 @@ Two boundaries are worth stating because they are easy to erode:
   then seed" — the seed replaces what the invalidation forgot, and on every
   comparison shape that fails the witness test above, the invalidation is the
   whole answer.
+
+## Amendment (2026-08-07, issue #168): `preg_match_all` joins the witness table, and the flags stop being a blanket refusal
+
+§4 postponed two things and this slice lands both, adding **no new witness
+vocabulary**: the catalog gains exactly one row, `preg_match_all` position 2
+with the existing `WrittenWhen::ReturnTruthy`, and every consumer is unchanged
+— including the #158 comparison witness, which `preg_match_all(…) === 2`
+rides as-is (`> 0` still declines; orderings remain the separate precision
+change the #158 amendment named).
+
+The soundness argument is the same shape as §2, re-measured for the new name:
+the return is `int|false`, a truthy value is an int ≥ 1, and that proves both
+that the pattern compiled and that at least one match landed — so on the truthy
+branch every written list is non-empty. The zero-match case (`ret = 0`) does
+write (empty columns), but it is indistinguishable from `false` on the falsy
+branch, so the falsy side stays unseeded, exactly as §3.1 requires.
+
+What the write contains is mode-dependent, and the modes divide cleanly:
+
+* **PATTERN_ORDER** (the default) writes one always-present, padded column per
+  entry — `preg_match`'s trailing-absence rule does not exist there, and an
+  unmatched group contributes `''` to its column wherever it sits. The column
+  element therefore consults the reader's raw can-go-unmatched bit and never
+  the per-match middle-vs-trailing projections.
+* **SET_ORDER** writes a list of per-match sets, each of which measures as
+  exactly the `preg_match` success shape. The implementation reuses that one
+  constructor rather than re-deriving it, so the two paths cannot drift.
+
+The flags argument moves from "must be a proven `0`" to a **modeled-bits
+gate**: a present flags argument seeds only when it resolves to a proven int
+whose every set bit this slice models (`PREG_PATTERN_ORDER` = 1,
+`PREG_SET_ORDER` = 2, `PREG_OFFSET_CAPTURE` = 256, `PREG_UNMATCHED_AS_NULL` =
+512 — resolved to values, never matched by name, under the issue-#29
+engine-constant shadow discipline). `PREG_UNMATCHED_AS_NULL` turns optionality
+into nullability (the unmatched entry is written as `null`), and
+`PREG_OFFSET_CAPTURE` wraps every entry in a measured `[text, offset]` pair
+whose floor is `-1` exactly where an unmatched entry can be written. Any
+unknown bit, any unproven value — including a `|` expression the lowering does
+not fold — and the measured-`ValueError` combination of both order bits all
+decline the entire seed, silently.
