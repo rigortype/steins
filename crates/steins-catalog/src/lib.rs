@@ -565,13 +565,18 @@ pub enum WrittenWhen {
 /// # Membership
 ///
 /// * `preg_match` position 2 — measured above.
+/// * `preg_match_all` position 2 (issue #168) — measured (PHP 8.5.9): the return
+///   is the number of full matches, an `int >= 1` on the truthy branch, `0` on
+///   zero matches (which still writes — empty columns), and `false` on a compile
+///   failure, which writes nothing at all. Truthy therefore proves both that the
+///   pattern compiled and that at least one match landed, exactly the
+///   `ReturnTruthy` discipline; the zero-match write is real but
+///   indistinguishable from `false` on the falsy branch, so the falsy side
+///   stays unseeded.
 ///
-/// Deliberately absent, each a decline until measured (ADR-0077 §4):
-/// `preg_match_all`, whose truthiness witness is the same but whose written
-/// *shape* depends on `PREG_PATTERN_ORDER` vs `PREG_SET_ORDER` and is unmodelled;
-/// and every other [`out_params`] row — `sort` and friends write their argument
-/// too, and their contracts deserve the same treatment, but none has been
-/// measured here.
+/// Deliberately absent, each a decline until measured (ADR-0077 §4): every other
+/// [`out_params`] row — `sort` and friends write their argument too, and their
+/// contracts deserve the same treatment, but none has been measured here.
 ///
 /// A witness is not by itself a fact: it says *where* a seed would be sound, and
 /// the consumer still has to know what was written.
@@ -581,6 +586,10 @@ pub fn out_param_written_when(name: &str, position: usize) -> Option<WrittenWhen
         // `preg_match(string $pattern, string $subject, array &$matches = null, …)`:
         // `1` writes the success shape, `0` writes `[]`, `false` writes nothing.
         ("preg_match", 2) => Some(WrittenWhen::ReturnTruthy),
+        // `preg_match_all(string $pattern, string $subject, array &$matches = null, …)`:
+        // an int >= 1 writes every column non-empty, `0` writes empty columns,
+        // `false` writes nothing (issue #168; measured, see the doc above).
+        ("preg_match_all", 2) => Some(WrittenWhen::ReturnTruthy),
         _ => None,
     }
 }
@@ -2228,17 +2237,21 @@ mod tests {
     }
 
     #[test]
-    fn the_written_when_witness_is_stated_for_one_row_only() {
-        // The one measured contract: truthy means `preg_match` performed the write.
+    fn the_written_when_witness_is_stated_for_the_measured_rows_only() {
+        // The two measured contracts: truthy means the callee performed the write.
+        // `preg_match_all` joined with issue #168 — measured, an int >= 1 return is
+        // reachable only through the branch that wrote every column.
         assert_eq!(out_param_written_when("preg_match", 2), Some(WrittenWhen::ReturnTruthy));
         assert_eq!(out_param_written_when("PREG_MATCH", 2), Some(WrittenWhen::ReturnTruthy));
+        assert_eq!(out_param_written_when("preg_match_all", 2), Some(WrittenWhen::ReturnTruthy));
         // A position the row does not name is not a by-ref position at all.
         for p in [0, 1, 3, 4] {
             assert_eq!(out_param_written_when("preg_match", p), None, "position {p} is by value");
+            assert_eq!(out_param_written_when("preg_match_all", p), None, "position {p} is by value");
         }
         // Every other out-param row stays silent: a witness is added only after the
         // callee's contract has been measured, never inferred from `out_params`.
-        for f in ["preg_match_all", "similar_text", "str_replace", "sort", "array_pop"] {
+        for f in ["similar_text", "str_replace", "sort", "array_pop"] {
             for p in 0..5 {
                 assert_eq!(out_param_written_when(f, p), None, "{f} states no witness yet");
             }
