@@ -16269,9 +16269,9 @@ fn strict_leg_message(kind: &str, base: &str, shape: &ShapeFact, canon: &VKey) -
     let (our_key, php_key) = render_offset_key(canon);
     let declared = render_shape_fact(shape, false);
     // `{base} is {declared}` mirrors `offset.missing`'s own evidence clause. The
-    // spelling is the shape fact's, which may be more precise than the source text
-    // (a fully-required shape spells `non-empty-array{…}`) — the same rendering the
-    // dump surface shows, so the two never disagree about what Steins believes.
+    // spelling is the shape fact's, which may differ from the source text (issue
+    // #159 canonicalizes every sealed shape's head) — the same rendering the dump
+    // surface shows, so the two never disagree about what Steins believes.
     match kind {
         "undeclared" => format!(
             "offset {our_key} is outside the declared shape — {base} is {declared}, which cannot carry the key; reads null with \"Undefined array key {php_key}\""
@@ -22666,22 +22666,23 @@ mod dump_render_tests {
     #[test]
     fn array_bearing_fact_spells_through_the_d4_array_vocabulary() {
         // ADR-0062 §6 flip: the array-vocabulary slice teaches the speller, so an
-        // array-bearing fact is no longer an honest-unknown refusal. The empty
-        // array is denotationally a Yes-list (array_is_list([]) is vacuously
-        // true, §3) — the D4-native `list{}` spelling, a deliberate divergence
-        // from PHPStan stable's own `array{}` for the empty/Yes-list case.
+        // array-bearing fact is no longer an honest-unknown refusal. A concrete
+        // value is a sealed shape, and issue #159 spells every sealed shape the
+        // way the reference model does — so the empty array is `array{}`, no
+        // longer the D4-native `list{}` ADR-0062 §6 recorded as a divergence.
         let fact = Fact::Singleton(Val::Array(vec![]));
-        assert_eq!(render_dump_fact(&fact), "list{}");
+        assert_eq!(render_dump_fact(&fact), "array{}");
     }
 
     #[test]
     fn concrete_array_values_spell_value_precisely() {
-        // Point 3 of the S1 mission fixtures: a keyed non-list value spells
-        // keyed `array{…}`; a sequential list value spells `list{…}`.
+        // Point 3 of the S1 mission fixtures: a keyed non-list value spells its
+        // keys; a sequential value spells positionally (issue #159 — both under
+        // the one `array{…}` head, as the reference model writes them).
         let map = Fact::Singleton(Val::Array(vec![(VKey::Str("a".to_owned()), s("v"))]));
         assert_eq!(render_dump_fact(&map), "array{a: 'v'}");
         let list = Fact::Singleton(Val::Array(vec![(VKey::Int(0), s("x")), (VKey::Int(1), s("y"))]));
-        assert_eq!(render_dump_fact(&list), "list{'x', 'y'}");
+        assert_eq!(render_dump_fact(&list), "array{'x', 'y'}");
     }
 
     #[test]
@@ -22698,9 +22699,9 @@ mod dump_render_tests {
         );
         let fact = Fact::Shape { shape: Box::new(shape), nullable: false };
         // `ShapeFact::normalize` sets `non_empty` from the `Required` field
-        // itself (shape.rs), so the rendering carries the (redundant but
-        // honest) `non-empty-` modifier.
-        assert_eq!(render_dump_fact(&fact), "non-empty-array{a: mixed}");
+        // itself (shape.rs), but a sealed shape's required key already proves
+        // non-emptiness, so issue #159 stops printing the modifier twice.
+        assert_eq!(render_dump_fact(&fact), "array{a: mixed}");
     }
 }
 

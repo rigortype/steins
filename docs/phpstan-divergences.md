@@ -133,7 +133,12 @@ is honestly lost. Positional projections over shape-only truth take the
 sound widening, never declaration order. The #14939 model (`array{…}` a
 key *set*, `list{…}` a key *sequence*, `isList` computed over the admitted
 value set) runs natively, ahead of PHPStan stable — including `list{…}`
-acceptance rejecting permutations and the D4 `list{…}` rendering. Declined
+acceptance rejecting permutations. The *rendering* is deliberately not a
+divergence: a sealed shape is spelled exactly as PHPStan spells it
+(positional `array{…}` for contiguous required keys, every key printed
+otherwise, `non-empty-` dropped where a required key implies it, and the
+`list` word kept only where two or more optional keys make it load-bearing).
+Declined
 with reasons: an abstract `nextAutoIndexes` (concrete-only, version-aware),
 and `ARRAY_COUNT_LIMIT`-style union degradation (replaced by the computed
 OneOf descent; the 256 constant survives only as the single-shape

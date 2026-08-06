@@ -263,10 +263,12 @@ fn phpdoc_type_spells_map_generic() {
 }
 
 #[test]
-fn phpdoc_type_spells_non_empty_shape() {
+fn phpdoc_type_spells_a_sealed_shape_canonically() {
+    // Issue #159: the phpdoc surface prints the canonical head, not the source
+    // text — `a` is required, so `non-empty-` says nothing the key does not.
     let src = "<?php\n/** @param non-empty-array{a: int} $x */\n\
                function f($x) { \\PHPStan\\dumpPhpDocType($x); }\n";
-    assert_eq!(one_phpdoc(src), "dumped phpdoc type: non-empty-array{a: int} (asserted)");
+    assert_eq!(one_phpdoc(src), "dumped phpdoc type: array{a: int} (asserted)");
 }
 
 #[test]
@@ -276,11 +278,12 @@ fn dump_type_spells_a_keyed_concrete_array() {
 }
 
 #[test]
-fn dump_type_spells_a_sequential_concrete_array_as_a_list() {
-    // The D4-native divergence (ADR-0062 §6): a Yes-list value spells `list{…}`,
-    // never PHPStan stable's own `array{…}` for the same value.
+fn dump_type_spells_a_sequential_concrete_array_positionally() {
+    // Issue #159 closes the D4-native divergence ADR-0062 §6 recorded here: a
+    // sealed shape with keys 0..n-1 all required is spelled the way the
+    // reference model spells it, positionally under an `array{…}` head.
     let src = "<?php\n$l = ['x', 'y'];\n\\PHPStan\\dumpType($l);\n";
-    assert_eq!(one_type(src), "dumped type: list{'x', 'y'}");
+    assert_eq!(one_type(src), "dumped type: array{'x', 'y'}");
 }
 
 // ---- Transparency (ADR-0053 §10 §3) ----------------------------------------

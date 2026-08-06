@@ -281,7 +281,7 @@ function f($x) { return $x; }
     let out = findings(src);
     let hit = out.iter().find(|d| d.id == RETURN_MISMATCH_ID).expect("fires");
     assert!(
-        hit.message.contains("non-empty-array{a: int}"),
+        hit.message.contains("array{a: int}"),
         "the shape should spell itself: {}",
         hit.message
     );

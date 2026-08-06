@@ -109,7 +109,7 @@ fn the_helper_narrows_exactly_as_the_native_assert_does() {
         "assert(isset($d['a'])); \\PHPStan\\dumpType($d);",
     ));
     assert_eq!(helper, native, "the two forms must be the same guard");
-    assert_eq!(helper, "dumped type: non-empty-array{a: string, b?: string} (asserted)");
+    assert_eq!(helper, "dumped type: array{a: string, b?: string} (asserted)");
 }
 
 #[test]

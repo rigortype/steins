@@ -60,6 +60,11 @@ skill seals them into a version section at release time, reconstructing from
 
 ### Changed
 
+- **A sealed array shape is now written the way PHPStan writes it, everywhere Steins prints a type.** What Steins knows about these types has not changed at all — only how it spells them, so dumps, `@var`/`@param` annotations produced by `steins transform`, and the types quoted inside finding messages read differently for the same code.
+  - Three rules, all confined to *sealed* shapes (a shape whose braces list its whole key set). Keys exactly `0…n-1` with every one required print positionally — `array{string, int}` rather than `non-empty-list{string, int}`. Anything else prints every key, with `?` on the optional ones — `array{0: string, 1?: int}`, where a leading value used to be abbreviated. And `non-empty-` comes off wherever a required key already proves it: `array{a: int}`, not `non-empty-array{a: int}`. The empty array is now `array{}` rather than `list{}`.
+  - **The `list` word survives exactly where it still says something**: a sealed shape with two or more optional keys (`list{0: string, 1?: int, 2?: int}`), whose key set alone would also admit the gapped `[0 => …, 2 => …]`. Unsealed shapes — the ones with a `…` tail — are untouched for the same reason, since keys the braces never mention can arrive at runtime.
+  - The practical effect is that Steins and PHPStan now agree in writing about types they already agreed about: on the PHPStan test corpus this turns 118 rows that read as divergent into exact matches — 76 of them rows the harness could previously see only as "narrower than asserted". No finding appears or disappears from this change, and no inferred type moved; only the sentences some findings print.
+
 - **`array_slice` widening is sharper in two cases: slicing a proven list from offset `0` with `preserve_keys: true` still yields a list, and a slice whose length is a proven `0` is exactly the empty array.**
   - Unknown offsets, lengths, or flags and subjects not proven to be lists keep the previous conservative answer; a `null` length still means "to the end". The added precision can make downstream findings appear or disappear.
 
