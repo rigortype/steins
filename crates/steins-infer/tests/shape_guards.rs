@@ -278,9 +278,9 @@ fn a_truthy_array_guard_sets_non_empty_and_sharpens_count() {
 
 #[test]
 fn a_falsy_array_guard_proves_the_empty_array() {
-    // Spelled by the one speller (ADR-0062 §6 / RFC D4): `[]` is denotationally
-    // a list, so it spells `list{}`.
-    assert_eq!(guarded_else("array{a?: int}", "$v", "$v"), "dumped type: list{} (asserted)");
+    // Spelled by the one speller (ADR-0062 §6 / RFC D4): a sealed shape with no
+    // fields is the empty array, and issue #159 spells it `array{}`.
+    assert_eq!(guarded_else("array{a?: int}", "$v", "$v"), "dumped type: array{} (asserted)");
 }
 
 #[test]
@@ -547,7 +547,7 @@ fn a_flow_refined_fact_outspells_its_declared_arm() {
     // non-emptiness — neither of which the declared arm says.
     assert_eq!(
         guarded("array{a?: string}", "isset($v['a'])", "$v"),
-        "dumped type: non-empty-array{a: string} (asserted)"
+        "dumped type: array{a: string} (asserted)"
     );
 }
 

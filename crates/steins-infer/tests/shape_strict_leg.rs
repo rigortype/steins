@@ -113,7 +113,7 @@ fn a_key_outside_a_sealed_shape_fires_undeclared() {
     assert_eq!(
         msg,
         "offset 'zzz' is outside the declared shape — $d is \
-         non-empty-array{a: string, b: string}, which cannot carry the key; reads null with \
+         array{a: string, b: string}, which cannot carry the key; reads null with \
          \"Undefined array key \"zzz\"\""
     );
 }

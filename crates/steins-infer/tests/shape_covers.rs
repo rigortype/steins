@@ -297,7 +297,7 @@ fn the_false_branch_marks_every_disjunct_key_absent() {
         TWO,
         "if (isset($v['a']) || isset($v['b'])) { return; } \\PHPStan\\dumpType($v);",
     );
-    assert_eq!(one_type(&src), "dumped type: list{} (asserted)");
+    assert_eq!(one_type(&src), "dumped type: array{} (asserted)");
 }
 
 /// A declared-`Required` final arm is proven present without a cover.

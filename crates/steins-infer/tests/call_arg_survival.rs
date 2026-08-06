@@ -85,7 +85,7 @@ fn an_array_shape_survives_the_non_mutating_read_position_family() {
     // shape to read.
     assert_eq!(
         dump_after("$s = [1, 2]; array_first($s); array_last($s);"),
-        "dumped type: list{1, 2}"
+        "dumped type: array{1, 2}"
     );
     // The projection family and the two `array|object $array` pointer *readers*
     // (`current`/`key` — their pointer-*moving* siblings are by-ref, below).
@@ -93,7 +93,7 @@ fn an_array_shape_survives_the_non_mutating_read_position_family() {
               "array_key_first", "array_key_last", "count", "in_array"] {
         assert_eq!(
             dump_after(&format!("$s = [1, 2]; {f}($s);")),
-            "dumped type: list{1, 2}",
+            "dumped type: array{1, 2}",
             "{f} takes its array by value"
         );
     }

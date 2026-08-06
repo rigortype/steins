@@ -32,8 +32,13 @@ an order-agnostic key *set*, `list{}` a positional key *sequence*, and
 `list<T>` requires keys exactly `0..n-1`. Steins implements the RFC's
 resolution, which current PHPStan does not — since ADR-0062 this includes
 the denotational `isList` trinary (computed over the admitted value set,
-optional-key combinatorics included) and the D4 rendering (`list{…}` for
-every Yes-list; keyless `array{…}` for a sequential Maybe).
+optional-key combinatorics included). The *rendering* is deliberately not a
+divergence (issue #159): a sealed shape spells exactly as PHPStan spells it —
+positional `array{…}` for keys `0..n-1` all required, every key printed
+otherwise, `non-empty-` dropped where a required key implies it, and the `list`
+word kept only where two or more optional keys make the key set admit a gap.
+Unsealed shapes keep the native spelling, where both modifiers still carry
+information the braces do not.
 
 **3. No benevolent unions.** `BenevolentUnionType` compensates for worst-case
 false positives that a proof layer does not emit. The grammar is accepted

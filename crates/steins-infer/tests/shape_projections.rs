@@ -422,12 +422,12 @@ fn a_proven_zero_length_slice_is_the_empty_array() {
     // Claim 2: a proven `$length = 0` empties the window for ANY subject, offset,
     // and flag (`array_slice(['a' => 1], 0, 0) === []`,
     // `array_slice([1,2,3], -2, 0, true) === []`), so the answer is the SEALED
-    // empty shape — which spells `list{}`: the empty array is itself a list —
+    // empty shape — which spells `array{}`: no keys at all, sealed —
     // rather than the unsealed floor.
-    assert_eq!(dump("array{a: int}", "array_slice($v, 0, 0)"), "dumped type: list{} (asserted)");
+    assert_eq!(dump("array{a: int}", "array_slice($v, 0, 0)"), "dumped type: array{} (asserted)");
     assert_eq!(
         dump("list<int>", "array_slice($v, -2, 0, true)"),
-        "dumped type: list{} (asserted)"
+        "dumped type: array{} (asserted)"
     );
 }
 
@@ -437,7 +437,7 @@ fn the_zero_length_claim_wins_over_the_preserved_prefix_claim() {
     // sealed `array{}` is the sharper fact — itself a list, so nothing is lost.
     assert_eq!(
         dump("list<int>", "array_slice($v, 0, 0, true)"),
-        "dumped type: list{} (asserted)"
+        "dumped type: array{} (asserted)"
     );
 }
 
@@ -464,23 +464,23 @@ fn array_slice_of_a_witnessed_array_projects_exactly() {
     // array), which is the exact rung's whole premise.
     assert_eq!(
         dump_body("$a = ['x', 'y', 'z']; \\PHPStan\\dumpType(array_slice($a, 1));"),
-        "dumped type: list{'y', 'z'}"
+        "dumped type: array{'y', 'z'}"
     );
     // Negative offsets and lengths take php-src's own clamping
     // (`array_slice([1,2,3,4,5], 1, -1) === [2,3,4]`).
     assert_eq!(
         dump_body("$a = [1, 2, 3, 4, 5]; \\PHPStan\\dumpType(array_slice($a, 1, -1));"),
-        "dumped type: list{2, 3, 4}"
+        "dumped type: array{2, 3, 4}"
     );
     assert_eq!(
         dump_body("$a = [1, 2, 3]; \\PHPStan\\dumpType(array_slice($a, 10));"),
-        "dumped type: list{}"
+        "dumped type: array{}"
     );
     // `$preserve_keys = true` keeps the keys; the default renumbers integers and
     // leaves strings alone.
     assert_eq!(
         dump_body("$a = ['a' => 1, 5 => 2, 'b' => 3]; \\PHPStan\\dumpType(array_slice($a, 1));"),
-        "dumped type: array{2, b: 3}"
+        "dumped type: array{0: 2, b: 3}"
     );
     assert_eq!(
         dump_body(

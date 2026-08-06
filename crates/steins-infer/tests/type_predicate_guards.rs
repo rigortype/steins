@@ -79,7 +79,7 @@ fn is_array_both_polarities() {
     // The surviving single array arm mints its shape fact through the SAME gated
     // helper the S4 presence guards use — no second minting path.
     let (t, f) = polarity(SIX, "is_array($v)");
-    assert_eq!(t, "non-empty-array{a: int} (asserted)");
+    assert_eq!(t, "array{a: int} (asserted)");
     assert_eq!(f, "int|float|string|bool|null (asserted)");
 }
 
@@ -117,7 +117,7 @@ fn is_scalar_both_polarities() {
     // `is_scalar([])` are both false.
     let (t, f) = polarity(SIX, "is_scalar($v)");
     assert_eq!(t, "int|float|string|bool (asserted)");
-    assert_eq!(f, "non-empty-array{a: int}|null (asserted)");
+    assert_eq!(f, "array{a: int}|null (asserted)");
 }
 
 #[test]
@@ -135,7 +135,7 @@ fn is_iterable_both_polarities() {
     // proven, scalar/null arms refuted, and an OBJECT arm stays `Maybe` on both
     // branches (see `is_iterable_keeps_object_arms_on_both_branches`).
     let (t, f) = polarity(SIX, "is_iterable($v)");
-    assert_eq!(t, "non-empty-array{a: int} (asserted)");
+    assert_eq!(t, "array{a: int} (asserted)");
     assert_eq!(f, "int|float|string|bool|null (asserted)");
 }
 
