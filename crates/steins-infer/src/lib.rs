@@ -1594,6 +1594,9 @@ fn arg_to_fold_within(arg: &ArgValue, depth: u8, budget: &mut usize) -> Option<F
         // Object-world values (ADR-0043) are not fold arguments — unproven, == Other.
         | ArgValue::ClassConst(..)
         | ArgValue::EnumCase(..)
+        // A global-constant fetch (issue #168) is unproven here: only the preg
+        // flags reader resolves the modeled engine constants, by value.
+        | ArgValue::GlobalConst(..)
         | ArgValue::Other => None,
     }
 }
@@ -6173,6 +6176,8 @@ fn val_of(arg: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<Val> {
         // Object-world values (ADR-0043): not domain `Val`s — unproven, == Other.
         | ArgValue::ClassConst(..)
         | ArgValue::EnumCase(..)
+        // A global-constant fetch (issue #168): unproven here, == Other.
+        | ArgValue::GlobalConst(..)
         | ArgValue::Other => None,
     }
 }
@@ -12649,9 +12654,9 @@ fn out_param_seed_callee<'a>(cx: &Cx, call: &'a CallExpr) -> Option<&'a str> {
 /// The fact the callee's contract determines for the out-parameter at
 /// `position`, computed from **proven arguments only** (ADR-0077 §3.3).
 ///
-/// One row exists, and the dispatch is by (name, position) because that is what
-/// the witness is keyed by: a second row would be a second arm, not a widening of
-/// this one.
+/// Two rows exist, and the dispatch is by (name, position) because that is what
+/// the witness is keyed by: another row would be another arm, not a widening of
+/// these.
 fn out_param_written_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -12662,8 +12667,110 @@ fn out_param_written_fact(
 ) -> Option<Fact> {
     match (name.to_ascii_lowercase().as_str(), position) {
         ("preg_match", 2) => preg_match_written_fact(w, folder, call, env),
+        ("preg_match_all", 2) => preg_match_all_written_fact(w, folder, call, env),
         _ => None,
     }
+}
+
+/// The modeled `$flags` bits of the `preg_match` family, by **value** (issue
+/// #168 rule 6). Each value was verified by running `php -r 'echo PREG_…;'`
+/// (PHP 8.5.9) — a flag is a bit the callee tests, so the values, not the
+/// names, are the contract.
+const PREG_FLAG_PATTERN_ORDER: i64 = 1;
+/// See [`PREG_FLAG_PATTERN_ORDER`].
+const PREG_FLAG_SET_ORDER: i64 = 2;
+/// See [`PREG_FLAG_PATTERN_ORDER`].
+const PREG_FLAG_OFFSET_CAPTURE: i64 = 256;
+/// See [`PREG_FLAG_PATTERN_ORDER`].
+const PREG_FLAG_UNMATCHED_AS_NULL: i64 = 512;
+
+/// The resolved, fully-modeled `$flags` of a `preg_match`/`preg_match_all` call
+/// (issue #168). Only ever produced by [`preg_resolved_flags`], so holding one
+/// *is* the proof that every set bit of the argument is modeled here.
+///
+/// `PREG_PATTERN_ORDER` has no field: it is `preg_match_all`'s default, so the
+/// bit adds no information — `set_order: false` is that mode.
+#[derive(Debug, Clone, Copy, Default)]
+struct PregFlags {
+    /// `PREG_SET_ORDER`: one array per match instead of one column per group.
+    set_order: bool,
+    /// `PREG_OFFSET_CAPTURE`: every entry becomes a `[text, offset]` pair.
+    offset_capture: bool,
+    /// `PREG_UNMATCHED_AS_NULL`: an unmatched group's entry is `null` instead of
+    /// being dropped (`preg_match` trailing) or padded as `''` (interior /
+    /// PATTERN_ORDER columns).
+    unmatched_as_null: bool,
+}
+
+/// The proven flags of a preg call, or `None` — the gate of issue #168 rule 6:
+/// **a present flags argument seeds only when it is a proven int whose every
+/// set bit is one this slice models**, where "models" is per callee (`allowed`).
+///
+/// An absent argument is the measured default (PATTERN_ORDER, no pairs, no
+/// nulls). A present one must resolve to a proven int — a literal, a modeled
+/// engine constant ([`preg_flag_const_value`]), or a variable the walk proves —
+/// and any unknown bit, any bit outside `allowed`, and any unproven value
+/// decline the whole seed, silently. Both order bits together also decline:
+/// measured (PHP 8.5.9), `preg_match_all(…, 3)` throws a `ValueError` and
+/// writes nothing, so there is no written shape to state.
+fn preg_resolved_flags(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    allowed: i64,
+) -> Option<PregFlags> {
+    let Some(arg) = call.args.get(3) else { return Some(PregFlags::default()) };
+    let bits = match &arg.value {
+        ArgValue::GlobalConst(r) => preg_flag_const_value(w.cx, r)?,
+        v => match w.cx.resolve_literal(v, env, w.scope.poisoned, folder)? {
+            ArgValue::Int(n) => n,
+            _ => return None,
+        },
+    };
+    if bits & !allowed != 0 {
+        return None;
+    }
+    if bits & PREG_FLAG_PATTERN_ORDER != 0 && bits & PREG_FLAG_SET_ORDER != 0 {
+        return None;
+    }
+    Some(PregFlags {
+        set_order: bits & PREG_FLAG_SET_ORDER != 0,
+        offset_capture: bits & PREG_FLAG_OFFSET_CAPTURE != 0,
+        unmatched_as_null: bits & PREG_FLAG_UNMATCHED_AS_NULL != 0,
+    })
+}
+
+/// The engine **value** of a modeled `PREG_*` flag-constant reference, or
+/// `None` (issue #168 rule 6: constants resolve to values, never match by
+/// name — the name is only the route to the engine's constant).
+///
+/// The route is guarded by the same shadow discipline as the engine
+/// `PHP_VERSION_ID` ([`is_engine_version_id`], issue #29): a fully-qualified
+/// `\PREG_SET_ORDER` always denotes the engine constant (the engine defines it
+/// first, and a `define` of an already-defined constant is a no-op); an
+/// unqualified one does unless this file `use const`-imports one of the names
+/// or **any file in the project** declares a userland twin — PHP's namespace
+/// fallback would then resolve an unqualified reference to the twin, whose
+/// value nothing here knows. Qualified and `namespace\`-relative spellings
+/// never denote the engine constant.
+fn preg_flag_const_value(cx: &Cx, r: &NameRef) -> Option<i64> {
+    let value = match r.raw.as_str() {
+        "PREG_PATTERN_ORDER" => PREG_FLAG_PATTERN_ORDER,
+        "PREG_SET_ORDER" => PREG_FLAG_SET_ORDER,
+        "PREG_OFFSET_CAPTURE" => PREG_FLAG_OFFSET_CAPTURE,
+        "PREG_UNMATCHED_AS_NULL" => PREG_FLAG_UNMATCHED_AS_NULL,
+        _ => return None,
+    };
+    let ok = match r.kind {
+        RefKind::FullyQualified => true,
+        RefKind::Unqualified => {
+            !cx.tree().preg_flag_const_aliased()
+                && !cx.units.iter().any(|u| u.tree.preg_flag_const_declared())
+        }
+        _ => false,
+    };
+    ok.then_some(value)
 }
 
 /// What `preg_match` wrote into `$matches`, for a call whose every premise is
@@ -12677,11 +12784,11 @@ fn out_param_written_fact(
 /// * **the group reader declines** (#149) for every pattern whose numbering it
 ///   cannot establish, which is also what keeps this out of the business of
 ///   deciding whether PCRE would compile the pattern at all;
-/// * **the flags argument**, when supplied, must be a proven `0`.
-///   `PREG_OFFSET_CAPTURE` turns every entry into a `[string, int]` pair and
-///   `PREG_UNMATCHED_AS_NULL` makes the trailing absence an explicit `null`
-///   instead (both measured) — neither is modelled here, so both refuse
-///   (ADR-0077 §4).
+/// * **the flags argument**, when supplied, must be a proven int whose every set
+///   bit is modeled ([`preg_resolved_flags`]). For `preg_match` those are
+///   `PREG_OFFSET_CAPTURE` and `PREG_UNMATCHED_AS_NULL` (issue #168) — the
+///   order bits are `preg_match_all` vocabulary, and passing one here is a
+///   measured `ValueError`, so they stay outside `allowed`.
 ///
 /// The `$offset` argument (position 4) is deliberately *not* consulted: it moves
 /// where matching starts, and measurement confirms it leaves the written key set
@@ -12692,17 +12799,73 @@ fn preg_match_written_fact(
     call: &CallExpr,
     env: &HashMap<String, Known>,
 ) -> Option<Fact> {
-    let poisoned = w.scope.poisoned;
-    if let Some(flags) = call.args.get(3) {
-        let resolved = w.cx.resolve_literal(&flags.value, env, poisoned, folder)?;
-        if !matches!(resolved, ArgValue::Int(0)) {
-            return None;
-        }
+    let flags = preg_resolved_flags(
+        w,
+        folder,
+        call,
+        env,
+        PREG_FLAG_OFFSET_CAPTURE | PREG_FLAG_UNMATCHED_AS_NULL,
+    )?;
+    let groups = preg_proven_groups(w, folder, call, env)?;
+    preg_success_shape(&groups, flags)
+}
+
+/// What `preg_match_all` wrote into `$matches` (issue #168), for a call whose
+/// every premise is proven — else `None`. Same pattern and reader refusals as
+/// [`preg_match_written_fact`]; the flags gate additionally admits the two
+/// order bits, mutually exclusive (measured: both together is a `ValueError`).
+///
+/// Called only on the proven-truthy branch (ADR-0077): the return is
+/// `int|false`, a truthy value is an int >= 1, and that proves both that the
+/// pattern compiled and that at least one match landed — so every column
+/// (PATTERN_ORDER) is a written, non-empty list, and the SET_ORDER outer list
+/// is non-empty. The zero-match write (`ret = 0`, empty columns — measured) is
+/// real but indistinguishable from `false` on the falsy branch, which therefore
+/// stays unseeded.
+fn preg_match_all_written_fact(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+) -> Option<Fact> {
+    let flags = preg_resolved_flags(
+        w,
+        folder,
+        call,
+        env,
+        PREG_FLAG_PATTERN_ORDER
+            | PREG_FLAG_SET_ORDER
+            | PREG_FLAG_OFFSET_CAPTURE
+            | PREG_FLAG_UNMATCHED_AS_NULL,
+    )?;
+    let groups = preg_proven_groups(w, folder, call, env)?;
+    if flags.set_order {
+        // SET_ORDER: a non-empty list of per-match sets, and each set follows the
+        // `preg_match` success-shape rules under the same entry flags — measured,
+        // trailing absence applies per set (`['2', '2']` has no key 2), interior
+        // padding is `''`, and the flag variants match entry for entry. One
+        // constructor, deliberately: re-deriving the set shape here would let the
+        // two paths drift (issue #168 rule 3).
+        let set = preg_success_shape(&groups, flags)?;
+        Some(list_transfer_fact(true, Some(set)))
+    } else {
+        preg_pattern_order_shape(&groups, flags)
     }
-    let pattern = w.cx.resolve_literal(&call.args.first()?.value, env, poisoned, folder)?;
+}
+
+/// The proven capture-group structure of a preg call's pattern argument, or
+/// `None`: the pattern must resolve to a proven `Singleton` string (ADR-0037)
+/// and the slice-A reader (#149) must fully establish its numbering.
+fn preg_proven_groups(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+) -> Option<steins_catalog::preg::CaptureGroups> {
+    let pattern =
+        w.cx.resolve_literal(&call.args.first()?.value, env, w.scope.poisoned, folder)?;
     let ArgValue::Str(pattern) = pattern else { return None };
-    let groups = steins_catalog::preg::capture_groups(&pattern)?;
-    preg_success_shape(&groups)
+    steins_catalog::preg::capture_groups(&pattern)
 }
 
 /// The element type of one `$matches` entry, read off the sub-pattern that
@@ -12785,7 +12948,27 @@ fn preg_element_fact(text: &steins_catalog::preg::MatchedText) -> Fact {
 /// one) — so a pattern with any name asserts nothing and lets the denotational
 /// computation answer, which is `No` for a name that always participates and
 /// `Maybe` for one that may not.
-fn preg_success_shape(groups: &steins_catalog::preg::CaptureGroups) -> Option<Fact> {
+/// **The per-match constructor is this one function**, for both consumers: a
+/// `preg_match` seed and one `PREG_SET_ORDER` set of `preg_match_all` are the
+/// same measured shape (issue #168 rule 3), so a second derivation may not
+/// exist.
+///
+/// `flags` varies the entries, each variant measured (PHP 8.5.9):
+///
+/// * `PREG_UNMATCHED_AS_NULL` turns optionality into nullability: an unmatched
+///   group's entry is **present** with value `null` (`preg_match('/(a)(b)?/',
+///   'a', $m, PREG_UNMATCHED_AS_NULL)` gives `['a', 'a', null]`), so every key
+///   becomes required and a can-go-unmatched group's element gains `|null` —
+///   while the interior-`''` padding disappears (`/(a)(b)?(c)/` on `'ac'` gives
+///   `['ac', 'a', null, 'c']`), so the element keeps its body refinement.
+/// * `PREG_OFFSET_CAPTURE` turns every entry into a `[text, offset]` pair
+///   ([`preg_offset_pair`]). Presence is unchanged: a trailing unmatched group
+///   is still dropped (`/(a)(b)?/` on `'a'` gives two pairs), and an unmatched
+///   entry that IS present is `['', -1]` (`[null, -1]` with both flags).
+fn preg_success_shape(
+    groups: &steins_catalog::preg::CaptureGroups,
+    flags: PregFlags,
+) -> Option<Fact> {
     use steins_domain::{Presence, SHAPE_WIDTH_LIMIT, Tail};
 
     // Presence is `witnessed: false` throughout (ADR-0062 §3): this is a declared
@@ -12793,15 +12976,47 @@ fn preg_success_shape(groups: &steins_catalog::preg::CaptureGroups) -> Option<Fa
     let required = Presence::Required { witnessed: false };
     let slot = |fact: Fact| Some(Box::new(fact));
 
-    let mut fields = vec![(VKey::Int(0), required, slot(preg_element_fact(&groups.whole)))];
+    // The whole-match entry always participates: never null, offset floor 0.
+    let entry0 = {
+        let e = preg_element_fact(&groups.whole);
+        if flags.offset_capture { preg_offset_pair(e, false)? } else { e }
+    };
+    let mut fields = vec![(VKey::Int(0), required, slot(entry0))];
     for (i, g) in groups.groups.iter().enumerate() {
-        let presence = if g.can_be_trailing_absent { Presence::Optional } else { required };
-        // A group that may be present as `''` admits the empty string on a
-        // reachable path, so its body's floor says nothing about its entry.
-        let element = if g.can_be_present_empty {
+        let presence = if flags.unmatched_as_null {
+            // Optionality became nullability: the unmatched entry is written.
+            required
+        } else if g.can_be_trailing_absent {
+            Presence::Optional
+        } else {
+            required
+        };
+        let element = if flags.unmatched_as_null {
+            // The unmatched case is an explicit `null`, and the `''` padding is
+            // gone (measured above) — so the body's floor holds wherever the
+            // value is a string, and `|null` covers the rest.
+            let body = preg_element_fact(&g.body);
+            if g.can_go_unmatched { preg_nullable_element(body) } else { body }
+        } else if g.can_be_present_empty {
+            // A group that may be present as `''` admits the empty string on a
+            // reachable path, so its body's floor says nothing about its entry.
             Fact::General { base: Base::String, nullable: false }
         } else {
             preg_element_fact(&g.body)
+        };
+        let element = if flags.offset_capture {
+            // `-1` is reachable exactly where an unmatched instance of this
+            // group has a written entry: the interior-`''` case, widened to
+            // every can-go-unmatched group under PREG_UNMATCHED_AS_NULL
+            // (trailing absence no longer removes the entry).
+            let unmatched_written = if flags.unmatched_as_null {
+                g.can_go_unmatched
+            } else {
+                g.can_be_present_empty
+            };
+            preg_offset_pair(element, unmatched_written)?
+        } else {
+            element
         };
         let index = i64::try_from(i + 1).ok()?;
         fields.push((VKey::Int(index), presence, slot(element.clone())));
@@ -12821,6 +13036,136 @@ fn preg_success_shape(groups: &steins_catalog::preg::CaptureGroups) -> Option<Fa
         // would add one (`(*MARK:x)`) is a decline in the reader, not a key here.
         Tail::Sealed,
         if list { Certainty::Yes } else { Certainty::Maybe },
+        true,
+        Vec::new(),
+    );
+    Some(Fact::Shape { shape: Box::new(shape), nullable: false })
+}
+
+/// The PATTERN_ORDER shape of `preg_match_all` (issue #168 rule 2, the default
+/// and explicit `PREG_PATTERN_ORDER`): sealed, one **always-present** column
+/// per entry — key `0` plus `1..n` with each name beside its numeric twin —
+/// every column a `non-empty-list<elem>` on the proven-truthy branch (an
+/// int >= 1 matches landed, and every column holds exactly that many entries).
+///
+/// **Columns are PADDED — the trap this slice exists to avoid.** `preg_match`'s
+/// trailing-absence rule does not apply here: any can-go-unmatched group
+/// contributes `''` (or `null` under PREG_UNMATCHED_AS_NULL) to its column
+/// **wherever it sits** (measured: `preg_match_all('/(\d)(a)?/', '1a 2 3a',
+/// $m)` gives `$m[2] === ['a', '', 'a']`). So the element consults the reader's
+/// raw [`can_go_unmatched`](steins_catalog::preg::CaptureGroup::can_go_unmatched)
+/// bit and NEVER the slice-E middle-vs-trailing projections — reusing the
+/// per-set element rule here would refine a column that holds `''` on a
+/// reachable path.
+///
+/// Entry `0`'s element is the whole-expression refinement from slice E: the
+/// whole match always participates (a zero-width match contributes `''`, which
+/// the whole expression's own floor already accounts for — a floor of 0 is
+/// plain `string`).
+fn preg_pattern_order_shape(
+    groups: &steins_catalog::preg::CaptureGroups,
+    flags: PregFlags,
+) -> Option<Fact> {
+    use steins_domain::{Presence, SHAPE_WIDTH_LIMIT, Tail};
+
+    let required = Presence::Required { witnessed: false };
+    let slot = |fact: Fact| Some(Box::new(fact));
+    let column = |elem: Fact| list_transfer_fact(true, Some(elem));
+
+    let entry0 = {
+        let e = preg_element_fact(&groups.whole);
+        if flags.offset_capture { preg_offset_pair(e, false)? } else { e }
+    };
+    let mut fields = vec![(VKey::Int(0), required, slot(column(entry0)))];
+    for (i, g) in groups.groups.iter().enumerate() {
+        // The padding rule: position never matters, only whether the group can
+        // go unmatched at all.
+        let elem = if flags.unmatched_as_null {
+            let body = preg_element_fact(&g.body);
+            if g.can_go_unmatched { preg_nullable_element(body) } else { body }
+        } else if g.can_go_unmatched {
+            preg_padded_element(preg_element_fact(&g.body))
+        } else {
+            preg_element_fact(&g.body)
+        };
+        let elem = if flags.offset_capture {
+            // A padded entry is `['', -1]` / `[null, -1]` (measured), so `-1` is
+            // reachable exactly for the groups whose column is padded.
+            preg_offset_pair(elem, g.can_go_unmatched)?
+        } else {
+            elem
+        };
+        let col = column(elem);
+        let index = i64::try_from(i + 1).ok()?;
+        fields.push((VKey::Int(index), required, slot(col.clone())));
+        if let Some(name) = &g.name {
+            fields.push((VKey::Str(name.clone()), required, slot(col)));
+        }
+    }
+    if fields.len() > SHAPE_WIDTH_LIMIT {
+        return None;
+    }
+    let list = groups.groups.iter().all(|g| g.name.is_none());
+    let shape = ShapeFact::normalize(
+        fields,
+        Tail::Sealed,
+        if list { Certainty::Yes } else { Certainty::Maybe },
+        true,
+        Vec::new(),
+    );
+    Some(Fact::Shape { shape: Box::new(shape), nullable: false })
+}
+
+/// A PATTERN_ORDER column element for a group whose column is padded: the body's
+/// element type **unioned with `''`** (issue #168 rule 2). The union is computed
+/// by the domain's own join — today every body refinement collapses against `''`
+/// to plain `string` (none of the floor predicates admit the empty string), and
+/// an unrepresentable join degrades to the same, which is the sound side either
+/// way.
+fn preg_padded_element(body: Fact) -> Fact {
+    body.join(&Fact::Singleton(Val::Str(String::new())))
+        .unwrap_or(Fact::General { base: Base::String, nullable: false })
+}
+
+/// A group element under `PREG_UNMATCHED_AS_NULL`: the body's element type with
+/// `null` added — optionality (or `''` padding) turned into nullability, which
+/// the flag is for.
+fn preg_nullable_element(body: Fact) -> Fact {
+    match body {
+        Fact::Refined { base, refinement, .. } => {
+            Fact::Refined { base, refinement, nullable: true }
+        }
+        Fact::General { base, .. } => Fact::General { base, nullable: true },
+        // Unreachable today ([`preg_element_fact`] only produces the two arms
+        // above), but a future literal-element derivation lands safely.
+        other => other
+            .join(&Fact::Singleton(Val::Null))
+            .unwrap_or(Fact::General { base: Base::String, nullable: true }),
+    }
+}
+
+/// One entry under `PREG_OFFSET_CAPTURE`: the measured `[text, offset]` pair as
+/// a sealed `list{T, int<lo, max>}`.
+///
+/// The offset floor was probed rather than assumed (issue #168 rule 5): a
+/// participating group's offset is a byte position, `>= 0`; an unmatched
+/// group's **written** entry is `['', -1]` — `[null, -1]` under
+/// `PREG_UNMATCHED_AS_NULL` — so `-1` is reachable exactly when
+/// `unmatched_written`, and the floor is `0` everywhere else (notably entry
+/// `0`, which participates by definition).
+fn preg_offset_pair(elem: Fact, unmatched_written: bool) -> Option<Fact> {
+    use steins_domain::{IntRange, Presence, Tail};
+
+    let required = Presence::Required { witnessed: false };
+    let lo = if unmatched_written { -1 } else { 0 };
+    let offset = Fact::refined(Base::Int, Refinement::Int(IntRange::new(lo, i64::MAX)?), false);
+    let shape = ShapeFact::normalize(
+        vec![
+            (VKey::Int(0), required, Some(Box::new(elem))),
+            (VKey::Int(1), required, Some(Box::new(offset))),
+        ],
+        Tail::Sealed,
+        Certainty::Yes,
         true,
         Vec::new(),
     );
@@ -17782,6 +18127,8 @@ fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
         // A closure value against a scalar/union param is never a scalar finding
         // (a `callable`/`Closure` param is not a native scalar type this checks).
         | ArgValue::Closure(_)
+        // A global-constant fetch (issue #168) is genuinely unproven here.
+        | ArgValue::GlobalConst(..)
         | ArgValue::Other => false,
     }
 }
