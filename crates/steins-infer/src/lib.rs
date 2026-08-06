@@ -46,10 +46,10 @@ use steins_syntax::CallExpr;
 use steins_syntax::Span;
 use steins_syntax::{
     ArgValue, ArrayKey, Callee, CatchClause, ClassDecl, ClosureRef, CmpOp, Comment, CondExpr, CondOperand,
-    EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, MatchArmT, MethodDecl, NameRef, NamedArg,
-    NativeType, NormKey, Param, PropertyDecl, Receiver, RefKind, ScalarType, Scope, ScopeOwner, SourceTree,
-    StaticClass, Stmt, StmtKind, ThrowKind, ThrowOrigin, TypeMember, Visibility, normalize_array,
-    php_canonical_int_string,
+    EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, InvalidatedVar, MatchArmT, MethodDecl,
+    NameRef, NamedArg, NativeType, NormKey, Param, PropertyDecl, Receiver, RefKind, ScalarType, Scope,
+    ScopeOwner, SourceTree, StaticClass, Stmt, StmtKind, ThrowKind, ThrowOrigin, TypeMember, Visibility,
+    normalize_array, php_canonical_int_string,
 };
 
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, StringLit, TypeKind as PKind};
@@ -7394,7 +7394,7 @@ fn walk_trace(
         // 4. After the statement, invalidate any variable handed to a call — except
         // one an assertion just narrowed (its post-call fact is known), and except
         // one every occurrence of which is a proven by-value argument (ADR-0070).
-        let by_value = by_value_survivors(cx, scope, stmt, env, store);
+        let by_value = by_value_survivors(cx, scope.poisoned, &stmt.invalidated, env, store);
         for v in &stmt.invalidated {
             if asserted.contains(&v.name) || by_value.contains(v.name.as_str()) {
                 continue;
@@ -7422,6 +7422,12 @@ fn walk_trace(
 
 /// The variables `stmt` hands to a call whose facts nevertheless **survive** it
 /// (ADR-0070) — the precise reading of the blanket `Stmt::invalidated` drop.
+///
+/// Takes the evidence rather than the statement, because two positions carry
+/// it: a statement's [`Stmt::invalidated`], and a comparison operand's
+/// [`CondOperand::Other`] `sites` (issue #158 — `count($a) === count($b)` hands
+/// `$a` to the same by-value parameter `count($a);` does, and the branch has the
+/// same right to keep its shape).
 ///
 /// # Why anything may survive at all
 ///
@@ -7503,18 +7509,18 @@ fn walk_trace(
 /// decide identically, with or without PHP.
 fn by_value_survivors<'s>(
     cx: &Cx<'_>,
-    scope: &Scope,
-    stmt: &'s Stmt,
+    poisoned: bool,
+    invalidated: &'s [InvalidatedVar],
     env: &HashMap<String, Known>,
     store: &Store,
 ) -> HashSet<&'s str> {
     let mut kept: HashSet<&'s str> = HashSet::new();
     // Condition 4 (this scope's half): every scope on the ADR-0001 give-up list
     // keeps the blanket drop outright.
-    if scope.poisoned {
+    if poisoned {
         return kept;
     }
-    for entry in &stmt.invalidated {
+    for entry in invalidated {
         // An opaque entry has an unprovable occurrence somewhere in the
         // statement — the lowering already discarded whatever provable sites
         // the name had, so no protection may be granted (the blanket drop).
@@ -9660,7 +9666,7 @@ fn walk_if(
     // clones (a call in either operand may have executed on the excluded path too).
     let guard_calls: Vec<&CallExpr> = collect_guard_calls_any(cond);
     escape_and_sweep_calls(w, &guard_calls, store);
-    for v in cond_invalidations(w.cx, cond, env, store) {
+    for v in cond_invalidations(w.cx, cond, env, store, poisoned) {
         env.remove(&v);
         store.unbind(&v);
     }
@@ -9691,22 +9697,13 @@ fn walk_if(
         for (call, returns_true) in then_calls {
             let kind = if returns_true { AssertKind::IfTrue } else { AssertKind::IfFalse };
             apply_guard_asserts(w, call, kind, &mut benv, &mut bclasses);
-            // Out-parameter seed (ADR-0077): a truthy result is the callee's own
-            // witness that it performed its by-ref write, and the ONLY branch where
-            // the written fact is sound — `preg_match` on an uncompilable pattern
-            // returns `false` and writes nothing at all. Runs after the invalidation
-            // of step 2 and rebinds what it forgot (§3.4).
-            if returns_true {
-                for (var, fact) in out_param_seed(w, folder, call, &benv) {
-                    seed_out_param(&var, fact, guard_call_line(w, call), &mut benv, &mut bclasses);
-                }
-            }
             // Guard-respect leg (ADR-0049 §4): a positive existence guard vouches its
             // symbol on the branch where it holds true, silencing the absence family.
             if returns_true && let Some(v) = existence_vouch(w.cx, &bclasses, call) {
                 bclasses.vouch(v);
             }
         }
+        seed_out_params(w, folder, cond, true, &mut benv, &mut bclasses);
         if walk_trace(w, folder, then_trace, &mut benv, &mut bclasses, descent, facts, true, out)
             == Flow::FellThrough
         {
@@ -9727,22 +9724,18 @@ fn walk_if(
         for (call, returns_true) in else_calls {
             let kind = if returns_true { AssertKind::IfTrue } else { AssertKind::IfFalse };
             apply_guard_asserts(w, call, kind, &mut benv, &mut bclasses);
-            // The same seed on the other side of the branch, for the same reason and
-            // under the same condition: `if (!preg_match($re, $s, $m)) { return; }`
-            // reaches its else-branch — and everything after it — with the call
-            // proven truthy (ADR-0077 §3.1). The polarity flag, not the branch, is
-            // what decides.
-            if returns_true {
-                for (var, fact) in out_param_seed(w, folder, call, &benv) {
-                    seed_out_param(&var, fact, guard_call_line(w, call), &mut benv, &mut bclasses);
-                }
-            }
             // Guard-respect leg (ADR-0049 §4): the negated-guard branch where the
             // predicate holds true (`if (!method_exists(...)) {} else <here>`) vouches too.
             if returns_true && let Some(v) = existence_vouch(w.cx, &bclasses, call) {
                 bclasses.vouch(v);
             }
         }
+        // The same seed on the other side of the branch, for the same reason and
+        // under the same condition: `if (!preg_match($re, $s, $m)) { return; }`
+        // reaches its else-branch — and everything after it — with the call
+        // proven truthy (ADR-0077 §3.1). The branch is not what decides; the
+        // polarity the witness survives under is.
+        seed_out_params(w, folder, cond, false, &mut benv, &mut bclasses);
         if walk_else(w, folder, elseifs, else_trace, &mut benv, &mut bclasses, descent, facts, out)
             == Flow::FellThrough
         {
@@ -10241,7 +10234,8 @@ fn eval_cond(
             if va == Certainty::No {
                 return Certainty::No;
             }
-            let (benv, bstore) = threaded_operand_env(w.cx, a, true, env, store, w.cx.php_minor);
+            let (benv, bstore) =
+                threaded_operand_env(w.cx, a, true, env, store, w.cx.php_minor, poisoned);
             va.and(eval_cond(w, folder, b, &benv, &bstore, poisoned))
         }
         CondExpr::Or(a, b) => {
@@ -10250,7 +10244,8 @@ fn eval_cond(
             if va == Certainty::Yes {
                 return Certainty::Yes;
             }
-            let (benv, bstore) = threaded_operand_env(w.cx, a, false, env, store, w.cx.php_minor);
+            let (benv, bstore) =
+                threaded_operand_env(w.cx, a, false, env, store, w.cx.php_minor, poisoned);
             va.or(eval_cond(w, folder, b, &benv, &bstore, poisoned))
         }
         // A foldable existence predicate in guard position folds to a Yes/No/Maybe
@@ -10618,6 +10613,7 @@ fn threaded_operand_env(
     env: &HashMap<String, Known>,
     store: &Store,
     php_minor: Option<(u16, u16)>,
+    poisoned: bool,
 ) -> (HashMap<String, Known>, Store) {
     let mut benv = env.clone();
     let mut bstore = store.clone();
@@ -10632,7 +10628,7 @@ fn threaded_operand_env(
     // The operand's own side effects land *after* its test narrowed (a by-ref call
     // in the operand may rebind a variable the test just constrained): forget them
     // so the right operand's verdict reads the post-`operand` env, not a stale one.
-    for v in cond_invalidations(cx, operand, env, store) {
+    for v in cond_invalidations(cx, operand, env, store, poisoned) {
         benv.remove(&v);
         bstore.unbind(&v);
     }
@@ -10657,8 +10653,8 @@ fn eval_ternary_fact(
     // `$c ? A : B` — `A` runs only when `$c` was truthy (so it sees
     // `then_refinements($c)`), `B` only when `$c` was falsy (`else_refinements`).
     // The arm-selection verdict logic is unchanged; only the arm *envs* thread.
-    let (tenv, _) = threaded_operand_env(w.cx, cond, true, env, store, w.cx.php_minor);
-    let (eenv, _) = threaded_operand_env(w.cx, cond, false, env, store, w.cx.php_minor);
+    let (tenv, _) = threaded_operand_env(w.cx, cond, true, env, store, w.cx.php_minor, poisoned);
+    let (eenv, _) = threaded_operand_env(w.cx, cond, false, env, store, w.cx.php_minor, poisoned);
     match verdict {
         Certainty::Yes => {
             w.cx
@@ -11335,6 +11331,99 @@ fn collect_guard_calls<'a>(cond: &'a CondExpr, then: bool, out: &mut Vec<(&'a Ca
     }
 }
 
+/// The calls this branch proves returned a **truthy** value — the witness the
+/// out-parameter seed (ADR-0077 §3.2) consumes, in source order.
+///
+/// Its `&&`/`||`/`!` distribution is [`collect_guard_calls`]', and for a call in
+/// guard position it selects exactly the same calls that function's `returns_true`
+/// flag did. What it adds is the **compared** call: `preg_match($re, $s, $m) === 1`
+/// proves the result is `1`, which is as truthy as a bare `preg_match(…)` guard
+/// proves it, and PHPStan types both.
+///
+/// Kept apart from [`collect_guard_calls`] deliberately, because the two ask
+/// different questions. `@phpstan-assert-if-true` is stated about the callee
+/// *returning `true`*, and `f($x) === 1` does not witness that — `1` is truthy
+/// but is not `true`. Feeding compared calls into the assert consumption would
+/// silently widen every envelope in the project; feeding them into the seed only
+/// asserts what the comparison itself proved.
+fn collect_truthy_calls<'a>(
+    cond: &'a CondExpr,
+    then: bool,
+    php_minor: Option<(u16, u16)>,
+    out: &mut Vec<&'a CallExpr>,
+) {
+    match cond {
+        CondExpr::Call { call, .. } if then => out.push(call),
+        CondExpr::Cmp { op, lhs, rhs } => {
+            out.extend(cmp_truthy_witness(*op, lhs, rhs, then, php_minor));
+        }
+        CondExpr::Not(c) => collect_truthy_calls(c, !then, php_minor, out),
+        CondExpr::And(a, b) if then => {
+            collect_truthy_calls(a, true, php_minor, out);
+            collect_truthy_calls(b, true, php_minor, out);
+        }
+        CondExpr::Or(a, b) if !then => {
+            collect_truthy_calls(a, false, php_minor, out);
+            collect_truthy_calls(b, false, php_minor, out);
+        }
+        _ => {}
+    }
+}
+
+/// The call a comparison proves truthy on this branch polarity, or `None`.
+///
+/// The test is not a table of blessed shapes — it is the claim itself, checked:
+/// **every** value that satisfies the comparison must be truthy, i.e. no falsy
+/// value may satisfy it. PHP's falsy values are a finite, enumerable set
+/// ([`FALSY_LITERALS`]), and the comparison semantics are the ones the evaluator
+/// already implements, so the question is answered by running each falsy value
+/// through [`eval_cmp`] rather than by reasoning about operators in prose.
+///
+/// It lands where it should: `f() === 1` and `f() == 1` prove truthy on the then
+/// branch (nothing falsy is identical or loosely equal to `1`); `f() !== 1` and
+/// `f() != 1` prove it on the *else* branch (every falsy value differs from `1`,
+/// so none of them survives the negation); `f() === 0`, `f() !== false` and
+/// `f() === ''` prove nothing, on either branch.
+fn cmp_truthy_witness<'a>(
+    op: CmpOp,
+    lhs: &'a CondOperand,
+    rhs: &'a CondOperand,
+    then: bool,
+    php_minor: Option<(u16, u16)>,
+) -> Option<&'a CallExpr> {
+    let (call, lit) = match (lhs, rhs) {
+        (CondOperand::Other { call, .. }, CondOperand::Literal(v))
+        | (CondOperand::Literal(v), CondOperand::Other { call, .. }) => (call.as_deref()?, v),
+        _ => return None,
+    };
+    // On the then branch the comparison held, so a falsy result must be one the
+    // comparison *rejects*; on the else branch it failed, so a falsy result must
+    // be one it *accepts*. Anything undecidable (`Maybe`) refuses, silently.
+    let excluded = if then { Certainty::No } else { Certainty::Yes };
+    falsy_literals()
+        .iter()
+        .all(|f| {
+            eval_cmp(op, std::slice::from_ref(f), std::slice::from_ref(lit), php_minor) == excluded
+        })
+        .then_some(call)
+}
+
+/// Every falsy value in PHP, as a literal. The list is exhaustive by the language
+/// definition — `null`, `false`, `0`, `0.0`, `''`, `'0'` and the empty array —
+/// and [`php_truthy`] is its other half (each of these is a value it answers
+/// `Some(false)` for, and nothing else is).
+fn falsy_literals() -> [ArgValue; 7] {
+    [
+        ArgValue::Null,
+        ArgValue::Bool(false),
+        ArgValue::Int(0),
+        ArgValue::Float(0.0),
+        ArgValue::Str(String::new()),
+        ArgValue::Str("0".to_owned()),
+        ArgValue::Array(Vec::new()),
+    ]
+}
+
 /// Every retained guard call anywhere in the condition (both polarities), for the
 /// position-sequenced escape/sweep and by-ref invalidation that apply on *every*
 /// resulting path (a call in either operand may have executed on the excluded path).
@@ -11347,12 +11436,28 @@ fn collect_guard_calls_any(cond: &CondExpr) -> Vec<&CallExpr> {
 fn collect_all_calls<'a>(cond: &'a CondExpr, out: &mut Vec<&'a CallExpr>) {
     match cond {
         CondExpr::Call { call, .. } => out.push(call),
+        // A call in a comparison/`instanceof` operand escapes its arguments and
+        // sweeps their props exactly as one in guard position does (issue #158 —
+        // the same traversal gap that lost the by-ref invalidation).
+        CondExpr::Cmp { lhs, rhs, .. } => {
+            out.extend(operand_call(lhs));
+            out.extend(operand_call(rhs));
+        }
+        CondExpr::Instanceof { operand, .. } => out.extend(operand_call(operand)),
         CondExpr::Not(c) => collect_all_calls(c, out),
         CondExpr::And(a, b) | CondExpr::Or(a, b) => {
             collect_all_calls(a, out);
             collect_all_calls(b, out);
         }
         _ => {}
+    }
+}
+
+/// The resolvable call an operand **is**, when it is one.
+fn operand_call(operand: &CondOperand) -> Option<&CallExpr> {
+    match operand {
+        CondOperand::Other { call, .. } => call.as_deref(),
+        _ => None,
     }
 }
 
@@ -12443,6 +12548,33 @@ fn guard_call_line(w: &WalkCx, call: &CallExpr) -> u32 {
     w.cx.tree().position(call.span.start).line
 }
 
+/// Seed the out-parameters of every call this branch proves returned truthy
+/// (ADR-0077), in source order.
+///
+/// A truthy result is the callee's own witness that it performed its by-ref
+/// write, and the ONLY branch where the written fact is sound — `preg_match` on
+/// an uncompilable pattern returns `false` and writes nothing at all. Runs after
+/// the invalidation of `walk_if` step 2 and rebinds what it forgot (§3.4), and
+/// after the branch's assert narrowings, so an explicit `@phpstan-assert`
+/// envelope is not silently overwritten by a seed at a further call in the same
+/// condition.
+fn seed_out_params(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    cond: &CondExpr,
+    then: bool,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    let mut calls = Vec::new();
+    collect_truthy_calls(cond, then, w.cx.php_minor, &mut calls);
+    for call in calls {
+        for (var, fact) in out_param_seed(w, folder, call, env) {
+            seed_out_param(&var, fact, guard_call_line(w, call), env, store);
+        }
+    }
+}
+
 /// The [`Known::bound`] provenance an out-parameter seed stamps (ADR-0077), read
 /// as the clause it becomes: "from `$m`, written by the guard call on this
 /// branch". Both halves of the claim are in it — the fact is the callee's, and it
@@ -12955,9 +13087,10 @@ fn cond_invalidations(
     cond: &CondExpr,
     env: &HashMap<String, Known>,
     store: &Store,
+    poisoned: bool,
 ) -> Vec<String> {
     let mut out = Vec::new();
-    collect_cond_opaque_reads(cx, cond, &mut out);
+    collect_cond_opaque_reads(cx, cond, &CondEnv { env, store, poisoned }, &mut out);
     let mut pure = Vec::new();
     collect_pure_guard_bases(cx, cond, &mut pure);
     for v in pure {
@@ -12988,6 +13121,25 @@ fn collect_pure_guard_bases(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) {
                 }
             }
         }
+        // A pure predicate keeps its exemption when it is *compared* rather than
+        // tested (`array_is_list($x) === true`): position within the condition
+        // does not change what a call can do, in either direction.
+        CondExpr::Cmp { lhs, rhs, .. } => {
+            for operand in [lhs, rhs] {
+                let CondOperand::Other { call: Some(call), invalidates, .. } = operand else {
+                    continue;
+                };
+                if array_guard_predicate(cx, call).is_some()
+                    || array_all_any_predicate(cx, call).is_some()
+                {
+                    for r in invalidates {
+                        if !out.contains(r) {
+                            out.push(r.clone());
+                        }
+                    }
+                }
+            }
+        }
         CondExpr::Not(c) => collect_pure_guard_bases(cx, c, out),
         CondExpr::And(a, b) | CondExpr::Or(a, b) => {
             collect_pure_guard_bases(cx, a, out);
@@ -13011,33 +13163,17 @@ fn shape_lane_present(var: &str, env: &HashMap<String, Known>, store: &Store) ->
         .is_some_and(|arms| arms.iter().any(|a| steins_contract::to_shape_fact(&a.ty).is_some()))
 }
 
-fn collect_cond_opaque_reads(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) {
+/// The walk-local state the operand arm of [`collect_cond_opaque_reads`] needs
+/// to run ADR-0070's by-value gate — everything the gate asks that the condition
+/// itself cannot answer.
+struct CondEnv<'a> {
+    env: &'a HashMap<String, Known>,
+    store: &'a Store,
+    poisoned: bool,
+}
+
+fn collect_cond_opaque_reads(cx: &Cx, cond: &CondExpr, ce: &CondEnv, out: &mut Vec<String>) {
     match cond {
-        // A recognized pure array builtin mutates nothing; its bases are decided
-        // by `collect_pure_guard_bases` + the shape-lane test instead. `array_all`/
-        // `array_any` (A8) join this set: neither parameter is by-ref in PHP's own
-        // signature, so the base array is exactly as safe as `array_is_list`'s —
-        // any *other* alias risk (a callback closing over the base by reference)
-        // is still caught, because `collect_pure_guard_bases` only exempts a read
-        // that also carries the shape lane, and a by-ref-captured var generally
-        // won't.
-        CondExpr::Call { call, .. }
-            if array_guard_predicate(cx, call).is_some()
-                || array_all_any_predicate(cx, call).is_some() => {}
-        // **The DR2 exemption, and why it is unconditional** (unlike S8's, which is
-        // gated on the shape lane). The `is_*` family and `in_array` declare every
-        // parameter BY VALUE in PHP's own signature and are side-effect free, so a
-        // guard call cannot have changed the base between the test and the branch.
-        // S8 kept its exemption shape-lane-gated because lifting it wholesale would
-        // let *any* proven fact survive a guard for the first time; here the base's
-        // scalar fact surviving is the entire point of the slice — and every finding
-        // it can premise is true by construction, because the value the branch sees
-        // is the value the predicate tested. A base mentioned by any OTHER call in
-        // the same condition is still forgotten: that mention is what might mutate
-        // it, and it is collected by the general arm below.
-        CondExpr::Call { call, .. }
-            if type_predicate(cx, call).is_some()
-                || in_array_literals(cx, call, cx.php_minor).is_some() => {}
         // An opaque condition may mutate any variable it reads by reference — the
         // whole read-set is forgotten (the conservative floor, unchanged).
         CondExpr::Opaque { reads } => {
@@ -13047,31 +13183,125 @@ fn collect_cond_opaque_reads(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) {
                 }
             }
         }
-        // A retained guard call forgets its by-ref arguments and every nested
-        // by-ref mention — but NOT a pure method receiver (`$x` in `$x->m()` is not
-        // rebound by the call, only its object's props are swept; ADR-0052 §6 payoff
-        // (i)). The receiver survives only when it is not also handed in as an
-        // argument (`$x->m($x)` passes it by value/ref, so it is still forgotten).
-        CondExpr::Call { call, reads } => {
-            let recv = call_method_receiver_var(call);
-            let recv_is_arg = recv.is_some_and(|r| {
-                call.args.iter().any(|a| matches!(&a.value, ArgValue::Var(v) if v == r))
-            });
-            for r in reads {
-                if Some(r.as_str()) == recv && !recv_is_arg {
-                    continue;
-                }
-                if !out.contains(r) {
-                    out.push(r.clone());
-                }
-            }
+        CondExpr::Call { call, reads } => collect_call_opaque_reads(cx, call, reads, out),
+        // **Operand position** (issue #158). A call does not become harmless by
+        // sitting inside a comparison: `preg_match($re, $s, $m) === 1` writes
+        // `$m` exactly as the bare `preg_match($re, $s, $m)` guard does, and
+        // before this arm existed the walk had nothing to forget — an earlier
+        // `$m = []` survived into the branch and was reported there as `list{}`,
+        // a false fact on a reachable path. The rule is the one-liner it should
+        // always have been: **an operand's writes are judged by the same policy
+        // as a guard call's, because position within the condition changes
+        // nothing about what a call can do.**
+        CondExpr::Cmp { lhs, rhs, .. } => {
+            collect_operand_opaque_reads(cx, lhs, ce, out);
+            collect_operand_opaque_reads(cx, rhs, ce, out);
         }
-        CondExpr::Not(c) => collect_cond_opaque_reads(cx, c, out),
+        // `f($x, $m) instanceof Foo` — the same gap, reached through the other
+        // operand-carrying variant. (`Truthy`'s operand can only be an `Offset`
+        // here: `lower_cond` routes a call or any other unrepresentable
+        // condition to `Call`/`Opaque` before it can become a `Truthy(Other)`.)
+        CondExpr::Instanceof { operand, .. } => {
+            collect_operand_opaque_reads(cx, operand, ce, out);
+        }
+        CondExpr::Not(c) => collect_cond_opaque_reads(cx, c, ce, out),
         CondExpr::And(a, b) | CondExpr::Or(a, b) => {
-            collect_cond_opaque_reads(cx, a, out);
-            collect_cond_opaque_reads(cx, b, out);
+            collect_cond_opaque_reads(cx, a, ce, out);
+            collect_cond_opaque_reads(cx, b, ce, out);
         }
         _ => {}
+    }
+}
+
+/// The invalidation a comparison/`instanceof` operand contributes: nothing for
+/// the modelled variants (a bare variable, a literal, a constant-key projection,
+/// a constant fetch — none of them writes), and for [`CondOperand::Other`]
+/// whatever its write set earns under the guard-call policy above, **minus what
+/// ADR-0070's by-value gate proves the callee could not reach**.
+///
+/// The gate runs here and not on [`CondExpr::Call`] because this is where the
+/// floor is being chosen for the first time. The blanket read-set drop in guard
+/// position is pre-existing and measured, and lifting it would let facts survive
+/// guards that never let them through before — a precision change with its own
+/// FP exposure and its own measurement run. Choosing the *precise* sound rule
+/// for a path that had no rule at all costs nothing and keeps 191 nsrt
+/// observations (`count($listA) === count($listB)`, `strstr($s, 'a') === 'b'`)
+/// that the missing invalidation had been holding up.
+fn collect_operand_opaque_reads(
+    cx: &Cx,
+    operand: &CondOperand,
+    ce: &CondEnv,
+    out: &mut Vec<String>,
+) {
+    let CondOperand::Other { call, invalidates, sites } = operand else { return };
+    let mut floor = Vec::new();
+    match call {
+        // The operand *is* a resolvable call: it gets every exemption a guard
+        // call gets, including the by-value predicate families and the
+        // method-receiver survival.
+        Some(call) => collect_call_opaque_reads(cx, call, invalidates, &mut floor),
+        // A write the lowering could not name a callee for — a dynamic call, a
+        // call nested inside arithmetic, an assignment or an increment
+        // (`($x = f()) === 1`, `$i++ === 5`). No call-shaped exemption applies to
+        // something this walk cannot identify, so the whole set is the floor.
+        None => floor = invalidates.clone(),
+    }
+    let survivors = by_value_survivors(cx, ce.poisoned, sites, ce.env, ce.store);
+    for r in floor {
+        if !survivors.contains(r.as_str()) && !out.contains(&r) {
+            out.push(r);
+        }
+    }
+}
+
+/// One retained call's contribution to the invalidation set — **the single
+/// policy for what a call in a condition forgets**, wherever in the condition it
+/// sits (guard position, or an operand of a comparison/`instanceof`).
+///
+/// The general rule is its `reads`, minus the pure method receiver (`$x` in
+/// `$x->m()` is not rebound by the call, only its object's props are swept;
+/// ADR-0052 §6 payoff (i)) — which survives only when it is not also handed in
+/// as an argument (`$x->m($x)` passes it by value/ref, so it is still
+/// forgotten). Two families are exempt outright:
+///
+/// **The S4 exemption.** A recognized pure array builtin mutates nothing; its
+/// bases are decided by [`collect_pure_guard_bases`] + the shape-lane test
+/// instead. `array_all`/`array_any` (A8) join this set: neither parameter is
+/// by-ref in PHP's own signature, so the base array is exactly as safe as
+/// `array_is_list`'s — any *other* alias risk (a callback closing over the base
+/// by reference) is still caught, because `collect_pure_guard_bases` only
+/// exempts a read that also carries the shape lane, and a by-ref-captured var
+/// generally won't.
+///
+/// **The DR2 exemption, and why it is unconditional** (unlike S4's, which is
+/// gated on the shape lane). The `is_*` family and `in_array` declare every
+/// parameter BY VALUE in PHP's own signature and are side-effect free, so a
+/// guard call cannot have changed the base between the test and the branch.
+/// S4 kept its exemption shape-lane-gated because lifting it wholesale would
+/// let *any* proven fact survive a guard for the first time; here the base's
+/// scalar fact surviving is the entire point of the slice — and every finding
+/// it can premise is true by construction, because the value the branch sees
+/// is the value the predicate tested. A base mentioned by any OTHER call in
+/// the same condition is still forgotten: that mention is what might mutate
+/// it, and it is collected by that call's own visit.
+fn collect_call_opaque_reads(cx: &Cx, call: &CallExpr, reads: &[String], out: &mut Vec<String>) {
+    if array_guard_predicate(cx, call).is_some()
+        || array_all_any_predicate(cx, call).is_some()
+        || type_predicate(cx, call).is_some()
+        || in_array_literals(cx, call, cx.php_minor).is_some()
+    {
+        return;
+    }
+    let recv = call_method_receiver_var(call);
+    let recv_is_arg = recv
+        .is_some_and(|r| call.args.iter().any(|a| matches!(&a.value, ArgValue::Var(v) if v == r)));
+    for r in reads {
+        if Some(r.as_str()) == recv && !recv_is_arg {
+            continue;
+        }
+        if !out.contains(r) {
+            out.push(r.clone());
+        }
     }
 }
 

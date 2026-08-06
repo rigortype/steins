@@ -1594,8 +1594,42 @@ pub enum CondOperand {
     /// against the resolved target range. Other consumers derive no verdict or
     /// refinement from it.
     Const(NameRef),
-    /// Anything else (a call, a property fetch, an arithmetic sub-expression, …).
-    Other,
+    /// Anything else (a call, a property fetch, an arithmetic sub-expression, …)
+    /// — unrepresentable for the *verdict*, but never opaque about what it did.
+    ///
+    /// A comparison operand is a position where arbitrary PHP runs, and the
+    /// operand variants above cannot say so: before these two fields existed,
+    /// `preg_match($re, $s, $m) === 1` lowered to a `Cmp` that mentioned neither
+    /// the call nor `$m`, so the branch walk had nothing to invalidate and an
+    /// earlier `$m = []` survived into the branch as a false `list{}` (issue
+    /// #158). What is unmodeled here is the operand's *value*, not its effects.
+    Other {
+        /// The call this operand **is**, when it is a statically-resolvable one
+        /// (`named_call` — the same recognition [`CondExpr::Call`] uses in
+        /// guard position). `None` for a dynamic callee and for an operand that
+        /// merely *contains* a call (`f($x) + 1`), whose invalidation still
+        /// lands through `invalidates`.
+        call: Option<Box<CallExpr>>,
+        /// The variables a write inside this operand may have rebound — the
+        /// operand's **invalidation set**, and deliberately not "every variable
+        /// it mentions": it is empty unless the subtree contains something that
+        /// can write a variable of this scope at all
+        /// (`operand_writers`). `$o->p === $s` writes nothing, so `$o` and
+        /// `$s` keep their facts across it; `f($o->p) === $s` may write both.
+        invalidates: Vec<String>,
+        /// The ADR-0070 by-value evidence for the names in `invalidates`, in the
+        /// shape [`Stmt::invalidated`] carries it — so a fact the callee provably
+        /// cannot reach (`count($a) === count($b)` hands `$a` and `$b` to a
+        /// by-value parameter) survives the comparison, exactly as it survives a
+        /// statement-position call.
+        ///
+        /// **Empty means no exemption may be granted**, and it is empty whenever
+        /// the operand contains a writer that is not a call
+        /// (`OperandWriters::Any`): the gate describes what a *callee* can do
+        /// to its arguments and says nothing about an assignment or an `++`
+        /// sitting beside it, so `f($y) + ($y = 1)` keeps the blanket drop.
+        sites: Vec<InvalidatedVar>,
+    },
 }
 
 /// A small lowered condition language (ADR-0031). The trace evaluator
@@ -6237,7 +6271,7 @@ fn lower_switch(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
 /// whether a `match`/`switch` can be structured at all.
 fn usable_operand(expr: &Expression<'_>) -> Option<CondOperand> {
     match lower_cond_operand(expr) {
-        CondOperand::Other => None,
+        CondOperand::Other { .. } => None,
         operand => Some(operand),
     }
 }
@@ -6375,7 +6409,12 @@ fn lower_cond(expr: &Expression<'_>) -> CondExpr {
             // other unmodeled condition stays `Opaque`. `Call` and `Opaque` are
             // interchangeable for the verdict and the invalidation set — the only
             // added behavior is the tag consumption in the branch walk.
-            CondOperand::Other => {
+            // The whole-condition position keeps the conservative floor: `reads`
+            // here is every variable the condition mentions, not the narrower
+            // `CondOperand::Other::invalidates` set. Widening this one to match
+            // would be a precision change (`if ($o->p)` would stop forgetting
+            // `$o`) with its own measurement, and it is not what issue #158 is.
+            CondOperand::Other { .. } => {
                 let reads = cond_reads(other);
                 match named_call(other) {
                     Some(call) => CondExpr::Call { call: Box::new(call), reads },
@@ -6404,12 +6443,15 @@ fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
         let lhs = lower_cond_operand(b.lhs);
         let rhs = lower_cond_operand(b.rhs);
         // Ordering comparisons (`<`/`<=`/`>`/`>=`) are only useful for guard
-        // refinement when one side is a bare variable and the other a literal;
-        // an unrepresentable operand would otherwise silently drop the reads it
-        // may mutate by reference, so fall back to `Opaque` (collecting reads).
+        // refinement when one side is a bare variable and the other a literal,
+        // so an unrepresentable operand falls back to `Opaque` (collecting
+        // reads). Since issue #158 a `CondOperand::Other` no longer drops what
+        // it may write, so this arm is now about *refinement value*, not
+        // soundness — lifting it would let `preg_match($re, $s, $m) > 0` reach
+        // the out-parameter seed, which is a precision change of its own.
         let ordering = matches!(op, CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge);
         if ordering
-            && (matches!(lhs, CondOperand::Other) || matches!(rhs, CondOperand::Other))
+            && (matches!(lhs, CondOperand::Other { .. }) || matches!(rhs, CondOperand::Other { .. }))
         {
             let mut reads = Vec::new();
             collect_read_vars(&Node::Expression(b.lhs), &[], &mut reads);
@@ -6499,9 +6541,86 @@ fn lower_cond_operand(expr: &Expression<'_>) -> CondOperand {
             // non-concrete array (an element that is a `Var`/call/offset read) stays
             // `Other`, so nothing unproven is ever treated as a decided literal.
             v if v.is_concrete_value() => CondOperand::Literal(v),
-            _ => CondOperand::Other,
+            _ => {
+                // The invalidation set is collected only when the operand can
+                // write at all — `$o->p === 1` reads `$o` and rebinds nothing,
+                // and forgetting there would be a precision loss with no
+                // soundness content (issue #158).
+                let node = Node::Expression(other);
+                let writers = operand_writers(&node);
+                CondOperand::Other {
+                    call: named_call(other).map(Box::new),
+                    invalidates: match writers {
+                        OperandWriters::None => Vec::new(),
+                        _ => cond_reads(other),
+                    },
+                    sites: match writers {
+                        OperandWriters::Calls => call_invalidation(&node),
+                        _ => Vec::new(),
+                    },
+                }
+            }
         },
     }
+}
+
+/// What, if anything, in an operand subtree can **rebind a variable of the
+/// enclosing scope** (issue #158) — the question behind both
+/// [`CondOperand::Other`] fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperandWriters {
+    /// Nothing can: the operand reads and returns. A property or offset read,
+    /// arithmetic, concatenation, a cast, `isset`/`empty`/`print` are all this.
+    None,
+    /// Only calls and `new` — each may declare a parameter `&$x` and write
+    /// through the caller's binding (`preg_match($re, $s, $m)`), and each is
+    /// describable by the ADR-0070 by-value evidence.
+    Calls,
+    /// A writer the by-value evidence does not describe: an assignment in any
+    /// form (`($x = f()) === 1`), an increment/decrement prefix or postfix
+    /// (`$i++ === 5` — the branch sees the incremented `$i`, never the tested
+    /// one), or `eval`/`include`/`require`, which run statements in this very
+    /// frame.
+    Any,
+}
+
+/// Classify an operand subtree's writers. A nested function-like is a separate
+/// scope whose body does not run here, exactly as [`collect_read_vars`] treats
+/// it (and a closure that *is* invoked is a `Node::Call` at the invocation).
+fn operand_writers(node: &Node<'_, '_>) -> OperandWriters {
+    match node {
+        Node::Assignment(_)
+        | Node::UnaryPostfix(_)
+        | Node::EvalConstruct(_)
+        | Node::IncludeConstruct(_)
+        | Node::IncludeOnceConstruct(_)
+        | Node::RequireConstruct(_)
+        | Node::RequireOnceConstruct(_) => return OperandWriters::Any,
+        Node::UnaryPrefix(u) if u.operator.is_increment_or_decrement() => {
+            return OperandWriters::Any;
+        }
+        // Nested scopes are their own concern — their bodies do not run here.
+        Node::Function(_)
+        | Node::Closure(_)
+        | Node::ArrowFunction(_)
+        | Node::AnonymousClass(_)
+        | Node::Class(_)
+        | Node::Interface(_)
+        | Node::Trait(_)
+        | Node::Enum(_) => return OperandWriters::None,
+        _ => {}
+    }
+    // A call still has to be descended: `f($x = 1)` is both.
+    let seen_call = matches!(node, Node::Call(_) | Node::Instantiation(_));
+    let mut worst = if seen_call { OperandWriters::Calls } else { OperandWriters::None };
+    for child in node.children() {
+        match operand_writers(&child) {
+            OperandWriters::Any => return OperandWriters::Any,
+            OperandWriters::Calls => worst = OperandWriters::Calls,
+            OperandWriters::None => {}
+        }
+    }
+    worst
 }
 
 /// The bare variables a condition subtree reads (for the opaque-condition read-set
