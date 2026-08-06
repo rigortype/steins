@@ -46,7 +46,10 @@
 //! declaration-ordered by their caller; [`dedup_arms`] is order-stable.
 
 use crate::{CField, CKey, ContractTy, MixedCut, admits_fact, admits_val};
-use steins_domain::{Base, Certainty, Fact, IntRange, Refinement, StrPreds, Val};
+use steins_domain::{
+    Base, Certainty, Fact, IntRange, Key, KeyClass, Presence, Refinement, ShapeFact, StrPreds,
+    Tail, Val,
+};
 
 /// The set a guard's negative information removes from an arm list (ADR-0052
 /// §2). Judged arm-wise by [`subtract`] / [`subtract_arm`]: an arm dies iff
@@ -679,16 +682,22 @@ fn vs_shape(a: &ContractTy, bv: &ShapeView<'_>) -> Certainty {
 
 /// `list<T> ⊇ array{…}` (ADR-0071 §2.1, `Shape`'s `ListOf` row).
 ///
-/// `Yes` only for a **positional** `b` (`list{…}`): a keyed `b` with keys
-/// `0..n-1` still has order-agnostic realizations (#14939) that are not lists —
-/// `array{0: int, 1: string}` admits `[1 => 's', 0 => 1]` — so it stays `Maybe`.
-/// `No` when a required string key makes every `b`-member a non-list.
+/// `Yes`-eligibility is **denotational** (issue #161): either `b` is positional
+/// (`list{…}` — the spelling itself asserts the sequence), or `b`'s key
+/// structure alone proves every realization a list ([`keys_prove_list`], the
+/// domain's own judgment). The keys decide, not the keyword: `array{null}` and
+/// `list{null}` denote the same set and get the same answer.
+///
+/// A keyed `b` whose realizations can hold two keys still stays `Maybe`: an
+/// `array{…}` key set is order-agnostic (#14939), so `array{0: int, 1: string}`
+/// admits `[1 => 's', 0 => 1]`, which is not a list. `No` when a required
+/// string key makes every `b`-member a non-list.
 fn list_vs_shape(elem: &ContractTy, bv: &ShapeView<'_>) -> Certainty {
     use Certainty::{Maybe, No, Yes};
     if bv.fields.iter().any(|f| !f.optional && matches!(f.key, CKey::Str(_))) {
         return No;
     }
-    if !bv.list {
+    if !bv.list && !keys_prove_list(bv) {
         return Maybe;
     }
     let fields_ok = bv.fields.iter().all(|f| covers(elem, &f.ty));
@@ -698,6 +707,43 @@ fn list_vs_shape(elem: &ContractTy, bv: &ShapeView<'_>) -> Certainty {
         Extras::Open => false,
     };
     if fields_ok && tail_ok { Yes } else { Maybe }
+}
+
+/// Does the key structure alone prove every realization of the shape a list?
+///
+/// **Routed to the domain rather than re-derived** (issue #161): the shape's
+/// key skeleton — keys, presence, sealing; value slots stay the unknown floor,
+/// which the judgment never reads — goes through [`ShapeFact::normalize`], and
+/// the answer is its denotational `is_list`. One definition of list-ness in
+/// the codebase, so the two layers cannot drift. An unsealed tail is passed as
+/// the widest key class it could admit; the `Yes` this caller consumes
+/// requires a sealed tail, so the widening cannot manufacture one.
+fn keys_prove_list(bv: &ShapeView<'_>) -> bool {
+    let fields = bv
+        .fields
+        .iter()
+        .map(|f| {
+            let key = match &f.key {
+                CKey::Int(i) => Key::Int(*i),
+                CKey::Str(s) => Key::Str(s.clone()),
+            };
+            let presence = if f.optional {
+                Presence::Optional
+            } else {
+                Presence::Required { witnessed: false }
+            };
+            (key, presence, None)
+        })
+        .collect();
+    let tail = match bv.tail {
+        Extras::Sealed => Tail::Sealed,
+        Extras::Open | Extras::Typed(..) => {
+            Tail::Unsealed { key: KeyClass::ArrayKey, value: None }
+        }
+    };
+    ShapeFact::normalize(fields, tail, Certainty::Maybe, bv.non_empty, Vec::new())
+        .is_list
+        .is_yes()
 }
 
 /// `array<K, V>` / `iterable<K, V>` `⊇ array{…}` (ADR-0071 §2.1, `Shape`'s
@@ -1552,6 +1598,83 @@ mod tests {
         // a list. Not refutable either (the in-order realization IS a list), so
         // the honest middle.
         assert_eq!(subsumes(&ty("list<int>"), &ty("array{0: int, 1: int}")), Certainty::Maybe);
+    }
+
+    #[test]
+    fn list_acceptance_does_not_depend_on_the_spelling_of_a_proven_key_set() {
+        // Issue #161: a sealed shape whose only possible key is `0` has no
+        // order-agnostic realization, so `array{null}` and `list{null}` denote
+        // the same set — the verdict must be the same, and it must be Yes.
+        for a in ["list<string|null>", "non-empty-list<string|null>"] {
+            let keyed = subsumes(&ty(a), &ty("array{null}"));
+            let positional = subsumes(&ty(a), &ty("list{null}"));
+            assert_eq!(keyed, positional, "{a}: the verdict read the keyword, not the keys");
+            assert_eq!(keyed, Certainty::Yes, "{a} must accept the single-key-0 sealed shape");
+        }
+        // The optional twin realizes `[]` and `[0 => v]` — both lists.
+        assert_eq!(subsumes(&ty("list<int>"), &ty("array{0?: int}")), Certainty::Yes);
+    }
+
+    #[test]
+    fn list_does_not_accept_a_shape_admitting_a_gapped_key_set() {
+        // The unsound direction of issue #161: optional keys admit gapped
+        // realizations — `[0 => 1, 2 => 1]` fails `array_is_list` (measured) —
+        // so a `Yes` here would be a wrong Yes, whatever the element types say.
+        assert_eq!(
+            subsumes(&ty("list<int>"), &ty("array{0?: int, 1?: int, 2: int}")),
+            Certainty::Maybe
+        );
+        assert_eq!(subsumes(&ty("list<int>"), &ty("array{0?: int, 2?: int}")), Certainty::Maybe);
+        // Two optional keys with no gap still admit `{1}` alone (`[1 => 1]`).
+        assert_eq!(subsumes(&ty("list<int>"), &ty("array{0?: int, 1?: int}")), Certainty::Maybe);
+    }
+
+    #[test]
+    fn list_acceptance_yes_agrees_with_the_domain_is_list_judgment() {
+        // The denotational eligibility is ROUTED through `ShapeFact::normalize`
+        // (one definition of list-ness); this matrix walks keyed spellings
+        // through both ends of the route — the acceptance relation on the
+        // lowered spelling, the domain on the same key skeleton — so the
+        // conversion between the layers cannot drift. `list{…}` spellings are
+        // excluded by design: the keyword adds order information the key set
+        // alone does not carry.
+        let cases: &[(&str, &[(i64, bool)], bool)] = &[
+            // (spelling, [(int key, required)], sealed)
+            ("array{null}", &[(0, true)], true),
+            ("array{0?: null}", &[(0, false)], true),
+            ("array{0: null, 1: null}", &[(0, true), (1, true)], true),
+            ("array{0?: null, 1?: null}", &[(0, false), (1, false)], true),
+            ("array{0?: null, 1?: null, 2: null}", &[(0, false), (1, false), (2, true)], true),
+            ("array{1: null}", &[(1, true)], true),
+            ("array{null, ...}", &[(0, true)], false),
+            ("array{null, ...<int, null>}", &[(0, true)], false),
+        ];
+        for (src, keys, sealed) in cases {
+            let fields = keys
+                .iter()
+                .map(|(k, required)| {
+                    let presence = if *required {
+                        Presence::Required { witnessed: false }
+                    } else {
+                        Presence::Optional
+                    };
+                    (Key::Int(*k), presence, None)
+                })
+                .collect();
+            let tail = if *sealed {
+                Tail::Sealed
+            } else {
+                Tail::Unsealed { key: KeyClass::ArrayKey, value: None }
+            };
+            let domain =
+                ShapeFact::normalize(fields, tail, Certainty::Maybe, false, Vec::new()).is_list;
+            let accepted = subsumes(&ty("list<null>"), &ty(src));
+            assert_eq!(
+                accepted.is_yes(),
+                domain.is_yes(),
+                "{src}: acceptance {accepted:?} disagrees with domain is_list {domain:?}"
+            );
+        }
     }
 
     #[test]

@@ -144,10 +144,13 @@ admits `[]`, so `non-empty` `a`-side flags refute with a witness.
   `covers_ne`, and for `nl`: Yes only with a required string-keyed
   field in `b` (else the list/`[]` realizations refute or stay
   Maybe).
-* `ListOf{T, ne}`: Yes iff `list'`, every field `ty ⊆ T`, and
+* `ListOf{T, ne}`: Yes iff `b` is proven all-list — `list'`, or the
+  domain's denotational `is_list` answers Yes on `b`'s key skeleton
+  (Amendment A, issue #161) — and every field `ty ⊆ T`, and
   `sealed'` or a typed tail with `tailV ⊆ T`; `covers_ne`. A keyed
-  (`¬list'`) `b` stays Maybe — its order-agnostic realizations
-  (#14939) need not be lists even when the keys are `0..n-1`.
+  `b` whose realizations can hold two keys stays Maybe — its
+  order-agnostic realizations (#14939) need not be lists even when
+  the keys are `0..n-1`.
 * `Shape{list, fields, sealed, ne, tail}`:
   * every **required** `a`-field must be guaranteed by `b`: a
     same-key `b`-field, required, with `b.ty ⊆ a.ty`; a `b`-optional
@@ -272,3 +275,33 @@ wrong `No` confined to seams where `No` is not a finding trigger (the
 closure-variance seam excludes the vocabulary via `scalar_decidable`).
 Documented at `denotes_nothing`; an inhabitation oracle is not worth
 its weight today.
+
+## Amendment A (2026-08-06): denotational list-acceptance (issue #161) — PENDING ratification
+
+The `ListOf ⊇ Shape` row originally gated `Yes` on `list'` alone —
+the **syntactic** flag, true only when the subject was *spelled*
+with the `list` keyword. That made the verdict depend on which of
+two legal spellings introduced the same denotation: a sealed
+`array{null}` stayed `Maybe` where `list{null}` answered `Yes`,
+although both denote exactly `{[0 => v]}`.
+
+The gate is now denotational: `Yes`-eligibility holds when `list'`
+**or** when the subject's key structure alone proves every
+realization a list. The judgment is not re-derived in the contract
+layer — `normalize::keys_prove_list` routes the subject's key
+skeleton (keys, presence, sealing; value slots at the unknown
+floor, which the judgment never reads) through the domain's own
+`ShapeFact::normalize` and reads back its denotational `is_list`,
+so list-ness keeps exactly one definition in the codebase (§3 of
+ADR-0062, RFC #14939).
+
+The direction of care is unchanged: under the order-agnostic key-set
+model, the keys prove list-ness only when no permutation and no gap
+is realizable — a sealed subject whose only possible key is `0`. A
+keyed subject whose realizations can hold two keys stays `Maybe`
+(`array{0: int, 1: string}` admits `[1 => 's', 0 => 1]`), and a
+shape with optional keys below a required one admits a gapped
+realization (`[0 => v, 2 => v]` fails `array_is_list`, measured),
+so it stays `Maybe` too. Both are pinned in tests, alongside a
+matrix that walks the same spellings through the acceptance
+relation and the domain judgment so the routing cannot drift.
