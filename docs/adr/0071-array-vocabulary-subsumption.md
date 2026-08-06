@@ -90,7 +90,7 @@ admits `[]`, so `non-empty` `a`-side flags refute with a witness.
 | `MapOf{K,V,…}` | Yes iff `K ⊇ int\|string`, `V ⊇ mixed`, `¬not_list`, `covers_ne`; No never (Maybe otherwise) |
 | `IterableOf{K,V}` | same key/value rule, Yes/Maybe |
 | `ListOf` | No (`['a'=>1]` witness) |
-| `Shape` | No if `list` or any required field; Yes iff unsealed-untyped-or-mixed-tail, all fields optional with `ty ⊇ mixed`, `covers_ne`; else Maybe |
+| `Shape` | No if `list`, any required field, or the keys alone prove every realization a list (Amendment B, issue #169 — witness `['a' => 0]`); Yes iff unsealed-untyped-or-mixed-tail, all fields optional with `ty ⊇ mixed`, `covers_ne`; else Maybe |
 | scalar / literal / `Null` / `IntIn` / `StrWith` / `StrOpaque` / `Class` / `ObjectAny` | No |
 | `CallableTy` | No if `closure_only`, else Maybe (a pair-array may be callable) |
 | `Opaque` | Maybe |
@@ -167,8 +167,11 @@ admits `[]`, so `non-empty` `a`-side flags refute with a witness.
     `b.tailV ⊆ a.tailV`, or No when `a` sealed; `b` untyped-unsealed
     → `a` unsealed-untyped, else No when `a` sealed, Maybe when `a`
     has a typed tail short of `int|string → mixed`.
-  * flags: `a.list ⇒ b` must be positional (`list'`) — a keyed `b`
-    stays Maybe (see above); `covers_ne` with `ne(b)` as defined.
+  * flags: `a.list ⇒ b` proven all-list — `list'`, or the domain's
+    denotational `is_list` answers Yes on `b`'s key skeleton
+    (Amendment B, issue #169); a keyed `b` whose realizations can
+    hold two keys stays Maybe (see above); `covers_ne` with `ne(b)`
+    as defined.
 * Scalars/classes: No. `Mixed`/`MixedMinus`: as `ArrayAny`'s row.
 * Degenerate sealed empty shape (`array{}`): denotes exactly `[]`;
   the rules above already decide it (`ListOf ⊇ array{}` = Yes,
@@ -305,3 +308,37 @@ realization (`[0 => v, 2 => v]` fails `array_is_list`, measured),
 so it stays `Maybe` too. Both are pinned in tests, alongside a
 matrix that walks the same spellings through the acceptance
 relation and the domain judgment so the routing cannot drift.
+
+## Amendment B (2026-08-07): the remaining flag reads (issue #169) — PENDING ratification
+
+Amendment A left two rows reading the syntactic `list` flag where
+the denotational judgment belongs; issue #169 closes them with the
+same bridge (`normalize::keys_prove_list`, deliberately unwidened:
+`Yes` only for possible keys ⊆ {0} under a sealed tail — for n ≥ 2
+the `list` keyword carries order information a key set does not).
+
+* **`Shape ⊇ Shape`, the flags obligation.** A positional `a` no
+  longer degrades a keys-prove-list `b` to `Maybe`: when the keys
+  alone prove every realization of `b` a list, the flag mismatch is
+  spelling, not denotation, and any `Yes` is still earned field by
+  field by the presence/field/tail obligations. A `b` whose
+  realizations can hold two keys or a gapped key set stays `Maybe`,
+  pinned exactly as in Amendment A.
+* **`ArrayAny ⊇ Shape`, a No-sharpening.** A keys-prove-list `a`
+  spelled `array{…}` fell to `Maybe` where its `list{…}` twin
+  answered `No`. Never-wrong-No demands a member witness, and it is
+  the same one the positional case always had: `['a' => 0]` is a
+  member of `array` — string-keyed and non-empty, so both `ne`
+  flavors of `b` hold it — that no sealed key-`0`-only shape
+  admits, because such an `a`'s possible keys are ⊆ {0} and no
+  member of `a` carries the key `'a'`. The witness is exercised in
+  a test through `admits_val` on both sides, not asserted by
+  analogy with the flag case.
+
+The one other `.list` read in the file (`entries_vs_shape`'s
+untyped-unsealed branch) is a genuine spelling consumer, not a
+stand-in for the denotational judgment: it guards the fresh-key
+refutation on the tail's *sequencing* semantics, which the
+`list{…}` keyword carries and a key set cannot, and
+`keys_prove_list` is identically false under an open tail, so the
+bridge has nothing to add there.
