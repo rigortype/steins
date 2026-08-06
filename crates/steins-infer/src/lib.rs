@@ -21844,10 +21844,64 @@ fn shape_key_union(shape: &ShapeFact) -> Option<Fact> {
     }
 }
 
+/// One shape field as the domain stores it — `steins_domain`'s own `Field`
+/// alias, which is not exported.
+type ShapeField = (VKey, steins_domain::Presence, Option<Box<Fact>>);
+
+/// **The SEQUENCE lane's structural gate** (issue #165): the fields of a
+/// *sealed* shape whose own `is_list` fact is `Yes`, verified to spell the
+/// sequence the flag claims — keys exactly `0..n-1` (the field order is the
+/// canonical [`VKey`] order, which for integer keys *is* the sequence order),
+/// with every `Required` position before every `Optional` one.
+///
+/// `is_list == Yes` is **realizable order**: every admitted value passes
+/// `array_is_list`, so its keys are `0..n-1` in that sequence — a semantic
+/// guarantee, not the declaration artifact `docs/phpstan-divergences.md`
+/// records as PHPStan's real-FP class. Consuming it is sound by the fact's own
+/// definition ([`ShapeFact::admits`] enforces the verdict against the entries'
+/// real order).
+///
+/// The structural verification is deliberate rather than assumed: `is_list`
+/// can arrive from an `array_is_list` guard on a shape whose declared key set
+/// does not cohere with it (the intersection admits nothing), and a projection
+/// built from such fields would reason from positions no admitted value has.
+/// Those shapes decline to the set widening instead.
+fn sealed_list_sequence(shape: &ShapeFact) -> Option<&[ShapeField]> {
+    use steins_domain::{Presence, Tail};
+    if shape.is_list != Certainty::Yes || !matches!(shape.tail, Tail::Sealed) {
+        return None;
+    }
+    let mut seen_optional = false;
+    for (i, (k, p, _)) in shape.fields.iter().enumerate() {
+        if *k != VKey::Int(i64::try_from(i).ok()?) {
+            return None;
+        }
+        match p {
+            Presence::Required { .. } if seen_optional => return None,
+            Presence::Required { .. } => {}
+            Presence::Optional => seen_optional = true,
+            // Unreachable under a sealed tail (`normalize` strips `Absent`
+            // there), kept so the gate never trusts that invariant.
+            Presence::Absent => return None,
+        }
+    }
+    Some(&shape.fields)
+}
+
 /// `array_values($x)`: a list of the value union. `non_empty` carries — the
 /// projection preserves the entry count.
+///
+/// **The SEQUENCE lane** (issue #165): on a proven list the keys are already
+/// `0..n-1` in realizable order, so the projection is the **identity** — the
+/// subject's own shape, element types, optionality and non-emptiness intact
+/// (probed: `array_values(["x", 1]) === ["x", 1]`). This needs no structural
+/// gate: identity is exact for every value `is_list == Yes` admits, sealed or
+/// unsealed alike.
 fn project_values(shape: &ShapeFact) -> ShapeFact {
     use steins_domain::{KeyClass, Tail};
+    if shape.is_list == Certainty::Yes {
+        return shape.clone();
+    }
     ShapeFact::normalize(
         Vec::new(),
         Tail::Unsealed { key: KeyClass::Int, value: shape_value_union(shape).map(Box::new) },
@@ -21858,11 +21912,44 @@ fn project_values(shape: &ShapeFact) -> ShapeFact {
 }
 
 /// `array_keys($x)`: a list of the key union. `non_empty` carries.
+///
+/// **The SEQUENCE lane** (issue #165): a proven list's keys are `0..n-1` in
+/// that order, so the key list is exact rather than a union —
+///
+/// * **sealed** (through [`sealed_list_sequence`]'s gate): the literal
+///   sequence `list{0, 1, …}` (probed: `array_keys(["x", 1, 2.5]) ===
+///   [0, 1, 2]`), each position carrying the subject position's own presence,
+///   so a trailing-optional `list{A, 1?: B}` answers `list{0, 1?: 1}` —
+///   exactly the two realizable key arrays `[0]` and `[0, 1]` (both probed);
+/// * **unsealed** `list<T>`: `list<int<0, max>>`, sharper than the bare `int`
+///   class because a list key is never negative.
 fn project_keys(shape: &ShapeFact) -> ShapeFact {
     use steins_domain::{KeyClass, Tail};
+    if let Some(fields) = sealed_list_sequence(shape) {
+        let fields = fields
+            .iter()
+            .enumerate()
+            .map(|(i, (_, p, _))| {
+                let i = i64::try_from(i).expect("field width is bounded");
+                (VKey::Int(i), *p, Some(Box::new(Fact::Singleton(Val::Int(i)))))
+            })
+            .collect();
+        return ShapeFact::normalize(
+            fields,
+            Tail::Sealed,
+            Certainty::Yes,
+            shape.non_empty,
+            Vec::new(),
+        );
+    }
+    let value = if shape.is_list == Certainty::Yes {
+        Some(Box::new(Fact::refined(Base::Int, Refinement::Int(IntRange::NON_NEGATIVE), false)))
+    } else {
+        shape_key_union(shape).map(Box::new)
+    };
     ShapeFact::normalize(
         Vec::new(),
-        Tail::Unsealed { key: KeyClass::Int, value: shape_key_union(shape).map(Box::new) },
+        Tail::Unsealed { key: KeyClass::Int, value },
         Certainty::Yes,
         shape.non_empty,
         Vec::new(),
@@ -21913,8 +22000,32 @@ fn project_flip(shape: &ShapeFact) -> ShapeFact {
 /// * **`Maybe`** otherwise — the honest widening.
 ///
 /// `non_empty` carries (reversal preserves the entry count).
+///
+/// **The SEQUENCE lane** (issue #165), for a sealed, **all-required** proven
+/// list only: the result is the reversed sequence — position `i` takes the
+/// subject's position `n-1-i` value slot (probed: `array_reverse(["a", "b",
+/// "c"]) === ["c", "b", "a"]`, and likewise at lengths 1 and 2). Any
+/// `Optional` key declines to the widening below: a variable-length reversal
+/// smears every position (probed: `"a"` lands at index 0 in
+/// `array_reverse(["a"])` but at index 1 in `array_reverse(["a", "b"])`), so
+/// the positional claim is not statable. The unsealed `list<T>` already takes
+/// its element-identity answer from the widening (`all_int_keys` below), with
+/// `non-empty-` surviving.
 fn project_reverse(shape: &ShapeFact) -> ShapeFact {
     use steins_domain::{KeyClass, Presence, Tail};
+    if let Some(fields) = sealed_list_sequence(shape)
+        && fields.iter().all(|(_, p, _)| p.is_required())
+    {
+        let rev = fields
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(i, (_, p, slot))| {
+                (VKey::Int(i64::try_from(i).expect("field width is bounded")), *p, slot.clone())
+            })
+            .collect();
+        return ShapeFact::normalize(rev, Tail::Sealed, Certainty::Yes, shape.non_empty, Vec::new());
+    }
     let declared_ints =
         shape.fields.iter().all(|(k, p, _)| matches!(p, Presence::Absent) || matches!(k, VKey::Int(_)));
     let tail_ints = match &shape.tail {
@@ -23146,6 +23257,35 @@ mod shape_projection_tests {
         )
     }
 
+    /// `list{string, int}` — issue #165's measured-table subject: sealed,
+    /// all-required, `is_list == Yes` surviving `normalize`'s sharpening.
+    fn sealed_list_str_int() -> ShapeFact {
+        ShapeFact::normalize(
+            vec![
+                (ik(0), req(), slot(base_fact(Base::String))),
+                (ik(1), req(), slot(base_fact(Base::Int))),
+            ],
+            Tail::Sealed,
+            Certainty::Yes,
+            false,
+            Vec::new(),
+        )
+    }
+
+    /// `list{int, 1?: string}` — the trailing-optional sequence form.
+    fn sealed_list_trailing_optional() -> ShapeFact {
+        ShapeFact::normalize(
+            vec![
+                (ik(0), req(), slot(base_fact(Base::Int))),
+                (ik(1), Presence::Optional, slot(base_fact(Base::String))),
+            ],
+            Tail::Sealed,
+            Certainty::Yes,
+            false,
+            Vec::new(),
+        )
+    }
+
     /// The concrete arrays the soundness sweep runs over, in *witnessed* order.
     fn arrays() -> Vec<Vec<(VKey, Val)>> {
         vec![
@@ -23158,12 +23298,19 @@ mod shape_projection_tests {
             vec![(sk("a"), Val::Int(1))],
             vec![(sk("b"), Val::Str("zz".to_owned())), (sk("a"), Val::Int(4))],
             vec![(ik(0), Val::Int(1)), (sk("a"), Val::Int(2)), (ik(3), Val::Int(3))],
+            vec![(ik(0), Val::Str("x".to_owned())), (ik(1), Val::Int(1))],
         ]
     }
 
     fn shapes() -> Vec<ShapeFact> {
-        let mut out =
-            vec![declared_shape(), list_of_int(), map_str_int(), ShapeFact::plain_array()];
+        let mut out = vec![
+            declared_shape(),
+            list_of_int(),
+            map_str_int(),
+            ShapeFact::plain_array(),
+            sealed_list_str_int(),
+            sealed_list_trailing_optional(),
+        ];
         out.extend(arrays().iter().map(|a| ShapeFact::lift(a)));
         out
     }
@@ -23344,9 +23491,18 @@ mod shape_projection_tests {
             project_keys(&ShapeFact::plain_array()).tail,
             Tail::Unsealed { key: KeyClass::Int, value: None }
         );
+        // An unsealed Yes-list's keys are `0..n-1` — never negative, so the
+        // element bound sharpens past the bare `int` class (issue #165).
         assert_eq!(
             project_keys(&list_of_int()).tail,
-            Tail::Unsealed { key: KeyClass::Int, value: slot(base_fact(Base::Int)) }
+            Tail::Unsealed {
+                key: KeyClass::Int,
+                value: slot(Fact::refined(
+                    Base::Int,
+                    Refinement::Int(IntRange::NON_NEGATIVE),
+                    false
+                )),
+            }
         );
     }
 
@@ -23390,6 +23546,179 @@ mod shape_projection_tests {
         assert_eq!(project_reverse(&optional_str).is_list, Certainty::Maybe);
         // The entry count is preserved, so `non_empty` carries.
         assert!(project_reverse(&declared_shape()).non_empty);
+    }
+
+    // ---- The SEQUENCE lane (issue #165): isList == Yes is realizable order --
+
+    #[test]
+    fn array_values_is_the_identity_on_a_proven_list() {
+        // A Yes-list's keys are already `0..n-1` in realizable order (probed:
+        // `array_values(["x", 1]) === ["x", 1]`), so the projection returns
+        // the subject's own shape — element types, optionality and
+        // non-emptiness intact — where the set widening drops the
+        // heterogeneous element types to the unknown floor.
+        assert_eq!(project_values(&sealed_list_str_int()), sealed_list_str_int());
+        assert_eq!(
+            project_values(&sealed_list_trailing_optional()),
+            sealed_list_trailing_optional()
+        );
+        // The unsealed forms: `list<T>` and `non-empty-list<T>`.
+        assert_eq!(project_values(&list_of_int()), list_of_int());
+        let non_empty = ShapeFact::normalize(
+            Vec::new(),
+            Tail::Unsealed { key: KeyClass::Int, value: slot(base_fact(Base::Int)) },
+            Certainty::Yes,
+            true,
+            Vec::new(),
+        );
+        assert_eq!(project_values(&non_empty), non_empty);
+    }
+
+    #[test]
+    fn array_keys_of_a_proven_sequence_is_the_literal_key_list() {
+        // Probed: `array_keys(["x", 1, 2.5]) === [0, 1, 2]` — a list's keys
+        // ARE the sequence `0..n-1`, so the sealed all-required answer is the
+        // literal `list{0, 1}`.
+        let expected = ShapeFact::normalize(
+            vec![
+                (ik(0), req(), slot(Fact::Singleton(Val::Int(0)))),
+                (ik(1), req(), slot(Fact::Singleton(Val::Int(1)))),
+            ],
+            Tail::Sealed,
+            Certainty::Yes,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(project_keys(&sealed_list_str_int()), expected);
+        // A trailing optional carries per position: `list{A, 1?: B}` realizes
+        // as `[A]` or `[A, B]`, whose key arrays are `[0]` and `[0, 1]` (both
+        // probed) — exactly `list{0, 1?: 1}`.
+        let expected = ShapeFact::normalize(
+            vec![
+                (ik(0), req(), slot(Fact::Singleton(Val::Int(0)))),
+                (ik(1), Presence::Optional, slot(Fact::Singleton(Val::Int(1)))),
+            ],
+            Tail::Sealed,
+            Certainty::Yes,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(project_keys(&sealed_list_trailing_optional()), expected);
+    }
+
+    #[test]
+    fn array_reverse_of_a_sealed_all_required_sequence_reverses_it() {
+        // Probed at lengths 1, 2 and 3: `array_reverse(["a", "b", "c"]) ===
+        // ["c", "b", "a"]` — position `i` takes the subject's position
+        // `n-1-i`, so `list{string, int}` reverses to `list{int, string}`.
+        let expected = ShapeFact::normalize(
+            vec![
+                (ik(0), req(), slot(base_fact(Base::Int))),
+                (ik(1), req(), slot(base_fact(Base::String))),
+            ],
+            Tail::Sealed,
+            Certainty::Yes,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(project_reverse(&sealed_list_str_int()), expected);
+    }
+
+    #[test]
+    fn array_reverse_declines_the_positional_claim_on_an_optional_key() {
+        // Probed: `"a"` sits at index 0 in `array_reverse(["a"])` but at
+        // index 1 in `array_reverse(["a", "b"])` — a variable-length reversal
+        // smears every position, so an optional key keeps today's widening
+        // exactly (the value union under an int-classed list tail, `non_empty`
+        // carried).
+        let expected = ShapeFact::normalize(
+            Vec::new(),
+            Tail::Unsealed { key: KeyClass::Int, value: None },
+            Certainty::Yes,
+            true,
+            Vec::new(),
+        );
+        assert_eq!(project_reverse(&sealed_list_trailing_optional()), expected);
+    }
+
+    #[test]
+    fn a_set_subject_keeps_todays_widenings_exactly() {
+        // The doctrinal pin (issue #165): `array{a: 1, b: 2}` is a key SET —
+        // `['b' => 2, 'a' => 1]` is admitted just as well — so no projection
+        // may consume an order from it. `array_values` still answers the
+        // value union as a non-empty list: the issue's pinned
+        // `non-empty-list<1|2>`.
+        let subject = ShapeFact::normalize(
+            vec![
+                (sk("a"), req(), slot(Fact::Singleton(Val::Int(1)))),
+                (sk("b"), req(), slot(Fact::Singleton(Val::Int(2)))),
+            ],
+            Tail::Sealed,
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(subject.is_list, Certainty::No, "a required string key is never a list");
+        let values = project_values(&subject);
+        assert_eq!(
+            values.tail,
+            Tail::Unsealed {
+                key: KeyClass::Int,
+                value: slot(Fact::OneOf(vec![Val::Int(1), Val::Int(2)])),
+            }
+        );
+        assert!(values.non_empty);
+        assert_eq!(values.is_list, Certainty::Yes);
+        assert_eq!(
+            project_keys(&subject).tail,
+            Tail::Unsealed {
+                key: KeyClass::Int,
+                value: slot(Fact::OneOf(vec![
+                    Val::Str("a".to_owned()),
+                    Val::Str("b".to_owned())
+                ])),
+            }
+        );
+    }
+
+    #[test]
+    fn a_guard_flagged_sequence_with_incoherent_fields_declines_the_positional_claims() {
+        // `array{0: int, 2?: int}` narrowed by an `array_is_list` guard: the
+        // flag is `Yes` (key `2` can then never actually be present), but the
+        // FIELDS do not spell the sequence the flag claims. The positional
+        // claims decline — `array_keys` answers from the flag alone (a list's
+        // keys are never negative), `array_reverse` keeps the widening — while
+        // `array_values` stays the identity, exact for every admitted value
+        // whatever the fields say.
+        let subject = ShapeFact::normalize(
+            vec![
+                (ik(0), req(), slot(base_fact(Base::Int))),
+                (ik(2), Presence::Optional, slot(base_fact(Base::Int))),
+            ],
+            Tail::Sealed,
+            Certainty::Yes,
+            false,
+            Vec::new(),
+        );
+        assert_eq!(subject.is_list, Certainty::Yes, "the guard flag survives normalize");
+        let keys = project_keys(&subject);
+        assert!(keys.fields.is_empty(), "no literal key list from incoherent fields");
+        assert_eq!(
+            keys.tail,
+            Tail::Unsealed {
+                key: KeyClass::Int,
+                value: slot(Fact::refined(
+                    Base::Int,
+                    Refinement::Int(IntRange::NON_NEGATIVE),
+                    false
+                )),
+            }
+        );
+        assert!(
+            project_reverse(&subject).fields.is_empty(),
+            "no reversed sequence from incoherent fields"
+        );
+        assert_eq!(project_values(&subject), subject);
     }
 }
 

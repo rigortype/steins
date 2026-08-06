@@ -278,6 +278,91 @@ fn array_reverse_and_array_flip_take_their_stated_widenings() {
     );
 }
 
+// The SEQUENCE lane (issue #165): isList == Yes is realizable order, so the
+// order-dependent projections consume it — a semantic guarantee every admitted
+// value satisfies, never the declaration artifact the divergence doc records
+// as PHPStan's real-FP class.
+
+#[test]
+fn a_proven_sequence_projects_exactly() {
+    // Issue #165's measured table, each row probed at PHP 8.5.9.
+    // `array_values(["x", 1]) === ["x", 1]` — identity on a list, element
+    // types intact where the set widening dropped them to `mixed`.
+    assert_eq!(
+        dump("list{string, int}", "array_values($v)"),
+        "dumped type: list{string, int} (asserted)"
+    );
+    // `array_keys(["x", 1, 2.5]) === [0, 1, 2]` — the literal key sequence.
+    assert_eq!(
+        dump("list{string, int}", "array_keys($v)"),
+        "dumped type: list{0, 1} (asserted)"
+    );
+    // `array_reverse(["a", "b"]) === ["b", "a"]` (probed at lengths 1, 2, 3)
+    // — the reversed sequence.
+    assert_eq!(
+        dump("list{string, int}", "array_reverse($v)"),
+        "dumped type: list{int, string} (asserted)"
+    );
+}
+
+#[test]
+fn a_trailing_optional_sequence_keeps_keys_and_declines_reverse() {
+    // `list{int, 1?: string}` realizes as `[A]` or `[A, B]`. Probed:
+    // `array_keys` answers `[0]` / `[0, 1]` — exactly `list{0, 1?: 1}`,
+    // spelled with its keys because an optional key is never positional.
+    assert_eq!(
+        dump("list{int, 1?: string}", "array_keys($v)"),
+        "dumped type: list{0: 0, 1?: 1} (asserted)"
+    );
+    // `array_values` stays the identity — optionality preserved.
+    assert_eq!(
+        dump("list{int, 1?: string}", "array_values($v)"),
+        "dumped type: list{0: int, 1?: string} (asserted)"
+    );
+    // Reversal of a variable-length sequence smears every position (probed:
+    // `"a"` is index 0 in `array_reverse(["a"])` but index 1 in
+    // `array_reverse(["a", "b"])`), so `array_reverse` keeps today's widening.
+    assert_eq!(
+        dump("list{int, 1?: string}", "array_reverse($v)"),
+        "dumped type: non-empty-list<mixed> (asserted)"
+    );
+}
+
+#[test]
+fn an_unsealed_list_keeps_identity_and_gains_exact_keys() {
+    // `array_values` identity on the unsealed forms, `non-empty-` included.
+    assert_eq!(dump("list<string>", "array_values($v)"), "dumped type: list<string> (asserted)");
+    assert_eq!(
+        dump("non-empty-list<string>", "array_values($v)"),
+        "dumped type: non-empty-list<string> (asserted)"
+    );
+    // A list's keys are `0..n-1` — never negative, so the element bound
+    // sharpens past the bare `int` class.
+    assert_eq!(
+        dump("list<int>", "array_keys($v)"),
+        "dumped type: list<int<0, max>> (asserted)"
+    );
+    // `array_reverse` on `non-empty-list<T>`: element identity, cardinality
+    // (and so `non-empty-`) preserved.
+    assert_eq!(
+        dump("non-empty-list<int>", "array_reverse($v)"),
+        "dumped type: non-empty-list<int> (asserted)"
+    );
+}
+
+#[test]
+fn a_set_subject_keeps_todays_widenings() {
+    // The issue's own pinned answer: `array{a: 1, b: 2}` is a key SET —
+    // `['b' => 2, 'a' => 1]` is admitted just as well — so `array_values`
+    // still answers the value union as a list, never an order (probed:
+    // `array_values(["a" => 1, "b" => 2]) === [1, 2]` is one realization
+    // among the permutations the shape admits).
+    assert_eq!(
+        dump("array{a: 1, b: 2}", "array_values($v)"),
+        "dumped type: non-empty-list<1|2> (asserted)"
+    );
+}
+
 #[test]
 fn the_declined_projections_say_nothing() {
     // The value side of `array_search` is the family's ONE remaining v1 decline —

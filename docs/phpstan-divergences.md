@@ -130,7 +130,12 @@ trinary + non-emptiness + key covers — is the fifth fact form, the single
 degenerate home of `array` / `array<K, V>` / `list<T>` / `array{…}`.
 Lifting a concrete array into the shape world is where order-witnessed-ness
 is honestly lost. Positional projections over shape-only truth take the
-sound widening, never declaration order. The #14939 model (`array{…}` a
+sound widening, never declaration order — except where the shape's own
+`isList` fact is `Yes`, which is **realizable order**: every admitted value
+has keys `0..n-1` in that sequence, so `array_values`/`array_keys`/
+`array_reverse` consume it exactly. Order is consumed only where it is a
+semantic guarantee (a proven sequence), never a declaration artifact — the
+line the FP class above crossed. The #14939 model (`array{…}` a
 key *set*, `list{…}` a key *sequence*, `isList` computed over the admitted
 value set) runs natively, ahead of PHPStan stable — including `list{…}`
 acceptance rejecting permutations and the *rendering*, which follows the

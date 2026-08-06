@@ -68,6 +68,10 @@ skill seals them into a version section at release time, reconstructing from
 - **`array_slice` widening is sharper in two cases: slicing a proven list from offset `0` with `preserve_keys: true` still yields a list, and a slice whose length is a proven `0` is exactly the empty array.**
   - Unknown offsets, lengths, or flags and subjects not proven to be lists keep the previous conservative answer; a `null` length still means "to the end". The added precision can make downstream findings appear or disappear.
 
+- **`array_values`, `array_keys`, and `array_reverse` over a proven list now carry exact types: `array_values(list{string, int})` is `list{string, int}` (identity), `array_keys` the literal `list{0, 1}`, `array_reverse` the reversed `list{int, string}`.**
+  - The order consumed is a semantic guarantee, never a declaration artifact: a shape proves its list-ness only when every admitted value has keys `0..n-1` in that sequence, so an `array{…}` key-*set* subject keeps the previous widening exactly — `array_values(array{a: 1, b: 2})` still answers `non-empty-list<1|2>`.
+  - On the unsealed forms, `array_values`/`array_reverse` keep the element identity with `non-empty-` preserved, and `array_keys(list<T>)` sharpens to `list<int<0, max>>` — a list's keys are never negative. A trailing-optional sequence keeps its key sequence (`array_keys(list{A, 1?: B})` is `list{0, 1?: 1}`), while `array_reverse` of any optional-length sequence keeps the previous widening, because reversing a variable-length sequence smears every position. The added precision can make downstream findings appear or disappear.
+
 ### Fixed
 
 - **`list<T>` now accepts a sealed single-entry shape — `array{T}`, `array{0?: T}` — whatever keyword spelled it, deciding list-ness from the keys instead of the spelling.**
