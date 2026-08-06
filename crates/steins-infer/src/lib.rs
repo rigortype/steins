@@ -9697,22 +9697,13 @@ fn walk_if(
         for (call, returns_true) in then_calls {
             let kind = if returns_true { AssertKind::IfTrue } else { AssertKind::IfFalse };
             apply_guard_asserts(w, call, kind, &mut benv, &mut bclasses);
-            // Out-parameter seed (ADR-0077): a truthy result is the callee's own
-            // witness that it performed its by-ref write, and the ONLY branch where
-            // the written fact is sound — `preg_match` on an uncompilable pattern
-            // returns `false` and writes nothing at all. Runs after the invalidation
-            // of step 2 and rebinds what it forgot (§3.4).
-            if returns_true {
-                for (var, fact) in out_param_seed(w, folder, call, &benv) {
-                    seed_out_param(&var, fact, guard_call_line(w, call), &mut benv, &mut bclasses);
-                }
-            }
             // Guard-respect leg (ADR-0049 §4): a positive existence guard vouches its
             // symbol on the branch where it holds true, silencing the absence family.
             if returns_true && let Some(v) = existence_vouch(w.cx, &bclasses, call) {
                 bclasses.vouch(v);
             }
         }
+        seed_out_params(w, folder, cond, true, &mut benv, &mut bclasses);
         if walk_trace(w, folder, then_trace, &mut benv, &mut bclasses, descent, facts, true, out)
             == Flow::FellThrough
         {
@@ -9733,22 +9724,18 @@ fn walk_if(
         for (call, returns_true) in else_calls {
             let kind = if returns_true { AssertKind::IfTrue } else { AssertKind::IfFalse };
             apply_guard_asserts(w, call, kind, &mut benv, &mut bclasses);
-            // The same seed on the other side of the branch, for the same reason and
-            // under the same condition: `if (!preg_match($re, $s, $m)) { return; }`
-            // reaches its else-branch — and everything after it — with the call
-            // proven truthy (ADR-0077 §3.1). The polarity flag, not the branch, is
-            // what decides.
-            if returns_true {
-                for (var, fact) in out_param_seed(w, folder, call, &benv) {
-                    seed_out_param(&var, fact, guard_call_line(w, call), &mut benv, &mut bclasses);
-                }
-            }
             // Guard-respect leg (ADR-0049 §4): the negated-guard branch where the
             // predicate holds true (`if (!method_exists(...)) {} else <here>`) vouches too.
             if returns_true && let Some(v) = existence_vouch(w.cx, &bclasses, call) {
                 bclasses.vouch(v);
             }
         }
+        // The same seed on the other side of the branch, for the same reason and
+        // under the same condition: `if (!preg_match($re, $s, $m)) { return; }`
+        // reaches its else-branch — and everything after it — with the call
+        // proven truthy (ADR-0077 §3.1). The branch is not what decides; the
+        // polarity the witness survives under is.
+        seed_out_params(w, folder, cond, false, &mut benv, &mut bclasses);
         if walk_else(w, folder, elseifs, else_trace, &mut benv, &mut bclasses, descent, facts, out)
             == Flow::FellThrough
         {
@@ -11344,6 +11331,99 @@ fn collect_guard_calls<'a>(cond: &'a CondExpr, then: bool, out: &mut Vec<(&'a Ca
     }
 }
 
+/// The calls this branch proves returned a **truthy** value — the witness the
+/// out-parameter seed (ADR-0077 §3.2) consumes, in source order.
+///
+/// Its `&&`/`||`/`!` distribution is [`collect_guard_calls`]', and for a call in
+/// guard position it selects exactly the same calls that function's `returns_true`
+/// flag did. What it adds is the **compared** call: `preg_match($re, $s, $m) === 1`
+/// proves the result is `1`, which is as truthy as a bare `preg_match(…)` guard
+/// proves it, and PHPStan types both.
+///
+/// Kept apart from [`collect_guard_calls`] deliberately, because the two ask
+/// different questions. `@phpstan-assert-if-true` is stated about the callee
+/// *returning `true`*, and `f($x) === 1` does not witness that — `1` is truthy
+/// but is not `true`. Feeding compared calls into the assert consumption would
+/// silently widen every envelope in the project; feeding them into the seed only
+/// asserts what the comparison itself proved.
+fn collect_truthy_calls<'a>(
+    cond: &'a CondExpr,
+    then: bool,
+    php_minor: Option<(u16, u16)>,
+    out: &mut Vec<&'a CallExpr>,
+) {
+    match cond {
+        CondExpr::Call { call, .. } if then => out.push(call),
+        CondExpr::Cmp { op, lhs, rhs } => {
+            out.extend(cmp_truthy_witness(*op, lhs, rhs, then, php_minor));
+        }
+        CondExpr::Not(c) => collect_truthy_calls(c, !then, php_minor, out),
+        CondExpr::And(a, b) if then => {
+            collect_truthy_calls(a, true, php_minor, out);
+            collect_truthy_calls(b, true, php_minor, out);
+        }
+        CondExpr::Or(a, b) if !then => {
+            collect_truthy_calls(a, false, php_minor, out);
+            collect_truthy_calls(b, false, php_minor, out);
+        }
+        _ => {}
+    }
+}
+
+/// The call a comparison proves truthy on this branch polarity, or `None`.
+///
+/// The test is not a table of blessed shapes — it is the claim itself, checked:
+/// **every** value that satisfies the comparison must be truthy, i.e. no falsy
+/// value may satisfy it. PHP's falsy values are a finite, enumerable set
+/// ([`FALSY_LITERALS`]), and the comparison semantics are the ones the evaluator
+/// already implements, so the question is answered by running each falsy value
+/// through [`eval_cmp`] rather than by reasoning about operators in prose.
+///
+/// It lands where it should: `f() === 1` and `f() == 1` prove truthy on the then
+/// branch (nothing falsy is identical or loosely equal to `1`); `f() !== 1` and
+/// `f() != 1` prove it on the *else* branch (every falsy value differs from `1`,
+/// so none of them survives the negation); `f() === 0`, `f() !== false` and
+/// `f() === ''` prove nothing, on either branch.
+fn cmp_truthy_witness<'a>(
+    op: CmpOp,
+    lhs: &'a CondOperand,
+    rhs: &'a CondOperand,
+    then: bool,
+    php_minor: Option<(u16, u16)>,
+) -> Option<&'a CallExpr> {
+    let (call, lit) = match (lhs, rhs) {
+        (CondOperand::Other { call, .. }, CondOperand::Literal(v))
+        | (CondOperand::Literal(v), CondOperand::Other { call, .. }) => (call.as_deref()?, v),
+        _ => return None,
+    };
+    // On the then branch the comparison held, so a falsy result must be one the
+    // comparison *rejects*; on the else branch it failed, so a falsy result must
+    // be one it *accepts*. Anything undecidable (`Maybe`) refuses, silently.
+    let excluded = if then { Certainty::No } else { Certainty::Yes };
+    falsy_literals()
+        .iter()
+        .all(|f| {
+            eval_cmp(op, std::slice::from_ref(f), std::slice::from_ref(lit), php_minor) == excluded
+        })
+        .then_some(call)
+}
+
+/// Every falsy value in PHP, as a literal. The list is exhaustive by the language
+/// definition — `null`, `false`, `0`, `0.0`, `''`, `'0'` and the empty array —
+/// and [`php_truthy`] is its other half (each of these is a value it answers
+/// `Some(false)` for, and nothing else is).
+fn falsy_literals() -> [ArgValue; 7] {
+    [
+        ArgValue::Null,
+        ArgValue::Bool(false),
+        ArgValue::Int(0),
+        ArgValue::Float(0.0),
+        ArgValue::Str(String::new()),
+        ArgValue::Str("0".to_owned()),
+        ArgValue::Array(Vec::new()),
+    ]
+}
+
 /// Every retained guard call anywhere in the condition (both polarities), for the
 /// position-sequenced escape/sweep and by-ref invalidation that apply on *every*
 /// resulting path (a call in either operand may have executed on the excluded path).
@@ -12466,6 +12546,33 @@ fn apply_stmt_asserts(
 /// binds at, which is where the callee performed the write.
 fn guard_call_line(w: &WalkCx, call: &CallExpr) -> u32 {
     w.cx.tree().position(call.span.start).line
+}
+
+/// Seed the out-parameters of every call this branch proves returned truthy
+/// (ADR-0077), in source order.
+///
+/// A truthy result is the callee's own witness that it performed its by-ref
+/// write, and the ONLY branch where the written fact is sound — `preg_match` on
+/// an uncompilable pattern returns `false` and writes nothing at all. Runs after
+/// the invalidation of `walk_if` step 2 and rebinds what it forgot (§3.4), and
+/// after the branch's assert narrowings, so an explicit `@phpstan-assert`
+/// envelope is not silently overwritten by a seed at a further call in the same
+/// condition.
+fn seed_out_params(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    cond: &CondExpr,
+    then: bool,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    let mut calls = Vec::new();
+    collect_truthy_calls(cond, then, w.cx.php_minor, &mut calls);
+    for call in calls {
+        for (var, fact) in out_param_seed(w, folder, call, env) {
+            seed_out_param(&var, fact, guard_call_line(w, call), env, store);
+        }
+    }
 }
 
 /// The [`Known::bound`] provenance an out-parameter seed stamps (ADR-0077), read
