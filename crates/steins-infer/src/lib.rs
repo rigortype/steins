@@ -209,6 +209,19 @@ pub const OFFSET_MAYBE_MISSING_ID: &str = "offset.maybe-missing";
 /// branch analysis, under descendant closure.
 pub const PHPDOC_UNDEFINED_METHOD_ID: &str = "phpdoc.undefined-method";
 
+// printf arity (ADR-0078, issue #188)
+/// The registry id for the printf-family arity check (ADR-0078 / issue #188,
+/// proof layer): a `printf`/`sprintf`/`fprintf`/`vprintf`/`vsprintf` call whose
+/// folded literal format string demands more placeholders than the call proves
+/// it supplies (a `printf`/`sprintf`/`fprintf` fatal `ArgumentCountError`; a
+/// `vprintf`/`vsprintf` fatal `ValueError` on a proven-size array). Distinct
+/// from [`CALL_TOO_FEW_ARGUMENTS_ID`]: the evidence here is a folded format
+/// string, not a resolved callee signature, so this id keeps the M2
+/// internal-arity slice (`CALL_TOO_MANY_ARGUMENTS_ID`) clean of format-derived
+/// claims (ADR-0078 §"The naming decision").
+pub const CALL_PRINTF_TOO_FEW_ARGUMENTS_ID: &str = "call.printf-too-few-arguments";
+// end printf arity (ADR-0078, issue #188)
+
 // ---------------------------------------------------------------------------
 // The dump surface (ADR-0053): requested introspection in the debug layer.
 // ---------------------------------------------------------------------------
@@ -300,6 +313,9 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     DEBUG_TRACE_ID,
     suppress::SUPPRESS_UNMATCHED_ID,
     suppress::SUPPRESS_UNKNOWN_ID,
+    // printf arity (ADR-0078, issue #188)
+    CALL_PRINTF_TOO_FEW_ARGUMENTS_ID,
+    // end printf arity (ADR-0078, issue #188)
 ];
 
 /// Ids **registered ahead of emission**: they exist in [`DIAGNOSTIC_REGISTRY`]
@@ -7025,6 +7041,12 @@ fn walk_trace(
                     // plain per-scope pass, like the absence flagship.
                     if descent.is_none() {
                         check_arity(cx, folder, call, store, scope.poisoned, out);
+                        // The printf-family arity check (ADR-0078, issue #188): a
+                        // folded literal format string demanding more placeholders
+                        // than the call proves it supplies. Judged once in the plain
+                        // per-scope pass, like the signature-derived arity checks
+                        // above.
+                        check_printf_arity(cx, folder, call, env, scope.poisoned, out);
                         // The existence flagship (ADR-0049 §3 / S4): a call to a
                         // provably-undefined function behind a clear dam. Judged once
                         // in the plain per-scope pass; the walk has already pruned any
@@ -16209,6 +16231,332 @@ fn check_arity(
         return;
     };
     emit_arity(cx, call, &target, out);
+}
+
+// ---------------------------------------------------------------------------
+// `call.printf-too-few-arguments` (ADR-0078, issue #188).
+//
+// A `printf`-family call whose FOLDED LITERAL format string demands more
+// placeholders than the call proves it supplies is a fatal in PHP 8, exactly
+// as with `call.too-few-arguments` — but the evidence is a folded format
+// string, not a resolved callee signature (ADR-0078's naming decision), so
+// this stays a distinct id and never launders into the M2 internal-arity slot
+// (`call.too-many-arguments`, still `REGISTERED_NOT_YET_EMITTED`).
+//
+// Every runtime claim below is `php -r`-witnessed (PHP 8.5.9, `php --version`
+// checked at authoring time):
+//
+//   php -r 'printf("%s %s", "one");'
+//     => ArgumentCountError: 3 arguments are required, 2 given
+//   php -r 'sprintf("%s %s", "one");'
+//     => ArgumentCountError: 3 arguments are required, 2 given
+//   php -r 'fprintf(STDOUT, "%s %s", "one");'
+//     => ArgumentCountError: 4 arguments are required, 3 given
+//   php -r 'vprintf("%s %s", ["one"]);'
+//     => ValueError: The arguments array must contain 2 items, 1 given
+//   php -r 'vsprintf("%s %s", ["one"]);'
+//     => ValueError: The arguments array must contain 2 items, 1 given
+//   php -r 'sprintf("%s", "one", "two");'          // too MANY — runs clean
+//     => string(3) "one"                              (never a finding: ADR-0002/0049 §6 asymmetry)
+//   php -r 'sprintf("100%%");'                      // `%%` is not a placeholder
+//     => string(4) "100%"
+//   php -r 'sprintf("%1$s %1$s", "a");'             // positional MAX, not additive
+//     => string(3) "a a"                               (1 required, not 2)
+//   php -r 'sprintf("%s %s %1$s", "a", "b");'       // auto-index is independent of
+//     => string(5) "a b a"                             positional refs interleaved with it
+//   php -r 'sprintf("%z", "x");'                    // unknown conversion char
+//     => ValueError: Unknown format specifier "z"       (UNPROVEN here — silence, never guess)
+//   php -r 'sprintf("%05.2f %-10s %\'x10d", 1.0);'  // width/precision/flags parse fine
+//     => (no error when enough args are given — the shapes from the issue's examples)
+//   php -r 'sprintf("%0$s", "x");'
+//     => ValueError: Argument number specifier must be greater than zero and less than 2147483647
+//        (an explicit `%0$` position is itself invalid — declined, never guessed)
+//
+// The count PHP actually requires for a malformed/dangling `%` (e.g. a bare
+// trailing `%`, or `%1$` with no type char) does not match a simple
+// placeholder count — witnessed, but deliberately NOT reproduced here: this
+// parser declines (returns `None`, whole-format silence) on anything it
+// cannot walk to a complete, recognized specifier, per the "never guess"
+// directive; a missed finding is always the safe side.
+// ---------------------------------------------------------------------------
+
+/// One `printf`-family target's call shape (ADR-0078): which positional
+/// argument carries the format string, and whether the values arrive as
+/// trailing positional arguments (`printf`/`sprintf`/`fprintf`) or as a single
+/// array argument right after the format (`vprintf`/`vsprintf`).
+#[derive(Clone, Copy)]
+enum PrintfShape {
+    /// Format at `format_pos`; every argument after it is one value.
+    Variadic { format_pos: usize },
+    /// Format at `format_pos`; the array of values is the very next argument.
+    Array { format_pos: usize },
+}
+
+/// Recognize a call as a `printf`-family builtin (ADR-0078 scope: `printf`,
+/// `sprintf`, `fprintf`, `vprintf`, `vsprintf`), or `None` for anything else —
+/// including a namespaced/aliased/userland-shadowed spelling of the same name,
+/// which [`global_function_callee`] already refuses to call global (the same
+/// entry point every other builtin recognizer in this file opens with, e.g.
+/// `existence_predicate`).
+fn printf_family_shape(cx: &Cx, call: &CallExpr) -> Option<(&'static str, PrintfShape)> {
+    let callee = global_function_callee(cx, call)?;
+    let (name, shape): (&'static str, PrintfShape) = if callee.eq_ignore_ascii_case("printf") {
+        ("printf", PrintfShape::Variadic { format_pos: 0 })
+    } else if callee.eq_ignore_ascii_case("sprintf") {
+        ("sprintf", PrintfShape::Variadic { format_pos: 0 })
+    } else if callee.eq_ignore_ascii_case("fprintf") {
+        ("fprintf", PrintfShape::Variadic { format_pos: 1 })
+    } else if callee.eq_ignore_ascii_case("vprintf") {
+        ("vprintf", PrintfShape::Array { format_pos: 0 })
+    } else if callee.eq_ignore_ascii_case("vsprintf") {
+        ("vsprintf", PrintfShape::Array { format_pos: 0 })
+    } else {
+        return None;
+    };
+    Some((name, shape))
+}
+
+/// The number of argument slots a `printf`-family format string demands
+/// (ADR-0078): the maximum over every recognized specifier's 1-based position
+/// — an explicit `%n$` position, or the next value of an independent
+/// auto-increment counter for every NON-positional specifier, in source order
+/// (`php -r`-witnessed: `sprintf("%s %2$s %s", "a", "b")` succeeds on 2 args
+/// because the auto counter advances only across the two non-positional
+/// `%s`es, landing on the same slot the explicit `%2$s` already named — the
+/// counters are independent, never additive).
+///
+/// `None` — whole-format UNPROVEN, silence — when ANY `%`-sequence fails to
+/// walk to a complete, recognized specifier: an unknown conversion character
+/// (`php -r`-witnessed `ValueError: Unknown format specifier "z"` for `%z`),
+/// a dangling `%` with nothing after it, or an explicit position that parses
+/// but is not a valid 1-based index (`%0$`, witnessed
+/// `ValueError: Argument number specifier must be greater than zero…`).
+/// `%%` is recognized as the literal-percent escape ONLY when the two `%`
+/// bytes are directly adjacent (no flags/width/positional prefix between
+/// them) — `php -r`-witnessed that `%5%` is NOT the same shape (it does not
+/// behave like a plain `%%`), so this parser declines it via the general
+/// specifier path below rather than guessing it means anything.
+///
+/// Recognized conversion characters (per the PHP manual's `sprintf` format
+/// spec, PHP 8.5): `b c d e E f F g G h H o s u x X`. `%` itself is
+/// deliberately excluded from this set — it is the escape's own vocabulary,
+/// not a general type character after flags/width.
+fn printf_placeholder_count(fmt: &str) -> Option<usize> {
+    let b = fmt.as_bytes();
+    let n = b.len();
+    let mut i = 0usize;
+    let mut auto = 0usize;
+    let mut max_pos = 0usize;
+    while i < n {
+        if b[i] != b'%' {
+            i += 1;
+            continue;
+        }
+        // The `%%` literal-percent escape: no argument, only when the second
+        // `%` sits immediately after the first (php -r-witnessed above).
+        if i + 1 < n && b[i + 1] == b'%' {
+            i += 2;
+            continue;
+        }
+        i += 1; // past the opening '%'.
+
+        // Optional positional prefix: digit+ immediately followed by '$'.
+        let digits_start = i;
+        while i < n && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        let explicit_pos = if i < n && i > digits_start && b[i] == b'$' {
+            let digits = std::str::from_utf8(&b[digits_start..i]).ok()?;
+            let pos: usize = digits.parse().ok()?;
+            i += 1; // past '$'.
+            if pos == 0 {
+                // `%0$` — php -r-witnessed `ValueError`, an invalid position:
+                // decline the whole format rather than guess its meaning.
+                return None;
+            }
+            Some(pos)
+        } else {
+            // Not positional after all — rewind past the digits we scanned.
+            i = digits_start;
+            None
+        };
+
+        // Flags: `-`, `+`, ` `, `0` (any order, any repeat), or a custom pad
+        // `'` + one literal pad character (PHP's own grammar: any byte may
+        // follow the quote).
+        loop {
+            if i >= n {
+                return None; // dangling `%` mid-flags — unparseable, decline.
+            }
+            match b[i] {
+                b'-' | b'+' | b' ' | b'0' => i += 1,
+                b'\'' => {
+                    if i + 1 >= n {
+                        return None; // quote with no pad char — dangling.
+                    }
+                    i += 2;
+                }
+                _ => break,
+            }
+        }
+        // Width.
+        while i < n && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        // Precision: `.` optionally followed by digits.
+        if i < n && b[i] == b'.' {
+            i += 1;
+            while i < n && b[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+        if i >= n {
+            return None; // dangling specifier — no type character at all.
+        }
+        let type_char = b[i];
+        if !matches!(
+            type_char,
+            b'b' | b'c'
+                | b'd'
+                | b'e'
+                | b'E'
+                | b'f'
+                | b'F'
+                | b'g'
+                | b'G'
+                | b'h'
+                | b'H'
+                | b'o'
+                | b's'
+                | b'u'
+                | b'x'
+                | b'X'
+        ) {
+            // Unknown conversion character — `php -r`-witnessed `ValueError`;
+            // the whole format is UNPROVEN (never guess).
+            return None;
+        }
+        i += 1; // past the type character.
+
+        let pos = match explicit_pos {
+            Some(p) => p,
+            None => {
+                auto += 1;
+                auto
+            }
+        };
+        max_pos = max_pos.max(pos);
+    }
+    Some(max_pos)
+}
+
+/// Run the `call.printf-too-few-arguments` check (ADR-0078, issue #188) for
+/// one call, emitting iff every leg holds. Called only from the plain
+/// per-scope pass (mirrors [`check_arity`]'s `descent.is_none()` gating), so a
+/// site is judged once, never re-emitted under an interprocedural descent.
+fn check_printf_arity(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    out: &mut Vec<Diagnostic>,
+) {
+    // Call-site conditions (ADR-0078 scope): a purely positional call only —
+    // `positional_only` already excludes both argument unpacking (`...$args`,
+    // whose cardinality is a runtime value) and named arguments (the
+    // printf-family signatures are effectively unnamed/variadic, so a named
+    // argument's binding here is not proven), and the first-class-callable
+    // shape (`sprintf(...)`) naturally has too few args to ever qualify below.
+    if !call.positional_only {
+        return;
+    }
+    let Callee::Function(_) = &call.receiver else { return };
+    let Some((name, shape)) = printf_family_shape(cx, call) else { return };
+
+    let format_pos = match shape {
+        PrintfShape::Variadic { format_pos } | PrintfShape::Array { format_pos } => format_pos,
+    };
+    let Some(format_arg) = call.args.get(format_pos) else { return };
+    // The format string must come through the fold gate as a proven literal
+    // (a `Singleton` string fact) — a plain local, a global `const`/`define()`
+    // value, or a foldable concatenation all qualify exactly as they do for
+    // every other proof-layer fold consumer; a non-folded format is silence.
+    let Some(ArgValue::Str(fmt)) = cx.resolve_literal(&format_arg.value, env, poisoned, folder)
+    else {
+        return;
+    };
+    let Some(required) = printf_placeholder_count(&fmt) else {
+        return; // an unknown conversion char / malformed specifier — silence.
+    };
+    if required == 0 {
+        return; // nothing to prove too few of.
+    }
+
+    match shape {
+        PrintfShape::Variadic { format_pos } => {
+            // `printf`/`sprintf` (format_pos 0) / `fprintf` (format_pos 1):
+            // every argument after the format is one value. PHP counts the
+            // format (and, for `fprintf`, the stream) as required arguments
+            // too, so `php_required` = everything before the values
+            // (`format_pos + 1`) plus the placeholder count, and
+            // `php_given` is simply the call's whole positional arg count
+            // (php -r-witnessed above: both match exactly).
+            let supplied = call.args.len().saturating_sub(format_pos + 1);
+            if supplied >= required {
+                return;
+            }
+            let php_required = format_pos + 1 + required;
+            let php_given = call.args.len();
+            let at = cx.tree().position(call.span.start);
+            out.push(Diagnostic {
+                id: CALL_PRINTF_TOO_FEW_ARGUMENTS_ID,
+                facet: None,
+                fix: None,
+                path: cx.path().to_owned(),
+                line: at.line,
+                column: at.column,
+                message: format!(
+                    "too few arguments to {name}(): format needs {required} placeholder \
+                     argument(s), {supplied} supplied — provable ArgumentCountError: \
+                     {php_required} arguments are required, {php_given} given",
+                ),
+            });
+        }
+        PrintfShape::Array { format_pos } => {
+            // `vprintf`/`vsprintf`: the values arrive as ONE array argument
+            // right after the format. Report only against a proven array
+            // shape of KNOWN size (ADR-0078: "unknown size = silence") — the
+            // same fold gate resolves an array literal, or a variable proven
+            // to hold one, to a concrete `ArgValue::Array` whose element
+            // count IS the array's proven size; anything else (an unresolved
+            // variable, a non-array, a call result) is silence.
+            let Some(array_arg) = call.args.get(format_pos + 1) else { return };
+            let Some(ArgValue::Array(items)) =
+                cx.resolve_literal(&array_arg.value, env, poisoned, folder)
+            else {
+                return;
+            };
+            let supplied = items.len();
+            if supplied >= required {
+                return;
+            }
+            let at = cx.tree().position(call.span.start);
+            out.push(Diagnostic {
+                id: CALL_PRINTF_TOO_FEW_ARGUMENTS_ID,
+                facet: None,
+                fix: None,
+                path: cx.path().to_owned(),
+                line: at.line,
+                column: at.column,
+                message: format!(
+                    "too few arguments to {name}(): format needs {required} placeholder \
+                     argument(s), array holds {supplied} — provable ValueError: The \
+                     arguments array must contain {required} items, {supplied} given",
+                ),
+            });
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
