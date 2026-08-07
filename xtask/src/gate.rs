@@ -816,6 +816,162 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 14,
         message_contains: "AppApi_Testing::requestToAllAppApiEndpoints(): 1 passed, 3 required",
     },
+    // ADR-0078 issue #187: the new mechanics id `array.duplicate-key` fired 19
+    // times, all on the legacy monorepo, all TRUE — triaged verbatim against the
+    // checkout on 2026-08-08. One config key is silently overwritten by a later
+    // entry in the same literal (its variable-bound value is dead code); twelve
+    // are duplicate integer ids in an append-grown allowlist literal; one is a
+    // repeated series-options key; one is a repeated analytics path key; three
+    // are duplicated test-fixture keys; one is a repeated view-parameter key.
+    // Mechanics layer, red-on-sight bucket (ADR-0050 §1) — pinned here like the
+    // S2 ten above, not weakened. The count is coupled to the drifted checkout
+    // revision the gate already flags (the "revision DIFFERS" warning below):
+    // reseeding the corpus baseline may move these lines, and the pins should be
+    // re-cut at that sitting.
+    //
+    // A config accessor literal binds 'x_restricts' twice; the earlier value is
+    // dead the moment the array is built.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "Illust/Common.php",
+        line: 2495,
+        message_contains: "array key 'x_restricts' is declared twice",
+    },
+    // An append-grown integer allowlist literal: twelve ids were added more than
+    // once across the literal's history, each overwriting an earlier entry with
+    // an identical value — the duplication carries no information, only churn.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "Novel/NovelsAllowedCoverReupload.php",
+        line: 1680,
+        message_contains: "array key 8317821 is declared twice",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "Novel/NovelsAllowedCoverReupload.php",
+        line: 2450,
+        message_contains: "array key 8279354 is declared twice",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "Novel/NovelsAllowedCoverReupload.php",
+        line: 2451,
+        message_contains: "array key 8317785 is declared twice",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "Novel/NovelsAllowedCoverReupload.php",
+        line: 2452,
+        message_contains: "array key 8318880 is declared twice",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "Novel/NovelsAllowedCoverReupload.php",
+        line: 2453,
+        message_contains: "array key 7886722 is declared twice",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "Novel/NovelsAllowedCoverReupload.php",
+        line: 2454,
+        message_contains: "array key 8267865 is declared twice",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "Novel/NovelsAllowedCoverReupload.php",
+        line: 2455,
+        message_contains: "array key 8168208 is declared twice",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "Novel/NovelsAllowedCoverReupload.php",
+        line: 2456,
+        message_contains: "array key 8315952 is declared twice",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "Novel/NovelsAllowedCoverReupload.php",
+        line: 2457,
+        message_contains: "array key 8240621 is declared twice",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "Novel/NovelsAllowedCoverReupload.php",
+        line: 2458,
+        message_contains: "array key 8204566 is declared twice",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "Novel/NovelsAllowedCoverReupload.php",
+        line: 2459,
+        message_contains: "array key 8214002 is declared twice",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "Novel/NovelsAllowedCoverReupload.php",
+        line: 2460,
+        message_contains: "array key 8166826 is declared twice",
+    },
+    // A series-options literal binds 'ai_type' twice.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "NovelSeries/Common.php",
+        line: 1727,
+        message_contains: "array key 'ai_type' is declared twice",
+    },
+    // An analytics referer-config literal binds the same path twice.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "UserAnalytics/RefererConfig.php",
+        line: 554,
+        message_contains: "array key '/novel/index.php' is declared twice",
+    },
+    // A test fixture rebinds 'illust_sanity_level' three separate times across
+    // three separate literals in the same file — copy-paste drift, not one bug.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "SanityLevelTest.php",
+        line: 29,
+        message_contains: "array key 'illust_sanity_level' is declared twice",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "SanityLevelTest.php",
+        line: 54,
+        message_contains: "array key 'illust_sanity_level' is declared twice",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "SanityLevelTest.php",
+        line: 79,
+        message_contains: "array key 'illust_sanity_level' is declared twice",
+    },
+    // A controller's view-parameter literal binds 'tag' twice.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "array.duplicate-key",
+        path_suffix: "AllController.php",
+        line: 236,
+        message_contains: "array key 'tag' is declared twice",
+    },
 ];
 
 /// Whether `d` is a recorded, triaged TRUE proof-layer positive for `package`
