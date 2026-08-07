@@ -151,6 +151,34 @@ impl Reflection {
     }
 }
 
+/// The verdict of a `preg_compile(pattern)` request (issue #189 / ADR-0078): what
+/// the **project's own PCRE** does when handed the pattern.
+///
+/// Steins' pattern reader (`steins_catalog::preg`) decides that a pattern is a
+/// proven literal worth asking about; it never decides whether PCRE accepts it.
+/// That is ADR-0004's rule — ask the real thing — and it is what keeps the
+/// `preg.invalid-pattern` id off the zero-FP hazard of reporting a pattern the
+/// reader dislikes but PCRE compiles happily.
+///
+/// There are exactly two *answers*. "Cannot answer" is not a variant: it is the
+/// `None` of [`parse_preg_compile_result`], spelled the way every other unanswerable
+/// reply on this wire is spelled (a `widen`), so a consumer that forgets the third
+/// case gets silence rather than a claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PregCompile {
+    /// The engine's PCRE accepted the pattern.
+    Compiles,
+    /// The engine's PCRE **refused** the pattern. `message` is the engine's own
+    /// complaint with PHP's `<function>(): ` prefix stripped — the probe calls
+    /// `preg_match`, but the *call site* may be any `preg_*` entry point, so the
+    /// prefix is the caller's to re-attach and only the PCRE half travels.
+    /// Measured at PHP 8.5.9: `Compilation failed: missing closing parenthesis at
+    /// offset 9`, `Delimiter must not be alphanumeric, backslash, or NUL byte`,
+    /// `Unknown modifier 'Z'`, `No ending delimiter '/' found`, `Empty regular
+    /// expression`.
+    Refuses { message: String },
+}
+
 /// The wire tag that marks an array argument. A scalar argument encodes to a bare
 /// JSON scalar, so a JSON *object* can only ever be this envelope — the tag is a
 /// readability aid and a shape check for the runner, not a disambiguator.
@@ -172,6 +200,14 @@ pub fn env_params() -> serde_json::Value {
 #[must_use]
 pub fn reflect_params(target: &str) -> serde_json::Value {
     serde_json::json!({ "target": target })
+}
+
+/// The `params` of a `preg_compile` request: the whole PCRE pattern *as PHP would
+/// receive it* — delimiters and modifiers included, because the delimiter and the
+/// modifier letters are exactly the parts PCRE can refuse.
+#[must_use]
+pub fn preg_compile_params(pattern: &str) -> serde_json::Value {
+    serde_json::json!({ "pattern": pattern })
 }
 
 /// The `params` of a `fold` request: the function's simple name plus its already
@@ -282,6 +318,32 @@ pub fn parse_reflection_result(result: &serde_json::Value, target: &str) -> Opti
 /// `None` for absent / null / anything that is not one.
 fn parse_count(v: Option<&serde_json::Value>) -> Option<u32> {
     v.and_then(serde_json::Value::as_u64).and_then(|n| u32::try_from(n).ok())
+}
+
+/// Interpret a `preg_compile` `result` object. `Some` only for a structured
+/// `{kind: "preg"}` verdict; **everything else is `None`** — a `widen` (a malformed
+/// request, a runner too old to implement the method, a `false` return the runner
+/// could not attribute to a compile refusal), an unknown `status`, or a `refuses`
+/// carrying no message.
+///
+/// `None` means *unanswerable*, and the caller's only sound reading of it is
+/// silence. A refusal is the sole thing this parser will ever assert, and only on a
+/// reply that says so in as many words.
+#[must_use]
+pub fn parse_preg_compile_result(result: &serde_json::Value) -> Option<PregCompile> {
+    if result.get("kind").and_then(serde_json::Value::as_str) != Some("preg") {
+        return None;
+    }
+    match result.get("status").and_then(serde_json::Value::as_str)? {
+        "compiles" => Some(PregCompile::Compiles),
+        "refuses" => {
+            // A refusal without PCRE's own words is not evidence we will quote, so
+            // it is unanswerable rather than a message-less claim.
+            let message = result.get("message").and_then(serde_json::Value::as_str)?;
+            (!message.is_empty()).then(|| PregCompile::Refuses { message: message.to_owned() })
+        }
+        _ => None,
+    }
 }
 
 /// Interpret a `fold` `result` object (`{kind, ...}`) as a [`FoldResult`]. Any
@@ -484,6 +546,54 @@ mod tests {
         let r = parse_reflection_result(&refl, "Countable").expect("reflection");
         assert_eq!(r.target, "Countable");
         assert_eq!(r.return_type, None);
+    }
+
+    #[test]
+    fn preg_compile_params_carry_the_whole_pattern() {
+        // Delimiters and modifiers travel verbatim: they are exactly what PCRE can
+        // refuse (`Unknown modifier 'Z'`, `Delimiter must not be alphanumeric`).
+        assert_eq!(
+            preg_compile_params("/a/Z"),
+            serde_json::json!({ "pattern": "/a/Z" })
+        );
+    }
+
+    #[test]
+    fn preg_compile_result_reads_both_verdicts() {
+        let ok = serde_json::json!({ "kind": "preg", "status": "compiles" });
+        assert_eq!(parse_preg_compile_result(&ok), Some(PregCompile::Compiles));
+        let bad = serde_json::json!({
+            "kind": "preg",
+            "status": "refuses",
+            "message": "Compilation failed: missing closing parenthesis at offset 9",
+        });
+        assert_eq!(
+            parse_preg_compile_result(&bad),
+            Some(PregCompile::Refuses {
+                message: "Compilation failed: missing closing parenthesis at offset 9".to_owned()
+            })
+        );
+    }
+
+    /// The zero-FP half: every shape that is not an explicit verdict reads as
+    /// unanswerable, which the consumer turns into silence.
+    #[test]
+    fn an_unrecognized_preg_compile_reply_is_unanswerable() {
+        for bad in [
+            // A runner too old to implement the method.
+            serde_json::json!({ "kind": "widen", "reason": "unknown method" }),
+            // The runner could not attribute the `false` to a compile refusal.
+            serde_json::json!({ "kind": "widen", "reason": "runtime limit, not a compile refusal" }),
+            serde_json::json!({ "kind": "preg" }),
+            serde_json::json!({ "kind": "preg", "status": "maybe" }),
+            // A refusal with nothing to quote is not evidence.
+            serde_json::json!({ "kind": "preg", "status": "refuses" }),
+            serde_json::json!({ "kind": "preg", "status": "refuses", "message": "" }),
+            serde_json::json!({}),
+            serde_json::json!(42),
+        ] {
+            assert_eq!(parse_preg_compile_result(&bad), None, "{bad}");
+        }
     }
 
     #[test]

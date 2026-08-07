@@ -106,6 +106,8 @@ function steins_handle($method, array $params)
             return steins_fold($params);
         case 'reflect':
             return steins_reflect($params);
+        case 'preg_compile':
+            return steins_preg_compile($params);
         // Documented stub (ADR-0024), and it stays one. The plugin channel's
         // first facts (issue #68) arrive by a MANIFEST the Rust side reads
         // directly — `vendor/<name>/steins-plugin.json`, carrying label
@@ -249,6 +251,106 @@ function steins_reflect(array $params)
         'params_total' => $params_total,
         'params_required' => $params_required,
     ];
+}
+
+/**
+ * `preg_compile` — does THIS engine's PCRE accept the pattern? (issue #189 /
+ * ADR-0078, ADR-0004's ask-the-real-thing.)
+ *
+ * The Rust side's pattern reader decides that a pattern is a proven literal worth
+ * asking about; it never decides whether PCRE accepts it. A reader-derived refusal
+ * would report patterns PCRE compiles happily, which the zero-FP bar forbids — so
+ * the refusal comes from here, from the project's own engine and its own PCRE
+ * build, or it does not come at all.
+ *
+ * ## The probe, and why it is safe
+ *
+ * `@preg_match($pattern, '')`: compilation is unavoidable, and the *match* runs
+ * against a ZERO-LENGTH subject, so there is exactly one start position and no
+ * input to backtrack over. Measured at PHP 8.5.9: the textbook catastrophic
+ * pattern `/(a+)+$/` answers in 0.0001s on `''` (and only hits the backtrack limit
+ * once given a real adversarial subject), and a pattern that IS expensive to
+ * compile fails fast (`/(?:a){1,100000}/` → `number too big in {} quantifier`,
+ * 0.0000s). A pathological pattern that still burns time inside the engine hits
+ * PCRE's own backtrack/recursion/JIT-stack limits, and past those the transport's
+ * per-request timeout and `memory_limit` bound it from outside. Nothing here can
+ * run the caller's pattern against the caller's data: the subject is `''`, always.
+ *
+ * ## What carries the compile message — and what does NOT
+ *
+ * Measured at PHP 8.5.9, `@preg_match('/(unclosed/', '')`:
+ *
+ * * `preg_last_error_msg()` is **`"Internal error"`** — the PREG error *category*,
+ *   with none of PCRE's diagnosis. It is the obvious candidate and it is useless.
+ * * `error_get_last()['message']` is
+ *   `preg_match(): Compilation failed: missing closing parenthesis at offset 9` —
+ *   PCRE's own words, at `E_WARNING` severity (type 2), and `@` does not stop it
+ *   being recorded. This is what travels.
+ *
+ * The message is prefixed with the name of the function that *ran*, and PHP uses
+ * the real call site's name (`preg_split(): Compilation failed: …` at a
+ * `preg_split` site). Our probe always says `preg_match`, so the prefix is stripped
+ * here and the consumer re-attaches its own site's name — otherwise a `preg_split`
+ * finding would quote a warning naming `preg_match`, which the engine never emits.
+ *
+ * ## Why a `false` return alone is NOT a refusal
+ *
+ * `@preg_match('/(?R)/', '')` returns `false` with `preg_last_error()` =
+ * `PREG_JIT_STACKLIMIT_ERROR` and NO recorded diagnostic: the pattern compiled
+ * fine and the *match* hit a runtime limit. Reporting it would be a false positive
+ * of exactly the kind this whole detour exists to avoid. So a refusal requires all
+ * three: a `false` return, `preg_last_error() === PREG_INTERNAL_ERROR` (the
+ * category compile failures land in), and a freshly-recorded diagnostic to quote.
+ * Anything else widens.
+ *
+ * @param array<mixed> $params
+ * @return array<string, mixed>
+ */
+function steins_preg_compile(array $params)
+{
+    $pattern = isset($params['pattern']) && is_string($params['pattern']) ? $params['pattern'] : null;
+    if ($pattern === null) {
+        return ['kind' => 'widen', 'reason' => 'preg_compile requires a string pattern'];
+    }
+
+    // Clear first: `error_get_last()` is process-wide and survives across requests,
+    // so an unrelated notice from an earlier fold would otherwise be quoted as this
+    // pattern's compile error.
+    error_clear_last();
+    try {
+        $matched = @preg_match($pattern, '');
+    } catch (\Throwable $e) {
+        // Nothing observed throws here (a non-string pattern cannot reach this
+        // point), but the runner's standing contract is that any misuse widens.
+        return ['kind' => 'widen', 'reason' => 'preg_match threw'];
+    }
+
+    if ($matched !== false) {
+        return ['kind' => 'preg', 'status' => 'compiles'];
+    }
+
+    // `false` with any other PREG category is a RUNTIME limit on a pattern that
+    // compiled — see the `(?R)` witness above.
+    if (preg_last_error() !== PREG_INTERNAL_ERROR) {
+        return ['kind' => 'widen', 'reason' => 'not a compile refusal'];
+    }
+
+    $last = error_get_last();
+    $message = is_array($last) && isset($last['message']) && is_string($last['message'])
+        ? $last['message']
+        : '';
+    if ($message === '') {
+        return ['kind' => 'widen', 'reason' => 'no diagnostic recorded'];
+    }
+
+    // Strip our probe's own `preg_match(): ` prefix; the consumer re-attaches the
+    // name of the function that actually appears at the call site.
+    $prefix = 'preg_match(): ';
+    if (strncmp($message, $prefix, strlen($prefix)) === 0) {
+        $message = substr($message, strlen($prefix));
+    }
+
+    return ['kind' => 'preg', 'status' => 'refuses', 'message' => $message];
 }
 
 /**

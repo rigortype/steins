@@ -13,8 +13,9 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::wire::{
-    EnvInfo, FoldArg, FoldResult, Reflection, env_params, fold_params, parse_env_result,
-    parse_fold_result, parse_reflection_result, reflect_params,
+    EnvInfo, FoldArg, FoldResult, PregCompile, Reflection, env_params, fold_params,
+    parse_env_result, parse_fold_result, parse_preg_compile_result, parse_reflection_result,
+    preg_compile_params, reflect_params,
 };
 
 /// The runner source, baked into the binary.
@@ -257,6 +258,19 @@ impl Sidecar {
         }
         let value = self.request("reflect", reflect_params(target))?;
         parse_reflection_result(value.get("result")?, target)
+    }
+
+    /// Ask the project's own PCRE whether it accepts `pattern` (issue #189 /
+    /// ADR-0078, ADR-0004's ask-the-real-thing). `Some(PregCompile::Refuses{..})`
+    /// is the only answer that licenses a finding; `Some(Compiles)` and `None` —
+    /// poison, timeout, a `widen`, a runner too old to implement the method — are
+    /// both silence at the consumer.
+    pub fn preg_compile(&mut self, pattern: &str) -> Option<PregCompile> {
+        if !self.revive() {
+            return None;
+        }
+        let value = self.request("preg_compile", preg_compile_params(pattern))?;
+        parse_preg_compile_result(value.get("result")?)
     }
 
     /// Fold one builtin call: send `fold(name, args)` and interpret the reply.

@@ -39,7 +39,7 @@ use steins_db::{
     Db, DeclSite, PluginFacts, Project, ProjectIndex, ProjectLayout, Resolve, SourceFile, parse,
     project_index,
 };
-use steins_sidecar::{EnvInfo, FoldArg, FoldKey, FoldResult, FoldValue, Reflection};
+use steins_sidecar::{EnvInfo, FoldArg, FoldKey, FoldResult, FoldValue, PregCompile, Reflection};
 #[cfg(not(target_arch = "wasm32"))]
 use steins_sidecar::Sidecar;
 use steins_syntax::CallExpr;
@@ -368,6 +368,34 @@ pub fn is_dump_family_fqn(fqn: &str) -> bool {
     DUMP_FQNS.contains(&fqn)
 }
 
+// preg pattern refusal (ADR-0078, issue #189)
+
+/// The registry id for the invalid-pattern check (ADR-0078, **proof** layer, floor
+/// `Default`): a `preg_*` call whose pattern argument is a proven literal that the
+/// project's OWN PCRE refuses to compile.
+///
+/// # Why proof, and why the warning-handler gate
+///
+/// The consequence is warning-plus-a-useless-return, measured at PHP 8.5.9: the
+/// call emits an `E_WARNING` carrying PCRE's own complaint and returns `false`
+/// (`preg_match`, `preg_match_all`, `preg_split`, `preg_grep`) or `null`
+/// (`preg_replace`, `preg_replace_callback`, `preg_replace_callback_array`,
+/// `preg_filter`). The call never does what it was written to do — a live-path
+/// break, so **proof**, the same answer `offset.missing` carries for the same
+/// warning-plus-degraded-value shape. And for the same reason it rides the same
+/// ADR-0049 §7 lever: under a declared `warning-handler = "null"` posture the
+/// application tolerates the warning, so the warning-grade finding leaves the proof
+/// surface exactly as `offset.missing` does.
+///
+/// # Where the refusal comes from
+///
+/// From the project's own PCRE, through the sidecar (ADR-0004), never from Steins'
+/// own pattern reader. The reader's job stays what it was built for (#148/#149/
+/// #156/#168/#177): deciding that the pattern IS a proven literal worth asking
+/// about. A reader-derived refusal would report patterns PCRE compiles happily,
+/// which the zero-FP bar forbids. No sidecar ⇒ no refusal ⇒ silence.
+pub const PREG_INVALID_PATTERN_ID: &str = "preg.invalid-pattern";
+
 /// Every id constant that reaches a `Diagnostic { id: … }` construction site — the
 /// canonical enumeration of what the emitters can produce (ADR-0050 §2 totality).
 ///
@@ -425,6 +453,8 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     PHPDOC_MISPLACED_VAR_ID,
     PHPDOC_THROWS_NOT_THROWABLE_ID,
     CLOSURE_UNUSED_USE_ID,
+    // preg pattern refusal (ADR-0078, issue #189)
+    PREG_INVALID_PATTERN_ID,
 ];
 
 /// Ids **registered ahead of emission**: they exist in [`DIAGNOSTIC_REGISTRY`]
@@ -589,6 +619,28 @@ pub trait Folder {
         let _ = name;
         None
     }
+
+    // preg pattern refusal (ADR-0078, issue #189)
+
+    /// The project's own PCRE **refusal** of `pattern`, as PCRE's own words — or
+    /// `None` when no refusal is proven.
+    ///
+    /// `pattern` is the whole pattern PHP would receive, delimiters and modifiers
+    /// included, because those are exactly the parts PCRE can reject. The answer is
+    /// the running engine's, obtained by compiling the pattern there (ADR-0004): it
+    /// is never derived from Steins' own pattern reader, whose dislikes are not
+    /// PCRE's. The returned string carries no `<function>(): ` prefix — the emitter
+    /// re-attaches the name of the function at the call site, which is the one PHP
+    /// would name.
+    ///
+    /// **`None` deliberately conflates "compiles" with "cannot answer"**, because a
+    /// consumer must treat them identically: only a refusal licenses a finding, and
+    /// everything else is silence. The sound subset (no sidecar / `--no-php`) is
+    /// therefore the default, like every other engine question here.
+    fn preg_pattern_refusal(&mut self, pattern: &str) -> Option<String> {
+        let _ = pattern;
+        None
+    }
 }
 
 /// The runtime-redefinition extensions that void the absence family (ADR-0049 A9):
@@ -639,6 +691,10 @@ pub trait FoldEngine {
     fn reflect(&mut self, target: &str) -> Option<Reflection>;
     /// Run `name(args)` on the engine and report the outcome.
     fn fold(&mut self, name: &str, args: &[FoldArg]) -> FoldResult;
+    /// Whether the engine's own PCRE accepts `pattern` (ADR-0078, issue #189).
+    /// `None` declines — no engine, a failed request, or a `false` return the
+    /// runner could not attribute to a compile refusal.
+    fn preg_compile(&mut self, pattern: &str) -> Option<PregCompile>;
 }
 
 /// The **policy** half of the fold seam: a [`Folder`] over any [`FoldEngine`],
@@ -685,6 +741,18 @@ pub struct EngineFolder<E: FoldEngine> {
     /// ADR-0064's mixed-pin second leg, riding the same `reflect` reply as the two
     /// memos above and following the same per-name pattern.
     param_counts_memo: HashMap<String, Option<(u32, u32)>>,
+    /// Per-**pattern** memo of the PCRE compile verdict (ADR-0078, issue #189):
+    /// the dedupe that makes a pattern repeated across a run cost exactly one
+    /// `preg_compile` request. Keyed by the pattern verbatim — PCRE is
+    /// case-sensitive about everything in a pattern, delimiters and modifier
+    /// letters included, so unlike the name-keyed memos above nothing is
+    /// lowercased.
+    ///
+    /// Engine-intrinsic, like `int_size`: what this engine's PCRE build accepts
+    /// does not change with the project's declared target, so
+    /// [`Self::set_php_target`] does not drop it. The target gate lives at the
+    /// check, on `absence_family_available`.
+    preg_refusal_memo: HashMap<String, Option<String>>,
     /// The project's declared target PHP range (issue #28), when the layout
     /// resolved one. Set by the CLI after layout discovery; gates the absence
     /// family (the boot surface interrogated must be a declared-supported
@@ -708,6 +776,7 @@ impl<E: FoldEngine> EngineFolder<E> {
             return_fact_memo: HashMap::new(),
             return_type_memo: HashMap::new(),
             param_counts_memo: HashMap::new(),
+            preg_refusal_memo: HashMap::new(),
             php_target: None,
         }
     }
@@ -1009,6 +1078,24 @@ impl<E: FoldEngine> Folder for EngineFolder<E> {
         }
         let answer = self.compute_builtin_param_counts(&key);
         self.param_counts_memo.insert(key, answer);
+        answer
+    }
+
+    // preg pattern refusal (ADR-0078, issue #189)
+
+    fn preg_pattern_refusal(&mut self, pattern: &str) -> Option<String> {
+        if let Some(cached) = self.preg_refusal_memo.get(pattern) {
+            return cached.clone();
+        }
+        // `Compiles` and a declined request collapse to the same `None` here — see
+        // the trait doc. The engine is asked at most once per distinct pattern per
+        // run, which is the whole point of the memo: a pattern written in fifty
+        // files costs one round trip.
+        let answer = match self.engine.preg_compile(pattern) {
+            Some(PregCompile::Refuses { message }) => Some(message),
+            Some(PregCompile::Compiles) | None => None,
+        };
+        self.preg_refusal_memo.insert(pattern.to_owned(), answer.clone());
         answer
     }
 }
@@ -1322,6 +1409,10 @@ impl FoldEngine for ProcessEngine {
     fn fold(&mut self, name: &str, args: &[FoldArg]) -> FoldResult {
         self.call(|sc| sc.fold(name, args)).unwrap_or_else(|| FoldResult::widen("no sidecar"))
     }
+
+    fn preg_compile(&mut self, pattern: &str) -> Option<PregCompile> {
+        self.call(|sc| sc.preg_compile(pattern)).flatten()
+    }
 }
 
 /// The default native folder: the shared policy over the process transport.
@@ -1443,6 +1534,11 @@ impl FoldEngine for TableEngine {
             // Unanswered: the same decline a dead sidecar gives.
             None => FoldResult::widen("pending"),
         }
+    }
+
+    fn preg_compile(&mut self, pattern: &str) -> Option<PregCompile> {
+        let answer = self.ask("preg_compile", &steins_sidecar::preg_compile_params(pattern))?;
+        steins_sidecar::parse_preg_compile_result(&answer)
     }
 }
 
@@ -7737,6 +7833,11 @@ fn walk_trace(
                         // proven-dead region, and the branch store carries the FP-15
                         // `function_exists` vouch.
                         check_undefined_function(cx, folder, call, store, out);
+                        // The pattern-refusal check (ADR-0078 / issue #189): a
+                        // `preg_*` call whose proven-literal pattern the project's
+                        // own PCRE refuses to compile. Plain per-scope pass only,
+                        // like every other once-per-site judgement here.
+                        check_preg_pattern(w, folder, call, env, out);
                         // The dump surface (ADR-0053 D3/D4): a recognized
                         // `PHPStan\dumpType`-family or `var_dump` call emits its fact
                         // rendering at this position. Plain per-scope pass only, so a
@@ -10391,6 +10492,17 @@ fn walk_if(
     // clones (a call in either operand may have executed on the excluded path too).
     let guard_calls: Vec<&CallExpr> = collect_guard_calls_any(cond);
     escape_and_sweep_calls(w, &guard_calls, store);
+    // The pattern-refusal check at guard position (ADR-0078 / issue #189).
+    // `if (preg_match('/…/', $s))` is THE idiom the id is about, and a guard
+    // condition is not a `checkable_calls` position, so the statement-position hook
+    // never sees it. An `elseif` chain arrives here too — `walk_else` recurses into
+    // `walk_if` per link — so each condition is judged exactly once. Plain
+    // per-scope pass only, like every other once-per-site judgement.
+    if descent.is_none() {
+        for call in &guard_calls {
+            check_preg_pattern(w, folder, call, env, out);
+        }
+    }
     for v in cond_invalidations(w.cx, cond, env, store, poisoned) {
         env.remove(&v);
         store.unbind(&v);
@@ -13582,10 +13694,239 @@ fn preg_proven_groups(
     call: &CallExpr,
     env: &HashMap<String, Known>,
 ) -> Option<steins_catalog::preg::CaptureGroups> {
-    let pattern =
-        w.cx.resolve_literal(&call.args.first()?.value, env, w.scope.poisoned, folder)?;
-    let ArgValue::Str(pattern) = pattern else { return None };
+    let pattern = preg_proven_pattern(w, folder, &call.args.first()?.value, env)?;
     steins_catalog::preg::capture_groups(&pattern)
+}
+
+/// The **one** fold-gate fact both preg consumers rest on: `value` resolves to a
+/// proven `Singleton` string (ADR-0037), i.e. a pattern the analysis can name.
+///
+/// Extracted so the ADR-0078 refusal check asks the same question the capture-group
+/// reader asks, out of the same seam, rather than re-deriving "is this a literal
+/// pattern" a second time and drifting from it. Everything the reader's
+/// resolution admits — a written literal, a variable bound to one, a concatenation
+/// of proven halves, a folded builtin call — is admitted here, and nothing else is.
+fn preg_proven_pattern(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+) -> Option<String> {
+    match w.cx.resolve_literal(value, env, w.scope.poisoned, folder)? {
+        ArgValue::Str(pattern) => Some(pattern),
+        _ => None,
+    }
+}
+
+// preg pattern refusal (ADR-0078, issue #189)
+
+/// Where a recognized `preg_*` entry point keeps its PCRE pattern(s) in argument 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PregPatternForm {
+    /// A single pattern string, and nothing else is accepted there.
+    Single,
+    /// A single pattern string **or** a list of them
+    /// (`preg_replace(['/a/', '/b/'], 'z', $s)`).
+    SingleOrList,
+    /// An array whose **keys** are the patterns
+    /// (`preg_replace_callback_array(['/a/' => $cb], $s)`).
+    Keys,
+}
+
+/// One `preg_*` entry point that takes a PCRE pattern in argument 0 (ADR-0078).
+struct PregEntryPoint {
+    /// The builtin's name, matched case-insensitively (PHP function names are).
+    name: &'static str,
+    form: PregPatternForm,
+    /// What the call evaluates to when PCRE refuses the pattern. Measured at PHP
+    /// 8.5.9 with `@f('/(unclosed/', …)`: the `preg_match` family and the two
+    /// splitters answer `false`, the four replacers answer `null`. Both are
+    /// preceded by the same `E_WARNING`, which is why the whole set rides the
+    /// ADR-0049 §7 warning-handler gate together.
+    refusal_value: &'static str,
+}
+
+/// **Every** `preg_*` function that takes a pattern, and no others.
+///
+/// The `preg_*` surface is `preg_match`, `preg_match_all`, `preg_replace`,
+/// `preg_replace_callback`, `preg_replace_callback_array`, `preg_filter`,
+/// `preg_split`, `preg_grep`, `preg_quote`, `preg_last_error` and
+/// `preg_last_error_msg`. The last three are the complement and take no pattern:
+/// `preg_quote` takes the *text to escape* (a plain string, never compiled), and
+/// the two error readers take nothing. So this table is the whole entry-point set,
+/// with the omission recorded rather than left implicit.
+const PREG_PATTERN_ENTRY_POINTS: &[PregEntryPoint] = &[
+    PregEntryPoint { name: "preg_match", form: PregPatternForm::Single, refusal_value: "false" },
+    PregEntryPoint { name: "preg_match_all", form: PregPatternForm::Single, refusal_value: "false" },
+    PregEntryPoint { name: "preg_split", form: PregPatternForm::Single, refusal_value: "false" },
+    PregEntryPoint { name: "preg_grep", form: PregPatternForm::Single, refusal_value: "false" },
+    PregEntryPoint { name: "preg_replace", form: PregPatternForm::SingleOrList, refusal_value: "null" },
+    PregEntryPoint {
+        name: "preg_replace_callback",
+        form: PregPatternForm::SingleOrList,
+        refusal_value: "null",
+    },
+    PregEntryPoint { name: "preg_filter", form: PregPatternForm::SingleOrList, refusal_value: "null" },
+    PregEntryPoint {
+        name: "preg_replace_callback_array",
+        form: PregPatternForm::Keys,
+        refusal_value: "null",
+    },
+];
+
+/// The entry point `call` names, or `None` when it names none — or names one
+/// *textually* while denoting something else. [`global_function_callee`] owns that
+/// second rule: a `Foo\preg_match` or a project function of the same simple name is
+/// a DIFFERENT function, and asking PCRE about its first argument would be a claim
+/// about code we did not analyze.
+fn preg_entry_point(cx: &Cx, call: &CallExpr) -> Option<&'static PregEntryPoint> {
+    let callee = global_function_callee(cx, call)?;
+    PREG_PATTERN_ENTRY_POINTS.iter().find(|e| callee.eq_ignore_ascii_case(e.name))
+}
+
+/// The proven pattern strings in a `Single`/`SingleOrList` argument.
+///
+/// The whole-value resolution comes first, which covers the written literal, a
+/// variable bound to one, and an array every element of which is proven. It is the
+/// **partial** array that needs the second leg: `resolve_literal` is all-or-nothing
+/// over an array, so `preg_replace(['/(unclosed/', $dynamic], …)` resolves to
+/// nothing at all — yet each element is still its own question, and the literal one
+/// is refused no matter what `$dynamic` turns out to hold. Elements that do not
+/// resolve simply contribute nothing (silence, never a guess).
+fn preg_pattern_list(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+) -> Vec<String> {
+    if let Some(resolved) = w.cx.resolve_literal(value, env, w.scope.poisoned, folder) {
+        return match resolved {
+            ArgValue::Str(p) => vec![p],
+            ArgValue::Array(items) => items
+                .into_iter()
+                .filter_map(|(_, v)| match v {
+                    ArgValue::Str(p) => Some(p),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+    }
+    let ArgValue::Array(items) = value else { return Vec::new() };
+    items.iter().filter_map(|(_, v)| preg_proven_pattern(w, folder, v, env)).collect()
+}
+
+/// The pattern strings in a `Keys` argument (`preg_replace_callback_array`).
+///
+/// Keys are fixed at lowering, so no element value needs to resolve for a key to be
+/// known — the callback values (closures) never resolve to literals anyway. Only a
+/// `Str` key can be a pattern: PHP normalizes integer-like string keys to `Int`, and
+/// a PCRE pattern always opens with a non-alphanumeric delimiter, so a pattern is
+/// never integer-like and an `Int`/`Auto` key is never one.
+fn preg_pattern_keys(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+) -> Vec<String> {
+    let resolved = w.cx.resolve_literal(value, env, w.scope.poisoned, folder);
+    let ArgValue::Array(items) = resolved.as_ref().unwrap_or(value) else { return Vec::new() };
+    items
+        .iter()
+        .filter_map(|(k, _)| match k {
+            ArrayKey::Str(s) => Some(s.clone()),
+            ArrayKey::Int(_) | ArrayKey::Auto => None,
+        })
+        .collect()
+}
+
+/// Emit `preg.invalid-pattern` for every proven-literal pattern at this `preg_*`
+/// call that the project's own PCRE refuses (ADR-0078, issue #189).
+///
+/// The ladder, in the order the legs are cheapest to fail:
+///
+/// 1. **The warning-handler posture** (ADR-0049 §7). A refusal is warning-plus-a-
+///    useless-return, so under a declared `warning-handler = "null"` the finding
+///    leaves the proof surface — wired exactly as `offset.missing` is.
+/// 2. **A recognized entry point**, denoting the real builtin.
+/// 3. **Positional arguments only.** A named `pattern:` argument is not read: the
+///    positional mapping this check reasons with is what a named or spread argument
+///    defeats, and the same conservatism `out_param_seed_callee` applies. A
+///    first-class callable (`preg_match(...)`) lands here too and is likewise
+///    skipped — it builds a Closure and compiles nothing.
+/// 4. **A live, legitimate boot surface** (`absence_family_available`): a sidecar is
+///    answering, no runtime-redefinition extension has redefined `preg_match` out
+///    from under the probe (ADR-0049 A9), and the runtime is a version the project
+///    declares it ships on (issue #28) — a refusal on a version the project does not
+///    ship on proves nothing about the ones it does. `--no-php` and a missing `php`
+///    both fail this leg, which is the sound subset (ADR-0004).
+/// 5. **A proven literal pattern**, from the same fold gate the capture-group reader
+///    consumes ([`preg_proven_pattern`]).
+/// 6. **PCRE's own refusal**, asked of the project's own engine and deduped per
+///    distinct pattern for the whole run ([`Folder::preg_pattern_refusal`]).
+///
+/// # Positions covered, and the recorded boundary
+///
+/// Two hooks: the statement-position pass (a bare call, and the `return` / assign /
+/// echo positions [`checkable_calls`] yields) and `walk_if`'s guard, which is where
+/// `if (preg_match(…))` — the idiom the id exists for — actually lives. A call in a
+/// LOOP header, a ternary condition, or a `match` subject is not reached by either,
+/// and is silence: the same position boundary every other call-site check here
+/// carries, recorded rather than left implicit.
+fn check_preg_pattern(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let cx = w.cx;
+    if !cx.warning_handler_abort {
+        return;
+    }
+    let Some(entry) = preg_entry_point(cx, call) else {
+        return;
+    };
+    if !call.positional_only {
+        return;
+    }
+    let Some(arg) = call.args.first() else {
+        return;
+    };
+    if !folder.absence_family_available() {
+        return;
+    }
+
+    let patterns = match entry.form {
+        PregPatternForm::Single => {
+            preg_proven_pattern(w, folder, &arg.value, env).into_iter().collect()
+        }
+        PregPatternForm::SingleOrList => preg_pattern_list(w, folder, &arg.value, env),
+        PregPatternForm::Keys => preg_pattern_keys(w, folder, &arg.value, env),
+    };
+
+    // Report at the PATTERN argument, not the call: that is the text to fix, and in
+    // the array form every element shares it (a lowered array element carries no
+    // span of its own — the pattern text in the message is what tells them apart).
+    let pos = cx.tree().position(arg.span.start);
+    for pattern in patterns {
+        let Some(message) = folder.preg_pattern_refusal(&pattern) else {
+            continue;
+        };
+        out.push(Diagnostic {
+            id: PREG_INVALID_PATTERN_ID,
+            path: cx.path().to_owned(),
+            line: pos.line,
+            column: pos.column,
+            message: format!(
+                "pattern '{pattern}' is refused by this PHP's PCRE; the call warns and \
+                 returns {} with \"{}(): {message}\"",
+                entry.refusal_value, entry.name
+            ),
+            facet: None,
+            fix: None,
+        });
+    }
 }
 
 /// The element type of one `$matches` entry, read off the sub-pattern that

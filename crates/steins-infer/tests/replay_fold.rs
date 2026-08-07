@@ -25,7 +25,8 @@ use steins_infer::{
     TableFolder, annotate_project, check_with, request_key,
 };
 use steins_sidecar::{
-    EnvInfo, FoldArg, FoldResult, Reflection, Sidecar, env_params, fold_params, reflect_params,
+    EnvInfo, FoldArg, FoldResult, PregCompile, Reflection, Sidecar, env_params, fold_params,
+    reflect_params,
 };
 use steins_syntax::{ArgValue, SourceTree};
 
@@ -290,6 +291,11 @@ impl FoldEngine for FakeEngine {
     fn fold(&mut self, name: &str, _args: &[FoldArg]) -> FoldResult {
         self.dispatched.push(name.to_owned());
         self.folds.get(name).cloned().unwrap_or_else(|| FoldResult::widen("unknown"))
+    }
+    /// The fake models no PCRE (ADR-0078): declining is the sound answer for a
+    /// transport that cannot answer, and this file's subject is the replay loop.
+    fn preg_compile(&mut self, _pattern: &str) -> Option<PregCompile> {
+        None
     }
 }
 
