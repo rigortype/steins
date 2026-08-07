@@ -650,3 +650,73 @@ files reports numbers **byte-identical** to those at the parent commit
 `===` verdict in the corpus moved. That is the expected result — the
 shape needs a negative explicit key followed by an omitted one — and it
 is recorded here so a future change to these numbers is attributable.
+
+## Amendment (2026-08-08): stratum routing for the declared-receiver lane; obstacles become dischargeable records
+
+Status: PENDING ratification (post-hoc-ratification mode, ADR-0077
+precedent). Source: the 2026-08-08 grilled design session over
+`docs/notes/20260808-phpstan-rule-port-map.md`; issues #195/#196. This
+amendment supersedes §8's layer sentence and sharpens the obstacle legs'
+recording contract. Everything else in this ADR stands unchanged —
+including point 6's refusal of an arity lane over declared receivers (a
+descendant may legally relax arity, so the S6 descendant closure does not
+transfer to argument counts without signature comparison, which no slice
+has built).
+
+### A13. The lane routes by minimum stratum, not by a fixed layer
+
+§8 assigned the declared-receiver lane to `phpdoc.undefined-method` on the
+contract layer wholesale. Measured against real receivers that is one case
+of two: a **native** `C $o` parameter declaration is *Verified* evidence —
+PHP enforces the declaration at the call boundary, so the runtime value
+conforms or the program has already thrown — while a `@param`/`@var` claim
+is *Asserted*. The lane already narrows arms whose provenance carries the
+stratum (ADR-0037; ADR-0052 N2 computes the minimum across premises). The
+amendment routes the emission on that minimum:
+
+- **all arms Verified** → the finding is `call.undefined-method` — the
+  proof layer, `Default` floor, the same id S2 emits, because it is the
+  same claim at the same certainty. ADR-0022's emitter/id decoupling
+  licenses one id from two emitters; `ALL_EMITTABLE_IDS` is unchanged as a
+  set. The evidence string keeps the declared-receiver phrasing so a
+  reader can tell which ladder proved it.
+- **any arm Asserted** → `phpdoc.undefined-method`, exactly as today.
+
+No id is renamed and none is added: after routing, `phpdoc.undefined-method`
+fires only when a docblock premise participates, which makes its name
+*correct* rather than approximately so. The §8 pairing precedent
+(`type.property-mismatch` / `phpdoc.property-mismatch`) is the model.
+
+Sequencing is normative: the A14 obstacle records for `@method` /
+`@property` / `@mixin` (issue #195) land **before** the routed emission
+reaches the default surface, and a full-corpus measurement is published in
+the routing PR before the switch — a new corpus `call.undefined-method`
+site is triaged as a true positive or the switch does not happen
+(ADR-0013). The ladder itself — every leg of §4/§8 plus the audit
+amendments — is untouched; this amendment moves *findings between two
+existing ids*, never a firing condition.
+
+### A14. Obstacles are dischargeable records, never opaque flags
+
+The ladder's silence legs — `__call`/`__get` in a chain, the `@method` /
+`@property` / `@mixin` tags once they are read (issue #195), dam sites —
+are **default calibration** under the owner's zero-FP policy (2026-08-08
+restatement): the FP tolerance they encode is meant to be *discharged* by
+the plugin lane (ADR-0039: a pack declares what the magic actually
+provides), not frozen into the engine. That imposes a recording contract:
+
+- an obstacle is recorded **per site with its subject** — `(class-like,
+  obstacle kind, subject)` where the subject is the tag's named member for
+  `@method`/`@property`, the mixin target for `@mixin`, and the magic
+  method's own name for `__call`/`__get`;
+- a class-level boolean ("has magic somewhere") is barred, because a pack
+  declaring `@method`-provided members one by one must be able to
+  re-enable the absence proof for the *undeclared remainder* without the
+  engine re-learning where the obstacle came from;
+- `doctor` and the triage surface may aggregate the records — "N absence
+  claims silenced by @method tags on M classes" is exactly the
+  pack-demand measurement the adoption instrument needs.
+
+The discharge channel itself (manifest schema, pack format) is ADR-0039's
+to extend and is **not** designed here; this amendment only guarantees the
+records are shaped so that extension needs no engine rework.

@@ -246,6 +246,40 @@ _Avoid_: strictness trade-off (this is not a trade-off; it is a constraint)
 The acknowledged pre-existing findings a project starts from; only new
 findings surface. The adoption path that replaces gradual level-raising.
 
+**Member-kind family**:
+The id-family axis for the finding-breadth port wave: the first segment names
+what kind of member or construct the finding is about (`property.*`,
+`constant.*`, `variable.*`, `class-const.*`, `override.*`, `string.*`,
+`untyped.*`), joining the older premise axis (`type.*` = Verified native /
+`phpdoc.*` = Asserted docblock) and syntactic axis (`call.*`, `class.*`,
+`offset.*`).
+_Avoid_: PHPStan identifier mirroring (`property.notFound` — camelCase ids
+are not Steins vocabulary)
+
+**Dischargeable obstacle**:
+A silence leg (`__call`, `__get`, `@method`/`@mixin` tags, dams) read as
+*default calibration*, recorded at a granularity (per tag, with its subject)
+that lets the plugin lane later declare what the magic actually provides and
+re-enable the absence proof member-by-member. Obstacles are dischargeable,
+never terminal.
+_Avoid_: permanent omission, class-level opaque flag
+
+**maybe- sibling**:
+The possibly-grade twin of a definite finding id, spelled with a `maybe-`
+prefix on the rule name and floored at `strict`
+(`offset.missing` / `offset.maybe-missing` is the precedent pair). Every
+"Maybe ⇒ silence" describes the default floor; the sibling names the
+strict-floor end state, registered ahead of emission when its definite leg
+ships.
+_Avoid_: scoping the possibly-leg out of existence
+
+**Warning-handler gate**:
+The `[runtime] warning-handler = "abort" | "null"` pseudo-constant
+(ADR-0049 §7): under the default `"abort"` a proven `E_WARNING` is a proven
+runtime break and warning-grade ids sit on the proof layer; under a declared
+`"null"` posture they demote off the proof surface. Gate boundaries and id
+boundaries must coincide — one id never straddles the gate.
+
 **Annotation restraint** (provisional name):
 The design stance that complex structural types (`array{foo: int}` shapes,
 scattered `@var`) should not be hand-written: Steins infers them, and steers

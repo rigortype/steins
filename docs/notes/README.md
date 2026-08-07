@@ -45,3 +45,9 @@ Filenames are `YYYYMMDD-<slug>.md`, dated to authorship.
   the default surface holds at zero FP, and four recall gaps fall out
   (symlink-duplicate suppression, unreported syntax errors, member reach,
   the `vendor` literal).
+- [PHPStan rule-port map — what is worth porting, and in what order](20260808-phpstan-rule-port-map.md)
+  — PHPStan's 357 rules re-bucketed by identifier over the same fourteen
+  applications: 86 ids ever fire and nine cover 95%, so the port is a
+  ~twenty-id project. Ranks the classes onto existing Steins machinery, names
+  member reach as the precondition, and records what is deliberately not
+  ported.

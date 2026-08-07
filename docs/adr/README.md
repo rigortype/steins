@@ -113,3 +113,5 @@ list in one place.
 | ADR-0075 | [A method call's summary rebinds where a function's does](0075-method-call-summary-rebinding.md) |
 | ADR-0076 | [Loop-to-array_map: the first effect-preconditioned transform](0076-loop-to-array-map-transform.md) |
 | ADR-0077 | [A by-reference out-parameter carries a fact only where the call proves it was written](0077-out-parameter-fact-seeding.md) |
+| ADR-0078 | [Member-kind diagnostic families and the port-wave floor table](0078-member-kind-diagnostic-families.md) |
+| ADR-0079 | [A file that fails to parse is named loudly and dams the absence family](0079-parse-failure-dam.md) |
