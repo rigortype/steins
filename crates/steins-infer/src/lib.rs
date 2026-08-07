@@ -2019,18 +2019,32 @@ pub fn collect_assert_types(
 /// What the propagation walk knows about one variable at one program point
 /// (ADR-0076 §3, the loop-subject probe). Every field is `false` when the walk
 /// bound nothing there — a missing answer is "not proven", never a guess.
+///
+/// The answer carries **both trust lanes in one struct**: `array` and `list`
+/// report what the bound fact *says*, and `verified` reports which stratum
+/// (ADR-0052 §5) says it. A consumer that requires `verified` reads the proven
+/// lane; a consumer that deliberately accepts `verified == false` (the
+/// ADR-0076 issue-#175 opt-in) is consuming the **Asserted** lane — a docblock
+/// claim, never a proof — and must keep the two apart in everything it derives
+/// (its own admission counts, its labels). Nothing here lets one lane launder
+/// into the other: the stratum bit is the wall.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SubjectFact {
     /// `true` when the bound fact is an array value (an abstract shape or a
-    /// fully-known array literal) that does **not** also admit `null`.
+    /// fully-known array literal) that does **not** also admit `null`. A bare
+    /// native `array $xs` hint contributes nothing here at either stratum: the
+    /// native lowering represents no `array` member (ADR-0002 silence), so
+    /// only a docblock shape or a walked value can answer.
     pub array: bool,
     /// `true` when that array's denotational `array_is_list` verdict is `Yes`
     /// (ADR-0062 §3). `array_map` over a single array preserves keys, while
     /// `$out[] = …` renumbers `0..n-1`, so anything weaker is not equivalent.
     pub list: bool,
     /// `true` when the fact sits at the `Verified` stratum (ADR-0052 §5) — a
-    /// runtime-executed test or a native declaration, fit to premise a proof. A
-    /// docblock-asserted array shape answers `false` here and never qualifies.
+    /// runtime-executed test or a native declaration, fit to premise a proof.
+    /// A docblock-asserted array shape answers `false` here and never
+    /// premises the proven lane; `false` with `array`/`list` set is exactly
+    /// the Asserted answer the ADR-0076 amendment's opt-in consumes.
     pub verified: bool,
 }
 
