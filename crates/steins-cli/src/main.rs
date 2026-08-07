@@ -78,7 +78,7 @@ fn dispatch(args: &[String]) -> ExitCode {
             );
             errln!("       steins annotate [--no-php] [--format text|json] <file.php>");
             errln!(
-                "       steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--format text|json] <paths...>"
+                "       steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--asserted-subjects] [--format text|json] <paths...>"
             );
             errln!(
                 "       steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>"
@@ -703,7 +703,8 @@ fn match_baseline(
 }
 
 /// `steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map>
-/// [--apply] [--format text|json] <paths...>` (ADR-0020/0034). Dry-run by default:
+/// [--apply] [--asserted-subjects] [--format text|json] <paths...>`
+/// (ADR-0020/0034). Dry-run by default:
 /// prints a unified diff and a refusal report, and runs the dual-verification
 /// post-check (ADR-0034 point 3a — the edited project must produce *zero new
 /// diagnostics*, on the surface that transform names; see [`PostCheckSurface`]).
@@ -713,6 +714,7 @@ fn match_baseline(
 fn run_transform(args: &[String]) -> ExitCode {
     let mut format = Format::Text;
     let mut apply = false;
+    let mut asserted_subjects = false;
     let mut subcommand: Option<String> = None;
     let mut paths: Vec<String> = Vec::new();
     let mut config_path: Option<String> = None;
@@ -721,6 +723,10 @@ fn run_transform(args: &[String]) -> ExitCode {
         match args[i].as_str() {
             "--apply" => {
                 apply = true;
+                i += 1;
+            }
+            "--asserted-subjects" => {
+                asserted_subjects = true;
                 i += 1;
             }
             "--config" => {
@@ -772,11 +778,18 @@ fn run_transform(args: &[String]) -> ExitCode {
         },
         None => {
             errln!(
-                "steins: transform requires a name (usage: steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--config steins.toml] [--format text|json] <paths...>)"
+                "steins: transform requires a name (usage: steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--asserted-subjects] [--config steins.toml] [--format text|json] <paths...>)"
             );
             return ExitCode::from(2);
         }
     };
+    // The opt-in belongs to exactly one transform (the ADR-0076 issue-#175
+    // amendment); on any other it has no defined meaning, so it is a usage
+    // error rather than a silent no-op.
+    if asserted_subjects && !kind.supports_asserted_subjects() {
+        errln!("steins: --asserted-subjects applies only to loop-to-array-map");
+        return ExitCode::from(2);
+    }
     if paths.is_empty() {
         errln!("steins: no paths given");
         return ExitCode::from(2);
@@ -785,7 +798,7 @@ fn run_transform(args: &[String]) -> ExitCode {
         return code;
     }
 
-    let run = match plan_transform_run(kind, &paths, config_path.as_deref()) {
+    let run = match plan_transform_run(kind, &paths, config_path.as_deref(), asserted_subjects) {
         Ok(run) => run,
         Err(e) => {
             errln!("steins: {e}");
@@ -900,6 +913,14 @@ impl TransformKind {
         }
     }
 
+    /// Whether this transform consumes the `--asserted-subjects` opt-in (the
+    /// ADR-0076 issue-#175 amendment). Exactly one does; on every other the
+    /// flag is a usage error, and both entry points (command line and MCP)
+    /// read the answer from here so they cannot disagree.
+    fn supports_asserted_subjects(self) -> bool {
+        matches!(self, TransformKind::LoopToArrayMap)
+    }
+
     /// The surface this transform's dual-verification post-check is measured
     /// against (ADR-0034 point 3a, issue #115). The answer is a property of what
     /// the transform *does*, so it is named here, once, beside the transform it
@@ -953,6 +974,7 @@ fn plan_transform_run(
     kind: TransformKind,
     paths: &[String],
     config_path: Option<&str>,
+    asserted_subjects: bool,
 ) -> Result<TransformRun, String> {
     // Load the vouching valve (ADR-0046 §2): `steins.toml [transform.vouch]` from
     // `--config`, else `./steins.toml` if present. A malformed entry is a warning,
@@ -985,7 +1007,7 @@ fn plan_transform_run(
             project,
             &vouches,
             partitions.as_ref(),
-            LoopToArrayMapOptions::default(),
+            LoopToArrayMapOptions { asserted_subjects },
         ),
     };
 
@@ -1445,6 +1467,17 @@ fn print_transform_text(
         }
     }
 
+    // Asserted-subject admissions (the ADR-0076 issue-#175 amendment): each
+    // opted-in site's trust label, printed beside the diff it qualifies. Absent
+    // whenever the run had none, so a run without the opt-in prints exactly as
+    // before.
+    if !report.asserted_admissions.is_empty() {
+        outln!("\nAsserted-subject admissions ({}):", report.asserted_admissions.len());
+        for a in &report.asserted_admissions {
+            outln!("  {}:{}:{}: {} — {}", a.site.path, a.site.line, a.site.column, a.site.label, a.detail);
+        }
+    }
+
     // Project-global dynamic-code obstacles (ADR-0046 §2): recorded once, with the
     // site list capped in text output (the JSON carries every site).
     const OBSTACLE_SITE_CAP: usize = 5;
@@ -1472,7 +1505,16 @@ fn print_transform_text(
     }
 
     let o = &report.oracle;
-    outln!("\n{} enumerated: {} {action}, {} refused", o.enumerated, o.transformed, o.refused);
+    if o.transformed_asserted > 0 {
+        // The lane split, visible in the summary line (the amendment's oracle
+        // clause): proven yield and opted-in yield are different numbers.
+        outln!(
+            "\n{} enumerated: {} {action} ({} on asserted evidence), {} refused",
+            o.enumerated, o.transformed, o.transformed_asserted, o.refused
+        );
+    } else {
+        outln!("\n{} enumerated: {} {action}, {} refused", o.enumerated, o.transformed, o.refused);
+    }
 
     // The vouching downgrade (ADR-0046 §2 / ADR-0037): a run that vouched sites
     // does not silently pass — its completeness claim is conditional on those
