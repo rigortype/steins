@@ -110,7 +110,10 @@ message register.
 
 5. **`class.undefined`** — only at positions verified to hard-error:
    `new`, static method call, class-const fetch, static property fetch
-   (`Error: Class "X" not found`). Explicitly **not** findings, per the
+   (`Error: Class "X" not found`). *The position list in this point is
+   superseded by the A15 amendment (2026-08-08), which adds inheritance,
+   `catch` and native type declarations; the ladder below stands.*
+   Explicitly **not** findings, per the
    verified table: `instanceof` an undefined class evaluates `false`
    (feeds branch analysis as a value fact instead); `catch` of an
    undefined class matches nothing and errors nothing; `X::class` has
@@ -720,3 +723,70 @@ provides), not frozen into the engine. That imposes a recording contract:
 The discharge channel itself (manifest schema, pack format) is ADR-0039's
 to extend and is **not** designed here; this amendment only guarantees the
 records are shaped so that extension needs no engine rework.
+
+## Amendment (2026-08-08): `class.undefined` collects at every position that breaks
+
+Status: PENDING ratification (post-hoc-ratification mode, ADR-0077
+precedent). Source: `docs/notes/20260808-phpstan-rule-port-map.md` P3;
+issue #182; ADR-0078's vocabulary for the deferred twins. This amendment
+supersedes the *position list* in point 5 and nothing else — the ladder,
+the id, the layer and the floor are untouched.
+
+### A15. Three further position groups, one unchanged ladder
+
+Point 5 read the verified consequence table correctly and then drew the
+position set too narrowly: it kept the four positions whose consequence is
+`Error: Class "X" not found` and dismissed the rest as "not a hard error".
+Two of those dismissals do not survive re-reading the same table.
+
+- **Inheritance** — `extends` / `implements` on a class, `implements` on
+  an enum, `extends` on an interface, and `use <Trait>` in a class body.
+  A missing name here is a **fatal at class load**, the earliest and
+  least escapable consequence in the whole family. Point 5 simply did not
+  enumerate it.
+- **`catch (X $e)`** — point 5's "matches nothing and errors nothing" is
+  true and is not exculpatory. A handler that can never run is silently
+  dead code around a live `throw`; the consequence is a wrong-behaviour
+  break, which the proof layer's definition (runtime breakage, ADR-0002)
+  covers.
+- **Native type declarations** — parameter, return and property. Point 5
+  is right that nothing errors *at the declaration*; the `TypeError` lands
+  at the first typed use, and it is a genuine fatal there. What point 5
+  refused, and this amendment still refuses, is a *declaration-coherence
+  lint* (ADR-0030 §2): the finding is the missing class, never the
+  declaration's tidiness. A nullable, union, intersection or DNF
+  declaration contributes one reference per **named arm** — the built-in
+  type keywords are excluded structurally, being their own CST hint
+  variants rather than identifiers.
+
+Anonymous-class `extends` / `implements` join the set too: the parent of
+an anonymous class fatals at the `new` that declares it, so the same names
+that already feed the S6 descendant closure are also hard references.
+
+`instanceof` (evaluates `false`) and the docblock positions (`@param` /
+`@return` / `@var`) stay out — both are ADR-0078's named contract twins,
+and both carry a layer decision this ADR does not make.
+
+### A16. Widening the collection is not a firing licence
+
+The consuming pass is unchanged, deliberately and testably: index Absent
+over the class-*like* closure, absent from the builtin catalog hierarchy,
+the ADR-0046 dam clear, `absence_family_available`, and the sidecar's
+not-found answer — the same five legs, in the same order, over a longer
+list. Every silence leg therefore covers the new positions with no new
+argument, and the dead-region skip that serves as this id's guard leg
+(a `class_exists('X')` folding its branch dead) applies at a `catch` or an
+`extends` exactly as it does at a `new`.
+
+One collection-side silence is specific to `catch`: a clause whose caught
+type the lowering cannot name statically (`CatchClause::has_unresolvable`,
+ADR-0040) contributes **nothing** — not even its resolvable arms, since
+the unnameable member may be the one that would have caught.
+
+The message register keeps ONE wording, `reference to undefined class X`,
+across all four groups. A per-position phrasing ("extends undefined
+class") was considered and declined for this slice: the position is
+already legible from the reported line and column, and a position tag on
+every collected reference would buy wording variety at the cost of a
+wider lowering contract. It remains available if the corpus shows readers
+mis-locating the reference.

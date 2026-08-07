@@ -200,7 +200,7 @@ tabulated at its emitter):
 | --- | --- | --- |
 | `check_undefined_method` (S2) | `call.undefined-method` | exact-class receivers only; hierarchy fully enumerated; `absence_family_available` (A9) plus the boot-surface class homonym leg (A2ii) |
 | `check_offset_read` (S3) | `offset.missing`, `offset.on-unsupported` | proven container values under the read-context whitelist; warning-grade findings obey the `warning-handler` pseudo-constant |
-| `check_undefined_function` / `check_undefined_class` (S4) | `call.undefined-function`, `class.undefined` | a clear dynamism dam (A5); every candidate answered not-a-function/not-a-class-like by the boot surface (A2ii) and `absence_family_available` (A9); `class.undefined` runs the §5 ladder over the file's `hard_class_refs`; the message register is seeded by `boot_surface_label` |
+| `check_undefined_function` / `check_undefined_class` (S4) | `call.undefined-function`, `class.undefined` | a clear dynamism dam (A5); every candidate answered not-a-function/not-a-class-like by the boot surface (A2ii) and `absence_family_available` (A9); `class.undefined` runs the §5 ladder over the file's `hard_class_refs` (the four hard-error expressions plus, per A15, inheritance clauses, `catch` clauses and native type declarations); the message register is seeded by `boot_surface_label` |
 | `check_arity` (S5) | `call.too-few-arguments`, `call.unknown-named-argument` | uniquely-resolved userland functions or proven-exact receivers; the boot-surface *function* homonym leg |
 | `check_phpdoc_undefined_method` (S6) | `phpdoc.undefined-method` (contract layer) | the declared-receiver lane over narrowed contract-arm lists, under per-arm descendant closure |
 
