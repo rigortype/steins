@@ -873,6 +873,18 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 20,
         message_contains: "proven array on this path",
     },
+    // ADR-0078 issue #184: `override.visibility-weakened` fired once, on another
+    // phpunit end-to-end regression fixture (issue 6294's reproduction) — a class
+    // deliberately committed to weaken a parent's visibility so the harness can
+    // observe the engine fatal. Same category as the 5451 pin above. Triaged
+    // TRUE 2026-08-08.
+    ExpectedProofFinding {
+        package: "sebastianbergmann/phpunit",
+        id: "override.visibility-weakened",
+        path_suffix: "regression/6294/B.php",
+        line: 17,
+        message_contains: "weakens the visibility",
+    },
     // ADR-0078 issue #187: the new mechanics id `array.duplicate-key` fired 19
     // times, all on the legacy monorepo, all TRUE — triaged verbatim against the
     // checkout on 2026-08-08. One config key is silently overwritten by a later
