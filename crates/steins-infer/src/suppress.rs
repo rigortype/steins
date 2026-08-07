@@ -31,8 +31,8 @@ use crate::{
     CALL_UNDEFINED_METHOD_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID, CLASS_UNDEFINED_ID,
     DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, EFFECT_ID,
     CLASS_ABSTRACT_UNIMPLEMENTED_ID, CLASS_EXTENDS_FINAL_ID,
-    EFFECT_LISKOV_ID, ID, OFFSET_MAYBE_MISSING_ID, OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID,
-    OFFSET_UNDECLARED_ID, PARAM_MISMATCH_ID,
+    EFFECT_LISKOV_ID, FOREACH_NON_ITERABLE_ID, ID, OFFSET_MAYBE_MISSING_ID, OFFSET_MISSING_ID,
+    OFFSET_ON_UNSUPPORTED_ID, OFFSET_UNDECLARED_ID, PARAM_MISMATCH_ID,
     PHPDOC_PROP_MISMATCH_ID, PHPDOC_UNDEFINED_METHOD_ID, PREG_INVALID_PATTERN_ID, PROP_MISMATCH_ID,
     READONLY_REASSIGNED_ID,
     RETURN_ID, RETURN_MISMATCH_ID, THROW_LISKOV_ID, THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID,
@@ -273,6 +273,13 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // `offset.missing` does (ADR-0049 §7).
     (PROPERTY_ON_NON_OBJECT_ID, Layer::Proof, Floor::Default),
     // end non-object receivers (ADR-0078, issue #190)
+    // foreach subject (ADR-0078, issue #192)
+    // proof — a `foreach` subject proven a non-array scalar/null: PHP warns and
+    // skips the loop body entirely. Warning-grade, so it demotes under a declared
+    // `warning-handler = "null"` posture exactly as `offset.missing` does
+    // (ADR-0049 §7).
+    (FOREACH_NON_ITERABLE_ID, Layer::Proof, Floor::Default),
+    // end foreach subject (ADR-0078, issue #192)
     // contract — declared-contract acceptance (increase tripwires).
     (PARAM_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     (RETURN_MISMATCH_ID, Layer::Contract, Floor::Contracts),
