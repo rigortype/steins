@@ -5861,15 +5861,19 @@ fn check_undefined_variables(cx: &Cx, out: &mut Vec<Diagnostic>) {
     for scope in cx.tree().scopes() {
         // An out-parameter position is a **binding form**, not merely a read that
         // does not count: `preg_match($p, $s, $m); return $m;` must be silent at the
-        // `return` too. The scope's own read list is what attributes the call to
-        // this scope — the argument occurrence was collected here, so a name whose
-        // argument occurrence survives the by-value oracle is bound for the whole
-        // scope, exactly as `global $x` is.
+        // `return` too, so a surviving candidate binds its name for the whole scope
+        // exactly as `global $x` does.
+        //
+        // The candidates come from `Scope::ref_arg_candidates`, which is collected
+        // independently of the read list. Deriving them from the reads instead made
+        // the binding depend on the read being *recorded*, and a guarded occurrence
+        // is not: `@proc_open($cmd, $spec, $pipes)` binds `$pipes` in PHP while the
+        // `@` withholds the read (symfony/console `Terminal.php`).
         let bound: HashSet<&str> = scope
-            .undefined_reads
+            .ref_arg_candidates
             .iter()
-            .filter(|r| bound_by_call.contains(&r.span.start))
-            .map(|r| r.name.as_str())
+            .filter(|c| bound_by_call.contains(&c.span.start))
+            .map(|c| c.name.as_str())
             .collect();
         for read in &scope.undefined_reads {
             if bound.contains(read.name.as_str()) {

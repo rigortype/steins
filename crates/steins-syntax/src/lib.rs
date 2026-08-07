@@ -2394,6 +2394,25 @@ pub struct Scope {
     /// argument — binds its bare-variable arguments right here, since no
     /// name is even available to resolve.
     pub undefined_reads: Vec<UndefinedRead>,
+    /// Every bare-variable positional argument at a **function call** in this scope
+    /// — the out-parameter candidates [`Self::undefined_reads`] cannot settle alone,
+    /// since whether `f($x)` writes `$x` is a property of `f`'s declaration and needs
+    /// the cross-file index.
+    ///
+    /// Recorded **independently of [`Self::undefined_reads`]**, and deliberately so:
+    /// an out-parameter is a *binding form*, and a binding must not depend on whether
+    /// its argument occurrence happened to be collected as a read. It is not —
+    /// `@proc_open($cmd, $spec, $pipes)` sits inside an error-control guard, so the
+    /// `$pipes` occurrence is withheld from the read list while PHP binds `$pipes`
+    /// exactly as it would without the `@` (symfony/console `Terminal.php`, the
+    /// corpus site that made the point).
+    ///
+    /// Only plain function calls appear here. Every other call shape — method,
+    /// static, dynamic, `new`, and every named argument — has no callee name to
+    /// resolve, so it binds its bare-variable arguments outright at lowering.
+    /// Empty whenever [`Self::undefined_reads`] is (a dammed or non-reporting
+    /// scope has nothing to subtract from).
+    pub ref_arg_candidates: Vec<UndefinedRead>,
     // end undefined variables (ADR-0078, issue #194)
 }
 
@@ -6343,6 +6362,7 @@ fn build_scope_from(
         ScopeOwner::Function(name) => Some(name.clone()),
         ScopeOwner::TopLevel | ScopeOwner::Method { .. } | ScopeOwner::Closure { .. } => None,
     };
+    let vars = undefined_variable_reads(params, None, statements);
     Scope {
         function_name,
         owner,
@@ -6359,7 +6379,8 @@ fn build_scope_from(
         is_static: false,
         docblock: None,
         unused_captures: Vec::new(),
-        undefined_reads: undefined_variable_reads(params, None, statements),
+        undefined_reads: vars.undefined_reads,
+        ref_arg_candidates: vars.ref_arg_candidates,
     }
 }
 
@@ -6461,6 +6482,11 @@ fn build_closure_scope_from_closure(
     }
     let poisoned = !opaque.is_empty();
     let def_offset = closure_def_offset(cl);
+    let vars = undefined_variable_reads(
+        Some(&cl.parameter_list),
+        cl.use_clause.as_ref(),
+        &cl.body.statements.iter().collect::<Vec<_>>(),
+    );
     Scope {
         function_name: None,
         owner: ScopeOwner::Closure { def_offset },
@@ -6477,11 +6503,8 @@ fn build_closure_scope_from_closure(
         is_static: cl.r#static.is_some(),
         docblock: adopt_closure_docblock(docs, to_span(cl.span()).start, def_offset, stmt_doc),
         unused_captures: unused_by_value_captures(cl),
-        undefined_reads: undefined_variable_reads(
-            Some(&cl.parameter_list),
-            cl.use_clause.as_ref(),
-            &cl.body.statements.iter().collect::<Vec<_>>(),
-        ),
+        undefined_reads: vars.undefined_reads,
+        ref_arg_candidates: vars.ref_arg_candidates,
     }
 }
 
@@ -6575,6 +6598,9 @@ fn scan_var_mentions(
 struct VarUsage {
     bound: std::collections::HashSet<String>,
     reads: Vec<UndefinedRead>,
+    /// See [`Scope::ref_arg_candidates`] — collected in the same walk but on its own
+    /// terms, because a binding form must not depend on a read being recorded.
+    arg_candidates: Vec<UndefinedRead>,
     dammed: bool,
 }
 
@@ -6683,6 +6709,27 @@ fn bind_partial_arguments(list: &mago_syntax::cst::PartialArgumentList<'_>, acc:
     }
 }
 
+/// Read one variable in **local** position — the inner name of a dynamic
+/// static-property spelling (`Server::$$v`), which is an ordinary read of `$v`.
+/// A further indirection (`Server::$$$v`) reaches a local whose name is computed,
+/// which is the `$$x` dam.
+fn scan_local_variable(
+    var: &mago_syntax::cst::Variable<'_>,
+    guarded: bool,
+    acc: &mut VarUsage,
+) {
+    match var {
+        mago_syntax::cst::Variable::Direct(dv) => {
+            if !guarded {
+                acc.read_direct(dv);
+            }
+        }
+        mago_syntax::cst::Variable::Indirect(_) | mago_syntax::cst::Variable::Nested(_) => {
+            acc.dammed = true;
+        }
+    }
+}
+
 /// The single walk behind [`Scope::undefined_reads`]: collect this scope's binding
 /// forms, its read sites, and its name dams, without descending into any nested
 /// scope.
@@ -6733,6 +6780,21 @@ fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, acc: &mut VarUsage) {
         | Node::RequireConstruct(_)
         | Node::RequireOnceConstruct(_) => acc.dammed = true,
         Node::FunctionCall(fc) => {
+            // Out-parameter candidates, recorded whatever the guard state — a binding
+            // form must not depend on its argument occurrence being collected as a
+            // read. See `Scope::ref_arg_candidates`.
+            for arg in fc.argument_list.arguments.iter() {
+                if let Argument::Positional(p) = arg
+                    && p.ellipsis.is_none()
+                    && let Expression::Variable(mago_syntax::cst::Variable::Direct(dv)) =
+                        p.value.unparenthesized()
+                {
+                    let name = strip_dollar(bytes_to_string(dv.name));
+                    if !always_bound(&name) {
+                        acc.arg_candidates.push(UndefinedRead { name, span: to_span(dv.span()) });
+                    }
+                }
+            }
             if let Expression::Identifier(id) = fc.function
                 && matches!(
                     bytes_to_string(id.last_segment()).as_str(),
@@ -6818,6 +6880,37 @@ fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, acc: &mut VarUsage) {
         // subtraction cannot reach it.
         Node::NamedArgument(n) => bind_lvalue_roots(n.value, acc),
 
+        // --- The one position where a `$name` token is NOT a local. ---
+        //
+        // `Server::$url` spells a **static property**, whose `$url` names a slot on
+        // the class, not a variable in this frame (witnessed silent at 8.5.9, and
+        // the same for `static::`/`self::`/`parent::`). Left to the generic read
+        // arm below this is a false positive on one of the most common shapes in
+        // legacy PHP, so the property token is skipped here — while the class
+        // expression, which may well be a local (`$obj::$url`), is still walked.
+        //
+        // The dynamic spellings behave the other way round: `Server::$$v` and
+        // `Server::${$v}` name the property at runtime, so `$v` IS an ordinary
+        // local read (witnessed: `Server::$$nope` warns `Undefined variable $nope`
+        // before it fatals on the empty property name). They are deliberately NOT
+        // dams either, which is consistent with the `$$x` dam rather than an
+        // exception to it: that dam exists because a variable-variable can mint or
+        // consume a **local** binding, and an indirection in this position reaches
+        // the class's static table instead, where no local can be minted.
+        Node::StaticPropertyAccess(spa) => {
+            scan_var_usage(&Node::Expression(spa.class), guarded, acc);
+            match &spa.property {
+                mago_syntax::cst::Variable::Direct(_) => {}
+                mago_syntax::cst::Variable::Indirect(iv) => {
+                    scan_var_usage(&Node::Expression(iv.expression), guarded, acc);
+                }
+                mago_syntax::cst::Variable::Nested(nv) => {
+                    scan_local_variable(nv.variable, guarded, acc);
+                }
+            }
+            return;
+        }
+
         // --- Reads. ---
         Node::DirectVariable(dv) if !guarded => acc.read_direct(dv),
         _ => {}
@@ -6840,9 +6933,9 @@ fn undefined_variable_reads(
     params: Option<&mago_syntax::cst::FunctionLikeParameterList<'_>>,
     use_clause: Option<&mago_syntax::cst::ClosureUseClause<'_>>,
     statements: &[&Statement<'_>],
-) -> Vec<UndefinedRead> {
+) -> ScopeVarFacts {
     let mut acc = VarUsage::default();
-    let Some(params) = params else { return Vec::new() };
+    let Some(params) = params else { return ScopeVarFacts::default() };
     for p in params.parameters.iter() {
         acc.bind_direct(&p.variable);
     }
@@ -6855,10 +6948,27 @@ fn undefined_variable_reads(
         scan_var_usage(&Node::Statement(s), false, &mut acc);
     }
     if acc.dammed {
-        return Vec::new();
+        return ScopeVarFacts::default();
     }
-    let VarUsage { bound, reads, .. } = acc;
-    reads.into_iter().filter(|r| !bound.contains(&r.name)).collect()
+    let VarUsage { bound, reads, arg_candidates, .. } = acc;
+    let reads: Vec<UndefinedRead> =
+        reads.into_iter().filter(|r| !bound.contains(&r.name)).collect();
+    if reads.is_empty() {
+        // Nothing to subtract from: keep the candidate list off every scope that
+        // cannot report, which is nearly all of them.
+        return ScopeVarFacts::default();
+    }
+    let arg_candidates =
+        arg_candidates.into_iter().filter(|c| !bound.contains(&c.name)).collect();
+    ScopeVarFacts { undefined_reads: reads, ref_arg_candidates: arg_candidates }
+}
+
+/// The two lists [`undefined_variable_reads`] produces for one scope — the reads to
+/// judge and the out-parameter candidates the checker must subtract first.
+#[derive(Default)]
+struct ScopeVarFacts {
+    undefined_reads: Vec<UndefinedRead>,
+    ref_arg_candidates: Vec<UndefinedRead>,
 }
 
 // end undefined variables (ADR-0078, issue #194)
@@ -6928,6 +7038,7 @@ fn build_closure_scope_from_arrow(
         // its OWN: every free variable it mentions is auto-captured from the
         // enclosing scope, whose question this is not.
         undefined_reads: Vec::new(),
+        ref_arg_candidates: Vec::new(),
     }
 }
 

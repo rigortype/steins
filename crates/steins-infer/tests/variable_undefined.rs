@@ -369,6 +369,25 @@ fn an_unresolvable_function_argument_binds() {
 }
 
 #[test]
+fn an_out_parameter_inside_an_error_control_guard_still_binds() {
+    // symfony/console `Terminal.php`: `@proc_open($cmd, $spec, $pipes, …)` binds
+    // `$pipes` in PHP exactly as it would without the `@`, and the LATER reads of
+    // `$pipes` must be silent. The guard withholds the argument occurrence from the
+    // read list, so the binding is collected on its own terms — deriving it from
+    // the reads reported all three `$pipes` lines.
+    silent(
+        "<?php\nfunction f(string $cmd, array $spec): string {\n    if (!$p = @proc_open($cmd, $spec, $pipes, null, null, [])) {\n        return '';\n    }\n    $info = stream_get_contents($pipes[1]);\n    fclose($pipes[1]);\n    fclose($pipes[2]);\n    return $info;\n}\n",
+    );
+}
+
+#[test]
+fn an_out_parameter_inside_an_isset_guard_still_binds() {
+    silent(
+        "<?php\nfunction f(string $p, string $s): array {\n    if (empty(preg_match($p, $s, $m))) {\n        return [];\n    }\n    return $m;\n}\n",
+    );
+}
+
+#[test]
 fn a_certified_by_value_builtin_argument_still_fires() {
     // The subtraction is not a blanket amnesty for call arguments: `strlen`'s
     // parameter is certified by value, so the read stands.
@@ -441,6 +460,82 @@ fn include_dams_the_scope() {
     // ends here — whether or not the path resolves in-universe.
     silent("<?php\nfunction f(): mixed {\n    include 'partial.php';\n    return $fromPartial;\n}\n");
     silent("<?php\nfunction f(): mixed {\n    require __DIR__ . '/p.php';\n    return $fromPartial;\n}\n");
+}
+
+// ---------------------------------------------------------------------------
+// Static and dynamic property spellings: which `$name` token is a local?
+//
+// `Class::$prop`'s `$prop` names a slot on the class, not a variable in the frame.
+// Missing that made the id fire on one of the commonest shapes in legacy PHP; the
+// guzzle fixture below is the exact site that caught it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_static_property_fetch_is_not_a_variable_read() {
+    // Witnessed silent at 8.5.9. The guzzle shape, verbatim:
+    // `$client->get(Server::$url)` in tests/ClientTest.php.
+    silent("<?php\nfunction f(object $c): void {\n    $c->get(Server::$url);\n}\n");
+    silent("<?php\nfunction f(): string {\n    return Server::$url;\n}\n");
+}
+
+#[test]
+fn late_static_self_and_parent_property_fetches_are_not_variable_reads() {
+    for class in ["static", "self", "parent"] {
+        silent(&format!(
+            "<?php\nclass C extends B {{\n    public static function m(): string {{\n        return {class}::$url;\n    }}\n}}\n"
+        ));
+    }
+}
+
+#[test]
+fn a_static_property_write_binds_nothing_and_reads_nothing() {
+    // The class carries the state, so the assignment neither creates a local nor
+    // reads one (witnessed: `Server::$url = 'set';` is silent).
+    silent("<?php\nfunction f(): void {\n    Server::$url = 'set';\n}\n");
+}
+
+#[test]
+fn a_static_property_fetch_still_reads_a_local_class_expression() {
+    // `$obj::$url` — the PROPERTY token is not a local, but the class token is.
+    fires("<?php\nfunction f(): string {\n    return $obj::$url;\n}\n", "obj");
+}
+
+#[test]
+fn a_dynamic_static_property_name_reads_its_local() {
+    // Witnessed at 8.5.9: `Server::$$nope` warns `Undefined variable $nope` before
+    // it fatals on the empty property name. Not a dam — the indirection reaches the
+    // class's static table, where no LOCAL binding can be minted.
+    fires("<?php\nfunction f(): string {\n    return Server::$$n;\n}\n", "n");
+    fires("<?php\nfunction f(): string {\n    return Server::${$n};\n}\n", "n");
+}
+
+#[test]
+fn a_bound_dynamic_static_property_name_is_silent() {
+    silent("<?php\nfunction f(): string {\n    $n = 'url';\n    return Server::$$n;\n}\n");
+}
+
+#[test]
+fn a_dynamic_instance_property_name_reads_its_local() {
+    // Witnessed at 8.5.9: `$o->$nope2` warns `Undefined variable $nope2`.
+    fires("<?php\nfunction f(object $o): mixed {\n    return $o->$n;\n}\n", "n");
+}
+
+#[test]
+fn a_plain_instance_property_name_is_not_a_variable() {
+    silent("<?php\nfunction f(object $o): mixed {\n    return $o->inst;\n}\n");
+    silent("<?php\nfunction f(object $o): mixed {\n    return $o?->inst;\n}\n");
+}
+
+#[test]
+fn a_static_method_called_through_a_local_reads_that_local() {
+    // `Server::$m()` is a METHOD call named by `$m` — the CST tells it apart from
+    // the property fetch, and PHP warns on the local (witnessed).
+    fires("<?php\nfunction f(): mixed {\n    return Server::$m();\n}\n", "m");
+}
+
+#[test]
+fn a_class_constant_fetch_is_not_a_variable_read() {
+    silent("<?php\nfunction f(): mixed {\n    return Server::K;\n}\n");
 }
 
 // ---------------------------------------------------------------------------
