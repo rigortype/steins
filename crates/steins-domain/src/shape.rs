@@ -916,7 +916,7 @@ mod tests {
     }
 
     fn ks(s: &str) -> Key {
-        Key::Str(s.to_owned())
+        Key::Str(s.into())
     }
 
     fn req() -> Presence {
@@ -1391,7 +1391,7 @@ mod tests {
 
     #[test]
     fn lift_makes_every_entry_required_and_witnessed() {
-        let entries = arr(vec![(k(0), Val::Int(1)), (k(1), Val::Str("x".to_owned()))]);
+        let entries = arr(vec![(k(0), Val::Int(1)), (k(1), Val::Str("x".into()))]);
         let s = ShapeFact::lift(&entries);
         assert_eq!(s.tail, Tail::Sealed);
         assert_eq!(s.is_list, Certainty::Yes);
@@ -1606,7 +1606,7 @@ mod tests {
     #[test]
     fn join_admits_both_operands_denotations() {
         let a = arr(vec![(k(0), Val::Int(1)), (k(1), Val::Int(2))]);
-        let b = arr(vec![(k(0), Val::Str("x".to_owned()))]);
+        let b = arr(vec![(k(0), Val::Str("x".into()))]);
         let j = ShapeFact::lift(&a).join(&ShapeFact::lift(&b));
         assert!(j.admits(&a), "join lost the left operand");
         assert!(j.admits(&b), "join lost the right operand");
@@ -1750,7 +1750,7 @@ mod tests {
         ]);
         let n = s.mark_absent(&ks("a"));
         assert!(n.field(&ks("a")).is_none(), "sealed already proves the absence");
-        assert!(!n.admits(&arr(vec![(ks("a"), Val::Str("x".to_owned()))])));
+        assert!(!n.admits(&arr(vec![(ks("a"), Val::Str("x".into()))])));
         // `unset($x['a'])` on `['a' => 'x']` leaves `[]`, which is a list — the
         // receiver's `is_list = No` must not survive the removal.
         assert_eq!(s.is_list, Certainty::No);
@@ -1846,8 +1846,8 @@ mod tests {
         assert_eq!(s.set_is_list(Certainty::Yes).is_list, Certainty::Yes);
         assert_eq!(s.set_is_list(Certainty::No).is_list, Certainty::No);
         let yes = s.set_is_list(Certainty::Yes);
-        assert!(yes.admits(&arr(vec![(k(0), Val::Str("x".to_owned()))])));
-        assert!(!yes.admits(&arr(vec![(k(1), Val::Str("x".to_owned()))])));
+        assert!(yes.admits(&arr(vec![(k(0), Val::Str("x".into()))])));
+        assert!(!yes.admits(&arr(vec![(k(1), Val::Str("x".into()))])));
     }
 
     #[test]
@@ -1879,7 +1879,7 @@ mod tests {
             vec![],
             vec![(ks("a"), Val::Int(1))],
             vec![(ks("a"), Val::Null)],
-            vec![(ks("a"), Val::Str("x".to_owned()))],
+            vec![(ks("a"), Val::Str("x".into()))],
             vec![(ks("b"), Val::Int(2))],
             vec![(ks("a"), Val::Int(1)), (ks("b"), Val::Int(2))],
             vec![(k(0), Val::Int(1))],

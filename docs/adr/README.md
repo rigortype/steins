@@ -115,3 +115,4 @@ list in one place.
 | ADR-0077 | [A by-reference out-parameter carries a fact only where the call proves it was written](0077-out-parameter-fact-seeding.md) |
 | ADR-0078 | [Member-kind diagnostic families and the port-wave floor table](0078-member-kind-diagnostic-families.md) |
 | ADR-0079 | [A file that fails to parse is named loudly and dams the absence family](0079-parse-failure-dam.md) |
+| ADR-0080 | [A PHP string value carries bytes, not a lossy UTF-8 decoding](0080-php-strings-are-byte-strings.md) |
