@@ -489,6 +489,251 @@ fn scan_template_line(text: &str, line_start: usize, line_end: usize) -> Option<
     Some(text[ident_start..j].to_owned())
 }
 
+// ---------------------------------------------------------------------------
+// Magic-member tags: `@method` / `@property*` / `@mixin` / the `@phpstan-type`
+// pair (ADR-0049 A14, issue #195).
+//
+// These declare members that live *somewhere the index cannot see*. Steins does
+// not read them as member sources; it reads them as **obstacles** — a class-like
+// carrying one is not enumerable for an absence proof. So the scan below recovers
+// exactly two things: the tag's presence and its subject. It never parses the
+// tag's type expression, and it never fails on one: an unrecognizable tail leaves
+// the subject empty and the record stands, because the obstacle is the tag, not
+// its shape.
+// ---------------------------------------------------------------------------
+
+/// Which magic-member docblock tag a [`MagicMemberTag`] records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MagicTagKind {
+    /// `@method [static] [Type] name(…)` — a method that exists only at runtime.
+    Method,
+    /// `@property [Type] $name`.
+    Property,
+    /// `@property-read [Type] $name`.
+    PropertyRead,
+    /// `@property-write [Type] $name`.
+    PropertyWrite,
+    /// `@mixin Target` — *the members live on another class*, the one tag whose
+    /// whole meaning is the obstacle.
+    Mixin,
+    /// `@phpstan-type Alias = …` / `@psalm-type` — a local type alias. Read for
+    /// presence only: an alias is not a member, but a class-like that spells one
+    /// carries docblock vocabulary the engine does not resolve.
+    TypeAlias,
+    /// `@phpstan-import-type Alias from Other` / `@psalm-import-type`.
+    ImportedTypeAlias,
+}
+
+impl MagicTagKind {
+    /// The tag's canonical spelling — what a reader looks for in their source,
+    /// and what a posture report prints (the [`crate::docblock`] analogue of
+    /// steins-syntax's give-up-list labels).
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Method => "@method",
+            Self::Property => "@property",
+            Self::PropertyRead => "@property-read",
+            Self::PropertyWrite => "@property-write",
+            Self::Mixin => "@mixin",
+            Self::TypeAlias => "@phpstan-type",
+            Self::ImportedTypeAlias => "@phpstan-import-type",
+        }
+    }
+
+    /// Whether the tag names a class-like whose own members are pulled in
+    /// (`@mixin`) — the only kind whose subject is followed transitively.
+    #[must_use]
+    pub const fn is_mixin(self) -> bool {
+        matches!(self, Self::Mixin)
+    }
+
+    /// Recognize a magic-member tag name (the token right after the `@`),
+    /// applying the ADR-0029 `@phpstan-`/`@psalm-` prefix rule. The type-alias
+    /// pair exists in prefixed form only — a bare `@type` is not a tag.
+    fn from_name(name: &str) -> Option<Self> {
+        let (bare, prefixed) = match name
+            .strip_prefix("phpstan-")
+            .or_else(|| name.strip_prefix("psalm-"))
+        {
+            Some(rest) => (rest, true),
+            None => (name, false),
+        };
+        Some(match bare {
+            "method" => Self::Method,
+            "property" => Self::Property,
+            "property-read" => Self::PropertyRead,
+            "property-write" => Self::PropertyWrite,
+            "mixin" => Self::Mixin,
+            "type" if prefixed => Self::TypeAlias,
+            "import-type" if prefixed => Self::ImportedTypeAlias,
+            _ => return None,
+        })
+    }
+}
+
+/// One magic-member tag found on a class-like docblock: its kind and its subject,
+/// with no type parsing at all.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MagicMemberTag {
+    pub kind: MagicTagKind,
+    /// The tag's subject **as written**: the method name for `@method`, the
+    /// property name *without* its `$` for `@property*`, the target class
+    /// reference (leading `\` preserved, so the caller can classify it) for
+    /// `@mixin`, and the alias name for the `@phpstan-type` pair. Empty when the
+    /// tag's tail gave none — the tag is still recorded, because the obstacle is
+    /// its presence.
+    pub subject: String,
+    /// Span of the tag within the scanned docblock text, from its `@` to the end
+    /// of its trimmed content (the [`DocTag::tag_span`] convention).
+    pub tag_span: Span,
+}
+
+/// Scan a class-like docblock for the magic-member tags (ADR-0049 A14).
+///
+/// Deliberately separate from [`scan_docblock`]: those tags carry a type Steins
+/// parses into an envelope, these carry one it refuses to. Mixing them would put
+/// an unparsed `type_text` into a struct whose whole contract is that the text is
+/// a type expression.
+#[must_use]
+pub fn scan_magic_member_tags(text: &str) -> Vec<MagicMemberTag> {
+    let bytes = text.as_bytes();
+    let mut tags = Vec::new();
+    let mut line_start = 0usize;
+    while line_start <= bytes.len() {
+        let line_end = memchr(bytes, line_start, b'\n').unwrap_or(bytes.len());
+        if let Some(tag) = scan_magic_line(text, line_start, line_end) {
+            tags.push(tag);
+        }
+        if line_end == bytes.len() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    tags
+}
+
+fn scan_magic_line(text: &str, line_start: usize, line_end: usize) -> Option<MagicMemberTag> {
+    let bytes = text.as_bytes();
+    let i = skip_gutter(bytes, line_start, line_end);
+    if i >= line_end || bytes[i] != b'@' {
+        return None;
+    }
+    let at_offset = i;
+    let name_start = i + 1;
+    let mut j = name_start;
+    while j < line_end && (bytes[j].is_ascii_alphabetic() || bytes[j] == b'-') {
+        j += 1;
+    }
+    let kind = MagicTagKind::from_name(&text[name_start..j])?;
+
+    let mut rest_start = j;
+    while rest_start < line_end && (bytes[rest_start] == b' ' || bytes[rest_start] == b'\t') {
+        rest_start += 1;
+    }
+    let mut rest_end = line_end;
+    while rest_end > rest_start
+        && (bytes[rest_end - 1] == b' '
+            || bytes[rest_end - 1] == b'\t'
+            || bytes[rest_end - 1] == b'\r')
+    {
+        rest_end -= 1;
+    }
+    if rest_end >= rest_start + 2 && &bytes[rest_end - 2..rest_end] == b"*/" {
+        rest_end -= 2;
+        while rest_end > rest_start
+            && (bytes[rest_end - 1] == b' ' || bytes[rest_end - 1] == b'\t')
+        {
+            rest_end -= 1;
+        }
+    }
+
+    let subject = match kind {
+        MagicTagKind::Method => magic_method_name(text, bytes, rest_start, rest_end),
+        MagicTagKind::Property | MagicTagKind::PropertyRead | MagicTagKind::PropertyWrite => {
+            find_variable(bytes, rest_start, rest_end)
+                .map(|p| read_variable(text, bytes, p, rest_end)[1..].to_owned())
+                .unwrap_or_default()
+        }
+        MagicTagKind::Mixin => read_class_ref(text, bytes, rest_start, rest_end),
+        MagicTagKind::TypeAlias | MagicTagKind::ImportedTypeAlias => {
+            read_identifier(text, bytes, rest_start, rest_end)
+        }
+    };
+    Some(MagicMemberTag {
+        kind,
+        subject,
+        tag_span: Span::new(at_offset as u32, rest_end as u32),
+    })
+}
+
+/// The method name in an `@method` tail: the identifier that opens the parameter
+/// list, i.e. the one immediately before the first `(` that is not nested inside
+/// a generic/shape bracket run and not the `(` of a parenthesized *type*
+/// (`callable(int): string`, `Closure(): void`). The type itself is never parsed,
+/// so an unrecognized tail simply yields an empty name — the tag still records.
+fn magic_method_name(text: &str, bytes: &[u8], start: usize, end: usize) -> String {
+    let mut depth = 0u32;
+    let mut i = start;
+    while i < end {
+        match bytes[i] {
+            b'<' | b'{' | b'[' => depth += 1,
+            b'>' | b'}' | b']' => depth = depth.saturating_sub(1),
+            b'(' if depth == 0 => {
+                let mut s = i;
+                while s > start && is_ident_byte(bytes[s - 1]) {
+                    s -= 1;
+                }
+                if s < i {
+                    let ident = &text[s..i];
+                    if !is_parenthesized_type_name(ident) {
+                        return ident.to_owned();
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    String::new()
+}
+
+/// The type names PHPDoc lets carry a parenthesized signature, which therefore
+/// must not read as an `@method` name. Compared case-insensitively, with any
+/// leading `\` ignored (`\Closure(): void`).
+fn is_parenthesized_type_name(ident: &str) -> bool {
+    let bare = ident.trim_start_matches('\\');
+    ["callable", "closure", "pure-callable", "pure-closure"]
+        .iter()
+        .any(|k| bare.eq_ignore_ascii_case(k))
+}
+
+const fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80
+}
+
+/// Read a class reference token (identifier bytes plus `\` separators) at `start`.
+/// A trailing generic argument list (`Foo<int>`) or punctuation ends it; the
+/// leading `\` is preserved so the caller can tell a fully-qualified name from an
+/// import-relative one.
+fn read_class_ref(text: &str, bytes: &[u8], start: usize, end: usize) -> String {
+    let mut j = start;
+    while j < end && (is_ident_byte(bytes[j]) || bytes[j] == b'\\') {
+        j += 1;
+    }
+    text[start..j].to_owned()
+}
+
+/// Read a bare identifier at `start` (no namespace separators) — the alias name
+/// of the `@phpstan-type` pair.
+fn read_identifier(text: &str, bytes: &[u8], start: usize, end: usize) -> String {
+    let mut j = start;
+    while j < end && is_ident_byte(bytes[j]) {
+        j += 1;
+    }
+    text[start..j].to_owned()
+}
+
 /// Find the byte offset of the first `$name` variable within `[start, end)` that
 /// is not part of a `$this`-in-type position. We accept the first `$` followed by
 /// an identifier char — good enough for `@param T $x`.
@@ -848,6 +1093,122 @@ mod tests {
         assert!(scan_template_names("/** @param int $x */").is_empty());
         // `@template-extends`/`@extends` are class-relation tags, not declarations.
         assert!(scan_template_names("/** @template-extends Foo<int> */").is_empty());
+    }
+
+    // ---- Magic-member tags (ADR-0049 A14, issue #195) ----------------------
+
+    fn magic(doc: &str) -> Vec<(MagicTagKind, String)> {
+        scan_magic_member_tags(doc).into_iter().map(|t| (t.kind, t.subject)).collect()
+    }
+
+    #[test]
+    fn scans_method_tag_and_its_name() {
+        assert_eq!(magic("/** @method int foo() */"), [(MagicTagKind::Method, "foo".into())]);
+        assert_eq!(
+            magic("/** @method static self make(int $n) builds one */"),
+            [(MagicTagKind::Method, "make".into())]
+        );
+        // No return type at all is legal.
+        assert_eq!(magic("/** @method run() */"), [(MagicTagKind::Method, "run".into())]);
+    }
+
+    #[test]
+    fn method_name_survives_a_complex_return_type() {
+        // The type is never parsed; generics, shapes and parenthesized callable
+        // types must not be mistaken for the parameter list.
+        for (doc, name) in [
+            ("/** @method Collection<int, string> map(callable(int): string $c) */", "map"),
+            ("/** @method array{a: int, b: list<string>} rows() */", "rows"),
+            ("/** @method callable(int): string factory() */", "factory"),
+            ("/** @method \\Closure(): void lazy() */", "lazy"),
+            ("/** @method $this whereIn(string $c, array $v) */", "whereIn"),
+        ] {
+            assert_eq!(magic(doc), [(MagicTagKind::Method, name.into())], "{doc}");
+        }
+    }
+
+    #[test]
+    fn a_method_tag_with_an_unreadable_tail_still_records() {
+        // The obstacle is the tag's presence; an empty subject never drops it.
+        assert_eq!(magic("/** @method */"), [(MagicTagKind::Method, String::new())]);
+        assert_eq!(magic("/** @method int */"), [(MagicTagKind::Method, String::new())]);
+    }
+
+    #[test]
+    fn scans_the_property_family() {
+        assert_eq!(
+            magic("/**\n * @property int $count\n * @property-read ?Foo $foo the foo\n \
+                   * @property-write list<string> $names\n */"),
+            [
+                (MagicTagKind::Property, "count".into()),
+                (MagicTagKind::PropertyRead, "foo".into()),
+                (MagicTagKind::PropertyWrite, "names".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn scans_mixin_target_as_written() {
+        assert_eq!(magic("/** @mixin Builder */"), [(MagicTagKind::Mixin, "Builder".into())]);
+        assert_eq!(
+            magic("/** @mixin \\Illuminate\\Database\\Eloquent\\Builder */"),
+            [(MagicTagKind::Mixin, "\\Illuminate\\Database\\Eloquent\\Builder".into())]
+        );
+        // A generic argument list ends the reference.
+        assert_eq!(
+            magic("/** @mixin Builder<static> */"),
+            [(MagicTagKind::Mixin, "Builder".into())]
+        );
+    }
+
+    #[test]
+    fn scans_the_type_alias_pair_in_prefixed_form_only() {
+        assert_eq!(
+            magic("/** @phpstan-type UserRow array{id: int} */"),
+            [(MagicTagKind::TypeAlias, "UserRow".into())]
+        );
+        assert_eq!(
+            magic("/** @psalm-import-type UserRow from UserRepo */"),
+            [(MagicTagKind::ImportedTypeAlias, "UserRow".into())]
+        );
+        // A bare `@type` is not a tag in either upstream tool.
+        assert!(scan_magic_member_tags("/** @type int $x */").is_empty());
+    }
+
+    #[test]
+    fn magic_scan_ignores_the_envelope_tags_and_vice_versa() {
+        let doc = "/**\n * @param int $n\n * @return string\n * @template T\n */";
+        assert!(scan_magic_member_tags(doc).is_empty());
+        assert!(scan_docblock("/**\n * @method int foo()\n * @mixin Bar\n */").is_empty());
+    }
+
+    #[test]
+    fn every_magic_kind_labels_itself_with_its_own_spelling() {
+        // The label is what a posture report prints and what a reader greps for,
+        // so each kind must carry its own — never a shared family word.
+        let kinds = [
+            MagicTagKind::Method,
+            MagicTagKind::Property,
+            MagicTagKind::PropertyRead,
+            MagicTagKind::PropertyWrite,
+            MagicTagKind::Mixin,
+            MagicTagKind::TypeAlias,
+            MagicTagKind::ImportedTypeAlias,
+        ];
+        let labels: Vec<&str> = kinds.iter().map(|k| k.label()).collect();
+        assert!(labels.iter().all(|l| l.starts_with('@')));
+        let mut sorted = labels.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), labels.len(), "labels must be distinct: {labels:?}");
+        // `@mixin` is the only kind whose subject the caller follows.
+        assert!(kinds.iter().filter(|k| k.is_mixin()).count() == 1);
+    }
+
+    #[test]
+    fn magic_tags_accept_the_precedence_prefixes() {
+        assert_eq!(magic("/** @phpstan-method int foo() */"), [(MagicTagKind::Method, "foo".into())]);
+        assert_eq!(magic("/** @psalm-property int $n */"), [(MagicTagKind::Property, "n".into())]);
     }
 
     #[test]

@@ -173,9 +173,12 @@ named class in the reference's namespace/`use` context.
 family and the strictest consumer of everything above. It fires only under
 **complete closure**: a proven-exact receiver, a fully-enumerated hierarchy that
 defines no such method, no `__call`/`__callStatic` anywhere in the chain, no
-trait obstacle, and — through the sidecar — no builtin/extension homonym that
-could mean the textual class is dead code shadowed by a loaded one. Any doubt is
-silence. See [dynamism.md](dynamism.md).
+trait obstacle, no `@method`/`@property`/`@mixin` docblock tag anywhere in the
+class-like's resolved reach (ADR-0049 A14 — a tag says the members live where
+the index cannot enumerate them), and — through the sidecar — no
+builtin/extension homonym that could mean the textual class is dead code
+shadowed by a loaded one. Any doubt is silence. See
+[dynamism.md](dynamism.md).
 
 `phpdoc.undefined-method` is its contract-layer twin over *declared* receivers,
 under an additional per-arm **descendant closure** requirement: a declared type is
@@ -198,3 +201,6 @@ value.
   method source.
 - **`__get`/`__set`** property magic is not modeled (and would, like `__call`,
   be an obstacle rather than a feature).
+- **`@method`/`@property`/`@mixin`** are read as obstacles only (ADR-0049 A14):
+  they silence absence proofs over the class-like, and never resolve a call or a
+  property access to a type.
