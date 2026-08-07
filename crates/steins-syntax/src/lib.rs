@@ -1233,7 +1233,7 @@ pub fn normalize_array(
 
 /// One element of a literal array expression, reduced to what
 /// [`duplicate_array_keys`] needs (issue #187): its resolved key and its own
-/// span. The key coercion is the exact one [`lower_array_key`] applies at
+/// span. The key coercion is the exact one `lower_array_key` applies at
 /// every other array-literal use site — no second table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ArrayLiteralElement {
@@ -1273,8 +1273,8 @@ pub struct DuplicateArrayKey {
 
 /// Scan one [`ArrayLiteralSite`]'s elements for PHP-key-equal duplicates
 /// (issue #187, `array.duplicate-key`), reusing the exact key coercion
-/// ([`lower_array_key`], via [`ArrayLiteralElement::key`]) and next-auto-index
-/// rule ([`next_auto_index`]) [`normalize_array`] applies to fold a whole
+/// (`lower_array_key`, via [`ArrayLiteralElement::key`]) and next-auto-index
+/// rule (`next_auto_index`) [`normalize_array`] applies to fold a whole
 /// literal — no second coercion table.
 ///
 /// Pairing is **adjacent**: each later occurrence is reported against the
@@ -7450,7 +7450,7 @@ fn collect_array_literal_sites(node: &Node<'_, '_>, out: &mut Vec<ArrayLiteralSi
 }
 
 /// Lower one array literal's elements to their [`ArrayLiteralSite`] shape.
-/// Purely syntactic: only the key side is resolved ([`lower_array_key`]'s
+/// Purely syntactic: only the key side is resolved (`lower_array_key`'s
 /// coercion); the value side is never lowered or evaluated.
 fn lower_array_literal_site<'a>(
     elements: impl Iterator<Item = &'a ArrayElement<'a>>,
