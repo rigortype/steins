@@ -12,6 +12,13 @@
 //! # optional:
 //! exclude = ["cache/**", "assets-origin/**"]
 //!
+//! # optional: collect only these subdirectories of `path` instead of the whole
+//! # tree. Absent (the default) walks everything, which is what every entry did
+//! # before this key existed. It exists for a project whose repository contains a
+//! # deliberately-invalid fixture tree — code written to be broken, which is not
+//! # code that works and so is outside the gate's own bar.
+//! paths = ["src"]
+//!
 //! # optional: the checkout revision the gate's seeded baseline was measured at.
 //! # Recording it is what lets a tripwire distinguish "the analyzer regressed"
 //! # from "the corpus moved" (see `gate::classify_revision`). It lives HERE, in
@@ -56,6 +63,24 @@ pub struct LocalProject {
     /// Glob patterns (see [`glob_match`]) pruning subtrees/files from the walk.
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// Optional: the subdirectories of [`Self::path`] to collect, instead of the
+    /// whole tree. **Absent is the default and means "everything"** — every entry
+    /// written before this key existed behaves byte-identically.
+    ///
+    /// This is a coarser instrument than [`Self::exclude`] on purpose. `exclude`
+    /// prunes noise out of a corpus that is otherwise in scope; `paths` says which
+    /// part of a repository *is* the corpus. The case that needs it is a project
+    /// shipping a deliberately-invalid fixture tree beside its real source: those
+    /// files are broken by construction, and the fp-gate's bar is zero false
+    /// positives on **code that works**, so measuring them measures the wrong
+    /// thing (the same presumption ADR-0079 §2.3 records for parser fixtures).
+    ///
+    /// Entries are project-relative directory names, joined onto `path`; a name
+    /// that does not resolve to a directory simply contributes nothing. `exclude`
+    /// still applies, and its globs stay relative to `path`, not to the subtree —
+    /// one coordinate system for both keys.
+    #[serde(default)]
+    pub paths: Vec<String>,
     /// Optional: the checkout revision the gate's seeded baseline for this project
     /// was measured at. **Absent is legal** and stays legal — an entry without it
     /// behaves exactly as before, except the gate now says out loud that the
@@ -180,10 +205,27 @@ pub fn checkout_is_dirty(path: &Path) -> Option<bool> {
 /// Collect every `.php` file under `root`, skipping `.git` and any path matched
 /// by an `exclude` glob. Directory subtrees whose whole contents are excluded
 /// (patterns of the form `<prefix>/**` or `**`) are pruned without descent.
-pub fn collect_php_files(root: &Path, excludes: &[String]) -> Vec<PathBuf> {
+///
+/// `subdirs` ([`LocalProject::paths`]) restricts the walk to those directories of
+/// `root` when non-empty; an **empty list walks the whole tree**, which is the
+/// behaviour every entry had before the key existed.
+///
+/// The walk carries `root` as its glob origin whichever subtree it is in, so an
+/// `exclude` pattern means the same thing under both settings.
+pub fn collect_php_files_in(root: &Path, subdirs: &[String], excludes: &[String]) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    walk(root, root, excludes, &mut out);
+    if subdirs.is_empty() {
+        walk(root, root, excludes, &mut out);
+    } else {
+        for sub in subdirs {
+            let dir = root.join(sub);
+            if dir.is_dir() {
+                walk(root, &dir, excludes, &mut out);
+            }
+        }
+    }
     out.sort();
+    out.dedup();
     out
 }
 
@@ -318,6 +360,56 @@ mod tests {
         // Missing `exclude` defaults to empty.
         assert_eq!(cfg.projects[1].name, "plugin");
         assert!(cfg.projects[1].exclude.is_empty());
+    }
+
+    #[test]
+    fn parses_projects_with_and_without_paths() {
+        let cfg: LocalConfig = toml::from_str(
+            r#"
+            [[project]]
+            name = "scoped"
+            path = "/abs/scoped"
+            paths = ["src"]
+
+            [[project]]
+            name = "whole"
+            path = "/abs/whole"
+            "#,
+        )
+        .expect("parses");
+        assert_eq!(cfg.projects[0].paths, vec!["src"]);
+        // Absent must stay legal and mean "the whole tree" — every entry written
+        // before the key existed depends on it.
+        assert!(cfg.projects[1].paths.is_empty());
+    }
+
+    #[test]
+    fn empty_paths_walks_the_whole_tree_and_a_scope_restricts_it() {
+        let root = std::env::temp_dir().join("steins-xtask-test-paths-scope");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src/deep")).expect("mkdir src");
+        std::fs::create_dir_all(root.join("tests/data")).expect("mkdir tests");
+        std::fs::write(root.join("src/a.php"), "<?php").expect("write");
+        std::fs::write(root.join("src/deep/b.php"), "<?php").expect("write");
+        std::fs::write(root.join("tests/data/broken.php"), "<?php").expect("write");
+
+        let whole = collect_php_files_in(&root, &[], &[]);
+        assert_eq!(whole.len(), 3, "no scope walks everything: {whole:?}");
+
+        let scoped = collect_php_files_in(&root, &["src".to_owned()], &[]);
+        assert_eq!(scoped.len(), 2, "the scope drops the fixture tree: {scoped:?}");
+        assert!(scoped.iter().all(|p| p.starts_with(root.join("src"))));
+
+        // A named directory that does not exist contributes nothing rather than
+        // failing the run.
+        let missing = collect_php_files_in(&root, &["nope".to_owned()], &[]);
+        assert!(missing.is_empty());
+
+        // `exclude` globs stay relative to the ROOT, not to the scoped subtree.
+        let both = collect_php_files_in(&root, &["src".to_owned()], &["src/deep/**".to_owned()]);
+        assert_eq!(both.len(), 1, "root-relative exclude still applies: {both:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
