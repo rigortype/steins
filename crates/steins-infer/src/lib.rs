@@ -48,8 +48,8 @@ use steins_syntax::{
     ArgValue, ArrayKey, Callee, CatchClause, ClassDecl, ClosureRef, CmpOp, Comment, CommentKind, CondExpr, CondOperand,
     EffectEnvelope, EffectOrigin, EffectRecv, ForeachSite, FunctionDecl, InvalidatedVar, MatchArmT, MethodDecl,
     NameRef, NamedArg, NativeType, NormKey, OpaqueConstruct, Param, PropertyDecl, Receiver, RefKind, ScalarType, Scope,
-    ScopeOwner, SourceTree, StaticClass, Stmt, StmtKind, ThrowKind, ThrowOrigin, TypeMember, Visibility,
-    duplicate_array_keys, normalize_array, php_canonical_int_string,
+    ScopeOwner, SourceTree, StaticClass, Stmt, StmtKind, StringContextSite, ThrowKind, ThrowOrigin,
+    TypeMember, Visibility, duplicate_array_keys, normalize_array, php_canonical_int_string,
 };
 
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, StringLit, TypeKind as PKind};
@@ -454,6 +454,66 @@ pub const PROPERTY_ON_NON_OBJECT_ID: &str = "property.on-non-object";
 /// does (ADR-0049 §7): silent under a declared `warning-handler = "null"` posture.
 pub const FOREACH_NON_ITERABLE_ID: &str = "foreach.non-iterable";
 
+// string context (ADR-0078, issue #193)
+
+/// The registry id for an **object with no reachable `__toString`** put into string
+/// context (ADR-0078, **proof** layer, floor `Default`): `"x $o"`, `echo $o`,
+/// `print $o`, `(string) $o`, `'a' . $o`.
+///
+/// Witnessed on PHP 8.5.9, identically in all five contexts:
+///
+/// ```text
+/// Error: Object of class A could not be converted to string
+/// ```
+///
+/// An `Error` is a fatal on the live path — proof layer, and **not** behind the
+/// ADR-0049 §7 warning-handler gate, which demotes warning-grade findings only.
+/// That gate boundary is exactly why this is a separate id from
+/// [`STRING_ARRAY_CONVERSION_ID`] (ADR-0078 §1.4: an id demotes whole or not at
+/// all), rather than one id with a precise message.
+///
+/// # What has to be proven
+///
+/// The receiver's class must be **exactly** known and its `__toString` provably
+/// absent under complete enumeration — the same ladder `call.undefined-method`
+/// walks, asked for one particular method name. So a `Stringable` implementor is
+/// silence (the is-a oracle answers `Yes` for any class with a `__toString`
+/// anywhere), a `__toString` inherited from a parent Steins cannot resolve is
+/// silence (the chain never closes), a trait anywhere in the chain is silence (the
+/// object model does not flatten trait members), and an A14 magic-tag obstacle
+/// anywhere in the class-like's resolved reach is silence.
+///
+/// The magic-tag leg is deliberate over-silence, and it is worth naming why:
+/// measured on 8.5.9, a `__call` does **not** rescue a string conversion
+/// (`WithCall` with `__call` still raises the `Error`), so no docblock claim about
+/// magic members can make the conversion legal. Reusing the obstacle records
+/// anyway keeps ONE enumerability rule in the codebase instead of a second one
+/// that happens to be laxer.
+pub const STRING_NON_STRINGABLE_ID: &str = "string.non-stringable";
+
+/// The registry id for an **array** put into string context (ADR-0078, **proof**
+/// layer, floor `Default`, behind the warning-handler gate).
+///
+/// Witnessed on PHP 8.5.9, identically in all five contexts:
+///
+/// ```text
+/// Warning: Array to string conversion
+/// ```
+///
+/// and the value produced is the literal string `"Array"` — `(string) [1,2,3]` is
+/// `"Array"`, `'x' . [1,2,3]` is `"xArray"`. The program keeps running with a
+/// value it cannot have been written for, which is the same warning-plus-degraded-
+/// value shape `offset.missing` and `preg.invalid-pattern` carry: **proof** layer,
+/// and demoted off the proof surface under a declared `warning-handler = "null"`
+/// posture (ADR-0049 §7), where the application has said it tolerates the warning.
+///
+/// The evidence is a value-domain fact alone — no class world, no sidecar. A
+/// `Maybe` (`array|string`) proves nothing and is silence, and an `Asserted` fact
+/// (a docblock `@var array`) is not proof-layer evidence (ADR-0052 §5).
+pub const STRING_ARRAY_CONVERSION_ID: &str = "string.array-conversion";
+
+// end string context (ADR-0078, issue #193)
+
 /// Every id constant that reaches a `Diagnostic { id: … }` construction site — the
 /// canonical enumeration of what the emitters can produce (ADR-0050 §2 totality).
 ///
@@ -520,6 +580,10 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // foreach subject (ADR-0078, issue #192)
     FOREACH_NON_ITERABLE_ID,
     // end foreach subject (ADR-0078, issue #192)
+    // string context (ADR-0078, issue #193)
+    STRING_NON_STRINGABLE_ID,
+    STRING_ARRAY_CONVERSION_ID,
+    // end string context (ADR-0078, issue #193)
 ];
 
 /// Ids **registered ahead of emission**: they exist in [`DIAGNOSTIC_REGISTRY`]
@@ -8045,6 +8109,16 @@ fn walk_trace(
             check_property_on_non_object(cx, var, prop, env, scope.poisoned, *span, out);
         }
         // end non-object receivers (ADR-0078, issue #190)
+
+        // 1z-ter. String context (ADR-0078, issue #193): every value this statement
+        // hands to PHP's string conversion, judged against the PRE-statement env —
+        // which is the env PHP evaluates the operands in. The sites themselves come
+        // from the lowering, so this position list is the statement's own, not a
+        // second syntactic derivation. Plain per-scope pass only, like every other
+        // once-per-site judgement.
+        if descent.is_none() {
+            check_string_contexts(w, folder, stmt, env, store, out);
+        }
 
         // 1a. Escape + sweep (ADR-0036): passing an object into a call escapes it;
         // an unknown/overridable call — or any call an object was passed into —
@@ -17149,6 +17223,225 @@ fn check_undefined_method(
         facet: None,
         fix: None,
     });
+}
+
+// ---------------------------------------------------------------------------
+// string context (ADR-0078, issue #193): `string.non-stringable` +
+// `string.array-conversion`.
+// ---------------------------------------------------------------------------
+
+/// Judge every string conversion this statement performs (ADR-0078, issue #193).
+///
+/// The sites come from the lowering ([`Stmt::string_contexts`]), which owns *where*
+/// the conversions are — an `echo`/`print` operand, an interpolated string's
+/// embedded expressions, a `(string)` cast, and both operands of `.` / `.=`. This
+/// owns *whether each one is legal*, and the default answer is that it is: an
+/// `int`, a `float`, a `bool`, a `null` and a `string` all convert silently and
+/// totally, so they are never a finding however precisely they are proven. Two
+/// values are not:
+///
+/// * an **array** — a warning plus the literal string `"Array"`
+///   ([`STRING_ARRAY_CONVERSION_ID`]);
+/// * an **object with no reachable `__toString`** — a fatal `Error`
+///   ([`STRING_NON_STRINGABLE_ID`]).
+///
+/// A site whose value is neither proven array nor proven exact-class object is
+/// silence, which covers every `Maybe` by construction.
+fn check_string_contexts(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    stmt: &Stmt,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    out: &mut Vec<Diagnostic>,
+) {
+    for site in &stmt.string_contexts {
+        check_string_context_site(w, folder, site, env, store, out);
+    }
+}
+
+/// One conversion site: the array leg, then the object leg. They are disjoint by
+/// construction (a value-domain [`Fact`] never denotes an object), so at most one
+/// finding is produced per site.
+fn check_string_context_site(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    site: &StringContextSite,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    out: &mut Vec<Diagnostic>,
+) {
+    let cx = w.cx;
+    // The array leg. Warning-grade, so it rides the ADR-0049 §7 lever: under a
+    // declared `warning-handler = "null"` the application tolerates the warning and
+    // the finding leaves the proof surface, exactly as `offset.missing` does.
+    if cx.warning_handler_abort && string_context_is_array(w, folder, &site.value, env) {
+        let pos = cx.tree().position(site.span.start);
+        out.push(Diagnostic {
+            id: STRING_ARRAY_CONVERSION_ID,
+            path: cx.path().to_owned(),
+            line: pos.line,
+            column: pos.column,
+            message: format!(
+                "array in {} — PHP warns \"Array to string conversion\" and converts it to \
+                 the literal string \"Array\"",
+                site.kind.render(),
+            ),
+            facet: None,
+            fix: None,
+        });
+        return;
+    }
+    check_non_stringable(w, folder, site, store, out);
+}
+
+/// The fatal leg: an object whose class provably declares no `__toString` anywhere
+/// a runtime lookup could find one.
+///
+/// The ladder is `call.undefined-method`'s, asked for one particular method name,
+/// and every leg of it is a silence:
+///
+/// 1. **An exactly-known class.** A lower bound is not enough — a subclass may
+///    declare `__toString` — so the same exactness discipline
+///    [`undefined_method_receiver`] applies holds here (`$this` included: it is
+///    membership, not exactness, unless the class is `final`).
+/// 2. **A live, monkey-patch-free boot surface** (`absence_family_available`,
+///    ADR-0049 A9): a runtime-redefinition extension can add a method to a class
+///    out from under any textual proof.
+/// 3. **`Stringable` refuted** by the is-a oracle. That oracle already knows PHP
+///    8.0's implicit implementation — any class with a `__toString` anywhere in its
+///    hierarchy answers `Yes`, and a trait-using class answers `Unknown` — so a
+///    non-`No` answer is silence before the chain is walked at all.
+/// 4. **The chain fully enumerated** with `__toString` absent from every node
+///    ([`enumerate_method_chain`]): an unresolvable or ambiguous ancestor, a
+///    builtin ancestor, a trait, an enum, and an A14 magic-tag obstacle anywhere in
+///    the resolved reach each stop the walk.
+/// 5. **The dam and the A2ii homonym leg**, as the method id applies them.
+fn check_non_stringable(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    site: &StringContextSite,
+    store: &Store,
+    out: &mut Vec<Diagnostic>,
+) {
+    let cx = w.cx;
+    let Some(class_fqn) = string_context_object_class(cx, store, &site.value, w.scope.poisoned)
+    else {
+        return;
+    };
+    if !folder.absence_family_available() {
+        return;
+    }
+    if cx.is_a(&class_fqn, "Stringable") != IsA::No {
+        return;
+    }
+    let ChainWalk::Absent { simple_chain, fqns, any_conditional } =
+        enumerate_method_chain(cx, &class_fqn, "__toString", UndefKind::Instance)
+    else {
+        return;
+    };
+    if any_conditional && !cx.dam.is_clear() {
+        return;
+    }
+    for fqn in &fqns {
+        match folder.boot_surface_class_like(fqn) {
+            Some(false) => {}
+            Some(true) | None => return,
+        }
+    }
+
+    // Every leg holds — a proven `Error: Object of class C could not be converted
+    // to string`, witnessed on PHP 8.5.9 in all five contexts.
+    let pos = cx.tree().position(site.span.start);
+    let display = cx.class_display_fqn(&class_fqn);
+    let chain_render = simple_chain.join(" → ");
+    out.push(Diagnostic {
+        id: STRING_NON_STRINGABLE_ID,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message: format!(
+            "object of class {display} in {} — hierarchy fully enumerated ({chain_render}), \
+             no __toString, not Stringable: PHP raises \
+             \"Error: Object of class {display} could not be converted to string\"",
+            site.kind.render(),
+        ),
+        facet: None,
+        fix: None,
+    });
+}
+
+/// Whether a string-context operand is **provably an array** at the `Verified`
+/// stratum a proof-layer finding requires (ADR-0052 §5): a proven array value, in
+/// the env or resolved by the fold. `Certainty::Maybe` — an `array|string` — is
+/// silence by construction.
+///
+/// # What is deliberately NOT evidence here, and why
+///
+/// The `Fact::Shape` a **declared** array seeds is always `Asserted`, by ADR-0062
+/// A-G9's corollary: a declared shape's contents are a claim the runtime never
+/// checks, and the stratum is what enforces "shape-derived facts never feed
+/// proof-layer findings" structurally rather than by review. That covers the
+/// docblock case (`@param array<int, string> $a`) exactly right.
+///
+/// It also means a bare native `array $x` parameter — which PHP *does* enforce with
+/// a `TypeError`, and which is the single commonest shape of this finding in other
+/// analyzers — reports nothing today. The reason is one level below this check:
+/// `TypeMember` has no array member, so an `array` hint lowers the whole native
+/// type to `None` and there is no `Verified` arm to read. Widening it is an IR
+/// change (the array vocabulary joining the native envelope), not a judgement
+/// change, and it is recorded silence until then.
+fn string_context_is_array(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+) -> bool {
+    matches!(
+        string_context_fact(w, folder, value, env),
+        Some((fact, Stratum::Verified)) if pred_holds_on_fact(TypePred::Array, &fact) == Certainty::Yes
+    )
+}
+
+/// The value-domain fact behind a string-context operand, with its trust stratum:
+/// a bare variable's env binding, else whatever the operand resolves to as a
+/// literal. Anything else — a call, an offset read, an object — yields `None`,
+/// which is silence.
+fn string_context_fact(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+) -> Option<(Fact, Stratum)> {
+    if let ArgValue::Var(name) = value {
+        if w.scope.poisoned {
+            return None;
+        }
+        let known = env.get(name)?;
+        return Some((known.fact.clone()?, known.stratum));
+    }
+    let (lit, stratum) = w.cx.resolve_literal_strat(value, env, w.scope.poisoned, folder)?;
+    Some((singleton_fact(&lit, w.cx.php_minor)?, stratum))
+}
+
+/// The **exact** class of a string-context operand that is an object, or `None`.
+/// A `new C(...)` and a resolved enum case are exact by construction; a variable
+/// must be bound to a heap object the store knows exactly (`class_exact`), which is
+/// the same bound [`undefined_method_receiver`] requires and for the same reason.
+fn string_context_object_class(
+    cx: &Cx,
+    store: &Store,
+    value: &ArgValue,
+    poisoned: bool,
+) -> Option<String> {
+    if let ArgValue::Var(name) = value {
+        if poisoned {
+            return None;
+        }
+        let obj = store.obj_of(name)?;
+        return obj.class_exact.then(|| obj.class.clone());
+    }
+    cx.proven_object_class(value)
 }
 
 // ---------------------------------------------------------------------------

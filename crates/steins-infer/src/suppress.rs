@@ -37,6 +37,9 @@ use crate::{
     READONLY_REASSIGNED_ID,
     RETURN_ID, RETURN_MISMATCH_ID, THROW_LISKOV_ID, THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID,
 };
+// string context (ADR-0078, issue #193)
+use crate::{STRING_ARRAY_CONVERSION_ID, STRING_NON_STRINGABLE_ID};
+// end string context (ADR-0078, issue #193)
 // docblock hygiene (ADR-0078, issue #186)
 use crate::{
     CLOSURE_UNUSED_USE_ID, PHPDOC_MISPLACED_VAR_ID, PHPDOC_STALE_PARAM_ID, PHPDOC_STALE_VAR_ID,
@@ -280,6 +283,15 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // (ADR-0049 §7).
     (FOREACH_NON_ITERABLE_ID, Layer::Proof, Floor::Default),
     // end foreach subject (ADR-0078, issue #192)
+    // string context (ADR-0078, issue #193)
+    // proof — a value PHP cannot convert to a string. The two consequences are two
+    // ids because the ADR-0049 §7 gate cuts between them (ADR-0078 §1.4): the
+    // object case is a fatal `Error` and never demotes, while the array case is a
+    // warning plus the literal string "Array" and demotes under a declared
+    // `warning-handler = "null"` exactly as `offset.missing` does.
+    (STRING_NON_STRINGABLE_ID, Layer::Proof, Floor::Default),
+    (STRING_ARRAY_CONVERSION_ID, Layer::Proof, Floor::Default),
+    // end string context (ADR-0078, issue #193)
     // contract — declared-contract acceptance (increase tripwires).
     (PARAM_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     (RETURN_MISMATCH_ID, Layer::Contract, Floor::Contracts),
