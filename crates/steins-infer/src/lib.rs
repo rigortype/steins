@@ -46,7 +46,7 @@ use steins_syntax::CallExpr;
 use steins_syntax::Span;
 use steins_syntax::{
     ArgValue, ArrayKey, Callee, CatchClause, ClassDecl, ClosureRef, CmpOp, Comment, CommentKind, CondExpr, CondOperand,
-    EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, InvalidatedVar, MatchArmT, MethodDecl,
+    EffectEnvelope, EffectOrigin, EffectRecv, ForeachSite, FunctionDecl, InvalidatedVar, MatchArmT, MethodDecl,
     NameRef, NamedArg, NativeType, NormKey, OpaqueConstruct, Param, PropertyDecl, Receiver, RefKind, ScalarType, Scope,
     ScopeOwner, SourceTree, StaticClass, Stmt, StmtKind, ThrowKind, ThrowOrigin, TypeMember, Visibility,
     duplicate_array_keys, normalize_array, php_canonical_int_string,
@@ -441,6 +441,19 @@ pub const PROPERTY_ON_NON_OBJECT_ID: &str = "property.on-non-object";
 
 // end non-object receivers (ADR-0078, issue #190)
 
+/// `foreach.non-iterable` (ADR-0078, issue #192): a `foreach` subject proven — in
+/// the same value-domain lane `offset.missing` reads — to be a non-array
+/// scalar/`null`. PHP's own consequence (`php -r`-witnessed, 8.5.9):
+/// `foreach() argument must be of type array|object, {type} given`, and the loop
+/// body is skipped entirely, not merely warned about. Single-id family, like
+/// `readonly.reassigned` — there is no companion "unsupported" arm, because every
+/// leg this proves already IS the one runtime consequence (unlike the offset
+/// family's missing-key/unsupported-base split).
+///
+/// Warning-grade, so it rides the same `warning-handler` gate `offset.missing`
+/// does (ADR-0049 §7): silent under a declared `warning-handler = "null"` posture.
+pub const FOREACH_NON_ITERABLE_ID: &str = "foreach.non-iterable";
+
 /// Every id constant that reaches a `Diagnostic { id: … }` construction site — the
 /// canonical enumeration of what the emitters can produce (ADR-0050 §2 totality).
 ///
@@ -504,6 +517,9 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     CALL_ON_NON_OBJECT_ID,
     PROPERTY_ON_NON_OBJECT_ID,
     // end non-object receivers (ADR-0078, issue #190)
+    // foreach subject (ADR-0078, issue #192)
+    FOREACH_NON_ITERABLE_ID,
+    // end foreach subject (ADR-0078, issue #192)
 ];
 
 /// Ids **registered ahead of emission**: they exist in [`DIAGNOSTIC_REGISTRY`]
@@ -7829,6 +7845,17 @@ fn walk_trace(
             // no behaviour change; never under a binding descent, like every other
             // observer.
             record_subject_probe(cx, stmt, env);
+            // 0a-bis. `foreach.non-iterable` (ADR-0078, issue #192): judged from the
+            // SAME entry env the probe above just read — the construct is still
+            // `StmtKind::Opaque` at this point (step 2 below is what clears/forgets
+            // its write/read set), so nothing has touched `env` for it yet. The
+            // trace carries no per-construct discriminant for `foreach` versus its
+            // `Opaque` siblings (`while`/`for`/`do-while`/`try`), so the match is by
+            // span against the ADR-0076 site enumeration (both computed from the
+            // same `Statement` node's span, so they agree exactly).
+            if let Some(site) = cx.tree().foreach_sites().iter().find(|s| s.span == stmt.span) {
+                check_foreach_subject(cx, site, env, scope.poisoned, out);
+            }
         }
         // 0b. The trace annotation (ADR-0074, issue #94): a statement-adopted
         // `@psalm-trace $x` docblock asks the dump surface's question against
@@ -14189,6 +14216,131 @@ fn check_preg_pattern(
             fix: None,
         });
     }
+}
+
+// ---------------------------------------------------------------------------
+// `foreach.non-iterable` (ADR-0078, issue #192).
+// ---------------------------------------------------------------------------
+
+/// The PHP word `foreach()`'s own warning would print for a proven-concrete
+/// non-array `Val` (`php -r`-witnessed, 8.5.9: `foreach() argument must be of
+/// type array|object, {word} given`), or `None` for an array (iterable — never
+/// reaches this check).
+fn foreach_subject_word(v: &Val) -> Option<&'static str> {
+    match v {
+        Val::Null => Some("null"),
+        Val::Int(_) => Some("int"),
+        Val::Float(_) => Some("float"),
+        Val::Bool(true) => Some("true"),
+        Val::Bool(false) => Some("false"),
+        Val::Str(_) => Some("string"),
+        Val::Array(_) => None,
+    }
+}
+
+/// The definite PHP word `foreach()`'s own warning would print for a `Refined`/
+/// `General` fact, when the base/nullability pin exactly one — `int`/`float`/
+/// `string` at `nullable: false` (the same words a concrete `Val` of that base
+/// renders as). `None` when the word is not pinned: `nullable: true` (the
+/// runtime value could be the base OR `null` — two different words) or a `Bool`
+/// base (PHP's warning names the concrete `true`/`false`, never the bare word
+/// `bool`, and the abstract layers never carry a bool's truth value).
+fn foreach_subject_abstract_word(fact: &Fact) -> Option<&'static str> {
+    match fact {
+        Fact::Refined { base, nullable: false, .. } | Fact::General { base, nullable: false } => {
+            match base {
+                Base::Int => Some("int"),
+                Base::Float => Some("float"),
+                Base::String => Some("string"),
+                Base::Bool => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Judge one [`ForeachSite`]'s subject against the entry env and emit
+/// `foreach.non-iterable` when it is proven a non-array scalar/`null` (ADR-0078,
+/// issue #192).
+///
+/// Reuses `SourceTree::foreach_sites()` (ADR-0076) rather than re-lowering the
+/// construct — the checker's own trace erases `foreach` into an undifferentiated
+/// `StmtKind::Opaque` (ADR-0027), so the site list is where "this IS a foreach,
+/// and here is its subject" survives.
+///
+/// The subject's fact comes from the SAME lane `offset.missing` reads (a bare
+/// `Var` in `env`, required `Verified` — an `Asserted`/docblock claim never
+/// premises this proof, ADR-0052 §5). Only a `Singleton` over a non-array `Val`
+/// and a scalar-base `Refined`/`General` fact fire (ADR-0078 §"fires only on a
+/// proven non-iterable"); a `Fact::Shape` (an array, always iterable) and a
+/// `Fact::OneOf` (out of scope here — no single warning word to attribute) stay
+/// silent.
+///
+/// Every other silence leg falls out of the SAME gate with no extra code: a
+/// plain object carries no `Fact` at all (the domain `Val` has no object
+/// variant — object state lives in the heap/store, ADR-0036), so `Traversable`/
+/// `Generator`/a plain object/an unenumerable class hierarchy are all simply
+/// unproven here. An `iterable`-declared native parameter contributes no `Fact`
+/// either (ADR-0002 silence — only a docblock shape or a walked value answers).
+/// A `None` fact, a poisoned scope, or an `Asserted`-stratum fact all stay
+/// silent by the same gates `offset.missing` uses.
+fn check_foreach_subject(
+    cx: &Cx,
+    site: &ForeachSite,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    out: &mut Vec<Diagnostic>,
+) {
+    // The warning-handler posture (ADR-0049 §7): a refusal is warning-plus-a-
+    // skipped-body, silenced under a declared `warning-handler = "null"` posture
+    // exactly as `offset.missing` is.
+    if !cx.warning_handler_abort {
+        return;
+    }
+    if poisoned {
+        return;
+    }
+    let Some(name) = &site.subject else { return };
+    let Some(known) = env.get(name) else { return };
+    if known.stratum != Stratum::Verified {
+        return;
+    }
+    let Some(fact) = &known.fact else { return };
+
+    let message = match fact {
+        Fact::Singleton(v) => {
+            let Some(word) = foreach_subject_word(v) else { return };
+            format!(
+                "foreach subject ${name} is provably {} — the loop body never runs; \
+                 warns with \"foreach() argument must be of type array|object, {word} given\"",
+                render_val(v),
+            )
+        }
+        Fact::Refined { .. } | Fact::General { .. } => {
+            let desc = describe_fact(fact);
+            match foreach_subject_abstract_word(fact) {
+                Some(word) => format!(
+                    "foreach subject ${name} is provably {desc} — the loop body never runs; \
+                     warns with \"foreach() argument must be of type array|object, {word} given\"",
+                ),
+                None => format!(
+                    "foreach subject ${name} is provably {desc} — never array or object, so \
+                     PHP's foreach() warns and the loop body never runs",
+                ),
+            }
+        }
+        Fact::OneOf(_) | Fact::Shape { .. } => return,
+    };
+    let pos = cx.tree().position(site.span.start);
+    out.push(Diagnostic {
+        id: FOREACH_NON_ITERABLE_ID,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message,
+        facet: None,
+        fix: None,
+    });
 }
 
 /// The element type of one `$matches` entry, read off the sub-pattern that
