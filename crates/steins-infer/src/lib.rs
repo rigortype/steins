@@ -15886,12 +15886,15 @@ fn preg_pattern_list(
     env: &HashMap<String, Known>,
 ) -> Vec<String> {
     if let Some(resolved) = w.cx.resolve_literal(value, env, w.scope.poisoned, folder) {
+        // A byte-string pattern contributes nothing: PCRE is asked about a
+        // pattern this reader can name, never about a lossy decoding of one
+        // (ADR-0080 §2.5) — the same silence a non-literal element gets.
         return match resolved {
-            ArgValue::Str(p) => vec![p],
+            ArgValue::Str(p) => p.as_str().map(ToOwned::to_owned).into_iter().collect(),
             ArgValue::Array(items) => items
                 .into_iter()
                 .filter_map(|(_, v)| match v {
-                    ArgValue::Str(p) => Some(p),
+                    ArgValue::Str(p) => p.as_str().map(ToOwned::to_owned),
                     _ => None,
                 })
                 .collect(),
@@ -15920,7 +15923,7 @@ fn preg_pattern_keys(
     items
         .iter()
         .filter_map(|(k, _)| match k {
-            ArrayKey::Str(s) => Some(s.clone()),
+            ArrayKey::Str(s) => s.as_str().map(ToOwned::to_owned),
             ArrayKey::Int(_) | ArrayKey::Auto => None,
         })
         .collect()
