@@ -5210,27 +5210,67 @@ fn check_stale_params(cx: &Cx, out: &mut Vec<Diagnostic>) {
 /// grammar puts it, so a `$name` inside `callable(…)` / `\Closure(…)` parens can
 /// never be the subject.
 ///
-/// A payload the parser rejects yields `None` — silence here, because that case
-/// belongs to `phpdoc.unparsable` (and only within its balanced narrowing).
+/// Two guards keep a *multiline* type from ever convicting, because the
+/// line-based scanner hands this a truncated payload and `parse_type`'s
+/// tolerance can hide the truncation:
+///
+/// 1. **The payload must be bracket-balanced** — the same guard
+///    `phpdoc.unparsable` applies, applied symmetrically. An unbalanced payload is
+///    a type continued on the next physical line
+///    (`@phpstan-param callable(array<string,string> $params): array{` …), which
+///    the scanner never reassembles.
+/// 2. **The subject must sit at bracket depth 0** past the parse's extent. The
+///    `callable(…)` / `\Closure(…)` signature form is all-or-nothing: when the
+///    whole `(params): ret` cannot parse — a missing return type, or one truncated
+///    mid-shape — the parser BACKTRACKS to the bare identifier and reports
+///    `consumed = 8`, leaving the entire parameter list unconsumed. Trusting
+///    `consumed` alone then reads the type's own `$params` as the subject.
+///
+/// A payload the parser rejects yields `None` too — silence here, because that
+/// case belongs to `phpdoc.unparsable` (and only within its balanced narrowing).
 fn param_subject(doc_text: &str, tag: &DocTag) -> Option<String> {
     let payload = tag_payload(doc_text, tag)?;
+    if !brackets_balanced(payload) {
+        return None;
+    }
     let parsed = parse_type(payload).ok()?;
-    first_variable_token(payload.get(parsed.consumed as usize..)?)
+    top_level_variable_token(payload.get(parsed.consumed as usize..)?)
 }
 
-/// The first `$name` token in `s`, without its `$`. `None` when there is none (a
-/// bare `@param T` names no subject at all).
-fn first_variable_token(s: &str) -> Option<String> {
+/// The first `$name` token in `s` that is **not nested inside a bracket**, without
+/// its `$`. `None` when there is none (a bare `@param T` names no subject), and
+/// `None` the moment the scan closes a bracket it never opened — that means the
+/// scan began *inside* a bracketed construct, so nothing here is a subject.
+fn top_level_variable_token(s: &str) -> Option<String> {
     let bytes = s.as_bytes();
-    let at = s.find('$')?;
-    let mut end = at + 1;
-    while bytes
-        .get(end)
-        .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80)
-    {
-        end += 1;
+    let mut depth = 0i32;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' | b'<' => depth += 1,
+            b')' | b']' | b'}' | b'>' => {
+                depth -= 1;
+                if depth < 0 {
+                    return None;
+                }
+            }
+            b'$' if depth == 0 => {
+                let mut end = i + 1;
+                while bytes
+                    .get(end)
+                    .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80)
+                {
+                    end += 1;
+                }
+                if end > i + 1 {
+                    return Some(s[i + 1..end].to_owned());
+                }
+            }
+            _ => {}
+        }
+        i += 1;
     }
-    (end > at + 1).then(|| s[at + 1..end].to_owned())
+    None
 }
 
 /// The per-declaration leg of [`check_stale_params`]. `doc_start` is the

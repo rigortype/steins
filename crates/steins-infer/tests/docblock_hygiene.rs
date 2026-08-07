@@ -168,6 +168,41 @@ fn an_unparsable_payload_is_not_also_stale() {
     silent("<?php\n/** @param int|string| $gone */\nfunction f(int $n): void {}\n", PHPDOC_STALE_PARAM_ID);
 }
 
+/// **A multiline type can never convict.** The docblock scanner reads one physical
+/// line, so a `callable(…): array{…}` whose shape continues below arrives cut at
+/// `array{`. Worse, `parse_type` does not reject that: the `callable(…)` signature
+/// form is all-or-nothing, so a truncated return type makes it BACKTRACK to the
+/// bare identifier and report `consumed = 8` with the whole parameter list
+/// unconsumed — which read the type's own `$params` as the tag's subject.
+///
+/// Both guards are pinned here: the payload is bracket-unbalanced (guard 1), and
+/// even balanced-but-backtracked forms leave no subject at bracket depth 0
+/// (guard 2). `phpdoc.unparsable` stays silent too, by the same wrap rule.
+#[test]
+fn a_multiline_callable_type_convicts_nothing() {
+    let src = "<?php\n/**\n * @phpstan-param callable(array<string,string> $params): array{\n *   subject:string,\n *   body:string\n * } $render\n */\nfunction f(callable $render): void {}\n";
+    silent(src, PHPDOC_STALE_PARAM_ID);
+    silent(src, PHPDOC_UNPARSABLE_ID);
+
+    // Guard 2 on its own: a BALANCED callable with no return type still backtracks
+    // to `consumed = 8`, and its `$a` sits inside the parens.
+    silent(
+        "<?php\n/** @param callable(int $a) */\nfunction f(callable $cb): void {}\n",
+        PHPDOC_STALE_PARAM_ID,
+    );
+}
+
+/// The firing control beside it: the same callable spelled on ONE line, with a
+/// subject the signature genuinely lacks.
+#[test]
+fn a_single_line_callable_with_a_stale_subject_still_fires() {
+    let msg = one(
+        "<?php\n/** @phpstan-param callable(array<string,string> $params): array{subject:string} $gone */\nfunction f(callable $render): void {}\n",
+        PHPDOC_STALE_PARAM_ID,
+    );
+    assert_eq!(msg, "`@param $gone` names no parameter of f()");
+}
+
 #[test]
 fn a_method_param_tag_is_checked_against_its_own_signature() {
     let msg = one(

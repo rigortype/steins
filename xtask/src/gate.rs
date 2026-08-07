@@ -1154,6 +1154,59 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 358,
         message_contains: "sits where nothing adopts it",
     },
+    // The legacy monorepo's five, verified at source by the orchestrator on
+    // 2026-08-08 and all TRUE. Path suffixes are cut to the shortest fragment that
+    // still keys the row 1:1 (the private-corpus naming rule) — do not lengthen
+    // them. Like every row on this unpinned corpus, a re-cut of the checkout can
+    // move a line number and re-red the gate; that is the pin working, not drift
+    // to be papered over.
+    //
+    // A `@phpstan-param` naming a parameter the signature genuinely lacks: the
+    // options array it documents is built inline in the body, so the tag is
+    // refactor rot.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "phpdoc.stale-param",
+        path_suffix: "AppApi/IllustRecommend.php",
+        line: 35,
+        message_contains: "names no parameter",
+    },
+    // A stacked duplicate `@phpstan-var`: its twin adopts the property below, and
+    // this one adopts nothing at all.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "phpdoc.misplaced-var",
+        path_suffix: "Search/Illust.php",
+        line: 105,
+        message_contains: "sits where nothing adopts it",
+    },
+    // Two `@var` casts written as the LAST statement of a branch. The author means
+    // them for the code after the closing brace, but next-statement adoption
+    // (ADR-0073) ends at the `}` — in Steins and in every tool that adopts
+    // next-statement-only — so the annotation is inert exactly as written.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "phpdoc.misplaced-var",
+        path_suffix: "View/NovelCreateBookController.php",
+        line: 313,
+        message_contains: "sits where nothing adopts it",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "phpdoc.misplaced-var",
+        path_suffix: "View/NovelCreateBookController.php",
+        line: 317,
+        message_contains: "sits where nothing adopts it",
+    },
+    // A pseudo-tuple `@return [$total, $illust_ids]` — a spelling no PHPDoc grammar
+    // admits, so the tag declares nothing to any reader.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "phpdoc.unparsable",
+        path_suffix: "Controller/V1SearchWorks.php",
+        line: 91,
+        message_contains: "does not parse",
+    },
 ];
 
 /// Whether `d` is a recorded, triaged TRUE proof-layer positive for `package`
