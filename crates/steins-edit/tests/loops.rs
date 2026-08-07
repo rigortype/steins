@@ -12,6 +12,7 @@
 
 use steins_edit::TransformReport;
 use steins_edit::VouchSet;
+use steins_edit::loops::LoopToArrayMapOptions;
 use steins_edit::loops::{
     REASON_ACCUMULATOR_INIT_NOT_ADJACENT, REASON_ACCUMULATOR_NOT_EMPTY,
     REASON_ACCUMULATOR_READ_IN_BODY, REASON_BODY_CALL_UNRESOLVED, REASON_BODY_EFFECTS,
@@ -23,6 +24,10 @@ use steins_edit::loops::{
 use steins_edit::plan_loop_to_array_map;
 
 fn plan(files: &[(&str, &str)]) -> TransformReport {
+    plan_with(files, LoopToArrayMapOptions::default())
+}
+
+fn plan_with(files: &[(&str, &str)], options: LoopToArrayMapOptions) -> TransformReport {
     let db = steins_db::SteinsDatabase::default();
     let inputs: Vec<steins_db::SourceFile> = files
         .iter()
@@ -34,7 +39,7 @@ fn plan(files: &[(&str, &str)]) -> TransformReport {
         steins_db::ProjectLayout::fallback(),
         steins_db::PluginFacts::none(),
     );
-    plan_loop_to_array_map(&db, project, &VouchSet::empty(), None)
+    plan_loop_to_array_map(&db, project, &VouchSet::empty(), None, options)
 }
 
 fn assert_oracle_complete(report: &TransformReport) {
@@ -354,4 +359,183 @@ fn a_non_empty_accumulator_refuses() {
 fn a_loop_that_opens_its_block_refuses_for_want_of_an_initializer() {
     let src = "<?php\nfunction run(array $xs): array {\n    foreach ($xs as $x) {\n        $out[] = $x;\n    }\n    return $out;\n}\n";
     assert_eq!(refusal_for(src), REASON_ACCUMULATOR_INIT_NOT_ADJACENT);
+}
+
+// ---- 6. The Asserted-subject opt-in (ADR-0076 amendment, issue #175) -------
+
+fn opted_in() -> LoopToArrayMapOptions {
+    LoopToArrayMapOptions { asserted_subjects: true }
+}
+
+/// A loop whose subject qualifies only at the Asserted stratum: a docblock
+/// `list<int>` claim over a native `array` hint the engine cannot represent.
+const ASSERTED_LIST: &str = "<?php\n/** @param list<int> $xs */\nfunction scale(array $xs): array {\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $x * 3;\n    }\n    return $out;\n}\n";
+
+#[test]
+fn the_opt_in_admits_a_docblock_list_counted_and_labeled() {
+    let report = plan_with(&[("lib.php", ASSERTED_LIST)], opted_in());
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
+    assert_eq!(report.oracle.transformed_asserted, 1, "counted on the asserted side");
+    let out = report.plan.apply_file("lib.php", ASSERTED_LIST);
+    assert!(out.contains("$out = array_map(fn ($x) => $x * 3, $xs);"), "got:\n{out}");
+
+    // The label at the site (amendment condition 3): it must name the subject,
+    // say declared-not-proven, state the key-numbering risk, and not pretend
+    // the post-check could catch a wrong claim.
+    assert_eq!(report.asserted_admissions.len(), 1, "{:#?}", report.asserted_admissions);
+    let admission = &report.asserted_admissions[0];
+    assert_eq!(admission.site.label, "foreach");
+    assert!(admission.detail.contains("`$xs`"), "label names the subject: {}", admission.detail);
+    assert!(admission.detail.contains("declared"), "label: {}", admission.detail);
+    assert!(admission.detail.contains("not proven"), "label: {}", admission.detail);
+    assert!(
+        admission.detail.contains("array_map preserves keys"),
+        "label states the risk: {}",
+        admission.detail
+    );
+    assert!(
+        admission.detail.contains("post-check cannot catch"),
+        "label must not oversell the post-check: {}",
+        admission.detail
+    );
+}
+
+#[test]
+fn without_the_opt_in_the_same_fixture_still_refuses_at_the_array_gate() {
+    // The pre-amendment behavior, pinned: a declared list is a claim, and the
+    // proven-only gate refuses it at the array check (the #145 order artifact).
+    let report = plan(&[("lib.php", ASSERTED_LIST)]);
+    assert_oracle_complete(&report);
+    assert!(report.plan.is_empty(), "no edit without the opt-in");
+    assert_eq!(only_reason(&report), REASON_SUBJECT_NOT_PROVEN_ARRAY);
+    assert_eq!(report.oracle.transformed_asserted, 0);
+    assert!(report.asserted_admissions.is_empty());
+}
+
+#[test]
+fn the_flag_alone_changes_nothing_where_no_asserted_evidence_exists() {
+    // Byte-identity measured in one run: over a proven rewrite plus a proven
+    // non-list refusal, the whole report — plan, refusals, oracle — is equal
+    // with and without the opt-in.
+    let non_list = "<?php\nfunction keys(): array {\n    $xs = ['a' => 1, 'b' => 2];\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $x;\n    }\n    return $out;\n}\n";
+    let files = [("a.php", FLAGSHIP), ("b.php", non_list)];
+    let off = plan_with(&files, LoopToArrayMapOptions::default());
+    let on = plan_with(&files, opted_in());
+    assert_eq!(off, on, "the opt-in must be inert without asserted evidence");
+    assert_eq!(on.oracle.transformed_asserted, 0);
+    assert!(on.asserted_admissions.is_empty());
+}
+
+#[test]
+fn a_proven_subject_under_the_opt_in_stays_a_proven_rewrite() {
+    // The proven lane is untouched: the opt-in never relabels a proven site.
+    let report = plan_with(&[("lib.php", FLAGSHIP)], opted_in());
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
+    assert_eq!(report.oracle.transformed_asserted, 0, "a proven rewrite is not an admission");
+    assert!(report.asserted_admissions.is_empty());
+}
+
+#[test]
+fn a_bare_native_array_hint_is_no_evidence_at_either_stratum() {
+    // Amendment condition 2: `function scale(array $xs)` with no docblock. The
+    // native lowering represents no `array` member, so the subject has no
+    // evidence at all and still refuses at the array gate even opted in.
+    let src = "<?php\nfunction scale(array $xs): array {\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $x;\n    }\n    return $out;\n}\n";
+    let off = plan(&[("lib.php", src)]);
+    assert_eq!(only_reason(&off), REASON_SUBJECT_NOT_PROVEN_ARRAY);
+
+    let on = plan_with(&[("lib.php", src)], opted_in());
+    assert_oracle_complete(&on);
+    assert_eq!(on.oracle.transformed, 0);
+    assert_eq!(only_reason(&on), REASON_SUBJECT_NOT_PROVEN_ARRAY);
+    assert!(
+        on.refusals[0].detail.contains("no declared type establishes one"),
+        "the opted-in detail says which half is missing: {}",
+        on.refusals[0].detail
+    );
+}
+
+#[test]
+fn a_declared_bare_array_satisfies_the_array_half_only() {
+    // `@param array $xs`: Asserted evidence for array-ness, none for list-ness.
+    // Off, it refuses at the array gate (nothing Verified); on, the array half
+    // is Asserted-satisfied and the honest refusal moves to the list gate.
+    let src = "<?php\n/** @param array $xs */\nfunction scale($xs): array {\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $x;\n    }\n    return $out;\n}\n";
+    let off = plan(&[("lib.php", src)]);
+    assert_eq!(only_reason(&off), REASON_SUBJECT_NOT_PROVEN_ARRAY);
+
+    let on = plan_with(&[("lib.php", src)], opted_in());
+    assert_oracle_complete(&on);
+    assert_eq!(on.oracle.transformed, 0);
+    assert_eq!(only_reason(&on), REASON_SUBJECT_NOT_PROVEN_LIST);
+    assert!(
+        on.refusals[0].detail.contains("Asserted stratum but not list-ness"),
+        "detail: {}",
+        on.refusals[0].detail
+    );
+}
+
+#[test]
+fn a_declared_map_shape_refuses_at_the_list_gate_under_the_opt_in() {
+    // `array<string, int>` declares the array half and denies nothing about
+    // keys the list gate could accept — same cell as the bare `array` claim.
+    let src = "<?php\n/** @param array<string, int> $xs */\nfunction scale($xs): array {\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $x;\n    }\n    return $out;\n}\n";
+    let on = plan_with(&[("lib.php", src)], opted_in());
+    assert_oracle_complete(&on);
+    assert_eq!(on.oracle.transformed, 0);
+    assert_eq!(only_reason(&on), REASON_SUBJECT_NOT_PROVEN_LIST);
+}
+
+#[test]
+fn a_nullable_declared_list_is_not_array_evidence() {
+    // `list<int>|null` admits null, which `foreach` warns through and
+    // `array_map` TypeErrors on — the array half fails at both strata.
+    let src = "<?php\n/** @param list<int>|null $xs */\nfunction scale($xs): array {\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $x;\n    }\n    return $out;\n}\n";
+    let on = plan_with(&[("lib.php", src)], opted_in());
+    assert_oracle_complete(&on);
+    assert_eq!(on.oracle.transformed, 0);
+    assert_eq!(only_reason(&on), REASON_SUBJECT_NOT_PROVEN_ARRAY);
+}
+
+#[test]
+fn an_inline_var_cast_admits_under_the_opt_in() {
+    // ADR-0073's inline `@var` is the same Asserted seeding as a `@param`, so
+    // the opt-in reads it the same way.
+    let src = "<?php\nfunction scale($xs): array {\n    /** @var list<int> $xs */\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $x;\n    }\n    return $out;\n}\n";
+    let report = plan_with(&[("lib.php", src)], opted_in());
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
+    assert_eq!(report.oracle.transformed_asserted, 1);
+    assert_eq!(report.asserted_admissions.len(), 1);
+}
+
+#[test]
+fn an_opted_in_effectful_body_finally_fires_the_purity_cell() {
+    // The #145 measurement found the purity cells starved by the subject gate;
+    // under the opt-in they become load-bearing: an admitted-quality subject
+    // with an effectful body refuses on the effect, not on the subject.
+    let src = "<?php\n/** @param list<int> $xs */\nfunction scale(array $xs): array {\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = shout($x);\n    }\n    return $out;\n}\nfunction shout(int $n): int { echo $n; return $n; }\n";
+    let off = plan(&[("lib.php", src)]);
+    assert_eq!(only_reason(&off), REASON_SUBJECT_NOT_PROVEN_ARRAY, "the starvation, pinned");
+
+    let on = plan_with(&[("lib.php", src)], opted_in());
+    assert_oracle_complete(&on);
+    assert_eq!(on.oracle.transformed, 0);
+    assert_eq!(only_reason(&on), REASON_BODY_EFFECTS);
+    assert!(on.asserted_admissions.is_empty(), "a refused site carries no admission label");
+}
+
+#[test]
+fn proven_and_asserted_rewrites_are_accounted_separately_in_one_run() {
+    let files = [("a.php", FLAGSHIP), ("b.php", ASSERTED_LIST)];
+    let report = plan_with(&files, opted_in());
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.enumerated, 2);
+    assert_eq!(report.oracle.transformed, 2, "{:#?}", report.refusals);
+    assert_eq!(report.oracle.transformed_asserted, 1);
+    assert_eq!(report.oracle.refused, 0);
+    assert_eq!(report.asserted_admissions.len(), 1);
+    assert_eq!(report.asserted_admissions[0].site.path, "b.php", "the label sits on the asserted site");
 }

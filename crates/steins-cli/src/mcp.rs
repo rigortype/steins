@@ -423,6 +423,10 @@ static TOOLS: &[Tool] = &[
                     "type": "string",
                     "description": "Path to a steins.toml for `[transform.vouch]` / `[transform.partitions]`. Defaults to ./steins.toml when present.",
                 },
+                "asserted_subjects": {
+                    "type": "boolean",
+                    "description": "loop-to-array-map only (an error on any other transform): admit a loop subject whose `array` AND list evidence hold at the Asserted (declared) stratum — a docblock `list<T>` — instead of requiring proven facts. Off by default. Each admitted site carries a trust label in `report.asserted_admissions` (its list-ness is declared, not proven; a wrong claim changes the result's keys, which the post-check cannot catch), and the oracle counts it separately in `transformed_asserted`.",
+                },
             },
             "required": ["transform", "paths"],
             "additionalProperties": false,
@@ -529,8 +533,19 @@ fn tool_plan_transform(_session: &Session, args: &Value) -> Result<Reply, ToolEr
     })?;
     let paths = paths_arg(args)?;
     let config = optional_string_arg(args, "config")?;
+    let asserted_subjects = bool_arg(args, "asserted_subjects")?;
+    // The same one-transform rule the command line enforces, read from the same
+    // table ([`TransformKind::supports_asserted_subjects`]): on any other
+    // transform the opt-in has no defined meaning, so it is a named error, not
+    // a silent no-op.
+    if asserted_subjects && !kind.supports_asserted_subjects() {
+        return Err(ToolError::new(
+            "invalid-argument",
+            format!("`asserted_subjects` applies only to loop-to-array-map, not `{id}`"),
+        ));
+    }
 
-    let run = crate::plan_transform_run(kind, &paths, config.as_deref())
+    let run = crate::plan_transform_run(kind, &paths, config.as_deref(), asserted_subjects)
         .map_err(|e| ToolError::new("config-error", e))?;
 
     // The `--format json` document, plus what the command line prints as a
@@ -678,6 +693,7 @@ fn tool_apply_plan(session: &mut Session, args: &Value) -> Result<Reply, ToolErr
         "oracle": {
             "enumerated": stored.oracle.enumerated,
             "transformed": stored.oracle.transformed,
+            "transformed_asserted": stored.oracle.transformed_asserted,
             "refused": stored.oracle.refused,
             "complete": stored.oracle.is_complete(),
         },

@@ -196,6 +196,7 @@ pub fn plan_phpdoc_honesty(
         oracle,
         obstacles: dynamism.obstacles,
         vouched_exemptions: dynamism.vouched_exemptions,
+        asserted_admissions: Vec::new(),
     }
 }
 

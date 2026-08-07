@@ -142,3 +142,81 @@ completeness oracle's accounting (ADR-0034 §3). v1 reasons:
 - **Enumerating only append-shaped loops.** Hides the narrowness the
   oracle exists to expose; every `foreach` counts, so the refusal
   distribution is the roadmap for v2.
+
+## Amendment (2026-08-07, issue #175): an opt-in admits an Asserted subject, labeled at the site
+
+Issue #145's measurement across ~26.5k `foreach` candidates in 11 trees
+(ten public packages plus the locally-configured project) settled what the
+§4 histogram is for: 26,549 candidates, 592 loops passing every structural
+check, 591 of those dying at the subject gate, exactly 1 transforming. The
+binding cell is `subject-not-proven-array` (591 with the list cell), and
+`subject-not-proven-list`'s zero is a **check-order artifact**, not
+evidence: the `array` proof runs first, so a subject with no Verified shape
+fact at all — a parameter, an `@param`-annotated variable, a call result, a
+loop under an Opaque enclosing construct — never reaches the list check.
+~94.8% of all refusals are structural shape (`key-binding`,
+`body-not-single-append`, `subject-not-variable`, `early-exit`) that no
+subject-gate policy touches, so the ~592 structural survivors, not the
+26.5k, are the ceiling of any admission change. And the purity cells
+(`body-effects`, `body-throws`, `body-call-unresolved`) never fired in the
+field: the subject gate starves them, because purity is consulted only
+after a subject qualifies.
+
+**The proof-only default stands.** A v2 opt-in admits an **Asserted**
+subject under three conditions:
+
+1. **Explicit opt-in, never default.** `steins transform loop-to-array-map
+   --asserted-subjects` on the command line, and the same-named boolean
+   argument of the MCP `plan_transform` tool. Without it the gate is
+   byte-identical to §3's proven-only reading, pinned by test. This is a
+   per-run policy flag, deliberately *not* an ADR-0046 §2 vouch entry: a
+   vouch exempts named `file:line` obstacle sites from a caller-enumeration
+   question this transform never asks (it consumes no vouches at all),
+   while this opt-in is one trust decision about the whole run's admission
+   bar. One mechanism, and the flag is it.
+2. **Admission requires the Asserted evidence to prove BOTH halves.** The
+   subject's declared type must establish `array` AND list-ness at the
+   Asserted stratum. A docblock `list<T>` (with or without a native `array`
+   hint) qualifies. A bare native `array $xs` does NOT — the native
+   lowering represents no `array` member at all (ADR-0002 silence), so it
+   is evidence at *neither* stratum and still refuses
+   `subject-not-proven-array`. A declared `array` / `array<K, V>`
+   establishes the array half only and refuses `subject-not-proven-list`
+   with the declared-evidence detail. `array_values(...)` wrapping stays
+   rejected (§6): a non-list subject is a refusal to report, not a shape to
+   launder. The unlock sits exactly where the modernization story wants it:
+   annotate, then transform.
+3. **The plan labels each admitted site's trust in its own output.** An
+   admitted-under-opt-in site carries, in its own report entry (text,
+   `--format json`, and the MCP plan document alike), that the subject's
+   list-ness is *declared rather than proven*, and the concrete risk: if
+   the claim is wrong — the value is actually string-keyed or gapped — the
+   rewrite changes behavior, because `array_map` preserves keys where the
+   append renumbered them `0..n-1`. The post-check cannot catch a wrong
+   list claim (both spellings type-check; only the keys differ), and the
+   label says so rather than implying otherwise. The approve step is the
+   human gate.
+
+Nothing else moves. Every structural gate (§1), the whole purity bar (§2)
+and the remaining parity gates (§3) are unchanged; the probe's proven lane
+is untouched, and an Asserted fact never masquerades as Verified — the
+`SubjectFact` stratum split is the seam, and the opt-in reads its
+unverified side instead of collapsing the two. The completeness oracle
+stays exact (`enumerated == transformed + refused`) and gains a
+`transformed_asserted` count, so a re-measure can report the proven yield
+and the opted-in yield as the separate numbers they are. Under the opt-in
+the purity cells become load-bearing for the first time: some fraction of
+the ~591 subject-gate refusals will now refuse on effects, throws, or
+unresolved calls instead — those zeros were starvation, never absence, and
+the next reading of the histogram should expect them to move.
+
+**Rejected alternative, recorded: closing as proof-only.** A yield of
+1/26,549 leaves the flagship effect-preconditioned transform inert in
+exactly the legacy-codebase setting ADR-0010 built it for, while every
+unsoundness the opt-in accepts is *visible* — a behavioral key-numbering
+change reviewed in a diff under an explicit flag with a per-site label —
+never silent. Also recorded for the next measurement: the list cell's zero
+is the check-order artifact above, and the 591 mixes probe-answered
+negatives with subjects that never received a probe at all (the Opaque
+enclosing-construct lowering), a split the histogram as shipped cannot
+report.

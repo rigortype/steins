@@ -268,6 +268,139 @@ fn a_run_with_nothing_to_do_claims_no_post_check() {
     assert!(r.stdout.contains("0 rewritten, 1 refused"), "oracle:\n{}", r.stdout);
 }
 
+// ---- The Asserted-subject opt-in (ADR-0076 amendment, issue #175) ----------
+
+/// A loop whose subject qualifies only at the Asserted stratum (a docblock
+/// `list<int>` over a native `array` hint), invoked with a *true* claim so the
+/// differential run below has behavior to compare.
+const ASSERTED_FIXTURE: &str = "\
+<?php
+
+/** @param list<int> $xs */
+function scale(array $xs): array
+{
+    $out = [];
+    foreach ($xs as $x) {
+        $out[] = $x * 3;
+    }
+
+    return $out;
+}
+
+var_export(scale([2, 4, 6]));
+echo \"\\n\";
+";
+
+#[test]
+fn the_opt_in_flips_a_declared_list_from_refusal_to_labeled_rewrite() {
+    let proj = TempProject::new("optin");
+    proj.write("lib.php", ASSERTED_FIXTURE);
+
+    let off = run(&["transform", "loop-to-array-map", proj.path()]);
+    assert_eq!(off.code, 0, "stderr:\n{}", off.stderr);
+    assert!(off.stdout.contains("subject-not-proven-array"), "off:\n{}", off.stdout);
+    assert!(off.stdout.contains("0 rewritten, 1 refused"), "off oracle:\n{}", off.stdout);
+    assert!(
+        !off.stdout.contains("Asserted-subject admissions"),
+        "no admissions without the flag:\n{}",
+        off.stdout
+    );
+
+    let on = run(&["transform", "loop-to-array-map", "--asserted-subjects", proj.path()]);
+    assert_eq!(on.code, 0, "stderr:\n{}", on.stderr);
+    assert!(
+        on.stdout.contains("+    $out = array_map(fn ($x) => $x * 3, $xs);"),
+        "diff:\n{}",
+        on.stdout
+    );
+    // The label rides in the site's own entry, and the oracle line splits the
+    // lanes.
+    assert!(on.stdout.contains("Asserted-subject admissions (1):"), "label:\n{}", on.stdout);
+    assert!(on.stdout.contains("declared evidence"), "label:\n{}", on.stdout);
+    assert!(on.stdout.contains("post-check cannot catch"), "label:\n{}", on.stdout);
+    assert!(
+        on.stdout.contains("1 enumerated: 1 rewritten (1 on asserted evidence), 0 refused"),
+        "oracle:\n{}",
+        on.stdout
+    );
+    assert_eq!(proj.read("lib.php"), ASSERTED_FIXTURE, "a dry run wrote to disk");
+}
+
+#[test]
+fn the_flag_alone_changes_no_output_without_asserted_evidence() {
+    // The binding byte-identity pin, measured in one run: over a proven-only
+    // project the two invocations print the same bytes and exit the same way.
+    let proj = TempProject::new("optin-inert");
+    proj.write(
+        "lib.php",
+        "<?php\n$xs = [1, 2, 3];\n$out = [];\nforeach ($xs as $x) {\n    $out[] = $x;\n}\nvar_export($out);\n",
+    );
+    let off = run(&["transform", "loop-to-array-map", proj.path()]);
+    let on = run(&["transform", "loop-to-array-map", "--asserted-subjects", proj.path()]);
+    assert_eq!(off.code, on.code);
+    assert_eq!(off.stdout, on.stdout, "the opt-in must be inert without asserted evidence");
+    assert_eq!(off.stderr, on.stderr);
+}
+
+#[test]
+fn an_admitted_true_claim_preserves_behavior_under_the_real_php() {
+    // The differential fixture, opt-in edition: with a *correct* `list<int>`
+    // claim the two spellings must agree under the real interpreter — which is
+    // exactly the conditional equivalence the trust label describes.
+    let proj = TempProject::new("optin-differential");
+    let file = proj.write("fixture.php", ASSERTED_FIXTURE);
+    let before_out = php_output(&file);
+
+    let r = run(&["transform", "loop-to-array-map", "--asserted-subjects", "--apply", proj.path()]);
+    assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
+    let after_src = proj.read("fixture.php");
+    assert!(after_src.contains("array_map(fn ($x) => $x * 3, $xs);"), "not rewritten:\n{after_src}");
+    assert!(!after_src.contains("foreach"), "the loop survived:\n{after_src}");
+
+    let after_out = php_output(&file);
+    assert_eq!(
+        before_out, after_out,
+        "the two spellings disagree under php:\nbefore:\n{before_out}\nafter:\n{after_out}"
+    );
+    assert!(before_out.contains("0 => 6"), "fixture produced nothing to compare:\n{before_out}");
+}
+
+#[test]
+fn json_format_carries_the_admissions_and_the_asserted_count() {
+    let proj = TempProject::new("optin-json");
+    proj.write("lib.php", ASSERTED_FIXTURE);
+
+    let on = run(&["transform", "loop-to-array-map", "--asserted-subjects", "--format", "json", proj.path()]);
+    assert_eq!(on.code, 0, "stderr:\n{}", on.stderr);
+    let v: serde_json::Value = serde_json::from_str(&on.stdout).expect("valid json");
+    assert_eq!(v["report"]["oracle"]["enumerated"], 1);
+    assert_eq!(v["report"]["oracle"]["transformed"], 1);
+    assert_eq!(v["report"]["oracle"]["transformed_asserted"], 1);
+    let admissions = v["report"]["asserted_admissions"].as_array().expect("admissions array");
+    assert_eq!(admissions.len(), 1, "admissions: {v}");
+    let detail = admissions[0]["detail"].as_str().expect("admission detail");
+    assert!(detail.contains("declared"), "label: {detail}");
+    assert!(detail.contains("preserves keys"), "label: {detail}");
+
+    let off = run(&["transform", "loop-to-array-map", "--format", "json", proj.path()]);
+    let v0: serde_json::Value = serde_json::from_str(&off.stdout).expect("valid json");
+    assert_eq!(v0["report"]["oracle"]["transformed_asserted"], 0);
+    assert_eq!(v0["report"]["asserted_admissions"].as_array().expect("array").len(), 0);
+}
+
+#[test]
+fn the_opt_in_is_a_usage_error_on_any_other_transform() {
+    let proj = TempProject::new("optin-misuse");
+    proj.write("lib.php", "<?php\n");
+    let r = run(&["transform", "phpdoc-to-native", "--asserted-subjects", proj.path()]);
+    assert_eq!(r.code, 2, "stdout:\n{}", r.stdout);
+    assert!(
+        r.stderr.contains("--asserted-subjects applies only to loop-to-array-map"),
+        "stderr:\n{}",
+        r.stderr
+    );
+}
+
 #[test]
 fn unknown_and_missing_transform_names_still_list_this_one() {
     let bad = run(&["transform", "bogus-transform", "."]);
