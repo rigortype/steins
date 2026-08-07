@@ -2,6 +2,7 @@
 //! key normalization, auto (next-int) keys, nested arrays, and the spread /
 //! unrepresentable-element → `Other` fallback.
 
+use steins_domain::PhpStr;
 use steins_syntax::{
     ArgValue, ArrayKey, NextIntRule, NormKey, SourceTree, next_int_is_version_dependent,
     normalize_array, normalize_array_with,
@@ -65,7 +66,7 @@ fn bool_float_null_keys_normalize_php_faithfully() {
     assert_eq!(it[0].0, ArrayKey::Int(1));
     assert_eq!(it[1].0, ArrayKey::Int(0));
     assert_eq!(it[2].0, ArrayKey::Int(1));
-    assert_eq!(it[3].0, ArrayKey::Str(String::new()));
+    assert_eq!(it[3].0, ArrayKey::Str(PhpStr::new()));
 }
 
 #[test]

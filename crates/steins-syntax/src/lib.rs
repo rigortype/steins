@@ -12,6 +12,8 @@
 //! parser-backend types private. Spans are byte offsets, convertible to 1-based
 //! line/column via [`SourceTree::position`].
 
+use steins_domain::PhpStr;
+
 use mago_allocator::LocalArena;
 use mago_database::file::FileId;
 use mago_span::HasSpan;
@@ -1020,7 +1022,9 @@ pub struct ClassDecl {
 pub enum ArgValue {
     Int(i64),
     Float(f64),
-    Str(String),
+    /// A PHP string literal's value — a byte string, not a Rust `String`
+    /// (ADR-0080).
+    Str(PhpStr),
     Bool(bool),
     Null,
     /// A bare local variable reference `$name` (name stored without the `$`).
@@ -1178,15 +1182,15 @@ pub enum ArrayKey {
     /// An integer key (already PHP-normalized: integer-like string keys, floats,
     /// and bools all fold to this).
     Int(i64),
-    /// A string key that is not integer-like.
-    Str(String),
+    /// A string key that is not integer-like. A byte string (ADR-0080).
+    Str(PhpStr),
 }
 
 /// A fully PHP-normalized array key (no `Auto`): the runtime key an entry occupies.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NormKey {
     Int(i64),
-    Str(String),
+    Str(PhpStr),
 }
 
 impl NormKey {
@@ -1195,7 +1199,7 @@ impl NormKey {
     pub fn render(&self) -> String {
         match self {
             NormKey::Int(i) => i.to_string(),
-            NormKey::Str(s) => format!("'{s}'"),
+            NormKey::Str(s) => s.to_php_literal(),
         }
     }
 }
@@ -1421,26 +1425,15 @@ pub struct DuplicateArrayKey {
 /// every `Auto` element after it too (the version-dependent leg of ADR-0049
 /// A12, resolved per element rather than for the whole literal).
 ///
-/// **Known representation limit (issue #187):** PHP array-literal string keys
-/// are byte strings, but this crate's CST lowering decodes them UTF-8-lossily
-/// (`lower_literal`'s `Literal::String` arm, via `bytes_to_string` /
-/// `String::from_utf8_lossy`), so every invalid-UTF-8 byte becomes one
-/// U+FFFD. `corpus/symfony__console/Helper/QuestionHelper.php:356` is the
-/// measured false positive: `["\xC0"=>1, "\xD0"=>1, "\xE0"=>2, "\xF0"=>3]` is
-/// four DISTINCT single-byte keys that all decode to `"\u{FFFD}"` and would
-/// look like one key repeated four times. A resolved `NormKey::Str` that
-/// *contains* U+FFFD is therefore treated as unresolvable **for equality
-/// only** — the conservative detector for "this decoding lost information" —
-/// and participates in no duplicate comparison at all, not even against
-/// another lossy key (two lossy keys may have been different bytes; a
-/// genuine `"\u{FFFD}"` source literal is indistinguishable from a decoding
-/// artifact, and the silence is accepted). This is deliberately NOT routed
-/// through the `None`-key poisoning above: an invalid-UTF-8 byte can never be
-/// a PHP canonical integer string ([`php_canonical_int_string`]), so it can
-/// never be an auto-increment key and never shifts the counter — poisoning
-/// later `Auto` elements over it would silently drop true positives for no
-/// reason. Its auto-index bookkeeping (none — it is an ordinary non-numeric
-/// string key) proceeds exactly as if the byte sequence had decoded cleanly.
+/// String keys compare as **byte strings** (ADR-0080), so a literal spelling
+/// four distinct invalid-UTF-8 bytes declares four distinct keys.
+/// `corpus/symfony__console/Helper/QuestionHelper.php:356` —
+/// `["\xC0"=>1, "\xD0"=>1, "\xE0"=>2, "\xF0"=>3]` — is silent because those
+/// keys genuinely differ, not because the scan declines to look at them. Until
+/// [`PhpStr`] landed they all decoded to one `"\u{FFFD}"` and this scan needed
+/// a guard skipping any U+FFFD-bearing key (issue #187), which also cost the
+/// true positive on a literal that repeats a real `"\u{FFFD}"`; both the guard
+/// and its cost are gone.
 #[must_use]
 pub fn duplicate_array_keys(
     site: &ArrayLiteralSite,
@@ -1483,15 +1476,6 @@ pub fn duplicate_array_keys(
             }
         };
         let Some(key) = resolved else { continue };
-        // A lossily-decoded string key (issue #187: the symfony/console false
-        // positive) is unresolvable for equality only — skip the comparison,
-        // but it was never eligible to bump the auto-index counter above, so
-        // nothing else about the scan changes.
-        if let NormKey::Str(ref s) = key
-            && s.contains('\u{FFFD}')
-        {
-            continue;
-        }
         if let Some(shadowed_span) = last_seen.insert(key.clone(), el.span) {
             out.push(DuplicateArrayKey { key, winner_span: el.span, shadowed_span });
         }
@@ -1602,7 +1586,7 @@ impl ArgValue {
                 // Keep a float visibly a float: `5.0`, not `5`.
                 if v.fract() == 0.0 && v.is_finite() { format!("{v:.1}") } else { v.to_string() }
             }
-            ArgValue::Str(v) => format!("\"{v}\""),
+            ArgValue::Str(v) => v.render_with('"'),
             ArgValue::Bool(v) => v.to_string(),
             ArgValue::Null => "null".to_owned(),
             ArgValue::Var(v) => format!("${v}"),
@@ -1661,7 +1645,7 @@ fn render_array(items: &[(ArrayKey, ArgValue)]) -> String {
 /// shared [`ArgValue::render`].
 fn render_array_value(v: &ArgValue) -> String {
     match v {
-        ArgValue::Str(s) => format!("'{s}'"),
+        ArgValue::Str(s) => s.to_php_literal(),
         other => other.render(),
     }
 }
@@ -4417,9 +4401,14 @@ fn lower_include_path(expr: &Expression<'_>) -> IncludePath {
 /// anything else (a variable, a call, a second `__DIR__`) is unproven.
 fn lower_concat(expr: &Expression<'_>) -> ConcatVal {
     match expr.unparenthesized() {
-        Expression::Literal(Literal::String(ls)) => {
-            ls.value.map_or(ConcatVal::Unproven, |bytes| ConcatVal::Str(bytes_to_string(bytes)))
-        }
+        // A name lane (include paths, `class_alias` arguments), not a value lane:
+        // the result is looked up in a `String`-keyed universe, so a literal
+        // whose bytes are not UTF-8 is unproven rather than lossily decoded
+        // (ADR-0080 §2.5 — silence, never a guess).
+        Expression::Literal(Literal::String(ls)) => ls
+            .value
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map_or(ConcatVal::Unproven, |s| ConcatVal::Str(s.to_owned())),
         Expression::MagicConstant(MagicConstant::Directory(_)) => ConcatVal::DirRel(String::new()),
         Expression::Binary(b) if b.operator.is_concatenation() => {
             match (lower_concat(b.lhs), lower_concat(b.rhs)) {
@@ -6950,7 +6939,7 @@ fn lower_array_key(expr: &Expression<'_>) -> Option<ArrayKey> {
     match lower_arg_value(expr) {
         ArgValue::Int(i) => Some(ArrayKey::Int(i)),
         ArgValue::Bool(b) => Some(ArrayKey::Int(i64::from(b))),
-        ArgValue::Null => Some(ArrayKey::Str(String::new())),
+        ArgValue::Null => Some(ArrayKey::Str(PhpStr::new())),
         // A float key truncates toward zero — but only when the truncated value is
         // actually an `int`. Outside that range PHP does not produce a key at all:
         // it emits "The float … is not representable as an int, cast occurred"
@@ -6968,6 +6957,9 @@ fn lower_array_key(expr: &Expression<'_>) -> Option<ArrayKey> {
             Some(ArrayKey::Int(f.trunc() as i64))
         }
         ArgValue::Str(s) => Some(match php_canonical_int_string(&s) {
+            // A byte string is never a canonical integer spelling (every byte of
+            // one is an ASCII digit or `-`), so a non-UTF-8 key always lands in
+            // the `Str` arm and never disturbs the auto-index counter.
             Some(i) => ArrayKey::Int(i),
             None => ArrayKey::Str(s),
         }),
@@ -6984,7 +6976,8 @@ fn lower_array_key(expr: &Expression<'_>) -> Option<ArrayKey> {
 /// through the **same** primitive the write/lowering side uses — never a parallel
 /// comparison, so `$a = [5 => 'x']; $a["5"]` resolves to the present key 5.
 #[must_use]
-pub fn php_canonical_int_string(s: &str) -> Option<i64> {
+pub fn php_canonical_int_string(s: impl AsRef<[u8]>) -> Option<i64> {
+    let s = std::str::from_utf8(s.as_ref()).ok()?;
     let i: i64 = s.parse().ok()?;
     (i.to_string() == s).then_some(i)
 }
@@ -7047,8 +7040,12 @@ fn lower_literal(lit: &Literal<'_>) -> ArgValue {
         // magnitude off PHP's `1.0E+20`. The spelling is re-read instead.
         Literal::Integer(li) => lower_int_literal(li.raw),
         Literal::Float(lf) => ArgValue::Float(lf.value.0),
+        // The parser hands over the escape-decoded **bytes** (`"\xC0"` arrives as
+        // `[0xC0]`), and a PHP string is a byte string, so they are carried
+        // through unchanged. Decoding them lossily here was issue #208: it made
+        // `"\xC0"` and `"\xD0"` the same value everywhere downstream.
         Literal::String(ls) => {
-            ls.value.map_or(ArgValue::Other, |bytes| ArgValue::Str(bytes_to_string(bytes)))
+            ls.value.map_or(ArgValue::Other, |bytes| ArgValue::Str(PhpStr::from_bytes(bytes)))
         }
         Literal::True(_) => ArgValue::Bool(true),
         Literal::False(_) => ArgValue::Bool(false),

@@ -113,16 +113,23 @@ impl PhpStr {
         self.as_bytes().is_empty()
     }
 
-    /// Spell the value as PHP source would, in double quotes, escaping every
-    /// byte that is not printable ASCII as `\xNN` (ADR-0080 §2.7).
-    ///
-    /// A diagnostic that printed the lossy `'�'` where the source says `"\xC0"`
-    /// names something the reader cannot act on, so rendering goes through here
-    /// for any value that is not plain UTF-8.
+    /// Spell the value as PHP source would (ADR-0080 §2.7), single-quoted.
     #[must_use]
     pub fn to_php_literal(&self) -> String {
+        self.render_with('\'')
+    }
+
+    /// Spell the value as PHP source would, using `quote` for the ordinary
+    /// UTF-8 case so each diagnostic keeps the quoting style it already used.
+    ///
+    /// A value that is **not** valid UTF-8 is always double-quoted with `\xNN`
+    /// escapes, because that is the only PHP spelling that can carry those
+    /// bytes — and because a message printing the lossy `'�'` where the source
+    /// says `"\xC0"` names something the reader cannot act on.
+    #[must_use]
+    pub fn render_with(&self, quote: char) -> String {
         if let Some(s) = self.as_str() {
-            return format!("'{s}'");
+            return format!("{quote}{s}{quote}");
         }
         let mut out = String::from("\"");
         for &b in self.as_bytes() {
@@ -271,6 +278,16 @@ mod tests {
         assert_eq!(PhpStr::from("ok").to_php_literal(), "'ok'");
         assert_eq!(PhpStr::from_bytes(&[0xC0]).to_php_literal(), r#""\xC0""#);
         assert_eq!(PhpStr::from_bytes(&[b'a', 0xD0]).to_php_literal(), r#""a\xD0""#);
+    }
+
+    /// The quote choice belongs to the caller for the ordinary case, so each
+    /// diagnostic keeps its existing spelling; a byte string ignores it,
+    /// because only a double-quoted PHP literal can carry `\xNN`.
+    #[test]
+    fn the_quote_is_the_callers_for_utf8_only() {
+        assert_eq!(PhpStr::from("ok").render_with('"'), r#""ok""#);
+        assert_eq!(PhpStr::from("ok").render_with('\''), "'ok'");
+        assert_eq!(PhpStr::from_bytes(&[0xC0]).render_with('\''), r#""\xC0""#);
     }
 
     #[test]
