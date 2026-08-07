@@ -329,6 +329,49 @@ fn a_plan_whose_targets_moved_is_refused_rather_than_spliced() {
 }
 
 #[test]
+fn the_asserted_subjects_opt_in_rides_the_plan_tool_and_is_fenced_to_its_transform() {
+    // The ADR-0076 issue-#175 amendment on the agent surface: the same code
+    // path as the command line, so the label and the split count arrive in the
+    // same document the diff does.
+    let proj = TempProject::new("asserted");
+    proj.write(
+        "loop.php",
+        "<?php\n/** @param list<int> $xs */\nfunction scale(array $xs): array {\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $x * 3;\n    }\n    return $out;\n}\n",
+    );
+    let mut client = Client::start(proj.path());
+
+    // Fenced: on any other transform the opt-in has no defined meaning.
+    let err = client.call_err(
+        "plan_transform",
+        json!({ "transform": "phpdoc-to-native", "paths": [proj.path()], "asserted_subjects": true }),
+    );
+    assert_eq!(err["reason"], "invalid-argument", "error: {err}");
+
+    // Without the opt-in, the declared list refuses exactly as before.
+    let plain = client
+        .call_ok("plan_transform", json!({ "transform": "loop-to-array-map", "paths": [proj.path()] }));
+    assert_eq!(plain["report"]["oracle"]["transformed"], 0, "plan: {plain}");
+    assert_eq!(plain["report"]["refusals"][0]["reason"], "subject-not-proven-array");
+
+    // With it: admitted, counted on the asserted side, and labeled per site.
+    let plan = client.call_ok(
+        "plan_transform",
+        json!({ "transform": "loop-to-array-map", "paths": [proj.path()], "asserted_subjects": true }),
+    );
+    assert_eq!(plan["report"]["oracle"]["transformed"], 1, "plan: {plan}");
+    assert_eq!(plan["report"]["oracle"]["transformed_asserted"], 1, "plan: {plan}");
+    let admissions = plan["report"]["asserted_admissions"].as_array().expect("admissions array");
+    assert_eq!(admissions.len(), 1, "plan: {plan}");
+    let detail = admissions[0]["detail"].as_str().expect("admission detail");
+    assert!(detail.contains("declared"), "label: {detail}");
+    assert!(detail.contains("preserves keys"), "label: {detail}");
+    assert!(detail.contains("post-check cannot catch"), "label: {detail}");
+    assert!(plan["plan_handle"].is_string(), "an admitted site is applyable: {plan}");
+    // Planning wrote nothing; the approve step stays a separate call.
+    assert!(proj.read("loop.php").contains("foreach"), "the dry run must not touch the tree");
+}
+
+#[test]
 fn unknown_tools_and_methods_are_protocol_errors() {
     let proj = TempProject::new("protocol");
     proj.write("lib.php", LIB);
