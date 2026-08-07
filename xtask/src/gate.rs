@@ -972,6 +972,23 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 236,
         message_contains: "array key 'tag' is declared twice",
     },
+    // ADR-0078 / issue #183: the declaration-fatal tracer's ONE corpus finding,
+    // triaged TRUE for the analyzed runtime on 2026-08-08. A ClockMock test double
+    // extends a `final` class and carries the other tool's inline ignore for the
+    // same rule, whose stated reason is that the runtime strips `final` (ClockMock
+    // rewrites classes through ext-uopz) — the author's own acknowledgment that the
+    // declaration is illegal as written. The PHP Steins analyzes reports no uopz
+    // loaded, so on that runtime the class load genuinely fatals and the message's
+    // claim holds. Issue #205 tracks demoting final-immunity claims when the sidecar
+    // reports a final-stripping extension; this pin is re-cut if that lands or the
+    // corpus reseeds.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "class.extends-final",
+        path_suffix: "tests/lib/ExDateTimeImmutableMock.php",
+        line: 14,
+        message_contains: "cannot extend final class ExDateTimeImmutable",
+    },
 ];
 
 /// Whether `d` is a recorded, triaged TRUE proof-layer positive for `package`
