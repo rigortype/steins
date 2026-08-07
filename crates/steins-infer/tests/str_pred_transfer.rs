@@ -709,5 +709,5 @@ fn the_casing_predicate_is_an_ascii_uppercase_byte_test() {
     assert!(!StrPreds::of("").contains_all(StrPreds::NON_EMPTY));
     // The domain's own witness that a `Val::Str` is what these summaries read.
     assert_eq!(StrPreds::of("foo"), StrPreds::of(&String::from("foo")));
-    assert!(matches!(Val::Str("foo".to_owned()), Val::Str(_)));
+    assert!(matches!(Val::Str("foo".into()), Val::Str(_)));
 }

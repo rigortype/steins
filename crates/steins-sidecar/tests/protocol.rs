@@ -483,7 +483,7 @@ fn php_assigns_absent_keys_and_resolves_duplicates() {
 
     // Mixed explicit and absent keys: the runtime's next-int rule places 'c'.
     let mixed = FoldArg::Array(vec![
-        (Some(FoldKey::Str("x".to_owned())), s("a")),
+        (Some(FoldKey::Str("x".into())), s("a")),
         (Some(FoldKey::Int(5)), s("b")),
         (None, s("c")),
     ]);

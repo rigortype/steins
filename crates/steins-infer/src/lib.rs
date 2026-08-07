@@ -14312,7 +14312,7 @@ fn falsy_literals() -> [ArgValue; 7] {
         ArgValue::Int(0),
         ArgValue::Float(0.0),
         ArgValue::Str(String::new()),
-        ArgValue::Str("0".to_owned()),
+        ArgValue::Str("0".into()),
         ArgValue::Array(Vec::new()),
     ]
 }
@@ -29297,8 +29297,8 @@ mod domain_tests {
     fn unproven_negative_key_drops_the_singleton_fact() {
         use steins_syntax::ArrayKey;
         let arr = ArgValue::Array(vec![
-            (ArrayKey::Int(-5), ArgValue::Str("a".to_owned())),
-            (ArrayKey::Auto, ArgValue::Str("b".to_owned())),
+            (ArrayKey::Int(-5), ArgValue::Str("a".into())),
+            (ArrayKey::Auto, ArgValue::Str("b".into())),
         ]);
         assert!(singleton_fact(&arr, None).is_none());
         assert!(singleton_fact(&arr, Some((8, 5))).is_some());
@@ -29868,7 +29868,7 @@ mod dump_render_tests {
         // keys under `array{…}`; a sequential value IS a key sequence (a concrete
         // array is order-witnessed) and spells positionally under `list{…}`,
         // stating the fact rather than the oracle's spelling of it (issue #163).
-        let map = Fact::Singleton(Val::Array(vec![(VKey::Str("a".to_owned()), s("v"))]));
+        let map = Fact::Singleton(Val::Array(vec![(VKey::Str("a".into()), s("v"))]));
         assert_eq!(render_dump_fact(&map), "array{a: 'v'}");
         let list = Fact::Singleton(Val::Array(vec![(VKey::Int(0), s("x")), (VKey::Int(1), s("y"))]));
         assert_eq!(render_dump_fact(&list), "list{'x', 'y'}");
@@ -29880,7 +29880,7 @@ mod dump_render_tests {
         // every consumer inherits the rendering for free.
         use steins_domain::{Presence, ShapeFact, Tail};
         let shape = ShapeFact::normalize(
-            vec![(VKey::Str("a".to_owned()), Presence::Required { witnessed: false }, None)],
+            vec![(VKey::Str("a".into()), Presence::Required { witnessed: false }, None)],
             Tail::Sealed,
             steins_domain::Certainty::Maybe,
             false,
@@ -30136,14 +30136,14 @@ mod shape_projection_tests {
         vec![
             vec![],
             vec![(ik(0), Val::Int(7))],
-            vec![(ik(0), Val::Str("x".to_owned())), (ik(1), Val::Str("y".to_owned()))],
+            vec![(ik(0), Val::Str("x".into())), (ik(1), Val::Str("y".into()))],
             vec![(ik(5), Val::Int(1)), (ik(9), Val::Int(2))],
             vec![(ik(1), Val::Int(2)), (ik(0), Val::Int(3))],
-            vec![(sk("a"), Val::Int(1)), (sk("b"), Val::Str("x".to_owned()))],
+            vec![(sk("a"), Val::Int(1)), (sk("b"), Val::Str("x".into()))],
             vec![(sk("a"), Val::Int(1))],
-            vec![(sk("b"), Val::Str("zz".to_owned())), (sk("a"), Val::Int(4))],
+            vec![(sk("b"), Val::Str("zz".into())), (sk("a"), Val::Int(4))],
             vec![(ik(0), Val::Int(1)), (sk("a"), Val::Int(2)), (ik(3), Val::Int(3))],
-            vec![(ik(0), Val::Str("x".to_owned())), (ik(1), Val::Int(1))],
+            vec![(ik(0), Val::Str("x".into())), (ik(1), Val::Int(1))],
         ]
     }
 
@@ -30274,9 +30274,9 @@ mod shape_projection_tests {
         let keys = shape_key_union(&shape).expect("enumerable");
         assert_eq!(
             keys,
-            Fact::OneOf(vec![Val::Str("a".to_owned()), Val::Str("b".to_owned())])
+            Fact::OneOf(vec![Val::Str("a".into()), Val::Str("b".into())])
         );
-        assert!(keys.admits(&Val::Str("b".to_owned())));
+        assert!(keys.admits(&Val::Str("b".into())));
         // Both fields are Required, so the array cannot be empty and no `null`
         // joins in.
         assert!(shape.non_empty);
@@ -30325,8 +30325,8 @@ mod shape_projection_tests {
             Tail::Unsealed {
                 key: KeyClass::Int,
                 value: slot(Fact::OneOf(vec![
-                    Val::Str("a".to_owned()),
-                    Val::Str("b".to_owned())
+                    Val::Str("a".into()),
+                    Val::Str("b".into())
                 ])),
             }
         );
@@ -30519,8 +30519,8 @@ mod shape_projection_tests {
             Tail::Unsealed {
                 key: KeyClass::Int,
                 value: slot(Fact::OneOf(vec![
-                    Val::Str("a".to_owned()),
-                    Val::Str("b".to_owned())
+                    Val::Str("a".into()),
+                    Val::Str("b".into())
                 ])),
             }
         );

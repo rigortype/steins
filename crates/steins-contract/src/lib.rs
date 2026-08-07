@@ -21,8 +21,8 @@ pub mod spell;
 pub use admit::{ShapeSpec, admits_fact, admits_val, shape_verdict};
 
 use steins_domain::{
-    Base, Certainty, Fact, IntRange, KeyClass, Key as DKey, Presence as DPresence, Refinement,
-    ShapeFact, StrPreds, Tail as DTail, Val,
+    Base, Certainty, Fact, IntRange, KeyClass, Key as DKey, PhpStr, Presence as DPresence,
+    Refinement, ShapeFact, StrPreds, Tail as DTail, Val,
 };
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, ShapeKey, StringLit, Type, TypeKind};
 
@@ -132,7 +132,7 @@ pub enum CKey {
     /// Integer key.
     Int(i64),
     /// String key.
-    Str(String),
+    Str(PhpStr),
 }
 
 /// What a [`ContractTy::MixedMinus`] subtracts from `mixed`.
@@ -197,7 +197,7 @@ pub enum ContractTy {
     /// equality).
     LitFloat(f64),
     /// String literal type.
-    LitStr(String),
+    LitStr(PhpStr),
     /// `true` / `false`.
     LitBool(bool),
     /// `array` / `non-empty-array` without parameters.
@@ -855,7 +855,7 @@ pub fn shape_keys(shape: &steins_phpdoc::ast::ArrayShape) -> Option<Vec<CKey>> {
 fn norm_shape_key(s: &str) -> CKey {
     match s.parse::<i64>() {
         Ok(i) if i.to_string() == s => CKey::Int(i),
-        _ => CKey::Str(s.to_owned()),
+        _ => CKey::Str(PhpStr::from(s)),
     }
 }
 
@@ -1073,7 +1073,7 @@ fn lower_const(c: &ConstExpr) -> ContractTy {
         ConstExpr::Float(s) => {
             s.replace('_', "").parse().map_or(ContractTy::Opaque, ContractTy::LitFloat)
         }
-        ConstExpr::Str(lit) => ContractTy::LitStr(string_lit_value(lit)),
+        ConstExpr::Str(lit) => ContractTy::LitStr(PhpStr::from(string_lit_value(lit))),
         ConstExpr::True => ContractTy::LitBool(true),
         ConstExpr::False => ContractTy::LitBool(false),
         ConstExpr::Null => ContractTy::Null,
@@ -1162,7 +1162,7 @@ mod shape_fact_lowering_tests {
     }
 
     fn slot(s: &ShapeFact, key: &str) -> Option<Fact> {
-        s.field(&DKey::Str(key.to_owned())).and_then(|(_, _, v)| v.clone()).map(|b| *b)
+        s.field(&DKey::Str(key.into())).and_then(|(_, _, v)| v.clone()).map(|b| *b)
     }
 
     // ---- the four degenerate forms (A-G1) ---------------------------------
@@ -1212,11 +1212,11 @@ mod shape_fact_lowering_tests {
     fn declared_shape_carries_presence_at_the_declared_stratum() {
         let s = shape_of("array{a: string, b?: int}");
         assert_eq!(
-            s.field(&DKey::Str("a".to_owned())).map(|(_, p, _)| *p),
+            s.field(&DKey::Str("a".into())).map(|(_, p, _)| *p),
             Some(DPresence::Required { witnessed: false })
         );
         assert_eq!(
-            s.field(&DKey::Str("b".to_owned())).map(|(_, p, _)| *p),
+            s.field(&DKey::Str("b".into())).map(|(_, p, _)| *p),
             Some(DPresence::Optional)
         );
         assert_eq!(s.tail, Tail::Sealed);
@@ -1250,18 +1250,18 @@ mod shape_fact_lowering_tests {
     fn the_lowered_shape_admits_what_the_declaration_admits() {
         let s = shape_of("array{a: string, b?: int}");
         let a = |v: Vec<(DKey, Val)>| v;
-        assert!(s.admits(&a(vec![(DKey::Str("a".to_owned()), Val::Str("x".to_owned()))])));
+        assert!(s.admits(&a(vec![(DKey::Str("a".into()), Val::Str("x".into()))])));
         assert!(s.admits(&a(vec![
-            (DKey::Str("a".to_owned()), Val::Str("x".to_owned())),
-            (DKey::Str("b".to_owned()), Val::Int(1)),
+            (DKey::Str("a".into()), Val::Str("x".into())),
+            (DKey::Str("b".into()), Val::Int(1)),
         ])));
         // missing required key / sealed-undeclared key / wrong value type
-        assert!(!s.admits(&a(vec![(DKey::Str("b".to_owned()), Val::Int(1))])));
+        assert!(!s.admits(&a(vec![(DKey::Str("b".into()), Val::Int(1))])));
         assert!(!s.admits(&a(vec![
-            (DKey::Str("a".to_owned()), Val::Str("x".to_owned())),
-            (DKey::Str("z".to_owned()), Val::Int(1)),
+            (DKey::Str("a".into()), Val::Str("x".into())),
+            (DKey::Str("z".into()), Val::Int(1)),
         ])));
-        assert!(!s.admits(&a(vec![(DKey::Str("a".to_owned()), Val::Int(1))])));
+        assert!(!s.admits(&a(vec![(DKey::Str("a".into()), Val::Int(1))])));
     }
 
     // ---- value slots (A-G1a) ----------------------------------------------
@@ -1274,7 +1274,7 @@ mod shape_fact_lowering_tests {
             slot(&s, "b"),
             Some(Fact::refined(Base::Int, Refinement::Int(IntRange::POSITIVE), false))
         );
-        assert_eq!(slot(&s, "c"), Some(Fact::Singleton(Val::Str("x".to_owned()))));
+        assert_eq!(slot(&s, "c"), Some(Fact::Singleton(Val::Str("x".into()))));
         assert_eq!(
             slot(&s, "d"),
             Some(Fact::refined(Base::String, Refinement::Str(StrPreds::NON_EMPTY), false))
@@ -1287,7 +1287,7 @@ mod shape_fact_lowering_tests {
         assert_eq!(slot(&s, "a"), Some(Fact::General { base: Base::Int, nullable: true }));
         assert_eq!(
             slot(&s, "b"),
-            Some(Fact::OneOf(vec![Val::Str("x".to_owned()), Val::Str("y".to_owned())]))
+            Some(Fact::OneOf(vec![Val::Str("x".into()), Val::Str("y".into())]))
         );
     }
 

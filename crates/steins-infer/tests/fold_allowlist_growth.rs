@@ -25,7 +25,7 @@ fn dumps(src: &str, folder: &mut dyn Folder) -> Vec<String> {
 /// the caller skips loudly rather than asserting something vacuous.
 fn live(test: &str) -> Option<SidecarFolder> {
     let mut folder = SidecarFolder::enabled();
-    if folder.fold("strtoupper", &[ArgValue::Str("probe".to_owned())]).is_none() {
+    if folder.fold("strtoupper", &[ArgValue::Str("probe".into())]).is_none() {
         eprintln!("SKIP {test}: no folding engine — is `php` on PATH?");
         return None;
     }

@@ -460,7 +460,7 @@ mod tests {
     fn fold_params_encode_arrays_as_tagged_entry_lists() {
         let arg = FoldArg::Array(vec![
             (None, FoldArg::Int(1)),
-            (Some(FoldKey::Str("k".to_owned())), FoldArg::Bool(true)),
+            (Some(FoldKey::Str("k".into())), FoldArg::Bool(true)),
             (Some(FoldKey::Int(-3)), FoldArg::Null),
         ]);
         let p = fold_params("count", &[arg]);

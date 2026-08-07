@@ -904,7 +904,7 @@ mod shape_fact_tests {
     }
 
     fn skey(s: &str) -> Key {
-        Key::Str(s.to_owned())
+        Key::Str(s.into())
     }
 
     fn int_fact() -> Fact {
@@ -1603,7 +1603,7 @@ mod shape_fact_tests {
     /// Small concrete arrays to probe a denotation with.
     fn witness_pool() -> Vec<Vec<(Key, Val)>> {
         let i = |n: i64| Val::Int(n);
-        let s = |t: &str| Val::Str(t.to_owned());
+        let s = |t: &str| Val::Str(t.into());
         vec![
             vec![],
             vec![(ikey(0), i(1))],
