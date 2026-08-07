@@ -1027,6 +1027,59 @@ pub const INVALID_OPERAND_ID: &str = "type.invalid-operand";
 
 // end invalid operands (ADR-0078, issue #191)
 
+// undefined variables (ADR-0078, issue #194)
+
+/// `variable.undefined` (ADR-0078, issue #194, **proof** layer, floor `Default`): a
+/// read of a name its scope **never binds**, by any binding form, anywhere in the
+/// scope. PHP's own consequence (`php -r`-witnessed, 8.5.9):
+/// `Warning: Undefined variable $x`, and the read evaluates to `null`.
+///
+/// # Why proof
+///
+/// Warning-plus-a-degraded-value is exactly `offset.missing`'s shape: the
+/// expression never yields what it was written to yield, and every consumer
+/// downstream sees a `null` the author did not intend. So it rides the same
+/// ADR-0049 §7 lever too — under a declared `warning-handler = "null"` posture the
+/// application tolerates the warning and the finding leaves the proof surface.
+///
+/// # Why no reachability is needed
+///
+/// The premise is deliberately weaker than PHP's own: this id fires only when the
+/// name appears as **no** binding form at all in the scope's text — not a
+/// parameter, not an assignment target anywhere (compound, destructuring, `list()`,
+/// offset or property write), not a `global`/`static` declaration, not a closure
+/// `use`, not a `catch` binding, not a `foreach` binding, not an out-parameter
+/// position. Ordering and branching are ignored on purpose: a read that *precedes*
+/// its only assignment is a possibility claim, which is `variable.maybe-undefined`'s
+/// territory (see [`VARIABLE_MAYBE_UNDEFINED_ID`]) and needs the reachability
+/// foundation (issue #199). Under this premise the two are disjoint by
+/// construction — one binding form anywhere is enough to leave this id.
+///
+/// The firing set is computed at lowering (`Scope::undefined_reads`), where the
+/// binding forms, the `isset`/`empty`/`??`/`unset`/`@` guard exclusions, the
+/// superglobal/`$this` exclusions and the `extract`/`compact`/`$$x`/`eval`/`include`
+/// scope dam are all already accounted for. The checker adds the one premise
+/// lowering cannot reach: whether a bare `$x` argument at a statically-named call is
+/// an out-parameter (ADR-0077's by-value oracle, which needs the cross-file index).
+pub const VARIABLE_UNDEFINED_ID: &str = "variable.undefined";
+
+/// `variable.maybe-undefined` (ADR-0078, issue #194, **proof** layer, floor
+/// `Strict`): a read of a name bound on only *some* paths reaching it — PHPStan's
+/// `checkMaybeUndefinedVariables`. Registered ahead of emission
+/// ([`REGISTERED_NOT_YET_EMITTED`]) exactly as `call.too-many-arguments` is: the id
+/// and its layer are pinned now so `@steins-ignore` can name it and a baseline
+/// entry means one fixed thing, while the emitter waits on the reachability
+/// foundation (issue #199).
+///
+/// It sits at the `strict` floor, not `default`, because the claim is weaker than
+/// its sibling's: `variable.undefined` proves the binding is absent from the whole
+/// scope, whereas this one proves only that *a* path reaches the read unbound — a
+/// shape defensive house styles produce on purpose, and one a partial-path guess
+/// would turn into exactly the false positive the proof layer forbids.
+pub const VARIABLE_MAYBE_UNDEFINED_ID: &str = "variable.maybe-undefined";
+
+// end undefined variables (ADR-0078, issue #194)
+
 /// Every id constant that reaches a `Diagnostic { id: … }` construction site — the
 /// canonical enumeration of what the emitters can produce (ADR-0050 §2 totality).
 ///
@@ -1134,6 +1187,9 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // global constants (ADR-0078, issue #198)
     CONSTANT_UNDEFINED_ID,
     // end global constants (ADR-0078, issue #198)
+    // undefined variables (ADR-0078, issue #194)
+    VARIABLE_UNDEFINED_ID,
+    // end undefined variables (ADR-0078, issue #194)
 ];
 
 /// Ids **registered ahead of emission**: they exist in [`DIAGNOSTIC_REGISTRY`]
@@ -1153,6 +1209,12 @@ pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
     // waits for the declared-shape-over-an-object vocabulary.
     PROPERTY_MAYBE_UNDEFINED_ID,
     // end member absence (ADR-0078, issue #197)
+    // undefined variables (ADR-0078, issue #194)
+    // The some-paths-only sibling of `variable.undefined`: its premise is a claim
+    // about the paths reaching a read, so it waits for the reachability foundation
+    // (issue #199).
+    VARIABLE_MAYBE_UNDEFINED_ID,
+    // end undefined variables (ADR-0078, issue #194)
 ];
 
 /// The maximum depth of interprocedural argument-binding descent (Feature B).
@@ -3532,6 +3594,14 @@ fn check_units(
         // dead-region filter: a body that runs off its end does so wherever it
         // sits, and the judgement is about the body's own shape.
         check_return_missing(&cx, &never_returning, &mut out);
+
+        // --- `variable.undefined` (ADR-0078 / issue #194): every read of a name
+        // its scope never binds. A per-scope textual/structural pass over the
+        // lowering-computed firing set, plus the warning-handler posture and the
+        // out-parameter subtraction. No dead-region filter and no folder: the
+        // premise is that the scope's own text holds no binding form, which is
+        // true wherever the read sits. -------------------------------------------
+        check_undefined_variables(&cx, &mut out);
 
         // --- Direct pass: literal / array / `new` arguments at every function
         // call site (env-free; propagation adds `$var`/folded resolution). Native
@@ -6875,6 +6945,107 @@ fn collect_bare_identifiers(ty: &PType, out: &mut Vec<String>) {
         _ => {}
     }
 }
+
+// ---------------------------------------------------------------------------
+// undefined variables (ADR-0078, issue #194)
+// ---------------------------------------------------------------------------
+
+/// `variable.undefined`: a read of a name its scope never binds.
+///
+/// The firing set is `Scope::undefined_reads`, computed at lowering — every binding
+/// form, the `isset`/`empty`/`??`/`unset`/`@` guard exclusions, the
+/// superglobal/`$this` exclusions, the top-level and arrow-function silences and the
+/// `extract`/`compact`/`$$x`/`eval`/`include` scope dam are all settled there. This
+/// function adds the two premises lowering cannot reach:
+///
+/// 1. **The warning-handler posture** (ADR-0049 §7). The consequence is
+///    warning-plus-`null`, so under a declared `warning-handler = "null"` the
+///    application tolerates it and the finding leaves the proof surface, exactly as
+///    `offset.missing` does.
+/// 2. **The out-parameter subtraction** (ADR-0077). `preg_match('/a/', $s, $m)`
+///    *binds* `$m`, and whether an argument position is by-reference is a property
+///    of the **callee's** declaration — the cross-file index for a user function,
+///    the catalog's `out_params` rows for a builtin. `arg_is_by_value` is that same
+///    oracle, and it refuses for every uncertainty (an unresolved name, an ambiguous
+///    one, an argument past the declared arity), which is the direction that keeps
+///    this id silent rather than wrong.
+///
+/// `Scope::poisoned` is deliberately **not** a gate here. Its members that matter to
+/// a binding question — `global $x`, `static $x`, `$a = &$b`, `use (&$x)` — are
+/// binding forms this id reads directly, and the rest (`extract`, `$$v`, `eval`,
+/// `include`) already dam the read list at lowering. Gating on the flag would
+/// silence every scope that merely declares a `global`.
+fn check_undefined_variables(cx: &Cx, out: &mut Vec<Diagnostic>) {
+    if !cx.warning_handler_abort {
+        return;
+    }
+    // Nothing to judge in most files: skip the call-site sweep entirely then.
+    if cx.tree().scopes().iter().all(|s| s.undefined_reads.is_empty()) {
+        return;
+    }
+    let bound_by_call = out_param_argument_spans(cx);
+    for scope in cx.tree().scopes() {
+        // An out-parameter position is a **binding form**, not merely a read that
+        // does not count: `preg_match($p, $s, $m); return $m;` must be silent at the
+        // `return` too. The scope's own read list is what attributes the call to
+        // this scope — the argument occurrence was collected here, so a name whose
+        // argument occurrence survives the by-value oracle is bound for the whole
+        // scope, exactly as `global $x` is.
+        let bound: HashSet<&str> = scope
+            .undefined_reads
+            .iter()
+            .filter(|r| bound_by_call.contains(&r.span.start))
+            .map(|r| r.name.as_str())
+            .collect();
+        for read in &scope.undefined_reads {
+            if bound.contains(read.name.as_str()) {
+                continue;
+            }
+            let name = &read.name;
+            out.push(hygiene_diag(
+                cx,
+                VARIABLE_UNDEFINED_ID,
+                read.span.start,
+                format!(
+                    "${name} is never bound in this scope — PHP warns \
+                     \"Undefined variable ${name}\" and the read evaluates to null"
+                ),
+            ));
+        }
+    }
+}
+
+/// The byte offsets of every bare-variable argument in this file that a call could
+/// be **writing** rather than reading — the out-parameter subtraction of
+/// [`check_undefined_variables`].
+///
+/// Only statically-named function calls reach here: `SourceTree::calls()` is the
+/// comprehensive file-wide function-call surface, and every other call shape
+/// (method, static, dynamic, `new`, every named argument) already binds its
+/// bare-variable arguments at lowering, where no callee name existed to ask about.
+/// The span keys the join because `lower_argument_list` records a positional
+/// argument's own expression span, which for a bare `$x` is the same token span the
+/// read carries.
+fn out_param_argument_spans(cx: &Cx) -> HashSet<u32> {
+    let mut spans = HashSet::new();
+    for call in cx.tree().calls() {
+        for (position, arg) in call.args.iter().enumerate() {
+            if !matches!(arg.value, ArgValue::Var(_)) {
+                continue;
+            }
+            let by_value = call
+                .callee_ref
+                .as_ref()
+                .is_some_and(|callee| arg_is_by_value(cx, callee, position as u32));
+            if !by_value {
+                spans.insert(arg.span.start);
+            }
+        }
+    }
+    spans
+}
+
+// end undefined variables (ADR-0078, issue #194)
 
 /// The whole-project throw diagnostics: `throw.undeclared` envelope escapes and
 /// `throw.liskov-widened` overrides (ADR-0040/0033).
