@@ -176,6 +176,7 @@ pub fn plan_phpdoc_to_native(
         oracle,
         obstacles: dynamism.obstacles,
         vouched_exemptions: dynamism.vouched_exemptions,
+        asserted_admissions: Vec::new(),
     }
 }
 

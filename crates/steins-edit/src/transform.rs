@@ -50,6 +50,28 @@ impl Refusal {
     }
 }
 
+/// An admitted-under-opt-in site (the ADR-0076 issue-#175 amendment): a
+/// transform edit whose subject qualified on **Asserted** (declared) evidence
+/// rather than proven facts. The `detail` is the trust label the site's own
+/// report entry carries — that the subject's list-ness is declared, not
+/// proven, and that a wrong claim changes behavior in a way the post-check
+/// cannot catch. Kept distinct from [`Refusal`]: the site *was* transformed;
+/// what this records is the conditional trust its equivalence rests on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssertedAdmission {
+    /// The transformed site the label is about.
+    pub site: SiteRef,
+    /// The trust label — the human sentence the reviewer must read.
+    pub detail: String,
+}
+
+impl AssertedAdmission {
+    #[must_use]
+    pub fn new(site: SiteRef, detail: impl Into<String>) -> Self {
+        Self { site, detail: detail.into() }
+    }
+}
+
 /// The completeness oracle (ADR-0034 point 3b): every enumerated candidate site
 /// is accounted for as transformed or refused — a mismatch is a bug in the
 /// transform, surfaced by [`Self::is_complete`].
@@ -59,6 +81,14 @@ pub struct CompletenessOracle {
     pub enumerated: usize,
     /// Sites that produced an edit.
     pub transformed: usize,
+    /// The subset of `transformed` admitted on **Asserted** (declared) rather
+    /// than proven evidence (the ADR-0076 issue-#175 opt-in). Always `0` with
+    /// the opt-in off, and for every transform that has no such opt-in — so
+    /// proven yield and opted-in yield stay separately reportable numbers.
+    /// Not a fourth accounting column: these sites are already counted in
+    /// `transformed`, and [`Self::is_complete`] is unchanged.
+    #[serde(default)]
+    pub transformed_asserted: usize,
     /// Sites that produced a refusal.
     pub refused: usize,
 }
@@ -111,6 +141,12 @@ pub struct TransformReport {
     /// Sites the user vouched in `steins.toml` (the completeness-claim downgrade).
     #[serde(default)]
     pub vouched_exemptions: Vec<SiteRef>,
+    /// Sites admitted on Asserted evidence under an explicit opt-in (the
+    /// ADR-0076 issue-#175 amendment), each carrying its trust label. Empty
+    /// for every run without the opt-in, and for every transform that has no
+    /// such opt-in.
+    #[serde(default)]
+    pub asserted_admissions: Vec<AssertedAdmission>,
 }
 
 /// The transform contract (ADR-0034 point 2). Concrete transforms (e.g.
@@ -128,9 +164,11 @@ mod tests {
 
     #[test]
     fn oracle_completeness() {
-        let o = CompletenessOracle { enumerated: 5, transformed: 2, refused: 3 };
+        let o =
+            CompletenessOracle { enumerated: 5, transformed: 2, transformed_asserted: 1, refused: 3 };
         assert!(o.is_complete());
-        let bad = CompletenessOracle { enumerated: 5, transformed: 2, refused: 2 };
+        let bad =
+            CompletenessOracle { enumerated: 5, transformed: 2, transformed_asserted: 0, refused: 2 };
         assert!(!bad.is_complete());
     }
 
@@ -143,13 +181,22 @@ mod tests {
                 "dynamic-call-present",
                 "a $fn(...) call could target f()",
             )],
-            oracle: CompletenessOracle { enumerated: 1, transformed: 0, refused: 1 },
+            oracle: CompletenessOracle {
+                enumerated: 1,
+                transformed: 0,
+                transformed_asserted: 0,
+                refused: 1,
+            },
             obstacles: vec![Obstacle::new(
                 "eval-present",
                 "the project contains an `eval(...)`",
                 vec![SiteRef::new("b.php", 7, 1, "eval(...)")],
             )],
             vouched_exemptions: vec![SiteRef::new("c.php", 2, 1, "include (vouched)")],
+            asserted_admissions: vec![AssertedAdmission::new(
+                SiteRef::new("d.php", 4, 5, "foreach"),
+                "subject list-ness is declared, not proven",
+            )],
         };
         let json = serde_json::to_string(&report).unwrap();
         let back: TransformReport = serde_json::from_str(&json).unwrap();

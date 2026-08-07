@@ -12,6 +12,7 @@
 
 use steins_edit::TransformReport;
 use steins_edit::VouchSet;
+use steins_edit::loops::LoopToArrayMapOptions;
 use steins_edit::loops::{
     REASON_ACCUMULATOR_INIT_NOT_ADJACENT, REASON_ACCUMULATOR_NOT_EMPTY,
     REASON_ACCUMULATOR_READ_IN_BODY, REASON_BODY_CALL_UNRESOLVED, REASON_BODY_EFFECTS,
@@ -23,6 +24,10 @@ use steins_edit::loops::{
 use steins_edit::plan_loop_to_array_map;
 
 fn plan(files: &[(&str, &str)]) -> TransformReport {
+    plan_with(files, LoopToArrayMapOptions::default())
+}
+
+fn plan_with(files: &[(&str, &str)], options: LoopToArrayMapOptions) -> TransformReport {
     let db = steins_db::SteinsDatabase::default();
     let inputs: Vec<steins_db::SourceFile> = files
         .iter()
@@ -34,7 +39,7 @@ fn plan(files: &[(&str, &str)]) -> TransformReport {
         steins_db::ProjectLayout::fallback(),
         steins_db::PluginFacts::none(),
     );
-    plan_loop_to_array_map(&db, project, &VouchSet::empty(), None)
+    plan_loop_to_array_map(&db, project, &VouchSet::empty(), None, options)
 }
 
 fn assert_oracle_complete(report: &TransformReport) {

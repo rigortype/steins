@@ -50,11 +50,11 @@ pub mod transform;
 pub use diff::unified_diff;
 pub use envelope::{ThrowsEnvelope, plan_throws_envelope};
 pub use honesty::{PhpdocHonesty, plan_phpdoc_honesty};
-pub use loops::{LoopToArrayMap, plan_loop_to_array_map};
+pub use loops::{LoopToArrayMap, LoopToArrayMapOptions, plan_loop_to_array_map};
 pub use obstacles::{DynamismObstacles, VouchSet};
 pub use plan::{ByteSpan, Edit, EditPlan, NewFile, PlanError};
 pub use regions::{PartitionConfigError, PartitionMap, RegionId};
 pub use promote::{PhpdocToNative, plan_phpdoc_to_native};
 pub use transform::{
-    CompletenessOracle, Obstacle, Refusal, SiteRef, Transform, TransformReport,
+    AssertedAdmission, CompletenessOracle, Obstacle, Refusal, SiteRef, Transform, TransformReport,
 };

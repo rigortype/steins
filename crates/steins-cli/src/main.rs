@@ -29,8 +29,9 @@ use steins_db::{
     parse as parse_tree,
 };
 use steins_edit::{
-    ByteSpan, Edit, EditPlan, PartitionMap, TransformReport, VouchSet, plan_loop_to_array_map,
-    plan_phpdoc_honesty, plan_phpdoc_to_native, plan_throws_envelope, unified_diff,
+    ByteSpan, Edit, EditPlan, LoopToArrayMapOptions, PartitionMap, TransformReport, VouchSet,
+    plan_loop_to_array_map, plan_phpdoc_honesty, plan_phpdoc_to_native, plan_throws_envelope,
+    unified_diff,
 };
 use steins_infer::{
     Diagnostic, EffectSummary, LineFact, NoFold, SOUND_SUBSET_NOTICE, SidecarFolder,
@@ -979,9 +980,13 @@ fn plan_transform_run(
         // of the declaration's own body/callees, so the ADR-0046 §2 caller-
         // enumerability obstacles (and their vouching valve) have no bearing.
         TransformKind::ThrowsEnvelope => plan_throws_envelope(db, project, partitions.as_ref()),
-        TransformKind::LoopToArrayMap => {
-            plan_loop_to_array_map(db, project, &vouches, partitions.as_ref())
-        }
+        TransformKind::LoopToArrayMap => plan_loop_to_array_map(
+            db,
+            project,
+            &vouches,
+            partitions.as_ref(),
+            LoopToArrayMapOptions::default(),
+        ),
     };
 
     // Vouching an already-benign (or nonexistent) site is a no-op the user should

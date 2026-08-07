@@ -207,7 +207,14 @@ pub fn plan_throws_envelope(
         verify_and_commit(&fcx, staged, &mut plan, &mut refusals, &mut oracle);
     }
 
-    TransformReport { plan, refusals, oracle, obstacles: Vec::new(), vouched_exemptions: Vec::new() }
+    TransformReport {
+        plan,
+        refusals,
+        oracle,
+        obstacles: Vec::new(),
+        vouched_exemptions: Vec::new(),
+        asserted_admissions: Vec::new(),
+    }
 }
 
 /// Decide one candidate: refuse (`escape-not-proven` / `already-declared` / an

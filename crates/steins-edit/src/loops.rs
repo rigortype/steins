@@ -43,7 +43,13 @@
 //! - The subject must prove `array` **and** `is_list = Yes` at the loop head, at
 //!   the `Verified` stratum: `array_map` over a single array *preserves keys*
 //!   while `$out[] = …` renumbers `0..n-1`. A docblock-asserted shape is a claim,
-//!   not a proof, and refuses.
+//!   not a proof, and refuses — unless the run passes the explicit
+//!   [`LoopToArrayMapOptions::asserted_subjects`] opt-in (the ADR-0076
+//!   issue-#175 amendment), under which a declaration establishing BOTH halves
+//!   at the Asserted stratum (a docblock `list<T>`) admits the site, counted
+//!   and labeled separately; a declared `array` alone still refuses at the
+//!   list gate, and a bare native `array $xs` (no represented evidence at all)
+//!   still refuses at the array gate.
 //! - The iteration variable must not occur after the loop (`foreach` leaks it,
 //!   the arrow function does not). v1 scans the remainder of the enclosing scope
 //!   textually — sound in the refusing direction.
@@ -67,7 +73,9 @@ use steins_syntax::{ForeachSite, SourceTree, Span};
 
 use crate::obstacles::VouchSet;
 use crate::plan::{ByteSpan, Edit, EditPlan};
-use crate::transform::{CompletenessOracle, Refusal, SiteRef, Transform, TransformReport};
+use crate::transform::{
+    AssertedAdmission, CompletenessOracle, Refusal, SiteRef, Transform, TransformReport,
+};
 
 // ---- Stable refusal reason names (ADR-0034 point 2 / ADR-0076 §4) ----------
 
@@ -148,6 +156,41 @@ impl Transform for LoopToArrayMap {
     }
 }
 
+/// Per-run options for [`plan_loop_to_array_map`] (the ADR-0076 issue-#175
+/// amendment). `Default` is the proven-only v1 gate, byte-identical to a run
+/// before the options existed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LoopToArrayMapOptions {
+    /// The explicit opt-in: admit a subject whose `array` AND list evidence
+    /// both hold at the **Asserted** stratum (a docblock `list<T>`), counting
+    /// it in [`CompletenessOracle::transformed_asserted`] and labeling the
+    /// site in [`TransformReport::asserted_admissions`]. Off, the subject gate
+    /// consumes the proven lane only, exactly as before. Declared evidence
+    /// that proves the array half alone (`array`, `array<K, V>`) still
+    /// refuses — at the list gate, with a detail that says which half failed.
+    pub asserted_subjects: bool,
+}
+
+/// Which trust lane admitted a rewritten site's subject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubjectLane {
+    /// The subject proved `array` + `is_list = Yes` at the `Verified` stratum.
+    Proven,
+    /// The subject qualified on declared evidence under the explicit opt-in.
+    Asserted,
+}
+
+/// The trust label an admitted-under-opt-in site carries in its own report
+/// entry (ADR-0076 amendment condition 3). The wording is the contract: it
+/// must say the list-ness is declared rather than proven, name the concrete
+/// behavioral risk (`array_map` preserves keys where the append renumbered
+/// them), and not pretend the post-check could catch a wrong claim.
+fn asserted_label(subject: &str) -> String {
+    format!(
+        "subject `${subject}` admitted on declared evidence: its array-ness and list-ness are asserted by a declaration, not proven. If the claim is wrong — the value is actually string-keyed or gapped — this rewrite changes behavior, because array_map preserves keys where the append renumbered them 0..n-1. The post-check cannot catch a wrong list claim; reviewing this diff is the gate."
+    )
+}
+
 /// Plan the loop→`array_map` rewrite over `project`. Pure planning: no files are
 /// written and no diagnostics are re-checked here — the caller (CLI) drives the
 /// dry-run diff, ADR-0034's dual-verification post-check, and any `--apply`
@@ -157,13 +200,16 @@ impl Transform for LoopToArrayMap {
 /// transforms and are **not consumed**: this transform enumerates no callers, so
 /// ADR-0046 §2's caller-enumeration obstacles (`eval`, dynamic `include`) decide
 /// nothing here, and ADR-0047's region map decides nothing in any planner yet.
-/// The plan is identical whatever either argument holds.
+/// The plan is identical whatever either argument holds. `options` IS consumed:
+/// it carries the ADR-0076 issue-#175 Asserted-subject opt-in, and its
+/// `Default` reproduces the proven-only gate byte for byte.
 #[must_use]
 pub fn plan_loop_to_array_map(
     db: &dyn Db,
     project: Project,
     vouches: &VouchSet,
     partitions: Option<&crate::regions::PartitionMap>,
+    options: LoopToArrayMapOptions,
 ) -> TransformReport {
     let _ = (vouches, partitions);
     let files: Vec<SourceFile> = project.files(db).to_vec();
@@ -195,6 +241,7 @@ pub fn plan_loop_to_array_map(
     // 3. Decide each candidate: one edit, or exactly one named refusal.
     let mut plan = EditPlan::new();
     let mut refusals: Vec<Refusal> = Vec::new();
+    let mut asserted_admissions: Vec<AssertedAdmission> = Vec::new();
     let mut oracle = CompletenessOracle::default();
     for (i, c) in candidates.iter().enumerate() {
         oracle.enumerated += 1;
@@ -206,14 +253,24 @@ pub fn plan_loop_to_array_map(
             .map(|_| subjects.get(&(c.path.clone(), c.site.span.start)).copied().unwrap_or_default())
             .unwrap_or_default();
         let purity = purities.get(i).cloned().unwrap_or_default();
-        match c.decide(&subject, &purity) {
-            Ok(replacement) => {
+        match c.decide(&subject, &purity, options) {
+            Ok((replacement, lane)) => {
                 let span = ByteSpan::new(c.edit_start(), c.site.span.end);
                 let edit = Edit { path: c.path.clone(), span, replacement };
                 // Overlap rejection is the plan's job; a rejection here is an
                 // internal invariant break, surfaced as a refusal (never a panic).
                 if plan.add_edit(edit).is_ok() {
                     oracle.transformed += 1;
+                    if lane == SubjectLane::Asserted {
+                        // The lane split survives into the report: the count and
+                        // the per-site label are how an Asserted admission stays
+                        // distinguishable from a proven rewrite (amendment
+                        // conditions 3 and the oracle clause).
+                        oracle.transformed_asserted += 1;
+                        let subj = c.site.subject.as_deref().unwrap_or_default();
+                        asserted_admissions
+                            .push(AssertedAdmission::new(site, asserted_label(subj)));
+                    }
                 } else {
                     oracle.refused += 1;
                     refusals.push(Refusal::new(
@@ -236,6 +293,7 @@ pub fn plan_loop_to_array_map(
         oracle,
         obstacles: Vec::new(),
         vouched_exemptions: Vec::new(),
+        asserted_admissions,
     }
 }
 
@@ -263,13 +321,15 @@ impl Candidate<'_> {
 
     /// The whole gate sequence, in a fixed order: the shape gates first (a
     /// judgment about what is *written*), then the parity gates, then the purity
-    /// bar (a judgment about what the code *does*). Returns the replacement text,
-    /// or the one named reason this loop is refused for.
+    /// bar (a judgment about what the code *does*). Returns the replacement text
+    /// plus which trust lane admitted the subject, or the one named reason this
+    /// loop is refused for.
     fn decide(
         &self,
         subject_fact: &SubjectFact,
         purity: &RegionPurity,
-    ) -> Result<String, (&'static str, String)> {
+        options: LoopToArrayMapOptions,
+    ) -> Result<(String, SubjectLane), (&'static str, String)> {
         let s = self.site;
 
         // ---- Shape (ADR-0076 §1) ------------------------------------------
@@ -373,23 +433,56 @@ impl Candidate<'_> {
             ));
         }
 
-        // ---- Subject value facts (ADR-0076 §3) -----------------------------
-        if !subject_fact.array || !subject_fact.verified {
+        // ---- Subject value facts (ADR-0076 §3, amended by issue #175) ------
+        // The probe's `verified` bit is the lane wall: `true` is the proven
+        // lane, `false` with `array`/`list` set is the Asserted (declared)
+        // answer. The proven path below is byte-identical with the opt-in off
+        // AND on — the opt-in only adds an admission where the proven gate
+        // would have refused, it never re-routes a proven site.
+        let lane = if subject_fact.array && subject_fact.verified {
+            if !subject_fact.list {
+                return Err((
+                    REASON_SUBJECT_NOT_PROVEN_LIST,
+                    format!(
+                        "`${subject}` is not proven `is_list = Yes`; array_map preserves keys while the append renumbers 0..n-1"
+                    ),
+                ));
+            }
+            SubjectLane::Proven
+        } else if !options.asserted_subjects {
+            // The v1 reading, unchanged: anything short of a Verified array
+            // fact refuses at the array gate, list unexamined (the #145
+            // check-order artifact the amendment records).
             return Err((
                 REASON_SUBJECT_NOT_PROVEN_ARRAY,
                 format!(
                     "`${subject}` is not proven to be a plain array at the loop head (array_map TypeErrors on a Traversable)"
                 ),
             ));
-        }
-        if !subject_fact.list {
+        } else if subject_fact.array {
+            // Asserted array evidence under the opt-in: admission still needs
+            // the list half at the same stratum (amendment condition 2 — a
+            // declared `array`/`array<K, V>` proves the array half only).
+            if !subject_fact.list {
+                return Err((
+                    REASON_SUBJECT_NOT_PROVEN_LIST,
+                    format!(
+                        "`${subject}`'s declared type establishes `array` at the Asserted stratum but not list-ness (`array` alone leaves the keys unknown); array_map preserves keys while the append renumbers 0..n-1"
+                    ),
+                ));
+            }
+            SubjectLane::Asserted
+        } else {
+            // No array evidence at either stratum — a bare native `array $xs`
+            // lands here too, since the native lowering represents no `array`
+            // member at all (ADR-0002 silence).
             return Err((
-                REASON_SUBJECT_NOT_PROVEN_LIST,
+                REASON_SUBJECT_NOT_PROVEN_ARRAY,
                 format!(
-                    "`${subject}` is not proven `is_list = Yes`; array_map preserves keys while the append renumbers 0..n-1"
+                    "`${subject}` is not proven to be a plain array at the loop head, and no declared type establishes one either — the opt-in admits declared evidence, not its absence (array_map TypeErrors on a Traversable)"
                 ),
             ));
-        }
+        };
 
         // ---- The purity bar (ADR-0076 §2) ----------------------------------
         if !purity.labels.is_empty() {
@@ -435,7 +528,7 @@ impl Candidate<'_> {
             ));
         }
 
-        Ok(self.rewrite(acc, iter_var, subject, append.value_span))
+        Ok((self.rewrite(acc, iter_var, subject, append.value_span), lane))
     }
 
     /// The replacement text for `[initializer, loop]` — one statement.
