@@ -30,6 +30,7 @@ use crate::{
     CALL_TOO_FEW_ARGUMENTS_ID, CALL_TOO_MANY_ARGUMENTS_ID, CALL_UNDEFINED_FUNCTION_ID,
     CALL_UNDEFINED_METHOD_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID, CLASS_UNDEFINED_ID,
     DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, EFFECT_ID,
+    CLASS_ABSTRACT_UNIMPLEMENTED_ID, CLASS_EXTENDS_FINAL_ID,
     EFFECT_LISKOV_ID, ID, OFFSET_MAYBE_MISSING_ID, OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID,
     OFFSET_UNDECLARED_ID, PARAM_MISMATCH_ID,
     PHPDOC_PROP_MISMATCH_ID, PHPDOC_UNDEFINED_METHOD_ID, PROP_MISMATCH_ID, READONLY_REASSIGNED_ID,
@@ -243,6 +244,11 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // printf arity (ADR-0078, issue #188)
     (CALL_PRINTF_TOO_FEW_ARGUMENTS_ID, Layer::Proof, Floor::Default),
     // end printf arity (ADR-0078, issue #188)
+    // declaration-incompatibility fatals (ADR-0078, issue #183): load-time fatals
+    // read off the declaration graph alone — proof layer at the `default` floor,
+    // per the ADR's floor table.
+    (CLASS_ABSTRACT_UNIMPLEMENTED_ID, Layer::Proof, Floor::Default),
+    (CLASS_EXTENDS_FINAL_ID, Layer::Proof, Floor::Default),
     // contract — declared-contract acceptance (increase tripwires).
     (PARAM_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     (RETURN_MISMATCH_ID, Layer::Contract, Floor::Contracts),

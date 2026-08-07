@@ -267,6 +267,26 @@ pub const DEBUG_VAR_DUMP_ID: &str = "debug.var-dump";
 /// annotation is an authored question, removed by deleting the comment.
 pub const DEBUG_TRACE_ID: &str = "debug.trace";
 
+// ---------------------------------------------------------------------------
+// declaration-incompatibility fatals (ADR-0078, issue #183)
+// ---------------------------------------------------------------------------
+
+/// The registry id for the unimplemented-abstract-method check (ADR-0078, proof
+/// layer): a **non-abstract** class-like that inherits an abstract method (from an
+/// abstract ancestor or an implemented interface) which no class in its chain ever
+/// defines. PHP refuses the declaration itself — `php -r 'abstract class B {
+/// abstract public function m(); } class C extends B {}'` →
+/// `Fatal error: Class C contains 1 abstract method and must therefore be declared
+/// abstract or implement the remaining method (B::m)`. A declaration-graph claim
+/// only: no flow analysis, no receiver, no value domain.
+pub const CLASS_ABSTRACT_UNIMPLEMENTED_ID: &str = "class.abstract-unimplemented";
+
+/// The registry id for the extends-final check (ADR-0078, proof layer): `class X
+/// extends F` where `F` resolves uniquely to a `final` project class. PHP refuses
+/// the declaration — `php -r 'final class F {} class C extends F {}'` →
+/// `Fatal error: Class C cannot extend final class F`.
+pub const CLASS_EXTENDS_FINAL_ID: &str = "class.extends-final";
+
 /// The resolved FQN of `PHPStan\dumpType` (ADR-0053 §2), lowercase-normalized and
 /// leading-`\`-stripped — the case-insensitive matching key (PHP function names are
 /// case-insensitive).
@@ -334,6 +354,9 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // printf arity (ADR-0078, issue #188)
     CALL_PRINTF_TOO_FEW_ARGUMENTS_ID,
     // end printf arity (ADR-0078, issue #188)
+    // declaration-incompatibility fatals (ADR-0078, issue #183)
+    CLASS_ABSTRACT_UNIMPLEMENTED_ID,
+    CLASS_EXTENDS_FINAL_ID,
 ];
 
 /// Ids **registered ahead of emission**: they exist in [`DIAGNOSTIC_REGISTRY`]
@@ -2297,6 +2320,14 @@ fn check_units(
         // WRITTEN, not a proof of a live runtime path, so it fires the same
         // whether or not the array is ever reached. -----------------------
         check_array_duplicate_keys(&cx, &mut out);
+
+        // --- The declaration-fatal pass (ADR-0078 / issue #183): the file's own
+        // class-like declarations, judged against the enumerated declaration graph.
+        // Sidecar-free (a positive claim about resolved declarations, not an absence
+        // of a symbol) and dam-free (the immunity asymmetry — no runtime construct
+        // adds a method to a declared class), so it runs beside the pass above
+        // without borrowing its ladder. -------------------------------------------
+        check_declaration_fatals(&cx, &dead_spans, &mut out);
 
         // --- Direct pass: literal / array / `new` arguments at every function
         // call site (env-free; propagation adds `$var`/folded resolution). Native
@@ -15954,6 +15985,339 @@ fn check_array_duplicate_keys(cx: &Cx, out: &mut Vec<Diagnostic>) {
                 facet: None,
                 fix: None,
             });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The declaration-incompatibility fatals: `class.abstract-unimplemented` and
+// `class.extends-final` (ADR-0078, issue #183 — the member-kind port's P5 tracer).
+//
+// Both read the DECLARATION GRAPH only — the same edges `resolve_in_chain` walks,
+// read in the other direction. No flow analysis, no value domain, no receiver: a
+// class-like declaration either is or is not loadable, and PHP decides it at class
+// load, before a single statement of the body runs. Every runtime claim below is
+// `php -r`-witnessed (ADR-0049 point 10 discipline; PHP 8.5.9):
+//
+//   - `abstract class B { abstract public function m(); } class C extends B {}`
+//     → `Fatal error: Class C contains 1 abstract method and must therefore be
+//       declared abstract or implement the remaining method (B::m)`
+//   - `interface I { public function m(); } class C implements I {}`
+//     → the same fatal, `(I::m)` — an interface is a requirement source exactly
+//       like an abstract ancestor;
+//   - the same with `class C extends B { public function __call($n, $a) {} }`
+//     → STILL the same fatal. `__call` does **not** discharge an abstract method
+//       (it is a dispatch fallback, and the class never becomes instantiable), so
+//       unlike `call.undefined-method`'s leg (d) the magic fallback is deliberately
+//       NOT an obstacle here;
+//   - `final class F {} class C extends F {}`
+//     → `Fatal error: Class C cannot extend final class F` (also for an
+//       `abstract class C`, and for `$x = new class extends F {}`, which reports
+//       `Class F@anonymous cannot extend final class F`).
+//
+// The dam (ADR-0046/0049 A5) does **not** gate these ids, and that is the immunity
+// asymmetry (ADR-0049 point 2 / A2) applied to a positive claim: only symbol
+// *existence* is dammed, because `eval` and out-of-universe includes mint names —
+// they cannot reopen a declared class to add the missing method body, and the fatal
+// happens at the declaration itself, not at a later call. What A2 *does* keep is the
+// identification of the textual declaration with the bound one, so the ladder below
+// carries A2's three legs: every consulted ancestor must resolve UNIQUELY in the
+// index (`Ambiguous` ⇒ silence), the subject's own FQN must be unique, and a
+// `conditional` declaration anywhere in the consulted set re-dams the claim (the
+// `if (!class_exists('F')) { final class F {} }` polyfill-stub shape leaves which
+// declaration binds to load order). No sidecar leg: these are not absence-of-symbol
+// claims the boot surface could answer, and an unconditional top-level homonym of a
+// project class is itself a declaration-collision fatal, never a silent rebinding.
+//
+// Obstacles, each a tested silence leg:
+//   - a `use`d trait ANYWHERE in the chain — a trait is a member source the object
+//     model does not flatten (the `resolve_in_chain` / ADR-0049 leg (e) obstacle),
+//     so a trait-using class could implement the method invisibly;
+//   - an unresolvable/ambiguous PARENT — the implementation could live there;
+//   - a misshapen edge (`extends` naming an interface/enum/trait, `implements`
+//     naming a non-interface): its own load-time fatal with a different message;
+//   - the "Cannot make non abstract method A::m() abstract in class B" shape
+//     (witnessed) — an ancestor re-declaring a concrete method abstract fatals at
+//     THAT declaration, so naming the subject class would misname the consequence;
+//   - enums and traits at the declaration site (no members are lowered for either)
+//     and abstract classes / interfaces (allowed to carry abstract methods);
+//   - anonymous classes, for `class.abstract-unimplemented` only: `new class`
+//     lowers edge-only (ADR-0049 A4 — parent + implements refs, no members), so
+//     their own definitions are invisible and an unimplemented-method claim would
+//     be unfounded. `class.extends-final` needs no members and DOES cover them.
+//
+// The ONE asymmetry, deliberate: an unresolvable INTERFACE is dropped rather than
+// silencing the class. A PHP interface never carries a method body in any version,
+// so an interface Steins cannot enumerate can only ADD requirements — dropping it
+// loses findings (`class C implements Countable {}` is silent) and can never
+// manufacture one. The parent direction is the opposite: a parent is a *definition*
+// source, so an unresolvable one must silence the whole claim.
+// ---------------------------------------------------------------------------
+
+/// How many unimplemented method names a `class.abstract-unimplemented` message
+/// spells before summarizing the rest. PHP's own fatal truncates at three
+/// (`(B::a, B::b, B::c, ...)`, witnessed); the message says how many it dropped.
+const ABSTRACT_NAMES_IN_MESSAGE: usize = 3;
+
+/// One inherited abstract method the subject must define: the method name as
+/// written and the display FQN of the class-like declaring it abstract — the pair
+/// PHP's own fatal renders (`(App\B::m)`, witnessed).
+struct AbstractRequirement {
+    name: String,
+    declarer: String,
+}
+
+/// A subject class's enumerated ancestry (ADR-0078 / issue #183).
+struct Ancestry<'a> {
+    /// The `extends` chain, SUBJECT FIRST. The only member source that can define a
+    /// method body, so this is what answers "is the requirement discharged?" — and
+    /// why it must be enumerable end to end.
+    chain: Vec<&'a ClassDecl>,
+    /// The transitively collected interfaces (`implements` on every chain node, plus
+    /// each interface's own `extends` list). Requirement sources only; unresolvable
+    /// ones are dropped, per the asymmetry above.
+    interfaces: Vec<&'a ClassDecl>,
+    /// Whether any consulted declaration is `conditional` (ADR-0049 A2i): the claim
+    /// is re-dammed when one is.
+    any_conditional: bool,
+}
+
+/// Enumerate `subject`'s ancestry, or `None` when any obstacle taints it (silence).
+fn enumerate_ancestry<'a>(cx: &Cx<'a>, subject: &'a ClassDecl) -> Option<Ancestry<'a>> {
+    let mut chain: Vec<&'a ClassDecl> = Vec::new();
+    let mut iface_refs: Vec<String> = Vec::new();
+    let mut any_conditional = false;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut cur: Option<(usize, &'a ClassDecl)> = Some((cx.cur, subject));
+
+    while let Some((file, cd)) = cur {
+        if !seen.insert(cd.fqn.to_ascii_lowercase()) {
+            return None; // a cycle — PHP refuses it too, and closure cannot terminate.
+        }
+        // A parent chain runs through CLASSES. `extends` naming an interface, enum or
+        // trait is its own load-time fatal ("cannot extend"), never this id's business.
+        if cd.is_interface || cd.is_enum || cd.is_trait {
+            return None;
+        }
+        // The trait obstacle (ADR-0049 leg (e)): trait members are not flattened into
+        // the class, so a trait use could discharge the requirement invisibly —
+        // witnessed silent: `trait T { public function m() {} } class C implements I
+        // { use T; }` runs clean.
+        if cd.uses_traits {
+            return None;
+        }
+        any_conditional |= cd.conditional;
+        iface_refs.extend(cd.implements.iter().map(|r| cx.units[file].tree.resolve_class_fqn(r)));
+        chain.push(cd);
+        cur = match &cd.parent {
+            None => None,
+            // A2 leg: the parent must resolve to a UNIQUE project declaration. Absent
+            // (a vendor/builtin ancestor) or Ambiguous ⇒ the implementation could live
+            // there ⇒ silence.
+            Some(pref) => Some(cx.find_class(&cx.units[file].tree.resolve_class_fqn(pref))?),
+        };
+    }
+
+    let mut interfaces: Vec<&'a ClassDecl> = Vec::new();
+    let mut iseen: HashSet<String> = HashSet::new();
+    while let Some(fqn) = iface_refs.pop() {
+        if !iseen.insert(fqn.to_ascii_lowercase()) {
+            continue; // interface diamonds are legal PHP — dedupe, never an obstacle.
+        }
+        // The asymmetry: an interface Steins cannot resolve is DROPPED, not an
+        // obstacle. It can only add requirements (no bodies), so the requirements
+        // already proven stand.
+        let Some((ifile, idecl)) = cx.find_class(&fqn) else { continue };
+        // `implements` naming a non-interface is another fatal entirely ("I cannot
+        // implement F - it is not an interface", witnessed).
+        if !idecl.is_interface || idecl.uses_traits {
+            return None;
+        }
+        any_conditional |= idecl.conditional;
+        if let Some(pref) = &idecl.parent {
+            iface_refs.push(cx.units[ifile].tree.resolve_class_fqn(pref));
+        }
+        iface_refs
+            .extend(idecl.implements.iter().map(|r| cx.units[ifile].tree.resolve_class_fqn(r)));
+        interfaces.push(idecl);
+    }
+
+    Some(Ancestry { chain, interfaces, any_conditional })
+}
+
+/// Whether a requirement is discharged by the enumerated class chain.
+enum Satisfaction {
+    /// The nearest declaration of the name carries a body — implemented.
+    Concrete,
+    /// No chain node declares the name with a body — the fatal.
+    Missing,
+    /// The nearest declaration is abstract while a FARTHER ancestor's is concrete:
+    /// the "Cannot make non abstract method A::m() abstract in class B" shape, which
+    /// fatals at that ancestor's own declaration. Naming the subject would misname
+    /// the consequence — refuse the whole claim.
+    Refused,
+}
+
+/// Resolve `name` against the class chain (subject first), nearest declaration wins
+/// — the same first-wins rule [`resolve_in_chain`] applies to dispatch.
+fn method_satisfaction(chain: &[&ClassDecl], name: &str) -> Satisfaction {
+    let mut saw_abstract = false;
+    for node in chain {
+        let Some(m) = node.methods.iter().find(|m| m.name.eq_ignore_ascii_case(name)) else {
+            continue;
+        };
+        if !m.is_abstract {
+            return if saw_abstract { Satisfaction::Refused } else { Satisfaction::Concrete };
+        }
+        saw_abstract = true;
+    }
+    Satisfaction::Missing
+}
+
+/// The display FQN of a class-like declaration (its declared casing and namespace),
+/// falling back to the simple name for a declaration whose FQN was never stamped.
+fn decl_display(cd: &ClassDecl) -> String {
+    if cd.display.is_empty() { cd.name.clone() } else { cd.display.clone() }
+}
+
+/// Run the ADR-0078 ladder for one class-like declaration and emit
+/// `class.abstract-unimplemented` iff every leg holds.
+fn check_abstract_unimplemented(cx: &Cx, cd: &ClassDecl, out: &mut Vec<Diagnostic>) {
+    // Declaration-site gate: only a CONCRETE class must implement everything. An
+    // abstract class and an interface may carry abstract methods (witnessed silent);
+    // a trait's and an enum's members are not lowered at all (an enum cannot be
+    // abstract, and its own `Enum E must implement …` fatal is a different message).
+    if cd.is_abstract || cd.is_interface || cd.is_enum || cd.is_trait {
+        return;
+    }
+    // A2 leg: a duplicate FQN leaves which declaration binds to load order.
+    if !matches!(cx.index.resolve_class(&cd.fqn), Res::Unique(_)) {
+        return;
+    }
+    let Some(anc) = enumerate_ancestry(cx, cd) else { return };
+
+    // Requirements: every abstract method on the chain plus every interface method
+    // (an interface method lowers with `is_abstract` set — it has no body). Deduped
+    // by name, nearest declarer first, exactly as the runtime message lists them.
+    let mut required: Vec<AbstractRequirement> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for node in anc.chain.iter().chain(anc.interfaces.iter()) {
+        for m in node.methods.iter().filter(|m| m.is_abstract) {
+            if seen.insert(m.name.to_ascii_lowercase()) {
+                required
+                    .push(AbstractRequirement { name: m.name.clone(), declarer: decl_display(node) });
+            }
+        }
+    }
+
+    let mut missing: Vec<String> = Vec::new();
+    for req in &required {
+        match method_satisfaction(&anc.chain, &req.name) {
+            Satisfaction::Concrete => {}
+            Satisfaction::Missing => missing.push(format!("{}::{}", req.declarer, req.name)),
+            Satisfaction::Refused => return,
+        }
+    }
+    if missing.is_empty() {
+        return;
+    }
+    // A2i: a conditional declaration among the consulted set re-dams the claim.
+    if anc.any_conditional && !cx.dam.is_clear() {
+        return;
+    }
+
+    let pos = cx.tree().position(cd.span.start);
+    let count = missing.len();
+    let listed = if count > ABSTRACT_NAMES_IN_MESSAGE {
+        format!(
+            "{}, and {} more",
+            missing[..ABSTRACT_NAMES_IN_MESSAGE].join(", "),
+            count - ABSTRACT_NAMES_IN_MESSAGE
+        )
+    } else {
+        missing.join(", ")
+    };
+    let plural = if count == 1 { "method" } else { "methods" };
+    out.push(Diagnostic {
+        id: CLASS_ABSTRACT_UNIMPLEMENTED_ID,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message: format!(
+            "class {} leaves {count} inherited abstract {plural} unimplemented ({listed}) — fatal when the class is loaded",
+            decl_display(cd),
+        ),
+        facet: None,
+        fix: None,
+    });
+}
+
+/// Emit `class.extends-final` for one `extends` edge (a named class declaration's
+/// or an anonymous class's), iff the parent resolves uniquely to a `final` class.
+fn check_extends_final(
+    cx: &Cx,
+    subject: &str,
+    subject_conditional: bool,
+    pref: &NameRef,
+    out: &mut Vec<Diagnostic>,
+) {
+    let fqn = cx.class_fqn(pref);
+    // A2 leg: Absent (issue #182's `class.undefined` territory) or Ambiguous ⇒ the
+    // parent's finality is not proven.
+    let Some((_, parent)) = cx.find_class(&fqn) else { return };
+    // An enum lowers with `is_final` set (enums are implicitly final), but extending
+    // one is the different fatal `Class C cannot extend enum E` (witnessed) — out.
+    if !parent.is_final || parent.is_enum {
+        return;
+    }
+    // A2i: a conditionally-declared `final class F` may not be the F that binds.
+    if (subject_conditional || parent.conditional) && !cx.dam.is_clear() {
+        return;
+    }
+    let pos = cx.tree().position(pref.offset);
+    out.push(Diagnostic {
+        id: CLASS_EXTENDS_FINAL_ID,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message: format!(
+            "class {subject} cannot extend final class {} — fatal when the class is loaded",
+            decl_display(parent),
+        ),
+        facet: None,
+        fix: None,
+    });
+}
+
+/// The per-file declaration-fatal pass (ADR-0078 / issue #183). Declarations in a
+/// proven-dead region are skipped, exactly as the `class.undefined` pass skips
+/// references in one.
+fn check_declaration_fatals(cx: &Cx, dead: &[Span], out: &mut Vec<Diagnostic>) {
+    for cd in cx.tree().classes() {
+        if in_dead(dead, cd.span.start) {
+            continue;
+        }
+        // `extends` on an interface names interfaces, and enums/traits cannot extend
+        // at all — only a class declaration can carry this fatal.
+        if !cd.is_interface
+            && !cd.is_enum
+            && !cd.is_trait
+            && let Some(pref) = cd.parent.as_ref()
+        {
+            check_extends_final(cx, &decl_display(cd), cd.conditional, pref, out);
+        }
+        check_abstract_unimplemented(cx, cd, out);
+    }
+    // Anonymous classes carry the same extends-final fatal (`Class F@anonymous cannot
+    // extend final class F`, witnessed) and need no members to prove it. They are
+    // never `conditional` in the A2i sense: the flag is about which declaration a
+    // NAME binds to, and an anonymous class has no name to contest.
+    for edge in cx.tree().anonymous_class_edges() {
+        if in_dead(dead, edge.span.start) {
+            continue;
+        }
+        if let Some(pref) = edge.parent.as_ref() {
+            check_extends_final(cx, "anonymous class", false, pref, out);
         }
     }
 }
