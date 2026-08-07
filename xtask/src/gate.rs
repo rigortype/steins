@@ -839,6 +839,18 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 14,
         message_contains: "AppApi_Testing::requestToAllAppApiEndpoints(): 1 passed, 3 required",
     },
+    // ADR-0078 issue #190: `call.on-non-object` fired once, on a phpunit
+    // end-to-end regression fixture whose own name states the intent —
+    // `dataProviderThatTriggersPhpError` (`$foo = []; $foo->bar();`, issue
+    // 5451's reproduction). The provider genuinely fatals when invoked; that
+    // is what the fixture is FOR. Triaged TRUE 2026-08-08.
+    ExpectedProofFinding {
+        package: "sebastianbergmann/phpunit",
+        id: "call.on-non-object",
+        path_suffix: "regression/5451/Issue5451Test.php",
+        line: 20,
+        message_contains: "proven array on this path",
+    },
     // ADR-0078 issue #187: the new mechanics id `array.duplicate-key` fired 19
     // times, all on the legacy monorepo, all TRUE — triaged verbatim against the
     // checkout on 2026-08-08. One config key is silently overwritten by a later

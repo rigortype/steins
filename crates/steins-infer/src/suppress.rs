@@ -42,6 +42,8 @@ use crate::{
     CLOSURE_UNUSED_USE_ID, PHPDOC_MISPLACED_VAR_ID, PHPDOC_STALE_PARAM_ID, PHPDOC_STALE_VAR_ID,
     PHPDOC_THROWS_NOT_THROWABLE_ID, PHPDOC_UNPARSABLE_ID,
 };
+// non-object receivers (ADR-0078, issue #190)
+use crate::{CALL_ON_NON_OBJECT_ID, PROPERTY_ON_NON_OBJECT_ID};
 
 /// The registry id for an `@steins-ignore` whose diagnostic id matches nothing on
 /// its target line (ADR-0023 anti-rot). Exempt from suppression.
@@ -261,6 +263,16 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // it demotes under a declared `warning-handler = "null"` posture exactly as
     // `offset.missing` does (ADR-0049 §7).
     (PREG_INVALID_PATTERN_ID, Layer::Proof, Floor::Default),
+    // non-object receivers (ADR-0078, issue #190)
+    // proof — the same fatal `call.on-null` names, with the receiver's runtime type
+    // in place of null; a sibling id rather than a widening, so the null case's
+    // baseline entries keep their meaning (ADR-0022).
+    (CALL_ON_NON_OBJECT_ID, Layer::Proof, Floor::Default),
+    // proof — a property fetch on a non-object is an `E_WARNING` yielding null, so
+    // it demotes under a declared `warning-handler = "null"` posture exactly as
+    // `offset.missing` does (ADR-0049 §7).
+    (PROPERTY_ON_NON_OBJECT_ID, Layer::Proof, Floor::Default),
+    // end non-object receivers (ADR-0078, issue #190)
     // contract — declared-contract acceptance (increase tripwires).
     (PARAM_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     (RETURN_MISMATCH_ID, Layer::Contract, Floor::Contracts),

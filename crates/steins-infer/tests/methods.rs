@@ -260,8 +260,14 @@ fn by_value_pass_of_object_var_loses_class_fact_conservatively() {
 fn reassigned_object_var_loses_its_class_fact() {
     // `$x` is reassigned to an unknown value before the method call, so its
     // exact-class fact is dropped and `$x->m()` no longer resolves.
+    //
+    // Counted per id rather than in total (issue #190): `mk()` provably returns `1`,
+    // so the very same site is a real `call.on-non-object` — `php -r 'function mk() {
+    // return 1; } $x = mk(); $x->m("abc");'` is `Uncaught Error: Call to a member
+    // function m() on int`. What this test pins is that the *dispatch* fact died.
     let src = "<?php\nclass Foo { public function m(int $w): void {} }\nfunction mk() { return 1; }\n$x = new Foo();\n$x = mk();\n$x->m(\"abc\");\n";
-    assert_eq!(n(src), 0, "reassigned $x loses its class fact → silent");
+    let mismatches = findings(src).into_iter().filter(|d| d.id == ID).count();
+    assert_eq!(mismatches, 0, "reassigned $x loses its class fact → no argument mismatch");
 }
 
 // Effect envelope on a method

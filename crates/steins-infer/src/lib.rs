@@ -396,6 +396,51 @@ pub fn is_dump_family_fqn(fqn: &str) -> bool {
 /// which the zero-FP bar forbids. No sidecar ⇒ no refusal ⇒ silence.
 pub const PREG_INVALID_PATTERN_ID: &str = "preg.invalid-pattern";
 
+// non-object receivers (ADR-0078, issue #190)
+
+/// The registry id for a method call on a receiver proven to be a **non-object,
+/// non-null** value (ADR-0078, issue #190): `$x = 1; $x->m();` is the very same
+/// fatal `Error` [`CALL_ON_NULL_ID`] already names for `null`, only with the runtime
+/// type in its place — `Call to a member function m() on int` (witnessed at PHP
+/// 8.5.9 for `int`, `string`, `float`, `true`, `false` and `array`).
+///
+/// **A sibling id, not a widening of `call.on-null`.** ADR-0022 makes an id's
+/// meaning a contract: `call.on-null` is already in users' baselines and
+/// `@steins-ignore` comments, and widening it in place would silently change what
+/// those suppress. The null case keeps its own, sharper sentence; this id takes the
+/// scalar and array receivers. The two are disjoint by construction — the null
+/// receiver is `Fact::Singleton(Val::Null)`, which this id's emitter refuses — so no
+/// site can ever report both.
+///
+/// The receiver premise is the four-layer value domain's own: a `Fact` has no object
+/// denotation at all (`Val` cannot spell one), so a receiver that carries a fact is
+/// already proven not to be an object. A receiver with no fact is silence, which is
+/// where every `Maybe`-object, object-arm union and unknown-class receiver lands.
+///
+/// `?->` does **not** excuse it: nullsafe short-circuits on `null` alone, so a
+/// proven non-null non-object still fatals (witnessed: `$x = 1; $x?->m();`).
+pub const CALL_ON_NON_OBJECT_ID: &str = "call.on-non-object";
+
+/// The registry id for a property fetch on a receiver proven to be a **non-object,
+/// non-null** value (ADR-0078, issue #190): `$x = 1; $y = $x->p;` raises
+/// `Warning: Attempt to read property "p" on int` and evaluates to `null`
+/// (witnessed at PHP 8.5.9 for `int`, `string`, `float`, `true`, `false` and
+/// `array`).
+///
+/// Warning-grade, so it rides the ADR-0049 §7 lever exactly as `offset.missing`
+/// does: under a declared `warning-handler = "null"` posture the application
+/// tolerates the warning and the finding leaves the proof surface.
+///
+/// Unlike its `call.` sibling this id **does** own the proven-`null` receiver:
+/// there is no `property.on-null` in the ADR-0078 table to defer to, PHP raises the
+/// very same warning for it (`Attempt to read property "p" on null`), and null is a
+/// non-object — carving it out would leave the commonest receiver of all
+/// unreported. `call.on-non-object` carves null out only because
+/// [`CALL_ON_NULL_ID`] already owns it.
+pub const PROPERTY_ON_NON_OBJECT_ID: &str = "property.on-non-object";
+
+// end non-object receivers (ADR-0078, issue #190)
+
 /// Every id constant that reaches a `Diagnostic { id: … }` construction site — the
 /// canonical enumeration of what the emitters can produce (ADR-0050 §2 totality).
 ///
@@ -455,6 +500,10 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     CLOSURE_UNUSED_USE_ID,
     // preg pattern refusal (ADR-0078, issue #189)
     PREG_INVALID_PATTERN_ID,
+    // non-object receivers (ADR-0078, issue #190)
+    CALL_ON_NON_OBJECT_ID,
+    PROPERTY_ON_NON_OBJECT_ID,
+    // end non-object receivers (ADR-0078, issue #190)
 ];
 
 /// Ids **registered ahead of emission**: they exist in [`DIAGNOSTIC_REGISTRY`]
@@ -7863,6 +7912,13 @@ fn walk_trace(
                     // Branch-sensitive null-dereference proof (ADR-0031): a `$v->m()`
                     // whose receiver is proven `Singleton(null)` on this path.
                     check_call_on_null(w, call, env, store, out);
+                    // non-object receivers (ADR-0078, issue #190)
+                    // Its sibling on the same receiver fact: a `$v->m()` whose
+                    // receiver is proven a non-null NON-object (`int`, `string`,
+                    // `float`, `bool`, `array`) — the same fatal, a different id, and
+                    // disjoint from the null case by construction.
+                    check_call_on_non_object(w, call, env, store, out);
+                    // end non-object receivers (ADR-0078, issue #190)
                     // The absence flagship (ADR-0049 §4 / S2): fire only in the plain
                     // per-scope pass — every scope (method bodies included) is walked
                     // once there, so a descent must not re-judge the same site.
@@ -7947,6 +8003,21 @@ fn walk_trace(
         {
             check_coalesce_final_arm(cx, value, env, scope.poisoned, *span, out);
         }
+
+        // non-object receivers (ADR-0078, issue #190)
+        // 1z-ter. `property.on-non-object` at the SAME whitelisted read positions the
+        // offset family uses (A7): a plain assignment-RHS and a return operand whose
+        // value is directly a property fetch. Judged once per site in the plain
+        // per-scope pass, against the pre-statement env — so a branch that narrowed
+        // the receiver is already in force. Argument, echo and condition positions
+        // are outside the whitelist, exactly as they are for `offset.missing`.
+        if descent.is_none()
+            && let StmtKind::Assign { value: ArgValue::PropFetch { var, prop }, span, .. }
+            | StmtKind::Return { value: ArgValue::PropFetch { var, prop }, span, .. } = &stmt.kind
+        {
+            check_property_on_non_object(cx, var, prop, env, scope.poisoned, *span, out);
+        }
+        // end non-object receivers (ADR-0078, issue #190)
 
         // 1a. Escape + sweep (ADR-0036): passing an object into a call escapes it;
         // an unknown/overridable call — or any call an object was passed into —
@@ -10851,23 +10922,10 @@ fn check_call_on_null(
     let Callee::Method { receiver, method, nullsafe: false } = &call.receiver else {
         return;
     };
-    // The proven-null receiver fact + its trust stratum + the receiver's rendering.
-    // A bare `$v` reads the env value fact; a depth-1 `$v->prop` receiver reads the
-    // allocation-keyed heap property fact (ADR-0052 §7, alias-correct by construction,
-    // ADR-0036) — escaped-then-swept props return `None` here (silence preserved), a
-    // readonly prop survives the sweep, and the stratum gate below refuses an
-    // `Asserted` premise exactly as it does for a variable.
-    let (fact, stratum, display) = match receiver {
-        Receiver::Var(v) => {
-            let Some(k) = env.get(v) else { return };
-            (k.fact.as_ref(), k.stratum, format!("${v}"))
-        }
-        Receiver::Prop { var, prop } => {
-            (store.prop_fact(var, prop), store.prop_stratum(var, prop), format!("${var}->{prop}"))
-        }
-        Receiver::This | Receiver::New(_) => return,
+    let Some((fact, stratum, display)) = call_receiver_fact(receiver, env, store) else {
+        return;
     };
-    if !matches!(fact, Some(Fact::Singleton(Val::Null))) {
+    if !matches!(fact, Fact::Singleton(Val::Null)) {
         return;
     }
     // Proof-layer consumption rule (ADR-0052 §5): a receiver proven null only by an
@@ -10889,6 +10947,210 @@ fn check_call_on_null(
         ),
     });
 }
+
+// non-object receivers (ADR-0078, issue #190)
+
+/// The receiver fact the call-site proofs consume: the value-domain fact behind a
+/// method call's receiver, its trust stratum, and the receiver's rendering.
+///
+/// A bare `$v` reads the env value fact; a depth-1 `$v->prop` receiver reads the
+/// allocation-keyed heap property fact (ADR-0052 §7, alias-correct by construction,
+/// ADR-0036) — escaped-then-swept props return `None` here (silence preserved), and a
+/// readonly prop survives the sweep. `$this` and `(new C)->…` are objects by
+/// construction and carry no fact lane at all.
+///
+/// The env fact and the [`Store`] object binding are mutually exclusive by
+/// construction: every rvalue arm of `apply_assign` pairs `env.remove(var)` with
+/// `store.unbind(var)`, so a variable that currently holds an object never has a
+/// fact here, and a variable with a fact never holds one.
+fn call_receiver_fact<'a>(
+    receiver: &Receiver,
+    env: &'a HashMap<String, Known>,
+    store: &'a Store,
+) -> Option<(&'a Fact, Stratum, String)> {
+    match receiver {
+        Receiver::Var(v) => {
+            let k = env.get(v)?;
+            Some((k.fact.as_ref()?, k.stratum, format!("${v}")))
+        }
+        Receiver::Prop { var, prop } => Some((
+            store.prop_fact(var, prop)?,
+            store.prop_stratum(var, prop),
+            format!("${var}->{prop}"),
+        )),
+        Receiver::This | Receiver::New(_) => None,
+    }
+}
+
+/// The PHP type name a fact's denotation is confined to, when that denotation
+/// contains **no object** — the "definitely not an object" premise both members of
+/// the ADR-0078 non-object family consume (issue #190).
+///
+/// The four-layer domain does the proving for free: [`Val`] has no object variant
+/// and [`Base`] no object base, so *no* fact can denote an object. What is left to
+/// decide is only whether the fact names ONE type, which the message must be able to
+/// say. Three shapes therefore decline:
+///
+/// * a `nullable: true` abstract layer (`?int` — non-object either way, but "int"
+///   would be a wrong sentence and `null` is a different id on the call side);
+/// * a `OneOf` mixing bases (`1|'a'` from a ternary — again fatal either way, but
+///   with no single name to print);
+/// * an absent fact, which is where every `Maybe`-object receiver, every union with
+///   an object arm, and every unknown-class receiver lands — the domain simply has
+///   no fact for a value that might be an object, so silence is automatic.
+///
+/// `null` IS named here: `property.on-non-object` owns that receiver, and the call
+/// side filters it out because [`CALL_ON_NULL_ID`] already does.
+fn definite_non_object_type(fact: &Fact) -> Option<&'static str> {
+    match fact {
+        Fact::Singleton(v) => Some(val_type_name(v)),
+        Fact::OneOf(vals) => {
+            let first = val_type_name(vals.first()?);
+            vals.iter().all(|v| val_type_name(v) == first).then_some(first)
+        }
+        Fact::Refined { base, nullable: false, .. } | Fact::General { base, nullable: false } => {
+            Some(base_type_name(*base))
+        }
+        Fact::Shape { nullable: false, .. } => Some("array"),
+        Fact::Refined { nullable: true, .. }
+        | Fact::General { nullable: true, .. }
+        | Fact::Shape { nullable: true, .. } => None,
+    }
+}
+
+/// The PHP type name of a concrete value, as the engine spells it in the
+/// `Call to a member function m() on <type>` / `Attempt to read property "p" on
+/// <type>` messages. Witnessed at PHP 8.5.9: a bool receiver renders as `true` /
+/// `false` there rather than `bool`, but this is the *type* name the finding's
+/// sentence reports, so the base name is what both callers want.
+fn val_type_name(v: &Val) -> &'static str {
+    match v {
+        Val::Int(_) => "int",
+        Val::Float(_) => "float",
+        Val::Str(_) => "string",
+        Val::Bool(_) => "bool",
+        Val::Null => "null",
+        Val::Array(_) => "array",
+    }
+}
+
+/// The PHP type name of a scalar base.
+fn base_type_name(base: Base) -> &'static str {
+    match base {
+        Base::Int => "int",
+        Base::Float => "float",
+        Base::String => "string",
+        Base::Bool => "bool",
+    }
+}
+
+/// The non-object receiver proof for a method call (`call.on-non-object`, ADR-0078,
+/// issue #190): `$x = 1; $x->m();` is the same guaranteed `Error` `call.on-null`
+/// reports, with the receiver's runtime type in place of null — witnessed at PHP
+/// 8.5.9 as `Call to a member function m() on int` for `int`, `string`, `float`,
+/// `true`, `false` and `array`.
+///
+/// Two boundaries, both deliberate:
+///
+/// * **`?->` is not an excuse.** Nullsafe short-circuits on `null` alone, so a proven
+///   non-null non-object receiver still fatals (`$x = 1; $x?->m();` — witnessed).
+///   This is why, unlike [`check_call_on_null`], the `nullsafe` flag is not read.
+/// * **null belongs to [`CALL_ON_NULL_ID`]**, whose meaning ADR-0022 keeps stable;
+///   the two ids are disjoint at every site by this one filter.
+///
+/// The receiver lane is exactly [`check_call_on_null`]'s — a bare variable or a
+/// depth-1 `$v->prop` — deliberately not widened here (issue #196 owns reach).
+fn check_call_on_non_object(
+    w: &WalkCx,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    out: &mut Vec<Diagnostic>,
+) {
+    if w.scope.poisoned {
+        return;
+    }
+    let Callee::Method { receiver, method, .. } = &call.receiver else {
+        return;
+    };
+    let Some((fact, stratum, display)) = call_receiver_fact(receiver, env, store) else {
+        return;
+    };
+    let Some(ty) = definite_non_object_type(fact) else {
+        return;
+    };
+    if ty == "null" {
+        return;
+    }
+    // Proof-layer consumption rule (ADR-0052 §5): an `Asserted` premise (a
+    // `@phpstan-assert int $x`) cannot premise a proof-layer fatal.
+    if stratum != Stratum::Verified {
+        return;
+    }
+    let pos = w.cx.tree().position(call.span.start);
+    out.push(Diagnostic {
+        id: CALL_ON_NON_OBJECT_ID,
+        facet: None,
+        fix: None,
+        path: w.cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message: format!(
+            "method call {display}->{method}() — {display} is proven {ty} on this path — proven Error (Call to a member function on {ty})"
+        ),
+    });
+}
+
+/// The non-object receiver proof for a property fetch (`property.on-non-object`,
+/// ADR-0078, issue #190): `$x = 1; $y = $x->p;` raises
+/// `Warning: Attempt to read property "p" on int` and evaluates to `null`
+/// (witnessed at PHP 8.5.9 for `int`, `string`, `float`, `true`, `false`, `array`
+/// and `null`).
+///
+/// Warning-grade, so the ADR-0049 §7 posture gate comes first: under a declared
+/// `warning-handler = "null"` the application tolerates the warning and the finding
+/// leaves the proof surface, exactly as `offset.missing` does.
+///
+/// The receiver here is only ever a bare variable — [`ArgValue::PropFetch`] is the
+/// only lowered shape of a property read, and it decomposes `$var->prop` alone
+/// (a chain, a dynamic name and the `?->` form all lower to `ArgValue::Other`, so
+/// `$x?->p` on a proven `int` is a recorded silence rather than a finding). `$this`
+/// carries no fact lane, so `$this->p` is silent by construction.
+fn check_property_on_non_object(
+    cx: &Cx,
+    var: &str,
+    prop: &str,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    span: Span,
+    out: &mut Vec<Diagnostic>,
+) {
+    if poisoned || !cx.warning_handler_abort {
+        return;
+    }
+    let Some(k) = env.get(var) else { return };
+    let Some(ty) = k.fact.as_ref().and_then(definite_non_object_type) else {
+        return;
+    };
+    // Proof-layer consumption rule (ADR-0052 §5): an `Asserted` premise stays silent.
+    if k.stratum != Stratum::Verified {
+        return;
+    }
+    let pos = cx.tree().position(span.start);
+    out.push(Diagnostic {
+        id: PROPERTY_ON_NON_OBJECT_ID,
+        facet: None,
+        fix: None,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message: format!(
+            "property fetch ${var}->{prop} — ${var} is proven {ty} on this path — proven E_WARNING (Attempt to read property on {ty}), evaluating to null"
+        ),
+    });
+}
+
+// end non-object receivers (ADR-0078, issue #190)
 
 // ---------------------------------------------------------------------------
 // Condition evaluation → `Certainty` (ADR-0031 stage 1).
