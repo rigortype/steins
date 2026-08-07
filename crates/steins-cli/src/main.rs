@@ -20,7 +20,7 @@ mod sha256;
 // no-second-relation discipline for surface selection.
 pub(crate) use steins_infer::profile;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -1671,8 +1671,7 @@ fn run_annotate(args: &[String]) -> ExitCode {
     let canon_target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut project_files = Vec::new();
     collect_php_files(&root, &mut project_files);
-    project_files.sort();
-    project_files.dedup();
+    let project_files = dedup_canonical(project_files);
 
     let mut inputs: Vec<SourceFile> = Vec::new();
     let mut target: Option<SourceFile> = None;
@@ -1831,8 +1830,7 @@ fn run_effect_diff(args: &[String]) -> ExitCode {
     for p in &paths {
         collect_php_files(Path::new(p), &mut files);
     }
-    files.sort();
-    files.dedup();
+    let files = dedup_canonical(files);
 
     // No sidecar, no folder: effect summaries are a pure static fixpoint, so this
     // command never needs `php` and takes no `--no-php`.
@@ -2201,15 +2199,64 @@ fn missing_paths(paths: &[String]) -> Vec<&String> {
     paths.iter().filter(|p| !Path::new(p.as_str()).exists()).collect()
 }
 
-/// The `.php` files `paths` names, sorted and deduplicated — the analyzed set.
+/// The `.php` files `paths` names, deduplicated to their real identity (issue
+/// #179) — the analyzed set. See [`dedup_canonical`] for the dedup key and
+/// why the surviving spelling is NOT the sorted/canonical one.
 fn collect_files(paths: &[String]) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for p in paths {
         collect_php_files(Path::new(p), &mut files);
     }
-    files.sort();
-    files.dedup();
-    files
+    dedup_canonical(files)
+}
+
+/// Deduplicate `files` by real filesystem identity, keeping the first
+/// spelling encountered (push order — argument order, then this crate's walk
+/// order) rather than sorting first.
+///
+/// Issue #179: a directory symlink (`mirror/src -> ../src`) makes the same
+/// tree reachable through two different path spellings. The pre-#179 code
+/// sorted the aggregate file list and deduped by path STRING, so `src/a.php`
+/// and `mirror/src/a.php` survived as two distinct entries naming one file.
+/// Every class-like in that file was then declared twice, and the
+/// absence-family existence guard (ADR-0049) read the duplicated hierarchy as
+/// non-enumerable, silently dropping every declaration-dependent finding
+/// (arity, undefined-method, `class.undefined`); flow-derived findings
+/// (`call.on-null`) survived but were reported twice, once per spelling.
+///
+/// The fix separates the dedup KEY from the surviving SPELLING:
+///   - key: [`Path::canonicalize`] — the file's real, symlink-resolved
+///     identity, so both spellings above collapse to one entry.
+///   - spelling: whichever of the duplicates was pushed first. Diagnostics,
+///     `--fix` edits, and the baseline hash (ADR-0022) all key off the path
+///     the user gets back, so silently normalizing it to the canonical form
+///     would change output for every user who never named a symlink — the
+///     common case — while the symlink case (this fix's actual target) is
+///     rare. First-in-argument-order is also the more PREDICTABLE half of the
+///     "decide and document" acceptance criterion: `steins check a b` always
+///     prefers whatever `a` contributed, independent of the two directories'
+///     alphabetical relationship.
+///
+/// A path whose `canonicalize()` fails (dangling symlink, permission denied,
+/// a TOCTOU race with a delete) falls back to its own literal path as the key
+/// — it dedups against nothing and is never dropped, degrading to the
+/// pre-#179 behavior for exactly that one file rather than losing it.
+fn dedup_canonical(files: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen: HashSet<PathBuf> = HashSet::with_capacity(files.len());
+    let mut out = Vec::with_capacity(files.len());
+    for file in files {
+        let key = file.canonicalize().unwrap_or_else(|_| file.clone());
+        if seen.insert(key) {
+            out.push(file);
+        }
+    }
+    // The pre-#179 pipeline handed every consumer a SORTED list, and read_dir's
+    // order is filesystem-dependent — so re-sort the survivors to keep the
+    // analyzed set deterministic across runs and machines. Survivor SELECTION
+    // (which spelling of a duplicate lives) happened above, in push order;
+    // this sort only fixes where each survivor sits in the list.
+    out.sort();
+    out
 }
 
 /// One analyzed project: the salsa database, the [`Project`] input, the parsed
@@ -2314,10 +2361,37 @@ fn suppression_pipeline(
 }
 
 fn collect_php_files(path: &Path, out: &mut Vec<PathBuf>) {
+    collect_php_files_inner(path, out, &mut HashSet::new());
+}
+
+/// The walk `collect_php_files` fronts, plus a directory symlink cycle guard
+/// (issue #179): `visited_dirs` holds the canonical form of every directory
+/// already entered on THIS top-level call, so a self-referential symlink
+/// (`a/self -> .`, or a deeper loop through several directories) terminates
+/// instead of recursing forever — the walker had no such guard before #179.
+///
+/// This is deliberately NOT the file-level dedup: `visited_dirs` starts fresh
+/// per top-level [`collect_php_files`] call, so two independent arguments that
+/// both reach the same tree (`check src mirror` where `mirror/src -> ../src`)
+/// still each walk it fully, pushing both spellings into `out`. Collapsing
+/// that duplication is [`dedup_canonical`]'s job, run once over the aggregate
+/// list — see its doc comment for why the dedup key and the surviving
+/// spelling are decided at that later, whole-list layer rather than here.
+fn collect_php_files_inner(path: &Path, out: &mut Vec<PathBuf>, visited_dirs: &mut HashSet<PathBuf>) {
     if path.is_dir() {
+        // A directory whose canonical form was already entered on this walk is
+        // a symlink cycle: stop rather than recurse forever. A directory whose
+        // canonicalize() fails (permissions, a TOCTOU race) is walked
+        // uncached — read_dir below fails harmlessly if it truly is not
+        // readable, exactly like before this guard existed.
+        if let Ok(canon) = path.canonicalize()
+            && !visited_dirs.insert(canon)
+        {
+            return;
+        }
         let Ok(entries) = std::fs::read_dir(path) else { return };
         for entry in entries.flatten() {
-            collect_php_files(&entry.path(), out);
+            collect_php_files_inner(&entry.path(), out, visited_dirs);
         }
     } else if path.extension().is_some_and(|e| e == "php") {
         out.push(path.to_path_buf());
@@ -2522,5 +2596,44 @@ mod tests {
             filtered_diagnostics(&layout, Some(&default_only), vec![contract_finding]).is_empty(),
             "the same finding must be invisible on the default surface"
         );
+    }
+
+    // ---- dedup_canonical (issue #179) --------------------------------------
+
+    /// Two spellings of one real file — the direct path and one through a
+    /// symlinked directory — collapse to a single entry, and the survivor is
+    /// the FIRST spelling pushed, not a re-sort. The end-to-end repro through
+    /// `steins check` lives in `tests/symlink_dedup.rs`; this is the unit-level
+    /// pin on `dedup_canonical` itself.
+    #[test]
+    fn dedup_canonical_collapses_two_spellings_keeping_the_first() {
+        let dir = std::env::temp_dir()
+            .join(format!("steins-dedup-canonical-unit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::fs::write(dir.join("real/a.php"), "<?php\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+
+        let first = dir.join("real/a.php");
+        let second = dir.join("link/a.php"); // same file, symlinked spelling
+        let out = dedup_canonical(vec![first.clone(), second]);
+        assert_eq!(out, vec![first], "one real file survives, spelled as first pushed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A path whose `canonicalize()` fails (nothing on disk at that spelling)
+    /// is never dropped: it dedups against nothing, keyed on its own literal
+    /// path, and degrades to the pre-#179 behavior for that one entry instead
+    /// of silently disappearing.
+    #[test]
+    fn dedup_canonical_keeps_uncanonicalizable_paths() {
+        let a = PathBuf::from("/steins-dedup-canonical-unit-does-not-exist-a.php");
+        let b = PathBuf::from("/steins-dedup-canonical-unit-does-not-exist-b.php");
+        let out = dedup_canonical(vec![a.clone(), b.clone(), a.clone()]);
+        // `a` still dedups against its own exact repeat (both fall back to the
+        // same literal-path key), but never against the unrelated `b`.
+        assert_eq!(out, vec![a, b]);
     }
 }
