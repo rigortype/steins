@@ -245,7 +245,10 @@ fn preg_replace_declines_a_subject_it_cannot_place() {
     // arms rather than choosing one, and carries the `(asserted)` marker the rule's
     // own `string|null` would not.
     assert_eq!(
-        dump("", "preg_replace('/a/', 'b', $u)"),
+        // `$u` is an untyped parameter: bound (so `variable.undefined` is not the
+        // finding under test) and carrying no fact, which is the unknown base the
+        // rule declines on.
+        dump("$u", "preg_replace('/a/', 'b', $u)"),
         "dumped type: string|null|array (asserted)"
     );
     assert_eq!(

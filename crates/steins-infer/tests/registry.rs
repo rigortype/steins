@@ -21,6 +21,8 @@ use steins_infer::{
     PHPDOC_UNDEFINED_METHOD_ID, PROP_MISMATCH_ID, READONLY_REASSIGNED_ID, REGISTERED_NOT_YET_EMITTED,
     RETURN_ID, RETURN_MISMATCH_ID, SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID, THROW_LISKOV_ID,
     THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID, declared_facet, layer,
+    // undefined variables (ADR-0078, issue #194)
+    VARIABLE_MAYBE_UNDEFINED_ID, VARIABLE_UNDEFINED_ID,
 };
 
 /// Totality, forward: every id an emitter can produce is registered *with* a layer.
@@ -172,8 +174,69 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
     assert!(pending.contains(too_many), "`{too_many}` should be registered-not-yet-emitted");
     assert!(!emittable.contains(too_many), "`{too_many}` must not be emittable before its stage");
     assert!(layer(too_many).is_some(), "`{too_many}` must be registered with a layer");
-    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 1);
 }
+
+// undefined variables (ADR-0078, issue #194)
+
+/// The `variable.*` pair: one id emitting, one registered ahead of emission.
+///
+/// `variable.undefined` proves the binding absent from the whole scope and emits at
+/// the `default` floor. `variable.maybe-undefined` claims only that *a* path reaches
+/// the read unbound — the reachability foundation's question (issue #199) — so it
+/// takes `call.too-many-arguments`' route: registered now so `@steins-ignore` can
+/// name it and a baseline entry means one fixed thing, emitting later.
+#[test]
+fn the_variable_pair_splits_across_the_two_carve_outs() {
+    let emittable: HashSet<&str> = ALL_EMITTABLE_IDS.iter().copied().collect();
+    let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
+
+    assert!(emittable.contains(VARIABLE_UNDEFINED_ID), "the proven arm emits");
+    assert!(
+        !pending.contains(VARIABLE_UNDEFINED_ID),
+        "`{VARIABLE_UNDEFINED_ID}` must not be registered-ahead-of-emission"
+    );
+    assert_eq!(layer(VARIABLE_UNDEFINED_ID), Some(Layer::Proof));
+    assert_eq!(surface_floor(VARIABLE_UNDEFINED_ID), Some(Floor::Default));
+
+    assert!(
+        pending.contains(VARIABLE_MAYBE_UNDEFINED_ID),
+        "`{VARIABLE_MAYBE_UNDEFINED_ID}` should be registered-not-yet-emitted (issue #199)"
+    );
+    assert!(
+        !emittable.contains(VARIABLE_MAYBE_UNDEFINED_ID),
+        "`{VARIABLE_MAYBE_UNDEFINED_ID}` must not be emittable before its stage"
+    );
+    assert_eq!(layer(VARIABLE_MAYBE_UNDEFINED_ID), Some(Layer::Proof));
+    assert_eq!(
+        surface_floor(VARIABLE_MAYBE_UNDEFINED_ID),
+        Some(Floor::Strict),
+        "the weaker claim is opt-in"
+    );
+
+    // Disjointness, stated for this pair specifically — the two ids describe the
+    // same defect at different strengths, which is exactly the shape where a
+    // double-registration would go unnoticed.
+    assert!(emittable.is_disjoint(&pending));
+    assert_ne!(VARIABLE_UNDEFINED_ID, VARIABLE_MAYBE_UNDEFINED_ID);
+
+    // The ADR-0022 kebab-case spellings are pinned: they reach users' baselines.
+    assert_eq!(VARIABLE_UNDEFINED_ID, "variable.undefined");
+    assert_eq!(VARIABLE_MAYBE_UNDEFINED_ID, "variable.maybe-undefined");
+}
+
+/// The registered-ahead-of-emission list holds exactly the two ids argued above and
+/// nothing else — the cardinality guard that makes a forgotten emitter visible.
+#[test]
+fn exactly_two_ids_are_registered_ahead_of_emission() {
+    let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
+    assert_eq!(
+        pending,
+        HashSet::from([CALL_TOO_MANY_ARGUMENTS_ID, VARIABLE_MAYBE_UNDEFINED_ID]),
+        "REGISTERED_NOT_YET_EMITTED drifted — every entry needs an argued reason"
+    );
+}
+
+// end undefined variables (ADR-0078, issue #194)
 
 /// All four debug ids emit at `Layer::Debug`, appear in `ALL_EMITTABLE_IDS`, and
 /// retain their ADR-0053/ADR-0074 kebab-case spellings.
@@ -260,9 +323,13 @@ fn every_registered_id_has_a_surface_floor() {
 /// exactly this rule — proof/mechanics/debug at `default`, contract at `contracts` —
 /// and it is checked here for EVERY id rather than argued once in a comment.
 ///
-/// The only admitted exception is the pair ADR-0062 S6 itself introduces: the offset
-/// family's strict leg sits in the contract layer at the `strict` floor, which is
-/// the whole reason a floor attribute was needed (a layer can now straddle rungs).
+/// Two exceptions are admitted, each argued at its registry row. The first is the
+/// pair ADR-0062 S6 itself introduces: the offset family's strict leg sits in the
+/// contract layer at the `strict` floor, which is the whole reason a floor attribute
+/// was needed (a layer can now straddle rungs). The second is `variable.maybe-undefined`
+/// (ADR-0078, issue #194), which straddles in the other direction — a *proof*-layer
+/// id at the `strict` floor, because its claim is weaker than its sibling's and the
+/// shape it names is one defensive house styles produce on purpose.
 #[test]
 fn floors_reproduce_the_pre_s6_layer_selection() {
     // The S6 pair, post-triage (2026-07-29 sweep): `offset.undeclared` measured
@@ -271,6 +338,13 @@ fn floors_reproduce_the_pre_s6_layer_selection() {
     // discharge lands (its 3 sweep findings were all that one gap).
     let promoted = [(OFFSET_UNDECLARED_ID, Floor::Contracts), (OFFSET_MAYBE_MISSING_ID, Floor::Strict)];
     for &(id, layer_of, floor) in DIAGNOSTIC_REGISTRY {
+        // The proof-layer opt-in (ADR-0078, issue #194) — the one row where a
+        // proof id does NOT sit at `default`, and deliberately so.
+        if id == VARIABLE_MAYBE_UNDEFINED_ID {
+            assert_eq!(layer_of, Layer::Proof, "the some-paths sibling stays proof-layer");
+            assert_eq!(floor, Floor::Strict, "…but opts in at `strict` (issue #199)");
+            continue;
+        }
         if let Some(&(_, expected_floor)) = promoted.iter().find(|(p, _)| *p == id) {
             assert_eq!(layer_of, Layer::Contract, "the strict leg is contract-layer");
             assert_eq!(floor, expected_floor, "`{id}` floor per the 2026-07-29 triage ruling");

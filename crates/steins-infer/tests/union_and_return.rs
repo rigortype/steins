@@ -230,7 +230,7 @@ fn return_inside_structured_if_is_now_checked() {
     // (The former "only top-of-trace returns are checked" limitation is lifted for
     // `if`; loops/switch/try returns remain inside `Opaque` and are still unseen.)
     let src =
-        "<?php\ndeclare(strict_types=1);\nfunction f(): int { if ($c) { return \"abc\"; } return 1; }\n";
+        "<?php\ndeclare(strict_types=1);\nfunction f($c): int { if ($c) { return \"abc\"; } return 1; }\n";
     let d = findings(src);
     assert_eq!(d.len(), 1, "return inside structured if is now checked: {d:#?}");
     assert_eq!(d[0].id, "type.return-mismatch");
@@ -275,6 +275,6 @@ fn void_never_untyped_and_nonscalar_returns_skipped() {
 fn return_without_value_is_silent() {
     // A bare `return;` in a typed function proves nothing about the value
     // (missing-return-path analysis is out of scope).
-    let src = "<?php\ndeclare(strict_types=1);\nfunction f(): int { if ($c) { return; } return 1; }\n";
+    let src = "<?php\ndeclare(strict_types=1);\nfunction f($c): int { if ($c) { return; } return 1; }\n";
     assert_eq!(n(src), 0, "bare return; is not a value proof");
 }

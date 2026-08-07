@@ -162,10 +162,16 @@ fn one_type_with(src: &str, folder: &mut dyn Folder) -> String {
 }
 
 /// A string-declared fixture: `@param <decl> $v`, one dump of `<expr>`.
+///
+/// `$n` and `$p` are untyped parameters the fixtures use wherever an argument must
+/// be an *unknown* int or string: untyped means no fact, which is the premise under
+/// test, and being parameters means they are bound (so `variable.undefined` — which
+/// this helper's no-other-finding assertion would otherwise catch — has nothing to
+/// say about them).
 fn dump_with(decl: &str, expr: &str, folder: &mut dyn Folder) -> String {
     one_type_with(
         &format!(
-            "<?php\n/** @param {decl} $v */\nfunction f(string $v): void {{ \\PHPStan\\dumpType({expr}); }}\n"
+            "<?php\n/** @param {decl} $v */\nfunction f(string $v, $n, $p): void {{ \\PHPStan\\dumpType({expr}); }}\n"
         ),
         folder,
     )
