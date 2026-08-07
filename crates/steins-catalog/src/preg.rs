@@ -80,8 +80,58 @@
 //! seed's consumer in `steins-infer`. This module knows only about the pattern
 //! string.
 //!
-//! Enumerating a sub-pattern's *language* — `(a)` yielding `'a'` rather than a
-//! refined `string` — is a different derivation and is not attempted here.
+//! # The literal enumeration (issue #177, slice F)
+//!
+//! Alongside the one-sided [`MatchedText`] floors, each group carries
+//! [`literals`](CaptureGroup::literals): the sub-pattern's whole **language**,
+//! when it is provably finite and small — `(a)` is `'a'`, `(£|€)` is
+//! `'£'|'€'`, `(a(b))` is `'ab'` (a nested group is transparent: its own
+//! entry keeps its own language). The enumeration rides this parser's own
+//! walk — the same atoms, the same alternation and concatenation — and it
+//! declines to `None`, silently and per group, far more often than it answers:
+//!
+//! * any quantifier other than exactly-one (`{1}` included) on an atom inside
+//!   the body — `?`, `*`, `+`, `{n}`, `{n,m}` all decline the enclosing
+//!   enumeration, and a quantifier admitting more than one iteration declines
+//!   the enumeration of every group inside its atom too (measured:
+//!   `preg_match('/(baz){2}/', 'bazbaz', $m)` gives `$m[1] === 'baz'`, the
+//!   last iteration, so enumerating it would be sound — but the oracle this
+//!   slice is calibrated against declines there, and agreement beats
+//!   sharpness, the same trade slice E already made);
+//! * a group's **own** quantifier is the one exception the calibration
+//!   demands: `(b)?` still enumerates `'b'`, because the quantifier belongs
+//!   to the surrounding text and the entry holds the body's single iteration
+//!   whenever the group participates (measured, and the projection layers
+//!   supply the `''`/`null`/absence story for the other paths);
+//! * every character class, even `[ab]` — the enumeration-vs-class boundary
+//!   is where miscounting starts;
+//! * every escape that is not punctuation-for-itself: `\d` and friends denote
+//!   sets, `\x{30}` is a second spelling of `'0'`, and one spelling per atom
+//!   is the rule;
+//! * `.`, backreferences, subroutine calls, `\K`;
+//! * the `i` modifier, trailing or inline: measured,
+//!   `preg_match('/(a)/i', 'A', $m)` captures `'A'`, so the pattern's own
+//!   spelling is NOT the language — and the oracle declines case-insensitive
+//!   patterns wholesale (`([xXa])/i` is `non-empty-string` there while the
+//!   case-sensitive twin enumerates), so the case product is not attempted
+//!   either;
+//! * more than [`LITERAL_UNION_CAP`] members at any intermediate step.
+//!
+//! Zero-width constructs contribute the empty string (`(^a$)` is `'a'`,
+//! measured), an empty alternation branch contributes `''` as a genuine
+//! member (`(|a)` is `''|'a'`, measured), and `\Q…\E` contributes its bytes
+//! verbatim. A decline never disturbs the [`MatchedText`] summary next to it.
+
+/// The most members a [`literals`](CaptureGroup::literals) union may carry.
+///
+/// Chosen from two measurements (issue #177): the consumer domain's own
+/// finite-value layer holds at most eight members before it widens, and the
+/// largest literal union the calibration oracle expects on a row this
+/// enumeration can reach has three (`''|'a'|'b'`) — so eight never truncates
+/// an expectation while keeping every product this parser can build trivially
+/// small. Past the cap the enumeration declines, at whatever intermediate
+/// step the excess appears.
+pub const LITERAL_UNION_CAP: usize = 8;
 
 /// The capture groups of a pattern, in numeric order.
 ///
@@ -201,6 +251,17 @@ pub struct CaptureGroup {
     /// repeated group captures its **last** iteration, so `preg_match('/(0){2}/',
     /// '00', $m)` gives `$m[1] === '0'` while `$m[0] === '00'` (measured).
     pub body: MatchedText,
+    /// The body's whole language, when provably finite and small (issue #177):
+    /// **every** string this group's entry can hold when the group
+    /// participates, sorted and deduped, `1..=`[`LITERAL_UNION_CAP`] members.
+    ///
+    /// `None` is the normal answer and is silent — the decline discipline is
+    /// the module-level story. `Some` is a claim about the whole language, so
+    /// a consumer may state the union as the entry's exact type wherever the
+    /// group participates; the unmatched paths (`''` padding, `null`, an
+    /// absent key) stay the projection fields' business, exactly as they are
+    /// for the [`MatchedText`] refinements.
+    pub literals: Option<Vec<String>>,
 }
 
 /// Read the capture-group structure of a PHP PCRE pattern, or decline.
@@ -213,13 +274,14 @@ pub struct CaptureGroup {
 /// established. This is a silent decline, not an error report; see the module
 /// documentation.
 pub fn capture_groups(pattern: &str) -> Option<CaptureGroups> {
-    let Delimited { body, ucp_digits } = split_delimited(pattern)?;
+    let Delimited { body, ucp_digits, case_insensitive } = split_delimited(pattern)?;
     let mut parser = Parser {
         src: body.as_bytes(),
         pos: 0,
         groups: Vec::new(),
         ucp_digits,
         match_start_reset: false,
+        case_flagged: false,
     };
     let whole = parser.alternation()?;
     if parser.pos != parser.src.len() {
@@ -230,10 +292,15 @@ pub fn capture_groups(pattern: &str) -> Option<CaptureGroups> {
     // expression's own length says nothing about `$matches[0]` — measured,
     // `preg_match('/a\K0/', 'a0', $m)` gives the falsy `'0'` for a two-character
     // expression. Group entries keep their text, so only entry 0 gives up.
-    let whole = if parser.match_start_reset { MatchedText::OPAQUE } else { whole };
+    let whole = if parser.match_start_reset { MatchedText::OPAQUE } else { whole.text };
+    // Case-insensitivity multiplies every letter's spellings, and the pattern's
+    // own spelling is not the language (measured: `/(a)/i` captures `'A'`) — so
+    // an `i` anywhere, trailing or inline, declines every enumeration while
+    // leaving the one-sided floors untouched.
+    let case_blind = case_insensitive || parser.case_flagged;
     let raw = parser.take_groups()?;
     Some(CaptureGroups {
-        groups: apply_trailing_absence(raw),
+        groups: apply_trailing_absence(raw, case_blind),
         whole,
     })
 }
@@ -295,6 +362,84 @@ fn is_utf8_continuation(b: u8) -> bool {
     b & 0b1100_0000 == 0b1000_0000
 }
 
+/// A sub-pattern's language while it is being built: byte strings, because the
+/// parser walks bytes and a multi-byte character is stitched back together by
+/// concatenation of its byte atoms. `None` is a decline and is absorbing.
+type Lang = Option<Vec<Vec<u8>>>;
+
+/// What the parser knows about one sub-pattern: the one-sided [`MatchedText`]
+/// floors, plus the whole language where it is provably finite and small
+/// (issue #177). The two travel together through the same walk, and the
+/// language declining never disturbs the floors.
+struct SubPattern {
+    text: MatchedText,
+    lang: Lang,
+}
+
+impl SubPattern {
+    /// A sub-pattern with no language claim.
+    fn undescribed(text: MatchedText) -> SubPattern {
+        SubPattern { text, lang: None }
+    }
+
+    /// A zero-width construct: it consumes nothing and contributes `''`.
+    fn zero_width() -> SubPattern {
+        SubPattern { text: MatchedText::EMPTY, lang: Some(vec![Vec::new()]) }
+    }
+
+    /// One sub-pattern followed by another: floors add, languages multiply.
+    fn concat(self, next: SubPattern) -> SubPattern {
+        let lang = match (self.lang, next.lang) {
+            (Some(a), Some(b)) => lang_bounded(
+                a.iter()
+                    .flat_map(|x| {
+                        b.iter().map(move |y| {
+                            let mut joined = x.clone();
+                            joined.extend_from_slice(y);
+                            joined
+                        })
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        };
+        SubPattern { text: self.text.concat(next.text), lang }
+    }
+
+    /// One alternation branch or the other: floors weaken, languages unite.
+    fn alternate(self, other: SubPattern) -> SubPattern {
+        let lang = match (self.lang, other.lang) {
+            (Some(mut a), Some(b)) => {
+                a.extend(b);
+                lang_bounded(a)
+            }
+            _ => None,
+        };
+        SubPattern { text: self.text.alternate(other.text), lang }
+    }
+}
+
+/// Sort, dedupe, and bound a language; past [`LITERAL_UNION_CAP`] the
+/// enumeration declines, at whatever intermediate step the excess appears.
+fn lang_bounded(mut members: Vec<Vec<u8>>) -> Lang {
+    members.sort();
+    members.dedup();
+    (members.len() <= LITERAL_UNION_CAP).then_some(members)
+}
+
+/// A raw byte-string language as the public [`CaptureGroup::literals`] field.
+///
+/// Every member a quantifier-free walk of a valid-UTF-8 pattern can build is
+/// itself valid UTF-8 (alternation splits on ASCII bytes, so a multi-byte
+/// character is never divided between branches), and every construct that
+/// could isolate a partial character — a quantifier on one byte of it —
+/// already declines. The conversion still checks rather than trusts: an
+/// invalid member declines the whole enumeration, because a literal fact that
+/// cannot be spelled must not be stated.
+fn lang_into_literals(lang: Lang) -> Option<Vec<String>> {
+    lang?.into_iter().map(|m| String::from_utf8(m).ok()).collect()
+}
+
 /// Apply the trailing-absence rule to groups already tagged with whether they
 /// can go unmatched.
 ///
@@ -306,7 +451,7 @@ fn is_utf8_continuation(b: u8) -> bool {
 /// with **any** group after it can be present-and-empty, because that later
 /// group may participate on a path where this one does not. Only the final group
 /// is exempt, since nothing can be populated after it to keep its entry alive.
-fn apply_trailing_absence(raw: Vec<RawGroup>) -> Vec<CaptureGroup> {
+fn apply_trailing_absence(raw: Vec<RawGroup>, case_blind: bool) -> Vec<CaptureGroup> {
     let last = raw.len().saturating_sub(1);
     let mut out: Vec<CaptureGroup> = Vec::with_capacity(raw.len());
     let mut guaranteed_after = false;
@@ -317,6 +462,7 @@ fn apply_trailing_absence(raw: Vec<RawGroup>) -> Vec<CaptureGroup> {
             can_be_present_empty: g.can_go_unmatched && i != last,
             can_go_unmatched: g.can_go_unmatched,
             body: g.body,
+            literals: if case_blind { None } else { lang_into_literals(g.lang) },
         });
         if !g.can_go_unmatched {
             guaranteed_after = true;
@@ -344,6 +490,10 @@ struct Delimited<'a> {
     /// Whether the `u` modifier is set, which switches PCRE2's Unicode
     /// properties on and so widens `\d` past ASCII (see the module docs).
     ucp_digits: bool,
+    /// Whether the `i` modifier is set, which multiplies every letter's
+    /// spellings and so declines the literal enumeration (issue #177) while
+    /// leaving the numbering and the floors alone.
+    case_insensitive: bool,
 }
 
 /// Strip the delimiters and modifiers, yielding the bare expression.
@@ -402,6 +552,7 @@ fn split_delimited(pattern: &str) -> Option<Delimited<'_>> {
     };
 
     let mut ucp_digits = false;
+    let mut case_insensitive = false;
     for &m in &bytes[end + 1..] {
         // PHP ignores space, LF, and CR between modifiers — but not tab.
         if m == b' ' || m == b'\n' || m == b'\r' {
@@ -411,13 +562,14 @@ fn split_delimited(pattern: &str) -> Option<Delimited<'_>> {
             return None;
         }
         ucp_digits |= m == b'u';
+        case_insensitive |= m == b'i';
     }
 
     // The scan is byte-wise, but it only ever stops on ASCII, and UTF-8 never
     // encodes an ASCII byte inside a multi-byte sequence, so both cuts land on
     // character boundaries.
     let body = pattern.get(start + 1..end)?;
-    Some(Delimited { body, ucp_digits })
+    Some(Delimited { body, ucp_digits, case_insensitive })
 }
 
 // ---------------------------------------------------------------------------
@@ -433,6 +585,11 @@ struct RawGroup {
     can_go_unmatched: bool,
     /// The group's body, filled in once the body has been parsed.
     body: MatchedText,
+    /// The body's language, filled in with the body — and wiped again by a
+    /// surrounding quantifier that admits more than one iteration (issue #177:
+    /// the capture then comes from an iteration, which the calibration oracle
+    /// declines to model, so this does too).
+    lang: Lang,
 }
 
 /// Inline flag letters. `x`, `n`, and `J` are listed so `(?xn)` is *recognised*
@@ -452,6 +609,10 @@ struct Parser<'a> {
     /// A `\K` was seen, so the overall match starts somewhere the expression's
     /// own length cannot locate.
     match_start_reset: bool,
+    /// An inline flag group mentioned `i` (setting or clearing — either way a
+    /// region of the pattern may be case-insensitive), so every literal
+    /// enumeration declines (issue #177).
+    case_flagged: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -504,50 +665,72 @@ impl<'a> Parser<'a> {
     /// successful match takes a different branch. That over-approximates —
     /// nothing here proves the other branches are reachable — but it errs
     /// towards `can_be_trailing_absent`, which is the safe side.
-    fn alternation(&mut self) -> Option<MatchedText> {
+    fn alternation(&mut self) -> Option<SubPattern> {
         let start = self.groups.len();
         let mut branches = 1usize;
-        let mut text = self.branch()?;
+        let mut sum = self.branch()?;
         loop {
             if self.peek() != Some(b'|') {
                 break;
             }
             self.pos += 1;
             branches += 1;
-            text = text.alternate(self.branch()?);
+            sum = sum.alternate(self.branch()?);
         }
         if branches > 1 {
             self.mark_optional_from(start);
         }
-        Some(text)
+        Some(sum)
     }
 
     /// One alternation branch: atoms until `|`, `)`, or end of input.
-    fn branch(&mut self) -> Option<MatchedText> {
-        let mut text = MatchedText::EMPTY;
+    ///
+    /// The empty branch is a genuine sub-pattern whose language is `{''}` —
+    /// measured, `preg_match('/(|a)/', 'a', $m)` succeeds with `$m[1] === ''`,
+    /// so `(|a)` enumerates to `''|'a'`.
+    fn branch(&mut self) -> Option<SubPattern> {
+        let mut sum = SubPattern::zero_width();
         while let Some(c) = self.peek() {
             if c == b'|' || c == b')' {
                 break;
             }
-            text = text.concat(self.atom()?);
+            sum = sum.concat(self.atom()?);
         }
-        Some(text)
+        Some(sum)
     }
 
     /// One quantified atom.
-    fn atom(&mut self) -> Option<MatchedText> {
+    fn atom(&mut self) -> Option<SubPattern> {
         let start = self.groups.len();
-        let text = match self.peek()? {
+        let sub = match self.peek()? {
             b'(' => self.open_paren()?,
             b'[' => self.char_class()?,
             b'\\' => self.escape()?,
             _ => self.literal_byte(),
         };
-        let min_reps = self.quantifier_min();
-        if min_reps == 0 {
+        let quant = self.quantifier();
+        if quant.min_reps == 0 {
             self.mark_optional_from(start);
         }
-        Some(text.repeat(min_reps))
+        if !quant.at_most_one {
+            // More than one iteration reachable: the capture of any group
+            // inside comes from an iteration. Measured, `/(baz){2}/` on
+            // 'bazbaz' still captures `'baz'` — the last iteration — so the
+            // body language would be sound; but the calibration oracle
+            // declines every multi-iteration quantifier (`(baz){2}` expects
+            // only `non-falsy-string` there), and agreement beats sharpness.
+            for g in &mut self.groups[start..] {
+                g.lang = None;
+            }
+        }
+        // The atom's contribution to the surrounding language survives only an
+        // exactly-once quantifier (none, `{1}`, `{1,1}`): `?` and `{0,1}` make
+        // it variable and the rest make it repeated, and both decline (issue
+        // #177 — the group's own entry above keeps its body language, because
+        // the quantifier belongs to the surrounding text, not the capture).
+        let exactly_once = quant.min_reps == 1 && quant.at_most_one;
+        let lang = if exactly_once { sub.lang } else { None };
+        Some(SubPattern { text: sub.text.repeat(quant.min_reps), lang })
     }
 
     /// One byte that is not the start of a group, a class, or an escape.
@@ -555,20 +738,33 @@ impl<'a> Parser<'a> {
     /// `^` and `$` are the ones that matter: they assert a position rather than
     /// consuming a character, so a pattern like `/(^0$)/` must still be read as
     /// one character and stay falsy-capable.
-    fn literal_byte(&mut self) -> MatchedText {
-        let Some(c) = self.peek() else { return MatchedText::EMPTY };
+    fn literal_byte(&mut self) -> SubPattern {
+        let Some(c) = self.peek() else { return SubPattern::undescribed(MatchedText::EMPTY) };
         self.pos += 1;
         match c {
-            b'^' | b'$' => MatchedText::EMPTY,
+            // Zero-width, and zero contribution to the language: measured,
+            // `preg_match('/(^a$)/', 'a', $m)` gives `$m[1] === 'a'`.
+            b'^' | b'$' => SubPattern::zero_width(),
+            // The dot names a set, not a literal; the stray quantifier bytes
+            // sit in a pattern PCRE rejects ("nothing to repeat"), where a
+            // language claim would be about matches that never happen.
+            b'.' | b'*' | b'+' | b'?' => SubPattern::undescribed(MatchedText::ONE_CHAR),
             // Counted with the character its lead byte opened, so `£` is one.
-            c if is_utf8_continuation(c) => MatchedText::EMPTY,
-            c if c.is_ascii_digit() => MatchedText::ONE_DIGIT,
-            _ => MatchedText::ONE_CHAR,
+            // The byte still joins the language: concatenation stitches a
+            // multi-byte character back together from its byte atoms, and
+            // every construct that could isolate one byte of it declines.
+            c if is_utf8_continuation(c) => {
+                SubPattern { text: MatchedText::EMPTY, lang: Some(vec![vec![c]]) }
+            }
+            c if c.is_ascii_digit() => {
+                SubPattern { text: MatchedText::ONE_DIGIT, lang: Some(vec![vec![c]]) }
+            }
+            _ => SubPattern { text: MatchedText::ONE_CHAR, lang: Some(vec![vec![c]]) },
         }
     }
 
     /// Dispatch on what follows a `(`.
-    fn open_paren(&mut self) -> Option<MatchedText> {
+    fn open_paren(&mut self) -> Option<SubPattern> {
         debug_assert_eq!(self.peek(), Some(b'('));
 
         // Backtracking control verbs. `(*MARK:x)` puts a `'MARK'` key into
@@ -587,19 +783,23 @@ impl<'a> Parser<'a> {
         // Order matters: `(?<=` and `(?<!` must be tested before `(?<name>`,
         // and `(?P<name>` before the inline-flag fallthrough.
         if self.eat(b"(?:") || self.eat(b"(?>") {
-            // Non-capturing, and its body is matched in place.
-            let text = self.alternation()?;
+            // Non-capturing, and its body is matched in place — language
+            // included. An atomic group only prunes backtracking, so every
+            // string it can consume is still in its body's language and the
+            // over-approximation stays sound.
+            let sub = self.alternation()?;
             self.close_group()?;
-            return Some(text);
+            return Some(sub);
         }
         if self.eat(b"(?=") || self.eat(b"(?<=") {
             // Everything inside a *positive* lookaround participates whenever
             // the match succeeds — but it is an assertion, so it consumes no
             // characters and contributes none. Measured:
-            // `preg_match('/(0(?=x))/', '0x', $m)` gives `$m[1] === '0'`.
+            // `preg_match('/(0(?=x))/', '0x', $m)` gives `$m[1] === '0'`, and
+            // `preg_match('/(a(?=x))/', 'ax', $m)` gives `$m[1] === 'a'`.
             self.alternation()?;
             self.close_group()?;
-            return Some(MatchedText::EMPTY);
+            return Some(SubPattern::zero_width());
         }
         if self.eat(b"(?!") || self.eat(b"(?<!") {
             // A negative lookaround succeeds only when its body did NOT match,
@@ -609,13 +809,14 @@ impl<'a> Parser<'a> {
             self.alternation()?;
             self.close_group()?;
             self.mark_optional_from(start);
-            return Some(MatchedText::EMPTY);
+            return Some(SubPattern::zero_width());
         }
         if self.eat(b"(?#") {
             // A comment runs to the first `)`. A backslash does not escape
-            // inside it: `'/(?#a\)b)/'` fails to compile.
+            // inside it: `'/(?#a\)b)/'` fails to compile. Measured:
+            // `preg_match('/(a(?#hi)b)/', 'ab', $m)` gives `$m[1] === 'ab'`.
             self.skip_to_close_paren()?;
-            return Some(MatchedText::EMPTY);
+            return Some(SubPattern::zero_width());
         }
         if self.rest().starts_with(b"(?P=") {
             // A named backreference, not a group. What it matches is whatever
@@ -623,7 +824,7 @@ impl<'a> Parser<'a> {
             // `preg_match('/(a?)b\1/', 'b', $m)` matches.
             self.pos += 4;
             self.skip_to_close_paren()?;
-            return Some(MatchedText::OPAQUE);
+            return Some(SubPattern::undescribed(MatchedText::OPAQUE));
         }
         if self.eat(b"(?P<") {
             return self.named_group(b'>');
@@ -650,7 +851,7 @@ impl<'a> Parser<'a> {
     ///
     /// Measured: a named group takes a numeric index too, so this pushes one
     /// group exactly like a plain `(…)` and merely records the name alongside.
-    fn named_group(&mut self, terminator: u8) -> Option<MatchedText> {
+    fn named_group(&mut self, terminator: u8) -> Option<SubPattern> {
         let name_start = self.pos;
         while let Some(c) = self.peek() {
             if c == terminator {
@@ -678,17 +879,22 @@ impl<'a> Parser<'a> {
 
     /// Record a capture group, parse its body, and hand the body back — both to
     /// the group's own entry and to the surrounding text, which is where its
-    /// quantifier will be applied.
-    fn capturing_group(&mut self, name: Option<String>) -> Option<MatchedText> {
+    /// quantifier will be applied. The language rides along on both sides,
+    /// which is what makes a nested group transparent to an enclosing one:
+    /// measured, `preg_match('/(a(b))/', 'ab', $m)` gives `$m[1] === 'ab'`
+    /// while `$m[2] === 'b'`.
+    fn capturing_group(&mut self, name: Option<String>) -> Option<SubPattern> {
         let index = self.groups.len();
         self.groups.push(RawGroup {
             name,
             can_go_unmatched: false,
             body: MatchedText::OPAQUE,
+            lang: None,
         });
         let body = self.alternation()?;
         self.close_group()?;
-        self.groups[index].body = body;
+        self.groups[index].body = body.text;
+        self.groups[index].lang = body.lang.clone();
         Some(body)
     }
 
@@ -698,7 +904,7 @@ impl<'a> Parser<'a> {
     /// (`(?(?=…)`) hides a whole sub-pattern, `(?(R…)` is a recursion test, and
     /// `(?(DEFINE)…)` holds groups that occupy indices yet never participate;
     /// all three decline.
-    fn conditional(&mut self) -> Option<MatchedText> {
+    fn conditional(&mut self) -> Option<SubPattern> {
         let cond_start = self.pos;
         while self.peek()? != b')' {
             self.pos += 1;
@@ -712,16 +918,19 @@ impl<'a> Parser<'a> {
         // single arm the whole body may be skipped — so the entire subtree can
         // go unmatched. `alternation` reads the two arms as branches of one
         // alternation, which is wrong for the length (the condition is not an
-        // arm), so the whole construct contributes nothing.
+        // arm), so the whole construct contributes nothing. The groups inside
+        // keep their own body languages: a language is a claim about the entry
+        // *when the group participates*, and which arm ran does not change
+        // what the arm's own body can capture.
         let start = self.groups.len();
         self.alternation()?;
         self.close_group()?;
         self.mark_optional_from(start);
-        Some(MatchedText::OPAQUE)
+        Some(SubPattern::undescribed(MatchedText::OPAQUE))
     }
 
     /// `(?flags)` and `(?flags:…)` — the cursor sits on the `(`.
-    fn inline_flags(&mut self) -> Option<MatchedText> {
+    fn inline_flags(&mut self) -> Option<SubPattern> {
         let flags_start = self.pos + 2;
         let mut i = flags_start;
         while let Some(&c) = self.src.get(i) {
@@ -740,20 +949,26 @@ impl<'a> Parser<'a> {
             // one group where a flag-blind reader would say two.
             return None;
         }
+        if flags.contains(&b'i') {
+            // Setting or clearing — either way some region's case behavior is
+            // not the default, and the literal enumeration declines pattern-wide
+            // (issue #177; measured, `/(?i)(a)/` on 'A' captures 'A').
+            self.case_flagged = true;
+        }
         match self.src.get(i)? {
             // `(?i)` — a bare setting, spanning the rest of the enclosing
             // group. It opens nothing, so there is no body and no `)` to match
             // beyond this one.
             b')' => {
                 self.pos = i + 1;
-                Some(MatchedText::EMPTY)
+                Some(SubPattern::zero_width())
             }
             // `(?i:…)` — a scoped setting on a non-capturing group.
             b':' => {
                 self.pos = i + 1;
-                let text = self.alternation()?;
+                let sub = self.alternation()?;
                 self.close_group()?;
-                Some(text)
+                Some(sub)
             }
             // A digit here means `(?-1)`/`(?+1)`: a relative subroutine call,
             // not a flag setting.
@@ -793,7 +1008,7 @@ impl<'a> Parser<'a> {
     ///
     /// Every arm consumes exactly what the old backslash-plus-quantifier
     /// reading consumed, so the group numbering is untouched.
-    fn escape(&mut self) -> Option<MatchedText> {
+    fn escape(&mut self) -> Option<SubPattern> {
         debug_assert_eq!(self.peek(), Some(b'\\'));
         let next = *self.src.get(self.pos + 1)?;
         self.pos += 2;
@@ -801,39 +1016,48 @@ impl<'a> Parser<'a> {
             // A literal run, which ends at `\E` or at the end of the expression.
             b'Q' => self.take_quoted(),
             // A stray `\E` closes nothing and matches nothing.
-            b'E' => MatchedText::EMPTY,
+            b'E' => SubPattern::zero_width(),
             // Zero-width assertions.
-            b'A' | b'b' | b'B' | b'G' | b'z' | b'Z' => MatchedText::EMPTY,
+            b'A' | b'b' | b'B' | b'G' | b'z' | b'Z' => SubPattern::zero_width(),
             // `\K` discards what was matched before it from `$matches[0]`.
+            // What it leaves a surrounding *group's* entry holding is a claim
+            // this reader has not measured, so the language declines.
             b'K' => {
                 self.match_start_reset = true;
-                MatchedText::EMPTY
+                SubPattern::undescribed(MatchedText::EMPTY)
             }
             // The one escape that carries a digit claim — and only without the
             // `u` modifier, which widens it to every Unicode decimal digit.
-            b'd' => {
-                if self.ucp_digits { MatchedText::ONE_CHAR } else { MatchedText::ONE_DIGIT }
-            }
+            b'd' => SubPattern::undescribed(if self.ucp_digits {
+                MatchedText::ONE_CHAR
+            } else {
+                MatchedText::ONE_DIGIT
+            }),
             // One character, of a kind that is not known to be a digit. `\R`
             // can match the two characters of a CRLF, so one is still a floor.
             b'D' | b'w' | b'W' | b's' | b'S' | b'h' | b'H' | b'v' | b'V' | b'R' | b'X' | b'C'
-            | b'a' | b'e' | b'f' | b'n' | b'r' | b't' => MatchedText::ONE_CHAR,
+            | b'a' | b'e' | b'f' | b'n' | b'r' | b't' => {
+                SubPattern::undescribed(MatchedText::ONE_CHAR)
+            }
             // `\cA` — one control character, spelled with a following byte.
             b'c' => {
                 self.src.get(self.pos)?;
                 self.pos += 1;
-                MatchedText::ONE_CHAR
+                SubPattern::undescribed(MatchedText::ONE_CHAR)
             }
-            // One character named by a code point or a property.
+            // One character named by a code point or a property. `\x{30}` is a
+            // second spelling of `'0'`, and one spelling per atom is the
+            // enumeration's rule, so the language declines with the set-like
+            // properties rather than modelling code-point arithmetic.
             b'x' | b'o' | b'p' | b'P' | b'N' => {
                 self.skip_escape_argument();
-                MatchedText::ONE_CHAR
+                SubPattern::undescribed(MatchedText::ONE_CHAR)
             }
             // A backreference or a subroutine call: whatever the referenced
             // group matched, which may be the empty string.
             b'g' | b'k' => {
                 self.skip_escape_argument();
-                MatchedText::OPAQUE
+                SubPattern::undescribed(MatchedText::OPAQUE)
             }
             // `\1` is a backreference, `\060` an octal code point, and telling
             // them apart needs the group count. Neither claim is worth the
@@ -842,13 +1066,15 @@ impl<'a> Parser<'a> {
                 while self.peek().is_some_and(|c| c.is_ascii_digit()) {
                     self.pos += 1;
                 }
-                MatchedText::OPAQUE
+                SubPattern::undescribed(MatchedText::OPAQUE)
             }
-            // An escaped punctuation character stands for itself. An escaped
-            // letter this reader does not know is one PCRE rejects, so the
-            // floor it gives up costs nothing.
-            c if c.is_ascii_alphabetic() => MatchedText::OPAQUE,
-            c => MatchedText::literal_run(&[c]),
+            // An escaped letter this reader does not know is one PCRE rejects,
+            // so the floor it gives up costs nothing.
+            c if c.is_ascii_alphabetic() => SubPattern::undescribed(MatchedText::OPAQUE),
+            // An escaped punctuation character stands for itself — measured,
+            // `preg_match('/(a\.b)/', 'a.b', $m)` gives `$m[1] === 'a.b'` and
+            // `'axb'` does not match.
+            c => SubPattern { text: MatchedText::literal_run(&[c]), lang: Some(vec![vec![c]]) },
         })
     }
 
@@ -885,18 +1111,25 @@ impl<'a> Parser<'a> {
     }
 
     /// Read a `\Q` literal run, which ends at `\E` or at the end of input.
-    fn take_quoted(&mut self) -> MatchedText {
+    ///
+    /// The run is one literal, bytes verbatim — measured,
+    /// `preg_match('/(\Qa|b\E)/', 'a|b', $m)` gives `$m[1] === 'a|b'`.
+    fn take_quoted(&mut self) -> SubPattern {
         let src = self.src;
         let start = self.pos;
         while self.pos < src.len() {
             if self.rest().starts_with(b"\\E") {
-                let text = MatchedText::literal_run(&src[start..self.pos]);
+                let run = &src[start..self.pos];
                 self.pos += 2;
-                return text;
+                return SubPattern {
+                    text: MatchedText::literal_run(run),
+                    lang: Some(vec![run.to_vec()]),
+                };
             }
             self.pos += 1;
         }
-        MatchedText::literal_run(&src[start..])
+        let run = &src[start..];
+        SubPattern { text: MatchedText::literal_run(run), lang: Some(vec![run.to_vec()]) }
     }
 
     /// A bracketed character class. Nothing inside one is a group.
@@ -905,7 +1138,11 @@ impl<'a> Parser<'a> {
     /// measured: a `]` in first position (after an optional `^`) is a literal,
     /// `\Q…\E` hides a `]`, and a POSIX class `[:alpha:]` carries a `]` of its
     /// own — `'/[[:alpha:](]+(b)/'` has one group, not two.
-    fn char_class(&mut self) -> Option<MatchedText> {
+    ///
+    /// A class never enumerates, `[ab]` included (issue #177): the
+    /// enumeration-vs-class boundary is where miscounting starts, so v1 keeps
+    /// the whole family on the decline side.
+    fn char_class(&mut self) -> Option<SubPattern> {
         debug_assert_eq!(self.peek(), Some(b'['));
         let src = self.src;
         self.pos += 1;
@@ -919,10 +1156,10 @@ impl<'a> Parser<'a> {
                     self.pos += 1;
                     // A class matches exactly one character, whatever its body
                     // holds — so only the digit claim needs the body read.
-                    return Some(MatchedText {
+                    return Some(SubPattern::undescribed(MatchedText {
                         min_chars: 1,
                         digits_only: class_is_digits_only(body, self.ucp_digits),
-                    });
+                    }));
                 }
                 b'\\' => {
                     if self.eat(b"\\Q") {
@@ -971,41 +1208,46 @@ impl<'a> Parser<'a> {
         Some(())
     }
 
-    /// Read the quantifier after an atom, answering how few times the atom may
-    /// repeat. Zero means the atom can be skipped entirely; one is the answer
-    /// for an unquantified atom.
+    /// Read the quantifier after an atom. Zero `min_reps` means the atom can be
+    /// skipped entirely; `min_reps` one with `at_most_one` is the answer for an
+    /// unquantified atom.
     ///
     /// A `{…}` that is not a well-formed quantifier is a literal brace, which
     /// PCRE accepts: `'/(a)b{x}(c)/'` matches the text `b{x}` and has two
     /// groups.
-    fn quantifier_min(&mut self) -> u32 {
-        let min_reps = match self.peek() {
-            Some(b'?' | b'*') => {
+    fn quantifier(&mut self) -> Quant {
+        let quant = match self.peek() {
+            Some(b'?') => {
                 self.pos += 1;
-                0
+                Quant { min_reps: 0, at_most_one: true }
+            }
+            Some(b'*') => {
+                self.pos += 1;
+                Quant { min_reps: 0, at_most_one: false }
             }
             Some(b'+') => {
                 self.pos += 1;
-                1
+                Quant { min_reps: 1, at_most_one: false }
             }
             Some(b'{') => match self.braced_quantifier() {
-                Some(min_reps) => min_reps,
-                None => return 1,
+                Some(quant) => quant,
+                None => return Quant::ONCE,
             },
-            _ => return 1,
+            _ => return Quant::ONCE,
         };
         // A trailing `?` (lazy) or `+` (possessive) changes the search order,
-        // never how few times the atom may repeat.
+        // never how few or how many times the atom may repeat.
         if matches!(self.peek(), Some(b'?' | b'+')) {
             self.pos += 1;
         }
-        min_reps
+        quant
     }
 
     /// `{n}`, `{n,}`, `{n,m}`, `{,m}` — consumed only if well formed. Answers
-    /// the minimum repeat count, saturating rather than overflowing on a count
-    /// no subject could ever be long enough to satisfy.
-    fn braced_quantifier(&mut self) -> Option<u32> {
+    /// the repeat bounds, saturating rather than overflowing on a count no
+    /// subject could ever be long enough to satisfy (which also keeps the
+    /// `at_most_one` claim honest: a saturated count is far above one).
+    fn braced_quantifier(&mut self) -> Option<Quant> {
         let mut i = self.pos + 1;
         let digits_start = i;
         while self.src.get(i).is_some_and(u8::is_ascii_digit) {
@@ -1013,6 +1255,7 @@ impl<'a> Parser<'a> {
         }
         let min_digits = &self.src[digits_start..i];
         let has_comma = self.src.get(i) == Some(&b',');
+        let max_start = i + 1;
         if has_comma {
             i += 1;
             while self.src.get(i).is_some_and(u8::is_ascii_digit) {
@@ -1026,13 +1269,40 @@ impl<'a> Parser<'a> {
         if min_digits.is_empty() && (!has_comma || i == digits_start + 1) {
             return None;
         }
+        let max_digits = if has_comma { &self.src[max_start..i] } else { min_digits };
         self.pos = i + 1;
-        let mut min_reps: u32 = 0;
-        for d in min_digits {
-            min_reps = min_reps.saturating_mul(10).saturating_add(u32::from(d - b'0'));
-        }
-        Some(min_reps)
+        let min_reps = saturating_decimal(min_digits);
+        // `{n,}` has no ceiling; `{n}` repeats exactly `n` times.
+        let at_most_one = (!has_comma || !max_digits.is_empty())
+            && saturating_decimal(max_digits) <= 1;
+        Some(Quant { min_reps, at_most_one })
     }
+}
+
+/// An atom's quantifier, reduced to what the two consumers need: the floor
+/// multiplies by `min_reps`, and the literal enumeration survives only where
+/// `at_most_one` holds (a multi-iteration quantifier hands the capture to an
+/// iteration — see [`Parser::atom`]).
+struct Quant {
+    /// The fewest times the atom may repeat.
+    min_reps: u32,
+    /// Whether the atom can repeat at most once (`?`, `{1}`, `{0,1}`, `{0}`,
+    /// or no quantifier at all).
+    at_most_one: bool,
+}
+
+impl Quant {
+    /// The unquantified atom: exactly once.
+    const ONCE: Quant = Quant { min_reps: 1, at_most_one: true };
+}
+
+/// A digit run as a saturating decimal count.
+fn saturating_decimal(digits: &[u8]) -> u32 {
+    let mut n: u32 = 0;
+    for d in digits {
+        n = n.saturating_mul(10).saturating_add(u32::from(d - b'0'));
+    }
+    n
 }
 
 /// Whether a byte may appear in an escape's argument — a code point, a Unicode
@@ -1939,5 +2209,182 @@ mod tests {
         // Measured: `preg_match('/\w-(?P<num>\d+)-(\w)/', 'a-12-b', $m)`
         // matches, and no subject shorter than five characters can.
         assert_eq!(whole(r"/\w-(?P<num>\d+)-(\w)/").min_chars, 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // The literal enumeration (issue #177, slice F)
+    // -----------------------------------------------------------------------
+
+    /// Each group's enumerated language, in numeric order — `None` per group
+    /// is the decline, and every `Some` below was observed by running the
+    /// pattern through PHP 8.5.9 in the same work session.
+    fn literals(pattern: &str) -> Vec<Option<Vec<String>>> {
+        capture_groups(pattern)
+            .unwrap_or_else(|| panic!("expected an answer for {pattern}"))
+            .groups
+            .iter()
+            .map(|g| g.literals.clone())
+            .collect()
+    }
+
+    /// The expected argument for [`literals`]: one `Some` union, members in
+    /// the reader's sorted order.
+    fn union(members: &[&str]) -> Option<Vec<String>> {
+        Some(members.iter().map(|m| (*m).to_owned()).collect())
+    }
+
+    #[test]
+    fn a_single_literal_enumerates_to_its_one_spelling() {
+        // Measured: `preg_match('/(a)/', 'xay', $m)` gives `$m[1] === 'a'`.
+        assert_eq!(literals("/(a)/"), [union(&["a"])]);
+        // Measured: `'a.b'` matches and `'axb'` does not — the escaped dot is
+        // itself, not a set.
+        assert_eq!(literals(r"/(a\.b)/"), [union(&["a.b"])]);
+        // Measured: `preg_match('~(\{2})~', 'x{2}y', $m)` gives `'{2}'` — a
+        // brace with nothing to quantify is a literal.
+        assert_eq!(literals(r"~(\{2})~"), [union(&["{2}"])]);
+        // Measured: `preg_match('/(\Qa|b\E)/', 'a|b', $m)` gives `'a|b'`.
+        assert_eq!(literals(r"/(\Qa|b\E)/"), [union(&["a|b"])]);
+    }
+
+    #[test]
+    fn an_alternation_of_literals_enumerates_every_branch() {
+        // Measured: `'xbary'` captures `'bar'` and `'xfooy'` captures `'foo'`.
+        assert_eq!(literals("/(foo|bar)/"), [union(&["bar", "foo"])]);
+        // Measured: both currencies captured, one character each, two bytes —
+        // the byte atoms of a multi-byte character stitch back together.
+        assert_eq!(literals("/Price: (£|€)/"), [union(&["£", "€"])]);
+        // Duplicate branches are one member.
+        assert_eq!(literals("/(a|a)/"), [union(&["a"])]);
+    }
+
+    #[test]
+    fn an_empty_branch_contributes_the_empty_string_as_a_member() {
+        // Measured: `preg_match('/(|a)/', 'a', $m)` succeeds with `$m[1] ===
+        // ''`, and `preg_match('/(|a)a$/', 'aa', $m)` reaches `'a'`.
+        assert_eq!(literals("/(|a)/"), [union(&["", "a"])]);
+        assert_eq!(literals("/(a|)/"), [union(&["", "a"])]);
+    }
+
+    #[test]
+    fn a_nested_group_is_transparent_to_its_encloser() {
+        // Measured: `preg_match('/(a(b))/', 'ab', $m)` gives `$m[1] === 'ab'`
+        // and `$m[2] === 'b'` — the oracle's own `~^(a(b))$~` expectation.
+        assert_eq!(literals("/(a(b))/"), [union(&["ab"]), union(&["b"])]);
+        // A non-capturing wrapper is transparent the same way, and the product
+        // of small alternations enumerates up to the cap: measured, `'ace'`
+        // and `'bdf'` both capture themselves.
+        assert_eq!(
+            literals("/((?:a|b)(?:c|d)(?:e|f))/"),
+            [union(&["ace", "acf", "ade", "adf", "bce", "bcf", "bde", "bdf"])]
+        );
+    }
+
+    #[test]
+    fn past_the_cap_the_enumeration_declines() {
+        // One more doubling than the case above: sixteen members.
+        assert_eq!(literals("/((?:a|b)(?:c|d)(?:e|f)(?:g|h))/"), [None]);
+    }
+
+    #[test]
+    fn zero_width_constructs_contribute_the_empty_string() {
+        // Measured: `preg_match('/(^a$)/', 'a', $m)` gives `$m[1] === 'a'`.
+        assert_eq!(literals("/(^a$)/"), [union(&["a"])]);
+        // Measured: `preg_match('/(a(?=x))/', 'ax', $m)` gives `$m[1] === 'a'`.
+        assert_eq!(literals("/(a(?=x))/"), [union(&["a"])]);
+        // Measured: `preg_match('/(a(?#hi)b)/', 'ab', $m)` gives `'ab'`.
+        assert_eq!(literals("/(a(?#hi)b)/"), [union(&["ab"])]);
+    }
+
+    #[test]
+    fn a_groups_own_single_iteration_quantifier_keeps_its_body_language() {
+        // The quantifier belongs to the surrounding text, not the capture:
+        // measured, `preg_match('/x(b)?/', 'xb', $m)` gives `$m[1] === 'b'`,
+        // and the oracle's `~^a\.(b)?(c)?d~` expectation is `1?: ''|'b'` — the
+        // `''` member is the present-empty projection's business, joined on by
+        // the consumer, not a language member here.
+        assert_eq!(literals("/x(b)?/"), [union(&["b"])]);
+        assert_eq!(literals(r"/a\.(b)?(c)?d/"), [union(&["b"]), union(&["c"])]);
+    }
+
+    #[test]
+    fn a_multi_iteration_quantifier_declines_the_groups_inside_it() {
+        // Measured: `preg_match('/(baz){2}/', 'bazbaz', $m)` gives `$m[1] ===
+        // 'baz'` — the last iteration, so enumerating WOULD be sound. The
+        // calibration oracle declines there (`(baz){2}` expects only
+        // `non-falsy-string`), and agreement beats sharpness, so this declines
+        // too — the measured decision of issue #177.
+        assert_eq!(literals("/(baz){2}/"), [None]);
+        assert_eq!(literals("/(d)*/"), [None]);
+        assert_eq!(literals("/(b)+/"), [None]);
+        assert_eq!(literals("/(a(b){2})/"), [None, None]);
+    }
+
+    #[test]
+    fn any_quantifier_inside_the_body_declines_the_enumeration() {
+        // The oracle enumerates `(a|bc?)` to `'a'|'b'|'bc'`; v1 stays on the
+        // decline side of every body-level quantifier, `{1}` excepted — the
+        // floors still answer, so the entry keeps its slice-E refinement.
+        assert_eq!(literals("/(a|bc?)/"), [None]);
+        assert_eq!(literals("/(ab*)/"), [None]);
+        assert_eq!(literals("/(ab+)/"), [None]);
+        // Measured: `preg_match('/(a{2})/', 'aa', $m)` gives `'aa'` — sound to
+        // enumerate, declined for the same agreement reason as `(baz){2}`.
+        assert_eq!(literals("/(a{2})/"), [None]);
+        assert_eq!(literals("/(a{2,3})/"), [None]);
+        // `{1}` is the identity: measured, `preg_match('/(a{1})/', 'a', $m)`
+        // gives `'a'`.
+        assert_eq!(literals("/(a{1})/"), [union(&["a"])]);
+        // The inner `?` declines the encloser, never the inner group's own
+        // entry: the oracle's `~^(a(b)?)$~` row expects `1: 'a'|'ab', 2?: 'b'`
+        // and v1 answers `non-empty-string` for group 1, `'b'` for group 2.
+        assert_eq!(literals("/(a(b)?)/"), [None, union(&["b"])]);
+    }
+
+    #[test]
+    fn sets_and_references_decline_the_enumeration() {
+        // Every character class, even a two-member one — the v1 boundary.
+        assert_eq!(literals("/([ab])/"), [None]);
+        assert_eq!(literals("/([157])/"), [None]);
+        // Set-denoting escapes, the dot, and code-point spellings.
+        assert_eq!(literals(r"/(\d)/"), [None]);
+        assert_eq!(literals("/(.)/"), [None]);
+        assert_eq!(literals(r"/(\x{30})/"), [None]);
+        // A mixed alternation declines whole: one undescribed branch is enough.
+        assert_eq!(literals(r"/(a|\d)/"), [None]);
+        // Backreferences, in both spellings.
+        assert_eq!(literals(r"/(a)(\1)/"), [union(&["a"]), None]);
+        assert_eq!(literals(r"/(?<x>a)((?P=x))/"), [union(&["a"]), None]);
+    }
+
+    #[test]
+    fn case_insensitivity_declines_every_enumeration() {
+        // Measured: `preg_match('/(a)/i', 'A', $m)` gives `$m[1] === 'A'` —
+        // the pattern's own spelling is not the language. The oracle declines
+        // case-insensitive rows wholesale (its `([xXa])/i` expectation is
+        // `non-empty-string` where the case-sensitive twin enumerates), so the
+        // case product is not attempted either — the other measured decision
+        // of issue #177.
+        assert_eq!(literals("/(a)/i"), [None]);
+        // Even caseless atoms decline under `i`, matching the oracle's
+        // `(£|€)(\d+)/i` row.
+        assert_eq!(literals("/(£|€)/i"), [None]);
+        // Inline spellings, bare and scoped: measured, both capture `'A'`.
+        assert_eq!(literals("/(?i)(a)/"), [None]);
+        assert_eq!(literals("/(?i:(a))/"), [None]);
+        // The floors survive the decline untouched.
+        assert_eq!(floors("/(ab)/i"), [2]);
+    }
+
+    #[test]
+    fn the_enumeration_rides_along_named_groups_and_conditionals() {
+        assert_eq!(literals("/(?<named>foo|bar)/"), [union(&["bar", "foo"])]);
+        // A conditional's arms keep their own groups' languages — a language
+        // is a claim about the entry when the group participates.
+        assert_eq!(literals("/(a)?(?(1)(b)|(c))/"), [
+            union(&["a"]),
+            union(&["b"]),
+            union(&["c"])
+        ]);
     }
 }
