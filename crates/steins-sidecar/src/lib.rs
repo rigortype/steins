@@ -3,7 +3,7 @@
 //!
 //! # Two halves
 //!
-//! * [`wire`] — the **format**: [`FoldArg`]/[`FoldResult`]/[`EnvInfo`]/[`Reflection`],
+//! * [`wire`] — the **format**: [`FoldArg`]/[`FoldResult`]/[`EnvInfo`]/[`Reflection`]/[`PregCompile`],
 //!   the `*_params` request constructors and the `parse_*_result` response parsers.
 //!   Pure `serde_json`, so it compiles on `wasm32-unknown-unknown` too (ADR-0066).
 //! * `process` — the **transport**: [`Sidecar`], a resident `php` child.
@@ -45,9 +45,10 @@
 pub mod wire;
 
 pub use wire::{
-    ARRAY_TAG, EnvInfo, FoldArg, FoldKey, FoldResult, FoldValue, Reflection, env_params,
-    fold_arg_to_json, fold_params, parse_env_result, parse_fold_result, parse_fold_value,
-    parse_reflection_result, reflect_params,
+    ARRAY_TAG, EnvInfo, FoldArg, FoldKey, FoldResult, FoldValue, PregCompile, Reflection,
+    env_params, fold_arg_to_json, fold_params, parse_env_result, parse_fold_result,
+    parse_fold_value, parse_preg_compile_result, parse_reflection_result, preg_compile_params,
+    reflect_params,
 };
 
 #[cfg(not(target_arch = "wasm32"))]

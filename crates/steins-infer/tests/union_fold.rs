@@ -30,7 +30,7 @@ use std::rc::Rc;
 use steins_infer::{
     DEBUG_TYPE_ID, Diagnostic, EngineFolder, FoldEngine, Folder, ID, SidecarFolder, check_with,
 };
-use steins_sidecar::{EnvInfo, FoldArg, FoldResult, FoldValue, Reflection};
+use steins_sidecar::{EnvInfo, FoldArg, FoldResult, FoldValue, PregCompile, Reflection};
 use steins_syntax::{ArgValue, SourceTree};
 
 // Foldable-union source shapes
@@ -145,6 +145,12 @@ impl FoldEngine for Fake {
             ("strval", [FoldArg::Int(i)]) => FoldResult::Value(FoldValue::Str(i.to_string())),
             _ => FoldResult::widen("unmodeled by the fake"),
         }
+    }
+
+    /// The fake has no PCRE (ADR-0078): declining is what a transport that cannot
+    /// answer must do, and it keeps this file's subject the fold-width lane.
+    fn preg_compile(&mut self, _pattern: &str) -> Option<PregCompile> {
+        None
     }
 }
 

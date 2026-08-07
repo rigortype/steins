@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use steins_sidecar::{FoldArg, FoldKey, FoldResult, FoldValue, Sidecar};
+use steins_sidecar::{FoldArg, FoldKey, FoldResult, FoldValue, PregCompile, Sidecar};
 
 /// An unkeyed (`ArrayKey::Auto`) array argument of `values`.
 fn list(values: Vec<FoldArg>) -> FoldArg {
@@ -225,6 +225,105 @@ fn reflect_reports_a_nonsense_name_as_not_found() {
     let r = sc.reflect("steins_no_such_symbol_xyzzy").expect("reflection reply");
     assert!(!r.exists(), "nonsense name must not exist: {r:?}");
     assert!(!r.function_exists && !r.class_like_exists);
+}
+
+// `preg_compile` (issue #189 / ADR-0078) — the project's own PCRE answers.
+
+/// The firing shape, end to end against a real `php`: PCRE refuses, and its OWN
+/// words come back with the probe's `preg_match(): ` prefix already stripped.
+#[test]
+fn preg_compile_reports_a_refusal_with_pcres_own_message() {
+    let Some(mut sc) = spawn_or_skip("preg_compile_reports_a_refusal") else { return };
+    let PregCompile::Refuses { message } =
+        sc.preg_compile("/(unclosed/").expect("a preg_compile verdict")
+    else {
+        panic!("PCRE must refuse an unclosed group");
+    };
+    assert!(
+        message.starts_with("Compilation failed:"),
+        "PCRE's own words, unprefixed: {message}"
+    );
+    assert!(message.contains("missing closing parenthesis"), "{message}");
+    // The probe's own function name must NOT travel — the call site re-attaches
+    // its own (`preg_split(): …` at a `preg_split` site).
+    assert!(!message.contains("preg_match()"), "the probe's prefix is stripped: {message}");
+}
+
+/// The three refusal families PHP words differently, all of them compile-time.
+#[test]
+fn preg_compile_reports_delimiter_and_modifier_refusals() {
+    let Some(mut sc) = spawn_or_skip("preg_compile_reports_delimiter_and_modifier_refusals") else {
+        return;
+    };
+    for (pattern, needle) in [
+        ("nodelim", "Delimiter must not be alphanumeric"),
+        ("/a/Z", "Unknown modifier"),
+        ("/a", "No ending delimiter"),
+        ("", "Empty regular expression"),
+    ] {
+        let PregCompile::Refuses { message } =
+            sc.preg_compile(pattern).unwrap_or_else(|| panic!("verdict for {pattern:?}"))
+        else {
+            panic!("PCRE must refuse {pattern:?}");
+        };
+        assert!(message.contains(needle), "{pattern:?} → {message}");
+    }
+}
+
+/// The silence half: everything the reader's own delimiter/modifier handling
+/// admits compiles, so nothing is reported for it.
+#[test]
+fn preg_compile_accepts_the_patterns_the_reader_handles() {
+    let Some(mut sc) = spawn_or_skip("preg_compile_accepts_valid_patterns") else { return };
+    for pattern in ["/valid/", "~ok~iu", "#(a)(b)?#", "/\\d+/u", "//", "/(?|(a)|(b))(c)/"] {
+        assert_eq!(
+            sc.preg_compile(pattern),
+            Some(PregCompile::Compiles),
+            "{pattern:?} compiles on this PHP"
+        );
+    }
+}
+
+/// The false-positive PCRE would hand us if a bare `false` return counted as a
+/// refusal. `/(?R)/` COMPILES and then blows a runtime limit on the empty
+/// subject; the runner must widen rather than call that a compile refusal.
+#[test]
+fn a_runtime_limit_is_not_a_compile_refusal() {
+    let Some(mut sc) = spawn_or_skip("a_runtime_limit_is_not_a_compile_refusal") else { return };
+    assert_eq!(
+        sc.preg_compile("/(?R)/"),
+        None,
+        "a `false` from a runtime limit is unanswerable, never a refusal"
+    );
+}
+
+/// The probe never runs the pattern against real data: the subject is `''`, so the
+/// textbook catastrophic pattern answers instantly instead of backtracking.
+#[test]
+fn a_catastrophic_pattern_compiles_without_running_away() {
+    let Some(mut sc) = spawn_or_skip("a_catastrophic_pattern_compiles_without_running_away") else {
+        return;
+    };
+    let start = std::time::Instant::now();
+    assert_eq!(sc.preg_compile("/(a+)+$/"), Some(PregCompile::Compiles));
+    // Loose on purpose: this asserts "no runaway", not a performance figure. The
+    // transport's own 2s timeout would otherwise be the only bound.
+    assert!(start.elapsed() < Duration::from_secs(1), "the empty-subject probe returns at once");
+}
+
+/// A pattern query leaves the stream healthy: `error_get_last` is cleared per
+/// request, so an unrelated earlier diagnostic is never quoted as a compile error,
+/// and the warning the probe provokes never reaches stdout.
+#[test]
+fn a_refusal_does_not_corrupt_the_stream_or_leak_into_the_next_query() {
+    let Some(mut sc) = spawn_or_skip("a_refusal_does_not_corrupt_the_stream") else { return };
+    assert!(matches!(sc.preg_compile("/(unclosed/"), Some(PregCompile::Refuses { .. })));
+    assert_eq!(sc.preg_compile("/ok/"), Some(PregCompile::Compiles), "no stale diagnostic");
+    assert_eq!(
+        sc.fold("strtoupper", &[s("ab")]),
+        FoldResult::Value(FoldValue::Str("AB".to_owned())),
+        "the NDJSON stream survives a provoked warning"
+    );
 }
 
 #[test]
