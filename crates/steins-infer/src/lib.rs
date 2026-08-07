@@ -12922,6 +12922,29 @@ fn preg_element_fact(text: &steins_catalog::preg::MatchedText) -> Fact {
     Fact::refined(Base::String, Refinement::Str(preds), false)
 }
 
+/// The element type of one capture group's entry when the group participates —
+/// the literal union where the reader enumerated the body's language (issue
+/// #177, slice F), and the slice-E [`preg_element_fact`] refinement everywhere
+/// else.
+///
+/// The union is the sharper answer to the same question the refinement
+/// answers, so it slots in above it and changes nothing about presence: the
+/// unmatched paths (`''` padding, `null`, an absent key) stay with the
+/// positional projections and the flag seams, which join their extra member
+/// onto whatever element this function produced. The reader caps the union at
+/// the domain's own finite layer ([`steins_catalog::preg::LITERAL_UNION_CAP`]
+/// = the `OneOf` cap), so `from_vals` never widens here; the fallthrough is
+/// belt-and-suspenders for an empty or unrepresentable set.
+fn preg_group_element_fact(g: &steins_catalog::preg::CaptureGroup) -> Fact {
+    if let Some(literals) = &g.literals {
+        let vals = literals.iter().map(|s| Val::Str(s.clone())).collect();
+        if let Some(fact) = Fact::from_vals(vals) {
+            return fact;
+        }
+    }
+    preg_element_fact(&g.body)
+}
+
 /// The success shape of `$matches`: key `0` plus one key per capture group in
 /// numeric order, each value a string refined from the sub-pattern that fills
 /// it, named groups additionally under their string key, sealed.
@@ -12944,9 +12967,12 @@ fn preg_element_fact(text: &steins_catalog::preg::MatchedText) -> Fact {
 /// `array{0: non-falsy-string, 1: 'a', 2: string, 3: 'c', 4?: non-empty-string}`
 /// — the middle `(b)*` and the trailing `(d)*` are the same sub-pattern and get
 /// **different** element types. A group that can be *present* while unmatched
-/// holds `''` on that path, so no refinement of its body may be stated however
-/// its floor reads; only a group whose unmatched case is *absence* keeps the
-/// claim. The reader answers which is which
+/// holds `''` on that path, so no bare refinement of its body may be stated
+/// however its floor reads — a floor collapses to plain `string`, and a
+/// literal union (slice F, issue #177) must carry `''` as an explicit member
+/// (measured: `preg_match('/(a)(b)?(c)/', 'ac', $m)` gives `$m[2] === ''`, so
+/// the entry is `''|'b'`); only a group whose unmatched case is *absence*
+/// keeps the bare claim. The reader answers which is which
 /// ([`can_be_present_empty`](steins_catalog::preg::CaptureGroup::can_be_present_empty)),
 /// and getting it backwards would put a false fact on a reachable path.
 ///
@@ -13007,16 +13033,24 @@ fn preg_success_shape(
         };
         let element = if flags.unmatched_as_null {
             // The unmatched case is an explicit `null`, and the `''` padding is
-            // gone (measured above) — so the body's floor holds wherever the
-            // value is a string, and `|null` covers the rest.
-            let body = preg_element_fact(&g.body);
+            // gone (measured above) — so the body's element holds wherever the
+            // value is a string, and `|null` covers the rest (measured with a
+            // literal body: `preg_match('/(a)(b)?/', 'a', $m,
+            // PREG_UNMATCHED_AS_NULL)` gives `['a', 'a', null]`, so entry 2 is
+            // `'b'|null`).
+            let body = preg_group_element_fact(g);
             if g.can_go_unmatched { preg_nullable_element(body) } else { body }
         } else if g.can_be_present_empty {
             // A group that may be present as `''` admits the empty string on a
-            // reachable path, so its body's floor says nothing about its entry.
-            Fact::General { base: Base::String, nullable: false }
+            // reachable path, so its body's *floor* says nothing about its
+            // entry — while an enumerated body keeps its union with `''`
+            // joined on (measured: `preg_match('/(a)(b)?(c)/', 'ac', $m)`
+            // gives `$m[2] === ''`, so the entry is `''|'b'`). One seam for
+            // both: the padded join collapses a floor against `''` to plain
+            // `string` and extends a literal union by the one member.
+            preg_padded_element(preg_group_element_fact(g))
         } else {
-            preg_element_fact(&g.body)
+            preg_group_element_fact(g)
         };
         let element = if flags.offset_capture {
             // `-1` is reachable exactly where an unmatched instance of this
@@ -13095,12 +13129,12 @@ fn preg_pattern_order_shape(
         // The padding rule: position never matters, only whether the group can
         // go unmatched at all.
         let elem = if flags.unmatched_as_null {
-            let body = preg_element_fact(&g.body);
+            let body = preg_group_element_fact(g);
             if g.can_go_unmatched { preg_nullable_element(body) } else { body }
         } else if g.can_go_unmatched {
-            preg_padded_element(preg_element_fact(&g.body))
+            preg_padded_element(preg_group_element_fact(g))
         } else {
-            preg_element_fact(&g.body)
+            preg_group_element_fact(g)
         };
         let elem = if flags.offset_capture {
             // A padded entry is `['', -1]` / `[null, -1]` (measured), so `-1` is
@@ -13130,12 +13164,13 @@ fn preg_pattern_order_shape(
     Some(Fact::Shape { shape: Box::new(shape), nullable: false })
 }
 
-/// A PATTERN_ORDER column element for a group whose column is padded: the body's
-/// element type **unioned with `''`** (issue #168 rule 2). The union is computed
-/// by the domain's own join — today every body refinement collapses against `''`
-/// to plain `string` (none of the floor predicates admit the empty string), and
-/// an unrepresentable join degrades to the same, which is the sound side either
-/// way.
+/// An element for an entry whose unmatched case is a **written** `''` — the
+/// PATTERN_ORDER padded column (issue #168 rule 2) and the `preg_match`
+/// present-empty interior entry (issue #177). The union is computed by the
+/// domain's own join: a floor refinement collapses against `''` to plain
+/// `string` (none of the floor predicates admit the empty string), a literal
+/// union (slice F) gains `''` as one more member, and an unrepresentable join
+/// degrades to plain `string`, which is the sound side either way.
 fn preg_padded_element(body: Fact) -> Fact {
     body.join(&Fact::Singleton(Val::Str(String::new())))
         .unwrap_or(Fact::General { base: Base::String, nullable: false })
@@ -13150,8 +13185,9 @@ fn preg_nullable_element(body: Fact) -> Fact {
             Fact::Refined { base, refinement, nullable: true }
         }
         Fact::General { base, .. } => Fact::General { base, nullable: true },
-        // Unreachable today ([`preg_element_fact`] only produces the two arms
-        // above), but a future literal-element derivation lands safely.
+        // The literal-element layers (issue #177): the join folds `null` into
+        // the finite set (`'b'` becomes `'b'|null`), and an unrepresentable
+        // join degrades to nullable `string`, the sound side.
         other => other
             .join(&Fact::Singleton(Val::Null))
             .unwrap_or(Fact::General { base: Base::String, nullable: true }),

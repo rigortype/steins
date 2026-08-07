@@ -73,11 +73,12 @@ fn pattern_order_writes_one_padded_column_per_group() {
     // `[['1a','2','3a'], ['1','2','3'], ['a','','a']]`. Column 0 is the
     // whole-expression refinement (slice E), column 1 keeps its body refinement
     // (the group cannot go unmatched), and column 2 is padded with `''` — its
-    // element is the body unioned with `''`, which is plain `string`.
+    // element is the body unioned with `''`, which the literal enumeration
+    // (issue #177) spells exactly: `''|'a'`.
     assert_eq!(
         all_shape(r"'/(\d)(a)?/'", None),
         "list{non-empty-list<non-empty-string>, non-empty-list<numeric-string>, \
-         non-empty-list<string>} (asserted)"
+         non-empty-list<''|'a'>} (asserted)"
     );
 }
 
@@ -92,19 +93,19 @@ fn a_trailing_optional_group_is_still_a_padded_required_column() {
     // `preg_match` shape so the divergence itself is the assertion.
     assert_eq!(
         all_shape("'/(a)(b)?/'", None),
-        "list{non-empty-list<non-empty-string>, non-empty-list<non-empty-string>, \
-         non-empty-list<string>} (asserted)"
+        "list{non-empty-list<non-empty-string>, non-empty-list<'a'>, \
+         non-empty-list<''|'b'>} (asserted)"
     );
     assert_eq!(
         per_match_shape("'/(a)(b)?/'", None),
-        "list{0: non-empty-string, 1: non-empty-string, 2?: non-empty-string} (asserted)"
+        "list{0: non-empty-string, 1: 'a', 2?: 'b'} (asserted)"
     );
     // An interior optional group reads identically in its column — position is
-    // not consulted.
+    // not consulted (measured: `'abc ac'` gives `$m[2] === ['b', '']`).
     assert_eq!(
         all_shape("'/(a)(b)?(c)/'", None),
-        "list{non-empty-list<non-falsy-string>, non-empty-list<non-empty-string>, \
-         non-empty-list<string>, non-empty-list<non-empty-string>} (asserted)"
+        "list{non-empty-list<non-falsy-string>, non-empty-list<'a'>, \
+         non-empty-list<''|'b'>, non-empty-list<'c'>} (asserted)"
     );
 }
 
@@ -126,7 +127,7 @@ fn named_groups_put_the_name_beside_its_numeric_twin() {
     assert_eq!(
         all_shape(r"'/(?<d>\d)(a)?/'", None),
         "array{0: non-empty-list<non-empty-string>, 1: non-empty-list<numeric-string>, \
-         2: non-empty-list<string>, d: non-empty-list<numeric-string>} (asserted)"
+         2: non-empty-list<''|'a'>, d: non-empty-list<numeric-string>} (asserted)"
     );
 }
 
@@ -175,12 +176,12 @@ fn set_order_is_a_non_empty_list_of_preg_match_success_shapes() {
 fn unmatched_as_null_turns_the_padding_into_null() {
     // Measured: `preg_match_all('/(\d)(a)?/', '1a 2', $m, PREG_UNMATCHED_AS_NULL)`
     // gives `[['1a','2'], ['1','2'], ['a',null]]` — the `''` padding becomes an
-    // explicit `null`, so the element keeps its body floor and gains `|null`,
-    // while a group that cannot go unmatched is untouched.
+    // explicit `null`, so the element keeps its body — the literal, issue #177
+    // — and gains `|null`, while a group that cannot go unmatched is untouched.
     assert_eq!(
         all_shape(r"'/(\d)(a)?/'", Some("PREG_UNMATCHED_AS_NULL")),
         "list{non-empty-list<non-empty-string>, non-empty-list<numeric-string>, \
-         non-empty-list<non-empty-string|null>} (asserted)"
+         non-empty-list<'a'|null>} (asserted)"
     );
 }
 
@@ -194,7 +195,7 @@ fn offset_capture_wraps_column_elements_in_measured_pairs() {
         all_shape(r"'/(\d)(a)?/'", Some("PREG_OFFSET_CAPTURE")),
         "list{non-empty-list<list{non-empty-string, int<0, max>}>, \
          non-empty-list<list{numeric-string, int<0, max>}>, \
-         non-empty-list<list{string, int<-1, max>}>} (asserted)"
+         non-empty-list<list{''|'a', int<-1, max>}>} (asserted)"
     );
     // Both flags at once (256 | 512 = 768, a proven int): the pad pair is
     // `[null, -1]` (measured), so the pair text is nullable and the floor is -1.
@@ -202,7 +203,7 @@ fn offset_capture_wraps_column_elements_in_measured_pairs() {
         all_shape(r"'/(\d)(a)?/'", Some("768")),
         "list{non-empty-list<list{non-empty-string, int<0, max>}>, \
          non-empty-list<list{numeric-string, int<0, max>}>, \
-         non-empty-list<list{non-empty-string|null, int<-1, max>}>} (asserted)"
+         non-empty-list<list{'a'|null, int<-1, max>}>} (asserted)"
     );
 }
 
@@ -231,7 +232,7 @@ fn a_comparison_witness_rides_the_existing_machinery() {
                if (preg_match_all('/(a)/', $s, $m) === 2) { \\PHPStan\\dumpType($m); }\n}\n";
     assert_eq!(
         one_dump(src),
-        "list{non-empty-list<non-empty-string>, non-empty-list<non-empty-string>} (asserted)"
+        "list{non-empty-list<non-empty-string>, non-empty-list<'a'>} (asserted)"
     );
     // `!== 0` does not: `false` also satisfies it, and `false` wrote nothing.
     refuses(
