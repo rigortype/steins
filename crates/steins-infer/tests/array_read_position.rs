@@ -334,8 +334,12 @@ fn a_call_that_is_not_one_argument_declines() {
 
 #[test]
 fn a_project_function_shadowing_the_name_declines() {
-    let src = "<?php\n/** @param array{a: int} $v */\n\
+    // The shape docblock belongs to `f` — the fixture's `$v` — not to the
+    // shadowing declaration, whose parameter is `$x` (issue #186: a `@param`
+    // naming a parameter its own signature lacks is now `phpdoc.stale-param`).
+    let src = "<?php\n\
                function current(array $x): int { return 1; }\n\
+               /** @param array{a: int} $v */\n\
                function f(array $v): void { \\PHPStan\\dumpType(current($v)); }\n";
     assert_eq!(one_type_with(src, &mut Mock::sidecar()), "dumped type: unknown");
 }
