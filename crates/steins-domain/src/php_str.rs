@@ -18,10 +18,10 @@
 ///
 /// # Canonical form
 ///
-/// The [`Repr::Bytes`] arm holds bytes that are **not** valid UTF-8, and the
-/// [`Repr::Utf8`] arm holds bytes that are; the constructors maintain this, so
-/// there is exactly one representation per value and the common ASCII path
-/// keeps a plain `String` with no extra allocation.
+/// The inner representation has two arms: one holds bytes that are **not**
+/// valid UTF-8, the other holds bytes that are. The constructors maintain that
+/// split, so there is exactly one representation per value and the common ASCII
+/// path keeps a plain `String` with no extra allocation.
 ///
 /// Equality, ordering and hashing nonetheless go through [`PhpStr::as_bytes`]
 /// rather than deriving over the arms. Two reasons: a derived `Ord` would sort
