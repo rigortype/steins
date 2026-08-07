@@ -155,6 +155,27 @@ retires the "no declared contract" rendering on seeded array lanes (#51
 L1) and gives `Singleton(Array)` dumps a faithful spelling through the
 same one speller.
 
+**Amendment (2026-08-07, issue #172): visibility by dedicated verdict,
+not by residence in `differ`.** This section's visibility law — a
+D4-native spelling divergence (the oracle asserts `array{…}` where
+Steins spells the same denotation `list{…}`) stays visible in the nsrt
+harness and is never normalized away — was originally *mechanized* by
+keeping such rows in the `differ` bucket, pinned by the harness's D4
+exemplar test. Once the acceptance relation learned to prove both
+directions for these pairs, that mechanism defeated the law's purpose:
+`differ` is the least visible place in the harness, and the class sat
+buried among eleven thousand genuine gaps, countable only by hand. The
+mechanism is hereby amended: the harness awards such pairs a dedicated
+`equal` verdict, granted exclusively when the relation itself proves
+both directions (`expected ⊇ got` and `got ⊇ expected`, each
+`Certainty::Yes`) while the normalized spellings differ. The law's
+*substance* is unchanged and strengthened, not weakened: no
+normalization rule may absorb the class (a pair the relation cannot
+prove equal both ways stays `differ`, as a relation gap to file), and
+the class is now countable in the summary and listed row by row instead
+of drowned in the gap inventory. The D4 exemplar pin flips with this
+amendment in the same commit.
+
 ## 7. Declined imports (divergence registry)
 
 1. Declared-order trust in positional projections (§2) — replaced by the

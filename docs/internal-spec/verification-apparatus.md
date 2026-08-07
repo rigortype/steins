@@ -16,7 +16,7 @@ is the instrument.
 | `lean-check` | build the Lean 4 spec of the value domain and verify the committed differential vectors are still what it prints (`--bless` to rewrite) |
 | `gen-catalog` | regenerate the builtin class hierarchy **and the return-fact table** from the mining TOML |
 | `freq` | builtin frequency mining (catalog seeding input) |
-| `nsrt` | the `assertType` harness (oracle idea B): four-verdict measurement of dump renderings against PHPStan's own `nsrt/` fixtures, `assertType` recognized **harness-only** |
+| `nsrt` | the `assertType` harness (oracle idea B): five-verdict measurement of dump renderings against PHPStan's own `nsrt/` fixtures, `assertType` recognized **harness-only** |
 
 ## `fp-gate`
 
@@ -232,8 +232,13 @@ the `bug-2600*.php` rows narrow on an `(asserted)`-stratum phpdoc fact that igno
 What actually fixes the defect is that these rows **leave `differ`**, not that they
 join `match`. A slice that converts ten divergences into subsumptions now reads as
 differ falling and subsumed rising, never as a regression. The report prints
-`match + subsumed` as an explicit secondary *admissible* figure so that movement is
-visible without unverified claims entering the headline.
+`match + equal + subsumed` as an explicit secondary *admissible* figure so that
+movement is visible without unverified claims entering the headline. (`equal` —
+issue #172, ADR-0062 §6 as amended — is the proven-equal-but-differently-spelled
+verdict: the relation answers `Yes` in both directions while the normalized
+spellings differ. It is awarded by the relation's own proof, never by a
+normalization rule, and it too stays out of the headline: the headline counts
+string-level reproduction of the oracle.)
 
 Recorded baseline, post-#47 (superseded below by the S1.5 reseed):
 
