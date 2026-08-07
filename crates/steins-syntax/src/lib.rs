@@ -2054,7 +2054,7 @@ pub struct Stmt {
     /// env, which is where PHP evaluates them.
     ///
     /// Empty for every statement kind whose expressions are not collected — see
-    /// [`string_context_sites`] for the boundary and why it is where it is.
+    /// `string_context_sites` for the boundary and why it is where it is.
     pub string_contexts: Vec<StringContextSite>,
 }
 
