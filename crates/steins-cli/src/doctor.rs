@@ -470,8 +470,7 @@ fn breakdown<const N: usize>(counts: &[usize; N], labels: [&str; N]) -> String {
 fn parse_project(root: &Path) -> Vec<ParsedFile> {
     let mut files = Vec::new();
     crate::collect_php_files(root, &mut files);
-    files.sort();
-    files.dedup();
+    let files = crate::dedup_canonical(files);
     files
         .iter()
         .filter_map(|file| {
