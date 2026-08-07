@@ -1295,6 +1295,27 @@ pub struct DuplicateArrayKey {
 /// element resolves only while they agree, and the first disagreement poisons
 /// every `Auto` element after it too (the version-dependent leg of ADR-0049
 /// A12, resolved per element rather than for the whole literal).
+///
+/// **Known representation limit (issue #187):** PHP array-literal string keys
+/// are byte strings, but this crate's CST lowering decodes them UTF-8-lossily
+/// (`lower_literal`'s `Literal::String` arm, via `bytes_to_string` /
+/// `String::from_utf8_lossy`), so every invalid-UTF-8 byte becomes one
+/// U+FFFD. `corpus/symfony__console/Helper/QuestionHelper.php:356` is the
+/// measured false positive: `["\xC0"=>1, "\xD0"=>1, "\xE0"=>2, "\xF0"=>3]` is
+/// four DISTINCT single-byte keys that all decode to `"\u{FFFD}"` and would
+/// look like one key repeated four times. A resolved `NormKey::Str` that
+/// *contains* U+FFFD is therefore treated as unresolvable **for equality
+/// only** — the conservative detector for "this decoding lost information" —
+/// and participates in no duplicate comparison at all, not even against
+/// another lossy key (two lossy keys may have been different bytes; a
+/// genuine `"\u{FFFD}"` source literal is indistinguishable from a decoding
+/// artifact, and the silence is accepted). This is deliberately NOT routed
+/// through the `None`-key poisoning above: an invalid-UTF-8 byte can never be
+/// a PHP canonical integer string ([`php_canonical_int_string`]), so it can
+/// never be an auto-increment key and never shifts the counter — poisoning
+/// later `Auto` elements over it would silently drop true positives for no
+/// reason. Its auto-index bookkeeping (none — it is an ordinary non-numeric
+/// string key) proceeds exactly as if the byte sequence had decoded cleanly.
 #[must_use]
 pub fn duplicate_array_keys(
     site: &ArrayLiteralSite,
@@ -1337,6 +1358,15 @@ pub fn duplicate_array_keys(
             }
         };
         let Some(key) = resolved else { continue };
+        // A lossily-decoded string key (issue #187: the symfony/console false
+        // positive) is unresolvable for equality only — skip the comparison,
+        // but it was never eligible to bump the auto-index counter above, so
+        // nothing else about the scan changes.
+        if let NormKey::Str(ref s) = key
+            && s.contains('\u{FFFD}')
+        {
+            continue;
+        }
         if let Some(shadowed_span) = last_seen.insert(key.clone(), el.span) {
             out.push(DuplicateArrayKey { key, winner_span: el.span, shadowed_span });
         }

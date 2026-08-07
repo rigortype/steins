@@ -135,6 +135,54 @@ fn zero_padded_string_alone_against_int_one_is_silent() {
     assert!(d.is_empty(), "{d:#?}");
 }
 
+// --- Lossily-decoded string keys: a known representation limit (issue #187,
+// the symfony/console false positive) -----------------------------------
+//
+// PHP array-literal string keys are byte strings; this crate's CST lowering
+// decodes them UTF-8-lossily, so distinct invalid-UTF-8 byte keys can decode
+// to the same U+FFFD-bearing `String`. Such a key must never be compared for
+// equality — not against another ordinary key, and not against another lossy
+// key either.
+
+#[test]
+fn the_symfony_console_shape_is_silent() {
+    // corpus/symfony__console/Helper/QuestionHelper.php:356 (the measured FP):
+    // `["\xC0"=>1, "\xD0"=>1, "\xE0"=>2, "\xF0"=>3][$c & "\xF0"]` — four
+    // DISTINCT single-byte keys, all lossily decoding to "\u{FFFD}". Reporting
+    // three bogus duplicates here was the fp-gate RED this fix addresses.
+    let src = "<?php\n$a = [\"\\xC0\" => 1, \"\\xD0\" => 1, \"\\xE0\" => 2, \"\\xF0\" => 3];\n";
+    let d = dups(src);
+    assert!(d.is_empty(), "{d:#?}");
+}
+
+#[test]
+fn a_lossy_key_does_not_hide_a_genuine_duplicate_beside_it() {
+    // The lossy key opts itself out of comparison; every other key in the same
+    // literal is judged exactly as if it were not there.
+    let src = "<?php\n$a = [\n    \"\\xC0\" => 1,\n    2 => 'a',\n    2 => 'b',\n];\n";
+    let d = dups(src);
+    assert_eq!(d.len(), 1, "{d:#?}");
+    assert!(d[0].message.contains('2'), "{}", d[0].message);
+    assert_eq!(d[0].line, 5, "the genuine 2/2 pair, not the lossy key");
+}
+
+#[test]
+fn a_lossy_key_does_not_poison_auto_increment() {
+    // php -r 'var_export(["\xC0" => "x", "a", 0 => "b"]);' →
+    //   ['\u{FFFD}' => 'x', 0 => 'b']
+    // An invalid-UTF-8 byte can never be a canonical integer string, so the
+    // lossy key is an ordinary (non-numeric) string key: it never bumps the
+    // auto-index counter, `'a'` still auto-assigns to 0, and the explicit
+    // `0 => 'b'` still collides with it — the genuine duplicate must still
+    // fire, unlike an actually-unresolvable (`None`) key, which WOULD poison
+    // every later `Auto` position.
+    let src = "<?php\n$a = [\n    \"\\xC0\" => 'x',\n    'a',\n    0 => 'b',\n];\n";
+    let d = dups(src);
+    assert_eq!(d.len(), 1, "{d:#?}");
+    assert_eq!(d[0].line, 5);
+    assert!(d[0].message.contains('0'), "{}", d[0].message);
+}
+
 // --- Auto-increment interplay (ADR-0049 A12) --------------------------------
 
 #[test]
