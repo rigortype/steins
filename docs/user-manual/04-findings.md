@@ -304,9 +304,17 @@ and in profiles, and it produces nothing.
 
 ### `class.*` — a class name that resolves to nothing
 
-One id, proof layer, default surface. It fires at hard-error positions only:
-`new`, a static call, a class-constant or static-property fetch. Like the
-absence ids above, it needs the sidecar.
+One id, proof layer, default surface. It fires wherever a missing class-like
+actually breaks the program: `new`, a static call, a class-constant or
+static-property fetch (fatal `Error`); `extends`, `implements` and `use
+<Trait>` (fatal at class load); `catch (X $e)` (the handler is silently
+dead); and a parameter, return or property native type declaration
+(`TypeError` on the first typed use — nullable, union and intersection
+declarations report once per named arm). It stays silent where PHP does not
+break: `instanceof` evaluates `false`, `X::class` is a plain string,
+`self`/`static`/`parent` and the built-in type keywords are not class names,
+and a docblock is a comment. Like the absence ids above, it needs the
+sidecar.
 
 ```php
 <?php

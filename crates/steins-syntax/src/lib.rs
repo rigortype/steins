@@ -2410,8 +2410,8 @@ pub struct SourceTree {
     /// shape (ADR-0076). Read by the loop→`array_map` transform and nothing else;
     /// no finding consults it.
     foreach_sites: Vec<ForeachSite>,
-    /// Class references at the four hard-error positions (ADR-0049 §5 / S4), read by
-    /// the `class.undefined` per-file pass.
+    /// Class references at the positions that break at run time (ADR-0049 §5 / S4,
+    /// widened by issue #182), read by the `class.undefined` per-file pass.
     hard_class_refs: Vec<NameRef>,
     parse_errors: Vec<ParseError>,
     /// The comment trivia in the file, in source order (ADR-0023 inline ignores).
@@ -2623,10 +2623,13 @@ impl SourceTree {
     /// The anonymous-class inheritance edges found file-wide (ADR-0049 A4). Read by
     /// the declared-receiver lane's descendant closure (S6) to detect an invisible
     /// descendant of a union member (an anon class is never in the class index).
-    /// Class references at the four hard-error positions — `new X`, `X::m()`,
-    /// `X::CONST`, `X::$prop` (ADR-0049 §5 / S4). Consumed by the `class.undefined`
-    /// per-file pass; `self`/`static`/`parent`, dynamic classes, and `X::class` are
-    /// excluded at collection.
+    /// Class references at the positions verified to break at run time (ADR-0049
+    /// §5 / S4, widened by issue #182): the hard-error expressions (`new X`,
+    /// `X::m()`, `X::CONST`, `X::$prop`), inheritance (`extends` / `implements` /
+    /// `use <Trait>`), `catch (X $e)`, and parameter / return / property native
+    /// type declarations. Consumed by the `class.undefined` per-file pass;
+    /// `self`/`static`/`parent`, dynamic classes, `X::class`, `instanceof` and the
+    /// docblock positions are excluded at collection.
     #[must_use]
     pub fn hard_class_refs(&self) -> &[NameRef] {
         &self.hard_class_refs
@@ -2802,12 +2805,19 @@ struct Lowered {
     preg_flag_const_declared: bool,
     /// Issue #168: see [`SourceTree::preg_flag_const_aliased`].
     preg_flag_const_aliased: bool,
-    /// Class references at the four **hard-error positions** (ADR-0049 §5 / S4):
-    /// `new X`, `X::m()`, `X::CONST`, `X::$prop`. Explicit named classes only —
-    /// `self`/`static`/`parent`, dynamic class exprs, and the `X::class` magic
-    /// constant (a plain string since 8.0, never an error) are excluded at
-    /// collection, so the collection IS exactly the verified finding-position set
-    /// (`instanceof`/`catch`/type-decls are other node kinds, never collected here).
+    /// Class references at the **positions verified to break at run time**
+    /// (ADR-0049 §5 / S4, widened by issue #182), in four groups:
+    /// the original hard-error expressions (`new X`, `X::m()`, `X::CONST`,
+    /// `X::$prop` — fatal `Error`); inheritance (`extends`, `implements`, `use
+    /// <Trait>` — fatal at class load); `catch (X $e)` (never matches, the handler
+    /// is silently dead); and native type declarations on a parameter, return or
+    /// property (`TypeError` on the first typed use).
+    ///
+    /// Explicit named classes only — `self`/`static`/`parent`, dynamic class exprs,
+    /// and the `X::class` magic constant (a plain string since 8.0, never an error)
+    /// are excluded at collection, so the collection IS exactly the verified
+    /// finding-position set. `instanceof` and the docblock positions error nothing
+    /// and are deliberately absent (the ADR-0078 contract twins).
     hard_class_refs: Vec<NameRef>,
 }
 
@@ -2921,11 +2931,20 @@ fn walk(
                     .unwrap_or_default(),
                 span: to_span(ac.span()),
             });
+            // …and the SAME names are hard refs (issue #182): an anonymous class
+            // whose parent or interface is missing fatals at the `new` that
+            // declares it, exactly like a named class fatals at load. The two
+            // lists are read by different passes and never joined, so collecting
+            // both duplicates no diagnostic.
+            push_inheritance_refs(ac.extends.as_ref(), ac.implements.as_ref(), out);
         }
-        // The four hard-error class-reference positions (ADR-0049 §5 / S4). Each
-        // collects only an explicitly-named class (`trace_static_class` /
-        // `instantiation_class` return `None`/non-`Named` for self/static/parent and
-        // dynamic class exprs), so `class.undefined` never fires on those forms.
+        // The class-reference positions verified to break at run time (ADR-0049 §5
+        // / S4, widened by issue #182). Each collects only an explicitly-named
+        // class (`trace_static_class` / `instantiation_class` return
+        // `None`/non-`Named` for self/static/parent and dynamic class exprs), so
+        // `class.undefined` never fires on those forms.
+        //
+        // (a) The original four hard-error expression positions.
         Node::Instantiation(inst) => {
             if let Some(r) = instantiation_class(inst) {
                 out.hard_class_refs.push(r);
@@ -2955,6 +2974,51 @@ fn walk(
         Node::StaticPropertyAccess(sp) => {
             if let Some(StaticClass::Named(r)) = trace_static_class(sp.class) {
                 out.hard_class_refs.push(r);
+            }
+        }
+        // (b) Inheritance (issue #182): `extends` / `implements` on a class, an
+        // enum's `implements`, an interface's (multiple) `extends`, and a `use`
+        // of a trait in a class body. Every one of these is a fatal at CLASS LOAD
+        // time — the strongest consequence in the family.
+        Node::Class(c) => push_inheritance_refs(c.extends.as_ref(), c.implements.as_ref(), out),
+        Node::Interface(i) => push_inheritance_refs(i.extends.as_ref(), None, out),
+        Node::Enum(e) => push_inheritance_refs(None, e.implements.as_ref(), out),
+        Node::TraitUse(tu) => out.hard_class_refs.extend(tu.trait_names.iter().map(name_ref)),
+        // (c) `catch (X $e)` (issue #182): a clause naming a class that does not
+        // exist never matches, so the handler is silently dead. The clause is
+        // lowered by the SAME `lower_catch_clause` the throw walk uses, so the
+        // caught-name set here is the one ADR-0040 already agreed on; a clause
+        // that lowering could not name statically (`has_unresolvable`) contributes
+        // nothing at all — not even its resolvable arms, since the unresolvable
+        // member may well be the one that catches.
+        Node::TryCatchClause(c) => {
+            let clause = lower_catch_clause(c);
+            if !clause.has_unresolvable {
+                out.hard_class_refs.extend(clause.classes);
+            }
+        }
+        // (d) Native type declarations (issue #182): a parameter (promoted
+        // constructor properties and property-hook parameters included), a return
+        // type, or a property type naming a class-like that does not exist raises
+        // a `TypeError` on the first typed use. `collect_hint_class_refs` walks
+        // the declaration's arms; the built-in type keywords are excluded by
+        // construction (see its doc comment).
+        Node::FunctionLikeParameter(p) => {
+            if let Some(hint) = &p.hint {
+                collect_hint_class_refs(hint, &mut out.hard_class_refs);
+            }
+        }
+        Node::FunctionLikeReturnTypeHint(r) => {
+            collect_hint_class_refs(&r.hint, &mut out.hard_class_refs);
+        }
+        Node::PlainProperty(p) => {
+            if let Some(hint) = &p.hint {
+                collect_hint_class_refs(hint, &mut out.hard_class_refs);
+            }
+        }
+        Node::HookedProperty(p) => {
+            if let Some(hint) = &p.hint {
+                collect_hint_class_refs(hint, &mut out.hard_class_refs);
             }
         }
         Node::DeclareItem(d) if is_strict_types_one(d) => out.strict_types = true,
@@ -2998,6 +3062,53 @@ fn walk(
     };
     for child in node.children() {
         walk(&child, aliases, docs, rc, child_conditional, child_typed, out);
+    }
+}
+
+/// Push every name an inheritance clause pair mentions onto the hard-reference
+/// list (issue #182). An `extends` on an interface carries several names, a class's
+/// carries one, and `implements` carries a list on both classes and enums — the
+/// same `Identifier` sequence in every case, so one helper serves them all.
+/// Inheritance names are always textual identifiers in the grammar: there is no
+/// `extends $x` and no `extends self`, so nothing needs excluding here.
+fn push_inheritance_refs(
+    extends: Option<&mago_syntax::cst::Extends<'_>>,
+    implements: Option<&mago_syntax::cst::Implements<'_>>,
+    out: &mut Lowered,
+) {
+    if let Some(e) = extends {
+        out.hard_class_refs.extend(e.types.iter().map(name_ref));
+    }
+    if let Some(i) = implements {
+        out.hard_class_refs.extend(i.types.iter().map(name_ref));
+    }
+}
+
+/// Collect every class-like name a **native type declaration** mentions (issue
+/// #182), one [`NameRef`] per named arm: `?X` contributes `X`, `X|Y` contributes
+/// both, `X&Y` contributes both, and a DNF declaration `(A&B)|null` contributes
+/// `A` and `B`.
+///
+/// The exclusion of the built-in type keywords is structural, not a name list:
+/// every one of them — `int`, `float`, `string`, `bool`, `true`, `false`, `null`,
+/// `array`, `callable`, `iterable`, `object`, `mixed`, `void`, `never`, and
+/// `self`/`static`/`parent` — is its OWN `Hint` variant in the CST, so only
+/// `Hint::Identifier` can name a class-like and the catch-all arm drops the rest
+/// by construction. This is the same discrimination [`lower_hint_into`] makes.
+fn collect_hint_class_refs(hint: &Hint<'_>, out: &mut Vec<NameRef>) {
+    match hint {
+        Hint::Identifier(id) => out.push(name_ref(id)),
+        Hint::Nullable(n) => collect_hint_class_refs(n.hint, out),
+        Hint::Union(u) => {
+            collect_hint_class_refs(u.left, out);
+            collect_hint_class_refs(u.right, out);
+        }
+        Hint::Intersection(i) => {
+            collect_hint_class_refs(i.left, out);
+            collect_hint_class_refs(i.right, out);
+        }
+        Hint::Parenthesized(p) => collect_hint_class_refs(p.hint, out),
+        _ => {}
     }
 }
 
