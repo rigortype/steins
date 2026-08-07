@@ -77,6 +77,8 @@ Places where Steins is quieter than it could be.
 
 - `__get`/`__set` are not modeled; `__call` is an absence-proof obstacle.
 - Traits are an obstacle, not a modeled method source.
+- `@method`/`@property`/`@mixin` are absence-proof obstacles too, not member
+  sources: `$obj->scopeActive()` still resolves to nothing.
 - A `Member` fact on a `final` class is not treated as exactness in v1.
 - `Closure::bind`/`bindTo` rebinding drops the binding.
 
@@ -85,9 +87,21 @@ Places where Steins is quieter than it could be.
 - Binding descent is capped at 8 frames (`MAX_BINDING_DEPTH`), plus on-stack
   recursion detection. Past the cap: silence.
 
-**Docblock tags not read** ([phpdoc-grammar.md](phpdoc-grammar.md)):
-`@method`, `@property`, `@mixin`, `@phpstan-type` aliases,
-`@phpstan-import-type`, `@phpstan-pure`, `@phpstan-impure`.
+**Docblock tags not read as types** ([phpdoc-grammar.md](phpdoc-grammar.md)):
+`@phpstan-pure`, `@phpstan-impure`.
+
+**Docblock tags read as obstacles only** (ADR-0049 A14): `@method`,
+`@property`, `@property-read`, `@property-write`, `@mixin`, `@phpstan-type`
+aliases, `@phpstan-import-type`. Steins recognizes each tag's presence and its
+subject — the method name, the property name, the `@mixin` target — and records
+one `(class-like, kind, subject)` obstacle per tag site. A class-like carrying
+any of them anywhere in its resolved reach (parents, interfaces, `@mixin`
+targets transitively) is not enumerable, so the absence family is silent on it,
+exactly as for `__call`. Reading them as **member sources** — resolving
+`$model->scopeActive()` or `$model->created_at` to a type — remains deferred,
+as does the subject-granular discharge channel that would re-enable the
+absence proof for a class-like's *undeclared* remainder (ADR-0039's to design).
+Their types are never parsed: only the subject is.
 
 ## Engine and performance
 

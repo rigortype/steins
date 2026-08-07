@@ -94,7 +94,7 @@ pub fn sweep_escapes(db: &dyn Db, project: Project) -> EscapeSweep {
     let db_index = project_index(db, project);
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
-    let index = Index::from_db(db_index, &pos);
+    let index = Index::from_db(db_index, &pos, &units);
 
     let throws = compute_throws(&units, &index);
     let mut out = EscapeSweep::default();

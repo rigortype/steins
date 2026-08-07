@@ -108,7 +108,7 @@ pub fn sweep_free_functions(db: &dyn Db, project: Project) -> FreeFnSweep {
     let db_index = project_index(db, project);
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
-    let index = Index::from_db(db_index, &pos);
+    let index = Index::from_db(db_index, &pos, &units);
 
     let mut out = FreeFnSweep::default();
     for fi in 0..units.len() {
@@ -378,7 +378,7 @@ pub fn sweep_methods(db: &dyn Db, project: Project) -> MethodSweep {
     let db_index = project_index(db, project);
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
-    let index = Index::from_db(db_index, &pos);
+    let index = Index::from_db(db_index, &pos, &units);
 
     let mut out = MethodSweep::default();
     let empty_store = Store::default();

@@ -53,7 +53,10 @@ use steins_syntax::{
 };
 
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, StringLit, TypeKind as PKind};
-use steins_phpdoc::{AssertKind, TagKind, Type as PType, parse_type, scan_docblock};
+use steins_phpdoc::{
+    AssertKind, MagicTagKind, TagKind, Type as PType, parse_type, scan_docblock,
+    scan_magic_member_tags,
+};
 
 /// The registry id for the `type.argument-mismatch` proof-layer check (ADR-0022).
 pub const ID: &str = "type.argument-mismatch";
@@ -1743,6 +1746,35 @@ enum Res {
     Ambiguous,
 }
 
+/// One recorded **silence obstacle** a class-like's docblock declares (ADR-0049
+/// A14, issue #195): a `@method` / `@property*` / `@mixin` / `@phpstan-type` tag
+/// says members exist somewhere the index cannot enumerate, so every absence
+/// proof over that class-like is silent.
+///
+/// The shape is normative: a record is `(class-like, obstacle kind, subject)` —
+/// **never** a class-level "has magic somewhere" boolean. A plugin pack that
+/// declares what the magic actually provides (ADR-0039) must be able to discharge
+/// the obstacle member by member and re-enable the absence proof for the
+/// undeclared remainder, which a boolean forecloses. The discharge channel itself
+/// is not built here; only the record granularity that lets it be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MagicObstacle {
+    /// The declaring class-like's own FQN, lowercase-normalized
+    /// ([`ClassDecl::fqn`]) — the class-like half of the A14 triple.
+    pub class: String,
+    /// Which tag recorded it.
+    pub kind: MagicTagKind,
+    /// The tag's subject as written: the method name, the property name (no `$`),
+    /// the mixin target reference, the alias name. Empty when the tag's tail gave
+    /// none — presence alone still obstructs.
+    pub subject: String,
+    /// For [`MagicTagKind::Mixin`] only: [`Self::subject`] resolved to a project
+    /// FQN against the declaring file's namespace and `use` imports, so the reach
+    /// walk can follow it. A target that resolves to nothing is not a finding and
+    /// not an error — the `@mixin` record itself already obstructs.
+    pub mixin_target: Option<String>,
+}
+
 /// The project symbol index in the analysis's own `Site` terms (a file *index*,
 /// not a salsa handle). Built either directly from the [`FileUnit`] slice
 /// (single-file / test paths) or adapted from the salsa [`ProjectIndex`]
@@ -1755,6 +1787,12 @@ struct Index {
     classes: HashMap<String, Site>,
     ambiguous_classes: HashSet<String>,
     fn_by_simple: HashMap<String, Vec<Site>>,
+    /// The A14 obstacle records, keyed by the **declaration's own** lowercase FQN
+    /// ([`ClassDecl::fqn`]) rather than by whatever name a lookup arrived on — a
+    /// `class_alias` edge must never make a tag-carrying class read as tag-free.
+    /// Empty for a project that spells none of the tags, which is the cheap path
+    /// every consumer checks first.
+    magic_obstacles: HashMap<String, Vec<MagicObstacle>>,
 }
 
 impl Index {
@@ -1790,12 +1828,20 @@ impl Index {
         for (alias_fqn, target) in resolved {
             insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &alias_fqn, target);
         }
+        idx.magic_obstacles = scan_magic_obstacles(units);
         idx
     }
 
     /// Adapt the salsa [`ProjectIndex`] to `Site`s, using `pos` to map each
     /// [`SourceFile`] to its position in the (identically ordered) unit slice.
-    fn from_db(db_index: &ProjectIndex, pos: &HashMap<SourceFile, usize>) -> Self {
+    /// The A14 obstacle records are scanned off the same unit slice: they are a
+    /// docblock fact of the lowered tree (which salsa already memoizes), not a
+    /// symbol-table fact the project index carries.
+    fn from_db(
+        db_index: &ProjectIndex,
+        pos: &HashMap<SourceFile, usize>,
+        units: &[FileUnit],
+    ) -> Self {
         let site = |ds: &DeclSite| Site { file: pos[&ds.file], index: ds.index };
         let mut idx = Index::default();
         for (fqn, ds) in db_index.functions() {
@@ -1809,7 +1855,23 @@ impl Index {
         for (simple, sites) in db_index.fn_by_simple() {
             idx.fn_by_simple.insert(simple.clone(), sites.iter().map(site).collect());
         }
+        idx.magic_obstacles = scan_magic_obstacles(units);
         idx
+    }
+
+    /// The A14 records a single class-like **declares itself** (no chain walk).
+    /// Empty for every class-like that spells none of the tags.
+    fn magic_obstacles_of(&self, decl_fqn: &str) -> &[MagicObstacle] {
+        if self.magic_obstacles.is_empty() {
+            return &[];
+        }
+        self.magic_obstacles.get(&decl_fqn.to_ascii_lowercase()).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether the project spells any magic-member tag at all — the one-branch
+    /// early-out that keeps a tag-free project paying nothing for this leg.
+    fn has_magic_obstacles(&self) -> bool {
+        !self.magic_obstacles.is_empty()
     }
 
     fn resolve_function(&self, fqn: &str) -> Res {
@@ -1840,6 +1902,96 @@ impl Index {
     fn has_simple_function(&self, simple: &str) -> bool {
         self.fn_by_simple.contains_key(&simple.to_ascii_lowercase())
     }
+}
+
+/// Scan every class-like docblock in the project for magic-member tags, keyed by
+/// the declaring class-like's own lowercase FQN (ADR-0049 A14, issue #195).
+///
+/// A `@mixin` subject is resolved here, once, against its declaring file's
+/// namespace and `use` imports — the same resolution a written `extends` gets,
+/// because a docblock class reference obeys the same PHP name-resolution rules.
+fn scan_magic_obstacles(units: &[FileUnit]) -> HashMap<String, Vec<MagicObstacle>> {
+    let mut out: HashMap<String, Vec<MagicObstacle>> = HashMap::new();
+    let mut buf: Vec<MagicObstacle> = Vec::new();
+    for u in units {
+        for cd in u.tree.classes() {
+            class_magic_obstacles(u, cd, &mut buf);
+            if !buf.is_empty() {
+                out.entry(cd.fqn.to_ascii_lowercase()).or_default().append(&mut buf);
+            }
+        }
+    }
+    out
+}
+
+/// Append one class-like's own magic-member records to `out` (nothing appended
+/// when it carries none).
+fn class_magic_obstacles(u: &FileUnit, cd: &ClassDecl, out: &mut Vec<MagicObstacle>) {
+    let Some(doc) = cd.docblock.as_deref() else { return };
+    // Cheap reject: most class docblocks are prose, and the scan below is the
+    // only place that pays.
+    if !doc.contains('@') {
+        return;
+    }
+    for tag in scan_magic_member_tags(doc) {
+        let mixin_target = (tag.kind.is_mixin() && !tag.subject.is_empty())
+            .then(|| u.tree.resolve_class_fqn(&docblock_class_ref(&tag.subject, cd.span.start)));
+        out.push(MagicObstacle {
+            class: cd.fqn.clone(),
+            kind: tag.kind,
+            subject: tag.subject,
+            mixin_target,
+        });
+    }
+}
+
+/// Turn a class reference **written in a docblock** into a [`NameRef`] resolvable
+/// against the declaring file's namespace context. `offset` is the declaration's
+/// own position, so the context is the one that governs its `extends` clause.
+fn docblock_class_ref(raw: &str, offset: u32) -> NameRef {
+    if let Some(rest) = raw.strip_prefix('\\') {
+        return NameRef { raw: rest.to_owned(), kind: RefKind::FullyQualified, offset };
+    }
+    // The `namespace\Foo` relative form (ADR-0049 A8) resolves against the
+    // enclosing namespace with no imports applied; `raw` drops the prefix.
+    // `get` (not a slice) because a class reference may be non-ASCII, and byte 10
+    // is then not guaranteed to be a char boundary.
+    if raw.get(..10).is_some_and(|p| p.eq_ignore_ascii_case("namespace\\")) {
+        return NameRef { raw: raw[10..].to_owned(), kind: RefKind::Relative, offset };
+    }
+    let kind = if raw.contains('\\') { RefKind::Qualified } else { RefKind::Unqualified };
+    NameRef { raw: raw.to_owned(), kind, offset }
+}
+
+/// Every magic-member obstacle record the project declares (ADR-0049 A14), in
+/// file then source order — the seam a posture/`doctor` surface aggregates
+/// ("N absence claims silenced by `@method` tags on M classes") and the one a
+/// plugin discharge channel (ADR-0039) will subtract from. The ladders read the
+/// same records through the per-class index built from this scan; nothing in this
+/// slice reports them.
+#[must_use]
+pub fn magic_obstacles(units: &[FileUnit<'_>]) -> Vec<MagicObstacle> {
+    let mut recs: Vec<MagicObstacle> = Vec::new();
+    for u in units {
+        for cd in u.tree.classes() {
+            class_magic_obstacles(u, cd, &mut recs);
+        }
+    }
+    recs
+}
+
+/// The A14 records in one class-like's **resolved reach** — its own, its parents',
+/// its interfaces', and those of its `@mixin` targets followed transitively. This
+/// is the exact question the absence ladders ask (non-empty ⇒ not enumerable ⇒
+/// silence); public so the reach, not merely the per-declaration scan, is
+/// observable to a future posture surface and to tests.
+#[must_use]
+pub fn magic_obstacles_reaching(units: &[FileUnit<'_>], class_fqn: &str) -> Vec<MagicObstacle> {
+    if units.is_empty() {
+        return Vec::new();
+    }
+    let index = Index::from_units(units);
+    magic_obstacles_in_reach(&Cx::new(units, &index, 0), class_fqn)
 }
 
 /// Whether a function-call reference resolves to a **user** function defined in
@@ -1970,7 +2122,7 @@ pub fn check_project_with_runtime(
     let db_index = project_index(db, project);
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
-    let index = Index::from_db(db_index, &pos);
+    let index = Index::from_db(db_index, &pos, &units);
     check_units(
         &units,
         &index,
@@ -2496,7 +2648,7 @@ pub fn annotate_project(
     let db_index = project_index(db, project);
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
-    let index = Index::from_db(db_index, &pos);
+    let index = Index::from_db(db_index, &pos, &units);
     let Some(target_idx) = handles.iter().position(|&f| f == target) else {
         return Vec::new();
     };
@@ -2531,7 +2683,7 @@ pub fn effect_summaries_project(
     let db_index = project_index(db, project);
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
-    let index = Index::from_db(db_index, &pos);
+    let index = Index::from_db(db_index, &pos, &units);
     let Some(target_idx) = handles.iter().position(|&f| f == target) else {
         return Vec::new();
     };
@@ -3408,7 +3560,7 @@ pub fn region_purity_project(
     let db_index = project_index(db, project);
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
-    let index = Index::from_db(db_index, &pos);
+    let index = Index::from_db(db_index, &pos, &units);
     let plugins = project.plugins(db);
     let effects = compute_effects(&units, &index, plugins);
     let throws = compute_throws(&units, &index);
@@ -15545,6 +15697,53 @@ enum ChainWalk {
     Silent,
 }
 
+/// Collect every magic-member obstacle record in `start_fqn`'s **resolved reach**
+/// (ADR-0049 A14, issue #195): the class-like's own records, then those of its
+/// parent chain, its interfaces, and its `@mixin` targets — each of those
+/// followed transitively, so a mixin whose target is itself a mixin chains on.
+///
+/// Non-empty ⇒ the class-like is not enumerable for an absence proof. Three
+/// deliberate asymmetries with the method-chain walk:
+///
+/// - **Interfaces are walked here** even though [`enumerate_method_chain`]
+///   ignores them: an interface cannot *define* a method, but a `@method` tag on
+///   one still says the implementors answer names the index cannot list.
+/// - **An unresolvable parent/interface is not an obstacle here** — that leg
+///   belongs to the chain walk, which already silences on it; treating every
+///   vendor-unresolved interface as a magic obstacle would silence the family
+///   through the wrong door.
+/// - **An unresolvable `@mixin` target needs no special case**: the `@mixin`
+///   record on the carrier is already in the result, so a target naming nothing
+///   is silence, never a finding.
+///
+/// The visited set is the cycle guard: `@mixin`-into-`@mixin` cycles (and the
+/// diamond an interface list makes) terminate after one visit per class-like.
+fn magic_obstacles_in_reach(cx: &Cx, start_fqn: &str) -> Vec<MagicObstacle> {
+    if !cx.index.has_magic_obstacles() {
+        return Vec::new(); // a project spelling none of the tags pays nothing.
+    }
+    let mut out: Vec<MagicObstacle> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut stack: Vec<String> = vec![start_fqn.to_owned()];
+    while let Some(fqn) = stack.pop() {
+        if !seen.insert(fqn.to_ascii_lowercase()) {
+            continue;
+        }
+        let Some((file, cd)) = cx.find_class(&fqn) else { continue };
+        for rec in cx.index.magic_obstacles_of(&cd.fqn) {
+            if let Some(target) = &rec.mixin_target {
+                stack.push(target.clone());
+            }
+            out.push(rec.clone());
+        }
+        let tree = cx.units[file].tree;
+        for r in cd.parent.iter().chain(cd.implements.iter()) {
+            stack.push(tree.resolve_class_fqn(r));
+        }
+    }
+    out
+}
+
 /// Walk `start_fqn`'s parent chain proving the method's *absence* under complete
 /// enumeration (ADR-0049 §4 (b)–(f), (j); A2i/A2iii). Interfaces are not walked:
 /// a PHP interface never carries a method body, so it can never *define* the
@@ -15555,6 +15754,15 @@ enum ChainWalk {
 /// (`__call`/`__callStatic`, leg d), a cycle (leg b), or the method being present
 /// (not undefined).
 fn enumerate_method_chain(cx: &Cx, start_fqn: &str, method: &str, kind: UndefKind) -> ChainWalk {
+    // Leg A14 (issue #195): a `@method` / `@property*` / `@mixin` / `@phpstan-type`
+    // tag anywhere in the class-like's resolved reach says members live where the
+    // index cannot enumerate them — exactly the `__call` verdict, one door earlier.
+    // The records are the reified decline: nothing in this slice reports them, but
+    // they are what a `doctor` posture will count and what a plugin pack will
+    // discharge member by member (ADR-0049 A14).
+    if !magic_obstacles_in_reach(cx, start_fqn).is_empty() {
+        return ChainWalk::Silent;
+    }
     let magic = kind.magic();
     let mut cur = start_fqn.to_owned();
     let mut seen: HashSet<String> = HashSet::new();
@@ -15666,7 +15874,8 @@ fn check_undefined_method(
     let simple_class = simple_chain.first().map_or(class_fqn.as_str(), String::as_str);
     let chain_render = simple_chain.join(" → ");
     let message = format!(
-        "call to undefined method {simple_class}::{method}() — hierarchy fully enumerated ({chain_render}), no {}",
+        "call to undefined method {simple_class}::{method}() — hierarchy fully enumerated ({chain_render}), \
+         no {}, no @method/@property/@mixin",
         kind.magic(),
     );
     out.push(Diagnostic {
@@ -16783,15 +16992,17 @@ fn descendant_closure<'a>(cx: &Cx<'a>, arm_fqn: &str) -> DescendantClosure<'a> {
 /// Whether a descendant declaration could **introduce** `method` (or an obstacle
 /// that hides it) below a member whose own chain already lacks it (ADR-0049 §8). A
 /// descendant that declares the method, uses a trait, is an enum (A3, methods
-/// unlowered), or carries `__call` is a witness that the runtime object — though
-/// contract-typed as the member — may answer the call. Any such descendant makes
-/// the absence claim fail (silence).
-fn descendant_introduces_method(cd: &ClassDecl, method: &str) -> bool {
+/// unlowered), carries `__call`, or stands in the reach of a magic-member docblock
+/// tag (A14) is a witness that the runtime object — though contract-typed as the
+/// member — may answer the call. Any such descendant makes the absence claim fail
+/// (silence).
+fn descendant_introduces_method(cx: &Cx, cd: &ClassDecl, method: &str) -> bool {
     cd.is_enum
         || cd.is_trait
         || cd.uses_traits
         || cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__call"))
         || cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case(method))
+        || !magic_obstacles_in_reach(cx, &cd.fqn).is_empty()
 }
 
 /// Run the full §8 ladder for one narrowed contract arm and return its display
@@ -16831,7 +17042,7 @@ fn arm_provably_lacks_method(
                 return None; // eval could mint a subclass carrying the method.
             }
             for (_, dcd) in &descendants {
-                if descendant_introduces_method(dcd, method) {
+                if descendant_introduces_method(cx, dcd, method) {
                     return None;
                 }
                 // A homonym descendant may be dead code shadowed by a loaded class.
@@ -16903,7 +17114,7 @@ fn check_phpdoc_undefined_method(
     let arms_disp = arm_names.join("|");
     let message = format!(
         "call to undefined method {arms_disp}::{method}() — declared receiver ${var} narrowed to {{{arms_disp}}}, \
-         hierarchy and descendants fully enumerated, no __call"
+         hierarchy and descendants fully enumerated, no __call, no @method/@property/@mixin"
     );
     out.push(Diagnostic {
         id: PHPDOC_UNDEFINED_METHOD_ID,

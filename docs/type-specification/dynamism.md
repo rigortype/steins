@@ -85,7 +85,7 @@ present, no absence claim holds.
 
 | Id | Layer | Requires | Status |
 | --- | --- | --- | --- |
-| `call.undefined-method` | proof | proven-exact receiver, fully-enumerated hierarchy, no `__call`, no trait obstacle, no builtin homonym | **emits** |
+| `call.undefined-method` | proof | proven-exact receiver, fully-enumerated hierarchy, no `__call`, no trait obstacle, no `@method`/`@property`/`@mixin` in reach, no builtin homonym | **emits** |
 | `offset.missing` | proof | a fully-proven container value and a provably-absent key | **emits** |
 | `offset.on-unsupported` | proof | a proven non-offsetable base (object → fatal; scalar/null → warning) | **emits** |
 | `call.too-few-arguments` | proof | a uniquely-resolved target, fewer positional args than required params | **emits** |
