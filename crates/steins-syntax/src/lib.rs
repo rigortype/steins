@@ -18,6 +18,7 @@ use mago_span::HasSpan;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArrayElement;
+use mago_syntax::cst::AssignmentOperator;
 use mago_syntax::cst::Attribute;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
@@ -48,6 +49,7 @@ use mago_syntax::cst::Property;
 use mago_syntax::cst::PropertyItem;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Statement;
+use mago_syntax::cst::StringPart;
 use mago_syntax::cst::Trivia;
 use mago_syntax::cst::TriviaKind;
 use mago_syntax::cst::UnaryPrefixOperator;
@@ -2043,6 +2045,78 @@ pub struct Stmt {
     /// by-value site is the one thing the walk may excuse from it, and the
     /// entry itself now says which it is.
     pub invalidated: Vec<InvalidatedVar>,
+    /// Every place this statement puts a value into PHP's **string context**
+    /// (ADR-0078, issue #193) — an `echo`/`print` operand, an interpolated
+    /// string's embedded expressions, a `(string)` cast, and both operands of a
+    /// `.` concatenation. Collected centrally by `lower_stmt` from the statement's
+    /// own expressions, so a consumer reads one list instead of re-deriving five
+    /// syntactic shapes; the walk judges each site against the statement's ENTRY
+    /// env, which is where PHP evaluates them.
+    ///
+    /// Empty for every statement kind whose expressions are not collected — see
+    /// [`string_context_sites`] for the boundary and why it is where it is.
+    pub string_contexts: Vec<StringContextSite>,
+}
+
+impl Stmt {
+    /// A statement **under construction**: its kind and by-ref evidence, with the
+    /// span and the string-context sites left for `lower_stmt` to fill in centrally
+    /// (`span` is [`ZERO_SPAN`] until then, the invariant that function documents).
+    fn lowered(kind: StmtKind, invalidated: Vec<InvalidatedVar>) -> Stmt {
+        Stmt { kind, span: ZERO_SPAN, invalidated, string_contexts: Vec::new() }
+    }
+}
+
+/// One value a statement hands to PHP's string conversion (ADR-0078, issue #193):
+/// the lowered operand, the span to report at, and which syntactic context it is.
+///
+/// The syntax layer decides nothing here — it knows no values. What it owns is
+/// **where the conversions are**; whether a given one is legal (`int`, `null` and
+/// every other scalar are), a warning (an array) or a fatal (an object with no
+/// reachable `__toString`) is the inference layer's judgement.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StringContextSite {
+    /// The converted operand, lowered by the same rules as a call argument. An
+    /// operand the lowering cannot spell arrives as [`ArgValue::Other`], which
+    /// proves nothing and is therefore silence — never a manufactured finding.
+    pub value: ArgValue,
+    /// The span of the operand (not of the enclosing construct): the text to fix.
+    pub span: Span,
+    /// Which conversion this is, for the finding's own words.
+    pub kind: StringContextKind,
+}
+
+/// The syntactic form of a [`StringContextSite`]. PHP converts identically in all
+/// of them — the distinction exists so a finding can name the construct the reader
+/// is looking at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StringContextKind {
+    /// An expression embedded in a double-quoted string or heredoc (`"x $v"`,
+    /// `"{$v}"`), and in a backtick shell-exec string, which converts the same way.
+    Interpolation,
+    /// An `echo` operand, including the `<?= … ?>` short-tag form.
+    Echo,
+    /// A `print` operand.
+    Print,
+    /// A `(string)` cast.
+    Cast,
+    /// Either operand of `.`, and both sides of `.=` — a compound concatenation
+    /// reads its target in string context exactly as the binary form does.
+    Concat,
+}
+
+impl StringContextKind {
+    /// How a finding names this context.
+    #[must_use]
+    pub fn render(self) -> &'static str {
+        match self {
+            StringContextKind::Interpolation => "string interpolation",
+            StringContextKind::Echo => "`echo`",
+            StringContextKind::Print => "`print`",
+            StringContextKind::Cast => "a `(string)` cast",
+            StringContextKind::Concat => "a `.` concatenation",
+        }
+    }
 }
 
 /// One local variable a statement hands to a call — the name plus the ADR-0070
@@ -6439,10 +6513,16 @@ fn build_closure_scope_from_arrow(
     let invalidated = call_invalidation(&Node::Expression(af.expression));
     let call = named_call(af.expression);
     let span = to_span(af.expression.span());
+    // An arrow body is a `return` position with a real env, so its string contexts
+    // (ADR-0078, issue #193) are collected here — `lower_stmt`, which does that
+    // centrally for every other statement, is bypassed by this one-statement trace.
+    let mut string_contexts = Vec::new();
+    scan_string_contexts(&Node::Expression(af.expression), &mut string_contexts);
     let ret = Stmt {
         span,
         kind: StmtKind::Return { value, call, span },
         invalidated,
+        string_contexts,
     };
     let mut opaque = Vec::new();
     scan_opaque(&Node::Expression(af.expression), &mut opaque, false);
@@ -6551,7 +6631,7 @@ fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
                 // `return f($s);` — carry the call so propagation/descent reach it.
                 call = named_call(e);
             }
-            Stmt { span: ZERO_SPAN, kind: StmtKind::Return { value, call, span }, invalidated }
+            Stmt::lowered(StmtKind::Return { value, call, span }, invalidated)
         }
         // `echo e1, e2, …;` — collect the statically-named calls among the
         // operands so propagation/descent check them; env stays conservative.
@@ -6578,7 +6658,7 @@ fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
                     calls.push(c);
                 }
             }
-            Stmt { span: ZERO_SPAN, kind: StmtKind::Echo(calls), invalidated }
+            Stmt::lowered(StmtKind::Echo(calls), invalidated)
         }
         // `if`/`elseif`/`else` is structured (ADR-0031): its control flow
         // is modeled, not erased.
@@ -6609,18 +6689,131 @@ fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
                 .next()
                 .and_then(|v| const_key_offset(v))
                 .expect("guarded above");
-            Stmt {
-                span: ZERO_SPAN,
-                kind: StmtKind::OffsetUnset { base, key },
-                invalidated: Vec::new(),
-            }
+            Stmt::lowered(StmtKind::OffsetUnset { base, key }, Vec::new())
         }
         // Everything else (declarations, `goto`, labels, `declare`, other unsets,
         // `__halt_compiler`, …) stays a full Barrier: the sound floor for
         // anything whose write set the lowering cannot bound.
-        _ => Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated: Vec::new() },
+        _ => Stmt::lowered(StmtKind::Barrier, Vec::new()),
     };
-    out.push(Stmt { span: stmt_span, ..stmt });
+    out.push(Stmt { span: stmt_span, string_contexts: string_context_sites(s), ..stmt });
+}
+
+/// Every [`StringContextSite`] a statement's **own** expressions carry (ADR-0078,
+/// issue #193).
+///
+/// # The position boundary, and why it is here
+///
+/// Four statement kinds are read: an expression statement, a `return`, and the two
+/// `echo` forms. Together they carry the constructs the ids exist for —
+/// `$s = "x $v";`, `f((string) $v)`, `return 'a' . $v;`, `echo $v;`, `print $v;`,
+/// `<?= $v ?>` — and each is a position where the walk's ENTRY env is exactly the
+/// env PHP evaluates the expression in.
+///
+/// Everything else is recorded silence, for one reason: a branch condition, a loop
+/// header, a `match` subject and a `switch` case are evaluated in an env the
+/// statement-position pass does not hold (an `elseif` condition runs only after the
+/// previous branch was refuted; a loop header runs once per iteration), and the
+/// bodies of the unstructured constructs are not lowered as statements at all
+/// (`lower_opaque` keeps only their write/read sets). This is the same position
+/// boundary every other value-reading check carries — the preg pattern check's
+/// "statement pass plus the `if` guard" — minus the guard, because `if ((string) $v)`
+/// is not an idiom the way `if (preg_match(…))` is.
+///
+/// Nested statements are never descended: an `if` branch's body is lowered by
+/// [`lower_stmt`] itself and collects its own sites, so nothing is counted twice.
+fn string_context_sites(s: &Statement<'_>) -> Vec<StringContextSite> {
+    let mut out = Vec::new();
+    match s {
+        Statement::Expression(es) => {
+            scan_string_contexts(&Node::Expression(es.expression), &mut out);
+        }
+        Statement::Return(r) => {
+            if let Some(e) = r.value {
+                scan_string_contexts(&Node::Expression(e), &mut out);
+            }
+        }
+        // Each `echo` operand is itself a conversion. An operand that is a composite
+        // string or a cast lowers to `Other` here (proving nothing) and is collected
+        // again, precisely, by the scan — so a value is reported once, at the
+        // innermost construct that names it.
+        Statement::Echo(e) => {
+            for v in e.values.iter() {
+                out.push(echo_site(v));
+                scan_string_contexts(&Node::Expression(v), &mut out);
+            }
+        }
+        Statement::EchoTag(e) => {
+            for v in e.values.iter() {
+                out.push(echo_site(v));
+                scan_string_contexts(&Node::Expression(v), &mut out);
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// One `echo` / `<?= ?>` operand as a site.
+fn echo_site(v: &Expression<'_>) -> StringContextSite {
+    StringContextSite {
+        value: lower_arg_value(v),
+        span: to_span(v.span()),
+        kind: StringContextKind::Echo,
+    }
+}
+
+/// Collect the string conversions inside one expression subtree.
+///
+/// Function-like bodies are not descended — a closure, an arrow function and a
+/// nested declaration are their own scopes, lowered (and judged) separately, and
+/// their free variables are not this statement's env.
+fn scan_string_contexts(node: &Node<'_, '_>, out: &mut Vec<StringContextSite>) {
+    let mut site = |e: &Expression<'_>, kind| {
+        out.push(StringContextSite { value: lower_arg_value(e), span: to_span(e.span()), kind });
+    };
+    match node {
+        Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_) => return,
+        // `"a $v"`, `"{$v}"`, a heredoc body, and a backtick string: every embedded
+        // expression is converted. A nowdoc and a single-quoted string carry only
+        // literal parts and so contribute nothing.
+        Node::CompositeString(cs) => {
+            for part in cs.parts().iter() {
+                match part {
+                    StringPart::Literal(_) => {}
+                    StringPart::Expression(e) => site(e, StringContextKind::Interpolation),
+                    StringPart::BracedExpression(b) => {
+                        site(b.expression, StringContextKind::Interpolation);
+                    }
+                }
+            }
+        }
+        // `(string) $v`. Every other cast converts to something else entirely and is
+        // not these ids' business.
+        Node::UnaryPrefix(u) if matches!(u.operator, UnaryPrefixOperator::StringCast(..)) => {
+            site(u.operand, StringContextKind::Cast);
+        }
+        // `$a . $b` — BOTH operands convert, and PHP warns once per array operand, so
+        // both are sites. A left-nested chain `'a' . $x . $y` visits each inner
+        // `Binary` in turn, so every leaf is collected exactly once (the nested
+        // `Binary` operand itself lowers to `ArgValue::Concat`, which proves no value
+        // unless both its own operands do — never a second report).
+        Node::Binary(b) if b.operator.is_concatenation() => {
+            site(b.lhs, StringContextKind::Concat);
+            site(b.rhs, StringContextKind::Concat);
+        }
+        // `$a .= $b` reads `$a` in string context too — `$arr .= 'x'` warns on the
+        // left-hand side exactly as `$arr . 'x'` does.
+        Node::Assignment(a) if matches!(a.operator, AssignmentOperator::Concat(_)) => {
+            site(a.lhs, StringContextKind::Concat);
+            site(a.rhs, StringContextKind::Concat);
+        }
+        Node::PrintConstruct(p) => site(p.value, StringContextKind::Print),
+        _ => {}
+    }
+    for child in node.children() {
+        scan_string_contexts(&child, out);
+    }
 }
 
 /// The full [`CallExpr`] when `expr` (unparenthesized) is a resolvable call —
@@ -6668,11 +6861,7 @@ fn lower_if(if_stmt: &mago_syntax::cst::If<'_>) -> Stmt {
         .map(|(c, stmts)| (lower_cond(c), lower_trace(stmts)))
         .collect();
     let else_trace = body.else_statements().map(lower_trace);
-    Stmt {
-        span: ZERO_SPAN,
-        kind: StmtKind::If { cond, then_trace, elseifs, else_trace },
-        invalidated: Vec::new(),
-    }
+    Stmt::lowered(StmtKind::If { cond, then_trace, elseifs, else_trace }, Vec::new())
 }
 
 /// Lower a borrowed statement list to a sub-trace (a branch body). Shares the
@@ -6719,11 +6908,7 @@ fn lower_match_stmt(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
             }
         }
     }
-    Some(Stmt {
-        span: ZERO_SPAN,
-        kind: StmtKind::Match { subject, arms, default, loose: false },
-        invalidated: Vec::new(),
-    })
+    Some(Stmt::lowered(StmtKind::Match { subject, arms, default, loose: false }, Vec::new()))
 }
 
 /// Structure a `switch ($subject) { … }` (ADR-0031 Part B) into the same
@@ -6808,11 +6993,7 @@ fn lower_switch(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
     if !pending.is_empty() || pending_default {
         return None;
     }
-    Some(Stmt {
-        span: ZERO_SPAN,
-        kind: StmtKind::Match { subject, arms, default, loose: true },
-        invalidated: Vec::new(),
-    })
+    Some(Stmt::lowered(StmtKind::Match { subject, arms, default, loose: true }, Vec::new()))
 }
 
 /// Lower an operand to a *usable* [`CondOperand`] — a bare variable or a literal —
@@ -7186,11 +7367,7 @@ fn cond_reads(expr: &Expression<'_>) -> Vec<String> {
 fn lower_opaque(s: &Statement<'_>) -> Stmt {
     let node = Node::Statement(s);
     let (writes, reads, poisons, may_return) = opaque_sets(&node);
-    Stmt {
-        span: ZERO_SPAN,
-        kind: StmtKind::Opaque { writes, reads, poisons, may_return },
-        invalidated: Vec::new(),
-    }
+    Stmt::lowered(StmtKind::Opaque { writes, reads, poisons, may_return }, Vec::new())
 }
 
 /// Compute an `Opaque` construct's `(writes, reads, poisons, may_return)` over its
@@ -7243,11 +7420,8 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
                 let invalidated = call_invalidation(&Node::Expression(a.rhs));
                 // `$x = f($s);` — carry the RHS call for propagation/descent.
                 let call = if a.operator.is_assign() { named_call(a.rhs) } else { None };
-                Stmt {
-                    span: ZERO_SPAN,
-                    kind: StmtKind::Assign { var, value, span: to_span(a.lhs.span()), call },
-                    invalidated,
-                }
+                let span = to_span(a.lhs.span());
+                Stmt::lowered(StmtKind::Assign { var, value, span, call }, invalidated)
             } else if let Expression::Access(Access::Property(pa)) = a.lhs.unparenthesized()
                 && let Some((target_var, prop)) = prop_fetch_of(pa.object, &pa.property)
             {
@@ -7256,11 +7430,9 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
                 let value = if a.operator.is_assign() { lower_arg_value(a.rhs) } else { ArgValue::Other };
                 let value_call = if a.operator.is_assign() { named_call(a.rhs) } else { None };
                 let invalidated = call_invalidation(&Node::Expression(a.rhs));
-                Stmt {
-                    span: ZERO_SPAN,
-                    kind: StmtKind::PropAssign { target_var, prop, value, value_call, span: to_span(a.lhs.span()) },
-                    invalidated,
-                }
+                let span = to_span(a.lhs.span());
+                let kind = StmtKind::PropAssign { target_var, prop, value, value_call, span };
+                Stmt::lowered(kind, invalidated)
             } else if a.operator.is_assign()
                 && let Some((base, keys)) = const_key_offset_path(a.lhs)
             {
@@ -7268,17 +7440,14 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
                 // Still a barrier in the walk — see `StmtKind::OffsetWrite` — but
                 // one that names the base and key so the shape lane survives it.
                 let invalidated = call_invalidation(&Node::Expression(a.rhs));
-                Stmt {
-                    span: ZERO_SPAN,
-                    kind: StmtKind::OffsetWrite { base, keys, value: lower_arg_value(a.rhs) },
-                    invalidated,
-                }
+                let value = lower_arg_value(a.rhs);
+                Stmt::lowered(StmtKind::OffsetWrite { base, keys, value }, invalidated)
             } else {
                 // Assignment to a non-simple lvalue (`$a[] = …`, `$a[$i] = …`,
                 // `$o->$p = …`, `$a->b->c = …`, `Foo::$s = …`). Barrier (the sound
                 // floor); a by-ref property alias `$r = &$x->p` is caught by the
                 // poison family above.
-                Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated: Vec::new() }
+                Stmt::lowered(StmtKind::Barrier, Vec::new())
             }
         }
         Expression::Call(Call::Function(fc)) => {
@@ -7287,10 +7456,10 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
             // mutates its argument by reference), so the narrowed variables carry no
             // invalidation; a non-lowerable argument falls back to a plain `Call`.
             if let Some(cond) = assert_stmt_cond(fc) {
-                Stmt { span: ZERO_SPAN, kind: StmtKind::Assert { cond }, invalidated: Vec::new() }
+                Stmt::lowered(StmtKind::Assert { cond }, Vec::new())
             } else {
                 let invalidated = call_invalidation(&Node::Expression(expr));
-                Stmt { span: ZERO_SPAN, kind: StmtKind::Call(lower_call(fc)), invalidated }
+                Stmt::lowered(StmtKind::Call(lower_call(fc)), invalidated)
             }
         }
         // Statement-level method / static / constructor calls. A resolvable
@@ -7300,11 +7469,11 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
         | Expression::Instantiation(_) => match named_call(expr) {
             Some(call) => {
                 let invalidated = call_invalidation(&Node::Expression(expr));
-                Stmt { span: ZERO_SPAN, kind: StmtKind::Call(call), invalidated }
+                Stmt::lowered(StmtKind::Call(call), invalidated)
             }
             None => {
                 let invalidated = call_invalidation(&Node::Expression(expr));
-                Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated }
+                Stmt::lowered(StmtKind::Barrier, invalidated)
             }
         },
         // A statement-position `match` (ADR-0031 Part B): structure its arms when
@@ -7314,24 +7483,20 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
         Expression::Match(m) => lower_match_stmt(m).unwrap_or_else(|| {
             let node = Node::Expression(expr);
             let (writes, reads, poisons, may_return) = opaque_sets(&node);
-            Stmt {
-                span: ZERO_SPAN,
-                kind: StmtKind::Opaque { writes, reads, poisons, may_return },
-                invalidated: Vec::new(),
-            }
+            Stmt::lowered(StmtKind::Opaque { writes, reads, poisons, may_return }, Vec::new())
         }),
         // `throw <expr>;` — a trace terminator (ADR-0031). Variables the thrown
         // expression hands to a call are still invalidated (by-ref conservatism),
         // though the terminator makes anything after it unreachable.
         Expression::Throw(t) => {
             let invalidated = call_invalidation(&Node::Expression(t.exception));
-            Stmt { span: ZERO_SPAN, kind: StmtKind::Throw { span: to_span(expr.span()) }, invalidated }
+            Stmt::lowered(StmtKind::Throw { span: to_span(expr.span()) }, invalidated)
         }
         // `exit;` / `die;` — a trace terminator (ADR-0019 never-returns).
         Expression::Construct(Construct::Exit(_) | Construct::Die(_)) => {
-            Stmt { span: ZERO_SPAN, kind: StmtKind::Exit { span: to_span(expr.span()) }, invalidated: Vec::new() }
+            Stmt::lowered(StmtKind::Exit { span: to_span(expr.span()) }, Vec::new())
         }
-        _ => Stmt { span: ZERO_SPAN, kind: StmtKind::Barrier, invalidated: Vec::new() },
+        _ => Stmt::lowered(StmtKind::Barrier, Vec::new()),
     }
 }
 
