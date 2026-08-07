@@ -10,7 +10,8 @@
 use std::collections::HashSet;
 
 use steins_infer::{
-    ALL_EMITTABLE_IDS, CALL_ON_NULL_ID, CALL_TOO_FEW_ARGUMENTS_ID, CALL_TOO_MANY_ARGUMENTS_ID,
+    ALL_EMITTABLE_IDS, ARRAY_DUPLICATE_KEY_ID, CALL_ON_NULL_ID, CALL_TOO_FEW_ARGUMENTS_ID,
+    CALL_TOO_MANY_ARGUMENTS_ID,
     CALL_UNDEFINED_FUNCTION_ID, CALL_UNDEFINED_METHOD_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID,
     CLASS_UNDEFINED_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID,
     DIAGNOSTIC_IDS,
@@ -108,6 +109,8 @@ fn classification_matches_adr_0050_section_1() {
     assert_eq!(layer(SUPPRESS_UNMATCHED_ID), Some(Layer::Mechanics));
     assert_eq!(layer(SUPPRESS_UNKNOWN_ID), Some(Layer::Mechanics));
     assert_eq!(layer(UNKNOWN_LABEL_ID), Some(Layer::Mechanics));
+    // the member-kind port wave's first id (ADR-0078, issue #187).
+    assert_eq!(layer(ARRAY_DUPLICATE_KEY_ID), Some(Layer::Mechanics));
     // finding-breadth family (ADR-0049): proof layer, except the declared-receiver
     // lane which is contract (the paired-id precedent, ADR-0049 §8).
     assert_eq!(layer(CALL_UNDEFINED_FUNCTION_ID), Some(Layer::Proof));

@@ -180,12 +180,32 @@ fn array_literals_fold_through_the_untouched_allowlist() {
     // (the source line is reprinted verbatim; what must be absent is the margin)
     assert!(out.contains("$widened = count([1, $x]);"), "source reprinted, got:\n{out}");
     assert!(!out.contains("//=> $widened"), "count([1, $x]) must widen, got:\n{out}");
+    // The `$dup` literal's own duplicate key is ALSO a genuine `array.duplicate-key`
+    // finding (ADR-0078, issue #187), joined onto the same line's margin as the
+    // fold fact above — annotate carries both kinds of fact on one line.
+    assert!(out.contains("✗ array.duplicate-key"), "the finding margin, got:\n{out}");
 
-    // Under `--no-php` every one of these is a folded fact, so all of them go —
-    // the sound subset (ADR-0004) never invents a value it did not execute.
+    // Under `--no-php` every FOLDED fact goes — the sound subset (ADR-0004) never
+    // invents a value it did not execute — but `array.duplicate-key` is a purely
+    // syntactic mechanics finding (issue #187) that needs no PHP at all, so it
+    // stays.
     let sound = run(&["annotate", "--no-php", path.to_str().unwrap()]);
     assert_eq!(sound.code, 0);
-    assert!(!sound.stdout.contains("//=>"), "no folded facts without PHP, got:\n{}", sound.stdout);
+    for needle in [
+        "//=> $n = 3",
+        r#"//=> $joined = "a,b""#,
+        "//=> $member = true",
+        "//=> $nested = 2",
+        "//=> $dup = 1",
+        r#"//=> $mixed = "a,b,c""#,
+    ] {
+        assert!(!sound.stdout.contains(needle), "no folded facts without PHP ({needle}), got:\n{}", sound.stdout);
+    }
+    assert!(
+        sound.stdout.contains("//=> ✗ array.duplicate-key"),
+        "the duplicate-key finding is PHP-independent, got:\n{}",
+        sound.stdout
+    );
 }
 
 // ---- annotate (ADR-0020): Rigor-style margin, proven facts only -----------

@@ -26,11 +26,12 @@ use steins_syntax::SourceTree;
 
 use crate::Diagnostic;
 use crate::{
-    CALL_ON_NULL_ID, CALL_PRINTF_TOO_FEW_ARGUMENTS_ID, CALL_TOO_FEW_ARGUMENTS_ID,
-    CALL_TOO_MANY_ARGUMENTS_ID, CALL_UNDEFINED_FUNCTION_ID, CALL_UNDEFINED_METHOD_ID,
-    CALL_UNKNOWN_NAMED_ARGUMENT_ID, CLASS_UNDEFINED_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID,
-    DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, EFFECT_ID, EFFECT_LISKOV_ID, ID, OFFSET_MAYBE_MISSING_ID,
-    OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID, OFFSET_UNDECLARED_ID, PARAM_MISMATCH_ID,
+    ARRAY_DUPLICATE_KEY_ID, CALL_ON_NULL_ID, CALL_PRINTF_TOO_FEW_ARGUMENTS_ID,
+    CALL_TOO_FEW_ARGUMENTS_ID, CALL_TOO_MANY_ARGUMENTS_ID, CALL_UNDEFINED_FUNCTION_ID,
+    CALL_UNDEFINED_METHOD_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID, CLASS_UNDEFINED_ID,
+    DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, EFFECT_ID,
+    EFFECT_LISKOV_ID, ID, OFFSET_MAYBE_MISSING_ID, OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID,
+    OFFSET_UNDECLARED_ID, PARAM_MISMATCH_ID,
     PHPDOC_PROP_MISMATCH_ID, PHPDOC_UNDEFINED_METHOD_ID, PROP_MISMATCH_ID, READONLY_REASSIGNED_ID,
     RETURN_ID, RETURN_MISMATCH_ID, THROW_LISKOV_ID, THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID,
 };
@@ -262,6 +263,9 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     (SUPPRESS_UNMATCHED_ID, Layer::Mechanics, Floor::Default),
     (SUPPRESS_UNKNOWN_ID, Layer::Mechanics, Floor::Default),
     (UNKNOWN_LABEL_ID, Layer::Mechanics, Floor::Default),
+    // mechanics — the member-kind port wave's first id (ADR-0078, issue #187):
+    // works-but-drops-a-value intent/behaviour drift, not a runtime break.
+    (ARRAY_DUPLICATE_KEY_ID, Layer::Mechanics, Floor::Default),
     // debug — the dump surface (ADR-0053): requested introspection, not a finding.
     // Suppression-, baseline-, and fp-gate-exempt (§4/§8). The `Default` floor is
     // inert for capture: the debug lane's exclusion from `surfaces_id` is a *layer*
