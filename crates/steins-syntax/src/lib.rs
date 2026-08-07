@@ -2958,6 +2958,145 @@ pub struct AppendStmt {
     pub value_unmodelled: bool,
 }
 
+// invalid operands (ADR-0078, issue #191)
+
+/// One **operator application** whose operand types PHP's own arithmetic table
+/// can refuse: an arithmetic, bitwise or shift binary operator, or a unary
+/// `-`/`+`/`~` (issue #191). Every such application in the file produces one of
+/// these, with both operands lowered to [`ArgValue`] — the value IR is
+/// where a literal `[]` and a `$var` carrying an env fact are spelled the same
+/// way, so the `type.invalid-operand` judge reads one shape.
+///
+/// Purely syntactic, like [`ForeachSite`]: nothing here decides a finding. What
+/// the operands *are* is a value-domain question answered in `steins-infer`
+/// against the enclosing statement's entry env.
+///
+/// Three operator families are deliberately **absent** (each a witnessed
+/// non-fatal or another id's territory, see the judge's table):
+///
+/// * `.` — concatenation is issue #193's id (`string.non-stringable` /
+///   `string.array-conversion`); array-in-concat is a *warning*, not a fatal;
+/// * every comparison (`< > <= >= <=> == != === !== <>`) — `php -r`-witnessed at
+///   8.5.9 to be legal for **every** operand pair, arrays and objects included,
+///   so `InvalidComparisonOperationRule` contributes no fatal row at all;
+/// * `++`/`--` — fatal on an array (`Cannot increment array`), but a mutation
+///   statement rather than an operand expression; out of v1's reach.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OperandSite {
+    /// The whole operator application's span (`$a + $b`, `-$a`) — where the
+    /// finding points.
+    pub span: Span,
+    /// The operator and its lowered operands.
+    pub kind: OperandSiteKind,
+    /// The span of the innermost enclosing **function-like body** (function,
+    /// method, closure, arrow function, property hook), or `None` at file
+    /// scope.
+    ///
+    /// This is the one field that is not about the operator: it keeps a site
+    /// inside a closure from being judged against the *enclosing* scope's env.
+    /// A statement `$f = fn() => $s + 1;` textually contains the `$s + 1` site,
+    /// but `$s` there is the closure's own binding, so the consumer requires
+    /// the statement it judges at to itself lie inside this body.
+    pub enclosing_body: Option<Span>,
+}
+
+/// The operator half of an [`OperandSite`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum OperandSiteKind {
+    /// A binary application `lhs <op> rhs`.
+    Binary {
+        /// The operator.
+        op: BinaryOperandOp,
+        /// The left operand, lowered.
+        lhs: ArgValue,
+        /// The right operand, lowered.
+        rhs: ArgValue,
+    },
+    /// A unary prefix application `<op> operand`.
+    Unary {
+        /// The operator.
+        op: UnaryOperandOp,
+        /// The operand, lowered.
+        operand: ArgValue,
+    },
+}
+
+/// The binary operators whose operand types PHP's arithmetic table can refuse.
+/// `.`, `??`, the comparisons and the logical operators are not here (see
+/// [`OperandSite`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BinaryOperandOp {
+    /// `+`
+    Add,
+    /// `-`
+    Sub,
+    /// `*`
+    Mul,
+    /// `/`
+    Div,
+    /// `%`
+    Mod,
+    /// `**`
+    Pow,
+    /// `&`
+    BitAnd,
+    /// `|`
+    BitOr,
+    /// `^`
+    BitXor,
+    /// `<<`
+    ShiftLeft,
+    /// `>>`
+    ShiftRight,
+}
+
+impl BinaryOperandOp {
+    /// The operator as written, for the diagnostic sentence.
+    #[must_use]
+    pub fn symbol(self) -> &'static str {
+        match self {
+            BinaryOperandOp::Add => "+",
+            BinaryOperandOp::Sub => "-",
+            BinaryOperandOp::Mul => "*",
+            BinaryOperandOp::Div => "/",
+            BinaryOperandOp::Mod => "%",
+            BinaryOperandOp::Pow => "**",
+            BinaryOperandOp::BitAnd => "&",
+            BinaryOperandOp::BitOr => "|",
+            BinaryOperandOp::BitXor => "^",
+            BinaryOperandOp::ShiftLeft => "<<",
+            BinaryOperandOp::ShiftRight => ">>",
+        }
+    }
+}
+
+/// The unary prefix operators whose operand type PHP can refuse. `!` is not
+/// here — it is total (`php -r`-witnessed legal on every operand kind,
+/// including arrays and objects).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnaryOperandOp {
+    /// `-`
+    Minus,
+    /// `+`
+    Plus,
+    /// `~`
+    BitNot,
+}
+
+impl UnaryOperandOp {
+    /// The operator as written, for the diagnostic sentence.
+    #[must_use]
+    pub fn symbol(self) -> &'static str {
+        match self {
+            UnaryOperandOp::Minus => "-",
+            UnaryOperandOp::Plus => "+",
+            UnaryOperandOp::BitNot => "~",
+        }
+    }
+}
+
+// end invalid operands (ADR-0078, issue #191)
+
 /// An owned, Mago-free lowering of one parsed PHP file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SourceTree {
@@ -3015,6 +3154,12 @@ pub struct SourceTree {
     /// in source order (issue #187). Read by the `array.duplicate-key` per-file
     /// pass.
     array_literal_sites: Vec<ArrayLiteralSite>,
+    // invalid operands (ADR-0078, issue #191)
+    /// Every arithmetic/bitwise/shift operator application in the file, in
+    /// source order, with both operands lowered. Read by the
+    /// `type.invalid-operand` judge and nothing else.
+    operand_sites: Vec<OperandSite>,
+    // end invalid operands (ADR-0078, issue #191)
     /// Class references at the positions that break at run time (ADR-0049 §5 / S4,
     /// widened by issue #182), read by the `class.undefined` per-file pass.
     hard_class_refs: Vec<NameRef>,
@@ -3084,6 +3229,12 @@ impl SourceTree {
         // check's whole evidence.
         let mut array_literal_sites = Vec::new();
         collect_array_literal_sites(&Node::Program(program), &mut array_literal_sites);
+
+        // Every arithmetic/bitwise/shift operator application in the file
+        // (ADR-0078, issue #191), with both operands lowered to the value IR.
+        // File scope carries no enclosing function-like body.
+        let mut operand_sites = Vec::new();
+        collect_operand_sites(&Node::Program(program), None, &mut operand_sites);
 
         // Comment trivia (ADR-0023 inline ignores): whitespace trivia is dropped;
         // every comment shape is kept with its raw spelling and span.
@@ -3157,6 +3308,7 @@ impl SourceTree {
             preg_flag_const_aliased: lowered.preg_flag_const_aliased,
             foreach_sites,
             array_literal_sites,
+            operand_sites,
             hard_class_refs: lowered.hard_class_refs,
             // member absence (ADR-0078, issue #197)
             property_writes: lowered.property_writes,
@@ -3301,6 +3453,17 @@ impl SourceTree {
         self.property_writes.dynamic
     }
     // end member absence (ADR-0078, issue #197)
+
+    // invalid operands (ADR-0078, issue #191)
+    /// Every arithmetic/bitwise/shift operator application in the file, in
+    /// source order (ADR-0078, issue #191) — ordered by span start, so a
+    /// consumer may binary-search the sites a statement's span covers.
+    /// Purely syntactic: the operands are lowered, never resolved.
+    #[must_use]
+    pub fn operand_sites(&self) -> &[OperandSite] {
+        &self.operand_sites
+    }
+    // end invalid operands (ADR-0078, issue #191)
 
     #[must_use]
     pub fn anonymous_class_edges(&self) -> &[AnonClassEdge] {
@@ -8677,6 +8840,93 @@ fn collect_foreach_sites(node: &Node<'_, '_>, scope_end: u32, out: &mut Vec<Fore
         collect_foreach_sites(&child, scope_end, out);
     }
 }
+
+// invalid operands (ADR-0078, issue #191)
+
+/// Collect every arithmetic/bitwise/shift operator application in the file, in
+/// pre-order (ADR-0078, issue #191). Recursion is unconditional, matching
+/// [`collect_array_literal_sites`]: a site nested in a call argument, an array
+/// element or a closure body is still found — the `enclosing_body` each site
+/// carries is what keeps a closure's site from being judged against the
+/// enclosing scope's env, not a truncated walk.
+///
+/// Pre-order plus source-ordered children means the output is sorted by span
+/// start (a parent's span starts at or before every child's), which is the
+/// ordering [`SourceTree::operand_sites`] promises.
+fn collect_operand_sites(node: &Node<'_, '_>, body: Option<Span>, out: &mut Vec<OperandSite>) {
+    // The innermost enclosing function-like body, refreshed on entry exactly as
+    // `collect_foreach_sites` refreshes `scope_end` — PHP's variable scope is
+    // the function, and this field's whole job is to name that scope.
+    let body = match node {
+        Node::Function(_)
+        | Node::Method(_)
+        | Node::Closure(_)
+        | Node::ArrowFunction(_)
+        | Node::PropertyHook(_) => Some(to_span(node.span())),
+        _ => body,
+    };
+    match node {
+        Node::Binary(b) => {
+            if let Some(op) = binary_operand_op(&b.operator) {
+                out.push(OperandSite {
+                    span: to_span(node.span()),
+                    kind: OperandSiteKind::Binary {
+                        op,
+                        lhs: lower_arg_value(b.lhs),
+                        rhs: lower_arg_value(b.rhs),
+                    },
+                    enclosing_body: body,
+                });
+            }
+        }
+        Node::UnaryPrefix(u) => {
+            if let Some(op) = unary_operand_op(&u.operator) {
+                out.push(OperandSite {
+                    span: to_span(node.span()),
+                    kind: OperandSiteKind::Unary { op, operand: lower_arg_value(u.operand) },
+                    enclosing_body: body,
+                });
+            }
+        }
+        _ => {}
+    }
+    for child in node.children() {
+        collect_operand_sites(&child, body, out);
+    }
+}
+
+/// The [`BinaryOperandOp`] of a CST binary operator, or `None` for an operator
+/// whose operand types PHP never refuses fatally — see [`OperandSite`] for why
+/// concatenation, the comparisons and the logical operators are all `None`.
+fn binary_operand_op(op: &BinaryOperator<'_>) -> Option<BinaryOperandOp> {
+    match op {
+        BinaryOperator::Addition(_) => Some(BinaryOperandOp::Add),
+        BinaryOperator::Subtraction(_) => Some(BinaryOperandOp::Sub),
+        BinaryOperator::Multiplication(_) => Some(BinaryOperandOp::Mul),
+        BinaryOperator::Division(_) => Some(BinaryOperandOp::Div),
+        BinaryOperator::Modulo(_) => Some(BinaryOperandOp::Mod),
+        BinaryOperator::Exponentiation(_) => Some(BinaryOperandOp::Pow),
+        BinaryOperator::BitwiseAnd(_) => Some(BinaryOperandOp::BitAnd),
+        BinaryOperator::BitwiseOr(_) => Some(BinaryOperandOp::BitOr),
+        BinaryOperator::BitwiseXor(_) => Some(BinaryOperandOp::BitXor),
+        BinaryOperator::LeftShift(_) => Some(BinaryOperandOp::ShiftLeft),
+        BinaryOperator::RightShift(_) => Some(BinaryOperandOp::ShiftRight),
+        _ => None,
+    }
+}
+
+/// The [`UnaryOperandOp`] of a CST unary prefix operator. `!`, the casts, `@`,
+/// `&` and `++`/`--` are all `None` (see [`OperandSite`]).
+fn unary_operand_op(op: &UnaryPrefixOperator<'_>) -> Option<UnaryOperandOp> {
+    match op {
+        UnaryPrefixOperator::Negation(_) => Some(UnaryOperandOp::Minus),
+        UnaryPrefixOperator::Plus(_) => Some(UnaryOperandOp::Plus),
+        UnaryPrefixOperator::BitwiseNot(_) => Some(UnaryOperandOp::BitNot),
+        _ => None,
+    }
+}
+
+// end invalid operands (ADR-0078, issue #191)
 
 /// Collect every literal array expression in the file, file-wide, including
 /// nested ones (issue #187) — recursion is unconditional, matching
