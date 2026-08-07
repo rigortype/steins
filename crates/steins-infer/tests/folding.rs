@@ -14,14 +14,14 @@ struct Mock;
 impl Folder for Mock {
     fn fold(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue> {
         match (name, args) {
-            ("strtolower", [ArgValue::Str(s)]) => Some(ArgValue::Str(s.to_lowercase())),
-            ("strtoupper", [ArgValue::Str(s)]) => Some(ArgValue::Str(s.to_uppercase())),
-            ("strval", [ArgValue::Int(i)]) => Some(ArgValue::Str(i.to_string())),
+            ("strtolower", [ArgValue::Str(s)]) => Some(ArgValue::Str(s.as_str()?.to_lowercase().into())),
+            ("strtoupper", [ArgValue::Str(s)]) => Some(ArgValue::Str(s.as_str()?.to_uppercase().into())),
+            ("strval", [ArgValue::Int(i)]) => Some(ArgValue::Str(i.to_string().into())),
             // `count` over a literal array (issue #39). The real fold runs on the
             // project's PHP; the mock only has to prove the GATE let the array
             // through — the sidecar tests cover the semantics.
             ("count", [ArgValue::Array(items)]) => {
-                Some(ArgValue::Str(format!("n{}", items.len())))
+                Some(ArgValue::Str(format!("n{}", items.len()).into()))
             }
             _ => None,
         }

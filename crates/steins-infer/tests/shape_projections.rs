@@ -75,7 +75,7 @@ fn entries(arg: &ArgValue) -> Option<&[(ArrayKey, ArgValue)]> {
 
 fn scalar_text(v: &ArgValue) -> Option<String> {
     match v {
-        ArgValue::Str(s) => Some(s.clone()),
+        ArgValue::Str(s) => s.as_str().map(ToOwned::to_owned),
         ArgValue::Int(i) => Some(i.to_string()),
         _ => None,
     }
@@ -92,7 +92,7 @@ impl Folder for Mock {
                 let sep = scalar_text(sep)?;
                 let parts: Option<Vec<String>> =
                     entries(a)?.iter().map(|(_, v)| scalar_text(v)).collect();
-                Some(ArgValue::Str(parts?.join(&sep)))
+                Some(ArgValue::Str(parts?.join(&sep).into()))
             }
             ("in_array", [needle, a]) => {
                 let needle = scalar_text(needle)?;

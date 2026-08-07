@@ -52,7 +52,7 @@
 
 use std::collections::HashMap;
 
-use steins_domain::{Base, Fact, StrPreds, Val};
+use steins_domain::{Base, Fact, PhpStr, StrPreds, Val};
 use steins_infer::{DEBUG_TYPE_ID, Diagnostic, Folder, check_with};
 use steins_syntax::{ArgValue, SourceTree};
 
@@ -708,6 +708,15 @@ fn the_casing_predicate_is_an_ascii_uppercase_byte_test() {
     assert!(StrPreds::of("").contains_all(StrPreds::LOWERCASE.union(StrPreds::UPPERCASE)));
     assert!(!StrPreds::of("").contains_all(StrPreds::NON_EMPTY));
     // The domain's own witness that a `Val::Str` is what these summaries read.
-    assert_eq!(StrPreds::of("foo"), StrPreds::of(&String::from("foo")));
+    // Since ADR-0080 the summary reads **bytes**, so one signature serves a
+    // `&str`, a `String` and the `PhpStr` a lowered literal actually carries.
+    assert_eq!(StrPreds::of("foo"), StrPreds::of(String::from("foo")));
+    assert_eq!(StrPreds::of("foo"), StrPreds::of(PhpStr::from("foo")));
     assert!(matches!(Val::Str("foo".into()), Val::Str(_)));
+    // A byte string is uncased, non-numeric and not a decimal-int string — the
+    // same answers the engine gives for those bytes.
+    let bytes = StrPreds::of(PhpStr::from_bytes(&[0xC0]));
+    assert!(bytes.contains_all(StrPreds::LOWERCASE.union(StrPreds::UPPERCASE)));
+    assert!(bytes.contains_all(StrPreds::NON_EMPTY.union(StrPreds::NON_FALSY)));
+    assert!(!bytes.contains_all(StrPreds::NUMERIC));
 }

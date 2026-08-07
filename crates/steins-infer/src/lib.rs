@@ -2557,13 +2557,13 @@ fn fits_fold_budget(v: &ArgValue, depth: u8, budget: &mut usize) -> bool {
 ///
 /// Arrays (`"Array"` plus a warning), objects (`__toString` or an `Error`) and every
 /// unresolved carrier widen for the ordinary reason — the result is not proven.
-fn concat_cast(v: &ArgValue) -> Option<String> {
+fn concat_cast(v: &ArgValue) -> Option<PhpStr> {
     match v {
         ArgValue::Str(s) => Some(s.clone()),
-        ArgValue::Int(i) => Some(i.to_string()),
+        ArgValue::Int(i) => Some(PhpStr::from(i.to_string())),
         // `true` is "1", `false` is "" — verified against php-src, not assumed.
-        ArgValue::Bool(b) => Some(if *b { "1".to_owned() } else { String::new() }),
-        ArgValue::Null => Some(String::new()),
+        ArgValue::Bool(b) => Some(PhpStr::from(if *b { "1" } else { "" })),
+        ArgValue::Null => Some(PhpStr::new()),
         _ => None,
     }
 }
@@ -2591,7 +2591,11 @@ fn arg_to_fold_within(arg: &ArgValue, depth: u8, budget: &mut usize) -> Option<F
     match arg {
         ArgValue::Int(v) => Some(FoldArg::Int(*v)),
         ArgValue::Float(v) => Some(FoldArg::Float(*v)),
-        ArgValue::Str(v) => Some(FoldArg::Str(v.clone())),
+        // The fold wire is JSON, which cannot carry arbitrary bytes, so a
+        // non-UTF-8 string is **not sent** (ADR-0080 §2.6): the fold declines
+        // rather than asking PHP about a different string than the source has.
+        // Restoring the fold for byte strings is ADR-0080 §3.1.
+        ArgValue::Str(v) => Some(FoldArg::Str(v.as_str()?.to_owned())),
         ArgValue::Bool(v) => Some(FoldArg::Bool(*v)),
         ArgValue::Null => Some(FoldArg::Null),
         // An array literal (issue #39): representable when every element is, and
@@ -2610,7 +2614,9 @@ fn arg_to_fold_within(arg: &ArgValue, depth: u8, budget: &mut usize) -> Option<F
                 let key = match k {
                     ArrayKey::Auto => None,
                     ArrayKey::Int(i) => Some(FoldKey::Int(*i)),
-                    ArrayKey::Str(s) => Some(FoldKey::Str(s.clone())),
+                    // `?` widens the WHOLE array, exactly like an unrepresentable
+                    // element: `None` here would mean "auto key", a different claim.
+                    ArrayKey::Str(s) => Some(FoldKey::Str(s.as_str()?.to_owned())),
                 };
                 entries.push((key, arg_to_fold_within(v, depth - 1, budget)?));
             }
@@ -2645,7 +2651,7 @@ fn fold_value_to_arg(value: &FoldValue) -> Option<ArgValue> {
     Some(match value {
         FoldValue::Int(v) => ArgValue::Int(*v),
         FoldValue::Float(v) => ArgValue::Float(*v),
-        FoldValue::Str(v) => ArgValue::Str(v.clone()),
+        FoldValue::Str(v) => ArgValue::Str(PhpStr::from(v.clone())),
         FoldValue::Bool(v) => ArgValue::Bool(*v),
         FoldValue::Null => ArgValue::Null,
     })
@@ -7938,7 +7944,13 @@ impl<'a> Cx<'a> {
                 let (r, sr) = self.resolve_literal_under(
                     b, env, poisoned, folder, descent.as_deref_mut(), out.as_deref_mut(),
                 )?;
-                Some((ArgValue::Str(concat_cast(&l)? + &concat_cast(&r)?), sl.min(sr)))
+                // PHP's `.` joins **bytes** (ADR-0080), so two halves that are each
+                // invalid UTF-8 can still concatenate to a valid string;
+                // `PhpStr::from_vec` re-canonicalizes the join.
+                let (lb, rb) = (concat_cast(&l)?, concat_cast(&r)?);
+                let mut bytes = lb.as_bytes().to_vec();
+                bytes.extend_from_slice(rb.as_bytes());
+                Some((ArgValue::Str(PhpStr::from_vec(bytes)), sl.min(sr)))
             }
             // An array is proven iff every element value is proven (keys are fixed
             // at lowering). Folding is never applied to arrays (ADR-0001).
@@ -8495,7 +8507,8 @@ impl<'a> Cx<'a> {
 /// The domain value-fact (four layers), aliased as `Fact` throughout the walk.
 use steins_domain::Fact;
 use steins_domain::{
-    Base, CoverFlavor, IntRange, Key as VKey, Refinement, ShapeFact, StrPreds, Val, php_is_numeric,
+    Base, CoverFlavor, IntRange, Key as VKey, PhpStr, Refinement, ShapeFact, StrPreds, Val,
+    php_is_numeric,
 };
 
 /// The conversion seam **into** the domain: a literal (or fully-literal array)
@@ -10526,7 +10539,11 @@ fn render_finite_precise(members: &[Val]) -> Option<String> {
         _ => None,
     }));
     parts.extend(vals.iter().filter_map(|v| match v {
-        Val::Str(s) => Some(steins_contract::spell::string_literal(s)),
+        // A byte string has no phpdoc literal spelling, so the dump surface shows
+        // PHP's own escape form instead of a lossy character.
+        Val::Str(s) => Some(
+            s.as_str().map_or_else(|| s.to_php_literal(), steins_contract::spell::string_literal),
+        ),
         _ => None,
     }));
     // Both bool literals present ⟺ the whole `bool` type — PHPStan renders `bool`
@@ -11193,11 +11210,13 @@ fn assert_expected_string(
     poisoned: bool,
     folder: &mut dyn Folder,
 ) -> Option<String> {
+    // A text lane (the harness compares this against a phpdoc type string), so a
+    // non-UTF-8 literal is not an expected-type spelling at all.
     if let ArgValue::Str(s) = value {
-        return Some(s.clone());
+        return s.as_str().map(ToOwned::to_owned);
     }
     match cx.resolve_literal(value, env, poisoned, folder) {
-        Some(ArgValue::Str(s)) => Some(s),
+        Some(ArgValue::Str(s)) => s.as_str().map(ToOwned::to_owned),
         _ => None,
     }
 }
@@ -13154,7 +13173,12 @@ fn eval_existence_call(w: &WalkCx, folder: &mut dyn Folder, call: &CallExpr) -> 
         let Some(class_fqn) = existence_class_literal(w.cx, &call.args[0].value) else {
             return Certainty::Maybe;
         };
+        // A name lane: a byte string names no PHP method, so the verdict stays
+        // Maybe rather than resolving against a lossy spelling (ADR-0080 §2.5).
         let ArgValue::Str(method) = &call.args[1].value else {
+            return Certainty::Maybe;
+        };
+        let Some(method) = method.as_str() else {
             return Certainty::Maybe;
         };
         method_exists_verdict(w.cx, folder, &class_fqn, method)
@@ -13163,6 +13187,9 @@ fn eval_existence_call(w: &WalkCx, folder: &mut dyn Folder, call: &CallExpr) -> 
             return Certainty::Maybe;
         }
         let ArgValue::Str(name) = &call.args[0].value else {
+            return Certainty::Maybe;
+        };
+        let Some(name) = name.as_str() else {
             return Certainty::Maybe;
         };
         function_exists_verdict(w.cx, folder, name)
@@ -13199,7 +13226,7 @@ fn existence_class_literal(cx: &Cx, v: &ArgValue) -> Option<String> {
         ArgValue::ClassConst(StaticClass::Named(r), name) if name.eq_ignore_ascii_case("class") => {
             Some(cx.class_fqn(r))
         }
-        ArgValue::Str(s) => Some(s.trim_start_matches('\\').to_owned()),
+        ArgValue::Str(s) => Some(s.as_str()?.trim_start_matches('\\').to_owned()),
         _ => None,
     }
 }
@@ -13406,7 +13433,7 @@ fn existence_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Option<Vouch> {
         };
         Some(Vouch::Method {
             class: class.trim_start_matches('\\').to_ascii_lowercase(),
-            method: method.to_ascii_lowercase(),
+            method: method.as_str()?.to_ascii_lowercase(),
         })
     } else if pred == "function_exists" {
         if !call.positional_only || call.args.len() != 1 {
@@ -13415,7 +13442,7 @@ fn existence_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Option<Vouch> {
         let ArgValue::Str(name) = &call.args[0].value else {
             return None;
         };
-        Some(Vouch::Function(name.trim_start_matches('\\').to_ascii_lowercase()))
+        Some(Vouch::Function(name.as_str()?.trim_start_matches('\\').to_ascii_lowercase()))
     // global constants (ADR-0078, issue #198)
     } else if pred == "defined" {
         // `defined('X')` vouches nothing, on purpose. The absence id it guards
@@ -14311,7 +14338,7 @@ fn falsy_literals() -> [ArgValue; 7] {
         ArgValue::Bool(false),
         ArgValue::Int(0),
         ArgValue::Float(0.0),
-        ArgValue::Str(String::new()),
+        ArgValue::Str(PhpStr::new()),
         ArgValue::Str("0".into()),
         ArgValue::Array(Vec::new()),
     ]
@@ -15769,7 +15796,10 @@ fn preg_proven_pattern(
     env: &HashMap<String, Known>,
 ) -> Option<String> {
     match w.cx.resolve_literal(value, env, w.scope.poisoned, folder)? {
-        ArgValue::Str(pattern) => Some(pattern),
+        // A byte-string pattern is not a spelling either preg reader can parse,
+        // so the seam declines once for both rather than guessing at a lossy
+        // decoding of it (ADR-0080 §2.5).
+        ArgValue::Str(pattern) => pattern.as_str().map(ToOwned::to_owned),
         _ => None,
     }
 }
@@ -16735,7 +16765,7 @@ fn preg_element_fact(text: &steins_catalog::preg::MatchedText) -> Fact {
 /// belt-and-suspenders for an empty or unrepresentable set.
 fn preg_group_element_fact(g: &steins_catalog::preg::CaptureGroup) -> Fact {
     if let Some(literals) = &g.literals {
-        let vals = literals.iter().map(|s| Val::Str(s.clone())).collect();
+        let vals = literals.iter().map(|s| Val::Str(s.clone().into())).collect();
         if let Some(fact) = Fact::from_vals(vals) {
             return fact;
         }
@@ -16867,7 +16897,7 @@ fn preg_success_shape(
         let index = i64::try_from(i + 1).ok()?;
         fields.push((VKey::Int(index), presence, slot(element.clone())));
         if let Some(name) = &g.name {
-            fields.push((VKey::Str(name.clone()), presence, slot(element)));
+            fields.push((VKey::Str(name.clone().into()), presence, slot(element)));
         }
     }
     // A pattern with more groups than a shape may carry has no faithful shape, and
@@ -16945,7 +16975,7 @@ fn preg_pattern_order_shape(
         let index = i64::try_from(i + 1).ok()?;
         fields.push((VKey::Int(index), required, slot(col.clone())));
         if let Some(name) = &g.name {
-            fields.push((VKey::Str(name.clone()), required, slot(col)));
+            fields.push((VKey::Str(name.clone().into()), required, slot(col)));
         }
     }
     if fields.len() > SHAPE_WIDTH_LIMIT {
@@ -16970,7 +17000,7 @@ fn preg_pattern_order_shape(
 /// union (slice F) gains `''` as one more member, and an unrepresentable join
 /// degrades to plain `string`, which is the sound side either way.
 fn preg_padded_element(body: Fact) -> Fact {
-    body.join(&Fact::Singleton(Val::Str(String::new())))
+    body.join(&Fact::Singleton(Val::Str(PhpStr::new())))
         .unwrap_or(Fact::General { base: Base::String, nullable: false })
 }
 
@@ -17887,28 +17917,37 @@ fn php_loose_eq(a: &ArgValue, b: &ArgValue, php_minor: Option<(u16, u16)>) -> Op
 
 /// `int == string`: numeric string → numeric compare; else compare the int's
 /// decimal form to the string (PHP 8 semantics).
-fn php_int_str_eq(i: i64, s: &str) -> bool {
-    if php_is_numeric(s) {
-        php_str_to_float(s).is_some_and(|f| (i as f64) == f)
+fn php_int_str_eq(i: i64, s: &PhpStr) -> bool {
+    // A byte string is never numeric (every byte of a numeric string is ASCII),
+    // so it always falls to the byte comparison — which is what PHP does.
+    if let Some(t) = s.as_str()
+        && php_is_numeric(t)
+    {
+        php_str_to_float(t).is_some_and(|f| (i as f64) == f)
     } else {
-        i.to_string() == s
+        i.to_string().as_bytes() == s.as_bytes()
     }
 }
 
 /// `float == string`: numeric string → numeric compare; a non-numeric string is
 /// undecidable here (float→string formatting is precision-sensitive) → `None`.
-fn php_float_str_eq(f: f64, s: &str) -> Option<bool> {
-    if php_is_numeric(s) {
-        Some(php_str_to_float(s).is_some_and(|g| f == g))
+fn php_float_str_eq(f: f64, s: &PhpStr) -> Option<bool> {
+    if let Some(t) = s.as_str()
+        && php_is_numeric(t)
+    {
+        Some(php_str_to_float(t).is_some_and(|g| f == g))
     } else {
         None
     }
 }
 
 /// `string == string`: both numeric strings → numeric compare; else byte compare.
-fn php_str_eq(x: &str, y: &str) -> bool {
-    if php_is_numeric(x) && php_is_numeric(y) {
-        match (php_str_to_float(x), php_str_to_float(y)) {
+fn php_str_eq(x: &PhpStr, y: &PhpStr) -> bool {
+    if let (Some(a), Some(b)) = (x.as_str(), y.as_str())
+        && php_is_numeric(a)
+        && php_is_numeric(b)
+    {
+        match (php_str_to_float(a), php_str_to_float(b)) {
             (Some(a), Some(b)) => a == b,
             _ => x == y,
         }
@@ -18479,8 +18518,13 @@ fn handle_var_call(
     // Named/spread still route through `dispatch_named_callable` so the declared
     // return floor is kept when binding refuses (issue #128 review) — same rung as
     // local closures and first-class callables.
-    if let Some(ArgValue::Str(s)) = known.singleton() {
-        let nameref = NameRef { raw: s.clone(), kind: RefKind::Unqualified, offset: call.span.start };
+    // A name lane: a byte string names no PHP function, so it resolves to nothing
+    // rather than to a lossy spelling (ADR-0080 §2.5).
+    if let Some(ArgValue::Str(s)) = known.singleton()
+        && let Some(s) = s.as_str()
+    {
+        let nameref =
+            NameRef { raw: s.to_owned(), kind: RefKind::Unqualified, offset: call.span.start };
         return dispatch_named_callable(cx, folder, scope.poisoned, &nameref, call, env, descent, out);
     }
     empty
@@ -18745,7 +18789,7 @@ fn descend(
         // Exact receiver is a runtime-proven identity — Verified.
         key_binding.push((
             "this:".to_owned(),
-            ArgValue::Str(exact.clone()),
+            ArgValue::Str(PhpStr::from(exact.clone())),
             Stratum::Verified,
         ));
     }
@@ -22385,7 +22429,9 @@ fn printf_family_shape(cx: &Cx, call: &CallExpr) -> Option<(&'static str, Printf
 /// spec, PHP 8.5): `b c d e E f F g G h H o s u x X`. `%` itself is
 /// deliberately excluded from this set — it is the escape's own vocabulary,
 /// not a general type character after flags/width.
-fn printf_placeholder_count(fmt: &str) -> Option<usize> {
+fn printf_placeholder_count(fmt: &PhpStr) -> Option<usize> {
+    // php-src walks the format **byte by byte**, so this reader does too — a lossy
+    // decode would have shifted every position after an invalid byte.
     let b = fmt.as_bytes();
     let n = b.len();
     let mut i = 0usize;
@@ -23005,7 +23051,7 @@ fn offset_key_of(v: &Val) -> Option<VKey> {
     match v {
         Val::Int(i) => Some(VKey::Int(*i)),
         Val::Bool(b) => Some(VKey::Int(i64::from(*b))),
-        Val::Null => Some(VKey::Str(String::new())),
+        Val::Null => Some(VKey::Str(PhpStr::new())),
         #[allow(clippy::cast_possible_truncation)]
         Val::Float(f) if f.is_finite() => Some(VKey::Int(f.trunc() as i64)),
         Val::Str(s) => Some(match php_canonical_int_string(s) {
@@ -23057,7 +23103,7 @@ fn unsupported_base_word(v: &Val) -> Option<&'static str> {
 fn render_offset_key(k: &VKey) -> (String, String) {
     match k {
         VKey::Int(i) => (i.to_string(), i.to_string()),
-        VKey::Str(s) => (format!("'{s}'"), format!("\"{s}\"")),
+        VKey::Str(s) => (s.render_with('\''), s.render_with('"')),
     }
 }
 
@@ -24865,17 +24911,19 @@ fn coerce_scalar(scalar: ScalarType, value: &ArgValue) -> Option<ArgValue> {
 
         (ScalarType::Float, ArgValue::Int(i)) => ArgValue::Float(*i as f64),
 
-        (ScalarType::Int, ArgValue::Str(s)) => ArgValue::Int(php_str_to_int(s)?),
-        (ScalarType::Float, ArgValue::Str(s)) => ArgValue::Float(php_str_to_float(s)?),
+        // A byte string's numeric cast is declined rather than guessed: both readers
+        // are written over a `&str` prefix (ADR-0080 §2.5).
+        (ScalarType::Int, ArgValue::Str(s)) => ArgValue::Int(php_str_to_int(s.as_str()?)?),
+        (ScalarType::Float, ArgValue::Str(s)) => ArgValue::Float(php_str_to_float(s.as_str()?)?),
         (ScalarType::Int, ArgValue::Float(f)) => ArgValue::Int(php_float_to_int(*f)?),
         (ScalarType::Int, ArgValue::Bool(b)) => ArgValue::Int(i64::from(*b)),
         (ScalarType::Float, ArgValue::Bool(b)) => ArgValue::Float(if *b { 1.0 } else { 0.0 }),
         (ScalarType::Bool, ArgValue::Int(i)) => ArgValue::Bool(*i != 0),
         (ScalarType::Bool, ArgValue::Float(f)) => ArgValue::Bool(*f != 0.0),
         (ScalarType::Bool, ArgValue::Str(s)) => ArgValue::Bool(!(s.is_empty() || s == "0")),
-        (ScalarType::String, ArgValue::Int(i)) => ArgValue::Str(i.to_string()),
+        (ScalarType::String, ArgValue::Int(i)) => ArgValue::Str(PhpStr::from(i.to_string())),
         (ScalarType::String, ArgValue::Bool(b)) => {
-            ArgValue::Str(if *b { "1".to_owned() } else { String::new() })
+            ArgValue::Str(PhpStr::from(if *b { "1" } else { "" }))
         }
 
         _ => return None,
@@ -25368,7 +25416,7 @@ impl<'a> Cx<'a> {
         if name.eq_ignore_ascii_case("class") {
             return match sc {
                 StaticClass::Named(r) => {
-                    Some(ArgValue::Str(self.class_fqn(r).trim_start_matches('\\').to_owned()))
+                    Some(ArgValue::Str(PhpStr::from(self.class_fqn(r).trim_start_matches('\\'))))
                 }
                 _ => None,
             };
@@ -29213,7 +29261,7 @@ mod domain_tests {
     #[test]
     fn loose_eq_measured_cells_php_8_5_8() {
         use ArgValue::{Bool, Int, Null, Str};
-        let s = |x: &str| Str(x.to_owned());
+        let s = |x: &str| Str(x.into());
         // A representative slice of the recorded PHP 8.5.8 table.
         assert_eq!(php_loose_eq(&Null, &Null, Some((8, 5))), Some(true));
         assert_eq!(php_loose_eq(&Null, &Int(0), Some((8, 5))), Some(true));
@@ -29234,9 +29282,9 @@ mod domain_tests {
     #[test]
     fn truthiness_edge_cells() {
         use ArgValue::{Array, Float, Int, Null, Str};
-        assert_eq!(php_truthy(&Str("0".to_owned())), Some(false)); // "0" is falsy
-        assert_eq!(php_truthy(&Str("0.0".to_owned())), Some(true)); // but "0.0" is truthy
-        assert_eq!(php_truthy(&Str(String::new())), Some(false));
+        assert_eq!(php_truthy(&Str("0".into())), Some(false)); // "0" is falsy
+        assert_eq!(php_truthy(&Str("0.0".into())), Some(true)); // but "0.0" is truthy
+        assert_eq!(php_truthy(&Str(PhpStr::new())), Some(false));
         assert_eq!(php_truthy(&Int(0)), Some(false));
         assert_eq!(php_truthy(&Float(0.0)), Some(false));
         assert_eq!(php_truthy(&Null), Some(false));
@@ -29256,7 +29304,7 @@ mod domain_tests {
     #[test]
     fn negative_key_arrays_compare_per_the_project_minor() {
         use steins_syntax::ArrayKey;
-        let s = |x: &str| ArgValue::Str(x.to_owned());
+        let s = |x: &str| ArgValue::Str(x.into());
         let arr = |items: Vec<(ArrayKey, ArgValue)>| ArgValue::Array(items);
 
         // `[-5 => 'a', 'b']` — the omitted key is where the two rules disagree.
@@ -29791,7 +29839,7 @@ mod dump_render_tests {
         Val::Int(n)
     }
     fn s(v: &str) -> Val {
-        Val::Str(v.to_owned())
+        Val::Str(v.into())
     }
 
     #[test]
@@ -30051,7 +30099,7 @@ mod shape_projection_tests {
     }
 
     fn sk(s: &str) -> VKey {
-        VKey::Str(s.to_owned())
+        VKey::Str(s.into())
     }
 
     fn req() -> Presence {
