@@ -1134,6 +1134,24 @@ pub fn next_int_is_version_dependent(items: &[(ArrayKey, ArgValue)]) -> bool {
     false
 }
 
+/// The next PHP auto-index for an omitted array key, given the running max
+/// integer key seen so far (`None` — no integer key yet — answers position
+/// `0`) and the [`NextIntRule`] in force. Saturating: at `i64::MAX` PHP itself
+/// refuses to append; the clamped index collides and last-wins folds it, which
+/// is as close as a pure key model gets to that runtime error.
+///
+/// Shared by [`normalize_array_with`] (which also folds `max_seen`'s bump back
+/// in afterward) and [`duplicate_array_keys`] (issue #187), which needs the
+/// same arithmetic without the last-wins fold — one auto-index rule, not two.
+#[must_use]
+fn next_auto_index(max_seen: Option<i64>, rule: NextIntRule) -> i64 {
+    let mut i = max_seen.map_or(0, |m: i64| m.saturating_add(1));
+    if matches!(rule, NextIntRule::FloorAtZero) {
+        i = i.max(0);
+    }
+    i
+}
+
 /// Resolve an array literal under an explicitly chosen [`NextIntRule`], applying
 /// next-int assignment for `Auto` keys and **last-wins** for duplicates (a
 /// repeated key updates the value in place, keeping the first position — PHP
@@ -1156,13 +1174,7 @@ pub fn normalize_array_with(
     for (k, v) in items {
         let key = match k {
             ArrayKey::Auto => {
-                // Saturating: at `i64::MAX` PHP itself refuses to append; the
-                // clamped index collides and last-wins folds it, which is as
-                // close as a pure key model gets to that runtime error.
-                let mut i = max_seen.map_or(0, |m: i64| m.saturating_add(1));
-                if matches!(rule, NextIntRule::FloorAtZero) {
-                    i = i.max(0);
-                }
+                let i = next_auto_index(max_seen, rule);
                 max_seen = Some(max_seen.map_or(i, |m| m.max(i)));
                 NormKey::Int(i)
             }
@@ -1205,6 +1217,131 @@ pub fn normalize_array(
         // The rules agree on this literal, so either one resolves it.
         None => Some(normalize_array_with(items, NextIntRule::MaxPlusOne)),
     }
+}
+
+// ---------------------------------------------------------------------------
+// `array.duplicate-key` (ADR-0078, issue #187): duplicate literal array keys.
+//
+// Purely syntactic — no inference, no evaluation of the *value* side at all —
+// so [`ArrayLiteralSite`] is collected file-wide at parse time (like
+// [`ForeachSite`]) rather than riding the value-domain [`ArgValue::Array`]
+// lowering, which bails the WHOLE literal to `Other` the moment any single
+// *value* fails to lower. A duplicate-key finding cares only about keys:
+// `[1 => 'a', 1 => $x]` still has a provable duplicate even though `$x`
+// defeats value representation.
+// ---------------------------------------------------------------------------
+
+/// One element of a literal array expression, reduced to what
+/// [`duplicate_array_keys`] needs (issue #187): its resolved key and its own
+/// span. The key coercion is the exact one [`lower_array_key`] applies at
+/// every other array-literal use site — no second table.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArrayLiteralElement {
+    /// `Some(ArrayKey::Auto)` for a bare `value` element (no explicit key);
+    /// `Some(ArrayKey::Int(_) | ArrayKey::Str(_))` for an explicit key the fold
+    /// gate resolves (PHP's own coercion: `1`/`'1'`/`1.7`/`true` all fold to
+    /// `Int(1)`, `null` to `Str("")`); `None` for an explicit key expression the
+    /// fold gate cannot pin (a variable, a call, a nested expression, …), a
+    /// `...$spread`, or a `list()`-style missing hole — none of the three
+    /// contributes a knowable key.
+    pub key: Option<ArrayKey>,
+    /// The element's own span (`key => value`, or the bare value) — where a
+    /// duplicate-key finding naming this element is positioned.
+    pub span: Span,
+}
+
+/// One literal array expression in a file (`[...]` or legacy `array(...)`),
+/// its elements in source order — the whole evidence `array.duplicate-key`
+/// needs (issue #187). Collected file-wide, independent of whether the
+/// literal is ever read on a live path (mechanics, not proof).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArrayLiteralSite {
+    pub elements: Vec<ArrayLiteralElement>,
+}
+
+/// One shadowed-then-overwritten pair `array.duplicate-key` reports (issue
+/// #187): `shadowed_span` is the earlier element carrying the same
+/// PHP-normalized key, `winner_span` is the later one that overwrites it (and
+/// is where the finding is positioned), and `key` is the shared [`NormKey`]
+/// for the message.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DuplicateArrayKey {
+    pub key: NormKey,
+    pub winner_span: Span,
+    pub shadowed_span: Span,
+}
+
+/// Scan one [`ArrayLiteralSite`]'s elements for PHP-key-equal duplicates
+/// (issue #187, `array.duplicate-key`), reusing the exact key coercion
+/// ([`lower_array_key`], via [`ArrayLiteralElement::key`]) and next-auto-index
+/// rule ([`next_auto_index`]) [`normalize_array`] applies to fold a whole
+/// literal — no second coercion table.
+///
+/// Pairing is **adjacent**: each later occurrence is reported against the
+/// nearest earlier occurrence of the same key, matching how PHP itself
+/// overwrites the slot in place (three occurrences of one key yield two
+/// findings — first-shadowed-by-second, second-shadowed-by-third — never one
+/// finding naming the first and third).
+///
+/// An element whose key the fold gate cannot pin (`None` — a variable, a
+/// call, a spread, a destructuring hole) is skipped, and — since its actual
+/// runtime key could be an integer that shifts the auto-increment counter —
+/// every `Auto` element after it is unresolvable too and skipped as well
+/// (silence, never a guess: `php -r '$x=5; var_export([$x=>"a","b"]);'` →
+/// `[5=>"a", 6=>"b"]`, so an unproven key genuinely moves later positions).
+///
+/// `php_minor` selects the next-int rule exactly as [`normalize_array`] does.
+/// When it is `None`, both rules run in parallel per `Auto` element; the
+/// element resolves only while they agree, and the first disagreement poisons
+/// every `Auto` element after it too (the version-dependent leg of ADR-0049
+/// A12, resolved per element rather than for the whole literal).
+#[must_use]
+pub fn duplicate_array_keys(
+    site: &ArrayLiteralSite,
+    php_minor: Option<(u16, u16)>,
+) -> Vec<DuplicateArrayKey> {
+    let known_rule = php_minor.map(NextIntRule::for_minor);
+    let mut max_plus_one: Option<i64> = None;
+    let mut max_floor_zero: Option<i64> = None;
+    let mut poisoned = false;
+    let mut last_seen: HashMap<NormKey, Span> = HashMap::new();
+    let mut out = Vec::new();
+
+    for el in &site.elements {
+        let resolved = match &el.key {
+            None => {
+                poisoned = true;
+                None
+            }
+            Some(ArrayKey::Int(i)) => {
+                max_plus_one = Some(max_plus_one.map_or(*i, |m| m.max(*i)));
+                max_floor_zero = Some(max_floor_zero.map_or(*i, |m| m.max(*i)));
+                Some(NormKey::Int(*i))
+            }
+            Some(ArrayKey::Str(s)) => Some(NormKey::Str(s.clone())),
+            Some(ArrayKey::Auto) if poisoned => None,
+            Some(ArrayKey::Auto) => {
+                let a = next_auto_index(max_plus_one, NextIntRule::MaxPlusOne);
+                let b = next_auto_index(max_floor_zero, NextIntRule::FloorAtZero);
+                max_plus_one = Some(max_plus_one.map_or(a, |m| m.max(a)));
+                max_floor_zero = Some(max_floor_zero.map_or(b, |m| m.max(b)));
+                match known_rule {
+                    Some(NextIntRule::MaxPlusOne) => Some(NormKey::Int(a)),
+                    Some(NextIntRule::FloorAtZero) => Some(NormKey::Int(b)),
+                    None if a == b => Some(NormKey::Int(a)),
+                    None => {
+                        poisoned = true;
+                        None
+                    }
+                }
+            }
+        };
+        let Some(key) = resolved else { continue };
+        if let Some(shadowed_span) = last_seen.insert(key.clone(), el.span) {
+            out.push(DuplicateArrayKey { key, winner_span: el.span, shadowed_span });
+        }
+    }
+    out
 }
 
 impl Eq for ArgValue {}
@@ -2410,6 +2547,10 @@ pub struct SourceTree {
     /// shape (ADR-0076). Read by the loop→`array_map` transform and nothing else;
     /// no finding consults it.
     foreach_sites: Vec<ForeachSite>,
+    /// Every literal array expression in the file (`[...]` / legacy `array(...)`),
+    /// in source order (issue #187). Read by the `array.duplicate-key` per-file
+    /// pass.
+    array_literal_sites: Vec<ArrayLiteralSite>,
     /// Class references at the positions that break at run time (ADR-0049 §5 / S4,
     /// widened by issue #182), read by the `class.undefined` per-file pass.
     hard_class_refs: Vec<NameRef>,
@@ -2468,6 +2609,12 @@ impl SourceTree {
             source.len().try_into().unwrap_or(u32::MAX),
             &mut foreach_sites,
         );
+
+        // Every literal array expression in the file, in source order (issue
+        // #187): purely syntactic keys-and-spans, the `array.duplicate-key`
+        // check's whole evidence.
+        let mut array_literal_sites = Vec::new();
+        collect_array_literal_sites(&Node::Program(program), &mut array_literal_sites);
 
         // Comment trivia (ADR-0023 inline ignores): whitespace trivia is dropped;
         // every comment shape is kept with its raw spelling and span.
@@ -2540,6 +2687,7 @@ impl SourceTree {
             preg_flag_const_declared: lowered.preg_flag_const_declared,
             preg_flag_const_aliased: lowered.preg_flag_const_aliased,
             foreach_sites,
+            array_literal_sites,
             hard_class_refs: lowered.hard_class_refs,
             parse_errors,
             comments,
@@ -2641,6 +2789,14 @@ impl SourceTree {
     #[must_use]
     pub fn foreach_sites(&self) -> &[ForeachSite] {
         &self.foreach_sites
+    }
+
+    /// Every literal array expression in the file, in source order (issue
+    /// #187). Purely syntactic — no value lowering, no inference — the whole
+    /// evidence the `array.duplicate-key` per-file pass reads.
+    #[must_use]
+    pub fn array_literal_sites(&self) -> &[ArrayLiteralSite] {
+        &self.array_literal_sites
     }
 
     #[must_use]
@@ -7246,6 +7402,46 @@ fn collect_foreach_sites(node: &Node<'_, '_>, scope_end: u32, out: &mut Vec<Fore
         }
         collect_foreach_sites(&child, scope_end, out);
     }
+}
+
+/// Collect every literal array expression in the file, file-wide, including
+/// nested ones (issue #187) — recursion is unconditional, matching
+/// [`collect_foreach_sites`], so an array literal nested inside another
+/// array's value, a call argument, a closure body, … is still found.
+fn collect_array_literal_sites(node: &Node<'_, '_>, out: &mut Vec<ArrayLiteralSite>) {
+    match node {
+        Node::Array(a) => out.push(lower_array_literal_site(a.elements.iter())),
+        Node::LegacyArray(a) => out.push(lower_array_literal_site(a.elements.iter())),
+        _ => {}
+    }
+    for child in node.children() {
+        collect_array_literal_sites(&child, out);
+    }
+}
+
+/// Lower one array literal's elements to their [`ArrayLiteralSite`] shape.
+/// Purely syntactic: only the key side is resolved ([`lower_array_key`]'s
+/// coercion); the value side is never lowered or evaluated.
+fn lower_array_literal_site<'a>(
+    elements: impl Iterator<Item = &'a ArrayElement<'a>>,
+) -> ArrayLiteralSite {
+    let elements = elements
+        .map(|el| {
+            let span = to_span(el.span());
+            let key = match el {
+                ArrayElement::Value(_) => Some(ArrayKey::Auto),
+                ArrayElement::KeyValue(kv) => lower_array_key(kv.key),
+                // A spread contributes an unknown number of unknown keys; a
+                // destructuring hole (only ever seen in `list()` lvalue
+                // position, never a legal literal) contributes none either —
+                // both are `None`, the same "no knowable key here" the fold
+                // gate already uses for an unresolvable explicit key.
+                ArrayElement::Variadic(_) | ArrayElement::Missing(_) => None,
+            };
+            ArrayLiteralElement { key, span }
+        })
+        .collect();
+    ArrayLiteralSite { elements }
 }
 
 /// Lower one `foreach` into its [`ForeachSite`] shape. Purely syntactic — every

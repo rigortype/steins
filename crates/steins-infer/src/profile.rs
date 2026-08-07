@@ -468,9 +468,9 @@ impl ProfileConfigs {
 mod tests {
     use super::*;
     use crate::{
-        CALL_ON_NULL_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, EFFECT_ID,
-        OFFSET_MAYBE_MISSING_ID, OFFSET_UNDECLARED_ID, PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID,
-        SUPPRESS_UNMATCHED_ID, THROW_LISKOV_ID,
+        ARRAY_DUPLICATE_KEY_ID, CALL_ON_NULL_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID,
+        EFFECT_ID, OFFSET_MAYBE_MISSING_ID, OFFSET_UNDECLARED_ID, PARAM_MISMATCH_ID,
+        PHPDOC_PROP_MISMATCH_ID, SUPPRESS_UNMATCHED_ID, THROW_LISKOV_ID,
     };
 
     fn diag(id: &'static str, facet: Option<Facet>) -> Diagnostic {
@@ -548,6 +548,26 @@ mod tests {
             Level::Fail,
             "warn cannot demote a mechanics id — a stale @steins-ignore must keep failing CI"
         );
+    }
+
+    #[test]
+    fn array_duplicate_key_ignores_disable_and_warn_too() {
+        // Issue #187: `array.duplicate-key` is a mechanics id (ADR-0078), so it
+        // inherits the same disable/warn-proof behavior as the rest of the
+        // layer for free — pinned here the same way `suppress.unmatched` is
+        // above, rather than trusted from the layer classification alone.
+        let mut m = BTreeMap::new();
+        m.insert(
+            "quiet".to_owned(),
+            UserProfile {
+                disable: vec!["array.duplicate-key".to_owned()],
+                warn: vec!["array.*".to_owned()],
+                ..Default::default()
+            },
+        );
+        let s = ProfileConfigs(m).resolve(Some("quiet")).unwrap();
+        assert!(s.is_surfaced(&diag(ARRAY_DUPLICATE_KEY_ID, None)), "disable cannot turn it off");
+        assert_eq!(s.level(ARRAY_DUPLICATE_KEY_ID), Level::Fail, "warn cannot demote it either");
     }
 
     #[test]

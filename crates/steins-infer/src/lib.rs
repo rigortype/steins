@@ -49,7 +49,7 @@ use steins_syntax::{
     EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, InvalidatedVar, MatchArmT, MethodDecl,
     NameRef, NamedArg, NativeType, NormKey, Param, PropertyDecl, Receiver, RefKind, ScalarType, Scope,
     ScopeOwner, SourceTree, StaticClass, Stmt, StmtKind, ThrowKind, ThrowOrigin, TypeMember, Visibility,
-    normalize_array, php_canonical_int_string,
+    duplicate_array_keys, normalize_array, php_canonical_int_string,
 };
 
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, StringLit, TypeKind as PKind};
@@ -223,6 +223,23 @@ pub const CALL_PRINTF_TOO_FEW_ARGUMENTS_ID: &str = "call.printf-too-few-argument
 // end printf arity (ADR-0078, issue #188)
 
 // ---------------------------------------------------------------------------
+// The member-kind port wave (ADR-0078): ids that fit neither the premise axis
+// (`type.*`/`phpdoc.*`) nor the syntactic axis (`call.*`/`class.*`/`offset.*`),
+// named instead by what kind of member or construct the finding is about.
+// ---------------------------------------------------------------------------
+
+/// The registry id for the duplicate-array-key check (ADR-0078, **mechanics**
+/// layer, issue #187): a literal array expression declares the same
+/// PHP-normalized key twice, so the earlier value is silently overwritten —
+/// works-but-drops-a-value intent/behaviour drift, not a runtime break, hence
+/// mechanics rather than proof. Purely syntactic (the evidence is the literal
+/// itself); the key comparison reuses `steins_syntax`'s A12 coercion and
+/// next-auto-index resolution (`duplicate_array_keys`) rather than a second
+/// coercion table, and a key the fold gate cannot pin — a variable, a call, a
+/// spread, and every `Auto` position after one of those — is silently skipped.
+pub const ARRAY_DUPLICATE_KEY_ID: &str = "array.duplicate-key";
+
+// ---------------------------------------------------------------------------
 // The dump surface (ADR-0053): requested introspection in the debug layer.
 // ---------------------------------------------------------------------------
 
@@ -303,6 +320,7 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     OFFSET_UNDECLARED_ID,
     OFFSET_MAYBE_MISSING_ID,
     PHPDOC_UNDEFINED_METHOD_ID,
+    ARRAY_DUPLICATE_KEY_ID,
     CALL_TOO_FEW_ARGUMENTS_ID,
     CALL_UNKNOWN_NAMED_ARGUMENT_ID,
     CALL_UNDEFINED_FUNCTION_ID,
@@ -2272,6 +2290,13 @@ fn check_units(
             }
             check_undefined_class(&cx, folder, r, &mut out);
         }
+
+        // --- `array.duplicate-key` (ADR-0078, issue #187): every literal array
+        // in the file, judged once each. No dead-region gate — unlike the
+        // passes above, this is a mechanics finding about how the literal is
+        // WRITTEN, not a proof of a live runtime path, so it fires the same
+        // whether or not the array is ever reached. -----------------------
+        check_array_duplicate_keys(&cx, &mut out);
 
         // --- Direct pass: literal / array / `new` arguments at every function
         // call site (env-free; propagation adds `$var`/folded resolution). Native
@@ -15899,6 +15924,38 @@ fn check_undefined_class(cx: &Cx, folder: &mut dyn Folder, r: &NameRef, out: &mu
         facet: None,
         fix: None,
     });
+}
+
+// ---------------------------------------------------------------------------
+// `array.duplicate-key` (ADR-0078, issue #187, mechanics layer).
+// ---------------------------------------------------------------------------
+
+/// The `array.duplicate-key` check: every literal array expression in the
+/// file, keys compared through `steins_syntax`'s own A12 coercion and
+/// next-auto-index resolution (`duplicate_array_keys`) — no second coercion
+/// table here. One finding per shadowed entry, positioned at the LATER
+/// (winning) occurrence and naming the line of the earlier one it silently
+/// overwrites.
+fn check_array_duplicate_keys(cx: &Cx, out: &mut Vec<Diagnostic>) {
+    for site in cx.tree().array_literal_sites() {
+        for dup in duplicate_array_keys(site, cx.php_minor) {
+            let winner_pos = cx.tree().position(dup.winner_span.start);
+            let shadowed_pos = cx.tree().position(dup.shadowed_span.start);
+            out.push(Diagnostic {
+                id: ARRAY_DUPLICATE_KEY_ID,
+                path: cx.path().to_owned(),
+                line: winner_pos.line,
+                column: winner_pos.column,
+                message: format!(
+                    "array key {} is declared twice — this entry silently overwrites the earlier one at line {}",
+                    dup.key.render(),
+                    shadowed_pos.line,
+                ),
+                facet: None,
+                fix: None,
+            });
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
