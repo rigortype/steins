@@ -47,6 +47,9 @@ use crate::{
 };
 // non-object receivers (ADR-0078, issue #190)
 use crate::{CALL_ON_NON_OBJECT_ID, PROPERTY_ON_NON_OBJECT_ID};
+// parse failure (ADR-0079, issue #180)
+use crate::SYNTAX_UNPARSABLE_ID;
+// end parse failure (ADR-0079, issue #180)
 
 /// The registry id for an `@steins-ignore` whose diagnostic id matches nothing on
 /// its target line (ADR-0023 anti-rot). Exempt from suppression.
@@ -326,6 +329,12 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     (PHPDOC_MISPLACED_VAR_ID, Layer::Mechanics, Floor::Default),
     (PHPDOC_THROWS_NOT_THROWABLE_ID, Layer::Mechanics, Floor::Default),
     (CLOSURE_UNUSED_USE_ID, Layer::Mechanics, Floor::Default),
+    // parse failure (ADR-0079, issue #180)
+    // mechanics — a file `php -l` rejects is apparatus rot, not a style opinion:
+    // red on sight, `disable`-proof, undemotable, suppression-exempt. The remedy
+    // is fixing the file, and the exit code says so.
+    (SYNTAX_UNPARSABLE_ID, Layer::Mechanics, Floor::Default),
+    // end parse failure (ADR-0079, issue #180)
     // debug — the dump surface (ADR-0053): requested introspection, not a finding.
     // Suppression-, baseline-, and fp-gate-exempt (§4/§8). The `Default` floor is
     // inert for capture: the debug lane's exclusion from `surfaces_id` is a *layer*

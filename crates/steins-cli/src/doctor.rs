@@ -402,12 +402,15 @@ fn section_coverage(root: &Path, files: &[ParsedFile], layout: &ProjectLayout) {
             "  dam sites: none — no runtime-definition construct stands, so existence-absence claims are undammed (ADR-0049 §2)"
         );
     } else {
-        let mut dam_counts = [0usize; 3];
+        let mut dam_counts = [0usize; 4];
         for site in dam.sites() {
             let i = match site.kind {
                 DamKind::Eval => 0,
                 DamKind::Include => 1,
                 DamKind::ClassAlias => 2,
+                // parse failure (ADR-0079, issue #180)
+                DamKind::Unparsable => 3,
+                // end parse failure (ADR-0079, issue #180)
             };
             dam_counts[i] += 1;
         }
@@ -416,7 +419,12 @@ fn section_coverage(root: &Path, files: &[ParsedFile], layout: &ProjectLayout) {
             dam.len(),
             breakdown(
                 &dam_counts,
-                ["eval", "unproven/out-of-universe include", "runtime-name class_alias"]
+                [
+                    "eval",
+                    "unproven/out-of-universe include",
+                    "runtime-name class_alias",
+                    "unparsable file",
+                ]
             )
         );
         outln!(

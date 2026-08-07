@@ -65,8 +65,10 @@
 //! or invalid UTF-8 input). The call itself never traps on user input: a snippet
 //! that PHP would reject parses with recovery and analyzes, exactly as the CLI
 //! treats it, and its recovered parse errors are reported in the envelope's
-//! `parse_errors` — the playground states what the CLI today keeps silent
-//! (the known `parse_errors()`-has-no-consumer gap).
+//! `parse_errors`. Since ADR-0079 (issue #180) the CLI is no longer silent about
+//! them either — the same snippet also carries a `syntax.unparsable` finding — so
+//! `parse_errors` is now the *detailed* view of what the finding names once: every
+//! recovered error with its position, not just the first plus a count.
 //!
 //! The `findings` array mirrors the CLI's `--format json` schema key for key
 //! (`id`, `layer`, `level`, `path`, `line`, `column`, `message`, plus the facet
