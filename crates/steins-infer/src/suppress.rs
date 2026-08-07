@@ -36,6 +36,11 @@ use crate::{
     PHPDOC_PROP_MISMATCH_ID, PHPDOC_UNDEFINED_METHOD_ID, PROP_MISMATCH_ID, READONLY_REASSIGNED_ID,
     RETURN_ID, RETURN_MISMATCH_ID, THROW_LISKOV_ID, THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID,
 };
+// docblock hygiene (ADR-0078, issue #186)
+use crate::{
+    CLOSURE_UNUSED_USE_ID, PHPDOC_MISPLACED_VAR_ID, PHPDOC_STALE_PARAM_ID, PHPDOC_STALE_VAR_ID,
+    PHPDOC_THROWS_NOT_THROWABLE_ID, PHPDOC_UNPARSABLE_ID,
+};
 
 /// The registry id for an `@steins-ignore` whose diagnostic id matches nothing on
 /// its target line (ADR-0023 anti-rot). Exempt from suppression.
@@ -272,6 +277,17 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // mechanics — the member-kind port wave's first id (ADR-0078, issue #187):
     // works-but-drops-a-value intent/behaviour drift, not a runtime break.
     (ARRAY_DUPLICATE_KEY_ID, Layer::Mechanics, Floor::Default),
+    // docblock hygiene (ADR-0078, issue #186)
+    // Anti-rot ids about annotations that drifted from the code. The `phpdoc.*`
+    // prefix now spans two layers (ADR-0078 §1.5): these five are mechanics —
+    // `disable`-proof and undemotable — while `phpdoc.param-mismatch` and its
+    // siblings above stay contract. The layer, never the prefix, decides.
+    (PHPDOC_UNPARSABLE_ID, Layer::Mechanics, Floor::Default),
+    (PHPDOC_STALE_PARAM_ID, Layer::Mechanics, Floor::Default),
+    (PHPDOC_STALE_VAR_ID, Layer::Mechanics, Floor::Default),
+    (PHPDOC_MISPLACED_VAR_ID, Layer::Mechanics, Floor::Default),
+    (PHPDOC_THROWS_NOT_THROWABLE_ID, Layer::Mechanics, Floor::Default),
+    (CLOSURE_UNUSED_USE_ID, Layer::Mechanics, Floor::Default),
     // debug — the dump surface (ADR-0053): requested introspection, not a finding.
     // Suppression-, baseline-, and fp-gate-exempt (§4/§8). The `Default` floor is
     // inert for capture: the debug lane's exclusion from `surfaces_id` is a *layer*

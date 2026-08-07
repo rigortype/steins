@@ -2256,6 +2256,37 @@ pub struct Scope {
     /// with no adopted docblock and for every non-closure scope (functions and
     /// methods adopt on their decls).
     pub docblock: Option<String>,
+    /// The by-value `use ($x)` captures of a `function (…) use (…) {…}` scope
+    /// whose name the closure body **never mentions** (issue #186, the
+    /// `closure.unused-use` mechanics id). A syntactic fact, computed at lowering
+    /// where the CST is still in hand.
+    ///
+    /// Three deliberate silences make the list a safe firing set:
+    ///
+    /// * A by-ref `use (&$x)` capture is **never** listed — it is an out-channel
+    ///   (the closure writes through it), so "unread" says nothing about it. It
+    ///   is recorded as an [`OpaqueConstruct::ByRefCapture`] site instead.
+    /// * A *mention* — not a read — clears a capture: any `$x` token anywhere in
+    ///   the body subtree counts, **including inside nested closures and their
+    ///   own `use ($x)` clauses**, which the scope-local walks stop at.
+    ///   Over-collection only removes entries, so it is the safe direction.
+    /// * The whole list is empty when the body holds a construct that can consume
+    ///   a name without spelling it (`compact` / `extract` / `get_defined_vars` /
+    ///   `$$x` / `eval` / `include`) — the scope-local dam.
+    ///
+    /// Empty for arrow functions (their captures are *derived* from the body, so
+    /// an unused one cannot exist) and for every non-closure scope.
+    pub unused_captures: Vec<UnusedCapture>,
+}
+
+/// One by-value `use ($x)` capture a closure body never mentions — an entry of
+/// [`Scope::unused_captures`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnusedCapture {
+    /// The captured name without the leading `$`.
+    pub name: String,
+    /// The file byte span of the `$x` token in the `use (…)` clause.
+    pub span: Span,
 }
 
 /// A recovered parse error with its span (ADR-0003: error-tolerant).
@@ -2909,6 +2940,70 @@ impl SourceTree {
         }
         let gap = self.text.get(c.span.end as usize..stmt_start as usize)?;
         gap.chars().all(char::is_whitespace).then_some(c)
+    }
+
+    /// Whether a docblock trivium ending at `doc_end` is followed by **nothing an
+    /// adoption rule could attach it to** — the negative side of
+    /// [`Self::stmt_docblock`]'s grammar, and the ADR-0029 declaration grammar's
+    /// too (issue #186, the `phpdoc.misplaced-var` mechanics id).
+    ///
+    /// Deliberately answered from the *text*, not from the lowered trace: a
+    /// statement inside a construct the trace keeps opaque (a loop body, a `try`,
+    /// a `switch` arm) has no [`Stmt`] to query, so enumerating adopters would call
+    /// a perfectly ordinary annotation misplaced. What this asks instead is
+    /// whether any construct can follow **at all**: skipping whitespace from
+    /// `doc_end` lands on end-of-file, a closing `}`, or another comment (which
+    /// then becomes the nearest preceding trivium for whatever follows, so this
+    /// docblock adopts nothing either way).
+    ///
+    /// A `?>` close tag is deliberately **not** a proof: the inline HTML after it
+    /// is an output statement, and the template idiom
+    /// `<?php /** @var View $v */ ?>` is a legal annotation, not rot.
+    ///
+    /// A `true` answer is therefore a proof of non-adoption; a `false` answer is
+    /// merely "something follows", not a proof that it adopts.
+    #[must_use]
+    pub fn docblock_adopts_nothing(&self, doc_end: u32) -> bool {
+        let Some(rest) = self.text.get(doc_end as usize..) else { return true };
+        let rest = rest.trim_start();
+        rest.is_empty() || rest.starts_with('}') || rest.starts_with("/*")
+    }
+
+    /// Whether the variable spelling `$name` occurs anywhere in the file **before**
+    /// `offset` — a deliberately crude textual probe, used by
+    /// `phpdoc.stale-var` to ask whether a named variable plausibly exists at all
+    /// (issue #186).
+    ///
+    /// It counts every occurrence alike — a parameter, an assignment target, a
+    /// `use` capture, a `foreach` binding, a plain read, even a mention in an
+    /// earlier docblock — because the question is existence, not liveness. And its
+    /// window is the whole file prefix rather than the enclosing scope's, which is
+    /// a **superset**: every over-match only produces more silence, and the check
+    /// it serves fires only on a name that occurs nowhere at all.
+    ///
+    /// The match is token-exact at both ends: `$ec` does not match `$echo`, and
+    /// `$$echo` does not match `$echo`.
+    #[must_use]
+    pub fn variable_mentioned_before(&self, name: &str, offset: u32) -> bool {
+        if name.is_empty() {
+            return false;
+        }
+        let Some(prefix) = self.text.get(..offset as usize) else { return false };
+        let bytes = prefix.as_bytes();
+        let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
+        let needle = format!("${name}");
+        let mut from = 0usize;
+        while let Some(rel) = prefix[from..].find(&needle) {
+            let at = from + rel;
+            let after = at + needle.len();
+            let before_ok = at == 0 || bytes[at - 1] != b'$';
+            let after_ok = bytes.get(after).is_none_or(|&b| !ident(b));
+            if before_ok && after_ok {
+                return true;
+            }
+            from = at + 1;
+        }
+        false
     }
 
     /// Whether everything on `offset`'s line *before* `offset` is whitespace —
@@ -6121,6 +6216,7 @@ fn build_scope_from(
         throw_origins: Vec::new(),
         is_static: false,
         docblock: None,
+        unused_captures: Vec::new(),
     }
 }
 
@@ -6237,6 +6333,82 @@ fn build_closure_scope_from_closure(
         throw_origins,
         is_static: cl.r#static.is_some(),
         docblock: adopt_closure_docblock(docs, to_span(cl.span()).start, def_offset, stmt_doc),
+        unused_captures: unused_by_value_captures(cl),
+    }
+}
+
+/// The by-value `use ($x)` captures a closure body never mentions (issue #186) —
+/// the computation behind [`Scope::unused_captures`], done here because it needs
+/// the CST the lowered trace deliberately forgets.
+///
+/// The walk is the **deep** one: it descends nested closures, arrow functions and
+/// their `use (…)` clauses, so `use ($x) { return fn () => $x; }` and
+/// `use ($x) { return function () use ($x) {…}; }` both count `$x` as mentioned.
+/// A body that can mint or consume names without spelling them dams the whole
+/// list ([`body_dams_names`]).
+fn unused_by_value_captures(cl: &mago_syntax::cst::Closure<'_>) -> Vec<UnusedCapture> {
+    let Some(uc) = cl.use_clause.as_ref() else { return Vec::new() };
+    if uc.variables.iter().all(|v| v.ampersand.is_some()) {
+        return Vec::new();
+    }
+    let mut mentioned = std::collections::HashSet::new();
+    let mut dammed = false;
+    for s in cl.body.statements.iter() {
+        scan_var_mentions(&Node::Statement(s), &mut mentioned, &mut dammed);
+    }
+    if dammed {
+        return Vec::new();
+    }
+    uc.variables
+        .iter()
+        .filter(|v| v.ampersand.is_none())
+        .filter_map(|v| {
+            let name = strip_dollar(bytes_to_string(v.variable.name));
+            (!mentioned.contains(&name))
+                .then(|| UnusedCapture { name, span: to_span(v.variable.span()) })
+        })
+        .collect()
+}
+
+/// Collect every `$var` token mentioned in a subtree (name without `$`), and set
+/// `dammed` when the subtree holds a construct that can read or mint a binding
+/// without naming it (`eval`, `include`/`require`, a variable-variable, or
+/// `extract`/`compact`/`get_defined_vars`).
+///
+/// Unlike [`collect_var_reads`] this walk **descends every nested construct**,
+/// including closures, arrow functions and their `use (…)` clauses: for the
+/// unused-capture question a name mentioned by an inner scope is a use of the
+/// outer capture, and over-collection only removes findings.
+fn scan_var_mentions(
+    node: &Node<'_, '_>,
+    mentioned: &mut std::collections::HashSet<String>,
+    dammed: &mut bool,
+) {
+    match node {
+        Node::DirectVariable(dv) => {
+            mentioned.insert(strip_dollar(bytes_to_string(dv.name)));
+        }
+        Node::NestedVariable(_)
+        | Node::IndirectVariable(_)
+        | Node::EvalConstruct(_)
+        | Node::IncludeConstruct(_)
+        | Node::IncludeOnceConstruct(_)
+        | Node::RequireConstruct(_)
+        | Node::RequireOnceConstruct(_) => *dammed = true,
+        Node::FunctionCall(fc) => {
+            if let Expression::Identifier(id) = fc.function
+                && matches!(
+                    bytes_to_string(id.last_segment()).as_str(),
+                    "extract" | "compact" | "get_defined_vars"
+                )
+            {
+                *dammed = true;
+            }
+        }
+        _ => {}
+    }
+    for child in node.children() {
+        scan_var_mentions(&child, mentioned, dammed);
     }
 }
 
@@ -6292,6 +6464,9 @@ fn build_closure_scope_from_arrow(
         throw_origins,
         is_static: af.r#static.is_some(),
         docblock: adopt_closure_docblock(docs, to_span(af.span()).start, def_offset, stmt_doc),
+        // An arrow function's captures are *derived* from its body's free
+        // variables, so an unused one is not expressible.
+        unused_captures: Vec::new(),
     }
 }
 

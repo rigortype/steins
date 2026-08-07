@@ -301,11 +301,16 @@ fn is_debug(d: &Diagnostic) -> bool {
     gate_bucket(d) == GateBucket::Excluded
 }
 
-/// Whether a diagnostic is one of the measurement-mode `phpdoc.*` contract ids.
-/// The `phpdoc.*` family is layer-homogeneous (all contract), so the prefix keys
-/// its separate count table; [`is_contract`] is what actually gates it.
+/// Whether a diagnostic is one of the measurement-mode `phpdoc.*` **contract** ids.
+///
+/// Selected by prefix **and** layer, the `is_effect_contract` shape. The family
+/// stopped being layer-homogeneous with ADR-0078 §1.5 (issue #186): `phpdoc.*` now
+/// carries the docblock-hygiene mechanics ids beside the contract ones, and a bare
+/// prefix test would have counted a mechanics finding against `PHPDOC_EXPECTED`
+/// *and* left it red-on-sight — double-counted, and its tripwire quietly absorbing
+/// an anti-rot id the layer says must never be absorbed.
 fn is_phpdoc(d: &Diagnostic) -> bool {
-    d.id.starts_with("phpdoc.")
+    d.id.starts_with("phpdoc.") && is_contract(d)
 }
 
 /// Whether a diagnostic is one of the measurement-mode `throw.*` contract ids
@@ -343,6 +348,13 @@ fn is_effect_contract(d: &Diagnostic) -> bool {
 /// Seeded with the post-assertion-exemption counts (the assertion-helper exemption
 /// removed ~19 monorepo findings vs. the pre-exemption 352). Packages absent from
 /// this table expect **zero** `phpdoc.*` findings.
+///
+/// **This table counts the `phpdoc.*` CONTRACT ids only** — see [`is_phpdoc`]. The
+/// docblock-hygiene ids added by ADR-0078 / issue #186 share the prefix but carry
+/// the mechanics layer, so they stay red-on-sight and are pinned individually in
+/// [`EXPECTED_PROOF_FINDINGS`]; no count here moved when they landed.
+/// `phpstan/phpstan-src` remains absent (measured 0 under the 2026-08-08 corpus
+/// scoping recorded on its `THROW_EXPECTED` row).
 const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     ("composer/composer", 19),
     ("sebastianbergmann/phpunit", 8),
@@ -584,6 +596,17 @@ const THROW_EXPECTED: &[(&str, usize)] = &[
     // of the same homogeneous shape as the seeded 20, caught transitively (the
     // throw is in the helper, the escape is attributed to the annotated caller),
     // which is what the ADR-0040 damming machinery is for.
+    //
+    // 2026-08-08 (#186): this project's corpus scope moved from an `exclude`
+    // denylist onto the new positive `paths = ["src", "vendor"]` key in
+    // corpus.local.toml — the recorded decision that PHPStan's `tests/` tree is
+    // that project's own rule-fixture corpus, i.e. INPUTS written to be broken,
+    // and so outside an FP gate whose bar is zero false positives on code that
+    // works (the ADR-0079 §2.3 presumption for parser fixtures, applied to a
+    // whole tree). Re-measured under the scoping in the same run: 21, and
+    // `phpdoc.*` 0 — both UNCHANGED, because the denylist already named the same
+    // directories. The key buys enforcement, not a different corpus: an allowlist
+    // cannot silently readmit a fixture tree added later, and a denylist can.
     ("phpstan/phpstan-src", 21),
     // 43964 → 44372 (+408), 2026-07-24 evening: LIVE-TREE DRIFT — the unpinned
     // monorepo checkout gained ~210 files (84,038 → 84,248) during the day.
@@ -989,6 +1012,201 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 14,
         message_contains: "cannot extend final class ExDateTimeImmutable",
     },
+    // -----------------------------------------------------------------------
+    // Docblock hygiene (ADR-0078 / issue #186), triaged 2026-08-08.
+    //
+    // The six mechanics ids are red-on-sight like the proof layer, so every TRUE
+    // corpus site is pinned here at finding precision. All eleven public-corpus
+    // sites were read at source and are TRUE under Steins's own semantics; the
+    // per-package triage is in the comment above each group. Nothing about the
+    // private corpus is pinned by this wave — it is measured and reported only.
+    // -----------------------------------------------------------------------
+    //
+    // nikic/PHP-Parser — the fuzzing driver builds a `$lexer` and then captures it
+    // into a closure that never touches it (the closure works off the parser it
+    // also captures). A dead capture in a dev tool: unread, by-value, and the body
+    // holds no `compact`/`extract`/`$$`/`eval`/`include` that could consume it
+    // unspelled.
+    ExpectedProofFinding {
+        package: "nikic/PHP-Parser",
+        id: "closure.unused-use",
+        path_suffix: "tools/fuzzing/target.php",
+        line: 111,
+        message_contains: "`use ($lexer)` is never read",
+    },
+    // sebastianbergmann/phpunit — the mock generator stacks three `@var` docblocks
+    // in a row above one `return`. Under ADR-0073 only the LAST of a run adopts:
+    // each of the first two has another docblock as its nearest following trivium,
+    // which becomes the adopter for whatever comes after, so `$className` and
+    // `$type` are cast by nothing at all. The third is silent, correctly. Inert
+    // annotations, not wrong ones — which is exactly what the id claims.
+    ExpectedProofFinding {
+        package: "sebastianbergmann/phpunit",
+        id: "phpdoc.misplaced-var",
+        path_suffix: "src/Framework/MockObject/Generator/Generator.php",
+        line: 577,
+        message_contains: "sits where nothing adopts it",
+    },
+    ExpectedProofFinding {
+        package: "sebastianbergmann/phpunit",
+        id: "phpdoc.misplaced-var",
+        path_suffix: "src/Framework/MockObject/Generator/Generator.php",
+        line: 578,
+        message_contains: "sits where nothing adopts it",
+    },
+    // composer/composer — the SAME virtual-parameter idiom as the symfony group
+    // below, in a vendored copy of `symfony/filesystem` that lives inside a
+    // functional-test FIXTURE tree (`tests/…/installed-versions2/vendor/…`):
+    // `tempnam(string $dir, string $prefix/*, string $suffix = ''*/)` documents
+    // `@param string $suffix` for an argument read back with `func_get_arg(2)`.
+    // TRUE by the same reading. It is pinned rather than vendor-suppressed because
+    // a pinned package is analyzed whole (ADR-0015's vendor split runs for local
+    // projects only), which is why `steins check` on the same tree hides it and
+    // the gate does not.
+    ExpectedProofFinding {
+        package: "composer/composer",
+        id: "phpdoc.stale-param",
+        path_suffix: "installed-versions2/vendor/symfony/filesystem/Filesystem.php",
+        line: 586,
+        message_contains: "`@param $suffix` names no parameter",
+    },
+    // symfony/console + symfony/process — two deliberate authoring idioms, both of
+    // which nonetheless leave a tag declaring nothing:
+    //
+    //   * `@return list<\SIG*>` / `@param list<\SIG*> $signals` spell a WILDCARD
+    //     over the `SIG*` constant family. No PHPDoc grammar admits it — PHPStan's
+    //     own parser rejects it too — so the envelope is lost to every reader, not
+    //     just to Steins. `phpdoc.unparsable`'s claim is precisely "the tag
+    //     declares nothing", and it holds.
+    //   * `SymfonyStyle`'s three progress helpers document `@param string|null
+    //     $format` as a VIRTUAL parameter: the real signature is
+    //     `progressStart(int $max = 0 /* , ?string $format = null *\/)` — the
+    //     second argument is commented out for BC and read back with
+    //     `func_get_arg(1)`. The tag names no parameter of the declaration, which
+    //     is exactly what the id says, and the reason PHPStan reports
+    //     `parameter.notFound` on the identical shape.
+    ExpectedProofFinding {
+        package: "symfony/console",
+        id: "phpdoc.unparsable",
+        path_suffix: "Command/SignalableCommandInterface.php",
+        line: 24,
+        message_contains: "does not parse (expected CloseAngle, found Wildcard)",
+    },
+    ExpectedProofFinding {
+        package: "symfony/console",
+        id: "phpdoc.stale-param",
+        path_suffix: "Style/SymfonyStyle.php",
+        line: 305,
+        message_contains: "`@param $format` names no parameter",
+    },
+    ExpectedProofFinding {
+        package: "symfony/console",
+        id: "phpdoc.stale-param",
+        path_suffix: "Style/SymfonyStyle.php",
+        line: 327,
+        message_contains: "`@param $format` names no parameter",
+    },
+    ExpectedProofFinding {
+        package: "symfony/console",
+        id: "phpdoc.stale-param",
+        path_suffix: "Style/SymfonyStyle.php",
+        line: 355,
+        message_contains: "`@param $format` names no parameter",
+    },
+    ExpectedProofFinding {
+        package: "symfony/process",
+        id: "phpdoc.unparsable",
+        path_suffix: "Process.php",
+        line: 1276,
+        message_contains: "does not parse (expected CloseAngle, found Wildcard)",
+    },
+    // thephpleague/flysystem — three inert `@var` casts in `MountManager`, two
+    // shapes:
+    //
+    //   * `move()`/`copy()` (245, 262) write `/** @var … $sourceFilesystem */`
+    //     immediately followed by a SINGLE-star `/* @var … $destinationFilesystem */`.
+    //     The one-star form is a plain block comment, so it is not a docblock at
+    //     all — and it still sits in the gap, breaking ADR-0073's strict adjacency
+    //     for the docblock above it. Neither line casts anything.
+    //   * `determineFilesystemAndPath()` (358) stacks two docblocks, so the first
+    //     is shadowed by the second exactly as in the phpunit group above.
+    //
+    // This is a real divergence from tools with a laxer association rule, and it
+    // is exactly what a Steins adopter needs to hear about their own file.
+    ExpectedProofFinding {
+        package: "thephpleague/flysystem",
+        id: "phpdoc.misplaced-var",
+        path_suffix: "src/MountManager.php",
+        line: 245,
+        message_contains: "sits where nothing adopts it",
+    },
+    ExpectedProofFinding {
+        package: "thephpleague/flysystem",
+        id: "phpdoc.misplaced-var",
+        path_suffix: "src/MountManager.php",
+        line: 262,
+        message_contains: "sits where nothing adopts it",
+    },
+    ExpectedProofFinding {
+        package: "thephpleague/flysystem",
+        id: "phpdoc.misplaced-var",
+        path_suffix: "src/MountManager.php",
+        line: 358,
+        message_contains: "sits where nothing adopts it",
+    },
+    // The legacy monorepo's five, verified at source by the orchestrator on
+    // 2026-08-08 and all TRUE. Path suffixes are cut to the shortest fragment that
+    // still keys the row 1:1 (the private-corpus naming rule) — do not lengthen
+    // them. Like every row on this unpinned corpus, a re-cut of the checkout can
+    // move a line number and re-red the gate; that is the pin working, not drift
+    // to be papered over.
+    //
+    // A `@phpstan-param` naming a parameter the signature genuinely lacks: the
+    // options array it documents is built inline in the body, so the tag is
+    // refactor rot.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "phpdoc.stale-param",
+        path_suffix: "AppApi/IllustRecommend.php",
+        line: 35,
+        message_contains: "names no parameter",
+    },
+    // A stacked duplicate `@phpstan-var`: its twin adopts the property below, and
+    // this one adopts nothing at all.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "phpdoc.misplaced-var",
+        path_suffix: "Search/Illust.php",
+        line: 105,
+        message_contains: "sits where nothing adopts it",
+    },
+    // Two `@var` casts written as the LAST statement of a branch. The author means
+    // them for the code after the closing brace, but next-statement adoption
+    // (ADR-0073) ends at the `}` — in Steins and in every tool that adopts
+    // next-statement-only — so the annotation is inert exactly as written.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "phpdoc.misplaced-var",
+        path_suffix: "View/NovelCreateBookController.php",
+        line: 313,
+        message_contains: "sits where nothing adopts it",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "phpdoc.misplaced-var",
+        path_suffix: "View/NovelCreateBookController.php",
+        line: 317,
+        message_contains: "sits where nothing adopts it",
+    },
+    // A pseudo-tuple `@return [$total, $illust_ids]` — a spelling no PHPDoc grammar
+    // admits, so the tag declares nothing to any reader.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "phpdoc.unparsable",
+        path_suffix: "Controller/V1SearchWorks.php",
+        line: 91,
+        message_contains: "does not parse",
+    },
 ];
 
 /// Whether `d` is a recorded, triaged TRUE proof-layer positive for `package`
@@ -1243,7 +1461,7 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
     let measured_revision = corpus_local::checkout_revision(root);
     let worktree = WorktreeState::from_dirty(corpus_local::checkout_is_dirty(root));
 
-    let files = corpus_local::collect_php_files(root, &proj.exclude);
+    let files = corpus_local::collect_php_files_in(root, &proj.paths, &proj.exclude);
 
     let db = SteinsDatabase::default();
     let mut inputs: Vec<SourceFile> = Vec::with_capacity(files.len());

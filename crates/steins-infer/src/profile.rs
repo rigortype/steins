@@ -472,6 +472,11 @@ mod tests {
         EFFECT_ID, OFFSET_MAYBE_MISSING_ID, OFFSET_UNDECLARED_ID, PARAM_MISMATCH_ID,
         PHPDOC_PROP_MISMATCH_ID, SUPPRESS_UNMATCHED_ID, THROW_LISKOV_ID,
     };
+    // docblock hygiene (ADR-0078, issue #186)
+    use crate::{
+        CLOSURE_UNUSED_USE_ID, PHPDOC_MISPLACED_VAR_ID, PHPDOC_STALE_PARAM_ID, PHPDOC_STALE_VAR_ID,
+        PHPDOC_THROWS_NOT_THROWABLE_ID, PHPDOC_UNPARSABLE_ID,
+    };
 
     fn diag(id: &'static str, facet: Option<Facet>) -> Diagnostic {
         Diagnostic { id, path: "a.php".to_owned(), line: 1, column: 1, message: String::new(), facet, fix: None }
@@ -548,6 +553,60 @@ mod tests {
             Level::Fail,
             "warn cannot demote a mechanics id — a stale @steins-ignore must keep failing CI"
         );
+    }
+
+    /// ADR-0078 §1.5, mechanized: a family prefix may span layers. `phpdoc.*` now
+    /// carries contract ids (`phpdoc.param-mismatch`) **and** mechanics ids (the
+    /// issue #186 hygiene family), and a profile pattern matches across both — but
+    /// the mechanics side stays `disable`-proof and undemotable. Without this the
+    /// new ids would have shipped with a one-line escape hatch the older mechanics
+    /// ids never had.
+    #[test]
+    fn a_phpdoc_family_disable_cannot_reach_the_mechanics_ids() {
+        let mut m = BTreeMap::new();
+        m.insert(
+            "quiet".to_owned(),
+            UserProfile {
+                extends: Some("contracts".to_owned()),
+                disable: vec!["phpdoc.*".to_owned()],
+                warn: vec!["phpdoc.*".to_owned()],
+                ..Default::default()
+            },
+        );
+        let s = ProfileConfigs(m).resolve(Some("quiet")).unwrap();
+        // The contract member of the family IS disableable — the prefix matched it.
+        assert!(!s.is_surfaced(&diag(PARAM_MISMATCH_ID, None)), "contract ids obey disable");
+        // The mechanics members are not, on either channel.
+        for id in [
+            PHPDOC_UNPARSABLE_ID,
+            PHPDOC_STALE_PARAM_ID,
+            PHPDOC_STALE_VAR_ID,
+            PHPDOC_MISPLACED_VAR_ID,
+            PHPDOC_THROWS_NOT_THROWABLE_ID,
+            CLOSURE_UNUSED_USE_ID,
+        ] {
+            assert_eq!(layer(id), Some(Layer::Mechanics), "`{id}` must be a mechanics id");
+            assert!(s.is_surfaced(&diag(id, None)), "`{id}` must ignore a family disable");
+            assert_eq!(s.level(id), Level::Fail, "`{id}` must ignore a family warn");
+        }
+    }
+
+    /// The hygiene family is on the bare `steins check` surface (floor `default`),
+    /// like every other mechanics id.
+    #[test]
+    fn the_hygiene_family_is_on_the_default_surface() {
+        let s = empty().resolve(None).unwrap();
+        for id in [
+            PHPDOC_UNPARSABLE_ID,
+            PHPDOC_STALE_PARAM_ID,
+            PHPDOC_STALE_VAR_ID,
+            PHPDOC_MISPLACED_VAR_ID,
+            PHPDOC_THROWS_NOT_THROWABLE_ID,
+            CLOSURE_UNUSED_USE_ID,
+        ] {
+            assert_eq!(surface_floor(id), Some(Floor::Default), "`{id}` floors at default");
+            assert!(s.is_surfaced(&diag(id, None)), "`{id}` prints on a bare check");
+        }
     }
 
     #[test]
