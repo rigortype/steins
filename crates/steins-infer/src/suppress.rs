@@ -50,6 +50,8 @@ use crate::{CALL_ON_NON_OBJECT_ID, PROPERTY_ON_NON_OBJECT_ID};
 // parse failure (ADR-0079, issue #180)
 use crate::SYNTAX_UNPARSABLE_ID;
 // end parse failure (ADR-0079, issue #180)
+// inaccessible members (ADR-0078, issue #185)
+use crate::{CALL_INACCESSIBLE_METHOD_ID, CLASS_CONST_INACCESSIBLE_ID, PROPERTY_INACCESSIBLE_ID};
 
 /// The registry id for an `@steins-ignore` whose diagnostic id matches nothing on
 /// its target line (ADR-0023 anti-rot). Exempt from suppression.
@@ -295,6 +297,15 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     (STRING_NON_STRINGABLE_ID, Layer::Proof, Floor::Default),
     (STRING_ARRAY_CONVERSION_ID, Layer::Proof, Floor::Default),
     // end string context (ADR-0078, issue #193)
+    // inaccessible members (ADR-0078, issue #185)
+    // proof — a visibility violation is a fatal `Error` raised before the member is
+    // reached, so all three sit at the `default` floor per the ADR's floor table.
+    // None is warning-grade, so none is behind the ADR-0049 §7 warning-handler gate:
+    // no posture makes a `Cannot access private property` survivable.
+    (CALL_INACCESSIBLE_METHOD_ID, Layer::Proof, Floor::Default),
+    (PROPERTY_INACCESSIBLE_ID, Layer::Proof, Floor::Default),
+    (CLASS_CONST_INACCESSIBLE_ID, Layer::Proof, Floor::Default),
+    // end inaccessible members (ADR-0078, issue #185)
     // contract — declared-contract acceptance (increase tripwires).
     (PARAM_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     (RETURN_MISMATCH_ID, Layer::Contract, Floor::Contracts),

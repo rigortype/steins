@@ -169,9 +169,16 @@ fn static_call_lsb_is_silent() {
 #[test]
 fn private_method_from_outside_is_skipped() {
     // Calling a private method from outside its class is a PHP fatal — a
-    // different error we do not report. The arg check is skipped entirely.
+    // different error, so the ARG check is skipped entirely: resolution returns no
+    // target, exactly as it always did.
+    //
+    // The site is not silent overall any more, and should not be: since issue #185
+    // the fatal itself is reported under `call.inaccessible-method`
+    // (`php -r`-witnessed: `Call to private method Foo::m() from global scope`). So
+    // this counts per id rather than in total.
     let src = "<?php\nclass Foo { private function m(int $w): void {} }\n(new Foo())->m(\"abc\");\n";
-    assert_eq!(n(src), 0, "private method from outside → skip (not our error)");
+    let arg_findings = findings(src).into_iter().filter(|d| d.id == ID).count();
+    assert_eq!(arg_findings, 0, "private method from outside → skip (not our error)");
 }
 
 // Trait-using class / chain leaving the file → give up
