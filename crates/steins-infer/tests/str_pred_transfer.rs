@@ -154,7 +154,11 @@ impl Folder for Mock {
 fn one_type_with(src: &str, folder: &mut dyn Folder) -> String {
     let tree = SourceTree::parse(src);
     let ds = check_with(&tree, &[], "t.php", folder);
-    let other: Vec<&Diagnostic> = ds.iter().filter(|d| !d.id.starts_with("debug.")).collect();
+    // `untyped.*` is contract-layer claim-absence (issue #200), orthogonal to the
+    // transfer semantics this harness asserts (its fixtures deliberately carry
+    // untyped-but-bound parameters so `variable.undefined` stays out of frame).
+    let other: Vec<&Diagnostic> =
+        ds.iter().filter(|d| !d.id.starts_with("debug.") && !d.id.starts_with("untyped.")).collect();
     assert!(other.is_empty(), "a string-predicate transfer emitted a finding: {other:?}");
     let ty: Vec<&Diagnostic> = ds.iter().filter(|d| d.id == DEBUG_TYPE_ID).collect();
     assert_eq!(ty.len(), 1, "expected exactly one debug.type dump, got {ds:?}");
