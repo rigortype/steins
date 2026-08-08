@@ -668,3 +668,50 @@ death, and the i64 domain ends); `crates/steins-infer/tests/`
 `false_arm_strip.rs` (`strpos` reads `int<0, max>|false`,
 `int<0, max>` under the `!== false` guard, `int<1, max>|false` under
 `!== 0`, and the interior-point refusal under `!== 5`).
+
+## Note (2026-08-09): §6's stand-down clause, implemented (issue #266 slice 1)
+
+Completion of point 6, not new design. The clause was written into §6 with
+the guard-call retention — "the direct env-free pass stands down on spans
+covered here exactly as `mark_dead` already models" — and N3 landed the
+verdict half (env-threaded `&&`/`||`, threaded ternary arm envs) without
+it. The residue was a live false-positive class, because the two passes
+disagreed about what runs: the walk knew `$x === 2 && f("bad")` never
+evaluates its right operand, and the env-free direct pass reported inside
+it anyway. Four shapes, all measured firing before this note:
+
+* `a && b` with `a` decided **No** — `b` is unevaluated;
+* `a || b` with `a` decided **Yes** — `b` is unevaluated (De Morgan mirror);
+* `$c ? A : B` with `$c` decided — the untaken arm is unevaluated;
+* `$a ?? $b` with `$a` proven set-and-non-null — `$b` is unevaluated.
+
+Each is recorded through the same `dead` channel a decided `if` already
+uses, and therefore inherits its whole discipline unchanged: only a
+**decided** verdict records anything, and only the plain per-scope walk's
+regions escape (a binding descent's regions are dead for that caller's
+bindings alone, and are discarded as they always were).
+
+Two boundaries are load-bearing:
+
+* **Reachability stays proof-only.** A `??` left operand whose presence is
+  only `Asserted` does **not** stand the direct pass down. Marking a span
+  dead is a reachability claim, and §5's rule that a docblock claim buys
+  silence applies to *narrowing*, never to declaring live code unreachable
+  — the same line `eval_cond` already draws at `Isset`. Pinned as a
+  fixture.
+* **Spans, not calls.** A condition operand is a lowered `CondExpr` with no
+  span of its own, so the record is per **call span** there; the ternary
+  and `??` arms carry real CST extents (`ArgValue::Ternary`'s
+  `then_span`/`else_span`, `ArgValue::Coalesce`'s third field — outside the
+  `Hash` impl, since position is not denotation). A non-call site inside an
+  unevaluated operand (a class reference, a constant fetch) filters on its
+  own offset and is **not** covered; recorded as a known residue.
+
+Direction of movement: **finding-removing only**. Nothing here mints a
+verdict, a fact, or an id; php-typing-conformance is unmoved (206/214
+before and after, same eight fails).
+
+Fixtures: `crates/steins-infer/tests/short_circuit_dead_operands.rs` —
+every shape as a decided/undecided pair, the Asserted-presence stratum pin,
+the short-circuiting chain, and the per-span (not per-call) proof that an
+identical call on a live path keeps firing.

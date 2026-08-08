@@ -1068,7 +1068,21 @@ pub enum ArgValue {
     /// arms (a `OneOf` if both are literal, else unknown). Short-ternary `?:` and
     /// null-coalescing `??` are **not** lowered here because their operands need
     /// negative/definedness facts outside this domain.
-    Ternary { cond: Box<CondExpr>, then_val: Box<ArgValue>, else_val: Box<ArgValue> },
+    ///
+    /// `then_span`/`else_span` are the source extents of the two arms. PHP
+    /// evaluates exactly one of them, so a decided guard proves the other one's
+    /// span **unevaluated** — the walk records it as dead (ADR-0052 §6: "the
+    /// direct env-free pass stands down on spans covered here exactly as
+    /// `mark_dead` already models"). They are carried for that one purpose and
+    /// are deliberately outside the [`Hash`] impl: two ternaries that differ only
+    /// in position denote the same value.
+    Ternary {
+        cond: Box<CondExpr>,
+        then_val: Box<ArgValue>,
+        then_span: Span,
+        else_val: Box<ArgValue>,
+        else_span: Span,
+    },
     /// A closure value (ADR-0033): a `function (...) use (...) {...}` / arrow
     /// `fn(...) => …` expression lowered to its own [`Scope`], or a first-class
     /// callable (`strtolower(...)`) naming a function target. Carried in the trace
@@ -1113,7 +1127,13 @@ pub enum ArgValue {
     /// operand the domain cannot spell (notably an array offset `$arr['k']`, which
     /// lowers to [`Self::Other`]) yields no fact, so `??` never manufactures a fact
     /// for a value it cannot see. Short-ternary `?:` still widens to `Other`.
-    Coalesce(Box<ArgValue>, Box<ArgValue>),
+    ///
+    /// The third field is the RIGHT operand's source extent. `??` gates it the
+    /// way a ternary gates its arms: a left operand proven set-and-non-null means
+    /// PHP never evaluates the right, and the walk records that span dead
+    /// (ADR-0052 §6). Outside the [`Hash`] impl, for the same reason as
+    /// [`Self::Ternary`]'s arm spans.
+    Coalesce(Box<ArgValue>, Box<ArgValue>, Span),
     /// An array/offset read `$base[$key]` in **rvalue** position (ADR-0049 §7 / S3).
     /// `base` and `key` are the lowered sub-expressions (each may itself be any
     /// [`ArgValue`], commonly a [`Self::Var`] base and a literal/`Var` key). This is
@@ -1519,7 +1539,9 @@ impl std::hash::Hash for ArgValue {
                 named.hash(state);
             }
             ArgValue::Array(items) => items.hash(state),
-            ArgValue::Ternary { cond, then_val, else_val } => {
+            // The arm spans are position, not denotation — excluded (a narrower
+            // hash than `PartialEq` is always sound).
+            ArgValue::Ternary { cond, then_val, else_val, .. } => {
                 cond.hash(state);
                 then_val.hash(state);
                 else_val.hash(state);
@@ -1530,7 +1552,7 @@ impl std::hash::Hash for ArgValue {
                 prop.hash(state);
             }
             ArgValue::Clone(v) => v.hash(state),
-            ArgValue::Coalesce(l, r) => {
+            ArgValue::Coalesce(l, r, _) => {
                 l.hash(state);
                 r.hash(state);
             }
@@ -1620,7 +1642,7 @@ impl ArgValue {
             ArgValue::Closure(ClosureRef::Anonymous { .. }) => "Closure".to_owned(),
             ArgValue::PropFetch { var, prop } => format!("${var}->{prop}"),
             ArgValue::Clone(v) => format!("clone ${v}"),
-            ArgValue::Coalesce(l, r) => format!("({} ?? {})", l.render(), r.render()),
+            ArgValue::Coalesce(l, r, _) => format!("({} ?? {})", l.render(), r.render()),
             ArgValue::Concat(l, r) => format!("({} . {})", l.render(), r.render()),
             ArgValue::Binary { op, lhs, rhs } => {
                 format!("({} {} {})", lhs.render(), op.symbol(), rhs.render())
@@ -6945,7 +6967,9 @@ fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
         Expression::Conditional(cond) => match cond.then {
             Some(then_expr) => ArgValue::Ternary {
                 cond: Box::new(lower_cond(cond.condition)),
+                then_span: to_span(then_expr.span()),
                 then_val: Box::new(lower_arg_value(then_expr)),
+                else_span: to_span(cond.r#else.span()),
                 else_val: Box::new(lower_arg_value(cond.r#else)),
             },
             None => ArgValue::Other,
@@ -6987,7 +7011,11 @@ fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
         // an operand the domain cannot spell lowers to `Other`, and the walk then
         // yields no fact (so `$arr['k'] ?? …` manufactures nothing).
         Expression::Binary(b) if b.operator.is_null_coalesce() => {
-            ArgValue::Coalesce(Box::new(lower_arg_value(b.lhs)), Box::new(lower_arg_value(b.rhs)))
+            ArgValue::Coalesce(
+                Box::new(lower_arg_value(b.lhs)),
+                Box::new(lower_arg_value(b.rhs)),
+                to_span(b.rhs.span()),
+            )
         }
         // String concatenation `$a . $b` (issue #59). Structural, like `??` above:
         // an operand's value is an env fact, so the join runs in the walk. Note this

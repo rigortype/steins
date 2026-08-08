@@ -9878,6 +9878,38 @@ fn mark_dead(w: &WalkCx, traces: &[&[Stmt]]) {
     }
 }
 
+/// Record one source extent as proven dead — an expression PHP's own evaluation
+/// order proves is never reached (ADR-0052 §6: a `&&`/`||` operand the left side
+/// short-circuits past, the untaken arm of a decided ternary, the right operand of
+/// a `??` whose left is proven set-and-non-null).
+///
+/// The statement-level [`mark_dead`] and this share one consumer, [`in_dead`], and
+/// one discipline: a region is recorded only from a **decided** verdict, and only
+/// the plain per-scope walk's regions escape the walk (a binding descent discards
+/// its own — its verdicts hold for that caller's bindings, not universally).
+fn mark_dead_span(w: &WalkCx, span: Span) {
+    w.dead.borrow_mut().push(span);
+}
+
+/// Record every call this condition carries as dead. Used where a whole operand of
+/// `&&`/`||` is proven unevaluated: the operand itself has no span (a [`CondExpr`]
+/// is a lowered form, not a CST node), but its calls do, and a call is where the
+/// env-free direct pass positions the findings this closes.
+///
+/// A non-call site inside such an operand (a class reference, a constant fetch)
+/// keeps its own filter and is NOT covered — those families read `r.offset`, not a
+/// call span. Recorded as a known residue rather than papered over.
+fn mark_dead_cond_calls(w: &WalkCx, cond: &CondExpr) {
+    let calls = collect_guard_calls_any(cond);
+    if calls.is_empty() {
+        return;
+    }
+    let mut dead = w.dead.borrow_mut();
+    for call in calls {
+        dead.push(call.span);
+    }
+}
+
 /// Whether a byte position falls inside any proven-dead region.
 fn in_dead(dead: &[Span], pos: u32) -> bool {
     dead.iter().any(|s| s.start <= pos && pos < s.end)
@@ -10733,7 +10765,7 @@ fn value_stratum(value: &ArgValue, env: &HashMap<String, Known>, store: Option<&
             value_stratum(then_val, env, store).min(value_stratum(else_val, env, store))
         }
         // `$a ?? $b` consumes both operands' facts (a widening join): `min` (§5).
-        ArgValue::Coalesce(a, b) => {
+        ArgValue::Coalesce(a, b, _) => {
             value_stratum(a, env, store).min(value_stratum(b, env, store))
         }
         // `$a . $b` consumes both operands' facts to build one string — the same
@@ -11247,7 +11279,7 @@ fn best_dump_type(
     // A `??` chain (ADR-0052 §6 + ADR-0062 A-G11, S5): the spine's join under the
     // left-to-right `¬isset` premise ladder, which is where a KeyCover discharges.
     // Placed above the fold because a `??` is never a literal the folder can reach.
-    if let ArgValue::Coalesce(a, b) = value
+    if let ArgValue::Coalesce(a, b, _) = value
         && let Some((fact, stratum)) = eval_coalesce_fact(w, folder, a, b, env, Some(store))
     {
         return DumpRendering {
@@ -11764,8 +11796,17 @@ fn apply_assign(
     // A ternary rvalue `$x = $c ? A : B` is a conditional value (ADR-0031): the
     // walk evaluates the guard and resolves to the chosen arm, or (undecided) a
     // `OneOf` of the two arms when both are literal, else unknown.
-    if let ArgValue::Ternary { cond, then_val, else_val } = value {
-        match eval_ternary_fact(w, folder, cond, then_val, else_val, env, store) {
+    if let ArgValue::Ternary { cond, then_val, then_span, else_val, else_span } = value {
+        match eval_ternary_fact(
+            w,
+            folder,
+            cond,
+            then_val,
+            else_val,
+            (*then_span, *else_span),
+            env,
+            store,
+        ) {
             Some(fact) => {
                 if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
                     facts.push(LineFact {
@@ -11923,7 +11964,13 @@ fn apply_assign(
         // unknown call) yields no fact, so `??` never manufactures certainty for a
         // value it cannot spell. The join widens, so it can only *lose* precision
         // (never fire a proof the concrete arms would not) — the FP-safe side.
-        ArgValue::Coalesce(a, b) => {
+        ArgValue::Coalesce(a, b, rhs_span) => {
+            // `??` gates its right operand the way a ternary gates an arm: a left
+            // operand proven set-and-non-null means PHP never evaluates the right,
+            // so a finding positioned there is a false positive (ADR-0052 §6).
+            if coalesce_lhs_proven_present(w, folder, a, env, store) {
+                mark_dead_span(w, *rhs_span);
+            }
             // The stratum is the evaluator's own `min` over the spine's arms — the
             // same derivation clause the two-operand form used, extended to a
             // projection arm, whose stratum comes from the base's shape fact rather
@@ -12197,7 +12244,7 @@ fn eval_coalesce_fact(
 /// parentheses (`($a ?? $b) ?? $c`) nest left and mean the same chain.
 fn flatten_coalesce<'a>(v: &'a ArgValue, out: &mut Vec<&'a ArgValue>) {
     match v {
-        ArgValue::Coalesce(a, b) => {
+        ArgValue::Coalesce(a, b, _) => {
             flatten_coalesce(a, out);
             flatten_coalesce(b, out);
         }
@@ -13561,8 +13608,14 @@ fn eval_cond(
         CondExpr::And(a, b) => {
             let va = eval_cond(w, folder, a, env, store, poisoned);
             // `a` false ⇒ `b` never runs; the verdict is already `No`, and the
-            // threaded env would be a contradiction — skip it.
+            // threaded env would be a contradiction — skip it. `b`'s span is
+            // *unevaluated code*, not merely unnarrowed: PHP short-circuits past it,
+            // so a finding positioned there would be a false positive on a path the
+            // engine never takes. Record it, exactly as a decided `if` records its
+            // skipped branch (ADR-0052 §6's "the direct env-free pass stands down on
+            // spans covered here").
             if va == Certainty::No {
+                mark_dead_cond_calls(w, b);
                 return Certainty::No;
             }
             let (benv, bstore) =
@@ -13571,8 +13624,10 @@ fn eval_cond(
         }
         CondExpr::Or(a, b) => {
             let va = eval_cond(w, folder, a, env, store, poisoned);
-            // `a` true ⇒ `b` never runs; the verdict is already `Yes`.
+            // `a` true ⇒ `b` never runs; the verdict is already `Yes`. Same
+            // unevaluated-span reasoning as the `&&` side, De Morgan-mirrored.
             if va == Certainty::Yes {
+                mark_dead_cond_calls(w, b);
                 return Certainty::Yes;
             }
             let (benv, bstore) =
@@ -14145,20 +14200,65 @@ fn eval_binary_fact(
     (fact, strat)
 }
 
+/// Is a `??` left operand proven **set and non-null**, so PHP's own evaluation
+/// order proves the right operand unevaluated (ADR-0052 §6)?
+///
+/// Three refusals keep this on the FP-safe side, and each is the same refusal the
+/// verdict machinery already makes elsewhere:
+///
+/// * an **offset read** never answers yes — presence is the very question `??`
+///   asks of it, and [`ArgValue::OffsetRead`] is a silence carrier in this
+///   position by construction (ADR-0049 A7);
+/// * an operand that does not resolve to a concrete value answers no (unknown is
+///   not "present");
+/// * an operand whose fact is **`Asserted`** answers no. Marking a span dead is a
+///   reachability claim, and reachability stays proof-only — the same line
+///   [`eval_cond`] draws at `Isset` (a docblock claim must never silence the
+///   env-free direct pass on a live path).
+fn coalesce_lhs_proven_present(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    lhs: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: &Store,
+) -> bool {
+    if matches!(lhs, ArgValue::OffsetRead { .. }) {
+        return false;
+    }
+    if value_stratum(lhs, env, Some(store)) != Stratum::Verified {
+        return false;
+    }
+    match w.cx.resolve_literal(lhs, env, w.scope.poisoned, folder) {
+        Some(v) => !matches!(v, ArgValue::Null),
+        None => false,
+    }
+}
+
 /// Evaluate a ternary rvalue to an env [`Fact`] (ADR-0031): a decided guard picks
 /// the chosen arm's proven value; an undecided guard yields a `OneOf` of the two
 /// arms when both resolve to literals, else `None` (unknown → the var is dropped).
+///
+/// A decided guard also proves the **untaken arm unevaluated** (ADR-0052 §6): PHP
+/// evaluates exactly one arm of a ternary, so `$x === 2 ? f("bad") : 0` with `$x`
+/// proven `1` never runs `f` at all, and a finding on it would be a false positive.
+/// `arms` carries the two source extents for exactly that record.
 fn eval_ternary_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
     cond: &CondExpr,
     then_val: &ArgValue,
     else_val: &ArgValue,
+    arms: (Span, Span),
     env: &HashMap<String, Known>,
     store: &Store,
 ) -> Option<Fact> {
     let poisoned = w.scope.poisoned;
     let verdict = eval_cond(w, folder, cond, env, store, poisoned);
+    match verdict {
+        Certainty::Yes => mark_dead_span(w, arms.1),
+        Certainty::No => mark_dead_span(w, arms.0),
+        Certainty::Maybe => {}
+    }
     // The arms evaluate under the guard's respective refinements (ADR-0052 §6):
     // `$c ? A : B` — `A` runs only when `$c` was truthy (so it sees
     // `then_refinements($c)`), `B` only when `$c` was falsy (`else_refinements`).
