@@ -187,8 +187,41 @@ use steins_infer::{AssertObservation, SidecarFolder, collect_assert_types};
 
 use crate::corpus::{collect_php_files, repo_root};
 
-/// Entry point for `cargo xtask nsrt [DIR]`. `DIR` overrides the default nsrt path.
+/// Headroom for [`run`]'s worker thread (issue #246). phpstan-src ships its own
+/// benchmark fixture, `tests/bench/data/nullsafe-chain-walk.php`, built out of
+/// six `Node` property-fetch chains 250–1,000 `->next` accesses deep (a
+/// deliberate O(N²)-walk stress test, per that file's own doc comment) — a
+/// deeply nested but perfectly finite expression tree, not a cycle. Walking it
+/// recurses through steins-syntax's `scan_effect_origins` (one frame per CST
+/// node on the way down, `Node::children`/`visit_children` in between) roughly
+/// 2,500 frames deep. A debug build's frames are large — no inlining, full
+/// locals — so that descent alone blows the ~8 MiB default OS stack; the same
+/// walk fits comfortably in a release build's optimized frames, which is why
+/// `--release` was the only known workaround before this fix.
+///
+/// This is the harness choosing headroom the *library* has no business
+/// assuming (steins-infer serves an LSP that cannot spawn a worker thread per
+/// keystroke) — the recursion terminates on its own, so an engine depth cutoff
+/// would be manufacturing a silence nothing calls for. 256 MiB is roughly 100x
+/// the depth this fixture needs; it is virtual address space the OS commits
+/// lazily, page by page as frames are touched, so an idle process pays nothing
+/// for headroom it never uses.
+const WORKER_STACK_SIZE: usize = 256 * 1024 * 1024;
+
+/// Entry point for `cargo xtask nsrt [DIR]`. `DIR` overrides the default nsrt
+/// path. Runs the analysis on a worker thread sized per [`WORKER_STACK_SIZE`]
+/// rather than on `main`'s default-sized stack — see that constant's doc.
 pub fn run(dir_arg: Option<&str>) -> Result<(), String> {
+    let dir_arg = dir_arg.map(str::to_owned);
+    std::thread::Builder::new()
+        .stack_size(WORKER_STACK_SIZE)
+        .spawn(move || run_on_worker(dir_arg.as_deref()))
+        .expect("failed to spawn the nsrt worker thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+fn run_on_worker(dir_arg: Option<&str>) -> Result<(), String> {
     let dir = match dir_arg {
         Some(d) => PathBuf::from(d),
         None => default_nsrt_dir(),
@@ -1654,5 +1687,35 @@ mod tests {
         };
         let rec = Record::classify("f.php", obs);
         assert_eq!(rec.verdict, "skipped");
+    }
+
+    /// Regression for issue #246: phpstan-src's own benchmark fixture,
+    /// `tests/bench/data/nullsafe-chain-walk.php`, nests a `->next`
+    /// property-fetch chain 1,000 deep — steins-syntax's `scan_effect_origins`
+    /// recurses roughly one frame per CST node on the way down (~2,500 frames
+    /// for that chain) and overflowed a debug build's default ~8 MiB stack,
+    /// while fitting comfortably in release's optimized frames. Reproduce the
+    /// shape (a chain past that depth) and drive it through the real entry
+    /// point, `run`, whose worker thread is sized per [`WORKER_STACK_SIZE`].
+    ///
+    /// A stack overflow is not a catchable panic — there is nothing to
+    /// `assert!` on the failure side. If the worker-thread sizing in `run`
+    /// regresses, this test does not fail cleanly; it aborts the whole test
+    /// process, which is exactly the signal a stack-overflow regression
+    /// leaves behind.
+    #[test]
+    fn deep_property_chain_does_not_overflow_the_worker_stack() {
+        let dir = std::env::temp_dir().join(format!("steins-nsrt-deep-chain-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create scratch dir for the deep-chain fixture");
+
+        let chain = "->next".repeat(1_500);
+        let php = format!(
+            "<?php\nclass Node {{ public Node $next; }}\nfunction f(Node $n): Node {{ return $n{chain}; }}\n"
+        );
+        std::fs::write(dir.join("deep_chain.php"), php).expect("write the deep-chain fixture");
+
+        let result = run(Some(dir.to_str().expect("scratch path is valid UTF-8")));
+        let _ = std::fs::remove_dir_all(&dir); // best-effort; a leftover temp dir is not a test failure
+        assert!(result.is_ok(), "nsrt::run overflowed or errored on a deep-but-finite chain: {result:?}");
     }
 }
