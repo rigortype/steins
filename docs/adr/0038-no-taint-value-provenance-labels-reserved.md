@@ -27,3 +27,34 @@ counterpart of effect labels — one mechanism covering what taint,
 literal-string, and dialect zones each partially address.
 Reconsideration preconditions: the Refined layer and label registry
 mature, and a boundary-policy consumer with demonstrated demand.
+
+## Amendment (2026-08-08): `class-string` is a value property, not a provenance one (issue #236)
+
+The original entry assessed `literal-string` as taint's polarity twin and
+declined it from ADR-0035's Refined layer on a stated ground: *two identical
+strings can differ in literal-string status*, so no function of the value
+decides it. That ground is exact, and it is what makes the exclusion a
+principle rather than a preference.
+
+It does **not** reach `class-string`. Two identical strings are both
+class-strings or neither — whether `'App\User'` names a declared class-like is
+a question about the string and the program's class table, never about where
+the string came from. So the extensionality the Refined layer rests on is
+intact, and `class-string` (with its `interface-string` / `trait-string` /
+`enum-string` synonyms — PHP has one symbol table for all four) is a
+`StrPreds` predicate.
+
+What it costs is a **split inside the bitset**, not an exception to it. The
+class table is not in `StrPreds::of`'s scope, so the predicate is *contextual*:
+a producer holding the evidence records it, and no member test on a bare string
+can discharge it. Every membership query reads a set through its extensional
+projection (`StrPreds::extensional`), which over-approximates γ — the sound
+direction — and leaves the acceptance relation answering exactly the `Maybe`
+this ADR's bar produced when the spelling had no predicate at all. The
+implications that *are* extensional come from PHP's identifier grammar
+(`⇒ non-falsy`, `⇒ non-decimal-int`), and they are what lets a `class-string`
+contract refute `''` and `'0'` instead of shrugging at them.
+
+`literal-string` and `callable-string` stay out, unamended: the first for the
+reason above, the second because it names a *function* table this crate carries
+no view of.

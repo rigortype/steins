@@ -8588,6 +8588,46 @@ fn singleton_fact(arg: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<Fact>
     val_of(arg, php_minor).map(Fact::Singleton)
 }
 
+/// The value fact a `::class` magic constant produces — one seam for both of its
+/// forms (issue #236, on ADR-0043's resolution and issue #36's settlement that
+/// the compiler resolves `::class` and it mints nothing at runtime).
+///
+/// - **Written** (`Foo::class`): the FQN **string literal**, in the source's own
+///   declared casing, which [`Cx::class_fqn`] preserves. Strictly more precise
+///   than any refinement, and exactly what PHPStan asserts for the same
+///   expression — so the literal, never `class-string`.
+/// - **Relative** (`self`/`parent`/`static::class`): the `class-string`
+///   refinement. [`Cx::resolve_class_const`] refuses these for a stated reason —
+///   the class-like is resolved, but only as the index's lowercase-normalized
+///   FQN, while `::class` yields the *declared* casing, so emitting a literal
+///   would risk a wrong-case string. That deferral left the value with no fact
+///   at all; the refinement is precisely what survives it. The class table is
+///   the evidence, which is why the predicate is the contextual one
+///   ([`StrPreds::CLASS_STRING`]) rather than anything `StrPreds::of` derives.
+///
+/// A closure scope refuses the relative forms: [`scope_class`] answers `None`
+/// there for a lexical reason rather than because no class is in scope
+/// ([`class_scope_known`]), and `parent::class` outside a class is a compile
+/// error, not a class-string.
+fn class_const_class_fact(cx: &Cx, scope: &Scope, sc: &StaticClass, name: &str) -> Option<Fact> {
+    if !name.eq_ignore_ascii_case("class") {
+        return None;
+    }
+    match sc {
+        // The written form: ADR-0043's own resolution, which preserves the
+        // source casing, so the value lane gets the LITERAL rather than the
+        // refinement. Strictly more precise, and what the oracle asserts too.
+        StaticClass::Named(r) => Some(Fact::Singleton(Val::Str(
+            cx.class_fqn(r).trim_start_matches('\\').to_owned(),
+        ))),
+        StaticClass::SelfKw | StaticClass::Parent | StaticClass::Static => {
+            (class_scope_known(scope) && scope_class(scope).is_some()).then(|| {
+                Fact::refined(Base::String, Refinement::Str(StrPreds::CLASS_STRING.close()), false)
+            })
+        }
+    }
+}
+
 /// The target of a proven closure value (ADR-0033): an anonymous closure/arrow
 /// scope (by definition-site byte offset), or a first-class callable naming a free
 /// function.
@@ -10696,6 +10736,15 @@ fn best_dump_type(
             asserted: strat == Stratum::Asserted,
         };
     }
+    // The `::class` magic constant (issue #236): its FQN literal when written,
+    // the `class-string` refinement when relative. Verified — the claim is PHP's
+    // own, not a declaration's. Below the fold rung above, which never reaches a
+    // class constant, so nothing more precise is displaced.
+    if let ArgValue::ClassConst(sc, name) = value
+        && let Some(fact) = class_const_class_fact(cx, w.scope, sc, name)
+    {
+        return DumpRendering { text: render_dump_fact(&fact), asserted: false };
+    }
     // The MEMBER-WISE UNION FOLD (issue #74): the fold lane's own generalization —
     // an argument that is a bounded union of constants is enumerated, each
     // combination folded through the very seam a literal call takes, and the
@@ -11343,6 +11392,16 @@ fn apply_assign(
             // refinement (ADR-0056 R1). Enters at `Verified` — a native declaration
             // (§2). A more-precise fold above already returned; this is the floor.
             None => match value {
+                // The `::class` magic constant (issue #236): `$c = Foo::class`
+                // binds its FQN literal, `$c = static::class` the refinement.
+                // Above every call rung, since none of them can see a class
+                // constant. Verified: PHP's own guarantee, not a declaration's.
+                ArgValue::ClassConst(sc, name)
+                    if let Some(fact) = class_const_class_fact(cx, w.scope, sc, name) =>
+                {
+                    env.insert(var.to_owned(), Known::value(fact, line, None));
+                    store.unbind(var);
+                }
                 // The MEMBER-WISE UNION FOLD (issue #74): still the fold lane, one
                 // rung wider — an argument that is a bounded union of constants is
                 // enumerated and every combination answered by the real engine. It

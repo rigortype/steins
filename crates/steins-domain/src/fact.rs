@@ -118,7 +118,13 @@ impl Fact {
                 _ => {
                     v.base() == Some(*base)
                         && match (refinement, v) {
-                            (Refinement::Str(p), Val::Str(s)) => StrPreds::of(s).contains_all(*p),
+                            // Read through the extensional projection: a
+                            // contextual predicate (`class-string`) has no
+                            // member test here, so γ is over-approximated —
+                            // the sound direction for the join contract.
+                            (Refinement::Str(p), Val::Str(s)) => {
+                                StrPreds::of(s).contains_all(p.extensional())
+                            }
                             (Refinement::Int(r), Val::Int(i)) => r.contains(*i),
                             // Base matched but refinement kind cannot apply:
                             // unreachable by construction (Str↔String,
@@ -194,10 +200,22 @@ impl Fact {
 
     /// Certainty that the value is a string satisfying every predicate in
     /// `pred`.
+    ///
+    /// A contextual predicate in `pred` (`class-string`) can be *refuted* by a
+    /// concrete string — `""` names no class — but never proven here, so a
+    /// value that survives the extensional part answers `Maybe`.
     #[must_use]
     pub fn satisfies_str(&self, pred: StrPreds) -> Certainty {
         let eval_one = |v: &Val| match v {
-            Val::Str(s) => Certainty::from_bool(StrPreds::of(s).contains_all(pred)),
+            Val::Str(s) => {
+                if !StrPreds::of(s).contains_all(pred.extensional()) {
+                    Certainty::No
+                } else if pred.is_extensional() {
+                    Certainty::Yes
+                } else {
+                    Certainty::Maybe
+                }
+            }
             _ => Certainty::No,
         };
         match self {

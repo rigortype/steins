@@ -588,6 +588,14 @@ fn float_literal(f: f64) -> String {
 /// widening, never a lie.
 #[must_use]
 pub fn preds_keyword(preds: StrPreds) -> String {
+    // `class-string` outranks every core rung: it is the only *contextual*
+    // predicate (issue #236), so it says something none of the character-level
+    // rungs can, and dropping it in favour of `non-falsy-string` — which it
+    // entails — would throw away the whole claim. Round-trips through
+    // `lower_identifier` back to the same set.
+    if preds.contains_all(StrPreds::CLASS_STRING) {
+        return "class-string".to_owned();
+    }
     let casing = match (
         preds.contains_all(StrPreds::LOWERCASE),
         preds.contains_all(StrPreds::UPPERCASE),

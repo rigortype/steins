@@ -734,3 +734,70 @@ fn var_dump_carries_no_fix() {
     assert_eq!(ds.len(), 1);
     assert_eq!(ds[0].fix, None);
 }
+
+// ---- `class-string` (issue #236) -------------------------------------------
+
+#[test]
+fn written_class_const_still_dumps_its_literal() {
+    // ADR-0043 resolves a WRITTEN `Foo::class` to its FQN string, which is
+    // strictly more precise than the refinement — the class-string rung sits
+    // below the literal rung exactly so this cannot regress.
+    // The rendering is a phpdoc string literal, so the namespace separator is
+    // escaped the way single-quoted PHP escapes it (and PHPStan prints it).
+    let src = "<?php namespace N;\nclass Foo {}\n\\PHPStan\\dumpType(Foo::class);\n";
+    assert_eq!(one_type(src), "dumped type: 'N\\\\Foo'");
+}
+
+#[test]
+fn relative_class_consts_dump_as_class_string() {
+    // `self`/`parent`/`static::class` name a class-like the index knows but
+    // whose declared CASING it does not carry, so no literal may be emitted.
+    // The refinement is what survives that: it names a class-like.
+    for kw in ["self", "parent", "static"] {
+        let src = format!(
+            "<?php namespace N;\nclass Base {{}}\n\
+             class Child extends Base {{ function go(): void {{ \\PHPStan\\dumpType({kw}::class); }} }}\n"
+        );
+        assert_eq!(one_type(&src), "dumped type: class-string", "{kw}::class");
+    }
+}
+
+#[test]
+fn relative_class_const_binds_the_fact_through_an_assignment() {
+    // The producer lives in the value lane, not only on the dump surface: a
+    // binding carries the refinement to every later read.
+    let src = "<?php namespace N;\nclass Base {}\n\
+        class Child extends Base { function go(): void { $c = static::class; \\PHPStan\\dumpType($c); } }\n";
+    assert_eq!(one_type(src), "dumped type: class-string");
+}
+
+#[test]
+fn relative_class_const_outside_a_class_produces_nothing() {
+    // `self::class` at file scope is a compile error, not a class-string —
+    // there is no class-like to name, so the surface stays honestly silent.
+    let src = "<?php \\PHPStan\\dumpType(self::class);\n";
+    assert_eq!(one_type(src), "dumped type: unknown");
+}
+
+#[test]
+fn declared_class_string_param_dumps_as_class_string() {
+    // The declaration-flow producer: a `@param class-string` seeds the value
+    // lane, and the interface/trait/enum spellings name the same predicate —
+    // PHPStan renders all four back as `class-string` too.
+    for spelling in ["class-string", "interface-string", "trait-string", "enum-string"] {
+        let src = format!(
+            "<?php /** @param {spelling} $c */ function f($c): void {{ \\PHPStan\\dumpType($c); }}\n"
+        );
+        assert_eq!(one_type(&src), "dumped type: class-string (asserted)", "{spelling}");
+    }
+}
+
+#[test]
+fn a_parameterized_class_string_param_widens_to_the_bare_form() {
+    // The generics vocabulary owns `T` (ADR-0032's carry, issue #10). Until it
+    // lands, `class-string<Foo>` is carried as the bare predicate — a widening,
+    // which is what every member of the parameterized set satisfies anyway.
+    let src = "<?php class Foo {}\n\
+        /** @param class-string<Foo> $c */ function f($c): void { \\PHPStan\\dumpType($c); }\n";
+    assert_eq!(one_type(src), "dumped type: class-string (asserted)");
+}

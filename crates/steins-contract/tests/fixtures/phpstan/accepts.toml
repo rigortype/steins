@@ -20,8 +20,9 @@
 #  ClassStringTypeTest — the `dataAccepts` providers):
 #
 #   PORTED          18   Steins agrees with PHPStan (scalar/literal/nullable/union).
-#   EXPECTED-DIVERGENT 5  4× class-string is non-extensional (ADR-0038) → Steins
-#                         answers Maybe where PHPStan reflects a class table;
+#   EXPECTED-DIVERGENT 5  4× class-string is CONTEXTUAL (ADR-0038 as amended by
+#                         issue #236) → Steins answers Maybe where PHPStan
+#                         reflects a class table;
 #                         1× narrow-LHS accepts strictness deliberately not
 #                         reproduced (ADR-0030 registry 4): the accepts/
 #                         isSuperTypeOf asymmetry collapses to the single
@@ -32,7 +33,8 @@
 #   FloatTypeTest::dataAccepts          2   `mixed` RHS; `string|resource` (resource)
 #   BooleanTypeTest::dataAccepts        1   `bool accepts mixed`
 #   ClassStringTypeTest::dataAccepts    1   `class-string accepts class-string`
-#                                           (non-extensional RHS, StrOpaque)
+#                                           (the probe lane has no fact form for
+#                                            a contextual-only RHS)
 #   StringTypeTest::dataAccepts        19   templates, template-args,
 #                                           object&HasProperty intersection,
 #                                           class-string RHS, and the
@@ -179,12 +181,14 @@ rhs = "2"
 phpstan = "no"
 source = "ConstantIntegerTypeTest::dataAccepts[2]"
 
-# ── EXPECTED-DIVERGENT: class-string is non-extensional (ADR-0038) ──────────
+# ── EXPECTED-DIVERGENT: class-string is contextual (ADR-0038, issue #236) ───
 # PHPStan decides these by consulting the class table (does the string name a
-# real class?). Steins lowers class-string to StrOpaque: any string is Maybe,
-# a non-string is No — it can never answer Yes/No on a concrete class name.
-# ADR-0030 imports the denotational core "as-is" but registers this: provenance-
-# flavored string types are non-extensional and cannot decide membership.
+# real class?). Steins carries class-string as a StrPreds predicate now, but a
+# CONTEXTUAL one: the class table is not in the value domain's scope, so a
+# concrete identifier-shaped string is Maybe — refutable (`''`, `'0'`, `'123'`
+# are decided No by PHP's identifier grammar), never provable. ADR-0030 imports
+# the denotational core "as-is" and registers this residual: without a class
+# table the relation cannot answer Yes on a concrete class name.
 [[row]]
 name = "classstring_accepts_real_class"
 lhs = "class-string"
@@ -192,7 +196,7 @@ rhs = "'stdClass'"
 phpstan = "yes"
 steins = "maybe"
 status = "divergent"
-adr = "ADR-0038 (non-extensional string types) / ADR-0030 denotational-core registry"
+adr = "ADR-0038 as amended (contextual string predicate) / ADR-0030 denotational-core registry"
 source = "ClassStringTypeTest::dataAccepts (ConstantString stdClass → Yes)"
 
 [[row]]
@@ -202,7 +206,7 @@ rhs = "'NonexistentClass'"
 phpstan = "no"
 steins = "maybe"
 status = "divergent"
-adr = "ADR-0038 (non-extensional string types) / ADR-0030 denotational-core registry"
+adr = "ADR-0038 as amended (contextual string predicate) / ADR-0030 denotational-core registry"
 source = "ClassStringTypeTest::dataAccepts (ConstantString NonexistentClass → No)"
 
 [[row]]
@@ -212,7 +216,7 @@ rhs = "'Foo'|'Bar'"
 phpstan = "yes"
 steins = "maybe"
 status = "divergent"
-adr = "ADR-0038 (non-extensional string types) / ADR-0030 denotational-core registry"
+adr = "ADR-0038 as amended (contextual string predicate) / ADR-0030 denotational-core registry"
 source = "ClassStringTypeTest::dataAccepts (union of real ConstantStrings → Yes)"
 
 [[row]]
@@ -222,13 +226,13 @@ rhs = "'Nonexistent'|'Nonexistent2'"
 phpstan = "no"
 steins = "maybe"
 status = "divergent"
-adr = "ADR-0038 (non-extensional string types) / ADR-0030 denotational-core registry"
+adr = "ADR-0038 as amended (contextual string predicate) / ADR-0030 denotational-core registry"
 source = "ClassStringTypeTest::dataAccepts (union of missing ConstantStrings → No)"
 
 # Coincidental agreement: a mixed real/missing union is Maybe in PHPStan too,
-# and Steins already answers Maybe for any class-string probe — so this ports
-# cleanly even though the *reason* differs (PHPStan: partial class table;
-# Steins: non-extensional). Kept as PORTED (asserts PHPStan's own Maybe).
+# and Steins already answers Maybe for any identifier-shaped class-string probe
+# — so this ports cleanly even though the *reason* differs (PHPStan: partial
+# class table; Steins: no class table). Kept as PORTED (asserts PHPStan's own Maybe).
 [[row]]
 name = "classstring_accepts_union_mixed"
 lhs = "class-string"

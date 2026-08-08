@@ -526,7 +526,9 @@ fn atom_unsupported_category(atom: &str) -> Option<&'static str> {
         "void" | "never" | "resource" | "scalar" | "empty" | "iterable" => Some("other-keyword"),
         "static" | "self" | "parent" | "$this" => Some("self-static"),
         "callable" => Some("callable"),
-        "class-string" => Some("class-string"),
+        // (`class-string` bare is no longer here: `is_supported_atom` claims it
+        // first — issue #236. The `class-string-`prefixed leftovers that still
+        // reach the `contains` check above keep the category name.)
         "" => Some("empty-atom"),
         _ => {
             // A leftover token that is not a plain class name — anything with an
@@ -566,6 +568,12 @@ fn is_supported_atom(a: &str) -> bool {
         // and stays unsupported on its own terms.
         "lowercase-string",
         "uppercase-string",
+        // The BARE class-string only (issue #236): the speller renders it, the
+        // acceptance relation judges it, so it is a fair comparison. The
+        // parameterized `class-string<T>` is NOT listed — it is caught by the
+        // `<` branch of `atom_unsupported_category` and stays `unsupported`
+        // until the generics carry (issue #10) gives `T` a meaning.
+        "class-string",
         "positive-int",
         "negative-int",
         "non-negative-int",

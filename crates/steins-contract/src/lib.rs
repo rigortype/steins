@@ -181,8 +181,14 @@ pub enum ContractTy {
     /// `lowercase-string`, `uppercase-string` and their intersections.
     StrWith(StrPreds),
     /// A string-based type whose membership is non-extensional or unmodeled
-    /// (`class-string`, `literal-string`, `callable-string`, …): strings
+    /// (`literal-string`, `callable-string`, `numeric-int-string`): strings
     /// are `Maybe`, everything else `No` (ADR-0038).
+    ///
+    /// `class-string` and kin left this variant with issue #236 — a class-like
+    /// name is a *value* property, so it is a [`StrPreds`] predicate. What is
+    /// still here is genuinely undecidable from the value: `literal-string` is
+    /// provenance, and `callable-string` names a function table this crate has
+    /// no view of.
     StrOpaque,
     /// Integer literal type.
     LitInt(i64),
@@ -482,8 +488,22 @@ pub fn lower_identifier(name: &str) -> ContractTy {
         // (`StrPreds`'s module doc, and the ceiling noted on `admits_fact`).
         "decimal-int-string" => ContractTy::StrWith(StrPreds::DECIMAL_INT.close()),
         "non-decimal-int-string" => ContractTy::StrWith(StrPreds::NON_DECIMAL_INT),
-        "literal-string" | "class-string" | "interface-string" | "enum-string" | "trait-string"
-        | "callable-string" | "numeric-int-string" => ContractTy::StrOpaque,
+        // The class-like family (issue #236). All four name the SAME predicate —
+        // "this string names a class-like" — because PHP has one symbol table
+        // for classes, interfaces, traits and enums, and PHPStan renders every
+        // one of them back as `class-string`. It is a *value* property, so
+        // ADR-0038's provenance bar does not reach it: two identical strings are
+        // both class-strings or neither. What it needs is the class table, which
+        // `StrPreds::of` has not got — hence the contextual bit, and hence the
+        // `Maybe` the acceptance relation still answers for a concrete string.
+        "class-string" | "interface-string" | "enum-string" | "trait-string" => {
+            ContractTy::StrWith(StrPreds::CLASS_STRING.close())
+        }
+        // Genuinely non-extensional, and staying so: `literal-string` is
+        // provenance (ADR-0038), `callable-string` is a property of a function
+        // table this crate carries no view of, and `numeric-int-string` is
+        // Phan-only vocabulary with no predicate here.
+        "literal-string" | "callable-string" | "numeric-int-string" => ContractTy::StrOpaque,
         "positive-int" => ContractTy::IntIn(IntRange::POSITIVE),
         "negative-int" => ContractTy::IntIn(IntRange::NEGATIVE),
         "non-negative-int" => ContractTy::IntIn(IntRange::NON_NEGATIVE),
@@ -646,7 +666,15 @@ pub fn lower_generic(base: &str, args: &[steins_phpdoc::ast::GenericArg]) -> Con
             key: Box::new(arg(0).expect("len checked")),
             val: Box::new(arg(1).expect("len checked")),
         },
-        ("class-string", _) => ContractTy::StrOpaque,
+        // `class-string<T>` (issue #236) — carried as the BARE predicate, with
+        // the parameter dropped. The generics vocabulary owns `T` (ADR-0032's
+        // carry, issue #10); until it lands, widening to `class-string` is
+        // strictly better than the `StrOpaque` this used to be: every member of
+        // `class-string<Foo>` is a `class-string`, so the widening is sound, and
+        // it keeps the parameterized spelling from being *less* precise than the
+        // bare one. What is lost is only the bound, which nothing here could
+        // check anyway.
+        ("class-string", _) => ContractTy::StrWith(StrPreds::CLASS_STRING.close()),
         // `key-of<T>` / `value-of<T>` — the two *derived* spellings: their content
         // is not written down, it is projected out of another type. The operand is
         // lowered first through this same table, so the projection sees a
@@ -912,8 +940,10 @@ pub fn to_shape_fact(ty: &ContractTy) -> Option<ShapeFact> {
 /// * classes, `object`, `callable`, `iterable`, intersections — no fact form;
 /// * `mixed` / `Opaque` / `never` — an unknown slot *is* `mixed`, so spelling
 ///   it costs a representation with no extra content;
-/// * `class-string` &c. ([`ContractTy::StrOpaque`]) — non-extensional
-///   (ADR-0038): a fact would claim membership the relation refuses to decide;
+/// * `literal-string` &c. ([`ContractTy::StrOpaque`]) — non-extensional
+///   (ADR-0038): a fact would claim membership the relation refuses to decide.
+///   `class-string` is NOT in this bucket since issue #236 — it lowers to
+///   [`ContractTy::StrWith`] and gets the ordinary refined-string fact;
 /// * **`float` and float literals** — `ContractTy::Base(Base::Float)` accepts
 ///   ints (PHPStan core semantics, noted on the variant), while
 ///   `Fact::General { base: Float }` does not. Lowering it would make the fact
@@ -1276,11 +1306,22 @@ mod shape_fact_lowering_tests {
         // Classes, callables, `mixed`, unmergeable unions, and the
         // int-accepting `float` all floor — the honest `None` (A-G1a).
         let s = shape_of(
-            "array{a: Foo, b: callable, c: mixed, d: int|string, e: float, f: class-string}",
+            "array{a: Foo, b: callable, c: mixed, d: int|string, e: float, f: literal-string}",
         );
         for key in ["a", "b", "c", "d", "e", "f"] {
             assert_eq!(slot(&s, key), None, "slot {key} should floor to unknown");
         }
+        // …but `class-string` no longer does (issue #236): it is a string
+        // refinement now, so the slot carries the predicate instead of nothing.
+        let cs = shape_of("array{f: class-string}");
+        assert_eq!(
+            slot(&cs, "f"),
+            Some(Fact::refined(
+                Base::String,
+                Refinement::Str(StrPreds::CLASS_STRING.close()),
+                false
+            ))
+        );
     }
 
     #[test]

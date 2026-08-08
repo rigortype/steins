@@ -156,7 +156,25 @@ Sliced smallest-first, so each lands a measurable nsrt delta:
    rows) — a scoping slice, not an implementation one. **Done (#235); the
    answer moved this item out of the vocabulary plan entirely — see the probe
    below.**
-2. `class-string` and its parameterized form (148).
+2. ~~`class-string` and its parameterized form (148).~~ **Bare form landed
+   (issue #236).** The predicate, its spelling, and the acceptance relation are
+   in; `::class` and the declaration-flow producers are in. Measured outcome:
+   37 of the 148 left `unsupported`, 2 of them straight to `match`, and the
+   vocabulary paid for itself elsewhere — 64 rows outside the bucket moved
+   `differ → match` (the `class-implements` block, which asserts
+   `array<string, class-string>|false`, is 60 of them). **The parameterized
+   form waits on the ADR-0032 carry (issue #10)**: 106 of the 148 spell
+   `class-string<T>`, and 22 of those name a template parameter, a
+   `static(C)`, a `$this(C)`, or a `hasMethod(…)` accessory — none of which the
+   bare refinement could carry without inventing the generics vocabulary here.
+   `class-string<T>` is meanwhile lowered as the bare predicate, a widening.
+   The remaining 35, by what blocks each: builtin returns 10 (`get_class`,
+   `get_parent_class` — the function-map miner refused all 41 `class-string`
+   rows as unspellable and can now admit them, on the next pin bump), guards 8
+   (`is_a` / `is_subclass_of` / the `*_exists` family), templates 7, native
+   declarations masking a phpdoc refinement 5 (**not** class-string-specific —
+   `positive-int` and `non-empty-string` are masked identically), property and
+   method-return flow 3, `ltrim` predicate transfer 2.
 3. The `mixed` cut vocabulary beyond Null/Falsy (133).
 4. Object intersections, on #234's inhabitance rule (183 → 246).
 5. ~~Decide what `mixed` should score as in the harness (329) — a measurement

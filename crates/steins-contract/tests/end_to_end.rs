@@ -2,6 +2,7 @@
 //! including the #14939 shape semantics and the abstract-fact judgments.
 
 use proptest::prelude::*;
+use steins_contract::normalize::subsumes;
 use steins_contract::{admits_fact, admits_val, lower_str};
 use steins_domain::{Base, Certainty, Fact, IntRange, Key, Refinement, StrPreds, Val};
 use Certainty::{Maybe, No, Yes};
@@ -52,10 +53,23 @@ fn refinement_keywords() {
 
 #[test]
 fn provenance_strings_never_decide_yes() {
-    // ADR-0038: class-string / literal-string are non-extensional.
-    assert_eq!(admits_val(&ty("class-string"), &s("App\\User")), Maybe);
+    // ADR-0038: `literal-string` is provenance, so no value decides it.
     assert_eq!(admits_val(&ty("literal-string"), &s("abc")), Maybe);
+    assert_eq!(admits_val(&ty("literal-string"), &Val::Int(1)), No);
+    // `class-string` is a *contextual* predicate (issue #236), not provenance:
+    // no `Yes` without the class table, but the identifier grammar refutes.
+    assert_eq!(admits_val(&ty("class-string"), &s("App\\User")), Maybe);
     assert_eq!(admits_val(&ty("class-string"), &Val::Int(1)), No);
+    assert_eq!(admits_val(&ty("class-string"), &s("")), No);
+    assert_eq!(admits_val(&ty("class-string"), &s("0")), No);
+    assert_eq!(admits_val(&ty("class-string"), &s("123")), No);
+    // …and it takes its place on the refined-string ladder in both directions.
+    assert_eq!(subsumes(&ty("non-falsy-string"), &ty("class-string")), Yes);
+    assert_eq!(subsumes(&ty("string"), &ty("class-string")), Yes);
+    assert_eq!(subsumes(&ty("class-string"), &ty("class-string")), Yes);
+    assert_ne!(subsumes(&ty("class-string"), &ty("non-empty-string")), Yes);
+    // The spelling round-trips: the speller's word lowers back to the same set.
+    assert_eq!(steins_contract::spell::spell_arms(&[ty("class-string")]).as_deref(), Some("class-string"));
 }
 
 #[test]

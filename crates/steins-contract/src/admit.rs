@@ -36,8 +36,24 @@ pub fn admits_val(ty: &ContractTy, v: &Val) -> Certainty {
             Val::Int(i) => Certainty::from_bool(r.contains(*i)),
             _ => No,
         },
+        // The extensional predicates decide the question outright. A CONTEXTUAL
+        // one (`class-string`, issue #236) is decidable only in the refuting
+        // direction from the string itself: PHP's identifier grammar rules out
+        // `''`, `'0'` and `'123'`, and nothing here can rule anything *in* —
+        // whether `'App\User'` names a declared class is the class table's
+        // answer, not the characters'. So `No` stays proven and `Yes` degrades
+        // to `Maybe`, which is exactly the floor ADR-0038 pinned for the
+        // spelling before it had a predicate.
         ContractTy::StrWith(p) => match v {
-            Val::Str(s) => Certainty::from_bool(StrPreds::of(s).contains_all(*p)),
+            Val::Str(s) => {
+                if !StrPreds::of(s).contains_all(p.extensional()) {
+                    No
+                } else if p.is_extensional() {
+                    Yes
+                } else {
+                    Maybe
+                }
+            }
             _ => No,
         },
         ContractTy::StrOpaque => match v {
@@ -200,8 +216,10 @@ fn base_only(ty: &ContractTy, base: Base, refinement: Option<Refinement>) -> Cer
                 if have.contains_all(*p) {
                     Yes
                 } else {
-                    // Positive predicate sets always overlap ("5" satisfies
-                    // every predicate), so refuting is impossible here.
+                    // Positive predicate sets over the extensional bits always
+                    // overlap ("5" satisfies every one of them), so refuting is
+                    // impossible here — and a contextual bit cannot refute
+                    // either, since it is never proven absent, only unrecorded.
                     Maybe
                 }
             }
