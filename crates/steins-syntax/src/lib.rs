@@ -2138,6 +2138,160 @@ pub enum StmtKind {
     Barrier,
 }
 
+// reachability foundation (ADR-0078, issue #199)
+
+/// Where a statement — or a whole statement list — leaves control (ADR-0078,
+/// issue #199): the **terminality judgment** the reachability foundation is built
+/// from. Computed at lowering time from the CST (see `stmt_end`), so every
+/// consumer reads one answer instead of re-deriving control flow from the
+/// deliberately lossy trace IR.
+///
+/// The judgment is over the **syntactic control-flow graph**, not over path
+/// feasibility: a branch condition is read as non-deterministic (both edges
+/// live), exactly as PHP's own compiler and every other reachability analysis
+/// read it. What the judgment does model precisely is a construct with *no exit
+/// edge at all* — `return`, `throw`, `exit`, an `unhandled` `match`, a
+/// `while (true)` with no `break`.
+///
+/// # The safe-side asymmetry — the spine of this design
+///
+/// [`Self::Unknown`] is not a third outcome to be smoothed away; it is the honest
+/// answer for a construct whose exit edges the judgment cannot bound (a
+/// `try`/`catch`, a `goto`, a `switch` that resisted structuring). **The safe
+/// side of `Unknown` differs by consumer, and each consumer must say which side
+/// it takes:**
+///
+/// * `type.return-missing` (issue #199) — the accusation is *"this body runs off
+///   its end"*. Only [`Self::FallsThrough`] may be accused, so `Unknown` counts
+///   as **terminating**: silence. It asks [`Self::provably_falls_through`].
+/// * a future dead-code consumer (`UnreachableStatementRule` and the level-4
+///   family) — the accusation is *"the statement after this one never runs"*.
+///   Only [`Self::Terminates`] may be accused, so `Unknown` counts as **not
+///   terminal**: silence. It asks [`Self::provably_terminates`].
+///
+/// Both predicates exist so that neither consumer is ever tempted to write
+/// `!= Terminates` or `!= FallsThrough` — the two negations are exactly the
+/// mistake this type exists to prevent, and each would invert the other
+/// consumer's safe side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BodyEnd {
+    /// Control provably never reaches the end: `return` / `throw` / `exit`, a
+    /// branch construct whose every arm terminates, a loop with no exit edge.
+    Terminates,
+    /// Control provably *can* reach the end — there is a terminator-free
+    /// syntactic path through the construct (an `if` with no `else`, a loop whose
+    /// condition can be false, a plain statement).
+    FallsThrough,
+    /// Undecided: the construct's exit edges are not bounded by this judgment
+    /// (`try`/`catch`/`finally`, `goto`/labels, an unstructurable `switch`, a
+    /// provably-infinite loop containing a `break` whose target is unknown). Every
+    /// consumer must name which way it reads this — see the type docs.
+    Unknown,
+}
+
+impl BodyEnd {
+    /// `true` only for [`Self::FallsThrough`] — the predicate `type.return-missing`
+    /// asks. `Unknown` answers `false`: never accuse a body of running off its end
+    /// when the analysis could not prove that it does.
+    #[must_use]
+    pub const fn provably_falls_through(self) -> bool {
+        matches!(self, Self::FallsThrough)
+    }
+
+    /// `true` only for [`Self::Terminates`] — the predicate a dead-code consumer
+    /// asks. `Unknown` answers `false`: never call a statement unreachable when the
+    /// analysis could not prove that its predecessor terminates.
+    #[must_use]
+    pub const fn provably_terminates(self) -> bool {
+        matches!(self, Self::Terminates)
+    }
+
+    /// Join the ends of the **alternative arms** of a branch construct (the arms of
+    /// an `if`/`match`/`switch`, including the implicit no-match arm). The join is
+    /// the arms' least upper bound in the order *every arm terminates* →
+    /// *some arm provably falls through* → *undecided*:
+    ///
+    /// * every arm [`Self::Terminates`] ⇒ the construct terminates;
+    /// * any arm [`Self::FallsThrough`] ⇒ the construct falls through (that arm is
+    ///   a terminator-free path to the successor, whatever the others do);
+    /// * otherwise (only `Terminates` and `Unknown` arms) ⇒ [`Self::Unknown`].
+    ///
+    /// An empty arm list answers [`Self::Terminates`], the identity: a construct
+    /// with no arms at all offers no path to its successor. (Callers supply the
+    /// implicit arm explicitly — an `if` with no `else` joins in a
+    /// `FallsThrough`, a `match` with no `default` joins in a `Terminates`
+    /// because PHP throws `\UnhandledMatchError` there.)
+    #[must_use]
+    pub fn join_arms(arms: impl IntoIterator<Item = Self>) -> Self {
+        let mut acc = Self::Terminates;
+        for arm in arms {
+            acc = match (acc, arm) {
+                (Self::FallsThrough, _) | (_, Self::FallsThrough) => Self::FallsThrough,
+                (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+                (Self::Terminates, Self::Terminates) => Self::Terminates,
+            };
+        }
+        acc
+    }
+}
+
+/// The terminality of an ordered statement list — the tail judgment the whole
+/// foundation exists to answer (ADR-0078, issue #199). Reads each entry's
+/// [`Stmt::end`], which the lowering already computed from the CST.
+///
+/// The fold is *not* "the last statement decides":
+///
+/// * the **first** [`BodyEnd::Terminates`] wins outright — everything after it is
+///   unreachable, so the list terminates however the tail is written. This is what
+///   makes `[try { … } catch { … }, return 1;]` answer `Terminates` rather than
+///   inheriting the `try`'s `Unknown`;
+/// * a [`BodyEnd::Unknown`] entry does **not** stop the scan; it is remembered.
+///   Control may or may not reach past it, so the list's end is undecided *unless*
+///   a later entry terminates unconditionally (see above);
+/// * an empty list [`BodyEnd::FallsThrough`] — the identity — which is exactly
+///   what makes an `if` with no `else` fall through.
+#[must_use]
+pub fn body_end(stmts: &[Stmt]) -> BodyEnd {
+    let mut undecided = false;
+    for stmt in stmts {
+        match stmt.end {
+            BodyEnd::Terminates => return BodyEnd::Terminates,
+            BodyEnd::Unknown => undecided = true,
+            BodyEnd::FallsThrough => {}
+        }
+    }
+    if undecided { BodyEnd::Unknown } else { BodyEnd::FallsThrough }
+}
+
+/// Whether a statement list contains a **function exit** anywhere at all — a
+/// `return`, a `throw`, an `exit`/`die` — however deeply nested, and whether or not
+/// it is on a path [`body_end`] can see.
+///
+/// The second question of the foundation, and deliberately a *separate* one from
+/// [`body_end`]. That answers "does control reach the end"; this answers "does the
+/// body exit anywhere". Together they split a falling-through body into two
+/// populations that the zero-FP policy floors differently (ADR-0078 §1.3, the
+/// `maybe-` convention):
+///
+/// * **no exit anywhere** — a stub, an empty body, a body of pure side effects.
+///   *Every* execution runs off the end, so the consequence is unconditional.
+/// * **an exit somewhere, but not on every path** — the shape a `return` in every
+///   taken arm with an uncovered escape edge produces (a no-`default` `switch`
+///   whose every case returns, an `if` with no `else`, a loop that returns on a
+///   match). The fall-through edge exists but may be taken only for inputs the
+///   program never sees, which is exactly the definite/possibly boundary.
+///
+/// It reads [`Stmt::has_terminator`], which the lowering computed over the **whole
+/// CST subtree** — so a `return` inside a `foreach` body, a `try` block or a
+/// `switch` case counts, even though the trace IR erased those constructs into an
+/// opaque node with nothing inside.
+#[must_use]
+pub fn body_has_terminator(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| s.has_terminator)
+}
+
+// end reachability foundation (ADR-0078, issue #199)
+
 /// A trace entry plus the local variables it feeds into a call.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Stmt {
@@ -2167,14 +2321,61 @@ pub struct Stmt {
     /// Empty for every statement kind whose expressions are not collected — see
     /// `string_context_sites` for the boundary and why it is where it is.
     pub string_contexts: Vec<StringContextSite>,
+    /// Where this statement leaves control (ADR-0078, issue #199) — the
+    /// per-statement half of the reachability foundation, and the only thing
+    /// [`body_end`] reads.
+    ///
+    /// Computed centrally by `lower_stmt` from the **CST**, not from
+    /// [`Self::kind`]: the trace IR erases `while`/`for`/`try`/`switch` into an
+    /// undifferentiated [`StmtKind::Opaque`] and `goto` into a
+    /// [`StmtKind::Barrier`], so a judgment derived from the IR alone could never
+    /// tell a `while (true)` (no exit edge) from a `foreach` (always one) nor a
+    /// `goto` (unbounded) from a `global $x;` (plainly falls through). The CST
+    /// still has all of it in hand at lowering time, which is why the answer is
+    /// computed there and carried here.
+    ///
+    /// Deliberately independent of [`Self::kind`]: a `break;` is a
+    /// [`StmtKind::Barrier`] whose `end` is [`BodyEnd::Terminates`] (control
+    /// leaves the enclosing list), and a `while (true) {}` is a
+    /// [`StmtKind::Opaque`] whose `end` is [`BodyEnd::Terminates`] too. Nothing
+    /// may infer one field from the other.
+    pub end: BodyEnd,
+    /// Whether this statement's **whole CST subtree** contains a function exit — a
+    /// `return`, a `throw`, an `exit`/`die` (ADR-0078 §5, issue #199). Nested
+    /// function-likes are not counted: their exits are their own scope's.
+    ///
+    /// Orthogonal to [`Self::end`], and that is the point. `end` asks *does control
+    /// reach past this statement*; this asks *does the subtree exit the function
+    /// anywhere*. `if ($c) { return 1; }` answers `FallsThrough` and `true`;
+    /// `foreach ($xs as $x) { $s .= $x; }` answers `FallsThrough` and `false`. The
+    /// pair is what splits a falling-through body into the unconditional and the
+    /// conditional class — see [`body_has_terminator`].
+    ///
+    /// Computed from the CST for the same reason `end` is: the trace IR erases a
+    /// loop body, a `try` block and an unstructured `switch` case entirely, so a
+    /// `return` inside any of them is invisible from the IR alone.
+    pub has_terminator: bool,
 }
 
 impl Stmt {
     /// A statement **under construction**: its kind and by-ref evidence, with the
-    /// span and the string-context sites left for `lower_stmt` to fill in centrally
-    /// (`span` is [`ZERO_SPAN`] until then, the invariant that function documents).
+    /// span, the string-context sites and the terminality left for `lower_stmt` to
+    /// fill in centrally (`span` is [`ZERO_SPAN`] until then, the invariant that
+    /// function documents).
+    ///
+    /// `end` starts at [`BodyEnd::FallsThrough`] — the value that is correct for
+    /// every straight-line statement and therefore the one whose *absence* of a
+    /// central fill would be least surprising; the two lowering paths that bypass
+    /// `lower_stmt` (`lower_arm_body`, the arrow-function body) set it themselves.
     fn lowered(kind: StmtKind, invalidated: Vec<InvalidatedVar>) -> Stmt {
-        Stmt { kind, span: ZERO_SPAN, invalidated, string_contexts: Vec::new() }
+        Stmt {
+            kind,
+            span: ZERO_SPAN,
+            invalidated,
+            string_contexts: Vec::new(),
+            end: BodyEnd::FallsThrough,
+            has_terminator: false,
+        }
     }
 }
 
@@ -2362,6 +2563,22 @@ pub enum RetHintKind {
     Other,
 }
 
+/// A written return type hint (`: T`) — its [`RetHintKind`] classification plus
+/// the **source span of the hint itself** (the `T`, not the colon).
+///
+/// The span exists so a diagnostic about the declaration can quote the type
+/// exactly as the author wrote it ([`SourceTree::text_at`]): `: array` and
+/// `: mixed` lower to no [`NativeType`] at all, so `ret`/[`Scope::ret_ty`] cannot
+/// name them, yet PHP's own `TypeError` does — `Return value must be of type
+/// array, none returned`. Kind and span travel together in one struct so they
+/// cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RetHint {
+    pub kind: RetHintKind,
+    /// The hint's own file byte span; `SourceTree::text_at` maps it back to text.
+    pub span: Span,
+}
+
 /// One analysis scope: the top-level script, a function body, or a method body.
 /// Carries the linear trace and a whole-scope `poisoned` flag (ADR-0001 give-up
 /// list).
@@ -2375,10 +2592,11 @@ pub struct Scope {
     pub function_name: Option<String>,
     /// The precise owner of this scope (top-level / function / method).
     pub owner: ScopeOwner,
-    /// The written return type hint's kind, if any. `None` means untyped (no
-    /// `: T`). Distinct from [`Self::ret_ty`] / the decl's lowered `ret`, which
-    /// collapse void/never/object/array to silence for the return-type check.
-    pub ret_hint: Option<RetHintKind>,
+    /// The written return type hint, if any — its kind and its source span (see
+    /// [`RetHint`]). `None` means untyped (no `: T`). Distinct from
+    /// [`Self::ret_ty`] / the decl's lowered `ret`, which collapse
+    /// void/never/object/array to silence for the return-type check.
+    pub ret_hint: Option<RetHint>,
     /// `true` when the body contains `yield` / `yield from` — the call result is
     /// a `Generator`, not the value of a trailing `return` (ADR-0057 §5). Return
     /// summaries refuse such scopes.
@@ -3267,6 +3485,19 @@ impl SourceTree {
         let end = (offset as usize).min(self.text.len());
         let column = self.text.get(line_start..end).map_or(0, |s| s.chars().count());
         Position { line: line_idx as u32 + 1, column: column as u32 + 1 }
+    }
+
+    /// The source text a span covers, or `None` when the span is out of bounds or
+    /// does not land on a character boundary.
+    ///
+    /// The one way to read the file's own words back out of the tree. Its first
+    /// consumer is `type.return-missing` (issue #199), which quotes a declared
+    /// return type **as written** — `: array`, `: mixed`, `: self` all lower to no
+    /// [`NativeType`], so nothing else in the tree can name them, yet PHP's
+    /// `TypeError` does.
+    #[must_use]
+    pub fn text_at(&self, span: Span) -> Option<&str> {
+        self.text.get(span.start as usize..span.end as usize)
     }
 
     /// Widen a statement `span` to its whole physical line(s) when nothing else
@@ -6578,7 +6809,7 @@ fn adopt_closure_docblock(
 fn build_scope(
     owner: ScopeOwner,
     statements: &[Statement<'_>],
-    ret_hint: Option<RetHintKind>,
+    ret_hint: Option<RetHint>,
 ) -> Scope {
     let refs: Vec<&Statement<'_>> = statements.iter().collect();
     build_scope_from(owner, &refs, ret_hint)
@@ -6589,7 +6820,7 @@ fn build_scope(
 fn build_scope_from(
     owner: ScopeOwner,
     statements: &[&Statement<'_>],
-    ret_hint: Option<RetHintKind>,
+    ret_hint: Option<RetHint>,
 ) -> Scope {
     let mut opaque = Vec::new();
     let mut stmts = Vec::new();
@@ -6628,9 +6859,10 @@ fn build_scope_from(
     }
 }
 
-/// Classify a written return type hint for summary fallthrough (ADR-0075).
-fn ret_hint_of(hint: Option<&mago_syntax::cst::FunctionLikeReturnTypeHint<'_>>) -> Option<RetHintKind> {
-    hint.map(|r| classify_ret_hint(&r.hint))
+/// Classify a written return type hint for summary fallthrough (ADR-0075) and
+/// record its span for the declaration-quoting diagnostics (issue #199).
+fn ret_hint_of(hint: Option<&mago_syntax::cst::FunctionLikeReturnTypeHint<'_>>) -> Option<RetHint> {
+    hint.map(|r| RetHint { kind: classify_ret_hint(&r.hint), span: to_span(r.hint.span()) })
 }
 
 fn classify_ret_hint(hint: &Hint<'_>) -> RetHintKind {
@@ -6857,6 +7089,11 @@ fn build_closure_scope_from_arrow(
         kind: StmtKind::Return { value, call, span },
         invalidated,
         string_contexts,
+        // An arrow body IS a `return`, so the scope's trace always terminates —
+        // which is precisely why `fn () => …` can never be a `type.return-missing`
+        // site, no matter what it declares (ADR-0078, issue #199).
+        end: BodyEnd::Terminates,
+        has_terminator: true,
     };
     let mut opaque = Vec::new();
     scan_opaque(&Node::Expression(af.expression), &mut opaque, false);
@@ -7030,8 +7267,333 @@ fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         // anything whose write set the lowering cannot bound.
         _ => Stmt::lowered(StmtKind::Barrier, Vec::new()),
     };
-    out.push(Stmt { span: stmt_span, string_contexts: string_context_sites(s), ..stmt });
+    out.push(Stmt {
+        span: stmt_span,
+        string_contexts: string_context_sites(s),
+        // The reachability foundation's central fill (ADR-0078, issue #199) — read
+        // off the CST statement, never off the lowered `kind`. See `stmt_end`.
+        end: stmt_end(s),
+        has_terminator: subtree_has_function_exit(&Node::Statement(s)),
+        ..stmt
+    });
 }
+
+// reachability foundation (ADR-0078, issue #199)
+
+/// Where one CST statement leaves control — the per-statement half of the
+/// terminality judgment ([`BodyEnd`]), computed here because this is the last
+/// place the full construct is in hand.
+///
+/// # The per-construct table, and why each row answers what it does
+///
+/// | construct | answer | why |
+/// | --- | --- | --- |
+/// | `return`, `throw` (expression-statement), `exit`/`die`, `__halt_compiler` | `Terminates` | no edge to the successor at all |
+/// | `break`, `continue` | `Terminates` | control leaves *this* statement list; where it lands is the enclosing construct's business, not this list's |
+/// | `if` | join of every arm, with a missing `else` joined in as `FallsThrough`; a literal-true condition ends the chain at its own arm and a literal-false one drops it | the implicit empty else IS a terminator-free path to the successor — unless the condition is a literal, where there is no branch at all |
+/// | `match` (statement position) | join of every arm, with a missing `default` joined in as `Terminates` | PHP throws `\UnhandledMatchError` on no match — witnessed 8.5.9 |
+/// | `switch` | join of every case body, with a missing `default` joined in as `FallsThrough`; `Unknown` when the subtree holds any `break`/`continue`/`goto`, or when a case body runs into the next | a `break` exits the *switch* rather than the list it sits in, and resolving which is which is not this judgment's job; case-to-case fall-through is a real edge it does not model |
+/// | `foreach` | `FallsThrough` | the iteration exhausts; see the recorded obstacle below |
+/// | `while` / `for` / `do-while` with a provably-true condition and no `break`/`goto` in the subtree | `Terminates` | there is no exit edge to take |
+/// | the same with a `break`/`goto` somewhere inside | `Unknown` | the jump's target is not resolved here, so whether *this* loop has an exit edge is undecided |
+/// | every other loop | `FallsThrough` | the condition can be false, which is an exit edge |
+/// | `try` | `Unknown` | recorded exclusion — see below |
+/// | `goto`, a `label:` | `Unknown` | an unbounded jump; a label is an unbounded *incoming* edge, so the tail may be re-entered |
+/// | everything else (assignments, calls, `echo`, `global`, `static`, `unset`, declarations, `use`, `declare`, `namespace`) | `FallsThrough` | straight-line |
+///
+/// # Recorded obstacles — silences this judgment names rather than hides
+///
+/// * **`try`/`catch`/`finally` is `Unknown`, full stop (issue #199's "handled or
+///   explicitly excluded with a reason").** The reason is `finally`, which
+///   *overwrites the exit point*: witnessed on 8.5.9,
+///   `try { return 1; } finally { return 2; }` returns `2`, and a `finally` that
+///   returns also swallows an in-flight exception from the `try`. So a `try`
+///   whose block and every `catch` terminate can still fall through, and a `try`
+///   that plainly falls through can still terminate. Judging either direction
+///   from the block ends alone would be wrong in both, so the whole construct is
+///   undecided until a later slice models `finally` properly.
+/// * **A call to a function proven never to return is not judged here.** A
+///   statement-position call answers `FallsThrough`, because deciding otherwise
+///   needs the project index (which callee? does it declare `: never`?) and this
+///   judgment is deliberately index-free and env-free. `type.return-missing`
+///   applies that refinement itself, at the emitter, where the index lives.
+/// * **An infinite `Traversable`.** `foreach ($generator as $v)` over a generator
+///   that never ends has no exit edge, and this judgment says `FallsThrough`
+///   anyway. Bounding it would need the iterator's value, which is exactly the
+///   whole-program reasoning the syntactic CFG reading rules out.
+fn stmt_end(s: &Statement<'_>) -> BodyEnd {
+    match s {
+        Statement::Return(_) => BodyEnd::Terminates,
+        // `break` / `continue` leave the enclosing statement list. A `switch`
+        // case's trailing `break` is stripped before its body is lowered
+        // (`strip_trailing_break`), so this row never mis-reads an arm as
+        // terminating when it only ends the arm.
+        Statement::Break(_) | Statement::Continue(_) => BodyEnd::Terminates,
+        Statement::HaltCompiler(_) => BodyEnd::Terminates,
+        Statement::Expression(es) => expr_end(es.expression),
+        Statement::Block(b) => block_end(b.statements.as_slice()),
+        Statement::If(i) => if_end(i),
+        Statement::Switch(sw) => switch_end(sw),
+        Statement::Foreach(_) => BodyEnd::FallsThrough,
+        Statement::While(w) => loop_end(expr_is_true(w.condition), &Node::Statement(s)),
+        Statement::DoWhile(d) => loop_end(expr_is_true(d.condition), &Node::Statement(s)),
+        // `for (;;)` — no condition at all — is the canonical infinite `for`; a
+        // written condition list is infinite when its LAST expression (the one PHP
+        // actually tests) is a true literal.
+        Statement::For(f) => {
+            let infinite = f.conditions.iter().next_back().is_none_or(|c| expr_is_true(c));
+            loop_end(infinite, &Node::Statement(s))
+        }
+        Statement::Try(_) => BodyEnd::Unknown,
+        Statement::Goto(_) | Statement::Label(_) => BodyEnd::Unknown,
+        _ => BodyEnd::FallsThrough,
+    }
+}
+
+/// [`body_end`] over a borrowed CST statement list — the same fold, one level
+/// earlier. Kept separate from [`body_end`] (which reads lowered [`Stmt`]s) because
+/// a branch body is judged here *before* it is lowered, and the two must agree by
+/// sharing this shape rather than by coincidence.
+fn block_end(statements: &[Statement<'_>]) -> BodyEnd {
+    let mut undecided = false;
+    for s in statements {
+        match stmt_end(s) {
+            BodyEnd::Terminates => return BodyEnd::Terminates,
+            BodyEnd::Unknown => undecided = true,
+            BodyEnd::FallsThrough => {}
+        }
+    }
+    if undecided { BodyEnd::Unknown } else { BodyEnd::FallsThrough }
+}
+
+/// An `if`'s terminality: the join over its arms, with the **implicit empty
+/// `else`** joined in as [`BodyEnd::FallsThrough`] when no `else` is written.
+///
+/// That implicit arm is the whole reason `if ($c) { return 1; }` is reported by
+/// `type.return-missing` and `if ($c) { return 1; } else { return 2; }` is not.
+///
+/// # The one place a condition is read
+///
+/// Branch conditions are otherwise non-deterministic here (see [`stmt_end`]), but
+/// a **literal** one is not a branch at all: `if (true) { return 1; }` has no
+/// no-branch path to add, and reading it as one would accuse a function that
+/// demonstrably returns. So a provably-true condition ends the chain at its own
+/// arm (no later `elseif`, no `else`, no implicit arm), and a provably-false one
+/// contributes no arm.
+///
+/// **Recorded obstacle:** only *literals* are read. A constant-folded guard —
+/// `if (PHP_VERSION_ID >= 80000) { return 1; }`, `if (self::ENABLED) { … }` —
+/// still contributes the implicit fall-through arm, because folding it needs the
+/// project index and the version view this judgment deliberately does without.
+/// A guard of that shape with no `else` is `type.return-missing`'s second named
+/// over-report risk, alongside the undeclared never-returning callee.
+fn if_end(i: &mago_syntax::cst::If<'_>) -> BodyEnd {
+    let body = &i.body;
+    let mut chain: Vec<(&Expression<'_>, &[Statement<'_>])> =
+        vec![(i.condition, body.statements())];
+    chain.extend(body.else_if_clauses());
+
+    let mut arms = Vec::new();
+    for (cond, stmts) in chain {
+        if expr_is_false(cond) {
+            // The arm can never be taken; it contributes no path.
+            continue;
+        }
+        arms.push(block_end(stmts));
+        if expr_is_true(cond) {
+            // Always taken: no later arm and no implicit no-branch path exist.
+            return BodyEnd::join_arms(arms);
+        }
+    }
+    match body.else_statements() {
+        Some(stmts) => arms.push(block_end(stmts)),
+        // No `else`: the no-branch-taken path runs straight to the successor.
+        None => arms.push(BodyEnd::FallsThrough),
+    }
+    BodyEnd::join_arms(arms)
+}
+
+/// A `switch`'s terminality: the join over its case bodies, with the **implicit
+/// no-match arm** joined in as [`BodyEnd::FallsThrough`] when there is no
+/// `default`.
+///
+/// Two shapes make the whole construct [`BodyEnd::Unknown`], and both are the
+/// honest answer rather than a shortcut:
+///
+/// * **any `break` / `continue` / `goto` in the subtree.** A `break` in a case
+///   body exits the *switch* and lands on its successor — the exact opposite of
+///   what [`stmt_end`] says about a `break` in isolation, where it terminates the
+///   list it sits in. Telling the two apart means resolving the jump's target
+///   through nested `if`s, loops and inner switches, which this judgment does not
+///   do. A `switch` whose every case `break`s would otherwise be read as
+///   *terminating*, and a dead-code consumer would then call everything after it
+///   unreachable — the single worst mistake available here.
+/// * **a non-empty case body that runs off its end** into the *next* case. PHP's
+///   case-to-case fall-through is a real control-flow edge and is not modelled;
+///   an empty case label (`case 1: case 2: body`) is that shape used
+///   deliberately, and contributes no arm of its own.
+fn switch_end(sw: &mago_syntax::cst::Switch<'_>) -> BodyEnd {
+    if subtree_has_switch_jump(&Node::Switch(sw)) {
+        return BodyEnd::Unknown;
+    }
+    let mut arms = Vec::new();
+    let mut has_default = false;
+    for case in sw.body.cases() {
+        if case.expression().is_none() {
+            has_default = true;
+        }
+        if case.is_empty() {
+            continue;
+        }
+        let end = block_end(case.statements());
+        if !end.provably_terminates() {
+            // The body runs off its end — into the next case, not past the switch.
+            return BodyEnd::Unknown;
+        }
+        arms.push(end);
+    }
+    if !has_default {
+        arms.push(BodyEnd::FallsThrough);
+    }
+    BodyEnd::join_arms(arms)
+}
+
+/// Whether `node`'s subtree contains a jump whose target could be this `switch`:
+/// a `break`, a `continue` (which PHP accepts inside a `switch`, where it acts on
+/// the enclosing loop) or a `goto`. Nested function-likes are not descended.
+fn subtree_has_switch_jump(node: &Node<'_, '_>) -> bool {
+    match node {
+        Node::Break(_) | Node::Continue(_) | Node::Goto(_) => true,
+        Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_) => false,
+        _ => node.children().iter().any(subtree_has_switch_jump),
+    }
+}
+
+/// A loop's terminality from the two facts that decide it: whether its condition
+/// is a proven-true literal, and whether its subtree contains a jump that could
+/// leave it.
+///
+/// * not provably infinite → [`BodyEnd::FallsThrough`]: the false-condition exit
+///   edge exists (a `while ($x)` whose `$x` happens to always be true is a hang,
+///   not a fall-through, but proving that is path feasibility — outside this
+///   judgment by design, and the same reading `if ($c) { return 1; }` gets);
+/// * infinite with no `break`/`goto` anywhere inside → [`BodyEnd::Terminates`]:
+///   there is no exit edge at all;
+/// * infinite *with* one → [`BodyEnd::Unknown`]: a `break` may belong to a nested
+///   `switch` or loop rather than to this one, and resolving jump targets is not
+///   this judgment's job.
+///
+/// `continue` is deliberately not a jump here: it re-enters the loop, it never
+/// leaves it — not even `continue 2` from a nested loop, which targets *this*
+/// loop's next iteration.
+fn loop_end(infinite: bool, node: &Node<'_, '_>) -> BodyEnd {
+    if !infinite {
+        return BodyEnd::FallsThrough;
+    }
+    if subtree_has_exit_jump(node) { BodyEnd::Unknown } else { BodyEnd::Terminates }
+}
+
+/// Whether `node`'s subtree contains a **function exit** — a `return`, a `throw`
+/// or an `exit`/`die` — at any depth (ADR-0078 §5). Nested function-likes are their
+/// own scopes and are not descended: a `return` inside a closure exits the closure,
+/// not the body that defines it.
+///
+/// Deliberately **not** counting `break`/`continue`: those leave a construct, never
+/// the function, and a `switch` full of `break`s is no evidence at all that the
+/// author meant to return something.
+fn subtree_has_function_exit(node: &Node<'_, '_>) -> bool {
+    match node {
+        Node::Return(_)
+        | Node::Throw(_)
+        | Node::ExitConstruct(_)
+        | Node::DieConstruct(_)
+        | Node::HaltCompiler(_) => true,
+        Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_) => false,
+        _ => node.children().iter().any(subtree_has_function_exit),
+    }
+}
+
+/// Whether `node`'s subtree contains a `break` or a `goto` — a jump that could
+/// leave an enclosing loop. Nested function-likes are their own scopes and are not
+/// descended (their jumps cannot leave this loop).
+fn subtree_has_exit_jump(node: &Node<'_, '_>) -> bool {
+    match node {
+        Node::Break(_) | Node::Goto(_) => true,
+        Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_) => false,
+        _ => node.children().iter().any(subtree_has_exit_jump),
+    }
+}
+
+/// Whether an expression is a **proven-true literal** — the only conditions this
+/// judgment reads as always-taken. `while (true)`, `while (1)` and `for (;;)` are
+/// the idioms; anything else (a variable, a call, a comparison) is left to the
+/// non-deterministic reading, which is the safe side for a *loop* condition
+/// because it produces [`BodyEnd::FallsThrough`], never a claim of termination.
+fn expr_is_true(expr: &Expression<'_>) -> bool {
+    match lower_arg_value(expr.unparenthesized()) {
+        ArgValue::Bool(b) => b,
+        ArgValue::Int(i) => i != 0,
+        _ => false,
+    }
+}
+
+/// Whether an expression is a **proven-false literal** — the mirror of
+/// [`expr_is_true`], read only for an `if`/`elseif` condition (see [`if_end`]).
+/// `false`, `0` and `null` are the spellings that appear; anything non-literal is
+/// left to the non-deterministic reading.
+fn expr_is_false(expr: &Expression<'_>) -> bool {
+    match lower_arg_value(expr.unparenthesized()) {
+        ArgValue::Bool(b) => !b,
+        ArgValue::Int(i) => i == 0,
+        ArgValue::Null => true,
+        _ => false,
+    }
+}
+
+/// Where an expression in **statement position** leaves control. The expression
+/// forms that terminate are exactly the three the trace IR already models as
+/// terminators — `throw`, `exit`, `die` — plus a statement-position `match`,
+/// whose arms are themselves expressions.
+///
+/// A plain call answers [`BodyEnd::FallsThrough`]; see `stmt_end`'s recorded
+/// obstacle on never-returning callees for why, and where that refinement lives.
+fn expr_end(expr: &Expression<'_>) -> BodyEnd {
+    match expr.unparenthesized() {
+        Expression::Throw(_) => BodyEnd::Terminates,
+        Expression::Construct(Construct::Exit(_) | Construct::Die(_)) => BodyEnd::Terminates,
+        Expression::Match(m) => match_end(m),
+        _ => BodyEnd::FallsThrough,
+    }
+}
+
+/// A `match`'s terminality: the join over its arm bodies, with the **implicit
+/// no-match arm** joined in as [`BodyEnd::Terminates`] when there is no
+/// `default` — PHP throws `\UnhandledMatchError` there (witnessed 8.5.9), and a
+/// throw is a terminator.
+///
+/// This is the one place where a missing default makes a construct *more*
+/// terminal rather than less, and it is the exact opposite of `switch`'s rule
+/// above. The two are different constructs with different semantics; sharing one
+/// rule between them would be wrong for one of them.
+fn match_end(m: &mago_syntax::cst::Match<'_>) -> BodyEnd {
+    let mut arms = Vec::new();
+    let mut has_default = false;
+    for arm in m.arms.iter() {
+        match arm {
+            mago_syntax::cst::MatchArm::Expression(a) => arms.push(expr_end(a.expression)),
+            mago_syntax::cst::MatchArm::Default(a) => {
+                has_default = true;
+                arms.push(expr_end(a.expression));
+            }
+        }
+    }
+    if !has_default {
+        arms.push(BodyEnd::Terminates);
+    }
+    BodyEnd::join_arms(arms)
+}
+
+// end reachability foundation (ADR-0078, issue #199)
 
 /// Every [`StringContextSite`] a statement's **own** expressions carry (ADR-0078,
 /// issue #193).
@@ -7213,7 +7775,15 @@ fn lower_trace(statements: &[Statement<'_>]) -> Vec<Stmt> {
 /// is `throw …` therefore lowers to a real [`StmtKind::Throw`] terminator).
 fn lower_arm_body(expr: &Expression<'_>) -> Vec<Stmt> {
     let st = lower_expr_stmt(expr);
-    vec![Stmt { span: to_span(expr.span()), ..st }]
+    // This path bypasses `lower_stmt`, so it owns its own terminality fill
+    // (ADR-0078, issue #199) — from the arm's expression, the same `expr_end` a
+    // statement-position expression gets.
+    vec![Stmt {
+        span: to_span(expr.span()),
+        end: expr_end(expr),
+        has_terminator: subtree_has_function_exit(&Node::Expression(expr)),
+        ..st
+    }]
 }
 
 /// Structure a statement-position `match ($subject) { … }` (ADR-0031 Part B).

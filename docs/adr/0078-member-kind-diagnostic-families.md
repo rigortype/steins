@@ -84,7 +84,8 @@ claim ships `php -r`-witnessed per the ADR-0049 point-10 discipline.
 | `string.non-stringable` | proof / Default | fatal: object without `__toString` in string context |
 | `string.array-conversion` | proof / Default, gate | warning: array in string context |
 | `type.invalid-operand` | proof / Default | binary/unary/comparison in one id; fatal rows only, version-sensitive rows ask the sidecar |
-| `type.return-missing` | proof / Default | fall-through past a non-void native return type; the reachability tracer — *added here beyond the approved table, flagged for ratification* |
+| `type.return-missing` | proof / Default | fall-through past a non-void native return type **with no `return`/`throw`/`exit` anywhere in the body** — a stub, an empty body, pure side effects, where every execution fatals; the reachability tracer — *added here beyond the approved table, flagged for ratification* |
+| `type.return-maybe-missing` | proof / **Strict** | the same fatal where the body *does* exit somewhere but not on every path (a no-`default` `switch` whose every case returns, an `if` with no `else`). §1.3's `maybe-` sibling, emitted with its definite leg rather than deferred. The **layer** is the definite leg's — one consequence, one layer — and only the floor differs; the first proof-layer id at `strict`, on the 2026-08-08 gate measurement (phpstan-src's own `src/` carries two and passes its own missing-return rule) |
 | `preg.invalid-pattern` | proof / Default, gate | PCRE refusal witnessed by the sidecar; joins the preg-slice vocabulary |
 | `array.duplicate-key` | mechanics / Default | works but drops a value silently — intent/behaviour drift, the anti-rot shape |
 | `syntax.unparsable` | mechanics / Default | ADR-0079 |
@@ -150,3 +151,67 @@ Recorded so the registry's silence is named (ADR-0049 point 10 shape):
   that side.
 - `CONTEXT.md` gains the session's four terms (member-kind family,
   dischargeable obstacle, maybe- sibling, warning-handler gate).
+
+## 5. The reachability foundation and its seam (issue #199)
+
+`type.return-missing` is the one row in §2 that is not a rule port. It is
+the **tracer** of a foundation the port map needed three separate times
+and could not scope: a per-scope terminality judgment. The foundation
+landed with it, and this section records the seam so the deferred
+consumers do not each invent their own.
+
+**The judgment.** `steins_syntax::BodyEnd` — `Terminates` /
+`FallsThrough` / `Unknown` — is computed per statement at lowering time,
+from the CST, and carried on `Stmt::end`; `body_end(&[Stmt])` folds a
+statement list to the same three-valued answer. It is deliberately
+computed from the CST rather than from the trace IR, because the IR
+erases every loop, `try` and `switch` into one undifferentiated
+`StmtKind::Opaque` and `goto` into a `StmtKind::Barrier` — the two
+distinctions the judgment lives on. It is env-free, index-free and
+project-free: a **syntactic** control-flow reading, where a branch
+condition is non-deterministic and only a construct with no exit edge at
+all (`return`, `throw`, `exit`, an `unhandled` `match`, a `while (true)`
+with no `break`) terminates.
+
+**The asymmetry, which is the point.** `Unknown` is not a defect to be
+smoothed away; it is the honest verdict for a construct whose exit edges
+the judgment does not bound. Its *safe side differs by consumer*, and
+each consumer must name which side it takes:
+
+| consumer | the accusation | safe reading of `Unknown` | predicate |
+| --- | --- | --- | --- |
+| `type.return-missing` | "this body runs off its end" | **terminating** — silence | `provably_falls_through()` |
+| the level-4 dead-code family (`UnreachableStatementRule`, `CatchWithUnthrownExceptionRule`, the unused-private trio) | "the statement after this never runs" | **not terminal** — silence | `provably_terminates()` |
+| `variable.maybe-undefined` (#194), some-paths-only | "this path reaches a read with no write" | not terminal — the path stays live, so no claim | `provably_terminates()` |
+
+Both predicates exist precisely so that no consumer writes
+`!= Terminates` or `!= FallsThrough`: each negation is correct for one
+consumer and inverts the other's safe side, and that is the mistake the
+type exists to prevent.
+
+**The second question, and the definite/possibly split.** `body_end`
+answers *does control reach the end*; `body_has_terminator` answers *does
+the body exit the function anywhere*, reading a `Stmt::has_terminator`
+the lowering computed over the whole CST subtree (so a `return` inside a
+`foreach` body or a `try` block counts, though the trace IR erased the
+construct). The pair splits a falling-through body into the two
+populations §1.3's `maybe-` convention exists for: **no exit anywhere** is
+unconditional and stays `type.return-missing` at `Default`; **an exit that
+does not cover every path** is `type.return-maybe-missing` at `Strict`.
+One predicate routes the finding, so the two ids are disjoint by
+construction and no site can report both.
+
+**Named silences of the foundation**, so its quiet is measured rather
+than assumed: `try`/`catch`/`finally` is excluded whole (`finally`
+overwrites the exit point — `try { return 1; } finally { return 2; }`
+returns `2` on 8.5.9, and a returning `finally` swallows an in-flight
+exception, so neither direction is readable off the block ends);
+`goto` and labels are unbounded jumps; a `switch` whose case body runs
+into the next case is not modelled; a provably-infinite loop containing a
+`break` whose target is unresolved is undecided. A call to a callee
+proven never to return is not the judgment's business either — it needs
+the project index — so `type.return-missing` applies that refinement
+itself, at the emitter, and the undeclared never-returner (a helper that
+calls `exit` without declaring `: never`) is its one named over-report
+risk. Inferring `never` from a callee's own `BodyEnd` is the obvious next
+consumer of this seam.
