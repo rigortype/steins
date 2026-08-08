@@ -65,6 +65,7 @@ const FAMILY: &[(&str, &str)] = &[
     ("chop", "string"),
     ("substr", "string"),
     ("strrev", "string"),
+    ("strtr", "string"),
     ("str_repeat", "string"),
     ("str_pad", "string"),
     ("strtolower", "string"),
@@ -228,19 +229,91 @@ fn the_trim_family_never_carries_the_length_axis() {
 }
 
 #[test]
-fn substr_is_casing_only_in_v1() {
-    // `substr($lowercase, 0, 5)` is a substring: casing holds.
+fn substr_carries_casing_from_every_window() {
+    // `substr($lowercase, 0, 5)` is a substring: casing holds wherever the window
+    // sits, including the offsets the length axis refuses.
     assert_eq!(dump("lowercase-string", "substr($v, 5)"), "dumped type: lowercase-string (asserted)");
     assert_eq!(dump("uppercase-string", "substr($v, -5)"), "dumped type: uppercase-string (asserted)");
     assert_eq!(
         dump("lowercase-string", "substr($v, 0, 5)"),
         "dumped type: lowercase-string (asserted)"
     );
-    // THE pinned v1 decline: `substr('abc', 0, 0) === ''`, so non-emptiness needs
-    // bounds arithmetic this rung does not do — even at the literal `(0, 1)` that
-    // upstream PHPStan does answer.
-    assert_eq!(dump("non-empty-string", "substr($v, 0, 1)"), "dumped type: string");
-    assert_eq!(dump("non-falsy-string", "substr($v, 0, 1)"), "dumped type: string");
+}
+
+/// Issue #41 — the length axis, which lives entirely at a **provably zero** offset.
+#[test]
+fn substr_carries_the_length_axis_only_from_a_zero_offset() {
+    // `substr('abc', 0) === 'abc'` — the identity, so the whole axis rides along.
+    assert_eq!(dump("non-empty-string", "substr($v, 0)"), "dumped type: non-empty-string (asserted)");
+    assert_eq!(dump("non-falsy-string", "substr($v, 0)"), "dumped type: non-falsy-string (asserted)");
+    // `substr('a', 0, 2) === 'a'`: a length past the end clamps, never pads.
+    assert_eq!(
+        dump("non-empty-string", "substr($v, 0, 1)"),
+        "dumped type: non-empty-string (asserted)"
+    );
+    // At a length >= 2 the output is two bytes or the whole subject — either way
+    // not `'0'` — so non-falsiness survives too (`substr('0x', 0, 2) === '0x'`).
+    assert_eq!(
+        dump("non-falsy-string", "substr($v, 0, 2)"),
+        "dumped type: non-falsy-string (asserted)"
+    );
+    // …but at a length of exactly 1 a non-falsy subject can answer `'0'`
+    // (`substr('0x', 0, 1) === '0'`), so only non-emptiness survives there.
+    assert_eq!(
+        dump("non-falsy-string", "substr($v, 0, 1)"),
+        "dumped type: non-empty-string (asserted)"
+    );
+    // `substr('abc', 0, 0) === ''` and `substr('abc', 0, -5) === ''`.
+    assert_eq!(dump("non-empty-string", "substr($v, 0, 0)"), "dumped type: string");
+    assert_eq!(dump("non-empty-string", "substr($v, 0, -5)"), "dumped type: string");
+    // An unseen length, and an unseen or non-zero offset, all decline the axis:
+    // `substr('abc', 5) === ''` and this rung does not carry `strlen($s)`.
+    assert_eq!(dump("non-empty-string", "substr($v, 0, $n)"), "dumped type: string");
+    assert_eq!(dump("non-empty-string", "substr($v, 1, 1)"), "dumped type: string");
+    assert_eq!(dump("non-empty-string", "substr($v, $n, 1)"), "dumped type: string");
+    assert_eq!(dump("non-empty-string", "substr($v, 5)"), "dumped type: string");
+}
+
+/// Issue #41 — `strtr` preserves the byte COUNT (3-arg) or replaces substrings by
+/// non-empty ones (2-arg); either way non-emptiness survives and nothing else does.
+#[test]
+fn strtr_carries_non_emptiness_and_refuses_everything_else() {
+    // `strtr('ab', 'ab', 'xy') === 'xy'` — one byte in, one byte out.
+    assert_eq!(
+        dump("non-empty-string", "strtr($v, $p, $p)"),
+        "dumped type: non-empty-string (asserted)"
+    );
+    // THE refusal, against upstream's own claim: `strtr('a', 'ax', '0x') === '0'`,
+    // so a non-falsy subject does NOT stay non-falsy — it degrades to non-empty.
+    assert_eq!(
+        dump("non-falsy-string", "strtr($v, 'ax', '0x')"),
+        "dumped type: non-empty-string (asserted)"
+    );
+    // `strtr('a', 'a', 'A') === 'A'` — the target byte is arbitrary, so casing goes.
+    assert_eq!(dump("lowercase-string", "strtr($v, $p, $p)"), "dumped type: string");
+    assert_eq!(dump("uppercase-string", "strtr($v, $p, $p)"), "dumped type: string");
+    // A subject with no length claim gets nothing: the rule transfers, never forces.
+    assert_eq!(dump("string", "strtr($v, $p, $p)"), "dumped type: string");
+}
+
+#[test]
+fn the_strtr_array_form_reads_its_replacement_values() {
+    // Every value non-empty ⇒ non-emptiness survives (`strtr('abc', ['ab' => 'Z'])`).
+    assert_eq!(
+        dump("non-empty-string", "strtr($v, ['a' => 'x', 'b' => 'yy'])"),
+        "dumped type: non-empty-string (asserted)"
+    );
+    // One empty value DELETES: `strtr('a', ['a' => '']) === ''`.
+    assert_eq!(dump("non-empty-string", "strtr($v, ['a' => 'x', 'b' => ''])"), "dumped type: string");
+    // `strtr('a', ['a' => '0']) === '0'` — the same refusal the 3-arg form takes.
+    assert_eq!(
+        dump("non-falsy-string", "strtr($v, ['a' => '0'])"),
+        "dumped type: non-empty-string (asserted)"
+    );
+    // An array this rung cannot see through declines rather than guessing.
+    assert_eq!(dump("non-empty-string", "strtr($v, $p)"), "dumped type: string");
+    // A fourth argument is not this function's signature.
+    assert_eq!(dump("non-empty-string", "strtr($v, $p, $p, $p)"), "dumped type: string");
 }
 
 #[test]
