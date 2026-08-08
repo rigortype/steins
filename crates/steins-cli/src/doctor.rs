@@ -984,6 +984,24 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "y" } else { "ies" }
 }
 
+/// The Catalog section's version-pin verdict (ADR-0052 amendment A11): three
+/// states, not two, because "not skewed" and "cannot say" are different claims
+/// with different fixes — a target range fixes a skew, but nothing fixes an
+/// unconfirmable comparison except giving doctor a version to compare (a target
+/// or a sidecar). Section *rendering* treats [`Self::Unconfirmed`] exactly like
+/// [`Self::Confirmed`] (the checker's own silence-over-absence default, ADR-0004
+/// crying-wolf); the `[doctor] require` evaluation of `"catalog-pin-match"` does
+/// not — see [`evaluate_assertion`]'s doc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatalogSkew {
+    /// A target or the runtime minor is known and matches the pin exactly.
+    Confirmed,
+    /// A target or the runtime minor is known and does NOT match the pin.
+    Skewed,
+    /// Neither a target nor a sidecar answered — no comparison basis at all.
+    Unconfirmed,
+}
+
 /// Section 7 — Catalog (ADR-0052 amendment A11): the builtin catalog's pinned
 /// php-src minor versus this run's version answer, and the hierarchy/foldable
 /// entry counts as freshness context.
@@ -994,10 +1012,11 @@ fn plural(n: usize) -> &'static str {
 /// with no target, the sidecar-reported runtime minor is compared instead; with
 /// neither, the checker treats the run as unskewed (no comparison basis, and
 /// silence-over-absence is the same crying-wolf discipline as everywhere else in
-/// this report) — recorded here as "unconfirmed", not asserted as a fact nobody
-/// measured. Returns the skew flag for the `"catalog-pin-match"` [`RequireFacts`]
-/// leg.
-fn section_catalog(target: Option<&PhpTarget>, runtime_minor: Option<(u16, u16)>) -> (Section, bool) {
+/// this report) — rendered here as "unconfirmed", not asserted as a fact nobody
+/// measured. Returns the [`CatalogSkew`] verdict for the `"catalog-pin-match"`
+/// [`RequireFacts`] leg, which reads `Unconfirmed` differently than this section's
+/// own text does (see [`evaluate_assertion`]).
+fn section_catalog(target: Option<&PhpTarget>, runtime_minor: Option<(u16, u16)>) -> (Section, CatalogSkew) {
     let mut sec = Section::new("Catalog");
     let pin = steins_catalog::PINNED_PHP;
     line!(sec, "  builtin catalog pinned to php-src PHP {}.{}", pin.0, pin.1);
@@ -1011,7 +1030,7 @@ fn section_catalog(target: Option<&PhpTarget>, runtime_minor: Option<(u16, u16)>
                 t.render(),
                 if skewed { "SKEWED against the pin" } else { "matches the pin exactly" }
             );
-            skewed
+            if skewed { CatalogSkew::Skewed } else { CatalogSkew::Confirmed }
         }
         None => match runtime_minor {
             Some(m) => {
@@ -1023,18 +1042,18 @@ fn section_catalog(target: Option<&PhpTarget>, runtime_minor: Option<(u16, u16)>
                     m.1,
                     if skewed { "SKEWED against the pin" } else { "matches the pin exactly" }
                 );
-                skewed
+                if skewed { CatalogSkew::Skewed } else { CatalogSkew::Confirmed }
             }
             None => {
                 line!(
                     sec,
                     "  no target declared and no PHP sidecar this run — skew is unconfirmed (no comparison basis); the checker treats this as unskewed, the same silence-over-absence default as elsewhere in this report"
                 );
-                false
+                CatalogSkew::Unconfirmed
             }
         },
     };
-    if skew {
+    if skew == CatalogSkew::Skewed {
         line!(
             sec,
             "  A11 consequence: catalog-backed is-a demoted to Unknown for arm deletion and descendant closure (ADR-0052 amendment A11)"
@@ -1103,7 +1122,7 @@ fn section_registry() -> Section {
 /// [`run_doctor`] so this section recomputes nothing.
 struct RequireFacts {
     sidecar_ok: bool,
-    catalog_skew: bool,
+    catalog_skew: CatalogSkew,
     monkey_patch_present: bool,
     dormant_count: usize,
 }
@@ -1180,14 +1199,28 @@ fn evaluate_assertion(name: &str, facts: &RequireFacts) -> Option<(bool, &'stati
                 "no PHP sidecar answered this run (Runtime section)"
             },
         )),
-        "catalog-pin-match" => Some((
-            !facts.catalog_skew,
-            if facts.catalog_skew {
-                "the analysis version is skewed against the catalog's php-src pin (Catalog section)"
-            } else {
-                "the analysis version matches the catalog's php-src pin (or is unconfirmed, treated as a match)"
-            },
-        )),
+        // The one assertion where the section's own rendering and the require
+        // verdict deliberately disagree on `Unconfirmed` (orchestrator ruling,
+        // issue #268): the default report's lenient-default silence-over-absence
+        // is right for a posture that is only ever *described*, but `require` is
+        // the named strictness opt-in ADR-0054 §14 designed — the caller is
+        // asking doctor to GUARANTEE the pin match, and a guarantee doctor cannot
+        // confirm is exactly the violation the assertion exists to surface. So
+        // only `Confirmed` passes; `Skewed` and `Unconfirmed` both fail, with
+        // distinct messages so the fix is legible (declare a target/get a sidecar
+        // vs. actually move off the skewed version).
+        "catalog-pin-match" => Some(match facts.catalog_skew {
+            CatalogSkew::Confirmed => {
+                (true, "the analysis version matches the catalog's php-src pin (Catalog section)")
+            }
+            CatalogSkew::Skewed => {
+                (false, "the analysis version is skewed against the catalog's php-src pin (Catalog section)")
+            }
+            CatalogSkew::Unconfirmed => (
+                false,
+                "unconfirmable — no target declared and no PHP sidecar this run, so the pin match cannot be guaranteed (Catalog section); declare a PHP target or make a sidecar available",
+            ),
+        }),
         "no-monkey-patch" => Some((
             !facts.monkey_patch_present,
             if facts.monkey_patch_present {

@@ -891,7 +891,7 @@ The known assertion names:
 | Name | Passes when |
 | --- | --- |
 | `sidecar` | The PHP sidecar spawned and answered `env()` this run. |
-| `catalog-pin-match` | The analysis version matches the catalog's php-src pin (Catalog section); unconfirmed (no target, no sidecar) counts as a pass. |
+| `catalog-pin-match` | The analysis version is **confirmed** to match the catalog's php-src pin (Catalog section). A confirmed skew fails; so does an unconfirmable comparison (no target declared and no PHP sidecar) — `require` is the strictness opt-in, so a guarantee doctor cannot even attempt is a violation, not a free pass (the Catalog section's own text still reports "unskewed" by default — this is stricter only under `require`). |
 | `no-monkey-patch` | No `uopz`/`runkit7`/`Componere` extension is loaded (Runtime section, ADR-0049 A9). |
 | `no-dormant-baseline` | The baseline carries no dormant entries (Baseline section); vacuously true with no baseline at all. |
 
