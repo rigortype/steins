@@ -546,11 +546,17 @@ fn scalar_param_int_interval_renders() {
 #[test]
 fn scalar_param_refines_within_a_native_base() {
     // `@param positive-int` on a native `int` refines within it — Asserted (a strict
-    // subset, not an exact match), and the native value seed still wins on dumpType.
+    // subset, not an exact match), and the refinement REACHES the value lane
+    // (issue #242): the native pass' coarser `int` seed no longer shadows it.
+    //
+    // This assertion used to read `dumped type: int`, recorded as if the native seed
+    // rightly won. It did not — it won only because it was planted first, and the
+    // measured asymmetry against the array vocabulary (which seeds its value lane
+    // from the very same arms) is what exposed that.
     let pd = "<?php\n/** @param positive-int $m */\nfunction f(int $m) { \\PHPStan\\dumpPhpDocType($m); }\n";
     assert_eq!(one_phpdoc(pd), "dumped phpdoc type: int<1, max> (asserted)");
     let ty = "<?php\n/** @param positive-int $m */\nfunction f(int $m) { \\PHPStan\\dumpType($m); }\n";
-    assert_eq!(one_type(ty), "dumped type: int");
+    assert_eq!(one_type(ty), "dumped type: int<1, max> (asserted)");
 }
 
 #[test]
