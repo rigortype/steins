@@ -141,3 +141,78 @@ fn array_map_callback_throws_propagate_to_summary() {
         s.throws
     );
 }
+
+// ---- Issue #279: HigherOrder dispatch through an aliased builtin import ---
+//
+// `invocation_shape` used to be asked by the call's own spelling
+// (`callee.simple()`), so `use function usort as u; u(...)` missed the entire
+// invoker treatment — both `usort`'s own by-ref color and the comparator
+// callback's effects. `Cx::resolve_invoker_function` now routes the resolved
+// catalog name through, generalizing the fix to this third consumer.
+
+#[test]
+fn an_aliased_usort_import_dispatches_and_colors_like_the_spelled_call() {
+    let aliased = "<?php\nuse function usort as u;\n\
+                   function f(array $xs): array {\n    \
+                   u($xs, function ($a, $b) { echo $a; return $a <=> $b; });\n    \
+                   return $xs;\n}\n";
+    let spelled = "<?php\nfunction f(array $xs): array {\n    \
+                   usort($xs, function ($a, $b) { echo $a; return $a <=> $b; });\n    \
+                   return $xs;\n}\n";
+    let sa = summary(aliased, "f");
+    let ss = summary(spelled, "f");
+    assert_eq!(sa.labels, ss.labels, "aliased usort colors identically to the spelled call");
+    assert!(
+        sa.labels.iter().any(|l| l == "output"),
+        "the comparator's echo propagates through the alias: {:?}",
+        sa.labels
+    );
+}
+
+#[test]
+fn an_aliased_usort_import_propagates_callback_throws_like_the_spelled_call() {
+    // The throws-pass twin of the effects test above: `add_callback_throws`
+    // is only reached at all if `resolve_invoker_function` finds the
+    // comparator's callback slot through the alias.
+    let aliased = "<?php\nuse function usort as u;\n\
+                   function f(array $xs): array {\n    \
+                   u($xs, function ($a, $b) { return intdiv($a, $b); });\n    \
+                   return $xs;\n}\n";
+    let spelled = "<?php\nfunction f(array $xs): array {\n    \
+                   usort($xs, function ($a, $b) { return intdiv($a, $b); });\n    \
+                   return $xs;\n}\n";
+    let sa = summary(aliased, "f");
+    let ss = summary(spelled, "f");
+    assert_eq!(sa.throws, ss.throws, "aliased usort's callback throws identically to the spelled call");
+    assert!(
+        sa.throws.iter().any(|t| t.contains("DivisionByZeroError")),
+        "callback throw propagates through the alias: {:?}",
+        sa.throws
+    );
+}
+
+#[test]
+fn an_aliased_import_of_a_shape_named_project_function_is_unaffected() {
+    // The negative twin: a project function that merely shares a name with a
+    // catalog invocation shape (`usort`) is never a catalog invoker — it is
+    // resolved through the ordinary `use function` import machinery (a
+    // `Site`, not a spelling), so an aliased import of it must behave exactly
+    // like the unaliased import, both joining the shadowing function's OWN
+    // effects and never consulting `usort`'s shape table.
+    let unaliased = "<?php\nnamespace App\\Sorting;\n\
+                      function usort(array $a, callable $cmp): array { echo \"shadow\"; return $a; }\n\
+                      namespace App;\nuse function App\\Sorting\\usort;\n\
+                      function f(array $xs): array { return usort($xs, function ($a, $b) { return $a <=> $b; }); }\n";
+    let aliased = "<?php\nnamespace App\\Sorting;\n\
+                   function usort(array $a, callable $cmp): array { echo \"shadow\"; return $a; }\n\
+                   namespace App;\nuse function App\\Sorting\\usort as u;\n\
+                   function f(array $xs): array { return u($xs, function ($a, $b) { return $a <=> $b; }); }\n";
+    let su = summary(unaliased, "f");
+    let sa = summary(aliased, "f");
+    assert_eq!(su.labels, sa.labels, "aliasing a shadowing project function changes nothing");
+    assert!(
+        su.labels.iter().any(|l| l == "output"),
+        "the shadow's own echo joins, not usort's shape table: {:?}",
+        su.labels
+    );
+}

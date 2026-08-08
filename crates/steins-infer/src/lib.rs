@@ -3494,10 +3494,20 @@ enum FnResolution {
     /// bare `trim(...)` both carry `"trim"`; an aliased `use function trim as
     /// t;` also carries `"trim"` even though the call site spells it `t`
     /// (issue #279) — every catalog-keyed consumer (the ADR-0070
-    /// argument-survival gate, the effects pass, the throws pass) must key the
-    /// catalog by this name, not by [`steins_syntax::NameRef::simple`] or
-    /// `.raw`, or an aliased import's calls silently fall back to "unknown
-    /// name" and lose everything the catalog would otherwise state.
+    /// argument-survival gate, the effects pass, the throws pass, and the
+    /// effects/throws higher-order dispatch sites that ask
+    /// [`steins_catalog::invocation_shape`]) must key the catalog by this
+    /// name, not by [`steins_syntax::NameRef::simple`] or `.raw`, or an
+    /// aliased import's calls silently fall back to "unknown name" and lose
+    /// everything the catalog would otherwise state.
+    ///
+    /// **Decision, not an oversight**: diagnostic *display* text (the
+    /// `t() has effect …` message body, throw provenance origins, …)
+    /// deliberately keeps using [`steins_syntax::NameRef::simple`] — the
+    /// call's own written spelling — even where the catalog answer above came
+    /// from this canonical name instead. A reader looking at `t()` in their
+    /// source wants the diagnostic to say `t()`, not the builtin it happens to
+    /// alias; only the catalog *key* needed fixing, never what gets printed.
     Builtin(String),
     /// Ambiguous or unresolved — skip everything (no check, no fold, no effect
     /// classification). The silent side.
@@ -4866,8 +4876,10 @@ fn classify_effect_origins(
             // the base call resolves normally for a non-invoker callee (ADR-0033).
             EffectOrigin::HigherOrder { callee, callbacks, arg_count, arg_targets, span } => {
                 let targets = Some(arg_targets.as_slice());
-                match steins_catalog::invocation_shape(callee.simple()) {
-                    Some(shape) => {
+                match cx.resolve_invoker_function(callee) {
+                    FnResolution::Builtin(builtin_name) => {
+                        let shape = steins_catalog::invocation_shape(&builtin_name)
+                            .expect("resolve_invoker_function's catalog_knows guarantees a shape row");
                         // ADR-0063 P1: the call's effect is the invoker's OWN
                         // catalog color ⊔ the envelope of the callback it
                         // immediately invokes. The own-color leg runs first and
@@ -4877,7 +4889,7 @@ fn classify_effect_origins(
                         // that leg for the sort family: `usort`'s own color is
                         // the by-ref write to its array argument.
                         for f in
-                            builtin_findings(callee.simple(), *span, cx.tree(), cx.path(), targets)
+                            builtin_findings(&builtin_name, *span, cx.tree(), cx.path(), targets)
                         {
                             d.insert(f);
                         }
@@ -4894,7 +4906,7 @@ fn classify_effect_origins(
                     // Not a known invoker: the callee is a normal edge, unless it
                     // is a user function declaring a conditional-purity contract
                     // — a userland catalog row (ADR-0063 §2 decision 2).
-                    None => match cx.resolve_effect_function(callee) {
+                    FnResolution::User(_) | FnResolution::Unknown => match cx.resolve_effect_function(callee) {
                         FnResolution::User(site) => {
                             let decl = cx.fn_decl(site);
                             let sym = Sym::Func(decl.fqn.clone());
@@ -5626,13 +5638,15 @@ fn report_unit(
             // callee resolves as a normal edge.
             EffectOrigin::HigherOrder { callee, callbacks, arg_count, arg_targets, span } => {
                 let targets = Some(arg_targets.as_slice());
-                match steins_catalog::invocation_shape(callee.simple()) {
-                    Some(shape) => {
+                match cx.resolve_invoker_function(callee) {
+                    FnResolution::Builtin(builtin_name) => {
+                        let shape = steins_catalog::invocation_shape(&builtin_name)
+                            .expect("resolve_invoker_function's catalog_knows guarantees a shape row");
                         // ADR-0063 P1 own-color leg, mirroring `compute_effects`:
                         // the invoker's own catalog color is reported whether or not
                         // the callback at the shape's position resolves.
                         for f in
-                            builtin_findings(callee.simple(), *span, cx.tree(), cx.path(), targets)
+                            builtin_findings(&builtin_name, *span, cx.tree(), cx.path(), targets)
                         {
                             if exceeds(labels, &f.label) {
                                 let prefix = format!("{}() has effect {}", callee.simple(), f.label);
@@ -5646,7 +5660,7 @@ fn report_unit(
                             report_callback(out, cx, cbref, effects, span.start, display, labels);
                         }
                     }
-                    None => {
+                    FnResolution::User(_) | FnResolution::Unknown => {
                         if let FnResolution::User(site) = cx.resolve_effect_function(callee) {
                             let decl = cx.fn_decl(site);
                             let cs = Sym::Func(decl.fqn.clone());
@@ -6440,8 +6454,10 @@ fn classify_throw_origins(
                 add_callback_throws(cx, file, cbref, origin.span, &origin.guards, d, e, x);
             }
             ThrowKind::HigherOrder { callee, callbacks, arg_count } => {
-                match steins_catalog::invocation_shape(callee.simple()) {
-                    Some(shape) => {
+                match cx.resolve_invoker_function(callee) {
+                    FnResolution::Builtin(builtin_name) => {
+                        let shape = steins_catalog::invocation_shape(&builtin_name)
+                            .expect("resolve_invoker_function's catalog_knows guarantees a shape row");
                         if shape.callback_param < *arg_count {
                             match callbacks.iter().find(|(p, _)| *p == shape.callback_param) {
                                 Some((_, cbref)) => add_callback_throws(
@@ -6451,7 +6467,7 @@ fn classify_throw_origins(
                             }
                         }
                     }
-                    None => match cx.resolve_function(callee) {
+                    FnResolution::User(_) | FnResolution::Unknown => match cx.resolve_function(callee) {
                         FnResolution::User(site) => {
                             e.push((Sym::Func(cx.fn_decl(site).fqn.clone()), origin.guards.clone()));
                         }
@@ -8123,6 +8139,31 @@ impl<'a> Cx<'a> {
     /// moves behind its back.
     fn resolve_arg_function(&self, r: &NameRef) -> FnResolution {
         self.resolve_function_with(r, &|n| steins_catalog::by_value_arg(n, 0).is_some())
+    }
+
+    /// [`Self::resolve_function`] with the **higher-order invocation** notion
+    /// of a known builtin: a name the catalog states a callback-invoking shape
+    /// for ([`steins_catalog::invocation_shape`]) — `usort`, `array_map`,
+    /// `call_user_func`, and siblings. A distinct predicate from either of the
+    /// two above on purpose: `array_map` and `call_user_func` carry neither an
+    /// effect color nor an out-param row, so [`Self::resolve_effect_function`]
+    /// would answer `Unknown` for them and silently drop the higher-order
+    /// dispatch this resolver exists to feed.
+    ///
+    /// Before issue #279's fix, the three call sites that need this asked
+    /// [`steins_catalog::invocation_shape`] directly with the call's own
+    /// spelling ([`steins_syntax::NameRef::simple`]) — sound for a bare
+    /// `usort(...)`, silently blind to `use function usort as u; u(...)`, and
+    /// (as a side effect neither issue nor fix intended to preserve) blind to
+    /// **shadowing** too: a project function literally named `usort` was
+    /// treated as the builtin invoker on spelling alone, resolution never
+    /// consulted. Routing through [`Self::resolve_function_with`] fixes both
+    /// in one motion — a project function's declaration site answers `User`
+    /// (or `Unknown`, ambiguous, exactly as every other shadowed builtin name
+    /// does under ADR-0001) whether or not the call spells it through an
+    /// alias.
+    fn resolve_invoker_function(&self, r: &NameRef) -> FnResolution {
+        self.resolve_function_with(r, &|n| steins_catalog::invocation_shape(n).is_some())
     }
 
     fn resolve_function_with(
