@@ -516,7 +516,7 @@ mod tests {
     use super::*;
 
     fn s(v: &str) -> Val {
-        Val::Str(v.to_owned())
+        Val::Str(v.into())
     }
 
     #[test]

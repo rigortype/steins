@@ -40,6 +40,7 @@
 mod certainty;
 mod fact;
 mod php;
+mod php_str;
 mod preds;
 mod range;
 mod shape;
@@ -51,6 +52,7 @@ pub use php::{
     php_is_falsy, php_is_numeric, php_str_is_decimal_int, php_str_is_lowercase,
     php_str_is_uppercase,
 };
+pub use php_str::PhpStr;
 pub use preds::StrPreds;
 pub use range::IntRange;
 pub use shape::{

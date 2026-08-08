@@ -10,6 +10,10 @@ publish.workspace = true
 # No Mago type may appear in this crate's public API — everything below the fold
 # is lowered into the owned, Mago-free representation exposed by `lib.rs`.
 [dependencies]
+# The value vocabulary (ADR-0080 §2.3): `PhpStr` is a domain type, and
+# `steins-domain` carries no `steins-*` dependency of its own, so the edge is
+# acyclic and adds no build surface.
+steins-domain = { path = "../steins-domain" }
 mago-syntax.workspace = true
 mago-allocator.workspace = true
 mago-span.workspace = true

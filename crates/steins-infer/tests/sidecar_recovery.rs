@@ -42,7 +42,7 @@ fn a_bomb_fold_does_not_disable_the_folder_for_the_rest_of_the_run() {
     // argument the snippet does not use, because `EngineFolder` memoizes answers
     // and a probe of `strtoupper("ab")` would answer the snippet's second fold
     // from cache, hiding the very death this test is about.
-    if folder.fold("strtoupper", &[ArgValue::Str("probe".to_owned())]).is_none() {
+    if folder.fold("strtoupper", &[ArgValue::Str("probe".into())]).is_none() {
         eprintln!(
             "SKIP a_bomb_fold_does_not_disable_the_folder_for_the_rest_of_the_run: \
              no folding engine — is `php` on PATH?"

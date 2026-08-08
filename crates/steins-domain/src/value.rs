@@ -2,6 +2,8 @@
 
 use std::cmp::Ordering;
 
+use crate::PhpStr;
+
 /// A scalar base type (the Refined/General layers' carrier).
 ///
 /// `Null` is deliberately absent: nullability is a *flag* on the abstract
@@ -25,8 +27,9 @@ pub enum Base {
 pub enum Key {
     /// Integer key.
     Int(i64),
-    /// String key.
-    Str(String),
+    /// String key. A PHP array key is a byte string (ADR-0080), so two keys
+    /// spelled with different invalid-UTF-8 bytes stay distinct.
+    Str(PhpStr),
 }
 
 /// A concrete PHP value.
@@ -41,8 +44,8 @@ pub enum Val {
     Int(i64),
     /// Float value (total order, see above).
     Float(f64),
-    /// String value.
-    Str(String),
+    /// String value — a byte string, not a Rust `String` (ADR-0080).
+    Str(PhpStr),
     /// Boolean value.
     Bool(bool),
     /// The null value.
@@ -129,7 +132,7 @@ mod tests {
             Val::Bool(false),
             Val::Int(0),
             Val::Float(0.0),
-            Val::Str(String::new()),
+            Val::Str(PhpStr::new()),
             Val::Array(vec![]),
         ];
         for a in &vals {

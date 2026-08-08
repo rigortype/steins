@@ -19,8 +19,8 @@
 //! lines, which is what this test compares.
 
 use steins_domain::{
-    Base, Certainty, Cover, CoverFlavor, Fact, IntRange, Key, KeyClass, Presence, Refinement,
-    ShapeFact, StrPreds, Tail, Val, array_is_list, php_is_falsy,
+    Base, Certainty, Cover, CoverFlavor, Fact, IntRange, Key, KeyClass, PhpStr, Presence,
+    Refinement, ShapeFact, StrPreds, Tail, Val, array_is_list, php_is_falsy,
 };
 
 /// The string atoms of the spec, in rank order — which is `str::cmp` order,
@@ -43,7 +43,7 @@ const KEY_ATOMS: [&str; 3] = ["a", "b", "c"];
 /// The keys the S4 narrowing operators are exercised over: exactly the keys the
 /// array atoms use, so every operator sees both a hit and a miss.
 fn op_keys() -> Vec<Key> {
-    vec![Key::Int(0), Key::Int(1), Key::Str("a".to_owned()), Key::Str("b".to_owned())]
+    vec![Key::Int(0), Key::Int(1), Key::Str("a".into()), Key::Str("b".into())]
 }
 
 /// Every two-element subset of [`op_keys`], in that order — so each seed sees
@@ -71,7 +71,7 @@ fn ik(n: i64) -> Key {
 }
 
 fn sk(rank: usize) -> Key {
-    Key::Str(KEY_ATOMS[rank].to_owned())
+    Key::Str(KEY_ATOMS[rank].into())
 }
 
 /// Every array atom, in the domain's total order on `Val` — which is what
@@ -183,10 +183,10 @@ fn float_rank(f: f64) -> usize {
         .unwrap_or_else(|| panic!("float {f} is not an atom of the vector universe"))
 }
 
-fn str_rank(s: &str) -> usize {
+fn str_rank(s: &PhpStr) -> usize {
     STR_ATOMS
         .iter()
-        .position(|a| *a == s)
+        .position(|a| *s == *a)
         .unwrap_or_else(|| panic!("string {s:?} is not an atom of the vector universe"))
 }
 
@@ -238,10 +238,10 @@ fn render_fact(f: &Fact) -> String {
 // Shape rendering (ADR-0062 S2)
 // ----------------------------------------------------------------------------
 
-fn key_rank(s: &str) -> usize {
+fn key_rank(s: &PhpStr) -> usize {
     KEY_ATOMS
         .iter()
-        .position(|a| *a == s)
+        .position(|a| *s == *a)
         .unwrap_or_else(|| panic!("key {s:?} is not an atom of the vector universe"))
 }
 
@@ -341,7 +341,7 @@ fn values() -> Vec<Val> {
         out.push(Val::Float(f));
     }
     for s in STR_ATOMS {
-        out.push(Val::Str(s.to_owned()));
+        out.push(Val::Str(s.into()));
     }
     for (a, _) in arr_atoms() {
         out.push(a);
@@ -421,10 +421,10 @@ fn one_of_seeds() -> Vec<Vec<Val>> {
             Val::Int(9),
             Val::Int(i64::MAX),
         ],
-        vec![Val::Str("0".to_owned()), Val::Str("5".to_owned())],
+        vec![Val::Str("0".into()), Val::Str("5".into())],
         vec![Val::Null, Val::Int(1)],
         vec![Val::Bool(false), Val::Bool(true)],
-        vec![Val::Int(1), Val::Str("5".to_owned())],
+        vec![Val::Int(1), Val::Str("5".into())],
         vec![Val::Float(-1.5), Val::Float(0.0)],
     ]
 }
@@ -437,8 +437,8 @@ fn facts() -> Vec<Fact> {
         Val::Int(0),
         Val::Int(1),
         Val::Int(9),
-        Val::Str(String::new()),
-        Val::Str("5".to_owned()),
+        Val::Str(PhpStr::new()),
+        Val::Str("5".into()),
         Val::Float(0.0),
         Val::Array(vec![]),
     ] {

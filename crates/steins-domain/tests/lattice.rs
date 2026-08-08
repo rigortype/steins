@@ -19,7 +19,7 @@ fn arb_scalar() -> impl Strategy<Value = Val> {
             Just("00".to_owned()),
             "[a-z0-9]{0,4}",
         ]
-        .prop_map(Val::Str),
+        .prop_map(|s| Val::Str(s.into())),
         any::<bool>().prop_map(Val::Bool),
         Just(Val::Null),
     ]

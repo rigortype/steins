@@ -12,7 +12,7 @@ fn ty(s: &str) -> steins_contract::ContractTy {
 }
 
 fn s(v: &str) -> Val {
-    Val::Str(v.to_owned())
+    Val::Str(v.into())
 }
 
 fn arr(items: Vec<(Key, Val)>) -> Val {
@@ -325,7 +325,7 @@ fn arb_scalar() -> impl Strategy<Value = Val> {
             Just("abc".to_owned()),
             "[a-z0-9]{0,3}",
         ]
-        .prop_map(Val::Str),
+        .prop_map(|s| Val::Str(s.into())),
         any::<bool>().prop_map(Val::Bool),
         Just(Val::Null),
     ]

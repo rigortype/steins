@@ -135,30 +135,30 @@ fn zero_padded_string_alone_against_int_one_is_silent() {
     assert!(d.is_empty(), "{d:#?}");
 }
 
-// --- Lossily-decoded string keys: a known representation limit (issue #187,
-// the symfony/console false positive) -----------------------------------
+// --- Byte-string keys (issue #187's false positive, ADR-0080's fix) ---------
 //
-// PHP array-literal string keys are byte strings; this crate's CST lowering
-// decodes them UTF-8-lossily, so distinct invalid-UTF-8 byte keys can decode
-// to the same U+FFFD-bearing `String`. Such a key must never be compared for
-// equality — not against another ordinary key, and not against another lossy
-// key either.
+// PHP array-literal string keys are byte strings, and since ADR-0080 they are
+// carried as such: two keys spelled with different invalid-UTF-8 bytes are two
+// keys. Issue #187 met these when lowering still went through
+// `String::from_utf8_lossy`, which collapsed them to one U+FFFD-bearing key and
+// reported three duplicates that were not there; the guard that bought silence
+// then is gone, and these keys now compare like every other.
 
 #[test]
 fn the_symfony_console_shape_is_silent() {
     // corpus/symfony__console/Helper/QuestionHelper.php:356 (the measured FP):
     // `["\xC0"=>1, "\xD0"=>1, "\xE0"=>2, "\xF0"=>3][$c & "\xF0"]` — four
-    // DISTINCT single-byte keys, all lossily decoding to "\u{FFFD}". Reporting
-    // three bogus duplicates here was the fp-gate RED this fix addresses.
+    // DISTINCT single-byte keys. Silent because they genuinely differ, which is
+    // a stronger claim than the pre-ADR-0080 silence: the scan compares them.
     let src = "<?php\n$a = [\"\\xC0\" => 1, \"\\xD0\" => 1, \"\\xE0\" => 2, \"\\xF0\" => 3];\n";
     let d = dups(src);
     assert!(d.is_empty(), "{d:#?}");
 }
 
 #[test]
-fn a_lossy_key_does_not_hide_a_genuine_duplicate_beside_it() {
-    // The lossy key opts itself out of comparison; every other key in the same
-    // literal is judged exactly as if it were not there.
+fn a_byte_string_key_does_not_hide_a_genuine_duplicate_beside_it() {
+    // A byte-string key participates like any other; every other key in the
+    // same literal is judged exactly as it would be without it.
     let src = "<?php\n$a = [\n    \"\\xC0\" => 1,\n    2 => 'a',\n    2 => 'b',\n];\n";
     let d = dups(src);
     assert_eq!(d.len(), 1, "{d:#?}");
@@ -167,15 +167,14 @@ fn a_lossy_key_does_not_hide_a_genuine_duplicate_beside_it() {
 }
 
 #[test]
-fn a_lossy_key_does_not_poison_auto_increment() {
+fn a_byte_string_key_does_not_poison_auto_increment() {
     // php -r 'var_export(["\xC0" => "x", "a", 0 => "b"]);' →
-    //   ['\u{FFFD}' => 'x', 0 => 'b']
-    // An invalid-UTF-8 byte can never be a canonical integer string, so the
-    // lossy key is an ordinary (non-numeric) string key: it never bumps the
-    // auto-index counter, `'a'` still auto-assigns to 0, and the explicit
-    // `0 => 'b'` still collides with it — the genuine duplicate must still
-    // fire, unlike an actually-unresolvable (`None`) key, which WOULD poison
-    // every later `Auto` position.
+    //   ["\xC0" => 'x', 0 => 'b']
+    // An invalid-UTF-8 byte can never be a canonical integer string, so the key
+    // is an ordinary (non-numeric) string key: it never bumps the auto-index
+    // counter, `'a'` still auto-assigns to 0, and the explicit `0 => 'b'` still
+    // collides with it — unlike an actually-unresolvable (`None`) key, which
+    // WOULD poison every later `Auto` position.
     let src = "<?php\n$a = [\n    \"\\xC0\" => 'x',\n    'a',\n    0 => 'b',\n];\n";
     let d = dups(src);
     assert_eq!(d.len(), 1, "{d:#?}");
@@ -274,4 +273,25 @@ fn fires_even_in_a_proven_dead_region() {
     let src = "<?php\nfunction f() {\n    return;\n    $a = [1 => 'a', 1 => 'b'];\n}\n";
     let d = dups(src);
     assert_eq!(d.len(), 1, "{d:#?}");
+}
+
+/// The cost the issue #187 guard charged, repaid: a literal that repeats a
+/// **genuine** `"\u{FFFD}"` was indistinguishable from the decoding artifact
+/// and had to be passed over. It is an ordinary duplicate now.
+#[test]
+fn a_repeated_real_replacement_character_is_a_duplicate_again() {
+    let src = "<?php\n$a = [\n    \"\\u{FFFD}\" => 1,\n    \"\\u{FFFD}\" => 2,\n];\n";
+    let d = dups(src);
+    assert_eq!(d.len(), 1, "{d:#?}");
+    assert_eq!(d[0].line, 4);
+}
+
+/// The byte keys of the symfony shape are distinct *values*, so a literal that
+/// really does repeat one of them still reports.
+#[test]
+fn a_repeated_byte_string_key_is_a_duplicate() {
+    let src = "<?php\n$a = [\n    \"\\xC0\" => 1,\n    \"\\xD0\" => 2,\n    \"\\xC0\" => 3,\n];\n";
+    let d = dups(src);
+    assert_eq!(d.len(), 1, "{d:#?}");
+    assert_eq!(d[0].line, 5, "the repeated \\xC0, not the distinct \\xD0");
 }

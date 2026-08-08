@@ -240,7 +240,13 @@ fn scan_stmts(
 /// stripped and its last segment), each keyed name recording `site`.
 fn collect_value_names(v: &ArgValue, site: &SweepSite, map: &mut HashMap<String, Vec<SweepSite>>) {
     match v {
-        ArgValue::Str(s) => insert_name_forms(s, site, map),
+        // A name lane: a byte string is no PHP symbol name, so it seeds nothing
+        // (ADR-0080 §2.5).
+        ArgValue::Str(s) => {
+            if let Some(s) = s.as_str() {
+                insert_name_forms(s, site, map);
+            }
+        }
         ArgValue::Closure(ClosureRef::FunctionName(name)) => {
             insert_name_forms(&name.raw, site, map);
             push_name(map, name.simple().to_ascii_lowercase(), site);
@@ -646,7 +652,7 @@ fn collect_method_value_names(
 ) {
     match v {
         ArgValue::Str(s) => {
-            if let Some((_, m)) = s.rsplit_once("::")
+            if let Some((_, m)) = s.as_str().and_then(|s| s.rsplit_once("::"))
                 && is_identifier(m)
             {
                 push_name(set, m.to_ascii_lowercase(), site);
@@ -658,7 +664,9 @@ fn collect_method_value_names(
             if items.len() == 2 {
                 match &items[1].1 {
                     ArgValue::Str(name) => {
-                        if is_identifier(name) {
+                        if let Some(name) = name.as_str()
+                            && is_identifier(name)
+                        {
                             push_name(set, name.to_ascii_lowercase(), site);
                         }
                     }

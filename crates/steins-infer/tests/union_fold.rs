@@ -98,12 +98,12 @@ impl Folder for Mock {
     fn fold(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue> {
         self.0.borrow_mut().push((name.to_owned(), args.to_vec()));
         match (name, args) {
-            ("strtoupper", [ArgValue::Str(s)]) => Some(ArgValue::Str(s.to_uppercase())),
+            ("strtoupper", [ArgValue::Str(s)]) => Some(ArgValue::Str(s.as_str()?.to_uppercase().into())),
             ("str_repeat", [ArgValue::Str(s), ArgValue::Int(n)]) => {
-                Some(ArgValue::Str(s.repeat(usize::try_from(*n).ok()?)))
+                Some(ArgValue::Str(s.as_str()?.repeat(usize::try_from(*n).ok()?).into()))
             }
             ("str_replace", [ArgValue::Str(a), ArgValue::Str(b), ArgValue::Str(c)]) => {
-                Some(ArgValue::Str(c.replace(a.as_str(), b)))
+                Some(ArgValue::Str(c.as_str()?.replace(a.as_str()?, b.as_str()?).into()))
             }
             _ => None,
         }
@@ -162,7 +162,7 @@ impl FoldEngine for Fake {
 /// the caller skips loudly rather than asserting something vacuous.
 fn live(test: &str) -> Option<SidecarFolder> {
     let mut folder = SidecarFolder::enabled();
-    if folder.fold("strtoupper", &[ArgValue::Str("probe".to_owned())]).is_none() {
+    if folder.fold("strtoupper", &[ArgValue::Str("probe".into())]).is_none() {
         eprintln!("SKIP {test}: no folding engine — is `php` on PATH?");
         return None;
     }
@@ -340,10 +340,10 @@ fn the_product_is_enumerated_in_a_canonical_order() {
     assert_eq!(
         order,
         vec![
-            vec![ArgValue::Str("a".to_owned()), ArgValue::Int(1)],
-            vec![ArgValue::Str("a".to_owned()), ArgValue::Int(2)],
-            vec![ArgValue::Str("b".to_owned()), ArgValue::Int(1)],
-            vec![ArgValue::Str("b".to_owned()), ArgValue::Int(2)],
+            vec![ArgValue::Str("a".into()), ArgValue::Int(1)],
+            vec![ArgValue::Str("a".into()), ArgValue::Int(2)],
+            vec![ArgValue::Str("b".into()), ArgValue::Int(1)],
+            vec![ArgValue::Str("b".into()), ArgValue::Int(2)],
         ],
         "sorted members, last argument fastest — never the source's written order",
     );

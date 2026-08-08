@@ -20,7 +20,7 @@
 //! The cut is byte-identical against the honesty tests in `steins-edit` (the
 //! renderer's oracle) and the cross-crate parity test there.
 
-use steins_domain::{Base, Certainty, IntRange, Key, StrPreds, Val, CAP};
+use steins_domain::{Base, Certainty, IntRange, Key, PhpStr, StrPreds, Val, CAP};
 
 use crate::{is_array_key_ty, shape_is_list, CallableObl, CField, CKey, ContractTy, MixedCut};
 
@@ -60,7 +60,7 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
     // The string portion: a summarized set hands us either the numeric-string class
     // (one `StrWith` arm) or the distinct-sorted literal arms — never both.
     let mut string_keyword: Option<String> = None;
-    let mut string_lits: Vec<&str> = Vec::new();
+    let mut string_lits: Vec<&PhpStr> = Vec::new();
     // Array-vocabulary arms (ADR-0062 §6): spelled in encounter order and
     // appended after the scalar members, by the one speller (not a second
     // renderer). An array arm never blocks the scalar members around it (a
@@ -402,6 +402,14 @@ pub fn spell_shape(
     } else {
         non_empty_keyword(if is_list { "list" } else { "array" }, non_empty)
     };
+    // A key whose bytes are not UTF-8 has no phpdoc spelling at all: the
+    // grammar's quoted key is text, and it has no `\xNN` escape to carry the
+    // byte. The whole shape therefore widens to its bare keyword — a
+    // supertype, which is the honest direction for a spelled contract
+    // (ADR-0080 §2.5: decline, never guess).
+    if fields.iter().any(|(k, _, _)| matches!(k, Key::Str(s) if !s.is_utf8())) {
+        return kw.to_owned();
+    }
     // Sealed: one verdict for the whole field list (vacuously true for the
     // fieldless `array{}`). Unsealed: never consulted — the per-field rule
     // below decides there.
@@ -447,7 +455,13 @@ pub fn spell_shape(
 fn spell_key(k: &Key) -> String {
     match k {
         Key::Int(i) => i.to_string(),
-        Key::Str(s) => if is_bare_ident(s) { s.clone() } else { string_literal(s) },
+        // The `None` arm is unreachable: `spell_shape` widens any shape that
+        // carries a non-UTF-8 key before it reaches this loop.
+        Key::Str(s) => match s.as_str() {
+            Some(t) if is_bare_ident(t) => t.to_owned(),
+            Some(t) => string_literal(t),
+            None => "string".to_owned(),
+        },
     }
 }
 
@@ -475,7 +489,9 @@ pub fn spell_val(v: &Val) -> String {
     match v {
         Val::Int(i) => i.to_string(),
         Val::Float(f) => float_literal(*f),
-        Val::Str(s) => string_literal(s),
+        // A byte string has no phpdoc literal spelling; `string` is its honest
+        // supertype (ADR-0080 §2.5).
+        Val::Str(s) => s.as_str().map_or_else(|| "string".to_owned(), string_literal),
         Val::Bool(true) => "true".to_owned(),
         Val::Bool(false) => "false".to_owned(),
         Val::Null => "null".to_owned(),
@@ -503,17 +519,20 @@ fn spell_array_entries(entries: &[(Key, Val)]) -> String {
 /// safety is deliberately absent — that armor lives in the docblock renderer and
 /// runs before this, so any literal reaching here is safe to embed *as terminal
 /// text* (single-quote/backslash escaping still applies via [`string_literal`]).
-fn spell_string_literals(strings: &[&str]) -> Option<Vec<String>> {
+fn spell_string_literals(strings: &[&PhpStr]) -> Option<Vec<String>> {
     if strings.is_empty() {
         return None;
     }
-    let mut distinct: Vec<&str> = strings.to_vec();
+    let mut distinct: Vec<&PhpStr> = strings.to_vec();
     distinct.sort_unstable();
     distinct.dedup();
 
-    if distinct.len() <= CAP {
+    // A byte string has no phpdoc literal spelling at all (ADR-0080 §2.5), so a
+    // group carrying one skips the literal arm and widens to the shared
+    // predicate keyword below — a supertype, never a guessed spelling.
+    if distinct.len() <= CAP && distinct.iter().all(|s| s.is_utf8()) {
         // One value, or a small enum-like set: precise literal / literal union.
-        return Some(distinct.iter().map(|s| string_literal(s)).collect());
+        return Some(distinct.iter().filter_map(|s| s.as_str()).map(string_literal).collect());
     }
 
     // Larger than CAP: widen to the tightest predicate keyword the shared,
@@ -650,7 +669,7 @@ mod tests {
         Val::Int(n)
     }
     fn s(v: &str) -> Val {
-        Val::Str(v.to_owned())
+        Val::Str(v.into())
     }
 
     /// Spell the summarized arms of a value set — the path the dump/annotate
@@ -972,7 +991,7 @@ mod array_vocabulary_tests {
     #[test]
     fn keyed_string_map_value_spells_array() {
         assert_eq!(
-            spell_val(&av(vec![(Key::Str("a".to_owned()), Val::Str("v".to_owned()))])),
+            spell_val(&av(vec![(Key::Str("a".into()), Val::Str("v".into()))])),
             "array{a: 'v'}"
         );
     }
@@ -984,8 +1003,8 @@ mod array_vocabulary_tests {
         // the positional form (issue #163).
         assert_eq!(
             spell_val(&av(vec![
-                (Key::Int(0), Val::Str("x".to_owned())),
-                (Key::Int(1), Val::Str("y".to_owned())),
+                (Key::Int(0), Val::Str("x".into())),
+                (Key::Int(1), Val::Str("y".into())),
             ])),
             "list{'x', 'y'}"
         );
@@ -1012,8 +1031,8 @@ mod array_vocabulary_tests {
         // this row: `array{'a', 'b'}` would name the wrong value for each key.
         assert_eq!(
             spell_val(&av(vec![
-                (Key::Int(1), Val::Str("a".to_owned())),
-                (Key::Int(0), Val::Str("b".to_owned())),
+                (Key::Int(1), Val::Str("a".into())),
+                (Key::Int(0), Val::Str("b".into())),
             ])),
             "array{1: 'a', 0: 'b'}"
         );

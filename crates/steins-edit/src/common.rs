@@ -20,7 +20,7 @@ use steins_contract::normalize::summarize_vals;
 use steins_contract::spell::spell_arms;
 use steins_contract::{ContractTy, admits_val};
 use steins_db::{Db, SourceFile, parse};
-use steins_domain::{Base, Certainty, Key, StrPreds, Val};
+use steins_domain::{Base, Certainty, Key, PhpStr, StrPreds, Val};
 use steins_infer::promote::{FreeFnSweep, MethodSweep};
 use steins_syntax::{
     ArgValue, ClassDecl, FunctionDecl, MethodDecl, NativeType, NormKey, Param, ScalarType,
@@ -380,11 +380,14 @@ pub fn render_value_domain(vals: &[Val]) -> Option<String> {
 fn docblock_widen_unsafe_literals(arms: &mut Vec<ContractTy>) {
     // `summarize_vals` yields the string group as either one `StrWith` arm (numeric
     // collapse) or distinct-sorted `LitStr` arms — never both.
-    let lits: Vec<&str> = arms
+    let lits: Vec<&PhpStr> = arms
         .iter()
-        .filter_map(|a| if let ContractTy::LitStr(s) = a { Some(s.as_str()) } else { None })
+        .filter_map(|a| if let ContractTy::LitStr(s) = a { Some(s) } else { None })
         .collect();
-    if lits.is_empty() || lits.iter().all(|s| docblock_literal_safe(s)) {
+    // A byte string is unsafe by construction: a docblock is text, and phpdoc has
+    // no escape that can carry those bytes (ADR-0080 §2.5), so it widens like any
+    // other literal the block cannot hold.
+    if lits.is_empty() || lits.iter().all(|s| s.as_str().is_some_and(docblock_literal_safe)) {
         return;
     }
     // The shared, implication-closed predicate summary of the group (the same
@@ -429,7 +432,7 @@ mod tests {
         Val::Int(n)
     }
     fn s(v: &str) -> Val {
-        Val::Str(v.to_owned())
+        Val::Str(v.into())
     }
 
     fn round_trips(rendered: &str) {

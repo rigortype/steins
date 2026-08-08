@@ -53,8 +53,8 @@
 
 use crate::{CField, CKey, ContractTy, MixedCut, admits_fact, admits_val};
 use steins_domain::{
-    Base, Certainty, Fact, IntRange, Key, KeyClass, Presence, Refinement, ShapeFact, StrPreds,
-    Tail, Val,
+    Base, Certainty, Fact, IntRange, Key, KeyClass, PhpStr, Presence, Refinement, ShapeFact,
+    StrPreds, Tail, Val,
 };
 
 /// The set a guard's negative information removes from an arm list (ADR-0052
@@ -776,7 +776,7 @@ fn vs_map(a: &ContractTy, key2: &ContractTy, val2: &ContractTy, not_list2: bool)
         ContractTy::ListOf { .. } => {
             // A key that is neither the string-free `0` nor a list continuation
             // makes the whole realization a non-list, which no `list<T>` admits.
-            let non_list_key = [Val::Int(1), Val::Str("k".to_owned())]
+            let non_list_key = [Val::Int(1), Val::Str(PhpStr::from("k"))]
                 .iter()
                 .any(|k| admits_val(key2, k).is_yes());
             if non_list_key { No } else { Maybe }
@@ -978,18 +978,18 @@ fn entries_vs_shape(
 /// The first integer key, and the first `kN` string key, that `fields` does not
 /// declare. Fields are finite, so both always exist — they are the "fresh key"
 /// every extra-entry witness in this module is built on.
-fn free_keys(fields: &[CField]) -> (i64, String) {
+fn free_keys(fields: &[CField]) -> (i64, PhpStr) {
     let mut i = 0i64;
     while fields.iter().any(|f| f.key == CKey::Int(i)) {
         i += 1;
     }
     let mut n = 0usize;
     let mut s = format!("k{n}");
-    while fields.iter().any(|f| matches!(&f.key, CKey::Str(k) if *k == s)) {
+    while fields.iter().any(|f| matches!(&f.key, CKey::Str(k) if *k == *s)) {
         n += 1;
         s = format!("k{n}");
     }
-    (i, s)
+    (i, PhpStr::from(s))
 }
 
 /// Whether a typed tail can carry an entry whose key the shape's own fields do
@@ -1017,7 +1017,7 @@ fn entry_refuted(key: &ContractTy, val: &ContractTy, fields: &[CField]) -> bool 
     if admits_val(key, &Val::Int(probe)).is_no() {
         return true;
     }
-    [Val::Null, Val::Int(0), Val::Str(String::new()), Val::Bool(false), Val::Array(Vec::new())]
+    [Val::Null, Val::Int(0), Val::Str(PhpStr::new()), Val::Bool(false), Val::Array(Vec::new())]
         .iter()
         .any(|v| admits_val(val, v).is_no())
 }
@@ -1323,7 +1323,7 @@ pub fn summarize_vals(vals: &[Val]) -> Option<Vec<ContractTy>> {
     let mut has_true = false;
     let mut has_false = false;
     let mut has_null = false;
-    let mut strings: Vec<&str> = Vec::new();
+    let mut strings: Vec<&PhpStr> = Vec::new();
     for v in &sorted {
         match v {
             Val::Int(_) => has_int = true,
@@ -1369,11 +1369,11 @@ pub fn summarize_vals(vals: &[Val]) -> Option<Vec<ContractTy>> {
 /// [`ContractTy::StrWith`] arm. Every other group is returned as its
 /// distinct-sorted literal arms — the renderer owns the literal-vs-keyword
 /// spelling decision (safety, CAP).
-fn summarize_string_group(strings: &[&str]) -> Vec<ContractTy> {
+fn summarize_string_group(strings: &[&PhpStr]) -> Vec<ContractTy> {
     if strings.is_empty() {
         return Vec::new();
     }
-    let mut distinct: Vec<&str> = strings.to_vec();
+    let mut distinct: Vec<&PhpStr> = strings.to_vec();
     distinct.sort_unstable();
     distinct.dedup();
 
@@ -1389,7 +1389,7 @@ fn summarize_string_group(strings: &[&str]) -> Vec<ContractTy> {
         // renderer keeps it, or (when unsafe to embed) widens it itself.
         return vec![ContractTy::StrWith(StrPreds::NUMERIC.close())];
     }
-    distinct.into_iter().map(|s| ContractTy::LitStr(s.to_owned())).collect()
+    distinct.into_iter().map(|s| ContractTy::LitStr((*s).clone())).collect()
 }
 
 /// Subtract a guard's negative information from an arm list, arm-wise
@@ -1547,7 +1547,7 @@ mod tests {
         ContractTy::LitInt(n)
     }
     fn lit_s(s: &str) -> ContractTy {
-        ContractTy::LitStr(s.to_owned())
+        ContractTy::LitStr(s.into())
     }
     fn class(s: &str) -> ContractTy {
         ContractTy::Class(s.to_owned())
@@ -1663,7 +1663,7 @@ mod tests {
             ContractTy::Shape {
                 list: false,
                 fields: vec![CField {
-                    key: CKey::Str("a".to_owned()),
+                    key: CKey::Str("a".into()),
                     optional: false,
                     ty: ContractTy::Base(Base::Int),
                 }],
@@ -1947,7 +1947,7 @@ mod tests {
         // both `ne` flavors hold it) that every sealed key-`0`-only acceptor
         // provably rejects — its possible keys are ⊆ {0}, so no member carries
         // the key `'a'`.
-        let witness = Val::Array(vec![(Key::Str("a".to_owned()), Val::Int(0))]);
+        let witness = Val::Array(vec![(Key::Str("a".into()), Val::Int(0))]);
         assert_eq!(admits_val(&ty("array"), &witness), Certainty::Yes);
         assert_eq!(admits_val(&ty("non-empty-array"), &witness), Certainty::Yes);
         for a in ["array{0?: int}", "list{0?: int}", "array{}"] {
@@ -2277,7 +2277,7 @@ mod tests {
         Val::Int(n)
     }
     fn s(v: &str) -> Val {
-        Val::Str(v.to_owned())
+        Val::Str(v.into())
     }
 
     #[test]

@@ -184,7 +184,8 @@ impl StrPreds {
     /// widening, never a lie, and the reason the class-string producer records
     /// the bit at the site that holds the evidence instead of re-deriving it.
     #[must_use]
-    pub fn of(s: &str) -> Self {
+    pub fn of(s: impl AsRef<[u8]>) -> Self {
+        let s = s.as_ref();
         let mut p = StrPreds::empty();
         if !s.is_empty() {
             p = p.union(StrPreds::NON_EMPTY);
@@ -216,7 +217,7 @@ impl StrPreds {
     /// `true` here means "not refuted by the characters", not "proven" — ask
     /// [`StrPreds::is_extensional`] first when the difference matters.
     #[must_use]
-    pub fn eval(pred: StrPreds, s: &str) -> bool {
+    pub fn eval(pred: StrPreds, s: impl AsRef<[u8]>) -> bool {
         StrPreds::of(s).contains_all(pred.extensional())
     }
 }

@@ -2,6 +2,35 @@
 //! PHP 8.x and (where history was treacherous) verified against the real
 //! engine by `tests/php_oracle.rs` — the ask-the-real-thing discipline
 //! applied to unit semantics.
+//!
+//! Every predicate here takes `impl AsRef<[u8]>` rather than `&str`, because a
+//! PHP string is a byte string (ADR-0080): they answer for a [`PhpStr`] whose
+//! bytes are not valid UTF-8 exactly as the engine does, and `&str` callers
+//! pass through unchanged. Each one is byte-oriented anyway — the engine's own
+//! rules are stated over bytes, and every byte >= 0x80 is uncased,
+//! non-numeric and non-digit under all of them.
+//!
+//! [`PhpStr`]: crate::PhpStr
+
+/// The ASCII whitespace PHP's numeric grammar trims.
+const WS: &[u8] = b" \t\n\r\x0B\x0C";
+
+/// Trim [`WS`] from both ends, byte-wise.
+fn trim_ws(mut b: &[u8]) -> &[u8] {
+    while let [first, rest @ ..] = b {
+        if !WS.contains(first) {
+            break;
+        }
+        b = rest;
+    }
+    while let [rest @ .., last] = b {
+        if !WS.contains(last) {
+            break;
+        }
+        b = rest;
+    }
+    b
+}
 
 /// PHP 8 `is_numeric()`.
 ///
@@ -12,10 +41,8 @@
 /// Hex/binary/octal strings are NOT numeric. At least one digit must appear
 /// in the mantissa.
 #[must_use]
-pub fn php_is_numeric(s: &str) -> bool {
-    const WS: &[char] = &[' ', '\t', '\n', '\r', '\u{0B}', '\u{0C}'];
-    let s = s.trim_start_matches(WS).trim_end_matches(WS);
-    let b = s.as_bytes();
+pub fn php_is_numeric(s: impl AsRef<[u8]>) -> bool {
+    let b = trim_ws(s.as_ref());
     let mut i = 0usize;
 
     if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
@@ -59,8 +86,9 @@ pub fn php_is_numeric(s: &str) -> bool {
 /// PHP falsiness of a *string*: exactly `""` and `"0"` are falsy.
 /// (`"0.0"`, `" "`, and `"00"` are all truthy — the classic traps.)
 #[must_use]
-pub fn php_str_is_falsy(s: &str) -> bool {
-    s.is_empty() || s == "0"
+pub fn php_str_is_falsy(s: impl AsRef<[u8]>) -> bool {
+    let b = s.as_ref();
+    b.is_empty() || b == b"0"
 }
 
 /// PHP's `strtolower($s) === $s` — the definition of PHPStan's
@@ -74,16 +102,16 @@ pub fn php_str_is_falsy(s: &str) -> bool {
 /// all >= 0x80, so no `A-Z` byte occurs. `tests/php_oracle.rs` asks the real
 /// engine, including the multibyte cases.
 #[must_use]
-pub fn php_str_is_lowercase(s: &str) -> bool {
-    !s.as_bytes().iter().any(u8::is_ascii_uppercase)
+pub fn php_str_is_lowercase(s: impl AsRef<[u8]>) -> bool {
+    !s.as_ref().iter().any(u8::is_ascii_uppercase)
 }
 
 /// PHP's `strtoupper($s) === $s` — the mirror of [`php_str_is_lowercase`], and
 /// the definition of PHPStan's `uppercase-string`. The two are *not* exclusive:
 /// a string with no cased character satisfies both.
 #[must_use]
-pub fn php_str_is_uppercase(s: &str) -> bool {
-    !s.as_bytes().iter().any(u8::is_ascii_lowercase)
+pub fn php_str_is_uppercase(s: impl AsRef<[u8]>) -> bool {
+    !s.as_ref().iter().any(u8::is_ascii_lowercase)
 }
 
 /// PHP's array-key cast identity for integer-like strings — the definition of
@@ -107,16 +135,18 @@ pub fn php_str_is_uppercase(s: &str) -> bool {
 /// identity. `tests/php_oracle.rs` asks the real engine by inserting each case
 /// as an array key and reading back `is_int(array_key_first(...))`.
 #[must_use]
-pub fn php_str_is_decimal_int(s: &str) -> bool {
-    let b = s.as_bytes();
+pub fn php_str_is_decimal_int(s: impl AsRef<[u8]>) -> bool {
+    let b = s.as_ref();
     let digits = if b.first() == Some(&b'-') { &b[1..] } else { b };
     if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
         return false;
     }
-    if digits[0] == b'0' && s.len() > 1 {
+    if digits[0] == b'0' && b.len() > 1 {
         return false;
     }
-    s.parse::<i64>().is_ok()
+    // Every byte is now ASCII (`-` plus digits), so the value is valid UTF-8
+    // and the range test is the engine's `PHP_INT_MAX` bound.
+    std::str::from_utf8(b).is_ok_and(|s| s.parse::<i64>().is_ok())
 }
 
 /// PHP falsiness of a scalar value, expressed over the domain's [`Val`](crate::Val).
