@@ -6622,14 +6622,77 @@ impl VarUsage {
         self.bound.insert(strip_dollar(bytes_to_string(dv.name)));
     }
 
-    /// Record a read of `$x`, unless the engine binds the name unconditionally.
-    fn read_direct(&mut self, dv: &mago_syntax::cst::DirectVariable<'_>) {
+    /// Record a read of `$x`, unless the engine binds the name unconditionally or
+    /// an enclosing same-variable guard shields it (see [`guard_tested_names`]).
+    fn read_direct(&mut self, dv: &mago_syntax::cst::DirectVariable<'_>, shielded: &[String]) {
         let name = strip_dollar(bytes_to_string(dv.name));
-        if always_bound(&name) {
+        if always_bound(&name) || shielded.contains(&name) {
             return;
         }
         self.reads.push(UndefinedRead { name, span: to_span(dv.span()) });
     }
+}
+
+/// The variable names an `isset`/`empty` condition **tests**, at either polarity —
+/// the shield an enclosing `isset($x) ? … : …` or `if (empty($x)) { … }` casts over
+/// its arms.
+///
+/// This is the `??` discharge idiom in conditional spelling, and it is the same
+/// finding-defeating fact: `empty($page) ? 0 : ($page - 1) * $view` reaches the
+/// `$page` read only when `$page` is non-empty, hence bound, so this id's runtime
+/// claim — "PHP warns and the read evaluates to null" — is simply false there.
+///
+/// **Not reachability, and deliberately not.** The rule asks only what the
+/// condition spells, and then withholds reads in *both* arms without deciding which
+/// arm the guard protects. Withholding is the silence direction, so getting the
+/// polarity "wrong" costs a finding and never manufactures one — which is what lets
+/// a purely syntactic containment test stand in for a flow analysis Steins does not
+/// have (the `variable.maybe-undefined` foundation, issue #199).
+///
+/// `!` is transparent (`!isset($x)` tests `$x` too) and so are parentheses. Nothing
+/// else is: a conjunction (`isset($x) && $y`) tests nothing here, which keeps the
+/// carve-out to the shape the corpus actually produced.
+fn guard_tested_names(cond: &Expression<'_>) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_guard_tested_names(cond, &mut out);
+    out
+}
+
+fn collect_guard_tested_names(cond: &Expression<'_>, out: &mut Vec<String>) {
+    match cond.unparenthesized() {
+        Expression::Construct(Construct::Isset(i)) => {
+            for value in i.values.iter() {
+                if let Expression::Variable(mago_syntax::cst::Variable::Direct(dv)) =
+                    value.unparenthesized()
+                {
+                    out.push(strip_dollar(bytes_to_string(dv.name)));
+                }
+            }
+        }
+        Expression::Construct(Construct::Empty(e)) => {
+            if let Expression::Variable(mago_syntax::cst::Variable::Direct(dv)) =
+                e.value.unparenthesized()
+            {
+                out.push(strip_dollar(bytes_to_string(dv.name)));
+            }
+        }
+        Expression::UnaryPrefix(up) if matches!(up.operator, UnaryPrefixOperator::Not(_)) => {
+            collect_guard_tested_names(up.operand, out);
+        }
+        _ => {}
+    }
+}
+
+/// The shield in force inside a guarded construct's arms: `None` when the condition
+/// tests nothing, so the caller keeps borrowing its own slice and no allocation
+/// happens on the overwhelmingly common path.
+fn extend_shield(base: &[String], added: Vec<String>) -> Option<Vec<String>> {
+    if added.is_empty() {
+        return None;
+    }
+    let mut extended = base.to_vec();
+    extended.extend(added);
+    Some(extended)
 }
 
 /// Names PHP itself always provides, so a read of one is never undefined: the nine
@@ -6716,12 +6779,13 @@ fn bind_partial_arguments(list: &mago_syntax::cst::PartialArgumentList<'_>, acc:
 fn scan_local_variable(
     var: &mago_syntax::cst::Variable<'_>,
     guarded: bool,
+    shielded: &[String],
     acc: &mut VarUsage,
 ) {
     match var {
         mago_syntax::cst::Variable::Direct(dv) => {
             if !guarded {
-                acc.read_direct(dv);
+                acc.read_direct(dv, shielded);
             }
         }
         mago_syntax::cst::Variable::Indirect(_) | mago_syntax::cst::Variable::Nested(_) => {
@@ -6737,7 +6801,7 @@ fn scan_local_variable(
 /// `guarded` marks a subtree PHP legalizes a read in (`isset`/`empty`/`unset`, the
 /// left operand of `??`, and the `@` error-control operand — all witnessed silent at
 /// 8.5.9). Bindings are still collected there; only the read is withheld.
-fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, acc: &mut VarUsage) {
+fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[String], acc: &mut VarUsage) {
     match node {
         // --- Nested scopes: their reads are their own scope's question. ---
         //
@@ -6751,7 +6815,7 @@ fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, acc: &mut VarUsage) {
                     if v.ampersand.is_some() {
                         acc.bind_direct(&v.variable);
                     } else if !guarded {
-                        acc.read_direct(&v.variable);
+                        acc.read_direct(&v.variable, shielded);
                     }
                 }
             }
@@ -6813,20 +6877,51 @@ fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, acc: &mut VarUsage) {
             }
         }
 
+        // --- Same-variable guarded constructs: the `??` discharge idiom in
+        // conditional spelling. `empty($page) ? 0 : ($page - 1) * $view` reaches
+        // the `$page` read only when `$page` is non-empty, hence bound, so this
+        // id's runtime claim is false there. Both arms are shielded without asking
+        // which one the guard protects — see `guard_tested_names` for why that is
+        // a containment rule and not a reachability one. Only the TESTED name is
+        // shielded, so `$view` above is still judged. ---
+        Node::Conditional(c) => {
+            scan_var_usage(&Node::Expression(c.condition), guarded, shielded, acc);
+            let extended = extend_shield(shielded, guard_tested_names(c.condition));
+            let inner = extended.as_deref().unwrap_or(shielded);
+            // `?:` has no `then` arm; its condition IS the value, already walked.
+            if let Some(then) = c.then {
+                scan_var_usage(&Node::Expression(then), guarded, inner, acc);
+            }
+            scan_var_usage(&Node::Expression(c.r#else), guarded, inner, acc);
+            return;
+        }
+        // The statement spelling of the same idiom. It needs no block-scoped
+        // tracking: the `if`'s whole body — including its `elseif`/`else` clauses —
+        // is one subtree, and shielding all of it is the same silence-direction
+        // containment rule. A read AFTER the `if` is outside that subtree and is
+        // still judged.
+        Node::If(i) => {
+            scan_var_usage(&Node::Expression(i.condition), guarded, shielded, acc);
+            let extended = extend_shield(shielded, guard_tested_names(i.condition));
+            let inner = extended.as_deref().unwrap_or(shielded);
+            scan_var_usage(&Node::IfBody(&i.body), guarded, inner, acc);
+            return;
+        }
+
         // --- Guards: PHP legalizes the read, so it is not this finding. ---
         Node::IssetConstruct(_) | Node::EmptyConstruct(_) | Node::Unset(_) => {
             for child in node.children() {
-                scan_var_usage(&child, true, acc);
+                scan_var_usage(&child, true, shielded, acc);
             }
             return;
         }
         Node::UnaryPrefix(up) if up.operator.is_error_control() => {
-            scan_var_usage(&Node::Expression(up.operand), true, acc);
+            scan_var_usage(&Node::Expression(up.operand), true, shielded, acc);
             return;
         }
         Node::Binary(b) if b.operator.is_null_coalesce() => {
-            scan_var_usage(&Node::Expression(b.lhs), true, acc);
-            scan_var_usage(&Node::Expression(b.rhs), guarded, acc);
+            scan_var_usage(&Node::Expression(b.lhs), true, shielded, acc);
+            scan_var_usage(&Node::Expression(b.rhs), guarded, shielded, acc);
             return;
         }
 
@@ -6898,25 +6993,25 @@ fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, acc: &mut VarUsage) {
         // consume a **local** binding, and an indirection in this position reaches
         // the class's static table instead, where no local can be minted.
         Node::StaticPropertyAccess(spa) => {
-            scan_var_usage(&Node::Expression(spa.class), guarded, acc);
+            scan_var_usage(&Node::Expression(spa.class), guarded, shielded, acc);
             match &spa.property {
                 mago_syntax::cst::Variable::Direct(_) => {}
                 mago_syntax::cst::Variable::Indirect(iv) => {
-                    scan_var_usage(&Node::Expression(iv.expression), guarded, acc);
+                    scan_var_usage(&Node::Expression(iv.expression), guarded, shielded, acc);
                 }
                 mago_syntax::cst::Variable::Nested(nv) => {
-                    scan_local_variable(nv.variable, guarded, acc);
+                    scan_local_variable(nv.variable, guarded, shielded, acc);
                 }
             }
             return;
         }
 
         // --- Reads. ---
-        Node::DirectVariable(dv) if !guarded => acc.read_direct(dv),
+        Node::DirectVariable(dv) if !guarded => acc.read_direct(dv, shielded),
         _ => {}
     }
     for child in node.children() {
-        scan_var_usage(&child, guarded, acc);
+        scan_var_usage(&child, guarded, shielded, acc);
     }
 }
 
@@ -6945,7 +7040,7 @@ fn undefined_variable_reads(
         }
     }
     for s in statements {
-        scan_var_usage(&Node::Statement(s), false, &mut acc);
+        scan_var_usage(&Node::Statement(s), false, &[], &mut acc);
     }
     if acc.dammed {
         return ScopeVarFacts::default();
