@@ -12,7 +12,7 @@ the binary in the first place, see
 A synopsis line spells one invocation:
 
 ```
-steins check [--format text|json|github] [--profile <name>] <paths...>
+steins check [--format text|json|github|sarif] [--profile <name>] <paths...>
 ```
 
 Square brackets mark optional flags. `<name>` is a value you supply.
@@ -26,7 +26,7 @@ whole surface to stderr and exits `2`:
 
 ```
 $ steins
-usage: steins check [--format text|json|github] [--profile <name>] [--no-php] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
+usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-php] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
        steins annotate [--no-php] [--format text|json] <file.php>
        steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--format text|json] <paths...>
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
@@ -106,14 +106,14 @@ an installed package under `vendor/`:
 Analyze a tree and report findings. This is the command you run in CI.
 
 ```
-steins check [--format text|json|github] [--profile <name>] [--no-php]
+steins check [--format text|json|github|sarif] [--profile <name>] [--no-php]
              [--vendor-diagnostics] [--fix] [--set-baseline]
              [--baseline <path>] [--ignore-baseline] <paths...>
 ```
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--format text\|json\|github` | `text`, or `github` under GitHub Actions | Output mode — see [`--format github`](#--format-github) for the auto-detection rule. |
+| `--format text\|json\|github\|sarif` | `text`, or `github` under GitHub Actions | Output mode — see [`--format github`](#--format-github) for the auto-detection rule. |
 | `--profile <name>` | `[check] profile`, else `default` | Select the display surface — a built-in stage or one named in `steins.toml`. |
 | `--no-php` | off | Skip the PHP sidecar and run the sound subset. |
 | `--vendor-diagnostics` | off | Report findings inside vendor trees too. |
@@ -356,13 +356,69 @@ Paths pass through as given: relative stays relative, absolute stays
 absolute. GitHub matches annotations against repo-root-relative paths, so
 invoke `check` from the repo root with relative paths.
 
+### `--format sarif`
+
+A SARIF 2.1.0 log, for upload to a code-scanning service. One `run`, and a
+deliberately minimal committed shape:
+
+```
+$ steins check --format sarif . > steins.sarif
+$ jq '.runs[0] | {rules: [.tool.driver.rules[].id], results: (.results | length), properties}' steins.sarif
+{
+  "rules": [
+    "type.argument-mismatch"
+  ],
+  "results": 1,
+  "properties": {
+    "profile": "default",
+    "vendorSuppressed": 1,
+    "suppressed": 0,
+    "baselined": 0
+  }
+}
+```
+
+- `tool.driver.rules` carries **one entry per id present in the results**,
+  deduped and sorted — not the whole registry. Each entry has the id, its
+  layer under `properties`, and its default level. Prose descriptions and
+  `helpUri` are not there yet; the id is the description.
+- Each result carries `ruleId`, `ruleIndex`, `level` (the same mapping
+  `--format github` uses), the message verbatim, one physical location with
+  the same 1-based line and column the other formats print, and any
+  registry-declared facet under `properties`.
+- `partialFingerprints` carries `steinsFindingHash/v1` — the *same* hash the
+  baseline uses to recognize a finding across unrelated edits. Alert
+  tracking across runs therefore gets the stability the baseline already
+  has, from one identity function rather than two.
+- `run.automationDetails.id` is `steins/<profile>`, so a `default` gate and
+  a `contracts` debt dashboard can upload in parallel without clobbering
+  each other's alert categories.
+- `run.properties` carries the accounting envelope — **counts, never
+  entries**.
+
+There is no `suppressions` section and there never will be. A baselined or
+`@steins-ignore`d finding is a count and nothing more: re-emitting it as a
+SARIF "suppressed result" would make the format a fourth suppression
+channel beside the three that exist, and would publish the contents of your
+baseline into every upload.
+
+Output goes to stdout like every other format — redirect it. `sarif` is
+never auto-selected: it is a file artifact you ask for in an upload step,
+not a log rendering. And the exit code is the usual one, so a workflow that
+wants to upload the log from a failing run wants `continue-on-error` on the
+check step; there is no flag that makes `check` lie about what it found.
+
+Paths pass through as given, with backslashes normalized to forward
+slashes. Code-scanning upload matches repo-root-relative paths, so invoke
+`check` from the repo root with relative paths.
+
 ### Errors
 
 ```
 $ steins check src/Typo
 steins: path does not exist: src/Typo
 $ steins check --format xml src/
-steins: unknown format `xml` (text|json|github)
+steins: unknown format `xml` (text|json|github|sarif)
 $ steins check --profile nope src/
 steins: unknown profile `nope` (built-ins: default, contracts, throws-direct, strict, pedantic; or define [profile.nope])
 ```

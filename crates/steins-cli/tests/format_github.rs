@@ -268,6 +268,26 @@ fn positions_github(stdout: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// The same, from a SARIF log.
+fn positions_sarif(stdout: &str) -> BTreeSet<String> {
+    let v: serde_json::Value = serde_json::from_str(stdout).expect("valid SARIF log");
+    v["runs"][0]["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .map(|r| {
+            let loc = &r["locations"][0]["physicalLocation"];
+            format!(
+                "{}|{}|{}|{}",
+                r["ruleId"].as_str().unwrap(),
+                loc["artifactLocation"]["uri"].as_str().unwrap(),
+                loc["region"]["startLine"],
+                loc["region"]["startColumn"]
+            )
+        })
+        .collect()
+}
+
 /// The same, from the `json` document.
 fn positions_json(stdout: &str) -> BTreeSet<String> {
     let v: serde_json::Value = serde_json::from_str(stdout).expect("valid json document");
@@ -299,13 +319,16 @@ fn every_format_renders_one_multiset_and_one_exit_code() {
     let text = run_in(&dir, &["check", "--no-php", "--format", "text", "a.php"]);
     let json = run_in(&dir, &["check", "--no-php", "--format", "json", "a.php"]);
     let github = run_in(&dir, &["check", "--no-php", "--format", "github", "a.php"]);
+    let sarif = run_in(&dir, &["check", "--no-php", "--format", "sarif", "a.php"]);
     assert_eq!(text.code, 1, "stdout:\n{}", text.stdout);
     assert_eq!(text.code, json.code, "json exit");
     assert_eq!(text.code, github.code, "github exit");
+    assert_eq!(text.code, sarif.code, "sarif exit");
     let expected = positions_text(&text.stdout);
     assert_eq!(expected.len(), 3, "three findings span the levels: {expected:?}");
     assert_eq!(expected, positions_json(&json.stdout), "json multiset");
     assert_eq!(expected, positions_github(&github.stdout), "github multiset");
+    assert_eq!(expected, positions_sarif(&sarif.stdout), "sarif multiset");
 }
 
 // ----------------------------------------------------------------- usage ---
@@ -323,5 +346,5 @@ fn an_unknown_format_is_a_usage_error() {
     assert_eq!(out.status.code(), Some(2), "unknown format → exit 2");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("unknown format `gitlab`"), "names it, got:\n{stderr}");
-    assert!(stderr.contains("text|json|github"), "lists the formats, got:\n{stderr}");
+    assert!(stderr.contains("text|json|github|sarif"), "lists the formats, got:\n{stderr}");
 }

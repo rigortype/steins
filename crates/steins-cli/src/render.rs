@@ -29,6 +29,8 @@
 //! * `json` — the machine document, unchanged byte for byte.
 //! * `github` — GitHub Actions workflow commands (ADR-0054 §4), so a run
 //!   annotates a pull request's diff inline.
+//! * `sarif` — SARIF 2.1.0 for code-scanning upload (ADR-0054 §2), in
+//!   [`crate::sarif`].
 //!
 //! `text` and `json` moved here verbatim from `main.rs`; the extraction is
 //! byte-identical by construction (a `String` accumulated with `\n` per line and
@@ -36,10 +38,12 @@
 //! `tests/format_recorded.rs` pins that against recorded output rather than
 //! trusting the argument.
 
+use std::collections::HashMap;
+
 use steins_infer::{Diagnostic, Layer};
 
-use crate::FixRun;
 use crate::profile;
+use crate::{FixRun, sarif};
 
 /// Which spelling of the displayed surface `check` emits.
 ///
@@ -56,6 +60,7 @@ pub enum CheckFormat {
     Text,
     Json,
     Github,
+    Sarif,
 }
 
 impl CheckFormat {
@@ -66,6 +71,7 @@ impl CheckFormat {
             "text" => Some(Self::Text),
             "json" => Some(Self::Json),
             "github" => Some(Self::Github),
+            "sarif" => Some(Self::Sarif),
             _ => None,
         }
     }
@@ -96,6 +102,10 @@ pub struct CheckReport<'a> {
     pub fix_run: Option<&'a FixRun>,
     pub surface: &'a profile::Surface,
     pub accounting: Accounting<'a>,
+    /// The analyzed sources by diagnostic path. SARIF's `partialFingerprints`
+    /// reads them for the ADR-0022 baseline hash (ADR-0054 §2); the other three
+    /// formats do not consult them.
+    pub texts: &'a HashMap<String, String>,
 }
 
 /// Render `report` in `format`. The returned `String` is the command's entire
@@ -105,6 +115,7 @@ pub fn render(report: &CheckReport<'_>, format: CheckFormat) -> String {
         CheckFormat::Text => text(report),
         CheckFormat::Json => json(report),
         CheckFormat::Github => github(report),
+        CheckFormat::Sarif => sarif::render(report),
     }
 }
 
@@ -160,6 +171,15 @@ pub enum CiLevel {
 }
 
 impl CiLevel {
+    /// The SARIF `level` string.
+    pub const fn sarif(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warning => "warning",
+            Self::Note => "note",
+        }
+    }
+
     /// The GitHub workflow command name.
     pub const fn command(self) -> &'static str {
         match self {
@@ -451,6 +471,7 @@ mod tests {
         assert_eq!(CheckFormat::parse("text"), Some(CheckFormat::Text));
         assert_eq!(CheckFormat::parse("json"), Some(CheckFormat::Json));
         assert_eq!(CheckFormat::parse("github"), Some(CheckFormat::Github));
+        assert_eq!(CheckFormat::parse("sarif"), Some(CheckFormat::Sarif));
         assert_eq!(CheckFormat::parse("Text"), None);
         assert_eq!(CheckFormat::parse("gitlab"), None);
     }

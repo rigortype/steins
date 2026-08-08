@@ -8,6 +8,10 @@
 # renamed path) both fail the job; only exit 0 is green. See
 # docs/user-manual/06-ci.md for the exit-code contract and the baseline loop
 # this template assumes is already committed as .steins-baseline.jsonl.
+#
+# No --format is passed, so the run emits GitHub Actions annotations: inside
+# Actions, `check` selects `--format github` on its own. Pass --format text
+# explicitly if a step downstream parses stdout as the plain report.
 name: steins
 
 on: [push, pull_request]

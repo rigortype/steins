@@ -15,6 +15,7 @@ mod doctor;
 mod effect_baseline;
 mod mcp;
 mod render;
+mod sarif;
 mod sha256;
 
 // The CLI and wasm playground share `steins_infer::profile`, preserving the
@@ -118,7 +119,7 @@ fn dispatch(args: &[String]) -> ExitCode {
         }
         None => {
             errln!(
-                "usage: steins check [--format text|json|github] [--profile <name>] [--no-php] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
+                "usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-php] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
             );
             errln!("       steins annotate [--no-php] [--format text|json] <file.php>");
             errln!(
@@ -260,11 +261,11 @@ fn run_check(args: &[String]) -> ExitCode {
             }
             "--format" => {
                 let Some(value) = args.get(i + 1) else {
-                    errln!("steins: --format requires an argument (text|json|github)");
+                    errln!("steins: --format requires an argument (text|json|github|sarif)");
                     return ExitCode::from(2);
                 };
                 let Some(parsed) = render::CheckFormat::parse(value) else {
-                    errln!("steins: unknown format `{value}` (text|json|github)");
+                    errln!("steins: unknown format `{value}` (text|json|github|sarif)");
                     return ExitCode::from(2);
                 };
                 format = Some(parsed);
@@ -447,6 +448,7 @@ fn run_check(args: &[String]) -> ExitCode {
             stale,
             surface_notice: surface_notice.as_deref(),
         },
+        texts,
     };
     out!("{}", render::render(&report, format));
 

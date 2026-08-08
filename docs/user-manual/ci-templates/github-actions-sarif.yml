@@ -1,0 +1,42 @@
+# Steins — GitHub Actions workflow (SARIF upload to code scanning).
+#
+# Copy to .github/workflows/steins.yml. Same install as github-actions.yml;
+# the check step writes a SARIF 2.1.0 log and the upload step ingests it
+# into the repository's Security tab.
+#
+# `continue-on-error: true` on the check step is deliberate and is what
+# makes the upload happen on a run that found something: `check` exits 1
+# when a fail-level finding displays, and Steins has no flag that makes it
+# report success on a failing tree. Gate the job on the code scanning
+# alerts, or add a later step that re-runs `check` without the redirect.
+#
+# Run from the repo root with a relative path — that is what code scanning
+# matches alerts against. See docs/user-manual/06-ci.md.
+name: steins
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  steins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          coverage: none
+
+      - run: composer require --dev typedduck/steins
+
+      - name: steins check (sarif)
+        continue-on-error: true
+        run: vendor/bin/steins check --format sarif . > steins.sarif
+
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: steins.sarif

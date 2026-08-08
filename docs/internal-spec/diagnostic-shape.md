@@ -141,14 +141,34 @@ registered, so `layer` is always present.
 `warn`-level findings are exit-neutral by construction. The `debug` layer is
 excluded from every gate counter.
 
+## Format invariance
+
+`check` renders one displayed surface in four spellings — `text`, `json`,
+`github` (GitHub Actions workflow commands) and `sarif` (2.1.0) — and the binding
+rule across them is **format invariance** (ADR-0054 §1): for a fixed invocation
+all four render the same displayed finding multiset and produce the same exit
+code. Nothing format-specific may reopen a suppression channel (a baselined
+finding does not reappear as a SARIF "suppressed result") or drop a displayed
+finding (no annotation cap, no debug-layer omission).
+
+The CI level a finding is spelled with keys on its **exit level**, not on its
+layer — the CI level and the exit code answer the same question and must not
+disagree — with one carve-out for the debug lane, whose warn-fixed ids take
+SARIF `note` / `::notice` rather than `warning`:
+
+| layer | level | SARIF `level` | github command |
+| --- | --- | --- | --- |
+| proof / contract / mechanics | fail | `error` | `::error` |
+| proof / contract / mechanics | warn | `warning` | `::warning` |
+| debug | fail (fixed) | `error` | `::error` |
+| debug | warn (fixed) | `note` | `::notice` |
+
+With no `--format` flag, `GITHUB_ACTIONS=true` in the environment selects
+`github`; an explicit `--format` always wins, and detection changes nothing but
+the spelling. `sarif` is never auto-selected.
+
 ## Not implemented
 
-- **`sarif` and `github` formats** (ADR-0054), with CI auto-detection. The
-  binding rule when they land is **format invariance**: for a fixed invocation
-  all formats render the same displayed finding multiset and the same exit code.
-  Nothing format-specific may reopen a suppression channel (a baselined finding
-  must not reappear as a SARIF "suppressed result") or drop a displayed finding
-  (no annotation cap).
 - **Fix-it payloads** on diagnostics (ADR-0010).
 - **A stable message contract.** Messages are prose and keep improving; they are
   explicitly not a suppression key (ADR-0023).
