@@ -668,3 +668,112 @@ death, and the i64 domain ends); `crates/steins-infer/tests/`
 `false_arm_strip.rs` (`strpos` reads `int<0, max>|false`,
 `int<0, max>` under the `!== false` guard, `int<1, max>|false` under
 `!== 0`, and the interior-point refusal under `!== 5`).
+
+## Note (2026-08-09): §6's stand-down clause, implemented (issue #266 slice 1)
+
+Completion of point 6, not new design. The clause was written into §6 with
+the guard-call retention — "the direct env-free pass stands down on spans
+covered here exactly as `mark_dead` already models" — and N3 landed the
+verdict half (env-threaded `&&`/`||`, threaded ternary arm envs) without
+it. The residue was a live false-positive class, because the two passes
+disagreed about what runs: the walk knew `$x === 2 && f("bad")` never
+evaluates its right operand, and the env-free direct pass reported inside
+it anyway. Four shapes, all measured firing before this note:
+
+* `a && b` with `a` decided **No** — `b` is unevaluated;
+* `a || b` with `a` decided **Yes** — `b` is unevaluated (De Morgan mirror);
+* `$c ? A : B` with `$c` decided — the untaken arm is unevaluated;
+* `$a ?? $b` with `$a` proven set-and-non-null — `$b` is unevaluated.
+
+Each is recorded through the same `dead` channel a decided `if` already
+uses, and therefore inherits its whole discipline unchanged: only a
+**decided** verdict records anything, and only the plain per-scope walk's
+regions escape (a binding descent's regions are dead for that caller's
+bindings alone, and are discarded as they always were).
+
+Two boundaries are load-bearing:
+
+* **Reachability stays proof-only.** A `??` left operand whose presence is
+  only `Asserted` does **not** stand the direct pass down. Marking a span
+  dead is a reachability claim, and §5's rule that a docblock claim buys
+  silence applies to *narrowing*, never to declaring live code unreachable
+  — the same line `eval_cond` already draws at `Isset`. Pinned as a
+  fixture.
+* **Spans, not calls.** A condition operand is a lowered `CondExpr` with no
+  span of its own, so the record is per **call span** there; the ternary
+  and `??` arms carry real CST extents (`ArgValue::Ternary`'s
+  `then_span`/`else_span`, `ArgValue::Coalesce`'s third field — outside the
+  `Hash` impl, since position is not denotation). A non-call site inside an
+  unevaluated operand (a class reference, a constant fetch) filters on its
+  own offset and is **not** covered; recorded as a known residue.
+
+Direction of movement: **finding-removing only**. Nothing here mints a
+verdict, a fact, or an id; php-typing-conformance is unmoved (206/214
+before and after, same eight fails).
+
+Fixtures: `crates/steins-infer/tests/short_circuit_dead_operands.rs` —
+every shape as a decided/undecided pair, the Asserted-presence stratum pin,
+the short-circuiting chain, and the per-span (not per-call) proof that an
+identical call on a live path keeps firing.
+
+## Note (2026-08-09): a class-typed assert tag reaches the arm lane (issue #266 slice 2)
+
+Completion of point 5's consumption rule for the one type shape it could not
+carry, plus the §3(d) consumer it was always meant to feed. Not new design.
+
+The state of the family before this note: `@phpstan-assert Guest $v`,
+`-if-true`, `-if-false` and their negations parsed, resolved to a caller
+variable, and then established **nothing at all**. The value lane is the
+only carrier `apply_assert_to_var` wrote, and that lane is object-free by
+construction (ADR-0035, ADR-0043 §4) — so `assert_fact_of` declined every
+`Class` arm and the whole road ended in a silent `return false`. The same
+claim written as `if ($v instanceof Guest)` narrowed the declared arm lane
+and fed `phpdoc.undefined-method`; written as a tag it did not.
+
+**What lands.** A class-typed spec narrows the **contract arm lane**,
+arm-wise, through `normalize::subtract_arm` — the same single judgment the
+`instanceof` guard uses, with the same polarity asymmetry (point 2's
+class-arm rule): a positive spec deletes an arm only when it is final/enum
+and provably not a `T`; a negated spec (`@phpstan-assert !Guest`) deletes an
+arm iff it is-a `T`; an `Unknown` is-a keeps the arm either way. The class
+name resolves in the **callee's** namespace context, which is where it was
+written. Surviving arms keep their own strata, and the declared-receiver
+lane already routes by minimum stratum (issue #196) — so the tag buys the
+contract-layer finding it is entitled to under point 5, and no proof.
+
+**The `Member` carrier is refused, and this is the slice's one deferral.**
+`Member` has no stratum slot — point 2 binds it at `Verified` because a
+runtime `instanceof` executed — and its consumers include point 3(b)'s
+`eval_instanceof` implication, which decides verdicts, prunes branches and
+marks regions dead. Routing a docblock claim into a *reachability* decision
+is exactly the laundering point 5 exists to prevent. The precondition for
+lifting this is a stratum on `Member` and a demand for it, not a quiet
+insertion.
+
+**One conservatism lifted, minimally.** A guard call's read set is dropped
+wholesale before the branch clones, which erased the very lane a
+`-if-true` tag exists to narrow. The arm lane the tag names is now taken
+before that drop and restored after it — the statement-position rule
+verbatim (an assertion tag's contract is a stronger statement about the
+argument than "the call may have mutated this by reference"). Three gates
+keep it narrow: class-typed specs only; the callee's parameter at the
+asserted position must be **by value** (ADR-0070 — a separate zval cannot
+reach the caller's binding); and the variable must occur nowhere else among
+the condition's calls. The **arm lane only** is carried: the value lane and
+the `Member` sets still drop, so no *fact* survives a guard here that did
+not survive one before, and `collect_call_opaque_reads`'s standing refusal
+to lift the general case stands.
+
+Direction of movement: this **adds** contract-layer `phpdoc.*` findings
+where a docblock claim narrows a declared union, and adds nothing on the
+proof layer. php-typing-conformance is unmoved (206/214 before and after,
+same eight fails — none narrowing-owned;
+`regressions_string_narrowing_assert_if_true` keeps passing, as point 10
+requires).
+
+Fixtures: `crates/steins-infer/tests/assert_tag_class_lane.rs` — the
+`instanceof` reference narrowing beside the tag forms, both polarities of
+both guard kinds, the negated spec, and four pins: the proof-layer absence
+id stays silent (exactness is not membership), a Verified null is not
+overwritten, no value fact is minted, and ADR-0029's prefix rule still gates
+the family.

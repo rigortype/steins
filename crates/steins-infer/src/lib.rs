@@ -9878,6 +9878,38 @@ fn mark_dead(w: &WalkCx, traces: &[&[Stmt]]) {
     }
 }
 
+/// Record one source extent as proven dead — an expression PHP's own evaluation
+/// order proves is never reached (ADR-0052 §6: a `&&`/`||` operand the left side
+/// short-circuits past, the untaken arm of a decided ternary, the right operand of
+/// a `??` whose left is proven set-and-non-null).
+///
+/// The statement-level [`mark_dead`] and this share one consumer, [`in_dead`], and
+/// one discipline: a region is recorded only from a **decided** verdict, and only
+/// the plain per-scope walk's regions escape the walk (a binding descent discards
+/// its own — its verdicts hold for that caller's bindings, not universally).
+fn mark_dead_span(w: &WalkCx, span: Span) {
+    w.dead.borrow_mut().push(span);
+}
+
+/// Record every call this condition carries as dead. Used where a whole operand of
+/// `&&`/`||` is proven unevaluated: the operand itself has no span (a [`CondExpr`]
+/// is a lowered form, not a CST node), but its calls do, and a call is where the
+/// env-free direct pass positions the findings this closes.
+///
+/// A non-call site inside such an operand (a class reference, a constant fetch)
+/// keeps its own filter and is NOT covered — those families read `r.offset`, not a
+/// call span. Recorded as a known residue rather than papered over.
+fn mark_dead_cond_calls(w: &WalkCx, cond: &CondExpr) {
+    let calls = collect_guard_calls_any(cond);
+    if calls.is_empty() {
+        return;
+    }
+    let mut dead = w.dead.borrow_mut();
+    for call in calls {
+        dead.push(call.span);
+    }
+}
+
 /// Whether a byte position falls inside any proven-dead region.
 fn in_dead(dead: &[Span], pos: u32) -> bool {
     dead.iter().any(|s| s.start <= pos && pos < s.end)
@@ -10733,7 +10765,7 @@ fn value_stratum(value: &ArgValue, env: &HashMap<String, Known>, store: Option<&
             value_stratum(then_val, env, store).min(value_stratum(else_val, env, store))
         }
         // `$a ?? $b` consumes both operands' facts (a widening join): `min` (§5).
-        ArgValue::Coalesce(a, b) => {
+        ArgValue::Coalesce(a, b, _) => {
             value_stratum(a, env, store).min(value_stratum(b, env, store))
         }
         // `$a . $b` consumes both operands' facts to build one string — the same
@@ -11247,7 +11279,7 @@ fn best_dump_type(
     // A `??` chain (ADR-0052 §6 + ADR-0062 A-G11, S5): the spine's join under the
     // left-to-right `¬isset` premise ladder, which is where a KeyCover discharges.
     // Placed above the fold because a `??` is never a literal the folder can reach.
-    if let ArgValue::Coalesce(a, b) = value
+    if let ArgValue::Coalesce(a, b, _) = value
         && let Some((fact, stratum)) = eval_coalesce_fact(w, folder, a, b, env, Some(store))
     {
         return DumpRendering {
@@ -11764,8 +11796,17 @@ fn apply_assign(
     // A ternary rvalue `$x = $c ? A : B` is a conditional value (ADR-0031): the
     // walk evaluates the guard and resolves to the chosen arm, or (undecided) a
     // `OneOf` of the two arms when both are literal, else unknown.
-    if let ArgValue::Ternary { cond, then_val, else_val } = value {
-        match eval_ternary_fact(w, folder, cond, then_val, else_val, env, store) {
+    if let ArgValue::Ternary { cond, then_val, then_span, else_val, else_span } = value {
+        match eval_ternary_fact(
+            w,
+            folder,
+            cond,
+            then_val,
+            else_val,
+            (*then_span, *else_span),
+            env,
+            store,
+        ) {
             Some(fact) => {
                 if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
                     facts.push(LineFact {
@@ -11923,7 +11964,13 @@ fn apply_assign(
         // unknown call) yields no fact, so `??` never manufactures certainty for a
         // value it cannot spell. The join widens, so it can only *lose* precision
         // (never fire a proof the concrete arms would not) — the FP-safe side.
-        ArgValue::Coalesce(a, b) => {
+        ArgValue::Coalesce(a, b, rhs_span) => {
+            // `??` gates its right operand the way a ternary gates an arm: a left
+            // operand proven set-and-non-null means PHP never evaluates the right,
+            // so a finding positioned there is a false positive (ADR-0052 §6).
+            if coalesce_lhs_proven_present(w, folder, a, env, store) {
+                mark_dead_span(w, *rhs_span);
+            }
             // The stratum is the evaluator's own `min` over the spine's arms — the
             // same derivation clause the two-operand form used, extended to a
             // projection arm, whose stratum comes from the base's shape fact rather
@@ -12197,7 +12244,7 @@ fn eval_coalesce_fact(
 /// parentheses (`($a ?? $b) ?? $c`) nest left and mean the same chain.
 fn flatten_coalesce<'a>(v: &'a ArgValue, out: &mut Vec<&'a ArgValue>) {
     match v {
-        ArgValue::Coalesce(a, b) => {
+        ArgValue::Coalesce(a, b, _) => {
             flatten_coalesce(a, out);
             flatten_coalesce(b, out);
         }
@@ -12806,9 +12853,27 @@ fn walk_if(
             check_preg_pattern(w, folder, call, env, out);
         }
     }
+    // The declared-arm lanes a guard call's own `@phpstan-assert-*` tag names, taken
+    // BEFORE the conservative read-set drop below and put back after it. Rationale is
+    // the statement-position rule, verbatim (walk_trace step 3 before step 4): an
+    // assertion tag's contract is a *stronger* statement about the argument than "the
+    // call may have mutated this by reference", and the tag is worthless if the same
+    // call's blanket invalidation erases the lane the tag exists to narrow.
+    //
+    // The lift is deliberately minimal, and each restriction is load-bearing:
+    // the **arm lane only** (the value lane and the `Member` sets still drop, so no
+    // fact survives a guard that did not survive one before — the precision change
+    // `collect_call_opaque_reads` refuses stays refused); only for a variable the
+    // callee takes **by value** at the asserted position (ADR-0070's gate: a by-value
+    // parameter is a separate zval, so that call cannot rebind the caller's binding);
+    // and only when no other call in the same condition takes the variable at all.
+    let kept_lanes = guard_assert_kept_lanes(w, cond, &guard_calls, env, store);
     for v in cond_invalidations(w.cx, cond, env, store, poisoned) {
         env.remove(&v);
         store.unbind(&v);
+    }
+    for (var, arms) in kept_lanes {
+        store.contract.insert(var, arms);
     }
 
     // 3. Walk the live branches on cloned envs, collecting those that fall through.
@@ -13561,8 +13626,14 @@ fn eval_cond(
         CondExpr::And(a, b) => {
             let va = eval_cond(w, folder, a, env, store, poisoned);
             // `a` false ⇒ `b` never runs; the verdict is already `No`, and the
-            // threaded env would be a contradiction — skip it.
+            // threaded env would be a contradiction — skip it. `b`'s span is
+            // *unevaluated code*, not merely unnarrowed: PHP short-circuits past it,
+            // so a finding positioned there would be a false positive on a path the
+            // engine never takes. Record it, exactly as a decided `if` records its
+            // skipped branch (ADR-0052 §6's "the direct env-free pass stands down on
+            // spans covered here").
             if va == Certainty::No {
+                mark_dead_cond_calls(w, b);
                 return Certainty::No;
             }
             let (benv, bstore) =
@@ -13571,8 +13642,10 @@ fn eval_cond(
         }
         CondExpr::Or(a, b) => {
             let va = eval_cond(w, folder, a, env, store, poisoned);
-            // `a` true ⇒ `b` never runs; the verdict is already `Yes`.
+            // `a` true ⇒ `b` never runs; the verdict is already `Yes`. Same
+            // unevaluated-span reasoning as the `&&` side, De Morgan-mirrored.
             if va == Certainty::Yes {
+                mark_dead_cond_calls(w, b);
                 return Certainty::Yes;
             }
             let (benv, bstore) =
@@ -14145,20 +14218,66 @@ fn eval_binary_fact(
     (fact, strat)
 }
 
+/// Is a `??` left operand proven **set and non-null**, so PHP's own evaluation
+/// order proves the right operand unevaluated (ADR-0052 §6)?
+///
+/// Three refusals keep this on the FP-safe side, and each is the same refusal the
+/// verdict machinery already makes elsewhere:
+///
+/// * an **offset read** never answers yes — presence is the very question `??`
+///   asks of it, and [`ArgValue::OffsetRead`] is a silence carrier in this
+///   position by construction (ADR-0049 A7);
+/// * an operand that does not resolve to a concrete value answers no (unknown is
+///   not "present");
+/// * an operand whose fact is **`Asserted`** answers no. Marking a span dead is a
+///   reachability claim, and reachability stays proof-only — the same line
+///   [`eval_cond`] draws at `Isset` (a docblock claim must never silence the
+///   env-free direct pass on a live path).
+fn coalesce_lhs_proven_present(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    lhs: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: &Store,
+) -> bool {
+    if matches!(lhs, ArgValue::OffsetRead { .. }) {
+        return false;
+    }
+    if value_stratum(lhs, env, Some(store)) != Stratum::Verified {
+        return false;
+    }
+    match w.cx.resolve_literal(lhs, env, w.scope.poisoned, folder) {
+        Some(v) => !matches!(v, ArgValue::Null),
+        None => false,
+    }
+}
+
 /// Evaluate a ternary rvalue to an env [`Fact`] (ADR-0031): a decided guard picks
 /// the chosen arm's proven value; an undecided guard yields a `OneOf` of the two
 /// arms when both resolve to literals, else `None` (unknown → the var is dropped).
+///
+/// A decided guard also proves the **untaken arm unevaluated** (ADR-0052 §6): PHP
+/// evaluates exactly one arm of a ternary, so `$x === 2 ? f("bad") : 0` with `$x`
+/// proven `1` never runs `f` at all, and a finding on it would be a false positive.
+/// `arms` carries the two source extents for exactly that record.
+#[allow(clippy::too_many_arguments)]
 fn eval_ternary_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
     cond: &CondExpr,
     then_val: &ArgValue,
     else_val: &ArgValue,
+    arms: (Span, Span),
     env: &HashMap<String, Known>,
     store: &Store,
 ) -> Option<Fact> {
     let poisoned = w.scope.poisoned;
     let verdict = eval_cond(w, folder, cond, env, store, poisoned);
+    match verdict {
+        Certainty::Yes => mark_dead_span(w, arms.1),
+        Certainty::No => mark_dead_span(w, arms.0),
+        Certainty::Maybe => {}
+    }
     // The arms evaluate under the guard's respective refinements (ADR-0052 §6):
     // `$c ? A : B` — `A` runs only when `$c` was truthy (so it sees
     // `then_refinements($c)`), `B` only when `$c` was falsy (`else_refinements`).
@@ -17790,25 +17909,12 @@ fn apply_call_asserts(
     if scope.poisoned || !call.positional_only {
         return;
     }
-    let (params, docblock): (&[Param], Option<&str>) = match &call.receiver {
-        Callee::Function(_) => {
-            let Some(site) = cx.resolve_user_fn(call) else { return };
-            let decl = cx.fn_decl(site);
-            (&decl.params, decl.docblock.as_deref())
-        }
-        Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
-            let Some(target) = resolve_call_target(
-                cx, &call.receiver, store, this_exact, enclosing_class, scope.poisoned,
-            ) else {
-                return;
-            };
-            (&target.method.params, target.method.docblock.as_deref())
-        }
-        // A `$fn(...)` variable call carries no static declaration to read
-        // `@phpstan-assert` envelopes from — nothing to apply.
-        Callee::DynamicVar(_) | Callee::Dynamic => return,
+    let Some(callee) = assert_callee(cx, call, store, this_exact, enclosing_class, scope.poisoned)
+    else {
+        return;
     };
-    let Some(envelopes) = parse_envelopes(docblock) else { return };
+    let (params, decl_at) = (callee.params, callee.decl_at);
+    let Some(envelopes) = parse_envelopes(callee.docblock) else { return };
     for spec in &envelopes.asserts {
         if spec.kind != kind {
             continue;
@@ -17825,10 +17931,152 @@ fn apply_call_asserts(
         }
         let Some(arg) = call.args.get(pos) else { continue };
         let ArgValue::Var(v) = &arg.value else { continue };
-        if apply_assert_to_var(env, store, v, spec) {
+        if apply_assert_to_var(cx, decl_at, env, store, v, spec) {
             asserted.insert(v.clone());
         }
     }
+}
+
+/// The declaration a call's `@phpstan-assert` envelopes are read from: its
+/// parameter list, its docblock, and its **own name-resolution context**
+/// `(file, offset)`.
+///
+/// The last element is what makes a class-typed spec resolvable: an assert tag's
+/// class name is written in the *callee's* namespace, not the caller's —
+/// `@phpstan-assert Guest $v` declared in `App\Auth` means `App\Auth\Guest`
+/// wherever it is called from. Reading it there is a query answer, not cross-scope
+/// walk state, so ADR-0048 §2's replayability argument carries over unchanged.
+struct AssertCallee<'a> {
+    params: &'a [Param],
+    docblock: Option<&'a str>,
+    /// The declaration's own `(file, offset)` — the context a class name in an
+    /// assert tag resolves in.
+    decl_at: (usize, u32),
+}
+
+fn assert_callee<'a>(
+    cx: &Cx<'a>,
+    call: &CallExpr,
+    store: &Store,
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
+    poisoned: bool,
+) -> Option<AssertCallee<'a>> {
+    match &call.receiver {
+        Callee::Function(_) => {
+            let site = cx.resolve_user_fn(call)?;
+            let decl = cx.fn_decl(site);
+            Some(AssertCallee {
+                params: &decl.params,
+                docblock: decl.docblock.as_deref(),
+                decl_at: (site.file, decl.span.start),
+            })
+        }
+        Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
+            let target =
+                resolve_call_target(cx, &call.receiver, store, this_exact, enclosing_class, poisoned)?;
+            Some(AssertCallee {
+                params: &target.method.params,
+                docblock: target.method.docblock.as_deref(),
+                decl_at: (target.class_file, target.method.span.start),
+            })
+        }
+        // A `$fn(...)` variable call carries no static declaration to read
+        // `@phpstan-assert` envelopes from — nothing to apply.
+        Callee::DynamicVar(_) | Callee::Dynamic => None,
+    }
+}
+
+/// The declared-arm lanes that must survive a guard's conservative read-set drop:
+/// one entry per variable a **class-typed** assert spec of a guard call names, and
+/// only where the callee provably cannot have rebound it.
+///
+/// Three gates, each a refusal rather than a heuristic:
+///
+/// 1. the spec's type must lower to a `Class` — this is the arm-lane road, and no
+///    other spec kind reaches it;
+/// 2. the callee's parameter at the asserted position must be **by value**
+///    (ADR-0070): a by-value parameter is a separate zval, so the call cannot write
+///    the caller's binding through it;
+/// 3. the variable must appear **nowhere else** in the condition's calls — not as
+///    another argument, not as a receiver. One by-value occurrence proves nothing
+///    about a second occurrence somewhere that could take a reference.
+///
+/// Only the arm lane is carried across. The value lane and the `Member` sets still
+/// drop with everything else, so no *fact* survives a guard here that did not
+/// survive one before.
+fn guard_assert_kept_lanes(
+    w: &WalkCx,
+    cond: &CondExpr,
+    guard_calls: &[&CallExpr],
+    env: &HashMap<String, Known>,
+    store: &Store,
+) -> Vec<(String, Vec<ContractArm>)> {
+    let mut kept: Vec<(String, Vec<ContractArm>)> = Vec::new();
+    if w.scope.poisoned {
+        return kept;
+    }
+    let invalidated = cond_invalidations(w.cx, cond, env, store, w.scope.poisoned);
+    for call in guard_calls {
+        if !call.positional_only {
+            continue;
+        }
+        let Some(callee) = assert_callee(
+            w.cx, call, store, w.this_exact, w.enclosing_class, w.scope.poisoned,
+        ) else {
+            continue;
+        };
+        let params = callee.params;
+        let Some(envelopes) = parse_envelopes(callee.docblock) else { continue };
+        for spec in &envelopes.asserts {
+            if !matches!(steins_contract::lower(&spec.ty), steins_contract::ContractTy::Class(_)) {
+                continue;
+            }
+            let Some(pos) = params.iter().position(|p| p.name == spec.param) else { continue };
+            if params[pos].by_ref {
+                continue;
+            }
+            let Some(ArgValue::Var(v)) = call.args.get(pos).map(|a| &a.value) else { continue };
+            if !invalidated.iter().any(|name| name == v) {
+                // Nothing is dropping this lane — no rescue needed.
+                continue;
+            }
+            if occurs_elsewhere_in_calls(guard_calls, pos, v) {
+                continue;
+            }
+            let Some(arms) = store.contract.get(v) else { continue };
+            if !kept.iter().any(|(name, _)| name == v) {
+                kept.push((v.clone(), arms.clone()));
+            }
+        }
+    }
+    kept
+}
+
+/// Does `var` occur in any of these calls other than as the positional argument at
+/// `pos` — as another argument, a named argument, or a method receiver?
+fn occurs_elsewhere_in_calls(calls: &[&CallExpr], pos: usize, var: &str) -> bool {
+    let mut seen_at_pos = false;
+    for call in calls {
+        if let Callee::Method { receiver: Receiver::Var(v), .. } = &call.receiver
+            && v == var
+        {
+            return true;
+        }
+        for (i, arg) in call.args.iter().enumerate() {
+            if matches!(&arg.value, ArgValue::Var(v) if v == var) {
+                if i == pos && !seen_at_pos {
+                    seen_at_pos = true;
+                } else {
+                    return true;
+                }
+            }
+        }
+        if call.named_args.iter().any(|n| matches!(&n.value, ArgValue::Var(v) if v == var)) {
+            return true;
+        }
+    }
+    false
 }
 
 /// The boolean an assertion spec claims of its parameter, or `None` when the spec
@@ -17919,16 +18167,45 @@ fn apply_helper_guard(
 /// nullability (also `Asserted`); other negated forms are not representable as a
 /// positive fact and are skipped (documented).
 ///
+/// A **class-typed** spec (`@phpstan-assert Guest $v`, and its negation) takes the
+/// other road, because the value lane cannot spell it: the four-layer domain is
+/// object-free by construction (ADR-0035/0043 §4), so `assert_fact_of` declines
+/// every `Class` arm and the whole tag family was — until this — a silent no-op on
+/// object subjects. Class claims belong to the **class carriers** of §1, and this
+/// routes them to the one of the two that is stratified: the **contract arm lane**,
+/// narrowed arm-wise through `normalize::subtract_arm`, the same single judgment an
+/// `instanceof` guard uses, with the same polarity asymmetry (§2's class-arm rule).
+/// That lane is what ADR-0052 §3(d) names as the consumer — the declared-receiver
+/// lane, `phpdoc.undefined-method`, contract-layer — and its routing already grades
+/// by the minimum arm stratum, so a lying tag can buy the contract-layer finding it
+/// is entitled to and no proof.
+///
+/// The **`Member` carrier is deliberately refused here.** It has no stratum slot —
+/// it is documented as bound at `Verified`, and its consumers include
+/// `eval_instanceof` implication (§3(b)), which decides verdicts, prunes branches
+/// and marks regions dead. Feeding a docblock claim into a *reachability* decision
+/// is precisely the laundering §5 exists to prevent, and the fix is a stratum on
+/// `Member`, not a quiet insertion. Recorded as the slice's one deferral.
+///
 /// Returns whether the variable now carries an established fact (so the caller
 /// protects it from the by-ref invalidation) — `true` when a fact was set or a
 /// stronger/Verified fact was deliberately kept, `false` when nothing applied.
 fn apply_assert_to_var(
+    cx: &Cx,
+    decl_at: (usize, u32),
     env: &mut HashMap<String, Known>,
     store: &mut Store,
     var: &str,
     spec: &AssertSpec,
 ) -> bool {
     let cty = steins_contract::lower(&spec.ty);
+    // The class carrier, both polarities, before the value-lane road: a positive
+    // spec subtracts as `instanceof T` does (an arm dies only when it is final/enum
+    // and provably not a `T`), a negated one as `!($v instanceof T)` does (an arm
+    // dies iff it is-a `T`). An `Unknown` is-a keeps the arm either way.
+    if let steins_contract::ContractTy::Class(name) = &cty {
+        return assert_class_to_lane(cx, decl_at, store, var, name, !spec.negated);
+    }
     if spec.negated {
         // Only `!null` is representable as a positive narrowing (clear nullable);
         // other negated forms establish nothing. The narrowing is `Asserted`, so
@@ -17963,6 +18240,35 @@ fn apply_assert_to_var(
     }
     env.insert(var.to_owned(), Known::value_strat(fact, 0, Some("asserted".to_owned()), Stratum::Asserted));
     store.unbind(var);
+    true
+}
+
+/// Narrow `var`'s contract arm lane by a class-typed assertion spec, resolved in
+/// the **callee's** namespace context (`decl_at`).
+///
+/// Returns whether the lane was actually there to narrow — the by-ref protection
+/// answer, and honest: a subject with no declared arms learned nothing here, so
+/// there is nothing to protect.
+fn assert_class_to_lane(
+    cx: &Cx,
+    decl_at: (usize, u32),
+    store: &mut Store,
+    var: &str,
+    name: &str,
+    positive: bool,
+) -> bool {
+    if !store.contract.contains_key(var) {
+        return false;
+    }
+    let (file, offset) = decl_at;
+    let fqn = cx.resolve_pclass(file, offset, name).trim_start_matches('\\').to_ascii_lowercase();
+    let oracle = ProjectIsa { cx, demote_catalog: cx.a11_demote_catalog() };
+    subtract_contract_lane(
+        store,
+        var,
+        &normalize::Subtrahend::Class { fqn, polarity: positive },
+        &oracle,
+    );
     true
 }
 
