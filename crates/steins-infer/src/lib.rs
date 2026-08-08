@@ -8630,9 +8630,9 @@ fn class_const_class_fact(cx: &Cx, scope: &Scope, sc: &StaticClass, name: &str) 
         // The written form: ADR-0043's own resolution, which preserves the
         // source casing, so the value lane gets the LITERAL rather than the
         // refinement. Strictly more precise, and what the oracle asserts too.
-        StaticClass::Named(r) => Some(Fact::Singleton(Val::Str(
-            cx.class_fqn(r).trim_start_matches('\\').to_owned(),
-        ))),
+        StaticClass::Named(r) => Some(Fact::Singleton(Val::Str(PhpStr::from(
+            cx.class_fqn(r).trim_start_matches('\\'),
+        )))),
         StaticClass::SelfKw | StaticClass::Parent | StaticClass::Static => {
             (class_scope_known(scope) && scope_class(scope).is_some()).then(|| {
                 Fact::refined(Base::String, Refinement::Str(StrPreds::CLASS_STRING.close()), false)
@@ -13201,6 +13201,9 @@ fn eval_existence_call(w: &WalkCx, folder: &mut dyn Folder, call: &CallExpr) -> 
         let ArgValue::Str(name) = &call.args[0].value else {
             return Certainty::Maybe;
         };
+        let Some(name) = name.as_str() else {
+            return Certainty::Maybe;
+        };
         constant_defined_verdict(w.cx, folder, name)
     // end global constants (ADR-0078, issue #198)
     } else {
@@ -16415,8 +16418,12 @@ impl OperandKind {
 /// either an ASCII digit or a `.` followed by an ASCII digit. Anything else has
 /// no prefix and is fatal. Witnessed on both sides of the boundary: `'- 5'`
 /// (sign, space, digit) is fatal, `'-.5x'` is the warning.
-fn string_is_fatal_operand(s: &str) -> bool {
-    let b = s.as_bytes();
+fn string_is_fatal_operand(s: impl AsRef<[u8]>) -> bool {
+    // Byte-oriented, and byte-**exact** for a non-UTF-8 string: PHP's own
+    // leading-numeric prefix rule reads bytes, so `"\xC0" * 2` is the TypeError
+    // this reports and `"5\xC0" * 2` is the mere warning it does not
+    // (verified on PHP 8.5). No decline is needed here (ADR-0080 §2.5).
+    let b = s.as_ref();
     let mut i = 0;
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
         i += 1;
