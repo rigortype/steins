@@ -1241,6 +1241,177 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 91,
         message_contains: "does not parse",
     },
+    // ---------------------------------------------------------------------
+    // `type.return-missing` / `type.return-maybe-missing` (ADR-0078 §5, issue
+    // #199) — the reachability foundation's tracer, triaged 2026-08-08.
+    //
+    // The proof layer is gated whole, floor or not: a `Strict`-floor proof id must
+    // be as FP-free as a `Default`-floor one, so the sibling's rows sit here beside
+    // the definite leg's. Every row below was read against its checkout and every
+    // one is TRUE as worded.
+    //
+    // TWO REGISTERS, and the comment on each row says which:
+    //
+    // 1. **Deliberately-stub test doubles** (the fifteen public rows). Empty or
+    //    never-returning-by-intent bodies carrying a real return type. Each WOULD
+    //    fatal `Return value must be of type T, none returned` the moment it were
+    //    invoked — and several exist precisely so that invoking them is invalid.
+    //    Nothing here is a bug in the package; nothing here is an FP either. This
+    //    is what the unconditional class looks like in mature OSS: not broken
+    //    production code, but fixtures.
+    //
+    // 2. **The conditional class** (the two phpstan-src rows, id
+    //    `type.return-maybe-missing`). Live, shipped, correct code whose escape
+    //    edge no caller takes: a `switch` over a string with no `default` where
+    //    every case returns. The finding's sentence is precisely true — the body
+    //    *does* return on some paths and one path *does* fall through — and
+    //    phpstan-src passes PHPStan's own `MissingReturnRule` on both, which is
+    //    exactly why this class is floored at `strict` rather than `default`
+    //    (ADR-0078 §1.3). Pinned, not suppressed: the day the shape changes, the
+    //    row stops matching and the gate speaks up.
+    // ---------------------------------------------------------------------
+
+    // Carbon — two macro bodies registered ONLY so the PHPStan extension under test
+    // can read their declared return type: `Carbon::macro('foo', function ():
+    // CarbonInterval {});`. The closure is never called; its body is `{}`.
+    ExpectedProofFinding {
+        package: "briannesbitt/Carbon",
+        id: "type.return-missing",
+        path_suffix: "tests/PHPStan/MacroExtensionTest.php",
+        line: 66,
+        message_contains: "Return value must be of type CarbonInterval, none returned",
+    },
+    ExpectedProofFinding {
+        package: "briannesbitt/Carbon",
+        id: "type.return-missing",
+        path_suffix: "tests/PHPStan/MacroExtensionTest.php",
+        line: 238,
+        message_contains: "Return value must be of type Carbon, none returned",
+    },
+    // guzzle — eight `FnStream`/`MockHandler` decorator closures whose whole body is
+    // `self::fail('the body must not be read')`. They exist to BE invalid: reaching
+    // one is the test's failure condition. `Assert::fail()` is declared `: never` by
+    // PHPUnit, which would silence these through the never-returning-callee veto —
+    // but PHPUnit is not in guzzle's analysed universe here, so there is no
+    // declaration to resolve. The rows are correct as things stand and are expected
+    // to disappear the day cross-package callee resolution reaches them; that
+    // disappearance is a gate event, which is the point of pinning at finding
+    // precision.
+    ExpectedProofFinding {
+        package: "guzzle/guzzle",
+        id: "type.return-missing",
+        path_suffix: "tests/Handler/CurlFactoryTest.php",
+        line: 6812,
+        message_contains: "Return value must be of type bool, none returned",
+    },
+    ExpectedProofFinding {
+        package: "guzzle/guzzle",
+        id: "type.return-missing",
+        path_suffix: "tests/Handler/CurlFactoryTest.php",
+        line: 6815,
+        message_contains: "Return value must be of type string, none returned",
+    },
+    ExpectedProofFinding {
+        package: "guzzle/guzzle",
+        id: "type.return-missing",
+        path_suffix: "tests/Handler/RequestFramingTest.php",
+        line: 417,
+        message_contains: "Return value must be of type bool, none returned",
+    },
+    ExpectedProofFinding {
+        package: "guzzle/guzzle",
+        id: "type.return-missing",
+        path_suffix: "tests/Handler/RequestFramingTest.php",
+        line: 423,
+        message_contains: "Return value must be of type string, none returned",
+    },
+    ExpectedProofFinding {
+        package: "guzzle/guzzle",
+        id: "type.return-missing",
+        path_suffix: "tests/Handler/StreamHandlerTest.php",
+        line: 4516,
+        message_contains: "Return value must be of type string, none returned",
+    },
+    ExpectedProofFinding {
+        package: "guzzle/guzzle",
+        id: "type.return-missing",
+        path_suffix: "tests/Handler/StreamHandlerTest.php",
+        line: 4519,
+        message_contains: "Return value must be of type string, none returned",
+    },
+    ExpectedProofFinding {
+        package: "guzzle/guzzle",
+        id: "type.return-missing",
+        path_suffix: "tests/PrepareBodyMiddlewareTest.php",
+        line: 329,
+        message_contains: "Return value must be of type ResponseInterface, none returned",
+    },
+    ExpectedProofFinding {
+        package: "guzzle/guzzle",
+        id: "type.return-missing",
+        path_suffix: "tests/PrepareBodyMiddlewareTest.php",
+        line: 380,
+        message_contains: "Return value must be of type ResponseInterface, none returned",
+    },
+    // phpunit — a `tests/_files` fixture implementing the `Event` interface with two
+    // empty method bodies, both carrying the interface's declared return types.
+    ExpectedProofFinding {
+        package: "sebastianbergmann/phpunit",
+        id: "type.return-missing",
+        path_suffix: "tests/_files/DummyEvent.php",
+        line: 17,
+        message_contains: "DummyEvent::telemetryInfo(): Return value must be of type Info",
+    },
+    ExpectedProofFinding {
+        package: "sebastianbergmann/phpunit",
+        id: "type.return-missing",
+        path_suffix: "tests/_files/DummyEvent.php",
+        line: 21,
+        message_contains: "DummyEvent::asString(): Return value must be of type string",
+    },
+    // symfony/console — the `NonStringInput` test double: an `Input` subclass whose
+    // three overrides are empty bodies carrying the parent's return types. The test
+    // it serves drives the listener, never these methods.
+    ExpectedProofFinding {
+        package: "symfony/console",
+        id: "type.return-missing",
+        path_suffix: "Tests/EventListener/ErrorListenerTest.php",
+        line: 118,
+        message_contains: "NonStringInput::getFirstArgument(): Return value must be of type ?string",
+    },
+    ExpectedProofFinding {
+        package: "symfony/console",
+        id: "type.return-missing",
+        path_suffix: "Tests/EventListener/ErrorListenerTest.php",
+        line: 122,
+        message_contains: "NonStringInput::hasParameterOption(): Return value must be of type bool",
+    },
+    ExpectedProofFinding {
+        package: "symfony/console",
+        id: "type.return-missing",
+        path_suffix: "Tests/EventListener/ErrorListenerTest.php",
+        line: 126,
+        message_contains: "NonStringInput::getParameterOption(): Return value must be of type mixed",
+    },
+    // phpstan-src — register 2, the canonical conditional shape. A closure and a
+    // method, each a `switch` over a string with no `default` whose every case
+    // returns. The no-match edge is real in the control-flow graph and no caller
+    // supplies a string that takes it, so the code is correct by construction and
+    // unprovable by analysis — the exact reason this id is floored at `strict`.
+    ExpectedProofFinding {
+        package: "phpstan/phpstan-src",
+        id: "type.return-maybe-missing",
+        path_suffix: "src/PhpDoc/TypeNodeResolver.php",
+        line: 697,
+        message_contains: "Return value must be of type TemplateTypeVariance, none returned",
+    },
+    ExpectedProofFinding {
+        package: "phpstan/phpstan-src",
+        id: "type.return-maybe-missing",
+        path_suffix: "src/Rules/ClassNameUsageLocation.php",
+        line: 128,
+        message_contains: "ClassNameUsageLocation::createMessage(): Return value must be of type string",
+    },
 ];
 
 /// Whether `d` is a recorded, triaged TRUE proof-layer positive for `package`
