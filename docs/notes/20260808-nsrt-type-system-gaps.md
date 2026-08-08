@@ -872,3 +872,85 @@ already holds, on 107 residual rows, with no new vocabulary and no new
 computation — the cheapest measured item in this section. D1 is larger but
 unpriced; D3 and D4 are one-liners that belong with whatever touches their code
 next.
+
+## 2026-08-09 — the operator-value node, first slice (#260)
+
+The realized delta the [issue](https://github.com/rigortype/steins/issues/260)
+asks to be recorded here. Master `223712f`, phpstan-src `55a7732`, same
+instrument, same 15,845 observations.
+
+| | before | after | Δ |
+| --- | ---: | ---: | ---: |
+| `match` | 1,719 | 2,246 | **+527** |
+| `equal` | 138 | 138 | 0 |
+| `subsumed` | 246 | 246 | 0 |
+| **admissible** | **2,103** | **2,630** | **+527** |
+| `differ` | 11,703 | 11,176 | −527 |
+| `unsupported` | 1,731 | 1,731 | 0 |
+
+**Zero rows regressed** — no admissible row of the before-run is anything but
+admissible in the after-run. (The before-run's 2,103 is 4 rows above the 2,099
+the probe recorded at `9427a73`; master moved between the two, and the shift is
+not in these fixtures.)
+
+The slice is the comparison arm only: `ArgValue::Binary { op: ValueOp, lhs, rhs }`
+plus `eval_cmp` read from value position, mapped `Yes/No/Maybe → true/false/bool`.
+
+### Against the probe's six-rule table
+
+`loose-comparisons.php` moves **0 → 304 of 369**, which is the probe's predicted
+304 exactly — rule 1 (`eval_cmp` over finite value sets, 214) and rule 2 (the
+`Maybe` floor renders `bool`, 90). The residual **65** is the probe's other four
+rules, row for row, and they are all *type-family* claims rather than value ones:
+
+| n | rule | shape of the residual |
+| ---: | --- | --- |
+| 25 | array vs scalar family disjointness | `$int == $array`, `5 == $arrShape` |
+| 24 | int-range vs a value | `int<1, max> == 0`, `int<-20, -10> >= null` |
+| 14 | string refinement vs a value | `lowercase-string == 'A'`, `'' == $upper` |
+| 2 | array emptiness | `array{} == non-empty-array` |
+
+So the acceptance fixture's remainder needs the loose-comparison relation lifted
+from values to facts — a second evaluator beside `eval_cmp`, over `Fact` rather
+than over `ArgValue` — and not one more operator.
+
+### Where the other 223 rows landed
+
+23 fixtures moved; the ranking is the probe's corpus-wide one, restated by what
+actually moved: `bcmath-number` 74, `integer-range-types` 24,
+`constant-array-type-identical` 23, `equal` 20, `gmp-operators` 18, `enums` 10,
+`comparison-operators` 9, `bug-14793` 6, `loose-comparisons-php8` 6, `binary` 4,
+`bug-2443` 4, `identical` 4, `smaller-than-benevolent` 4, and 10 more fixtures
+contributing 1–3 each. Against the node's measured ceiling of **1,292 rows over
+61 fixtures**, this slice takes **527**.
+
+### What the operand lanes taught
+
+The probe classified `loose-comparisons.php`'s operands by whether
+`operand_values` could enumerate them. That function reads the **fact** lane, and
+almost none of the fixture's operands are there: `@param 1 $one` seeds a declared
+*arm*, not a fact. Reading the declared arm lane is therefore not a refinement of
+this slice — it *is* the slice's yield, and without it the fixture moves by
+single digits. The arms are read at their own `Asserted` stratum and only at the
+fact seam; `resolve_literal` (the proof-layer seam) still cannot see them, so no
+declaration is laundered into a proven value.
+
+### Deferred, with the reason
+
+**The arithmetic and bitwise arms are not in this slice, and they are not a
+lowering away.** The node carries them the moment an evaluator exists; what does
+not exist is the evaluator, and ADR-0028 says where it belongs. `&`/`|`/`^` over
+two ints look total and environment-independent — the admission argument that put
+`.` in Rust (#59) — but PHP's int width is the *engine's*, and this repo has
+already measured 64-bit against 32-bit divergence in the fold width
+classification. A Rust-side bitwise fold would be exactly the "reimplemented in
+Rust to be wrong about later" case ADR-0028 §3 names. The arm therefore wants a
+sidecar operator surface (the fold seam generalized from `(function, args)` to an
+applied operator), which is a protocol slice of its own — and the note's own
+sequencing already says the `|` arm buys nothing for `filterVar.php` until a
+global constant resolves to a value (#168).
+
+**D1 was not touched** (the guard whose negative branch erases the declared lane).
+It is real, it is not this node's, and this slice neither worsens nor depends on
+it: every fixture row here is evaluated in place, with no narrowing carried across
+a statement boundary.
