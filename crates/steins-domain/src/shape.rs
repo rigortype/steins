@@ -19,7 +19,8 @@
 //! * **No general meet** (A-G7). Narrowing arrives as the targeted refinement
 //!   operators of S4 ([`ShapeFact::promote_present`],
 //!   [`ShapeFact::mark_absent`], [`ShapeFact::set_non_empty`],
-//!   [`ShapeFact::set_is_list`]) — never a general ⊓.
+//!   [`ShapeFact::set_is_list`], [`ShapeFact::narrow_count`]) — never a
+//!   general ⊓.
 //!
 //! `is_list` is **denotational**, never syntactic (§3, RFC #14939): it is
 //! recomputed from the key structure by [`ShapeFact::normalize`], and a
@@ -203,7 +204,11 @@ type Field = (Key, Presence, Option<Box<Fact>>);
 ///   `Required` key, sorted deterministically;
 /// * `is_list` denotationally computed from the key structure, sharpened but
 ///   never contradicted by the caller's flag;
-/// * `non_empty` implied by any `Required` field.
+/// * `non_empty` implied by any `Required` field **or** by a `count_bound`
+///   whose floor is at least 1;
+/// * `count_bound` clamped to the non-negative ints, and — under a `Sealed`
+///   tail whose declared key set the floor already exhausts — discharged into
+///   `Required` presence (the exact-count pin, issue #272).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ShapeFact {
     /// Declared keys, sorted, one entry per key.
@@ -216,6 +221,12 @@ pub struct ShapeFact {
     pub non_empty: bool,
     /// Disjunctive-presence facts (A-G8).
     pub covers: Vec<Cover>,
+    /// **The count accessory** (issue #272): an entry-count interval learned
+    /// from something *other* than the key structure — a `count($x)`
+    /// comparison guard. [`IntRange::NON_NEGATIVE`] is "nothing learned", and
+    /// [`ShapeFact::count_range`] reports this interval met with the
+    /// structural one, so the two can never disagree.
+    pub count_bound: IntRange,
 }
 
 /// PHP's `array_is_list`: the keys are exactly `0..n-1`, in that order.
@@ -271,12 +282,52 @@ impl ShapeFact {
     /// is established here; nothing else may build the struct literally.
     #[must_use]
     pub fn normalize(
-        mut fields: Vec<Field>,
+        fields: Vec<Field>,
         tail: Tail,
         is_list: Certainty,
         non_empty: bool,
         covers: Vec<Cover>,
     ) -> ShapeFact {
+        ShapeFact::normalize_counted(
+            fields,
+            tail,
+            is_list,
+            non_empty,
+            covers,
+            IntRange::NON_NEGATIVE,
+        )
+    }
+
+    /// [`ShapeFact::normalize`] with a **count accessory** (issue #272).
+    ///
+    /// Three things happen to `count_bound` here and nowhere else:
+    ///
+    /// * it is clamped to the non-negative ints — no array has fewer than zero
+    ///   entries, and an interval that survives nothing of that clamp is
+    ///   dropped rather than kept (widening, the safe side: a count claim
+    ///   contradicting the domain is not a death signal, ADR-0052 §2);
+    /// * a floor of 1 or more implies `non_empty`, so the two flags state the
+    ///   same truth once;
+    /// * under a `Sealed` tail whose declared, non-`Absent` key set the floor
+    ///   already exhausts, **every declared key is present** — the exact-count
+    ///   pin. It is discharged into `Required` presence at `witnessed: false`,
+    ///   because the evidence is a count comparison, not an observation of the
+    ///   key itself (A-G9's presence stratum); an already-witnessed key keeps
+    ///   its bit.
+    ///
+    /// There is no such pin under an `Unsealed` tail: a floor there says
+    /// nothing about *which* keys are present, only how many entries exist.
+    #[must_use]
+    pub fn normalize_counted(
+        mut fields: Vec<Field>,
+        tail: Tail,
+        is_list: Certainty,
+        non_empty: bool,
+        covers: Vec<Cover>,
+        count_bound: IntRange,
+    ) -> ShapeFact {
+        let count_bound =
+            count_bound.intersect(IntRange::NON_NEGATIVE).unwrap_or(IntRange::NON_NEGATIVE);
         fields.sort_by(|a, b| a.0.cmp(&b.0));
         fields.dedup_by(|a, b| a.0 == b.0);
 
@@ -301,15 +352,29 @@ impl ShapeFact {
             fields.retain(|(_, p, _)| !matches!(p, Presence::Absent));
         }
 
+        // The exact-count pin: a sealed shape with no room left for an absent
+        // declared key. `declared` counts the fields that survived the retain
+        // above, so it is exactly the array's admitted key set.
+        if matches!(tail, Tail::Sealed)
+            && i64::try_from(fields.len()).is_ok_and(|declared| count_bound.lo() >= declared)
+        {
+            for (_, p, _) in &mut fields {
+                let keep = matches!(*p, Presence::Required { witnessed: true });
+                *p = Presence::Required { witnessed: keep };
+            }
+        }
+
         // A cover with a `Required` member is discharged.
         kept.retain(|c| !c.keys.iter().any(|k| field_of(&fields, k).is_some_and(|(_, p, _)| p.is_required())));
         let covers = antichain(kept);
 
+        let non_empty = non_empty
+            || count_bound.lo() >= 1
+            || fields.iter().any(|(_, p, _)| p.is_required());
         let computed = compute_is_list(&fields, &tail, non_empty);
         let is_list = sharpen_is_list(computed, is_list);
-        let non_empty = non_empty || fields.iter().any(|(_, p, _)| p.is_required());
 
-        ShapeFact { fields, tail, is_list, non_empty, covers }
+        ShapeFact { fields, tail, is_list, non_empty, covers, count_bound }
     }
 
     /// The degenerate shape: plain `array` (A-G1). No fields, an untyped
@@ -378,12 +443,13 @@ impl ShapeFact {
         let mut covers = self.covers.clone();
         let claims_a_key = keys.len() > 1;
         covers.push(Cover::new(keys, flavor));
-        ShapeFact::normalize(
+        ShapeFact::normalize_counted(
             self.fields.clone(),
             self.tail.clone(),
             self.is_list,
             self.non_empty || claims_a_key,
             covers,
+            self.count_bound,
         )
     }
 
@@ -515,6 +581,12 @@ impl ShapeFact {
         if self.non_empty && entries.is_empty() {
             return false;
         }
+        // The count accessory is extensional (issue #272): an array outside the
+        // learned interval is not admitted, whatever its keys say.
+        match i64::try_from(entries.len()) {
+            Ok(n) if !self.count_bound.contains(n) => return false,
+            _ => {}
+        }
         self.covers.iter().all(|c| {
             c.keys.iter().any(|k| match entries.iter().find(|(ek, _)| ek == k) {
                 None => false,
@@ -538,7 +610,14 @@ impl ShapeFact {
     ///   undeclared keys, so the ceiling is the domain's own top.
     ///
     /// `lo == hi` is exactly the exact-size case (a sealed, all-required
-    /// shape) — the caller spells that as a literal rather than an interval.
+    /// shape, or a `count_bound` pinned to a point) — the caller spells that
+    /// as a literal rather than an interval.
+    ///
+    /// The **learned** `count_bound` (issue #272) is met with the structural
+    /// interval here, which is the only place the two meet. A `count_bound`
+    /// that shares no point with the structure is a contradiction the domain
+    /// declines to represent (ADR-0052 §2: an emptied lane is no-fact, never a
+    /// death signal), so the structural answer stands.
     #[must_use]
     pub fn count_range(&self) -> IntRange {
         let required = self.fields.iter().filter(|(_, p, _)| p.is_required()).count();
@@ -552,7 +631,8 @@ impl ShapeFact {
         // `lo <= hi` holds by construction (required ⊆ declared, and a
         // non-empty sealed shape declares at least one key); the fallback
         // keeps the constructor total rather than trusting that argument.
-        IntRange::new(lo, hi).unwrap_or(IntRange::NON_NEGATIVE)
+        let structural = IntRange::new(lo, hi).unwrap_or(IntRange::NON_NEGATIVE);
+        structural.intersect(self.count_bound).unwrap_or(structural)
     }
 
     /// **Join** (A-G5): field-wise, with the tail absorbing the key-set
@@ -592,12 +672,18 @@ impl ShapeFact {
             .cloned()
             .collect();
 
-        ShapeFact::normalize(
+        ShapeFact::normalize_counted(
             fields,
             join_tails(&self.tail, &other.tail),
             Certainty::all_of([self.is_list, other.is_list]),
             self.non_empty && other.non_empty,
             covers,
+            // The accessory joins by **hull**: the union of two count intervals
+            // is bounded by the smaller floor and the larger ceiling, and the
+            // hull is the least interval containing both. A side that learned
+            // nothing carries `NON_NEGATIVE`, which absorbs the other — the
+            // join of "at least 3 entries" with "no idea" is "no idea".
+            self.count_bound.hull(other.count_bound),
         )
     }
 
@@ -672,12 +758,53 @@ impl ShapeFact {
                 }
             },
         }
-        ShapeFact::normalize(
+        ShapeFact::normalize_counted(
             fields,
             self.tail.clone(),
             self.is_list,
             self.non_empty,
             self.covers.clone(),
+            // As a *guard* this operator records a key the array already had,
+            // so the entry count is unchanged and the accessory carries. As the
+            // shape half of an offset **write** the count may grow past the
+            // ceiling — that call site relaxes it first
+            // ([`ShapeFact::relax_count_ceiling`]).
+            self.count_bound,
+        )
+    }
+
+    /// **Drop a learned count ceiling** (issue #272), keeping the floor.
+    ///
+    /// The one operator here that *widens*, and it exists for the one event
+    /// that invalidates a ceiling while leaving a floor sound: an offset write.
+    /// `$x[k] = v` can only add an entry or overwrite one, so "at least n"
+    /// survives it and "at most n" does not.
+    #[must_use]
+    pub fn relax_count_ceiling(&self) -> ShapeFact {
+        let relaxed = IntRange::new(self.count_bound.lo(), i64::MAX)
+            .unwrap_or(IntRange::NON_NEGATIVE);
+        ShapeFact { count_bound: relaxed, ..self.clone() }
+    }
+
+    /// **The count narrowing** (issue #272): meet the learned entry-count
+    /// interval with `want`, the interval the branch's `count($x)` comparison
+    /// proves.
+    ///
+    /// A narrowing like every other operator in this block — the result admits
+    /// every array the receiver admits whose entry count lies in `want` — and
+    /// like them it widens rather than bottoms where the meet is empty
+    /// ([`ShapeFact::count_range`] states that rule once, for both halves of
+    /// the interval).
+    #[must_use]
+    pub fn narrow_count(&self, want: IntRange) -> ShapeFact {
+        let met = self.count_bound.intersect(want).unwrap_or(self.count_bound);
+        ShapeFact::normalize_counted(
+            self.fields.clone(),
+            self.tail.clone(),
+            self.is_list,
+            self.non_empty,
+            self.covers.clone(),
+            met,
         )
     }
 
@@ -722,18 +849,32 @@ impl ShapeFact {
         }
         let covers: Vec<Cover> =
             self.covers.iter().filter(|c| !c.keys.contains(k)).cloned().collect();
-        ShapeFact::normalize(fields, self.tail.clone(), Certainty::Maybe, false, covers)
+        // The count **floor** goes for the same reason `non_empty` does: under
+        // the `unset` law the removed key may have been the entry the floor was
+        // counting. The ceiling survives — removing an entry cannot push the
+        // count above a bound it already respected.
+        let count_bound =
+            IntRange::new(0, self.count_bound.hi()).unwrap_or(IntRange::NON_NEGATIVE);
+        ShapeFact::normalize_counted(
+            fields,
+            self.tail.clone(),
+            Certainty::Maybe,
+            false,
+            covers,
+            count_bound,
+        )
     }
 
     /// **`non_empty` set**: the true branch of `if ($x)` on an array base.
     #[must_use]
     pub fn set_non_empty(&self) -> ShapeFact {
-        ShapeFact::normalize(
+        ShapeFact::normalize_counted(
             self.fields.clone(),
             self.tail.clone(),
             self.is_list,
             true,
             self.covers.clone(),
+            self.count_bound,
         )
     }
 
@@ -747,12 +888,13 @@ impl ShapeFact {
     /// admitted array is a list, so the true branch's meet is empty.
     #[must_use]
     pub fn set_is_list(&self, want: Certainty) -> ShapeFact {
-        ShapeFact::normalize(
+        ShapeFact::normalize_counted(
             self.fields.clone(),
             self.tail.clone(),
             want,
             self.non_empty,
             self.covers.clone(),
+            self.count_bound,
         )
     }
 }
@@ -1218,6 +1360,109 @@ mod tests {
         let s = sealed(vec![(ks("a"), req(), None)]);
         assert!(s.admits(&arr(vec![(ks("a"), Val::Null)])));
         assert!(s.admits(&arr(vec![(ks("a"), Val::Array(vec![]))])));
+    }
+
+    // ------------------------------------------------------------------
+    // The count accessory (issue #272)
+    // ------------------------------------------------------------------
+
+    /// `array<array-key, mixed>` with a learned count interval.
+    fn counted(lo: i64, hi: i64) -> ShapeFact {
+        ShapeFact::plain_array().narrow_count(IntRange::new(lo, hi).expect("ordered"))
+    }
+
+    #[test]
+    fn narrow_count_meets_and_is_read_through_count_range() {
+        assert_eq!(counted(2, 5).count_range(), IntRange::new(2, 5).expect("ordered"));
+        // A second guard meets with the first rather than replacing it.
+        assert_eq!(
+            counted(2, 5).narrow_count(IntRange::new(3, 9).expect("ordered")).count_range(),
+            IntRange::new(3, 5).expect("ordered")
+        );
+    }
+
+    #[test]
+    fn a_floor_of_one_is_non_empty_and_nothing_else() {
+        let s = counted(1, i64::MAX);
+        assert!(s.non_empty);
+        assert!(s.fields.is_empty());
+        assert!(!counted(0, 3).non_empty);
+    }
+
+    #[test]
+    fn the_accessory_is_clamped_to_the_non_negative_ints() {
+        assert_eq!(
+            ShapeFact::plain_array().narrow_count(IntRange::FULL).count_bound,
+            IntRange::NON_NEGATIVE
+        );
+        assert_eq!(counted(i64::MIN, 3).count_range(), IntRange::new(0, 3).expect("ordered"));
+    }
+
+    #[test]
+    fn a_contradicting_count_widens_rather_than_bottoming() {
+        // `array{a: int, b: int}` has exactly two entries; a guard claiming five
+        // is a contradiction the domain declines to represent, so the structural
+        // answer stands.
+        let two = sealed(vec![(ks("a"), req(), None), (ks("b"), req(), None)]);
+        assert_eq!(two.narrow_count(IntRange::point(5)).count_range(), IntRange::point(2));
+    }
+
+    #[test]
+    fn a_sealed_shape_pins_its_optional_keys_once_the_floor_exhausts_them() {
+        let s = ShapeFact::normalize(
+            vec![(k(0), req(), None), (k(1), Presence::Optional, None)],
+            Tail::Sealed,
+            Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        let pinned = s.narrow_count(IntRange::new(2, i64::MAX).expect("ordered"));
+        assert!(pinned.field(&k(1)).expect("declared").1.is_required());
+        assert_eq!(pinned.count_range(), IntRange::point(2));
+        // An unsealed tail pins nothing: a floor says how many entries exist,
+        // never which keys they are.
+        let open = counted(2, i64::MAX);
+        assert!(open.fields.is_empty());
+    }
+
+    #[test]
+    fn the_accessory_joins_by_hull_and_a_side_that_learned_nothing_absorbs() {
+        assert_eq!(
+            counted(1, 3).join(&counted(5, 8)).count_range(),
+            IntRange::new(1, 8).expect("ordered")
+        );
+        assert_eq!(
+            counted(1, 3).join(&ShapeFact::plain_array()).count_range(),
+            IntRange::NON_NEGATIVE
+        );
+    }
+
+    #[test]
+    fn the_accessory_is_extensional_in_admits() {
+        let s = counted(2, 3);
+        assert!(!s.admits(&arr(vec![(k(0), Val::Int(1))])));
+        assert!(s.admits(&arr(vec![(k(0), Val::Int(1)), (k(1), Val::Int(2))])));
+        assert!(!s.admits(&arr(vec![
+            (k(0), Val::Int(1)),
+            (k(1), Val::Int(2)),
+            (k(2), Val::Int(3)),
+            (k(3), Val::Int(4)),
+        ])));
+    }
+
+    #[test]
+    fn a_write_drops_the_ceiling_and_an_unset_drops_the_floor() {
+        let s = counted(2, 3);
+        assert_eq!(
+            s.relax_count_ceiling().count_range(),
+            IntRange::new(2, i64::MAX).expect("ordered")
+        );
+        assert_eq!(s.mark_absent(&ks("gone")).count_range(), IntRange::new(0, 3).expect("ordered"));
+        // A presence promotion is a guard, not a write: the count is unchanged.
+        assert_eq!(
+            s.promote_present(&ks("a"), false, true).count_range(),
+            IntRange::new(2, 3).expect("ordered")
+        );
     }
 
     #[test]

@@ -777,3 +777,100 @@ both guard kinds, the negated spec, and four pins: the proof-layer absence
 id stays silent (exactness is not membership), a Verified null is not
 overwritten, no value fact is minted, and ADR-0029's prefix rule still gates
 the family.
+
+
+## Note (2026-08-09): a count comparison narrows the shape it counts (issue #272)
+
+New **narrowing vocabulary**, not a new carrier and not a return rung. The
+argument-dependent `count()` rung has read `ShapeFact::count_range` since
+ADR-0062 S4; what was missing was the other direction — a `count($x)`
+comparison in *guard* position telling the shape something. `collect_refine`
+and `collect_shape_guards` dispatched on `Var`/`Literal` operands and a fixed
+predicate name set, so `if (count($x) > 0)` narrowed nothing at all.
+
+**The shape accessory.** `ShapeFact` gains one field, `count_bound: IntRange`,
+whose default (`int<0, max>`) is "nothing learned". It is an accessory in the
+S4 sense — a claim about the whole array, like `non_empty` and `is_list`, not
+about a key — and its algebra is fixed by three rules, all inside
+`normalize_counted` so no caller can restate them:
+
+* **Meet** (the narrowing, `ShapeFact::narrow_count`) is interval
+  intersection. An empty intersection **widens back to the receiver** rather
+  than bottoming: a count claim that contradicts the structure is not a death
+  signal (§2), and the shape lane has no bottom to signal it with.
+* **Join** is the interval **hull**, and a side that learned nothing absorbs
+  the other — the join of "at least 3 entries" with "no idea" is "no idea".
+  This is the same shape as `non_empty`'s `&&` in the join, generalized from
+  a floor of one to a floor of *n*, and it is why the two flags cannot
+  disagree: `non_empty` is *derived* from a floor of 1 or more, in `normalize`.
+* **Reading** it is `count_range()`, which meets the accessory with the
+  structural interval (one entry per `Required` field; a `Sealed` tail's
+  declared key set as the ceiling). The accessory is never read alone, so a
+  declaration and a guard can only sharpen each other.
+
+**The sealed/unsealed split, as the issue framed it.** An unsealed shape can
+gain a floor and a ceiling, and that is all it can gain: a floor over an
+unsealed tail says how many entries exist, never which keys they are. A
+**sealed** shape whose declared key set the floor exhausts additionally pins
+every declared key **present** — `array{0: string, 1?: string}` under
+`count($x) > 1` has no room for key `1` to be absent. That discharge happens
+in `normalize_counted`, at presence stratum `witnessed: false` (A-G9): the
+evidence is a count comparison, not an observation of the key itself.
+
+**Invalidation follows the accessory's two halves separately**, because the
+two events are asymmetric. An offset write can only add an entry, so the
+ceiling does not survive it (`relax_count_ceiling` at the write site) and the
+floor does. An `unset` can only remove one, so the floor goes (with
+`non_empty`, which `mark_absent` already dropped for the same reason) and the
+ceiling stays.
+
+**Where the dispatcher gained the operand.** `collect_shape_guards`'s `Cmp`
+arm tries `count_guard` first: it recognizes `count($x)`/`sizeof($x)` on
+either side (`count_subject`), bounds the other side to an `IntRange`
+(`operand_int_bound` — a literal int, or a binding carrying an int interval,
+so `count($x) === $n` with `$n` an `int<3, 5>` bounds as a literal would),
+normalizes the operator to read left-to-right, negates it on the false branch,
+and reads the weakest claim true over the whole bound interval. Both
+polarities record. `assert(count($x) >= 1)` needs no plumbing: assert lowers
+its argument to the same `CondExpr` and runs the same walk at its own stratum
+(the 2026-07-25 amendment), and a docblock-only claim stays `Asserted` through
+`apply_helper_guard` exactly as every other shape guard does.
+
+One **lowering** change was required and is deliberately narrow. An ordering
+comparison with an opaque operand lowered to `CondExpr::Opaque`, which
+discarded the comparison before any consumer saw it. That fallback is now
+lifted for a `count`/`sizeof` operand **only**, matched syntactically in
+steins-syntax (which has no project view); whether the name denotes the global
+builtin is still settled on the consuming side. Lifting it generally would let
+`preg_match($re, $s, $m) > 0` reach the out-parameter seed, which is a
+precision change of its own and is not taken here.
+
+**Four refusals**, each a soundness or scope requirement: the mode argument
+(`count($x, COUNT_RECURSIVE)` counts a different number, and the named
+spelling refuses with it); a project function shadowing the simple name
+(`global_function_callee`, the rule every builtin recognizer opens with); a
+bound the engine cannot pin to an interval; and `count($a) === count($b)`,
+which relates two bindings and bounds neither. `!==` narrows only against the
+point `0`, where the complement is the domain's own floor — an interior point
+exclusion has no interval spelling.
+
+ADR-0048's three constraints hold unchanged: the guard is decided from the
+condition's own syntax and applied in the scope walk that built the env it
+reads (walk-local, replayable), it introduces no new fact kind — the accessory
+rides `Fact::Shape` — and it carries no global ordering.
+
+Direction of movement: **both**, and the shape lane is the whole of it. It
+*adds* precision to `count()` readings and to sealed-shape key presence, which
+can discharge an absence finding (finding-removing) and can equally let a
+downstream check that needed a key's presence now fire (finding-adding).
+Nothing here mints a verdict or marks a region dead — `Fact::Shape` still does
+not decide guard verdicts, and `shape_facts_do_not_decide_guard_verdicts` is
+still the tripwire that says so.
+
+Fixtures: `crates/steins-infer/tests/count_guards.rs` — both polarities of the
+floor, the Yoda spelling, `sizeof`, the ceiling, the identity pin, the bounded
+variable, the sealed exact-count pin beside its unsealed complement, the
+assert lane, conjunction distribution and negation, the four refusals, and the
+write/unset invalidation pair; `crates/steins-domain/src/shape.rs` — the
+accessory's meet, join, clamp and contradiction-widening, and its extensional
+reading in `admits`.
