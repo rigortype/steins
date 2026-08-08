@@ -269,6 +269,46 @@ fn an_unknown_callee_invalidates() {
     }
 }
 
+/// Issue #41 — `use function trim;` names the **global builtin**, and the gate
+/// must read the catalog through the import exactly as it does through `\trim`.
+///
+/// This was the string family's second measured blocker: an imported call
+/// resolved to *nothing*, so every argument's fact was condemned, and a file that
+/// imports its string functions (phpstan-src's own nsrt fixtures do) lost every
+/// refinement at the first such call.
+#[test]
+fn an_imported_builtin_resolves_through_the_import() {
+    let src = |uses: &str, call: &str| {
+        format!(
+            "<?php\nnamespace App;\n{uses}\n\
+             function f(): void {{ $s = 'abc'; {call}; \\PHPStan\\dumpType($s); }}\n"
+        )
+    };
+    // The plain and leading-backslash import forms both name `trim`/`strtolower`.
+    assert_eq!(one_type(&src("use function trim;", "trim($s)")), "dumped type: 'abc'");
+    assert_eq!(
+        one_type(&src("use function \\strtolower;", "strtolower($s)")),
+        "dumped type: 'abc'"
+    );
+    // The **aliased** form is a pinned boundary, not a promise: `FnResolution`
+    // carries no resolved name, so every consumer of a `Builtin` answer keys the
+    // catalog by the call's own spelling — `t` here, which no catalog row has.
+    // Widening that is a change to the resolution enum shared with the effects and
+    // throws passes, deliberately out of this wave's scope.
+    assert_eq!(one_type(&src("use function trim as t;", "t($s)")), "dumped type: unknown");
+    // An import of a NAMESPACED name is not the builtin, whatever it is spelled:
+    // no project function defines it, so the call stays unresolved and condemns.
+    assert_eq!(one_type(&src("use function Other\\trim;", "trim($s)")), "dumped type: unknown");
+    // An import of an uncertified builtin is still not a promise.
+    assert_eq!(one_type(&src("use function sscanf;", "sscanf($s)")), "dumped type: unknown");
+    // …and an import that a project function DOES define answers from that
+    // declaration, not from the same-named builtin.
+    let shadowed = "<?php\nnamespace Other;\nfunction trim(string &$x): void {}\n\
+                    namespace App;\nuse function Other\\trim;\n\
+                    function f(): void { $s = 'abc'; trim($s); \\PHPStan\\dumpType($s); }\n";
+    assert_eq!(one_type(shadowed), "dumped type: unknown");
+}
+
 #[test]
 fn a_project_function_answers_from_its_declared_parameter() {
     // The index knows the declaration, so the by-ref bit is read, not guessed.

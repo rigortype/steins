@@ -8157,9 +8157,27 @@ impl<'a> Cx<'a> {
                 let name = r.raw.to_ascii_lowercase();
                 // `use function` import wins outright.
                 if let Some(t) = ctx.fn_imports.get(&name) {
-                    return match self.index.resolve_function(&t.to_ascii_lowercase()) {
+                    let target = t.to_ascii_lowercase();
+                    return match self.index.resolve_function(&target) {
                         Res::Unique(site) => FnResolution::User(site),
-                        _ => FnResolution::Unknown,
+                        Res::Ambiguous => FnResolution::Unknown,
+                        // `use function strtolower;` imports the **global builtin**:
+                        // the target is a single-segment name no project function
+                        // defines, which is exactly the `\strtolower` case the
+                        // `FullyQualified` arm above already answers `Builtin`.
+                        // Without this leg an import silenced every catalog answer
+                        // about the name — measured (issue #41) as the second half
+                        // of the string family's precision loss: phpstan-src's
+                        // `non-empty-string.php` imports five string builtins, and
+                        // each imported call condemned its arguments' facts at the
+                        // ADR-0070 survival gate for want of a resolution.
+                        Res::Absent => {
+                            if !target.contains('\\') && catalog_knows(&target) {
+                                FnResolution::Builtin
+                            } else {
+                                FnResolution::Unknown
+                            }
+                        }
                     };
                 }
                 let is_builtin = catalog_knows(&name);

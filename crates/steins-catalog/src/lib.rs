@@ -645,7 +645,17 @@ pub fn out_param_written_when(name: &str, position: usize) -> Option<WrittenWhen
 ///   tables corroborate each other, as do `array_slice` and its rowed splicing
 ///   sibling `array_splice`), plus
 /// * the alias spellings of foldable names (`chop`, `join`, `sizeof`), which are
-///   the same C function under a second name.
+///   the same C function under a second name, plus
+/// * the **string-producer family's non-foldable members** (issue #41):
+///   `addcslashes`, `escapeshellarg`, `escapeshellcmd`, `htmlspecialchars`,
+///   `htmlentities`, `vsprintf`. Each is a member of the string-predicate
+///   transfer table (or its recorded refusal) whose absence here was measured
+///   as the family's dominant precision loss — see the note on the constant,
+///   plus
+/// * the **`mb_*` string family** (issue #41), which is excluded from
+///   [`foldable`] for the determinism of its *result* and is nevertheless
+///   all-by-value in its *arguments* — two independent questions, and only the
+///   second one is this table's.
 ///
 /// Widening this set is deliberately a separate act with its own measurement
 /// run: every added name is a new premise for every kept fact downstream.
@@ -679,6 +689,101 @@ pub fn by_value_arg(name: &str, position: usize) -> Option<bool> {
         // bool $preserve_keys = false)` is entirely by value at `PINNED_PHP`;
         // sibling `array_splice` takes `&$array` and has an `out_params` row.
         "array_slice",
+        // ---- The string-producer family's non-foldable members (issue #41) ----
+        //
+        // Every other member of the string-predicate transfer table is already
+        // certified through [`foldable`]; these six are the family's whole
+        // uncertified remainder, and leaving them uncertified was measured as
+        // the wave's dominant precision loss rather than a theoretical one. An
+        // uncertified name makes ADR-0070's survival gate condemn every variable
+        // the call is handed, and that drop takes the **declared-arm lane** with
+        // it (`Store::unbind`) — so a single `escapeshellarg($s)` erased the
+        // `@param non-empty-string` premise of *every later statement in the
+        // scope*, and the transfers below it declined for want of a subject
+        // fact. In phpstan-src's `non-empty-string.php` one such call at line 319
+        // silenced the ~70 assertions that follow it.
+        //
+        // Certification is the reflected declaration at `PINNED_PHP`
+        // (`ReflectionFunction::getParameters`, 8.5.9, no parameter reports
+        // `isPassedByReference`), verbatim:
+        //
+        //   addcslashes(string $string, string $characters): string
+        //   escapeshellarg(string $arg): string
+        //   escapeshellcmd(string $command): string
+        //   htmlspecialchars(string $string, int $flags = …, ?string $encoding = null,
+        //                    bool $double_encode = true): string
+        //   htmlentities(string $string, int $flags = …, ?string $encoding = null,
+        //                bool $double_encode = true): string
+        //   vsprintf(string $format, array $values): string
+        //
+        // `escapeshellcmd` is here despite the transfer table *refusing* it
+        // (`escapeshellcmd("\x80") === ''`): the two questions are independent —
+        // refusing to describe a name's RESULT says nothing about whether the
+        // call can reach the caller's binding, and it cannot.
+        "addcslashes",
+        "escapeshellarg",
+        "escapeshellcmd",
+        "htmlspecialchars",
+        "htmlentities",
+        "vsprintf",
+        // ---- The `mb_*` string family (issue #41) ----------------------------
+        //
+        // These are the catalog's standing **fold** exclusion (see the "Deliberate
+        // exclusions" note: their RESULT depends on the internal encoding and, for
+        // the case pair, on a Unicode table that is not the byte-wise ASCII
+        // mapping Steins' predicates describe). That exclusion says nothing about
+        // their ARGUMENT semantics, which is this table's only question — and
+        // conflating the two was measured as costly: one `mb_strtolower($s)` in a
+        // string-heavy scope condemned every refinement that followed it
+        // (phpstan-src's `non-empty-string.php` lines 327-330 silenced the ~70
+        // assertions below them).
+        //
+        // Reflected at `PINNED_PHP` (8.5.9), every parameter by value; the last
+        // five are the 8.4+ additions, absent on older engines and harmless here
+        // (a name the engine does not have is never called):
+        //
+        //   mb_strtolower/mb_strtoupper(string $string, ?string $encoding = null)
+        //   mb_substr(string $string, int $start, ?int $length = null, ?string $encoding = null)
+        //   mb_strlen/mb_strwidth(string $string, ?string $encoding = null)
+        //   mb_convert_case(string $string, int $mode, ?string $encoding = null)
+        //   mb_convert_kana(string $string, string $mode = "KV", ?string $encoding = null)
+        //   mb_str_split(string $string, int $length = 1, ?string $encoding = null)
+        //   mb_str_pad(string $string, int $length, string $pad_string = " ",
+        //              int $pad_type = STR_PAD_RIGHT, ?string $encoding = null)
+        //   mb_strpos(string $haystack, string $needle, int $offset = 0, ?string $encoding = null)
+        //   mb_substr_count(string $haystack, string $needle, ?string $encoding = null)
+        //   mb_convert_encoding(array|string $string, string $to_encoding,
+        //                       array|string|null $from_encoding = null)
+        //   mb_check_encoding(array|string|null $value = null, ?string $encoding = null)
+        //   mb_detect_encoding(string $string, array|string|null $encodings = null,
+        //                      bool $strict = false)
+        //   mb_ucfirst/mb_lcfirst(string $string, ?string $encoding = null)
+        //   mb_trim/mb_ltrim/mb_rtrim(string $string, ?string $characters = null,
+        //                             ?string $encoding = null)
+        //
+        // `mb_internal_encoding` is deliberately ABSENT: its argument is by value
+        // too, but it is the one member that writes process-global state, and the
+        // certification is read by a gate about *keeping facts across a call* —
+        // leaving it uncertified costs nothing and states the asymmetry.
+        "mb_strtolower",
+        "mb_strtoupper",
+        "mb_substr",
+        "mb_strlen",
+        "mb_strwidth",
+        "mb_convert_case",
+        "mb_convert_kana",
+        "mb_str_split",
+        "mb_str_pad",
+        "mb_strpos",
+        "mb_substr_count",
+        "mb_convert_encoding",
+        "mb_check_encoding",
+        "mb_detect_encoding",
+        "mb_ucfirst",
+        "mb_lcfirst",
+        "mb_trim",
+        "mb_ltrim",
+        "mb_rtrim",
     ];
     match out_params(name) {
         // A transcribed row states this name's by-ref positions exhaustively.
@@ -2340,6 +2445,41 @@ mod tests {
             assert_eq!(by_value_arg("array_slice", p), Some(true), "array_slice position {p}");
         }
         assert_eq!(by_value_arg("array_splice", 0), Some(false), "array_splice is by ref");
+    }
+
+    /// Issue #41 — the string-producer family's six non-foldable members.
+    ///
+    /// Certification is per NAME here (none of them carries an `out_params` row),
+    /// so every position answers `true`, including the optional ones the string
+    /// rules read: `htmlspecialchars`' `$flags`, `vsprintf`' `$values`.
+    #[test]
+    fn by_value_arg_certifies_the_string_producer_family() {
+        for f in ["addcslashes", "escapeshellarg", "escapeshellcmd", "htmlspecialchars",
+                  "htmlentities", "vsprintf"] {
+            for p in 0..4 {
+                assert_eq!(by_value_arg(f, p), Some(true), "{f} position {p} is by value");
+            }
+            // Case-insensitive, like every other lookup.
+            assert_eq!(by_value_arg(&f.to_uppercase(), 0), Some(true), "{f} folds case");
+        }
+        // `str_replace` stays the family's rowed member: its `&$count` is position
+        // 3 and the certification must not blur that.
+        assert_eq!(by_value_arg("str_replace", 2), Some(true));
+        assert_eq!(by_value_arg("str_replace", 3), Some(false));
+    }
+
+    /// The `mb_*` family: certified for **argument** semantics while staying
+    /// outside the fold allowlist, which is about the *result*. The two answers
+    /// must be able to disagree, and this pins that they do.
+    #[test]
+    fn the_mb_family_is_by_value_without_becoming_foldable() {
+        for f in ["mb_strtolower", "mb_strtoupper", "mb_substr", "mb_strlen", "mb_convert_case",
+                  "mb_str_split", "mb_str_pad", "mb_strpos", "mb_convert_encoding", "mb_trim"] {
+            assert_eq!(by_value_arg(f, 0), Some(true), "{f} is by value");
+            assert!(!foldable(f), "{f} must NOT become foldable");
+        }
+        // The one member left out on purpose: it writes process-global state.
+        assert_eq!(by_value_arg("mb_internal_encoding", 0), None);
     }
 
     #[test]

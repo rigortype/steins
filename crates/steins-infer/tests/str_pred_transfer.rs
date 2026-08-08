@@ -476,8 +476,13 @@ fn htmlspecialchars_needs_the_substitute_flag() {
             "{f} without the substitute bit"
         );
         // …and a flags argument the rule cannot see through declines the same way.
+        // The unknown flag is `$n`, the helper's *bound* untyped parameter: issue
+        // #41 certified `htmlspecialchars`' arguments as by-value, which resolves
+        // the callee at this site and lets `variable.undefined` see an unbound name
+        // it previously could not — a correct finding, and this fixture is about the
+        // transfer, not about it.
         assert_eq!(
-            dump("non-empty-string", &format!("{f}($v, $flags)")),
+            dump("non-empty-string", &format!("{f}($v, $n)")),
             "dumped type: string",
             "{f} under a non-constant flags argument"
         );
