@@ -157,11 +157,22 @@ pub struct NsCtx {
     pub class_imports: HashMap<String, String>,
     /// `use function` imports: lowercased alias → case-preserved target FQN.
     pub fn_imports: HashMap<String, String>,
+    /// `use const` imports (issue #198): **exact-case** alias → case-preserved
+    /// target FQN. Unlike the two maps above, the keys are *not* lowercased:
+    /// constant names are case-sensitive in PHP (the case-insensitive third
+    /// argument to `define()` was removed in 8.0, and the workspace floor is 8.1
+    /// per ADR-0011), so `use const A\FOO;` binds `FOO` and nothing else.
+    pub const_imports: HashMap<String, String>,
 }
 
 impl NsCtx {
     fn global() -> Self {
-        Self { namespace: String::new(), class_imports: HashMap::new(), fn_imports: HashMap::new() }
+        Self {
+            namespace: String::new(),
+            class_imports: HashMap::new(),
+            fn_imports: HashMap::new(),
+            const_imports: HashMap::new(),
+        }
     }
 }
 
@@ -172,6 +183,7 @@ impl std::hash::Hash for NsCtx {
         self.namespace.hash(state);
         self.class_imports.len().hash(state);
         self.fn_imports.len().hash(state);
+        self.const_imports.len().hash(state);
     }
 }
 
@@ -2762,6 +2774,16 @@ pub enum DynamismKind {
     /// is *not* a dam site. The finding-breadth dam treats this as a dam site;
     /// transform obstacle detection does not (ADR-0049).
     ClassAlias,
+    /// A `define(...)` call with a **runtime-minted** name argument (ADR-0078,
+    /// issue #198) — a computed name mints a *constant* nobody can enumerate, the
+    /// exact parallel to [`Self::ClassAlias`] on the class side. A `define()` whose
+    /// name is a string literal instead contributes a [`GlobalConstDecl`] (see
+    /// [`SourceTree::global_const_decls`]) and is *not* a dam site.
+    ///
+    /// Damming is deliberately narrower than "any dynamism": this kind is read by
+    /// the `constant.undefined` ladder only, because only constant existence is put
+    /// in doubt by it — `define()` cannot mint a function or a class.
+    DefineDynamic,
 }
 
 /// One dynamic-code construct in a file (ADR-0046 §2). Collected file-wide —
@@ -2850,6 +2872,51 @@ pub struct ClassAliasEdge {
     pub target_fqn: String,
     /// The `class_alias(...)` call's source span.
     pub span: Span,
+}
+
+/// A **global constant declaration** (ADR-0078, issue #198): a `const FOO = …;`
+/// statement outside any class-like — resolved against its enclosing namespace,
+/// exactly like a function declaration — or a `define('FOO', …)` call whose name
+/// argument is a string literal. Class constants are a different namespace
+/// entirely (they live on [`ClassDecl::consts`] and are issue #197's territory)
+/// and never appear here.
+///
+/// The two forms differ in one way that matters and is honoured below: a `const`
+/// statement declares into the *current* namespace, while `define()` always takes
+/// an absolute name — `define('FOO', 1)` inside `namespace App;` declares the
+/// **global** `FOO`, not `App\FOO` (`php -r`-witnessed).
+///
+/// A `define()` whose name argument is *not* a literal declares a name no scan can
+/// read; it contributes a [`DynamismKind::DefineDynamic`] dam site instead, the
+/// same split [`ClassAliasEdge`] makes for `class_alias`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GlobalConstDecl {
+    /// The declared name, normalized by [`normalize_const_fqn`]: leading `\`
+    /// stripped, namespace segments lowercased, the final segment case-preserved.
+    pub fqn: String,
+    /// The declaration's source span.
+    pub span: Span,
+}
+
+/// Normalize a global constant name into the index's matching key: leading `\`
+/// stripped, every **namespace** segment lowercased, the final segment left
+/// exactly as written.
+///
+/// This split is PHP's, not a convenience. Constant names are case-sensitive —
+/// `define('Foo', 1)` leaves `defined('FOO')` false — while the namespace prefix
+/// they sit under is case-insensitive like every other namespace: with
+/// `namespace App; const LOCAL = 'l';`, both `defined('App\LOCAL')` and
+/// `defined('app\LOCAL')` are true and `defined('App\local')` is false (all three
+/// `php -r`-witnessed on 8.5.9). The case-insensitive third argument to `define()`
+/// died in PHP 8.0 and the workspace floor is 8.1 (ADR-0011), so there is no
+/// version fork here: constants are case-sensitive, full stop.
+#[must_use]
+pub fn normalize_const_fqn(name: &str) -> String {
+    let name = name.trim_start_matches('\\');
+    match name.rfind('\\') {
+        Some(pos) => format!("{}{}", name[..=pos].to_ascii_lowercase(), &name[pos + 1..]),
+        None => name.to_owned(),
+    }
 }
 
 /// An **anonymous class** declaration's inheritance edges (ADR-0049 A4 —
@@ -3168,6 +3235,16 @@ pub struct SourceTree {
     /// went through a computed name. See [`SourceTree::property_write_names`].
     property_writes: PropertyWrites,
     // end member absence (ADR-0078, issue #197)
+    /// Every **global constant declaration** in the file (ADR-0078, issue #198) —
+    /// `const FOO = …;` outside a class-like, and `define('FOO', …)` with a literal
+    /// name. The project-index evidence leg of the `constant.undefined` ladder.
+    global_const_decls: Vec<GlobalConstDecl>,
+    /// Every **bare constant fetch** in the file (`FOO`, `\FOO`, `Ns\FOO`), in
+    /// source order (ADR-0078, issue #198), read by the `constant.undefined`
+    /// per-file pass. `X::CONST` is a class constant — a different namespace, issue
+    /// #197's — and never appears here; nor do `true`/`false`/`null` or the magic
+    /// `__LINE__` family, which the grammar lowers as other node kinds.
+    const_refs: Vec<NameRef>,
     parse_errors: Vec<ParseError>,
     /// The comment trivia in the file, in source order (ADR-0023 inline ignores).
     comments: Vec<Comment>,
@@ -3313,6 +3390,8 @@ impl SourceTree {
             // member absence (ADR-0078, issue #197)
             property_writes: lowered.property_writes,
             // end member absence (ADR-0078, issue #197)
+            global_const_decls: lowered.global_const_decls,
+            const_refs: lowered.const_refs,
             parse_errors,
             comments,
             contexts,
@@ -3405,6 +3484,31 @@ impl SourceTree {
     #[must_use]
     pub fn hard_class_refs(&self) -> &[NameRef] {
         &self.hard_class_refs
+    }
+
+    /// Every **global constant declaration** the file makes (ADR-0078, issue #198):
+    /// `const FOO = …;` outside a class-like (resolved against its namespace) and
+    /// `define('FOO', …)` with a literal name (always absolute). Folded into the
+    /// project index as the textual half of the `constant.undefined` evidence.
+    ///
+    /// Conditionality is deliberately *not* recorded: the `if (!defined('X'))
+    /// define('X', …)` idiom declares `X` for the purposes of an absence proof
+    /// exactly as an unconditional `define` does — the branch exists precisely so
+    /// the constant ends up defined either way.
+    #[must_use]
+    pub fn global_const_decls(&self) -> &[GlobalConstDecl] {
+        &self.global_const_decls
+    }
+
+    /// Every **bare constant fetch** in the file (`FOO`, `\FOO`, `Ns\FOO`), in
+    /// source order (ADR-0078, issue #198) — the finding-position set of the
+    /// `constant.undefined` per-file pass, exactly as [`Self::hard_class_refs`] is
+    /// for `class.undefined`. `X::CONST` (issue #197's class-constant namespace),
+    /// `true`/`false`/`null` and the `__LINE__` magic family are excluded at
+    /// collection, so the list IS the verified finding-position set.
+    #[must_use]
+    pub fn const_refs(&self) -> &[NameRef] {
+        &self.const_refs
     }
 
     /// Every `foreach` statement in the file, in source order, lowered to the
@@ -3737,6 +3841,8 @@ struct Lowered {
     // member absence (ADR-0078, issue #197)
     property_writes: PropertyWrites,
     // end member absence (ADR-0078, issue #197)
+    global_const_decls: Vec<GlobalConstDecl>,
+    const_refs: Vec<NameRef>,
 }
 
 // member absence (ADR-0078, issue #197)
@@ -3806,6 +3912,10 @@ fn walk(
             // before the call itself is lowered. `rc` resolves the `X::class` spelling
             // against the enclosing namespace context, exactly as PHP does.
             classify_class_alias(c, rc, out);
+            // `define(...)` (ADR-0078, issue #198): a literal name mints a global
+            // constant declaration, a computed one mints a dam site — the same
+            // compile-time/runtime split `classify_class_alias` makes just above.
+            classify_define(c, out);
             // `func_get_args()` under a typed signature (issue #30, report-only):
             // the declaration announces an argument shape the body then bypasses.
             if typed_sig
@@ -3863,6 +3973,19 @@ fn walk(
                 .any(|i| PREG_FLAG_CONST_NAMES.contains(&bytes_to_string(i.name.value).as_str()))
             {
                 out.preg_flag_const_declared = true;
+            }
+            // …and the same statement declares global constants (ADR-0078, issue
+            // #198), one per item, resolved against the enclosing namespace exactly
+            // as a function declaration is. A class constant is a `ClassLikeConstant`
+            // node, never this one, so nothing here can leak into issue #197's
+            // namespace.
+            for item in con.items.iter() {
+                let name = bytes_to_string(item.name.value);
+                let offset = to_span(item.name.span).start;
+                out.global_const_decls.push(GlobalConstDecl {
+                    fqn: normalize_const_fqn(&qualify_const_decl(rc, offset, &name)),
+                    span: to_span(item.name.span),
+                });
             }
         }
         // `use const … as PHP_VERSION_ID` / `use const …\PHP_VERSION_ID` (issue
@@ -3967,6 +4090,23 @@ fn walk(
             out.property_writes.push_lvalue(t.value);
         }
         // end member absence (ADR-0078, issue #197)
+        // A **bare constant fetch** (ADR-0078, issue #198) — the one position a
+        // global constant is read from, and a fatal `Error: Undefined constant "X"`
+        // since PHP 8.0 (`php -r`-witnessed on 8.5.9). The grammar does the
+        // excluding for us: `X::CONST` is `ClassConstantAccess` (issue #197's
+        // namespace), `__LINE__` and friends are `MagicConstant`, and `true` /
+        // `false` / `null` lex as `Literal` — none of them reach this arm. The one
+        // textual exclusion below is belt-and-braces for the reserved trio, which
+        // are case-insensitive keywords and could never be a finding whatever a
+        // future grammar change did with them.
+        Node::ConstantAccess(ca) => {
+            let r = name_ref(&ca.name);
+            let reserved = !r.raw.contains('\\')
+                && ["true", "false", "null"].iter().any(|k| r.raw.eq_ignore_ascii_case(k));
+            if !reserved {
+                out.const_refs.push(r);
+            }
+        }
         // (b) Inheritance (issue #182): `extends` / `implements` on a class, an
         // enum's `implements`, an interface's (multiple) `extends`, and a `use`
         // of a trait in a class body. Every one of these is a fatal at CLASS LOAD
@@ -4271,6 +4411,61 @@ fn classify_class_alias(c: &FunctionCall<'_>, rc: &RefResolver, out: &mut Lowere
     } else {
         out.dynamism.push(DynamismSite { kind: DynamismKind::ClassAlias, span });
     }
+}
+
+/// Classify a `define(...)` call (ADR-0078, issue #198), the constant-side twin of
+/// [`classify_class_alias`]: a **compile-time** name argument mints a
+/// [`GlobalConstDecl`] the index reads as evidence of definition; a name that only
+/// exists at run time makes it a [`DynamismKind::DefineDynamic`] dam site, because a
+/// computed `define` can mint *any* constant name and no scan can enumerate it.
+///
+/// Two deliberate differences from the `class_alias` classifier:
+///
+/// * the name is **not** resolved against the namespace or `use` imports.
+///   `define('FOO', 1)` inside `namespace App;` declares the global `FOO`, not
+///   `App\FOO` — `php -r`-witnessed on 8.5.9 — so the literal is the whole FQN.
+/// * `X::class` is not accepted as a name. It is a compile-time string, but a
+///   `define` keyed on a class name is not an idiom worth a special case; it falls
+///   through to the dam, which is the sound direction.
+///
+/// Callee recognition is `class_alias`'s: the unqualified spelling (subject to PHP's
+/// global function fallback) or the fully-qualified `\define`; a namespaced
+/// `Foo\define` is a different symbol and is ignored entirely.
+fn classify_define(c: &FunctionCall<'_>, out: &mut Lowered) {
+    let Expression::Identifier(id) = c.function else { return };
+    if !matches!(id, Identifier::Local(_) | Identifier::FullyQualified(_)) {
+        return;
+    }
+    if !bytes_to_string(id.last_segment()).eq_ignore_ascii_case("define") {
+        return;
+    }
+    let span = to_span(c.span());
+    // The name is the FIRST positional (non-spread) argument. A named or spread
+    // first argument is not read — it dams, like every other unreadable name.
+    let literal = match c.argument_list.arguments.iter().next() {
+        Some(Argument::Positional(p)) if p.ellipsis.is_none() => {
+            match lower_concat(p.value.unparenthesized()) {
+                ConcatVal::Str(s) => Some(s),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    match literal {
+        Some(name) => out
+            .global_const_decls
+            .push(GlobalConstDecl { fqn: normalize_const_fqn(name.trim()), span }),
+        None => out.dynamism.push(DynamismSite { kind: DynamismKind::DefineDynamic, span }),
+    }
+}
+
+/// The FQN a `const NAME = …;` statement at `offset` declares: the enclosing
+/// namespace joined to the written name, or the name alone in the global namespace.
+/// Case is preserved on both halves — [`normalize_const_fqn`] is what decides which
+/// half folds.
+fn qualify_const_decl(rc: &RefResolver, offset: u32, name: &str) -> String {
+    let ns = &ctx_of(rc.contexts, rc.regions, offset).namespace;
+    if ns.is_empty() { name.to_owned() } else { format!("{ns}\\{name}") }
 }
 
 /// Lower one `class_alias` argument to the normalized index-key FQN it names at
@@ -9341,15 +9536,18 @@ fn collect_namespaces(
     }
 }
 
-/// Fold one `use` statement's items into a context — every class/function import
-/// form: the plain sequence (`use A\B, C\D;`), the typed sequence
-/// (`use function a\b;`), and the **grouped** forms (`use A\{B, C}`,
-/// `use function A\{b, c}`, and the mixed `use A\{B, function c, const D}`). Only
-/// `use const` items are skipped (constant resolution is out of scope).
+/// Fold one `use` statement's items into a context — every import form: the plain
+/// sequence (`use A\B, C\D;`), the typed sequences (`use function a\b;`,
+/// `use const A\FOO;`), and the **grouped** forms (`use A\{B, C}`,
+/// `use function A\{b, c}`, `use const A\{X, Y}`, and the mixed
+/// `use A\{B, function c, const D}`).
 ///
 /// Grouped imports must be lowered because an unresolved import falls back through
 /// [`resolve_class_ref`] to the enclosing namespace and can collide with a different
-/// class, producing a false positive (ADR-0049 §6).
+/// class, producing a false positive (ADR-0049 §6). `use const` items joined the
+/// same discipline with issue #198, for the same reason on the constant side: an
+/// unlowered const import would make `FOO` read as `Ns\FOO` and manufacture an
+/// absence. Their alias keys are exact-case — see [`NsCtx::const_imports`].
 fn add_use(u: &mago_syntax::cst::Use<'_>, ctx: &mut NsCtx) {
     match &u.items {
         UseItems::Sequence(seq) => {
@@ -9358,42 +9556,53 @@ fn add_use(u: &mago_syntax::cst::Use<'_>, ctx: &mut NsCtx) {
                 ctx.class_imports.insert(use_item_alias(item), target);
             }
         }
-        UseItems::TypedSequence(seq) if seq.r#type.is_function() => {
+        // `use function a\b;` and `use const A\FOO, B\BAR;` (the latter, issue #198,
+        // with exact-case alias keys).
+        UseItems::TypedSequence(seq) => {
+            let is_fn = seq.r#type.is_function();
             for item in seq.items.iter() {
                 let target = bytes_to_string(item.name.value()).trim_start_matches('\\').to_owned();
-                ctx.fn_imports.insert(use_item_alias(item), target);
+                if is_fn {
+                    ctx.fn_imports.insert(use_item_alias(item), target);
+                } else {
+                    ctx.const_imports.insert(use_item_bound_name(item), target);
+                }
             }
         }
         // Grouped `use function A\{b, c}` / `use const A\{X, Y}`: one leading type
         // applies to every item under the `A\` prefix.
         UseItems::TypedList(list) => {
+            let prefix = bytes_to_string(list.namespace.value());
             if list.r#type.is_function() {
-                let prefix = bytes_to_string(list.namespace.value());
                 for item in list.items.iter() {
                     ctx.fn_imports.insert(use_item_alias(item), group_target(&prefix, item));
+                }
+            } else if list.r#type.is_const() {
+                for item in list.items.iter() {
+                    ctx.const_imports
+                        .insert(use_item_bound_name(item), group_target(&prefix, item));
                 }
             }
         }
         // Grouped `use A\{B, function c, const D}`: each item carries its own
-        // optional type (`None` ⇒ class, `Function` ⇒ function, `Const` ⇒ skip).
+        // optional type (`None` ⇒ class, `Function` ⇒ function, `Const` ⇒ constant).
         UseItems::MixedList(list) => {
             let prefix = bytes_to_string(list.namespace.value());
             for mti in list.items.iter() {
                 let target = group_target(&prefix, &mti.item);
-                let alias = use_item_alias(&mti.item);
                 match &mti.r#type {
                     None => {
-                        ctx.class_imports.insert(alias, target);
+                        ctx.class_imports.insert(use_item_alias(&mti.item), target);
                     }
                     Some(t) if t.is_function() => {
-                        ctx.fn_imports.insert(alias, target);
+                        ctx.fn_imports.insert(use_item_alias(&mti.item), target);
                     }
-                    Some(_) => {} // `const` — out of scope.
+                    Some(_) => {
+                        ctx.const_imports.insert(use_item_bound_name(&mti.item), target);
+                    }
                 }
             }
         }
-        // `use const A\B;` — out of scope.
-        UseItems::TypedSequence(_) => {}
     }
 }
 
@@ -9450,6 +9659,17 @@ fn use_item_alias(item: &mago_syntax::cst::UseItem<'_>) -> String {
         None => bytes_to_string(item.name.last_segment()),
     }
     .to_ascii_lowercase()
+}
+
+/// The **exact-case** name a `use` item binds — [`use_item_alias`]'s constant-side
+/// twin (issue #198). Same rule (the explicit `as` alias, else the imported name's
+/// last segment) with the lowercasing omitted, because constant names are
+/// case-sensitive and `use const A\FOO;` binds `FOO`, never `foo`.
+fn use_item_bound_name(item: &mago_syntax::cst::UseItem<'_>) -> String {
+    match &item.alias {
+        Some(a) => bytes_to_string(a.identifier.value),
+        None => bytes_to_string(item.name.last_segment()),
+    }
 }
 
 /// The full target FQN of a grouped-`use` item: `<prefix>\<item name>`, each side

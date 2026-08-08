@@ -39,7 +39,9 @@ use steins_db::{
     Db, DeclSite, PluginFacts, Project, ProjectIndex, ProjectLayout, Resolve, SourceFile, parse,
     project_index,
 };
-use steins_sidecar::{EnvInfo, FoldArg, FoldKey, FoldResult, FoldValue, PregCompile, Reflection};
+use steins_sidecar::{
+    ConstantDefined, EnvInfo, FoldArg, FoldKey, FoldResult, FoldValue, PregCompile, Reflection,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use steins_sidecar::Sidecar;
 use steins_syntax::CallExpr;
@@ -53,6 +55,8 @@ use steins_syntax::{
     // invalid operands (ADR-0078, issue #191)
     BinaryOperandOp, OperandSite, OperandSiteKind, UnaryOperandOp,
     // end invalid operands (ADR-0078, issue #191)
+    TypeMember, Visibility, duplicate_array_keys, normalize_array, normalize_const_fqn,
+    php_canonical_int_string,
 };
 // return missing (ADR-0078, issue #199)
 pub use steins_syntax::{BodyEnd, body_end, body_has_terminator};
@@ -166,6 +170,18 @@ pub const CALL_UNDEFINED_METHOD_ID: &str = "call.undefined-method";
 /// static-property fetch) whose FQN is absent from the index, the builtin
 /// hierarchy, and the sidecar, with the dam clear.
 pub const CLASS_UNDEFINED_ID: &str = "class.undefined";
+
+// global constants (ADR-0078, issue #198)
+/// The registry id for the undefined-**global-constant** check (ADR-0078, issue
+/// #198, proof layer): a bare constant fetch (`FOO`, `\FOO`, `Ns\FOO`) that no
+/// `const` statement and no literal `define()` in the universe declares, and the
+/// project's own PHP reports as not defined, with the dam clear.
+///
+/// Fetching one is a fatal `Error: Undefined constant "FOO"` since PHP 8.0
+/// (`php -r`-witnessed on 8.5.9). `X::CONST` is a **class** constant — a different
+/// member namespace, and issue #197's id, not this one.
+pub const CONSTANT_UNDEFINED_ID: &str = "constant.undefined";
+// end global constants (ADR-0078, issue #198)
 
 /// The registry id for the too-few-arguments check (ADR-0049 §6, proof layer): a
 /// uniquely-resolved call passing fewer positional arguments than the target's
@@ -1116,6 +1132,9 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // invalid operands (ADR-0078, issue #191)
     INVALID_OPERAND_ID,
     // end invalid operands (ADR-0078, issue #191)
+    // global constants (ADR-0078, issue #198)
+    CONSTANT_UNDEFINED_ID,
+    // end global constants (ADR-0078, issue #198)
 ];
 
 /// Ids **registered ahead of emission**: they exist in [`DIAGNOSTIC_REGISTRY`]
@@ -1211,6 +1230,25 @@ pub trait Folder {
         let _ = fqn;
         None
     }
+
+    // global constants (ADR-0078, issue #198)
+    /// Ask the project's own PHP whether the global constant `name` is defined —
+    /// the `constant.undefined` ladder's boot-surface leg. `Some(true)` is a
+    /// homonym (an extension constant, or one a loaded bootstrap defined) and
+    /// forces silence; `Some(false)` is definitively absent; `None` is
+    /// unanswerable (no sidecar / a mid-run failure ⇒ silence). The default is
+    /// `None` — the sound subset (ADR-0004).
+    ///
+    /// Unlike [`Self::boot_surface_function`] and
+    /// [`Self::boot_surface_class_like`], `name` is **case-preserved**: PHP
+    /// constant names are case-sensitive (the case-insensitive third argument to
+    /// `define()` was removed in 8.0, and the workspace floor is 8.1 per
+    /// ADR-0011), so a lowercased query would be a different question.
+    fn boot_surface_constant(&mut self, name: &str) -> Option<bool> {
+        let _ = name;
+        None
+    }
+    // end global constants (ADR-0078, issue #198)
 
     /// The project's own PHP `(major, minor)` from the sidecar `env()` — the
     /// ADR-0052 A11 version-skew input. `None` (the default / sound subset) when no
@@ -1361,6 +1399,13 @@ pub trait FoldEngine {
     /// `None` declines — no engine, a failed request, or a `false` return the
     /// runner could not attribute to a compile refusal.
     fn preg_compile(&mut self, pattern: &str) -> Option<PregCompile>;
+    // global constants (ADR-0078, issue #198)
+    /// Whether the engine has the global constant `name` — its `defined($name)`
+    /// (ADR-0078, issue #198). `name` is the resolved FQN with case preserved:
+    /// constants are case-sensitive, so unlike `reflect` this question is not
+    /// case-blind. `None` declines.
+    fn constant_defined(&mut self, name: &str) -> Option<ConstantDefined>;
+    // end global constants (ADR-0078, issue #198)
 }
 
 /// The **policy** half of the fold seam: a [`Folder`] over any [`FoldEngine`],
@@ -1419,6 +1464,17 @@ pub struct EngineFolder<E: FoldEngine> {
     /// [`Self::set_php_target`] does not drop it. The target gate lives at the
     /// check, on `absence_family_available`.
     preg_refusal_memo: HashMap<String, Option<String>>,
+    // global constants (ADR-0078, issue #198)
+    /// Per-**name** memo of the constant-existence oracle (issue #198). Keyed by
+    /// the name verbatim, with nothing lowercased: PHP constant names are
+    /// case-sensitive, so `FOO` and `Foo` are genuinely different questions and
+    /// folding them together would answer one with the other.
+    ///
+    /// Target-dependent, like the two boot-surface memos it sits beside: which
+    /// constants exist is a property of the interrogated engine, and
+    /// [`Self::set_php_target`] changes whether that engine may be believed.
+    boot_surface_const_memo: HashMap<String, Option<bool>>,
+    // end global constants (ADR-0078, issue #198)
     /// The project's declared target PHP range (issue #28), when the layout
     /// resolved one. Set by the CLI after layout discovery; gates the absence
     /// family (the boot surface interrogated must be a declared-supported
@@ -1443,6 +1499,7 @@ impl<E: FoldEngine> EngineFolder<E> {
             return_type_memo: HashMap::new(),
             param_counts_memo: HashMap::new(),
             preg_refusal_memo: HashMap::new(),
+            boot_surface_const_memo: HashMap::new(),
             php_target: None,
         }
     }
@@ -1469,6 +1526,7 @@ impl<E: FoldEngine> EngineFolder<E> {
             self.param_counts_memo.clear();
             self.boot_surface_memo.clear();
             self.boot_surface_fn_memo.clear();
+            self.boot_surface_const_memo.clear();
         }
         self.php_target = target;
     }
@@ -1693,6 +1751,20 @@ impl<E: FoldEngine> Folder for EngineFolder<E> {
         self.boot_surface_fn_memo.insert(fqn.to_owned(), answer);
         answer
     }
+
+    // global constants (ADR-0078, issue #198)
+    fn boot_surface_constant(&mut self, name: &str) -> Option<bool> {
+        if let Some(cached) = self.boot_surface_const_memo.get(name) {
+            return *cached;
+        }
+        let answer = self
+            .engine
+            .constant_defined(name)
+            .map(|d| matches!(d, steins_sidecar::ConstantDefined::Defined));
+        self.boot_surface_const_memo.insert(name.to_owned(), answer);
+        answer
+    }
+    // end global constants (ADR-0078, issue #198)
 
     fn php_minor(&mut self) -> Option<(u16, u16)> {
         if let Some(cached) = self.php_minor {
@@ -2079,6 +2151,10 @@ impl FoldEngine for ProcessEngine {
     fn preg_compile(&mut self, pattern: &str) -> Option<PregCompile> {
         self.call(|sc| sc.preg_compile(pattern)).flatten()
     }
+
+    fn constant_defined(&mut self, name: &str) -> Option<ConstantDefined> {
+        self.call(|sc| sc.constant_defined(name)).flatten()
+    }
 }
 
 /// The default native folder: the shared policy over the process transport.
@@ -2205,6 +2281,11 @@ impl FoldEngine for TableEngine {
     fn preg_compile(&mut self, pattern: &str) -> Option<PregCompile> {
         let answer = self.ask("preg_compile", &steins_sidecar::preg_compile_params(pattern))?;
         steins_sidecar::parse_preg_compile_result(&answer)
+    }
+
+    fn constant_defined(&mut self, name: &str) -> Option<ConstantDefined> {
+        let answer = self.ask("defined", &steins_sidecar::defined_params(name))?;
+        steins_sidecar::parse_defined_result(&answer)
     }
 }
 
@@ -2650,6 +2731,26 @@ struct Index {
     /// the obstacle is keyed by name rather than by receiver.
     property_writes: (HashSet<String>, bool),
     // end member absence (ADR-0078, issue #197)
+    // global constants (ADR-0078, issue #198)
+    /// Every global constant the universe declares, keyed by
+    /// [`steins_syntax::normalize_const_fqn`] (namespace lowercased, final segment
+    /// case-preserved).
+    ///
+    /// A **set**, not a `Site` map, and that is the whole design: this table exists
+    /// for one absence proof, which asks "does anything define this name?" and
+    /// nothing else. There is therefore no `Unique`/`Ambiguous` distinction to
+    /// draw — two `define('X', …)` calls are a redefinition *warning* at run time
+    /// and the first one wins, so the name is still defined either way, and a
+    /// duplicate `const X` is a load-time fatal that is the declaration-fatal
+    /// family's business, not this id's. Presence can only silence an absence
+    /// claim, never raise one.
+    ///
+    /// Scanned off the [`FileUnit`] slice rather than carried on the salsa
+    /// [`ProjectIndex`], the same route [`Self::magic_obstacles`] takes: the
+    /// lowering (which salsa memoizes) already holds the records, and a set with no
+    /// site identity needs none of the project index's collision machinery.
+    constants: HashSet<String>,
+    // end global constants (ADR-0078, issue #198)
 }
 
 // member absence (ADR-0078, issue #197)
@@ -2704,6 +2805,7 @@ impl Index {
         // member absence (ADR-0078, issue #197)
         idx.property_writes = scan_property_writes(units);
         // end member absence (ADR-0078, issue #197)
+        idx.constants = scan_global_constants(units);
         idx
     }
 
@@ -2734,8 +2836,17 @@ impl Index {
         // member absence (ADR-0078, issue #197)
         idx.property_writes = scan_property_writes(units);
         // end member absence (ADR-0078, issue #197)
+        idx.constants = scan_global_constants(units);
         idx
     }
+
+    // global constants (ADR-0078, issue #198)
+    /// Whether **anything in the universe** declares the global constant `key`
+    /// (already normalized by [`steins_syntax::normalize_const_fqn`]).
+    fn declares_constant(&self, key: &str) -> bool {
+        self.constants.contains(key)
+    }
+    // end global constants (ADR-0078, issue #198)
 
     /// The A14 records a single class-like **declares itself** (no chain walk).
     /// Empty for every class-like that spells none of the tags.
@@ -2791,6 +2902,23 @@ impl Index {
     fn has_simple_function(&self, simple: &str) -> bool {
         self.fn_by_simple.contains_key(&simple.to_ascii_lowercase())
     }
+}
+
+/// Scan the universe for every global constant declaration (ADR-0078, issue #198)
+/// — `const FOO = …;` and `define('FOO', …)` alike, already normalized to the
+/// matching key by the lowering.
+///
+/// Vendor files are **included**, deliberately: a constant a package declares is
+/// as real as one the project declares, and the vendor presumption of ADR-0046 §2
+/// is about unproven *dynamism*, not about ignoring plain declarations.
+fn scan_global_constants(units: &[FileUnit]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for u in units {
+        for decl in u.tree.global_const_decls() {
+            out.insert(decl.fqn.clone());
+        }
+    }
+    out
 }
 
 /// Scan every class-like docblock in the project for magic-member tags, keyed by
@@ -3360,6 +3488,16 @@ fn check_units(
                 continue;
             }
             check_undefined_class(&cx, folder, r, &mut out);
+        }
+
+        // --- The `constant.undefined` pass (ADR-0078, issue #198): the file's bare
+        // constant fetches, judged once each, with the same dead-region skip — which
+        // IS this id's guard leg, exactly as it is for `class.undefined` above.
+        for r in cx.tree().const_refs() {
+            if in_dead(&dead_spans, r.offset) {
+                continue;
+            }
+            check_undefined_constant(&cx, folder, r, &mut out);
         }
 
         // --- `array.duplicate-key` (ADR-0078, issue #187): every literal array
@@ -12724,6 +12862,9 @@ fn existence_predicate(cx: &Cx, call: &CallExpr) -> Option<&'static str> {
         "interface_exists",
         "trait_exists",
         "enum_exists",
+        // global constants (ADR-0078, issue #198)
+        "defined",
+        // end global constants (ADR-0078, issue #198)
     ];
     PREDS.iter().copied().find(|p| callee.eq_ignore_ascii_case(p))
 }
@@ -12759,6 +12900,16 @@ fn eval_existence_call(w: &WalkCx, folder: &mut dyn Folder, call: &CallExpr) -> 
             return Certainty::Maybe;
         };
         function_exists_verdict(w.cx, folder, name)
+    // global constants (ADR-0078, issue #198)
+    } else if pred == "defined" {
+        if !call.positional_only || call.args.len() != 1 {
+            return Certainty::Maybe;
+        }
+        let ArgValue::Str(name) = &call.args[0].value else {
+            return Certainty::Maybe;
+        };
+        constant_defined_verdict(w.cx, folder, name)
+    // end global constants (ADR-0078, issue #198)
     } else {
         // `class_exists`/`interface_exists`/`trait_exists`/`enum_exists('Name')`.
         if !call.positional_only || call.args.is_empty() {
@@ -12878,6 +13029,43 @@ fn function_exists_verdict(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Cert
     }
 }
 
+// global constants (ADR-0078, issue #198)
+/// The three-valued `defined('NAME')` verdict — deliberately **two**-valued in
+/// practice: it answers `No` or `Maybe`, and never `Yes`.
+///
+/// That asymmetry is the whole point. `defined()` asks a question about the state
+/// of the *running* process, not about the text: a `define('X', 1)` sitting in the
+/// universe has not necessarily executed by the time this call runs, and the single
+/// most common shape in real code is precisely the one where it has not —
+/// `if (!defined('X')) { define('X', …); }`, whose body exists because `defined`
+/// is false there. Folding a declared constant to `Yes` would mark that body dead
+/// and delete findings inside it on a claim PHP does not make.
+///
+/// `No` is safe in the opposite direction and is what buys `constant.undefined` its
+/// guard leg for free: when nothing in the universe declares the name, the dam is
+/// clear for constants, and the project's own PHP reports it not defined, then the
+/// call provably returns `false` — so `if (defined('X')) { echo X; }` folds its body
+/// dead and the fetch inside is never judged. That is the same mechanism
+/// `class.undefined` uses, resting on the same closure the ladder itself needs.
+///
+/// `name` is case-sensitive on its final segment; [`steins_syntax::normalize_const_fqn`]
+/// is what decides which half of the name folds case.
+fn constant_defined_verdict(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Certainty {
+    let key = steins_syntax::normalize_const_fqn(name);
+    if cx.index.declares_constant(&key) {
+        // Declared somewhere — but "declared" is not "already executed". Maybe.
+        return Certainty::Maybe;
+    }
+    if !cx.dam.constants_are_clear() {
+        return Certainty::Maybe;
+    }
+    match folder.boot_surface_constant(&key) {
+        Some(false) => Certainty::No,
+        Some(true) | None => Certainty::Maybe,
+    }
+}
+// end global constants (ADR-0078, issue #198)
+
 /// The three-valued `class_exists`/`interface_exists`/`trait_exists`/`enum_exists`
 /// verdict (ADR-0049 §4 / S1 existence). A uniquely-indexed unconditional project
 /// class-like of the MATCHING kind is present; an absent name the boot surface reports
@@ -12962,6 +13150,18 @@ fn existence_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Option<Vouch> {
             return None;
         };
         Some(Vouch::Function(name.trim_start_matches('\\').to_ascii_lowercase()))
+    // global constants (ADR-0078, issue #198)
+    } else if pred == "defined" {
+        // `defined('X')` vouches nothing, on purpose. The absence id it guards
+        // (`constant.undefined`) is judged by a file-wide pass with no branch store
+        // — exactly like `class.undefined` — and takes its guard leg from dead-region
+        // pruning instead: a `defined('X')` whose constant meets this id's firing
+        // conditions folds to `false` under the SAME closure the ladder rests on
+        // (see `constant_defined_verdict`), so the guarded branch is already dead
+        // before the pass looks at it. The arm exists so the class-predicate arm
+        // below cannot mistake a constant name for a class name.
+        None
+    // end global constants (ADR-0078, issue #198)
     } else {
         if !call.positional_only || call.args.is_empty() {
             return None;
@@ -20501,6 +20701,154 @@ fn check_undefined_class(cx: &Cx, folder: &mut dyn Folder, r: &NameRef, out: &mu
         line: pos.line,
         column: pos.column,
         message: format!("reference to undefined class {display} — {evidence}"),
+        facet: None,
+        fix: None,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// `constant.undefined` (ADR-0078, issue #198) — the absence family's global-constant
+// member. Shorter than the class ladder only in that there is no hierarchy to
+// enumerate; every other leg is the same, and one is stricter.
+// ---------------------------------------------------------------------------
+
+/// Resolve a bare constant fetch to its provably-**absent** target under PHP's
+/// constant name resolution (ADR-0078, issue #198): `Some((display, candidates))`
+/// when every name the fetch could denote is undeclared in the universe, `None`
+/// otherwise (something declares it ⇒ silence).
+///
+/// The resolution shape is `undefined_function_target`'s, reused rather than
+/// reinvented, because PHP resolves the two the same way — including the global
+/// fallback that classes do not get: an unqualified `FOO` inside `namespace App;`
+/// tries `App\FOO` and then the global `FOO` (`php -r`-witnessed on 8.5.9). Three
+/// differences, each forced by the language:
+///
+/// * **case**. Constants are case-sensitive; only the namespace prefix folds
+///   ([`steins_syntax::normalize_const_fqn`]). `defined('App\LOCAL')` and
+///   `defined('app\LOCAL')` are both true while `defined('App\local')` is false.
+/// * **imports**. An unqualified name consults `use const` imports
+///   ([`steins_syntax::NsCtx::const_imports`]), not `use function`; a qualified
+///   name's first segment consults the ordinary class/namespace imports, since
+///   that segment is a namespace either way.
+/// * **no catalog leg**. `undefined_function_target` treats a catalogued builtin as
+///   proof of presence; there is no such step here, and there must not be — the
+///   builtin catalog is never an absence oracle (ADR-0049 §1) and a *presence*
+///   catalog for constants would be a second, staler copy of the answer the sidecar
+///   already gives. Engine and extension constants are refuted (or not) by the boot
+///   surface alone.
+///
+/// `display` is the source-cased primary target (PHP's own phrasing at the fatal);
+/// `candidates` are the normalized keys the boot-surface leg must also refute — two
+/// for an unqualified in-namespace fetch, one otherwise.
+fn undefined_constant_target(cx: &Cx, r: &NameRef) -> Option<(String, Vec<String>)> {
+    let undeclared = |key: &str| !cx.index.declares_constant(key);
+    match r.kind {
+        RefKind::FullyQualified => {
+            let key = normalize_const_fqn(&r.raw);
+            undeclared(&key).then(|| (r.raw.clone(), vec![key]))
+        }
+        RefKind::Qualified => {
+            // The first segment is a namespace, so it resolves through the class /
+            // namespace import map — the same rule `undefined_function_target` uses.
+            // No global fallback for a qualified name.
+            let ctx = cx.tree().ctx_at(r.offset);
+            let first_len = r.raw.find('\\').unwrap_or(r.raw.len());
+            let first = &r.raw[..first_len];
+            let fqn = if let Some(t) = ctx.class_imports.get(&first.to_ascii_lowercase()) {
+                format!("{t}{}", &r.raw[first_len..])
+            } else if ctx.namespace.is_empty() {
+                r.raw.clone()
+            } else {
+                format!("{}\\{}", ctx.namespace, r.raw)
+            };
+            let key = normalize_const_fqn(&fqn);
+            undeclared(&key).then_some((fqn, vec![key]))
+        }
+        RefKind::Relative => {
+            // A8: `namespace\FOO` — the enclosing-ns candidate only, no fallback.
+            let ctx = cx.tree().ctx_at(r.offset);
+            let fqn = if ctx.namespace.is_empty() {
+                r.raw.clone()
+            } else {
+                format!("{}\\{}", ctx.namespace, r.raw)
+            };
+            let key = normalize_const_fqn(&fqn);
+            undeclared(&key).then_some((fqn, vec![key]))
+        }
+        RefKind::Unqualified => {
+            let ctx = cx.tree().ctx_at(r.offset);
+            // A `use const` import wins outright: the single candidate is its target,
+            // and there is no fallback past it.
+            if let Some(t) = ctx.const_imports.get(&r.raw) {
+                let key = normalize_const_fqn(t);
+                return undeclared(&key).then(|| (t.clone(), vec![key]));
+            }
+            let (display, ns_candidate) = if ctx.namespace.is_empty() {
+                (r.raw.clone(), None)
+            } else {
+                // PHP tries `Ns\FOO` first; anything declaring it ⇒ not absent.
+                let ns_key = normalize_const_fqn(&format!("{}\\{}", ctx.namespace, r.raw));
+                if !undeclared(&ns_key) {
+                    return None;
+                }
+                (format!("{}\\{}", ctx.namespace, r.raw), Some(ns_key))
+            };
+            // The global fallback candidate.
+            let global_key = normalize_const_fqn(&r.raw);
+            if !undeclared(&global_key) {
+                return None;
+            }
+            let mut candidates: Vec<String> = ns_candidate.into_iter().collect();
+            candidates.push(global_key);
+            Some((display, candidates))
+        }
+    }
+}
+
+/// Run the `constant.undefined` ladder for the file's bare constant fetches and
+/// emit one finding per provably-absent one (ADR-0078, issue #198). Called once per
+/// file, never under a descent; a fetch in a proven-dead region is skipped by the
+/// caller, which IS this id's guard leg — a `defined('X')` whose constant meets the
+/// firing conditions folds its branch dead under the same closure this ladder rests
+/// on (`constant_defined_verdict`), so the `if (defined('X')) { echo X; }` idiom is
+/// silent without a second mechanism.
+fn check_undefined_constant(cx: &Cx, folder: &mut dyn Folder, r: &NameRef, out: &mut Vec<Diagnostic>) {
+    // Index leg (cheap, first): every candidate undeclared anywhere in the universe.
+    // `const` statements and literal `define()` calls both land here, conditional or
+    // not — which is what makes `if (!defined('X')) define('X', …)` silent.
+    let Some((display, candidates)) = undefined_constant_target(cx, r) else {
+        return;
+    };
+    // Dam leg (A5, constant edition): ANY dam site closes this valve — `eval`, an
+    // unproven include, a broken file, and the computed `define()` that only this id
+    // reads (`DamKind::DefineDynamic`). Stricter than `is_clear()` on purpose.
+    if !cx.dam.constants_are_clear() {
+        return;
+    }
+    // A9 + no-sidecar sound subset: the whole family is silent (checked once, cached).
+    if !folder.absence_family_available() {
+        return;
+    }
+    // Boot-surface leg (A2ii): the project's own PHP must answer not-defined for
+    // every candidate. This is where extension constants and anything an already-
+    // loaded bootstrap defined declare themselves; the builtin catalog is never
+    // consulted, because it is never an absence oracle (ADR-0049 §1).
+    for c in &candidates {
+        match folder.boot_surface_constant(c) {
+            Some(false) => {}
+            Some(true) | None => return,
+        }
+    }
+
+    let pos = cx.tree().position(r.offset);
+    let evidence = existence_evidence(folder);
+    out.push(Diagnostic {
+        id: CONSTANT_UNDEFINED_ID,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        // PHP's own words: `Uncaught Error: Undefined constant "FOO"`.
+        message: format!("undefined constant {display} — {evidence}"),
         facet: None,
         fix: None,
     });

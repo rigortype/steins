@@ -179,6 +179,26 @@ pub enum PregCompile {
     Refuses { message: String },
 }
 
+/// The project's own PHP's answer to `defined($name)` for a **global constant**
+/// (ADR-0078, issue #198) — the existence oracle the `constant.undefined` ladder
+/// ends on, for everything the runtime provides rather than the project: extension
+/// constants, and constants an already-loaded bootstrap defined.
+///
+/// It exists because the builtin catalog is never an absence oracle (ADR-0049 §1):
+/// a constant missing from a curated list proves nothing about the engine actually
+/// running the project. Only the engine can say.
+///
+/// As with [`PregCompile`], there are exactly two *answers*; "cannot answer" is the
+/// `None` of [`parse_defined_result`], so a consumer that forgets the third case
+/// gets silence rather than a claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstantDefined {
+    /// The engine has the constant — a homonym stands, so no absence claim holds.
+    Defined,
+    /// The engine does not have the constant.
+    NotDefined,
+}
+
 /// The wire tag that marks an array argument. A scalar argument encodes to a bare
 /// JSON scalar, so a JSON *object* can only ever be this envelope — the tag is a
 /// readability aid and a shape check for the runner, not a disambiguator.
@@ -208,6 +228,14 @@ pub fn reflect_params(target: &str) -> serde_json::Value {
 #[must_use]
 pub fn preg_compile_params(pattern: &str) -> serde_json::Value {
     serde_json::json!({ "pattern": pattern })
+}
+
+/// The `params` of a `defined` request: the constant's fully-resolved name, exactly
+/// as PHP's `defined()` would receive it (`FOO`, `App\FOO`) — no leading `\`, and
+/// **case as written**, since constant names are case-sensitive.
+#[must_use]
+pub fn defined_params(name: &str) -> serde_json::Value {
+    serde_json::json!({ "name": name })
 }
 
 /// The `params` of a `fold` request: the function's simple name plus its already
@@ -342,6 +370,26 @@ pub fn parse_preg_compile_result(result: &serde_json::Value) -> Option<PregCompi
             let message = result.get("message").and_then(serde_json::Value::as_str)?;
             (!message.is_empty()).then(|| PregCompile::Refuses { message: message.to_owned() })
         }
+        _ => None,
+    }
+}
+
+/// Interpret a `defined` `result` object as a [`ConstantDefined`] (ADR-0078, issue
+/// #198), or `None` when the reply is anything else — a widen (a malformed request,
+/// a name the runner refused to ask about, a runner too old to implement the
+/// method) or an unknown `status`.
+///
+/// `None` means *unanswerable*, and the caller's only sound reading of it is
+/// silence — the same discipline [`parse_preg_compile_result`] and
+/// [`parse_reflection_result`] carry.
+#[must_use]
+pub fn parse_defined_result(result: &serde_json::Value) -> Option<ConstantDefined> {
+    if result.get("kind").and_then(serde_json::Value::as_str) != Some("constant") {
+        return None;
+    }
+    match result.get("status").and_then(serde_json::Value::as_str)? {
+        "defined" => Some(ConstantDefined::Defined),
+        "not_defined" => Some(ConstantDefined::NotDefined),
         _ => None,
     }
 }
@@ -593,6 +641,42 @@ mod tests {
             serde_json::json!(42),
         ] {
             assert_eq!(parse_preg_compile_result(&bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn defined_params_carry_the_name_verbatim() {
+        // Case is NOT folded: PHP constant names are case-sensitive, so `Foo` and
+        // `FOO` are different questions and the wire must keep them apart.
+        assert_eq!(defined_params("App\\Foo"), serde_json::json!({ "name": "App\\Foo" }));
+        assert_ne!(defined_params("FOO"), defined_params("Foo"));
+    }
+
+    #[test]
+    fn defined_result_reads_both_verdicts() {
+        let yes = serde_json::json!({ "kind": "constant", "status": "defined" });
+        assert_eq!(parse_defined_result(&yes), Some(ConstantDefined::Defined));
+        let no = serde_json::json!({ "kind": "constant", "status": "not_defined" });
+        assert_eq!(parse_defined_result(&no), Some(ConstantDefined::NotDefined));
+    }
+
+    /// The zero-FP half: anything that is not an explicit verdict is unanswerable,
+    /// which the consumer turns into silence.
+    #[test]
+    fn an_unrecognized_defined_reply_is_unanswerable() {
+        for bad in [
+            // A runner too old to implement the method.
+            serde_json::json!({ "kind": "widen", "reason": "unknown method" }),
+            // The runner refused to ask about a class-constant name.
+            serde_json::json!({ "kind": "widen", "reason": "class constants are not asked here" }),
+            serde_json::json!({ "kind": "constant" }),
+            serde_json::json!({ "kind": "constant", "status": "maybe" }),
+            // The reflect reply shape must not be mistaken for this one.
+            serde_json::json!({ "kind": "reflection", "exists": false }),
+            serde_json::json!({}),
+            serde_json::json!(42),
+        ] {
+            assert_eq!(parse_defined_result(&bad), None, "{bad}");
         }
     }
 

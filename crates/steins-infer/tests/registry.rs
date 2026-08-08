@@ -25,6 +25,9 @@ use steins_infer::{
 // member absence (ADR-0078, issue #197)
 use steins_infer::{CLASS_CONST_UNDEFINED_ID, PROPERTY_MAYBE_UNDEFINED_ID, PROPERTY_UNDEFINED_ID};
 // end member absence (ADR-0078, issue #197)
+// global constants (ADR-0078, issue #198)
+use steins_infer::CONSTANT_UNDEFINED_ID;
+// end global constants (ADR-0078, issue #198)
 
 /// Totality, forward: every id an emitter can produce is registered *with* a layer.
 #[test]
@@ -121,6 +124,10 @@ fn classification_matches_adr_0050_section_1() {
     assert_eq!(layer(CALL_UNDEFINED_FUNCTION_ID), Some(Layer::Proof));
     assert_eq!(layer(CALL_UNDEFINED_METHOD_ID), Some(Layer::Proof));
     assert_eq!(layer(CLASS_UNDEFINED_ID), Some(Layer::Proof));
+    // global constants (ADR-0078, issue #198): the family's third existence id,
+    // registered at the same layer and floor as the two above.
+    assert_eq!(layer(CONSTANT_UNDEFINED_ID), Some(Layer::Proof));
+    assert_eq!(surface_floor(CONSTANT_UNDEFINED_ID), Some(Floor::Default));
     assert_eq!(layer(CALL_TOO_FEW_ARGUMENTS_ID), Some(Layer::Proof));
     assert_eq!(layer(CALL_TOO_MANY_ARGUMENTS_ID), Some(Layer::Proof));
     assert_eq!(layer(CALL_UNKNOWN_NAMED_ARGUMENT_ID), Some(Layer::Proof));

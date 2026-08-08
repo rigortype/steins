@@ -6,7 +6,9 @@
 
 use std::time::Duration;
 
-use steins_sidecar::{FoldArg, FoldKey, FoldResult, FoldValue, PregCompile, Sidecar};
+use steins_sidecar::{
+    ConstantDefined, FoldArg, FoldKey, FoldResult, FoldValue, PregCompile, Sidecar,
+};
 
 /// An unkeyed (`ArrayKey::Auto`) array argument of `values`.
 fn list(values: Vec<FoldArg>) -> FoldArg {
@@ -324,6 +326,53 @@ fn a_refusal_does_not_corrupt_the_stream_or_leak_into_the_next_query() {
         FoldResult::Value(FoldValue::Str("AB".to_owned())),
         "the NDJSON stream survives a provoked warning"
     );
+}
+
+// `defined` (issue #198 / ADR-0078) — the constant-existence oracle.
+
+/// Both verdicts against a real `php`. `PHP_EOL` is core and `JSON_THROW_ON_ERROR`
+/// comes from ext-json, so this also pins that the oracle sees what extensions
+/// provide — which is the whole reason it exists (ADR-0049 §1: the builtin catalog
+/// is never an absence oracle).
+#[test]
+fn defined_answers_for_engine_and_extension_constants() {
+    let Some(mut sc) = spawn_or_skip("defined_answers_for_engine_and_extension_constants") else {
+        return;
+    };
+    assert_eq!(sc.constant_defined("PHP_EOL"), Some(ConstantDefined::Defined));
+    assert_eq!(sc.constant_defined("JSON_THROW_ON_ERROR"), Some(ConstantDefined::Defined));
+    assert_eq!(
+        sc.constant_defined("STEINS_NO_SUCH_CONSTANT_XYZZY"),
+        Some(ConstantDefined::NotDefined),
+        "a nonsense name is a definitive not-defined, never an unanswerable"
+    );
+}
+
+/// Constants are case-sensitive, and the wire must not launder that away: PHP's own
+/// `define('Foo', 1); var_dump(defined('FOO'));` prints `bool(false)`.
+#[test]
+fn defined_is_case_sensitive() {
+    let Some(mut sc) = spawn_or_skip("defined_is_case_sensitive") else { return };
+    assert_eq!(sc.constant_defined("PHP_EOL"), Some(ConstantDefined::Defined));
+    assert_eq!(sc.constant_defined("php_eol"), Some(ConstantDefined::NotDefined));
+}
+
+/// A leading `\` is a *spelling*, not part of the name — the runner trims it, the
+/// same way `reflect` does.
+#[test]
+fn defined_ignores_a_leading_backslash() {
+    let Some(mut sc) = spawn_or_skip("defined_ignores_a_leading_backslash") else { return };
+    assert_eq!(sc.constant_defined("\\PHP_EOL"), Some(ConstantDefined::Defined));
+}
+
+/// A class-constant name is refused rather than asked: `defined('C::K')` would
+/// **autoload** `C`, which would run project code inside the sidecar.
+#[test]
+fn defined_refuses_a_class_constant_name() {
+    let Some(mut sc) = spawn_or_skip("defined_refuses_a_class_constant_name") else { return };
+    assert_eq!(sc.constant_defined("DateTime::ATOM"), None, "a `::` name widens, never answers");
+    // …and the refusal leaves the stream healthy.
+    assert_eq!(sc.constant_defined("PHP_EOL"), Some(ConstantDefined::Defined));
 }
 
 #[test]

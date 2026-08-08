@@ -297,6 +297,11 @@ impl FoldEngine for FakeEngine {
     fn preg_compile(&mut self, _pattern: &str) -> Option<PregCompile> {
         None
     }
+    /// Likewise the constant-existence oracle (issue #198): declining is the sound
+    /// answer for a transport whose subject is the replay loop, not constants.
+    fn constant_defined(&mut self, _name: &str) -> Option<steins_sidecar::ConstantDefined> {
+        None
+    }
 }
 
 fn fact_base_of(f: &Fact) -> Option<Base> {
