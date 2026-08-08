@@ -29527,13 +29527,14 @@ fn var_export_transfer(
 /// | `addslashes addcslashes escapeshellarg urlencode rawurlencode preg_quote` | length | — | casing |
 /// | `htmlspecialchars` / `htmlentities` | length, **only** under `ENT_SUBSTITUTE` | — | casing; everything under a non-constant flags argument |
 /// | `urldecode` / `rawurldecode` | `NON_EMPTY` only | — | `NON_FALSY` (`urldecode('%30') === '0'`) |
-/// | `sprintf` | — | `NON_EMPTY` at a constant format with a literal byte | everything else |
+/// | `sprintf` `vsprintf` | — | `NON_EMPTY` at a constant format with a literal byte; `NUMERIC` at a whole-format `%[flags][width][.precision]{b,d,o,e,f,g}` conversion (`e`/`f`/`g` gated on a proven `int` value — `sprintf` only, issue #41) | everything else |
 /// | `strlen` | — | `int<1, max>` at a non-empty subject | — |
 ///
-/// Only those four bits move. `NUMERIC`, `DECIMAL_INT` and `NON_DECIMAL_INT` are
-/// never propagated even where they would survive (`ucfirst(' 1e5')` is still
-/// numeric): dropping a bit is a widening, and keeping the table to the measured
-/// axis is worth more than the two rows it would buy.
+/// Only those five bits move (`NON_EMPTY`, `NON_FALSY`, `NUMERIC`, `LOWERCASE`,
+/// `UPPERCASE`). `DECIMAL_INT` and `NON_DECIMAL_INT` are never propagated even
+/// where they would survive (`ucfirst(' 1e5')` is still numeric): dropping a bit
+/// is a widening, and keeping the table to the measured axis is worth more than
+/// the rows it would buy.
 ///
 /// # The declines, each for a stated reason
 ///
@@ -29558,6 +29559,31 @@ fn var_export_transfer(
 ///   uppercase (`sprintf('%X', 255) === 'FF'`) or nothing at all
 ///   (`sprintf('%.0s', 'abc') === ''`), so only a *literal byte in a constant
 ///   format* is claimed, and the scanner refuses any format it cannot parse.
+/// * **`sprintf`'s hex pair, `%x`/`%X`** — issue #41's NUMERIC slice excludes both:
+///   `sprintf('%14x', 255) === 'ff'` and `sprintf('%14X', 255) === 'FF'`, neither a
+///   numeric string, though upstream PHPStan's `bug-7387.php` fixture claims
+///   `numeric-string` for both. A measured counterexample outranks upstream's
+///   say-so (ADR-0061 §2) for the second time in this table.
+/// * **`sprintf`'s `%e`/`%f`/`%g` away from a proven `int` value** — the float
+///   formatter renders `NAN`/`INF`/`-INF` verbatim (`sprintf('%f', NAN) === 'NaN'`),
+///   and a numeric-*string* argument can overflow its own `(float)` cast to `INF`
+///   (`sprintf('%f', "1e400") === 'INF'`). Only a native `int` value closes both
+///   holes (PHP has no `int` spelling of either special value), so the rule reads
+///   the value argument's fact for exactly these three type characters — `b`/`d`/
+///   `o` need no such gate, because PHP's int CAST (not float format) clamps any
+///   input, `NAN`/`INF` included, to a definite in-range integer.
+/// * **`sprintf`'s `%c %s %u %h %H %E %F %G`** — unmeasured for this slice.
+///   Upstream's fixture claims `numeric-string` for several (`%u`/`%h`/`%H`
+///   plausibly by the same int-cast argument admitting `%d`/`%b`/`%o`), but this
+///   rule widens only on a witness it has taken itself, not on upstream's say-so
+///   — a future slice, not this one.
+/// * **`vsprintf`'s `%e`/`%f`/`%g`** — the same float-trio gate `sprintf` clears
+///   with its own second argument needs a proven `int` VALUE, and `vsprintf`'s
+///   value sits inside the values array rather than at a fixed argument position.
+///   Opening that array for one element's fact is more machinery than this slice's
+///   measured rows need (both `vsprintf` rows in `bug-7387.php` and
+///   `lowercase-string-sprintf.php` are `%d`, the unconditional int-cast leg), so
+///   the float trio stays declined for `vsprintf` — a stated decline, not a guess.
 /// * **`str_replace`/`substr_replace`/`parse_str`** — nsrt asks for casing through
 ///   them too; they need a second subject's predicates (or an out-parameter) rather
 ///   than this table's single-subject shape. Not modeled by this table.
@@ -29861,17 +29887,55 @@ fn str_pred_out(
             };
             substitutes.then(|| subject.intersect(LENGTH))
         }
-        // ---- `sprintf`: a literal byte in a CONSTANT format --------------------
+        // ---- `sprintf`/`vsprintf`: a literal byte in a CONSTANT format, and ----
+        // ---- issue #41's NUMERIC slice on top of it ----------------------------
+        //
+        // Both names carry their format at argument 0 (ADR-0078's `PrintfShape`),
+        // so both read [`sprintf_emits_a_literal`] and
+        // [`sprintf_whole_numeric_conversion`] the same way — the difference is
+        // only WHERE the one value being converted lives: `sprintf`'s own second
+        // positional argument, or somewhere inside `vsprintf`'s values array.
         //
         // Every conversion can produce nothing (`sprintf('%.0s', 'abc') === ''`), so
         // the only thing a format proves on its own is the literal text between the
         // conversions. `'%%'` counts — it emits one `'%'`.
-        "sprintf" => {
+        //
+        // NUMERIC is a SEPARATE, stricter question — [`sprintf_whole_numeric_conversion`]
+        // answers it — and forces `StrPreds::NUMERIC` (which closes to `NON_EMPTY`
+        // too, see `StrPreds::close`) when the WHOLE format is one admitted
+        // conversion. `b`/`d`/`o` are forced unconditionally (PHP's int cast cannot
+        // render anything but digits, whatever the value) for EITHER name — issue
+        // #41's `vsprintf('%d', $array)` row (`bug-7387.php`) is exactly this leg,
+        // and it needs no look inside `$array` at all. `e`/`f`/`g` are forced only
+        // when the paired value argument is provably an `int` — a float value could
+        // BE `NAN`/`INF`, which renders as the non-numeric `'NaN'`/`'INF'` literal —
+        // and only `sprintf` exposes that argument positionally; `vsprintf`'s value
+        // sits inside the array this rule does not open, so the float trio stays
+        // declined there (a stated decline, not a guess).
+        "sprintf" | "vsprintf" => {
             let Some(Fact::Singleton(Val::Str(fmt))) = transfer_arg_fact(cx, folder, &args[0], env, store)
             else {
                 return None;
             };
-            sprintf_emits_a_literal(fmt.as_bytes())?.then_some(StrPreds::NON_EMPTY)
+            let mut out = if sprintf_emits_a_literal(fmt.as_bytes())? {
+                StrPreds::NON_EMPTY
+            } else {
+                StrPreds::empty()
+            };
+            if let Some(ty) = sprintf_whole_numeric_conversion(fmt.as_bytes()) {
+                let numeric_safe = match ty {
+                    b'b' | b'd' | b'o' => true,
+                    b'e' | b'f' | b'g' if lower == "sprintf" => args
+                        .get(1)
+                        .and_then(|v| transfer_arg_fact(cx, folder, v, env, store))
+                        .is_some_and(|f| fact_is_int(&f)),
+                    _ => false,
+                };
+                if numeric_safe {
+                    out = out.union(StrPreds::NUMERIC);
+                }
+            }
+            Some(out)
         }
         _ => None,
     }
@@ -30066,6 +30130,119 @@ fn sprintf_emits_a_literal(fmt: &[u8]) -> Option<bool> {
         i += 1;
     }
     Some(literal)
+}
+
+/// Issue #41's sprintf `NUMERIC` slice: is this `sprintf`/`vsprintf` format EXACTLY
+/// one conversion — no literal byte anywhere, not even a `%%` escape, no second
+/// specifier, no explicit `%N$` position — built from admitted flags/width/
+/// precision and one of the six type characters this rule has probed sound?
+/// Returns that type character on a match.
+///
+/// # Why a stricter grammar than [`sprintf_emits_a_literal`]
+///
+/// That scanner answers "does a byte definitely come out"; this one answers "is
+/// the WHOLE output determined by one conversion", which is a narrower question
+/// with its own admitted vocabulary — a single unrecognized byte anywhere (a
+/// literal character, a second `%`, a custom pad, a position) is a decline here
+/// even where the general scanner would still walk past it.
+///
+/// # The admitted flags, probed at `PINNED_PHP` (8.5.9)
+///
+/// ```text
+/// php -r 'var_dump(sprintf("%05d", 5));'      // "00005"      (zero-pad: NUMERIC)
+/// php -r 'var_dump(sprintf("%+d", 5));'       // "+5"         (leading +: NUMERIC)
+/// php -r 'var_dump(sprintf("%+d", -5));'      // "-5"
+/// php -r 'var_dump(sprintf("%-10d", 5));'     // "5         " (trailing spaces:
+///                                              //   PHP 8+ numeric strings allow
+///                                              //   trailing whitespace)
+/// php -r 'var_dump(sprintf("% 5d", 5));'      // "    5"      (default space-pad:
+///                                              //   leading whitespace is ALWAYS
+///                                              //   allowed in a numeric string)
+/// php -r 'var_dump(sprintf("% d", 5));'       // "5"          (the space FLAG
+///                                              //   itself is a documented no-op
+///                                              //   at this pin — admitted for
+///                                              //   the same reason as '0'/'+'/'-')
+/// ```
+///
+/// A custom pad (the `'` flag) is refused outright — its pad byte is arbitrary and
+/// not always whitespace-or-digit:
+///
+/// ```text
+/// php -r 'var_dump(sprintf("%\x27*10d", 5));' // "*********5" — NOT numeric, even
+///                                              //   though "%'010d" (pad '0') would be
+/// ```
+///
+/// # The type-character split: int-cast vs. float-format
+///
+/// `b`/`d`/`o` go through PHP's int cast (`zend_dval_to_lval`), which clamps any
+/// input — including a float `NAN`/`INF`, or a numeric string that overflows on
+/// cast — to a definite, in-range integer. There is no value for which the int
+/// cast renders anything but ASCII digits (and an optional leading `-`), so these
+/// three are admitted UNCONDITIONALLY, independent of the value argument's type:
+///
+/// ```text
+/// php -r 'var_dump(sprintf("%d", NAN));'        // "0"   (int-cast clamps; NUMERIC)
+/// php -r 'var_dump(sprintf("%b", 1.0e300));'    // "0"   (same clamp; NUMERIC)
+/// php -r 'var_dump(sprintf("%o", "1e400"));'    // "0"   (string->int; NUMERIC)
+/// ```
+///
+/// `e`/`f`/`g` go through PHP's float FORMATTER instead, which renders a
+/// non-finite float verbatim — and that rendering is not a numeric string:
+///
+/// ```text
+/// php -r 'var_dump(sprintf("%f", NAN));'        // "NaN"  — NOT numeric
+/// php -r 'var_dump(sprintf("%f", INF));'        // "INF"  — NOT numeric
+/// php -r 'var_dump(sprintf("%f", "1e400"));'    // "INF"  — a numeric STRING can
+///                                                //   overflow its (float) cast too
+/// ```
+///
+/// A native PHP `int` cannot hold `NAN`/`INF` at all (and `null`'s `(float)` cast
+/// is the finite `0.0`), so the call site admits `e`/`f`/`g` only when the value
+/// argument's own fact is provably `int` (via [`fact_is_int`], which treats `null`
+/// as immaterial for exactly this reason) — the same boundary PHPStan's own
+/// `bug-7387.php` fixture draws by typing that argument `int $i` rather than
+/// `float`.
+///
+/// # What stays out of this slice
+///
+/// `%x`/`%X` are the excluded hex pair (`sprintf('%14x', 255) === 'ff'`, not a
+/// numeric string — upstream PHPStan's `bug-7387.php` claims `numeric-string` for
+/// both and is wrong at this pin). `%c`/`%s`/`%u`/`%h`/`%H`/`%E`/`%F`/`%G` are
+/// unmeasured for this slice (upstream's fixture claims `numeric-string` for
+/// several of them too, `%u`/`%h`/`%H` plausibly by the same int-cast argument
+/// that clears `%d`/`%b`/`%o`) and are left to a future slice rather than widened
+/// on an unwitnessed guess.
+fn sprintf_whole_numeric_conversion(fmt: &[u8]) -> Option<u8> {
+    let n = fmt.len();
+    if n < 2 || fmt[0] != b'%' {
+        return None;
+    }
+    let mut i = 1;
+    // Flags: only the four bytes probed above as numeric-safe. A custom pad
+    // (`'`) is not in this set, so it falls through to the "leftover bytes"
+    // decline below rather than being specially recognized and refused.
+    while i < n && matches!(fmt[i], b'-' | b'+' | b'0' | b' ') {
+        i += 1;
+    }
+    // Width.
+    while i < n && fmt[i].is_ascii_digit() {
+        i += 1;
+    }
+    // Precision: `.` optionally followed by digits.
+    if i < n && fmt[i] == b'.' {
+        i += 1;
+        while i < n && fmt[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    // Exactly one byte must remain: the type character. Anything else — a
+    // literal byte before/after, a second specifier, a dangling `%N$` position
+    // (whose `$` is never consumed by the loops above), a custom-pad quote — is
+    // leftover content this whole-format claim cannot admit.
+    if i + 1 != n {
+        return None;
+    }
+    matches!(fmt[i], b'b' | b'd' | b'o' | b'e' | b'f' | b'g').then_some(fmt[i])
 }
 
 /// A `list<T>` / `non-empty-list<T>` fact, through the canonical constructor —

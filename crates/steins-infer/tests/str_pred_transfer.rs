@@ -55,6 +55,23 @@
 //! strtr('a', ['a' => '0'])         === '0'          (the array form's own refutation)
 //! ```
 //!
+//! # Issue #41's sprintf NUMERIC slice, witnessed at 8.5.9
+//!
+//! ```text
+//! sprintf('%d', NAN)               === '0'          (int cast clamps: NUMERIC)
+//! sprintf('%b', 1.0e300)           === '0'          (same clamp, any float)
+//! sprintf('%o', '1e400')           === '0'          (same clamp, any string)
+//! sprintf('%+d', 'not a number')   === '+0'         (int cast is total: even a
+//!                                                     non-numeric string is safe)
+//! sprintf('%f', NAN)               === 'NaN'        (float FORMAT does not clamp:
+//!                                                     NOT a numeric string)
+//! sprintf('%f', INF)               === 'INF'        (same, for +/-infinity)
+//! sprintf('%f', '1e400')           === 'INF'        ((float) cast can overflow a
+//!                                                     numeric STRING argument too)
+//! sprintf('%14x', 255)             === 'ff'         (the excluded hex pair —
+//! sprintf('%14X', 255)             === 'FF'          upstream claims both numeric)
+//! ```
+//!
 //! `strtolower('ÄB') === 'Äb'` is the probe the whole casing half rests on. Steins'
 //! `LOWERCASE` is `php_str_is_lowercase`, i.e. **no ASCII uppercase byte** — which
 //! `'Äb'` satisfies — so `strtolower` establishes the predicate for *any* input,
@@ -102,6 +119,7 @@ const FAMILY: &[(&str, &str)] = &[
     ("htmlspecialchars", "string"),
     ("htmlentities", "string"),
     ("sprintf", "string"),
+    ("vsprintf", "string"),
     ("strlen", "int"),
 ];
 
@@ -662,12 +680,24 @@ fn the_sprintf_format_scanner_matches_the_engine_on_every_probed_shape() {
     //                       'Hello %s' → 'Hello '  'x%sy' → 'xy'
     //                       '%s %s' → ' '  '%2$s %1$s' → ' '  '%%%s' → '%'  '%s%%' → '%'
     //   claimed nothing   : '%s' → ''  '%.0s' → ''  '%1$s' → ''  '%c' → "\0"
-    //                       '%d' '%b' '%x' '%X' '%o' '%u' '%g' '%G' → '0'
-    //                       '%-5s' → '     '  "%'x5s" → 'xxxxx'  '%05d' → '00000'
-    //                       '%e' → '0.000000e+0'  '%10.3f' → '     0.000'  '%+d' → '+0'
+    //                       '%x' '%X' '%u' '%g' '%G' → '0'
+    //                       '%-5s' → '     '  "%'x5s" → 'xxxxx'
+    //                       '%10.3f' → '     0.000'
     //                       "%'-10s" → '----------'  "%-'x10s"/"%1$'x10s" → 'xxxxxxxxxx'
     //   DECLINED (parse)  : '%'  '%s%'  → ValueError "Missing format specifier at end
     //                       of string";  '%z' → ValueError 'Unknown format specifier "z"'
+    //
+    // `'%d'`/`'%b'`/`'%o'`/`'%05d'`/`'%+d'` moved OUT of the "claims nothing" bucket
+    // in issue #41: each is an int-cast whole-format conversion, and the int cast
+    // never renders a non-digit byte for ANY input — `%d`/`%b`/`%o` claim NUMERIC
+    // even from a plain `string` value (`php -r`-witnessed: `sprintf('%+d', "not a
+    // number") === '+0'`). `%e`/`%f`/`%g` are the FLOAT-format trio and stay in the
+    // "claims nothing" bucket here on purpose: they need a proven `int` value
+    // before NUMERIC is safe (a `NAN`/`INF` float, or an overflowing numeric
+    // string, renders as non-numeric text) — see
+    // `sprintf_gates_the_float_trio_on_a_proven_int_value` below, which is the test
+    // that exercises them against an `int`-typed value instead of this `string`
+    // one.
     //
     // Representative cases from that table.
     for claims in ["'abc'", "'100%%'", "'x%sy'", "'%s %s'", "'%2$s %1$s'", "'%s%%'"] {
@@ -677,11 +707,19 @@ fn the_sprintf_format_scanner_matches_the_engine_on_every_probed_shape() {
             "{claims} emits a literal byte"
         );
     }
-    for silent in ["'%s'", "'%.0s'", "'%1$s'", "'%c'", "'%X'", "'%-5s'", "'%10.3f'", "'%+d'"] {
+    for silent in ["'%s'", "'%.0s'", "'%1$s'", "'%c'", "'%X'", "'%-5s'", "'%10.3f'"] {
         assert_eq!(
             dump("string", &format!("sprintf({silent}, $v)")),
             "dumped type: string",
             "{silent} can emit nothing"
+        );
+    }
+    // The int-cast trio claims NUMERIC even from a plain `string` value.
+    for numeric in ["'%d'", "'%b'", "'%o'", "'%05d'", "'%+d'"] {
+        assert_eq!(
+            dump("string", &format!("sprintf({numeric}, $v)")),
+            "dumped type: numeric-string",
+            "{numeric} is an unconditional int-cast conversion"
         );
     }
     // A format the engine itself refuses is refused here: no return value exists
@@ -693,6 +731,142 @@ fn the_sprintf_format_scanner_matches_the_engine_on_every_probed_shape() {
             "{refused} is a ValueError at 8.5.8"
         );
     }
+}
+
+/// A helper mirroring `dump`, but the tested variable is a NATIVE `int` parameter
+/// rather than `dump`'s native `string` one. Issue #41's float-trio gate needs a
+/// genuinely `int`-typed value to admit, and a `@param int $v` docblock cannot
+/// narrow `dump`'s native `string` parameter to `int` — that would be a
+/// base-type mismatch the docblock/native reconciliation itself would flag,
+/// tripping `one_type_with`'s "no other finding" assertion.
+fn dump_int(expr: &str) -> String {
+    one_type_with(
+        &format!("<?php\nfunction f(int $v): void {{ \\PHPStan\\dumpType({expr}); }}\n"),
+        &mut Mock::sidecar(),
+    )
+}
+
+/// Issue #41 — the int-cast trio (`%b`/`%d`/`%o`) forces `NUMERIC` unconditionally,
+/// exactly as [`the_sprintf_format_scanner_matches_the_engine_on_every_probed_shape`]
+/// already showed from a plain `string` value; this pins the same claim from a
+/// proven `int` one, and adds the width/sign/precision-adjacent shapes that value
+/// type does not affect (`%b`/`%o` have no precision, so only `%d` needs one).
+#[test]
+fn sprintf_admits_numeric_from_the_int_cast_trio_from_any_value_type() {
+    for f in ["'%b'", "'%d'", "'%o'", "'%05d'", "'%+d'", "'%-10d'", "'% d'"] {
+        assert_eq!(
+            dump_int(&format!("sprintf({f}, $v)")),
+            "dumped type: numeric-string",
+            "{f} is an unconditional int-cast conversion"
+        );
+    }
+}
+
+/// Issue #41 — the float-format trio (`%e`/`%f`/`%g`) forces `NUMERIC` only when
+/// the paired value argument is provably `int`. A `string` value declines even
+/// though this scanner cannot see through it, because PHP's float formatter
+/// renders a `NAN`/`INF`/`-INF` value verbatim (`sprintf('%f', NAN) === 'NaN'`)
+/// and a numeric STRING can overflow its own `(float)` cast to `INF`
+/// (`sprintf('%f', "1e400") === 'INF'`, both `php -r`-witnessed at 8.5.9) — a
+/// native `int` cannot hold either special value, closing both holes at once.
+#[test]
+fn sprintf_gates_the_float_trio_on_a_proven_int_value() {
+    for f in ["'%e'", "'%f'", "'%g'", "'%14e'", "'%.2f'", "'%05.2f'"] {
+        assert_eq!(
+            dump_int(&format!("sprintf({f}, $v)")),
+            "dumped type: numeric-string",
+            "{f} of a proven int value is NUMERIC"
+        );
+        assert_eq!(
+            dump("string", &format!("sprintf({f}, $v)")),
+            "dumped type: string",
+            "{f} of an unproven string value declines"
+        );
+    }
+}
+
+/// Issue #41 — the excluded hex pair. `%x`/`%X` are int-cast conversions exactly
+/// like `%d`/`%b`/`%o`, but their digits are hexadecimal (`sprintf('%14x', 255)
+/// === 'ff'`), and a hex string is never a PHP numeric string — refused
+/// regardless of the value's type, pinned against upstream PHPStan's own
+/// `bug-7387.php` fixture, which claims `numeric-string` for `%14X` (and, per
+/// this issue's tracking comment, `%14x`) and is wrong about both at this pin.
+#[test]
+fn sprintf_declines_the_hex_pair_even_from_a_proven_int_value() {
+    for f in ["'%x'", "'%X'", "'%14x'", "'%14X'"] {
+        assert_eq!(
+            dump_int(&format!("sprintf({f}, $v)")),
+            "dumped type: string",
+            "{f} is hexadecimal, never a numeric string"
+        );
+    }
+}
+
+/// Issue #41 — the "WHOLE format" requirement. `%d`/`%b`/`%o` alone would force
+/// NUMERIC, but a literal byte anywhere, a second specifier, a custom pad, or an
+/// explicit position all decline it — declining is silence, never a lie.
+#[test]
+fn sprintf_declines_numeric_when_the_format_is_not_purely_the_conversion() {
+    // Literal text around the conversion still earns `NON_EMPTY` from the
+    // existing literal-byte rule (unaffected by this issue), but never `NUMERIC`
+    // — the claim is about the WHOLE format, and one literal byte breaks it.
+    // `'%%d'` is the escape case: `%%` is a guaranteed literal `'%'`, and the
+    // trailing `d` is a second literal byte, not a specifier at all.
+    for f in ["'literal %d'", "'%d literal'", "' %d'", "'%d %d'", "'%%d'"] {
+        assert_eq!(
+            dump_int(&format!("sprintf({f}, $v, $v)")),
+            "dumped type: non-empty-string",
+            "{f} carries a literal byte, so NON_EMPTY holds but not NUMERIC"
+        );
+    }
+    // All-conversion shapes that are still not ONE admitted conversion: no
+    // literal byte survives either scanner, so both legs decline outright.
+    for f in ["\"%'*10d\"", "'%1$d'", "'%d%d'"] {
+        assert_eq!(
+            dump_int(&format!("sprintf({f}, $v, $v)")),
+            "dumped type: string",
+            "{f} is neither a literal byte nor a single admitted conversion"
+        );
+    }
+}
+
+/// Issue #41 — `vsprintf` reads the same whole-format scanner as `sprintf`, but
+/// only ever admits the int-cast trio: PHPStan's own `bug-7387.php` fixture
+/// (`vsprintf("%4d", $array)` against a plain, UNSHAPED `array` parameter) is
+/// exactly the case this leg is for — `%b`/`%d`/`%o` need no look inside the
+/// values array at all, so an array this rule cannot see through still admits.
+/// The float trio and the hex pair are pinned as continuing declines: this rule
+/// never opens `vsprintf`'s values array to find the one value being converted,
+/// so `%e`/`%f`/`%g` cannot clear their `int`-value gate for `vsprintf` the way
+/// they do for `sprintf`, and `%x`/`%X` are refused for the same hex reason
+/// either name takes.
+#[test]
+fn vsprintf_admits_numeric_from_the_int_cast_trio_but_not_the_float_trio_or_the_hex_pair() {
+    let src = |f: &str| {
+        format!(
+            "<?php\nfunction f(array $arr): void {{ \\PHPStan\\dumpType(vsprintf({f}, $arr)); }}\n"
+        )
+    };
+    for f in ["'%b'", "'%d'", "'%o'", "'%05d'"] {
+        assert_eq!(
+            one_type_with(&src(f), &mut Mock::sidecar()),
+            "dumped type: numeric-string",
+            "vsprintf({f}, ...) is an unconditional int-cast conversion"
+        );
+    }
+    // The float trio and the hex pair decline for `vsprintf`.
+    for f in ["'%e'", "'%f'", "'%g'", "'%x'", "'%X'"] {
+        assert_eq!(
+            one_type_with(&src(f), &mut Mock::sidecar()),
+            "dumped type: string",
+            "vsprintf({f}, ...) does not admit NUMERIC"
+        );
+    }
+    // A literal byte still earns NON_EMPTY, exactly as it does for `sprintf`.
+    assert_eq!(
+        one_type_with(&src("'literal %d'"), &mut Mock::sidecar()),
+        "dumped type: non-empty-string"
+    );
 }
 
 /// Issue #41's precedence question, pinned rather than left to registration order:
