@@ -1253,6 +1253,53 @@ pub const SOUND_SUBSET_NOTICE: &str = "note: running as sound subset (no PHP sid
 /// run, and it never changes the exit status.
 pub const SIDECAR_HANDSHAKE_NOTICE: &str = "note: PHP sidecar stopped answering — running as sound subset (degraded): findings that require executing PHP are omitted, and builtin return types come from the catalog's declarations, unverified; run `steins doctor` for detail";
 
+/// What the fold surface actually delivered over one whole run (issue #245).
+///
+/// The two notices above are *events*: they fire once, on stderr, at the moment
+/// the posture changes. That is enough for a person watching a `check`, and not
+/// enough for a harness that prints a number at the end — a count measured after
+/// the child died reads exactly like one measured before it, and the run that
+/// produced it is long gone by the time anyone compares. So the same posture is
+/// also carried as data, to be *reported beside the number it qualifies*
+/// (ADR-0004: incompleteness is never silent, and a posture that changes partway
+/// is still a posture).
+///
+/// The counters are edges, not requests: `losses` counts the times a request
+/// ended with the child dead or silent — each one an answer that widened and,
+/// per ADR-0024, is never retried — and `restarts` counts the replacements that
+/// followed. `losses == 0` is the only shape that licenses reading a count as
+/// sidecar-backed throughout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FoldPosture {
+    /// Whether a live engine was ever reached at all. `false` covers both
+    /// `--no-php` and a failed spawn — the plain sound subset, which the
+    /// [`SOUND_SUBSET_NOTICE`] already names at the top of the run.
+    pub engaged: bool,
+    /// Requests that ended with the transport dead or silent. Each is one lost
+    /// answer, never retried.
+    pub losses: u32,
+    /// Children replaced after such a loss. `restarts == losses` means every
+    /// loss was repaired and the run finished on a live child.
+    pub restarts: u32,
+    /// The respawn budget is spent and the transport is dead: every remaining
+    /// request widens, and the run ended as the sound subset.
+    pub abandoned: bool,
+}
+
+impl FoldPosture {
+    /// Whether every request this run put to the engine was answered by a live
+    /// engine — the one condition under which an absolute count is comparable
+    /// with a sidecar-backed baseline.
+    ///
+    /// A run that never engaged an engine is **not** "throughout": it is the
+    /// sound subset, which is a different posture with a different notice, not a
+    /// clean bill of health.
+    #[must_use]
+    pub fn sidecar_backed_throughout(&self) -> bool {
+        self.engaged && self.losses == 0
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Folding seam (ADR-0004 / ADR-0024).
 // ---------------------------------------------------------------------------
@@ -1477,6 +1524,23 @@ pub trait FoldEngine {
     /// case-blind. `None` declines.
     fn constant_defined(&mut self, name: &str) -> Option<ConstantDefined>;
     // end global constants (ADR-0078, issue #198)
+
+    /// How many times the transport underneath has been **replaced** this run
+    /// (issue #245) — a generation counter, not a health check.
+    ///
+    /// A decline is only ever a statement about the engine that declined. Where a
+    /// caller memoizes a decline as a *whole-run* answer, a bumped generation says
+    /// the engine that gave it no longer exists, so the answer may be asked once
+    /// more of the one that replaced it — [`EngineFolder`]'s `refresh_env_memos`
+    /// is the only consumer. Bounded by the transport's own respawn cap, which is
+    /// what keeps "ask again" from becoming "ask at every call site".
+    ///
+    /// The default `0` is right for every transport that cannot be replaced
+    /// mid-run ([`TableEngine`], and any wasm engine): its declines are as
+    /// permanent as it is.
+    fn restarts(&self) -> u32 {
+        0
+    }
 }
 
 /// The **policy** half of the fold seam: a [`Folder`] over any [`FoldEngine`],
@@ -1551,6 +1615,9 @@ pub struct EngineFolder<E: FoldEngine> {
     /// family (the boot surface interrogated must be a declared-supported
     /// version) and the curated return-fact admission.
     php_target: Option<steins_db::PhpTarget>,
+    /// The transport generation ([`FoldEngine::restarts`]) the four `env`-derived
+    /// memos above were taken at (issue #245). See [`Self::refresh_env_memos`].
+    env_generation: u32,
 }
 
 impl<E: FoldEngine> EngineFolder<E> {
@@ -1572,6 +1639,7 @@ impl<E: FoldEngine> EngineFolder<E> {
             preg_refusal_memo: HashMap::new(),
             boot_surface_const_memo: HashMap::new(),
             php_target: None,
+            env_generation: 0,
         }
     }
 
@@ -1602,10 +1670,50 @@ impl<E: FoldEngine> EngineFolder<E> {
         self.php_target = target;
     }
 
+    /// Drop the four `env`-derived whole-run answers when the child that gave
+    /// them has since been replaced (issue #245).
+    ///
+    /// The four memos below (`absence_available`, `php_minor`, `int_size`,
+    /// `boot_surface_label`) are *whole-run* answers taken from a single `env()`
+    /// reply, and each one gates a whole family: a declined `env` turns the entire
+    /// absence family off, for the rest of the run, from one badly-timed request.
+    /// That is how a transport failure the transport itself recovers from — one
+    /// lost fold, one respawn — became a run-long, silent narrowing of what the
+    /// checker would even ask. The lost *request* stays lost (ADR-0024: a reply
+    /// that never arrived is never retried); what must not stay lost is the
+    /// standing answer that happened to be taken in that window.
+    ///
+    /// The generation counter is what keeps this bounded. Re-asking on "the memo
+    /// holds a decline" would pay the ADR-0024 timeout at every call site against
+    /// a sidecar that is merely hung; re-asking on "the engine that declined has
+    /// been replaced" costs at most one `env` per respawn, and the respawn cap
+    /// bounds those. All four are dropped rather than only the declines: they come
+    /// from one reply, re-deriving an unchanged answer costs one request, and a
+    /// conditional would have to reason about which `false` was a decline and
+    /// which was a real verdict (a loaded monkey-patch extension is a legitimate
+    /// `absence_available == Some(false)`).
+    ///
+    /// The per-name memos are deliberately NOT dropped. A declined `reflect` costs
+    /// exactly the one name it was asked about — the same magnitude as the lost
+    /// request itself, which ADR-0024 already accepts — while dropping them would
+    /// re-issue thousands of requests per respawn.
+    fn refresh_env_memos(&mut self) {
+        let generation = self.engine.restarts();
+        if generation == self.env_generation {
+            return;
+        }
+        self.env_generation = generation;
+        self.absence_available = None;
+        self.php_minor = None;
+        self.int_size = None;
+        self.boot_surface_label = None;
+    }
+
     /// The engine's integer width in bytes (`PHP_INT_SIZE`), memoized like the
     /// other whole-run `env` answers. `None` = unanswerable, which every caller
     /// here treats as "not provably 64-bit".
     fn engine_int_size(&mut self) -> Option<u32> {
+        self.refresh_env_memos();
         if let Some(cached) = self.int_size {
             return cached;
         }
@@ -1770,6 +1878,7 @@ impl<E: FoldEngine> Folder for EngineFolder<E> {
     }
 
     fn absence_family_available(&mut self) -> bool {
+        self.refresh_env_memos();
         if let Some(cached) = self.absence_available {
             return cached;
         }
@@ -1838,6 +1947,7 @@ impl<E: FoldEngine> Folder for EngineFolder<E> {
     // end global constants (ADR-0078, issue #198)
 
     fn php_minor(&mut self) -> Option<(u16, u16)> {
+        self.refresh_env_memos();
         if let Some(cached) = self.php_minor {
             return cached;
         }
@@ -1849,6 +1959,7 @@ impl<E: FoldEngine> Folder for EngineFolder<E> {
     }
 
     fn boot_surface_label(&mut self) -> Option<String> {
+        self.refresh_env_memos();
         if let Some(cached) = &self.boot_surface_label {
             return cached.clone();
         }
@@ -2106,6 +2217,16 @@ pub struct ProcessEngine {
     /// the first poisoning event at any point in the run — no permanent
     /// suppression from an earlier success (review finding on PR #134).
     unresponsive_notified: bool,
+    /// Requests that ended with the child dead or silent (issue #245) — the
+    /// [`FoldPosture::losses`] counter. Counted on the EDGE into poison rather
+    /// than per poisoned call: past the respawn cap `is_poisoned` stays true for
+    /// every remaining request of the run, and counting those would report tens of
+    /// thousands of "losses" for one dead child.
+    losses: u32,
+    /// The edge detector for `losses`: the last `Sidecar::is_poisoned` this engine
+    /// observed. A `false → true` step is a loss; a `true → false` step is a
+    /// successful respawn, which is [`Sidecar::respawns`]'s business to count.
+    poisoned_seen: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2120,6 +2241,8 @@ impl ProcessEngine {
             spawn_failed: false,
             notified: true, // suppress our own notice; only spawn-failure re-arms it.
             unresponsive_notified: true, // suppress; only enabled() re-arms it (mirrors `notified`).
+            losses: 0,
+            poisoned_seen: false,
         }
     }
 
@@ -2172,7 +2295,16 @@ impl ProcessEngine {
     fn call<T>(&mut self, op: impl FnOnce(&mut Sidecar) -> T) -> Option<T> {
         let sc = self.ensure()?;
         let result = op(sc);
-        if sc.is_poisoned() {
+        let poisoned = sc.is_poisoned();
+        // The loss ledger (issue #245), read off the same post-call state the
+        // notice latch is: an edge into poison is one answer this run will never
+        // have. The notice says it happened; this counts how often, so the run's
+        // own report can qualify the numbers it prints.
+        if poisoned && !self.poisoned_seen {
+            self.losses += 1;
+        }
+        self.poisoned_seen = poisoned;
+        if poisoned {
             self.note_unresponsive();
         }
         Some(result)
@@ -2203,6 +2335,27 @@ impl ProcessEngine {
     pub fn call_raw(&mut self, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
         self.call(|sc| sc.call_raw(method, params)).flatten()
     }
+
+    /// What this engine delivered over the whole run (issue #245).
+    ///
+    /// `engaged` is "a child was spawned", not "a request succeeded": a spawn that
+    /// worked and then answered nothing is a *degraded* run with losses, which is
+    /// a different story from the sound subset and must not be told as one.
+    /// `abandoned` reads the respawn budget rather than the poison flag alone —
+    /// poisoned-with-budget-left is a child about to be replaced, poisoned-with-
+    /// none-left is the end of the fold surface for this run.
+    #[must_use]
+    pub fn posture(&self) -> FoldPosture {
+        let Some(sc) = &self.sidecar else {
+            return FoldPosture::default();
+        };
+        FoldPosture {
+            engaged: true,
+            losses: self.losses,
+            restarts: sc.respawns(),
+            abandoned: sc.is_poisoned() && sc.respawns() >= steins_sidecar::RESPAWN_CAP,
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2225,6 +2378,10 @@ impl FoldEngine for ProcessEngine {
 
     fn constant_defined(&mut self, name: &str) -> Option<ConstantDefined> {
         self.call(|sc| sc.constant_defined(name)).flatten()
+    }
+
+    fn restarts(&self) -> u32 {
+        self.sidecar.as_ref().map_or(0, Sidecar::respawns)
     }
 }
 
@@ -2250,6 +2407,13 @@ impl EngineFolder<ProcessEngine> {
     #[must_use]
     pub fn enabled() -> Self {
         Self::with_engine(ProcessEngine::enabled())
+    }
+
+    /// The fold surface this folder actually delivered (issue #245) — for a
+    /// caller that prints a number and owes the reader its coverage posture.
+    #[must_use]
+    pub fn posture(&self) -> FoldPosture {
+        self.engine.posture()
     }
 }
 

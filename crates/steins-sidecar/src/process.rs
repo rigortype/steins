@@ -47,7 +47,11 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 /// The storm brake. A run that kills three children is being fed input that
 /// kills children, and each respawn costs a PHP startup. Past the cap the
 /// instance stays poisoned and every later request widens immediately.
-const RESPAWN_CAP: u32 = 3;
+///
+/// Public so a run's **coverage report** can say which side of the brake it
+/// ended on (issue #245) — see [`Sidecar::respawns`]. It is a reporting input,
+/// never a request gate.
+pub const RESPAWN_CAP: u32 = 3;
 
 /// One live child and the thread draining it — everything a respawn replaces.
 ///
@@ -237,6 +241,23 @@ impl Sidecar {
     #[must_use]
     pub fn is_poisoned(&self) -> bool {
         self.poisoned
+    }
+
+    /// Respawn attempts charged against [`RESPAWN_CAP`] so far — how many children
+    /// this instance has already buried (issue #245).
+    ///
+    /// **Reporting only.** It exists so a long run can state its coverage posture
+    /// in its own output — "the child died twice and was replaced twice" reads very
+    /// differently from "the budget is spent and every later request widens" — and
+    /// a reader who is comparing counts needs to know which one happened. It is
+    /// deliberately NOT the "permanently dead" predicate [`Self::is_poisoned`]'s
+    /// doc declines to offer: gating a request on `respawns() >= RESPAWN_CAP`
+    /// re-creates exactly the run-long disabling the respawn discipline exists to
+    /// prevent. Make the request and widen on the answer, as before; read this only
+    /// to describe what happened.
+    #[must_use]
+    pub fn respawns(&self) -> u32 {
+        self.respawns
     }
 
     /// Query the child's PHP environment. Returns `None` on any failure (the
