@@ -1412,6 +1412,87 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 128,
         message_contains: "ClassNameUsageLocation::createMessage(): Return value must be of type string",
     },
+    // The same tracer's nine findings in the legacy monorepo, triaged 2026-08-08 —
+    // all on the sibling id, all register 2 (the conditional class). Each is a body
+    // that returns on every arm the code actually takes and leaves one escape edge
+    // uncovered: the sentence "returns on some paths, but one path falls through to
+    // the end" is precisely true of every one. None is the unconditional class; the
+    // legacy tree has no stub bodies of that shape.
+    //
+    // Whether nine live conditional fall-throughs are worth a project's attention is
+    // exactly what the `strict` floor exists to let that project decide — the id is
+    // off the default surface, and these rows record what turning it on would say.
+    //
+    // Two of the nine sit in files under a product-named directory; their suffixes
+    // are cut below it, and one is cut mid-filename past a product-named prefix. For
+    // those two the message fingerprint is reduced to the id's generic tail, the same
+    // treatment the `SampleTest.php:192` row above carries — suffix plus line plus id
+    // still keys each row 1:1. Every row here uses that generic tail for uniformity;
+    // a re-cut of the checkout that moves a line stops the match and re-reds the
+    // gate, which is the intended tripwire.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "type.return-maybe-missing",
+        path_suffix: "AiGeneratedWork/Common.php",
+        line: 58,
+        message_contains: "type array, none returned",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "type.return-maybe-missing",
+        path_suffix: "CreateWork/Mapper/BoolString.php",
+        line: 13,
+        message_contains: "type bool, none returned",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "type.return-maybe-missing",
+        path_suffix: "CreateWork/Mapper/IllustCommentOffSetting.php",
+        line: 18,
+        message_contains: "type bool, none returned",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "type.return-maybe-missing",
+        path_suffix: "Novel/BookGenerator.php",
+        line: 212,
+        message_contains: "type string, none returned",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "type.return-maybe-missing",
+        path_suffix: "Novel/Image/Detail.php",
+        line: 266,
+        message_contains: "type array, none returned",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "type.return-maybe-missing",
+        path_suffix: "Common.php",
+        line: 296,
+        message_contains: "type array, none returned",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "type.return-maybe-missing",
+        path_suffix: "ArticleExistence.php",
+        line: 76,
+        message_contains: "type array, none returned",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "type.return-maybe-missing",
+        path_suffix: "Www/AJAX/NovelSeriesGlossaryHelper.php",
+        line: 329,
+        message_contains: "type array, none returned",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "type.return-maybe-missing",
+        path_suffix: "Www/AJAX/TopHelper.php",
+        line: 433,
+        message_contains: "type array, none returned",
+    },
 ];
 
 /// Whether `d` is a recorded, triaged TRUE proof-layer positive for `package`
