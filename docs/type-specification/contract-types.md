@@ -52,7 +52,21 @@ rules instead of a keyword zoo:
   equal (`lower` maps `A&B` to `Inter`, and an all-`StrWith` intersection folds
   to the same predicate set), while a compound keyword is what the emitted phpdoc
   can lower back through. The cost is that `uncased-string` and the
-  `non-falsy-`/`numeric-` casing compounds are not PHPStan vocabulary.
+  `non-falsy-`/`numeric-` casing compounds are not PHPStan vocabulary — PHPStan
+  reads them as class names.
+
+  **That cost is accepted deliberately, by owner ruling (2026-08-08), with the
+  full grid kept.** It is not a detail of the implementation: `transform` and
+  `annotate` write these words into the project's own docblocks, so a project
+  running both tools will see PHPStan reject an annotation Steins authored. The
+  alternatives — trimming the grid to the `non-empty-` compounds, or lowering
+  only the emitted spelling to a PHPStan-parseable cell — were weighed and
+  declined in favour of one vocabulary that says what the domain actually holds.
+  Steins' vocabulary is Steins' (ADR-0030); the acceptance relation still judges
+  PHPStan's intersection spelling equal to the cell, so *reading* PHPStan-shaped
+  annotations is unaffected — only what Steins *writes* diverges. An adopter who
+  needs PHPStan-parseable output should not run the docblock-writing transforms
+  until that is offered as a choice.
 - `decimal-int-string`, `non-decimal-int-string`
   → `StrWith`, and NOT part of the grid above (neither is a spelling the speller
   emits; both widen to the cell their closure names).
