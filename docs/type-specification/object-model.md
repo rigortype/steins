@@ -180,10 +180,24 @@ builtin/extension homonym that could mean the textual class is dead code
 shadowed by a loaded one. Any doubt is silence. See
 [dynamism.md](dynamism.md).
 
-`phpdoc.undefined-method` is its contract-layer twin over *declared* receivers,
-under an additional per-arm **descendant closure** requirement: a declared type is
-satisfied by subclasses, so absence on the declared class is not absence on the
-value.
+The **declared-receiver lane** covers *declared* receivers under an additional
+per-arm **descendant closure** requirement: a declared type is satisfied by
+subclasses, so absence on the declared class is not absence on the value.
+
+That lane's id is decided by the declaration it rests on, not by the lane
+(ADR-0049 A13). A native `C $o` parameter is runtime-enforced — PHP raises a
+`TypeError` at the call boundary or the value conforms — so an all-native arm list
+is `Verified` evidence and the finding is `call.undefined-method`, the same
+proof-layer id an exact receiver gets. A `@param`/`@var` claim is `Asserted`, so a
+lane with any docblock-derived arm is `phpdoc.undefined-method` on the contract
+layer. The minimum stratum over the surviving arms picks between the two, which
+means one unverified arm in a union is enough to keep the whole finding
+contract-grade.
+
+The two emitters share the proof-layer id but never a **site**: an exact receiver
+has no declared-arm lane consulted, and a lane-carrying variable is never
+exact-class. The evidence string says which ladder proved it — the
+declared-receiver phrasing names the variable and its narrowed arms.
 
 ## Not implemented
 

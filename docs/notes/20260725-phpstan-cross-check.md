@@ -99,6 +99,20 @@ proof (a posture question for an ADR).
 
 ## 3. Member checks only reach `new`-typed and static receivers
 
+> **Corrected 2026-08-08 (issue #196).** The probe below measured a bare
+> `steins check`, and read a *floor* as a reach boundary. The ADR-0049 §8
+> declared-receiver lane already bound `C $o`; its only id sat on the contract
+> layer, so nothing printed without `--profile contracts`. ADR-0049 A13 routes the
+> lane by minimum stratum, and `viaParam` — a native declaration, `Verified` —
+> now reports `call.undefined-method` on the **default** profile, matching
+> PHPStan on this line. Also fixed in the same slice: a parameter copied into
+> another variable (`$c = $o; $c->nope();`) carries its declared arms and
+> reports. Still out of reach, and now for stated reasons rather than by
+> omission: property and promoted-property receivers (ADR-0052 N5 — a property
+> chain is a Barrier) and return-typed call receivers (`mk()->nope()` has no
+> receiver representation in the trace at all). The paragraph after the probe
+> stands only for those three shapes.
+
 ```php
 final class C { public function ok(): void {} }
 function viaParam(C $o): void { $o->nope(); }    // Steins silent, PHPStan reports

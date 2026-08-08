@@ -111,7 +111,14 @@ lives on the **contract** layer at the `Contracts` floor, so a bare
 cross-check measured. The 14-of-14-versus-1 gap is therefore a **floor and
 stratum question**, not missing inference.
 
-That reframes it into four separable pieces, in descending leverage:
+That reframes it into four separable pieces, in descending leverage.
+
+> **Status 2026-08-08 (issue #196).** Piece 1 landed as ADR-0049 A13's
+> minimum-stratum routing, with the copied-variable half of piece 2. Piece 4
+> **dissolved**: once the routing is in, `phpdoc.undefined-method` fires only
+> where a docblock premise participates, so the name is correct and no rename
+> or deprecation path is needed. The remaining piece-2 shapes and piece 3 are
+> still open — see the per-piece notes below.
 
 **1. The Verified half of S6 is proof-grade evidence shipped as contract.**
 The lane's own code comment says it accepts Asserted premises because the
@@ -141,7 +148,9 @@ add. Whatever S6 knows about a receiver, only S6 uses.
 **4. The id is misnamed.** `phpdoc.undefined-method` fires on
 `function f(C $o)` where no docblock exists. Under ADR-0022 an id is a
 contract, so this is a rename with a deprecation path, not a typo fix —
-worth folding into piece 1 rather than doing twice.
+worth folding into piece 1 rather than doing twice. *(Superseded: piece 1's
+routing sends that case to `call.undefined-method`, which leaves the
+`phpdoc.` id firing only on docblock premises. Nothing to rename.)*
 
 The false-positive guard is unchanged by all of this and still comes
 first: `@method`, `@property`, `@mixin` and `@phpstan-type` are listed in

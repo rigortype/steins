@@ -112,7 +112,9 @@ fn classification_matches_adr_0050_section_1() {
     // the member-kind port wave's first id (ADR-0078, issue #187).
     assert_eq!(layer(ARRAY_DUPLICATE_KEY_ID), Some(Layer::Mechanics));
     // finding-breadth family (ADR-0049): proof layer, except the declared-receiver
-    // lane which is contract (the paired-id precedent, ADR-0049 §8).
+    // lane's Asserted half, which is contract (the paired-id precedent, ADR-0049 §8;
+    // the lane's all-Verified half rides `call.undefined-method` under A13, so the
+    // two rows below cover both halves without a third id).
     assert_eq!(layer(CALL_UNDEFINED_FUNCTION_ID), Some(Layer::Proof));
     assert_eq!(layer(CALL_UNDEFINED_METHOD_ID), Some(Layer::Proof));
     assert_eq!(layer(CLASS_UNDEFINED_ID), Some(Layer::Proof));
@@ -160,11 +162,24 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
         assert_eq!(layer(id), Some(Layer::Proof));
     }
 
-    // S6: the declared-receiver lane is emittable and left the pending list — a
-    // **contract**-layer id (the paired-id precedent), not proof.
+    // S6: the declared-receiver lane is emittable and left the pending list. Under
+    // ADR-0049 A13 the lane routes by minimum stratum across TWO already-registered
+    // ids — `phpdoc.undefined-method` for an Asserted premise, `call.undefined-method`
+    // (S2's, asserted above) for an all-Verified one. The registry sees no change at
+    // all from that: no id was added, renamed or relayered, which is the invariant
+    // this block pins.
     assert!(emittable.contains(PHPDOC_UNDEFINED_METHOD_ID), "S6 must be emittable");
     assert!(!pending.contains(PHPDOC_UNDEFINED_METHOD_ID), "S6 must have left REGISTERED_NOT_YET_EMITTED");
     assert_eq!(layer(PHPDOC_UNDEFINED_METHOD_ID), Some(Layer::Contract));
+    // The A13 restatement of §8's disjointness invariant: it is over SITES, not ids.
+    // One id may carry two emitters (ADR-0022 decouples the two) — what may never
+    // happen is one call site judged by both, and that is pinned where the emitters
+    // live (`tests/s6_routing.rs::one_call_site_is_judged_by_exactly_one_emitter`,
+    // `tests/phpdoc_undefined_method.rs::exact_receiver_is_s2s_emitter_never_both`).
+    // Here the registry-side consequence: both ids stay emittable, and neither is a
+    // duplicate of the other.
+    assert!(emittable.contains(CALL_UNDEFINED_METHOD_ID), "the promoted half's id must be emittable");
+    assert_ne!(PHPDOC_UNDEFINED_METHOD_ID, CALL_UNDEFINED_METHOD_ID);
 
     // Only the internal-target too-many arm remains pending; userland too-many
     // measured clean, and internal targets require reflection (M2).

@@ -9953,6 +9953,19 @@ fn apply_assign(
         return;
     }
 
+    // The declared-arm lane travels across a plain copy `$c = $o` (ADR-0052 §9,
+    // issue #196 piece 2). A copy binds the SAME value, so every declared
+    // possibility that held of the source holds of the destination, at the same
+    // stratum — this carries an existing fact one step, it does not infer a new one.
+    // Read BEFORE the match, because a self-assign `$a = $a` unbinds `var` — and so
+    // the source's own lane — inside it; written AFTER, because every arm the match
+    // can take for a `Var` rvalue drops `var`'s lane on its way (`unbind`) and none
+    // of them mints a replacement, so this is the one write that survives.
+    let copied_arms: Option<Vec<ContractArm>> = match value {
+        ArgValue::Var(src) if !w.scope.poisoned => store.contract.get(src).cloned(),
+        _ => None,
+    };
+
     match value {
         // `$x = new Foo(args)` (ADR-0036): a fresh allocation, class from resolution,
         // props populated from promoted ctor params + literal defaults.
@@ -10207,6 +10220,10 @@ fn apply_assign(
                 }
             },
         },
+    }
+
+    if let Some(arms) = copied_arms {
+        store.contract.insert(var.to_owned(), arms);
     }
 }
 
@@ -19516,26 +19533,46 @@ fn check_printf_arity(
 }
 
 // ---------------------------------------------------------------------------
-// The declared-receiver lane: `phpdoc.undefined-method` (ADR-0049 §8 / S6).
+// The declared-receiver lane (ADR-0049 §8 / S6), routed by minimum stratum
+// (ADR-0049 A13): `call.undefined-method` when every arm is `Verified`,
+// `phpdoc.undefined-method` when any arm is `Asserted`.
 //
-// The **contract-layer** twin of `call.undefined-method`. Where S2 fires on a
-// proven-exact receiver (`class_exact`), S6 fires on a receiver whose *declared*
-// type — a phpdoc `@param User|Guest`, narrowed by branch analysis (N4) down to a
-// surviving contract-arm list — provably lacks the method under a stricter ladder:
-// "conditional is not enough" (§8), so each surviving arm must clear both the §4
-// chain legs AND **descendant closure** (a subclass, incl. an `eval`-minted one,
-// could satisfy the contract and define the method).
+// Where S2 fires on a proven-exact receiver (`class_exact`), S6 fires on a receiver
+// whose *declared* type — a native `C $o` parameter, a phpdoc `@param User|Guest`,
+// narrowed by branch analysis (N4) down to a surviving contract-arm list — provably
+// lacks the method under a stricter ladder: "conditional is not enough" (§8), so
+// each surviving arm must clear both the §4 chain legs AND **descendant closure**
+// (a subclass, incl. an `eval`-minted one, could satisfy the contract and define
+// the method).
 //
-// **Disjointness from S2 (stated in code).** S2 owns `class_exact` receivers; S6
-// requires the receiver be NOT exact — an inexact/lower-bound `$var` carrying a
-// narrowed arm lane. A receiver is never judged by both ids: an exact object has no
-// contract lane consulted here (the `is_exact` bail), and a lane-carrying var is
-// never `class_exact`. The two lists (`ALL_EMITTABLE_IDS`) stay disjoint too.
+// **The A13 routing.** The ladder above is one ladder and it does not move; what
+// moves is which id carries the result. A native declaration is runtime-enforced
+// evidence (`Verified` — PHP raises a `TypeError` at the boundary or the value
+// conforms), a docblock claim is not (`Asserted`). ADR-0052 N2's minimum over the
+// lane's arms is therefore the whole discriminator:
 //
-// This id **accepts Asserted premises** (contract layer, ADR-0052 §5): the
-// narrowed lane's arms may be `Asserted` (a `@param` refinement) — the finding is
-// coherent at the min stratum. It still respects `absence_family_available` (A9
-// monkey-patch silence + the A2ii homonym leg needs a live sidecar) and the A11
+// * **every arm `Verified`** → [`CALL_UNDEFINED_METHOD_ID`], the proof layer at the
+//   `Default` floor — the same id S2 emits, because it is the same claim at the
+//   same certainty (ADR-0022 decouples id from emitter). The evidence string keeps
+//   the declared-receiver phrasing so a reader can tell which ladder proved it.
+// * **any arm `Asserted`** → [`PHPDOC_UNDEFINED_METHOD_ID`], the contract layer,
+//   exactly as before. After routing this id fires only where a docblock premise
+//   participates, which is what its name says.
+//
+// Neither id is renamed and none is added: `ALL_EMITTABLE_IDS` is unchanged as a
+// set.
+//
+// **Disjointness from S2 (stated in code).** The invariant is over SITES, not over
+// ids: S2 owns `class_exact` receivers; S6 requires the receiver be NOT exact — an
+// inexact/lower-bound `$var` carrying a narrowed arm lane. A receiver is never
+// judged by both emitters — an exact object has no contract lane consulted here
+// (the `is_exact` bail), and a lane-carrying var is never `class_exact` — so the
+// two emitters can share the proof-layer id without ever double-reporting a call.
+//
+// The Asserted half **accepts Asserted premises** (contract layer, ADR-0052 §5):
+// the narrowed lane's arms may be `Asserted` (a `@param` refinement) — the finding
+// is coherent at the min stratum. Both halves respect `absence_family_available`
+// (A9 monkey-patch silence + the A2ii homonym leg needs a live sidecar) and the A11
 // version-skew demotion of descendant closure.
 // ---------------------------------------------------------------------------
 
@@ -19752,11 +19789,16 @@ fn arm_provably_lacks_method(
     Some(simple_chain.first().cloned().unwrap_or_else(|| arm_fqn.to_owned()))
 }
 
-/// Run the ADR-0049 §8 ladder for one `$var->method()` and emit
-/// `phpdoc.undefined-method` iff the receiver's narrowed contract-arm lane consists
-/// entirely of class arms that **each** provably lack the method under descendant
-/// closure. Contract layer — Asserted arms are coherent premises; any leg failure
-/// on any arm is silence.
+/// Run the ADR-0049 §8 ladder for one `$var->method()` and emit the declared-receiver
+/// finding iff the receiver's narrowed contract-arm lane consists entirely of class
+/// arms that **each** provably lack the method under descendant closure. Any leg
+/// failure on any arm is silence.
+///
+/// The id is chosen by [`declared_receiver_id`] from the lane's minimum stratum
+/// (ADR-0049 A13): all-`Verified` arms carry the proof-layer
+/// [`CALL_UNDEFINED_METHOD_ID`], any `Asserted` arm keeps the contract-layer
+/// [`PHPDOC_UNDEFINED_METHOD_ID`]. The ladder above the choice is identical for both
+/// — the routing moves findings between two existing ids, never a firing condition.
 fn check_phpdoc_undefined_method(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -19793,6 +19835,10 @@ fn check_phpdoc_undefined_method(
             _ => return,
         }
     }
+    // A13: the minimum over the PARTICIPATING arms — the ones the ladder is about to
+    // close over, i.e. exactly the lane that survived narrowing. Computed here, next
+    // to the arm read, so it can never drift from the arms the claim rests on.
+    let id = declared_receiver_id(arms);
     // A9 (monkey-patch) + A2ii's honest consequence: without a live sidecar, or with
     // a runtime-redefinition extension loaded, the id is silent (checked once).
     if !folder.absence_family_available() {
@@ -19814,7 +19860,7 @@ fn check_phpdoc_undefined_method(
          hierarchy and descendants fully enumerated, no __call, no @method/@property/@mixin"
     );
     out.push(Diagnostic {
-        id: PHPDOC_UNDEFINED_METHOD_ID,
+        id,
         path: cx.path().to_owned(),
         line: pos.line,
         column: pos.column,
@@ -19822,6 +19868,24 @@ fn check_phpdoc_undefined_method(
         facet: None,
         fix: None,
     });
+}
+
+/// The declared-receiver lane's id for a narrowed arm lane (ADR-0049 A13): the
+/// proof-layer [`CALL_UNDEFINED_METHOD_ID`] when EVERY arm is `Verified` — a native
+/// declaration PHP enforces at the call boundary — and the contract-layer
+/// [`PHPDOC_UNDEFINED_METHOD_ID`] as soon as one arm is `Asserted`.
+///
+/// This is [`Stratum::min`] folded over the lane and nothing else: the rule is
+/// ADR-0052 N2's, read rather than re-derived, so it is commutative, associative
+/// and order-independent (ADR-0048). An `Asserted` arm can never launder into
+/// `Verified` upstream ([`refine_declared_arms`]), which is what makes the fold a
+/// sound gate rather than a convention.
+fn declared_receiver_id(arms: &[ContractArm]) -> &'static str {
+    let min = arms.iter().fold(Stratum::Verified, |acc, a| acc.min(a.stratum));
+    match min {
+        Stratum::Verified => CALL_UNDEFINED_METHOD_ID,
+        Stratum::Asserted => PHPDOC_UNDEFINED_METHOD_ID,
+    }
 }
 
 // ---------------------------------------------------------------------------

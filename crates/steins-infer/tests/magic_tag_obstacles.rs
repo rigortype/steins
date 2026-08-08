@@ -38,14 +38,27 @@ fn run(src: &str, id: &str) -> Vec<Diagnostic> {
     check_with(&tree, &[], "test.php", &mut Boot).into_iter().filter(|d| d.id == id).collect()
 }
 
-/// The S2 findings (exact `new`-typed receiver).
+/// The S2 findings (exact `new`-typed receiver): the proof id MINUS the
+/// declared-receiver lane's own emissions, which A13 routes onto the same id.
 fn s2(src: &str) -> Vec<Diagnostic> {
     run(src, CALL_UNDEFINED_METHOD_ID)
+        .into_iter()
+        .filter(|d| !d.message.contains("declared receiver"))
+        .collect()
 }
 
-/// The S6 findings (declared receiver).
+/// The S6 findings (declared receiver), on EITHER id ADR-0049 A13 may route them
+/// to — the fixtures below use native declarations, so they take the promoted
+/// proof-layer id, and the obstacle leg has to hold there too.
 fn s6(src: &str) -> Vec<Diagnostic> {
-    run(src, PHPDOC_UNDEFINED_METHOD_ID)
+    let tree = SourceTree::parse(src);
+    check_with(&tree, &[], "test.php", &mut Boot)
+        .into_iter()
+        .filter(|d| {
+            (d.id == PHPDOC_UNDEFINED_METHOD_ID || d.id == CALL_UNDEFINED_METHOD_ID)
+                && d.message.contains("declared receiver")
+        })
+        .collect()
 }
 
 fn reach(src: &str, fqn: &str) -> Vec<MagicObstacle> {

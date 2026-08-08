@@ -372,16 +372,26 @@ fn adversarial_abstract_method_declaration_counts_as_present() {
 }
 
 #[test]
-fn adversarial_declared_type_parameter_receiver_is_silent() {
+fn adversarial_declared_type_parameter_receiver_is_not_s2s() {
     // THE soundness boundary: a `Shape $s` parameter is a *declared* receiver, not an
     // exact one — a subclass passed at runtime may define the method (and `eval` can
-    // mint such a subclass). This is S6's descendant-closure lane, never S2's. The
+    // mint such a subclass). This is S6's descendant-closure lane, never S2's: the
     // heap seeds no exact object for a declared param, so `class_exact` is false and
-    // the receiver leg (A1) silences it.
+    // S2's receiver leg (A1) refuses the site.
+    //
+    // Since ADR-0049 A13 the two lanes SHARE this id when the declared arm is native
+    // (`Verified`), so the boundary is stated the way it is now enforced — the
+    // finding here exists, and it is the declared-receiver lane's, carrying that
+    // lane's descendant-closure evidence rather than S2's exact-receiver evidence.
     let d = fires(
         "<?php\nclass Shape { public function area() {} }\nfunction f(Shape $s): void { $s->tyop(); }\n",
     );
-    assert!(d.is_empty(), "{d:?}");
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(
+        d[0].message.contains("declared receiver $s"),
+        "S2 must not claim an exact receiver here: {}",
+        d[0].message
+    );
 }
 
 #[test]
