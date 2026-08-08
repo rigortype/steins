@@ -17,7 +17,13 @@ fn findings(src: &str) -> Vec<Diagnostic> {
     let db = SteinsDatabase::default();
     let input = SourceFile::new(&db, "main.php".to_owned(), src.to_owned());
     let project = Project::new(&db, vec![input], steins_db::ProjectLayout::fallback(), steins_db::PluginFacts::none());
+    // The `untyped.*` family (ADR-0078, issue #200) reports on the FIXTURES' own
+    // declarations — deliberately untyped here — not on the behaviour under test.
+    // Dropped so every assertion below keeps meaning what it meant before it landed.
     check_project(&db, project, &mut NoFold)
+        .into_iter()
+        .filter(|d| !d.id.starts_with("untyped."))
+        .collect()
 }
 
 fn count(src: &str) -> usize {

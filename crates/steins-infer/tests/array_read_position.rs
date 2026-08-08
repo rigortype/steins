@@ -125,7 +125,14 @@ impl Folder for Mock {
 fn one_type_with(src: &str, folder: &mut dyn Folder) -> String {
     let tree = SourceTree::parse(src);
     let ds = check_with(&tree, &[], "t.php", folder);
-    let other: Vec<&Diagnostic> = ds.iter().filter(|d| !d.id.starts_with("debug.")).collect();
+    // `untyped.*` (ADR-0078, issue #200) is excluded alongside the dumps. These
+    // fixtures declare a bare `array` on purpose — that is the shape under test —
+    // and a contract-layer id observing the missing value type is not the
+    // read-position transfer speaking.
+    let other: Vec<&Diagnostic> = ds
+        .iter()
+        .filter(|d| !d.id.starts_with("debug.") && !d.id.starts_with("untyped."))
+        .collect();
     assert!(other.is_empty(), "a read-position transfer emitted a finding: {other:?}");
     let ty: Vec<&Diagnostic> = ds.iter().filter(|d| d.id == DEBUG_TYPE_ID).collect();
     assert_eq!(ty.len(), 1, "expected exactly one debug.type dump, got {ds:?}");

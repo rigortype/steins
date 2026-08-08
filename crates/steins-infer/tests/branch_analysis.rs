@@ -14,7 +14,13 @@ use steins_syntax::SourceTree;
 fn findings(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
     let functions = tree.functions().to_vec();
+    // The `untyped.*` family (ADR-0078, issue #200) reports on the FIXTURES' own
+    // declarations — deliberately untyped here — not on the behaviour under test.
+    // Dropped so every count below keeps meaning what it meant before the family landed.
     check(&tree, &functions, "demo.php")
+        .into_iter()
+        .filter(|d| !d.id.starts_with("untyped."))
+        .collect()
 }
 
 fn n(src: &str) -> usize {
