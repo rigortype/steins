@@ -819,17 +819,22 @@ pub const CLASS_CONST_INACCESSIBLE_ID: &str = "class-const.inaccessible";
 /// keeps this id and [`PROPERTY_INACCESSIBLE_ID`] disjoint by construction.
 pub const PROPERTY_UNDEFINED_ID: &str = "property.undefined";
 
-/// The `maybe-` sibling of [`PROPERTY_UNDEFINED_ID`] (ADR-0078 §1.3), **registered
-/// ahead of emission**: the declared-shape possibly-grade leg — a docblock-declared
-/// property set (the `array{a?: string}` analogue over an object) that leaves a name
-/// possibly-absent. Proof layer at the `Strict` floor, the `offset.maybe-missing`
-/// precedent.
+/// The `maybe-` sibling of [`PROPERTY_UNDEFINED_ID`] (ADR-0078 §1.3): the
+/// declared-shape possibly-grade leg — a read whose receiver was narrowed to a
+/// **union** of declared types, where the §8 ladder proves the property absent on
+/// some arms and finds it declared on the rest. Proof layer at the `Strict` floor,
+/// the `offset.maybe-missing` precedent.
 ///
-/// Registration is the mechanical enforcement of "the possibly-leg is named, never
-/// scoped out of existence" (ADR-0078 §1.3, the `call.too-many-arguments`
-/// precedent): the id exists in [`DIAGNOSTIC_REGISTRY`], `@steins-ignore` can name
-/// it and its layer is pinned, while [`REGISTERED_NOT_YET_EMITTED`] records that no
-/// emitter produces it yet.
+/// Registered ahead of emission in v0.1.4 and **emitting since ADR-0081 §7**
+/// (issue #267). It carries no reachability premise of its own: the arms are a
+/// union of declared types, not control-flow paths, so the binding-presence pass
+/// the `variable.*` pair rests on plays no part here. It shares that ADR only
+/// because the pair was registered together and ships together.
+///
+/// Disjoint from [`PROPERTY_UNDEFINED_ID`] by a partition, not a filter: every arm
+/// absent is the definite id, some arms absent is this one, and a single arm the
+/// ladder cannot close silences both — a possibly-grade claim about "some arms" is
+/// still a claim about all of them.
 pub const PROPERTY_MAYBE_UNDEFINED_ID: &str = "property.maybe-undefined";
 
 /// The registry id for a class-constant fetch no declaration in the receiver's
@@ -1082,17 +1087,25 @@ pub const VARIABLE_UNDEFINED_ID: &str = "variable.undefined";
 
 /// `variable.maybe-undefined` (ADR-0078, issue #194, **proof** layer, floor
 /// `Strict`): a read of a name bound on only *some* paths reaching it — PHPStan's
-/// `checkMaybeUndefinedVariables`. Registered ahead of emission
-/// ([`REGISTERED_NOT_YET_EMITTED`]) exactly as `call.too-many-arguments` is: the id
-/// and its layer are pinned now so `@steins-ignore` can name it and a baseline
-/// entry means one fixed thing, while the emitter waits on the reachability
-/// foundation (issue #199).
+/// `checkMaybeUndefinedVariables`. Registered ahead of emission in v0.1.4 and
+/// **emitting since the binding-presence pass landed** (ADR-0081, issue #267): the
+/// firing set is `Scope::maybe_undefined_reads`, computed at lowering by a
+/// statement-ordered walk over a three-valued presence lattice that subtracts a
+/// provably-terminating branch arm, iterates loop bodies to a fixpoint and consumes
+/// `isset`/`empty` guards with polarity.
 ///
 /// It sits at the `strict` floor, not `default`, because the claim is weaker than
 /// its sibling's: `variable.undefined` proves the binding is absent from the whole
 /// scope, whereas this one proves only that *a* path reaches the read unbound — a
 /// shape defensive house styles produce on purpose, and one a partial-path guess
 /// would turn into exactly the false positive the proof layer forbids.
+///
+/// The two are disjoint by construction, not by a filter: this id fires only where
+/// the scope binds the name **somewhere**, which is exactly the condition that
+/// takes a read out of [`VARIABLE_UNDEFINED_ID`]'s ordering-blind premise. The
+/// use-before-assign shape (`$y = $x; $x = 1;`) therefore stays here even though no
+/// path reaches the read bound — promoting it would break the definite id's
+/// documented ordering-blindness (ADR-0081, non-goal 1).
 pub const VARIABLE_MAYBE_UNDEFINED_ID: &str = "variable.maybe-undefined";
 
 // end undefined variables (ADR-0078, issue #194)
@@ -1184,6 +1197,8 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // end inaccessible members (ADR-0078, issue #185)
     // member absence (ADR-0078, issue #197)
     PROPERTY_UNDEFINED_ID,
+    // The declared-shape possibly leg, emitting since ADR-0081 (issue #267).
+    PROPERTY_MAYBE_UNDEFINED_ID,
     CLASS_CONST_UNDEFINED_ID,
     // end member absence (ADR-0078, issue #197)
     // untyped surface (ADR-0078, issue #200)
@@ -1206,6 +1221,9 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // end global constants (ADR-0078, issue #198)
     // undefined variables (ADR-0078, issue #194)
     VARIABLE_UNDEFINED_ID,
+    // The some-paths sibling, emitting since the binding-presence pass landed
+    // (ADR-0081, issue #267).
+    VARIABLE_MAYBE_UNDEFINED_ID,
     // end undefined variables (ADR-0078, issue #194)
 ];
 
@@ -1221,17 +1239,6 @@ pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
     // The too-many-arguments arm fires for INTERNAL targets only (userland
     // too-many runs clean), so it waits for the reflect slice (M2).
     CALL_TOO_MANY_ARGUMENTS_ID,
-    // member absence (ADR-0078, issue #197)
-    // The `maybe-` sibling registers WITH its definite leg (ADR-0078 §1.3) and
-    // waits for the declared-shape-over-an-object vocabulary.
-    PROPERTY_MAYBE_UNDEFINED_ID,
-    // end member absence (ADR-0078, issue #197)
-    // undefined variables (ADR-0078, issue #194)
-    // The some-paths-only sibling of `variable.undefined`: its premise is a claim
-    // about the paths reaching a read, so it waits for the reachability foundation
-    // (issue #199).
-    VARIABLE_MAYBE_UNDEFINED_ID,
-    // end undefined variables (ADR-0078, issue #194)
 ];
 
 /// The maximum depth of interprocedural argument-binding descent (Feature B).
@@ -7334,7 +7341,15 @@ fn collect_bare_identifiers(ty: &PType, out: &mut Vec<String>) {
 // undefined variables (ADR-0078, issue #194)
 // ---------------------------------------------------------------------------
 
-/// `variable.undefined`: a read of a name its scope never binds.
+/// The `variable.*` pair: `variable.undefined` on a read of a name its scope never
+/// binds, and `variable.maybe-undefined` on a read only *some* paths reach bound
+/// (ADR-0081, issue #267).
+///
+/// **One predicate routes between them, and it lives at lowering**: a name the
+/// scope binds nowhere lands in `Scope::undefined_reads`, a name it binds somewhere
+/// lands in `Scope::maybe_undefined_reads`, and no read can be in both. This is
+/// `check_return_missing`'s shape — a Default-floor definite id and a Strict-floor
+/// possibly id, disjoint by construction rather than by a filter applied here.
 ///
 /// The firing set is `Scope::undefined_reads`, computed at lowering — every binding
 /// form, the `isset`/`empty`/`??`/`unset`/`@` guard exclusions, the
@@ -7364,7 +7379,12 @@ fn check_undefined_variables(cx: &Cx, out: &mut Vec<Diagnostic>) {
         return;
     }
     // Nothing to judge in most files: skip the call-site sweep entirely then.
-    if cx.tree().scopes().iter().all(|s| s.undefined_reads.is_empty()) {
+    if cx
+        .tree()
+        .scopes()
+        .iter()
+        .all(|s| s.undefined_reads.is_empty() && s.maybe_undefined_reads.is_empty())
+    {
         return;
     }
     let bound_by_call = out_param_argument_spans(cx);
@@ -7397,6 +7417,35 @@ fn check_undefined_variables(cx: &Cx, out: &mut Vec<Diagnostic>) {
                 format!(
                     "${name} is never bound in this scope — PHP warns \
                      \"Undefined variable ${name}\" and the read evaluates to null"
+                ),
+            ));
+        }
+        // The some-paths leg. Same scope, same warning-handler gate, same
+        // out-parameter oracle — with one refinement the definite leg does not
+        // need: an out-parameter binds from its **call site forward**, so a
+        // confirmed candidate subtracts only the reads that follow it. Subtracting
+        // scope-wide (the definite leg's rule) would be wrong in the other
+        // direction here — `echo $x; preg_match($p, $s, $x);` reaches its read
+        // before the binding — and subtracting nothing would report the shape
+        // ADR-0077 exists to keep silent.
+        for read in &scope.maybe_undefined_reads {
+            let bound_before = scope.ref_arg_candidates.iter().any(|c| {
+                c.name == read.name
+                    && c.span.start <= read.span.start
+                    && bound_by_call.contains(&c.span.start)
+            });
+            if bound_before {
+                continue;
+            }
+            let name = &read.name;
+            out.push(hygiene_diag(
+                cx,
+                VARIABLE_MAYBE_UNDEFINED_ID,
+                read.span.start,
+                format!(
+                    "${name} is bound on only some of the paths that reach this read \
+                     — on the others PHP warns \"Undefined variable ${name}\" and the \
+                     read evaluates to null"
                 ),
             ));
         }
@@ -20649,39 +20698,73 @@ fn property_walk_obstacle(cd: &ClassDecl) -> bool {
 /// declines in v1 because `stdClass` is the language's own property bag and a
 /// dynamic property written anywhere would make the read clean.
 fn enumerate_property_chain(cx: &Cx, start_fqn: &str, prop: &str) -> Option<PropertyChain> {
+    match enumerate_property_chain_outcome(cx, start_fqn, prop) {
+        PropertyChainOutcome::Absent(chain) => Some(chain),
+        PropertyChainOutcome::Declared | PropertyChainOutcome::Unknown => None,
+    }
+}
+
+/// What a parent-chain walk actually established — the three-valued form of
+/// [`enumerate_property_chain`] (ADR-0081 §7).
+///
+/// The definite leg needs only "absent or not", and collapses the other two into
+/// silence. The possibly leg needs them apart: a union arm that **declares** the
+/// property is a path on which the read is clean, while an arm the walk could not
+/// close is a path nothing is known about — and a claim that "some arms lack it"
+/// may rest on the first but never on the second.
+enum PropertyChainOutcome {
+    /// Every node of a fully enumerated chain lacks the property.
+    Absent(PropertyChain),
+    /// A node in the chain declares it — plain, promoted, static, readonly or
+    /// hooked.
+    Declared,
+    /// An obstacle taints the closure: nothing is proven in either direction.
+    Unknown,
+}
+
+fn enumerate_property_chain_outcome(
+    cx: &Cx,
+    start_fqn: &str,
+    prop: &str,
+) -> PropertyChainOutcome {
     // Leg A14 (issue #195): a `@property*` / `@method` / `@mixin` / `@phpstan-type`
     // tag anywhere in the class-like's resolved reach says members live where the
     // index cannot enumerate them. This is the leg that keeps the Eloquent shape
     // silent, and it is reused verbatim — the same records, the same reach walk, the
     // same discharge channel a plugin pack will open member by member.
     if !magic_obstacles_in_reach(cx, start_fqn).is_empty() {
-        return None;
+        return PropertyChainOutcome::Unknown;
     }
     let mut cur = start_fqn.to_owned();
     let mut seen: HashSet<String> = HashSet::new();
     let mut chain = PropertyChain { simple: Vec::new(), fqns: Vec::new(), any_conditional: false };
     loop {
         if !seen.insert(cur.to_ascii_lowercase()) {
-            return None; // a cycle — closure cannot terminate soundly.
+            // A cycle — closure cannot terminate soundly.
+            return PropertyChainOutcome::Unknown;
         }
         // Every ancestor edge must resolve to a UNIQUE project declaration:
         // `find_class` is `None` for an absent ancestor (a builtin — `stdClass`
         // included — or a vendor class awaiting the reflect surface) and for an
         // `Ambiguous` FQN alike.
-        let (cfile, cd) = cx.find_class(&cur)?;
+        let Some((cfile, cd)) = cx.find_class(&cur) else {
+            return PropertyChainOutcome::Unknown;
+        };
         // ADR-0079 §2.5: a node declared in an unparsable file is member-incomplete —
         // recovery kept the class but may have dropped members out of its body.
         if cx.member_incomplete(cfile) || property_walk_obstacle(cd) {
-            return None;
+            return PropertyChainOutcome::Unknown;
         }
         if declares_property(cd, prop) {
-            return None; // declared — plain, promoted, static, readonly or hooked.
+            // Declared — plain, promoted, static, readonly or hooked. This is the
+            // one exit that proves the read CLEAN rather than merely unprovable.
+            return PropertyChainOutcome::Declared;
         }
         chain.simple.push(cd.name.clone());
         chain.fqns.push(cur.clone());
         chain.any_conditional |= cd.conditional;
         match &cd.parent {
-            None => return Some(chain),
+            None => return PropertyChainOutcome::Absent(chain),
             Some(pref) => cur = cx.units[cfile].tree.resolve_class_fqn(pref),
         }
     }
@@ -20754,42 +20837,68 @@ fn descendant_introduces_property(cx: &Cx, cd: &ClassDecl, prop: &str) -> bool {
         || !magic_obstacles_in_reach(cx, &cd.fqn).is_empty()
 }
 
-/// Run the §8 ladder for one narrowed contract arm and return its display simple
-/// name when `prop` is **provably absent** across the arm's whole hierarchy *and*
-/// its complete descendant set, or `None` when any leg fails (silence).
-fn arm_provably_lacks_property(
+/// What the §8 ladder established about `prop` on one narrowed contract arm
+/// (ADR-0081 §7).
+///
+/// Three-valued on purpose. The definite leg only ever needed "absent or not" and
+/// collapsed the other two into one silence; splitting them is what lets the
+/// possibly leg rest on an arm that genuinely declares the property while still
+/// refusing an arm the ladder could not close.
+enum ArmPropertyPresence {
+    /// Provably absent across the arm's hierarchy and its complete descendant set,
+    /// carrying the display simple name for the message.
+    Absent(String),
+    /// A node in the arm's chain declares the property: a receiver of this arm
+    /// reads it cleanly.
+    Declared,
+    /// A ladder leg refused. Nothing is proven in either direction, and a
+    /// possibly-grade claim may not rest on it.
+    Unknown,
+}
+
+fn arm_property_presence(
     cx: &Cx,
     folder: &mut dyn Folder,
     arm_fqn: &str,
     prop: &str,
-) -> Option<String> {
-    let chain = enumerate_property_chain(cx, arm_fqn, prop)?;
+) -> ArmPropertyPresence {
+    let chain = match enumerate_property_chain_outcome(cx, arm_fqn, prop) {
+        PropertyChainOutcome::Absent(chain) => chain,
+        PropertyChainOutcome::Declared => return ArmPropertyPresence::Declared,
+        PropertyChainOutcome::Unknown => return ArmPropertyPresence::Unknown,
+    };
     if chain.any_conditional && !cx.dam.is_clear() {
-        return None; // A2i.
+        return ArmPropertyPresence::Unknown; // A2i.
     }
     for fqn in &chain.fqns {
         if folder.boot_surface_class_like(fqn) != Some(false) {
-            return None; // A2ii homonym.
+            return ArmPropertyPresence::Unknown; // A2ii homonym.
         }
     }
     match descendant_closure(cx, arm_fqn) {
         DescendantClosure::Immune => {}
-        DescendantClosure::Obstacle => return None,
+        DescendantClosure::Obstacle => return ArmPropertyPresence::Unknown,
         DescendantClosure::Enumerated(descendants) => {
             if !cx.dam.is_clear() {
-                return None; // `eval` could mint a subclass declaring the property.
+                // `eval` could mint a subclass declaring the property.
+                return ArmPropertyPresence::Unknown;
             }
             for (_, dcd) in &descendants {
+                // A descendant that declares the property is NOT the `Declared`
+                // answer: the receiver may or may not be that descendant, which is
+                // precisely an unknown rather than a clean path.
                 if descendant_introduces_property(cx, dcd, prop) {
-                    return None;
+                    return ArmPropertyPresence::Unknown;
                 }
                 if folder.boot_surface_class_like(&dcd.fqn) != Some(false) {
-                    return None;
+                    return ArmPropertyPresence::Unknown;
                 }
             }
         }
     }
-    Some(chain.simple.first().cloned().unwrap_or_else(|| arm_fqn.to_owned()))
+    ArmPropertyPresence::Absent(
+        chain.simple.first().cloned().unwrap_or_else(|| arm_fqn.to_owned()),
+    )
 }
 
 /// `property.undefined` (ADR-0078, issue #197) at a `$var->prop` **read**.
@@ -20848,21 +20957,55 @@ fn check_undefined_property(
         PropertyReceiver::Declared(arms) => {
             // Every arm, and within an intersection arm every conjunct: a property
             // declared on EITHER conjunct resolves, because member lookup over an
-            // inhabited intersection is the union of its arms (issue #234). A leg
-            // that cannot close answers `None` here too, so the same fold carries
-            // both the either-arm rule and `Maybe`-is-silence.
-            let mut names: Vec<String> = Vec::with_capacity(arms.len());
+            // inhabited intersection is the union of its arms (issue #234).
+            //
+            // The fold is three-valued now (ADR-0081 §7), which is what splits the
+            // pair: an arm that PROVES the property absent, an arm that declares it,
+            // and an arm the ladder could not close. Every arm absent is the
+            // definite id; some absent and the rest declared is the possibly id;
+            // a single unknown arm is silence on both, because a possibly-grade
+            // claim about "some arms" is still a claim about ALL of them.
+            let mut absent: Vec<String> = Vec::new();
+            let mut declared: Vec<String> = Vec::new();
             for conjuncts in &arms {
                 let mut per_arm: Vec<String> = Vec::with_capacity(conjuncts.len());
+                let mut any_declared = false;
                 for f in conjuncts {
-                    match arm_provably_lacks_property(cx, folder, f, prop) {
-                        Some(name) => per_arm.push(name),
-                        None => return, // any conjunct not provably-absent ⇒ silence.
+                    match arm_property_presence(cx, folder, f, prop) {
+                        ArmPropertyPresence::Absent(name) => per_arm.push(name),
+                        ArmPropertyPresence::Declared => {
+                            any_declared = true;
+                            // The declaration's own spelling, so a declared arm
+                            // renders like an absent one (the FQN is case-folded).
+                            per_arm.push(
+                                cx.find_class(f)
+                                    .map_or_else(|| simple_class(f).to_owned(), |(_, cd)| cd.name.clone()),
+                            );
+                        }
+                        // Any conjunct the ladder could not close ⇒ silence on both
+                        // legs, for the whole read.
+                        ArmPropertyPresence::Unknown => return,
                     }
                 }
-                names.push(per_arm.join("&"));
+                let rendered = per_arm.join("&");
+                if any_declared {
+                    declared.push(rendered);
+                } else {
+                    absent.push(rendered);
+                }
             }
-            let joined = names.join("|");
+            if absent.is_empty() {
+                return; // every arm declares it — the read is clean.
+            }
+            if !declared.is_empty() {
+                // The possibly leg: the read is clean on the declared arms and
+                // warns on the absent ones.
+                check_maybe_undefined_property(
+                    cx, var, prop, &absent, &declared, span, out,
+                );
+                return;
+            }
+            let joined = absent.join("|");
             (
                 joined.clone(),
                 format!(
@@ -20885,6 +21028,55 @@ fn check_undefined_property(
              no #[AllowDynamicProperties], no @property/@method/@mixin, no dynamic write of \
              `{prop}` anywhere — PHP warns \"Undefined property: {subject}::${prop}\" and \
              evaluates to null"
+        ),
+    });
+}
+
+/// `property.maybe-undefined` (ADR-0078's floor table, ADR-0081 §7): the
+/// declared-shape possibly leg, where the declared-receiver ladder proves the
+/// property absent on **some** union arms and present on the rest.
+///
+/// This is `offset.maybe-missing`'s emission pattern one member kind over: the
+/// definite leg claims absence over the whole receiver, this one claims it over a
+/// proper subset of the arms the receiver was narrowed to, and the two are disjoint
+/// because the routing in [`check_undefined_property`] is a partition — every arm
+/// absent, some arms absent, or an unclosable arm that silences both.
+///
+/// It carries **no reachability premise**: the arms are a union of declared types,
+/// not a set of control-flow paths, so nothing here consults the binding-presence
+/// pass. It shares ADR-0081 only because the pair was registered together.
+///
+/// Every premise of the definite leg is already discharged by the caller — the
+/// ADR-0049 §7 warning-handler gate, `Scope::poisoned`, the project-wide
+/// dynamic-write obstacle, the A9 sidecar availability, the A13 Verified-stratum
+/// floor on the participating arms, and the full §8 ladder per arm.
+fn check_maybe_undefined_property(
+    cx: &Cx,
+    var: &str,
+    prop: &str,
+    absent: &[String],
+    declared: &[String],
+    span: Span,
+    out: &mut Vec<Diagnostic>,
+) {
+    let missing = absent.join("|");
+    let carrying = declared.join("|");
+    let subject = absent.first().cloned().unwrap_or_default();
+    let pos = cx.tree().position(span.start);
+    out.push(Diagnostic {
+        id: PROPERTY_MAYBE_UNDEFINED_ID,
+        facet: None,
+        fix: None,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message: format!(
+            "property ${var}->{prop} is declared on only some arms of the receiver's \
+             declared type — {{{carrying}}} declare it, {{{missing}}} do not, with \
+             hierarchy and descendants fully enumerated, no __get/__set/__isset, no \
+             #[AllowDynamicProperties], no @property/@method/@mixin and no dynamic \
+             write of `{prop}` anywhere — on a {subject} PHP warns \"Undefined \
+             property: {subject}::${prop}\" and the read evaluates to null"
         ),
     });
 }

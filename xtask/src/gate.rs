@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 use steins_db::{Project, SourceFile, SteinsDatabase, parse};
 use steins_db::composer;
-use steins_infer::{Diagnostic, Layer, SidecarFolder, check_project, layer};
+use steins_infer::{Diagnostic, Floor, Layer, SidecarFolder, check_project, layer, surface_floor};
 
 use crate::corpus::{PACKAGES, checkout_dir, collect_php_files, read_lock, repo_root};
 use crate::corpus_local::{self, LocalProject};
@@ -58,6 +58,13 @@ struct PackageReport {
     /// `effect.unknown-label` is **mechanics**, not contract — it stays on the
     /// red-on-sight path in `diagnostics`, never here.
     effects: Vec<Diagnostic>,
+    /// **Possibly-grade** proof findings — the `strict`-floored proof ids
+    /// (ADR-0081 §8), held in the same measurement mode as `phpdoc.*`/`throw.*`:
+    /// counted per package against [`POSSIBLY_EXPECTED`] and gating only on an
+    /// increase. Their definite siblings (`variable.undefined`,
+    /// `property.undefined`, `type.return-missing`) stay red-on-sight in
+    /// `diagnostics`, never here.
+    possibly: Vec<Diagnostic>,
     /// Triaged TRUE runtime-layer positives (real broken corpus code Steins
     /// correctly proves; see [`EXPECTED_PROOF_FINDINGS`]). Reported prominently
     /// but excluded from the red/green verdict — matched at finding precision so
@@ -270,6 +277,18 @@ enum GateBucket {
     /// contract: **measurement mode** — reported and counted, gates only on a
     /// per-package increase past the seeded baseline (ADR-0050 §9).
     Measurement,
+    /// **possibly-grade** proof ids — the `maybe-` siblings, the proof-layer rows
+    /// the registry floors at `strict` (ADR-0081 §8). Measurement mode, on the same
+    /// per-package increase tripwire as the contract families and for the same
+    /// reason: the claim is *"some path"*, so a true finding on working code is the
+    /// id's own yield rather than a defect the corpus is supposed to be free of,
+    /// and the default profile a corpus user runs never shows one.
+    ///
+    /// This is where the zero-FP policy's FP tolerance is absorbed for these ids —
+    /// not by omitting the check, and not by suppressing a finding, but by the
+    /// `strict` opt-in the floor already encodes. A count that *grows* is still a
+    /// regression and still reds.
+    Tripwire,
     /// debug (ADR-0053 §8): requested introspection, **excluded from every counter**
     /// — not red-on-sight, not a tripwire, not `EXPECTED_PROOF_FINDINGS` material. A
     /// dump is not a finding. Vacuous today (no debug emitter until ADR-0053 D3/D4),
@@ -284,6 +303,13 @@ fn gate_bucket(d: &Diagnostic) -> GateBucket {
     match layer(d.id) {
         Some(Layer::Contract) => GateBucket::Measurement,
         Some(Layer::Debug) => GateBucket::Excluded,
+        // A proof id floored at `strict` is a possibly-grade claim (ADR-0078 §1.3's
+        // `maybe-` convention, mechanized): derived from the registry rather than
+        // listed here, so a new `maybe-` sibling takes the right posture the day it
+        // registers and no id list can drift from the floors.
+        Some(Layer::Proof) if surface_floor(d.id) == Some(Floor::Strict) => {
+            GateBucket::Tripwire
+        }
         Some(Layer::Proof | Layer::Mechanics) | None => GateBucket::RedOnSight,
     }
 }
@@ -299,6 +325,14 @@ fn is_contract(d: &Diagnostic) -> bool {
 /// counter. Read from the same exhaustive [`gate_bucket`] partition.
 fn is_debug(d: &Diagnostic) -> bool {
     gate_bucket(d) == GateBucket::Excluded
+}
+
+/// Whether a diagnostic is a **possibly-grade** proof finding (ADR-0081 §8) — the
+/// `strict`-floored proof ids, counted against [`POSSIBLY_EXPECTED`] and gating
+/// only on a per-package increase. One id table, not one per family: the three ids
+/// share a posture, not a prefix.
+fn is_possibly(d: &Diagnostic) -> bool {
+    gate_bucket(d) == GateBucket::Tripwire
 }
 
 /// Whether a diagnostic is one of the measurement-mode `phpdoc.*` **contract** ids.
@@ -684,6 +718,79 @@ const EFFECT_EXPECTED: &[(&str, usize)] = &[];
 /// untabled — the all-zero seed).
 fn effect_expected(name: &str) -> usize {
     EFFECT_EXPECTED.iter().find(|(n, _)| *n == name).map_or(0, |(_, c)| *c)
+}
+
+/// Permanent gate policy for the **possibly-grade** proof ids (ADR-0081 §8):
+/// `variable.maybe-undefined`, `property.maybe-undefined` and
+/// `type.return-maybe-missing`, selected by floor rather than by name (see
+/// [`gate_bucket`]). Same per-package **increase** tripwire as
+/// [`PHPDOC_EXPECTED`] / [`THROW_EXPECTED`] / [`EFFECT_EXPECTED`].
+///
+/// Why a count and not per-finding pins. A definite proof id claims the program
+/// breaks, so its corpus count belongs at zero and each exception is triaged
+/// verbatim into [`EXPECTED_PROOF_FINDINGS`]. A possibly-grade id claims only that
+/// *a* path reaches the site — the shape defensive house styles produce on purpose,
+/// and the reason the registry floors these at `strict` where no default-profile
+/// run shows them. Pinning each site individually would have meant hundreds of rows
+/// asserting that working code is working, and the twelve
+/// `type.return-maybe-missing` rows this table absorbed were already that shape.
+///
+/// Seeded 2026-08-09 from the run that landed the binding-presence pass, against
+/// the corpus revisions recorded in `corpus.lock.toml` / `corpus.local.toml`.
+/// **A count that grows is a regression and reds the gate**; a count that shrinks
+/// is reported and the baseline updated consciously. Packages absent from this
+/// table expect **zero**.
+/// The five classes the 2026-08-09 triage found, so a future reader knows what a
+/// count is made of before deciding whether a change to it is a regression:
+///
+/// 1. **Genuinely conditional binding** (`if`/`elseif` with no `else`, a name bound
+///    only inside one arm) — TRUE, and the id's whole point.
+/// 2. **A loop variable read after its loop** (`foreach (…) {…} use($i);`) — TRUE;
+///    the zero-iteration path really does reach it unbound.
+/// 3. **Correlated conditions** — bound under `if (count($c) > 1)` and read under a
+///    second, textually identical `if (count($c) > 1)` whose body reassigns `$c`
+///    in between (symfony/console `Application.php:827`). TRUE under the syntactic
+///    control-flow reading this id is defined over; proving the two conditions
+///    agree is path feasibility, which no reachability analysis here attempts.
+/// 4. **A never-returning callee** (`$this->fail()`, `self::fail()`,
+///    `markTestSkipped()`, `exitWithErrorMessage()`) — FALSE. `stmt_end` reads a
+///    statement-position call as falling through because deciding otherwise needs
+///    the project index, and ADR-0081 §9 defers the refinement to the emitter side
+///    where the index lives. The six symfony/process rows, both Carbon rows and the
+///    phpunit row are this class.
+/// 5. **A binding in an argument position of a throwing call inside `try`**
+///    (`$app->find($name = 'x');` then `$name` read in the `catch`) — FALSE. PHP
+///    evaluates arguments before entering the callee, so the binding is done before
+///    anything can throw; the pass weakens at statement granularity and cannot see
+///    inside. The four symfony/console `Tests/` rows are this class.
+const POSSIBLY_EXPECTED: &[(&str, usize)] = &[
+    // 1 — `PluginManager.php:525`, class 1.
+    ("composer/composer", 1),
+    // 1 — `Application.php:409`, class 4 (`exitWithErrorMessage`).
+    ("sebastianbergmann/phpunit", 1),
+    // 10 — six class 1/2/3 in `Application.php`, `CompletionInput.php` and
+    // `SymfonyStyle.php`; four class 5 in `Tests/`.
+    ("symfony/console", 10),
+    // 6 — every row class 4 (`$this->fail()` in `ProcessTest.php`).
+    ("symfony/process", 6),
+    // 2 — both class 4 (`markTestSkipped()` in the serialization tests).
+    ("briannesbitt/Carbon", 2),
+    // 10 — 8 `variable.maybe-undefined` (class 1 and class 4) plus the 2
+    // `type.return-maybe-missing` rows this bucket absorbed from
+    // `EXPECTED_PROOF_FINDINGS`.
+    ("phpstan/phpstan-src", 10),
+    // 120 — 111 `variable.maybe-undefined` over 85,282 files plus the 9
+    // `type.return-maybe-missing` rows absorbed from `EXPECTED_PROOF_FINDINGS`.
+    // Measured against the checkout this run saw, which already differs from the
+    // revision `corpus.local.toml` records (the same drift the `phpdoc.*` tripwire
+    // reports); reseed with that one when the checkout is reconciled.
+    ("pxxxx-monorepo", 120),
+];
+
+/// The expected possibly-grade count for a package/local-project name (0 if
+/// untabled).
+fn possibly_expected(name: &str) -> usize {
+    POSSIBLY_EXPECTED.iter().find(|(n, _)| *n == name).map_or(0, |(_, c)| *c)
 }
 
 /// A single **triaged TRUE proof-layer positive** the corpus legitimately
@@ -1254,33 +1361,25 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         message_contains: "does not parse",
     },
     // ---------------------------------------------------------------------
-    // `type.return-missing` / `type.return-maybe-missing` (ADR-0078 §5, issue
-    // #199) — the reachability foundation's tracer, triaged 2026-08-08.
+    // `type.return-missing` (ADR-0078 §5, issue #199) — the reachability
+    // foundation's tracer, triaged 2026-08-08.
     //
-    // The proof layer is gated whole, floor or not: a `Strict`-floor proof id must
-    // be as FP-free as a `Default`-floor one, so the sibling's rows sit here beside
-    // the definite leg's. Every row below was read against its checkout and every
-    // one is TRUE as worded.
+    // **Deliberately-stub test doubles**, every row. Empty or
+    // never-returning-by-intent bodies carrying a real return type. Each WOULD
+    // fatal `Return value must be of type T, none returned` the moment it were
+    // invoked — and several exist precisely so that invoking them is invalid.
+    // Nothing here is a bug in the package; nothing here is an FP either. This is
+    // what the unconditional class looks like in mature OSS: not broken production
+    // code, but fixtures.
     //
-    // TWO REGISTERS, and the comment on each row says which:
-    //
-    // 1. **Deliberately-stub test doubles** (the fifteen public rows). Empty or
-    //    never-returning-by-intent bodies carrying a real return type. Each WOULD
-    //    fatal `Return value must be of type T, none returned` the moment it were
-    //    invoked — and several exist precisely so that invoking them is invalid.
-    //    Nothing here is a bug in the package; nothing here is an FP either. This
-    //    is what the unconditional class looks like in mature OSS: not broken
-    //    production code, but fixtures.
-    //
-    // 2. **The conditional class** (the two phpstan-src rows, id
-    //    `type.return-maybe-missing`). Live, shipped, correct code whose escape
-    //    edge no caller takes: a `switch` over a string with no `default` where
-    //    every case returns. The finding's sentence is precisely true — the body
-    //    *does* return on some paths and one path *does* fall through — and
-    //    phpstan-src passes PHPStan's own `MissingReturnRule` on both, which is
-    //    exactly why this class is floored at `strict` rather than `default`
-    //    (ADR-0078 §1.3). Pinned, not suppressed: the day the shape changes, the
-    //    row stops matching and the gate speaks up.
+    // Its `maybe-` sibling `type.return-maybe-missing` used to be pinned here too,
+    // on the reading that "the proof layer is gated whole, floor or not". ADR-0081
+    // §8 supersedes that: a possibly-grade id claims only that *a* path reaches the
+    // site, so a true finding on working code is the id's own yield rather than a
+    // defect the corpus should be free of, and the `strict` floor already keeps it
+    // off every default-profile run. Its eleven rows moved to the per-package
+    // `POSSIBLY_EXPECTED` count, which still reds on an increase. The two registers
+    // that comment used to distinguish are now two buckets.
     // ---------------------------------------------------------------------
 
     // Carbon — two macro bodies registered ONLY so the PHPStan extension under test
@@ -1404,106 +1503,6 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         path_suffix: "Tests/EventListener/ErrorListenerTest.php",
         line: 126,
         message_contains: "NonStringInput::getParameterOption(): Return value must be of type mixed",
-    },
-    // phpstan-src — register 2, the canonical conditional shape. A closure and a
-    // method, each a `switch` over a string with no `default` whose every case
-    // returns. The no-match edge is real in the control-flow graph and no caller
-    // supplies a string that takes it, so the code is correct by construction and
-    // unprovable by analysis — the exact reason this id is floored at `strict`.
-    ExpectedProofFinding {
-        package: "phpstan/phpstan-src",
-        id: "type.return-maybe-missing",
-        path_suffix: "src/PhpDoc/TypeNodeResolver.php",
-        line: 697,
-        message_contains: "Return value must be of type TemplateTypeVariance, none returned",
-    },
-    ExpectedProofFinding {
-        package: "phpstan/phpstan-src",
-        id: "type.return-maybe-missing",
-        path_suffix: "src/Rules/ClassNameUsageLocation.php",
-        line: 128,
-        message_contains: "ClassNameUsageLocation::createMessage(): Return value must be of type string",
-    },
-    // The same tracer's nine findings in the legacy monorepo, triaged 2026-08-08 —
-    // all on the sibling id, all register 2 (the conditional class). Each is a body
-    // that returns on every arm the code actually takes and leaves one escape edge
-    // uncovered: the sentence "returns on some paths, but one path falls through to
-    // the end" is precisely true of every one. None is the unconditional class; the
-    // legacy tree has no stub bodies of that shape.
-    //
-    // Whether nine live conditional fall-throughs are worth a project's attention is
-    // exactly what the `strict` floor exists to let that project decide — the id is
-    // off the default surface, and these rows record what turning it on would say.
-    //
-    // Two of the nine sit in files under a product-named directory; their suffixes
-    // are cut below it, and one is cut mid-filename past a product-named prefix. For
-    // those two the message fingerprint is reduced to the id's generic tail, the same
-    // treatment the `SampleTest.php:192` row above carries — suffix plus line plus id
-    // still keys each row 1:1. Every row here uses that generic tail for uniformity;
-    // a re-cut of the checkout that moves a line stops the match and re-reds the
-    // gate, which is the intended tripwire.
-    ExpectedProofFinding {
-        package: "pxxxx-monorepo",
-        id: "type.return-maybe-missing",
-        path_suffix: "AiGeneratedWork/Common.php",
-        line: 58,
-        message_contains: "type array, none returned",
-    },
-    ExpectedProofFinding {
-        package: "pxxxx-monorepo",
-        id: "type.return-maybe-missing",
-        path_suffix: "CreateWork/Mapper/BoolString.php",
-        line: 13,
-        message_contains: "type bool, none returned",
-    },
-    ExpectedProofFinding {
-        package: "pxxxx-monorepo",
-        id: "type.return-maybe-missing",
-        path_suffix: "CreateWork/Mapper/IllustCommentOffSetting.php",
-        line: 18,
-        message_contains: "type bool, none returned",
-    },
-    ExpectedProofFinding {
-        package: "pxxxx-monorepo",
-        id: "type.return-maybe-missing",
-        path_suffix: "Novel/BookGenerator.php",
-        line: 212,
-        message_contains: "type string, none returned",
-    },
-    ExpectedProofFinding {
-        package: "pxxxx-monorepo",
-        id: "type.return-maybe-missing",
-        path_suffix: "Novel/Image/Detail.php",
-        line: 266,
-        message_contains: "type array, none returned",
-    },
-    ExpectedProofFinding {
-        package: "pxxxx-monorepo",
-        id: "type.return-maybe-missing",
-        path_suffix: "Common.php",
-        line: 296,
-        message_contains: "type array, none returned",
-    },
-    ExpectedProofFinding {
-        package: "pxxxx-monorepo",
-        id: "type.return-maybe-missing",
-        path_suffix: "ArticleExistence.php",
-        line: 76,
-        message_contains: "type array, none returned",
-    },
-    ExpectedProofFinding {
-        package: "pxxxx-monorepo",
-        id: "type.return-maybe-missing",
-        path_suffix: "Www/AJAX/NovelSeriesGlossaryHelper.php",
-        line: 329,
-        message_contains: "type array, none returned",
-    },
-    ExpectedProofFinding {
-        package: "pxxxx-monorepo",
-        id: "type.return-maybe-missing",
-        path_suffix: "Www/AJAX/TopHelper.php",
-        line: 433,
-        message_contains: "type array, none returned",
     },
     // ---------------------------------------------------------------------
     // `variable.undefined` (ADR-0078, issue #194) — triaged at source
@@ -1677,8 +1676,17 @@ pub fn run() -> Result<bool, String> {
     // ADR-0050 §9 delta family: `effect.*`-contract findings gate as an increase
     // tripwire too. Empty today (no corpus envelopes), so no package can regress.
     let effect_regressions = measurement_regressions(&reports, &local_reports, "effect", |r| r.effects.len(), effect_expected);
+    // ADR-0081 §8: the possibly-grade proof ids gate as an increase tripwire too.
+    let possibly_regressions = measurement_regressions(&reports, &local_reports, "possibly", |r| r.possibly.len(), possibly_expected);
 
-    print_report(&reports, &local_reports, &regressions, &throw_regressions, &effect_regressions);
+    print_report(
+        &reports,
+        &local_reports,
+        &regressions,
+        &throw_regressions,
+        &effect_regressions,
+        &possibly_regressions,
+    );
 
     // RED on any counted proof-layer finding — package diagnostics plus local
     // *non-vendor* diagnostics (vendor findings never gate; ADR-0015) — OR on any
@@ -1688,7 +1696,8 @@ pub fn run() -> Result<bool, String> {
     Ok(total_diags == 0
         && regressions.is_empty()
         && throw_regressions.is_empty()
-        && effect_regressions.is_empty())
+        && effect_regressions.is_empty()
+        && possibly_regressions.is_empty())
 }
 
 /// One measurement-mode regression: a package whose count exceeds its expectation.
@@ -1831,12 +1840,14 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
     let phpdoc: Vec<Diagnostic> = diags.iter().filter(|d| is_phpdoc(d)).cloned().collect();
     let throws: Vec<Diagnostic> = diags.iter().filter(|d| is_throw(d)).cloned().collect();
     let effects: Vec<Diagnostic> = diags.iter().filter(|d| is_effect_contract(d)).cloned().collect();
+    let possibly: Vec<Diagnostic> = diags.iter().filter(|d| is_possibly(d)).cloned().collect();
     // Debug-layer findings (ADR-0053 §8) are excluded from every counter before the
     // contract split and the red-on-sight retain: a dump is requested introspection,
     // not a finding. Dropped outright — not reported, not counted. Vacuous today (no
     // debug emitter until D3/D4), so `diags` is byte-identical to the pre-dump run.
     diags.retain(|d| !is_debug(d));
     diags.retain(|d| !is_contract(d));
+    diags.retain(|d| !is_possibly(d));
     // Split off triaged TRUE runtime-layer positives (reported, not gated). The
     // ADR-0049 S2 flagship `call.undefined-method` now flows through this
     // red-on-sight channel like any proof-layer id, with its triaged TRUE corpus
@@ -1855,6 +1866,7 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
         phpdoc,
         throws,
         effects,
+        possibly,
         expected_true,
         vendor_suppressed: 0,
         // A pinned package's revision is in the tracked `corpus.lock.toml` and the
@@ -1943,10 +1955,12 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
     let phpdoc: Vec<Diagnostic> = diags.iter().filter(|d| is_phpdoc(d)).cloned().collect();
     let throws: Vec<Diagnostic> = diags.iter().filter(|d| is_throw(d)).cloned().collect();
     let effects: Vec<Diagnostic> = diags.iter().filter(|d| is_effect_contract(d)).cloned().collect();
+    let possibly: Vec<Diagnostic> = diags.iter().filter(|d| is_possibly(d)).cloned().collect();
     // Debug-layer findings (ADR-0053 §8): excluded from every counter (see
     // `analyze_package`). Vacuous until D3/D4 — byte-identical gate output today.
     diags.retain(|d| !is_debug(d));
     diags.retain(|d| !is_contract(d));
+    diags.retain(|d| !is_possibly(d));
     // Split off triaged TRUE runtime-layer positives (reported, not gated).
     let expected_true: Vec<Diagnostic> =
         diags.iter().filter(|d| is_expected_true_positive(&proj.name, d)).cloned().collect();
@@ -1962,6 +1976,7 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
         phpdoc,
         throws,
         effects,
+        possibly,
         expected_true,
         vendor_suppressed,
         recorded_revision: proj.revision.clone(),
@@ -1977,6 +1992,7 @@ fn print_report(
     regressions: &[PhpdocRegression],
     throw_regressions: &[PhpdocRegression],
     effect_regressions: &[PhpdocRegression],
+    possibly_regressions: &[PhpdocRegression],
 ) {
     println!("\n=== fp-gate: per-package findings ===\n");
     if !local_reports.is_empty() {
@@ -2071,7 +2087,7 @@ fn print_report(
         );
     }
     println!("phpdoc.* TOTAL: {total_phpdoc} (expected baseline {total_expected})");
-    print_tripwire("phpdoc", regressions, local_reports);
+    print_tripwire("phpdoc.*", regressions, local_reports);
 
     // Measurement-mode summary for the `throw.*` contract-layer ids (ADR-0040):
     // counted per package against `THROW_EXPECTED`, gating only on INCREASE. The
@@ -2108,7 +2124,7 @@ fn print_report(
         }
     }
     println!("throw.* TOTAL: {total_throw} (expected baseline {total_throw_expected})");
-    print_tripwire("throw", throw_regressions, local_reports);
+    print_tripwire("throw.*", throw_regressions, local_reports);
 
     // Measurement-mode summary for the `effect.*` **contract** ids (ADR-0050 §9
     // delta: `effect.envelope-exceeded` / `effect.liskov-widened`). Seeded empty
@@ -2148,8 +2164,49 @@ fn print_report(
             }
         }
         println!("effect.* TOTAL: {total_effect} (expected baseline {total_effect_expected})");
-        print_tripwire("effect", effect_regressions, local_reports);
+        print_tripwire("effect.*", effect_regressions, local_reports);
     }
+
+    // Measurement-mode summary for the **possibly-grade** proof ids (ADR-0081 §8):
+    // the `strict`-floored rows, counted per package against `POSSIBLY_EXPECTED`
+    // and gating only on INCREASE. Every finding prints — unlike `throw.*` the
+    // volume is triageable, and unlike `phpdoc.*` a reader has no prefix to go
+    // looking for these under.
+    let total_possibly: usize =
+        reports.iter().chain(local_reports.iter()).map(|r| r.possibly.len()).sum();
+    println!(
+        "\n=== possibly-grade proof ids, strict floor (measurement mode — gates only on INCREASE) ===\n"
+    );
+    let total_possibly_expected: usize = POSSIBLY_EXPECTED.iter().map(|(_, c)| *c).sum();
+    for r in reports.iter().chain(local_reports.iter()) {
+        let expected = possibly_expected(&r.name);
+        if r.possibly.is_empty() && expected == 0 {
+            continue;
+        }
+        let label = if r.local { format!("{} (local)", r.name) } else { r.name.clone() };
+        let actual = r.possibly.len();
+        let marker = match actual.cmp(&expected) {
+            std::cmp::Ordering::Greater => "  ⬆ REGRESSION (exceeds expected)",
+            std::cmp::Ordering::Less => {
+                "  ⬇ improved (below expected — update baseline when intentional)"
+            }
+            std::cmp::Ordering::Equal => "",
+        };
+        let by_id = |want: &str| r.possibly.iter().filter(|d| d.id == want).count();
+        println!(
+            "{label} — {actual} possibly-grade ({} variable, {} property, {} return) [expected {expected}]{marker}",
+            by_id("variable.maybe-undefined"),
+            by_id("property.maybe-undefined"),
+            by_id("type.return-maybe-missing"),
+        );
+        for d in &r.possibly {
+            println!("    POSSIBLY {}:{}:{} [{}] {}", d.path, d.line, d.column, d.id, d.message);
+        }
+    }
+    println!(
+        "possibly-grade TOTAL: {total_possibly} (expected baseline {total_possibly_expected})"
+    );
+    print_tripwire("possibly-grade", possibly_regressions, local_reports);
 
     // Summary table: packages and local projects share one table; local rows are
     // marked `(local)`.
@@ -2221,10 +2278,10 @@ fn print_report(
 /// deciding whether to triage findings or re-measure the corpus.
 fn print_tripwire(family: &str, regressions: &[PhpdocRegression], local_reports: &[PackageReport]) {
     if regressions.is_empty() {
-        println!("{family}.* tripwire: OK — no package exceeds its expected baseline.");
+        println!("{family} tripwire: OK — no package exceeds its expected baseline.");
         return;
     }
-    println!("{family}.* tripwire: TRIPPED — the following packages regressed:");
+    println!("{family} tripwire: TRIPPED — the following packages regressed:");
     for reg in regressions {
         println!("    {} — {} > expected {}", reg.name, reg.actual, reg.expected);
         if let Some(local) = local_reports.iter().find(|r| r.name == reg.name) {

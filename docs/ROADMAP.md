@@ -53,8 +53,10 @@ Engine:
   (`syntax.unparsable`, `array.duplicate-key`, the five `phpdoc.*`
   rot ids, `closure.unused-use`), `preg.invalid-pattern`,
   `call.printf-too-few-arguments`, and the six contract-layer
-  `untyped.*`. Two — `property.maybe-undefined` and
-  `variable.maybe-undefined` — are registered ahead of emission.
+  `untyped.*`, and the two possibly-grade legs ADR-0081 landed
+  (`variable.maybe-undefined`, `property.maybe-undefined`). None is
+  registered ahead of emission any more except
+  `call.too-many-arguments`, which waits for the reflect slice.
 
 Verification apparatus (ADR-0013):
 

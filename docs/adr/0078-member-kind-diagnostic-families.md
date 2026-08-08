@@ -62,14 +62,14 @@ claim ships `php -r`-witnessed per the ADR-0049 point-10 discipline.
 | id | layer / floor | notes |
 | --- | --- | --- |
 | `property.undefined` | proof / Default, gate | undefined property **read**; `__get`/`#[AllowDynamicProperties]`/`stdClass` descent are A14 obstacles |
-| `property.maybe-undefined` | proof / Strict | declared-shape possibly leg; registered with the definite leg, emission deferred |
+| `property.maybe-undefined` | proof / Strict | declared-shape possibly leg; emitting since ADR-0081 §7 — the §8 ladder proves the property absent on some union arms and declared on the rest |
 | `property.on-non-object` | proof / Default, gate | property fetch on proven non-object |
 | `property.inaccessible` | proof / Default | fatal; visibility from the resolver that already computes it |
 | `class-const.undefined` | proof / Default | fatal; enum cases and interface constants are member sources |
 | `class-const.inaccessible` | proof / Default | fatal |
 | `constant.undefined` | proof / Default | fatal since 8.0; global constants; computed `define()` dams |
 | `variable.undefined` | proof / Default, gate | never-bound in scope; `extract`/`compact`/`$$` dam the scope |
-| `variable.maybe-undefined` | proof / Strict | some-paths-only; emission waits on the reachability foundation |
+| `variable.maybe-undefined` | proof / Strict | some-paths-only; emitting since ADR-0081 — the binding-presence pass is the reachability foundation it waited on |
 | `call.inaccessible-method` | proof / Default | fatal; `__call` is an A14 obstacle |
 | `call.on-non-object` | proof / Default | fatal; sibling of `call.on-null`, whose meaning is unchanged |
 | `call.printf-too-few-arguments` | proof / Default | format-string-derived arity; distinct from signature-derived `call.too-few-arguments` so the M2 internal-arity slice stays clean |
