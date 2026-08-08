@@ -313,6 +313,14 @@ fn spell_callable(obl: CallableObl) -> &'static str {
     }
 }
 
+/// [`spell_nested`] for the crate's own tests: the nested spelling is what an
+/// intersection/union arm reaches, and issue #238's round-trip property is stated
+/// about exactly that rendering.
+#[cfg(test)]
+pub(crate) fn spell_nested_for_test(ty: &ContractTy) -> String {
+    spell_nested(ty)
+}
+
 fn spell_nested(ty: &ContractTy) -> String {
     match ty {
         ContractTy::Mixed => "mixed".to_owned(),
@@ -447,8 +455,15 @@ pub fn spell_shape(
     match tail {
         ShapeTail::Sealed => {}
         ShapeTail::Untyped => parts.push("...".to_owned()),
-        ShapeTail::Typed { key: None, value } => parts.push(format!("...<{value}>")),
-        ShapeTail::Typed { key: Some(k), value } => parts.push(format!("...<{k}, {value}>")),
+        // A LIST tail never prints a key: the phpdoc grammar's list-shape tail is
+        // `...<V>` and has no key slot at all (its key class is `int` by
+        // definition), so a `list{…, ...<int, V>}` does not re-parse. This is the
+        // rule [`spell_generic_array`] already states for the fieldless forms,
+        // applied at the one other place a tail is printed.
+        ShapeTail::Typed { key: Some(k), value } if !is_list => {
+            parts.push(format!("...<{k}, {value}>"));
+        }
+        ShapeTail::Typed { value, .. } => parts.push(format!("...<{value}>")),
     }
     format!("{kw}{{{}}}", parts.join(", "))
 }

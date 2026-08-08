@@ -290,6 +290,26 @@ fn sealed_class_conflict(
 #[must_use]
 pub fn subsumes(a: &ContractTy, b: &ContractTy) -> Certainty {
     use Certainty::{Maybe, Yes};
+    // Conjunction against conjunction, judged ARM-WISE (issue #238). Asked whole,
+    // `A&B ⊇ A&B` folds to `Maybe`: the `b`-dispatch below reduces it to
+    // `A&B ⊇ A`, which genuinely is not provable (a plain `A` need not be a `B`).
+    // So the reflexive case — and every case where the two conjunctions share
+    // their arms — has to be decided on the arms:
+    //
+    // > `(A₁ ∩ … ∩ Aₙ) ⊇ (B₁ ∩ … ∩ Bₘ)` when **every** `Aᵢ` subsumes **some** `Bⱼ`.
+    //
+    // Sound by construction: take any `x` in `∩Bⱼ`; for each `Aᵢ` pick its witness
+    // `Bⱼ`, and `x ∈ Bⱼ ⊆ Aᵢ`, so `x ∈ ∩Aᵢ`. Only the proven `Yes` is claimed here
+    // — anything short of it falls through to the rules below, so this can widen a
+    // `Maybe` to `Yes` but can never manufacture a `No` that `dedup_arms` /
+    // `subtract` would act on.
+    if let (ContractTy::Inter(am), ContractTy::Inter(bm)) = (a, b)
+        && !am.is_empty()
+        && !bm.is_empty()
+        && am.iter().all(|x| bm.iter().any(|y| subsumes(x, y).is_yes()))
+    {
+        return Yes;
+    }
     match b {
         // The empty type is subsumed by everything.
         ContractTy::Never => Yes,
