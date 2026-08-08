@@ -231,6 +231,28 @@ fn a_transfer_binds_into_the_env_for_later_use() {
     assert_eq!(one_type(src), "dumped type: 2 (asserted)");
 }
 
+// ---- A literal array LIFTS to a shape when the value lane declines (#262) --
+
+#[test]
+fn count_of_a_literal_array_lifts_to_its_shape() {
+    // `$v = [1, 2, 3]` binds a `Fact::Singleton(Val::Array(..))`, not a
+    // `Fact::Shape` — the value-lane privilege (issue #118) claims `count` first
+    // and, having no projection for it, must fall through to `ShapeFact::lift`
+    // rather than give up: a literal array is strictly more informative than any
+    // declared one, so `count` over it is exact, `Verified` (not `(asserted)` —
+    // no docblock was consulted).
+    let src = "<?php\nfunction f(): void { $v = [1, 2, 3]; \\PHPStan\\dumpType(count($v)); }\n";
+    assert_eq!(one_type(src), "dumped type: 3");
+}
+
+#[test]
+fn array_is_list_of_a_literal_array_also_lifts() {
+    // The same fallback serves every name this rung answers for, not just
+    // `count` — `array_is_list` over a witnessed literal falls through too.
+    let src = "<?php\nfunction f(): void { $v = [1, 2, 3]; \\PHPStan\\dumpType(array_is_list($v)); }\n";
+    assert_eq!(one_type(src), "dumped type: true");
+}
+
 // ---- Emission discipline (A-G9's corollary) --------------------------------
 
 #[test]
