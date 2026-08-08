@@ -8157,9 +8157,27 @@ impl<'a> Cx<'a> {
                 let name = r.raw.to_ascii_lowercase();
                 // `use function` import wins outright.
                 if let Some(t) = ctx.fn_imports.get(&name) {
-                    return match self.index.resolve_function(&t.to_ascii_lowercase()) {
+                    let target = t.to_ascii_lowercase();
+                    return match self.index.resolve_function(&target) {
                         Res::Unique(site) => FnResolution::User(site),
-                        _ => FnResolution::Unknown,
+                        Res::Ambiguous => FnResolution::Unknown,
+                        // `use function strtolower;` imports the **global builtin**:
+                        // the target is a single-segment name no project function
+                        // defines, which is exactly the `\strtolower` case the
+                        // `FullyQualified` arm above already answers `Builtin`.
+                        // Without this leg an import silenced every catalog answer
+                        // about the name — measured (issue #41) as the second half
+                        // of the string family's precision loss: phpstan-src's
+                        // `non-empty-string.php` imports five string builtins, and
+                        // each imported call condemned its arguments' facts at the
+                        // ADR-0070 survival gate for want of a resolution.
+                        Res::Absent => {
+                            if !target.contains('\\') && catalog_knows(&target) {
+                                FnResolution::Builtin
+                            } else {
+                                FnResolution::Unknown
+                            }
+                        }
                     };
                 }
                 let is_builtin = catalog_knows(&name);
@@ -29136,8 +29154,9 @@ fn var_export_transfer(
 /// | name(s) | keeps | forces | declines |
 /// | --- | --- | --- | --- |
 /// | `trim ltrim rtrim chop` | casing | — | length (`trim('  ') === ''`) |
-/// | `substr` | casing | — | length in v1 (`substr('abc', 0, 0) === ''`) |
+/// | `substr` | casing always; length at a provably zero offset (whole axis with no length argument or a length ≥ 2, `NON_EMPTY` at ≥ 1) | — | length at any other offset (`substr('abc', 5) === ''`) |
 /// | `strrev` | casing + length | — | — |
+/// | `strtr` | `NON_EMPTY` (3-arg always; 2-arg when every replacement value is non-empty) | — | casing (`strtr('a', 'a', 'A')`) and `NON_FALSY` (`strtr('a', 'ax', '0x') === '0'`) |
 /// | `str_repeat` | casing always; length at a provable multiplier ≥ 1 | — | length at `str_repeat('a', 0) === ''` |
 /// | `str_pad` | length; casing when the pad argument carries it | `NON_EMPTY` at a provable length ≥ 1 | casing under an unknown pad |
 /// | `strtolower` / `strtoupper` | length | `LOWERCASE` / `UPPERCASE` | the opposite casing |
@@ -29166,10 +29185,14 @@ fn var_export_transfer(
 /// * **Any `mb_*` name** — encoding- and locale-dependent, the catalog's standing
 ///   exclusion (`steins_catalog` lib.rs "Deliberate exclusions"). `mb_strtolower`
 ///   and `mb_substr` are *absent by that rule*, not by oversight.
-/// * **`substr` non-emptiness** — `substr($nonEmpty, 0, 1)` really is non-empty, but
-///   only once offset and length are both known to select a character inside the
-///   subject's bounds, and the subject's length is exactly what a predicate summary
-///   does not carry. v1 keeps casing and says nothing about length.
+/// * **`substr` non-emptiness away from offset zero** — `substr($nonEmpty, 1, 1)`
+///   may be non-empty, and proving it needs the subject's own length, which a
+///   predicate summary does not carry (`substr('a', 1, 1) === ''`). Issue #41
+///   takes only the offset-zero sliver, where the window is anchored at the first
+///   byte and the clamping does the rest; every other offset still declines.
+/// * **`strtr` casing and non-falsiness** — both refuted at the pin
+///   (`strtr('a', 'a', 'A') === 'A'`; `strtr('a', 'ax', '0x') === '0'`), the
+///   second against upstream PHPStan's own claim for both arities.
 /// * **`sprintf` casing, and every non-constant format** — a conversion may emit
 ///   uppercase (`sprintf('%X', 255) === 'FF'`) or nothing at all
 ///   (`sprintf('%.0s', 'abc') === ''`), so only a *literal byte in a constant
@@ -29257,9 +29280,79 @@ fn str_pred_out(
         "trim" | "ltrim" | "rtrim" | "chop" => {
             (1..=2).contains(&args.len()).then(|| subject.intersect(CASING))
         }
-        // `substr('abc', 0, 0) === ''` — same shape, and the length axis needs
-        // bounds arithmetic this rung does not carry (see the doc's declines).
-        "substr" => (2..=3).contains(&args.len()).then(|| subject.intersect(CASING)),
+        // `substr('abc', 0, 0) === ''`, so casing is all a bare `substr` claims.
+        // The length axis needs the offset AND the length, and issue #41 buys
+        // exactly the sliver that needs no knowledge of the subject's own length:
+        // an offset **provably zero** anchors the window at the first byte, and
+        // then the output's first `min(strlen($s), $length)` bytes are the
+        // subject's own. Witnesses at `PINNED_PHP` (8.5.9):
+        //
+        // * `substr('abc', 0) === 'abc'` — the two-argument form at offset 0 is the
+        //   IDENTITY, so both length bits survive it.
+        // * `substr('a', 0, 2) === 'a'` — a length past the end clamps; it never
+        //   pads, so a non-empty subject cannot come back empty.
+        // * `substr('abc', 0, 0) === ''` and `substr('abc', 0, -5) === ''` — which
+        //   is why the length must be provably `>= 1`, negatives included.
+        // * `substr('0x', 0, 2) === '0x'` — at a length `>= 2` the output is either
+        //   two bytes (so not `'0'`) or the whole subject (so non-falsy if the
+        //   subject was), which is the whole non-falsy leg.
+        //
+        // A non-zero (or unknown) offset declines the length axis outright:
+        // `substr('abc', 5) === ''`, and this rung does not carry `strlen($s)`.
+        "substr" => {
+            if !(2..=3).contains(&args.len()) {
+                return None;
+            }
+            let anchored = transfer_arg_fact(cx, folder, &args[1], env, store)
+                .is_some_and(|f| f == Fact::Singleton(Val::Int(0)));
+            let length = match (anchored, args.get(2)) {
+                (false, _) => StrPreds::empty(),
+                // The identity form.
+                (true, None) => LENGTH,
+                (true, Some(len)) => {
+                    let len = transfer_arg_fact(cx, folder, len, env, store);
+                    let at_least = |n: i64| len.as_ref().is_some_and(|f| fact_int_at_least(f, n));
+                    if at_least(2) {
+                        LENGTH
+                    } else if at_least(1) {
+                        StrPreds::NON_EMPTY
+                    } else {
+                        StrPreds::empty()
+                    }
+                }
+            };
+            Some(subject.intersect(CASING.union(length)))
+        }
+        // ---- Byte MAPPING: the length is preserved, the bytes are not --------
+        //
+        // `strtr($s, $from, $to)` maps single bytes 1:1 over the common prefix of
+        // `$from`/`$to`, so the output length EQUALS the subject's and non-emptiness
+        // survives (`strtr('ab', 'ab', 'xy') === 'xy'`, `strtr('a', 'abc', 'x')
+        // === 'x'`). Nothing else does, and both refusals are measured at 8.5.9:
+        //
+        // * **Casing** — `strtr('a', 'a', 'A') === 'A'`: the map's target byte is
+        //   arbitrary, so neither bit can be carried.
+        // * **`NON_FALSY`** — `strtr('a', 'ax', '0x') === '0'`. Upstream PHPStan
+        //   propagates non-falsiness through both arities; a one-byte subject
+        //   mapped onto `'0'` refutes it, and a measured counterexample outranks
+        //   upstream's say-so (ADR-0061 §2). The same shape refutes the array form:
+        //   `strtr('a', ['a' => '0']) === '0'`.
+        //
+        // The array form replaces whole substrings rather than bytes, so the length
+        // is no longer preserved and a value of `''` DELETES one
+        // (`strtr('a', ['a' => '']) === ''`). Non-emptiness survives it only when
+        // every replacement value is known non-empty — read off the array's own
+        // values by [`array_value_preds`], which declines an array this rung cannot
+        // see through.
+        "strtr" => match args {
+            [_subject, pairs] => {
+                let vals = array_value_preds(cx, folder, pairs, env, store)?;
+                vals.contains_all(StrPreds::NON_EMPTY)
+                    .then(|| subject.intersect(StrPreds::NON_EMPTY))
+            }
+            [_subject, _from, _to] => Some(subject.intersect(StrPreds::NON_EMPTY)),
+            _ => None,
+        },
         // ---- Permutation: the byte MULTISET is preserved -------------------
         //
         // `strrev` keeps the length exactly, so `''`/`'0'` can only come from
@@ -29478,15 +29571,45 @@ fn implode_element_preds(
     env: &HashMap<String, Known>,
     store: Option<&Store>,
 ) -> Option<StrPreds> {
+    array_value_preds_seeded(cx, folder, value, env, store, Some(StrPreds::of("")))
+}
+
+/// The predicate summary every VALUE of an array argument satisfies, with **no
+/// seed** — the difference from [`implode_element_preds`], whose `''` seed is
+/// `implode`'s own answer for the empty array and would silently drop the length
+/// axis for any caller asking a different question. `strtr`'s array form is that
+/// caller: it needs "every replacement value is non-empty", and the empty array
+/// (whose answer is the unchanged subject) declines here rather than pretending.
+fn array_value_preds(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<StrPreds> {
+    array_value_preds_seeded(cx, folder, value, env, store, None)
+}
+
+/// The shared body of the two accessors above: the intersection over an array
+/// argument's values, starting from `seed`.
+fn array_value_preds_seeded(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+    seed: Option<StrPreds>,
+) -> Option<StrPreds> {
     match transfer_arg_fact(cx, folder, value, env, store)? {
         Fact::Shape { shape, nullable: false } => fact_str_preds(&shape_value_union(&shape)?),
         Fact::Singleton(Val::Array(entries)) => {
-            let mut acc = StrPreds::of("");
+            let mut acc = seed;
             for (_, v) in &entries {
                 let Val::Str(s) = v else { return None };
-                acc = acc.intersect(StrPreds::of(s));
+                let p = StrPreds::of(s);
+                acc = Some(acc.map_or(p, |a| a.intersect(p)));
             }
-            Some(acc)
+            acc
         }
         _ => None,
     }
@@ -29496,15 +29619,26 @@ fn implode_element_preds(
 /// for `str_repeat` and the length gate for `str_pad` — both of which turn on
 /// exactly that boundary (`str_repeat('a', 0) === ''`, `str_pad('', 0) === ''`).
 fn fact_is_positive_int(f: &Fact) -> bool {
+    fact_int_at_least(f, 1)
+}
+
+/// Is every value this fact admits an integer of at least `bound`? The general
+/// form of [`fact_is_positive_int`], which `substr`'s length axis needs at two
+/// different bounds at once (`>= 1` for non-emptiness, `>= 2` for non-falsiness).
+///
+/// Everything the finite layers admit is read directly; anything else answers
+/// `false`, which is the decline every caller wants from an integer it cannot see
+/// through.
+fn fact_int_at_least(f: &Fact, bound: i64) -> bool {
     match f {
-        Fact::Singleton(Val::Int(n)) => *n >= 1,
+        Fact::Singleton(Val::Int(n)) => *n >= bound,
         // `all` over an empty set is vacuously true; a `OneOf` is never empty in
         // practice, and the guard says so rather than relying on it.
         Fact::OneOf(vals) => {
-            !vals.is_empty() && vals.iter().all(|v| matches!(v, Val::Int(n) if *n >= 1))
+            !vals.is_empty() && vals.iter().all(|v| matches!(v, Val::Int(n) if *n >= bound))
         }
         Fact::Refined { base: Base::Int, refinement: Refinement::Int(r), nullable: false } => {
-            r.lo() >= 1
+            r.lo() >= bound
         }
         _ => false,
     }
