@@ -2,16 +2,17 @@
 
 Copy-pasteable CI configuration for running Steins in your project's
 pipeline. See [chapter 6, "CI integration"](../06-ci.md) for the
-exit-code contract, the baseline loop, and the `jq` annotation recipe
+exit-code contract, the baseline loop, and the annotation format
 these templates use — this README only lists the files and their
 assumptions.
 
 | File | Copy it to | What it does |
 | --- | --- | --- |
-| [`github-actions.yml`](github-actions.yml) | `.github/workflows/steins.yml` | **The minimal template.** Checkout, `setup-php`, install Steins via Composer, `steins check .`. Plain log output; no annotations. |
-| [`github-actions-annotations.yml`](github-actions-annotations.yml) | `.github/workflows/steins.yml` | Same install, plus `--format json` piped through `jq` into GitHub Actions workflow commands — inline `::error`/`::warning` annotations on the diff. |
+| [`github-actions.yml`](github-actions.yml) | `.github/workflows/steins.yml` | **The minimal template.** Checkout, `setup-php`, install Steins via Composer, `steins check .`. Findings render as inline annotations anyway — `check` selects `--format github` on its own inside Actions; add `--format text` for a plain log. |
+| [`github-actions-annotations.yml`](github-actions-annotations.yml) | `.github/workflows/steins.yml` | Same install, plus `--format github` — GitHub Actions workflow commands, so findings render as inline `::error`/`::warning`/`::notice` annotations on the diff. |
+| [`github-actions-sarif.yml`](github-actions-sarif.yml) | `.github/workflows/steins.yml` | Same install, plus `--format sarif` and `github/codeql-action/upload-sarif` — findings land in the repository's Security tab, with alert tracking across runs. |
 
-Both assume:
+All three assume:
 
 - **GitHub Actions**, `ubuntu-latest`.
 - **The Composer install channel** — your project has a `composer.json`
@@ -20,18 +21,19 @@ Both assume:
   instead ([installation and quickstart](../01-installation-and-quickstart.md)
   covers all four).
 - **A `.steins-baseline.jsonl` committed at the repo root, or none yet.**
-  Neither template runs `--set-baseline` — that command is a human,
+  No template runs `--set-baseline` — that command is a human,
   local action (see [chapter 6](../06-ci.md#the-baseline-loop-in-ci)). If
   your project has adopted a baseline, commit it before this workflow
   runs; if not, every pre-existing finding fails the first run, which is
   the expected first-adoption experience.
 - **PHP on the runner, matching your project's declared floor.** The
-  `php-version` input in both templates is a placeholder (`"8.3"`) —
+  `php-version` input in every template is a placeholder (`"8.3"`) —
   set it to what your `composer.json` requires.
 
 Pick the annotations variant when you want findings visible inline on the
-PR diff without a code-scanning upload step. Pick the minimal one when
-plain job-log output is enough, or as the smaller starting point to build
+PR diff. Pick the SARIF variant when you want them in the Security tab
+with alert tracking across runs — the two compose, and a job can do both.
+Pick the minimal one when plain job-log output is enough, or as the smaller starting point to build
 your own variant from — a matrix over multiple PHP versions, a
 `--no-php` job for a container without PHP, a `steins doctor` preflight
 step (all discussed in [chapter 6](../06-ci.md)).
@@ -45,8 +47,9 @@ Steins (Composer, the prebuilt binary, or Homebrew), run `steins check
 pipeline — no Steins-specific glue is needed for that part on GitLab CI,
 CircleCI, Jenkins, or anywhere else that runs shell steps. What a
 GitHub-specific template adds over that generic recipe is exactly the
-`jq` annotation step; every other CI system gets the same value from the
-minimal recipe with `steins check .` as its own step.
+annotation rendering (`--format github`, which `check` also selects on
+its own inside Actions); every other CI system gets the same value from
+the minimal recipe with `steins check .` as its own step.
 
 ## Pinning Steins' version
 

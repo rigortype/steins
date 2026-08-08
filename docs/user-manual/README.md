@@ -40,7 +40,7 @@ Two things worth knowing before you start:
    separate capture loop, and why mechanics ids can never be switched off.
 6. [**CI integration**](06-ci.md) — the exit-code contract in CI, install
    channels and the PHP sidecar on runners, the baseline loop and why
-   `--set-baseline` never runs in CI, a `jq` recipe for inline
+   `--set-baseline` never runs in CI, `--format github` for inline
    annotations, `steins doctor` as a preflight, and copy-pasteable
    workflow templates in [`ci-templates/`](ci-templates/README.md).
 7. [**Troubleshooting**](07-troubleshooting.md) — `steins doctor` section

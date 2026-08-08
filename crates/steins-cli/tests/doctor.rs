@@ -18,6 +18,18 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
+/// Every test in this file spawns the binary with `GITHUB_ACTIONS` scrubbed.
+/// `check`'s format auto-detection (ADR-0054 §6) reads that variable, so a test
+/// run *on* GitHub Actions would otherwise get workflow commands where it
+/// asserted text. No test's expected output may depend on the ambient CI
+/// environment; detection itself is tested in `tests/format_github.rs`, which
+/// sets the variable deliberately.
+fn steins_cmd() -> Command {
+    let mut cmd = Command::new(bin());
+    cmd.env_remove("GITHUB_ACTIONS");
+    cmd
+}
+
 fn workdir(tag: &str) -> PathBuf {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -34,7 +46,7 @@ struct Run {
 }
 
 fn run_in(dir: &Path, args: &[&str]) -> Run {
-    let out = Command::new(bin()).args(args).current_dir(dir).output().expect("run steins");
+    let out = steins_cmd().args(args).current_dir(dir).output().expect("run steins");
     Run {
         code: out.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -55,7 +67,7 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// instead of reporting one. Piped output is drained on a thread so a child that
 /// fills its pipe buffer cannot deadlock against the timer.
 fn run_in_within(dir: &Path, args: &[&str], timeout: Duration) -> Run {
-    let mut child = Command::new(bin())
+    let mut child = steins_cmd()
         .args(args)
         .current_dir(dir)
         .stdout(Stdio::piped())

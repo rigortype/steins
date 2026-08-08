@@ -9,7 +9,7 @@
 //! re-derives a fact: the plan, the refusals, the oracle counts and the
 //! post-check all come from [`crate::plan_transform_run`], the function
 //! `steins transform` itself calls, and a finding is spelled by
-//! [`crate::finding_json`], the same one `check --format json` prints.
+//! [`crate::render::finding_json`], the same one `check --format json` prints.
 //!
 //! # Approve is a step, not a flag
 //!
@@ -742,7 +742,7 @@ fn tool_check(_session: &Session, args: &Value) -> Result<Reply, ToolError> {
         (a.path.as_str(), a.line, a.column, a.id).cmp(&(b.path.as_str(), b.line, b.column, b.id))
     });
     let findings: Vec<Value> =
-        displayed.iter().map(|d| crate::finding_json(d, &surface)).collect();
+        displayed.iter().map(|d| crate::render::finding_json(d, &surface)).collect();
 
     Ok(Reply::plain(json!({
         "findings": findings,

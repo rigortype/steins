@@ -14,6 +14,8 @@ mod baseline;
 mod doctor;
 mod effect_baseline;
 mod mcp;
+mod render;
+mod sarif;
 mod sha256;
 
 // The CLI and wasm playground share `steins_infer::profile`, preserving the
@@ -40,6 +42,10 @@ use steins_infer::{
 };
 use steins_syntax::SourceTree;
 
+/// The `text|json` pair `annotate`, `transform` and `effect-diff` share. `check`
+/// has its own [`render::CheckFormat`], which adds the CI renderings (ADR-0054):
+/// those are mappings of *findings*, and the other three commands render
+/// something else entirely (an annotated file, a diff plan, an effect delta).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Format {
     Text,
@@ -113,7 +119,7 @@ fn dispatch(args: &[String]) -> ExitCode {
         }
         None => {
             errln!(
-                "usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
+                "usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-php] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
             );
             errln!("       steins annotate [--no-php] [--format text|json] <file.php>");
             errln!(
@@ -201,7 +207,11 @@ fn print_license() -> ExitCode {
 }
 
 fn run_check(args: &[String]) -> ExitCode {
-    let mut format = Format::Text;
+    // `None` until `--format` names one: the flag's *absence* is what
+    // auto-detection reads (ADR-0054 §6), so it cannot be pre-filled with a
+    // default here or an explicit `--format text` would be indistinguishable
+    // from no flag at all inside GitHub Actions.
+    let mut format: Option<render::CheckFormat> = None;
     let mut no_php = false;
     let mut fix_requested = false;
     let mut set_baseline = false;
@@ -251,17 +261,14 @@ fn run_check(args: &[String]) -> ExitCode {
             }
             "--format" => {
                 let Some(value) = args.get(i + 1) else {
-                    errln!("steins: --format requires an argument (text|json)");
+                    errln!("steins: --format requires an argument (text|json|github|sarif)");
                     return ExitCode::from(2);
                 };
-                match value.as_str() {
-                    "text" => format = Format::Text,
-                    "json" => format = Format::Json,
-                    other => {
-                        errln!("steins: unknown format `{other}` (text|json)");
-                        return ExitCode::from(2);
-                    }
-                }
+                let Some(parsed) = render::CheckFormat::parse(value) else {
+                    errln!("steins: unknown format `{value}` (text|json|github|sarif)");
+                    return ExitCode::from(2);
+                };
+                format = Some(parsed);
                 i += 2;
             }
             other => {
@@ -270,6 +277,12 @@ fn run_check(args: &[String]) -> ExitCode {
             }
         }
     }
+
+    // Auto-detection (ADR-0054 §6): an explicit `--format` always wins; with no
+    // flag the environment may name a *consumer* (GitHub Actions), and then only
+    // the spelling changes — surface, profile, pipeline and exit code are
+    // untouched by detection.
+    let format = format.unwrap_or_else(render::detect_from_env);
 
     if paths.is_empty() {
         errln!("steins: no paths given");
@@ -419,28 +432,25 @@ fn run_check(args: &[String]) -> ExitCode {
         _ => (displayed, Vec::new()),
     };
 
-    match format {
-        Format::Text => print_text(
-            &displayed,
-            &fixed,
-            fix_run.as_ref(),
-            &surface,
+    // The render seam (ADR-0054 C1): ONE report, handed to whichever spelling was
+    // selected. Every format sees the same displayed multiset and the same
+    // accounting — format invariance (§1) is a property of this shape, not of
+    // four call sites agreeing.
+    let report = render::CheckReport {
+        displayed: &displayed,
+        fixed: &fixed,
+        fix_run: fix_run.as_ref(),
+        surface: &surface,
+        accounting: render::Accounting {
             vendor_suppressed,
-            inline.suppressed,
+            suppressed: inline.suppressed,
             baselined,
             stale,
-            surface_notice.as_deref(),
-        ),
-        Format::Json => print_json(
-            &displayed,
-            &fixed,
-            fix_run.as_ref(),
-            &surface,
-            vendor_suppressed,
-            inline.suppressed,
-            baselined,
-        ),
-    }
+            surface_notice: surface_notice.as_deref(),
+        },
+        texts,
+    };
+    out!("{}", render::render(&report, format));
 
     // The fix run's stderr accounting, after the report like every maintenance
     // confirmation (`--set-baseline`, `--apply`).
@@ -2122,148 +2132,6 @@ fn render_annotation(text: &str, facts: &[LineFact]) -> String {
         out.push('\n');
     }
     out
-}
-
-#[allow(clippy::too_many_arguments)]
-fn print_text(
-    findings: &[Diagnostic],
-    fixed: &[Diagnostic],
-    fix_run: Option<&FixRun>,
-    surface: &profile::Surface,
-    vendor_suppressed: usize,
-    suppressed: usize,
-    baselined: usize,
-    stale: usize,
-    surface_notice: Option<&str>,
-) {
-    for d in findings {
-        // The level distinction (ADR-0050 §7): fail-level prints `error[…]`,
-        // warn-level (a profile `warn = [...]` demotion) prints `warning[…]`.
-        let kind = match surface.level(d.id) {
-            profile::Level::Fail => "error",
-            profile::Level::Warn => "warning",
-        };
-        outln!("{}:{}:{}: {kind}[{}]: {}", d.path, d.line, d.column, d.id, d.message);
-    }
-    // What `--fix` fixed (ADR-0010): each applied finding on its own line, in
-    // the same position spelling as a finding, marked `fixed[…]`. A refusal
-    // prints its named reason and the diagnostics the edits would have
-    // surfaced (ADR-0034's Refusal discipline). Both empty on a plain run.
-    for d in fixed {
-        outln!("{}:{}:{}: fixed[{}]: {}", d.path, d.line, d.column, d.id, d.message);
-    }
-    if let Some(r) = fix_run.and_then(|run| run.refusal.as_ref()) {
-        outln!("fix refused ({}): {}", r.reason, r.detail);
-        for d in &r.new_diagnostics {
-            outln!("  {}:{}:{}: [{}] {}", d.path, d.line, d.column, d.id, d.message);
-        }
-    }
-    // Suppression accounting (ADR-0022/0023/0015), each line printed only when
-    // nonzero. Vendor is the first channel (ADR-0015), so it prints first.
-    if vendor_suppressed > 0 {
-        outln!("{vendor_suppressed} findings in vendor suppressed (--vendor-diagnostics to show)");
-    }
-    if suppressed > 0 {
-        outln!("{suppressed} diagnostics suppressed by inline ignores");
-    }
-    if baselined > 0 {
-        outln!("{baselined} findings in baseline");
-    }
-    if stale > 0 {
-        outln!("{stale} baseline entries no longer match (stale — rerun --set-baseline)");
-    }
-    // The drowns-loudly notice (ADR-0050 §8), printed after the accounting.
-    if let Some(notice) = surface_notice {
-        outln!("{notice}");
-    }
-}
-
-/// One finding as a `--format json` object. Shared by the `findings` array,
-/// the `--fix` run's `fixed` array, and a refusal's `new_diagnostics`, so the
-/// three spell a finding identically.
-fn finding_json(d: &Diagnostic, surface: &profile::Surface) -> serde_json::Value {
-    let mut obj = serde_json::json!({
-        "id": d.id,
-        // ADR-0050 §2: the diagnostic layer, additive. Every emitted id is
-        // registered (totality test), so this is always present.
-        "layer": steins_infer::layer(d.id).map(steins_infer::Layer::as_str),
-        // ADR-0050 §7: the exit level (`fail|warn`), additive.
-        "level": surface.level(d.id).as_str(),
-        "path": d.path,
-        "line": d.line,
-        "column": d.column,
-        "message": d.message,
-    });
-    // ADR-0050 §4: the registry-declared facet, additive — present as its own
-    // key (`"origin": "direct"|"propagated"`) only on ids that declare one.
-    if let Some(facet) = d.facet {
-        obj[facet.key()] = serde_json::Value::String(facet.value().to_owned());
-    }
-    // ADR-0010: the fix payload, additive — present only on findings that carry
-    // one (v1: the explicit dump pair). The edit objects mirror steins-edit's
-    // `Edit` serialization (`path` + `span {start, end}` + `replacement`), so a
-    // consumer applies them with the same splice the transform surface speaks.
-    if let Some(fix) = &d.fix {
-        let edits: Vec<serde_json::Value> = fix
-            .edits
-            .iter()
-            .map(|e| {
-                serde_json::json!({
-                    "path": e.path,
-                    "span": { "start": e.start, "end": e.end },
-                    "replacement": e.replacement,
-                })
-            })
-            .collect();
-        obj["fix"] = serde_json::json!({ "title": fix.title, "edits": edits });
-    }
-    obj
-}
-
-#[allow(clippy::too_many_arguments)]
-fn print_json(
-    findings: &[Diagnostic],
-    fixed: &[Diagnostic],
-    fix_run: Option<&FixRun>,
-    surface: &profile::Surface,
-    vendor_suppressed: usize,
-    suppressed: usize,
-    baselined: usize,
-) {
-    let array: Vec<serde_json::Value> = findings.iter().map(|d| finding_json(d, surface)).collect();
-    let mut doc = serde_json::json!({
-        "findings": array,
-        "profile": surface.name,
-        "vendor_suppressed": vendor_suppressed,
-        "suppressed": suppressed,
-        "baselined": baselined,
-    });
-    // The `--fix` run report, present only when the flag was passed (a plain
-    // run's document is byte-identical to before): whether the edits were
-    // written, the findings they resolved, and — on refusal — the named reason
-    // with the diagnostics the edits would have surfaced.
-    if let Some(run) = fix_run {
-        let fixed_arr: Vec<serde_json::Value> =
-            fixed.iter().map(|d| finding_json(d, surface)).collect();
-        let refusal = run.refusal.as_ref().map(|r| {
-            let new_ds: Vec<serde_json::Value> =
-                r.new_diagnostics.iter().map(|d| finding_json(d, surface)).collect();
-            serde_json::json!({
-                "reason": r.reason,
-                "detail": r.detail,
-                "new_diagnostics": new_ds,
-            })
-        });
-        doc["fix"] = serde_json::json!({
-            "applied": run.applied,
-            "fixed": fixed_arr,
-            "refusal": refusal,
-        });
-    }
-    match serde_json::to_string_pretty(&doc) {
-        Ok(s) => outln!("{s}"),
-        Err(e) => errln!("steins: failed to serialize json: {e}"),
-    }
 }
 
 /// Reject explicitly-passed paths that name nothing (ADR-0050 §7 amendment).

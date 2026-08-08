@@ -131,8 +131,9 @@ CLI surface: `check`, `annotate`, `transform`, a minimal `doctor`
 (ADR-0054 C3 scope — the index-bound posture report, running no emitter), and
 `mcp` (the ADR-0010 agent surface: the transform loop as MCP tools over stdio,
 plan and apply as separate calls). ADR-0020 declares six commands; `lsp` is
-**designed, not implemented**, and is deliberately not stubbed. Output formats are `text` and
-`json`; `sarif` and `github` are designed in ADR-0054 and absent from the binary.
+**designed, not implemented**, and is deliberately not stubbed. `check`'s output formats are `text`, `json`, `github` (GitHub Actions
+annotations, auto-selected inside Actions) and `sarif` (2.1.0, for
+code-scanning upload); the other commands render `text` and `json`.
 
 The full gap list is [not-implemented.md](not-implemented.md).
 

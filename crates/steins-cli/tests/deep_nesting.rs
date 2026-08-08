@@ -26,6 +26,18 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
+/// Every test in this file spawns the binary with `GITHUB_ACTIONS` scrubbed.
+/// `check`'s format auto-detection (ADR-0054 §6) reads that variable, so a test
+/// run *on* GitHub Actions would otherwise get workflow commands where it
+/// asserted text. No test's expected output may depend on the ambient CI
+/// environment; detection itself is tested in `tests/format_github.rs`, which
+/// sets the variable deliberately.
+fn steins_cmd() -> Command {
+    let mut cmd = Command::new(bin());
+    cmd.env_remove("GITHUB_ACTIONS");
+    cmd
+}
+
 /// Past the release ceiling (~2,700) as well as the debug one (~520), so the
 /// test does not quietly stop testing anything under `--release`.
 const CHAIN_DEPTH: usize = 3_000;
@@ -72,7 +84,7 @@ fn a_deep_property_chain_does_not_overflow_the_stack() {
     let dir = workdir("chain");
     let file = write(&dir, "deep.php", &deep_chain_src(CHAIN_DEPTH));
 
-    let out = Command::new(bin())
+    let out = steins_cmd()
         .args(["check", "--no-php"])
         .arg(&file)
         .output()
