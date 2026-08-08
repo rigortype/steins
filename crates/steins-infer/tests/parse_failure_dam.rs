@@ -23,7 +23,7 @@
 
 use std::collections::BTreeMap;
 
-use steins_db::{PluginFacts, Project, ProjectLayout, SourceFile, SteinsDatabase};
+use steins_db::{GoverningRoot, PluginFacts, Project, ProjectLayout, SourceFile, SteinsDatabase};
 use steins_infer::profile::{Level, ProfileConfigs, UserProfile};
 use steins_infer::{
     ARRAY_DUPLICATE_KEY_ID, CALL_UNDEFINED_FUNCTION_ID, CALL_UNDEFINED_METHOD_ID, CLASS_UNDEFINED_ID,
@@ -73,6 +73,33 @@ fn findings(files: &[(&str, &str)]) -> Vec<Diagnostic> {
 /// Just the findings carrying `id`.
 fn of(files: &[(&str, &str)], id: &str) -> Vec<Diagnostic> {
     findings(files).into_iter().filter(|d| d.id == id).collect()
+}
+
+/// [`findings`], but with a caller-supplied layout — issue #181's proof that the
+/// vendor presumption (§2.3) follows the SAME [`ProjectLayout::is_vendor`] answer
+/// as every other consumer, whether that answer came from a declared
+/// `composer.json` vendor-dir or `steins.toml [paths] vendor-dirs`, not a
+/// second, independently-literal `vendor` check.
+fn findings_with_layout(files: &[(&str, &str)], layout: ProjectLayout) -> Vec<Diagnostic> {
+    let db = SteinsDatabase::default();
+    let inputs: Vec<SourceFile> = files
+        .iter()
+        .map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned()))
+        .collect();
+    let project = Project::new(&db, inputs, layout, PluginFacts::none());
+    check_project(&db, project, &mut Boot)
+}
+
+fn of_with_layout(files: &[(&str, &str)], layout: ProjectLayout, id: &str) -> Vec<Diagnostic> {
+    findings_with_layout(files, layout).into_iter().filter(|d| d.id == id).collect()
+}
+
+/// A layout with one governing root at `/proj` whose declared vendor-dir is
+/// `3rdparty` — the nextcloud shape (composer.json `config.vendor-dir`).
+fn composer_layout_with_vendor_dir(name: &str) -> ProjectLayout {
+    let dir = std::path::PathBuf::from("/proj");
+    let root = GoverningRoot::new(dir.join("composer.json"), dir.clone(), vec![dir.join(name)], vec![]);
+    ProjectLayout::new(dir, vec![root])
 }
 
 /// The breakage every fixture reuses: a `$this->s->` with no member name. One parse
@@ -310,6 +337,58 @@ fn a_broken_vendor_files_classes_are_not_member_incomplete() {
         CALL_UNDEFINED_METHOD_ID,
     );
     assert_eq!(d.len(), 1, "{d:?}");
+}
+
+// ---------------------------------------------------------------------------
+// 6b. Issue #181: the presumption follows the RESOLVED vendor answer, not a
+//     second literal-`vendor` check of its own.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_presumption_follows_a_composer_declared_vendor_dir() {
+    // `3rdparty/` is not literally `vendor`, so a bespoke literal check inside the
+    // dam would miss it and wrongly dam the project. Routed through
+    // `ProjectLayout::is_vendor`, the composer-declared root answers correctly.
+    let layout = composer_layout_with_vendor_dir("3rdparty");
+    let tree = SourceTree::parse(BROKEN);
+    let units = [FileUnit { path: "3rdparty/pkg/q.php", tree: &tree }];
+    assert!(dam_facts(&units, &layout).is_clear(), "a declared vendor dir is not a dam site");
+
+    let caller = ("src/main.php", "<?php\ntyop();\n");
+    assert_eq!(
+        of_with_layout(&[caller, ("3rdparty/pkg/q.php", BROKEN)], layout, CALL_UNDEFINED_FUNCTION_ID).len(),
+        1,
+        "the existence family keeps its findings"
+    );
+}
+
+#[test]
+fn the_presumption_still_applies_to_a_first_party_break_under_a_composer_project() {
+    // The flip side of the previous test: a break OUTSIDE the declared vendor dir
+    // still dams, even though the project has a composer.json. The presumption is
+    // not "any project with a manifest gets a free pass".
+    let layout = composer_layout_with_vendor_dir("3rdparty");
+    let caller = ("src/main.php", "<?php\ntyop();\n");
+    assert!(
+        of_with_layout(&[caller, ("src/q.php", BROKEN)], layout, CALL_UNDEFINED_FUNCTION_ID).is_empty(),
+        "src/q.php is not under the declared vendor root, so it still dams"
+    );
+}
+
+#[test]
+fn the_presumption_follows_the_steins_toml_no_manifest_vendor_dirs() {
+    // No composer.json at all: `steins.toml [paths] vendor-dirs` is the only
+    // reason `3rdparty/` reads as vendor here, and the dam has to agree with it.
+    let layout = ProjectLayout::fallback().with_extra_vendor_dirs(vec!["3rdparty".to_owned()]);
+    let tree = SourceTree::parse(BROKEN);
+    let units = [FileUnit { path: "3rdparty/pkg/q.php", tree: &tree }];
+    assert!(dam_facts(&units, &layout).is_clear());
+
+    let caller = ("src/main.php", "<?php\ntyop();\n");
+    assert_eq!(
+        of_with_layout(&[caller, ("3rdparty/pkg/q.php", BROKEN)], layout, CALL_UNDEFINED_FUNCTION_ID).len(),
+        1
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -37,6 +37,17 @@
 //! trees under subprojects whose manifests are not checked in, and a rule that
 //! *only* honoured declarations would hand every one of them back to the project
 //! as first-party code.
+//!
+//! # The no-manifest config channel (issue #181)
+//!
+//! A project that predates or ignores Composer has no `composer.json` to read a
+//! `vendor-dir` from, so its own third-party tree (`3rdparty/`, `lib/vendor/`, …)
+//! never gets to be anything but first-party code. `steins.toml`'s `[paths]
+//! vendor-dirs` names extra whole-path-component sequences to treat as the floor
+//! alongside the `vendor` literal ([`ProjectLayout::with_extra_vendor_dirs`]).
+//! It is consulted in exactly the situations [`fallback_is_vendor`] already was
+//! — never where a governing root's own declared vendor dir already answered —
+//! so a project with a `composer.json` needs it not at all.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -202,6 +213,11 @@ pub struct ProjectLayout {
     /// Governing roots, ordered deepest-first so the nearest ancestor is the
     /// first match.
     roots: Vec<GoverningRoot>,
+    /// `steins.toml [paths] vendor-dirs` (issue #181), pre-split into component
+    /// sequences at construction so matching is a pure component comparison —
+    /// see [`ProjectLayout::with_extra_vendor_dirs`]. Empty unless the caller set
+    /// it, so a project with no such config answers exactly as before.
+    extra_vendor_dirs: Vec<Vec<String>>,
 }
 
 impl Default for ProjectLayout {
@@ -216,7 +232,7 @@ impl ProjectLayout {
     /// is compared against a root), so it is empty.
     #[must_use]
     pub fn fallback() -> Self {
-        Self { cwd: PathBuf::new(), roots: Vec::new() }
+        Self { cwd: PathBuf::new(), roots: Vec::new(), extra_vendor_dirs: Vec::new() }
     }
 
     /// Build a layout from already-discovered roots. Orders them deepest-first so
@@ -227,7 +243,25 @@ impl ProjectLayout {
             let depth = |r: &GoverningRoot| r.dir.components().count();
             depth(b).cmp(&depth(a)).then_with(|| b.dir.cmp(&a.dir))
         });
-        Self { cwd, roots }
+        Self { cwd, roots, extra_vendor_dirs: Vec::new() }
+    }
+
+    /// Attach `steins.toml [paths] vendor-dirs` (issue #181): extra directory-name
+    /// sequences to treat as vendor at the floor, alongside the `vendor` literal.
+    /// Each entry is a `/`-separated component sequence (`"3rdparty"`,
+    /// `"lib/vendor"`) matched as a contiguous whole-component run anywhere in the
+    /// path — the same component-wise discipline [`fallback_is_vendor`] uses, so
+    /// `vendor_proj/` and `vendor.php` never match and an empty entry matches
+    /// nothing. A caller that never sets this gets the pre-#181 floor back
+    /// exactly, which is how a Composer project stays zero-config.
+    #[must_use]
+    pub fn with_extra_vendor_dirs(mut self, dirs: Vec<String>) -> Self {
+        self.extra_vendor_dirs = dirs
+            .into_iter()
+            .map(|d| d.split(['/', '\\']).filter(|c| !c.is_empty()).map(str::to_owned).collect::<Vec<_>>())
+            .filter(|components| !components.is_empty())
+            .collect();
+        self
     }
 
     /// The discovered governing roots, deepest-first.
@@ -266,11 +300,11 @@ impl ProjectLayout {
     #[must_use]
     pub fn is_vendor(&self, path: &str) -> bool {
         if self.roots.is_empty() {
-            return fallback_is_vendor(path);
+            return self.floor(path);
         }
         let abs = self.absolutize(path);
         let Some(root) = self.governing_root(&abs) else {
-            return fallback_is_vendor(path);
+            return self.floor(path);
         };
         let declared = longest_prefix(&root.vendor, &abs);
         let first = longest_prefix(&root.first_party, &abs);
@@ -286,7 +320,30 @@ impl ProjectLayout {
         if first.is_some_and(|n| n > root.depth()) && first >= declared {
             return false;
         }
-        fallback_is_vendor(path)
+        self.floor(path)
+    }
+
+    /// The floor every unanswered question falls to: the `vendor` literal
+    /// ([`fallback_is_vendor`]) or, when `steins.toml [paths] vendor-dirs`
+    /// declared any, a whole-component match against one of those sequences
+    /// (issue #181). A layout with no declared extra dirs answers identically to
+    /// [`fallback_is_vendor`] alone.
+    fn floor(&self, path: &str) -> bool {
+        fallback_is_vendor(path) || self.matches_extra_vendor_dir(path)
+    }
+
+    /// Whether `path` contains, as a contiguous run, every component of any
+    /// declared `[paths] vendor-dirs` entry. Component-wise like
+    /// [`fallback_is_vendor`]: `vendor_proj/other` does not satisfy a `vendor`
+    /// entry, and `lib/vendored/x` does not satisfy `lib/vendor`.
+    fn matches_extra_vendor_dir(&self, path: &str) -> bool {
+        if self.extra_vendor_dirs.is_empty() {
+            return false;
+        }
+        let components: Vec<&str> = path.split(['/', '\\']).collect();
+        self.extra_vendor_dirs.iter().any(|entry| {
+            components.windows(entry.len()).any(|w| w.iter().zip(entry).all(|(c, e)| *c == e))
+        })
     }
 
     /// The nearest governing root above `abs`, or `None` when no manifest governs
@@ -375,10 +432,16 @@ mod tests {
         assert!(fallback_is_vendor("src/vendor/foo/Bar.php"));
         assert!(fallback_is_vendor("/abs/mono/vendor/pkg/lib.php"));
         assert!(!fallback_is_vendor("src/App/Bar.php"));
+        // Whole-component matching: a name that merely CONTAINS `vendor` is not
+        // the `vendor` component itself (issue #181's negative controls).
+        assert!(!fallback_is_vendor("vendor_proj/Bar.php"));
+        assert!(!fallback_is_vendor("src/vendor.php"));
         // A layout with no roots answers every question with it.
         let l = ProjectLayout::fallback();
         assert!(l.is_vendor("vendor/foo/Bar.php"));
         assert!(!l.is_vendor("src/App/Bar.php"));
+        assert!(!l.is_vendor("vendor_proj/Bar.php"));
+        assert!(!l.is_vendor("src/vendor.php"));
         assert!(l.is_fallback());
     }
 
@@ -458,5 +521,52 @@ mod tests {
         let l = layout(vec![root("/proj", &["vendor"], &["src"])]);
         assert!(l.is_vendor("/elsewhere/vendor/pkg/Lib.php"));
         assert!(!l.is_vendor("/elsewhere/src/App.php"));
+    }
+
+    #[test]
+    fn extra_vendor_dirs_extend_the_no_manifest_floor() {
+        // Issue #181: `[paths] vendor-dirs` for a project with no composer.json.
+        let l = ProjectLayout::fallback().with_extra_vendor_dirs(vec!["3rdparty".to_owned()]);
+        assert!(l.is_vendor("3rdparty/pkg/Lib.php"));
+        assert!(l.is_vendor("app/3rdparty/pkg/Lib.php"));
+        // The `vendor` literal still matches unconditionally alongside it.
+        assert!(l.is_vendor("vendor/pkg/Lib.php"));
+        assert!(!l.is_vendor("src/App.php"));
+    }
+
+    #[test]
+    fn extra_vendor_dirs_are_whole_component_sequences() {
+        let l = ProjectLayout::fallback().with_extra_vendor_dirs(vec!["lib/deps".to_owned()]);
+        assert!(l.is_vendor("lib/deps/pkg/Lib.php"));
+        // A single matching component is not the whole declared sequence.
+        assert!(!l.is_vendor("lib/other/deps/pkg/Lib.php"));
+        assert!(!l.is_vendor("other/lib/App.php"));
+    }
+
+    #[test]
+    fn extra_vendor_dirs_never_match_a_component_prefix_or_suffix() {
+        // Whole-component matching stays: `vendor_proj/` and `vendor.php` are not
+        // vendor, exactly like the `vendor` literal itself.
+        let l = ProjectLayout::fallback().with_extra_vendor_dirs(vec!["3rdparty".to_owned()]);
+        assert!(!l.is_vendor("3rdparty_extra/Lib.php"));
+        assert!(!l.is_vendor("my3rdparty/Lib.php"));
+        assert!(!l.is_vendor("3rdparty.php"));
+    }
+
+    #[test]
+    fn extra_vendor_dirs_only_reach_paths_no_declared_root_answers() {
+        // A declared composer vendor root still wins the longest-prefix contest;
+        // the config channel only ever supplies the floor.
+        let l =
+            layout(vec![root("/proj", &["vendor"], &["src"])]).with_extra_vendor_dirs(vec!["src".to_owned()]);
+        assert!(!l.is_vendor("/proj/src/App.php"));
+        assert!(l.is_vendor("/proj/vendor/pkg/Lib.php"));
+    }
+
+    #[test]
+    fn an_empty_or_blank_extra_vendor_dir_entry_matches_nothing() {
+        let l = ProjectLayout::fallback().with_extra_vendor_dirs(vec![String::new(), "/".to_owned()]);
+        assert!(!l.is_vendor("anything/at/all.php"));
+        assert!(l.is_vendor("vendor/pkg/Lib.php"));
     }
 }

@@ -453,6 +453,30 @@ mod tests {
     }
 
     #[test]
+    fn two_sibling_analyzed_roots_each_resolve_their_own_declared_vendor_dir() {
+        // Issue #181: `steins check projA projB` where the two are unrelated
+        // Composer projects (not one nested inside the other) — each of their
+        // own declared `vendor-dir`s must answer independently.
+        let t = Tree::new("sibling-roots");
+        t.write("projA/composer.json", r#"{"config":{"vendor-dir":"3rdparty"},"autoload":{"psr-4":{"A\\":"src/"}}}"#);
+        t.dir("projA/3rdparty/pkg");
+        t.dir("projA/src");
+        t.write("projB/composer.json", r#"{"config":{"vendor-dir":"deps"},"autoload":{"psr-4":{"B\\":"lib/"}}}"#);
+        t.dir("projB/deps/pkg");
+        t.dir("projB/lib");
+
+        let l = discover(&[t.0.join("projA"), t.0.join("projB")], &t.0);
+        assert_eq!(l.roots().len(), 2);
+        assert!(l.is_vendor(&t.path("projA/3rdparty/pkg/Lib.php")));
+        assert!(!l.is_vendor(&t.path("projA/src/App.php")));
+        assert!(l.is_vendor(&t.path("projB/deps/pkg/Lib.php")));
+        assert!(!l.is_vendor(&t.path("projB/lib/App.php")));
+        // Neither root's declared vendor-dir reaches into the other project.
+        assert!(!l.is_vendor(&t.path("projA/deps/pkg/Lib.php")));
+        assert!(!l.is_vendor(&t.path("projB/3rdparty/pkg/Lib.php")));
+    }
+
+    #[test]
     fn dependency_manifests_are_not_governing_roots() {
         let t = Tree::new("prune-vendor");
         t.write("composer.json", "{}");

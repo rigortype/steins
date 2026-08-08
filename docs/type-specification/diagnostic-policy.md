@@ -129,10 +129,18 @@ The pipeline is fixed and ordered (ADR-0050 §6):
 vendor filter → profile surface → [[policy]] → inline ignores → baseline
 ```
 
-- **Vendor filter** — findings under a `vendor/` path component are suppressed
-  unless `--vendor-diagnostics` is passed. The match is on whole path
-  components, so `vendor_proj/` and `vendor.php` are not vendor. Vendor trees
-  are still *analyzed* as source (ADR-0015) — they are just not reported on.
+- **Vendor filter** — findings under a vendor path are suppressed unless
+  `--vendor-diagnostics` is passed. "Vendor" is answered by one resolution
+  (`ProjectLayout::is_vendor`, ADR-0015) every consumer shares, including the
+  ADR-0079 parse-failure dam's vendor presumption: a project's own
+  `composer.json` `config.vendor-dir` (default `vendor`) governs when present
+  (issue #181, each analyzed root resolving its own), `steins.toml [paths]
+  vendor-dirs` covers the no-manifest case, and the literal `vendor` component
+  is the floor either way. The match is always on whole path components — a
+  single component for a plain name, or the exact contiguous run for a
+  multi-segment one like `lib/vendor` — so `vendor_proj/` and `vendor.php` are
+  never vendor. Vendor trees are still *analyzed* as source (ADR-0015) — they
+  are just not reported on.
 - **`[[policy]]`** — **designed, not implemented.** The stage exists in the
   pipeline as a no-op with a clear seam.
 - **Inline ignores** and **baseline** below.
