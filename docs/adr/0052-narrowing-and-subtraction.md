@@ -845,6 +845,28 @@ builtin is still settled on the consuming side. Lifting it generally would let
 `preg_match($re, $s, $m) > 0` reach the out-parameter seed, which is a
 precision change of its own and is not taken here.
 
+**Value-lane coherence, and why this guard needs it.** Every other guard here
+narrows `Fact::Shape` and says nothing about a *proven*
+`Fact::Singleton(Val::Array(…))` — it cannot, because presence and list-ness
+are already decided on a literal. A count comparison can contradict one:
+`count($x) > 0` on a binding the walk proved to be `[]` names a branch that
+literal cannot reach.
+The lowering lift is what makes this reachable at all — before it, such a
+comparison lowered to `CondExpr::Opaque` and the opaque path dropped the guard
+call's read set, so the stale literal was forgotten rather than narrowed. So the
+count guard narrows **both** lanes in one place: a proven array whose entry
+count the branch's interval excludes is replaced by the honest floor, "an array
+whose entry count lies in the interval". Not by a lifted-and-narrowed shape —
+the entries are exactly what the branch refutes, so neither their keys nor
+their value types survive as proof — and not by a dead region, which is the
+verdict's business (§2). A literal *inside* the interval is kept untouched: it
+is sharper than any shape. A `OneOf` of arrays filters member-wise; a `OneOf`
+with a non-array member is left alone, since `count()` accepts a `Countable`
+too. Measured on the private corpus this is not optional: without it the
+sharpened branch convicts on the stale literal, and with it four *pre-existing*
+false positives of the same class (a `[]` from a defaulted parameter or a
+call-site descent, reported inside the arm a count guard refutes) go away.
+
 **Four refusals**, each a soundness or scope requirement: the mode argument
 (`count($x, COUNT_RECURSIVE)` counts a different number, and the named
 spelling refuses with it); a project function shadowing the simple name
@@ -859,18 +881,30 @@ condition's own syntax and applied in the scope walk that built the env it
 reads (walk-local, replayable), it introduces no new fact kind — the accessory
 rides `Fact::Shape` — and it carries no global ordering.
 
-Direction of movement: **both**, and the shape lane is the whole of it. It
-*adds* precision to `count()` readings and to sealed-shape key presence, which
-can discharge an absence finding (finding-removing) and can equally let a
-downstream check that needed a key's presence now fire (finding-adding).
-Nothing here mints a verdict or marks a region dead — `Fact::Shape` still does
-not decide guard verdicts, and `shape_facts_do_not_decide_guard_verdicts` is
-still the tripwire that says so.
+Direction of movement: **both**. It *adds* precision to `count()` readings and
+to sealed-shape key presence, which can discharge an absence finding
+(finding-removing) and can equally let a downstream check that needed a key's
+presence now fire (finding-adding). Nothing here mints a verdict or marks a
+region dead — `Fact::Shape` still does not decide guard verdicts, and
+`shape_facts_do_not_decide_guard_verdicts` is still the tripwire that says so.
+
+Measured on the private corpus, `phpdoc.*` moves 508 → 507: **four removed**,
+all the value-lane class above; **three added**, all triaged TRUE against the
+source — two `@param` declarations that omit a key the `@return` feeding them
+declares (`Order::_capture`/`_refund`, missing `payment_policy_version`), and
+one that omits two (`ActionHelper::_changeToCancelInTransaction`). The third
+is the sharpening at work rather than a new claim: an `array<X>` whose element
+type violates the contract still admits `[]`, which the contract accepts, so
+the verdict was `Maybe`; a proven non-empty floor makes it a definite `No`. One
+further site keeps its finding with a sharpened rendering for the same reason
+(`array<array>` → `non-empty-array<array>`).
 
 Fixtures: `crates/steins-infer/tests/count_guards.rs` — both polarities of the
 floor, the Yoda spelling, `sizeof`, the ceiling, the identity pin, the bounded
 variable, the sealed exact-count pin beside its unsealed complement, the
-assert lane, conjunction distribution and negation, the four refusals, and the
-write/unset invalidation pair; `crates/steins-domain/src/shape.rs` — the
+assert lane, conjunction distribution and negation, the four refusals, the
+write/unset invalidation pair, and the value-lane trio (both corpus shapes
+pinned silent, the unguarded literal still convicting, and a surviving literal
+keeping its proven value); `crates/steins-domain/src/shape.rs` — the
 accessory's meet, join, clamp and contradiction-widening, and its extensional
 reading in `admits`.

@@ -327,3 +327,78 @@ fn an_unset_drops_the_floor_and_keeps_the_ceiling() {
 }
 
 
+
+// ---- Value-lane coherence (the fp-gate FP class) ---------------------------
+//
+// The lowering lift keeps a count comparison as a real `Cmp`; before it, such a
+// comparison lowered to `CondExpr::Opaque` and the opaque path *dropped* the
+// guard call's read set, so a proven `[]` never survived into the arm. It
+// survives now, and if the count guard moved only the shape lane the contract
+// checker would convict the arm on the stale literal — the two corpus false
+// positives this section reproduces. `refuted_array_value` is what closes it.
+
+/// A body calling a `non-empty-list<int>` contract, with its declaration.
+fn contract_fixture(body: &str) -> String {
+    format!(
+        "<?php\n\
+         /** @param non-empty-list<int> $ids */\n\
+         function dao(array $ids): void {{}}\n\
+         function f(): void {{ {body} }}\n"
+    )
+}
+
+fn contract_findings(body: &str) -> Vec<String> {
+    diagnostics(&contract_fixture(body))
+        .into_iter()
+        .filter(|d| !d.id.starts_with("debug."))
+        .map(|d| format!("{}: {}", d.id, d.message))
+        .collect()
+}
+
+#[test]
+fn a_proven_empty_array_does_not_ride_into_the_arm_the_guard_refutes() {
+    // Corpus shape (a): the true arm of `count($x) > 0`.
+    assert_eq!(
+        contract_findings("$ids = []; if (count($ids) > 0) { dao($ids); }"),
+        Vec::<String>::new()
+    );
+    // Corpus shape (b): the fall-through of an early `count($x) < 1` return.
+    assert_eq!(
+        contract_findings("$ids = []; if (count($ids) < 1) { return; } dao($ids);"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_literal_that_can_genuinely_reach_the_call_still_convicts() {
+    // The positive twin: no guard stands between the literal and the call, so
+    // the contract violation is real and must keep firing. Value-lane coherence
+    // is a narrowing, not a blanket amnesty for array literals.
+    let found = contract_findings("$ids = []; dao($ids);");
+    assert_eq!(found.len(), 1, "expected the genuine violation, got {found:?}");
+    assert!(found[0].starts_with("phpdoc.param-mismatch"), "{found:?}");
+    // …and the arm a count guard does NOT refute keeps its literal too: `[]`
+    // satisfies `count($x) <= 0`, so the else arm still convicts.
+    let kept = contract_findings("$ids = []; if (count($ids) > 0) { return; } dao($ids);");
+    assert_eq!(kept.len(), 1, "expected the surviving literal to convict, got {kept:?}");
+}
+
+#[test]
+fn a_surviving_literal_keeps_its_proven_value() {
+    // Inside the bound, the Singleton is sharper than any shape and is left
+    // exactly as it was — `count($v)` still reads the literal's own size.
+    assert_eq!(
+        one_type(
+            "<?php\nfunction f(): void { $v = [1, 2]; if (count($v) > 1) { \\PHPStan\\dumpType(count($v)); } }\n"
+        ),
+        "dumped type: 2"
+    );
+    // Outside it, the literal is refuted and what remains is the honest floor:
+    // an array whose entry count the guard proved.
+    assert_eq!(
+        one_type(
+            "<?php\nfunction f(): void { $v = [1, 2]; if (count($v) > 5) { \\PHPStan\\dumpType(count($v)); } }\n"
+        ),
+        "dumped type: int<6, max>"
+    );
+}

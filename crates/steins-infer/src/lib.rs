@@ -25469,6 +25469,63 @@ fn mint_collapsed_shape(var: &str, env: &mut HashMap<String, Known>, store: &Sto
     );
 }
 
+/// **The value lane's answer to a count guard** (issue #272): the fact that
+/// replaces a *proven* array the branch's count interval excludes, or `None`
+/// when the value survives and must be left exactly as it is.
+///
+/// Why this exists at all. Every other shape guard narrows a `Fact::Shape` and
+/// says nothing about a proven `Fact::Singleton(Val::Array(…))` — it cannot,
+/// because presence and list-ness are *already decided* on a literal, so a
+/// literal that satisfies the guard is untouched and one that does not is a
+/// contradiction the guard forms could not express. A count comparison can
+/// express it: `count($x) > 0` on a binding the walk proved to be `[]` is a
+/// branch the literal cannot reach. Before the count guard existed such a
+/// comparison lowered to `CondExpr::Opaque` and the opaque path *dropped* the
+/// binding, so the stale literal never survived; the lowering lift keeps the
+/// comparison, and without this the literal would ride into the arm and the
+/// contract checker would convict on it (`resolve_cval` reads exactly this
+/// lane). The two lanes are narrowed in one place so they cannot disagree.
+///
+/// The replacement is **not** a lifted-and-narrowed shape. The entries are what
+/// the branch refutes, so nothing about them — not their keys, not their value
+/// types — survives as proof; what survives is "an array whose entry count lies
+/// in `range`", which is the honest floor and still a narrowing. Marking the
+/// branch dead instead is the verdict's business, never a narrowing operator's
+/// (ADR-0052 §2).
+///
+/// A `OneOf` of arrays filters member-wise, which is sharper: only the members
+/// the interval excludes drop, and a surviving remainder stays a proven value
+/// set. A `OneOf` with any non-array member is left alone — `count()` accepts a
+/// `Countable` too, and this rule has no business guessing at one.
+fn refuted_array_value(fact: &Fact, range: IntRange) -> Option<Fact> {
+    let in_range = |entries: &[(VKey, Val)]| {
+        i64::try_from(entries.len()).is_ok_and(|n| range.contains(n))
+    };
+    // "An array, with this entry count": everything the guard leaves standing.
+    let widened = || Fact::Shape {
+        shape: Box::new(ShapeFact::plain_array().narrow_count(range)),
+        nullable: false,
+    };
+    match fact {
+        Fact::Singleton(Val::Array(entries)) => (!in_range(entries)).then(widened),
+        Fact::OneOf(vals) => {
+            if !vals.iter().all(|v| matches!(v, Val::Array(_))) {
+                return None;
+            }
+            let kept: Vec<Val> = vals
+                .iter()
+                .filter(|v| matches!(v, Val::Array(e) if in_range(e)))
+                .cloned()
+                .collect();
+            if kept.len() == vals.len() {
+                return None;
+            }
+            Some(Fact::from_vals(kept).unwrap_or_else(widened))
+        }
+        _ => None,
+    }
+}
+
 /// **Fact-lane refinement**: apply the guard's domain operator to `var`'s
 /// `Fact::Shape`, if it has one. Every operator is a narrowing
 /// (`crates/steins-domain/src/shape.rs`), so the result admits everything the
@@ -25476,6 +25533,20 @@ fn mint_collapsed_shape(var: &str, env: &mut HashMap<String, Known>, store: &Sto
 fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>, witnessed: bool) {
     use steins_domain::Presence;
     let Some(known) = env.get(g.var()) else { return };
+    // **Value-lane coherence first** (issue #272): a count guard is the one guard
+    // here that can refute a *proven* array outright, and the value lane is where
+    // the contract checker looks. See [`refuted_array_value`].
+    if let ShapeGuard::Count { range, .. } = g
+        && let Some(fact) = known.fact.as_ref()
+        && let Some(next) = refuted_array_value(fact, *range)
+    {
+        let (line, stratum) = (known.line, known.stratum);
+        env.insert(
+            g.var().to_owned(),
+            Known::value_strat(next, line, Some(SHAPE_REFINED.to_owned()), stratum),
+        );
+        return;
+    }
     let Some(Fact::Shape { shape, nullable }) = &known.fact else { return };
     let (shape, nullable) = (shape.as_ref(), *nullable);
     let next = match g {
