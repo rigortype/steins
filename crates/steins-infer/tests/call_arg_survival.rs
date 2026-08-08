@@ -290,15 +290,21 @@ fn an_imported_builtin_resolves_through_the_import() {
         one_type(&src("use function \\strtolower;", "strtolower($s)")),
         "dumped type: 'abc'"
     );
-    // The **aliased** form is a pinned boundary, not a promise: `FnResolution`
-    // carries no resolved name, so every consumer of a `Builtin` answer keys the
-    // catalog by the call's own spelling — `t` here, which no catalog row has.
-    // Widening that is a change to the resolution enum shared with the effects and
-    // throws passes, deliberately out of this wave's scope.
-    assert_eq!(one_type(&src("use function trim as t;", "t($s)")), "dumped type: unknown");
+    // The **aliased** form (issue #279): `FnResolution::Builtin` now carries the
+    // resolved catalog name (`trim`) alongside the import target, so every
+    // catalog-keyed consumer reads that instead of the call's own spelling
+    // (`t`). Generalizes the unaliased leg fixed just above.
+    assert_eq!(one_type(&src("use function trim as t;", "t($s)")), "dumped type: 'abc'");
     // An import of a NAMESPACED name is not the builtin, whatever it is spelled:
     // no project function defines it, so the call stays unresolved and condemns.
     assert_eq!(one_type(&src("use function Other\\trim;", "trim($s)")), "dumped type: unknown");
+    // …and the same holds through an ALIAS of a namespaced import: the resolved
+    // target is still not a project function and not the global builtin, so the
+    // aliased name gains no more than the unaliased one did.
+    assert_eq!(
+        one_type(&src("use function Other\\trim as t;", "t($s)")),
+        "dumped type: unknown"
+    );
     // An import of an uncertified builtin is still not a promise.
     assert_eq!(one_type(&src("use function sscanf;", "sscanf($s)")), "dumped type: unknown");
     // …and an import that a project function DOES define answers from that
@@ -307,6 +313,15 @@ fn an_imported_builtin_resolves_through_the_import() {
                     namespace App;\nuse function Other\\trim;\n\
                     function f(): void { $s = 'abc'; trim($s); \\PHPStan\\dumpType($s); }\n";
     assert_eq!(one_type(shadowed), "dumped type: unknown");
+    // The same shadowing holds through an ALIAS: an aliased import that resolves
+    // to a project function (not a builtin) keeps today's behavior — the
+    // by-ref parameter condemns the argument, exactly as the unaliased call
+    // above does. Aliasing must not manufacture a builtin promise the target
+    // never had.
+    let shadowed_aliased = "<?php\nnamespace Other;\nfunction trim(string &$x): void {}\n\
+                    namespace App;\nuse function Other\\trim as t;\n\
+                    function f(): void { $s = 'abc'; t($s); \\PHPStan\\dumpType($s); }\n";
+    assert_eq!(one_type(shadowed_aliased), "dumped type: unknown");
 }
 
 #[test]

@@ -167,7 +167,7 @@ pub fn sweep_free_functions(db: &dyn Db, project: Project) -> FreeFnSweep {
                                 entry.named_or_spread = true;
                             }
                         }
-                        FnResolution::Builtin | FnResolution::Unknown => {
+                        FnResolution::Builtin(_) | FnResolution::Unknown => {
                             out.unresolved_simple_names
                                 .entry(cref.simple().to_ascii_lowercase())
                                 .or_default()

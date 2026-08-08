@@ -52,6 +52,21 @@ fn pure_calling_uncatalogued_builtin_is_silent() {
     assert_eq!(effects(src).len(), 0, "uncatalogued builtin → silent (deferred)");
 }
 
+/// Issue #279: an ALIASED builtin import must color the same as the spelled
+/// call. `FnResolution::Builtin` used to carry no resolved catalog name, so
+/// every catalog-keyed consumer — this pass included — keyed the lookup by
+/// the call's own spelling (`r`, which `steins_catalog::effect_labels` has
+/// never heard of) and stayed silent instead of flagging the violation.
+#[test]
+fn pure_calling_an_aliased_builtin_import_is_flagged_like_the_spelled_call() {
+    let src = "<?php\nuse function rand as r;\n#[\\Steins\\Pure]\nfunction withRng(): int { return r(); }\n";
+    let d = one(src);
+    assert_eq!(
+        d.message,
+        "r() has effect nondet.random, but withRng() is declared #[\\Steins\\Pure]"
+    );
+}
+
 // ---- echo (CST-scan case: nested in control flow) ------------------------
 
 #[test]
