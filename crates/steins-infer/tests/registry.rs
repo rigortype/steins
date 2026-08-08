@@ -30,6 +30,9 @@ use steins_infer::{CLASS_CONST_UNDEFINED_ID, PROPERTY_MAYBE_UNDEFINED_ID, PROPER
 // global constants (ADR-0078, issue #198)
 use steins_infer::CONSTANT_UNDEFINED_ID;
 // end global constants (ADR-0078, issue #198)
+// untyped surface (ADR-0078, issue #200)
+use steins_infer::UNTYPED_CLASS_CONSTANT_ID;
+// end untyped surface (ADR-0078, issue #200)
 
 /// Totality, forward: every id an emitter can produce is registered *with* a layer.
 #[test]
@@ -409,12 +412,19 @@ fn floors_reproduce_the_pre_s6_layer_selection() {
     // on every taken arm and leaves an uncovered escape edge) is dominated by code
     // that is correct by construction and unprovable by analysis: phpstan-src's own
     // `src/` carries two and passes its own missing-return rule. Hence `Strict`.
+    // `untyped.class-constant` (2026-08-09 conformance measurement): the one arm of
+    // the untyped family whose missing declaration withholds NO information — a
+    // constant's initializer is a constant expression, so the type is pinned either
+    // way. What is left to buy is the interface contract and the covariance check,
+    // which is a strict-tier concern. Hence `Strict`, while its five siblings stay
+    // at the family floor.
     let promoted = [
         (OFFSET_UNDECLARED_ID, Layer::Contract, Floor::Contracts),
         (OFFSET_MAYBE_MISSING_ID, Layer::Contract, Floor::Strict),
         (PROPERTY_MAYBE_UNDEFINED_ID, Layer::Proof, Floor::Strict),
         (VARIABLE_MAYBE_UNDEFINED_ID, Layer::Proof, Floor::Strict),
         (TYPE_RETURN_MAYBE_MISSING_ID, Layer::Proof, Floor::Strict),
+        (UNTYPED_CLASS_CONSTANT_ID, Layer::Contract, Floor::Strict),
     ];
     for &(id, layer_of, floor) in DIAGNOSTIC_REGISTRY {
         if let Some(&(_, expected_layer, expected_floor)) =

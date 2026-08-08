@@ -418,16 +418,28 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // nothing here rots another channel; the contract layer's increase-tripwire
     // posture is exactly right for "how much untyped surface is left".
     //
-    // ALL SIX land at `Contracts`. The ADR's floor table marks the last two
+    // FIVE land at `Contracts`. The ADR's floor table marks the last two
     // `Contracts→Strict by measurement`: `untyped.iterable-value` and
     // `untyped.generics` carry the real content and are the two most likely to be
     // noisy, so they ship at the family's floor and MOVE here — one-line edits to
     // `Floor::Strict` — once the corpus measurement says they should. Nothing else
     // in the tree keys on their rung.
+    //
+    // `untyped.class-constant` is the one that already MOVED (2026-08-09
+    // measurement), and for a reason no other arm shares: a class constant's
+    // initializer is a constant expression, so its type is fully determined by the
+    // declaration whether or not a type is written. Every other arm's silence
+    // yields `mixed` — real withheld information — while this arm's yields the
+    // exact same type either way. What a written constant type still buys is the
+    // interface contract and the child-class covariance check (PHP 8.3), which is
+    // a strict-tier concern, not the `contracts` rung's "how much untyped surface
+    // is left" question. Measured on the php-typing-conformance suite, where the
+    // arm fired on `key-of<C::MAP>` / `value-of<C::MAP>` / `int-mask-of<…>`
+    // fixtures whose constants are exhaustively typed BY their values.
     (UNTYPED_PARAMETER_ID, Layer::Contract, Floor::Contracts),
     (UNTYPED_RETURN_ID, Layer::Contract, Floor::Contracts),
     (UNTYPED_PROPERTY_ID, Layer::Contract, Floor::Contracts),
-    (UNTYPED_CLASS_CONSTANT_ID, Layer::Contract, Floor::Contracts),
+    (UNTYPED_CLASS_CONSTANT_ID, Layer::Contract, Floor::Strict),
     (UNTYPED_ITERABLE_VALUE_ID, Layer::Contract, Floor::Contracts),
     (UNTYPED_GENERICS_ID, Layer::Contract, Floor::Contracts),
     // end untyped surface (ADR-0078, issue #200)

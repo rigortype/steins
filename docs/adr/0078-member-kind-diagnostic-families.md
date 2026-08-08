@@ -98,7 +98,7 @@ claim ships `php -r`-witnessed per the ADR-0049 point-10 discipline.
 | `untyped.parameter` | contract / Contracts | no native type and no docblock claim |
 | `untyped.return` | contract / Contracts | |
 | `untyped.property` | contract / Contracts | |
-| `untyped.class-constant` | contract / Contracts | |
+| `untyped.class-constant` | contract / **Strict** | moved off the family floor by the 2026-08-09 conformance measurement: a constant's initializer is a constant expression, so the type is pinned whether or not one is written — the only arm whose silence withholds nothing. A written constant type still buys the interface contract and the PHP 8.3 covariance check, which is a strict-tier ask, not the `contracts` rung's "how much untyped surface is left" |
 | `untyped.iterable-value` | contract / Contracts→Strict by measurement | `array` with no value type |
 | `untyped.generics` | contract / Contracts→Strict by measurement | generic class used bare |
 
