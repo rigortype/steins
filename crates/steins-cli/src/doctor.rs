@@ -36,7 +36,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use steins_db::{PhpTarget, ProjectLayout, composer};
+use steins_db::{PhpTarget, ProjectLayout};
 use steins_infer::{
     DamKind, FileUnit, MONKEY_PATCH_EXTENSIONS, SOUND_SUBSET_NOTICE, THROW_UNDECLARED_ID,
     dam_facts,
@@ -112,8 +112,11 @@ pub fn run_doctor(args: &[String]) -> ExitCode {
     outln!("steins doctor — posture report (index-bound; runs no checks)");
 
     // One parse of the tree, one layout discovery, shared by every section below.
+    // Routed through the same `resolve_layout` every other surface uses (issue
+    // #181), so doctor's Layout section reports exactly what `check` would
+    // filter — including `steins.toml [paths] vendor-dirs` when set.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let layout = composer::discover(std::slice::from_ref(&root), &cwd);
+    let layout = crate::resolve_layout(std::slice::from_ref(&root.to_string_lossy().into_owned()));
     let files = parse_project(&root);
 
     section_runtime(no_php, &layout);

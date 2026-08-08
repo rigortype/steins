@@ -401,6 +401,74 @@ fn vendor_suppressed_field_present_in_json() {
     assert_eq!(v["findings"].as_array().unwrap().len(), 2, "both findings, got:\n{}", show.stdout);
 }
 
+// ---- composer-aware vendor-dir resolution (issue #181) --------------------
+
+#[test]
+fn a_composer_declared_vendor_dir_is_suppressed_by_default_shown_with_flag() {
+    // `composer_vendor_dir_proj/composer.json` declares `config.vendor-dir:
+    // "3rdparty"` — not the literal `vendor` — so this proves the suppression
+    // reads Composer's own configuration rather than guessing a directory name.
+    let dir = fixture("composer_vendor_dir_proj");
+    let vendor_lib = dir.join("3rdparty/acme/lib.php").to_string_lossy().into_owned();
+
+    let def = run(&["check", dir.to_str().unwrap()]);
+    assert_eq!(def.code, 1, "first-party finding → exit 1, got:\n{}", def.stdout);
+    assert!(def.stdout.contains("to width() cannot become int $w"), "first-party shown, got:\n{}", def.stdout);
+    assert!(!def.stdout.contains("to height()"), "3rdparty finding hidden, got:\n{}", def.stdout);
+    assert!(!def.stdout.contains(&vendor_lib), "no vendor path printed, got:\n{}", def.stdout);
+    assert!(
+        def.stdout.contains("1 findings in vendor suppressed (--vendor-diagnostics to show)"),
+        "vendor summary line, got:\n{}",
+        def.stdout
+    );
+
+    let show = run(&["check", "--vendor-diagnostics", dir.to_str().unwrap()]);
+    assert_eq!(show.code, 1);
+    assert!(show.stdout.contains("to width() cannot become int $w"), "first-party shown");
+    assert!(show.stdout.contains("to height() cannot become int $h"), "3rdparty shown, got:\n{}", show.stdout);
+    assert!(!show.stdout.contains("in vendor suppressed"), "no summary when shown, got:\n{}", show.stdout);
+}
+
+#[test]
+fn a_broken_file_under_a_composer_declared_vendor_dir_does_not_dam_the_project() {
+    // `composer_vendor_dir_dam_proj/3rdparty/pkg/broken.php` fails to parse. If the
+    // ADR-0079 dam read a literal `vendor` component instead of the SAME resolved
+    // answer `check` uses, it would treat this as a first-party break and silence
+    // `src/main.php`'s undefined-function fatal project-wide (§2.2). It must not:
+    // the declared `3rdparty` vendor-dir carries the ADR-0046 §2 presumption too.
+    let dir = fixture("composer_vendor_dir_dam_proj");
+
+    let def = run(&["check", dir.to_str().unwrap()]);
+    assert_eq!(def.code, 1, "the existence-family fatal must still fire, got:\n{}", def.stdout);
+    assert!(
+        def.stdout.contains("call to undefined function tyop()"),
+        "not dammed by the vendor break, got:\n{}",
+        def.stdout
+    );
+    assert!(
+        !def.stdout.contains("syntax.unparsable"),
+        "the broken file's own finding is vendor-suppressed by default, got:\n{}",
+        def.stdout
+    );
+    assert!(
+        def.stdout.contains("1 findings in vendor suppressed (--vendor-diagnostics to show)"),
+        "got:\n{}",
+        def.stdout
+    );
+
+    let show = run(&["check", "--vendor-diagnostics", dir.to_str().unwrap()]);
+    assert!(
+        show.stdout.contains("call to undefined function tyop()"),
+        "still not dammed, got:\n{}",
+        show.stdout
+    );
+    assert!(
+        show.stdout.contains("error[syntax.unparsable]"),
+        "the broken file's own finding rides the ordinary vendor filter, got:\n{}",
+        show.stdout
+    );
+}
+
 #[test]
 fn fold_strval_flagged_in_strict_silent_in_coercive() {
     let strict = run(&["check", fixture("fold_strval_strict.php").to_str().unwrap()]);

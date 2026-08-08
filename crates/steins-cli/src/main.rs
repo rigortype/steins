@@ -1043,6 +1043,23 @@ struct SteinsConfig {
     profile: Option<std::collections::BTreeMap<String, ProfileEntryConfig>>,
     /// The `[plugins]` section (ADR-0039/0068): the explicit plugin listing.
     plugins: Option<PluginsConfig>,
+    /// The `[paths]` section (issue #181): the no-manifest vendor-dir config
+    /// channel.
+    paths: Option<PathsConfig>,
+}
+
+/// The `[paths]` section (issue #181) — `steins.toml`'s config channel for a
+/// project with no `composer.json` at all. Consulted only at the vendor floor
+/// (see `layout::ProjectLayout::with_extra_vendor_dirs`), so a project a
+/// governing manifest already answers for needs none of this: zero-config for
+/// Composer projects is unaffected either way.
+#[derive(serde::Deserialize, Default)]
+struct PathsConfig {
+    /// Extra vendor directory-name sequences, `/`-separated
+    /// (`"3rdparty"`, `"lib/vendor"`), matched whole-component like the `vendor`
+    /// literal — `vendor_proj/` and `vendor.php` never match.
+    #[serde(rename = "vendor-dirs", default)]
+    vendor_dirs: Vec<String>,
 }
 
 /// The `[plugins]` section (ADR-0039 discovery, ADR-0068 §2 ownership).
@@ -1186,6 +1203,17 @@ fn allow_list(plugins: Option<PluginsConfig>) -> Option<Vec<String>> {
 /// surfaces that turn a malformed config into exit 2, and they run first.
 fn allow_list_from_disk() -> Option<Vec<String>> {
     allow_list(read_steins_config().ok().flatten().and_then(|c| c.plugins))
+}
+
+/// The `[paths] vendor-dirs` list from `./steins.toml` (issue #181), read the
+/// same lenient way [`allow_list_from_disk`] reads `[plugins] allow`: a missing
+/// or unparseable file yields no extra dirs rather than blocking the run.
+/// `check`/`doctor` already turn a malformed `steins.toml` into exit 2 before
+/// this is ever consulted; the other surfaces (`annotate`, `effect-diff`,
+/// `transform`) treat this config exactly as permissively as they already treat
+/// the plugin allow-list.
+fn vendor_dirs_from_disk() -> Vec<String> {
+    read_steins_config().ok().flatten().and_then(|c| c.paths).map(|p| p.vendor_dirs).unwrap_or_default()
 }
 
 /// Load the plugin channel (ADR-0068) for `layout`, reporting every load-time
@@ -2186,10 +2214,15 @@ fn reject_missing_paths(paths: &[String]) -> Result<(), ExitCode> {
 /// declares rather than from a directory name. A tree with no manifest — or an
 /// unreadable working directory — resolves to [`ProjectLayout::fallback`], which
 /// is the directory-name floor.
+///
+/// `steins.toml [paths] vendor-dirs` (issue #181) is layered on top either way:
+/// it only ever supplies the floor a governing root's own declaration already
+/// beats, so a project with a `composer.json` and no `[paths]` section resolves
+/// byte-identically to before.
 fn resolve_layout(paths: &[String]) -> ProjectLayout {
     let Ok(cwd) = std::env::current_dir() else { return ProjectLayout::fallback() };
     let roots: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-    composer::discover(&roots, &cwd)
+    composer::discover(&roots, &cwd).with_extra_vendor_dirs(vendor_dirs_from_disk())
 }
 
 /// The path arguments that name nothing on disk. The command line turns these
