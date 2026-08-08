@@ -28,10 +28,12 @@
 //! monkey-patch line), Config + active surface, Layout (the ADR-0015 vendor
 //! resolution and the manifest that answered), Coverage posture (ADR-0054 §9.2 and
 //! issue #30 — the dam statistics and the opaque-construct inventory), Envelopes
-//! (the G1-demote written-but-unchecked notice), and Baseline. Not covered from
-//! the full ADR-0054 §9 list: Catalog skew, Registry totality, the SAPI-undeclared
-//! A6 line, `[runtime]` pseudo-constant reporting, and `doctor --format json`
-//! (§14: the section structure is the schema; it ships when a consumer exists).
+//! (the G1-demote written-but-unchecked notice), and Baseline. The Config section
+//! also carries the `[runtime]` pseudo-constant lines (ADR-0037 §2), which the
+//! posture family reaches through `steins.toml` rather than through the
+//! environment. Not covered from the full ADR-0054 §9 list: Catalog skew, Registry
+//! totality, the SAPI-undeclared A6 line, and `doctor --format json` (§14: the
+//! section structure is the schema; it ships when a consumer exists).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -205,19 +207,21 @@ fn section_config(contradiction: &mut bool) -> profile::Surface {
             None
         }
     };
-    let (check_cfg, profile_tbl) = match config {
+    let (check_cfg, profile_tbl, runtime_cfg) = match config {
         Some(c) => {
             outln!("  steins.toml: found");
-            (c.check, c.profile)
+            (c.check, c.profile, c.runtime)
         }
         None => {
             // A genuine absence (not the parse-error fallback, which already printed).
             if !*contradiction {
                 outln!("  steins.toml: not found (built-in defaults govern)");
             }
-            (None, None)
+            (None, None, None)
         }
     };
+
+    section_runtime_postures(runtime_cfg);
 
     let (config_profile, profile_configs) = crate::profiles_from_config(check_cfg, profile_tbl);
     let provenance = if config_profile.is_some() { "[check] profile" } else { "built-in default" };
@@ -242,6 +246,49 @@ fn section_config(contradiction: &mut bool) -> profile::Surface {
         surface.surface_ids().len()
     );
     surface
+}
+
+/// The `[runtime]` pseudo-constant lines of the Config section (ADR-0037 §2; the
+/// ADR-0054 §9 item that had been listed as not-covered).
+///
+/// Named-silence discipline: a posture that changes what Steins will and will not
+/// claim must be visible without reading the source, and a *default* posture is
+/// still a posture — both keys print on every run, tagged with where the value came
+/// from, so "I never declared that" and "I declared it and it did not take" are
+/// distinguishable from the report alone. An unrecognized *value* is a
+/// warn-and-proceed in `check`; doctor names it here as the environment fact it is.
+fn section_runtime_postures(runtime_cfg: Option<crate::RuntimeConfig>) {
+    // Declared-ness is read before the config is consumed: the resolved value alone
+    // cannot distinguish an absent key from one spelled at its default.
+    let declared = |v: &Option<String>| if v.is_some() { "declared" } else { "default" };
+    let (wh_src, fk_src) = match &runtime_cfg {
+        Some(r) => (declared(&r.warning_handler), declared(&r.final_keyword)),
+        None => ("default", "default"),
+    };
+    let (postures, warnings) = crate::runtime_from_config(runtime_cfg);
+
+    let (wh, wh_note) = if postures.warning_handler_abort {
+        ("abort", "a proven E_WARNING is a proven break, so warning-grade ids fire")
+    } else {
+        ("null", "the app tolerates the warning, so warning-grade ids leave the proof surface")
+    };
+    outln!("  [runtime] warning-handler: \"{wh}\" ({wh_src}) — {wh_note}");
+
+    let (fk, fk_note) = match postures.final_keyword {
+        steins_infer::FinalKeyword::Enforced => (
+            "enforced",
+            "`final` seals a class, so an intersection carrying a final arm is uninhabited",
+        ),
+        steins_infer::FinalKeyword::Stripped => (
+            "stripped",
+            "the analyzed runtime rewrites `final` away, so `FinalClass&MockObject` stays inhabited; `readonly` and the `final` diagnostics are unaffected",
+        ),
+    };
+    outln!("  [runtime] final-keyword: \"{fk}\" ({fk_src}) — {fk_note}");
+
+    for w in warnings {
+        outln!("  {w}");
+    }
 }
 
 /// The Runtime section's TARGET lines (issue #28): what version range the

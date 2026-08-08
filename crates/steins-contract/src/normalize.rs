@@ -28,7 +28,13 @@
 //! endpoint), and an interior point is refused everywhere else. [`subtract`]
 //! (and the public per-arm judgment [`subtract_arm`] / [`subtrahend_covers`])
 //! consult a real is-a [`IsaOracle`]; the caller wires the project hierarchy
-//! through that seam, and [`ReflexiveFloor`] is the default.
+//! through that seam, and [`ReflexiveFloor`] is the default. The same seam
+//! carries the **inhabitance** judgment [`provably_uninhabited`] (issue #234) —
+//! whether a type's denotation is provably empty — because the one rule that
+//! makes an intersection empty is a statement about class finality, and finality
+//! is what the oracle already answers. It takes the declared [`FinalKeyword`]
+//! posture explicitly, so no caller can collapse `final A ∧ B` to `never` without
+//! having decided what the project's runtime does with the keyword.
 //!
 //! ### ADR-0030 registry entry 5 (semantic type equality)
 //! Semantic type equality is defined **only** as mutual subsumption (Yes/Yes)
@@ -120,6 +126,154 @@ impl IsaOracle for ReflexiveFloor {
     fn is_final(&self, _fqn: &str) -> bool {
         false
     }
+}
+
+/// The `[runtime] final-keyword` posture (issue #234): what the runtime the
+/// project actually runs under *does* with the `final` keyword.
+///
+/// It belongs to the ADR-0037 §2 pseudo-constant family — the same shelf as
+/// `warning-handler` (ADR-0049 §7 amendment) — and for the same reason: it is a
+/// boot truth no amount of reading source settles, so the project declares it and
+/// Steins reasons under the declaration instead of guessing. The key names the
+/// language facility and the value names what the runtime does to it, exactly as
+/// `warning-handler = "abort" | "null"` does.
+///
+/// [`Self::Enforced`] is the default and the [`Default`] impl, so a project that
+/// declares nothing gets today's semantics unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FinalKeyword {
+    /// `final-keyword = "enforced"` — the language's own rule, and the absence
+    /// default: a `final` class (or an enum) admits no subtype, so its instances
+    /// all have that exact class.
+    #[default]
+    Enforced,
+    /// `final-keyword = "stripped"` — the project declares that the runtime it is
+    /// analyzed for removes the keyword before the engine ever compiles the class.
+    /// `dg/bypass-finals` is the motivating implementation: it installs a stream
+    /// wrapper that rewrites `final` out of the source as it loads, so under the
+    /// test harness a mock subclass of a `final` class genuinely exists and
+    /// `FinalClass&MockObject` is a type test code legitimately holds.
+    ///
+    /// # What this posture deliberately does NOT license
+    ///
+    /// * **`readonly` is untouched.** `dg/bypass-finals` strips `readonly` only
+    ///   when explicitly asked — `enable(bypassReadOnly: true)` — and the project
+    ///   that motivated this passes `false`. The two knobs are separate in the
+    ///   library, so they stay separate here: a declared `"stripped"` never widens
+    ///   to `readonly.reassigned`, whose proof rests on the property modifier and
+    ///   not on class finality at all.
+    /// * **The `final` diagnostics stay as they are** (issue #234, "out of
+    ///   scope"): `class.extends-final` still fires on a declaration that extends a
+    ///   final class, `override.final` still fires, and the ADR-0049 §8
+    ///   descendant-closure `Immune` leg is unchanged. Source that *spells*
+    ///   `extends FinalClass` is broken under a plain runtime whatever the test
+    ///   harness rewrites at load time; only the *inhabitance* of an intersection
+    ///   type is at stake here.
+    /// * **Nothing is inferred.** Detecting `uopz`/`runkit7` or sniffing a
+    ///   final-stripping loader out of the dependency graph is issue #205; this
+    ///   posture is declared or it is absent.
+    ///
+    /// # Calibration boundary: the posture is project-wide in v1
+    ///
+    /// The real call site is path-scoped — `dg/bypass-finals` takes a
+    /// `denyPaths([…])` list, so production code is rewritten and the test tree is
+    /// not (or the reverse) — and this posture is not: declaring it declares it for
+    /// the whole run. That is the honest v1 boundary rather than a defect, because
+    /// the widening is in the *silent* direction (it only ever withdraws an
+    /// emptiness proof, never adds a claim), and because Steins has nowhere to put a
+    /// scoped answer yet: region assignment is ADR-0047's `[transform.partitions]`
+    /// machinery, whose observer/partition split is exactly the `denyPaths()` shape,
+    /// and it is unimplemented outside `steins transform`. A path-scoped
+    /// `final-keyword` belongs there when regions reach the check lane, keyed on the
+    /// same declared regions rather than on a second, parallel path vocabulary.
+    Stripped,
+}
+
+/// Whether `t`'s denotation is **provably empty** — no value of any shape can
+/// inhabit it — under the class hierarchy `oracle` answers for and the declared
+/// `final_keyword` posture.
+///
+/// This is the guard issue #234 plants ahead of its consumer. Intersections are
+/// consumed nowhere today, so nothing in the binary calls this yet; whoever lands
+/// intersection consumption (issue #238) reaches for exactly this question, and
+/// the signature makes the posture impossible to skip — there is no argument-free
+/// way to ask it. Computing `final A ∧ B` as empty *unconditionally* is the
+/// natural implementation and would be a false claim on the **default** surface
+/// the moment a project runs its tests under a final-stripping loader (the
+/// declared-receiver lane is proof-layer at the `Default` floor, ADR-0049 A13).
+///
+/// # The rule
+///
+/// `true` is a **proof**, so every leg is conservative:
+///
+/// * the algebraic emptiness `denotes_nothing` already decides (`never` and its
+///   closures) — posture-independent, and unchanged;
+/// * the **sealed-class conflict**: under [`FinalKeyword::Enforced`] a `final`
+///   class arm `F` has no subtype, so every value of the intersection has exact
+///   class `F` and must therefore already be an instance of every other class arm
+///   `T`. One proven `is_a(F, T) = No` and no value satisfies both arms at once.
+///   An `Unknown` is-a keeps the intersection alive (the FP-safe side), and so
+///   does a non-final arm — an unseen descendant of it could implement `T`.
+///
+/// Under [`FinalKeyword::Stripped`] the sealed-class leg does not run at all: the
+/// subtype the rule assumed away does exist there, so `FinalClass&MockObject` is
+/// inhabited and member lookup over it is the union of the arms.
+///
+/// # Residuals
+///
+/// Emptiness for a reason this vocabulary does not model — `int&string`, an
+/// abstract class with no concrete descendant, a private constructor — answers
+/// `false` here exactly as it does in `denotes_nothing`. `false` means "not proven
+/// empty", never "proven inhabited"; only the `true` side is actionable.
+#[must_use]
+pub fn provably_uninhabited(
+    t: &ContractTy,
+    oracle: &dyn IsaOracle,
+    final_keyword: FinalKeyword,
+) -> bool {
+    if denotes_nothing(t) {
+        return true;
+    }
+    match t {
+        // A union is empty only when every member is (an empty member list is
+        // already `denotes_nothing`).
+        ContractTy::Union(members) => {
+            members.iter().all(|m| provably_uninhabited(m, oracle, final_keyword))
+        }
+        // An intersection is empty as soon as ONE member is, plus the finality leg.
+        ContractTy::Inter(members) => {
+            members.iter().any(|m| provably_uninhabited(m, oracle, final_keyword))
+                || sealed_class_conflict(members, oracle, final_keyword)
+        }
+        _ => false,
+    }
+}
+
+/// The finality leg of [`provably_uninhabited`]: two class arms an *enforced*
+/// `final` keyword cannot let one value satisfy at once.
+///
+/// `is_a(F, F)` is reflexively `Yes`, so a lone final arm never conflicts with
+/// itself; a non-class member (`object`, a scalar, a shape) is not consulted here
+/// — its own emptiness is the recursive leg's business, and its *object-ness* is
+/// the recall question issue #234 leaves to #238.
+fn sealed_class_conflict(
+    members: &[ContractTy],
+    oracle: &dyn IsaOracle,
+    final_keyword: FinalKeyword,
+) -> bool {
+    if final_keyword == FinalKeyword::Stripped {
+        return false;
+    }
+    let classes: Vec<&str> = members
+        .iter()
+        .filter_map(|m| match m {
+            ContractTy::Class(fqn) => Some(fqn.as_str()),
+            _ => None,
+        })
+        .collect();
+    classes.iter().any(|&f| {
+        oracle.is_final(f) && classes.iter().any(|&t| oracle.is_a(f, t) == Certainty::No)
+    })
 }
 
 /// Pairwise arm subsumption: the [`Certainty`] that every value in `b`'s
@@ -398,6 +552,11 @@ pub(crate) fn array_incapable(t: &ContractTy) -> bool {
 /// closures of it). An intersection that is empty for an unmodeled reason
 /// (`int&string`) is not detected here; a witness built on it would be vacuous,
 /// which is the one residual this module accepts and the ADR does not name.
+///
+/// This is the posture-independent core of [`provably_uninhabited`], which adds
+/// the one emptiness rule that *is* posture-dependent (the sealed-class conflict).
+/// The array laws below need no oracle and no posture, so they keep calling this
+/// directly.
 fn denotes_nothing(t: &ContractTy) -> bool {
     match t {
         ContractTy::Never => true,
@@ -2419,5 +2578,186 @@ mod tests {
         let mut arms = vec![class("animal")];
         subtract(&mut arms, &Subtrahend::Class { fqn: "Cat".to_owned(), polarity: true }, &mock());
         assert_eq!(arms, vec![class("animal")]);
+    }
+
+    // ---- inhabitance under the `[runtime] final-keyword` posture (issue #234) --
+    //
+    // These pin the judgment ITSELF, not a finding: intersections are consumed
+    // nowhere in the binary today, so there is no diagnostic to assert against and
+    // no consumer whose arrival these tests may wait on. That is the point — the
+    // rule ships before the consumer so the consumer cannot ship the collapse.
+
+    /// The mock-object hierarchy: `Svc` is a plain final service class, `Guard` a
+    /// final class that additionally implements `Mock`, `Base` an open class, and
+    /// `Mock` the marker interface a mock generator would implement. Those four are
+    /// fully enumerated, so a missing edge is a definite `No` — the situation a real
+    /// project reaches once PHPUnit is indexed. `Sealed` is the fifth case a real
+    /// project also has: `final`, but with an ancestor the index cannot resolve, so
+    /// its is-a answers `Unknown`.
+    fn mock_object_isa() -> MockIsa {
+        MockIsa {
+            edges: [
+                ("svc", vec![]),
+                ("guard", vec!["mock"]),
+                ("base", vec![]),
+                ("mock", vec![]),
+            ]
+            .into_iter()
+            .collect(),
+            finals: vec!["svc", "guard", "sealed"],
+            known: vec!["svc", "guard", "base", "mock"],
+        }
+    }
+
+    fn inter(arms: &[&str]) -> ContractTy {
+        ContractTy::Inter(arms.iter().map(|a| class(a)).collect())
+    }
+
+    #[test]
+    fn enforced_final_arm_makes_the_intersection_uninhabited() {
+        // The DEFAULT posture, and the language's own semantics: `Svc` is final, so
+        // every value of the intersection is an exact `Svc`, and is_a(Svc, Mock)=No
+        // proves no such value implements `Mock`. Nothing can inhabit `Svc&Mock`.
+        assert!(provably_uninhabited(
+            &inter(&["svc", "mock"]),
+            &mock_object_isa(),
+            FinalKeyword::Enforced
+        ));
+    }
+
+    #[test]
+    fn stripped_final_arm_leaves_the_intersection_inhabited() {
+        // The whole issue: under a declared `final-keyword = "stripped"` the loader
+        // has removed the keyword, a mock subclass of `Svc` exists, and `Svc&Mock`
+        // is a type the test suite genuinely holds. Whoever consumes intersections
+        // must NOT collapse it.
+        assert!(!provably_uninhabited(
+            &inter(&["svc", "mock"]),
+            &mock_object_isa(),
+            FinalKeyword::Stripped
+        ));
+    }
+
+    #[test]
+    fn the_absence_default_is_the_enforced_posture() {
+        // `Default` is what a `steins.toml` with no `[runtime] final-keyword` key
+        // resolves to, so today's semantics are what a silent project gets.
+        assert_eq!(FinalKeyword::default(), FinalKeyword::Enforced);
+        assert_eq!(
+            provably_uninhabited(&inter(&["svc", "mock"]), &mock_object_isa(), FinalKeyword::default()),
+            provably_uninhabited(&inter(&["svc", "mock"]), &mock_object_isa(), FinalKeyword::Enforced),
+        );
+    }
+
+    #[test]
+    fn a_final_arm_that_already_implements_the_other_is_inhabited_under_both() {
+        // `Guard` is final AND is_a(Guard, Mock)=Yes: the exact class already
+        // satisfies both arms, so `Guard&Mock` is inhabited whatever the runtime
+        // does with the keyword. The posture only ever *removes* an emptiness
+        // proof; it never adds one.
+        for posture in [FinalKeyword::Enforced, FinalKeyword::Stripped] {
+            assert!(
+                !provably_uninhabited(&inter(&["guard", "mock"]), &mock_object_isa(), posture),
+                "{posture:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_open_class_arm_is_never_proven_empty() {
+        // `Base` is not final and is_a(Base, Mock)=No, but an unseen descendant of
+        // `Base` could implement `Mock` — the FP-safe side, and unchanged by this
+        // issue in either posture.
+        for posture in [FinalKeyword::Enforced, FinalKeyword::Stripped] {
+            assert!(
+                !provably_uninhabited(&inter(&["base", "mock"]), &mock_object_isa(), posture),
+                "{posture:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_is_a_keeps_the_intersection_alive() {
+        // `Sealed` is final but its ancestry is not fully enumerated, so
+        // is_a(Sealed, Mock) answers Unknown. A sealed arm against an undecided
+        // target proves nothing (ADR-0052's Unknown-keeps-the-arm discipline), in
+        // either posture — and neither does the A11 catalog-skew demotion, which
+        // reaches this rule as exactly the same `Maybe`.
+        assert_eq!(mock_object_isa().is_a("sealed", "mock"), Certainty::Maybe);
+        for posture in [FinalKeyword::Enforced, FinalKeyword::Stripped] {
+            assert!(
+                !provably_uninhabited(&inter(&["sealed", "mock"]), &mock_object_isa(), posture),
+                "{posture:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_distinct_final_arms_are_uninhabited_only_when_enforced() {
+        // Neither `Svc` nor `Guard` is a subtype of the other and both are sealed.
+        let t = inter(&["svc", "guard"]);
+        assert!(provably_uninhabited(&t, &mock_object_isa(), FinalKeyword::Enforced));
+        assert!(!provably_uninhabited(&t, &mock_object_isa(), FinalKeyword::Stripped));
+    }
+
+    #[test]
+    fn a_lone_final_arm_never_conflicts_with_itself() {
+        // is_a(Svc, Svc) is reflexively Yes: a one-arm intersection (and a bare
+        // class) is not an emptiness proof.
+        for posture in [FinalKeyword::Enforced, FinalKeyword::Stripped] {
+            assert!(!provably_uninhabited(&inter(&["svc"]), &mock_object_isa(), posture), "{posture:?}");
+            assert!(!provably_uninhabited(&class("svc"), &mock_object_isa(), posture), "{posture:?}");
+        }
+    }
+
+    #[test]
+    fn the_never_legs_are_posture_independent() {
+        // Algebraic emptiness is the language's, not the runtime's: `never` and its
+        // closures answer the same under both postures. A posture that could silence
+        // THIS would be the scope creep issue #234 forbids.
+        let cases = [
+            ContractTy::Never,
+            ContractTy::Inter(vec![class("svc"), ContractTy::Never]),
+            ContractTy::Union(vec![ContractTy::Never, ContractTy::Never]),
+            ContractTy::Union(vec![ContractTy::Never, inter(&["svc", "mock"])]),
+        ];
+        for t in &cases {
+            assert!(provably_uninhabited(t, &mock_object_isa(), FinalKeyword::Enforced), "{t:?}");
+        }
+        // Only the last one — whose non-`never` member is the sealed conflict —
+        // stops being a proof when the keyword is stripped.
+        for t in &cases[..3] {
+            assert!(provably_uninhabited(t, &mock_object_isa(), FinalKeyword::Stripped), "{t:?}");
+        }
+        assert!(!provably_uninhabited(&cases[3], &mock_object_isa(), FinalKeyword::Stripped));
+    }
+
+    #[test]
+    fn the_reflexive_floor_proves_no_intersection_empty() {
+        // Without a project hierarchy nothing is final and nothing is a proven
+        // non-member, so the floor answers the honest "not proven empty" in both
+        // postures — the same FP-safe default `subtract` gets from it.
+        for posture in [FinalKeyword::Enforced, FinalKeyword::Stripped] {
+            assert!(
+                !provably_uninhabited(&inter(&["svc", "mock"]), &ReflexiveFloor, posture),
+                "{posture:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_posture_does_not_reach_the_positive_branch_subtraction() {
+        // Issue #234's "out of scope": `final` semantics are otherwise unchanged.
+        // `subtract` takes no posture at all — it cannot, by construction — so the
+        // ADR-0052 §2 positive-branch deletion of a final non-member is exactly
+        // what it was, and `class.extends-final` / `override.final` / the ADR-0049
+        // §8 `Immune` leg are untouched for the same reason.
+        let mut arms = vec![class("svc"), class("guard")];
+        subtract(
+            &mut arms,
+            &Subtrahend::Class { fqn: "Mock".to_owned(), polarity: true },
+            &mock_object_isa(),
+        );
+        assert_eq!(arms, vec![class("guard")], "final Svc is not a Mock and still dies");
     }
 }

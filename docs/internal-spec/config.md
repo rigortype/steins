@@ -56,6 +56,7 @@ Mechanics ids ignore `disable`.
 ```toml
 [runtime]
 warning-handler = "abort"      # default: abort
+final-keyword   = "enforced"   # default: enforced
 ```
 
 Boot-truth pseudo-constants the checker cannot observe from source.
@@ -64,6 +65,24 @@ Boot-truth pseudo-constants the checker cannot observe from source.
   `"abort"` (the default) assumes a handler converts it to an exception or halts,
   so proven warning-grade offset findings emit. `"null"` declares the app
   tolerates the warning, and those findings leave the proof surface.
+- `final-keyword` declares what the analyzed runtime *does* with the `final`
+  keyword (issue #234). `"enforced"` (the default) is PHP's own rule: a `final`
+  class admits no subtype, so an intersection carrying a final class arm is
+  uninhabited. `"stripped"` declares a loader that rewrites the keyword away
+  before the engine compiles the class — `dg/bypass-finals` does this in a stream
+  wrapper — which is what makes `FinalClass&MockObject` a real type under a test
+  harness, so the intersection stays inhabited.
+
+  The posture governs exactly one judgment,
+  `steins_contract::normalize::provably_uninhabited`, and reaches the checker only
+  once intersections are consumed (issue #238); it is project-wide in v1, where a
+  path-scoped version would key on ADR-0047 regions. It does **not** touch
+  `readonly` (`dg/bypass-finals` strips that only under an explicit
+  `bypassReadOnly: true`), `class.extends-final`, `override.final`, or the
+  ADR-0049 §8 descendant-closure `Immune` leg.
+
+An unrecognized *value* on either key warns on stderr and falls back to the safe
+default; only an unrecognized *key* is the exit-2 error described below.
 
 There is **no `zend-assertions` key**: the 2026-07-25 owner ruling (ADR-0052
 amendment "assert() reads as a throw-guard") reads `assert($expr)` as statically

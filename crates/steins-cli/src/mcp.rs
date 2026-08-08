@@ -726,9 +726,13 @@ fn tool_check(_session: &Session, args: &Value) -> Result<Reply, ToolError> {
     let files = crate::collect_files(&paths);
     let loaded = crate::load_project(&files, &paths, plugin_allow.as_deref());
     folder.set_php_target(loaded.layout.php_target().cloned());
-    let (warning_handler_abort, runtime_notices) = crate::runtime_from_config(runtime_cfg);
-    let findings =
-        check_project_with_runtime(&loaded.db, loaded.project, &mut folder, warning_handler_abort);
+    let (postures, runtime_notices) = crate::runtime_from_config(runtime_cfg);
+    let findings = check_project_with_runtime(
+        &loaded.db,
+        loaded.project,
+        &mut folder,
+        postures.warning_handler_abort,
+    );
     let (inline, vendor_suppressed) =
         crate::suppression_pipeline(&loaded, findings, &surface, vendor_diagnostics);
 
