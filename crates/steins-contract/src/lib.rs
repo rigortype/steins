@@ -1417,8 +1417,8 @@ mod refined_string_grid_tests {
         let folded = inter_str_preds(members).expect("both arms are StrWith");
         assert!(folded.contains_all(StrPreds::DECIMAL_INT));
         assert!(folded.contains_all(StrPreds::NON_DECIMAL_INT));
-        assert_eq!(admits_val(&ContractTy::StrWith(folded), &Val::Str("1".to_owned())), Certainty::No);
-        assert_eq!(admits_val(&ContractTy::StrWith(folded), &Val::Str("x".to_owned())), Certainty::No);
+        assert_eq!(admits_val(&ContractTy::StrWith(folded), &Val::Str("1".into())), Certainty::No);
+        assert_eq!(admits_val(&ContractTy::StrWith(folded), &Val::Str("x".into())), Certainty::No);
     }
 
     /// The floor stays: one non-`StrWith` arm refuses the whole intersection, so
@@ -1450,12 +1450,12 @@ mod refined_string_grid_tests {
         assert!(!folded.is_extensional(), "the class-table bit must still be contextual");
         // Undecidable from the characters alone: the honest `Maybe`, unchanged.
         assert_eq!(
-            admits_val(&ContractTy::StrWith(folded), &Val::Str("Foo".to_owned())),
+            admits_val(&ContractTy::StrWith(folded), &Val::Str("Foo".into())),
             Certainty::Maybe
         );
         // …and refuted where the extensional half refutes it.
         assert_eq!(
-            admits_val(&ContractTy::StrWith(folded), &Val::Str(String::new())),
+            admits_val(&ContractTy::StrWith(folded), &Val::Str("".into())),
             Certainty::No
         );
     }
