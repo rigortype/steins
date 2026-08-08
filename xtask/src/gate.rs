@@ -1505,6 +1505,117 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 433,
         message_contains: "type array, none returned",
     },
+    // ---------------------------------------------------------------------
+    // `variable.undefined` (ADR-0078, issue #194) — triaged at source
+    // 2026-08-08. Eleven TRUE positives: reads of a name that appears as no
+    // binding form anywhere in its scope, so PHP warns and the read yields null.
+    // The two remaining sites from the same run were an FP shape (a same-variable
+    // `empty($x) ? … : …` ternary, whose else arm runs only when `$x` is bound)
+    // and are gone at source — the checker now shields both arms of a
+    // same-variable `isset`/`empty` conditional, so they are not pinned here.
+    //
+    // The OSS one is a fixture doing its job. The ten monorepo ones split into:
+    // four exception-message reads of a name that does not exist (including one
+    // `$this->$mode` dynamic-property typo that meant `->mode`, and an obvious
+    // `$withd` for `$width`); one logger field silently null ever since its
+    // variable was renamed; one KVS setter storing `(int)$count` of a never-bound
+    // name, hence always zero — a live defect; two batch-script reads of a deleted
+    // `$offset` that work only by accident (`array_splice(…, null)` degrades to a
+    // single whole-list pass); one deleted-parameter read on a return path; and one
+    // stale test fixture. The standing re-cut note applies: a corpus reseed moves
+    // these lines and must re-triage rather than re-pin blindly.
+    //
+    // Path suffixes are kept SHORT on purpose — several full paths carry the
+    // private project's name, which must not enter a tracked file. Do not lengthen
+    // them.
+    //
+    // The warning-observation fixture: `$a = $b;` with no `$b` anywhere, written to
+    // make PHPUnit observe a PHP warning. Steins reports the one unsuppressed read
+    // and stays silent on the `@`-suppressed twin beneath it.
+    ExpectedProofFinding {
+        package: "sebastianbergmann/phpunit",
+        id: "variable.undefined",
+        path_suffix: "event/_files/PhpWarningTest.php",
+        line: 18,
+        message_contains: "$b is never bound",
+    },
+    // Exception-message reads of names that do not exist.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "variable.undefined",
+        path_suffix: "Model/Illust/ContentsType.php",
+        line: 29,
+        message_contains: "$type is never bound",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "variable.undefined",
+        path_suffix: "Model/Illust/IllustModel.php",
+        line: 134,
+        message_contains: "$withd is never bound",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "variable.undefined",
+        path_suffix: "Ranking.php",
+        line: 109,
+        message_contains: "$mode is never bound",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "variable.undefined",
+        path_suffix: "PPoint/PaymentMethodCode.php",
+        line: 71,
+        message_contains: "$payment_method_code is never bound",
+    },
+    // Two reads of a deleted `$offset` in one batch script — live only because
+    // `array_splice(…, null)` degrades to a single whole-list pass.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "variable.undefined",
+        path_suffix: "script/get_event_circle_user.php",
+        line: 78,
+        message_contains: "$offset is never bound",
+    },
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "variable.undefined",
+        path_suffix: "script/get_event_circle_user.php",
+        line: 82,
+        message_contains: "$offset is never bound",
+    },
+    // A KVS setter storing `(int)$count` of a never-bound name: always zero.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "variable.undefined",
+        path_suffix: "Group/Base.php",
+        line: 1381,
+        message_contains: "$count is never bound",
+    },
+    // A deleted parameter, still read on a return path.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "variable.undefined",
+        path_suffix: "stacc/api.php",
+        line: 574,
+        message_contains: "$display_m is never bound",
+    },
+    // A stale test fixture.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "variable.undefined",
+        path_suffix: "tests/SampleTest.php",
+        line: 215,
+        message_contains: "$cookie_store is never bound",
+    },
+    // A logger field silently null since its variable was renamed.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "variable.undefined",
+        path_suffix: "Log/FluentdLogger.php",
+        line: 41,
+        message_contains: "$write_time is never bound",
+    },
 ];
 
 /// Whether `d` is a recorded, triaged TRUE proof-layer positive for `package`

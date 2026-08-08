@@ -74,6 +74,8 @@ use crate::{
 // global constants (ADR-0078, issue #198)
 use crate::CONSTANT_UNDEFINED_ID;
 // end global constants (ADR-0078, issue #198)
+// undefined variables (ADR-0078, issue #194)
+use crate::{VARIABLE_MAYBE_UNDEFINED_ID, VARIABLE_UNDEFINED_ID};
 
 /// The registry id for an `@steins-ignore` whose diagnostic id matches nothing on
 /// its target line (ADR-0023 anti-rot). Exempt from suppression.
@@ -384,6 +386,16 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // warning-grade, so it is not behind the ADR-0049 §7 warning-handler gate.
     (CONSTANT_UNDEFINED_ID, Layer::Proof, Floor::Default),
     // end global constants (ADR-0078, issue #198)
+    // undefined variables (ADR-0078, issue #194)
+    // proof — a read of a name the scope never binds is an `E_WARNING` yielding
+    // null, so it demotes under a declared `warning-handler = "null"` posture
+    // exactly as `offset.missing` does (ADR-0049 §7).
+    (VARIABLE_UNDEFINED_ID, Layer::Proof, Floor::Default),
+    // proof, `strict` floor — the some-paths-only sibling, registered ahead of its
+    // emitter (issue #199). A weaker claim than its `default`-floor sibling's, and
+    // one defensive house styles produce deliberately, so it is opt-in.
+    (VARIABLE_MAYBE_UNDEFINED_ID, Layer::Proof, Floor::Strict),
+    // end undefined variables (ADR-0078, issue #194)
     // contract — declared-contract acceptance (increase tripwires).
     (PARAM_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     (RETURN_MISMATCH_ID, Layer::Contract, Floor::Contracts),

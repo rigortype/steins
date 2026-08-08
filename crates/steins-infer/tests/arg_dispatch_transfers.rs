@@ -95,7 +95,11 @@ fn diagnostics_with(src: &str, folder: &mut dyn Folder) -> Vec<Diagnostic> {
 /// that the source produced NO other finding.
 fn one_type_with(src: &str, folder: &mut dyn Folder) -> String {
     let ds = diagnostics_with(src, folder);
-    let other: Vec<&Diagnostic> = ds.iter().filter(|d| !d.id.starts_with("debug.")).collect();
+    // `untyped.*` is contract-layer claim-absence (issue #200), orthogonal to the
+    // transfer semantics this harness asserts — same one-line filter as the other
+    // deliberately-untyped fixtures.
+    let other: Vec<&Diagnostic> =
+        ds.iter().filter(|d| !d.id.starts_with("debug.") && !d.id.starts_with("untyped.")).collect();
     assert!(other.is_empty(), "a transfer emitted a finding: {other:?}");
     let ty: Vec<&Diagnostic> = ds.iter().filter(|d| d.id == DEBUG_TYPE_ID).collect();
     assert_eq!(ty.len(), 1, "expected exactly one debug.type dump, got {ds:?}");
@@ -245,7 +249,10 @@ fn preg_replace_declines_a_subject_it_cannot_place() {
     // arms rather than choosing one, and carries the `(asserted)` marker the rule's
     // own `string|null` would not.
     assert_eq!(
-        dump("", "preg_replace('/a/', 'b', $u)"),
+        // `$u` is an untyped parameter: bound (so `variable.undefined` is not the
+        // finding under test) and carrying no fact, which is the unknown base the
+        // rule declines on.
+        dump("$u", "preg_replace('/a/', 'b', $u)"),
         "dumped type: string|null|array (asserted)"
     );
     assert_eq!(

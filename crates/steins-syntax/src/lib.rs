@@ -2692,6 +2692,69 @@ pub struct Scope {
     /// Empty for arrow functions (their captures are *derived* from the body, so
     /// an unused one cannot exist) and for every non-closure scope.
     pub unused_captures: Vec<UnusedCapture>,
+    // undefined variables (ADR-0078, issue #194)
+    /// Every read of a name this scope **never binds** — the firing set of
+    /// `variable.undefined` (issue #194). A syntactic fact, computed at lowering
+    /// where the CST is still in hand, exactly as [`Self::unused_captures`] is.
+    ///
+    /// The proof is closed-world over one scope's own text and deliberately
+    /// **ordering-blind**: a name that appears as a binding form *anywhere* in the
+    /// scope — before, after, or in a branch that never runs — is bound here. A read
+    /// that precedes its only assignment is therefore silence; that is
+    /// `variable.maybe-undefined`'s territory and waits on the reachability
+    /// foundation (issue #199).
+    ///
+    /// The list is empty — never merely shorter — in four cases, each a place where
+    /// the closed world does not hold:
+    ///
+    /// * **Top-level script scopes.** `include` splices the *including* scope's whole
+    ///   symbol table into the included file's top level, so a file's own text can
+    ///   never prove a top-level name unbound (the template-partial idiom). No
+    ///   function-like scope has that channel: a call frame starts empty.
+    /// * **Arrow-function scopes.** `fn () => $x` auto-captures every free variable
+    ///   from the enclosing scope, so an arrow body's reads are the *enclosing*
+    ///   scope's question, not this one's (witnessed: `$x = 3; fn () => $x + 1` is
+    ///   silent at 8.5.9).
+    /// * **A scope carrying a name dam** — `extract` / `compact` /
+    ///   `get_defined_vars` / `$$x` / `${…}` / `eval` / `include` / `require`. The
+    ///   same scope-local dam [`Self::unused_captures`] uses, for the same reason:
+    ///   each can consume or mint a binding without spelling it.
+    /// * A read whose name is a superglobal, `$this`, or `$http_response_header`
+    ///   (the engine binds all three), which is filtered at collection.
+    ///
+    /// `isset($x)` / `empty($x)` / `$x ?? d` / `unset($x)` / `@$x` reads are excluded
+    /// at collection too, but for a different reason: PHP *legalizes* them (witnessed
+    /// silent at 8.5.9), so they are not this finding at all (ADR-0078 §3 defers the
+    /// pointless-guard reading entirely).
+    ///
+    /// One residue the syntax side cannot settle is left for the checker: a bare
+    /// `$x` passed to a **statically-named function** may be an out-parameter, and
+    /// whether the callee declares `&$p` needs the cross-file index. Those reads are
+    /// collected here and subtracted in `steins-infer` (ADR-0077's by-value oracle).
+    /// Every *other* call shape — method, static, dynamic, `new`, and every named
+    /// argument — binds its bare-variable arguments right here, since no
+    /// name is even available to resolve.
+    pub undefined_reads: Vec<UndefinedRead>,
+    /// Every bare-variable positional argument at a **function call** in this scope
+    /// — the out-parameter candidates [`Self::undefined_reads`] cannot settle alone,
+    /// since whether `f($x)` writes `$x` is a property of `f`'s declaration and needs
+    /// the cross-file index.
+    ///
+    /// Recorded **independently of [`Self::undefined_reads`]**, and deliberately so:
+    /// an out-parameter is a *binding form*, and a binding must not depend on whether
+    /// its argument occurrence happened to be collected as a read. It is not —
+    /// `@proc_open($cmd, $spec, $pipes)` sits inside an error-control guard, so the
+    /// `$pipes` occurrence is withheld from the read list while PHP binds `$pipes`
+    /// exactly as it would without the `@` (symfony/console `Terminal.php`, the
+    /// corpus site that made the point).
+    ///
+    /// Only plain function calls appear here. Every other call shape — method,
+    /// static, dynamic, `new`, and every named argument — has no callee name to
+    /// resolve, so it binds its bare-variable arguments outright at lowering.
+    /// Empty whenever [`Self::undefined_reads`] is (a dammed or non-reporting
+    /// scope has nothing to subtract from).
+    pub ref_arg_candidates: Vec<UndefinedRead>,
+    // end undefined variables (ADR-0078, issue #194)
 }
 
 /// One by-value `use ($x)` capture a closure body never mentions — an entry of
@@ -2703,6 +2766,22 @@ pub struct UnusedCapture {
     /// The file byte span of the `$x` token in the `use (…)` clause.
     pub span: Span,
 }
+
+// undefined variables (ADR-0078, issue #194)
+
+/// One read of a name its scope never binds — an entry of
+/// [`Scope::undefined_reads`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UndefinedRead {
+    /// The read name without the leading `$`.
+    pub name: String,
+    /// The file byte span of the `$x` token at the **read**, which is also the
+    /// span `lower_argument_list` records for a bare-variable positional argument
+    /// — the join the checker's out-parameter subtraction keys on.
+    pub span: Span,
+}
+
+// end undefined variables (ADR-0078, issue #194)
 
 /// A recovered parse error with its span (ADR-0003: error-tolerant).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -7004,7 +7083,7 @@ fn lower_scopes(
         flatten_top_level(s, &mut top);
     }
     let rc = RefResolver { contexts, regions };
-    let mut scopes = vec![build_scope_from(ScopeOwner::TopLevel, &top, None)];
+    let mut scopes = vec![build_scope_from(ScopeOwner::TopLevel, &top, None, None)];
     collect_scopes(&Node::Program(program), contexts, regions, &rc, docs, None, &mut scopes);
     scopes
 }
@@ -7049,6 +7128,7 @@ fn collect_scopes(
                 ScopeOwner::Function(name),
                 f.body.statements.as_slice(),
                 ret_hint_of(f.return_type_hint.as_ref()),
+                Some(&f.parameter_list),
             ));
         }
         Node::Class(c) => {
@@ -7071,6 +7151,7 @@ fn collect_scopes(
                         owner,
                         block.statements.as_slice(),
                         ret_hint_of(m.return_type_hint.as_ref()),
+                        Some(&m.parameter_list),
                     ));
                 }
             }
@@ -7168,17 +7249,23 @@ fn build_scope(
     owner: ScopeOwner,
     statements: &[Statement<'_>],
     ret_hint: Option<RetHint>,
+    params: Option<&mago_syntax::cst::FunctionLikeParameterList<'_>>,
 ) -> Scope {
     let refs: Vec<&Statement<'_>> = statements.iter().collect();
-    build_scope_from(owner, &refs, ret_hint)
+    build_scope_from(owner, &refs, ret_hint, params)
 }
 
 /// Lower a scope from a borrowed statement list (shared by the flattened
 /// top-level scope and the direct function/method paths).
+///
+/// `params` is the scope's own parameter list, or `None` for the top-level script
+/// — which is both "no parameters" and the reason that scope reports no undefined
+/// reads at all (see [`Scope::undefined_reads`]).
 fn build_scope_from(
     owner: ScopeOwner,
     statements: &[&Statement<'_>],
     ret_hint: Option<RetHint>,
+    params: Option<&mago_syntax::cst::FunctionLikeParameterList<'_>>,
 ) -> Scope {
     let mut opaque = Vec::new();
     let mut stmts = Vec::new();
@@ -7198,6 +7285,7 @@ fn build_scope_from(
         ScopeOwner::Function(name) => Some(name.clone()),
         ScopeOwner::TopLevel | ScopeOwner::Method { .. } | ScopeOwner::Closure { .. } => None,
     };
+    let vars = undefined_variable_reads(params, None, statements);
     Scope {
         function_name,
         owner,
@@ -7214,6 +7302,8 @@ fn build_scope_from(
         is_static: false,
         docblock: None,
         unused_captures: Vec::new(),
+        undefined_reads: vars.undefined_reads,
+        ref_arg_candidates: vars.ref_arg_candidates,
     }
 }
 
@@ -7316,6 +7406,11 @@ fn build_closure_scope_from_closure(
     }
     let poisoned = !opaque.is_empty();
     let def_offset = closure_def_offset(cl);
+    let vars = undefined_variable_reads(
+        Some(&cl.parameter_list),
+        cl.use_clause.as_ref(),
+        &cl.body.statements.iter().collect::<Vec<_>>(),
+    );
     Scope {
         function_name: None,
         owner: ScopeOwner::Closure { def_offset },
@@ -7332,6 +7427,8 @@ fn build_closure_scope_from_closure(
         is_static: cl.r#static.is_some(),
         docblock: adopt_closure_docblock(docs, to_span(cl.span()).start, def_offset, stmt_doc),
         unused_captures: unused_by_value_captures(cl),
+        undefined_reads: vars.undefined_reads,
+        ref_arg_candidates: vars.ref_arg_candidates,
     }
 }
 
@@ -7410,6 +7507,491 @@ fn scan_var_mentions(
     }
 }
 
+// undefined variables (ADR-0078, issue #194)
+
+/// The accumulator behind [`Scope::undefined_reads`]: one scope's binding set, its
+/// read sites, and whether a name dam stands anywhere in it.
+///
+/// Bindings and reads are collected in **one** walk and reconciled only at the end,
+/// which is what lets the walk be ordering-blind and duplication-tolerant: a name
+/// that is both bound and read (`$x = 1; echo $x;`) filters out no matter which the
+/// walk saw first, so binding forms need no read-suppression machinery. Only the
+/// positions that bind *nothing* — the `isset`/`empty`/`??`/`unset`/`@` guards —
+/// need the walk to actually withhold a read.
+#[derive(Default)]
+struct VarUsage {
+    bound: std::collections::HashSet<String>,
+    reads: Vec<UndefinedRead>,
+    /// See [`Scope::ref_arg_candidates`] — collected in the same walk but on its own
+    /// terms, because a binding form must not depend on a read being recorded.
+    arg_candidates: Vec<UndefinedRead>,
+    dammed: bool,
+}
+
+impl VarUsage {
+    /// Record `$name` as bound. An indirect/nested spelling cannot be named, so it
+    /// dams instead (`$$n = 1` mints a binding this pass cannot see).
+    fn bind_variable(&mut self, var: &mago_syntax::cst::Variable<'_>) {
+        match var {
+            mago_syntax::cst::Variable::Direct(dv) => {
+                self.bound.insert(strip_dollar(bytes_to_string(dv.name)));
+            }
+            mago_syntax::cst::Variable::Indirect(_) | mago_syntax::cst::Variable::Nested(_) => {
+                self.dammed = true;
+            }
+        }
+    }
+
+    fn bind_direct(&mut self, dv: &mago_syntax::cst::DirectVariable<'_>) {
+        self.bound.insert(strip_dollar(bytes_to_string(dv.name)));
+    }
+
+    /// Record a read of `$x`, unless the engine binds the name unconditionally or
+    /// an enclosing same-variable guard shields it (see [`guard_tested_names`]).
+    fn read_direct(&mut self, dv: &mago_syntax::cst::DirectVariable<'_>, shielded: &[String]) {
+        let name = strip_dollar(bytes_to_string(dv.name));
+        if always_bound(&name) || shielded.contains(&name) {
+            return;
+        }
+        self.reads.push(UndefinedRead { name, span: to_span(dv.span()) });
+    }
+}
+
+/// The variable names an `isset`/`empty` condition **tests**, at either polarity —
+/// the shield an enclosing `isset($x) ? … : …` or `if (empty($x)) { … }` casts over
+/// its arms.
+///
+/// This is the `??` discharge idiom in conditional spelling, and it is the same
+/// finding-defeating fact: `empty($page) ? 0 : ($page - 1) * $view` reaches the
+/// `$page` read only when `$page` is non-empty, hence bound, so this id's runtime
+/// claim — "PHP warns and the read evaluates to null" — is simply false there.
+///
+/// **Not reachability, and deliberately not.** The rule asks only what the
+/// condition spells, and then withholds reads in *both* arms without deciding which
+/// arm the guard protects. Withholding is the silence direction, so getting the
+/// polarity "wrong" costs a finding and never manufactures one — which is what lets
+/// a purely syntactic containment test stand in for a flow analysis Steins does not
+/// have (the `variable.maybe-undefined` foundation, issue #199).
+///
+/// `!` is transparent (`!isset($x)` tests `$x` too) and so are parentheses. Nothing
+/// else is: a conjunction (`isset($x) && $y`) tests nothing here, which keeps the
+/// carve-out to the shape the corpus actually produced.
+fn guard_tested_names(cond: &Expression<'_>) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_guard_tested_names(cond, &mut out);
+    out
+}
+
+fn collect_guard_tested_names(cond: &Expression<'_>, out: &mut Vec<String>) {
+    match cond.unparenthesized() {
+        Expression::Construct(Construct::Isset(i)) => {
+            for value in i.values.iter() {
+                if let Expression::Variable(mago_syntax::cst::Variable::Direct(dv)) =
+                    value.unparenthesized()
+                {
+                    out.push(strip_dollar(bytes_to_string(dv.name)));
+                }
+            }
+        }
+        Expression::Construct(Construct::Empty(e)) => {
+            if let Expression::Variable(mago_syntax::cst::Variable::Direct(dv)) =
+                e.value.unparenthesized()
+            {
+                out.push(strip_dollar(bytes_to_string(dv.name)));
+            }
+        }
+        Expression::UnaryPrefix(up) if matches!(up.operator, UnaryPrefixOperator::Not(_)) => {
+            collect_guard_tested_names(up.operand, out);
+        }
+        _ => {}
+    }
+}
+
+/// The shield in force inside a guarded construct's arms: `None` when the condition
+/// tests nothing, so the caller keeps borrowing its own slice and no allocation
+/// happens on the overwhelmingly common path.
+fn extend_shield(base: &[String], added: Vec<String>) -> Option<Vec<String>> {
+    if added.is_empty() {
+        return None;
+    }
+    let mut extended = base.to_vec();
+    extended.extend(added);
+    Some(extended)
+}
+
+/// Names PHP itself always provides, so a read of one is never undefined: the nine
+/// superglobals, `$this`, and `$http_response_header` — which the HTTP stream
+/// wrappers mint into whatever scope performed the request, with nothing in the
+/// scope's own text to show for it.
+fn always_bound(name: &str) -> bool {
+    name == "this" || name == "http_response_header" || SUPERGLOBALS.contains(&name)
+}
+
+/// Bind the **root local** of an lvalue, and nothing else.
+///
+/// `$x = …` binds `x`; so does `$x['k'] = …` (witnessed: the offset write
+/// auto-vivifies `$x` with no warning at 8.5.9) and `$x->p = …`. The *index* of an
+/// offset write is an ordinary read and is left to the main walk, which visits it
+/// anyway. Destructuring recurses into every element, so `[$a, [$b]] = …` and
+/// `list(, $b) = …` bind exactly the names they write. A non-lvalue shape binds
+/// nothing — this is called on argument positions too, where `f($a + $b)` must not
+/// pretend to bind.
+fn bind_lvalue_roots(expr: &Expression<'_>, acc: &mut VarUsage) {
+    match expr.unparenthesized() {
+        Expression::Variable(v) => acc.bind_variable(v),
+        Expression::ArrayAccess(aa) => bind_lvalue_roots(aa.array, acc),
+        Expression::ArrayAppend(ap) => bind_lvalue_roots(ap.array, acc),
+        Expression::Access(Access::Property(pa)) => bind_lvalue_roots(pa.object, acc),
+        Expression::Access(Access::NullSafeProperty(pa)) => bind_lvalue_roots(pa.object, acc),
+        Expression::Array(a) => bind_destructured(a.elements.iter(), acc),
+        Expression::LegacyArray(a) => bind_destructured(a.elements.iter(), acc),
+        Expression::List(l) => bind_destructured(l.elements.iter(), acc),
+        // `$a = &$b` binds `$b` as well as `$a` (witnessed: no warning, and the two
+        // names alias from then on).
+        Expression::UnaryPrefix(up) if matches!(up.operator, UnaryPrefixOperator::Reference(_)) => {
+            bind_lvalue_roots(up.operand, acc);
+        }
+        _ => {}
+    }
+}
+
+/// Bind every destructuring target of an array/list pattern. A `Missing` element
+/// (`[, $b]`) writes nothing, and a key is a read rather than a target.
+fn bind_destructured<'a>(
+    elements: impl Iterator<Item = &'a ArrayElement<'a>>,
+    acc: &mut VarUsage,
+) {
+    for element in elements {
+        match element {
+            ArrayElement::KeyValue(kv) => bind_lvalue_roots(kv.value, acc),
+            ArrayElement::Value(v) => bind_lvalue_roots(v.value, acc),
+            ArrayElement::Variadic(v) => bind_lvalue_roots(v.value, acc),
+            ArrayElement::Missing(_) => {}
+        }
+    }
+}
+
+/// Bind the bare-variable arguments of a call whose target this pass cannot name —
+/// a method, static, dynamic or constructor call. Any of them may declare `&$p`,
+/// and with no resolvable callee spelling there is nothing for the checker's
+/// out-parameter oracle to ask, so the closed-world-safe reading is that every
+/// argument position might be an out-parameter.
+fn bind_call_arguments(list: &mago_syntax::cst::ArgumentList<'_>, acc: &mut VarUsage) {
+    for arg in list.arguments.iter() {
+        bind_lvalue_roots(arg.value(), acc);
+    }
+}
+
+/// The [`bind_call_arguments`] analogue for a partial-application argument list
+/// (`new class ($x) {…}`), whose placeholders carry no value.
+fn bind_partial_arguments(list: &mago_syntax::cst::PartialArgumentList<'_>, acc: &mut VarUsage) {
+    for arg in list.arguments.iter() {
+        match arg {
+            PartialArgument::Positional(p) => bind_lvalue_roots(p.value, acc),
+            PartialArgument::Named(n) => bind_lvalue_roots(n.value, acc),
+            PartialArgument::NamedPlaceholder(_)
+            | PartialArgument::Placeholder(_)
+            | PartialArgument::VariadicPlaceholder(_) => {}
+        }
+    }
+}
+
+/// Read one variable in **local** position — the inner name of a dynamic
+/// static-property spelling (`Server::$$v`), which is an ordinary read of `$v`.
+/// A further indirection (`Server::$$$v`) reaches a local whose name is computed,
+/// which is the `$$x` dam.
+fn scan_local_variable(
+    var: &mago_syntax::cst::Variable<'_>,
+    guarded: bool,
+    shielded: &[String],
+    acc: &mut VarUsage,
+) {
+    match var {
+        mago_syntax::cst::Variable::Direct(dv) => {
+            if !guarded {
+                acc.read_direct(dv, shielded);
+            }
+        }
+        mago_syntax::cst::Variable::Indirect(_) | mago_syntax::cst::Variable::Nested(_) => {
+            acc.dammed = true;
+        }
+    }
+}
+
+/// The single walk behind [`Scope::undefined_reads`]: collect this scope's binding
+/// forms, its read sites, and its name dams, without descending into any nested
+/// scope.
+///
+/// `guarded` marks a subtree PHP legalizes a read in (`isset`/`empty`/`unset`, the
+/// left operand of `??`, and the `@` error-control operand — all witnessed silent at
+/// 8.5.9). Bindings are still collected there; only the read is withheld.
+fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[String], acc: &mut VarUsage) {
+    match node {
+        // --- Nested scopes: their reads are their own scope's question. ---
+        //
+        // A closure is the one nested scope that still speaks about THIS one: a
+        // by-value `use ($x)` reads the enclosing binding (witnessed: warns at the
+        // use clause), while a by-ref `use (&$x)` *creates* it (witnessed: silent,
+        // and the name reads back null afterwards).
+        Node::Closure(cl) => {
+            if let Some(uc) = cl.use_clause.as_ref() {
+                for v in uc.variables.iter() {
+                    if v.ampersand.is_some() {
+                        acc.bind_direct(&v.variable);
+                    } else if !guarded {
+                        acc.read_direct(&v.variable, shielded);
+                    }
+                }
+            }
+            return;
+        }
+        Node::ArrowFunction(_)
+        | Node::Function(_)
+        | Node::Class(_)
+        | Node::Interface(_)
+        | Node::Trait(_)
+        | Node::Enum(_) => return,
+        Node::AnonymousClass(ac) => {
+            if let Some(list) = ac.argument_list.as_ref() {
+                bind_partial_arguments(list, acc);
+            }
+            return;
+        }
+
+        // --- Name dams: a construct that can mint or consume a binding without
+        // spelling it. The same set `unused_by_value_captures` dams on. ---
+        Node::NestedVariable(_)
+        | Node::IndirectVariable(_)
+        | Node::EvalConstruct(_)
+        | Node::IncludeConstruct(_)
+        | Node::IncludeOnceConstruct(_)
+        | Node::RequireConstruct(_)
+        | Node::RequireOnceConstruct(_) => acc.dammed = true,
+        Node::FunctionCall(fc) => {
+            // Out-parameter candidates, recorded whatever the guard state — a binding
+            // form must not depend on its argument occurrence being collected as a
+            // read. See `Scope::ref_arg_candidates`.
+            for arg in fc.argument_list.arguments.iter() {
+                if let Argument::Positional(p) = arg
+                    && p.ellipsis.is_none()
+                    && let Expression::Variable(mago_syntax::cst::Variable::Direct(dv)) =
+                        p.value.unparenthesized()
+                {
+                    let name = strip_dollar(bytes_to_string(dv.name));
+                    if !always_bound(&name) {
+                        acc.arg_candidates.push(UndefinedRead { name, span: to_span(dv.span()) });
+                    }
+                }
+            }
+            if let Expression::Identifier(id) = fc.function
+                && matches!(
+                    bytes_to_string(id.last_segment()).as_str(),
+                    "extract" | "compact" | "get_defined_vars"
+                )
+            {
+                // `extract` mints; `$$x` mints; `get_defined_vars` consumes the whole
+                // table. `compact` only READS names, spelled as strings, and answers
+                // an undefined one with its OWN warning
+                // (`compact(): Undefined variable $nope`, witnessed at 8.5.9) rather
+                // than this id's — so it cannot un-prove a binding. It dams anyway,
+                // matching `closure.unused-use`: the cost is silence in a scope that
+                // is already handling names as data, and the alternative is a finding
+                // whose sentence would describe the wrong warning.
+                acc.dammed = true;
+            }
+        }
+
+        // --- Same-variable guarded constructs: the `??` discharge idiom in
+        // conditional spelling. `empty($page) ? 0 : ($page - 1) * $view` reaches
+        // the `$page` read only when `$page` is non-empty, hence bound, so this
+        // id's runtime claim is false there. Both arms are shielded without asking
+        // which one the guard protects — see `guard_tested_names` for why that is
+        // a containment rule and not a reachability one. Only the TESTED name is
+        // shielded, so `$view` above is still judged. ---
+        Node::Conditional(c) => {
+            scan_var_usage(&Node::Expression(c.condition), guarded, shielded, acc);
+            let extended = extend_shield(shielded, guard_tested_names(c.condition));
+            let inner = extended.as_deref().unwrap_or(shielded);
+            // `?:` has no `then` arm; its condition IS the value, already walked.
+            if let Some(then) = c.then {
+                scan_var_usage(&Node::Expression(then), guarded, inner, acc);
+            }
+            scan_var_usage(&Node::Expression(c.r#else), guarded, inner, acc);
+            return;
+        }
+        // The statement spelling of the same idiom. It needs no block-scoped
+        // tracking: the `if`'s whole body — including its `elseif`/`else` clauses —
+        // is one subtree, and shielding all of it is the same silence-direction
+        // containment rule. A read AFTER the `if` is outside that subtree and is
+        // still judged.
+        Node::If(i) => {
+            scan_var_usage(&Node::Expression(i.condition), guarded, shielded, acc);
+            let extended = extend_shield(shielded, guard_tested_names(i.condition));
+            let inner = extended.as_deref().unwrap_or(shielded);
+            scan_var_usage(&Node::IfBody(&i.body), guarded, inner, acc);
+            return;
+        }
+
+        // --- Guards: PHP legalizes the read, so it is not this finding. ---
+        Node::IssetConstruct(_) | Node::EmptyConstruct(_) | Node::Unset(_) => {
+            for child in node.children() {
+                scan_var_usage(&child, true, shielded, acc);
+            }
+            return;
+        }
+        Node::UnaryPrefix(up) if up.operator.is_error_control() => {
+            scan_var_usage(&Node::Expression(up.operand), true, shielded, acc);
+            return;
+        }
+        Node::Binary(b) if b.operator.is_null_coalesce() => {
+            scan_var_usage(&Node::Expression(b.lhs), true, shielded, acc);
+            scan_var_usage(&Node::Expression(b.rhs), guarded, shielded, acc);
+            return;
+        }
+
+        // --- Binding forms. None of these return: the main recursion may re-visit
+        // the very same token as a read, which the final set difference discards. ---
+        Node::Assignment(a) => bind_lvalue_roots(a.lhs, acc),
+        Node::Global(g) => {
+            for v in g.variables.iter() {
+                acc.bind_variable(v);
+            }
+        }
+        Node::Static(s) => {
+            for item in s.items.iter() {
+                acc.bind_direct(item.variable());
+            }
+        }
+        Node::TryCatchClause(tc) => {
+            if let Some(v) = tc.variable.as_ref() {
+                acc.bind_direct(v);
+            }
+        }
+        Node::ForeachValueTarget(t) => bind_lvalue_roots(t.value, acc),
+        Node::ForeachKeyValueTarget(t) => {
+            bind_lvalue_roots(t.key, acc);
+            bind_lvalue_roots(t.value, acc);
+        }
+        // `&$x` (reference), `++$x` / `--$x` and `$x++` / `$x--` all write through
+        // the operand, so each is a binding form.
+        Node::UnaryPrefix(up)
+            if matches!(
+                up.operator,
+                UnaryPrefixOperator::Reference(_)
+                    | UnaryPrefixOperator::PreIncrement(_)
+                    | UnaryPrefixOperator::PreDecrement(_)
+            ) =>
+        {
+            bind_lvalue_roots(up.operand, acc);
+        }
+        Node::UnaryPostfix(up) => bind_lvalue_roots(up.operand, acc),
+        // Calls whose target cannot be named here — see `bind_call_arguments`.
+        Node::MethodCall(c) => bind_call_arguments(&c.argument_list, acc),
+        Node::NullSafeMethodCall(c) => bind_call_arguments(&c.argument_list, acc),
+        Node::StaticMethodCall(c) => bind_call_arguments(&c.argument_list, acc),
+        Node::Instantiation(i) => {
+            if let Some(list) = i.argument_list.as_ref() {
+                bind_call_arguments(list, acc);
+            }
+        }
+        // A named argument binds too: `lower_argument_list` records the whole
+        // `name: value` span for one, so the checker's span-keyed out-parameter
+        // subtraction cannot reach it.
+        Node::NamedArgument(n) => bind_lvalue_roots(n.value, acc),
+
+        // --- The one position where a `$name` token is NOT a local. ---
+        //
+        // `Server::$url` spells a **static property**, whose `$url` names a slot on
+        // the class, not a variable in this frame (witnessed silent at 8.5.9, and
+        // the same for `static::`/`self::`/`parent::`). Left to the generic read
+        // arm below this is a false positive on one of the most common shapes in
+        // legacy PHP, so the property token is skipped here — while the class
+        // expression, which may well be a local (`$obj::$url`), is still walked.
+        //
+        // The dynamic spellings behave the other way round: `Server::$$v` and
+        // `Server::${$v}` name the property at runtime, so `$v` IS an ordinary
+        // local read (witnessed: `Server::$$nope` warns `Undefined variable $nope`
+        // before it fatals on the empty property name). They are deliberately NOT
+        // dams either, which is consistent with the `$$x` dam rather than an
+        // exception to it: that dam exists because a variable-variable can mint or
+        // consume a **local** binding, and an indirection in this position reaches
+        // the class's static table instead, where no local can be minted.
+        Node::StaticPropertyAccess(spa) => {
+            scan_var_usage(&Node::Expression(spa.class), guarded, shielded, acc);
+            match &spa.property {
+                mago_syntax::cst::Variable::Direct(_) => {}
+                mago_syntax::cst::Variable::Indirect(iv) => {
+                    scan_var_usage(&Node::Expression(iv.expression), guarded, shielded, acc);
+                }
+                mago_syntax::cst::Variable::Nested(nv) => {
+                    scan_local_variable(nv.variable, guarded, shielded, acc);
+                }
+            }
+            return;
+        }
+
+        // --- Reads. ---
+        Node::DirectVariable(dv) if !guarded => acc.read_direct(dv, shielded),
+        _ => {}
+    }
+    for child in node.children() {
+        scan_var_usage(&child, guarded, shielded, acc);
+    }
+}
+
+/// The reads of names a scope never binds (issue #194) — the computation behind
+/// [`Scope::undefined_reads`], done here because it needs the CST the lowered trace
+/// deliberately forgets.
+///
+/// `params` seeds the binding set with the scope's own parameters (promoted
+/// constructor properties included — they are ordinary entries of the same list),
+/// and `use_clause` with a closure's captures, by value and by reference alike.
+/// `None` for both is a top-level or arrow scope, which reports nothing at all; see
+/// [`Scope::undefined_reads`] for why each is silent.
+fn undefined_variable_reads(
+    params: Option<&mago_syntax::cst::FunctionLikeParameterList<'_>>,
+    use_clause: Option<&mago_syntax::cst::ClosureUseClause<'_>>,
+    statements: &[&Statement<'_>],
+) -> ScopeVarFacts {
+    let mut acc = VarUsage::default();
+    let Some(params) = params else { return ScopeVarFacts::default() };
+    for p in params.parameters.iter() {
+        acc.bind_direct(&p.variable);
+    }
+    if let Some(uc) = use_clause {
+        for v in uc.variables.iter() {
+            acc.bind_direct(&v.variable);
+        }
+    }
+    for s in statements {
+        scan_var_usage(&Node::Statement(s), false, &[], &mut acc);
+    }
+    if acc.dammed {
+        return ScopeVarFacts::default();
+    }
+    let VarUsage { bound, reads, arg_candidates, .. } = acc;
+    let reads: Vec<UndefinedRead> =
+        reads.into_iter().filter(|r| !bound.contains(&r.name)).collect();
+    if reads.is_empty() {
+        // Nothing to subtract from: keep the candidate list off every scope that
+        // cannot report, which is nearly all of them.
+        return ScopeVarFacts::default();
+    }
+    let arg_candidates =
+        arg_candidates.into_iter().filter(|c| !bound.contains(&c.name)).collect();
+    ScopeVarFacts { undefined_reads: reads, ref_arg_candidates: arg_candidates }
+}
+
+/// The two lists [`undefined_variable_reads`] produces for one scope — the reads to
+/// judge and the out-parameter candidates the checker must subtract first.
+#[derive(Default)]
+struct ScopeVarFacts {
+    undefined_reads: Vec<UndefinedRead>,
+    ref_arg_candidates: Vec<UndefinedRead>,
+}
+
+// end undefined variables (ADR-0078, issue #194)
+
 /// Build the [`Scope`] for an arrow function `fn(...) => expr` (ADR-0033). The
 /// single body expression lowers to one `return <expr>;` statement so a call
 /// inside it (`fn($x) => width($x)`) is a reachable propagation/descent edge.
@@ -7476,6 +8058,11 @@ fn build_closure_scope_from_arrow(
         // An arrow function's captures are *derived* from its body's free
         // variables, so an unused one is not expressible.
         unused_captures: Vec::new(),
+        // …and by the same derivation an arrow body cannot read an unbound name of
+        // its OWN: every free variable it mentions is auto-captured from the
+        // enclosing scope, whose question this is not.
+        undefined_reads: Vec::new(),
+        ref_arg_candidates: Vec::new(),
     }
 }
 

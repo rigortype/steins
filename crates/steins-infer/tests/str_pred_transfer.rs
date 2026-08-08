@@ -154,7 +154,11 @@ impl Folder for Mock {
 fn one_type_with(src: &str, folder: &mut dyn Folder) -> String {
     let tree = SourceTree::parse(src);
     let ds = check_with(&tree, &[], "t.php", folder);
-    let other: Vec<&Diagnostic> = ds.iter().filter(|d| !d.id.starts_with("debug.")).collect();
+    // `untyped.*` is contract-layer claim-absence (issue #200), orthogonal to the
+    // transfer semantics this harness asserts (its fixtures deliberately carry
+    // untyped-but-bound parameters so `variable.undefined` stays out of frame).
+    let other: Vec<&Diagnostic> =
+        ds.iter().filter(|d| !d.id.starts_with("debug.") && !d.id.starts_with("untyped.")).collect();
     assert!(other.is_empty(), "a string-predicate transfer emitted a finding: {other:?}");
     let ty: Vec<&Diagnostic> = ds.iter().filter(|d| d.id == DEBUG_TYPE_ID).collect();
     assert_eq!(ty.len(), 1, "expected exactly one debug.type dump, got {ds:?}");
@@ -162,10 +166,16 @@ fn one_type_with(src: &str, folder: &mut dyn Folder) -> String {
 }
 
 /// A string-declared fixture: `@param <decl> $v`, one dump of `<expr>`.
+///
+/// `$n` and `$p` are untyped parameters the fixtures use wherever an argument must
+/// be an *unknown* int or string: untyped means no fact, which is the premise under
+/// test, and being parameters means they are bound (so `variable.undefined` — which
+/// this helper's no-other-finding assertion would otherwise catch — has nothing to
+/// say about them).
 fn dump_with(decl: &str, expr: &str, folder: &mut dyn Folder) -> String {
     one_type_with(
         &format!(
-            "<?php\n/** @param {decl} $v */\nfunction f(string $v): void {{ \\PHPStan\\dumpType({expr}); }}\n"
+            "<?php\n/** @param {decl} $v */\nfunction f(string $v, $n, $p): void {{ \\PHPStan\\dumpType({expr}); }}\n"
         ),
         folder,
     )
