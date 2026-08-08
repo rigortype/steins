@@ -90,7 +90,8 @@ present, no absence claim holds.
 | `offset.on-unsupported` | proof | a proven non-offsetable base (object → fatal; scalar/null → warning) | **emits** |
 | `call.too-few-arguments` | proof | a uniquely-resolved target, fewer positional args than required params | **emits** |
 | `call.unknown-named-argument` | proof | a named argument binding no parameter of a resolved non-variadic target | **emits** |
-| `phpdoc.undefined-method` | contract | narrowed declared-receiver arms, each under descendant closure | **emits** |
+| `phpdoc.undefined-method` | contract | narrowed declared-receiver arms, each under descendant closure, **any arm `Asserted`** (a `@param`/`@var` premise) | **emits** |
+| `call.undefined-method` (declared-receiver half) | proof | the same ladder with **every arm `Verified`** — a native declaration PHP enforces at the call boundary (ADR-0049 A13) | **emits** |
 | `call.undefined-function` | proof | the dam clear, no candidate FQN, sidecar not-found | **emitting** (ADR-0049 S4, landed) |
 | `class.undefined` | proof | the same, at a position that breaks (`new`, static call, class-const fetch, `extends`/`implements`/`use <Trait>`, `catch`, a native type declaration) | **emitting** (S4 + ADR-0049 A15, landed) |
 | `call.too-many-arguments` | proof | an **internal** non-variadic target | registered, **not emitted** (needs the reflect slice) |

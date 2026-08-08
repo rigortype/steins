@@ -504,6 +504,30 @@ $ steins check --profile contracts src/Receiver.php
 src/Receiver.php:16:12: error[phpdoc.undefined-method]: call to undefined method Clock::currentTime() — declared receiver $clock narrowed to {Clock}, hierarchy and descendants fully enumerated, no __call
 ```
 
+Write the same declaration natively and the finding changes id. A native
+`Clock $clock` parameter is enforced by PHP itself — the call either passes a
+`Clock` or has already thrown a `TypeError` — so the absence is proven, not
+merely asserted, and the finding is `call.undefined-method` on the **default**
+surface:
+
+```php
+function stamp(Clock $clock): int
+{
+    return $clock->currentTime();
+}
+```
+
+```
+$ steins check src/Receiver.php
+src/Receiver.php:16:12: error[call.undefined-method]: call to undefined method Clock::currentTime() — declared receiver $clock narrowed to {Clock}, hierarchy and descendants fully enumerated, no __call, no @method/@property/@mixin
+```
+
+One `@param`-derived arm anywhere in the receiver's type is enough to put the
+finding back on `phpdoc.undefined-method` and back behind `--profile contracts`:
+the id follows the weakest premise the claim rests on. The evidence wording is
+the same either way, so `declared receiver $x` in a `call.undefined-method`
+message is how you tell this lane's findings from the exact-receiver ones.
+
 ### `throw.*` — `@throws` envelopes
 
 Two ids, contract layer. An unannotated function is never envelope-checked;

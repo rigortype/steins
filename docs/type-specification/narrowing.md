@@ -108,8 +108,20 @@ native type; a PHPDoc arm that covers a native member **exactly** stays
 every native member is `Verified`. An undecidable is-a (two unrelated classes)
 is *not* a contradiction — the arm stays, the FP-safe side. Consumed by exactly
 four things: arm filtering, `instanceof` implication, catch matching, and the
-declared-receiver lane (`phpdoc.undefined-method`). It is **never** consumed by
-`call.on-null` proofs, arity checks, `call.undefined-method`, or binding descent.
+declared-receiver lane. It is **never** consumed by `call.on-null` proofs, arity
+checks, the exact-receiver `call.undefined-method` lane, or binding descent.
+
+The per-arm stratum is not decoration: the declared-receiver lane routes its
+finding on the **minimum** stratum across the surviving arms (ADR-0049 A13). An
+all-`Verified` lane emits `call.undefined-method` on the proof layer; one
+`Asserted` arm keeps the whole finding on `phpdoc.undefined-method`. So a
+docblock that merely restates the native type costs nothing, and a docblock that
+refines past it moves the finding off the default surface — the trust order,
+observable.
+
+A plain copy `$c = $o` carries the lane to the destination unchanged, arms and
+strata alike: the copy binds the same value, so the same declared possibilities
+hold of it. Narrowing on the copy subtracts from the copy's arms only.
 
 The same refinement seeds the **declared-return arm list** at a call site
 (`$x = f(...)` where `f` has a native/PHPDoc return): a uniquely-resolved user
