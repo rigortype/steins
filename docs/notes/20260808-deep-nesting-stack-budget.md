@@ -144,22 +144,87 @@ gate before any artifact upload", but no workflow invokes it — `smoke.mjs`,
 `wasm32` and `steins-wasm` appear nowhere in `.github/workflows/`. Nothing would
 have caught this.
 
+### 5.1 What landed for it (issue #264, 2026-08-09)
+
+A **headroom** guard, not a depth counter: `crates/steins-syntax/src/stack_guard.rs`
+records the stack address at the top of `SourceTree::parse` and refuses once the
+walk has consumed a budget of bytes below it. Bytes, because §2's 6× frame-size
+gap between profiles is exactly what a node count cannot straddle; the same
+budget refuses under debug frames and release frames alike, and every input the
+machine can walk is still walked in full.
+
+The walkers reach it through one function. All 36 descents in `lib.rs` went from
+`node.children()` to a `children(node)` helper that hands back an empty child
+list when the headroom is gone, so a walker out of stack returns exactly as it
+would at a leaf — no walker's control flow changed. The five expression
+recursions that descend through typed sub-nodes instead of `children()`
+(`lower_arg_value`, `lower_cond`, `lower_guard_arg`, `lower_concat`,
+`bind_lvalue_roots`) check the guard at their entry and return the unproven
+answer they already give an unmodelled shape.
+
+The budget is **off by default everywhere except wasm**, where it is half the
+1 MiB shadow stack. A library may not refuse on a stack that could have answered,
+and on native nothing has to: §4 bought the headroom. `stack_guard::set_budget`
+is there for an embedder that cannot.
+
+`-z stack-size` stays at wasm-ld's default, decided rather than defaulted: the
+table above shows 16 MiB buys about 2× and then changes the failure from a
+shadow-stack overrun — a linear-memory address this module can *read*, and
+therefore preempt — into the host VM's `RangeError`, which it cannot. It also
+costs that much initial linear memory outright. A bigger stack would trade a
+preemptible failure for an unpreemptible one and pay for the privilege.
+
+Measured after, in Node against the release module (fresh instance per depth):
+
+| Depth (`->` levels) | Before | After |
+| --- | --- | --- |
+| 100–200 | analyzed | analyzed |
+| 300–400 | `RuntimeError: memory access out of bounds` | `syntax.unparsable`, module alive |
+| 600–1,600 | trap | `syntax.unparsable`, module alive |
+| 1,800+ | trap | `RangeError: Maximum call stack size exceeded` |
+
+The residual ceiling is **not** the guard's to move, and it is worth stating
+precisely because the next person will otherwise re-derive it: `HasSpan::span`
+on a Mago CST node recurses down that node's spine. `lower_stmt` asks a statement
+for its span at walker depth 1 — above any guard — and the parser joins spans the
+same way while building the chain, so a 1,800-level chain pushes ~1,800 small
+frames that never touch the shadow stack (hence V8's `RangeError` rather than an
+out-of-bounds access, and hence no budget preempts them). Making the fork's span
+accessors iterative is what moves that number; it is a change to the parser, not
+to Steins.
+
+Two smaller consequences, both landed: the deep-chain case is now asserted by
+`apps/playground/smoke.mjs`, and that file is finally *invoked* — by the `wasm`
+job in `ci.yml`, which builds the module for `wasm32-unknown-unknown` and runs
+the suite over it.
+
 ## 6. What is left open
 
 Filed for decision rather than answered here, because it needs a ruling and
 probably an ADR amendment:
 
-1. **A depth guard for the surfaces that cannot buy stack** (wasm, and any future
-   embedder). The shape that respects the Certainty discipline is a *headroom*
-   guard rather than a node-count budget — it fires only when the machine is
-   about to die, so on every input the engine can answer, it answers fully — and
-   it names its silence in the `syntax.*` family.
+1. ~~**A depth guard for the surfaces that cannot buy stack**~~ — answered by
+   §5.1: a headroom guard, on by default only where headroom cannot be bought,
+   naming its silence as `syntax.unparsable`.
 2. **Whether the guard belongs in `steins-syntax` at all**, or whether the 34
    walkers should be rewritten onto an explicit worklist. One shared visitor
    would fix all 34 at once and remove the question permanently; it is a large,
-   mechanical, and risky change to the lowering pass.
-3. **`cargo test` runs on libtest's 2 MiB threads**, so any future test that
-   parses a deep fixture in-process (rather than as a subprocess, as
-   `deep_nesting.rs` does) is on a stack smaller than the one already known
-   fatal.
-4. **Wiring `apps/playground/smoke.mjs` into CI**, with a deep-chain case.
+   mechanical, and risky change to the lowering pass. §5.1 narrowed rather than
+   answered this: the descents now go through one function, so a worklist has a
+   single seam to replace — but it would also retire the CST half of the guard
+   entirely, and it would *not* retire the span recursion §5.1 measured.
+3. ~~**`cargo test` runs on libtest's 2 MiB threads**~~ — written down as a
+   convention in
+   [the verification apparatus](../internal-spec/verification-apparatus.md), and
+   demonstrated both ways (`crates/steins-syntax/tests/deep_nesting.rs` sets a
+   budget; `crates/steins-cli/tests/deep_nesting.rs` uses a subprocess). Not
+   *enforced*: nothing stops a new in-process deep parse from aborting the suite.
+4. ~~**Wiring `apps/playground/smoke.mjs` into CI**~~ — done, §5.1.
+5. **Mago's recursive `HasSpan`** (new, from §5.1): the parser fork computes a
+   node's span by walking its spine, which is now the binding constraint on the
+   playground and a hidden multiplier on every surface's stack cost. Making it
+   iterative is a fork change.
+6. **The Steins IR's derived `Hash`/`PartialEq`/`Clone`** (§1) are still
+   unguarded: salsa runs them on every revision to backdate `parse`, and they
+   recurse over `ArgValue`/`CondExpr` shapes this slice did not touch. The guard
+   protects the lowering, not the comparison of what it produced.

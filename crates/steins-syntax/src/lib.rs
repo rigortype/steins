@@ -61,6 +61,8 @@ use mago_syntax::cst::Variable;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
+pub mod stack_guard;
+
 // ---------------------------------------------------------------------------
 // Public, Mago-free representation.
 // ---------------------------------------------------------------------------
@@ -3327,6 +3329,13 @@ impl SourceTree {
     /// recovered and reported via [`SourceTree::parse_errors`].
     #[must_use]
     pub fn parse(source: &str) -> Self {
+        // The lowering walkers below recurse once per CST node, so the depth of
+        // the deepest expression in `source` is a stack cost. Where headroom can
+        // be bought the entry point buys it (issue #246) and this guard is off;
+        // where it cannot — the wasm playground, whose shadow stack is fixed at
+        // link time — the guard stops the walk while the machine can still
+        // report, and the refusal is appended to `parse_errors` below.
+        let guard = stack_guard::Scope::enter();
         let arena = LocalArena::new();
         let file_id = FileId::new(b"<steins>");
         let program = mago_syntax::parser::parse_file_content(&arena, file_id, source.as_bytes());
@@ -3426,11 +3435,23 @@ impl SourceTree {
             }
         }
 
-        let parse_errors = program
+        let mut parse_errors: Vec<ParseError> = program
             .errors
             .iter()
             .map(|e| ParseError { message: e.to_string(), span: to_span(e.span()) })
             .collect();
+
+        // A refused walk is a recovered parse error like any other: the checker
+        // names it once as `syntax.unparsable` (ADR-0079) — the same vocabulary
+        // Mago's own `MAX_RECURSION_DEPTH` already surfaces through — and dams
+        // the file's other findings, which is the honest reading of a tree that
+        // was only partly lowered. The refusal is about the file (it carries no
+        // line, for the reason `stack_guard::REFUSAL` records), so it goes first.
+        if guard.tripped() {
+            let span = Span { start: 0, end: 0 };
+            parse_errors.insert(0, ParseError { message: stack_guard::REFUSAL.to_owned(), span });
+        }
+        drop(guard);
 
         Self {
             strict_types: lowered.strict_types,
@@ -4254,7 +4275,7 @@ fn walk(
         Node::ArrowFunction(a) => signature_is_typed(&a.parameter_list, a.return_type_hint.as_ref()),
         _ => typed_sig,
     };
-    for child in node.children() {
+    for child in children(node) {
         walk(&child, aliases, docs, rc, child_conditional, child_typed, out);
     }
 }
@@ -4400,6 +4421,11 @@ fn lower_include_path(expr: &Expression<'_>) -> IncludePath {
 /// directory-relative result; a literal-only chain folds to a plain literal;
 /// anything else (a variable, a call, a second `__DIR__`) is unproven.
 fn lower_concat(expr: &Expression<'_>) -> ConcatVal {
+    // A long `.` chain recurses once per operand (issue #264); out of headroom,
+    // the value is simply unproven — the same answer any unmodelled operand gets.
+    if stack_guard::exhausted() {
+        return ConcatVal::Unproven;
+    }
     match expr.unparenthesized() {
         // A name lane (include paths, `class_alias` arguments), not a value lane:
         // the result is looked up in a `String`-keyed universe, so a literal
@@ -4686,7 +4712,7 @@ fn lower_classes_into(
     // unconditional; passing through anything else (a function/method body, `if`,
     // `try`, loop, bare block) makes every declaration below it conditional.
     let child_conditional = conditional || !is_decl_transparent(node);
-    for child in node.children() {
+    for child in children(node) {
         lower_classes_into(&child, aliases, docs, rc, child_conditional, out);
     }
 }
@@ -5255,7 +5281,7 @@ fn collect_steins_aliases_into(node: &Node<'_, '_>, out: &mut SteinsAttrAliases)
             set.insert(local.to_ascii_lowercase());
         }
     }
-    for child in node.children() {
+    for child in children(node) {
         collect_steins_aliases_into(&child, out);
     }
 }
@@ -5634,7 +5660,7 @@ fn collect_frame_rebinds(node: &Node<'_, '_>, out: &mut Vec<String>) {
         | Node::Enum(_) => return,
         _ => {}
     }
-    for child in node.children() {
+    for child in children(node) {
         collect_frame_rebinds(&child, out);
     }
 }
@@ -5699,7 +5725,7 @@ fn collect_this_prop_writes(node: &Node<'_, '_>, w: &mut ReceiverWrites) {
         | Node::Enum(_) => return,
         _ => {}
     }
-    for child in node.children() {
+    for child in children(node) {
         collect_this_prop_writes(&child, w);
     }
 }
@@ -5724,7 +5750,7 @@ fn collect_this_props(node: &Node<'_, '_>, out: &mut HashSet<String>) {
     {
         out.insert(prop);
     }
-    for child in node.children() {
+    for child in children(node) {
         collect_this_props(&child, out);
     }
 }
@@ -5864,7 +5890,7 @@ fn collect_callable_assigns(
         | Node::Enum(_) => return,
         _ => {}
     }
-    for child in node.children() {
+    for child in children(node) {
         collect_callable_assigns(&child, candidates, writes);
     }
 }
@@ -5969,7 +5995,7 @@ fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut Vec<Eff
         | Node::Enum(_) => return,
         _ => {}
     }
-    for child in node.children() {
+    for child in children(node) {
         scan_effect_origins(&child, cx, out);
     }
 }
@@ -6027,7 +6053,7 @@ fn scan_method_calls(node: &Node<'_, '_>, out: &mut Vec<CallExpr>) {
         | Node::Enum(_) => return,
         _ => {}
     }
-    for child in node.children() {
+    for child in children(node) {
         scan_method_calls(&child, out);
     }
 }
@@ -6219,7 +6245,7 @@ fn scan_throw_origins(
         | Node::Enum(_) => return,
         _ => {}
     }
-    for child in node.children() {
+    for child in children(node) {
         scan_throw_origins(&child, guards, catch_scope, locals, out);
     }
 }
@@ -6462,6 +6488,11 @@ fn lower_argument_list(list: &mago_syntax::cst::ArgumentList<'_>) -> LoweredArgs
 /// property fetch, a concatenation. So each arm is a positive recognition, the
 /// fallback is a bare `None`, and only the recognized arms may walk anything.
 fn lower_guard_arg(expr: &Expression<'_>) -> Option<CondExpr> {
+    // Out of headroom (issue #264): the guard is unmodelled, which claims nothing
+    // on either polarity — exactly what an unrecognized operand already yields.
+    if stack_guard::exhausted() {
+        return None;
+    }
     match expr.unparenthesized() {
         // `isset(…)` / `empty(…)`: `lower_cond` owns both forms and their
         // scope rules; an unmodelled one comes back `Opaque` and is declined.
@@ -6746,6 +6777,12 @@ fn lower_construct_call(inst: &Instantiation<'_>) -> Option<CallExpr> {
 /// function (`f(...)` → [`ArgValue::Call`]); everything else is
 /// [`ArgValue::Other`].
 fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
+    // `$a[0][0][…]` and long `.` chains recurse once per level (issue #264). Out
+    // of headroom the value is `Other` — the unproven answer this lowering
+    // already gives every shape it does not model.
+    if stack_guard::exhausted() {
+        return ArgValue::Other;
+    }
     match expr.unparenthesized() {
         Expression::Literal(lit) => lower_literal(lit),
         Expression::Variable(Variable::Direct(dv)) => {
@@ -7165,7 +7202,7 @@ fn collect_scopes(
         // statement-silent — inline adjacency is their only route.
         Node::ExpressionStatement(es) => {
             let adopt = stmt_closure_adoption(es, docs);
-            for child in node.children() {
+            for child in children(node) {
                 collect_scopes(&child, contexts, regions, rc, docs, adopt.as_ref(), out);
             }
             return;
@@ -7175,7 +7212,7 @@ fn collect_scopes(
     // Recurse so nested functions (inside methods or blocks) and nested classes
     // also get their scopes. Method scopes are only created above (matching
     // `Node::Class`), so this recursion never double-creates one.
-    for child in node.children() {
+    for child in children(node) {
         collect_scopes(&child, contexts, regions, rc, docs, stmt_doc, out);
     }
 }
@@ -7327,7 +7364,7 @@ fn node_is_generator(node: &Node<'_, '_>) -> bool {
         Node::Yield(_) | Node::YieldFrom(_) | Node::YieldPair(_) | Node::YieldValue(_) => true,
         Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_) => false,
         _ => {
-            for child in node.children() {
+            for child in children(node) {
                 if node_is_generator(&child) {
                     return true;
                 }
@@ -7499,7 +7536,7 @@ fn scan_var_mentions(
         }
         _ => {}
     }
-    for child in node.children() {
+    for child in children(node) {
         scan_var_mentions(&child, mentioned, dammed);
     }
 }
@@ -7634,6 +7671,10 @@ fn always_bound(name: &str) -> bool {
 /// nothing — this is called on argument positions too, where `f($a + $b)` must not
 /// pretend to bind.
 fn bind_lvalue_roots(expr: &Expression<'_>, acc: &mut VarUsage) {
+    // Issue #264: `$a[0][0][…] = …` walks one frame per subscript.
+    if stack_guard::exhausted() {
+        return;
+    }
     match expr.unparenthesized() {
         Expression::Variable(v) => acc.bind_variable(v),
         Expression::ArrayAccess(aa) => bind_lvalue_roots(aa.array, acc),
@@ -7831,7 +7872,7 @@ fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[String], acc: 
 
         // --- Guards: PHP legalizes the read, so it is not this finding. ---
         Node::IssetConstruct(_) | Node::EmptyConstruct(_) | Node::Unset(_) => {
-            for child in node.children() {
+            for child in children(node) {
                 scan_var_usage(&child, true, shielded, acc);
             }
             return;
@@ -7931,7 +7972,7 @@ fn scan_var_usage(node: &Node<'_, '_>, guarded: bool, shielded: &[String], acc: 
         Node::DirectVariable(dv) if !guarded => acc.read_direct(dv, shielded),
         _ => {}
     }
-    for child in node.children() {
+    for child in children(node) {
         scan_var_usage(&child, guarded, shielded, acc);
     }
 }
@@ -8106,7 +8147,7 @@ fn collect_var_reads(node: &Node<'_, '_>, out: &mut Vec<String>) {
         | Node::Enum(_) => return,
         _ => {}
     }
-    for child in node.children() {
+    for child in children(node) {
         collect_var_reads(&child, out);
     }
 }
@@ -8407,7 +8448,7 @@ fn subtree_has_switch_jump(node: &Node<'_, '_>) -> bool {
     match node {
         Node::Break(_) | Node::Continue(_) | Node::Goto(_) => true,
         Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_) => false,
-        _ => node.children().iter().any(subtree_has_switch_jump),
+        _ => children(node).iter().any(subtree_has_switch_jump),
     }
 }
 
@@ -8451,7 +8492,7 @@ fn subtree_has_function_exit(node: &Node<'_, '_>) -> bool {
         | Node::DieConstruct(_)
         | Node::HaltCompiler(_) => true,
         Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_) => false,
-        _ => node.children().iter().any(subtree_has_function_exit),
+        _ => children(node).iter().any(subtree_has_function_exit),
     }
 }
 
@@ -8462,7 +8503,7 @@ fn subtree_has_exit_jump(node: &Node<'_, '_>) -> bool {
     match node {
         Node::Break(_) | Node::Goto(_) => true,
         Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_) => false,
-        _ => node.children().iter().any(subtree_has_exit_jump),
+        _ => children(node).iter().any(subtree_has_exit_jump),
     }
 }
 
@@ -8649,7 +8690,7 @@ fn scan_string_contexts(node: &Node<'_, '_>, out: &mut Vec<StringContextSite>) {
         Node::PrintConstruct(p) => site(p.value, StringContextKind::Print),
         _ => {}
     }
-    for child in node.children() {
+    for child in children(node) {
         scan_string_contexts(&child, out);
     }
 }
@@ -8900,7 +8941,7 @@ fn stmt_has_stray_jump(s: &Statement<'_>) -> bool {
 /// Recurse through a node's children looking for a stray jump, stopping at nested
 /// loops/switches (which consume their own) and nested function-like scopes.
 fn node_has_stray_jump(node: &Node<'_, '_>) -> bool {
-    node.children().iter().any(|child| match child {
+    children(node).iter().any(|child| match child {
         Node::Break(_) | Node::Continue(_) | Node::Goto(_) => true,
         Node::While(_)
         | Node::For(_)
@@ -8924,6 +8965,15 @@ fn node_has_stray_jump(node: &Node<'_, '_>) -> bool {
 /// low-precedence `and`/`or`), and bare truthiness. Everything else becomes
 /// [`CondExpr::Opaque`] carrying the variables it reads.
 fn lower_cond(expr: &Expression<'_>) -> CondExpr {
+    // A long `&&` / `||` chain recurses once per conjunct (issue #264). Out of
+    // headroom the condition is opaque, and its read set is what the (equally
+    // guarded) scan can still reach — which is why the refusal also travels to
+    // the caller as a parse error: a partly-walked condition is exactly the case
+    // ADR-0079's dam exists for, and the file's other findings are dropped with
+    // it rather than drawn from a tree the walk did not finish.
+    if stack_guard::exhausted() {
+        return CondExpr::Opaque { reads: Vec::new() };
+    }
     match expr.unparenthesized() {
         Expression::Binary(b) => lower_binary_cond(b),
         Expression::UnaryPrefix(u) if matches!(u.operator, UnaryPrefixOperator::Not(_)) => {
@@ -9189,7 +9239,7 @@ fn operand_writers(node: &Node<'_, '_>) -> OperandWriters {
     // A call still has to be descended: `f($x = 1)` is both.
     let seen_call = matches!(node, Node::Call(_) | Node::Instantiation(_));
     let mut worst = if seen_call { OperandWriters::Calls } else { OperandWriters::None };
-    for child in node.children() {
+    for child in children(node) {
         match operand_writers(&child) {
             OperandWriters::Any => return OperandWriters::Any,
             OperandWriters::Calls => worst = OperandWriters::Calls,
@@ -9244,7 +9294,7 @@ fn node_may_return(node: &Node<'_, '_>) -> bool {
         Node::Return(_) => true,
         Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_) => false,
         _ => {
-            for child in node.children() {
+            for child in children(node) {
                 if node_may_return(&child) {
                     return true;
                 }
@@ -9366,7 +9416,7 @@ fn collect_call_vars(node: &Node<'_, '_>, out: &mut Vec<String>) {
             }
         }
     }
-    for child in node.children() {
+    for child in children(node) {
         collect_call_vars(&child, out);
     }
 }
@@ -9453,7 +9503,7 @@ fn scan_invalidated(node: &Node<'_, '_>, out: &mut Vec<InvalidatedVar>, nested: 
             }
         }
     }
-    for child in node.children() {
+    for child in children(node) {
         scan_invalidated(&child, out, nested);
     }
 }
@@ -9539,7 +9589,7 @@ fn collect_assign_writes(node: &Node<'_, '_>, out: &mut Vec<String>) {
         | Node::Enum(_) => return,
         _ => {}
     }
-    for child in node.children() {
+    for child in children(node) {
         collect_assign_writes(&child, out);
     }
 }
@@ -9553,7 +9603,7 @@ fn collect_direct_vars(node: &Node<'_, '_>, out: &mut Vec<String>) {
             out.push(name);
         }
     }
-    for child in node.children() {
+    for child in children(node) {
         collect_direct_vars(&child, out);
     }
 }
@@ -9582,7 +9632,7 @@ fn collect_read_vars(node: &Node<'_, '_>, writes: &[String], out: &mut Vec<Strin
         | Node::Enum(_) => return,
         _ => {}
     }
-    for child in node.children() {
+    for child in children(node) {
         collect_read_vars(&child, writes, out);
     }
 }
@@ -9609,7 +9659,7 @@ fn collect_foreach_sites(node: &Node<'_, '_>, scope_end: u32, out: &mut Vec<Fore
         _ => scope_end,
     };
     let mut prev: Option<&Statement<'_>> = None;
-    for child in node.children() {
+    for child in children(node) {
         if let Node::Statement(s) = child {
             if let Statement::Foreach(fe) = s {
                 out.push(lower_foreach_site(fe, to_span(s.span()), prev, scope_end));
@@ -9669,7 +9719,7 @@ fn collect_operand_sites(node: &Node<'_, '_>, body: Option<Span>, out: &mut Vec<
         }
         _ => {}
     }
-    for child in node.children() {
+    for child in children(node) {
         collect_operand_sites(&child, body, out);
     }
 }
@@ -9717,7 +9767,7 @@ fn collect_array_literal_sites(node: &Node<'_, '_>, out: &mut Vec<ArrayLiteralSi
         Node::LegacyArray(a) => out.push(lower_array_literal_site(a.elements.iter())),
         _ => {}
     }
-    for child in node.children() {
+    for child in children(node) {
         collect_array_literal_sites(&child, out);
     }
 }
@@ -9886,7 +9936,7 @@ fn body_has_early_exit(node: &Node<'_, '_>) -> bool {
         | Node::Enum(_) => return false,
         _ => {}
     }
-    node.children().iter().any(body_has_early_exit)
+    children(node).iter().any(body_has_early_exit)
 }
 
 /// The scope-sensitive builtins whose meaning is defined by the *frame* they are
@@ -9927,7 +9977,7 @@ fn scan_unmodelled(node: &Node<'_, '_>) -> bool {
         }
         _ => {}
     }
-    node.children().iter().any(scan_unmodelled)
+    children(node).iter().any(scan_unmodelled)
 }
 
 /// Whether a node (scanned within a single scope, not descending into nested
@@ -10007,7 +10057,7 @@ fn scan_opaque(node: &Node<'_, '_>, out: &mut Vec<OpaqueSite>, stop_at_first: bo
         out.push(OpaqueSite { construct, span: to_span(node.span()) });
         return;
     }
-    for child in node.children() {
+    for child in children(node) {
         scan_opaque(&child, out, stop_at_first);
         if stop_at_first && !out.is_empty() {
             return;
@@ -10115,7 +10165,7 @@ fn collect_namespaces(
         let span = to_span(ns.span());
         regions.push((span.start, span.end, idx));
     }
-    for child in node.children() {
+    for child in children(node) {
         collect_namespaces(&child, contexts, regions);
     }
 }
@@ -10358,6 +10408,25 @@ impl RefResolver<'_> {
 
 fn to_span(span: mago_span::Span) -> Span {
     Span { start: span.start.offset, end: span.end.offset }
+}
+
+/// The children of `node`, **or none when the stack is spent** (issue #264).
+///
+/// Every walker in this file descends through here, so this one function is the
+/// whole depth guard for the CST walk: when [`stack_guard::exhausted`] says the
+/// remaining headroom is gone, a walker is handed an empty child list and returns
+/// the way it would at a leaf. No walker's control flow changes, no walker
+/// unwinds, and the parse still produces a tree — a partial one, which
+/// [`SourceTree::parse`] then reports as a recovered parse error rather than
+/// letting the process (or the wasm module) die walking it.
+///
+/// On every native target the guard is off by default and this is
+/// `node.children()` behind one thread-local read; see [`stack_guard`].
+fn children<'ast, 'arena>(node: &Node<'ast, 'arena>) -> Vec<Node<'ast, 'arena>> {
+    if stack_guard::exhausted() {
+        return Vec::new();
+    }
+    node.children()
 }
 
 /// Lower one trivium to a [`Comment`], dropping whitespace trivia (`None`).
