@@ -96,6 +96,17 @@ pub fn foldable(name: &str) -> bool {
     width_safe(name) || width_refused(name)
 }
 
+/// The number of names on the folding allowlist (ADR-0054 §9.6's Catalog section
+/// "freshness context", the [`foldable`] twin of [`hierarchy_entry_count`]): the
+/// union of `WIDTH_SAFE` and `WIDTH_REFUSED`, which is exactly what
+/// [`foldable`] tests — the two lists are disjoint by construction (a name has one
+/// width verdict), so counting both and summing is the same set [`foldable`]
+/// answers `true` for.
+#[must_use]
+pub fn foldable_entry_count() -> usize {
+    WIDTH_SAFE.len() + WIDTH_REFUSED.len()
+}
+
 /// Whether folding `name` is **safe on a 32-bit engine** (case-insensitive), given
 /// that the caller has already applied the argument range guard.
 ///
@@ -974,6 +985,16 @@ pub fn builtin_class_supers(name: &str) -> Option<Vec<&'static str>> {
         .binary_search_by(|(n, _)| (*n).cmp(key.as_str()))
         .ok()
         .map(|i| hierarchy_generated::HIERARCHY[i].1.to_vec())
+}
+
+/// The number of rows in the generated hierarchy table (ADR-0054 §9.6's Catalog
+/// section "freshness context" — a plain count, not a fact about any project).
+/// Reading `hierarchy_generated::HIERARCHY.len()` through a named accessor rather
+/// than exposing the table itself keeps the generated module private, per its own
+/// doc comment ("consulted only by `builtin_class_supers`").
+#[must_use]
+pub fn hierarchy_entry_count() -> usize {
+    hierarchy_generated::HIERARCHY.len()
 }
 
 /// The casing php-src **declares** a builtin class/interface/enum with (`gmp` →

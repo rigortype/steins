@@ -128,7 +128,7 @@ fn dispatch(args: &[String]) -> ExitCode {
             errln!(
                 "       steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>"
             );
-            errln!("       steins doctor [--no-php] [--baseline <path>] [path]");
+            errln!("       steins doctor [--no-php] [--baseline <path>] [--format text|json] [path]");
             errln!("       steins mcp");
             errln!("       steins version | -v | --version");
             errln!("       steins license");
@@ -1100,6 +1100,25 @@ struct SteinsConfig {
     /// The `[paths]` section (issue #181): the no-manifest vendor-dir config
     /// channel.
     paths: Option<PathsConfig>,
+    /// The `[doctor]` section (ADR-0054 §14 deferred-with-design, issue #268):
+    /// `require`'s named posture-to-failure assertions.
+    doctor: Option<DoctorConfig>,
+}
+
+/// The `[doctor]` section (ADR-0054 §14, issue #268): `require = [...]` names
+/// posture facts doctor otherwise only *reports* (exit 0) and turns a violation
+/// into doctor's exit 1 — the lenient-default escape hatch point 10 promised
+/// ("teams that want environment facts to fail... get it the lenient-default way").
+/// `deny_unknown_fields` so a misspelled key under `[doctor]` (e.g. `requries`) is
+/// a hard parse error, the same posture `[runtime]`/`[plugins]` already take;
+/// an unknown *name inside* `require` is validated separately by
+/// `doctor::known_assertions` (ADR-0054 §10's config-contradiction lane, since the
+/// string is data, not a struct field serde can gate).
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct DoctorConfig {
+    #[serde(default)]
+    require: Vec<String>,
 }
 
 /// The `[paths]` section (issue #181) — `steins.toml`'s config channel for a

@@ -179,15 +179,17 @@ section falls back to the built-in `default` surface rather than aborting
 profile that cannot resolve — and that is different from a usage error like
 a typo'd path or an unknown flag, which exits `2`. The distinction is
 argv versus committed intent: `steins doctor nope/` (a path that is not
-there) and `steins doctor --format json` (a flag doctor does not have) both
-exit `2` and are covered in
+there) and `steins doctor --format yaml` (a format doctor does not render)
+both exit `2` and are covered in
 [the CLI reference](02-cli-reference.md#doctors-three-exits). A malformed
-`steins.toml`, an unresolvable profile, or an unparseable baseline header
-are the only three things that make doctor exit `1`; everything else it can
-report — no PHP on `PATH`, a monkey-patching extension loaded, a dormant
-baseline entry — reports at exit `0`, because a fact about your environment
-is not a problem doctor is entitled to fail the run over (ADR-0054 §10, the
-crying-wolf prohibition also argued in ADR-0004).
+`steins.toml`, an unresolvable profile, an unparseable baseline header, or a
+violated (or unknown) `[doctor] require` assertion are the things that make
+doctor exit `1`; everything else it can report — no PHP on `PATH`, a
+monkey-patching extension loaded, a dormant baseline entry, catalog skew —
+reports at exit `0` by default, because a fact about your environment is
+not a problem doctor is entitled to fail the run over unless the project
+opted in by name (ADR-0054 §10/§14, the crying-wolf prohibition also argued
+in ADR-0004).
 
 ## Sidecar failure modes
 
