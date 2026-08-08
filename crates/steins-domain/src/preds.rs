@@ -12,6 +12,28 @@
 //! subset test over positive literals can conclude "every string with these
 //! predicates also has those", never "no string has both". See
 //! `complementary_bits_are_a_conjunction_not_a_contradiction`.
+//!
+//! ## Extensional and contextual predicates (issue #236)
+//!
+//! Every predicate here is a property of the *value*, never of its provenance —
+//! that is what keeps the Refined layer extensional, and it is why ADR-0038
+//! keeps `literal-string` out (two identical strings differ in literal-string
+//! status, so no function of the value decides it).
+//!
+//! [`StrPreds::CLASS_STRING`] is a value property in exactly that sense — two
+//! identical strings are both class-strings or neither — but it is decided
+//! against the program's **class table**, which [`StrPreds::of`] does not have.
+//! So the bitset splits in two:
+//!
+//! - the **extensional** predicates ([`StrPreds::extensional`]), which
+//!   [`StrPreds::of`] computes from the string alone; and
+//! - the **contextual** ones, which the set can *record* (a producer that knows
+//!   the class table puts them there) but no member test can *decide* here.
+//!
+//! Every membership query in this crate therefore reads a set through its
+//! extensional projection, which over-approximates γ — the sound direction for
+//! the join contract, and the value-domain face of the honest `Maybe` the
+//! contract layer answers for the same question.
 
 use crate::php::{
     php_is_numeric, php_str_is_decimal_int, php_str_is_falsy, php_str_is_lowercase,
@@ -55,6 +77,27 @@ impl StrPreds {
     /// whole lattice. Being the *complement* of a sibling bit is not something
     /// the closure can express (see [`StrPreds`] module docs).
     pub const NON_DECIMAL_INT: StrPreds = StrPreds(1 << 6);
+    /// `class-string`: the value names a class-like — a class, interface, trait
+    /// or enum the program declares (issue #236).
+    ///
+    /// The one **contextual** predicate (see the module docs): a property of the
+    /// value, but decided against the class table rather than against the
+    /// characters, so [`StrPreds::of`] never sets it and no member test here can
+    /// discharge it. It is set by a producer that holds the evidence — a
+    /// declared `class-string` contract, or `self`/`parent`/`static::class`,
+    /// where the class-like is resolved but its *spelling* is not (ADR-0043's
+    /// casing deferral).
+    ///
+    /// Its implications are the ones every class-like name satisfies by PHP's
+    /// own identifier grammar: a name is never `""` and never `"0"`
+    /// (`NON_FALSY`, hence `NON_EMPTY`), and never a canonical decimal integer
+    /// (`NON_DECIMAL_INT`) — an identifier cannot start with a digit. Those are
+    /// extensional, so they *are* decidable, which is what lets a `class-string`
+    /// contract refute `""` instead of shrugging at it.
+    pub const CLASS_STRING: StrPreds = StrPreds(1 << 7);
+
+    /// The predicates [`StrPreds::of`] can decide from the string alone.
+    const EXTENSIONAL: StrPreds = StrPreds(0b0111_1111);
 
     /// The empty predicate set (no knowledge — the General form's content).
     #[must_use]
@@ -88,17 +131,24 @@ impl StrPreds {
     }
 
     /// Apply the implication closure: `DecimalInt ⇒ Numeric`,
-    /// `DecimalInt ⇒ Lowercase ∧ Uppercase`, `NonFalsy ⇒ NonEmpty`,
-    /// `Numeric ⇒ NonEmpty`.
+    /// `DecimalInt ⇒ Lowercase ∧ Uppercase`, `ClassString ⇒ NonFalsy ∧
+    /// NonDecimalInt`, `NonFalsy ⇒ NonEmpty`, `Numeric ⇒ NonEmpty`.
     ///
     /// One pass reaches the fixpoint because the clauses are applied in
-    /// dependency order: `DecimalInt`'s consequents are discharged first, and
-    /// the only clause they feed (`Numeric ⇒ NonEmpty`) runs after.
+    /// dependency order: `DecimalInt`'s and `ClassString`'s consequents are
+    /// discharged first, and the only clauses they feed (`NonFalsy ⇒ NonEmpty`,
+    /// `Numeric ⇒ NonEmpty`) run after.
     #[must_use]
     pub const fn close(self) -> Self {
         let mut bits = self.0;
         if bits & StrPreds::DECIMAL_INT.0 != 0 {
             bits |= StrPreds::NUMERIC.0 | StrPreds::LOWERCASE.0 | StrPreds::UPPERCASE.0;
+        }
+        // PHP's identifier grammar, read as implications: a class-like name has
+        // at least one character, is not `"0"`, and cannot be a canonical
+        // decimal integer (it may not start with a digit).
+        if bits & StrPreds::CLASS_STRING.0 != 0 {
+            bits |= StrPreds::NON_FALSY.0 | StrPreds::NON_DECIMAL_INT.0;
         }
         if bits & (StrPreds::NON_FALSY.0 | StrPreds::NUMERIC.0) != 0 {
             bits |= StrPreds::NON_EMPTY.0;
@@ -106,8 +156,33 @@ impl StrPreds {
         StrPreds(bits)
     }
 
+    /// This set with every contextual predicate dropped — the part
+    /// [`StrPreds::of`] can decide, and the only part a membership test on a
+    /// concrete string may consult.
+    ///
+    /// Dropping predicates *widens* the denotation, so reading a set through
+    /// this projection over-approximates γ, which is the sound direction for
+    /// every consumer (see the module docs).
+    #[must_use]
+    pub const fn extensional(self) -> Self {
+        StrPreds(self.0 & StrPreds::EXTENSIONAL.0)
+    }
+
+    /// True when nothing in this set needs the class table — so a membership
+    /// test on a concrete string is *exact* rather than an over-approximation.
+    #[must_use]
+    pub const fn is_extensional(self) -> bool {
+        self.0 & !StrPreds::EXTENSIONAL.0 == 0
+    }
+
     /// The full predicate summary of a concrete string — the computed
     /// widening seed (ADR-0035: precision loss is measured, not guessed).
+    ///
+    /// Extensional predicates only: [`StrPreds::CLASS_STRING`] is never set
+    /// here, because the class table is not in scope. A `Foo::class` literal
+    /// therefore widens to a set that has *forgotten* it names a class — a
+    /// widening, never a lie, and the reason the class-string producer records
+    /// the bit at the site that holds the evidence instead of re-deriving it.
     #[must_use]
     pub fn of(s: &str) -> Self {
         let mut p = StrPreds::empty();
@@ -136,9 +211,13 @@ impl StrPreds {
 
     /// Evaluate a single predicate (one of the constants) on a concrete
     /// string.
+    ///
+    /// A contextual predicate is read through [`StrPreds::extensional`], so a
+    /// `true` here means "not refuted by the characters", not "proven" — ask
+    /// [`StrPreds::is_extensional`] first when the difference matters.
     #[must_use]
     pub fn eval(pred: StrPreds, s: &str) -> bool {
-        StrPreds::of(s).contains_all(pred)
+        StrPreds::of(s).contains_all(pred.extensional())
     }
 }
 
@@ -268,6 +347,54 @@ mod tests {
         // reason the abstract-fact leg of `admits` answers `Maybe` there.
         assert!(!StrPreds::DECIMAL_INT.close().contains_all(StrPreds::NON_DECIMAL_INT));
         assert!(!StrPreds::NON_DECIMAL_INT.contains_all(StrPreds::DECIMAL_INT));
+    }
+
+    #[test]
+    fn class_string_is_contextual_and_carries_the_identifier_grammar() {
+        let cs = StrPreds::CLASS_STRING.close();
+        // The implications PHP's identifier grammar hands us, and they are
+        // extensional — which is what makes them decidable.
+        assert!(cs.contains_all(StrPreds::NON_FALSY));
+        assert!(cs.contains_all(StrPreds::NON_EMPTY));
+        assert!(cs.contains_all(StrPreds::NON_DECIMAL_INT));
+        // Nothing extensional entails it back: `"Foo"` looks exactly like every
+        // other non-falsy identifier-shaped string.
+        assert!(!StrPreds::of("Foo").contains_all(StrPreds::CLASS_STRING));
+        assert!(!StrPreds::NON_FALSY.close().contains_all(StrPreds::CLASS_STRING));
+        // The split: only this bit is contextual.
+        assert!(!cs.is_extensional());
+        assert!(cs.extensional().is_extensional());
+        assert_eq!(cs.extensional(), StrPreds::NON_FALSY.union(StrPreds::NON_DECIMAL_INT));
+        for extensional in [
+            StrPreds::empty(),
+            StrPreds::NON_EMPTY,
+            StrPreds::NUMERIC.close(),
+            StrPreds::DECIMAL_INT.close(),
+            StrPreds::LOWERCASE,
+        ] {
+            assert!(extensional.is_extensional(), "{extensional:?}");
+        }
+    }
+
+    #[test]
+    fn class_string_eval_refutes_but_never_proves() {
+        // Refuted by the characters — no class-like is named `""`, `"0"` or `"7"`.
+        for refuted in ["", "0", "7", "123"] {
+            assert!(!StrPreds::eval(StrPreds::CLASS_STRING.close(), refuted), "{refuted:?}");
+        }
+        // Not refuted — and `eval` says so without claiming the class exists.
+        for open in ["Foo", "App\\User", "stdClass"] {
+            assert!(StrPreds::eval(StrPreds::CLASS_STRING.close(), open), "{open:?}");
+        }
+    }
+
+    #[test]
+    fn class_string_widens_away_under_intersection() {
+        // The meet with a plain non-empty string forgets the class-like claim —
+        // the widening direction, which is the safe one for a join.
+        let joined = StrPreds::CLASS_STRING.close().intersect(StrPreds::NON_EMPTY);
+        assert!(!joined.contains_all(StrPreds::CLASS_STRING));
+        assert!(joined.contains_all(StrPreds::NON_EMPTY));
     }
 
     #[test]

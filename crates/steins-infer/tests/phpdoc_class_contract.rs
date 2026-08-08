@@ -153,12 +153,54 @@ fn enum_case_rejected_by_unrelated_class() {
 
 #[test]
 fn class_string_literal_vs_class_string_stays_maybe() {
-    // `class-string` lowers to StrOpaque (non-extensional, ADR-0038): a proven
-    // `::class` string must NOT be forced to decide membership — it stays silent.
+    // `class-string` is a string refinement now (issue #236) but a CONTEXTUAL one:
+    // whether `'Foo'` names a declared class is the class table's answer, not the
+    // characters'. So a proven `::class` string is still never forced to decide
+    // membership — it stays silent, exactly as it did under `StrOpaque`.
     let src = "<?php class Foo {}\n\
         /** @param class-string $c */ function f($c): void {}\n\
         f(Foo::class);";
     assert_eq!(param_count(src), 0, "Foo::class vs class-string → Maybe (locked)");
+}
+
+#[test]
+fn class_string_refutes_the_strings_no_class_like_can_be() {
+    // The extensional half of the refinement (issue #236) IS decidable, and it is
+    // the identifier grammar: a class-like is never `''` and never `'0'`. Both
+    // were `Maybe` — silence — while the spelling had no predicate at all.
+    let base = "<?php /** @param class-string $c */ function f($c): void {}\n";
+    assert_eq!(param_count(&format!("{base}f('');")), 1, "'' names no class-like");
+    assert_eq!(param_count(&format!("{base}f('0');")), 1, "'0' names no class-like");
+    assert_eq!(param_count(&format!("{base}f('123');")), 1, "a decimal int is no identifier");
+    // …and an identifier-shaped string still stays silent: not refuted, not proven.
+    assert_eq!(param_count(&format!("{base}f('App\\\\User');")), 0);
+}
+
+#[test]
+fn class_string_satisfies_the_refinements_it_entails() {
+    // `class-string ⇒ non-falsy-string ⇒ non-empty-string` is the identifier
+    // grammar read as implication, so a class-string argument is accepted by the
+    // weaker string contracts without a word from the class table.
+    for weaker in ["non-empty-string", "non-falsy-string", "string"] {
+        let src = format!(
+            "<?php /** @param class-string $c */ function g($c): void {{ h($c); }}\n\
+             /** @param {weaker} $s */ function h($s): void {{}}\n"
+        );
+        assert_eq!(param_count(&src), 0, "class-string is a {weaker}");
+    }
+}
+
+#[test]
+fn relative_class_const_is_a_class_string() {
+    // `self`/`parent`/`static::class` resolve to a class-like the index knows but
+    // cannot spell (ADR-0043's casing deferral) — which is exactly the claim the
+    // refinement carries (issue #236). Passing one to a `@param class-string`
+    // is silent; passing it where a class-like name cannot go is not.
+    let src = "<?php class Base {} class Child extends Base {\n\
+        /** @param class-string $c */ function f($c): void {}\n\
+        function go(): void { $this->f(self::class); $this->f(parent::class); $this->f(static::class); }\n\
+        }";
+    assert_eq!(param_count(src), 0, "every relative ::class is a class-string");
 }
 
 #[test]
