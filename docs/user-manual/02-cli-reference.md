@@ -2,8 +2,10 @@
 
 Every subcommand, every flag it accepts, and what each exit code means.
 Verified against **steins 0.1.2** (`steins version`); the transcripts below
-are real output from that binary. For getting the binary in the first place,
-see [installation and quickstart](01-installation-and-quickstart.md).
+are real output from that binary, except that every **id count** and the
+built-in profile list have been re-measured on the current build. For getting
+the binary in the first place, see
+[installation and quickstart](01-installation-and-quickstart.md).
 
 ## How to read this page
 
@@ -326,7 +328,7 @@ steins: path does not exist: src/Typo
 $ steins check --format xml src/
 steins: unknown format `xml` (text|json)
 $ steins check --profile nope src/
-steins: unknown profile `nope` (built-ins: default, contracts, throws-direct, strict; or define [profile.nope])
+steins: unknown profile `nope` (built-ins: default, contracts, throws-direct, strict, pedantic; or define [profile.nope])
 ```
 
 All three exit `2`, and under `--format json` no document is emitted at all.
@@ -769,7 +771,7 @@ Runtime
 Config + active surface
   steins.toml: not found (built-in defaults govern)
   active profile: `default` (from built-in default)
-  surface: layers [mechanics, proof], 16 checked id(s)
+  surface: layers [mechanics, proof], 47 checked id(s)
 
 Layout
   1 manifest(s) govern this tree:

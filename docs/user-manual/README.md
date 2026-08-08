@@ -33,7 +33,9 @@ Two things worth knowing before you start:
    the anatomy of a message line, and the proof / contract / mechanics /
    debug layers with the profile that surfaces each.
 5. [**Profiles, baseline, and suppression**](05-profiles-and-baseline.md) —
-   the four named strictness stages, the `.steins-baseline.jsonl` ratchet,
+   the five named profiles — the `default ⊂ contracts ⊂ strict` ladder plus
+   the `throws-direct` and `pedantic` branches — the
+   `.steins-baseline.jsonl` ratchet,
    user profiles in `steins.toml`, inline `@steins-ignore`, `effect-diff`'s
    separate capture loop, and why mechanics ids can never be switched off.
 6. [**CI integration**](06-ci.md) — the exit-code contract in CI, install

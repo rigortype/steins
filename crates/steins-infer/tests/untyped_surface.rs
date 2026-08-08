@@ -52,25 +52,33 @@ fn surfaced(name: &str, d: &Diagnostic) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// The registry contract: six contract-layer ids, all at the `Contracts` floor.
+// The registry contract: six contract-layer ids, five at the `Contracts` floor
+// and one at `Pedantic`.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn every_id_is_a_contract_layer_id_at_the_contracts_floor() {
-    // The last two are the ADR's `Contracts→Strict by measurement` rows. They ship
-    // at the family's floor; moving either is a one-line registry edit, and this
-    // test is where the move must be recorded.
+    // `untyped.iterable-value` and `untyped.generics` are the ADR's remaining
+    // `Contracts→Strict by measurement` rows. They ship at the family's floor;
+    // moving either is a one-line registry edit, and this test is where the move
+    // must be recorded.
     for id in [
         UNTYPED_PARAMETER_ID,
         UNTYPED_RETURN_ID,
         UNTYPED_PROPERTY_ID,
-        UNTYPED_CLASS_CONSTANT_ID,
         UNTYPED_ITERABLE_VALUE_ID,
         UNTYPED_GENERICS_ID,
     ] {
         assert_eq!(layer(id), Some(Layer::Contract), "{id}");
         assert_eq!(surface_floor(id), Some(Floor::Contracts), "{id}");
     }
+    // The arm that left the family floor entirely (2026-08-09): a class constant's
+    // initializer is a constant expression, so the type is pinned with or without a
+    // written one. The layer is unchanged — declared debt is still declared debt —
+    // and only the rung that asks for it moved. `Pedantic`, not `Strict`: a house
+    // -style ask does not belong on the rung that asks about weaker claims.
+    assert_eq!(layer(UNTYPED_CLASS_CONSTANT_ID), Some(Layer::Contract));
+    assert_eq!(surface_floor(UNTYPED_CLASS_CONSTANT_ID), Some(Floor::Pedantic));
 }
 
 // ---------------------------------------------------------------------------
@@ -488,8 +496,18 @@ fn the_family_is_absent_from_the_default_surface_and_present_from_contracts() {
     assert!(!ds.is_empty(), "the fixture must exercise the family");
     for d in &ds {
         assert!(!surfaced("default", d), "`{}` must not reach a bare check", d.id);
-        assert!(surfaced("contracts", d), "`{}` must reach --profile contracts", d.id);
-        assert!(surfaced("strict", d), "the ladder is cumulative for `{}`", d.id);
+        assert!(surfaced("pedantic", d), "`{}` must reach --profile pedantic", d.id);
+        if d.id == UNTYPED_CLASS_CONSTANT_ID {
+            // The one arm that left the family floor: a constant's initializer already
+            // pins its type, so demanding the declaration is a house-style ask. It
+            // reaches `pedantic` (above, by name) and NOTHING else — `strict` asks a
+            // different question and does not get to carry a style opinion.
+            assert!(!surfaced("contracts", d), "`{}` is the pedantic-floor arm", d.id);
+            assert!(!surfaced("strict", d), "`{}` must not ride the strict rung", d.id);
+        } else {
+            assert!(surfaced("contracts", d), "`{}` must reach --profile contracts", d.id);
+            assert!(surfaced("strict", d), "the rung ladder is cumulative for `{}`", d.id);
+        }
     }
     // All five non-generics ids are exercised by that one fixture.
     for id in [

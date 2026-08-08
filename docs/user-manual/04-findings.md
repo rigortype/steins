@@ -129,12 +129,15 @@ ladder and outside every gate.
 
 Which profile puts each layer on the surface:
 
-| Layer | `default` | `throws-direct` | `contracts` | `strict` |
-| --- | --- | --- | --- | --- |
-| proof | yes | yes | yes | yes |
-| mechanics | yes | yes | yes | yes |
-| contract | no | `throw.undeclared`, direct escapes only | all but `offset.maybe-missing` | yes |
-| debug | yes | yes | yes | yes |
+| Layer | `default` | `throws-direct` | `contracts` | `strict` | `pedantic` |
+| --- | --- | --- | --- | --- | --- |
+| proof | yes | yes | yes | yes | yes |
+| mechanics | yes | yes | yes | yes | yes |
+| contract | no | `throw.undeclared`, direct escapes only | all but the strict and pedantic rungs | contracts + the some-paths-only claims | contracts + the house-style asks |
+| debug | yes | yes | yes | yes | yes |
+
+`strict` and `pedantic` both build on `contracts` and neither contains the
+other — see [chapter 5](05-profiles-and-baseline.md).
 
 `steins doctor` prints the resolved surface for your build and config, which
 is the authoritative answer for a given binary — two lines out of its
@@ -143,12 +146,12 @@ is the authoritative answer for a given binary — two lines out of its
 ```
 $ steins doctor --no-php .
   active profile: `default` (from built-in default)
-  surface: layers [mechanics, proof], 16 checked id(s)
+  surface: layers [mechanics, proof], 47 checked id(s)
 ```
 
-Today that count runs 16 ids at `default`, 17 at `throws-direct`, 25 at
-`contracts`, 26 at `strict`. The stages, the baseline ratchet that makes
-raising one survivable, and user-defined profiles all live in
+Today that count runs 47 ids at `default`, 48 at `throws-direct`, 61 at
+`contracts`, 65 at `strict` and 62 at `pedantic`. The profiles, the baseline
+ratchet that makes raising one survivable, and user-defined profiles all live in
 [chapter 5](05-profiles-and-baseline.md). The normative rules for layers,
 facets, and suppression are in
 [diagnostic-policy.md](../type-specification/diagnostic-policy.md).
@@ -161,16 +164,21 @@ facets, and suppression are in
 
 ## The catalogue
 
-Ten families, twenty-nine registered ids, twenty-eight of them with a live
-emitter. The registry is a closed set bound by a totality test, so an id
-that reaches your terminal is in it and an id outside it cannot be emitted
-(ADR-0022). Every id below is shown with the PHP that triggers it and the
-transcript it produces, and every transcript was produced by the v0.1.2
-binary against PHP 8.5.8. The one id without an emitter is called out where
-its family appears.
+The registry holds **70 ids**, 67 of them with a live emitter. It is a closed
+set bound by a totality test, so an id that reaches your terminal is in it
+and an id outside it cannot be emitted (ADR-0022). Each id below is shown
+with the PHP that triggers it and the transcript it produces.
 
-Ids grow by ADR. `steins doctor` is the current answer for your build; this
-catalogue is the current answer for this release.
+**The catalogue covers eleven families and is behind the registry.** v0.1.4
+landed a large port wave — `property.*`, `variable.*`, `constant.*`,
+`class-const.*`, `override.*`, `string.*`, `preg.*`, `array.*`, `closure.*`
+and `syntax.*` — and those families have no section here yet. `steins doctor`
+is the authoritative answer for your build; this page is a guide, not a
+census.
+
+Transcripts are from the v0.1.2 binary against PHP 8.5.8 except where a
+section says otherwise; the `untyped.*` transcripts were produced on the
+current build.
 
 ### `type.*` — native declared types, proven
 
@@ -671,6 +679,122 @@ $ steins check src/Label.php
 src/Label.php:5:3: error[effect.unknown-label]: unknown effect label 'io.netwrok' in #[\Steins\Effect] on fetch()
 ```
 
+### `untyped.*` — the type declarations you have not written yet
+
+Six ids, contract layer. This family is the odd one out: every other family
+reports a claim that *disagrees* with your code, and this one reports a claim
+your code never makes. It answers one question — how much untyped surface is
+left, and where — which is the question a modernization project actually has.
+
+Five of the six are on `contracts`. The sixth is on `pedantic` and nothing
+else; that split is the family's whole design and is explained below.
+
+A type written **anywhere** counts. A native declaration types the subject, a
+docblock claim types it, and a claim that turns out to be *wrong* still types
+it — a wrong claim is `phpdoc.*`'s finding, never this family's. Steins
+reads `@param` / `@return` / `@var` and their `@phpstan-` and `@psalm-`
+prefixed spellings alike.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+final class Registry
+{
+    const DEFAULTS = ['retries' => 3];
+
+    public $cache;
+
+    /** @var array */
+    public array $entries = [];
+
+    public function put($key, array $rows)
+    {
+        $this->entries[$key] = $rows;
+    }
+}
+```
+
+```
+$ steins check --profile contracts src/Untyped.php
+src/Untyped.php:9:5: error[untyped.property]: property Registry::$cache has no type — no native type and no `@var`
+src/Untyped.php:12:5: error[untyped.iterable-value]: property Registry::$entries is an iterable with no value type — write `array<T>`, `T[]`, `list<T>` or an array shape
+src/Untyped.php:14:21: error[untyped.return]: Registry::put() has no return type — no native return type and no `@return`
+src/Untyped.php:14:25: error[untyped.parameter]: parameter $key of Registry::put() has no type — no native type and no `@param`
+src/Untyped.php:14:31: error[untyped.iterable-value]: parameter $rows of Registry::put() is an iterable with no value type — write `array<T>`, `T[]`, `list<T>` or an array shape
+```
+
+**`untyped.parameter`** — a parameter with no native type and no `@param`.
+Variadic (`...$args`) and by-ref (`&$x`) spellings still name the parameter.
+A promoted constructor parameter reports here and *only* here: one
+declaration, one finding.
+
+**`untyped.return`** — no native return type and no `@return`.
+`__construct` and `__destruct` are excluded by construction, since PHP
+forbids a return type on either — their silence is a language rule, not
+information withheld.
+
+**`untyped.property`** — no native type and no `@var` on the declaration.
+Each item of `public $a, $b;` is its own subject, and one `@var` above the
+declaration types them both.
+
+**`untyped.iterable-value`** — a native `array` or `iterable` whose docblock
+never states the *value* type. `array` is a real type, so the plain parameter
+and property arms stay quiet; this id is the one that asks what is inside.
+`array<T>`, `T[]`, `list<T>`, `iterable<T>` and an array shape all answer it.
+
+**`untyped.generics`** — a docblock type naming a class that declares
+`@template` parameters, written without type arguments.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+/** @template T */
+final class Collection {}
+
+final class Report
+{
+    /** @param Collection $rows */
+    public function render(Collection $rows): void {}
+}
+```
+
+```
+$ steins check --profile contracts src/Generics.php
+src/Generics.php:11:28: error[untyped.generics]: parameter $rows of Report::render() names the generic class Collection without type arguments — it declares `@template T`
+```
+
+**`untyped.class-constant`** — a class constant with no native (PHP 8.3)
+constant type and no `@var`. **This one is on `pedantic`, not `contracts`.**
+A constant is inherently static: its initializer is a constant expression, so
+`const DEFAULTS = ['retries' => 3];` has exactly the type it would have with
+the declaration written out. Nothing is withheld, which is not true of any
+other arm — a parameter, property or return with no type is `mixed`, and the
+analyzer has to guess. Inheritance can still overwrite a constant with a
+differently shaped value, and Steins takes that risk knowingly rather than
+asking you for a declaration that buys it nothing.
+
+So Steins does not ask. A team that wants every constant annotated does,
+and says so by name:
+
+```
+$ steins check --profile pedantic src/Untyped.php
+src/Untyped.php:7:11: error[untyped.class-constant]: class constant Registry::DEFAULTS has no type — no native type and no `@var`
+src/Untyped.php:9:5: error[untyped.property]: property Registry::$cache has no type — no native type and no `@var`
+...
+```
+
+Enum cases are never subjects — a case's type *is* its enum. An enum's
+ordinary constants still are.
+
+This family is what the baseline ratchet was built for. A repo with years of
+untyped surface produces a large first run by design; freeze it with
+`--set-baseline` and only newly untyped declarations fail CI. See
+[chapter 5](05-profiles-and-baseline.md).
+
 ### `suppress.*` — the ignore channel keeping itself honest
 
 Two ids, mechanics layer, every profile, fail level, exempt from every
@@ -795,7 +919,7 @@ deleting working PHP is your judgment call.
 4. **Freeze today's debt** with a baseline when you raise a profile over an
    existing codebase, so only new findings fail CI.
 
-Options 3 and 4, the four named stages, and the ratchet workflow that walks
+Options 3 and 4, the five named profiles, and the ratchet workflow that walks
 a repo from `default` to `strict` without a first run that buries you are
 all in [profiles, baseline, and suppression](05-profiles-and-baseline.md).
 The binding rules behind everything on this page are in

@@ -8,7 +8,9 @@ symptom-indexed list of the problems people hit on a first run.
 
 Every transcript below is real output from the binary described in
 [installation and quickstart](01-installation-and-quickstart.md), run
-against PHP 8.5.8. Long sections are trimmed with `…`; nothing is invented.
+against PHP 8.5.8, except that the **id counts** and the built-in profile
+list have been re-measured on the current build. Long sections are trimmed
+with `…`; nothing is invented.
 
 ## Start with `steins doctor`
 
@@ -87,7 +89,7 @@ Runtime
 Config + active surface
   steins.toml: not found (built-in defaults govern)
   active profile: `default` (from built-in default)
-  surface: layers [mechanics, proof], 16 checked id(s)
+  surface: layers [mechanics, proof], 47 checked id(s)
 
 Layout
   1 manifest(s) govern this tree:
@@ -144,7 +146,7 @@ expected `.`, `]`
 )
   (configuration contradiction — doctor exits 1, ADR-0054 §10)
   active profile: `default` (from built-in default)
-  surface: layers [mechanics, proof], 16 checked id(s)
+  surface: layers [mechanics, proof], 47 checked id(s)
 
 Layout
   1 manifest(s) govern this tree:
@@ -552,15 +554,16 @@ Baseline section names the file it found or says `none`. Full workflow in
 ### "unknown profile"
 
 **Symptom.** ``steins: unknown profile `nope` (built-ins: default,
-contracts, throws-direct, strict; or define [profile.nope])``, exit `2`.
+contracts, throws-direct, strict, pedantic; or define [profile.nope])``,
+exit `2`.
 
 **Cause.** A `--profile` flag or `[check] profile` names something that is
 neither a built-in stage nor a `[profile.<name>]` table in `steins.toml` —
 a typo, or a profile defined in a `steins.toml` that was not found (see the
 next entry).
 
-**Fix.** Check the spelling against the four built-ins
-(`default`/`throws-direct`/`contracts`/`strict`), or define
+**Fix.** Check the spelling against the five built-ins
+(`default`/`throws-direct`/`contracts`/`strict`/`pedantic`), or define
 `[profile.<name>]` if you meant a custom one. Full syntax in
 [profiles, baseline, and suppression](05-profiles-and-baseline.md#user-profiles-in-steinstoml).
 

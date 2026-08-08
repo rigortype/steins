@@ -251,7 +251,10 @@ never guesses it; the repo declares it, reviewably.
    surfaces* and never reopens the trust-toggle refusal (point 10).
 5. **Middle stage decided by measurement — v1 ships THREE built-ins**
    (amending point 5's "two, not a ladder": still not a ladder, now
-   three names). The direct-vs-propagated measurement
+   three names). *(Since amended twice: ADR-0062 A-G10 added `strict`,
+   and ADR-0078 §6 added `pedantic` — a branch off `contracts` for
+   house-style asks, reaching the `Floor::Pedantic` ids no built-in
+   carries as a rung. Five built-ins, and "not a ladder" holds.)* The direct-vs-propagated measurement
    (`docs/notes/20260724-g1-throw-origin-measurement.md`: monorepo
    43,963 = 158 direct across 134 declarations + 43,805 propagated,
    99.5%) justified the middle stage, so `throws-direct` (= default +

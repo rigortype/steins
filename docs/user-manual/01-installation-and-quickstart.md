@@ -102,7 +102,7 @@ Runtime
 Config + active surface
   steins.toml: not found (built-in defaults govern)
   active profile: `default` (from built-in default)
-  surface: layers [mechanics, proof], 16 checked id(s)
+  surface: layers [mechanics, proof], 47 checked id(s)
 
 Layout
   no composer.json governs . — vendor is the `vendor` directory-name floor, not a declared fact
@@ -240,7 +240,7 @@ value that merely *looks* risky but works at runtime is silent by
 construction. This is the lenient-default principle: defaults are lenient,
 strictness is opt-in and named — see
 [profiles, baseline, and suppression](05-profiles-and-baseline.md) for the
-`throws-direct` / `contracts` / `strict` stages, and
+`throws-direct` / `contracts` / `strict` / `pedantic` profiles, and
 [the configuration chapter](03-configuration.md) for wiring one into
 `steins.toml`. Debt reporting — true-but-not-breaking findings such as
 undeclared `@throws` — is reached through profiles, deliberately, never
@@ -285,7 +285,7 @@ $ steins check . --format json
 
   ```
   $ steins check . --profile nope
-  steins: unknown profile `nope` (built-ins: default, contracts, throws-direct, strict; or define [profile.nope])
+  steins: unknown profile `nope` (built-ins: default, contracts, throws-direct, strict, pedantic; or define [profile.nope])
   ```
 
   and exits `2`.

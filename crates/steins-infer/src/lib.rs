@@ -465,6 +465,12 @@ pub const UNTYPED_PROPERTY_ID: &str = "untyped.property";
 
 /// The registry id for a class constant with no native (PHP 8.3) constant type and
 /// no `@var`. Enum cases are excluded: a case's type *is* its enum.
+///
+/// The family's one `strict`-floor arm, and the only one whose silence withholds
+/// nothing: a constant's initializer is a constant expression, so its type is
+/// pinned by the declaration either way. The written type buys the interface
+/// contract and the child-class covariance check, not information — a strict-tier
+/// concern. See the registry row for the measurement.
 pub const UNTYPED_CLASS_CONSTANT_ID: &str = "untyped.class-constant";
 
 /// The registry id for a native `array` / `iterable` declaration (parameter,
