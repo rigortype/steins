@@ -963,13 +963,60 @@ fn doctor_require_no_dormant_baseline_passes_with_no_baseline() {
 }
 
 #[test]
-fn doctor_require_catalog_pin_match_unconfirmed_counts_as_a_pass() {
-    let dir = workdir("require-catalog");
+fn doctor_require_catalog_pin_match_unconfirmed_is_a_failure() {
+    // Orchestrator ruling on issue #268: `[doctor] require` is the named
+    // strictness opt-in (ADR-0054 §14) — the caller is asking doctor to
+    // GUARANTEE the pin match, so a comparison doctor cannot even attempt (no
+    // target, no sidecar) is a violation, not a free pass. This deliberately
+    // disagrees with the Catalog section's own rendering, which still reports
+    // "unskewed" by the default lenient-default posture (unaffected by this
+    // test — see `doctor_catalog_says_skew_is_unconfirmed_with_no_target_and_no_sidecar`).
+    let dir = workdir("require-catalog-unconfirmed");
     write(&dir, "a.php", THREE_THROWS);
     write(&dir, "steins.toml", "[doctor]\nrequire = [\"catalog-pin-match\"]\n");
     let r = run_in(&dir, &["doctor", "--no-php", "."]);
-    assert_eq!(r.code, 0, "no target and no sidecar ⇒ unconfirmed, treated as a pass; stdout:\n{}", r.stdout);
+    assert_eq!(
+        r.code, 1,
+        "no target and no sidecar ⇒ unconfirmable, and require treats that as a failure; stdout:\n{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("FAIL `catalog-pin-match`") && r.stdout.contains("unconfirmable"),
+        "the failure message must distinguish unconfirmable from skewed; stdout:\n{}",
+        r.stdout
+    );
+    // The Catalog section's own text is untouched by this stricter require verdict.
+    assert!(r.stdout.contains("skew is unconfirmed"), "stdout:\n{}", r.stdout);
+}
+
+#[test]
+fn doctor_require_catalog_pin_match_passes_on_a_confirmed_match() {
+    // A declared target that IS the catalog's pin (steins_catalog::PINNED_PHP is
+    // 8.5 as of this writing) confirms the match, so the assertion passes.
+    let dir = workdir("require-catalog-confirmed");
+    write(&dir, "a.php", THREE_THROWS);
+    write(&dir, "composer.json", r#"{"require":{"php":"8.5.*"}}"#);
+    write(&dir, "steins.toml", "[doctor]\nrequire = [\"catalog-pin-match\"]\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0, "an exact pin match confirms and passes; stdout:\n{}", r.stdout);
     assert!(r.stdout.contains("PASS `catalog-pin-match`"), "stdout:\n{}", r.stdout);
+}
+
+#[test]
+fn doctor_require_catalog_pin_match_fails_on_a_confirmed_skew() {
+    let dir = workdir("require-catalog-skewed");
+    write(&dir, "a.php", THREE_THROWS);
+    write(&dir, "composer.json", r#"{"require":{"php":"^7.4"}}"#);
+    write(&dir, "steins.toml", "[doctor]\nrequire = [\"catalog-pin-match\"]\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 1, "a confirmed skew fails the assertion; stdout:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("FAIL `catalog-pin-match`")
+            && r.stdout.contains("skewed against the catalog's php-src pin")
+            && !r.stdout.contains("unconfirmable"),
+        "a confirmed skew must be distinguished from an unconfirmable comparison; stdout:\n{}",
+        r.stdout
+    );
 }
 
 #[test]
