@@ -30,7 +30,7 @@ usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-p
        steins annotate [--no-php] [--format text|json] <file.php>
        steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--format text|json] <paths...>
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
-       steins doctor [--no-php] [--baseline <path>] [path]
+       steins doctor [--no-php] [--baseline <path>] [--format text|json] [path]
        steins mcp
        steins version | -v | --version
        steins license
@@ -831,22 +831,22 @@ $ echo $?
 
 Report posture: which `php` answered, what the active profile checks, which
 trees count as vendor, how much of the code the analysis declined to reason
-about, baseline health. Doctor reads configuration, the environment, and
-index-level facts. It runs **no checks**, and its exit never depends on what
-`check` would find (ADR-0054 §8).
+about, baseline health, the builtin catalog's version pin, and the
+diagnostic registry's own self-consistency. Doctor reads configuration, the
+environment, and index-level facts. It runs **no checks**, and its exit
+never depends on what `check` would find (ADR-0054 §8).
 
 ```
-steins doctor [--no-php] [--baseline <path>] [path]
+steins doctor [--no-php] [--baseline <path>] [--format text|json] [path]
 ```
 
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--no-php` | off | Report the sound-subset posture without spawning the sidecar. |
 | `--baseline <path>` | the conventional default file when it exists | Which baseline to report on. |
+| `--format text\|json` | `text` | Render the same section structure as JSON (ADR-0054 §14). |
 
-`path` is optional and defaults to `.`. A second path exits `2`. There is no
-`--format` — machine-readable doctor output is deferred with design
-(ADR-0054 §14).
+`path` is optional and defaults to `.`. A second path exits `2`.
 
 ```
 $ steins doctor
@@ -859,6 +859,7 @@ Runtime
   loaded extensions: 70
   analysis target: PHP 8.3 (8.x) (from require.php "^8.3")
   version skew: runtime 8.5 sits above the 8.3 floor — reflection describes the runtime, so symbols newer than the floor are not proven absent for it (silence, never a false claim)
+  [runtime] sapi: undeclared (deferred-with-design, ADR-0049 A6) — apache_*, fastcgi_finish_request, getallheaders, litespeed_*, virtual are never reported Absent this run
 
 Config + active surface
   steins.toml: not found (built-in defaults govern)
@@ -879,12 +880,27 @@ Coverage posture
     (this list is a guess until measured: the recognizer is syntactic, it names no receiver type, and it is not exhaustive)
   reflected class world: 1 of 3 unanswered class-like name(s) resolved off the project's own PHP — Redis (redis)
     (a reflected declaration restores coverage only: it is the runtime's own claim, and no absence finding is premised on it — issue #269)
+  vendor posture: findings under a vendor root are suppressed by default (ADR-0015)
+  vouched dynamic-code exemptions: none declared ([transform.vouch] in steins.toml)
 
 Envelopes
   1 written throw envelope(s); the active profile `default` does not check them — the `contracts` (or `throws-direct`) profile does
 
 Baseline
   none (no baseline file; `check --set-baseline` writes one)
+
+Catalog
+  builtin catalog pinned to php-src PHP 8.5
+  analysis target: PHP 8.3 (8.x) — SKEWED against the pin
+  A11 consequence: catalog-backed is-a demoted to Unknown for arm deletion and descendant closure (ADR-0052 amendment A11)
+  hierarchy table: 352 row(s); foldable allowlist: 46 name(s) (freshness context, not a per-project fact)
+
+Registry totality
+  70 registered id(s): 67 emittable, 3 registered-not-yet-emitted
+  partition consistent — every registered id is emittable XOR pending (ADR-0050 §2 totality)
+
+Require
+  not configured — no posture assertions declared ([doctor] require = [...] opts in, ADR-0054 §14)
 $ echo $?
 0
 ```
@@ -923,6 +939,76 @@ A `--baseline` path that does not exist is reported as absent, not failed.
 > analysis declined to reason about — poisoned scopes, `eval` sites, dynamic
 > includes — so a quiet run comes with numbers behind its quiet.
 
+### `--format json`
+
+The point-9 section list **is** the schema (ADR-0054 §14): `text` and
+`json` render the identical internal `Vec<Section>`, so the two can never
+drift apart into two different stories about one run.
+
+```
+$ steins doctor --no-php --format json .
+{
+  "schema": "steins.doctor/v1",
+  "banner": "steins doctor — posture report (index-bound; runs no checks)",
+  "exit_code": 0,
+  "sections": [
+    {"name": "Runtime", "lines": ["PHP sidecar: disabled (--no-php)", "…"]},
+    {"name": "Config + active surface", "lines": ["…"]},
+    {"name": "Layout", "lines": ["…"]},
+    {"name": "Coverage posture", "lines": ["…"]},
+    {"name": "Envelopes", "lines": ["…"]},
+    {"name": "Baseline", "lines": ["…"]},
+    {"name": "Catalog", "lines": ["…"]},
+    {"name": "Registry totality", "lines": ["…"]},
+    {"name": "Require", "lines": ["…"]}
+  ]
+}
+```
+
+`sections` is always exactly these nine, in this order, whatever their
+content — the *structure* is fixed the way the four `check` formats' finding
+multiset is fixed (ADR-0054 point 1), only the *content* of a `lines` array
+varies with the project. Each line is the same sentence `text` prints, with
+the terminal-facing leading-space indentation trimmed; nesting is not
+otherwise represented in this first schema version. `exit_code` mirrors the
+process's own exit code, so a consumer that only reads the JSON document
+still learns whether the run was 0 or 1.
+
+### `[doctor] require`
+
+Every posture line above reports at exit `0`, degradations included — that
+is point 10's whole design. A project that wants a specific fact to fail the
+run opts in by name:
+
+```toml
+[doctor]
+require = ["sidecar"]
+```
+
+```
+$ steins doctor --no-php
+…
+Require
+  FAIL `sidecar` — no PHP sidecar answered this run (Runtime section)
+  1 of 1 declared assertion(s) FAILED (sidecar) — doctor exits 1, ADR-0054 §14
+$ echo $?
+1
+```
+
+The known assertion names:
+
+| Name | Passes when |
+| --- | --- |
+| `sidecar` | The PHP sidecar spawned and answered `env()` this run. |
+| `catalog-pin-match` | The analysis version matches the catalog's php-src pin (Catalog section); unconfirmed (no target, no sidecar) counts as a pass. |
+| `no-monkey-patch` | No `uopz`/`runkit7`/`Componere` extension is loaded (Runtime section, ADR-0049 A9). |
+| `no-dormant-baseline` | The baseline carries no dormant entries (Baseline section); vacuously true with no baseline at all. |
+
+A name outside this list is a configuration contradiction — the same lane
+as an unparseable `steins.toml` — and so is a misspelled key under
+`[doctor]` itself (`requries`, say): both are hard config errors, exit `1`,
+never a silently-ignored typo.
+
 ### Doctor's three exits
 
 `0` covers every posture doctor can report, degraded ones included. No
@@ -941,9 +1027,9 @@ Runtime
 ```
 
 `1` is a configuration contradiction — the configuration asserts something
-the world refutes. An unparseable `steins.toml`, an unresolvable profile, or
-a baseline file whose header is not valid JSON. The report still renders in
-full:
+the world refutes. An unparseable `steins.toml`, an unresolvable profile, a
+baseline file whose header is not valid JSON, or a violated (or unknown)
+`[doctor] require` assertion. The report still renders in full:
 
 ```
 $ steins doctor
@@ -957,15 +1043,16 @@ $ echo $?
 ```
 
 `2` is doctor's own usage error: an unknown flag, a second path, a
-`--baseline` with no argument, or a `path` that names nothing (ADR-0054 §10):
+`--baseline` with no argument, an unrecognized `--format` value, or a
+`path` that names nothing (ADR-0054 §10):
 
 ```
 $ steins doctor nope/
 steins: path does not exist: nope/
-$ steins doctor --format json
-steins: unknown flag `--format` for doctor
+$ steins doctor --format yaml
+steins: unknown format `yaml` (text|json)
 $ steins doctor src/ .
-steins: doctor takes at most one path (usage: steins doctor [--no-php] [--baseline <path>] [path])
+steins: doctor takes at most one path (usage: steins doctor [--no-php] [--baseline <path>] [--format text|json] [path])
 ```
 
 Reporting on `/typo`'s parent directory would answer a different question,

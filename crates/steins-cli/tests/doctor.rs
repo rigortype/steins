@@ -1,7 +1,9 @@
-//! End-to-end tests for `steins doctor` (ADR-0054 Part II, C3 plus C4's coverage
-//! posture): the sections (Runtime, Config + active surface, Layout, Coverage
-//! posture, Envelopes, Baseline) and the exit semantics (§10 — environment degrades
-//! at 0, configuration contradicts at 1, usage at 2).
+//! End-to-end tests for `steins doctor` (ADR-0054 Part II, C3 plus C4's full
+//! posture set): the sections (Runtime, Config + active surface, Layout, Coverage
+//! posture, Envelopes, Baseline, Catalog, Registry totality, Require) and the exit
+//! semantics (§10 — environment degrades at 0, configuration contradicts at 1,
+//! usage at 2). `--format json` and `[doctor] require` (§14) get their own test
+//! groups near the bottom of this file.
 //!
 //! Each test runs the real `steins` binary in a private temp dir (its own CWD) so
 //! the auto-loaded `steins.toml` and `.steins-baseline.jsonl` are isolated. Most use
@@ -136,6 +138,9 @@ fn doctor_renders_all_sections_exit_zero() {
         "Coverage posture",
         "Envelopes",
         "Baseline",
+        "Catalog",
+        "Registry totality",
+        "Require",
     ] {
         assert!(r.stdout.contains(section), "missing `{section}` section; stdout:\n{}", r.stdout);
     }
@@ -702,4 +707,293 @@ fn doctor_coverage_survives_an_empty_tree() {
     let r = run_in(&dir, &["doctor", "--no-php", "."]);
     assert_eq!(r.code, 0);
     assert!(r.stdout.contains("no .php files under"), "stdout:\n{}", r.stdout);
+}
+
+// ------------------------------------------------------------------- coverage: sound subset ---
+
+#[test]
+fn doctor_names_the_sound_subset_ids_when_no_sidecar() {
+    // ADR-0054 §9.2 / A2(ii): the sound-subset line names exactly which absence
+    // claims go silent, not just that "some" do.
+    let dir = workdir("sound-subset");
+    write(&dir, "a.php", "<?php\nfunction f(int $x): int { return $x + 1; }\nf(1);\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.stdout.contains("call.undefined-function")
+            && r.stdout.contains("class.undefined")
+            && r.stdout.contains("call.undefined-method")
+            && r.stdout.contains("silenced"),
+        "stdout:\n{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn doctor_reports_no_vouch_sites_by_default() {
+    let dir = workdir("no-vouch");
+    write(&dir, "a.php", "<?php\nfunction f(int $x): int { return $x + 1; }\nf(1);\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert!(
+        r.stdout.contains("vouched dynamic-code exemptions: none declared"),
+        "stdout:\n{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn doctor_counts_vouched_sites_and_names_the_checker_boundary() {
+    let dir = workdir("vouch");
+    write(&dir, "a.php", "<?php\nfunction f(int $x): int { return $x + 1; }\nf(1);\n");
+    write(
+        &dir,
+        "steins.toml",
+        "[transform.vouch]\nsites = [\"a.php:1\", \"a.php:2\"]\n",
+    );
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0, "a declared vouch is not a contradiction; stdout:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("vouched dynamic-code exemptions: 2 site(s) declared")
+            && r.stdout.contains("consulted by `transform` only"),
+        "stdout:\n{}",
+        r.stdout
+    );
+}
+
+// --------------------------------------------------------------------------- Runtime: A6 SAPI ---
+
+#[test]
+fn doctor_names_the_sapi_undeclared_curated_set() {
+    let dir = workdir("sapi");
+    write(&dir, "a.php", "<?php\n$x = 1;\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.stdout.contains("[runtime] sapi: undeclared")
+            && r.stdout.contains("fastcgi_finish_request")
+            && r.stdout.contains("apache_*"),
+        "stdout:\n{}",
+        r.stdout
+    );
+}
+
+// ------------------------------------------------------------------------------------ Catalog ---
+
+#[test]
+fn doctor_catalog_reports_the_pin_and_freshness_context() {
+    let dir = workdir("catalog");
+    write(&dir, "a.php", "<?php\n$x = 1;\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0);
+    assert!(r.stdout.contains("Catalog"), "stdout:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("builtin catalog pinned to php-src PHP"),
+        "stdout:\n{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("hierarchy table:") && r.stdout.contains("foldable allowlist:"),
+        "stdout:\n{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn doctor_catalog_says_skew_is_unconfirmed_with_no_target_and_no_sidecar() {
+    let dir = workdir("catalog-unconfirmed");
+    write(&dir, "a.php", "<?php\n$x = 1;\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert!(
+        r.stdout.contains("skew is unconfirmed"),
+        "with no target and --no-php, skew has no comparison basis; stdout:\n{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn doctor_catalog_flags_skew_against_a_declared_target() {
+    // ADR-0052 A11: a target range that does not exactly match the catalog's pin
+    // is skewed — demonstrated with a `require.php` far from `steins_catalog::PINNED_PHP`.
+    let dir = workdir("catalog-skew");
+    write(&dir, "a.php", "<?php\n$x = 1;\n");
+    write(&dir, "composer.json", r#"{"require":{"php":"^7.4"}}"#);
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0, "catalog skew is a degraded posture, not a contradiction; stdout:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("SKEWED against the pin") && r.stdout.contains("A11 consequence"),
+        "stdout:\n{}",
+        r.stdout
+    );
+}
+
+// ----------------------------------------------------------------------- Registry totality ---
+
+#[test]
+fn doctor_registry_totality_is_consistent() {
+    let dir = workdir("registry");
+    write(&dir, "a.php", "<?php\n$x = 1;\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0);
+    assert!(r.stdout.contains("Registry totality"), "stdout:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("registered id(s):")
+            && r.stdout.contains("emittable")
+            && r.stdout.contains("registered-not-yet-emitted"),
+        "stdout:\n{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("partition consistent"),
+        "the shipped registry must itself be self-consistent; stdout:\n{}",
+        r.stdout
+    );
+}
+
+// ------------------------------------------------------------------------ `--format json` ---
+
+#[test]
+fn doctor_format_json_renders_the_same_section_structure_as_text() {
+    let dir = workdir("json");
+    write(&dir, "a.php", THREE_THROWS);
+    let text = run_in(&dir, &["doctor", "--no-php", "."]);
+    let json_run = run_in(&dir, &["doctor", "--no-php", "--format", "json", "."]);
+    assert_eq!(text.code, 0);
+    assert_eq!(json_run.code, 0);
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&json_run.stdout).expect("doctor --format json must emit valid JSON");
+    assert_eq!(doc["schema"], "steins.doctor/v1");
+    assert_eq!(doc["exit_code"], 0);
+    let sections = doc["sections"].as_array().expect("sections is an array");
+    let names: Vec<&str> = sections.iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "Runtime",
+            "Config + active surface",
+            "Layout",
+            "Coverage posture",
+            "Envelopes",
+            "Baseline",
+            "Catalog",
+            "Registry totality",
+            "Require",
+        ],
+        "the json section list must match the text rendering's structure exactly"
+    );
+    // Spot-check one section's content agrees between the two renderings (modulo
+    // the text renderer's leading-space indentation, which json trims).
+    let envelopes = sections.iter().find(|s| s["name"] == "Envelopes").expect("Envelopes section");
+    let envelope_line = envelopes["lines"][0].as_str().expect("a line");
+    assert!(
+        text.stdout.contains(envelope_line),
+        "json line `{envelope_line}` must appear (trimmed) in the text rendering:\n{}",
+        text.stdout
+    );
+}
+
+#[test]
+fn doctor_format_json_exit_code_matches_the_process_exit_code() {
+    let dir = workdir("json-exit");
+    write(&dir, "a.php", THREE_THROWS);
+    write(&dir, "steins.toml", "garbage = = [[[\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "--format", "json", "."]);
+    assert_eq!(r.code, 1, "malformed toml is a contradiction even under json; stdout:\n{}", r.stdout);
+    let doc: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid JSON even on contradiction");
+    assert_eq!(doc["exit_code"], 1);
+}
+
+#[test]
+fn doctor_rejects_unknown_format_value() {
+    let dir = workdir("bad-format");
+    let r = run_in(&dir, &["doctor", "--format", "yaml"]);
+    assert_eq!(r.code, 2, "unrecognized --format value → usage error; stderr:\n{}", r.stderr);
+}
+
+#[test]
+fn doctor_format_requires_an_argument() {
+    let dir = workdir("format-noarg");
+    let r = run_in(&dir, &["doctor", "--format"]);
+    assert_eq!(r.code, 2, "stderr:\n{}", r.stderr);
+}
+
+// -------------------------------------------------------------------- `[doctor] require` ---
+
+#[test]
+fn doctor_require_not_configured_by_default() {
+    let dir = workdir("require-absent");
+    write(&dir, "a.php", THREE_THROWS);
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0);
+    assert!(r.stdout.contains("Require\n  not configured"), "stdout:\n{}", r.stdout);
+}
+
+#[test]
+fn doctor_require_sidecar_fails_under_no_php() {
+    let dir = workdir("require-sidecar");
+    write(&dir, "a.php", THREE_THROWS);
+    write(&dir, "steins.toml", "[doctor]\nrequire = [\"sidecar\"]\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 1, "a declared `sidecar` requirement fails under --no-php; stdout:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("FAIL `sidecar`") && r.stdout.contains("doctor exits 1"),
+        "the failing assertion must be named in the output; stdout:\n{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn doctor_require_no_monkey_patch_passes_by_default() {
+    let dir = workdir("require-monkey-patch");
+    write(&dir, "a.php", THREE_THROWS);
+    write(&dir, "steins.toml", "[doctor]\nrequire = [\"no-monkey-patch\"]\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0, "no monkey-patch extension is loaded by default; stdout:\n{}", r.stdout);
+    assert!(r.stdout.contains("PASS `no-monkey-patch`"), "stdout:\n{}", r.stdout);
+}
+
+#[test]
+fn doctor_require_no_dormant_baseline_passes_with_no_baseline() {
+    let dir = workdir("require-dormant");
+    write(&dir, "a.php", THREE_THROWS);
+    write(&dir, "steins.toml", "[doctor]\nrequire = [\"no-dormant-baseline\"]\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0, "vacuously true with no baseline at all; stdout:\n{}", r.stdout);
+    assert!(r.stdout.contains("PASS `no-dormant-baseline`"), "stdout:\n{}", r.stdout);
+}
+
+#[test]
+fn doctor_require_catalog_pin_match_unconfirmed_counts_as_a_pass() {
+    let dir = workdir("require-catalog");
+    write(&dir, "a.php", THREE_THROWS);
+    write(&dir, "steins.toml", "[doctor]\nrequire = [\"catalog-pin-match\"]\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0, "no target and no sidecar ⇒ unconfirmed, treated as a pass; stdout:\n{}", r.stdout);
+    assert!(r.stdout.contains("PASS `catalog-pin-match`"), "stdout:\n{}", r.stdout);
+}
+
+#[test]
+fn doctor_require_unknown_assertion_is_a_hard_config_error() {
+    let dir = workdir("require-unknown");
+    write(&dir, "a.php", THREE_THROWS);
+    write(&dir, "steins.toml", "[doctor]\nrequire = [\"not-a-real-assertion\"]\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 1, "an unknown assertion name is a configuration contradiction; stdout:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("FAIL `not-a-real-assertion`") && r.stdout.contains("unknown assertion"),
+        "stdout:\n{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn doctor_require_rejects_an_unknown_toml_key() {
+    // `deny_unknown_fields` posture (issue #268 acceptance criteria): a misspelled
+    // key under `[doctor]` is a hard parse error, same as `[runtime]`/`[plugins]`.
+    let dir = workdir("doctor-config-typo");
+    write(&dir, "a.php", THREE_THROWS);
+    write(&dir, "steins.toml", "[doctor]\nrequires = [\"sidecar\"]\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 1, "unknown [doctor] key → parse error → contradiction; stdout:\n{}", r.stdout);
+    assert!(r.stdout.contains("PARSE ERROR"), "stdout:\n{}", r.stdout);
 }
