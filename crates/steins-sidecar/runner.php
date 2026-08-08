@@ -108,6 +108,8 @@ function steins_handle($method, array $params)
             return steins_reflect($params);
         case 'preg_compile':
             return steins_preg_compile($params);
+        case 'defined':
+            return steins_defined($params);
         // Documented stub (ADR-0024), and it stays one. The plugin channel's
         // first facts (issue #68) arrive by a MANIFEST the Rust side reads
         // directly — `vendor/<name>/steins-plugin.json`, carrying label
@@ -351,6 +353,41 @@ function steins_preg_compile(array $params)
     }
 
     return ['kind' => 'preg', 'status' => 'refuses', 'message' => $message];
+}
+
+/**
+ * `defined` — does this engine have the global constant `$name`? (issue #198)
+ *
+ * The `constant.undefined` ladder's last leg. A curated list can never answer it:
+ * the constant a loaded extension provides is a property of the engine actually
+ * running the project, so the engine is asked (ADR-0049 §1, ADR-0004).
+ *
+ * ## Why the name is screened before `defined()` sees it
+ *
+ * `defined('C::K')` is a *class*-constant query, and PHP will **autoload** `C` to
+ * answer it — running project code inside the sidecar, which this process must
+ * never do. The caller only ever asks about bare global constants, so a name
+ * carrying `::` is a protocol violation and widens rather than being asked.
+ *
+ * `defined()` itself neither autoloads nor throws for a plain name, and it is
+ * case-sensitive on the constant's final segment (case-insensitive constants died
+ * with the third argument to `define()` in PHP 8.0), so the name travels verbatim.
+ *
+ * @param array<mixed> $params
+ * @return array<string, mixed>
+ */
+function steins_defined(array $params)
+{
+    $name = isset($params['name']) && is_string($params['name']) ? $params['name'] : null;
+    if ($name === null || $name === '') {
+        return ['kind' => 'widen', 'reason' => 'defined requires a non-empty string name'];
+    }
+    if (strpos($name, '::') !== false) {
+        return ['kind' => 'widen', 'reason' => 'class constants are not asked here'];
+    }
+
+    $name = ltrim($name, '\\');
+    return ['kind' => 'constant', 'status' => defined($name) ? 'defined' : 'not_defined'];
 }
 
 /**

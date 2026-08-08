@@ -71,6 +71,9 @@ use crate::{
     OVERRIDE_FINAL_ID, OVERRIDE_PARAMETER_VARIANCE_ID, OVERRIDE_RETURN_VARIANCE_ID,
     OVERRIDE_STATIC_MISMATCH_ID, OVERRIDE_VISIBILITY_WEAKENED_ID,
 };
+// global constants (ADR-0078, issue #198)
+use crate::CONSTANT_UNDEFINED_ID;
+// end global constants (ADR-0078, issue #198)
 
 /// The registry id for an `@steins-ignore` whose diagnostic id matches nothing on
 /// its target line (ADR-0023 anti-rot). Exempt from suppression.
@@ -375,6 +378,12 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // any posture), so no `warning-handler` gate: it never demotes.
     (INVALID_OPERAND_ID, Layer::Proof, Floor::Default),
     // end invalid operands (ADR-0078, issue #191)
+    // global constants (ADR-0078, issue #198)
+    // proof — fetching a constant nothing defines is a fatal `Error` since PHP 8.0,
+    // so it sits at the `default` floor with the rest of the absence family. Not
+    // warning-grade, so it is not behind the ADR-0049 §7 warning-handler gate.
+    (CONSTANT_UNDEFINED_ID, Layer::Proof, Floor::Default),
+    // end global constants (ADR-0078, issue #198)
     // contract — declared-contract acceptance (increase tripwires).
     (PARAM_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     (RETURN_MISMATCH_ID, Layer::Contract, Floor::Contracts),

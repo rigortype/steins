@@ -405,7 +405,7 @@ fn section_coverage(root: &Path, files: &[ParsedFile], layout: &ProjectLayout) {
             "  dam sites: none — no runtime-definition construct stands, so existence-absence claims are undammed (ADR-0049 §2)"
         );
     } else {
-        let mut dam_counts = [0usize; 4];
+        let mut dam_counts = [0usize; 5];
         for site in dam.sites() {
             let i = match site.kind {
                 DamKind::Eval => 0,
@@ -414,6 +414,9 @@ fn section_coverage(root: &Path, files: &[ParsedFile], layout: &ProjectLayout) {
                 // parse failure (ADR-0079, issue #180)
                 DamKind::Unparsable => 3,
                 // end parse failure (ADR-0079, issue #180)
+                // global constants (ADR-0078, issue #198)
+                DamKind::DefineDynamic => 4,
+                // end global constants (ADR-0078, issue #198)
             };
             dam_counts[i] += 1;
         }
@@ -427,11 +430,26 @@ fn section_coverage(root: &Path, files: &[ParsedFile], layout: &ProjectLayout) {
                     "unproven/out-of-universe include",
                     "runtime-name class_alias",
                     "unparsable file",
+                    "runtime-name define",
                 ]
             )
         );
+        // The name valve is only closed by a kind that can mint a name — a universe
+        // whose only sites are runtime-name `define`s keeps its function/class
+        // existence claims (ADR-0078, issue #198).
+        if dam.is_clear() {
+            outln!(
+                "    existence-absence claims (undefined function/class) still stand — no site here can mint a function or class name"
+            );
+        } else {
+            outln!(
+                "    existence-absence claims (undefined function/class) stay silent where these stand (ADR-0049 §2)"
+            );
+        }
+        // global constants (ADR-0078, issue #198): every kind closes the constant
+        // valve, so the operator is told that separately.
         outln!(
-            "    existence-absence claims (undefined function/class) stay silent where these stand (ADR-0049 §2)"
+            "    `constant.undefined` stays silent where any of these stand — a runtime-name define is a constant-only dam"
         );
     }
 

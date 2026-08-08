@@ -13,9 +13,9 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::wire::{
-    EnvInfo, FoldArg, FoldResult, PregCompile, Reflection, env_params, fold_params,
-    parse_env_result, parse_fold_result, parse_preg_compile_result, parse_reflection_result,
-    preg_compile_params, reflect_params,
+    ConstantDefined, EnvInfo, FoldArg, FoldResult, PregCompile, Reflection, defined_params,
+    env_params, fold_params, parse_defined_result, parse_env_result, parse_fold_result,
+    parse_preg_compile_result, parse_reflection_result, preg_compile_params, reflect_params,
 };
 
 /// The runner source, baked into the binary.
@@ -271,6 +271,21 @@ impl Sidecar {
         }
         let value = self.request("preg_compile", preg_compile_params(pattern))?;
         parse_preg_compile_result(value.get("result")?)
+    }
+
+    /// Ask the project's own PHP whether the global constant `name` is defined
+    /// (issue #198 / ADR-0078) — the existence oracle for extension constants and
+    /// anything an already-loaded bootstrap defined. `name` is the resolved FQN,
+    /// case as written. `Some(NotDefined)` is the only answer that lets the
+    /// `constant.undefined` ladder continue; `Some(Defined)` and `None` — poison,
+    /// timeout, a `widen`, a runner too old to implement the method — are both
+    /// silence at the consumer.
+    pub fn constant_defined(&mut self, name: &str) -> Option<ConstantDefined> {
+        if !self.revive() {
+            return None;
+        }
+        let value = self.request("defined", defined_params(name))?;
+        parse_defined_result(value.get("result")?)
     }
 
     /// Fold one builtin call: send `fold(name, args)` and interpret the reply.

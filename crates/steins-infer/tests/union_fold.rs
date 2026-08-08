@@ -152,6 +152,10 @@ impl FoldEngine for Fake {
     fn preg_compile(&mut self, _pattern: &str) -> Option<PregCompile> {
         None
     }
+    /// No constant oracle either (issue #198): this file's subject is integer width.
+    fn constant_defined(&mut self, _name: &str) -> Option<steins_sidecar::ConstantDefined> {
+        None
+    }
 }
 
 /// A live sidecar folder, or `None` when `php` cannot be reached — in which case

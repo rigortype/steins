@@ -200,6 +200,9 @@ pub fn detect(db: &dyn Db, project: Project, vouches: &VouchSet) -> DynamismObst
                 // transform scanner therefore ignores it; only `eval` and an
                 // out-of-universe include can hide call sites from this sweep.
                 DynamismKind::ClassAlias => {}
+                // Likewise a computed `define(...)` (ADR-0078, issue #198): it mints
+                // a constant name, which hides no call site from this sweep.
+                DynamismKind::DefineDynamic => {}
             }
         }
     }

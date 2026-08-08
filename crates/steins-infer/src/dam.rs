@@ -21,7 +21,11 @@
 //!   the reference scan cannot resolve — [`steins_syntax::DynamismKind::ClassAlias`]);
 //! - every **non-vendor** file that fails to parse (ADR-0079 §2.2): a recovery point
 //!   is a place the world is not enumerated, so it may have swallowed a class or a
-//!   function declaration outright.
+//!   function declaration outright;
+//! - every `define(...)` naming a **runtime-minted constant** (issue #198 —
+//!   [`steins_syntax::DynamismKind::DefineDynamic`]). This is the one kind with a
+//!   narrower blast radius: it dams `constant.undefined` only, since `define()`
+//!   cannot mint a function or a class ([`DamKind::dams_names`]).
 //!
 //! The vendor presumption of ADR-0046 §2 carries over verbatim: `eval` /
 //! dynamic-include inside a `vendor/` path is composer plumbing, presumed
@@ -63,6 +67,34 @@ pub enum DamKind {
     /// methods.
     Unparsable,
     // end parse failure (ADR-0079, issue #180)
+    // global constants (ADR-0078, issue #198)
+    /// A `define(...)` naming a **runtime-minted constant** — the constant-side twin
+    /// of [`Self::ClassAlias`] (a `define` with a literal name mints a declaration
+    /// record instead and is never a dam site).
+    ///
+    /// The only kind with a **narrower** blast radius than the rest: `define()` can
+    /// mint a constant and nothing else, so this site dams `constant.undefined` and
+    /// leaves the function/class-existence ids alone. That asymmetry is spelled in
+    /// [`DamKind::dams_names`], not open-coded at the consumers.
+    DefineDynamic,
+    // end global constants (ADR-0078, issue #198)
+}
+
+impl DamKind {
+    /// Whether the site can mint a **function or class-like name** — the question
+    /// [`DamFacts::is_clear`] asks. True for every kind but
+    /// [`Self::DefineDynamic`], whose mint is a constant.
+    ///
+    /// The converse needs no method: every kind here can mint a *constant*
+    /// (`eval` and an unproven include obviously; a mangled file may have swallowed
+    /// a `const` statement; a computed `class_alias` is the one that arguably
+    /// cannot, and is kept in the conservative direction rather than carved out
+    /// for a gain nobody asked for), so the constant question is simply "any site
+    /// at all" — see [`DamFacts::constants_are_clear`].
+    #[must_use]
+    pub const fn dams_names(self) -> bool {
+        !matches!(self, Self::DefineDynamic)
+    }
 }
 
 /// One dam site: where a runtime-definition construct stands (ADR-0049 §2).
@@ -89,12 +121,29 @@ impl DamFacts {
         &self.sites
     }
 
-    /// Whether the universe is **dam-clear**: no runtime-definition site stands, so
-    /// existence-absence claims are undammed (subject to the per-id ladder legs).
+    /// Whether the universe is **dam-clear** for *name* existence: no site that can
+    /// mint a function or class-like name stands, so those absence claims are
+    /// undammed (subject to the per-id ladder legs).
+    ///
+    /// A [`DamKind::DefineDynamic`] site does not count here (issue #198): a
+    /// computed `define()` mints a constant, and reading it as a universe-wide name
+    /// dam would silence `call.undefined-function` and `class.undefined` over
+    /// something that cannot touch either. The constant ladder asks
+    /// [`Self::constants_are_clear`] instead.
     #[must_use]
     pub fn is_clear(&self) -> bool {
+        !self.sites.iter().any(|s| s.kind.dams_names())
+    }
+
+    // global constants (ADR-0078, issue #198)
+    /// Whether the universe is dam-clear for **constant** existence: *any* site at
+    /// all closes this valve, since every dam kind can mint a constant name.
+    /// Strictly stronger than [`Self::is_clear`].
+    #[must_use]
+    pub fn constants_are_clear(&self) -> bool {
         self.sites.is_empty()
     }
+    // end global constants (ADR-0078, issue #198)
 
     /// The number of dam sites (the report/doctor posture's "N dammed sites").
     #[must_use]
@@ -102,7 +151,9 @@ impl DamFacts {
         self.sites.len()
     }
 
-    /// Whether there are no dam sites (alias of [`Self::is_clear`]).
+    /// Whether there are no dam sites at all (the `len() == 0` twin clippy pairs
+    /// with [`Self::len`]; identical to [`Self::constants_are_clear`], and *not* to
+    /// [`Self::is_clear`], which filters by kind).
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.sites.is_empty()
@@ -189,6 +240,10 @@ pub fn dam_facts(units: &[FileUnit], layout: &ProjectLayout) -> DamFacts {
                 // autoload include/eval, an aliasing call mints a *project-visible*
                 // class name regardless of where it sits, so it dams even in vendor.
                 DynamismKind::ClassAlias => DamKind::ClassAlias,
+                // A computed `define` mints a project-visible CONSTANT name wherever
+                // it sits, so — exactly like `class_alias` and for the same reason —
+                // the vendor presumption does not extend to it.
+                DynamismKind::DefineDynamic => DamKind::DefineDynamic,
             };
             sites.push(DamSite { path: u.path.to_owned(), line: pos.line, column: pos.column, kind });
         }
@@ -430,4 +485,45 @@ mod tests {
         assert_eq!(facts.len(), 1, "{:?}", facts.sites());
         assert!(!facts.is_clear());
     }
+
+    // global constants (ADR-0078, issue #198)
+    #[test]
+    fn a_runtime_name_define_dams_constants_only() {
+        // The one kind with a narrower blast radius. `define()` can mint a constant
+        // and nothing else, so reading it as a universe-wide NAME dam would silence
+        // `call.undefined-function` and `class.undefined` over something that cannot
+        // touch either.
+        let t = tree("<?php\ndefine('KNOWN', 1);\ndefine($computed, 2);\n");
+        let units = [FileUnit { path: "src/a.php", tree: &t }];
+        let facts = dam_facts(&units, &ProjectLayout::fallback());
+        assert_eq!(facts.len(), 1, "the literal define is not a site: {:?}", facts.sites());
+        assert_eq!(facts.sites()[0].kind, DamKind::DefineDynamic);
+        assert!(facts.is_clear(), "function/class existence is undammed by a computed define");
+        assert!(!facts.constants_are_clear(), "constant existence is dammed");
+    }
+
+    #[test]
+    fn a_runtime_name_define_in_vendor_still_dams() {
+        // The `class_alias` argument, verbatim: an aliasing or defining call mints a
+        // project-visible name regardless of where it sits, so the ADR-0046 §2 vendor
+        // presumption does not extend to it.
+        let t = tree("<?php\ndefine($computed, 1);\n");
+        let units = [FileUnit { path: "vendor/pkg/boot.php", tree: &t }];
+        let facts = dam_facts(&units, &ProjectLayout::fallback());
+        assert!(!facts.constants_are_clear(), "{:?}", facts.sites());
+    }
+
+    #[test]
+    fn every_ordinary_kind_dams_constants_too() {
+        // The converse of the asymmetry above: `eval` and an unproven include can
+        // mint a constant just as easily as a function, so both valves close.
+        for src in ["<?php\neval($code);\n", "<?php\ninclude 'config.php';\n"] {
+            let t = tree(src);
+            let units = [FileUnit { path: "src/a.php", tree: &t }];
+            let facts = dam_facts(&units, &ProjectLayout::fallback());
+            assert!(!facts.is_clear(), "{src}");
+            assert!(!facts.constants_are_clear(), "{src}");
+        }
+    }
+    // end global constants (ADR-0078, issue #198)
 }
