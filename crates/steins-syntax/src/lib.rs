@@ -8090,17 +8090,27 @@ fn refine_bound(state: &mut PresenceState, names: &[String]) {
 }
 
 /// Where control leaves a statement list, at the granularity the presence pass
-/// needs. Deliberately finer than [`BodyEnd`]: a `break` **terminates the list it
-/// sits in** and yet reaches the enclosing construct's successor, and conflating
-/// the two would drop a `switch` arm that ends in `break` out of the arm join —
-/// the one mistake that manufactures a finding on `switch { case 1: $x = 1; break;
-/// default: $x = 2; break; }`.
+/// needs. Deliberately finer than [`BodyEnd`], because the three ways out land in
+/// three different places and only one of them is the enclosing statement's
+/// successor:
+///
+/// * a `break` leaves for the enclosing **loop or switch**'s successor — so a
+///   `switch` arm ending in `break` stays in the switch's arm join (`switch { case
+///   1: $x = 1; break; default: $x = 2; break; }` binds on every arm), while an
+///   `if` arm ending in `break` does **not** reach the `if`'s successor;
+/// * a `continue` leaves for the enclosing loop's **back edge**;
+/// * `return`/`throw`/`exit` leave the scope entirely.
+///
+/// The states carried out by the first two are not lost: [`PresenceCx`] collects
+/// them, and the enclosing loop or switch joins them where they actually arrive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PresenceFlow {
     /// Control reached the end of the list.
     Fell,
-    /// A `break`/`continue` left the list for an enclosing construct.
-    Jumped,
+    /// A `break` left for the enclosing loop or switch's successor.
+    Broke,
+    /// A `continue` left for the enclosing loop's back edge.
+    Continued,
     /// `return`/`throw`/`exit`: the list's state reaches no successor at all, and
     /// this is the arm ADR-0081 §3 subtracts from a branch join.
     Terminated,
@@ -8120,6 +8130,13 @@ struct PresenceCx<'a> {
     silent: bool,
     /// Read spans already reported — a loop body is walked more than once.
     seen: HashSet<u32>,
+    /// The states carried out by `break`, waiting for the enclosing loop or switch
+    /// to join them into its successor. Saved and cleared around each such
+    /// construct, so a jump is never credited to the wrong one.
+    breaks: Vec<PresenceState>,
+    /// The states carried out by `continue`, waiting for the enclosing loop's back
+    /// edge — and, for a loop that can exit by its condition, its successor too.
+    continues: Vec<PresenceState>,
 }
 
 impl PresenceCx<'_> {
@@ -8228,15 +8245,11 @@ fn guard_bound_names(cond: &Expression<'_>, want_true: bool, out: &mut Vec<Strin
     match cond.unparenthesized() {
         Expression::Construct(Construct::Isset(i)) if want_true => {
             for value in i.values.iter() {
-                if let Expression::Variable(Variable::Direct(dv)) = value.unparenthesized() {
-                    out.push(strip_dollar(bytes_to_string(dv.name)));
-                }
+                push_guard_root(value, out);
             }
         }
         Expression::Construct(Construct::Empty(e)) if !want_true => {
-            if let Expression::Variable(Variable::Direct(dv)) = e.value.unparenthesized() {
-                out.push(strip_dollar(bytes_to_string(dv.name)));
-            }
+            push_guard_root(e.value, out);
         }
         Expression::UnaryPrefix(up) if matches!(up.operator, UnaryPrefixOperator::Not(_)) => {
             guard_bound_names(up.operand, !want_true, out);
@@ -8255,6 +8268,27 @@ fn guard_bound_names(cond: &Expression<'_>, want_true: bool, out: &mut Vec<Strin
             guard_bound_names(b.lhs, false, out);
             guard_bound_names(b.rhs, false, out);
         }
+        _ => {}
+    }
+}
+
+/// The **root local** a guarded expression reads through: `$x`, `$x['a']['b']`,
+/// `$x->p` and `$x->p['k']` all reach `x`, and nothing else does.
+///
+/// `isset($info['subject']['commonName'])` cannot be true unless `$info` is bound
+/// (witnessed: PHP evaluates the whole chain and answers false at the first missing
+/// link, without warning), so the root is exactly as guarded as a bare `isset($x)`
+/// would make it. This is the shape the corpus produces far more often than the
+/// bare one — the `if (!isset($info['subject']['commonName'])) { return null; }`
+/// prologue — and reading only the bare spelling reported every read after it.
+fn push_guard_root(expr: &Expression<'_>, out: &mut Vec<String>) {
+    match expr.unparenthesized() {
+        Expression::Variable(Variable::Direct(dv)) => {
+            out.push(strip_dollar(bytes_to_string(dv.name)));
+        }
+        Expression::ArrayAccess(aa) => push_guard_root(aa.array, out),
+        Expression::Access(Access::Property(pa)) => push_guard_root(pa.object, out),
+        Expression::Access(Access::NullSafeProperty(pa)) => push_guard_root(pa.object, out),
         _ => {}
     }
 }
@@ -8293,7 +8327,14 @@ fn presence_stmt(
     cx: &mut PresenceCx,
 ) -> PresenceFlow {
     match s {
-        Statement::Break(_) | Statement::Continue(_) => PresenceFlow::Jumped,
+        Statement::Break(_) => {
+            cx.breaks.push(state.clone());
+            PresenceFlow::Broke
+        }
+        Statement::Continue(_) => {
+            cx.continues.push(state.clone());
+            PresenceFlow::Continued
+        }
         Statement::Block(b) => presence_seq(b.statements.iter(), state, cx),
         Statement::If(i) => presence_if(i, state, cx),
         Statement::Switch(sw) => presence_switch(sw, state, cx),
@@ -8301,20 +8342,26 @@ fn presence_stmt(
             presence_leaf(&Node::Expression(w.condition), state, cx);
             let mut entry = state.clone();
             refine_bound(&mut entry, &guarded_names(w.condition, true));
-            let exit = presence_loop_body(w.body.statements(), &entry, cx);
+            let exits = presence_loop_body(w.body.statements(), &entry, cx);
             if expr_is_true(w.condition) {
-                // No false-condition exit edge: zero iterations is impossible, so
-                // the loop's own exit state is the body's.
-                *state = exit;
+                // No false-condition exit edge: zero iterations is impossible and
+                // the back edge never leaves, so only a `break` reaches the
+                // successor.
+                *state = join_loop_exit(&entry, exits, false);
             } else {
-                *state = join_states(state, &exit);
+                let after = join_loop_exit(&entry, exits, true);
+                *state = join_states(state, &after);
                 refine_bound(state, &guarded_names(w.condition, false));
             }
             PresenceFlow::Fell
         }
         Statement::DoWhile(d) => {
-            // The body runs at least once, so its exit state is unconditional.
-            *state = presence_loop_body(std::slice::from_ref(d.statement), state, cx);
+            // The body runs at least once, so there is no zero-iteration path to
+            // join in — but the condition can still be false, so the back edge does
+            // reach the successor.
+            let entry = state.clone();
+            let exits = presence_loop_body(std::slice::from_ref(d.statement), &entry, cx);
+            *state = join_loop_exit(&entry, exits, true);
             presence_leaf(&Node::Expression(d.condition), state, cx);
             PresenceFlow::Fell
         }
@@ -8330,14 +8377,16 @@ fn presence_stmt(
             if let Some(cond) = last {
                 refine_bound(&mut entry, &guarded_names(cond, true));
             }
-            let mut exit = presence_loop_body(f.body.statements(), &entry, cx);
+            let mut exits = presence_loop_body(f.body.statements(), &entry, cx);
+            // The increments run on the back edge, not on a `break`.
             for inc in f.increments.iter() {
-                presence_leaf(&Node::Expression(inc), &mut exit, cx);
+                presence_leaf(&Node::Expression(inc), &mut exits.looped, cx);
             }
             if last.is_none_or(|c| expr_is_true(c)) {
-                *state = exit;
+                *state = join_loop_exit(&entry, exits, false);
             } else {
-                *state = join_states(state, &exit);
+                let after = join_loop_exit(&entry, exits, true);
+                *state = join_states(state, &after);
             }
             PresenceFlow::Fell
         }
@@ -8357,11 +8406,12 @@ fn presence_stmt(
             for name in targets.bound {
                 entry.insert(name, BindingPresence::Bound);
             }
-            let exit = presence_loop_body(fe.body.statements(), &entry, cx);
+            let exits = presence_loop_body(fe.body.statements(), &entry, cx);
+            let after = join_loop_exit(&entry, exits, true);
             // Zero iterations is always possible over an empty subject — which is
             // exactly why `foreach ($xs as $v) {} echo $v;` is this id and not
             // silence.
-            *state = join_states(state, &exit);
+            *state = join_states(state, &after);
             PresenceFlow::Fell
         }
         Statement::Try(t) => presence_try(t, state, cx),
@@ -8405,7 +8455,12 @@ fn presence_if(
         }
         let mut arm = state.clone();
         refine_bound(&mut arm, &guarded_names(cond, true));
-        if presence_seq(stmts.iter(), &mut arm, cx) != PresenceFlow::Terminated {
+        // Only a fall-through arm reaches THIS statement's successor. A `break` or
+        // `continue` arm leaves for an enclosing construct, which joins its state
+        // where it actually arrives — keeping it here is what would report
+        // `foreach (…) { if (A) { $p = …; } elseif (B) { $p = …; } else { continue; }
+        // use($p); }`, the shape the corpus produces most.
+        if presence_seq(stmts.iter(), &mut arm, cx) == PresenceFlow::Fell {
             arms.push(arm);
         }
         if expr_is_true(cond) {
@@ -8419,7 +8474,7 @@ fn presence_if(
         match body.else_statements() {
             Some(stmts) => {
                 let mut arm = state.clone();
-                if presence_seq(stmts.iter(), &mut arm, cx) != PresenceFlow::Terminated {
+                if presence_seq(stmts.iter(), &mut arm, cx) == PresenceFlow::Fell {
                     arms.push(arm);
                 }
             }
@@ -8429,6 +8484,9 @@ fn presence_if(
         }
     }
     let Some(joined) = arms.into_iter().reduce(|a, b| join_states(&a, &b)) else {
+        // No arm falls through. Whatever each one did — terminate or jump — nothing
+        // after this `if` in this list runs, and the jump states are already parked
+        // on the enclosing construct.
         return PresenceFlow::Terminated;
     };
     *state = joined;
@@ -8450,6 +8508,9 @@ fn presence_switch(
 ) -> PresenceFlow {
     presence_leaf(&Node::Expression(sw.expression), state, cx);
     let pre = state.clone();
+    // A `break` in a case body targets THIS switch, so its state is ours to join.
+    // A `continue` targets the enclosing loop and must stay parked for it.
+    let outer_breaks = std::mem::take(&mut cx.breaks);
     let mut arms: Vec<PresenceState> = Vec::new();
     let mut has_default = false;
     for case in sw.body.cases() {
@@ -8465,13 +8526,18 @@ fn presence_switch(
             continue;
         }
         let mut arm = pre.clone();
-        if presence_seq(case.statements().iter(), &mut arm, cx) != PresenceFlow::Terminated {
+        // A case body that falls off its end runs into the NEXT case rather than
+        // past the switch, so only its `break` state — already parked — reaches the
+        // successor. Keeping the fall-off state here would be the fall-through edge
+        // this pass does not model.
+        if presence_seq(case.statements().iter(), &mut arm, cx) == PresenceFlow::Fell {
             arms.push(arm);
         }
     }
     if !has_default {
         arms.push(pre);
     }
+    arms.extend(std::mem::replace(&mut cx.breaks, outer_breaks));
     let Some(joined) = arms.into_iter().reduce(|a, b| join_states(&a, &b)) else {
         return PresenceFlow::Terminated;
     };
@@ -8494,13 +8560,32 @@ fn presence_try(
     state: &mut PresenceState,
     cx: &mut PresenceCx,
 ) -> PresenceFlow {
-    let pre = state.clone();
+    let mut certain = state.clone();
+    let mut block_flow = PresenceFlow::Fell;
+    let mut rest = t.block.statements.iter().peekable();
+    // The prologue that cannot throw. `$count = 0;` at the head of a `try` runs
+    // before anything can go wrong, so a `catch` arm must not be entered with it
+    // undone — the shape that reported `try { $count = 0; foreach (…) {…} } catch
+    // (…) {…} if (1 < $count)`, where every path does bind.
+    while let Some(s) = rest.peek() {
+        if !stmt_cannot_throw(s) {
+            break;
+        }
+        let s = rest.next().expect("peeked");
+        block_flow = presence_stmt(s, &mut certain, cx);
+        if block_flow != PresenceFlow::Fell {
+            break;
+        }
+    }
+    let pre = certain;
     let mut block = pre.clone();
-    let block_flow = presence_seq(t.block.statements.iter(), &mut block, cx);
+    if block_flow == PresenceFlow::Fell {
+        block_flow = presence_seq(rest, &mut block, cx);
+    }
     let thrown = join_states(&pre, &block);
 
     let mut arms: Vec<PresenceState> = Vec::new();
-    if block_flow != PresenceFlow::Terminated {
+    if block_flow == PresenceFlow::Fell {
         arms.push(block);
     }
     for clause in t.catch_clauses.iter() {
@@ -8508,8 +8593,7 @@ fn presence_try(
         if let Some(v) = clause.variable.as_ref() {
             arm.insert(strip_dollar(bytes_to_string(v.name)), BindingPresence::Bound);
         }
-        if presence_seq(clause.block.statements.iter(), &mut arm, cx) != PresenceFlow::Terminated
-        {
+        if presence_seq(clause.block.statements.iter(), &mut arm, cx) == PresenceFlow::Fell {
             arms.push(arm);
         }
     }
@@ -8533,35 +8617,92 @@ fn presence_try(
     PresenceFlow::Fell
 }
 
-/// Walk a loop body to a fixpoint and answer its exit state (ADR-0081 §4).
+/// Walk a loop body to a fixpoint and answer the states that leave it
+/// (ADR-0081 §4).
 ///
-/// The body's entry is its own entry joined with its exit — a prior iteration may
-/// have bound a name the first one did not, so a read *earlier* in the body than the
-/// binding is `Maybe` rather than `Unbound`. The lattice has height two, so the
-/// iteration is bounded at two rounds and asserted stable by construction; the
-/// rounds that only compute the fixpoint report nothing, because the state they run
-/// against is not yet the one any execution has.
+/// The body's entry is its own entry joined with everything that reaches the **back
+/// edge** — the fall-through end of the body and every `continue`. A prior iteration
+/// may have bound a name the first one did not, so a read *earlier* in the body than
+/// the binding is `Maybe` rather than `Unbound`. The lattice has height two, so the
+/// iteration is bounded at two rounds; the rounds that only compute the fixpoint
+/// report nothing, because the state they run against is not yet the one any
+/// execution has.
+///
+/// The two exits are answered apart because they are reached differently: `looped`
+/// is the state at the back edge, which becomes the loop's successor only when the
+/// loop can exit by its condition, while `broke` is every `break` state, which
+/// reaches the successor unconditionally — including out of a `while (true)`.
+struct LoopExits {
+    /// The state at the back edge: the body's fall-through end joined with every
+    /// `continue`.
+    looped: PresenceState,
+    /// Every `break` state, in order.
+    broke: Vec<PresenceState>,
+}
+
 fn presence_loop_body(
     body: &[Statement<'_>],
     entry: &PresenceState,
     cx: &mut PresenceCx,
-) -> PresenceState {
+) -> LoopExits {
+    // A jump inside this body targets THIS loop; anything parked by an enclosing
+    // one must not be credited to it, and vice versa.
+    let outer_breaks = std::mem::take(&mut cx.breaks);
+    let outer_continues = std::mem::take(&mut cx.continues);
+
     let mut body_entry = entry.clone();
     let was_silent = cx.silent;
     cx.silent = true;
     for _ in 0..2 {
         let mut s = body_entry.clone();
-        presence_seq(body.iter(), &mut s, cx);
-        let next = join_states(&body_entry, &s);
+        let flow = presence_seq(body.iter(), &mut s, cx);
+        let mut back = std::mem::take(&mut cx.continues);
+        if flow == PresenceFlow::Fell {
+            back.push(s);
+        }
+        cx.breaks.clear();
+        let Some(reached) = back.into_iter().reduce(|a, b| join_states(&a, &b)) else {
+            break; // nothing reaches the back edge at all.
+        };
+        let next = join_states(&body_entry, &reached);
         if next == body_entry {
             break;
         }
         body_entry = next;
     }
     cx.silent = was_silent;
-    let mut exit = body_entry;
-    presence_seq(body.iter(), &mut exit, cx);
-    exit
+    cx.breaks.clear();
+    cx.continues.clear();
+
+    let mut fell = body_entry.clone();
+    let flow = presence_seq(body.iter(), &mut fell, cx);
+    let mut back = std::mem::replace(&mut cx.continues, outer_continues);
+    if flow == PresenceFlow::Fell {
+        back.push(fell);
+    }
+    let looped = back.into_iter().reduce(|a, b| join_states(&a, &b)).unwrap_or(body_entry);
+    let broke = std::mem::replace(&mut cx.breaks, outer_breaks);
+    LoopExits { looped, broke }
+}
+
+/// Join a loop's exits into the state after it. `entry` is folded in for the
+/// zero-iteration path and `looped` for the condition-became-false path, both only
+/// when the loop can exit that way at all; a `break` always reaches the successor.
+fn join_loop_exit(
+    entry: &PresenceState,
+    exits: LoopExits,
+    can_exit_by_condition: bool,
+) -> PresenceState {
+    let LoopExits { looped, broke } = exits;
+    let mut states = broke;
+    if can_exit_by_condition {
+        states.push(looped);
+    } else if states.is_empty() {
+        // `while (true)` with no `break`: the successor is unreachable, and the
+        // back-edge state is the only honest thing to carry into dead code.
+        states.push(looped);
+    }
+    states.into_iter().reduce(|a, b| join_states(&a, &b)).unwrap_or_else(|| entry.clone())
 }
 
 /// The reads whose binding only *some* paths carry (issue #267) — the computation
@@ -8596,8 +8737,14 @@ fn maybe_undefined_reads(
             state.insert(strip_dollar(bytes_to_string(v.variable.name)), BindingPresence::Bound);
         }
     }
-    let mut cx =
-        PresenceCx { scope_bound, out: Vec::new(), silent: false, seen: HashSet::new() };
+    let mut cx = PresenceCx {
+        scope_bound,
+        out: Vec::new(),
+        silent: false,
+        seen: HashSet::new(),
+        breaks: Vec::new(),
+        continues: Vec::new(),
+    };
     for s in statements {
         if presence_stmt(s, &mut state, &mut cx) != PresenceFlow::Fell {
             break;
@@ -8606,6 +8753,60 @@ fn maybe_undefined_reads(
     let mut out = cx.out;
     out.sort_by_key(|r| r.span.start);
     out
+}
+
+/// Whether a statement **provably cannot throw**, over a whitelist narrow enough
+/// that no PHP semantics argument is needed to read it.
+///
+/// Almost every PHP construct can raise something: a call, a property fetch, a
+/// division, a concatenation with an object, an undefined constant. So this answers
+/// `true` only for a plain `=` assignment from a literal, an array of literals or
+/// another local — the prologue idiom (`$count = 0;`, `$out = [];`, `$x = $y;`) and
+/// nothing beyond it. Answering `false` costs precision and never correctness: it
+/// puts the statement back on the "may have thrown before this" side, which is the
+/// conservative reading [`presence_try`] applies to the whole block anyway.
+fn stmt_cannot_throw(s: &Statement<'_>) -> bool {
+    match s {
+        Statement::Noop(_) => true,
+        Statement::Expression(es) => match es.expression.unparenthesized() {
+            Expression::Assignment(a) => {
+                a.operator.is_assign()
+                    && matches!(a.lhs.unparenthesized(), Expression::Variable(Variable::Direct(_)))
+                    && expr_cannot_throw(a.rhs)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// The value half of [`stmt_cannot_throw`]: a literal, an array literal of such
+/// values, another local, or a sign/negation over one.
+fn expr_cannot_throw(expr: &Expression<'_>) -> bool {
+    match expr.unparenthesized() {
+        Expression::Literal(_) => true,
+        Expression::Variable(Variable::Direct(_)) => true,
+        Expression::Array(a) => a.elements.iter().all(element_cannot_throw),
+        Expression::LegacyArray(a) => a.elements.iter().all(element_cannot_throw),
+        Expression::UnaryPrefix(up) => {
+            matches!(
+                up.operator,
+                UnaryPrefixOperator::Not(_)
+                    | UnaryPrefixOperator::Negation(_)
+                    | UnaryPrefixOperator::Plus(_)
+            ) && expr_cannot_throw(up.operand)
+        }
+        _ => false,
+    }
+}
+
+fn element_cannot_throw(element: &ArrayElement<'_>) -> bool {
+    match element {
+        ArrayElement::KeyValue(kv) => expr_cannot_throw(kv.key) && expr_cannot_throw(kv.value),
+        ArrayElement::Value(v) => expr_cannot_throw(v.value),
+        ArrayElement::Missing(_) => true,
+        ArrayElement::Variadic(_) => false,
+    }
 }
 
 /// Whether a `goto` or a label stands anywhere in this subtree, without descending

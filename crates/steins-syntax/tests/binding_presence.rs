@@ -153,6 +153,22 @@ fn a_conjunction_guards_its_right_operand() {
 }
 
 #[test]
+fn a_guard_over_an_offset_chain_refines_its_root() {
+    // `isset($info['subject']['commonName'])` cannot be true unless `$info` is
+    // bound, so the early-return prologue leaves the reads after it on a bound path.
+    assert_eq!(
+        maybe(
+            "if ($c) { $info = [1]; } if (!isset($info['a']['b'])) { return 0; } echo $info['a']['b'];"
+        ),
+        none()
+    );
+    assert_eq!(maybe("if ($c) { $o = 1; } if (!isset($o->p)) { return 0; } echo $o->p;"), none());
+    assert_eq!(maybe("if ($c) { $x = [1]; } if (empty($x['k'])) { return 0; } echo $x['k'];"), none());
+    // The negative control: no guard, and the same read reports.
+    assert_eq!(maybe("if ($c) { $info = [1]; } echo $info['a'];"), one("info"));
+}
+
+#[test]
 fn no_polarity_ever_refines_toward_absence() {
     // `isset($x)` is FALSE on a bound null, so the else-arm proves nothing — and
     // the then-arm binding is what makes the join bound.
@@ -192,6 +208,54 @@ fn the_back_edge_makes_an_earlier_read_maybe_rather_than_unbound() {
     assert_eq!(maybe("$x = 0; foreach ([1, 2] as $v) { echo $x; $x = 1; }"), none());
 }
 
+#[test]
+fn a_jumping_arm_does_not_reach_the_ifs_successor() {
+    // The corpus's most common shape by a wide margin: the classify-or-skip loop.
+    // The `continue` arm never reaches `use($p)`, so the join is over the two
+    // binding arms alone.
+    assert_eq!(
+        maybe(
+            "foreach ([1, 2] as $op) { if ($c) { $p = 1; } elseif ($d) { $p = 2; } else { continue; } echo $p; }"
+        ),
+        none()
+    );
+    assert_eq!(
+        maybe("foreach ([1, 2] as $op) { if ($c) { $p = 1; } else { break; } echo $p; }"),
+        none()
+    );
+    // The negative control: the same shape whose third arm falls through does
+    // reach the read, on a path that binds nothing.
+    assert_eq!(
+        maybe(
+            "foreach ([1, 2] as $op) { if ($c) { $p = 1; } elseif ($d) { $p = 2; } else { echo 'skip'; } echo $p; }"
+        ),
+        one("p")
+    );
+}
+
+#[test]
+fn a_break_state_reaches_the_loop_successor() {
+    // The only way out of a `while (true)` is the `break`, and it binds — so the
+    // read after the loop is on a bound path.
+    assert_eq!(maybe("while (true) { if ($c) { $x = 1; break; } } echo $x;"), none());
+    assert_eq!(maybe("for (;;) { if ($c) { $x = 1; break; } } echo $x;"), none());
+    // A second break that does NOT bind puts an unbound path back on the exit.
+    assert_eq!(
+        maybe("while (true) { if ($c) { $x = 1; break; } if ($d) { break; } } echo $x;"),
+        one("x")
+    );
+}
+
+#[test]
+fn a_continue_reaches_the_back_edge_rather_than_the_successor() {
+    // The `continue` state re-enters the body, so a read before the binding is
+    // `Maybe` on the second iteration — and the loop's own exit still sees the
+    // zero-iteration path.
+    assert_eq!(maybe("while ($c) { if ($d) { continue; } $x = 1; } echo $x;"), one("x"));
+    // Bound before the loop, so neither edge has anything to add.
+    assert_eq!(maybe("$x = 0; while ($c) { if ($d) { continue; } $x = 1; } echo $x;"), none());
+}
+
 // ---------------------------------------------------------------------------
 // `try`/`catch`/`finally` — conservative in one direction only (ADR-0081 §4).
 // ---------------------------------------------------------------------------
@@ -208,6 +272,25 @@ fn a_catch_arm_enters_with_the_try_block_weakened() {
     assert_eq!(maybe("try { $x = g(); } catch (Throwable $e) { return 0; } echo $x;"), none());
     // A read inside the catch is judged against the weakened state.
     assert_eq!(maybe("try { $x = g(); } catch (Throwable $e) { echo $x; }"), one("x"));
+}
+
+#[test]
+fn a_try_block_prologue_that_cannot_throw_runs_for_certain() {
+    // `$count = 0;` at the head of a `try` runs before anything can go wrong, so
+    // every path reaching the read after the construct carries the binding.
+    assert_eq!(
+        maybe("try { $count = 0; g(); } catch (Throwable $e) { } echo $count;"),
+        none()
+    );
+    assert_eq!(maybe("try { $out = []; g(); } catch (Throwable $e) { } echo $out;"), none());
+    // The negative control: a binding that can throw on its right-hand side is back
+    // on the "may have thrown before this" side.
+    assert_eq!(maybe("try { $count = g(); } catch (Throwable $e) { } echo $count;"), one("count"));
+    // …and so is one that follows a statement that can throw.
+    assert_eq!(
+        maybe("try { g(); $count = 0; } catch (Throwable $e) { } echo $count;"),
+        one("count")
+    );
 }
 
 #[test]
