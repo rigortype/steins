@@ -503,7 +503,10 @@ mod tests {
         let r = render_value_domain(&[s("a*/b")]).unwrap();
         assert!(!r.contains("*/"), "rendered `{r}` still carries the docblock terminator");
         assert!(!r.contains('\''), "rendered `{r}` is a corrupting literal, not a keyword");
-        assert_eq!(r, "non-falsy-string");
+        // The keyword is the grid cell the value's own predicates name (issue
+        // #240): `'a*/b'` is lowercase as well as non-falsy, and the armor's
+        // contract is that a literal widens to a KEYWORD, not to any one rung.
+        assert_eq!(r, "non-falsy-lowercase-string");
         round_trips(&r);
     }
 
@@ -513,7 +516,7 @@ mod tests {
     fn star_slash_in_a_union_forces_a_keyword() {
         let r = render_value_domain(&[s("ok"), s("a*/b")]).unwrap();
         assert!(!r.contains("*/"), "rendered `{r}` still carries the docblock terminator");
-        assert_eq!(r, "non-falsy-string");
+        assert_eq!(r, "non-falsy-lowercase-string");
         round_trips(&r);
     }
 
@@ -523,7 +526,7 @@ mod tests {
     fn newline_string_never_renders_a_literal() {
         let r = render_value_domain(&[s("line1\nline2")]).unwrap();
         assert!(!r.contains('\n') && !r.contains('\''), "rendered `{r}` corrupts the tag line");
-        assert_eq!(r, "non-falsy-string");
+        assert_eq!(r, "non-falsy-lowercase-string");
         round_trips(&r);
     }
 
@@ -533,7 +536,9 @@ mod tests {
     #[test]
     fn newline_bearing_numeric_string_renders_the_keyword() {
         let r = render_value_domain(&[s("5\n")]).unwrap();
-        assert_eq!(r, "numeric-string");
+        // `"5\n"` is numeric, is neither `''` nor `'0'`, and has no cased
+        // character — three predicates, one grid cell (issue #240).
+        assert_eq!(r, "non-falsy-numeric-uncased-string");
         assert!(!r.contains('\n') && !r.contains('\''));
         round_trips(&r);
     }
@@ -573,7 +578,7 @@ mod tests {
         // Documented divergence on a docblock-*unsafe* value: the renderer widens to
         // a keyword, the shared terminal speller spells the (escaped) literal.
         let unsafe_val = vec![s("a*/b")];
-        assert_eq!(render_value_domain(&unsafe_val).unwrap(), "non-falsy-string");
+        assert_eq!(render_value_domain(&unsafe_val).unwrap(), "non-falsy-lowercase-string");
         assert_eq!(
             summarize_vals(&unsafe_val).and_then(|a| spell_arms(&a)).unwrap(),
             "'a*/b'"

@@ -411,3 +411,44 @@ Sized and filed as issue #240, in three separable pieces: re-file the bucket
 (harness only, +10 admissible for free), seed the declared `Inter` form, and
 spell the closed grid. The reach gaps it exposes are deliberately left for
 their own issues, once #240's first piece makes them visible as `differ` rows.
+
+### Realized delta (#240, implemented)
+
+Same instrument, master `5264878`, phpstan-src unchanged, 15,845 assertions. The
+three pieces landed in the order the issue sized them, each measured on its own:
+
+| run | match | unsupported | equal | subsumed | differ | skipped | **admissible** |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline | 1,711 | 2,120 | 108 | 220 | 11,378 | 308 | **2,039** |
+| + piece 1 (harness) | 1,711 | 1,877 | 110 | 228 | 11,611 | 308 | **2,049** |
+| + piece 2 (seed) | 1,711 | 1,877 | 110 | 232 | 11,607 | 308 | **2,053** |
+| + piece 3 (grid) | 1,711 | 1,877 | 110 | 243 | 11,596 | 308 | **2,064** |
+
+The 273 accessory rows, before → after: `unsupported` 273 → 30, `differ` 0 →
+223, `subsumed` 0 → 18, `equal` 0 → 2. **No row anywhere moved away from
+admissible**, and `match` did not move at all.
+
+Three corrections to the probe above:
+
+1. **Piece 1 moves 243 rows, not 263.** The two figures cannot both hold: the 30
+   rows with a `literal-string`/`class-string` arm stay gated *by the same
+   decision*, so 233 land in `differ` and 10 flip to admissible. "263 to
+   `differ`" double-counted the 30.
+2. **`contractty_to_fact` is not the lowering a declared `@param` reaches.** That
+   hole is real but sits on the *builtin* return path (curated rows, the
+   ADR-0069 floor), where no intersection occurs today. A declared `@param`
+   reaches `steins_contract::to_fact` through issue #242's
+   `seed_refined_scalar_fact` when the parameter has a native type, and
+   `spell_arms` through the arm lane when it does not — so closing the hole where
+   the probe pointed would have changed nothing observable. The fold now lives in
+   one place (`steins_contract::inter_str_preds`) and all three read it.
+3. **The speller gap was bounded at ≤ 19 rows and paid 11.** The 10 already-exact
+   rows were piece 1's, and 4 of the remainder were piece 2's; the grid's own
+   +11 includes rows the probe's ceiling attribution had filed under "sayable but
+   not computed", because the *conjunction* seeded by piece 2 became sayable only
+   with the grid in front of it. The two pieces are not separable in the way the
+   attribution table implies.
+
+The reach gaps the re-filing exposes are now visible as `differ` rows and remain
+for their own issues: `!== '0'` establishing `NON_FALSY`, concatenation carrying
+predicates, and `strtoupper` preserving `NUMERIC`.

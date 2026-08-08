@@ -26860,6 +26860,12 @@ fn contractty_to_fact(ty: &ContractTy) -> Option<Fact> {
         ContractTy::Base(b) => Some(Fact::General { base: *b, nullable: false }),
         ContractTy::IntIn(r) => Some(Fact::refined(Base::Int, Refinement::Int(*r), false)),
         ContractTy::StrWith(p) => Some(Fact::refined(Base::String, Refinement::Str(*p), false)),
+        // An all-`StrWith` intersection is one predicate set (issue #240), folded
+        // by `steins_contract::inter_str_preds` — the same fold
+        // `steins_contract::to_fact` and the arm speller read, never a second one
+        // here. Every other `Inter` still returns `None`: the honest floor.
+        ContractTy::Inter(members) => steins_contract::inter_str_preds(members)
+            .map(|p| Fact::refined(Base::String, Refinement::Str(p), false)),
         ContractTy::Union(members) if members.len() == 2 && members.iter().any(|m| matches!(m, ContractTy::Null)) => {
             let inner = members.iter().find(|m| !matches!(m, ContractTy::Null))?;
             fact_with_null(&contractty_to_fact(inner)?)

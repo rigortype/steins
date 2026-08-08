@@ -323,12 +323,14 @@ fn star_slash_string_widens_to_keyword_not_a_broken_literal() {
     // A caller passes a string containing the block-comment terminator `*/`.
     // Rendering it as a literal (`'a*/b'`) would close the enclosing `/** … */`
     // early — a hard PHP parse error. The honest, valid repair widens to a keyword.
+    // (The keyword is the grid cell the value names — `'a*/b'` is lowercase too,
+    // issue #240 — and `assert_docblock_types_parse` still re-reads it.)
     let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
     let main = "<?php\nf(\"a*/b\");\n";
     let report = plan(&[("lib.php", lib), ("main.php", main)]);
     assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
     let out = report.plan.apply_file("lib.php", lib);
-    assert!(out.contains("@param non-falsy-string $x"), "got:\n{out}");
+    assert!(out.contains("@param non-falsy-lowercase-string $x"), "got:\n{out}");
     assert_eq!(out.matches("*/").count(), 1, "docblock terminator corrupted:\n{out}");
     assert!(!out.contains("'a*/b'"), "wrote a corrupting literal:\n{out}");
     assert_docblock_types_parse(&out);
@@ -341,7 +343,7 @@ fn star_slash_in_a_literal_union_widens_to_keyword() {
     let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
     let main = "<?php\nf(\"ok\");\nf(\"a*/b\");\n";
     let out = apply_first(&[("lib.php", lib), ("main.php", main)]);
-    assert!(out.contains("@param non-falsy-string $x"), "got:\n{out}");
+    assert!(out.contains("@param non-falsy-lowercase-string $x"), "got:\n{out}");
     assert_eq!(out.matches("*/").count(), 1, "docblock terminator corrupted:\n{out}");
     assert_docblock_types_parse(&out);
 }
@@ -354,7 +356,7 @@ fn newline_bearing_string_widens_to_keyword_not_a_split_literal() {
     let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
     let main = "<?php\nf('line1\nline2');\n";
     let out = apply_first(&[("lib.php", lib), ("main.php", main)]);
-    assert!(out.contains("@param non-falsy-string $x"), "got:\n{out}");
+    assert!(out.contains("@param non-falsy-lowercase-string $x"), "got:\n{out}");
     let doc_line = out.lines().find(|l| l.contains("@param")).unwrap();
     assert!(doc_line.contains("*/"), "docblock split across lines:\n{out}");
     assert_docblock_types_parse(&out);

@@ -77,6 +77,13 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
             ContractTy::LitBool(false) => bool_member = Some("false"),
             ContractTy::Null => nullable = true,
             ContractTy::StrWith(p) => string_keyword = Some(preds_keyword(*p)),
+            // A declared `A&B` over string refinements is one predicate set
+            // (issue #240) — folded by the ONE fold, then spelled by the ONE
+            // ladder, so a conjunction reaches the same keyword the equivalent
+            // computed set would. Any other intersection keeps the refusal below.
+            ContractTy::Inter(members) => {
+                string_keyword = Some(preds_keyword(crate::inter_str_preds(members)?));
+            }
             ContractTy::Base(Base::String) => string_keyword = Some("string".to_owned()),
             ContractTy::LitStr(s) => string_lits.push(s),
             ContractTy::IntIn(r) => int_ranges.push(int_range_keyword(*r)),
@@ -579,32 +586,47 @@ fn float_literal(f: f64) -> String {
     if f.is_finite() && f.fract() == 0.0 { format!("{f:.1}") } else { f.to_string() }
 }
 
-/// The tightest refined-string keyword a predicate summary admits (the keyword half
-/// of the precision ladder). `numeric-string` ⊐ `non-falsy-string` ⊐
-/// `non-empty-string` ⊐ `string`, with the casing pair spelled where PHPStan has a
-/// **single** word for it: `lowercase-string` / `uppercase-string` and their
-/// `non-empty-` intersections.
+/// The tightest refined-string keyword a predicate summary admits: the **closed
+/// grid** `core × casing` (issue #240), where
 ///
-/// One keyword comes out, never an intersection (`non-falsy-string&lowercase-string`
-/// is PHPStan's spelling for that set; this crate emits phpdoc that has to lower
-/// back through [`crate::lower_identifier`], so it keeps to the named atoms). When a
-/// set is nameable on both axes the core class wins and the casing half is dropped —
-/// a *widening*, which is the safe direction for every consumer of a spelling, and
-/// it leaves every casing-free set spelled exactly as the core ladder would.
-/// `Lowercase ∧ Uppercase` (a string with no cased character) has no single keyword
-/// either, so it falls through to the core ladder for the same reason.
+/// * core ∈ {—, `non-empty-`, `non-falsy-`, `numeric-`, `non-falsy-numeric-`},
+///   the length/numeric ladder — `non-falsy-numeric-` is its own rung because
+///   `NUMERIC` does not entail `NON_FALSY` (`'0'` is both numeric and falsy); and
+/// * casing ∈ {—, `lowercase-`, `uppercase-`, `uncased-`}, where `uncased-` is
+///   Steins' own word for `LOWERCASE ∧ UPPERCASE` (a string with no cased
+///   character), the set PHPStan spells `lowercase-string&uppercase-string`.
 ///
-/// The array-key-cast pair is deliberately **not** a rung. `decimal-int-string`
-/// would be a legitimate one (it is tighter than `numeric-string`), but the
-/// predicate is computed by `StrPreds::of` for every string value, so adding it
-/// would silently re-spell every *value-derived* all-canonical-decimal set —
-/// `'1'|'2'` widening to `decimal-int-string` rather than `numeric-string` — as
-/// a side effect of teaching the checker a keyword. `non-decimal-int-string` is
-/// not a rung for the mirror reason: nearly every string carries the bit, so it
-/// says almost nothing about a set. Both therefore widen away here, which is the
-/// same safe direction the casing half already takes. A declared
-/// `decimal-int-string` consequently round-trips as `numeric-string` — a
-/// widening, never a lie.
+/// One keyword comes out, never an intersection. That is ADR-0030's vocabulary
+/// rule, not a limitation: this crate emits phpdoc that has to lower back through
+/// [`crate::lower_identifier`], and every cell here does
+/// (`crate::grid_str_preds` is the inverse, pinned by `every_grid_cell_round_trips`)
+/// while `A&B` would need a matching entry per cell anyway.
+///
+/// The grid replaced a single-keyword ladder that ranked the axes against each
+/// other and widened the loser away — a set holding `{NON_FALSY, LOWERCASE}`
+/// spelled `non-falsy-string` and the casing half was *invisible*, which the #235
+/// probe measured as the speller's whole loss. Every casing-free set keeps exactly
+/// the spelling that ladder gave it, save the one new core rung.
+///
+/// The array-key-cast pair is deliberately **not** an axis, and issue #240 did not
+/// change that. `decimal-int-string` would be a legitimate rung (it is tighter than
+/// `numeric-string`), but the predicate is computed by `StrPreds::of` for every
+/// string value, so adding it would silently re-spell every *value-derived*
+/// all-canonical-decimal set — `'1'|'2'` widening to `decimal-int-string` rather
+/// than `numeric-string` — as a side effect of teaching the checker a keyword.
+/// `non-decimal-int-string` is not a rung for the mirror reason: nearly every
+/// string carries the bit, so it says almost nothing about a set. Both therefore
+/// widen away here, and a declared `decimal-int-string` still round-trips to a
+/// strictly wider cell — a widening, never a lie.
+///
+/// The casing axis DOES read through `DECIMAL_INT`'s closure (`⇒ LOWERCASE ∧
+/// UPPERCASE`, since a canonical decimal has no cased character), so that
+/// round-trip is now `numeric-uncased-string` rather than `numeric-string` and a
+/// value-derived decimal set spells `uncased-` too. That is not the re-spelling
+/// refused above: the casing bits are *true of every member* and are said by the
+/// axis that already exists, while the refusal is about not minting a keyword for
+/// the array-key-cast predicate itself. Measured over the nsrt corpus, no row
+/// moved away from admissible.
 #[must_use]
 pub fn preds_keyword(preds: StrPreds) -> String {
     // `class-string` outranks every core rung: it is the only *contextual*
@@ -619,25 +641,21 @@ pub fn preds_keyword(preds: StrPreds) -> String {
         preds.contains_all(StrPreds::LOWERCASE),
         preds.contains_all(StrPreds::UPPERCASE),
     ) {
-        (true, false) => Some("lowercase"),
-        (false, true) => Some("uppercase"),
-        _ => None,
+        (true, true) => "uncased-",
+        (true, false) => "lowercase-",
+        (false, true) => "uppercase-",
+        (false, false) => "",
     };
-    if preds.contains_all(StrPreds::NUMERIC) {
-        "numeric-string".to_owned()
+    let core = if preds.contains_all(StrPreds::NUMERIC) {
+        if preds.contains_all(StrPreds::NON_FALSY) { "non-falsy-numeric-" } else { "numeric-" }
     } else if preds.contains_all(StrPreds::NON_FALSY) {
-        "non-falsy-string".to_owned()
-    } else if let Some(c) = casing {
-        if preds.contains_all(StrPreds::NON_EMPTY) {
-            format!("non-empty-{c}-string")
-        } else {
-            format!("{c}-string")
-        }
+        "non-falsy-"
     } else if preds.contains_all(StrPreds::NON_EMPTY) {
-        "non-empty-string".to_owned()
+        "non-empty-"
     } else {
-        "string".to_owned()
-    }
+        ""
+    };
+    format!("{core}{casing}string")
 }
 
 /// Render one PHP string as a single-quoted phpdoc literal, escaping `\` and `'`
@@ -720,10 +738,22 @@ mod tests {
         assert_eq!(string_literal("c\\d"), "'c\\\\d'");
     }
 
-    /// Above CAP distinct literals widen to the tightest keyword.
+    /// Above CAP distinct literals widen to the tightest keyword — which since
+    /// issue #240 states BOTH axes of the shared summary. `'k0'…'k8'` really are
+    /// all lowercase, so the casing half is part of the answer; the ladder that
+    /// spelled this `non-falsy-string` was dropping a predicate every member has.
     #[test]
     fn over_cap_widens_to_keyword() {
         let vals: Vec<Val> = (0..=CAP as i64).map(|n| s(&format!("k{n}"))).collect();
+        assert_eq!(spell_vals(&vals).unwrap(), "non-falsy-lowercase-string");
+    }
+
+    /// …and a set whose members disagree about casing keeps the bare core rung:
+    /// `intersect` drops both bits, so the grid's casing half is empty.
+    #[test]
+    fn over_cap_mixed_casing_widens_to_the_core_rung() {
+        let vals: Vec<Val> =
+            (0..=CAP as i64).map(|n| s(&format!("{}{n}", if n % 2 == 0 { "k" } else { "K" }))).collect();
         assert_eq!(spell_vals(&vals).unwrap(), "non-falsy-string");
     }
 }

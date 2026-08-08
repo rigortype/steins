@@ -22,6 +22,11 @@
 //! * the refinement is `Asserted` — it is a docblock claim, so it may narrow a
 //!   report and premise a contract-layer finding, but it can never premise a
 //!   proof-layer one (ADR-0037, ADR-0052 N2).
+//!
+//! Issue #240 added the **declared conjunction** to the same seam: `A&B` over
+//! string refinements folds to the one closed `StrPreds` set it denotes, so it
+//! narrows through this lane exactly as a single keyword does, and an
+//! intersection the fold refuses keeps the floor it always had.
 
 use steins_infer::{DEBUG_PHPDOC_TYPE_ID, DEBUG_TYPE_ID, Diagnostic, Layer, check, layer};
 use steins_syntax::SourceTree;
@@ -69,6 +74,72 @@ fn a_string_predicate_narrows_a_native_string() {
     assert_eq!(
         param_dump("non-empty-lowercase-string", "string "),
         "dumped type: non-empty-lowercase-string (asserted)"
+    );
+}
+
+// ---- The declared conjunction (issue #240, piece 2) ------------------------
+
+#[test]
+fn a_declared_conjunction_seeds_the_single_set_it_denotes() {
+    // `A&B` over string refinements is not an intersection the domain has to
+    // *represent*: `StrPreds` is a conjunction of predicates already, so the two
+    // arms fold to one closed set (`steins_contract::inter_str_preds`) and the
+    // ordinary refinement seed takes it from there. Before #240 the fold did not
+    // exist and the lowering returned `None`, so a declared conjunction seeded
+    // nothing at all and the coarse native fact stood.
+    assert_eq!(
+        param_dump("lowercase-string&non-empty-string", "string "),
+        "dumped type: non-empty-lowercase-string (asserted)"
+    );
+    assert_eq!(
+        param_dump("lowercase-string&non-falsy-string", "string "),
+        "dumped type: non-falsy-lowercase-string (asserted)"
+    );
+    // Three arms, and the closure inside the fold: `numeric` entails `non-empty`.
+    assert_eq!(
+        param_dump("numeric-string&uppercase-string", "string "),
+        "dumped type: numeric-uppercase-string (asserted)"
+    );
+    // The set PHPStan spells with two casing arms is one word here (ADR-0030).
+    assert_eq!(
+        param_dump("lowercase-string&uppercase-string", "string "),
+        "dumped type: uncased-string (asserted)"
+    );
+}
+
+#[test]
+fn an_untyped_parameter_takes_the_conjunction_through_the_arm_lane() {
+    // No native type means no value-lane seed to replace — the arm lane answers,
+    // through the same fold and the same speller, so the two paths agree.
+    assert_eq!(
+        param_dump("lowercase-string&non-empty-string", ""),
+        "dumped type: non-empty-lowercase-string (asserted)"
+    );
+    assert_eq!(
+        param_dump("non-falsy-string&numeric-string", ""),
+        "dumped type: non-falsy-numeric-string (asserted)"
+    );
+}
+
+#[test]
+fn a_conjunction_the_fold_refuses_keeps_the_honest_floor() {
+    // `literal-string` is provenance (ADR-0038), not a predicate set, so the
+    // intersection folds to nothing — the arm lane keeps it and judges it, and the
+    // value lane stays exactly as it was. Same for an object intersection, which
+    // is issue #234's territory and untouched here.
+    assert_eq!(param_dump("literal-string&non-falsy-string", "string "), "dumped type: string");
+    assert_eq!(param_dump("literal-string&non-falsy-string", ""), "dumped type: unknown");
+    assert_eq!(param_dump("Countable&Traversable", ""), "dumped type: unknown");
+}
+
+#[test]
+fn a_class_string_conjunction_folds_and_keeps_its_contextual_reading() {
+    // The bit is CONTEXTUAL (issue #236) — decided against the class table, never
+    // by `StrPreds::of` — so it folds like any other bit and still outranks the
+    // grid at the speller, where it says what no character-level rung can.
+    assert_eq!(
+        param_dump("class-string&non-empty-string", "string "),
+        "dumped type: class-string (asserted)"
     );
 }
 
