@@ -280,6 +280,17 @@ runtime break and warning-grade ids sit on the proof layer; under a declared
 `"null"` posture they demote off the proof surface. Gate boundaries and id
 boundaries must coincide — one id never straddles the gate.
 
+**Final-keyword posture**:
+The `[runtime] final-keyword = "enforced" | "stripped"` pseudo-constant
+(issue #234), the warning-handler gate's sibling on the ADR-0037 §2 shelf:
+under the default `"enforced"` a `final` class admits no subtype, so an
+intersection carrying a final arm is uninhabited; under a declared
+`"stripped"` the analyzed runtime has rewritten the keyword away
+(`dg/bypass-finals`), so `FinalClass&MockObject` is a type the test suite
+genuinely holds. It withdraws an emptiness proof and never adds a claim.
+_Avoid_: reading it as a `final`-diagnostics switch, or letting it reach
+`readonly`
+
 **Annotation restraint** (provisional name):
 The design stance that complex structural types (`array{foo: int}` shapes,
 scattered `@var`) should not be hand-written: Steins infers them, and steers

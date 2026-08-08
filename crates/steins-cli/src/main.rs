@@ -34,7 +34,7 @@ use steins_edit::{
     unified_diff,
 };
 use steins_infer::{
-    Diagnostic, EffectSummary, LineFact, NoFold, SOUND_SUBSET_NOTICE, SidecarFolder,
+    Diagnostic, EffectSummary, FinalKeyword, LineFact, NoFold, SOUND_SUBSET_NOTICE, SidecarFolder,
     annotate_file, annotate_project, apply_inline_ignores, check_project,
     check_project_with_runtime, effect_summaries_file, effect_summaries_project,
 };
@@ -305,12 +305,12 @@ fn run_check(args: &[String]) -> ExitCode {
     // observe from source (e.g. `warning-handler = "null"`). Parsed above with the
     // rest of the config; an unknown *value* on a known key still warns and keeps the
     // safe default (a parse error already exited 2).
-    let (warning_handler_abort, runtime_warnings) = runtime_from_config(runtime_cfg);
+    let (postures, runtime_warnings) = runtime_from_config(runtime_cfg);
     for w in &runtime_warnings {
         errln!("steins: {w}");
     }
     let findings: Vec<Diagnostic> =
-        check_project_with_runtime(db, project, &mut folder, warning_handler_abort);
+        check_project_with_runtime(db, project, &mut folder, postures.warning_handler_abort);
 
     // The suppression channels, in ADR-0050 §6 order (vendor → surface → policy →
     // inline). The baseline is the one channel that stays here in `check`: it is
@@ -1118,6 +1118,17 @@ struct RuntimeConfig {
     /// and stay silent.
     #[serde(rename = "warning-handler", default)]
     warning_handler: Option<String>,
+    /// `final-keyword = "enforced" | "stripped"` (issue #234): what the runtime this
+    /// project is analyzed for *does* with the `final` keyword. Default (or absence)
+    /// is `"enforced"` — the language's own rule, so a `final` class admits no
+    /// subtype and an intersection carrying a final arm is uninhabited. `"stripped"`
+    /// declares a loader that removes the keyword before the engine compiles the
+    /// class (`dg/bypass-finals` rewrites the source in a stream wrapper), which is
+    /// what makes `FinalClass&MockObject` a real type under a test harness. See
+    /// [`steins_infer::FinalKeyword`] for what the posture deliberately does not
+    /// license — `readonly`, and the `final` diagnostics, are untouched.
+    #[serde(rename = "final-keyword", default)]
+    final_keyword: Option<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1257,11 +1268,27 @@ fn read_steins_config() -> Result<Option<SteinsConfig>, String> {
         .map_err(|e| format!("{}: parse error ({e})", path.display()))
 }
 
-/// Derive the `[runtime]` pseudo-constants (ADR-0049 §7) from the already-parsed
-/// config. Returns `(warning_handler_abort)` plus human warnings for an unrecognized
-/// *value* on a known key (a parse error / unknown key already exited 2 in
-/// [`read_steins_config`]). Absence is the safe default — `warning-handler = "abort"`.
-fn runtime_from_config(runtime: Option<RuntimeConfig>) -> (bool, Vec<String>) {
+/// The `[runtime]` pseudo-constants a run analyses under (ADR-0037 §2), resolved
+/// from `steins.toml` by [`runtime_from_config`]. One value per declared boot
+/// truth; every slot has a safe default, so a project with no `[runtime]` section
+/// and a project that spells every key at its default resolve to the same value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimePostures {
+    /// `warning-handler` (ADR-0049 §7 amendment): `true` for `"abort"`.
+    warning_handler_abort: bool,
+    /// `final-keyword` (issue #234). Consumed by the inhabitance judgment in
+    /// steins-contract; `doctor` reports it, and the checker picks it up when
+    /// intersection consumption lands (issue #238).
+    final_keyword: FinalKeyword,
+}
+
+/// Derive the `[runtime]` pseudo-constants (ADR-0037 §2 family) from the
+/// already-parsed config. Returns the [`RuntimePostures`] plus human warnings for
+/// an unrecognized *value* on a known key (a parse error / unknown key already
+/// exited 2 in [`read_steins_config`]). Absence is the safe default in every slot:
+/// `warning-handler = "abort"` (ADR-0049 §7) and `final-keyword = "enforced"`
+/// (issue #234), which together are byte-identical to declaring no section at all.
+fn runtime_from_config(runtime: Option<RuntimeConfig>) -> (RuntimePostures, Vec<String>) {
     let mut warnings = Vec::new();
     let runtime = runtime.unwrap_or_default();
     // Default "abort": a proven E_WARNING is a proven runtime break (ADR-0049 §7).
@@ -1275,7 +1302,19 @@ fn runtime_from_config(runtime: Option<RuntimeConfig>) -> (bool, Vec<String>) {
             true
         }
     };
-    (warning_handler_abort, warnings)
+    // Default "enforced": PHP's own rule. Only an explicit declaration says the
+    // analyzed runtime rewrites the keyword away (issue #234).
+    let final_keyword = match runtime.final_keyword.as_deref() {
+        None | Some("enforced") => FinalKeyword::Enforced,
+        Some("stripped") => FinalKeyword::Stripped,
+        Some(other) => {
+            warnings.push(format!(
+                "steins.toml [runtime] final-keyword: unknown value `{other}` (want \"enforced\"|\"stripped\"); using enforced"
+            ));
+            FinalKeyword::Enforced
+        }
+    };
+    (RuntimePostures { warning_handler_abort, final_keyword }, warnings)
 }
 
 /// Derive the profile selection and user-profile table from the already-parsed

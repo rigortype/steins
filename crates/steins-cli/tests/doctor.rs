@@ -172,6 +172,98 @@ fn doctor_reflects_configured_profile() {
     assert!(r.stdout.contains("[check] profile"), "provenance named; stdout:\n{}", r.stdout);
 }
 
+// ------------------------------------------ `[runtime]` pseudo-constant lines ---
+
+#[test]
+fn doctor_names_both_runtime_postures_on_a_bare_project() {
+    // Named-silence discipline (ADR-0037 §2 family): a default posture is still a
+    // posture, so both keys print with their provenance even when `steins.toml` does
+    // not exist at all. Absence has to be legible from the report, not inferred from
+    // a missing line.
+    let dir = workdir("runtime-postures-default");
+    write(&dir, "a.php", THREE_THROWS);
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.stdout.contains("[runtime] warning-handler: \"abort\" (default)"),
+        "stdout:\n{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("[runtime] final-keyword: \"enforced\" (default)"),
+        "stdout:\n{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn doctor_reports_a_declared_final_keyword_posture() {
+    // Issue #234: the posture changes what Steins will claim about an intersection
+    // type, so it must be visible without reading the source — and the line must
+    // also carry the boundary, since `readonly` and the `final` diagnostics are
+    // exactly what a reader would otherwise assume it moved.
+    let dir = workdir("runtime-postures-stripped");
+    write(&dir, "a.php", THREE_THROWS);
+    write(&dir, "steins.toml", "[runtime]\nfinal-keyword = \"stripped\"\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0, "a declared posture is not a contradiction; stdout:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("[runtime] final-keyword: \"stripped\" (declared)"),
+        "the declared posture and its provenance; stdout:\n{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("`readonly` and the `final` diagnostics are unaffected"),
+        "the line names its own boundary; stdout:\n{}",
+        r.stdout
+    );
+    // The sibling posture is untouched by declaring this one.
+    assert!(
+        r.stdout.contains("[runtime] warning-handler: \"abort\" (default)"),
+        "stdout:\n{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn doctor_distinguishes_a_declared_default_from_an_absent_key() {
+    // `"enforced"` spelled out resolves to the same posture as absence, but the
+    // report says which one the project wrote — the difference between "I never
+    // declared that" and "I declared it and it did not take".
+    let dir = workdir("runtime-postures-declared-default");
+    write(&dir, "a.php", THREE_THROWS);
+    write(&dir, "steins.toml", "[runtime]\nfinal-keyword = \"enforced\"\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.stdout.contains("[runtime] final-keyword: \"enforced\" (declared)"),
+        "stdout:\n{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn doctor_names_an_unrecognized_runtime_value() {
+    // An unknown *value* on a known key is a warn-and-proceed in `check`; doctor
+    // reports it as the config fact it is, at exit 0 — the value is legible, so this
+    // is a degraded posture, not a contradiction.
+    let dir = workdir("runtime-postures-bad-value");
+    write(&dir, "a.php", THREE_THROWS);
+    write(&dir, "steins.toml", "[runtime]\nfinal-keyword = \"bypassed\"\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0, "an unrecognized value is not a contradiction; stdout:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("final-keyword: unknown value `bypassed`"),
+        "stdout:\n{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("[runtime] final-keyword: \"enforced\" (declared)"),
+        "and the posture actually in force; stdout:\n{}",
+        r.stdout
+    );
+}
+
 #[test]
 fn doctor_names_the_contract_layer_under_throws_direct() {
     // Issue #108: `throws-direct` reaches contract-layer `throw.undeclared`

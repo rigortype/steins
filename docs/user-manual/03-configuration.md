@@ -36,6 +36,11 @@ warn    = ["throw.*"]
 # it, and the corresponding proof-layer findings stay silent.
 warning-handler = "abort"
 
+# What the runtime does with the `final` keyword. "enforced" (the default)
+# is PHP's own rule; "stripped" declares a loader that rewrites `final`
+# away, the way dg/bypass-finals does under a test harness.
+final-keyword = "enforced"
+
 [plugins]
 # Explicit plugin allowlist, by Composer package name (ADR-0039/0068).
 # Replaces installed.json discovery outright; allow = [] loads nothing.
@@ -154,8 +159,32 @@ This section rejects unrecognized keys outright.
 | Key | Type | Default | Effect |
 | --- | --- | --- | --- |
 | `warning-handler` | `"abort"` \| `"null"` | `"abort"` | What a proven `E_WARNING` does at runtime. `"abort"` treats it as a proven break, so the corresponding proof-layer findings fire. `"null"` declares the app tolerates the warning; those findings go silent. An unrecognized *value* (not an unrecognized key) warns and falls back to `"abort"` rather than erroring. |
+| `final-keyword` | `"enforced"` \| `"stripped"` | `"enforced"` | What the runtime does with the `final` keyword. `"enforced"` is PHP's own rule: a `final` class admits no subtype, so an intersection carrying a final class arm is uninhabited. `"stripped"` declares a loader that rewrites the keyword away before the class is compiled — `dg/bypass-finals` installs a stream wrapper that does exactly this — so `FinalClass&MockObject`, the type a mock of a final class actually has, stays inhabited. An unrecognized *value* warns and falls back to `"enforced"`. |
 
-There is no CLI flag for `warning-handler` — it is config-only.
+There is no CLI flag for either key — both are config-only.
+
+`steins doctor` prints both postures, with their value and whether it came
+from the file or from the default, in the Config section.
+
+### What `final-keyword = "stripped"` does not change
+
+The posture is deliberately narrow. It withdraws exactly one emptiness
+proof and nothing else:
+
+- **`readonly` is untouched.** `dg/bypass-finals` strips `readonly` only
+  when explicitly asked (`enable(bypassReadOnly: true)`); the two are
+  separate knobs in the library, so they stay separate here.
+  `readonly.reassigned` fires identically under both postures.
+- **The `final` diagnostics are untouched.** `class.extends-final` and
+  `override.final` still fire: source that *spells* `extends FinalClass`
+  is broken under a plain runtime whatever a test harness rewrites at load
+  time.
+- **Nothing is detected.** Steins never infers a final-stripping runtime
+  from a loaded `uopz`/`runkit7` or from your dependency graph. The
+  posture is declared or it is absent.
+- **It is project-wide.** The library's own `denyPaths([...])` scoping has
+  no equivalent here yet; a path-scoped posture would key on ADR-0047
+  regions, which the check lane does not carry.
 
 ### `[plugins]`
 
@@ -232,6 +261,7 @@ its "active profile" line reports only `[check] profile` or
 not what a flag would have overridden.
 
 Every other key is config-only: `[runtime] warning-handler`,
+`[runtime] final-keyword`,
 `[plugins] allow`, `[transform.vouch]`, and `[transform.partitions]` have
 no flag equivalent. `[profile.<name>]` *definitions* are config-only too —
 selecting one is `--profile <name>`, but there is no way to define a

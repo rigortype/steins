@@ -25,6 +25,16 @@ pub mod promote;
 pub mod suppress;
 
 pub use dam::{DamFacts, DamKind, DamSite, dam_facts};
+/// The `[runtime] final-keyword` posture (issue #234), re-exported so the CLI can
+/// resolve `steins.toml` into it without depending on steins-contract directly —
+/// the same shape as [`check_project_with_runtime`]'s `warning_handler_abort`
+/// parameter, which is the CLI's other `[runtime]` pseudo-constant. Nothing in the
+/// checker reads it yet: intersections are consumed nowhere, so the judgment it
+/// governs ([`steins_contract::normalize::provably_uninhabited`]) has no caller in
+/// the binary, and planting an unread field on the analysis context would claim a
+/// run reads something it does not. Intersection consumption (issue #238) is where
+/// it joins `warning_handler_abort` on `Cx`.
+pub use steins_contract::normalize::FinalKeyword;
 pub use suppress::{
     DIAGNOSTIC_IDS, DIAGNOSTIC_REGISTRY, FACET_ORIGIN, Facet, Floor, InlineOutcome, Layer, Origin,
     SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID, apply_inline_ignores, declared_facet, layer,
