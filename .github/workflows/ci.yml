@@ -189,6 +189,17 @@ jobs:
         with:
           toolchain: ${{ env.RUST_MSRV }}
 
+      # `cargo xtask licenses` below compiles the `xtask` binary, which pulls
+      # in most of the analysis crates as libraries (steins-syntax, -infer,
+      # -domain, -sidecar, ...) — effectively a full workspace build, same as
+      # `fp-gate`'s `cargo run -p xtask`. Shares that job's cache key on
+      # purpose: same binary, same crate graph, so whichever job runs first in
+      # a given workflow run warms the cache the other restores from.
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: xtask
+
       - name: Install cargo-about + cargo-deny
         uses: taiki-e/install-action@v2
         with:
@@ -230,10 +241,12 @@ jobs:
         with:
           toolchain: ${{ env.RUST_MSRV }}
 
+      # Shares the `licenses` job's cache key — both jobs build the identical
+      # `xtask` binary (see that job's comment).
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          key: fp-gate
+          key: xtask
 
       - name: Cache corpus
         uses: actions/cache@v4
