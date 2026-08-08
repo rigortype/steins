@@ -7,7 +7,8 @@
 //! The premise is deliberately weaker than PHP's: ordering and branching are
 //! ignored, so one binding form anywhere in the scope is silence. A read that
 //! precedes its only assignment therefore belongs to the `variable.maybe-undefined`
-//! sibling, which waits on the reachability foundation (issue #199) — pinned below.
+//! sibling, which the binding-presence pass answers (ADR-0081, issue #267) — the
+//! silences below are that id's firing set, pinned here as the boundary.
 //!
 //! No sidecar and no folder dependency: the check reads a lowering-computed
 //! syntactic fact, so every fixture uses the sound-subset [`NoFold`] folder. The two
@@ -686,21 +687,22 @@ fn error_control_is_not_a_read() {
 }
 
 // ---------------------------------------------------------------------------
-// The `variable.maybe-undefined` boundary (issue #199) — everything ordering- or
-// path-sensitive is silence here, by construction.
+// The `variable.maybe-undefined` boundary (ADR-0081, issue #267) — everything
+// ordering- or path-sensitive is silence HERE, by construction, and reported by the
+// sibling id instead (`tests/variable_maybe_undefined.rs`).
 // ---------------------------------------------------------------------------
 
 #[test]
 fn a_read_before_its_only_assignment_is_silence() {
-    // PHP warns; Steins does not. This is `variable.maybe-undefined`'s territory
-    // and needs the reachability foundation (issue #199): proving the read comes
-    // FIRST is a claim about paths, not about the scope's text.
+    // PHP warns, and so does Steins — under `variable.maybe-undefined`, at the
+    // `strict` floor. Proving the read comes FIRST is a claim about paths, not
+    // about the scope's text, so it is never this id's.
     silent("<?php\nfunction f(): int {\n    $y = $x;\n    $x = 1;\n    return $y;\n}\n");
 }
 
 #[test]
 fn a_binding_on_only_some_paths_is_silence() {
-    // The `checkMaybeUndefinedVariables` shape, explicitly out of scope (issue #199).
+    // The `checkMaybeUndefinedVariables` shape: the sibling id's, never this one's.
     silent(
         "<?php\nfunction f(bool $c): int {\n    if ($c) {\n        $x = 1;\n    }\n    return $x;\n}\n",
     );

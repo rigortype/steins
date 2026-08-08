@@ -53,8 +53,9 @@ Engine:
   (`syntax.unparsable`, `array.duplicate-key`, the five `phpdoc.*`
   rot ids, `closure.unused-use`), `preg.invalid-pattern`,
   `call.printf-too-few-arguments`, and the six contract-layer
-  `untyped.*`. Two — `property.maybe-undefined` and
-  `variable.maybe-undefined` — are registered ahead of emission.
+  `untyped.*`, and the some-paths-only `variable.maybe-undefined`
+  (ADR-0081). One — `property.maybe-undefined` — is registered ahead
+  of emission.
 
 Verification apparatus (ADR-0013):
 

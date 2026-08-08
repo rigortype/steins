@@ -225,7 +225,7 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
     assert_eq!(surface_floor(PROPERTY_MAYBE_UNDEFINED_ID), Some(Floor::Strict));
     // end member absence (ADR-0078, issue #197)
 
-    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 3);
+    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 2);
 }
 
 // undefined variables (ADR-0078, issue #194)
@@ -234,11 +234,12 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
 ///
 /// `variable.undefined` proves the binding absent from the whole scope and emits at
 /// the `default` floor. `variable.maybe-undefined` claims only that *a* path reaches
-/// the read unbound — the reachability foundation's question (issue #199) — so it
-/// takes `call.too-many-arguments`' route: registered now so `@steins-ignore` can
-/// name it and a baseline entry means one fixed thing, emitting later.
+/// the read unbound — the reachability foundation's question (issue #199), answered
+/// by the binding-presence pass (ADR-0081, issue #267) — and emits at the `strict`
+/// floor. The split that matters is no longer emitting/pending but the two floors:
+/// the weaker claim never reaches the default profile.
 #[test]
-fn the_variable_pair_splits_across_the_two_carve_outs() {
+fn the_variable_pair_splits_across_the_two_floors() {
     let emittable: HashSet<&str> = ALL_EMITTABLE_IDS.iter().copied().collect();
     let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
 
@@ -251,12 +252,12 @@ fn the_variable_pair_splits_across_the_two_carve_outs() {
     assert_eq!(surface_floor(VARIABLE_UNDEFINED_ID), Some(Floor::Default));
 
     assert!(
-        pending.contains(VARIABLE_MAYBE_UNDEFINED_ID),
-        "`{VARIABLE_MAYBE_UNDEFINED_ID}` should be registered-not-yet-emitted (issue #199)"
+        emittable.contains(VARIABLE_MAYBE_UNDEFINED_ID),
+        "`{VARIABLE_MAYBE_UNDEFINED_ID}` emits since the binding-presence pass (#267)"
     );
     assert!(
-        !emittable.contains(VARIABLE_MAYBE_UNDEFINED_ID),
-        "`{VARIABLE_MAYBE_UNDEFINED_ID}` must not be emittable before its stage"
+        !pending.contains(VARIABLE_MAYBE_UNDEFINED_ID),
+        "`{VARIABLE_MAYBE_UNDEFINED_ID}` left the registered-ahead-of-emission list"
     );
     assert_eq!(layer(VARIABLE_MAYBE_UNDEFINED_ID), Some(Layer::Proof));
     assert_eq!(
@@ -276,18 +277,14 @@ fn the_variable_pair_splits_across_the_two_carve_outs() {
     assert_eq!(VARIABLE_MAYBE_UNDEFINED_ID, "variable.maybe-undefined");
 }
 
-/// The registered-ahead-of-emission list holds exactly the three ids argued above
-/// and nothing else — the cardinality guard that makes a forgotten emitter visible.
+/// The registered-ahead-of-emission list holds exactly the two ids argued above and
+/// nothing else — the cardinality guard that makes a forgotten emitter visible.
 #[test]
 fn exactly_two_ids_are_registered_ahead_of_emission() {
     let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
     assert_eq!(
         pending,
-        HashSet::from([
-            CALL_TOO_MANY_ARGUMENTS_ID,
-            VARIABLE_MAYBE_UNDEFINED_ID,
-            PROPERTY_MAYBE_UNDEFINED_ID,
-        ]),
+        HashSet::from([CALL_TOO_MANY_ARGUMENTS_ID, PROPERTY_MAYBE_UNDEFINED_ID]),
         "REGISTERED_NOT_YET_EMITTED drifted — every entry needs an argued reason"
     );
 }

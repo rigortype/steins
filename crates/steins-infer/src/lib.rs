@@ -1081,17 +1081,25 @@ pub const VARIABLE_UNDEFINED_ID: &str = "variable.undefined";
 
 /// `variable.maybe-undefined` (ADR-0078, issue #194, **proof** layer, floor
 /// `Strict`): a read of a name bound on only *some* paths reaching it — PHPStan's
-/// `checkMaybeUndefinedVariables`. Registered ahead of emission
-/// ([`REGISTERED_NOT_YET_EMITTED`]) exactly as `call.too-many-arguments` is: the id
-/// and its layer are pinned now so `@steins-ignore` can name it and a baseline
-/// entry means one fixed thing, while the emitter waits on the reachability
-/// foundation (issue #199).
+/// `checkMaybeUndefinedVariables`. Registered ahead of emission in v0.1.4 and
+/// **emitting since the binding-presence pass landed** (ADR-0081, issue #267): the
+/// firing set is `Scope::maybe_undefined_reads`, computed at lowering by a
+/// statement-ordered walk over a three-valued presence lattice that subtracts a
+/// provably-terminating branch arm, iterates loop bodies to a fixpoint and consumes
+/// `isset`/`empty` guards with polarity.
 ///
 /// It sits at the `strict` floor, not `default`, because the claim is weaker than
 /// its sibling's: `variable.undefined` proves the binding is absent from the whole
 /// scope, whereas this one proves only that *a* path reaches the read unbound — a
 /// shape defensive house styles produce on purpose, and one a partial-path guess
 /// would turn into exactly the false positive the proof layer forbids.
+///
+/// The two are disjoint by construction, not by a filter: this id fires only where
+/// the scope binds the name **somewhere**, which is exactly the condition that
+/// takes a read out of [`VARIABLE_UNDEFINED_ID`]'s ordering-blind premise. The
+/// use-before-assign shape (`$y = $x; $x = 1;`) therefore stays here even though no
+/// path reaches the read bound — promoting it would break the definite id's
+/// documented ordering-blindness (ADR-0081, non-goal 1).
 pub const VARIABLE_MAYBE_UNDEFINED_ID: &str = "variable.maybe-undefined";
 
 // end undefined variables (ADR-0078, issue #194)
@@ -1205,6 +1213,9 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // end global constants (ADR-0078, issue #198)
     // undefined variables (ADR-0078, issue #194)
     VARIABLE_UNDEFINED_ID,
+    // The some-paths sibling, emitting since the binding-presence pass landed
+    // (ADR-0081, issue #267).
+    VARIABLE_MAYBE_UNDEFINED_ID,
     // end undefined variables (ADR-0078, issue #194)
 ];
 
@@ -1225,12 +1236,6 @@ pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
     // waits for the declared-shape-over-an-object vocabulary.
     PROPERTY_MAYBE_UNDEFINED_ID,
     // end member absence (ADR-0078, issue #197)
-    // undefined variables (ADR-0078, issue #194)
-    // The some-paths-only sibling of `variable.undefined`: its premise is a claim
-    // about the paths reaching a read, so it waits for the reachability foundation
-    // (issue #199).
-    VARIABLE_MAYBE_UNDEFINED_ID,
-    // end undefined variables (ADR-0078, issue #194)
 ];
 
 /// The maximum depth of interprocedural argument-binding descent (Feature B).
@@ -7185,7 +7190,15 @@ fn collect_bare_identifiers(ty: &PType, out: &mut Vec<String>) {
 // undefined variables (ADR-0078, issue #194)
 // ---------------------------------------------------------------------------
 
-/// `variable.undefined`: a read of a name its scope never binds.
+/// The `variable.*` pair: `variable.undefined` on a read of a name its scope never
+/// binds, and `variable.maybe-undefined` on a read only *some* paths reach bound
+/// (ADR-0081, issue #267).
+///
+/// **One predicate routes between them, and it lives at lowering**: a name the
+/// scope binds nowhere lands in `Scope::undefined_reads`, a name it binds somewhere
+/// lands in `Scope::maybe_undefined_reads`, and no read can be in both. This is
+/// `check_return_missing`'s shape — a Default-floor definite id and a Strict-floor
+/// possibly id, disjoint by construction rather than by a filter applied here.
 ///
 /// The firing set is `Scope::undefined_reads`, computed at lowering — every binding
 /// form, the `isset`/`empty`/`??`/`unset`/`@` guard exclusions, the
@@ -7215,7 +7228,12 @@ fn check_undefined_variables(cx: &Cx, out: &mut Vec<Diagnostic>) {
         return;
     }
     // Nothing to judge in most files: skip the call-site sweep entirely then.
-    if cx.tree().scopes().iter().all(|s| s.undefined_reads.is_empty()) {
+    if cx
+        .tree()
+        .scopes()
+        .iter()
+        .all(|s| s.undefined_reads.is_empty() && s.maybe_undefined_reads.is_empty())
+    {
         return;
     }
     let bound_by_call = out_param_argument_spans(cx);
@@ -7248,6 +7266,35 @@ fn check_undefined_variables(cx: &Cx, out: &mut Vec<Diagnostic>) {
                 format!(
                     "${name} is never bound in this scope — PHP warns \
                      \"Undefined variable ${name}\" and the read evaluates to null"
+                ),
+            ));
+        }
+        // The some-paths leg. Same scope, same warning-handler gate, same
+        // out-parameter oracle — with one refinement the definite leg does not
+        // need: an out-parameter binds from its **call site forward**, so a
+        // confirmed candidate subtracts only the reads that follow it. Subtracting
+        // scope-wide (the definite leg's rule) would be wrong in the other
+        // direction here — `echo $x; preg_match($p, $s, $x);` reaches its read
+        // before the binding — and subtracting nothing would report the shape
+        // ADR-0077 exists to keep silent.
+        for read in &scope.maybe_undefined_reads {
+            let bound_before = scope.ref_arg_candidates.iter().any(|c| {
+                c.name == read.name
+                    && c.span.start <= read.span.start
+                    && bound_by_call.contains(&c.span.start)
+            });
+            if bound_before {
+                continue;
+            }
+            let name = &read.name;
+            out.push(hygiene_diag(
+                cx,
+                VARIABLE_MAYBE_UNDEFINED_ID,
+                read.span.start,
+                format!(
+                    "${name} is bound on only some of the paths that reach this read \
+                     — on the others PHP warns \"Undefined variable ${name}\" and the \
+                     read evaluates to null"
                 ),
             ));
         }
