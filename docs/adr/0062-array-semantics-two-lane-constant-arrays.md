@@ -314,6 +314,11 @@ amendment governs.
   optional-key read; layer contracts, floor strict). The registry gains
   exactly one attribute — `surface_floor ∈ {default, contracts, strict}` —
   and profiles are the cumulative ladder `default ⊂ contracts ⊂ strict`.
+  *(Amended by ADR-0078 §6, 2026-08-09: the floor set gains a fourth
+  member, `pedantic`, and stays a total order; the rungs remain a
+  cumulative chain but the built-in profiles are not one — `pedantic`
+  branches off `contracts` as `throws-direct` already branched off
+  `default`.)*
   Baselines record their capture surface; `suppress.unmatched` judges only
   ids fireable at the current surface. v1 emission: shape-declared bases
   with constant keys only. General-map/list reads do not fire in v1 but

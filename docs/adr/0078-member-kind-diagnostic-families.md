@@ -98,7 +98,7 @@ claim ships `php -r`-witnessed per the ADR-0049 point-10 discipline.
 | `untyped.parameter` | contract / Contracts | no native type and no docblock claim |
 | `untyped.return` | contract / Contracts | |
 | `untyped.property` | contract / Contracts | |
-| `untyped.class-constant` | contract / **Strict** | moved off the family floor by the 2026-08-09 conformance measurement: a constant's initializer is a constant expression, so the type is pinned whether or not one is written — the only arm whose silence withholds nothing. A written constant type still buys the interface contract and the PHP 8.3 covariance check, which is a strict-tier ask, not the `contracts` rung's "how much untyped surface is left" |
+| `untyped.class-constant` | contract / **Pedantic** | moved off the family floor by the 2026-08-09 owner ruling: a constant is inherently static — its initializer is a constant expression, so the type is pinned whether or not one is written — making it the only arm whose silence withholds nothing. Inheritance can still overwrite a constant with a differently shaped value; that risk is accepted knowingly, and unlike a property Steins does not ask for the declaration. Not `Strict` either, which asks a different question (is a weaker some-paths-only claim worth seeing?): demanding the declaration is a house-style ask, so it takes the `Pedantic` rung no built-in reaches by rung, and the `pedantic` branch names it in `enable` |
 | `untyped.iterable-value` | contract / Contracts→Strict by measurement | `array` with no value type |
 | `untyped.generics` | contract / Contracts→Strict by measurement | generic class used bare |
 
@@ -215,3 +215,67 @@ itself, at the emitter, and the undeclared never-returner (a helper that
 calls `exit` without declaring `: never`) is its one named over-report
 risk. Inferring `never` from a callee's own `BodyEnd` is the obvious next
 consumer of this seam.
+
+## 6. The `pedantic` rung and branch (2026-08-09 owner ruling)
+
+`untyped.class-constant` forced a distinction the ladder did not have a
+place for, and §2's table now records the result. The finding itself is
+unchanged — same id, same layer, same emission conditions — but the rung
+that asks for it is new, and so is the built-in that reaches it.
+
+**The ruling.** A constant is inherently static: its initializer is a
+constant expression, so the declaration pins the type whether or not one
+is written. Every other arm of the `untyped.*` family names information
+that is genuinely lost — a parameter, property or return with no type is
+`mixed` — while this arm's silence costs nothing. Inheritance can still
+overwrite a constant with a differently shaped value, and that risk is
+accepted knowingly: unlike a property, Steins does not ask for the
+declaration. Teams that *do* want to require it must still be able to,
+so the check is calibrated rather than deleted — the standing rule that
+zero-FP means calibrated defaults, not omitted checks.
+
+**Why not `Strict`.** The strict rung asks one question: is a weaker,
+some-paths-only claim worth seeing? Its whole population is `maybe-`
+siblings and shapes that defensive house styles produce on purpose. A
+team opting into that has not thereby asked to be told how to write its
+constants. Parking a house-style ask there would make every `strict` user
+inherit a style opinion the analyzer does not hold — the same objection
+that took the id off `contracts`, one rung higher.
+
+**The amendments.** Two prior decisions are narrowed:
+
+- **ADR-0062 A-G10** wrote `surface_floor ∈ {default, contracts, strict}`
+  and "profiles are the cumulative ladder `default ⊂ contracts ⊂
+  strict`". The floor set gains a fourth member, `pedantic`, and stays a
+  total order — `Default < Contracts < Strict < Pedantic` — because
+  `floor(id) <= rung` depends on it. What is narrowed is the second
+  clause: the *rungs* remain a cumulative chain, but the *built-in
+  profiles* are not one, which was already true when A-G10 was written
+  (`throws-direct` branches off `default` via `enable`) and is now true
+  by design rather than by exception.
+- **ADR-0050 §5 / G1 amendment** ships a fifth built-in, `pedantic` =
+  `contracts` plus the pedantic-floor ids named in its `enable` list. Its
+  rung is `Floor::Contracts`; it reaches above its rung exactly the way
+  `throws-direct` does. No built-in carries `Floor::Pedantic` **as a
+  rung**, and a test pins that: an id parked at that floor is off every
+  built-in surface until something names it.
+
+**What this costs, accepted.** There is no built-in meaning "everything
+on" — `pedantic` and `strict` are incomparable, each holding what the
+other lacks (measured: 62 ids and 65 ids, over a shared 61). A project
+wanting the union writes `extends = "strict"` with the pedantic ids in
+its own `enable`. The second cost is that a baseline captured under
+`pedantic` tags its entries `contracts`, its rung — the same
+under-reporting `throws-direct` already produces, and harmless for the
+same reason: the staleness predicate is `captured <= rung && surfaces_id`,
+and the second conjunct is what actually gates.
+
+**The per-id path is unchanged and remains the finer one.** `enable` was
+always orthogonal to the rung, so a project can take one pedantic id
+without the profile:
+
+```toml
+[profile.house-style]
+extends = "contracts"
+enable = ["untyped.class-constant"]
+```

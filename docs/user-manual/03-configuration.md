@@ -135,7 +135,8 @@ Repo defaults for `steins check`.
 
 Zero or more named tables, each defining one user profile (ADR-0050 §5).
 The table name is the profile name; `default`, `contracts`,
-`throws-direct`, and `strict` are built in and cannot be redefined, and
+`throws-direct`, `strict` and `pedantic` are built in and cannot be
+redefined, and
 `boundary` is reserved (see below) — defining or selecting either is a
 config error.
 

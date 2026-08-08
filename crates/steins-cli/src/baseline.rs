@@ -443,7 +443,7 @@ mod tests {
             surface: None,
         }];
         let m = Matcher::new(&entries);
-        for rung in [Floor::Default, Floor::Contracts, Floor::Strict] {
+        for rung in [Floor::Default, Floor::Contracts, Floor::Strict, Floor::Pedantic] {
             assert_eq!(m.stale_count_within(|_, captured| captured <= rung), 1, "{rung:?}");
         }
     }

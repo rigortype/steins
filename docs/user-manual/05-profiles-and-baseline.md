@@ -65,7 +65,10 @@ final class Report
 }
 ```
 
-Every transcript below came from the v0.1.2 binary against PHP 8.5.8.
+The `check` transcripts below came from the v0.1.2 binary against PHP 8.5.8.
+Every **id count** on this page was re-measured on the current build, so the
+findings a transcript prints and the surface sizes quoted around it come from
+different binaries — the counts are the ones to trust.
 
 ## The lenient-default principle
 
@@ -75,7 +78,7 @@ because a project's appetite for it tracks its modernization stage, and that
 is a fact about your team rather than about your source. The repo declares it,
 reviewably, in a file that shows up in a diff.
 
-## The four named stages
+## The five named profiles
 
 A profile selects over the diagnostic *layers* —
 [chapter 4](04-findings.md) defines `proof`, `contract`, `mechanics`, and
@@ -84,10 +87,11 @@ profile. `debug` sits outside the ladder entirely. The stages differ in how
 much of the **contract** layer they put on the surface.
 
 Every diagnostic id carries the lowest **rung** that admits it, and three of
-the four built-ins are that ladder: `default ⊂ contracts ⊂ strict`. One layer
+the five built-ins are that ladder: `default ⊂ contracts ⊂ strict`. One layer
 can hold ids at two rungs, which is what the contract layer does today
-(ADR-0062). `throws-direct` sits beside the ladder: it is `default` plus one
-faceted id.
+(ADR-0062). The other two sit beside the ladder rather than on it:
+`throws-direct` is `default` plus one faceted id, and `pedantic` is
+`contracts` plus the house-style asks.
 
 - **`default`** — proof and mechanics. Only what provably breaks, plus
   anti-rot. This is a bare `check`.
@@ -99,12 +103,42 @@ faceted id.
   `throw.undeclared`, direct and propagated; `phpdoc.*` mismatches;
   effect-envelope violations; and `offset.undeclared`, a read of a key the
   declared array shape proves is not there.
-- **`strict`** — contracts plus the strict rung. Today that is
-  `offset.maybe-missing`: a read of a key the declared shape marks *optional*,
-  on a path where no guard discharges it. This stage asks you to prove
-  presence.
+- **`strict`** — contracts plus the strict rung: the ids that make a
+  *weaker* claim than their default-surface siblings, because they hold on
+  some paths rather than all. `offset.maybe-missing` is the shape — a read
+  of a key the declared shape marks *optional*, on a path where no guard
+  discharges it. This stage asks you to prove presence.
+- **`pedantic`** — contracts plus the **house-style** asks: rules about how
+  code should be written, where Steins itself has no finding to make. Today
+  that is `untyped.class-constant`, a class constant with no native type and
+  no `@var`. Steins does not ask for that declaration on its own account —
+  a constant's initializer is a constant expression, so its type is pinned
+  either way — but a team that wants every constant annotated can say so
+  here.
 
-The counts climb as the surface widens. Same code, the four stages in order:
+`pedantic` is a **branch off `contracts`, not a step above `strict`**, and
+the two are independent: `strict` never reports `untyped.class-constant`,
+`pedantic` never reports `offset.maybe-missing`. Wanting your constants
+annotated and wanting the some-paths-only claims are separate decisions, so
+neither profile forces the other. If you want both, extend one and name the
+rest:
+
+```toml
+[profile.everything]
+extends = "strict"
+enable = ["untyped.class-constant"]
+```
+
+The same shape takes **one** pedantic rule without the profile — `enable` is
+independent of the rung, so it works from any base:
+
+```toml
+[profile.house-style]
+extends = "contracts"
+enable = ["untyped.class-constant"]
+```
+
+The counts climb as the surface widens. Same code, the ladder in order:
 
 ```
 $ steins check src/                          # default
@@ -144,15 +178,21 @@ its `Config + active surface` section:
 ```
 $ steins doctor --no-php .
   active profile: `default` (from built-in default)
-  surface: layers [mechanics, proof], 16 checked id(s)
+  surface: layers [mechanics, proof], 47 checked id(s)
 ```
 
-| Stage | What it adds | Checked ids |
-| --- | --- | --- |
-| `default` | — | 16 |
-| `throws-direct` | `throw.undeclared`, direct escapes only | 17 |
-| `contracts` | the contract layer except `offset.maybe-missing` | 25 |
-| `strict` | `offset.maybe-missing` | 26 |
+| Profile | Base | What it adds | Checked ids |
+| --- | --- | --- | --- |
+| `default` | — | — | 47 |
+| `throws-direct` | `default` | `throw.undeclared`, direct escapes only | 48 |
+| `contracts` | `default` | the contract layer, except the strict and pedantic rungs | 61 |
+| `strict` | `contracts` | the some-paths-only claims — `offset.maybe-missing`, `variable.maybe-undefined`, `type.return-maybe-missing` | 65 |
+| `pedantic` | `contracts` | the house-style asks — `untyped.class-constant` | 62 |
+
+Only the `default` / `contracts` / `strict` rows nest. `throws-direct` and
+`pedantic` branch off their base, so neither contains nor is contained by
+`strict` — 62 and 65 are not steps on one scale, they are two different
+supersets of the same 61.
 
 `boundary` is a reserved name (ADR-0050 §5, deferred to ADR-0042). Selecting
 it or defining `[profile.boundary]` is a config error until its design lands.
@@ -210,8 +250,8 @@ file it found and what state it is in:
 $ steins doctor --no-php .
 Baseline
   file: .steins-baseline.jsonl (1 entry)
-  capture surface: profile `throws-direct`, 17 id(s)
-  active surface: profile `default`, 16 id(s)
+  capture surface: profile `throws-direct`, 48 id(s)
+  active surface: profile `default`, 47 id(s)
   1 dormant entry (id outside the active surface — kept, not stale)
 ```
 
@@ -258,12 +298,12 @@ findings are unbaselined. The run says so, on its own line, and fails:
 $ steins check --profile contracts src/
 src/Importer.php:12:9: error[throw.undeclared]: RuntimeException can escape Importer::runAll() but is not declared (@throws LogicException) — proven escape
 1 findings in baseline
-active profile `contracts` surfaces 8 id(s) the baseline (captured under `throws-direct`) did not — those findings are unbaselined (rerun --set-baseline to capture them)
+active profile `contracts` surfaces 13 id(s) the baseline (captured under `throws-direct`) did not — those findings are unbaselined (rerun --set-baseline to capture them)
 $ echo $?
 1
 ```
 
-`contracts` checks 25 ids and the `throws-direct` capture covered 17, so eight
+`contracts` checks 61 ids and the `throws-direct` capture covered 48, so 13
 ids on today's surface have no frozen past. The propagated escape is one of
 them, and it fails the build. Recapture under `contracts` and it goes quiet.
 

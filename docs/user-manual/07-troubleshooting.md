@@ -552,7 +552,8 @@ Baseline section names the file it found or says `none`. Full workflow in
 ### "unknown profile"
 
 **Symptom.** ``steins: unknown profile `nope` (built-ins: default,
-contracts, throws-direct, strict; or define [profile.nope])``, exit `2`.
+contracts, throws-direct, strict, pedantic; or define [profile.nope])``,
+exit `2`.
 
 **Cause.** A `--profile` flag or `[check] profile` names something that is
 neither a built-in stage nor a `[profile.<name>]` table in `steins.toml` —

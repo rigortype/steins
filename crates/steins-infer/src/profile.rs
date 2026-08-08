@@ -18,14 +18,30 @@
 //! * `contracts` — default plus the whole contract layer.
 //! * `strict` — contracts plus the strict-floor ids (ADR-0062 A-G10): the offset
 //!   family's `offset.undeclared` / `offset.maybe-missing` leg (issue #51).
+//! * `pedantic` — contracts plus the house-style asks, a **branch off
+//!   `contracts`** rather than a rung above `strict` (see below).
 //!
 //! # The rung ladder (ADR-0062 A-G10)
 //!
 //! Profiles select by **rung**, not by layer set: the registry gives every id a
-//! `surface_floor`, and a surface admits an id when `floor(id) <= rung`. The
-//! built-ins are the cumulative ladder `default ⊂ contracts ⊂ strict`. Selecting
+//! `surface_floor`, and a surface admits an id when `floor(id) <= rung`. The rung
+//! order is the cumulative chain `default ⊂ contracts ⊂ strict`. Selecting
 //! by rung (rather than by layer set) is what lets ONE layer hold ids at two rungs
 //! — the contract layer does, spanning `Floor::Contracts` and `Floor::Strict`.
+//!
+//! **The built-ins are not one chain, and never were.** `throws-direct` branches
+//! off `default`, and `pedantic` branches off `contracts`. Both reach an id above
+//! their own rung through `enable`, which is orthogonal to the ladder — the rung
+//! answers "how far up the cumulative order", `enable` answers "and also this".
+//!
+//! `pedantic` is a branch on purpose. "Demand an explicit type declaration" and
+//! "show me the weaker some-paths-only claims" are independent axes: a team that
+//! wants its constants annotated has not thereby asked to see
+//! `variable.maybe-undefined`. Making `pedantic` a rung above `strict` would force
+//! exactly that bundling, and it is the same objection that kept its ids off
+//! `strict` in the first place. The cost is real and accepted: there is no built-in
+//! that means "everything on", and a project wanting one writes
+//! `extends = "strict"` with the pedantic ids in its own `enable`.
 //!
 //! `boundary` is still a **reserved** name (ADR-0042): selecting *or* defining it
 //! is a config error until its ADR lands.
@@ -53,8 +69,8 @@ use std::fmt;
 use crate::{
     DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, DIAGNOSTIC_REGISTRY,
     Diagnostic, Facet,
-    Floor, Layer, Origin, THROW_UNDECLARED_ID, layer, pattern_is_known, pattern_matches,
-    surface_floor,
+    Floor, Layer, Origin, THROW_UNDECLARED_ID, UNTYPED_CLASS_CONSTANT_ID, layer, pattern_is_known,
+    pattern_matches, surface_floor,
 };
 
 /// The default profile name, used when neither `--profile` nor `[check] profile`
@@ -67,8 +83,8 @@ pub const DEFAULT: &str = "default";
 const RESERVED: &[&str] = &["boundary"];
 
 /// The built-in profile names (ADR-0050 §5 / G1 amendment, extended by ADR-0062
-/// A-G10's `strict` rung).
-const BUILTINS: &[&str] = &["default", "contracts", "throws-direct", "strict"];
+/// A-G10's `strict` rung and by the `pedantic` branch).
+const BUILTINS: &[&str] = &["default", "contracts", "throws-direct", "strict", "pedantic"];
 
 /// Whether a surfaced finding fails the run or is merely reported (ADR-0050 §7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,9 +160,14 @@ impl fmt::Display for ConfigError {
                 f,
                 "[profile.{n}] redefines the built-in profile `{n}`; pick another name"
             ),
+            // Derived from `BUILTINS`, not spelled out: the hand-written list had
+            // already drifted once (it still read four names after `pedantic`
+            // landed), and a wrong hint here sends the reader looking for a profile
+            // that exists.
             ConfigError::Unknown(n) => write!(
                 f,
-                "unknown profile `{n}` (built-ins: default, contracts, throws-direct, strict; or define [profile.{n}])"
+                "unknown profile `{n}` (built-ins: {}; or define [profile.{n}])",
+                BUILTINS.join(", ")
             ),
             ConfigError::Cycle(chain) => {
                 write!(f, "profile `extends` cycle: {}", chain.join(" -> "))
@@ -228,6 +249,18 @@ impl Surface {
                 let mut s = base(Floor::Default);
                 s.enable.push(THROW_UNDECLARED_ID.to_owned());
                 s.origin_direct_only = true;
+                Some(s)
+            }
+            // contracts + the house-style asks. A BRANCH off `contracts`, not a rung
+            // above `strict`: "demand an explicit type declaration" and "show me the
+            // weaker some-paths claims" are independent axes, and a rung would force
+            // whoever wants the first to take the second. So the rung stays
+            // `Contracts` and the pedantic-floor ids are named — the `throws-direct`
+            // shape, one `enable` line per id, `Floor::Pedantic` keeping every one of
+            // them off the other three built-ins.
+            "pedantic" => {
+                let mut s = base(Floor::Contracts);
+                s.enable.push(UNTYPED_CLASS_CONSTANT_ID.to_owned());
                 Some(s)
             }
             _ => None,
@@ -919,6 +952,44 @@ mod tests {
         assert_eq!(c.layers_on(), s.layers_on());
         assert_eq!(s.layers_on(), vec!["contract", "mechanics", "proof"]);
         assert_eq!(empty().resolve(None).unwrap().layers_on(), vec!["mechanics", "proof"]);
+    }
+
+    #[test]
+    fn pedantic_branches_off_contracts_and_takes_nothing_from_strict() {
+        // The whole shape of the branch, in one test. `pedantic` is `contracts` plus
+        // the pedantic-floor ids by name — NOT a rung above `strict`.
+        let c = empty().resolve(Some("contracts")).unwrap();
+        let s = empty().resolve(Some("strict")).unwrap();
+        let p = empty().resolve(Some("pedantic")).unwrap();
+
+        assert_eq!(p.rung(), Floor::Contracts, "the rung is contracts; `enable` does the rest");
+        assert!(p.surfaces_id(UNTYPED_CLASS_CONSTANT_ID), "the pedantic id is on");
+        assert!(!c.surfaces_id(UNTYPED_CLASS_CONSTANT_ID), "…and on NO other built-in");
+        assert!(!s.surfaces_id(UNTYPED_CLASS_CONSTANT_ID), "…including strict");
+        assert!(!empty().resolve(None).unwrap().surfaces_id(UNTYPED_CLASS_CONSTANT_ID));
+
+        // Contracts ⊂ pedantic: the branch adds, it does not drop.
+        for &(id, ..) in DIAGNOSTIC_REGISTRY {
+            assert!(!c.surfaces_id(id) || p.surfaces_id(id), "`{id}`: contracts ⊄ pedantic");
+        }
+        // But pedantic and strict are INCOMPARABLE — each holds what the other lacks.
+        // This is the property that would be lost by making `pedantic` a rung.
+        assert!(s.surfaces_id(OFFSET_MAYBE_MISSING_ID) && !p.surfaces_id(OFFSET_MAYBE_MISSING_ID));
+        assert!(p.surfaces_id(UNTYPED_CLASS_CONSTANT_ID) && !s.surfaces_id(UNTYPED_CLASS_CONSTANT_ID));
+        // Still a contract-layer id reached by `enable`, so the layer list is the
+        // contracts one — the `throws-direct` lesson from issue #108.
+        assert_eq!(p.layers_on(), vec!["contract", "mechanics", "proof"]);
+    }
+
+    #[test]
+    fn no_builtin_carries_the_pedantic_rung() {
+        // The invariant that makes `Floor::Pedantic` mean "off unless named": if any
+        // built-in ever took it AS A RUNG, every pedantic-floor id would ride along
+        // and the branch would silently become a ladder top.
+        for name in BUILTINS {
+            let s = empty().resolve(Some(name)).unwrap();
+            assert_ne!(s.rung(), Floor::Pedantic, "`{name}` must not rung at pedantic");
+        }
     }
 
     #[test]

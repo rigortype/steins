@@ -326,7 +326,7 @@ steins: path does not exist: src/Typo
 $ steins check --format xml src/
 steins: unknown format `xml` (text|json)
 $ steins check --profile nope src/
-steins: unknown profile `nope` (built-ins: default, contracts, throws-direct, strict; or define [profile.nope])
+steins: unknown profile `nope` (built-ins: default, contracts, throws-direct, strict, pedantic; or define [profile.nope])
 ```
 
 All three exit `2`, and under `--format json` no document is emitted at all.

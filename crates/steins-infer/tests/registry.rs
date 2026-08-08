@@ -412,19 +412,20 @@ fn floors_reproduce_the_pre_s6_layer_selection() {
     // on every taken arm and leaves an uncovered escape edge) is dominated by code
     // that is correct by construction and unprovable by analysis: phpstan-src's own
     // `src/` carries two and passes its own missing-return rule. Hence `Strict`.
-    // `untyped.class-constant` (2026-08-09 conformance measurement): the one arm of
-    // the untyped family whose missing declaration withholds NO information — a
-    // constant's initializer is a constant expression, so the type is pinned either
-    // way. What is left to buy is the interface contract and the covariance check,
-    // which is a strict-tier concern. Hence `Strict`, while its five siblings stay
-    // at the family floor.
+    // `untyped.class-constant` (2026-08-09 owner ruling): the one arm of the untyped
+    // family whose missing declaration withholds NO information — a constant is
+    // inherently static, its initializer is a constant expression, so the type is
+    // pinned either way. Not `Strict`, which asks whether a weaker some-paths-only
+    // claim is worth seeing: a team opting into that has not asked to be told how to
+    // write its constants. `Pedantic`, the rung no built-in reaches by rung, and the
+    // `pedantic` branch names it in `enable`.
     let promoted = [
         (OFFSET_UNDECLARED_ID, Layer::Contract, Floor::Contracts),
         (OFFSET_MAYBE_MISSING_ID, Layer::Contract, Floor::Strict),
         (PROPERTY_MAYBE_UNDEFINED_ID, Layer::Proof, Floor::Strict),
         (VARIABLE_MAYBE_UNDEFINED_ID, Layer::Proof, Floor::Strict),
         (TYPE_RETURN_MAYBE_MISSING_ID, Layer::Proof, Floor::Strict),
-        (UNTYPED_CLASS_CONSTANT_ID, Layer::Contract, Floor::Strict),
+        (UNTYPED_CLASS_CONSTANT_ID, Layer::Contract, Floor::Pedantic),
     ];
     for &(id, layer_of, floor) in DIAGNOSTIC_REGISTRY {
         if let Some(&(_, expected_layer, expected_floor)) =
@@ -459,7 +460,8 @@ fn floors_reproduce_the_pre_s6_layer_selection() {
 fn the_floor_ladder_is_cumulative() {
     assert!(Floor::Default < Floor::Contracts);
     assert!(Floor::Contracts < Floor::Strict);
-    for f in [Floor::Default, Floor::Contracts, Floor::Strict] {
+    assert!(Floor::Strict < Floor::Pedantic);
+    for f in [Floor::Default, Floor::Contracts, Floor::Strict, Floor::Pedantic] {
         assert_eq!(Floor::parse(f.as_str()), Some(f), "rung spelling round-trips");
     }
     assert_eq!(Floor::parse("nope"), None);

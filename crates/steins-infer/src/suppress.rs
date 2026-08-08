@@ -202,16 +202,25 @@ pub fn declared_facet(id: &str) -> Option<&'static str> {
 }
 
 /// The **lowest profile rung** on which a registered id may reach the surface
-/// (ADR-0062 A-G10). The profile ladder is cumulative — `default ⊂ contracts ⊂
+/// (ADR-0062 A-G10). The rung ladder is cumulative — `default ⊂ contracts ⊂
 /// strict` — so an id is admitted by a profile exactly when its floor is at or
 /// below that profile's rung. Ordered smallest-first: `Default < Contracts <
-/// Strict`, and the `Ord` derive is what the admission test uses.
+/// Strict < Pedantic`, and the `Ord` derive is what the admission test uses.
 ///
 /// A floor is finer than a layer *set*: a built-in profile admits an id when the
 /// id's floor is at or below the profile's rung. This lets a *single* layer
 /// straddle two rungs — the contract layer holds both floor-`Contracts` ids and
 /// floor-`Strict` ids (the offset family's strict leg), which naming layer sets
 /// could not express.
+///
+/// # The one rung no built-in's *rung* reaches
+///
+/// [`Floor::Pedantic`] is the top of the order and **no built-in profile carries it
+/// as a rung**. That is deliberate, and it is what makes the order still a total
+/// order while the profiles stop being one chain: an id parked there is off every
+/// built-in surface until something names it in an `enable` list — the built-in
+/// `pedantic` profile, or a user profile. The `throws-direct` precedent is the same
+/// shape read the other way (a rung *below* the id it reaches).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Floor {
     /// On the bare `steins check` surface (and therefore every surface above it).
@@ -220,17 +229,27 @@ pub enum Floor {
     Contracts,
     /// Reached only by the `strict` opt-up stage (ADR-0062 A-G10).
     Strict,
+    /// Reached by **no built-in rung at all** — only by an explicit `enable`,
+    /// whether the built-in `pedantic` profile's or a user profile's.
+    ///
+    /// The home for a house-style ask: a rule about how code should be *written*
+    /// where Steins itself has no finding to make. Those cannot ride `Strict`,
+    /// which asks a different question (is a weaker, some-paths-only claim worth
+    /// seeing?), and putting them there would make every `strict` user inherit a
+    /// style opinion the analyzer does not hold.
+    Pedantic,
 }
 
 impl Floor {
-    /// The wire/config spelling (`"default"|"contracts"|"strict"`) — also the rung
-    /// name a baseline entry records as its capture surface (A-G10).
+    /// The wire/config spelling (`"default"|"contracts"|"strict"|"pedantic"`) — also
+    /// the rung name a baseline entry records as its capture surface (A-G10).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Floor::Default => "default",
             Floor::Contracts => "contracts",
             Floor::Strict => "strict",
+            Floor::Pedantic => "pedantic",
         }
     }
 
@@ -244,6 +263,7 @@ impl Floor {
             "default" => Some(Floor::Default),
             "contracts" => Some(Floor::Contracts),
             "strict" => Some(Floor::Strict),
+            "pedantic" => Some(Floor::Pedantic),
             _ => None,
         }
     }
@@ -425,21 +445,27 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // `Floor::Strict` — once the corpus measurement says they should. Nothing else
     // in the tree keys on their rung.
     //
-    // `untyped.class-constant` is the one that already MOVED (2026-08-09
-    // measurement), and for a reason no other arm shares: a class constant's
-    // initializer is a constant expression, so its type is fully determined by the
-    // declaration whether or not a type is written. Every other arm's silence
-    // yields `mixed` — real withheld information — while this arm's yields the
-    // exact same type either way. What a written constant type still buys is the
-    // interface contract and the child-class covariance check (PHP 8.3), which is
-    // a strict-tier concern, not the `contracts` rung's "how much untyped surface
-    // is left" question. Measured on the php-typing-conformance suite, where the
-    // arm fired on `key-of<C::MAP>` / `value-of<C::MAP>` / `int-mask-of<…>`
-    // fixtures whose constants are exhaustively typed BY their values.
+    // `untyped.class-constant` is the one that LEFT the family floor (2026-08-09
+    // owner ruling), and for a reason no other arm shares: a constant is inherently
+    // static. Its initializer is a constant expression, so the declaration pins the
+    // type whether or not one is written. Every other arm's silence yields `mixed`
+    // — real withheld information — while this arm's yields the exact same type
+    // either way. Inheritance can still overwrite a constant with a differently
+    // shaped value, and that risk is accepted knowingly: unlike a property, Steins
+    // does not ask for the declaration.
+    //
+    // So it does not sit at `Strict` either. `Strict` asks a different question —
+    // is a weaker, some-paths-only claim worth seeing? — and a team opting into
+    // that has not thereby asked to be told how to write its constants. The id goes
+    // to `Pedantic`, which no built-in rung reaches, and the built-in `pedantic`
+    // profile picks it up by name. Measured on the php-typing-conformance suite,
+    // where the arm fired on `key-of<C::MAP>` / `value-of<C::MAP>` /
+    // `int-mask-of<…>` fixtures whose constants are exhaustively typed BY their
+    // values.
     (UNTYPED_PARAMETER_ID, Layer::Contract, Floor::Contracts),
     (UNTYPED_RETURN_ID, Layer::Contract, Floor::Contracts),
     (UNTYPED_PROPERTY_ID, Layer::Contract, Floor::Contracts),
-    (UNTYPED_CLASS_CONSTANT_ID, Layer::Contract, Floor::Strict),
+    (UNTYPED_CLASS_CONSTANT_ID, Layer::Contract, Floor::Pedantic),
     (UNTYPED_ITERABLE_VALUE_ID, Layer::Contract, Floor::Contracts),
     (UNTYPED_GENERICS_ID, Layer::Contract, Floor::Contracts),
     // end untyped surface (ADR-0078, issue #200)

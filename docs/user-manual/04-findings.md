@@ -129,12 +129,15 @@ ladder and outside every gate.
 
 Which profile puts each layer on the surface:
 
-| Layer | `default` | `throws-direct` | `contracts` | `strict` |
-| --- | --- | --- | --- | --- |
-| proof | yes | yes | yes | yes |
-| mechanics | yes | yes | yes | yes |
-| contract | no | `throw.undeclared`, direct escapes only | all but `offset.maybe-missing` | yes |
-| debug | yes | yes | yes | yes |
+| Layer | `default` | `throws-direct` | `contracts` | `strict` | `pedantic` |
+| --- | --- | --- | --- | --- | --- |
+| proof | yes | yes | yes | yes | yes |
+| mechanics | yes | yes | yes | yes | yes |
+| contract | no | `throw.undeclared`, direct escapes only | all but the strict and pedantic rungs | contracts + the some-paths-only claims | contracts + the house-style asks |
+| debug | yes | yes | yes | yes | yes |
+
+`strict` and `pedantic` both build on `contracts` and neither contains the
+other — see [chapter 5](05-profiles-and-baseline.md).
 
 `steins doctor` prints the resolved surface for your build and config, which
 is the authoritative answer for a given binary — two lines out of its
@@ -143,12 +146,12 @@ is the authoritative answer for a given binary — two lines out of its
 ```
 $ steins doctor --no-php .
   active profile: `default` (from built-in default)
-  surface: layers [mechanics, proof], 16 checked id(s)
+  surface: layers [mechanics, proof], 47 checked id(s)
 ```
 
-Today that count runs 16 ids at `default`, 17 at `throws-direct`, 25 at
-`contracts`, 26 at `strict`. The stages, the baseline ratchet that makes
-raising one survivable, and user-defined profiles all live in
+Today that count runs 47 ids at `default`, 48 at `throws-direct`, 61 at
+`contracts`, 65 at `strict` and 62 at `pedantic`. The profiles, the baseline
+ratchet that makes raising one survivable, and user-defined profiles all live in
 [chapter 5](05-profiles-and-baseline.md). The normative rules for layers,
 facets, and suppression are in
 [diagnostic-policy.md](../type-specification/diagnostic-policy.md).
