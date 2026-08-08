@@ -82,6 +82,11 @@ Splitting the 519 by whether every arm is an accessory/scalar refinement:
   arrays. The `FinalClass&MockObject` shape issue #234 guards is in this half,
   and it is the smaller half.
 
+> **Corrected 2026-08-08 (#235):** the 336/183 split does not reproduce. The
+> measured halves are **273 / 246**, and the probe below states the filter that
+> produces them. The rest of this section's *reading* survives the correction;
+> its *conclusion* does not — see the probe's verdict.
+
 ### Subtraction is a `mixed`-cut problem
 
 133 of the 157 rows are `mixed~null`, `mixed~int`, `mixed~array<mixed, mixed>`,
@@ -148,10 +153,12 @@ headline: the two intersection halves, the `mixed`-cut vocabulary,
 Sliced smallest-first, so each lands a measurable nsrt delta:
 
 1. Probe whether accessory conjunctions are a speller gap or a domain gap (336
-   rows) — a scoping slice, not an implementation one.
+   rows) — a scoping slice, not an implementation one. **Done (#235); the
+   answer moved this item out of the vocabulary plan entirely — see the probe
+   below.**
 2. `class-string` and its parameterized form (148).
 3. The `mixed` cut vocabulary beyond Null/Falsy (133).
-4. Object intersections, on #234's inhabitance rule (183).
+4. Object intersections, on #234's inhabitance rule (183 → 246).
 5. ~~Decide what `mixed` should score as in the harness (329) — a measurement
    decision that moves no engine code.~~ **Done (issue #239)**; see the
    correction at the top. It moved 329 rows from `unsupported` to `differ`,
@@ -159,3 +166,172 @@ Sliced smallest-first, so each lands a measurable nsrt delta:
    admissible figure untouched.
 6. Then reach: loose comparisons, `filter_var`, binary operators (896).
 7. Then precision: the array-vocabulary block (1,609), decomposed.
+
+## 2026-08-08 — the accessory-conjunction probe (#235)
+
+Same instrument, same inputs: master `bc6df55`, phpstan-src `55a7732`, 15,845
+assertions, the six verdict counts reproduce to the row. Everything below is
+measured — `target/nsrt/nsrt-asserttype.json` for the counts, `steins check`
+with `\PHPStan\dumpType` for the witnesses.
+
+### The filter, and the corrected split
+
+Take `verdict == "unsupported" && class == "intersection"` (519 rows) and keep
+the rows where **every arm of every `&`-group is a string-refinement keyword**
+(`lowercase-` / `uppercase-` / `non-empty-` / `non-falsy-` / `numeric-` /
+`decimal-int-` / `non-decimal-int-` / `literal-` / `class-string`):
+
+| half | n |
+| --- | ---: |
+| accessory conjunctions | **273** |
+| object / array intersections (`hasOffset`, class names, `callable`) | **246** |
+
+Not 336/183. No stated-or-implied filter reaches 336: the loosest reading that
+still excludes class names ("any accessory keyword anywhere in `expected`")
+gives 284, and the strictest gives 273. The 336 figure above is withdrawn.
+
+**27 distinct arm-combinations** occur, and they are the whole population:
+
+| n | combination | n | combination |
+| ---: | --- | ---: | --- |
+| 47 | `lowercase-string&non-falsy-string` | 6 | `lowercase-string&non-empty-string&uppercase-string` |
+| 27 | `lowercase-string&non-empty-string` | 6 | `literal-string&non-falsy-string` |
+| 23 | `lowercase-string&numeric-string` | 3 | `lowercase-string&non-empty-string&numeric-string` |
+| 19 | `lowercase-string&non-falsy-string&uppercase-string` | 3 | `non-decimal-int-string&non-falsy-string` |
+| 16 | `numeric-string&uppercase-string` | 2 | `lowercase-string&non-falsy-string&numeric-string` |
+| 15 | `non-empty-string&uppercase-string` | 2 | `non-falsy-string&numeric-string&uppercase-string` |
+| 15 | `decimal-int-string&non-falsy-string` | 2 | `literal-string&non-falsy-string&uppercase-string` |
+| 14 | `lowercase-string&non-falsy-string&numeric-string&uppercase-string` | 2 | `literal-string&lowercase-string&non-falsy-string&numeric-string&uppercase-string` |
+| 14 | `non-falsy-string&uppercase-string` | 2 | `literal-string&lowercase-string&non-falsy-string&uppercase-string` |
+| 11 | `non-falsy-string&numeric-string` | 1 | `class-string&literal-string` |
+| 10 | `non-empty-string&numeric-string` | 1 | `literal-string&lowercase-string&non-empty-string&numeric-string&uppercase-string` |
+| 8 | `lowercase-string&uppercase-string` | 1 | `literal-string&lowercase-string&uppercase-string` |
+| 8 | `lowercase-string&non-empty-string&numeric-string&uppercase-string` | | |
+| 8 | `literal-string&non-empty-string` | | |
+
+Thirty of the 273 carry a `literal-string` / `class-string` arm — `StrOpaque`,
+not a `StrPreds` set, so no predicate spelling can ever reach them. That leaves
+**243 pure-`StrPreds` rows**, and run through `StrPreds::close` they collapse to
+**17 distinct closed predicate sets**. A closed set, decisively — not an open
+conjunction algebra.
+
+### The four answers
+
+**1. Does the value domain hold two accessory refinements at once? Yes.**
+
+`StrPreds` is a `u8` bitset closed under implication; a conjunction is the only
+thing it can represent. The witness makes that observable through a surface
+that shows one keyword at a time. `preds_keyword` ranks
+`NUMERIC` > `NON_FALSY` > casing > `NON_EMPTY` and emits exactly one keyword, so
+a set holding `{NON_FALSY, LOWERCASE}` renders `non-falsy-string` and the casing
+half is *invisible*. `substr` drops the length predicates and keeps casing
+(pinned in `str_pred_transfer.rs`), so it re-exposes what was underneath:
+
+```php
+/** @param non-falsy-string $nf */
+function speller($nf): void {
+    $x = strtolower($nf);
+    \PHPStan\dumpType($x);            // non-falsy-string (asserted)
+    \PHPStan\dumpType(substr($x, 3)); // lowercase-string (asserted)   <= LOWERCASE was held all along
+}
+```
+
+The uppercase mirror behaves identically (`strtoupper` → `non-falsy-string`,
+then `substr` → `uppercase-string`). And the corpus corroborates without any
+constructed fixture: `str-casing.php:54`, `more-types.php:51` and
+`lowercase-string-pad.php:18` all render `non-empty-lowercase-string` — the one
+accessory conjunction that happens to have a single keyword today.
+
+**2. Where is the loss? In the speller, and (separately) in the seed — not in
+the acceptance relation.**
+
+- *Renderer.* `render_dump_fact` routes the entire bitset through
+  `steins_contract::spell::preds_keyword`, whose own doc already says it: "One
+  keyword comes out, never an intersection." One call site, one ladder. This is
+  the loss the witness above measures, and it is exactly localized.
+- *Acceptance relation: not a blocker.* `steins_contract::lower` maps
+  `TypeKind::Intersection` → `ContractTy::Inter`, and `admit`, `normalize` and
+  `spell` all carry `Inter` arms (`spell` even joins them with `&`). `lower_str`
+  parses `A&B` today.
+- *Seed: a real hole.* A **declared** conjunction reaches nothing:
+
+  ```php
+  /** @param lowercase-string&non-falsy-string $both */  // dumpType => unknown
+  /** @param lowercase-string&non-empty-string $ne */    // dumpType => unknown
+  ```
+
+  `$ne` is `non-empty-lowercase-string`, which Steins can already say — so this
+  is not a spelling failure. `contractty_to_fact` has no `ContractTy::Inter`
+  arm and returns `None`, so an intersected `@param` seeds no fact at all.
+
+**3. Nothing is lost at a join or at storage — but most of the 243 rows never
+had anything to lose.** Attributing each row by comparing Steins' `got` against
+the *ceiling* `preds_keyword` could emit for the expected closed set:
+
+| n | attribution |
+| ---: | --- |
+| 10 | Steins already renders **exactly** the expected set — harness-only, no engine change |
+| 42 | the set is sayable with today's vocabulary, but Steins does not compute it |
+| 9 | Steins sits at the speller's ceiling; only a conjunction spelling could add anything |
+| 92 | `unknown` — nothing computed at all |
+| 90 | below the ceiling *and* unsayable |
+| 30 | a `StrOpaque` arm (`literal-string` / `class-string`) |
+
+The reach failures are ordinary and reproducible:
+
+```php
+/** @param non-empty-string $ne */   if ($ne !== '0') dumpType($ne);  // non-empty-string, not non-falsy-string
+/** @param lowercase-string $lc */   dumpType($lc . 'abc');           // unknown
+/** @param numeric-string $n */      dumpType(strtoupper($n));        // non-empty-uppercase-string, NUMERIC dropped
+```
+
+`!== '0'` establishing `NON_FALSY`, concatenation carrying predicates, and
+`strtoupper` preserving `NUMERIC` are three separate transfer gaps, and between
+them they account for far more of the bucket than any spelling does.
+
+**4. The spelling should be Steins' own compound keyword, not PHPStan's `&`.**
+
+Steins already spells one of these conjunctions as a single word —
+`non-empty-lowercase-string` — and the codebase already calls the
+`LOWERCASE ∧ UPPERCASE` set *uncased*. Extending that pattern gives a closed
+grid, core rung × casing:
+
+- core ∈ {—, `non-empty-`, `non-falsy-`, `numeric-`, `non-falsy-numeric-`}
+- casing ∈ {—, `lowercase-`, `uppercase-`, `uncased-`}
+
+which names 15 of the 17 closed sets; two cells (`non-empty-lowercase-string`,
+`non-empty-uppercase-string`) already exist. The two remaining sets carry
+`DECIMAL_INT` / `NON_DECIMAL_INT`, which `preds_keyword` deliberately refuses as
+rungs and should keep refusing. Because the harness normalizes and `lower`
+already handles `Intersection`, an equivalent-but-different rendering scores
+`match` / `equal` on its own terms — importing `&` buys nothing and costs the
+phpdoc round-trip.
+
+### Verdict
+
+**A reach gap, dominant by a wide margin. Not a domain gap; a real but small
+speller gap; no relation gap.**
+
+- **Domain gap: none.** The bitset holds the conjunction, and the witness shows
+  it surviving a render that cannot show it.
+- **Relation gap: none on the contract side.** `lower_str` already parses `A&B`.
+  One seed-side hole (`contractty_to_fact` refusing `Inter`), worth closing on
+  its own merits, but it is not what costs the rows.
+- **Speller gap: real, precisely localized to `preds_keyword`, and bounded at
+  ≤ 19 of 243 rows** (the 10 already-exact plus the 9 at the ceiling) — and 10 of
+  those 19 need no engine change at all.
+- **Reach gap: 224 of 243 rows.** Steins renders `unknown` or a strictly weaker
+  set because the predicates were never established.
+
+The consequence for §A's plan is larger than the correction to its arithmetic:
+**263 of these 273 rows are misfiled**. They sit in the *vocabulary* bucket only
+because `is_supported_atom` refuses any atom containing `&` before the relation
+is ever consulted. They are reach and precision failures wearing a vocabulary
+costume, and the "vocabulary before reach" sequencing does not apply to them.
+Dropping the `&`-gate for all-`StrPreds` atoms is a harness-only change that
+re-files them honestly and flips 10 rows to admissible with zero engine change.
+
+Sized and filed as issue #240, in three separable pieces: re-file the bucket
+(harness only, +10 admissible for free), seed the declared `Inter` form, and
+spell the closed grid. The reach gaps it exposes are deliberately left for
+their own issues, once #240's first piece makes them visible as `differ` rows.
