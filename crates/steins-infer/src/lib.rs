@@ -51,6 +51,10 @@ use steins_syntax::{
     ScopeOwner, SourceTree, StaticClass, Stmt, StmtKind, StringContextSite, ThrowKind, ThrowOrigin,
     TypeMember, Visibility, duplicate_array_keys, normalize_array, php_canonical_int_string,
 };
+// return missing (ADR-0078, issue #199)
+pub use steins_syntax::{BodyEnd, body_end};
+use steins_syntax::RetHintKind;
+// end return missing (ADR-0078, issue #199)
 
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, StringLit, TypeKind as PKind};
 use steins_phpdoc::{
@@ -770,6 +774,74 @@ pub const CLASS_CONST_UNDEFINED_ID: &str = "class-const.undefined";
 
 // end member absence (ADR-0078, issue #197)
 
+// return missing (ADR-0078, issue #199)
+
+/// The registry id for a function-like that **runs off the end of its body** while
+/// declaring a native return type PHP demands a value for (ADR-0078, issue #199).
+///
+/// Witnessed on PHP 8.5.9 — the consequence is a fatal `TypeError` at the moment
+/// control reaches the closing brace, not at declaration time:
+///
+/// ```text
+/// TypeError: f(): Return value must be of type int, none returned
+/// TypeError: A::m(): Return value must be of type int, none returned
+/// TypeError: {closure:…}(): Return value must be of type int, none returned
+/// ```
+///
+/// A live-path break, so **proof** layer at the `Default` floor. It is *not*
+/// behind the ADR-0049 §7 warning-handler gate: a `TypeError` is fatal and no
+/// declared posture makes it survivable.
+///
+/// # Why `type.*` and not a `return.*` family
+///
+/// The premise is the **native return declaration** — the same Verified evidence
+/// [`RETURN_MISMATCH_ID`]'s native leg reads, asked one step earlier: that id says
+/// *the value you returned is the wrong type*, this one says *you returned no
+/// value at all*. ADR-0078 §1 puts an id in the family its premise names, and the
+/// premise here is a written type, so `type.*` it is (the ADR flags this row as
+/// added beyond its grilled table; landing the id discharges the flag).
+///
+/// # What has to be proven, and what is deliberately not
+///
+/// Two independent premises, both required:
+///
+/// 1. **The declaration demands a value.** A written, non-`void`, non-`never`
+///    return hint — read from `Scope::ret_hint`, the *raw* hint, because
+///    `: array` / `: mixed` / `: self` lower to no `NativeType` yet all three
+///    fatal identically. `?int` and `int|string` demand one too: nullable is not
+///    optional. A generator body (`yield` anywhere) is excluded — its declared
+///    type describes the `Generator` the *call* produces, never a body exit
+///    (ADR-0057 §5). `never` is excluded because its fall-through is a different
+///    fatal with a different sentence (`never-returning function must not
+///    implicitly return`), and ADR-0022 makes one id one consequence.
+/// 2. **The body provably falls through** —
+///    [`BodyEnd::provably_falls_through`], the ADR-0078 reachability foundation.
+///    The asymmetry that type documents is this id's safe side: an undecided body
+///    (`try`/`catch`, a `goto`, an unstructurable `switch`) counts as
+///    **terminating**, i.e. silence. Never accuse a body of running off its end
+///    on evidence that only failed to prove it did not.
+///
+/// Abstract methods and interface methods are excluded **by construction**: the
+/// lowering builds a `Scope` only for a concrete body, so a body-less declaration
+/// is not a candidate at all. `__construct`/`__destruct` are excluded by
+/// construction too — PHP forbids a return type on either. An arrow function is
+/// excluded by construction a third way: its body lowers to a single `return`.
+///
+/// # The recorded obstacle: never-returning callees
+///
+/// `function g(): never { exit(1); } function f(): int { g(); }` runs clean
+/// (witnessed 8.5.9) — `g()` never returns, so control never reaches `f`'s closing
+/// brace. The reachability judgment is index-free and reads a statement-position
+/// call as falling through, so this id applies the refinement itself: a scope
+/// containing a statement-position call to a resolvable callee declaring `: never`
+/// is silent, whole. A callee that never returns without *declaring* `never` —
+/// the legacy `function redirect($u) { header(…); exit; }` — is **not** modelled,
+/// and is this id's one named over-report risk; inferring `never` from a callee's
+/// own `BodyEnd` is exactly what a later consumer of this foundation can add.
+pub const TYPE_RETURN_MISSING_ID: &str = "type.return-missing";
+
+// end return missing (ADR-0078, issue #199)
+
 /// Every id constant that reaches a `Diagnostic { id: … }` construction site — the
 /// canonical enumeration of what the emitters can produce (ADR-0050 §2 totality).
 ///
@@ -860,6 +932,9 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     UNTYPED_ITERABLE_VALUE_ID,
     UNTYPED_GENERICS_ID,
     // end untyped surface (ADR-0078, issue #200)
+    // return missing (ADR-0078, issue #199)
+    TYPE_RETURN_MISSING_ID,
+    // end return missing (ADR-0078, issue #199)
 ];
 
 /// Ids **registered ahead of emission**: they exist in [`DIAGNOSTIC_REGISTRY`]
@@ -3046,6 +3121,12 @@ fn check_units(
         units.iter().filter(|u| !u.tree.parse_errors().is_empty()).map(|u| u.path).collect();
     // end parse failure (ADR-0079, issue #180)
 
+    // return missing (ADR-0078, issue #199): the whole-run veto set, computed once
+    // because a never-returning helper is routinely declared in a different file
+    // from the body that calls it.
+    let never_returning = never_returning_names(units);
+    // end return missing (ADR-0078, issue #199)
+
     for fi in 0..units.len() {
         // parse failure (ADR-0079, issue #180): the broken file's own passes do not
         // run at all. The project-wide passes below (effects, throws) are filtered
@@ -3126,6 +3207,13 @@ fn check_units(
         // dead-region filter, no sidecar: a declaration that withholds its type
         // withholds it wherever it sits. -----------------------------------------
         untyped_surface(&cx, &mut out);
+
+        // --- `type.return-missing` (ADR-0078 / issue #199): the reachability
+        // foundation's tracer. Declaration premise plus a structural terminality
+        // verdict, so — like the two passes above — no env, no folder, no
+        // dead-region filter: a body that runs off its end does so wherever it
+        // sits, and the judgement is about the body's own shape.
+        check_return_missing(&cx, &never_returning, &mut out);
 
         // --- Direct pass: literal / array / `new` arguments at every function
         // call site (env-free; propagation adds `$var`/folded resolution). Native
@@ -15311,6 +15399,177 @@ fn check_foreach_subject(
         fix: None,
     });
 }
+
+// return missing (ADR-0078, issue #199)
+
+/// Every function-like body in this file, judged for `type.return-missing`
+/// ([`TYPE_RETURN_MISSING_ID`]).
+///
+/// Env-free and dead-region-free by design. The premise is a *declaration* plus
+/// the ADR-0078 reachability foundation's structural verdict, neither of which a
+/// walked value can change, so this pass borrows nothing from the propagation
+/// pass — the same posture `check_declaration_fatals` and `docblock_hygiene` take.
+///
+/// `never_returning` is the set of callee names the run proved never return; see
+/// [`never_returning_names`] and the id's own "recorded obstacle" section.
+fn check_return_missing(cx: &Cx, never_returning: &HashSet<String>, out: &mut Vec<Diagnostic>) {
+    for scope in cx.tree().scopes() {
+        // Premise 1a: a written, non-void, non-never return hint. The RAW hint, not
+        // the lowered `NativeType`: `: array` / `: mixed` / `: self` lower to `None`
+        // and fatal exactly as `: int` does.
+        let Some(hint) = scope.ret_hint else { continue };
+        if hint.kind != RetHintKind::Other {
+            continue;
+        }
+        // Premise 1b: not a generator. A body containing `yield` returns a
+        // `Generator` object from the CALL; its declared type describes that object
+        // and never a body exit (ADR-0057 §5), so falling off the end is legal.
+        if scope.is_generator {
+            continue;
+        }
+        // Premise 2: the body PROVABLY falls through. This is the asymmetry
+        // [`BodyEnd`] documents, applied: `Unknown` — a `try`/`catch`, a `goto`, an
+        // unstructurable `switch` — reads as terminating here, i.e. silence.
+        if !body_end(&scope.stmts).provably_falls_through() {
+            continue;
+        }
+        // The never-returning-callee refinement the judgment leaves to this id:
+        // `function g(): never { exit(1); }` makes `function f(): int { g(); }` run
+        // clean (witnessed 8.5.9). Scope-wide rather than path-precise — a strictly
+        // larger silence, which is the safe direction.
+        if scope_calls_never_returning(scope, never_returning) {
+            continue;
+        }
+        // `include`/`require`/`eval` bring in code that can `exit` the whole script,
+        // so a body whose fall-through path runs through one has an exit this
+        // judgment cannot see. Only these two give-up constructs are vetoed — the
+        // rest of the ADR-0001 list (`global`, `static $x`, `extract`, a by-ref
+        // capture) defeats *value* tracking, which this premise never consults.
+        if scope
+            .opaque
+            .iter()
+            .any(|s| matches!(s.construct, OpaqueConstruct::Include | OpaqueConstruct::Eval))
+        {
+            continue;
+        }
+
+        let declared = cx.tree().text_at(hint.span).unwrap_or("the declared type").trim();
+        let (subject, php_subject) = return_missing_subject(cx, scope);
+        let pos = cx.tree().position(hint.span.start);
+        out.push(Diagnostic {
+            id: TYPE_RETURN_MISSING_ID,
+            path: cx.path().to_owned(),
+            line: pos.line,
+            column: pos.column,
+            message: format!(
+                "{subject} declares a return type of {declared} but its body falls through \
+                 to the end — PHP fatals there with \"{php_subject}(): Return value must be of \
+                 type {declared}, none returned\""
+            ),
+            facet: None,
+            fix: None,
+        });
+    }
+}
+
+/// How a `type.return-missing` message names its function-like: the readable
+/// subject for the sentence, and the subject PHP's own `TypeError` prints.
+///
+/// The two differ only for a closure, whose runtime name is a synthesized
+/// `{closure:file:line}` no source text can be quoted for.
+fn return_missing_subject(cx: &Cx, scope: &Scope) -> (String, String) {
+    match &scope.owner {
+        ScopeOwner::Function(name) => (format!("function {name}"), name.clone()),
+        ScopeOwner::Method { class, method } => {
+            let qualified = format!("{class}::{method}");
+            (format!("method {qualified}"), qualified)
+        }
+        ScopeOwner::Closure { def_offset } => {
+            let line = cx.tree().position(*def_offset).line;
+            (format!("the closure on line {line}"), "{closure}".to_owned())
+        }
+        // The top-level scope carries no return hint, so it never reaches here.
+        ScopeOwner::TopLevel => ("the script".to_owned(), "{main}".to_owned()),
+    }
+}
+
+/// The simple names of every function and method in the run that declares
+/// `: never` — the veto set for the recorded never-returning-callee obstacle.
+///
+/// Read off `Scope::ret_hint`, so it covers exactly the bodies the analysis
+/// lowered. Names are lowercased because PHP function and method names are
+/// case-insensitive, and they are **simple** names, not resolved targets: a scope
+/// is vetoed when it calls *something spelled like* a never-returning callee. That
+/// is a deliberate over-silence — resolving each call's real target would need the
+/// receiver's exact class, which this declaration-only pass has no business
+/// computing, and the cost of guessing wrong is a false `TypeError` accusation.
+fn never_returning_names(units: &[FileUnit]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for unit in units {
+        for scope in unit.tree.scopes() {
+            if scope.ret_hint.is_none_or(|h| h.kind != RetHintKind::Never) {
+                continue;
+            }
+            match &scope.owner {
+                ScopeOwner::Function(name) => names.insert(name.to_ascii_lowercase()),
+                ScopeOwner::Method { method, .. } => names.insert(method.to_ascii_lowercase()),
+                ScopeOwner::TopLevel | ScopeOwner::Closure { .. } => continue,
+            };
+        }
+    }
+    names
+}
+
+/// Whether `scope` calls anything named in the never-returning veto set.
+///
+/// Two sources, together covering every call the lowering records: the trace's
+/// statement-position calls (descending the structured `if`/`match` sub-traces,
+/// which are where the fall-through path's own statements live) and
+/// `Scope::method_calls`, the comprehensive method-call enumeration.
+fn scope_calls_never_returning(scope: &Scope, never_returning: &HashSet<String>) -> bool {
+    if never_returning.is_empty() {
+        return false;
+    }
+    let named = |call: &CallExpr| {
+        callee_simple_name(call).is_some_and(|n| never_returning.contains(&n.to_ascii_lowercase()))
+    };
+    scope.method_calls.iter().any(named) || trace_calls_any(&scope.stmts, &named)
+}
+
+/// `true` when any statement-position call in `stmts` (or in a structured
+/// sub-trace beneath it) satisfies `pred`.
+fn trace_calls_any(stmts: &[Stmt], pred: &impl Fn(&CallExpr) -> bool) -> bool {
+    stmts.iter().any(|stmt| {
+        if checkable_calls(&stmt.kind).into_iter().any(pred) {
+            return true;
+        }
+        match &stmt.kind {
+            StmtKind::If { then_trace, elseifs, else_trace, .. } => {
+                trace_calls_any(then_trace, pred)
+                    || elseifs.iter().any(|(_, t)| trace_calls_any(t, pred))
+                    || else_trace.as_deref().is_some_and(|t| trace_calls_any(t, pred))
+            }
+            StmtKind::Match { arms, default, .. } => {
+                arms.iter().any(|a| trace_calls_any(&a.trace, pred))
+                    || default.as_deref().is_some_and(|t| trace_calls_any(t, pred))
+            }
+            _ => false,
+        }
+    })
+}
+
+/// The simple callee name of a call, for name-keyed matching: the function name,
+/// or the method name of an instance/static call. A constructor, a `$fn()` and an
+/// unrepresentable callee have no name to match on.
+fn callee_simple_name(call: &CallExpr) -> Option<&str> {
+    match &call.receiver {
+        Callee::Function(name) => Some(name),
+        Callee::Method { method, .. } | Callee::Static { method, .. } => Some(method),
+        Callee::Construct { .. } | Callee::DynamicVar(_) | Callee::Dynamic => None,
+    }
+}
+
+// end return missing (ADR-0078, issue #199)
 
 /// The element type of one `$matches` entry, read off the sub-pattern that
 /// produced it (issue #156).

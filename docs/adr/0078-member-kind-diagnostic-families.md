@@ -150,3 +150,55 @@ Recorded so the registry's silence is named (ADR-0049 point 10 shape):
   that side.
 - `CONTEXT.md` gains the session's four terms (member-kind family,
   dischargeable obstacle, maybe- sibling, warning-handler gate).
+
+## 5. The reachability foundation and its seam (issue #199)
+
+`type.return-missing` is the one row in §2 that is not a rule port. It is
+the **tracer** of a foundation the port map needed three separate times
+and could not scope: a per-scope terminality judgment. The foundation
+landed with it, and this section records the seam so the deferred
+consumers do not each invent their own.
+
+**The judgment.** `steins_syntax::BodyEnd` — `Terminates` /
+`FallsThrough` / `Unknown` — is computed per statement at lowering time,
+from the CST, and carried on `Stmt::end`; `body_end(&[Stmt])` folds a
+statement list to the same three-valued answer. It is deliberately
+computed from the CST rather than from the trace IR, because the IR
+erases every loop, `try` and `switch` into one undifferentiated
+`StmtKind::Opaque` and `goto` into a `StmtKind::Barrier` — the two
+distinctions the judgment lives on. It is env-free, index-free and
+project-free: a **syntactic** control-flow reading, where a branch
+condition is non-deterministic and only a construct with no exit edge at
+all (`return`, `throw`, `exit`, an `unhandled` `match`, a `while (true)`
+with no `break`) terminates.
+
+**The asymmetry, which is the point.** `Unknown` is not a defect to be
+smoothed away; it is the honest verdict for a construct whose exit edges
+the judgment does not bound. Its *safe side differs by consumer*, and
+each consumer must name which side it takes:
+
+| consumer | the accusation | safe reading of `Unknown` | predicate |
+| --- | --- | --- | --- |
+| `type.return-missing` | "this body runs off its end" | **terminating** — silence | `provably_falls_through()` |
+| the level-4 dead-code family (`UnreachableStatementRule`, `CatchWithUnthrownExceptionRule`, the unused-private trio) | "the statement after this never runs" | **not terminal** — silence | `provably_terminates()` |
+| `variable.maybe-undefined` (#194), some-paths-only | "this path reaches a read with no write" | not terminal — the path stays live, so no claim | `provably_terminates()` |
+
+Both predicates exist precisely so that no consumer writes
+`!= Terminates` or `!= FallsThrough`: each negation is correct for one
+consumer and inverts the other's safe side, and that is the mistake the
+type exists to prevent.
+
+**Named silences of the foundation**, so its quiet is measured rather
+than assumed: `try`/`catch`/`finally` is excluded whole (`finally`
+overwrites the exit point — `try { return 1; } finally { return 2; }`
+returns `2` on 8.5.9, and a returning `finally` swallows an in-flight
+exception, so neither direction is readable off the block ends);
+`goto` and labels are unbounded jumps; a `switch` whose case body runs
+into the next case is not modelled; a provably-infinite loop containing a
+`break` whose target is unresolved is undecided. A call to a callee
+proven never to return is not the judgment's business either — it needs
+the project index — so `type.return-missing` applies that refinement
+itself, at the emitter, and the undeclared never-returner (a helper that
+calls `exit` without declaring `: never`) is its one named over-report
+risk. Inferring `never` from a callee's own `BodyEnd` is the obvious next
+consumer of this seam.

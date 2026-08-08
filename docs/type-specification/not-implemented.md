@@ -55,9 +55,17 @@ Places where Steins is quieter than it could be.
 - Loops are `Opaque` — write/read-set invalidation only, no loop-carried facts
   (ADR-0052 N6, deferred out of v0.1.0 by owner decision).
 - `try`/`catch`/`finally` is `Opaque` for value flow (catch *matching* works).
-- No reachability analysis: a construct that early-returns on every branch makes
-  fall-through code dead, and a fact about a variable it never reads could
-  describe an unreachable path.
+- Reachability is decided **structurally only** (ADR-0078 §5, issue #199). Every
+  statement carries a `BodyEnd` — `Terminates` / `FallsThrough` / `Unknown` —
+  computed from the CST, and `body_end` folds a statement list to the same
+  verdict. What it does not do is feed *value* flow: a construct that early-
+  returns on every branch is now provably terminal, but a fact about a variable
+  the dead tail never reads is still carried as if that tail ran. The judgment's
+  own silences are `try`/`catch`/`finally` (excluded whole — `finally` overwrites
+  the exit point), `goto`/labels, a `switch` with case-to-case fall-through, and
+  a provably-infinite loop containing a `break` whose target is unresolved.
+  `type.return-missing` is its only consumer today; the level-4 dead-code family
+  is the deferred one, and reads `Unknown` the opposite way round.
 - Static properties are not a fact lane; property chains (`$a->b->c`) are a
   `Barrier` (ADR-0052 N5, same owner deferral).
 - `??` refines an *array offset* in guard position (ADR-0062 S5); over any other

@@ -61,6 +61,9 @@ use crate::{
     UNTYPED_PARAMETER_ID, UNTYPED_PROPERTY_ID, UNTYPED_RETURN_ID,
 };
 // end untyped surface (ADR-0078, issue #200)
+// return missing (ADR-0078, issue #199)
+use crate::TYPE_RETURN_MISSING_ID;
+// end return missing (ADR-0078, issue #199)
 
 /// The registry id for an `@steins-ignore` whose diagnostic id matches nothing on
 /// its target line (ADR-0023 anti-rot). Exempt from suppression.
@@ -332,6 +335,13 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // `offset.maybe-missing` shape one layer up.
     (PROPERTY_MAYBE_UNDEFINED_ID, Layer::Proof, Floor::Strict),
     // end member absence (ADR-0078, issue #197)
+    // return missing (ADR-0078, issue #199)
+    // proof — falling off the end of a function-like that declares a non-void
+    // native return type is a fatal `TypeError` on the live path. Not behind the
+    // ADR-0049 §7 warning-handler gate: nothing about a declared posture makes a
+    // `TypeError` survivable, so there is nothing to demote.
+    (TYPE_RETURN_MISSING_ID, Layer::Proof, Floor::Default),
+    // end return missing (ADR-0078, issue #199)
     // contract — declared-contract acceptance (increase tripwires).
     (PARAM_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     (RETURN_MISMATCH_ID, Layer::Contract, Floor::Contracts),
