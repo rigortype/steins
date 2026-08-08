@@ -15,19 +15,19 @@
 //                   Copyright (c) 2015 Andrew Morrison)
 //
 // phpstan-src pin: dcde2be6ca3caae0e0d4bee6bfbc9fd39ea560e7
-// cross-checked against PHP 8.5.8 via the real sidecar.
+// cross-checked against PHP 8.5.9 via the real sidecar.
 //
 // Mining counts at the pin:
 //   12461  functionMap entries (after the delta ladder)
 //    6658  `Class::method` rows skipped (methods stay out of this slice)
 //      18  names whose alternate signatures disagree on the return type
-//    1119  rows the declared-contract arm lane cannot carry, of which
+//    1116  rows the declared-contract arm lane cannot carry, of which
 //       0    shaped arrays / lists
 //     474    objects / class names / callable / resource
 //      75  rows the arm-wise engine countersign refuses
 //    2793  names the pinned engine does not know as functions
-//    1708  ADMITTED (the table below), of which
-//     789    RICHER than a single-base envelope (the #79 and ADR-0071 reach)
+//    1711  ADMITTED (the table below), of which
+//     792    RICHER than a single-base envelope (the #79 and ADR-0071 reach)
 //
 // The skipped methods and the object bucket are what remains deferred
 // (ADR-0069 §5 as amended 2026-08-01, ADR-0071 §2.3). Object, class-name,
@@ -171,9 +171,9 @@ pub(crate) static DECLARED_RETURNS: &[(&str, &str)] = &[
     ("chunk_split", "string"),
     ("class_alias", "bool"),
     ("class_exists", "bool"),
-    ("class_implements", "array<string,interface-string>|false"),
-    ("class_parents", "array<string,class-string>|false"),
-    ("class_uses", "array<string,trait-string>|false"),
+    ("class_implements", "false|array<string, class-string>"),
+    ("class_parents", "false|array<string, class-string>"),
+    ("class_uses", "false|array<string, class-string>"),
     ("cli_set_process_title", "bool"),
     ("closelog", "bool"),
     ("collator_asort", "bool"),
@@ -290,7 +290,7 @@ pub(crate) static DECLARED_RETURNS: &[(&str, &str)] = &[
     ("dba_sync", "bool"),
     ("dcgettext", "string"),
     ("dcngettext", "string"),
-    ("debug_backtrace", "list<array{function:string,line?:int,file?:string,class?:class-string,type?:'::'|'->',args?:list<mixed>,object?:object}>"),
+    ("debug_backtrace", "list<array{args?: list<mixed>, class?: class-string, file?: string, function: string, line?: int, object?: object, type?: '->'|'::'}>"),
     ("decbin", "string"),
     ("dechex", "string"),
     ("decoct", "string"),
@@ -411,13 +411,15 @@ pub(crate) static DECLARED_RETURNS: &[(&str, &str)] = &[
     ("gc_mem_caches", "int"),
     ("gc_status", "array{application_time: float, buffer_size: int, collected: int, collector_time: float, destructor_time: float, free_time: float, full: bool, protected: bool, roots: int, running: bool, runs: int, threshold: int}"),
     ("gd_info", "array"),
+    ("get_called_class", "class-string"),
+    ("get_class", "class-string"),
     ("get_class_methods", "list<non-falsy-string>"),
     ("get_class_vars", "array"),
     ("get_current_user", "string"),
     ("get_debug_type", "string"),
     ("get_declared_classes", "list<class-string>"),
-    ("get_declared_interfaces", "list<interface-string>"),
-    ("get_declared_traits", "list<trait-string>"),
+    ("get_declared_interfaces", "list<class-string>"),
+    ("get_declared_traits", "list<class-string>"),
     ("get_defined_constants", "array<string, mixed>"),
     ("get_defined_functions", "array{internal:non-empty-list<callable-string>,user:list<callable-string>}"),
     ("get_defined_vars", "array<string, mixed>"),
@@ -430,6 +432,7 @@ pub(crate) static DECLARED_RETURNS: &[(&str, &str)] = &[
     ("get_mangled_object_vars", "array"),
     ("get_meta_tags", "false|array"),
     ("get_object_vars", "array<mixed>"),
+    ("get_parent_class", "class-string|false"),
     ("get_required_files", "list<string>"),
     ("get_resource_id", "int"),
     ("get_resource_type", "string"),
@@ -440,8 +443,8 @@ pub(crate) static DECLARED_RETURNS: &[(&str, &str)] = &[
     ("gethostbyname", "string"),
     ("gethostbynamel", "false|list<string>"),
     ("gethostname", "string|false"),
-    ("getimagesize", "false|array{int<1, max>|0, int<1, max>|0, int, string, bits?: int, channels?: int, mime: string}"),
-    ("getimagesizefromstring", "false|array{int<1, max>|0, int<1, max>|0, int, string, bits?: int, channels?: int, mime: string}"),
+    ("getimagesize", "false|array{0: int<1, max>|0, 1: int<1, max>|0, 2: int, 3: string, bits?: int, channels?: int, mime: string}"),
+    ("getimagesizefromstring", "false|array{0: int<1, max>|0, 1: int<1, max>|0, 2: int, 3: string, bits?: int, channels?: int, mime: string}"),
     ("getlastmod", "int|false"),
     ("getmxrr", "bool"),
     ("getmygid", "int|false"),
