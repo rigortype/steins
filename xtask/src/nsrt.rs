@@ -113,6 +113,51 @@
 //! and `unsupported` no longer names `mixed`. Pinned by
 //! `mixed_is_measured_never_subsumed`.
 //!
+//! ## `mixed~…`: a reach gap wearing vocabulary's clothes (issue #237)
+//!
+//! The `subtraction` bucket (158 rows on phpstan-src at the #237 measurement, 133
+//! of them `mixed~…`) reads like the `mixed` case above — a set the engine holds
+//! parked in a bucket that says *we cannot say this* — and the resemblance is real
+//! for a third of it. It is also, measured, irrelevant:
+//!
+//! - **44 rows are exact re-spellings of a cut Steins already holds.** `mixed~null`
+//!   (33) *is* `MixedMinus(Null)`; `mixed~(0|0.0|''|'0'|array{}|false|null)` (11)
+//!   *is* `MixedMinus(Falsy)`, value for value. A further 8
+//!   (`mixed~(array|object|resource)`) have a complement Steins can spell as the
+//!   plain union `bool|float|int|string|null`, the domain carrying neither
+//!   objects nor resources. So the headline "the cut vocabulary is too narrow"
+//!   is, for a third of the bucket, a **spelling** claim, not a representation
+//!   one.
+//! - **All 52 of those render `unknown`.** So does the bucket as a whole: **154 of
+//!   158**. Closing the spelling — the #239 move, a normalizer synonym or a widened
+//!   `is_supported_atom` — would move them from `unsupported` to `differ` and award
+//!   exactly nothing, because `unknown` is a sentinel and no direction is asked of
+//!   a sentinel. Unlike #239, where 5 of 329 rows carried a real rendering and the
+//!   reclassification surfaced information, here the move would be motion without
+//!   measurement, bought with a synonym table this harness deliberately has none of.
+//! - **The four rows that do render something cap the whole slice at +1.** Three
+//!   are class/enum subtractions (`Throwable~LogicException`,
+//!   `Suit~Suit::Clubs`, `Foo~Foo::B`) where Steins renders the **un-narrowed base**
+//!   — wider than the oracle, so `differ` under any cut vocabulary whatsoever. The
+//!   fourth (`bug-8249.php:19`, expected `mixed~int`, Steins `null`) would earn
+//!   `subsumed`, and it earns it from body-return inference on
+//!   `function foo(): mixed { return null; }`, not from subtraction.
+//!
+//! **So the ceiling of the entire bucket is one row**, and reaching it needs a cut
+//! (`Int`) the corpus asks for 16 times and the engine could never *construct*:
+//! `ContractTy::MixedMinus` is built in exactly one place, `lower_str`, from the two
+//! literal phpdoc keywords. No inference path produces it, so no enum extension can
+//! change a single `got`. Recorded as a ceiling in ADR-0030's divergence registry
+//! (entry 6) rather than built. Pinned by
+//! `subtraction_is_gated_before_the_top_type_veto_is_reached` and
+//! `the_two_cuts_stay_spellable_and_judged`.
+//!
+//! One harness question the issue raised, answered so it is not re-asked: **the
+//! #239 top-type veto does not touch these rows.** [`classify`] consults
+//! `unsupported_pattern` first, so the veto is never reached; and `normalize` keeps
+//! `mixed~null` as its own atom, so [`expected_is_top_type`] answers `false` even
+//! when asked directly. Nothing in the 133 is scoreless *because of* the veto.
+//!
 //! ## Headline decision (settled here; do not re-argue per slice)
 //!
 //! **`subsumed` does NOT count toward the headline `match` number.** The headline
@@ -1357,6 +1402,64 @@ mod tests {
     #[test]
     fn still_gated_pattern_stays_unsupported() {
         assert_eq!(classify("Traversable<int, string>", "unknown").0, Verdict::Unsupported);
+    }
+
+    /// The `subtraction` bucket keeps its gate, and the issue-#239 top-type veto has
+    /// nothing to do with it (issue #237).
+    ///
+    /// Two independent reasons, both pinned here because the ceiling argument in the
+    /// module docs rests on them: `unsupported_pattern` claims every `~` before
+    /// [`classify`] ever consults the relation, so [`expected_is_top_type`] is not
+    /// reached — and it would answer `false` anyway, since a cut is a constraint and
+    /// `normalize` keeps it as its own atom. Lifting the gate would therefore not
+    /// route these rows through the veto; it would route them into `differ` with
+    /// **no direction asked at all**, because the oracle's `~` spelling is not phpdoc
+    /// and does not lower.
+    #[test]
+    fn subtraction_is_gated_before_the_top_type_veto_is_reached() {
+        for s in ["mixed~null", "mixed~int", "mixed~(array|object|resource)"] {
+            assert_eq!(unsupported_pattern(s), Some("subtraction"), "{s}");
+            assert_eq!(classify(s, "unknown").0, Verdict::Unsupported, "{s}");
+            // Not the top type: the veto never applies, reached or not.
+            assert!(!expected_is_top_type(s), "{s}");
+            // The expected side does not parse, so ungating buys a `differ` row on
+            // which the acceptance relation is silent in both directions.
+            assert!(steins_contract::lower_str(s).is_none(), "{s}");
+            assert!(!subsumption_directions(s, "null").covers, "{s}");
+            assert!(!subsumption_directions(s, "null").covered, "{s}");
+        }
+    }
+
+    /// Steins' own spellings of the two cuts stay lowerable and stay judged in both
+    /// directions, with `Maybe` staying silence (issue #237: nothing regresses).
+    ///
+    /// This is the representation half of the triage: `mixed~null` denotes exactly
+    /// `non-null-mixed`, so the corpus rows are a *spelling* miss over a set the
+    /// engine already holds — which is why closing the spelling would move nothing.
+    #[test]
+    fn the_two_cuts_stay_spellable_and_judged() {
+        use steins_contract::normalize::subsumes;
+        let nn = steins_contract::lower_str("non-null-mixed").expect("non-null-mixed lowers");
+        let ne = steins_contract::lower_str("non-empty-mixed").expect("non-empty-mixed lowers");
+        let nul = steins_contract::lower_str("null").expect("null lowers");
+        // The cut excludes null outright — `No`, not `Maybe`.
+        assert!(subsumes(&nn, &nul).is_no());
+        assert!(subsumes(&ne, &nul).is_no());
+        // The reverse direction is undecided, and undecided stays silence: neither
+        // `equal` nor `subsumed` may be awarded on a `Maybe`.
+        assert!(!subsumes(&nul, &nn).is_yes());
+        assert!(!subsumes(&nul, &ne).is_yes());
+        // Concrete non-null `b`s are covered by the null cut, so a harness that
+        // *did* normalize `mixed~null` to this spelling would have a live relation
+        // to ask — which is what makes the measured answer decisive rather than
+        // structural: it is the `got` side, not the relation, that is empty.
+        let int = steins_contract::lower_str("int").expect("int lowers");
+        assert!(subsumes(&nn, &int).is_yes());
+        // Between two cuts the relation is silent by design (a cut spans every
+        // base, objects included, so it has no scalar-fact denotation to ask
+        // about). `Maybe` in both directions is silence, never an award.
+        assert!(!subsumes(&nn, &ne).is_yes());
+        assert!(!subsumes(&ne, &nn).is_yes());
     }
 
     #[test]
