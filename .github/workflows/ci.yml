@@ -38,6 +38,9 @@ on:
   push:
     branches: [master]
   pull_request:
+  # Manual escape hatch: GitHub webhook->Actions delivery dropped this branch's
+  # events across three outage windows (2026-08-08); dispatch bypasses the webhook.
+  workflow_dispatch:
 
 # Cancel superseded runs on the same ref.
 concurrency:

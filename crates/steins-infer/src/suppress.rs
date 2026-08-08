@@ -64,6 +64,11 @@ use crate::{
 // return missing (ADR-0078, issue #199)
 use crate::{TYPE_RETURN_MAYBE_MISSING_ID, TYPE_RETURN_MISSING_ID};
 // end return missing (ADR-0078, issue #199)
+// overriding family (ADR-0078, issue #184)
+use crate::{
+    OVERRIDE_FINAL_ID, OVERRIDE_PARAMETER_VARIANCE_ID, OVERRIDE_RETURN_VARIANCE_ID,
+    OVERRIDE_STATIC_MISMATCH_ID, OVERRIDE_VISIBILITY_WEAKENED_ID,
+};
 
 /// The registry id for an `@steins-ignore` whose diagnostic id matches nothing on
 /// its target line (ADR-0023 anti-rot). Exempt from suppression.
@@ -277,6 +282,20 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // per the ADR's floor table.
     (CLASS_ABSTRACT_UNIMPLEMENTED_ID, Layer::Proof, Floor::Default),
     (CLASS_EXTENDS_FINAL_ID, Layer::Proof, Floor::Default),
+    // overriding family (ADR-0078, issue #184): the same load-time fatal
+    // `class.extends-final` claims, read off the same declaration graph — so the same
+    // layer and floor. The layer question the issue raises is settled by the
+    // consequence, not by the premise's stratum: PHP itself refuses the declaration,
+    // and every premise is a NATIVE declaration, which is Verified. That is where
+    // these diverge from `throw.liskov-widened` / `effect.liskov-widened`, whose
+    // premise is a docblock `@throws` / an inferred envelope PHP never enforces, and
+    // which therefore sit on the contract layer.
+    (OVERRIDE_FINAL_ID, Layer::Proof, Floor::Default),
+    (OVERRIDE_STATIC_MISMATCH_ID, Layer::Proof, Floor::Default),
+    (OVERRIDE_VISIBILITY_WEAKENED_ID, Layer::Proof, Floor::Default),
+    (OVERRIDE_PARAMETER_VARIANCE_ID, Layer::Proof, Floor::Default),
+    (OVERRIDE_RETURN_VARIANCE_ID, Layer::Proof, Floor::Default),
+    // end overriding family (ADR-0078, issue #184)
     // preg pattern refusal (ADR-0078, issue #189)
     // proof — the project's own PCRE refuses a proven literal pattern, so the call
     // warns and returns a value it cannot have been written for. Warning-grade, so

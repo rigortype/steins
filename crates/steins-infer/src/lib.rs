@@ -294,6 +294,58 @@ pub const CLASS_ABSTRACT_UNIMPLEMENTED_ID: &str = "class.abstract-unimplemented"
 /// `Fatal error: Class C cannot extend final class F`.
 pub const CLASS_EXTENDS_FINAL_ID: &str = "class.extends-final";
 
+// overriding family (ADR-0078, issue #184)
+// ---------------------------------------------------------------------------
+// Five proof-layer ids for the rest of PHPStan's `OverridingMethodRule` surface,
+// each a fatal PHP raises **at class load** — the same consequence class
+// `class.extends-final` claims, from the same declaration graph, which is why they
+// take the same layer and floor. v1 judges **native signatures only**: an
+// `@param`/`@return`/generics premise is Asserted (ADR-0037/0052 N2) and cannot
+// forge a proof-layer finding, so it is silence here and the phpdoc twin waits on
+// ADR-0032's generics carry.
+// ---------------------------------------------------------------------------
+
+/// The registry id for overriding a `final` method: `php -r 'class P { final
+/// public function m() {} } class C extends P { public function m() {} }'` →
+/// `Fatal error: Cannot override final method P::m()`. Witnessed to fire on a
+/// `static` method, on a grandparent's `final`, on an `abstract` re-declaration in
+/// the child, and on `__construct` — finality is the one member of this family a
+/// constructor does **not** escape.
+pub const OVERRIDE_FINAL_ID: &str = "override.final";
+
+/// The registry id for a static/non-static override mismatch, both directions:
+/// `class P { public function m() {} } class C extends P { public static function
+/// m() {} }` → `Fatal error: Cannot make non static method P::m() static in class
+/// C`, and the reverse → `Cannot make static method P::m() non static in class C`.
+/// `__construct` is excluded: `public static function __construct()` is the
+/// standalone fatal `Method C::__construct() cannot be static`, a different
+/// consequence that this id would misname.
+pub const OVERRIDE_STATIC_MISMATCH_ID: &str = "override.static-mismatch";
+
+/// The registry id for an override that weakens visibility along
+/// `public` → `protected` → `private`: `class P { public function m() {} } class C
+/// extends P { protected function m() {} }` → `Fatal error: Access level to C::m()
+/// must be public (as in class P)`. Widening is legal and silent (all three
+/// widening directions witnessed clean), as is any redeclaration of a **private**
+/// parent method — a private method is not inherited at all.
+pub const OVERRIDE_VISIBILITY_WEAKENED_ID: &str = "override.visibility-weakened";
+
+/// The registry id for a parameter type an override NARROWS (contravariance
+/// broken): `class P { public function m(int|string $x) {} } class C extends P {
+/// public function m(int $x) {} }` → `Fatal error: Declaration of C::m(int $x) must
+/// be compatible with P::m(string|int $x)`. Widening is legal and silent
+/// (`int` → `int|string`, `int` → `?int`, `array` → `iterable`, all witnessed).
+pub const OVERRIDE_PARAMETER_VARIANCE_ID: &str = "override.parameter-variance";
+
+/// The registry id for a return type an override WIDENS (covariance broken):
+/// `class P { public function m(): int {} } class C extends P { public function m():
+/// int|string {} }` → `Fatal error: Declaration of C::m(): string|int must be
+/// compatible with P::m(): int`. Narrowing is legal and silent (`int|string` → `int`,
+/// `?int` → `int`, `iterable` → `array`, `int` → `never`, all witnessed).
+pub const OVERRIDE_RETURN_VARIANCE_ID: &str = "override.return-variance";
+
+// end overriding family (ADR-0078, issue #184)
+
 // docblock hygiene (ADR-0078, issue #186)
 // ---------------------------------------------------------------------------
 // Six **mechanics**-layer anti-rot ids about annotations that drifted from the
@@ -946,6 +998,13 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // declaration-incompatibility fatals (ADR-0078, issue #183)
     CLASS_ABSTRACT_UNIMPLEMENTED_ID,
     CLASS_EXTENDS_FINAL_ID,
+    // overriding family (ADR-0078, issue #184)
+    OVERRIDE_FINAL_ID,
+    OVERRIDE_STATIC_MISMATCH_ID,
+    OVERRIDE_VISIBILITY_WEAKENED_ID,
+    OVERRIDE_PARAMETER_VARIANCE_ID,
+    OVERRIDE_RETURN_VARIANCE_ID,
+    // end overriding family (ADR-0078, issue #184)
     // docblock hygiene (ADR-0078, issue #186)
     PHPDOC_UNPARSABLE_ID,
     PHPDOC_STALE_PARAM_ID,
@@ -20342,6 +20401,9 @@ fn check_declaration_fatals(cx: &Cx, dead: &[Span], out: &mut Vec<Diagnostic>) {
             check_extends_final(cx, &decl_display(cd), cd.conditional, pref, out);
         }
         check_abstract_unimplemented(cx, cd, out);
+        // overriding family (ADR-0078, issue #184)
+        check_override_family(cx, cd, out);
+        // end overriding family (ADR-0078, issue #184)
     }
     // Anonymous classes carry the same extends-final fatal (`Class F@anonymous cannot
     // extend final class F`, witnessed) and need no members to prove it. They are
@@ -20356,6 +20418,407 @@ fn check_declaration_fatals(cx: &Cx, dead: &[Span], out: &mut Vec<Diagnostic>) {
         }
     }
 }
+
+// overriding family (ADR-0078, issue #184)
+// ---------------------------------------------------------------------------
+// The rest of PHPStan's `OverridingMethodRule` surface: `override.final`,
+// `override.static-mismatch`, `override.visibility-weakened`,
+// `override.parameter-variance` and `override.return-variance`. Every one is a
+// fatal PHP raises **at class load**, off the same declaration graph the tracer
+// above reads, so they share its closure discipline verbatim — unique resolution
+// of every consulted ancestor, a `use`d trait anywhere in the chain is silence,
+// no sidecar leg, and no dam gate (the immunity asymmetry: `eval` can mint a
+// class but cannot re-open a declared one to change a signature already written).
+// `enumerate_ancestry` is reused as-is, so the tracer's silence legs are these
+// ids' silence legs by construction.
+//
+// **v1 judges native signatures only.** An `@param` / `@return` / generics premise
+// is Asserted (ADR-0037/0052 N2) and a docblock claim must never forge a
+// proof-layer finding; PHP does not read docblocks when it decides this fatal, so
+// a docblock premise is not merely demoted here, it is *absent*. The phpdoc twin
+// waits on ADR-0032's generics carry.
+//
+// PHP 8.5.9 `php -r` witness table (every row run; the legal counterpart of each
+// firing row is run too and prints nothing):
+//
+//   final
+//     `class P { final public function m() {} } class C extends P { public function m() {} }`
+//       → Fatal error: Cannot override final method P::m()
+//     — also for a `static` pair, a grandparent's `final`, an `abstract` child
+//       re-declaration, an anonymous child class, and `__construct`.
+//     `class P { public function m() {} } class C extends P { final public function m() {} }`
+//       → clean: the CHILD being final is legal.
+//
+//   static mismatch (both directions)
+//     `class P { public function m() {} } class C extends P { public static function m() {} }`
+//       → Fatal error: Cannot make non static method P::m() static in class C
+//     `class P { public static function m() {} } class C extends P { public function m() {} }`
+//       → Fatal error: Cannot make static method P::m() non static in class C
+//     `class P { public function __construct() {} } class C extends P { public static function __construct() {} }`
+//       → Fatal error: Method C::__construct() cannot be static — a DIFFERENT fatal
+//         (it needs no parent at all), so `__construct` is excluded from this id.
+//
+//   visibility weakened
+//     public → protected / public → private
+//       → Fatal error: Access level to C::m() must be public (as in class P)
+//     protected → private
+//       → Fatal error: Access level to C::m() must be protected (as in class P) or weaker
+//     protected → public, private → public, private → protected → all clean (widening).
+//
+//   parameter variance (contravariance: the child must accept everything the parent does)
+//     `P::m(int|string $x)` / `C::m(int $x)`
+//       → Fatal error: Declaration of C::m(int $x) must be compatible with P::m(string|int $x)
+//     `P::m(?int $x)` / `C::m(int $x)`, `P::m($x)` / `C::m(int $x)`,
+//     `P::m(iterable $x)` / `C::m(array $x)`, `P::m(bool $x)` / `C::m(true $x)`,
+//     `P::m(string $x)` / `C::m(int $x)` — all the same fatal.
+//     LEGAL, witnessed clean: `int` → `int|string`, `int` → `?int`, `array` →
+//     `iterable`, `true` → `bool`, dropping the type entirely, renaming the
+//     parameter, and adding an OPTIONAL parameter.
+//     NOT judged in v1 (silence, its own deferred id — the shape is an arity
+//     change, not a variance one, and this id's name would misname it): adding a
+//     REQUIRED parameter (`Declaration of C::m(int $x, int $y) must be compatible
+//     with P::m(int $x)`), REMOVING a parameter (the same message, mirrored), and
+//     a by-reference mismatch (`C::m(int &$x)` vs `P::m(int $x)`).
+//
+//   return variance (covariance: the child must return only what the parent promised)
+//     `P::m(): int` / `C::m(): int|string`
+//       → Fatal error: Declaration of C::m(): string|int must be compatible with P::m(): int
+//     `P::m(): int` / `C::m(): ?int`, `P::m(): never` / `C::m(): int`,
+//     `P::m(): true` / `C::m(): bool` — all the same fatal.
+//     LEGAL, witnessed clean: `int|string` → `int`, `?int` → `int`, `iterable` →
+//     `array`, `int` → `never`, `mixed` → `int`, `self` → `static`, and ADDING a
+//     return type where the parent declares none.
+//     A child DROPPING the parent's return type IS a fatal (`Declaration of C::m()
+//     must be compatible with P::m(): int`), and is a deliberate v1 silence: the
+//     syntax layer lowers an unrepresentable hint (`void`, `iterable`, `mixed`, a
+//     DNF form) to the same `None` an *absent* hint lowers to, so "the child
+//     declares nothing" is not distinguishable from "the child declares something
+//     Steins does not carry". Both sides must therefore carry a lowered type.
+//
+//   __construct — the exemption, pinned exactly
+//     A constructor is NOT exempt from `final`: overriding a `final __construct`
+//     is the same `Cannot override final method P::__construct()` fatal.
+//     It IS exempt from the static id (a different fatal, above), and it is exempt
+//     from visibility and variance **when the parent's `__construct` is concrete**:
+//       `class P { public function __construct(int|string $x) {} }
+//        class C extends P { public function __construct(int $x) {} }`      → clean
+//       `class P { public function __construct() {} }
+//        class C extends P { private function __construct() {} }`           → clean
+//     The exemption ends the moment the parent's `__construct` is ABSTRACT — an
+//     interface method or an `abstract` declaration — where both fire again:
+//       `interface I { public function __construct(int|string $x); }
+//        class C implements I { public function __construct(int $x) {} }`
+//          → Declaration of C::__construct(int $x) must be compatible with I::__construct(string|int $x)
+//       `abstract class P { abstract public function __construct(); }
+//        class C extends P { protected function __construct() {} }`
+//          → Access level to C::__construct() must be public (as in class P)
+//     (`__destruct` and the other magic methods are NOT exempt from anything —
+//     `class P { public function __destruct() {} } class C extends P { private
+//     function __destruct() {} }` → `Access level to C::__destruct() must be public`.)
+//
+//   private parent methods — silence, and not an exemption but a non-inheritance
+//     `class P { private function m(int $x) {} } class C extends P { public static
+//      function m(string $y, array $z): void {} }` → clean. A private method is not
+//     inherited, so there is nothing to override; `final private function` is not
+//     even accepted (`Warning: Private methods cannot be final as they are never
+//     overridden by other classes`).
+//
+//   interface implementation — the SAME path, no separate one
+//     `interface I { public function m(int|string $x); } class C implements I {
+//      public function m(int $x) {} }` → the same `must be compatible` fatal, and
+//     likewise for the return, visibility and static ids. `enumerate_ancestry`
+//     already collects the transitive interface set, so an interface declaration is
+//     just another parent candidate.
+//
+//   runtime precedence, witnessed by pairing each violation with a narrowing:
+//     **final ≻ static ≻ visibility ≻ variance**. At most one finding is emitted per
+//     overriding method, in that order, so the id never misnames which fatal fires.
+//
+// The acceptance relation's own two yield losses, each a tested leg and each in the
+// direction that can only lose findings: a `bool` arm against a `true`/`false`
+// literal folds its finite members to `Maybe` (proven-PARTIAL coverage is
+// indistinguishable from ignorance at that fold), and the relation carries PHP's
+// weak-mode int→float widening, which PHP's *inheritance* check — a pure subtype
+// test with no coercion — does not. Both stay silent rather than being special-cased
+// out of the relation.
+//
+// Measured: the whole native-type matrix (13 types × 13 types over parameter,
+// return, interface and constructor positions, plus the modifier matrix — 774
+// fixtures) was run against `php -r` on 8.5.9. Zero false positives; the 49 yield
+// losses are exactly the class-vs-class `Maybe` leg, the two allowances above, and
+// the static-constructor exclusion.
+//
+// Deliberate silences beyond the ones above, each a tested leg: an interface
+// SUBJECT (`interface I extends J` re-declaring a method is the same fatal, but the
+// ancestry walk is class-shaped); an enum subject and an anonymous class (members
+// are not lowered for either, ADR-0043 / ADR-0049 A4); a child method declared
+// `abstract` over a CONCRETE parent (`Cannot make non abstract method P::m()
+// abstract in class C` — a different fatal, the tracer's `Satisfaction::Refused`
+// shape); a `self`/`static`/`parent` return keyword on either side, whose lowered
+// bound is the *declaring* class and would misname the comparison; and a variadic
+// or by-reference position on either side.
+// ---------------------------------------------------------------------------
+
+/// A parent-side declaration a subject method overrides: the method and the display
+/// FQN of the class-like that declares it.
+struct OverrideParent<'a> {
+    method: &'a MethodDecl,
+    declarer: String,
+}
+
+/// Order visibility for the weakening test: `public` (2) is the widest.
+fn visibility_rank(v: Visibility) -> u8 {
+    match v {
+        Visibility::Public => 2,
+        Visibility::Protected => 1,
+        Visibility::Private => 0,
+    }
+}
+
+/// The PHP keyword for a visibility, for the message.
+fn visibility_word(v: Visibility) -> &'static str {
+    match v {
+        Visibility::Public => "public",
+        Visibility::Protected => "protected",
+        Visibility::Private => "private",
+    }
+}
+
+/// The parent declarations `name` overrides, nearest first: the nearest `extends`
+/// chain declaration (if any), then every interface declaration of the name.
+///
+/// `None` — silence for the whole method — when the nearest chain declaration is
+/// **private**: a private method is not inherited, so the subject is not overriding
+/// anything through the chain, and any interface question that survives is the
+/// *ancestor's* fatal, not the subject's (witnessed: `class A { public function
+/// m(int|string $x) {} } class B extends A { private function m() {} } class C
+/// extends B { public function m(int $x) {} }` fatals at **B**, naming B::m's access
+/// level — naming C would misname it).
+fn override_parents<'a>(anc: &Ancestry<'a>, name: &str) -> Option<Vec<OverrideParent<'a>>> {
+    let mut parents: Vec<OverrideParent<'a>> = Vec::new();
+    for node in anc.chain.iter().skip(1) {
+        if let Some(m) = node.methods.iter().find(|m| m.name.eq_ignore_ascii_case(name)) {
+            if m.visibility == Visibility::Private {
+                return None;
+            }
+            parents.push(OverrideParent { method: m, declarer: decl_display(node) });
+            break; // nearest declaration binds; farther ones are already compatible.
+        }
+    }
+    for node in &anc.interfaces {
+        if let Some(m) = node.methods.iter().find(|m| m.name.eq_ignore_ascii_case(name)) {
+            parents.push(OverrideParent { method: m, declarer: decl_display(node) });
+        }
+    }
+    Some(parents)
+}
+
+/// Whether a native type pair is comparable at all for variance: both sides must
+/// carry a lowered [`NativeType`] (the syntax layer collapses every unrepresentable
+/// hint to the same `None` an absent hint lowers to, so `None` proves nothing).
+fn variance_pair<'a>(
+    child: Option<&'a NativeType>,
+    parent: Option<&'a NativeType>,
+) -> Option<(&'a NativeType, &'a NativeType)> {
+    Some((child?, parent?))
+}
+
+/// Whether `consumer` provably REFUSES some whole arm of `produced` — the one
+/// variance question both directions of the LSP check reduce to.
+///
+/// This routes through **the** acceptance relation — `steins_contract`'s
+/// `normalize::subsumes(a, b)` = "every value of `b`'s denotation is admitted by
+/// `a`", the `isSuperTypeOf` shape ADR-0030 registry entry 5 defines — applied
+/// **arm-wise**, exactly as `dedup_arms` / `subtract` apply it, and exactly as the
+/// issue names it. No second comparison path is introduced: `subsumes` is the only
+/// comparator, and `native_arms` is the same decomposition the contract lane already
+/// uses to carry a native type as arms.
+///
+/// Arm-wise is what makes the answer *decidable* here. Asked whole,
+/// `subsumes(int, int|string)` folds `[Yes, No]` to `Maybe` — the honest answer to
+/// "does `int` admit every `int|string` value?", since the fold cannot distinguish
+/// proven-partial coverage from ignorance. LSP asks the sharper question: is there
+/// an arm the consumer provably rejects? So each arm is asked on its own, and one
+/// `No` convicts. A `Maybe` arm never does — two unrelated class arms judge only
+/// through the reflexive is-a floor, so `Class(A)` vs `Class(B)` is `Maybe` and
+/// stays silent.
+fn provably_refuses_an_arm(consumer: &NativeType, produced: &NativeType) -> bool {
+    let c = native_to_contract(consumer);
+    native_arms(produced).iter().any(|arm| normalize::subsumes(&c, arm) == Certainty::No)
+}
+
+/// The parameter-contravariance verdict for one overriding method: the index of the
+/// first position the child provably NARROWS, or `None`. The child must accept
+/// everything the parent's declaration accepts.
+fn override_param_violation(child: &[Param], parent: &[Param]) -> Option<usize> {
+    for (i, pp) in parent.iter().enumerate() {
+        let cp = child.get(i)?;
+        // A variadic or by-ref position on either side is a different shape (an
+        // arity/binding change), deferred — see the header's witness table.
+        if pp.variadic || pp.by_ref || cp.variadic || cp.by_ref {
+            continue;
+        }
+        let Some((cty, pty)) = variance_pair(cp.ty.as_ref(), pp.ty.as_ref()) else { continue };
+        // Contravariance: the child must accept everything the parent accepts.
+        if provably_refuses_an_arm(cty, pty) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// The return-covariance verdict: `true` when the child provably WIDENS the parent's
+/// return type. The same acceptance relation, asked in the other direction — the
+/// parent's declared return must subsume the child's.
+fn override_return_widens(child: &MethodDecl, parent: &MethodDecl) -> bool {
+    // A `self`/`static`/`parent` return keyword is synthesized to an `Instance` of
+    // the DECLARING class (ADR-0043 amendment), so comparing the two sides would
+    // compare `P` against `C` and misname whatever it found. Silence.
+    if child.ret_bound_keyword.is_some() || parent.ret_bound_keyword.is_some() {
+        return false;
+    }
+    let Some((cty, pty)) = variance_pair(child.ret.as_ref(), parent.ret.as_ref()) else {
+        return false;
+    };
+    // Covariance: the parent's promise must cover everything the child returns.
+    provably_refuses_an_arm(pty, cty)
+}
+
+/// Judge one subject method against one parent declaration and push the FIRST
+/// violation in PHP's own witnessed precedence (final ≻ static ≻ visibility ≻
+/// parameter ≻ return). Returns `true` when something was emitted, so the caller
+/// stops at one finding per overriding method — one runtime fatal, one finding.
+fn emit_override_violation(
+    cx: &Cx,
+    subject: &ClassDecl,
+    cm: &MethodDecl,
+    parent: &OverrideParent,
+    out: &mut Vec<Diagnostic>,
+) -> bool {
+    let pm = parent.method;
+    let pos = cx.tree().position(cm.span.start);
+    let child_name = format!("{}::{}", decl_display(subject), cm.name);
+    let parent_name = format!("{}::{}", parent.declarer, pm.name);
+    let mut emit = |id: &'static str, message: String| {
+        out.push(Diagnostic {
+            id,
+            path: cx.path().to_owned(),
+            line: pos.line,
+            column: pos.column,
+            message,
+            facet: None,
+            fix: None,
+        });
+    };
+
+    // 1. `final` — the top of the precedence, and the one member `__construct` does
+    //    not escape. An interface method can never be `final`, so this only ever
+    //    fires against a chain declaration.
+    if pm.is_final {
+        emit(
+            OVERRIDE_FINAL_ID,
+            format!(
+                "{child_name}() overrides final method {parent_name}() — fatal when the class is loaded"
+            ),
+        );
+        return true;
+    }
+    // A child re-declaring a CONCRETE parent method `abstract` is the different fatal
+    // `Cannot make non abstract method P::m() abstract in class C` (witnessed) —
+    // naming it with one of these ids would misname the consequence.
+    if cm.is_abstract && !pm.is_abstract {
+        return false;
+    }
+    // 2. static/non-static, both directions. `__construct` is excluded: a static
+    //    constructor is its own standalone fatal (witnessed).
+    if cm.is_static != pm.is_static && !cm.is_constructor {
+        let (verb, adj) = if cm.is_static { ("makes", "static") } else { ("makes", "non-static") };
+        emit(
+            OVERRIDE_STATIC_MISMATCH_ID,
+            format!(
+                "{child_name}() {verb} {parent_name}() {adj} — fatal when the class is loaded"
+            ),
+        );
+        return true;
+    }
+    // A constructor escapes visibility and variance too, but only while the parent's
+    // `__construct` is CONCRETE; an abstract one (an interface method, or an
+    // `abstract` declaration) re-imposes both (witnessed).
+    if cm.is_constructor && !pm.is_abstract {
+        return false;
+    }
+    // 3. visibility weakened along public → protected → private.
+    if visibility_rank(cm.visibility) < visibility_rank(pm.visibility) {
+        emit(
+            OVERRIDE_VISIBILITY_WEAKENED_ID,
+            format!(
+                "{child_name}() weakens the visibility of {parent_name}() from {} to {} — fatal when the class is loaded",
+                visibility_word(pm.visibility),
+                visibility_word(cm.visibility),
+            ),
+        );
+        return true;
+    }
+    // 4. parameter contravariance.
+    if let Some(i) = override_param_violation(&cm.params, &pm.params) {
+        let cp = &cm.params[i];
+        let pp = &pm.params[i];
+        emit(
+            OVERRIDE_PARAMETER_VARIANCE_ID,
+            format!(
+                "{child_name}() narrows parameter ${} from `{}` to `{}`, which {parent_name}() accepts — fatal when the class is loaded",
+                cp.name,
+                pp.ty.as_ref().expect("compared pair carries both types").render(),
+                cp.ty.as_ref().expect("compared pair carries both types").render(),
+            ),
+        );
+        return true;
+    }
+    // 5. return covariance.
+    if override_return_widens(cm, pm) {
+        emit(
+            OVERRIDE_RETURN_VARIANCE_ID,
+            format!(
+                "{child_name}() widens the return type of {parent_name}() from `{}` to `{}` — fatal when the class is loaded",
+                pm.ret.as_ref().expect("compared pair carries both types").render(),
+                cm.ret.as_ref().expect("compared pair carries both types").render(),
+            ),
+        );
+        return true;
+    }
+    false
+}
+
+/// Run the overriding family over one class declaration's own methods.
+fn check_override_family(cx: &Cx, cd: &ClassDecl, out: &mut Vec<Diagnostic>) {
+    // Only a CLASS declaration is the subject in v1. An enum's and a trait's members
+    // are not lowered (ADR-0043); `interface I extends J` re-declaring a method is
+    // the same fatal, but the ancestry walk `enumerate_ancestry` performs is
+    // class-shaped (it refuses an interface node outright) — a recorded silence.
+    if cd.is_interface || cd.is_enum || cd.is_trait {
+        return;
+    }
+    // A2 leg, as the tracer's: a duplicate FQN leaves which declaration binds to
+    // load order, so the subject's own signature is not the proven one.
+    if !matches!(cx.index.resolve_class(&cd.fqn), Res::Unique(_)) {
+        return;
+    }
+    let Some(anc) = enumerate_ancestry(cx, cd) else { return };
+    // A2i, as the tracer's: a conditional declaration among the consulted set leaves
+    // which signature binds to load order, so a standing dam re-dams the claim.
+    if anc.any_conditional && !cx.dam.is_clear() {
+        return;
+    }
+    for cm in &cd.methods {
+        let Some(parents) = override_parents(&anc, &cm.name) else { continue };
+        for parent in &parents {
+            if emit_override_violation(cx, cd, cm, parent, out) {
+                break; // one runtime fatal, one finding.
+            }
+        }
+    }
+}
+// end overriding family (ADR-0078, issue #184)
 
 // ---------------------------------------------------------------------------
 // Arity: `call.too-few-arguments` / `call.unknown-named-argument`
