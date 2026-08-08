@@ -98,7 +98,8 @@ Section 5 records the one surface where it is not.
   at 256 MiB (`WORKER_STACK_SIZE`), matching the nsrt harness's constant. One
   spawn covers every subcommand, because every subcommand parses. Measured
   after: the debug ceiling moves from ~520 to between 10,000 and 15,000 levels,
-  and phpstan-src's fixture completes in a plain debug build.
+  the release build clears a synthesized 50,000-level chain (from ~2,700), and
+  phpstan-src's fixture completes in a plain debug build.
 - `xtask/src/main.rs`: the global rayon pool is now built with a 256 MiB
   `stack_size`. `fp-gate` and `freq` fan out with `par_iter`, so their parsing
   ran on rayon's **2 MiB** default — a quarter of the stack issue #246 already
