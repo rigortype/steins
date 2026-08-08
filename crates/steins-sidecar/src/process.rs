@@ -13,9 +13,10 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::wire::{
-    ConstantDefined, EnvInfo, FoldArg, FoldResult, PregCompile, Reflection, defined_params,
-    env_params, fold_params, parse_defined_result, parse_env_result, parse_fold_result,
-    parse_preg_compile_result, parse_reflection_result, preg_compile_params, reflect_params,
+    ClassReflection, ConstantDefined, EnvInfo, FoldArg, FoldResult, PregCompile, Reflection,
+    defined_params, env_params, fold_params, parse_class_reflection_result, parse_defined_result,
+    parse_env_result, parse_fold_result, parse_preg_compile_result, parse_reflection_result,
+    preg_compile_params, reflect_class_params, reflect_params,
 };
 
 /// The runner source, baked into the binary.
@@ -279,6 +280,23 @@ impl Sidecar {
         }
         let value = self.request("reflect", reflect_params(target))?;
         parse_reflection_result(value.get("result")?, target)
+    }
+
+    /// Ask the project's own PHP for the **declaration** behind a resident
+    /// class-like (issue #269) — the class-world half of the ADR-0024 `reflect`
+    /// surface, and the only honest source for a class an installed extension
+    /// provides (ADR-0049 §1).
+    ///
+    /// `Some(ClassReflection)` whose `declaration` is `None` is a definitive
+    /// not-found on this boot surface; any sidecar failure — poison, timeout, a
+    /// `widen`, a runner too old to implement the method — is `None`, "unknown",
+    /// never a wrong declaration and never a half-read one.
+    pub fn reflect_class(&mut self, target: &str) -> Option<ClassReflection> {
+        if !self.revive() {
+            return None;
+        }
+        let value = self.request("reflect_class", reflect_class_params(target))?;
+        parse_class_reflection_result(value.get("result")?, target)
     }
 
     /// Ask the project's own PCRE whether it accepts `pattern` (issue #189 /
