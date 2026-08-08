@@ -268,9 +268,66 @@ fn run_on_worker(dir_arg: Option<&str>) -> Result<(), String> {
 
     let elapsed = start.elapsed();
 
-    report(&records, elapsed.as_secs_f64());
+    report(&records, elapsed.as_secs_f64(), folder.posture());
     write_json(&records)?;
     Ok(())
+}
+
+// ----------------------------------------------------------------------------
+// coverage posture (issue #245)
+// ----------------------------------------------------------------------------
+
+/// The run's fold-surface posture, as the line printed under the headline.
+///
+/// The instrument's absolute numbers are only comparable between runs that
+/// folded the same way, and until this line existed nothing in the output said
+/// which way a given run folded. The trigger measured on issue #245 is not
+/// exotic: phpstan-src carries `str_repeat('abcdefghij', 1000000000)` as its
+/// own regression fixture for the same hazard (`data/bug-6866.php`), the fold
+/// exhausts the runner's `memory_limit`, and memory exhaustion is a PHP fatal no
+/// `catch` can see — so the child dies, the transport replaces it, and the run
+/// carries on one answer poorer with only a stderr notice to say so.
+///
+/// Three postures, three readings:
+///
+/// * **backed throughout** — every request reached a live engine. This is the
+///   only shape whose absolute counts may be compared with a sidecar-backed
+///   baseline.
+/// * **degraded, recovered** — the child died and was replaced. The lost replies
+///   are never retried (ADR-0024), so the counts are a FLOOR: every later request
+///   ran at full fidelity, and the ones lost in the window did not.
+/// * **abandoned** — the respawn budget is spent and the fold surface is gone for
+///   the rest of the run. The counts are the sound subset from that point on.
+///
+/// A run that never engaged an engine at all is the plain sound subset, which
+/// [`steins_infer::SOUND_SUBSET_NOTICE`] already announced on stderr; it is named
+/// here too, because a reader comparing two numbers should not have to go and
+/// find the stderr of the run that produced one of them.
+fn posture_line(p: steins_infer::FoldPosture) -> String {
+    if !p.engaged {
+        return "  fold surface: SOUND SUBSET — no PHP sidecar was engaged; counts are not \
+                comparable with a sidecar-backed baseline"
+            .to_owned();
+    }
+    if p.sidecar_backed_throughout() {
+        return "  fold surface: sidecar-backed throughout".to_owned();
+    }
+    let answers = if p.losses == 1 { "answer was" } else { "answers were" };
+    if p.abandoned {
+        format!(
+            "  fold surface: ABANDONED — the PHP sidecar died {} time(s), was replaced {} time(s), \
+             and its respawn budget is spent; the run finished as the sound subset, so these \
+             counts are NOT comparable with a sidecar-backed baseline",
+            p.losses, p.restarts
+        )
+    } else {
+        format!(
+            "  fold surface: DEGRADED — the PHP sidecar died {} time(s) and was restarted {} \
+             time(s); {} {} lost and never retried (ADR-0024), so these counts are a FLOOR and \
+             NOT comparable with a sidecar-backed baseline",
+            p.losses, p.restarts, p.losses, answers
+        )
+    }
 }
 
 /// The default nsrt directory: a sibling phpstan-src checkout, relative to the repo.
@@ -1142,7 +1199,7 @@ fn is_scalarish(a: &str) -> bool {
 // reporting
 // ----------------------------------------------------------------------------
 
-fn report(records: &[Record], elapsed: f64) {
+fn report(records: &[Record], elapsed: f64, posture: steins_infer::FoldPosture) {
     let total = records.len();
     let count = |v: &str| records.iter().filter(|r| r.verdict == v).count();
     let (m, u, d, s) = (count("match"), count("unsupported"), count("differ"), count("skipped"));
@@ -1170,7 +1227,11 @@ fn report(records: &[Record], elapsed: f64) {
     // *unfalsified* by the oracle; both are reported beside the headline, never
     // inside it (issues #47/#172; the argument is in this module's docs).
     println!("\n  HEADLINE (match, oracle-confirmed):   {m}");
-    println!("  admissible (match + equal + subsumed): {}\n", m + eq + sub);
+    println!("  admissible (match + equal + subsumed): {}", m + eq + sub);
+    // The coverage posture belongs WITH the headline, not in a footnote: the two
+    // numbers above are only comparable between runs whose fold surface held the
+    // same way (ADR-0004, issue #245).
+    println!("{}\n", posture_line(posture));
 
     // Unsupported pattern breakdown.
     let mut unsup: BTreeMap<&str, usize> = BTreeMap::new();
@@ -1260,6 +1321,57 @@ fn scratch_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------------------------------
+    // coverage posture (issue #245)
+    // ------------------------------------------------------------------------
+
+    /// The one posture under which a headline may be compared with another run's.
+    #[test]
+    fn a_clean_run_says_it_was_sidecar_backed_throughout() {
+        let p = steins_infer::FoldPosture { engaged: true, ..Default::default() };
+        assert!(p.sidecar_backed_throughout());
+        let line = posture_line(p);
+        assert!(line.contains("sidecar-backed throughout"), "got: {line}");
+        // A clean run must NOT carry the comparability warning: a caveat printed
+        // on every run is a caveat nobody reads on the run that needed it.
+        assert!(!line.contains("NOT comparable"), "got: {line}");
+    }
+
+    /// The issue's own shape: the child died mid-run, was replaced, and the run
+    /// finished on a live child. The count is a floor, and the line says so.
+    #[test]
+    fn a_recovered_death_is_named_and_the_count_is_called_a_floor() {
+        let p =
+            steins_infer::FoldPosture { engaged: true, losses: 1, restarts: 1, abandoned: false };
+        assert!(!p.sidecar_backed_throughout());
+        let line = posture_line(p);
+        assert!(line.contains("DEGRADED"), "got: {line}");
+        assert!(line.contains("restarted"), "the recovery is part of the story, got: {line}");
+        assert!(line.contains("FLOOR"), "got: {line}");
+        assert!(line.contains("NOT comparable"), "got: {line}");
+    }
+
+    /// Past the respawn cap the fold surface is gone, which is a different claim
+    /// from "a few answers are missing" and must read differently.
+    #[test]
+    fn an_abandoned_transport_is_reported_as_the_sound_subset_from_that_point() {
+        let p = steins_infer::FoldPosture { engaged: true, losses: 4, restarts: 3, abandoned: true };
+        let line = posture_line(p);
+        assert!(line.contains("ABANDONED"), "got: {line}");
+        assert!(line.contains("sound subset"), "got: {line}");
+        assert!(!line.contains("FLOOR"), "an abandoned run is not merely a floor, got: {line}");
+    }
+
+    /// Never engaging an engine is the plain sound subset — not a clean run.
+    #[test]
+    fn a_run_with_no_engine_is_not_reported_as_backed_throughout() {
+        let p = steins_infer::FoldPosture::default();
+        assert!(!p.sidecar_backed_throughout());
+        let line = posture_line(p);
+        assert!(line.contains("SOUND SUBSET"), "got: {line}");
+        assert!(!line.contains("throughout"), "got: {line}");
+    }
 
     #[test]
     fn nullable_forms_are_equivalent() {
