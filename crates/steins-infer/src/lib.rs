@@ -615,6 +615,114 @@ pub const CLASS_CONST_INACCESSIBLE_ID: &str = "class-const.inaccessible";
 
 // end inaccessible members (ADR-0078, issue #185)
 
+// member absence (ADR-0078, issue #197)
+
+/// The registry id for a **read** of a property no declaration in the receiver's
+/// hierarchy provides (ADR-0078, issue #197) — the member-kind twin of
+/// [`CALL_UNDEFINED_METHOD_ID`], and PHPStan's single highest-volume identifier.
+///
+/// `php -r`-witnessed at PHP 8.5.9:
+///
+/// ```text
+/// class C { public int $a = 1; } $c = new C; var_dump($c->nope);
+///   Warning: Undefined property: C::$nope
+///   NULL
+/// ```
+///
+/// So the consequence is **warning-grade**: the read yields `null` and the program
+/// keeps running with a value it cannot have been written for — the
+/// `offset.missing` shape exactly. Proof layer at the `Default` floor, **behind
+/// the ADR-0049 §7 warning-handler gate**: under a declared
+/// `[runtime] warning-handler = "null"` the application has said it tolerates the
+/// warning, and the finding leaves the proof surface. ADR-0049 §7's 2026-08-08
+/// amendment settles that layer question once for `variable.undefined`,
+/// `foreach.non-iterable` and this id alike; it is not re-argued here.
+///
+/// # The ladder (ADR-0049 §4, per member kind)
+///
+/// Absence over a property is the method ladder with the property's own obstacles
+/// substituted for `__call`, and the additions are what PHP 8.2 made of dynamic
+/// properties:
+///
+/// * **`__get` / `__set` / `__isset` anywhere in the chain.** Only `__get` truly
+///   rescues a read (witnessed: `__get` prints `__get:nope`, while `__isset` and
+///   `__set` alone still warn), but all three are taken as obstacles — a class
+///   declaring any of them is running the magic-property protocol, and the
+///   over-silence keeps ONE enumerability rule rather than a laxer second one
+///   (the [`STRING_NON_STRINGABLE_ID`] precedent).
+/// * **`#[AllowDynamicProperties]` anywhere in the chain**, which re-licenses the
+///   write PHP 8.2 deprecated and so leaves the property set open.
+/// * **`stdClass` and its descent**, silence for the id entirely — reads
+///   included. A never-written read on a `stdClass` really does warn (witnessed),
+///   so this is deliberate v1 conservatism: `stdClass` is the language's own
+///   property bag and a dynamic property may have been written anywhere. Its
+///   descent needs no leg of its own — `stdClass` is not a project declaration, so
+///   the chain never closes through it.
+/// * **A project-wide dynamic-write obstacle** (`SourceTree::property_write_names`):
+///   a name written *anywhere* could have been created dynamically on this object
+///   before the read, and a plain-class dynamic write is deprecated, not an error
+///   (witnessed). A computed-name write (`$o->$n = …`) anywhere takes the id off
+///   the surface altogether.
+/// * Everything the method ladder already had: the A14 magic-tag obstacle in the
+///   class-like's reach, a trait name or a trait-using node, an enum node
+///   (`name`/`value` are engine-provided), an unresolvable/`Ambiguous`/builtin
+///   ancestor, a member-incomplete file (ADR-0079 §2.5), a cycle, the A2i
+///   conditional-declaration re-dam, and the A2ii boot-surface homonym leg under
+///   `absence_family_available`.
+///
+/// A **declared** property is silence however it is spelled — plain, `static`
+/// (`$obj->staticName` warns, but a same-named declaration is treated as present:
+/// safe under-firing), promoted, `readonly`, inherited, or hooked (the #185
+/// lowering keeps a hooked property's name in `ClassDecl::hooked_properties`
+/// precisely so an absence claim cannot miss it). A `private` property declared by
+/// an *ancestor* is genuinely absent on the child (witnessed:
+/// `Warning: Undefined property: B1::$p`), and is nonetheless treated as present
+/// here — v1 under-fires rather than reason about name mangling, and the choice
+/// keeps this id and [`PROPERTY_INACCESSIBLE_ID`] disjoint by construction.
+pub const PROPERTY_UNDEFINED_ID: &str = "property.undefined";
+
+/// The `maybe-` sibling of [`PROPERTY_UNDEFINED_ID`] (ADR-0078 §1.3), **registered
+/// ahead of emission**: the declared-shape possibly-grade leg — a docblock-declared
+/// property set (the `array{a?: string}` analogue over an object) that leaves a name
+/// possibly-absent. Proof layer at the `Strict` floor, the `offset.maybe-missing`
+/// precedent.
+///
+/// Registration is the mechanical enforcement of "the possibly-leg is named, never
+/// scoped out of existence" (ADR-0078 §1.3, the `call.too-many-arguments`
+/// precedent): the id exists in [`DIAGNOSTIC_REGISTRY`], `@steins-ignore` can name
+/// it and its layer is pinned, while [`REGISTERED_NOT_YET_EMITTED`] records that no
+/// emitter produces it yet.
+pub const PROPERTY_MAYBE_UNDEFINED_ID: &str = "property.maybe-undefined";
+
+/// The registry id for a class-constant fetch no declaration in the receiver's
+/// member reach provides (ADR-0078, issue #197).
+///
+/// `php -r`-witnessed at PHP 8.5.9 — a **fatal `Error`**, with no gate and no
+/// posture that survives it:
+///
+/// ```text
+/// class C { const K = 1; } echo C::NOPE;   Error: Undefined constant C::NOPE
+/// enum Suit { case Hearts; } Suit::Nope    Error: Undefined constant Suit::Nope
+/// interface I { const IK = 1; } I::NOPE    Error: Undefined constant I::NOPE
+/// ```
+///
+/// This is the cleanest member in the family because PHP gives it **no magic
+/// channel at all** — witnessed at 8.5.9 and already recorded by #185: a class
+/// carrying both `__get` and `__callStatic` still raises
+/// `Error: Undefined constant Magic::NOPE`. What remains is enumeration, and the
+/// enumeration is wider than a method's: a constant may come from the parent
+/// chain, from **any interface in the reach** (`class C implements I` answers
+/// `C::IK`, and `interface IB extends IA` carries `IA`'s constants through to
+/// `CB::AK` — both witnessed), from a **trait** the class uses (`CT::TK`,
+/// witnessed, 8.2+ — so `uses_traits` is an obstacle), or from an enum's **cases**
+/// (`Suit::Hearts`), which are member sources exactly as constants are.
+///
+/// `X::class` is excluded at the site: it is a plain string since PHP 8.0 and
+/// errors on nothing (witnessed on an undefined class name).
+pub const CLASS_CONST_UNDEFINED_ID: &str = "class-const.undefined";
+
+// end member absence (ADR-0078, issue #197)
+
 /// Every id constant that reaches a `Diagnostic { id: … }` construction site — the
 /// canonical enumeration of what the emitters can produce (ADR-0050 §2 totality).
 ///
@@ -693,6 +801,10 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     PROPERTY_INACCESSIBLE_ID,
     CLASS_CONST_INACCESSIBLE_ID,
     // end inaccessible members (ADR-0078, issue #185)
+    // member absence (ADR-0078, issue #197)
+    PROPERTY_UNDEFINED_ID,
+    CLASS_CONST_UNDEFINED_ID,
+    // end member absence (ADR-0078, issue #197)
 ];
 
 /// Ids **registered ahead of emission**: they exist in [`DIAGNOSTIC_REGISTRY`]
@@ -707,6 +819,11 @@ pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
     // The too-many-arguments arm fires for INTERNAL targets only (userland
     // too-many runs clean), so it waits for the reflect slice (M2).
     CALL_TOO_MANY_ARGUMENTS_ID,
+    // member absence (ADR-0078, issue #197)
+    // The `maybe-` sibling registers WITH its definite leg (ADR-0078 §1.3) and
+    // waits for the declared-shape-over-an-object vocabulary.
+    PROPERTY_MAYBE_UNDEFINED_ID,
+    // end member absence (ADR-0078, issue #197)
 ];
 
 /// The maximum depth of interprocedural argument-binding descent (Feature B).
@@ -2215,7 +2332,29 @@ struct Index {
     /// Empty for a project that spells none of the tags, which is the cheap path
     /// every consumer checks first.
     magic_obstacles: HashMap<String, Vec<MagicObstacle>>,
+    // member absence (ADR-0078, issue #197)
+    /// Every property name **written** anywhere in the project, and whether any
+    /// write went through a computed name — the dynamic-property obstacle for
+    /// [`PROPERTY_UNDEFINED_ID`]. See `SourceTree::property_write_names` for why
+    /// the obstacle is keyed by name rather than by receiver.
+    property_writes: (HashSet<String>, bool),
+    // end member absence (ADR-0078, issue #197)
 }
+
+// member absence (ADR-0078, issue #197)
+/// Fold every file's property-write inventory into one project-wide obstacle set
+/// (ADR-0078, issue #197). A whole-universe query in the ADR-0048 sense:
+/// recomputed per run from the unit slice, with no ordering dependence.
+fn scan_property_writes(units: &[FileUnit]) -> (HashSet<String>, bool) {
+    let mut names: HashSet<String> = HashSet::new();
+    let mut dynamic = false;
+    for u in units {
+        names.extend(u.tree.property_write_names().iter().cloned());
+        dynamic |= u.tree.writes_computed_property_name();
+    }
+    (names, dynamic)
+}
+// end member absence (ADR-0078, issue #197)
 
 impl Index {
     /// Build the index straight from the file units (mirrors the db query).
@@ -2251,6 +2390,9 @@ impl Index {
             insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &alias_fqn, target);
         }
         idx.magic_obstacles = scan_magic_obstacles(units);
+        // member absence (ADR-0078, issue #197)
+        idx.property_writes = scan_property_writes(units);
+        // end member absence (ADR-0078, issue #197)
         idx
     }
 
@@ -2278,6 +2420,9 @@ impl Index {
             idx.fn_by_simple.insert(simple.clone(), sites.iter().map(site).collect());
         }
         idx.magic_obstacles = scan_magic_obstacles(units);
+        // member absence (ADR-0078, issue #197)
+        idx.property_writes = scan_property_writes(units);
+        // end member absence (ADR-0078, issue #197)
         idx
     }
 
@@ -2295,6 +2440,17 @@ impl Index {
     fn has_magic_obstacles(&self) -> bool {
         !self.magic_obstacles.is_empty()
     }
+
+    // member absence (ADR-0078, issue #197)
+    /// Whether a property named `prop` could have been created dynamically
+    /// somewhere in the project before this read (ADR-0078, issue #197): the
+    /// project writes that exact name anywhere, or it writes some property under
+    /// a computed name — which could be any name at all.
+    fn property_write_obstacle(&self, prop: &str) -> bool {
+        let (names, dynamic) = &self.property_writes;
+        *dynamic || names.contains(prop)
+    }
+    // end member absence (ADR-0078, issue #197)
 
     fn resolve_function(&self, fqn: &str) -> Res {
         let key = fqn.to_ascii_lowercase();
@@ -8335,6 +8491,15 @@ fn walk_trace(
                 StmtKind::Assign { value: ArgValue::PropFetch { var, prop }, span, .. }
                 | StmtKind::Return { value: ArgValue::PropFetch { var, prop }, span, .. } => {
                     check_inaccessible_property(w, var, prop, store, false, *span, out);
+                    // member absence (ADR-0078, issue #197)
+                    // The absence twin at the same READ position — and only the read
+                    // position: the write side is `property.dynamic-write`, deferred
+                    // with its design, and a write is a deprecation today rather than
+                    // the warning this id names. The two are disjoint by construction
+                    // (an inaccessible property is *declared*, which is this walk's
+                    // silence), so a site never carries both.
+                    check_undefined_property(w, folder, var, prop, store, *span, out);
+                    // end member absence (ADR-0078, issue #197)
                 }
                 StmtKind::PropAssign { target_var, prop, span, .. } => {
                     check_inaccessible_property(w, target_var, prop, store, true, *span, out);
@@ -8342,6 +8507,9 @@ fn walk_trace(
                 StmtKind::Assign { value: ArgValue::ClassConst(sc, name), span, .. }
                 | StmtKind::Return { value: ArgValue::ClassConst(sc, name), span, .. } => {
                     check_inaccessible_class_const(w, sc, name, *span, out);
+                    // member absence (ADR-0078, issue #197)
+                    check_undefined_class_const(w, folder, sc, name, *span, out);
+                    // end member absence (ADR-0078, issue #197)
                 }
                 _ => {}
             }
@@ -18043,6 +18211,507 @@ fn check_undefined_method(
         fix: None,
     });
 }
+
+// member absence (ADR-0078, issue #197)
+// ---------------------------------------------------------------------------
+// The absence ladder over the remaining member kinds: `property.undefined`
+// (a read of a property nothing declares) and `class-const.undefined` (a fetch of
+// a constant nothing provides).
+//
+// The ADR-0049 §4 ladder is one ladder and it does not move; what moves per member
+// kind is **what counts as a member source** and **what obstacle hides one**:
+//
+// | kind      | sources                                   | obstacles beyond the chain |
+// | --------- | ----------------------------------------- | -------------------------- |
+// | method    | class chain                               | `__call`/`__callStatic`     |
+// | property  | class chain (plain/promoted/static/hooked) | `__get`/`__set`/`__isset`, `#[AllowDynamicProperties]`, `stdClass` descent, a project-wide dynamic write |
+// | class-const | chain + **interfaces** + **enum cases**  | none — PHP gives constants no magic channel at all |
+//
+// Every `php -r` witness quoted here was taken at PHP 8.5.9 and is reproduced at
+// the leg that consumes it. The two consequences differ, and ADR-0078 §1.4 makes
+// that an id boundary rather than a message detail:
+//
+//   $c = new C; echo $c->nope;   Warning: Undefined property: C::$nope   → null
+//   echo C::NOPE;                Error: Undefined constant C::NOPE       → fatal
+//   echo C::$nope;               Error: Access to undeclared static property C::$nope
+//
+// **The static-property row is recorded, not implemented.** `C::$prop` on an
+// undeclared static property is a fatal `Error` (witnessed above) — a different
+// consequence from the instance read, so under ADR-0078 §1.4 it could not ride
+// `property.undefined` in any case, and the trace IR has no static-property *read*
+// site at all (`Node::StaticPropertyAccess` is collected only as a class
+// reference, for `class.undefined`). Naming it here rather than minting an id the
+// ADR-0078 floor table does not carry: the collection is a lowering change, not a
+// cheap one, and the id would have to be its own row.
+//
+// **Discharge, and where it does not reach yet** (the owner's 2026-08-08 policy
+// restatement, ADR-0049 A14). The A14 magic-tag leg is a *dischargeable* obstacle:
+// its records are reified, and a plugin manifest / pack (ADR-0039/0044/0045) that
+// declares a magic property restores the absolute check for exactly what it
+// declared — the demand side of that channel is PHPStan's 15,554 Eloquent-shaped
+// `property.notFound` sites. The three legs this slice adds — `__get`/`__set`/
+// `__isset`, `#[AllowDynamicProperties]` and the project-wide dynamic-write set —
+// are read off the code rather than off a docblock, so they produce no record and
+// nothing can discharge them today. Recorded as the boundary it is: reifying them
+// is a `MagicObstacle`-vocabulary change, not a ladder change, and the ladder here
+// is already the consumer that would read them.
+//
+// **The write side is deferred with its design**, per ADR-0078 §3 and this issue.
+// `property.dynamic-write` — writing an undeclared property on a plain class — is
+// a **deprecation** today (witnessed:
+// `Deprecated: Creation of dynamic property Plain::$dyn is deprecated`) and a
+// fatal at PHP 9.0. Ask-the-real-thing forbids calling it proof while the
+// project's own PHP tolerates it, so the id ships when the sidecar reports
+// ≥ 9.0 and not before. Designed, named, not registered.
+// ---------------------------------------------------------------------------
+
+/// The magic methods that route an instance property access away from the
+/// declaration set (ADR-0078, issue #197).
+///
+/// Only `__get` genuinely rescues a **read** — witnessed at 8.5.9: a class with a
+/// `__get` prints `__get:nope`, while `__isset` alone and `__set` alone both still
+/// raise `Warning: Undefined property`. All three are obstacles anyway: a class
+/// declaring any of them runs the magic-property protocol, and the deliberate
+/// over-silence keeps ONE enumerability rule in the codebase rather than a second,
+/// laxer one — the [`STRING_NON_STRINGABLE_ID`] precedent, argued there.
+const PROPERTY_MAGIC: &[&str] = &["__get", "__set", "__isset"];
+
+/// A receiver class's ancestor chain, enumerated end to end with no obstacle on it
+/// and with the property provably absent from every node (ADR-0078, issue #197).
+struct PropertyChain {
+    /// The chain's simple names, most-derived first (for the message).
+    simple: Vec<String>,
+    /// The chain's FQNs (for the A2ii boot-surface homonym leg).
+    fqns: Vec<String>,
+    /// Whether any node was declared conditionally (A2i — re-dams the claim).
+    any_conditional: bool,
+}
+
+/// Whether a class-like declaration **provides** `prop` as a member — the
+/// declaration set an absence claim must find empty.
+///
+/// Every spelling counts, and one of them only exists because #185 put it there: a
+/// class-body **hooked** property (`public int $p { get => 42; }`) binds no value
+/// and so is not lowered to a `PropertyDecl` at all, but it IS declared (witnessed:
+/// the read prints `42`), which is why `ClassDecl::hooked_properties` keeps the
+/// bare name. A `static` declaration counts too, though `$obj->staticName` really
+/// does warn (witnessed: `Accessing static property S1::$sp as non static` then
+/// `Undefined property: S1::$sp`) — treating the name as present costs one true
+/// positive and can never cost a false one.
+fn declares_property(cd: &ClassDecl, prop: &str) -> bool {
+    cd.properties.iter().any(|p| p.name == prop) || cd.hooked_properties.iter().any(|h| h == prop)
+}
+
+/// Whether this node hides members from the property walk however the walk asks
+/// (ADR-0078, issue #197) — the obstacle set shared by the chain walk and the
+/// descendant scan.
+///
+/// * a **trait** name or a trait-using node: trait members are not flattened (S1 /
+///   leg (e)), and a trait can declare properties (witnessed: `UT::$tp` reads `4`
+///   through `use TP`);
+/// * an **enum**: `name`/`value` are engine-provided rather than declared, and an
+///   enum node would otherwise read as property-empty;
+/// * an **interface**: it declares no properties at all, so its own emptiness
+///   proves nothing about the object behind it;
+/// * `__get`/`__set`/`__isset` — see [`PROPERTY_MAGIC`], and note the fallback is
+///   inherited (witnessed: a parent's `__get` rescues a read on the child, which
+///   is exactly why this is asked at every node rather than only at the receiver);
+/// * `#[AllowDynamicProperties]`, which re-licenses the write PHP 8.2 deprecated
+///   and so leaves the property set open for good.
+fn property_walk_obstacle(cd: &ClassDecl) -> bool {
+    cd.is_trait
+        || cd.uses_traits
+        || cd.is_enum
+        || cd.is_interface
+        || cd.allows_dynamic_properties
+        || cd.methods.iter().any(|m| PROPERTY_MAGIC.iter().any(|g| m.name.eq_ignore_ascii_case(g)))
+}
+
+/// Walk `start_fqn`'s parent chain proving `prop`'s absence under complete
+/// enumeration (ADR-0078, issue #197). `None` is silence — either an obstacle
+/// taints closure or the property is declared.
+///
+/// Interfaces are not walked (a PHP interface cannot declare a property), and
+/// **`stdClass` needs no leg of its own**: it is not a project declaration, so
+/// `find_class` answers `None` at it and the chain simply never closes — which is
+/// the id-wide silence this issue asks for, covering `stdClass` itself and every
+/// descendant of it in one edge. The conservatism is deliberate and worth naming:
+/// a never-written read on a `stdClass` really does warn (witnessed:
+/// `Undefined property: stdClass::$nope`), so these are true positives Steins
+/// declines in v1 because `stdClass` is the language's own property bag and a
+/// dynamic property written anywhere would make the read clean.
+fn enumerate_property_chain(cx: &Cx, start_fqn: &str, prop: &str) -> Option<PropertyChain> {
+    // Leg A14 (issue #195): a `@property*` / `@method` / `@mixin` / `@phpstan-type`
+    // tag anywhere in the class-like's resolved reach says members live where the
+    // index cannot enumerate them. This is the leg that keeps the Eloquent shape
+    // silent, and it is reused verbatim — the same records, the same reach walk, the
+    // same discharge channel a plugin pack will open member by member.
+    if !magic_obstacles_in_reach(cx, start_fqn).is_empty() {
+        return None;
+    }
+    let mut cur = start_fqn.to_owned();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut chain = PropertyChain { simple: Vec::new(), fqns: Vec::new(), any_conditional: false };
+    loop {
+        if !seen.insert(cur.to_ascii_lowercase()) {
+            return None; // a cycle — closure cannot terminate soundly.
+        }
+        // Every ancestor edge must resolve to a UNIQUE project declaration:
+        // `find_class` is `None` for an absent ancestor (a builtin — `stdClass`
+        // included — or a vendor class awaiting the reflect surface) and for an
+        // `Ambiguous` FQN alike.
+        let (cfile, cd) = cx.find_class(&cur)?;
+        // ADR-0079 §2.5: a node declared in an unparsable file is member-incomplete —
+        // recovery kept the class but may have dropped members out of its body.
+        if cx.member_incomplete(cfile) || property_walk_obstacle(cd) {
+            return None;
+        }
+        if declares_property(cd, prop) {
+            return None; // declared — plain, promoted, static, readonly or hooked.
+        }
+        chain.simple.push(cd.name.clone());
+        chain.fqns.push(cur.clone());
+        chain.any_conditional |= cd.conditional;
+        match &cd.parent {
+            None => return Some(chain),
+            Some(pref) => cur = cx.units[cfile].tree.resolve_class_fqn(pref),
+        }
+    }
+}
+
+/// The receiver a `property.undefined` claim can rest on (ADR-0078, issue #197),
+/// or `None` for silence.
+///
+/// The reach is the two lanes the member family already has, and nothing new:
+///
+/// * **the exact lane (S2's).** An allocation-proven `$var` whose `class_exact`
+///   holds. `$this` never qualifies — it is a membership fact, not exactness
+///   (A1) — and a lower-bound variable is not this lane's.
+/// * **the declared lane (S6's, routed by A13).** A receiver carrying a narrowed
+///   contract-arm lane, admitted only when the minimum stratum over the
+///   *participating* arms is `Verified` — a native `C $o` declaration PHP enforces
+///   at the boundary. **Any `Asserted` arm is silence**, and that is this slice's
+///   calibration boundary rather than a ladder step: the A13 routing sends an
+///   Asserted method claim to `phpdoc.undefined-method`, and the property family
+///   has no phpdoc twin to send it to (ADR-0078's floor table registers none). A
+///   docblock-premised property absence therefore gets no id in v1 rather than
+///   being laundered onto the proof surface, which is the direction ADR-0052 §5
+///   requires. The twin, if measurement ever asks for one, is a registry addition.
+enum PropertyReceiver {
+    Exact(String),
+    Declared(Vec<String>),
+}
+
+/// Classify a `$var->prop` receiver into [`PropertyReceiver`]. Disjoint by
+/// construction, exactly as S2/S6 are: the exact lane is taken first, and a
+/// lane-carrying variable is never `class_exact`.
+fn undefined_property_receiver(store: &Store, var: &str) -> Option<PropertyReceiver> {
+    if let Some(obj) = store.obj_of(var)
+        && obj.class_exact
+    {
+        return Some(PropertyReceiver::Exact(obj.class.clone()));
+    }
+    if store.is_exact(var) {
+        return None; // an exact object without a usable class — not a subject.
+    }
+    let arms = store.contract_arms(var)?;
+    if arms.is_empty() {
+        return None;
+    }
+    // A13: the minimum over the PARTICIPATING arms, computed next to the arm read so
+    // it can never drift from the arms the claim rests on.
+    if arms.iter().fold(Stratum::Verified, |acc, a| acc.min(a.stratum)) != Stratum::Verified {
+        return None; // an Asserted premise — the calibration boundary, see above.
+    }
+    let mut fqns: Vec<String> = Vec::with_capacity(arms.len());
+    for a in arms {
+        match &a.ty {
+            steins_contract::ContractTy::Class(f) => fqns.push(f.clone()),
+            // A scalar/array/null arm means the runtime receiver may be a
+            // non-object: a different finding (`property.on-non-object`), not this
+            // one.
+            _ => return None,
+        }
+    }
+    Some(PropertyReceiver::Declared(fqns))
+}
+
+/// Whether a descendant declaration could **introduce** `prop` (or an obstacle
+/// that hides one) below an arm whose own chain already lacks it (ADR-0049 §8
+/// applied to properties). The property twin of [`descendant_introduces_method`],
+/// leg for leg.
+fn descendant_introduces_property(cx: &Cx, cd: &ClassDecl, prop: &str) -> bool {
+    property_walk_obstacle(cd)
+        || declares_property(cd, prop)
+        || !magic_obstacles_in_reach(cx, &cd.fqn).is_empty()
+}
+
+/// Run the §8 ladder for one narrowed contract arm and return its display simple
+/// name when `prop` is **provably absent** across the arm's whole hierarchy *and*
+/// its complete descendant set, or `None` when any leg fails (silence).
+fn arm_provably_lacks_property(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    arm_fqn: &str,
+    prop: &str,
+) -> Option<String> {
+    let chain = enumerate_property_chain(cx, arm_fqn, prop)?;
+    if chain.any_conditional && !cx.dam.is_clear() {
+        return None; // A2i.
+    }
+    for fqn in &chain.fqns {
+        if folder.boot_surface_class_like(fqn) != Some(false) {
+            return None; // A2ii homonym.
+        }
+    }
+    match descendant_closure(cx, arm_fqn) {
+        DescendantClosure::Immune => {}
+        DescendantClosure::Obstacle => return None,
+        DescendantClosure::Enumerated(descendants) => {
+            if !cx.dam.is_clear() {
+                return None; // `eval` could mint a subclass declaring the property.
+            }
+            for (_, dcd) in &descendants {
+                if descendant_introduces_property(cx, dcd, prop) {
+                    return None;
+                }
+                if folder.boot_surface_class_like(&dcd.fqn) != Some(false) {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(chain.simple.first().cloned().unwrap_or_else(|| arm_fqn.to_owned()))
+}
+
+/// `property.undefined` (ADR-0078, issue #197) at a `$var->prop` **read**.
+///
+/// The warning-handler gate is the FIRST question asked, because under a declared
+/// `warning-handler = "null"` posture the application has said it tolerates
+/// `Undefined property` and the whole id leaves the proof surface (ADR-0049 §7) —
+/// there is nothing further to compute.
+fn check_undefined_property(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    var: &str,
+    prop: &str,
+    store: &Store,
+    span: Span,
+    out: &mut Vec<Diagnostic>,
+) {
+    let cx = w.cx;
+    if !cx.warning_handler_abort || w.scope.poisoned {
+        return;
+    }
+    // The dynamic-write obstacle. A name written anywhere in the project could have
+    // been created on this object before the read — a plain-class dynamic write is
+    // a deprecation, not an error (witnessed), so the read that follows is clean —
+    // and a computed-name write could have created any name at all. Asked before any
+    // class work: it is a hash lookup, and it is the leg most likely to answer.
+    if cx.index.property_write_obstacle(prop) {
+        return;
+    }
+    let Some(receiver) = undefined_property_receiver(store, var) else {
+        return;
+    };
+    // A9 (monkey-patch) + A2ii's honest consequence: without a live sidecar, or with
+    // a runtime-redefinition extension loaded, the id is silent (checked once).
+    if !folder.absence_family_available() {
+        return;
+    }
+    let (subject, chain_render) = match receiver {
+        PropertyReceiver::Exact(class_fqn) => {
+            let Some(chain) = enumerate_property_chain(cx, &class_fqn, prop) else {
+                return;
+            };
+            if chain.any_conditional && !cx.dam.is_clear() {
+                return; // A2i.
+            }
+            for fqn in &chain.fqns {
+                match folder.boot_surface_class_like(fqn) {
+                    Some(false) => {}
+                    Some(true) | None => return, // A2ii homonym / unanswerable.
+                }
+            }
+            let subject = chain.simple.first().cloned().unwrap_or(class_fqn);
+            let render = chain.simple.join(" → ");
+            (subject, format!("hierarchy fully enumerated ({render})"))
+        }
+        PropertyReceiver::Declared(arms) => {
+            let mut names: Vec<String> = Vec::with_capacity(arms.len());
+            for f in &arms {
+                match arm_provably_lacks_property(cx, folder, f, prop) {
+                    Some(name) => names.push(name),
+                    None => return, // any arm not provably-absent ⇒ silence.
+                }
+            }
+            let joined = names.join("|");
+            (
+                joined.clone(),
+                format!(
+                    "declared receiver ${var} narrowed to {{{joined}}}, hierarchy and \
+                     descendants fully enumerated"
+                ),
+            )
+        }
+    };
+    let pos = cx.tree().position(span.start);
+    out.push(Diagnostic {
+        id: PROPERTY_UNDEFINED_ID,
+        facet: None,
+        fix: None,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message: format!(
+            "read of undefined property ${var}->{prop} — {chain_render}, no __get/__set/__isset, \
+             no #[AllowDynamicProperties], no @property/@method/@mixin, no dynamic write of \
+             `{prop}` anywhere — PHP warns \"Undefined property: {subject}::${prop}\" and \
+             evaluates to null"
+        ),
+    });
+}
+
+/// A class-like's **member reach** for a constant fetch, enumerated end to end with
+/// the constant provably absent from every node (ADR-0078, issue #197).
+struct ConstReach {
+    /// Every FQN visited, for the A2ii boot-surface homonym leg.
+    fqns: Vec<String>,
+    /// The number of class-likes the reach covers, for the message.
+    width: usize,
+    /// Whether any node was declared conditionally (A2i — re-dams the claim).
+    any_conditional: bool,
+}
+
+/// Whether a class-like **provides** `name` as a class constant.
+///
+/// Two member sources, both witnessed: the declared constants
+/// (`ClassDecl::const_visibility` lists every declared name, including one whose
+/// initializer is not a literal — the value list would not), and an enum's
+/// **cases**, which answer `Suit::Hearts` in exactly the same syntactic position.
+/// Names are matched case-sensitively, as PHP matches them.
+fn provides_class_const(cd: &ClassDecl, name: &str) -> bool {
+    cd.const_visibility.iter().any(|(n, _)| n == name)
+        || cd.enum_cases.iter().any(|c| c.name == name)
+}
+
+/// Walk `start_fqn`'s whole member reach — parent chain **and** interfaces,
+/// transitively — proving `name`'s absence (ADR-0078, issue #197). `None` is
+/// silence.
+///
+/// Where the method and property walks follow the `extends` chain alone, a constant
+/// can arrive from anywhere in the reach, and all three routes are witnessed at
+/// 8.5.9: `class CImpl implements I1 {}` answers `CImpl::IK`,
+/// `interface IB extends IA` carries `IA::AK` through to `CB::AK`, and a trait's
+/// constant answers through the using class (`CT::TK`) — which is why a
+/// trait-using node is an obstacle here rather than a node to skip.
+///
+/// An enum node is **not** an obstacle: unlike enum methods (leg (j)/A3, unlowered)
+/// both an enum's constants and its cases are lowered, so an enum reach is
+/// enumerable for this member kind.
+fn enumerate_const_reach(cx: &Cx, start_fqn: &str, name: &str) -> Option<ConstReach> {
+    // A14 (issue #195), one door earlier. Constants have no magic channel at all —
+    // a `@property`/`@method` tag cannot make `C::K` resolve — so this leg is pure
+    // over-silence, taken for the same reason `string.non-stringable` takes it: ONE
+    // enumerability rule, not a second laxer one that happens to be sound here.
+    if !magic_obstacles_in_reach(cx, start_fqn).is_empty() {
+        return None;
+    }
+    let mut reach = ConstReach { fqns: Vec::new(), width: 0, any_conditional: false };
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut stack: Vec<String> = vec![start_fqn.to_owned()];
+    while let Some(fqn) = stack.pop() {
+        if !seen.insert(fqn.to_ascii_lowercase()) {
+            continue; // already visited — the diamond an interface list makes.
+        }
+        // Every edge must resolve to a UNIQUE project declaration; `None` covers an
+        // absent (builtin/vendor) and an `Ambiguous` class-like alike, and either
+        // could be where the constant lives.
+        let (cfile, cd) = cx.find_class(&fqn)?;
+        if cx.member_incomplete(cfile) {
+            return None; // ADR-0079 §2.5: members may have been dropped by recovery.
+        }
+        if cd.is_trait || cd.uses_traits {
+            return None; // trait constants are not flattened into the using class.
+        }
+        if provides_class_const(cd, name) {
+            return None; // declared constant, or an enum case — not undefined.
+        }
+        reach.any_conditional |= cd.conditional;
+        reach.fqns.push(fqn.clone());
+        reach.width += 1;
+        let tree = cx.units[cfile].tree;
+        for r in cd.parent.iter().chain(cd.implements.iter()) {
+            stack.push(tree.resolve_class_fqn(r));
+        }
+    }
+    Some(reach)
+}
+
+/// `class-const.undefined` (ADR-0078, issue #197) at a `C::K` fetch.
+///
+/// Only an explicitly **named** class is a subject, the reach `class-const.inaccessible`
+/// already has: `self::`/`parent::` resolve in a lexically fixed scope this walk does
+/// not thread, and `static::K` is late-bound and unproven (ADR-0043 §1). `X::class`
+/// is excluded outright — a plain string since PHP 8.0 that errors on nothing, even
+/// for a class that does not exist (witnessed).
+///
+/// No warning-handler gate: the consequence is a fatal `Error` and no posture makes
+/// it survivable.
+fn check_undefined_class_const(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    sc: &StaticClass,
+    name: &str,
+    span: Span,
+    out: &mut Vec<Diagnostic>,
+) {
+    let cx = w.cx;
+    if w.scope.poisoned || name.eq_ignore_ascii_case("class") {
+        return;
+    }
+    let StaticClass::Named(r) = sc else { return };
+    let class_fqn = cx.class_fqn(r);
+    // A9 + A2ii: without a live, monkey-patch-free sidecar the id is silent.
+    if !folder.absence_family_available() {
+        return;
+    }
+    let Some(reach) = enumerate_const_reach(cx, &class_fqn, name) else {
+        return;
+    };
+    // A2i: a conditional declaration anywhere leaves which body binds to load order.
+    if reach.any_conditional && !cx.dam.is_clear() {
+        return;
+    }
+    // A2ii: every class-like in the reach must be answered NOT-present by the
+    // boot-surface existence oracle. A homonym (`Some(true)`) or an unanswerable
+    // query (`None` — a mid-run sidecar failure) is silence.
+    for fqn in &reach.fqns {
+        match folder.boot_surface_class_like(fqn) {
+            Some(false) => {}
+            Some(true) | None => return,
+        }
+    }
+    let written = cx.find_class(&class_fqn).map_or(class_fqn.as_str(), |(_, cd)| cd.name.as_str());
+    let pos = cx.tree().position(span.start);
+    let width = reach.width;
+    out.push(Diagnostic {
+        id: CLASS_CONST_UNDEFINED_ID,
+        facet: None,
+        fix: None,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message: format!(
+            "fetch of undefined class constant {written}::{name} — member reach fully \
+             enumerated ({width} class-like(s): parents, interfaces and enum cases), \
+             constants have no magic fallback — proven Error (Undefined constant \
+             {written}::{name})"
+        ),
+    });
+}
+
+// end member absence (ADR-0078, issue #197)
 
 // ---------------------------------------------------------------------------
 // string context (ADR-0078, issue #193): `string.non-stringable` +

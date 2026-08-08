@@ -898,6 +898,25 @@ pub struct ClassDecl {
     /// value-less property back on the surface every other consumer walks.
     pub hooked_properties: Vec<String>,
     // end inaccessible members (ADR-0078, issue #185)
+    // member absence (ADR-0078, issue #197)
+    /// `true` when the declaration carries `#[AllowDynamicProperties]`.
+    ///
+    /// The attribute re-licences what PHP 8.2 deprecated: writing an undeclared
+    /// property on such a class is legal and creates it, so the class's property
+    /// set is **open** and no enumeration of its declarations can prove a name
+    /// absent. `property.undefined` therefore treats the attribute anywhere in a
+    /// receiver's chain as an obstacle, exactly as it treats `__get`.
+    ///
+    /// Recognized by the attribute's **name only**, in either the bare
+    /// (`#[AllowDynamicProperties]`) or fully-qualified
+    /// (`#[\AllowDynamicProperties]`) spelling. PHP itself resolves the name
+    /// against the current namespace, so a namespaced file without a `use` import
+    /// would not really get the engine attribute — but a class *meaning* to be
+    /// open and failing to import it is still a class whose author writes dynamic
+    /// properties, and over-silencing there costs an absence claim, never a wrong
+    /// one. Matching is case-insensitive (PHP class-name semantics).
+    pub allows_dynamic_properties: bool,
+    // end member absence (ADR-0078, issue #197)
     /// `true` if the class `use`s any trait. Trait methods are merged into the
     /// class at compile time but their bodies live elsewhere, so a
     /// trait-using class is treated as unresolvable (give up → silent).
@@ -2715,6 +2734,11 @@ pub struct SourceTree {
     /// Class references at the positions that break at run time (ADR-0049 §5 / S4,
     /// widened by issue #182), read by the `class.undefined` per-file pass.
     hard_class_refs: Vec<NameRef>,
+    // member absence (ADR-0078, issue #197)
+    /// Every property name written anywhere in this file, and whether any write
+    /// went through a computed name. See [`SourceTree::property_write_names`].
+    property_writes: PropertyWrites,
+    // end member absence (ADR-0078, issue #197)
     parse_errors: Vec<ParseError>,
     /// The comment trivia in the file, in source order (ADR-0023 inline ignores).
     comments: Vec<Comment>,
@@ -2850,6 +2874,9 @@ impl SourceTree {
             foreach_sites,
             array_literal_sites,
             hard_class_refs: lowered.hard_class_refs,
+            // member absence (ADR-0078, issue #197)
+            property_writes: lowered.property_writes,
+            // end member absence (ADR-0078, issue #197)
             parse_errors,
             comments,
             contexts,
@@ -2959,6 +2986,37 @@ impl SourceTree {
     pub fn array_literal_sites(&self) -> &[ArrayLiteralSite] {
         &self.array_literal_sites
     }
+
+    // member absence (ADR-0078, issue #197)
+    /// Every property name this file writes, deduplicated, in source order
+    /// (ADR-0078, issue #197). Purely syntactic — no receiver is resolved — and
+    /// read project-wide as the dynamic-property obstacle for
+    /// `property.undefined`.
+    ///
+    /// The over-approximation is the point. A write is what creates a dynamic
+    /// property, so a class may declare nothing named `p` and still answer `$o->p`
+    /// at runtime because some other file did `$o->p = 1` first — deprecated on a
+    /// plain class since PHP 8.2, deprecated and not an error, with the read that
+    /// follows clean (witnessed at 8.5.9). Resolving *which* object each write
+    /// lands on is the deferred `property.dynamic-write` slice's problem, and a
+    /// name-keyed obstacle needs none of it: it costs the absence claims for names
+    /// the project assigns somewhere — exactly the names a dynamic write could have
+    /// created — while the typo shape the check exists for (`$user->emial`) is
+    /// written nowhere and survives.
+    #[must_use]
+    pub fn property_write_names(&self) -> &[String] {
+        &self.property_writes.names
+    }
+
+    /// Whether this file writes a property through a **computed** name
+    /// (`$o->$n = …`, ADR-0078, issue #197). Such a write can create any name at
+    /// all, so one anywhere in the project takes `property.undefined` off the
+    /// surface entirely.
+    #[must_use]
+    pub fn writes_computed_property_name(&self) -> bool {
+        self.property_writes.dynamic
+    }
+    // end member absence (ADR-0078, issue #197)
 
     #[must_use]
     pub fn anonymous_class_edges(&self) -> &[AnonClassEdge] {
@@ -3200,7 +3258,58 @@ struct Lowered {
     /// finding-position set. `instanceof` and the docblock positions error nothing
     /// and are deliberately absent (the ADR-0078 contract twins).
     hard_class_refs: Vec<NameRef>,
+    // member absence (ADR-0078, issue #197)
+    property_writes: PropertyWrites,
+    // end member absence (ADR-0078, issue #197)
 }
+
+// member absence (ADR-0078, issue #197)
+/// Every property name a file **writes**, plus whether it writes one under a name
+/// only the runtime knows (ADR-0078, issue #197).
+///
+/// A write is what creates a dynamic property, so this is the evidence a
+/// `property.undefined` claim needs and cannot get from a class declaration: a
+/// class may declare nothing named `p` and still answer `$o->p` at runtime because
+/// some other file did `$o->p = 1` first (deprecated on a plain class since PHP
+/// 8.2 — deprecated, not an error, and the read that follows is clean; witnessed
+/// at 8.5.9).
+///
+/// Names, not receivers: resolving *which* object each write lands on is the
+/// deferred `property.dynamic-write` slice's problem, and a name-keyed obstacle
+/// needs none of it. The over-silence costs the absence claims for names the
+/// project assigns somewhere — which are exactly the names a dynamic write could
+/// have created — while the typo shape the check exists for (`$user->emial`) is
+/// written nowhere and survives.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+struct PropertyWrites {
+    /// The written names, deduplicated, as written (property names are
+    /// case-sensitive in PHP).
+    names: Vec<String>,
+    /// `true` when the file writes a property through a runtime-computed name
+    /// (`$o->$n = …`). Such a write can create **any** name, so one anywhere in
+    /// the project takes the whole id off the surface.
+    dynamic: bool,
+}
+
+impl PropertyWrites {
+    /// Record a property-write lvalue. A `$o->p` / `$this->p` / `$a->b->c` target
+    /// contributes its (last) name; a computed selector sets [`Self::dynamic`];
+    /// anything else is not a property write and contributes nothing.
+    fn push_lvalue(&mut self, lvalue: &Expression<'_>) {
+        let Expression::Access(Access::Property(pa)) = lvalue.unparenthesized() else {
+            return;
+        };
+        match method_name_of(&pa.property) {
+            Some(name) => {
+                if !self.names.contains(&name) {
+                    self.names.push(name);
+                }
+            }
+            None => self.dynamic = true,
+        }
+    }
+}
+// end member absence (ADR-0078, issue #197)
 
 fn walk(
     node: &Node<'_, '_>,
@@ -3357,6 +3466,31 @@ fn walk(
                 out.hard_class_refs.push(r);
             }
         }
+        // member absence (ADR-0078, issue #197)
+        // Every property-write lvalue in the file, collected where the walk already
+        // visits every node — so a write buried in a sub-expression the linear
+        // trace drops to `ArgValue::Other` (`f($o->dyn = 1)`) is seen too, which is
+        // what makes the resulting obstacle set an over-approximation rather than a
+        // trace artefact. Nested scopes are NOT skipped here (unlike
+        // `collect_assign_writes`, which asks a per-scope question): a dynamic
+        // property written inside a closure is written all the same.
+        Node::Assignment(a) => out.property_writes.push_lvalue(a.lhs),
+        Node::UnaryPrefix(u) => {
+            if matches!(
+                u.operator,
+                UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_)
+            ) {
+                out.property_writes.push_lvalue(u.operand);
+            }
+        }
+        Node::UnaryPostfix(u) => out.property_writes.push_lvalue(u.operand),
+        // `foreach ($xs as $o->p)` binds the property on every iteration.
+        Node::ForeachValueTarget(t) => out.property_writes.push_lvalue(t.value),
+        Node::ForeachKeyValueTarget(t) => {
+            out.property_writes.push_lvalue(t.key);
+            out.property_writes.push_lvalue(t.value);
+        }
+        // end member absence (ADR-0078, issue #197)
         // (b) Inheritance (issue #182): `extends` / `implements` on a class, an
         // enum's `implements`, an interface's (multiple) `extends`, and a `use`
         // of a trait in a class body. Every one of these is a fatal at CLASS LOAD
@@ -3854,6 +3988,9 @@ fn lower_trait(t: &mago_syntax::cst::Trait<'_>, conditional: bool) -> ClassDecl 
         consts: Vec::new(),
         const_visibility: Vec::new(),
         hooked_properties: Vec::new(),
+        // A trait is inert for member absence: `uses_traits` on the using class is
+        // already an obstacle, so the attribute here would change nothing.
+        allows_dynamic_properties: false,
         uses_traits: false,
         // No member docblock can observe a trait-level `@template`.
         docblock: None,
@@ -3928,6 +4065,9 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
         consts,
         const_visibility,
         hooked_properties,
+        // member absence (ADR-0078, issue #197)
+        allows_dynamic_properties: attrs_allow_dynamic_properties(&c.attribute_lists),
+        // end member absence (ADR-0078, issue #197)
         uses_traits,
         // Class-level docblock (preceding the whole declaration incl. attributes/
         // modifiers, mirroring the function/method lookup) — read for `@template`
@@ -4083,6 +4223,8 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
         consts,
         const_visibility,
         hooked_properties: Vec::new(),
+        // An interface declares no properties at all, so it can never be open.
+        allows_dynamic_properties: false,
         uses_traits: false,
         // Class-level docblock — `@template` names shadow same-named classes in the
         // interface's method docblocks (issue #5).
@@ -4164,6 +4306,8 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _doc
         consts,
         const_visibility,
         hooked_properties: Vec::new(),
+        // An enum cannot declare a property, dynamic or otherwise.
+        allows_dynamic_properties: false,
         uses_traits: false,
         // No analyzed member can observe an enum-level `@template`.
         docblock: None,
@@ -4369,6 +4513,21 @@ fn collect_steins_aliases_into(node: &Node<'_, '_>, out: &mut SteinsAttrAliases)
 /// `#[\Steins\Pure]` and `#[\Steins\Effect(...)]` on the same declaration are
 /// contradictory (Pure = empty upper bound, the tighter one); **Pure wins**
 /// (empty `labels`), with no diagnostic about the contradiction here.
+// member absence (ADR-0078, issue #197)
+/// Whether an attribute list carries PHP's own `#[AllowDynamicProperties]`
+/// (ADR-0078, issue #197) — see [`ClassDecl::allows_dynamic_properties`] for what
+/// the flag licenses and why the match is name-only.
+fn attrs_allow_dynamic_properties(
+    attribute_lists: &mago_syntax::cst::Sequence<'_, mago_syntax::cst::AttributeList<'_>>,
+) -> bool {
+    attribute_lists.iter().any(|list| {
+        list.attributes
+            .iter()
+            .any(|attr| normalize_class(&bytes_to_string(attr.name.value())) == "allowdynamicproperties")
+    })
+}
+// end member absence (ADR-0078, issue #197)
+
 fn attrs_effect_envelope(
     attribute_lists: &mago_syntax::cst::Sequence<'_, mago_syntax::cst::AttributeList<'_>>,
     aliases: &SteinsAttrAliases,
