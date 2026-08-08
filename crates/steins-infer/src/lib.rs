@@ -9211,6 +9211,29 @@ fn analyze_scope(
                         ),
                     );
                 }
+                // The scalar half of the same seeding (issue #242). Unlike the array
+                // half above, the value lane is NOT free here: the native pass just
+                // planted the coarse `Fact::General` of the parameter's own native
+                // type, and it outranks the arm lane at every fact read — so a
+                // declared refinement within that envelope has to REPLACE it, not
+                // yield to it. The `== native` test is the whole discipline: it
+                // overwrites only the seed this same entry pass planted from
+                // `seed_fact`, never a descent-bound value, a guard fact, or anything
+                // else a caller may have put in the lane.
+                else if let Some(native) = seed_fact(p)
+                    && env.get(&p.name).is_some_and(|k| k.fact.as_ref() == Some(&native))
+                    && let Some((fact, stratum)) = seed_refined_scalar_fact(p, &native, &arms)
+                {
+                    env.insert(
+                        p.name.clone(),
+                        Known::value_strat(
+                            fact,
+                            0,
+                            Some("declared parameter refinement".to_owned()),
+                            stratum,
+                        ),
+                    );
+                }
                 store.contract.insert(p.name.clone(), arms);
             }
         }
@@ -13797,6 +13820,62 @@ fn seed_shape_fact(arms: &[ContractArm]) -> Option<Fact> {
         shape = Some(lowered);
     }
     Some(Fact::Shape { shape: Box::new(shape?), nullable })
+}
+
+/// The **scalar** mirror of [`seed_shape_fact`] (issue #242): the value-lane fact a
+/// declared arm list contributes when it REFINES the native scalar envelope the
+/// entry pass already seeded.
+///
+/// It exists because the two lanes seed in the wrong order for scalars. The native
+/// pass ([`seed_fact`]) plants `Fact::General { base }` for every single-scalar
+/// parameter *before* the ADR-0052 §9 arm lane is built, and the value lane outranks
+/// the arm lane everywhere a fact is read (the ADR-0037 trust order — a value beats
+/// a declared envelope). So a `@param non-empty-string $s` on a `string $s` reached
+/// its arm lane intact and was then shadowed by the coarser `string` the native pass
+/// had already put in front of it. The array vocabulary never hit this: [`seed_fact`]
+/// matches a lone native *scalar* member, so a native `array $a` leaves the value
+/// lane free for [`seed_shape_fact`] to fill from the arms — which is exactly the
+/// asymmetry issue #242 measured.
+///
+/// The seed is admitted only under conditions that make it a strict narrowing of the
+/// native fact it replaces, so nothing here can ever widen what the runtime enforces:
+///
+/// * the lane lowers ([`steins_contract::to_fact`], the ONE lowering — the same one
+///   the shape seed and the arm speller use) to a **`Fact::Refined`**. A refinement
+///   adds a predicate set or an interval and keeps the base; every other lowering is
+///   refused, which is what keeps the sound-looking-but-wrong cases out — a `@param
+///   int $x` on a `float $x` lowers to `Fact::General`, not `Refined`, and PHP's
+///   coercion makes that parameter hold a float at runtime whatever the docblock
+///   claims;
+/// * the refined **base equals** the native seed's base — belt to the brace above;
+/// * nullability only ever shrinks, and an implicitly-nullable parameter
+///   (`string $s = null`) keeps its `null`: [`native_arms`] reads `ty.nullable`
+///   alone, so the arm lane cannot see that default and its lowering would drop a
+///   `null` the runtime really admits.
+///
+/// The stratum comes from the arms. A refinement the native type does not itself
+/// prove is `Asserted` and stays `Asserted` here (ADR-0037; ADR-0052 N2) — it is a
+/// docblock claim, so it can narrow a report but can never premise a proof-layer
+/// finding, exactly as the shape seed's A-G9 corollary pins for arrays.
+fn seed_refined_scalar_fact(
+    p: &Param,
+    native: &Fact,
+    arms: &[ContractArm],
+) -> Option<(Fact, Stratum)> {
+    let Fact::General { base, nullable } = native else { return None };
+    let lowered = steins_contract::to_fact(&ContractTy::Union(
+        arms.iter().map(|a| a.ty.clone()).collect(),
+    ))?;
+    let Fact::Refined { base: rbase, nullable: rnullable, .. } = &lowered else { return None };
+    if rbase != base || (*rnullable && !*nullable) || (!*rnullable && p.has_null_default) {
+        return None;
+    }
+    let stratum = if arms.iter().any(|a| a.stratum == Stratum::Asserted) {
+        Stratum::Asserted
+    } else {
+        Stratum::Verified
+    };
+    Some((lowered, stratum))
 }
 
 /// Statement-level inline `/** @var T $x */` casts (ADR-0073): the docblock
