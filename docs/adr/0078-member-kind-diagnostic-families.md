@@ -119,6 +119,20 @@ Recorded so the registry's silence is named (ADR-0049 point 10 shape):
   today, fatal at PHP 9.0. Ask-the-real-thing forbids calling it proof
   while the project's PHP tolerates it; when the sidecar reports ≥ 9.0 it
   becomes a proof id. Designed, not registered.
+- **Undeclared static property access** (`C::$prop`, issue #197): a fatal
+  `Error` (`Access to undeclared static property C::$nope`, witnessed at
+  8.5.9), so §1.4 forbids it riding `property.undefined`'s warning-grade
+  id and it would need a row of its own. The trace IR carries no
+  static-property *read* site either — `Node::StaticPropertyAccess` is
+  collected only as a class reference, for `class.undefined` — so the
+  slice is a lowering change, not a ladder change. Named here rather than
+  minted.
+- **The property family's phpdoc twin.** A13 routes an Asserted
+  declared-receiver *method* claim to `phpdoc.undefined-method`; the
+  property family has no such id in the table above, so an Asserted arm is
+  simply silence for `property.undefined` (issue #197's calibration
+  boundary). Adding the twin is a registry addition, and waits on
+  measurement asking for one.
 - **`class.undefined` contract twins** (`instanceof` on a missing class,
   docblock class references): contract-layer by consequence, named at
   slice time under this ADR's vocabulary (issue #182 follow-up).

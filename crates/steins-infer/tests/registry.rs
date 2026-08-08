@@ -22,6 +22,9 @@ use steins_infer::{
     RETURN_ID, RETURN_MISMATCH_ID, SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID, THROW_LISKOV_ID,
     THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID, declared_facet, layer,
 };
+// member absence (ADR-0078, issue #197)
+use steins_infer::{CLASS_CONST_UNDEFINED_ID, PROPERTY_MAYBE_UNDEFINED_ID, PROPERTY_UNDEFINED_ID};
+// end member absence (ADR-0078, issue #197)
 
 /// Totality, forward: every id an emitter can produce is registered *with* a layer.
 #[test]
@@ -187,7 +190,30 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
     assert!(pending.contains(too_many), "`{too_many}` should be registered-not-yet-emitted");
     assert!(!emittable.contains(too_many), "`{too_many}` must not be emittable before its stage");
     assert!(layer(too_many).is_some(), "`{too_many}` must be registered with a layer");
-    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 1);
+
+    // member absence (ADR-0078, issue #197)
+    // The `maybe-` sibling convention (ADR-0078 §1.3) mechanized: `property.undefined`
+    // ships, so its possibly-grade twin is REGISTERED with it and emitted by nothing —
+    // the enforcement of "the possibly-leg is named, never scoped out of existence".
+    for id in [PROPERTY_UNDEFINED_ID, CLASS_CONST_UNDEFINED_ID] {
+        assert!(emittable.contains(id), "`{id}` must be emittable from its slice (#197)");
+        assert!(!pending.contains(id), "`{id}` must not be registered-not-yet-emitted");
+        assert_eq!(layer(id), Some(Layer::Proof));
+        assert_eq!(surface_floor(id), Some(Floor::Default));
+    }
+    assert!(
+        pending.contains(PROPERTY_MAYBE_UNDEFINED_ID),
+        "the maybe- sibling registers AHEAD of emission, with its definite leg"
+    );
+    assert!(
+        !emittable.contains(PROPERTY_MAYBE_UNDEFINED_ID),
+        "no emitter produces the maybe- sibling yet"
+    );
+    assert_eq!(layer(PROPERTY_MAYBE_UNDEFINED_ID), Some(Layer::Proof));
+    assert_eq!(surface_floor(PROPERTY_MAYBE_UNDEFINED_ID), Some(Floor::Strict));
+    // end member absence (ADR-0078, issue #197)
+
+    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 2);
 }
 
 /// All four debug ids emit at `Layer::Debug`, appear in `ALL_EMITTABLE_IDS`, and
@@ -275,20 +301,30 @@ fn every_registered_id_has_a_surface_floor() {
 /// exactly this rule — proof/mechanics/debug at `default`, contract at `contracts` —
 /// and it is checked here for EVERY id rather than argued once in a comment.
 ///
-/// The only admitted exception is the pair ADR-0062 S6 itself introduces: the offset
-/// family's strict leg sits in the contract layer at the `strict` floor, which is
-/// the whole reason a floor attribute was needed (a layer can now straddle rungs).
+/// The admitted exceptions are named one by one, with the layer each is allowed to
+/// carry. Two of them are the pair ADR-0062 S6 itself introduced (the offset
+/// family's strict leg, in the contract layer at the `strict` floor — the whole
+/// reason a floor attribute was needed); the third is ADR-0078 §1.3's `maybe-`
+/// sibling convention, which puts a **proof**-layer id above `default` for the
+/// first time: a possibly-grade twin is still proof-grade evidence about the
+/// runtime, and a possibly-claim belongs on the strict surface.
 #[test]
 fn floors_reproduce_the_pre_s6_layer_selection() {
     // The S6 pair, post-triage (2026-07-29 sweep): `offset.undeclared` measured
     // ZERO corpus findings and took A-G10's END-state promotion to `Contracts`;
     // `offset.maybe-missing` stays `Strict` until the assertion-helper
-    // discharge lands (its 3 sweep findings were all that one gap).
-    let promoted = [(OFFSET_UNDECLARED_ID, Floor::Contracts), (OFFSET_MAYBE_MISSING_ID, Floor::Strict)];
+    // discharge lands (its 3 sweep findings were all that one gap). Plus the
+    // member-absence `maybe-` sibling (ADR-0078, issue #197).
+    let promoted = [
+        (OFFSET_UNDECLARED_ID, Layer::Contract, Floor::Contracts),
+        (OFFSET_MAYBE_MISSING_ID, Layer::Contract, Floor::Strict),
+        (PROPERTY_MAYBE_UNDEFINED_ID, Layer::Proof, Floor::Strict),
+    ];
     for &(id, layer_of, floor) in DIAGNOSTIC_REGISTRY {
-        if let Some(&(_, expected_floor)) = promoted.iter().find(|(p, _)| *p == id) {
-            assert_eq!(layer_of, Layer::Contract, "the strict leg is contract-layer");
-            assert_eq!(floor, expected_floor, "`{id}` floor per the 2026-07-29 triage ruling");
+        if let Some(&(_, expected_layer, expected_floor)) = promoted.iter().find(|(p, ..)| *p == id)
+        {
+            assert_eq!(layer_of, expected_layer, "`{id}` keeps the layer its ADR gives it");
+            assert_eq!(floor, expected_floor, "`{id}` floor per its ADR / triage ruling");
             continue;
         }
         let expected = match layer_of {

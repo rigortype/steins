@@ -52,6 +52,9 @@ use crate::SYNTAX_UNPARSABLE_ID;
 // end parse failure (ADR-0079, issue #180)
 // inaccessible members (ADR-0078, issue #185)
 use crate::{CALL_INACCESSIBLE_METHOD_ID, CLASS_CONST_INACCESSIBLE_ID, PROPERTY_INACCESSIBLE_ID};
+// member absence (ADR-0078, issue #197)
+use crate::{CLASS_CONST_UNDEFINED_ID, PROPERTY_MAYBE_UNDEFINED_ID, PROPERTY_UNDEFINED_ID};
+// end member absence (ADR-0078, issue #197)
 
 /// The registry id for an `@steins-ignore` whose diagnostic id matches nothing on
 /// its target line (ADR-0023 anti-rot). Exempt from suppression.
@@ -306,6 +309,23 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     (PROPERTY_INACCESSIBLE_ID, Layer::Proof, Floor::Default),
     (CLASS_CONST_INACCESSIBLE_ID, Layer::Proof, Floor::Default),
     // end inaccessible members (ADR-0078, issue #185)
+    // member absence (ADR-0078, issue #197)
+    // proof — reading a property no declaration provides is an `E_WARNING`
+    // yielding null (witnessed), so it demotes under a declared
+    // `warning-handler = "null"` posture exactly as `offset.missing` does
+    // (ADR-0049 §7). Fetching an undefined class constant is a fatal `Error`
+    // (witnessed) and never demotes — the gate boundary that ADR-0078 §1.4 makes
+    // an id boundary, which is why these are two ids and not one member-absence id
+    // with a precise message.
+    (PROPERTY_UNDEFINED_ID, Layer::Proof, Floor::Default),
+    (CLASS_CONST_UNDEFINED_ID, Layer::Proof, Floor::Default),
+    // proof at the STRICT floor — the `maybe-` sibling registered ahead of
+    // emission (ADR-0078 §1.3). The first proof-layer id to sit above `default`:
+    // the possibly-grade twin of a proven warning is still proof-grade evidence
+    // about the runtime, but a possibly-claim belongs on the strict surface, the
+    // `offset.maybe-missing` shape one layer up.
+    (PROPERTY_MAYBE_UNDEFINED_ID, Layer::Proof, Floor::Strict),
+    // end member absence (ADR-0078, issue #197)
     // contract — declared-contract acceptance (increase tripwires).
     (PARAM_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     (RETURN_MISMATCH_ID, Layer::Contract, Floor::Contracts),
