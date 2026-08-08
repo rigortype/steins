@@ -37,6 +37,13 @@ Filenames are `YYYYMMDD-<slug>.md`, dated to authorship.
 
 ## Surveys
 
+- [The type-system gap inventory, measured through nsrt](20260808-nsrt-type-system-gaps.md)
+  — 15,845 `assertType` assertions bucketed into vocabulary / reach / precision:
+  two thirds of the vocabulary headline turns out not to be work, the
+  intersection bucket splits into two unrelated problems, and vocabulary
+  sequences before reach because most reach gaps are downstream of a spelling
+  that does not exist.
+
 - [The four oxidized PHP checkers: Steins vs Mago / Pzoom / Mir](20260722-oxidized-php-checkers.md)
   — where the Rust-side PHP-tooling landscape stands and what Steins does
   differently.
