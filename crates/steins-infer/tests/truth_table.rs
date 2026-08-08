@@ -101,9 +101,11 @@ fn non_literal_and_unknown_are_silent() {
 fn parse_error_is_safe() {
     let broken = "<?php\nfunction width(int $w): int { return $w;\nfunction broken( int $x {\nwidth(123);";
     let f = findings(broken);
-    assert!(f.iter().all(|d| d.id == "type.argument-mismatch"));
-    // width(123) is a valid int->int call, so there must be no finding at all.
-    assert_eq!(f.len(), 0, "no false positive from a broken file");
+    // ADR-0079 / issue #180: the file now names its own breakage, and that is the
+    // ONLY thing it says. `width(123)` is a valid int->int call and would be silent
+    // anyway; what this pins is that no *inference* finding escapes a broken file.
+    assert!(f.iter().all(|d| d.id == "syntax.unparsable"), "{f:?}");
+    assert_eq!(f.len(), 1, "one parse finding per broken file, and nothing else: {f:?}");
 }
 
 // ---- Message shape (matches the ADR-0022 spirit) -------------------------

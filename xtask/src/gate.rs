@@ -1394,6 +1394,15 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
     }
 
     // Identify parse-error files (their diagnostics are excluded from the count).
+    //
+    // ADR-0079 (issue #180) makes most of this redundant and one part of it a
+    // deliberate blind spot. Redundant: the analyzer itself now emits nothing but
+    // `syntax.unparsable` from a file that failed to parse, so there are no
+    // inference findings left here to drop. The blind spot: this retain also drops
+    // that new id, so a pre-existing unparsable corpus file cannot turn the gate red
+    // on a finding whose remedy lives in someone else's repository. What it does NOT
+    // drop is the *consequence* — a non-vendor unparsable file is a dam site, so the
+    // existence family goes silent across that package, which can only lower counts.
     let mut parse_error_files = Vec::new();
     for &input in &inputs {
         if !parse(&db, input).parse_errors().is_empty() {
@@ -1489,6 +1498,25 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
         inputs.push(SourceFile::new(&db, rel, text));
     }
 
+    // The same exclusion, and the same ADR-0079 reading, as the corpus path above.
+    //
+    // ADR-0079 §4 asks the corpus to be swept for pre-existing unparsable files
+    // before the id ships, and for what it finds to be recorded as corpus facts
+    // rather than rediscovered as surprises. Swept 2026-08-08; the local root holds
+    // exactly three, each with a cascade of further errors behind its first:
+    //
+    //   vendor/apache/thrift/lib/php/lib/Thrift/Transport/TCurlClient.php:95  (+8)
+    //   vendor/apache/thrift/lib/php/lib/Thrift/Transport/THttpClient.php:100 (+8)
+    //   php-openid/Tests/Auth/OpenID/HMAC.php:66                              (+6)
+    //
+    // All three are VENDOR, so §2.3's presumption applies to all three: none is a
+    // dam site, none makes its class-likes member-incomplete, and each one's
+    // `syntax.unparsable` finding is dropped by the retain below in any case. The
+    // consequence worth writing down is that the dam never engages on this corpus
+    // today — so the §2.5 member-incomplete leg is exercised by fixtures alone
+    // (`crates/steins-infer/tests/parse_failure_dam.rs`) until a NON-vendor break
+    // appears here, at which point the existence family goes silent for that
+    // package and these counts fall. They cannot rise.
     let mut parse_error_files = Vec::new();
     for &input in &inputs {
         if !parse(&db, input).parse_errors().is_empty() {

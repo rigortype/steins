@@ -514,6 +514,30 @@ pub const STRING_ARRAY_CONVERSION_ID: &str = "string.array-conversion";
 
 // end string context (ADR-0078, issue #193)
 
+// parse failure (ADR-0079, issue #180)
+
+/// The registry id for a file the parser could not read (ADR-0079 §2.1,
+/// **mechanics** layer, floor `Default`): `SourceTree::parse` recovered from at
+/// least one error, so `php -l` would reject the file outright.
+///
+/// Emitted **once per file**, positioned at the FIRST error and naming the count of
+/// further errors. One per file rather than one per error because recovery cascades
+/// make every position after the first unreliable — a second "error" is as likely to
+/// be the recovery's own confusion as a second mistake.
+///
+/// Mechanics semantics apply in full: fail level, red on sight, profile-`disable`-
+/// proof and undemotable, suppression-exempt. A file that does not parse is
+/// apparatus rot, not a style opinion, and the remedy is fixing the file. The
+/// finding is the only thing the broken file emits (§2.4) — a finding built on a
+/// misparse is precisely the manufactured-FP shape ADR-0002 forbids — and a
+/// **non-vendor** broken file additionally joins the whole-universe dam as
+/// [`DamKind::Unparsable`] (§2.2). In `vendor/` the ADR-0046 §2 presumption carries
+/// over verbatim (§2.3): not a dam site, and the finding rides the ordinary vendor
+/// filter like every other vendor finding.
+pub const SYNTAX_UNPARSABLE_ID: &str = "syntax.unparsable";
+
+// end parse failure (ADR-0079, issue #180)
+
 /// Every id constant that reaches a `Diagnostic { id: … }` construction site — the
 /// canonical enumeration of what the emitters can produce (ADR-0050 §2 totality).
 ///
@@ -584,6 +608,9 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     STRING_NON_STRINGABLE_ID,
     STRING_ARRAY_CONVERSION_ID,
     // end string context (ADR-0078, issue #193)
+    // parse failure (ADR-0079, issue #180)
+    SYNTAX_UNPARSABLE_ID,
+    // end parse failure (ADR-0079, issue #180)
 ];
 
 /// Ids **registered ahead of emission**: they exist in [`DIAGNOSTIC_REGISTRY`]
@@ -2709,7 +2736,31 @@ fn check_units(
     // spells a purity-bearing callable.
     let purity = PurityOracle::build(units, index, plugins);
 
+    // parse failure (ADR-0079, issue #180): `parse_errors()`'s first real consumer.
+    // One finding per broken file at its first error, and then NOTHING else from
+    // that file — its recovered tree may misattribute anything locally, and a
+    // finding built on a misparse is the manufactured-FP shape ADR-0002 forbids
+    // (§2.4). The declarations the recovery kept still sit in the index, where they
+    // can only *silence* an absence claim, never fire one.
+    //
+    // Vendor is NOT special here, only in the dam (§2.3): a broken vendor file
+    // emits the finding too and it rides the CLI's ordinary vendor filter, exactly
+    // as the ADR-0046 §2 presumption prescribes.
+    for u in units {
+        emit_parse_failure(u, dam.file_is_unparsable(u.path), &mut out);
+    }
+    let unparsable: HashSet<&str> =
+        units.iter().filter(|u| !u.tree.parse_errors().is_empty()).map(|u| u.path).collect();
+    // end parse failure (ADR-0079, issue #180)
+
     for fi in 0..units.len() {
+        // parse failure (ADR-0079, issue #180): the broken file's own passes do not
+        // run at all. The project-wide passes below (effects, throws) are filtered
+        // by path instead — they walk the whole universe in one go, so there is no
+        // per-file switch to turn off there.
+        if unparsable.contains(units[fi].path) {
+            continue;
+        }
         let cx = Cx::new_with(
             units,
             index,
@@ -2870,8 +2921,58 @@ fn check_units(
     // --- Throw system (ADR-0040/0007): `@throws` envelope + Liskov. ----------
     out.extend(throw_diagnostics(units, index));
 
+    // parse failure (ADR-0079, issue #180): drop whatever the two project-wide
+    // passes above attributed to a broken file. §2.4 is about the file, not about
+    // which pass produced the finding.
+    if !unparsable.is_empty() {
+        out.retain(|d| d.id == SYNTAX_UNPARSABLE_ID || !unparsable.contains(d.path.as_str()));
+    }
+
     dedup(&mut out);
     out
+}
+
+// ---------------------------------------------------------------------------
+// `syntax.unparsable` (ADR-0079, issue #180, mechanics layer).
+// ---------------------------------------------------------------------------
+
+/// Emit the one `syntax.unparsable` finding a broken file earns (ADR-0079 §2.1):
+/// positioned at the FIRST recovered parse error and naming the count of further
+/// ones. One per file, never one per error — recovery cascades make every position
+/// after the first unreliable, so the later errors are reported as a *count* (a
+/// magnitude the operator can use) rather than as positions (which would be
+/// guesses). A file that parses emits nothing.
+///
+/// `dams` is the ADR-0046 §2 vendor answer, read off the site list rather than
+/// re-derived here so the finding's own words cannot drift from the dam's behavior:
+/// a non-vendor break silences the existence family project-wide and the message
+/// says so, a vendor break does not and the message does not claim it.
+fn emit_parse_failure(unit: &FileUnit, dams: bool, out: &mut Vec<Diagnostic>) {
+    let errors = unit.tree.parse_errors();
+    let Some(first) = errors.first() else { return };
+    let pos = unit.tree.position(first.span.start);
+    let tail = match errors.len() - 1 {
+        0 => String::new(),
+        1 => " (and 1 further parse error in this file)".to_owned(),
+        n => format!(" (and {n} further parse errors in this file)"),
+    };
+    let consequence = if dams {
+        ", and while it stands no existence-absence claim can be proven anywhere in the project"
+    } else {
+        ""
+    };
+    out.push(Diagnostic {
+        id: SYNTAX_UNPARSABLE_ID,
+        path: unit.path.to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message: format!(
+            "this file does not parse — {}{tail}; nothing else is reported from it{consequence}",
+            first.message,
+        ),
+        facet: None,
+        fix: None,
+    });
 }
 
 /// Drop exact-duplicate diagnostics, preserving first-occurrence order.
@@ -6014,6 +6115,21 @@ impl<'a> Cx<'a> {
     fn a11_demote_catalog(&self) -> bool {
         self.catalog_skew
     }
+
+    // parse failure (ADR-0079, issue #180)
+    /// Whether the class-likes declared in `file` are **member-incomplete**
+    /// (ADR-0079 §2.5): the file did not parse, so a recovery point may have
+    /// swallowed methods out of a class body the recovery otherwise kept. Asked by
+    /// the chain-closure legs exactly where the A14 magic-tag obstacle is asked —
+    /// both say "members live where the index cannot enumerate them".
+    ///
+    /// Read off the dam's site list, so the ADR-0046 §2 vendor presumption applies
+    /// here too, and so an auxiliary-pass context (pointing at [`EMPTY_DAM`]) answers
+    /// `false` — those passes emit no absence id and ask this of nothing.
+    fn member_incomplete(&self, file: usize) -> bool {
+        self.dam.file_is_unparsable(self.units[file].path)
+    }
+    // end parse failure (ADR-0079, issue #180)
 
     fn tree(&self) -> &'a SourceTree {
         self.units[self.cur].tree
@@ -17116,6 +17232,15 @@ fn enumerate_method_chain(cx: &Cx, start_fqn: &str, method: &str, kind: UndefKin
         let Some((cfile, cd)) = cx.find_class(&cur) else {
             return ChainWalk::Silent;
         };
+        // parse failure (ADR-0079, issue #180), leg §2.5: a node declared in an
+        // unparsable file is member-incomplete — the recovery kept the class but may
+        // have dropped methods out of its body, so "the method is not in this chain"
+        // is exactly the enumeration the break makes unprovable. The A14 verdict, one
+        // door later: the whole-universe dam covers name existence, this leg covers
+        // member enumeration, and both read the same site list.
+        if cx.member_incomplete(cfile) {
+            return ChainWalk::Silent;
+        }
         // Leg (j)/A3: enum methods are not lowered, so an enum chain would look
         // method-empty — Unknown until enum method lowering lands.
         if cd.is_enum {
@@ -18929,6 +19054,13 @@ fn arm_provably_lacks_method(
             if !cx.dam.is_clear() {
                 return None; // eval could mint a subclass carrying the method.
             }
+            // ADR-0079 §2.5 needs NO leg of its own here, and deliberately does not
+            // grow a dead one: a member-incomplete descendant can only exist while a
+            // non-vendor file is unparsable, and that file is itself a dam site, so
+            // the `is_clear()` guard directly above has already returned. Should the
+            // §3 position-aware refinement ever let a file be unparsable *without*
+            // damming, this loop gains the same `member_incomplete` question the
+            // chain walk asks.
             for (_, dcd) in &descendants {
                 if descendant_introduces_method(cx, dcd, method) {
                     return None;

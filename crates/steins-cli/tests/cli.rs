@@ -51,12 +51,31 @@ fn strict_fixture_flags_string_and_float_to_int() {
 
 #[test]
 fn clean_fixtures_exit_zero() {
-    for name in ["nullable.php", "nullable_strict.php", "silent.php", "broken.php"] {
+    for name in ["nullable.php", "nullable_strict.php", "silent.php"] {
         let r = run(&["check", fixture(name).to_str().unwrap()]);
         assert_eq!(r.code, 0, "{name} should be clean, got:\n{}", r.stdout);
         assert!(r.stdout.is_empty(), "{name} produced output:\n{}", r.stdout);
     }
 }
+
+// parse failure (ADR-0079, issue #180)
+#[test]
+fn a_file_that_does_not_parse_reports_and_exits_non_zero() {
+    // `broken.php` used to be a *clean* fixture: error-tolerant parsing recovered,
+    // and `steins check` printed nothing and exited 0 on a file `php -l` rejects.
+    // ADR-0079 §2.1 ends that — the silence was the finding.
+    let r = run(&["check", fixture("broken.php").to_str().unwrap()]);
+    assert_eq!(r.code, 1, "a file that does not parse must fail the run:\n{}", r.stdout);
+    let lines: Vec<&str> = r.stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "exactly one finding per broken file, got:\n{}", r.stdout);
+    assert!(lines[0].contains("error[syntax.unparsable]"), "{}", lines[0]);
+    // Positioned at the FIRST parse error — the missing `)` in `function broken(
+    // int $x {` on line 7 is diagnosed where the parser gives up, at `$x` on line 8 —
+    // and the message carries the count of the further ones.
+    assert!(lines[0].contains("broken.php:8:12:"), "positioned at the first error: {}", lines[0]);
+    assert!(lines[0].contains("further parse error"), "{}", lines[0]);
+}
+// end parse failure (ADR-0079, issue #180)
 
 #[test]
 fn json_format_smoke() {

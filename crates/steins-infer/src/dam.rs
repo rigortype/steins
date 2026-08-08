@@ -18,7 +18,10 @@
 //!   CWD, so directory-relative belief is unsound), or an absolute / `__DIR__`-
 //!   anchored literal that resolves *outside* the analyzed universe;
 //! - every `class_alias(...)` naming a **runtime-minted** class (a class-name mint
-//!   the reference scan cannot resolve — [`steins_syntax::DynamismKind::ClassAlias`]).
+//!   the reference scan cannot resolve — [`steins_syntax::DynamismKind::ClassAlias`]);
+//! - every **non-vendor** file that fails to parse (ADR-0079 §2.2): a recovery point
+//!   is a place the world is not enumerated, so it may have swallowed a class or a
+//!   function declaration outright.
 //!
 //! The vendor presumption of ADR-0046 §2 carries over verbatim: `eval` /
 //! dynamic-include inside a `vendor/` path is composer plumbing, presumed
@@ -49,6 +52,17 @@ pub enum DamKind {
     /// A `class_alias(...)` naming a runtime-minted class (issue #36: `X::class` is
     /// compile-time and mints an index edge instead).
     ClassAlias,
+    // parse failure (ADR-0079, issue #180)
+    /// A **non-vendor** file `SourceTree::parse` recovered from (ADR-0079 §2.2).
+    /// Unlike the three above, the site is not a *construct* — it is the whole
+    /// file, positioned at its first parse error. Its blast radius is also wider:
+    /// besides the whole-universe existence dam every kind carries, an
+    /// `Unparsable` site makes the class-likes THAT FILE declares member-incomplete
+    /// (§2.5, [`DamFacts::file_is_unparsable`]) — `eval` can mint a new name but
+    /// cannot reopen a defined class, whereas a mangled class body can have lost
+    /// methods.
+    Unparsable,
+    // end parse failure (ADR-0079, issue #180)
 }
 
 /// One dam site: where a runtime-definition construct stands (ADR-0049 §2).
@@ -93,6 +107,23 @@ impl DamFacts {
     pub fn is_empty(&self) -> bool {
         self.sites.is_empty()
     }
+
+    // parse failure (ADR-0079, issue #180)
+    /// Whether `path` is a standing [`DamKind::Unparsable`] site — the
+    /// **member-incompleteness** question of ADR-0079 §2.5, which the
+    /// method-absence ladders ask of every class-like they walk through.
+    ///
+    /// Deliberately narrower than [`Self::is_clear`]: name existence is dammed
+    /// universe-wide by *any* site, but member enumeration is only unprovable for
+    /// the class-likes the broken file itself declares. And deliberately built on
+    /// the site list rather than on `parse_errors()` directly, so the ADR-0046 §2
+    /// vendor presumption applies to both legs at once — a broken vendor file is
+    /// not a site, so it neither dams nor makes its classes member-incomplete.
+    #[must_use]
+    pub fn file_is_unparsable(&self, path: &str) -> bool {
+        self.sites.iter().any(|s| s.kind == DamKind::Unparsable && s.path == path)
+    }
+    // end parse failure (ADR-0079, issue #180)
 }
 
 /// Compute the whole-universe dam fact from the lowered `units` (ADR-0049 §2).
@@ -112,6 +143,33 @@ pub fn dam_facts(units: &[FileUnit], layout: &ProjectLayout) -> DamFacts {
     for u in units {
         let tree = u.tree;
         let vendor = layout.is_vendor(u.path);
+        // parse failure (ADR-0079, issue #180)
+        // One site per broken file, at the first error — recovery cascades make
+        // every position after the first unreliable, so the count of further errors
+        // is the emitter's business and the position is the first one's. The vendor
+        // presumption of ADR-0046 §2 carries over verbatim (§2.3): parser test
+        // suites ship deliberately broken PHP, so a `vendor/` file is not a site.
+        //
+        // Deferred with design (ADR-0079 §3): a *position-aware* refinement would
+        // keep the absence family alive when the recovery region is provably inside
+        // a statement body, since a body cannot have swallowed a top-level
+        // declaration. It is not built here — it needs the syntax-tree contract to
+        // expose the recovery REGIONS (the spans recovery skipped), which the
+        // backend does not surface. When it lands, this site gains a region and the
+        // consumers below consult it; nothing else changes shape. A naive
+        // implementation would be wrong: conditional class declarations inside
+        // bodies are legal PHP, so the body-local judgment must still check the
+        // region for declaration keywords.
+        if !vendor && let Some(first) = tree.parse_errors().first() {
+            let pos = tree.position(first.span.start);
+            sites.push(DamSite {
+                path: u.path.to_owned(),
+                line: pos.line,
+                column: pos.column,
+                kind: DamKind::Unparsable,
+            });
+        }
+        // end parse failure (ADR-0079, issue #180)
         for site in tree.dynamism_sites() {
             let pos = tree.position(site.span.start);
             let kind = match &site.kind {
@@ -296,6 +354,66 @@ mod tests {
         let units = [FileUnit { path: "vendor/pkg/Thing.php", tree: &t }];
         assert!(dam_facts(&units, &ProjectLayout::fallback()).is_clear());
     }
+
+    // parse failure (ADR-0079, issue #180)
+
+    /// A file with exactly one parse error (`$this->s->` with no member name), whose
+    /// recovery nevertheless keeps the class declaration.
+    const BROKEN: &str = "<?php\nclass Q { public function f(): void { if ($this->s->) {} } }\n";
+
+    #[test]
+    fn an_unparsable_non_vendor_file_is_one_site_at_its_first_error() {
+        let t = tree(BROKEN);
+        let units = [FileUnit { path: "src/q.php", tree: &t }];
+        let facts = dam_facts(&units, &ProjectLayout::fallback());
+        assert_eq!(facts.len(), 1, "{:?}", facts.sites());
+        let site = &facts.sites()[0];
+        assert_eq!(site.kind, DamKind::Unparsable);
+        assert_eq!(site.path, "src/q.php");
+        assert_eq!((site.line, site.column), (2, 53));
+        assert!(!facts.is_clear());
+    }
+
+    #[test]
+    fn a_file_with_many_errors_is_still_exactly_one_site() {
+        // The site is the FILE, not the error: recovery cascades make every position
+        // after the first unreliable, so counting them here would count noise.
+        let t = tree("<?php\nfunction a( int $x {\n}\nfunction b( int $y {\n}\n");
+        assert!(t.parse_errors().len() > 1, "fixture must cascade: {:?}", t.parse_errors());
+        let units = [FileUnit { path: "src/fns.php", tree: &t }];
+        assert_eq!(dam_facts(&units, &ProjectLayout::fallback()).len(), 1);
+    }
+
+    #[test]
+    fn an_unparsable_vendor_file_is_not_a_site() {
+        // ADR-0079 §2.3, carrying ADR-0046 §2 over verbatim: parser test suites ship
+        // deliberately broken PHP, so a `vendor/` break is presumed plumbing.
+        let t = tree(BROKEN);
+        let units = [FileUnit { path: "vendor/pkg/tests/broken.php", tree: &t }];
+        let facts = dam_facts(&units, &ProjectLayout::fallback());
+        assert!(facts.is_clear(), "{:?}", facts.sites());
+        assert!(!facts.file_is_unparsable("vendor/pkg/tests/broken.php"));
+    }
+
+    #[test]
+    fn member_incompleteness_is_per_file_while_the_dam_is_universe_wide() {
+        // The two questions the site list answers are deliberately different reaches
+        // (§2.5): `is_clear` is false for EVERY file once one break stands, but
+        // `file_is_unparsable` is true only of the broken one — otherwise the member
+        // leg would be a second whole-universe dam.
+        let broken = tree(BROKEN);
+        let sound = tree("<?php\nclass R { public function g(): void {} }\n");
+        let units = [
+            FileUnit { path: "src/q.php", tree: &broken },
+            FileUnit { path: "src/r.php", tree: &sound },
+        ];
+        let facts = dam_facts(&units, &ProjectLayout::fallback());
+        assert!(!facts.is_clear());
+        assert!(facts.file_is_unparsable("src/q.php"));
+        assert!(!facts.file_is_unparsable("src/r.php"));
+    }
+
+    // end parse failure (ADR-0079, issue #180)
 
     #[test]
     fn one_runtime_name_class_alias_dams_the_whole_universe() {
