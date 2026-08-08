@@ -188,6 +188,38 @@ issue #47.
 | `subsumed` | Steins is strictly **more precise**: what it renders is a proper subtype of what PHPStan asserts |
 | `differ` | a genuine divergence, including `unknown` where a concrete type was asserted |
 
+### Invocation
+
+```
+cargo xtask nsrt [DIR]
+```
+
+`DIR` defaults to a sibling checkout, `../../php/phpstan-src/tests/PHPStan/Analyser/nsrt`
+resolved from the workspace root — pass it explicitly whenever `cargo xtask` runs
+from anywhere else (a worktree, most obviously: its workspace root is not the
+repo root the default assumes, so the default path resolves to nothing there).
+`DIR` need not be that exact subdirectory; the walk is recursive over whatever
+path it is given, so pointing it at the phpstan-src checkout root instead of the
+`nsrt/` fixture directory also works — it just measures a much larger, mostly
+irrelevant file set (phpstan-src's own `src/`, `vendor/`, `tmp/`, benches, …)
+alongside the fixtures that are the actual oracle.
+
+A plain `cargo xtask nsrt` (debug build) used to stack-overflow on that larger
+walk (issue #246): phpstan-src ships a benchmark fixture,
+`tests/bench/data/nullsafe-chain-walk.php`, built out of `Node` property-fetch
+chains up to 1,000 `->next` accesses deep (a deliberate stress test, per that
+file's own doc comment) — deeply nested but finite, not a cycle. Walking it
+recurses steins-syntax's `scan_effect_origins` roughly 2,500 frames down, which
+overflows a debug build's large, uninlined frames on the ~8 MiB default OS
+stack while fitting easily in release's optimized ones — release was the only
+workaround. `nsrt`'s entry point now runs the analysis on a worker thread with
+an explicitly sized stack (256 MiB; see `WORKER_STACK_SIZE` in `xtask/src/nsrt.rs`)
+specifically so a measurer does not need `--release` to get past that fixture —
+a plain debug-build `cargo xtask nsrt` now completes over the whole phpstan-src
+tree, not just the `nsrt/` subdirectory. The fixture is fixed depth, not a
+growing one, so this is a one-time harness fix, not a budget that needs
+revisiting as the corpus moves.
+
 Before the fourth verdict existed, `subsumed` rows scored as `differ`. That made the
 instrument argue against the analyzer: PHPStan asserts `bool` for
 `in_array('foo', ['foo', 'bar'])` because it declines to fold a loose comparison,
