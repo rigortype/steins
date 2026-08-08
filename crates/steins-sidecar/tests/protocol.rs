@@ -266,30 +266,38 @@ fn reflect_class_never_autoloads() {
     assert!(!sc.is_poisoned(), "asking about a userland name is not a transport failure");
 }
 
-/// **Fault injection**: the sidecar dies mid-run while a class query is in flight.
-/// Reflection degrades to `None` — Unknown — and never to a class with no members,
-/// which is the shape that could become a wrong diagnostic. The next query still
-/// answers, because the transport replaces the child (ADR-0024).
+/// **Fault injection**: the sidecar dies mid-run while class queries are being
+/// asked. Reflection degrades to `None` — Unknown — and never to a class with no
+/// members, which is the shape that could become a wrong diagnostic. Each death
+/// costs one answer, and past the respawn cap every query declines.
+///
+/// The child is killed by the *timeout* path rather than a memory bomb: both are
+/// the same event to the transport (the reply never arrives, the child is killed
+/// and the instance poisoned), and the timeout costs no allocation — which matters
+/// in a file whose tests run in parallel and already fire four 256 MB bombs.
 #[test]
 fn a_dead_sidecar_declines_a_class_query_and_the_next_one_answers() {
     let Some(mut sc) = spawn_or_skip("a_dead_sidecar_declines_a_class_query") else { return };
-    // Kill the child mid-run the way a real run does: an allocation past
-    // `memory_limit` is an uncatchable fatal, so the process stops mid-NDJSON.
-    assert!(matches!(sc.fold("str_repeat", &[s("x"), int(2_000_000_000)]), FoldResult::Widen { .. }));
-    assert!(sc.is_poisoned(), "the child died");
+    let quick = Duration::from_millis(20);
+    let generous = Duration::from_secs(2);
 
-    // The next request revives the transport — and the one after it proves that a
-    // query issued while the transport is spent declines rather than inventing.
-    let revived = sc.reflect_class("ArrayObject").expect("the revived child answers");
-    assert!(revived.exists(), "{revived:?}");
-
-    // Now spend the respawn budget entirely, and ask again: every later request
-    // widens/declines immediately.
-    let bomb = [s("x"), int(2_000_000_000)];
-    for _ in 0..3 {
-        let _ = sc.fold("str_repeat", &bomb);
+    for i in 0..3 {
+        sc.set_timeout(quick);
+        let r = sc.fold("usleep", &[int(1_000_000)]); // 1s > 20ms
+        assert!(matches!(r, FoldResult::Widen { .. }), "death {i} widens, got {r:?}");
+        assert!(sc.is_poisoned(), "death {i} poisoned the instance");
+        // The next request revives the transport, and it is a class query — the
+        // recovery must be as transparent here as it is for a fold.
+        sc.set_timeout(generous);
+        let revived = sc.reflect_class("ArrayObject").expect("the revived child answers");
+        assert!(revived.exists(), "respawn {i} answered: {revived:?}");
     }
-    assert!(sc.is_poisoned(), "the budget is spent");
+
+    // The fourth death spends the budget: nothing replaces this child.
+    sc.set_timeout(quick);
+    assert!(matches!(sc.fold("usleep", &[int(1_000_000)]), FoldResult::Widen { .. }));
+    sc.set_timeout(generous);
+    assert!(sc.is_poisoned(), "the respawn budget is spent");
     assert_eq!(
         sc.reflect_class("ArrayObject"),
         None,
