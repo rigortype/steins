@@ -229,6 +229,27 @@ per-entry-point measurements, and the ceilings each surface actually has, are in
 binary's own worker is `WORKER_STACK_SIZE` in `crates/steins-cli/src/main.rs`
 and the pool's is `RAYON_STACK_SIZE` in `xtask/src/main.rs`.
 
+The playground got the other answer, because it had no choice (issue #264):
+`crates/steins-syntax/src/stack_guard.rs` measures how much stack the lowering
+walk has actually consumed and refuses past a budget, which on wasm defaults to
+half the module's 1 MiB shadow stack and everywhere else is off unless an
+embedder sets it. The refusal is a recovered parse error, so it reaches the
+reader as the `syntax.unparsable` a broken file already earns rather than as a
+trap. Two conventions follow, and both are load-bearing for anyone adding
+coverage here:
+
+- **A test that parses a deep fixture in process must set a budget first.**
+  libtest runs tests on 2 MiB threads — a quarter of the stack issue #246 found
+  fatal at ~520 levels — so an unguarded in-process deep parse aborts the whole
+  test binary, and a stack overflow is not a catchable panic.
+  `crates/steins-syntax/tests/deep_nesting.rs` sets one;
+  `crates/steins-cli/tests/deep_nesting.rs` takes the other route and drives the
+  real binary as a subprocess.
+- **The wasm module has a gate now.** `apps/playground/smoke.mjs` called itself
+  "the CI gate before any artifact upload" while no workflow invoked it; the
+  `wasm` job in `ci.yml` builds the module and runs it, with the deep-chain case
+  among its assertions.
+
 Before the fourth verdict existed, `subsumed` rows scored as `differ`. That made the
 instrument argue against the analyzer: PHPStan asserts `bool` for
 `in_array('foo', ['foo', 'bar'])` because it declines to fold a loose comparison,
