@@ -1148,6 +1148,19 @@ pub enum ArgValue {
     /// rules) may read a value out of it. Every other consumer treats it exactly
     /// like the [`ArgValue::Other`] it lowered to before.
     GlobalConst(NameRef),
+    /// A binary-operator expression in **value** position (issue #260): the
+    /// operator-value node.
+    ///
+    /// Lowered structurally, exactly like [`Self::Concat`] and [`Self::Coalesce`]:
+    /// an operand is commonly a [`Self::Var`] whose value only the walk knows, so
+    /// the decision belongs at resolution time where the env is in hand. This is
+    /// never a proven value on its own ([`Self::is_literal`] is `false`) — it
+    /// resolves to one exactly when the evaluator can decide it.
+    ///
+    /// Only [`ValueOp`]-representable operators reach here; every other binary
+    /// operator still lowers to [`Self::Other`], so the node never claims reach it
+    /// does not have.
+    Binary { op: ValueOp, lhs: Box<ArgValue>, rhs: Box<ArgValue> },
     Other,
 }
 
@@ -1529,6 +1542,11 @@ impl std::hash::Hash for ArgValue {
                 l.hash(state);
                 r.hash(state);
             }
+            ArgValue::Binary { op, lhs, rhs } => {
+                op.hash(state);
+                lhs.hash(state);
+                rhs.hash(state);
+            }
             ArgValue::ClassConst(class, name) => {
                 class.hash(state);
                 name.hash(state);
@@ -1604,6 +1622,9 @@ impl ArgValue {
             ArgValue::Clone(v) => format!("clone ${v}"),
             ArgValue::Coalesce(l, r) => format!("({} ?? {})", l.render(), r.render()),
             ArgValue::Concat(l, r) => format!("({} . {})", l.render(), r.render()),
+            ArgValue::Binary { op, lhs, rhs } => {
+                format!("({} {} {})", lhs.render(), op.symbol(), rhs.render())
+            }
             ArgValue::OffsetRead { base, key } => format!("{}[{}]", base.render(), key.render()),
             ArgValue::ClassConst(class, name) => format!("{}::{name}", class.render()),
             ArgValue::EnumCase(class, case) => format!("{class}::{case}"),
@@ -1856,6 +1877,51 @@ pub enum CmpOp {
     Gt,
     /// `>=` — greater-than-or-equal.
     Ge,
+}
+
+impl CmpOp {
+    /// The operator as written, for a rendered value expression.
+    #[must_use]
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            CmpOp::Identical => "===",
+            CmpOp::NotIdentical => "!==",
+            CmpOp::Loose => "==",
+            CmpOp::NotLoose => "!=",
+            CmpOp::Lt => "<",
+            CmpOp::Le => "<=",
+            CmpOp::Gt => ">",
+            CmpOp::Ge => ">=",
+        }
+    }
+}
+
+/// The operator half of an [`ArgValue::Binary`] — a binary operator carried in
+/// **value** position (issue #260).
+///
+/// The condition language ([`CondExpr::Cmp`]) already carries a comparison for
+/// *guard* position; this is the same operator seen as the expression's value
+/// (`$b = $x > 3;` rather than `if ($x > 3)`). The two share [`CmpOp`] so one
+/// evaluator decides both — the value path reuses the condition path's decision
+/// procedure rather than restating PHP's comparison semantics.
+///
+/// Only the operators an evaluator can actually answer are lowered here; an
+/// operator with no value-position evaluation stays [`ArgValue::Other`], so an
+/// unimplemented arm declines rather than manufacturing a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ValueOp {
+    /// A comparison `=== !== == != < <= > >=`. Its value is a `bool`.
+    Cmp(CmpOp),
+}
+
+impl ValueOp {
+    /// The operator as written, for a rendered value expression.
+    #[must_use]
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            ValueOp::Cmp(op) => op.symbol(),
+        }
+    }
 }
 
 /// A lowered operand of a [`CondExpr`] comparison (ADR-0031): a bare local
@@ -6934,6 +7000,20 @@ fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
         Expression::Binary(b) if b.operator.is_concatenation() => {
             ArgValue::Concat(Box::new(lower_arg_value(b.lhs)), Box::new(lower_arg_value(b.rhs)))
         }
+        // A comparison in VALUE position (issue #260): `$b = $x > 3;` rather than
+        // `if ($x > 3)`. Structural, like `.` and `??` above — the operands' values
+        // are env facts, so the decision runs in the walk, where the SAME `eval_cmp`
+        // that decides a guard decides this one. Arithmetic, bitwise and logical
+        // operators still widen to `Other`: this node carries only what an
+        // evaluator answers (Certainty discipline — an unimplemented arm declines).
+        Expression::Binary(b) if cmp_op_of(&b.operator).is_some() => {
+            let op = ValueOp::Cmp(cmp_op_of(&b.operator).expect("matched above"));
+            ArgValue::Binary {
+                op,
+                lhs: Box::new(lower_arg_value(b.lhs)),
+                rhs: Box::new(lower_arg_value(b.rhs)),
+            }
+        }
         // An array/offset read `$base[$key]` (ADR-0049 §7 / S3). Lowered
         // structurally in every rvalue position; the walk fires `offset.missing` /
         // `offset.on-unsupported` **only** at the whitelisted read positions (A7).
@@ -9931,9 +10011,13 @@ fn lower_cond(expr: &Expression<'_>) -> CondExpr {
     }
 }
 
-/// Lower a binary-operator condition (comparison / `instanceof` / `&&` / `||`).
-fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
-    let op = match b.operator {
+/// The [`CmpOp`] a parsed binary operator denotes, or `None` when the operator is
+/// not a comparison. The ONE place the syntax-to-`CmpOp` map lives: guard position
+/// ([`lower_binary_cond`]) and value position (`lower_arg_value`, issue #260) read
+/// the same map, so the two positions can never drift apart on which operators
+/// count as comparisons.
+fn cmp_op_of(operator: &BinaryOperator<'_>) -> Option<CmpOp> {
+    match operator {
         BinaryOperator::Identical(_) => Some(CmpOp::Identical),
         BinaryOperator::NotIdentical(_) => Some(CmpOp::NotIdentical),
         BinaryOperator::Equal(_) => Some(CmpOp::Loose),
@@ -9943,7 +10027,12 @@ fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
         BinaryOperator::GreaterThan(_) => Some(CmpOp::Gt),
         BinaryOperator::GreaterThanOrEqual(_) => Some(CmpOp::Ge),
         _ => None,
-    };
+    }
+}
+
+/// Lower a binary-operator condition (comparison / `instanceof` / `&&` / `||`).
+fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
+    let op = cmp_op_of(&b.operator);
     if let Some(op) = op {
         let lhs = lower_cond_operand(b.lhs);
         let rhs = lower_cond_operand(b.rhs);

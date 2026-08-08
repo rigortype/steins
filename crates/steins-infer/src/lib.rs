@@ -65,7 +65,7 @@ use steins_syntax::{
     // invalid operands (ADR-0078, issue #191)
     BinaryOperandOp, OperandSite, OperandSiteKind, UnaryOperandOp,
     // end invalid operands (ADR-0078, issue #191)
-    TypeMember, Visibility, duplicate_array_keys, normalize_array, normalize_const_fqn,
+    TypeMember, ValueOp, Visibility, duplicate_array_keys, normalize_array, normalize_const_fqn,
     php_canonical_int_string,
 };
 // return missing (ADR-0078, issue #199)
@@ -2962,6 +2962,10 @@ fn arg_to_fold_within(arg: &ArgValue, depth: u8, budget: &mut usize) -> Option<F
         // already collapsed to its `Str`. One that did not resolve is unproven, and
         // sending its operands would be sending a different call than was written.
         | ArgValue::Concat(..)
+        // A comparison in value position (issue #260) is not a wire value either:
+        // `resolve_literal` collapses a decided one to its `Bool` before the fold
+        // sees it, and an undecided one is unproven.
+        | ArgValue::Binary { .. }
         // Object-world values (ADR-0043) are not fold arguments — unproven, == Other.
         | ArgValue::ClassConst(..)
         | ArgValue::EnumCase(..)
@@ -8381,6 +8385,29 @@ impl<'a> Cx<'a> {
                 bytes.extend_from_slice(rb.as_bytes());
                 Some((ArgValue::Str(PhpStr::from_vec(bytes)), sl.min(sr)))
             }
+            // A comparison in value position (issue #260): the SAME `eval_cmp` the
+            // condition path runs, over the same candidate value sets — a decided
+            // verdict IS the expression's value (`1 === 1` is `true`), so it resolves
+            // like any other proven literal. An undecided one yields `None` here (the
+            // caller's honest silence); the `bool` floor every comparison still
+            // deserves is minted one level up, at the fact seam, because a literal
+            // cannot spell it.
+            ArgValue::Binary { op: ValueOp::Cmp(cop), lhs, rhs } => {
+                let l = self.cmp_candidates_under(
+                    lhs, env, poisoned, folder, descent.as_deref_mut(), out.as_deref_mut(),
+                )?;
+                let r = self.cmp_candidates_under(
+                    rhs, env, poisoned, folder, descent.as_deref_mut(), out.as_deref_mut(),
+                )?;
+                // Same derivation clause as `.` above: the verdict consumes both
+                // operands' facts, so the result stratum is their `min`.
+                let strat = value_stratum(lhs, env, None).min(value_stratum(rhs, env, None));
+                match eval_cmp(*cop, &l, &r, self.php_minor) {
+                    Certainty::Yes => Some((ArgValue::Bool(true), strat)),
+                    Certainty::No => Some((ArgValue::Bool(false), strat)),
+                    Certainty::Maybe => None,
+                }
+            }
             // An array is proven iff every element value is proven (keys are fixed
             // at lowering). Folding is never applied to arrays (ADR-0001).
             ArgValue::Array(items) => {
@@ -8397,6 +8424,34 @@ impl<'a> Cx<'a> {
             }
             _ => None,
         }
+    }
+
+    /// The candidate values of a **value-position** comparison operand (issue #260)
+    /// — the value-side twin of `operand_values`, which does the same job for a
+    /// guard's [`CondOperand`].
+    ///
+    /// A bare variable contributes its fact's finite members (a `Singleton` or a
+    /// `OneOf`, the layers ADR-0031's all-pairs rule can enumerate); anything else
+    /// contributes whatever the general value seam proves it to be — a literal, a
+    /// fold, a resolved `.`, a nested comparison — as one candidate. `None` means
+    /// the operand offers no candidates at all, and the caller declines.
+    fn cmp_candidates_under(
+        &self,
+        value: &ArgValue,
+        env: &HashMap<String, Known>,
+        poisoned: bool,
+        folder: &mut dyn Folder,
+        descent: Option<&mut Descent<'_>>,
+        out: Option<&mut Vec<Diagnostic>>,
+    ) -> Option<Vec<ArgValue>> {
+        if !poisoned
+            && let ArgValue::Var(name) = value
+            && let Some(fact) = env.get(name).and_then(|k| k.fact.as_ref())
+            && let Some(vals) = fact.finite_members()
+        {
+            return Some(vals.iter().map(arg_of_val).collect());
+        }
+        self.resolve_literal_under(value, env, poisoned, folder, descent, out).map(|(v, _)| vec![v])
     }
 
     /// Try to fold an allowlisted builtin call over **proven** arguments.
@@ -8981,6 +9036,9 @@ fn val_of(arg: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<Val> {
         // Like the carriers above, a concatenation is structural: it becomes a `Val`
         // only by way of `resolve_literal`, which needs the env this seam does not see.
         | ArgValue::Concat(..)
+        // Likewise a value-position comparison (issue #260): it becomes a `Val`
+        // only through `resolve_literal`/`eval_binary_fact`, which have the env.
+        | ArgValue::Binary { .. }
         // Object-world values (ADR-0043): not domain `Val`s — unproven, == Other.
         | ArgValue::ClassConst(..)
         | ArgValue::EnumCase(..)
@@ -11180,6 +11238,20 @@ fn best_dump_type(
         };
     }
 
+    // A value-position binary operator (issue #260): the operator's own fact. Placed
+    // beside `??` and above the fold rung for the same reason — a comparison is never
+    // a literal the folder can reach — and it is total for a comparison, so the rungs
+    // below never see one. `true`/`false` when `eval_cmp` decides, `bool` when it does
+    // not: the floor is the operator's guarantee, not a guess about its operands.
+    if let ArgValue::Binary { op, lhs, rhs } = value {
+        let (fact, stratum) =
+            eval_binary_fact(cx, folder, *op, lhs, rhs, env, Some(store), poisoned);
+        return DumpRendering {
+            text: render_dump_fact(&fact),
+            asserted: stratum == Stratum::Asserted,
+        };
+    }
+
     // A depth-1 property fetch `$var->prop` (ADR-0052 §7, Gap B): the allocation-keyed
     // heap property fact (alias-correct by construction, ADR-0036). Escaped-then-swept
     // props carry no fact and fall through to honest unknown; a readonly prop survives.
@@ -11695,6 +11767,24 @@ fn apply_assign(
                 store.unbind(var);
             }
         }
+        return;
+    }
+
+    // A comparison rvalue `$b = $x > 3;` (issue #260): the operator's fact, by the
+    // same evaluator the dump surface reads, so the assignment and the dump of the
+    // same expression can never disagree. Total for a comparison — the binding is
+    // `bool` at worst, never dropped.
+    if let ArgValue::Binary { op, lhs, rhs } = value {
+        let (fact, strat) =
+            eval_binary_fact(cx, folder, *op, lhs, rhs, env, Some(&*store), w.scope.poisoned);
+        if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
+            facts.push(LineFact {
+                line,
+                kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
+            });
+        }
+        env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
+        store.unbind(var);
         return;
     }
 
@@ -13929,6 +14019,112 @@ fn threaded_operand_env(
         bstore.unbind(&v);
     }
     (benv, bstore)
+}
+
+/// The concrete value a **declared** contract arm denotes, or `None` when the arm
+/// is not a single value (`int`, `int<1, 5>`, `non-empty-string`, a class, …).
+///
+/// The inverse of `literal_contract`, and deliberately as narrow: `array{}` is
+/// included because a sealed, field-less, non-`non-empty` shape denotes exactly one
+/// array — the empty one — which is what makes `$x == $emptyArr` decidable.
+fn contract_literal_value(ty: &ContractTy) -> Option<ArgValue> {
+    Some(match ty {
+        ContractTy::LitInt(i) => ArgValue::Int(*i),
+        ContractTy::LitFloat(f) => ArgValue::Float(*f),
+        ContractTy::LitStr(s) => ArgValue::Str(s.clone()),
+        ContractTy::LitBool(b) => ArgValue::Bool(*b),
+        ContractTy::Null => ArgValue::Null,
+        ContractTy::Shape { fields, sealed: true, non_empty: false, unsealed: None, .. }
+            if fields.is_empty() =>
+        {
+            ArgValue::Array(Vec::new())
+        }
+        _ => return None,
+    })
+}
+
+/// The candidate values of a value-position comparison operand, over **both**
+/// value lanes (issue #260).
+///
+/// The proven lane first (`cmp_candidates_under`: a fact's finite members, a
+/// literal, a fold). Then the DECLARED arm lane (ADR-0052 §1) — which is where a
+/// `@param 1 $one` lives, and therefore where most of the corpus's finite operands
+/// actually are: a parameter declared as a literal type carries no *fact*, only an
+/// arm. Reading it here is the same read the dump surface already performs for
+/// `dumpType($one)`, at the same `Asserted` stratum, so the comparison inherits the
+/// declaration's trust rather than laundering it: nothing is promoted to the proven
+/// lane, and `resolve_literal` (the proof-layer seam) still refuses to see it.
+///
+/// `None` = no candidates ⇒ the caller's verdict is `Maybe`.
+fn cmp_operand_candidates(
+    cx: &Cx<'_>,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+    poisoned: bool,
+) -> Option<(Vec<ArgValue>, Stratum)> {
+    if let Some(vals) = cx.cmp_candidates_under(value, env, poisoned, folder, None, None) {
+        return Some((vals, value_stratum(value, env, store)));
+    }
+    if poisoned {
+        return None;
+    }
+    let ArgValue::Var(name) = value else { return None };
+    let arms = store?.contract_arms(name)?;
+    if arms.is_empty() {
+        return None;
+    }
+    let mut vals = Vec::with_capacity(arms.len());
+    for arm in arms {
+        vals.push(contract_literal_value(&arm.ty)?);
+    }
+    let strat = arms.iter().fold(Stratum::Verified, |acc, a| acc.min(a.stratum));
+    Some((vals, strat))
+}
+
+/// Evaluate a **value-position binary operator** (issue #260) to an env [`Fact`].
+///
+/// For a comparison this is total, and that is the point: a PHP comparison
+/// operator evaluates to a `bool` whatever its operands are, so the honest floor
+/// for an undecided one is `bool` — not silence. `eval_cmp`'s three verdicts map
+/// straight onto the three renderings the fixtures ask for:
+/// `Yes → true`, `No → false`, `Maybe → bool`.
+///
+/// The decision procedure is the condition path's, unchanged and unforked: the
+/// only new thing here is *where* it is asked from.
+#[allow(clippy::too_many_arguments)]
+fn eval_binary_fact(
+    cx: &Cx<'_>,
+    folder: &mut dyn Folder,
+    op: ValueOp,
+    lhs: &ArgValue,
+    rhs: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+    poisoned: bool,
+) -> (Fact, Stratum) {
+    let ValueOp::Cmp(cop) = op;
+    let l = cmp_operand_candidates(cx, folder, lhs, env, store, poisoned);
+    let r = cmp_operand_candidates(cx, folder, rhs, env, store, poisoned);
+    // Derivation clause (ADR-0052 §5): the verdict consumes both operands' facts,
+    // so the result carries their `min` stratum. An operand with no candidates
+    // leaves the verdict undecided — never wrong — and contributes the stratum its
+    // own value lane would.
+    let strat = l.as_ref().map_or_else(
+        || value_stratum(lhs, env, store),
+        |(_, s)| *s,
+    ).min(r.as_ref().map_or_else(|| value_stratum(rhs, env, store), |(_, s)| *s));
+    let verdict = match (l, r) {
+        (Some((l, _)), Some((r, _))) => eval_cmp(cop, &l, &r, cx.php_minor),
+        _ => Certainty::Maybe,
+    };
+    let fact = match verdict {
+        Certainty::Yes => Fact::Singleton(Val::Bool(true)),
+        Certainty::No => Fact::Singleton(Val::Bool(false)),
+        Certainty::Maybe => Fact::General { base: Base::Bool, nullable: false },
+    };
+    (fact, strat)
 }
 
 /// Evaluate a ternary rvalue to an env [`Fact`] (ADR-0031): a decided guard picks
@@ -25362,6 +25558,9 @@ fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
         // A concatenation reaching here did not resolve — an operand's value is
         // unknown, so the result string is too. (A resolved one arrives as `Str`.)
         | ArgValue::Concat(..)
+        // An undecided comparison (issue #260) proves no value; a decided one
+        // arrives here already resolved to its `Bool`.
+        | ArgValue::Binary { .. }
         // A closure value against a scalar/union param is never a scalar finding
         // (a `callable`/`Closure` param is not a native scalar type this checks).
         | ArgValue::Closure(_)
