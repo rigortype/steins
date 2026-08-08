@@ -1782,12 +1782,12 @@ mod tests {
         for (name, ty) in t {
             assert!(!ty.is_empty(), "{name} carries an empty spelling");
         }
-        // Pinned mining contract: 1,708 rows comprise 919 single-base envelopes and
-        // 789 richer rows. Any count change indicates a generation or lowering change.
+        // Pinned mining contract: 1,711 rows comprise 919 single-base envelopes and
+        // 792 richer rows. Any count change indicates a generation or lowering change.
         let rich = t.iter().filter(|(_, ty)| !ENVELOPE_SPELLINGS.contains(ty)).count();
-        assert_eq!(t.len(), 1708, "admitted rows at this pin");
+        assert_eq!(t.len(), 1711, "admitted rows at this pin");
         assert_eq!(t.len() - rich, 919, "the #73 envelope population must be preserved exactly");
-        assert_eq!(rich, 789, "the #79, ADR-0071 and object-slice rich admissions");
+        assert_eq!(rich, 792, "the #79, ADR-0071, object-slice and class-string (#236) rich admissions");
     }
 
     #[test]
