@@ -8417,6 +8417,7 @@ fn presence_stmt(
         Statement::Try(t) => presence_try(t, state, cx),
         _ => {
             presence_leaf(&Node::Statement(s), state, cx);
+            refine_bound(state, &assert_bound_names(s));
             if stmt_end(s).provably_terminates() {
                 PresenceFlow::Terminated
             } else {
@@ -8424,6 +8425,43 @@ fn presence_stmt(
             }
         }
     }
+}
+
+/// The names a statement-position `assert()` proves bound in everything after it.
+///
+/// `assert(isset($x));` is a boundness guard whose *only* continuation is the
+/// true-polarity one: ADR-0052 slice I0 already reads `assert()` as Verified
+/// evidence, and with assertions enabled a failed one throws `AssertionError`
+/// (witnessed at 8.5.9 under `zend.assertions=1`), so control reaches the next
+/// statement exactly when the condition held. With assertions compiled out the call
+/// does not run at all — and then neither does anything the assertion was
+/// protecting, so the refinement cannot manufacture a claim either way.
+///
+/// The polarity is [`guard_bound_names`]' own, so `assert(isset($x) && $x > 1)`
+/// refines through the conjunction and `assert(!isset($x))` refines nothing —
+/// there is no continuation on which that spelling proves a binding.
+fn assert_bound_names(s: &Statement<'_>) -> Vec<String> {
+    let Statement::Expression(es) = s else {
+        return Vec::new();
+    };
+    let Expression::Call(Call::Function(fc)) = es.expression.unparenthesized() else {
+        return Vec::new();
+    };
+    let Expression::Identifier(id) = fc.function else {
+        return Vec::new();
+    };
+    if !bytes_to_string(id.last_segment()).eq_ignore_ascii_case("assert") {
+        return Vec::new();
+    }
+    // The first argument is the condition; a second is the description, which
+    // asserts nothing. A named or spread argument is not this shape.
+    let Some(Argument::Positional(first)) = fc.argument_list.arguments.iter().next() else {
+        return Vec::new();
+    };
+    if first.ellipsis.is_some() {
+        return Vec::new();
+    }
+    guarded_names(first.value, true)
 }
 
 /// The `if`/`elseif`/`else` chain: each arm is evaluated from the pre-branch state

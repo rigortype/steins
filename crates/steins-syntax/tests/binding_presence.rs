@@ -153,6 +153,29 @@ fn a_conjunction_guards_its_right_operand() {
 }
 
 #[test]
+fn a_statement_position_assert_refines_everything_after_it() {
+    // `assert()` is Verified evidence (ADR-0052 slice I0) and a failed enabled
+    // assertion throws, so the next statement is reached exactly when the condition
+    // held — the true-polarity continuation, and the only one.
+    assert_eq!(maybe("if ($c) { $x = 1; } assert(isset($x)); echo $x;"), none());
+    assert_eq!(maybe("if ($c) { $x = 1; } assert(isset($x) && $x > 0); echo $x;"), none());
+    assert_eq!(maybe("if ($c) { $x = 1; } assert(!empty($x)); echo $x;"), none());
+    assert_eq!(maybe("if ($c) { $x = 1; } \\assert(isset($x)); echo $x;"), none());
+    // A description argument asserts nothing of its own and does not disturb it.
+    assert_eq!(maybe("if ($c) { $x = 1; } assert(isset($x), 'why'); echo $x;"), none());
+
+    // The other direction: `assert(!isset($x))` proves the name ABSENT on its
+    // continuation, and no polarity of this pass ever refines that way.
+    assert_eq!(maybe("if ($c) { $x = 1; } assert(!isset($x)); echo $x;"), one("x"));
+    assert_eq!(maybe("if ($c) { $x = 1; } assert(empty($x)); echo $x;"), one("x"));
+    // A different name, and an assertion about something else entirely.
+    assert_eq!(maybe("if ($c) { $x = 1; } assert(isset($d)); echo $x;"), one("x"));
+    assert_eq!(maybe("if ($c) { $x = 1; } assert($c); echo $x;"), one("x"));
+    // A method named `assert` is not the construct.
+    assert_eq!(maybe("if ($c) { $x = 1; } $c->assert(isset($x)); echo $x;"), one("x"));
+}
+
+#[test]
 fn a_guard_over_an_offset_chain_refines_its_root() {
     // `isset($info['subject']['commonName'])` cannot be true unless `$info` is
     // bound, so the early-return prologue leaves the reads after it on a bound path.
