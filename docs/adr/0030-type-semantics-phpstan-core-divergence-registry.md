@@ -49,10 +49,50 @@ entries:
    extraction (ADR-0052 §4 / slice N1), as the no-type-combinator amendment
    below requires; this is the recorded reason Steins has no `Type::equals`
    beside a separate `isSuperTypeOf`.
+6. **Two named cuts of `mixed`, not arbitrary subtraction from it.** PHPStan
+   subtracts any type from `mixed` and renders the result as `mixed~T`;
+   Steins spells exactly two cuts — `non-null-mixed` and `non-empty-mixed`
+   (`ContractTy::MixedMinus(MixedCut::{Null, Falsy})`) — and this is the
+   ceiling, not a staging post. Both cuts are *value predicates the four-layer
+   domain already owns* (`v != Null`, `!php_is_falsy(v)`), which is why they
+   need one leaf variant rather than a subtraction operator; a general
+   `mixed~T` would be exactly the point-complement representation ADR-0052 §2
+   refuses for the `General` layer ("has **no** point-complement
+   representation, and gets none"), and the `remove(T, S)` the
+   no-type-combinator amendment below declines. Base-level subtraction stays
+   where that ADR put it — one carrier up, as arm deletion on a declared
+   contract fact, where a subtracted union is arm-wise and needs no `~`
+   spelling at all.
+
+   **Measured before being registered** (issue #237, phpstan-src nsrt, 158
+   `subtraction` rows, 133 of them `mixed~…`): 44 rows are exact re-spellings
+   of the two cuts Steins already holds — `mixed~null` *is* the null cut,
+   `mixed~(0|0.0|''|'0'|array{}|false|null)` *is* the falsy cut, value for
+   value — so what that part of the bucket names is a spelling gap, not a
+   representation one. It changes nothing either way: **154 of the 158 rows
+   render `unknown`**, a reach gap, and of the four that render a type, three
+   are class/enum subtractions where Steins renders the un-narrowed base
+   (wider than the oracle under any cut vocabulary) and the fourth scores from
+   body-return inference. The realizable ceiling of the whole bucket is **one
+   assertion in 15,537**. Extending the enum could not even reach that one:
+   `MixedMinus` is constructed in exactly one place — `lower_str`, from the two
+   literal keywords — so it is a *declaration-side* vocabulary, and no
+   inference path can produce it. What the corpus asks for at those sites is
+   narrowing reach on `mixed` parameters (`isset($arr[$mixed])`,
+   `!is_array($m)`), which is ADR-0052 arm-lane work priced independently of
+   any `~` spelling.
+
+   PHPStan's spelling is not imported and the `mixed~T` grammar is not
+   accepted; the governing rule below applies, with the familiar spellings
+   kept wherever Steins denotes the same set. Revisit only if the arm lane
+   starts producing narrowed `mixed` facts that have no arm spelling — that is
+   the evidence this entry waits on, not a larger row count.
 
 **Deferred until needed** — narrowing details (co-evolving with the branch
 analysis ratchet), template variance in full, subtraction types: decided in
-envelope-checking priority order, not up front.
+envelope-checking priority order, not up front. The narrowing/subtraction pair
+is **discharged** — ADR-0052 for the machinery, entry 6 above for the cut
+vocabulary's ceiling.
 
 ## No type combinator: the combinator lives in the value lattice
 

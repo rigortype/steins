@@ -60,7 +60,7 @@ headline number is not work**, which is the first thing measurement bought:
 | `intersection` | 519 | see below — this bucket is two unrelated problems |
 | ~~`mixed`~~ | ~~329~~ | **not an engine gap** — and, as of issue #239, no longer here: the rows are measured and sit in `differ` (see the correction above). Leaving the bucket at **2,157**. |
 | `generic-other` | 225 | non-array generics (`DOMNamedNodeMap<DOMAttr>`) — the ADR-0032 carry root, already tracked as issue #10 |
-| `subtraction` | 157 | 133 of them are `mixed~…` |
+| `subtraction` | 157 | 133 of them are `mixed~…` — **not vocabulary work either** (#237): 154 of the rows render `unknown`, so see the correction below |
 | `class-string` | 148 | |
 | `compound` | 99 | `T of X (class Y, argument)` — template-parameter rendering |
 | `object` / `callable` / `other-keyword` / `shape-other` | 212 | |
@@ -95,6 +95,50 @@ Splitting the 519 by whether every arm is an accessory/scalar refinement:
 `non-empty-mixed` — against PHPStan's arbitrary type subtraction. So this is
 not "subtraction is missing" (ADR-0052 subtraction exists); it is that the cut
 vocabulary is a two-value enum where the oracle has a type algebra.
+
+> **Correction (2026-08-08, issue #237): this section names the wrong gap, and
+> the bucket is not work.** Read against what Steins renders — the reading this
+> section skipped — the 158 rows (133 `mixed~…`; 158 rather than 157 only
+> because the corpus checkout moved) say something else:
+>
+> - **44 of them are exact re-spellings of the cuts Steins already holds.**
+>   `mixed~null` (33) *is* `MixedCut::Null`;
+>   `mixed~(0|0.0|''|'0'|array{}|false|null)` (11) *is* `MixedCut::Falsy`, value
+>   for value. Another 8 (`mixed~(array|object|resource)`) have a complement
+>   Steins spells as the plain union `bool|float|int|string|null` — the domain
+>   is object-free (ADR-0035) and has no `resource` (registry entry 4), so the
+>   subtrahend removes exactly what Steins does not carry anyway. For a third of
+>   the bucket "the vocabulary is a two-value enum" is a **spelling** claim, not
+>   a representation one.
+> - **154 of the 158 render `unknown`** — including all 52 of the above. These
+>   are §B reach rows sitting in an §A bucket. Closing the spelling (the #239
+>   move) would reclassify them into `differ` and award nothing: `unknown` is a
+>   sentinel and the relation is not asked of a sentinel.
+> - **The four rows that render a type cap the slice at +1 admissible.** Three
+>   are class/enum subtractions (`Throwable~LogicException`,
+>   `Bug7176Types\Suit~…::Clubs`, `AllowedSubtypesEnum\Foo~…::B`) where Steins
+>   renders the **un-narrowed base** — wider than the oracle, so `differ` under
+>   any cut vocabulary. The fourth (`bug-8249.php:19`, expected `mixed~int`,
+>   Steins `null`) would earn `subsumed`, and it earns it from body-return
+>   inference on `function foo(): mixed { return null; }`, not from subtraction.
+>
+> So the ladder in issue #237 was climbed and the answer is its third rung:
+> **stop here**, recorded as ADR-0030 divergence-registry entry 6. The decisive
+> structural fact is that `ContractTy::MixedMinus` is constructed in exactly one
+> place — `lower_str`, from the two literal keywords — so the cut vocabulary is
+> *declaration-side*: no enum extension can change a `got`, and no nsrt row can
+> move until the arm lane narrows `mixed` at all. That reach work
+> (`isset($arr[$mixed])` in `bug-11716.php`, `!is_array($m)` in
+> `mixed-subtract.php`, the isset/coalesce cluster behind the 33 `mixed~null`
+> rows) is priced in §B and is independent of any `~` spelling. The harness is
+> unchanged, so the totals above and the `subtraction` count both stand; two
+> tests in `xtask/src/nsrt.rs` pin the finding, and the module docs carry the
+> argument.
+>
+> Also settled here, since #239 made it askable: the **top-type veto does not
+> touch these rows**. `classify` consults `unsupported_pattern` first, so the
+> veto is never reached, and `normalize` keeps `mixed~null` as its own atom, so
+> `expected_is_top_type` answers `false` even when asked directly.
 
 ## B. Reach — 7,843 rows (70% of `differ`)
 
@@ -148,6 +192,16 @@ headline: the two intersection halves, the `mixed`-cut vocabulary,
 `class-string`, and template rendering — on the order of **1,000 rows**, not
 2,486.
 
+> **Correction (2026-08-08, #237):** the `mixed`-cut vocabulary is not in that
+> remainder either. Its 158 rows are a reach item (154 render `unknown`) with a
+> one-row ceiling, closed as ADR-0030 registry entry 6. Read together with #239
+> and #235, the pattern is the note's most reusable finding: **an A bucket has
+> to be read against what Steins renders before it is priced.** Of the four
+> buckets so read, `mixed` (#239) and the `mixed` cuts (#237) turned out not to
+> be work at all, the intersection bucket (#235) turned out to be speller and
+> seed work rather than vocabulary, and only `class-string` (#236) was the
+> vocabulary slice its row count implied.
+
 ## Follow-up
 
 Sliced smallest-first, so each lands a measurable nsrt delta:
@@ -175,7 +229,11 @@ Sliced smallest-first, so each lands a measurable nsrt delta:
    declarations masking a phpdoc refinement 5 (**not** class-string-specific —
    `positive-int` and `non-empty-string` are masked identically), property and
    method-return flow 3, `ltrim` predicate transfer 2.
-3. The `mixed` cut vocabulary beyond Null/Falsy (133).
+3. ~~The `mixed` cut vocabulary beyond Null/Falsy (133).~~ **Closed as a
+   ceiling (#237), nothing built.** 154 of the bucket's 158 rows render
+   `unknown`, so it is a §B reach item shelved in an §A bucket, and the four
+   rows that render a type cap the whole slice at **+1 admissible**. Recorded
+   as ADR-0030 divergence-registry entry 6; see the correction in §A.
 4. Object intersections, on #234's inhabitance rule (183 → 246).
 5. ~~Decide what `mixed` should score as in the harness (329) — a measurement
    decision that moves no engine code.~~ **Done (issue #239)**; see the
