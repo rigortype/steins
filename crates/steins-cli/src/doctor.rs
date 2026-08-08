@@ -638,7 +638,7 @@ fn section_layout(root: &Path, cwd: &Path, layout: &ProjectLayout) -> Section {
 ///    measurement, printed every run so the report is self-contained.
 /// 7. **The `[transform.vouch]` count** (ADR-0046 §2) — read from config, not
 ///    consulted by the checker's own dam yet (`dam.rs`'s own doc: "the vouch
-///    valve … [is] deferred; v1 is whole-universe"), so the line says both the
+///    valve … `[is]` deferred; v1 is whole-universe"), so the line says both the
 ///    count and that boundary honestly rather than implying the dam already
 ///    reads it.
 fn section_coverage(

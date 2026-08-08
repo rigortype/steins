@@ -21467,7 +21467,7 @@ fn string_context_object_class(
 // ---------------------------------------------------------------------------
 
 /// The curated SAPI-provided *exact* names (ADR-0049 A6) — the non-prefix half of
-/// [`is_sapi_provided_function`]'s list, exported so `steins doctor`'s Runtime
+/// `is_sapi_provided_function`'s list, exported so `steins doctor`'s Runtime
 /// section (ADR-0054 §9.1's A6 line) can name the same set it silences, without a
 /// second copy of the list drifting from this one.
 pub const SAPI_PROVIDED_FUNCTIONS_EXACT: &[&str] = &["fastcgi_finish_request", "getallheaders", "virtual"];
