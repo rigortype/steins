@@ -21466,14 +21466,24 @@ fn string_context_object_class(
 //   - PHP function-/class-name case-insensitivity throughout.
 // ---------------------------------------------------------------------------
 
+/// The curated SAPI-provided *exact* names (ADR-0049 A6) — the non-prefix half of
+/// [`is_sapi_provided_function`]'s list, exported so `steins doctor`'s Runtime
+/// section (ADR-0054 §9.1's A6 line) can name the same set it silences, without a
+/// second copy of the list drifting from this one.
+pub const SAPI_PROVIDED_FUNCTIONS_EXACT: &[&str] = &["fastcgi_finish_request", "getallheaders", "virtual"];
+
+/// The curated SAPI-provided *prefix* families (ADR-0049 A6), the doctor-facing
+/// twin of [`SAPI_PROVIDED_FUNCTIONS_EXACT`].
+pub const SAPI_PROVIDED_FUNCTION_PREFIXES: &[&str] = &["apache_", "litespeed_"];
+
 /// The curated SAPI-provided functions (ADR-0049 A6): symbols a CLI sidecar lacks
 /// but the serving FPM/Apache/LiteSpeed runtime provides, so they are NEVER Absent
 /// while the serving SAPI is undeclared (the default — `[runtime] sapi` would unlock
 /// a firing claim, deferred-with-design). Matched case-insensitively on the already-
 /// lowercased candidate; the `apache_`/`litespeed_` families are prefix-matched.
 fn is_sapi_provided_function(lname: &str) -> bool {
-    const EXACT: &[&str] = &["fastcgi_finish_request", "getallheaders", "virtual"];
-    lname.starts_with("apache_") || lname.starts_with("litespeed_") || EXACT.contains(&lname)
+    SAPI_PROVIDED_FUNCTION_PREFIXES.iter().any(|p| lname.starts_with(p))
+        || SAPI_PROVIDED_FUNCTIONS_EXACT.contains(&lname)
 }
 
 /// Resolve a function-call reference to its provably-**absent** target under PHP name
