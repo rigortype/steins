@@ -19,7 +19,7 @@ Or `brew install rigortype/tap/steins`, a [prebuilt binary](https://github.com/r
 - [Why effects?](docs/why-effects.md) — the motivation, the Flix and PHPStan lineage, the intended value, and why this is not algebraic effects for PHP.
 - [Quickstart](docs/user-manual/01-installation-and-quickstart.md) — install, first run, exit codes, limits.
 - [Handbook](docs/handbook/README.md) — a guided tour of what Steins proves: the guarantee, the type system, narrowing, and effects.
-- [Profiles and baseline](docs/user-manual/05-profiles-and-baseline.md) — named stages, the baseline ratchet, `steins.toml`.
+- [Profiles and baseline](docs/user-manual/05-profiles-and-baseline.md) — the five named profiles, the baseline ratchet, `steins.toml`.
 
 ### Specifications
 

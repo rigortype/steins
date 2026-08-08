@@ -102,7 +102,7 @@ Runtime
 Config + active surface
   steins.toml: not found (built-in defaults govern)
   active profile: `default` (from built-in default)
-  surface: layers [mechanics, proof], 16 checked id(s)
+  surface: layers [mechanics, proof], 47 checked id(s)
 
 Layout
   no composer.json governs . — vendor is the `vendor` directory-name floor, not a declared fact
