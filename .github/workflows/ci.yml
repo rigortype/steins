@@ -11,6 +11,11 @@
 #              over a temp-dir path — the one part of Steins whose behaviour
 #              is genuinely OS-shaped. macOS runs are just not on the PR
 #              iteration loop's critical path; see the job comment.
+#   wasm      builds the playground module for wasm32-unknown-unknown and runs
+#             `apps/playground/smoke.mjs` over it in Node. The browser is the one
+#             surface that cannot buy stack headroom (issue #264) and the one
+#             whose failures are invisible to every gate below, so the module is
+#             smoked where it is built rather than trusted at upload time.
 #   docs      rustdoc with `-D warnings`: intra-doc links across a 10-crate
 #             workspace rot silently, and the ADR-heavy doc comments are the
 #             navigation layer.
@@ -145,6 +150,43 @@ jobs:
           cd "$tmp"
           "$bin" doctor
           "$bin" doctor --no-php
+
+  wasm:
+    name: wasm
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain (MSRV)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_MSRV }}
+          targets: wasm32-unknown-unknown
+
+      # Its own key: this is a second target triple, so it shares no artifacts
+      # with the host-target jobs above.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # The module the playground loads, built exactly as apps/playground/build.sh
+      # builds it (that script also vendors php-wasm from npm, which this gate has
+      # no need of — smoke.mjs drives the Steins module alone).
+      - name: Build the playground module
+        run: cargo build -p steins-wasm --target wasm32-unknown-unknown --release --locked
+
+      # `apps/playground/smoke.mjs` has called itself "the CI gate before any
+      # artifact upload" since ADR-0065 and no workflow invoked it: `smoke.mjs`,
+      # `wasm32` and `steins-wasm` appeared nowhere in this directory. Nothing
+      # would have caught the deep-nesting trap of issue #264, which shipped in a
+      # module a paste could kill. This is that gate, actually wired.
+      - name: Node smoke over the module
+        run: node apps/playground/smoke.mjs
 
   docs:
     name: docs

@@ -63,6 +63,39 @@ const broken = steins.check("<?php\nfunction f( {\n");
 assert(broken.ok === true, "broken snippet does not trap");
 assert(broken.parse_errors.length > 0, "parse errors are reported in the envelope");
 
+// 4b. Deep expression nesting (issue #264). The module's shadow stack is fixed at
+// link time and the host VM's call stack is not ours to raise, so this is the one
+// surface where the analyzer refuses by name instead of buying headroom. A trap
+// here is a dead module and a JavaScript error naming neither PHP nor a line —
+// which is exactly what shipped before the headroom guard landed, at depths a
+// real repository reaches: phpstan-src's own tests/bench/data/nullsafe-chain-walk.php
+// is 1,000 levels of `->`, and the pre-fix ceiling was between 300 and 600.
+const chain = (n) => `<?php\n$n = new stdClass();\n$x = $n${"->next".repeat(n)};\n`;
+for (const depth of [100, 300, 1000]) {
+  let deep;
+  try {
+    deep = steins.check(chain(depth));
+  } catch (e) {
+    deep = null;
+    assert(false, `${depth}-level chain traps the module: ${e}`);
+  }
+  if (deep === null) continue;
+  assert(deep.ok === true, `${depth}-level chain returns an envelope`);
+  const refused = deep.parse_errors.some((e) => e.message.includes("nests deeper than the analyzer can walk"));
+  const ids = deep.findings.map((f) => f.id);
+  if (depth <= 100) {
+    // Comfortably inside the budget: answered in full, nothing manufactured.
+    assert(!refused && deep.parse_errors.length === 0, `${depth} levels are analyzed, not refused`);
+  } else {
+    // Past it: a named silence in the syntax family, not a trap and not a guess.
+    assert(refused, `${depth} levels are refused by name (got: ${JSON.stringify(deep.parse_errors)})`);
+    assert(ids.includes("syntax.unparsable"), `${depth} levels surface as syntax.unparsable (got: ${ids.join(", ")})`);
+  }
+}
+
+// The module is still alive after the refusal — the whole point of refusing.
+assert(steins.check(snippet).findings.length > 0, "the instance still answers after a refused file");
+
 // 5. Repeated calls on one instance (the playground's debounce pattern).
 for (let i = 0; i < 50; i++) steins.check(snippet + `// edit ${i}\n`);
 assert(true, "50 repeated checks on one instance");
