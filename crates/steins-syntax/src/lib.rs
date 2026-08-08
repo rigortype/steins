@@ -872,6 +872,32 @@ pub struct ClassDecl {
     /// case-sensitive); enum-case pseudo-constants live in [`Self::enum_cases`],
     /// not here. Consumed by the class-constant value resolution.
     pub consts: Vec<(String, ArgValue)>,
+    // inaccessible members (ADR-0078, issue #185)
+    /// The **declared visibility** of every class constant, as `(name, visibility)`
+    /// pairs — the surface [`Self::consts`] deliberately does not carry.
+    ///
+    /// Two differences from [`Self::consts`], and both are why this is a separate
+    /// list rather than a third tuple field: a constant with a non-literal
+    /// initializer (`const K = self::J . 'x';`) is **recorded here** though it is
+    /// absent there, so this list's absence of a name really does mean "this
+    /// class-like declares no such constant"; and the value list's meaning
+    /// (ADR-0043 §2 "no proven literal") is a contract other consumers already
+    /// read. Names are stored as written (constant names are case-sensitive).
+    /// Enum cases are not constants for this purpose — they live in
+    /// [`Self::enum_cases`] and are always public.
+    pub const_visibility: Vec<(String, Visibility)>,
+    /// The names of the class-body **hooked** properties this declaration drops.
+    ///
+    /// A `public int $p { get => … }` member binds no value and is not lowered to a
+    /// [`PropertyDecl`] at all, which is right for every value check and wrong for
+    /// any check that asks "does this class declare `p`?". A hooked property
+    /// **overrides an inherited one** (`php -r`-witnessed at 8.5.9: a child's
+    /// `public int $p { get => 42; }` over a parent's `protected int $p` prints
+    /// `42`), so a member-visibility claim that could not see it would convict legal
+    /// code. Recording the bare names keeps that door shut without putting a
+    /// value-less property back on the surface every other consumer walks.
+    pub hooked_properties: Vec<String>,
+    // end inaccessible members (ADR-0078, issue #185)
     /// `true` if the class `use`s any trait. Trait methods are merged into the
     /// class at compile time but their bodies live elsewhere, so a
     /// trait-using class is treated as unresolvable (give up → silent).
@@ -3826,6 +3852,8 @@ fn lower_trait(t: &mago_syntax::cst::Trait<'_>, conditional: bool) -> ClassDecl 
         methods: Vec::new(),
         properties: Vec::new(),
         consts: Vec::new(),
+        const_visibility: Vec::new(),
+        hooked_properties: Vec::new(),
         uses_traits: false,
         // No member docblock can observe a trait-level `@template`.
         docblock: None,
@@ -3848,6 +3876,8 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
     let mut methods = Vec::new();
     let mut properties = Vec::new();
     let mut consts = Vec::new();
+    let mut const_visibility = Vec::new();
+    let mut hooked_properties = Vec::new();
     let mut uses_traits = false;
     for member in c.members.iter() {
         match member {
@@ -3862,9 +3892,18 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
                 lower_plain_property(p, docs, rc, &mut properties);
             }
             // Hooked properties are virtual/computed and therefore not heap-tracked
-            // or checked as stored values.
-            ClassLikeMember::Property(Property::Hooked(_)) => {}
-            ClassLikeMember::Constant(k) => lower_class_consts(k, &mut consts),
+            // or checked as stored values — only their NAME is kept, so a check that
+            // asks whether the class declares the member at all is not fooled by the
+            // drop (ADR-0078, issue #185).
+            ClassLikeMember::Property(Property::Hooked(h)) => {
+                hooked_properties.push(strip_dollar(bytes_to_string(match &h.item {
+                    PropertyItem::Abstract(a) => a.variable.name,
+                    PropertyItem::Concrete(c) => c.variable.name,
+                })));
+            }
+            ClassLikeMember::Constant(k) => {
+                lower_class_consts(k, &mut consts, &mut const_visibility);
+            }
             ClassLikeMember::TraitUse(_) => uses_traits = true,
             _ => {}
         }
@@ -3887,6 +3926,8 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
         methods,
         properties,
         consts,
+        const_visibility,
+        hooked_properties,
         uses_traits,
         // Class-level docblock (preceding the whole declaration incl. attributes/
         // modifiers, mirroring the function/method lookup) — read for `@template`
@@ -3898,13 +3939,24 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
 
 /// Lower a `const NAME = <expr>[, …];` class-member declaration into `(name,
 /// value)` pairs, keeping **only literal** initializers (ADR-0043 §2). A
-/// non-literal value lowers to [`ArgValue::Other`] and is dropped, so a name's
-/// absence means "no proven literal", never "no such constant".
-fn lower_class_consts(k: &mago_syntax::cst::ClassLikeConstant<'_>, out: &mut Vec<(String, ArgValue)>) {
+/// non-literal value lowers to [`ArgValue::Other`] and is dropped from `out`, so a
+/// name's absence there means "no proven literal", never "no such constant".
+///
+/// `vis` receives every declared name with its visibility (ADR-0078, issue #185),
+/// literal initializer or not — the one list whose absence of a name does mean the
+/// class-like declares no such constant.
+fn lower_class_consts(
+    k: &mago_syntax::cst::ClassLikeConstant<'_>,
+    out: &mut Vec<(String, ArgValue)>,
+    vis: &mut Vec<(String, Visibility)>,
+) {
+    let visibility = visibility_of(&k.modifiers);
     for item in k.items.iter() {
+        let name = bytes_to_string(item.name.value);
+        vis.push((name.clone(), visibility));
         let v = lower_arg_value(item.value);
         if !matches!(v, ArgValue::Other) {
-            out.push((bytes_to_string(item.name.value), v));
+            out.push((name, v));
         }
     }
 }
@@ -4001,10 +4053,13 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
 
     let mut methods = Vec::new();
     let mut consts = Vec::new();
+    let mut const_visibility = Vec::new();
     for member in i.members.iter() {
         match member {
             ClassLikeMember::Method(m) => methods.push(lower_method(m, aliases, docs, rc)),
-            ClassLikeMember::Constant(k) => lower_class_consts(k, &mut consts),
+            ClassLikeMember::Constant(k) => {
+                lower_class_consts(k, &mut consts, &mut const_visibility);
+            }
             _ => {}
         }
     }
@@ -4026,6 +4081,8 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
         methods,
         properties: Vec::new(),
         consts,
+        const_visibility,
+        hooked_properties: Vec::new(),
         uses_traits: false,
         // Class-level docblock — `@template` names shadow same-named classes in the
         // interface's method docblocks (issue #5).
@@ -4060,6 +4117,7 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _doc
 
     let mut enum_cases = Vec::new();
     let mut consts = Vec::new();
+    let mut const_visibility = Vec::new();
     for member in e.members.iter() {
         match member {
             ClassLikeMember::EnumCase(case) => {
@@ -4076,7 +4134,9 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _doc
                     span: to_span(case.span()),
                 });
             }
-            ClassLikeMember::Constant(k) => lower_class_consts(k, &mut consts),
+            ClassLikeMember::Constant(k) => {
+                lower_class_consts(k, &mut consts, &mut const_visibility);
+            }
             _ => {}
         }
     }
@@ -4102,6 +4162,8 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _doc
         methods: Vec::new(),
         properties: Vec::new(),
         consts,
+        const_visibility,
+        hooked_properties: Vec::new(),
         uses_traits: false,
         // No analyzed member can observe an enum-level `@template`.
         docblock: None,
