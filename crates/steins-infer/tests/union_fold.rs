@@ -156,6 +156,10 @@ impl FoldEngine for Fake {
     fn constant_defined(&mut self, _name: &str) -> Option<steins_sidecar::ConstantDefined> {
         None
     }
+    /// No class world either (issue #269): same reason.
+    fn reflect_class(&mut self, _target: &str) -> Option<steins_sidecar::ClassReflection> {
+        None
+    }
 }
 
 /// A live sidecar folder, or `None` when `php` cannot be reached — in which case

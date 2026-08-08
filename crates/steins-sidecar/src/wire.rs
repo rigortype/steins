@@ -151,6 +151,127 @@ impl Reflection {
     }
 }
 
+/// The result of a `reflect_class(target)` request (issue #269): the **declaration**
+/// the project's own PHP holds for a resident class-like, or a structured not-found.
+///
+/// [`Reflection`] answers *whether* a name exists; this answers *what it is*. It is
+/// the class-world half of the ADR-0024 `reflect` surface, and it exists because a
+/// class an installed extension provides (`Redis`, `Random\Randomizer`,
+/// `Dom\Element`) has no source declaration and no builtin-catalog row — the
+/// catalog carries hierarchy edges for ~350 names and no member data at all — so
+/// today it is Unknown everywhere even though the engine running the project can
+/// describe it completely (ADR-0049 §1: ask the real thing, never a curated stub).
+///
+/// `declaration == None` with a parsed reply is a **definitive not-found** on this
+/// boot surface. A *failed* query is the `None` of [`parse_class_reflection_result`],
+/// as everywhere else on this wire, so a consumer that forgets the third case gets
+/// silence rather than a claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassReflection {
+    /// The name asked about (echoed back from the request).
+    pub target: String,
+    /// The resident declaration, or `None` when this engine has no such class-like.
+    pub declaration: Option<ReflectedClass>,
+}
+
+impl ClassReflection {
+    /// Whether the engine has the class-like at all.
+    #[must_use]
+    pub fn exists(&self) -> bool {
+        self.declaration.is_some()
+    }
+}
+
+/// A class-like declaration as the **running engine** reports it (issue #269).
+///
+/// Every field is the engine's own answer about its own resident class, so it is
+/// version-correct and extension-set-correct by construction — the property that
+/// makes it usable where a curated list is not. It is an *envelope-grade* fact (the
+/// runtime's declaration), never a proven value: see [`ClassReflection`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReflectedClass {
+    /// The declared name with the engine's own casing (`Random\Randomizer`).
+    pub name: String,
+    /// Class, interface, trait, or enum.
+    pub kind: ReflectedClassKind,
+    /// `ReflectionClass::isInternal()` — true for everything the engine or an
+    /// extension declares, false for a userland class the sidecar somehow has.
+    /// Part of the **origin** a consumer records beside the fact.
+    pub internal: bool,
+    /// `ReflectionClass::getExtensionName()` — the extension that declares it
+    /// (`random`, `redis`), or `None` for a non-internal class. The other half of
+    /// the origin.
+    pub extension: Option<String>,
+    pub is_final: bool,
+    pub is_abstract: bool,
+    /// The **direct** parent's name, or `None`.
+    pub parent: Option<String>,
+    /// `ReflectionClass::getInterfaceNames()` — the **transitive** interface set,
+    /// not just the directly-implemented ones. Named as such because that is what
+    /// the engine reports and re-deriving directness here would be a guess.
+    pub interfaces: Vec<String>,
+    /// Every method the class has, inherited ones included (the engine reports the
+    /// resolved member set, which is exactly the set a call site can reach).
+    pub methods: Vec<ReflectedMethod>,
+    /// Class constants as *declarations*: the runner reads them off
+    /// `getReflectionConstants()` and never evaluates an initializer.
+    pub constants: Vec<ReflectedConst>,
+    pub properties: Vec<ReflectedProperty>,
+}
+
+/// Which class-like kind a [`ReflectedClass`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReflectedClassKind {
+    Class,
+    Interface,
+    Trait,
+    Enum,
+}
+
+/// PHP member visibility, as reported by the engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    Public,
+    Protected,
+    Private,
+}
+
+/// One method off a [`ReflectedClass`] — the engine's own signature surface for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReflectedMethod {
+    pub name: String,
+    pub is_static: bool,
+    pub is_abstract: bool,
+    pub is_final: bool,
+    pub visibility: Visibility,
+    /// `getNumberOfParameters()`.
+    pub params_total: u32,
+    /// `getNumberOfRequiredParameters()`.
+    pub params_required: u32,
+    /// The `(string)` rendering of the declared return type, or of the *tentative*
+    /// one when there is no declared one — the same discipline (and the same wire
+    /// form) [`Reflection::return_type`] carries for functions.
+    pub return_type: Option<String>,
+    /// Whether [`Self::return_type`] came from the tentative return type.
+    pub return_type_tentative: bool,
+}
+
+/// One class constant off a [`ReflectedClass`]. The **name and visibility only** —
+/// no value: reading a value would mean evaluating an initializer inside the sidecar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReflectedConst {
+    pub name: String,
+    pub visibility: Visibility,
+}
+
+/// One property off a [`ReflectedClass`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReflectedProperty {
+    pub name: String,
+    pub is_static: bool,
+    pub visibility: Visibility,
+}
+
 /// The verdict of a `preg_compile(pattern)` request (issue #189 / ADR-0078): what
 /// the **project's own PCRE** does when handed the pattern.
 ///
@@ -219,6 +340,14 @@ pub fn env_params() -> serde_json::Value {
 /// The `params` of a `reflect` request.
 #[must_use]
 pub fn reflect_params(target: &str) -> serde_json::Value {
+    serde_json::json!({ "target": target })
+}
+
+/// The `params` of a `reflect_class` request (issue #269). The same single-`target`
+/// shape `reflect` uses — one method, one question, so a replay key built for either
+/// is built the same way.
+#[must_use]
+pub fn reflect_class_params(target: &str) -> serde_json::Value {
     serde_json::json!({ "target": target })
 }
 
@@ -342,6 +471,123 @@ pub fn parse_reflection_result(result: &serde_json::Value, target: &str) -> Opti
     })
 }
 
+/// Interpret a `reflect_class` `result` object for the name `target` that was asked
+/// about (issue #269). Only a structured `class_reflection` reply is an answer; a
+/// `widen` — a malformed request, a reflection failure inside the runner, or a
+/// runner too old to implement the method — is unknown and yields `None`.
+///
+/// **A declaration parses whole or not at all.** A reply that says the class exists
+/// but whose member lists do not read cleanly yields `None`, not a class with fewer
+/// members: a consumer must never be able to mistake "we could not read the members"
+/// for "the class has none". That is the same reason the runner widens on a
+/// reflection failure rather than returning a half-filled declaration.
+#[must_use]
+pub fn parse_class_reflection_result(
+    result: &serde_json::Value,
+    target: &str,
+) -> Option<ClassReflection> {
+    if result.get("kind").and_then(serde_json::Value::as_str) != Some("class_reflection") {
+        return None;
+    }
+    let echoed = result
+        .get("target")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(target)
+        .to_owned();
+    if result.get("exists").and_then(serde_json::Value::as_bool) != Some(true) {
+        // A structured not-found. An absent/odd `exists` reads as not-found too:
+        // the conservative direction here is "the engine does not have it", which
+        // buys no claim on its own — the caller's every use of a declaration is
+        // gated on there BEING one.
+        return Some(ClassReflection { target: echoed, declaration: None });
+    }
+    let declaration = ReflectedClass {
+        name: result.get("name").and_then(serde_json::Value::as_str)?.to_owned(),
+        kind: parse_class_kind(result.get("class_kind").and_then(serde_json::Value::as_str)?)?,
+        internal: result.get("internal").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        extension: result
+            .get("extension")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+        is_final: result.get("final").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        is_abstract: result.get("abstract").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        parent: result.get("parent").and_then(serde_json::Value::as_str).map(ToOwned::to_owned),
+        interfaces: parse_name_list(result.get("interfaces")?)?,
+        methods: parse_list(result.get("methods")?, parse_reflected_method)?,
+        constants: parse_list(result.get("constants")?, parse_reflected_const)?,
+        properties: parse_list(result.get("properties")?, parse_reflected_property)?,
+    };
+    Some(ClassReflection { target: echoed, declaration: Some(declaration) })
+}
+
+/// Map every element of a JSON array through `one`, failing whole on any element
+/// that does not read — the all-or-nothing rule of
+/// [`parse_class_reflection_result`].
+fn parse_list<T>(
+    value: &serde_json::Value,
+    one: impl Fn(&serde_json::Value) -> Option<T>,
+) -> Option<Vec<T>> {
+    value.as_array()?.iter().map(one).collect()
+}
+
+/// A JSON array of strings, whole or not at all.
+fn parse_name_list(value: &serde_json::Value) -> Option<Vec<String>> {
+    parse_list(value, |v| v.as_str().map(ToOwned::to_owned))
+}
+
+fn parse_class_kind(tag: &str) -> Option<ReflectedClassKind> {
+    match tag {
+        "class" => Some(ReflectedClassKind::Class),
+        "interface" => Some(ReflectedClassKind::Interface),
+        "trait" => Some(ReflectedClassKind::Trait),
+        "enum" => Some(ReflectedClassKind::Enum),
+        _ => None,
+    }
+}
+
+/// Visibility, whole or not at all: an unrecognized tag is a reply we do not
+/// understand, and guessing `public` would widen a member's reach by fiat.
+fn parse_visibility(value: Option<&serde_json::Value>) -> Option<Visibility> {
+    match value.and_then(serde_json::Value::as_str)? {
+        "public" => Some(Visibility::Public),
+        "protected" => Some(Visibility::Protected),
+        "private" => Some(Visibility::Private),
+        _ => None,
+    }
+}
+
+fn parse_reflected_method(value: &serde_json::Value) -> Option<ReflectedMethod> {
+    Some(ReflectedMethod {
+        name: value.get("name").and_then(serde_json::Value::as_str)?.to_owned(),
+        is_static: value.get("static").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        is_abstract: value.get("abstract").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        is_final: value.get("final").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        visibility: parse_visibility(value.get("visibility"))?,
+        params_total: parse_count(value.get("params_total"))?,
+        params_required: parse_count(value.get("params_required"))?,
+        return_type: value.get("return_type").and_then(serde_json::Value::as_str).map(ToOwned::to_owned),
+        return_type_tentative: value
+            .get("return_type_tentative")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn parse_reflected_const(value: &serde_json::Value) -> Option<ReflectedConst> {
+    Some(ReflectedConst {
+        name: value.get("name").and_then(serde_json::Value::as_str)?.to_owned(),
+        visibility: parse_visibility(value.get("visibility"))?,
+    })
+}
+
+fn parse_reflected_property(value: &serde_json::Value) -> Option<ReflectedProperty> {
+    Some(ReflectedProperty {
+        name: value.get("name").and_then(serde_json::Value::as_str)?.to_owned(),
+        is_static: value.get("static").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        visibility: parse_visibility(value.get("visibility"))?,
+    })
+}
+
 /// One parameter count off a reflection reply: a non-negative JSON integer, or
 /// `None` for absent / null / anything that is not one.
 fn parse_count(v: Option<&serde_json::Value>) -> Option<u32> {
@@ -444,6 +690,119 @@ mod tests {
     #[test]
     fn reflect_params_carries_the_target() {
         assert_eq!(reflect_params("strlen"), serde_json::json!({ "target": "strlen" }));
+    }
+
+    /// A full `class_reflection` reply, for the parser tests below to mutate.
+    fn class_reply() -> serde_json::Value {
+        serde_json::json!({
+            "kind": "class_reflection",
+            "target": "Random\\Randomizer",
+            "exists": true,
+            "name": "Random\\Randomizer",
+            "class_kind": "class",
+            "internal": true,
+            "extension": "random",
+            "final": true,
+            "abstract": false,
+            "parent": serde_json::Value::Null,
+            "interfaces": [],
+            "methods": [{
+                "name": "getInt",
+                "static": false,
+                "abstract": false,
+                "final": false,
+                "visibility": "public",
+                "params_total": 2,
+                "params_required": 2,
+                "return_type": "int",
+                "return_type_tentative": false,
+            }],
+            "constants": [],
+            "properties": [{ "name": "engine", "static": false, "visibility": "public" }],
+        })
+    }
+
+    #[test]
+    fn reflect_class_params_carries_the_target() {
+        assert_eq!(
+            reflect_class_params("Random\\Randomizer"),
+            serde_json::json!({ "target": "Random\\Randomizer" })
+        );
+    }
+
+    #[test]
+    fn a_class_reflection_reply_reads_the_whole_declaration() {
+        let r = parse_class_reflection_result(&class_reply(), "x").expect("a parsed reply");
+        assert_eq!(r.target, "Random\\Randomizer");
+        assert!(r.exists());
+        let d = r.declaration.expect("a declaration");
+        assert_eq!(d.name, "Random\\Randomizer");
+        assert_eq!(d.kind, ReflectedClassKind::Class);
+        assert!(d.internal);
+        assert_eq!(d.extension.as_deref(), Some("random"));
+        assert!(d.is_final && !d.is_abstract);
+        assert_eq!(d.parent, None);
+        assert_eq!(d.methods.len(), 1);
+        assert_eq!(d.methods[0].name, "getInt");
+        assert_eq!(d.methods[0].params_total, 2);
+        assert_eq!(d.methods[0].return_type.as_deref(), Some("int"));
+        assert_eq!(d.methods[0].visibility, Visibility::Public);
+        assert_eq!(d.properties[0].name, "engine");
+    }
+
+    #[test]
+    fn a_not_found_class_is_an_answer_not_a_decline() {
+        let reply = serde_json::json!({
+            "kind": "class_reflection", "target": "Redis", "exists": false,
+        });
+        let r = parse_class_reflection_result(&reply, "Redis").expect("an answer");
+        assert!(!r.exists());
+        assert_eq!(r.declaration, None);
+    }
+
+    #[test]
+    fn a_widen_reply_is_a_decline() {
+        // A runner too old to implement `reflect_class`, or one whose reflection
+        // failed: unanswerable, never an empty class.
+        let widen = serde_json::json!({ "kind": "widen", "reason": "unknown method" });
+        assert_eq!(parse_class_reflection_result(&widen, "Redis"), None);
+    }
+
+    #[test]
+    fn a_declaration_parses_whole_or_not_at_all() {
+        // Each mutation below would, under a lenient parser, yield a class with
+        // FEWER members than it has — which a consumer could read as "the class
+        // lacks that member". Every one of them must decline instead.
+        let mut missing_member_name = class_reply();
+        missing_member_name["methods"][0]
+            .as_object_mut()
+            .expect("a method object")
+            .remove("name");
+        assert_eq!(parse_class_reflection_result(&missing_member_name, "x"), None);
+
+        let mut unknown_visibility = class_reply();
+        unknown_visibility["properties"][0]["visibility"] = serde_json::json!("secret");
+        assert_eq!(parse_class_reflection_result(&unknown_visibility, "x"), None);
+
+        let mut unknown_kind = class_reply();
+        unknown_kind["class_kind"] = serde_json::json!("record");
+        assert_eq!(parse_class_reflection_result(&unknown_kind, "x"), None);
+
+        let mut no_lists = class_reply();
+        no_lists.as_object_mut().expect("the reply").remove("constants");
+        assert_eq!(parse_class_reflection_result(&no_lists, "x"), None);
+
+        let mut no_arity = class_reply();
+        no_arity["methods"][0]["params_total"] = serde_json::Value::Null;
+        assert_eq!(parse_class_reflection_result(&no_arity, "x"), None);
+    }
+
+    #[test]
+    fn a_class_reflection_falls_back_to_the_asked_target() {
+        let mut no_echo = class_reply();
+        no_echo.as_object_mut().expect("the reply").remove("target");
+        let r = parse_class_reflection_result(&no_echo, "Asked\\About").expect("a parsed reply");
+        assert_eq!(r.target, "Asked\\About");
     }
 
     #[test]

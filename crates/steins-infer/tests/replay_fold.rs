@@ -302,6 +302,11 @@ impl FoldEngine for FakeEngine {
     fn constant_defined(&mut self, _name: &str) -> Option<steins_sidecar::ConstantDefined> {
         None
     }
+    /// And the class world (issue #269): the replay loop is this file's subject, and
+    /// the `TableEngine` — not this fake — is what carries `reflect_class` through it.
+    fn reflect_class(&mut self, _target: &str) -> Option<steins_sidecar::ClassReflection> {
+        None
+    }
 }
 
 fn fact_base_of(f: &Fact) -> Option<Base> {
