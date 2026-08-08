@@ -51,7 +51,6 @@ use steins_syntax::{
     EffectEnvelope, EffectOrigin, EffectRecv, ForeachSite, FunctionDecl, InvalidatedVar, MatchArmT, MethodDecl,
     NameRef, NamedArg, NativeType, NormKey, OpaqueConstruct, Param, PropertyDecl, Receiver, RefKind, ScalarType, Scope,
     ScopeOwner, SourceTree, StaticClass, Stmt, StmtKind, StringContextSite, ThrowKind, ThrowOrigin,
-    TypeMember, Visibility, duplicate_array_keys, normalize_array, php_canonical_int_string,
     // invalid operands (ADR-0078, issue #191)
     BinaryOperandOp, OperandSite, OperandSiteKind, UnaryOperandOp,
     // end invalid operands (ADR-0078, issue #191)
