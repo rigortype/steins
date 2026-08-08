@@ -230,8 +230,9 @@ fn the_union_fold_outranks_the_predicate_transfer() {
     let five = merge_src(&[("x", &["'a'", "'b'", "'c'", "'d'", "'e'"])], "strtoupper($x)");
     // Over the cap the ladder DEGRADES to the rung below rather than dropping to
     // the reflected envelope: issue #77 reads the same union member-wise for its
-    // predicates, so `string` is still not the answer.
-    assert_eq!(dump(&five, &mut folder), "non-falsy-string");
+    // predicates, so `string` is still not the answer — and since issue #240 the
+    // casing the transfer establishes is spelled beside the length rung.
+    assert_eq!(dump(&five, &mut folder), "non-falsy-uppercase-string");
 }
 
 /// A member that THROWS declines the whole fold. `intdiv($n, 0)` raises
@@ -300,7 +301,9 @@ fn the_combination_cap_is_charged_on_the_product() {
     // `Fact::from_vals` hands back its **computed** widening — the summary derived
     // by evaluating predicates on every member (ADR-0035). That is the fold
     // succeeding, and it is a strictly better answer than the declared envelope.
-    assert_eq!(dump(&sixteen, &mut mock.clone()), "non-falsy-string");
+    // (Every one of the sixteen answers is lowercase, so the computed summary says
+    // so — the grid of issue #240 spells both axes.)
+    assert_eq!(dump(&sixteen, &mut mock.clone()), "non-falsy-lowercase-string");
     assert_eq!(mock.count(), 16, "every combination was folded: {:?}", mock.asks());
 }
 
@@ -312,7 +315,7 @@ fn a_two_argument_product_folds_at_sixteen_and_declines_at_twenty() {
         &[("s", &["'a'", "'b'", "'c'", "'d'"]), ("k", &["1", "2", "3", "4"])],
         "str_repeat($s, $k)",
     );
-    assert_eq!(dump(&four_by_four, &mut mock.clone()), "non-falsy-string");
+    assert_eq!(dump(&four_by_four, &mut mock.clone()), "non-falsy-lowercase-string");
     assert_eq!(mock.count(), 16, "4×4 = 16 folds: {:?}", mock.asks());
 
     let mock = Mock::default();

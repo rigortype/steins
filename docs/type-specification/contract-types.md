@@ -33,11 +33,29 @@ rules instead of a keyword zoo:
 
 - `scalar` → the union of the four bases.
 - `positive-int`, `negative-int`, `non-negative-int`, `int<lo, hi>` → `IntIn`.
-- `numeric-string`, `non-empty-string`, `non-falsy-string`, `lowercase-string`,
-  `uppercase-string`, `non-empty-lowercase-string`, `non-empty-uppercase-string`,
-  `decimal-int-string`, `non-decimal-int-string`
-  → `StrWith`. The casing pair is `strtolower($s) === $s` (an identity, so an
-  uncased string satisfies both) and is orthogonal to the length/falsy axis.
+- The **refined-string grid** (issue #240) → `StrWith`: a core rung ∈ {—,
+  `non-empty-`, `non-falsy-`, `numeric-`, `non-falsy-numeric-`} followed by a
+  casing rung ∈ {—, `lowercase-`, `uppercase-`, `uncased-`}, suffixed `-string`.
+  Twenty cells, one word each — `non-falsy-lowercase-string`,
+  `numeric-uppercase-string`, `uncased-string`, … — and the grid is exactly what
+  the speller emits, so every cell round-trips through the lowering it came from
+  (`every_grid_cell_round_trips`). `non-falsy-numeric-` is its own core rung
+  because `numeric-string` does **not** entail `non-falsy-string` (`'0'` and
+  `'0.0'` are numeric and falsy). The casing rung is `strtolower($s) === $s` (an
+  identity, so an uncased string satisfies both halves — which is what `uncased-`
+  names) and is orthogonal to the length/falsy axis.
+
+  **Divergence (ADR-0030).** PHPStan spells these sets as intersections
+  (`lowercase-string&uppercase-string`, `non-falsy-string&numeric-string`) and
+  parses only the `non-empty-` casing compounds as single words. Steins keeps a
+  single identifier per cell: the acceptance relation judges the two spellings
+  equal (`lower` maps `A&B` to `Inter`, and an all-`StrWith` intersection folds
+  to the same predicate set), while a compound keyword is what the emitted phpdoc
+  can lower back through. The cost is that `uncased-string` and the
+  `non-falsy-`/`numeric-` casing compounds are not PHPStan vocabulary.
+- `decimal-int-string`, `non-decimal-int-string`
+  → `StrWith`, and NOT part of the grid above (neither is a spelling the speller
+  emits; both widen to the cell their closure names).
   The array-key-cast pair is the engine's own `ZEND_HANDLE_NUMERIC_STR` rule —
   `'123'` becomes an `int` key, `'007'`/`'+1'`/`'-0'` and anything past
   `PHP_INT_MAX` stay string keys — so `decimal-int-string` is strictly narrower

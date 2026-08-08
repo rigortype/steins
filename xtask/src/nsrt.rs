@@ -533,7 +533,11 @@ fn atom_unsupported_category(atom: &str) -> Option<&'static str> {
         return Some("subtraction"); // e.g. mixed~null
     }
     if a.contains('&') {
-        return Some("intersection"); // int&object, T&hasMethod(...)
+        // (An all-string-refinement conjunction is NOT here: `is_supported_atom`
+        // claims it first — issue #240. What still reaches this branch is the
+        // object half, `int&object` / `T&hasMethod(...)` / a `literal-string`
+        // arm, which no `StrPreds` set can denote.)
+        return Some("intersection");
     }
     // `{` no longer implies unsupported (S1.5): a well-formed `array{...}` /
     // `list{...}` / `non-empty-*{...}` already returned `None` above via
@@ -591,7 +595,9 @@ fn atom_unsupported_category(atom: &str) -> Option<&'static str> {
 /// classify unsupported). Scalar/refined/int-range keywords, scalar literals,
 /// plain class names, and — as of S1.5 (ADR-0062), the array vocabulary the
 /// speller now spells (`array`/`list` and their `non-empty-` forms, bare or
-/// applied as `array{…}`/`list{…}`/`array<K, V>`/`list<T>`) — all qualify.
+/// applied as `array{…}`/`list{…}`/`array<K, V>`/`list<T>`) — all qualify, as
+/// does a conjunction of string-refinement keywords (issue #240; see
+/// [`is_str_preds_conjunction`]).
 fn is_supported_atom(a: &str) -> bool {
     const KEYWORDS: &[&str] = &[
         "int",
@@ -641,6 +647,9 @@ fn is_supported_atom(a: &str) -> bool {
     if KEYWORDS.contains(&low.as_str()) {
         return true;
     }
+    if is_str_preds_conjunction(a) {
+        return true;
+    }
     if is_int_range(&low) {
         return true;
     }
@@ -661,6 +670,40 @@ fn is_supported_atom(a: &str) -> bool {
     // A plain class name: `Foo`, `\Foo\Bar`, `Foo\Bar` — letters/digits/underscore
     // and namespace separators only, starting class-like.
     is_plain_class_name(a)
+}
+
+/// `A&B` where every arm is a string-refinement keyword the value domain holds as
+/// a **bit** — so the whole conjunction is one closed `StrPreds` set and the
+/// acceptance relation can already judge it (issue #240, piece 1).
+///
+/// Gating these on the `&` measured the harness's own vocabulary rather than the
+/// analyzer's — the identical defect S1.5 fixed for the array atoms, #77 for the
+/// casing pair and #236 for `class-string`. `steins_contract::lower_str` parses
+/// `A&B` into `ContractTy::Inter`, and `admits_fact`'s `Inter` arm is the
+/// conjunction (`and`-fold), so the pair gets a real answer; where Steins renders
+/// the same set under a compound keyword the row scores `subsumed`/`equal` on the
+/// relation's own terms, and where it renders something weaker the row lands in
+/// `differ` — a reach gap, which is what it always was (the #235 probe measured
+/// 263 of the 273 accessory rows as misfiled).
+///
+/// The arm test is the lowering itself rather than a hand list, so this cannot
+/// drift from the identifier table. Two families are excluded by construction and
+/// stay `unsupported`:
+///
+/// * `literal-string` lowers to `StrOpaque` — provenance (ADR-0038), never a
+///   predicate set, so no spelling can ever reach it;
+/// * `class-string` lowers to a `StrPreds` set carrying the **contextual**
+///   `CLASS_STRING` bit (issue #236), which `is_extensional` refuses here: it is
+///   decided against the class table, so a row containing it would measure the
+///   class-table reach rather than the conjunction.
+fn is_str_preds_conjunction(a: &str) -> bool {
+    a.contains('&')
+        && a.split('&').all(|arm| {
+            matches!(
+                steins_contract::lower_identifier(arm.trim()),
+                steins_contract::ContractTy::StrWith(p) if p.is_extensional()
+            )
+        })
 }
 
 /// `array{…}` / `list{…}` / `non-empty-array{…}` / `non-empty-list{…}` — the full
@@ -1309,12 +1352,45 @@ mod tests {
         // and it must stay ungated inside a union too.
         assert_eq!(unsupported_pattern("mixed"), None);
         assert_eq!(unsupported_pattern("int|mixed"), None);
-        // …and their PHPStan spelling as an intersection stays gated on its own
-        // terms — this opened one keyword each, not the `&` operator.
+        // …and their PHPStan spelling as an intersection is measured too since
+        // issue #240: every arm is a `StrPreds` bit, so the whole atom is one
+        // closed predicate set the acceptance relation already judges.
+        assert_eq!(unsupported_pattern("lowercase-string&non-empty-string"), None);
         assert_eq!(
-            unsupported_pattern("lowercase-string&non-empty-string"),
-            Some("intersection")
+            unsupported_pattern("lowercase-string&non-falsy-string&uppercase-string"),
+            None
         );
+        assert_eq!(unsupported_pattern("(lowercase-string&non-falsy-string)|false"), None);
+    }
+
+    /// The #240 conjunction gate, from both sides: an atom is measured when EVERY
+    /// arm is an extensional string refinement, and stays `intersection` otherwise.
+    #[test]
+    fn only_all_string_refinement_conjunctions_are_measured() {
+        for a in [
+            "numeric-string&uppercase-string",
+            "non-empty-string&numeric-string",
+            "decimal-int-string&non-falsy-string",
+            // The compound cells the speller emits are arms like any other.
+            "non-empty-lowercase-string&numeric-string",
+        ] {
+            assert_eq!(unsupported_pattern(a), None, "{a} should be measured");
+        }
+        for a in [
+            // `literal-string` is provenance (`StrOpaque`) — no predicate set.
+            "literal-string&non-falsy-string",
+            // `class-string`'s bit is CONTEXTUAL (issue #236): the row would
+            // measure the class-table reach, not the conjunction.
+            "class-string&literal-string",
+            "class-string&non-empty-string",
+            // The object half of the bucket (#234's territory), untouched.
+            "int&object",
+            "Foo&Bar",
+            "Traversable&Countable",
+            "non-empty-string&hasOffset('a')",
+        ] {
+            assert_eq!(unsupported_pattern(a), Some("intersection"), "{a} should stay gated");
+        }
     }
 
     /// S1.5 (ADR-0062): the array vocabulary itself is no longer gated — the

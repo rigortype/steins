@@ -106,10 +106,16 @@ fn a_named_group_occupies_a_string_key_and_a_numeric_one() {
     // `preg_match('/(?<year>\d{4})-(?<mon>\d{2})/', '2026-08', $m)` measured
     // `[0, 'year', 1, 'mon', 2]` — the name is ADDITIONAL, never a replacement,
     // and it makes `array_is_list($m)` false (measured), so the fact is no list.
+    //
+    // The group slots spell `non-falsy-numeric-string` since issue #240: the
+    // measured captures are numeric AND neither `''` nor `'0'`, which is one grid
+    // cell rather than the `numeric-string` the old single-keyword ladder emitted
+    // (PHPStan spells the same set `non-falsy-string&numeric-string`, and
+    // `preg_match_shapes.php` asserts exactly that).
     assert_eq!(
         shape(r"'/(?<year>\d{4})-(?<mon>\d{2})/'"),
-        "array{0: non-falsy-string, 1: numeric-string, 2: numeric-string, \
-         mon: numeric-string, year: numeric-string} (asserted)"
+        "array{0: non-falsy-string, 1: non-falsy-numeric-string, 2: non-falsy-numeric-string, \
+         mon: non-falsy-numeric-string, year: non-falsy-numeric-string} (asserted)"
     );
 }
 

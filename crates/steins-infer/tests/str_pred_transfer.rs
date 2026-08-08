@@ -624,8 +624,13 @@ fn a_union_of_constant_strings_answers_by_intersecting_its_members() {
     assert_eq!(dump("'foo'|'bar'", "trim($v, $v)"), "dumped type: lowercase-string (asserted)");
     // A mixed-casing union carries neither bit, and the rule declines.
     assert_eq!(dump("'foo'|'BAR'", "trim($v, $v)"), "dumped type: string");
-    // The length axis works the same way: both members are non-falsy.
-    assert_eq!(dump("'foo'|'bar'", "strrev($v)"), "dumped type: non-falsy-string (asserted)");
+    // The length axis works the same way: both members are non-falsy — and since
+    // issue #240 the two axes are spelled TOGETHER (`strrev` keeps both), where the
+    // old ladder ranked the core rung ahead of the casing half and dropped it.
+    assert_eq!(
+        dump("'foo'|'bar'", "strrev($v)"),
+        "dumped type: non-falsy-lowercase-string (asserted)"
+    );
     // …and one falsy member sinks it to non-empty.
     assert_eq!(dump("'foo'|'0'", "strrev($v)"), "dumped type: non-empty-lowercase-string (asserted)");
     // A single constant is the same path with one member (the fold lane owns the

@@ -465,19 +465,10 @@ pub fn lower_identifier(name: &str) -> ContractTy {
         "numeric-string" => ContractTy::StrWith(StrPreds::NUMERIC.close()),
         "non-empty-string" => ContractTy::StrWith(StrPreds::NON_EMPTY),
         "non-falsy-string" | "truthy-string" => ContractTy::StrWith(StrPreds::NON_FALSY.close()),
-        // The casing pair, and their `non-empty-` intersections. `lowercase-string`
-        // is `strtolower($s) === $s` — an *identity* under the case function, not
-        // "made of lowercase letters" — so an uncased string (`''`, `'123'`)
-        // satisfies both at once, and the length half is genuinely orthogonal
-        // (`''` fails only `non-empty-`, `'ABC'` only the casing half).
-        "lowercase-string" => ContractTy::StrWith(StrPreds::LOWERCASE),
-        "uppercase-string" => ContractTy::StrWith(StrPreds::UPPERCASE),
-        "non-empty-lowercase-string" => {
-            ContractTy::StrWith(StrPreds::NON_EMPTY.union(StrPreds::LOWERCASE))
-        }
-        "non-empty-uppercase-string" => {
-            ContractTy::StrWith(StrPreds::NON_EMPTY.union(StrPreds::UPPERCASE))
-        }
+        // (The casing axis — `lowercase-string`, `uppercase-string`, `uncased-string`
+        // and every core × casing compound — is [`grid_str_preds`], reached from the
+        // catch-all below. It is the inverse of the speller's own grid, in one place,
+        // rather than twenty arms here that could drift from it.)
         // The array-key-cast pair. `decimal-int-string` is the string PHP writes
         // an integer back as, so it is cast to `int` as an array key; the
         // `non-` form is its complement *within string*, which is wider than
@@ -556,8 +547,79 @@ pub fn lower_identifier(name: &str) -> ContractTy {
         }
         "object" => ContractTy::ObjectAny,
         "self" | "static" | "parent" | "key-of" | "value-of" => ContractTy::Opaque,
-        _ => ContractTy::Class(norm),
+        // The refined-string grid (issue #240), the last keyword rung before the
+        // class catch-all: every cell the speller can emit lowers back to the set
+        // it was spelled from, and anything else is a class name as before.
+        other => match grid_str_preds(other) {
+            Some(p) => ContractTy::StrWith(p),
+            None => ContractTy::Class(norm),
+        },
     }
+}
+
+/// The **refined-string grid** (issue #240), read as an input spelling: `core ×
+/// casing`, where core ∈ {—, `non-empty-`, `non-falsy-`, `numeric-`,
+/// `non-falsy-numeric-`} and casing ∈ {—, `lowercase-`, `uppercase-`,
+/// `uncased-`}, all suffixed `-string`. `None` for anything that is not a cell.
+///
+/// This is the exact inverse of [`spell::preds_keyword`], and it is a *parse*
+/// rather than twenty arms in [`lower_identifier`] for the reason ADR-0030 gives
+/// the vocabulary in general: the grid is one closed decision, so it should have
+/// one implementation on each side and a round-trip test between them
+/// (`every_grid_cell_round_trips`), not a table that can drift a cell at a time.
+///
+/// The casing axis is an *identity* under the case function, not "made of
+/// lowercase letters": `strtolower($s) === $s`, so an uncased string (`''`,
+/// `'123'`) satisfies both halves at once — which is what `uncased-` names, and
+/// why it is Steins' own word for the set PHPStan spells
+/// `lowercase-string&uppercase-string` (ADR-0030: the vocabulary is Steins',
+/// and the intersection would not round-trip through a single identifier).
+/// The length half is genuinely orthogonal to it (`''` fails only `non-empty-`,
+/// `'ABC'` only the casing half).
+///
+/// `non-falsy-numeric-` is a core rung and not a compound of two, because
+/// `NUMERIC` does not entail `NON_FALSY` (`'0'` and `'0.0'` are numeric and
+/// falsy) — so the set really is tighter than either, and PHPStan spells it
+/// `non-falsy-string&numeric-string`.
+///
+/// The array-key-cast pair keeps its own arms above and is deliberately not an
+/// axis here — see [`spell::preds_keyword`] for why neither may become a rung.
+fn grid_str_preds(name: &str) -> Option<StrPreds> {
+    // The core rungs, longest spelling first so `non-falsy-numeric-` is not read
+    // as `non-falsy-` with a stray `numeric` casing token.
+    const CORES: &[(&str, StrPreds)] = &[
+        ("non-falsy-numeric", StrPreds::NON_FALSY.union(StrPreds::NUMERIC)),
+        ("non-falsy", StrPreds::NON_FALSY),
+        ("non-empty", StrPreds::NON_EMPTY),
+        ("numeric", StrPreds::NUMERIC),
+    ];
+    let body = name.strip_suffix("-string")?;
+    let mut core = StrPreds::empty();
+    let mut rest = body;
+    for (tok, p) in CORES {
+        if let Some(tail) = rest.strip_prefix(tok)
+            && (tail.is_empty() || tail.starts_with('-'))
+        {
+            core = *p;
+            rest = tail.strip_prefix('-').unwrap_or(tail);
+            break;
+        }
+    }
+    let casing = match rest {
+        "" => StrPreds::empty(),
+        "lowercase" => StrPreds::LOWERCASE,
+        "uppercase" => StrPreds::UPPERCASE,
+        "uncased" => StrPreds::LOWERCASE.union(StrPreds::UPPERCASE),
+        // Not a cell: `foo-string` is a class name, and `decimal-int-string` and
+        // the rest of the string family are their own arms above.
+        _ => return None,
+    };
+    // The empty cell is `string`, which has its own arm: reaching here with
+    // nothing recognized means the name was never a grid spelling at all.
+    if core.is_empty() && casing.is_empty() {
+        return None;
+    }
+    Some(core.union(casing))
 }
 
 /// Whether a same-named class in scope takes precedence over this keyword — the
@@ -937,7 +999,9 @@ pub fn to_shape_fact(ty: &ContractTy) -> Option<ShapeFact> {
 ///
 /// `None` covers, deliberately:
 ///
-/// * classes, `object`, `callable`, `iterable`, intersections — no fact form;
+/// * classes, `object`, `callable`, `iterable`, and every intersection whose
+///   members are not ALL string refinements — no fact form. The all-`StrWith`
+///   intersection is the one exception (issue #240): see [`inter_str_preds`];
 /// * `mixed` / `Opaque` / `never` — an unknown slot *is* `mixed`, so spelling
 ///   it costs a representation with no extra content;
 /// * `literal-string` &c. ([`ContractTy::StrOpaque`]) — non-extensional
@@ -958,6 +1022,12 @@ pub fn to_fact(ty: &ContractTy) -> Option<Fact> {
         ContractTy::Base(b) => Some(Fact::General { base: *b, nullable: false }),
         ContractTy::IntIn(r) => Some(Fact::refined(Base::Int, Refinement::Int(*r), false)),
         ContractTy::StrWith(p) => Some(Fact::refined(Base::String, Refinement::Str(*p), false)),
+        // A conjunction of string refinements IS a predicate set (issue #240):
+        // the domain's own representation of `A&B` is the closed union of the
+        // two bit sets, so this is the same lowering as the arm above with the
+        // fold in front of it, not a second reading of the vocabulary.
+        ContractTy::Inter(members) => inter_str_preds(members)
+            .map(|p| Fact::refined(Base::String, Refinement::Str(p), false)),
         ContractTy::LitInt(i) => Some(Fact::Singleton(Val::Int(*i))),
         ContractTy::LitStr(s) => Some(Fact::Singleton(Val::Str(s.clone()))),
         ContractTy::LitBool(b) => Some(Fact::Singleton(Val::Bool(*b))),
@@ -984,6 +1054,46 @@ pub fn to_fact(ty: &ContractTy) -> Option<Fact> {
         }
         _ => None,
     }
+}
+
+/// The single closed [`StrPreds`] set an intersection of string refinements
+/// denotes, or `None` as soon as one member is anything else (issue #240).
+///
+/// `A&B` over string refinements needs no intersection *algebra*: the domain's
+/// representation of a refined string is already a conjunction of predicates
+/// (ADR-0035), so the intersection of two of them is the union of their bits —
+/// and [`StrPreds::union`] closes under implication, so the fold lands on the
+/// canonical set every other producer would have built. There is exactly one
+/// fold, read by the three consumers that need it ([`to_fact`], the arm speller,
+/// and `steins-infer`'s curated-row lowering), so a seeded conjunction and its
+/// spelling cannot disagree.
+///
+/// Two boundaries, both inherited rather than invented here:
+///
+/// * a non-`StrWith` member refuses the WHOLE intersection — `literal-string`
+///   ([`ContractTy::StrOpaque`], provenance, ADR-0038) and every object/array arm
+///   included. The honest floor stays: an intersection this cannot fold keeps
+///   living in the arm lane, judged by the acceptance relation's `Inter` arms;
+/// * **complementary bits are not a special case.** `decimal-int-string&non-decimal-int-string`
+///   folds to the set carrying both, which [`StrPreds`]' module doc establishes
+///   denotes ∅ — a legitimate value of the type, and the one `StrWith` that
+///   admits no string at all. Nothing here needs to detect it.
+///
+/// [`StrPreds::CLASS_STRING`] folds like any other bit: it is a value property
+/// decided against the class table (issue #236), so an intersection carrying it
+/// records it and every membership query keeps reading the set through
+/// [`StrPreds::extensional`], exactly as it does for a `class-string` that
+/// arrived alone.
+#[must_use]
+pub fn inter_str_preds(members: &[ContractTy]) -> Option<StrPreds> {
+    let mut acc = StrPreds::empty();
+    for m in members {
+        let ContractTy::StrWith(p) = m else { return None };
+        acc = acc.union(*p);
+    }
+    // An empty intersection denotes `mixed`, not a string: it has no member to
+    // take a predicate from, and answering `string` would invent a claim.
+    (!members.is_empty()).then_some(acc)
 }
 
 /// Lower a declared shape's parts into the canonical [`ShapeFact`] — the
@@ -1142,6 +1252,212 @@ mod known_unenforced_tests {
             lower_generic("SomeUnknownGeneric", &[]),
             ContractTy::Class(name) if name == "someunknowngeneric"
         ));
+    }
+}
+
+/// Issue #240 — the refined-string grid and the intersection fold: one closed
+/// vocabulary, spelled and re-read by one pair of inverse functions.
+#[cfg(test)]
+mod refined_string_grid_tests {
+    use super::*;
+    use crate::spell::preds_keyword;
+
+    /// Every cell of the grid, built from its own axes rather than from a copy of
+    /// the speller's table.
+    fn cells() -> Vec<StrPreds> {
+        let cores = [
+            StrPreds::empty(),
+            StrPreds::NON_EMPTY,
+            StrPreds::NON_FALSY,
+            StrPreds::NUMERIC,
+            StrPreds::NON_FALSY.union(StrPreds::NUMERIC),
+        ];
+        let casings = [
+            StrPreds::empty(),
+            StrPreds::LOWERCASE,
+            StrPreds::UPPERCASE,
+            StrPreds::LOWERCASE.union(StrPreds::UPPERCASE),
+        ];
+        cores
+            .iter()
+            .flat_map(|c| casings.iter().map(|k| c.union(*k)))
+            .collect()
+    }
+
+    /// **The round trip** the speller's docs promise: every keyword
+    /// [`preds_keyword`] can emit lowers back through [`lower_identifier`] to the
+    /// very set it was spelled from. This is what lets `spell` emit phpdoc that
+    /// Steins re-reads without loss, and it is why the grid is a parse on one side
+    /// and a `format!` on the other instead of two tables.
+    #[test]
+    fn every_grid_cell_round_trips() {
+        for preds in cells() {
+            let kw = preds_keyword(preds);
+            // The empty cell is the base type: `string` has always lowered to
+            // `Base(String)`, which denotes exactly `StrWith` with no predicate.
+            let expected = if preds.is_empty() {
+                ContractTy::Base(Base::String)
+            } else {
+                ContractTy::StrWith(preds)
+            };
+            assert_eq!(
+                lower_identifier(&kw),
+                expected,
+                "{kw} did not lower back to the set it spells"
+            );
+        }
+    }
+
+    /// The twenty cells are twenty distinct words: a grid that named two sets the
+    /// same would make the round trip above lossy in one direction only.
+    #[test]
+    fn the_grid_is_injective() {
+        let mut seen: Vec<String> = cells().iter().map(|p| preds_keyword(*p)).collect();
+        seen.sort();
+        let n = seen.len();
+        seen.dedup();
+        assert_eq!(seen.len(), n, "two cells share a spelling");
+    }
+
+    /// The spellings themselves, written out — the table a reader of the issue can
+    /// check against, including the two cells that predate the grid.
+    #[test]
+    fn the_named_cells() {
+        let k = |p: StrPreds| preds_keyword(p);
+        assert_eq!(k(StrPreds::empty()), "string");
+        assert_eq!(k(StrPreds::LOWERCASE), "lowercase-string");
+        assert_eq!(k(StrPreds::LOWERCASE.union(StrPreds::UPPERCASE)), "uncased-string");
+        assert_eq!(k(StrPreds::NON_EMPTY.union(StrPreds::LOWERCASE)), "non-empty-lowercase-string");
+        assert_eq!(k(StrPreds::NON_EMPTY.union(StrPreds::UPPERCASE)), "non-empty-uppercase-string");
+        assert_eq!(k(StrPreds::NON_FALSY.union(StrPreds::LOWERCASE)), "non-falsy-lowercase-string");
+        assert_eq!(k(StrPreds::NUMERIC.union(StrPreds::UPPERCASE)), "numeric-uppercase-string");
+        assert_eq!(
+            k(StrPreds::NON_FALSY.union(StrPreds::NUMERIC)),
+            "non-falsy-numeric-string"
+        );
+        assert_eq!(
+            k(StrPreds::NON_FALSY.union(StrPreds::NUMERIC).union(StrPreds::LOWERCASE)),
+            "non-falsy-numeric-lowercase-string"
+        );
+    }
+
+    /// The array-key-cast pair is still not an axis (the decision #240 left alone):
+    /// a declared `decimal-int-string` widens to the cell its closure names, never
+    /// to a keyword of its own.
+    #[test]
+    fn the_array_key_cast_pair_is_still_not_a_rung() {
+        assert_eq!(preds_keyword(StrPreds::DECIMAL_INT.close()), "numeric-uncased-string");
+        assert_eq!(preds_keyword(StrPreds::NON_DECIMAL_INT), "string");
+    }
+
+    /// `class-string` still outranks the grid — the contextual bit says something
+    /// no character-level rung can (issue #236), and it round-trips as itself.
+    #[test]
+    fn the_contextual_bit_outranks_the_grid() {
+        let cs = StrPreds::CLASS_STRING.close();
+        assert_eq!(preds_keyword(cs), "class-string");
+        assert_eq!(preds_keyword(cs.union(StrPreds::LOWERCASE)), "class-string");
+        assert_eq!(lower_identifier("class-string"), ContractTy::StrWith(cs));
+    }
+
+    /// A name that merely ends in `-string` is not a cell: the class catch-all is
+    /// load-bearing and must still claim it.
+    #[test]
+    fn a_non_cell_still_lowers_to_class() {
+        assert_eq!(grid_str_preds("foo-string"), None);
+        assert_eq!(grid_str_preds("string"), None);
+        assert_eq!(grid_str_preds("non-decimal-int-string"), None);
+        assert_eq!(
+            lower_identifier("Non-Cell-String"),
+            ContractTy::Class("non-cell-string".to_owned())
+        );
+        // …and the family members with their own arms keep them.
+        assert_eq!(lower_identifier("literal-string"), ContractTy::StrOpaque);
+        assert_eq!(
+            lower_identifier("decimal-int-string"),
+            ContractTy::StrWith(StrPreds::DECIMAL_INT.close())
+        );
+    }
+
+    /// The fold: `A&B` over string refinements is the closed union of their bits,
+    /// so a declared conjunction lowers to exactly the set an equivalent computed
+    /// one would carry.
+    #[test]
+    fn an_all_string_intersection_folds_to_one_set() {
+        let ty = lower_str("lowercase-string&non-empty-string").unwrap();
+        assert_eq!(
+            to_fact(&ty),
+            Some(Fact::refined(
+                Base::String,
+                Refinement::Str(StrPreds::NON_EMPTY.union(StrPreds::LOWERCASE)),
+                false
+            ))
+        );
+        // Three arms, and the closure runs: `numeric` entails `non-empty`.
+        let ty = lower_str("lowercase-string&numeric-string&uppercase-string").unwrap();
+        let expected = StrPreds::NUMERIC
+            .union(StrPreds::LOWERCASE)
+            .union(StrPreds::UPPERCASE);
+        assert_eq!(
+            inter_str_preds(std::slice::from_ref(&ty)),
+            None,
+            "a non-StrWith member is not this fold's business"
+        );
+        let ContractTy::Inter(members) = &ty else { panic!("expected an Inter, got {ty:?}") };
+        assert_eq!(inter_str_preds(members), Some(expected));
+        assert!(expected.contains_all(StrPreds::NON_EMPTY));
+    }
+
+    /// Complementary bits need no special case: the fold builds the set that
+    /// denotes ∅, which is a legitimate `StrWith` (the `StrPreds` module doc).
+    #[test]
+    fn complementary_arms_fold_to_the_empty_denotation() {
+        let ty = lower_str("decimal-int-string&non-decimal-int-string").unwrap();
+        let ContractTy::Inter(members) = &ty else { panic!("expected an Inter, got {ty:?}") };
+        let folded = inter_str_preds(members).expect("both arms are StrWith");
+        assert!(folded.contains_all(StrPreds::DECIMAL_INT));
+        assert!(folded.contains_all(StrPreds::NON_DECIMAL_INT));
+        assert_eq!(admits_val(&ContractTy::StrWith(folded), &Val::Str("1".to_owned())), Certainty::No);
+        assert_eq!(admits_val(&ContractTy::StrWith(folded), &Val::Str("x".to_owned())), Certainty::No);
+    }
+
+    /// The floor stays: one non-`StrWith` arm refuses the whole intersection, so
+    /// an object/provenance conjunction still lives in the arm lane alone.
+    #[test]
+    fn a_non_string_arm_refuses_the_fold() {
+        for src in [
+            "literal-string&non-falsy-string",
+            "Foo&Bar",
+            "non-empty-string&Countable",
+            "int&object",
+        ] {
+            let ty = lower_str(src).unwrap();
+            let ContractTy::Inter(members) = &ty else { panic!("{src} is not an Inter") };
+            assert_eq!(inter_str_preds(members), None, "{src} must not fold");
+            assert_eq!(to_fact(&ty), None, "{src} must seed no fact");
+        }
+        assert_eq!(inter_str_preds(&[]), None, "an empty intersection is not a string");
+    }
+
+    /// The contextual bit folds like any other — it is a value property (#236),
+    /// and every membership query keeps reading the set extensionally.
+    #[test]
+    fn a_class_string_arm_folds_and_stays_contextual() {
+        let ty = lower_str("class-string&non-empty-string").unwrap();
+        let ContractTy::Inter(members) = &ty else { panic!("expected an Inter, got {ty:?}") };
+        let folded = inter_str_preds(members).expect("both arms are StrWith");
+        assert!(folded.contains_all(StrPreds::CLASS_STRING));
+        assert!(!folded.is_extensional(), "the class-table bit must still be contextual");
+        // Undecidable from the characters alone: the honest `Maybe`, unchanged.
+        assert_eq!(
+            admits_val(&ContractTy::StrWith(folded), &Val::Str("Foo".to_owned())),
+            Certainty::Maybe
+        );
+        // …and refuted where the extensional half refutes it.
+        assert_eq!(
+            admits_val(&ContractTy::StrWith(folded), &Val::Str(String::new())),
+            Certainty::No
+        );
     }
 }
 

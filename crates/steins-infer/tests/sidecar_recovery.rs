@@ -51,9 +51,11 @@ fn a_bomb_fold_does_not_disable_the_folder_for_the_rest_of_the_run() {
     }
     // The bomb's dump is the rung BELOW the fold, not a folded value: since issue
     // #77 that rung is the string-predicate transfer, which reads `str_repeat`'s
-    // literal subject `"x"` and its multiplier `>= 1` and answers
-    // `non-falsy-string`. A folded answer would be the two-billion-character
-    // literal itself, so this spelling is still exactly the evidence the test
-    // wants — the fold did NOT happen, and the analysis carried on.
-    assert_eq!(dumps(BOMB_THEN_FOLDABLE, &mut folder), vec!["non-falsy-string", "'AB'"]);
+    // literal subject `"x"` and its multiplier `>= 1` and answers non-falsy — and,
+    // since issue #240, says the casing half of the same transfer's answer out
+    // loud (`"x"` is lowercase), which is the one grid cell for that set. A folded
+    // answer would be the two-billion-character literal itself, so this spelling is
+    // still exactly the evidence the test wants — the fold did NOT happen, and the
+    // analysis carried on.
+    assert_eq!(dumps(BOMB_THEN_FOLDABLE, &mut folder), vec!["non-falsy-lowercase-string", "'AB'"]);
 }
