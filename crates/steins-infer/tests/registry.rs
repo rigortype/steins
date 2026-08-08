@@ -20,7 +20,7 @@ use steins_infer::{
     OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID, Origin, PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID,
     PHPDOC_UNDEFINED_METHOD_ID, PROP_MISMATCH_ID, READONLY_REASSIGNED_ID, REGISTERED_NOT_YET_EMITTED,
     RETURN_ID, RETURN_MISMATCH_ID, SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID, THROW_LISKOV_ID,
-    THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID, declared_facet, layer,
+    THROW_UNDECLARED_ID, TYPE_RETURN_MAYBE_MISSING_ID, UNKNOWN_LABEL_ID, declared_facet, layer,
 };
 // member absence (ADR-0078, issue #197)
 use steins_infer::{CLASS_CONST_UNDEFINED_ID, PROPERTY_MAYBE_UNDEFINED_ID, PROPERTY_UNDEFINED_ID};
@@ -308,6 +308,12 @@ fn every_registered_id_has_a_surface_floor() {
 /// sibling convention, which puts a **proof**-layer id above `default` for the
 /// first time: a possibly-grade twin is still proof-grade evidence about the
 /// runtime, and a possibly-claim belongs on the strict surface.
+/// The admitted exceptions are the ids whose floor was set by a **measurement**
+/// rather than by their layer: the pair ADR-0062 S6 itself introduces (the offset
+/// family's strict leg, contract layer at the `strict` floor — the whole reason a
+/// floor attribute was needed, since a layer can now straddle rungs), and
+/// `type.return-maybe-missing` (ADR-0078 §1.3, issue #199), the first **proof**
+/// layer id to do the same.
 #[test]
 fn floors_reproduce_the_pre_s6_layer_selection() {
     // The S6 pair, post-triage (2026-07-29 sweep): `offset.undeclared` measured
@@ -320,11 +326,28 @@ fn floors_reproduce_the_pre_s6_layer_selection() {
         (OFFSET_MAYBE_MISSING_ID, Layer::Contract, Floor::Strict),
         (PROPERTY_MAYBE_UNDEFINED_ID, Layer::Proof, Floor::Strict),
     ];
+    //
+    // `type.return-maybe-missing` (2026-08-08 gate triage): the SAME fatal as its
+    // definite sibling, so the layer cannot differ — a `TypeError` is a `TypeError`.
+    // What the corpus measured is that the conditional class (a body that returns
+    // on every taken arm and leaves an uncovered escape edge) is dominated by code
+    // that is correct by construction and unprovable by analysis: phpstan-src's own
+    // `src/` carries two and passes its own missing-return rule. Hence `Strict`.
+    let promoted = [
+        (OFFSET_UNDECLARED_ID, Layer::Contract, Floor::Contracts),
+        (OFFSET_MAYBE_MISSING_ID, Layer::Contract, Floor::Strict),
+        (TYPE_RETURN_MAYBE_MISSING_ID, Layer::Proof, Floor::Strict),
+    ];
     for &(id, layer_of, floor) in DIAGNOSTIC_REGISTRY {
         if let Some(&(_, expected_layer, expected_floor)) = promoted.iter().find(|(p, ..)| *p == id)
         {
             assert_eq!(layer_of, expected_layer, "`{id}` keeps the layer its ADR gives it");
             assert_eq!(floor, expected_floor, "`{id}` floor per its ADR / triage ruling");
+        if let Some(&(_, expected_layer, expected_floor)) =
+            promoted.iter().find(|(p, _, _)| *p == id)
+        {
+            assert_eq!(layer_of, expected_layer, "`{id}` layer is fixed by its consequence");
+            assert_eq!(floor, expected_floor, "`{id}` floor per its triage ruling");
             continue;
         }
         let expected = match layer_of {

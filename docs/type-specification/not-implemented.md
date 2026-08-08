@@ -64,8 +64,11 @@ Places where Steins is quieter than it could be.
   own silences are `try`/`catch`/`finally` (excluded whole — `finally` overwrites
   the exit point), `goto`/labels, a `switch` with case-to-case fall-through, and
   a provably-infinite loop containing a `break` whose target is unresolved.
-  `type.return-missing` is its only consumer today; the level-4 dead-code family
-  is the deferred one, and reads `Unknown` the opposite way round.
+  A second, orthogonal question — `body_has_terminator`, does the body exit the
+  function anywhere — splits a falling-through body into the unconditional and
+  the conditional class. The `type.return-missing` pair is the only consumer
+  today; the level-4 dead-code family is the deferred one, and reads `Unknown`
+  the opposite way round.
 - Static properties are not a fact lane; property chains (`$a->b->c`) are a
   `Barrier` (ADR-0052 N5, same owner deferral).
 - `??` refines an *array offset* in guard position (ADR-0062 S5); over any other

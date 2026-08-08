@@ -84,7 +84,8 @@ claim ships `php -r`-witnessed per the ADR-0049 point-10 discipline.
 | `string.non-stringable` | proof / Default | fatal: object without `__toString` in string context |
 | `string.array-conversion` | proof / Default, gate | warning: array in string context |
 | `type.invalid-operand` | proof / Default | binary/unary/comparison in one id; fatal rows only, version-sensitive rows ask the sidecar |
-| `type.return-missing` | proof / Default | fall-through past a non-void native return type; the reachability tracer — *added here beyond the approved table, flagged for ratification* |
+| `type.return-missing` | proof / Default | fall-through past a non-void native return type **with no `return`/`throw`/`exit` anywhere in the body** — a stub, an empty body, pure side effects, where every execution fatals; the reachability tracer — *added here beyond the approved table, flagged for ratification* |
+| `type.return-maybe-missing` | proof / **Strict** | the same fatal where the body *does* exit somewhere but not on every path (a no-`default` `switch` whose every case returns, an `if` with no `else`). §1.3's `maybe-` sibling, emitted with its definite leg rather than deferred. The **layer** is the definite leg's — one consequence, one layer — and only the floor differs; the first proof-layer id at `strict`, on the 2026-08-08 gate measurement (phpstan-src's own `src/` carries two and passes its own missing-return rule) |
 | `preg.invalid-pattern` | proof / Default, gate | PCRE refusal witnessed by the sidecar; joins the preg-slice vocabulary |
 | `array.duplicate-key` | mechanics / Default | works but drops a value silently — intent/behaviour drift, the anti-rot shape |
 | `syntax.unparsable` | mechanics / Default | ADR-0079 |
@@ -187,6 +188,18 @@ Both predicates exist precisely so that no consumer writes
 `!= Terminates` or `!= FallsThrough`: each negation is correct for one
 consumer and inverts the other's safe side, and that is the mistake the
 type exists to prevent.
+
+**The second question, and the definite/possibly split.** `body_end`
+answers *does control reach the end*; `body_has_terminator` answers *does
+the body exit the function anywhere*, reading a `Stmt::has_terminator`
+the lowering computed over the whole CST subtree (so a `return` inside a
+`foreach` body or a `try` block counts, though the trace IR erased the
+construct). The pair splits a falling-through body into the two
+populations §1.3's `maybe-` convention exists for: **no exit anywhere** is
+unconditional and stays `type.return-missing` at `Default`; **an exit that
+does not cover every path** is `type.return-maybe-missing` at `Strict`.
+One predicate routes the finding, so the two ids are disjoint by
+construction and no site can report both.
 
 **Named silences of the foundation**, so its quiet is measured rather
 than assumed: `try`/`catch`/`finally` is excluded whole (`finally`

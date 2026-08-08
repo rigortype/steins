@@ -52,7 +52,7 @@ use steins_syntax::{
     TypeMember, Visibility, duplicate_array_keys, normalize_array, php_canonical_int_string,
 };
 // return missing (ADR-0078, issue #199)
-pub use steins_syntax::{BodyEnd, body_end};
+pub use steins_syntax::{BodyEnd, body_end, body_has_terminator};
 use steins_syntax::RetHintKind;
 // end return missing (ADR-0078, issue #199)
 
@@ -801,6 +801,27 @@ pub const CLASS_CONST_UNDEFINED_ID: &str = "class-const.undefined";
 /// premise here is a written type, so `type.*` it is (the ADR flags this row as
 /// added beyond its grilled table; landing the id discharges the flag).
 ///
+/// # The definite/possibly split — why this id is not alone
+///
+/// A body whose fold is `FallsThrough` comes in two populations, measured on the
+/// corpus (2026-08-08 gate triage, 26 findings), and the zero-FP policy floors
+/// them differently (ADR-0078 §1.3, the `maybe-` convention):
+///
+/// * **no function exit anywhere in the body** — a stub, an empty body, a body of
+///   pure side effects (`function (): bool {}` in a test double). *Every*
+///   execution reaches the closing brace, so the fatal is unconditional. **This
+///   id**, `Default` floor.
+/// * **an exit somewhere, but not covering every path** — a `return` in every
+///   taken arm with an uncovered escape edge (a no-`default` `switch` over a
+///   string whose every case returns; an `if` with no `else`; a loop that returns
+///   on a match). The fall-through edge is real, but may be taken only for inputs
+///   the program never produces — phpstan-src's own `src/` carries two such shapes
+///   and passes its own missing-return rule. [`TYPE_RETURN_MAYBE_MISSING_ID`],
+///   `Strict` floor.
+///
+/// The discriminator is [`body_has_terminator`], which is a *separate question*
+/// from the fold, not a refinement of it — see its own docs.
+///
 /// # What has to be proven, and what is deliberately not
 ///
 /// Two independent premises, both required:
@@ -839,6 +860,39 @@ pub const CLASS_CONST_UNDEFINED_ID: &str = "class-const.undefined";
 /// and is this id's one named over-report risk; inferring `never` from a callee's
 /// own `BodyEnd` is exactly what a later consumer of this foundation can add.
 pub const TYPE_RETURN_MISSING_ID: &str = "type.return-missing";
+
+/// The registry id for the **possibly** leg of [`TYPE_RETURN_MISSING_ID`]
+/// (ADR-0078 §1.3's `maybe-` convention, issue #199): a function-like whose body
+/// falls through *and* returns, throws or exits somewhere — so the fatal is real
+/// but reached only along the paths the returns do not cover.
+///
+/// The consequence is the same fatal, witnessed identically:
+///
+/// ```text
+/// TypeError: f(): Return value must be of type int, none returned
+/// ```
+///
+/// so this is **proof** layer like its definite sibling. What differs is the
+/// *floor*: `Strict`, not `Default`. It is the first proof-layer id at that rung,
+/// and it is there for the reason ADR-0078 §1.3 names the convention for — the
+/// possibly-leg is registered and emitted rather than scoped out of existence, but
+/// it does not print on a bare `steins check`.
+///
+/// # Why the floor, in one measurement
+///
+/// phpstan-src's `src/` passes PHPStan's own `MissingReturnRule` and still carries
+/// this shape twice — `TypeNodeResolver.php:697` and `ClassNameUsageLocation.php:128`,
+/// each a no-`default` `switch` over a string whose every case returns. The escape
+/// edge exists in the CFG; the inputs that take it do not exist in the program.
+/// Reporting that at `Default` would put a whole class of "correct by construction,
+/// unprovable by analysis" code in front of every user on a bare check, which is
+/// the crying-wolf failure the floor ladder exists to prevent. Reporting it at
+/// `Strict` keeps it named, addressable and measurable.
+///
+/// Every premise, silence leg and recorded obstacle is [`TYPE_RETURN_MISSING_ID`]'s
+/// — the two ids differ in exactly one predicate, [`body_has_terminator`], and are
+/// disjoint by construction, so no site can ever report both.
+pub const TYPE_RETURN_MAYBE_MISSING_ID: &str = "type.return-maybe-missing";
 
 // end return missing (ADR-0078, issue #199)
 
@@ -934,6 +988,7 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // end untyped surface (ADR-0078, issue #200)
     // return missing (ADR-0078, issue #199)
     TYPE_RETURN_MISSING_ID,
+    TYPE_RETURN_MAYBE_MISSING_ID,
     // end return missing (ADR-0078, issue #199)
 ];
 
@@ -15402,8 +15457,10 @@ fn check_foreach_subject(
 
 // return missing (ADR-0078, issue #199)
 
-/// Every function-like body in this file, judged for `type.return-missing`
-/// ([`TYPE_RETURN_MISSING_ID`]).
+/// Every function-like body in this file, judged for the return-missing pair —
+/// [`TYPE_RETURN_MISSING_ID`] and its `maybe-` sibling
+/// [`TYPE_RETURN_MAYBE_MISSING_ID`]. Both premises are shared; one predicate,
+/// [`body_has_terminator`], routes the finding between them.
 ///
 /// Env-free and dead-region-free by design. The premise is a *declaration* plus
 /// the ADR-0078 reachability foundation's structural verdict, neither of which a
@@ -15453,19 +15510,35 @@ fn check_return_missing(cx: &Cx, never_returning: &HashSet<String>, out: &mut Ve
             continue;
         }
 
+        // The definite/possibly discriminator (ADR-0078 §1.3). A body that exits
+        // NOWHERE fatals on every execution — the stub/test-double class, and the
+        // definite id. A body that exits somewhere but not on every path fatals only
+        // along the uncovered edge, which is the `maybe-` sibling's whole subject.
+        // The two ids are disjoint by construction: one predicate decides.
+        let conditional = body_has_terminator(&scope.stmts);
+
         let declared = cx.tree().text_at(hint.span).unwrap_or("the declared type").trim();
         let (subject, php_subject) = return_missing_subject(cx, scope);
         let pos = cx.tree().position(hint.span.start);
-        out.push(Diagnostic {
-            id: TYPE_RETURN_MISSING_ID,
-            path: cx.path().to_owned(),
-            line: pos.line,
-            column: pos.column,
-            message: format!(
+        let message = if conditional {
+            format!(
+                "{subject} declares a return type of {declared} and returns on some paths, but \
+                 one path falls through to the end — PHP fatals there with \"{php_subject}(): \
+                 Return value must be of type {declared}, none returned\""
+            )
+        } else {
+            format!(
                 "{subject} declares a return type of {declared} but its body falls through \
                  to the end — PHP fatals there with \"{php_subject}(): Return value must be of \
                  type {declared}, none returned\""
-            ),
+            )
+        };
+        out.push(Diagnostic {
+            id: if conditional { TYPE_RETURN_MAYBE_MISSING_ID } else { TYPE_RETURN_MISSING_ID },
+            path: cx.path().to_owned(),
+            line: pos.line,
+            column: pos.column,
+            message,
             facet: None,
             fix: None,
         });

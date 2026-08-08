@@ -2263,6 +2263,33 @@ pub fn body_end(stmts: &[Stmt]) -> BodyEnd {
     if undecided { BodyEnd::Unknown } else { BodyEnd::FallsThrough }
 }
 
+/// Whether a statement list contains a **function exit** anywhere at all — a
+/// `return`, a `throw`, an `exit`/`die` — however deeply nested, and whether or not
+/// it is on a path [`body_end`] can see.
+///
+/// The second question of the foundation, and deliberately a *separate* one from
+/// [`body_end`]. That answers "does control reach the end"; this answers "does the
+/// body exit anywhere". Together they split a falling-through body into two
+/// populations that the zero-FP policy floors differently (ADR-0078 §1.3, the
+/// `maybe-` convention):
+///
+/// * **no exit anywhere** — a stub, an empty body, a body of pure side effects.
+///   *Every* execution runs off the end, so the consequence is unconditional.
+/// * **an exit somewhere, but not on every path** — the shape a `return` in every
+///   taken arm with an uncovered escape edge produces (a no-`default` `switch`
+///   whose every case returns, an `if` with no `else`, a loop that returns on a
+///   match). The fall-through edge exists but may be taken only for inputs the
+///   program never sees, which is exactly the definite/possibly boundary.
+///
+/// It reads [`Stmt::has_terminator`], which the lowering computed over the **whole
+/// CST subtree** — so a `return` inside a `foreach` body, a `try` block or a
+/// `switch` case counts, even though the trace IR erased those constructs into an
+/// opaque node with nothing inside.
+#[must_use]
+pub fn body_has_terminator(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| s.has_terminator)
+}
+
 // end reachability foundation (ADR-0078, issue #199)
 
 /// A trace entry plus the local variables it feeds into a call.
@@ -2313,6 +2340,21 @@ pub struct Stmt {
     /// [`StmtKind::Opaque`] whose `end` is [`BodyEnd::Terminates`] too. Nothing
     /// may infer one field from the other.
     pub end: BodyEnd,
+    /// Whether this statement's **whole CST subtree** contains a function exit — a
+    /// `return`, a `throw`, an `exit`/`die` (ADR-0078 §5, issue #199). Nested
+    /// function-likes are not counted: their exits are their own scope's.
+    ///
+    /// Orthogonal to [`Self::end`], and that is the point. `end` asks *does control
+    /// reach past this statement*; this asks *does the subtree exit the function
+    /// anywhere*. `if ($c) { return 1; }` answers `FallsThrough` and `true`;
+    /// `foreach ($xs as $x) { $s .= $x; }` answers `FallsThrough` and `false`. The
+    /// pair is what splits a falling-through body into the unconditional and the
+    /// conditional class — see [`body_has_terminator`].
+    ///
+    /// Computed from the CST for the same reason `end` is: the trace IR erases a
+    /// loop body, a `try` block and an unstructured `switch` case entirely, so a
+    /// `return` inside any of them is invisible from the IR alone.
+    pub has_terminator: bool,
 }
 
 impl Stmt {
@@ -2332,6 +2374,7 @@ impl Stmt {
             invalidated,
             string_contexts: Vec::new(),
             end: BodyEnd::FallsThrough,
+            has_terminator: false,
         }
     }
 }
@@ -7050,6 +7093,7 @@ fn build_closure_scope_from_arrow(
         // which is precisely why `fn () => …` can never be a `type.return-missing`
         // site, no matter what it declares (ADR-0078, issue #199).
         end: BodyEnd::Terminates,
+        has_terminator: true,
     };
     let mut opaque = Vec::new();
     scan_opaque(&Node::Expression(af.expression), &mut opaque, false);
@@ -7229,6 +7273,7 @@ fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         // The reachability foundation's central fill (ADR-0078, issue #199) — read
         // off the CST statement, never off the lowered `kind`. See `stmt_end`.
         end: stmt_end(s),
+        has_terminator: subtree_has_function_exit(&Node::Statement(s)),
         ..stmt
     });
 }
@@ -7446,6 +7491,26 @@ fn loop_end(infinite: bool, node: &Node<'_, '_>) -> BodyEnd {
         return BodyEnd::FallsThrough;
     }
     if subtree_has_exit_jump(node) { BodyEnd::Unknown } else { BodyEnd::Terminates }
+}
+
+/// Whether `node`'s subtree contains a **function exit** — a `return`, a `throw`
+/// or an `exit`/`die` — at any depth (ADR-0078 §5). Nested function-likes are their
+/// own scopes and are not descended: a `return` inside a closure exits the closure,
+/// not the body that defines it.
+///
+/// Deliberately **not** counting `break`/`continue`: those leave a construct, never
+/// the function, and a `switch` full of `break`s is no evidence at all that the
+/// author meant to return something.
+fn subtree_has_function_exit(node: &Node<'_, '_>) -> bool {
+    match node {
+        Node::Return(_)
+        | Node::Throw(_)
+        | Node::ExitConstruct(_)
+        | Node::DieConstruct(_)
+        | Node::HaltCompiler(_) => true,
+        Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_) => false,
+        _ => node.children().iter().any(subtree_has_function_exit),
+    }
 }
 
 /// Whether `node`'s subtree contains a `break` or a `goto` — a jump that could
@@ -7713,7 +7778,12 @@ fn lower_arm_body(expr: &Expression<'_>) -> Vec<Stmt> {
     // This path bypasses `lower_stmt`, so it owns its own terminality fill
     // (ADR-0078, issue #199) — from the arm's expression, the same `expr_end` a
     // statement-position expression gets.
-    vec![Stmt { span: to_span(expr.span()), end: expr_end(expr), ..st }]
+    vec![Stmt {
+        span: to_span(expr.span()),
+        end: expr_end(expr),
+        has_terminator: subtree_has_function_exit(&Node::Expression(expr)),
+        ..st
+    }]
 }
 
 /// Structure a statement-position `match ($subject) { … }` (ADR-0031 Part B).

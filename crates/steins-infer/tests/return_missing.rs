@@ -11,6 +11,24 @@
 //! TypeError: {closure:Command line code:1}(): Return value must be of type int, none returned
 //! ```
 //!
+//! # The definite/possibly split
+//!
+//! Two ids come off one judgment, and the discriminator is a *second* question —
+//! does the body exit the function anywhere at all (`body_has_terminator`)?
+//!
+//! * **`type.return-missing`** (proof / `Default`) — the body falls through and
+//!   exits nowhere: a stub, an empty body, pure side effects. *Every* execution
+//!   fatals.
+//! * **`type.return-maybe-missing`** (proof / `Strict`) — the body falls through
+//!   and *does* return/throw/exit somewhere, just not on every path. Same fatal,
+//!   reached only along the uncovered edge. Floored at `strict` because that class
+//!   is dominated by code that is correct by construction and unprovable by
+//!   analysis — phpstan-src's own `src/` carries two, verbatim below, and passes
+//!   its own missing-return rule.
+//!
+//! Every firing fixture below asserts which of the two it routes to, because a
+//! finding on the wrong id is a floor mistake, not a wording one.
+//!
 //! # The asymmetry these tests pin
 //!
 //! `BodyEnd::Unknown` — a body whose exit edges the judgment cannot bound — is
@@ -24,15 +42,40 @@
 //! No sidecar, no env, no folder: both premises are declaration-and-shape facts,
 //! so every fixture uses the sound-subset [`NoFold`].
 
-use steins_infer::{Diagnostic, NoFold, TYPE_RETURN_MISSING_ID, check_full};
+use steins_infer::profile::ProfileConfigs;
+use steins_infer::{
+    Diagnostic, Floor, Layer, NoFold, TYPE_RETURN_MAYBE_MISSING_ID, TYPE_RETURN_MISSING_ID,
+    check_full, layer, surface_floor,
+};
 use steins_syntax::SourceTree;
 
+/// Every finding of the return-missing PAIR — never one id alone, so a fixture
+/// that silently migrates from one to the other fails a floor assertion rather
+/// than passing as "still fires".
 fn diags(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
     check_full(&tree, "test.php", &mut NoFold, true)
         .into_iter()
-        .filter(|d| d.id == TYPE_RETURN_MISSING_ID)
+        .filter(|d| d.id == TYPE_RETURN_MISSING_ID || d.id == TYPE_RETURN_MAYBE_MISSING_ID)
         .collect()
+}
+
+/// Exactly one finding, on the **definite** id: the body exits nowhere, so every
+/// execution fatals.
+fn definite(src: &str) -> Diagnostic {
+    let d = diags(src);
+    assert_eq!(d.len(), 1, "{d:#?}");
+    assert_eq!(d[0].id, TYPE_RETURN_MISSING_ID, "the unconditional class: {d:#?}");
+    d.into_iter().next().expect("one finding")
+}
+
+/// Exactly one finding, on the **`maybe-` sibling**: the body returns somewhere,
+/// just not on every path.
+fn maybe(src: &str) -> Diagnostic {
+    let d = diags(src);
+    assert_eq!(d.len(), 1, "{d:#?}");
+    assert_eq!(d[0].id, TYPE_RETURN_MAYBE_MISSING_ID, "the conditional class: {d:#?}");
+    d.into_iter().next().expect("one finding")
 }
 
 fn assert_silent(src: &str, why: &str) {
@@ -41,38 +84,217 @@ fn assert_silent(src: &str, why: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Firing: bodies whose fall-through the foundation proves.
+// Registry wiring for the pair: the layer is shared (same fatal), the floor is
+// not (the corpus measurement).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_pair_shares_a_layer_and_splits_on_the_floor() {
+    // The consequence is one `TypeError`, so the layer cannot differ — a proof
+    // finding does not become a contract finding because its path is conditional.
+    assert_eq!(layer(TYPE_RETURN_MISSING_ID), Some(Layer::Proof));
+    assert_eq!(layer(TYPE_RETURN_MAYBE_MISSING_ID), Some(Layer::Proof));
+    // The floor is where the measurement lands: unconditional on a bare check,
+    // conditional only under `--profile strict`.
+    assert_eq!(surface_floor(TYPE_RETURN_MISSING_ID), Some(Floor::Default));
+    assert_eq!(surface_floor(TYPE_RETURN_MAYBE_MISSING_ID), Some(Floor::Strict));
+}
+
+// ---------------------------------------------------------------------------
+// Firing, class 1 — UNCONDITIONAL fall-through: the body exits nowhere, so every
+// execution fatals. `type.return-missing`, `Default` floor.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn fires_on_plain_fall_through() {
-    let d = diags(
+    let d = definite(
         "<?php
 function f(): int {
     $x = 1;
 }
 ",
     );
-    assert_eq!(d.len(), 1, "{d:#?}");
-    assert_eq!(d[0].line, 2, "reported at the declaration: {d:#?}");
-    assert!(d[0].message.contains("function f"), "{}", d[0].message);
+    assert_eq!(d.line, 2, "reported at the declaration: {d:#?}");
+    assert!(d.message.contains("function f"), "{}", d.message);
     assert!(
-        d[0].message.contains("Return value must be of type int, none returned"),
+        d.message.contains("Return value must be of type int, none returned"),
         "the witnessed PHP sentence: {}",
-        d[0].message
+        d.message
     );
 }
 
 #[test]
 fn fires_on_empty_body() {
-    let d = diags("<?php\nfunction f(): int {\n}\n");
-    assert_eq!(d.len(), 1, "an empty statement list falls through: {d:#?}");
+    // The corpus's own dominant shape: a test double / stub `function (): bool {}`.
+    definite("<?php\nfunction f(): int {\n}\n");
+}
+
+#[test]
+fn fires_on_a_stub_closure() {
+    let d = definite(
+        "<?php
+$f = function (): bool {
+};
+",
+    );
+    assert!(d.message.contains("closure"), "{}", d.message);
+}
+
+#[test]
+fn fires_on_a_side_effect_only_body() {
+    definite(
+        "<?php
+function f(): int {
+    log_it('x');
+    $this->counter++;
+}
+",
+    );
+}
+
+#[test]
+fn fires_on_loop_then_nothing() {
+    // A `foreach` always has an exit edge (the iteration exhausts), so the body
+    // provably falls through. No `return` anywhere in it, so this is the
+    // unconditional class: every call runs the loop and then off the end.
+    definite(
+        "<?php
+function f(): int {
+    foreach ($xs as $x) {
+        echo $x;
+    }
+}
+",
+    );
+}
+
+#[test]
+fn fires_on_conditional_while_then_nothing() {
+    // `while ($c)` can exit on a false condition — an exit edge, so FallsThrough.
+    definite(
+        "<?php
+function f(): int {
+    while ($c) {
+        $x = 1;
+    }
+}
+",
+    );
+}
+
+#[test]
+fn fires_on_a_method() {
+    let d = definite(
+        "<?php
+class A {
+    public function m(): string {
+        $x = 1;
+    }
+}
+",
+    );
+    assert!(d.message.contains("A::m"), "{}", d.message);
+    assert!(
+        d.message.contains("Return value must be of type string, none returned"),
+        "{}",
+        d.message
+    );
+}
+
+#[test]
+fn fires_on_a_closure() {
+    // Witnessed: a closure body falls off the same fatal, named `{closure:…}()`.
+    let d = definite(
+        "<?php
+$f = function (): int {
+    $x = 1;
+};
+",
+    );
+    assert!(d.message.contains("closure"), "{}", d.message);
+}
+
+#[test]
+fn fires_on_a_nullable_return_type() {
+    // `?int` is not optional: PHP demands an explicit `return null;`.
+    let d = definite("<?php\nfunction f(): ?int {\n    $x = 1;\n}\n");
+    assert!(
+        d.message.contains("Return value must be of type ?int, none returned"),
+        "{}",
+        d.message
+    );
+}
+
+#[test]
+fn fires_on_a_union_return_type() {
+    let d = definite("<?php\nfunction f(): int|string {\n    $x = 1;\n}\n");
+    assert!(d.message.contains("int|string"), "{}", d.message);
+}
+
+#[test]
+fn fires_on_types_that_lower_to_no_native_type() {
+    // `: array` / `: mixed` lower to no `NativeType` at all, yet both fatal
+    // identically — which is why the premise reads the RAW hint.
+    for ty in ["array", "mixed"] {
+        let src = format!("<?php\nfunction f(): {ty} {{\n    $x = 1;\n}}\n");
+        let d = definite(&src);
+        assert!(d.message.contains(ty), "{ty}: {}", d.message);
+    }
+}
+
+#[test]
+fn fires_on_a_match_statement_that_neither_returns_nor_covers() {
+    // A `match` with a `default` whose arms are plain calls: falls through, and no
+    // `return`/`throw`/`exit` anywhere — the unconditional class.
+    definite(
+        "<?php
+function f(): int {
+    match ($x) {
+        1 => foo(),
+        default => bar(),
+    };
+}
+",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Firing, class 2 — CONDITIONAL fall-through: the body returns/throws somewhere,
+// just not on every path. `type.return-maybe-missing`, `Strict` floor.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_conditional_finding_is_absent_below_strict_and_present_at_strict() {
+    // The floor's whole purpose, asserted through the surface rather than argued.
+    let src = "<?php
+function f(): int {
+    if ($c) {
+        return 1;
+    }
+}
+";
+    let tree = SourceTree::parse(src);
+    let raw = check_full(&tree, "test.php", &mut NoFold, true);
+    let finding = raw
+        .iter()
+        .find(|d| d.id == TYPE_RETURN_MAYBE_MISSING_ID)
+        .expect("the conditional finding is emitted");
+    for profile in ["default", "contracts", "throws-direct"] {
+        let surface = ProfileConfigs::default().resolve(Some(profile)).expect("built-in");
+        assert!(
+            !surface.is_surfaced(finding),
+            "`{profile}` must not show the conditional leg"
+        );
+    }
+    let strict = ProfileConfigs::default().resolve(Some("strict")).expect("built-in");
+    assert!(strict.is_surfaced(finding), "`strict` is where the conditional leg lives");
 }
 
 #[test]
 fn fires_on_if_without_else() {
-    // The implicit empty `else` IS a terminator-free path to the closing brace.
-    let d = diags(
+    // The implicit empty `else` IS a terminator-free path to the closing brace —
+    // and the `return` in the taken arm is what makes it the conditional class.
+    let d = maybe(
         "<?php
 function f(): int {
     if ($c) {
@@ -81,13 +303,18 @@ function f(): int {
 }
 ",
     );
-    assert_eq!(d.len(), 1, "{d:#?}");
-    assert_eq!(d[0].line, 2, "{d:#?}");
+    assert_eq!(d.line, 2, "{d:#?}");
+    assert!(d.message.contains("returns on some paths"), "{}", d.message);
+    assert!(
+        d.message.contains("Return value must be of type int, none returned"),
+        "the same witnessed sentence as the definite leg: {}",
+        d.message
+    );
 }
 
 #[test]
 fn fires_when_only_one_arm_returns() {
-    let d = diags(
+    maybe(
         "<?php
 function f(): int {
     if ($c) {
@@ -98,12 +325,11 @@ function f(): int {
 }
 ",
     );
-    assert_eq!(d.len(), 1, "the else arm falls through: {d:#?}");
 }
 
 #[test]
 fn fires_when_an_elseif_chain_leaves_a_hole() {
-    let d = diags(
+    maybe(
         "<?php
 function f(): int {
     if ($c) {
@@ -114,119 +340,120 @@ function f(): int {
 }
 ",
     );
-    assert_eq!(d.len(), 1, "no else — the no-branch path reaches the end: {d:#?}");
 }
 
 #[test]
-fn fires_on_loop_then_nothing() {
-    // A `foreach` always has an exit edge (the iteration exhausts), so the body
-    // provably falls through even though the loop body itself is opaque.
-    let d = diags(
+fn fires_when_a_loop_returns_on_a_match_but_the_collection_may_be_empty() {
+    // The escape edge is "no element matched" — a real edge, taken for inputs that
+    // may never occur. The `return` lives inside an `Opaque` loop body, invisible
+    // to the trace IR, which is why the discriminator is computed over the CST.
+    maybe(
         "<?php
 function f(): int {
     foreach ($xs as $x) {
-        echo $x;
+        return $x;
     }
 }
 ",
     );
-    assert_eq!(d.len(), 1, "{d:#?}");
 }
 
 #[test]
-fn fires_on_conditional_while_then_nothing() {
-    // `while ($c)` can exit on a false condition — an exit edge, so FallsThrough.
-    let d = diags(
-        "<?php
-function f(): int {
-    while ($c) {
-        $x = 1;
-    }
-}
-",
-    );
-    assert_eq!(d.len(), 1, "{d:#?}");
-}
-
-#[test]
-fn fires_on_a_method() {
-    let d = diags(
-        "<?php
-class A {
-    public function m(): string {
-        $x = 1;
-    }
-}
-",
-    );
-    assert_eq!(d.len(), 1, "{d:#?}");
-    assert!(d[0].message.contains("A::m"), "{}", d[0].message);
-    assert!(
-        d[0].message.contains("Return value must be of type string, none returned"),
-        "{}",
-        d[0].message
-    );
-}
-
-#[test]
-fn fires_on_a_closure() {
-    // Witnessed: a closure body falls off the same fatal, named `{closure:…}()`.
-    let d = diags(
-        "<?php
-$f = function (): int {
-    $x = 1;
-};
-",
-    );
-    assert_eq!(d.len(), 1, "{d:#?}");
-    assert!(d[0].message.contains("closure"), "{}", d[0].message);
-}
-
-#[test]
-fn fires_on_a_nullable_return_type() {
-    // `?int` is not optional: PHP demands an explicit `return null;`.
-    let d = diags("<?php\nfunction f(): ?int {\n    $x = 1;\n}\n");
-    assert_eq!(d.len(), 1, "{d:#?}");
-    assert!(
-        d[0].message.contains("Return value must be of type ?int, none returned"),
-        "{}",
-        d[0].message
-    );
-}
-
-#[test]
-fn fires_on_a_union_return_type() {
-    let d = diags("<?php\nfunction f(): int|string {\n    $x = 1;\n}\n");
-    assert_eq!(d.len(), 1, "{d:#?}");
-    assert!(d[0].message.contains("int|string"), "{}", d[0].message);
-}
-
-#[test]
-fn fires_on_types_that_lower_to_no_native_type() {
-    // `: array` / `: mixed` lower to no `NativeType` at all, yet both fatal
-    // identically — which is why the premise reads the RAW hint.
-    for ty in ["array", "mixed"] {
-        let src = format!("<?php\nfunction f(): {ty} {{\n    $x = 1;\n}}\n");
-        let d = diags(&src);
-        assert_eq!(d.len(), 1, "{ty}: {d:#?}");
-        assert!(d[0].message.contains(ty), "{ty}: {}", d[0].message);
-    }
-}
-
-#[test]
-fn fires_after_a_match_statement_that_is_not_exhaustively_terminal() {
-    // A `match` with a `default` whose arms do not all terminate falls through.
-    let d = diags(
+fn fires_on_a_match_statement_with_a_throwing_arm_and_a_plain_default() {
+    maybe(
         "<?php
 function f(): int {
     match ($x) {
-        1 => foo(),
+        1 => throw new LogicException(),
         default => bar(),
     };
 }
 ",
     );
-    assert_eq!(d.len(), 1, "{d:#?}");
+}
+
+#[test]
+fn fires_on_the_phpstan_src_no_default_switch_shape() {
+    // `TypeNodeResolver.php:697` and `ClassNameUsageLocation.php:128`, reduced: a
+    // `switch` over a string parameter, no `default`, every case returns. The
+    // no-match edge exists in the CFG; the strings that take it do not exist in the
+    // program. phpstan-src passes its own `MissingReturnRule` on both.
+    maybe(
+        "<?php
+function resolve(string $name): string {
+    switch ($name) {
+        case 'int':
+            return 'integer';
+        case 'bool':
+            return 'boolean';
+        case 'float':
+            return 'double';
+    }
+}
+",
+    );
+}
+
+#[test]
+fn fires_on_the_phpstan_src_shape_inside_a_closure() {
+    // `TypeNodeResolver.php:697` is that switch inside a closure, which is where
+    // the shape actually sits.
+    let d = maybe(
+        "<?php
+$f = function (string $name): string {
+    switch ($name) {
+        case 'int':
+            return 'integer';
+        case 'bool':
+            return 'boolean';
+    }
+};
+",
+    );
+    assert!(d.message.contains("closure"), "{}", d.message);
+}
+
+#[test]
+fn fires_on_a_method_that_returns_in_a_guard_only() {
+    let d = maybe(
+        "<?php
+class A {
+    public function m(): string {
+        if ($this->ok) {
+            return $this->value;
+        }
+    }
+}
+",
+    );
+    assert!(d.message.contains("A::m"), "{}", d.message);
+}
+
+#[test]
+fn a_throw_counts_as_an_exit_sighting_but_a_break_does_not() {
+    // A `throw` in one arm is a function exit — conditional class.
+    maybe(
+        "<?php
+function f(): int {
+    if ($c) {
+        throw new LogicException();
+    }
+}
+",
+    );
+    // A `break` leaves a construct, never the function, so a body full of them is
+    // still the unconditional class.
+    definite(
+        "<?php
+function f(): int {
+    while ($c) {
+        if ($d) {
+            break;
+        }
+    }
+}
+",
+    );
 }
 
 // ---------------------------------------------------------------------------

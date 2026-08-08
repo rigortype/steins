@@ -9,18 +9,28 @@
 //! answers `Terminates` when it should answer `Unknown` is a false "this code is
 //! unreachable" waiting to happen, and no test on the tracer would ever see it.
 
-use steins_syntax::{BodyEnd, ScopeOwner, SourceTree, body_end};
+use steins_syntax::{BodyEnd, Scope, ScopeOwner, SourceTree, body_end, body_has_terminator};
+
+/// The lowered scope of `function f`, whose body is `body`.
+fn scope_of(body: &str) -> Scope {
+    let src = format!("<?php\nfunction f() {{\n{body}\n}}\n");
+    let tree = SourceTree::parse(&src);
+    tree.scopes()
+        .iter()
+        .find(|s| matches!(&s.owner, ScopeOwner::Function(n) if n == "f"))
+        .expect("the function scope")
+        .clone()
+}
 
 /// The [`body_end`] verdict for the body of `function f`, parsed from `body`.
 fn end_of(body: &str) -> BodyEnd {
-    let src = format!("<?php\nfunction f() {{\n{body}\n}}\n");
-    let tree = SourceTree::parse(&src);
-    let scope = tree
-        .scopes()
-        .iter()
-        .find(|s| matches!(&s.owner, ScopeOwner::Function(n) if n == "f"))
-        .expect("the function scope");
-    body_end(&scope.stmts)
+    body_end(&scope_of(body).stmts)
+}
+
+/// The [`body_has_terminator`] verdict for the same body — the foundation's
+/// *second* question, and the definite/possibly discriminator.
+fn exits_of(body: &str) -> bool {
+    body_has_terminator(&scope_of(body).stmts)
 }
 
 // ---------------------------------------------------------------------------
@@ -206,4 +216,75 @@ fn the_arm_join_is_the_documented_lattice() {
     assert_eq!(BodyEnd::join_arms([Terminates, Unknown]), Unknown);
     // A provably terminator-free arm decides the construct whatever the rest do.
     assert_eq!(BodyEnd::join_arms([Unknown, FallsThrough]), FallsThrough);
+}
+
+// ---------------------------------------------------------------------------
+// The second question: does the body exit ANYWHERE (`body_has_terminator`)?
+// Orthogonal to `body_end`, and the discriminator that splits `type.return-missing`
+// from its `maybe-` sibling (ADR-0078 §1.3, issue #199).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_body_with_no_exit_anywhere_reports_none() {
+    assert!(!exits_of(""));
+    assert!(!exits_of("$x = 1;"));
+    assert!(!exits_of("log_it('x');"));
+    assert!(!exits_of("foreach ($xs as $x) { echo $x; }"));
+    assert!(!exits_of("match ($x) { 1 => foo(), default => bar() };"));
+    // `break` and `continue` leave a construct, never the function.
+    assert!(!exits_of("while ($c) { if ($d) { break; } else { continue; } }"));
+    assert!(!exits_of("switch ($x) { case 1: $y = 1; break; default: break; }"));
+}
+
+#[test]
+fn every_function_exit_form_counts() {
+    assert!(exits_of("return 1;"));
+    assert!(exits_of("throw new E();"));
+    assert!(exits_of("exit;"));
+    assert!(exits_of("exit(1);"));
+    assert!(exits_of("die('x');"));
+}
+
+#[test]
+fn an_exit_nested_in_an_arm_or_an_opaque_construct_counts() {
+    // Inside an `if` arm — visible in the trace, but only via the sub-trace.
+    assert!(exits_of("if ($c) { return 1; }"));
+    // Inside a `match` arm.
+    assert!(exits_of("match ($x) { 1 => throw new E(), default => bar() };"));
+    // Inside constructs the trace IR erases into an opaque node with nothing
+    // inside — which is exactly why this is computed over the CST.
+    assert!(exits_of("foreach ($xs as $x) { return $x; }"));
+    assert!(exits_of("while ($c) { throw new E(); }"));
+    assert!(exits_of("try { return 1; } catch (Throwable $e) { $x = 0; }"));
+    assert!(exits_of("switch ($x) { case 1: return 1; case 2: $y = 2; }"));
+    assert!(exits_of("do { exit; } while ($c);"));
+}
+
+#[test]
+fn a_nested_function_likes_own_exit_does_not_count() {
+    // A `return` inside a closure exits the closure, not the body defining it.
+    assert!(!exits_of("$f = function () { return 1; };"));
+    assert!(!exits_of("$f = fn () => 1;"));
+    assert!(!exits_of("function inner() { return 1; }"));
+}
+
+#[test]
+fn the_two_questions_are_independent() {
+    // All four combinations occur, which is what makes them two questions.
+    assert_eq!((end_of("return 1;"), exits_of("return 1;")), (BodyEnd::Terminates, true));
+    assert_eq!(
+        (end_of("while (true) { $x = 1; }"), exits_of("while (true) { $x = 1; }")),
+        (BodyEnd::Terminates, false),
+        "an infinite loop terminates the body without ever exiting the function"
+    );
+    assert_eq!(
+        (end_of("if ($c) { return 1; }"), exits_of("if ($c) { return 1; }")),
+        (BodyEnd::FallsThrough, true),
+        "the conditional class"
+    );
+    assert_eq!(
+        (end_of("$x = 1;"), exits_of("$x = 1;")),
+        (BodyEnd::FallsThrough, false),
+        "the unconditional class"
+    );
 }
