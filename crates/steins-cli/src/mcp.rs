@@ -9,7 +9,7 @@
 //! re-derives a fact: the plan, the refusals, the oracle counts and the
 //! post-check all come from [`crate::plan_transform_run`], the function
 //! `steins transform` itself calls, and a finding is spelled by
-//! [`crate::finding_json`], the same one `check --format json` prints.
+//! [`crate::render::finding_json`], the same one `check --format json` prints.
 //!
 //! # Approve is a step, not a flag
 //!
