@@ -58,9 +58,12 @@ Enumerated so a reader can predict silence rather than discover it:
 - **Opaque contract types** — everything `ContractTy::Opaque` covers:
   conditionals, templates, const fetches, `$this`/`self`/`static`, offset-access
   types. See [contract-types.md](contract-types.md).
-- **Provenance-flavored string types** — `class-string`, `literal-string`, and
+- **Provenance-flavored string types** — `literal-string`, `callable-string` and
   kin are non-extensional (ADR-0038), so they can decide `No` for a non-string
-  but never `Yes` for a string.
+  but never `Yes` for a string. `class-string` is **not** one of them since
+  issue #236: it is a value property carried as a string refinement, refuting
+  what the identifier grammar rules out, though a concrete identifier still
+  answers `Maybe` for want of the class table.
 - **No sidecar** — the sound subset. Anything requiring PHP execution widens.
 - **A poisoned scope** — `extract`/`compact`, `global`, `static $x`,
   variable-variables, reference assignment, by-ref closure capture, or

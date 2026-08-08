@@ -14,11 +14,28 @@ the handbook is reference you can dip into later.
 ## Installing Steins
 
 Steins is a tool, not a library — like a linter or a compiler,
-it analyzes your project but is not part of its runtime. **Do
-not add it to your `composer.json`.** Build it on its own and
-point it at your project.
+it analyzes your project but is never loaded by its runtime.
+Four channels install it; they differ only in *where the version
+lives*. [The user manual's install
+chapter](../user-manual/01-installation-and-quickstart.md) covers
+the trade-off in full.
 
-From a checkout of the workspace:
+**Composer**, when the analyzer should be pinned beside the code
+it analyzes — the version goes in `composer.lock`, so CI and
+every developer resolve the same one. This is the right default
+for a project:
+
+```sh
+composer require --dev typedduck/steins
+```
+
+What that installs is a small PHP shim, not the analyzer: on
+first use it downloads the release binary matching the installed
+version, verifies it against the published sha256, and runs it.
+Requires PHP 8.1+.
+
+**Homebrew**, when you want `steins` on `PATH` for any project
+on the machine:
 
 ```sh
 brew install rigortype/tap/steins
@@ -42,15 +59,18 @@ crates.io rejects crates with git dependencies. From a checkout,
 `cargo install --path crates/steins-cli` works, or run
 `target/release/steins` directly after a release build.
 
-The binary has six subcommands — `check`, `annotate`,
-`transform`, `doctor`, `version`, `license` — and no `--help`. Run it with no arguments
-to see the surface:
+The binary has eight subcommands — `check`, `annotate`,
+`transform`, `effect-diff`, `doctor`, `mcp`, `version`,
+`license` — and no `--help`. Run it with no arguments to see the
+surface:
 
 ```text
-usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor-diagnostics] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
-       steins annotate [--no-php] <file.php>
-       steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--format text|json] <paths...>
+usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
+       steins annotate [--no-php] [--format text|json] <file.php>
+       steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--asserted-subjects] [--format text|json] <paths...>
+       steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
        steins doctor [--no-php] [--baseline <path>] [path]
+       steins mcp
        steins version | -v | --version
        steins license
 ```
