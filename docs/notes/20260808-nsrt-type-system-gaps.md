@@ -546,3 +546,329 @@ boundary), 18 generic-arm-plus-class, 14 object accessories
 not built: there is no member-level vocabulary for them to fold into), 9 callable
 arms, 6 `object{…}`, 5 accessory-on-a-class-base, 4 `$this`/`static`, 3 other,
 1 `Generator&iterable`.
+
+## 2026-08-08 — the reach-trio probe (#257)
+
+Same instrument, master `9427a73`, phpstan-src `55a7732`. This is the first
+section measured on the **repaired** sidecar (#245/#246): the report's new
+posture line reads `fold surface: sidecar-backed throughout`, so every §B count
+above — taken under the degraded sidecar — is restated here before anything is
+priced. No engine code was written for this probe.
+
+### The retaken baseline
+
+| verdict | n |
+| --- | ---: |
+| `match` | 1,715 |
+| `equal` | 138 |
+| `subsumed` | 246 |
+| **admissible** | **2,099** |
+| `differ` | 11,707 |
+| `unsupported` | 1,731 |
+| `skipped` | 308 |
+
+15,845 assertType observations, 15,537 measured — **identical to the #238
+"after" row**, verdict for verdict. The corpus did not drift: the same
+phpstan-src commit, the same assertion total. (The file count reads 1,644 here
+against the 1,602 at the head of this note; the assertion total is unchanged, so
+that is a counting difference in the walker, not corpus movement.) The repaired
+sidecar changed no count — which is itself the useful result, because it means
+the §B ranking was never distorted by the degradation it was measured under.
+
+The trio, restated against that baseline:
+
+| fixture | assertions | residual | renders `unknown` | §B said |
+| --- | ---: | ---: | ---: | ---: |
+| `loose-comparisons.php` | 369 | 369 | 369 | 369 |
+| `filterVar.php` | 315 | 315 | 315 | 276 + 39 |
+| `filter-var.php` | 121 | 121 | 121 | 117 |
+| `binary.php` | 319 | 296 | 272 | 251 |
+| `integer-range-types.php` | 210 | 204 | 203 | 182 |
+
+*residual* = `differ` + `unsupported`. The **priced ceiling** subtracts the rows
+no computation can win: `unsupported` vocabulary (fixed by `expected` alone) and
+rows whose `expected` is the top type `mixed` (the harness's top-type veto, §A;
+`got` is `mixed` for exactly zero rows corpus-wide, so a literal `match` is
+unreachable too):
+
+| fixture | residual | − `unsupported` | − expected `mixed` | **ceiling** |
+| --- | ---: | ---: | ---: | ---: |
+| `loose-comparisons.php` | 369 | 0 | 0 | **369** |
+| `filterVar.php` | 315 | 0 | 39 | **276** |
+| `filter-var.php` | 121 | 2 | 1 | **118** |
+| `binary.php` | 296 | 23 | 0 | **273** |
+| `integer-range-types.php` | 204 | 20 | 2 | **182** |
+
+Class 2 (*vocabulary missing downstream*) is therefore **45 rows across all
+five fixtures**, and 42 of the 45 are not vocabulary work at all: 31 are
+`*ERROR*`/`*NEVER*` markers, 8 are `mixed~…` cuts closed as ADR-0030 registry
+entry 6 (#237), 2 are `literal-string&non-falsy-string` (`StrOpaque`, #240's own
+boundary), 1 is `class-string<static>` (issue #10). The real remainder is three
+rows: `1.0E-50`, `decimal-int-string`, and one `other`.
+
+### The structural finding: the trio shares one missing IR node
+
+Read against what Steins renders — this note's standing method — the three
+fixtures do not decompose into three rule families. They decompose into **one
+missing node in the trace IR**, and the witness is a single file:
+
+```php
+\PHPStan\dumpType(1 + 1);          // unknown
+\PHPStan\dumpType(1.2 + 1.4);      // unknown
+\PHPStan\dumpType($integer * 10);  // unknown
+\PHPStan\dumpType(5 & 3);          // unknown
+\PHPStan\dumpType(1 == 1);         // unknown
+\PHPStan\dumpType(1 === 1);        // unknown
+\PHPStan\dumpType(true && false);  // unknown
+\PHPStan\dumpType(true ? 1 : 2);   // unknown
+\PHPStan\dumpType('a' . 'b');      // 'ab'          <= the one operator wired
+\PHPStan\dumpType(intdiv(7, 2));   // 3             <= the fold lane works
+```
+
+`ArgValue` carries exactly one binary operator — `Concat` (issue #59) — plus
+`Coalesce` and `Ternary`. Every arithmetic, bitwise, comparison and logical
+operator lowers to `ArgValue::Other`, so nothing downstream is ever asked. This
+is not a per-rule computation gap; it is that the value IR has no expression to
+compute over.
+
+Two facts make the slice much smaller than that framing suggests:
+
+- **The operand lowering already exists.** `OperandSiteKind::Binary { op, lhs,
+  rhs }` carries both operands as `ArgValue` today, for the `binaryOp.invalid`
+  diagnostic (issue #191). The syntax side is done and tested; the value side
+  has no counterpart.
+- **The comparison semantics already exist.** `eval_cmp` (steins-infer)
+  implements `=== !== == != < <= > >=` over candidate value sets, on top of
+  `php_loose_eq` — a full PHP 8 loose-equality decision procedure with the
+  numeric-string, array, bool-cast and null arms — and it already applies the
+  ADR-0031 OneOf rule (all member pairs agree → that verdict, else `Maybe`).
+  It is reachable only from *condition* position.
+
+Swept corpus-wide, residual rows whose asserted expression carries a top-level
+arithmetic / bitwise / comparison / logical operator:
+
+| | n |
+| --- | ---: |
+| residual rows with such an operator | **1,501** (61 fixtures) |
+| of which Steins renders `unknown` | 1,495 |
+| of which `*ERROR*`/`*NEVER*` | 209 |
+| **priced ceiling** | **1,292** |
+
+(Lower bound: single-line `assertType` only — 12,902 of 13,438 residual rows
+parse — and unary/increment forms are excluded.) Ranked: `loose-comparisons`
+369, `bcmath-number` 291, `integer-range-types` 148, `binary` 141, `pow` 70,
+`gmp-operators` 53, `comparison-operators` 49, `bitwise` 48, `enums` 47. The
+`bcmath-number`/`gmp-operators` 344 are operator *overloading* on objects — a
+different rule that rides the same node.
+
+### `loose-comparisons.php`: 369 rows, six rules, closed
+
+Every row is the **value of a comparison expression**, not narrowing carried
+into a branch: 360 `==`, 8 ordering, 1 `===`, and the whole fixture asserts only
+`true` (69), `false` (210) or `bool` (90). Classified by whether each operand's
+type is *finite* in the value domain (a `Singleton`, or a union of them — what
+`operand_values` can enumerate):
+
+| n | operands | expected `true`/`false` | expected `bool` |
+| ---: | --- | ---: | ---: |
+| 228 | both finite | 214 | 14 |
+| 120 | one abstract | 57 | 63 |
+| 21 | both abstract | 8 | 13 |
+
+There is a **closed set of six rules**, and it is the whole population — the
+#235 shape, at a different scale:
+
+| n | rule |
+| ---: | --- |
+| 214 | `eval_cmp` decides over finite value sets — **already implemented** |
+| 90 | the `Maybe` floor: an undecided comparison renders `bool` |
+| 25 | array vs scalar family disjointness (`$int == $array` ⇒ `false`) |
+| 24 | int-range vs a value (`int<10, 20> == 1` ⇒ `false`) |
+| 14 | string refinement vs a value (`non-falsy-string == ''` ⇒ `false`) |
+| 2 | array emptiness (`array{} == non-empty-array` ⇒ `false`) |
+
+**304 of 369 need no new semantics at all** — the first two rules are `eval_cmp`
+plus its `Certainty::Maybe` arm, mapped `Yes/No/Maybe → true/false/bool`. The
+remaining 65 need the loose-comparison relation lifted from *values* to *type
+families*; `php_loose_eq` already states the array-vs-scalar arm at the value
+level, so rule 3 is a lift, not a new rule.
+
+**ADR-0073.** The question does not arise in this fixture: no row carries
+narrowing across a statement boundary — each is evaluated in place. Where the
+stale-var discipline *does* bite is the defect below (D1), and it bites the
+wrong way: ADR-0073's rule is that a carrier which can no longer be justified
+dies silently rather than making a stale claim, and that is exactly right about
+a *narrowing*; applying it to the **declaration** underneath the narrowing
+erases a lane the declaration still justifies.
+
+### `filterVar.php` + `filter-var.php`: 436 rows behind two primitives
+
+The shape is uniform — `filter_var($subject, <FILTER_ID>, <3rd arg>)` with a
+`mixed` subject, so the return is a pure function of the filter id and the
+flags. That is ADR-0064 class **(ii) structural transfer**, and `filter_var`
+reflects `mixed` with arity `(3, 1)` — the *same* declaration shape `min`/`max`
+already carry through the DR3 rung's Amendment-B arity leg. Classified by third
+argument:
+
+| 3rd argument | `filterVar.php` | `filter-var.php` |
+| --- | ---: | ---: |
+| array, flags composed with `\|` | 75 | 16 |
+| array, flag read from a variable | 57 | 5 |
+| array, `options` map | 41 | 15 |
+| int, single constant | 40 | 17 |
+| int, composed with `\|` | 38 | 1 |
+| absent | 26 | 53 |
+| array, single flag constant | 19 | 11 |
+| opaque variable | 19 | 0 |
+| int, from a variable | 0 | 1 |
+| (not a `filter_var` call) | 0 | 2 |
+| distinct filter ids | 21 | 5 |
+
+Two primitives gate the whole slice, and neither is `filter_var` work:
+
+1. **A global constant has no value.** `dumpType(FILTER_VALIDATE_INT)` renders
+   `unknown`; so does `PHP_INT_MAX`. `ArgValue::GlobalConst` is unproven by
+   construction (issue #168), with `PHP_VERSION_ID`'s shadow discipline the one
+   exception. **All 436 rows dispatch on a `FILTER_*` constant**, so not one of
+   them can move until a constant resolves to a value. Corpus-wide, 777 residual
+   rows name a bare global constant; 407 of them are these two fixtures.
+2. **`A | B` over constants does not fold** — 130 of the 436 rows compose their
+   flags that way, which is the same missing operator node as above.
+
+Once those land, the evaluator itself is a single arm in
+`arg_dispatch_return_fact`, beside `explode`, `range`, `preg_replace`,
+`var_export` and `min`/`max`, gated by the existing
+`transfer_declaration_admits` envelope check.
+
+**Sequencing verdict for #75: neither throwaway nor buildable now.** A
+hand-built `filter_var` evaluator would not be thrown away when #75 lands —
+there is no "hand-built" version to write, because the DR3 seam *is* the
+mechanism and already exists; #75 is about growing its coverage. But
+`filter_var` is not the first tenant it looks like: it is the tenant with the
+largest prerequisite. It should be sequenced **behind global-constant value
+resolution** (a class-(i) value question the sidecar can answer directly, with
+ADR-0066's replay transport already in place) and behind constant `|` folding.
+The 39 expected-`mixed` rows in `filterVar.php` are unwinnable under any of it.
+
+### `binary.php`: 296 rows, of which 29 are #40's
+
+The fixture is not a binary-operator fixture. By family:
+
+| n | family | n | family |
+| ---: | --- | ---: | --- |
+| 85 | arithmetic operator | 7 | comparison operator |
+| 29 | `min`/`max` (issue #40) | 7 | `??` coalesce |
+| 28 | array mutation / SimpleXML tail | 7 | magic constant (`__LINE__` …) |
+| 26 | bitwise operator | 6 | string offset / interpolation |
+| 21 | `isset`/`empty` as a value | 6 | concatenation |
+| 19 | `*ERROR*` (not work) | 5 | predicate call as a value |
+| 16 | increment / decrement | 2 | `instanceof` as a value |
+| 11 | logical operator | 2 | `pathinfo` (DR3) |
+| 8 | ternary / `?:` | 1 | `class-string<static>` |
+| 8 | `count()` precision | 2 | assignment / offset read |
+
+The 111 arithmetic-and-bitwise rows, split as the issue asks:
+
+| n | share |
+| ---: | --- |
+| 80 | (a) plain int/float algebra, vocabulary already present |
+| 15 | (c) string / numeric-string arm (`1 + "123"`, `"x" & "y"`) |
+| 13 | (d) array `+` union |
+| 3 | (b) int-range arithmetic |
+
+**The int-range share of `binary.php` is three rows.** The overlap with
+`integer-range-types.php` is therefore *not* in the rules — it is in the node.
+That fixture's own 204 residual rows are 90 int-range algebra, 36 shift, 32
+comparison-as-a-value, 12 `*ERROR*`, 11 narrowing under a comparison guard, 9
+`(int)` casts of a `mixed` cut, 8 `mixed~…`, 6 declared property ranges: 158 of
+them ride the same `ArgValue::Binary` node, and only then need range arithmetic
+on top of it.
+
+**Pricing #40.** ADR-0056's headline for this family is 970 differs. Measured
+today — residual rows that are a top-level call to an R5 arithmetic-family
+builtin — it is **414 rows, 327 of them winnable**, led by `max` 106, `min` 102,
+`pow` 42, `abs` 41, `array_sum` 22, and `random_int`/`round`/`ceil`/`floor` 18
+each. Its fixtures are `minmax-arrays.php` (66), `minmax-php8.php` (66),
+`pow.php` (42), `abs.php` (41), `round-php8-strict-types.php` (30),
+`array-sum.php` (22) — `binary.php` contributes 30. So **#40 absorbs 29 of
+`binary.php`'s 273 winnable rows and nothing else in the trio**, and its own
+ranking points at fixtures this note has never named.
+
+### Computed but dropped
+
+Four, all witnessed with `steins check`:
+
+**D1 — a guard whose negative branch is unrepresentable erases the declared
+lane for the rest of the function.** The largest of the four, and not confined
+to these fixtures:
+
+```php
+/** @param 1|2 $i */
+function a($i): void {
+    \PHPStan\dumpType($i);     // 1|2 (asserted)
+    if ($i === 1) { }          // an empty branch
+    \PHPStan\dumpType($i);     // unknown        <= the declaration is gone
+}
+```
+
+`join_stores` keeps a contract lane only when the var is present in **every**
+branch. The `=== 1` negative branch cannot spell `(1|2) ∖ 1` in the arm lane, so
+it drops the entry, and the join then drops the whole lane — even though the
+un-narrowed `1|2` is a correct over-approximation and `1|2` is exactly what the
+same join produces for an ordinary variable (`$z` in the same file renders
+`1|2`). It survives when only one arm continues (`if (…) { return; }` ⇒ `int`),
+when the guard is representable on both sides (`int|string` under `is_int` ⇒
+`int|string`), and when no guard is present. Its corpus share is not measurable
+without engine instrumentation, which this probe declines to write.
+
+**D2 — `count()` discards a known shape: 107 residual rows.** Steins holds
+`list{int, int, int}` and renders `int<0, max>`; PHPStan gives the exact literal
+in 21 rows and a tighter range in 80 (`int<1, max>` 30, `int<3, max>` 23,
+`int<2, max>` 9 — the first of those is bare non-emptiness). Top fixtures:
+`count-recursive.php` 53, `bug-13747.php` 22, `bug-2750.php` 6, `binary.php` 5.
+
+**D3 — `'foo' ?? null` renders `'foo'|null`** (`binary.php:350`). A
+definitely-set non-null left operand makes the whole expression the left
+operand; the `clear_null(a) ⊔ b` join keeps an arm PHP cannot reach. One row.
+
+**D4 — `min`/`max` fall back to the argument union off the int path.**
+`min_max_interval` is int-only; a float or string argument routes to
+`facts.join(…)`, so `min(1.1, 2.2, 3.3)` renders `1.1|2.2|3.3` and
+`min('a', 'b')` renders `'a'|'b'` where the sidecar could answer exactly. 5
+all-literal rows, 4 of them rendering a union. (The unary array form's union —
+`min([1, 2, 3])` ⇒ `1|2|3` — is the documented A-G5 decision, not a defect.)
+
+### Verdict
+
+**The trio is one slice wearing three fixture names.** Neither #40 nor #75
+absorbs it: #40 covers 29 of its 1,036 winnable rows, #75's seam already exists
+but its `filter_var` tenant is blocked on two primitives that are not #75's.
+
+**`loose-comparisons.php` — ceiling 369. Build, but not as this fixture.** No
+issue absorbs it. 304 of the 369 fall out of wiring the *existing* `eval_cmp`
+into value position (`Yes/No/Maybe → true/false/bool`); the other 65 fall to
+four named type-level rules. The unit of work is `ArgValue::Binary` + the value
+path, whose corpus ceiling is 1,292 rows over 61 fixtures — the largest single
+priced item this note has measured. File it as the operator-value node, with
+this fixture as its acceptance measure, and the fixture-shaped framing of §B's
+Follow-up 6 is withdrawn.
+
+**`filterVar.php` + `filter-var.php` — ceiling 276 + 118 = 394. Don't build;
+sequence behind two primitives.** The evaluator is a one-arm DR3 tenant and
+nothing about it would be throwaway, but no row moves until (1) a global
+constant resolves to a value and (2) `A | B` folds over constants. Both are
+shared work with far wider reach (777 residual rows name a global constant).
+#75's first tenant should be an extension whose dispatch argument is *not* a
+constant; `filter_var` is its most expensive one, not its cheapest.
+
+**`binary.php` — ceiling 273. Don't build as a slice.** It is a grab-bag: 111
+operator rows that belong to the node above, 29 that belong to #40, 28 array
+mutation, 21 `isset`-as-a-value, and a long tail of ones and twos. Re-price #40
+at **414 rows / 327 winnable**, led by `minmax-arrays.php`, `minmax-php8.php`,
+`pow.php` and `abs.php` — not by `binary.php`, and not by the stale 970.
+
+**One new issue is warranted**, from D2: `count()` discards a shape Steins
+already holds, on 107 residual rows, with no new vocabulary and no new
+computation — the cheapest measured item in this section. D1 is larger but
+unpriced; D3 and D4 are one-liners that belong with whatever touches their code
+next.
