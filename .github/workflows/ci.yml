@@ -1,11 +1,16 @@
-# Continuous integration — every push to master and every pull request.
+# Continuous integration — every push to master and every pull request, except
+# Markdown-only changes (see `paths-ignore` below, and its THIRD-PARTY-LICENSES.md
+# carve-out).
 #
 # The gates, and why each one is here:
 #
-#   test      clippy + workspace tests + a release build, on Linux AND macOS.
-#             Both, because both ship as release binaries and because the PHP
-#             sidecar (ADR-0004/0024) spawns a real `php` over a temp-dir path —
-#             the one part of Steins whose behaviour is genuinely OS-shaped.
+#   test      clippy + workspace tests + a release build, on Linux always and
+#              macOS conditionally (see the `if:` on the `test` job below).
+#              Both OSes matter because both ship as release binaries and
+#              because the PHP sidecar (ADR-0004/0024) spawns a real `php`
+#              over a temp-dir path — the one part of Steins whose behaviour
+#              is genuinely OS-shaped. macOS runs are just not on the PR
+#              iteration loop's critical path; see the job comment.
 #   docs      rustdoc with `-D warnings`: intra-doc links across a 10-crate
 #             workspace rot silently, and the ADR-heavy doc comments are the
 #             navigation layer.
@@ -37,7 +42,21 @@ name: CI
 on:
   push:
     branches: [master]
+    # Markdown-only changes (README, CHANGELOG, ADRs, ...) touch none of the
+    # gates below — except THIRD-PARTY-LICENSES.md, which is both what
+    # `licenses` checks for drift AND embedded into the `steins-cli` binary via
+    # `include_str!` (crates/steins-cli/src/main.rs), so it has to keep
+    # triggering a real build. The `!` line re-includes it; order matters, and
+    # it must come after the blanket ignore. NB: duplicated verbatim on
+    # `pull_request` below — GitHub's workflow parser does not honour YAML
+    # anchors (see composer.yml), so an anchor here would silently widen scope.
+    paths-ignore:
+      - "**.md"
+      - "!THIRD-PARTY-LICENSES.md"
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "!THIRD-PARTY-LICENSES.md"
   # Manual escape hatch: GitHub webhook->Actions delivery dropped this branch's
   # events across three outage windows (2026-08-08); dispatch bypasses the webhook.
   workflow_dispatch:
@@ -57,6 +76,14 @@ jobs:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    # macOS is slow (the matrix's long pole) and PR iteration is a tight loop —
+    # so it's skipped on `pull_request` and only runs on push to master and on
+    # the workflow_dispatch escape hatch above. That still catches an
+    # OS-specific sidecar break BEFORE it ships (every push to master runs it,
+    # and every release is cut from master), just not on every PR round-trip.
+    # `if:` on a matrix job is evaluated per expanded leg, so this skips only
+    # the macos-latest leg on PRs — ubuntu-latest still runs there.
+    if: matrix.os != 'macos-latest' || github.event_name != 'pull_request'
     strategy:
       # One OS failing should still report the other — an OS-specific sidecar
       # break is exactly the signal this matrix exists to isolate.
