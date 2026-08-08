@@ -321,12 +321,6 @@ fn floors_reproduce_the_pre_s6_layer_selection() {
     // `offset.maybe-missing` stays `Strict` until the assertion-helper
     // discharge lands (its 3 sweep findings were all that one gap). Plus the
     // member-absence `maybe-` sibling (ADR-0078, issue #197).
-    let promoted = [
-        (OFFSET_UNDECLARED_ID, Layer::Contract, Floor::Contracts),
-        (OFFSET_MAYBE_MISSING_ID, Layer::Contract, Floor::Strict),
-        (PROPERTY_MAYBE_UNDEFINED_ID, Layer::Proof, Floor::Strict),
-    ];
-    //
     // `type.return-maybe-missing` (2026-08-08 gate triage): the SAME fatal as its
     // definite sibling, so the layer cannot differ — a `TypeError` is a `TypeError`.
     // What the corpus measured is that the conditional class (a body that returns
@@ -336,13 +330,10 @@ fn floors_reproduce_the_pre_s6_layer_selection() {
     let promoted = [
         (OFFSET_UNDECLARED_ID, Layer::Contract, Floor::Contracts),
         (OFFSET_MAYBE_MISSING_ID, Layer::Contract, Floor::Strict),
+        (PROPERTY_MAYBE_UNDEFINED_ID, Layer::Proof, Floor::Strict),
         (TYPE_RETURN_MAYBE_MISSING_ID, Layer::Proof, Floor::Strict),
     ];
     for &(id, layer_of, floor) in DIAGNOSTIC_REGISTRY {
-        if let Some(&(_, expected_layer, expected_floor)) = promoted.iter().find(|(p, ..)| *p == id)
-        {
-            assert_eq!(layer_of, expected_layer, "`{id}` keeps the layer its ADR gives it");
-            assert_eq!(floor, expected_floor, "`{id}` floor per its ADR / triage ruling");
         if let Some(&(_, expected_layer, expected_floor)) =
             promoted.iter().find(|(p, _, _)| *p == id)
         {
