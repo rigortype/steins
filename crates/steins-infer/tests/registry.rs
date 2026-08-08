@@ -214,18 +214,18 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
         assert_eq!(surface_floor(id), Some(Floor::Default));
     }
     assert!(
-        pending.contains(PROPERTY_MAYBE_UNDEFINED_ID),
-        "the maybe- sibling registers AHEAD of emission, with its definite leg"
+        emittable.contains(PROPERTY_MAYBE_UNDEFINED_ID),
+        "the maybe- sibling emits since the declared-shape possibly leg (#267)"
     );
     assert!(
-        !emittable.contains(PROPERTY_MAYBE_UNDEFINED_ID),
-        "no emitter produces the maybe- sibling yet"
+        !pending.contains(PROPERTY_MAYBE_UNDEFINED_ID),
+        "the maybe- sibling left the registered-ahead-of-emission list"
     );
     assert_eq!(layer(PROPERTY_MAYBE_UNDEFINED_ID), Some(Layer::Proof));
     assert_eq!(surface_floor(PROPERTY_MAYBE_UNDEFINED_ID), Some(Floor::Strict));
     // end member absence (ADR-0078, issue #197)
 
-    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 2);
+    assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 1);
 }
 
 // undefined variables (ADR-0078, issue #194)
@@ -277,14 +277,14 @@ fn the_variable_pair_splits_across_the_two_floors() {
     assert_eq!(VARIABLE_MAYBE_UNDEFINED_ID, "variable.maybe-undefined");
 }
 
-/// The registered-ahead-of-emission list holds exactly the two ids argued above and
+/// The registered-ahead-of-emission list holds exactly the one id argued above and
 /// nothing else — the cardinality guard that makes a forgotten emitter visible.
 #[test]
-fn exactly_two_ids_are_registered_ahead_of_emission() {
+fn exactly_one_id_is_registered_ahead_of_emission() {
     let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
     assert_eq!(
         pending,
-        HashSet::from([CALL_TOO_MANY_ARGUMENTS_ID, PROPERTY_MAYBE_UNDEFINED_ID]),
+        HashSet::from([CALL_TOO_MANY_ARGUMENTS_ID]),
         "REGISTERED_NOT_YET_EMITTED drifted — every entry needs an argued reason"
     );
 }

@@ -186,7 +186,7 @@ $ steins doctor --no-php .
 | `default` | — | — | 47 |
 | `throws-direct` | `default` | `throw.undeclared`, direct escapes only | 48 |
 | `contracts` | `default` | the contract layer, except the strict and pedantic rungs | 61 |
-| `strict` | `contracts` | the some-paths-only claims — `offset.maybe-missing`, `variable.maybe-undefined`, `type.return-maybe-missing` | 65 |
+| `strict` | `contracts` | the some-paths-only claims — `offset.maybe-missing`, `variable.maybe-undefined`, `property.maybe-undefined`, `type.return-maybe-missing` | 65 |
 | `pedantic` | `contracts` | the house-style asks — `untyped.class-constant` | 62 |
 
 Only the `default` / `contracts` / `strict` rows nest. `throws-direct` and

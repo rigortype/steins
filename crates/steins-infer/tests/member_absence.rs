@@ -755,19 +755,21 @@ eval('$q = 1;');
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_maybe_sibling_is_registered_ahead_of_emission() {
+fn the_maybe_sibling_never_doubles_up_on_a_definite_finding() {
     // The convention mechanized: a definite leg never ships without its
-    // possibly-grade twin being NAMED. The registry-side assertions (layer, floor,
-    // disjointness from `ALL_EMITTABLE_IDS`) live in `tests/registry.rs`; what
-    // belongs here is that nothing in this slice emits it.
+    // possibly-grade twin being NAMED, and the twin now emits (ADR-0081 §7, issue
+    // #267). The registry-side assertions (layer, floor, membership of
+    // `ALL_EMITTABLE_IDS`) live in `tests/registry.rs` and the twin's own fixtures
+    // in `tests/property_maybe_undefined.rs`; what belongs here is that the two
+    // legs partition the sites rather than overlapping on one.
     assert!(
-        REGISTERED_NOT_YET_EMITTED.contains(&"property.maybe-undefined"),
-        "the maybe- sibling must be registered with its definite leg"
+        !REGISTERED_NOT_YET_EMITTED.contains(&"property.maybe-undefined"),
+        "the maybe- sibling emits, so it left the registered-ahead-of-emission list"
     );
     for src in [EXACT_FIRES, CONST_FIRES] {
         assert!(
             findings(src, "property.maybe-undefined").is_empty(),
-            "no emitter produces the maybe- sibling yet"
+            "a site the definite leg owns is never also the possibly leg's"
         );
     }
 }
