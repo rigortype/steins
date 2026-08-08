@@ -220,6 +220,15 @@ tree, not just the `nsrt/` subdirectory. The fixture is fixed depth, not a
 growing one, so this is a one-time harness fix, not a budget that needs
 revisiting as the corpus moves.
 
+`nsrt` was not the only walker of that fixture, though, and the sizing is no
+longer harness-only: `steins check` aborted on it too, `fp-gate` and `freq`
+parse on rayon workers whose default stack is a quarter of the one that
+overflowed, and the wasm playground cannot buy headroom at any price. The
+per-entry-point measurements, and the ceilings each surface actually has, are in
+[the deep-nesting note](../notes/20260808-deep-nesting-stack-budget.md); the
+binary's own worker is `WORKER_STACK_SIZE` in `crates/steins-cli/src/main.rs`
+and the pool's is `RAYON_STACK_SIZE` in `xtask/src/main.rs`.
+
 Before the fourth verdict existed, `subsumed` rows scored as `differ`. That made the
 instrument argue against the analyzer: PHPStan asserts `bool` for
 `in_array('foo', ['foo', 'bar'])` because it declines to fold a loose comparison,

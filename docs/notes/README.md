@@ -26,6 +26,10 @@ Filenames are `YYYYMMDD-<slug>.md`, dated to authorship.
 
 - [Soundness audit: ADR-0049 absence family + ADR-0052 narrowing](20260724-adr0049-0052-soundness-audit.md)
   — a pre-implementation audit of the silence legs the absence proofs depend on.
+- [Deep expression nesting and the stack budget of each entry point](20260808-deep-nesting-stack-budget.md)
+  — the issue #246 recursion measured at every entry point rather than just the
+  nsrt harness: 34 walkers of the same shape, ceilings per surface and build
+  profile, and the one surface (wasm) where headroom cannot be bought at all.
 
 ## Adoption and release
 

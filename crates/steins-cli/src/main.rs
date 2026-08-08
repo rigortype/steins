@@ -46,12 +46,51 @@ enum Format {
     Json,
 }
 
+/// Headroom for the worker thread every subcommand runs on (issue #246).
+///
+/// `SourceTree::parse`'s lowering walkers — `scan_effect_origins` and some thirty
+/// siblings — recurse one frame per CST node, so a deeply nested expression costs
+/// stack in proportion to its nesting depth. Nothing about that recursion is
+/// unbounded: a `$n->next->next…` chain is a finite tree, and the walk terminates.
+/// It just does not fit the OS default stack. Measured on this workspace with such
+/// a chain, the ~8 MiB main thread runs out around 520 levels in a debug build and
+/// around 2,700 in a release one; phpstan-src ships
+/// `tests/bench/data/nullsafe-chain-walk.php` with chains 1,000 levels deep, so a
+/// real file in a real repository sits past the debug ceiling and at roughly 40%
+/// of the release one. `steins check` over it aborted with `fatal runtime error:
+/// stack overflow`.
+///
+/// An abort is the one outcome the Certainty discipline (ADR-0009) leaves no room
+/// for. It is not a finding and not a named silence — it is the loss of the entire
+/// run, including every other file in the project, reported as a bare process
+/// death. Issue #246 ruled that a depth cutoff over a finite input manufactures a
+/// silence nothing calls for, and that ruling is why this is headroom rather than
+/// a budget: the engine still answers the whole question. 256 MiB matches the nsrt
+/// harness's constant (`WORKER_STACK_SIZE` in `xtask/src/nsrt.rs`) and is virtual
+/// address space the OS commits page by page as frames are touched, so a run that
+/// never nests deeply pays nothing for it.
+///
+/// This sizes the *binary*, not the library: steins-syntax still promises no
+/// particular depth to an embedder, and the wasm playground — whose shadow stack
+/// is fixed at link time and cannot be grown from inside — is not covered here.
+const WORKER_STACK_SIZE: usize = 256 * 1024 * 1024;
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Every command's verdict passes through the output seam on its way out
     // (issue #44): `out::finish` flushes stdout and decides what a failed write
     // does to the exit code. A closed reader leaves `code` alone — see `out`.
-    out::finish(dispatch(&args))
+    //
+    // `dispatch` runs on a worker thread sized per `WORKER_STACK_SIZE` rather than
+    // on `main`'s default-sized OS stack — see that constant's doc. Every
+    // subcommand parses, so the sizing belongs here rather than in `run_check`.
+    let code = std::thread::Builder::new()
+        .stack_size(WORKER_STACK_SIZE)
+        .spawn(move || dispatch(&args))
+        .expect("failed to spawn the steins worker thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    out::finish(code)
 }
 
 /// Dispatch on the subcommand. Split out of `main` so there is exactly one exit

@@ -31,7 +31,29 @@ mod sync;
 
 use std::process::ExitCode;
 
+/// Headroom for the rayon workers `fp-gate` and `freq` analyze packages on
+/// (issue #246).
+///
+/// Both fan out with `PACKAGES.par_iter()`, so their parsing happens on rayon's
+/// pool rather than on `main`. Rayon leaves `stack_size` unset by default, which
+/// means std's 2 MiB thread default — a quarter of the ~8 MiB that issue #246
+/// already found too small for a deeply nested expression under debug's large,
+/// uninlined frames. `fp-gate` is a debug-built CI job (`.github/workflows/ci.yml`)
+/// reading a corpus that includes an unpinned local checkout, so "no package
+/// happens to contain a deep chain today" is not a property anything holds.
+///
+/// Same reasoning and same number as the binary's own worker
+/// (`WORKER_STACK_SIZE` in `crates/steins-cli/src/main.rs`): buy headroom for a
+/// finite walk rather than cut it short. Lazily committed, so the per-worker
+/// reservation costs nothing until frames are touched.
+const RAYON_STACK_SIZE: usize = 256 * 1024 * 1024;
+
 fn main() -> ExitCode {
+    // Sized before any `par_iter` runs — `build_global` refuses once the default
+    // pool exists.
+    if let Err(e) = rayon::ThreadPoolBuilder::new().stack_size(RAYON_STACK_SIZE).build_global() {
+        return fail(&format!("failed to size the rayon worker stacks: {e}"));
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("corpus-sync") => {
