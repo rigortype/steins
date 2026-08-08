@@ -12,7 +12,7 @@ position queries reachable — but they release after the checker is
 genuinely usable. The specifically protected LSP capability:
 type-directed member completion at a cursor position.
 
-## Current state (verified against the tree, 2026-07-24)
+## Current state (verified against the tree, 2026-08-08)
 
 Engine:
 
@@ -27,13 +27,34 @@ Engine:
   (ADR-0028, folding impurity) — nothing of inference is memoized
   across runs. Acceptable for batch CLI; the LSP prerequisite is
   ADR-0048 §5.
-- Diagnostic surface (all landed ids): `type.argument-mismatch`,
+- Diagnostic surface, through v0.1.4. Pre-existing: `type.argument-mismatch`,
   `type.return-mismatch`, `type.property-mismatch`, `call.on-null`,
   `readonly.reassigned`, `phpdoc.param-mismatch`,
   `phpdoc.return-mismatch`, `phpdoc.property-mismatch`,
-  `throw.undeclared`, `throw.liskov-widened`, `effect.envelope-exceeded`,
-  `effect.unknown-label`, `effect.liskov-widened`, plus
+  `phpdoc.undefined-method`, `throw.undeclared`, `throw.liskov-widened`,
+  `effect.envelope-exceeded`, `effect.unknown-label`,
+  `effect.liskov-widened`, `call.undefined-function`,
+  `call.undefined-method`, `call.too-few-arguments`,
+  `call.unknown-named-argument`, `class.undefined`, `offset.missing`,
+  `offset.maybe-missing`, `offset.undeclared`, `offset.on-unsupported`,
+  the `debug.*` family, plus
   `suppress.unmatched`/`suppress.unknown-id`.
+- v0.1.4 added thirty-nine ids, closing gap 1 below: the absence family
+  (`property.undefined`, `class-const.undefined`, `constant.undefined`,
+  `variable.undefined`), the inaccessibility family
+  (`call.inaccessible-method`, `property.inaccessible`,
+  `class-const.inaccessible`), the declaration fatals
+  (`class.abstract-unimplemented`, `class.extends-final`, the five
+  `override.*`), the value-domain checks (`call.on-non-object`,
+  `property.on-non-object`, `foreach.non-iterable`,
+  `type.invalid-operand`, `string.non-stringable`,
+  `string.array-conversion`), reachability (`type.return-missing`,
+  `type.return-maybe-missing`), mechanics
+  (`syntax.unparsable`, `array.duplicate-key`, the five `phpdoc.*`
+  rot ids, `closure.unused-use`), `preg.invalid-pattern`,
+  `call.printf-too-few-arguments`, and the six contract-layer
+  `untyped.*`. Two — `property.maybe-undefined` and
+  `variable.maybe-undefined` — are registered ahead of emission.
 
 Verification apparatus (ADR-0013):
 
@@ -49,22 +70,25 @@ Verification apparatus (ADR-0013):
 
 CLI (ADR-0020, partially landed):
 
-- Landed: `check` (`--format text|json`, `--no-php` sound subset,
-  `--vendor-diagnostics`, baseline set/match/stale per ADR-0022),
-  `annotate` (margin facts, `…?` non-exhaustiveness), `transform`
-  (`phpdoc-to-native`, `phpdoc-honesty`, `throws-envelope`,
+- Landed: `check` (`--format text|json`, `--profile`, `--no-php` sound
+  subset, `--vendor-diagnostics`, `--fix`, baseline set/match/stale per
+  ADR-0022), `annotate` (margin facts, `…?` non-exhaustiveness),
+  `transform` (`phpdoc-to-native`, `phpdoc-honesty`, `throws-envelope`,
   `loop-to-array-map`; dry-run default, `--apply`
-  gated on zero-new-diagnostics; vouch valve + partition regions read
-  from `steins.toml`). Inline `@steins-ignore` with anti-rot.
+  gated on zero-new-diagnostics; `--asserted-subjects` opt-in; vouch
+  valve + partition regions read from `steins.toml`), `effect-diff`,
+  the minimal `doctor` (ADR-0054 C3 scope), and `mcp` (stdio MCP server,
+  four tools). Inline `@steins-ignore` with anti-rot.
 - NOT landed (declared in ADR-0020/0023, absent from the binary):
-  `sarif`/`github` output, `doctor`, `lsp`, `mcp`, `--profile` /
-  policy profiles, `check --fix` fix-its, `[paths.sets]` / `[[policy]]`
-  scoped policy (steins.toml is parsed only for `[transform.*]`).
-- `check` does not separate layers: `phpdoc.*` and `throw.*` findings
-  print beside proof-layer findings. The measurement-mode distinction
-  exists only in the xtask gate. On the legacy monorepo this means
-  ~44k `throw.undeclared` findings in a default run — the single
-  largest adoption blocker in the current binary.
+  `sarif`/`github` output, `lsp`, `doctor --format json` and its richer
+  audits, `[paths.sets]` / `[[policy]]` scoped policy, and every
+  `check --fix` family beyond the `debug.*` dump-removal one.
+- `check` separates layers (ADR-0050): the cumulative ladder
+  `default ⊂ contracts ⊂ strict` is live behind `--profile`, so
+  `phpdoc.*` and `throw.*` no longer print in a default run and the
+  ~44k `throw.undeclared` findings the legacy monorepo produced are
+  opt-in. The mechanics layer (ADR-0078) is the exception by design:
+  on by default, disable-proof and undemotable.
 
 Transforms (ADR-0034/0041): promotion + honesty landed through method
 scope (ADR-0043 stage 5) with the full refusal taxonomy, eval/include
@@ -83,11 +107,13 @@ C–E queued).
 What a team adopting the checker needs, versus what exists. Each gap
 names its milestone.
 
-1. **Finding breadth.** No undefined-function/method/class/property,
-   argument-count, or offset-access ids exist. A checker that is silent
-   on `$foo->tyop()` is not adoptable regardless of its precision
-   elsewhere. Zero-FP variants are reachable (definite-No only under
-   the closed-world conditions ADR-0043 established). → M1
+1. **Finding breadth. CLOSED in v0.1.4.** The
+   undefined-function/method/class/property, argument-count and
+   offset-access ids all exist, each shipped as a zero-FP variant
+   (definite-No only under the closed-world conditions ADR-0043
+   established) and corpus-triaged before its id shipped. See the
+   diagnostic surface above for the full list. The rest of M1's exit
+   criteria are unaffected by this and still bind. → M1
 2. **Narrowing and assertions.** Real code is guard-heavy. The deferred
    list — `@phpstan-assert-if-true/-if-false`, `assert()`,
    short-circuit refinement, loops beyond write-sets, static props,

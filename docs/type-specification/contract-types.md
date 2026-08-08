@@ -94,7 +94,10 @@ rules instead of a keyword zoo:
   non-falsy-string|true` and so stays silent on `0` and `0.0` (its `float`
   member is never narrowed and int-is-accepted-where-float-is-expected lets both
   back in); Steins spells the subtraction and rejects them.
-- `class-string`, `literal-string`, `callable-string`, … → `StrOpaque`.
+- `class-string`, `interface-string`, `trait-string`, `enum-string` →
+  `StrWith(CLASS_STRING)` — a value property, judged like any other string
+  refinement (issue #236).
+- `literal-string`, `callable-string`, `numeric-int-string` → `StrOpaque`.
 - `list<T>`, `non-empty-list<T>` → `ListOf`; `array<K, V>`, `T[]` → `MapOf`;
   `iterable<K, V>` → `IterableOf`.
 - `array{…}` / `list{…}` → `Shape`.
@@ -149,11 +152,20 @@ where `5` and `5.0` are distinct values.
 
 **`mixed` admits everything, including null. `never` admits nothing.**
 
-**Provenance-flavored string types can never answer `Yes`.** `class-string` and
-kin lower to `StrOpaque`: a non-string is `No`, a string is `Maybe`. Membership
-in these types is a fact about where a value *came from*, not about the value,
-and Steins does not do taint tracking (ADR-0038). It reserves value-provenance
-labels as the general mechanism, unimplemented.
+**Provenance-flavored string types can never answer `Yes`.** `literal-string`
+and `callable-string` lower to `StrOpaque`: a non-string is `No`, a string is
+`Maybe`. Membership in these types is a fact about where a value *came from*,
+not about the value, and Steins does not do taint tracking (ADR-0038). It
+reserves value-provenance labels as the general mechanism, unimplemented.
+
+**`class-string` is not one of them.** Naming a class-like is a property of the
+value, so it lowers to a `CLASS_STRING` refinement instead (issue #236,
+ADR-0038's amendment): it **refutes** the strings PHP's identifier grammar rules
+out (`''`, `'0'`, `'123'`) and **satisfies** `string`/`non-empty-string`/
+`non-falsy-string`. What it still never answers is `Yes` for a concrete
+identifier — whether `'App\User'` is in the class table needs the class table,
+which `StrPreds::of` has not got — so that stays `Maybe`. `class-string<T>`
+drops its bound and is carried as plain `class-string` (issue #10).
 
 **`callable` is `Maybe` for strings and arrays.** A string may name a function,
 a two-element array a method; other scalars are `No`. A declared

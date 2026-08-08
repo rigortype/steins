@@ -65,6 +65,17 @@ still read UTF-8-lossily, so a file that is not itself valid UTF-8 collapses
 before parsing (ADR-0080 §3.2), which also leaves the salsa backdating in §3.3
 open.
 
+**`class-string<T>` carries no bound** (issue #236 landed the bare form; the
+parameterized one is issue #10). `class-string`, `interface-string`,
+`trait-string` and `enum-string` are judged as a value refinement — they refute
+`''`, `'0'` and `'123'`, and satisfy `string`/`non-empty-string`/
+`non-falsy-string` — but a written `class-string<Foo>` drops to plain
+`class-string`. That widens rather than misstates (every `class-string<Foo>` is
+a `class-string`), so a bound the annotation states costs a true positive, never
+a false one. Whether a concrete identifier names a real class is never asserted
+in either form: that needs the class table, and the refinement is decidable in
+the refuting direction only.
+
 **Control flow** ([narrowing.md](narrowing.md)):
 
 - Loops are `Opaque` — write/read-set invalidation only, no loop-carried facts

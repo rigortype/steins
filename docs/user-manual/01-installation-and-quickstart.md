@@ -63,14 +63,14 @@ this workspace, `cargo build --release -p steins-cli` (binary lands at
 `target/release/steins`) or `cargo install --path crates/steins-cli` both
 work.
 
-The binary has seven subcommands and no `--help`; run it with no arguments
+The binary has eight subcommands and no `--help`; run it with no arguments
 to see the surface:
 
 ```
 $ steins
 usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
        steins annotate [--no-php] [--format text|json] <file.php>
-       steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--format text|json] <paths...>
+       steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--asserted-subjects] [--format text|json] <paths...>
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
        steins doctor [--no-php] [--baseline <path>] [path]
        steins mcp
@@ -302,7 +302,7 @@ error line above on stderr — so a renamed directory reds the build instead
 of keeping it green (ADR-0050 §7). A path that *exists* and happens to
 contain no `.php` files is a genuine no-op and still exits `0`.
 
-## Known limitations (v0.1.2, honest)
+## Known limitations (v0.1.4, honest)
 
 - **No warm or incremental runs.** Every `check` is a cold batch analysis.
 - **No LSP or editor server yet.** `annotate` gives a one-shot margin view
