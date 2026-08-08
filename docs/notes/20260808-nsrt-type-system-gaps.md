@@ -22,6 +22,31 @@ phpstan-src `55a7732`: 1,602 fixture files, **15,845 assertions**.
 | `unsupported` | 2,486 | the oracle's spelling uses vocabulary Steins does not model |
 | `skipped` | 308 | |
 
+> **Correction (2026-08-08, issue #239):** the `mixed` row of the A table below
+> was right that this is not an engine gap and wrong about where the rows
+> belong. Follow-up 5 has since been taken: the harness no longer gates `mixed`,
+> so its **329 rows moved out of `unsupported` and into `differ`** — 324 of them
+> as reach (Steins renders `unknown`), five as precision. The totals in the table
+> above therefore read, on the same engine, `unsupported` **2,157** and `differ`
+> **11,432**. `match` (1,621), `equal` (107), `subsumed` (220) and **admissible
+> (1,948)** are all **unchanged**: the movement is reclassification, not
+> behaviour. No engine code changed and no release note was warranted.
+>
+> The five non-`unknown` rows are worth naming, because they are why an expected
+> `mixed` now earns neither `equal` nor `subsumed`. `mixed` is the top type, so
+> the acceptance relation answers the covering direction `Yes` for *every*
+> parseable rendering — the verdict would report the oracle's silence, not a type
+> relation. Measured, that is what it does: three of the four rows the relation
+> would have booked as precision (`unresolvable-types.php:17,18`,
+> `invalid-type-aliases.php:13`) are Steins rendering an **unresolvable phpdoc
+> type** (`array<int, int, int>`, `iterable<int, int, int>`, `what{foo: 'bar'}`)
+> as a class name — which is exactly why PHPStan says `mixed` there — and the
+> fourth (`bug-14333.php:167`, `$c = [&$b]; foo($c);`) is a **missed by-ref
+> invalidation** that the pre-existing int/float veto already held out. Exactly
+> one row (`bug-13282.php:40`) was a genuine precision claim, and losing it is
+> the acknowledged cost. The argument and the numbers live in `xtask/src/nsrt.rs`'s
+> module docs.
+
 The gaps split three ways, and the split is what the plan follows.
 
 ## A. Vocabulary — 2,486 rows
@@ -33,7 +58,7 @@ headline number is not work**, which is the first thing measurement bought:
 | --- | ---: | --- |
 | `phpstan-special` | 669 | `*ERROR*` (391) + `*NEVER*` (272) — PHPStan's own internal markers. Not vocabulary; nothing to port. |
 | `intersection` | 519 | see below — this bucket is two unrelated problems |
-| `mixed` | 329 | **not an engine gap.** `ContractTy::Mixed` exists and spells `mixed`; the harness classifies the spelling as out-of-scope. A harness-semantics question, not a hole. |
+| ~~`mixed`~~ | ~~329~~ | **not an engine gap** — and, as of issue #239, no longer here: the rows are measured and sit in `differ` (see the correction above). Leaving the bucket at **2,157**. |
 | `generic-other` | 225 | non-array generics (`DOMNamedNodeMap<DOMAttr>`) — the ADR-0032 carry root, already tracked as issue #10 |
 | `subtraction` | 157 | 133 of them are `mixed~…` |
 | `class-string` | 148 | |
@@ -71,6 +96,11 @@ vocabulary is a two-value enum where the oracle has a type algebra.
 The vocabulary exists and nothing computes the value: Steins renders `unknown`
 where PHPStan asserts a concrete type. Ranked by fixture:
 
+> **Correction (2026-08-08, issue #239):** **8,167**, not 7,843 — the 324
+> reclassified `mixed` rows are reach rows and belong in this section. They are
+> spread across **112** fixtures — the largest single contribution is 39 to
+> `filterVar.php` — so the ranking below keeps its order.
+
 | n | fixture | area |
 | ---: | --- | --- |
 | 369 | `loose-comparisons.php` | `==` / `!=` narrowing |
@@ -107,10 +137,11 @@ expression whose result type has no spelling renders `unknown` whatever the
 engine computed. Closing B first means touching the same code twice.
 
 **And two thirds of A is already answered**: `phpstan-special` is not
-vocabulary, `mixed` is modelled, `generic-other` is issue #10. What is left is
-smaller than the headline: the two intersection halves, the `mixed`-cut
-vocabulary, `class-string`, and template rendering — on the order of **1,000
-rows**, not 2,486.
+vocabulary, `mixed` is modelled (and, since issue #239, no longer counted here
+at all), `generic-other` is issue #10. What is left is smaller than the
+headline: the two intersection halves, the `mixed`-cut vocabulary,
+`class-string`, and template rendering — on the order of **1,000 rows**, not
+2,486.
 
 ## Follow-up
 
@@ -121,7 +152,10 @@ Sliced smallest-first, so each lands a measurable nsrt delta:
 2. `class-string` and its parameterized form (148).
 3. The `mixed` cut vocabulary beyond Null/Falsy (133).
 4. Object intersections, on #234's inhabitance rule (183).
-5. Decide what `mixed` should score as in the harness (329) — a measurement
-   decision that moves no engine code.
+5. ~~Decide what `mixed` should score as in the harness (329) — a measurement
+   decision that moves no engine code.~~ **Done (issue #239)**; see the
+   correction at the top. It moved 329 rows from `unsupported` to `differ`,
+   324 of them into slice 6's reach pile, and left the headline and the
+   admissible figure untouched.
 6. Then reach: loose comparisons, `filter_var`, binary operators (896).
 7. Then precision: the array-vocabulary block (1,609), decomposed.

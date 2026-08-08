@@ -22,12 +22,13 @@
 //! - `match` — semantically equal after normalization (case, `|` order, nullable
 //!   forms, int-range spelling). Generous only where equivalence is certain.
 //! - `unsupported` — the expected string uses vocabulary Steins deliberately does
-//!   not model (`*ERROR*`/`*NEVER*`, `mixed`, non-array generics (`Traversable<K,
-//!   V>` and friends), intersections, `object`, …), named by pattern. As of S1.5
-//!   (ADR-0062), the full array vocabulary (`array{…}`, `list{…}`,
-//!   `array<K, V>`, `list<T>`, bare `array`/`list`, and their `non-empty-`
-//!   forms) is **not** on this list — S1 taught the speller to spell it, so it
-//!   now flows into the normal match/equal/subsumed/differ comparison below.
+//!   not model (`*ERROR*`/`*NEVER*`, non-array generics (`Traversable<K, V>` and
+//!   friends), intersections, arbitrary subtraction, `object`, …), named by
+//!   pattern. As of S1.5 (ADR-0062), the full array vocabulary (`array{…}`,
+//!   `list{…}`, `array<K, V>`, `list<T>`, bare `array`/`list`, and their
+//!   `non-empty-` forms) is **not** on this list — S1 taught the speller to spell
+//!   it, so it now flows into the normal match/equal/subsumed/differ comparison
+//!   below. Neither is `mixed`, as of issue #239 — see the named silence below.
 //! - `equal` — proven-equal-but-differently-spelled (issue #172): the acceptance
 //!   relation proves **both** directions (`expected ⊇ got` and `got ⊇ expected`,
 //!   each `Certainty::Yes`) while the normalized strings differ. The proof is the
@@ -67,6 +68,50 @@
 //! the reverse direction would turn every widening regression into a "we're more
 //! precise" row — the worst possible failure for this instrument. Pinned by
 //! `reverse_direction_is_never_subsumption`.
+//!
+//! ## `mixed`: measured, but never `subsumed` (issue #239)
+//!
+//! `mixed` used to sit in the `unsupported` list on the claim that Steins does not
+//! model it. That claim was stale: `ContractTy::Mixed` exists and spells `mixed`,
+//! alongside `MixedMinus(MixedCut::{Null, Falsy})` spelling `non-null-mixed` /
+//! `non-empty-mixed`. So the 329 rows the oracle asserts `mixed` for were parked in
+//! a bucket that says *we cannot say this* while the engine could.
+//!
+//! **What Steins actually renders there was measured before deciding** (phpstan-src
+//! `55a7732`, 329 rows, all of them the bare string `mixed`): **324 render
+//! `unknown`**, and the remaining five render a concrete type (`'name'`, `1`,
+//! and three class names). Steins renders `mixed` itself for exactly **zero** of
+//! them — so "the normalization is missing a `mixed` rule" was never the answer;
+//! the overwhelming majority is a plain **reach** gap and belongs in `differ`,
+//! where `unknown`-against-a-concrete-assertion already lives. `unknown` is "no
+//! fact" and `mixed` is "every value"; scoring them equal is precisely the
+//! conflation `differ` exists to expose.
+//!
+//! **The named silence: an expected `mixed` never earns `equal` or `subsumed`.**
+//! [`subsumption_directions`] vetoes the pair outright, next to the sentinel and
+//! int/float vetoes. The reason is that `mixed` is the **top type**, so the
+//! covering direction `expected ⊇ got` answers `Yes` for *every* parseable
+//! rendering, unconditionally — a predicate true of all inputs measures nothing,
+//! and `subsumed` would stop naming a relation and start naming the oracle's own
+//! silence.
+//!
+//! The measurement says the same thing the argument does. Of the five non-`unknown`
+//! rows, one (`bug-14333.php:167` — `$c = [&$b]; foo($c);`, where PHPStan widens
+//! `$b` to `mixed` and Steins still says `1`, a **missed by-ref invalidation**) is
+//! already held out by [`crosses_int_float`]. Of the four that would otherwise be
+//! booked as precision, **three are not precision at all**:
+//! `unresolvable-types.php:17,18` and `invalid-type-aliases.php:13` assert `mixed`
+//! because the phpdoc type is *unresolvable* (`array<int, int, int>`,
+//! `iterable<int, int, int>`, `what{foo: 'bar'}`), and Steins renders the malformed
+//! spelling as a **class name** — a parse-tolerance artifact that the top type
+//! subsumes for free. Exactly one row (`bug-13282.php:40`: a `: mixed`-declared
+//! function whose body only ever returns `'name'`) is a genuine precision claim,
+//! and losing it is the acknowledged cost of the veto: one true positive is worth
+//! less than a bucket that launders three artifacts and a soundness hole.
+//!
+//! So the whole class lands in `differ` — 324 as reach, five as precision gaps —
+//! and `unsupported` no longer names `mixed`. Pinned by
+//! `mixed_is_measured_never_subsumed`.
 //!
 //! ## Headline decision (settled here; do not re-argue per slice)
 //!
@@ -306,16 +351,20 @@ struct SubsumptionDirections {
 /// decide (`Maybe`, the honest floor for `Opaque`, for class hierarchies
 /// steins-contract carries no oracle for) yields `false` for that direction — the
 /// pair stays in the `differ` inventory where it can be triaged, which is the
-/// FP-safe direction for a metric. The sentinel and int/float-coercion guards
-/// veto the question entirely (both directions `false`): a sentinel is not a type
-/// string, and a coercion-crossing pair is answered by a rule this harness is not
-/// asking about (see [`crosses_int_float`]).
+/// FP-safe direction for a metric. Three guards veto the question entirely (both
+/// directions `false`): a sentinel is not a type string, a coercion-crossing pair
+/// is answered by a rule this harness is not asking about (see
+/// [`crosses_int_float`]), and a top-type expectation makes the covering direction
+/// free (see [`expected_is_top_type`]).
 fn subsumption_directions(expected: &str, got: &str) -> SubsumptionDirections {
     const NEITHER: SubsumptionDirections = SubsumptionDirections { covers: false, covered: false };
     if STEINS_SENTINELS.contains(&got.trim()) {
         return NEITHER;
     }
     if crosses_int_float(expected, got) {
+        return NEITHER;
+    }
+    if expected_is_top_type(expected) {
         return NEITHER;
     }
     let (Some(exp_ty), Some(got_ty)) =
@@ -347,6 +396,25 @@ fn is_proven_equal(expected: &str, got: &str) -> bool {
 fn is_subsumption(expected: &str, got: &str) -> bool {
     let dirs = subsumption_directions(expected, got);
     dirs.covers && !dirs.covered
+}
+
+/// Whether the oracle asserted the **top type** — the one expectation under which
+/// the covering direction is free (issue #239).
+///
+/// `mixed` denotes every value, so `subsumes(mixed, got)` answers `Yes` for every
+/// parseable `got` whatever Steins computed. A `subsumed` verdict awarded on that
+/// evidence would not be naming a type relation at all; it would be re-reporting
+/// that the oracle declined to constrain the expression. The module docs carry the
+/// measurement behind this (issue #239, §`mixed`): three of the four rows the
+/// relation would have booked as precision are Steins rendering an *unresolvable*
+/// phpdoc type as a class name, which the top type covers for free.
+///
+/// This is a veto on *asking*, not a second notion of narrowing — the same shape as
+/// [`crosses_int_float`]. `match` still claims a genuine `mixed`/`mixed` pair first
+/// (normalization runs before the relation is consulted), so the veto costs no
+/// agreement, only the vacuous half of the comparison.
+fn expected_is_top_type(expected: &str) -> bool {
+    normalize(expected) == "mixed"
 }
 
 /// Whether the pair straddles the int/float boundary in the widening direction —
@@ -454,7 +522,6 @@ fn atom_unsupported_category(atom: &str) -> Option<&'static str> {
     // Bare keyword atoms Steins does not render.
     let low = a.to_ascii_lowercase();
     match low.as_str() {
-        "mixed" => Some("mixed"),
         "object" => Some("object"),
         "void" | "never" | "resource" | "scalar" | "empty" | "iterable" => Some("other-keyword"),
         "static" | "self" | "parent" | "$this" => Some("self-static"),
@@ -508,6 +575,14 @@ fn is_supported_atom(a: &str) -> bool {
         "non-empty-array",
         "list",
         "non-empty-list",
+        // The top type (issue #239): `ContractTy::Mixed` exists and the speller
+        // spells `mixed`, so gating the atom measured the harness's own vocabulary
+        // rather than the analyzer's — the identical defect S1.5 fixed for the
+        // array atoms and #77 for the casing pair. The cut forms
+        // (`non-null-mixed`/`non-empty-mixed`) are NOT listed: PHPStan spells that
+        // set `mixed~null` / `mixed~(0|0.0|''|…)`, which is subtraction and stays
+        // unsupported on its own terms.
+        "mixed",
     ];
     let low = a.to_ascii_lowercase();
     if KEYWORDS.contains(&low.as_str()) {
@@ -566,9 +641,10 @@ fn is_array_generic_atom(a: &str) -> bool {
 /// Bare lowercase keywords that are syntactically class-like but denote vocabulary
 /// Steins does not model — never a plain class name, always an unsupported atom.
 /// `array`/`list` (and their `non-empty-` forms) are deliberately NOT here as of
-/// S1.5: they are recognized earlier, in [`is_supported_atom`]'s `KEYWORDS` list.
+/// S1.5, and neither is `mixed` as of issue #239: they are recognized earlier, in
+/// [`is_supported_atom`]'s `KEYWORDS` list.
 const RESERVED_UNSUPPORTED_KEYWORDS: &[&str] = &[
-    "mixed", "object", "void", "never", "resource", "scalar", "empty", "iterable",
+    "object", "void", "never", "resource", "scalar", "empty", "iterable",
     "callable", "static", "self", "parent",
 ];
 
@@ -838,6 +914,10 @@ fn atom_kind(a: &str) -> &'static str {
         "int" => "int",
         "float" => "float",
         "string" => "string",
+        // The top type and its two cuts (issue #239). Without this arm `mixed`
+        // lowercases into a syntactically valid class name and the 329-row class
+        // would rank as `expected:class`, which is the wrong reading entirely.
+        "mixed" | "non-null-mixed" | "non-empty-mixed" => "mixed",
         "non-empty-string" | "non-falsy-string" | "numeric-string" => "refined-string",
         "array" | "non-empty-array" => "array-bare",
         "list" | "non-empty-list" => "list-bare",
@@ -854,7 +934,13 @@ fn atom_kind(a: &str) -> &'static str {
 fn is_scalarish(a: &str) -> bool {
     !matches!(
         atom_kind(a),
-        "class" | "other" | "array-shape" | "array-generic" | "array-bare" | "list-bare"
+        "class"
+            | "other"
+            | "mixed"
+            | "array-shape"
+            | "array-generic"
+            | "array-bare"
+            | "list-bare"
     )
 }
 
@@ -1102,16 +1188,55 @@ mod tests {
 
     #[test]
     fn unsupported_expected_wins_over_subsumption() {
-        // `mixed` subsumes everything, but Steins does not aim at `mixed` — the
-        // vocabulary verdict is decided first, so the denominator is unchanged.
-        assert_eq!(classify("mixed", "int").0, Verdict::Unsupported);
+        // `*NEVER*` is the bottom type: the relation would answer the covering
+        // direction for it too, but Steins does not aim at PHPStan's internal
+        // markers — the vocabulary verdict is decided first, so the denominator
+        // is unchanged.
+        assert_eq!(classify("*NEVER*", "int").0, Verdict::Unsupported);
+        assert_eq!(classify("int&object", "int").0, Verdict::Unsupported);
+    }
+
+    /// Issue #239: `mixed` is measured (the speller spells it), but the top type
+    /// never earns `equal` or `subsumed` — the covering direction is free for
+    /// every rendering, so the verdict would name the oracle's silence rather than
+    /// a type relation. See the module docs for the measurement behind this.
+    #[test]
+    fn mixed_is_measured_never_subsumed() {
+        // No longer parked in the vocabulary bucket…
+        assert_eq!(unsupported_pattern("mixed"), None);
+        // …but a concrete rendering under it is a gap, not precision. These are
+        // the corpus's own shapes: `unknown` (324 of the 329 rows), a folded
+        // literal, and an unresolvable phpdoc type rendered as a class name.
+        assert_eq!(classify("mixed", "unknown").0, Verdict::Differ);
+        assert_eq!(classify("mixed", "'name'").0, Verdict::Differ);
+        assert_eq!(classify("mixed", "1").0, Verdict::Differ);
+        assert_eq!(classify("mixed", "UnresolvableTypes\\array").0, Verdict::Differ);
+        assert!(!is_subsumption("mixed", "int"));
+        assert!(!is_proven_equal("mixed", "int"));
+        // Agreement still costs nothing: normalization claims the pair before the
+        // relation is consulted, so the veto never suppresses a `match`.
+        assert_eq!(classify("mixed", "mixed").0, Verdict::Match);
+        assert_eq!(classify("MIXED", "mixed").0, Verdict::Match);
+        // The veto is the top type only — a cut is a real constraint and keeps
+        // its ordinary comparison.
+        assert!(!expected_is_top_type("non-null-mixed"));
+        // …and `mixed` on the *got* side is not covered by an `int` expectation,
+        // so a widening regression cannot sneak into `subsumed` either.
+        assert_eq!(classify("int", "mixed").0, Verdict::Differ);
+    }
+
+    /// Issue #239: the 329-row class must rank as `mixed`, not as a class name —
+    /// `mixed` lowercases into a syntactically valid class identifier.
+    #[test]
+    fn mixed_has_its_own_gap_class() {
+        assert_eq!(gap_class("mixed", "unknown"), "expected:mixed | steins:unknown");
+        assert_eq!(atom_kind("non-null-mixed"), "mixed");
     }
 
     #[test]
     fn unsupported_patterns_are_named() {
         assert_eq!(unsupported_pattern("*ERROR*"), Some("phpstan-special"));
         assert_eq!(unsupported_pattern("*NEVER*"), Some("phpstan-special"));
-        assert_eq!(unsupported_pattern("mixed"), Some("mixed"));
         assert_eq!(unsupported_pattern("object"), Some("object"));
         assert_eq!(unsupported_pattern("int&object"), Some("intersection"));
         assert_eq!(unsupported_pattern("mixed~null"), Some("subtraction"));
@@ -1127,6 +1252,10 @@ mod tests {
         // The casing pair (issue #77): spelled by `preds_keyword`, so measured.
         assert_eq!(unsupported_pattern("lowercase-string"), None);
         assert_eq!(unsupported_pattern("uppercase-string"), None);
+        // The top type (issue #239): `ContractTy::Mixed` spells it, so measured —
+        // and it must stay ungated inside a union too.
+        assert_eq!(unsupported_pattern("mixed"), None);
+        assert_eq!(unsupported_pattern("int|mixed"), None);
         // …and their PHPStan spelling as an intersection stays gated on its own
         // terms — this opened one keyword each, not the `&` operator.
         assert_eq!(
