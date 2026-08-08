@@ -605,17 +605,75 @@ fn unset_is_neither_a_read_nor_a_binding() {
     fires("<?php\nfunction f(): mixed {\n    unset($a);\n    return $a;\n}\n", "a");
 }
 
+// The same-variable guarded conditional: the `??` discharge idiom in ternary and
+// `if` spelling. Orchestrator ruling, 2026-08-08, from a corpus site where a
+// commented-out binding left `empty($page) ? 0 : ($page - 1) * $view` standing —
+// the else arm runs only when `$page` is non-empty, hence bound, so the id's
+// runtime claim ("PHP warns and the read evaluates to null") is FALSE there.
+
 #[test]
-fn a_guard_excludes_its_own_read_but_binds_nothing_for_the_rest_of_the_scope() {
-    // ADR-0078 §3 excludes the guard trio **at collection** — a guard is not a read
-    // — and stops there: it does not make the guarded name bound. So a scope whose
-    // ONLY mention of `$x` besides the guard is a plain read still fires on that
-    // read. The code is dead (the guard can only ever be false when nothing in the
-    // scope binds `$x`), which is why the finding is defensible; it is nonetheless
-    // the shape defensive house styles get closest to, and the one for gate triage
-    // to watch.
-    fires(
+fn a_same_variable_empty_ternary_shields_both_arms() {
+    // The corpus site's exact shape, parentheses and all.
+    silent(
+        "<?php\nfunction f(int $view): int {\n    $start = (empty($page)) ? 0 : ($page - 1) * $view;\n    return $start;\n}\n",
+    );
+}
+
+#[test]
+fn a_same_variable_isset_ternary_shields_both_arms() {
+    silent("<?php\nfunction f(): mixed {\n    return isset($x) ? $x : null;\n}\n");
+    silent("<?php\nfunction f(): mixed {\n    return !isset($x) ? null : $x;\n}\n");
+    silent("<?php\nfunction f(): mixed {\n    return !empty($x) ? $x : null;\n}\n");
+}
+
+#[test]
+fn a_guarded_ternary_shields_only_the_name_it_tests() {
+    // The firing control: the guard names `$other`, so `$page` is still judged.
+    fires("<?php\nfunction f(): int {\n    return empty($other) ? 0 : $page;\n}\n", "page");
+}
+
+#[test]
+fn a_same_variable_isset_if_shields_its_body() {
+    // The statement spelling. No block-scoped tracking is involved: the `if`'s
+    // whole body is one subtree, and shielding it is the same containment rule.
+    silent(
         "<?php\nfunction f(): mixed {\n    if (isset($x)) {\n        return $x;\n    }\n    return null;\n}\n",
+    );
+    silent(
+        "<?php\nfunction f(): mixed {\n    if (empty($x)) {\n        return null;\n    } else {\n        return $x;\n    }\n}\n",
+    );
+}
+
+#[test]
+fn a_guarded_if_stops_shielding_after_its_body() {
+    // A read outside the guarded subtree is still judged — the shield is
+    // containment, not a scope-wide binding.
+    let d = diags(
+        "<?php\nfunction f(): mixed {\n    if (isset($x)) {\n        echo $x;\n    }\n    return $x;\n}\n",
+    );
+    assert_eq!(d.len(), 1, "only the read outside the guarded body: {d:#?}");
+    assert_eq!(d[0].line, 6, "{d:#?}");
+}
+
+#[test]
+fn a_guarded_if_shields_only_the_name_it_tests() {
+    // `$other` is read INSIDE the guarded body but is not the name the guard
+    // tests, so it still fires; `$x` fires only outside the body. Both together
+    // pin the shield's two dimensions at once — which name, and which subtree.
+    let d = diags(
+        "<?php\nfunction f(): mixed {\n    if (isset($x)) {\n        return $other;\n    }\n    return $x;\n}\n",
+    );
+    assert_eq!(d.len(), 2, "{d:#?}");
+    assert!(d.iter().any(|d| d.line == 4 && d.message.contains("$other")), "{d:#?}");
+    assert!(d.iter().any(|d| d.line == 6 && d.message.contains("$x")), "{d:#?}");
+}
+
+#[test]
+fn a_conjunction_guard_shields_nothing() {
+    // The carve-out is kept to the shape the corpus produced: only a bare
+    // `isset`/`empty` test, optionally negated or parenthesized, casts a shield.
+    fires(
+        "<?php\nfunction f(bool $c): mixed {\n    return isset($x) && $c ? $x : null;\n}\n",
         "x",
     );
 }
