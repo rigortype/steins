@@ -27376,10 +27376,13 @@ fn floor_target_admits(name: &str, target: Option<&steins_db::PhpTarget>) -> boo
 /// as before.
 ///
 /// The rule fires only on a single-argument call whose one argument is a bare
-/// variable carrying a non-nullable [`Fact::Shape`]; a nullable base declines
-/// (the value may be null, which is a TypeError rather than a count), a second
-/// argument declines (`count($x, COUNT_RECURSIVE)` counts something else), and a
-/// project function shadowing the simple name declines through
+/// variable carrying a non-nullable [`Fact::Shape`] — or a [`Fact::Singleton`]
+/// array, lifted to a shape ([`ShapeFact::lift`]) once the value lane's own
+/// order-dependent projections (issue #118) have first refused the name, so a
+/// literal array is never worse off than a declared one; a nullable base
+/// declines (the value may be null, which is a TypeError rather than a count),
+/// a second argument declines (`count($x, COUNT_RECURSIVE)` counts something
+/// else), and a project function shadowing the simple name declines through
 /// [`builtin_call_return_fact`]'s own check.
 ///
 /// **The admission gate is ADR-0061 §2's, unweakened**: the computed fact is
@@ -27421,14 +27424,27 @@ fn shape_builtin_return_fact(
     // **The value lane's own privilege** (ADR-0062 §2): a subject whose fact is a
     // witnessed `Val::Array` carries true insertion order, so the order-dependent
     // projection may be *executed* rather than widened. Taken before the shape
-    // binding below, because a `Singleton` is not a `Fact::Shape` — and refused for
-    // every name but the one issue #118 authored it for.
-    if let Some(Fact::Singleton(Val::Array(entries))) = &known.fact {
-        let out = witnessed_projection_fact(cx, folder, name, entries, args, env, store)?;
-        return Some((out, derivation_stratum(cx, folder, args, env, store, subject_stratum)));
-    }
-
-    let Some(Fact::Shape { shape, nullable: false }) = &known.fact else { return None };
+    // binding below, because a `Singleton` is not a `Fact::Shape`.
+    //
+    // A name that projection declines (every name but the one issue #118
+    // authored it for) is not a dead end: the same entries LIFT to a `ShapeFact`
+    // (issue #262) and fall through to the rung below exactly as a seeded
+    // `Fact::Shape` would. A literal array is strictly more informative than any
+    // declared shape, so lifting only sharpens what the rung below can answer —
+    // `count($x)` over `[1, 2, 3]` reaches the same `count_range()` a sealed
+    // `array{int, int, int}` would.
+    let lifted;
+    let shape: &ShapeFact = match &known.fact {
+        Some(Fact::Singleton(Val::Array(entries))) => {
+            if let Some(out) = witnessed_projection_fact(cx, folder, name, entries, args, env, store) {
+                return Some((out, derivation_stratum(cx, folder, args, env, store, subject_stratum)));
+            }
+            lifted = ShapeFact::lift(entries);
+            &lifted
+        }
+        Some(Fact::Shape { shape, nullable: false }) => shape.as_ref(),
+        _ => return None,
+    };
 
     let out = if rest.is_empty()
         && (name.eq_ignore_ascii_case("count") || name.eq_ignore_ascii_case("sizeof"))
