@@ -18195,7 +18195,7 @@ fn apply_helper_guard(
     asserted: &mut HashSet<String>,
 ) {
     let mut guards = Vec::new();
-    collect_shape_guards(cx, cond, then, &mut guards);
+    collect_shape_guards(cx, cond, then, env, &mut guards);
     for g in &guards {
         // ADR-0058: tag-declared, so the presence stratum is the declared one.
         apply_shape_guard(cx, g, env, store, false);
@@ -24877,6 +24877,12 @@ enum ShapeGuard {
     /// pushes this only at the firing polarity, so its absence on that branch
     /// is silence, not a claim.
     NonEmpty { var: String },
+    /// **A count comparison** (issue #272): `count($x) <op> <int>` resolved to
+    /// the entry-count interval the branch proves. Both polarities record —
+    /// the false arm of `count($x) > 0` proves `count($x) <= 0`, which is the
+    /// complement interval and not a vacuity trap — and the interval is
+    /// already the branch's, so nothing downstream re-reads the operator.
+    Count { var: String, range: IntRange },
 }
 
 impl ShapeGuard {
@@ -24887,7 +24893,8 @@ impl ShapeGuard {
             | ShapeGuard::IsList { var, .. }
             | ShapeGuard::Tag { var, .. }
             | ShapeGuard::Cover { var, .. }
-            | ShapeGuard::NonEmpty { var, .. } => var,
+            | ShapeGuard::NonEmpty { var, .. }
+            | ShapeGuard::Count { var, .. } => var,
         }
     }
 }
@@ -24924,16 +24931,142 @@ fn array_all_any_predicate(cx: &Cx, call: &CallExpr) -> Option<&'static str> {
     ["array_all", "array_any"].into_iter().find(|p| callee.eq_ignore_ascii_case(p))
 }
 
+/// The binding whose entry count an operand **is** — `count($x)` / `sizeof($x)`
+/// over a bare local (issue #272), or `None` for everything else.
+///
+/// Four refusals, each a soundness or scope requirement rather than a
+/// convenience:
+///
+/// * the callee must denote the **global builtin** ([`global_function_callee`],
+///   the same rule the presence predicates use): a project function named
+///   `count` counts whatever it likes;
+/// * the call must be **positional-only with exactly one argument** — the mode
+///   argument (`count($x, COUNT_RECURSIVE)`) counts nested entries, which is a
+///   different number, and the named spelling (`count(value: $x)`) is refused
+///   with it rather than pattern-matched a second way;
+/// * the argument must be a **bare local**, since that is the only thing the
+///   fact lanes can be keyed by;
+/// * the operand must be a *resolvable* call (`CondOperand::Other`'s `call`),
+///   so `count($x) + 1` — an operand that merely contains one — declines.
+fn count_subject<'a>(cx: &Cx, operand: &'a CondOperand) -> Option<&'a str> {
+    let call = operand_call(operand)?;
+    let callee = global_function_callee(cx, call)?;
+    if !call.positional_only || call.args.len() != 1 {
+        return None;
+    }
+    if !["count", "sizeof"].iter().any(|n| callee.eq_ignore_ascii_case(n)) {
+        return None;
+    }
+    match &call.args[0].value {
+        ArgValue::Var(v) => Some(v.as_str()),
+        _ => None,
+    }
+}
+
+/// The int interval an operand denotes, when the engine can bound it: a literal
+/// int is a point, and a binding carrying an int fact contributes its own
+/// interval (`int<3, 5>` bounds `count($x) === $range` exactly as a literal
+/// does). Anything else — a float, a string, an unbounded or non-int fact —
+/// declines, and the guard with it.
+fn operand_int_bound(operand: &CondOperand, env: &HashMap<String, Known>) -> Option<IntRange> {
+    match operand {
+        CondOperand::Literal(ArgValue::Int(i)) => Some(IntRange::point(*i)),
+        CondOperand::Var(v) => match env.get(v)?.fact.as_ref()? {
+            Fact::Singleton(Val::Int(i)) => Some(IntRange::point(*i)),
+            Fact::Refined { base: Base::Int, refinement: Refinement::Int(r), nullable: false } => {
+                Some(*r)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The logical negation of a comparison, for the false branch. Orderings flip
+/// through [`negate_ordering`]; the equality pairs swap. Total, so the false
+/// arm of a count guard is derived rather than special-cased at each operator.
+fn negate_cmp(op: CmpOp) -> CmpOp {
+    match op {
+        CmpOp::Identical => CmpOp::NotIdentical,
+        CmpOp::NotIdentical => CmpOp::Identical,
+        CmpOp::Loose => CmpOp::NotLoose,
+        CmpOp::NotLoose => CmpOp::Loose,
+        other => negate_ordering(other),
+    }
+}
+
+/// **The count-comparison guard** (issue #272): the entry-count interval
+/// `count($x) <op> <bound>` proves on branch `then`.
+///
+/// The comparison is first normalized to read left-to-right (`flip_ordering`
+/// mirrors a Yoda `0 < count($x)`), then negated on the false branch, and only
+/// then read against the bound's own interval `[lo, hi]`. Reading it against an
+/// *interval* rather than a literal is what makes a bounded variable work, and
+/// each row below is the weakest sound claim over the whole interval:
+///
+/// * `> bound` — the bound is at least `lo`, so the count is at least `lo + 1`;
+/// * `>= bound` — at least `lo`;
+/// * `< bound` / `<= bound` — the mirror, against `hi`;
+/// * `===` / `==` — the count lies in `[lo, hi]` (a literal makes that a point);
+/// * `!==` / `!=` — nothing, **except** against the point `0`, where the
+///   complement is representable: the array is non-empty.
+///
+/// PHP compares `count($x)` as an int, so a loose comparison against an int
+/// bound is the strict one; a non-int bound never reaches here
+/// ([`operand_int_bound`] declines it) rather than being loosely coerced.
+///
+/// An interval the ordering empties (`count($x) < 0`) declines: the branch is
+/// in fact impossible, and death is the verdict's business (ADR-0052 §2), not a
+/// narrowing operator's.
+fn count_guard(
+    cx: &Cx,
+    env: &HashMap<String, Known>,
+    op: CmpOp,
+    lhs: &CondOperand,
+    rhs: &CondOperand,
+    then: bool,
+) -> Option<ShapeGuard> {
+    let (var, bound, count_on_left) = match (count_subject(cx, lhs), count_subject(cx, rhs)) {
+        // `count($a) === count($b)` relates two bindings and bounds neither.
+        (Some(_), Some(_)) => return None,
+        (Some(v), None) => (v, rhs, true),
+        (None, Some(v)) => (v, lhs, false),
+        (None, None) => return None,
+    };
+    let bound = operand_int_bound(bound, env)?;
+    let op = if count_on_left { op } else { flip_ordering(op) };
+    let op = if then { op } else { negate_cmp(op) };
+    let (lo, hi) = (bound.lo(), bound.hi());
+    let range = match op {
+        CmpOp::Gt => IntRange::new(lo.checked_add(1)?, i64::MAX),
+        CmpOp::Ge => IntRange::new(lo, i64::MAX),
+        CmpOp::Lt => IntRange::new(0, hi.checked_sub(1)?),
+        CmpOp::Le => IntRange::new(0, hi),
+        CmpOp::Identical | CmpOp::Loose => IntRange::new(lo, hi),
+        CmpOp::NotIdentical | CmpOp::NotLoose => {
+            (lo == 0 && hi == 0).then_some(IntRange::POSITIVE)
+        }
+    }?;
+    Some(ShapeGuard::Count { var: var.to_owned(), range })
+}
+
 /// Collect the shape guards a condition establishes at polarity `then`.
 ///
 /// The polarity walk is `collect_refine`'s, verbatim in structure: `Not` flips,
 /// `And` contributes on the true path, `Or` on the false one (De Morgan).
 /// Everything else contributes nothing, so an unmodeled condition
 /// narrows nothing rather than narrowing wrongly.
+///
+/// `env` is read for **operand bounds only** (issue #272's `count($x) === $n`,
+/// where the comparison's other side is a binding carrying an int interval);
+/// every guard here is still decided from the condition's own syntax, so the
+/// walk stays replayable in the ADR-0048 §1 sense — the env it reads is the one
+/// the walk itself built to this point.
 fn collect_shape_guards(
     cx: &Cx,
     cond: &CondExpr,
     then: bool,
+    env: &HashMap<String, Known>,
     out: &mut Vec<ShapeGuard>,
 ) {
     let php_minor = cx.php_minor;
@@ -24956,6 +25089,13 @@ fn collect_shape_guards(
         // NOT `'circle'` kills an arm only if that arm's tag slot admits nothing
         // else, which is a residue question A-G4 does not open in v1.
         CondExpr::Cmp { op, lhs, rhs } => {
+            // A count comparison (issue #272) is the one comparison form whose
+            // operand is a *call*; it cannot also be a tag guard, so it takes
+            // the arm and returns.
+            if let Some(g) = count_guard(cx, env, *op, lhs, rhs, then) {
+                out.push(g);
+                return;
+            }
             let positive = match op {
                 CmpOp::Identical | CmpOp::Loose => then,
                 CmpOp::NotIdentical | CmpOp::NotLoose => !then,
@@ -25028,18 +25168,18 @@ fn collect_shape_guards(
                 }
             }
         }
-        CondExpr::Not(c) => collect_shape_guards(cx, c, !then, out),
+        CondExpr::Not(c) => collect_shape_guards(cx, c, !then, env, out),
         CondExpr::And(a, b) if then => {
-            collect_shape_guards(cx, a, then, out);
-            collect_shape_guards(cx, b, then, out);
+            collect_shape_guards(cx, a, then, env, out);
+            collect_shape_guards(cx, b, then, env, out);
         }
         // De Morgan: `¬(isset a ∨ isset b)` is `¬isset a ∧ ¬isset b`, so the false
         // branch of a disjunction is just both disjuncts at false polarity — the
         // per-key S4 narrowing, distributed by the walk itself. Nothing S5-specific
         // is needed here; the cover lives on the TRUE branch only.
         CondExpr::Or(a, b) if !then => {
-            collect_shape_guards(cx, a, then, out);
-            collect_shape_guards(cx, b, then, out);
+            collect_shape_guards(cx, a, then, env, out);
+            collect_shape_guards(cx, b, then, env, out);
         }
         // The true branch of a disjunction (A-G8, S5). Individually a disjunct
         // proves nothing — either could be the false one — so the ONLY thing
@@ -25148,7 +25288,7 @@ fn apply_shape_narrowing(
     witnessed: bool,
 ) {
     let mut guards = Vec::new();
-    collect_shape_guards(cx, cond, then, &mut guards);
+    collect_shape_guards(cx, cond, then, env, &mut guards);
     for g in &guards {
         apply_shape_guard(cx, g, env, store, witnessed);
     }
@@ -25184,6 +25324,15 @@ fn subtract_shape_arms(cx: &Cx, g: &ShapeGuard, store: &mut Store) {
     let kept: Vec<ContractArm> =
         arms.iter().filter(|a| shape_arm_survives(g, &a.ty, cx.php_minor)).cloned().collect();
     if kept.len() == arms.len() {
+        return;
+    }
+    // **A count guard never empties the lane** (issue #272). Every other guard
+    // here refutes an arm on a *structural* ground, and an emptied lane means
+    // the binding is out of vocabulary; a count guard refutes on arithmetic, so
+    // an emptied lane means the branch is unreachable — a claim §2 reserves for
+    // the verdict, and one that would erase the binding for the *join* as well
+    // as for the branch. The lane is left whole instead.
+    if kept.is_empty() && matches!(g, ShapeGuard::Count { .. }) {
         return;
     }
     if kept.is_empty() {
@@ -25244,6 +25393,15 @@ fn shape_arm_survives(g: &ShapeGuard, ty: &ContractTy, php_minor: Option<(u16, u
         // subtracts nothing here and refines the fact lane only.
         ShapeGuard::Truthy { .. } | ShapeGuard::IsList { .. } | ShapeGuard::NonEmpty { .. } => {
             true
+        }
+        // A count guard **does** discriminate arms (issue #272), through the
+        // one interval each array arm already publishes: an arm none of whose
+        // admitted arrays can have a count in `range` cannot be the live one.
+        // `array{}` dies under `count($x) > 0`; `array<int>` survives it, since
+        // its interval is `int<0, max>`. A non-array arm keeps its place —
+        // `count()` accepts a `Countable`, whose entry count no shape bounds.
+        ShapeGuard::Count { range, .. } => {
+            shape.is_none_or(|s| s.count_range().intersect(*range).is_some())
         }
         // **Covers on arms are future work** (A-G8's home for them is inside the
         // shape fact, and A-G3 keeps unions in the arm lane). An arm that can hold
@@ -25311,6 +25469,63 @@ fn mint_collapsed_shape(var: &str, env: &mut HashMap<String, Known>, store: &Sto
     );
 }
 
+/// **The value lane's answer to a count guard** (issue #272): the fact that
+/// replaces a *proven* array the branch's count interval excludes, or `None`
+/// when the value survives and must be left exactly as it is.
+///
+/// Why this exists at all. Every other shape guard narrows a `Fact::Shape` and
+/// says nothing about a proven `Fact::Singleton(Val::Array(…))` — it cannot,
+/// because presence and list-ness are *already decided* on a literal, so a
+/// literal that satisfies the guard is untouched and one that does not is a
+/// contradiction the guard forms could not express. A count comparison can
+/// express it: `count($x) > 0` on a binding the walk proved to be `[]` is a
+/// branch the literal cannot reach. Before the count guard existed such a
+/// comparison lowered to `CondExpr::Opaque` and the opaque path *dropped* the
+/// binding, so the stale literal never survived; the lowering lift keeps the
+/// comparison, and without this the literal would ride into the arm and the
+/// contract checker would convict on it (`resolve_cval` reads exactly this
+/// lane). The two lanes are narrowed in one place so they cannot disagree.
+///
+/// The replacement is **not** a lifted-and-narrowed shape. The entries are what
+/// the branch refutes, so nothing about them — not their keys, not their value
+/// types — survives as proof; what survives is "an array whose entry count lies
+/// in `range`", which is the honest floor and still a narrowing. Marking the
+/// branch dead instead is the verdict's business, never a narrowing operator's
+/// (ADR-0052 §2).
+///
+/// A `OneOf` of arrays filters member-wise, which is sharper: only the members
+/// the interval excludes drop, and a surviving remainder stays a proven value
+/// set. A `OneOf` with any non-array member is left alone — `count()` accepts a
+/// `Countable` too, and this rule has no business guessing at one.
+fn refuted_array_value(fact: &Fact, range: IntRange) -> Option<Fact> {
+    let in_range = |entries: &[(VKey, Val)]| {
+        i64::try_from(entries.len()).is_ok_and(|n| range.contains(n))
+    };
+    // "An array, with this entry count": everything the guard leaves standing.
+    let widened = || Fact::Shape {
+        shape: Box::new(ShapeFact::plain_array().narrow_count(range)),
+        nullable: false,
+    };
+    match fact {
+        Fact::Singleton(Val::Array(entries)) => (!in_range(entries)).then(widened),
+        Fact::OneOf(vals) => {
+            if !vals.iter().all(|v| matches!(v, Val::Array(_))) {
+                return None;
+            }
+            let kept: Vec<Val> = vals
+                .iter()
+                .filter(|v| matches!(v, Val::Array(e) if in_range(e)))
+                .cloned()
+                .collect();
+            if kept.len() == vals.len() {
+                return None;
+            }
+            Some(Fact::from_vals(kept).unwrap_or_else(widened))
+        }
+        _ => None,
+    }
+}
+
 /// **Fact-lane refinement**: apply the guard's domain operator to `var`'s
 /// `Fact::Shape`, if it has one. Every operator is a narrowing
 /// (`crates/steins-domain/src/shape.rs`), so the result admits everything the
@@ -25318,6 +25533,20 @@ fn mint_collapsed_shape(var: &str, env: &mut HashMap<String, Known>, store: &Sto
 fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>, witnessed: bool) {
     use steins_domain::Presence;
     let Some(known) = env.get(g.var()) else { return };
+    // **Value-lane coherence first** (issue #272): a count guard is the one guard
+    // here that can refute a *proven* array outright, and the value lane is where
+    // the contract checker looks. See [`refuted_array_value`].
+    if let ShapeGuard::Count { range, .. } = g
+        && let Some(fact) = known.fact.as_ref()
+        && let Some(next) = refuted_array_value(fact, *range)
+    {
+        let (line, stratum) = (known.line, known.stratum);
+        env.insert(
+            g.var().to_owned(),
+            Known::value_strat(next, line, Some(SHAPE_REFINED.to_owned()), stratum),
+        );
+        return;
+    }
     let Some(Fact::Shape { shape, nullable }) = &known.fact else { return };
     let (shape, nullable) = (shape.as_ref(), *nullable);
     let next = match g {
@@ -25397,6 +25626,13 @@ fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>, witnessed
             // exactly the reading `Present { positive: true }` already takes.
             nullable: nullable && *flavor == PresenceFlavor::KeyExists,
         }),
+        // The count accessory (issue #272). `nullable` is deliberately NOT
+        // cleared: `count(null)` raises a TypeError rather than answering, so —
+        // exactly as `array_key_exists` reads on a null base — the comparison
+        // having a value proves nothing this lane may record.
+        ShapeGuard::Count { range, .. } => {
+            Some(Fact::Shape { shape: Box::new(shape.narrow_count(*range)), nullable })
+        }
         // A tag guard's job is arm subtraction; the collapsed arm's own slot is
         // already the declared literal, so refining the fact adds nothing v1.
         ShapeGuard::Tag { .. } => None,
@@ -25471,7 +25707,10 @@ fn apply_offset_write(
             // state something the write may have falsified. Unknown is the honest
             // floor; a real nested-shape update is not v1.
             let nested = keys.len() > 1;
-            let mut next = shape.promote_present(&first, false, true);
+            // A write can only add an entry, so the learned count **ceiling**
+            // (issue #272) does not survive it; the floor does, and does not
+            // need re-deriving.
+            let mut next = shape.relax_count_ceiling().promote_present(&first, false, true);
             // Writing an UNDECLARED key under a `Sealed` tail: the declaration
             // says the key cannot be there and the code just put it there, so the
             // runtime value has diverged from the docblock. Resolved the A-G5
@@ -25481,12 +25720,13 @@ fn apply_offset_write(
             // code just built; unsealing is sound and loses only the declared
             // sealing, on this binding, from this point on.
             if next.field(&first).is_none() {
-                next = ShapeFact::normalize(
+                next = ShapeFact::normalize_counted(
                     next.fields.clone(),
                     Tail::Unsealed { key: KeyClass::ArrayKey, value: None },
                     next.is_list,
                     next.non_empty,
                     next.covers.clone(),
+                    next.count_bound,
                 )
                 .promote_present(&first, false, true);
             }
@@ -25522,12 +25762,14 @@ fn set_slot_fact(shape: &ShapeFact, key: &VKey, fact: Option<Fact>) -> ShapeFact
             }
         })
         .collect();
-    ShapeFact::normalize(
+    ShapeFact::normalize_counted(
         fields,
         shape.tail.clone(),
         shape.is_list,
         shape.non_empty,
         shape.covers.clone(),
+        // A slot replacement changes a value, never the entry count.
+        shape.count_bound,
     )
 }
 

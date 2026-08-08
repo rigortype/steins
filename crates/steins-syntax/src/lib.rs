@@ -10058,6 +10058,20 @@ fn cmp_op_of(operator: &BinaryOperator<'_>) -> Option<CmpOp> {
     }
 }
 
+/// Is this operand a `count(…)` / `sizeof(…)` call **as written** (issue #272)?
+///
+/// A syntactic question, deliberately: the lowering decides only whether the
+/// comparison is worth carrying as a [`CondExpr::Cmp`], and the semantic
+/// question — does the name denote the global builtin here — belongs to the
+/// consumer, which has the project view this crate does not.
+fn names_count_call(operand: &CondOperand) -> bool {
+    let CondOperand::Other { call: Some(call), .. } = operand else { return false };
+    call.callee.as_deref().is_some_and(|c| {
+        let bare = c.rsplit('\\').next().unwrap_or(c);
+        ["count", "sizeof"].iter().any(|n| bare.eq_ignore_ascii_case(n))
+    })
+}
+
 /// Lower a binary-operator condition (comparison / `instanceof` / `&&` / `||`).
 fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
     let op = cmp_op_of(&b.operator);
@@ -10071,10 +10085,19 @@ fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
         // it may write, so this arm is now about *refinement value*, not
         // soundness — lifting it would let `preg_match($re, $s, $m) > 0` reach
         // the out-parameter seed, which is a precision change of its own.
+        //
+        // **The count exception** (issue #272): an ordering comparison whose
+        // opaque side is a `count()`/`sizeof()` call keeps its `Cmp` form, so
+        // the shape-narrowing dispatcher can read it. The name is matched
+        // syntactically here because this crate has no project view; whether it
+        // denotes the *global builtin* is settled on the consuming side
+        // (`count_subject`), which is also where the mode argument and a
+        // shadowing project function decline.
         let ordering = matches!(op, CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge);
-        if ordering
-            && (matches!(lhs, CondOperand::Other { .. }) || matches!(rhs, CondOperand::Other { .. }))
-        {
+        let opaque_side = |o: &CondOperand| {
+            matches!(o, CondOperand::Other { .. }) && !names_count_call(o)
+        };
+        if ordering && (opaque_side(&lhs) || opaque_side(&rhs)) {
             let mut reads = Vec::new();
             collect_read_vars(&Node::Expression(b.lhs), &[], &mut reads);
             collect_read_vars(&Node::Expression(b.rhs), &[], &mut reads);
