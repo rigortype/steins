@@ -76,20 +76,24 @@ jobs:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    # macOS is slow (the matrix's long pole) and PR iteration is a tight loop —
-    # so it's skipped on `pull_request` and only runs on push to master and on
-    # the workflow_dispatch escape hatch above. That still catches an
-    # OS-specific sidecar break BEFORE it ships (every push to master runs it,
-    # and every release is cut from master), just not on every PR round-trip.
-    # `if:` on a matrix job is evaluated per expanded leg, so this skips only
-    # the macos-latest leg on PRs — ubuntu-latest still runs there.
-    if: matrix.os != 'macos-latest' || github.event_name != 'pull_request'
     strategy:
       # One OS failing should still report the other — an OS-specific sidecar
       # break is exactly the signal this matrix exists to isolate.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # macOS is slow (the matrix's long pole) and PR iteration is a tight
+        # loop, so it's left out of the matrix entirely on `pull_request` and
+        # only included on push to master / the workflow_dispatch escape hatch
+        # above. Every push to master (and every release, cut from master)
+        # still runs it, so an OS-specific sidecar break is caught before it
+        # ships — just not on every PR round-trip.
+        #
+        # This has to live here rather than as a job-level `if: matrix.os !=
+        # ...` — the `matrix` context isn't available in `jobs.<id>.if` (only
+        # github/inputs/needs/vars are; actionlint catches the mistake). It
+        # IS available as an expression inside the matrix definition itself,
+        # since only `github` (not `matrix`) is needed to compute it.
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest"]') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
