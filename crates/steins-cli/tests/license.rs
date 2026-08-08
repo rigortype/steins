@@ -13,8 +13,20 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
+/// Every test in this file spawns the binary with `GITHUB_ACTIONS` scrubbed.
+/// `check`'s format auto-detection (ADR-0054 §6) reads that variable, so a test
+/// run *on* GitHub Actions would otherwise get workflow commands where it
+/// asserted text. No test's expected output may depend on the ambient CI
+/// environment; detection itself is tested in `tests/format_github.rs`, which
+/// sets the variable deliberately.
+fn steins_cmd() -> Command {
+    let mut cmd = Command::new(bin());
+    cmd.env_remove("GITHUB_ACTIONS");
+    cmd
+}
+
 fn run(args: &[&str]) -> (i32, String) {
-    let out = Command::new(bin()).args(args).output().expect("run steins");
+    let out = steins_cmd().args(args).output().expect("run steins");
     (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
@@ -114,7 +126,7 @@ fn a_closed_pipe_is_not_a_crash() {
     // `steins license` emits thousands of lines, so `| head` and quitting `less`
     // early are the normal ways to read it. `println!` panics on EPIPE; this
     // pins that the command does not.
-    let mut child = Command::new(bin())
+    let mut child = steins_cmd()
         .arg("license")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

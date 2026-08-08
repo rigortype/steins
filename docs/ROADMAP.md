@@ -80,7 +80,7 @@ CLI (ADR-0020, partially landed):
   the minimal `doctor` (ADR-0054 C3 scope), and `mcp` (stdio MCP server,
   four tools). Inline `@steins-ignore` with anti-rot.
 - NOT landed (declared in ADR-0020/0023, absent from the binary):
-  `sarif`/`github` output, `lsp`, `doctor --format json` and its richer
+  `lsp`, `doctor --format json` and its richer
   audits, `[paths.sets]` / `[[policy]]` scoped policy, and every
   `check --fix` family beyond the `debug.*` dump-removal one.
 - `check` separates layers (ADR-0050): the cumulative ladder
@@ -131,8 +131,9 @@ names its milestone.
 5. **Config UX.** ADR-0023's `[paths.sets]` and `[[policy]]` scoped
    policy are designed, not implemented. Zero-config must stay true;
    config carries intent only. → M2
-6. **CI surface.** `sarif`/`github` formats with auto-detection;
-   `doctor` for coverage posture, sidecar health, catalog audit. → M2
+6. **CI surface.** `sarif`/`github` formats with auto-detection have
+   landed (ADR-0054 C1/C2); what remains is `doctor`'s richer coverage
+   posture, sidecar health and catalog audit. → M2
 7. **Vendor and extension maturity.** Vendor trees are analyzed as
    source (works, budgeted per ADR-0015). Classes from unloaded PHP
    extensions (`ext-redis`, …) are Unknown-silent; the sidecar's

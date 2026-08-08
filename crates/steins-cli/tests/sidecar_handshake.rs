@@ -32,6 +32,18 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
+/// Every test in this file spawns the binary with `GITHUB_ACTIONS` scrubbed.
+/// `check`'s format auto-detection (ADR-0054 §6) reads that variable, so a test
+/// run *on* GitHub Actions would otherwise get workflow commands where it
+/// asserted text. No test's expected output may depend on the ambient CI
+/// environment; detection itself is tested in `tests/format_github.rs`, which
+/// sets the variable deliberately.
+fn steins_cmd() -> Command {
+    let mut cmd = Command::new(bin());
+    cmd.env_remove("GITHUB_ACTIONS");
+    cmd
+}
+
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
 }
@@ -131,7 +143,7 @@ fn stub_php_dir_mid_run() -> PathBuf {
 /// each with its own respawn) put this comfortably under ten seconds; a
 /// 30-second bound below only guards against an actual hang regression.
 fn run_against_stub(stub_dir: &Path, args: &[&str]) -> Run {
-    let out = Command::new(bin()).args(args).env("PATH", stub_dir).output().expect("run steins");
+    let out = steins_cmd().args(args).env("PATH", stub_dir).output().expect("run steins");
     let _ = std::fs::remove_dir_all(stub_dir);
     Run {
         code: out.status.code().unwrap_or(-1),

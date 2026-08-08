@@ -67,7 +67,13 @@ mago-database = { git = "https://github.com/rigortype/mago", rev = "237465ec7a36
 
 salsa = "0.28"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` is load-bearing for the committed document shapes: `check
+# --format json` and `--format sarif` both build a `serde_json::Value` and print
+# it, so without it every object's keys come out alphabetized and the SARIF
+# snapshot fixture (and the JSON document users read) reorder wholesale. The
+# feature was already on through mago's `schemars`, i.e. by dependency accident;
+# declaring it here is what keeps a mago bump from silently rewriting output.
+serde_json = { version = "1", features = ["preserve_order"] }
 
 # Dev-tooling dependencies (xtask only).
 rayon = "1"

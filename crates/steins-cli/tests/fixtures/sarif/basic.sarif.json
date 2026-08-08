@@ -1,0 +1,100 @@
+{
+  "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "steins",
+          "semanticVersion": "{{VERSION}}",
+          "informationUri": "https://github.com/rigortype/steins",
+          "rules": [
+            {
+              "id": "debug.var-dump",
+              "shortDescription": {
+                "text": "debug.var-dump"
+              },
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "properties": {
+                "layer": "debug"
+              }
+            },
+            {
+              "id": "type.argument-mismatch",
+              "shortDescription": {
+                "text": "type.argument-mismatch"
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "layer": "proof"
+              }
+            }
+          ]
+        }
+      },
+      "automationDetails": {
+        "id": "steins/default"
+      },
+      "results": [
+        {
+          "ruleId": "type.argument-mismatch",
+          "ruleIndex": 1,
+          "level": "error",
+          "message": {
+            "text": "argument \"abc\" to width() cannot become int $w — proven TypeError (coercive mode)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "a.php"
+                },
+                "region": {
+                  "startLine": 3,
+                  "startColumn": 7
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "steinsFindingHash/v1": "f956bd63fb3d2079"
+          }
+        },
+        {
+          "ruleId": "debug.var-dump",
+          "ruleIndex": 0,
+          "level": "note",
+          "message": {
+            "text": "dumped type: 1"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "a.php"
+                },
+                "region": {
+                  "startLine": 4,
+                  "startColumn": 10
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "steinsFindingHash/v1": "f2f6d30c7aa6beb0"
+          }
+        }
+      ],
+      "properties": {
+        "profile": "default",
+        "vendorSuppressed": 0,
+        "suppressed": 0,
+        "baselined": 0
+      }
+    }
+  ]
+}

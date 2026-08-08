@@ -212,9 +212,11 @@ declares one; the document also reports the active `profile` and the
 | 1 | at least one `fail`-level finding displayed |
 | 2 | usage or config error |
 
-`sarif` and `github` formats are designed in ADR-0054 (with format invariance as
-the binding rule — a format is a serialization of the displayed surface, never a
-second surface) and are **not implemented** — decided out of v0.1.0 by owner. A
+`sarif` and `github` formats have **landed** (ADR-0054 C1/C2), under format
+invariance as the binding rule — a format is a serialization of the displayed
+surface, never a second surface: for a fixed invocation all four formats render
+the same displayed finding multiset and the same exit code. With no `--format`,
+`GITHUB_ACTIONS=true` selects `github`; an explicit flag always wins. A
 minimal `doctor` — the posture report that answers "what is my coverage, is the
 sidecar healthy, what does the catalog know" without running an emitter — has
 **landed** (ADR-0054 C3 scope, index-bound); the full report (`--format json`,
