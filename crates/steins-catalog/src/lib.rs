@@ -98,7 +98,7 @@ pub fn foldable(name: &str) -> bool {
 
 /// The number of names on the folding allowlist (ADR-0054 §9.6's Catalog section
 /// "freshness context", the [`foldable`] twin of [`hierarchy_entry_count`]): the
-/// union of [`WIDTH_SAFE`] and [`WIDTH_REFUSED`], which is exactly what
+/// union of `WIDTH_SAFE` and `WIDTH_REFUSED`, which is exactly what
 /// [`foldable`] tests — the two lists are disjoint by construction (a name has one
 /// width verdict), so counting both and summing is the same set [`foldable`]
 /// answers `true` for.
