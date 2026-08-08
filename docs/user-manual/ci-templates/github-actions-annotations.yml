@@ -1,14 +1,17 @@
 # Steins — GitHub Actions workflow (with inline annotations).
 #
-# Copy to .github/workflows/steins.yml. Same install as github-actions.yml,
-# but the check step emits `--format json` and a jq recipe turns each
-# finding into a GitHub Actions workflow command
-# (`::error file=...,line=...,col=...,title=...::message`), which the
-# runner renders as an inline annotation on the diff. This is the interim
-# annotation path: Steins has no `--format github` yet (SARIF and a native
-# GitHub format are designed and deferred, ADR-0054 §5) — see
-# docs/user-manual/06-ci.md for the recipe explained line by line and why
-# `set -o pipefail` is load-bearing here.
+# Copy to .github/workflows/steins.yml. Same install as github-actions.yml;
+# the check step emits `--format github`, so each finding becomes a GitHub
+# Actions workflow command (`::error file=...,line=...,col=...,title=...::message`)
+# and the runner renders it as an inline annotation on the diff.
+#
+# The flag is spelled out here for clarity, but it is not required: with no
+# `--format`, `check` selects `github` on its own when GITHUB_ACTIONS is set
+# (an explicit --format always wins). Escaping is handled in both of
+# GitHub's registers. See docs/user-manual/06-ci.md.
+#
+# Run from the repo root with a relative path — that is what GitHub matches
+# annotations against.
 name: steins
 
 on: [push, pull_request]
@@ -27,15 +30,4 @@ jobs:
       - run: composer require --dev typedduck/steins
 
       - name: steins check (annotated)
-        run: |
-          set -o pipefail
-          vendor/bin/steins check --format json . | tee steins.json | jq -r '
-            .findings[]
-            | (if .level == "fail" then "error" else "warning" end) as $cmd
-            | "::" + $cmd
-              + " file=" + .path
-              + ",line=" + (.line | tostring)
-              + ",col=" + (.column | tostring)
-              + ",title=" + .id
-              + "::" + .message
-          '
+        run: vendor/bin/steins check --format github .

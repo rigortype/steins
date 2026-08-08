@@ -65,7 +65,7 @@ The binary has eight subcommands — `check`, `annotate`,
 surface:
 
 ```text
-usage: steins check [--format text|json] [--profile <name>] [--no-php] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
+usage: steins check [--format text|json|github] [--profile <name>] [--no-php] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
        steins annotate [--no-php] [--format text|json] <file.php>
        steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--asserted-subjects] [--format text|json] <paths...>
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>

@@ -19,6 +19,18 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
+/// Every test in this file spawns the binary with `GITHUB_ACTIONS` scrubbed.
+/// `check`'s format auto-detection (ADR-0054 §6) reads that variable, so a test
+/// run *on* GitHub Actions would otherwise get workflow commands where it
+/// asserted text. No test's expected output may depend on the ambient CI
+/// environment; detection itself is tested in `tests/format_github.rs`, which
+/// sets the variable deliberately.
+fn steins_cmd() -> Command {
+    let mut cmd = Command::new(bin());
+    cmd.env_remove("GITHUB_ACTIONS");
+    cmd
+}
+
 /// A throwaway project directory under the OS temp dir, cleaned on drop.
 struct TempProject {
     dir: PathBuf,
@@ -70,7 +82,7 @@ impl Client {
     /// Start a server with `cwd` as its working directory (where a `steins.toml`
     /// would be looked up) and complete the MCP handshake.
     fn start(cwd: &str) -> Self {
-        let mut child = Command::new(bin())
+        let mut child = steins_cmd()
             .arg("mcp")
             .current_dir(cwd)
             .stdin(Stdio::piped())

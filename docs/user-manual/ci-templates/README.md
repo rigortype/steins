@@ -2,14 +2,14 @@
 
 Copy-pasteable CI configuration for running Steins in your project's
 pipeline. See [chapter 6, "CI integration"](../06-ci.md) for the
-exit-code contract, the baseline loop, and the `jq` annotation recipe
+exit-code contract, the baseline loop, and the annotation format
 these templates use — this README only lists the files and their
 assumptions.
 
 | File | Copy it to | What it does |
 | --- | --- | --- |
 | [`github-actions.yml`](github-actions.yml) | `.github/workflows/steins.yml` | **The minimal template.** Checkout, `setup-php`, install Steins via Composer, `steins check .`. Plain log output; no annotations. |
-| [`github-actions-annotations.yml`](github-actions-annotations.yml) | `.github/workflows/steins.yml` | Same install, plus `--format json` piped through `jq` into GitHub Actions workflow commands — inline `::error`/`::warning` annotations on the diff. |
+| [`github-actions-annotations.yml`](github-actions-annotations.yml) | `.github/workflows/steins.yml` | Same install, plus `--format github` — GitHub Actions workflow commands, so findings render as inline `::error`/`::warning`/`::notice` annotations on the diff. |
 
 Both assume:
 
@@ -45,8 +45,9 @@ Steins (Composer, the prebuilt binary, or Homebrew), run `steins check
 pipeline — no Steins-specific glue is needed for that part on GitLab CI,
 CircleCI, Jenkins, or anywhere else that runs shell steps. What a
 GitHub-specific template adds over that generic recipe is exactly the
-`jq` annotation step; every other CI system gets the same value from the
-minimal recipe with `steins check .` as its own step.
+annotation rendering (`--format github`, which `check` also selects on
+its own inside Actions); every other CI system gets the same value from
+the minimal recipe with `steins check .` as its own step.
 
 ## Pinning Steins' version
 
