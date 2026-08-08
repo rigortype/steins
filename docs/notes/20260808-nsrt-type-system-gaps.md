@@ -452,3 +452,97 @@ Three corrections to the probe above:
 The reach gaps the re-filing exposes are now visible as `differ` rows and remain
 for their own issues: `!== '0'` establishing `NON_FALSY`, concatenation carrying
 predicates, and `strtoupper` preserving `NUMERIC`.
+
+## 2026-08-08 — the object-intersection half (#238)
+
+Same instrument, master `f45cb1b`, phpstan-src `55a7732`, 15,845 assertions. The
+six verdict counts reproduce to the row across both runs, and the sidecar did not
+degrade (issue #245) in either — the delta is a clean difference, not two
+differently-truncated runs.
+
+### The split, measured before any code was written
+
+The residual `intersection` bucket after #240 is **276 rows**, not the 246 the
+probe reported: #240's gate moved out the 243 all-`StrPreds` conjunctions, and
+the 30 rows with a `literal-string`/`class-string` arm stayed behind, so
+519 − 243 = 276 = 246 + 30. Classified by arm shape:
+
+| share | n | reading |
+| --- | ---: | --- |
+| `hasOffset` / `hasOffsetValue` | **114** | PHPStan's array accessory predicates |
+| template parameter | 41 | blocked on the ADR-0032 carry (issue #10) |
+| **plain class intersection** | **35** | `ArrayAccess&stdClass` — the issue's headline shape |
+| `literal-string`/`class-string` arms | 29 | `StrOpaque`, gated by #240's own decision |
+| generic/array arm + class arm | 18 | |
+| object accessory (`hasProperty`/`hasMethod`) | 14 | no fold to land in |
+| callable arm | 9 | |
+| `object{…}` arm | 6 | |
+| other | 6 | |
+| `$this`/`static` arm | 4 | |
+
+**The array-accessory share is the larger half, and the issue's suspicion was
+right: it is the cheap part.** 53 of the 114 already render a concrete unsealed
+shape from ADR-0062's vocabulary, several of them the expected type value for
+value — `array-flip.php:74` renders `non-empty-array{foo: int, ...<string, int>}`
+where the oracle asserts `non-empty-array<string, int>&hasOffset('foo')`. Nothing
+about these rows was ever a vocabulary gap; they were a *lowering* gap, and they
+are routed to the array vocabulary rather than built as intersections.
+
+**The plain-class half is the smaller one and pays nothing here.** 34 of its 35
+rows render `unknown`. So, by the §A lesson this note keeps re-learning, they are
+reach rows in a vocabulary bucket, and re-filing them awards nothing: `unknown` is
+a sentinel and no direction is asked of a sentinel. What the object half buys is
+**recall in the checker** — a `Svc&Mock` receiver reported nothing at all before,
+not even a member on neither arm — and nsrt does not measure that surface at all.
+That is the honest reading of this slice: the measurable delta and the point of
+the slice are in different halves.
+
+### Realized delta
+
+| run | match | unsupported | equal | subsumed | differ | skipped | **admissible** |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| before | 1,715 | 1,877 | 110 | 243 | 11,592 | 308 | **2,068** |
+| after | 1,715 | 1,731 | 138 | 246 | 11,707 | 308 | **2,099** |
+
+**+31 admissible, and no row anywhere moved away from admissible** (checked
+row-by-row, keyed on file/line/expected). `match` and `skipped` did not move.
+
+Where the 276 went: `unsupported` 276 → 130, `differ` 0 → 117, `equal` 0 → 28,
+`subsumed` 0 → 1. By share:
+
+| share | n | left `unsupported` | → `equal` | → `subsumed` | → `differ` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `hasOffset`/`hasOffsetValue` | 114 | 5 | 28 | 1 | 80 |
+| plain class intersection | 35 | 1 | 0 | 0 | 34 |
+| everything else | 127 | 124 | 0 | 0 | 3 |
+
+**Every admissible row the slice earned came from the array-accessory share**, as
+the pre-measurement predicted. The 5 that stayed gated all put the predicate on a
+*class* base (`ArrayObject<int, …>&hasOffset(1)`, `SimpleXMLElement&hasOffset('foo')`),
+where ADR-0062's vocabulary says nothing and the fold correctly declines; the one
+plain-class row that stayed is `Generator&iterable`, whose `iterable` arm is a
+reserved keyword rather than a class name.
+
+The remaining 2 of the +31 are outside the bucket entirely: `list-type.php:159`
+and `:170` moved `differ → subsumed` when a **round-trip defect in the speller**
+was fixed. Two were found, both sitting in this slice's path and both costing
+rows before it:
+
+1. `non-empty-array{…, ...<K, V>}` was parsed under the *list* tail grammar
+   (`kind == ArrayShapeKind::Array` excluded `NonEmptyArray`), which has no key
+   slot and rejected the comma. The plain `array{…}` spelling parsed fine, which
+   is why this survived so long.
+2. A **list** shape's typed tail was spelled `list{17, ...<int, int>}`, naming a
+   key the list-shape grammar has no slot for — so Steins printed a type its own
+   parser could not read. It now spells `...<int>`, the rule `spell_generic_array`
+   already stated for the fieldless forms.
+
+### What is left in the bucket, and what blocks it
+
+Of the residual 130: 41 templates (issue #10), 29 `literal-string`/`class-string`
+arms (`StrOpaque` — no predicate spelling can ever reach them, #240's own
+boundary), 18 generic-arm-plus-class, 14 object accessories
+(`hasProperty`/`hasMethod` — the object twin of the fold landed here, deliberately
+not built: there is no member-level vocabulary for them to fold into), 9 callable
+arms, 6 `object{…}`, 5 accessory-on-a-class-base, 4 `$this`/`static`, 3 other,
+1 `Generator&iterable`.

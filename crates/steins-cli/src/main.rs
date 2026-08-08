@@ -36,7 +36,7 @@ use steins_edit::{
 use steins_infer::{
     Diagnostic, EffectSummary, FinalKeyword, LineFact, NoFold, SOUND_SUBSET_NOTICE, SidecarFolder,
     annotate_file, annotate_project, apply_inline_ignores, check_project,
-    check_project_with_runtime, effect_summaries_file, effect_summaries_project,
+    check_project_with_postures, effect_summaries_file, effect_summaries_project,
 };
 use steins_syntax::SourceTree;
 
@@ -309,8 +309,13 @@ fn run_check(args: &[String]) -> ExitCode {
     for w in &runtime_warnings {
         errln!("steins: {w}");
     }
-    let findings: Vec<Diagnostic> =
-        check_project_with_runtime(db, project, &mut folder, postures.warning_handler_abort);
+    let findings: Vec<Diagnostic> = check_project_with_postures(
+        db,
+        project,
+        &mut folder,
+        postures.warning_handler_abort,
+        postures.final_keyword,
+    );
 
     // The suppression channels, in ADR-0050 §6 order (vendor → surface → policy →
     // inline). The baseline is the one channel that stays here in `check`: it is

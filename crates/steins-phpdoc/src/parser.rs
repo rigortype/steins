@@ -491,6 +491,11 @@ impl Parser {
             if let Some(callable) = self.try_parse_callable(start, name.clone(), false)? {
                 return Ok(callable);
             }
+            if is_accessory_predicate(&name)
+                && let Some(acc) = self.try_parse_accessory(start, name.clone())?
+            {
+                return Ok(acc);
+            }
             return Ok(ident);
         }
 
@@ -648,6 +653,58 @@ impl Parser {
             }
         }
         false
+    }
+
+    /// Try to parse one of PHPStan's **accessory predicates** — `hasOffset(K)`,
+    /// `hasOffsetValue(K, V)` — starting at `name`, with the cursor rewound on
+    /// failure.
+    ///
+    /// PHPStan spells these with call syntax (`hasOffset('foo')`), not generic
+    /// syntax, but they *mean* what a generic argument list means: a base name
+    /// applied to types. So they lower onto the existing
+    /// [`TypeKind::Generic`] node rather than a variant of their own — nothing
+    /// downstream needs a new arm, and `steins_contract`'s intersection fold
+    /// reads them exactly as it reads `array<K, V>`.
+    ///
+    /// The name list is closed ([`is_accessory_predicate`]) and checked before
+    /// this is called, so an ordinary class named `Foo` followed by a
+    /// parenthesized description is untouched: the bare identifier still wins,
+    /// as it did before, and only the two spellings the array vocabulary can
+    /// actually consume are claimed here.
+    fn try_parse_accessory(&mut self, start: u32, name: String) -> PResult<Option<Type>> {
+        let sp = self.save();
+        match self.parse_accessory(start, name) {
+            Ok(ty) => Ok(Some(ty)),
+            Err(_) => {
+                self.restore(sp);
+                Ok(None)
+            }
+        }
+    }
+
+    /// [`Self::try_parse_accessory`]'s body: `Name(T1, T2, …)` into a
+    /// [`TypeKind::Generic`]. An empty argument list is rejected — a predicate
+    /// with nothing to predicate over says nothing, and letting it through
+    /// would turn `hasOffset()` into a silent `array` widening.
+    fn parse_accessory(&mut self, start: u32, base: String) -> PResult<Type> {
+        self.consume(TokenKind::OpenParen)?;
+        self.skip_ws_comments();
+        let mut args = Vec::new();
+        let mut first = true;
+        while first || self.try_consume(TokenKind::Comma) {
+            self.skip_ws_comments();
+            if !first && self.is_kind(TokenKind::CloseParen) {
+                break; // trailing comma
+            }
+            first = false;
+            args.push(self.parse_generic_argument()?);
+            self.skip_ws_comments();
+        }
+        self.consume(TokenKind::CloseParen)?;
+        if args.is_empty() {
+            return Err(self.error("accessory predicate needs at least one argument"));
+        }
+        Ok(self.spanned(start, TypeKind::Generic { base, args }))
     }
 
     /// Try to parse a callable starting at `name`; `None` (with the cursor
@@ -961,11 +1018,20 @@ impl Parser {
                 sealed = false;
                 self.skip_ws_comments();
                 if self.is_kind(TokenKind::OpenAngle) {
-                    unsealed = Some(if kind == ArrayShapeKind::Array {
-                        self.parse_array_shape_unsealed()?
-                    } else {
-                        self.parse_list_shape_unsealed()?
-                    });
+                    // The tail grammar is chosen by the shape's ARRAY-ness, not by
+                    // one of the two array spellings: an array tail carries an
+                    // optional key (`...<V>` / `...<K, V>`), a list tail carries a
+                    // value alone, its key class being `int` by definition. Testing
+                    // `kind == Array` here left `non-empty-array{…, ...<K, V>}`
+                    // parsing under the LIST grammar, which rejects the comma — so
+                    // a shape Steins' own speller emits could not be read back.
+                    unsealed = Some(
+                        if matches!(kind, ArrayShapeKind::Array | ArrayShapeKind::NonEmptyArray) {
+                            self.parse_array_shape_unsealed()?
+                        } else {
+                            self.parse_list_shape_unsealed()?
+                        },
+                    );
                     self.skip_ws_comments();
                 }
                 self.try_consume(TokenKind::Comma);
@@ -1158,6 +1224,24 @@ impl Parser {
             }
         }
     }
+}
+
+/// PHPStan's **array** accessory predicates, the only names for which the
+/// call-syntax spelling `Name(…)` is parsed as an applied type (issue #238).
+///
+/// The list is closed on purpose, and it is closed at the *array* half. PHPStan
+/// also spells object accessories this way (`hasProperty(foo)`,
+/// `hasMethod(doFoo)`) and template bounds carry parenthesized provenance
+/// (`T (method Foo::bar(), argument)`); neither has a contract-side fold to land
+/// in, so parsing them would only move an honest refusal from the parser to the
+/// lowering. `hasOffset` / `hasOffsetValue` are here because ADR-0062's array
+/// vocabulary already carries what they say — key presence, and the value at a
+/// key — so there is somewhere for them to go.
+///
+/// Matching is case-insensitive: PHPStan's own rendering is camelCase, and phpdoc
+/// type keywords are matched case-blind everywhere else in this parser.
+fn is_accessory_predicate(name: &str) -> bool {
+    name.eq_ignore_ascii_case("hasOffset") || name.eq_ignore_ascii_case("hasOffsetValue")
 }
 
 /// The shape kinds keyed by identifier name.

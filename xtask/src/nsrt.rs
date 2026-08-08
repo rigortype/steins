@@ -650,6 +650,9 @@ fn is_supported_atom(a: &str) -> bool {
     if is_str_preds_conjunction(a) {
         return true;
     }
+    if is_array_accessory_conjunction(a) || is_class_intersection(a) {
+        return true;
+    }
     if is_int_range(&low) {
         return true;
     }
@@ -703,6 +706,68 @@ fn is_str_preds_conjunction(a: &str) -> bool {
                 steins_contract::lower_identifier(arm.trim()),
                 steins_contract::ContractTy::StrWith(p) if p.is_extensional()
             )
+        })
+}
+
+/// `<array>&hasOffset(K)` / `<array>&hasOffsetValue(K, V)` and their stacked forms
+/// — PHPStan's accessory-predicate spelling for facts ADR-0062's array vocabulary
+/// already carries (issue #238).
+///
+/// Gating these on the `&` measured the harness's own vocabulary rather than the
+/// analyzer's, exactly as #240 found for the accessory conjunctions: Steins
+/// *computes* the unsealed shape these describe — `array-flip.php:74` renders
+/// `non-empty-array{foo: int, ...<string, int>}` where PHPStan asserts
+/// `non-empty-array<string, int>&hasOffset('foo')` — and the relation can prove
+/// the two agree. What was missing was a lowering, not a domain.
+///
+/// The test is the fold itself rather than a spelling pattern: an atom qualifies
+/// iff `lower_str` turns it into the array vocabulary. So this cannot drift from
+/// [`steins_contract`]'s own refusals — a predicate on a class base
+/// (`ArrayObject<int, string>&hasOffset(1)`) still lowers to an `Inter` and stays
+/// `unsupported`, which is where a row Steins genuinely cannot say belongs.
+fn is_array_accessory_conjunction(a: &str) -> bool {
+    a.contains('&')
+        && a.contains("hasOffset")
+        && matches!(
+            steins_contract::lower_str(a),
+            Some(
+                steins_contract::ContractTy::Shape { .. }
+                    | steins_contract::ContractTy::ArrayAny { .. }
+                    | steins_contract::ContractTy::ListOf { .. }
+                    | steins_contract::ContractTy::MapOf { .. }
+            )
+        )
+}
+
+/// `A&B` where every arm is a plain class/interface name (issue #238) —
+/// `ArrayAccess&stdClass`, `Countable&Traversable`.
+///
+/// `steins_contract::lower_str` lowers these to `ContractTy::Inter` of `Class`
+/// arms, `spell_nested` renders them back to the same conjunction, and `subsumes`
+/// judges them arm-wise in both directions — so, as in #240's re-filing, the `&`
+/// was measuring the harness's own vocabulary rather than the analyzer's.
+///
+/// **What re-filing these buys is honesty, not admissible rows.** Measured before
+/// the change: 35 rows, and 34 of them render `unknown`. So they are reach rows
+/// wearing a vocabulary costume — `unknown` is a sentinel and no direction is asked
+/// of a sentinel (the #237 lesson) — and moving them into `differ` names the gap
+/// they actually are. The recall this slice buys is in the checker's
+/// declared-receiver lane, which nsrt does not measure.
+///
+/// The arm test is the lowering, not a name pattern, so it cannot drift from the
+/// identifier table: an arm that is a keyword (`int&object`), a template
+/// (`T (method …)`), a callable, or an accessory predicate does not lower to
+/// `Class` and the atom stays `unsupported`.
+fn is_class_intersection(a: &str) -> bool {
+    a.contains('&')
+        && a.split('&').all(|arm| {
+            let arm = arm.trim();
+            is_plain_class_name(arm)
+                && !RESERVED_UNSUPPORTED_KEYWORDS.contains(&arm.to_ascii_lowercase().as_str())
+                && matches!(
+                    steins_contract::lower_identifier(arm),
+                    steins_contract::ContractTy::Class(_)
+                )
         })
 }
 
@@ -1383,11 +1448,50 @@ mod tests {
             // measure the class-table reach, not the conjunction.
             "class-string&literal-string",
             "class-string&non-empty-string",
-            // The object half of the bucket (#234's territory), untouched.
+            // `object` is a reserved keyword, never a plain class name — so the
+            // class-intersection gate (#238) does not claim this either.
             "int&object",
-            "Foo&Bar",
-            "Traversable&Countable",
+            // A predicate whose base is not the array vocabulary has nothing to fold
+            // into, so the #238 accessory gate declines it.
             "non-empty-string&hasOffset('a')",
+        ] {
+            assert_eq!(unsupported_pattern(a), Some("intersection"), "{a} should stay gated");
+        }
+    }
+
+    /// Issue #238's two gates, from both sides.
+    ///
+    /// The object half of the bucket splits into rows Steins can now be *asked*
+    /// about — a conjunction of plain classes, and PHPStan's array accessory
+    /// predicates folded into the ADR-0062 vocabulary — and rows it still cannot say,
+    /// which keep the honest refusal.
+    #[test]
+    fn object_and_array_accessory_intersections_are_measured() {
+        for a in [
+            // Plain class conjunctions: lowered, spelled and judged arm-wise.
+            "ArrayAccess&stdClass",
+            "Countable&Traversable",
+            "Bug14545\\ObjectClass&Bug14545\\SomeInterface",
+            // The accessory predicates over an array base: ADR-0062 already carries
+            // key presence, and with the shape lane the value at a key.
+            "non-empty-array&hasOffset('foo')",
+            "non-empty-array<string, int>&hasOffset('foo')",
+            "non-empty-array<string, int>&hasOffsetValue('foo', 17)",
+            "non-empty-list<int>&hasOffsetValue(0, 17)&hasOffsetValue(1, 19)",
+        ] {
+            assert_eq!(unsupported_pattern(a), None, "{a} should be measured");
+        }
+        for a in [
+            // A predicate on a CLASS base: ADR-0062's vocabulary says nothing about
+            // an `ArrayObject`, so the fold declines and the row keeps its refusal.
+            "ArrayObject<int, array<string, mixed>>&hasOffset(1)",
+            // Object accessories have no fold to land in — deliberately out of #238.
+            "object&hasProperty(foo)",
+            "object&hasMethod(doFoo)",
+            // A template arm waits on the ADR-0032 carry (issue #10).
+            "list<int>&T (method Bug14631\\Foo::sortList(), argument)",
+            // A callable arm is not a class.
+            "non-empty-list&callable(): mixed",
         ] {
             assert_eq!(unsupported_pattern(a), Some("intersection"), "{a} should stay gated");
         }

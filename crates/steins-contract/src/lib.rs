@@ -297,9 +297,8 @@ pub fn lower(ty: &Type) -> ContractTy {
         TypeKind::Union { types, .. } => {
             ContractTy::Union(types.iter().map(lower).collect())
         }
-        TypeKind::Intersection(types) => {
-            ContractTy::Inter(types.iter().map(lower).collect())
-        }
+        TypeKind::Intersection(types) => fold_array_accessories(types)
+            .unwrap_or_else(|| ContractTy::Inter(types.iter().map(lower).collect())),
         TypeKind::Array(elem) => ContractTy::MapOf {
             key: Box::new(array_key()),
             val: Box::new(lower(elem)),
@@ -388,6 +387,17 @@ pub(crate) fn is_array_key_ty(ty: &ContractTy) -> bool {
 /// pseudo-types/type-operators it does not enforce, so their fallback is honest
 /// rather than a coincidence of an unmodeled name looking like a class.
 const KNOWN_UNENFORCED: &[&str] = &[
+    // PHPStan's array accessory predicates (issue #238). Inside an intersection
+    // beside an array arm they are *folded into* the array vocabulary by
+    // [`fold_array_accessories`] and never reach this table. Standing alone —
+    // `@param hasOffset('foo') $a`, or beside a non-array arm such as
+    // `ArrayObject<…>&hasOffset(1)` — they have nothing to attach to, and this
+    // entry is what keeps that case honest: without it `hasoffset` is not a
+    // keyword, so the catch-all would mint `Class("hasoffset")` and the class leg
+    // of acceptance would answer a definite `No` for every array argument the
+    // checker could resolve. Exactly the wrong-No hazard this list exists for.
+    "hasoffset",
+    "hasoffsetvalue",
     "int-mask",
     "int-mask-of",
     "resource",
@@ -1096,6 +1106,116 @@ pub fn inter_str_preds(members: &[ContractTy]) -> Option<StrPreds> {
     (!members.is_empty()).then_some(acc)
 }
 
+/// Fold PHPStan's array **accessory predicates** into ADR-0062's array
+/// vocabulary, or `None` when the intersection is not of that shape (issue #238).
+///
+/// `non-empty-array<string, int>&hasOffset('foo')` is PHPStan's spelling for a
+/// fact Steins already carries: an unsealed shape with a required key. It is not
+/// an intersection Steins needs an *algebra* for — it is a shape written in
+/// another dialect, and this is the translation:
+///
+/// ```text
+/// non-empty-array<string, int>&hasOffset('foo')        → non-empty-array{foo: int, ...<string, int>}
+/// non-empty-array<string, int>&hasOffsetValue('foo', 17) → non-empty-array{foo: 17, ...<string, int>}
+/// non-empty-list<int>&hasOffsetValue(0, 17)            → non-empty-list{17, ...<int, int>}
+/// ```
+///
+/// `hasOffset(K)` states presence and nothing about the value, so the field takes
+/// the base's own value contract — which is exactly what Steins' own speller
+/// prints for the shape it computes. `hasOffsetValue(K, V)` states both, so the
+/// field takes `V`.
+///
+/// This runs on the **AST**, before the members are lowered, because a predicate
+/// has no contract form of its own to fold from: `ContractTy` gains no variant
+/// here, and the accessory names lower to [`ContractTy::Opaque`] (via
+/// `KNOWN_UNENFORCED`) wherever this fold declines.
+///
+/// # What it refuses, and why the refusals are the honest floor
+///
+/// * **a non-array base** — `ArrayObject<int, …>&hasOffset(1)` puts the predicate
+///   on a class arm, where ADR-0062's vocabulary says nothing. Refused, so the row
+///   keeps its `Inter` and its `Maybe`;
+/// * **more than one non-accessory arm** — there is one shape to build and no rule
+///   for which arm it is built from;
+/// * **a non-literal key** — a shape key is a literal by construction ([`CKey`]),
+///   and inventing one from `hasOffset(int)` would claim a key nobody named;
+/// * **an already-`Shape` base** — PHPStan does not spell one, and merging a
+///   predicate into declared fields is a second merge rule this slice does not need.
+///
+/// Every refusal leaves the intersection exactly where it was, so nothing this
+/// fold declines becomes *less* precise than it is today.
+fn fold_array_accessories(types: &[steins_phpdoc::ast::Type]) -> Option<ContractTy> {
+    use steins_phpdoc::ast::TypeKind;
+
+    let mut base: Option<&steins_phpdoc::ast::Type> = None;
+    let mut accessories: Vec<(&str, &[steins_phpdoc::ast::GenericArg])> = Vec::new();
+    for t in types {
+        if let TypeKind::Generic { base: b, args } = &t.kind
+            && is_accessory_base(b)
+        {
+            accessories.push((b.as_str(), args.as_slice()));
+        } else if base.replace(t).is_some() {
+            // A second non-accessory arm has no fold rule — refuse the whole thing.
+            return None;
+        }
+    }
+    if accessories.is_empty() {
+        return None;
+    }
+    let (list, key_ty, val_ty) = match lower(base?) {
+        ContractTy::ArrayAny { .. } => (false, None, ContractTy::Mixed),
+        ContractTy::MapOf { key, val, .. } => (false, Some(*key), *val),
+        // A list tail carries no key: `list: true` already pins the keys to
+        // `0..n-1`, so naming `int` again would be a second, weaker copy of the
+        // same fact — and `list{…, ...<V>}`, the spelling this must agree with,
+        // lowers to exactly this `None`.
+        ContractTy::ListOf { elem, .. } => (true, None, *elem),
+        _ => return None,
+    };
+
+    let mut fields: Vec<CField> = Vec::new();
+    for (name, args) in accessories {
+        let (key_arg, value) = match (name.to_ascii_lowercase().as_str(), args.len()) {
+            ("hasoffset", 1) => (&args[0], val_ty.clone()),
+            ("hasoffsetvalue", 2) => (&args[0], lower(&args[1].ty)),
+            _ => return None,
+        };
+        let key = match lower(&key_arg.ty) {
+            ContractTy::LitInt(i) => CKey::Int(i),
+            ContractTy::LitStr(s) => CKey::Str(s),
+            _ => return None,
+        };
+        // A repeated key is one key: the later predicate is the more specific
+        // statement about it (`hasOffset('a')&hasOffsetValue('a', 17)`), and two
+        // fields with one key is not a shape any producer here can build.
+        match fields.iter_mut().find(|f| f.key == key) {
+            Some(existing) => existing.ty = value,
+            None => fields.push(CField { key, optional: false, ty: value }),
+        }
+    }
+
+    Some(ContractTy::Shape {
+        list,
+        fields,
+        // The predicates say which keys are *present*, never which are all there
+        // are — the tail stays open and carries the base's own key/value contract.
+        sealed: false,
+        // A required key already forbids the empty array, so this holds whatever
+        // the base's own `non-empty-` modifier said.
+        non_empty: true,
+        unsealed: Some((key_ty.map(Box::new), Box::new(val_ty))),
+    })
+}
+
+/// Whether a generic base name is one of the array accessory predicates
+/// [`fold_array_accessories`] consumes. Mirrors the parser's own closed list
+/// (`steins_phpdoc`'s `is_accessory_predicate`) — the parser decides what gets a
+/// [`TypeKind::Generic`](steins_phpdoc::ast::TypeKind::Generic) node, this decides
+/// what the fold does with one, and both are case-blind.
+fn is_accessory_base(base: &str) -> bool {
+    base.eq_ignore_ascii_case("hasOffset") || base.eq_ignore_ascii_case("hasOffsetValue")
+}
+
 /// Lower a declared shape's parts into the canonical [`ShapeFact`] — the
 /// shared core of [`to_shape_fact`]'s `Shape` arm and [`shape_is_list`].
 ///
@@ -1257,6 +1377,196 @@ mod known_unenforced_tests {
 
 /// Issue #240 — the refined-string grid and the intersection fold: one closed
 /// vocabulary, spelled and re-read by one pair of inverse functions.
+/// Plain object intersections (issue #238): `ArrayAccess&stdClass` — the arms
+/// Steins already has, conjoined. What was missing was never the arms.
+#[cfg(test)]
+mod object_intersection_tests {
+    use super::*;
+    use crate::normalize::subsumes;
+
+    fn inter(s: &str) -> ContractTy {
+        lower_str(s).unwrap_or_else(|| panic!("{s} did not lower"))
+    }
+
+    /// Representable: the declared spelling lowers to a conjunction of class arms,
+    /// with the arms intact and in order. Class names normalize exactly as a lone
+    /// class arm's does (lowercased, leading `\` stripped) — the conjunction adds no
+    /// naming rule of its own.
+    #[test]
+    fn an_object_intersection_is_representable() {
+        let ty = inter("ArrayAccess&stdClass");
+        assert_eq!(
+            ty,
+            ContractTy::Inter(vec![
+                ContractTy::Class("arrayaccess".to_owned()),
+                ContractTy::Class("stdclass".to_owned()),
+            ])
+        );
+        assert_eq!(inter(r"\Foo\Bar&Baz"), inter(r"foo\bar&baz"));
+    }
+
+    /// Spellable: `spell_nested` joins the arms with `&`, so an intersection
+    /// travelling inside an array or a union round-trips to the same conjunction.
+    ///
+    /// The scalar-arm speller ([`spell::spell_arms`]) still refuses it — but it
+    /// refuses a bare `Class` arm identically, for the identical reason (no faithful
+    /// *scalar* spelling exists). An intersection is exactly as spellable as its
+    /// arms are, which is the property that matters: the conjunction adds no new
+    /// refusal.
+    #[test]
+    fn an_object_intersection_is_spellable() {
+        let ty = inter("ArrayAccess&stdClass");
+        assert_eq!(spell::spell_nested_for_test(&ty), "arrayaccess&stdclass");
+        assert_eq!(lower_str(&spell::spell_nested_for_test(&ty)), Some(ty));
+        // The scalar speller's refusal is the arms', not the conjunction's.
+        let one = ContractTy::Class("stdclass".to_owned());
+        assert_eq!(spell::spell_arms(std::slice::from_ref(&one)), None);
+        assert_eq!(spell::spell_arms(&[inter("ArrayAccess&stdClass")]), None);
+    }
+
+    /// The acceptance relation judges the conjunction ARM-WISE, in both directions.
+    #[test]
+    fn the_relation_judges_an_object_intersection_arm_wise() {
+        let ab = inter("ArrayAccess&stdClass");
+        let a = ContractTy::Class("arrayaccess".to_owned());
+
+        // `A ⊇ A∩B` — proven: the intersection is a subset of each arm.
+        assert!(subsumes(&a, &ab).is_yes(), "an arm covers the conjunction");
+        // `A∩B ⊇ A` — NOT proven: a plain `ArrayAccess` need not be a `stdClass`.
+        // The honest `Maybe`, never a `No`.
+        assert_eq!(subsumes(&ab, &a), Certainty::Maybe);
+        // Reflexivity, which only the arm-wise rule can reach: asked whole, the
+        // conjunction reduces to `A∩B ⊇ A` above and folds to `Maybe`.
+        assert!(subsumes(&ab, &ab).is_yes(), "a conjunction subsumes itself");
+        // Order is not identity: the same conjunction spelled the other way round
+        // is proven equal in both directions.
+        let ba = inter("stdClass&ArrayAccess");
+        assert!(subsumes(&ab, &ba).is_yes() && subsumes(&ba, &ab).is_yes());
+    }
+
+    /// A conjunction is never confused with a union: `A∩B ⊇ A∪B` must not be
+    /// claimed, and a scalar never covers an object conjunction.
+    #[test]
+    fn the_relation_never_over_claims() {
+        let ab = inter("ArrayAccess&stdClass");
+        let union = inter("ArrayAccess|stdClass");
+        assert!(!subsumes(&ab, &union).is_yes(), "a conjunction does not cover the union");
+        assert!(subsumes(&union, &ab).is_yes(), "the union does cover the conjunction");
+        // A scalar never *covers* an object conjunction. `Maybe` rather than `No` is
+        // the `b`-is-an-intersection floor this crate already keeps everywhere — what
+        // is pinned here is only that it can never be a `Yes`.
+        assert!(!subsumes(&ContractTy::Base(Base::Int), &ab).is_yes());
+        // `mixed` covers every object, conjoined or not.
+        assert!(subsumes(&ContractTy::Mixed, &ab).is_yes());
+    }
+}
+
+/// The array accessory fold (issue #238): PHPStan's `hasOffset` dialect against
+/// the ADR-0062 vocabulary Steins already speaks. Every `expected` string here is
+/// copied from an nsrt row, and every `got` string is what Steins renders for that
+/// same row today — so these pin the *translation*, not a constructed pair.
+#[cfg(test)]
+mod array_accessory_tests {
+    use super::*;
+    use crate::normalize::subsumes;
+
+    /// The two lowerings denote the same set: the relation proves it in both
+    /// directions, which is exactly what earns an nsrt `equal`.
+    #[track_caller]
+    fn mutually_subsume(phpstan: &str, steins: &str) {
+        let a = lower_str(phpstan).unwrap_or_else(|| panic!("{phpstan} did not lower"));
+        let b = lower_str(steins).unwrap_or_else(|| panic!("{steins} did not lower"));
+        assert!(subsumes(&a, &b).is_yes(), "{phpstan} ⊇ {steins} was not proven");
+        assert!(subsumes(&b, &a).is_yes(), "{steins} ⊇ {phpstan} was not proven");
+    }
+
+    /// `hasOffset` states presence only, so the field carries the base's own value
+    /// contract — `array-flip.php:74`, the row this fold was measured on.
+    #[test]
+    fn has_offset_is_a_required_key_at_the_base_value_type() {
+        mutually_subsume(
+            "non-empty-array<string, int>&hasOffset('foo')",
+            "non-empty-array{foo: int, ...<string, int>}",
+        );
+    }
+
+    /// `hasOffsetValue` states presence AND the value at the key
+    /// (`unsealed-array-shapes.php:95`).
+    #[test]
+    fn has_offset_value_carries_the_value_contract() {
+        mutually_subsume(
+            "non-empty-array<int, string>&hasOffsetValue(1, 'foo')",
+            "non-empty-array{1: 'foo', ...<int, string>}",
+        );
+    }
+
+    /// A list base keeps its list-ness, and the stacked form folds every predicate
+    /// into one shape (`list-type.php:116`).
+    ///
+    /// The Steins side is spelled `...<int>`, not `...<int, int>`: a list-shape
+    /// tail has no key slot in the phpdoc grammar, and the speller emitting one was
+    /// a round-trip defect this slice had to fix to reach the row at all.
+    #[test]
+    fn stacked_predicates_over_a_list_fold_to_one_shape() {
+        mutually_subsume(
+            "non-empty-list<int>&hasOffsetValue(0, 17)&hasOffsetValue(1, 19)",
+            "non-empty-list{17, 19, ...<int>}",
+        );
+    }
+
+    /// A bare `non-empty-array` base has no value contract to give the field, so
+    /// the field is `mixed` and the tail stays untyped (`bug-11518-types.php:17`).
+    #[test]
+    fn a_bare_array_base_yields_a_mixed_field() {
+        mutually_subsume("non-empty-array&hasOffset('thing')", "non-empty-array{thing: mixed, ...}");
+    }
+
+    /// The fold never invents a key it was not given, never attaches to a base
+    /// ADR-0062 does not speak for, and never seals the tail. Each of these keeps
+    /// the intersection it had — the honest floor, not a widening.
+    #[test]
+    fn the_refusals_keep_the_intersection() {
+        // A class base: `ArrayObject<int, array<string, mixed>>&hasOffset(1)`.
+        let ty = lower_str("ArrayObject<int, string>&hasOffset(1)").unwrap();
+        assert!(matches!(ty, ContractTy::Inter(_)), "a class base must not fold: {ty:?}");
+        // A non-literal key names no shape key.
+        let ty = lower_str("non-empty-array<string, int>&hasOffset(string)").unwrap();
+        assert!(matches!(ty, ContractTy::Inter(_)), "a non-literal key must not fold: {ty:?}");
+        // Two non-accessory arms: no rule for which one the shape is built from.
+        let ty = lower_str("array<string, int>&Countable&hasOffset('a')").unwrap();
+        assert!(matches!(ty, ContractTy::Inter(_)), "two bases must not fold: {ty:?}");
+    }
+
+    /// A predicate with no array arm to attach to lowers to the honest `Opaque`,
+    /// NOT to a nonexistent class. `Class("hasoffset")` would make the class leg of
+    /// acceptance answer a definite `No` for every array value — a manufactured
+    /// false positive, which is what `KNOWN_UNENFORCED` exists to prevent.
+    #[test]
+    fn a_stray_predicate_is_opaque_never_a_class() {
+        assert_eq!(lower_str("hasOffset('foo')"), Some(ContractTy::Opaque));
+        assert_eq!(lower_str("hasOffsetValue('foo', 17)"), Some(ContractTy::Opaque));
+        // …and Opaque is `Maybe` against an array, never `No`.
+        let opaque = lower_str("hasOffset('foo')").unwrap();
+        let arr = lower_str("array<string, int>").unwrap();
+        assert!(!subsumes(&opaque, &arr).is_no(), "a stray predicate must never refute an array");
+    }
+
+    /// The tail stays OPEN: the predicates say which keys are present, never that
+    /// they are all the keys there are. A sealed fold would claim the array has no
+    /// other key — a claim PHPStan's spelling never makes.
+    #[test]
+    fn the_folded_tail_is_never_sealed() {
+        let ty = lower_str("non-empty-array<string, int>&hasOffset('foo')").unwrap();
+        let ContractTy::Shape { sealed, non_empty, fields, .. } = &ty else {
+            panic!("expected a Shape, got {ty:?}")
+        };
+        assert!(!sealed, "the predicates never seal the tail");
+        assert!(non_empty, "a required key forbids the empty array");
+        assert_eq!(fields.len(), 1);
+        assert!(!fields[0].optional, "hasOffset states presence, not optionality");
+    }
+}
+
 #[cfg(test)]
 mod refined_string_grid_tests {
     use super::*;

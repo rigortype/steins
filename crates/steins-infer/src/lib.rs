@@ -3176,7 +3176,15 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let tree = parse(db, file);
     let units = [FileUnit { path: file.path(db), tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, &mut NoFold, true, &ProjectLayout::fallback(), &PluginFacts::none())
+    check_units(
+        &units,
+        &index,
+        &mut NoFold,
+        true,
+        FinalKeyword::Enforced,
+        &ProjectLayout::fallback(),
+        &PluginFacts::none(),
+    )
 }
 
 /// The folding-aware check for one file (run **outside** salsa; ADR-0004),
@@ -3186,7 +3194,15 @@ pub fn check_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec
     let tree = parse(db, file);
     let units = [FileUnit { path: file.path(db), tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, folder, true, &ProjectLayout::fallback(), &PluginFacts::none())
+    check_units(
+        &units,
+        &index,
+        folder,
+        true,
+        FinalKeyword::Enforced,
+        &ProjectLayout::fallback(),
+        &PluginFacts::none(),
+    )
 }
 
 /// The folding-aware check for a whole **project** (ADR-0009/0015): every file
@@ -3210,6 +3226,27 @@ pub fn check_project_with_runtime(
     folder: &mut dyn Folder,
     warning_handler_abort: bool,
 ) -> Vec<Diagnostic> {
+    check_project_with_postures(db, project, folder, warning_handler_abort, FinalKeyword::Enforced)
+}
+
+/// [`check_project_with_runtime`] plus the `[runtime] final-keyword` posture
+/// (issue #234, consumed by #238).
+///
+/// Both `[runtime]` pseudo-constants in one entry point, because they are one
+/// family (ADR-0037 §2): a boot truth no amount of reading source settles, which
+/// the project declares and Steins reasons under. `final_keyword` reaches exactly
+/// one consumer — the declared-receiver lane's intersection leg — and
+/// [`FinalKeyword::Enforced`] is what declaring nothing means, so
+/// [`check_project_with_runtime`] delegating with it keeps every existing caller's
+/// semantics byte-identical.
+#[must_use]
+pub fn check_project_with_postures(
+    db: &dyn Db,
+    project: Project,
+    folder: &mut dyn Folder,
+    warning_handler_abort: bool,
+    final_keyword: FinalKeyword,
+) -> Vec<Diagnostic> {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
     let units: Vec<FileUnit> =
         handles.iter().map(|&f| FileUnit { path: f.path(db), tree: parse(db, f) }).collect();
@@ -3222,6 +3259,7 @@ pub fn check_project_with_runtime(
         &index,
         folder,
         warning_handler_abort,
+        final_keyword,
         project.layout(db),
         project.plugins(db),
     )
@@ -3421,7 +3459,15 @@ pub fn check_with(
     let _ = functions; // authoritative list comes from `tree.functions()`
     let units = [FileUnit { path, tree }];
     let index = Index::from_units(&units);
-    check_units(&units, &index, folder, true, &ProjectLayout::fallback(), &PluginFacts::none())
+    check_units(
+        &units,
+        &index,
+        folder,
+        true,
+        FinalKeyword::Enforced,
+        &ProjectLayout::fallback(),
+        &PluginFacts::none(),
+    )
 }
 
 /// The single-file check with a folder **and** the `warning-handler` posture
@@ -3444,6 +3490,7 @@ pub fn check_full(
         &index,
         folder,
         warning_handler_abort,
+        FinalKeyword::Enforced,
         &ProjectLayout::fallback(),
         &PluginFacts::none(),
     )
@@ -3456,6 +3503,7 @@ fn check_units(
     index: &Index,
     folder: &mut dyn Folder,
     warning_handler_abort: bool,
+    final_keyword: FinalKeyword,
     layout: &ProjectLayout,
     plugins: &PluginFacts,
 ) -> Vec<Diagnostic> {
@@ -3527,6 +3575,7 @@ fn check_units(
             fi,
             &dam,
             warning_handler_abort,
+            final_keyword,
             php_minor,
             catalog_skew,
             version_id,
@@ -3963,7 +4012,7 @@ fn annotate_units(
 
     // 3. Findings on the target file (project-wide check, filtered by path).
     let target_path = units[target].path;
-    for d in check_units(units, index, folder, true, layout, plugins) {
+    for d in check_units(units, index, folder, true, FinalKeyword::Enforced, layout, plugins) {
         if d.path == target_path {
             facts.push(LineFact { line: d.line, kind: FactKind::Finding { id: d.id } });
         }
@@ -7325,6 +7374,14 @@ struct Cx<'a> {
     /// Error-grade `offset.on-unsupported` object case (not yet implemented) is
     /// posture-independent and would emit under both.
     warning_handler_abort: bool,
+    /// The `[runtime] final-keyword` pseudo-constant (issue #234, ADR-0037 §2
+    /// family) — what the runtime this project is analyzed for does with `final`.
+    /// Read by the declared-receiver lane's intersection leg (issue #238) through
+    /// [`steins_contract::normalize::provably_uninhabited`], and by nothing else:
+    /// the posture governs *inhabitance*, never a `final` diagnostic (#234's own
+    /// out-of-scope list). [`FinalKeyword::Enforced`] is the absence default, so a
+    /// project declaring nothing gets the language's own rule.
+    final_keyword: FinalKeyword,
     /// The **effective analysis minor** for version-keyed value rules (issue
     /// #28): the target floor when the project declares a target whose range
     /// agrees on the ADR-0049 A12 next-int boundary, `None` when the declared
@@ -7365,6 +7422,7 @@ impl<'a> Cx<'a> {
             cur,
             dam: &EMPTY_DAM,
             warning_handler_abort: true,
+            final_keyword: FinalKeyword::Enforced,
             php_minor: None,
             catalog_skew: false,
             version_id: None,
@@ -7381,6 +7439,7 @@ impl<'a> Cx<'a> {
         cur: usize,
         dam: &'a DamFacts,
         warning_handler_abort: bool,
+        final_keyword: FinalKeyword,
         php_minor: Option<(u16, u16)>,
         catalog_skew: bool,
         version_id: Option<(u32, Option<u32>)>,
@@ -7393,6 +7452,7 @@ impl<'a> Cx<'a> {
             cur,
             dam,
             warning_handler_abort,
+            final_keyword,
             php_minor,
             catalog_skew,
             version_id,
@@ -7410,6 +7470,7 @@ impl<'a> Cx<'a> {
             cur: file,
             dam: self.dam,
             warning_handler_abort: self.warning_handler_abort,
+            final_keyword: self.final_keyword,
             php_minor: self.php_minor,
             catalog_skew: self.catalog_skew,
             version_id: self.version_id,
@@ -14015,6 +14076,29 @@ fn apply_inline_var_casts(
 /// `int`) is `Asserted`. An undecidable is-a (two unrelated classes — no hierarchy in
 /// this crate) is NOT a contradiction; the arm stays (`Asserted`), the FP-safe side.
 /// Where NO native type exists, every phpdoc arm seeds `Asserted`.
+/// Resolve every class name in a contract arm against the declaring namespace.
+///
+/// One level of intersection is walked and nothing else: `Foo&Bar` is the shape a
+/// declared conjunction has, and an arm list is already union-flattened
+/// ([`flatten_arms`]) by the time this runs, so there is no nested union to
+/// descend into. Non-class members of an intersection (an array arm, a scalar) are
+/// left exactly as they are — they name no class to resolve.
+fn resolve_class_arms(ty: ContractTy, resolve_class: &dyn Fn(&str) -> String) -> ContractTy {
+    match ty {
+        ContractTy::Class(n) => ContractTy::Class(resolve_class(&n)),
+        ContractTy::Inter(members) => ContractTy::Inter(
+            members
+                .into_iter()
+                .map(|m| match m {
+                    ContractTy::Class(n) => ContractTy::Class(resolve_class(&n)),
+                    other => other,
+                })
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 fn refine_contract_arms(
     native: &[ContractTy],
     phpdoc: Option<&PType>,
@@ -14049,12 +14133,13 @@ fn refine_declared_arms(
     let out: Vec<ContractArm> = declared
         .into_iter()
         .filter_map(|ty| {
-            // Resolve a top-level class arm against the declaring namespace; the
-            // native member list already holds FQNs, so this aligns the two.
-            let ty = match ty {
-                ContractTy::Class(n) => ContractTy::Class(resolve_class(&n)),
-                other => other,
-            };
+            // Resolve a class arm against the declaring namespace; the native member
+            // list already holds FQNs, so this aligns the two. An intersection's
+            // MEMBERS are class arms too (`@param Foo&Bar`, issue #238) and need the
+            // same resolution — without it the lane would carry a namespace-relative
+            // `Bar` that no hierarchy lookup can find, and every consumer would read
+            // it as an unknown class.
+            let ty = resolve_class_arms(ty, resolve_class);
             if !native.is_empty() {
                 let covered = native
                     .iter()
@@ -20303,13 +20388,17 @@ fn enumerate_property_chain(cx: &Cx, start_fqn: &str, prop: &str) -> Option<Prop
 ///   requires. The twin, if measurement ever asks for one, is a registry addition.
 enum PropertyReceiver {
     Exact(String),
-    Declared(Vec<String>),
+    /// A declared/narrowed arm lane, as **conjunct lists** — one inner list per
+    /// arm, holding the classes a receiver of that arm satisfies all of. A plain
+    /// `Foo` arm is a one-element list; a declared `Foo&Bar` is a two-element one
+    /// (issue #238). Built by [`declared_receiver_conjuncts`].
+    Declared(Vec<Vec<String>>),
 }
 
 /// Classify a `$var->prop` receiver into [`PropertyReceiver`]. Disjoint by
 /// construction, exactly as S2/S6 are: the exact lane is taken first, and a
 /// lane-carrying variable is never `class_exact`.
-fn undefined_property_receiver(store: &Store, var: &str) -> Option<PropertyReceiver> {
+fn undefined_property_receiver(cx: &Cx, store: &Store, var: &str) -> Option<PropertyReceiver> {
     if let Some(obj) = store.obj_of(var)
         && obj.class_exact
     {
@@ -20327,17 +20416,13 @@ fn undefined_property_receiver(store: &Store, var: &str) -> Option<PropertyRecei
     if arms.iter().fold(Stratum::Verified, |acc, a| acc.min(a.stratum)) != Stratum::Verified {
         return None; // an Asserted premise — the calibration boundary, see above.
     }
-    let mut fqns: Vec<String> = Vec::with_capacity(arms.len());
-    for a in arms {
-        match &a.ty {
-            steins_contract::ContractTy::Class(f) => fqns.push(f.clone()),
-            // A scalar/array/null arm means the runtime receiver may be a
-            // non-object: a different finding (`property.on-non-object`), not this
-            // one.
-            _ => return None,
-        }
-    }
-    Some(PropertyReceiver::Declared(fqns))
+    // The same arm read the method lane uses, so the two declared-receiver lanes
+    // cannot disagree about what an arm IS: a class, an intersection of classes
+    // (issue #238), or out of scope. A scalar/array/null arm means the runtime
+    // receiver may be a non-object — a different finding (`property.on-non-object`),
+    // not this one — and an intersection issue #234's posture proves uninhabited is
+    // no receiver at all.
+    Some(PropertyReceiver::Declared(declared_receiver_conjuncts(cx, arms)?))
 }
 
 /// Whether a descendant declaration could **introduce** `prop` (or an obstacle
@@ -20415,7 +20500,7 @@ fn check_undefined_property(
     if cx.index.property_write_obstacle(prop) {
         return;
     }
-    let Some(receiver) = undefined_property_receiver(store, var) else {
+    let Some(receiver) = undefined_property_receiver(cx, store, var) else {
         return;
     };
     // A9 (monkey-patch) + A2ii's honest consequence: without a live sidecar, or with
@@ -20442,12 +20527,21 @@ fn check_undefined_property(
             (subject, format!("hierarchy fully enumerated ({render})"))
         }
         PropertyReceiver::Declared(arms) => {
+            // Every arm, and within an intersection arm every conjunct: a property
+            // declared on EITHER conjunct resolves, because member lookup over an
+            // inhabited intersection is the union of its arms (issue #234). A leg
+            // that cannot close answers `None` here too, so the same fold carries
+            // both the either-arm rule and `Maybe`-is-silence.
             let mut names: Vec<String> = Vec::with_capacity(arms.len());
-            for f in &arms {
-                match arm_provably_lacks_property(cx, folder, f, prop) {
-                    Some(name) => names.push(name),
-                    None => return, // any arm not provably-absent ⇒ silence.
+            for conjuncts in &arms {
+                let mut per_arm: Vec<String> = Vec::with_capacity(conjuncts.len());
+                for f in conjuncts {
+                    match arm_provably_lacks_property(cx, folder, f, prop) {
+                        Some(name) => per_arm.push(name),
+                        None => return, // any conjunct not provably-absent ⇒ silence.
+                    }
                 }
+                names.push(per_arm.join("&"));
             }
             let joined = names.join("|");
             (
@@ -22916,6 +23010,68 @@ fn arm_provably_lacks_method(
     Some(simple_chain.first().cloned().unwrap_or_else(|| arm_fqn.to_owned()))
 }
 
+/// Read a narrowed contract-arm lane as the declared-receiver lane's **conjunct
+/// lists** — one inner list per arm, holding the class FQNs a receiver of that arm
+/// must satisfy *all* of — or `None` when the lane is out of scope (silence).
+///
+/// This is where issue #238's intersection consumption enters, and where issue
+/// #234's inhabitance rule is honoured. Three arm shapes, and only three:
+///
+/// * `Class(f)` — one conjunct, the pre-#238 behaviour exactly;
+/// * `Inter([Class, …])` — the conjuncts of a declared `Foo&Bar` receiver;
+/// * anything else — silence. A scalar/array/null arm means the receiver may not be
+///   an object at all, and an intersection carrying a non-class member (`Foo&callable`,
+///   a template arm) names a constraint this lane cannot close over.
+///
+/// # The #234 rule, and why an uninhabited arm is SILENCE
+///
+/// An intersection the posture proves empty
+/// ([`normalize::provably_uninhabited`]) takes the whole lane out: no value
+/// inhabits it, so there is no receiver to make a claim about, and every claim
+/// about one would be vacuous.
+///
+/// Silence is not merely the polite answer here, it is the **FP-safe** one, and it
+/// is the exact hazard #234 planted its guard against. The natural implementation
+/// of `final Svc & MockObject` is "this collapses to nothing", and a lane that
+/// collapses to nothing has no conjunct to look a method up on — so *every* method
+/// call on that receiver would be provably-absent and fire. Under a project running
+/// `dg/bypass-finals`, where the mock subclass genuinely exists, that is a false
+/// positive on the **proof layer** (`call.undefined-method`, the `Default` floor
+/// since ADR-0049 A13). Returning `None` here means the collapse can never fire,
+/// under either posture.
+///
+/// The posture is read from [`Cx::final_keyword`], never assumed: under
+/// [`FinalKeyword::Stripped`] the emptiness leg does not run at all, the
+/// intersection is inhabited, and its members are looked up as the union the issue
+/// specifies.
+fn declared_receiver_conjuncts(cx: &Cx, arms: &[ContractArm]) -> Option<Vec<Vec<String>>> {
+    let oracle = ProjectIsa { cx, demote_catalog: cx.a11_demote_catalog() };
+    let mut lane: Vec<Vec<String>> = Vec::with_capacity(arms.len());
+    for a in arms {
+        match &a.ty {
+            ContractTy::Class(f) => lane.push(vec![f.clone()]),
+            ContractTy::Inter(members) => {
+                // A member this lane cannot close over refuses the whole arm.
+                let mut conjuncts: Vec<String> = Vec::with_capacity(members.len());
+                for m in members {
+                    let ContractTy::Class(f) = m else { return None };
+                    conjuncts.push(f.clone());
+                }
+                if conjuncts.is_empty() {
+                    return None;
+                }
+                // #234: an arm no value can inhabit is not a receiver.
+                if normalize::provably_uninhabited(&a.ty, &oracle, cx.final_keyword) {
+                    return None;
+                }
+                lane.push(conjuncts);
+            }
+            _ => return None,
+        }
+    }
+    (!lane.is_empty()).then_some(lane)
+}
+
 /// Run the ADR-0049 §8 ladder for one `$var->method()` and emit the declared-receiver
 /// finding iff the receiver's narrowed contract-arm lane consists entirely of class
 /// arms that **each** provably lack the method under descendant closure. Any leg
@@ -22952,16 +23108,13 @@ fn check_phpdoc_undefined_method(
     if arms.is_empty() {
         return;
     }
-    // Every surviving arm must be a class/interface arm: a scalar/array/null arm
-    // means the runtime receiver may be a non-object, so a method-absence claim does
-    // not hold (a different error, out of this lane) — silence.
-    let mut class_fqns: Vec<String> = Vec::with_capacity(arms.len());
-    for a in arms {
-        match &a.ty {
-            steins_contract::ContractTy::Class(f) => class_fqns.push(f.clone()),
-            _ => return,
-        }
-    }
+    // Every surviving arm must be a class/interface arm, or an intersection of them
+    // (issue #238). A scalar/array/null arm means the runtime receiver may be a
+    // non-object, so a method-absence claim does not hold (a different error, out of
+    // this lane) — silence.
+    let Some(lane) = declared_receiver_conjuncts(cx, arms) else {
+        return;
+    };
     // A13: the minimum over the PARTICIPATING arms — the ones the ladder is about to
     // close over, i.e. exactly the lane that survived narrowing. Computed here, next
     // to the arm read, so it can never drift from the arms the claim rests on.
@@ -22971,13 +23124,23 @@ fn check_phpdoc_undefined_method(
     if !folder.absence_family_available() {
         return;
     }
-    // Every arm must provably lack the method under its closed ladder.
-    let mut arm_names: Vec<String> = Vec::with_capacity(class_fqns.len());
-    for f in &class_fqns {
-        match arm_provably_lacks_method(cx, folder, f, &method) {
-            Some(name) => arm_names.push(name),
-            None => return, // any arm not provably-absent ⇒ silence.
+    // Every arm must provably lack the method under its closed ladder — and for an
+    // intersection arm, every CONJUNCT must, because member lookup over an inhabited
+    // intersection is the union of the arms (issue #234): a method defined on either
+    // conjunct resolves, so only a method absent from all of them is absent from the
+    // intersection. `arm_provably_lacks_method` answers `None` both for "the method
+    // is there" and for "a leg could not close", so one fold covers both the
+    // either-arm-resolves rule and the `Maybe`-is-silence rule.
+    let mut arm_names: Vec<String> = Vec::with_capacity(lane.len());
+    for conjuncts in &lane {
+        let mut names: Vec<String> = Vec::with_capacity(conjuncts.len());
+        for f in conjuncts {
+            match arm_provably_lacks_method(cx, folder, f, &method) {
+                Some(name) => names.push(name),
+                None => return, // any conjunct not provably-absent ⇒ silence.
+            }
         }
+        arm_names.push(names.join("&"));
     }
 
     let pos = cx.tree().position(call.span.start);
@@ -29503,6 +29666,7 @@ mod n4_carrier_tests {
             0,
             &EMPTY_DAM,
             true,
+            FinalKeyword::Enforced,
             view.effective_minor,
             view.catalog_skew,
             view.version_id,
