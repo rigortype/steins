@@ -40,6 +40,21 @@
 //! implode(',', [])                 === ''           (no length claim through implode)
 //! ```
 //!
+//! # Issue #41's additions, witnessed at 8.5.9
+//!
+//! ```text
+//! substr('abc', 0)                 === 'abc'        (offset 0, no length: IDENTITY)
+//! substr('a', 0, 2)                === 'a'          (a long length clamps, never pads)
+//! substr('0x', 0, 1)               === '0'          (…so NON_FALSY needs length >= 2)
+//! substr('abc', 0, -5)             === ''           (a negative length is not a length)
+//! substr('abc', 5)                 === ''           (why every other offset declines)
+//! strtr('ab', 'ab', 'xy')          === 'xy'         (byte count preserved exactly)
+//! strtr('a', 'a', 'A')             === 'A'          (…so no casing bit survives)
+//! strtr('a', 'ax', '0x')           === '0'          (NON_FALSY refuted; upstream keeps it)
+//! strtr('a', ['a' => ''])          === ''           (an empty value DELETES)
+//! strtr('a', ['a' => '0'])         === '0'          (the array form's own refutation)
+//! ```
+//!
 //! `strtolower('ÄB') === 'Äb'` is the probe the whole casing half rests on. Steins'
 //! `LOWERCASE` is `php_str_is_lowercase`, i.e. **no ASCII uppercase byte** — which
 //! `'Äb'` satisfies — so `strtolower` establishes the predicate for *any* input,
@@ -52,7 +67,7 @@
 
 use std::collections::HashMap;
 
-use steins_domain::{Base, Fact, PhpStr, StrPreds, Val};
+use steins_domain::{Base, Fact, IntRange, PhpStr, Refinement, StrPreds, Val};
 use steins_infer::{DEBUG_TYPE_ID, Diagnostic, Folder, check_with};
 use steins_syntax::{ArgValue, SourceTree};
 
@@ -678,6 +693,35 @@ fn the_sprintf_format_scanner_matches_the_engine_on_every_probed_shape() {
             "{refused} is a ValueError at 8.5.8"
         );
     }
+}
+
+/// Issue #41's precedence question, pinned rather than left to registration order:
+/// where an argument-dependent rule and an **admitted curated static row** describe
+/// the same call, the rule wins — and it can only win by narrowing strictly inside
+/// the row, which is what makes the precedence safe instead of a coin toss.
+///
+/// `strlen` is the family's one such collision. The fixture hands the walk what the
+/// real pipeline hands it once ADR-0056's gate has admitted `("strlen",
+/// "int<0, max>")`: the curated row itself, not the bare `int` envelope.
+#[test]
+fn an_argument_dependent_rule_outranks_the_admitted_curated_row() {
+    let curated = || {
+        let mut m = Mock::sidecar();
+        m.facts.insert(
+            "strlen".to_owned(),
+            Fact::refined(Base::Int, Refinement::Int(IntRange::NON_NEGATIVE), false),
+        );
+        m
+    };
+    // The rule fires and REPLACES the row, because `int<1, max>` is strictly
+    // inside `int<0, max>`.
+    assert_eq!(
+        dump_with("non-empty-string", "strlen($v)", &mut curated()),
+        "dumped type: int<1, max> (asserted)"
+    );
+    // Where the rule declines, the curated row is untouched — the precedence is a
+    // replacement by a narrower answer, never a suppression of the row.
+    assert_eq!(dump_with("string", "strlen($v)", &mut curated()), "dumped type: int<0, max>");
 }
 
 // `strlen`: the one member that answers an int
