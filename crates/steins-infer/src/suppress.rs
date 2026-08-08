@@ -55,6 +55,12 @@ use crate::{CALL_INACCESSIBLE_METHOD_ID, CLASS_CONST_INACCESSIBLE_ID, PROPERTY_I
 // member absence (ADR-0078, issue #197)
 use crate::{CLASS_CONST_UNDEFINED_ID, PROPERTY_MAYBE_UNDEFINED_ID, PROPERTY_UNDEFINED_ID};
 // end member absence (ADR-0078, issue #197)
+// untyped surface (ADR-0078, issue #200)
+use crate::{
+    UNTYPED_CLASS_CONSTANT_ID, UNTYPED_GENERICS_ID, UNTYPED_ITERABLE_VALUE_ID,
+    UNTYPED_PARAMETER_ID, UNTYPED_PROPERTY_ID, UNTYPED_RETURN_ID,
+};
+// end untyped surface (ADR-0078, issue #200)
 
 /// The registry id for an `@steins-ignore` whose diagnostic id matches nothing on
 /// its target line (ADR-0023 anti-rot). Exempt from suppression.
@@ -342,6 +348,25 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // `Strict` until the `isset`→`@phpstan-assert` discharge-ladder gap is closed.
     (OFFSET_UNDECLARED_ID, Layer::Contract, Floor::Contracts),
     (OFFSET_MAYBE_MISSING_ID, Layer::Contract, Floor::Strict),
+    // untyped surface (ADR-0078, issue #200)
+    // contract — declared debt: a claim the code does not make (ADR-0078 §2's
+    // lint boundary). Declaration reading only, so nothing here is a proof and
+    // nothing here rots another channel; the contract layer's increase-tripwire
+    // posture is exactly right for "how much untyped surface is left".
+    //
+    // ALL SIX land at `Contracts`. The ADR's floor table marks the last two
+    // `Contracts→Strict by measurement`: `untyped.iterable-value` and
+    // `untyped.generics` carry the real content and are the two most likely to be
+    // noisy, so they ship at the family's floor and MOVE here — one-line edits to
+    // `Floor::Strict` — once the corpus measurement says they should. Nothing else
+    // in the tree keys on their rung.
+    (UNTYPED_PARAMETER_ID, Layer::Contract, Floor::Contracts),
+    (UNTYPED_RETURN_ID, Layer::Contract, Floor::Contracts),
+    (UNTYPED_PROPERTY_ID, Layer::Contract, Floor::Contracts),
+    (UNTYPED_CLASS_CONSTANT_ID, Layer::Contract, Floor::Contracts),
+    (UNTYPED_ITERABLE_VALUE_ID, Layer::Contract, Floor::Contracts),
+    (UNTYPED_GENERICS_ID, Layer::Contract, Floor::Contracts),
+    // end untyped surface (ADR-0078, issue #200)
     // mechanics — apparatus hygiene (red on sight, suppression-exempt).
     (SUPPRESS_UNMATCHED_ID, Layer::Mechanics, Floor::Default),
     (SUPPRESS_UNKNOWN_ID, Layer::Mechanics, Floor::Default),

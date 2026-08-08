@@ -32,7 +32,13 @@ impl Folder for Mock {
 
 fn diagnostics(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
+    // The `untyped.*` family (ADR-0078, issue #200) reports on the FIXTURES' own
+    // declarations — deliberately untyped here — not on the behaviour under test.
+    // Dropped so every assertion below keeps meaning what it meant before it landed.
     check_with(&tree, &[], "t.php", &mut Mock)
+        .into_iter()
+        .filter(|d| !d.id.starts_with("untyped."))
+        .collect()
 }
 
 /// All `debug.type` dump bodies, in source order, asserting no other finding.

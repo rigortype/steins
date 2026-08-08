@@ -24,7 +24,13 @@ use steins_syntax::{ArgValue, SourceTree};
 fn silent_dumps(src: &str, folder: &mut dyn Folder) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
     let ds = check_with(&tree, &[], "t.php", folder);
-    let other: Vec<&Diagnostic> = ds.iter().filter(|d| !d.id.starts_with("debug.")).collect();
+    // `untyped.*` (ADR-0078, issue #200) is excluded alongside the dumps: these
+    // fixtures declare bare `array` parameters on purpose, and a contract-layer id
+    // observing the missing value type is not arm subtraction speaking.
+    let other: Vec<&Diagnostic> = ds
+        .iter()
+        .filter(|d| !d.id.starts_with("debug.") && !d.id.starts_with("untyped."))
+        .collect();
     assert!(other.is_empty(), "arm subtraction emitted a finding: {other:?}");
     ds
 }
@@ -33,7 +39,13 @@ fn silent_dumps(src: &str, folder: &mut dyn Folder) -> Vec<Diagnostic> {
 fn one_type(src: &str) -> String {
     let tree = SourceTree::parse(src);
     let ds = check(&tree, &[], "t.php");
-    let other: Vec<&Diagnostic> = ds.iter().filter(|d| !d.id.starts_with("debug.")).collect();
+    // `untyped.*` (ADR-0078, issue #200) is excluded alongside the dumps: these
+    // fixtures declare bare `array` parameters on purpose, and a contract-layer id
+    // observing the missing value type is not arm subtraction speaking.
+    let other: Vec<&Diagnostic> = ds
+        .iter()
+        .filter(|d| !d.id.starts_with("debug.") && !d.id.starts_with("untyped."))
+        .collect();
     assert!(other.is_empty(), "arm subtraction emitted a finding: {other:?}");
     let ty: Vec<&Diagnostic> = ds.iter().filter(|d| d.id == DEBUG_TYPE_ID).collect();
     assert_eq!(ty.len(), 1, "expected exactly one debug.type dump, got {ds:?}");

@@ -317,6 +317,19 @@ pub struct Param {
     pub name: String,
     /// Native scalar/union type, or `None` when untyped / non-scalar / complex.
     pub ty: Option<NativeType>,
+    // untyped surface (ADR-0078, issue #200)
+    /// The **file byte span of the native type hint as written**, or `None` when
+    /// the parameter declares no native type at all.
+    ///
+    /// [`Self::ty`] cannot answer "is there a native type?" — it is a *modeling*
+    /// answer, and `array`, `iterable`, `mixed`, `callable`, `object`,
+    /// `self`/`static`/`parent`, `void`/`never` all lower to `None` there while
+    /// being perfectly good declarations. This field is the *syntactic* answer:
+    /// `None` means the source wrote nothing, full stop. Slice it out of the file
+    /// with [`SourceTree::source_slice`] when the spelling itself matters (the
+    /// `array`/`iterable` discrimination `untyped.iterable-value` makes).
+    pub hint_span: Option<Span>,
+    // end untyped surface (ADR-0078, issue #200)
     /// `...$x` — the checker skips this and every later position.
     pub variadic: bool,
     /// `&$x` — by-reference; the checker skips it.
@@ -601,6 +614,13 @@ pub struct FunctionDecl {
     /// The native scalar/union return type, or `None` when untyped / non-scalar
     /// / `void` / `never` — the return-type check skips those (zero-FP).
     pub ret: Option<NativeType>,
+    // untyped surface (ADR-0078, issue #200)
+    /// The file byte span of the native **return** type hint as written, or
+    /// `None` when the declaration writes none. The return-side twin of
+    /// [`Param::hint_span`], and for the same reason: `void`, `never`, `array`
+    /// and friends are real declarations that [`Self::ret`] models as `None`.
+    pub ret_span: Option<Span>,
+    // end untyped surface (ADR-0078, issue #200)
     pub span: Span,
     /// The recognized `#[\Steins\Pure]` / `#[\Steins\Effect(...)]` envelope on
     /// this function, if present (ADR-0005/0006/0018). `Some` opts the function
@@ -698,6 +718,12 @@ pub struct MethodDecl {
     /// enclosing class's resolved name (and, for `parent`, the resolved parent)
     /// is known; `None` for every other return shape.
     pub ret_bound_keyword: Option<RetBoundKeyword>,
+    // untyped surface (ADR-0078, issue #200)
+    /// The file byte span of the native return type hint as written, or `None`
+    /// when the method writes none — the method-world twin of
+    /// [`FunctionDecl::ret_span`].
+    pub ret_span: Option<Span>,
+    // end untyped surface (ADR-0078, issue #200)
     /// The span of the method name identifier (for diagnostic positions).
     pub span: Span,
     /// The recognized effect envelope, if declared (see [`FunctionDecl`]).
@@ -741,6 +767,13 @@ pub struct PropertyDecl {
     /// (same lowering as a param/return type; the property-mismatch check skips
     /// `None`-typed props, zero-FP).
     pub ty: Option<NativeType>,
+    // untyped surface (ADR-0078, issue #200)
+    /// The file byte span of the native property type hint as written, or `None`
+    /// when the declaration writes none — the property-world twin of
+    /// [`Param::hint_span`]. For a promoted constructor parameter this is the
+    /// parameter's own hint span.
+    pub hint_span: Option<Span>,
+    // end untyped surface (ADR-0078, issue #200)
     /// `true` when declared `readonly` (or a promoted `readonly` ctor param). A
     /// readonly prop, once established, is sweep-immune (ADR-0036 readonly immunity).
     pub readonly: bool,
@@ -790,6 +823,34 @@ pub struct EnumCaseDecl {
     pub value: Option<ArgValue>,
     pub span: Span,
 }
+
+// untyped surface (ADR-0078, issue #200)
+/// One class constant's **declaration shape** — the facts a declaration-reading
+/// check needs and neither [`ClassDecl::consts`] (values) nor
+/// [`ClassDecl::const_visibility`] (visibility) carries.
+///
+/// A third list rather than a wider tuple in either of those, for the reason the
+/// second one was split off: each existing list's *absence* of a name already
+/// means something specific to its own consumers, and this one records every
+/// declared constant regardless of initializer, exactly as the visibility list
+/// does. Enum cases are not constants for this purpose — they live in
+/// [`ClassDecl::enum_cases`], and their type is the enum, so they are never
+/// `untyped.class-constant` material.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClassConstDecl {
+    /// The constant name as written (constant names are case-sensitive).
+    pub name: String,
+    /// The file byte span of the PHP 8.3 native constant type hint as written
+    /// (`const string FOO = 'x';`), or `None` when the declaration writes none.
+    pub hint_span: Option<Span>,
+    /// The raw `/** … */` docblock preceding the `const` declaration, if any —
+    /// read for a `@var` claim. Shared by every item of a multi-item
+    /// `const A = 1, B = 2;` declaration, exactly as the native hint is.
+    pub docblock: Option<String>,
+    /// The span of the constant name identifier (for diagnostic positions).
+    pub span: Span,
+}
+// end untyped surface (ADR-0078, issue #200)
 
 /// A user-defined class, **interface**, or **enum** declaration (top-level or
 /// namespaced). Interfaces are lowered (ADR-0033 Liskov), distinguished by
@@ -886,6 +947,11 @@ pub struct ClassDecl {
     /// Enum cases are not constants for this purpose — they live in
     /// [`Self::enum_cases`] and are always public.
     pub const_visibility: Vec<(String, Visibility)>,
+    // untyped surface (ADR-0078, issue #200)
+    /// Every declared class constant's declaration shape (see [`ClassConstDecl`]),
+    /// in source order. Populated for classes, interfaces and enums alike.
+    pub const_decls: Vec<ClassConstDecl>,
+    // end untyped surface (ADR-0078, issue #200)
     /// The names of the class-body **hooked** properties this declaration drops.
     ///
     /// A `public int $p { get => … }` member binds no value and is not lowered to a
@@ -3100,6 +3166,22 @@ impl SourceTree {
         gap.chars().all(char::is_whitespace).then_some(c)
     }
 
+    // untyped surface (ADR-0078, issue #200)
+    /// The exact source text a file byte [`Span`] covers, or `None` when the span
+    /// is out of range or does not land on `char` boundaries.
+    ///
+    /// The lowered tree records spans, not spellings, for everything whose
+    /// *spelling* is not itself a modeled fact. This is the one accessor that
+    /// turns such a span back into text — used by the declaration-reading
+    /// `untyped.*` family to tell an `array` hint from an `int` one, which no
+    /// lowered [`NativeType`] can express (both model to `None` and `Some`
+    /// respectively for unrelated reasons).
+    #[must_use]
+    pub fn source_slice(&self, span: Span) -> Option<&str> {
+        self.text.get(span.start as usize..span.end as usize)
+    }
+    // end untyped surface (ADR-0078, issue #200)
+
     /// Whether a docblock trivium ending at `doc_end` is followed by **nothing an
     /// adoption rule could attach it to** — the negative side of
     /// [`Self::stmt_docblock`]'s grammar, and the ADR-0029 declaration grammar's
@@ -3876,6 +3958,7 @@ fn lower_function(
         fqn: String::new(), // filled in `parse` from the enclosing namespace ctx
         params: lower_params(&f.parameter_list, rc),
         ret: f.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
+        ret_span: f.return_type_hint.as_ref().map(|r| to_span(r.hint.span())),
         span: to_span(f.name.span()),
         effect_envelope: attrs_effect_envelope(&f.attribute_lists, aliases),
         effect_origins,
@@ -3893,6 +3976,8 @@ fn lower_params(list: &mago_syntax::cst::FunctionLikeParameterList<'_>, rc: &Ref
         .map(|p| Param {
             name: strip_dollar(bytes_to_string(p.variable.name)),
             ty: p.hint.as_ref().and_then(|h| lower_hint(h, rc)),
+            // The syntactic answer, kept beside the modeling one (issue #200).
+            hint_span: p.hint.as_ref().map(|h| to_span(h.span())),
             variadic: p.is_variadic(),
             by_ref: p.is_reference(),
             has_null_default: p
@@ -3987,6 +4072,7 @@ fn lower_trait(t: &mago_syntax::cst::Trait<'_>, conditional: bool) -> ClassDecl 
         properties: Vec::new(),
         consts: Vec::new(),
         const_visibility: Vec::new(),
+        const_decls: Vec::new(),
         hooked_properties: Vec::new(),
         // A trait is inert for member absence: `uses_traits` on the using class is
         // already an obstacle, so the attribute here would change nothing.
@@ -4014,6 +4100,7 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
     let mut properties = Vec::new();
     let mut consts = Vec::new();
     let mut const_visibility = Vec::new();
+    let mut const_decls = Vec::new();
     let mut hooked_properties = Vec::new();
     let mut uses_traits = false;
     for member in c.members.iter() {
@@ -4039,7 +4126,7 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
                 })));
             }
             ClassLikeMember::Constant(k) => {
-                lower_class_consts(k, &mut consts, &mut const_visibility);
+                lower_class_consts(k, docs, &mut consts, &mut const_visibility, &mut const_decls);
             }
             ClassLikeMember::TraitUse(_) => uses_traits = true,
             _ => {}
@@ -4064,6 +4151,7 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
         properties,
         consts,
         const_visibility,
+        const_decls,
         hooked_properties,
         // member absence (ADR-0078, issue #197)
         allows_dynamic_properties: attrs_allow_dynamic_properties(&c.attribute_lists),
@@ -4085,15 +4173,32 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
 /// `vis` receives every declared name with its visibility (ADR-0078, issue #185),
 /// literal initializer or not — the one list whose absence of a name does mean the
 /// class-like declares no such constant.
+///
+/// `decls` receives every declared name's **declaration shape** (ADR-0078, issue
+/// #200): the PHP 8.3 native constant type's span and the `const` declaration's
+/// own docblock. A multi-item `const A = 1, B = 2;` shares both, exactly as it
+/// shares its visibility.
 fn lower_class_consts(
     k: &mago_syntax::cst::ClassLikeConstant<'_>,
+    docs: &DocIndex,
     out: &mut Vec<(String, ArgValue)>,
     vis: &mut Vec<(String, Visibility)>,
+    decls: &mut Vec<ClassConstDecl>,
 ) {
     let visibility = visibility_of(&k.modifiers);
+    // untyped surface (ADR-0078, issue #200)
+    let hint_span = k.hint.as_ref().map(|h| to_span(h.span()));
+    let docblock = docs.preceding(to_span(k.span()).start);
+    // end untyped surface (ADR-0078, issue #200)
     for item in k.items.iter() {
         let name = bytes_to_string(item.name.value);
         vis.push((name.clone(), visibility));
+        decls.push(ClassConstDecl {
+            name: name.clone(),
+            hint_span,
+            docblock: docblock.clone(),
+            span: to_span(item.name.span()),
+        });
         let v = lower_arg_value(item.value);
         if !matches!(v, ArgValue::Other) {
             out.push((name, v));
@@ -4120,6 +4225,7 @@ fn lower_plain_property(p: &PlainProperty<'_>, docs: &DocIndex, rc: &RefResolver
     let is_static = p.modifiers.iter().any(Modifier::is_static);
     let visibility = visibility_of(&p.modifiers);
     let ty = p.hint.as_ref().and_then(|h| lower_hint(h, rc));
+    let hint_span = p.hint.as_ref().map(|h| to_span(h.span()));
     let docblock = docs.preceding(to_span(p.span()).start);
     let span = to_span(p.span());
     for item in p.items.iter() {
@@ -4134,6 +4240,7 @@ fn lower_plain_property(p: &PlainProperty<'_>, docs: &DocIndex, rc: &RefResolver
         out.push(PropertyDecl {
             name,
             ty: ty.clone(),
+            hint_span,
             readonly,
             is_static,
             visibility,
@@ -4166,6 +4273,7 @@ fn lower_promoted_params(m: &Method<'_>, rc: &RefResolver, out: &mut Vec<Propert
         out.push(PropertyDecl {
             name: strip_dollar(bytes_to_string(p.variable.name)),
             ty,
+            hint_span: p.hint.as_ref().map(|h| to_span(h.span())),
             readonly,
             is_static: false,
             visibility,
@@ -4194,11 +4302,12 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
     let mut methods = Vec::new();
     let mut consts = Vec::new();
     let mut const_visibility = Vec::new();
+    let mut const_decls = Vec::new();
     for member in i.members.iter() {
         match member {
             ClassLikeMember::Method(m) => methods.push(lower_method(m, aliases, docs, rc)),
             ClassLikeMember::Constant(k) => {
-                lower_class_consts(k, &mut consts, &mut const_visibility);
+                lower_class_consts(k, docs, &mut consts, &mut const_visibility, &mut const_decls);
             }
             _ => {}
         }
@@ -4222,6 +4331,7 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
         properties: Vec::new(),
         consts,
         const_visibility,
+        const_decls,
         hooked_properties: Vec::new(),
         // An interface declares no properties at all, so it can never be open.
         allows_dynamic_properties: false,
@@ -4242,7 +4352,7 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
 ///
 /// Enum method bodies are not analyzed: [`methods`] is empty and no scope is
 /// built (see [`ClassDecl`]).
-fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _docs: &DocIndex, rc: &RefResolver, conditional: bool) -> ClassDecl {
+fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, docs: &DocIndex, rc: &RefResolver, conditional: bool) -> ClassDecl {
     let implements: Vec<NameRef> = e
         .implements
         .as_ref()
@@ -4260,6 +4370,7 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _doc
     let mut enum_cases = Vec::new();
     let mut consts = Vec::new();
     let mut const_visibility = Vec::new();
+    let mut const_decls = Vec::new();
     for member in e.members.iter() {
         match member {
             ClassLikeMember::EnumCase(case) => {
@@ -4277,7 +4388,7 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _doc
                 });
             }
             ClassLikeMember::Constant(k) => {
-                lower_class_consts(k, &mut consts, &mut const_visibility);
+                lower_class_consts(k, docs, &mut consts, &mut const_visibility, &mut const_decls);
             }
             _ => {}
         }
@@ -4305,6 +4416,7 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, _doc
         properties: Vec::new(),
         consts,
         const_visibility,
+        const_decls,
         hooked_properties: Vec::new(),
         // An enum cannot declare a property, dynamic or otherwise.
         allows_dynamic_properties: false,
@@ -4341,6 +4453,7 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
         params: lower_params(&m.parameter_list, rc),
         ret: m.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
         ret_bound_keyword: m.return_type_hint.as_ref().and_then(|r| ret_bound_keyword(&r.hint)),
+        ret_span: m.return_type_hint.as_ref().map(|r| to_span(r.hint.span())),
         span: to_span(m.name.span()),
         effect_envelope: attrs_effect_envelope(&m.attribute_lists, aliases),
         effect_origins,

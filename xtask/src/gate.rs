@@ -327,6 +327,28 @@ fn is_effect_contract(d: &Diagnostic) -> bool {
     d.id.starts_with("effect.") && is_contract(d)
 }
 
+// untyped surface (ADR-0078, issue #200)
+//
+// A contract-layer id belonging to NONE of the three families above — which is
+// exactly what `untyped.*` is — is **dropped by the `!is_contract` retain and
+// counted nowhere**. Verified against this file when the family landed, and worth
+// writing down because the reading is not obvious in either direction:
+//
+// * It CANNOT turn the gate red. The retain runs off [`gate_bucket`]'s layer
+//   partition, not off any family prefix, so a contract id with no expected table
+//   never joins the red-on-sight `diagnostics` list. This is the property that
+//   matters, and it is a property of the layer — nothing about the family had to be
+//   special-cased for it, unlike issue #186's `is_phpdoc` fix, where a MECHANICS id
+//   was wrongly *absorbed* by a contract table (the opposite defect).
+// * It is therefore also not *reported* by the gate: there is no `UNTYPED_EXPECTED`
+//   row, no count column, no tripwire. Deliberate for now — a tripwire seeded before
+//   the corpus measurement would pin an arbitrary number. When the measurement
+//   decides the `iterable-value` / `generics` floors (ADR-0078's
+//   `Contracts→Strict by measurement` rows), seeding a fourth table here beside
+//   `PHPDOC_EXPECTED` / `THROW_EXPECTED` / `EFFECT_EXPECTED` is the one-family edit
+//   that turns the family into an increase tripwire.
+// end untyped surface (ADR-0078, issue #200)
+
 /// Permanent gate policy for `phpdoc.*` findings (ADR-0030 relation #1).
 ///
 /// `phpdoc.*` findings are **contract-layer** claims: they say a proven value does
