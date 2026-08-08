@@ -1032,6 +1032,7 @@ version = "0.1.4"
 dependencies = [
  "serde",
  "serde_json",
+ "steins-catalog",
  "steins-db",
  "steins-edit",
  "steins-infer",

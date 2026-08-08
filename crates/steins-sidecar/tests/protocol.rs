@@ -7,7 +7,8 @@
 use std::time::Duration;
 
 use steins_sidecar::{
-    ConstantDefined, FoldArg, FoldKey, FoldResult, FoldValue, PregCompile, Sidecar,
+    ConstantDefined, FoldArg, FoldKey, FoldResult, FoldValue, PregCompile, ReflectedClassKind,
+    Sidecar,
 };
 
 /// An unkeyed (`ArrayKey::Auto`) array argument of `values`.
@@ -195,6 +196,134 @@ fn reflect_reports_the_parameter_counts() {
             assert_eq!(r.params_required, None, "no arity for a name that is not resident: {r:?}");
         }
     }
+}
+
+/// `reflect_class` on a class the ENGINE has and Steins' static class worlds do
+/// not: `Random\Randomizer` is provided by ext-random (always built in since PHP
+/// 8.2) and carries no builtin-catalog row, which is exactly the population issue
+/// #269 exists for. Guarded on the live engine's own answer rather than a version
+/// pin — CI runs 8.4, local engines run 8.5, and the 8.1 floor has no such class.
+#[test]
+fn reflect_class_reads_an_extension_class_declaration() {
+    let Some(mut sc) = spawn_or_skip("reflect_class_reads_an_extension_class_declaration") else {
+        return;
+    };
+    let r = sc.reflect_class("Random\\Randomizer").expect("class reflection reply");
+    let Some(d) = r.declaration else {
+        eprintln!("SKIP reflect_class_reads_an_extension_class_declaration: ext-random absent");
+        return;
+    };
+    assert_eq!(d.name, "Random\\Randomizer");
+    assert_eq!(d.kind, ReflectedClassKind::Class);
+    assert!(d.internal, "an extension class is internal: {d:?}");
+    assert_eq!(d.extension.as_deref(), Some("random"), "the origin travels: {d:?}");
+    // The member surfaces the catalog cannot supply for this class, because it has
+    // no rows for it at all: a method with its signature, and a property.
+    let get_int = d.methods.iter().find(|m| m.name == "getInt").expect("getInt is declared");
+    assert_eq!(get_int.params_required, 2, "getInt(int $min, int $max): {get_int:?}");
+    assert_eq!(get_int.return_type.as_deref(), Some("int"), "{get_int:?}");
+    assert!(d.properties.iter().any(|p| p.name == "engine"), "the engine property: {d:?}");
+}
+
+/// Constants and hierarchy edges off an always-resident class-like. `ArrayObject`
+/// is SPL, present on every supported minor, and carries both.
+#[test]
+fn reflect_class_reads_constants_and_hierarchy_edges() {
+    let Some(mut sc) = spawn_or_skip("reflect_class_reads_constants_and_hierarchy_edges") else {
+        return;
+    };
+    let d = sc
+        .reflect_class("ArrayObject")
+        .expect("class reflection reply")
+        .declaration
+        .expect("ArrayObject is resident on every supported PHP");
+    assert!(d.constants.iter().any(|c| c.name == "ARRAY_AS_PROPS"), "class constants: {d:?}");
+    assert!(d.interfaces.iter().any(|i| i == "Countable"), "hierarchy edges: {d:?}");
+    assert!(d.methods.iter().any(|m| m.name == "count"), "methods: {d:?}");
+    // A leading backslash resolves to the same symbol, as it does for `reflect`.
+    assert!(sc.reflect_class("\\ArrayObject").expect("reply").exists());
+}
+
+/// A name no extension provides is a **structured not-found**, never a decline —
+/// the same distinction `reflect` draws, and the one that keeps "the engine says
+/// no" separate from "we could not ask".
+#[test]
+fn reflect_class_reports_an_absent_class_as_a_structured_not_found() {
+    let Some(mut sc) = spawn_or_skip("reflect_class_reports_an_absent_class") else { return };
+    let r = sc.reflect_class("Steins\\NoSuchClass269").expect("an answer, not a decline");
+    assert!(!r.exists(), "{r:?}");
+    assert_eq!(r.declaration, None);
+}
+
+/// The runner never autoloads to answer this: it has no project autoloader at all,
+/// and a class that is not already resident is a not-found rather than a load.
+/// Asserted on a name PHP would try to autoload if anything were registered.
+#[test]
+fn reflect_class_never_autoloads() {
+    let Some(mut sc) = spawn_or_skip("reflect_class_never_autoloads") else { return };
+    let r = sc.reflect_class("App\\Kernel").expect("an answer");
+    assert!(!r.exists(), "no project class is reachable from the sidecar: {r:?}");
+    assert!(!sc.is_poisoned(), "asking about a userland name is not a transport failure");
+}
+
+/// **Fault injection**: the sidecar dies mid-run while class queries are being
+/// asked. Reflection degrades to `None` — Unknown — and never to a class with no
+/// members, which is the shape that could become a wrong diagnostic. Each death
+/// costs one answer, and past the respawn cap every query declines.
+///
+/// The child is killed by the *timeout* path rather than a memory bomb: both are
+/// the same event to the transport (the reply never arrives, the child is killed
+/// and the instance poisoned), and the timeout costs no allocation — which matters
+/// in a file whose tests run in parallel and already fire four 256 MB bombs.
+#[test]
+fn a_dead_sidecar_declines_a_class_query_and_the_next_one_answers() {
+    let Some(mut sc) = spawn_or_skip("a_dead_sidecar_declines_a_class_query") else { return };
+    let quick = Duration::from_millis(20);
+    let generous = Duration::from_secs(2);
+
+    for i in 0..3 {
+        sc.set_timeout(quick);
+        let r = sc.fold("usleep", &[int(1_000_000)]); // 1s > 20ms
+        assert!(matches!(r, FoldResult::Widen { .. }), "death {i} widens, got {r:?}");
+        assert!(sc.is_poisoned(), "death {i} poisoned the instance");
+        // The next request revives the transport, and it is a class query — the
+        // recovery must be as transparent here as it is for a fold.
+        sc.set_timeout(generous);
+        let revived = sc.reflect_class("ArrayObject").expect("the revived child answers");
+        assert!(revived.exists(), "respawn {i} answered: {revived:?}");
+    }
+
+    // The fourth death spends the budget: nothing replaces this child.
+    sc.set_timeout(quick);
+    assert!(matches!(sc.fold("usleep", &[int(1_000_000)]), FoldResult::Widen { .. }));
+    sc.set_timeout(generous);
+    assert!(sc.is_poisoned(), "the respawn budget is spent");
+    assert_eq!(
+        sc.reflect_class("ArrayObject"),
+        None,
+        "a spent transport declines — Unknown, never an empty declaration"
+    );
+}
+
+/// A per-request timeout during a class query is the same story as a dead child:
+/// `None`, and the instance is poisoned rather than trusted for an answer.
+#[test]
+fn a_timed_out_class_query_declines() {
+    let Some(mut sc) = spawn_or_skip("a_timed_out_class_query_declines") else { return };
+    sc.set_timeout(Duration::from_millis(1));
+    // A 1ms deadline against a real round trip: whether it is the class query or
+    // the runner's read that loses the race, the only admissible outcome is a
+    // decline. (A machine fast enough to beat it still passes: the assert is on
+    // the *shape* of the answer, and a real declaration is a real answer.)
+    match sc.reflect_class("ArrayObject") {
+        None => assert!(sc.is_poisoned(), "a lost reply poisons the instance"),
+        Some(r) => assert!(r.exists(), "if it did answer in 1ms, it answered correctly: {r:?}"),
+    }
+    sc.set_timeout(Duration::from_secs(2));
+    assert!(
+        sc.reflect_class("ArrayObject").expect("the next request revives").exists(),
+        "recovery is transparent"
+    );
 }
 
 /// Parse `major.minor` off an `EnvInfo::php_version` string (e.g. `"8.4.10"` or

@@ -121,10 +121,14 @@ pub fn run_doctor(args: &[String]) -> ExitCode {
     let layout = crate::resolve_layout(std::slice::from_ref(&root.to_string_lossy().into_owned()));
     let files = parse_project(&root);
 
-    section_runtime(no_php, &layout);
+    // The live child, when there is one, outlives its section: the Coverage
+    // posture's reflected class world (issue #269) is the same engine's answer
+    // about the same run, and spawning a second `php` to ask it would be a second
+    // runtime the report could not honestly attribute the first one's numbers to.
+    let mut sidecar = section_runtime(no_php, &layout);
     let surface = section_config(&mut contradiction);
     section_layout(&root, &cwd, &layout);
-    section_coverage(&root, &files, &layout);
+    section_coverage(&root, &files, &layout, sidecar.as_mut());
     section_envelopes(&files, &surface);
     section_baseline(baseline_path.as_deref(), &surface, &mut contradiction);
 
@@ -139,7 +143,13 @@ pub fn run_doctor(args: &[String]) -> ExitCode {
 /// Section 1 — Runtime (ADR-0054 §9.1, minimal): sidecar spawn health, PHP version,
 /// SAPI, loaded-extension count, the monkey-patch line (ADR-0049 A9), and the
 /// analysis TARGET version with its skew against the runtime (issue #28).
-fn section_runtime(no_php: bool, layout: &ProjectLayout) {
+///
+/// Returns the **live child** when one answered `env()`, so a later section can put
+/// a further question to the same engine (issue #269). Every degraded posture —
+/// `--no-php`, no `php` on PATH, a spawn that then failed to answer — returns
+/// `None`, which is what keeps those runs byte-identical to the report they
+/// produced before this surface existed.
+fn section_runtime(no_php: bool, layout: &ProjectLayout) -> Option<Sidecar> {
     outln!();
     outln!("Runtime");
     let target = layout.php_target();
@@ -148,7 +158,7 @@ fn section_runtime(no_php: bool, layout: &ProjectLayout) {
         section_target(target, None);
         outln!("  posture: sound subset — findings that require executing PHP are omitted");
         outln!("  (a degraded environment is not a failure — exit stays 0, ADR-0004)");
-        return;
+        return None;
     }
     match Sidecar::spawn() {
         Ok(mut sc) => match sc.env() {
@@ -173,18 +183,21 @@ fn section_runtime(no_php: bool, layout: &ProjectLayout) {
                     );
                 }
                 section_target(target, parse_env_minor(&env.php_version));
+                Some(sc)
             }
             None => {
                 outln!("  PHP sidecar: spawned, but the env() query failed");
                 outln!(
                     "  posture: sound subset (degraded) — findings that require executing PHP are omitted (exit 0, ADR-0004)"
                 );
+                None
             }
         },
         Err(_) => {
             outln!("  PHP sidecar: not spawnable (no `php` on PATH)");
             outln!("  {SOUND_SUBSET_NOTICE}");
             outln!("  (a degraded environment is not a failure — exit stays 0, ADR-0004)");
+            None
         }
     }
 }
@@ -383,7 +396,12 @@ fn section_layout(root: &Path, cwd: &Path, layout: &ProjectLayout) {
 ///    havoc: they answer "could a name exist that the reference scan never saw".
 /// 3. **Reflection-driven invocation** sites — inventoried even though they poison
 ///    no scope and dam no claim, and labelled as the guess they are.
-fn section_coverage(root: &Path, files: &[ParsedFile], layout: &ProjectLayout) {
+fn section_coverage(
+    root: &Path,
+    files: &[ParsedFile],
+    layout: &ProjectLayout,
+    sidecar: Option<&mut Sidecar>,
+) {
     outln!();
     outln!("Coverage posture");
     if files.is_empty() {
@@ -513,6 +531,117 @@ fn section_coverage(root: &Path, files: &[ParsedFile], layout: &ProjectLayout) {
     // is "the recognizer saw nothing", not "the code reflects nowhere".
     outln!(
         "    (this list is a guess until measured: the recognizer is syntactic, it names no receiver type, and it is not exhaustive)"
+    );
+
+    section_reflected_classes(files, sidecar);
+}
+
+/// How many distinct unanswered class names doctor will put to the engine.
+///
+/// A round trip apiece, on a report that must stay quick; a tree with thousands of
+/// unresolved names is answered honestly by a sample plus the count it came from,
+/// not by a minute of IPC. `check` has no such cap — it asks about the names its
+/// walk actually reaches, when it reaches them.
+const REFLECT_QUERY_CAP: usize = 200;
+
+/// How many resolved names are printed before the line summarizes the rest.
+const REFLECT_DISPLAY_CAP: usize = 8;
+
+/// The **reflected class world** (issue #269), inside Coverage posture: the class
+/// names this tree references that neither a source declaration nor a builtin-catalog
+/// row answers, but the *project's own PHP* does.
+///
+/// This is the origin surface for the reflect slice. A class an installed extension
+/// provides (`Redis`, `Random\Randomizer`, `Dom\Element`) is invisible to both of
+/// Steins' static class worlds, and the engine running the project is the only
+/// honest source for it (ADR-0049 §1 — ask the real thing, never a curated stub
+/// list). Naming the resolved ones with the extension that declares them is what
+/// makes "where did this fact come from" answerable.
+///
+/// The line is printed **only when a live engine answered**. Under `--no-php`, with
+/// no `php` on PATH, or after a failed handshake there is no question to report the
+/// answer to, and the section stays exactly what it was before this surface existed.
+///
+/// Doctor stays index-bound (ADR-0054 §8): this reads declarations and asks the
+/// environment, and runs no emitter. The reflected declarations it finds convict
+/// nothing — see `steins_infer::Folder::reflected_class`.
+fn section_reflected_classes(files: &[ParsedFile], sidecar: Option<&mut Sidecar>) {
+    let Some(sc) = sidecar else {
+        return;
+    };
+
+    // Every class-like the project itself declares, by the same lowercased key the
+    // index uses. Declared here means answered here — the engine is never asked.
+    let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for f in files {
+        for cd in f.tree.classes() {
+            declared.insert(cd.fqn.clone());
+        }
+    }
+
+    // The unanswered names, deduped, in first-encounter order so a report is stable
+    // and its sample is the reader's own first few. Lowercased throughout: PHP class
+    // names are case-insensitive, and it is the key both the index and the catalog
+    // are written in. The engine's reply carries the declaration's own casing back.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut unanswered: Vec<String> = Vec::new();
+    for f in files {
+        for r in f.tree.hard_class_refs() {
+            let fqn = f.tree.resolve_class_fqn(r).to_ascii_lowercase();
+            if declared.contains(&fqn) || steins_catalog::builtin_class_supers(&fqn).is_some() {
+                continue;
+            }
+            if seen.insert(fqn.clone()) {
+                unanswered.push(fqn);
+            }
+        }
+    }
+    if unanswered.is_empty() {
+        outln!(
+            "  reflected class world: no unanswered class-like referenced — the project index and the builtin catalog cover this tree"
+        );
+        return;
+    }
+
+    let asked = unanswered.len().min(REFLECT_QUERY_CAP);
+    let mut resolved: Vec<String> = Vec::new();
+    for fqn in unanswered.iter().take(asked) {
+        // A decline (`None`) and a not-found are both "not resolved here". Only a
+        // declaration counts, and it is counted with the origin it arrived with.
+        let Some(reflection) = sc.reflect_class(fqn) else {
+            continue;
+        };
+        if let Some(decl) = reflection.declaration {
+            let origin = decl.extension.unwrap_or_else(|| {
+                if decl.internal { "engine".to_owned() } else { "runtime".to_owned() }
+            });
+            resolved.push(format!("{} ({origin})", decl.name));
+        }
+    }
+
+    let truncated = if asked < unanswered.len() {
+        format!(" (asked {asked} of {} distinct names)", unanswered.len())
+    } else {
+        String::new()
+    };
+    if resolved.is_empty() {
+        outln!(
+            "  reflected class world: none of {} unanswered class-like name(s) is resident on this PHP{truncated}",
+            unanswered.len()
+        );
+        return;
+    }
+    let shown = resolved.len().min(REFLECT_DISPLAY_CAP);
+    let more = resolved.len() - shown;
+    let tail = if more == 0 { String::new() } else { format!(", +{more} more") };
+    outln!(
+        "  reflected class world: {} of {} unanswered class-like name(s) resolved off the project's own PHP{truncated} — {}{tail}",
+        resolved.len(),
+        unanswered.len(),
+        resolved[..shown].join(", ")
+    );
+    outln!(
+        "    (a reflected declaration restores coverage only: it is the runtime's own claim, and no absence finding is premised on it — issue #269)"
     );
 }
 

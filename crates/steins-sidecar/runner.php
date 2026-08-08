@@ -106,6 +106,8 @@ function steins_handle($method, array $params)
             return steins_fold($params);
         case 'reflect':
             return steins_reflect($params);
+        case 'reflect_class':
+            return steins_reflect_class($params);
         case 'preg_compile':
             return steins_preg_compile($params);
         case 'defined':
@@ -253,6 +255,159 @@ function steins_reflect(array $params)
         'params_total' => $params_total,
         'params_required' => $params_required,
     ];
+}
+
+/**
+ * `reflect_class` — the *declaration* behind a resident class-like (issue #269).
+ *
+ * `reflect` above answers existence; this answers WHAT. It is the class-world half
+ * of ADR-0024's `reflect(target)` surface: a class an installed extension provides
+ * (`Redis`, `Collator`, `SQLite3`, `Dom\Element`) has no source declaration and no
+ * builtin-catalog row, so today it is Unknown everywhere. The project's own PHP has
+ * the whole declaration and is the only honest source for it (ADR-0049 §1: ask the
+ * real thing, never a curated stub list).
+ *
+ * ## No autoload, ever
+ *
+ * Existence is settled first with the `*_exists($name, false)` family, so
+ * `ReflectionClass` is only ever constructed for a class the engine ALREADY has
+ * resident. The sidecar boots no project autoloader (ADR-0024), and a query that
+ * would have to run project code to be answered is not answered at all.
+ *
+ * ## What travels, and what does not
+ *
+ * Methods carry the signature surface a consumer can check against — name, the
+ * static/abstract/final flags, visibility, the two parameter counts, and the
+ * `(string)` rendering of the declared (or tentative) return type, exactly as
+ * `reflect` renders a function's. Constants and properties travel as declarations,
+ * NOT as values: `getReflectionConstants()` is used rather than `getConstants()`
+ * precisely so no constant *initializer is evaluated* inside the sidecar. Interface
+ * names are the transitive set `ReflectionClass::getInterfaceNames()` reports; the
+ * parent is the direct one.
+ *
+ * A reflection failure is a `widen` — unanswerable — never a half-filled
+ * declaration: a consumer must not be able to mistake "we could not read the members"
+ * for "the class has none".
+ *
+ * @param array<mixed> $params
+ * @return array<string, mixed>
+ */
+function steins_reflect_class(array $params)
+{
+    $target = isset($params['target']) && is_string($params['target']) ? $params['target'] : null;
+    if ($target === null || $target === '') {
+        return ['kind' => 'widen', 'reason' => 'reflect_class requires a non-empty string target'];
+    }
+
+    $name = ltrim($target, '\\');
+
+    $is_interface = interface_exists($name, false);
+    $is_trait = trait_exists($name, false);
+    $is_enum = function_exists('enum_exists') && enum_exists($name, false);
+    $is_class = class_exists($name, false);
+    if (!$is_interface && !$is_trait && !$is_enum && !$is_class) {
+        // A structured not-found, exactly as `reflect` spells one: the engine
+        // genuinely does not have this class-like.
+        return ['kind' => 'class_reflection', 'target' => $target, 'exists' => false];
+    }
+
+    try {
+        $rc = new ReflectionClass($name);
+
+        if ($is_enum) {
+            $class_kind = 'enum';
+        } elseif ($is_interface) {
+            $class_kind = 'interface';
+        } elseif ($is_trait) {
+            $class_kind = 'trait';
+        } else {
+            $class_kind = 'class';
+        }
+
+        $parent = $rc->getParentClass();
+        $extension = $rc->getExtensionName();
+
+        $methods = [];
+        foreach ($rc->getMethods() as $m) {
+            $return_type = null;
+            $tentative = false;
+            $rt = $m->getReturnType();
+            if ($rt === null && method_exists($m, 'getTentativeReturnType')) {
+                $tt = $m->getTentativeReturnType();
+                if ($tt !== null) {
+                    $rt = $tt;
+                    $tentative = true;
+                }
+            }
+            if ($rt !== null) {
+                $return_type = (string) $rt;
+            }
+            $methods[] = [
+                'name' => $m->getName(),
+                'static' => $m->isStatic(),
+                'abstract' => $m->isAbstract(),
+                'final' => $m->isFinal(),
+                'visibility' => steins_visibility($m),
+                'params_total' => $m->getNumberOfParameters(),
+                'params_required' => $m->getNumberOfRequiredParameters(),
+                'return_type' => $return_type,
+                'return_type_tentative' => $tentative,
+            ];
+        }
+
+        $constants = [];
+        foreach ($rc->getReflectionConstants() as $c) {
+            $constants[] = ['name' => $c->getName(), 'visibility' => steins_visibility($c)];
+        }
+
+        $properties = [];
+        foreach ($rc->getProperties() as $p) {
+            $properties[] = [
+                'name' => $p->getName(),
+                'static' => $p->isStatic(),
+                'visibility' => steins_visibility($p),
+            ];
+        }
+
+        return [
+            'kind' => 'class_reflection',
+            'target' => $target,
+            'exists' => true,
+            'name' => $rc->getName(),
+            'class_kind' => $class_kind,
+            'internal' => $rc->isInternal(),
+            'extension' => $extension === false ? null : $extension,
+            'final' => $rc->isFinal(),
+            'abstract' => $rc->isAbstract(),
+            'parent' => $parent === false ? null : $parent->getName(),
+            'interfaces' => array_values($rc->getInterfaceNames()),
+            'methods' => $methods,
+            'constants' => $constants,
+            'properties' => $properties,
+        ];
+    } catch (\Throwable $e) {
+        // Unanswerable, never a partial declaration: a consumer must not read a
+        // failed read as an empty class.
+        return ['kind' => 'widen', 'reason' => 'class reflection failed'];
+    }
+}
+
+/**
+ * `public` / `protected` / `private` for any reflection member that reports the
+ * three predicates (methods, class constants, properties).
+ *
+ * @param ReflectionMethod|ReflectionClassConstant|ReflectionProperty $member
+ * @return string
+ */
+function steins_visibility($member)
+{
+    if ($member->isPrivate()) {
+        return 'private';
+    }
+    if ($member->isProtected()) {
+        return 'protected';
+    }
+    return 'public';
 }
 
 /**

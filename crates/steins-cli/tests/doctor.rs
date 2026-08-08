@@ -167,6 +167,54 @@ fn doctor_without_no_php_still_renders_runtime_and_exits_zero() {
     );
 }
 
+// ---------------------------------------------------- reflected class world ---
+
+/// A class ext-random provides (`Random\Randomizer`, always built in since PHP 8.2)
+/// beside one nothing provides — the two halves of issue #269's Coverage line.
+const EXTENSION_CLASS_REFS: &str =
+    "<?php\nfunction f(\\Random\\Randomizer $r, \\Steins\\NoSuchClass269 $n): void {}\n";
+
+/// The origin surface: doctor names the classes it resolved off the project's own
+/// PHP, and the extension each came from.
+#[test]
+fn doctor_reports_the_reflected_class_world() {
+    let dir = workdir("reflected");
+    write(&dir, "a.php", EXTENSION_CLASS_REFS);
+    let r = run_in(&dir, &["doctor", "."]);
+    assert_eq!(r.code, 0, "stdout:\n{}", r.stdout);
+    if !r.stdout.contains("PHP version:") {
+        eprintln!("SKIP doctor_reports_the_reflected_class_world: no `php` on PATH");
+        return;
+    }
+    assert!(r.stdout.contains("reflected class world:"), "stdout:\n{}", r.stdout);
+    // ext-random is built in from 8.2; below that (or on a stripped build) the line
+    // still renders, it just resolves nothing — assert the origin only where the
+    // engine actually answered.
+    if r.stdout.contains("Random\\Randomizer") {
+        assert!(r.stdout.contains("Random\\Randomizer (random)"), "stdout:\n{}", r.stdout);
+        assert!(
+            r.stdout.contains("no absence finding is premised on it"),
+            "the ruling is stated beside the fact; stdout:\n{}",
+            r.stdout
+        );
+    }
+}
+
+/// The sound subset is untouched: with `--no-php` there is no engine to ask, so the
+/// line does not appear at all and the report is exactly what it was.
+#[test]
+fn doctor_no_php_says_nothing_about_a_reflected_class_world() {
+    let dir = workdir("reflected-nophp");
+    write(&dir, "a.php", EXTENSION_CLASS_REFS);
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0, "stdout:\n{}", r.stdout);
+    assert!(
+        !r.stdout.contains("reflected class world"),
+        "no engine, no line; stdout:\n{}",
+        r.stdout
+    );
+}
+
 // -------------------------------------------------------- active surface line ---
 
 #[test]
