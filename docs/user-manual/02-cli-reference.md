@@ -785,6 +785,8 @@ Coverage posture
   dam sites: none — no runtime-definition construct stands, so existence-absence claims are undammed (ADR-0049 §2)
   reflection-driven invocation: none recognized
     (this list is a guess until measured: the recognizer is syntactic, it names no receiver type, and it is not exhaustive)
+  reflected class world: 1 of 3 unanswered class-like name(s) resolved off the project's own PHP — Redis (redis)
+    (a reflected declaration restores coverage only: it is the runtime's own claim, and no absence finding is premised on it — issue #269)
 
 Envelopes
   1 written throw envelope(s); the active profile `default` does not check them — the `contracts` (or `throws-direct`) profile does
@@ -794,6 +796,21 @@ Baseline
 $ echo $?
 0
 ```
+
+The **reflected class world** line answers "which classes here does Steins
+know about only because your PHP told it". A class an installed extension
+provides — `Redis`, `Random\Randomizer`, `Dom\Element` — is in no source
+file and in no bundled list, so Steins asks the same `php` the sidecar
+already runs and prints what it resolved, with the extension each class came
+from. The line appears only when a live sidecar answered: under `--no-php`,
+with no `php` on `PATH`, or after a failed handshake there is nothing to
+report and the section is exactly what it was.
+
+A resolved class buys coverage, not findings. It is the runtime's own claim
+about its own class, so nothing that reports a *missing* member — the
+`call.undefined-method` / `property.undefined` / `class-const.undefined`
+family — is ever premised on it. Enabling PHP can therefore make Steins
+know more about `Redis`, and cannot make it report a method call on one.
 
 With `--baseline`, the Baseline section compares the surface the file was
 captured under against the active one:

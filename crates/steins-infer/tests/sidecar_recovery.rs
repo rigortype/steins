@@ -153,6 +153,9 @@ impl steins_infer::FoldEngine for RestartableEngine {
     fn constant_defined(&mut self, _name: &str) -> Option<steins_sidecar::ConstantDefined> {
         None
     }
+    fn reflect_class(&mut self, _target: &str) -> Option<steins_sidecar::ClassReflection> {
+        None
+    }
     fn restarts(&self) -> u32 {
         self.restarts
     }

@@ -50,7 +50,8 @@ use steins_db::{
     project_index,
 };
 use steins_sidecar::{
-    ConstantDefined, EnvInfo, FoldArg, FoldKey, FoldResult, FoldValue, PregCompile, Reflection,
+    ClassReflection, ConstantDefined, EnvInfo, FoldArg, FoldKey, FoldResult, FoldValue, PregCompile,
+    Reflection,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use steins_sidecar::Sidecar;
@@ -1374,6 +1375,46 @@ pub trait Folder {
     }
     // end global constants (ADR-0078, issue #198)
 
+    // reflected class world (ADR-0024 `reflect`, issue #269)
+
+    /// The **declaration** the project's own PHP holds for `fqn`, when neither a
+    /// source declaration nor a builtin-catalog row answers it — the class an
+    /// installed extension provides (`Redis`, `Random\Randomizer`, `Dom\Element`).
+    ///
+    /// `Some(r)` with `r.declaration == Some(..)` is the runtime's own declaration:
+    /// members, signatures, constants, hierarchy edges, and the origin
+    /// (`internal` + `extension`) they came with. `Some(r)` with no declaration is
+    /// a definitive not-found on this boot surface. `None` is unanswerable — no
+    /// sidecar, `--no-php`, a timeout, a poisoned child, a runner too old to
+    /// implement the method — and the only sound reading of it is silence, exactly
+    /// as for every other engine question here. The default is `None`: the sound
+    /// subset (ADR-0004).
+    ///
+    /// # This answer resolves; it does not convict (owner ruling, 2026-08-09)
+    ///
+    /// A reflected declaration is an **envelope-grade** fact: the runtime's claim
+    /// about its own class, not a proof about the program. It may restore coverage
+    /// and buy correct silence, and a member check may consume it as an envelope —
+    /// but **no absence-family finding may be premised on its completeness**.
+    /// `call.undefined-method`, `property.undefined`, `class-const.undefined`,
+    /// `class.undefined` and the arity family all require a chain that is
+    /// source-declared and uniquely resolved (`Cx::find_class`), and this query is
+    /// deliberately *not* reachable from any of them: a reflected class never
+    /// enters the project index, so no enumeration those checks perform can be
+    /// completed by one. Convictions over reflected declarations are a separate
+    /// slice behind their own ADR, consistent with the standing pattern that the
+    /// runtime's answers refute rather than convict (`constant.undefined`'s
+    /// `defined()` precedent).
+    ///
+    /// `fqn` is the resolved name; PHP class names are case-insensitive, so the
+    /// lowercased form is a faithful query and is what the memo keys on.
+    fn reflected_class(&mut self, fqn: &str) -> Option<ClassReflection> {
+        let _ = fqn;
+        None
+    }
+
+    // end reflected class world (issue #269)
+
     /// The project's own PHP `(major, minor)` from the sidecar `env()` — the
     /// ADR-0052 A11 version-skew input. `None` (the default / sound subset) when no
     /// sidecar answers: an unknown minor is treated as "no detectable skew", so the
@@ -1517,6 +1558,10 @@ pub trait FoldEngine {
     /// Whether the engine knows `target` as a resident function / class-like, plus
     /// its declared return type when it is a function.
     fn reflect(&mut self, target: &str) -> Option<Reflection>;
+    /// The engine's **declaration** for a resident class-like — members, signatures,
+    /// constants, hierarchy edges, origin (issue #269). `None` declines; a parsed
+    /// reply with no declaration is a definitive not-found.
+    fn reflect_class(&mut self, target: &str) -> Option<ClassReflection>;
     /// Run `name(args)` on the engine and report the outcome.
     fn fold(&mut self, name: &str, args: &[FoldArg]) -> FoldResult;
     /// Whether the engine's own PCRE accepts `pattern` (ADR-0078, issue #189).
@@ -1616,6 +1661,34 @@ pub struct EngineFolder<E: FoldEngine> {
     /// [`Self::set_php_target`] changes whether that engine may be believed.
     boot_surface_const_memo: HashMap<String, Option<bool>>,
     // end global constants (ADR-0078, issue #198)
+    // reflected class world (issue #269)
+    /// Per-**class** memo of the reflected declaration, keyed by the lowercased FQN
+    /// (PHP class names are case-insensitive). A declaration is by far the largest
+    /// reply on this wire — a fat extension class carries hundreds of methods — so
+    /// asking twice for the same name is the one thing this memo must prevent.
+    ///
+    /// Keyed by the `env()` identity, not merely by name: see
+    /// [`Self::env_identity`]. What a class *is* — which members it has, which
+    /// extension declares it — is a property of the interrogated engine, so an
+    /// engine that changes underneath the run invalidates every answer taken from
+    /// the previous one rather than silently mixing two runtimes' class worlds.
+    /// Per-run memoization is the whole of the caching discipline in this slice;
+    /// cross-run persistence is M5's problem (issue #269).
+    ///
+    /// Engine-intrinsic, like `int_size` and `preg_refusal_memo`: what a resident
+    /// class *is* does not change with the project's declared target, so
+    /// [`Self::set_php_target`] does not drop it. The target gates absence claims,
+    /// and a declaration is not one.
+    class_reflect_memo: HashMap<String, Option<ClassReflection>>,
+    /// The `env()` identity the [`Self::class_reflect_memo`] entries were taken at:
+    /// PHP version plus the loaded-extension set, the two facts that determine which
+    /// classes exist and what they contain. `Some(None)` records "asked,
+    /// unanswerable". See [`Self::class_world_identity`].
+    env_identity: Option<Option<String>>,
+    /// The transport generation [`Self::env_identity`] was taken at — this memo's
+    /// own stamp, separate from `env_generation` (see `class_world_identity`).
+    class_env_generation: u32,
+    // end reflected class world (issue #269)
     /// The project's declared target PHP range (issue #28), when the layout
     /// resolved one. Set by the CLI after layout discovery; gates the absence
     /// family (the boot surface interrogated must be a declared-supported
@@ -1644,6 +1717,9 @@ impl<E: FoldEngine> EngineFolder<E> {
             param_counts_memo: HashMap::new(),
             preg_refusal_memo: HashMap::new(),
             boot_surface_const_memo: HashMap::new(),
+            class_reflect_memo: HashMap::new(),
+            env_identity: None,
+            class_env_generation: 0,
             php_target: None,
             env_generation: 0,
         }
@@ -1714,6 +1790,50 @@ impl<E: FoldEngine> EngineFolder<E> {
         self.int_size = None;
         self.boot_surface_label = None;
     }
+
+    // reflected class world (issue #269)
+
+    /// The `env()` identity the reflected class world is keyed by — PHP version
+    /// plus the loaded-extension set — re-taken when the transport has been
+    /// replaced, and **clearing [`Self::class_reflect_memo`] when it has changed**.
+    ///
+    /// Those two facts are exactly the two that determine the class world: which
+    /// classes are resident, and what each one contains. Keying on them is what
+    /// makes a changed runtime invalidate the answers rather than silently mixing
+    /// two engines' class worlds inside one run.
+    ///
+    /// An unanswerable `env()` is a *distinct* identity from any answered one, so
+    /// an answered memo is not carried across a window where the engine stopped
+    /// describing itself. This has its own generation stamp rather than riding
+    /// [`Self::refresh_env_memos`]: that helper drops its four memos on a bumped
+    /// generation, and here the point is precisely to *compare* the re-taken value
+    /// with the one the class memo holds.
+    fn class_world_identity(&mut self) -> Option<String> {
+        let generation = self.engine.restarts();
+        if let Some(cached) = &self.env_identity
+            && generation == self.class_env_generation
+        {
+            return cached.clone();
+        }
+        let taken = self.engine.env().map(|env| {
+            let mut extensions: Vec<String> =
+                env.extensions.iter().map(|e| e.to_ascii_lowercase()).collect();
+            // Sorted: `get_loaded_extensions()` reports load order, and a
+            // reordering is not a different runtime.
+            extensions.sort_unstable();
+            format!("{}|{}", env.php_version, extensions.join(","))
+        });
+        if let Some(previous) = &self.env_identity
+            && *previous != taken
+        {
+            self.class_reflect_memo.clear();
+        }
+        self.class_env_generation = generation;
+        self.env_identity = Some(taken.clone());
+        taken
+    }
+
+    // end reflected class world (issue #269)
 
     /// The engine's integer width in bytes (`PHP_INT_SIZE`), memoized like the
     /// other whole-run `env` answers. `None` = unanswerable, which every caller
@@ -1951,6 +2071,26 @@ impl<E: FoldEngine> Folder for EngineFolder<E> {
         answer
     }
     // end global constants (ADR-0078, issue #198)
+
+    // reflected class world (issue #269)
+    fn reflected_class(&mut self, fqn: &str) -> Option<ClassReflection> {
+        // Taken FIRST, on every query: it is what may clear the memo below, and a
+        // lookup that read a stale entry before the invalidation ran would be
+        // exactly the cross-runtime mixing the key exists to prevent.
+        //
+        // The identity is not otherwise consulted. A run with no answerable `env()`
+        // still asks — a live engine that cannot describe itself can still describe
+        // a class, and declining here would trade a real answer for a posture.
+        let _identity = self.class_world_identity();
+        let key = fqn.to_ascii_lowercase();
+        if let Some(cached) = self.class_reflect_memo.get(&key) {
+            return cached.clone();
+        }
+        let answer = self.engine.reflect_class(&key);
+        self.class_reflect_memo.insert(key, answer.clone());
+        answer
+    }
+    // end reflected class world (issue #269)
 
     fn php_minor(&mut self) -> Option<(u16, u16)> {
         self.refresh_env_memos();
@@ -2374,6 +2514,10 @@ impl FoldEngine for ProcessEngine {
         self.call(|sc| sc.reflect(target)).flatten()
     }
 
+    fn reflect_class(&mut self, target: &str) -> Option<ClassReflection> {
+        self.call(|sc| sc.reflect_class(target)).flatten()
+    }
+
     fn fold(&mut self, name: &str, args: &[FoldArg]) -> FoldResult {
         self.call(|sc| sc.fold(name, args)).unwrap_or_else(|| FoldResult::widen("no sidecar"))
     }
@@ -2509,6 +2653,11 @@ impl FoldEngine for TableEngine {
     fn reflect(&mut self, target: &str) -> Option<Reflection> {
         let answer = self.ask("reflect", &steins_sidecar::reflect_params(target))?;
         steins_sidecar::parse_reflection_result(&answer, target)
+    }
+
+    fn reflect_class(&mut self, target: &str) -> Option<ClassReflection> {
+        let answer = self.ask("reflect_class", &steins_sidecar::reflect_class_params(target))?;
+        steins_sidecar::parse_class_reflection_result(&answer, target)
     }
 
     fn fold(&mut self, name: &str, args: &[FoldArg]) -> FoldResult {

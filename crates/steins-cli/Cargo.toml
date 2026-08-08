@@ -20,6 +20,10 @@ name = "steins"
 path = "src/main.rs"
 
 [dependencies]
+# Doctor's reflected-class-world line (issue #269) asks the builtin catalog whether a
+# referenced class already has a row before putting it to the engine — the same
+# "catalog first, engine last" order the analysis uses.
+steins-catalog = { path = "../steins-catalog" }
 steins-db = { path = "../steins-db" }
 steins-infer = { path = "../steins-infer" }
 steins-syntax = { path = "../steins-syntax" }
