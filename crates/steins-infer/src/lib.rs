@@ -14239,6 +14239,28 @@ fn cmp_operand_candidates(
 ///
 /// The decision procedure is the condition path's, unchanged and unforked: the
 /// only new thing here is *where* it is asked from.
+///
+/// # Stratum: the undecided arm is Verified, the decided arms are derived
+///
+/// Owner ruling (2026-08-09), and the one place this rung departs from a flat
+/// reading of the derivation clause (ADR-0052 §5). The three verdicts do not make
+/// the same *kind* of claim, so they do not carry the same trust:
+///
+/// * `Maybe → bool` is a claim about the **operator**, not about either operand.
+///   A PHP comparison evaluates to a `bool` whatever it is handed — that is the
+///   language's guarantee, owed to nobody's docblock — and in this arm no operand
+///   refinement survived into the fact at all, so an inherited `Asserted` marker
+///   would be vestigial: it would record a premise the conclusion never used.
+///   **Verified, always**, exactly as ADR-0061 §3 floors its envelope.
+/// * `Yes → true` / `No → false` are claims about **which** bool, and that claim
+///   does rest on the operands: it is `eval_cmp`'s verdict over candidate values
+///   the declared arm lane may have supplied. These keep the operands' `min`
+///   stratum, so a lying `@param 1 $one` can still never launder into the proof
+///   lane.
+///
+/// The recall this buys is the point: a Verified `bool` may premise a proof-layer
+/// finding, so `$x = ($a === $b); f($x);` against `function f(int $i)` is now the
+/// definite No it always was, instead of a silence.
 #[allow(clippy::too_many_arguments)]
 fn eval_binary_fact(
     cx: &Cx<'_>,
@@ -14253,24 +14275,27 @@ fn eval_binary_fact(
     let ValueOp::Cmp(cop) = op;
     let l = cmp_operand_candidates(cx, folder, lhs, env, store, poisoned);
     let r = cmp_operand_candidates(cx, folder, rhs, env, store, poisoned);
-    // Derivation clause (ADR-0052 §5): the verdict consumes both operands' facts,
-    // so the result carries their `min` stratum. An operand with no candidates
+    // Derivation clause (ADR-0052 §5): a *decided* verdict consumes both operands'
+    // facts, so it carries their `min` stratum. An operand with no candidates
     // leaves the verdict undecided — never wrong — and contributes the stratum its
     // own value lane would.
-    let strat = l.as_ref().map_or_else(
-        || value_stratum(lhs, env, store),
-        |(_, s)| *s,
-    ).min(r.as_ref().map_or_else(|| value_stratum(rhs, env, store), |(_, s)| *s));
+    let derived = l
+        .as_ref()
+        .map_or_else(|| value_stratum(lhs, env, store), |(_, s)| *s)
+        .min(r.as_ref().map_or_else(|| value_stratum(rhs, env, store), |(_, s)| *s));
     let verdict = match (l, r) {
         (Some((l, _)), Some((r, _))) => eval_cmp(cop, &l, &r, cx.php_minor),
         _ => Certainty::Maybe,
     };
-    let fact = match verdict {
-        Certainty::Yes => Fact::Singleton(Val::Bool(true)),
-        Certainty::No => Fact::Singleton(Val::Bool(false)),
-        Certainty::Maybe => Fact::General { base: Base::Bool, nullable: false },
-    };
-    (fact, strat)
+    match verdict {
+        Certainty::Yes => (Fact::Singleton(Val::Bool(true)), derived),
+        Certainty::No => (Fact::Singleton(Val::Bool(false)), derived),
+        // The operator's own guarantee, premised on neither operand: Verified,
+        // whatever the operands' lanes were (see this function's doc comment).
+        Certainty::Maybe => {
+            (Fact::General { base: Base::Bool, nullable: false }, Stratum::Verified)
+        }
+    }
 }
 
 /// Is a `??` left operand proven **set and non-null**, so PHP's own evaluation

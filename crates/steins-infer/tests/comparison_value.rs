@@ -16,6 +16,13 @@
 //!    honest fact about the operator, not a guess about the operands. This is the
 //!    one claim the node makes that the condition path never had to make, and it
 //!    is why an unknown operand renders `bool` rather than `unknown`.
+//! 3. **The stratum split** (owner ruling 2026-08-09, ADR-0052 note). The three
+//!    verdicts do not carry the same trust, because they do not make the same kind
+//!    of claim. `Maybe → bool` is the *operator's* guarantee and consumed no
+//!    operand refinement, so it is **Verified always**; `Yes → true` / `No → false`
+//!    say **which** bool, which does rest on the operands, so they keep the
+//!    operands' `min` stratum. Both halves are pinned, from both sides, so a later
+//!    refactor cannot collapse them onto one stratum in either direction.
 //!
 //! Arithmetic, bitwise and logical operators still widen to `ArgValue::Other`:
 //! the node carries only what an evaluator answers (`unimplemented_operators_still_decline`).
@@ -101,16 +108,75 @@ fn a_declared_literal_operand_decides_and_stays_asserted() {
 #[test]
 fn a_union_operand_decides_only_when_every_pair_agrees() {
     // The ADR-0031 OneOf rule, unchanged: all member pairs agree → that verdict.
-    // The undecided one keeps the operands' `min` stratum too — the derivation
-    // clause is applied to all three verdicts rather than special-cased for the
-    // floor, which is the conservative reading (a marker is never an FP).
+    // The stratum split is the load-bearing half here (owner ruling 2026-08-09,
+    // ADR-0052 note): the *decided* verdict is a claim about WHICH bool, and that
+    // rests on the declared arms, so it stays `asserted`. The *undecided* one is a
+    // claim about the operator only — no operand refinement survived into it — so
+    // it is Verified, and carries no marker even though both operands are declared.
     let src = "<?php\n\
         /** @param 1|2 $i */\n\
         function f($i): void {\n\
             \\PHPStan\\dumpType($i === 3);\n\
             \\PHPStan\\dumpType($i === 1);\n\
         }\n";
-    assert_eq!(types(src), vec!["false (asserted)", "bool (asserted)"]);
+    assert_eq!(types(src), vec!["false (asserted)", "bool"]);
+}
+
+#[test]
+fn the_undecided_bool_is_verified_even_from_declared_operands() {
+    // The split pinned from the other side, so a refactor cannot collapse the two
+    // arms onto one stratum in either direction. Same two declared operands, one
+    // pair of dumps: the decided comparison keeps the declaration's trust, the
+    // undecided one does not inherit it.
+    let src = "<?php\n\
+        /**\n\
+         * @param 1 $one\n\
+         * @param 0|1 $bit\n\
+         */\n\
+        function f($one, $bit, string $s): void {\n\
+            \\PHPStan\\dumpType($one === 1);\n\
+            \\PHPStan\\dumpType($bit === 1);\n\
+            \\PHPStan\\dumpType($one === $s);\n\
+        }\n";
+    assert_eq!(types(src), vec!["true (asserted)", "bool", "bool"]);
+}
+
+/// Every `type.argument-mismatch` message in `src`, in source order.
+fn mismatches(src: &str) -> Vec<String> {
+    let tree = SourceTree::parse(src);
+    let functions = tree.functions().to_vec();
+    check(&tree, &functions, "test.php")
+        .into_iter()
+        .filter(|d| d.id == "type.argument-mismatch")
+        .map(|d| d.message)
+        .collect()
+}
+
+#[test]
+fn a_decided_comparison_over_declared_operands_stays_out_of_the_proof_lane() {
+    // The half of the ruling that protects the zero-FP bar. `$b` is `true` —
+    // decided — but decided *from* a declared arm, so it is Asserted, and the
+    // all-Verified premise rule (ADR-0052 §5) keeps it out of the native
+    // definite-No. A lying `@param 1 $one` must not be able to premise a finding.
+    let asserted = "<?php\n\
+        function f(\\DateTime $p): void {}\n\
+        /** @param 1 $one */\n\
+        function g($one): void {\n\
+            $b = ($one === 1);\n\
+            f($b);\n\
+        }\n";
+    assert_eq!(mismatches(asserted), Vec::<String>::new());
+
+    // Same shape with a *proven* operand: Verified, and the finding fires. The
+    // contrast is the point — the stratum, not the verdict, is what gates it.
+    let verified = "<?php\n\
+        function f(\\DateTime $p): void {}\n\
+        function g(): void {\n\
+            $one = 1;\n\
+            $b = ($one === 1);\n\
+            f($b);\n\
+        }\n";
+    assert_eq!(mismatches(verified).len(), 1, "{:?}", mismatches(verified));
 }
 
 #[test]
