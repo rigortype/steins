@@ -2218,6 +2218,29 @@ pub enum StmtKind {
     /// `mark_absent` on the base's shape. A multi-target `unset`, a dynamic key,
     /// and `unset($var)` itself all stay a plain `Barrier`.
     OffsetUnset { base: String, key: ArgValue },
+    /// `[$a, $b] = <source>;` / `list($a, $b) = <source>;` — an array-destructuring
+    /// assignment (issue #288).
+    ///
+    /// This is a [`Self::Barrier`] carrying one extra piece of information: the
+    /// **reads the source undergoes**. A destructure evaluates `<source>[k]` once
+    /// per target, exactly as a plain assignment-RHS read would, and PHP warns
+    /// `Undefined array key k` for every key that is not there. The targets are
+    /// *writes* and are not modeled — the walk still forgets the whole env and
+    /// store, as a barrier does — so this variant adds a read position and no
+    /// value lane at all.
+    ///
+    /// `reads` holds one **key path** per target, outermost key first, in source
+    /// order: `[$a, $b]` is `[[0], [1]]`, `['a' => $x]` is `[["a"]]`, and a nested
+    /// pattern `[[$a], $b]` recurses to `[[0], [0, 0], [1]]` — the outer read
+    /// happens too, and it is the one PHP warns about first. A skipped hole
+    /// (`[, $b]`) consumes its index without reading it, so it contributes no path.
+    /// `call` carries the full [`CallExpr`] when the source *is* a statically-named
+    /// call (`[$a, $b] = f();`), so the read judgment can reach its declared return.
+    ///
+    /// A pattern the lowering cannot read faithfully stays a plain [`Self::Barrier`]:
+    /// a by-reference target (`[&$a] = $m` aliases `$m[0]` into existence with no
+    /// warning — it is not a read), a spread, or a non-literal key.
+    Destructure { source: ArgValue, call: Option<CallExpr>, reads: Vec<Vec<ArgValue>>, span: Span },
     /// Any construct the trace does not model *and* whose write set it cannot
     /// bound (`goto`, labels, `declare`, `__halt_compiler`, and anything the
     /// lowering is unsure of). Erases all known values — the sound floor.
@@ -10323,6 +10346,103 @@ fn node_may_return(node: &Node<'_, '_>) -> bool {
     }
 }
 
+/// The **source reads** a destructuring assignment target performs (issue #288):
+/// one key path per target, outermost key first, in source order — see
+/// [`StmtKind::Destructure`]. `None` when `lhs` is not a destructuring pattern at
+/// all, or when it is one this lowering cannot read faithfully.
+///
+/// PHP's own key rule is the whole derivation: a positional element reads the next
+/// auto index (a skipped hole `[, $b]` consumes its index without reading it), a
+/// keyed element reads its own key, and a nested pattern reads the outer key AND
+/// everything beneath it. Mixing the two spellings is a compile-time fatal in PHP,
+/// so a mixed pattern is refused rather than given a key derivation no runtime
+/// would ever exercise.
+fn destructure_reads(lhs: &Expression<'_>) -> Option<Vec<Vec<ArgValue>>> {
+    let mut reads = Vec::new();
+    destructure_pattern_reads(lhs, &[], &mut reads)?;
+    // `[] = $x;` is a fatal, not a read — and a pattern of nothing but holes
+    // (`[, ,] = $x;`) reads nothing, so there is no read position to carry.
+    (!reads.is_empty()).then_some(reads)
+}
+
+/// Walk one destructuring pattern level, appending each target's key path to
+/// `out`. `Some(())` only for a pattern every element of which is faithfully
+/// readable; see [`destructure_reads`].
+fn destructure_pattern_reads(
+    pattern: &Expression<'_>,
+    prefix: &[ArgValue],
+    out: &mut Vec<Vec<ArgValue>>,
+) -> Option<()> {
+    // Issue #246: a nested pattern walks one frame per level.
+    if stack_guard::exhausted() {
+        return None;
+    }
+    let elements: Vec<&ArrayElement<'_>> = match pattern.unparenthesized() {
+        Expression::Array(a) => a.elements.iter().collect(),
+        Expression::LegacyArray(a) => a.elements.iter().collect(),
+        Expression::List(l) => l.elements.iter().collect(),
+        _ => return None,
+    };
+    let mut auto: i64 = 0;
+    let mut keyed = false;
+    let mut positional = false;
+    for element in elements {
+        let (key, value) = match element {
+            // A hole consumes its index and reads nothing (witnessed at 8.5.9:
+            // `[, $b] = [];` warns for key 1 only).
+            ArrayElement::Missing(_) => {
+                auto = auto.checked_add(1)?;
+                positional = true;
+                continue;
+            }
+            ArrayElement::Value(v) => {
+                let key = ArgValue::Int(auto);
+                auto = auto.checked_add(1)?;
+                positional = true;
+                (key, v.value)
+            }
+            ArrayElement::KeyValue(kv) => {
+                keyed = true;
+                (destructure_key(kv.key)?, kv.value)
+            }
+            // A spread is not a destructuring target spelling.
+            ArrayElement::Variadic(_) => return None,
+        };
+        if keyed && positional {
+            return None;
+        }
+        let mut path = prefix.to_vec();
+        path.push(key);
+        // A by-reference target aliases the offset into existence rather than
+        // reading it (`[&$a] = $m;` autovivifies `$m[0]` with no warning), so the
+        // whole pattern is refused instead of being read as something it is not.
+        if let Expression::UnaryPrefix(up) = value.unparenthesized()
+            && matches!(up.operator, UnaryPrefixOperator::Reference(_))
+        {
+            return None;
+        }
+        out.push(path.clone());
+        // A nested pattern reads the outer key (pushed above) and then recurses.
+        if matches!(
+            value.unparenthesized(),
+            Expression::Array(_) | Expression::LegacyArray(_) | Expression::List(_)
+        ) {
+            destructure_pattern_reads(value, &path, out)?;
+        }
+    }
+    Some(())
+}
+
+/// Lower a destructuring pattern's explicit key (`['a' => $x] = $m`) to the literal
+/// the read judgment canonicalizes; `None` for any key the lowering cannot prove
+/// (a variable, a call, a constant fetch), which refuses the whole pattern.
+fn destructure_key(key: &Expression<'_>) -> Option<ArgValue> {
+    match lower_arg_value(key) {
+        v @ (ArgValue::Int(_) | ArgValue::Str(_) | ArgValue::Bool(_) | ArgValue::Null) => Some(v),
+        _ => None,
+    }
+}
+
 /// Lower an expression-statement to a trace entry.
 fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
     match expr.unparenthesized() {
@@ -10357,6 +10477,17 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
                 let invalidated = call_invalidation(&Node::Expression(a.rhs));
                 let value = lower_arg_value(a.rhs);
                 Stmt::lowered(StmtKind::OffsetWrite { base, keys, value }, invalidated)
+            } else if a.operator.is_assign()
+                && let Some(reads) = destructure_reads(a.lhs)
+            {
+                // `[$a, $b] = <source>;` / `list($a, $b) = <source>;` (issue #288).
+                // Barrier semantics for the targets, plus the source's own reads —
+                // see `StmtKind::Destructure`.
+                let invalidated = call_invalidation(&Node::Expression(a.rhs));
+                let source = lower_arg_value(a.rhs);
+                let call = named_call(a.rhs);
+                let span = to_span(a.lhs.span());
+                Stmt::lowered(StmtKind::Destructure { source, call, reads, span }, invalidated)
             } else {
                 // Assignment to a non-simple lvalue (`$a[] = …`, `$a[$i] = …`,
                 // `$o->$p = …`, `$a->b->c = …`, `Foo::$s = …`). Barrier (the sound

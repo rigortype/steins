@@ -10188,6 +10188,19 @@ fn walk_trace(
             check_shape_read(cx, base, key, env, scope.poisoned, *span, out);
         }
 
+        // 1z-bis-a. The destructure source (issue #288), the third whitelisted read
+        // position: `[$a, $b] = $m;` / `list($a, $b) = $m;` reads `$m[0]`, `$m[1]`
+        // exactly as the assignment-RHS position reads `$m[0]`, and PHP warns per
+        // absent key. The targets are writes and stay silent (the audit note's
+        // G7(e)). Same pass, same pre-statement env, same two legs.
+        if descent.is_none()
+            && let StmtKind::Destructure { source, call, reads, span } = &stmt.kind
+        {
+            check_destructure_source(
+                w, folder, source, call.as_ref(), reads, env, store, *span, out,
+            );
+        }
+
         // 1z-bis. The `??` final arm (ADR-0062 S6, issue #51 §2). A coalesce operand
         // is a silence carrier for every arm the operator protects, but the RIGHT-MOST
         // arm is a plain read: it is the value whenever everything left of it fell
@@ -10385,6 +10398,15 @@ fn walk_trace(
         // 2. Apply the statement's own effect on the environment + compute its flow.
         let flow = match &stmt.kind {
             StmtKind::Barrier => {
+                env.clear();
+                store.clear();
+                Flow::FellThrough
+            }
+            // A destructuring assignment (issue #288) is a barrier that also names
+            // the reads its source undergoes. The reads were judged above (1z-bis-a,
+            // against the pre-statement env); the env effect is the barrier's, since
+            // the pattern's targets are writes this walk does not model.
+            StmtKind::Destructure { .. } => {
                 env.clear();
                 store.clear();
                 Flow::FellThrough
@@ -12191,6 +12213,7 @@ fn apply_assign(
                     } else if let Some(arms) = return_arms {
                         // Prefer arms captured at resolution (before this unbind),
                         // so method self-assign keeps the declared floor.
+                        seed_returned_shape(var, arms, line, env);
                         store.contract.insert(var.to_owned(), arms.to_vec());
                     } else if let Some(c) = call
                         && let Some(arms) = call_return_arms(
@@ -12203,6 +12226,7 @@ fn apply_assign(
                         )
                     {
                         // Fallback: free-function / non-self-assign paths.
+                        seed_returned_shape(var, &arms, line, env);
                         store.contract.insert(var.to_owned(), arms);
                     }
                 }
@@ -12213,6 +12237,35 @@ fn apply_assign(
     if let Some(arms) = copied_arms {
         store.contract.insert(var.to_owned(), arms);
     }
+}
+
+/// Seed the value lane of `$var = <call>;` with the callee's **declared return
+/// shape** (issue #288), the return-lane mirror of the parameter seeding the entry
+/// pass does with [`seed_shape_fact`].
+///
+/// The arm lane alone carried the array vocabulary across a return, and the arm lane
+/// is not what the abstract array stratum reads: every shape consumer (S3's read
+/// row, S4's guards, S6's strict leg) asks the VALUE lane for a [`Fact::Shape`]. So a
+/// `@return array<string, int>` reached the caller as a declared arm nobody could
+/// project a key out of, while the same declaration on a `@param` seeded a shape and
+/// every one of those consumers worked — the asymmetry issue #288 measured.
+///
+/// The seed is the same fact, from the same ONE lowering, at the same **`Asserted`**
+/// stratum the parameter seed enters at (A-G9's corollary: shape-derived facts never
+/// feed proof-layer findings), and it is written only into a value lane this
+/// assignment has already cleared — it can never overwrite a more precise fact,
+/// because every rung above this one returned before reaching here.
+fn seed_returned_shape(
+    var: &str,
+    arms: &[ContractArm],
+    line: u32,
+    env: &mut HashMap<String, Known>,
+) {
+    let Some(fact) = seed_shape_fact(arms) else { return };
+    env.insert(
+        var.to_owned(),
+        Known::value_strat(fact, line, Some("declared array shape".to_owned()), Stratum::Asserted),
+    );
 }
 
 /// The fact of a `??` chain (ADR-0052 §6, extended by ADR-0062 A-G11 / S5).
@@ -24309,20 +24362,32 @@ fn declared_receiver_id(arms: &[ContractArm]) -> &'static str {
 // objects, string bases, and any non-`Verified` fact (N2) are silent.
 //
 // **Read-context whitelist (A7).** The emitter is called ONLY from the whitelisted
-// read positions — a plain assignment-RHS and a return operand — in the plain
-// per-scope pass. Every silence context (`isset`/`??`/`array_key_exists`/`unset`,
-// write lvalues, by-ref/unresolved-callee argument positions, array elements) never
-// reaches here: `??` lowers its operand into an [`ArgValue::Coalesce`] (not a
-// top-level `OffsetRead`), a write lvalue never lowers to an `Assign`/`Return`
-// value, and `isset`/`unset`/`array_key_exists` are constructs/calls the lowering
-// keeps out of these value slots entirely.
+// read positions — a plain assignment-RHS, a return operand, and the SOURCE of a
+// destructuring assignment (issue #288) — in the plain per-scope pass. Every silence
+// context (`isset`/`??`/`array_key_exists`/`unset`, write lvalues, by-ref/
+// unresolved-callee argument positions, array elements) never reaches here: `??`
+// lowers its operand into an [`ArgValue::Coalesce`] (not a top-level `OffsetRead`),
+// a write lvalue never lowers to an `Assign`/`Return` value, and
+// `isset`/`unset`/`array_key_exists` are constructs/calls the lowering keeps out of
+// these value slots entirely.
+//
+// The destructure source was an **omission**, not a decision: `[$a, $b] = $m;` reads
+// `$m[0]` and `$m[1]` — witnessed at PHP 8.5.9, two `Undefined array key` warnings —
+// and the v1 deferral list below never named it, so nothing here had ever weighed it.
+// Its keys are PHP's own: positional for `[$a, $b]` / `list($a, $b)` (a hole `[, $b]`
+// consumes its index without reading it), explicit for `['a' => $x] = $m`, and a
+// nested pattern reads the outer key and recurses. The pattern's TARGETS remain
+// silent — they are write positions, and stay so (the ADR-0049/0052 soundness audit
+// note's G7(e)). See [`StmtKind::Destructure`] for the read derivation and
+// [`check_destructure_source`] for the judgment.
 //
 // v1 scope (deferred-with-comment, all safe silence): the Error-grade object case
 // (needs the ArrayAccess is-a surface), the TypeError string-key-on-string case,
 // string-base offset reads (in-range present / uninitialized-offset warning), the
 // call-argument read position (the by-ref / unresolved-callee autovivification risk,
-// A7), and the compound-assignment read half — none of which the current lowering
-// carries into `Assign`/`Return` value slots.
+// A7), the compound-assignment read half, and a destructure source read below the
+// first pattern level (an intermediate base no leg can resolve — the same silence a
+// chained `$m[0][1]` read has).
 // ---------------------------------------------------------------------------
 
 /// Severity grade of an offset finding (ADR-0049 §7 verified table). The
@@ -24719,8 +24784,22 @@ fn check_shape_read(
     let Some((shape, canon, _)) = shape_site_at(base, key, env, poisoned, cx.php_minor) else {
         return;
     };
-    let rendered = base.render();
-    match shape_read(shape, &canon) {
+    judge_shape_read(cx, shape, &canon, &base.render(), span, out);
+}
+
+/// The emitter half of [`check_shape_read`], taking the resolved site rather than
+/// deriving it — so a read position whose base is not a bare variable (the
+/// destructure source of issue #288, whose base may be the call expression itself)
+/// judges through exactly the same ladder and the same message discipline.
+fn judge_shape_read(
+    cx: &Cx,
+    shape: &ShapeFact,
+    canon: &VKey,
+    rendered: &str,
+    span: Span,
+    out: &mut Vec<Diagnostic>,
+) {
+    match shape_read(shape, canon) {
         // Proven present (declared Required, or promoted by an S4 guard / S5 cover),
         // or an unsealed tail's value (out of v1 scope): silent.
         ShapeRead::Present(_) | ShapeRead::Tail(_) => {}
@@ -24729,7 +24808,7 @@ fn check_shape_read(
             span,
             OFFSET_UNDECLARED_ID,
             OffsetGrade::Warning,
-            strict_leg_message("undeclared", &rendered, shape, &canon),
+            strict_leg_message("undeclared", rendered, shape, canon),
             out,
         ),
         // A plain read carries no `¬isset` premises — a discharged optional key is
@@ -24740,9 +24819,79 @@ fn check_shape_read(
             span,
             OFFSET_MAYBE_MISSING_ID,
             OffsetGrade::Warning,
-            strict_leg_message("maybe-missing", &rendered, shape, &canon),
+            strict_leg_message("maybe-missing", rendered, shape, canon),
             out,
         ),
+    }
+}
+
+/// Judge the source of a destructuring assignment `[$a, $b] = <source>;` as the
+/// read position it is (issue #288, the ADR-0049 §7 A7 whitelist extended).
+///
+/// Both legs run, exactly as they do at the assignment-RHS position: the proof leg
+/// ([`check_offset_read`]) on a `Verified` whole container, and the strict leg
+/// ([`judge_shape_read`]) on the declared shape. They stay disjoint by the same
+/// construction as everywhere else — the proof leg's operand gate takes `Verified`
+/// facts and a shape is `Asserted`.
+///
+/// Two source spellings carry a shape, and both are judged: a bare variable (its
+/// env fact) and a statically-named call (its declared-return arms, the ADR-0069
+/// floor — the value the caller is about to destructure). The call spelling is the
+/// one the plain-assignment position never needs, because there the value has been
+/// bound to a name first.
+///
+/// **Depth 1 only.** `reads` records the full key path of a nested pattern
+/// (`[[$a], $b]` reads `$m[0]`, `$m[0][0]`, `$m[1]`), because that is what PHP
+/// reads; a path below the first level names an intermediate base neither leg can
+/// resolve — the same silence a chained `$x = $m[0][1];` read already has — so it
+/// is skipped here rather than judged against a base nobody proved.
+#[allow(clippy::too_many_arguments)]
+fn check_destructure_source(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    source: &ArgValue,
+    call: Option<&CallExpr>,
+    reads: &[Vec<ArgValue>],
+    env: &HashMap<String, Known>,
+    store: &Store,
+    span: Span,
+    out: &mut Vec<Diagnostic>,
+) {
+    let cx = w.cx;
+    let poisoned = w.scope.poisoned;
+    // The call spelling's shape, resolved once for the whole pattern: a bare
+    // variable is `check_shape_read`'s own site resolution and is left to it.
+    let call_shape = match source {
+        ArgValue::Var(_) => None,
+        _ => call
+            .and_then(|c| {
+                call_return_arms(cx, c, store, w.this_exact, w.enclosing_class, poisoned)
+            })
+            .and_then(|arms| seed_shape_fact(&arms))
+            // A nullable declared return may be null, so no field is guaranteed —
+            // the same decline `shape_site_at` makes for a nullable base.
+            .and_then(|fact| match fact {
+                Fact::Shape { shape, nullable: false } => Some(*shape),
+                _ => None,
+            }),
+    };
+    for path in reads {
+        let [key] = path.as_slice() else { continue };
+        check_offset_read(cx, folder, source, key, env, poisoned, span, out);
+        match (&call_shape, source) {
+            (_, ArgValue::Var(_)) => check_shape_read(cx, source, key, env, poisoned, span, out),
+            (Some(shape), _) => {
+                // The key resolution is the offset family's own (A10), unchanged.
+                let Some(Fact::Singleton(key_val)) =
+                    offset_operand_fact(key, env, poisoned, cx.php_minor)
+                else {
+                    continue;
+                };
+                let Some(canon) = offset_key_of(&key_val) else { continue };
+                judge_shape_read(cx, shape, &canon, &source.render(), span, out);
+            }
+            (None, _) => {}
+        }
     }
 }
 
