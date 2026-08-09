@@ -179,8 +179,14 @@ deferral.
    value-modeling cluster, not a refusal.
 
 The remaining non-registered gaps stay the prioritized unimplemented queue:
-generic type-argument carry (ADR-0032) and callable signatures beyond the
-closure-variance arm. Native **object** acceptance — single classes, unions,
+generic type-argument carry (ADR-0032), callable signatures beyond the
+closure-variance arm, and — added when the suite grew past the cases this
+section was first written against — offset-read breadth, where a
+`[$a, $b] = $stringKeyed` destructure reads keys 0 and 1 that the container
+provably cannot carry and Steins stays silent because the ADR-0049 §7
+read-context whitelist admits only an assignment RHS and a return operand,
+and because the array lane does not carry a callee's returned array back to
+its caller (issue #12). Silence, not a wrong answer: the gap is reach. Native **object** acceptance — single classes, unions,
 enum cases, class constants, and now `A&B` **intersections** (the
 conjunctive `InstanceInter` member, ADR-0043) — has landed; the
 `instanceof` / offset-access / undefined-method finding kinds exist.
