@@ -577,6 +577,80 @@ fn scan_template_bound(text: &str, after_name: usize, line_end: usize) -> Option
     (!rest.is_empty()).then(|| rest.to_owned())
 }
 
+/// Whether `name` (the token right after the `@`) is an **inheritance-edge** tag:
+/// `extends` / `implements`, their `template-` spellings (`@template-extends`,
+/// `@template-implements`), each optionally carrying a `@phpstan-`/`@psalm-`
+/// precedence prefix (the ADR-0029 prefix rule).
+///
+/// Deliberately *not* folded into [`template_tag_variance`]: `@template-extends`
+/// declares no template name, and the scanner test that pins it as a non-template
+/// is what keeps the two families apart.
+fn is_inheritance_tag(name: &str) -> bool {
+    let bare = name
+        .strip_prefix("phpstan-")
+        .or_else(|| name.strip_prefix("psalm-"))
+        .unwrap_or(name);
+    matches!(
+        bare,
+        "extends" | "implements" | "template-extends" | "template-implements"
+    )
+}
+
+/// Scan a raw docblock for **inheritance-edge type arguments** — the `Box<int>` in
+/// `@extends Box<int>`, the `Producer<Dog>` in `@implements Producer<Dog>` — in
+/// source order (ADR-0032 amendment, issue #294).
+///
+/// The type argument written on an inheritance edge is a *phpdoc* fact, not a
+/// syntax one: nothing in PHP source carries `<int>`, so the class syntax node
+/// keeps its bare `extends`/`implements` name references and the parameterization
+/// is recovered here, from the class docblock, in the same pass shape as
+/// [`scan_template_decls`].
+///
+/// Each entry is the tag's raw tail (the docblock's closing `*/` cut, trimmed) —
+/// unparsed on purpose, exactly as [`TemplateDecl::bound`] is. The caller decides
+/// whether it parses as a type and in whose namespace its class name resolves; a
+/// tail that does not parse contributes nothing and its siblings are unaffected.
+#[must_use]
+pub fn scan_inheritance_args(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut line_start = 0usize;
+    while line_start <= bytes.len() {
+        let line_end = memchr(bytes, line_start, b'\n').unwrap_or(bytes.len());
+        if let Some(arg) = scan_inheritance_line(text, line_start, line_end) {
+            out.push(arg);
+        }
+        if line_end == bytes.len() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    out
+}
+
+fn scan_inheritance_line(text: &str, line_start: usize, line_end: usize) -> Option<String> {
+    let bytes = text.as_bytes();
+    let i = skip_gutter(bytes, line_start, line_end);
+    if i >= line_end || bytes[i] != b'@' {
+        return None;
+    }
+    let name_start = i + 1;
+    let mut j = name_start;
+    while j < line_end && (bytes[j].is_ascii_alphabetic() || bytes[j] == b'-') {
+        j += 1;
+    }
+    if !is_inheritance_tag(&text[name_start..j]) {
+        return None;
+    }
+    let mut rest = &text[j..line_end];
+    // A one-line docblock ends on the same line as its tag.
+    if let Some(cut) = rest.find("*/") {
+        rest = &rest[..cut];
+    }
+    let rest = rest.trim();
+    (!rest.is_empty()).then(|| rest.to_owned())
+}
+
 // ---------------------------------------------------------------------------
 // Magic-member tags: `@method` / `@property*` / `@mixin` / the `@phpstan-type`
 // pair (ADR-0049 A14, issue #195).
@@ -1230,6 +1304,54 @@ mod tests {
         assert!(scan_template_names("/** @param int $x */").is_empty());
         // `@template-extends`/`@extends` are class-relation tags, not declarations.
         assert!(scan_template_names("/** @template-extends Foo<int> */").is_empty());
+    }
+
+    // ---- Inheritance-edge type arguments (ADR-0032 amendment, issue #294) --
+
+    #[test]
+    fn scans_extends_and_implements_arguments() {
+        assert_eq!(scan_inheritance_args("/** @extends Box<int> */"), vec!["Box<int>"]);
+        assert_eq!(
+            scan_inheritance_args("/** @implements Producer<Dog> */"),
+            vec!["Producer<Dog>"]
+        );
+        // Both `@template-` spellings and both precedence prefixes reach the same
+        // edge (ADR-0029), and a nested argument survives verbatim.
+        assert_eq!(
+            scan_inheritance_args("/** @template-extends Box<list<int>> */"),
+            vec!["Box<list<int>>"]
+        );
+        assert_eq!(
+            scan_inheritance_args("/** @phpstan-implements Producer<Dog> */"),
+            vec!["Producer<Dog>"]
+        );
+        assert_eq!(
+            scan_inheritance_args("/** @psalm-template-implements Producer<Dog> */"),
+            vec!["Producer<Dog>"]
+        );
+    }
+
+    #[test]
+    fn scans_every_inheritance_edge_in_order() {
+        let doc = "/**\n * @extends Box<int>\n * @implements Producer<Dog>\n */";
+        assert_eq!(scan_inheritance_args(doc), vec!["Box<int>", "Producer<Dog>"]);
+    }
+
+    #[test]
+    fn ignores_non_inheritance_and_empty_edges() {
+        assert!(scan_inheritance_args("/** @template T */").is_empty());
+        assert!(scan_inheritance_args("/** @param Box<int> $b */").is_empty());
+        assert!(scan_inheritance_args("/** @extends */").is_empty());
+        // `@extended` is a different tag; the match is on the whole tag name.
+        assert!(scan_inheritance_args("/** @extendsomething Box<int> */").is_empty());
+    }
+
+    #[test]
+    fn an_unparameterized_edge_still_yields_its_tail() {
+        // The scanner recovers text, not meaning: a bare `@extends Box` is a
+        // well-formed tag with no type arguments, and the caller's parse decides
+        // that it carries none.
+        assert_eq!(scan_inheritance_args("/** @extends Box */"), vec!["Box"]);
     }
 
     // ---- Magic-member tags (ADR-0049 A14, issue #195) ----------------------

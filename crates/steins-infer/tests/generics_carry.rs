@@ -320,3 +320,190 @@ fn bound_does_not_leak_past_its_declaration() {
         (new Outer())->m('x');";
     assert_eq!(param_count(redeclared), 0, "the member's own unbounded T wins");
 }
+
+// 5. Type arguments on INHERITANCE EDGES (ADR-0032 amendment, issue #294).
+//
+// `@extends Box<int>` parameterizes an ancestor, so the carry names the class that
+// *declares* the templates rather than the object's own class. Variance gates every
+// verdict: a covariant/contravariant position answers `Maybe`, because Steins models
+// neither direction and an invariant reading there convicts correct code.
+
+/// `generics_extends_implements`: a template-free subclass documenting
+/// `@extends Box<int>` behaves as `Box<int>` at call sites — accepted where
+/// `Box<int>` is required, rejected where `Box<string>` is.
+#[test]
+fn extends_edge_parameterizes_the_ancestor() {
+    let base = "<?php\n\
+        /** @template T */\n\
+        class Box {\n\
+            /** @param T $value */\n\
+            public function __construct(public mixed $value) {}\n\
+        }\n\
+        /** @extends Box<int> */\n\
+        final class IntBox extends Box {\n\
+            public function __construct(int $value) { parent::__construct($value); }\n\
+        }\n\
+        /** @param Box<int> $box */\n\
+        function takesIntBox(Box $box): void {}\n\
+        /** @param Box<string> $box */\n\
+        function takesStringBox(Box $box): void {}\n";
+    assert_eq!(
+        param_count(&format!("{base}takesIntBox(new IntBox(1));")),
+        0,
+        "IntBox is a Box<int>",
+    );
+    assert_eq!(
+        param_count(&format!("{base}takesStringBox(new IntBox(1));")),
+        1,
+        "Box<int> does not satisfy Box<string>",
+    );
+}
+
+/// `@implements Producer<int>` reads the same way as `@extends`, through an
+/// interface edge — and an *invariant* interface template does reach a verdict.
+#[test]
+fn implements_edge_parameterizes_the_interface() {
+    let base = "<?php\n\
+        /** @template T */\n\
+        interface Producer { /** @return T */ public function get(): mixed; }\n\
+        /** @implements Producer<int> */\n\
+        final class IntProducer implements Producer {\n\
+            public function get(): int { return 1; }\n\
+        }\n\
+        /** @param Producer<string> $p */\n\
+        function takesStringProducer(Producer $p): void {}\n";
+    assert_eq!(
+        param_count(&format!("{base}takesStringProducer(new IntProducer());")),
+        1,
+        "Producer<int> does not satisfy Producer<string>",
+    );
+}
+
+/// **The variance regression pins** — the two conformance cases that pass today
+/// *because* the carry was absent, and would become false positives under an
+/// invariant reading of the edge.
+#[test]
+fn covariant_and_contravariant_positions_stay_silent() {
+    // `generics_template_covariant`: Dog producer where an Animal producer is
+    // required. Correct code under `@template-covariant`.
+    let covariant = "<?php\n\
+        class Animal {}\n\
+        class Dog extends Animal {}\n\
+        /** @template-covariant T */\n\
+        interface Producer { /** @return T */ public function get(): mixed; }\n\
+        /** @implements Producer<Dog> */\n\
+        final class DogProducer implements Producer {\n\
+            public function get(): Dog { return new Dog(); }\n\
+        }\n\
+        /** @param Producer<Animal> $producer */\n\
+        function takesAnimalProducer(Producer $producer): void {}\n\
+        takesAnimalProducer(new DogProducer());";
+    assert_eq!(param_count(covariant), 0, "a covariant position never reaches a verdict");
+    // The same edge against a *disjoint* argument is still silent: the gate is the
+    // variance marker, not the arguments' relationship.
+    let covariant_disjoint = "<?php\n\
+        class Animal {}\n\
+        class Dog extends Animal {}\n\
+        /** @template-covariant T */\n\
+        interface Producer { /** @return T */ public function get(): mixed; }\n\
+        /** @implements Producer<Dog> */\n\
+        final class DogProducer implements Producer {\n\
+            public function get(): Dog { return new Dog(); }\n\
+        }\n\
+        /** @param Producer<int> $producer */\n\
+        function takesIntProducer(Producer $producer): void {}\n\
+        takesIntProducer(new DogProducer());";
+    assert_eq!(param_count(covariant_disjoint), 0, "variance gates before the comparison");
+    // `generics_template_contravariant`: a consumer of Animal standing in for a
+    // consumer of Dog.
+    let contravariant = "<?php\n\
+        class Animal {}\n\
+        class Dog extends Animal {}\n\
+        /** @template-contravariant T */\n\
+        interface Consumer { /** @param T $value */ public function consume($value): void; }\n\
+        /** @implements Consumer<Animal> */\n\
+        final class AnimalConsumer implements Consumer {\n\
+            public function consume($value): void {}\n\
+        }\n\
+        /** @param Consumer<Dog> $consumer */\n\
+        function takesDogConsumer(Consumer $consumer): void {}\n\
+        takesDogConsumer(new AnimalConsumer());";
+    assert_eq!(param_count(contravariant), 0, "a contravariant position never reaches a verdict");
+}
+
+/// A subclass that declares its **own** `@template` is unaffected: the value carry
+/// wins and the edge is never read (it may mention that very template).
+#[test]
+fn own_templates_win_over_the_edge() {
+    let src = "<?php\n\
+        /** @template T */\n\
+        class Box { /** @param T $value */ public function __construct(public mixed $value) {} }\n\
+        /** @template T\n * @extends Box<T> */\n\
+        final class SubBox extends Box {\n\
+            /** @param T $value */\n\
+            public function __construct(public mixed $value) { parent::__construct($value); }\n\
+        }\n\
+        /** @param SubBox<int> $b */\n\
+        function f(SubBox $b): void {}\n";
+    assert_eq!(
+        param_count(&format!("{src}f(new SubBox('x'));")),
+        1,
+        "the subclass's own value carry judges its own templates",
+    );
+    // And the edge's `T` is never lowered as a class named `T`: a `Box<int>`
+    // spelling over the same object stays silent rather than manufacturing a `No`.
+    assert_eq!(
+        param_count(&format!(
+            "{src}/** @param Box<int> $b */\nfunction g(Box $b): void {{}}\ng(new SubBox('x'));"
+        )),
+        0,
+        "no ancestor edge is read from a class with its own templates",
+    );
+}
+
+/// Adversarial edges, all silent: an edge naming a class the object is not, an
+/// arity disagreement between the edge and the ancestor's templates, an
+/// unparameterized `@extends`, and an argument naming an unresolvable identifier
+/// (which may be a `@phpstan-type` alias denoting a scalar).
+#[test]
+fn adversarial_edges_stay_silent() {
+    let ancestor = "<?php\n\
+        /** @template T */\n\
+        class Box { public function __construct() {} }\n";
+    // The edge names a class this object does not extend.
+    let wrong_owner = format!(
+        "{ancestor}/** @extends Box<int> */\n\
+         final class NotABox {{ public function __construct() {{}} }}\n\
+         /** @param Box<string> $b */\n\
+         function f($b): void {{}}\n\
+         f(new NotABox());"
+    );
+    assert_eq!(param_count(&wrong_owner), 0, "an edge to a non-ancestor says nothing");
+    // Edge writes two arguments, the ancestor declares one.
+    let arity = format!(
+        "{ancestor}/** @extends Box<int, string> */\n\
+         final class Weird extends Box {{ public function __construct() {{}} }}\n\
+         /** @param Box<string> $b */\n\
+         function f(Box $b): void {{}}\n\
+         f(new Weird());"
+    );
+    assert_eq!(param_count(&arity), 0, "edge/template arity disagreement stays a thin lint");
+    // A bare `@extends Box` carries no arguments.
+    let bare = format!(
+        "{ancestor}/** @extends Box */\n\
+         final class Plain extends Box {{ public function __construct() {{}} }}\n\
+         /** @param Box<string> $b */\n\
+         function f(Box $b): void {{}}\n\
+         f(new Plain());"
+    );
+    assert_eq!(param_count(&bare), 0, "an unparameterized edge carries nothing");
+    // An unresolvable argument identifier may be a type alias denoting a scalar.
+    let alias = format!(
+        "{ancestor}/** @extends Box<SomeAlias> */\n\
+         final class AliasBox extends Box {{ public function __construct() {{}} }}\n\
+         /** @param Box<string> $b */\n\
+         function f(Box $b): void {{}}\n\
+         f(new AliasBox());"
+    );
+    assert_eq!(param_count(&alias), 0, "an unknown class name in an edge → Maybe");
+}

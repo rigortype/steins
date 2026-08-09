@@ -657,7 +657,21 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //
     // Nothing else moved: proof layer 0, `throw.*` 44107 = baseline,
     // possibly-grade 150 = baseline, every OSS package byte-identical.
-    ("pxxxx-monorepo", 528),
+    //
+    // **528 -> 526 (-2), 2026-08-09, and the corpus owner did this, not the
+    // analyzer.** The +15 entry above named one site as a genuine defect
+    // rather than a loose annotation — a constant asserted as holding
+    // strings at one call site and ints at its sibling — and predicted that
+    // fixing it upstream would take two findings with it. It was fixed, and
+    // exactly two went. The prediction landing on the nose is the reason
+    // this reseed is a one-line edit rather than a re-triage: the remaining
+    // 526 are the same rows, read at source, that the entry above records.
+    //
+    // A drop never trips the tripwire, so this buys no alarm. It buys the
+    // entry back its meaning, which is the whole argument of the 2026-08-09
+    // reseed two entries up: a baseline above the truth swallows exactly
+    // that many real regressions in silence.
+    ("pxxxx-monorepo", 526),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).

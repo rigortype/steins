@@ -73,6 +73,7 @@ pub use steins_syntax::{BodyEnd, body_end, body_has_terminator};
 use steins_syntax::RetHintKind;
 // end return missing (ADR-0078, issue #199)
 
+use steins_phpdoc::Variance;
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, StringLit, TypeKind as PKind};
 use steins_phpdoc::{
     AssertKind, DocTag, MagicTagKind, TagKind, Type as PType, parse_type, scan_docblock,
@@ -8101,6 +8102,101 @@ impl<'a> Cx<'a> {
                 return empty;
             };
             out.push(cv);
+        }
+        out
+    }
+
+    /// Whether `class_fqn` declares any class-level `@template` of its own.
+    fn declares_templates(&self, class_fqn: &str) -> bool {
+        self.find_class(class_fqn).is_some_and(|(_, cd)| {
+            cd.docblock
+                .as_deref()
+                .is_some_and(|d| !steins_phpdoc::scan_template_names(d).is_empty())
+        })
+    }
+
+    /// The class-level generic parameterizations a `new Class(args)` expression
+    /// carries (ADR-0032 tier 3 + its inheritance-edge amendment, issues #10/#294).
+    ///
+    /// Two provenances, in a fixed precedence:
+    ///
+    /// 1. **Own templates** — the class declares `@template`s and the `new` site
+    ///    proves values for them ([`Self::infer_generic_args`]). One edge owned by
+    ///    the class itself. A class that declares its own templates stops here even
+    ///    when the value carry comes back empty: its inheritance edges may mention
+    ///    those very templates, and a value is the stronger fact whenever there is
+    ///    one (amendment, "own templates win").
+    /// 2. **Inheritance edges** — the class declares no templates, so `@extends
+    ///    Box<int>` / `@implements Producer<Dog>` on its own docblock name an
+    ///    *ancestor's* parameterization. One edge per parameterized tag, owned by the
+    ///    ancestor. Read one level only: following the chain up through a generic
+    ///    intermediate is a substitution problem this slice does not build.
+    ///
+    /// An edge is kept only when its base resolves to a class that (a) the object
+    /// provably is-a and (b) declares exactly as many `@template`s as the tag writes
+    /// arguments. Anything else is dropped silently — an arity disagreement is a
+    /// library-author lint, which ADR-0032 keeps thin.
+    fn infer_generic_carry(
+        &self,
+        class_fqn: &str,
+        args: &[ArgValue],
+        env: &HashMap<String, Known>,
+        store: &Store,
+        poisoned: bool,
+        folder: &mut dyn Folder,
+    ) -> Vec<GenericCarry> {
+        if self.declares_templates(class_fqn) {
+            let vals = self.infer_generic_args(class_fqn, args, env, store, poisoned, folder);
+            if vals.is_empty() {
+                return Vec::new();
+            }
+            return vec![GenericCarry {
+                owner: class_fqn.to_owned(),
+                args: vals.into_iter().map(CArg::Val).collect(),
+                site: None,
+            }];
+        }
+        self.inheritance_edges(class_fqn)
+    }
+
+    /// The parameterized inheritance edges declared on `class_fqn`'s own docblock,
+    /// as owner-keyed carries (ADR-0032 amendment, issue #294). Empty for a class
+    /// with no docblock, no such tag, or no tag that survives the checks above.
+    fn inheritance_edges(&self, class_fqn: &str) -> Vec<GenericCarry> {
+        let Some((file, cd)) = self.find_class(class_fqn) else { return Vec::new() };
+        let Some(doc) = cd.docblock.as_deref() else { return Vec::new() };
+        let coff = cd.span.start;
+        let mut out = Vec::new();
+        for tail in steins_phpdoc::scan_inheritance_args(doc) {
+            // The tag's tail is raw text; a trailing description is tolerated (the
+            // parser reports a consumed prefix), an unparseable one contributes
+            // nothing and its siblings are unaffected (ADR-0029).
+            let Ok(parsed) = steins_phpdoc::parse_type(&tail) else { continue };
+            let PKind::Generic { base, args } = &parsed.ty.kind else { continue };
+            if args.is_empty() {
+                continue;
+            }
+            let owner = self.resolve_pclass(file, coff, base);
+            // The edge must name a real ancestor: an `@extends` that disagrees with
+            // the `extends` in source says nothing trustworthy about this object.
+            if self.is_a(class_fqn, &owner) != IsA::Yes {
+                continue;
+            }
+            // Positional alignment is only sound against the owner's own template
+            // list — same all-or-nothing rule the value carry follows.
+            let declared = self
+                .find_class(&owner)
+                .and_then(|(_, od)| od.docblock.as_deref())
+                .map(steins_phpdoc::scan_template_names)
+                .unwrap_or_default();
+            if declared.len() != args.len() {
+                continue;
+            }
+            out.push(GenericCarry {
+                owner,
+                args: args.iter().map(|a| CArg::Ty(steins_contract::lower(&a.ty))).collect(),
+                site: Some((file, coff)),
+            });
         }
         out
     }
@@ -26685,17 +26781,52 @@ use Certainty as Tri;
 /// A proven value in contract terms: a scalar literal, an array of proven values
 /// (normalized keys), or an object of an exact class (a `New` fact).
 ///
-/// An object additionally carries its **class-level generic type-argument values**
-/// (ADR-0032 tier 3, issue #10): the per-`@template` values that flowed into the
-/// object at its `new` site (tier-1 propagation), in template-declaration order.
-/// The vector is empty when the class is non-generic, or when the arguments could
-/// not be proven — an empty carry is the honest floor (acceptance then answers
-/// `Maybe` on the argument half, never a manufactured `No`). These live in the
-/// contract lane, not the object-free value lattice (ADR-0035/0043 §4).
+/// An object additionally carries its **class-level generic type arguments**
+/// (ADR-0032 tier 3, issue #10, extended by the ADR-0032 inheritance-edge
+/// amendment / issue #294): a set of [`GenericCarry`] edges, each naming the class
+/// that *declares* the templates its arguments align to. The vector is empty when
+/// the class is non-generic and documents no parameterized inheritance edge, or
+/// when nothing could be proven — an empty carry is the honest floor (acceptance
+/// then answers `Maybe` on the argument half, never a manufactured `No`). These
+/// live in the contract lane, not the object-free value lattice (ADR-0035/0043 §4).
 enum CVal {
     Scalar(ArgValue),
     Array(Vec<(NormKey, CVal)>),
-    Object(String, Vec<CVal>),
+    Object(String, Vec<GenericCarry>),
+}
+
+/// One class-level generic parameterization an object carries: the FQN of the class
+/// that **declares** the templates, plus one argument per declared template in
+/// declaration order (ADR-0032 amendment, issue #294).
+///
+/// Naming the owner is what makes the carry survive inheritance. Stage 1's carry was
+/// a bare positional vector, implicitly aligned to the object's *own* class; that
+/// assumption breaks the moment `final class IntBox extends Box` documents
+/// `@extends Box<int>`, because the object is an `IntBox` and the templates are
+/// `Box`'s. Acceptance therefore looks up the edge whose owner **is** the class the
+/// contract names, and stays silent when no edge matches — never comparing one
+/// class's arguments against another's parameters.
+struct GenericCarry {
+    /// The class declaring the `@template`s `args` aligns to (resolved FQN).
+    owner: String,
+    /// One argument per declared template, in declaration order.
+    args: Vec<CArg>,
+    /// The file whose namespace/`use` scope the argument *types* were written in,
+    /// with the offset that picks it — `None` for a value carry, which needs no
+    /// resolution context. Class names inside a [`CArg::Ty`] are resolved here.
+    site: Option<(usize, u32)>,
+}
+
+/// One carried type argument. Two provenances, because the two facts differ in
+/// kind: a `new` site proves a **value** flowed in (ADR-0032 tier-1 propagation
+/// feeding tier 3), whereas an inheritance edge states a **type** the author wrote.
+enum CArg {
+    /// A proven value from the `new` site (`new Box('x')` → `'x'`).
+    Val(CVal),
+    /// A type written on an inheritance edge (`@extends Box<int>` → `int`), lowered
+    /// but with its class names still spelled as written (resolved against
+    /// [`GenericCarry::site`] at the point of use).
+    Ty(steins_contract::ContractTy),
 }
 
 /// The `@param`/`@return` phpdoc envelopes parsed off one declaration's docblock.
@@ -27044,12 +27175,15 @@ impl<'a> Cx<'a> {
         match value {
             v if v.is_literal() => Some(CVal::Scalar(v.clone())),
             // `new Class(args)` — a proven object of exactly `Class`, carrying the
-            // generic type-argument values that flow into it (ADR-0032 tier 3,
-            // issue #10). Empty carry when non-generic / unprovable (FP-safe).
+            // generic parameterizations it can prove: the type-argument values that
+            // flow into it (ADR-0032 tier 3, issue #10) or, for a template-free
+            // class, the ancestor parameterization its `@extends`/`@implements`
+            // documents (ADR-0032 amendment, issue #294). Empty carry when
+            // non-generic / unprovable (FP-safe).
             ArgValue::New(class_ref, args, _) if !poisoned => {
                 let class = self.class_fqn(class_ref);
-                let targs = self.infer_generic_args(&class, args, env, store, poisoned, folder);
-                Some(CVal::Object(class, targs))
+                let carry = self.infer_generic_carry(&class, args, env, store, poisoned, folder);
+                Some(CVal::Object(class, carry))
             }
             // ADR-0043 stage 4: an enum case is an object value of its enum class,
             // so it can ride the is-a oracle against enum/interface phpdoc contracts.
@@ -27847,21 +27981,26 @@ fn accepts_generic(
 }
 
 /// Acceptance of a value against a class-level generic contract `Class<A, …>`
-/// (ADR-0032 tier 3, issue #10). The class half rides the trinary is-a oracle
-/// exactly as the bare-class identifier path; the argument half judges ONLY when
-/// the object carries provable, arity-matched per-position type-argument values
-/// (from `new`-site propagation — see [`Cx::infer_generic_args`]).
+/// (ADR-0032 tier 3, issue #10; inheritance edges by the ADR-0032 amendment, issue
+/// #294). The class half rides the trinary is-a oracle exactly as the bare-class
+/// identifier path; the argument half judges ONLY through the carried edge whose
+/// **owner is the class the contract names** — the object's own class when it
+/// declares the templates, an ancestor when `@extends Box<int>` does.
 ///
-/// Honesty bounds (zero-FP, stage 1):
+/// Honesty bounds (zero-FP):
 /// - A **non-object** value is silent (`Maybe`): the bare-class identifier path
 ///   owns scalar-vs-class `No`; a *generic* spelling never manufactures it here.
 /// - The class half only **gates**: a `No`/`Unknown` is-a answers `Maybe`, never a
 ///   manufactured `No` — generic-class *class-mismatch* reporting is deferred, so
 ///   the sole `No` this arm yields comes from a provable **argument-half** violation
 ///   on an object that **is** the required class.
-/// - An **empty** carry or an **arity mismatch** between declared arguments and
-///   carried values answers `Maybe` (no provable knowledge / library-author
+/// - **No matching edge** (an empty carry, or one owned by a different class) or an
+///   **arity mismatch** answers `Maybe` (no provable knowledge / library-author
 ///   inconsistency stays a thin lint, per ADR-0032).
+/// - A **non-invariant** template position answers `Maybe` whatever its argument
+///   says. Steins models neither variance direction, and reading a
+///   `@template-covariant` position invariantly convicts correct code — a false
+///   positive, not a miss. See [`template_variances`].
 fn accepts_class_generic(
     cx: &Cx,
     cfile: usize,
@@ -27870,24 +28009,105 @@ fn accepts_class_generic(
     args: &[steins_phpdoc::ast::GenericArg],
     v: &CVal,
 ) -> Tri {
-    let CVal::Object(obj_class, targs) = v else { return Tri::Maybe };
+    let CVal::Object(obj_class, carries) = v else { return Tri::Maybe };
     let target = cx.resolve_pclass(cfile, coff, base);
     // Class half: proceed only on a proven is-a; otherwise stay silent.
     if cx.is_a(obj_class, &target) != IsA::Yes {
         return Tri::Maybe;
     }
-    // Argument half: needs provable, arity-matched per-position knowledge.
-    if targs.is_empty() || targs.len() != args.len() {
+    // Argument half: the edge that speaks about THIS class's templates, if any.
+    let Some(carry) = carries.iter().find(|c| class_key(&c.owner) == class_key(&target)) else {
+        return Tri::Maybe;
+    };
+    if carry.args.len() != args.len() {
         return Tri::Maybe;
     }
+    let variances = template_variances(cx, &carry.owner);
     let mut r = Tri::Yes;
-    for (declared, actual) in args.iter().zip(targs.iter()) {
-        r = combine(r, accepts(cx, cfile, coff, &declared.ty, actual));
+    for (i, (declared, actual)) in args.iter().zip(carry.args.iter()).enumerate() {
+        // Variance gates before the comparison, not after it.
+        if variances.get(i).copied().unwrap_or_default() != Variance::Invariant {
+            r = combine(r, Tri::Maybe);
+            continue;
+        }
+        let one = match actual {
+            CArg::Val(cv) => accepts(cx, cfile, coff, &declared.ty, cv),
+            CArg::Ty(cty) => accepts_carried_ty(cx, carry.site, &declared.ty, cty),
+        };
+        r = combine(r, one);
         if r == Tri::No {
             return Tri::No;
         }
     }
     r
+}
+
+/// The FQN comparison key for a class name: case-insensitive (PHP class names are),
+/// leading `\` insignificant.
+fn class_key(fqn: &str) -> String {
+    fqn.trim_start_matches('\\').to_ascii_lowercase()
+}
+
+/// The declared variance of each class-level `@template` of `owner`, in declaration
+/// order. Empty when the class is unresolvable or declares none — and an absent
+/// entry reads as [`Variance::Invariant`], which is the only reading that can
+/// produce a verdict, so the arity checks upstream carry the weight.
+fn template_variances(cx: &Cx, owner: &str) -> Vec<Variance> {
+    cx.find_class(owner)
+        .and_then(|(_, cd)| cd.docblock.as_deref())
+        .map(steins_phpdoc::scan_template_decls)
+        .unwrap_or_default()
+        .iter()
+        .map(|d| d.variance)
+        .collect()
+}
+
+/// Judge a **declared** type argument against a **carried type** one — the
+/// type-vs-type face of the argument half, reached only from an inheritance edge
+/// (ADR-0032 amendment, issue #294).
+///
+/// It delegates to [`steins_contract::subsumes`], the relation that already answers
+/// "does every inhabitant of `b` inhabit `a`" (ADR-0071 §2.1); no second relation is
+/// introduced. Two gates keep it FP-safe beyond what `subsumes` guarantees on its
+/// own:
+///
+/// - A carried type mentioning an **unresolvable class name** stays silent. A bare
+///   identifier the project does not declare may be a `@phpstan-type` alias
+///   denoting a scalar, and `subsumes(int, Class("Alias"))` would then be a
+///   manufactured `No`. This is the same `is_known_class` safety valve
+///   [`accepts_class_name`] applies, for the same reason.
+/// - The verdict is the relation's own trinary. `subsumes` carries no class
+///   hierarchy, so a cross-class position answers `Maybe` — generic class-half
+///   reporting stays deferred here exactly as it is above.
+fn accepts_carried_ty(
+    cx: &Cx,
+    site: Option<(usize, u32)>,
+    declared: &PType,
+    carried: &steins_contract::ContractTy,
+) -> Tri {
+    let Some((file, off)) = site else { return Tri::Maybe };
+    if names_unknown_class(cx, file, off, carried) {
+        return Tri::Maybe;
+    }
+    steins_contract::normalize::subsumes(&steins_contract::lower(declared), carried)
+}
+
+/// Whether `cty` mentions a class name that resolves to no known class in the
+/// docblock's own file context — the silence gate of [`accepts_carried_ty`].
+fn names_unknown_class(cx: &Cx, file: usize, off: u32, cty: &steins_contract::ContractTy) -> bool {
+    use steins_contract::ContractTy as C;
+    match cty {
+        C::Class(n) => !cx.is_known_class(&cx.resolve_pclass(file, off, n)),
+        C::Union(ms) | C::Inter(ms) => ms.iter().any(|m| names_unknown_class(cx, file, off, m)),
+        C::ListOf { elem, .. } => names_unknown_class(cx, file, off, elem),
+        C::MapOf { key, val, .. } => {
+            names_unknown_class(cx, file, off, key) || names_unknown_class(cx, file, off, val)
+        }
+        C::IterableOf { key, val } => {
+            names_unknown_class(cx, file, off, key) || names_unknown_class(cx, file, off, val)
+        }
+        _ => false,
+    }
 }
 
 /// Membership for an `array`/`list` generic (per phpstan#14939): a value is a list
