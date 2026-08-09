@@ -181,8 +181,31 @@ conditions, each corpus-triaged before its id ships.
 Exit criteria:
 
 - Every php-typing-conformance fail is a registered divergence
-  (ADR-0030) — zero absent-machinery fails. (From 85/98; the ceiling
-  is set by intentional entries, expected ≥ 93/98.)
+  (ADR-0030) — zero absent-machinery fails. **Not met today.** The
+  suite has grown to 214 automated cases and Steins passes 206 of them
+  (measured 2026-08-09); the two halves of the criterion now part
+  company. Three fails are registered standing refusals and are as
+  closed as they will ever be: `phpdoc_advanced_vendor_prefixed_param_phan`
+  (ADR-0030 conformance entry 1, tool-tag scope) and the two
+  declaration-coherence cases,
+  `phpdoc_advanced_param_typehint_nullable_mismatch` and its
+  `…_array_nullable_mismatch` variant (entry 2, a refusal PHPStan
+  shares). The other five are absent machinery, which is what the
+  criterion actually gates on, and they name exactly three capabilities:
+  generic type-argument carry and template-bound checking (ADR-0032,
+  issue #10, gap 3) for `generics_extends_implements`,
+  `generics_template_bound_array` and `assertions_this_out_self_out` —
+  the last of which fails on the generics expectation, not on the
+  `@…-self-out` tag its name advertises; offset-read breadth (ADR-0049
+  §7's read-context whitelist reaching an array-destructuring source,
+  and the array lane carrying a callee's returned array back to its
+  caller — issue #12) for `regressions_list_destructure_string_key`;
+  and a `resource` value domain for `native_types_resource_argument`,
+  the one absent-machinery fail already registered, as the honest
+  deferral in entry 4. No fail is an unregistered intentional
+  divergence, and none is a defect — every one is a silence, not a
+  wrong answer. The criterion closes when those three capabilities
+  land; the ceiling is then 211/214, set by the three refusals.
 - fp-gate green over the full corpus; every tripwire movement triaged
   verbatim (5-sample minimum per class).
 - Issue #5 (the template-shadow FP) closed. Issues #1–4 (the template
