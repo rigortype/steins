@@ -907,12 +907,14 @@ rather than left as implementation residue.** Each stays exactly as implemented:
   means the key was *observed*; a count comparison is arithmetic evidence about
   how many entries exist, so the presence it forces is derived, not seen. A
   consumer that needs an observation must keep asking for one.
-* **A count guard does not clear `nullable`.** `count(null)` raises a TypeError
-  rather than answering, and this lane reads a TypeError the way
-  `array_key_exists` on a null base is already read: the comparison having
-  produced a value is not something the fact lane may record as proof of
-  non-nullness. Narrowing it here would be a reachability argument in a
-  narrowing operator's clothing (§2), so the conservative reading stands.
+* ~~A count guard does not clear `nullable`.~~ **Superseded 2026-08-09 (issue
+  #289) — see the note below.** The reasoning recorded here at ratification
+  was backwards: it read `count(null)`'s TypeError as `array_key_exists`'s
+  null-base answer, when the two are opposites (a raised exception is not an
+  answer at all). The conservative reading itself was sound — it only
+  withheld precision — but the ground it stood on was not §2 reachability
+  the way the text claimed; issue #289 corrects both the ground and the
+  behavior.
 * **The lane-emptying refusal is scoped to `Count`, and the general rule is
   untouched.** `subtract_shape_arms` still removes a binding from the
   contract lane when every arm dies — an emptied lane under a structural
@@ -1069,3 +1071,68 @@ operands, three dumps, one marker), and
 `a_decided_comparison_over_declared_operands_stays_out_of_the_proof_lane`
 (the Asserted decided verdict stays silent against a class-typed parameter
 while its Verified twin convicts — the stratum, not the verdict, is the gate).
+
+## Note (2026-08-09): the count guard clears `nullable` on both arms (issue #289) — ratified 2026-08-09
+
+Recorded during this same ratification pass, and lifted the same day: the
+2026-08-09 count note's "**A count guard does not clear `nullable`**" bullet
+argued its conservatism backwards, and issue #289 corrects the argument and
+the behavior together.
+
+**The argument.** `count(null)` raises a `TypeError` under PHP 8.1+ — it does
+not answer `false`, it does not fall through, it never reaches either side of
+the `if`. So if a branch was taken **at all**, the subject provably was not
+null on entry to `count()`: the exception reaches neither arm, and both arms
+therefore prove non-null. This is the same §2 reachability shape as everything
+else on this page, not an exception to it — the mistake in the original note
+was reading a *raised exception* as if it were `array_key_exists`'s *false
+answer*, and the two are opposites. `array_key_exists($k, null)` also raises a
+`TypeError`, so `array_key_exists`'s existing conservatism (`Present` in
+`refine_shape_fact`, `shape_arm_survives`) was never the right analogy either
+— but that guard's true/false split narrows key presence, not nullness, so
+its own conservatism is untouched here; only the *nullness* reading, and only
+`count()`'s, moves.
+
+**Where it lands.** Two sites, the fact lane and the arm lane, matching the
+`Present`/`array_key_exists` precedent's own two-lane shape:
+
+* `refine_shape_fact`'s `ShapeGuard::Count` arm now returns
+  `nullable: false` unconditionally (was: `nullable` carried through
+  unchanged) — the fact lane's own claim, for a binding already narrowed to
+  one `Fact::Shape`.
+* `shape_arm_survives`'s `ShapeGuard::Count` arm now kills the `Null` arm
+  outright, before `to_shape_fact` is even consulted — the arm lane's claim,
+  for a still-disjunctive contract (a declared `?array`, `?Countable`, or any
+  union with a `Null` member). This is what makes the lift reach a
+  `Countable` receiver identically to an array one: the argument is about
+  `count()`'s own null case, not about arrays, and `shape_arm_survives`
+  already treats a non-array arm (a `Class("Countable")` arm, say) as
+  surviving the count comparison on its own — killing `Null` is orthogonal to
+  that and applies whether the surviving arm is an array shape or not.
+
+**The one place it does *not* reach: a catch that could have caught the
+guard's own failure.** `try`/`catch` stays `StmtKind::Opaque` in this engine
+(ADR-0027's one-construct-at-a-time ratchet — the trace does not model try's
+control flow at all, so a catch body never inherits a preceding guard's
+narrowed env; the whole construct forgets what it reads and writes on entry).
+A `count($x) <op> N` guard therefore cannot narrow anything a
+`catch (\TypeError $e)` body downstream can see, by construction — not
+because of a special case added here, but because the surrounding
+`try`/`catch` was never structured enough to carry the narrowing across the
+boundary in the first place. `crates/steins-infer/tests/count_guards.rs`
+pins this as a regression: a `count($x)` guard immediately followed by a
+`catch (\TypeError)` that could plausibly have caught the guard's own call
+failing must not see `$x` proven non-null.
+
+**Direction of movement: both**, same as the parent note. Clearing `nullable`
+removes null from what the branch admits, which can discharge a
+`call.on-null`/non-object finding downstream (finding-removing) and can
+equally let a definite verdict fire where the nullable arm was previously
+absorbing it to `Maybe` (finding-adding) — exactly the class ADR-0052 §2
+reserves for the verdict layer to decide, not this narrowing.
+
+Fixtures: `crates/steins-infer/tests/count_guards.rs` — both arms clearing
+`nullable` on a declared-nullable array, the `Countable` receiver reading
+identically, the sealed/unsealed cases unaffected, an expression `count()`
+cannot bind to a subject still doing nothing, and the catch-arm regression
+above.
