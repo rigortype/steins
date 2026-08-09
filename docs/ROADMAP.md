@@ -184,30 +184,32 @@ Exit criteria:
 
 - Every php-typing-conformance fail is a registered divergence
   (ADR-0030) — zero absent-machinery fails. **Not met today.** The
-  suite has grown to 214 automated cases and Steins passes 208 of them
+  suite has grown to 214 automated cases and Steins passes 209 of them
   (measured 2026-08-09, after issue #288 closed the offset-read breadth
-  gap and issue #293 read template bounds as contracts); the two halves
+  gap, issue #293 read template bounds as contracts, and issue #294 read
+  type arguments off inheritance edges); the two halves
   of the criterion now part company. Three fails are registered standing refusals and are as
   closed as they will ever be: `phpdoc_advanced_vendor_prefixed_param_phan`
   (ADR-0030 conformance entry 1, tool-tag scope) and the two
   declaration-coherence cases,
   `phpdoc_advanced_param_typehint_nullable_mismatch` and its
   `…_array_nullable_mismatch` variant (entry 2, a refusal PHPStan
-  shares). The other three are absent machinery, which is what the
-  criterion actually gates on, and they name exactly three capabilities.
-  Two of the generics family's three legs have closed: template bounds
+  shares). The other two are absent machinery, which is what the
+  criterion actually gates on, and they name exactly two capabilities.
+  The generics family is down to one leg: template bounds
   read as upper-bound contracts (issue #293) took
-  `generics_template_bound_array`, and offset-read breadth (issue #288)
-  took `regressions_list_destructure_string_key`. What remains of that
-  family is type arguments on inheritance edges (issue #294) for
-  `generics_extends_implements`, and carry through a variable binding
-  with its sweep (issue #295) for `assertions_this_out_self_out` — the
-  latter failing on the generics expectation, not on the `@…-self-out`
-  tag its name advertises. The third capability is a `resource` value
+  `generics_template_bound_array`, offset-read breadth (issue #288)
+  took `regressions_list_destructure_string_key`, and type arguments on
+  inheritance edges (issue #294, under the ADR-0032 amendment) took
+  `generics_extends_implements`. What remains of that
+  family is carry through a variable binding
+  with its sweep (issue #295) for `assertions_this_out_self_out` — which
+  fails on the generics expectation, not on the `@…-self-out`
+  tag its name advertises. The second capability is a `resource` value
   domain for `native_types_resource_argument`, the one absent-machinery
   fail already registered, as the honest deferral in entry 4. No fail is an unregistered intentional
   divergence, and none is a defect — every one is a silence, not a
-  wrong answer. The criterion closes when those three capabilities
+  wrong answer. The criterion closes when those two capabilities
   land; the ceiling is then 211/214, set by the three refusals.
 - fp-gate green over the full corpus; every tripwire movement triaged
   verbatim (5-sample minimum per class).
