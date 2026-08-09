@@ -194,3 +194,129 @@ fn non_generic_class_object_accepted() {
         f(new Plain());";
     assert_eq!(param_count(src), 0, "empty carry on a non-generic class → argument half silent");
 }
+
+// 4. Template BOUNDS as upper-bound contracts (ADR-0032 tier 1, issue #293).
+//
+// A declared bound is a promise about every value that ever binds to the template,
+// so a bound parameter can be judged without solving anything: whatever reaches
+// `@param T $x` inhabits `T`, and `T` is at most its bound. Only **vocabulary**
+// bounds participate in this slice — a class bound declines (see below).
+
+/// `generics_template_bound_array`: `@template T of array` makes `@param T $items`
+/// an `array` contract at the call site. A literal `1` violates it; an array does
+/// not, and an abstract array fact is accepted rather than doubted into a finding.
+#[test]
+fn vocabulary_bound_array_gates_the_constructor_argument() {
+    let base = "<?php\n\
+        /** @template T of array */\n\
+        final class Collection {\n\
+            /** @param T $items */\n\
+            public function __construct(public $items) {}\n\
+        }\n";
+    assert_eq!(
+        param_count(&format!("{base}new Collection(1);")),
+        1,
+        "1 is outside the `of array` bound on T",
+    );
+    assert_eq!(
+        param_count(&format!("{base}new Collection([1, 2]);")),
+        0,
+        "an array satisfies the `of array` bound",
+    );
+    // The abstract-fact path: `$row` is a declared parameter carrying no proven
+    // value, so the bound answers Maybe — the silence conformance line 51 pins.
+    let abstract_arg = format!(
+        "{base}/** @param array{{id: int}} $row */\n\
+         function fill(array $row): void {{ new Collection($row); }}"
+    );
+    assert_eq!(
+        param_count(&abstract_arg),
+        0,
+        "a declared array param satisfies the bound abstractly → silent",
+    );
+}
+
+/// Bounds other than `array` read the same way, including a union bound and a
+/// bound reached through a *function*'s own `@template` rather than a class's.
+#[test]
+fn vocabulary_bounds_beyond_array() {
+    let int_bound = "<?php\n\
+        /** @template T of int */\n\
+        final class Counter { /** @param T $n */ public function __construct(public $n) {} }\n";
+    assert_eq!(param_count(&format!("{int_bound}new Counter('x');")), 1, "string outside `of int`");
+    assert_eq!(param_count(&format!("{int_bound}new Counter(3);")), 0, "int satisfies `of int`");
+
+    let union_bound = "<?php\n\
+        /** @template T of int|list<int> */\n\
+        final class Nums { /** @param T $v */ public function __construct(public $v) {} }\n";
+    assert_eq!(
+        param_count(&format!("{union_bound}new Nums('x');")),
+        1,
+        "string outside the union bound",
+    );
+    assert_eq!(
+        param_count(&format!("{union_bound}new Nums(7);")),
+        0,
+        "int inhabits the union bound",
+    );
+
+    // A free function's own `@template` declaration, not a class-level one.
+    let fn_bound = "<?php\n\
+        /** @template T of string\n * @param T $s */\n\
+        function takesStringy($s): void {}\n";
+    assert_eq!(param_count(&format!("{fn_bound}takesStringy(1);")), 1, "1 outside `of string`");
+    assert_eq!(
+        param_count(&format!("{fn_bound}takesStringy('a');")),
+        0,
+        "string satisfies the bound",
+    );
+}
+
+/// **The class-bound decline.** `@template T of HasName` is a class bound, and this
+/// slice does not read it: `T` stays opaque and `new Named(1)` is silent, exactly as
+/// before. Declining is the deliberate scope line (issue #293) — class bounds are
+/// the common corpus shape and reading them is a follow-up, not a half-check here.
+#[test]
+fn class_bound_declines() {
+    let src = "<?php\n\
+        interface HasName { public function name(): string; }\n\
+        /** @template T of HasName */\n\
+        final class Named { /** @param T $v */ public function __construct(public $v) {} }\n\
+        new Named(1);";
+    assert_eq!(param_count(src), 0, "a class bound is not read — T stays opaque → Maybe");
+    // `of object` and `of mixed` decline too: neither is information a check can
+    // act on, and the first is the class direction in disguise.
+    let obj = "<?php\n\
+        /** @template T of object */\n\
+        final class Holder { /** @param T $v */ public function __construct(public $v) {} }\n\
+        new Holder(1);";
+    assert_eq!(param_count(obj), 0, "`of object` declines");
+    let mixed = "<?php\n\
+        /** @template T of mixed */\n\
+        final class Any { /** @param T $v */ public function __construct(public $v) {} }\n\
+        new Any(1);";
+    assert_eq!(param_count(mixed), 0, "`of mixed` constrains nothing");
+}
+
+/// A bound never resurrects a template *name* as a class: an unbounded template
+/// whose name collides with a real class stays opaque (issue #5's shadow), and a
+/// template redeclared on a method without a bound loses the class-level bound.
+#[test]
+fn bound_does_not_leak_past_its_declaration() {
+    // Unbounded template named like a real class — the #5 shadow, unchanged.
+    let shadowed = "<?php\n\
+        final class Model {}\n\
+        /** @template Model */\n\
+        final class Repo { /** @param Model $m */ public function __construct($m) {} }\n\
+        new Repo(1);";
+    assert_eq!(param_count(shadowed), 0, "an unbounded template stays opaque");
+    // A method redeclaring the class-level name without a bound shadows the bound.
+    let redeclared = "<?php\n\
+        /** @template T of int */\n\
+        final class Outer {\n\
+            /** @template T\n * @param T $v */\n\
+            public function m($v): void {}\n\
+        }\n\
+        (new Outer())->m('x');";
+    assert_eq!(param_count(redeclared), 0, "the member's own unbounded T wins");
+}

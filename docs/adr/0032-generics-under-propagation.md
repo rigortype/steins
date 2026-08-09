@@ -9,7 +9,14 @@ model (a registered divergence, ADR-0030):
    information than a solved type variable. No call-site template solving
    runs (running a solver beside propagation would create dual-inference
    disagreement, a bug factory). A declared bound (`@template T of Foo`)
-   still participates as an upper-bound contract.
+   still participates as an upper-bound contract: whatever binds to `T`
+   inhabits `T`, and `T` is at most its bound, so a bounded template
+   reads as its bound wherever the template itself would be opaque.
+   **Implemented for vocabulary bounds only** (`of array`, `of int`,
+   `of int|list<int>`, …; issue #293). A **class** bound declines and
+   leaves the template opaque — reading class bounds is a follow-up, and
+   half-checking one would put a class contract on every templated
+   parameter in a codebase at once.
 2. **Where propagation cannot reach** (public-API entry points, opaque
    callers), templates act as **contracts**: signature-internal
    consistency and bound checking only, imported from the PHPStan

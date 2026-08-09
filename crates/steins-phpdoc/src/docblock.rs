@@ -419,15 +419,58 @@ fn scan_line(text: &str, line_start: usize, line_end: usize, tags: &mut Vec<DocT
 /// Whether `name` (the token right after the `@`) is a `@template` declaration
 /// tag: `template`, `template-covariant`, or `template-contravariant`, each
 /// optionally carrying a `@phpstan-`/`@psalm-` precedence prefix (the ADR-0029
-/// prefix rule — the same prefix set [`TagKind::from_name`] recognizes). The
-/// covariant/contravariant variants declare the same template *name*; the variance
-/// is irrelevant to name resolution, so all three are treated alike here.
-fn is_template_tag(name: &str) -> bool {
+/// prefix rule — the same prefix set [`TagKind::from_name`] recognizes). Returns
+/// the declared *variance*: all three spellings declare a template name, and the
+/// variance rides along for the callers that need it.
+fn template_tag_variance(name: &str) -> Option<Variance> {
     let bare = name
         .strip_prefix("phpstan-")
         .or_else(|| name.strip_prefix("psalm-"))
         .unwrap_or(name);
-    matches!(bare, "template" | "template-covariant" | "template-contravariant")
+    match bare {
+        "template" => Some(Variance::Invariant),
+        "template-covariant" => Some(Variance::Covariant),
+        "template-contravariant" => Some(Variance::Contravariant),
+        _ => None,
+    }
+}
+
+/// The variance a `@template` declaration was written with — invariant for a plain
+/// `@template`, covariant/contravariant for the two marked spellings (with or
+/// without a `@phpstan-`/`@psalm-` prefix).
+///
+/// Scanned but **not consumed** by contract checking today: a bound (issue #293) is
+/// judged the same way whatever the variance. It is recovered here so the
+/// `@extends`/`@implements` slice (issue #294) can read it off the declaration
+/// instead of treating every template as invariant — an invariant reading of a
+/// contravariant parameter is a false positive, not a miss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Variance {
+    /// `@template T` — no variance marker.
+    #[default]
+    Invariant,
+    /// `@template-covariant T`.
+    Covariant,
+    /// `@template-contravariant T`.
+    Contravariant,
+}
+
+/// One `@template` declaration, as written: the declared name, the *bound* text
+/// after `of`/`as` (PHPStan spells it `of`, Psalm accepts `as`), and the variance
+/// marker. Names and bound text are returned verbatim (case preserved); the caller
+/// decides case-folding and whether the bound text parses as a type.
+///
+/// A trailing `= Default` (PHPStan template defaults) is cut from the bound: the
+/// default is a different obligation from the upper bound and nothing reads it yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateDecl {
+    /// The declared template name, e.g. the `T` in `@template T of array`.
+    pub name: String,
+    /// The bound text after `of`/`as`, trimmed, or `None` for an unbounded
+    /// `@template T`. Never empty when `Some`.
+    pub bound: Option<String>,
+    /// The declared variance (see [`Variance`]).
+    pub variance: Variance,
 }
 
 /// Scan a raw docblock for `@template` declarations, returning each declared
@@ -438,27 +481,42 @@ fn is_template_tag(name: &str) -> bool {
 /// This is the seam that feeds the *template shadow set* (issue #5): a name
 /// declared here shadows a same-named class in that declaration's docblock types,
 /// so a `@template Model` whose name collides with a real class `Model` is a
-/// template parameter (opaque), not the class. Only the name is read; bounds
-/// (`of Foo`), defaults (`= Bar`), and descriptions are ignored.
+/// template parameter (opaque), not the class.
+///
+/// The name-only projection of [`scan_template_decls`], kept for the shadow-set
+/// callers that have nothing to say about bounds or variance.
 #[must_use]
 pub fn scan_template_names(text: &str) -> Vec<String> {
+    scan_template_decls(text).into_iter().map(|d| d.name).collect()
+}
+
+/// Scan a raw docblock for `@template` declarations, returning each one whole —
+/// name, bound (`of Foo` / `as Foo`), and variance marker — in source order.
+///
+/// One pass recovers all three on purpose. The bound is what an upper-bound
+/// contract needs (issue #293); the variance is what an inheritance-edge reading
+/// needs (issue #294), and dropping it there turns a contravariant parameter into a
+/// false positive rather than a miss. Nothing here interprets either: the bound is
+/// raw text the caller may or may not choose to parse.
+#[must_use]
+pub fn scan_template_decls(text: &str) -> Vec<TemplateDecl> {
     let bytes = text.as_bytes();
-    let mut names = Vec::new();
+    let mut decls = Vec::new();
     let mut line_start = 0usize;
     while line_start <= bytes.len() {
         let line_end = memchr(bytes, line_start, b'\n').unwrap_or(bytes.len());
-        if let Some(name) = scan_template_line(text, line_start, line_end) {
-            names.push(name);
+        if let Some(decl) = scan_template_line(text, line_start, line_end) {
+            decls.push(decl);
         }
         if line_end == bytes.len() {
             break;
         }
         line_start = line_end + 1;
     }
-    names
+    decls
 }
 
-fn scan_template_line(text: &str, line_start: usize, line_end: usize) -> Option<String> {
+fn scan_template_line(text: &str, line_start: usize, line_end: usize) -> Option<TemplateDecl> {
     let bytes = text.as_bytes();
     let i = skip_gutter(bytes, line_start, line_end);
     if i >= line_end || bytes[i] != b'@' {
@@ -470,9 +528,7 @@ fn scan_template_line(text: &str, line_start: usize, line_end: usize) -> Option<
     while j < line_end && (bytes[j].is_ascii_alphabetic() || bytes[j] == b'-') {
         j += 1;
     }
-    if !is_template_tag(&text[name_start..j]) {
-        return None;
-    }
+    let variance = template_tag_variance(&text[name_start..j])?;
     // Skip whitespace, then read the template name: a PHP identifier
     // (`[A-Za-z_\x80-…][A-Za-z0-9_\x80-…]*`).
     while j < line_end && (bytes[j] == b' ' || bytes[j] == b'\t') {
@@ -486,7 +542,39 @@ fn scan_template_line(text: &str, line_start: usize, line_end: usize) -> Option<
     while j < line_end && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] >= 0x80) {
         j += 1;
     }
-    Some(text[ident_start..j].to_owned())
+    let name = text[ident_start..j].to_owned();
+    Some(TemplateDecl { name, bound: scan_template_bound(text, j, line_end), variance })
+}
+
+/// The bound text of a `@template` line: everything after an `of`/`as` keyword,
+/// with the docblock's trailing `*/` and any `= Default` suffix cut off. `None`
+/// when the line carries no bound keyword (or nothing after it).
+fn scan_template_bound(text: &str, after_name: usize, line_end: usize) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut j = after_name;
+    while j < line_end && (bytes[j] == b' ' || bytes[j] == b'\t') {
+        j += 1;
+    }
+    let kw_start = j;
+    while j < line_end && bytes[j].is_ascii_alphabetic() {
+        j += 1;
+    }
+    if !matches!(&text[kw_start..j], "of" | "as") {
+        return None;
+    }
+    let mut rest = &text[j..line_end];
+    // A one-line docblock ends on the same line as its tag.
+    if let Some(cut) = rest.find("*/") {
+        rest = &rest[..cut];
+    }
+    // A template *default* (`@template T of array = array{}`) is a separate
+    // obligation from the upper bound and nothing reads it; cut it here so the
+    // bound text stays parseable. No bound spelling contains a top-level `=`.
+    if let Some(cut) = rest.find('=') {
+        rest = &rest[..cut];
+    }
+    let rest = rest.trim();
+    (!rest.is_empty()).then(|| rest.to_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -1068,9 +1156,58 @@ mod tests {
 
     #[test]
     fn scans_template_with_bound_and_default() {
-        // Only the name is read; `of Foo` / `= Bar` bounds and defaults are ignored.
+        // The name projection is unchanged by a bound or a default.
         assert_eq!(scan_template_names("/** @template T of \\Countable */"), vec!["T"]);
         assert_eq!(scan_template_names("/** @template TValue = mixed */"), vec!["TValue"]);
+    }
+
+    fn decl(doc: &str) -> TemplateDecl {
+        let mut ds = scan_template_decls(doc);
+        assert_eq!(ds.len(), 1, "{doc}");
+        ds.remove(0)
+    }
+
+    #[test]
+    fn scans_template_bound_text() {
+        // `of` (PHPStan) and `as` (Psalm) both introduce the upper bound, and the
+        // trailing `*/` of a one-line docblock is not part of it.
+        assert_eq!(decl("/** @template T of array */").bound.as_deref(), Some("array"));
+        assert_eq!(decl("/** @template T as \\Countable */").bound.as_deref(), Some("\\Countable"));
+        assert_eq!(
+            decl("/**\n * @template T of int|list<int>\n */").bound.as_deref(),
+            Some("int|list<int>")
+        );
+        // A bare template, a description, and a nameless keyword carry no bound.
+        assert_eq!(decl("/** @template T */").bound, None);
+        assert_eq!(decl("/** @template T the element type */").bound, None);
+        assert_eq!(decl("/** @template T of */").bound, None);
+    }
+
+    #[test]
+    fn scans_template_bound_without_its_default() {
+        // A template *default* is a different obligation; the bound stops at `=`.
+        assert_eq!(decl("/** @template T of array = array{} */").bound.as_deref(), Some("array"));
+        assert_eq!(decl("/** @template TValue = mixed */").bound, None);
+    }
+
+    /// Variance survives the scanner even though contract checking does not consume
+    /// it yet — issue #294 reads it off here, and an invariant reading of a
+    /// contravariant parameter is a false positive rather than a miss.
+    #[test]
+    fn scans_template_variance_markers() {
+        assert_eq!(decl("/** @template T */").variance, Variance::Invariant);
+        assert_eq!(decl("/** @template-covariant T */").variance, Variance::Covariant);
+        assert_eq!(decl("/** @template-contravariant T */").variance, Variance::Contravariant);
+        assert_eq!(decl("/** @psalm-template-covariant TKey */").variance, Variance::Covariant);
+        assert_eq!(
+            decl("/** @phpstan-template-contravariant T of array */").variance,
+            Variance::Contravariant
+        );
+        // Variance and bound come off the same line in the same pass.
+        let d = decl("/** @template-covariant TValue of string */");
+        assert_eq!(d.name, "TValue");
+        assert_eq!(d.bound.as_deref(), Some("string"));
+        assert_eq!(d.variance, Variance::Covariant);
     }
 
     #[test]
