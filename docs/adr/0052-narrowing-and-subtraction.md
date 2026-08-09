@@ -994,3 +994,78 @@ declining — **may not widen this projection without a new ruling**. Lifting
 it to more `ContractTy` constructors, to more consumers, or past the fact
 seam is each a separate decision, and the singleton-denotation test is the
 bar every one of them has to clear.
+
+## Note (2026-08-09): a value-position comparison's undecided `bool` is Verified (issue #260)
+
+Owner ruling, binding, and recorded here rather than in ADR-0061 because what
+it settles is an application of **§5's derivation clause** — ADR-0061 §3
+consumes that clause for the builtin-return rung and explicitly adds no tier
+and forks no join, so it is a reader of this rule, not its home.
+
+`eval_binary_fact` (issue #260) evaluates a value-position comparison through
+`eval_cmp` and maps the three verdicts onto `Yes → true`, `No → false`,
+`Maybe → bool`. As it shipped it gave all three the **minimum** stratum over
+its operands, so `bool (asserted)` appeared whenever an operand's value came
+from the declared arm lane (§1) — a docblock. That is now split, because the
+three verdicts do not make the same **kind** of claim:
+
+* **`Maybe → bool` is Verified, always.** A PHP comparison operator evaluates
+  to a `bool` whatever it is handed; that is the operator's own language
+  guarantee, owed to nobody's docblock, and not a claim inherited from any
+  operand. In this arm no operand refinement survived into the fact at all —
+  the verdict is undecided precisely because nothing about the operands was
+  usable — so an inherited `Asserted` marker records a premise the conclusion
+  never consumed. The derivation clause is a rule about facts a derivation
+  *consumed*; a vestigial marker is not conservatism, it is noise. This is the
+  same shape as ADR-0061 §3's closing line, "the envelope floor is Verified
+  always".
+* **`Yes → true` / `No → false` keep the operand-derived minimum.** These are
+  claims about **which** bool, and that claim genuinely rests on the operands
+  — it is `eval_cmp`'s verdict over candidate values the declared arm lane may
+  have supplied. A lying `@param 1 $one` must never launder into the proof
+  lane through `$b = ($one === 1)`, and it still cannot.
+
+So the stratum here is a function of the verdict, not of the operands alone.
+The split lands in `eval_binary_fact`'s final `match`: the `Yes`/`No` arms
+carry `derived` (the unchanged `min` computation), the `Maybe` arm carries
+`Stratum::Verified` unconditionally.
+
+**What it buys, stated honestly.** A Verified `bool` may premise a proof-layer
+finding where an Asserted one may not (the all-Verified premise rule), and it
+is not held off the Verified envelope by N2's replace-if-weaker half. That is
+latent headroom rather than banked recall: **measured, this slice adds no
+finding.** nsrt is unmoved (2411 headline / 2817 admissible / 11042 differ,
+identical before and after), and the private corpus gate is unmoved on every
+grade (`phpdoc.*` 556, `throw.*` 44107, possibly-grade 150, proof-layer
+diagnostics 0 — identical before and after; the `phpdoc.*` RED against its 549
+baseline is pre-existing drift on master, not this change).
+
+Two independent reasons account for the flat measurement, and both are worth
+recording because the ruling was framed around a recall example that does not
+hold:
+
+1. **`bool` into `int` is not a definite No at all.** In coercive mode PHP
+   accepts it, and `is_type_error` says so — a *proven* `true` passed to
+   `f(int $i)` is silent today and should be. Only a class-typed parameter
+   makes a bool a proven `TypeError`, which is what the new fixture pair uses.
+2. **No `Fact::General` premises the native `type.argument-mismatch`,
+   whatever its stratum.** That emitter resolves its argument to a concrete
+   value and consumes only `Fact::Singleton`; a `bool` with no known value has
+   nothing to resolve. Widening it to convict on a base-type envelope is a
+   separate slice with its own FP surface, and is not taken here.
+
+The consequence for the ruling is that it is correct and worth landing on its
+own terms — it removes a marker that was never earned — but it is a
+**precision** change on the dump surface, not a recall change, until a
+consumer of abstract facts exists. Recorded so the next reader does not
+mistake the flat gate for a failed measurement.
+
+Fixtures: `crates/steins-infer/tests/comparison_value.rs` pins the split from
+both sides so a refactor cannot collapse it in either direction —
+`a_union_operand_decides_only_when_every_pair_agrees` (declared operands: the
+decided verdict keeps `(asserted)`, the undecided one drops it),
+`the_undecided_bool_is_verified_even_from_declared_operands` (the same two
+operands, three dumps, one marker), and
+`a_decided_comparison_over_declared_operands_stays_out_of_the_proof_lane`
+(the Asserted decided verdict stays silent against a class-typed parameter
+while its Verified twin convicts — the stratum, not the verdict, is the gate).
