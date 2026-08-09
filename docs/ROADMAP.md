@@ -68,11 +68,11 @@ Verification apparatus (ADR-0013):
   ADR-0081 §8 scoped the strict-zero bar to the definite ids; triaged
   true positives among the definite ids are fingerprint-pinned
   (`EXPECTED_PROOF_FINDINGS`).
-- php-typing-conformance: 206/214 (re-measured 2026-08-09; the suite grew
-  past the 98-case denominator this line used to carry). Three fails are
-  registered refusals (ADR-0030), five are absent machinery reducing to
-  three capabilities — see M1's exit criteria below, which state the
-  standing in full.
+- php-typing-conformance: 208/214 (re-measured 2026-08-09 after issues
+  #288 and #293; the suite grew past the 98-case denominator this line
+  used to carry). Three fails are registered refusals (ADR-0030), three
+  are absent machinery reducing to three capabilities — see M1's exit
+  criteria below, which state the standing in full.
 - ~4,180 workspace tests; zero conformance regressions ever.
 
 CLI (ADR-0020, partially landed):
@@ -184,27 +184,28 @@ Exit criteria:
 
 - Every php-typing-conformance fail is a registered divergence
   (ADR-0030) — zero absent-machinery fails. **Not met today.** The
-  suite has grown to 214 automated cases and Steins passes 206 of them
-  (measured 2026-08-09); the two halves of the criterion now part
-  company. Three fails are registered standing refusals and are as
+  suite has grown to 214 automated cases and Steins passes 208 of them
+  (measured 2026-08-09, after issue #288 closed the offset-read breadth
+  gap and issue #293 read template bounds as contracts); the two halves
+  of the criterion now part company. Three fails are registered standing refusals and are as
   closed as they will ever be: `phpdoc_advanced_vendor_prefixed_param_phan`
   (ADR-0030 conformance entry 1, tool-tag scope) and the two
   declaration-coherence cases,
   `phpdoc_advanced_param_typehint_nullable_mismatch` and its
   `…_array_nullable_mismatch` variant (entry 2, a refusal PHPStan
-  shares). The other five are absent machinery, which is what the
-  criterion actually gates on, and they name exactly three capabilities:
-  generic type-argument carry and template-bound checking (ADR-0032,
-  issue #10, gap 3) for `generics_extends_implements`,
-  `generics_template_bound_array` and `assertions_this_out_self_out` —
-  the last of which fails on the generics expectation, not on the
-  `@…-self-out` tag its name advertises; offset-read breadth (ADR-0049
-  §7's read-context whitelist reaching an array-destructuring source,
-  and the array lane carrying a callee's returned array back to its
-  caller — issue #12) for `regressions_list_destructure_string_key`;
-  and a `resource` value domain for `native_types_resource_argument`,
-  the one absent-machinery fail already registered, as the honest
-  deferral in entry 4. No fail is an unregistered intentional
+  shares). The other three are absent machinery, which is what the
+  criterion actually gates on, and they name exactly three capabilities.
+  Two of the generics family's three legs have closed: template bounds
+  read as upper-bound contracts (issue #293) took
+  `generics_template_bound_array`, and offset-read breadth (issue #288)
+  took `regressions_list_destructure_string_key`. What remains of that
+  family is type arguments on inheritance edges (issue #294) for
+  `generics_extends_implements`, and carry through a variable binding
+  with its sweep (issue #295) for `assertions_this_out_self_out` — the
+  latter failing on the generics expectation, not on the `@…-self-out`
+  tag its name advertises. The third capability is a `resource` value
+  domain for `native_types_resource_argument`, the one absent-machinery
+  fail already registered, as the honest deferral in entry 4. No fail is an unregistered intentional
   divergence, and none is a defect — every one is a silence, not a
   wrong answer. The criterion closes when those three capabilities
   land; the ceiling is then 211/214, set by the three refusals.

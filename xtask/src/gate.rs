@@ -632,7 +632,32 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // throughout; `throw.*` unmoved at its own baseline (44107), so
     // `THROW_EXPECTED` does not move with this; possibly-grade unmoved
     // (150); nsrt admissible unmoved (2817).
-    ("pxxxx-monorepo", 513),
+    //
+    // **513 -> 528 (+15) with issue #293**, template bounds read as
+    // upper-bound contracts. Measured on the branch rebased onto the #288
+    // merge, so the two waves' findings are disjoint by measurement rather
+    // than by assumption. Every one is `phpdoc.param-mismatch` and every one
+    // was read at its source:
+    //
+    // - **12 sites** call an assertion helper declared
+    //   `@template T of list<string>` with `@phpstan-param T $collection`,
+    //   passing lists that hold `null` or ints — `[null, 'show', 0, 'hide',
+    //   1]` and `[0, 1]` among them. The helper's own bound says what it
+    //   accepts; these callers do not meet it.
+    // - **2 sites** call the `list<int>` sister with the wrong shape: one
+    //   passes constants that are literally the strings `'0'`/`'1'`, the
+    //   other a string-keyed map where a list is declared.
+    // - **1 site is a genuine defect rather than a loose annotation**: it
+    //   asserts *string* membership over a constant that a sibling call site
+    //   asserts *int* membership over, and the helper's
+    //   `@phpstan-assert value-of<T>` then narrows the value to `string`
+    //   against an `@param int` on the very next call. Two of the fifteen
+    //   would disappear if that were fixed upstream; the baseline is seeded
+    //   at what the corpus says today, not at what it should say.
+    //
+    // Nothing else moved: proof layer 0, `throw.*` 44107 = baseline,
+    // possibly-grade 150 = baseline, every OSS package byte-identical.
+    ("pxxxx-monorepo", 528),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).

@@ -7059,7 +7059,7 @@ fn untyped_function_like(
     anchor: u32,
     display: &str,
     no_return_type_possible: bool,
-    shadow: &HashSet<String>,
+    shadow: &TemplateShadow,
     out: &mut Vec<Diagnostic>,
 ) {
     let doc = DeclaredTags::of(docblock);
@@ -7126,7 +7126,7 @@ fn untyped_member(
     anchor: u32,
     id: &'static str,
     display: &str,
-    shadow: &HashSet<String>,
+    shadow: &TemplateShadow,
     out: &mut Vec<Diagnostic>,
 ) {
     let doc = DeclaredTags::of(docblock);
@@ -7149,7 +7149,7 @@ fn untyped_iterable_and_generics(
     claim: Claim<'_>,
     anchor: u32,
     display: &str,
-    shadow: &HashSet<String>,
+    shadow: &TemplateShadow,
     out: &mut Vec<Diagnostic>,
 ) {
     // `untyped.iterable-value`. The subject is the declaration's EFFECTIVE type: a
@@ -8942,20 +8942,20 @@ impl<'a> Cx<'a> {
     /// plus, for a method, the enclosing class-level ones — the same two idempotent
     /// stages [`Cx::scope_envelopes`] applies to the declaration's envelopes. Empty
     /// for top-level and closure scopes (no owning docblock).
-    fn scope_template_shadow(&self, scope: &Scope) -> HashSet<String> {
+    fn scope_template_shadow(&self, scope: &Scope) -> TemplateShadow {
         match &scope.owner {
-            ScopeOwner::TopLevel | ScopeOwner::Closure { .. } => HashSet::new(),
+            ScopeOwner::TopLevel | ScopeOwner::Closure { .. } => TemplateShadow::default(),
             ScopeOwner::Function(name) => self
                 .tree()
                 .functions()
                 .iter()
                 .find(|f| f.name.eq_ignore_ascii_case(name))
-                .map_or_else(HashSet::new, |f| template_names_of(f.docblock.as_deref())),
+                .map_or_else(TemplateShadow::default, |f| template_names_of(f.docblock.as_deref())),
             ScopeOwner::Method { class, method } => {
                 let Some(cd) =
                     self.tree().classes().iter().find(|c| c.fqn.eq_ignore_ascii_case(class))
                 else {
-                    return HashSet::new();
+                    return TemplateShadow::default();
                 };
                 let mut shadow = template_names_of(cd.docblock.as_deref());
                 if let Some(m) = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method)) {
@@ -14846,7 +14846,7 @@ fn apply_inline_var_casts(
     let Some(doc) = cx.tree().stmt_docblock(stmt.span.start) else { return };
     let tags = scan_docblock(&doc.text);
     // Computed on the first acting tag only — most adjacent docblocks carry none.
-    let mut shadow: Option<HashSet<String>> = None;
+    let mut shadow: Option<TemplateShadow> = None;
     for tag in &tags {
         if !matches!(tag.kind, TagKind::Var) || tag.property_target {
             continue;
@@ -26111,7 +26111,7 @@ fn check_method_args(
     folder: &mut dyn Folder,
     method: &MethodDecl,
     class_file: usize,
-    class_templates: &HashSet<String>,
+    class_templates: &TemplateShadow,
     callee_name: &str,
     call: &CallExpr,
     env: &HashMap<String, Known>,
@@ -26744,7 +26744,7 @@ impl Envelopes {
     /// in two idempotent stages — [`parse_envelopes`] applies this declaration's own
     /// `@template` names, then a member-check site applies the enclosing class-like's
     /// class-level `@template` names — so a `no-op` empty set costs nothing.
-    fn shadow_templates(&mut self, shadow: &HashSet<String>) {
+    fn shadow_templates(&mut self, shadow: &TemplateShadow) {
         if shadow.is_empty() {
             return;
         }
@@ -26774,29 +26774,117 @@ impl Envelopes {
 /// shadow set composes uniformly instead of needing a lone case-sensitive path; (3)
 /// the only observable divergence from PHPStan is Steins staying silent where
 /// PHPStan would still resolve the class — and silence is the safe side (ADR-0029).
-fn template_names_of(docblock: Option<&str>) -> HashSet<String> {
-    docblock
-        .map(|t| {
-            steins_phpdoc::scan_template_names(t)
-                .into_iter()
-                .map(|n| n.to_ascii_lowercase())
-                .collect()
-        })
-        .unwrap_or_default()
+///
+/// Each name also carries its declared **bound**, when that bound is one Steins can
+/// stand behind — see [`TemplateShadow`] and [`vocabulary_bound`].
+fn template_names_of(docblock: Option<&str>) -> TemplateShadow {
+    let Some(text) = docblock else { return TemplateShadow::default() };
+    let mut shadow = TemplateShadow::default();
+    for decl in steins_phpdoc::scan_template_decls(text) {
+        let key = decl.name.to_ascii_lowercase();
+        if let Some(bound) = decl.bound.as_deref().and_then(vocabulary_bound) {
+            shadow.bounds.insert(key.clone(), bound);
+        }
+        shadow.names.insert(key);
+        // `decl.variance` is scanned (issue #293) but not consumed: a bound is
+        // judged the same way whatever the variance. Issue #294's inheritance
+        // edges are what read it.
+    }
+    shadow
+}
+
+/// The `@template` names in force over a docblock, each with the *upper bound* it
+/// was declared with where Steins reads that bound (issue #293).
+///
+/// Two things ride together because they are two answers to the same question —
+/// "what does this bare identifier mean here?". A name with no usable bound means
+/// *opaque*; a name with one means *at most that bound*, which is what ADR-0032
+/// tier 1 calls the declared bound "participating as an upper-bound contract".
+#[derive(Debug, Clone, Default)]
+struct TemplateShadow {
+    /// Every declared template name, lowercased.
+    names: HashSet<String>,
+    /// The subset whose declared bound Steins reads, keyed by the same lowercased
+    /// name. Always a subset of `names`.
+    bounds: HashMap<String, PType>,
+}
+
+impl TemplateShadow {
+    /// Whether this docblock declares no templates at all — the overwhelmingly
+    /// common case, and the one every shadow stage short-circuits on.
+    fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
+    /// Whether `name` (already lowercased) is a declared template name.
+    fn contains(&self, name: &str) -> bool {
+        self.names.contains(name)
+    }
+
+    /// Fold another docblock's declarations in — the class-level stage extended by
+    /// a member's own `@template` names. A member redeclaring a class-level name
+    /// wins, bound and all, which matches PHP shadowing.
+    fn extend(&mut self, other: Self) {
+        for name in other.names {
+            self.bounds.remove(&name);
+            self.names.insert(name);
+        }
+        self.bounds.extend(other.bounds);
+    }
+}
+
+/// A `@template` bound Steins is willing to substitute for the template: one whose
+/// text parses whole and lowers to a **vocabulary** contract — `array`, `int`,
+/// `string`, `int|list<int>`, and their kin.
+///
+/// Deliberately narrow (issue #293). A **class** bound (`@template T of HasName`)
+/// declines here rather than being half-checked: class bounds are the common case in
+/// real code, and admitting them would put a class contract on every templated
+/// parameter in the corpus — a large, unmeasured surface for what is meant to be the
+/// smallest slice that closes `generics_template_bound_array`. `Opaque` (an
+/// unreadable bound), `mixed` (a bound that constrains nothing), and `object` (the
+/// class world's own top) decline for the same reason: none of them is information a
+/// check can act on, and two of them are the class direction in disguise.
+///
+/// Soundness is one-directional and holds in the direction that matters: whatever
+/// binds to `T` inhabits `T`, and `T` is *at most* its bound, so judging a value
+/// against the bound can only miss violations, never manufacture one.
+fn vocabulary_bound(text: &str) -> Option<PType> {
+    use steins_contract::ContractTy as C;
+    let parsed = steins_phpdoc::parse_type(text).ok()?;
+    if !parsed.at_end {
+        return None; // trailing garbage — the no-envelope outcome (ADR-0029).
+    }
+    let lowered = steins_contract::lower(&parsed.ty);
+    if matches!(lowered, C::Opaque | C::Mixed | C::ObjectAny) || contract_touches_class(&lowered) {
+        return None;
+    }
+    Some(parsed.ty)
 }
 
 /// Rewrite every **bare, unqualified** identifier naming a template from `shadow`
-/// to an opaque node (issue #5). The neutral node is [`PKind::Unsupported`], which
-/// lowers to `ContractTy::Opaque` and rides `accepts` as `Maybe` — exactly the
-/// silence a template already gets today when it names no existing class (ADR-0032:
-/// templates are transparent/thin where propagation does not reach). A `\`-qualified
-/// or namespaced reference (`\Model`, `App\Model`) is **never** shadowed —
-/// qualification opts out of the template namespace. Idempotent; recurses through
-/// every composite so a nested `list<Model>` / `array{a: Model}` is neutralized too.
-fn neutralize_templates(ty: &mut PType, shadow: &HashSet<String>) {
+/// to its declared bound, or to an opaque node when it has none (issue #5, extended
+/// by issue #293). The neutral node is [`PKind::Unsupported`], which lowers to
+/// `ContractTy::Opaque` and rides `accepts` as `Maybe` — exactly the silence a
+/// template already gets today when it names no existing class (ADR-0032: templates
+/// are transparent/thin where propagation does not reach). A bounded template
+/// becomes its bound instead: `T` under `@template T of array` reads as `array`,
+/// keeping the template's own span so a diagnostic still points at the `@param`.
+/// A `\`-qualified or namespaced reference (`\Model`, `App\Model`) is **never**
+/// shadowed — qualification opts out of the template namespace. Idempotent (a
+/// vocabulary bound contains no template names to rewrite on a second pass);
+/// recurses through every composite so a nested `list<Model>` / `array{a: Model}`
+/// is neutralized too.
+fn neutralize_templates(ty: &mut PType, shadow: &TemplateShadow) {
     match &mut ty.kind {
         PKind::Identifier(name) => {
-            if !name.contains('\\') && shadow.contains(&name.to_ascii_lowercase()) {
+            if name.contains('\\') {
+                return;
+            }
+            let key = name.to_ascii_lowercase();
+            if let Some(bound) = shadow.bounds.get(&key) {
+                ty.kind = bound.kind.clone();
+            } else if shadow.contains(&key) {
                 let raw = std::mem::take(name);
                 ty.kind = PKind::Unsupported(raw);
             }
