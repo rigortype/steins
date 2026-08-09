@@ -12213,6 +12213,7 @@ fn apply_assign(
                     } else if let Some(arms) = return_arms {
                         // Prefer arms captured at resolution (before this unbind),
                         // so method self-assign keeps the declared floor.
+                        seed_returned_shape(var, arms, line, env);
                         store.contract.insert(var.to_owned(), arms.to_vec());
                     } else if let Some(c) = call
                         && let Some(arms) = call_return_arms(
@@ -12225,6 +12226,7 @@ fn apply_assign(
                         )
                     {
                         // Fallback: free-function / non-self-assign paths.
+                        seed_returned_shape(var, &arms, line, env);
                         store.contract.insert(var.to_owned(), arms);
                     }
                 }
@@ -12235,6 +12237,35 @@ fn apply_assign(
     if let Some(arms) = copied_arms {
         store.contract.insert(var.to_owned(), arms);
     }
+}
+
+/// Seed the value lane of `$var = <call>;` with the callee's **declared return
+/// shape** (issue #288), the return-lane mirror of the parameter seeding the entry
+/// pass does with [`seed_shape_fact`].
+///
+/// The arm lane alone carried the array vocabulary across a return, and the arm lane
+/// is not what the abstract array stratum reads: every shape consumer (S3's read
+/// row, S4's guards, S6's strict leg) asks the VALUE lane for a [`Fact::Shape`]. So a
+/// `@return array<string, int>` reached the caller as a declared arm nobody could
+/// project a key out of, while the same declaration on a `@param` seeded a shape and
+/// every one of those consumers worked — the asymmetry issue #288 measured.
+///
+/// The seed is the same fact, from the same ONE lowering, at the same **`Asserted`**
+/// stratum the parameter seed enters at (A-G9's corollary: shape-derived facts never
+/// feed proof-layer findings), and it is written only into a value lane this
+/// assignment has already cleared — it can never overwrite a more precise fact,
+/// because every rung above this one returned before reaching here.
+fn seed_returned_shape(
+    var: &str,
+    arms: &[ContractArm],
+    line: u32,
+    env: &mut HashMap<String, Known>,
+) {
+    let Some(fact) = seed_shape_fact(arms) else { return };
+    env.insert(
+        var.to_owned(),
+        Known::value_strat(fact, line, Some("declared array shape".to_owned()), Stratum::Asserted),
+    );
 }
 
 /// The fact of a `??` chain (ADR-0052 §6, extended by ADR-0062 A-G11 / S5).

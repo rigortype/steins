@@ -119,6 +119,16 @@ fn a_nested_pattern_judges_the_outer_key_it_reads() {
 // ---- The return lane -------------------------------------------------------
 
 #[test]
+fn a_declared_return_shape_reaches_the_callers_read() {
+    // The scalar return lane always carried into the caller; the array lane did not,
+    // because the declared arms seeded no value-lane shape fact.
+    let src = "<?php\n/** @return array<string, int> */\n\
+               function g(): array { return ['a' => 1]; }\n\
+               function f(): void { $m = g(); $x = $m[0]; }\n";
+    assert_eq!(ids(src), [OFFSET_UNDECLARED_ID]);
+}
+
+#[test]
 fn a_call_is_judged_as_a_destructure_source_in_its_own_right() {
     // `[$a, $b] = g();` never binds the value to a name, so the source IS the call.
     let src = "<?php\n/** @return array<string, int> */\n\

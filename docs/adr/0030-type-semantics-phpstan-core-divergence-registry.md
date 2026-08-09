@@ -181,12 +181,17 @@ deferral.
 The remaining non-registered gaps stay the prioritized unimplemented queue:
 generic type-argument carry (ADR-0032), callable signatures beyond the
 closure-variance arm, and — added when the suite grew past the cases this
-section was first written against — offset-read breadth, where a
-`[$a, $b] = $stringKeyed` destructure reads keys 0 and 1 that the container
-provably cannot carry and Steins stays silent because the ADR-0049 §7
-read-context whitelist admits only an assignment RHS and a return operand,
-and because the array lane does not carry a callee's returned array back to
-its caller (issue #12). Silence, not a wrong answer: the gap is reach. Native **object** acceptance — single classes, unions,
+section was first written against — offset-read breadth (issue #12).
+Silence, not a wrong answer: the gap is reach. Its first two legs are
+**closed** by issue #288: a `[$a, $b] = $stringKeyed` destructure source is
+now a whitelisted read context under ADR-0049 §7 (the pattern's targets stay
+silent — they are writes), and a callee's declared **`@return` array shape**
+now seeds the caller's value lane exactly as a `@param` does, so the returned
+array carries back. What remains of the leg: a destructure source read below
+the first pattern level, and an array value handed to a **scalar** parameter
+(`takesInt($m)`), which is silent for a declared `@param` array and stays
+silent for a declared `@return` one — the same answer on both sides, so it
+is a judgment gap rather than a reach one. Native **object** acceptance — single classes, unions,
 enum cases, class constants, and now `A&B` **intersections** (the
 conjunctive `InstanceInter` member, ADR-0043) — has landed; the
 `instanceof` / offset-access / undefined-method finding kinds exist.

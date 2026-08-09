@@ -603,7 +603,36 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // analyzer-side movement was measured back-to-back at one checkout and
     // triaged (issue #272 alone removed 4 findings of a false-positive
     // class and added 3 verified-true declared-contract debts, 508 → 507).
-    ("pxxxx-monorepo", 507),
+    // 507 → 513 (+6), 2026-08-09, with issue #288's second half: a project
+    // call's DECLARED RETURN SHAPE now seeds the caller's value lane, the
+    // return-side mirror of the `@param` seeding ADR-0062 S3 already did —
+    // so `$x = f();` carries `f()`'s `@return array{…}` where it previously
+    // carried only an arm nothing could project. Baseline-diffed against
+    // the pre-slice build at one checkout: exactly 6 new, 0 disappeared,
+    // and every OSS package is unchanged (the soundness signal). All 6
+    // triaged by reading BOTH docblocks at source, 6/6 TRUE, and all one
+    // class — the sealed-shape under-declaration the +10/ADR-0072 and
+    // +1/ADR-0073 entries above already recorded, reached by the new path:
+    //   - 1 site: an HTTP wrapper whose `@return` is a three-key sealed
+    //     shape (status/headers/body) handed to a queue factory whose
+    //     `@param` seals at two (status/body) — the `headers` key is
+    //     genuinely outside the declared parameter.
+    //   - 3 sites (same callee, three callers): a ranking helper's
+    //     `@return array[]` — a list of records — handed to a private
+    //     method whose `@param` spells ONE record's seven-key shape while
+    //     its own prose calls the parameter a list. The plural-vs-singular
+    //     annotation defect the +10/ADR-0072 entry names, now with the
+    //     producing side declared too.
+    //   - 2 sites (same callee, two callers): an options builder whose
+    //     `@return` seals ELEVEN keys, handed to a post-filter whose
+    //     `@param` seals the same ten minus `fields` — the one key the
+    //     caller provably always passes, and which the caller itself reads
+    //     off the same value two lines earlier.
+    // PHPStan reports the identical class for sealed shapes. Proof layer 0
+    // throughout; `throw.*` unmoved at its own baseline (44107), so
+    // `THROW_EXPECTED` does not move with this; possibly-grade unmoved
+    // (150); nsrt admissible unmoved (2817).
+    ("pxxxx-monorepo", 513),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).
