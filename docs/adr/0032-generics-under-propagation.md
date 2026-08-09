@@ -109,3 +109,92 @@ capability it silently gets wrong.
 **Status: PENDING ratification.** Designed autonomously under the owner's
 standing delegation; recorded before the implementation so the decision,
 not the diff, is what gets reviewed.
+
+## Amendment (2026-08-09): the carry survives a variable binding, on the heap, and is swept by receiver calls (issue #295)
+
+Tier 3 reads class-level generics off the one place a value proves them, a
+`new Class(args)` site. Until now that reading died at the next semicolon:
+`resolve_cval` minted the carry inside the `New` arm, and a later
+`ArgValue::Var` re-derived the object from `Store::class_of`, which knows a
+class and nothing else. `$box = new MutableBox(1); takesStringBox($box);`
+therefore judged only the class half — the exact gap this amendment closes.
+
+**The carry is an extension of the exact-class fact, so it lives where that
+fact lives.** `HeapObj` already holds the one allocation-keyed record of
+what an object *is* (ADR-0036); `targs` joins `class`/`class_exact` there.
+The two rejected homes are rejected for stated reasons, not for taste. The
+**value lattice** is object-free by ADR-0035/0043 §4 — `cval_as_val`
+returns `None` for `CVal::Object`, and putting a class parameterization in
+`Fact` would be the first object in it. A **`ContractTy` variant** would
+oblige every existing `Class` consumer to answer what a parameterized class
+means, for zero movement: the declared side already works, because
+`accepts_class_generic` reads the phpdoc AST directly and never goes
+through `lower_generic`. A `ContractTy` variant becomes necessary only when
+a declared parameterized class must survive into `Store::contract` arms for
+the S6 declared-receiver lane, which is a different issue.
+
+**A carry can go stale, and the sweep is what makes it sound.** A class
+parameterization proven from constructor values is a fact about the values
+the object holds, so a call that may write those values invalidates it —
+`@phpstan-self-out self<U>` is the annotation that says so out loud, and
+Steins models no such re-parameterization. Carrying `int` past
+`$box->replace($next)` would not be a miss, it would be a **false
+positive** at the next `takesStringBox($box)`, convicting correct code. So
+a **receiver method call sweeps its receiver's value carries**, in the same
+step and for the same reason `sweep_nonreadonly` sweeps that receiver's
+mutable props. Argument passing deliberately does not: a callee that
+mutates a parameter it received is a hole this slice leaves open, stated,
+because closing it there would sweep the very carry the case under test
+needs one line later, and because the honest closure is `@param-out`
+modelling rather than a blanket erase.
+
+**What survives a sweep is what mutation cannot reach.** An
+inheritance-edge carry (`@extends Box<int>`, the previous amendment)
+records what the author *declared* about the class, not what flowed into
+one object; no method call can change it, so it is sweep-immune exactly as
+a `readonly` prop is. Value carries (`CArg::Val`) are swept; type carries
+(`CArg::Ty`) survive. That is the whole rule, and it needs no new
+machinery: the two provenances the previous amendment introduced already
+distinguish the mutable fact from the declared one.
+
+### ADR-0048 obligations
+
+**§2 (replayable).** The carry is a pure function of the `new` trace — the
+same arguments, the same class docblock, the same result — and the sweep is
+a function of the statement sequence the scope walk already replays. No
+site consults anything outside the trace it is replayed from.
+
+**§3 (entry-state contribution), the load-bearing one.** `targs` is a new
+fact kind on `HeapObj`, so its value at scope entry is defined here, when
+it lands, and not retroactively:
+
+- A **`$this` seed** contributes **empty**. `$this` is a lower bound on the
+  runtime class (audit G1), the enclosing method's docblock states no
+  parameterization of the instance, and a class's own `@template` binds to
+  constructor values this scope never saw.
+- **Any non-exact object** contributes **empty**, for the same reason the
+  No-side consumers gate on `class_exact`: without exactness there is no
+  single class whose template list the arguments could align to.
+- A **parameter seeded from a declared `@param MutableBox<string> $box`**
+  contributes its **declared** arguments — owner-keyed to the class that
+  declares the templates, as `CArg::Ty`, resolved in the *declaring* file's
+  namespace scope. Declared-authoritative is ADR-0037's trust order: at an
+  entry point the docblock is the strongest fact available, and it is
+  precisely the fact the callee is entitled to assume. Being `CArg::Ty`,
+  such a seed is sweep-immune, which is right: a declaration does not stop
+  being true because the body called a method.
+
+  Today this clause has no site to fire at — a parameter receives a
+  `Store::contract` arm lane and **no `HeapObj` at all**, so there is no
+  object for `targs` to hang on, and the clause is a contract on the
+  parameter-seed when one lands rather than code shipping in this slice.
+  It is stated now because §3 requires the contribution defined at the
+  moment the fact kind is introduced, not at the moment a consumer appears.
+
+**§4 (no global ordering).** Nothing in the carry or the sweep depends on
+analysis order across files or scopes. The branch join intersects: a carry
+survives a merge only when every joined branch carried it identically,
+which is order-independent because it is an intersection.
+
+**Status: PENDING ratification.** Designed autonomously under the owner's
+standing delegation, recorded ahead of the implementation.
