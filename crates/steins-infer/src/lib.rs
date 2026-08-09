@@ -9387,6 +9387,19 @@ struct HeapObj {
     /// non-readonly props swept by unknown calls; a purely-local object's props
     /// survive — the ADR-0036 precision payoff.
     escaped: bool,
+    /// The class-level generic parameterizations this object carries (ADR-0032 tier
+    /// 3 + its binding amendment, issue #295): the same owner-keyed
+    /// [`GenericCarry`] edges a `new Class(args)` expression proves, kept on the
+    /// allocation so they survive a variable binding. Empty for every seeded object
+    /// — the ADR-0048 §3 entry-state contribution: a `$this` seed and any non-exact
+    /// object seed empty, and a parameter seeded from a declared
+    /// `@param Box<string> $p` would seed its *declared* arguments (declared-
+    /// authoritative, ADR-0037) if parameters were seeded onto the heap at all,
+    /// which today they are not.
+    ///
+    /// Swept by a receiver method call ([`Self::sweep_targs`]): a value carry states
+    /// what flowed into the constructor, and a method may have replaced it.
+    targs: Vec<GenericCarry>,
 }
 
 impl HeapObj {
@@ -9401,6 +9414,7 @@ impl HeapObj {
             readonly: HashSet::new(),
             ro_written: HashSet::new(),
             escaped: false,
+            targs: Vec::new(),
         }
     }
 
@@ -9408,6 +9422,21 @@ impl HeapObj {
     /// `$this` object may have mutated them). readonly props and the class survive.
     fn sweep_nonreadonly(&mut self) {
         self.props.retain(|name, _| self.readonly.contains(name));
+    }
+
+    /// Sweep the **value** generic carries (ADR-0032 binding amendment, issue #295):
+    /// a method call on this object as the receiver may have written the very values
+    /// a `new`-site carry recorded (`@phpstan-self-out self<U>` is the annotation
+    /// that says so), and a stale carry is a false positive at the next declared
+    /// `Box<T>` parameter, not a miss. Type carries — an inheritance edge's
+    /// `@extends Box<int>` — state what the author declared about the class, which
+    /// no call can change, so they survive exactly as a `readonly` prop does.
+    ///
+    /// A mixed carry cannot occur (a carry is all-`Val` from a `new` site or all-`Ty`
+    /// from an edge), but the predicate is written over the args so that it stays
+    /// correct if one ever does.
+    fn sweep_targs(&mut self) {
+        self.targs.retain(|c| c.args.iter().all(|a| matches!(a, CArg::Ty(_))));
     }
 }
 
@@ -9488,6 +9517,22 @@ impl Store {
     /// The exact class of the object `var` currently refers to, if any.
     fn class_of(&self, var: &str) -> Option<&str> {
         self.heap.get(self.refs.get(var)?).map(|o| o.class.as_str())
+    }
+
+    /// The class-level generic parameterizations the object `var` refers to carries
+    /// (ADR-0032 binding amendment, issue #295). Empty slice for an unbound var.
+    fn targs_of(&self, var: &str) -> &[GenericCarry] {
+        self.obj_of(var).map_or(&[], |o| o.targs.as_slice())
+    }
+
+    /// Sweep the value generic carries of the object `var` refers to — the receiver
+    /// half of [`HeapObj::sweep_targs`].
+    fn sweep_targs(&mut self, var: &str) {
+        if let Some(id) = self.refs.get(var).copied()
+            && let Some(o) = self.heap.get_mut(&id)
+        {
+            o.sweep_targs();
+        }
     }
 
     /// The allocation id `var` currently refers to.
@@ -10694,7 +10739,11 @@ fn walk_trace(
 /// exactly as it was, and forgetting `$a`'s shape there is a precision loss with
 /// no soundness content. Only a `&$x` parameter (an alias of the caller's
 /// lvalue) and an object *handle* (whose referent the callee can mutate) pierce
-/// that, and both are refused below.
+/// that, and the first is refused below. The second — an object handle — is
+/// admitted since the 2026-08-09 amendment (issue #295): a by-value callee can
+/// mutate the referent's state, but that state is swept by ADR-0036 earlier in
+/// the same statement, and nothing else about the handle is reachable from the
+/// callee. See [`is_value_semantic`].
 ///
 /// # The gate — all five must hold, per variable
 ///
@@ -10710,9 +10759,9 @@ fn walk_trace(
 ///    was removed in PHP 8, so this is a property of the declaration alone; a
 ///    `&$x` parameter, an argument past the declared arity, and a variadic
 ///    position all refuse.
-/// 3. The variable denotes a **value-semantic** thing. An object binding (a heap
-///    handle, a guard-derived class bound, a closure value) always drops: the
-///    handle is copied, the object is not.
+/// 3. The variable denotes a **value-semantic** thing, or a **heap object
+///    handle** (the 2026-08-09 amendment). A closure value and a bare
+///    guard-derived class bound still drop.
 /// 4. The scope is **not poisoned**. Every aliasing / scope-injection construct
 ///    (`$x = &$y`, `global`, `static $x`, `$$v`, `extract`/`compact`, `eval`,
 ///    `include`, a by-ref `use (&$x)`) poisons the whole scope, so a live
@@ -10855,9 +10904,27 @@ fn is_assert_read_site(cx: &Cx<'_>, r: &NameRef) -> bool {
 /// [`Fact`] has no object layer by construction (its `Val` is int/float/string/
 /// bool/null/array), so the object question is asked of the carriers that do
 /// hold one: the heap handle lane, the guard-derived class-bound lane, and the
-/// closure value on the binding itself. Class identity is *not* the reason the
-/// heap lane refuses — a by-value call cannot change what class an object is —
-/// the object's own mutable state is.
+/// closure value on the binding itself.
+///
+/// **The heap handle lane admits** (ADR-0070 amendment, issue #295). Class
+/// identity was never the reason it refused — a by-value call cannot change what
+/// class an object is, and it cannot rebind the caller's variable either — the
+/// object's own **mutable state** was. That state is already invalidated,
+/// earlier in this very statement, by the ADR-0036 escape-and-sweep
+/// ([`escape_and_sweep_calls`]): handing an object to a call marks it escaped and
+/// sweeps its non-readonly props. Dropping the var→id link on top of that erased
+/// the allocation identity as well — the exact class, the readonly facts, and
+/// (issue #295) the class-level generic carry — for no soundness gain. The one
+/// route that could rebind the variable, a `&$x` parameter, is refused by
+/// condition 2, and the routes that reach a caller local sideways (`global`,
+/// `extract`, `$$v`, `eval`) are refused by condition 4 on both sides. So a
+/// handle whose every occurrence is a proven by-value argument survives, holding
+/// exactly what a by-value callee cannot touch.
+///
+/// A **guard-derived class bound alone** (a `Member` with no heap object)
+/// deliberately does not follow it here. The same argument would carry, but this
+/// slice needed the allocation lane and nothing else, and a narrowing carrier
+/// with no allocation behind it is a separate consumer set to measure.
 ///
 /// A name none of the lanes mention answers `false` too, and that leg is purely
 /// a cost gate: invalidating an unbound name is already a no-op, so the callee
@@ -10865,7 +10932,10 @@ fn is_assert_read_site(cx: &Cx<'_>, r: &NameRef) -> bool {
 /// call arguments in real code are exactly that, which is what keeps the precise
 /// path off the hot path.
 fn is_value_semantic(var: &str, env: &HashMap<String, Known>, store: &Store) -> bool {
-    if store.refs.contains_key(var) || store.members.contains_key(var) {
+    if store.refs.contains_key(var) {
+        return true;
+    }
+    if store.members.contains_key(var) {
         return false;
     }
     match env.get(var) {
@@ -12589,6 +12659,12 @@ fn build_new_object(
     let id = w.fresh_id();
     let mut obj = HeapObj::new(class.to_owned());
     obj.class_exact = true; // `new Class(...)` allocates exactly `Class` (audit G1)
+    // The class-level generic parameterizations this allocation proves (ADR-0032
+    // tier 3 + its binding amendment, issue #295). Recorded on the allocation, which
+    // is what makes them survive `$box = new MutableBox(1);` — the same computation
+    // `resolve_cval` runs for a bare `new` in argument position, read off the store
+    // BEFORE this object joins it (the carry is a function of the arguments only).
+    obj.targs = cx.infer_generic_carry(class, args, env, store, w.scope.poisoned, folder);
     let props = cx.class_props(class);
 
     // readonly set + literal defaults.
@@ -18839,6 +18915,16 @@ fn join_stores(first: &Store, rest: &[&Store]) -> Store {
         // exactness bit are invariant — carry them from the first branch (audit G1).
         joined.class_exact = o0.class_exact;
         joined.readonly = o0.readonly.clone();
+        // targs: an INTERSECTION (ADR-0032 binding amendment, issue #295) — a carry
+        // survives only when every joined branch still carries it identically, so a
+        // branch that swept it (a receiver call inside one arm of an `if`) erases it
+        // for the successor. Order-independent, per the amendment's ADR-0048 §4 note.
+        joined.targs = o0
+            .targs
+            .iter()
+            .filter(|c| others.iter().all(|o| o.targs.contains(c)))
+            .cloned()
+            .collect();
         joined.escaped = o0.escaped || others.iter().any(|o| o.escaped);
         // ro_written: written on EVERY joined path.
         joined.ro_written = o0
@@ -19247,6 +19333,14 @@ fn escape_and_sweep_calls(w: &WalkCx, calls: &[&CallExpr], store: &mut Store) {
         {
             store.mark_escaped(v);
             object_passed = true;
+            // The generic-carry half of the same invalidation (ADR-0032 binding
+            // amendment, issue #295). Unconditional on the receiver, and NOT on the
+            // argument objects below: a value carry is a fact about the values the
+            // receiver holds, which its own method may rewrite
+            // (`@phpstan-self-out self<U>`), whereas `takesIntBox($box)` mutating its
+            // parameter is a `@param-out` question this slice does not model — and
+            // erasing there would erase the very carry the next line must judge.
+            store.sweep_targs(v);
         }
         for arg in &call.args {
             if let ArgValue::Var(name) = &arg.value
@@ -26789,6 +26883,11 @@ use Certainty as Tri;
 /// when nothing could be proven — an empty carry is the honest floor (acceptance
 /// then answers `Maybe` on the argument half, never a manufactured `No`). These
 /// live in the contract lane, not the object-free value lattice (ADR-0035/0043 §4).
+///
+/// `Clone`/`PartialEq` exist because the carry now survives a variable binding on
+/// the heap ([`HeapObj::targs`], ADR-0032 binding amendment / issue #295): it is
+/// cloned out of the heap at every use and compared for identity at a branch join.
+#[derive(Clone, PartialEq)]
 enum CVal {
     Scalar(ArgValue),
     Array(Vec<(NormKey, CVal)>),
@@ -26806,6 +26905,7 @@ enum CVal {
 /// `Box`'s. Acceptance therefore looks up the edge whose owner **is** the class the
 /// contract names, and stays silent when no edge matches — never comparing one
 /// class's arguments against another's parameters.
+#[derive(Clone, PartialEq)]
 struct GenericCarry {
     /// The class declaring the `@template`s `args` aligns to (resolved FQN).
     owner: String,
@@ -26820,6 +26920,12 @@ struct GenericCarry {
 /// One carried type argument. Two provenances, because the two facts differ in
 /// kind: a `new` site proves a **value** flowed in (ADR-0032 tier-1 propagation
 /// feeding tier 3), whereas an inheritance edge states a **type** the author wrote.
+///
+/// The distinction is also what the binding-carry sweep reads (ADR-0032 binding
+/// amendment / issue #295): a `Val` is a fact about the values one object holds and
+/// a mutating receiver call invalidates it; a `Ty` is what the author declared about
+/// the class and no call can touch it, so it is sweep-immune.
+#[derive(Clone, PartialEq)]
 enum CArg {
     /// A proven value from the `new` site (`new Box('x')` → `'x'`).
     Val(CVal),
@@ -27218,12 +27324,16 @@ impl<'a> Cx<'a> {
                     // it, which a lower-bound `$this` would make unsound. An inexact
                     // object stays unresolved (silent) — acceptance never fires on it.
                     //
-                    // Generic type arguments are NOT carried through a variable binding
-                    // through a variable binding (the heap records no type-arg carry); a
-                    // `$x = new Box('x'); f($x)` therefore judges only its class half.
-                    // Stage 1 scopes the argument half to the direct `new` argument
-                    // position (the conformance fixtures' shape) — empty carry here.
-                    store.class_of(name).map(|c| CVal::Object(c.to_owned(), Vec::new()))
+                    // Generic type arguments DO travel through a variable binding
+                    // (ADR-0032 binding amendment, issue #295): the allocation records
+                    // them, so `$x = new Box('x'); f($x)` judges both halves. The carry
+                    // read here is whatever survives on this path — a receiver method
+                    // call has already swept the value half (`Store::sweep_targs`),
+                    // which is what keeps a post-mutation `f($x)` silent rather than
+                    // convicting it on a stale argument.
+                    store
+                        .class_of(name)
+                        .map(|c| CVal::Object(c.to_owned(), store.targs_of(name).to_vec()))
                 } else {
                     None
                 }

@@ -507,3 +507,197 @@ fn adversarial_edges_stay_silent() {
     );
     assert_eq!(param_count(&alias), 0, "an unknown class name in an edge → Maybe");
 }
+
+// 6. The carry through a VARIABLE BINDING, and the sweep that keeps it sound
+// (ADR-0032 binding amendment, issue #295).
+//
+// The carry lives on the allocation (`HeapObj::targs`), so it survives `$box = new
+// Box(1);`. A receiver method call sweeps the **value** half: a method may rewrite
+// the very values the carry recorded (`@phpstan-self-out self<U>` says so out loud),
+// and a stale carry is a false positive at the next declared `Box<T>` parameter.
+
+/// The shape `assertions_this_out_self_out` fails on: the carry reaches the call
+/// through the binding, so `takesStringBox($box)` on an int box reports — and
+/// `takesIntBox($box)` on the same box does not.
+#[test]
+fn carry_survives_a_variable_binding() {
+    let base = "<?php\n\
+        /** @template T */\n\
+        final class MutableBox {\n\
+            /** @param T $value */\n\
+            public function __construct(public mixed $value) {}\n\
+        }\n\
+        /** @param MutableBox<int> $box */\n\
+        function takesIntBox(MutableBox $box): void {}\n\
+        /** @param MutableBox<string> $box */\n\
+        function takesStringBox(MutableBox $box): void {}\n\
+        $box = new MutableBox(1);\n";
+    assert_eq!(
+        param_count(&format!("{base}takesIntBox($box);")),
+        0,
+        "the bound object is a MutableBox<int>",
+    );
+    assert_eq!(
+        param_count(&format!("{base}takesStringBox($box);")),
+        1,
+        "an int box does not satisfy a string box, through the binding",
+    );
+}
+
+/// **Argument passing does not sweep** — the conformance case's line 52/53 pair.
+/// `takesIntBox($box)` escapes the object (its props are swept), but a callee
+/// mutating its parameter is a `@param-out` question this slice does not model, and
+/// erasing the carry here would erase what line 53 exists to judge.
+#[test]
+fn passing_the_object_as_an_argument_keeps_the_carry() {
+    let src = "<?php\n\
+        /** @template T */\n\
+        final class MutableBox {\n\
+            /** @param T $value */\n\
+            public function __construct(public mixed $value) {}\n\
+        }\n\
+        /** @param MutableBox<int> $box */\n\
+        function takesIntBox(MutableBox $box): void {}\n\
+        /** @param MutableBox<string> $box */\n\
+        function takesStringBox(MutableBox $box): void {}\n\
+        $box = new MutableBox(1);\n\
+        takesIntBox($box);\n\
+        takesStringBox($box);";
+    assert_eq!(param_count(src), 1, "the carry survives an intervening call that only reads it");
+}
+
+/// **The line-57 pin.** After `$box->replace($next)` the carried `int` is stale:
+/// `@phpstan-self-out self<U>` re-parameterizes the receiver and Steins models no
+/// such update. Both spellings must therefore stay silent — the string one because
+/// the box may now hold a string, the int one because it may no longer.
+///
+/// Without the sweep this test fails on `takesStringBox` with a **false positive**,
+/// which is exactly the regression it exists to pin.
+#[test]
+fn receiver_method_call_sweeps_the_stale_value_carry() {
+    let base = "<?php\n\
+        /** @template T */\n\
+        final class MutableBox {\n\
+            /** @param T $value */\n\
+            public function __construct(public mixed $value) {}\n\
+            /**\n\
+             * @template U\n\
+             * @param U $value\n\
+             * @phpstan-self-out self<U>\n\
+             */\n\
+            public function replace(mixed $value): void {}\n\
+        }\n\
+        /** @param MutableBox<int> $box */\n\
+        function takesIntBox(MutableBox $box): void {}\n\
+        /** @param MutableBox<string> $box */\n\
+        function takesStringBox(MutableBox $box): void {}\n\
+        $next = 'x';\n\
+        $box = new MutableBox(1);\n\
+        $box->replace($next);\n";
+    assert_eq!(
+        param_count(&format!("{base}takesStringBox($box);")),
+        0,
+        "the post-replace carry is stale — silence, not a false positive",
+    );
+    assert_eq!(
+        param_count(&format!("{base}takesIntBox($box);")),
+        0,
+        "and the original parameterization is no longer claimed either",
+    );
+}
+
+/// A receiver call sweeps only **its own** receiver: an unrelated object's carry is
+/// untouched, the same precision payoff `sweep_nonreadonly` gives props.
+#[test]
+fn the_sweep_is_receiver_local() {
+    let src = "<?php\n\
+        /** @template T */\n\
+        final class MutableBox {\n\
+            /** @param T $value */\n\
+            public function __construct(public mixed $value) {}\n\
+            public function touch(): void {}\n\
+        }\n\
+        /** @param MutableBox<string> $box */\n\
+        function takesStringBox(MutableBox $box): void {}\n\
+        $a = new MutableBox(1);\n\
+        $b = new MutableBox(2);\n\
+        $a->touch();\n\
+        takesStringBox($b);";
+    assert_eq!(param_count(src), 1, "sweeping $a leaves $b's carry intact");
+}
+
+/// **The sweep-immune path.** An inheritance-edge carry states what the author
+/// *declared* about the class (`@extends Box<int>`), not what flowed into one
+/// object, so no method call can invalidate it — it survives a receiver call
+/// exactly as a `readonly` prop survives a sweep.
+#[test]
+fn inheritance_edge_carry_survives_a_receiver_call() {
+    let src = "<?php\n\
+        /** @template T */\n\
+        class Box {\n\
+            /** @param T $value */\n\
+            public function __construct(public mixed $value) {}\n\
+            public function touch(): void {}\n\
+        }\n\
+        /** @extends Box<int> */\n\
+        final class IntBox extends Box {\n\
+            public function __construct(int $value) { parent::__construct($value); }\n\
+        }\n\
+        /** @param Box<string> $box */\n\
+        function takesStringBox(Box $box): void {}\n\
+        $box = new IntBox(1);\n\
+        $box->touch();\n\
+        takesStringBox($box);";
+    assert_eq!(param_count(src), 1, "a declared edge is not a mutable fact — it survives the sweep");
+}
+
+/// Aliasing and cloning both preserve the carry: an alias shares the allocation, a
+/// clone copies it (and a `Box<int>` clone is still a `Box<int>`).
+#[test]
+fn alias_and_clone_carry_the_arguments() {
+    let base = "<?php\n\
+        /** @template T */\n\
+        final class Box { /** @param T $value */ public function __construct(public mixed $value) {} }\n\
+        /** @param Box<string> $box */\n\
+        function takesStringBox(Box $box): void {}\n\
+        $a = new Box(1);\n";
+    assert_eq!(
+        param_count(&format!("{base}$b = $a;\ntakesStringBox($b);")),
+        1,
+        "an alias shares the allocation, and so the carry",
+    );
+    assert_eq!(
+        param_count(&format!("{base}$c = clone $a;\ntakesStringBox($c);")),
+        1,
+        "a clone copies the carry",
+    );
+}
+
+/// A branch join **intersects**: a carry swept inside one arm is gone for the
+/// successor, even though the other arm still had it.
+#[test]
+fn a_branch_that_sweeps_erases_the_carry_after_the_join() {
+    let base = "<?php\n\
+        /** @template T */\n\
+        final class MutableBox {\n\
+            /** @param T $value */\n\
+            public function __construct(public mixed $value) {}\n\
+            public function touch(): void {}\n\
+        }\n\
+        /** @param MutableBox<string> $box */\n\
+        function takesStringBox(MutableBox $box): void {}\n\
+        function run(bool $c): void {\n\
+            $box = new MutableBox(1);\n";
+    assert_eq!(
+        param_count(&format!(
+            "{base}    if ($c) {{ $box->touch(); }}\n    takesStringBox($box);\n}}"
+        )),
+        0,
+        "one arm swept it → the join drops it",
+    );
+    assert_eq!(
+        param_count(&format!("{base}    if ($c) {{ $c = false; }}\n    takesStringBox($box);\n}}")),
+        1,
+        "neither arm swept it → the carry survives the join",
+    );
+}
