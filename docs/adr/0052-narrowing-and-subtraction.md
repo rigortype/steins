@@ -914,14 +914,14 @@ rather than left as implementation residue.** Each stays exactly as implemented:
   non-nullness. Narrowing it here would be a reachability argument in a
   narrowing operator's clothing (§2), so the conservative reading stands.
 * **The lane-emptying refusal is scoped to `Count`, and the general rule is
-  untouched.** `subtract_shape_arms` still removes a binding from the contract
-  lane when every arm dies — an emptied lane under a structural guard means the
-  binding is out of vocabulary, which is the honest outcome. A count guard
-  refutes on arithmetic, so an emptied lane would instead assert that the branch
-  is unreachable, and that claim belongs to the verdict, not to a subtraction —
-  besides which the erasure would outlive the branch and reach the join. Only
-  the `Count` arm therefore leaves the lane whole; no other guard's behaviour
-  moves with it.
+  untouched.** `subtract_shape_arms` still removes a binding from the
+  contract lane when every arm dies — an emptied lane under a structural
+  guard means the binding is out of vocabulary, which is the honest outcome.
+  A count guard refutes on arithmetic, so an emptied lane would instead
+  assert that the branch is unreachable, and that claim belongs to the
+  verdict, not to a subtraction — besides which the erasure would outlive
+  the branch and reach the join. Only the `Count` arm therefore leaves the
+  lane whole; no other guard's behaviour moves with it.
 * **A refuted `Singleton` widens to `plain_array()` narrowed by the interval,
   not to a summary of the tail it lost.** The branch refutes the entry count,
   which is precisely what the literal's keys and value types were evidence of,
@@ -943,51 +943,54 @@ reading in `admits`.
 ## Note (2026-08-09): a type may be read as a value only when it denotes exactly one value (issue #260) — ratified 2026-08-09
 
 The comparison-operand slice reads a declared contract arm as a *value*:
-`cmp_operand_candidates` falls back to the arm lane when the proven lane has no
-candidates, and `contract_literal_value` turns each arm into an `ArgValue`. The
-literal arms are unremarkable — `ContractTy::LitInt(1)` denotes `1` and there is
-nothing to argue about. One row is not: a `Shape` that is sealed, field-less,
-not `non_empty` and carries no unsealed tail is read as the value `[]`. That is
-the only place in the engine where a *type* is read as a *value*, and the owner
-ratified it together with the boundary that explains why it is not an
-exception.
+`cmp_operand_candidates` falls back to the arm lane when the proven lane has
+no candidates, and `contract_literal_value` turns each arm into an
+`ArgValue`. The literal arms are unremarkable — `ContractTy::LitInt(1)`
+denotes `1` and there is nothing to argue about. One row is not: a `Shape`
+that is sealed, field-less, not `non_empty` and carries no unsealed tail is
+read as the value `[]`. That is the only place in the engine where a *type*
+is read as a *value*, and the owner ratified it together with the boundary
+that explains why it is not an exception.
 
 **The rule, general.** The projection from a type to a value is admissible
-exactly when the type's denotation is a **singleton set** — when the type admits
-one value and no other. `array{}` qualifies: sealed says no key beyond the
-declared ones, field-less says there are no declared ones, and not-`non-empty`
-is the third condition rather than a redundancy, so the set of admitted arrays
-has exactly one member. `int<1, 1>` would qualify for the same reason and may be
-added when a consumer wants it. `non-empty-string` and `array<int>` do not, and
-no amount of narrowness makes them: a set with two members has no value to
-project to, and picking a representative would be a guess of the kind
-"silence over guess" exists to refuse. This is why the rule is stated as a
-denotational test and not as a list of accepted `ContractTy` constructors — a
-future constructor is admitted by proving its denotation is a singleton, which
-is an argument someone has to make, not a pattern someone can add.
+exactly when the type's denotation is a **singleton set** — when the type
+admits one value and no other. `array{}` qualifies: sealed says no key
+beyond the declared ones, field-less says there are no declared ones, and
+not-`non-empty` is the third condition rather than a redundancy, so the set
+of admitted arrays has exactly one member. `int<1, 1>` would qualify for the
+same reason and may be added when a consumer wants it. `non-empty-string`
+and `array<int>` do not, and no amount of narrowness makes them: a set with
+two members has no value to project to, and picking a representative would
+be a guess of the kind "silence over guess" exists to refuse. This is why
+the rule is stated as a denotational test and not as a list of accepted
+`ContractTy` constructors — a future constructor is admitted by proving its
+denotation is a singleton, which is an argument someone has to make, not a
+pattern someone can add.
 
 **Why this note lives here and not in ADR-0061.** ADR-0061 governs the
 argument-dependent return ladder — what a *builtin call* computes from its
-arguments — and this projection is not a rung on it: no builtin is involved, the
-consumer is a comparison operand, and the result is a candidate set for a
-verdict rather than a return fact. The governing precedent is this ADR's
-2026-08-01 amendment, which established that a consumer may read the declared
-arm lane where the value lane holds nothing sharper, at the declaration's own
-stratum, and said in the same breath that **a projection is justified
-per-consumer, not granted globally**. Issue #260 is the second consumer to claim
-it, and the singleton-denotation test is the general form of the licence: the
-2026-08-01 amendment projects an arm list to *one fact*, this one projects an
-arm to *one value*, and both refuse where the projection would have to choose.
+arguments — and this projection is not a rung on it: no builtin is involved,
+the consumer is a comparison operand, and the result is a candidate set for
+a verdict rather than a return fact. The governing precedent is this ADR's
+2026-08-01 amendment, which established that a consumer may read the
+declared arm lane where the value lane holds nothing sharper, at the
+declaration's own stratum, and said in the same breath that **a projection
+is justified per-consumer, not granted globally**. Issue #260 is the second
+consumer to claim it, and the singleton-denotation test is the general form
+of the licence: the 2026-08-01 amendment projects an arm list to *one fact*,
+this one projects an arm to *one value*, and both refuse where the
+projection would have to choose.
 
-**Two limits, both load-bearing.** The projection stays at the **fact seam**:
-the candidates enter at the arms' own (minimum) stratum, so a declaration-backed
-comparison is `Asserted` and can premise a contract-layer finding and nothing
-more. `resolve_literal` — the proof-layer seam — must not see it, and does not:
-the arm lane is read in `cmp_operand_candidates` alone, and a value that reached
-the proof layer through this road would be a docblock forging a proof (point 5,
-ADR-0037). And the forthcoming **family-lift** slice — the one that takes the
-operator-value node past comparisons to the arithmetic and bitwise operators
-issue #260 left declining — **may not widen this projection without a new
-ruling**. Lifting it to more `ContractTy` constructors, to more consumers, or
-past the fact seam is each a separate decision, and the singleton-denotation
-test is the bar every one of them has to clear.
+**Two limits, both load-bearing.** The projection stays at the **fact
+seam**: the candidates enter at the arms' own (minimum) stratum, so a
+declaration-backed comparison is `Asserted` and can premise a contract-layer
+finding and nothing more. `resolve_literal` — the proof-layer seam — must
+not see it, and does not: the arm lane is read in `cmp_operand_candidates`
+alone, and a value that reached the proof layer through this road would be a
+docblock forging a proof (point 5, ADR-0037). And the forthcoming
+**family-lift** slice — the one that takes the operator-value node past
+comparisons to the arithmetic and bitwise operators issue #260 left
+declining — **may not widen this projection without a new ruling**. Lifting
+it to more `ContractTy` constructors, to more consumers, or past the fact
+seam is each a separate decision, and the singleton-denotation test is the
+bar every one of them has to clear.
