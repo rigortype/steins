@@ -19334,20 +19334,27 @@ fn escape_and_sweep_calls(w: &WalkCx, calls: &[&CallExpr], store: &mut Store) {
             store.mark_escaped(v);
             object_passed = true;
             // The generic-carry half of the same invalidation (ADR-0032 binding
-            // amendment, issue #295). Unconditional on the receiver, and NOT on the
-            // argument objects below: a value carry is a fact about the values the
-            // receiver holds, which its own method may rewrite
-            // (`@phpstan-self-out self<U>`), whereas `takesIntBox($box)` mutating its
-            // parameter is a `@param-out` question this slice does not model — and
-            // erasing there would erase the very carry the next line must judge.
+            // amendment, issue #295): a method may rewrite the very values the carry
+            // recorded (`@phpstan-self-out self<U>`). Unconditional on the receiver —
+            // the callee is the receiver's own class hierarchy, which a variable
+            // receiver does not pin down.
             store.sweep_targs(v);
         }
-        for arg in &call.args {
+        for (i, arg) in call.args.iter().enumerate() {
             if let ArgValue::Var(name) = &arg.value
                 && store.is_bound(name)
             {
                 store.mark_escaped(name);
                 object_passed = true;
+                // The argument-pass leg of the same sweep (ADR-0032 binding
+                // amendment). A callee that mutates the object it was handed makes
+                // the carry stale just as the receiver's own method does, and the
+                // failure direction there is a REPORT on correct code, not silence
+                // — so the carry survives only where the callee provably cannot
+                // reach the object at all.
+                if !callee_cannot_reach_arg(w.cx, call, i) {
+                    store.sweep_targs(name);
+                }
             }
         }
         if !call_is_resolved(w, call, store) {
@@ -19357,6 +19364,115 @@ fn escape_and_sweep_calls(w: &WalkCx, calls: &[&CallExpr], store: &mut Store) {
     if object_passed || unknown {
         store.sweep_escaped();
     }
+}
+
+/// Whether the callee of `receiver`, taking an argument at `position`, **provably
+/// cannot reach** the object passed there (ADR-0032 binding amendment, issue #295)
+/// — the gate that decides whether a generic value carry survives being handed to
+/// a call.
+///
+/// # Why the effects machinery cannot answer this
+///
+/// The natural oracle would be "this callee does not mutate that argument", and it
+/// does not exist, in any form, today:
+///
+/// * ADR-0055's mutation family (`mutate.arg` / `.self` / `.instance` / `.static`)
+///   is **taxonomy only** — its inference is unbuilt, as [`by_ref_label`] states in
+///   the tree ("that taxonomy's *inference* (ADR-0055) is not built"). No property
+///   write contributes any effect label: [`steins_syntax::EffectOrigin`] has arms
+///   for calls, output, exit, method calls and opaque constructs, and none for a
+///   property assignment. The only `mutate*` carriers are `mutate.local` and a
+///   coarse `mutate`, both from **builtin by-ref out-parameters** (ADR-0063 §2.3).
+/// * [`PurityOracle`] therefore cannot stand in for it, and using it would be
+///   actively unsound here rather than merely weak. It answers `provably_impure`,
+///   whose `false` means "not proven impure"; and because property writes color
+///   nothing, `function mutate(Box $b) { $b->value = 's'; }` has an **empty** proven
+///   finding set. Gating on purity would keep the carry across exactly the call
+///   that invalidates it. This is ADR-0055's own opening complaint — "a
+///   `#[\Steins\Pure]` method that writes `$this->p` passes silently, and 'Pure'
+///   does not mean what it says" — so a declared envelope is no better.
+///
+/// # What is provable instead
+///
+/// A different question is decidable with what exists: not "does the callee mutate
+/// it" but "**can the callee refer to it at all**". PHP locals are lexical, so a
+/// parameter a body never spells cannot be read, written, captured, passed on, or
+/// used as a receiver by that body. Every construct that reaches a binding
+/// non-lexically (`$$v`, `extract`/`compact`, `eval`, `include`, `global`, a by-ref
+/// `use`) is on the ADR-0001 give-up list and sets [`Scope::poisoned`], which is
+/// refused below. The scan therefore runs over the body's **source text**
+/// ([`FunctionDecl::body_span`]) rather than the linear trace: the trace drops
+/// nested sub-expressions to [`ArgValue::Other`] and unrecognized statements to
+/// [`StmtKind::Barrier`], so `helper($b)` inside `$x = strlen($b->p) + helper($b);`
+/// is invisible to it — and a gate that misses one use is a gate that keeps a stale
+/// carry, which is the failure direction this whole amendment exists to close.
+///
+/// Every uncertainty answers `false` (sweep): an unresolved or dynamic callee, a
+/// builtin (an out-parameter row is a mutation contract, and no builtin takes a
+/// project object it could not touch), a method or static call, a by-ref or
+/// variadic position, an argument past the declared arity, a poisoned callee body,
+/// and a body whose text cannot be read. Unknown is never proof of non-mutation.
+///
+/// **Narrow by construction, and stated as such.** In practice this admits the
+/// callee that ignores the parameter — which is exactly the conformance fixture's
+/// `takesIntBox(MutableBox $box): void {}` — and little else. The wider gate is a
+/// real per-parameter non-mutation judgment, and its precondition is ADR-0055 Part
+/// II's inference: once a property write colors `mutate.self`/`mutate.instance`,
+/// "this callee mutates nothing an argument can reach" becomes a fixpoint question
+/// rather than a lexical one.
+fn callee_cannot_reach_arg(cx: &Cx<'_>, call: &CallExpr, position: usize) -> bool {
+    if !matches!(call.receiver, Callee::Function(_)) {
+        return false;
+    }
+    // `resolve_user_fn` carries the positional-only guard, which this gate needs
+    // literally: a named or spread argument defeats the position→parameter mapping
+    // the whole judgment is indexed by.
+    let Some(site) = cx.resolve_user_fn(call) else { return false };
+    let decl = cx.fn_decl(site);
+    // The parameter must exist, take its argument by value, and not be variadic —
+    // the same three refusals [`arg_is_by_value`] makes, for the same reasons.
+    let Some(param) = decl.params.get(position) else { return false };
+    if param.by_ref || param.variadic {
+        return false;
+    }
+    // A poisoned body can reach a binding without spelling it; the lexical argument
+    // does not hold there.
+    if !matches!(cx.fn_scope(site), Some((_, body)) if !body.poisoned) {
+        return false;
+    }
+    let Some((file, _)) = cx.fn_scope(site) else { return false };
+    let Some(text) = cx.units[file].tree.text_at(decl.body_span) else { return false };
+    !mentions_variable(text, &param.name)
+}
+
+/// Whether `text` spells the PHP variable `$name` as a whole token.
+///
+/// Token boundaries are what keep `$box` from matching inside `$boxes` or
+/// `$my_box`; a match inside a string literal or a comment is *accepted* as a
+/// mention, which errs toward sweeping and so toward silence.
+fn mentions_variable(text: &str, name: &str) -> bool {
+    let bytes = text.as_bytes();
+    let needle = name.as_bytes();
+    let is_name_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || !b.is_ascii();
+    let mut i = 0usize;
+    while let Some(off) = text[i..].find('$') {
+        let dollar = i + off;
+        let start = dollar + 1;
+        i = start;
+        // `$$v` is a variable-variable, which poisons the scope — but a body that
+        // reached here is unpoisoned, so a second `$` is simply not our token.
+        if bytes.get(start).copied() == Some(b'$') {
+            continue;
+        }
+        if !bytes[start..].starts_with(needle) {
+            continue;
+        }
+        if bytes.get(start + needle.len()).copied().is_some_and(is_name_byte) {
+            continue; // a longer name that merely starts with `name`
+        }
+        return true;
+    }
+    false
 }
 
 /// Whether a call resolves to a known project/user target (ADR-0036). An unresolved

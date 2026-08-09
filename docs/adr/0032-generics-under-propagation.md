@@ -142,11 +142,66 @@ Steins models no such re-parameterization. Carrying `int` past
 positive** at the next `takesStringBox($box)`, convicting correct code. So
 a **receiver method call sweeps its receiver's value carries**, in the same
 step and for the same reason `sweep_nonreadonly` sweeps that receiver's
-mutable props. Argument passing deliberately does not: a callee that
-mutates a parameter it received is a hole this slice leaves open, stated,
-because closing it there would sweep the very carry the case under test
-needs one line later, and because the honest closure is `@param-out`
-modelling rather than a blanket erase.
+mutable props.
+
+**Argument passing sweeps too, and the direction of failure is why.**
+Every other thing deferred around this carry fails toward *silence*: an
+empty carry, an unmatched owner, an arity disagreement, a non-invariant
+position — all of them answer `Maybe` and say nothing. A callee that
+mutates the object it was handed fails the other way. `$box = new
+MutableBox(1); mutate($box); takesStringBox($box);`, where `mutate()`
+calls `$b->replace('s')` internally, is **correct code**, and a retained
+carry reports `phpdoc.param-mismatch` on it. That it lands in the contract
+layer rather than the proof layer decides which gate absorbs it, not
+whether it is acceptable: a finding the reader has to argue with is the one
+output this analyzer promises not to produce. The fp-gate's silence over
+100k files says the shape is rare, not impossible. So the carry does not
+survive an argument pass by default.
+
+**What it survives on is reachability, not non-mutation — because
+non-mutation is not knowable here.** The natural gate would be "this callee
+does not mutate that argument", and no such judgment exists in the tree, in
+any form. ADR-0055's mutation family (`mutate.arg`/`.self`/`.instance`/
+`.static`) is taxonomy without inference — `EffectOrigin` has no
+property-write arm at all, so `$b->value = 's'` colors *nothing*, and the
+only `mutate*` carriers are `mutate.local` and a coarse `mutate` from
+builtin by-ref out-parameters (ADR-0063 §2.3). The purity judgment cannot
+stand in for it either, and leaning on it would be worse than leaning on
+nothing: `PurityOracle` answers `provably_impure`, whose negative means
+"not proven impure", and a body that only writes properties has an *empty*
+proven finding set — so a purity gate would keep the carry across precisely
+the call that invalidates it. That is ADR-0055's own opening complaint, that
+`Pure` does not today mean what it says, which disqualifies the declared
+envelope for the same reason.
+
+A different question *is* decidable with what exists: not whether the
+callee mutates the object, but whether it can **refer to it at all**. PHP
+locals are lexical, so a parameter a body never spells cannot be read,
+written, captured, passed onward, or used as a receiver by it; and every
+construct that reaches a binding non-lexically (`$$v`, `extract`/`compact`,
+`eval`, `include`, `global`, a by-ref `use`) is on the ADR-0001 give-up
+list that sets `Scope::poisoned`, which the gate refuses. The test is
+therefore a token scan of the callee's **body text**, not of the linear
+trace: the trace drops nested sub-expressions to `ArgValue::Other` and
+unrecognized statements to `Barrier`, so `helper($b)` inside `$x =
+strlen($b->p) + helper($b);` is invisible to it — and a gate that misses one
+use is a gate that keeps a stale carry, which is the failure this rule
+exists to prevent. Every uncertainty sweeps: an unresolved, dynamic,
+builtin, method or static callee; a named or spread argument list (position
+no longer maps to a parameter); a by-ref or variadic position; an argument
+past the declared arity; a poisoned callee body. Unknown is never proof of
+non-mutation.
+
+This is deliberately narrow: in practice it admits the callee that ignores
+the parameter — which is exactly what the conformance case's
+`takesIntBox(MutableBox $box): void {}` does, so line 53 keeps its carry
+while the mutating shape drops it. **The follow-up is the wider gate**, a
+real per-parameter non-mutation judgment, and its precondition is named:
+ADR-0055 Part II's inference. Once a property write colors
+`mutate.self`/`mutate.instance` and those labels reach the fixpoint,
+"nothing this callee mutates is reachable from its parameters" becomes a
+propagation question, and the lexical test retires into being its cheap
+fast path.
 
 **What survives a sweep is what mutation cannot reach.** An
 inheritance-edge carry (`@extends Box<int>`, the previous amendment)
@@ -161,8 +216,12 @@ distinguish the mutable fact from the declared one.
 
 **§2 (replayable).** The carry is a pure function of the `new` trace — the
 same arguments, the same class docblock, the same result — and the sweep is
-a function of the statement sequence the scope walk already replays. No
-site consults anything outside the trace it is replayed from.
+a function of the statement sequence the scope walk already replays. The
+argument-pass gate adds the project index and the callee's own source text
+to that input set, both of which are replay inputs already (the index keys
+every descent; the text is the file being analyzed). It asks the engine
+nothing — no sidecar, no fold, no effect fixpoint — so no per-name state
+and no global ordering can enter the verdict.
 
 **§3 (entry-state contribution), the load-bearing one.** `targs` is a new
 fact kind on `HeapObj`, so its value at scope entry is defined here, when

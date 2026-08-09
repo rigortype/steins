@@ -638,6 +638,21 @@ pub struct FunctionDecl {
     pub ret_span: Option<Span>,
     // end untyped surface (ADR-0078, issue #200)
     pub span: Span,
+    /// The file byte span of the function's **body block**, braces included.
+    ///
+    /// [`Self::span`] is the *name* span, so it cannot answer questions about what
+    /// the body does. This one can, and it exists for exactly one consumer: the
+    /// ADR-0032 argument-pass carry gate (issue #295), which must decide whether a
+    /// callee could possibly touch an object handed to it. PHP locals are
+    /// **lexical** — a name a body never spells cannot be read, written, captured
+    /// or passed on by it — and every construct that reaches a binding
+    /// non-lexically (`$$v`, `extract`/`compact`, `eval`, `include`, `global`, a
+    /// by-ref `use`) is on the give-up list that sets [`Scope::poisoned`]. So a
+    /// token scan over this span is a sound "the callee cannot reach it" oracle,
+    /// where the linear trace — which drops nested sub-expressions to
+    /// [`ArgValue::Other`] and unrecognized statements to [`StmtKind::Barrier`] —
+    /// is not.
+    pub body_span: Span,
     /// The recognized `#[\Steins\Pure]` / `#[\Steins\Effect(...)]` envelope on
     /// this function, if present (ADR-0005/0006/0018). `Some` opts the function
     /// into always-on envelope checking. Recognition is conservative — see
@@ -4774,6 +4789,7 @@ fn lower_function(
         ret: f.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
         ret_span: f.return_type_hint.as_ref().map(|r| to_span(r.hint.span())),
         span: to_span(f.name.span()),
+        body_span: to_span(f.body.span()),
         effect_envelope: attrs_effect_envelope(&f.attribute_lists, aliases),
         effect_origins,
         throw_origins,

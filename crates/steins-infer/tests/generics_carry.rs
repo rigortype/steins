@@ -544,10 +544,9 @@ fn carry_survives_a_variable_binding() {
     );
 }
 
-/// **Argument passing does not sweep** — the conformance case's line 52/53 pair.
-/// `takesIntBox($box)` escapes the object (its props are swept), but a callee
-/// mutating its parameter is a `@param-out` question this slice does not model, and
-/// erasing the carry here would erase what line 53 exists to judge.
+/// **Argument passing keeps the carry only for a callee that provably cannot reach
+/// the object** — the conformance case's line 52/53 pair. `takesIntBox` ignores its
+/// parameter entirely, so nothing it does can invalidate what the carry states.
 #[test]
 fn passing_the_object_as_an_argument_keeps_the_carry() {
     let src = "<?php\n\
@@ -700,4 +699,153 @@ fn a_branch_that_sweeps_erases_the_carry_after_the_join() {
         1,
         "neither arm swept it → the carry survives the join",
     );
+}
+
+// 7. The ARGUMENT-PASS gate (ADR-0032 binding amendment, argument-pass ruling).
+//
+// A callee that mutates the object it was handed makes the carry stale exactly as
+// the receiver's own method does — and there the failure direction is a *report* on
+// correct code. So the carry survives an argument pass only where the callee
+// provably cannot reach the object at all: PHP locals are lexical, so a parameter
+// the body never spells cannot be touched by it. Every uncertainty sweeps.
+
+/// **The false positive this gate exists to prevent.** `mutate()` calls
+/// `$b->replace('s')` internally, so the carried `int` is stale afterwards — and
+/// `takesStringBox($box)` on the following line is *correct code*. It must be
+/// silent, not reported.
+#[test]
+fn a_callee_that_mutates_its_parameter_sweeps_the_carry() {
+    let base = "<?php\n\
+        /** @template T */\n\
+        final class MutableBox {\n\
+            /** @param T $value */\n\
+            public function __construct(public mixed $value) {}\n\
+            /**\n\
+             * @template U\n\
+             * @param U $value\n\
+             * @phpstan-self-out self<U>\n\
+             */\n\
+            public function replace(mixed $value): void {}\n\
+        }\n\
+        function mutate(MutableBox $b): void { $b->replace('s'); }\n\
+        /** @param MutableBox<int> $box */\n\
+        function takesIntBox(MutableBox $box): void {}\n\
+        /** @param MutableBox<string> $box */\n\
+        function takesStringBox(MutableBox $box): void {}\n\
+        $box = new MutableBox(1);\n\
+        mutate($box);\n";
+    assert_eq!(
+        param_count(&format!("{base}takesStringBox($box);")),
+        0,
+        "the callee could have re-parameterized the box — silence, not a report",
+    );
+    assert_eq!(
+        param_count(&format!("{base}takesIntBox($box);")),
+        0,
+        "and the original parameterization is not claimed afterwards either",
+    );
+}
+
+/// The gate is **reachability, not mutation**: a callee that only *reads* the
+/// parameter sweeps too. Narrow by construction — proving "reads but never writes"
+/// is the per-parameter non-mutation judgment ADR-0055 Part II's inference unlocks,
+/// and it is not built.
+#[test]
+fn a_callee_that_merely_mentions_its_parameter_sweeps() {
+    let src = "<?php\n\
+        /** @template T */\n\
+        final class Box { /** @param T $value */ public function __construct(public mixed $value) {} }\n\
+        function readIt(Box $b): void { $x = $b->value; }\n\
+        /** @param Box<string> $box */\n\
+        function takesStringBox(Box $box): void {}\n\
+        $box = new Box(1);\n\
+        readIt($box);\n\
+        takesStringBox($box);";
+    assert_eq!(param_count(src), 0, "a mentioned parameter is not a proven-unreachable one");
+}
+
+/// **Unknown is not proof of non-mutation.** An unresolvable callee, a builtin, a
+/// method call, and a by-ref parameter all sweep.
+#[test]
+fn an_unprovable_callee_sweeps() {
+    let base = "<?php\n\
+        /** @template T */\n\
+        final class Box { /** @param T $value */ public function __construct(public mixed $value) {} }\n\
+        /** @param Box<string> $box */\n\
+        function takesStringBox(Box $box): void {}\n\
+        $box = new Box(1);\n";
+    // A function the project does not declare.
+    assert_eq!(
+        param_count(&format!("{base}undeclared_helper($box);\ntakesStringBox($box);")),
+        0,
+        "an unresolvable callee sweeps",
+    );
+    // A by-ref parameter — the callee can rebind the caller's variable outright.
+    assert_eq!(
+        param_count(&format!(
+            "{base}function byRef(Box &$b): void {{}}\nbyRef($box);\ntakesStringBox($box);"
+        )),
+        0,
+        "a by-ref position sweeps",
+    );
+    // A variadic position: no parameter to index.
+    assert_eq!(
+        param_count(&format!(
+            "{base}function variadic(Box ...$bs): void {{}}\nvariadic($box);\ntakesStringBox($box);"
+        )),
+        0,
+        "a variadic position sweeps",
+    );
+    // A poisoned callee body can reach a binding without spelling it.
+    assert_eq!(
+        param_count(&format!(
+            "{base}function poisoned(Box $b): void {{ extract(['b' => 1]); }}\n\
+             poisoned($box);\ntakesStringBox($box);"
+        )),
+        0,
+        "a poisoned callee body sweeps",
+    );
+}
+
+/// The mention test is **token-exact**: a callee spelling `$boxes` does not count
+/// as spelling `$box`, so a genuinely unreachable parameter is not swept by a
+/// near-name. (The other direction — a mention inside a string or comment — sweeps,
+/// which errs toward silence.)
+#[test]
+fn the_mention_test_respects_token_boundaries() {
+    let src = "<?php\n\
+        /** @template T */\n\
+        final class Box { /** @param T $value */ public function __construct(public mixed $value) {} }\n\
+        function nearName(Box $box, array $boxes): void { $n = count($boxes); }\n\
+        /** @param Box<string> $b */\n\
+        function takesStringBox(Box $b): void {}\n\
+        $box = new Box(1);\n\
+        nearName($box, []);\n\
+        takesStringBox($box);";
+    assert_eq!(param_count(src), 1, "$boxes is not $box — the carry survives");
+}
+
+/// An inheritance-edge carry is **declared**, so an argument pass does not sweep it
+/// any more than a receiver call does: no callee can change what `@extends Box<int>`
+/// says about the class.
+#[test]
+fn inheritance_edge_carry_survives_an_argument_pass() {
+    let src = "<?php\n\
+        /** @template T */\n\
+        class Box {\n\
+            /** @param T $value */\n\
+            public function __construct(public mixed $value) {}\n\
+            public function touch(): void {}\n\
+        }\n\
+        /** @extends Box<int> */\n\
+        final class IntBox extends Box {\n\
+            public function __construct(int $value) { parent::__construct($value); }\n\
+        }\n\
+        function mutate(Box $b): void { $b->touch(); }\n\
+        /** @param Box<string> $box */\n\
+        function takesStringBox(Box $box): void {}\n\
+        $box = new IntBox(1);\n\
+        mutate($box);\n\
+        takesStringBox($box);";
+    assert_eq!(param_count(src), 1, "a declared edge survives an argument pass");
 }
