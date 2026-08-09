@@ -68,10 +68,12 @@ Verification apparatus (ADR-0013):
   ADR-0081 §8 scoped the strict-zero bar to the definite ids; triaged
   true positives among the definite ids are fingerprint-pinned
   (`EXPECTED_PROOF_FINDINGS`).
-- php-typing-conformance: 85/98. Remaining fails: one intended
-  (#14939 list semantics), the registered intentional silences
-  (ADR-0030), and the unimplemented queue below.
-- ~780 workspace tests; zero conformance regressions ever.
+- php-typing-conformance: 206/214 (re-measured 2026-08-09; the suite grew
+  past the 98-case denominator this line used to carry). Three fails are
+  registered refusals (ADR-0030), five are absent machinery reducing to
+  three capabilities — see M1's exit criteria below, which state the
+  standing in full.
+- ~4,180 workspace tests; zero conformance regressions ever.
 
 CLI (ADR-0020, partially landed):
 
