@@ -669,7 +669,7 @@ death, and the i64 domain ends); `crates/steins-infer/tests/`
 `int<0, max>` under the `!== false` guard, `int<1, max>|false` under
 `!== 0`, and the interior-point refusal under `!== 5`).
 
-## Note (2026-08-09): §6's stand-down clause, implemented (issue #266 slice 1)
+## Note (2026-08-09): §6's stand-down clause, implemented (issue #266 slice 1) — ratified 2026-08-09
 
 Completion of point 6, not new design. The clause was written into §6 with
 the guard-call retention — "the direct env-free pass stands down on spans
@@ -716,7 +716,7 @@ every shape as a decided/undecided pair, the Asserted-presence stratum pin,
 the short-circuiting chain, and the per-span (not per-call) proof that an
 identical call on a live path keeps firing.
 
-## Note (2026-08-09): a class-typed assert tag reaches the arm lane (issue #266 slice 2)
+## Note (2026-08-09): a class-typed assert tag reaches the arm lane (issue #266 slice 2) — ratified 2026-08-09
 
 Completion of point 5's consumption rule for the one type shape it could not
 carry, plus the §3(d) consumer it was always meant to feed. Not new design.
@@ -779,7 +779,7 @@ overwritten, no value fact is minted, and ADR-0029's prefix rule still gates
 the family.
 
 
-## Note (2026-08-09): a count comparison narrows the shape it counts (issue #272)
+## Note (2026-08-09): a count comparison narrows the shape it counts (issue #272) — ratified 2026-08-09
 
 New **narrowing vocabulary**, not a new carrier and not a return rung. The
 argument-dependent `count()` rung has read `ShapeFact::count_range` since
@@ -898,6 +898,37 @@ type violates the contract still admits `[]`, which the contract accepts, so
 the verdict was `Maybe`; a proven non-empty floor makes it a definite `No`. One
 further site keeps its finding with a sharpened rendering for the same reason
 (`array<array>` → `non-empty-array<array>`).
+
+**Ratified 2026-08-09, and four judgment calls inside it confirmed as ruled
+rather than left as implementation residue.** Each stays exactly as implemented:
+
+* The exhausted-key-set discharge on a sealed shape writes
+  `Presence::Required { witnessed: false }` and nothing stronger. `witnessed`
+  means the key was *observed*; a count comparison is arithmetic evidence about
+  how many entries exist, so the presence it forces is derived, not seen. A
+  consumer that needs an observation must keep asking for one.
+* **A count guard does not clear `nullable`.** `count(null)` raises a TypeError
+  rather than answering, and this lane reads a TypeError the way
+  `array_key_exists` on a null base is already read: the comparison having
+  produced a value is not something the fact lane may record as proof of
+  non-nullness. Narrowing it here would be a reachability argument in a
+  narrowing operator's clothing (§2), so the conservative reading stands.
+* **The lane-emptying refusal is scoped to `Count`, and the general rule is
+  untouched.** `subtract_shape_arms` still removes a binding from the contract
+  lane when every arm dies — an emptied lane under a structural guard means the
+  binding is out of vocabulary, which is the honest outcome. A count guard
+  refutes on arithmetic, so an emptied lane would instead assert that the branch
+  is unreachable, and that claim belongs to the verdict, not to a subtraction —
+  besides which the erasure would outlive the branch and reach the join. Only
+  the `Count` arm therefore leaves the lane whole; no other guard's behaviour
+  moves with it.
+* **A refuted `Singleton` widens to `plain_array()` narrowed by the interval,
+  not to a summary of the tail it lost.** The branch refutes the entry count,
+  which is precisely what the literal's keys and value types were evidence of,
+  so none of them survive as proof. "An array whose entry count lies in this
+  interval" is the whole of what is left, and it is still a narrowing. A literal
+  inside the interval keeps its proven value untouched, being sharper than any
+  shape.
 
 Fixtures: `crates/steins-infer/tests/count_guards.rs` — both polarities of the
 floor, the Yoda spelling, `sizeof`, the ceiling, the identity pin, the bounded
