@@ -402,3 +402,84 @@ fn a_surviving_literal_keeps_its_proven_value() {
         "dumped type: int<6, max>"
     );
 }
+
+// ---- `nullable` clearing (issue #289) --------------------------------------
+//
+// `count(null)` raises a `TypeError` — it does not answer `false`, it does not
+// fall through, it reaches neither branch of the guard. So reaching a branch
+// at all — whichever one — already proves the subject was not null on entry.
+// This is the mirror image of `array_key_exists`'s reading (that guard
+// *answers false* on a null base, which is a real answer the guard's false
+// branch is genuine evidence of); a raised exception is not an answer, so the
+// analogy the pre-#289 comment leaned on never carried.
+
+#[test]
+fn a_count_guard_clears_nullable_on_the_true_arm() {
+    assert_eq!(
+        guarded("array<int>|null", "count($v) > 0", "$v"),
+        "dumped type: non-empty-array<int> (asserted)"
+    );
+}
+
+#[test]
+fn a_count_guard_clears_nullable_on_the_false_arm_too() {
+    // The whole point: this is not a truthiness-style guard whose false arm is
+    // the one case (null is falsy too) that keeps the doubt. Both arms of a
+    // count comparison reach only after `count()` has already returned.
+    assert_eq!(
+        guarded_else("array<int>|null", "count($v) > 0", "$v"),
+        "dumped type: array<int> (asserted)"
+    );
+}
+
+#[test]
+fn a_countable_receiver_clears_nullable_identically() {
+    // The argument is about `count()`'s own null case, not about arrays:
+    // `count()` accepts any `Countable`, and a `Countable` arm survives a
+    // count comparison exactly as an array arm does (no shape to
+    // discriminate against) — but the `Null` arm dies just the same.
+    assert_eq!(
+        one_type(
+            "<?php\n/** @param \\Countable|null $v */\nfunction f(?\\Countable $v): void { if (count($v) > 0) { \\PHPStan\\dumpType($v); } }\n"
+        ),
+        "dumped type: Countable"
+    );
+}
+
+#[test]
+fn a_count_guard_on_an_unbound_subject_still_clears_nothing() {
+    // The mode argument (`COUNT_RECURSIVE`) makes this a different guard
+    // (issue #272's own refusal) — `count_guard` declines entirely, so no
+    // `ShapeGuard::Count` is ever built and there is nothing for the null-arm
+    // lift to reach. `nullable` stays exactly as declared.
+    assert_eq!(
+        guarded("array<int>|null", "count($v, COUNT_RECURSIVE) > 0", "$v"),
+        "dumped type: null|array<int> (asserted)"
+    );
+}
+
+#[test]
+fn a_catch_that_could_have_caught_the_guards_own_typeerror_proves_nothing() {
+    // `try`/`catch` stays `StmtKind::Opaque` in this engine (ADR-0027): the
+    // trace does not model its control flow, so the whole construct forgets
+    // what it reads and writes on entry rather than letting a catch body
+    // inherit a preceding guard's narrowing — and does not walk the catch
+    // body's own statements as part of this pass at all. A `catch
+    // (\TypeError)` sitting right after this guard could in principle be
+    // catching the guard's own `count($v)` call failing on a null `$v` — so
+    // `$v` must not read as proven non-null (or proven anything) inside it.
+    // This holds by construction here, not by a case added for issue #289 —
+    // the fixture pins it as a regression: a receiver method call inside the
+    // catch, which `call.on-null`/`call.on-non-object` would convict were
+    // `$v` wrongly read as a proven non-null array, produces no finding at
+    // all (the catch body is not analyzed here, so there is nothing for a
+    // wrongly-cleared `nullable` to leak into).
+    let src = "<?php\nclass C { public function m(): void {} }\n\
+               /** @param array<int>|null $v */\n\
+               function f(array $v = null): void {\n\
+               try {\n    if (count($v) > 0) {\n    }\n} catch (\\TypeError $e) {\n    $v->m();\n}\n\
+               }\n";
+    let ds: Vec<Diagnostic> =
+        diagnostics(src).into_iter().filter(|d| !d.id.starts_with("debug.")).collect();
+    assert!(ds.is_empty(), "the catch body must prove nothing about $v: {ds:?}");
+}

@@ -25424,8 +25424,19 @@ fn shape_arm_survives(g: &ShapeGuard, ty: &ContractTy, php_minor: Option<(u16, u
         // admitted arrays can have a count in `range` cannot be the live one.
         // `array{}` dies under `count($x) > 0`; `array<int>` survives it, since
         // its interval is `int<0, max>`. A non-array arm keeps its place —
-        // `count()` accepts a `Countable`, whose entry count no shape bounds.
+        // `count()` accepts a `Countable`, whose entry count no shape bounds —
+        // EXCEPT the `Null` arm, which dies unconditionally (issue #289):
+        // `count(null)` raises a `TypeError`, so reaching this branch at all —
+        // whichever polarity — already proves the subject was not null. This
+        // is arithmetic reachability (ADR-0052 §2 territory in spirit, but not
+        // a death verdict — only this one arm of the union is refuted, exactly
+        // as any other arm-discriminating guard here refutes an arm), not a
+        // structural claim about the count itself, so it is decided before
+        // `to_shape_fact` is even consulted.
         ShapeGuard::Count { range, .. } => {
+            if matches!(ty, ContractTy::Null) {
+                return false;
+            }
             shape.is_none_or(|s| s.count_range().intersect(*range).is_some())
         }
         // **Covers on arms are future work** (A-G8's home for them is inside the
@@ -25651,12 +25662,19 @@ fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>, witnessed
             // exactly the reading `Present { positive: true }` already takes.
             nullable: nullable && *flavor == PresenceFlavor::KeyExists,
         }),
-        // The count accessory (issue #272). `nullable` is deliberately NOT
-        // cleared: `count(null)` raises a TypeError rather than answering, so —
-        // exactly as `array_key_exists` reads on a null base — the comparison
-        // having a value proves nothing this lane may record.
+        // The count accessory (issue #272, lifted by issue #289). `nullable` IS
+        // cleared here, on both arms. `count(null)` raises a `TypeError` —
+        // reaching *either* branch at all means the call returned, which means
+        // the subject was not null: the exception reaches neither the true nor
+        // the false arm, so both prove non-null. This is the mirror image of
+        // `array_key_exists`'s reading (`Present`, above): that guard *answers
+        // false* on a null base, so its false-answering tells the analysis
+        // nothing about nullness; `count()` on a null base never answers at
+        // all, and the branch existing is itself the proof. Treating the two
+        // alike was the argued-backwards reading ADR-0052's 2026-08-09 count
+        // note recorded and issue #289 lifts.
         ShapeGuard::Count { range, .. } => {
-            Some(Fact::Shape { shape: Box::new(shape.narrow_count(*range)), nullable })
+            Some(Fact::Shape { shape: Box::new(shape.narrow_count(*range)), nullable: false })
         }
         // A tag guard's job is arm subtraction; the collapsed arm's own slot is
         // already the declared literal, so refining the fact adds nothing v1.
