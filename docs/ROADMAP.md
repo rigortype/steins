@@ -63,8 +63,11 @@ Verification apparatus (ADR-0013):
 - fp-gate: runtime layer zero-FP over 90,709 corpus files (10 pinned
   OSS packages + a private legacy monorepo injected via
   `corpus.local.toml`). `phpdoc.*` (488) and `throw.*` (44,164) are
-  increase-tripwires in measurement mode; triaged true positives are
-  fingerprint-pinned (`EXPECTED_PROOF_FINDINGS`).
+  increase-tripwires in measurement mode, and so are the
+  **possibly-grade** proof ids (`Layer::Proof` + `Floor::Strict`) since
+  ADR-0081 §8 scoped the strict-zero bar to the definite ids; triaged
+  true positives among the definite ids are fingerprint-pinned
+  (`EXPECTED_PROOF_FINDINGS`).
 - php-typing-conformance: 85/98. Remaining fails: one intended
   (#14939 list semantics), the registered intentional silences
   (ADR-0030), and the unimplemented queue below.

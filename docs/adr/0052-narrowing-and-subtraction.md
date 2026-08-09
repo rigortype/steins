@@ -669,7 +669,7 @@ death, and the i64 domain ends); `crates/steins-infer/tests/`
 `int<0, max>` under the `!== false` guard, `int<1, max>|false` under
 `!== 0`, and the interior-point refusal under `!== 5`).
 
-## Note (2026-08-09): §6's stand-down clause, implemented (issue #266 slice 1)
+## Note (2026-08-09): §6's stand-down clause, implemented (issue #266 slice 1) — ratified 2026-08-09
 
 Completion of point 6, not new design. The clause was written into §6 with
 the guard-call retention — "the direct env-free pass stands down on spans
@@ -716,7 +716,7 @@ every shape as a decided/undecided pair, the Asserted-presence stratum pin,
 the short-circuiting chain, and the per-span (not per-call) proof that an
 identical call on a live path keeps firing.
 
-## Note (2026-08-09): a class-typed assert tag reaches the arm lane (issue #266 slice 2)
+## Note (2026-08-09): a class-typed assert tag reaches the arm lane (issue #266 slice 2) — ratified 2026-08-09
 
 Completion of point 5's consumption rule for the one type shape it could not
 carry, plus the §3(d) consumer it was always meant to feed. Not new design.
@@ -779,7 +779,7 @@ overwritten, no value fact is minted, and ADR-0029's prefix rule still gates
 the family.
 
 
-## Note (2026-08-09): a count comparison narrows the shape it counts (issue #272)
+## Note (2026-08-09): a count comparison narrows the shape it counts (issue #272) — ratified 2026-08-09
 
 New **narrowing vocabulary**, not a new carrier and not a return rung. The
 argument-dependent `count()` rung has read `ShapeFact::count_range` since
@@ -899,6 +899,37 @@ the verdict was `Maybe`; a proven non-empty floor makes it a definite `No`. One
 further site keeps its finding with a sharpened rendering for the same reason
 (`array<array>` → `non-empty-array<array>`).
 
+**Ratified 2026-08-09, and four judgment calls inside it confirmed as ruled
+rather than left as implementation residue.** Each stays exactly as implemented:
+
+* The exhausted-key-set discharge on a sealed shape writes
+  `Presence::Required { witnessed: false }` and nothing stronger. `witnessed`
+  means the key was *observed*; a count comparison is arithmetic evidence about
+  how many entries exist, so the presence it forces is derived, not seen. A
+  consumer that needs an observation must keep asking for one.
+* **A count guard does not clear `nullable`.** `count(null)` raises a TypeError
+  rather than answering, and this lane reads a TypeError the way
+  `array_key_exists` on a null base is already read: the comparison having
+  produced a value is not something the fact lane may record as proof of
+  non-nullness. Narrowing it here would be a reachability argument in a
+  narrowing operator's clothing (§2), so the conservative reading stands.
+* **The lane-emptying refusal is scoped to `Count`, and the general rule is
+  untouched.** `subtract_shape_arms` still removes a binding from the
+  contract lane when every arm dies — an emptied lane under a structural
+  guard means the binding is out of vocabulary, which is the honest outcome.
+  A count guard refutes on arithmetic, so an emptied lane would instead
+  assert that the branch is unreachable, and that claim belongs to the
+  verdict, not to a subtraction — besides which the erasure would outlive
+  the branch and reach the join. Only the `Count` arm therefore leaves the
+  lane whole; no other guard's behaviour moves with it.
+* **A refuted `Singleton` widens to `plain_array()` narrowed by the interval,
+  not to a summary of the tail it lost.** The branch refutes the entry count,
+  which is precisely what the literal's keys and value types were evidence of,
+  so none of them survive as proof. "An array whose entry count lies in this
+  interval" is the whole of what is left, and it is still a narrowing. A literal
+  inside the interval keeps its proven value untouched, being sharper than any
+  shape.
+
 Fixtures: `crates/steins-infer/tests/count_guards.rs` — both polarities of the
 floor, the Yoda spelling, `sizeof`, the ceiling, the identity pin, the bounded
 variable, the sealed exact-count pin beside its unsealed complement, the
@@ -908,3 +939,58 @@ pinned silent, the unguarded literal still convicting, and a surviving literal
 keeping its proven value); `crates/steins-domain/src/shape.rs` — the
 accessory's meet, join, clamp and contradiction-widening, and its extensional
 reading in `admits`.
+
+## Note (2026-08-09): a type may be read as a value only when it denotes exactly one value (issue #260) — ratified 2026-08-09
+
+The comparison-operand slice reads a declared contract arm as a *value*:
+`cmp_operand_candidates` falls back to the arm lane when the proven lane has
+no candidates, and `contract_literal_value` turns each arm into an
+`ArgValue`. The literal arms are unremarkable — `ContractTy::LitInt(1)`
+denotes `1` and there is nothing to argue about. One row is not: a `Shape`
+that is sealed, field-less, not `non_empty` and carries no unsealed tail is
+read as the value `[]`. That is the only place in the engine where a *type*
+is read as a *value*, and the owner ratified it together with the boundary
+that explains why it is not an exception.
+
+**The rule, general.** The projection from a type to a value is admissible
+exactly when the type's denotation is a **singleton set** — when the type
+admits one value and no other. `array{}` qualifies: sealed says no key
+beyond the declared ones, field-less says there are no declared ones, and
+not-`non-empty` is the third condition rather than a redundancy, so the set
+of admitted arrays has exactly one member. `int<1, 1>` would qualify for the
+same reason and may be added when a consumer wants it. `non-empty-string`
+and `array<int>` do not, and no amount of narrowness makes them: a set with
+two members has no value to project to, and picking a representative would
+be a guess of the kind "silence over guess" exists to refuse. This is why
+the rule is stated as a denotational test and not as a list of accepted
+`ContractTy` constructors — a future constructor is admitted by proving its
+denotation is a singleton, which is an argument someone has to make, not a
+pattern someone can add.
+
+**Why this note lives here and not in ADR-0061.** ADR-0061 governs the
+argument-dependent return ladder — what a *builtin call* computes from its
+arguments — and this projection is not a rung on it: no builtin is involved,
+the consumer is a comparison operand, and the result is a candidate set for
+a verdict rather than a return fact. The governing precedent is this ADR's
+2026-08-01 amendment, which established that a consumer may read the
+declared arm lane where the value lane holds nothing sharper, at the
+declaration's own stratum, and said in the same breath that **a projection
+is justified per-consumer, not granted globally**. Issue #260 is the second
+consumer to claim it, and the singleton-denotation test is the general form
+of the licence: the 2026-08-01 amendment projects an arm list to *one fact*,
+this one projects an arm to *one value*, and both refuse where the
+projection would have to choose.
+
+**Two limits, both load-bearing.** The projection stays at the **fact
+seam**: the candidates enter at the arms' own (minimum) stratum, so a
+declaration-backed comparison is `Asserted` and can premise a contract-layer
+finding and nothing more. `resolve_literal` — the proof-layer seam — must
+not see it, and does not: the arm lane is read in `cmp_operand_candidates`
+alone, and a value that reached the proof layer through this road would be a
+docblock forging a proof (point 5, ADR-0037). And the forthcoming
+**family-lift** slice — the one that takes the operator-value node past
+comparisons to the arithmetic and bitwise operators issue #260 left
+declining — **may not widen this projection without a new ruling**. Lifting
+it to more `ContractTy` constructors, to more consumers, or past the fact
+seam is each a separate decision, and the singleton-denotation test is the
+bar every one of them has to clear.

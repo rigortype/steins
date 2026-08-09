@@ -20,6 +20,10 @@ registry attribute and the printed surface a named, deliberate choice.
      live path. Held to the zero-FP bar; gates red on sight (ADR-0013).
      Today: `type.argument-mismatch`, `type.return-mismatch`,
      `type.property-mismatch`, `call.on-null`, `readonly.reassigned`.
+     Scoped 2026-08-09: red-on-sight is the bar for the **definite** proof
+     ids. A proof id registered at the `Strict` floor is possibly-grade — a
+     partial-path claim, off every default run — and gates on non-increase
+     instead (ADR-0081 §8).
    - **contract** — declared-contract acceptance: a proven behavior
      violates something the code *declares* about itself; the program
      works. True findings legitimately abound in released code. Today:

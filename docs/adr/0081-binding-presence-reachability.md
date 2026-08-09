@@ -1,7 +1,12 @@
 # Binding presence: a lowering-side reachability pass for the maybe-undefined pair
 
-Issue #267. Status: PENDING ratification (autonomous design under the owner's
-standing delegation; implementation may proceed, the owner ratifies post hoc).
+Issue #267. Status: **accepted 2026-08-09, owner-ratified.** Drafted under the
+owner's standing delegation and then amended by the implementer with what the
+corpus forced — the path-correct `try`/`catch`/`finally` rule that supersedes
+the draft's uniform one, `match` and `?:` as leaf units, the `goto` dam, the
+out-parameter-only residue, the §8 gate posture, and the never-returning-callee
+deferral of §9. All of it is ratified as written; the amendments are the
+decision, not a note on it.
 
 ## Problem
 
@@ -201,6 +206,39 @@ use-before-assign shape (`$y = $x; $x = 1;`) both fall through it today.
    definite ids, where the standing bar remains a strict zero; the eleven
    `type.return-maybe-missing` rows already pinned there move into the new
    bucket's counts, since they were that shape all along.
+
+   **This is a scoped reading of the zero-FP identity, and the owner ratified
+   it as such on 2026-08-09.** ADR-0002 promises that the proof layer reports
+   only what provably breaks on a live path, and ADR-0050 §1 restates it as
+   "held to the zero-FP bar; gates red on sight". Read without a scope, that
+   sentence says a proof-layer finding on working code is a defect of the
+   analyzer. The ruling narrows it: **the strict-zero promise covers the proof
+   layer's *definite* ids.** A possibly-grade id does not claim the program
+   breaks; it claims that *a* path reaching this site carries no binding, no
+   returned value, no proof — a partial-path claim, and it declares itself one
+   at registration, by taking the `Strict` floor rather than a default-profile
+   one. Holding a partial-path claim to a bar written for a total one would
+   force the choice the owner's calibration rule forbids: ship no check, or
+   ship it with its floor and then let a clean corpus veto it anyway. The floor
+   *is* the opt-in that absorbs the tolerance; the gate's job for these ids is
+   therefore **non-increase**, not zero.
+
+   The scope is a floor, not a family: it is not "ids spelled `maybe-`" and not
+   "ids in this ADR". Concretely, the bucket holds
+   `variable.maybe-undefined`, `property.maybe-undefined` and
+   `type.return-maybe-missing` today, because those are the three registry rows
+   that are `Layer::Proof` *and* `Floor::Strict`. `offset.maybe-missing` is
+   **not** in it despite the spelling: it registers as `Layer::Contract`, so it
+   was already a measurement-mode id under the contract bucket and nothing here
+   moves it. The derivation is the guarantee — an id joins or leaves this
+   posture by its registered layer and floor changing, which is an ADR-visible
+   act, and never by a list being edited.
+
+   Nothing else about the banner moves. Every definite proof id keeps the
+   red-on-sight bar; the default profile still prints exactly the
+   proven-runtime-break set, since a `Strict`-floored id is absent from it by
+   construction; and a possibly-grade id that fires on a **default** run would
+   be a bug in the floor, not an exercise of this exception.
 
 ## Non-goals, each one line
 

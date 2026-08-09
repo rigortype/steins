@@ -10,6 +10,12 @@ not adopted — levels make "what will be reported" opaque and would import
 PHPStan's level culture wholesale; adoption cost is absorbed by a baseline
 mechanism instead.
 
+One scope on the zero-FP sentence, ratified 2026-08-09: it covers the proof
+layer's **definite** ids. A possibly-grade id — proof layer, `Strict`
+floor — makes a partial-path claim, is off every default run, and is held
+to non-increase rather than to zero; see ADR-0081 §8 for the ruling and
+the membership rule.
+
 Consequence accepted explicitly: `width("5")` on a coercive-mode `int`
 parameter is **silent by default** (it works at runtime), while `width("abc")`
 is a proof-layer finding (proven `TypeError`). Value-precise analysis
