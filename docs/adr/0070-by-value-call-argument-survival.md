@@ -239,3 +239,55 @@ bare `array` floor to a structured answer without reaching match — their
 remaining distance is `slice_widening` precision (`$preserve_keys`,
 zero-length slices), not survival. Per §6, the kept fact is a new
 premise and the fp-gate remains the standing instrument.
+
+## Amendment (2026-08-09): a heap object handle passed by value survives (issue #295)
+
+Condition 3 refused every object binding, and the code that implemented
+it said why in one sentence: *class identity is not the reason the heap
+lane refuses — a by-value call cannot change what class an object is —
+the object's own mutable state is.* The refusal therefore threw away a
+fact it had no quarrel with in order to discard one that a different
+mechanism was already discarding.
+
+**The mutable state is swept without this drop.** Handing an object to a
+call runs the ADR-0036 escape-and-sweep in the same statement, *before*
+step 4's invalidation: the object is marked escaped and its non-readonly
+props are swept. What condition 3's drop removed on top of that was the
+var→id link — the allocation identity, which carries the exact class, the
+`readonly` bookkeeping, and (issue #295) the class-level generic carry.
+None of those is reachable from a by-value callee.
+
+**The one route that could rebind is already refused.** A `&$x` parameter
+is condition 2's job and it condemns the name for the whole statement; a
+callee body reaching a caller local sideways (`global`, `extract`, `$$v`,
+`eval`) is condition 4's, applied to both sides. So a name every
+occurrence of which is a proven by-value argument cannot be rebound, which
+is exactly what a surviving handle claims.
+
+**This was a stated deferral, not a new idea.** The regression that pinned
+the drop (`by_value_pass_of_object_var_loses_class_fact_conservatively`)
+recorded its own precondition verbatim: *"Recovering it requires proving
+the resolved callee's parameter at that position is not by-ref (deferred —
+not implemented now)."* `arg_is_by_value` is that proof, and it has been
+in the tree since this ADR landed. The amendment collects a debt this ADR
+itself made collectible; the test is renamed and inverted rather than
+deleted, so the by-ref twin beside it still pins the refusing direction.
+
+**What does not follow.** A bare guard-derived class bound (`Member` with
+no heap object behind it) keeps refusing. The same argument would carry
+it, but its consumer set is different and nothing in issue #295 needs it;
+lifting it is a separate measurement.
+
+**Why now.** Issue #295 carries class-level generic type arguments on the
+allocation, so the conformance case's shape —
+`$box = new MutableBox(1); takesIntBox($box); takesStringBox($box);` —
+reads the carry one statement after the object was handed to a call. Under
+the old condition 3 the second call saw no object at all, so the carry was
+unreachable there for the same reason the exact class was: not because
+anything doubted it, but because nobody had spent the deferral.
+
+Per §6, the kept fact is a new premise and the fp-gate remains the
+standing instrument.
+
+**Status: PENDING ratification.** Designed autonomously under the owner's
+standing delegation, alongside the ADR-0032 binding amendment it unblocks.

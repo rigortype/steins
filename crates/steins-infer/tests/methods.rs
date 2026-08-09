@@ -258,15 +258,17 @@ fn by_ref_rebinding_of_object_var_is_silent() {
 }
 
 #[test]
-fn by_value_pass_of_object_var_loses_class_fact_conservatively() {
-    // The precision-loss twin: `log_it($x)` takes `$x` by value and cannot rebind
-    // it, so `$x->m("abc")` would still be a real error — but the checker cannot
-    // tell by-value from by-ref without callee-signature awareness, so it
-    // conservatively drops the class fact here too. Silent (a missed finding, the
-    // FP-safe side). Recovering it requires proving the resolved callee's
-    // parameter at that position is not by-ref (deferred — not implemented now).
+fn by_value_pass_of_object_var_keeps_the_class_fact() {
+    // The precision-loss twin, recovered (ADR-0070 amendment, issue #295).
+    // `log_it($x)` takes `$x` by value and cannot rebind it, so `$x->m("abc")` is a
+    // real error — and the deferral this test used to pin ("proving the resolved
+    // callee's parameter at that position is not by-ref") is exactly what
+    // `arg_is_by_value` now proves. The object's mutable *state* still dies, swept
+    // by the ADR-0036 escape earlier in the same statement; its identity does not.
     let src = "<?php\nclass Foo { public function m(int $w): void {} }\nfunction log_it($o): void {}\n$x = new Foo();\nlog_it($x);\n$x->m(\"abc\");\n";
-    assert_eq!(n(src), 0, "by-value pass conservatively drops the class fact → silent");
+    assert_eq!(n(src), 1, "a by-value pass cannot rebind $x → the class fact survives");
+    // The by-ref twin above is unaffected: `swap(&$x)` refuses at condition 2, so
+    // the fact still dies there. (`by_ref_rebinding_of_object_var_is_silent`.)
 }
 
 #[test]
