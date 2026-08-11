@@ -28,7 +28,7 @@ whole surface to stderr and exits `2`:
 $ steins
 usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-php] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
        steins annotate [--no-php] [--format text|json] <file.php>
-       steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--format text|json] <paths...>
+       steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|effects-envelope|loop-to-array-map> [--apply] [--format text|json] <paths...>
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
        steins doctor [--no-php] [--baseline <path>] [--format text|json] [path]
        steins mcp
@@ -519,11 +519,11 @@ Plan — and optionally apply — a source-to-source rewrite. Dry-run by
 default.
 
 ```
-steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map>
+steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|effects-envelope|loop-to-array-map>
                  [--apply] [--config <path>] [--format text|json] <paths...>
 ```
 
-Four transforms:
+Five transforms:
 
 - **`phpdoc-to-native`** promotes a PHPDoc `@param`/`@return` type to a
   native declaration when every call site proves the native hint cannot
@@ -536,6 +536,18 @@ Four transforms:
   when absent, appending to it losslessly when present — so a repo can adopt
   the `throws-direct` and `contracts` profiles by running one command
   instead of hand-writing envelopes.
+- **`effects-envelope`** seeds the interop envelopes of ADR-0082 from proven
+  effects — the effect-world sister of `throws-envelope`. A declaration whose
+  inferred effects are *exhaustive* gets `@phpstan-impure <labels>` (the
+  declared lane folded in, prefix-subsumed labels dropped, comma-space
+  separated); a class whose every declared method is provenly and exhaustively
+  pure gets `@phpstan-all-methods-pure` and no method tags. It writes nothing
+  where a tag would be a lie or a no-op: a non-exhaustive declaration is
+  refused, no bare tag is ever written, no per-declaration `@phpstan-pure` is
+  ever written, and a declaration carrying the checked spelling
+  (`#[\Steins\Effect]` / `#[\Steins\Pure]`) is skipped. An envelope already
+  stating the same bound is left alone; one stating a different bound is
+  corrected in place.
 - **`loop-to-array-map`** rewrites an append loop to `array_map` when the
   engine *proves* the loop body has no effects and cannot throw.
 
@@ -635,15 +647,16 @@ line, so that no docblock can go above it without rewriting bytes that are
 not its own, refuses `declaration-mid-line`. Those four names are the whole
 refusal taxonomy for this transform.
 
-Unlike the other three transforms, `throws-envelope` consults no vouch valve:
-a proven escape is a forward fact of the declaration's own body and callees,
-so the dynamic-code obstacles that make "all callers proven" unknowable have
-no bearing on it. A `[transform.vouch]` section is simply inert for this
-transform, and no per-entry no-op warning is printed for it.
+Neither envelope-seeding transform consults the vouch valve: a proven escape
+(or a proven effect) is a forward fact of the declaration's own body and
+callees, so the dynamic-code obstacles that make "all callers proven"
+unknowable have no bearing on them. A `[transform.vouch]` section is simply
+inert for `throws-envelope` and `effects-envelope`, and no per-entry no-op
+warning is printed for either.
 
-The post-check for `throws-envelope` is measured on the **default** display
-surface — proof and mechanics, what a bare `check` reports — and it is the
-only transform for which that is true. `phpdoc-to-native`,
+The post-check for `throws-envelope` and `effects-envelope` is measured on the
+**default** display surface — proof and mechanics, what a bare `check` reports.
+They are the only two transforms for which that is true. `phpdoc-to-native`,
 `phpdoc-honesty`, and `loop-to-array-map` are measured against every layer,
 contract included.
 
@@ -655,10 +668,21 @@ against the contract layer, a correct seed would veto itself and refuse to
 write. That finding is existing debt the envelope makes visible — run
 `check --profile contracts` after seeding to see it — not a regression.
 
+An emitted interop envelope is the same story one system over: it is exactly
+what gives `effect.envelope-exceeded` something to check.
+
 The other three have no such property: a promotion or an honesty repair is
 not meant to change what a docblock promises, and a loop rewrite does not
 touch a docblock at all, so a new `phpdoc.*` finding after their edit is a
 regression and still blocks the write.
+
+`effects-envelope` refuses by name too: `effects-not-exhaustive` (inference
+could not close the effect set, so no label list is an upper bound),
+`attribute-envelope` (the declaration already carries the checked spelling),
+`already-declared` (the same bound is written — the second run of the
+transform), plus the two shared docblock-mechanics names above. A pure
+declaration is not a candidate at all: no per-declaration `@phpstan-pure` is
+ever written.
 
 `loop-to-array-map` is the first transform whose precondition is an
 *effect* judgment rather than a type one. It rewrites

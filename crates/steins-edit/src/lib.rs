@@ -27,6 +27,12 @@
 //! - [`envelope`] — the third transform, `@throws` envelope seeding (issue #115
 //!   / ADR-0040): writes the proven-escape set behind `throw.undeclared` as
 //!   declared `@throws` tags, creating or losslessly extending docblocks.
+//! - [`effects_envelope`] — the fifth transform, interop-envelope emission
+//!   (issue #303 / ADR-0082 §7): the sister of [`envelope`], writing the proven
+//!   effect *bound* as upstream's parameterized purity tags — a per-declaration
+//!   `@phpstan-impure <labels>` where inference is exhaustive, a class-level
+//!   `@phpstan-all-methods-pure` where every declared method is provenly pure,
+//!   and nothing at all anywhere a tag would be a lie or a no-op.
 //! - [`loops`] — the fourth transform, loop→`array_map` (ADR-0076 / ADR-0010's
 //!   flagship): the first **effect-preconditioned** rewrite, gated on the engine
 //!   *proving* the loop body's effect lane and throw set empty. Where the phpdoc
@@ -38,6 +44,7 @@
 
 pub mod common;
 pub mod diff;
+pub mod effects_envelope;
 pub mod envelope;
 pub mod honesty;
 pub mod loops;
@@ -48,6 +55,7 @@ pub mod regions;
 pub mod transform;
 
 pub use diff::unified_diff;
+pub use effects_envelope::{EffectsEnvelope, plan_effects_envelope};
 pub use envelope::{ThrowsEnvelope, plan_throws_envelope};
 pub use honesty::{PhpdocHonesty, plan_phpdoc_honesty};
 pub use loops::{LoopToArrayMap, LoopToArrayMapOptions, plan_loop_to_array_map};

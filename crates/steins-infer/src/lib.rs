@@ -19,6 +19,7 @@
 //! working unchanged; [`check_project`] / [`annotate_project`] run over many.
 
 pub mod dam;
+pub mod effects;
 pub mod escapes;
 pub mod profile;
 pub mod promote;

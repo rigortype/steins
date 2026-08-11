@@ -1,5 +1,6 @@
-//! End-to-end CLI tests for `steins transform` (ADR-0020/0034) — all three
-//! transforms. Dry-run prints a diff + refusal report and never writes;
+//! End-to-end CLI tests for `steins transform` (ADR-0020/0034) — every
+//! docblock-writing transform (`loop-to-array-map` has its own file). Dry-run
+//! prints a diff + refusal report and never writes;
 //! `--apply` writes only after the dual-verification post-check passes, which is
 //! measured on the default display surface (issue #115).
 
@@ -534,6 +535,98 @@ fn throws_envelope_json_format_emits_report_and_postcheck() {
     proj.write("lib.php", "<?php\nfunction f(): void { throw new \\RuntimeException(\"boom\"); }\n");
 
     let r = run(&["transform", "throws-envelope", "--format", "json", proj.path()]);
+    assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
+    let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid json");
+    assert_eq!(v["report"]["oracle"]["enumerated"], 1);
+    assert_eq!(v["report"]["oracle"]["transformed"], 1);
+    assert_eq!(v["postcheck"]["ok"], true);
+    assert_eq!(v["applied"], false);
+    assert_eq!(v["report"]["plan"]["edits"].as_array().unwrap().len(), 1);
+}
+
+// ---- effects-envelope (Transform #5, issue #303 / ADR-0082 §7) -------------
+
+#[test]
+fn effects_envelope_dry_run_prints_diff_and_does_not_write() {
+    let proj = TempProject::new("effects-dryrun");
+    let lib_before = "<?php\nfunction f(): void { file_put_contents(\"/x\", \"y\"); }\n";
+    proj.write("lib.php", lib_before);
+
+    let r = run(&["transform", "effects-envelope", proj.path()]);
+    assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
+    assert!(
+        r.stdout.contains("+ * @phpstan-impure io.fs.write"),
+        "diff missing the written envelope:\n{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("1 enumerated: 1 seeded, 0 refused"), "oracle line:\n{}", r.stdout);
+    assert!(r.stdout.contains("Post-check OK"), "postcheck:\n{}", r.stdout);
+    assert_eq!(proj.read("lib.php"), lib_before, "a dry run writes nothing");
+}
+
+#[test]
+fn effects_envelope_apply_writes_and_a_second_run_is_a_noop() {
+    let proj = TempProject::new("effects-idempotent");
+    proj.write("lib.php", "<?php\nfunction f(): void { file_put_contents(\"/x\", \"y\"); }\n");
+
+    let first = run(&["transform", "effects-envelope", "--apply", proj.path()]);
+    assert_eq!(first.code, 0, "stderr:\n{}", first.stderr);
+    let written = proj.read("lib.php");
+    assert!(written.contains(" * @phpstan-impure io.fs.write"), "not written on disk:\n{written}");
+
+    // Idempotence (ADR-0082 §7): the second run enumerates the same candidate
+    // and refuses `already-declared` — never a rewrite.
+    let second = run(&["transform", "effects-envelope", "--apply", proj.path()]);
+    assert_eq!(second.code, 0, "stderr:\n{}", second.stderr);
+    assert!(
+        second.stdout.contains("1 enumerated: 0 seeded, 1 refused"),
+        "oracle line:\n{}",
+        second.stdout
+    );
+    assert!(second.stdout.contains("already-declared"), "refusal reason:\n{}", second.stdout);
+    assert_eq!(proj.read("lib.php"), written, "the second run must not touch the file");
+}
+
+/// The written envelope is a contract the analyzer then *checks*: a repo can
+/// adopt the effect layer with one command and have the tags be real bounds.
+#[test]
+fn effects_envelope_writes_a_bound_the_checker_reads_back() {
+    let proj = TempProject::new("effects-adoption");
+    proj.write(
+        "lib.php",
+        "<?php\nclass C {\n    public function get(): int { return 1; }\n}\n",
+    );
+
+    let r = run(&["transform", "effects-envelope", "--apply", proj.path()]);
+    assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
+    let out = proj.read("lib.php");
+    assert!(out.contains(" * @phpstan-all-methods-pure"), "class tag written:\n{out}");
+    assert!(!out.contains("@phpstan-pure"), "no per-method pure tag is ever written:\n{out}");
+
+    // The emitted claim is true, so the checked project stays clean.
+    let check = run(&["check", "--no-php", proj.path()]);
+    assert_eq!(check.code, 0, "stdout:\n{}\nstderr:\n{}", check.stdout, check.stderr);
+}
+
+#[test]
+fn effects_envelope_non_exhaustive_refuses_and_writes_nothing() {
+    let proj = TempProject::new("effects-nonexhaustive");
+    let before = "<?php\nfunction f(): void { file_put_contents(\"/x\", \"y\"); some_unknown_fn(); }\n";
+    proj.write("lib.php", before);
+
+    let r = run(&["transform", "effects-envelope", "--apply", proj.path()]);
+    assert_eq!(r.code, 0, "a refusal is not a failure; stderr:\n{}", r.stderr);
+    assert!(r.stdout.contains("effects-not-exhaustive"), "refusal reason:\n{}", r.stdout);
+    assert!(r.stdout.contains("0 seeded, 1 refused"), "oracle:\n{}", r.stdout);
+    assert_eq!(proj.read("lib.php"), before);
+}
+
+#[test]
+fn effects_envelope_json_format_emits_report_and_postcheck() {
+    let proj = TempProject::new("effects-json");
+    proj.write("lib.php", "<?php\nfunction f(): void { file_put_contents(\"/x\", \"y\"); }\n");
+
+    let r = run(&["transform", "effects-envelope", "--format", "json", proj.path()]);
     assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
     let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid json");
     assert_eq!(v["report"]["oracle"]["enumerated"], 1);
