@@ -20,10 +20,30 @@
 //! | non-exhaustive summary | nothing (`effects-not-exhaustive`) |
 //! | pure function / method | nothing — no per-declaration `@phpstan-pure` is ever written |
 //! | declaration carries `#[\Steins\Effect]` / `#[\Steins\Pure]` | nothing (`attribute-envelope`) |
+//! | a tag is already written that the registry cannot read | nothing (`existing-tag-unreadable`) |
+//! | the computed bound names a label the registry does not know | nothing (`bound-label-unknown`) |
 //!
 //! A bare tag is never written in either family: a bare `@phpstan-impure` is ⊤,
 //! which is exactly what the absence of information already means (ADR-0082 §3),
 //! so writing one is docblock litter.
+//!
+//! ## What is already written may be prose (the 2026-08-12 ruling)
+//!
+//! A writer has to read first, and it reads through the **live** label registry —
+//! builtin labels plus this project's plugin registrations — via
+//! [`steins_infer::effects::existing_envelope`], which is the analyzer's own
+//! classification rather than a second opinion. Under the owner's ruling a tag
+//! carrying any label the registry does not know is *unspecified*, whole: current
+//! PHPStan discards everything after `@phpstan-impure`, so `@phpstan-impure
+//! database` is most likely a human's one-word note, and `@phpstan-impure io.netw`
+//! is indistinguishable from one. Neither is a stale bound to correct. Such a site
+//! is refused by name and **nothing** is written there — not a replacement, not a
+//! second tag beside it.
+//!
+//! The rule runs in the other direction too: the transform refuses to write a bound
+//! containing a label the registry does not know, because that tag would read back
+//! as prose rather than as the claim it meant. The two rules together are what make
+//! the round trip closed.
 //!
 //! ## The bound, and what "pure" means here
 //!
@@ -42,11 +62,11 @@
 //!
 //! ## Idempotence
 //!
-//! A declaration already carrying an interop envelope stating the same normalized
-//! bound refuses `already-declared`. One stating a different bound has that tag's
-//! text replaced in place — the transform makes docblocks honest, the way
-//! [`crate::honesty`] rewrites a lying `@param`. Running the transform on its own
-//! output is therefore a no-op, and a test pins it.
+//! A declaration already carrying a *readable* interop envelope stating the same
+//! normalized bound refuses `already-declared`. One stating a different readable
+//! bound has that tag's text replaced in place — the transform makes docblocks
+//! honest, the way [`crate::honesty`] rewrites a lying `@param`. Running the
+//! transform on its own output is therefore a no-op, and a test pins it.
 //!
 //! ## Post-check surface
 //!
@@ -55,8 +75,11 @@
 //! `effect.envelope-exceeded` something to check), so measuring it against the
 //! contract layer would let a correct emission veto its own success.
 
-use steins_db::{Db, Project, SourceFile, parse};
-use steins_infer::effects::{DeclEffects, EffectSweep, normalize_labels, sweep_effects};
+use steins_db::{Db, PluginFacts, Project, SourceFile, parse};
+use steins_infer::effects::{
+    DeclEffects, EffectSweep, ExistingEnvelope, existing_envelope, normalize_labels, sweep_effects,
+    unknown_labels,
+};
 use steins_phpdoc::ast::Span as DocSpan;
 use steins_phpdoc::{DocTag, EnvelopeTag, TagKind, scan_docblock};
 use steins_syntax::{ClassDecl, MethodDecl, Span, SourceTree};
@@ -81,6 +104,19 @@ pub const REASON_ALREADY_DECLARED: &str = "already-declared";
 /// method is enough: the class claim would speak for a method whose author already
 /// wrote the authoritative bound.
 pub const REASON_ATTRIBUTE_ENVELOPE: &str = "attribute-envelope";
+/// An interop-envelope tag is already written here and the run's label registry
+/// cannot read it as a bound — an unknown label collapses the whole tag to ⊤ (the
+/// owner's 2026-08-12 ruling), and a bare class-level `all-methods-impure` says ⊤
+/// outright. Those bytes are not a stale bound to correct: current PHPStan
+/// discards everything after `@phpstan-impure`, so `@phpstan-impure database` is
+/// most likely a human's note. The transform writes **nothing** at such a site —
+/// no replacement, no second tag — and says so by name.
+pub const REASON_EXISTING_TAG_UNREADABLE: &str = "existing-tag-unreadable";
+/// The bound the engine computed contains a label the run's registry does not
+/// know, so the tag this transform would write reads back as prose (⊤) rather than
+/// as the bound it meant. Writing a claim we cannot re-read is worse than writing
+/// nothing.
+pub const REASON_BOUND_LABEL_UNKNOWN: &str = "bound-label-unknown";
 /// The existing docblock offers no lossless insertion point, or the written tag did
 /// not survive the re-parse round-trip. Shared verbatim with the `@throws` sister
 /// transform — same mechanics, same reason name.
@@ -157,6 +193,12 @@ pub fn plan_effects_envelope(
     let sweep: EffectSweep = sweep_effects(db, project);
     let files: Vec<SourceFile> = project.files(db).to_vec();
     let layout = project.layout(db);
+    // The **live** label registry — builtin plus this project's plugin
+    // registrations (ADR-0068) — the same one the checker beside us asks. A
+    // transform that classified labels against a different vocabulary than the
+    // analyzer would write tags the analyzer cannot read (and refuse to touch tags
+    // it can).
+    let plugins = project.plugins(db);
 
     let mut plan = EditPlan::new();
     let mut refusals: Vec<Refusal> = Vec::new();
@@ -172,7 +214,13 @@ pub fn plan_effects_envelope(
         }
         let tree = parse(db, file);
         let fcx = FileCtx::new(path, file.text(db));
-        let mut staged: Vec<Staged> = Vec::new();
+        let mut em = Emission {
+            plugins,
+            fcx: &fcx,
+            staged: Vec::new(),
+            refusals: &mut refusals,
+            oracle: &mut oracle,
+        };
 
         for func in tree.functions() {
             let Some(eff) = sweep.functions.get(&func.fqn) else { continue };
@@ -184,30 +232,34 @@ pub fn plan_effects_envelope(
                 format!("function {}() @phpstan-impure", func.name),
             );
             decide_decl(
+                &mut em,
                 eff,
                 site,
                 Target::Func(func.fqn.clone()),
                 DeclShape {
                     has_attribute: func.effect_envelope.is_some(),
-                    docblock: func.docblock.as_deref(),
+                    docblock: func.docblock.as_ref(),
                     docblock_span: func.docblock_span,
                     name_span: func.span,
                 },
-                &fcx,
-                &mut staged,
-                &mut refusals,
-                &mut oracle,
             );
         }
 
         for class in tree.classes() {
-            // The class-level claim comes first: where it holds, ADR-0082 §7 writes
-            // it *instead of* per-method tags — and a class whose methods are all
-            // pure has no per-method candidate to lose, since pure is never written.
+            // The class-level claim is decided first: where it holds, ADR-0082 §7
+            // writes it *instead of* per-method tags.
             if class_is_provenly_pure(class, &sweep) {
-                decide_class(class, tree, &sweep, &fcx, &mut staged, &mut refusals, &mut oracle);
-                continue;
+                decide_class(&mut em, class, tree, &sweep);
             }
+            // The per-method pass runs either way, and that is safe rather than
+            // contradictory: a class only qualifies above when **every** method is
+            // provenly pure, and a pure declaration never produces a tag — so a
+            // qualifying class cannot also grow a method tag. What the pass still
+            // owes those methods is the one decision that is not about writing:
+            // a method whose own tag the registry cannot read is refused by name
+            // (rule 2), while the class-wide claim stands on provenness alone
+            // (rule 3) and upstream's nearest-wins keeps that method's own story
+            // truthful.
             for method in &class.methods {
                 let key = (class.fqn.to_ascii_lowercase(), method.name.to_ascii_lowercase());
                 let Some(eff) = sweep.methods.get(&key) else { continue };
@@ -219,23 +271,21 @@ pub fn plan_effects_envelope(
                     format!("{}::{}() @phpstan-impure", class.name, method.name),
                 );
                 decide_decl(
+                    &mut em,
                     eff,
                     site,
                     Target::Method(key.0, key.1),
                     DeclShape {
                         has_attribute: method.effect_envelope.is_some(),
-                        docblock: method.docblock.as_deref(),
+                        docblock: method.docblock.as_ref(),
                         docblock_span: method.docblock_span,
                         name_span: method.span,
                     },
-                    &fcx,
-                    &mut staged,
-                    &mut refusals,
-                    &mut oracle,
                 );
             }
         }
 
+        let staged = std::mem::take(&mut em.staged);
         verify_and_commit(&fcx, staged, &mut plan, &mut refusals, &mut oracle);
     }
 
@@ -249,13 +299,35 @@ pub fn plan_effects_envelope(
     }
 }
 
+/// One file's emission context: what every decision reads (the run's registry and
+/// the file's bytes) and what every decision writes into (the staged edits, the
+/// refusals, the oracle). Bundled so a decision takes its inputs as arguments and
+/// its outputs as one `&mut`, rather than eight parameters.
+struct Emission<'a> {
+    /// The plugin channel, consulted for the **live** label registry alone.
+    plugins: &'a PluginFacts,
+    fcx: &'a FileCtx<'a>,
+    staged: Vec<Staged>,
+    refusals: &'a mut Vec<Refusal>,
+    oracle: &'a mut CompletenessOracle,
+}
+
+impl Emission<'_> {
+    /// Record a refusal against the oracle in one place, so no arm can forget the
+    /// count (ADR-0034 point 3b).
+    fn refuse(&mut self, site: SiteRef, reason: &'static str, detail: String) {
+        self.oracle.refused += 1;
+        self.refusals.push(Refusal::new(site, reason, detail));
+    }
+}
+
 /// The facets of a declaration an emission decision reads — the same four for a
 /// free function and a method, so one `decide` serves both.
 struct DeclShape<'a> {
     /// Whether the **checked** spelling (`#[\Steins\Effect]` / `#[\Steins\Pure]`)
     /// is present, which shadows this whole stratum (ADR-0082 §1).
     has_attribute: bool,
-    docblock: Option<&'a str>,
+    docblock: Option<&'a String>,
     docblock_span: Option<Span>,
     name_span: Span,
 }
@@ -263,31 +335,36 @@ struct DeclShape<'a> {
 /// Decide one function/method: refuse with a named reason, or stage the edit that
 /// writes (or corrects) its `@phpstan-impure` bound.
 ///
-/// A declaration whose bound is **pure** is not a candidate at all and is not
-/// enumerated: ADR-0082 §7 writes no per-declaration pure tag, so there is no
-/// decision to account for. Everything else — including a non-exhaustive summary
-/// with a non-empty bound — is enumerated and answered.
-#[allow(clippy::too_many_arguments)]
+/// A declaration whose bound is **pure** is not a candidate and is not enumerated:
+/// ADR-0082 §7 writes no per-declaration pure tag, so there is no decision to
+/// account for. The one exception is a declaration whose existing tag the registry
+/// cannot read — "we left your docblock alone" is an answer the report owes,
+/// whatever the bound turned out to be.
 fn decide_decl(
+    em: &mut Emission,
     eff: &DeclEffects,
     site: SiteRef,
     target: Target,
     shape: DeclShape,
-    fcx: &FileCtx,
-    staged: &mut Vec<Staged>,
-    refusals: &mut Vec<Refusal>,
-    oracle: &mut CompletenessOracle,
 ) {
     let bound = eff.bound();
-    if is_pure(&bound) {
+    // A checked envelope shadows this whole stratum (ADR-0082 §1), and the
+    // shadowing is total: the checker does not read the docblock there, so neither
+    // does this — no tag beside an attribute is classified, corrected, or refused
+    // about.
+    let (reading, tag_span) = if shape.has_attribute {
+        (ExistingEnvelope::Absent, None)
+    } else {
+        existing_tag(em.plugins, shape.docblock, method_level)
+    };
+    let unreadable = reading == ExistingEnvelope::Unreadable;
+    if is_pure(&bound) && !unreadable {
         return;
     }
-    oracle.enumerated += 1;
+    em.oracle.enumerated += 1;
 
     if shape.has_attribute {
-        refuse(
-            oracle,
-            refusals,
+        em.refuse(
             site,
             REASON_ATTRIBUTE_ENVELOPE,
             "the declaration carries a checked effect envelope (#[\\Steins\\Effect] / #[\\Steins\\Pure]); \
@@ -296,10 +373,23 @@ fn decide_decl(
         );
         return;
     }
+    // Before anything about our own knowledge: those bytes are not ours to move.
+    // An unknown label makes the whole tag unspecified (the owner's 2026-08-12
+    // ruling), and the likeliest reading of `@phpstan-impure database` — which
+    // current PHPStan discards wholesale — is a human's note, not a stale bound.
+    if unreadable {
+        em.refuse(
+            site,
+            REASON_EXISTING_TAG_UNREADABLE,
+            "an interop-envelope tag is already written here and the label registry cannot read \
+             it as a bound (an unknown label makes the whole tag unspecified); it may well be \
+             prose, so nothing is written over it"
+                .to_owned(),
+        );
+        return;
+    }
     if !eff.exhaustive {
-        refuse(
-            oracle,
-            refusals,
+        em.refuse(
             site,
             REASON_EFFECTS_NOT_EXHAUSTIVE,
             format!(
@@ -310,61 +400,70 @@ fn decide_decl(
         );
         return;
     }
+    // The bound is spelled from proven/declared labels, which are registry-known
+    // wherever they came from the catalog or the plugin channel. The one way one
+    // is not is an unknown label in a *checked* attribute envelope reaching this
+    // declaration's declared lane — `effect.unknown-label` already reports that on
+    // the attribute, and writing the label on into a docblock would produce a tag
+    // whose own next run reads it as prose. Refuse instead. (The same guard covers
+    // the accepted scenario where a plugin that registered a label is later
+    // unloaded: the tag we wrote then reads as prose, and the rule above leaves it
+    // untouched.)
+    let unknown = unknown_labels(em.plugins, &bound);
+    if !unknown.is_empty() {
+        em.refuse(
+            site,
+            REASON_BOUND_LABEL_UNKNOWN,
+            format!(
+                "the proven bound names {}, which this run's label registry does not know; the \
+                 tag would read back as prose rather than as a bound",
+                render_labels(&unknown)
+            ),
+        );
+        return;
+    }
 
     let tag = format!("@phpstan-impure {}", render_labels(&bound));
-    let existing = shape.docblock.and_then(|d| envelope_tag(d, method_level));
-    let built = match (existing, shape.docblock_span) {
-        // An envelope is already written on this declaration. Same bound → nothing
-        // to do; different bound → rewrite that tag's text in place.
-        (Some((env, labels, tag_span)), Some(ds)) => {
-            if env == EnvelopeTag::Impure && labels == bound {
-                refuse(
-                    oracle,
-                    refusals,
+    let built = match (&reading, tag_span, shape.docblock_span) {
+        // A readable envelope is already written here. Same bound → nothing to do;
+        // different bound → rewrite that tag's text in place.
+        (ExistingEnvelope::Bound(env, labels), Some(ts), Some(ds)) => {
+            if *env == EnvelopeTag::Impure && normalize_labels(labels.clone()) == bound {
+                em.refuse(
                     site,
                     REASON_ALREADY_DECLARED,
                     format!("the declaration already declares {tag}"),
                 );
                 return;
             }
-            Ok(replace_tag(fcx, ds, tag_span, &tag))
+            Ok(replace_tag(em.fcx, ds, ts, &tag))
         }
         // No envelope yet: insert the tag line, creating the docblock if needed.
-        (_, Some(ds)) => extend_docblock(fcx, ds, std::slice::from_ref(&tag)),
-        (_, None) => {
-            create_docblock(fcx, shape.name_span, HeadKind::Function, std::slice::from_ref(&tag))
+        (_, _, Some(ds)) => extend_docblock(em.fcx, ds, std::slice::from_ref(&tag)),
+        (_, _, None) => {
+            create_docblock(em.fcx, shape.name_span, HeadKind::Function, std::slice::from_ref(&tag))
         }
     };
     match built {
-        Ok(edit) => staged.push(Staged { site, edit, target, expect: Expect::Impure(bound) }),
-        Err((reason, detail)) => refuse(oracle, refusals, site, reason, detail),
+        Ok(edit) => em.staged.push(Staged { site, edit, target, expect: Expect::Impure(bound) }),
+        Err((reason, detail)) => em.refuse(site, reason, detail),
     }
 }
 
 /// Decide the class-level `@phpstan-all-methods-pure` tag for a class whose every
 /// declared method is already known provenly pure ([`class_is_provenly_pure`]).
-fn decide_class(
-    class: &ClassDecl,
-    tree: &SourceTree,
-    sweep: &EffectSweep,
-    fcx: &FileCtx,
-    staged: &mut Vec<Staged>,
-    refusals: &mut Vec<Refusal>,
-    oracle: &mut CompletenessOracle,
-) {
+fn decide_class(em: &mut Emission, class: &ClassDecl, tree: &SourceTree, sweep: &EffectSweep) {
     let p = tree.position(class.span.start);
     let site = SiteRef::new(
-        fcx.path.to_owned(),
+        em.fcx.path.to_owned(),
         p.line,
         p.column,
         format!("class {} @phpstan-all-methods-pure", class.name),
     );
-    oracle.enumerated += 1;
+    em.oracle.enumerated += 1;
 
     if class.methods.iter().any(|m| m.effect_envelope.is_some()) {
-        refuse(
-            oracle,
-            refusals,
+        em.refuse(
             site,
             REASON_ATTRIBUTE_ENVELOPE,
             "a declared method carries a checked effect envelope (#[\\Steins\\Effect] / \
@@ -375,9 +474,7 @@ fn decide_class(
         return;
     }
     if let Some(m) = class.methods.iter().find(|m| !method_effects(class, m, sweep).exhaustive) {
-        refuse(
-            oracle,
-            refusals,
+        em.refuse(
             site,
             REASON_EFFECTS_NOT_EXHAUSTIVE,
             format!(
@@ -387,36 +484,52 @@ fn decide_class(
         );
         return;
     }
-    let existing = class.docblock.as_deref().and_then(|d| envelope_tag(d, class_level));
-    if let Some((env, _, _)) = existing {
-        let detail = match env {
-            EnvelopeTag::AllMethodsPure => {
-                "the class already declares @phpstan-all-methods-pure".to_owned()
-            }
-            // Narrowing someone's `all-methods-impure` to `all-methods-pure` would
-            // rewrite a claim that is *wider* than the truth, not one that is
-            // false. Write conservatively: leave it, and say so.
-            _ => "the class already carries a class-level interop envelope; a wider standing \
-                  claim is not false, and this transform does not narrow one"
-                .to_owned(),
-        };
-        refuse(oracle, refusals, site, REASON_ALREADY_DECLARED, detail);
-        return;
+    // The class-level tag families, read through the same registry (ADR-0082 §5
+    // keeps them apart from the method-level pair). An unreadable class tag is
+    // prose we must not overwrite, exactly as at a method.
+    match existing_envelope(em.plugins, class.docblock.as_ref(), class_level) {
+        ExistingEnvelope::Unreadable => {
+            em.refuse(
+                site,
+                REASON_EXISTING_TAG_UNREADABLE,
+                "a class-level interop-envelope tag is already written here and the label \
+                 registry cannot read it as a bound; it may well be prose, so nothing is written \
+                 over it"
+                    .to_owned(),
+            );
+            return;
+        }
+        ExistingEnvelope::Bound(env, _) => {
+            let detail = match env {
+                EnvelopeTag::AllMethodsPure => {
+                    "the class already declares @phpstan-all-methods-pure".to_owned()
+                }
+                // Narrowing someone's `all-methods-impure` to `all-methods-pure`
+                // would rewrite a claim that is *wider* than the truth, not one
+                // that is false. Write conservatively: leave it, and say so.
+                _ => "the class already carries a class-level interop envelope; a wider standing \
+                      claim is not false, and this transform does not narrow one"
+                    .to_owned(),
+            };
+            em.refuse(site, REASON_ALREADY_DECLARED, detail);
+            return;
+        }
+        ExistingEnvelope::Absent => {}
     }
 
     let tag = "@phpstan-all-methods-pure".to_owned();
     let built = match class.docblock_span {
-        Some(ds) => extend_docblock(fcx, ds, std::slice::from_ref(&tag)),
-        None => create_docblock(fcx, class.span, HeadKind::Class, std::slice::from_ref(&tag)),
+        Some(ds) => extend_docblock(em.fcx, ds, std::slice::from_ref(&tag)),
+        None => create_docblock(em.fcx, class.span, HeadKind::Class, std::slice::from_ref(&tag)),
     };
     match built {
-        Ok(edit) => staged.push(Staged {
+        Ok(edit) => em.staged.push(Staged {
             site,
             edit,
             target: Target::Class(class.fqn.to_ascii_lowercase()),
             expect: Expect::AllMethodsPure,
         }),
-        Err((reason, detail)) => refuse(oracle, refusals, site, reason, detail),
+        Err((reason, detail)) => em.refuse(site, reason, detail),
     }
 }
 
@@ -480,18 +593,31 @@ fn class_level(env: EnvelopeTag) -> bool {
     matches!(env, EnvelopeTag::AllMethodsPure | EnvelopeTag::AllMethodsImpure)
 }
 
-/// The first interop-envelope tag in `doc` whose family `accept` admits, with its
-/// labels **normalized** the way an emitted bound is (so "states the same bound" is
-/// a comparison of two normal forms, not of two spellings) and its docblock-relative
-/// tag span.
-fn envelope_tag(
-    doc: &str,
-    accept: impl Fn(EnvelopeTag) -> bool,
-) -> Option<(EnvelopeTag, Vec<String>, DocSpan)> {
+/// The interop envelope already written in `doc`: **how the checker reads it**, and
+/// where its bytes are.
+///
+/// Both halves are needed and neither substitutes for the other. The reading is
+/// [`steins_infer::effects::existing_envelope`] — the analyzer's own classification,
+/// registry and unknown-label ruling included — and it decides whether the tag may
+/// be touched at all. The span is where a correction would go, and it comes from
+/// the scanner because the reading does not carry one. Both name the *first* tag of
+/// an accepted family, so they cannot end up describing different tags.
+fn existing_tag(
+    plugins: &PluginFacts,
+    doc: Option<&String>,
+    accept: impl Fn(EnvelopeTag) -> bool + Copy,
+) -> (ExistingEnvelope, Option<DocSpan>) {
+    let reading = existing_envelope(plugins, doc, accept);
+    let span = doc.and_then(|d| envelope_tag_span(d, accept));
+    (reading, span)
+}
+
+/// The docblock-relative span of the first interop-envelope tag in `doc` whose
+/// family `accept` admits — the tag proper, from its `@` to the end of its trimmed
+/// content.
+fn envelope_tag_span(doc: &str, accept: impl Fn(EnvelopeTag) -> bool) -> Option<DocSpan> {
     scan_docblock(doc).into_iter().find_map(|t: DocTag| match t.kind {
-        TagKind::InteropEnvelope(env) if accept(env) => {
-            Some((env, normalize_labels(t.labels), t.tag_span))
-        }
+        TagKind::InteropEnvelope(env) if accept(env) => Some(t.tag_span),
         _ => None,
     })
 }

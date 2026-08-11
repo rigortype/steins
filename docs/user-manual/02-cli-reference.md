@@ -547,7 +547,9 @@ Five transforms:
   ever written, and a declaration carrying the checked spelling
   (`#[\Steins\Effect]` / `#[\Steins\Pure]`) is skipped. An envelope already
   stating the same bound is left alone; one stating a different bound is
-  corrected in place.
+  corrected in place — unless the tag carries a label the run's registry does
+  not know, in which case it is not a bound at all but most likely a human's
+  note (`@phpstan-impure database`), and those bytes are never touched.
 - **`loop-to-array-map`** rewrites an append loop to `array_map` when the
   engine *proves* the loop body has no effects and cannot throw.
 
@@ -680,9 +682,14 @@ regression and still blocks the write.
 could not close the effect set, so no label list is an upper bound),
 `attribute-envelope` (the declaration already carries the checked spelling),
 `already-declared` (the same bound is written — the second run of the
-transform), plus the two shared docblock-mechanics names above. A pure
-declaration is not a candidate at all: no per-declaration `@phpstan-pure` is
-ever written.
+transform), `existing-tag-unreadable` (a tag is already written whose labels
+the registry cannot read, so it may be prose rather than a bound),
+`bound-label-unknown` (the computed bound names a label the registry does not
+know, so the tag would read back as prose), plus the two shared
+docblock-mechanics names above. A pure declaration is not a candidate at all —
+no per-declaration `@phpstan-pure` is ever written — with one exception: a pure
+declaration carrying an unreadable tag is reported, because "your docblock was
+left alone" is an answer worth having.
 
 `loop-to-array-map` is the first transform whose precondition is an
 *effect* judgment rather than a type one. It rewrites

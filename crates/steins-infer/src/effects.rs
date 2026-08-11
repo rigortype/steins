@@ -29,12 +29,21 @@
 //! candidate; a *missing* entry would make "proven pure" and "never analyzed"
 //! indistinguishable, and the class-level tag of ADR-0082 §7 turns on exactly that
 //! distinction.
+//!
+//! ## Reading what is already written
+//!
+//! A writer also has to read: it must not touch a docblock whose tag it cannot
+//! interpret. [`existing_envelope`] is that reader, and it is the **checker's own**
+//! classification — the private `interop_tag` behind ADR-0082's read path, exposed
+//! here rather than re-implemented, so the transform and the analyzer agree on
+//! what a tag says down to the owner's unknown-label ruling.
 
 use std::collections::HashMap;
 
-use steins_db::{Db, Project, SourceFile, parse, project_index};
+use steins_db::{Db, PluginFacts, Project, SourceFile, parse, project_index};
+use steins_phpdoc::EnvelopeTag;
 
-use crate::{EffectSet, FileUnit, Index, Sym, compute_effects};
+use crate::{EffectSet, FileUnit, Index, InteropTag, Sym, compute_effects, interop_tag};
 
 /// What the effect fixpoint proves about one function or method.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -138,6 +147,62 @@ fn decl_effects(effects: &HashMap<Sym, EffectSet>, sym: &Sym) -> DeclEffects {
     declared.sort();
     declared.dedup();
     DeclEffects { labels, declared, exhaustive: set.exhaustive }
+}
+
+/// What a docblock **already** says about a declaration's interop envelope, as the
+/// checker itself reads it — the public face of the private `InteropTag`.
+///
+/// Three answers, not two, and the middle one is the owner's unknown-label ruling
+/// (2026-08-12): a tag carrying any label the run's registry does not know is
+/// *unspecified*, whole. Current PHPStan discards everything after
+/// `@phpstan-impure`, so wild code legitimately carries one-word prose
+/// (`@phpstan-impure database`), and a writer must recognize it as prose rather
+/// than as a bound it may correct.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExistingEnvelope {
+    /// No tag of the consulted families is written here.
+    Absent,
+    /// A tag is written and it bounds nothing: either an unknown label collapsed
+    /// it to ⊤, or it is a spelling whose bare form means ⊤. Nothing machine-
+    /// readable is claimed — and for a *writer*, nothing is safe to rewrite: those
+    /// bytes may be a human's note.
+    Unreadable,
+    /// A usable bound: the tag family as written (so a report can quote the
+    /// declaration back in its author's spelling) and its labels, every one of them
+    /// known to the registry.
+    Bound(EnvelopeTag, Vec<String>),
+}
+
+/// Classify the interop envelope written on `docblock`, restricted to the tag
+/// families `accept` admits (the method-level `@phpstan-pure`/`@phpstan-impure`
+/// pair, or the class-level `all-methods-*` one — ADR-0082 §5 keeps them apart).
+///
+/// `plugins` supplies the **live** registry — builtin labels plus this project's
+/// plugin registrations (ADR-0068) — so a consumer classifies exactly as the
+/// analyzer running beside it does. Pass [`PluginFacts::none`] for the builtin-only
+/// view.
+#[must_use]
+pub fn existing_envelope(
+    plugins: &PluginFacts,
+    docblock: Option<&String>,
+    accept: impl Fn(EnvelopeTag) -> bool,
+) -> ExistingEnvelope {
+    match interop_tag(plugins.registry(), docblock, accept) {
+        InteropTag::Absent => ExistingEnvelope::Absent,
+        InteropTag::Unbounded => ExistingEnvelope::Unreadable,
+        InteropTag::Bound(env, labels) => ExistingEnvelope::Bound(env, labels),
+    }
+}
+
+/// The members of `labels` the run's registry does not know, in the order given.
+///
+/// The emission counterpart of [`existing_envelope`]: a writer asks this before it
+/// spells a bound, because a tag carrying an unknown label is read back as prose
+/// (⊤) rather than as the bound it meant to write.
+#[must_use]
+pub fn unknown_labels(plugins: &PluginFacts, labels: &[String]) -> Vec<String> {
+    let registry = plugins.registry();
+    labels.iter().filter(|l| !registry.is_known(l)).cloned().collect()
 }
 
 #[cfg(test)]

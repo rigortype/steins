@@ -221,7 +221,23 @@ duplication. A non-exhaustive declaration refuses `effects-not-exhaustive` — a
 bare `@phpstan-impure` is ⊤, which is what the absence of the tag already means.
 An envelope already stating the same normalized bound refuses `already-declared`
 (idempotence); one stating a different bound has its tag text corrected in
-place, honesty-repair style. The seam is `steins_infer::effects::sweep_effects`,
+place, honesty-repair style.
+
+Reading what is already written goes through the **live** label registry
+(`steins_infer::effects::existing_envelope`, the analyzer's own classification
+rather than a second opinion), which carries the owner's 2026-08-12 unknown-label
+ruling into the writer: a tag with any unknown label is unspecified *whole*, and
+since current PHPStan discards everything after `@phpstan-impure`, the honest
+reading of `@phpstan-impure database` is a human's note. Such a site refuses
+`existing-tag-unreadable` and keeps its bytes — including a pure declaration,
+which is otherwise not a candidate at all, because leaving a docblock alone is a
+decision the report owes. Symmetrically, a computed bound naming a label the
+registry does not know refuses `bound-label-unknown`: the tag would read back as
+prose, and the one way that arises — an unknown label in a *checked* attribute
+envelope riding the declared lane into a caller — is already reported as
+`effect.unknown-label` where it was written. A class-level claim is unaffected by
+an inert method tag: provenness governs it, and upstream's nearest-wins keeps that
+method's own story truthful. The seam is `steins_infer::effects::sweep_effects`,
 the effect fixpoint's per-declaration verdicts, mirroring
 `steins_infer::escapes::sweep_escapes`; the docblock mechanics — create, extend,
 round-trip verify — are the `@throws` sister's own code.

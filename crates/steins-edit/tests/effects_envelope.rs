@@ -7,7 +7,8 @@ use steins_db::{Project, SourceFile, SteinsDatabase};
 use steins_edit::TransformReport;
 use steins_edit::effects_envelope::{
     REASON_ALREADY_DECLARED, REASON_ATTRIBUTE_ENVELOPE, REASON_DECLARATION_MID_LINE,
-    REASON_DOCBLOCK_NOT_ROUND_TRIPPABLE, REASON_EFFECTS_NOT_EXHAUSTIVE,
+    REASON_BOUND_LABEL_UNKNOWN, REASON_DOCBLOCK_NOT_ROUND_TRIPPABLE,
+    REASON_EFFECTS_NOT_EXHAUSTIVE, REASON_EXISTING_TAG_UNREADABLE,
 };
 use steins_edit::plan_effects_envelope;
 
@@ -469,5 +470,148 @@ fn vendor_declarations_are_never_written() {
     )]);
     assert_oracle_complete(&report);
     assert_eq!(report.oracle.enumerated, 0, "{:#?}", report.refusals);
+    assert!(report.plan.is_empty());
+}
+
+// ---- 9. An unreadable existing tag is prose, not a stale bound -------------
+//
+// The owner's 2026-08-12 ruling: a tag carrying any label the live registry does
+// not know is *unspecified*, whole. Current PHPStan discards everything after
+// `@phpstan-impure`, so wild code legitimately carries one-word prose — and the
+// transform must never overwrite a human's note.
+
+#[test]
+fn an_existing_prose_tag_is_never_overwritten() {
+    let lib = "<?php\n/**\n * @phpstan-impure database\n */\nfunction f(): void { file_put_contents(\"/x\", \"y\"); }\n";
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.enumerated, 1);
+    assert_eq!(only_reason(&report), REASON_EXISTING_TAG_UNREADABLE);
+    assert!(report.plan.is_empty());
+    assert_eq!(report.plan.apply_file("lib.php", lib), lib, "the file must be byte-identical");
+}
+
+/// The one-line spelling of the same docblock: the unreadable-tag refusal is
+/// reported ahead of the mechanics one, because "those bytes are not ours to
+/// move" settles the site whatever its insertion points look like.
+#[test]
+fn a_one_line_prose_tag_is_refused_as_prose() {
+    let lib = "<?php\n/** @phpstan-impure database */\nfunction f(): void { file_put_contents(\"/x\", \"y\"); }\n";
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    assert_eq!(only_reason(&report), REASON_EXISTING_TAG_UNREADABLE);
+    assert!(report.plan.is_empty());
+}
+
+/// Before the ruling this was "a stale bound → replace it" material. A typo is
+/// indistinguishable from prose to a registry, and the safe reading of both is
+/// the same: leave it alone.
+#[test]
+fn a_typoed_existing_bound_is_prose_not_a_stale_bound() {
+    let lib = "<?php\n/**\n * @phpstan-impure io.netw\n */\nfunction f(): void { file_put_contents(\"/x\", \"y\"); }\n";
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    assert_eq!(only_reason(&report), REASON_EXISTING_TAG_UNREADABLE);
+    assert_eq!(report.plan.apply_file("lib.php", lib), lib, "the file must be byte-identical");
+}
+
+/// One unreadable label makes the **whole** tag unspecified — the known label
+/// beside it is not a bound the transform may keep, correct, or write over.
+#[test]
+fn one_unknown_label_makes_the_whole_tag_unreadable() {
+    let lib = "<?php\n/**\n * @phpstan-impure io.fs.write, database\n */\nfunction f(): void { file_put_contents(\"/x\", \"y\"); }\n";
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    assert_eq!(only_reason(&report), REASON_EXISTING_TAG_UNREADABLE);
+    assert!(report.plan.is_empty());
+}
+
+/// A pure declaration is normally not a candidate at all — but one carrying a tag
+/// the registry cannot read is enumerated and refused, because "we left your
+/// docblock alone" is an answer the report owes.
+#[test]
+fn a_pure_declaration_with_a_prose_tag_is_reported_not_silently_skipped() {
+    let lib = "<?php\n/**\n * @phpstan-impure database\n */\nfunction f(string $s): string { return strtolower($s); }\n";
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.enumerated, 1);
+    assert_eq!(only_reason(&report), REASON_EXISTING_TAG_UNREADABLE);
+    assert!(report.plan.is_empty());
+}
+
+/// The class-level families go through the same registry.
+#[test]
+fn an_unreadable_class_level_tag_is_never_overwritten() {
+    let lib = concat!(
+        "<?php\n",
+        "/**\n",
+        " * @phpstan-all-methods-impure database\n",
+        " */\n",
+        "class C {\n",
+        "    public function get(): int { return 1; }\n",
+        "}\n",
+    );
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    assert_eq!(only_reason(&report), REASON_EXISTING_TAG_UNREADABLE);
+    assert_eq!(report.plan.apply_file("lib.php", lib), lib, "the file must be byte-identical");
+}
+
+/// Rule 3: provenness governs the class claim. An inert method-level tag does not
+/// block the class-level write — read-side nearest-wins keeps that method's own
+/// story truthful for PHPStan (bare impure) and for Steins (⊤) alike — but the
+/// method site itself is still refused, because its docblock is not ours to touch.
+#[test]
+fn an_inert_method_tag_does_not_block_the_class_tag() {
+    let lib = concat!(
+        "<?php\n",
+        "class C {\n",
+        "    /**\n",
+        "     * @phpstan-impure database\n",
+        "     */\n",
+        "    public function get(): int { return 1; }\n",
+        "    public function other(): int { return 2; }\n",
+        "}\n",
+    );
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    // Two sites: the class (written) and the prose-tagged method (refused).
+    assert_eq!(report.oracle.enumerated, 2, "{:#?}", report.refusals);
+    assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
+    assert_eq!(only_reason(&report), REASON_EXISTING_TAG_UNREADABLE);
+
+    let out = report.plan.apply_file("lib.php", lib);
+    assert!(
+        out.starts_with("<?php\n/**\n * @phpstan-all-methods-pure\n */\nclass C {"),
+        "the class tag is still written:\n{out}"
+    );
+    assert_eq!(
+        out.matches("@phpstan-impure database").count(),
+        1,
+        "the method's own note is untouched:\n{out}"
+    );
+    assert_eq!(out.matches("@phpstan-").count(), 2, "no third tag appears:\n{out}");
+}
+
+/// The emission invariant: the transform never writes a bound its own next run
+/// would read as prose. Proven labels come from the catalog and declared ones from
+/// the plugin channel, both registry-known by construction — with one hole, and
+/// this is it: an unknown label written in a **checked** attribute envelope rides
+/// the declared lane into a caller. `effect.unknown-label` already reports it on
+/// the attribute; the transform refuses rather than propagating it into a docblock.
+#[test]
+fn an_unknown_label_in_the_bound_is_never_written() {
+    let lib = concat!(
+        "<?php\n",
+        "interface Repo {\n",
+        "    #[\\Steins\\Effect('database')]\n",
+        "    public function load(): string;\n",
+        "}\n",
+        "function f(Repo $r): string { return $r->load(); }\n",
+    );
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.enumerated, 1, "{:#?}", report.refusals);
+    assert_eq!(only_reason(&report), REASON_BOUND_LABEL_UNKNOWN);
     assert!(report.plan.is_empty());
 }
