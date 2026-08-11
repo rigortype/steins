@@ -114,6 +114,15 @@ out-params get a `mutate.local` effect color that Pure envelopes tolerate,
 instead of the per-function `hasSideEffects` flag PHPStan's maintainers
 rejected twice as a lie.
 
+The docblock spelling of purity is not purely divergent, though: ADR-0082
+reads `@phpstan-impure <labels>` and `@phpstan-pure` as **interop
+envelopes** — an unchecked, checkable spelling of the same envelope
+concept, at the parameter position PHPStan's own author sketched for the
+tag. A bare `@phpstan-impure` stays unread (⊤ carries no information); the
+parameterized and class-level forms enter the declared lane and are
+contract-checked against their own declaration. See
+[phpdoc-effects-interop.md](type-specification/phpdoc-effects-interop.md).
+
 ## ConstantArrayType vs order-witnessed values + order-declared shapes
 
 PHPStan's `ConstantArrayType` is one class carrying declared key order,

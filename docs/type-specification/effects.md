@@ -1,10 +1,17 @@
 # Effects
 
 **Status: implemented** for the labels, envelopes, propagation, and checks
-described below. The plugin channel that opens the registry is **partly
-implemented**: a Composer package's manifest registers labels and colors plain
-functions; the sidecar half that would boot the framework does not exist.
-ADR-0005, ADR-0006, ADR-0008, ADR-0018, ADR-0019, ADR-0033, ADR-0067, ADR-0068.
+described below, plus the **interop envelope** surface — the parameterized
+PHPStan purity tags (`@phpstan-impure <labels>`, `@phpstan-pure`, the
+class-level `@phpstan-all-methods-*` pair) read as an unchecked, checkable
+docblock spelling of the same envelope concept, and `steins transform
+effects-envelope`, which writes them (ADR-0082; see
+[phpdoc-effects-interop.md](phpdoc-effects-interop.md)). The plugin channel
+that opens the registry is **partly implemented**: a Composer package's
+manifest registers labels and colors plain functions; the sidecar half that
+would boot the framework does not exist.
+ADR-0005, ADR-0006, ADR-0008, ADR-0018, ADR-0019, ADR-0033, ADR-0067,
+ADR-0068, ADR-0082.
 
 ## The second dimension
 
@@ -136,6 +143,17 @@ Both the fully-qualified spelling and a `use`-imported bare `#[Pure]` /
 `#[Effect(...)]` are recognized. When both attributes decorate one declaration
 they are contradictory (`Pure` is the tighter bound): `Pure` wins, and this slice
 emits no diagnostic about the contradiction.
+
+**A second, unchecked source exists one trust stratum below the attribute.**
+The parameterized PHPStan purity tags — `@phpstan-impure <labels>`,
+`@phpstan-pure`, and the class-level `@phpstan-all-methods-pure` /
+`@phpstan-all-methods-impure` pair — are read as **interop envelopes**
+(ADR-0082): the same envelope concept, spelled in a docblock rather than an
+attribute, entering the declared lane below and contract-checked against the
+declaring function exactly as an attribute envelope is. The full grammar and
+semantics are their own document,
+[phpdoc-effects-interop.md](phpdoc-effects-interop.md); this file does not
+duplicate them.
 
 **`@throws` is not the effect syntax.** It stays Throwable-only
 ([throws.md](throws.md)); the analogy to declarative effects is as far as the

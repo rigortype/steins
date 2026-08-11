@@ -98,6 +98,12 @@ Assertion tags exist **only** in prefixed form — PHPStan has no bare `@assert`
 tag, so an unprefixed `@assert` is not a tag at all. The negated form
 (`@phpstan-assert !T $x`) is recorded on the tag.
 
+`@phpstan-impure` / `@phpstan-pure` and the class-level
+`@phpstan-all-methods-pure` / `@phpstan-all-methods-impure` pair are read too,
+as **interop effect envelopes** rather than types — a separate grammar with
+its own alias rules, detailed in
+[phpdoc-effects-interop.md](phpdoc-effects-interop.md).
+
 **Tool-specific tags beyond `@phpstan-*` / `@psalm-*` are refused by design**
 (ADR-0029). There is no `@steins-` type tag: Steins' own annotations are PHP
 attributes ([effects.md](effects.md)), not docblock tags — with the single
@@ -111,12 +117,8 @@ universe** in the declaring docblock's own types (issue #5; see
 [contract-types.md](contract-types.md)) — but no call-site template solver
 exists (ADR-0032), and template scope transfer (ADR-0051) is designed and
 unimplemented. `@method`,
-`@property`, `@mixin`, `@phpstan-type` aliases, `@phpstan-import-type`,
-`@phpstan-pure`, and `@phpstan-impure` are not recognized. See
-[not-implemented.md](not-implemented.md). For the purity pair this is no
-longer a refusal but a gap: their interop-envelope reading is designed
-(ADR-0082, [phpdoc-effects-interop.md](phpdoc-effects-interop.md)) and
-unimplemented.
+`@property`, `@mixin`, `@phpstan-type` aliases, and `@phpstan-import-type`
+are not recognized. See [not-implemented.md](not-implemented.md).
 
 The two **conditional-purity** tags *are* read (ADR-0063 §2 decision 2), in the
 spelling merged upstream in `phpstan/phpdoc-parser` 2.3.3 — bare or
@@ -130,16 +132,19 @@ optional description:
 
 The first makes a call's effect the join of the callables bound at the flagged
 positions; the second makes the flagged parameter a userland by-ref
-out-parameter row, colored by its argument exactly as a catalog row is. The
-unconditional `@phpstan-pure` flag stays unread today: it was refused as the
-metadata lie upstream rejected twice, and Steins spells unconditional purity
-`#[\Steins\Pure]`, where inference can check it. ADR-0082 supersedes the
-refusal with a design that keeps its spirit — the parameterized forms
-(`@phpstan-impure <labels>`, and bare `@phpstan-pure` as the `{mutate.local}`
-envelope) become *checkable* unchecked bounds, while a bare `@phpstan-impure`
-(⊤, no information) stays a non-tag. See
-[phpdoc-effects-interop.md](phpdoc-effects-interop.md); none of it is
-implemented yet.
+out-parameter row, colored by its argument exactly as a catalog row is.
+
+The unconditional `@phpstan-pure` / `@phpstan-impure` flags stayed unread for
+a long time: they were refused as the metadata lie upstream rejected twice,
+and Steins spells unconditional purity `#[\Steins\Pure]`, where inference can
+check it. ADR-0082 supersedes that refusal with a design that keeps its
+spirit rather than repealing it — the parameterized forms (`@phpstan-impure
+<labels>`, and bare `@phpstan-pure` as the `{mutate.local}` envelope) are
+read as *checkable* unchecked bounds, the **interop envelope** row above.
+A bare `@phpstan-impure` is the one spelling still unread, and by the same
+logic as before: it is ⊤ (every effect possible), which is exactly what the
+absence of the tag already means, so reading it would add no information.
+See [phpdoc-effects-interop.md](phpdoc-effects-interop.md).
 
 ## Annotation restraint
 

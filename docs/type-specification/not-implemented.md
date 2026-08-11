@@ -123,14 +123,6 @@ the refuting direction only.
 - Binding descent is capped at 8 frames (`MAX_BINDING_DEPTH`), plus on-stack
   recursion detection. Past the cap: silence.
 
-**Docblock tags not read as types** ([phpdoc-grammar.md](phpdoc-grammar.md)):
-`@phpstan-pure`, `@phpstan-impure`. Their **interop-envelope** reading —
-parameterized `@phpstan-impure <labels>`, bare `@phpstan-pure` as the
-`{mutate.local}` envelope, and the class-level `@phpstan-all-methods-*` pair —
-is designed (ADR-0082,
-[phpdoc-effects-interop.md](phpdoc-effects-interop.md)) and not implemented;
-a bare `@phpstan-impure` stays a non-tag even under that design.
-
 **Docblock tags read as obstacles only** (ADR-0049 A14): `@method`,
 `@property`, `@property-read`, `@property-write`, `@mixin`, `@phpstan-type`
 aliases, `@phpstan-import-type`. Steins recognizes each tag's presence and its

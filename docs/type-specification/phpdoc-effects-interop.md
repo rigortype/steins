@@ -1,9 +1,14 @@
 # Interop envelopes: effect labels on the PHPStan purity tags
 
-**Status: designed, not implemented** (ADR-0082; slices tracked in issue
-#303). This document is deliberately self-contained — motivation, grammar,
-semantics, and compatibility — so it can be handed to an upstream (PHPStan)
-discussion as-is. Steins-specific machinery is confined to the
+**Status: implemented** (ADR-0082; issue #303). Steins reads these tags as
+interop envelopes: a covered call contributes to the caller's **declared
+lane** at abstraction-typed call sites (role A, ADR-0067), and the
+declaring function is contract-checked against its own bound —
+`effect.envelope-exceeded` (role B). `steins transform effects-envelope`
+writes the tags from proven effects. This document is now the description
+of that live behavior; it remains deliberately self-contained — motivation,
+grammar, semantics, and compatibility — so it can be handed to an upstream
+(PHPStan) discussion as-is. Steins-specific machinery is confined to the
 [Steins semantics](#steins-semantics) section.
 
 ## Proposal in one line
