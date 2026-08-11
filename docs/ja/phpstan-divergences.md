@@ -135,6 +135,22 @@ Steins は**意味論を先に**答える: 即時起動コールバック位置�
 色を与える — PHPStan 側で「嘘のフラグ」として二度却下された関数単位の
 `hasSideEffects=false` は採らない。
 
+ただし純粋性の docblock 表記は、分岐一辺倒ではない。ADR-0082 は
+`@phpstan-impure <labels>` と `@phpstan-pure` を**相互運用エンベロープ**
+として読む — 同じエンベロープ概念を、PHPStan の作者自身がタグの引数
+位置として示したかたちで docblock に(未検査だが検査可能に)綴った
+ものだ。`steins transform effects-envelope` はプロジェクト自身の証明
+済みエフェクトからこれを書き戻すので、橋渡しは双方向に働く。裸の
+`@phpstan-impure` は読まれないままだが(⊤ は情報を持たない)、パラ
+メータ付きおよびクラスレベルの形式は宣言レーンに入り、宣言自身に対
+して契約検査される。Steins のレジストリにないラベルは、タグ全体を
+「未指定」として読む — 狭められた上界としてではない(オーナー裁定、
+2026-08-12)。これにより、タイポは現行 PHPStan の下ですでにそうで
+あるように静かに通り過ぎ、`#[\Steins\Effect]` の下で未知ラベルが実
+行を失敗させるようには扱われない。詳細は
+[phpdoc-effects-interop.md](../type-specification/phpdoc-effects-interop.md)
+を参照。
+
 ## ConstantArrayType vs order-witnessed な値 + order-declared な shape
 
 PHPStan の `ConstantArrayType` はひとつのクラスが宣言キー順・

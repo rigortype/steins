@@ -1023,6 +1023,14 @@ pub struct ClassDecl {
     /// **every** member docblock of this class-like (issue #5). `None` for a trait,
     /// whose members are not lowered.
     pub docblock: Option<String>,
+    /// The **file byte span** of that docblock, when one is adopted — the
+    /// class-world analogue of [`FunctionDecl::docblock_span`], under the same
+    /// contract: [`Self::docblock`] is the exact substring `[span.start, span.end)`
+    /// of the source, so a docblock-relative tag offset maps into the file by
+    /// adding `span.start`. Retained for the transform engine (ADR-0034), whose
+    /// `effects-envelope` writes the **class-level** interop envelope
+    /// (`@phpstan-all-methods-pure`, ADR-0082 §7) into this block.
+    pub docblock_span: Option<Span>,
     /// The span of the class name identifier.
     pub span: Span,
 }
@@ -4910,6 +4918,7 @@ fn lower_trait(t: &mago_syntax::cst::Trait<'_>, conditional: bool) -> ClassDecl 
         uses_traits: false,
         // No member docblock can observe a trait-level `@template`.
         docblock: None,
+        docblock_span: None,
         span: to_span(t.name.span()),
     }
 }
@@ -4991,6 +5000,7 @@ fn lower_class(c: &Class<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc: 
         // modifiers, mirroring the function/method lookup) — read for `@template`
         // names that shadow same-named classes in member docblocks (issue #5).
         docblock: docs.preceding(to_span(c.span()).start),
+        docblock_span: docs.preceding_span(to_span(c.span()).start),
         span: to_span(c.name.span()),
     }
 }
@@ -5169,6 +5179,7 @@ fn lower_interface(i: &mago_syntax::cst::Interface<'_>, aliases: &SteinsAttrAlia
         // Class-level docblock — `@template` names shadow same-named classes in the
         // interface's method docblocks (issue #5).
         docblock: docs.preceding(to_span(i.span()).start),
+        docblock_span: docs.preceding_span(to_span(i.span()).start),
         span: to_span(i.name.span()),
     }
 }
@@ -5253,6 +5264,7 @@ fn lower_enum(e: &mago_syntax::cst::Enum<'_>, _aliases: &SteinsAttrAliases, docs
         uses_traits: false,
         // No analyzed member can observe an enum-level `@template`.
         docblock: None,
+        docblock_span: None,
         span: to_span(e.name.span()),
     }
 }

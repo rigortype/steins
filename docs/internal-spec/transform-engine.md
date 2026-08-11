@@ -194,9 +194,53 @@ plan). A Maybe escape refuses `escape-not-proven`, never annotates (ADR-0037:
 written-by-tool is declared, not proven); the second run refuses
 `already-declared` (idempotence). Unlike its siblings it consults no vouch
 valve: proven escapes are forward facts, so caller-enumeration obstacles have
-no bearing. It is also the one transform measured on the default surface alone
-(see above) — the recorded surface decision, and the only transform for which
-it holds.
+no bearing. It is measured on the default surface alone (see above) — the
+recorded surface decision, which it shares with `effects-envelope` and with
+nothing else.
+
+**`effects-envelope`** — interop-envelope emission (issue #303, ADR-0082 §7):
+the same shape one system over. Where `throws-envelope` writes the proven throw
+set, this writes the proven **effect bound** in upstream's own purity tags,
+parameterized with a label list at upstream's own suggestion. The bound is the
+union of both ADR-0067 lanes — proven ∪ declared, since a call answered only by
+a declared `io` may perform any `io` — reduced by prefix subsumption and
+rendered comma-space separated in the lexicographic order `annotate` prints an
+effect set in. Emission is stricter than the tags require, because a written tag
+is a contract the repo then owns: `@phpstan-impure <labels>` only where
+inference is **exhaustive**; `@phpstan-all-methods-pure` only where every
+declared method of a body-bearing class (the constructor and void-returning
+methods included, upstream's read-side quirk deliberately not exploited) is
+provenly and exhaustively pure, and then no method tag at all; nothing anywhere
+else. `mutate.local` is the degenerate member every envelope tolerates
+(ADR-0063 §2.3) and is exactly what `@phpstan-pure` means (ADR-0082 §3), so a
+bound of `{}` or `{mutate.local}` is *pure* — and pure is never written, in
+either family. A declaration carrying the checked spelling
+(`#[\Steins\Effect]` / `#[\Steins\Pure]`) refuses `attribute-envelope`: that
+stratum shadows this one outright (ADR-0082 §1), so a docblock twin would be
+duplication. A non-exhaustive declaration refuses `effects-not-exhaustive` — a
+bare `@phpstan-impure` is ⊤, which is what the absence of the tag already means.
+An envelope already stating the same normalized bound refuses `already-declared`
+(idempotence); one stating a different bound has its tag text corrected in
+place, honesty-repair style.
+
+Reading what is already written goes through the **live** label registry
+(`steins_infer::effects::existing_envelope`, the analyzer's own classification
+rather than a second opinion), which carries the owner's 2026-08-12 unknown-label
+ruling into the writer: a tag with any unknown label is unspecified *whole*, and
+since current PHPStan discards everything after `@phpstan-impure`, the honest
+reading of `@phpstan-impure database` is a human's note. Such a site refuses
+`existing-tag-unreadable` and keeps its bytes — including a pure declaration,
+which is otherwise not a candidate at all, because leaving a docblock alone is a
+decision the report owes. Symmetrically, a computed bound naming a label the
+registry does not know refuses `bound-label-unknown`: the tag would read back as
+prose, and the one way that arises — an unknown label in a *checked* attribute
+envelope riding the declared lane into a caller — is already reported as
+`effect.unknown-label` where it was written. A class-level claim is unaffected by
+an inert method tag: provenness governs it, and upstream's nearest-wins keeps that
+method's own story truthful. The seam is `steins_infer::effects::sweep_effects`,
+the effect fixpoint's per-declaration verdicts, mirroring
+`steins_infer::escapes::sweep_escapes`; the docblock mechanics — create, extend,
+round-trip verify — are the `@throws` sister's own code.
 
 **`loop-to-array-map`** — ADR-0010's flagship, landed under ADR-0076. The first
 transform whose precondition is an **effect** judgment: an append loop becomes

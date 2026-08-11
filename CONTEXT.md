@@ -180,6 +180,21 @@ language constructs, the *only* origins of effects (origin closure).
 Uncatalogued functions widen to unknown-effect.
 _Avoid_: function metadata (PHPStan's artifact)
 
+**Interop envelope**:
+The unchecked docblock spelling of an effect envelope — `@phpstan-impure
+<label-list>` (and `@phpstan-pure` as the `{mutate.local}` envelope), sharing
+`@phpstan-ignore`'s list-and-comment grammar; at class level, PHPStan's own
+`@phpstan-all-methods-pure` / `@phpstan-all-methods-impure`. It is an interop
+surface, not a second canonical spelling: `#[\Steins\Effect]` stays the
+checked stratum; interop envelopes enter the declared lane and never
+discharge taint. Within the interop stratum, upstream's semantics are
+followed faithfully (a method-level tag overrides the class-level one) —
+unlike checked envelopes, which always conjoin (Liskov). A bare
+`@phpstan-impure` is ⊤ and stays a non-tag.
+_Avoid_: effect tag (hides the trust-stratum difference from the attribute),
+phpdoc purity flag (the rejected metadata-only lie; an interop envelope is a
+checkable bound)
+
 **Envelope carrier interface**:
 An interface whose method declarations carry effect envelopes, making
 DI-mediated effects checkable: call sites typed against the interface assume

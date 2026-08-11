@@ -1,9 +1,13 @@
 # Why Effects?
 
 > [!NOTE]
-> This document states design goals as well as shipped behavior. As of
-> 2026-08-08, much of what it describes is not yet implemented or not yet
-> wired together. For the precise current state, see
+> This document narrates why the effect system exists and where the idea
+> came from. As of 2026-08-12, the core model it describes — labels,
+> envelopes, propagation, interface Liskov widening, and the PHPStan
+> interop bridge below — is implemented. A handful of illustrations stay
+> forward-looking on purpose (marked "could" or "a future rule"):
+> project-specific semantic labels beyond the manifest plugin channel, and
+> connection-provenance effects. For the precise current state, see
 > [What is not implemented](type-specification/not-implemented.md).
 
 Steins started with a question: can a PHP analyzer tell us not only what value
@@ -119,6 +123,31 @@ Interface methods can carry envelopes too. A call through an interface can
 therefore retain effect information after dependency injection breaks the
 concrete call graph. Implementations must not widen the interface's envelope.
 This is the effect form of Liskov substitutability.
+
+## Back to PHPStan: interop envelopes
+
+Steins began by studying PHPStan's purity model from outside; the interop
+envelope closes part of that loop. Ondřej Mirtes, PHPStan's author, suggested
+in passing (2026-08-09) that the existing `@phpstan-impure` tag could take a
+parameter naming the kind of impurity — `@phpstan-impure io`. Steins reads
+that parameterized form, and its `@phpstan-pure` /
+`@phpstan-all-methods-pure` / `@phpstan-all-methods-impure` siblings, as an
+**interop envelope**: the same envelope concept as `#[\Steins\Effect]`,
+spelled in a docblock instead of an attribute, one trust stratum below it. A
+call reached only through such a tag contributes to the caller's declared
+effect lane without ever discharging its own exhaustiveness taint, and the
+declaring function is contract-checked against its own tag exactly as an
+attribute is.
+
+The bridge runs in both directions. Steins reads what an upstream project
+already carries, and `steins transform effects-envelope` writes the same
+tags from a project's own proven effects — a docblock a current PHPStan
+install parses and quietly ignores, today, with no behavior change on either
+side. See
+[phpdoc-effects-interop.md](type-specification/phpdoc-effects-interop.md)
+for the grammar and semantics, written to be pasteable into an upstream
+discussion, and [ADR-0082](adr/0082-interop-envelopes.md) for the design
+record.
 
 ## Transport facts and semantic facts
 

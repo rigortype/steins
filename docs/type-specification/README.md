@@ -93,6 +93,7 @@ Foundational definitions first; specific surfaces build on them.
 | [object-model.md](object-model.md) | The store-based heap, escape sets, readonly immunity, the trinary is-a oracle, enums. |
 | [closures.md](closures.md) | Closures as values, invocation shapes, callable-signature variance. |
 | [effects.md](effects.md) | Effect labels, the registry, prefix subsumption, envelopes, origin closure, Liskov. |
+| [phpdoc-effects-interop.md](phpdoc-effects-interop.md) | Interop envelopes: effect labels on the PHPStan purity tags — grammar, semantics, upstream compatibility (ADR-0082). |
 | [throws.md](throws.md) | Checked/unchecked accounting, escape propagation, damming, `@throws` envelopes and their Liskov rule. |
 | [dynamism.md](dynamism.md) | The unanalyzability posture: `eval`, dynamic include, the dam, and what absence proofs require. |
 | [diagnostic-policy.md](diagnostic-policy.md) | The id registry, layers, facets, profiles, suppression channels, baseline. |

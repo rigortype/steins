@@ -32,8 +32,8 @@ use steins_db::{
 };
 use steins_edit::{
     ByteSpan, Edit, EditPlan, LoopToArrayMapOptions, PartitionMap, TransformReport, VouchSet,
-    plan_loop_to_array_map, plan_phpdoc_honesty, plan_phpdoc_to_native, plan_throws_envelope,
-    unified_diff,
+    plan_effects_envelope, plan_loop_to_array_map, plan_phpdoc_honesty, plan_phpdoc_to_native,
+    plan_throws_envelope, unified_diff,
 };
 use steins_infer::{
     Diagnostic, EffectSummary, FinalKeyword, LineFact, NoFold, SOUND_SUBSET_NOTICE, SidecarFolder,
@@ -123,7 +123,7 @@ fn dispatch(args: &[String]) -> ExitCode {
             );
             errln!("       steins annotate [--no-php] [--format text|json] <file.php>");
             errln!(
-                "       steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--asserted-subjects] [--format text|json] <paths...>"
+                "       steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|effects-envelope|loop-to-array-map> [--apply] [--asserted-subjects] [--format text|json] <paths...>"
             );
             errln!(
                 "       steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>"
@@ -549,8 +549,9 @@ fn apply_fixes(
     // Measured against the broad surface, as it has been since `check --fix`
     // landed: a fix-it deletes debug scaffolding and is never *meant* to move
     // the contract layer, so a new `phpdoc.*` or `throw.*` finding after the
-    // edit is a regression and must veto. Only `throws-envelope`, whose product
-    // *is* a contract, earns the narrow surface — see [`PostCheckSurface`].
+    // edit is a regression and must veto. Only the envelope-seeding transforms,
+    // whose product *is* a contract, earn the narrow surface — see
+    // [`PostCheckSurface`].
     let postcheck = post_check(db, project, &plan, texts, PostCheckSurface::Everything);
     if !postcheck.ok {
         let n = postcheck.new_diagnostics.len();
@@ -756,7 +757,7 @@ fn match_baseline(
     (reported, baselined, stale, surface_notice)
 }
 
-/// `steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map>
+/// `steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|effects-envelope|loop-to-array-map>
 /// [--apply] [--asserted-subjects] [--format text|json] <paths...>`
 /// (ADR-0020/0034). Dry-run by default:
 /// prints a unified diff and a refusal report, and runs the dual-verification
@@ -825,14 +826,14 @@ fn run_transform(args: &[String]) -> ExitCode {
             Some(k) => k,
             None => {
                 errln!(
-                    "steins: unknown transform `{name}` (available: phpdoc-to-native, phpdoc-honesty, throws-envelope, loop-to-array-map)"
+                    "steins: unknown transform `{name}` (available: phpdoc-to-native, phpdoc-honesty, throws-envelope, effects-envelope, loop-to-array-map)"
                 );
                 return ExitCode::from(2);
             }
         },
         None => {
             errln!(
-                "steins: transform requires a name (usage: steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|loop-to-array-map> [--apply] [--asserted-subjects] [--config steins.toml] [--format text|json] <paths...>)"
+                "steins: transform requires a name (usage: steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|effects-envelope|loop-to-array-map> [--apply] [--asserted-subjects] [--config steins.toml] [--format text|json] <paths...>)"
             );
             return ExitCode::from(2);
         }
@@ -912,15 +913,17 @@ enum TransformKind {
     Promote,
     Honesty,
     ThrowsEnvelope,
+    EffectsEnvelope,
     LoopToArrayMap,
 }
 
 impl TransformKind {
     /// Every transform, in the order the usage line lists them.
-    const ALL: [TransformKind; 4] = [
+    const ALL: [TransformKind; 5] = [
         TransformKind::Promote,
         TransformKind::Honesty,
         TransformKind::ThrowsEnvelope,
+        TransformKind::EffectsEnvelope,
         TransformKind::LoopToArrayMap,
     ];
 
@@ -931,6 +934,7 @@ impl TransformKind {
             TransformKind::Promote => "phpdoc-to-native",
             TransformKind::Honesty => "phpdoc-honesty",
             TransformKind::ThrowsEnvelope => "throws-envelope",
+            TransformKind::EffectsEnvelope => "effects-envelope",
             TransformKind::LoopToArrayMap => "loop-to-array-map",
         }
     }
@@ -944,7 +948,7 @@ impl TransformKind {
         match self {
             TransformKind::Promote => "promoted",
             TransformKind::Honesty | TransformKind::LoopToArrayMap => "rewritten",
-            TransformKind::ThrowsEnvelope => "seeded",
+            TransformKind::ThrowsEnvelope | TransformKind::EffectsEnvelope => "seeded",
         }
     }
 
@@ -960,6 +964,9 @@ impl TransformKind {
             }
             TransformKind::ThrowsEnvelope => {
                 "seed `@throws` tags from proven escapes; a declaration whose escapes are only `Maybe` is refused"
+            }
+            TransformKind::EffectsEnvelope => {
+                "seed the interop envelopes of ADR-0082 from proven effects: `@phpstan-impure <labels>` where inference is exhaustive, `@phpstan-all-methods-pure` where every declared method is provenly pure; a non-exhaustive declaration is refused and no bare or per-declaration pure tag is ever written"
             }
             TransformKind::LoopToArrayMap => {
                 "rewrite an append `foreach` to `array_map` where the body is proven to have no effects and no throws"
@@ -993,8 +1000,15 @@ impl TransformKind {
                 PostCheckSurface::Everything
             }
             // Seeding an envelope IS a contract change: measuring it against the
-            // contract layer would let the transform veto its own success.
-            TransformKind::ThrowsEnvelope => PostCheckSurface::DefaultOnly,
+            // contract layer would let the transform veto its own success. Both
+            // envelope-seeding transforms are on this side for the one reason —
+            // an emitted interop envelope (ADR-0082) is precisely what gives
+            // `effect.envelope-exceeded` and `effect.liskov-widened` something to
+            // check, so a new contract-layer finding after it is the product, not
+            // a regression.
+            TransformKind::ThrowsEnvelope | TransformKind::EffectsEnvelope => {
+                PostCheckSurface::DefaultOnly
+            }
         }
     }
 }
@@ -1056,6 +1070,9 @@ fn plan_transform_run(
         // of the declaration's own body/callees, so the ADR-0046 §2 caller-
         // enumerability obstacles (and their vouching valve) have no bearing.
         TransformKind::ThrowsEnvelope => plan_throws_envelope(db, project, partitions.as_ref()),
+        // Interop-envelope emission (ADR-0082 §7) takes no vouch set either, and
+        // for the same reason: an effect bound is a forward fact of the body.
+        TransformKind::EffectsEnvelope => plan_effects_envelope(db, project, partitions.as_ref()),
         TransformKind::LoopToArrayMap => plan_loop_to_array_map(
             db,
             project,
@@ -1069,7 +1086,7 @@ fn plan_transform_run(
     // know about (ADR-0046 §2). Skipped for a transform that consults no vouches
     // at all — there, silence about an inert section beats a misleading "no-op"
     // line per entry.
-    if kind != TransformKind::ThrowsEnvelope {
+    if !matches!(kind, TransformKind::ThrowsEnvelope | TransformKind::EffectsEnvelope) {
         for entry in vouches.unused() {
             notices.push(format!("vouched site `{entry}` matched no dynamic-code obstacle (no-op)"));
         }
@@ -1478,12 +1495,15 @@ enum PostCheckSurface {
     ///
     /// Reserved for a transform whose *product is a contract*, where a new
     /// contract-layer finding is the intended effect rather than a regression.
-    /// `throws-envelope` is the only one: seeding an `@throws` envelope onto an
-    /// override gives its ancestor's narrower envelope something to be widened
-    /// against, and seeding a parent gives an existing child envelope an
-    /// abstraction carrier it did not have — both surface `throw.liskov-widened`
-    /// under an opt-up profile. Measuring a seed against the contract layer would
-    /// let the transform veto its own success; the safety net that remains is the
+    /// The two envelope-seeding transforms are the ones: seeding an `@throws`
+    /// envelope onto an override gives its ancestor's narrower envelope something
+    /// to be widened against, and seeding a parent gives an existing child
+    /// envelope an abstraction carrier it did not have — both surface
+    /// `throw.liskov-widened` under an opt-up profile. `effects-envelope` is the
+    /// same shape in the effect world (ADR-0082 §7): an emitted interop envelope
+    /// is exactly what gives `effect.envelope-exceeded` / `effect.liskov-widened`
+    /// something to check. Measuring a seed against the contract layer would let
+    /// the transform veto its own success; the safety net that remains is the
     /// proof layer, the fp-gate discipline transposed to rewriting.
     ///
     /// The asymmetry with [`PostCheckSurface::Everything`] is deliberate. It is

@@ -96,18 +96,21 @@ impl Transform for ThrowsEnvelope {
 /// The bytes one file's seeding decisions splice into: its source text, its
 /// diagnostic path, and the line terminator to write. Bundled because every edit
 /// builder needs all three and none of them varies per candidate.
-struct FileCtx<'a> {
-    path: &'a str,
-    text: &'a str,
+///
+/// Shared with the sister transform (`effects-envelope`, ADR-0082 §7), which
+/// writes different tags into docblocks by the same mechanics.
+pub(crate) struct FileCtx<'a> {
+    pub(crate) path: &'a str,
+    pub(crate) text: &'a str,
     /// The terminator a seeded line ends with, matched to the file's own. Every
     /// *existing* line is byte-preserved either way (the seeded lines are new
     /// bytes); matching it keeps a CRLF file from acquiring lone-LF lines, which
     /// would be a gratuitous diff for every later reader of that file.
-    nl: &'static str,
+    pub(crate) nl: &'static str,
 }
 
 impl<'a> FileCtx<'a> {
-    fn new(path: &'a str, text: &'a str) -> Self {
+    pub(crate) fn new(path: &'a str, text: &'a str) -> Self {
         let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
         Self { path, text, nl }
     }
@@ -256,9 +259,12 @@ fn decide(
         return;
     }
 
+    // The written spelling is fully qualified, so coverage resolves context-free
+    // (and the round-trip check below compares it byte-for-byte).
+    let tags: Vec<String> = writable.iter().map(|class| format!("@throws \\{class}")).collect();
     let built = match docblock_span {
-        Some(ds) => extend_docblock(fcx, ds, &writable),
-        None => create_docblock(fcx, name_span, &writable),
+        Some(ds) => extend_docblock(fcx, ds, &tags),
+        None => create_docblock(fcx, name_span, HeadKind::Function, &tags),
     };
     match built {
         Ok(edit) => staged.push(Staged { site, edit, classes: writable, decl }),
@@ -269,20 +275,24 @@ fn decide(
     }
 }
 
-/// Extend an existing docblock losslessly: insert one `* @throws \FQN` line per
-/// class before the closing `*/` line (a pure byte insertion — every existing
+/// Extend an existing docblock losslessly: insert one `* <tag>` line per entry of
+/// `tags` before the closing `*/` line (a pure byte insertion — every existing
 /// line is byte-preserved). Refuses when the docblock has no closing line of its
 /// own to insert before.
-fn extend_docblock(
+///
+/// `tags` are whole rendered tags without the gutter (`@throws \RuntimeException`,
+/// `@phpstan-impure io.db`): the mechanics are the same for every tag family, so
+/// the sister transform (ADR-0082 §7) writes its envelopes through this one.
+pub(crate) fn extend_docblock(
     fcx: &FileCtx,
     ds: Span,
-    classes: &[String],
+    tags: &[String],
 ) -> Result<Edit, (&'static str, String)> {
     let doc = &fcx.text[ds.start as usize..ds.end as usize];
     let Some(last_nl) = doc.rfind('\n') else {
         return Err((
             REASON_DOCBLOCK_NOT_ROUND_TRIPPABLE,
-            "single-line docblock: a @throws line cannot be inserted without rewriting the existing line"
+            "single-line docblock: a tag line cannot be inserted without rewriting the existing line"
                 .to_owned(),
         ));
     };
@@ -298,10 +308,10 @@ fn extend_docblock(
     // with the closing `*`, so the inserted line is gutter + `* @throws …`.
     let gutter = &closing[..closing.len() - 2];
     let mut insertion = String::new();
-    for class in classes {
+    for tag in tags {
         insertion.push_str(gutter);
-        insertion.push_str("* @throws \\");
-        insertion.push_str(class);
+        insertion.push_str("* ");
+        insertion.push_str(tag);
         insertion.push_str(fcx.nl);
     }
     let at = ds.start + (last_nl as u32) + 1;
@@ -309,17 +319,19 @@ fn extend_docblock(
 }
 
 /// Create a fresh docblock above the declaration's head line, matching its
-/// indentation. Refuses when the head does not start its own line (nothing but
-/// whitespace and declaration-head keywords may precede the name).
-fn create_docblock(
+/// indentation, carrying one `* <tag>` line per entry of `tags`. Refuses when the
+/// head does not start its own line (nothing but whitespace and declaration-head
+/// keywords may precede the name).
+pub(crate) fn create_docblock(
     fcx: &FileCtx,
     name_span: Span,
-    classes: &[String],
+    head: HeadKind,
+    tags: &[String],
 ) -> Result<Edit, (&'static str, String)> {
     let name_start = name_span.start as usize;
     let line_start = fcx.text[..name_start].rfind('\n').map_or(0, |p| p + 1);
     let prefix = &fcx.text[line_start..name_start];
-    if !head_prefix_ok(prefix) {
+    if !head_prefix_ok(prefix, head) {
         return Err((
             REASON_DECLARATION_MID_LINE,
             "the declaration does not start its own line, so a docblock cannot be inserted losslessly above it"
@@ -331,10 +343,10 @@ fn create_docblock(
     block.push_str(&indent);
     block.push_str("/**");
     block.push_str(fcx.nl);
-    for class in classes {
+    for tag in tags {
         block.push_str(&indent);
-        block.push_str(" * @throws \\");
-        block.push_str(class);
+        block.push_str(" * ");
+        block.push_str(tag);
         block.push_str(fcx.nl);
     }
     block.push_str(&indent);
@@ -347,23 +359,42 @@ fn create_docblock(
     })
 }
 
+/// Which declaration head a created docblock is going above — the two have
+/// disjoint keyword sets, and conflating them would let a docblock land between a
+/// `class` head and a method sharing its line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeadKind {
+    /// `public static function f(` — the free-function and method head.
+    Function,
+    /// `final class C` / `interface I` — the class-like head (ADR-0082 §7's
+    /// class-level tag).
+    Class,
+}
+
 /// Whether the bytes between a head line's start and the declaration name are
 /// nothing but whitespace and declaration-head tokens (`public static function
-/// `, `function &`, …) — the guard that keeps a docblock insertion from landing
-/// mid-statement (`<?php function f() {}`, two declarations on one line).
-fn head_prefix_ok(prefix: &str) -> bool {
-    const ALLOWED: &[&str] =
+/// `, `function &`, `final class `, …) — the guard that keeps a docblock
+/// insertion from landing mid-statement (`<?php function f() {}`, two
+/// declarations on one line).
+fn head_prefix_ok(prefix: &str, head: HeadKind) -> bool {
+    const FUNCTION_ALLOWED: &[&str] =
         &["abstract", "final", "public", "protected", "private", "static", "function", "&"];
-    let mut saw_function = false;
+    const CLASS_ALLOWED: &[&str] =
+        &["abstract", "final", "readonly", "class", "interface", "enum", "trait"];
+    let (allowed, keyword) = match head {
+        HeadKind::Function => (FUNCTION_ALLOWED, &["function"][..]),
+        HeadKind::Class => (CLASS_ALLOWED, &["class", "interface", "enum", "trait"][..]),
+    };
+    let mut saw_keyword = false;
     for tok in prefix.split_whitespace() {
-        if !ALLOWED.iter().any(|a| tok.eq_ignore_ascii_case(a)) {
+        if !allowed.iter().any(|a| tok.eq_ignore_ascii_case(a)) {
             return false;
         }
-        if tok.eq_ignore_ascii_case("function") {
-            saw_function = true;
+        if keyword.iter().any(|k| tok.eq_ignore_ascii_case(k)) {
+            saw_keyword = true;
         }
     }
-    saw_function
+    saw_keyword
 }
 
 /// The round-trip gate (ADR-0003 applied to seeding): apply the file's staged

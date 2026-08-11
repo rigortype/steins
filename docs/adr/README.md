@@ -24,7 +24,8 @@ place:
 From there, three clusters:
 
 - **Type semantics** — 0029–0033, 0035–0037, 0042–0045, 0052, 0056.
-- **Effects and throws** — 0005–0008, 0018, 0019, 0040, 0055.
+- **Effects and throws** — 0005–0008, 0018, 0019, 0040, 0055, 0067, 0068,
+  0082.
 - **Apparatus and surfaces** — 0013, 0020–0026, 0049, 0050, 0053, 0054, 0059.
 
 Steins ADRs carry no `Status:` field. An ADR is in this directory because it was
@@ -117,3 +118,4 @@ list in one place.
 | ADR-0079 | [A file that fails to parse is named loudly and dams the absence family](0079-parse-failure-dam.md) |
 | ADR-0080 | [A PHP string value carries bytes, not a lossy UTF-8 decoding](0080-php-strings-are-byte-strings.md) |
 | ADR-0081 | [Binding presence: a lowering-side reachability pass for the maybe-undefined pair](0081-binding-presence-reachability.md) |
+| ADR-0082 | [Interop envelopes: parameterized purity tags as the unchecked docblock spelling of effect envelopes](0082-interop-envelopes.md) |

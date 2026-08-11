@@ -19,6 +19,7 @@
 //! working unchanged; [`check_project`] / [`annotate_project`] run over many.
 
 pub mod dam;
+pub mod effects;
 pub mod escapes;
 pub mod profile;
 pub mod promote;
@@ -76,8 +77,8 @@ use steins_syntax::RetHintKind;
 use steins_phpdoc::Variance;
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, StringLit, TypeKind as PKind};
 use steins_phpdoc::{
-    AssertKind, DocTag, MagicTagKind, TagKind, Type as PType, parse_type, scan_docblock,
-    scan_magic_member_tags,
+    AssertKind, DocTag, EnvelopeTag, MagicTagKind, TagKind, Type as PType, parse_type,
+    scan_docblock, scan_magic_member_tags,
 };
 
 /// The registry id for the `type.argument-mismatch` proof-layer check (ADR-0022).
@@ -4862,12 +4863,25 @@ fn classify_effect_origins(
                         }
                         None => match resolve_declared_bound(
                             cx,
+                            plugins.registry(),
                             class_fqn,
                             params,
                             receiver,
                             method,
                         ) {
-                            Some(labels) => dc.extend(labels),
+                            // A checked envelope answers this call site outright.
+                            Some(DeclaredBound::Checked(labels)) => dc.extend(labels),
+                            // An interop envelope (ADR-0082) contributes its bound
+                            // and keeps the taint: ADR-0068's plugin discipline,
+                            // applied to the unchecked stratum. An empty bound
+                            // (`@phpstan-pure`) adds no label and still claims no
+                            // exhaustiveness — the summary reads "≤ this, and
+                            // possibly more", which is the truth of a claim
+                            // nothing here has verified.
+                            Some(DeclaredBound::Interop(labels)) => {
+                                dc.extend(labels);
+                                *ex = false;
+                            }
                             None => *ex = false,
                         },
                     },
@@ -5398,10 +5412,23 @@ impl PurityOracle {
 
 /// Effect-envelope diagnostics for the whole project (proven violations only).
 fn effect_diagnostics(units: &[FileUnit], index: &Index, plugins: &PluginFacts) -> Vec<Diagnostic> {
-    // Fast path: no envelope anywhere → nothing to check.
+    // Fast path: no envelope anywhere → nothing to check. Interop envelopes
+    // (ADR-0082 role B) are checked here too, so the gate admits their carriers
+    // through [`docblock_envelope_tag`]'s own substring test — over-approximate
+    // by design (a docblock merely *saying* "pure" opens the gate and then
+    // resolves to no envelope), which costs a pass and can never lose a finding.
     let any_envelope = units.iter().any(|u| {
-        u.tree.functions().iter().any(|f| f.effect_envelope.is_some())
-            || u.tree.classes().iter().any(|c| c.methods.iter().any(|m| m.effect_envelope.is_some()))
+        u.tree
+            .functions()
+            .iter()
+            .any(|f| f.effect_envelope.is_some() || spells_interop_envelope(f.docblock.as_ref()))
+            || u.tree.classes().iter().any(|c| {
+                spells_interop_envelope(c.docblock.as_ref())
+                    || c.methods.iter().any(|m| {
+                        m.effect_envelope.is_some()
+                            || spells_interop_envelope(m.docblock.as_ref())
+                    })
+            })
     });
     if !any_envelope {
         return Vec::new();
@@ -5415,19 +5442,38 @@ fn effect_diagnostics(units: &[FileUnit], index: &Index, plugins: &PluginFacts) 
     for fi in 0..units.len() {
         let cx = Cx::new(units, index, fi);
         for f in cx.tree().functions() {
-            let Some(env) = &f.effect_envelope else { continue };
-            report_unit(&mut out, &cx, None, &f.name, env, &f.effect_origins, &effects, registry);
+            // The docblock is read only when no attribute is written — the other
+            // half of ADR-0082 §1's shadowing, and the half `operative_bound`
+            // cannot enforce. A free function reads its *own* docblock: there is
+            // no class-like for `@phpstan-all-methods-*` to distribute from (§5).
+            let interop = f
+                .effect_envelope
+                .is_none()
+                .then(|| own_interop_envelope(registry, f.docblock.as_ref()).into_bound())
+                .flatten();
+            let Some(bound) = operative_bound(f.effect_envelope.as_ref(), interop.as_ref(), f.span)
+            else {
+                continue;
+            };
+            report_unit(&mut out, &cx, None, &f.name, bound, &f.effect_origins, &effects, registry);
         }
         for c in cx.tree().classes() {
             for m in &c.methods {
-                if let Some(env) = &m.effect_envelope {
+                let interop = m
+                    .effect_envelope
+                    .is_none()
+                    .then(|| interop_envelope(registry, cx.tree(), c, m).into_bound())
+                    .flatten();
+                if let Some(bound) =
+                    operative_bound(m.effect_envelope.as_ref(), interop.as_ref(), m.span)
+                {
                     let display = format!("{}::{}", c.name, m.name);
                     report_unit(
                         &mut out,
                         &cx,
                         Some(&c.fqn),
                         &display,
-                        env,
+                        bound,
                         &m.effect_origins,
                         &effects,
                         registry,
@@ -5436,6 +5482,13 @@ fn effect_diagnostics(units: &[FileUnit], index: &Index, plugins: &PluginFacts) 
                 // Liskov (ADR-0033 point 5): a concrete implementation whose PROVEN
                 // effects exceed an abstraction's effect envelope. Interfaces carry
                 // no bodies, so only concrete class methods are judged.
+                //
+                // Interop envelopes deliberately do NOT participate: within that
+                // stratum upstream's nearest-wins override is the whole contract,
+                // and there is no conjunction rule to widen (ADR-0082 §5). So
+                // `collect_abstraction_effects` keeps reading `effect_envelope`
+                // only, and an interop-declared abstraction never yields
+                // `effect.liskov-widened`.
                 if !c.is_interface && !m.is_abstract {
                     emit_effect_liskov(&mut out, &cx, c, m, &effects);
                 }
@@ -5538,6 +5591,93 @@ fn nearest_parent_effect(cx: &Cx, class: &ClassDecl, method: &str) -> Option<(St
     }
 }
 
+/// **How the author spelled** the envelope a unit is checked against — the one
+/// thing the diagnostics need beyond its labels.
+///
+/// A finding must quote back syntax the reader actually wrote: telling someone who
+/// wrote `@phpstan-impure io.db` that their declaration is `#[\Steins\Effect('io.db')]`
+/// names a line that does not exist in their file, and for a feature whose whole
+/// point is reading upstream's tags that is exactly backwards. Message wording is
+/// not contract (ADR-0023 — the *ids* are), so it varies with the source; the id,
+/// the judgment and the anchor do not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvelopeSpelling {
+    /// The checked stratum: `#[\Steins\Pure]` / `#[\Steins\Effect(...)]`.
+    Attribute,
+    /// An interop envelope (ADR-0082), quoted back in the tag family that wrote
+    /// it. The family, not the exact alias: `@pure`, `@psalm-pure` and
+    /// `@phpstan-pure` are one bound, and the canonical `@phpstan-` spelling is
+    /// the one the interop spec documents.
+    Interop(EnvelopeTag),
+}
+
+impl EnvelopeSpelling {
+    /// The bare tag/attribute name — what the `effect.unknown-label` message
+    /// points the reader at.
+    const fn tag_name(self) -> &'static str {
+        match self {
+            // The label-bearing attribute; `#[\Steins\Pure]` carries none, so an
+            // unknown label can never have come from it.
+            Self::Attribute => "#[\\Steins\\Effect]",
+            Self::Interop(EnvelopeTag::Pure) => "@phpstan-pure",
+            Self::Interop(EnvelopeTag::Impure) => "@phpstan-impure",
+            Self::Interop(EnvelopeTag::AllMethodsPure) => "@phpstan-all-methods-pure",
+            Self::Interop(EnvelopeTag::AllMethodsImpure) => "@phpstan-all-methods-impure",
+        }
+    }
+}
+
+/// The envelope a unit is **actually held to** (ADR-0082 §1): its labels, the
+/// anchor a declaration-level finding points at, and the spelling the findings
+/// quote back.
+///
+/// Passed as one value down the whole reporting chain so that no site can judge
+/// against one envelope and name another.
+#[derive(Debug, Clone, Copy)]
+struct OperativeBound<'a> {
+    /// The declared upper bound. Empty is the *pure* envelope — a real claim, not
+    /// a missing one; the ⊤ (unconstrained) case never builds a bound at all.
+    labels: &'a [String],
+    /// Where a finding about the declaration itself lands: the attribute's own
+    /// span, or — for an interop envelope, which lives in trivia the attribute
+    /// path has no analogue for — the declaration's name.
+    span: Span,
+    spelling: EnvelopeSpelling,
+}
+
+impl OperativeBound<'_> {
+    /// Whether an inferred label exceeds this bound. The relation is
+    /// [`exceeds`] verbatim: the two strata differ in trust and in wording,
+    /// never in what counts as a violation.
+    fn exceeds(self, effect_label: &str) -> bool {
+        exceeds(self.labels, effect_label)
+    }
+
+    /// How `effect.envelope-exceeded` quotes the declaration back, in the
+    /// author's own syntax.
+    fn declared_clause(self, exceeding_label: &str) -> String {
+        let tag = self.spelling.tag_name();
+        match self.spelling {
+            EnvelopeSpelling::Attribute if self.labels.is_empty() => "#[\\Steins\\Pure]".to_owned(),
+            EnvelopeSpelling::Attribute => {
+                let quoted: Vec<String> = self.labels.iter().map(|l| format!("'{l}'")).collect();
+                format!(
+                    "#[\\Steins\\Effect({})] — {exceeding_label} exceeds the envelope",
+                    quoted.join(", ")
+                )
+            }
+            // The pure tags take no labels, so the tag name is the whole bound.
+            EnvelopeSpelling::Interop(_) if self.labels.is_empty() => tag.to_owned(),
+            // The label list is written in the tag's own grammar (ADR-0082 §4):
+            // comma-separated dot-paths, unquoted.
+            EnvelopeSpelling::Interop(_) => format!(
+                "{tag} {} — {exceeding_label} exceeds the envelope",
+                self.labels.join(", ")
+            ),
+        }
+    }
+}
+
 /// Emit the diagnostics for one declared-envelope unit (ADR-0005/0018).
 #[allow(clippy::too_many_arguments)]
 fn report_unit(
@@ -5545,13 +5685,20 @@ fn report_unit(
     cx: &Cx,
     class_fqn: Option<&str>,
     display: &str,
-    envelope: &EffectEnvelope,
+    bound: OperativeBound<'_>,
     origins: &[EffectOrigin],
     effects: &HashMap<Sym, EffectSet>,
     registry: &steins_catalog::LabelRegistry,
 ) {
-    // 1. Unknown declared labels (one diagnostic each, at the attribute span).
-    for label in &envelope.labels {
+    // 1. Unknown declared labels (one diagnostic each, at the bound's anchor).
+    //
+    // Reachable from the **attribute** stratum only, and by construction: an
+    // interop tag naming a label this registry does not know never becomes a bound
+    // in the first place ([`interop_tag`], owner ruling 2026-08-12), so it arrives
+    // here with every label known and the loop body never runs for it. Typos in
+    // upstream's tags are somebody else's rule; typos in a Steins attribute are
+    // this one's, unchanged.
+    for label in bound.labels {
         if registry.is_known(label) {
             continue;
         }
@@ -5560,9 +5707,10 @@ fn report_unit(
             .map(|s| format!(" — did you mean '{s}'?"))
             .unwrap_or_default();
         let msg = format!(
-            "unknown effect label '{label}' in #[\\Steins\\Effect] on {display}(){suggestion}"
+            "unknown effect label '{label}' in {} on {display}(){suggestion}",
+            bound.spelling.tag_name()
         );
-        let pos = cx.tree().position(envelope.span.start);
+        let pos = cx.tree().position(bound.span.start);
         out.push(Diagnostic {
             id: UNKNOWN_LABEL_ID,
             path: cx.path().to_owned(),
@@ -5575,7 +5723,6 @@ fn report_unit(
     }
 
     // 2. Envelope-exceeded violations.
-    let labels = &envelope.labels;
     for origin in origins {
         match origin {
             EffectOrigin::Call { name, span, arg_targets } => {
@@ -5584,21 +5731,21 @@ fn report_unit(
                     FnResolution::User(site) => {
                         let decl = cx.fn_decl(site);
                         let callee = Sym::Func(decl.fqn.clone());
-                        emit_transitive(out, cx, &callee, effects, span.start, display, labels);
+                        emit_transitive(out, cx, &callee, effects, span.start, display, bound);
                         // The `@pure-unless-parameter-passed` leg: a userland
                         // out-param row, reported like the catalog's.
                         report_conditional_purity(
-                            out, cx, decl, &[], targets, effects, *span, display, labels,
+                            out, cx, decl, &[], targets, effects, *span, display, bound,
                         );
                     }
                     FnResolution::Builtin(builtin_name) => {
                         for f in
                             builtin_findings(&builtin_name, *span, cx.tree(), cx.path(), targets)
                         {
-                            if exceeds(labels, &f.label) {
+                            if bound.exceeds(&f.label) {
                                 let prefix = format!("{}() has effect {}", name.simple(), f.label);
                                 out.push(exceeded_diag(
-                                    cx, span.start, &prefix, display, labels, &f.label,
+                                    cx, span.start, &prefix, display, bound, &f.label,
                                 ));
                             }
                         }
@@ -5606,17 +5753,17 @@ fn report_unit(
                     FnResolution::Unknown => {}
                 }
             }
-            EffectOrigin::Output { keyword, span } if exceeds(labels, "output") => {
+            EffectOrigin::Output { keyword, span } if bound.exceeds("output") => {
                 let prefix = format!("{keyword} has effect output");
-                out.push(exceeded_diag(cx, span.start, &prefix, display, labels, "output"));
+                out.push(exceeded_diag(cx, span.start, &prefix, display, bound, "output"));
             }
-            EffectOrigin::Exit { keyword, span } if exceeds(labels, "exit") => {
+            EffectOrigin::Exit { keyword, span } if bound.exceeds("exit") => {
                 let prefix = format!("{keyword} has effect exit");
-                out.push(exceeded_diag(cx, span.start, &prefix, display, labels, "exit"));
+                out.push(exceeded_diag(cx, span.start, &prefix, display, bound, "exit"));
             }
             EffectOrigin::MethodCall { receiver, method, span } => {
                 if let Some(callee) = resolve_effect_edge(cx, class_fqn, receiver, method) {
-                    emit_transitive(out, cx, &callee, effects, span.start, display, labels);
+                    emit_transitive(out, cx, &callee, effects, span.start, display, bound);
                 // There is deliberately no declared-lane leg here: a declared bound
                 // is not a proven effect, and this function only reports proven
                 // ones (ADR-0067 decision 5). An ADR-0067 receiver reaches neither
@@ -5624,10 +5771,10 @@ fn report_unit(
                 } else if let Some(fs) = builtin_method_findings(cx, receiver, method, *span) {
                     // A builtin-class catalog row, reported like a builtin call's.
                     for f in fs {
-                        if exceeds(labels, &f.label) {
+                        if bound.exceeds(&f.label) {
                             let prefix = format!("{}() has effect {}", f.origin, f.label);
                             out.push(exceeded_diag(
-                                cx, span.start, &prefix, display, labels, &f.label,
+                                cx, span.start, &prefix, display, bound, &f.label,
                             ));
                         }
                     }
@@ -5649,25 +5796,25 @@ fn report_unit(
                         for f in
                             builtin_findings(&builtin_name, *span, cx.tree(), cx.path(), targets)
                         {
-                            if exceeds(labels, &f.label) {
+                            if bound.exceeds(&f.label) {
                                 let prefix = format!("{}() has effect {}", callee.simple(), f.label);
-                                out.push(exceeded_diag(cx, span.start, &prefix, display, labels, &f.label));
+                                out.push(exceeded_diag(cx, span.start, &prefix, display, bound, &f.label));
                             }
                         }
                         if shape.callback_param < *arg_count
                             && let Some((_, cbref)) =
                                 callbacks.iter().find(|(p, _)| *p == shape.callback_param)
                         {
-                            report_callback(out, cx, cbref, effects, span.start, display, labels);
+                            report_callback(out, cx, cbref, effects, span.start, display, bound);
                         }
                     }
                     FnResolution::User(_) | FnResolution::Unknown => {
                         if let FnResolution::User(site) = cx.resolve_effect_function(callee) {
                             let decl = cx.fn_decl(site);
                             let cs = Sym::Func(decl.fqn.clone());
-                            emit_transitive(out, cx, &cs, effects, span.start, display, labels);
+                            emit_transitive(out, cx, &cs, effects, span.start, display, bound);
                             report_conditional_purity(
-                                out, cx, decl, callbacks, targets, effects, *span, display, labels,
+                                out, cx, decl, callbacks, targets, effects, *span, display, bound,
                             );
                         } else if let FnResolution::Builtin(builtin_name) =
                             cx.resolve_effect_function(callee)
@@ -5679,9 +5826,9 @@ fn report_unit(
                                 cx.path(),
                                 targets,
                             ) {
-                                if exceeds(labels, &f.label) {
+                                if bound.exceeds(&f.label) {
                                     let prefix = format!("{}() has effect {}", callee.simple(), f.label);
-                                    out.push(exceeded_diag(cx, span.start, &prefix, display, labels, &f.label));
+                                    out.push(exceeded_diag(cx, span.start, &prefix, display, bound, &f.label));
                                 }
                             }
                         }
@@ -5690,7 +5837,7 @@ fn report_unit(
             }
             // A `$fn()` resolved to a body-local closure — report its effects.
             EffectOrigin::Callback { cbref, span } => {
-                report_callback(out, cx, cbref, effects, span.start, display, labels);
+                report_callback(out, cx, cbref, effects, span.start, display, bound);
             }
             EffectOrigin::Output { .. } | EffectOrigin::Exit { .. } => {}
             EffectOrigin::Opaque { .. } => {}
@@ -5713,7 +5860,7 @@ fn report_conditional_purity(
     effects: &HashMap<Sym, EffectSet>,
     span: steins_syntax::Span,
     display: &str,
-    labels: &[String],
+    bound: OperativeBound<'_>,
 ) {
     let Some(cp) = conditional_purity(decl.docblock.as_ref(), &decl.params) else { return };
     let mut pending: Vec<steins_syntax::CallbackRef> = Vec::new();
@@ -5721,12 +5868,12 @@ fn report_conditional_purity(
         pending.push(cbref.clone());
     });
     for cbref in &pending {
-        report_callback(out, cx, cbref, effects, span.start, display, labels);
+        report_callback(out, cx, cbref, effects, span.start, display, bound);
     }
     for label in r.labels {
-        if exceeds(labels, label) {
+        if bound.exceeds(label) {
             let prefix = format!("{}() has effect {label}", decl.name);
-            out.push(exceeded_diag(cx, span.start, &prefix, display, labels, label));
+            out.push(exceeded_diag(cx, span.start, &prefix, display, bound, label));
         }
     }
 }
@@ -5741,10 +5888,10 @@ fn report_callback(
     effects: &HashMap<Sym, EffectSet>,
     offset: u32,
     display: &str,
-    labels: &[String],
+    bound: OperativeBound<'_>,
 ) {
     if let Some(sym) = callback_effect_edge(cx, cbref) {
-        emit_transitive(out, cx, &sym, effects, offset, display, labels);
+        emit_transitive(out, cx, &sym, effects, offset, display, bound);
     } else if let steins_syntax::CallbackRef::Named(name) = cbref
         && let FnResolution::Builtin(builtin_name) = cx.resolve_effect_function(name)
     {
@@ -5755,9 +5902,9 @@ fn report_callback(
             cx.path(),
             None,
         ) {
-            if exceeds(labels, &f.label) {
+            if bound.exceeds(&f.label) {
                 let prefix = format!("{}() has effect {}", name.simple(), f.label);
-                out.push(exceeded_diag(cx, offset, &prefix, display, labels, &f.label));
+                out.push(exceeded_diag(cx, offset, &prefix, display, bound, &f.label));
             }
         }
     }
@@ -5772,14 +5919,14 @@ fn emit_transitive(
     effects: &HashMap<Sym, EffectSet>,
     offset: u32,
     display: &str,
-    labels: &[String],
+    bound: OperativeBound<'_>,
 ) {
     let callee_display = cx.sym_display(callee);
     let mut fs: Vec<&EffectFinding> =
         effects.get(callee).map(|e| &e.findings).into_iter().flatten().collect();
     fs.sort_by(|a, b| (a.line, &a.label, &a.origin).cmp(&(b.line, &b.label, &b.origin)));
     for ef in fs {
-        if !exceeds(labels, &ef.label) {
+        if !bound.exceeds(&ef.label) {
             continue;
         }
         // Name the file when the ultimate origin arises in a different file than
@@ -5791,7 +5938,7 @@ fn emit_transitive(
         };
         let prefix =
             format!("{callee_display}() has effect {} (via {} at {loc})", ef.label, ef.origin);
-        out.push(exceeded_diag(cx, offset, &prefix, display, labels, &ef.label));
+        out.push(exceeded_diag(cx, offset, &prefix, display, bound, &ef.label));
     }
 }
 
@@ -5830,18 +5977,10 @@ fn exceeded_diag(
     offset: u32,
     prefix: &str,
     display: &str,
-    labels: &[String],
+    bound: OperativeBound<'_>,
     exceeding_label: &str,
 ) -> Diagnostic {
-    let clause = if labels.is_empty() {
-        "#[\\Steins\\Pure]".to_owned()
-    } else {
-        let quoted: Vec<String> = labels.iter().map(|l| format!("'{l}'")).collect();
-        format!(
-            "#[\\Steins\\Effect({})] — {exceeding_label} exceeds the envelope",
-            quoted.join(", ")
-        )
-    };
+    let clause = bound.declared_clause(exceeding_label);
     let msg = format!("{prefix}, but {display}() is declared {clause}");
     let pos = cx.tree().position(offset);
     Diagnostic { id: EFFECT_ID, path: cx.path().to_owned(), line: pos.line, column: pos.column, message: msg, facet: None, fix: None }
@@ -6006,6 +6145,24 @@ fn builtin_method_findings(
     )
 }
 
+/// Which **trust stratum** a declared bound was written in — the one thing a call
+/// site needs to know about an envelope beyond its labels (ADR-0082 §1).
+///
+/// Both strata feed the same declared lane; they differ in what the call site may
+/// conclude from the *absence* of further information.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeclaredBound {
+    /// A **checked** envelope: `#[\Steins\Effect(...)]` / `#[\Steins\Pure]`, which
+    /// `effect.envelope-exceeded` and `effect.liskov-widened` hold every analyzed
+    /// implementation to. Importing it discharges this call site's taint.
+    Checked(Vec<String>),
+    /// An **interop envelope** (ADR-0082): one of upstream's purity tags in a
+    /// docblock. Nothing has checked it at this call site, so it follows
+    /// ADR-0068's plugin discipline — the labels enter the declared lane and the
+    /// exhaustiveness taint stays. Assert, never prove.
+    Interop(Vec<String>),
+}
+
 /// The **declared** effect bound a call through a declared receiver imports
 /// (ADR-0067): the effect envelope carried by `method` on the project interface
 /// the receiver's declared type names.
@@ -6021,11 +6178,12 @@ fn builtin_method_findings(
 /// interfaces keeps the two from arguing.
 fn resolve_declared_bound(
     cx: &Cx,
+    registry: &steins_catalog::LabelRegistry,
     enclosing: Option<&str>,
     params: &[steins_syntax::Param],
     receiver: &EffectRecv,
     method: &str,
-) -> Option<Vec<String>> {
+) -> Option<DeclaredBound> {
     let ty = match receiver {
         // `f(Repo $r) { $r->find(); }` — the parameter's own declared type. The
         // syntax gate already proved this frame never writes `$r`, so the binding
@@ -6045,7 +6203,13 @@ fn resolve_declared_bound(
     if !decl.is_interface {
         return None;
     }
-    nearest_interface_envelope(cx, file, decl, method)
+    // The checked stratum beats the unchecked one (ADR-0082 §1): the attribute
+    // walk runs first and unchanged, and the docblock walk is consulted only when
+    // it came back empty — so an interop tag never preempts an attribute
+    // envelope, neither on the same declaration nor anywhere up the hierarchy.
+    nearest_interface_envelope(cx, file, decl, method).map(DeclaredBound::Checked).or_else(|| {
+        nearest_interop_envelope(cx, registry, file, decl, method).map(DeclaredBound::Interop)
+    })
 }
 
 /// The FQN of a declared type that names **exactly one** object type, or `None`
@@ -6101,6 +6265,298 @@ fn nearest_interface_envelope<'a>(
         level = next;
     }
     None
+}
+
+/// The nearest **interop envelope** (ADR-0082) declared for `method` on an
+/// interface hierarchy — the docblock twin of [`nearest_interface_envelope`],
+/// walked breadth-first in exactly the same order, so the nearest carrier wins
+/// here too.
+///
+/// The stopping rule differs in two ways, and both follow from where the tags
+/// live. An interface that redeclares the method but carries no purity tag of its
+/// own *and* no class-level one keeps the search going outward, because a
+/// class-level tag only ever distributes over the methods its own class-like
+/// declares (upstream's rule, ADR-0082 §5). An interface that *does* carry a tag
+/// stops the search even when that tag is [`InteropTag::Unbounded`]: it won its
+/// nearest-wins contest, and ⊤ is its answer.
+fn nearest_interop_envelope<'a>(
+    cx: &Cx<'a>,
+    registry: &steins_catalog::LabelRegistry,
+    start_file: usize,
+    start: &'a ClassDecl,
+    method: &str,
+) -> Option<Vec<String>> {
+    let mut level: Vec<(usize, &'a ClassDecl)> = vec![(start_file, start)];
+    let mut seen: HashSet<String> = HashSet::new();
+    while !level.is_empty() {
+        let mut next: Vec<(usize, &'a ClassDecl)> = Vec::new();
+        for (file, id) in level {
+            if !seen.insert(id.fqn.to_ascii_lowercase()) {
+                continue;
+            }
+            let tree = cx.units[file].tree;
+            if let Some(m) = id.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method)) {
+                match interop_envelope(registry, tree, id, m) {
+                    // The declared lane wants the bound, not its spelling: a call
+                    // site imports labels, and a bare ⊤ tag imports none of them.
+                    InteropTag::Bound(_, labels) => return Some(labels),
+                    // A tag was written and it says nothing. Importing an
+                    // ancestor's narrower bound instead would speak over the
+                    // carrier that actually won.
+                    InteropTag::Unbounded => return None,
+                    InteropTag::Absent => {}
+                }
+            }
+            let parents = id
+                .parent
+                .iter()
+                .chain(id.implements.iter())
+                .map(|r| tree.resolve_class_fqn(r))
+                .collect::<Vec<String>>();
+            for fqn in parents {
+                if let Some((f, d)) = cx.find_class(&fqn)
+                    && d.is_interface
+                {
+                    next.push((f, d));
+                }
+            }
+        }
+        level = next;
+    }
+    None
+}
+
+/// The envelope a declaration is **actually held to** (ADR-0082 role B), or `None`
+/// when nothing constrains it.
+///
+/// The checked stratum wins outright (ADR-0082 §1). The shadowing is total, and the
+/// caller enforces the other half of it by not even *reading* the docblock when an
+/// attribute is present: the interop bound is then neither checked nor
+/// label-validated. Checking both would let a docblock manufacture a finding
+/// against a declaration whose author already wrote the authoritative bound one
+/// line down.
+///
+/// `anchor` is where a finding about the declaration itself lands when the interop
+/// envelope wins — the declaration's name, since the tag lives in trivia the
+/// attribute path has no analogue for, and the name is where
+/// [`emit_effect_liskov`] already anchors declaration-level effect findings.
+fn operative_bound<'a>(
+    attr: Option<&'a EffectEnvelope>,
+    interop: Option<&'a (EnvelopeTag, Vec<String>)>,
+    anchor: Span,
+) -> Option<OperativeBound<'a>> {
+    if let Some(env) = attr {
+        return Some(OperativeBound {
+            labels: &env.labels,
+            span: env.span,
+            spelling: EnvelopeSpelling::Attribute,
+        });
+    }
+    let (tag, labels) = interop?;
+    // A bare `@phpstan-all-methods-impure` is ⊤ — every effect possible — and the
+    // only tag that reaches here carrying no labels while meaning "unconstrained"
+    // (ADR-0082 §3). It must not build a bound: an empty label list is the *pure*
+    // envelope everywhere else in this pass, so checking it would read upstream's
+    // widest claim as its narrowest and flag every method in the class.
+    if labels.is_empty() && matches!(tag, EnvelopeTag::AllMethodsImpure) {
+        return None;
+    }
+    Some(OperativeBound { labels, span: anchor, spelling: EnvelopeSpelling::Interop(*tag) })
+}
+
+/// What one docblock says about a declaration's interop envelope.
+///
+/// Three answers, not two, because *no tag* and *a tag that says nothing* behave
+/// differently under upstream's nearest-wins precedence (ADR-0082 §5): the first
+/// lets an outer carrier speak for the declaration, the second does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InteropTag {
+    /// No tag of the consulted families is written here. Keep looking outward.
+    Absent,
+    /// A tag is written, and it bounds nothing — the ⊤ envelope, which is what the
+    /// absence of information already means. It still won its precedence contest:
+    /// nothing further out gets to speak for this declaration.
+    Unbounded,
+    /// A usable bound: the tag family (for quoting the declaration back) and its
+    /// labels, every one of them known to the registry.
+    Bound(EnvelopeTag, Vec<String>),
+}
+
+impl InteropTag {
+    /// The bound, for the consumers that treat ⊤ and silence alike.
+    fn into_bound(self) -> Option<(EnvelopeTag, Vec<String>)> {
+        match self {
+            Self::Bound(env, labels) => Some((env, labels)),
+            Self::Absent | Self::Unbounded => None,
+        }
+    }
+}
+
+/// The interop tag one docblock carries, with any label the `registry` does not
+/// know collapsing the **whole tag** to [`InteropTag::Unbounded`] (owner ruling,
+/// 2026-08-12).
+///
+/// Current PHPStan discards everything after `@phpstan-impure`, so wild code
+/// legitimately carries one-word prose — `@phpstan-impure database` — that this
+/// grammar would otherwise read as a label. Treating an unrecognized label as
+/// *unspecified* is what keeps such a docblock from failing a run; a separate rule
+/// owns typo reporting, and it reports on the checked stratum.
+///
+/// The whole tag goes inert rather than the unknown labels being dropped from it.
+/// An unknown label is ⊤ — no information — and an upper bound that contains ⊤ is
+/// ⊤. Checking the body against the *known subset* of the author's claim would
+/// hold it to a narrower bound than the one written (`@phpstan-impure io.db,
+/// io.netw` is not a claim of `io.db`), which manufactures findings the zero-FP
+/// bar forbids. Widening to ⊤ can only lose findings, never invent them.
+fn interop_tag(
+    registry: &steins_catalog::LabelRegistry,
+    docblock: Option<&String>,
+    accept: impl Fn(EnvelopeTag) -> bool,
+) -> InteropTag {
+    let Some((env, labels)) = docblock_envelope_tag(docblock, accept) else {
+        return InteropTag::Absent;
+    };
+    if labels.iter().any(|l| !registry.is_known(l)) {
+        return InteropTag::Unbounded;
+    }
+    InteropTag::Bound(env, labels)
+}
+
+/// The **interop envelope** (ADR-0082) written on one declaration's *own*
+/// docblock: the `@phpstan-pure` / `@phpstan-impure <labels>` families, with no
+/// class-level fallback. The tag family travels with the labels — a finding has to
+/// quote the declaration back in the spelling its author used.
+///
+/// This is the nearest-wins half of [`interop_envelope`]'s precedence, and the
+/// whole of a top-level function's: the class-level `all-methods-*` pair
+/// distributes over the methods of the class-like it annotates (upstream's rule,
+/// ADR-0082 §5), so no class tag anywhere can reach a free function.
+fn own_interop_envelope(
+    registry: &steins_catalog::LabelRegistry,
+    docblock: Option<&String>,
+) -> InteropTag {
+    match interop_tag(registry, docblock, |e| matches!(e, EnvelopeTag::Pure | EnvelopeTag::Impure))
+    {
+        // `@phpstan-impure <labels>` is `≤labels`; the bare spelling is ⊤ and never
+        // scans to a tag at all, so `labels` is never empty here.
+        InteropTag::Bound(EnvelopeTag::Impure, labels) => {
+            InteropTag::Bound(EnvelopeTag::Impure, labels)
+        }
+        // `@phpstan-pure` takes no labels: the empty bound.
+        InteropTag::Bound(env, _) => InteropTag::Bound(env, Vec::new()),
+        other => other,
+    }
+}
+
+/// Whether a docblock could possibly carry an interop-envelope tag — the same
+/// cheap substring gate [`docblock_envelope_tag`] opens with, exposed for the
+/// whole-project fast path that decides whether the effect fixpoint runs at all.
+fn spells_interop_envelope(docblock: Option<&String>) -> bool {
+    docblock.is_some_and(|t| t.contains("pure"))
+}
+
+/// The **interop envelope** (ADR-0082) one method declaration carries: the effect
+/// bound written in upstream's purity tags, read from the method's own docblock
+/// and, failing that, from the declaring class-like's.
+///
+/// [`InteropTag::Absent`] means *nothing was written* — the same answer an absent
+/// docblock gives, and the caller's cue to keep looking or to keep its taint. An
+/// empty label list on a [`InteropTag::Bound`] is the **empty** bound
+/// (`@phpstan-pure`): a real claim, not a missing one — except under
+/// `AllMethodsImpure`, whose bare form is ⊤. The tag family is returned alongside
+/// precisely so a consumer can tell those two apart, and so a diagnostic can quote
+/// the declaration back as its author spelled it.
+///
+/// Precedence is upstream's **nearest-wins**, not Steins' Liskov conjunction: a
+/// method-level tag replaces the class-level one outright rather than joining it.
+/// ADR-0082 §5 records why the two strata differ here — rewriting the semantics of
+/// someone else's implemented tag is not "interop". Within one docblock the first
+/// envelope tag wins; a docblock spelling two contradictory ones is a user error
+/// this reader does not diagnose.
+fn interop_envelope(
+    registry: &steins_catalog::LabelRegistry,
+    tree: &SourceTree,
+    class: &ClassDecl,
+    method: &MethodDecl,
+) -> InteropTag {
+    // A method-level tag always wins; the class-level pair written *on a method*
+    // says nothing about that method upstream, so it is not a method-level tag.
+    //
+    // "Wins" includes winning with ⊤: a method whose own tag went inert is
+    // unbounded, NOT a method that said nothing. Falling back to the class tag
+    // there would check `/** @phpstan-impure database */ function save()` against
+    // its class's `@phpstan-all-methods-pure` — holding an author to the opposite
+    // of what they wrote.
+    match own_interop_envelope(registry, method.docblock.as_ref()) {
+        InteropTag::Absent => {}
+        won => return won,
+    }
+    match interop_tag(registry, class.docblock.as_ref(), |e| {
+        matches!(e, EnvelopeTag::AllMethodsPure | EnvelopeTag::AllMethodsImpure)
+    }) {
+        // `all-methods-impure` covers every declared method unconditionally —
+        // bare, it is the ⊤ bound, which contributes no labels.
+        InteropTag::Bound(env @ EnvelopeTag::AllMethodsImpure, labels) => {
+            InteropTag::Bound(env, labels)
+        }
+        // `all-methods-pure` covers the constructor (upstream's fixtures bless a
+        // property-initializing pure constructor) but **not** a void-returning
+        // method. Upstream's quirk, adopted verbatim (ADR-0082 §5).
+        InteropTag::Bound(env, _) => {
+            if method.is_constructor || !returns_void(tree, method) {
+                InteropTag::Bound(env, Vec::new())
+            } else {
+                InteropTag::Absent
+            }
+        }
+        other => other,
+    }
+}
+
+/// The first interop-envelope tag in a docblock whose family `accept` admits,
+/// with its label list as written.
+///
+/// The cheap substring gate ([`spells_interop_envelope`]) is [`conditional_purity`]'s
+/// idiom, and it is exact for this family: every accepted spelling — `@pure`,
+/// `@psalm-pure`, `@impure`, `@phpstan-all-methods-pure`,
+/// `@phpstan-all-methods-impure` — contains `pure`. Scanning every docblock in the
+/// project would not be cheap.
+fn docblock_envelope_tag(
+    docblock: Option<&String>,
+    accept: impl Fn(EnvelopeTag) -> bool,
+) -> Option<(EnvelopeTag, Vec<String>)> {
+    if !spells_interop_envelope(docblock) {
+        return None;
+    }
+    let text = docblock?;
+    scan_docblock(text).into_iter().find_map(|tag| match tag.kind {
+        TagKind::InteropEnvelope(env) if accept(env) => Some((env, tag.labels)),
+        _ => None,
+    })
+}
+
+/// Whether a method declares a `void` return — the one signature fact
+/// `@phpstan-all-methods-pure` reads (ADR-0082 §5).
+///
+/// [`MethodDecl::ret`] cannot answer it: `void`, `array`, `mixed` and an absent
+/// hint all lower to `None`. So the native hint is read back **as written**
+/// (ADR-0078's `ret_span`), and only when none was written does the docblock's
+/// `@return` get a say. A method declaring neither return type is *not* void:
+/// the envelope should be dropped only where the void quirk provably applies.
+fn returns_void(tree: &SourceTree, method: &MethodDecl) -> bool {
+    if let Some(span) = method.ret_span {
+        return tree.text_at(span).is_some_and(|t| t.trim().eq_ignore_ascii_case("void"));
+    }
+    method.docblock.as_ref().is_some_and(|doc| {
+        scan_docblock(doc).iter().any(|t| {
+            t.kind == TagKind::Return
+                // `type_text` may carry a trailing description; only the type leads.
+                && t.type_text
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|w| w.eq_ignore_ascii_case("void"))
+        })
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -27342,6 +27798,8 @@ fn parse_envelopes(docblock: Option<&str>) -> Option<Envelopes> {
             // trigger, never a declaration envelope; its consumer is the
             // statement-docblock emitter, not this seam.
             TagKind::TraceTag => {}
+            // Interop envelopes: consumed in Slice 2 (#303)
+            TagKind::InteropEnvelope(_) => {}
         }
     }
     // Return an envelope set whenever there is anything to check *or* any assertion

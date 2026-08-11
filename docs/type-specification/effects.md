@@ -1,10 +1,17 @@
 # Effects
 
 **Status: implemented** for the labels, envelopes, propagation, and checks
-described below. The plugin channel that opens the registry is **partly
-implemented**: a Composer package's manifest registers labels and colors plain
-functions; the sidecar half that would boot the framework does not exist.
-ADR-0005, ADR-0006, ADR-0008, ADR-0018, ADR-0019, ADR-0033, ADR-0067, ADR-0068.
+described below, plus the **interop envelope** surface — the parameterized
+PHPStan purity tags (`@phpstan-impure <labels>`, `@phpstan-pure`, the
+class-level `@phpstan-all-methods-*` pair) read as an unchecked, checkable
+docblock spelling of the same envelope concept, and `steins transform
+effects-envelope`, which writes them (ADR-0082; see
+[phpdoc-effects-interop.md](phpdoc-effects-interop.md)). The plugin channel
+that opens the registry is **partly implemented**: a Composer package's
+manifest registers labels and colors plain functions; the sidecar half that
+would boot the framework does not exist.
+ADR-0005, ADR-0006, ADR-0008, ADR-0018, ADR-0019, ADR-0033, ADR-0067,
+ADR-0068, ADR-0082.
 
 ## The second dimension
 
@@ -44,7 +51,10 @@ failure   failure.environment   failure.input   failure.resource
 
 A declared label outside this set — and not an ancestor of an entry — earns
 `effect.unknown-label`, with a Levenshtein-based suggestion (`io.netw` → did you
-mean `io.net`). Typo safety is Steins' own job, not the user's.
+mean `io.net`). Typo safety is Steins' own job, not the user's. This is the
+**checked** stratum's rule (`#[\Steins\Effect]` / `#[\Steins\Pure]`); the
+interop envelope below reads an unrecognized label differently — see
+[Unknown labels](phpdoc-effects-interop.md#unknown-labels).
 
 `failure.*` is the odd family: those labels name a `false`/`null` failure arm's
 *value provenance* — why the arm exists — rather than an effect. They share the
@@ -136,6 +146,17 @@ Both the fully-qualified spelling and a `use`-imported bare `#[Pure]` /
 `#[Effect(...)]` are recognized. When both attributes decorate one declaration
 they are contradictory (`Pure` is the tighter bound): `Pure` wins, and this slice
 emits no diagnostic about the contradiction.
+
+**A second, unchecked source exists one trust stratum below the attribute.**
+The parameterized PHPStan purity tags — `@phpstan-impure <labels>`,
+`@phpstan-pure`, and the class-level `@phpstan-all-methods-pure` /
+`@phpstan-all-methods-impure` pair — are read as **interop envelopes**
+(ADR-0082): the same envelope concept, spelled in a docblock rather than an
+attribute, entering the declared lane below and contract-checked against the
+declaring function exactly as an attribute envelope is. The full grammar and
+semantics are their own document,
+[phpdoc-effects-interop.md](phpdoc-effects-interop.md); this file does not
+duplicate them.
 
 **`@throws` is not the effect syntax.** It stays Throwable-only
 ([throws.md](throws.md)); the analogy to declarative effects is as far as the
@@ -318,5 +339,3 @@ pseudo-constant configuration this slice does not implement. See
   above; ADR-0014's php-src stub sourcing is not built.
 - **A computed purity property.** Folding permission stays an allowlist.
 - **`fopen` mode-string discrimination** — it stays at the parent `io.fs` label.
-- **Effect-precondition-driven transforms** (loop→map requires purity) — the
-  transform engine exists, but no transform consumes effects yet (ADR-0034).
