@@ -118,9 +118,15 @@ The docblock spelling of purity is not purely divergent, though: ADR-0082
 reads `@phpstan-impure <labels>` and `@phpstan-pure` as **interop
 envelopes** — an unchecked, checkable spelling of the same envelope
 concept, at the parameter position PHPStan's own author sketched for the
-tag. A bare `@phpstan-impure` stays unread (⊤ carries no information); the
+tag — and `steins transform effects-envelope` writes them back from a
+project's own proven effects, so the bridge runs both ways. A bare
+`@phpstan-impure` stays unread (⊤ carries no information); the
 parameterized and class-level forms enter the declared lane and are
-contract-checked against their own declaration. See
+contract-checked against their own declaration, and a label outside
+Steins' registry reads the *whole* tag as unspecified rather than a
+narrowed bound (owner ruling, 2026-08-12) — a typo can go quietly, the way
+one already does under current PHPStan, rather than fail a run the way an
+unknown label does under `#[\Steins\Effect]`. See
 [phpdoc-effects-interop.md](type-specification/phpdoc-effects-interop.md).
 
 ## ConstantArrayType vs order-witnessed values + order-declared shapes

@@ -150,3 +150,59 @@ effect tags co-designed with upstream, a different layer entirely.
 - The full grammar, semantics, and upstream-facing rationale live in
   [phpdoc-effects-interop.md](../type-specification/phpdoc-effects-interop.md),
   written as a standalone document pasteable into an upstream discussion.
+
+## Amendment (2026-08-12): an unknown label reads the whole tag as unspecified, not a narrowed subset
+
+Owner ruling, the day after ratification, closing a gap the original decision
+left implicit: what a checker does when a declared label is not in its
+vocabulary. §2 checks inference against "the declared bound," and the
+straightforward first implementation checked a *label* at a time against the
+registry — which would have reused the same `effect.unknown-label` diagnostic
+the checked (`#[\Steins\Effect]`) stratum earns for a typo. That reuse is now
+refused, and §2's coverage of `effect.envelope-exceeded` does not extend to
+`effect.unknown-label` for this stratum: the id stays attribute-only.
+
+**The ruling.** A tag carrying any label the registry does not know is read
+as **unspecified**, whole — the same ⊤ reading a bare `@phpstan-impure`
+already has, never a bound narrowed to its recognized members.
+`effect.unknown-label` never fires from an interop tag. Typo reporting for
+the docblock spelling is a **separate, deferred** concern, not folded into
+the bound-reading rule.
+
+**Motivation: current PHPStan discards everything after `@phpstan-impure`.**
+A wild docblock in the world today can legally carry one-word prose in that
+position — `@phpstan-impure database` — because nothing has ever parsed it
+as more than a boolean flag. Reading such a docblock's trailing word as a
+label and then flagging it unknown would fail a run over code that predates
+this proposal entirely and was never wrong under any rule that existed when
+it was written. A grammar whose adoption cost is "your existing docblocks
+might now fail CI" is not the minimal-adoption-surface story §4 promises.
+
+**Rationale: ⊤ composition, not subset composition.** An unrecognized label
+is itself uninformative — a checker cannot say what it bounds, so its width
+in the lattice is ⊤. The label list composes a conjunction of individually
+checkable bounds into one envelope; joining a real bound with ⊤ yields ⊤,
+not the real bound alone. Checking the body against only the recognized
+subset (`@phpstan-impure io.db, io.netw` read as `io.db`) would hold the
+declaration to a narrower claim than its author wrote — exactly the shape of
+finding the zero-FP bar forbids: a violation manufactured by the checker's
+own vocabulary gap, not by the code.
+
+**Precedence still resolves to the tag that spoke.** An unspecified tag is
+still a *tag* — it wins §5's nearest-wins contest over an outer class-level
+tag exactly as a bound one would, because the method did write something. A
+class tag does not get to speak for a method whose own tag went inert; that
+would check the method against a bound its author never reached for.
+
+**Implemented.** `interop_tag`/`InteropTag` in
+`crates/steins-infer/src/lib.rs` (~6366–6430) collapse any unrecognized
+label to `InteropTag::Unbounded` before a bound is ever built, so the
+existing "unknown declared label" loop in `report_unit` is reachable from
+the attribute stratum only. The transform side reads the identical
+classification through `ExistingEnvelope`
+(`crates/steins-infer/src/effects.rs`) and refuses by name rather than write
+through an unreadable site or a computed bound with the same defect
+(`crates/steins-edit/src/effects_envelope.rs`): `existing-tag-unreadable`
+and `bound-label-unknown`.
+
+**Status: accepted 2026-08-12, owner-ratified.**

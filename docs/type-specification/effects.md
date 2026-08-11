@@ -51,7 +51,10 @@ failure   failure.environment   failure.input   failure.resource
 
 A declared label outside this set — and not an ancestor of an entry — earns
 `effect.unknown-label`, with a Levenshtein-based suggestion (`io.netw` → did you
-mean `io.net`). Typo safety is Steins' own job, not the user's.
+mean `io.net`). Typo safety is Steins' own job, not the user's. This is the
+**checked** stratum's rule (`#[\Steins\Effect]` / `#[\Steins\Pure]`); the
+interop envelope below reads an unrecognized label differently — see
+[Unknown labels](phpdoc-effects-interop.md#unknown-labels).
 
 `failure.*` is the odd family: those labels name a `false`/`null` failure arm's
 *value provenance* — why the arm exists — rather than an effect. They share the
@@ -336,5 +339,3 @@ pseudo-constant configuration this slice does not implement. See
   above; ADR-0014's php-src stub sourcing is not built.
 - **A computed purity property.** Folding permission stays an allowlist.
 - **`fopen` mode-string discrimination** — it stays at the parent `io.fs` label.
-- **Effect-precondition-driven transforms** (loop→map requires purity) — the
-  transform engine exists, but no transform consumes effects yet (ADR-0034).

@@ -98,6 +98,32 @@ impure point I found subsumed by `io`?" — a segment-wise string prefix test.
 - `@phpstan-pure` takes no labels: "pure, except it performs effects" is a
   contradiction. A partially-effectful function is spelled as an impure bound.
 
+### Unknown labels
+
+A label a checker's vocabulary does not recognize does not narrow the bound
+to the labels it does recognize — it makes the **whole tag** unspecified (the
+⊤ bound), the same reading a bare `@phpstan-impure` already has. Current
+PHPStan discards everything after `@phpstan-impure`, so a docblock may
+legitimately carry a human's one-word note in that position —
+`@phpstan-impure database` — syntactically indistinguishable from a typo of a
+real label (`@phpstan-impure io.netw`). A checker cannot tell those apart, so
+it must not choose the reading that manufactures a violation: judging the
+body against only the recognized subset of the list would hold the function
+to a narrower claim than its author wrote, which is not what `@phpstan-impure
+io.db, io.netw` says. Widening the whole tag to ⊤ can only lose a finding,
+never invent one.
+
+An unspecified tag still **wins** whatever precedence rule applies to it (the
+class-level override of the next section, in particular): a method whose own
+tag is unspecified does not fall through to its class's tag, because the
+method did write something, however uninterpretable — falling through would
+check it against a bound its author never reached for.
+
+Reporting *why* a label went unrecognized — a typo-distance suggestion, say —
+is a separate concern from bounding, and this proposal takes no position on
+it: a vocabulary-conformance diagnostic can coexist with a checker that reads
+an unrecognized label as ⊤ for the purpose of the bound itself.
+
 ### Class-level tags
 
 `@phpstan-all-methods-pure` / `@phpstan-all-methods-impure` (PHPStan 2.1.39)
@@ -171,6 +197,14 @@ of the same envelope concept, one trust stratum below the attribute.
   a bare `@phpstan-pure` is read as the `{mutate.local}` envelope.
 - Within the interop stratum the class/method precedence is upstream's
   nearest-wins rule above; checked (attribute) envelopes continue to conjoin.
+- **Unknown labels never reach `effect.unknown-label`** (owner ruling,
+  2026-08-12): that id stays attribute-only. An interop tag naming a label
+  Steins' registry does not know is read per [Unknown
+  labels](#unknown-labels) above — the whole tag is unspecified, and the
+  declaration is checked (or, at a call site, contributes) as if it carried
+  no tag's *bound*, though the tag still wins its precedence contest. Typo
+  reporting for the docblock spelling is deferred to a future, separate,
+  opt-in rule.
 - Until `mutate.self` narrows Steins' conservative `mutate` coloring of
   property writes (ADR-0055 E2), a pure-declared constructor's own-property
   initialization is admissible rather than a finding — matching the upstream
@@ -179,7 +213,10 @@ of the same envelope concept, one trust stratum below the attribute.
   class-level pure only when every declared method is provenly, exhaustively
   pure; per-method impure bounds only from exhaustive inference;
   non-exhaustive functions get no tag at all. Emission never writes a bare
-  tag and never writes per-method `@phpstan-pure`.
+  tag and never writes per-method `@phpstan-pure`, and it refuses rather than
+  touch a site it cannot read faithfully: an existing tag carrying an unknown
+  label is left byte-untouched, and a computed bound is never written if it
+  would itself contain one.
 
 ## Open questions for upstream
 

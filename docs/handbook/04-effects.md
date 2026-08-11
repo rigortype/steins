@@ -57,23 +57,31 @@ exit   ffi
 global.read   global.write
 io   io.db   io.fs   io.fs.read   io.fs.write   io.ipc
      io.net   io.net.http   io.process   io.signal
-mutate
+mutate   mutate.local
 nondet   nondet.random   nondet.time
 output   output.header
-failure.environment   failure.input   failure.resource
+failure   failure.environment   failure.input   failure.resource
 ```
 
 You will not memorise these. You will read one off an `annotate`
 margin, decide whether it belongs on the function, and put it in
 the envelope if it does.
 
+One label is worth knowing by name: `mutate.local` is the one
+every envelope tolerates, `#[\Steins\Pure]` included. It marks a
+by-ref out-parameter write that lands in a binding of the
+*calling* frame — `preg_match($p, $s, $matches)`,
+`sort($localRows)` — and nothing escapes that frame, so no
+caller can ever observe it. That is why a `Pure` function may
+still call `preg_match` on its own local variables.
+
 ## Envelopes
 
 An **effect envelope** is a declared upper bound on what a
 function may do. Its mere presence opts the declaration into
 always-on checking; with no envelope, nothing about effects is
-checked. Envelopes are spelled as native PHP attributes, not
-docblock tags:
+checked. Envelopes are spelled as native PHP attributes — the
+**checked** spelling, verified everywhere it matters:
 
 ```php
 #[\Steins\Pure]                          // the empty set — the tightest bound
@@ -93,6 +101,46 @@ value and does nothing else. `#[\Steins\Effect('io.fs')]` says
 a read like `file_get_contents` falls under `io.fs`, so it raises
 no finding. Both the fully-qualified spelling and a `use`-imported
 `#[Pure]` / `#[Effect(...)]` are recognised.
+
+## The docblock spelling: interop envelopes
+
+The attribute is not the only envelope Steins reads. A
+parameterized PHPStan purity tag — `@phpstan-impure <labels>`,
+`@phpstan-pure`, or the class-level `@phpstan-all-methods-pure` /
+`@phpstan-all-methods-impure` pair — is read as an **interop
+envelope**: the same concept, spelled in a docblock, one trust
+stratum below the attribute.
+
+```php
+/** @phpstan-impure io.db, nondet.time (reads the clock for TTL) */
+function refreshCache(string $key): CacheEntry { … }
+```
+
+The unchecked stratum still does real work. A call reached only
+through one of these tags contributes to the caller's **declared
+lane** — a `≤label` fact, never a proven one, so it never
+discharges the call's own exhaustiveness taint — and the
+declaring function is contract-checked against its own tag
+exactly as an attribute is: `effect.envelope-exceeded` still
+fires on it, quoting the tag back in its own spelling
+(`@phpstan-impure io.db, nondet.time`, never translated into
+`#[\Steins\Effect]` syntax).
+
+A label the tag names that Steins does not know reads the
+**whole tag** as unspecified rather than as a narrower bound —
+current PHPStan discards everything after `@phpstan-impure`, so
+one-word prose (`@phpstan-impure database`) is legal today and
+must never fail a run because of this. `effect.unknown-label`
+does not fire from this spelling at all (see below); a bare
+`@phpstan-impure` is read the same way, on purpose — it is ⊤, no
+information — while a bare `@phpstan-pure` is read, as the empty
+envelope.
+
+You rarely write these by hand: `steins transform
+effects-envelope` seeds them from a declaration's own proven
+effects, the docblock-world sibling of `throws-envelope`. The
+full grammar and semantics are their own document:
+[phpdoc-effects-interop.md](../type-specification/phpdoc-effects-interop.md).
 
 ## Reading effects with `steins annotate`
 
@@ -245,6 +293,13 @@ Mechanics findings cannot be disabled — the anti-rot channel is
 the one thing you do not get to turn off. Typo safety is Steins'
 job, not yours.
 
+This is the **attribute's** rule; it does not extend to the
+docblock spelling above. An unrecognized label on
+`@phpstan-impure` never becomes `effect.unknown-label` — it
+reads the whole tag as unspecified instead, which is what keeps
+wild prose like `@phpstan-impure database` legal. Typo detection
+for that spelling is a separate, not-yet-built rule.
+
 > **If you know PHPStan:** the layer split is the mechanism. The
 > two contract findings sit behind `--profile contracts` exactly
 > as `throw.undeclared` does — declared-debt findings that are
@@ -286,8 +341,10 @@ Recorded honestly:
   implementations, as the Liskov example shows), but no framework
   knowledge ships to make dependency-injected effects checkable
   without your own annotations.
-- **Effect-driven transforms.** The `transform` engine exists,
-  but no transform consumes effects yet.
+- **Typo detection for the docblock spelling.** An unrecognized
+  label on an interop tag reads as unspecified rather than as a
+  reported typo (see above); a dedicated rule for that is future
+  work, not yet built.
 
 ## Where to go from here
 
