@@ -63,6 +63,27 @@ fn license_carries_our_terms_and_the_bundled_notices() {
 }
 
 #[test]
+fn license_carries_phpstans_notice() {
+    // PHPStan is Steins' direct model (README "Acknowledgments") but is not a
+    // Rust dependency `cargo xtask licenses` can discover, so
+    // `THIRD-PARTY-LICENSES.md` alone would never carry its notice — this has
+    // to be guaranteed some other way, which is why it is embedded directly
+    // (see `LICENSE_PHPSTAN` in `main.rs`).
+    let (code, out) = run(&["license"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("PHPStan"), "must credit PHPStan as the direct model");
+    assert!(out.contains("Copyright (c) 2016 Ondřej Mirtes"), "PHPStan's own copyright notice is missing");
+    assert!(out.contains("Copyright (c) 2025 PHPStan s.r.o."), "PHPStan s.r.o.'s copyright notice is missing");
+    // PHPStan's own MIT body must appear ahead of the third-party dependency
+    // notices, not merely somewhere among the 39 other MIT-licensed crates.
+    let before_third_party = out.split("Third-Party Licenses").next().expect("a prefix");
+    assert!(
+        before_third_party.contains("Copyright (c) 2016 Ondřej Mirtes"),
+        "PHPStan's notice must stand on its own, ahead of the dependency notices"
+    );
+}
+
+#[test]
 fn the_embedded_notices_are_generated_not_a_stub() {
     // Guards the failure this whole surface exists to prevent: a placeholder or
     // truncated notices file that makes the command look compliant while
