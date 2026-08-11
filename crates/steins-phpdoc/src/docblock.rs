@@ -216,7 +216,7 @@ pub enum TagKind {
     /// [`DocTag::labels`], which is empty for the label-free spellings.
     ///
     /// The family's recognized spellings and their bare-tag rules live on
-    /// [`EnvelopeTag`]; the label grammar lives on [`scan_label_list`].
+    /// [`EnvelopeTag`]; the label grammar lives on `scan_label_list` (private).
     InteropEnvelope(EnvelopeTag),
 }
 
