@@ -4862,6 +4862,7 @@ fn classify_effect_origins(
                         }
                         None => match resolve_declared_bound(
                             cx,
+                            plugins.registry(),
                             class_fqn,
                             params,
                             receiver,
@@ -5447,7 +5448,7 @@ fn effect_diagnostics(units: &[FileUnit], index: &Index, plugins: &PluginFacts) 
             let interop = f
                 .effect_envelope
                 .is_none()
-                .then(|| own_interop_envelope(f.docblock.as_ref()))
+                .then(|| own_interop_envelope(registry, f.docblock.as_ref()).into_bound())
                 .flatten();
             let Some(bound) = operative_bound(f.effect_envelope.as_ref(), interop.as_ref(), f.span)
             else {
@@ -5460,7 +5461,7 @@ fn effect_diagnostics(units: &[FileUnit], index: &Index, plugins: &PluginFacts) 
                 let interop = m
                     .effect_envelope
                     .is_none()
-                    .then(|| interop_envelope(cx.tree(), c, m))
+                    .then(|| interop_envelope(registry, cx.tree(), c, m).into_bound())
                     .flatten();
                 if let Some(bound) =
                     operative_bound(m.effect_envelope.as_ref(), interop.as_ref(), m.span)
@@ -5689,6 +5690,13 @@ fn report_unit(
     registry: &steins_catalog::LabelRegistry,
 ) {
     // 1. Unknown declared labels (one diagnostic each, at the bound's anchor).
+    //
+    // Reachable from the **attribute** stratum only, and by construction: an
+    // interop tag naming a label this registry does not know never becomes a bound
+    // in the first place ([`interop_tag`], owner ruling 2026-08-12), so it arrives
+    // here with every label known and the loop body never runs for it. Typos in
+    // upstream's tags are somebody else's rule; typos in a Steins attribute are
+    // this one's, unchanged.
     for label in bound.labels {
         if registry.is_known(label) {
             continue;
@@ -5697,8 +5705,6 @@ fn report_unit(
             .nearest(label)
             .map(|s| format!(" — did you mean '{s}'?"))
             .unwrap_or_default();
-        // Name the tag the reader has to go and edit: the attribute for a checked
-        // envelope, upstream's own tag for an interop one (ADR-0082).
         let msg = format!(
             "unknown effect label '{label}' in {} on {display}(){suggestion}",
             bound.spelling.tag_name()
@@ -6171,6 +6177,7 @@ enum DeclaredBound {
 /// interfaces keeps the two from arguing.
 fn resolve_declared_bound(
     cx: &Cx,
+    registry: &steins_catalog::LabelRegistry,
     enclosing: Option<&str>,
     params: &[steins_syntax::Param],
     receiver: &EffectRecv,
@@ -6199,9 +6206,9 @@ fn resolve_declared_bound(
     // walk runs first and unchanged, and the docblock walk is consulted only when
     // it came back empty — so an interop tag never preempts an attribute
     // envelope, neither on the same declaration nor anywhere up the hierarchy.
-    nearest_interface_envelope(cx, file, decl, method)
-        .map(DeclaredBound::Checked)
-        .or_else(|| nearest_interop_envelope(cx, file, decl, method).map(DeclaredBound::Interop))
+    nearest_interface_envelope(cx, file, decl, method).map(DeclaredBound::Checked).or_else(|| {
+        nearest_interop_envelope(cx, registry, file, decl, method).map(DeclaredBound::Interop)
+    })
 }
 
 /// The FQN of a declared type that names **exactly one** object type, or `None`
@@ -6264,13 +6271,16 @@ fn nearest_interface_envelope<'a>(
 /// walked breadth-first in exactly the same order, so the nearest carrier wins
 /// here too.
 ///
-/// The stopping rule differs in one way, and it follows from where the tags live:
-/// an interface that redeclares the method but carries no purity tag of its own
-/// *and* no class-level one keeps the search going outward, because a class-level
-/// tag only ever distributes over the methods its own class-like declares
-/// (upstream's rule, ADR-0082 §5).
+/// The stopping rule differs in two ways, and both follow from where the tags
+/// live. An interface that redeclares the method but carries no purity tag of its
+/// own *and* no class-level one keeps the search going outward, because a
+/// class-level tag only ever distributes over the methods its own class-like
+/// declares (upstream's rule, ADR-0082 §5). An interface that *does* carry a tag
+/// stops the search even when that tag is [`InteropTag::Unbounded`]: it won its
+/// nearest-wins contest, and ⊤ is its answer.
 fn nearest_interop_envelope<'a>(
     cx: &Cx<'a>,
+    registry: &steins_catalog::LabelRegistry,
     start_file: usize,
     start: &'a ClassDecl,
     method: &str,
@@ -6284,12 +6294,17 @@ fn nearest_interop_envelope<'a>(
                 continue;
             }
             let tree = cx.units[file].tree;
-            if let Some(m) = id.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))
-                && let Some((_, labels)) = interop_envelope(tree, id, m)
-            {
-                // The declared lane wants the bound, not its spelling: a call site
-                // imports labels, and a bare ⊤ tag imports none of them.
-                return Some(labels);
+            if let Some(m) = id.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method)) {
+                match interop_envelope(registry, tree, id, m) {
+                    // The declared lane wants the bound, not its spelling: a call
+                    // site imports labels, and a bare ⊤ tag imports none of them.
+                    InteropTag::Bound(_, labels) => return Some(labels),
+                    // A tag was written and it says nothing. Importing an
+                    // ancestor's narrower bound instead would speak over the
+                    // carrier that actually won.
+                    InteropTag::Unbounded => return None,
+                    InteropTag::Absent => {}
+                }
             }
             let parents = id
                 .parent
@@ -6348,6 +6363,64 @@ fn operative_bound<'a>(
     Some(OperativeBound { labels, span: anchor, spelling: EnvelopeSpelling::Interop(*tag) })
 }
 
+/// What one docblock says about a declaration's interop envelope.
+///
+/// Three answers, not two, because *no tag* and *a tag that says nothing* behave
+/// differently under upstream's nearest-wins precedence (ADR-0082 §5): the first
+/// lets an outer carrier speak for the declaration, the second does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InteropTag {
+    /// No tag of the consulted families is written here. Keep looking outward.
+    Absent,
+    /// A tag is written, and it bounds nothing — the ⊤ envelope, which is what the
+    /// absence of information already means. It still won its precedence contest:
+    /// nothing further out gets to speak for this declaration.
+    Unbounded,
+    /// A usable bound: the tag family (for quoting the declaration back) and its
+    /// labels, every one of them known to the registry.
+    Bound(EnvelopeTag, Vec<String>),
+}
+
+impl InteropTag {
+    /// The bound, for the consumers that treat ⊤ and silence alike.
+    fn into_bound(self) -> Option<(EnvelopeTag, Vec<String>)> {
+        match self {
+            Self::Bound(env, labels) => Some((env, labels)),
+            Self::Absent | Self::Unbounded => None,
+        }
+    }
+}
+
+/// The interop tag one docblock carries, with any label the `registry` does not
+/// know collapsing the **whole tag** to [`InteropTag::Unbounded`] (owner ruling,
+/// 2026-08-12).
+///
+/// Current PHPStan discards everything after `@phpstan-impure`, so wild code
+/// legitimately carries one-word prose — `@phpstan-impure database` — that this
+/// grammar would otherwise read as a label. Treating an unrecognized label as
+/// *unspecified* is what keeps such a docblock from failing a run; a separate rule
+/// owns typo reporting, and it reports on the checked stratum.
+///
+/// The whole tag goes inert rather than the unknown labels being dropped from it.
+/// An unknown label is ⊤ — no information — and an upper bound that contains ⊤ is
+/// ⊤. Checking the body against the *known subset* of the author's claim would
+/// hold it to a narrower bound than the one written (`@phpstan-impure io.db,
+/// io.netw` is not a claim of `io.db`), which manufactures findings the zero-FP
+/// bar forbids. Widening to ⊤ can only lose findings, never invent them.
+fn interop_tag(
+    registry: &steins_catalog::LabelRegistry,
+    docblock: Option<&String>,
+    accept: impl Fn(EnvelopeTag) -> bool,
+) -> InteropTag {
+    let Some((env, labels)) = docblock_envelope_tag(docblock, accept) else {
+        return InteropTag::Absent;
+    };
+    if labels.iter().any(|l| !registry.is_known(l)) {
+        return InteropTag::Unbounded;
+    }
+    InteropTag::Bound(env, labels)
+}
+
 /// The **interop envelope** (ADR-0082) written on one declaration's *own*
 /// docblock: the `@phpstan-pure` / `@phpstan-impure <labels>` families, with no
 /// class-level fallback. The tag family travels with the labels — a finding has to
@@ -6357,15 +6430,20 @@ fn operative_bound<'a>(
 /// whole of a top-level function's: the class-level `all-methods-*` pair
 /// distributes over the methods of the class-like it annotates (upstream's rule,
 /// ADR-0082 §5), so no class tag anywhere can reach a free function.
-fn own_interop_envelope(docblock: Option<&String>) -> Option<(EnvelopeTag, Vec<String>)> {
-    let (env, labels) =
-        docblock_envelope_tag(docblock, |e| matches!(e, EnvelopeTag::Pure | EnvelopeTag::Impure))?;
-    match env {
+fn own_interop_envelope(
+    registry: &steins_catalog::LabelRegistry,
+    docblock: Option<&String>,
+) -> InteropTag {
+    match interop_tag(registry, docblock, |e| matches!(e, EnvelopeTag::Pure | EnvelopeTag::Impure))
+    {
         // `@phpstan-impure <labels>` is `≤labels`; the bare spelling is ⊤ and never
         // scans to a tag at all, so `labels` is never empty here.
-        EnvelopeTag::Impure => Some((env, labels)),
+        InteropTag::Bound(EnvelopeTag::Impure, labels) => {
+            InteropTag::Bound(EnvelopeTag::Impure, labels)
+        }
         // `@phpstan-pure` takes no labels: the empty bound.
-        _ => Some((env, Vec::new())),
+        InteropTag::Bound(env, _) => InteropTag::Bound(env, Vec::new()),
+        other => other,
     }
 }
 
@@ -6380,41 +6458,57 @@ fn spells_interop_envelope(docblock: Option<&String>) -> bool {
 /// bound written in upstream's purity tags, read from the method's own docblock
 /// and, failing that, from the declaring class-like's.
 ///
-/// `None` means *nothing was written* — the same answer an absent docblock gives,
-/// and the caller's cue to keep looking or to keep its taint. An empty label list
-/// is the **empty** bound (`@phpstan-pure`): a real claim, not a missing one —
-/// except under `AllMethodsImpure`, whose bare form is ⊤. The tag family is
-/// returned alongside precisely so a consumer can tell those two apart, and so a
-/// diagnostic can quote the declaration back as its author spelled it.
+/// [`InteropTag::Absent`] means *nothing was written* — the same answer an absent
+/// docblock gives, and the caller's cue to keep looking or to keep its taint. An
+/// empty label list on a [`InteropTag::Bound`] is the **empty** bound
+/// (`@phpstan-pure`): a real claim, not a missing one — except under
+/// `AllMethodsImpure`, whose bare form is ⊤. The tag family is returned alongside
+/// precisely so a consumer can tell those two apart, and so a diagnostic can quote
+/// the declaration back as its author spelled it.
 ///
 /// Precedence is upstream's **nearest-wins**, not Steins' Liskov conjunction: a
 /// method-level tag replaces the class-level one outright rather than joining it.
 /// ADR-0082 §5 records why the two strata differ here — rewriting the semantics of
 /// someone else's implemented tag is not "interop". Within one docblock the first
 /// envelope tag wins; a docblock spelling two contradictory ones is a user error
-/// this reader does not diagnose (nothing validates labels in this lane either —
-/// the raw strings flow as written).
+/// this reader does not diagnose.
 fn interop_envelope(
+    registry: &steins_catalog::LabelRegistry,
     tree: &SourceTree,
     class: &ClassDecl,
     method: &MethodDecl,
-) -> Option<(EnvelopeTag, Vec<String>)> {
+) -> InteropTag {
     // A method-level tag always wins; the class-level pair written *on a method*
     // says nothing about that method upstream, so it is not a method-level tag.
-    if let Some(own) = own_interop_envelope(method.docblock.as_ref()) {
-        return Some(own);
+    //
+    // "Wins" includes winning with ⊤: a method whose own tag went inert is
+    // unbounded, NOT a method that said nothing. Falling back to the class tag
+    // there would check `/** @phpstan-impure database */ function save()` against
+    // its class's `@phpstan-all-methods-pure` — holding an author to the opposite
+    // of what they wrote.
+    match own_interop_envelope(registry, method.docblock.as_ref()) {
+        InteropTag::Absent => {}
+        won => return won,
     }
-    let (env, labels) = docblock_envelope_tag(class.docblock.as_ref(), |e| {
+    match interop_tag(registry, class.docblock.as_ref(), |e| {
         matches!(e, EnvelopeTag::AllMethodsPure | EnvelopeTag::AllMethodsImpure)
-    })?;
-    match env {
+    }) {
         // `all-methods-impure` covers every declared method unconditionally —
         // bare, it is the ⊤ bound, which contributes no labels.
-        EnvelopeTag::AllMethodsImpure => Some((env, labels)),
+        InteropTag::Bound(env @ EnvelopeTag::AllMethodsImpure, labels) => {
+            InteropTag::Bound(env, labels)
+        }
         // `all-methods-pure` covers the constructor (upstream's fixtures bless a
         // property-initializing pure constructor) but **not** a void-returning
         // method. Upstream's quirk, adopted verbatim (ADR-0082 §5).
-        _ => (method.is_constructor || !returns_void(tree, method)).then(|| (env, Vec::new())),
+        InteropTag::Bound(env, _) => {
+            if method.is_constructor || !returns_void(tree, method) {
+                InteropTag::Bound(env, Vec::new())
+            } else {
+                InteropTag::Absent
+            }
+        }
+        other => other,
     }
 }
 

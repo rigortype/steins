@@ -5,9 +5,8 @@
 //! Role A (the declared lane at *call sites*) lives in `interop_envelope_lane.rs`
 //! and is the half that trusts nothing. This file is the other half: reading the
 //! tag is not believing it, it is taking it as a checkable claim. So the
-//! diagnostics are the existing ones — `effect.envelope-exceeded` and
-//! `effect.unknown-label`, no new ids — and every judgment reads the **proven**
-//! lane only (ADR-0067 §5).
+//! diagnostic is the existing `effect.envelope-exceeded`, no new id, and every
+//! judgment reads the **proven** lane only (ADR-0067 §5).
 //!
 //! What *does* vary with the source is the wording, which is not contract
 //! (ADR-0023 — the ids are): a finding quotes the declaration back in the syntax
@@ -15,11 +14,14 @@
 //! the `#[\Steins\Effect('io.db')]` the reader would search their file for in
 //! vain. Every message below is asserted in full for that reason.
 //!
-//! Two exclusions are pinned as hard as the inclusions, because they are where a
+//! Three exclusions are pinned as hard as the inclusions, because they are where a
 //! plausible implementation would over-reach: an attribute envelope **shadows**
-//! the interop one outright (the checked stratum wins, ADR-0082 §1), and interop
+//! the interop one outright (the checked stratum wins, ADR-0082 §1); interop
 //! envelopes never participate in `effect.liskov-widened` (within that stratum
-//! upstream's nearest-wins override is the whole contract, ADR-0082 §5).
+//! upstream's nearest-wins override is the whole contract, ADR-0082 §5); and a tag
+//! naming any label the registry does not know is **inert** rather than
+//! diagnosed or narrowed (owner ruling 2026-08-12), because upstream discards the
+//! text after `@phpstan-impure` and wild docblocks put prose there.
 
 use steins_infer::{
     Diagnostic, EFFECT_ID, EFFECT_LISKOV_ID, UNKNOWN_LABEL_ID, check, effect_summary,
@@ -71,23 +73,18 @@ fn a_labeled_impure_tag_is_exceeded_by_a_proven_label_outside_it() {
 
 #[test]
 fn a_docblock_sourced_finding_never_names_the_attribute_syntax() {
-    // The refinement in one assertion: a reader who wrote a docblock tag must not
-    // be told about an attribute they never wrote and cannot find in their file.
-    // Both role-B diagnostics are checked at once — the bound is exceeded *and*
-    // one of its labels is unknown.
+    // A reader who wrote a docblock tag must not be told about an attribute they
+    // never wrote and cannot find in their file.
     let src = concat!(
         "<?php\n",
-        "/** @phpstan-impure io.db, io.netw */\n",
+        "/** @phpstan-impure io.db, nondet.random */\n",
         "function refresh(): int { return time(); }\n",
     );
-    let mut msgs: Vec<String> =
-        of_id(src, EFFECT_ID).into_iter().chain(of_id(src, UNKNOWN_LABEL_ID)).map(|d| d.message).collect();
-    msgs.sort();
+    let msgs: Vec<String> = of_id(src, EFFECT_ID).into_iter().map(|d| d.message).collect();
     assert_eq!(
         msgs,
         vec![
-            "time() has effect nondet.time, but refresh() is declared @phpstan-impure io.db, io.netw — nondet.time exceeds the envelope".to_owned(),
-            "unknown effect label 'io.netw' in @phpstan-impure on refresh() — did you mean 'io.net'?".to_owned(),
+            "time() has effect nondet.time, but refresh() is declared @phpstan-impure io.db, nondet.random — nondet.time exceeds the envelope".to_owned(),
         ],
         "the multi-label list is rendered in the tag's grammar, comma-space separated and unquoted"
     );
@@ -197,17 +194,28 @@ fn an_attribute_envelope_shadows_the_interop_bound_for_checking() {
 }
 
 #[test]
-fn an_attribute_envelope_shadows_the_interop_bound_for_label_validation() {
-    // Shadowing is total: an unread bound's labels are not validated either.
-    // Otherwise a docblock nobody consults could still emit a diagnostic.
+fn a_docblock_tag_changes_nothing_about_the_attribute_path() {
+    // The attribute here is *wrong* (`io.netw` is no label) and the docblock bound
+    // beside it would have been satisfied by this body. Both findings still come
+    // out of the attribute, in the attribute's wording: the checked stratum is
+    // judged, quoted and typo-checked exactly as it is with no docblock present.
     let src = concat!(
         "<?php\n",
-        "/** @phpstan-impure io.netw */\n",
-        "#[\\Steins\\Effect('io')]\n",
+        "/** @phpstan-impure io */\n",
+        "#[\\Steins\\Effect('io.netw')]\n",
         "function f(): string { return file_get_contents('/x'); }\n",
     );
-    assert!(of_id(src, UNKNOWN_LABEL_ID).is_empty(), "the shadowed bound is never label-checked");
-    silent(src);
+    let unknown = of_id(src, UNKNOWN_LABEL_ID);
+    assert_eq!(unknown.len(), 1, "the attribute's typo diagnostic is untouched, got: {unknown:#?}");
+    assert_eq!(
+        unknown[0].message,
+        "unknown effect label 'io.netw' in #[\\Steins\\Effect] on f() — did you mean 'io.net'?"
+    );
+    assert_eq!(
+        one_exceeded(src).message,
+        "file_get_contents() has effect io.fs.read, but f() is declared #[\\Steins\\Effect('io.netw')] — io.fs.read exceeds the envelope",
+        "the docblock's `io` would have admitted this — the attribute won"
+    );
 }
 
 // ---- Class-level tags: upstream semantics, verbatim (ADR-0082 §5) ------------
@@ -265,25 +273,86 @@ fn a_bare_all_methods_impure_tag_constrains_nothing() {
     ));
 }
 
-// ---- Unknown labels: the same loop, the same suggestion ----------------------
+// ---- Unknown labels make the tag inert (owner ruling, 2026-08-12) ------------
+//
+// Current PHPStan discards everything after `@phpstan-impure`, so wild code
+// legitimately carries one-word prose there. An unrecognized label is therefore
+// read as *unspecified*, and the whole tag with it — never as a diagnostic, and
+// never as the bound its known labels alone would spell.
 
 #[test]
-fn an_unknown_label_in_an_interop_bound_is_reported_with_its_suggestion() {
+fn an_unknown_label_makes_the_whole_tag_inert() {
     let src = concat!(
         "<?php\n",
         "/** @phpstan-impure io.netw */\n",
-        "function f(): void {}\n",
+        "function f(): int { return time(); }\n",
     );
-    let f = of_id(src, UNKNOWN_LABEL_ID);
-    assert_eq!(f.len(), 1, "the registry is source-agnostic, got: {f:#?}");
-    assert_eq!(
-        f[0].message,
-        "unknown effect label 'io.netw' in @phpstan-impure on f() — did you mean 'io.net'?"
+    assert!(of_id(src, UNKNOWN_LABEL_ID).is_empty(), "typo reporting is not this rule's job");
+    silent(src);
+    // And nothing reaches the declared lane either (role A's half of the ruling):
+    // no bound imported, and the taint an unchecked claim never discharges stays.
+    let iface = concat!(
+        "<?php\n",
+        "interface Repo {\n",
+        "    /** @phpstan-impure io.netw */\n",
+        "    public function find(int $id): string;\n",
+        "}\n",
+        "function g(Repo $r): string { return $r->find(1); }\n",
     );
-    // An interop envelope has no attribute span to point at, so the finding
-    // anchors on the declaration's own name — where declaration-level effect
-    // findings already land.
-    assert_eq!(f[0].line, 3, "anchored at the declaration");
+    let tree = SourceTree::parse(iface);
+    let s = effect_summary(&tree, tree.functions(), tree.classes())
+        .into_iter()
+        .find(|s| s.symbol == "g")
+        .expect("a summary for g");
+    assert!(s.declared.is_empty(), "an inert tag imports no bound, got: {:?}", s.declared);
+    assert!(!s.exhaustive, "and the call site keeps its taint");
+}
+
+#[test]
+fn a_one_word_description_after_impure_is_harmless() {
+    // The motivating shape: `@phpstan-impure database` is prose under current
+    // PHPStan, which reads the tag name and throws the rest away. It must not
+    // fail a run on any surface.
+    let src = concat!(
+        "<?php\n",
+        "/** @phpstan-impure database */\n",
+        "function save(string $row): void { file_put_contents('/x', $row); echo 'ok'; }\n",
+    );
+    let tree = SourceTree::parse(src);
+    let functions = tree.functions().to_vec();
+    let all: Vec<Diagnostic> = check(&tree, &functions, "test.php")
+        .into_iter()
+        .filter(|d| d.id == EFFECT_ID || d.id == EFFECT_LISKOV_ID || d.id == UNKNOWN_LABEL_ID)
+        .collect();
+    assert!(all.is_empty(), "a one-word description is not a bound and not a typo: {all:#?}");
+}
+
+#[test]
+fn a_typoed_label_disables_the_whole_bound_not_part_of_it() {
+    // `io.db, io.netw` is NOT a claim of `io.db`. Checking the body against the
+    // known subset would hold the author to a narrower bound than they wrote and
+    // manufacture the finding below; the tag goes ⊤ instead.
+    silent(concat!(
+        "<?php\n",
+        "/** @phpstan-impure io.db, io.netw */\n",
+        "function refresh(): int { return time(); }\n",
+    ));
+}
+
+#[test]
+fn an_inert_method_tag_does_not_fall_back_to_the_class_tag() {
+    // "As if nothing was written" stops at the bound, not at the precedence: the
+    // method-level tag still WON (upstream's nearest-wins, ADR-0082 §5), so the
+    // class's claim does not get to speak for a method whose author explicitly
+    // declared it impure.
+    silent(concat!(
+        "<?php\n",
+        "/** @phpstan-all-methods-pure */\n",
+        "class C {\n",
+        "    /** @phpstan-impure database */\n",
+        "    public function save(): void { file_put_contents('/x', 'y'); }\n",
+        "}\n",
+    ));
 }
 
 #[test]
