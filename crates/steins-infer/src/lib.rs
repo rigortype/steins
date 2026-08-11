@@ -76,8 +76,8 @@ use steins_syntax::RetHintKind;
 use steins_phpdoc::Variance;
 use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, StringLit, TypeKind as PKind};
 use steins_phpdoc::{
-    AssertKind, DocTag, MagicTagKind, TagKind, Type as PType, parse_type, scan_docblock,
-    scan_magic_member_tags,
+    AssertKind, DocTag, EnvelopeTag, MagicTagKind, TagKind, Type as PType, parse_type,
+    scan_docblock, scan_magic_member_tags,
 };
 
 /// The registry id for the `type.argument-mismatch` proof-layer check (ADR-0022).
@@ -4867,7 +4867,19 @@ fn classify_effect_origins(
                             receiver,
                             method,
                         ) {
-                            Some(labels) => dc.extend(labels),
+                            // A checked envelope answers this call site outright.
+                            Some(DeclaredBound::Checked(labels)) => dc.extend(labels),
+                            // An interop envelope (ADR-0082) contributes its bound
+                            // and keeps the taint: ADR-0068's plugin discipline,
+                            // applied to the unchecked stratum. An empty bound
+                            // (`@phpstan-pure`) adds no label and still claims no
+                            // exhaustiveness — the summary reads "≤ this, and
+                            // possibly more", which is the truth of a claim
+                            // nothing here has verified.
+                            Some(DeclaredBound::Interop(labels)) => {
+                                dc.extend(labels);
+                                *ex = false;
+                            }
                             None => *ex = false,
                         },
                     },
@@ -6006,6 +6018,24 @@ fn builtin_method_findings(
     )
 }
 
+/// Which **trust stratum** a declared bound was written in — the one thing a call
+/// site needs to know about an envelope beyond its labels (ADR-0082 §1).
+///
+/// Both strata feed the same declared lane; they differ in what the call site may
+/// conclude from the *absence* of further information.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeclaredBound {
+    /// A **checked** envelope: `#[\Steins\Effect(...)]` / `#[\Steins\Pure]`, which
+    /// `effect.envelope-exceeded` and `effect.liskov-widened` hold every analyzed
+    /// implementation to. Importing it discharges this call site's taint.
+    Checked(Vec<String>),
+    /// An **interop envelope** (ADR-0082): one of upstream's purity tags in a
+    /// docblock. Nothing has checked it at this call site, so it follows
+    /// ADR-0068's plugin discipline — the labels enter the declared lane and the
+    /// exhaustiveness taint stays. Assert, never prove.
+    Interop(Vec<String>),
+}
+
 /// The **declared** effect bound a call through a declared receiver imports
 /// (ADR-0067): the effect envelope carried by `method` on the project interface
 /// the receiver's declared type names.
@@ -6025,7 +6055,7 @@ fn resolve_declared_bound(
     params: &[steins_syntax::Param],
     receiver: &EffectRecv,
     method: &str,
-) -> Option<Vec<String>> {
+) -> Option<DeclaredBound> {
     let ty = match receiver {
         // `f(Repo $r) { $r->find(); }` — the parameter's own declared type. The
         // syntax gate already proved this frame never writes `$r`, so the binding
@@ -6045,7 +6075,13 @@ fn resolve_declared_bound(
     if !decl.is_interface {
         return None;
     }
+    // The checked stratum beats the unchecked one (ADR-0082 §1): the attribute
+    // walk runs first and unchanged, and the docblock walk is consulted only when
+    // it came back empty — so an interop tag never preempts an attribute
+    // envelope, neither on the same declaration nor anywhere up the hierarchy.
     nearest_interface_envelope(cx, file, decl, method)
+        .map(DeclaredBound::Checked)
+        .or_else(|| nearest_interop_envelope(cx, file, decl, method).map(DeclaredBound::Interop))
 }
 
 /// The FQN of a declared type that names **exactly one** object type, or `None`
@@ -6101,6 +6137,147 @@ fn nearest_interface_envelope<'a>(
         level = next;
     }
     None
+}
+
+/// The nearest **interop envelope** (ADR-0082) declared for `method` on an
+/// interface hierarchy — the docblock twin of [`nearest_interface_envelope`],
+/// walked breadth-first in exactly the same order, so the nearest carrier wins
+/// here too.
+///
+/// The stopping rule differs in one way, and it follows from where the tags live:
+/// an interface that redeclares the method but carries no purity tag of its own
+/// *and* no class-level one keeps the search going outward, because a class-level
+/// tag only ever distributes over the methods its own class-like declares
+/// (upstream's rule, ADR-0082 §5).
+fn nearest_interop_envelope<'a>(
+    cx: &Cx<'a>,
+    start_file: usize,
+    start: &'a ClassDecl,
+    method: &str,
+) -> Option<Vec<String>> {
+    let mut level: Vec<(usize, &'a ClassDecl)> = vec![(start_file, start)];
+    let mut seen: HashSet<String> = HashSet::new();
+    while !level.is_empty() {
+        let mut next: Vec<(usize, &'a ClassDecl)> = Vec::new();
+        for (file, id) in level {
+            if !seen.insert(id.fqn.to_ascii_lowercase()) {
+                continue;
+            }
+            let tree = cx.units[file].tree;
+            if let Some(m) = id.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))
+                && let Some(labels) = interop_envelope(tree, id, m)
+            {
+                return Some(labels);
+            }
+            let parents = id
+                .parent
+                .iter()
+                .chain(id.implements.iter())
+                .map(|r| tree.resolve_class_fqn(r))
+                .collect::<Vec<String>>();
+            for fqn in parents {
+                if let Some((f, d)) = cx.find_class(&fqn)
+                    && d.is_interface
+                {
+                    next.push((f, d));
+                }
+            }
+        }
+        level = next;
+    }
+    None
+}
+
+/// The **interop envelope** (ADR-0082) one method declaration carries: the effect
+/// bound written in upstream's purity tags, read from the method's own docblock
+/// and, failing that, from the declaring class-like's.
+///
+/// `None` means *nothing was written* — the same answer an absent docblock gives,
+/// and the caller's cue to keep looking or to keep its taint. `Some(vec![])` is
+/// the **empty** bound (`@phpstan-pure`): a real claim, not a missing one.
+///
+/// Precedence is upstream's **nearest-wins**, not Steins' Liskov conjunction: a
+/// method-level tag replaces the class-level one outright rather than joining it.
+/// ADR-0082 §5 records why the two strata differ here — rewriting the semantics of
+/// someone else's implemented tag is not "interop". Within one docblock the first
+/// envelope tag wins; a docblock spelling two contradictory ones is a user error
+/// this reader does not diagnose (nothing validates labels in this lane either —
+/// the raw strings flow as written).
+fn interop_envelope(
+    tree: &SourceTree,
+    class: &ClassDecl,
+    method: &MethodDecl,
+) -> Option<Vec<String>> {
+    // A method-level tag always wins; the class-level pair written *on a method*
+    // says nothing about that method upstream, so it is not a method-level tag.
+    if let Some((env, labels)) = docblock_envelope_tag(method.docblock.as_ref(), |e| {
+        matches!(e, EnvelopeTag::Pure | EnvelopeTag::Impure)
+    }) {
+        return match env {
+            // `@phpstan-impure <labels>` is `≤labels`; the bare spelling is ⊤ and
+            // never scans to a tag at all, so `labels` is never empty here.
+            EnvelopeTag::Impure => Some(labels),
+            // `@phpstan-pure` takes no labels: the empty bound.
+            _ => Some(Vec::new()),
+        };
+    }
+    let (env, labels) = docblock_envelope_tag(class.docblock.as_ref(), |e| {
+        matches!(e, EnvelopeTag::AllMethodsPure | EnvelopeTag::AllMethodsImpure)
+    })?;
+    match env {
+        // `all-methods-impure` covers every declared method unconditionally —
+        // bare, it is the ⊤ bound, which contributes no labels.
+        EnvelopeTag::AllMethodsImpure => Some(labels),
+        // `all-methods-pure` covers the constructor (upstream's fixtures bless a
+        // property-initializing pure constructor) but **not** a void-returning
+        // method. Upstream's quirk, adopted verbatim (ADR-0082 §5).
+        _ => (method.is_constructor || !returns_void(tree, method)).then(Vec::new),
+    }
+}
+
+/// The first interop-envelope tag in a docblock whose family `accept` admits,
+/// with its label list as written.
+///
+/// The cheap substring gate is [`conditional_purity`]'s idiom, and it is exact
+/// for this family: every accepted spelling — `@pure`, `@psalm-pure`,
+/// `@impure`, `@phpstan-all-methods-pure`, `@phpstan-all-methods-impure` —
+/// contains `pure`. Scanning every docblock in the project would not be cheap.
+fn docblock_envelope_tag(
+    docblock: Option<&String>,
+    accept: impl Fn(EnvelopeTag) -> bool,
+) -> Option<(EnvelopeTag, Vec<String>)> {
+    let text = docblock?;
+    if !text.contains("pure") {
+        return None;
+    }
+    scan_docblock(text).into_iter().find_map(|tag| match tag.kind {
+        TagKind::InteropEnvelope(env) if accept(env) => Some((env, tag.labels)),
+        _ => None,
+    })
+}
+
+/// Whether a method declares a `void` return — the one signature fact
+/// `@phpstan-all-methods-pure` reads (ADR-0082 §5).
+///
+/// [`MethodDecl::ret`] cannot answer it: `void`, `array`, `mixed` and an absent
+/// hint all lower to `None`. So the native hint is read back **as written**
+/// (ADR-0078's `ret_span`), and only when none was written does the docblock's
+/// `@return` get a say. A method declaring neither return type is *not* void:
+/// the envelope should be dropped only where the void quirk provably applies.
+fn returns_void(tree: &SourceTree, method: &MethodDecl) -> bool {
+    if let Some(span) = method.ret_span {
+        return tree.text_at(span).is_some_and(|t| t.trim().eq_ignore_ascii_case("void"));
+    }
+    method.docblock.as_ref().is_some_and(|doc| {
+        scan_docblock(doc).iter().any(|t| {
+            t.kind == TagKind::Return
+                // `type_text` may carry a trailing description; only the type leads.
+                && t.type_text
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|w| w.eq_ignore_ascii_case("void"))
+        })
+    })
 }
 
 // ---------------------------------------------------------------------------
