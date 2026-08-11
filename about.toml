@@ -8,9 +8,11 @@
 #
 #   cargo xtask licenses
 #
-# (which runs `cargo about generate about.hbs` and then merges sections whose
-# bodies differ only in typography — cargo-about groups on exact text, so one
-# license otherwise appears twice; see xtask/src/licenses.rs)
+# (a thin wrapper around `cargo about generate about.hbs`; see
+# xtask/src/licenses.rs). cargo-about groups sections by exact license text, so
+# the same license shipped with different wrapping by two crates lands in two
+# sections — left as cargo-about renders it, deliberately unmerged, so every
+# crate's own copyright notice stays paired with its own license body.
 #
 # CI fails if the committed file has drifted from the current dependency tree.
 #

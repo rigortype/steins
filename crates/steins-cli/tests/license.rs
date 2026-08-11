@@ -90,12 +90,9 @@ fn the_embedded_notices_are_generated_not_a_stub() {
     // carrying nothing. Assert real bodies and a real dependency, never merely
     // that the output is non-empty.
     let (_, out) = run(&["license"]);
-    assert!(out.matches("\n## ").count() >= 8, "expected the licence sections");
+    assert!(out.matches("\n## ").count() >= 30, "expected the licence sections");
     assert!(out.contains("Used by:"));
     assert!(out.contains("— https://"), "entries must carry crate repositories");
-    // Issue #45 groups sections by permission notice (9, not 44), so a section
-    // count measures little. What a stub cannot fake is the *attribution* —
-    // thirty-odd distinct copyright notices, and these named holders among them.
     let notices = out.lines().filter(|l| l.starts_with("Copyright")).count();
     assert!(notices >= 30, "the bundled copyright notices are missing (found {notices})");
     for holder in ["Copyright (c) 2014 Alex Crichton", "Copyright (c) 2010 The Rust Project Developers"] {
@@ -104,42 +101,43 @@ fn the_embedded_notices_are_generated_not_a_stub() {
 }
 
 #[test]
-fn typographic_variants_are_merged_into_one_section() {
-    // Issue #43: cargo-about groups on exact license text, so Apache-2.0 shipped
-    // centred by one crate and flush-left by another produced two sections of
-    // the same name. `cargo xtask licenses` merges them; this pins that the
-    // committed file is the merged one.
+fn typographic_variants_stay_in_their_own_sections() {
+    // cargo-about groups on exact license text, so Apache-2.0 shipped centred by
+    // one crate and flush-left by another produces two sections of the same
+    // name — left that way deliberately (matching rigortype/lisplens's
+    // about.toml/about.hbs, which carries no merge pass either): one crate, one
+    // block, is easier to scan than a merged notice, and every crate's own
+    // copyright line stays paired with its own license body rather than pooled
+    // above a shared one.
     let (_, out) = run(&["license"]);
     let third_party = out.split("Third-Party Licenses").nth(1).expect("third-party section");
     assert_eq!(
         third_party.matches("\n## Apache License 2.0").count(),
-        1,
-        "Apache-2.0 must appear as exactly one entry among the dependencies"
+        2,
+        "blake3 and codespan-reporting ship differently-wrapped Apache-2.0 text and must stay apart"
     );
-    assert_eq!(third_party.matches("\n## ISC License").count(), 1, "ISC likewise");
 }
 
 #[test]
-fn mit_is_one_section_carrying_every_holder() {
-    // Issue #45: 39 generated MIT sections share one permission notice, so they
-    // are one section with every crate's copyright notice listed above the grant.
-    // The embedded copy is what a `brew install` user reads, so the property is
-    // checked on the command's output and not only on the file.
+fn mit_is_one_section_per_crates_license_text() {
+    // Each MIT-licensed crate keeps its own section — no permission-notice
+    // merge collapses distinct copyright holders into one block. The embedded
+    // copy is what a `brew install` user reads, so the property is checked on
+    // the command's output and not only on the file.
     let (_, out) = run(&["license"]);
     let third_party = out.split("Third-Party Licenses").nth(1).expect("third-party section");
-    assert_eq!(third_party.matches("\n## MIT License").count(), 1, "MIT is one section");
-    let mit = third_party
-        .split("\n## MIT License")
-        .nth(1)
-        .and_then(|s| s.split("\n## ").next())
-        .expect("the MIT section");
-    assert_eq!(
-        mit.matches("Permission is hereby granted").count(),
-        1,
-        "one permission notice for the group"
-    );
-    let holders = mit.lines().filter(|l| l.starts_with("Copyright")).count();
-    assert!(holders >= 30, "the grouped section must keep every holder (found {holders})");
+    let mit_sections = third_party.matches("\n## MIT License").count();
+    assert!(mit_sections >= 30, "expected dozens of separate MIT sections, found {mit_sections}");
+    // Each section carries exactly one permission notice — nothing pools
+    // several crates' grants under one heading.
+    for section in third_party.split("\n## MIT License").skip(1) {
+        let body = section.split("\n## ").next().unwrap_or(section);
+        assert_eq!(
+            body.matches("Permission is hereby granted").count(),
+            1,
+            "a section must carry exactly one grant:\n{body}"
+        );
+    }
 }
 
 #[test]
