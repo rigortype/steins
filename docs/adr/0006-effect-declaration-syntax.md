@@ -1,5 +1,11 @@
 # Effect envelopes are spelled as native attributes; @throws stays Throwable-only
 
+**Amended by ADR-0082**: the refusal of a docblock spelling is narrowed —
+upstream's own purity tags, parameterized with effect labels at upstream's
+suggestion, are admitted as the *unchecked* interop spelling of an envelope
+(one trust stratum below the attribute). No `@steins-*` docblock tag exists
+either way; the attribute remains the checked canonical spelling.
+
 Effect envelopes (ADR-0005) are declared with native PHP attributes
 (`#[\Steins\Effect(...)]`, sugar like `#[\Steins\Pure]`), not a docblock tag.
 Attributes are real, parser-checked syntax referencing autoloadable classes,
