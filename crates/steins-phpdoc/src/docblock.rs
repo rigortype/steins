@@ -51,6 +51,13 @@ pub struct DocTag {
     /// on the receiver there could manufacture findings). See
     /// [`crate::docblock::TagKind::Assert`].
     pub property_target: bool,
+    /// The **effect labels** of an interop envelope (ADR-0082), in source order —
+    /// the `io.db` / `nondet.time` of `@phpstan-impure io.db, nondet.time`. Raw
+    /// dot-path strings exactly as written: recognizing a label is this scanner's
+    /// job, validating it against the effect registry is not. Empty for every
+    /// other tag kind, and for an envelope written without labels (the ⊤ bound of
+    /// a bare `@phpstan-all-methods-impure`).
+    pub labels: Vec<String>,
 }
 
 /// The three shapes of an assertion tag (PHPStan/Psalm `@…-assert` family).
@@ -109,6 +116,63 @@ impl PurityCondition {
     }
 }
 
+/// Which **interop-envelope** family a purity tag belongs to (ADR-0082).
+///
+/// An interop envelope is the *unchecked* docblock spelling of an effect envelope:
+/// upstream's own purity tags, parameterized with a label list at upstream's own
+/// suggestion. The label list rides in [`DocTag::labels`]; this enum records only
+/// which tag was written, and nothing here interprets either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvelopeTag {
+    /// `@pure` / `@psalm-pure` / `@phpstan-pure` — the empty envelope (Steins reads
+    /// it as `{mutate.local}`, ADR-0082 §3). Takes no labels: any trailing text is
+    /// an ignored description, and the tag is recognized regardless.
+    Pure,
+    /// `@impure` / `@phpstan-impure` **with** a conforming label list — the bound
+    /// `≤ labels`. A bare (or nonconforming) one is ⊤, which adds no information,
+    /// so it is not a tag at all and never reaches this enum (ADR-0082 §3).
+    Impure,
+    /// `@phpstan-all-methods-pure` — the class-level fallback, no labels.
+    AllMethodsPure,
+    /// `@phpstan-all-methods-impure`, bare or labeled. Unlike the method-level
+    /// impure tag this **is** a tag when bare: upstream gives it standing meaning
+    /// of its own, and the empty label list is then the ⊤ bound.
+    AllMethodsImpure,
+}
+
+impl EnvelopeTag {
+    /// Recognize an interop-envelope tag name, returning the family and whether it
+    /// carried a `@phpstan-`/`@psalm-` precedence prefix.
+    ///
+    /// Spellings are matched whole, before the shared prefix strip of
+    /// [`TagKind::from_name`], because the accepted set is **not** uniform across
+    /// the family: PHPStan implements `@impure` / `@phpstan-impure` with no
+    /// `@psalm-` alias, and the class-level pair exists under its one spelling
+    /// only. Deviation from the spec's upstream list: the `@phan-pure` /
+    /// `@phan-side-effect-free` spellings are skipped — Steins reads no `@phan-`
+    /// tag anywhere, and this slice does not open that surface.
+    fn from_tag_name(name: &str) -> Option<(Self, bool)> {
+        Some(match name {
+            "pure" => (Self::Pure, false),
+            "phpstan-pure" | "psalm-pure" => (Self::Pure, true),
+            "impure" => (Self::Impure, false),
+            "phpstan-impure" => (Self::Impure, true),
+            // The class-level pair has no unprefixed spelling to be the plain
+            // sibling of, so `prefixed` records the `@phpstan-` it is written with.
+            "phpstan-all-methods-pure" => (Self::AllMethodsPure, true),
+            "phpstan-all-methods-impure" => (Self::AllMethodsImpure, true),
+            _ => return None,
+        })
+    }
+
+    /// Whether the family accepts a label list at all. The pure side never does:
+    /// "pure, except it performs effects" is a contradiction, so a trailing text is
+    /// read as a description (upstream behavior) rather than as a bound.
+    const fn takes_labels(self) -> bool {
+        matches!(self, Self::Impure | Self::AllMethodsImpure)
+    }
+}
+
 /// The envelope-bearing tag kinds Steins reads, plus the assertion family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TagKind {
@@ -146,6 +210,14 @@ pub enum TagKind {
     /// Named `TraceTag`, not `Trace`: bare `trace` is the trace IR's word in this
     /// codebase (ADR-0074 §4's naming rule).
     TraceTag,
+    /// An **interop envelope** (ADR-0082, issue #303): one of upstream's purity
+    /// tags, optionally parameterized with a list of effect labels. It carries
+    /// **no type** — `type_text` is empty and the payload is the label list in
+    /// [`DocTag::labels`], which is empty for the label-free spellings.
+    ///
+    /// The family's recognized spellings and their bare-tag rules live on
+    /// [`EnvelopeTag`]; the label grammar lives on [`scan_label_list`].
+    InteropEnvelope(EnvelopeTag),
 }
 
 impl TagKind {
@@ -158,6 +230,12 @@ impl TagKind {
         // `@psalm-` alias, so it must not go through the shared prefix strip.
         if let Some((cond, prefixed)) = PurityCondition::from_tag_name(name) {
             return Some((TagKind::ConditionalPurity(cond), prefixed));
+        }
+        // The interop-envelope family likewise: its accepted spellings differ per
+        // member (no `@psalm-impure`, no alias for the class-level pair), so it is
+        // matched whole rather than through the shared strip.
+        if let Some((env, prefixed)) = EnvelopeTag::from_tag_name(name) {
+            return Some((TagKind::InteropEnvelope(env), prefixed));
         }
         let (bare, prefixed) = match name
             .strip_prefix("phpstan-")
@@ -204,6 +282,13 @@ impl TagKind {
 
     fn is_trace_annotation(self) -> bool {
         matches!(self, TagKind::TraceTag)
+    }
+
+    fn interop_envelope(self) -> Option<EnvelopeTag> {
+        match self {
+            TagKind::InteropEnvelope(env) => Some(env),
+            _ => None,
+        }
     }
 }
 
@@ -299,6 +384,41 @@ fn scan_line(text: &str, line_start: usize, line_end: usize, tags: &mut Vec<DocT
             rest_end -= 1;
         }
     }
+    // Interop envelopes (ADR-0082) are handled before the empty-remainder bail-out
+    // below: that guard exists for the tags whose payload *is* a type, and a bare
+    // `@phpstan-pure` is a whole tag with nothing after its name.
+    if let Some(env) = kind.interop_envelope() {
+        let labels =
+            if env.takes_labels() { scan_label_list(text, bytes, rest_start, rest_end) } else {
+                Vec::new()
+            };
+        // A bare `@phpstan-impure` is ⊤ — every effect possible, which is exactly
+        // what the absence of the tag already means — so it stays a **non-tag**
+        // (ADR-0082 §3). A remainder that is not a conforming label list reads as
+        // prose (`@phpstan-impure writes to the cache`), i.e. bare, and drops with
+        // it. The class-level `all-methods-impure` is the exception: upstream gives
+        // the bare form standing meaning, so it records with an empty list.
+        if env == EnvelopeTag::Impure && labels.is_empty() {
+            return;
+        }
+        // A tag with nothing after its name ends at that name; `rest_end` would
+        // otherwise carry the whitespace the remainder scan skipped over.
+        let tag_end = if rest_end > rest_start { rest_end } else { j };
+        tags.push(DocTag {
+            kind,
+            // Zero-width type region: the family declares no type.
+            type_text: String::new(),
+            type_span: Span::new(rest_start as u32, rest_start as u32),
+            tag_span: Span::new(at_offset as u32, tag_end as u32),
+            line_span: Span::new(line_start as u32, line_end as u32),
+            var_name: None,
+            prefixed,
+            property_target: false,
+            labels,
+        });
+        return;
+    }
+
     if rest_start >= rest_end {
         return;
     }
@@ -343,6 +463,7 @@ fn scan_line(text: &str, line_start: usize, line_end: usize, tags: &mut Vec<DocT
                 var_name: Some(var_name),
                 prefixed,
                 property_target: false,
+                labels: Vec::new(),
             });
         }
         return;
@@ -413,7 +534,70 @@ fn scan_line(text: &str, line_start: usize, line_end: usize, tags: &mut Vec<DocT
         var_name,
         prefixed,
         property_target,
+        labels: Vec::new(),
     });
+}
+
+/// The effect labels of an interop envelope's remainder `[start, end)`, following
+/// `@phpstan-ignore`'s list-and-comment shape (ADR-0082 §4):
+///
+/// ```ebnf
+/// label-list = label { "," label } [ "(" text-without-close-paren ")" ] ;
+/// label      = segment { "." segment } ;
+/// segment    = lowercase-letter { lowercase-letter | digit } ;
+/// ```
+///
+/// **Strict list or bare.** The remainder is a label list only when the *whole* of
+/// it conforms; anything else — prose (`writes to the cache`), an uppercase or
+/// underscored token, a dangling comma, a `(` before any label — yields the empty
+/// list, i.e. is read as a tag written bare with a description. There is no
+/// partial list: half a bound is a worse claim than none, and the caller's bare
+/// rule (drop, or ⊤) is the safe reading either way.
+fn scan_label_list(text: &str, bytes: &[u8], start: usize, end: usize) -> Vec<String> {
+    let mut labels = Vec::new();
+    let mut i = start;
+    loop {
+        let label_start = i;
+        loop {
+            // segment = [a-z][a-z0-9]*
+            if i >= end || !bytes[i].is_ascii_lowercase() {
+                return Vec::new();
+            }
+            i += 1;
+            while i < end && (bytes[i].is_ascii_lowercase() || bytes[i].is_ascii_digit()) {
+                i += 1;
+            }
+            if i < end && bytes[i] == b'.' {
+                i += 1;
+                continue;
+            }
+            break;
+        }
+        labels.push(text[label_start..i].to_owned());
+        while i < end && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            i += 1;
+        }
+        if i < end && bytes[i] == b',' {
+            i += 1;
+            while i < end && (bytes[i] == b' ' || bytes[i] == b'\t') {
+                i += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    // Whatever is left must be the one optional parenthesized comment, whole. A `(`
+    // is legal only here — directly after the tag name it sends phpdoc-parser down
+    // its Doctrine-annotation path, so that spelling is not a list at all.
+    if i < end {
+        if bytes[i] != b'(' || bytes[end - 1] != b')' {
+            return Vec::new();
+        }
+        if text[i + 1..end - 1].contains(')') {
+            return Vec::new();
+        }
+    }
+    labels
 }
 
 /// Whether `name` (the token right after the `@`) is a `@template` declaration
@@ -1176,13 +1360,253 @@ mod tests {
     }
 
     #[test]
-    fn bare_pure_is_still_not_a_tag() {
-        // ADR-0063 imports the *conditional* contracts only: a metadata-only
-        // `@pure` flag is the rejected-upstream lie, and Steins spells
-        // unconditional purity `#[\Steins\Pure]`.
-        assert!(scan_docblock("/** @pure */").is_empty());
-        assert!(scan_docblock("/** @phpstan-pure */").is_empty());
+    fn bare_impure_is_still_not_a_tag() {
+        // A bare `@phpstan-impure` is ⊤ — every effect possible — which is what the
+        // absence of the tag already says, so reading it would import the
+        // metadata-only lie ADR-0063 refused. ADR-0082 §3 keeps this side of the
+        // negative test verbatim; only the *pure* side evolved (see
+        // `bare_pure_is_the_mutate_local_envelope`).
+        assert!(scan_docblock("/** @impure */").is_empty());
         assert!(scan_docblock("/** @phpstan-impure */").is_empty());
+    }
+
+    // ---- Interop envelopes (ADR-0082, issue #303) --------------------------
+
+    /// The `(kind, labels)` of every tag a docblock scans to — the shape every
+    /// envelope test below asserts on.
+    fn envelopes(doc: &str) -> Vec<(TagKind, Vec<String>)> {
+        scan_docblock(doc).into_iter().map(|t| (t.kind, t.labels)).collect()
+    }
+
+    fn impure(labels: &[&str]) -> Vec<(TagKind, Vec<String>)> {
+        vec![(
+            TagKind::InteropEnvelope(EnvelopeTag::Impure),
+            labels.iter().map(|s| (*s).to_owned()).collect(),
+        )]
+    }
+
+    #[test]
+    fn bare_pure_is_the_mutate_local_envelope() {
+        // Unlike ⊤, the empty envelope carries information — it is the
+        // `{mutate.local}` bound (ADR-0082 §3) — so all three upstream spellings
+        // are read. What they *mean* is the declared lane's business, not the
+        // scanner's; here they simply become tags with no labels.
+        for doc in ["/** @pure */", "/** @phpstan-pure */", "/** @psalm-pure */"] {
+            let tags = scan_docblock(doc);
+            assert_eq!(tags.len(), 1, "{doc}");
+            assert_eq!(tags[0].kind, TagKind::InteropEnvelope(EnvelopeTag::Pure), "{doc}");
+            assert!(tags[0].labels.is_empty(), "{doc}");
+            // The family declares a bound, not a type.
+            assert_eq!(tags[0].type_text, "", "{doc}");
+            assert!(tags[0].var_name.is_none(), "{doc}");
+        }
+        // The bare spelling is the plain form; the two prefixes are the prefixed one.
+        assert!(!scan_docblock("/** @pure */")[0].prefixed);
+        assert!(scan_docblock("/** @phpstan-pure */")[0].prefixed);
+        assert!(scan_docblock("/** @psalm-pure */")[0].prefixed);
+    }
+
+    #[test]
+    fn pure_ignores_a_trailing_description() {
+        // "Pure, except it performs effects" is a contradiction, so the pure side
+        // takes no labels: trailing text is a description, exactly as upstream
+        // reads it, and never keeps the tag from being recognized.
+        assert_eq!(
+            envelopes("/** @phpstan-pure no side effects at all */"),
+            [(TagKind::InteropEnvelope(EnvelopeTag::Pure), Vec::new())]
+        );
+        // Even text that *would* parse as a label list is only a description here.
+        assert_eq!(
+            envelopes("/** @pure io.db */"),
+            [(TagKind::InteropEnvelope(EnvelopeTag::Pure), Vec::new())]
+        );
+    }
+
+    #[test]
+    fn impure_scans_its_label_list() {
+        assert_eq!(envelopes("/** @phpstan-impure io */"), impure(&["io"]));
+        // Spaced and tight commas alike, and a dot-path is one label.
+        assert_eq!(
+            envelopes("/** @phpstan-impure io.db, nondet.time */"),
+            impure(&["io.db", "nondet.time"])
+        );
+        assert_eq!(
+            envelopes("/** @phpstan-impure io.db,nondet.time,exit */"),
+            impure(&["io.db", "nondet.time", "exit"])
+        );
+        // A deep path and a digit-bearing segment are labels like any other: the
+        // registry, not the scanner, decides which names exist.
+        assert_eq!(
+            envelopes("/** @phpstan-impure io.fs.write, io.net.http */"),
+            impure(&["io.fs.write", "io.net.http"])
+        );
+        assert_eq!(envelopes("/** @phpstan-impure io2 */"), impure(&["io2"]));
+    }
+
+    #[test]
+    fn impure_accepts_a_trailing_paren_comment_after_labels() {
+        // `@phpstan-ignore`'s shape verbatim: the list, then one parenthesized
+        // comment. It is legal only *after* a label (see the negative test).
+        assert_eq!(
+            envelopes("/** @phpstan-impure io.db (reads the clock for cache TTL) */"),
+            impure(&["io.db"])
+        );
+        assert_eq!(
+            envelopes("/**\n * @phpstan-impure io.db, nondet.time (refreshes the entry)\n */"),
+            impure(&["io.db", "nondet.time"])
+        );
+    }
+
+    #[test]
+    fn the_unprefixed_impure_spelling_is_accepted() {
+        // PHPStan implements `@impure` and `@phpstan-impure`; the bare one is ⊤
+        // like its prefixed sibling, and a labeled one is a bound like it too.
+        assert!(scan_docblock("/** @impure */").is_empty());
+        assert_eq!(envelopes("/** @impure io */"), impure(&["io"]));
+        assert!(!scan_docblock("/** @impure io */")[0].prefixed);
+        assert!(scan_docblock("/** @phpstan-impure io */")[0].prefixed);
+    }
+
+    #[test]
+    fn psalm_prefixed_impure_is_not_a_tag() {
+        // The accepted spellings mirror PHPStan's implemented set exactly; there is
+        // no `@psalm-impure` to honor, labeled or not (ADR-0082 §5).
+        assert!(scan_docblock("/** @psalm-impure */").is_empty());
+        assert!(scan_docblock("/** @psalm-impure io */").is_empty());
+    }
+
+    #[test]
+    fn a_nonconforming_impure_remainder_reads_as_bare() {
+        // Strict list or bare: a remainder that is not a whole label list is prose,
+        // and a prose-only `@phpstan-impure` is the ⊤ non-tag. Never a partial list.
+        for doc in [
+            "/** @phpstan-impure writes to the cache */",
+            "/** @phpstan-impure IO */",
+            "/** @phpstan-impure io_db */",
+            "/** @phpstan-impure io.DB */",
+            "/** @phpstan-impure 1io */",
+            "/** @phpstan-impure io. */",
+            "/** @phpstan-impure io, */",
+            "/** @phpstan-impure io,, exit */",
+            "/** @phpstan-impure io exit */",
+            "/** @phpstan-impure \\Foo */",
+        ] {
+            assert!(scan_docblock(doc).is_empty(), "{doc}");
+        }
+    }
+
+    #[test]
+    fn a_paren_comment_without_labels_is_not_a_list() {
+        // A `(` directly after the tag name is phpdoc-parser's Doctrine-annotation
+        // path (`phpDoc.parseError`), so the grammar forbids it: zero labels means
+        // bare, and bare impure is a non-tag.
+        assert!(scan_docblock("/** @phpstan-impure (writes to the cache) */").is_empty());
+        assert!(scan_docblock("/** @impure (why) */").is_empty());
+        // An unclosed or re-opened comment is not the one trailing comment either.
+        assert!(scan_docblock("/** @phpstan-impure io (unclosed */").is_empty());
+        assert!(scan_docblock("/** @phpstan-impure io (a) (b) */").is_empty());
+    }
+
+    #[test]
+    fn class_level_pure_takes_no_labels() {
+        assert_eq!(
+            envelopes("/** @phpstan-all-methods-pure */"),
+            [(TagKind::InteropEnvelope(EnvelopeTag::AllMethodsPure), Vec::new())]
+        );
+        // Trailing text is a description, like the method-level pure tag's.
+        assert_eq!(
+            envelopes("/** @phpstan-all-methods-pure a value object */"),
+            [(TagKind::InteropEnvelope(EnvelopeTag::AllMethodsPure), Vec::new())]
+        );
+    }
+
+    #[test]
+    fn class_level_impure_is_a_tag_bare_and_labeled() {
+        // Unlike `@phpstan-impure`, the bare class-level tag has standing meaning
+        // upstream (it distributes over the methods), so it records — with the
+        // empty label list standing for the ⊤ bound.
+        assert_eq!(
+            envelopes("/** @phpstan-all-methods-impure */"),
+            [(TagKind::InteropEnvelope(EnvelopeTag::AllMethodsImpure), Vec::new())]
+        );
+        assert_eq!(
+            envelopes("/** @phpstan-all-methods-impure io.net */"),
+            [(
+                TagKind::InteropEnvelope(EnvelopeTag::AllMethodsImpure),
+                vec!["io.net".to_owned()]
+            )]
+        );
+        assert_eq!(
+            envelopes("/** @phpstan-all-methods-impure io.net, nondet.time (a Redis client) */"),
+            [(
+                TagKind::InteropEnvelope(EnvelopeTag::AllMethodsImpure),
+                vec!["io.net".to_owned(), "nondet.time".to_owned()]
+            )]
+        );
+        // A nonconforming remainder falls back to bare — the tag survives, the
+        // bound does not.
+        assert_eq!(
+            envelopes("/** @phpstan-all-methods-impure talks to Redis */"),
+            [(TagKind::InteropEnvelope(EnvelopeTag::AllMethodsImpure), Vec::new())]
+        );
+    }
+
+    #[test]
+    fn the_class_level_pair_has_no_aliases() {
+        // Exactly the two `@phpstan-` spellings, no prefix variants, no misspellings.
+        for doc in [
+            "/** @all-methods-pure */",
+            "/** @psalm-all-methods-pure */",
+            "/** @phpstan-all-method-pure */",
+            "/** @phpstan-all-methods-purely */",
+            "/** @all-methods-impure */",
+            "/** @psalm-all-methods-impure io */",
+            "/** @phpstan-allmethods-impure io */",
+        ] {
+            assert!(scan_docblock(doc).is_empty(), "{doc}");
+        }
+    }
+
+    #[test]
+    fn envelope_spans_cover_the_tag_only() {
+        // A label-free tag ends at its own name, not at the gutter whitespace after
+        // it; a labeled one ends at the end of its trimmed remainder.
+        let doc = "/** @phpstan-pure */";
+        let t = &scan_docblock(doc)[0];
+        assert_eq!(&doc[t.tag_span.start as usize..t.tag_span.end as usize], "@phpstan-pure");
+        let doc = "/** @phpstan-impure io.db (why) */";
+        let t = &scan_docblock(doc)[0];
+        assert_eq!(
+            &doc[t.tag_span.start as usize..t.tag_span.end as usize],
+            "@phpstan-impure io.db (why)"
+        );
+        assert_eq!(&doc[t.line_span.start as usize..t.line_span.end as usize], doc);
+    }
+
+    #[test]
+    fn envelopes_scan_alongside_their_siblings() {
+        // The family is a member of the read set like any other: it neither drops
+        // nor is dropped by the type-carrying tags on the same docblock.
+        let doc = "/**\n * @phpstan-impure io.db\n * @param string $key\n * @return int\n */";
+        assert_eq!(
+            envelopes(doc),
+            [
+                (TagKind::InteropEnvelope(EnvelopeTag::Impure), vec!["io.db".to_owned()]),
+                (TagKind::Param, Vec::new()),
+                (TagKind::Return, Vec::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_conditional_purity_family_still_wins_its_spellings() {
+        // `@pure-unless-callable-is-impure` is not a `@pure` with a description:
+        // the conditional family is matched before the envelope family, and each
+        // keeps its own kind.
+        assert_eq!(
+            envelopes("/** @pure-unless-callable-is-impure $cb */"),
+            [(TagKind::ConditionalPurity(PurityCondition::CallableIsImpure), Vec::new())]
+        );
     }
 
     #[test]

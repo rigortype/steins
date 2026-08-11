@@ -51,9 +51,9 @@ pub mod parser;
 
 pub use ast::{Type, TypeKind};
 pub use docblock::{
-    AssertKind, DocTag, MagicMemberTag, MagicTagKind, PurityCondition, TagKind, TemplateDecl,
-    Variance, scan_docblock, scan_inheritance_args, scan_magic_member_tags, scan_template_decls,
-    scan_template_names,
+    AssertKind, DocTag, EnvelopeTag, MagicMemberTag, MagicTagKind, PurityCondition, TagKind,
+    TemplateDecl, Variance, scan_docblock, scan_inheritance_args, scan_magic_member_tags,
+    scan_template_decls, scan_template_names,
 };
 pub use parser::{ParseError, TypeParse, parse_type};
 

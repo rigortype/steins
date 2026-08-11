@@ -27342,6 +27342,8 @@ fn parse_envelopes(docblock: Option<&str>) -> Option<Envelopes> {
             // trigger, never a declaration envelope; its consumer is the
             // statement-docblock emitter, not this seam.
             TagKind::TraceTag => {}
+            // Interop envelopes: consumed in Slice 2 (#303)
+            TagKind::InteropEnvelope(_) => {}
         }
     }
     // Return an envelope set whenever there is anything to check *or* any assertion
