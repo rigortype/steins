@@ -72,7 +72,7 @@ usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-p
        steins annotate [--no-php] [--format text|json] <file.php>
        steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|effects-envelope|loop-to-array-map> [--apply] [--asserted-subjects] [--format text|json] <paths...>
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
-       steins doctor [--no-php] [--baseline <path>] [path]
+       steins doctor [--no-php] [--baseline <path>] [--format text|json] [path]
        steins mcp
        steins version | -v | --version
        steins license

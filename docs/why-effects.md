@@ -2,7 +2,7 @@
 
 > [!NOTE]
 > This document narrates why the effect system exists and where the idea
-> came from. As of 2026-08-12, the core model it describes — labels,
+> came from. As of 2026-08-13, the core model it describes — labels,
 > envelopes, propagation, interface Liskov widening, and the PHPStan
 > interop bridge below — is implemented. A handful of illustrations stay
 > forward-looking on purpose (marked "could" or "a future rule"):

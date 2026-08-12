@@ -27,7 +27,7 @@ Engine:
   (ADR-0028, folding impurity) — nothing of inference is memoized
   across runs. Acceptable for batch CLI; the LSP prerequisite is
   ADR-0048 §5.
-- Diagnostic surface, through v0.1.4. Pre-existing: `type.argument-mismatch`,
+- Diagnostic surface, through v0.1.5. Pre-existing: `type.argument-mismatch`,
   `type.return-mismatch`, `type.property-mismatch`, `call.on-null`,
   `readonly.reassigned`, `phpdoc.param-mismatch`,
   `phpdoc.return-mismatch`, `phpdoc.property-mismatch`,
@@ -53,10 +53,17 @@ Engine:
   (`syntax.unparsable`, `array.duplicate-key`, the five `phpdoc.*`
   rot ids, `closure.unused-use`), `preg.invalid-pattern`,
   `call.printf-too-few-arguments`, and the six contract-layer
-  `untyped.*`, and the two possibly-grade legs ADR-0081 landed
-  (`variable.maybe-undefined`, `property.maybe-undefined`). None is
-  registered ahead of emission any more except
-  `call.too-many-arguments`, which waits for the reflect slice.
+  `untyped.*`, plus the two possibly-grade legs ADR-0081 registered
+  (`variable.maybe-undefined`, `property.maybe-undefined`) — ahead of
+  emission alongside `call.too-many-arguments`, which waits for the
+  reflect slice.
+- v0.1.5 added one id, `effect.interop-unknown-label` (ADR-0082, the
+  typo check for labels written in PHPStan's purity tags; contract
+  layer, rides with `effect.envelope-exceeded`). The two ADR-0081
+  possibly-grade legs registered ahead of emission since v0.1.4,
+  `variable.maybe-undefined` and `property.maybe-undefined`, now fire
+  under `strict` (#267). `call.too-many-arguments` is now the only id
+  registered ahead of emission, still waiting on the reflect slice.
 
 Verification apparatus (ADR-0013):
 
@@ -77,19 +84,23 @@ Verification apparatus (ADR-0013):
 
 CLI (ADR-0020, partially landed):
 
-- Landed: `check` (`--format text|json`, `--profile`, `--no-php` sound
-  subset, `--vendor-diagnostics`, `--fix`, baseline set/match/stale per
-  ADR-0022), `annotate` (margin facts, `…?` non-exhaustiveness),
-  `transform` (`phpdoc-to-native`, `phpdoc-honesty`, `throws-envelope`,
+- Landed: `check` (`--format text|json|github|sarif`, `--profile`,
+  `--no-php` sound subset, `--vendor-diagnostics`, `--fix`, baseline
+  set/match/stale per ADR-0022), `annotate` (margin facts, `…?`
+  non-exhaustiveness), `transform` (`phpdoc-to-native`,
+  `phpdoc-honesty`, `throws-envelope`, `effects-envelope`,
   `loop-to-array-map`; dry-run default, `--apply`
   gated on zero-new-diagnostics; `--asserted-subjects` opt-in; vouch
   valve + partition regions read from `steins.toml`), `effect-diff`,
-  the minimal `doctor` (ADR-0054 C3 scope), and `mcp` (stdio MCP server,
-  four tools). Inline `@steins-ignore` with anti-rot.
+  `doctor` (ADR-0054 C3 minimal scope, plus `--format json` and the
+  Catalog/Registry/SAPI posture sections, ADR-0054 C4 partial), and
+  `mcp` (stdio MCP server, four tools). Inline `@steins-ignore` with
+  anti-rot.
 - NOT landed (declared in ADR-0020/0023, absent from the binary):
-  `lsp`, `doctor --format json` and its richer
-  audits, `[paths.sets]` / `[[policy]]` scoped policy, and every
-  `check --fix` family beyond the `debug.*` dump-removal one.
+  `lsp`, `doctor`'s remaining ADR-0054 C4 audits (the dump-site count
+  and `contract_touches_class`'s project-wide count), `[paths.sets]` /
+  `[[policy]]` scoped policy, and every `check --fix` family beyond the
+  `debug.*` dump-removal one.
 - `check` separates layers (ADR-0050): the cumulative ladder
   `default ⊂ contracts ⊂ strict` is live behind `--profile`, so
   `phpdoc.*` and `throw.*` no longer print in a default run and the
