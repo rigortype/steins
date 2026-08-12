@@ -190,12 +190,25 @@ notices, not errors — vendor code comes and goes.
 ## Consequences
 
 - The logger-pollution shape becomes fixable without a lie: attribute
-  the facade, tolerate `telemetry`, and the thousands of true-positive
-  envelope-exceeded findings discharge — while a business-logic
-  `today()` in the same class keeps its report. The corpus validation
-  target is firefly-iii (3,307 `Log::` sites; `Steam::floatalize` and
-  `ParseDateString` are the textbook fixtures, with the tolerated and
-  non-tolerated clock reads side by side in one file).
+  the facade, tolerate `telemetry`, and the true-positive
+  envelope-exceeded findings flowing through it discharge — while a
+  business-logic clock read beside them keeps its report.
+- Corpus validation (2026-08-13, steins-survey) confirmed the mechanism
+  and corrected the target. Attributing a resolvable vendor class on
+  firefly-iii under `--vendor-diagnostics` discharged exactly its 19
+  cross-edge arrivals, kept the attributed class's own direct call
+  reported, and `--no-tolerated-effects` restored the unconcealed output
+  byte for byte. But framework logging itself is effect-invisible to
+  today's propagation — Laravel's `Log::` facade (`__callStatic`), the
+  `logger()` helper, injected PSR-3 interfaces, and even direct Monolog
+  (bottoming out in uncatalogued internal constructors and interface
+  dispatch) contribute no proven effects, so on the public corpus there
+  is no logging pollution to discharge yet. The pollution this ADR fixes
+  presupposes a logging path the analyzer resolves: project-local
+  facades over builtins have it, and builtin production sites take
+  attribution directly. Closing the framework-visibility gaps (catalog
+  rows for effectful internal constructors and `trigger_error`, facade
+  edge resolution, interface-dispatch propagation) is issue #326.
 - Survey guidance encoded in docs, not mechanism: PSR-14 `dispatch()`
   must not be attributed telemetry (its return value is routinely
   consumed); compliance/audit logging deserves its own label (`audit`)

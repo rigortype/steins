@@ -279,23 +279,32 @@ to hand it:
   watching" versus "must always fire". Give audit logging its own label
   so a project can tolerate one without the other.
 
-A worked shape, from a real Laravel application whose classes mix both
-kinds of clock read:
+A worked shape — a project-local logging facade, and a class that mixes
+both kinds of clock read:
 
 ```toml
 [effects]
 tolerated = ["telemetry"]
 
 [effects.attribution]
-"Illuminate\\Support\\Facades\\Log" = ["telemetry"]
+"App\\Support\\Trace" = ["telemetry"]
 ```
 
 ```php
+final class Trace
+{
+    public static function debug(string $line): void
+    {
+        error_log(date('H:i:s') . ' ' . $line);
+    }
+}
+
+/** @phpstan-all-methods-pure */
 final class Steam
 {
     public function floatalize(string $value): float
     {
-        Log::debug(sprintf('floatalize("%s")', $value));
+        Trace::debug(sprintf('floatalize("%s")', $value));
         return (float) str_replace(',', '.', $value);
     }
 
@@ -306,12 +315,23 @@ final class Steam
 }
 ```
 
-`floatalize()` reaches `nondet.time` and `io.fs.write` only through the
-log line, every arrival attributed `telemetry`, so a `@phpstan-pure`
-declared on it is no longer reported. `isStale()` reads the clock as
-logic, nothing attributed it, and its `effect.envelope-exceeded` is
-reported exactly as before. The attribution is written once, against the
-facade, and no call site is annotated.
+`floatalize()` reaches `nondet.time` and `io` only through the log line,
+every arrival attributed `telemetry`, so the class-level pure declaration
+is no longer violated there. `isStale()` reads the clock as logic,
+nothing attributed it, and its `effect.envelope-exceeded` is reported
+exactly as before. The attribution is written once, against the facade,
+and no call site is annotated. Builtins take attribution directly too —
+`"error_log" = ["telemetry"]` stamps that builtin's own findings at every
+call site, no wrapper needed.
+
+One honesty note about framework logging. A Laravel `Log::` facade
+resolves through `__callStatic`, an injected PSR-3 `LoggerInterface` is
+dynamic dispatch, and direct Monolog bottoms out in internal
+constructors the effect catalog has no rows for — none of those paths
+contributes proven effects to a caller today, so there is nothing for
+this table to discharge there yet. The policy grips effects the analyzer
+can actually see arrive: project-local facades and builtins, which is
+where envelope pollution actually manifests in a codebase that has it.
 
 ### `[transform.vouch]`
 
