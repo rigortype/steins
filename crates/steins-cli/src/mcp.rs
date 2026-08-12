@@ -633,7 +633,12 @@ fn tool_apply_plan(session: &mut Session, args: &Value) -> Result<Reply, ToolErr
     // names — not a cached verdict from planning time.
     let files = crate::collect_files(&stored.paths);
     let allow = crate::allow_list_from_disk();
-    let loaded = crate::load_project(&files, &stored.paths, allow.as_deref());
+    let loaded = crate::load_project(
+        &files,
+        &stored.paths,
+        allow.as_deref(),
+        crate::effects_policy_from_disk(),
+    );
     let postcheck = crate::post_check(
         &loaded.db,
         loaded.project,
@@ -712,9 +717,9 @@ fn tool_check(_session: &Session, args: &Value) -> Result<Reply, ToolError> {
     // The same config read `check` performs, with the same hard-error posture:
     // a malformed steins.toml is a refusal, never a warn-and-proceed.
     let config = crate::read_steins_config().map_err(|e| ToolError::new("config-error", e))?;
-    let (check_cfg, profile_tbl, runtime_cfg, plugin_allow) = match config {
-        Some(c) => (c.check, c.profile, c.runtime, crate::allow_list(c.plugins)),
-        None => (None, None, None, None),
+    let (check_cfg, profile_tbl, runtime_cfg, plugin_allow, effects_cfg) = match config {
+        Some(c) => (c.check, c.profile, c.runtime, crate::allow_list(c.plugins), c.effects),
+        None => (None, None, None, None, None),
     };
     let (config_profile, profile_configs) = crate::profiles_from_config(check_cfg, profile_tbl);
     let selected = requested_profile.as_deref().or(config_profile.as_deref());
@@ -724,7 +729,12 @@ fn tool_check(_session: &Session, args: &Value) -> Result<Reply, ToolError> {
 
     let mut folder = if no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
     let files = crate::collect_files(&paths);
-    let loaded = crate::load_project(&files, &paths, plugin_allow.as_deref());
+    let loaded = crate::load_project(
+        &files,
+        &paths,
+        plugin_allow.as_deref(),
+        crate::effects_from_config(effects_cfg, false),
+    );
     folder.set_php_target(loaded.layout.php_target().cloned());
     let (postures, runtime_notices) = crate::runtime_from_config(runtime_cfg);
     let findings = check_project_with_runtime(
