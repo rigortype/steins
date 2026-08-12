@@ -98,6 +98,11 @@ impure point I found subsumed by `io`?" — a segment-wise string prefix test.
   `hasSideEffects` flags could not express.
 - `@phpstan-pure` takes no labels: "pure, except it performs effects" is a
   contradiction. A partially-effectful function is spelled as an impure bound.
+- `@phpstan-pure` does **not** claim termination. The vocabulary has no
+  divergence label (Koka separates `div` from purity for exactly this
+  reason), so "pure" means "no observable effects", not "total": a checker
+  may deduplicate or memoize repeated pure calls even though that changes
+  behavior for a diverging program. Tracking divergence is out of scope.
 
 ### Unknown labels
 
@@ -155,12 +160,35 @@ declaration ("declared `io`, performs `nondet.time`"). A checker that does not
 understand the labels loses nothing: the tag still carries its current
 boolean meaning.
 
+### Vocabulary evolution
+
+The dot-path vocabulary is **open**, and the openness has consequences a
+consumer should be able to rely on:
+
+- **Adding a leaf is not a breaking change.** A coarse bound is a predicate,
+  not an enumeration: a declared `io` admits a future `io.xyz` by
+  construction, and a fine bound (`io.db`) is unaffected by new siblings.
+  (Contrast Koka, whose `io` is an *alias* expanding to a closed effect row —
+  there, growing the alias changes the meaning of every `io` annotation.
+  A prefix buys the evolution property an enumeration cannot have; the price
+  is that a coarse bound's extension grows silently with the registry.)
+- **Moving or removing a node is a breaking change**, and it degrades along
+  two paths by design: in a docblock tag the retired spelling becomes an
+  unrecognized label, so the whole tag reads as unspecified and no finding is
+  invented; a checked native annotation carrying it earns the
+  vocabulary-conformance diagnostic. The `output` → `io.output` migration
+  (ADR-0083) exercised both paths.
+
 ### Reserved: complement bounds
 
 A future `-except` form ("anything but `io`") is sound — the check inverts to
 "is the inferred effect subsumed by an excluded label?" — but is deliberately
 not part of v1: the class/method override rule covers the motivating cases,
-and the minimal adoption surface stays a string prefix test.
+and the minimal adoption surface stays a string prefix test. One caution the
+evolution rules above imply: a positive bound is *stable* under vocabulary
+growth, while a complement bound is not — every leaf added later silently
+joins what "`io -except io.db`" admits, so an exclusion is always read
+against the vocabulary at checking time, not at writing time.
 
 ## Backward compatibility
 
