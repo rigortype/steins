@@ -204,6 +204,25 @@ Trusting the bound at call sites while neither checking overrides nor
 capping the trust is not a coherent option: an impure implementation behind
 a pure-declared interface would then be invisible by construction.
 
+### Beyond envelope checks: labels as invalidation keys (informative)
+
+Envelope checking is not the only machinery inside a checker that can consume
+effect *kinds*. A checker that remembers returned values across statements —
+PHPStan documents its own such machinery in
+[Remembering and forgetting returned
+values](https://phpstan.org/blog/remembering-and-forgetting-returned-values) —
+must forget them when an intervening call could have changed what they
+describe, and with only a boolean impurity flag the trigger is
+all-or-nothing: *any* side-effecting call forces forgetting. Labels let the
+invalidation be scoped to what the memory actually depends on. Memory
+derived from the filesystem's stat cache (`is_dir($x)`, `file_exists($x)`)
+is invalidated by a call whose labels reach `io.fs` or `global.write` —
+`clearstatcache()` is precisely a `global.write` — while an intervening
+`rand()` (`nondet.random`) provably cannot have touched it and need not
+forget anything. This is informative, not part of the tag semantics: it
+records that the label vocabulary pays for itself inside an engine even
+before any user writes an envelope.
+
 ### Vocabulary evolution
 
 The dot-path vocabulary is **open**, and the openness has consequences a
