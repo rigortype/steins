@@ -14,7 +14,6 @@ the semantic inventory.
 
 | Surface | ADR | Note |
 | --- | --- | --- |
-| Generic type-argument carry through a variable binding | 0032 | A heap object records no type arguments; `$x = new Box('x'); f($x)` judges only the class half. Stage 1 (the direct-`new` argument position) landed. |
 | Narrowing N5/N6 — property-chain guards, static-prop channel, structured loops | 0052 | Deferred out of v0.1.0 by owner decision; designed in full in ADR-0052 §7–8. |
 | Template scope transfer | 0051 | Templates as functions, render sites as call sites. Out of v0.1.0 scope by owner decision; promoted only if dogfooding demands it. |
 | Callable signatures beyond the closure-variance arm | 0033 | A declared `callable(P): R` is checked against a *closure argument*; nothing else consumes it. |
@@ -30,7 +29,7 @@ the semantic inventory.
 | --- | --- | --- |
 | `call.too-many-arguments` | 0049 §6 | Internal targets only — userland too-many runs clean and is never a finding. Waits on the sidecar reflect slice. The only registered id with no emitter. |
 | Scoped policy — `[paths.sets]`, `[[policy]]` | 0023 | Designed in full, including semantic `where` matchers. The pipeline stage exists as a no-op with a seam. |
-| `doctor` (full report) | 0054 | The **minimal** `doctor` (ADR-0054 C3 scope — index-bound posture report, runs no emitter) has **landed**. Deferred: `--format json`, the richer audits (deeper catalog audit, full baseline capture-surface report). |
+| `doctor` (full report) | 0054 | The **minimal** `doctor` (ADR-0054 C3 scope — index-bound posture report, runs no emitter) has **landed**, and so has `--format json` and part of the richer ADR-0054 C4 audit: Catalog (builtin catalog pin vs. analysis version, hierarchy/foldable table sizes) and Registry totality (emittable/pending id partition) sections. Deferred: the dump-site count (waits on the unlanded D3/D4 recognizer) and `contract_touches_class`'s project-wide count (needs a second, index-only entry point the checker does not expose yet). |
 | `check --fix` fix-its | 0010 | Autofix as a first-class diagnostic payload has **landed**: a finding may carry a `Fix` (a title plus byte-span `FixEdit`s), `--format json` shows it as an additive key, and `check --fix` pours a run's fixes into one atomic plan that writes only past the ADR-0034 dual-verification post-check — a refusal is named and nothing touches disk. One family ships: deleting a committed `\PHPStan\dumpType()` / `\PHPStan\dumpPhpDocType()` statement (`debug.type`, `debug.phpdoc-type`), the remedy ADR-0053 names. Deferred: every further fix family. `debug.var-dump` carries no fix by decision, not by deferral — deleting legal working PHP is the author's call. |
 | `lsp` | 0048, roadmap M6 | Position queries are *constrained* today (replay over retention, canonical entry states, no global-ordering dependence) but not built. The flagship capability is type-directed member completion. |
 | `mcp` | 0010, roadmap M7 | The agent-driven dry-run → diff → approve → apply loop has **landed** as `steins mcp`: an MCP server on stdio with four tools (`list_transforms`, `plan_transform`, `apply_plan`, `check`), plan and apply deliberately separate, and a plan handle scoped to the serving process. Deferred: an `annotate` tool, MCP resources and prompts, and a tool that applies a finding's `fix` payload (the payload is returned; the agent applies it). |
@@ -63,6 +62,19 @@ inventing an escape the grammar does not have. Separately, *source files* are
 still read UTF-8-lossily, so a file that is not itself valid UTF-8 collapses
 before parsing (ADR-0080 §3.2), which also leaves the salsa backdating in §3.3
 open.
+
+**Generic type-argument carry drops conservatively past a variable binding**
+(issue #295, ADR-0032 stage 1). `$box = new MutableBox(1); f($box);` now
+judges the full `MutableBox<int>`, not just the class half — the direct-`new`
+argument position (already landed) and the variable-binding carry (v0.1.5)
+together cover assignment. The arguments are dropped again wherever they
+could have gone stale: any method call on the object drops them, and so does
+passing the object to any function whose signature so much as mentions the
+parameter, whether or not that function's body actually observes or mutates
+the type argument. Only a function that never mentions the parameter in its
+own text keeps them, which is provable from the function's text alone. This
+costs true positives only — a live argument dropped early is a widen, never a
+wrong answer.
 
 **`class-string<T>` carries no bound** (issue #236 landed the bare form; the
 parameterized one is issue #10). `class-string`, `interface-string`,
