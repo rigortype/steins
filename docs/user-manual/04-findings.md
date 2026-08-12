@@ -613,7 +613,7 @@ src/Liskov.php:14:21: error[throw.liskov-widened]: RuntimeException is declared 
 
 ### `effect.*` — effect envelopes
 
-Three ids in two layers. Effects are the second dimension Steins infers, and
+Four ids in two layers. Effects are the second dimension Steins infers, and
 the handbook's [effects chapter](../handbook/04-effects.md) is the tour.
 
 **`effect.envelope-exceeded`** and **`effect.liskov-widened`** are contract
@@ -678,6 +678,59 @@ function fetch(string $url): string
 $ steins check src/Label.php
 src/Label.php:5:3: error[effect.unknown-label]: unknown effect label 'io.netwrok' in #[\Steins\Effect] on fetch()
 ```
+
+**`effect.interop-unknown-label`** is the same mistake made in one of
+PHPStan's purity tags instead — and it is contract layer, `contracts` rung,
+because a docblock is not Steins' own syntax. The reading rule is the one
+[the interop
+spec](../type-specification/phpdoc-effects-interop.md#unknown-labels)
+describes: a label Steins does not recognize makes the **whole tag**
+unspecified, so `/** @phpstan-impure io.netw */` quietly bounds nothing. This
+id is what stops that from being silent.
+
+It fires only where something says the token was *meant* as a label: it is
+close to a real one, another member of the same list is a real one, it has two
+or more dot segments, or it is a spelling Steins retired. A one-word note —
+`/** @phpstan-impure database */`, which current PHPStan discards and which
+therefore appears in real docblocks — matches none of those and never reports,
+on any profile. That silence is a promise, not an oversight.
+
+The migration case is the one most projects meet first. `output` became
+`io.output.buffer` / `io.output.header` / `io.output` in v0.1.x, and `output` →
+`io.output` is three edits — too far for a "did you mean", which is why the
+replacement is written out instead:
+
+```php
+<?php
+
+declare(strict_types=1);
+
+final class Renderer
+{
+    /** @phpstan-impure output */
+    public function render(string $line): void
+    {
+        echo $line;
+    }
+
+    /** @phpstan-impure io.netw */
+    public function fetch(string $url): string
+    {
+        return file_get_contents($url);
+    }
+}
+```
+
+```
+$ steins check --profile contracts src/Renderer.php
+src/Renderer.php:8:21: error[effect.interop-unknown-label]: unknown effect label 'output' in @phpstan-impure on Renderer::render() — the whole tag reads as unspecified and bounds nothing; 'output' was retired, so write io.output.buffer for echo-shaped code, io.output.header for header()/setcookie(), or the umbrella io.output
+src/Renderer.php:14:21: error[effect.interop-unknown-label]: unknown effect label 'io.netw' in @phpstan-impure on Renderer::fetch() — the whole tag reads as unspecified and bounds nothing; did you mean 'io.net'?
+```
+
+A bare `steins check` prints neither: enabling envelope enforcement is what
+turns on the check that keeps enforcement honest. Being contract layer, it is
+also suppressable — `@steins-ignore effect.interop-unknown-label`, or a
+baseline entry — which is what a codebase halfway through a rename needs.
 
 ### `untyped.*` — the type declarations you have not written yet
 

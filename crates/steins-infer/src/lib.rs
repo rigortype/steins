@@ -140,6 +140,22 @@ pub use steins_domain::Certainty;
 /// label no plugin registers.
 pub const UNKNOWN_LABEL_ID: &str = "effect.unknown-label";
 
+/// The registry id for the **interop** vocabulary check (issue #311): a label in
+/// one of upstream's purity tags that the registry does not know, *and* that
+/// carries evidence of label intent ([`steins_catalog::LabelRegistry::label_intent`]
+/// — a near miss, a recognized sibling in the same list, a dot-path shape, or a
+/// spelling Steins retired). The tag has already gone ⊤ by then (the ADR-0082
+/// amendment); this id is what keeps that degradation from being invisible.
+///
+/// **Not [`UNKNOWN_LABEL_ID`]**, deliberately. That id is mechanics: unsuppressable
+/// and on every profile, which is the fail-closed posture the owner ruling refused
+/// for docblocks — firing it from an interop tag is exactly what the ADR-0082
+/// amendment declined. This one is *contract* layer at the `contracts` floor: its
+/// content is "the bound you declared is not the bound being checked", a statement
+/// about a declaration's debt, and a codebase mid-migration must be able to absorb
+/// a pile of them through a baseline or `@steins-ignore`.
+pub const INTEROP_UNKNOWN_LABEL_ID: &str = "effect.interop-unknown-label";
+
 /// The registry id for the `@throws` envelope check (ADR-0040/0007): a **checked**
 /// exception that **provably escapes** (`Yes`) a function/method whose docblock
 /// declares `@throws`, and is a subclass of **none** of the declared classes. Only
@@ -1139,6 +1155,8 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     EFFECT_ID,
     EFFECT_LISKOV_ID,
     UNKNOWN_LABEL_ID,
+    // interop-label hygiene (ADR-0082 amendment, issue #311)
+    INTEROP_UNKNOWN_LABEL_ID,
     CALL_UNDEFINED_METHOD_ID,
     OFFSET_MISSING_ID,
     OFFSET_ON_UNSUPPORTED_ID,
@@ -5464,6 +5482,19 @@ fn effect_diagnostics(units: &[FileUnit], index: &Index, plugins: &PluginFacts) 
             // half of ADR-0082 §1's shadowing, and the half `operative_bound`
             // cannot enforce. A free function reads its *own* docblock: there is
             // no class-like for `@phpstan-all-methods-*` to distribute from (§5).
+            // Both consumers of that docblock stand behind the same gate: its
+            // vocabulary (issue #311) and its bound.
+            if f.effect_envelope.is_none() {
+                report_interop_vocabulary(
+                    &mut out,
+                    &cx,
+                    &format!("{}()", f.name),
+                    f.docblock.as_ref(),
+                    own_tag,
+                    f.span,
+                    registry,
+                );
+            }
             let interop = f
                 .effect_envelope
                 .is_none()
@@ -5476,7 +5507,35 @@ fn effect_diagnostics(units: &[FileUnit], index: &Index, plugins: &PluginFacts) 
             report_unit(&mut out, &cx, None, &f.name, bound, &f.effect_origins, &effects, registry);
         }
         for c in cx.tree().classes() {
+            // The class-level tag is one declaration, so its vocabulary is judged
+            // once here rather than once per covered method. Nothing about a
+            // method's own attribute shadows it: `@phpstan-all-methods-impure
+            // io.netw` is a claim the class wrote, and it went ⊤ whoever reads it.
+            report_interop_vocabulary(
+                &mut out,
+                &cx,
+                &format!("class {}", c.name),
+                c.docblock.as_ref(),
+                class_tag,
+                c.span,
+                registry,
+            );
             for m in &c.methods {
+                // Judged only when the docblock is CONSULTED: an attribute envelope
+                // shadows it outright (ADR-0082 §1), and a bound nobody read cannot
+                // have misled anybody. The class-level tag above is a separate
+                // declaration and keeps its own report.
+                if m.effect_envelope.is_none() {
+                    report_interop_vocabulary(
+                        &mut out,
+                        &cx,
+                        &format!("{}::{}()", c.name, m.name),
+                        m.docblock.as_ref(),
+                        own_tag,
+                        m.span,
+                        registry,
+                    );
+                }
                 let interop = m
                     .effect_envelope
                     .is_none()
@@ -5720,9 +5779,14 @@ fn report_unit(
         if registry.is_known(label) {
             continue;
         }
-        let suggestion = registry
-            .nearest(label)
-            .map(|s| format!(" — did you mean '{s}'?"))
+        // A retirement outranks the edit-distance suggestion and reaches where it
+        // cannot: `output` → `io.output` is distance 3, past the cap, so before the
+        // table this message ended at the label name and left an ADR-0083 migration
+        // with nowhere to go (issue #311). Only the wording changes here — the id,
+        // the layer, the floor and the firing condition are untouched.
+        let suggestion = steins_catalog::retired_label(label)
+            .map(|r| format!(" — {}", retirement_clause(r)))
+            .or_else(|| registry.nearest(label).map(|s| format!(" — did you mean '{s}'?")))
             .unwrap_or_default();
         let msg = format!(
             "unknown effect label '{label}' in {} on {display}(){suggestion}",
@@ -6491,6 +6555,104 @@ fn interop_tag(
     InteropTag::Bound(env, labels)
 }
 
+/// The tag families a declaration's **own** docblock may carry (the method-level
+/// pair). A named predicate, not a closure at each call site, so the reader
+/// ([`own_interop_envelope`]) and the vocabulary check
+/// ([`report_interop_vocabulary`]) cannot come to consult different tags.
+const fn own_tag(env: EnvelopeTag) -> bool {
+    matches!(env, EnvelopeTag::Pure | EnvelopeTag::Impure)
+}
+
+/// The class-level pair, which distributes over the methods of the class-like it
+/// annotates (ADR-0082 §5). The [`own_tag`] counterpart.
+const fn class_tag(env: EnvelopeTag) -> bool {
+    matches!(env, EnvelopeTag::AllMethodsPure | EnvelopeTag::AllMethodsImpure)
+}
+
+/// Emit `effect.interop-unknown-label` (issue #311) for a docblock whose interop
+/// tag [`interop_tag`] just read as **unspecified** — but only for the labels that
+/// carry evidence of label intent.
+///
+/// This is the vocabulary-conformance diagnostic the interop spec's fail-open
+/// paragraph asks an enforcing checker for. The bound-reading rule stays exactly as
+/// it was: the tag is inert either way, and this function is told so by
+/// [`interop_tag`] rather than re-deriving it, so the ruling has one implementation
+/// and this has no vote in it. Firing on an inert tag is the entire point — a
+/// declaration that checks nothing while looking like it checks something is
+/// precisely the degradation the ruling accepted and asked to be made visible.
+///
+/// What it must never do is read a human's prose as a bound the author fumbled.
+/// [`steins_catalog::LabelRegistry::label_intent`] owns that judgment and answers
+/// `None` for a lone far-off word, which is silence on every surface, permanently.
+///
+/// `subject` names the declaration as the message quotes it (`f()`,
+/// `C::save()`, `class C`); `accept` is the tag family this site consults, and
+/// `anchor` the declaration's own name — where the attribute path anchors the same
+/// kind of finding.
+fn report_interop_vocabulary(
+    out: &mut Vec<Diagnostic>,
+    cx: &Cx,
+    subject: &str,
+    docblock: Option<&String>,
+    accept: fn(EnvelopeTag) -> bool,
+    anchor: Span,
+    registry: &steins_catalog::LabelRegistry,
+) {
+    if !matches!(interop_tag(registry, docblock, accept), InteropTag::Unbounded) {
+        return;
+    }
+    // The re-scan is how the labels are recovered for the message: `Unbounded`
+    // deliberately carries none of them, because a ⊤ tag has no bound to carry. The
+    // `else` arm is unreachable — only a tag that scanned can classify as
+    // `Unbounded` — and returns rather than assert, since a message is not worth a
+    // panic.
+    let Some((env, labels)) = docblock_envelope_tag(docblock, accept) else { return };
+    let tag = EnvelopeSpelling::Interop(env).tag_name();
+    let pos = cx.tree().position(anchor.start);
+    for label in &labels {
+        if registry.is_known(label) {
+            continue;
+        }
+        let Some(intent) = registry.label_intent(label, &labels) else {
+            continue;
+        };
+        // Every variant states the consequence, because it is the part a reader
+        // cannot see: their tag is still there, and it is checking nothing.
+        let head = format!(
+            "unknown effect label '{label}' in {tag} on {subject} — the whole tag reads as \
+             unspecified and bounds nothing"
+        );
+        let message = match intent {
+            steins_catalog::LabelIntent::Near(near) => format!("{head}; did you mean '{near}'?"),
+            steins_catalog::LabelIntent::Retired(r) => {
+                format!("{head}; {}", retirement_clause(r))
+            }
+            // Intent is evident, but nothing in the vocabulary is a candidate to
+            // suggest — naming a far-off label here would be a worse guess than
+            // saying nothing.
+            steins_catalog::LabelIntent::KnownSibling | steins_catalog::LabelIntent::DotPath => {
+                head
+            }
+        };
+        out.push(Diagnostic {
+            id: INTEROP_UNKNOWN_LABEL_ID,
+            path: cx.path().to_owned(),
+            line: pos.line,
+            column: pos.column,
+            message,
+            facet: None,
+            fix: None,
+        });
+    }
+}
+
+/// How both unknown-label checks spell a **retirement** (issue #311): the one
+/// migration sentence, shared so the docblock and the attribute stratum cannot
+/// give a reader two different answers about the same renamed node.
+fn retirement_clause(r: &steins_catalog::RetiredLabel) -> String {
+    format!("'{}' was retired, so write {}", r.spelling, r.guidance)
+}
+
 /// The **interop envelope** (ADR-0082) written on one declaration's *own*
 /// docblock: the `@phpstan-pure` / `@phpstan-impure <labels>` families, with no
 /// class-level fallback. The tag family travels with the labels — a finding has to
@@ -6504,8 +6666,7 @@ fn own_interop_envelope(
     registry: &steins_catalog::LabelRegistry,
     docblock: Option<&String>,
 ) -> InteropTag {
-    match interop_tag(registry, docblock, |e| matches!(e, EnvelopeTag::Pure | EnvelopeTag::Impure))
-    {
+    match interop_tag(registry, docblock, own_tag) {
         // `@phpstan-impure <labels>` is `≤labels`; the bare spelling is ⊤ and never
         // scans to a tag at all, so `labels` is never empty here.
         InteropTag::Bound(EnvelopeTag::Impure, labels) => {
@@ -6560,9 +6721,7 @@ fn interop_envelope(
         InteropTag::Absent => {}
         won => return won,
     }
-    match interop_tag(registry, class.docblock.as_ref(), |e| {
-        matches!(e, EnvelopeTag::AllMethodsPure | EnvelopeTag::AllMethodsImpure)
-    }) {
+    match interop_tag(registry, class.docblock.as_ref(), class_tag) {
         // `all-methods-impure` covers every declared method unconditionally —
         // bare, it is the ⊤ bound, which contributes no labels.
         InteropTag::Bound(env @ EnvelopeTag::AllMethodsImpure, labels) => {

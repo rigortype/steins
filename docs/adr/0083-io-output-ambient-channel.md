@@ -196,3 +196,33 @@ needs a real seam. Deferred rather than faked; `fwrite` stays `io.fs.write`.
 - Issue #312's reserved `-except` form gains its first concrete motivation:
   `io -except io.output` is now the only compact spelling of "stream work,
   no output".
+
+## Amendment (2026-08-13): retirement is a table the tool reads, not only prose
+
+This ADR's compatibility note ended by assigning migration guidance to the
+documentation: `output` → `io.output` is three edits apart, past the
+suggestion cap, so a stale spelling earns a bare "unknown label" and the
+reader is sent to the release notes. That was the honest description of a
+mechanism we had; it was not a good place to leave a migration.
+
+**The decision.** A retired spelling is recorded in a table beside the label
+registry — the spelling plus the guidance for what to write instead — and
+both consumers read it: the attribute stratum's `effect.unknown-label`
+message, and the interop stratum's new `effect.interop-unknown-label`
+(issue #311). A retirement therefore names its replacement at the
+declaration that carries it, which is where the person who must act is
+looking. `output` and `output.header` are the table's first two rows, and
+the table carries an append-on-move contract: when a later ADR moves or
+retires a node, it adds the row in the same change.
+
+**Why a table rather than widening the edit distance.** Raising the
+Levenshtein cap to reach `output` → `io.output` would make every distant
+word a suggestion candidate and would start guessing at prose — the exact
+failure the ADR-0082 amendment refuses. Retirement is not a spelling
+accident to be inferred; it is a fact this project knows and can simply
+state. The two mechanisms stay separate: distance answers "did you mistype
+a live label", the table answers "did you write a label we removed".
+
+This supersedes the "migration guidance is the docs' job" sentence above for
+retired *labels*. The release notes still carry the narrative; they are no
+longer the only place a user can learn what to write.

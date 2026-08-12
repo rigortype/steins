@@ -52,10 +52,15 @@ failure   failure.environment   failure.input   failure.resource
 
 A declared label outside this set — and not an ancestor of an entry — earns
 `effect.unknown-label`, with a Levenshtein-based suggestion (`io.netw` → did you
-mean `io.net`). Typo safety is Steins' own job, not the user's. This is the
-**checked** stratum's rule (`#[\Steins\Effect]` / `#[\Steins\Pure]`); the
-interop envelope below reads an unrecognized label differently — see
-[Unknown labels](phpdoc-effects-interop.md#unknown-labels).
+mean `io.net`) or, where the spelling is one Steins **retired**, the replacement
+to write instead (`output` → `io.output.buffer` / `io.output.header` /
+`io.output`, ADR-0083 — a rename no edit-distance metric can reach). Typo safety
+is Steins' own job, not the user's. This is the **checked** stratum's rule
+(`#[\Steins\Effect]` / `#[\Steins\Pure]`); the interop envelope below reads an
+unrecognized label differently — see
+[Unknown labels](phpdoc-effects-interop.md#unknown-labels), and the separate
+opt-in [`effect.interop-unknown-label`](phpdoc-effects-interop.md#the-paired-diagnostic)
+that keeps that reading from going unnoticed.
 
 `failure.*` is the odd family: those labels name a `false`/`null` failure arm's
 *value provenance* — why the arm exists — rather than an effect. They share the

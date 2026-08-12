@@ -571,18 +571,21 @@ fn the_buffer_leaf_admits_echo_but_not_a_header_call() {
     assert_eq!(effects(parent).len(), 0, "the umbrella admits response metadata too");
 }
 
-/// The retired spelling is now simply unknown — and `output` → `io.output` is
-/// Levenshtein 3, past the suggestion cap, so the finding carries no "did you
-/// mean". Migration guidance lives in the docs (ADR-0083).
+/// The retired spelling is simply unknown — and `output` → `io.output` is
+/// Levenshtein 3, past the suggestion cap, so no "did you mean" can ever reach it.
+/// The retirement table does instead (issue #311): the message spells the ADR-0083
+/// migration out, which is the whole reason that table sits beside the metric.
 #[test]
-fn the_retired_output_spelling_is_an_unknown_label_without_a_suggestion() {
+fn the_retired_output_spelling_is_an_unknown_label_carrying_its_migration() {
     let src = "<?php\n#[\\Steins\\Effect('output')]\nfunction f(): void { echo \"hi\"; }\n";
     let u = unknown_labels(src);
     assert_eq!(u.len(), 1, "{u:#?}");
-    assert_eq!(u[0].id, UNKNOWN_LABEL_ID);
+    assert_eq!(u[0].id, UNKNOWN_LABEL_ID, "same id, same layer, same floor as it always had");
     assert_eq!(
         u[0].message,
-        "unknown effect label 'output' in #[\\Steins\\Effect] on f()"
+        "unknown effect label 'output' in #[\\Steins\\Effect] on f() — 'output' was retired, so \
+         write io.output.buffer for echo-shaped code, io.output.header for header()/setcookie(), \
+         or the umbrella io.output"
     );
     // The unknown label still *reads* as an envelope, so the echo is additionally
     // reported against it — a project on the old spelling sees both findings, and

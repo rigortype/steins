@@ -15,7 +15,8 @@ use steins_infer::{
     CALL_UNDEFINED_FUNCTION_ID, CALL_UNDEFINED_METHOD_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID,
     CLASS_UNDEFINED_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID,
     DIAGNOSTIC_IDS,
-    DIAGNOSTIC_REGISTRY, EFFECT_ID, EFFECT_LISKOV_ID, FACET_ORIGIN, Facet, Floor, ID, Layer,
+    DIAGNOSTIC_REGISTRY, EFFECT_ID, EFFECT_LISKOV_ID, FACET_ORIGIN, Facet, Floor, ID,
+    INTEROP_UNKNOWN_LABEL_ID, Layer,
     OFFSET_MAYBE_MISSING_ID, OFFSET_UNDECLARED_ID, surface_floor,
     OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID, Origin, PARAM_MISMATCH_ID, PHPDOC_PROP_MISMATCH_ID,
     PHPDOC_UNDEFINED_METHOD_ID, PROP_MISMATCH_ID, READONLY_REASSIGNED_ID, REGISTERED_NOT_YET_EMITTED,
@@ -116,6 +117,11 @@ fn classification_matches_adr_0050_section_1() {
     assert_eq!(layer(THROW_LISKOV_ID), Some(Layer::Contract));
     assert_eq!(layer(EFFECT_ID), Some(Layer::Contract));
     assert_eq!(layer(EFFECT_LISKOV_ID), Some(Layer::Contract));
+    // The interop stratum's vocabulary check (issue #311) is contract, not the
+    // mechanics its attribute-side twin two lines down carries: it is suppressable
+    // and off the default surface by design, which is the whole reason it is a
+    // separate id at all.
+    assert_eq!(layer(INTEROP_UNKNOWN_LABEL_ID), Some(Layer::Contract));
     // mechanics
     assert_eq!(layer(SUPPRESS_UNMATCHED_ID), Some(Layer::Mechanics));
     assert_eq!(layer(SUPPRESS_UNKNOWN_ID), Some(Layer::Mechanics));
@@ -146,6 +152,34 @@ fn classification_matches_adr_0050_section_1() {
     // trace annotation (ADR-0074 §4): the docblock spelling of the same question,
     // same layer.
     assert_eq!(layer(DEBUG_TRACE_ID), Some(Layer::Debug));
+}
+
+/// The two unknown-label ids are one defect on two strata, and the registry is
+/// where that distinction is enforced (issue #311).
+///
+/// Same question — "this label is not in the vocabulary" — asked of a Steins
+/// attribute and of one of upstream's docblock tags. The attribute's is apparatus
+/// rot: Steins' own syntax, unsuppressable, red on every profile. The docblock's is
+/// declared debt on a claim upstream itself does not check, so it is suppressable
+/// and opt-in — reusing the mechanics id would have made every project with a
+/// pre-existing `@phpstan-impure` note fail a bare `steins check`, which is exactly
+/// what the ADR-0082 amendment refused.
+#[test]
+fn the_two_unknown_label_ids_sit_on_different_strata() {
+    let emittable: HashSet<&str> = ALL_EMITTABLE_IDS.iter().copied().collect();
+    assert!(emittable.contains(INTEROP_UNKNOWN_LABEL_ID), "the interop half emits (#311)");
+    assert_ne!(UNKNOWN_LABEL_ID, INTEROP_UNKNOWN_LABEL_ID);
+
+    assert_eq!(layer(UNKNOWN_LABEL_ID), Some(Layer::Mechanics));
+    assert_eq!(surface_floor(UNKNOWN_LABEL_ID), Some(Floor::Default));
+    assert_eq!(layer(INTEROP_UNKNOWN_LABEL_ID), Some(Layer::Contract));
+    assert_eq!(
+        surface_floor(INTEROP_UNKNOWN_LABEL_ID),
+        Some(Floor::Contracts),
+        "it rides with the envelope family it keeps honest"
+    );
+    // The ADR-0022 kebab-case spelling is pinned: it reaches users' baselines.
+    assert_eq!(INTEROP_UNKNOWN_LABEL_ID, "effect.interop-unknown-label");
 }
 
 /// Finding-breadth registry coverage by ADR-0049 stage.

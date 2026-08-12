@@ -1373,6 +1373,71 @@ fn nearest_of<'a>(label: &str, entries: impl Iterator<Item = &'a str>) -> Option
         .map(|(_, k)| k)
 }
 
+/// A label spelling this project has **retired**, paired with what to write in its
+/// place. Vocabulary knowledge, so it lives beside the registry rather than in a
+/// diagnostic: both the attribute check and the interop one read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetiredLabel {
+    /// The retired spelling, exactly as code that has not migrated still writes it.
+    pub spelling: &'static str,
+    /// What to write instead, as a diagnostic spells it after "write …" — prose,
+    /// because a retirement can fan a single old name out over several new ones.
+    pub guidance: &'static str,
+}
+
+/// Every label spelling Steins has retired, with its replacement guidance — the
+/// table [`retired_label`] looks up.
+///
+/// **A row is appended here whenever a taxonomy node moves or is renamed** — that
+/// is the table's contract, and the reason it exists at all: the Levenshtein
+/// suggestion of [`nearest_label`] cannot reach a renaming that moved a label more
+/// than two edits, and a migration is exactly where a project's docblocks are most
+/// likely to still name the old node. The first two rows are ADR-0083's, which
+/// moved the ambient output channel under `io` (`output` → `io.output.*`): those
+/// are distance 3, past the cap, so without this table a project on the old
+/// vocabulary is told nothing at all.
+const RETIRED_LABELS: &[RetiredLabel] = &[
+    // ADR-0083 split the old `output` root over three children on the one question
+    // an `ob_start()` guard has to answer, so there is no single replacement to
+    // name — the guidance walks the reader through the choice instead.
+    RetiredLabel {
+        spelling: "output",
+        guidance: "io.output.buffer for echo-shaped code, io.output.header for \
+                   header()/setcookie(), or the umbrella io.output",
+    },
+    // The one old spelling that does have an exact replacement (ADR-0083).
+    RetiredLabel { spelling: "output.header", guidance: "io.output.header" },
+];
+
+/// The retirement row for `label`, if this project retired that spelling. Exact
+/// match, like the registry's own lookups.
+#[must_use]
+pub fn retired_label(label: &str) -> Option<&'static RetiredLabel> {
+    RETIRED_LABELS.iter().find(|r| r.spelling == label)
+}
+
+/// Why an unrecognized label reads as an **attempt at a label** rather than as a
+/// human's prose ([`LabelRegistry::label_intent`]).
+///
+/// The variants are the evidence, in the order it is weighed. The first two carry
+/// something to suggest; the last two are evidence of intent with no replacement to
+/// name, so a diagnostic built on them says what happened and stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabelIntent<'a> {
+    /// The token is a spelling this project retired — the strongest signal there
+    /// is, since Steins itself once printed that name.
+    Retired(&'static RetiredLabel),
+    /// The token is within [`LabelRegistry::nearest`]'s edit cap of a known label,
+    /// which is also the suggestion to print.
+    Near(&'a str),
+    /// Some *other* member of the same tag's label list is a recognized label.
+    /// Prose does not usually sit in a comma list beside a real effect label.
+    KnownSibling,
+    /// The token has two or more dot-path segments, the shape a one-word English
+    /// note cannot take.
+    DotPath,
+}
+
 /// The label registry **as one run sees it**: the builtin table ([`known_labels`])
 /// plus whatever the ADR-0012/0039 plugin channel registered for this project
 /// (ADR-0068). Inference asks this, not the free functions, so an ecosystem label
@@ -1433,6 +1498,38 @@ impl LabelRegistry {
     pub fn nearest(&self, label: &str) -> Option<&str> {
         let builtin = known_labels().iter().copied();
         nearest_of(label, builtin.chain(self.extensions.iter().map(String::as_str)))
+    }
+
+    /// Whether an unrecognized `label`, written in a tag whose whole label list is
+    /// `siblings`, carries evidence of **label intent** — and if so, which
+    /// (issue #311).
+    ///
+    /// `None` is the answer that matters: a bare word far from every known label,
+    /// alone in its list, is indistinguishable from the one-word note current
+    /// PHPStan lets a docblock carry after `@phpstan-impure`, and guessing "it is a
+    /// label" is exactly what the ADR-0082 amendment refuses. `None` therefore
+    /// means *stay silent*, permanently and on every surface — not "report it
+    /// somewhere quieter".
+    ///
+    /// Answering `Some` for a *known* label would be meaningless, so callers filter
+    /// those out first; this method does not re-derive [`Self::is_known`] for the
+    /// label itself, only for its siblings.
+    #[must_use]
+    pub fn label_intent<'a>(&'a self, label: &str, siblings: &[String]) -> Option<LabelIntent<'a>> {
+        if let Some(r) = retired_label(label) {
+            return Some(LabelIntent::Retired(r));
+        }
+        if let Some(near) = self.nearest(label) {
+            return Some(LabelIntent::Near(near));
+        }
+        if siblings.iter().any(|s| s != label && self.is_known(s)) {
+            return Some(LabelIntent::KnownSibling);
+        }
+        let mut segments = label.split('.');
+        if segments.clone().count() >= 2 && segments.all(|s| !s.is_empty()) {
+            return Some(LabelIntent::DotPath);
+        }
+        None
     }
 }
 
@@ -2694,8 +2791,8 @@ mod tests {
     }
 
     use super::{
-        WrittenWhen, by_value_arg, is_core_label, is_known_label, nearest_label,
-        out_param_written_when, out_params, subsumes,
+        LabelIntent, WrittenWhen, by_value_arg, is_core_label, is_known_label, nearest_label,
+        out_param_written_when, out_params, retired_label, subsumes,
     };
 
     #[test]
@@ -2736,11 +2833,66 @@ mod tests {
         // Something wildly off has no near suggestion.
         assert_eq!(nearest_label("completely-different"), None);
         // The retired ADR-0083 spelling is *not* a near miss of its replacement
-        // (`output` → `io.output` is distance 3, past the cap), so a project on
-        // the old vocabulary gets `effect.unknown-label` with no suggestion —
-        // the migration table in the docs is what carries those users across.
+        // (`output` → `io.output` is distance 3, past the cap), so this metric can
+        // say nothing about it — which is precisely why `RETIRED_LABELS` exists
+        // beside it (issue #311) and why both checks consult that table first.
         assert_eq!(nearest_label("output"), None);
         assert_eq!(nearest_label("output.header"), None);
+    }
+
+    #[test]
+    fn the_retired_table_carries_the_adr_0083_migration() {
+        // Distance-3 renames the suggestion metric cannot reach: the table is the
+        // only channel that tells a project on the old vocabulary what to write.
+        let out = retired_label("output").expect("the retired output root");
+        assert_eq!(out.spelling, "output");
+        assert_eq!(
+            out.guidance,
+            "io.output.buffer for echo-shaped code, io.output.header for \
+             header()/setcookie(), or the umbrella io.output"
+        );
+        assert_eq!(retired_label("output.header").map(|r| r.guidance), Some("io.output.header"));
+        // Only retired spellings are in it: not a live label, not a typo, not prose.
+        assert_eq!(retired_label("io.output"), None);
+        assert_eq!(retired_label("io.netw"), None);
+        assert_eq!(retired_label("database"), None);
+        // Every replacement the table names must itself be a registry label, or the
+        // guidance sends a reader from one unknown label to another.
+        for label in ["io.output", "io.output.buffer", "io.output.header"] {
+            assert!(is_known_label(label), "{label} is named as a replacement");
+        }
+    }
+
+    #[test]
+    fn label_intent_tells_a_typo_from_a_humans_prose() {
+        let r = super::LabelRegistry::builtin();
+        let alone: Vec<String> = Vec::new();
+
+        // THE GUARANTEE (issue #311): a bare word, far from everything, alone in
+        // its list, is prose as far as this predicate is concerned — forever.
+        assert_eq!(r.label_intent("database", &alone), None);
+        assert_eq!(r.label_intent("todo", &alone), None);
+        // (a) near a known label.
+        assert_eq!(r.label_intent("io.netw", &alone), Some(LabelIntent::Near("io.net")));
+        assert_eq!(r.label_intent("nondet.tyme", &alone), Some(LabelIntent::Near("nondet.time")));
+        // (b) a recognized sibling in the same list turns even prose-shaped
+        // `database` into evidence — the deliberately aggressive signal.
+        let beside = vec!["io.db".to_owned(), "database".to_owned()];
+        assert_eq!(r.label_intent("database", &beside), Some(LabelIntent::KnownSibling));
+        // The sibling must be a *different* token: a list of one unknown label
+        // repeated is not evidence of anything.
+        let itself = vec!["database".to_owned(), "database".to_owned()];
+        assert_eq!(r.label_intent("database", &itself), None);
+        // (c) dot-path shape, with nothing near and no known sibling.
+        assert_eq!(r.label_intent("cache.warmup", &alone), Some(LabelIntent::DotPath));
+        // A trailing dot is not a second segment.
+        assert_eq!(r.label_intent("database.", &alone), None);
+        // (d) a retirement outranks the rest, and reaches where the metric cannot.
+        let retired = r.label_intent("output", &alone).expect("the retired spelling reports");
+        assert!(matches!(retired, LabelIntent::Retired(row) if row.spelling == "output"));
+        // An extension label a plugin registered makes its own typos near misses.
+        let plugged = super::LabelRegistry::with_extensions(["acme.cache".to_owned()]);
+        assert_eq!(plugged.label_intent("acme.cach", &alone), Some(LabelIntent::Near("acme.cache")));
     }
 
     #[test]

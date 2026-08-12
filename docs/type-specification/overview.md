@@ -110,10 +110,15 @@ Emitting ids, by layer (the registry is the source of truth —
   `offset.missing`, `offset.on-unsupported`.
 - **contract** — `phpdoc.param-mismatch`, `phpdoc.return-mismatch`,
   `phpdoc.property-mismatch`, `phpdoc.undefined-method`, `throw.undeclared`,
-  `throw.liskov-widened`, `effect.envelope-exceeded`, `effect.liskov-widened`.
+  `throw.liskov-widened`, `effect.envelope-exceeded`, `effect.liskov-widened`,
+  `effect.interop-unknown-label` (floor `contracts`, like the rest of this
+  list: an unrecognized label in one of upstream's purity tags, reported only
+  where something makes label-intent evident —
+  [phpdoc-effects-interop.md](phpdoc-effects-interop.md#the-paired-diagnostic)).
 - **mechanics** — `suppress.unmatched`, `suppress.unknown-id`,
-  `effect.unknown-label` (a typo'd label is apparatus rot, not a contract
-  claim).
+  `effect.unknown-label` (a typo'd label in Steins' *own* attribute syntax is
+  apparatus rot, not a contract claim; the docblock spelling of that mistake
+  is the contract-layer id above, and the split is deliberate).
 - **debug** — `debug.type`, `debug.phpdoc-type` (fail-level, profile-inert),
   `debug.var-dump` (warn-level, exit-neutral, disableable) — ADR-0053 D3/D4;
   `debug.trace` (warn-level, exit-neutral, profile-inert — the
