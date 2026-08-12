@@ -13,9 +13,11 @@ use salsa::Storage;
 use steins_syntax::{FunctionDecl, SourceTree};
 
 pub mod composer;
+pub mod effects;
 pub mod layout;
 pub mod plugins;
 
+pub use effects::EffectsPolicy;
 pub use layout::{GoverningRoot, PhpTarget, PhpTargetSource, ProjectLayout, fallback_is_vendor};
 pub use plugins::PluginFacts;
 
@@ -74,6 +76,14 @@ pub fn function_index(db: &dyn Db, file: SourceFile) -> Vec<FunctionDecl> {
 /// and a replay must reach the same verdict from the same inputs.
 /// [`PluginFacts::none`] is the empty channel — a project with no plugin carries
 /// no registered labels or colorings.
+///
+/// [`EffectsPolicy`] rides along as a fourth input, and for the third time for the
+/// same reason (ADR-0084 §1): the `[effects]` table decides which envelope
+/// findings exist and what the purity oracle answers, so it is project input
+/// state, read once from `steins.toml` at the boundary. It carries `#[default]`
+/// because the empty policy is the pre-ADR-0084 world exactly — every caller that
+/// declares no tolerance judges as it always has — so a project is built with
+/// [`Project::builder`] only where a policy is actually in hand.
 #[salsa::input]
 pub struct Project {
     #[returns(deref)]
@@ -82,6 +92,9 @@ pub struct Project {
     pub layout: ProjectLayout,
     #[returns(ref)]
     pub plugins: PluginFacts,
+    #[default]
+    #[returns(ref)]
+    pub effects: EffectsPolicy,
 }
 
 /// Where a declaration lives: the owning file and its index in that file's

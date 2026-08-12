@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use steins_db::{
-    PluginFacts, Project, ProjectLayout, SourceFile, SteinsDatabase, composer,
-    parse as parse_tree,
+    EffectsPolicy, PluginFacts, Project, ProjectLayout, Resolve, SourceFile, SteinsDatabase,
+    composer, parse as parse_tree, project_index,
 };
 use steins_edit::{
     ByteSpan, Edit, EditPlan, LoopToArrayMapOptions, PartitionMap, TransformReport, VouchSet,
@@ -120,7 +120,7 @@ fn dispatch(args: &[String]) -> ExitCode {
         }
         None => {
             errln!(
-                "usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-php] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
+                "usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-php] [--no-tolerated-effects] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
             );
             errln!("       steins annotate [--no-php] [--format text|json] <file.php>");
             errln!(
@@ -287,6 +287,7 @@ fn run_check(args: &[String]) -> ExitCode {
     // from no flag at all inside GitHub Actions.
     let mut format: Option<render::CheckFormat> = None;
     let mut no_php = false;
+    let mut no_tolerated_effects = false;
     let mut fix_requested = false;
     let mut set_baseline = false;
     let mut ignore_baseline = false;
@@ -299,6 +300,13 @@ fn run_check(args: &[String]) -> ExitCode {
         match args[i].as_str() {
             "--no-php" => {
                 no_php = true;
+                i += 1;
+            }
+            // The ADR-0084 §1 audit switch: judge with an empty tolerance and every
+            // discharged finding comes back. The attribution table is still parsed —
+            // it is fact, not policy, and nothing about it depends on this flag.
+            "--no-tolerated-effects" => {
+                no_tolerated_effects = true;
                 i += 1;
             }
             "--fix" => {
@@ -396,10 +404,11 @@ fn run_check(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let (check_cfg, profile_tbl, runtime_cfg, plugin_allow) = match config {
-        Some(c) => (c.check, c.profile, c.runtime, allow_list(c.plugins)),
-        None => (None, None, None, None),
+    let (check_cfg, profile_tbl, runtime_cfg, plugin_allow, effects_cfg) = match config {
+        Some(c) => (c.check, c.profile, c.runtime, allow_list(c.plugins), c.effects),
+        None => (None, None, None, None, None),
     };
+    let effects_policy = effects_from_config(effects_cfg, no_tolerated_effects);
 
     // The active display surface (ADR-0050 §5): resolve the selected profile before
     // any analysis so a config error fails fast (exit 2). Precedence: the
@@ -422,7 +431,7 @@ fn run_check(args: &[String]) -> ExitCode {
     // ONE project (one salsa DB), so cross-file calls, class chains, and effects
     // resolve. `texts` keeps each file's contents by diagnostic path so the
     // baseline hash can read the flagged line's neighborhood (ADR-0022).
-    let loaded = load_project(&files, &paths, plugin_allow.as_deref());
+    let loaded = load_project(&files, &paths, plugin_allow.as_deref(), effects_policy);
     let (db, project, texts) = (&loaded.db, loaded.project, &loaded.texts);
     // The declared target PHP range (issue #28) gates the folder's absence
     // family and curated-fact admission; the checker reads it from the layout.
@@ -1131,7 +1140,8 @@ fn plan_transform_run(
     let partitions = load_partitions(config_path)?;
 
     let files = collect_files(paths);
-    let loaded = load_project(&files, paths, allow_list_from_disk().as_deref());
+    let loaded =
+        load_project(&files, paths, allow_list_from_disk().as_deref(), effects_policy_from_disk());
     let (db, project) = (&loaded.db, loaded.project);
 
     // Plan the transform (pure — no writes, no re-check). The region map (ADR-0047)
@@ -1194,6 +1204,33 @@ struct SteinsConfig {
     /// The `[doctor]` section (ADR-0054 §14 deferred-with-design, issue #268):
     /// `require`'s named posture-to-failure assertions.
     doctor: Option<DoctorConfig>,
+    /// The `[effects]` section (ADR-0084 §1): the tolerated-effects policy and
+    /// the attribution table it grips.
+    effects: Option<EffectsConfig>,
+}
+
+/// The `[effects]` section (ADR-0084 §1) — the project's tolerated-effects
+/// policy, and deliberately NOT a `[profile.*]` field: ADR-0050 §10's refusal
+/// stands unamended, because a profile selects a display surface while this
+/// changes which findings exist at all.
+///
+/// `deny_unknown_fields`, like `[runtime]` and `[plugins]`: a misspelled key here
+/// (`tolerate` for `tolerated`) would leave the project believing it had declared
+/// a tolerance it has not, and silently reporting thousands of findings it thought
+/// it had discharged is exactly the pollution this section exists to end.
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct EffectsConfig {
+    /// The labels the envelope judgment discharges. Policy — the only half that
+    /// can change a verdict.
+    #[serde(default)]
+    tolerated: Vec<String>,
+    /// `[effects.attribution]`: symbol → the labels its effects are *for*. Fact,
+    /// not policy; inert until `tolerated` names one of its labels. A key is a
+    /// class (every method), a `Class::method`, or a global function. A
+    /// `BTreeMap` so notice order is deterministic.
+    #[serde(default)]
+    attribution: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// The `[doctor]` section (ADR-0054 §14, issue #268): `require = [...]` names
@@ -1363,6 +1400,24 @@ fn load_vouches(config_path: Option<&str>) -> (VouchSet, Vec<String>) {
         }
     }
     (VouchSet::from_entries(entries), warnings)
+}
+
+/// The tolerated-effects policy from an already-parsed config (ADR-0084 §1).
+/// `no_tolerated` is `steins check --no-tolerated-effects`, the audit switch: it
+/// empties the tolerance for the run while leaving the attribution table in place,
+/// because attribution is fact and only the tolerance is policy.
+fn effects_from_config(effects: Option<EffectsConfig>, no_tolerated: bool) -> EffectsPolicy {
+    let effects = effects.unwrap_or_default();
+    let policy = EffectsPolicy::new(effects.tolerated, effects.attribution);
+    if no_tolerated { policy.without_tolerance() } else { policy }
+}
+
+/// [`effects_from_config`] for the surfaces that do not already hold a parsed
+/// config, read the same lenient way [`allow_list_from_disk`] reads the plugin
+/// allow-list: `check`/`doctor` are the surfaces that turn a malformed
+/// `steins.toml` into exit 2, and they run first.
+fn effects_policy_from_disk() -> EffectsPolicy {
+    effects_from_config(read_steins_config().ok().flatten().and_then(|c| c.effects), false)
 }
 
 /// The `[plugins] allow` list from an already-parsed config: `Some(names)` when
@@ -1898,9 +1953,15 @@ fn run_annotate(args: &[String]) -> ExitCode {
     // The project context for cross-file facts (ADR-0015): the `--project`
     // directory, else the file's own directory. Every `.php` file under it is
     // parsed into one project so `annotate` sees cross-file resolution.
-    let root = project_dir
-        .map(PathBuf::from)
-        .unwrap_or_else(|| path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(".")));
+    //
+    // A bare relative filename has an *empty* parent, which is not a directory
+    // any walk can open: `steins annotate app.php` would otherwise find no
+    // project at all and silently fall back to the one-file, policy-free path.
+    let root = project_dir.map(PathBuf::from).unwrap_or_else(|| {
+        path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+    });
 
     let canon_target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut project_files = Vec::new();
@@ -1936,7 +1997,9 @@ fn run_annotate(args: &[String]) -> ExitCode {
                     let layout = resolve_layout(&[root.to_string_lossy().into_owned()]);
                     folder.set_php_target(layout.php_target().cloned());
                     let plugins = load_plugins(&layout, allow_list_from_disk().as_deref());
-                    let project = Project::new(&db, inputs, layout, plugins);
+                    let project = Project::builder(inputs, layout, plugins)
+                        .effects(effects_policy_from_disk())
+                        .new(&db);
                     annotate_project(&db, project, target_file, &mut folder)
                 }
                 None => {
@@ -1952,7 +2015,9 @@ fn run_annotate(args: &[String]) -> ExitCode {
                 Some(target_file) => {
                     let layout = resolve_layout(&[root.to_string_lossy().into_owned()]);
                     let plugins = load_plugins(&layout, allow_list_from_disk().as_deref());
-                    let project = Project::new(&db, inputs, layout, plugins);
+                    let project = Project::builder(inputs, layout, plugins)
+                        .effects(effects_policy_from_disk())
+                        .new(&db);
                     effect_summaries_project(&db, project, target_file)
                 }
                 None => {
@@ -1975,17 +2040,25 @@ fn run_annotate(args: &[String]) -> ExitCode {
 /// Only proven labels go in `effects`; the two lanes are never merged here, and
 /// `declared` arrives already normalized against `effects` (a bound the proven
 /// lane subsumes is dropped, exactly as the margin drops it).
+///
+/// `tolerated` (ADR-0084 §4) joins them only where the policy discharges
+/// something, so a project with no `[effects]` table emits the document it always
+/// did. Its labels stay listed in `effects` too — it names a subset, never a
+/// removal.
 fn print_annotate_json(summaries: &[EffectSummary]) {
     let functions: Vec<serde_json::Value> = summaries
         .iter()
         .map(|s| {
-            serde_json::json!({
-                "name": s.symbol,
-                "line": s.line,
-                "effects": s.labels,
-                "declared": s.declared,
-                "exhaustive": s.exhaustive,
-            })
+            let mut entry = serde_json::Map::new();
+            entry.insert("name".to_owned(), serde_json::json!(s.symbol));
+            entry.insert("line".to_owned(), serde_json::json!(s.line));
+            entry.insert("effects".to_owned(), serde_json::json!(s.labels));
+            if !s.tolerated.is_empty() {
+                entry.insert("tolerated".to_owned(), serde_json::json!(s.tolerated));
+            }
+            entry.insert("declared".to_owned(), serde_json::json!(s.declared));
+            entry.insert("exhaustive".to_owned(), serde_json::json!(s.exhaustive));
+            serde_json::Value::Object(entry)
         })
         .collect();
     let doc = serde_json::json!({ "functions": functions });
@@ -2376,13 +2449,19 @@ struct LoadedProject {
 
 /// Load `files` as ONE project (ADR-0009/0015): one salsa DB, so cross-file
 /// calls, class chains, and effects resolve. `paths` is the argv the layout is
-/// discovered from (ADR-0015) and `allow` the `[plugins] allow` list.
+/// discovered from (ADR-0015), `allow` the `[plugins] allow` list, and `effects`
+/// the `[effects]` tolerated-effects policy (ADR-0084 §1).
 ///
 /// The single door into a project: `check`, `transform`, and the MCP surface
 /// (issue #117) all come through here, so what "the project" means cannot
 /// differ between the command line and an agent's tool call. An unreadable file
 /// is reported on stderr and left out of the project, as it always has been.
-fn load_project(files: &[PathBuf], paths: &[String], allow: Option<&[String]>) -> LoadedProject {
+fn load_project(
+    files: &[PathBuf],
+    paths: &[String],
+    allow: Option<&[String]>,
+    effects: EffectsPolicy,
+) -> LoadedProject {
     let db = SteinsDatabase::default();
     let mut inputs: Vec<SourceFile> = Vec::new();
     let mut texts: HashMap<String, String> = HashMap::new();
@@ -2401,8 +2480,65 @@ fn load_project(files: &[PathBuf], paths: &[String], allow: Option<&[String]>) -
     let layout = resolve_layout(paths);
     // The plugin channel (ADR-0068), read once at the boundary like the layout.
     let plugins = load_plugins(&layout, allow);
-    let project = Project::new(&db, inputs.clone(), layout.clone(), plugins);
+    // The tolerated-effects policy's own vocabulary is judged against the registry
+    // this run actually has — builtin plus whatever the plugin channel registered
+    // — so a project tolerating an ecosystem label its plugin declares is clean
+    // (ADR-0084 §5).
+    for notice in effects.label_notices(plugins.registry()) {
+        errln!("steins: {notice}");
+    }
+    let project =
+        Project::builder(inputs.clone(), layout.clone(), plugins).effects(effects).new(&db);
+    // Attribution keys are checked against the symbol table, which only exists
+    // once the project is built. Never a diagnostic and never fatal: vendor code
+    // comes and goes, and a key naming a class this checkout does not vendor is a
+    // stale line in a config file, not a claim about the user's own code.
+    for notice in attribution_notices(&db, project) {
+        errln!("steins: {notice}");
+    }
     LoadedProject { db, project, inputs, texts, layout }
+}
+
+/// `[effects.attribution]` keys that name no symbol at all (ADR-0084 §5), in
+/// config order.
+///
+/// Four ways to be named, because four kinds of symbol produce effect findings:
+/// a project function, a project class, a **catalogued builtin function**
+/// (`error_log`, `trigger_error` — the telemetry shapes a real codebase reaches
+/// for before it writes a facade), and a **catalogued builtin class** (`PDO`).
+/// A bare key is tried as every one of them: the spellings are indistinguishable
+/// in the config, and PHP lets a class and a function share a name.
+///
+/// For a `Class::method` key only the class is resolved. A method can arrive from
+/// a trait (which this tree lowers as a name, with no members) or from `__call`,
+/// so a missing method is not evidence of a typo and a notice about one would be
+/// noise.
+fn attribution_notices(db: &SteinsDatabase, project: Project) -> Vec<String> {
+    let policy = project.effects(db);
+    if policy.is_empty() {
+        return Vec::new();
+    }
+    let index = project_index(db, project);
+    let known = |name: &str| {
+        !matches!(index.resolve_class(name), Resolve::Absent)
+            || !matches!(index.resolve_function(name), Resolve::Absent)
+            // The same test the checker itself uses to decide a name is a builtin
+            // rather than an unresolved userland call: the catalog colors it.
+            || steins_catalog::effect_labels(name).is_some()
+            || steins_catalog::out_params(name).is_some()
+            || steins_catalog::builtin_class_display(name).is_some()
+    };
+    policy
+        .attribution_keys()
+        .filter(|key| {
+            let symbol = key.trim_start_matches('\\');
+            let named = symbol.split("::").next().unwrap_or(symbol);
+            !known(named) && !known(&named.to_ascii_lowercase())
+        })
+        .map(|key| {
+            format!("steins.toml [effects.attribution]: \"{key}\" names no symbol this project defines")
+        })
+        .collect()
 }
 
 /// The suppression channels a check run applies to raw findings, in the
