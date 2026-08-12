@@ -40,7 +40,7 @@ the semantic inventory.
 
 | Surface | Note |
 | --- | --- |
-| Extension-class reflection | Classes from unloaded PHP extensions are `Unknown`-silent. The sidecar's `reflect()` exists and is unused for class resolution. |
+| Extension-class reflection, past the first slice | The sidecar's `reflect()` **does** resolve extension classes against the project's own PHP (#269): a class an installed extension provides carries its methods, constants, properties and inheritance edges. What stays out: a class the runtime cannot reflect — an unloaded extension, `--no-php`, no `php` on `PATH` — is `Unknown`-silent exactly as before, and no absence-family finding is ever premised on a reflected declaration (it resolves; it does not convict). |
 | The full effect catalog | What ships is a frequency-seeded starter set; ADR-0014's php-src stub sourcing is not built. |
 | Computed folding purity | Folding permission is a hand-picked allowlist, not a derived property. |
 | Locale/timezone pseudo-constants | The ADR-0008 opt-in that would let `mb_*` and locale-sensitive functions fold. |

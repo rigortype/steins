@@ -142,10 +142,14 @@ names its milestone.
    landed (ADR-0054 C1/C2); what remains is `doctor`'s richer coverage
    posture, sidecar health and catalog audit. → M2
 7. **Vendor and extension maturity.** Vendor trees are analyzed as
-   source (works, budgeted per ADR-0015). Classes from unloaded PHP
-   extensions (`ext-redis`, …) are Unknown-silent; the sidecar's
-   `reflect()` (ADR-0024) against the project's own PHP is the designed
-   answer and is unused today. → M2/M4
+   source (works, budgeted per ADR-0015). The sidecar's `reflect()`
+   (ADR-0024) now resolves extension classes against the project's own
+   PHP (#269, gap 7's first slice): a class an installed extension
+   provides is no longer unknown, while a class the runtime cannot
+   reflect stays Unknown-silent and reflected declarations never
+   premise an absence-family finding. What remains is the rest of the
+   maturity story — the vendor budget cap and the wider reflect
+   surface. → M4
 8. **Per-PHP-version posture.** Steins analyzes against the project's
    real PHP (sidecar `env()`, ask-the-real-thing) — a documented
    posture, not a version-emulation matrix (see Won't build). → M2
