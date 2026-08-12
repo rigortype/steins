@@ -1953,9 +1953,15 @@ fn run_annotate(args: &[String]) -> ExitCode {
     // The project context for cross-file facts (ADR-0015): the `--project`
     // directory, else the file's own directory. Every `.php` file under it is
     // parsed into one project so `annotate` sees cross-file resolution.
-    let root = project_dir
-        .map(PathBuf::from)
-        .unwrap_or_else(|| path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(".")));
+    //
+    // A bare relative filename has an *empty* parent, which is not a directory
+    // any walk can open: `steins annotate app.php` would otherwise find no
+    // project at all and silently fall back to the one-file, policy-free path.
+    let root = project_dir.map(PathBuf::from).unwrap_or_else(|| {
+        path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+    });
 
     let canon_target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut project_files = Vec::new();
@@ -1991,7 +1997,9 @@ fn run_annotate(args: &[String]) -> ExitCode {
                     let layout = resolve_layout(&[root.to_string_lossy().into_owned()]);
                     folder.set_php_target(layout.php_target().cloned());
                     let plugins = load_plugins(&layout, allow_list_from_disk().as_deref());
-                    let project = Project::new(&db, inputs, layout, plugins);
+                    let project = Project::builder(inputs, layout, plugins)
+                        .effects(effects_policy_from_disk())
+                        .new(&db);
                     annotate_project(&db, project, target_file, &mut folder)
                 }
                 None => {
@@ -2007,7 +2015,9 @@ fn run_annotate(args: &[String]) -> ExitCode {
                 Some(target_file) => {
                     let layout = resolve_layout(&[root.to_string_lossy().into_owned()]);
                     let plugins = load_plugins(&layout, allow_list_from_disk().as_deref());
-                    let project = Project::new(&db, inputs, layout, plugins);
+                    let project = Project::builder(inputs, layout, plugins)
+                        .effects(effects_policy_from_disk())
+                        .new(&db);
                     effect_summaries_project(&db, project, target_file)
                 }
                 None => {
@@ -2030,17 +2040,25 @@ fn run_annotate(args: &[String]) -> ExitCode {
 /// Only proven labels go in `effects`; the two lanes are never merged here, and
 /// `declared` arrives already normalized against `effects` (a bound the proven
 /// lane subsumes is dropped, exactly as the margin drops it).
+///
+/// `tolerated` (ADR-0084 §4) joins them only where the policy discharges
+/// something, so a project with no `[effects]` table emits the document it always
+/// did. Its labels stay listed in `effects` too — it names a subset, never a
+/// removal.
 fn print_annotate_json(summaries: &[EffectSummary]) {
     let functions: Vec<serde_json::Value> = summaries
         .iter()
         .map(|s| {
-            serde_json::json!({
-                "name": s.symbol,
-                "line": s.line,
-                "effects": s.labels,
-                "declared": s.declared,
-                "exhaustive": s.exhaustive,
-            })
+            let mut entry = serde_json::Map::new();
+            entry.insert("name".to_owned(), serde_json::json!(s.symbol));
+            entry.insert("line".to_owned(), serde_json::json!(s.line));
+            entry.insert("effects".to_owned(), serde_json::json!(s.labels));
+            if !s.tolerated.is_empty() {
+                entry.insert("tolerated".to_owned(), serde_json::json!(s.tolerated));
+            }
+            entry.insert("declared".to_owned(), serde_json::json!(s.declared));
+            entry.insert("exhaustive".to_owned(), serde_json::json!(s.exhaustive));
+            serde_json::Value::Object(entry)
         })
         .collect();
     let doc = serde_json::json!({ "functions": functions });

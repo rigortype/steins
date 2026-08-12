@@ -13,8 +13,8 @@
 
 use steins_db::{EffectsPolicy, PluginFacts, Project, ProjectLayout, SourceFile, SteinsDatabase};
 use steins_infer::{
-    check_project, effect_summary, Diagnostic, EffectSummary, NoFold, EFFECT_ID, EFFECT_LISKOV_ID,
-    PARAM_MISMATCH_ID,
+    annotate_project, check_project, effect_summaries_project, effect_summary, Diagnostic,
+    EffectSummary, FactKind, NoFold, EFFECT_ID, EFFECT_LISKOV_ID, PARAM_MISMATCH_ID,
 };
 use steins_syntax::SourceTree;
 
@@ -43,6 +43,27 @@ fn summary(src: &str, symbol: &str) -> EffectSummary {
         .into_iter()
         .find(|s| s.symbol == symbol)
         .unwrap_or_else(|| panic!("no summary for {symbol}"))
+}
+
+/// One declaration's summary and its rendered `annotate` effect margin under
+/// `policy` — the two ADR-0084 §4 surfaces, read off one project so a drift
+/// between them fails here.
+fn rendered(src: &str, symbol: &str, policy: EffectsPolicy) -> (EffectSummary, String) {
+    let db = SteinsDatabase::default();
+    let file = SourceFile::new(&db, "test.php".to_owned(), src.to_owned());
+    let project = Project::builder(vec![file], ProjectLayout::fallback(), PluginFacts::none())
+        .effects(policy)
+        .new(&db);
+    let summary = effect_summaries_project(&db, project, file)
+        .into_iter()
+        .find(|s| s.symbol == symbol)
+        .unwrap_or_else(|| panic!("no summary for {symbol}"));
+    let body = annotate_project(&db, project, file, &mut NoFold)
+        .into_iter()
+        .find(|f| f.line == summary.line && matches!(f.kind, FactKind::Effects { .. }))
+        .unwrap_or_else(|| panic!("no effect fact for {symbol}"))
+        .body();
+    (summary, body)
 }
 
 /// A policy tolerating `labels` and attributing nothing.
@@ -96,8 +117,13 @@ fn a_proven_child_discharges_under_a_tolerated_parent() {
 #[test]
 fn the_proven_lane_is_untouched_by_the_tolerance() {
     // The catalog never lies (ADR-0084 invariant 1): the label is still there, and
-    // `annotate` still shows it. Only the judgment tolerated it.
+    // `annotate` still shows it. Only the judgment tolerated it — and §4 says so
+    // in the margin, with the label present and prefixed rather than removed.
     assert_eq!(summary(ECHOES, "f").labels, vec!["io.output.buffer".to_owned()]);
+    let (s, margin) = rendered(ECHOES, "f", tolerate(&["io.output"]));
+    assert_eq!(s.labels, vec!["io.output.buffer".to_owned()], "the proven lane did not move");
+    assert_eq!(s.tolerated, vec!["io.output.buffer".to_owned()]);
+    assert_eq!(margin, "effects: {~io.output.buffer}");
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +148,49 @@ fn the_attributed_labels_stay_visible_in_the_margin() {
     // set is what it was, tolerance or no tolerance.
     let mut labels = summary(FACADE, "f").labels;
     labels.sort();
-    assert_eq!(labels, vec!["io.output.stderr".to_owned(), "nondet.time".to_owned()]);
+    let both = vec!["io.output.stderr".to_owned(), "nondet.time".to_owned()];
+    assert_eq!(labels, both);
+    // Under the policy the same two labels are still listed, still in the raw
+    // `labels` vec, and each wears the §4 marker: both reached `f` only through
+    // the attributed facade, so both are wholly discharged here.
+    let (s, margin) = rendered(FACADE, "f", telemetry(&["Logger"]));
+    assert_eq!(s.labels, both, "the proven lane did not move");
+    assert_eq!(s.tolerated, both);
+    assert_eq!(margin, "effects: {~io.output.stderr, ~nondet.time}");
+}
+
+#[test]
+fn a_partially_discharged_label_stays_unmarked() {
+    // The marker is a claim about the whole unit: `nondet.time` reaches `f` both
+    // through the facade and by a bare `time()`, so one of its groups survives and
+    // the label is judged here — no tilde. The stream write arrives only through
+    // the facade and is marked. Same fixture, two verdicts, one line.
+    const BOTH: &str = "<?php\nclass Logger {\n    public static function debug(string $m): void { fwrite(STDERR, $m . time()); }\n}\n#[\\Steins\\Pure]\nfunction f(string $s): int { Logger::debug($s); return time(); }\n";
+    let (s, margin) = rendered(BOTH, "f", telemetry(&["Logger"]));
+    assert_eq!(s.labels, vec!["io.output.stderr".to_owned(), "nondet.time".to_owned()]);
+    assert_eq!(s.tolerated, vec!["io.output.stderr".to_owned()]);
+    assert_eq!(margin, "effects: {~io.output.stderr, nondet.time}");
+}
+
+#[test]
+fn no_policy_marks_nothing_and_mutate_local_is_never_marked() {
+    // The empty policy is the pre-ADR world exactly: no `~` anywhere, and an empty
+    // `tolerated`.
+    let (bare, margin) = rendered(FACADE, "f", EffectsPolicy::none());
+    assert!(bare.tolerated.is_empty(), "{:?}", bare.tolerated);
+    assert_eq!(margin, "effects: {io.output.stderr, nondet.time}");
+    // `mutate.local` is discharged by every envelope and always has been, but it
+    // is the built-in case rather than a configured one, so it renders plain —
+    // under a policy as much as without one (§4: the marker shows the *policy* at
+    // work, and the docblock transforms read this same summary).
+    const BYREF: &str = "<?php\nfunction f(string $s): int { $n = 0; preg_match('/x/', $s, $m); return $n; }\n";
+    let (plain, unmarked) = rendered(BYREF, "f", EffectsPolicy::none());
+    assert_eq!(plain.labels, vec!["mutate.local".to_owned()]);
+    assert!(plain.tolerated.is_empty(), "{:?}", plain.tolerated);
+    assert_eq!(unmarked, "effects: {mutate.local}");
+    let (under_policy, still_plain) = rendered(BYREF, "f", telemetry(&["Logger"]));
+    assert!(under_policy.tolerated.is_empty(), "{:?}", under_policy.tolerated);
+    assert_eq!(still_plain, "effects: {mutate.local}");
 }
 
 #[test]

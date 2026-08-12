@@ -4205,8 +4205,15 @@ fn dedup(out: &mut Vec<Diagnostic>) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FactKind {
     /// The inferred effect set: `labels` is the proven lane, `declared` the
-    /// ADR-0067 declared one (rendered `≤label`, normalized against `labels`).
-    Effects { labels: Vec<String>, declared: Vec<String>, exhaustive: bool },
+    /// ADR-0067 declared one (rendered `≤label`, normalized against `labels`),
+    /// and `tolerated` the subset of `labels` the `[effects]` policy discharges
+    /// wholly at this unit (rendered `~label`, ADR-0084 §4).
+    Effects {
+        labels: Vec<String>,
+        declared: Vec<String>,
+        tolerated: Vec<String>,
+        exhaustive: bool,
+    },
     /// The inferred throw set (ADR-0040): the classes a function/method can raise
     /// that escape it, with a shared `…?` taint marker when non-exhaustive.
     Throws { classes: Vec<String>, exhaustive: bool },
@@ -4227,8 +4234,15 @@ impl LineFact {
     #[must_use]
     pub fn body(&self) -> String {
         match &self.kind {
-            FactKind::Effects { labels, declared, exhaustive } => {
-                let mut parts = labels.clone();
+            FactKind::Effects { labels, declared, tolerated, exhaustive } => {
+                // A tolerated label keeps its place and its spelling and gains a
+                // `~`: the effect is still proven and still printed, it is only no
+                // longer judged (ADR-0084 §4). Display vocabulary only — no
+                // docblock-writing surface reads this rendering.
+                let mut parts: Vec<String> = labels
+                    .iter()
+                    .map(|l| if tolerated.contains(l) { format!("~{l}") } else { l.clone() })
+                    .collect();
                 // A declared bound shares the braces with the proven labels but
                 // wears a `≤`: "at most this, because a contract says so" — never
                 // "this happens, because we saw it" (ADR-0067).
@@ -4379,6 +4393,7 @@ fn annotate_units(
             kind: FactKind::Effects {
                 labels: s.labels,
                 declared: s.declared,
+                tolerated: s.tolerated,
                 exhaustive: s.exhaustive,
             },
         });
@@ -5158,6 +5173,18 @@ pub struct EffectSummary {
     /// Normalized for display: a declared label already covered by a proven label
     /// of this same summary is dropped, since the proven lane says strictly more.
     pub declared: Vec<String>,
+    /// The subset of [`Self::labels`] the project's `[effects]` policy discharges
+    /// **wholly** at this unit (ADR-0084 §4), sorted. Rendered with a `~` prefix.
+    ///
+    /// Wholly means every finding group carrying the label is discharged here; a
+    /// label with one surviving group is absent, because the unit still answers
+    /// for it. [`Self::labels`] is unaffected — the tolerance is a fact about the
+    /// judgment, not about the proven lane, so a consumer reading only `labels`
+    /// reads what it always did.
+    ///
+    /// The built-in `mutate.local` tolerance is never listed: the marker reports
+    /// the *configured* policy at work, and no project configured that one.
+    pub tolerated: Vec<String>,
     pub exhaustive: bool,
     /// The inferred escaping throw classes (ADR-0040), sorted; empty when none.
     pub throws: Vec<String>,
@@ -5200,6 +5227,33 @@ fn effect_summary_units(
         labels.sort();
         labels.dedup();
         labels
+    };
+    // The labels the policy discharges wholly at this unit (ADR-0084 §4). The
+    // subset is read off the same [`finding_groups`] the judgment sites read, with
+    // the same empty edge the purity oracle and the Liskov check pass, so the
+    // margin and the verdict cannot disagree about one unit.
+    //
+    // `mutate.local` is excluded unless the project named it: the built-in
+    // tolerance predates the policy and has never worn a marker, and the tilde
+    // reports a *configured* judgment call.
+    let tolerated_labels = |sym: &Sym| -> Vec<String> {
+        let Some(e) = effects.get(sym) else { return Vec::new() };
+        let mut discharged: BTreeSet<&str> = BTreeSet::new();
+        let mut surviving: HashSet<&str> = HashSet::new();
+        for (f, ok) in finding_groups(&e.findings, &[], policy) {
+            if ok {
+                discharged.insert(&f.label);
+            } else {
+                surviving.insert(&f.label);
+            }
+        }
+        discharged
+            .into_iter()
+            .filter(|l| {
+                !surviving.contains(l) && (!tolerated_by_every_envelope(l) || policy.tolerates(l))
+            })
+            .map(str::to_owned)
+            .collect()
     };
     // The declared lane, normalized against this summary's own proven labels
     // (ADR-0067 rendering rule): `≤io.db` beside a proven `io` (or a proven
@@ -5251,6 +5305,7 @@ fn effect_summary_units(
             line: tree.position(f.span.start).line,
             labels,
             declared,
+            tolerated: tolerated_labels(&sym),
             exhaustive: exhaustive(&sym),
             throws: throw_classes(&sym),
             throws_exhaustive: throws_exhaustive(&sym),
@@ -5273,6 +5328,7 @@ fn effect_summary_units(
                 line: tree.position(m.span.start).line,
                 labels,
                 declared,
+                tolerated: tolerated_labels(&sym),
                 exhaustive: exhaustive(&sym),
                 throws: throw_classes(&sym),
                 throws_exhaustive: throws_exhaustive(&sym),
