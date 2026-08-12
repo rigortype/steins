@@ -145,10 +145,45 @@ precedence rule above) also suppresses the class-level bound that would
 otherwise have covered the method. "Degrades safely" means "invents no
 finding", not "loses nothing". A checker that *enforces* envelopes SHOULD
 therefore pair the bound-reading rule with a vocabulary-conformance
-diagnostic (unknown label, with a typo-distance suggestion), so the
-degradation is at least visible at the declaration; the diagnostic is a
-separable concern from bounding, but enforcement without it leaves the
-fail-open path invisible.
+diagnostic, so the degradation is at least visible at the declaration.
+
+#### The paired diagnostic
+
+That diagnostic stays **strictly separate** from the rule above: it changes no
+bound, and a tag it reports on is inert exactly as if it were silent. Its
+shape, as implemented:
+
+- It reports an unrecognized label only where something makes **label intent
+  evident**, and never merely because a token sits where a label could go.
+  Four signals, any one sufficient: the token is within a small edit distance
+  of a recognized label; some *other* member of the same tag's list is a
+  recognized label (prose does not usually sit in a comma list beside a real
+  effect label); the token has two or more dot-path segments, a shape an
+  English note cannot take; or the token is a spelling this checker's own
+  vocabulary has **retired**.
+- A lone far-off word — `@phpstan-impure database` — matches none of them and
+  is **silent on every surface, permanently**. That guarantee is the point:
+  the fail-open reading exists because prose is legal there, and a hygiene
+  rule that then reported the prose would take the ground back.
+- The retirement signal is the one that cannot be derived. A rename that moved
+  a label further than the edit cap is invisible to a distance metric, and a
+  migration is exactly when a project's docblocks still name the old node, so
+  a checker that renames labels wants a small table of retired spellings with
+  their replacements — and the diagnostic that spells the replacement out.
+- The message says what happened to the **bound**, not only that a word is
+  unknown: the whole tag reads as unspecified and bounds nothing. That is the
+  consequence the author cannot see, since their tag is still sitting there.
+- It reports at the declaration, on both the method-level and class-level
+  families, and it does *not* report a docblock that some other, checked
+  declaration shadows — a bound nobody consulted cannot have misled anybody.
+- It is **opt-in**. Enforcement is what makes the fail-open path cost
+  something, so the diagnostic belongs on the same surface as enforcement, and
+  a checker's quietest surface must not start failing over docblocks written
+  before the rule existed. It must also be suppressable: a codebase mid-rename
+  may carry many at once.
+
+The Steins id, layer and floor are in [Steins semantics](#steins-semantics)
+below.
 
 ### Class-level tags
 
@@ -265,7 +300,11 @@ consumer should be able to rely on:
   unrecognized label, so the whole tag reads as unspecified and no finding is
   invented; a checked native annotation carrying it earns the
   vocabulary-conformance diagnostic. The `output` → `io.output` migration
-  (ADR-0083) exercised both paths.
+  (ADR-0083) exercised both paths. Retiring a node is therefore also the
+  moment to record the replacement, so both paths can *say* it: a rename
+  usually moves a label past any edit-distance cap, which is why the
+  [paired diagnostic](#the-paired-diagnostic) treats a retired spelling as a
+  signal in its own right rather than hoping the metric reaches it.
 
 ### Reserved: complement bounds
 
@@ -337,9 +376,23 @@ of the same envelope concept, one trust stratum below the attribute.
   Steins' registry does not know is read per [Unknown
   labels](#unknown-labels) above — the whole tag is unspecified, and the
   declaration is checked (or, at a call site, contributes) as if it carried
-  no tag's *bound*, though the tag still wins its precedence contest. Typo
-  reporting for the docblock spelling is deferred to a future, separate,
-  opt-in rule.
+  no tag's *bound*, though the tag still wins its precedence contest.
+- The [paired diagnostic](#the-paired-diagnostic) is
+  **`effect.interop-unknown-label`** (issue #311): **contract** layer, floor
+  `contracts`. A separate id from the attribute stratum's, because
+  `effect.unknown-label` is mechanics — unsuppressable and on every profile,
+  the fail-closed posture the ruling refused for docblocks. Contract layer is
+  also what the finding *says*: the bound you declared is not the bound being
+  checked, a statement about a declaration's debt, and one a baseline or
+  `@steins-ignore` can absorb while a rename is in flight. The `contracts`
+  floor puts it with `effect.envelope-exceeded`, so opting into envelope
+  enforcement is exactly what turns on the diagnostic that keeps enforcement
+  honest; a bare `steins check` stays silent.
+  `steins_catalog`'s retired-spelling table is the fourth signal's data, and a
+  row is appended to it whenever a taxonomy node moves — ADR-0083's `output`
+  is its first entry. The same table now also supplies the attribute-side
+  `effect.unknown-label` message with its replacement text, which nothing else
+  changed about that id.
 - Until `mutate.self` narrows Steins' conservative `mutate` coloring of
   property writes (ADR-0055 E2), a pure-declared constructor's own-property
   initialization is admissible rather than a finding — matching the upstream

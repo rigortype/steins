@@ -31,7 +31,8 @@ use crate::{
     CALL_UNDEFINED_METHOD_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID, CLASS_UNDEFINED_ID,
     DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, EFFECT_ID,
     CLASS_ABSTRACT_UNIMPLEMENTED_ID, CLASS_EXTENDS_FINAL_ID,
-    EFFECT_LISKOV_ID, FOREACH_NON_ITERABLE_ID, ID, INVALID_OPERAND_ID, OFFSET_MAYBE_MISSING_ID,
+    EFFECT_LISKOV_ID, FOREACH_NON_ITERABLE_ID, ID, INTEROP_UNKNOWN_LABEL_ID, INVALID_OPERAND_ID,
+    OFFSET_MAYBE_MISSING_ID,
     OFFSET_MISSING_ID,
     OFFSET_ON_UNSUPPORTED_ID, OFFSET_UNDECLARED_ID,
     PARAM_MISMATCH_ID,
@@ -424,6 +425,14 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     (THROW_LISKOV_ID, Layer::Contract, Floor::Contracts),
     (EFFECT_ID, Layer::Contract, Floor::Contracts),
     (EFFECT_LISKOV_ID, Layer::Contract, Floor::Contracts),
+    // contract — interop-label hygiene (ADR-0082 amendment, issue #311). NOT the
+    // mechanics layer its attribute-side twin `effect.unknown-label` carries: a
+    // mechanics id is unsuppressable and prints on every profile, which is the
+    // fail-closed posture the owner ruling refused for docblocks. The floor rides
+    // with the rest of the envelope family, so opting into envelope enforcement is
+    // what turns on the diagnostic that keeps enforcement honest — a bare `check`
+    // stays silent, and a project mid-migration can baseline the pile.
+    (INTEROP_UNKNOWN_LABEL_ID, Layer::Contract, Floor::Contracts),
     // contract — finding-breadth declared-receiver lane (ADR-0049 §8).
     (PHPDOC_UNDEFINED_METHOD_ID, Layer::Contract, Floor::Contracts),
     // contract — the offset family's STRICT leg (ADR-0062 A-G10, issue #51):

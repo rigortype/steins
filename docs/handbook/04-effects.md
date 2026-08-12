@@ -142,7 +142,9 @@ A label the tag names that Steins does not know reads the
 current PHPStan discards everything after `@phpstan-impure`, so
 one-word prose (`@phpstan-impure database`) is legal today and
 must never fail a run because of this. `effect.unknown-label`
-does not fire from this spelling at all (see below); a bare
+does not fire from this spelling at all — the opt-in
+`effect.interop-unknown-label` is what reports the ones that are
+plainly typos, and it changes no bound (see below); a bare
 `@phpstan-impure` is read the same way, on purpose — it is ⊤, no
 information — while a bare `@phpstan-pure` is read, as the empty
 envelope.
@@ -244,9 +246,9 @@ on its own — an over-approximation of the unknown is not a proof
 of anything. It is honesty in the margin: Steins is telling you
 where its view ends.
 
-## The three findings
+## The four findings
 
-Effects produce three findings, and they live on different
+Effects produce four findings, and they live on different
 surfaces — which is the whole point of the layered design.
 
 **`effect.envelope-exceeded`** (contract layer) fires when a
@@ -308,14 +310,44 @@ This is the **attribute's** rule; it does not extend to the
 docblock spelling above. An unrecognized label on
 `@phpstan-impure` never becomes `effect.unknown-label` — it
 reads the whole tag as unspecified instead, which is what keeps
-wild prose like `@phpstan-impure database` legal. Typo detection
-for that spelling is a separate, not-yet-built rule.
+wild prose like `@phpstan-impure database` legal.
+
+**`effect.interop-unknown-label`** (contract layer) is that
+docblock's own version of the same problem, and the difference in
+stratum is the difference in surface. `#[\Steins\Effect]` is
+Steins' syntax, so a typo in it is rot and gets shouted about
+everywhere; `@phpstan-impure` is *someone else's* tag, in a
+position where upstream discards the text and people therefore
+write English. So this id is suppressable, and it waits for
+`--profile contracts` — the same profile that turns envelope
+checking on, since this is the finding that keeps that checking
+from quietly doing nothing:
+
+```php
+/** @phpstan-impure io.netw */
+function fetch(string $url): string { return file_get_contents($url); }
+```
+
+```text
+$ steins check --profile contracts fetch.php
+fetch.php:4:10: error[effect.interop-unknown-label]: unknown effect label 'io.netw' in @phpstan-impure on fetch() — the whole tag reads as unspecified and bounds nothing; did you mean 'io.net'?
+```
+
+It reports only where the token *shows* it was meant as a label:
+near a real one, beside a real one in the same list, shaped like
+a dot-path, or a spelling Steins retired (`output`, which the
+message walks you to `io.output.buffer` / `io.output.header` /
+`io.output`, since that rename is too far for a "did you mean").
+`@phpstan-impure database`, alone and far from everything, stays
+silent on every profile — permanently. That is the deal the
+reading rule was built on, and the hygiene rule does not take it
+back.
 
 > **If you know PHPStan:** the layer split is the mechanism. The
-> two contract findings sit behind `--profile contracts` exactly
-> as `throw.undeclared` does — declared-debt findings that are
-> true and abundant in real code, so never dumped on you by a
-> first run. The one mechanics finding is always on because a
+> three contract findings sit behind `--profile contracts`
+> exactly as `throw.undeclared` does — declared-debt findings
+> that are true and abundant in real code, so never dumped on you
+> by a first run. The one mechanics finding is always on because a
 > typo'd envelope silently checks the wrong thing.
 
 ## Where effects come from

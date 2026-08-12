@@ -392,7 +392,11 @@ ever cleans up. A typo'd effect label silently disables the envelope that
 contains it.
 
 So they print in every profile, they default to `fail`, and neither `disable`
-nor `warn` reaches them. A profile that tries either changes nothing:
+nor `warn` reaches them. A profile that tries either changes nothing for them —
+though a pattern like `effect.*` still governs the *contract*-layer ids it also
+matches (`effect.envelope-exceeded`, `effect.liskov-widened`,
+`effect.interop-unknown-label`): the exemption is per id's layer, never per
+prefix.
 
 ```toml
 [profile.quiet]

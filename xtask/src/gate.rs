@@ -49,12 +49,14 @@ struct PackageReport {
     /// (the checked-exception volume ADR-0007 keeps quiet by default), so they
     /// gate only as a per-package increase tripwire.
     throws: Vec<Diagnostic>,
-    /// `effect.*` **contract-layer** findings (`effect.envelope-exceeded` /
-    /// `effect.liskov-widened`), held in measurement mode under ADR-0050 §9: the
-    /// recorded gate-policy delta moves them off red-on-sight onto the same
-    /// per-package increase tripwire as `phpdoc.*`/`throw.*`, matching their
-    /// declared-contract semantics. Vacuous on the corpus today (no ADR-0006
-    /// envelope annotations exist in the wild) and correct the day they are not.
+    /// `effect.*` **contract-layer** findings (`effect.envelope-exceeded`,
+    /// `effect.liskov-widened`, `effect.interop-unknown-label`), held in
+    /// measurement mode under ADR-0050 §9: the recorded gate-policy delta moves
+    /// them off red-on-sight onto the same per-package increase tripwire as
+    /// `phpdoc.*`/`throw.*`, matching their declared-contract semantics. The first
+    /// two are vacuous on the corpus (no ADR-0006 envelope annotations exist in the
+    /// wild); the third (issue #311) reads upstream's own `@phpstan-impure` tags and
+    /// so can be nonzero on unannotated corpus code.
     /// `effect.unknown-label` is **mechanics**, not contract — it stays on the
     /// red-on-sight path in `diagnostics`, never here.
     effects: Vec<Diagnostic>,
@@ -800,16 +802,19 @@ fn throw_expected(name: &str) -> usize {
 }
 
 /// Permanent gate policy for the `effect.*` **contract** ids
-/// (`effect.envelope-exceeded` / `effect.liskov-widened`), the ADR-0050 §9 recorded
-/// delta. These moved off the runtime red-on-sight path onto the identical
-/// per-package **increase** tripwire as [`PHPDOC_EXPECTED`] / [`THROW_EXPECTED`],
-/// matching their declared-contract semantics (a proven behavior exceeds an
-/// envelope the code *declares* about itself; the program still runs).
+/// (`effect.envelope-exceeded`, `effect.liskov-widened`, and since issue #311
+/// `effect.interop-unknown-label`), the ADR-0050 §9 recorded delta. These moved off
+/// the runtime red-on-sight path onto the identical per-package **increase**
+/// tripwire as [`PHPDOC_EXPECTED`] / [`THROW_EXPECTED`], matching their
+/// declared-contract semantics (a proven behavior exceeds an envelope the code
+/// *declares* about itself; the program still runs).
 ///
-/// Seeded **empty** and vacuous today: no ADR-0006 effect envelopes exist in the
-/// pinned corpus or the legacy monorepo, so every package expects **zero** (absent
-/// = 0). It gates correctly the day an envelope-annotated package lands — update an
-/// entry here consciously when a checker change legitimately moves a count.
+/// Seeded **empty**: no ADR-0006 effect envelopes exist in the pinned corpus or the
+/// legacy monorepo, so every package expects **zero** (absent = 0). The third id is
+/// the first of the three that can fire on code carrying no Steins annotation at
+/// all — it reads upstream's `@phpstan-impure` — so this family is no longer
+/// vacuous by construction. Update an entry here consciously when a checker change
+/// legitimately moves a count.
 const EFFECT_EXPECTED: &[(&str, usize)] = &[];
 
 /// The expected `effect.*`-contract count for a package/local-project name (0 if
