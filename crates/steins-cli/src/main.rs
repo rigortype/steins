@@ -2481,15 +2481,20 @@ fn load_project(
     LoadedProject { db, project, inputs, texts, layout }
 }
 
-/// `[effects.attribution]` keys that name no symbol this project defines
-/// (ADR-0084 §5), in config order.
+/// `[effects.attribution]` keys that name no symbol at all (ADR-0084 §5), in
+/// config order.
 ///
-/// A bare key is *either* a class or a global function — the two spellings are
-/// indistinguishable in the config — so both lookups must miss before a key is
-/// reported. For a `Class::method` key only the class is resolved: a method can
-/// arrive from a trait (which this tree lowers as a name, with no members) or
-/// from `__call`, so a missing method is not evidence of a typo and a notice
-/// about one would be noise.
+/// Four ways to be named, because four kinds of symbol produce effect findings:
+/// a project function, a project class, a **catalogued builtin function**
+/// (`error_log`, `trigger_error` — the telemetry shapes a real codebase reaches
+/// for before it writes a facade), and a **catalogued builtin class** (`PDO`).
+/// A bare key is tried as every one of them: the spellings are indistinguishable
+/// in the config, and PHP lets a class and a function share a name.
+///
+/// For a `Class::method` key only the class is resolved. A method can arrive from
+/// a trait (which this tree lowers as a name, with no members) or from `__call`,
+/// so a missing method is not evidence of a typo and a notice about one would be
+/// noise.
 fn attribution_notices(db: &SteinsDatabase, project: Project) -> Vec<String> {
     let policy = project.effects(db);
     if policy.is_empty() {
@@ -2499,13 +2504,18 @@ fn attribution_notices(db: &SteinsDatabase, project: Project) -> Vec<String> {
     let known = |name: &str| {
         !matches!(index.resolve_class(name), Resolve::Absent)
             || !matches!(index.resolve_function(name), Resolve::Absent)
+            // The same test the checker itself uses to decide a name is a builtin
+            // rather than an unresolved userland call: the catalog colors it.
+            || steins_catalog::effect_labels(name).is_some()
+            || steins_catalog::out_params(name).is_some()
+            || steins_catalog::builtin_class_display(name).is_some()
     };
     policy
         .attribution_keys()
         .filter(|key| {
             let symbol = key.trim_start_matches('\\');
             let named = symbol.split("::").next().unwrap_or(symbol);
-            !known(named)
+            !known(named) && !known(&named.to_ascii_lowercase())
         })
         .map(|key| {
             format!("steins.toml [effects.attribution]: \"{key}\" names no symbol this project defines")

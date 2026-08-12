@@ -4528,6 +4528,7 @@ fn add_callback_effects(
     cx: &Cx,
     cbref: &steins_syntax::CallbackRef,
     span: steins_syntax::Span,
+    policy: &EffectsPolicy,
     d: &mut HashSet<EffectFinding>,
     e: &mut HashSet<Sym>,
     ex: &mut bool,
@@ -4544,7 +4545,9 @@ fn add_callback_effects(
                 // A builtin passed *as* a callback is invoked by the higher-order
                 // callee with arguments of its choosing, never with an lvalue of
                 // this frame — the conditional out-param row cannot apply.
-                for f in builtin_findings(&builtin_name, span, cx.tree(), cx.path(), None, None) {
+                for f in
+                    builtin_findings(&builtin_name, span, cx.tree(), cx.path(), None, None, policy)
+                {
                     d.insert(f);
                 }
             }
@@ -4774,6 +4777,7 @@ fn compute_effects(
             unit.params,
             unit.origins,
             plugins,
+            policy,
             d,
             dc,
             e,
@@ -4878,6 +4882,7 @@ fn classify_effect_origins(
     params: &[steins_syntax::Param],
     origins: &[EffectOrigin],
     plugins: &PluginFacts,
+    policy: &EffectsPolicy,
     d: &mut HashSet<EffectFinding>,
     dc: &mut HashSet<String>,
     e: &mut HashSet<Sym>,
@@ -4895,15 +4900,24 @@ fn classify_effect_origins(
                         match conditional_purity(decl.docblock.as_ref(), &decl.params) {
                             Some(cp) => {
                                 let r = eval_conditional_purity(&cp, &[], targets, |cbref| {
-                                    add_callback_effects(cx, cbref, *span, d, e, ex);
+                                    add_callback_effects(cx, cbref, *span, policy, d, e, ex);
                                 });
+                                // A userland out-param row is produced at this
+                                // call site but is the CALLEE's contract, so it
+                                // carries the callee's attribution — the same
+                                // reasoning that stamps a builtin's findings,
+                                // for the same reason: no edge carries these.
+                                let attributed = policy.function_attribution(&decl.fqn);
                                 for label in r.labels {
-                                    d.insert(EffectFinding::direct(
-                                        label.to_owned(),
-                                        name.simple().to_owned(),
-                                        cx.tree().position(span.start).line,
-                                        cx.path().to_owned(),
-                                    ));
+                                    d.insert(
+                                        EffectFinding::direct(
+                                            label.to_owned(),
+                                            name.simple().to_owned(),
+                                            cx.tree().position(span.start).line,
+                                            cx.path().to_owned(),
+                                        )
+                                        .attributed_by(attributed),
+                                    );
                                 }
                                 if r.discharge_taint {
                                     nt.insert(sym);
@@ -4924,6 +4938,7 @@ fn classify_effect_origins(
                             cx.path(),
                             targets,
                             Some(const_args),
+                            policy,
                         ) {
                             d.insert(f);
                         }
@@ -4975,7 +4990,7 @@ fn classify_effect_origins(
                     // answers only for `EffectRecv::ClassName` (a catalogued
                     // external class), `resolve_declared_bound` only for the
                     // declared receivers, which name no class here.
-                    None => match builtin_method_findings(cx, receiver, method, *span) {
+                    None => match builtin_method_findings(cx, receiver, method, *span, policy) {
                         Some(fs) => {
                             for f in fs {
                                 d.insert(f);
@@ -5037,13 +5052,14 @@ fn classify_effect_origins(
                             cx.path(),
                             targets,
                             Some(const_args),
+                            policy,
                         ) {
                             d.insert(f);
                         }
                         if shape.callback_param < *arg_count {
                             match callbacks.iter().find(|(p, _)| *p == shape.callback_param) {
                                 Some((_, cbref)) => {
-                                    add_callback_effects(cx, cbref, *span, d, e, ex);
+                                    add_callback_effects(cx, cbref, *span, policy, d, e, ex);
                                 }
                                 // Callback slot filled by an unresolvable value.
                                 None => *ex = false,
@@ -5063,15 +5079,19 @@ fn classify_effect_origins(
                                         &cp,
                                         callbacks,
                                         targets,
-                                        |cbref| add_callback_effects(cx, cbref, *span, d, e, ex),
+                                        |cbref| add_callback_effects(cx, cbref, *span, policy, d, e, ex),
                                     );
+                                    let attributed = policy.function_attribution(&decl.fqn);
                                     for label in r.labels {
-                                        d.insert(EffectFinding::direct(
-                                            label.to_owned(),
-                                            callee.simple().to_owned(),
-                                            cx.tree().position(span.start).line,
-                                            cx.path().to_owned(),
-                                        ));
+                                        d.insert(
+                                            EffectFinding::direct(
+                                                label.to_owned(),
+                                                callee.simple().to_owned(),
+                                                cx.tree().position(span.start).line,
+                                                cx.path().to_owned(),
+                                            )
+                                            .attributed_by(attributed),
+                                        );
                                     }
                                     if r.discharge_taint {
                                         nt.insert(sym);
@@ -5092,6 +5112,7 @@ fn classify_effect_origins(
                                 cx.path(),
                                 targets,
                                 Some(const_args),
+                                policy,
                             ) {
                                 d.insert(f);
                             }
@@ -5107,7 +5128,7 @@ fn classify_effect_origins(
             }
             // A `$fn()` resolved to a body-local closure — its effects join.
             EffectOrigin::Callback { cbref, span } => {
-                add_callback_effects(cx, cbref, *span, d, e, ex);
+                add_callback_effects(cx, cbref, *span, policy, d, e, ex);
             }
             EffectOrigin::Opaque { .. } => *ex = false,
         }
@@ -5339,17 +5360,28 @@ pub fn region_purity_project(
             let Some(fi) = units.iter().position(|u| u.path == path) else {
                 return RegionPurity::default();
             };
-            region_purity_in(&units, &index, plugins, fi, (*start, *end), &effects, &throws)
+            region_purity_in(
+                &units,
+                &index,
+                plugins,
+                project.effects(db),
+                fi,
+                (*start, *end),
+                &effects,
+                &throws,
+            )
         })
         .collect()
 }
 
 /// The per-region half of [`region_purity_project`], against already-computed
 /// fixpoints.
+#[allow(clippy::too_many_arguments)]
 fn region_purity_in(
     units: &[FileUnit],
     index: &Index,
     plugins: &PluginFacts,
+    policy: &EffectsPolicy,
     file: usize,
     region: (u32, u32),
     effects: &HashMap<Sym, EffectSet>,
@@ -5383,6 +5415,7 @@ fn region_purity_in(
             params,
             &picked,
             plugins,
+            policy,
             &mut eff,
             &mut declared,
             &mut edges,
@@ -5869,6 +5902,20 @@ impl OperativeBound<'_> {
         exceeds(self.labels, effect_label, self.policy)
     }
 
+    /// Whether a **freshly produced** finding must be reported against this
+    /// bound: it exceeds the envelope and nothing discharges it.
+    ///
+    /// A production site is a one-member finding group by construction — a
+    /// builtin draws no edge, so this call is the only way this label reached
+    /// this origin at this line — and leg 2 therefore collapses from `every
+    /// member` to this copy's own attribution. That is [`finding_groups`]'s
+    /// answer for a singleton group with no edge, computed through the same
+    /// [`attribution_tolerated`] predicate so the transitive site and this one
+    /// cannot disagree about the same effect.
+    fn reports(self, f: &EffectFinding) -> bool {
+        self.exceeds(&f.label) && !attribution_tolerated(f, self.policy)
+    }
+
     /// How `effect.envelope-exceeded` quotes the declaration back, in the
     /// author's own syntax.
     fn declared_clause(self, exceeding_label: &str) -> String {
@@ -5967,8 +6014,9 @@ fn report_unit(
                             cx.path(),
                             targets,
                             Some(const_args),
+                            bound.policy,
                         ) {
-                            if bound.exceeds(&f.label) {
+                            if bound.reports(&f) {
                                 let prefix = format!("{}() has effect {}", name.simple(), f.label);
                                 out.push(exceeded_diag(
                                     cx, span.start, &prefix, display, bound, &f.label,
@@ -5994,10 +6042,12 @@ fn report_unit(
                 // is not a proven effect, and this function only reports proven
                 // ones (ADR-0067 decision 5). An ADR-0067 receiver reaches neither
                 // arm and so reports nothing, which is the whole point.
-                } else if let Some(fs) = builtin_method_findings(cx, receiver, method, *span) {
+                } else if let Some(fs) =
+                    builtin_method_findings(cx, receiver, method, *span, bound.policy)
+                {
                     // A builtin-class catalog row, reported like a builtin call's.
                     for f in fs {
-                        if bound.exceeds(&f.label) {
+                        if bound.reports(&f) {
                             let prefix = format!("{}() has effect {}", f.origin, f.label);
                             out.push(exceeded_diag(
                                 cx, span.start, &prefix, display, bound, &f.label,
@@ -6033,8 +6083,9 @@ fn report_unit(
                             cx.path(),
                             targets,
                             Some(const_args),
+                            bound.policy,
                         ) {
-                            if bound.exceeds(&f.label) {
+                            if bound.reports(&f) {
                                 let prefix = format!("{}() has effect {}", callee.simple(), f.label);
                                 out.push(exceeded_diag(cx, span.start, &prefix, display, bound, &f.label));
                             }
@@ -6064,8 +6115,9 @@ fn report_unit(
                                 cx.path(),
                                 targets,
                                 Some(const_args),
+                                bound.policy,
                             ) {
-                                if bound.exceeds(&f.label) {
+                                if bound.reports(&f) {
                                     let prefix = format!("{}() has effect {}", callee.simple(), f.label);
                                     out.push(exceeded_diag(cx, span.start, &prefix, display, bound, &f.label));
                                 }
@@ -6109,6 +6161,12 @@ fn report_conditional_purity(
     for cbref in &pending {
         report_callback(out, cx, cbref, effects, span.start, display, bound);
     }
+    // Mirrors the fixpoint arm: the row is the callee's contract, so the callee's
+    // attribution decides it. A row is a one-member group (this call site is the
+    // only way it arises), so leg 2 is the labels test directly.
+    if any_tolerated(bound.policy.function_attribution(&decl.fqn), bound.policy) {
+        return;
+    }
     for label in r.labels {
         if bound.exceeds(label) {
             let prefix = format!("{}() has effect {label}", decl.name);
@@ -6141,8 +6199,9 @@ fn report_callback(
             cx.path(),
             None,
             None,
+            bound.policy,
         ) {
-            if bound.exceeds(&f.label) {
+            if bound.reports(&f) {
                 let prefix = format!("{}() has effect {}", name.simple(), f.label);
                 out.push(exceeded_diag(cx, offset, &prefix, display, bound, &f.label));
             }
@@ -6256,6 +6315,21 @@ struct FindingKey<'a> {
 /// what makes leg 2 must-semantics: an effect that reaches a declaration both
 /// through an attributed facade and through a bare call is discharged for
 /// neither.
+/// **Leg 2's per-member test**, over the attribution labels themselves. Written
+/// once and read by the group rule, the production sites and the userland
+/// conditional-purity rows alike, so none of them can drift apart.
+fn any_tolerated<'a>(
+    labels: impl IntoIterator<Item = &'a String>,
+    policy: &EffectsPolicy,
+) -> bool {
+    labels.into_iter().any(|a| policy.tolerates(a))
+}
+
+/// [`any_tolerated`] for a finding's own accumulated attribution.
+fn attribution_tolerated(f: &EffectFinding, policy: &EffectsPolicy) -> bool {
+    any_tolerated(&f.attributed, policy)
+}
+
 fn finding_groups<'f>(
     set: &'f HashSet<EffectFinding>,
     edge: &[String],
@@ -6268,8 +6342,7 @@ fn finding_groups<'f>(
     for f in set {
         let key =
             FindingKey { line: f.line, label: &f.label, origin: &f.origin, path: &f.path };
-        let attributed =
-            edge_tolerated || f.attributed.iter().any(|a| policy.tolerates(a));
+        let attributed = edge_tolerated || attribution_tolerated(f, policy);
         groups
             .entry(key)
             .and_modify(|slot| slot.1 = slot.1 && attributed)
@@ -6363,6 +6436,14 @@ fn stream_target(
 /// `nondet.random` *and* `mutate.local`. Empty for a pure or uncatalogued builtin
 /// called without an out-parameter.
 ///
+/// `policy` supplies the ADR-0084 attribution of the builtin being called. A
+/// builtin draws no edge in the effect graph — its findings are inserted straight
+/// into the caller's direct set — so the *production site* is the boundary the
+/// attribution has to be stamped at. That is not a weaker form of the edge fold:
+/// every path to this effect passes through this call by construction, so a
+/// finding born attributed is attributed on all of them, which is exactly what
+/// leg 2's `every` asks.
+///
 /// `const_args` is the third axis and the only one that can make a row *narrower*
 /// (issue #318): a wrapper-capable stream row is `io` until the call site proves
 /// which channel it opens, and [`steins_catalog::narrowed_stream_labels`] is what
@@ -6378,6 +6459,7 @@ fn builtin_findings(
     path: &str,
     arg_targets: Option<&[steins_syntax::RefTarget]>,
     const_args: Option<&steins_syntax::ConstArgs>,
+    policy: &EffectsPolicy,
 ) -> Vec<EffectFinding> {
     let narrowed = const_args.and_then(|c| {
         steins_catalog::narrowed_stream_labels(
@@ -6393,11 +6475,15 @@ fn builtin_findings(
         return Vec::new();
     }
     let line = tree.position(span.start).line;
+    let attributed = policy.function_attribution(name);
     colored
         .iter()
         .copied()
         .chain(by_ref)
-        .map(|label| EffectFinding::direct(label.to_owned(), name.to_owned(), line, path.to_owned()))
+        .map(|label| {
+            EffectFinding::direct(label.to_owned(), name.to_owned(), line, path.to_owned())
+                .attributed_by(attributed)
+        })
         .collect()
 }
 
@@ -6459,6 +6545,7 @@ fn builtin_method_findings(
     receiver: &EffectRecv,
     method: &str,
     span: steins_syntax::Span,
+    policy: &EffectsPolicy,
 ) -> Option<Vec<EffectFinding>> {
     let EffectRecv::ClassName(name) = receiver else { return None };
     let fqn = cx.class_fqn(name);
@@ -6469,6 +6556,9 @@ fn builtin_method_findings(
     // The source spelling, as the function rows use `name.simple()`.
     let origin = format!("{}::{}", name.simple(), method);
     let line = cx.tree().position(span.start).line;
+    // A catalogued external class is attributable the same way a builtin function
+    // is, and by the same argument: the call site is where the effect is produced.
+    let attributed = policy.method_attribution(&fqn, method);
     Some(
         labels
             .iter()
@@ -6479,6 +6569,7 @@ fn builtin_method_findings(
                     line,
                     cx.path().to_owned(),
                 )
+                .attributed_by(&attributed)
             })
             .collect(),
     )

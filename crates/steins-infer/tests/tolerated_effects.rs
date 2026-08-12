@@ -172,6 +172,87 @@ fn one_undischarged_group_emits_exactly_one_diagnostic() {
 }
 
 // ---------------------------------------------------------------------------
+// Builtin production sites: the boundary is the call, not an edge.
+// ---------------------------------------------------------------------------
+
+/// The telemetry shape a codebase reaches for before anyone writes a facade:
+/// PHP's own logging builtin, called straight from the body.
+const ERROR_LOG: &str = "<?php\n#[\\Steins\\Pure]\nfunction f(string $s): int { error_log($s); return 1; }\n";
+
+#[test]
+fn an_attributed_builtin_discharges_at_its_caller() {
+    // A builtin draws no edge in the effect graph — its findings go straight into
+    // the caller's direct set — so the attribution is stamped where the effect is
+    // produced. Every path to it passes through this call by construction.
+    assert_eq!(effects(ERROR_LOG, EffectsPolicy::none()).len(), 1);
+    assert_eq!(effects(ERROR_LOG, telemetry(&["error_log"])).len(), 0);
+}
+
+#[test]
+fn an_attributed_builtin_discharges_transitively() {
+    // Born attributed at the production site, the copy carries its attribution up
+    // every edge above it without any of those callees being attributed.
+    const VIA: &str = "<?php\nfunction helper(string $s): void { error_log($s); }\n#[\\Steins\\Pure]\nfunction f(string $s): int { helper($s); return 1; }\n";
+    assert_eq!(effects(VIA, EffectsPolicy::none()).len(), 1);
+    assert_eq!(effects(VIA, telemetry(&["error_log"])).len(), 0);
+}
+
+#[test]
+fn an_attributed_builtin_without_tolerance_stays_reported() {
+    // Attribution is fact; only the tolerance is policy, for a builtin exactly as
+    // for a project symbol.
+    let inert = EffectsPolicy::new(Vec::new(), attribution(&["error_log"]));
+    assert_eq!(effects(ERROR_LOG, inert).len(), 1);
+}
+
+#[test]
+fn a_clock_read_beside_an_attributed_builtin_still_reports() {
+    // Must-semantics are untouched by where the attribution was stamped.
+    const BOTH: &str = "<?php\n#[\\Steins\\Pure]\nfunction f(string $s): int { error_log($s); return time(); }\n";
+    let kept = effects(BOTH, telemetry(&["error_log"]));
+    assert_eq!(kept.len(), 1, "{kept:#?}");
+    assert!(kept[0].message.contains("nondet.time"), "{}", kept[0].message);
+    assert_eq!(effects(BOTH, EffectsPolicy::none()).len(), 2);
+}
+
+#[test]
+fn an_attributed_builtin_keeps_its_transport_label_in_the_margin() {
+    // The catalog never lies: `error_log` is still `io`, whoever tolerates it.
+    assert_eq!(summary(ERROR_LOG, "f").labels, vec!["io".to_owned()]);
+}
+
+#[test]
+fn a_second_attribution_label_carries_its_own_tolerance() {
+    // The ADR's survey guidance, mechanized: "safe to stop watching" and "must
+    // always fire" are different risk profiles, so `audit` is its own label with
+    // its own tolerance rather than riding `telemetry`.
+    const SRC: &str = "<?php\n#[\\Steins\\Pure]\nfunction f(string $s): int { error_log($s); syslog(LOG_INFO, $s); return 1; }\n";
+    let split = EffectsPolicy::new(
+        vec!["telemetry".to_owned()],
+        vec![
+            ("error_log".to_owned(), vec!["telemetry".to_owned()]),
+            ("syslog".to_owned(), vec!["audit".to_owned()]),
+        ],
+    );
+    let kept = effects(SRC, split);
+    assert_eq!(kept.len(), 1, "audit is attributed but not tolerated: {kept:#?}");
+    assert!(kept[0].message.contains("syslog"), "{}", kept[0].message);
+}
+
+#[test]
+fn a_catalogued_builtin_class_method_is_attributable() {
+    // The same production-site argument for `builtin_method_findings`: a
+    // catalogued external class colors the call, so the call is the boundary.
+    const SRC: &str = "<?php\n#[\\Steins\\Pure]\nfunction f(PDO $db): int { (new PDO('sqlite::memory:'))->exec('x'); return 1; }\n";
+    assert_eq!(effects(SRC, EffectsPolicy::none()).len(), 1);
+    let policy = EffectsPolicy::new(
+        vec!["telemetry".to_owned()],
+        vec![("PDO::exec".to_owned(), vec!["telemetry".to_owned()])],
+    );
+    assert_eq!(effects(SRC, policy).len(), 0);
+}
+
+// ---------------------------------------------------------------------------
 // Attribution is inert on its own; tolerance is inert without a match.
 // ---------------------------------------------------------------------------
 
