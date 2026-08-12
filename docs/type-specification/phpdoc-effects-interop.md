@@ -81,20 +81,33 @@ nondet   nondet.random   nondet.time
 ```
 
 Because a bound is checked by subsumption, a checker never needs the full leaf
-vocabulary to be useful: verifying `@phpstan-impure io` requires only "is every
-impure point I found subsumed by `io`?" — a segment-wise string prefix test.
+vocabulary to be useful: the *subsumption half* of verifying `@phpstan-impure
+io` is one question — "is every impure point I found subsumed by `io`?" — a
+segment-wise string prefix test. (The full checking surface is of course
+larger: the list grammar, a three-state reading — absent / unbounded /
+bounded — effect attribution for language constructs and catalogued builtins,
+call propagation, precedence, and diagnostics. The prefix test is the core
+relation, not the whole implementation.)
 
 ### Bare tags
 
 - A bare `@phpstan-impure` means what it means today: the function is impure,
   nothing said about how — the ⊤ bound. Adding labels only ever *narrows* an
-  existing tag's meaning; no existing docblock changes meaning.
-- `@phpstan-pure` is the empty envelope — with one deliberate exception:
-  writes through by-ref out-parameters whose target is a binding of the
-  *calling* frame (`preg_match($p, $s, $matches)`, `sort($rows)`) are
-  admissible under pure, because nothing escapes the frame and no caller can
-  observe a difference. In Steins vocabulary: pure is the `{mutate.local}`
-  envelope. This is the answer to the long-standing by-ref question that
+  existing tag's meaning; under a checker that has not adopted this proposal,
+  no existing docblock changes meaning. (What adoption itself changes is a
+  separate, honest claim — see [Backward
+  compatibility](#backward-compatibility).)
+- `@phpstan-pure` is the empty envelope — with one deliberate, precisely
+  bounded exception, spelled `mutate.local`: mutation of a local binding that
+  the enclosing function **owns**, that is **not aliased**, and that does
+  **not escape** the frame — `preg_match($p, $s, $matches)` into a local,
+  `sort($rows)` on a local copy. Writes reaching by-ref formal parameters,
+  properties, statics, superglobals, `global` aliases, reference aliases, or
+  escaping captures are *not* `mutate.local` and stay outside the pure bound.
+  Note the call boundary: `sort()` itself is not pure — it is the *enclosing
+  function*, having confined the mutation, whose envelope discharges it, and
+  only that enclosing function is a candidate for the pure-call optimizations
+  below. This is the answer to the long-standing by-ref question that
   `hasSideEffects` flags could not express.
 - `@phpstan-pure` takes no labels: "pure, except it performs effects" is a
   contradiction. A partially-effectful function is spelled as an impure bound.
@@ -125,10 +138,17 @@ tag is unspecified does not fall through to its class's tag, because the
 method did write something, however uninterpretable — falling through would
 check it against a bound its author never reached for.
 
-Reporting *why* a label went unrecognized — a typo-distance suggestion, say —
-is a separate concern from bounding, and this proposal takes no position on
-it: a vocabulary-conformance diagnostic can coexist with a checker that reads
-an unrecognized label as ⊤ for the purpose of the bound itself.
+This rule is deliberately **fail-open**, and the trade should be stated
+plainly: it creates no new false positives, at the price of silently losing
+enforcement — a typo'd `@phpstan-impure io.dbb` checks nothing, and (by the
+precedence rule above) also suppresses the class-level bound that would
+otherwise have covered the method. "Degrades safely" means "invents no
+finding", not "loses nothing". A checker that *enforces* envelopes SHOULD
+therefore pair the bound-reading rule with a vocabulary-conformance
+diagnostic (unknown label, with a typo-distance suggestion), so the
+degradation is at least visible at the declaration; the diagnostic is a
+separable concern from bounding, but enforcement without it leaves the
+fail-open path invisible.
 
 ### Class-level tags
 
@@ -160,18 +180,46 @@ declaration ("declared `io`, performs `nondet.time`"). A checker that does not
 understand the labels loses nothing: the tag still carries its current
 boolean meaning.
 
+### Trust models for bounds on abstractions
+
+An envelope on an interface method invites a second use beyond checking the
+declaration: trusting it as an upper bound at call sites typed against the
+interface, where the concrete callee is unknown. That trust is only coherent
+under one of two disciplines, and an adopting checker must pick one:
+
+- **Contract with substitutability.** The bound is trusted at call sites,
+  *and* an overriding method's envelope must be subsumed by the overridden
+  one (Liskov inclusion; with `pure = ∅` and bare impure = ⊤, the existing
+  impure-cannot-override-pure rule is the degenerate case). This is the
+  natural single-spelling choice for a checker that already trusts
+  `@phpstan-pure` declarations in its purity checks.
+- **Hint without proof.** The bound contributes what it claims but is never
+  treated as exhaustive — a covered call reads as "≤ these labels, and
+  possibly more" — and no substitutability rule is imposed on overrides.
+  This is the right posture when a checked spelling exists *above* the
+  docblock (Steins' native attributes) and the docblock is the unchecked
+  stratum.
+
+Trusting the bound at call sites while neither checking overrides nor
+capping the trust is not a coherent option: an impure implementation behind
+a pure-declared interface would then be invisible by construction.
+
 ### Vocabulary evolution
 
 The dot-path vocabulary is **open**, and the openness has consequences a
 consumer should be able to rely on:
 
-- **Adding a leaf is not a breaking change.** A coarse bound is a predicate,
-  not an enumeration: a declared `io` admits a future `io.xyz` by
+- **Adding a leaf never changes a *recognized* bound.** A coarse bound is a
+  predicate, not an enumeration: a declared `io` admits a future `io.xyz` by
   construction, and a fine bound (`io.db`) is unaffected by new siblings.
   (Contrast Koka, whose `io` is an *alias* expanding to a closed effect row —
   there, growing the alias changes the meaning of every `io` annotation.
   A prefix buys the evolution property an enumeration cannot have; the price
   is that a coarse bound's extension grows silently with the registry.)
+  The claim is scoped deliberately: a docblock that already carried the new
+  spelling *as an unknown label* flips from unspecified (⊤) to bounded the
+  moment the vocabulary grows — for such docblocks a vocabulary addition is a
+  semantic event, and it belongs in release notes.
 - **Moving or removing a node is a breaking change**, and it degrades along
   two paths by design: in a docblock tag the retired spelling becomes an
   unrecognized label, so the whole tag reads as unspecified and no finding is
@@ -184,7 +232,7 @@ consumer should be able to rely on:
 A future `-except` form ("anything but `io`") is sound — the check inverts to
 "is the inferred effect subsumed by an excluded label?" — but is deliberately
 not part of v1: the class/method override rule covers the motivating cases,
-and the minimal adoption surface stays a string prefix test. One caution the
+and the core subsumption relation stays one string prefix test. One caution the
 evolution rules above imply: a positive bound is *stable* under vocabulary
 growth, while a complement bound is not — every leaf added later silently
 joins what "`io -except io.db`" admits, so an exclusion is always read
@@ -192,18 +240,31 @@ against the vocabulary at checking time, not at writing time.
 
 ## Backward compatibility
 
-Verified against `phpstan/phpdoc-parser` 2.3.3 and phpstan-src 2.2.x:
+Two claims, deliberately separated — conflating them was the honest mistake
+an adversarial review caught, and the distinction is load-bearing:
 
-- `@phpstan-impure io` parses as the `@phpstan-impure` tag with a
-  `GenericTagValueNode("io")` value. PHPStan reads only the tag name, so the
-  tag functions exactly as today; the labels are ignored. No
-  `phpDoc.parseError`, no `phpDoc.phpstanTag`, no behavioral change for any
-  existing or new docblock under current PHPStan.
-- The one syntactic hazard is the Doctrine path noted under
-  [Grammar](#grammar); the grammar forbids the only spelling that triggers it.
-- Every construct here **narrows** an existing tag's meaning or adopts an
-  existing tag's implemented semantics. Nothing widens, nothing is redefined,
-  no new tag name is introduced.
+**Parser compatibility (unconditional).** Verified against
+`phpstan/phpdoc-parser` 2.3.3 and phpstan-src 2.2.x: `@phpstan-impure io`
+parses as the `@phpstan-impure` tag with a `GenericTagValueNode("io")` value.
+PHPStan reads only the tag name, so the tag functions exactly as today; the
+labels are ignored. No `phpDoc.parseError`, no `phpDoc.phpstanTag`. The one
+syntactic hazard is the Doctrine path noted under [Grammar](#grammar), and
+the grammar forbids the only spelling that triggers it. No new tag name is
+introduced, and a label list only ever narrows what its own tag claims.
+Anyone can start writing labels today, under any checker.
+
+**Semantic migration (at adoption).** A checker that *adopts* this proposal
+reinterprets every already-written recognized suffix: `@phpstan-impure io`
+goes from ⊤ (boolean impure, suffix ignored) to the bounded claim `io`, and
+a body performing `nondet.time` earns a new finding. That is the feature
+working as intended — the docblock was lying — but it is a semantic change
+for pre-existing docblocks, and an adopter should treat it as one: ship the
+checking behind an opt-in (or a migration release), and provide the
+vocabulary-conformance diagnostic so existing suffixes can be audited before
+enforcement is enabled. The same discipline applies to later vocabulary
+additions (see [Vocabulary evolution](#vocabulary-evolution)): they are
+semantic events for docblocks that carried the new spelling as an unknown
+label.
 
 ## Steins semantics
 
@@ -218,7 +279,12 @@ of the same envelope concept, one trust stratum below the attribute.
 - An interop envelope enters the **declared lane** (ADR-0067) with an
   unchecked stratum tag and **never discharges taint** (ADR-0068's plugin
   discipline): a call covered only by an interop envelope contributes `≤label`
-  facts without ever claiming exhaustiveness.
+  facts without ever claiming exhaustiveness. Of the two [trust
+  models](#trust-models-for-bounds-on-abstractions) this is "hint without
+  proof" — coherent for Steins precisely because the checked attribute
+  spelling exists above the docblock; a docblock-only checker choosing
+  "contract with substitutability" is making the other coherent choice, not
+  a conflicting one.
 - The declaring function is contract-checked against its interop envelope
   (`effect.envelope-exceeded`) — reading the tag is not believing it, it is
   verifying it.
