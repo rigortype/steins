@@ -90,10 +90,10 @@ not subsume `io.output.buffer`, so a repository that starts echoing is still
 caught. "Does io, but does not output" is spelled by enumerating the children.
 
 `io.input` is the symmetric ambient **input** channel (`php://input`,
-`php://stdin`). No builtin row carries it yet — recognizing a stream by its
-target needs argument awareness the catalog does not have — so like `ffi` it
-exists for declarations and for the rows that will follow. `$_GET`-style reads
-of parsed request memory stay `global.read`; they are memory, not a stream.
+`php://stdin`). Recognizing that channel is a question about the *argument*, so
+it is the narrowing below that produces it — `file_get_contents('php://input')`
+— and no argument-blind row carries it. `$_GET`-style reads of parsed request
+memory stay `global.read`; they are memory, not a stream.
 
 `mutate.local` is the degenerate member of the `mutate` family and the one label
 **every** envelope tolerates, `#[\Steins\Pure]` included (ADR-0063 §2.3). It
@@ -212,7 +212,7 @@ Recognized origins in a body:
 
 | Origin | Effect |
 | --- | --- |
-| a statically-named function call | the catalog's labels for it, or a propagation edge to a project function |
+| a statically-named function call | the catalog's labels for it — narrowed by a proven stream target, see below — or a propagation edge to a project function |
 | `echo` / `print` / `<?=` / inline HTML | `io.output.buffer` |
 | `exit` / `die` | `exit` (ADR-0019 rule 4 — `Pure` forbids exit) |
 | a resolvable method call (`$this->`, `self::`, `parent::`, `Foo::`, `new Foo()->`) | a method→method propagation edge into the project class, else the catalog's labels for the *builtin* class's method |
@@ -238,6 +238,38 @@ The origin scan is **structural, not reachability-aware**: an `echo` in provably
 dead code is still an origin. This is deliberate — an envelope is a contract
 about the function's *code*, not about one execution path, so `Pure` forbids the
 mere presence of an effectful construct.
+
+### Argument-dependent narrowing
+
+A catalog row is an **upper bound**, and for a wrapper-capable stream API the
+sound upper bound is wide: `file_get_contents` reads a file, a URL, a process
+pipe or the request body depending on the string it is handed; `unlink` deletes a
+local file or an `ssh2.sftp://` one; `fread` reads whatever the resource it is
+handed was opened on. Argument-blind, all of them are `io` — the parent of every
+channel a registered stream wrapper can reach. A narrower row would be a false
+negative of the worst kind, an envelope that admits an effect it does not name.
+Every filesystem row is in that position, so no argument-blind builtin row names
+an `io.fs.*` label at all.
+
+Precision comes back at the call sites that **prove** their target. A quoted
+string literal with no interpolation, or a bare `STDIN`/`STDOUT`/`STDERR`
+constant, is read for the channel it names: a plain path is that target's own
+`io.fs.*` direction (`fopen` composes it from a literal mode), `https://` is
+`io.net.http`, `unix://` is `io.ipc`, `php://output` is `io.output.buffer`,
+`php://input` is `io.input`, `php://filter/…/resource=<target>` resolves the
+target it wraps, and an unknown scheme narrows nothing. A row with two targets
+reads each one in its own role — `copy` reads its source and writes its
+destination, `rename` writes both — and narrows only when both are proven,
+because a union with the `io` default is `io`. The full table is in
+[`docs/internal-spec/catalog.md`](../internal-spec/catalog.md).
+
+Everything else is `io`, with no attempt to guess: a variable, a concatenation,
+an interpolated string and a call result are all "unknown provenance", and this
+is a *syntactic* reading of the argument, not dataflow. The practical shape of
+the rule is that ordinary code — literal paths — is unaffected, while
+`file_get_contents($url)` under an `io.fs.read` envelope now reports, which is
+the truth about what that envelope promises. This is the ADR-0064 symbolic
+argument-dependent transfer seam, used for effects.
 
 ## Propagation
 
@@ -372,4 +404,7 @@ pseudo-constant configuration this slice does not implement. See
 - **The full effect catalog.** What exists is the frequency-seeded starter set
   above; ADR-0014's php-src stub sourcing is not built.
 - **A computed purity property.** Folding permission stays an allowlist.
-- **`fopen` mode-string discrimination** — it stays at the parent `io.fs` label.
+- **Stream provenance past a constant argument.** Narrowing reads what the call
+  site *writes*; a target the flow environment could fold (a constant-valued
+  local, a concatenation of literals) still leaves the row at `io`, and a
+  registered userland wrapper is approximated by `io` whatever its target.

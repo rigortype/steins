@@ -352,6 +352,52 @@ fn scans_exit_and_die() {
     assert!(matches!(g.effect_origins.first(), Some(EffectOrigin::Exit { keyword: "die", .. })));
 }
 
+/// Issue #318: the proven-constant leading arguments an effect origin carries.
+/// A string-literal argument is also a resolvable callback reference, so most of
+/// these calls arrive as `HigherOrder` rather than `Call` — the pair is read off
+/// both arms, and this test is where that is pinned.
+#[test]
+fn scans_the_constant_leading_arguments_of_a_named_call() {
+    use steins_syntax::{CallTarget, ConstArgs};
+
+    fn const_args(body: &str) -> ConstArgs {
+        let src = format!("<?php function f($h, string $p): void {{ {body} }}");
+        let tree = SourceTree::parse(&src);
+        let f = tree.functions().iter().find(|f| f.name == "f").expect("f").clone();
+        let origin = f.effect_origins.first().expect("one origin").clone();
+        match origin {
+            EffectOrigin::Call { const_args, .. }
+            | EffectOrigin::HigherOrder { const_args, .. } => const_args,
+            other => panic!("expected a named-call origin, got {other:?}"),
+        }
+    }
+    let lit = |s: &str| Some(CallTarget::Literal(s.to_owned()));
+
+    // Both quotings, and the second position as well as the first.
+    assert_eq!(const_args("fopen('/tmp/x', \"r\");"), ConstArgs { first: lit("/tmp/x"), second: lit("r") });
+    // A leading `\` is stripped from a constant fetch; a namespaced one is not a
+    // global constant and is declined.
+    assert_eq!(
+        const_args("fwrite(\\STDOUT, 'x');"),
+        ConstArgs { first: Some(CallTarget::ConstFetch("STDOUT".to_owned())), second: lit("x") }
+    );
+    assert_eq!(const_args("fwrite(App\\STDOUT, 'x');").first, None);
+    // Everything a structural scan cannot read is absent: a variable, an
+    // interpolated string, a concatenation, a class constant.
+    assert_eq!(const_args("file_get_contents($p);"), ConstArgs::default());
+    assert_eq!(const_args("file_get_contents(\"pre{$p}post\");"), ConstArgs::default());
+    assert_eq!(const_args("file_get_contents('/tmp/' . $p);"), ConstArgs::default());
+    assert_eq!(const_args("file_get_contents(C::PATH);"), ConstArgs::default());
+    assert_eq!(const_args("fread($h, 8);"), ConstArgs::default());
+    // A named or spread argument defeats positional mapping wholesale, exactly as
+    // it defeats `arg_targets`.
+    assert_eq!(const_args("file_get_contents(filename: '/tmp/x');"), ConstArgs::default());
+    assert_eq!(const_args("file_get_contents(...$p);"), ConstArgs::default());
+    assert_eq!(const_args("file_put_contents('/tmp/x', 'y', flags: 8);"), ConstArgs::default());
+    // Nothing past position 1 is recorded.
+    assert_eq!(const_args("file_put_contents('/a', 'b', 'c');").second, lit("b"));
+}
+
 // ---- Class / method lowering (class-world extension) ----------------------
 
 use steins_syntax::{Callee, ClassDecl, Receiver, ScopeOwner, StaticClass, StmtKind, Visibility};

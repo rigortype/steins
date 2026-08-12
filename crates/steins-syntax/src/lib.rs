@@ -434,7 +434,12 @@ pub enum EffectOrigin {
     /// gets). `Some(vec![])` is a genuine zero-argument call and is *not* the
     /// same thing — `preg_match(matches: $m, …)` supplies its out-parameter,
     /// `preg_match()` does not.
-    Call { name: NameRef, span: Span, arg_targets: Option<Vec<RefTarget>> },
+    ///
+    /// `const_args` carries the call's first two positional arguments in their
+    /// proven-constant form, for the argument-dependent narrowing of a
+    /// wrapper-capable stream row (issue #318; the ADR-0064 symbolic
+    /// argument-dependent transfer seam) — see [`ConstArgs`].
+    Call { name: NameRef, span: Span, arg_targets: Option<Vec<RefTarget>>, const_args: ConstArgs },
     /// An `echo` / `print` / short-echo (`<?=`) construct, or non-blank inline
     /// HTML between a `?>` and the next `<?php`, at `span` — the
     /// `io.output.buffer` effect (ADR-0083: this is the OB-capturable channel).
@@ -477,11 +482,18 @@ pub enum EffectOrigin {
     /// is only produced for all-positional argument lists). Higher-order invokers
     /// are out-parameter writers too — `usort($rows, $cmp)` sorts `$rows` in
     /// place — so the by-ref row must be read on this arm as well.
+    ///
+    /// `const_args` is the same proven-constant pair [`Self::Call`] carries, and
+    /// it is not redundant here: a string-literal argument *is* a resolvable
+    /// callback reference, so `file_get_contents('/etc/hosts')` arrives on this
+    /// arm rather than on `Call`, and the stream narrowing of issue #318 has to
+    /// read it from both.
     HigherOrder {
         callee: NameRef,
         callbacks: Vec<(usize, CallbackRef)>,
         arg_count: usize,
         arg_targets: Vec<RefTarget>,
+        const_args: ConstArgs,
         span: Span,
     },
     /// A direct `$fn()` variable call resolved (by a body-local single-assignment
@@ -489,6 +501,42 @@ pub enum EffectOrigin {
     /// (immediate invocation); `span` is the call. An unresolvable `$fn()` stays
     /// [`Self::Opaque`] (the honest taint).
     Callback { cbref: CallbackRef, span: Span },
+}
+
+/// One call argument in the form a **structural** scan can prove constant
+/// (issue #318): the evidence an argument-dependent catalog row is narrowed on.
+///
+/// There is deliberately no third variant. A variable, a concatenation, an
+/// interpolated string, a class constant, an array element — each of them is a
+/// dataflow question, and this scan does not ask dataflow questions (ADR-0001):
+/// the argument is simply absent from [`ConstArgs`] and the consumer keeps
+/// whatever its argument-blind default was.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CallTarget {
+    /// A quoted string literal with **no interpolation**, by its decoded value
+    /// (an interpolated `"…{$x}…"` is a composite string, never this).
+    Literal(String),
+    /// A bare global-constant fetch by its spelling, leading `\` stripped
+    /// (`STDOUT`, `\STDERR`). Namespaced fetches (`App\STDOUT`) are excluded —
+    /// they name somebody else's constant. An *unqualified* fetch inside a
+    /// namespace is kept, because PHP falls back to the global constant.
+    ConstFetch(String),
+}
+
+/// The **proven-constant leading arguments** of a named call (issue #318):
+/// positions 0 and 1, each `None` unless [`CallTarget`] could read it.
+///
+/// Two positions, because two is what the argument-dependent stream rows need —
+/// the target (`file_get_contents($path)`, `fwrite($handle, …)`), plus either a
+/// mode (`fopen($path, $mode)`) or a second target (`copy($from, $to)`). A named
+/// or spread argument anywhere in the list defeats positional mapping and leaves
+/// both fields empty, exactly as `arg_targets` is withheld wholesale there.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct ConstArgs {
+    /// Positional argument 0.
+    pub first: Option<CallTarget>,
+    /// Positional argument 1.
+    pub second: Option<CallTarget>,
 }
 
 /// A resolvable callback argument (ADR-0033 invocation shapes): an inline
@@ -5632,6 +5680,45 @@ fn arg_targets_of_call(fc: &FunctionCall<'_>, cx: &EffectScanCx) -> Option<Vec<R
     Some(targets)
 }
 
+/// The proven-constant form of a named call's first two positional arguments
+/// ([`ConstArgs`], issue #318). Empty when a named or spread argument defeats
+/// positional mapping — the same list shapes [`arg_targets_of_call`] withholds.
+fn const_args_of_call(fc: &FunctionCall<'_>) -> ConstArgs {
+    let mut out = ConstArgs::default();
+    for (pos, arg) in fc.argument_list.arguments.iter().enumerate() {
+        let Argument::Positional(p) = arg else { return ConstArgs::default() };
+        if p.ellipsis.is_some() {
+            return ConstArgs::default();
+        }
+        match pos {
+            0 => out.first = const_arg_of(p.value),
+            1 => out.second = const_arg_of(p.value),
+            // Nothing past position 1 decides a stream target; the loop runs on
+            // only to catch a named/spread argument further along.
+            _ => {}
+        }
+    }
+    out
+}
+
+/// One argument expression as a [`CallTarget`], or `None` for every expression
+/// whose value is not written in the source text.
+fn const_arg_of(expr: &Expression<'_>) -> Option<CallTarget> {
+    match expr.unparenthesized() {
+        // The parser hands over the escape-decoded bytes; a stream target is a
+        // path, URL or wrapper name, so a lossy decode of a non-UTF-8 tail
+        // cannot invent a scheme (`://` is ASCII) and can only lose a narrowing.
+        Expression::Literal(Literal::String(ls)) => {
+            Some(CallTarget::Literal(bytes_to_string(ls.value?)))
+        }
+        Expression::ConstantAccess(ca) => {
+            let name = name_ref(&ca.name);
+            (!name.raw.contains('\\')).then_some(CallTarget::ConstFetch(name.raw))
+        }
+        _ => None,
+    }
+}
+
 /// Classify one argument expression's **lvalue root** ([`RefTarget`]).
 ///
 /// Offsets are transparent: `sort($rows[3])` writes into `$rows`, so the root of
@@ -6072,6 +6159,7 @@ fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut Vec<Eff
                 // named/spread argument lists, so on the `Some` arm the target
                 // vector is exactly `arg_count` long.
                 let arg_targets = arg_targets_of_call(fc, cx);
+                let const_args = const_args_of_call(fc);
                 match higher_order_of_call(fc) {
                     Some((callee, callbacks, arg_count)) => {
                         out.push(EffectOrigin::HigherOrder {
@@ -6081,6 +6169,7 @@ fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut Vec<Eff
                             // Both helpers reject the same argument lists, so this
                             // is always `Some` on this arm.
                             arg_targets: arg_targets.clone().unwrap_or_default(),
+                            const_args,
                             span: to_span(fc.span()),
                         });
                     }
@@ -6088,6 +6177,7 @@ fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut Vec<Eff
                         name: name_ref(id),
                         span: to_span(id.span()),
                         arg_targets,
+                        const_args,
                     }),
                 }
             } else if let Some(cb) = direct_var_callee(fc).and_then(|v| cx.locals.get(&v).cloned()) {
