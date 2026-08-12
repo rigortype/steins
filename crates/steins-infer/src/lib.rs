@@ -42,13 +42,13 @@ pub use suppress::{
     pattern_is_known, pattern_matches, surface_floor,
 };
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use steins_contract::ContractTy;
 use steins_contract::normalize;
 use steins_db::{
-    Db, DeclSite, PluginFacts, Project, ProjectIndex, ProjectLayout, Resolve, SourceFile, parse,
-    project_index,
+    Db, DeclSite, EffectsPolicy, PluginFacts, Project, ProjectIndex, ProjectLayout, Resolve,
+    SourceFile, parse, project_index,
 };
 use steins_sidecar::{
     ClassReflection, ConstantDefined, EnvInfo, FoldArg, FoldKey, FoldResult, FoldValue, PregCompile,
@@ -3553,6 +3553,7 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         FinalKeyword::Enforced,
         &ProjectLayout::fallback(),
         &PluginFacts::none(),
+        &EffectsPolicy::none(),
     )
 }
 
@@ -3571,6 +3572,7 @@ pub fn check_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec
         FinalKeyword::Enforced,
         &ProjectLayout::fallback(),
         &PluginFacts::none(),
+        &EffectsPolicy::none(),
     )
 }
 
@@ -3631,6 +3633,7 @@ pub fn check_project_with_postures(
         final_keyword,
         project.layout(db),
         project.plugins(db),
+        project.effects(db),
     )
 }
 
@@ -3836,6 +3839,7 @@ pub fn check_with(
         FinalKeyword::Enforced,
         &ProjectLayout::fallback(),
         &PluginFacts::none(),
+        &EffectsPolicy::none(),
     )
 }
 
@@ -3862,11 +3866,13 @@ pub fn check_full(
         FinalKeyword::Enforced,
         &ProjectLayout::fallback(),
         &PluginFacts::none(),
+        &EffectsPolicy::none(),
     )
 }
 
 /// The project checking core: direct + propagation passes over every file's
 /// calls and scopes, then the one project-wide effects pass.
+#[allow(clippy::too_many_arguments)]
 fn check_units(
     units: &[FileUnit],
     index: &Index,
@@ -3875,6 +3881,7 @@ fn check_units(
     final_keyword: FinalKeyword,
     layout: &ProjectLayout,
     plugins: &PluginFacts,
+    policy: &EffectsPolicy,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
 
@@ -3905,7 +3912,7 @@ fn check_units(
     // The callable-purity oracle (ADR-0063 P3): one whole-project effect fixpoint per
     // run, shared by every file's context, and built only when some docblock actually
     // spells a purity-bearing callable.
-    let purity = PurityOracle::build(units, index, plugins);
+    let purity = PurityOracle::build(units, index, plugins, policy);
 
     // parse failure (ADR-0079, issue #180): `parse_errors()`'s first real consumer.
     // One finding per broken file at its first error, and then NOTHING else from
@@ -4125,7 +4132,7 @@ fn check_units(
     }
 
     // --- Effects pass (ADR-0005), computed once over the whole project. ------
-    out.extend(effect_diagnostics(units, index, plugins));
+    out.extend(effect_diagnostics(units, index, plugins, policy));
 
     // --- Throw system (ADR-0040/0007): `@throws` envelope + Liskov. ----------
     out.extend(throw_diagnostics(units, index));
@@ -4257,7 +4264,15 @@ pub fn annotate_facts(
     let _ = (functions, classes);
     let units = [FileUnit { path, tree }];
     let index = Index::from_units(&units);
-    annotate_units(&units, &index, 0, folder, &ProjectLayout::fallback(), &PluginFacts::none())
+    annotate_units(
+        &units,
+        &index,
+        0,
+        folder,
+        &ProjectLayout::fallback(),
+        &PluginFacts::none(),
+        &EffectsPolicy::none(),
+    )
 }
 
 /// Salsa-fed single-file annotate.
@@ -4266,7 +4281,15 @@ pub fn annotate_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> 
     let tree = parse(db, file);
     let units = [FileUnit { path: file.path(db), tree }];
     let index = Index::from_units(&units);
-    annotate_units(&units, &index, 0, folder, &ProjectLayout::fallback(), &PluginFacts::none())
+    annotate_units(
+        &units,
+        &index,
+        0,
+        folder,
+        &ProjectLayout::fallback(),
+        &PluginFacts::none(),
+        &EffectsPolicy::none(),
+    )
 }
 
 /// Project-aware annotate (ADR-0020, `--project`): compute the margin facts for
@@ -4289,7 +4312,15 @@ pub fn annotate_project(
     let Some(target_idx) = handles.iter().position(|&f| f == target) else {
         return Vec::new();
     };
-    annotate_units(&units, &index, target_idx, folder, project.layout(db), project.plugins(db))
+    annotate_units(
+        &units,
+        &index,
+        target_idx,
+        folder,
+        project.layout(db),
+        project.plugins(db),
+        project.effects(db),
+    )
 }
 
 /// Salsa-fed single-file effect summaries — the data source behind `annotate
@@ -4302,7 +4333,7 @@ pub fn effect_summaries_file(db: &dyn Db, file: SourceFile) -> Vec<EffectSummary
     let tree = parse(db, file);
     let units = [FileUnit { path: file.path(db), tree }];
     let index = Index::from_units(&units);
-    effect_summary_units(&units, &index, 0, &PluginFacts::none())
+    effect_summary_units(&units, &index, 0, &PluginFacts::none(), &EffectsPolicy::none())
 }
 
 /// Project-aware effect summaries (issue #65): the same cross-file resolution
@@ -4324,10 +4355,11 @@ pub fn effect_summaries_project(
     let Some(target_idx) = handles.iter().position(|&f| f == target) else {
         return Vec::new();
     };
-    effect_summary_units(&units, &index, target_idx, project.plugins(db))
+    effect_summary_units(&units, &index, target_idx, project.plugins(db), project.effects(db))
 }
 
 /// Compute the annotate facts for `target` file within a project view.
+#[allow(clippy::too_many_arguments)]
 fn annotate_units(
     units: &[FileUnit],
     index: &Index,
@@ -4335,11 +4367,12 @@ fn annotate_units(
     folder: &mut dyn Folder,
     layout: &ProjectLayout,
     plugins: &PluginFacts,
+    policy: &EffectsPolicy,
 ) -> Vec<LineFact> {
     let mut facts: Vec<LineFact> = Vec::new();
 
     // 1. Effects (and throws) on each declaration line in the target file.
-    for s in effect_summary_units(units, index, target, plugins) {
+    for s in effect_summary_units(units, index, target, plugins, policy) {
         let throws_present = !s.throws.is_empty() || !s.throws_exhaustive;
         facts.push(LineFact {
             line: s.line,
@@ -4381,7 +4414,9 @@ fn annotate_units(
 
     // 3. Findings on the target file (project-wide check, filtered by path).
     let target_path = units[target].path;
-    for d in check_units(units, index, folder, true, FinalKeyword::Enforced, layout, plugins) {
+    for d in
+        check_units(units, index, folder, true, FinalKeyword::Enforced, layout, plugins, policy)
+    {
         if d.path == target_path {
             facts.push(LineFact { line: d.line, kind: FactKind::Finding { id: d.id } });
         }
@@ -4405,6 +4440,35 @@ struct EffectFinding {
     /// The path of the file the origin lives in, so a transitive `via` message
     /// can name the other file when the effect arises cross-file.
     path: String,
+    /// **How this copy arrived** (ADR-0084 §2): the attribution labels of every
+    /// attributed symbol the effect crossed on its way here. Empty for a finding
+    /// that arose in this unit's own body and for every project with no
+    /// `[effects.attribution]` table.
+    ///
+    /// Part of `Hash`/`Eq`, so two copies of one effect that reached this unit
+    /// along differently-attributed paths are distinct set elements. That is what
+    /// makes leg 2 of the discharge rule a *must* over paths rather than a may:
+    /// the copies are all present, and [`finding_groups`] quantifies over them.
+    /// Nothing else reads it — the label, origin, line and path of every finding
+    /// are what they were before this field existed.
+    attributed: BTreeSet<String>,
+}
+
+impl EffectFinding {
+    /// A finding with no attribution — everything the fixpoint proves directly,
+    /// before any edge out of an attributed symbol has been crossed.
+    fn direct(label: String, origin: String, line: u32, path: String) -> Self {
+        Self { label, origin, line, path, attributed: BTreeSet::new() }
+    }
+
+    /// This finding as a caller receives it across an edge out of a symbol
+    /// attributed `labels` (ADR-0084 §2). The attribution accumulates; nothing
+    /// else moves.
+    fn attributed_by(&self, labels: &[String]) -> Self {
+        let mut copy = self.clone();
+        copy.attributed.extend(labels.iter().cloned());
+        copy
+    }
 }
 
 /// A node in the unified project effect call graph — a free function (keyed by
@@ -4435,6 +4499,13 @@ struct EffectSet {
     /// bound, not an origin, so nothing ever reports them at a source position.
     declared: HashSet<String>,
     exhaustive: bool,
+    /// This unit's OWN `[effects.attribution]` labels (ADR-0084 §1), resolved once
+    /// by [`compute_effects`]. Not a third lane: it says nothing about what this
+    /// unit does, only what its effects are *for*, and it is read exclusively as
+    /// the attribution a caller accumulates when [`Self::findings`] cross the edge
+    /// out of here. Carried on the set so a reporting site holding a callee's
+    /// [`EffectSet`] can fold in the same edge the fixpoint folds in.
+    attribution: Vec<String>,
 }
 
 /// Resolve a [`CallbackRef`] to its effect [`Sym`], for the [`Sym::Closure`] key.
@@ -4632,6 +4703,7 @@ fn compute_effects(
     units: &[FileUnit],
     index: &Index,
     plugins: &PluginFacts,
+    policy: &EffectsPolicy,
 ) -> HashMap<Sym, EffectSet> {
     // Each effect unit with the file it lives in and its enclosing class FQN.
     struct Unit<'a> {
@@ -4715,6 +4787,23 @@ fn compute_effects(
     // declared(u) = locally-imported bounds(u) ∪ ⋃ declared(callees). A declared
     // label never crosses into `findings`, in either direction.
     let syms: Vec<Sym> = ulist.iter().map(|u| u.sym.clone()).collect();
+    // Each unit's own attribution (ADR-0084 §1), resolved once against the policy.
+    // A closure is unnamed and so unattributable — the config has no key that could
+    // reach one, which is why the table is keyed by [`Sym`] rather than consulted
+    // per edge.
+    let mut attribution: HashMap<Sym, Vec<String>> = HashMap::new();
+    if !policy.is_empty() {
+        for sym in &syms {
+            let labels = match sym {
+                Sym::Func(fqn) => policy.function_attribution(fqn).to_vec(),
+                Sym::Method(class, method) => policy.method_attribution(class, method),
+                Sym::Closure(..) => Vec::new(),
+            };
+            if !labels.is_empty() {
+                attribution.insert(sym.clone(), labels);
+            }
+        }
+    }
     let mut findings: HashMap<Sym, HashSet<EffectFinding>> = direct;
     let mut declared: HashMap<Sym, HashSet<String>> = declared_direct;
     loop {
@@ -4729,7 +4818,14 @@ fn compute_effects(
             let mut callee_taint = false;
             for c in callees.iter().chain(untainted.iter()) {
                 if let Some(ce) = findings.get(c) {
-                    incoming.extend(ce.iter().cloned());
+                    // Crossing out of an attributed callee stamps the copies with
+                    // that callee's labels (ADR-0084 §2). The originals stay where
+                    // they are: nothing is removed, nothing is rewritten, and the
+                    // label/origin/line/path of every copy is byte-identical.
+                    match attribution.get(c) {
+                        Some(labels) => incoming.extend(ce.iter().map(|f| f.attributed_by(labels))),
+                        None => incoming.extend(ce.iter().cloned()),
+                    }
                 }
                 if let Some(cd) = declared.get(c) {
                     incoming_declared.extend(cd.iter().cloned());
@@ -4763,7 +4859,8 @@ fn compute_effects(
             let f = findings.remove(&s).unwrap_or_default();
             let dc = declared.remove(&s).unwrap_or_default();
             let ex = exhaustive.get(&s).copied().unwrap_or(true);
-            (s, EffectSet { findings: f, declared: dc, exhaustive: ex })
+            let at = attribution.remove(&s).unwrap_or_default();
+            (s, EffectSet { findings: f, declared: dc, exhaustive: ex, attribution: at })
         })
         .collect()
 }
@@ -4801,12 +4898,12 @@ fn classify_effect_origins(
                                     add_callback_effects(cx, cbref, *span, d, e, ex);
                                 });
                                 for label in r.labels {
-                                    d.insert(EffectFinding {
-                                        label: label.to_owned(),
-                                        origin: name.simple().to_owned(),
-                                        line: cx.tree().position(span.start).line,
-                                        path: cx.path().to_owned(),
-                                    });
+                                    d.insert(EffectFinding::direct(
+                                        label.to_owned(),
+                                        name.simple().to_owned(),
+                                        cx.tree().position(span.start).line,
+                                        cx.path().to_owned(),
+                                    ));
                                 }
                                 if r.discharge_taint {
                                     nt.insert(sym);
@@ -4844,20 +4941,20 @@ fn classify_effect_origins(
                 }
             }
             EffectOrigin::Output { keyword, span } => {
-                d.insert(EffectFinding {
-                    label: "io.output.buffer".to_owned(),
-                    origin: (*keyword).to_owned(),
-                    line: cx.tree().position(span.start).line,
-                    path: cx.path().to_owned(),
-                });
+                d.insert(EffectFinding::direct(
+                    "io.output.buffer".to_owned(),
+                    (*keyword).to_owned(),
+                    cx.tree().position(span.start).line,
+                    cx.path().to_owned(),
+                ));
             }
             EffectOrigin::Exit { keyword, span } => {
-                d.insert(EffectFinding {
-                    label: "exit".to_owned(),
-                    origin: (*keyword).to_owned(),
-                    line: cx.tree().position(span.start).line,
-                    path: cx.path().to_owned(),
-                });
+                d.insert(EffectFinding::direct(
+                    "exit".to_owned(),
+                    (*keyword).to_owned(),
+                    cx.tree().position(span.start).line,
+                    cx.path().to_owned(),
+                ));
             }
             EffectOrigin::MethodCall { receiver, method, span } => {
                 match resolve_effect_edge(cx, class_fqn, receiver, method) {
@@ -4969,12 +5066,12 @@ fn classify_effect_origins(
                                         |cbref| add_callback_effects(cx, cbref, *span, d, e, ex),
                                     );
                                     for label in r.labels {
-                                        d.insert(EffectFinding {
-                                            label: label.to_owned(),
-                                            origin: callee.simple().to_owned(),
-                                            line: cx.tree().position(span.start).line,
-                                            path: cx.path().to_owned(),
-                                        });
+                                        d.insert(EffectFinding::direct(
+                                            label.to_owned(),
+                                            callee.simple().to_owned(),
+                                            cx.tree().position(span.start).line,
+                                            cx.path().to_owned(),
+                                        ));
                                     }
                                     if r.discharge_taint {
                                         nt.insert(sym);
@@ -5058,7 +5155,7 @@ pub fn effect_summary(
     let _ = (functions, classes);
     let units = [FileUnit { path: "", tree }];
     let index = Index::from_units(&units);
-    effect_summary_units(&units, &index, 0, &PluginFacts::none())
+    effect_summary_units(&units, &index, 0, &PluginFacts::none(), &EffectsPolicy::none())
 }
 
 /// The proven effect set of every concrete function/method in the `target` file.
@@ -5068,8 +5165,9 @@ fn effect_summary_units(
     index: &Index,
     target: usize,
     plugins: &PluginFacts,
+    policy: &EffectsPolicy,
 ) -> Vec<EffectSummary> {
-    let effects = compute_effects(units, index, plugins);
+    let effects = compute_effects(units, index, plugins, policy);
     let throws = compute_throws(units, index);
     let tree = units[target].tree;
     let sorted_labels = |sym: &Sym| -> Vec<String> {
@@ -5232,7 +5330,7 @@ pub fn region_purity_project(
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
     let index = Index::from_db(db_index, &pos, &units);
     let plugins = project.plugins(db);
-    let effects = compute_effects(&units, &index, plugins);
+    let effects = compute_effects(&units, &index, plugins, project.effects(db));
     let throws = compute_throws(&units, &index);
 
     regions
@@ -5398,6 +5496,11 @@ const fn effect_origin_span(o: &EffectOrigin) -> steins_syntax::Span {
 /// `$this->matches` does not.
 struct PurityOracle {
     effects: HashMap<Sym, EffectSet>,
+    /// The project's tolerated-effects policy (ADR-0084 §3). Owned rather than
+    /// borrowed because the oracle outlives the config read and is handed around
+    /// by reference itself; a policy is a handful of strings, so the clone is
+    /// cheaper than the lifetime it would otherwise thread through [`Cx`].
+    policy: EffectsPolicy,
 }
 
 impl PurityOracle {
@@ -5410,7 +5513,12 @@ impl PurityOracle {
     /// judgment by being *written*, and every purity-bearing spelling in the
     /// vocabulary (`pure-callable`, `pure-closure`, `static-pure-closure`) contains
     /// one of the two literal substrings tested.
-    fn build(units: &[FileUnit], index: &Index, plugins: &PluginFacts) -> Option<Self> {
+    fn build(
+        units: &[FileUnit],
+        index: &Index,
+        plugins: &PluginFacts,
+        policy: &EffectsPolicy,
+    ) -> Option<Self> {
         let spells_purity = |doc: Option<&String>| {
             doc.is_some_and(|t| t.contains("pure-callable") || t.contains("pure-closure"))
         };
@@ -5424,7 +5532,10 @@ impl PurityOracle {
         if !any {
             return None;
         }
-        Some(PurityOracle { effects: compute_effects(units, index, plugins) })
+        Some(PurityOracle {
+            effects: compute_effects(units, index, plugins, policy),
+            policy: policy.clone(),
+        })
     }
 
     /// Whether `sym`'s inferred effect envelope is **provably** not pure: the
@@ -5437,17 +5548,30 @@ impl PurityOracle {
     /// effect, never invent one, so a *non-empty* finding set is a definite verdict
     /// regardless of it.
     ///
-    /// Findings every envelope tolerates ([`tolerated_by_every_envelope`]) do not
-    /// count: they are proven, but they are not impurity.
+    /// Discharged findings ([`finding_groups`]) do not count: they are proven, but
+    /// they are not impurity — for the built-in `mutate.local` tolerance and for
+    /// the project's own policy alike. Reading the same rule the envelope check
+    /// reads is the point (ADR-0084 §3): otherwise a purity query and an envelope
+    /// judgment would disagree about one function.
+    ///
+    /// The symbol's own attribution is deliberately not folded in. This asks what
+    /// `sym` *is*, exactly as `report_unit` judges a unit against its own bound;
+    /// attribution answers how an effect reached a **caller**, and there is no
+    /// caller here.
     fn provably_impure(&self, sym: &Sym) -> bool {
         self.effects.get(sym).is_some_and(|e| {
-            e.findings.iter().any(|f| !tolerated_by_every_envelope(&f.label))
+            finding_groups(&e.findings, &[], &self.policy).iter().any(|&(_, d)| !d)
         })
     }
 }
 
 /// Effect-envelope diagnostics for the whole project (proven violations only).
-fn effect_diagnostics(units: &[FileUnit], index: &Index, plugins: &PluginFacts) -> Vec<Diagnostic> {
+fn effect_diagnostics(
+    units: &[FileUnit],
+    index: &Index,
+    plugins: &PluginFacts,
+    policy: &EffectsPolicy,
+) -> Vec<Diagnostic> {
     // Fast path: no envelope anywhere → nothing to check. Interop envelopes
     // (ADR-0082 role B) are checked here too, so the gate admits their carriers
     // through [`docblock_envelope_tag`]'s own substring test — over-approximate
@@ -5470,7 +5594,7 @@ fn effect_diagnostics(units: &[FileUnit], index: &Index, plugins: &PluginFacts) 
         return Vec::new();
     }
 
-    let effects = compute_effects(units, index, plugins);
+    let effects = compute_effects(units, index, plugins, policy);
     // The registry this project's declared labels are judged against (ADR-0068):
     // builtin taxonomy plus whatever the plugin channel registered.
     let registry = plugins.registry();
@@ -5500,7 +5624,8 @@ fn effect_diagnostics(units: &[FileUnit], index: &Index, plugins: &PluginFacts) 
                 .is_none()
                 .then(|| own_interop_envelope(registry, f.docblock.as_ref()).into_bound())
                 .flatten();
-            let Some(bound) = operative_bound(f.effect_envelope.as_ref(), interop.as_ref(), f.span)
+            let Some(bound) =
+                operative_bound(f.effect_envelope.as_ref(), interop.as_ref(), f.span, policy)
             else {
                 continue;
             };
@@ -5542,7 +5667,7 @@ fn effect_diagnostics(units: &[FileUnit], index: &Index, plugins: &PluginFacts) 
                     .then(|| interop_envelope(registry, cx.tree(), c, m).into_bound())
                     .flatten();
                 if let Some(bound) =
-                    operative_bound(m.effect_envelope.as_ref(), interop.as_ref(), m.span)
+                    operative_bound(m.effect_envelope.as_ref(), interop.as_ref(), m.span, policy)
                 {
                     let display = format!("{}::{}", c.name, m.name);
                     report_unit(
@@ -5567,7 +5692,7 @@ fn effect_diagnostics(units: &[FileUnit], index: &Index, plugins: &PluginFacts) 
                 // only, and an interop-declared abstraction never yields
                 // `effect.liskov-widened`.
                 if !c.is_interface && !m.is_abstract {
-                    emit_effect_liskov(&mut out, &cx, c, m, &effects);
+                    emit_effect_liskov(&mut out, &cx, c, m, &effects, policy);
                 }
             }
         }
@@ -5585,6 +5710,7 @@ fn emit_effect_liskov(
     class: &ClassDecl,
     m: &MethodDecl,
     effects: &HashMap<Sym, EffectSet>,
+    policy: &EffectsPolicy,
 ) {
     let abstractions = collect_abstraction_effects(cx, class, &m.name);
     if abstractions.is_empty() {
@@ -5592,8 +5718,15 @@ fn emit_effect_liskov(
     }
     let sym = Sym::Method(class.fqn.clone(), m.name.clone());
     let Some(set) = effects.get(&sym) else { return };
-    // The impl's proven effect labels (deduplicated, sorted for stable output).
-    let mut proven: Vec<&str> = set.findings.iter().map(|f| f.label.as_str()).collect();
+    // The impl's proven effect labels (deduplicated, sorted for stable output),
+    // less whatever the policy discharges. The subtraction is on the PROVEN side;
+    // the conjunction over abstractions below is on the declared side, and the two
+    // do not interact (ADR-0084 §3).
+    let mut proven: Vec<&str> = finding_groups(&set.findings, &[], policy)
+        .into_iter()
+        .filter(|(_, discharged)| !discharged)
+        .map(|(f, _)| f.label.as_str())
+        .collect();
     proven.sort_unstable();
     proven.dedup();
     if proven.is_empty() {
@@ -5601,7 +5734,7 @@ fn emit_effect_liskov(
     }
     for (abs_display, labels) in abstractions {
         for label in &proven {
-            if !exceeds(&labels, label) {
+            if !exceeds(&labels, label, policy) {
                 continue; // within the abstraction's envelope (purer OK)
             }
             let clause = if labels.is_empty() {
@@ -5720,6 +5853,12 @@ struct OperativeBound<'a> {
     /// path has no analogue for — the declaration's name.
     span: Span,
     spelling: EnvelopeSpelling,
+    /// The project's tolerated-effects policy (ADR-0084 §3). It rides on the bound
+    /// because discharge is a property of the **judgment**: every site that asks
+    /// whether something exceeds this envelope must ask under the same policy, and
+    /// carrying it here is what makes that structural rather than a convention six
+    /// call sites happen to keep.
+    policy: &'a EffectsPolicy,
 }
 
 impl OperativeBound<'_> {
@@ -5727,7 +5866,7 @@ impl OperativeBound<'_> {
     /// [`exceeds`] verbatim: the two strata differ in trust and in wording,
     /// never in what counts as a violation.
     fn exceeds(self, effect_label: &str) -> bool {
-        exceeds(self.labels, effect_label)
+        exceeds(self.labels, effect_label, self.policy)
     }
 
     /// How `effect.envelope-exceeded` quotes the declaration back, in the
@@ -6023,11 +6162,12 @@ fn emit_transitive(
     bound: OperativeBound<'_>,
 ) {
     let callee_display = cx.sym_display(callee);
-    let mut fs: Vec<&EffectFinding> =
-        effects.get(callee).map(|e| &e.findings).into_iter().flatten().collect();
-    fs.sort_by(|a, b| (a.line, &a.label, &a.origin).cmp(&(b.line, &b.label, &b.origin)));
-    for ef in fs {
-        if !bound.exceeds(&ef.label) {
+    let Some(set) = effects.get(callee) else { return };
+    // One diagnostic per finding GROUP, never one per attribution variant: the
+    // copies that differ only in how the effect arrived are one effect at one
+    // origin, and the reader has one thing to fix (ADR-0084 §2).
+    for (ef, discharged) in finding_groups(&set.findings, &set.attribution, bound.policy) {
+        if discharged || !bound.exceeds(&ef.label) {
             continue;
         }
         // Name the file when the ultimate origin arises in a different file than
@@ -6064,12 +6204,81 @@ fn tolerated_by_every_envelope(effect_label: &str) -> bool {
     effect_label == MUTATE_LOCAL
 }
 
-/// Whether an inferred `effect_label` **exceeds** the declared `labels`.
-fn exceeds(labels: &[String], effect_label: &str) -> bool {
-    if tolerated_by_every_envelope(effect_label) {
+/// **Leg 1** of the ADR-0084 discharge rule: the label itself is tolerated, so
+/// every finding carrying it is discharged wherever it arrived from.
+///
+/// The built-in `mutate.local` case is the degenerate member and stays here
+/// rather than in config: it is a fact about the language (nothing outside the
+/// frame can observe the write), not a judgment call any project gets to make.
+/// The policy's own labels are the project's call, and only they are configurable.
+fn tolerated_label(policy: &EffectsPolicy, effect_label: &str) -> bool {
+    tolerated_by_every_envelope(effect_label) || policy.tolerates(effect_label)
+}
+
+/// Whether an inferred `effect_label` **exceeds** the declared `labels` under
+/// `policy`.
+fn exceeds(labels: &[String], effect_label: &str, policy: &EffectsPolicy) -> bool {
+    if tolerated_label(policy, effect_label) {
         return false;
     }
     !labels.iter().any(|l| steins_catalog::subsumes(l, effect_label))
+}
+
+/// The identity of a finding **group** (ADR-0084 §2): everything a proven effect
+/// says about itself and where it arose, with *how it arrived* left out. Copies
+/// differing only in attribution are one group, and leg 2 quantifies over exactly
+/// that group.
+///
+/// The field order is the report order [`emit_transitive`] has always sorted by,
+/// with `path` added as a final tiebreaker — two findings agreeing on line, label
+/// and origin used to come out in whatever order the hash set yielded them.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct FindingKey<'a> {
+    line: u32,
+    label: &'a str,
+    origin: &'a str,
+    path: &'a str,
+}
+
+/// One representative per finding group of `set`, paired with the group's
+/// ADR-0084 discharge verdict, in report order.
+///
+/// `edge` is the attribution a caller accumulates as these findings cross out of
+/// the unit that owns them. A judgment site reads the *callee's* stored set, so
+/// the edge has not been folded in there yet — the fixpoint folds it when it
+/// copies, and this is the same fold at the reporting seam, so the two cannot
+/// disagree about what a caller sees. Pass an empty slice to judge a unit's own
+/// set as it stands (the purity oracle and the Liskov check both do: they ask
+/// about the symbol itself, not about a call into it).
+///
+/// A group is discharged iff its label is tolerated (leg 1), or **every** member
+/// carries at least one attribution the policy tolerates (leg 2). The `all` is
+/// what makes leg 2 must-semantics: an effect that reaches a declaration both
+/// through an attributed facade and through a bare call is discharged for
+/// neither.
+fn finding_groups<'f>(
+    set: &'f HashSet<EffectFinding>,
+    edge: &[String],
+    policy: &EffectsPolicy,
+) -> Vec<(&'f EffectFinding, bool)> {
+    // The whole edge is one attribution act, so it is judged once rather than per
+    // finding — and when it discharges, it discharges every copy that crosses it.
+    let edge_tolerated = edge.iter().any(|a| policy.tolerates(a));
+    let mut groups: BTreeMap<FindingKey<'f>, (&'f EffectFinding, bool)> = BTreeMap::new();
+    for f in set {
+        let key =
+            FindingKey { line: f.line, label: &f.label, origin: &f.origin, path: &f.path };
+        let attributed =
+            edge_tolerated || f.attributed.iter().any(|a| policy.tolerates(a));
+        groups
+            .entry(key)
+            .and_modify(|slot| slot.1 = slot.1 && attributed)
+            .or_insert((f, attributed));
+    }
+    groups
+        .into_values()
+        .map(|(f, attributed)| (f, attributed || tolerated_label(policy, &f.label)))
+        .collect()
 }
 
 /// Build an `effect.envelope-exceeded` diagnostic.
@@ -6188,12 +6397,7 @@ fn builtin_findings(
         .iter()
         .copied()
         .chain(by_ref)
-        .map(|label| EffectFinding {
-            label: label.to_owned(),
-            origin: name.to_owned(),
-            line,
-            path: path.to_owned(),
-        })
+        .map(|label| EffectFinding::direct(label.to_owned(), name.to_owned(), line, path.to_owned()))
         .collect()
 }
 
@@ -6268,11 +6472,13 @@ fn builtin_method_findings(
     Some(
         labels
             .iter()
-            .map(|label| EffectFinding {
-                label: (*label).to_owned(),
-                origin: origin.clone(),
-                line,
-                path: cx.path().to_owned(),
+            .map(|label| {
+                EffectFinding::direct(
+                    (*label).to_owned(),
+                    origin.clone(),
+                    line,
+                    cx.path().to_owned(),
+                )
             })
             .collect(),
     )
@@ -6477,12 +6683,14 @@ fn operative_bound<'a>(
     attr: Option<&'a EffectEnvelope>,
     interop: Option<&'a (EnvelopeTag, Vec<String>)>,
     anchor: Span,
+    policy: &'a EffectsPolicy,
 ) -> Option<OperativeBound<'a>> {
     if let Some(env) = attr {
         return Some(OperativeBound {
             labels: &env.labels,
             span: env.span,
             spelling: EnvelopeSpelling::Attribute,
+            policy,
         });
     }
     let (tag, labels) = interop?;
@@ -6494,7 +6702,7 @@ fn operative_bound<'a>(
     if labels.is_empty() && matches!(tag, EnvelopeTag::AllMethodsImpure) {
         return None;
     }
-    Some(OperativeBound { labels, span: anchor, spelling: EnvelopeSpelling::Interop(*tag) })
+    Some(OperativeBound { labels, span: anchor, spelling: EnvelopeSpelling::Interop(*tag), policy })
 }
 
 /// What one docblock says about a declaration's interop envelope.
