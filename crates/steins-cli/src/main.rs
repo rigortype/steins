@@ -216,8 +216,8 @@ fn print_version() -> ExitCode {
 }
 
 /// `license` / `licenses`. The text runs into the thousands of lines (three
-/// embedded license bodies plus every dependency notice — see [`out`]'s module
-/// docs), so on an interactive terminal it is worth paging rather than
+/// embedded license bodies plus every dependency notice — see [`mod@out`]'s
+/// module docs), so on an interactive terminal it is worth paging rather than
 /// scrolling past. Piped or redirected output (`| head`, `> file`, CI logs)
 /// keeps going straight to stdout unchanged, through the same EPIPE-safe seam
 /// every other command uses.
