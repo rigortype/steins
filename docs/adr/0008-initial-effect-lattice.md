@@ -1,5 +1,9 @@
 # Initial effect labels
 
+> Amended by ADR-0083: the `output` root below is retired — output is an
+> ambient channel under `io` (`io.output` and its ob-capturability split),
+> and `io.input` joins it.
+>
 > Amended by ADR-0018: the labels below are now the roots of a hierarchical
 > label taxonomy (`io` ⊃ `io.fs.read`/`io.net.http`/…, `nondet` ⊃
 > `nondet.random`/`nondet.time`; `global-read`/`global-write` spelled

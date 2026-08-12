@@ -8,15 +8,26 @@ table. For each side-effect KIND actually present in php-src's standard-library
 surface I state whether Steins' registry already has a node for it, and for each
 gap I propose a dot-path label in the registry's prefix-subsumption style.
 
+> **Update 2026-08-12 (ADR-0083).** Every gap ranked below has since landed,
+> and the `output` root the audit was written against no longer exists: output
+> is now an ambient channel under `io` (`io.output`, split by
+> `ob_start()`-capturability), with `io.input` beside it. Read `output` as
+> `io.output` and `output.header` as `io.output.header` throughout the
+> proposal sections; the registry block and the coverage table below are
+> current as of that ADR.
+
 ## Steins' current registry (`known_labels()`)
 
 ```
-exit
+exit   ffi
 global.read   global.write
-io   io.db   io.fs   io.fs.read   io.fs.write   io.net   io.net.http   io.process
-mutate
+io   io.db   io.fs   io.fs.read   io.fs.write   io.input   io.ipc
+     io.net   io.net.http   io.process   io.signal
+     io.output   io.output.buffer   io.output.header
+                 io.output.stderr   io.output.stdout
+mutate   mutate.local
 nondet   nondet.random   nondet.time
-output
+failure   failure.environment   failure.input   failure.resource
 ```
 
 ## Effect kinds present in the stdlib, mapped to the registry
@@ -28,8 +39,11 @@ output
 | Generic network | `fsockopen`, `stream_socket_client`, `curl_exec` | `io.net` | covered |
 | HTTP client | `curl_exec` (http), `file_get_contents("http://…")` | `io.net.http` | covered |
 | Database | `mysqli_query`, `PDO::query`, `pg_query` | `io.db` | covered (node exists; no builtin colored yet) |
-| Process spawn | `exec`, `system`, `proc_open`, `popen`, `shell_exec` | `io.process` | covered (node exists; no builtin colored yet) |
-| Stdout output | `echo`/`print`, `printf`, `var_dump`, `fpassthru` | `output` | covered |
+| Process spawn | `exec`, `proc_open`, `popen`, `shell_exec` | `io.process` | node exists; only the relaying pair below is colored |
+| Process spawn **that relays output** | `system`, `passthru` | `io.process` + `io.output` | covered (ADR-0083) |
+| Stdout output (language) | `echo`/`print`/`<?=`, inline HTML | `io.output.buffer` | covered (origins, not catalog rows) |
+| Stdout output (functions) | `printf`, `vprintf`, `var_dump`, `print_r`, `var_export`, `flush`, `ob_flush` | `io.output.buffer` | covered |
+| Read-and-relay to output | `readfile`, `fpassthru` | `io.fs.read` + `io.output.buffer` | covered (ADR-0083; uncolored before it) |
 | Environment mutate | `putenv`, `setlocale`, `ini_set` | `global.write` | covered |
 | Environment/ini read | `getenv`, `ini_get` | `global.read` | covered |
 | Randomness | `rand`, `random_int`, `random_bytes` | `nondet.random` | covered |
@@ -41,7 +55,8 @@ output
 | **FFI (opaque native)** | `FFI::cdef`, `FFI::new`, any `FFI\CData` call | — | **GAP** |
 | **Global handler / dispatch registration** | `set_error_handler`, `set_exception_handler`, `spl_autoload_register`, `stream_wrapper_register`, `ob_start` | `global.write`? | **borderline** |
 | **RNG state seeding** | `srand`, `mt_srand`, `random_*` engine seeding | `global.write`? | **borderline** |
-| Output-buffer state | `ob_start`, `ob_get_clean`, `ob_end_flush` | `output` / `global.write` | borderline |
+| Output-buffer state | `ob_start`, `ob_get_clean`, `ob_end_flush` | — | **uncatalogued on purpose**: unknown-effect widening is the sound default until effect masking exists (ADR-0083 deferral) |
+| Ambient input stream | `php://input`, `php://stdin` | `io.input` | node exists; no row, since narrowing a stream by its target needs argument awareness |
 | Session state | `session_start`, `session_write_close`, `session_regenerate_id` | composite | note |
 
 ---
@@ -115,9 +130,11 @@ output
   choice (an observable process-timing effect). No taxonomy change needed; a
   `nondet.time`-adjacent reading is possible but `io` is fine.
 - **Session** (`session_start`) is genuinely composite: `io.fs.write` (default
-  file handler) + `output.header` (Set-Cookie) + `global.write` ($_SESSION,
-  ini). It should be colored with the *set* once those labels exist — a good
-  first client of the proposed `output.header`.
+  file handler) + `io.output.header` (Set-Cookie) + `global.write` ($_SESSION,
+  ini). It is colored with the *set* — the first client of the header label.
+- **`fwrite`** stays `io.fs.write` even though its destination may be `STDOUT`.
+  Narrowing to `io.output.stdout` is a syntactic check on a `STDOUT`/`STDERR`
+  argument, which this name-keyed table cannot see; ADR-0083 defers it.
 
 ## Summary of proposed additions (ranked by envelope value)
 

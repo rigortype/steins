@@ -55,11 +55,12 @@ catalog can color a function with:
 ```text
 exit   ffi
 global.read   global.write
-io   io.db   io.fs   io.fs.read   io.fs.write   io.ipc
+io   io.db   io.fs   io.fs.read   io.fs.write   io.input   io.ipc
      io.net   io.net.http   io.process   io.signal
+     io.output   io.output.buffer   io.output.header
+                 io.output.stderr   io.output.stdout
 mutate   mutate.local
 nondet   nondet.random   nondet.time
-output   output.header
 failure   failure.environment   failure.input   failure.resource
 ```
 
@@ -189,7 +190,7 @@ function leaky(string $s): string { //=> effects: {}
     return $s;
 }
 
-function noisy(): void {            //=> effects: {nondet.random, output}
+function noisy(): void {            //=> effects: {io.output.buffer, nondet.random}
     echo "hi";
     $r = rand();
 }
@@ -203,7 +204,7 @@ declared `Pure`, so its margin shows the empty set it is *allowed*
 — and the `echo` that breaks that promise is pinpointed inline
 with `✗ effect.envelope-exceeded`. `noisy` has **no** envelope, so
 there is nothing to measure it against and the margin simply lists
-its full inferred set: `echo` contributes `output`, `rand()`
+its full inferred set: `echo` contributes `io.output.buffer`, `rand()`
 contributes `nondet.random`. `typo` misspelled its label, flagged
 on the attribute line. The margin is the fastest way to see both
 dimensions at once — and note the `throws:` clause appears only
@@ -253,7 +254,7 @@ Reach it with a named profile:
 
 ```text
 $ steins check --profile contracts leaky.php
-leaky.php:11:5: error[effect.envelope-exceeded]: echo has effect output, but leaky() is declared #[\Steins\Pure]
+leaky.php:11:5: error[effect.envelope-exceeded]: echo has effect io.output.buffer, but leaky() is declared #[\Steins\Pure]
 ```
 
 **`effect.liskov-widened`** (contract layer) applies the same
@@ -268,14 +269,14 @@ interface Store {
     public function get(string $k): string;
 }
 class LoudStore implements Store {
-    #[\Steins\Effect('output')]
+    #[\Steins\Effect('io.output')]
     public function get(string $k): string { echo $k; return $k; }
 }
 ```
 
 ```text
 $ steins check --profile contracts store.php
-store.php:9:21: error[effect.liskov-widened]: LoudStore::get() has proven effect output but Store::get() (its abstraction) is declared #[\Steins\Pure] — Liskov effect widening
+store.php:9:21: error[effect.liskov-widened]: LoudStore::get() has proven effect io.output.buffer but Store::get() (its abstraction) is declared #[\Steins\Pure] — Liskov effect widening
 ```
 
 **`effect.unknown-label`** (mechanics layer) is the odd one out —
@@ -310,13 +311,14 @@ for that spelling is a separate, not-yet-built rule.
 ## Where effects come from
 
 Effects have exactly two origins: **catalogued builtin/extension
-functions** and **language constructs** (`echo`/`print` →
-`output`, `exit`/`die` → `exit`). Nothing else *creates* an
-effect — user code only propagates what it calls. An uncatalogued
-function widens to *unknown effect*, which taints the `…?`
-exhaustiveness bit but never produces a finding. That seeding
-order — color what you know, widen the rest — is the only one
-compatible with the zero-false-positive bar.
+functions** and **language constructs** (`echo`/`print`/inline
+HTML → `io.output.buffer`, `exit`/`die` → `exit`). Nothing
+else *creates* an effect — user code only propagates what it
+calls. An uncatalogued function widens to *unknown effect*,
+which taints the `…?` exhaustiveness bit but never produces a
+finding. That seeding order — color what you know, widen the
+rest — is the only one compatible with the zero-false-positive
+bar.
 
 This also connects back to Chapter 1's sidecar: Steins may fold a
 value by executing it in the sidecar **only when its effect set

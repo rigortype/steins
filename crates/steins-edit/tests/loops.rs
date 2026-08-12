@@ -153,7 +153,11 @@ fn a_proven_effect_label_refuses_and_is_named() {
     assert_oracle_complete(&report);
     assert_eq!(only_reason(&report), REASON_BODY_EFFECTS);
     // The detail names the proven label, so an agent can act on it.
-    assert!(report.refusals[0].detail.contains("output"), "detail: {}", report.refusals[0].detail);
+    assert!(
+        report.refusals[0].detail.contains("io.output.buffer"),
+        "detail: {}",
+        report.refusals[0].detail
+    );
 }
 
 #[test]

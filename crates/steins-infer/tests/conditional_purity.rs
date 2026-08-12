@@ -66,7 +66,7 @@ fn an_echoing_callback_at_the_flagged_position_exceeds_pure() {
         "{APPLY}#[\\Steins\\Pure]\nfunction f(array $xs): array {{ return applyAll($xs, function ($x) {{ echo $x; return $x; }}); }}\n"
     );
     let d = one(&src);
-    assert!(d.message.contains("output"), "names the callback's color: {}", d.message);
+    assert!(d.message.contains("io.output.buffer"), "names the callback's color: {}", d.message);
     assert!(d.message.contains("closure"), "closure provenance: {}", d.message);
     assert!(d.message.contains("#[\\Steins\\Pure]"), "{}", d.message);
 }
@@ -78,7 +78,7 @@ fn a_named_function_callback_joins_too() {
          #[\\Steins\\Pure]\nfunction f(array $xs): array {{ return applyAll($xs, 'shout'); }}\n"
     );
     let d = one(&src);
-    assert!(d.message.contains("output"), "{}", d.message);
+    assert!(d.message.contains("io.output.buffer"), "{}", d.message);
 }
 
 #[test]
@@ -115,7 +115,7 @@ fn proven_effects_of_the_tagged_function_still_propagate() {
         #[\\Steins\\Pure]\n\
         function f(array $xs): void { logAll($xs, function ($x) { return $x; }); }\n";
     let d = one(src);
-    assert!(d.message.contains("output"), "the callee's own echo survives: {}", d.message);
+    assert!(d.message.contains("io.output.buffer"), "the callee's own echo survives: {}", d.message);
 }
 
 #[test]
@@ -202,7 +202,7 @@ fn the_phpstan_prefixed_spelling_is_honored() {
         #[\\Steins\\Pure]\n\
         function f(array $xs): array { return applyAll($xs, function ($x) { echo $x; return $x; }); }\n";
     let d = one(src);
-    assert!(d.message.contains("output"), "{}", d.message);
+    assert!(d.message.contains("io.output.buffer"), "{}", d.message);
 }
 
 #[test]

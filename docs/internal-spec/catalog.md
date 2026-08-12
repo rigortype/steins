@@ -53,15 +53,27 @@ otherwise a foldable builtin is catalogued with the **empty** effect set.
 
 Coverage is frequency-seeded (`docs/notes/20260722-builtin-frequency.md`) plus
 the gaps identified in `docs/research/phpsrc-mining/effects_gaps.md`:
-randomness, time, filesystem read/write, output, header mutation, signals,
-System-V IPC, global/ini state, and the composite `session_start`.
+randomness, time, filesystem read/write, output (ADR-0083's `io.output`
+family), header mutation, signals, System-V IPC, global/ini state, the
+read-and-relay pair `readfile`/`fpassthru`, the output-relaying
+`system`/`passthru`/`curl_exec`, and the composite `session_start`.
 
 Recorded imprecisions, stated rather than hidden:
 
 - `fopen` stays at the parent `io.fs` label — its read/write split is
   mode-string-dependent and this slice does not inspect it.
-- `print_r` / `var_export` are coloured `output` even though they are pure in
-  return-mode (`$return = true`); the arg-blind upper bound is the safe choice.
+- `print_r` / `var_export` are coloured `io.output.buffer` even though they are
+  pure in return-mode (`$return = true`); the arg-blind upper bound is the safe
+  choice. `curl_exec` keeps its `io.output` component the same way — only
+  `CURLOPT_RETURNTRANSFER` suppresses the echo.
+- `system` / `passthru` / `curl_exec` take the parent `io.output`, not
+  `io.output.buffer`: whether an output buffer captures a relayed child's
+  output is not settled, and ADR-0083 puts split evidence on the side a future
+  masking cannot deduct.
+- `fwrite` stays `io.fs.write`; narrowing a `STDOUT`/`STDERR` destination to
+  `io.output.stdout`/`.stderr` needs argument awareness this table lacks.
+- The `ob_start` family is deliberately absent — widening to unknown effect is
+  sound until masking exists (ADR-0083).
 - `sleep` / `usleep` are `io` — an observable timing side effect, closest to the
   `io` root among the initial labels.
 - `exit` / `die` are **language constructs**, not functions; they never reach

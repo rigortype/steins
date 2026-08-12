@@ -109,6 +109,45 @@ fn a_method_level_tag_replaces_the_class_level_one_rather_than_joining_it() {
     assert!(!s.exhaustive);
 }
 
+// ---- The ADR-0083 vocabulary migration -----------------------------------------
+
+/// A docblock still spelling the retired `output` root is *unreadable*, not
+/// wrong: the ADR-0082 amendment makes one unknown label unspecify the whole tag,
+/// so the bound simply does not arrive and no finding is invented. That is what
+/// makes a mixed-vocabulary transition period safe on the interop side, in
+/// contrast with the attribute spelling, which earns `effect.unknown-label`.
+#[test]
+fn a_retired_output_bound_in_an_interop_tag_is_inert() {
+    let src = concat!(
+        "<?php\n",
+        "interface Printer {\n",
+        "    /** @phpstan-impure output */\n",
+        "    public function emit(string $s): void;\n",
+        "}\n",
+        "function f(Printer $p): void { $p->emit(\"hi\"); }\n",
+    );
+    let s = summary(src, "f");
+    assert!(s.labels.is_empty(), "nothing proven, got: {:?}", s.labels);
+    assert!(s.declared.is_empty(), "the unreadable tag contributes no bound: {:?}", s.declared);
+    assert!(!s.exhaustive, "and the call is still an unresolved claim");
+}
+
+/// The migrated spelling of the same tag does arrive.
+#[test]
+fn the_migrated_output_bound_in_an_interop_tag_is_read() {
+    let src = concat!(
+        "<?php\n",
+        "interface Printer {\n",
+        "    /** @phpstan-impure io.output.buffer */\n",
+        "    public function emit(string $s): void;\n",
+        "}\n",
+        "function f(Printer $p): void { $p->emit(\"hi\"); }\n",
+    );
+    let s = summary(src, "f");
+    assert_eq!(s.declared, vec!["io.output.buffer"]);
+    assert!(!s.exhaustive);
+}
+
 // ---- The empty bound ---------------------------------------------------------
 
 #[test]
@@ -226,7 +265,7 @@ fn the_margin_renders_an_interop_bound_with_the_declared_lanes_own_prefix() {
     );
     let margins = effect_margins(src);
     assert!(
-        margins.contains(&"effects: {output, ≤io.db, …?}".to_owned()),
+        margins.contains(&"effects: {io.output.buffer, ≤io.db, …?}".to_owned()),
         "got: {margins:?}"
     );
 }

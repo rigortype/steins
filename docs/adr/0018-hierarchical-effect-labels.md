@@ -1,5 +1,9 @@
 # Hierarchical effect labels: dot-path strings, prefix subsumption, open registry
 
+> Amended by ADR-0083: the taxonomy's shape is unchanged, but the `output`
+> root it inherited from ADR-0008 is retired in favour of `io.output` (plus
+> `io.input`) — so a bare `io` envelope now admits output.
+
 Supersedes the enum sketch in ADR-0006/0008. Three pressures killed the enum:
 PHP enums are closed-world, so ecosystem and **private effects** could never
 be added without a Steins release; the name `Kind` collides with type

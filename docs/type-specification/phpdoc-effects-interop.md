@@ -72,11 +72,12 @@ which names value provenance rather than an effect and is out of scope here):
 exit
 ffi
 global.read   global.write
-io   io.db   io.fs   io.fs.read   io.fs.write   io.ipc
+io   io.db   io.fs   io.fs.read   io.fs.write   io.input   io.ipc
      io.net  io.net.http   io.process   io.signal
+     io.output   io.output.buffer   io.output.header
+                 io.output.stderr   io.output.stdout
 mutate   mutate.local
 nondet   nondet.random   nondet.time
-output   output.header
 ```
 
 Because a bound is checked by subsumption, a checker never needs the full leaf
@@ -228,4 +229,4 @@ of the same envelope concept, one trust stratum below the attribute.
    this direction; today the tags do not propagate.)
 3. Does `@phpstan-all-methods-pure`'s void-method exclusion want to carry
    over to a labeled world, where a void method could still usefully declare
-   `@phpstan-impure output`?
+   `@phpstan-impure io.output`?

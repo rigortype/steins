@@ -37,8 +37,8 @@ labels to those actions:
 ```text
 io.db
 io.net.http
+io.output.buffer
 nondet.time
-output
 ```
 
 It then propagates those labels through the call graph. If a controller calls a

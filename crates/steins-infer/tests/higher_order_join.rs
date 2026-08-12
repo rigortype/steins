@@ -37,13 +37,13 @@ fn summary(src: &str, symbol: &str) -> EffectSummary {
 fn php84_search_predicates_join_an_impure_callback() {
     // array_find/array_find_key/array_any/array_all run their predicate during the
     // call: an echoing predicate exceeds a Pure envelope, named by its own color
-    // (`output`), not a generic maybe.
+    // (`io.output.buffer`), not a generic maybe.
     for f in ["array_find", "array_find_key", "array_any", "array_all"] {
         let src = format!(
             "<?php\n#[\\Steins\\Pure]\nfunction f(array $xs): mixed {{\n    return {f}($xs, function ($x) {{ echo $x; return true; }});\n}}\n"
         );
         let d = one(&src);
-        assert!(d.message.contains("output"), "{f}: names the output effect: {}", d.message);
+        assert!(d.message.contains("io.output.buffer"), "{f}: names the output effect: {}", d.message);
         assert!(d.message.contains("closure"), "{f}: closure provenance: {}", d.message);
         assert!(d.message.contains("#[\\Steins\\Pure]"), "{f}: {}", d.message);
     }
@@ -63,14 +63,14 @@ fn php84_search_predicates_stay_silent_for_a_pure_callback() {
 fn array_walk_recursive_joins_its_callback() {
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(array $xs): void {\n    array_walk_recursive($xs, function ($v) { echo $v; });\n}\n";
     let d = one(src);
-    assert!(d.message.contains("output"), "{}", d.message);
+    assert!(d.message.contains("io.output.buffer"), "{}", d.message);
 }
 
 #[test]
 fn iterator_apply_joins_its_callback() {
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(\\Iterator $it): void {\n    iterator_apply($it, function () { echo \"x\"; return true; });\n}\n";
     let d = one(src);
-    assert!(d.message.contains("output"), "{}", d.message);
+    assert!(d.message.contains("io.output.buffer"), "{}", d.message);
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn a_new_row_carries_a_named_user_callback_too() {
     // position edges into the fixpoint the same way.
     let src = "<?php\nfunction shout($x) { echo $x; return true; }\n#[\\Steins\\Pure]\nfunction f(array $xs): mixed { return array_find($xs, 'shout'); }\n";
     let d = one(src);
-    assert!(d.message.contains("output"), "{}", d.message);
+    assert!(d.message.contains("io.output.buffer"), "{}", d.message);
 }
 
 // The opaque-callback floor
@@ -120,7 +120,7 @@ fn register_shutdown_function_is_unchanged_by_p1() {
     // widens nor narrows it.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(): void {\n    register_shutdown_function(function () { echo \"bye\"; });\n}\n";
     let d = one(src);
-    assert!(d.message.contains("output"), "{}", d.message);
+    assert!(d.message.contains("io.output.buffer"), "{}", d.message);
 }
 
 #[test]
@@ -136,12 +136,12 @@ fn preg_replace_callback_array_is_excluded() {
 
 #[test]
 fn a_declared_envelope_admits_the_matching_callback_color() {
-    // #[\Steins\Effect('output')] admits the echoing callback; the join is checked
+    // #[\Steins\Effect('io.output')] admits the echoing callback; the join is checked
     // against the envelope with ADR-0018 prefix subsumption, and the nondet.random
     // sibling still exceeds.
-    let admitted = "<?php\n#[\\Steins\\Effect('output')]\nfunction f(array $xs): array {\n    return array_map(function ($x) { echo $x; return $x; }, $xs);\n}\n";
-    assert_eq!(effects(admitted).len(), 0, "declared output admits the callback's output");
-    let exceeded = "<?php\n#[\\Steins\\Effect('output')]\nfunction f(array $xs): array {\n    return array_map(function ($x) { return $x + rand(); }, $xs);\n}\n";
+    let admitted = "<?php\n#[\\Steins\\Effect('io.output')]\nfunction f(array $xs): array {\n    return array_map(function ($x) { echo $x; return $x; }, $xs);\n}\n";
+    assert_eq!(effects(admitted).len(), 0, "declared io.output admits the callback's output");
+    let exceeded = "<?php\n#[\\Steins\\Effect('io.output')]\nfunction f(array $xs): array {\n    return array_map(function ($x) { return $x + rand(); }, $xs);\n}\n";
     let d = one(exceeded);
     assert!(d.message.contains("nondet.random"), "{}", d.message);
 }
@@ -179,5 +179,5 @@ fn nested_higher_order_calls_join_transitively() {
     // closure — the fixpoint carries the color up through both hops.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(array $xs): array {\n    return array_map(function ($x) { return array_find($x, function ($y) { echo $y; return true; }); }, $xs);\n}\n";
     let d = one(src);
-    assert!(d.message.contains("output"), "{}", d.message);
+    assert!(d.message.contains("io.output.buffer"), "{}", d.message);
 }

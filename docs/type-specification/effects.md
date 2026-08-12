@@ -41,11 +41,12 @@ builtin with, plus the ADR-0018 taxonomy roots:
 exit
 ffi
 global.read   global.write
-io   io.db   io.fs   io.fs.read   io.fs.write   io.ipc
+io   io.db   io.fs   io.fs.read   io.fs.write   io.input   io.ipc
      io.net  io.net.http   io.process   io.signal
+     io.output   io.output.buffer   io.output.header
+                 io.output.stderr   io.output.stdout
 mutate   mutate.local
 nondet   nondet.random   nondet.time
-output   output.header
 failure   failure.environment   failure.input   failure.resource
 ```
 
@@ -60,6 +61,39 @@ interop envelope below reads an unrecognized label differently — see
 *value provenance* — why the arm exists — rather than an effect. They share the
 registry so prefix subsumption works and a future boundary profile can name them
 (ADR-0042). See [divergence-registry.md](divergence-registry.md).
+
+The `io.output` family (ADR-0083) is the script's **ambient output channel** —
+an `io` child like the resources beside it, since both are the program talking
+to the world outside its own memory. Its own children split on one question,
+the one a future effect masking has to answer: can `ob_start()` capture this?
+
+| Label | Meaning | Origins |
+| --- | --- | --- |
+| `io.output` | the umbrella — writes to the ambient output channel, somehow | the row a split-evidence relay takes (`system`, `passthru`, `curl_exec`) |
+| `io.output.buffer` | OB-layer output, **capturable by `ob_start()`** | `echo`, `print`, `<?=`, inline HTML, `printf`, `print_r`, `var_dump`, `php://output`, `flush`, `ob_flush`, `readfile`, `fpassthru` |
+| `io.output.stdout` | a process-fd write, outside OB's reach | `php://stdout`, `fwrite(STDOUT, …)` — no builtin row narrows to it yet |
+| `io.output.stderr` | the same | `php://stderr`, `STDERR` — likewise no row yet |
+| `io.output.header` | response metadata, not OB-subject | `header()`, `header_remove()`, `setcookie()`, `setrawcookie()`, `http_response_code()`, `session_start()` |
+
+The `.buffer` leaf earns its existence from that split: once masking exists
+(an `ob_start()` region analysis, or a masking annotation on a higher-order
+call), the rule for what may be deducted from a callee's effect set is one
+prefix test — **only labels subsumed by `io.output.buffer`**. Where the
+evidence for capturability is divided, a row takes the parent `io.output`, so
+over-approximation lands on the side masking cannot deduct.
+
+Because output is under `io`, a bare `io` envelope **admits** output. That is
+the deliberate consequence of the move (ADR-0083), not an oversight: bare `io`
+is what a stream operation says when its destination is unknown, and stdout is
+one of the destinations. Fine-grained envelopes are unaffected — `io.db` does
+not subsume `io.output.buffer`, so a repository that starts echoing is still
+caught. "Does io, but does not output" is spelled by enumerating the children.
+
+`io.input` is the symmetric ambient **input** channel (`php://input`,
+`php://stdin`). No builtin row carries it yet — recognizing a stream by its
+target needs argument awareness the catalog does not have — so like `ffi` it
+exists for declarations and for the rows that will follow. `$_GET`-style reads
+of parsed request memory stay `global.read`; they are memory, not a stream.
 
 `mutate.local` is the degenerate member of the `mutate` family and the one label
 **every** envelope tolerates, `#[\Steins\Pure]` included (ADR-0063 §2.3). It
@@ -179,7 +213,7 @@ Recognized origins in a body:
 | Origin | Effect |
 | --- | --- |
 | a statically-named function call | the catalog's labels for it, or a propagation edge to a project function |
-| `echo` / `print` / `<?=` | `output` |
+| `echo` / `print` / `<?=` / inline HTML | `io.output.buffer` |
 | `exit` / `die` | `exit` (ADR-0019 rule 4 — `Pure` forbids exit) |
 | a resolvable method call (`$this->`, `self::`, `parent::`, `Foo::`, `new Foo()->`) | a method→method propagation edge into the project class, else the catalog's labels for the *builtin* class's method |
 | a higher-order builtin with a resolvable callback | the callback's effects, per the [invocation shape](closures.md) |
@@ -264,9 +298,9 @@ function f(Repo $r) { return $r->find(1); }     //=> effects: {≤io.db}
 `Repo::find()` declares `#[\Steins\Effect('io.db')]`, so the call *cannot* do
 more than `io.db` whichever implementation is injected. That label joins the
 caller's **declared** lane — rendered with a `≤` prefix inside the same braces
-(`effects: {output, ≤io.db}`) and never conflated with a proven one. Declared
-labels travel call edges exactly as proven ones do, monotone to the same
-fixpoint.
+(`effects: {io.output.buffer, ≤io.db}`) and never conflated with a proven one.
+Declared labels travel call edges exactly as proven ones do, monotone to the
+same fixpoint.
 
 The rules that make this safe:
 

@@ -79,7 +79,7 @@ fn several_labels_are_one_comma_space_list_sorted() {
     let lib = "<?php\nfunction f(): void {\n    file_put_contents(\"/x\", \"y\");\n    echo \"hi\";\n    $t = time();\n}\n";
     let out = applied("lib.php", lib);
     assert!(
-        out.contains(" * @phpstan-impure io.fs.write, nondet.time, output\n"),
+        out.contains(" * @phpstan-impure io.fs.write, io.output.buffer, nondet.time\n"),
         "one sorted comma-space list:\n{out}"
     );
 }
@@ -513,6 +513,37 @@ fn a_typoed_existing_bound_is_prose_not_a_stale_bound() {
     assert_oracle_complete(&report);
     assert_eq!(only_reason(&report), REASON_EXISTING_TAG_UNREADABLE);
     assert_eq!(report.plan.apply_file("lib.php", lib), lib, "the file must be byte-identical");
+}
+
+/// ADR-0083 retired the `output` root, so a docblock still carrying the old
+/// spelling reads as prose to the live registry: the transform refuses it and
+/// leaves the bytes alone rather than "upgrading" a tag it cannot parse. This is
+/// the migration path working as designed — the existing refusal discipline
+/// needed no new rule.
+#[test]
+fn a_retired_output_bound_is_prose_and_stays_byte_untouched() {
+    let lib = "<?php\n/**\n * @phpstan-impure output\n */\nfunction f(): void { echo \"hi\"; }\n";
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.enumerated, 1);
+    assert_eq!(only_reason(&report), REASON_EXISTING_TAG_UNREADABLE);
+    assert!(report.plan.is_empty());
+    assert_eq!(report.plan.apply_file("lib.php", lib), lib, "the file must be byte-identical");
+}
+
+/// And the writing side of the same migration: emission spells the new
+/// vocabulary. An echoing exhaustive function gets `io.output.buffer`, never the
+/// retired root.
+#[test]
+fn emission_writes_the_new_output_vocabulary() {
+    let lib = "<?php\nfunction f(): void { echo \"hi\"; }\n";
+    let report = plan(&[("lib.php", lib)]);
+    assert_oracle_complete(&report);
+    assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
+    assert_eq!(
+        report.plan.apply_file("lib.php", lib),
+        "<?php\n/**\n * @phpstan-impure io.output.buffer\n */\nfunction f(): void { echo \"hi\"; }\n"
+    );
 }
 
 /// One unreadable label makes the **whole** tag unspecified — the known label

@@ -329,7 +329,7 @@ fn declared_label_not_covered_by_the_proven_lane_survives() {
         "<?php\n{REPO}function f(Repo $r): string {{ echo 'x'; return $r->find(1); }}\n"
     );
     let s = summary(&src, "f");
-    assert_eq!(s.labels, vec!["output"]);
+    assert_eq!(s.labels, vec!["io.output.buffer"]);
     assert_eq!(s.declared, vec!["io.db"]);
     assert!(s.exhaustive);
 }
@@ -337,7 +337,7 @@ fn declared_label_not_covered_by_the_proven_lane_survives() {
 #[test]
 fn the_margin_renders_a_declared_label_with_a_less_than_or_equal_prefix() {
     // An only-declared summary: `effects: {≤io.db}`. Beside a proven label the
-    // two share the braces, proven first: `effects: {output, ≤io.db}`.
+    // two share the braces, proven first: `effects: {io.output.buffer, ≤io.db}`.
     let only = format!(
         "<?php\n{REPO}function f(Repo $r): string {{ return $r->find(1); }}\n"
     );
@@ -350,7 +350,7 @@ fn the_margin_renders_a_declared_label_with_a_less_than_or_equal_prefix() {
         "<?php\n{REPO}function f(Repo $r): string {{ echo 'x'; return $r->find(1); }}\n"
     );
     assert!(
-        effect_margins(&mixed).contains(&"effects: {output, ≤io.db}".to_owned()),
+        effect_margins(&mixed).contains(&"effects: {io.output.buffer, ≤io.db}".to_owned()),
         "got: {:?}",
         effect_margins(&mixed)
     );

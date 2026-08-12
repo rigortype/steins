@@ -172,8 +172,8 @@ fn pure_tolerates_preg_match_into_a_local() {
 fn a_narrower_declaration_is_not_stricter_than_pure() {
     // Tolerance is monotone: `Pure` is the tightest envelope, so a label it
     // tolerates cannot exceed a wider declaration either.
-    let src = "<?php\n#[\\Steins\\Effect('output')]\nfunction f(string $s): void { preg_match('/a/', $s, $m); echo $s; }\n";
-    assert_eq!(effects(src).len(), 0, "output envelope also tolerates mutate.local");
+    let src = "<?php\n#[\\Steins\\Effect('io.output')]\nfunction f(string $s): void { preg_match('/a/', $s, $m); echo $s; }\n";
+    assert_eq!(effects(src).len(), 0, "io.output envelope also tolerates mutate.local");
 }
 
 #[test]
@@ -217,12 +217,12 @@ fn usort_with_an_echoing_comparator_is_exceeded_by_echo_not_by_mutation() {
     // thing reported — the sort's own `mutate.local` stays tolerated.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(array $rows): array {\n    usort($rows, function ($a, $b) { echo $a; return $a <=> $b; });\n    return $rows;\n}\n";
     let d = one(src);
-    assert!(d.message.contains("output"), "named by the echo: {}", d.message);
+    assert!(d.message.contains("io.output.buffer"), "named by the echo: {}", d.message);
     assert!(!d.message.contains("mutate"), "the sort's own write stays tolerated: {}", d.message);
 
     let mut labels = summary(src, "f").labels;
     labels.sort();
-    assert_eq!(labels, vec!["mutate.local".to_owned(), "output".to_owned()]);
+    assert_eq!(labels, vec!["io.output.buffer".to_owned(), "mutate.local".to_owned()]);
 }
 
 #[test]
