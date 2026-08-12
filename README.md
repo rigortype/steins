@@ -28,9 +28,13 @@ Or `brew install rigortype/tap/steins`, a [prebuilt binary](https://github.com/r
 - [Not implemented](docs/type-specification/not-implemented.md) — the honest gap list.
 - [Roadmap](docs/ROADMAP.md) — milestones, exit criteria, and the refusal list.
 
+## Acknowledgments
+
+Steins draws on a number of PHP type checkers, but PHPStan is its direct model, and many of its rules are borrowed straight from PHPStan.
+
 ## Copyright
 
-Apache-2.0 ([LICENSE](LICENSE)). The `#[\Steins\Pure]` and `#[\Steins\Effect]` attributes are a separate MIT package, [rigortype/steins-attributes](https://github.com/rigortype/steins-attributes).
+Apache-2.0 ([LICENSE](LICENSE)). The `#[\Steins\Pure]` and `#[\Steins\Effect]` attributes are a separate MIT package, [rigortype/steins-attributes](https://github.com/rigortype/steins-attributes). Rules borrowed from PHPStan carry its own MIT license ([LICENSE-PHPSTAN](LICENSE-PHPSTAN)). See [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) for every other copyright notice.
 
 ```
 Copyright 2026 TypedDuck, USAMI Kenta <tadsan@zonu.me>

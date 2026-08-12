@@ -46,7 +46,7 @@
 //! would be faster for a long report but would reorder stdout against the stderr
 //! notices, and correctness of the interleaving is worth more than the syscalls.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -105,6 +105,16 @@ pub fn stdout_line(args: std::fmt::Arguments<'_>) {
     }
     let mut handle = std::io::stdout().lock();
     record(handle.write_fmt(args).and_then(|()| handle.write_all(b"\n")));
+}
+
+/// Whether stdout is an interactive terminal — `license` reads this to decide
+/// whether to page (see `main::should_page`). Lives in the seam, rather than
+/// as a bare `std::io::stdout().is_terminal()` at the call site, so the
+/// `nothing_writes_around_the_output_seam` guard test (which forbids raw
+/// `io::stdout()` elsewhere, on the theory that any of it might panic-write on
+/// a closed pipe) does not have to special-case a read that never writes.
+pub fn stdout_is_terminal() -> bool {
+    std::io::stdout().is_terminal()
 }
 
 /// Write one formatted line to stderr — the `errln!` macro. Errors are dropped

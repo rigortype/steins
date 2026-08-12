@@ -8,7 +8,7 @@
 //!   freq                     builtin-call frequency, written to docs/notes/
 //!   gen-catalog              regenerate the builtin hierarchy table from mining TOML
 //!   lean-check [--bless]     check the committed Lean 4 vectors against the spec
-//!   licenses                 regenerate THIRD-PARTY-LICENSES.md, merging typographic variants
+//!   licenses                 regenerate THIRD-PARTY-LICENSES.md from cargo-about
 //!   mine-function-map [DIR]  mine phpstan-src's functionMap into the declared-envelope TOML
 //!   nsrt [DIR]               assertType harness (oracle idea B) over phpstan-src nsrt
 //!   phpdoc-oracle [--check]  diff steins-phpdoc against the real phpstan/phpdoc-parser
