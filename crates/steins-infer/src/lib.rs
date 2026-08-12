@@ -4455,7 +4455,7 @@ fn add_callback_effects(
                 // A builtin passed *as* a callback is invoked by the higher-order
                 // callee with arguments of its choosing, never with an lvalue of
                 // this frame — the conditional out-param row cannot apply.
-                for f in builtin_findings(&builtin_name, span, cx.tree(), cx.path(), None) {
+                for f in builtin_findings(&builtin_name, span, cx.tree(), cx.path(), None, None) {
                     d.insert(f);
                 }
             }
@@ -4771,7 +4771,7 @@ fn classify_effect_origins(
 ) {
     for origin in origins {
         match origin {
-            EffectOrigin::Call { name, span, arg_targets } => {
+            EffectOrigin::Call { name, span, arg_targets, const_args } => {
                 let targets = arg_targets.as_deref();
                 match cx.resolve_effect_function(name) {
                     FnResolution::User(site) => {
@@ -4802,9 +4802,14 @@ fn classify_effect_origins(
                         }
                     }
                     FnResolution::Builtin(builtin_name) => {
-                        for f in
-                            builtin_findings(&builtin_name, *span, cx.tree(), cx.path(), targets)
-                        {
+                        for f in builtin_findings(
+                            &builtin_name,
+                            *span,
+                            cx.tree(),
+                            cx.path(),
+                            targets,
+                            Some(const_args),
+                        ) {
                             d.insert(f);
                         }
                     }
@@ -4889,7 +4894,14 @@ fn classify_effect_origins(
             }
             // A higher-order call: the callback's effects join the caller's, or
             // the base call resolves normally for a non-invoker callee (ADR-0033).
-            EffectOrigin::HigherOrder { callee, callbacks, arg_count, arg_targets, span } => {
+            EffectOrigin::HigherOrder {
+                callee,
+                callbacks,
+                arg_count,
+                arg_targets,
+                const_args,
+                span,
+            } => {
                 let targets = Some(arg_targets.as_slice());
                 match cx.resolve_invoker_function(callee) {
                     FnResolution::Builtin(builtin_name) => {
@@ -4903,9 +4915,14 @@ fn classify_effect_origins(
                         // adds the `…?` taint below. P2 is what puts anything in
                         // that leg for the sort family: `usort`'s own color is
                         // the by-ref write to its array argument.
-                        for f in
-                            builtin_findings(&builtin_name, *span, cx.tree(), cx.path(), targets)
-                        {
+                        for f in builtin_findings(
+                            &builtin_name,
+                            *span,
+                            cx.tree(),
+                            cx.path(),
+                            targets,
+                            Some(const_args),
+                        ) {
                             d.insert(f);
                         }
                         if shape.callback_param < *arg_count {
@@ -4959,6 +4976,7 @@ fn classify_effect_origins(
                                 cx.tree(),
                                 cx.path(),
                                 targets,
+                                Some(const_args),
                             ) {
                                 d.insert(f);
                             }
@@ -5725,7 +5743,7 @@ fn report_unit(
     // 2. Envelope-exceeded violations.
     for origin in origins {
         match origin {
-            EffectOrigin::Call { name, span, arg_targets } => {
+            EffectOrigin::Call { name, span, arg_targets, const_args } => {
                 let targets = arg_targets.as_deref();
                 match cx.resolve_effect_function(name) {
                     FnResolution::User(site) => {
@@ -5739,9 +5757,14 @@ fn report_unit(
                         );
                     }
                     FnResolution::Builtin(builtin_name) => {
-                        for f in
-                            builtin_findings(&builtin_name, *span, cx.tree(), cx.path(), targets)
-                        {
+                        for f in builtin_findings(
+                            &builtin_name,
+                            *span,
+                            cx.tree(),
+                            cx.path(),
+                            targets,
+                            Some(const_args),
+                        ) {
                             if bound.exceeds(&f.label) {
                                 let prefix = format!("{}() has effect {}", name.simple(), f.label);
                                 out.push(exceeded_diag(
@@ -5784,7 +5807,14 @@ fn report_unit(
             // at the shape's callback param contributes its effects with the
             // callback's own origin in the provenance (ADR-0033). A non-invoker
             // callee resolves as a normal edge.
-            EffectOrigin::HigherOrder { callee, callbacks, arg_count, arg_targets, span } => {
+            EffectOrigin::HigherOrder {
+                callee,
+                callbacks,
+                arg_count,
+                arg_targets,
+                const_args,
+                span,
+            } => {
                 let targets = Some(arg_targets.as_slice());
                 match cx.resolve_invoker_function(callee) {
                     FnResolution::Builtin(builtin_name) => {
@@ -5793,9 +5823,14 @@ fn report_unit(
                         // ADR-0063 P1 own-color leg, mirroring `compute_effects`:
                         // the invoker's own catalog color is reported whether or not
                         // the callback at the shape's position resolves.
-                        for f in
-                            builtin_findings(&builtin_name, *span, cx.tree(), cx.path(), targets)
-                        {
+                        for f in builtin_findings(
+                            &builtin_name,
+                            *span,
+                            cx.tree(),
+                            cx.path(),
+                            targets,
+                            Some(const_args),
+                        ) {
                             if bound.exceeds(&f.label) {
                                 let prefix = format!("{}() has effect {}", callee.simple(), f.label);
                                 out.push(exceeded_diag(cx, span.start, &prefix, display, bound, &f.label));
@@ -5825,6 +5860,7 @@ fn report_unit(
                                 cx.tree(),
                                 cx.path(),
                                 targets,
+                                Some(const_args),
                             ) {
                                 if bound.exceeds(&f.label) {
                                     let prefix = format!("{}() has effect {}", callee.simple(), f.label);
@@ -5900,6 +5936,7 @@ fn report_callback(
             steins_syntax::Span { start: offset, end: offset },
             cx.tree(),
             cx.path(),
+            None,
             None,
         ) {
             if bound.exceeds(&f.label) {
@@ -6030,6 +6067,20 @@ fn out_param_labels(name: &str, arg_targets: Option<&[steins_syntax::RefTarget]>
     labels
 }
 
+/// One [`steins_syntax::CallTarget`] as the catalog spells it. The two crates
+/// keep their own tiny enum on purpose: `steins-catalog` depends on nothing (it
+/// is a body of knowledge about PHP, testable without a parser) and
+/// `steins-syntax` is the Mago-lowering layer that knows no catalog, so the
+/// translation lives here, in the crate that already depends on both.
+fn stream_target(
+    target: Option<&steins_syntax::CallTarget>,
+) -> Option<steins_catalog::StreamTarget<'_>> {
+    match target? {
+        steins_syntax::CallTarget::Literal(s) => Some(steins_catalog::StreamTarget::Literal(s)),
+        steins_syntax::CallTarget::ConstFetch(s) => Some(steins_catalog::StreamTarget::Constant(s)),
+    }
+}
+
 /// The proven effect findings a builtin `name` carries: its unconditional catalog
 /// color ([`steins_catalog::effect_labels`]) joined with the **conditional**
 /// by-ref out-parameter color this particular call earns
@@ -6038,14 +6089,32 @@ fn out_param_labels(name: &str, arg_targets: Option<&[steins_syntax::RefTarget]>
 /// The two axes are independent and both may fire: `shuffle($rows)` is
 /// `nondet.random` *and* `mutate.local`. Empty for a pure or uncatalogued builtin
 /// called without an out-parameter.
+///
+/// `const_args` is the third axis and the only one that can make a row *narrower*
+/// (issue #318): a wrapper-capable stream row is `io` until the call site proves
+/// which channel it opens, and [`steins_catalog::narrowed_stream_labels`] is what
+/// reads the proof. Both consumers of a call origin — the summary fixpoint and
+/// the envelope check — reach the decision through this one function, so the two
+/// cannot answer differently. `None` is the honest answer wherever the arguments
+/// are not in hand (a builtin passed *as* a callback is invoked with arguments of
+/// the invoker's choosing, never ones written here).
 fn builtin_findings(
     name: &str,
     span: steins_syntax::Span,
     tree: &SourceTree,
     path: &str,
     arg_targets: Option<&[steins_syntax::RefTarget]>,
+    const_args: Option<&steins_syntax::ConstArgs>,
 ) -> Vec<EffectFinding> {
-    let colored = steins_catalog::effect_labels(name).unwrap_or(&[]);
+    let narrowed = const_args.and_then(|c| {
+        steins_catalog::narrowed_stream_labels(
+            name,
+            stream_target(c.first.as_ref()),
+            stream_target(c.second.as_ref()),
+        )
+    });
+    let colored: &[&str] =
+        narrowed.as_deref().unwrap_or_else(|| steins_catalog::effect_labels(name).unwrap_or(&[]));
     let by_ref = out_param_labels(name, arg_targets);
     if colored.is_empty() && by_ref.is_empty() {
         return Vec::new();

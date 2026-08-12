@@ -42,7 +42,9 @@ fn purer_impl_of_pure_interface_is_silent() {
 #[test]
 fn impl_within_effect_envelope_is_silent() {
     let src = "<?php\ninterface Store {\n    #[\\Steins\\Effect('io')]\n    public function load(string $p): string;\n}\nclass FileStore implements Store {\n    public function load(string $p): string { return file_get_contents($p); }\n}\n";
-    assert_eq!(effect_liskov(src).len(), 0, "io.fs.read is within the io envelope");
+    // The target is a parameter, so the proven effect is the `io` default the
+    // wrapper-capable rows carry (issue #318) — and the envelope is `io`.
+    assert_eq!(effect_liskov(src).len(), 0, "the proven io is within the io envelope");
 }
 
 #[test]

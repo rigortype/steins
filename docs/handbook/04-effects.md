@@ -91,17 +91,27 @@ function slug(string $s): string {
 }
 
 #[\Steins\Effect('io.fs')]               // an upper bound: filesystem, nothing wider
-function readIt(string $path): string {
-    return file_get_contents($path);
+function readIt(): string {
+    return file_get_contents('/etc/hosts');
 }
 ```
 
 `#[\Steins\Pure]` is the empty envelope: this function computes a
 value and does nothing else. `#[\Steins\Effect('io.fs')]` says
 "filesystem effects are allowed here" — and by prefix subsumption
-a read like `file_get_contents` falls under `io.fs`, so it raises
+the `io.fs.read` this call proves falls under `io.fs`, so it raises
 no finding. Both the fully-qualified spelling and a `use`-imported
 `#[Pure]` / `#[Effect(...)]` are recognised.
+
+The literal path is doing work in that example. `file_get_contents`
+is a *stream* function: hand it `'https://…'` and it reads the
+network, so its effect is whatever its target turns out to be.
+Steins reads a constant target and colors the call precisely
+(`io.fs.read` here, `io.net.http` for the URL); with a target it
+cannot see — `file_get_contents($path)` — the honest answer is the
+parent `io`, and an `io.fs` envelope over that call reports. Widen
+the declaration to `io` when the destination is genuinely a
+parameter.
 
 ## The docblock spelling: interop envelopes
 

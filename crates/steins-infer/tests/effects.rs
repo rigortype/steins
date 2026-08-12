@@ -251,6 +251,244 @@ fn narrow_read_envelope_admits_a_read() {
     assert_eq!(effects(src).len(), 0, "io.fs.read admits io.fs.read → silent");
 }
 
+// ---- Issue #318: wrapper-capable stream rows, and their call-site narrowing --
+//
+// The row a wrapper-capable builtin carries argument-blind is `io` — the parent
+// of every channel a stream wrapper can reach. What a call site *proves* narrows
+// it back down, which is why the literal-path fixtures above are unchanged by the
+// fix; this block is what the fix added.
+
+#[test]
+fn a_proven_url_target_exceeds_a_filesystem_envelope() {
+    // The headline false negative: an `io.fs.read` envelope used to admit a
+    // network read, because the row said `io.fs.read` whatever the argument was.
+    let src = "<?php\n#[\\Steins\\Effect('io.fs.read')]\nfunction fetch(): string { return file_get_contents('https://example.com/rates'); }\n";
+    let d = one(src);
+    assert_eq!(
+        d.message,
+        "file_get_contents() has effect io.net.http, but fetch() is declared #[\\Steins\\Effect('io.fs.read')] — io.net.http exceeds the envelope"
+    );
+    assert_eq!(d.line, 3);
+}
+
+#[test]
+fn a_literal_local_path_stays_silent_under_the_same_envelope() {
+    // The positive control for the test above, and for every fixture in this
+    // file: narrowing gives the precise old label back.
+    let src = "<?php\n#[\\Steins\\Effect('io.fs.read')]\nfunction load(): string { return file_get_contents('/etc/passwd'); }\n";
+    assert_eq!(effects(src).len(), 0, "a proven local path is still io.fs.read → silent");
+}
+
+#[test]
+fn an_unprovable_path_widens_to_the_io_default() {
+    // No proof, no narrowing: `$url` could be anything, and `io` is the honest
+    // upper bound of everything a stream wrapper reaches.
+    let src = "<?php\n#[\\Steins\\Effect('io.fs.read')]\nfunction load(string $url): string { return file_get_contents($url); }\n";
+    let d = one(src);
+    assert_eq!(
+        d.message,
+        "file_get_contents() has effect io, but load() is declared #[\\Steins\\Effect('io.fs.read')] — io exceeds the envelope"
+    );
+}
+
+#[test]
+fn a_resource_of_unknown_provenance_exceeds_a_filesystem_envelope() {
+    // `fread($r)` reads whatever the resource is — a socket, a process pipe.
+    let src = "<?php\n#[\\Steins\\Effect('io.fs.read')]\nfunction pull($r): string { return fread($r, 8); }\n";
+    let d = one(src);
+    assert_eq!(
+        d.message,
+        "fread() has effect io, but pull() is declared #[\\Steins\\Effect('io.fs.read')] — io exceeds the envelope"
+    );
+}
+
+#[test]
+fn a_write_to_an_unknown_resource_exceeds_a_filesystem_envelope() {
+    let src = "<?php\n#[\\Steins\\Effect('io.fs.write')]\nfunction push($sock): void { fwrite($sock, 'x'); }\n";
+    let d = one(src);
+    assert_eq!(
+        d.message,
+        "fwrite() has effect io, but push() is declared #[\\Steins\\Effect('io.fs.write')] — io exceeds the envelope"
+    );
+}
+
+#[test]
+fn fwrite_to_stdout_is_the_output_channel_not_the_filesystem() {
+    // The ADR-0083 row that had been waiting for argument awareness. It exceeds
+    // an `io.fs.write` envelope…
+    let bad = "<?php\n#[\\Steins\\Effect('io.fs.write')]\nfunction emit(): void { fwrite(STDOUT, 'x'); }\n";
+    let d = one(bad);
+    assert_eq!(
+        d.message,
+        "fwrite() has effect io.output.stdout, but emit() is declared #[\\Steins\\Effect('io.fs.write')] — io.output.stdout exceeds the envelope"
+    );
+    // …and is admitted by the channel's own parent, and by `io`.
+    let ok = "<?php\n#[\\Steins\\Effect('io.output')]\nfunction emit(): void { fwrite(STDOUT, 'x'); }\n";
+    assert_eq!(effects(ok).len(), 0, "io.output subsumes io.output.stdout → silent");
+    let wide = "<?php\n#[\\Steins\\Effect('io')]\nfunction emit(): void { fwrite(STDERR, 'x'); }\n";
+    assert_eq!(effects(wide).len(), 0, "io subsumes io.output.stderr → silent");
+}
+
+#[test]
+fn the_php_pseudo_streams_are_read_at_the_call_site() {
+    // `php://output` is the OB channel, which a `Pure` envelope forbids…
+    let out = "<?php\n#[\\Steins\\Pure]\nfunction emit(string $s): void { file_put_contents('php://output', $s); }\n";
+    assert_eq!(
+        one(out).message,
+        "file_put_contents() has effect io.output.buffer, but emit() is declared #[\\Steins\\Pure]"
+    );
+    // …`php://input` is the inbound stream, the first builtin row to carry it…
+    let inp = "<?php\n#[\\Steins\\Effect('io.fs.read')]\nfunction body(): string { return file_get_contents('php://input'); }\n";
+    assert_eq!(
+        one(inp).message,
+        "file_get_contents() has effect io.input, but body() is declared #[\\Steins\\Effect('io.fs.read')] — io.input exceeds the envelope"
+    );
+    // …a filter chain resolves to the stream it actually opens…
+    let filtered = "<?php\n#[\\Steins\\Effect('io.fs.read')]\nfunction fetch(): string { return file_get_contents('php://filter/read=convert.base64-encode/resource=https://example.com/r'); }\n";
+    assert_eq!(
+        one(filtered).message,
+        "file_get_contents() has effect io.net.http, but fetch() is declared #[\\Steins\\Effect('io.fs.read')] — io.net.http exceeds the envelope"
+    );
+    // …a `data://` URI reaches no channel at all, and `mutate.local` is the one
+    // label every envelope tolerates (ADR-0063 §2.3)…
+    let data = "<?php\n#[\\Steins\\Pure]\nfunction inline(): string { return file_get_contents('data://text/plain,hi'); }\n";
+    assert_eq!(effects(data).len(), 0, "a data URI is mutate.local → tolerated even by Pure");
+    // …and an unknown scheme keeps the sound `io` default (ruling D-W1: a
+    // userland `stream_wrapper_register` is approximated, not read).
+    let unknown = "<?php\n#[\\Steins\\Effect('io.fs.read')]\nfunction fetch(): string { return file_get_contents('acme://bucket/key'); }\n";
+    assert_eq!(
+        one(unknown).message,
+        "file_get_contents() has effect io, but fetch() is declared #[\\Steins\\Effect('io.fs.read')] — io exceeds the envelope"
+    );
+}
+
+#[test]
+fn fopen_composes_its_direction_from_a_literal_mode() {
+    // Read mode under a read envelope: silent, where the old parent-`io.fs` row
+    // would have reported.
+    let read = "<?php\n#[\\Steins\\Effect('io.fs.read')]\nfunction open(): mixed { return fopen('/tmp/x', 'r'); }\n";
+    assert_eq!(effects(read).len(), 0, "a proven 'r' mode on a local path is io.fs.read");
+    // Write mode under the same envelope reports the direction it proves.
+    let write = "<?php\n#[\\Steins\\Effect('io.fs.read')]\nfunction open(): mixed { return fopen('/tmp/x', 'w'); }\n";
+    assert_eq!(
+        one(write).message,
+        "fopen() has effect io.fs.write, but open() is declared #[\\Steins\\Effect('io.fs.read')] — io.fs.write exceeds the envelope"
+    );
+    // An unprovable mode leaves the direction unknown: the parent `io.fs`.
+    let dynamic = "<?php\n#[\\Steins\\Effect('io.fs.read')]\nfunction open(string $m): mixed { return fopen('/tmp/x', $m); }\n";
+    assert_eq!(
+        one(dynamic).message,
+        "fopen() has effect io.fs, but open() is declared #[\\Steins\\Effect('io.fs.read')] — io.fs exceeds the envelope"
+    );
+}
+
+#[test]
+fn a_two_target_row_reads_each_side_in_its_own_role() {
+    // `copy` reads its source and writes its destination, so two proven local
+    // paths earn both labels — an `io.fs` envelope admits the pair…
+    let both = "<?php\n#[\\Steins\\Effect('io.fs')]\nfunction dup(): bool { return copy('/a', '/b'); }\n";
+    assert_eq!(effects(both).len(), 0, "io.fs subsumes both halves");
+    // …and a write-only envelope catches the read the old row never named.
+    let write_only = "<?php\n#[\\Steins\\Effect('io.fs.write')]\nfunction dup(): bool { return copy('/a', '/b'); }\n";
+    assert_eq!(
+        one(write_only).message,
+        "copy() has effect io.fs.read, but dup() is declared #[\\Steins\\Effect('io.fs.write')] — io.fs.read exceeds the envelope"
+    );
+    // `rename` moves a directory entry: both sides are metadata writes, it reads
+    // no contents, and the same envelope is therefore silent.
+    let mv = "<?php\n#[\\Steins\\Effect('io.fs.write')]\nfunction mv(): bool { return rename('/a', '/b'); }\n";
+    assert_eq!(effects(mv).len(), 0, "rename writes on both sides → io.fs.write alone");
+    // A remote source is a transport the envelope does not admit.
+    let remote = "<?php\n#[\\Steins\\Effect('io.fs.write')]\nfunction dup(): bool { return copy('https://h/a', '/b'); }\n";
+    let f = effects(remote);
+    assert_eq!(f.len(), 1, "only the network half exceeds, got: {f:#?}");
+    assert_eq!(
+        f[0].message,
+        "copy() has effect io.net.http, but dup() is declared #[\\Steins\\Effect('io.fs.write')] — io.net.http exceeds the envelope"
+    );
+    // One unprovable side: the union with the `io` default is `io`, and the row
+    // declines to narrow at all rather than fake the precision.
+    let half = "<?php\n#[\\Steins\\Effect('io.fs.write')]\nfunction dup(string $to): bool { return copy('/a', $to); }\n";
+    assert_eq!(
+        one(half).message,
+        "copy() has effect io, but dup() is declared #[\\Steins\\Effect('io.fs.write')] — io exceeds the envelope"
+    );
+}
+
+#[test]
+fn the_stat_and_unlink_family_is_wrapper_capable_too() {
+    // A literal local path is the precise old row, so an `io.fs.write` envelope
+    // over `unlink('/tmp/x')` is as silent as it ever was…
+    let local = "<?php\n#[\\Steins\\Effect('io.fs.write')]\nfunction wipe(): void { unlink('/tmp/x'); }\n";
+    assert_eq!(effects(local).len(), 0, "a proven local path is still io.fs.write");
+    let stat = "<?php\n#[\\Steins\\Effect('io.fs.read')]\nfunction has(): bool { return file_exists('/tmp/x'); }\n";
+    assert_eq!(effects(stat).len(), 0, "a proven local path is still io.fs.read");
+    // …and the reason the row had to widen: the same call over a wrapper is a
+    // network round trip, which no `io.fs.*` envelope admits.
+    let remote = "<?php\n#[\\Steins\\Effect('io.fs.write')]\nfunction wipe(): void { unlink('ssh2.sftp://h/x'); }\n";
+    assert_eq!(
+        one(remote).message,
+        "unlink() has effect io.net, but wipe() is declared #[\\Steins\\Effect('io.fs.write')] — io.net exceeds the envelope"
+    );
+    let remote_stat = "<?php\n#[\\Steins\\Effect('io.fs.read')]\nfunction has(): bool { return file_exists('ftp://h/x'); }\n";
+    assert_eq!(
+        one(remote_stat).message,
+        "file_exists() has effect io.net, but has() is declared #[\\Steins\\Effect('io.fs.read')] — io.net exceeds the envelope"
+    );
+    // An unprovable path is the `io` default, like every other stream row.
+    let dynamic = "<?php\n#[\\Steins\\Effect('io.fs.write')]\nfunction wipe(string $p): void { unlink($p); }\n";
+    assert_eq!(
+        one(dynamic).message,
+        "unlink() has effect io, but wipe() is declared #[\\Steins\\Effect('io.fs.write')] — io exceeds the envelope"
+    );
+    // These open no stream, so a `php://` target names no channel for them: the
+    // `io` default stands rather than a made-up `io.output.stdout`.
+    let pseudo = "<?php\n#[\\Steins\\Effect('io.fs.read')]\nfunction has(): bool { return is_file('php://stdout'); }\n";
+    assert_eq!(
+        one(pseudo).message,
+        "is_file() has effect io, but has() is declared #[\\Steins\\Effect('io.fs.read')] — io exceeds the envelope"
+    );
+}
+
+#[test]
+fn the_read_and_relay_pair_keeps_its_output_component_when_narrowed() {
+    // `readfile('/x')` is both halves again once the target is proven, so an
+    // envelope naming only the read half still catches the output (ADR-0083).
+    let src = "<?php\n#[\\Steins\\Effect('io.fs.read')]\nfunction serve(): void { readfile('/var/www/x'); }\n";
+    let d = one(src);
+    assert_eq!(
+        d.message,
+        "readfile() has effect io.output.buffer, but serve() is declared #[\\Steins\\Effect('io.fs.read')] — io.output.buffer exceeds the envelope"
+    );
+    // Both halves are admitted by `io`.
+    let wide = "<?php\n#[\\Steins\\Effect('io')]\nfunction serve(): void { readfile('/var/www/x'); }\n";
+    assert_eq!(effects(wide).len(), 0, "io subsumes both components → silent");
+}
+
+// ---- Three process-global rows (a separate slice of the same branch) --------
+
+#[test]
+fn the_process_global_rows_are_proven_effects_not_silent_taint() {
+    for (call, name) in
+        [("srand(1)", "srand"), ("mt_srand(1)", "mt_srand"), ("clearstatcache()", "clearstatcache")]
+    {
+        let src = format!("<?php\n#[\\Steins\\Pure]\nfunction f(): void {{ {call}; }}\n");
+        assert_eq!(
+            one(&src).message,
+            format!("{name}() has effect global.write, but f() is declared #[\\Steins\\Pure]")
+        );
+    }
+    // Seeding writes the state a draw reads; the two are different effects, so a
+    // `global.write` envelope admits only the write.
+    let seeded = "<?php\n#[\\Steins\\Effect('global.write')]\nfunction reseed(): void { mt_srand(1); }\n";
+    assert_eq!(effects(seeded).len(), 0, "global.write admits the seeding row → silent");
+    let drawn = "<?php\n#[\\Steins\\Effect('global.write')]\nfunction draw(): int { return mt_rand(); }\n";
+    assert_eq!(
+        one(drawn).message,
+        "mt_rand() has effect nondet.random, but draw() is declared #[\\Steins\\Effect('global.write')] — nondet.random exceeds the envelope"
+    );
+}
+
 #[test]
 fn nondet_envelope_covers_random_and_time() {
     let src = "<?php\n#[\\Steins\\Effect('nondet')]\nfunction f(): int { return rand() + time(); }\n";

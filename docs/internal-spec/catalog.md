@@ -58,10 +58,22 @@ family), header mutation, signals, System-V IPC, global/ini state, the
 read-and-relay pair `readfile`/`fpassthru`, the output-relaying
 `system`/`passthru`/`curl_exec`, and the composite `session_start`.
 
+**Every filesystem row is `io`** (issue #318). `file_get_contents`,
+`file_put_contents`, `fopen`, `copy`, `rename`, `readfile`, `fpassthru`, the
+resource-taking `fread` / `fgets` / `fwrite` / `fputs`, and the stat-and-unlink
+family `unlink` / `mkdir` / `rmdir` / `touch` / `scandir` / `file_exists` /
+`is_file` / `is_dir` all reach whatever the stream layer resolves their argument
+to, so the argument-blind row can only be the `io` parent; a row of `io.fs.read`
+would hide a network read under an `io.fs.read` envelope, which is precisely the
+upper-bound contract's failure mode. The stat-and-unlink family is no exception
+— `unlink('ssh2.sftp://…')` deletes over the network, `file_exists('ftp://…')`
+stats over it — so **no argument-blind row in this table produces an `io.fs.*`
+label any more**; `session_start`'s composite is the one place that label
+survives arg-blind, and its default handler does write a real session file.
+`narrowed_stream_labels` below is what gives the precise labels back.
+
 Recorded imprecisions, stated rather than hidden:
 
-- `fopen` stays at the parent `io.fs` label — its read/write split is
-  mode-string-dependent and this slice does not inspect it.
 - `print_r` / `var_export` are coloured `io.output.buffer` even though they are
   pure in return-mode (`$return = true`); the arg-blind upper bound is the safe
   choice. `curl_exec` keeps its `io.output` component the same way — only
@@ -69,15 +81,75 @@ Recorded imprecisions, stated rather than hidden:
 - `system` / `passthru` / `curl_exec` take the parent `io.output`, not
   `io.output.buffer`: whether an output buffer captures a relayed child's
   output is not settled, and ADR-0083 puts split evidence on the side a future
-  masking cannot deduct.
-- `fwrite` stays `io.fs.write`; narrowing a `STDOUT`/`STDERR` destination to
-  `io.output.stdout`/`.stderr` needs argument awareness this table lacks.
+  masking cannot deduct. None of the three is wrapper-capable, so all three keep
+  their precise transport component (`io.process`, `io.net`).
 - The `ob_start` family is deliberately absent — widening to unknown effect is
   sound until masking exists (ADR-0083).
 - `sleep` / `usleep` are `io` — an observable timing side effect, closest to the
   `io` root among the initial labels.
+- `srand` / `mt_srand` / `clearstatcache` are `global.write`: all three replace
+  process-global state (the RNG generator, the engine's stat cache). Drawing
+  from the RNG stays `nondet.random` — seeding writes the state a draw reads,
+  and conflating the two would lose both.
 - `exit` / `die` are **language constructs**, not functions; they never reach
   this table and are detected structurally.
+
+## `narrowed_stream_labels(name, first, second)` — call-site narrowing
+
+The other half of the `io` rows above, and the reason widening them costs no
+precision on ordinary code. It takes the call's first two positional arguments in
+their **proven-constant** form (`StreamTarget::Literal` for a quoted string with
+no interpolation, `StreamTarget::Constant` for a bare constant fetch) and answers
+with the labels that target proves, or `None` when nothing here proves anything —
+in which case the caller keeps the `io` default. What the second argument means
+is the row's business: `fopen`'s mode, `copy`/`rename`'s destination, nothing at
+all for the rest.
+
+Each target is read through **its own role's** direction. That is what makes a
+two-target row honest: `copy($from, $to)` reads one path and writes the other, so
+`copy('/a', '/b')` is `["io.fs.read", "io.fs.write"]` and
+`copy('https://…', '/b')` is `["io.net.http", "io.fs.write"]`. `rename` writes on
+both sides — it moves a directory entry and reads no contents — so its proven
+pair collapses to `io.fs.write`.
+
+| target | narrowed to |
+| --- | --- |
+| no scheme (a plain path), `file://`, `zlib://`, `phar://`, `glob://`, `compress.*://`, `php://temp` | that target's own direction — `io.fs.read` for `file_get_contents`/`readfile`/`fread`/`fgets`/`scandir`/`file_exists`/`is_file`/`is_dir` and for `copy`'s source, `io.fs.write` for `file_put_contents`/`fwrite`/`fputs`/`unlink`/`mkdir`/`rmdir`/`touch`, for `copy`'s destination and for both of `rename`'s, and for `fopen` the mode (`r` → read, `w`/`a`/`x`/`c` → write, a `+` or an unprovable mode → the parent `io.fs`) |
+| `http://`, `https://` | `io.net.http` |
+| `ftp://`, `ftps://`, `ssh2.*://`, `tcp://`, `udp://`, `ssl://`, `tls://` | `io.net` |
+| `unix://`, `udg://` | `io.ipc` — a domain socket is cross-process state, not network transport |
+| `expect://` | `io.process` |
+| `php://output` | `io.output.buffer` |
+| `php://stdout`, `php://stderr` | `io.output.stdout`, `io.output.stderr` |
+| `php://input`, `php://stdin` | `io.input` |
+| `php://memory`, `data://` | `mutate.local` |
+| `php://filter/…/resource=<target>` | the trailing target, resolved **one** step (a filter naming a filter stops) |
+| `STDIN`, `STDOUT`, `STDERR` on a resource row | `io.input`, `io.output.stdout`, `io.output.stderr` |
+| anything else — `php://fd/3`, an unknown or userland scheme | `None`: the `io` default stands |
+
+Four deliberate refusals:
+
+- **A userland wrapper** (`stream_wrapper_register('acme', …)`) is an unknown
+  scheme, so the call keeps `io`. Ruling D-W1 is an approximation, not a
+  mechanism — nothing reads the registration.
+- **`copy` / `rename` with one provable side.** The row is the union of the two
+  targets, and the unprovable side contributes `io`, whose union with anything is
+  `io`. Both sides must be constant or the answer is `None`, rather than a
+  precision the call has not earned.
+- **A `php://` target on a stat-and-unlink row.** Those eight open no stream, so
+  `is_file('php://stdout')` is not a question about a channel and naming one
+  would be an invention; the `io` default stands. Their scheme narrowing is
+  otherwise the same table as everyone else's.
+- **A form mismatch.** A resource row handed a string literal (`fwrite('/tmp/x',
+  …)` passes no resource) or a path row handed a constant narrows nothing.
+
+The read-and-relay pair is the one composite: narrowing restores the
+`io.output.buffer` component beside the target's own label, which the `io`
+default had folded away.
+
+`StreamTarget` is the catalog's own tiny enum, mirrored by
+`steins_syntax::CallTarget` on the scan side. The duplication is the price of
+this crate depending on nothing; `steins-infer` depends on both and translates.
 
 ## `method_effect_labels(class, method)` — method-shaped effect rows
 

@@ -128,6 +128,45 @@ fn an_interop_bound_does_not_subsume_a_sibling() {
     );
 }
 
+/// Issue #318, in the stratum the upper-bound contract is *written* for: the
+/// review's finding was that `@phpstan-impure io.fs.read` admitted a network
+/// read, because the catalog row was `io.fs.read` whatever the argument said.
+/// Both halves are asserted here — the call site that proves a URL, and the one
+/// that proves a local path and must stay as silent as it always was.
+#[test]
+fn an_interop_bound_is_exceeded_by_a_proven_wrapper_target() {
+    let d = one_exceeded(concat!(
+        "<?php\n",
+        "/** @phpstan-impure io.fs.read */\n",
+        "function fetch(): string { return file_get_contents('https://example.com/rates'); }\n",
+    ));
+    assert_eq!(
+        d.message,
+        "file_get_contents() has effect io.net.http, but fetch() is declared @phpstan-impure io.fs.read — io.net.http exceeds the envelope"
+    );
+    silent(concat!(
+        "<?php\n",
+        "/** @phpstan-impure io.fs.read */\n",
+        "function load(): string { return file_get_contents('/etc/hosts'); }\n",
+    ));
+}
+
+/// The same bound over a call whose target is *not* provable. This is the
+/// honest cost of the fix, and the reason it is a behavior change rather than a
+/// pure win: an envelope written against the old precise row now reports.
+#[test]
+fn an_interop_bound_is_exceeded_by_an_unprovable_stream_resource() {
+    let d = one_exceeded(concat!(
+        "<?php\n",
+        "/** @phpstan-impure io.fs.read */\n",
+        "function pull($handle): string { return fread($handle, 8); }\n",
+    ));
+    assert_eq!(
+        d.message,
+        "fread() has effect io, but pull() is declared @phpstan-impure io.fs.read — io exceeds the envelope"
+    );
+}
+
 // ---- `@phpstan-pure`: the empty envelope, and its one tolerance --------------
 
 #[test]

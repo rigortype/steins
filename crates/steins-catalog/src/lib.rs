@@ -370,8 +370,16 @@ const WIDTH_REFUSED: &[&str] = &[
 /// Labels follow ADR-0018's taxonomy. Argument-dependent effects use the safe,
 /// argument-insensitive upper bound:
 ///
-/// * `fopen` uses parent label `io.fs` because its read/write split depends on
-///   the mode string.
+/// * Every **wrapper-capable** stream API is `io`, the parent of every channel a
+///   registered stream wrapper can reach (issue #318) — which is every
+///   filesystem row here, so no argument-blind row in this table produces
+///   `io.fs.*` any more (`session_start`'s composite is the one exception, and
+///   its handler writes an actual session file). `file_get_contents` is not a
+///   filesystem read — `file_get_contents('https://…')` is a network read — nor
+///   is `unlink('ssh2.sftp://…')` a filesystem write, nor `fread` on a resource
+///   whose provenance this table cannot see. A call site that *proves* its
+///   target narrows the row back down; see [`narrowed_stream_labels`], which is
+///   where the precise family now comes from.
 /// * `print_r`/`var_export`/`var_dump` are colored `io.output.buffer` even
 ///   though the first two are pure when their second argument is `true`
 ///   (return-mode); the upper bound is the arg-blind safe choice.
@@ -381,10 +389,8 @@ const WIDTH_REFUSED: &[&str] = &[
 ///   `CURLOPT_RETURNTRANSFER` suppresses the echo), and `system`/`passthru` take
 ///   the parent `io.output` rather than `io.output.buffer` because the evidence
 ///   for OB capturability of a relayed child's output is split — ADR-0083 puts
-///   split evidence on the unmaskable side.
-/// * `fwrite` stays `io.fs.write`: narrowing the `STDOUT`/`STDERR` destinations
-///   to `io.output.stdout`/`.stderr` needs argument awareness this table does
-///   not have (ADR-0083, deferred).
+///   split evidence on the unmaskable side. None of the three is
+///   wrapper-capable, so all three keep their precise transport component.
 ///
 /// `exit`/`die` are **language constructs**, not functions — they never reach
 /// this table; the effects pass detects them structurally (ADR-0019 rule 4).
@@ -393,9 +399,6 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     const EMPTY: &[&str] = &[];
     const NONDET_RANDOM: &[&str] = &["nondet.random"];
     const NONDET_TIME: &[&str] = &["nondet.time"];
-    const IO_FS_READ: &[&str] = &["io.fs.read"];
-    const IO_FS_WRITE: &[&str] = &["io.fs.write"];
-    const IO_FS: &[&str] = &["io.fs"];
     const IO_OUTPUT_BUFFER: &[&str] = &["io.output.buffer"];
     const IO: &[&str] = &["io"];
     const GLOBAL_WRITE: &[&str] = &["global.write"];
@@ -408,10 +411,6 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     // a `Set-Cookie` header (`io.output.header`), and `$_SESSION`/ini are mutated
     // (`global.write`). The upper-bound set is all three.
     const SESSION: &[&str] = &["io.fs.write", "io.output.header", "global.write"];
-    // Reads a file and writes it straight to the output channel. Both rows are
-    // `.buffer`: the manual documents the `ob_start()` + `readfile()` capture
-    // pattern, so the OB layer demonstrably sees this output (ADR-0083).
-    const FS_READ_TO_BUFFER: &[&str] = &["io.fs.read", "io.output.buffer"];
     // Runs a child process *and* relays its output. The relay's OB-capturability
     // is not settled, so the row takes the parent `io.output` rather than
     // `.buffer` — over-approximating toward "cannot be masked" is the sound side
@@ -428,19 +427,26 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
             Some(NONDET_RANDOM)
         }
         "time" | "microtime" | "hrtime" | "date" | "mktime" => Some(NONDET_TIME),
-        "file_get_contents" | "scandir" | "file_exists" | "is_file" | "is_dir" | "fread" => {
-            Some(IO_FS_READ)
-        }
-        "file_put_contents" | "fwrite" | "unlink" | "mkdir" | "rmdir" | "touch" | "copy"
-        | "rename" => Some(IO_FS_WRITE),
-        "fopen" => Some(IO_FS),
+        // The **wrapper-capable** family (issue #318), which is every filesystem
+        // row this catalog has. Each of these reaches whatever the stream layer
+        // resolves its target to — a URL wrapper, a socket, a process pipe, the
+        // output channel — so the argument-blind row can only be the `io` parent;
+        // a stricter row would hide a network read under an `io.fs.read`
+        // envelope, which is the upper-bound contract's exact failure mode. The
+        // path-taking rows are wrapper-capable by their target string, the
+        // stat-and-unlink family included (`unlink('ssh2.sftp://…')` deletes over
+        // the network, `file_exists('ftp://…')` stats over it); the
+        // resource-taking half (`fread`/`fgets`/`fwrite`/`fputs`) by the
+        // provenance of a resource this table cannot see. The relay component of
+        // `readfile`/`fpassthru` folds into the same `io` (which subsumes it).
+        // [`narrowed_stream_labels`] is what gives the precise labels back at a
+        // call site that proves its target.
+        "file_get_contents" | "file_put_contents" | "fopen" | "copy" | "rename" | "readfile"
+        | "fpassthru" | "fread" | "fgets" | "fwrite" | "fputs" | "unlink" | "mkdir" | "rmdir"
+        | "touch" | "scandir" | "file_exists" | "is_file" | "is_dir" => Some(IO),
         "print_r" | "var_dump" | "var_export" | "printf" | "vprintf" | "flush" | "ob_flush" => {
             Some(IO_OUTPUT_BUFFER)
         }
-        // Read-and-relay: the file's bytes leave through the output channel, so the
-        // row carries both halves. Without them a `readfile()`/`fpassthru()` body
-        // looked output-free (a false negative predating ADR-0083).
-        "readfile" | "fpassthru" => Some(FS_READ_TO_BUFFER),
         // Shell out and relay the child's output (ADR-0083).
         "system" | "passthru" => Some(PROCESS_TO_OUTPUT),
         "curl_exec" => Some(NET_TO_OUTPUT),
@@ -448,6 +454,13 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         "date_default_timezone_set" | "mb_regex_encoding" | "setlocale" | "ini_set" | "putenv" => {
             Some(GLOBAL_WRITE)
         }
+        // Process-global state with no channel behind it: the seeding pair
+        // replaces the RNG's generator state, `clearstatcache` empties the
+        // engine's stat cache (a write to a cache every later `is_file`/`stat`
+        // reads, not a filesystem access of its own). Drawing from the RNG stays
+        // `nondet.random` above — seeding *writes* the state a draw reads, and
+        // the two are not the same effect.
+        "srand" | "mt_srand" | "clearstatcache" => Some(GLOBAL_WRITE),
         "getenv" | "ini_get" | "date_default_timezone_get" => Some(GLOBAL_READ),
         // Signal delivery/handling (effects_gaps.md §1). pcntl/posix procedural
         // functions; a daemon/worker envelope declares `@effects io.signal`.
@@ -468,6 +481,376 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     // A colored entry wins; otherwise a pure/foldable builtin is catalogued with
     // the empty effect set, and everything else stays uncatalogued (`None`).
     colored.or_else(|| foldable(name).then_some(EMPTY))
+}
+
+/// A call argument a **call site** proved constant (issue #318) — the evidence
+/// [`narrowed_stream_labels`] narrows a wrapper-capable row on.
+///
+/// Both forms are *syntactic* proof, never dataflow: a variable, a concatenation
+/// or an interpolated string is no target at all, and the caller keeps the `io`
+/// default rather than guessing what the variable holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StreamTarget<'a> {
+    /// A quoted string literal with no interpolation, by its decoded value: a
+    /// path, a URL, or a `php://` pseudo-stream.
+    Literal(&'a str),
+    /// A bare constant fetch, by its unqualified spelling (`STDOUT`, `STDERR`,
+    /// `STDIN`) — the only spelling of an open stream *resource* a structural
+    /// scan can read.
+    Constant(&'a str),
+}
+
+/// The **narrowed** effect labels a wrapper-capable stream call earns at a call
+/// site that proves its target (issue #318), or `None` when nothing here proves
+/// anything — in which case the caller keeps [`effect_labels`]' sound `io`
+/// default.
+///
+/// This is the other half of the widening above, and the reason it costs no
+/// precision on ordinary code: the argument-blind row must cover every channel a
+/// stream wrapper can reach, but a call whose target is a *constant* reaches
+/// exactly one of them, and the constant says which. `file_get_contents('/etc/hosts')`
+/// is still `io.fs.read`; `file_get_contents('https://…')` is `io.net.http`; and
+/// `file_get_contents($url)` is `io`, because it is.
+///
+/// `first` and `second` are the call's first two positional arguments in their
+/// proven-constant form (`None` for an argument that is not a constant). What
+/// the second one means is the row's business: `fopen`'s mode string,
+/// `copy`/`rename`'s destination, and nothing at all for the rest.
+///
+/// Each target is read through **its own role's** direction, which is what makes
+/// a two-target row honest: `copy('/a', '/b')` reads one path and writes the
+/// other, so it earns `["io.fs.read", "io.fs.write"]`, and
+/// `copy('https://…', '/b')` earns `["io.net.http", "io.fs.write"]`. `rename`
+/// writes on both sides — it moves a directory entry and reads no contents.
+///
+/// # The scheme table
+///
+/// | target | narrowed to |
+/// | --- | --- |
+/// | no scheme (a plain path), `file://`, `zlib://`, `phar://`, `glob://`, `compress.*://`, `php://temp` | that target's own `io.fs.*` direction (`fopen` composes it from a literal mode) |
+/// | `http://`, `https://` | `io.net.http` |
+/// | `ftp://`, `ftps://`, `ssh2.*://`, `tcp://`, `udp://`, `ssl://`, `tls://` | `io.net` |
+/// | `unix://`, `udg://` | `io.ipc` |
+/// | `expect://` | `io.process` |
+/// | `php://output` | `io.output.buffer` |
+/// | `php://stdout` / `php://stderr` | `io.output.stdout` / `io.output.stderr` |
+/// | `php://input` / `php://stdin` | `io.input` |
+/// | `php://memory`, `data://` | `mutate.local` |
+/// | `php://filter/…/resource=<target>` | the trailing target, resolved **one** step |
+/// | `STDIN` / `STDOUT` / `STDERR` (a resource row) | `io.input` / `io.output.stdout` / `io.output.stderr` |
+/// | anything else (`php://fd/3`, an unknown or userland scheme) | `None` — the `io` default stands |
+///
+/// A `php://` special stream names a *channel*, and the label names the channel
+/// it names, not the direction of the call: `file_put_contents('php://stdout', …)`
+/// and a hypothetical read of the same target both color `io.output.stdout`. The
+/// whole `php://` column is declined by the stat-and-unlink rows, which open no
+/// stream (`is_file('php://stdout')` is not a question about a channel).
+///
+/// # What it declines
+///
+/// * **A userland wrapper** (`stream_wrapper_register('acme', …)`) is an unknown
+///   scheme, so it falls through to `None` and the call keeps `io` — ruling D-W1
+///   of the soundness proposal, which is an approximation and not a mechanism:
+///   nothing here reads the registration.
+/// * **`copy`/`rename` with one provable side.** The row is the union of the two
+///   targets' narrowings, and the unprovable side contributes the `io` default,
+///   whose union with anything is `io` — no narrowing at all. Both sides must be
+///   constant or the answer is `None`.
+/// * **A `php://` target on a stat-and-unlink row** (`unlink`, `mkdir`, `rmdir`,
+///   `touch`, `scandir`, `file_exists`, `is_file`, `is_dir`), for the reason
+///   above.
+/// * **A form mismatch**: a path row handed a constant, or a resource row handed
+///   a string literal (`fwrite('/tmp/x', …)` passes no resource). Neither is a
+///   target this table can read.
+#[must_use]
+pub fn narrowed_stream_labels(
+    name: &str,
+    first: Option<StreamTarget<'_>>,
+    second: Option<StreamTarget<'_>>,
+) -> Option<Vec<&'static str>> {
+    // The target leads: a call with no constant first argument — the common case,
+    // every builtin call in the project reaches this — answers before the row
+    // lookup pays for a lowercase copy of the name.
+    let first = first?;
+    let row = stream_row(&name.to_ascii_lowercase())?;
+    let mut labels = target_labels(row, row.direction, first, second)?;
+    // A second target is narrowed through **its own** role's direction: `copy`
+    // reads its source and writes its destination, so the two sides can land on
+    // different labels and both are true of the call.
+    if let SecondArg::Target(direction) = row.second {
+        for label in target_labels(row, direction, second?, None)? {
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        }
+    }
+    // The read-and-relay pair: narrowing restores the output component the `io`
+    // default folded away (ADR-0083 — `ob_start()` + `readfile()` is a documented
+    // capture pattern, so the relay is OB-visible).
+    if row.relays_to_output && !labels.contains(&"io.output.buffer") {
+        labels.push("io.output.buffer");
+    }
+    Some(labels)
+}
+
+/// What a proven target *means* for the wrapper-capable function that takes it —
+/// one row of [`narrowed_stream_labels`]' table.
+#[derive(Debug, Clone, Copy)]
+struct StreamRow {
+    /// The form argument 0 must have for this row to narrow at all.
+    form: TargetForm,
+    /// The `io.fs.*` label argument 0 earns when its target has no scheme (or a
+    /// filesystem-family one).
+    direction: FsDirection,
+    /// What argument 1 is.
+    second: SecondArg,
+    /// Whether the call also relays what it moves to the output channel
+    /// (`readfile`, `fpassthru`).
+    relays_to_output: bool,
+    /// Whether a `php://` pseudo-stream is a meaningful target for this row. The
+    /// stat-and-unlink family opens no stream — `is_file('php://stdout')` names
+    /// no channel anyone writes on purpose — so those rows decline it rather than
+    /// color a call after a target that says nothing about what it did.
+    php_streams: bool,
+}
+
+/// Which argument form carries the stream target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetForm {
+    /// A path or URL string: `file_get_contents($path)`, `fopen($path, $mode)`.
+    Path,
+    /// An already-open stream resource, provable only as one of PHP's three
+    /// predefined CLI constants: `fwrite($handle, …)`.
+    Resource,
+}
+
+/// The filesystem direction one target of a row takes when it is an ordinary
+/// file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FsDirection {
+    Read,
+    Write,
+    /// `fopen`: composed from the mode string when that is a literal too, and
+    /// the parent `io.fs` when it is not.
+    FromMode,
+}
+
+/// What argument 1 of a row is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecondArg {
+    /// Nothing this table reads: a length, a flags int, a sort order, a mtime.
+    Ignored,
+    /// `fopen`'s mode string, which composes argument 0's direction.
+    Mode,
+    /// A **second target**, narrowed through the direction its own role names —
+    /// `copy($from, $to)` reads the first and writes the second.
+    Target(FsDirection),
+}
+
+/// The [`StreamRow`] for a wrapper-capable builtin, `None` for every other name.
+fn stream_row(name_lc: &str) -> Option<StreamRow> {
+    use FsDirection::{FromMode, Read, Write};
+    use TargetForm::{Path, Resource};
+    let row = |form, direction, second, relays_to_output, php_streams| StreamRow {
+        form,
+        direction,
+        second,
+        relays_to_output,
+        php_streams,
+    };
+    let simple = |form, direction| row(form, direction, SecondArg::Ignored, false, true);
+    match name_lc {
+        "file_get_contents" => Some(simple(Path, Read)),
+        "file_put_contents" => Some(simple(Path, Write)),
+        // Reads a path and relays it to the output channel.
+        "readfile" => Some(row(Path, Read, SecondArg::Ignored, true, true)),
+        // `fopen($path, $mode)` — the one row whose second argument is a mode.
+        "fopen" => Some(row(Path, FromMode, SecondArg::Mode, false, true)),
+        // Two paths, one role each: `copy($from, $to)` reads the source and
+        // writes the destination, so a proven pair earns both labels — the
+        // argument-blind row could never say that, and neither could a union
+        // taken through one direction.
+        "copy" => Some(row(Path, Read, SecondArg::Target(Write), false, true)),
+        // `rename` moves a directory entry: both sides are metadata writes, and
+        // neither reads the file's contents.
+        "rename" => Some(row(Path, Write, SecondArg::Target(Write), false, true)),
+        "fread" | "fgets" => Some(simple(Resource, Read)),
+        "fwrite" | "fputs" => Some(simple(Resource, Write)),
+        // Reads a resource and relays it to the output channel.
+        "fpassthru" => Some(row(Resource, Read, SecondArg::Ignored, true, true)),
+        // The stat-and-unlink family: wrapper-capable all the same — `unlink` and
+        // `mkdir` go over `ssh2.sftp://`, `file_exists` stats over `ftp://` — but
+        // they open no stream, so the `php://` pseudo-streams are not targets they
+        // can meaningfully be handed.
+        "unlink" | "mkdir" | "rmdir" | "touch" => {
+            Some(row(Path, Write, SecondArg::Ignored, false, false))
+        }
+        "scandir" | "file_exists" | "is_file" | "is_dir" => {
+            Some(row(Path, Read, SecondArg::Ignored, false, false))
+        }
+        _ => None,
+    }
+}
+
+/// The labels one proven target earns under `row`, read through `direction` —
+/// which is the row's own for argument 0 and the second target's role for
+/// argument 1. `mode` is argument 1 where a [`FsDirection::FromMode`] target
+/// reads it.
+fn target_labels(
+    row: StreamRow,
+    direction: FsDirection,
+    target: StreamTarget<'_>,
+    mode: Option<StreamTarget<'_>>,
+) -> Option<Vec<&'static str>> {
+    match (row.form, target) {
+        (TargetForm::Path, StreamTarget::Literal(s)) => path_labels(s, row, direction, mode, true),
+        (TargetForm::Resource, StreamTarget::Constant(c)) => constant_labels(c),
+        _ => None,
+    }
+}
+
+/// The channel one of PHP's three predefined stream constants names. Matched
+/// case-**sensitively**: PHP constant names are.
+fn constant_labels(name: &str) -> Option<Vec<&'static str>> {
+    match name {
+        "STDIN" => Some(vec!["io.input"]),
+        "STDOUT" => Some(vec!["io.output.stdout"]),
+        "STDERR" => Some(vec!["io.output.stderr"]),
+        _ => None,
+    }
+}
+
+/// The labels a literal path or URL earns under `row`. `allow_filter` is the
+/// one-step recursion budget `php://filter/…/resource=` spends: a filter naming
+/// another filter proves nothing and stops at `None`.
+fn path_labels(
+    target: &str,
+    row: StreamRow,
+    direction: FsDirection,
+    mode: Option<StreamTarget<'_>>,
+    allow_filter: bool,
+) -> Option<Vec<&'static str>> {
+    let Some(scheme) = scheme_of(target) else {
+        // No scheme at all: an ordinary path, relative or absolute.
+        return Some(fs_labels(direction, mode));
+    };
+    let scheme = scheme.to_ascii_lowercase();
+    match scheme.as_str() {
+        "http" | "https" => Some(vec!["io.net.http"]),
+        "ftp" | "ftps" | "tcp" | "udp" | "ssl" | "tls" => Some(vec!["io.net"]),
+        // The socket wrappers that are not sockets on a network: a filesystem
+        // (`unix://`) or abstract (`udg://`) domain socket is cross-process
+        // state, which is `io.ipc` and NOT under `io.net`.
+        "unix" | "udg" => Some(vec!["io.ipc"]),
+        // `expect://` runs a program through a PTY.
+        "expect" => Some(vec!["io.process"]),
+        // A `data:` URI is its own content — nothing is read from anywhere.
+        "data" => Some(vec!["mutate.local"]),
+        // Wrappers layered over the filesystem: the bytes still come from (or go
+        // to) a file, so the target's own direction stands.
+        "file" | "zlib" | "phar" | "glob" => Some(fs_labels(direction, mode)),
+        "php" => php_labels(target, row, direction, mode, allow_filter),
+        // `ssh2.sftp://`, `ssh2.exec://`, … — all of them a network round trip.
+        _ if scheme.starts_with("ssh2.") => Some(vec!["io.net"]),
+        // `compress.zlib://`, `compress.bzip2://` — the filesystem family again.
+        _ if scheme.starts_with("compress.") => Some(fs_labels(direction, mode)),
+        // An unknown scheme is a wrapper this catalog knows nothing about,
+        // registered userland ones included (D-W1): no narrowing.
+        _ => None,
+    }
+}
+
+/// The labels a `php://` pseudo-stream earns. `target` is the whole literal, so
+/// the `resource=` tail keeps its own casing for the recursion.
+fn php_labels(
+    target: &str,
+    row: StreamRow,
+    direction: FsDirection,
+    mode: Option<StreamTarget<'_>>,
+    allow_filter: bool,
+) -> Option<Vec<&'static str>> {
+    if !row.php_streams {
+        return None;
+    }
+    let rest = target.get("php://".len()..)?;
+    let rest_lc = rest.to_ascii_lowercase();
+    match rest_lc.as_str() {
+        "output" => return Some(vec!["io.output.buffer"]),
+        "stdout" => return Some(vec!["io.output.stdout"]),
+        "stderr" => return Some(vec!["io.output.stderr"]),
+        // The two spellings of the script's inbound stream (ADR-0083).
+        "input" | "stdin" => return Some(vec!["io.input"]),
+        // A memory stream is a buffer with a stream API over it.
+        "memory" => return Some(vec!["mutate.local"]),
+        _ => {}
+    }
+    // `php://temp` spills to a temporary file past its memory threshold
+    // (`php://temp/maxmemory:1024`), so it is the filesystem family, not
+    // `php://memory`.
+    if rest_lc == "temp" || rest_lc.starts_with("temp/") {
+        return Some(fs_labels(direction, mode));
+    }
+    if rest_lc.starts_with("filter/") {
+        if !allow_filter {
+            return None;
+        }
+        // php-src reads the filter spec up to the first `/resource=` and takes
+        // everything after it as the stream actually opened; the filters
+        // themselves are transforms, not channels.
+        let inner = rest.split_once("/resource=")?.1;
+        return path_labels(inner, row, direction, mode, false);
+    }
+    // `php://fd/3` and anything else: the target is a number this table cannot
+    // resolve to a channel.
+    None
+}
+
+/// The filesystem label a target earns, in the direction its role names, when it
+/// is an ordinary file.
+fn fs_labels(direction: FsDirection, mode: Option<StreamTarget<'_>>) -> Vec<&'static str> {
+    match direction {
+        FsDirection::Read => vec!["io.fs.read"],
+        FsDirection::Write => vec!["io.fs.write"],
+        FsDirection::FromMode => match mode {
+            Some(StreamTarget::Literal(m)) => mode_labels(m),
+            // An unprovable mode leaves the direction unknown — the parent
+            // `io.fs`, which is exactly what the row said before issue #318.
+            _ => vec!["io.fs"],
+        },
+    }
+}
+
+/// `fopen`'s mode string, read for its direction: `r` reads, `w`/`a`/`x`/`c`
+/// write, and a `+` anywhere opens both, which is the parent `io.fs`. The
+/// `b`/`t`/`e` suffixes decide line endings and `close-on-exec`, not direction.
+/// Modes are lowercase in PHP; anything else is not a mode and stays `io.fs`.
+fn mode_labels(mode: &str) -> Vec<&'static str> {
+    if mode.contains('+') {
+        return vec!["io.fs"];
+    }
+    match mode.as_bytes().first() {
+        Some(b'r') => vec!["io.fs.read"],
+        Some(b'w' | b'a' | b'x' | b'c') => vec!["io.fs.write"],
+        _ => vec!["io.fs"],
+    }
+}
+
+/// The wrapper scheme of a target string — the `scheme` of `scheme://rest` —
+/// `None` when the string is a plain path.
+///
+/// Deliberately strict about the shape: the scheme must be an RFC-3986-flavored
+/// name (ASCII alphanumerics plus `+`, `-`, `.`, first character a letter), so a
+/// path that merely *contains* `://` (`/var/log/http://weird`) is a path, and a
+/// Windows drive letter (`C:\dir`) never looks like a scheme at all.
+fn scheme_of(target: &str) -> Option<&str> {
+    let (scheme, _) = target.split_once("://")?;
+    let mut chars = scheme.chars();
+    if !chars.next()?.is_ascii_alphabetic() {
+        return None;
+    }
+    chars
+        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+        .then_some(scheme)
 }
 
 /// **Method-shaped effect rows**: the effect labels of a call to `method` on an
@@ -895,9 +1278,10 @@ const BUILTIN_LABELS: &[&str] = {
         "io.fs.read",
         "io.fs.write",
         // Ambient *input* channel (ADR-0083): `php://input`, `php://stdin` — the
-        // script's inbound stream, symmetric with `io.output`. No builtin row
-        // carries it yet (Steins has no stream-target awareness), so like `ffi` it
-        // exists for envelope declarations and for the rows that will follow.
+        // script's inbound stream, symmetric with `io.output`. Produced by
+        // [`narrowed_stream_labels`] at a call site that names one of those
+        // targets (issue #318); no argument-blind row carries it, because
+        // recognizing this channel is exactly a question about the argument.
         // `$_GET`-style parsed-memory reads stay `global.read`.
         "io.input",
         // System-V / shared-memory IPC (effects_gaps.md §4): cross-process shared
@@ -1782,13 +2166,35 @@ mod tests {
     fn colored_builtins_carry_their_label() {
         assert_eq!(effect_labels("rand"), Some(&["nondet.random"][..]));
         assert_eq!(effect_labels("time"), Some(&["nondet.time"][..]));
-        assert_eq!(effect_labels("file_get_contents"), Some(&["io.fs.read"][..]));
-        assert_eq!(effect_labels("file_put_contents"), Some(&["io.fs.write"][..]));
-        assert_eq!(effect_labels("fopen"), Some(&["io.fs"][..]));
+        // Every filesystem row is wrapper-capable, so all of them are the `io`
+        // parent until a call site proves the target (issue #318 — see
+        // `narrowed_stream_labels`). The stat-and-unlink family included: a
+        // `ssh2.sftp://` path makes `unlink` a network write.
+        assert_eq!(effect_labels("file_get_contents"), Some(&["io"][..]));
+        assert_eq!(effect_labels("file_put_contents"), Some(&["io"][..]));
+        assert_eq!(effect_labels("fopen"), Some(&["io"][..]));
+        assert_eq!(effect_labels("scandir"), Some(&["io"][..]));
+        assert_eq!(effect_labels("unlink"), Some(&["io"][..]));
+        assert_eq!(effect_labels("file_exists"), Some(&["io"][..]));
+        assert_eq!(effect_labels("mkdir"), Some(&["io"][..]));
+        // The narrowing gives each of them its old precise row back.
+        assert_eq!(
+            super::narrowed_stream_labels("unlink", Some(Literal("/tmp/x")), None),
+            Some(vec!["io.fs.write"])
+        );
+        assert_eq!(
+            super::narrowed_stream_labels("file_exists", Some(Literal("/tmp/x")), None),
+            Some(vec!["io.fs.read"])
+        );
         assert_eq!(effect_labels("printf"), Some(&["io.output.buffer"][..]));
         assert_eq!(effect_labels("error_log"), Some(&["io"][..]));
         assert_eq!(effect_labels("setlocale"), Some(&["global.write"][..]));
         assert_eq!(effect_labels("getenv"), Some(&["global.read"][..]));
+        // Process-global state the catalog states precisely: the RNG generator
+        // (seeding, not drawing) and PHP's stat cache.
+        assert_eq!(effect_labels("srand"), Some(&["global.write"][..]));
+        assert_eq!(effect_labels("mt_srand"), Some(&["global.write"][..]));
+        assert_eq!(effect_labels("clearstatcache"), Some(&["global.write"][..]));
     }
 
     #[test]
@@ -2230,8 +2636,13 @@ mod tests {
     #[test]
     fn effect_labels_are_case_insensitive() {
         assert_eq!(effect_labels("RAND"), Some(&["nondet.random"][..]));
-        assert_eq!(effect_labels("File_Put_Contents"), Some(&["io.fs.write"][..]));
+        assert_eq!(effect_labels("File_Put_Contents"), Some(&["io"][..]));
         assert_eq!(effect_labels("STRTOLOWER"), Some(&[][..]));
+        // The narrowing table folds the function name's case the same way.
+        assert_eq!(
+            super::narrowed_stream_labels("UnLink", Some(Literal("/tmp/x")), None),
+            Some(vec!["io.fs.write"])
+        );
     }
 
     use super::method_effect_labels;
@@ -2592,9 +3003,16 @@ mod tests {
     /// carried no output component at all.
     #[test]
     fn relaying_builtins_carry_their_output_component() {
-        // Documented `ob_start()` + `readfile()` capture pattern → the OB leaf.
-        assert_eq!(effect_labels("readfile"), Some(&["io.fs.read", "io.output.buffer"][..]));
-        assert_eq!(effect_labels("fpassthru"), Some(&["io.fs.read", "io.output.buffer"][..]));
+        // The read-and-relay pair is wrapper-capable, so its argument-blind row is
+        // the `io` parent (issue #318) — which subsumes the output component the
+        // pair used to spell out. A proven target restores both halves; that is
+        // `narrowed_stream_labels`' job and its own tests pin it.
+        assert_eq!(effect_labels("readfile"), Some(&["io"][..]));
+        assert_eq!(effect_labels("fpassthru"), Some(&["io"][..]));
+        assert_eq!(
+            super::narrowed_stream_labels("readfile", Some(Literal("/tmp/x")), None),
+            Some(vec!["io.fs.read", "io.output.buffer"])
+        );
         // Split capturability evidence → the parent, which no future masking may
         // deduct.
         assert_eq!(effect_labels("system"), Some(&["io.process", "io.output"][..]));
@@ -2612,8 +3030,239 @@ mod tests {
         // the sound default until masking exists (ADR-0083, deferred).
         assert_eq!(effect_labels("ob_start"), None);
         assert_eq!(effect_labels("ob_get_clean"), None);
-        // `fwrite`'s destination narrowing is deferred — the row is unmoved.
-        assert_eq!(effect_labels("fwrite"), Some(&["io.fs.write"][..]));
+        // `fwrite`'s destination narrowing is no longer deferred (issue #318):
+        // arg-blind it is `io`, and a `STDOUT` argument proves the OB-unmaskable
+        // process fd ADR-0083 named the label for.
+        assert_eq!(effect_labels("fwrite"), Some(&["io"][..]));
+        assert_eq!(
+            super::narrowed_stream_labels("fwrite", Some(Constant("STDOUT")), None),
+            Some(vec!["io.output.stdout"])
+        );
+    }
+
+    // ---- issue #318: argument-dependent narrowing of the stream rows ---------
+
+    use super::StreamTarget::{Constant, Literal};
+    use super::narrowed_stream_labels as narrowed;
+
+    #[test]
+    fn a_literal_local_path_narrows_to_the_rows_own_direction() {
+        // The positive control the whole widening rests on: ordinary code keeps
+        // the precise label it had before the row moved to `io`.
+        assert_eq!(narrowed("file_get_contents", Some(Literal("/etc/passwd")), None), Some(vec!["io.fs.read"]));
+        assert_eq!(narrowed("file_put_contents", Some(Literal("out.txt")), None), Some(vec!["io.fs.write"]));
+        // Relative, dot-prefixed and Windows-flavored spellings are all paths.
+        assert_eq!(narrowed("file_get_contents", Some(Literal("./cfg/app.ini")), None), Some(vec!["io.fs.read"]));
+        assert_eq!(narrowed("file_get_contents", Some(Literal("C:\\tmp\\x")), None), Some(vec!["io.fs.read"]));
+        // A path that merely CONTAINS `://` is still a path — the scheme grammar
+        // rejects the slashes before it.
+        assert_eq!(narrowed("file_get_contents", Some(Literal("/var/log/http://odd")), None), Some(vec!["io.fs.read"]));
+        // Case-insensitive on the function name, like every other row.
+        assert_eq!(narrowed("File_Get_Contents", Some(Literal("/x")), None), Some(vec!["io.fs.read"]));
+    }
+
+    #[test]
+    fn a_url_scheme_narrows_off_the_filesystem_entirely() {
+        assert_eq!(narrowed("file_get_contents", Some(Literal("https://example.com/r")), None), Some(vec!["io.net.http"]));
+        assert_eq!(narrowed("file_get_contents", Some(Literal("HTTP://example.com")), None), Some(vec!["io.net.http"]));
+        assert_eq!(narrowed("file_put_contents", Some(Literal("ftp://h/f")), None), Some(vec!["io.net"]));
+        assert_eq!(narrowed("file_get_contents", Some(Literal("ssh2.sftp://h/f")), None), Some(vec!["io.net"]));
+        assert_eq!(narrowed("fopen", Some(Literal("tcp://h:9000")), Some(Literal("r"))), Some(vec!["io.net"]));
+        // Domain sockets are cross-process state, not network transport.
+        assert_eq!(narrowed("fopen", Some(Literal("unix:///tmp/s.sock")), Some(Literal("r"))), Some(vec!["io.ipc"]));
+        assert_eq!(narrowed("fopen", Some(Literal("udg:///tmp/s.sock")), Some(Literal("r"))), Some(vec!["io.ipc"]));
+        // A PTY-driven child process.
+        assert_eq!(narrowed("fopen", Some(Literal("expect://ls")), Some(Literal("r"))), Some(vec!["io.process"]));
+        // Compression and archive wrappers stay in the filesystem family.
+        assert_eq!(narrowed("file_get_contents", Some(Literal("compress.zlib:///tmp/a.gz")), None), Some(vec!["io.fs.read"]));
+        assert_eq!(narrowed("file_get_contents", Some(Literal("phar:///app.phar/x")), None), Some(vec!["io.fs.read"]));
+        assert_eq!(narrowed("file_get_contents", Some(Literal("file:///etc/hosts")), None), Some(vec!["io.fs.read"]));
+    }
+
+    #[test]
+    fn the_php_pseudo_streams_name_their_channel() {
+        assert_eq!(narrowed("file_put_contents", Some(Literal("php://output")), None), Some(vec!["io.output.buffer"]));
+        assert_eq!(narrowed("file_put_contents", Some(Literal("php://stdout")), None), Some(vec!["io.output.stdout"]));
+        assert_eq!(narrowed("file_put_contents", Some(Literal("php://stderr")), None), Some(vec!["io.output.stderr"]));
+        assert_eq!(narrowed("file_get_contents", Some(Literal("php://input")), None), Some(vec!["io.input"]));
+        assert_eq!(narrowed("file_get_contents", Some(Literal("php://stdin")), None), Some(vec!["io.input"]));
+        // Memory and data URIs touch no channel at all.
+        assert_eq!(narrowed("file_get_contents", Some(Literal("php://memory")), None), Some(vec!["mutate.local"]));
+        assert_eq!(narrowed("file_get_contents", Some(Literal("data://text/plain,hi")), None), Some(vec!["mutate.local"]));
+        // `php://temp` spills to a real file past its threshold.
+        assert_eq!(narrowed("fopen", Some(Literal("php://temp")), Some(Literal("w"))), Some(vec!["io.fs.write"]));
+        assert_eq!(narrowed("fopen", Some(Literal("php://temp/maxmemory:1024")), Some(Literal("w"))), Some(vec!["io.fs.write"]));
+        // The wrapper name and the stream name both fold case.
+        assert_eq!(narrowed("file_put_contents", Some(Literal("PHP://StdOut")), None), Some(vec!["io.output.stdout"]));
+        // A file descriptor is a number this table cannot resolve to a channel.
+        assert_eq!(narrowed("fopen", Some(Literal("php://fd/3")), Some(Literal("r"))), None);
+    }
+
+    #[test]
+    fn a_filter_chain_resolves_its_resource_exactly_one_step() {
+        assert_eq!(
+            narrowed("file_get_contents", Some(Literal("php://filter/read=convert.base64-encode/resource=https://example.com/r")), None),
+            Some(vec!["io.net.http"])
+        );
+        assert_eq!(
+            narrowed("file_get_contents", Some(Literal("php://filter/resource=/etc/hosts")), None),
+            Some(vec!["io.fs.read"])
+        );
+        // One step, and no more: a filter naming another filter is where this
+        // stops, with the `io` default (`None`) rather than an unbounded walk.
+        assert_eq!(
+            narrowed("file_get_contents", Some(Literal("php://filter/resource=php://filter/resource=/etc/hosts")), None),
+            None
+        );
+        // A filter spec with no `resource=` opens nothing this table can name.
+        assert_eq!(narrowed("file_get_contents", Some(Literal("php://filter/read=x")), None), None);
+    }
+
+    #[test]
+    fn an_unknown_scheme_keeps_the_io_default() {
+        // A userland `stream_wrapper_register('acme', …)` is exactly this case:
+        // ruling D-W1 approximates it by the widened default, and nothing here
+        // reads the registration.
+        assert_eq!(narrowed("file_get_contents", Some(Literal("acme://bucket/key")), None), None);
+        assert_eq!(narrowed("file_get_contents", Some(Literal("foo://x")), None), None);
+        // No proven target at all — the ordinary `file_get_contents($path)` call.
+        assert_eq!(narrowed("file_get_contents", None, None), None);
+        // A name with no stream row of its own never narrows, proven or not.
+        assert_eq!(narrowed("strlen", Some(Literal("/tmp/x")), None), None);
+        assert_eq!(narrowed("error_log", Some(Literal("/tmp/x")), None), None);
+        assert_eq!(narrowed("session_start", Some(Literal("/tmp/x")), None), None);
+    }
+
+    #[test]
+    fn fopen_composes_its_direction_from_a_literal_mode() {
+        assert_eq!(narrowed("fopen", Some(Literal("/tmp/x")), Some(Literal("r"))), Some(vec!["io.fs.read"]));
+        assert_eq!(narrowed("fopen", Some(Literal("/tmp/x")), Some(Literal("rb"))), Some(vec!["io.fs.read"]));
+        assert_eq!(narrowed("fopen", Some(Literal("/tmp/x")), Some(Literal("w"))), Some(vec!["io.fs.write"]));
+        assert_eq!(narrowed("fopen", Some(Literal("/tmp/x")), Some(Literal("a"))), Some(vec!["io.fs.write"]));
+        assert_eq!(narrowed("fopen", Some(Literal("/tmp/x")), Some(Literal("xb"))), Some(vec!["io.fs.write"]));
+        // A `+` opens both directions: the parent, which is what the row said
+        // before #318 for every mode.
+        assert_eq!(narrowed("fopen", Some(Literal("/tmp/x")), Some(Literal("r+"))), Some(vec!["io.fs"]));
+        assert_eq!(narrowed("fopen", Some(Literal("/tmp/x")), Some(Literal("w+b"))), Some(vec!["io.fs"]));
+        // An unprovable mode leaves the direction unknown — the same parent.
+        assert_eq!(narrowed("fopen", Some(Literal("/tmp/x")), None), Some(vec!["io.fs"]));
+        assert_eq!(narrowed("fopen", Some(Literal("/tmp/x")), Some(Constant("SOME_MODE"))), Some(vec!["io.fs"]));
+        // Off the filesystem the mode is irrelevant.
+        assert_eq!(narrowed("fopen", Some(Literal("https://h/r")), None), Some(vec!["io.net.http"]));
+    }
+
+    #[test]
+    fn the_resource_rows_narrow_only_on_the_predefined_constants() {
+        assert_eq!(narrowed("fwrite", Some(Constant("STDOUT")), None), Some(vec!["io.output.stdout"]));
+        assert_eq!(narrowed("fputs", Some(Constant("STDERR")), None), Some(vec!["io.output.stderr"]));
+        assert_eq!(narrowed("fread", Some(Constant("STDIN")), None), Some(vec!["io.input"]));
+        assert_eq!(narrowed("fgets", Some(Constant("STDIN")), None), Some(vec!["io.input"]));
+        assert_eq!(narrowed("fpassthru", Some(Constant("STDIN")), None), Some(vec!["io.input", "io.output.buffer"]));
+        // Any other constant is a resource of unknown provenance.
+        assert_eq!(narrowed("fwrite", Some(Constant("SOCKET")), None), None);
+        // Constants are case-sensitive in PHP, so `stdout` is a different name.
+        assert_eq!(narrowed("fwrite", Some(Constant("stdout")), None), None);
+        // A form mismatch in either direction proves nothing: a string is not a
+        // resource, and a constant is not a path this table can read.
+        assert_eq!(narrowed("fwrite", Some(Literal("/tmp/x")), None), None);
+        assert_eq!(narrowed("file_get_contents", Some(Constant("STDIN")), None), None);
+    }
+
+    #[test]
+    fn the_two_target_rows_read_each_side_in_its_own_role() {
+        // `copy` reads its source and writes its destination — two roles, two
+        // labels, and both of them true of the call.
+        assert_eq!(
+            narrowed("copy", Some(Literal("/a")), Some(Literal("/b"))),
+            Some(vec!["io.fs.read", "io.fs.write"])
+        );
+        // `rename` moves a directory entry: metadata writes on both sides, and
+        // the two collapse to one label.
+        assert_eq!(narrowed("rename", Some(Literal("/a")), Some(Literal("/b"))), Some(vec!["io.fs.write"]));
+        // A remote source is a genuinely different transport, and the roles keep
+        // it apart from the local destination.
+        assert_eq!(
+            narrowed("copy", Some(Literal("https://h/a")), Some(Literal("/b"))),
+            Some(vec!["io.net.http", "io.fs.write"])
+        );
+        assert_eq!(
+            narrowed("copy", Some(Literal("/a")), Some(Literal("ssh2.sftp://h/b"))),
+            Some(vec!["io.fs.read", "io.net"])
+        );
+        // The same pair under `rename`'s both-write reading.
+        assert_eq!(
+            narrowed("rename", Some(Literal("ftp://h/a")), Some(Literal("/b"))),
+            Some(vec!["io.net", "io.fs.write"])
+        );
+        // One side unprovable: its narrowing is the `io` default, and the union
+        // with `io` is `io` — no narrowing, so the row declines outright.
+        assert_eq!(narrowed("copy", Some(Literal("/a")), None), None);
+        assert_eq!(narrowed("copy", None, Some(Literal("/b"))), None);
+        // An unknown scheme on either side declines the same way.
+        assert_eq!(narrowed("copy", Some(Literal("acme://a")), Some(Literal("/b"))), None);
+        assert_eq!(narrowed("copy", Some(Literal("/a")), Some(Literal("acme://b"))), None);
+    }
+
+    #[test]
+    fn the_stat_and_unlink_family_narrows_by_scheme_but_not_by_pseudo_stream() {
+        // The positive control for all eight: a literal local path gives each of
+        // them the precise row it carried before issue #318 widened it.
+        for name in ["unlink", "mkdir", "rmdir", "touch"] {
+            assert_eq!(narrowed(name, Some(Literal("/tmp/x")), None), Some(vec!["io.fs.write"]), "{name}");
+        }
+        for name in ["scandir", "file_exists", "is_file", "is_dir"] {
+            assert_eq!(narrowed(name, Some(Literal("/tmp/x")), None), Some(vec!["io.fs.read"]), "{name}");
+        }
+        // …and the reason they were widened: these go over a wrapper too.
+        assert_eq!(narrowed("unlink", Some(Literal("ssh2.sftp://h/x")), None), Some(vec!["io.net"]));
+        assert_eq!(narrowed("mkdir", Some(Literal("ftp://h/d")), None), Some(vec!["io.net"]));
+        assert_eq!(narrowed("file_exists", Some(Literal("ssh2.sftp://h/x")), None), Some(vec!["io.net"]));
+        assert_eq!(narrowed("is_dir", Some(Literal("ftp://h/d")), None), Some(vec!["io.net"]));
+        // A `php://` target is not a question these functions ask, so they
+        // decline it and keep the `io` default rather than name a channel.
+        assert_eq!(narrowed("unlink", Some(Literal("php://stdout")), None), None);
+        assert_eq!(narrowed("is_file", Some(Literal("php://input")), None), None);
+        assert_eq!(narrowed("file_exists", Some(Literal("php://filter/resource=/x")), None), None);
+        // Their second argument is never a target or a mode: `mkdir`'s
+        // permissions and `scandir`'s sort order change nothing.
+        assert_eq!(narrowed("mkdir", Some(Literal("/tmp/d")), Some(Literal("0777"))), Some(vec!["io.fs.write"]));
+        assert_eq!(narrowed("scandir", Some(Literal("/tmp")), Some(Literal("1"))), Some(vec!["io.fs.read"]));
+        // And a constant is not a path: these rows take no resource.
+        assert_eq!(narrowed("unlink", Some(Constant("STDOUT")), None), None);
+    }
+
+    #[test]
+    fn every_narrowed_label_is_a_registry_entry() {
+        // The narrowing table is a second producer of effect labels, so it owes
+        // the registry the same debt `effect_labels` does — a label no envelope
+        // could name would be unreportable and unmatchable.
+        let targets = [
+            Literal("/tmp/x"), Literal("https://h/x"), Literal("ftp://h/x"), Literal("ssh2.exec://h/x"),
+            Literal("unix:///s"), Literal("expect://ls"), Literal("data://text/plain,x"),
+            Literal("php://output"), Literal("php://stdout"), Literal("php://stderr"),
+            Literal("php://input"), Literal("php://memory"), Literal("php://temp"),
+            Literal("phar:///a.phar/x"), Literal("php://filter/resource=https://h/x"),
+            Constant("STDIN"), Constant("STDOUT"), Constant("STDERR"),
+        ];
+        let modes = [None, Some(Literal("r")), Some(Literal("w")), Some(Literal("r+"))];
+        for name in ["file_get_contents", "file_put_contents", "fopen", "copy", "rename", "readfile",
+                     "fpassthru", "fread", "fgets", "fwrite", "fputs", "unlink", "mkdir", "rmdir",
+                     "touch", "scandir", "file_exists", "is_file", "is_dir"] {
+            // Every narrowing name is also a catalogued row: the narrowing REPLACES
+            // a default, it never colors an uncatalogued function.
+            assert!(effect_labels(name).is_some(), "{name} must be catalogued");
+            for &t in &targets {
+                for &m in &modes {
+                    let Some(labels) = narrowed(name, Some(t), m.or(Some(t))) else { continue };
+                    for label in labels {
+                        assert!(
+                            super::is_known_label(label),
+                            "{name}({t:?}) narrowed to unregistered label {label}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     use super::{failure_arms, FailureArms, FailureCause};
