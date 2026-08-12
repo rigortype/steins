@@ -48,14 +48,14 @@ fn an_effect_outside_the_region_does_not_count() {
 fn an_effect_inside_the_region_is_proven_and_named() {
     let src = "<?php\nfunction f(int $n): int {\n    // region-start\n    echo $n;\n    // region-end\n    return $n;\n}\n";
     let r = region(src);
-    assert_eq!(r.labels, vec!["output".to_owned()]);
+    assert_eq!(r.labels, vec!["io.output.buffer".to_owned()]);
 }
 
 #[test]
 fn a_callees_effect_propagates_into_the_region() {
     let src = "<?php\nfunction shout(int $n): int { echo $n; return $n; }\nfunction f(int $n): int {\n    // region-start\n    $y = shout($n);\n    // region-end\n    return $y;\n}\n";
     let r = region(src);
-    assert_eq!(r.labels, vec!["output".to_owned()], "callee effect did not propagate");
+    assert_eq!(r.labels, vec!["io.output.buffer".to_owned()], "callee effect did not propagate");
 }
 
 #[test]

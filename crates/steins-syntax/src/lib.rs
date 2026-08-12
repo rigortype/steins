@@ -435,8 +435,10 @@ pub enum EffectOrigin {
     /// same thing — `preg_match(matches: $m, …)` supplies its out-parameter,
     /// `preg_match()` does not.
     Call { name: NameRef, span: Span, arg_targets: Option<Vec<RefTarget>> },
-    /// An `echo` / `print` / short-echo (`<?=`) construct at `span` — the
-    /// `output` effect. `keyword` is the spelling for diagnostics.
+    /// An `echo` / `print` / short-echo (`<?=`) construct, or non-blank inline
+    /// HTML between a `?>` and the next `<?php`, at `span` — the
+    /// `io.output.buffer` effect (ADR-0083: this is the OB-capturable channel).
+    /// `keyword` is the spelling for diagnostics.
     Output { keyword: &'static str, span: Span },
     /// An `exit` / `die` construct at `span` — the `exit` effect (ADR-0019 rule
     /// 4: `Pure` forbids exit). `keyword` is the spelling for diagnostics.
@@ -6103,6 +6105,19 @@ fn scan_effect_origins(node: &Node<'_, '_>, cx: &EffectScanCx, out: &mut Vec<Eff
         }
         Node::PrintConstruct(p) => {
             out.push(EffectOrigin::Output { keyword: "print", span: to_span(p.span()) });
+        }
+        // Raw text between a `?>` and the next `<?php` inside a body: the engine
+        // writes it to the output channel exactly as `echo` does, so it is an
+        // output origin (ADR-0008 always said so; ADR-0083 is what wired it).
+        // Whitespace-only inline text is skipped — the newline and indentation
+        // separating two tag pairs are punctuation of the source layout, not
+        // output anyone writes a function for, and coloring them would make the
+        // effect depend on how the template is indented. A shebang is not output
+        // at all (the SAPI eats it) and cannot occur inside a body regardless.
+        Node::Inline(i) => {
+            if i.kind.is_text() && !i.value.iter().all(u8::is_ascii_whitespace) {
+                out.push(EffectOrigin::Output { keyword: "inline HTML", span: to_span(i.span()) });
+            }
         }
         // Non-local program exit.
         Node::ExitConstruct(x) => {

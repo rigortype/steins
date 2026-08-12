@@ -38,7 +38,7 @@ fn pure_array_map_inline_impure_closure_fires_with_callback_provenance() {
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(array $xs): array {\n    return array_map(function ($x) { echo $x; return $x; }, $xs);\n}\n";
     let d = one(src);
     assert_eq!(d.id, EFFECT_ID);
-    assert!(d.message.contains("output"), "names the output effect: {}", d.message);
+    assert!(d.message.contains("io.output.buffer"), "names the output effect: {}", d.message);
     assert!(d.message.contains("closure"), "names the closure in provenance: {}", d.message);
     assert!(d.message.contains("#[\\Steins\\Pure]"), "{}", d.message);
 }
@@ -64,7 +64,7 @@ fn pure_array_map_unknown_callable_is_silent_but_taints() {
 fn array_filter_reversed_args_finds_callback_at_position_1() {
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(array $xs): array {\n    return array_filter($xs, function ($x) { echo $x; return true; });\n}\n";
     let d = one(src);
-    assert!(d.message.contains("output"), "{}", d.message);
+    assert!(d.message.contains("io.output.buffer"), "{}", d.message);
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn register_shutdown_function_deferred_effects_propagate() {
     // the caller's set (ADR-0033: Deferred claims nothing about WHEN, not whether).
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(): void {\n    register_shutdown_function(function () { echo \"bye\"; });\n}\n";
     let d = one(src);
-    assert!(d.message.contains("output"), "deferred callback effect propagates: {}", d.message);
+    assert!(d.message.contains("io.output.buffer"), "deferred callback effect propagates: {}", d.message);
 }
 
 // ---- Named / string callables ----------------------------------------------
@@ -96,14 +96,14 @@ fn array_map_string_builtin_callback_is_pure() {
 fn array_map_user_impure_named_callback_fires() {
     let src = "<?php\nfunction shout($x) { echo $x; return $x; }\n#[\\Steins\\Pure]\nfunction f(array $xs): array { return array_map('shout', $xs); }\n";
     let d = one(src);
-    assert!(d.message.contains("output"), "{}", d.message);
+    assert!(d.message.contains("io.output.buffer"), "{}", d.message);
 }
 
 #[test]
 fn array_map_first_class_callable_callback_fires() {
     let src = "<?php\nfunction shout($x) { echo $x; return $x; }\n#[\\Steins\\Pure]\nfunction f(array $xs): array { return array_map(shout(...), $xs); }\n";
     let d = one(src);
-    assert!(d.message.contains("output"), "{}", d.message);
+    assert!(d.message.contains("io.output.buffer"), "{}", d.message);
 }
 
 // ---- Direct $fn() closure effect feeding -----------------------------------
@@ -114,7 +114,7 @@ fn direct_fn_call_on_local_closure_feeds_effects_with_provenance() {
     // to the enclosing Pure function, with the closure definition in provenance.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(): void {\n    $log = function () { echo \"x\"; };\n    $log();\n}\n";
     let d = one(src);
-    assert!(d.message.contains("output"), "{}", d.message);
+    assert!(d.message.contains("io.output.buffer"), "{}", d.message);
     assert!(d.message.contains("closure"), "closure provenance: {}", d.message);
 }
 
@@ -163,7 +163,7 @@ fn an_aliased_usort_import_dispatches_and_colors_like_the_spelled_call() {
     let ss = summary(spelled, "f");
     assert_eq!(sa.labels, ss.labels, "aliased usort colors identically to the spelled call");
     assert!(
-        sa.labels.iter().any(|l| l == "output"),
+        sa.labels.iter().any(|l| l == "io.output.buffer"),
         "the comparator's echo propagates through the alias: {:?}",
         sa.labels
     );
@@ -211,7 +211,7 @@ fn an_aliased_import_of_a_shape_named_project_function_is_unaffected() {
     let sa = summary(aliased, "f");
     assert_eq!(su.labels, sa.labels, "aliasing a shadowing project function changes nothing");
     assert!(
-        su.labels.iter().any(|l| l == "output"),
+        su.labels.iter().any(|l| l == "io.output.buffer"),
         "the shadow's own echo joins, not usort's shape table: {:?}",
         su.labels
     );

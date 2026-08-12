@@ -4822,7 +4822,7 @@ fn classify_effect_origins(
             }
             EffectOrigin::Output { keyword, span } => {
                 d.insert(EffectFinding {
-                    label: "output".to_owned(),
+                    label: "io.output.buffer".to_owned(),
                     origin: (*keyword).to_owned(),
                     line: cx.tree().position(span.start).line,
                     path: cx.path().to_owned(),
@@ -5753,9 +5753,9 @@ fn report_unit(
                     FnResolution::Unknown => {}
                 }
             }
-            EffectOrigin::Output { keyword, span } if bound.exceeds("output") => {
-                let prefix = format!("{keyword} has effect output");
-                out.push(exceeded_diag(cx, span.start, &prefix, display, bound, "output"));
+            EffectOrigin::Output { keyword, span } if bound.exceeds("io.output.buffer") => {
+                let prefix = format!("{keyword} has effect io.output.buffer");
+                out.push(exceeded_diag(cx, span.start, &prefix, display, bound, "io.output.buffer"));
             }
             EffectOrigin::Exit { keyword, span } if bound.exceeds("exit") => {
                 let prefix = format!("{keyword} has effect exit");
@@ -5957,7 +5957,7 @@ const MUTATE_LOCAL: &str = "mutate.local";
 /// The ADR states the tolerance for `Pure` specifically. It is implemented for
 /// every envelope because `Pure` is the *tightest* envelope in the lattice —
 /// tolerating a label there while rejecting it under a wider declaration would
-/// make the check non-monotone, and `#[\Steins\Effect('output')]` (strictly
+/// make the check non-monotone, and `#[\Steins\Effect('io.output')]` (strictly
 /// weaker than `Pure`) would flag a call `#[\Steins\Pure]` accepts.
 fn tolerated_by_every_envelope(effect_label: &str) -> bool {
     effect_label == MUTATE_LOCAL

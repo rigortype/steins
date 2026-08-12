@@ -372,11 +372,19 @@ const WIDTH_REFUSED: &[&str] = &[
 ///
 /// * `fopen` uses parent label `io.fs` because its read/write split depends on
 ///   the mode string.
-/// * `print_r`/`var_export`/`var_dump` are colored `output` even though the
-///   first two are pure when their second argument is `true` (return-mode); the
-///   upper bound is the arg-blind safe choice.
+/// * `print_r`/`var_export`/`var_dump` are colored `io.output.buffer` even
+///   though the first two are pure when their second argument is `true`
+///   (return-mode); the upper bound is the arg-blind safe choice.
 /// * `sleep`/`usleep` are `io`: an observable timing side effect on the running
 ///   process, closest to the io root among the initial colors.
+/// * `curl_exec` keeps its `io.output` component arg-blind (only
+///   `CURLOPT_RETURNTRANSFER` suppresses the echo), and `system`/`passthru` take
+///   the parent `io.output` rather than `io.output.buffer` because the evidence
+///   for OB capturability of a relayed child's output is split — ADR-0083 puts
+///   split evidence on the unmaskable side.
+/// * `fwrite` stays `io.fs.write`: narrowing the `STDOUT`/`STDERR` destinations
+///   to `io.output.stdout`/`.stderr` needs argument awareness this table does
+///   not have (ADR-0083, deferred).
 ///
 /// `exit`/`die` are **language constructs**, not functions — they never reach
 /// this table; the effects pass detects them structurally (ADR-0019 rule 4).
@@ -388,18 +396,31 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     const IO_FS_READ: &[&str] = &["io.fs.read"];
     const IO_FS_WRITE: &[&str] = &["io.fs.write"];
     const IO_FS: &[&str] = &["io.fs"];
-    const OUTPUT: &[&str] = &["output"];
+    const IO_OUTPUT_BUFFER: &[&str] = &["io.output.buffer"];
     const IO: &[&str] = &["io"];
     const GLOBAL_WRITE: &[&str] = &["global.write"];
     const GLOBAL_READ: &[&str] = &["global.read"];
     const IO_SIGNAL: &[&str] = &["io.signal"];
-    const OUTPUT_HEADER: &[&str] = &["output.header"];
+    const IO_OUTPUT_HEADER: &[&str] = &["io.output.header"];
     const IO_IPC: &[&str] = &["io.ipc"];
     // `session_start` is genuinely composite (effects_gaps.md): the default file
     // handler writes session files (`io.fs.write`), the session cookie is sent as
-    // a `Set-Cookie` header (`output.header`), and `$_SESSION`/ini are mutated
+    // a `Set-Cookie` header (`io.output.header`), and `$_SESSION`/ini are mutated
     // (`global.write`). The upper-bound set is all three.
-    const SESSION: &[&str] = &["io.fs.write", "output.header", "global.write"];
+    const SESSION: &[&str] = &["io.fs.write", "io.output.header", "global.write"];
+    // Reads a file and writes it straight to the output channel. Both rows are
+    // `.buffer`: the manual documents the `ob_start()` + `readfile()` capture
+    // pattern, so the OB layer demonstrably sees this output (ADR-0083).
+    const FS_READ_TO_BUFFER: &[&str] = &["io.fs.read", "io.output.buffer"];
+    // Runs a child process *and* relays its output. The relay's OB-capturability
+    // is not settled, so the row takes the parent `io.output` rather than
+    // `.buffer` — over-approximating toward "cannot be masked" is the sound side
+    // (ADR-0083).
+    const PROCESS_TO_OUTPUT: &[&str] = &["io.process", "io.output"];
+    // `curl_exec` writes the response body to output unless `CURLOPT_RETURNTRANSFER`
+    // is set; arg-blind, the upper bound keeps the output component, at the parent
+    // for the same capturability reason as `PROCESS_TO_OUTPUT`.
+    const NET_TO_OUTPUT: &[&str] = &["io.net", "io.output"];
 
     // A per-call lowercase copy keeps the arms readable; PHP names are ASCII.
     let colored: Option<&'static [&'static str]> = match name.to_ascii_lowercase().as_str() {
@@ -413,7 +434,16 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         "file_put_contents" | "fwrite" | "unlink" | "mkdir" | "rmdir" | "touch" | "copy"
         | "rename" => Some(IO_FS_WRITE),
         "fopen" => Some(IO_FS),
-        "print_r" | "var_dump" | "var_export" | "printf" | "vprintf" => Some(OUTPUT),
+        "print_r" | "var_dump" | "var_export" | "printf" | "vprintf" | "flush" | "ob_flush" => {
+            Some(IO_OUTPUT_BUFFER)
+        }
+        // Read-and-relay: the file's bytes leave through the output channel, so the
+        // row carries both halves. Without them a `readfile()`/`fpassthru()` body
+        // looked output-free (a false negative predating ADR-0083).
+        "readfile" | "fpassthru" => Some(FS_READ_TO_BUFFER),
+        // Shell out and relay the child's output (ADR-0083).
+        "system" | "passthru" => Some(PROCESS_TO_OUTPUT),
+        "curl_exec" => Some(NET_TO_OUTPUT),
         "error_log" | "syslog" | "sleep" | "usleep" => Some(IO),
         "date_default_timezone_set" | "mb_regex_encoding" | "setlocale" | "ini_set" | "putenv" => {
             Some(GLOBAL_WRITE)
@@ -425,7 +455,7 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         | "pcntl_sigprocmask" | "pcntl_sigwaitinfo" | "posix_kill" => Some(IO_SIGNAL),
         // HTTP response-header mutation (effects_gaps.md §2).
         "header" | "header_remove" | "setcookie" | "setrawcookie" | "http_response_code" => {
-            Some(OUTPUT_HEADER)
+            Some(IO_OUTPUT_HEADER)
         }
         // System-V / shared-memory IPC (effects_gaps.md §4).
         "shmop_write" | "shmop_read" | "sem_acquire" | "sem_release" | "msg_send"
@@ -824,7 +854,7 @@ pub fn known_labels() -> &'static [&'static str] {
 /// children are registry entries; root ownership applies to the namespace.
 #[must_use]
 pub fn core_roots() -> &'static [&'static str] {
-    &["exit", "failure", "ffi", "global", "io", "mutate", "nondet", "output"]
+    &["exit", "failure", "ffi", "global", "io", "mutate", "nondet"]
 }
 
 /// Whether `label` lies under some [`core_roots`] entry — equal to a root, or a
@@ -864,11 +894,33 @@ const BUILTIN_LABELS: &[&str] = {
         "io.fs",
         "io.fs.read",
         "io.fs.write",
+        // Ambient *input* channel (ADR-0083): `php://input`, `php://stdin` — the
+        // script's inbound stream, symmetric with `io.output`. No builtin row
+        // carries it yet (Steins has no stream-target awareness), so like `ffi` it
+        // exists for envelope declarations and for the rows that will follow.
+        // `$_GET`-style parsed-memory reads stay `global.read`.
+        "io.input",
         // System-V / shared-memory IPC (effects_gaps.md §4): cross-process shared
         // state, neither filesystem nor network.
         "io.ipc",
         "io.net",
         "io.net.http",
+        // Ambient *output* channel (ADR-0083), an `io` child like the opened
+        // resources beside it. Its own children split on the one question a future
+        // effect masking has to answer — can `ob_start()` capture this? — so the
+        // masking rule stays a single prefix test against `io.output.buffer`.
+        "io.output",
+        // OB-layer output: `echo`, `print`, `printf`, inline HTML, `php://output`,
+        // `flush`, `ob_flush`. The only family an `ob_start()` guard could ever
+        // deduct.
+        "io.output.buffer",
+        // HTTP response-header mutation (effects_gaps.md §2): response metadata,
+        // outside OB's reach (the old `output.header`).
+        "io.output.header",
+        // Process-fd writes, which OB cannot touch: `php://stderr`, `STDERR`.
+        "io.output.stderr",
+        // As `io.output.stderr`: `php://stdout`, `fwrite(STDOUT, …)`.
+        "io.output.stdout",
         "io.process",
         // Signal delivery/handling (pcntl/posix; effects_gaps.md §1): an
         // observable OS interaction, parallel to `io.process`.
@@ -886,11 +938,6 @@ const BUILTIN_LABELS: &[&str] = {
         "nondet",
         "nondet.random",
         "nondet.time",
-        "output",
-        // HTTP response-header mutation (effects_gaps.md §2): a response-side
-        // sibling of stdout `output`; a coarse `output` subsumes it, a policy can
-        // name it precisely.
-        "output.header",
     ]
 };
 
@@ -1717,7 +1764,7 @@ mod tests {
             "rand",              // nondet
             "setlocale",         // global-write
             "file_get_contents", // io
-            "printf",            // output
+            "printf",            // io.output.buffer
             "date",              // global-read (timezone) + nondet
             "strtotime",         // nondet.time, timezone-coupled
             "idate",             // timezone-coupled even with an explicit timestamp
@@ -1738,7 +1785,7 @@ mod tests {
         assert_eq!(effect_labels("file_get_contents"), Some(&["io.fs.read"][..]));
         assert_eq!(effect_labels("file_put_contents"), Some(&["io.fs.write"][..]));
         assert_eq!(effect_labels("fopen"), Some(&["io.fs"][..]));
-        assert_eq!(effect_labels("printf"), Some(&["output"][..]));
+        assert_eq!(effect_labels("printf"), Some(&["io.output.buffer"][..]));
         assert_eq!(effect_labels("error_log"), Some(&["io"][..]));
         assert_eq!(effect_labels("setlocale"), Some(&["global.write"][..]));
         assert_eq!(effect_labels("getenv"), Some(&["global.read"][..]));
@@ -1755,7 +1802,7 @@ mod tests {
 
     #[test]
     fn uncatalogued_builtins_are_none() {
-        for name in ["some_unknown_fn", "curl_exec", "mysqli_query"] {
+        for name in ["some_unknown_fn", "mysqli_query", "proc_open"] {
             assert_eq!(effect_labels(name), None, "{name} must be uncatalogued");
         }
     }
@@ -2256,7 +2303,7 @@ mod tests {
     #[test]
     fn registry_roots_are_known() {
         for label in [
-            "output", "io", "io.fs", "io.fs.read", "io.fs.write", "io.net", "io.net.http",
+            "io.output", "io", "io.fs", "io.fs.read", "io.fs.write", "io.net", "io.net.http",
             "io.db", "io.process", "global.read", "global.write", "nondet", "nondet.random",
             "nondet.time", "exit", "mutate",
         ] {
@@ -2274,9 +2321,15 @@ mod tests {
     #[test]
     fn nearest_label_suggests_the_obvious_typo() {
         assert_eq!(nearest_label("io.netw"), Some("io.net"));
-        assert_eq!(nearest_label("outputt"), Some("output"));
+        assert_eq!(nearest_label("io.outpt"), Some("io.output"));
         // Something wildly off has no near suggestion.
         assert_eq!(nearest_label("completely-different"), None);
+        // The retired ADR-0083 spelling is *not* a near miss of its replacement
+        // (`output` → `io.output` is distance 3, past the cap), so a project on
+        // the old vocabulary gets `effect.unknown-label` with no suggestion —
+        // the migration table in the docs is what carries those users across.
+        assert_eq!(nearest_label("output"), None);
+        assert_eq!(nearest_label("output.header"), None);
     }
 
     #[test]
@@ -2315,6 +2368,9 @@ mod tests {
         assert!(is_core_label("global.write"));
         // A new root is not — that is what the vendor-name rule adjudicates.
         assert!(!is_core_label("acme.cache"));
+        // ADR-0083 retired the `output` root; it is now just an unowned name.
+        assert!(!is_core_label("output"));
+        assert!(is_core_label("io.output.buffer"));
         assert!(!is_core_label("email.send"));
         // Segment-aware, like every other label predicate here.
         assert!(!is_core_label("iota.thing"));
@@ -2323,12 +2379,23 @@ mod tests {
     #[test]
     fn new_effect_labels_are_registered_and_subsume() {
         // Labels from effects_gaps.md are known and prefix-subsume correctly.
-        for label in ["ffi", "io.signal", "io.ipc", "output.header"] {
+        for label in ["ffi", "io.signal", "io.ipc", "io.output.header", "io.input"] {
             assert!(is_known_label(label), "{label} should be a known registry label");
         }
         assert!(subsumes("io", "io.signal"), "coarse io admits io.signal");
         assert!(subsumes("io", "io.ipc"), "coarse io admits io.ipc");
-        assert!(subsumes("output", "output.header"), "coarse output admits output.header");
+        assert!(
+            subsumes("io.output", "io.output.buffer"),
+            "coarse io.output admits io.output.buffer"
+        );
+        // The ADR-0083 meaning change, pinned at the registry: bare `io` is the
+        // ambient channels' ancestor too, so an `io` envelope admits output.
+        assert!(subsumes("io", "io.output.buffer"), "io admits the ambient output channel");
+        assert!(subsumes("io", "io.input"));
+        assert!(
+            !subsumes("io.output.buffer", "io.output.header"),
+            "headers are outside the OB-capturable family"
+        );
         assert!(!subsumes("io.signal", "io.ipc"), "siblings do not subsume");
         // ffi is a top-level escape hatch, not under io.
         assert!(!subsumes("io", "ffi"));
@@ -2507,17 +2574,46 @@ mod tests {
 
     #[test]
     fn new_effect_labels_color_the_mined_functions() {
-        // io.signal (pcntl/posix), output.header (header/cookies), io.ipc (sysv),
+        // io.signal (pcntl/posix), io.output.header (header/cookies), io.ipc (sysv),
         // and the composite session bootstrap.
         assert_eq!(effect_labels("pcntl_signal"), Some(&["io.signal"][..]));
         assert_eq!(effect_labels("posix_kill"), Some(&["io.signal"][..]));
-        assert_eq!(effect_labels("header"), Some(&["output.header"][..]));
-        assert_eq!(effect_labels("setcookie"), Some(&["output.header"][..]));
+        assert_eq!(effect_labels("header"), Some(&["io.output.header"][..]));
+        assert_eq!(effect_labels("setcookie"), Some(&["io.output.header"][..]));
         assert_eq!(effect_labels("shmop_write"), Some(&["io.ipc"][..]));
         assert_eq!(
             effect_labels("session_start"),
-            Some(&["io.fs.write", "output.header", "global.write"][..])
+            Some(&["io.fs.write", "io.output.header", "global.write"][..])
         );
+    }
+
+    /// The ADR-0083 rows that close the read-and-relay false-negative gap: before
+    /// the move, a body whose only statement was `readfile($p)` or `system($cmd)`
+    /// carried no output component at all.
+    #[test]
+    fn relaying_builtins_carry_their_output_component() {
+        // Documented `ob_start()` + `readfile()` capture pattern → the OB leaf.
+        assert_eq!(effect_labels("readfile"), Some(&["io.fs.read", "io.output.buffer"][..]));
+        assert_eq!(effect_labels("fpassthru"), Some(&["io.fs.read", "io.output.buffer"][..]));
+        // Split capturability evidence → the parent, which no future masking may
+        // deduct.
+        assert_eq!(effect_labels("system"), Some(&["io.process", "io.output"][..]));
+        assert_eq!(effect_labels("passthru"), Some(&["io.process", "io.output"][..]));
+        assert_eq!(effect_labels("curl_exec"), Some(&["io.net", "io.output"][..]));
+        // Its failure-arm row is a separate table and is untouched by the coloring.
+        assert_eq!(
+            failure_arms("curl_exec"),
+            Some(FailureArms::Causes(&[FailureCause::Environment]))
+        );
+        // The OB flush pair writes through the buffer like `echo` does.
+        assert_eq!(effect_labels("flush"), Some(&["io.output.buffer"][..]));
+        assert_eq!(effect_labels("ob_flush"), Some(&["io.output.buffer"][..]));
+        // `ob_start`/`ob_get_clean` stay uncatalogued: unknown-effect widening is
+        // the sound default until masking exists (ADR-0083, deferred).
+        assert_eq!(effect_labels("ob_start"), None);
+        assert_eq!(effect_labels("ob_get_clean"), None);
+        // `fwrite`'s destination narrowing is deferred — the row is unmoved.
+        assert_eq!(effect_labels("fwrite"), Some(&["io.fs.write"][..]));
     }
 
     use super::{failure_arms, FailureArms, FailureCause};

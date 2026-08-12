@@ -37,8 +37,8 @@ HTTPリクエストを送るのか、何かを出力するのかは分からな�
 ```text
 io.db
 io.net.http
+io.output.buffer
 nondet.time
-output
 ```
 
 Steinsはラベルを呼び出しグラフ上で伝播させる。コントローラがリポジトリを呼び、

@@ -155,7 +155,7 @@ $ steins check --vendor-diagnostics .
 
 ```
 $ steins check --profile contracts .
-./src/Counter.php:12:9: error[effect.envelope-exceeded]: echo has effect output, but Counter::bump() is declared #[\Steins\Pure]
+./src/Counter.php:12:9: error[effect.envelope-exceeded]: echo has effect io.output.buffer, but Counter::bump() is declared #[\Steins\Pure]
 ./src/Greeter.php:16:22: error[type.argument-mismatch]: argument null to Greeter::greet() cannot become string $name — proven TypeError (coercive mode)
 ./src/Ids.php:16:11: error[phpdoc.param-mismatch]: argument "42" to label() violates declared @param int $id — declared contract violation
 ./src/Invoice.php:15:13: error[throw.undeclared]: RuntimeException can escape Invoice::total() but is not declared (@throws LogicException) — proven escape
@@ -489,7 +489,7 @@ $ steins annotate --format json src/Counter.php
       "name": "Counter::bump",
       "line": 10,
       "effects": [
-        "output"
+        "io.output.buffer"
       ],
       "declared": [],
       "exhaustive": true
@@ -806,7 +806,7 @@ Delete the `echo` from `Counter::bump()` and rerun:
 
 ```
 $ steins effect-diff --baseline effects.json src/
-src/Counter.php Acme\Counter::bump: - output
+src/Counter.php Acme\Counter::bump: - io.output.buffer
 $ echo $?
 0
 ```
@@ -832,7 +832,7 @@ $ steins effect-diff --baseline effects.json --format json src/
       "file": "src/Counter.php",
       "symbol": "Acme\\Counter::bump",
       "category": "proven-removed",
-      "label": "output"
+      "label": "io.output.buffer"
     }
   ],
   "compared": 8,

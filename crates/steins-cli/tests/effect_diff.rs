@@ -102,7 +102,7 @@ fn a_removal_is_confident_when_the_current_summary_is_exhaustive() {
         "<?php\nfunction report(): int { return 1; }\n",
         &[],
     );
-    assert_eq!(r.stdout, "a.php report: - output\n");
+    assert_eq!(r.stdout, "a.php report: - io.output.buffer\n");
 }
 
 #[test]
@@ -117,10 +117,14 @@ fn a_non_exhaustive_current_summary_hedges_the_removal() {
     );
     assert_eq!(
         r.stdout,
-        "a.php report: ? - output (possibly removed; current summary non-exhaustive)\n\
+        "a.php report: ? - io.output.buffer (possibly removed; current summary non-exhaustive)\n\
          a.php report: coverage narrowed (exhaustive → non-exhaustive)\n"
     );
-    assert!(!r.stdout.contains("report: - output"), "no confident removal, got:\n{}", r.stdout);
+    assert!(
+        !r.stdout.contains("report: - io.output.buffer"),
+        "no confident removal, got:\n{}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -218,7 +222,7 @@ fn json_shape_is_pinned() {
     assert_eq!(events[0]["file"], "a.php");
     assert_eq!(events[0]["symbol"], "report");
     assert_eq!(events[0]["category"], "proven-added");
-    assert_eq!(events[0]["label"], "output");
+    assert_eq!(events[0]["label"], "io.output.buffer");
 }
 
 #[test]
@@ -250,5 +254,5 @@ fn an_explicit_baseline_path_is_honored_and_a_missing_one_is_a_usage_error() {
 
     write(&dir, "a.php", "<?php\nfunction report(): int { printf(\"x\"); return 1; }\n");
     let r = run_in(&dir, &["effect-diff", "--baseline", "effects.json", "a.php"]);
-    assert_eq!(r.stdout, "a.php report: + output\n");
+    assert_eq!(r.stdout, "a.php report: + io.output.buffer\n");
 }

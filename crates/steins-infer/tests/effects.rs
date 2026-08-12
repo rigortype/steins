@@ -73,7 +73,36 @@ fn pure_calling_an_aliased_builtin_import_is_flagged_like_the_spelled_call() {
 fn echo_inside_if_inside_pure_is_flagged() {
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(bool $c): void { if ($c) { echo \"hi\"; } }\n";
     let d = one(src);
-    assert_eq!(d.message, "echo has effect output, but f() is declared #[\\Steins\\Pure]");
+    assert_eq!(
+        d.message,
+        "echo has effect io.output.buffer, but f() is declared #[\\Steins\\Pure]"
+    );
+}
+
+// ---- inline HTML (ADR-0083 wired the ADR-0008 spec gap) ------------------
+
+/// Raw text between `?>` and `<?php` inside a body is output the engine writes
+/// for you. It was in ADR-0008's list from the start and never reached the scan;
+/// ADR-0083 wired it, with the same OB-capturable label `echo` carries.
+#[test]
+fn inline_html_inside_pure_is_flagged() {
+    let src = "<?php\n#[\\Steins\\Pure]\nfunction f(): void { ?><b>hi</b><?php }\n";
+    let d = one(src);
+    assert_eq!(
+        d.message,
+        "inline HTML has effect io.output.buffer, but f() is declared #[\\Steins\\Pure]"
+    );
+}
+
+/// Whitespace between two tag pairs is source layout, not output: coloring it
+/// would make a function's effect set depend on its indentation.
+#[test]
+fn whitespace_only_inline_text_is_not_an_output_origin() {
+    for body in ["?>\n<?php", "?> <?php", "?>\n    \n<?php", "?>\t<?php"] {
+        let src =
+            format!("<?php\n#[\\Steins\\Pure]\nfunction f(): void {{ {body} }}\n");
+        assert_eq!(effects(&src).len(), 0, "blank inline text is silent: {body:?}");
+    }
 }
 
 // ---- exit (ADR-0019 rule 4) ----------------------------------------------
@@ -255,9 +284,77 @@ fn effect_exit_admits_exit_but_pure_forbids_it() {
 }
 
 #[test]
-fn effect_output_admits_echo() {
+fn effect_io_output_admits_echo() {
+    let src =
+        "<?php\n#[\\Steins\\Effect('io.output')]\nfunction f(): void { echo \"hi\"; }\n";
+    assert_eq!(effects(src).len(), 0, "Effect('io.output') admits echo → silent");
+}
+
+/// ADR-0083's one deliberate meaning change, from the admitting side: output is
+/// an ambient channel *under* `io`, so a bare `io` envelope now admits `echo`.
+/// Before the move this was a finding. It is intended, not a regression — "io
+/// but no output" is spelled by enumerating children (or, once #312 lands, by
+/// `io -except io.output`).
+#[test]
+fn a_bare_io_envelope_admits_echo() {
+    let src = "<?php\n#[\\Steins\\Effect('io')]\nfunction f(): void { echo \"hi\"; }\n";
+    assert_eq!(effects(src).len(), 0, "io.output.buffer ⊑ io → silent");
+}
+
+/// …and from the other side: a fine-grained envelope keeps its edge. `io.db`
+/// does not subsume the ambient output channel, so the same `echo` is still a
+/// proven violation — the migration blunted only bare `io`.
+#[test]
+fn a_fine_grained_io_envelope_still_catches_echo() {
+    let src = "<?php\n#[\\Steins\\Effect('io.db')]\nfunction f(): void { echo \"hi\"; }\n";
+    let d = one(src);
+    assert_eq!(
+        d.message,
+        "echo has effect io.output.buffer, but f() is declared #[\\Steins\\Effect('io.db')] \
+         — io.output.buffer exceeds the envelope"
+    );
+}
+
+/// `io.output.buffer` is the OB-capturable leaf only: a `header()` call is
+/// response metadata `ob_start()` cannot touch, so it exceeds that envelope
+/// while the parent `io.output` admits both.
+#[test]
+fn the_buffer_leaf_admits_echo_but_not_a_header_call() {
+    let admits = "<?php\n#[\\Steins\\Effect('io.output.buffer')]\nfunction f(): void { echo \"hi\"; }\n";
+    assert_eq!(effects(admits).len(), 0, "echo is OB-capturable output");
+    let exceeds = "<?php\n#[\\Steins\\Effect('io.output.buffer')]\nfunction f(): void { header('X: 1'); }\n";
+    let d = one(exceeds);
+    assert_eq!(
+        d.message,
+        "header() has effect io.output.header, but f() is declared \
+         #[\\Steins\\Effect('io.output.buffer')] — io.output.header exceeds the envelope"
+    );
+    let parent = "<?php\n#[\\Steins\\Effect('io.output')]\nfunction f(): void { header('X: 1'); }\n";
+    assert_eq!(effects(parent).len(), 0, "the umbrella admits response metadata too");
+}
+
+/// The retired spelling is now simply unknown — and `output` → `io.output` is
+/// Levenshtein 3, past the suggestion cap, so the finding carries no "did you
+/// mean". Migration guidance lives in the docs (ADR-0083).
+#[test]
+fn the_retired_output_spelling_is_an_unknown_label_without_a_suggestion() {
     let src = "<?php\n#[\\Steins\\Effect('output')]\nfunction f(): void { echo \"hi\"; }\n";
-    assert_eq!(effects(src).len(), 0, "Effect('output') admits echo → silent");
+    let u = unknown_labels(src);
+    assert_eq!(u.len(), 1, "{u:#?}");
+    assert_eq!(u[0].id, UNKNOWN_LABEL_ID);
+    assert_eq!(
+        u[0].message,
+        "unknown effect label 'output' in #[\\Steins\\Effect] on f()"
+    );
+    // The unknown label still *reads* as an envelope, so the echo is additionally
+    // reported against it — a project on the old spelling sees both findings, and
+    // both point at the same fix.
+    let d = one(src);
+    assert_eq!(
+        d.message,
+        "echo has effect io.output.buffer, but f() is declared #[\\Steins\\Effect('output')] \
+         — io.output.buffer exceeds the envelope"
+    );
 }
 
 // ---- Non-literal args → unrecognized: no envelope AND no unknown-label -----
@@ -319,9 +416,10 @@ fn private_label_is_unknown_for_now() {
 #[test]
 fn registry_roots_produce_no_unknown_label() {
     for label in [
-        "output", "io", "io.fs", "io.fs.read", "io.fs.write", "io.net", "io.net.http", "io.db",
-        "io.process", "global.read", "global.write", "nondet", "nondet.random", "nondet.time",
-        "exit", "mutate",
+        "io.output", "io.output.buffer", "io.output.header", "io.output.stdout",
+        "io.output.stderr", "io.input", "io", "io.fs", "io.fs.read", "io.fs.write", "io.net",
+        "io.net.http", "io.db", "io.process", "global.read", "global.write", "nondet",
+        "nondet.random", "nondet.time", "exit", "mutate",
     ] {
         let src = format!("<?php\n#[\\Steins\\Effect('{label}')]\nfunction f(): void {{}}\n");
         assert_eq!(unknown_labels(&src).len(), 0, "{label} is a known registry root");

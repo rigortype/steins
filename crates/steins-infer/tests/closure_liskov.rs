@@ -27,7 +27,7 @@ fn impure_impl_of_pure_interface_fires() {
     let src = "<?php\ninterface Clock {\n    #[\\Steins\\Pure]\n    public function now(): int;\n}\nclass EchoClock implements Clock {\n    public function now(): int { echo \"tick\"; return 1; }\n}\n";
     let ds = effect_liskov(src);
     assert_eq!(ds.len(), 1, "got: {ds:#?}");
-    assert!(ds[0].message.contains("output"), "{}", ds[0].message);
+    assert!(ds[0].message.contains("io.output.buffer"), "{}", ds[0].message);
     assert!(ds[0].message.contains("Clock::now()"), "names the abstraction: {}", ds[0].message);
     assert!(ds[0].message.contains("#[\\Steins\\Pure]"), "{}", ds[0].message);
     assert_eq!(ds[0].line, 7);
@@ -68,11 +68,11 @@ fn impure_override_of_pure_parent_fires() {
 #[test]
 fn tainted_impl_reports_only_proven_part() {
     // The impl both echoes (proven output) AND calls an unknown function (taint).
-    // The proven `output` still fires; the unknown remainder stays silent.
+    // The proven `io.output.buffer` still fires; the unknown remainder stays silent.
     let src = "<?php\ninterface I {\n    #[\\Steins\\Pure]\n    public function m(): void;\n}\nclass C implements I {\n    public function m(): void { echo \"x\"; unknown_ext_fn(); }\n}\n";
     let ds = effect_liskov(src);
     assert_eq!(ds.len(), 1, "proven output fires despite the taint: {ds:#?}");
-    assert!(ds[0].message.contains("output"), "{}", ds[0].message);
+    assert!(ds[0].message.contains("io.output.buffer"), "{}", ds[0].message);
 }
 
 // ---- Throw Liskov extended to interface implementations --------------------

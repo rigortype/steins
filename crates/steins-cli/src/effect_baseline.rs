@@ -406,11 +406,11 @@ mod tests {
 
     #[test]
     fn the_file_round_trips() {
-        let text = render(vec![entry("f", &["io.db"], &["output"], false)]);
+        let text = render(vec![entry("f", &["io.db"], &["io.output"], false)]);
         let doc = parse(&text).expect("readable");
         assert_eq!(doc.version, 1);
         assert_eq!(doc.functions.len(), 1);
-        assert_eq!(doc.functions[0].declared, vec!["output"]);
+        assert_eq!(doc.functions[0].declared, vec!["io.output"]);
         assert!(text.contains("\"steins-effects-baseline\": 1"));
     }
 
