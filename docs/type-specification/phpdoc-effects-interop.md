@@ -317,6 +317,105 @@ growth, while a complement bound is not — every leaf added later silently
 joins what "`io -except io.db`" admits, so an exclusion is always read
 against the vocabulary at checking time, not at writing time.
 
+### Discharging effects by policy (informative)
+
+A checker that propagates effects across the whole program eventually meets a
+shape no bound can express. A system-wide logging facade transitively reaches
+the clock and the filesystem, so every path that can touch logging loses
+purity, and a codebase that annotates its service layer earns a violation on
+every one of those declarations. The reports are honest and unactionable at
+once. This section records the operation that answers that shape, and the
+family it belongs to; like the engine-internal consumers above it is
+informative, not part of the tag semantics — the tags describe declarations,
+and this describes a *judgment*.
+
+**An ignore suppresses a report; it does not discharge an effect.** PHP
+authors already write the intent, in the only vocabulary available:
+`@phpstan-ignore impure.methodCall` on the logger call, meaning "this
+impurity is understood and accepted." Under modular analysis that is where
+the story ends, because the report at that site was the only thing that
+existed. Under whole-program propagation the effect travels on: the same
+impurity resurfaces at every pure-declared caller in the transitive cone,
+each a different site, and no suppression written at the source travels with
+it. The distinction is invisible until checking deepens, which is why an
+engine can carry ignore-only for years and then need discharge in a single
+release. Discharge is the missing first-class intent — a named effect,
+having been recognized, stops here.
+
+**The family: three ways to subtract from a bound.** They differ in what the
+subtraction is attached to.
+
+- **By vocabulary** — a complement bound, the `-except` form reserved above
+  (steins#312). It is attached to one declaration, spelled in its own tag,
+  checked like any other bound, and read against the vocabulary at checking
+  time.
+- **By higher-order containment** — masking. Attached to a function that
+  provably confines an effect its callee performs: an `ob_start()` region
+  makes the output written inside it unobservable outside, so the region's
+  own declaration may deduct it. Koka's `mask` is the type-system form of
+  the same move. The subtraction is licensed by a containment proof, and the
+  annotation names where the containment happens.
+- **By policy** — this section. Attached to nothing in the source: a
+  project-wide configuration, consulted at judgment time, naming the labels
+  this project has decided not to be told about. It is the only member of
+  the three that does not travel with the code.
+
+**This is not the complement bound reserved above**, and the two are worth
+separating flatly, because both subtract. `-except` narrows what one
+declaration *claims*; the narrowing is part of the declaration's meaning,
+every consumer of that declaration sees it, and it survives copying the file
+into another project. A policy discharge changes no declaration's meaning at
+all: the tags say what they said, the inferred effects are what they were,
+and only the verdict differs. Neither preempts the other — a project can
+reasonably want a per-declaration exclusion on one function *and* a
+project-wide tolerance for its logging facade — and an implementation of one
+is not an implementation of the other.
+
+**Tolerate semantic labels, not transport labels.** Discharging
+`nondet.time` outright is too blunt: it silences the log timestamp and the
+business logic that branches on the current date in the same stroke. The
+composition worth specifying is that something first attributes the facade
+with a *semantic* label — `telemetry`, or a vendor-rooted equivalent — and
+the policy tolerates that label. The same `time()` call is then
+distinguishable by what it was *for*. This requires the judgment to know how
+an effect arrived and not merely what it is: an effect that reaches a
+declaration both through the attributed facade and through a direct clock
+read is discharged for neither. An engine whose effect set is flat has to
+grow that much path memory before a policy can be precise, and a blunt
+policy over transport labels is what it gets until then.
+
+**Four invariants keep this from being a lie**, and an implementation that
+drops any of them has built the metadata lie instead:
+
+1. The catalog never lies. The clock function keeps its label, the fixpoint
+   is untouched, and whatever the engine's "show me the inferred effects"
+   surface is keeps showing all of them. Only judgments consult the policy.
+2. The concealment is named and auditable — one reviewed place, visible in
+   configuration diffs, rather than scattered across call-site ignores that
+   no one can enumerate.
+3. It is reversible per question. "What touches the clock" still reads the
+   labels, which are all present; an audit switch that runs the judgment with
+   an empty tolerance set reproduces the unconcealed world on demand.
+4. A policy never produces a spelling. A tool that writes purity tags back
+   from inferred effects must keep writing them from the *undischarged* set:
+   a docblock outlives and out-travels the policy, so a function whose only
+   effects were tolerated telemetry has not earned a written `@phpstan-pure`.
+   The asymmetry — checking says the envelope holds, emission declines to
+   write the tag — is intended.
+
+Most purity checkers already ship one hard-coded instance of this operation:
+the local-mutation carve-out that lets a pure function assign to its own
+variables (`mutate.local` in this vocabulary). That one is justified by
+caller-unobservability and needs no configuration, which is exactly what
+telemetry cannot claim — fire-and-forget logging is unobservable *to the
+program* but observable to the world, and "unobservable to whom" is the
+project's call, not the analyzer's. So the mechanism generalizes and the
+*set* becomes policy. Steins realizes the set as a top-level `[effects]`
+table in `steins.toml` — `tolerated` for the policy, `[effects.attribution]`
+for the semantic labels it grips, `--no-tolerated-effects` for the audit
+switch (ADR-0084). That table is one concrete realization; the operation,
+the family, and the four invariants are the shared part.
+
 ## Backward compatibility
 
 Two claims, deliberately separated — conflating them was the honest mistake

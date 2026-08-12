@@ -46,6 +46,16 @@ final-keyword = "enforced"
 # Replaces installed.json discovery outright; allow = [] loads nothing.
 allow = []
 
+[effects]
+# Effect labels the envelope judgment discharges project-wide (ADR-0084).
+# The labels stay in the catalog and in `annotate`; only verdicts change.
+tolerated = ["telemetry"]
+
+[effects.attribution]
+# What a symbol's effects are *for*. Fact, not policy: inert until some
+# label it introduces appears in `tolerated` above.
+"Monolog\\Logger" = ["telemetry"]
+
 [transform.vouch]
 # Dynamic-code sites a human has reviewed and vouched for (ADR-0046 §2).
 # Read only by `steins transform`.
@@ -201,6 +211,108 @@ Every subcommand reads `[plugins]`, and does so leniently: a malformed
 than aborting the command, even for `check` and `doctor`, which are
 otherwise strict about the rest of the file.
 
+### `[effects]`
+
+Effect labels this project has decided not to be told about (ADR-0084).
+The table answers the one shape envelope checking cannot: a system-wide
+logger transitively reaches the clock and the filesystem, so under
+whole-program propagation every declaration that can touch logging loses
+purity and earns an `effect.envelope-exceeded`. Those findings are honest
+and unactionable at once.
+
+| Key | Type | Default | Effect |
+| --- | --- | --- | --- |
+| `tolerated` | array of string | `[]` | Labels the envelope judgment **discharges** before comparing proven effects against a bound. Subsumption applies: tolerating `nondet` tolerates `nondet.time`. |
+| `attribution` | table of string → array of string (as `[effects.attribution]`) | `{}` | Symbol → labels marking what that symbol's effects are *for*. Keys name a class (every method), a `Class::method`, or a global function. A label introduced here counts as project-declared for validation. |
+
+**`tolerated` is the policy; `[effects.attribution]` is fact.** Attribution
+alone changes no verdict — it marks a logging facade as being *for*
+telemetry and stops there. Tolerance alone is blunt — `tolerated =
+["nondet.time"]` silences the log timestamp and the business logic that
+branches on today's date in the same stroke. Written together they compose
+into the precision you want: the effects that arrived through the
+attributed facade discharge, and the same `time()` call reached any other
+way keeps its finding.
+
+Three things the table deliberately does not do. **It never edits the
+catalog:** `time()` stays `nondet.time`, propagation is untouched, and
+`annotate` still shows every label. **It never travels:** the discharge
+applies at judgment — `effect.envelope-exceeded` on both the attribute and
+the interop-envelope stratum, and the purity oracle behind `pure-callable`
+— but never at a spelling-producing site, so `steins transform
+effects-envelope` keeps judging by the undischarged effects and will not
+write a `@phpstan-pure` a function earned only under your policy. A
+docblock outlives the config file. **It is not a profile field:** profiles
+select which findings surface, and this changes which findings exist, so it
+sits at the top level and profile switching stays free of it.
+
+Labels in either key are validated against the known vocabulary —
+builtin, plugin-registered, and attribution-declared — with the same
+nearest-suggestion treatment the rest of the label surface has. An
+attribution key naming a symbol the run never resolves is a notice, not an
+error: vendor code comes and goes. The failure direction is toward more
+findings, never fewer — a table that does not take effect leaves the
+findings exactly where they were.
+
+`steins check --no-tolerated-effects` runs the judgment with an empty
+tolerance set. That is the audit switch: every discharged finding comes
+back, so "what is my policy currently hiding" is a flag away rather than a
+config edit. `annotate` marks a label wholly discharged at a unit with a
+tilde — `effects: {~nondet.time, io.db}` — and `--format json` grows a
+`tolerated` array beside `labels`; `labels` itself is unchanged, and a
+label only some of whose arrivals discharge stays unmarked.
+
+### Choosing what to tolerate
+
+The mechanism takes any label. The guidance is about which ones are safe
+to hand it:
+
+- **Tolerate semantic labels, not transport labels.** `telemetry` is a
+  statement about purpose and can only reach what you attributed;
+  `io.fs.write` is a statement about machinery and reaches everything.
+- **Never attribute a PSR-14 `dispatch()`.** An event dispatcher looks
+  like a logger and is not one: real frameworks routinely consume the
+  returned event object, so the call is observable to the program and a
+  listener's effects are the caller's business.
+- **Keep `audit` separate from `telemetry`.** Compliance trails and debug
+  logging share a shape and have opposite risk profiles — "safe to stop
+  watching" versus "must always fire". Give audit logging its own label
+  so a project can tolerate one without the other.
+
+A worked shape, from a real Laravel application whose classes mix both
+kinds of clock read:
+
+```toml
+[effects]
+tolerated = ["telemetry"]
+
+[effects.attribution]
+"Illuminate\\Support\\Facades\\Log" = ["telemetry"]
+```
+
+```php
+final class Steam
+{
+    public function floatalize(string $value): float
+    {
+        Log::debug(sprintf('floatalize("%s")', $value));
+        return (float) str_replace(',', '.', $value);
+    }
+
+    public function isStale(DateTimeImmutable $seen): bool
+    {
+        return $seen->getTimestamp() < time() - 3600;
+    }
+}
+```
+
+`floatalize()` reaches `nondet.time` and `io.fs.write` only through the
+log line, every arrival attributed `telemetry`, so a `@phpstan-pure`
+declared on it is no longer reported. `isStale()` reads the clock as
+logic, nothing attributed it, and its `effect.envelope-exceeded` is
+reported exactly as before. The attribution is written once, against the
+facade, and no call site is annotated.
+
 ### `[transform.vouch]`
 
 Dynamic-code sites vouched for by a human (ADR-0046 §2). Read only by
@@ -237,9 +349,9 @@ that closes, not a feature.
 
 ## Precedence: CLI flag versus config key
 
-Only one key has a same-purpose CLI counterpart: `[check] profile` and
-`--profile <name>` on `steins check` both select the active profile. The
-flag wins. Verified:
+Two keys have a CLI counterpart. `[check] profile` and `--profile <name>`
+on `steins check` both select the active profile, and the flag wins.
+Verified:
 
 ```
 $ steins check src/                 # steins.toml sets [check] profile = "migration"
@@ -261,10 +373,18 @@ its "active profile" line reports only `[check] profile` or
 `built-in default` as the provenance — it names what the config declared,
 not what a flag would have overridden.
 
+`[effects] tolerated` is the second, and the flag goes one way only:
+`--no-tolerated-effects` empties the tolerance set for that run, and
+there is no flag that adds a label to it. The asymmetry is the point — a
+tolerance is a reviewed decision that belongs in a diff, while removing
+one for an audit run is exactly the thing you want to be able to do from
+a shell.
+
 Every other key is config-only: `[runtime] warning-handler`,
 `[runtime] final-keyword`,
-`[plugins] allow`, `[transform.vouch]`, and `[transform.partitions]` have
-no flag equivalent. `[profile.<name>]` *definitions* are config-only too —
+`[plugins] allow`, `[effects.attribution]`, `[transform.vouch]`, and
+`[transform.partitions]` have no flag equivalent. `[profile.<name>]`
+*definitions* are config-only too —
 selecting one is `--profile <name>`, but there is no way to define a
 profile's `enable`/`disable`/`warn` arrays from the command line. The
 baseline file path is the mirror case: `--baseline <path>` is a flag with

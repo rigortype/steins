@@ -108,7 +108,8 @@ Analyze a tree and report findings. This is the command you run in CI.
 ```
 steins check [--format text|json|github|sarif] [--profile <name>] [--no-php]
              [--vendor-diagnostics] [--fix] [--set-baseline]
-             [--baseline <path>] [--ignore-baseline] <paths...>
+             [--baseline <path>] [--ignore-baseline]
+             [--no-tolerated-effects] <paths...>
 ```
 
 | Flag | Default | Effect |
@@ -121,6 +122,7 @@ steins check [--format text|json|github|sarif] [--profile <name>] [--no-php]
 | `--baseline <path>` | `.steins-baseline.jsonl` when it exists | Locate the baseline file. |
 | `--set-baseline` | off | Write the baseline instead of reporting; exits `0`. Cannot combine with `--fix`. |
 | `--ignore-baseline` | off | Report the full surface, consulting no baseline file. |
+| `--no-tolerated-effects` | off | Judge effect envelopes with an empty tolerance set, bringing back everything `[effects] tolerated` discharges — see [`[effects]`](03-configuration.md#effects). |
 
 `<paths...>` is required — `steins check` with none prints
 `steins: no paths given` and exits `2`.
@@ -472,7 +474,9 @@ function run(): string                          //=> effects: {…?}; throws: {�
 
 `{…?}` marks a non-exhaustive summary — "these, and possibly more". A `≤`
 prefix marks a declared bound: an upper limit imported from an envelope,
-read "at most" (ADR-0067).
+read "at most" (ADR-0067). A `~` prefix marks a label the project's
+`[effects] tolerated` policy discharges wholly at that unit — the label is
+still proven and still printed, it is only no longer judged (ADR-0084).
 
 By default `annotate` parses the target file's own directory as the project.
 Point `--project` at the project root when the callers live elsewhere, so the
@@ -500,6 +504,9 @@ $ steins annotate --format json src/Counter.php
 
 `effects` holds proven labels, `declared` holds envelope-imported upper
 bounds, and `exhaustive` is the bit the `…?` renders. Nothing is flattened.
+A `tolerated` array joins them where a policy discharges something; the
+tolerated labels stay listed in `effects` too, so a consumer reading only
+`effects` sees the same set it always did.
 
 > **If you know PHPStan or Psalm:** this is the batch answer to what you get
 > from sprinkling `\PHPStan\dumpType()` and rerunning — a whole file's
