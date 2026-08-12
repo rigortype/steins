@@ -204,11 +204,16 @@ Trusting the bound at call sites while neither checking overrides nor
 capping the trust is not a coherent option: an impure implementation behind
 a pure-declared interface would then be invisible by construction.
 
-### Beyond envelope checks: labels as invalidation keys (informative)
+### Beyond envelope checks: labels inside the engine (informative)
 
 Envelope checking is not the only machinery inside a checker that can consume
-effect *kinds*. A checker that remembers returned values across statements —
-PHPStan documents its own such machinery in
+effect *kinds*. Two engine-internal consumers fall out of the vocabulary, and
+neither needs a user to write a single envelope. This section is informative,
+not part of the tag semantics: it records that the labels pay for themselves
+inside an engine.
+
+**Invalidation keys.** A checker that remembers returned values across
+statements — PHPStan documents its own such machinery in
 [Remembering and forgetting returned
 values](https://phpstan.org/blog/remembering-and-forgetting-returned-values) —
 must forget them when an intervening call could have changed what they
@@ -219,9 +224,25 @@ derived from the filesystem's stat cache (`is_dir($x)`, `file_exists($x)`)
 is invalidated by a call whose labels reach `io.fs` or `global.write` —
 `clearstatcache()` is precisely a `global.write` — while an intervening
 `rand()` (`nondet.random`) provably cannot have touched it and need not
-forget anything. This is informative, not part of the tag semantics: it
-records that the label vocabulary pays for itself inside an engine even
-before any user writes an envelope.
+forget anything.
+
+**Discardability keys.** The same decomposition sorts the no-effect
+statement rules and the must-use question. Read-shaped effects —
+`global.read`, `nondet.random`, `nondet.time`, `io.fs.read` (a policy choice
+that declines to count atime) — change nothing a caller can observe, so a
+call whose proven effects stay inside that set, and whose throw set is
+empty, is a **dead statement** when its result is discarded: derivable, no
+annotation needed. Effects outside the set make a discarded call legitimate
+by default — it was called *for* the effect — and a must-use declaration
+(PHP 8.5's `#[\NoDiscard]`) is then the opt-in for the one quadrant that
+genuinely needs declaring: effectful calls whose result is still the point
+(`fopen()`). Two boundary choices matter: `io.input` is not discardable (the
+stream position advances, observably), and `mutate.local` is not discardable
+*at the call site* (`sort($rows);` is called precisely for the caller-visible
+mutation) even though a callee's own pure envelope tolerates it — two
+predicates a single boolean is forced to conflate. A boolean also cannot say
+"`rand()` may not be collapsed into one call, yet a bare `rand();` statement
+is dead" — the label vocabulary says both at once.
 
 ### Vocabulary evolution
 

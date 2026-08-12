@@ -149,6 +149,44 @@ for the grammar and semantics, written to be pasteable into an upstream
 discussion, and [ADR-0082](adr/0082-interop-envelopes.md) for the design
 record.
 
+## One bit, many questions
+
+The interop work surfaced a second, subtler limit of the flat flag. PHPStan's
+`hasSideEffects` bit is consulted by machinery with genuinely different
+questions: the no-effect statement rules ask *"did this discarded call change
+the world?"*; the
+[remembered-returned-values machinery](https://phpstan.org/blog/remembering-and-forgetting-returned-values)
+asks *"may two identical calls be treated as one — and does this call
+invalidate other memory?"*; and the must-use question (PHP 8.5's
+`#[\NoDiscard]`) asks *"is discarding the result a bug?"*. One bit answers
+all of them at once, so it can satisfy none of them precisely. `rand()` must
+be marked side-effectful so its results are not collapsed — which then stops
+the no-effect rule from flagging a bare `rand();`, a statement that provably
+changes nothing. `file_get_contents()` wants the bit clear so discarded reads
+are caught — until someone posts an HTTP request through it
+([phpstan#8440](https://github.com/phpstan/phpstan/issues/8440), patched by
+flipping the bit per parameter,
+[phpstan-src#2037](https://github.com/phpstan/phpstan-src/pull/2037)).
+Resource openers were flipped by hand
+([phpstan-src#698](https://github.com/phpstan/phpstan-src/pull/698)), and
+must-use arrived as its own request
+([phpstan#12738](https://github.com/phpstan/phpstan/issues/12738)) because it
+never was an effect question.
+
+Labels decompose the bit. Read-shaped effects — `global.read`, `nondet.*`,
+`io.fs.read` — change nothing a caller can observe, so a call whose proven
+effects stay inside that set and whose throw set is empty is a dead statement
+when its result is unused: derivable, no annotation. `nondet.random` forbids
+collapsing two calls into one without making a bare `rand();` meaningful.
+`clearstatcache()` is `global.write` — exactly what stat-derived memory
+depends on. And `#[\NoDiscard]` shrinks to the one quadrant that genuinely
+needs a declaration: effectful calls whose result is still the point
+(`fopen()`). The engine-facing halves are recorded as informative sections in
+[the interop spec](type-specification/phpdoc-effects-interop.md), and the
+argument-dependent narrowing that resolves the `file_get_contents` case is
+implemented: a literal `'/config'` is `io.fs.read`; an unprovable target
+stays `io`.
+
 ## Transport facts and semantic facts
 
 Low-level analysis can identify a transport action such as an HTTP request:

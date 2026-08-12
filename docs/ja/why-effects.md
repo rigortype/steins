@@ -143,6 +143,42 @@ Mirtes氏は、既存の`@phpstan-impure`タグが不純さの種類を示すパ
 を、設計の記録については[ADR-0082](../adr/0082-interop-envelopes.md)を
 参照。
 
+## 一つのbitに多すぎる問い
+
+相互運用の作業は、平坦なフラグのもう一つの、より繊細な限界を表面化させた。
+PHPStanの`hasSideEffects` bitは、本来別々の問いを持つ機構たちから参照されて
+いる。no-effect文ルールは「結果を捨てたこの呼び出しは世界を変えたか」を、
+[戻り値の記憶と忘却の機構](https://phpstan.org/blog/remembering-and-forgetting-returned-values)は
+「同一の呼び出し二つを一つに畳んでよいか——そしてこの呼び出しは他の記憶を
+無効化するか」を、そしてmust-useの問い(PHP 8.5の`#[\NoDiscard]`)は
+「結果を捨てることはバグか」を問う。一つのbitがすべてに同時に答えるため、
+どれにも正確には答えられない。`rand()`は結果を畳まれないためにside-effectful
+と印を付けられ——その途端、何も変えないことが証明できる裸の`rand();`を
+no-effectルールが指摘できなくなる。`file_get_contents()`は捨てられた読みを
+捕まえるためにbitを倒したいが、誰かがそれでHTTP POSTを送るまでの話である
+([phpstan#8440](https://github.com/phpstan/phpstan/issues/8440)、引数で
+bitを反転させるパッチ
+[phpstan-src#2037](https://github.com/phpstan/phpstan-src/pull/2037))。
+リソースを開く関数群は手作業で反転され
+([phpstan-src#698](https://github.com/phpstan/phpstan-src/pull/698))、
+must-useは独立した要望として届いた
+([phpstan#12738](https://github.com/phpstan/phpstan/issues/12738))——
+そもそもエフェクトの問いではなかったからである。
+
+ラベルはこのbitを分解する。読みの形をしたエフェクト——`global.read`、
+`nondet.*`、`io.fs.read`——は呼び出し元から観測できる何も変えないので、
+証明済みエフェクトがその集合に収まり、throw集合が空である呼び出しは、
+結果が未使用なら死んだ文である。導出可能で、注釈は要らない。
+`nondet.random`は、裸の`rand();`を意味のある文にすることなく、二つの
+呼び出しを一つに畳むことだけを禁じる。`clearstatcache()`は`global.write`
+であり、それはstat由来の記憶が依存しているものそのものである。そして
+`#[\NoDiscard]`は、宣言が本当に必要なただ一つの象限——エフェクトを持ち、
+かつ結果こそが本体である呼び出し(`fopen()`)——へと縮む。エンジン側の
+半分は[相互運用仕様](../type-specification/phpdoc-effects-interop.md)の
+informative節に記録されており、`file_get_contents`の件を解決する
+引数依存の狭化は実装済みである: リテラルの`'/config'`は`io.fs.read`、
+証明できないターゲットは`io`に留まる。
+
 ## 通信手段の事実と意味の事実
 
 低水準の解析は、HTTPリクエストという通信上の作用を特定できる。
