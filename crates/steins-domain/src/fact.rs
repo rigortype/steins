@@ -74,6 +74,105 @@ pub enum Fact {
 }
 
 impl Fact {
+    /// **The array-key cast, at the type level** (issue #336): the fact
+    /// describing `$a[$v]`'s key when all that is known about `$v` is this
+    /// fact.
+    ///
+    /// PHP casts an array key eagerly, and the interesting half is the string
+    /// one: a string that spells an integer *the way PHP writes one back*
+    /// becomes that integer, and every other string keeps its identity. Those
+    /// two classes are exactly [`StrPreds::DECIMAL_INT`] and
+    /// [`StrPreds::NON_DECIMAL_INT`], which is why this function can be written
+    /// at all — the vocabulary to name the halves already exists.
+    ///
+    /// # The grid, probed at PHP 8.5.9
+    ///
+    /// | input | key | witness |
+    /// | --- | --- | --- |
+    /// | `int` | `int` | identity |
+    /// | `decimal-int-string` | `int` | `'0'`, `'-1'`, `'9223372036854775807'` all cast |
+    /// | `non-decimal-int-string` | `non-decimal-int-string` | `''`, `'00'`, `'+1'`, `' 1'`, `'1e3'`, `'-0'` all keep their identity |
+    /// | `numeric-string` | `int \| numeric-string&non-decimal-int-string` | `'1'` casts, `'1.5'`/`' 1'`/`'1e3'` stay and stay numeric |
+    /// | `string` | `int \| non-decimal-int-string` | the two halves, and nothing else |
+    /// | `bool` | `int` | `true` is `1`, `false` is `0` |
+    /// | `float` | — | declines; see below |
+    ///
+    /// The `numeric-string` and plain `string` rows would be **sharper than
+    /// `array-key`** — a string that survives the cast is by definition one PHP
+    /// does not rewrite, which is a predicate this domain carries — but their
+    /// answers are two-base unions, and a [`Fact`] carries one [`Base`]. They
+    /// decline here rather than widen, so a caller can tell "no answer" from
+    /// "the answer is `array-key`" and pick its own floor. The sharp forms are
+    /// written down at the decline site for whichever lane grows to hold them.
+    ///
+    /// # What it declines, and why
+    ///
+    /// * **`float`** — PHP renders a float to string under the `precision` ini
+    ///   directive at some of these seams, so the key would depend on the
+    ///   runtime's configuration. (And the seams disagree: `$a[1.5]` truncates
+    ///   to `1` while `array_fill_keys([1.5], v)` writes `'1.5'`.) A key this
+    ///   crate cannot state without knowing a setting is a key it does not
+    ///   state.
+    /// * **`array`** — an illegal offset type, a `TypeError` rather than a key.
+    /// * Anything whose base is not a scalar, and any fact whose own layer this
+    ///   cannot express.
+    ///
+    /// A `Singleton`/`OneOf` of proven values is **not** handled here: those
+    /// have exact keys, and the callers compute them value-by-value with the
+    /// per-seam casts (which, as the float row shows, are not all this one).
+    /// This is the abstract rung, for when nothing exact is available.
+    #[must_use]
+    pub fn array_key_cast(&self) -> Option<Fact> {
+        let int = || Fact::General { base: Base::Int, nullable: false };
+        let str_with = |p: StrPreds| Fact::refined(Base::String, Refinement::Str(p), false);
+        let (base, preds) = match self {
+            Fact::General { base, nullable: false } => (*base, StrPreds::empty()),
+            Fact::Refined { base, refinement: Refinement::Str(p), nullable: false } => {
+                (*base, *p)
+            }
+            // An int refinement survives the cast untouched — the key IS the
+            // integer — so the fact passes straight through.
+            Fact::Refined { base: Base::Int, refinement: Refinement::Int(_), nullable: false } => {
+                return Some(self.clone());
+            }
+            _ => return None,
+        };
+        match base {
+            Base::Int => Some(int()),
+            // `true`/`false` cast to `1`/`0` (a `null` VALUE is a `Singleton`,
+            // which this abstract rung does not handle — see the doc comment).
+            Base::Bool => Some(int()),
+            Base::String => {
+                // A string already known to spell an integer casts whole; one
+                // already known not to keeps its identity, predicates and all.
+                if preds.contains_all(StrPreds::DECIMAL_INT) {
+                    return Some(int());
+                }
+                if preds.contains_all(StrPreds::NON_DECIMAL_INT) {
+                    return Some(str_with(preds));
+                }
+                // Otherwise both halves are live, and the answer is the union
+                // `int | <the surviving strings>`. **This domain cannot spell
+                // it**: a `Fact` carries one [`Base`], so a two-base union has
+                // no single-fact form (the same wall `json_decode`'s envelope
+                // and the `int|false` returns hit). Declining is the honest
+                // floor; the *sharp* answer is recorded here for whichever lane
+                // grows the vocabulary to hold it:
+                //
+                // * `numeric-string` → `int | numeric-string&non-decimal-int-string`
+                // * plain `string`   → `int | non-decimal-int-string`
+                //
+                // Both are strictly sharper than `array-key`, which is what a
+                // caller with only a [`KeyClass`] slot must fall back to.
+                let _sharp_but_unspellable =
+                    str_with(preds.union(StrPreds::NON_DECIMAL_INT).close());
+                let _ = int;
+                None
+            }
+            Base::Float => None,
+        }
+    }
+
     /// The Singleton layer.
     #[must_use]
     pub fn singleton(v: Val) -> Fact {
@@ -513,6 +612,73 @@ fn abstract_parts(f: &Fact) -> Option<(Base, Option<Refinement>, bool)> {
 
 #[cfg(test)]
 mod tests {
+
+    // ------------------------------------------------------------------
+    // the array-key cast (issue #336)
+    // ------------------------------------------------------------------
+
+    /// Every expectation here is a probe at PHP 8.5.9: the value was used as an
+    /// array key and the resulting key's type and identity read back.
+    #[test]
+    fn the_two_string_halves_are_the_whole_cast() {
+        let s = |p: StrPreds| Fact::refined(Base::String, Refinement::Str(p), false);
+        let int = Fact::General { base: Base::Int, nullable: false };
+
+        // `decimal-int-string` always casts: '0', '-1', '9223372036854775807'.
+        assert_eq!(s(StrPreds::DECIMAL_INT.close()).array_key_cast(), Some(int.clone()));
+        // `non-decimal-int-string` never does, and keeps its identity — so it
+        // keeps its predicates too: '', '00', '+1', ' 1', '1e3', '-0'.
+        assert_eq!(
+            s(StrPreds::NON_DECIMAL_INT).array_key_cast(),
+            Some(s(StrPreds::NON_DECIMAL_INT))
+        );
+    }
+
+    #[test]
+    fn the_two_base_unions_decline_rather_than_widen() {
+        // A plain `string` casts to `int | non-decimal-int-string` and a
+        // `numeric-string` to `int | numeric-string&non-decimal-int-string`.
+        // Both are two-base unions, and a `Fact` carries one `Base` — so this
+        // rung says nothing rather than widening to `array-key`, letting the
+        // caller choose its own floor knowingly.
+        assert_eq!(Fact::General { base: Base::String, nullable: false }.array_key_cast(), None);
+        assert_eq!(
+            Fact::refined(Base::String, Refinement::Str(StrPreds::NUMERIC), false)
+                .array_key_cast(),
+            None
+        );
+    }
+
+    #[test]
+    fn an_int_passes_through_with_its_refinement() {
+        let r = Fact::refined(Base::Int, Refinement::Int(IntRange::NON_NEGATIVE), false);
+        assert_eq!(r.array_key_cast(), Some(r.clone()));
+        let g = Fact::General { base: Base::Int, nullable: false };
+        assert_eq!(g.array_key_cast(), Some(g));
+    }
+
+    #[test]
+    fn a_bool_casts_to_int() {
+        assert_eq!(
+            Fact::General { base: Base::Bool, nullable: false }.array_key_cast(),
+            Some(Fact::General { base: Base::Int, nullable: false })
+        );
+    }
+
+    #[test]
+    fn a_float_declines_because_its_key_is_a_setting() {
+        // PHP renders a float to string under the `precision` ini directive at
+        // some of these seams, and the seams disagree with each other
+        // (`$a[1.5]` truncates to 1, `array_fill_keys([1.5], v)` writes '1.5').
+        assert_eq!(Fact::General { base: Base::Float, nullable: false }.array_key_cast(), None);
+    }
+
+    #[test]
+    fn a_nullable_fact_declines() {
+        // `null` is a value, not an abstract class this rung handles; a
+        // nullable fact mixes the two and is left to the caller.
+        assert_eq!(Fact::General { base: Base::String, nullable: true }.array_key_cast(), None);
+    }
     use super::*;
 
     fn s(v: &str) -> Val {

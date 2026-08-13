@@ -794,3 +794,86 @@ headline dropping two while the truth improved is the harness measuring
 
 fp-gate GREEN with **no baseline movement**: proof layer 0, `phpdoc.*` and
 `throw.*` unmoved.
+
+## Amendment G (2026-08-14): the array-key cast at the type level, and the wall it hits — PENDING ratification
+
+Owner request: support `array_flip` / `array_fill_keys` / `array_key_first` and
+the `foreach` key position when what is known about the value is a *refined
+string class* rather than a literal — the cases the reference implementation
+does not cover either.
+
+### G1. The cast is expressible, and the vocabulary was already there
+
+PHP casts an array key eagerly, and the interesting half is the string one: a
+string that spells an integer *the way PHP writes one back* becomes that
+integer, and every other string keeps its identity. Those two classes are
+exactly `StrPreds::DECIMAL_INT` and `StrPreds::NON_DECIMAL_INT`, which the
+conformance work landed for precisely this reason — the `DECIMAL_INT` doc
+already said "an array key made of it is cast to `int`".
+
+`Fact::array_key_cast` is that grid, every row probed at 8.5.9:
+
+| input | key |
+| --- | --- |
+| `int` (with its refinement) | itself |
+| `bool` | `int` |
+| `decimal-int-string` | `int` |
+| `non-decimal-int-string` | itself, predicates and all |
+| `numeric-string` | `int \| numeric-string&non-decimal-int-string` |
+| `string` | `int \| non-decimal-int-string` |
+| `float` | declines — the key is a `precision` ini setting away, and the seams disagree (`$a[1.5]` is `1`, `array_fill_keys([1.5], v)` is `'1.5'`) |
+
+The last two rows are **sharper than `array-key`**: a string that survives the
+cast is by definition one PHP does not rewrite, and that is a predicate this
+domain carries.
+
+### G2. The wall: a `Fact` carries one `Base`
+
+Both sharp rows are **two-base unions**, and the four-layer domain (ADR-0035)
+has no such form — the same wall `int|false` returns and `json_decode`'s
+envelope already hit. So `array_key_cast` *declines* them rather than widening,
+so that a caller can tell "no answer" from "the answer is `array-key`", and the
+sharp forms are written down at the decline site for whichever lane grows to
+hold them.
+
+The unsealed tail's key slot is a second, smaller wall: `KeyClass` has three
+values (`int`, `string`, `array-key`), so even `non-decimal-int-string` — which
+*is* a single-base fact — lowers to `string` there.
+
+### G3. What lands under those walls
+
+`array_flip`'s key class is now read off the cast rather than off the values'
+base, which is what lets a *string*-based value produce an *integer* key:
+
+| subject | before | after | the sharp answer the walls hide |
+| --- | --- | --- | --- |
+| `list<decimal-int-string>` | `array<int>` | **`array<int, int>`** | `array<int, int<0, max>>` |
+| `list<non-decimal-int-string>` | `array<int>` | **`array<string, int>`** | `array<non-decimal-int-string, int<0, max>>` |
+| `list<string>` / `list<numeric-string>` / `list<array-key>` | `array<int>` | unchanged | `array<int\|non-decimal-int-string, …>` &c. |
+| `[$decimalIntString, …]` (witnessed) | `array<0\|1>` | **`array<int, 0\|1>`** | `non-empty-array<int, 0\|1>` |
+
+A finite value set still casts key by key, which is exact where the abstract
+rung declines.
+
+### G4. What is still out of reach, and why — the three open pieces
+
+1. **The two-base union**, above. Every remaining row of the owner's spec needs
+   it. Reachable either by giving `Fact` a union layer (ADR-0035 is explicitly
+   single-base, so this is a domain-shape decision) or by moving the key slot to
+   the **arm lane**, which already carries `string|false`. Not decided here.
+2. **`array_fill_keys` has no shape-level arm at all**, so it declines on a
+   declared subject rather than answering the key class. Additive once the key
+   slot's expressiveness is settled.
+3. **A non-literal array key is unrepresentable in the IR.** `[$k => $v]` lowers
+   the *whole* literal to `Other`, so `array_key_first([$string => null])` and
+   every `foreach ([$k => $v] as …)` row of the spec has no fact to work from.
+   `ArrayKey` would need a non-literal form, and `normalize_array`'s next-int
+   would have to go unknown behind it (an unknown key may be an integer, which
+   moves the auto-index). Self-contained, and the largest of the three.
+
+### G5. Measurement
+
+nsrt unmoved (headline 2444, admissible 2872, empty transition matrix) — the
+harness's array fixtures do not exercise the refined-string key classes, which
+is itself a finding about coverage rather than about this change. fp-gate GREEN
+with no baseline movement; proof layer 0. Tests 4471 → 4477.

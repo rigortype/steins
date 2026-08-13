@@ -33289,18 +33289,58 @@ fn project_keys(shape: &ShapeFact) -> ShapeFact {
 /// `is_list` is left to `normalize` (`Maybe`): whether the values happen to be
 /// `0..n-1` is not something the shape knows.
 fn project_flip(shape: &ShapeFact) -> ShapeFact {
-    use steins_domain::{KeyClass, Tail};
-    let all_int = shape_value_union(shape).is_some_and(|f| fact_is_int(&f));
+    use steins_domain::Tail;
     ShapeFact::normalize(
         Vec::new(),
         Tail::Unsealed {
-            key: if all_int { KeyClass::Int } else { KeyClass::ArrayKey },
+            key: flipped_key_class(shape),
             value: shape_key_union(shape).map(Box::new),
         },
         Certainty::Maybe,
         false,
         Vec::new(),
     )
+}
+
+/// The key class `array_flip`'s result has, read off the **array-key cast** of
+/// the subject's value union (issue #336).
+///
+/// The cast is what decides this, not the base: a `decimal-int-string` value
+/// produces an **integer** key, because PHP rewrites a string that spells an
+/// integer the way it writes one back. So `array_flip(list<decimal-int-string>)`
+/// is keyed by `int`, which the previous all-int test could not see — it read
+/// the values' base and a string base is not an int.
+///
+/// Where the cast declines the answer is a two-base union
+/// (`int | non-decimal-int-string` for a plain string, and its numeric
+/// refinement for a numeric string), which is exactly `array-key`'s territory
+/// and no sharper thing this slot can hold: [`KeyClass`] has three values, and
+/// the union is not one of them. The floor is taken knowingly rather than by
+/// omission — see [`steins_domain::Fact::array_key_cast`] for the sharp forms.
+fn flipped_key_class(shape: &ShapeFact) -> steins_domain::KeyClass {
+    use steins_domain::KeyClass;
+    let Some(values) = shape_value_union(shape) else { return KeyClass::ArrayKey };
+    // A finite value set casts key by key, which is exact where the abstract
+    // rung declines: `array_flip(['a', '1'])` is keyed by `'a'` and `1`.
+    if let Some(members) = values.finite_members() {
+        let classes: Vec<KeyClass> = members
+            .iter()
+            .filter_map(|v| flip_key_of(v).as_ref().map(KeyClass::of_key))
+            .collect();
+        return match classes.split_first() {
+            Some((first, rest)) if rest.iter().all(|c| c == first) => *first,
+            _ => KeyClass::ArrayKey,
+        };
+    }
+    match values.array_key_cast() {
+        Some(Fact::General { base: Base::Int, .. } | Fact::Refined { base: Base::Int, .. }) => {
+            KeyClass::Int
+        }
+        Some(Fact::General { base: Base::String, .. } | Fact::Refined { base: Base::String, .. }) => {
+            KeyClass::Str
+        }
+        _ => KeyClass::ArrayKey,
+    }
 }
 
 /// `array_reverse($x)` with the default `$preserve_keys = false`: **string keys

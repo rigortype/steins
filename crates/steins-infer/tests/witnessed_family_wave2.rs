@@ -377,3 +377,63 @@ fn a_silent_engine_withholds_every_name_in_the_wave() {
         );
     }
 }
+
+// ---- The abstract array-key cast (issue #336, first rung) -------------------
+
+#[test]
+fn a_flipped_decimal_int_string_is_keyed_by_int() {
+    // The CAST decides the key class, not the value's base. A
+    // `decimal-int-string` is a string whose base says "string" and whose key
+    // is an `int`, because PHP rewrites a string that spells an integer the way
+    // it writes one back. The old all-int test could not see this.
+    assert_eq!(
+        declared("list<decimal-int-string>", "array_flip($v)"),
+        "dumped type: array<int, int> (asserted)"
+    );
+}
+
+#[test]
+fn a_flipped_non_decimal_int_string_stays_string_keyed() {
+    // The complement: every string that keeps its identity as an array key.
+    assert_eq!(
+        declared("list<non-decimal-int-string>", "array_flip($v)"),
+        "dumped type: array<string, int> (asserted)"
+    );
+}
+
+#[test]
+fn the_two_base_unions_take_the_array_key_floor() {
+    // A plain `string` casts to `int | non-decimal-int-string` and a
+    // `numeric-string` to `int | numeric-string&non-decimal-int-string`. Both
+    // are two-base unions, which neither a `Fact` nor a `KeyClass` can hold, so
+    // the key falls to `array-key` — knowingly, and not by omission.
+    assert_eq!(declared("list<string>", "array_flip($v)"), "dumped type: array<int> (asserted)");
+    assert_eq!(
+        declared("list<numeric-string>", "array_flip($v)"),
+        "dumped type: array<int> (asserted)"
+    );
+    assert_eq!(declared("list<array-key>", "array_flip($v)"), "dumped type: array<int> (asserted)");
+}
+
+#[test]
+fn a_witnessed_flip_reads_the_cast_too() {
+    let src = |decl: &str| {
+        format!(
+            "<?php\n/** @param {decl} $v */\nfunction f(string $v): void {{ \\PHPStan\\dumpType(array_flip([$v, $v])); }}\n"
+        )
+    };
+    assert_eq!(one_type(&src("decimal-int-string")), "dumped type: array<int, 0|1> (asserted)");
+    assert_eq!(
+        one_type(&src("non-decimal-int-string")),
+        "dumped type: array<string, 0|1> (asserted)"
+    );
+}
+
+#[test]
+fn a_finite_value_set_casts_key_by_key() {
+    // Exact where the abstract rung declines: each proven value has an exact
+    // key, so a mixed set is only `array-key` when the keys really differ in
+    // class. Probed: `array_flip(['1', '2']) === [1 => 0, 2 => 1]` (both cast).
+    assert_eq!(dump("array_flip(['1', '2'])"), "dumped type: array{1: 0, 2: 1}");
+    assert_eq!(dump("array_flip(['a', 'b'])"), "dumped type: array{a: 0, b: 1}");
+}
