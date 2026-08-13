@@ -356,10 +356,12 @@ fn min_and_max_decline_where_they_cannot_state_an_answer() {
     // winner. `$u` here carries nothing at all.
     let src = "<?php\nfunction f(int $i): void { $u = frobnicate(); \\PHPStan\\dumpType(min($i, $u)); }\n";
     assert_eq!(one_type(src), "dumped type: unknown");
-    // A join the four-layer domain cannot spell declines — `int|string` is a
-    // two-base union with no single `Fact`, exactly as `json_decode`'s six-base
-    // envelope is.
-    assert_eq!(dump("int $i, string $s", "min($i, $s)"), "dumped type: unknown");
+    // **This one no longer declines** (issue #339). `min($int, $string)` returns
+    // one of its arguments, so `int|string` is exactly the answer — it was
+    // declined only because the four-layer domain had no two-base form, which
+    // ADR-0062 Amendment B recorded as a deviation from its own slice design.
+    // `Fact::Union` is that form, and the deviation is discharged.
+    assert_eq!(dump("int $i, string $s", "min($i, $s)"), "dumped type: int|string");
     // A nullable int leaves the INTERVAL path (`min(null, 5)` is `NULL` at 8.5.8)
     // and takes the union, which carries the null side correctly.
     assert_eq!(dump("?int $i", "min($i, 5)"), "dumped type: int|null");

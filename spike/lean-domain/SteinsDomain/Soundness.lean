@@ -168,6 +168,629 @@ theorem sub_mkRefined {b r} {n : Bool} : Sub M (.refined b r n) (mkRefined b r n
     · exact sub_refined_general (fun h => h)
     · exact Sub.refl _
 
+/-! ## The union layer (issue #339)
+
+`mkUnion` is the only way into `Fact.union`, so everything the soundness proofs
+need from the layer is one property: **an arm that admits `v` survives the
+merge**. The merge is a left fold of `insertArm`, so the property is proved once
+for `insertArm` — for an arm already in the list, and for the one going in — and
+then lifted through the fold.
+
+Commutativity needs more: that the merged list is a *canonical form*, determined
+by the per-base aggregate of the input and nothing else. `armsFind` reads that
+form, `armsAgg` computes the aggregate, and `armsSorted_ext` is the
+extensionality that turns "same aggregate" into "same list" — the arm-list
+analogue of `Val.ssorted_ext`. -/
+
+/-- The refinement side of an arm's membership test. `none` is that base's
+General, which admits every value of the base. -/
+def refOptAdmits (M : Model) (r : Option Refinement) (v : Val) : Bool :=
+  match r with
+  | some rr => refAdmits M rr v
+  | none => true
+
+/-- One union arm's membership test, exactly as `admits` spells it inline. -/
+def armAdmits (M : Model) (v : Val) (a : Base × Option Refinement) : Bool :=
+  decide (v.base = some a.1) && refOptAdmits M a.2 v
+
+theorem admits_union_eq {arms : List (Base × Option Refinement)} {n : Bool} {v : Val}
+    (hv : v ≠ Val.null) : admits M (.union arms n) v = arms.any (armAdmits M v) := by
+  cases v with
+  | null => exact absurd rfl hv
+  | bool _ => simp only [admits]; rfl
+  | int _ => simp only [admits]; rfl
+  | float _ => simp only [admits]; rfl
+  | str _ => simp only [admits]; rfl
+  | arr _ => simp only [admits]; rfl
+
+/-- Normalising an arm widens it: a contentless refinement becomes that base's
+General, which admits strictly more. -/
+theorem refOptAdmits_normArm {r : Option Refinement} {v : Val}
+    (h : refOptAdmits M r v = true) : refOptAdmits M (normArm r) v = true := by
+  cases r with
+  | none => exact h
+  | some rr =>
+    simp only [normArm]
+    split
+    · rfl
+    · exact h
+
+/-- **The refinement join is a widening.** Whatever the left operand admits, the
+join admits — the arm-level reading of `sub_refined_str`/`sub_refined_int`. -/
+theorem refOptAdmits_joinRefinements_left {r s : Option Refinement} {v : Val}
+    (h : refOptAdmits M r v = true) : refOptAdmits M (joinRefinements r s) v = true := by
+  cases r with
+  | none => simp [joinRefinements, refOptAdmits]
+  | some rr =>
+    cases s with
+    | none => cases rr <;> simp [joinRefinements, refOptAdmits]
+    | some ss =>
+      cases rr with
+      | str p =>
+        cases ss with
+        | int _ => simp [joinRefinements, refOptAdmits]
+        | str q =>
+          cases v <;>
+            simp only [joinRefinements, refOptAdmits, refAdmits] at h ⊢ <;>
+            first
+              | exact StrPreds.containsAll_trans h (StrPreds.inter_containsAll_left p q)
+              | exact absurd h (by simp)
+      | int q =>
+        cases ss with
+        | str _ => simp [joinRefinements, refOptAdmits]
+        | int s =>
+          cases v <;>
+            simp only [joinRefinements, refOptAdmits, refAdmits] at h ⊢ <;>
+            first
+              | exact IntRange.contains_of_containsRange (IntRange.hull_containsRange_left q s) h
+              | exact absurd h (by simp)
+
+theorem joinRefinements_comm (r s : Option Refinement) :
+    joinRefinements r s = joinRefinements s r := by
+  cases r with
+  | none => cases s with
+    | none => rfl
+    | some ss => cases ss <;> rfl
+  | some rr =>
+    cases s with
+    | none => cases rr <;> rfl
+    | some ss =>
+      cases rr <;> cases ss <;>
+        simp [joinRefinements, StrPreds.inter_comm, IntRange.hull_comm]
+
+theorem refOptAdmits_joinRefinements_right {r s : Option Refinement} {v : Val}
+    (h : refOptAdmits M s v = true) : refOptAdmits M (joinRefinements r s) v = true := by
+  rw [joinRefinements_comm]; exact refOptAdmits_joinRefinements_left h
+
+/-! ### An admitting arm survives the merge -/
+
+theorem any_armAdmits_insertArm {M : Model} {v : Val} {a : Base × Option Refinement} :
+    ∀ arms : List (Base × Option Refinement), arms.any (armAdmits M v) = true →
+      (insertArm arms a).any (armAdmits M v) = true := by
+  intro arms
+  induction arms with
+  | nil => intro h; simp at h
+  | cons x rest ih =>
+    intro h
+    simp only [List.any_cons, Bool.or_eq_true] at h
+    simp only [insertArm]
+    split
+    · simp only [List.any_cons, Bool.or_eq_true]
+      rcases h with h | h
+      · left
+        simp only [armAdmits, Bool.and_eq_true] at h ⊢
+        exact ⟨h.1, refOptAdmits_normArm (refOptAdmits_joinRefinements_left h.2)⟩
+      · exact Or.inr h
+    · split
+      · simp only [List.any_cons, Bool.or_eq_true]
+        rcases h with h | h
+        · exact Or.inr (Or.inl h)
+        · exact Or.inr (Or.inr h)
+      · simp only [List.any_cons, Bool.or_eq_true]
+        rcases h with h | h
+        · exact Or.inl h
+        · exact Or.inr (ih h)
+
+theorem any_armAdmits_insertArm_self {M : Model} {v : Val} {a : Base × Option Refinement}
+    (ha : armAdmits M v a = true) :
+    ∀ arms : List (Base × Option Refinement), (insertArm arms a).any (armAdmits M v) = true := by
+  intro arms
+  induction arms with
+  | nil =>
+    simp only [insertArm, List.any_cons, List.any_nil, Bool.or_false]
+    simp only [armAdmits, Bool.and_eq_true] at ha ⊢
+    exact ⟨ha.1, refOptAdmits_normArm ha.2⟩
+  | cons x rest ih =>
+    simp only [insertArm]
+    split
+    · rename_i hx
+      simp only [List.any_cons, Bool.or_eq_true]
+      left
+      simp only [armAdmits, Bool.and_eq_true] at ha ⊢
+      refine ⟨?_, refOptAdmits_normArm (refOptAdmits_joinRefinements_right ha.2)⟩
+      show decide (v.base = some x.1) = true
+      rw [hx]; exact ha.1
+    · split
+      · simp only [List.any_cons, Bool.or_eq_true]
+        left
+        simp only [armAdmits, Bool.and_eq_true] at ha ⊢
+        exact ⟨ha.1, refOptAdmits_normArm ha.2⟩
+      · simp only [List.any_cons, Bool.or_eq_true]
+        exact Or.inr ih
+
+theorem any_armAdmits_foldl {M : Model} {v : Val} :
+    ∀ arms acc : List (Base × Option Refinement),
+      acc.any (armAdmits M v) = true ∨ arms.any (armAdmits M v) = true →
+      (arms.foldl insertArm acc).any (armAdmits M v) = true := by
+  intro arms
+  induction arms with
+  | nil =>
+    intro acc h
+    rcases h with h | h
+    · simpa using h
+    · simp at h
+  | cons x rest ih =>
+    intro acc h
+    rw [List.foldl_cons]
+    refine ih _ ?_
+    rcases h with h | h
+    · exact Or.inl (any_armAdmits_insertArm _ h)
+    · simp only [List.any_cons, Bool.or_eq_true] at h
+      rcases h with h | h
+      · exact Or.inl (any_armAdmits_insertArm_self h _)
+      · exact Or.inr h
+
+/-! ### What `mkUnion` returns -/
+
+theorem finiteMembers_mkUnion {arms : List (Base × Option Refinement)} {n : Bool} {f : Fact}
+    (h : mkUnion arms n = some f) : f.finiteMembers = none := by
+  simp only [mkUnion] at h
+  split at h
+  · exact absurd h (by simp)
+  · rename_i b r _
+    cases r with
+    | none => simp only at h; injection h with h; subst h; rfl
+    | some rr => simp only at h; injection h with h; subst h; exact finiteMembers_mkRefined b rr n
+  · injection h with h; subst h; rfl
+
+theorem mkUnion_admits_null {arms : List (Base × Option Refinement)} {n : Bool} {f : Fact}
+    (hn : n = true) (h : mkUnion arms n = some f) : admits M f Val.null = true := by
+  subst hn
+  simp only [mkUnion] at h
+  split at h
+  · exact absurd h (by simp)
+  · rename_i b r _
+    cases r with
+    | none => simp only at h; injection h with h; subst h; exact admits_null_general rfl
+    | some rr =>
+      simp only at h; injection h with h; subst h
+      exact sub_mkRefined Val.null (admits_null_refined rfl)
+  · injection h with h; subst h; simp [admits]
+
+/-- **`mkUnion` keeps every arm's members.** The union the constructor returns
+admits `v` as soon as one input arm does — through the per-base merge, through
+the refinement join, and through the one- and two-arm collapses. -/
+theorem mkUnion_admits {arms : List (Base × Option Refinement)} {n : Bool} {f : Fact} {v : Val}
+    (hv : v ≠ Val.null) (harm : arms.any (armAdmits M v) = true)
+    (h : mkUnion arms n = some f) : admits M f v = true := by
+  have hm : (arms.foldl insertArm []).any (armAdmits M v) = true :=
+    any_armAdmits_foldl arms [] (Or.inr harm)
+  simp only [mkUnion] at h
+  split at h
+  · exact absurd h (by simp)
+  · rename_i b r hl
+    rw [hl] at hm
+    simp only [List.any_cons, List.any_nil, Bool.or_false, armAdmits, Bool.and_eq_true,
+      decide_eq_true_eq] at hm
+    cases r with
+    | none =>
+      simp only at h; injection h with h; subst h
+      cases v <;>
+        simp only [admits, decide_eq_true_eq] <;>
+        first | exact absurd rfl hv | exact hm.1
+    | some rr =>
+      simp only at h; injection h with h; subst h
+      refine sub_mkRefined v ?_
+      cases v <;>
+        simp only [admits, Bool.and_eq_true, decide_eq_true_eq] <;>
+        first | exact absurd rfl hv | exact ⟨hm.1, hm.2⟩
+  · injection h with h; subst h
+    rw [admits_union_eq hv]
+    exact hm
+
+/-! ### The arms an abstract fact presents -/
+
+theorem admits_eq_any_abstractArms {a : Fact} {arms : List (Base × Option Refinement)} {n : Bool}
+    (ha : a.abstractArms = some (arms, n)) {v : Val} (hv : v ≠ Val.null) :
+    a.admits M v = arms.any (armAdmits M v) := by
+  cases a with
+  | singleton _ => simp [abstractArms] at ha
+  | oneOf _ => simp [abstractArms] at ha
+  | shape _ _ => simp [abstractArms] at ha
+  | refined b r m =>
+    simp only [abstractArms, Option.some.injEq, Prod.mk.injEq] at ha
+    obtain ⟨h1, h2⟩ := ha; subst h1; subst h2
+    cases v <;>
+      first
+        | exact absurd rfl hv
+        | simp only [admits, List.any_cons, List.any_nil, Bool.or_false, armAdmits, refOptAdmits]
+  | general b m =>
+    simp only [abstractArms, Option.some.injEq, Prod.mk.injEq] at ha
+    obtain ⟨h1, h2⟩ := ha; subst h1; subst h2
+    cases v <;>
+      first
+        | exact absurd rfl hv
+        | simp only [admits, List.any_cons, List.any_nil, Bool.or_false, armAdmits, refOptAdmits,
+            Bool.and_true]
+  | union as m =>
+    simp only [abstractArms, Option.some.injEq, Prod.mk.injEq] at ha
+    obtain ⟨h1, h2⟩ := ha; subst h1; subst h2
+    exact admits_union_eq hv
+
+theorem nullable_of_abstractArms {a : Fact} {arms : List (Base × Option Refinement)} {n : Bool}
+    (ha : a.abstractArms = some (arms, n)) (hv : a.admits M Val.null = true) : n = true := by
+  cases a with
+  | singleton _ => simp [abstractArms] at ha
+  | oneOf _ => simp [abstractArms] at ha
+  | shape _ _ => simp [abstractArms] at ha
+  | refined b r m =>
+    simp only [abstractArms, Option.some.injEq, Prod.mk.injEq] at ha
+    obtain ⟨_, h2⟩ := ha; subst h2
+    exact nullable_of_admits_null hv
+  | general b m =>
+    simp only [abstractArms, Option.some.injEq, Prod.mk.injEq] at ha
+    obtain ⟨_, h2⟩ := ha; subst h2
+    exact nullable_of_admits_null_general hv
+  | union as m =>
+    simp only [abstractArms, Option.some.injEq, Prod.mk.injEq] at ha
+    obtain ⟨_, h2⟩ := ha; subst h2
+    simpa [admits] using hv
+
+/-! ### The merged arm list is a canonical form
+
+The commutativity half. `insertArm` keeps the list strictly increasing in
+`baseRank`, so it holds at most one arm per base; `armsFind` then determines the
+list, and what `armsFind` reads back is the per-base aggregate `armsAgg` of the
+input — a commutative monoid, so appending in either order gives the same fact. -/
+
+theorem baseRank_inj {b c : Base} (h : baseRank b = baseRank c) : b = c := by
+  cases b <;> cases c <;> simp_all [baseRank]
+
+/-- Strictly increasing in `baseRank`, hence one arm per base. -/
+def ArmsSorted : List (Base × Option Refinement) → Prop
+  | [] => True
+  | a :: rest => (∀ x ∈ rest, baseRank a.1 < baseRank x.1) ∧ ArmsSorted rest
+
+theorem armsSorted_nil : ArmsSorted [] := True.intro
+
+/-- The arm list's refinement for `b`; `none` when `b` has no arm. -/
+def armsFind : List (Base × Option Refinement) → Base → Option (Option Refinement)
+  | [], _ => none
+  | a :: rest, b => if a.1 = b then some a.2 else armsFind rest b
+
+theorem armsFind_eq_none {l : List (Base × Option Refinement)} {b : Base}
+    (h : ∀ x ∈ l, baseRank b < baseRank x.1) : armsFind l b = none := by
+  induction l with
+  | nil => rfl
+  | cons x rest ih =>
+    have hx : ¬ x.1 = b := by
+      intro he
+      have hlt := h x (by simp)
+      rw [he] at hlt
+      exact absurd hlt (by simp)
+    simp only [armsFind, if_neg hx]
+    exact ih (fun y hy => h y (by simp [hy]))
+
+theorem exists_of_armsFind {l : List (Base × Option Refinement)} {b : Base}
+    {r : Option Refinement} (h : armsFind l b = some r) : ∃ x ∈ l, x.1 = b := by
+  induction l with
+  | nil => simp [armsFind] at h
+  | cons x rest ih =>
+    simp only [armsFind] at h
+    split at h
+    · rename_i hx; exact ⟨x, by simp, hx⟩
+    · obtain ⟨y, hy, hy2⟩ := ih h; exact ⟨y, by simp [hy], hy2⟩
+
+/-- **Extensionality for merged arm lists**: a strictly increasing arm list is
+determined by what `armsFind` reads out of it. -/
+theorem armsSorted_ext : ∀ {xs ys : List (Base × Option Refinement)},
+    ArmsSorted xs → ArmsSorted ys → (∀ b, armsFind xs b = armsFind ys b) → xs = ys := by
+  intro xs
+  induction xs with
+  | nil =>
+    intro ys _ _ h
+    cases ys with
+    | nil => rfl
+    | cons y yr =>
+      have hy := h y.1
+      simp only [armsFind] at hy
+      exact absurd hy.symm (by simp)
+  | cons x xr ih =>
+    intro ys hx hy h
+    cases ys with
+    | nil =>
+      have hx' := h x.1
+      simp only [armsFind] at hx'
+      exact absurd hx' (by simp)
+    | cons y yr =>
+      obtain ⟨hx1, hx2⟩ := hx
+      obtain ⟨hy1, hy2⟩ := hy
+      have hbase : x.1 = y.1 := by
+        by_cases hne : x.1 = y.1
+        · exact hne
+        exfalso
+        have h1 := h x.1
+        rw [armsFind, if_pos rfl, armsFind, if_neg (fun hh => hne hh.symm)] at h1
+        obtain ⟨e, he, he2⟩ := exists_of_armsFind h1.symm
+        have hr1 : baseRank y.1 < baseRank x.1 := he2 ▸ hy1 e he
+        have h2 := h y.1
+        rw [armsFind, if_neg hne, armsFind, if_pos rfl] at h2
+        obtain ⟨e', he', he'2⟩ := exists_of_armsFind h2
+        have hr2 : baseRank x.1 < baseRank y.1 := he'2 ▸ hx1 e' he'
+        omega
+      have hval : x.2 = y.2 := by
+        have h1 := h x.1
+        rw [armsFind, if_pos rfl, armsFind, if_pos hbase.symm] at h1
+        exact Option.some.inj h1
+      have hxy : x = y := by
+        rcases x with ⟨xb, xv⟩; rcases y with ⟨yb, yv⟩
+        simp only at hbase hval
+        subst hbase; subst hval; rfl
+      subst hxy
+      refine congrArg (x :: ·) (ih hx2 hy2 (fun b => ?_))
+      by_cases hb : x.1 = b
+      · subst hb
+        rw [armsFind_eq_none hx1, armsFind_eq_none hy1]
+      · have := h b
+        rwa [armsFind, if_neg hb, armsFind, if_neg hb] at this
+
+theorem base_mem_insertArm {a : Base × Option Refinement} :
+    ∀ {l : List (Base × Option Refinement)}, ∀ e ∈ insertArm l a,
+      e.1 = a.1 ∨ ∃ e' ∈ l, e'.1 = e.1 := by
+  intro l
+  induction l with
+  | nil =>
+    intro e he
+    simp only [insertArm, List.mem_singleton] at he
+    subst he; exact Or.inl rfl
+  | cons x rest ih =>
+    intro e he
+    simp only [insertArm] at he
+    split at he
+    · rcases List.mem_cons.mp he with h | h
+      · subst h; exact Or.inr ⟨x, by simp, rfl⟩
+      · exact Or.inr ⟨e, by simp [h], rfl⟩
+    · split at he
+      · rcases List.mem_cons.mp he with h | h
+        · subst h; exact Or.inl rfl
+        · exact Or.inr ⟨e, by simp [h], rfl⟩
+      · rcases List.mem_cons.mp he with h | h
+        · subst h; exact Or.inr ⟨e, by simp, rfl⟩
+        · rcases ih e h with h' | ⟨e', he', he'2⟩
+          · exact Or.inl h'
+          · exact Or.inr ⟨e', by simp [he'], he'2⟩
+
+theorem armsSorted_insertArm : ∀ (l : List (Base × Option Refinement))
+    (a : Base × Option Refinement), ArmsSorted l → ArmsSorted (insertArm l a) := by
+  intro l
+  induction l with
+  | nil => intro a _; exact ⟨by simp, armsSorted_nil⟩
+  | cons x rest ih =>
+    intro a hs
+    obtain ⟨hs1, hs2⟩ := hs
+    simp only [insertArm]
+    split
+    · exact ⟨hs1, hs2⟩
+    · rename_i hx
+      split
+      · rename_i hlt
+        refine ⟨?_, hs1, hs2⟩
+        intro y hy
+        rcases List.mem_cons.mp hy with h | h
+        · subst h; exact hlt
+        · exact Nat.lt_trans hlt (hs1 y h)
+      · rename_i hnlt
+        refine ⟨?_, ih a hs2⟩
+        intro y hy
+        rcases base_mem_insertArm y hy with h | ⟨e, he, he2⟩
+        · have hne : baseRank x.1 ≠ baseRank a.1 := fun hb => hx (baseRank_inj hb)
+          rw [h]; omega
+        · rw [← he2]; exact hs1 e he
+
+theorem armsSorted_foldl : ∀ (arms acc : List (Base × Option Refinement)),
+    ArmsSorted acc → ArmsSorted (arms.foldl insertArm acc) := by
+  intro arms
+  induction arms with
+  | nil => intro acc h; exact h
+  | cons x rest ih => intro acc h; exact ih _ (armsSorted_insertArm acc x h)
+
+theorem armsFind_insertArm_ne {a : Base × Option Refinement} {b : Base} (hb : ¬ a.1 = b) :
+    ∀ l : List (Base × Option Refinement), armsFind (insertArm l a) b = armsFind l b := by
+  intro l
+  induction l with
+  | nil => simp [insertArm, armsFind, hb]
+  | cons x rest ih =>
+    simp only [insertArm]
+    split
+    · rename_i hx
+      have hxb : ¬ x.1 = b := by rw [hx]; exact hb
+      simp only [armsFind, if_neg hxb]
+    · split
+      · simp only [armsFind, if_neg hb]
+      · simp only [armsFind]
+        by_cases hxb : x.1 = b
+        · rw [if_pos hxb, if_pos hxb]
+        · rw [if_neg hxb, if_neg hxb]; exact ih
+
+/-- The accumulated refinement for a base: `none` means "no arm yet". -/
+def mergeInto : Option (Option Refinement) → Option Refinement → Option Refinement
+  | none, r => r
+  | some x, r => joinRefinements x r
+
+theorem armsFind_insertArm_self {a : Base × Option Refinement} :
+    ∀ {l : List (Base × Option Refinement)}, ArmsSorted l →
+      armsFind (insertArm l a) a.1 = some (normArm (mergeInto (armsFind l a.1) a.2)) := by
+  intro l
+  induction l with
+  | nil => simp [insertArm, armsFind, mergeInto]
+  | cons x rest ih =>
+    intro hs
+    obtain ⟨hs1, hs2⟩ := hs
+    simp only [insertArm]
+    split
+    · rename_i hx
+      simp only [armsFind, if_pos hx, mergeInto]
+    · rename_i hx
+      split
+      · rename_i hlt
+        have hnone : armsFind (x :: rest) a.1 = none := by
+          refine armsFind_eq_none (fun e he => ?_)
+          rcases List.mem_cons.mp he with h | h
+          · subst h; exact hlt
+          · exact Nat.lt_trans hlt (hs1 e h)
+        rw [hnone]
+        simp [armsFind, mergeInto]
+      · simp only [armsFind, if_neg hx]
+        exact ih hs2
+
+/-! ### The per-base aggregate is a commutative monoid -/
+
+theorem joinRefinements_assoc (r s t : Option Refinement) :
+    joinRefinements (joinRefinements r s) t = joinRefinements r (joinRefinements s t) := by
+  cases r with
+  | none => cases s <;> cases t <;> rfl
+  | some rr =>
+    cases s with
+    | none => cases rr <;> cases t <;> rfl
+    | some ss =>
+      cases t with
+      | none => cases rr <;> cases ss <;> rfl
+      | some tt =>
+        cases rr <;> cases ss <;> cases tt <;>
+          simp [joinRefinements, StrPreds.inter_assoc, IntRange.hull_assoc]
+
+theorem inter_empty_left (q : StrPreds) : StrPreds.empty.inter q = StrPreds.empty := rfl
+
+theorem isEmpty_empty : StrPreds.empty.isEmpty = true := rfl
+
+theorem containsRange_full_hull {u q : IntRange} (h : u.containsRange IntRange.full = true) :
+    (u.hull q).containsRange IntRange.full = true := by
+  simp only [IntRange.containsRange, IntRange.hull, Bool.and_eq_true, decide_eq_true_eq] at h ⊢
+  omega
+
+/-- **Normalisation is absorbed by the join.** Widening an operand to that base's
+General before joining is the same as widening the result — which is what makes
+the arm merge associative, hence the union constructor order-independent. -/
+theorem normArm_joinRefinements_left (x y : Option Refinement) :
+    normArm (joinRefinements (normArm x) y) = normArm (joinRefinements x y) := by
+  cases x with
+  | none => rfl
+  | some r =>
+    by_cases he : refinementIsEmpty r = true
+    · have h0 : normArm (some r) = none := by simp only [normArm, if_pos he]
+      have hl : joinRefinements (none : Option Refinement) y = none := by cases y <;> rfl
+      rw [h0, hl]
+      cases r with
+      | str p =>
+        have hp : p = StrPreds.empty :=
+          (StrPreds.isEmpty_iff p).mp (by simpa [refinementIsEmpty] using he)
+        subst hp
+        cases y with
+        | none => rfl
+        | some s =>
+          cases s with
+          | str q =>
+            simp only [joinRefinements, normArm, refinementIsEmpty, inter_empty_left,
+              isEmpty_empty, if_pos]
+          | int _ => rfl
+      | int u =>
+        have hu : u.containsRange IntRange.full = true := by simpa [refinementIsEmpty] using he
+        cases y with
+        | none => rfl
+        | some s =>
+          cases s with
+          | str _ => rfl
+          | int q =>
+            simp only [joinRefinements, normArm, refinementIsEmpty,
+              containsRange_full_hull hu, if_pos]
+    · have h0 : normArm (some r) = some r := by simp only [normArm, if_neg he]
+      rw [h0]
+
+theorem normArm_joinRefinements_right (x y : Option Refinement) :
+    normArm (joinRefinements x (normArm y)) = normArm (joinRefinements x y) := by
+  rw [joinRefinements_comm x (normArm y), joinRefinements_comm x y]
+  exact normArm_joinRefinements_left y x
+
+/-- The per-base accumulator: `none` is "no arm", which is the unit. -/
+def joinOpt : Option (Option Refinement) → Option (Option Refinement) →
+    Option (Option Refinement)
+  | none, y => y
+  | some x, none => some x
+  | some x, some y => some (normArm (joinRefinements x y))
+
+def armsAgg : List (Base × Option Refinement) → Base → Option (Option Refinement)
+  | [], _ => none
+  | a :: rest, b => joinOpt (if a.1 = b then some (normArm a.2) else none) (armsAgg rest b)
+
+theorem joinOpt_none (x : Option (Option Refinement)) : joinOpt x none = x := by
+  cases x <;> rfl
+
+theorem joinOpt_comm (x y : Option (Option Refinement)) : joinOpt x y = joinOpt y x := by
+  cases x <;> cases y <;> simp [joinOpt, joinRefinements_comm]
+
+theorem joinOpt_assoc (x y z : Option (Option Refinement)) :
+    joinOpt (joinOpt x y) z = joinOpt x (joinOpt y z) := by
+  cases x with
+  | none => rfl
+  | some a =>
+    cases y with
+    | none => cases z <;> rfl
+    | some b =>
+      cases z with
+      | none => rfl
+      | some c =>
+        simp only [joinOpt, Option.some.injEq]
+        rw [normArm_joinRefinements_left, normArm_joinRefinements_right,
+          joinRefinements_assoc]
+
+theorem armsFind_foldl : ∀ (arms acc : List (Base × Option Refinement)) (b : Base),
+    ArmsSorted acc →
+      armsFind (arms.foldl insertArm acc) b = joinOpt (armsFind acc b) (armsAgg arms b) := by
+  intro arms
+  induction arms with
+  | nil => intro acc b _; simp [armsAgg, joinOpt_none]
+  | cons x rest ih =>
+    intro acc b hs
+    rw [List.foldl_cons, ih _ b (armsSorted_insertArm acc x hs), armsAgg, ← joinOpt_assoc]
+    refine congrArg (joinOpt · (armsAgg rest b)) ?_
+    by_cases hb : x.1 = b
+    · subst hb
+      rw [if_pos rfl, armsFind_insertArm_self hs]
+      cases armsFind acc x.1 with
+      | none => rfl
+      | some w => simp only [joinOpt, mergeInto, normArm_joinRefinements_right]
+    · rw [if_neg hb, armsFind_insertArm_ne hb, joinOpt_none]
+
+theorem armsAgg_append (xs ys : List (Base × Option Refinement)) (b : Base) :
+    armsAgg (xs ++ ys) b = joinOpt (armsAgg xs b) (armsAgg ys b) := by
+  induction xs with
+  | nil => rfl
+  | cons x rest ih =>
+    rw [List.cons_append, armsAgg, ih, armsAgg, joinOpt_assoc]
+
+theorem foldl_insertArm_append_comm (xs ys : List (Base × Option Refinement)) :
+    (xs ++ ys).foldl insertArm [] = (ys ++ xs).foldl insertArm [] := by
+  refine armsSorted_ext (armsSorted_foldl _ _ armsSorted_nil)
+    (armsSorted_foldl _ _ armsSorted_nil) (fun b => ?_)
+  rw [armsFind_foldl (xs ++ ys) [] b armsSorted_nil,
+    armsFind_foldl (ys ++ xs) [] b armsSorted_nil, armsAgg_append, armsAgg_append,
+    joinOpt_comm (armsAgg xs b)]
+
+/-- **The union constructor does not read the arm order.** -/
+theorem mkUnion_append_comm (xs ys : List (Base × Option Refinement)) (n : Bool) :
+    mkUnion (xs ++ ys) n = mkUnion (ys ++ xs) n := by
+  simp only [mkUnion, foldl_insertArm_append_comm xs ys]
+
 /-! ## The computed widening is sound -/
 
 theorem intHullOf_eq_none {vals : List Val} (h : intHullOf vals = none) {i : Int} :
@@ -261,6 +884,69 @@ private theorem mem_scalars {vals : List Val} {v : Val} (hv : v ∈ vals) (hn : 
     v ∈ vals.filter (fun w => decide (w ≠ Val.null)) :=
   List.mem_filter.mpr ⟨hv, by simpa using hn⟩
 
+/-- **The mixed-base overflow's arms cover every member.** `v`'s own base gets an
+arm — its member list contains `v`, so it is not empty — and that arm's
+refinement is `v`'s base summarized over a list `v` belongs to, which is exactly
+what `intHullOf_contains`/`strPredsOf_below` bound. -/
+private theorem any_armAdmits_unionArms (M : Model) (scalars : List Val) {v : Val} {bb : Base}
+    (hbase : v.base = some bb) (hmem : v ∈ scalars) :
+    (([Base.int, Base.float, Base.str, Base.bool] : List Base).filterMap (fun b =>
+      match scalars.filter (fun w => decide (w.base = some b)) with
+      | [] => none
+      | _ =>
+        match b with
+        | .int => some (b, (intHullOf (scalars.filter (fun w => decide (w.base = some b)))).map
+            Refinement.int)
+        | .str => some (b, (strPredsOf M (scalars.filter (fun w => decide (w.base = some b)))).map
+            Refinement.str)
+        | _ => some (b, none))).any (armAdmits M v) = true := by
+  have hmm : v ∈ scalars.filter (fun w => decide (w.base = some bb)) :=
+    List.mem_filter.mpr ⟨hmem, by simp [hbase]⟩
+  cases bb with
+  | int =>
+    obtain ⟨i, rfl⟩ : ∃ i, v = Val.int i := by cases v <;> simp_all [Val.base]
+    refine List.any_eq_true.mpr ⟨(Base.int,
+      (intHullOf (scalars.filter (fun w => decide (w.base = some Base.int)))).map Refinement.int),
+      List.mem_filterMap.mpr ⟨Base.int, by simp, ?_⟩, ?_⟩
+    · cases hm : scalars.filter (fun w => decide (w.base = some Base.int)) with
+      | nil => rw [hm] at hmm; simp at hmm
+      | cons y ys => rfl
+    · cases hq : intHullOf (scalars.filter (fun w => decide (w.base = some Base.int))) with
+      | none => simp [armAdmits, refOptAdmits, Val.base]
+      | some q =>
+        have hc : q.contains i = true := intHullOf_contains hq hmm
+        simp [armAdmits, refOptAdmits, refAdmits, Val.base, hc]
+  | str =>
+    obtain ⟨k, rfl⟩ : ∃ k, v = Val.str k := by cases v <;> simp_all [Val.base]
+    refine List.any_eq_true.mpr ⟨(Base.str,
+      (strPredsOf M (scalars.filter (fun w => decide (w.base = some Base.str)))).map
+        Refinement.str),
+      List.mem_filterMap.mpr ⟨Base.str, by simp, ?_⟩, ?_⟩
+    · cases hm : scalars.filter (fun w => decide (w.base = some Base.str)) with
+      | nil => rw [hm] at hmm; simp at hmm
+      | cons y ys => rfl
+    · cases hp : strPredsOf M (scalars.filter (fun w => decide (w.base = some Base.str))) with
+      | none => simp [armAdmits, refOptAdmits, Val.base]
+      | some p =>
+        have hc : (M.predsOf k).containsAll p = true := strPredsOf_below hp hmm
+        simp [armAdmits, refOptAdmits, refAdmits, Val.base, hc]
+  | float =>
+    obtain ⟨x, rfl⟩ : ∃ x, v = Val.float x := by cases v <;> simp_all [Val.base]
+    refine List.any_eq_true.mpr ⟨(Base.float, none),
+      List.mem_filterMap.mpr ⟨Base.float, by simp, ?_⟩, ?_⟩
+    · cases hm : scalars.filter (fun w => decide (w.base = some Base.float)) with
+      | nil => rw [hm] at hmm; simp at hmm
+      | cons y ys => rfl
+    · simp [armAdmits, refOptAdmits, Val.base]
+  | bool =>
+    obtain ⟨x, rfl⟩ : ∃ x, v = Val.bool x := by cases v <;> simp_all [Val.base]
+    refine List.any_eq_true.mpr ⟨(Base.bool, none),
+      List.mem_filterMap.mpr ⟨Base.bool, by simp, ?_⟩, ?_⟩
+    · cases hm : scalars.filter (fun w => decide (w.base = some Base.bool)) with
+      | nil => rw [hm] at hmm; simp at hmm
+      | cons y ys => rfl
+    · simp [armAdmits, refOptAdmits, Val.base]
+
 /-- `summarize` lands in a finite layer only in the all-null branch. This is what
 lets `joinFiniteAbstract`'s `Some(_)` arm conclude that the finite operand was
 nothing but nulls. -/
@@ -280,11 +966,14 @@ theorem summarize_finite {vals : List Val} {f : Fact} (h : summarizeScalar M val
     · rename_i b _
       split at h
       · exact absurd h (by simp)
-      · cases b <;> simp only at h <;>
-          first
-            | (split at h <;> injection h with h <;> subst h <;>
-                exact hf (by first | rfl | simp))
-            | (injection h with h; subst h; exact hf (by first | rfl | simp))
+      · split at h
+        -- The mixed-base overflow is a union, and no union is in a finite layer.
+        · exact hf (finiteMembers_mkUnion h)
+        · cases b <;> simp only at h <;>
+            first
+              | (split at h <;> injection h with h <;> subst h <;>
+                  exact hf (by first | rfl | simp))
+              | (injection h with h; subst h; exact hf (by first | rfl | simp))
 
 /-- **The computed widening never loses a member.** Every value the list contains
 is admitted by the summary an overflowing set widens to. -/
@@ -304,62 +993,81 @@ theorem summarize_admits {vals : List Val} {f : Fact} {v : Val}
     · rename_i b hbase
       split at h
       · exact absurd h (by simp)
-      · rename_i hany
-        simp only [Bool.not_eq_true] at hany
-        have hbase_of : ∀ w ∈ first :: rest, w.base = some b := by
-          intro w hw
-          have hw' : w ∈ List.filter (fun v => decide (v ≠ Val.null)) vals := by
-            rw [hcons]; exact hw
-          simpa using List.any_eq_false.mp hany w hw'
-        have hvs' : v ≠ Val.null → v ∈ first :: rest := fun hvn => by
-          rw [← hcons]; exact mem_scalars hv hvn
-        by_cases hvn : v = Val.null
-        · subst hvn
-          have hn := hnullable rfl
-          cases b <;> simp only at h <;>
-            first
-              | (split at h <;> injection h with h <;> subst h <;>
-                  first
-                    | exact sub_mkRefined Val.null (admits_null_refined hn)
-                    | exact admits_null_general hn)
-              | (injection h with h; subst h; exact admits_null_general hn)
-        · have hvs : v ∈ first :: rest := hvs' hvn
-          have hvb : v.base = some b := hbase_of v hvs
-          cases b with
-          | int =>
-            simp only at h
-            obtain ⟨i, rfl⟩ : ∃ i, v = Val.int i := by
-              cases v <;> simp_all [Val.base]
-            split at h
-            · rename_i r hr
+      · rename_i hallbase
+        simp only [Bool.not_eq_true] at hallbase
+        split at h
+        -- **The mixed-base overflow is a union.** Every non-null member has a
+        -- scalar base (the guard just above), so every one of them has an arm.
+        · by_cases hvn : v = Val.null
+          · subst hvn
+            exact mkUnion_admits_null (hnullable rfl) h
+          · have hvs : v ∈ List.filter (fun w => decide (w ≠ Val.null)) vals :=
+              mem_scalars hv hvn
+            obtain ⟨bb, hbb⟩ : ∃ bb, v.base = some bb := by
+              cases hvv : v.base with
+              | some bb => exact ⟨bb, rfl⟩
+              | none =>
+                have := List.any_eq_false.mp hallbase v hvs
+                simp [hvv] at this
+            exact mkUnion_admits hvn
+              (any_armAdmits_unionArms M (List.filter (fun w => decide (w ≠ Val.null)) vals)
+                hbb hvs) h
+        · rename_i hany
+          simp only [Bool.not_eq_true] at hany
+          have hbase_of : ∀ w ∈ first :: rest, w.base = some b := by
+            intro w hw
+            have hw' : w ∈ List.filter (fun v => decide (v ≠ Val.null)) vals := by
+              rw [hcons]; exact hw
+            simpa using List.any_eq_false.mp hany w hw'
+          have hvs' : v ≠ Val.null → v ∈ first :: rest := fun hvn => by
+            rw [← hcons]; exact mem_scalars hv hvn
+          by_cases hvn : v = Val.null
+          · subst hvn
+            have hn := hnullable rfl
+            cases b <;> simp only at h <;>
+              first
+                | (split at h <;> injection h with h <;> subst h <;>
+                    first
+                      | exact sub_mkRefined Val.null (admits_null_refined hn)
+                      | exact admits_null_general hn)
+                | (injection h with h; subst h; exact admits_null_general hn)
+          · have hvs : v ∈ first :: rest := hvs' hvn
+            have hvb : v.base = some b := hbase_of v hvs
+            cases b with
+            | int =>
+              simp only at h
+              obtain ⟨i, rfl⟩ : ∃ i, v = Val.int i := by
+                cases v <;> simp_all [Val.base]
+              split at h
+              · rename_i r hr
+                injection h with h; subst h
+                refine sub_mkRefined (Val.int i) ?_
+                simp only [admits, refAdmits, Bool.and_eq_true, decide_eq_true_eq]
+                exact ⟨hvb, intHullOf_contains hr (by rw [hcons]; exact hvs)⟩
+              · injection h with h; subst h
+                simp only [admits, decide_eq_true_eq]; exact hvb
+            | str =>
+              simp only at h
+              obtain ⟨k, rfl⟩ : ∃ k, v = Val.str k := by
+                cases v <;> simp_all [Val.base]
+              split at h
+              · rename_i p hp
+                injection h with h; subst h
+                refine sub_mkRefined (Val.str k) ?_
+                simp only [admits, refAdmits, Bool.and_eq_true, decide_eq_true_eq]
+                exact ⟨hvb, strPredsOf_below hp (by rw [hcons]; exact hvs)⟩
+              · injection h with h; subst h
+                simp only [admits, decide_eq_true_eq]; exact hvb
+            | float =>
+              simp only at h
               injection h with h; subst h
-              refine sub_mkRefined (Val.int i) ?_
-              simp only [admits, refAdmits, Bool.and_eq_true, decide_eq_true_eq]
-              exact ⟨hvb, intHullOf_contains hr (by rw [hcons]; exact hvs)⟩
-            · injection h with h; subst h
+              obtain ⟨x, rfl⟩ : ∃ x, v = Val.float x := by cases v <;> simp_all [Val.base]
               simp only [admits, decide_eq_true_eq]; exact hvb
-          | str =>
-            simp only at h
-            obtain ⟨k, rfl⟩ : ∃ k, v = Val.str k := by
-              cases v <;> simp_all [Val.base]
-            split at h
-            · rename_i p hp
+            | bool =>
+              simp only at h
               injection h with h; subst h
-              refine sub_mkRefined (Val.str k) ?_
-              simp only [admits, refAdmits, Bool.and_eq_true, decide_eq_true_eq]
-              exact ⟨hvb, strPredsOf_below hp (by rw [hcons]; exact hvs)⟩
-            · injection h with h; subst h
+              obtain ⟨x, rfl⟩ : ∃ x, v = Val.bool x := by cases v <;> simp_all [Val.base]
               simp only [admits, decide_eq_true_eq]; exact hvb
-          | float =>
-            simp only at h
-            injection h with h; subst h
-            obtain ⟨x, rfl⟩ : ∃ x, v = Val.float x := by cases v <;> simp_all [Val.base]
-            simp only [admits, decide_eq_true_eq]; exact hvb
-          | bool =>
-            simp only at h
-            injection h with h; subst h
-            obtain ⟨x, rfl⟩ : ∃ x, v = Val.bool x := by cases v <;> simp_all [Val.base]
-            simp only [admits, decide_eq_true_eq]; exact hvb
 
 /-- **Layering never loses a member.** The all-values generalisation of the
 `from_vals_admits_every_input` proptest. -/
@@ -386,112 +1094,43 @@ theorem fromVals_admits {vals : List Val} {f : Fact} {v : Val}
 /-! ## The join is sound -/
 
 theorem joinAbstract_sub_left {a b j : Fact} (h : joinAbstract a b = some j) : Sub M a j := by
-  unfold joinAbstract at h
-  cases a with
-  | singleton _ => simp [abstractParts] at h
-  | oneOf _ => simp [abstractParts] at h
-  | shape _ _ => simp [abstractParts] at h
-  | refined ab ar an =>
-    cases b with
-    | singleton _ => simp [abstractParts] at h
-    | oneOf _ => simp [abstractParts] at h
-    | shape _ _ => simp [abstractParts] at h
-    | refined bb br bn =>
-      simp only [abstractParts] at h
-      split at h
-      · exact absurd h (by simp)
-      · cases ar with
-        | str p =>
-          cases br with
-          | str q =>
-            injection h with h; subst h
-            exact Sub.trans (sub_refined_str (StrPreds.inter_containsAll_left p q)
-              (fun hn => by simp [hn])) sub_mkRefined
-          | int _ =>
-            injection h with h; subst h
-            exact sub_refined_general (fun hn => by simp [hn])
-        | int r =>
-          cases br with
-          | str _ =>
-            injection h with h; subst h
-            exact sub_refined_general (fun hn => by simp [hn])
-          | int s =>
-            injection h with h; subst h
-            exact Sub.trans (sub_refined_int (IntRange.hull_containsRange_left r s)
-              (fun hn => by simp [hn])) sub_mkRefined
-    | general bb bn =>
-      simp only [abstractParts] at h
-      split at h
-      · exact absurd h (by simp)
-      · injection h with h; subst h
-        exact sub_refined_general (fun hn => by simp [hn])
-  | general ab an =>
-    cases b with
-    | singleton _ => simp [abstractParts] at h
-    | oneOf _ => simp [abstractParts] at h
-    | shape _ _ => simp [abstractParts] at h
-    | refined bb br bn =>
-      simp only [abstractParts] at h
-      split at h
-      · exact absurd h (by simp)
-      · injection h with h; subst h
-        exact sub_general_nullable (fun hn => by simp [hn])
-    | general bb bn =>
-      simp only [abstractParts] at h
-      split at h
-      · exact absurd h (by simp)
-      · injection h with h; subst h
-        exact sub_general_nullable (fun hn => by simp [hn])
+  intro v hv
+  rcases ha : a.abstractArms with _ | ⟨aa, an⟩
+  · simp [joinAbstract, ha] at h
+  · rcases hb : b.abstractArms with _ | ⟨ba, bn⟩
+    · simp [joinAbstract, ha, hb] at h
+    · simp only [joinAbstract, ha, hb] at h
+      by_cases hvn : v = Val.null
+      · subst hvn
+        exact mkUnion_admits_null (by simp [nullable_of_abstractArms ha hv]) h
+      · refine mkUnion_admits hvn ?_ h
+        rw [List.any_append, Bool.or_eq_true]
+        exact Or.inl ((admits_eq_any_abstractArms ha hvn) ▸ hv)
 
-/-- `joinAbstract` is commutative: the base test is symmetric and the two
-refinement operations (`inter`, `hull`) are. -/
+theorem joinAbstract_sub_right {a b j : Fact} (h : joinAbstract a b = some j) : Sub M b j := by
+  intro v hv
+  rcases ha : a.abstractArms with _ | ⟨aa, an⟩
+  · simp [joinAbstract, ha] at h
+  · rcases hb : b.abstractArms with _ | ⟨ba, bn⟩
+    · simp [joinAbstract, ha, hb] at h
+    · simp only [joinAbstract, ha, hb] at h
+      by_cases hvn : v = Val.null
+      · subst hvn
+        exact mkUnion_admits_null (by simp [nullable_of_abstractArms hb hv]) h
+      · refine mkUnion_admits hvn ?_ h
+        rw [List.any_append, Bool.or_eq_true]
+        exact Or.inr ((admits_eq_any_abstractArms hb hvn) ▸ hv)
+
+/-- `joinAbstract` is commutative. The arms are concatenated, so this is exactly
+`mkUnion_append_comm`: the merged list is a canonical form of the per-base
+aggregate, and that aggregate is a commutative monoid. -/
 theorem joinAbstract_comm (a b : Fact) : joinAbstract a b = joinAbstract b a := by
-  cases a with
-  | singleton _ => cases b <;> rfl
-  | oneOf _ => cases b <;> rfl
-  | shape _ _ => cases b <;> rfl
-  | refined ab ar an =>
-    cases b with
-    | singleton _ => rfl
-    | oneOf _ => rfl
-    | shape _ _ => rfl
-    | refined bb br bn =>
-      simp only [joinAbstract, abstractParts]
-      by_cases hb : ab = bb
-      · subst hb
-        rw [if_neg (fun h => h rfl), if_neg (fun h => h rfl)]
-        cases ar <;> cases br <;>
-          simp [StrPreds.inter_comm, IntRange.hull_comm, Bool.or_comm]
-      · rw [if_pos hb, if_pos (fun h => hb h.symm)]
-    | general bb bn =>
-      simp only [joinAbstract, abstractParts]
-      by_cases hb : ab = bb
-      · subst hb
-        rw [if_neg (fun h => h rfl), if_neg (fun h => h rfl)]
-        cases ar <;> simp [Bool.or_comm]
-      · rw [if_pos hb, if_pos (fun h => hb h.symm)]
-  | general ab an =>
-    cases b with
-    | singleton _ => rfl
-    | oneOf _ => rfl
-    | shape _ _ => rfl
-    | refined bb br bn =>
-      simp only [joinAbstract, abstractParts]
-      by_cases hb : ab = bb
-      · subst hb
-        rw [if_neg (fun h => h rfl), if_neg (fun h => h rfl)]
-        cases br <;> simp [Bool.or_comm]
-      · rw [if_pos hb, if_pos (fun h => hb h.symm)]
-    | general bb bn =>
-      simp only [joinAbstract, abstractParts]
-      by_cases hb : ab = bb
-      · subst hb
-        rw [if_neg (fun h => h rfl), if_neg (fun h => h rfl)]
-        simp [Bool.or_comm]
-      · rw [if_pos hb, if_pos (fun h => hb h.symm)]
-
-theorem joinAbstract_sub_right {a b j : Fact} (h : joinAbstract a b = some j) : Sub M b j :=
-  joinAbstract_sub_left (M := M) (by rw [joinAbstract_comm]; exact h)
+  rcases ha : a.abstractArms with _ | ⟨aa, an⟩
+  · rcases hb : b.abstractArms with _ | ⟨ba, bn⟩ <;> simp only [joinAbstract, ha, hb]
+  · rcases hb : b.abstractArms with _ | ⟨ba, bn⟩
+    · simp only [joinAbstract, ha, hb]
+    · simp only [joinAbstract, ha, hb]
+      rw [mkUnion_append_comm, Bool.or_comm]
 
 theorem joinFiniteAbstract_admits_finite {finite : List Val} {abs j : Fact} {v : Val}
     (hv : v ∈ finite) (h : joinFiniteAbstract M finite abs = some j) :
@@ -511,6 +1150,9 @@ theorem joinFiniteAbstract_admits_finite {finite : List Val} {abs j : Fact} {v :
         injection h with h; subst h
         exact sub_mkRefined Val.null (admits_null_refined rfl)
       | general b n => injection h with h; subst h; exact admits_null_general rfl
+      -- A union takes the nullability beside its arms; `mkUnion` may collapse
+      -- it, but never below `null`.
+      | union arms n => exact mkUnion_admits_null rfl h
       | singleton _ => exact absurd h (by simp)
       | oneOf _ => exact absurd h (by simp)
       | shape _ _ => exact absurd h (by simp)
@@ -530,6 +1172,11 @@ theorem joinFiniteAbstract_admits_abs {finite : List Val} {abs j : Fact} {v : Va
       | general b n =>
         injection h with h; subst h
         exact sub_general_nullable (fun _ => rfl) v hv
+      | union arms n =>
+        by_cases hvn : v = Val.null
+        · subst hvn; exact mkUnion_admits_null rfl h
+        · refine mkUnion_admits hvn ?_ h
+          exact (admits_eq_any_abstractArms (a := Fact.union arms n) rfl hvn) ▸ hv
       | singleton _ => simp [finiteMembers] at habs
       | oneOf _ => simp [finiteMembers] at habs
       | shape _ _ => exact absurd h (by simp)

@@ -333,6 +333,40 @@ it; nothing in the spec needs propositional decidability of fact equality. This
 is also why `Fact` and `Refinement` are declared in `Shape.lean` rather than
 `Fact.lean`: `Fact` and the shape form are one recursive declaration.
 
+## The abstract union (issue #339): what it changed, and one divergence
+
+`Fact` gained a `union` constructor — one `(base, refinement)` arm per scalar
+base, sorted, at least two of them — so a mixed-base overflow becomes
+`int|string` instead of nothing. Three things in this file moved with it.
+
+**Proved, for every input.** `mkUnion` never loses a member: an arm that admits
+`v` survives the per-base merge (`mkUnion_admits`), through the refinement join
+and through the one-arm collapse to `Refined`/`General`. That is what carries
+`summarize_admits`, `fromVals_admits` and `join_sound` across the new branch,
+and what makes `joinAbstract` *total* over the abstract layers where it used to
+answer `none`.
+
+**Proved, and it needed a canonical form.** `join_comm` used to follow from
+`hull_comm`/`inter_comm` on a single pair. It now has to say that concatenating
+two arm lists in either order merges to the *same list*, so the spike proves
+that the merged list is determined by its per-base aggregate: `armsFind` reads
+the form, `armsAgg` computes the aggregate (a commutative monoid), and
+`armsSorted_ext` is the extensionality that ties them — the arm-list analogue of
+`Val.ssorted_ext`.
+
+**One deliberate divergence, in `refinementIsEmpty`.** Rust normalises a
+contentless arm refinement to `None`, testing `IntRange::is_full()` — `lo ==
+i64::MIN && hi == i64::MAX`. Its `IntRange` is a pair of `i64`, so that test *is*
+"contains every int there is". The spec's `IntRange` is a pair of `Int`, where
+those are two different predicates, and only the containment one is closed under
+`hull`. Closure is exactly what the arm merge needs to be associative, and
+without it `join_comm` is **false** in the spec's model: with `r ⊔ s = full` and
+an out-of-`i64` `u`, merging `[r, s] ++ [u]` collapses the arm to General while
+`[u] ++ [r, s]` does not. So `refinementIsEmpty (.int q)` reads
+`q.containsRange IntRange.full`. On every range Rust can build the two agree —
+`lo ≥ i64::MIN` and `hi ≤ i64::MAX` always hold there — and the vector universe
+confirms it: the fixture and the Rust implementation still agree line for line.
+
 ## What is not proved: associativity
 
 `join` associativity is **checked, not proved**: 314,432 triples over the

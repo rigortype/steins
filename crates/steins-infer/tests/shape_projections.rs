@@ -222,11 +222,12 @@ fn a_declared_shape_argument_is_not_a_fold_argument() {
 
 #[test]
 fn array_values_of_a_shape_is_a_list_of_the_value_union() {
-    // Heterogeneous values: `int|string` is not one fact, so the element bound is
-    // the unknown floor — the list-ness and non-emptiness still carry.
+    // Heterogeneous values: `int|string` IS one fact as of issue #339, so the
+    // element bound carries it where it used to be the unknown floor. The
+    // list-ness and non-emptiness carry as they always did.
     assert_eq!(
         dump("array{a: int, b?: string}", "array_values($v)"),
-        "dumped type: non-empty-list<mixed> (asserted)"
+        "dumped type: non-empty-list<int|string> (asserted)"
     );
     // Homogeneous values: the bound survives.
     assert_eq!(
@@ -243,9 +244,9 @@ fn array_keys_of_a_sealed_shape_enumerates_the_key_set() {
         "dumped type: non-empty-list<'a'|'b'> (asserted)"
     );
     assert_eq!(dump("array<string, int>", "array_keys($v)"), "dumped type: list<string> (asserted)");
-    // `array-key` is `int|string` — not one fact, so the element bound widens
-    // rather than guessing one half of it.
-    assert_eq!(dump("array", "array_keys($v)"), "dumped type: list<mixed> (asserted)");
+    // `array-key` is `int|string`, which IS one fact as of issue #339 — the
+    // element bound carries it instead of widening to the unknown floor.
+    assert_eq!(dump("array", "array_keys($v)"), "dumped type: list<int|string> (asserted)");
 }
 
 #[test]
@@ -330,7 +331,7 @@ fn a_trailing_optional_sequence_keeps_keys_and_declines_reverse() {
     // `array_reverse(["a", "b"])`), so `array_reverse` keeps today's widening.
     assert_eq!(
         dump("list{int, 1?: string}", "array_reverse($v)"),
-        "dumped type: non-empty-list<mixed> (asserted)"
+        "dumped type: non-empty-list<int|string> (asserted)"
     );
 }
 
@@ -397,7 +398,7 @@ fn array_slice_keeps_the_element_type_and_the_list_ness() {
     );
     assert_eq!(
         dump("array{0: int, 1: string}", "array_slice($v, 1)"),
-        "dumped type: list<mixed> (asserted)"
+        "dumped type: list<int|string> (asserted)"
     );
     // The optional `$length` changes nothing about the claim: every part of the
     // widening is sound for ANY offset and length.
@@ -603,11 +604,11 @@ fn the_contract_lane_never_projects_positionally() {
     // offset, never field declaration order.
     assert_eq!(
         dump("array{a: int, b: string}", "array_slice($v, 1, 1)"),
-        "dumped type: array<string, mixed> (asserted)"
+        "dumped type: array<string, int|string> (asserted)"
     );
     assert_eq!(
         dump("array{a: int, b: string}", "array_slice($v, 1, 1, true)"),
-        "dumped type: array<string, mixed> (asserted)"
+        "dumped type: array<string, int|string> (asserted)"
     );
 }
 

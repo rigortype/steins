@@ -244,7 +244,7 @@ fn an_optional_field_has_no_single_sequence_to_execute_over() {
     // `witnessed_order` declines and the key-set widening stands.
     assert_eq!(
         declared("list{int, 1?: string}", "array_reverse($v)"),
-        "dumped type: non-empty-list<mixed> (asserted)"
+        "dumped type: non-empty-list<int|string> (asserted)"
     );
 }
 

@@ -2865,11 +2865,19 @@ fn fits_fold_budget(v: &ArgValue, depth: u8, budget: &mut usize) -> bool {
             if depth == 0 {
                 return false;
             }
-            for (_, el) in items {
+            for (key, el) in items {
                 if *budget == 0 {
                     return false;
                 }
                 *budget -= 1;
+                // A key the source did not spell as a literal (issue #336) is not
+                // sendable, and this gate must agree with `arg_to_fold_within`'s
+                // encoder to the letter — the two compute one verdict twice, and
+                // a gate that admits what the encoder refuses would ask the
+                // engine a question it cannot be given.
+                if matches!(key, ArrayKey::Expr(_)) {
+                    return false;
+                }
                 if !fits_fold_budget(el, depth - 1, budget) {
                     return false;
                 }
@@ -2963,6 +2971,10 @@ fn arg_to_fold_within(arg: &ArgValue, depth: u8, budget: &mut usize) -> Option<F
                     // `?` widens the WHOLE array, exactly like an unrepresentable
                     // element: `None` here would mean "auto key", a different claim.
                     ArrayKey::Str(s) => Some(FoldKey::Str(s.as_str()?.to_owned())),
+                    // A key the source did not spell as a literal (issue #336)
+                    // is not a fold argument: the seam sends the engine the
+                    // array that was written or nothing at all.
+                    ArrayKey::Expr(_) => return None,
                 };
                 entries.push((key, arg_to_fold_within(v, depth - 1, budget)?));
             }
@@ -10391,6 +10403,16 @@ fn array_literal_fact_within(
     if poisoned || depth == 0 {
         return None;
     }
+    // **A key the source did not spell as a literal** (issue #336, piece 3).
+    // `normalize_array` declines the whole literal — an unknown key may be an
+    // integer, so it moves every following `Auto` position and no key set is
+    // resolvable. What IS knowable is what the key *is*, and that is worth
+    // stating: the literal seeds an **unsealed** shape whose tail key is the
+    // array-key cast of the key expressions and whose tail value is the join of
+    // the element values.
+    if items.iter().any(|(k, _)| matches!(k, ArrayKey::Expr(_))) {
+        return open_keyed_literal_fact(cx, folder, items, env, poisoned, store, depth);
+    }
     let normalized = normalize_array(items, cx.php_minor)?;
     let mut entries: Vec<(VKey, Option<Fact>)> = Vec::with_capacity(normalized.len());
     let mut stratum = Stratum::Verified;
@@ -10419,6 +10441,109 @@ fn array_literal_fact_within(
         }
     }
     Some((shape_fact(ShapeFact::from_witnessed_entries(&entries)), stratum))
+}
+
+/// The fact an array literal denotes when one of its **keys** is not a literal
+/// (issue #336, piece 3) — `[$k => $v]`, `['a' => 1, f() => 2]`.
+///
+/// # What is lost, and what is not
+///
+/// The key *set* is gone: an unknown key may be an integer, which moves the
+/// next-auto-index for every following `Auto` position, so no entry after it has
+/// a knowable key and even the entry count is uncertain (the unknown key may
+/// collide with a written one). That is why [`normalize_array`] declines, and
+/// declining is right.
+///
+/// What survives is what the keys and values *are*. The result is an unsealed
+/// shape: no declared fields, a tail whose key class is the **array-key cast**
+/// ([`steins_domain::Fact::array_key_cast`]) of the key expressions joined, and
+/// whose value is the join of the element values. `non_empty` holds — a literal
+/// with entries has at least one, whatever they collide into.
+///
+/// So `array_key_first([$decimalIntString => null])` answers `int`, because a
+/// string that spells an integer the way PHP writes one back keys an integer
+/// however little else is known.
+fn open_keyed_literal_fact(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    items: &[(ArrayKey, ArgValue)],
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    store: Option<&Store>,
+    depth: u8,
+) -> Option<(Fact, Stratum)> {
+    use steins_domain::{KeyClass, Tail};
+    let mut stratum = Stratum::Verified;
+    let mut keys: Option<Fact> = None;
+    let mut values: Option<Fact> = None;
+    let join_into = |acc: &mut Option<Fact>, f: Fact| {
+        *acc = match acc.take() {
+            None => Some(f),
+            Some(prev) => prev.join(&f),
+        };
+    };
+    for (k, v) in items {
+        // The key's own fact, cast to what it becomes as a key. A written
+        // literal key contributes itself; an unknown one contributes its
+        // expression's fact through the cast.
+        let key_fact = match k {
+            ArrayKey::Int(i) => Some(Fact::Singleton(Val::Int(*i))),
+            ArrayKey::Str(s) => Some(Fact::Singleton(Val::Str(s.clone()))),
+            // An `Auto` key is an integer at an unknowable position.
+            ArrayKey::Auto => Some(Fact::General { base: Base::Int, nullable: false }),
+            ArrayKey::Expr(e) => {
+                let (f, s) = transfer_arg_known(cx, folder, e, env, store)?;
+                stratum = stratum.min(s);
+                f.array_key_cast()
+            }
+        };
+        join_into(&mut keys, key_fact?);
+        let value_fact = transfer_arg_known(cx, folder, v, env, store)
+            .map(|(f, s)| {
+                stratum = stratum.min(s);
+                f
+            })
+            .or_else(|| match v {
+                ArgValue::Array(inner) => array_literal_fact_within(
+                    cx, folder, inner, env, poisoned, store, depth - 1,
+                )
+                .map(|(f, s)| {
+                    stratum = stratum.min(s);
+                    f
+                }),
+                _ => None,
+            });
+        match value_fact {
+            Some(f) => join_into(&mut values, f),
+            // One unknown value makes the tail's value bound unknown, and the
+            // tail says what EVERY undeclared entry satisfies.
+            None => values = None,
+        }
+    }
+    // The key class the tail can hold. A two-base union has none, so it takes
+    // `array-key` — the second wall #336 records.
+    let key = match &keys {
+        Some(Fact::General { base: Base::Int, .. } | Fact::Refined { base: Base::Int, .. }) => {
+            KeyClass::Int
+        }
+        Some(Fact::General { base: Base::String, .. } | Fact::Refined { base: Base::String, .. }) => {
+            KeyClass::Str
+        }
+        Some(f) => match f.finite_members() {
+            Some(vals) if vals.iter().all(|v| matches!(v, Val::Int(_))) => KeyClass::Int,
+            Some(vals) if vals.iter().all(|v| matches!(v, Val::Str(_))) => KeyClass::Str,
+            _ => KeyClass::ArrayKey,
+        },
+        None => KeyClass::ArrayKey,
+    };
+    let shape = ShapeFact::normalize(
+        Vec::new(),
+        Tail::Unsealed { key, value: values.map(Box::new) },
+        Certainty::Maybe,
+        !items.is_empty(),
+        Vec::new(),
+    );
+    Some((shape_fact(shape), stratum))
 }
 
 /// The value fact a `::class` magic constant produces — one seam for both of its
@@ -18272,7 +18397,8 @@ fn preg_pattern_keys(
         .iter()
         .filter_map(|(k, _)| match k {
             ArrayKey::Str(s) => s.as_str().map(ToOwned::to_owned),
-            ArrayKey::Int(_) | ArrayKey::Auto => None,
+            // An unknown key names nothing this reader can quote (issue #336).
+            ArrayKey::Int(_) | ArrayKey::Auto | ArrayKey::Expr(_) => None,
         })
         .collect()
 }
@@ -33287,7 +33413,13 @@ fn shape_key_union(shape: &ShapeFact) -> Option<Fact> {
             let class = match key {
                 KeyClass::Int => Fact::General { base: Base::Int, nullable: false },
                 KeyClass::Str => Fact::General { base: Base::String, nullable: false },
-                KeyClass::ArrayKey => return None,
+                // `array-key` is PHP's `int|string`, and that is a fact now
+                // (issue #339) where it used to be a two-base union with no
+                // form — which is why this arm read `return None`.
+                KeyClass::ArrayKey => Fact::union(
+                    vec![(Base::Int, None), (Base::String, None)],
+                    false,
+                )?,
             };
             declared
                 .iter()
@@ -34982,13 +35114,20 @@ mod shape_projection_tests {
 
     #[test]
     fn array_values_is_a_list_of_the_value_union() {
-        // int ⊔ string is not representable as one scalar fact, so the value slot
-        // widens to the unknown floor — a list of anything, still non-empty.
+        // `int ⊔ string` IS one fact now (issue #339), so the value slot carries
+        // the union where it used to widen to the unknown floor.
         let p = project_values(&declared_shape());
         assert_eq!(p.is_list, Certainty::Yes);
         assert!(p.non_empty);
         assert!(p.fields.is_empty());
-        assert_eq!(p.tail, Tail::Unsealed { key: KeyClass::Int, value: None });
+        assert_eq!(
+            p.tail,
+            Tail::Unsealed {
+                key: KeyClass::Int,
+                value: Fact::union(vec![(Base::Int, None), (Base::String, None)], false)
+                    .map(Box::new),
+            }
+        );
 
         // A homogeneous shape keeps its value bound.
         let same = ShapeFact::normalize(
@@ -35019,11 +35158,16 @@ mod shape_projection_tests {
                 ])),
             }
         );
-        // An `array-key`-classed tail is `int|string` — not one fact, so the
-        // element slot is the unknown floor rather than a wrong guess.
+        // An `array-key`-classed tail is `int|string`, which IS one fact now
+        // (issue #339) — the element slot carries it instead of widening to the
+        // unknown floor.
         assert_eq!(
             project_keys(&ShapeFact::plain_array()).tail,
-            Tail::Unsealed { key: KeyClass::Int, value: None }
+            Tail::Unsealed {
+                key: KeyClass::Int,
+                value: Fact::union(vec![(Base::Int, None), (Base::String, None)], false)
+                    .map(Box::new),
+            }
         );
         // An unsealed Yes-list's keys are `0..n-1` — never negative, so the
         // element bound sharpens past the bare `int` class (issue #165).
@@ -35164,10 +35308,16 @@ mod shape_projection_tests {
         // index 1 in `array_reverse(["a", "b"])` — a variable-length reversal
         // smears every position, so an optional key keeps today's widening
         // exactly (the value union under an int-classed list tail, `non_empty`
-        // carried).
+        // carried). The union that value slot carries is `int|string`, which
+        // issue #339 made expressible — the widening is the same one, said
+        // more precisely.
         let expected = ShapeFact::normalize(
             Vec::new(),
-            Tail::Unsealed { key: KeyClass::Int, value: None },
+            Tail::Unsealed {
+                key: KeyClass::Int,
+                value: Fact::union(vec![(Base::Int, None), (Base::String, None)], false)
+                    .map(Box::new),
+            },
             Certainty::Yes,
             true,
             Vec::new(),

@@ -107,3 +107,48 @@ whole vector universe: associativity, commutativity, and never-loses-a-member.
   `int|non-falsy-lowercase-string`. Sound, less sharp, and unchanged by this ADR.
 - **The victims list of §1**, each of which becomes its own small slice now that
   the form exists.
+
+## 6. Addendum (2026-08-14): what landed on top
+
+The layer paid for itself in the same session it was built. Recorded here so the
+list of §1's victims is not read as aspirational:
+
+- **`min`/`max` over mixed bases** — ADR-0062 Amendment B recorded a *deviation
+  from its own slice design* because `min($int, $string)` had no fact form. It
+  answers `int|string` now, and the deviation is discharged.
+- **The `∪ false` family** — `next($shape)` over abstract values answers
+  `int|bool` where it declined. Coarser than `int|false` (§5), and an answer
+  where there was none.
+- **`array-key` as a fact** — `shape_key_union` returned `None` for an
+  `array-key`-classed tail because `int|string` was not one fact. It is now, so
+  `array_keys(array)` is `list<int|string>` rather than `list<mixed>`, and the
+  same union reaches every value slot that used to floor.
+- **The curated-row lowering** folds any scalar union, so a declared
+  `int|string` reaches the value lane — including inside an array slot.
+- **The ternary** joins facts rather than values when an arm proves none.
+
+Six fixture expectations that pinned `mixed` moved to `int|string`, and three
+that pinned an outright decline now pin an answer. Each was reviewed
+individually rather than re-blessed: the point of those pins was "the domain
+cannot say this", and the domain can.
+
+### 6.1 A non-literal array key (issue #336, piece 3)
+
+`ArrayKey` gained an `Expr` form in the same session. One unspellable key used
+to collapse the **whole** literal to `ArgValue::Other`, so
+`array_key_first([$string => null])` and every `foreach ([$k => $v] as …)` had
+no fact at all. The key expression is carried now, and the literal seeds an
+**unsealed** shape: no declared fields (an unknown key may be an integer, so it
+moves the next-auto-index for every following `Auto` position, and it may
+collide with a written key, so even the entry count is uncertain), a tail key
+from the array-key cast of the key expressions, a tail value from the join of
+the element values, and `non_empty`.
+
+`normalize_array` declines such a literal outright — checked before the PHP
+minor is consulted, because no version resolves it — and the fold seam's
+*budget gate* rejects it too, so the gate and the encoder keep computing one
+verdict twice rather than the gate admitting what the encoder refuses.
+
+So `array_key_first([$decimalIntString => null])` is `int`, and
+`array_key_first([$string => null])` is `int|string` — the second being the
+union doing the work the `KeyClass` floor could not.

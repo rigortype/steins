@@ -55,15 +55,37 @@ def baseRank : Base → Nat
   | .str => 2
   | .bool => 3
 
+/-- **A refinement that constrains nothing** — Rust's `refinement_is_empty`.
+`mkRefined` already collapses such a refinement to the General layer; a union
+arm is the same layer one level in and must obey the same invariant, or
+`(str, none)` and `(str, some ⟨⟩)` are two structures for one denotation and the
+join stops being associative.
+
+The int side is where the spec must say more than Rust does. Rust tests
+`is_full()`, i.e. `lo == i64::MIN && hi == i64::MAX`; its `IntRange` is a pair of
+`i64`, so that *is* "contains every int there is". The spec's `IntRange` is a
+pair of `Int`, so it spells the containment out. On every range Rust can build
+the two tests agree; on the wider spec type only this one is closed under
+`hull`, which is exactly what the arm merge needs to be associative. -/
+def refinementIsEmpty : Refinement → Bool
+  | .str p => p.isEmpty
+  | .int q => q.containsRange IntRange.full
+
+/-- Normalise an arm's refinement: a contentless one is that base's General. -/
+def normArm : Option Refinement → Option Refinement
+  | some r => if refinementIsEmpty r then none else some r
+  | none => none
+
 /-- Merge an arm into a sorted-by-base arm list, joining refinements when the
-base is already present. -/
+base is already present. Every arm is normalised on the way in, and so is the
+result of a merge. -/
 def insertArm (arms : List (Base × Option Refinement)) (arm : Base × Option Refinement) :
     List (Base × Option Refinement) :=
   match arms with
-  | [] => [arm]
+  | [] => [(arm.1, normArm arm.2)]
   | a :: rest =>
-    if a.1 = arm.1 then (a.1, joinRefinements a.2 arm.2) :: rest
-    else if baseRank arm.1 < baseRank a.1 then arm :: a :: rest
+    if a.1 = arm.1 then (a.1, normArm (joinRefinements a.2 arm.2)) :: rest
+    else if baseRank arm.1 < baseRank a.1 then (arm.1, normArm arm.2) :: a :: rest
     else a :: insertArm rest arm
 
 /-- **The normalising union constructor** (issue #339): one arm per base,
@@ -234,7 +256,13 @@ def summarizeScalar (M : Model) (vals : List Val) : Option Fact :=
     match first.base with
     | none => none
     | some b =>
-      if scalars.any (fun v => decide (v.base ≠ some b)) then
+      if scalars.any (fun v => decide (v.base = none)) then
+        -- A member with no scalar base is an array, and the union has no arm
+        -- for it (`Fact::Union`'s doc: "a union with an array in it declines").
+        -- Summarizing per scalar base would drop that member, so the whole
+        -- fact drops — exactly as it did before the union layer existed.
+        none
+      else if scalars.any (fun v => decide (v.base ≠ some b)) then
         -- A mixed-base overflow becomes a union (issue #339), where it used to
         -- become nothing. Each base is summarized on its own members.
         mkUnion ([Base.int, .float, .str, .bool].filterMap (fun bb =>

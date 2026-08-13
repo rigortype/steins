@@ -173,6 +173,25 @@ impl Fact {
             Fact::Refined { base: Base::Int, refinement: Refinement::Int(_), nullable: false } => {
                 return Some(self.clone());
             }
+            // A union casts arm by arm and joins the results (issue #339): the
+            // arms are alternatives, and so are their keys. `int|string` keys
+            // `int|non-decimal-int-string`, because the string half splits and
+            // the int half is already a key.
+            Fact::Union { arms, nullable: false } => {
+                let mut acc: Option<Fact> = None;
+                for (base, refinement) in arms {
+                    let arm = match refinement {
+                        Some(r) => Fact::refined(*base, *r, false),
+                        None => Fact::General { base: *base, nullable: false },
+                    };
+                    let cast = arm.array_key_cast()?;
+                    acc = Some(match acc {
+                        None => cast,
+                        Some(prev) => prev.join(&cast)?,
+                    });
+                }
+                return acc;
+            }
             _ => return None,
         };
         match base {
