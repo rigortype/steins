@@ -452,3 +452,131 @@ its own slice.
 *import*; it was an unimplemented transfer, and the one entry the family
 still has — the value side of `in_array`/`array_search` — declines for the
 domain reason, not the seam one.
+
+## Amendment C (2026-08-13): a literal keeps its fact when its elements do not — PENDING ratification
+
+Issue [#327](https://github.com/rigortype/steins/issues/327). §3 built the
+abstract array stratum and §8's slice table fed it from exactly one place:
+a docblock. The other place an array's structure is known — the source
+writing one down — was never wired to it, and the effect was a cliff rather
+than a gap. `val_of` needs a proven `Val` per element and answers `None` on
+the first one it cannot build, so **one** unproven element dropped the fact
+for the **whole** array: its keys, its entry count, its sealing and every
+proven sibling. `['p' => 1, 'q' => $s]` knew nothing where the reference
+implementation knows `array{p: 1, q: string}`, and `count()` of it was
+`int<0, max>` where the count is two whatever `$s` turns out to be.
+
+Nothing about the keys was ever in doubt. `normalize_array` resolves auto
+indices, last-wins duplicates and A12's version-dependent next-int rule
+without inspecting a single value, so the key sequence is computable
+whatever the elements are — and a literal, by being a literal, seals its own
+key universe.
+
+### C1. The seeding ladder
+
+An array literal in rvalue position seeds by two rungs, most precise first:
+
+1. **Every element proven** → `Fact::Singleton(Val::Array)`, `Verified`.
+   Unchanged, and pinned as unchanged: the abstract rung may not be paid for
+   with the concrete one.
+2. **Otherwise** → `Fact::Shape` (`ShapeFact::from_witnessed_entries`): each
+   normalized key a field at `Presence::Required { witnessed: true }`, its
+   value slot that element's own fact and `None` where nothing proved one;
+   `Tail::Sealed`; `is_list` denotational over the **witnessed key
+   sequence**; `non_empty` from the entry count. Over `SHAPE_WIDTH_LIMIT`
+   it degrades to the tail summary exactly as `lift` does, and one unknown
+   slot makes that summary's value bound unknown.
+
+`normalize_array` declining (A12: a literal straddling the 8.3 next-int
+change on an unpinned minor) declines the **whole** literal at both rungs. A
+guessed key set is wrong rather than wide, which is not a trade this domain
+makes.
+
+**Stratum** is ADR-0061 §3's derivation clause: `min` over the element facts
+that contributed one. An unknown slot contributes nothing — it makes no
+claim to be trusted at any stratum. A literal over native elements is
+therefore `Verified`, and rightly: the keys were observed in the source, the
+sealing is what a literal *means*, and the slots are what the walk proved.
+A-G9's corollary keeps its `Asserted` cousins out of the proof layer as
+before.
+
+### C2. The order witness
+
+§2 splits the lanes by provenance and §7 declines declaration-order trust in
+positional projections, which is phpstan/phpstan#14940's false-positive
+class. `ShapeFact` could not *hold* the other side of that split:
+`normalize_counted` sorts fields into canonical key order, so a shape seeded
+from `['b' => 1, 'a' => $x]` was indistinguishable from one declared
+`array{a: …, b: …}` — and the sequence really was known.
+
+`ShapeFact` therefore gains **`order`**, the key sequence as observed, set at
+exactly two construction sites (this seeding, and `lift`) and dropped by
+every other operation: `normalize_counted` — which every derived shape goes
+through — always sets it to `None`, and the single struct-update that
+bypasses it (`relax_count_ceiling`) drops it by hand, because the write it
+models can append a key the sequence does not mention. Losing it costs
+precision and never soundness, which is the direction to fail in.
+
+It is **provenance, not extension**, exactly as `Presence::Required {
+witnessed }` already is: `admits` never reads it, two shapes differing only
+here admit the same values, and `with_order` refuses a claim inconsistent
+with the shape it is attached to rather than storing it. That inertness is
+also why it carries no ADR-0059 obligation — the Lean spec models the
+extension, and the extension did not move. It is pinned in the domain's own
+tests instead (`the_witness_is_extensionally_inert`), and `lean-check`
+agrees at 12208 lines.
+
+Two consumers, both of which are the split doing its job:
+
+- **`is_list` is decided by the sequence, not the key set.** `[1 => $x,
+  0 => $x]` has the key set of a two-element list and is not one. The
+  canonically sorted fields cannot tell it from `[0 => …, 1 => …]`.
+- **Spelling follows provenance.** A witnessed shape prints the order it
+  saw — the order its `Singleton` sibling has always printed, and the
+  reference implementation's — while a declared shape keeps the canonical
+  order, which is §6 saying out loud that `array{b: int, a: string}` is an
+  order-agnostic key set. The two must not look alike.
+
+The order-dependent *projections* do not read it yet; that is issue #328.
+
+### C3. §4's write row, on a witnessed base
+
+The write row was implemented for a declared base only, so `$a = [];
+$a['k'] = $x;` dropped the binding — the same cliff reached from the other
+direction. A base holding an order-witnessed value now lifts and takes the
+same path, and the witness changes one rule:
+
+**Writing an undeclared key under a sealed tail unseals it only when the
+sealing was declared.** A witnessed base has no docblock to have diverged
+from — its sealing is a fact about the array the code built, and adding a
+key yields another array the code built, still exactly known. There the
+write *extends* the sealed shape (the field is added by hand;
+`promote_present` can only promote a key a sealed shape already declares),
+the witness grows by the new key at the end where PHP puts it, an
+overwrite moves nothing, `unset` takes the key out of the sequence, and
+`is_list` is recomputed from the new sequence. The declared case is
+untouched: its sealing is a claim the write just falsified, so the tail
+opens.
+
+The written value's own fact now comes through the same argument-fact
+ladder an ordinary assignment uses, so `$a['k'] = $x` with a native
+`int $x` lands as `int` rather than unknown — and brings its stratum with
+it, because the binding must not come out more trusted than what was
+written into it.
+
+### C4. Measurement
+
+nsrt, same input both sides: headline 2414 → **2430**, admissible 2820 →
+**2852**, differ 11071 → 11039. The full transition matrix is
+one-directional — 16 `differ → match`, 14 `differ → subsumed`, 2
+`differ → equal`, and **zero** rows moved the other way.
+
+fp-gate GREEN: proof layer 0 across 6670 files, unchanged. One
+contract-layer movement, triaged verbatim rather than reseeded:
+`composer/composer` 19 → 21 `phpdoc.*`, both new findings the *same* true
+positive the same file already carried — an undeclared `type` key passed to
+a sealed `@param array{url: string}`, silent before only because the
+`__DIR__ . '…'` element used to drop the whole argument's fact along with
+its keys. Measured on a fixture that the unknown slot is not what fires: an
+unknown value against a declared `string` slot stays silent, because Maybe
+is silence.

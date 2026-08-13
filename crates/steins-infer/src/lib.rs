@@ -10293,6 +10293,111 @@ fn singleton_fact(arg: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<Fact>
     val_of(arg, php_minor).map(Fact::Singleton)
 }
 
+/// The deepest nesting [`array_literal_fact`] descends into before it stops
+/// resolving element facts and leaves the slot unknown (issue #327).
+///
+/// It exists for the same reason the fold seam's depth bound does — to keep a
+/// recursive walk over a source-controlled structure off an unbounded stack —
+/// and takes the same value, so the two seams refuse the same literals.
+const SHAPE_SEED_MAX_DEPTH: u8 = FOLD_ARRAY_MAX_DEPTH;
+
+/// **The fact an array literal denotes when its elements are not all proven**
+/// (issue #327) — the abstract half of the seeding ladder whose concrete half
+/// is [`singleton_fact`].
+///
+/// # Why this exists
+///
+/// [`val_of`] needs a [`Val`] per element and answers `None` on the first one it
+/// cannot build, so a single unproven element drops the fact for the **whole
+/// array**: its key set, its entry count, its sealing, and every sibling
+/// element that *was* proven, all at once. That is sound and it is most of the
+/// array line's precision ceiling — `['p' => 1, 'q' => $s]` knows nothing where
+/// the reference implementation knows `array{p: 1, q: string}`.
+///
+/// Nothing about the keys was ever in doubt: [`normalize_array`] resolves auto
+/// indices, last-wins duplicates and the version-dependent next-int rule
+/// without inspecting a single value. So the keys, the count, and the sealing
+/// survive an unknown element; only that element's own slot does not.
+///
+/// # The ladder, and where this sits on it
+///
+/// Callers try the concrete path first — a fully-proven literal stays a
+/// `Singleton`, `Verified`, spelled exactly as it always was. This is the rung
+/// below: reached only when that failed, so at least one slot here is unknown
+/// or abstract and the result is always a [`Fact::Shape`].
+///
+/// # What it refuses
+///
+/// * **A poisoned scope** — the env cannot be read, and an element resolved
+///   against a poisoned env is not evidence. Today's silence, unchanged.
+/// * **An unresolvable key set** — [`normalize_array`] declining means the
+///   literal straddles the 8.3 next-int change on an unpinned minor (ADR-0049
+///   A12). A guessed key is a *wrong* key set rather than a wider one, so the
+///   whole literal declines exactly as `val_of` already makes it.
+///
+/// # Stratum
+///
+/// `min` over the element facts that contributed one (ADR-0061 §3's derivation
+/// clause). An unknown slot contributes nothing — it makes no claim to be
+/// trusted at any stratum. A literal whose elements are all `Verified` yields a
+/// `Verified` shape, and rightly: the keys were observed in the source, the
+/// sealing is what a literal *means*, and the slots are what the walk proved.
+fn array_literal_fact(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    items: &[(ArrayKey, ArgValue)],
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    store: Option<&Store>,
+) -> Option<(Fact, Stratum)> {
+    array_literal_fact_within(cx, folder, items, env, poisoned, store, SHAPE_SEED_MAX_DEPTH)
+}
+
+/// The depth-carrying body of [`array_literal_fact`]. At depth zero a nested
+/// literal stops being descended into and its slot is left unknown, which
+/// widens the shape and never misstates it.
+fn array_literal_fact_within(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    items: &[(ArrayKey, ArgValue)],
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    store: Option<&Store>,
+    depth: u8,
+) -> Option<(Fact, Stratum)> {
+    if poisoned || depth == 0 {
+        return None;
+    }
+    let normalized = normalize_array(items, cx.php_minor)?;
+    let mut entries: Vec<(VKey, Option<Fact>)> = Vec::with_capacity(normalized.len());
+    let mut stratum = Stratum::Verified;
+    for (key, value) in &normalized {
+        let key = match key {
+            NormKey::Int(i) => VKey::Int(*i),
+            NormKey::Str(s) => VKey::Str(s.clone()),
+        };
+        // The element's own fact, by the same ladder any other argument-position
+        // value takes: a bound variable's fact (including its declared arm lane),
+        // a resolved literal, a fold. A nested literal that is itself only partly
+        // proven recurses here rather than dropping to unknown — the cliff this
+        // function exists to remove is the same one level down.
+        let slot = transfer_arg_known(cx, folder, value, env, store).or_else(|| match value {
+            ArgValue::Array(inner) => array_literal_fact_within(
+                cx, folder, inner, env, poisoned, store, depth - 1,
+            ),
+            _ => None,
+        });
+        match slot {
+            Some((fact, s)) => {
+                stratum = stratum.min(s);
+                entries.push((key, Some(fact)));
+            }
+            None => entries.push((key, None)),
+        }
+    }
+    Some((shape_fact(ShapeFact::from_witnessed_entries(&entries)), stratum))
+}
+
 /// The value fact a `::class` magic constant produces — one seam for both of its
 /// forms (issue #236, on ADR-0043's resolution and issue #36's settlement that
 /// the compiler resolves `::class` and it mints nothing at runtime).
@@ -12300,9 +12405,23 @@ fn render_shape_fact(shape: &ShapeFact, nullable: bool) -> String {
         );
         return with_null(body, nullable);
     }
-    let fields: Vec<(VKey, bool, String)> = shape
-        .fields
-        .iter()
+    // Field order on the page follows PROVENANCE (issue #327). A shape that
+    // witnessed its construction prints the order it saw, which is the order the
+    // `Singleton` it generalizes has always printed and the order the reference
+    // implementation prints: `['b' => 1, 'a' => $x]` is `array{b: 1, a: int}`.
+    // A shape that merely had an order *declared* at it keeps the canonical key
+    // order, which is Steins saying out loud that `array{b: int, a: string}` is
+    // an order-agnostic key set (ADR-0062 §2, RFC #14939) — the registered
+    // divergence, and the one place the two provenances must not look alike.
+    let ordered: Vec<&(VKey, Presence, Option<Box<Fact>>)> = match &shape.order {
+        Some(order) => order
+            .iter()
+            .filter_map(|k| shape.fields.iter().find(|(fk, _, _)| fk == k))
+            .collect(),
+        None => shape.fields.iter().collect(),
+    };
+    let fields: Vec<(VKey, bool, String)> = ordered
+        .into_iter()
         .filter(|(_, p, _)| !matches!(p, Presence::Absent))
         .map(|(k, p, slot)| {
             let value = slot.as_ref().map_or_else(|| "mixed".to_owned(), |f| render_dump_fact(f));
@@ -12607,6 +12726,19 @@ fn best_dump_type(
         return DumpRendering {
             text: render_dump_fact(&fact),
             asserted: strat == Stratum::Asserted,
+        };
+    }
+    // An array literal the rung above could not prove whole (issue #327): the
+    // shape its observed keys denote, with an unknown slot for each element the
+    // walk could not resolve. Below the proven-`Singleton` path, which already
+    // returned for a fully-literal array.
+    if let ArgValue::Array(items) = value
+        && let Some((fact, stratum)) =
+            array_literal_fact(cx, folder, items, env, poisoned, Some(store))
+    {
+        return DumpRendering {
+            text: render_dump_fact(&fact),
+            asserted: stratum == Stratum::Asserted,
         };
     }
     // The `::class` magic constant (issue #236): its FQN literal when written,
@@ -13300,6 +13432,25 @@ fn apply_assign(
             // refinement (ADR-0056 R1). Enters at `Verified` — a native declaration
             // (§2). A more-precise fold above already returned; this is the floor.
             None => match value {
+                // An array literal the rung above could not prove whole (issue
+                // #327): its keys, its count and its sealing are known even when
+                // an element's value is not, so it seeds a `Fact::Shape` rather
+                // than dropping the binding. Above every call rung — a literal
+                // is not a call — and below the proven-`Singleton` path, which
+                // already returned for a fully-literal array.
+                ArgValue::Array(items)
+                    if let Some((fact, strat)) = array_literal_fact(
+                        cx,
+                        folder,
+                        items,
+                        env,
+                        w.scope.poisoned,
+                        Some(&*store),
+                    ) =>
+                {
+                    env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
+                    store.unbind(var);
+                }
                 // The `::class` magic constant (issue #236): `$c = Foo::class`
                 // binds its FQN literal, `$c = static::class` the refinement.
                 // Above every call rung, since none of them can see a class
@@ -27216,16 +27367,67 @@ fn apply_offset_write(
     // The written value's fact, resolved in the PRE-write env through the same
     // ladder an ordinary assignment uses; `None` (an unresolvable rvalue, or the
     // `unset` case) leaves the slot unknown, which is the honest floor.
-    let slot = value.and_then(|v| {
-        w.cx.resolve_literal(v, env, w.scope.poisoned, folder).and_then(|lit| singleton_fact(&lit, php_minor))
-    });
+    //
+    // The ladder is [`transfer_arg_known`]'s (issue #327), so a written value
+    // that is *abstract but known* — `$a['k'] = $x` with a natively-typed
+    // `int $x` — lands as `int` rather than as unknown, and brings its own
+    // stratum with it (ADR-0061 §3's derivation clause: the binding cannot come
+    // out more trusted than what was written into it). A poisoned scope keeps
+    // the literal-only path, because an env read there is not evidence.
+    let (slot, slot_stratum) = match value {
+        None => (None, Stratum::Verified),
+        Some(v) if w.scope.poisoned => (
+            w.cx
+                .resolve_literal(v, env, true, folder)
+                .and_then(|lit| singleton_fact(&lit, php_minor)),
+            Stratum::Verified,
+        ),
+        Some(v) => match transfer_arg_known(w.cx, folder, v, env, Some(&*store)) {
+            Some((fact, s)) => (Some(fact), s),
+            None => (None, Stratum::Verified),
+        },
+    };
 
     env.clear();
     store.clear();
 
     let Some(known) = before else { return };
-    let Some(Fact::Shape { shape, nullable }) = &known.fact else { return };
+    // A base holding an order-witnessed VALUE takes the same path, by lifting
+    // (issue #327). Before this, `$b = ['p' => 1]; $b['q'] = 2;` dropped `$b`
+    // entirely — the one write undid everything the literal had proven, which is
+    // the [`array_literal_fact`] cliff reached from the other direction. The lift
+    // is where the exact value honestly becomes a shape; the update rules below
+    // are then the ones ADR-0062 §4 already specifies, unchanged.
+    let lifted;
+    let (shape, nullable): (&ShapeFact, &bool) = match &known.fact {
+        Some(Fact::Shape { shape, nullable }) => (shape.as_ref(), nullable),
+        Some(Fact::Singleton(Val::Array(entries))) => {
+            lifted = ShapeFact::lift(entries);
+            (&lifted, &false)
+        }
+        _ => return,
+    };
     let Some(first) = keys.first().and_then(|k| guard_key(k, php_minor)) else { return };
+
+    // The order witness this write hands on, when the base had one (issue #327).
+    // A witnessed base stays witnessed through a write, because a write to an
+    // array whose construction was observed produces another array whose
+    // construction was observed: PHP appends a new key at the end, leaves an
+    // existing key where it is, and `unset` takes one out of the sequence. Every
+    // rebuild below drops the witness on the way, so it is re-attached once, at
+    // the end, from the sequence computed here.
+    let witnessed_order: Option<Vec<VKey>> = shape.order.as_ref().map(|order| {
+        let mut order: Vec<VKey> = order.clone();
+        match value {
+            None => order.retain(|k| *k != first),
+            Some(_) => {
+                if !order.contains(&first) {
+                    order.push(first.clone());
+                }
+            }
+        }
+        order
+    });
 
     let next = match value {
         None => {
@@ -27256,7 +27458,40 @@ fn apply_offset_write(
             // Keeping `Sealed` would leave a fact that rejects the very array the
             // code just built; unsealing is sound and loses only the declared
             // sealing, on this binding, from this point on.
-            if next.field(&first).is_none() {
+            //
+            // **Unless the sealing was witnessed too** (issue #327). A base whose
+            // construction this walk observed — `$a = []; $a['k'] = $x;` — has no
+            // docblock to have diverged from: its sealing is a fact about the
+            // array the code built, and adding a key to it yields another array
+            // the code built, still exactly known. There the write EXTENDS the
+            // sealed shape by the new key instead of opening the tail. It has to
+            // be added by hand: `promote_present` can only promote a key a sealed
+            // shape already declares, and the whole point here is that this one
+            // does not.
+            if let Some(order) = witnessed_order.as_ref()
+                && next.field(&first).is_none()
+            {
+                let mut fields = next.fields.clone();
+                fields.push((
+                    first.clone(),
+                    steins_domain::Presence::Required { witnessed: true },
+                    None,
+                ));
+                next = ShapeFact::normalize_counted(
+                    fields,
+                    Tail::Sealed,
+                    // Recomputed denotationally from the NEW key sequence: an
+                    // append can make a list (`[]` then key `0`) or break one
+                    // (a string key), and the old flag survives neither. The
+                    // sequence is what decides it, which is what the witness is
+                    // for — the canonically sorted fields cannot tell
+                    // `[1 => …, 0 => …]` from a list.
+                    Certainty::from_bool(steins_domain::keys_are_a_list(order.iter())),
+                    true,
+                    next.covers.clone(),
+                    next.count_bound,
+                );
+            } else if witnessed_order.is_none() && next.field(&first).is_none() {
                 next = ShapeFact::normalize_counted(
                     next.fields.clone(),
                     Tail::Unsealed { key: KeyClass::ArrayKey, value: None },
@@ -27270,13 +27505,21 @@ fn apply_offset_write(
             if nested { set_slot_fact(&next, &first, None) } else { set_slot_fact(&next, &first, slot) }
         }
     };
+    // Re-attach the witness the rebuilds dropped. `with_order` re-checks it
+    // against the shape it lands on, so a sequence the update invalidated
+    // (a tail that ended up unsealed, a key count that no longer matches) is
+    // refused here rather than believed.
+    let next = match witnessed_order {
+        Some(order) => next.with_order(order),
+        None => next,
+    };
     env.insert(
         base.to_owned(),
         Known::value_strat(
             Fact::Shape { shape: Box::new(next), nullable: *nullable },
             known.line,
             Some(SHAPE_REFINED.to_owned()),
-            known.stratum,
+            known.stratum.min(slot_stratum),
         ),
     );
     if let Some(arms) = arms {
@@ -30355,9 +30598,34 @@ fn shape_builtin_return_fact(
     if let Some(out) = arg_dispatch_return_fact(cx, folder, name, args, env, store) {
         return Some(out);
     }
-    let [ArgValue::Var(var), rest @ ..] = args else { return None };
-    let known = env.get(var)?;
-    let subject_stratum = known.stratum;
+    // **The subject binds by what it resolves to, not by how it was spelled**
+    // (issue #328 L1). A bare variable reads the env, as it always did; an array
+    // written *at the call site* resolves through the seeding ladder — the same
+    // one an assignment takes — so `count(['a' => $x, 'b' => $x])` is no longer
+    // strictly worse than `$a = ['a' => $x, 'b' => $x]; count($a)`, which is
+    // what it was for as long as this pattern said `Var` and nothing else.
+    //
+    // Deliberately only these two forms. Every other spelling would have to be
+    // resolved to find out it is not an array, and resolution can dispatch to
+    // the engine — most calls reaching this rung are not in the family at all,
+    // so the cheap syntactic gate stays exactly as cheap as it was.
+    let seeded;
+    let (subject_fact, subject_stratum) = match args {
+        [ArgValue::Var(var), ..] => {
+            let known = env.get(var)?;
+            (known.fact.as_ref()?, known.stratum)
+        }
+        [ArgValue::Array(items), ..] => {
+            seeded = cx
+                .resolve_literal(&args[0], env, poisoned, folder)
+                .and_then(|lit| singleton_fact(&lit, cx.php_minor))
+                .map(|f| (f, value_stratum(&args[0], env, store)))
+                .or_else(|| array_literal_fact(cx, folder, items, env, poisoned, store))?;
+            (&seeded.0, seeded.1)
+        }
+        _ => return None,
+    };
+    let [_, rest @ ..] = args else { return None };
 
     // **The value lane's own privilege** (ADR-0062 §2): a subject whose fact is a
     // witnessed `Val::Array` carries true insertion order, so the order-dependent
@@ -30372,15 +30640,15 @@ fn shape_builtin_return_fact(
     // `count($x)` over `[1, 2, 3]` reaches the same `count_range()` a sealed
     // `array{int, int, int}` would.
     let lifted;
-    let shape: &ShapeFact = match &known.fact {
-        Some(Fact::Singleton(Val::Array(entries))) => {
+    let shape: &ShapeFact = match subject_fact {
+        Fact::Singleton(Val::Array(entries)) => {
             if let Some(out) = witnessed_projection_fact(cx, folder, name, entries, args, env, store) {
                 return Some((out, derivation_stratum(cx, folder, args, env, store, subject_stratum)));
             }
             lifted = ShapeFact::lift(entries);
             &lifted
         }
-        Some(Fact::Shape { shape, nullable: false }) => shape.as_ref(),
+        Fact::Shape { shape, nullable: false } => shape.as_ref(),
         _ => return None,
     };
 

@@ -57,5 +57,6 @@ pub use preds::StrPreds;
 pub use range::IntRange;
 pub use shape::{
     Cover, CoverFlavor, KeyClass, Presence, SHAPE_WIDTH_LIMIT, ShapeFact, Tail, array_is_list,
+    keys_are_a_list,
 };
 pub use value::{Base, Key, Val};
