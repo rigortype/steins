@@ -253,11 +253,15 @@ fn values_become_keys_through_the_measured_cast() {
 fn a_float_key_declines_because_its_spelling_is_a_setting() {
     // Probed: `array_fill_keys([1.5], 'v') === ['1.5' => 'v']` — the float is
     // *string*-cast here, unlike `$a[1.5]` (int 1) and unlike `array_flip`
-    // (skipped). The measured answer is still declined: PHP renders a float to
-    // string under the `precision` ini directive, so the KEY of
+    // (skipped). What is declined is the KEY: PHP renders a float to string
+    // under the `precision` ini directive, so the key of
     // `array_fill_keys([0.1 + 0.2], 'v')` depends on the runtime's
     // configuration — the same reason `concat_cast` excludes floats.
-    assert_eq!(dump("array_fill_keys([1.5], 'v')"), "dumped type: array (asserted)");
+    //
+    // The exact rung therefore declines and the shape lane answers what it can
+    // (issue #336 piece 2): the entry count and the VALUE are not in doubt, so
+    // the array is non-empty and filled with `'v'`. Only the key goes unnamed.
+    assert_eq!(dump("array_fill_keys([1.5], 'v')"), "dumped type: non-empty-array<'v'>");
 }
 
 #[test]
@@ -436,4 +440,42 @@ fn a_finite_value_set_casts_key_by_key() {
     // class. Probed: `array_flip(['1', '2']) === [1 => 0, 2 => 1]` (both cast).
     assert_eq!(dump("array_flip(['1', '2'])"), "dumped type: array{1: 0, 2: 1}");
     assert_eq!(dump("array_flip(['a', 'b'])"), "dumped type: array{a: 0, b: 1}");
+}
+
+// ---- array_fill_keys on the declared lane (#336 piece 2) -------------------
+
+#[test]
+fn fill_keys_over_a_declared_subject_answers_the_key_class() {
+    // The witnessed lane computes this entry by entry; here only the key CLASS
+    // is knowable, and it comes from the array-key CAST of the value union —
+    // which is what lets a `string`-based value key an `int` array.
+    assert_eq!(
+        declared("list<decimal-int-string>", "array_fill_keys($v, null)"),
+        "dumped type: array<int, null> (asserted)"
+    );
+    assert_eq!(
+        declared("list<non-decimal-int-string>", "array_fill_keys($v, null)"),
+        "dumped type: array<string, null> (asserted)"
+    );
+    // A two-base union has no `KeyClass`, so the key falls to `array-key`.
+    assert_eq!(
+        declared("list<string>", "array_fill_keys($v, null)"),
+        "dumped type: array<null> (asserted)"
+    );
+}
+
+#[test]
+fn fill_keys_keeps_non_emptiness_where_flip_drops_it() {
+    // Every value becomes a key — none is skipped — so a non-empty subject
+    // fills a non-empty array. `array_flip` drops it because a value that is
+    // not `int|string` is skipped entirely; probed at 8.5.9, `array_fill_keys`
+    // keeps even an array value (as the string key `'Array'`, with a warning).
+    assert_eq!(
+        declared("non-empty-list<decimal-int-string>", "array_fill_keys($v, null)"),
+        "dumped type: non-empty-array<int, null> (asserted)"
+    );
+    assert_eq!(
+        declared("non-empty-list<decimal-int-string>", "array_flip($v)"),
+        "dumped type: array<int, int> (asserted)"
+    );
 }

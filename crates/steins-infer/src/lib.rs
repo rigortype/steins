@@ -31032,6 +31032,34 @@ fn shape_projection_fact(
         let out = slice_widening(cx, folder, shape, args, env, store)?;
         return transfer_declaration_admits(cx, folder, name, ARRAY, ARITY_SLICE).then_some(out);
     }
+    // `array_fill_keys($keys, $value)` over a DECLARED `$keys` (issue #336 piece
+    // 2). Placed with `array_slice` above the single-argument gate for the same
+    // reason: it reads a sibling argument.
+    //
+    // The witnessed lane computes this entry by entry; here only the key CLASS
+    // is knowable, and it comes from the array-key cast of the subject's value
+    // union — which is what lets `list<decimal-int-string>` key an `int` array
+    // even though its values' base is `string`.
+    //
+    // Unlike `array_flip`, `non_empty` **carries**: every value becomes a key,
+    // none is skipped. Probed at 8.5.9 — even an array value survives, as the
+    // string key `'Array'` with a warning, and a float as its string rendering.
+    // (Those two are exactly what `array_key_cast` declines to name, which costs
+    // the key class and never the entry count.)
+    if lower == "array_fill_keys" && args.len() == 2 {
+        let out = ShapeFact::normalize(
+            Vec::new(),
+            steins_domain::Tail::Unsealed {
+                key: filled_key_class(shape),
+                value: transfer_arg_fact(cx, folder, &args[1], env, store).map(Box::new),
+            },
+            Certainty::Maybe,
+            shape.non_empty,
+            Vec::new(),
+        );
+        return transfer_declaration_admits(cx, folder, name, ARRAY, None)
+            .then_some(shape_fact(out));
+    }
     // The rest of the family reads exactly ONE argument, and a call passing more is
     // a different function than the rule describes: `array_reverse($x, true)`
     // preserves keys, `current($x, 1)` is an `ArgumentCountError`.
@@ -33422,6 +33450,28 @@ fn project_flip(shape: &ShapeFact) -> ShapeFact {
 /// and no sharper thing this slot can hold: [`KeyClass`] has three values, and
 /// the union is not one of them. The floor is taken knowingly rather than by
 /// omission — see [`steins_domain::Fact::array_key_cast`] for the sharp forms.
+/// The key class `array_fill_keys`'s result has (issue #336 piece 2): the
+/// array-key cast of the subject's value union, since every value becomes a key.
+///
+/// Shares [`flipped_key_class`]'s reading of the cast and differs from it in
+/// what it does with a value the cast declines — `array_flip` *skips* such an
+/// entry while `array_fill_keys` *keeps* it under a cast this crate will not
+/// name (a float's ini-dependent rendering, an array's `'Array'`), so the class
+/// falls to `array-key` rather than the entry being lost.
+fn filled_key_class(shape: &ShapeFact) -> steins_domain::KeyClass {
+    use steins_domain::KeyClass;
+    let Some(values) = shape_value_union(shape) else { return KeyClass::ArrayKey };
+    match values.array_key_cast() {
+        Some(Fact::General { base: Base::Int, .. } | Fact::Refined { base: Base::Int, .. }) => {
+            KeyClass::Int
+        }
+        Some(Fact::General { base: Base::String, .. } | Fact::Refined { base: Base::String, .. }) => {
+            KeyClass::Str
+        }
+        _ => KeyClass::ArrayKey,
+    }
+}
+
 fn flipped_key_class(shape: &ShapeFact) -> steins_domain::KeyClass {
     use steins_domain::KeyClass;
     let Some(values) = shape_value_union(shape) else { return KeyClass::ArrayKey };
